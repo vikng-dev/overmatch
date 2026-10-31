@@ -51,7 +51,7 @@ use super::collect::{self, Corridor};
 use super::mechanism::{Dose, DoseSource, Limits, Mechanism, SolidShot};
 use super::walk::{
     self, Begin, DiscCorridor, DiscFrame, DiscWalk, Outcome, RayCorridor, SampleCorridor,
-    SampleSeed, ShellKey, Shot, SpallSource, Stage, VolumeTable, WalkError, WalkLaws,
+    SampleSeed, ShellKey, Shot, SpallSource, VolumeTable, WalkError, WalkLaws,
 };
 use super::{
     ArmourMark, BallisticSurfaces, ComponentHealth, CrossingEnd, Impact, ImpactOutcome,
@@ -1358,7 +1358,6 @@ pub(crate) fn entry_force(
         disc_radius(round.body().caliber),
         &interior.seeds,
         contact + ENTRANCE_SPAN,
-        Stage::Entrance,
     )?;
     let Some(event) = entrance.events.first() else {
         return Ok(None);
@@ -1430,7 +1429,6 @@ pub(crate) fn decide(
         radius,
         seeds,
         contact + ENTRANCE_SPAN,
-        Stage::Entrance,
     )?;
     let state_in = round.at(speed);
     let shot = Shot {
@@ -1473,7 +1471,7 @@ pub(crate) fn decide(
             // Each sample's way in ends at its hand-off, as a transit's does: on the face it
             // struck, or at the crossing's depth when it struck none ([`DiscWalk::hand_off`]).
             let at = entrance
-                .hand_off()
+                .hand_off()?
                 .ok_or(WalkError::BadCorridor {
                     sample: 0,
                     reason: "a bounce was read off a disc that met nothing",
@@ -1520,7 +1518,6 @@ pub(crate) fn decide(
                 request.radius,
                 &request.seeds,
                 ENTRANCE_SPAN,
-                Stage::Transit,
             )?;
             let plan = walk::finish(&transit, &request, round, state_in, &LIMITS, &context.laws)?;
             Ok(Decision::Bite(bite(
@@ -1695,8 +1692,8 @@ fn volume_crossings(
 /// Collect and walk a corridor, extending it until the first crossing CLOSES.
 ///
 /// "Closes" is two conditions, not one: the walk must pair (no primitive left open at the end), and
-/// the first crossing, as `stage` reads it ([`DiscWalk::crossing_end`]), must end far enough inside
-/// the corridor that no ε-weld could reach past it. A corridor that stopped one millimetre after an
+/// the first crossing ([`DiscWalk::first_crossing`]) must end far enough inside the corridor that no
+/// ε-weld could reach past it. A corridor that stopped one millimetre after an
 /// exit could not tell a finished run from the first half of a welded sandwich.
 #[expect(
     clippy::too_many_arguments,
@@ -1712,7 +1709,6 @@ fn closing_walk(
     radius: f32,
     seeds: &[SampleSeed],
     initial: f32,
-    stage: Stage,
 ) -> Result<DiscWalk, WalkError> {
     let mut length = initial.clamp(ENTRANCE_SPAN, MAX_CORRIDOR);
     loop {
@@ -1722,7 +1718,12 @@ fn closing_walk(
         let volumes = volume_table(context, &corridor)?;
         match walk::walk_disc(&corridor, &volumes, &context.laws) {
             Ok(walked) => {
-                let settled = walked.crossing_end(stage).is_none_or(|end| {
+                let end = walked
+                    .first_crossing()
+                    .iter()
+                    .map(|&piece| walked.events[piece].end)
+                    .reduce(f64::max);
+                let settled = end.is_none_or(|end| {
                     end + context.laws.weld_max_lookahead as f64 <= length as f64
                 });
                 if settled || length >= MAX_CORRIDOR {

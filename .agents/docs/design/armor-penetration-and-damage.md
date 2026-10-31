@@ -1492,25 +1492,24 @@ transit seeded there met an exit it never entered or skipped the piece, and the 
 first contact (`CorridorMismatch`, three per 240 s at 30 bots, MEASURED 2026-10-31 on the build
 after the turret-scale fix).
 
-- **Who hands off on a face.** Every sample whose first run is in the first piece struck (the disc
-  walk's first event), and every sample whose first run is in another piece it meets no deeper
-  than the crossing's DEPTH: the first piece's mean entry point, measured square to the incoming
-  axis. That other piece joins the crossing.
-- **Everyone else** — a sample that meets nothing by that depth — hands off at the depth, in air,
-  on its own ray: the uncovered part of the disc stays where the disc is. The depth is clamped to
-  the span between the sample's start and the first piece's far end, so a hand-off lies on ground
-  the sample's walk covered and never depends on how far the corridor reached. No sample hands off
-  past the first face on its own ray, so nothing is seeded except presence carried in from the
-  crossing before.
+- **The crossing** is the disc walk's first event, then every event that begins before the
+  crossing so far ends. Which of two pieces that overlap in depth is struck first, by however
+  little, decides nothing: they are one crossing in either order.
+- **Who hands off on a face.** Every sample whose first run is in a piece of the crossing, at
+  that run's start.
+- **Everyone else** — a sample whose first face, if it has one, is in a piece that begins at or
+  past the crossing's end — hands off in air on its own ray, at the crossing's DEPTH: the read's
+  mean entry point, measured square to the incoming axis, clamped to the span between the
+  sample's start and the crossing's end. The uncovered part of the disc stays where the disc is;
+  a hand-off lies on ground the sample's walk covered and never depends on how far the corridor
+  reached. No sample hands off past the first face on its own ray, so nothing is seeded except
+  presence carried in from the crossing before.
 - **The entrance read is the crossing's.** `n̄`, η, the steel-equivalent thickness and the bend
-  are read over the first piece and every piece that joined it, so a disc meeting two pieces at
-  once reads both surfaces, as it would read one piece of that shape — "the geometry around the
-  axis is the fact, indifferent to how steel is partitioned into meshes". With one piece the read
-  is that piece's alone.
-- **The transit crossing** is every event of the transit corridor that begins at the hand-off,
-  then every event that begins before the crossing so far ends. The flight resumes past the
-  crossing's end, so a run that began inside it and was resolved apart from it would be skipped,
-  or charged only from the resume point on.
+  are read over every piece of the crossing, so a disc meeting two pieces that overlap in depth
+  reads both surfaces, whichever it meets first. With one piece the read is that piece's alone.
+- **The transit crossing** is the transit corridor's crossing, by the same rule, and it begins at
+  the hand-off. The flight resumes past the crossing's end, so a run that began inside it and was
+  resolved apart from it would be skipped, or charged only from the resume point on.
 - **The safe stop stays, as a tripwire.** A transit corridor that is not the one its entrance
   asked for still stops the round at contact (fail closed). The stop is no outcome of the damage
   model: it logs one error under a stable kind per failure reason (`WalkError::kind`), which a

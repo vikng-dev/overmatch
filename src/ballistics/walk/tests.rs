@@ -3947,23 +3947,24 @@ impl Straddle {
     }
 }
 
-/// A disc that meets two separate pieces at overlapping depths resolves, and charges both.
+/// A disc that meets two separate pieces at overlapping depths reads both, whichever it meets
+/// first, resolves, and charges both.
 ///
-/// The plate is struck first, so it decides the crossing's depth: its mean entry point, 0.377 m
-/// along the axis (DERIVED from the fixture). A sample hands off on the face it crossed when that
-/// face is the plate's or lies no deeper than that depth; otherwise at the depth, in air, never past
-/// the first face on its ray. A block shallower than the depth joins the crossing at its face, and
-/// the entrance reads both surfaces; a deeper one is met in the transit before the plate's crossing
-/// ends and is resolved with it. Handing every sample off on the plate's mean plane instead put the
-/// block's samples inside the block (deeper case: its exit then opened the transit ahead of the
-/// plate, `CorridorMismatch`) or past it (shallower case: the block was never charged).
+/// A piece joins the crossing when it begins before the crossing so far ends. The plate's faces lie
+/// 0.336–0.418 m along the axis, its mean entry at 0.377 m, and its crossing ends at 0.515 m
+/// (DERIVED from the fixture), so the block joins with its front ahead of the plate's earliest face
+/// (0.33 m: the block is struck first), between that face and the plate's mean entry (0.35 m), or
+/// past it (0.43 m). Every sample hands off on its own face, so the read covers the whole disc and
+/// presents the same surface in each case. A join decided by the first piece's mean entry instead
+/// read the block alone at 0.33 m, its plate samples bent in air, and at 0.43 m read the plate
+/// alone.
 #[test]
 fn a_disc_meeting_two_pieces_at_overlapping_depths_resolves() {
     let laws = WalkLaws::default();
     let volumes = table(&[(1, 1000.0), (2, 1000.0)]);
     let offsets = disc_offsets(&Straddle::FRAME, 0.044, DEFAULT_RING);
-    // (block front, whether it joins the crossing at its face)
-    for (block, joins) in [(0.35, true), (0.43, false)] {
+    let mut reads = Vec::new();
+    for block in [0.33, 0.35, 0.43] {
         let straddle = Straddle::at(block);
         let walked = walk_disc(&straddle.entrance(&offsets), &volumes, &laws).unwrap();
         assert_eq!(
@@ -3971,27 +3972,16 @@ fn a_disc_meeting_two_pieces_at_overlapping_depths_resolves() {
             2,
             "block {block}: two pieces, two events"
         );
-        assert!(
-            walked.events[1].start < walked.events[0].end,
-            "block {block}: the pieces overlap in depth"
-        );
         let request = transit_request(&walked, &AP_88, &laws);
-        let plate_samples = (0..offsets.len())
-            .filter(|&index| offsets[index].y > 0.02)
-            .count();
-        let read = if joins { offsets.len() } else { plate_samples };
         assert_eq!(
-            request.entrance.coverage,
-            (read as f64 / offsets.len() as f64) as f32,
-            "block {block}: the entrance reads the pieces the samples hand off on"
+            request.entrance.coverage, 1.0,
+            "block {block}: the entrance reads both pieces"
         );
         for seed in &request.seeds {
-            let face = walked.walks[seed.sample].runs[0].start;
-            assert!(
-                seed.t <= face,
-                "block {block}: sample {} hands off at {} past its first face {face}",
-                seed.sample,
-                seed.t
+            assert_eq!(
+                seed.t, walked.walks[seed.sample].runs[0].start,
+                "block {block}: sample {} hands off on its own face",
+                seed.sample
             );
             assert!(
                 seed.inside.is_empty(),
@@ -4012,6 +4002,22 @@ fn a_disc_meeting_two_pieces_at_overlapping_depths_resolves() {
                 plan.deposits
             );
         }
+        reads.push((block, request.entrance));
+    }
+    let (_, first) = &reads[0];
+    for (block, read) in &reads[1..] {
+        assert_eq!(
+            (read.normal, read.incidence, read.overmatched),
+            (first.normal, first.incidence, first.overmatched),
+            "block {block}: the same surface as with the block struck first"
+        );
+        assert!(
+            (read.steel_equivalent - first.steel_equivalent).abs()
+                <= 1.0e-6 * first.steel_equivalent,
+            "block {block}: {} steel-equivalent against {}",
+            read.steel_equivalent,
+            first.steel_equivalent
+        );
     }
 }
 

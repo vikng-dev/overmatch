@@ -154,7 +154,6 @@ fn every_entry_is_owned_once_across_the_hand_off() {
                                 radius,
                                 &[],
                                 STANDOFF + ENTRANCE_SPAN,
-                                Stage::Entrance,
                             )?;
                             let shot = Shot {
                                 caliber: ROUND.caliber,
@@ -185,7 +184,6 @@ fn every_entry_is_owned_once_across_the_hand_off() {
                                 request.radius,
                                 &request.seeds,
                                 ENTRANCE_SPAN,
-                                Stage::Transit,
                             )?;
                             let round = bound(ROUND);
                             walk::finish(
@@ -1112,7 +1110,6 @@ fn a_bounce_lifted_into_a_neighbour_resolves_it() {
                     radius,
                     &starts.seeds,
                     ENTRANCE_SPAN,
-                    Stage::Entrance,
                 )?;
                 Ok::<_, WalkError>((starts, corridor))
             },
@@ -1257,7 +1254,6 @@ fn certified_then_resumed(
                     radius,
                     &starts.seeds,
                     ENTRANCE_SPAN,
-                    Stage::Entrance,
                 );
                 Ok((starts, walked))
             },
@@ -2636,7 +2632,6 @@ fn a_convex_trunk_is_crossed_with_a_chord_at_any_offset_and_incidence() {
                             radius,
                             &[],
                             standoff + ENTRANCE_SPAN,
-                            Stage::Entrance,
                         )?;
                         let shot = Shot {
                             caliber: ROUND.caliber,
@@ -2655,7 +2650,6 @@ fn a_convex_trunk_is_crossed_with_a_chord_at_any_offset_and_incidence() {
                             request.radius,
                             &request.seeds,
                             ENTRANCE_SPAN,
-                            Stage::Transit,
                         )?;
                         let round = bound(ROUND);
                         let plan = walk::finish(

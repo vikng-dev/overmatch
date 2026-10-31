@@ -51,8 +51,8 @@
 //! the request from fixtures; the runtime answers it with real casts.
 //!
 //! Each sample hands off between the stages on the face of the piece it crossed
-//! ([`DiscWalk::hand_off`]), and the transit crossing is every piece the hand-off starts in plus
-//! everything that begins inside it ([`DiscWalk::transit_pieces`]). The rule, and why no plane is
+//! ([`DiscWalk::hand_off`]), and each stage's crossing is its first piece plus every piece that
+//! begins inside it ([`DiscWalk::first_crossing`]). The rule, and why no plane is
 //! shared across the disc, is the design doc's §13.5, "The hand-off"
 //! (`.agents/docs/design/armor-penetration-and-damage.md`).
 //!
@@ -2056,7 +2056,8 @@ pub struct DiscEvent {
     pub exits: Vec<BodyExit>,
     pub shares: Vec<EntityShare>,
     /// The `(sample, run)` pairs the crossing clusters, each an index into [`DiscWalk::walks`] and
-    /// that walk's [`RayWalk::runs`], sorted. Crossings are merged by these ([`DiscWalk::merged`]).
+    /// that walk's [`RayWalk::runs`], sorted. Crossings are rebuilt over these
+    /// ([`DiscWalk::crossing_of`]).
     pub runs: Vec<(usize, usize)>,
 }
 
@@ -2109,64 +2110,19 @@ impl DiscWalk {
             .collect()
     }
 
-    /// Where each sample of this ENTRANCE walk hands off, and the pieces its first crossing is made
-    /// of (design doc §13.5, the hand-off); `None` when the disc met nothing.
+    /// The events this walk's first crossing is made of, ascending: the first event, then every
+    /// event that begins before the crossing so far ends (design doc §13.5, the hand-off). Empty
+    /// when the walk met nothing.
     ///
-    /// A sample hands off at the start of its first run, on the face of the piece it crossed, when
-    /// that piece is the first one struck ([`DiscWalk::events`]`[0]`) or when it meets it no deeper
-    /// than the crossing's DEPTH: the first piece's mean entry point, square to the axis, clamped to
-    /// the span between the sample's start and the first piece's end. That piece joins the crossing.
-    /// A sample that meets nothing by that depth hands off there, in air. So no sample hands off
-    /// past the first face on its own ray, and every hand-off lies on ground its walk covered,
-    /// whatever the corridor's length.
-    pub fn hand_off(&self) -> Option<HandOff> {
-        let first = self.events.first()?;
-        let mut piece_of: BTreeMap<(usize, usize), usize> = BTreeMap::new();
-        for (index, event) in self.events.iter().enumerate() {
-            for &member in &event.runs {
-                piece_of.insert(member, index);
-            }
-        }
-        let mut pieces = vec![0];
-        let at = self
-            .walks
-            .iter()
-            .enumerate()
-            .map(|(sample, walk)| {
-                let start = self.origin + self.offsets[sample];
-                let depth = f64::from((first.entry_position - start).dot(self.axis))
-                    .min(first.end)
-                    .max(0.0);
-                let face = walk.runs.first().and_then(|run| {
-                    let piece = *piece_of.get(&(sample, 0))?;
-                    (piece == 0 || run.start <= depth).then_some((piece, run.start))
-                });
-                match face {
-                    Some((piece, t)) => {
-                        pieces.push(piece);
-                        t
-                    }
-                    None => depth,
-                }
-            })
-            .collect();
-        pieces.sort_unstable();
-        pieces.dedup();
-        Some(HandOff { pieces, at })
-    }
-
-    /// The events of this TRANSIT walk its crossing is made of, ascending: every one that begins at
-    /// the hand-off ([`HANDOFF_PROXIMITY`]), then every one that begins before the crossing so far
-    /// ends. Empty when none begins at the hand-off.
-    ///
-    /// The second clause is what keeps the crossing from leaving material behind: the flight resumes
-    /// past the crossing's end, so a run that began inside it and was not resolved with it would be
-    /// skipped, or charged only from the resume point on.
-    pub fn transit_pieces(&self) -> Vec<usize> {
+    /// Both stages read the crossing this way. Which of two pieces that overlap in depth is struck
+    /// first, by however little, decides nothing: they are one crossing in either order. And the
+    /// flight resumes past the crossing's end, so a run that began inside it and was resolved apart
+    /// from it would be skipped, or charged only from the resume point on.
+    pub fn first_crossing(&self) -> Vec<usize> {
         let mut pieces = Vec::new();
         let mut end = f64::NEG_INFINITY;
         for (index, event) in self.events.iter().enumerate() {
-            if event.start > HANDOFF_PROXIMITY as f64 && event.start >= end {
+            if !pieces.is_empty() && event.start >= end {
                 break;
             }
             pieces.push(index);
@@ -2175,63 +2131,91 @@ impl DiscWalk {
         pieces
     }
 
-    /// Where the first crossing of this walk ends, read as `stage` reads it; `None` when it met
-    /// nothing.
-    pub fn crossing_end(&self, stage: Stage) -> Option<f64> {
-        let pieces = match stage {
-            Stage::Entrance => self.hand_off()?.pieces,
-            Stage::Transit => self.transit_pieces(),
-        };
-        pieces
+    /// Where each sample of this ENTRANCE walk hands off, and the crossing the entrance reads
+    /// (design doc §13.5, the hand-off); `None` when the disc met nothing.
+    ///
+    /// A sample whose first run is in a piece of the [first crossing](Self::first_crossing) hands
+    /// off at that run's start, on the face it crossed. Any other sample hands off in air at the
+    /// crossing's DEPTH: the read's mean entry point, square to the axis, clamped to the span
+    /// between the sample's start and the crossing's end. Such a sample's first face, if it has
+    /// one, is in a piece that begins at or past that end, so no sample hands off past the first
+    /// face on its own ray, and every hand-off lies on ground its walk covered, whatever the
+    /// corridor's length.
+    pub fn hand_off(&self) -> Result<Option<HandOff<'_>>, WalkError> {
+        let pieces = self.first_crossing();
+        let Some(end) = pieces
             .iter()
             .map(|&piece| self.events[piece].end)
             .reduce(f64::max)
-            .or_else(|| self.events.first().map(|event| event.end))
-    }
-
-    /// The crossing the events `pieces` make together: the one event itself, or every aggregate
-    /// rebuilt over the union of their runs.
-    pub fn merged(&self, pieces: &[usize]) -> Result<Cow<'_, DiscEvent>, WalkError> {
-        match pieces {
-            [] => Err(WalkError::BadCorridor {
-                sample: 0,
-                reason: "a crossing was merged from no event",
-            }),
-            [one] => Ok(Cow::Borrowed(&self.events[*one])),
-            _ => {
-                let members: Vec<(usize, usize)> = pieces
-                    .iter()
-                    .flat_map(|&piece| self.events[piece].runs.iter().copied())
-                    .collect();
-                let rays = Rays {
-                    origin: self.origin,
-                    axis: self.axis,
-                    offsets: &self.offsets,
-                };
-                build_event(&rays, &self.walks, &members, self.samples()).map(Cow::Owned)
+        else {
+            return Ok(None);
+        };
+        let mut first_piece: Vec<Option<usize>> = vec![None; self.samples()];
+        for (index, event) in self.events.iter().enumerate() {
+            for &(sample, run) in &event.runs {
+                if run == 0 {
+                    first_piece[sample] = Some(index);
+                }
             }
         }
+        let on_face: Vec<bool> = first_piece
+            .iter()
+            .map(|piece| piece.is_some_and(|piece| pieces.contains(&piece)))
+            .collect();
+        let read = self.crossing_of(
+            pieces
+                .iter()
+                .flat_map(|&piece| self.events[piece].runs.iter().copied())
+                .collect(),
+        )?;
+        let at = self
+            .walks
+            .iter()
+            .enumerate()
+            .map(|(sample, walk)| {
+                if on_face[sample] {
+                    walk.runs[0].start
+                } else {
+                    let start = self.origin + self.offsets[sample];
+                    f64::from((read.entry_position - start).dot(self.axis))
+                        .min(end)
+                        .max(0.0)
+                }
+            })
+            .collect();
+        Ok(Some(HandOff { read, at }))
+    }
+
+    /// The crossing the `(sample, run)` pairs `members` make: the first event itself when they are
+    /// exactly its runs, or every aggregate rebuilt over them.
+    pub fn crossing_of(
+        &self,
+        mut members: Vec<(usize, usize)>,
+    ) -> Result<Cow<'_, DiscEvent>, WalkError> {
+        members.sort_unstable();
+        members.dedup();
+        if let Some(first) = self.events.first()
+            && members == first.runs
+        {
+            return Ok(Cow::Borrowed(first));
+        }
+        let rays = Rays {
+            origin: self.origin,
+            axis: self.axis,
+            offsets: &self.offsets,
+        };
+        build_event(&rays, &self.walks, &members, self.samples()).map(Cow::Owned)
     }
 }
 
 /// Where an entrance disc's samples hand off ([`DiscWalk::hand_off`]).
 #[derive(Clone, Debug, PartialEq)]
-pub struct HandOff {
-    /// The events the entrance crossing is made of, ascending: the first one struck, and every
-    /// piece a sample hands off on.
-    pub pieces: Vec<usize>,
+pub struct HandOff<'w> {
+    /// The crossing the entrance reads: `n̄`, η, the steel-equivalent thickness and the struck
+    /// volume come from it.
+    pub read: Cow<'w, DiscEvent>,
     /// Per sample, the progress along its entrance ray it hands off at, in `[0, length]`.
     pub at: Vec<f64>,
-}
-
-/// Which side of the hand-off a disc corridor is walked on, and so what its first crossing is made
-/// of.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Stage {
-    /// From the flight's position along the incoming axis ([`DiscWalk::hand_off`]).
-    Entrance,
-    /// From the hand-off along the bent axis ([`DiscWalk::transit_pieces`]).
-    Transit,
 }
 
 /// Walk every sample and associate their runs into crossing events.
@@ -3005,14 +2989,12 @@ pub struct TransitRequest {
 
 /// Read the entrance disc and decide whether the round enters (§4's decision tree, §13.3's inputs).
 ///
-/// The read is the crossing's: the first piece struck and every piece a sample hands off on
-/// ([`DiscWalk::hand_off`]), so a disc meeting two pieces at once reads both surfaces, as it would
-/// read one piece of the same shape.
+/// The read is the first crossing's ([`DiscWalk::hand_off`]), so a disc meeting two pieces that
+/// overlap in depth reads both surfaces, whichever it meets first.
 pub fn begin(entrance: &DiscWalk, shot: &Shot, laws: &WalkLaws) -> Result<Begin, WalkError> {
-    let Some(hand_off) = entrance.hand_off() else {
+    let Some(HandOff { read: event, at }) = entrance.hand_off()? else {
         return Ok(Begin::Miss);
     };
-    let event = entrance.merged(&hand_off.pieces)?;
     if event.coverage <= 0.0 || event.entry_normal == Vec3::ZERO {
         return Ok(Begin::Miss);
     }
@@ -3089,14 +3071,14 @@ pub fn begin(entrance: &DiscWalk, shot: &Shot, laws: &WalkLaws) -> Result<Begin,
     // Each sample resumes where [`DiscWalk::hand_off`] put it, and the transit ray is the AXIS
     // sample's: the request's origin is its hand-off, every other sample's offset carries its own.
     // The seed is a lookup on the ray each sample walked, at the point it resumes from.
-    let axis_t = hand_off.at[0];
+    let axis_t = at[0];
     let origin = entrance.origin + entrance.axis * axis_t as f32;
     let seeds = entrance
         .walks
         .iter()
         .enumerate()
         .map(|(index, walk)| {
-            let t = hand_off.at[index];
+            let t = at[index];
             SampleSeed {
                 sample: index,
                 offset: entrance.offsets[index] + entrance.axis * (t - axis_t) as f32,
@@ -3160,12 +3142,12 @@ pub struct ResolutionPlan<S> {
     /// One per body exit the round reached, in order: every exit before a stop throws, and the body
     /// the round stops inside throws nothing.
     pub spall: Vec<SpallSource>,
-    /// The transit crossing the plan resolved ([`DiscWalk::transit_pieces`]), corridor-relative.
+    /// The transit crossing the plan resolved ([`DiscWalk::first_crossing`]), corridor-relative.
     pub crossing: DiscEvent,
 }
 
 /// The corridor [`finish`] was handed must be the corridor [`begin`] asked for; if it is, its
-/// crossing ([`DiscWalk::transit_pieces`]).
+/// crossing ([`DiscWalk::first_crossing`]).
 ///
 /// Between the two stages the caller runs a spatial query, and nothing in the type system stops it
 /// from collecting along the UNBENT axis, from the wrong origin, with a re-derived frame, or around
@@ -3216,11 +3198,16 @@ fn validate_transit<'t>(
     }
     // Every sample starts at its hand-off, on the face it crossed or in air before the first face
     // on its ray, so the crossing the entrance decided to enter begins there.
-    let pieces = transit.transit_pieces();
-    if pieces.is_empty() {
+    if transit.events[0].start > HANDOFF_PROXIMITY as f64 {
         return mismatch(Mismatch::NotAtHandOff);
     }
-    let crossing = transit.merged(&pieces)?;
+    let crossing = transit.crossing_of(
+        transit
+            .first_crossing()
+            .iter()
+            .flat_map(|&piece| transit.events[piece].runs.iter().copied())
+            .collect(),
+    )?;
     // IDENTITY, on the two things that actually name a crossing: the geometry it is made of, and
     // the surface it presents. Sharing an ENTITY is too coarse — one hull presents primitives
     // metres apart.
