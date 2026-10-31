@@ -27,8 +27,8 @@
 # Validity: every precondition and gate of the frame sweep (run-frame-sweep.sh's runbook, code in
 # frame-run.zsh), plus this runner's own, per condition: the scatter placed the forest the
 # condition names (cones: graybox firs and no trees; trees: trees and no graybox firs), no asset
-# failed to load, and the forest scene's start lever took. The game is muted (OVERMATCH_MUTE=1)
-# and does not pause on a focus loss (OVERMATCH_NO_FOCUS_PAUSE=1) in every condition.
+# failed to load, and the forest scene's start lever took. The game is unattended
+# (OVERMATCH_UNATTENDED=1: silent, a focus loss never pauses it) in every condition.
 #
 # Expected wall-clock: 4 conditions x (startup + 15 s warmup + 60 s measure + 15 s cooldown)
 # ~ 7-8 min. SMOKE (hidden, numbers fiction): two conditions, ~1.5 min:
@@ -144,7 +144,7 @@ for cond in "${CONDITIONS[@]}"; do
   start=()
   [[ "$cond" == forest-* ]] && start=(OVERMATCH_START="$FOREST_START")
   frame_run_condition "$cond" "" \
-    OVERMATCH_MUTE=1 OVERMATCH_NO_FOCUS_PAUSE=1 BEVY_ASSET_ROOT="$root" "${start[@]}"
+    OVERMATCH_UNATTENDED=1 BEVY_ASSET_ROOT="$root" "${start[@]}"
 done
 
 for scene in forest duel; do

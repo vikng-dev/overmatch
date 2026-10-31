@@ -133,7 +133,7 @@ for spec in "${CONDITIONS[@]}"; do
   fields="${rest%%|*}"
   envs=""
   [[ "$rest" == *"|"* ]] && envs="${rest#*|}"
-  frame_run_condition "$cond" "$fields" OVERMATCH_MUTE=1 OVERMATCH_NO_FOCUS_PAUSE=1 ${=envs}
+  frame_run_condition "$cond" "$fields" OVERMATCH_UNATTENDED=1 ${=envs}
 done
 
 frame_run_analyze "${CONDITIONS[1]%%|*}" "$OUT"/*.client.jsonl

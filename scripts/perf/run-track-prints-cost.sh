@@ -26,8 +26,8 @@
 #   * prints laid before the hold: a non-zero stamp count;
 #   * the hold's start, on the frame stream's own clock, at or before the measurement window's
 #     start: frames before the camera settled on the prints are warmup, never evidence.
-# The game is muted (OVERMATCH_MUTE=1) and does not pause on a focus loss
-# (OVERMATCH_NO_FOCUS_PAUSE=1, whose log line the manifest counts) in every condition.
+# The game is unattended (OVERMATCH_UNATTENDED=1): silent, and a focus loss never pauses it (its
+# log line the manifest counts), in every condition.
 #
 # Expected wall-clock: 6 conditions x (startup + 50 s warmup + 60 s measure + 15 s cooldown)
 # ~ 13-15 min. SMOKE (hidden, numbers fiction): two conditions, ~2.5 min:
@@ -125,7 +125,7 @@ for cond in "${CONDITIONS[@]}"; do
     *-sun) relief=SunShadow ;;
   esac
   frame_run_condition "$cond" "track_prints: $relief, track_print_range: $RANGE," \
-    OVERMATCH_MUTE=1 OVERMATCH_NO_FOCUS_PAUSE=1 OVERMATCH_CAPTURE="$plan"
+    OVERMATCH_UNATTENDED=1 OVERMATCH_CAPTURE="$plan"
 done
 
 for ground in mud base; do

@@ -153,7 +153,7 @@ run_condition() {
   local lever_env=()
   [[ "$lever" != off ]] && lever_env=("OVERMATCH_DEBRIS_STRESS=$lever")
   env BEVY_ASSET_ROOT="$ASSET_ROOT" OVERMATCH_SERVER_BIND=127.0.0.1 OVERMATCH_SERVER_STATS_S=1 \
-    OVERMATCH_BOT="$BOTS" OVERMATCH_MUTE=1 "${lever_env[@]}" ${=SERVER_ENV} \
+    OVERMATCH_BOT="$BOTS" "${lever_env[@]}" ${=SERVER_ENV} \
     "$BIN/overmatch-server" >"$log" 2>&1 &
   SERVER_PID=$!
   for _ in {1..150}; do
@@ -168,7 +168,7 @@ run_condition() {
 
   for (( i = 1; i <= CLIENTS; i++ )); do
     env -u SPIKE_SIM_WINDOWED -u SPIKE_SIM_VISIBLE -u SPIKE_FRAME_COST_OFFSCREEN -u SPIKE_FRAME_COST \
-      SPIKE_SIMULATE_INPUT=1 OVERMATCH_SERVER="$ADDR" OVERMATCH_MUTE=1 OVERMATCH_NO_FOCUS_PAUSE=1 \
+      SPIKE_SIMULATE_INPUT=1 OVERMATCH_SERVER="$ADDR" OVERMATCH_UNATTENDED=1 \
       SPIKE_SIM_TICKS="$SIM_TICKS" BEVY_ASSET_ROOT="$ASSET_ROOT" ${=CLIENT_WORKLOAD} \
       "$BIN/overmatch" >"$OUT/$cond.client$i.log" 2>&1 &
     CLIENT_PIDS+=($!)

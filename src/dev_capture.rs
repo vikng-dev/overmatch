@@ -23,8 +23,9 @@
 //! On every root, whenever the plan takes frames and with no other variable: the primary window is
 //! created hidden and `Windowed`, settings never re-apply a persisted fullscreen to it
 //! (`settings::CaptureWindowPinned`), and on macOS the process renounces activation unless the
-//! root created the window hidden and renounced it itself. A focus loss never pauses the run
-//! (`state::FocusPauseSuppressed`). A hidden window has no swapchain texture, and a window
+//! root created the window hidden and renounced it itself. The run is unattended
+//! (`crate::unattended`): silent, and a focus loss never pauses it. A hidden window has no
+//! swapchain texture, and a window
 //! screenshot reads back nothing without one
 //! (`bevy_render::view::window::screenshot::submit_screenshot_commands` skips the copy), so the
 //! frame is instead read back from an offscreen image that every window-targeting camera is
@@ -34,13 +35,6 @@
 //! swaps the view's output attachment for its own texture by `NormalizedRenderTarget` equality,
 //! which `ImageRenderTarget` defines over both fields; `Screenshot::image` normalizes to scale 1,
 //! names a target no camera renders into, and reads back black.
-//!
-//! # Invariant: a capture run is silent
-//!
-//! The global volume is zero for the whole run, as under `OVERMATCH_MUTE=1` (`crate::sfx`), set or
-//! not. It is written in `PreStartup`, after every plugin has built — `AudioPlugin` inserts its own
-//! `GlobalVolume` at build — and before any audio sink exists (bevy reads the global volume when
-//! it creates a sink), so no mount order of this plugin lets a capture make a sound.
 
 mod fuze;
 pub(crate) use fuze::offline_shot_plugin;
@@ -52,7 +46,6 @@ pub(crate) use wall::{offline_wall_plugin, server_wall_plugin};
 use std::path::{Path, PathBuf};
 
 use bevy::app::AppExit;
-use bevy::audio::{GlobalVolume, Volume};
 use bevy::camera::visibility::VisibilitySystems;
 use bevy::camera::{Camera, ImageRenderTarget, RenderTarget};
 use bevy::prelude::*;
@@ -230,12 +223,11 @@ fn resolve_round(key: &str, mode: u8, field: &str) -> crate::rounds::Round {
 }
 
 /// What a capture run implies on every root, with no variable of its own (module doc): the window
-/// hidden and pinned, the run silent, and a focus loss never pausing it.
+/// hidden and pinned, and the run unattended.
 fn unattended(app: &mut App) {
     hide_window(app);
     pin_window(app);
-    silence(app);
-    app.insert_resource(crate::state::FocusPauseSuppressed);
+    crate::unattended::mount(app);
 }
 
 /// Keep the primary window a plain window for the whole run: `Windowed` at creation, so a persisted
@@ -248,13 +240,6 @@ fn pin_window(app: &mut App) {
         window.mode = bevy::window::WindowMode::Windowed;
     }
     app.insert_resource(crate::settings::CaptureWindowPinned);
-}
-
-/// Zero the global volume for the run, after every plugin's build (module doc).
-fn silence(app: &mut App) {
-    app.add_systems(PreStartup, |mut commands: Commands| {
-        commands.insert_resource(GlobalVolume::new(Volume::Linear(0.0)));
-    });
 }
 
 /// The plan's `fell` cue ([`plan::Fell`]) and whether it has fired.
@@ -580,13 +565,15 @@ pub(crate) fn retarget_to(
 
 #[cfg(test)]
 mod tests {
+    use bevy::audio::{GlobalVolume, Volume};
+
     use super::*;
 
     /// A CAPTURE RUN TAKES NO SCREEN AND NEVER PAUSES, on any root, with no variable of its own:
     /// capture drivers run on a machine its owner is working at. The window a root described
     /// visible and fullscreen is hidden and `Windowed` before winit creates it, settings are told
     /// to leave it so, the run is silent, and a focus loss does not pause it. Mutants: dropping any
-    /// one of [`hide_window`], [`pin_window`], [`silence`] or the focus marker fails one assert.
+    /// one of [`hide_window`], [`pin_window`] or `unattended::mount` fails an assert.
     #[test]
     fn a_capture_run_is_hidden_pinned_silent_and_never_paused() {
         let mut app = App::new();
@@ -618,22 +605,6 @@ mod tests {
             app.world()
                 .contains_resource::<crate::state::FocusPauseSuppressed>()
         );
-        assert_eq!(
-            app.world().resource::<GlobalVolume>().volume.to_linear(),
-            0.0
-        );
-    }
-
-    /// A CAPTURE RUN IS SILENT WHATEVER MOUNTS AFTER IT. Capture runs are unattended, on a machine
-    /// its owner is working at; `AudioPlugin` inserts its own `GlobalVolume` when it builds, so a
-    /// silence written at build would be undone by an audio plugin mounted later.
-    #[test]
-    fn a_capture_run_is_silent_whatever_mounts_after_it() {
-        let mut app = App::new();
-        silence(&mut app);
-        // What a later `AudioPlugin` build writes.
-        app.insert_resource(GlobalVolume::new(Volume::Linear(1.0)));
-        app.update();
         assert_eq!(
             app.world().resource::<GlobalVolume>().volume.to_linear(),
             0.0

@@ -139,9 +139,6 @@ pub fn client_plugin(app: &mut App) {
     escape_router(app);
     // The pause toggle and the focus watcher must run in either state, so they are deliberately not
     // in `GameplaySet`.
-    if crate::env_flag("OVERMATCH_NO_FOCUS_PAUSE", false) {
-        app.insert_resource(FocusPauseSuppressed);
-    }
     app.add_systems(Update, (pause_toggle(), release_on_focus_lost))
         .add_systems(OnEnter(AppState::Playing), (grab_cursor, resume_physics))
         .add_systems(
@@ -161,8 +158,7 @@ pub(crate) fn grab_now(window: &mut Window, cursor: &mut CursorOptions) {
 }
 
 /// Losing window focus does not pause: an unattended run keeps simulating so it never stops
-/// mid-leg. Inserted at build by a capture run (`dev_capture`) and by `OVERMATCH_NO_FOCUS_PAUSE=1`
-/// (the perf scripts' measurement windows); nothing removes it.
+/// mid-leg. Inserted at build by `crate::unattended::mount`; nothing removes it.
 #[derive(Resource)]
 pub(crate) struct FocusPauseSuppressed;
 

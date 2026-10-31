@@ -259,6 +259,9 @@ mod trees;
 /// `ui_font::UiFonts` resource that every `Text`-spawning client plugin reads. Mounted by each
 /// windowed composition root; retires Bevy's ASCII-only default font.
 mod ui_font;
+/// An unattended run (`OVERMATCH_UNATTENDED=1`): silent, and a focus loss never pauses it. Mounted by
+/// both windowed client compositions. See the module doc.
+mod unattended;
 /// Ship-facing view-layer combat VFX: render-only subscribers to the sim's `Impact` and
 /// `FireShell` seams (impact puffs, the 88's muzzle flash/light/smoke + shell smoke trail) plus
 /// the shared billboard/erosion/gradient-LUT machinery they are built from. Mounted by both
@@ -867,8 +870,9 @@ impl Plugin for ClientPlugin {
         // is mounted by `GamePlugin`).
         app.add_plugins(damage_cam::pen_cam::game::plugin);
         // View-layer audio (view-only, ADR-0014 — the server never mounts this): the trigger click,
-        // each weapon's authored report on the fire seam, and the per-tank engine loop.
-        app.add_plugins(sfx::plugin);
+        // each weapon's authored report on the fire seam, and the per-tank engine loop. An
+        // unattended run silences it and keeps a focus loss from pausing.
+        app.add_plugins((sfx::plugin, unattended::plugin));
         // Per-frame wall-clock recorder (idle unless `SPIKE_FRAME_COST` is set) — mounted on this
         // root so the offline frame-budget sweep needs no server; the net root mounts it too.
         app.add_plugins(frame_cost::client_plugin);
@@ -973,8 +977,8 @@ impl Plugin for NetClientPlugin {
         ));
         // View-layer audio (see `ClientPlugin`): the trigger click, each weapon's authored report,
         // and the engine loop on own AND remote tanks — every root carries the public `EngineRpm`,
-        // so one code path.
-        app.add_plugins(sfx::plugin);
+        // so one code path. An unattended run silences it.
+        app.add_plugins((sfx::plugin, unattended::plugin));
         // The pen cam's shooter corner over the player's own hits (view-only; the store it reads
         // is the link's, `net::shot_explanation`).
         app.add_plugins(damage_cam::pen_cam::game::plugin);

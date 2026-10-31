@@ -2,7 +2,7 @@
 // state only): one shipped round fired square at the house wall nearest the map's centre, framed
 // by the wall cue's own camera before and after. From the checkout root:
 //
-//   OVERMATCH_CAPTURE=scripts/capture/example.ron OVERMATCH_MUTE=1 target/debug/overmatch --offline
+//   OVERMATCH_CAPTURE=scripts/capture/example.ron target/debug/overmatch --offline
 //
 // writes target/capture/example-00009.0000s.png and target/capture/example-00012.0000s.png, then
 // exits. Times and size are capture configuration (ASSUMED), not game data.

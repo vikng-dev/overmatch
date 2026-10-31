@@ -199,7 +199,7 @@ launch_load() {
   local cond="$1" i
   for (( i = 1; i <= load_count; i++ )); do
     env -u SPIKE_SIM_WINDOWED -u SPIKE_SIM_VISIBLE -u SPIKE_FRAME_COST_OFFSCREEN -u SPIKE_FRAME_COST \
-      SPIKE_SIMULATE_INPUT=1 OVERMATCH_SERVER="$ADDR" OVERMATCH_MUTE=1 OVERMATCH_NO_FOCUS_PAUSE=1 \
+      SPIKE_SIMULATE_INPUT=1 OVERMATCH_SERVER="$ADDR" OVERMATCH_UNATTENDED=1 \
       SPIKE_SIM_TICKS="$SIM_TICKS" BEVY_ASSET_ROOT="$ASSET_ROOT" ${=LOAD_WORKLOAD} \
       "$CLIENT" >"$OUT/$cond.load$i.log" 2>&1 &
     LOAD_PIDS+=($!)
@@ -308,7 +308,7 @@ for spec in "${CONDITIONS[@]}"; do
     esac
   done
   frame_run_condition "$cond" "$BASE_FIELDS $fields" "${MODE_ENV[@]}" \
-    SPIKE_SIMULATE_INPUT=1 OVERMATCH_SERVER="$ADDR" OVERMATCH_MUTE=1 OVERMATCH_NO_FOCUS_PAUSE=1 \
+    SPIKE_SIMULATE_INPUT=1 OVERMATCH_SERVER="$ADDR" OVERMATCH_UNATTENDED=1 \
     SPIKE_SIM_TICKS="$SIM_TICKS" ${=CLIENT_WORKLOAD} "${client_env[@]}"
   ( cd "$REPO" && uv run scripts/perf/online_cost.py server-window --label "$cond" \
       --after-marker "$OUT/$cond.marker" --json "$OUT/$cond.server.json" "$OUT/$cond.server.log" )
