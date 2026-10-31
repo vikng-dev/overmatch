@@ -372,15 +372,12 @@ pub(crate) struct TankBlueprint {
     pub geometry: Arc<TankGeometry>,
     pub spec: Arc<TankSpec>,
     /// Computed from `geometry` and `spec` by [`TankBlueprint::new`], once per kind.
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "the atomic crossing (design §13.5, \"The envelope\", step 6b) reads it; \
-                      nothing does yet"
-        )
+    #[expect(
+        dead_code,
+        reason = "the atomic crossing (design §13.5, \"The envelope\", step 6b) reads it; \
+                  nothing does yet"
     )]
-    pub envelopes: TankEnvelopes,
+    envelopes: TankEnvelopes,
 }
 
 impl TankBlueprint {

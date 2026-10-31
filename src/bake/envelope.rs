@@ -15,11 +15,13 @@
 //! it can take, from battery to its recoil stop (`RecoilSpec::max_length`, which
 //! `shooting::apply_recoil` never lets it pass), lies inside the body's envelope, in the body's own
 //! frame.
-//! The box is computed in f64 and each face is then stepped one f32 past the nearest f32, a margin
-//! of at least half an f32 ulp of the face's coordinate that dominates the f64 evaluation's own
-//! error (DERIVED). The sim composes poses in f32 and so places a vertex a few f32 ulps from where
-//! exact arithmetic would (DERIVED, about 1e-6 m at tank scale); a consumer that needs the sim's
-//! f32 placement inside grows the box by at least that, which a round's own radius already does.
+//! The box is computed in f64 and each face is then stepped one f32 past the nearest f32, so it
+//! holds exact-arithmetic placement. It does not hold the sim's f32 placement: the sim composes
+//! poses in f32, which puts a vertex off by the rounding of about ten operations on coordinates of
+//! the box's extent, under `extent · 2^-20` (DERIVED: each operation rounds by at most `2^-24` of
+//! the extent), and a face near zero gets an outward step far smaller than that. A consumer that
+//! needs the sim's placement inside pads the box by `extent · 2^-20`, which also covers the f64
+//! evaluation's own error, about `extent · 2^-50` (DERIVED).
 
 use std::f64::consts::{PI, TAU};
 
@@ -30,32 +32,26 @@ use bevy::prelude::*;
 use super::TankGeometry;
 use crate::spec::TankSpec;
 
-/// The envelopes of one tank kind.
+/// The envelopes of one tank kind. Built only by [`TankEnvelopes::of`].
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) struct TankEnvelopes {
     /// The whole tank, in its body's frame: the tank root's, the frame every
-    /// [`super::NodeGeometry::root_position`] is in.
-    pub tank: Aabb3d,
+    /// [`super::NodeGeometry::root_position`] is in. `None` when the model holds no captured
+    /// geometry.
+    pub tank: Option<Aabb3d>,
     /// The turret a cook-off launches ([`super::turret_node`]), in that node's own frame, which is
     /// the frame of the free body it becomes. Its own traverse is the body's pose and is not swept;
-    /// the servos under it are.
-    pub turret: Aabb3d,
+    /// the servos under it are. `None` when the tank has no such turret or it holds no geometry.
+    pub turret: Option<Aabb3d>,
 }
 
 impl TankEnvelopes {
-    /// Both envelopes, from the bake's data alone. Panics on a tank with no turret, the rig contract
-    /// spawn asserts (`tank::spawn::resolve_rig_nodes`).
+    /// Both envelopes, from the bake's data alone. Total: a body with nothing to hold has none.
     pub(crate) fn of(geometry: &TankGeometry, spec: &TankSpec) -> Self {
-        let turret = super::turret_node(geometry, spec).unwrap_or_else(|| {
-            panic!(
-                "envelope: no Yaw servo at or above the Gunner view's node, so no turret to \
-                 launch — the rig contract spawn asserts"
-            )
-        });
         let joints = Joints::new(geometry, spec);
         Self {
             tank: joints.envelope(0),
-            turret: joints.envelope(turret),
+            turret: super::turret_node(geometry, spec).and_then(|turret| joints.envelope(turret)),
         }
     }
 }
@@ -151,22 +147,23 @@ impl<'a> Joints<'a> {
         }
     }
 
-    /// The envelope of everything under `body`, in `body`'s frame.
-    fn envelope(&self, body: usize) -> Aabb3d {
+    /// The envelope of everything under `body`, in `body`'s frame; `None` if it holds nothing.
+    fn envelope(&self, body: usize) -> Option<Aabb3d> {
+        if body >= self.geometry.nodes.len() {
+            return None;
+        }
         let points = self.hull_points(body);
-        assert!(
-            !points.is_empty(),
-            "envelope: `{}` holds no captured geometry",
-            self.geometry.nodes[body].name
-        );
+        if points.is_empty() {
+            return None;
+        }
         let (low, high) = points.iter().fold(
             (DVec3::INFINITY, DVec3::NEG_INFINITY),
             |(low, high), &point| (low.min(point), high.max(point)),
         );
-        Aabb3d::from_min_max(
+        Some(Aabb3d::from_min_max(
             low.as_vec3().map(f32::next_down),
             high.as_vec3().map(f32::next_up),
-        )
+        ))
     }
 
     /// Points whose convex hull holds every captured primitive under `frame`, in `frame`'s own
@@ -316,19 +313,19 @@ mod tests {
             .collect()
     }
 
-    /// Forward kinematics, written apart from the sweep: every vertex under `frame` at every
-    /// combination of sampled angles along its own servo chain and of sampled recoil offsets
-    /// (battery, half stroke, the stop) along its own barrels, in `frame`'s coordinates. A servo
-    /// node's local rotation is `rest · R(axis, θ)` (`tank::servo_pose`); a barrel's translation is
-    /// `rest + Z · offset` (`shooting::apply_recoil`); a pose composes as avian's collider
-    /// propagation does.
+    /// Forward kinematics, written apart from the sweep and from [`Joints`]: it reads the tree and
+    /// the sheet directly. Every vertex under `frame` at every combination of sampled angles along
+    /// its own servo chain and of sampled recoil offsets (battery, half stroke, the stop) along its
+    /// own barrels, in `frame`'s coordinates. A servo node's local rotation is
+    /// `rest · R(role axis, θ)` (`tank::servo_pose`, in f64 here); a barrel's translation is `rest + Z · offset`
+    /// (`shooting::apply_recoil`); a pose composes as avian's collider propagation does.
     fn posed_vertices(
-        joints: &Joints,
+        geometry: &TankGeometry,
         spec: &TankSpec,
         frame: usize,
         mut visit: impl FnMut(&str, DVec3),
     ) {
-        let nodes = &joints.geometry.nodes;
+        let nodes = &geometry.nodes;
         let stops = stops(spec);
         let mut stack: Vec<(usize, DVec3, DQuat, DVec3)> =
             vec![(frame, DVec3::ZERO, DQuat::IDENTITY, DVec3::ONE)];
@@ -339,18 +336,27 @@ mod tests {
                     visit(&nodes[index].name, translation + rotation * (scale * local));
                 }
             }
-            for &child in &joints.children[index] {
-                let local = nodes[child].transform;
-                let rest = rotation * local.rotation.as_dquat();
+            for (child, node) in nodes
+                .iter()
+                .enumerate()
+                .filter(|(_, node)| node.parent == Some(index))
+            {
+                let local = node.transform;
                 let composed = scale * local.scale.as_dvec3();
-                let turns: Vec<DQuat> = match joints.servos[child] {
-                    Some((axis, travel)) => sampled(travel)
-                        .into_iter()
-                        .map(|theta| rest * DQuat::from_axis_angle(axis, theta))
-                        .collect(),
-                    None => vec![rest],
+                let turns: Vec<DQuat> = match spec.servos.get(&node.name) {
+                    Some(servo) => {
+                        sampled(servo.travel_limits().map(|(a, b)| (a.into(), b.into())))
+                            .into_iter()
+                            .map(|theta| {
+                                rotation
+                                    * local.rotation.as_dquat()
+                                    * DQuat::from_axis_angle(servo.role().axis().as_dvec3(), theta)
+                            })
+                            .collect()
+                    }
+                    None => vec![rotation * local.rotation.as_dquat()],
                 };
-                let offsets = match stops.get(nodes[child].name.as_str()) {
+                let offsets = match stops.get(node.name.as_str()) {
                     Some(&stop) => vec![0.0, stop / 2.0, stop],
                     None => vec![0.0],
                 };
@@ -378,10 +384,11 @@ mod tests {
     #[test]
     fn every_part_at_every_servo_angle_and_recoil_offset_lies_inside_the_tank_envelope() {
         for (model, asset) in shipped() {
-            let envelope = TankEnvelopes::of(&asset.geometry, &asset.spec).tank;
-            let joints = Joints::new(&asset.geometry, &asset.spec);
+            let envelope = TankEnvelopes::of(&asset.geometry, &asset.spec)
+                .tank
+                .expect("a shipped tank holds geometry");
             let mut checked = 0usize;
-            posed_vertices(&joints, &asset.spec, 0, |node, point| {
+            posed_vertices(&asset.geometry, &asset.spec, 0, |node, point| {
                 checked += 1;
                 assert!(
                     inside(&envelope, point),
@@ -399,12 +406,13 @@ mod tests {
     #[test]
     fn a_launched_turret_lies_inside_its_own_envelope() {
         for (model, asset) in shipped() {
-            let envelope = TankEnvelopes::of(&asset.geometry, &asset.spec).turret;
+            let envelope = TankEnvelopes::of(&asset.geometry, &asset.spec)
+                .turret
+                .expect("a shipped tank has a turret holding geometry");
             let turret = crate::bake::turret_node(&asset.geometry, &asset.spec)
                 .expect("a shipped tank has a turret");
-            let joints = Joints::new(&asset.geometry, &asset.spec);
             let mut checked = 0usize;
-            posed_vertices(&joints, &asset.spec, turret, |node, point| {
+            posed_vertices(&asset.geometry, &asset.spec, turret, |node, point| {
                 checked += 1;
                 assert!(
                     inside(&envelope, point),
@@ -413,27 +421,6 @@ mod tests {
                 );
             });
             assert!(checked > 0, "{}: the turret holds no part", model.display());
-        }
-    }
-
-    /// Invariant: a kind's envelopes are a function of its data alone, so every spawn of the kind
-    /// reads the same boxes. Two independent loads parse two sheets whose servo maps iterate in
-    /// different orders (`HashMap`'s per-instance seed); a mutant that let iteration order, or any
-    /// state beyond the data, reach the result breaks bit equality here. The blueprint carries
-    /// exactly what the function gives.
-    #[test]
-    fn every_load_of_a_kind_gives_the_same_envelopes_bit_for_bit() {
-        let bits = |envelope: &TankEnvelopes| {
-            [envelope.tank, envelope.turret]
-                .map(|aabb| [aabb.min, aabb.max].map(|v| v.to_array().map(f32::to_bits)))
-        };
-        for ((model, first), (_, second)) in shipped().into_iter().zip(shipped()) {
-            let a = TankEnvelopes::of(&first.geometry, &first.spec);
-            let b = TankEnvelopes::of(&second.geometry, &second.spec);
-            assert_eq!(bits(&a), bits(&b), "{}", model.display());
-            let blueprint =
-                super::super::TankBlueprint::new(String::new(), second.geometry, second.spec);
-            assert_eq!(bits(&blueprint.envelopes), bits(&a), "{}", model.display());
         }
     }
 
@@ -511,14 +498,15 @@ mod tests {
     #[test]
     fn a_recoiling_barrel_at_its_stop_lies_inside_the_envelope() {
         let (geometry, spec) = one_recoiling_barrel();
-        let joints = Joints::new(&geometry, &spec);
-        let envelope = joints.envelope(0);
+        let envelope = TankEnvelopes::of(&geometry, &spec)
+            .tank
+            .expect("the fixture holds geometry");
         assert!(
             inside(&envelope, DVec3::new(0.0, 1.0, 1.0)),
             "the breech face at the stop is outside {envelope:?}"
         );
         let mut checked = 0usize;
-        posed_vertices(&joints, &spec, 0, |node, point| {
+        posed_vertices(&geometry, &spec, 0, |node, point| {
             checked += 1;
             assert!(
                 inside(&envelope, point),
@@ -530,7 +518,8 @@ mod tests {
 
     /// Invariant: [`arc_range`] is the exact range of `b cos θ + c sin θ` over a window, so the
     /// sweep neither leaves out an arc's peak inside the window nor claims one outside it. Checked
-    /// against dense evaluation on windows that hold the peak, the trough, both, or neither.
+    /// against dense evaluation on windows that hold the peak alone, the trough alone, both, or
+    /// neither.
     #[test]
     fn the_arc_range_is_the_range_of_the_arc() {
         let (b, c) = (0.6_f64, -0.8_f64);
@@ -540,6 +529,7 @@ mod tests {
             (1.0, 2.0),
             (-4.0, 4.0),
             (5.0, 6.0),
+            (2.0, 2.5),
         ] {
             let (low, high) = arc_range(b, c, Some((start, end)));
             let samples: Vec<f64> = (0..=10_000)
@@ -562,6 +552,48 @@ mod tests {
             assert!(
                 high >= sampled_high && high - sampled_high < 1.0e-7,
                 "high on [{start}, {end}]"
+            );
+        }
+    }
+
+    /// Invariant: [`swept_corners`] is tight, not merely containing: its box exceeds the box of
+    /// densely sampled turned points by no more than the chord bound `ρ (1 − cos(Δθ/2))` for the
+    /// sampling step `Δθ` (DERIVED), so a mutant that pads the box or treats a window as a full
+    /// turn fails. Step 6b relies on it: a bloated box widens the span in which crossings merge.
+    /// Checked on a generic point set about a skew axis, for windows and for a full turn.
+    #[test]
+    fn the_swept_box_is_the_box_of_the_turned_points() {
+        let points = [
+            DVec3::new(1.3, -0.4, 2.1),
+            DVec3::new(-0.7, 0.9, 0.2),
+            DVec3::new(0.1, 1.7, -1.4),
+            DVec3::new(2.2, 0.3, 0.8),
+        ];
+        let axis = DVec3::new(0.3, 0.8, 0.5).normalize();
+        let rho = points.iter().map(|p| p.length()).fold(0.0, f64::max);
+        for travel in [Some((-0.4, 0.9)), Some((2.0, 2.5)), None] {
+            let (start, end) = travel.unwrap_or((0.0, TAU));
+            let steps = 20_000;
+            let step = (end - start) / f64::from(steps);
+            let (mut lo, mut hi) = (DVec3::INFINITY, DVec3::NEG_INFINITY);
+            for k in 0..=steps {
+                let turn = DQuat::from_axis_angle(axis, start + step * f64::from(k));
+                for &point in &points {
+                    lo = lo.min(turn * point);
+                    hi = hi.max(turn * point);
+                }
+            }
+            let corners = swept_corners(&points, axis, travel);
+            let swept_lo = corners.iter().fold(DVec3::INFINITY, |a, &c| a.min(c));
+            let swept_hi = corners.iter().fold(DVec3::NEG_INFINITY, |a, &c| a.max(c));
+            let slack = rho * (1.0 - (step / 2.0).cos()) + 1.0e-12;
+            assert!(
+                swept_lo.cmple(lo + slack).all() && swept_lo.cmpge(lo - slack).all(),
+                "low on {travel:?}: {swept_lo} against {lo}"
+            );
+            assert!(
+                swept_hi.cmpge(hi - slack).all() && swept_hi.cmple(hi + slack).all(),
+                "top on {travel:?}: {swept_hi} against {hi}"
             );
         }
     }

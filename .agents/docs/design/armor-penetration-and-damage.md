@@ -1546,7 +1546,8 @@ across a tick boundary onto moving armour (the `unexpected_exit` above).
   (`bake::envelope`, carried on `TankBlueprint::envelopes`), as a pure function of the extracted
   geometry and the sheet's servos: conservative and threshold-free. Each servo's subtree enters its
   parent as the corners of the exact box of every point's arc over the servo's window, and the
-  faces are rounded outward to f32.
+  faces are rounded outward to f32. The box holds exact-arithmetic placement; a consumer pads it
+  for the sim's f32 placement by `extent · 2^-20` (`bake::envelope` states the derivation).
 - **A launched turret** gets its own envelope by the same rule, in its own frame: its traverse is
   now its pose, and the servos under it are swept.
 - **The recoil stroke is swept.** Each recoiling barrel's sheet states its recoil stop
