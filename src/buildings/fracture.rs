@@ -18,8 +18,10 @@
 //!   cracks the section when its angular impulse would spend the section's fracture energy.
 //! * **Support** ([`loose_groups`]). A chunk group with no path of intact joints to a ground anchor
 //!   or to a buried chunk ([`Chunk::buried`]: the soil holds it) falls as one body.
-//! * **The blast field** ([`blast_rays`]). A charge's blast energy and momentum leave it uniformly
-//!   over the sphere; each ray stops on the first standing chunk it meets.
+//! * **The blast field** ([`blast_rays`]). A charge's blast energy leaves it uniformly over the
+//!   sphere; each ray stops on the first standing chunk it meets and pushes the face it meets with
+//!   the blast's reflected impulse over the patch it stands for ([`Blast::push`]). The wall design
+//!   (`.agents/docs/design/wall-destruction.md`, "Standoff blast") owns the model.
 //!
 //! A deposit becomes point sources ([`Loading`]): a round's line in each chunk is split every
 //! [`LINE_STEP`]; a field's rays give one source per chunk they stop on, at the energy-weighted mean
@@ -230,11 +232,24 @@ impl Block {
         self.span(origin, dir).map(|(near, _)| near)
     }
 
+    /// Where a ray from `origin` along unit `dir` enters this shape, and the outward unit normal
+    /// of the face it enters through; `None` when it misses or the shape lies behind. A ray
+    /// starting inside enters at 0 through no face, and reads as meeting one square on (`-dir`).
+    pub fn entry_face(&self, origin: Vec3, dir: Vec3) -> Option<(f32, Vec3)> {
+        self.cut(origin, dir).map(|(near, _, face)| (near, face))
+    }
+
     /// The stretch of the ray from `origin` along unit `dir` inside this shape, `(enter, leave)`
     /// distances, `None` when it misses or the shape lies behind. A ray starting inside enters at
     /// 0.
     pub fn span(&self, origin: Vec3, dir: Vec3) -> Option<(f32, f32)> {
-        let (mut near, mut far) = (0.0_f32, f32::INFINITY);
+        self.cut(origin, dir).map(|(near, far, _)| (near, far))
+    }
+
+    /// [`Self::span`], with the outward normal of the plane the ray enters through (`-dir` when it
+    /// starts inside).
+    fn cut(&self, origin: Vec3, dir: Vec3) -> Option<(f32, f32, Vec3)> {
+        let (mut near, mut far, mut face) = (0.0_f32, f32::INFINITY, -dir);
         for &(n, o) in &self.planes {
             let rate = n.dot(dir);
             let gap = o - n.dot(origin);
@@ -243,12 +258,15 @@ impl Block {
                     return None;
                 }
             } else if rate < 0.0 {
-                near = near.max(gap / rate);
+                if gap / rate > near {
+                    near = gap / rate;
+                    face = n;
+                }
             } else {
                 far = far.min(gap / rate);
             }
         }
-        (near <= far).then_some((near, far))
+        (near <= far).then_some((near, far, face))
     }
 
     /// The corners on the plane through `at` of unit normal `normal`, ordered counter-clockwise
@@ -551,18 +569,19 @@ pub(crate) fn loose_groups(structure: &Structure, state: &WallState) -> Vec<Vec<
     groups
 }
 
-/// The first standing block a ray from `origin` along unit `dir` enters: its index and distance.
+/// The first standing block a ray from `origin` along unit `dir` enters: its index, distance and
+/// the outward normal of the face it enters through ([`Block::entry_face`]).
 pub(crate) fn first_hit(
     blocks: &[Block],
     standing: impl Fn(usize) -> bool,
     origin: Vec3,
     dir: Vec3,
-) -> Option<(usize, f32)> {
+) -> Option<(usize, f32, Vec3)> {
     blocks
         .iter()
         .enumerate()
         .filter(|(i, _)| standing(*i))
-        .filter_map(|(i, block)| block.entry(origin, dir).map(|t| (i, t)))
+        .filter_map(|(i, block)| block.entry_face(origin, dir).map(|(t, n)| (i, t, n)))
         .min_by(|a, b| a.1.total_cmp(&b.1))
 }
 
@@ -1015,26 +1034,115 @@ pub(crate) fn blast_directions() -> &'static [(Vec3, f32)] {
 }
 
 /// The blast field's ray count (Resolution): 0.0031 sr a ray, so a 25 cm chunk face 3 m away holds
-/// about 1.4 of them.
+/// about 2.3 of them square on (DERIVED).
 pub(crate) const BLAST_RAYS: usize = 4096;
 
-/// A blast: its energy (J) and momentum (N·s), from a charge of `mass` kg whose blast energy is
-/// `energy`: `p = √(2 C E)`, the momentum of the detonation products of mass `C` carrying `E` as
-/// kinetic energy (ASSUMED: the products carry the momentum, and the air they sweep up conserves
-/// it). Each ray stops on a chunk inelastically, so the push is a lower bound: a gas reflecting off
-/// the face would deliver up to twice it.
+/// TNT's energy, J/kg: the TNT-equivalent convention (CITED: the ton of TNT is defined as
+/// 4.184 GJ), which the burst cores' rows state as their chemical energy.
+const TNT_ENERGY: f32 = 4.184e6;
+
+/// The charge factor between a surface burst and a free-air one: a hemispherical surface burst of
+/// `W` loads like a free-air burst of `1.8 W` (CLAIMED: UFC 3-340-02's reflection factor for a
+/// surface burst, the ground's crater taking the rest of the doubling). The fits are the surface
+/// burst's; a blast in the air reads them at `W / 1.8`.
+const SURFACE_BURST_FACTOR: f32 = 1.8;
+
+/// The least cosine of incidence a ray's patch is reckoned at (ASSUMED, Resolution): past 84° one
+/// ray's patch, `4π share d² / cos θ`, outgrows the chunk face it stops on and would load the face
+/// with impulse that lands beyond it.
+const GRAZING_COS: f32 = 0.1;
+
+/// One of Swisdak's fits of a surface burst of TNT (Swisdak 1994, "Simplified Kingery Airblast
+/// Calculations", 26th DoD Explosives Safety Seminar; its metric table, which restates Kingery &
+/// Bulmash 1984, ARBRL-TR-02555, within 1 %): scaled impulse `i / W^⅓` (kPa·ms per kg^⅓, which is
+/// Pa·s per kg^⅓) at scaled distance `Z = R / W^⅓` (m/kg^⅓) as `exp(Σ cₖ (ln Z)ᵏ)`, each branch
+/// good up to its `Z`. Below `from` it holds the edge's value (the contact regime is the wall
+/// design's "Contact and near-contact blast", not this law); past the last branch it falls as
+/// `1/Z` (ASSUMED: the acoustic far field). CITED through the `kingery-bulmash` Python package's
+/// transcription (fcento100/kingery-bulmash); the primary was not opened. Its metric reflected
+/// row agrees with its imperial row, transcribed apart, to 0.05 % (DERIVED; the module's tests
+/// hold it to 0.1 %).
+struct ImpulseFit {
+    from: f32,
+    branches: &'static [(f32, [f32; 5])],
+}
+
+impl ImpulseFit {
+    /// The scaled impulse at scaled distance `z`, Pa·s per kg^⅓.
+    fn at(&self, z: f32) -> f32 {
+        let (edge, _) = self.branches[self.branches.len() - 1];
+        let held = z.max(self.from).min(edge);
+        let (_, c) = self
+            .branches
+            .iter()
+            .find(|(to, _)| held <= *to)
+            .expect("held is within the last branch's edge");
+        let l = held.ln();
+        let scaled = c.iter().rev().fold(0.0, |sum, ck| sum * l + ck).exp();
+        scaled * (held / z.max(held))
+    }
+}
+
+/// Swisdak's normally reflected impulse, Z 0.06–40 m/kg^⅓.
+const REFLECTED_IMPULSE: ImpulseFit = ImpulseFit {
+    from: 0.06,
+    branches: &[(40.0, [6.7853, -1.3466, 0.101, -0.01123, 0.0])],
+};
+
+/// Swisdak's incident (side-on) impulse, Z 0.2–158.7 m/kg^⅓.
+const INCIDENT_IMPULSE: ImpulseFit = ImpulseFit {
+    from: 0.2,
+    branches: &[
+        (0.96, [5.522, 1.117, 0.6, -0.292, -0.087]),
+        (2.38, [5.465, -0.308, -1.464, 1.362, -0.432]),
+        (33.7, [5.2749, -0.4677, -0.2499, 0.0588, -0.00554]),
+        (158.7, [5.9825, -1.062, 0.0, 0.0, 0.0]),
+    ],
+};
+
+/// A blast: its energy (J) and its charge `W` (kg of TNT), the TNT that carries that energy
+/// (ASSUMED: impulse equivalence is energy equivalence; the wall design notes they need not agree).
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub(crate) struct Blast {
     pub energy: f32,
-    pub momentum: f32,
+    pub charge: f32,
 }
 
 impl Blast {
-    pub(crate) fn of(mass: f32, energy: f32) -> Self {
+    /// A blast of `energy` J in the air.
+    pub(crate) fn of(energy: f32) -> Self {
+        let energy = energy.max(0.0);
         Self {
             energy,
-            momentum: (2.0 * mass * energy).max(0.0).sqrt(),
+            charge: energy / TNT_ENERGY,
         }
+    }
+
+    /// The specific impulse (Pa·s) the blast loads a face with `distance` m from the charge, at
+    /// incidence cosine `cos`: the normally reflected impulse `i_r` square on, the incident `i_s`
+    /// grazing, between them `i_r cos²θ + i_s (1 + cos²θ − 2 cos θ)` (CLAIMED: Randers-Pehrson &
+    /// Bannister 1997, ARL-TR-1310, the ConWep blend, which states it for pressure; read here on
+    /// impulse, ASSUMED).
+    pub(crate) fn specific_impulse(&self, distance: f32, cos: f32) -> f32 {
+        let scale = (self.charge / SURFACE_BURST_FACTOR).cbrt();
+        if scale <= 0.0 {
+            return 0.0;
+        }
+        let z = distance / scale;
+        let cos = cos.clamp(0.0, 1.0);
+        scale
+            * (REFLECTED_IMPULSE.at(z) * cos * cos
+                + INCIDENT_IMPULSE.at(z) * (1.0 - cos) * (1.0 - cos))
+    }
+
+    /// The impulse (N·s) a ray of `share` of the field delivers where it stops `distance` m out,
+    /// travelling along unit `dir`, on a face of outward unit normal `normal`: the specific impulse
+    /// there over the patch of the face the ray stands for, its solid angle `4π share` × `d²` /
+    /// cos θ ([`GRAZING_COS`] the least), pushed into the face (a pressure acts along the normal).
+    pub(crate) fn push(&self, share: f32, distance: f32, dir: Vec3, normal: Vec3) -> Vec3 {
+        let cos = -dir.dot(normal);
+        let patch = 4.0 * PI * share * distance * distance / cos.max(GRAZING_COS);
+        -normal * (self.specific_impulse(distance, cos) * patch)
     }
 }
 
@@ -1048,9 +1156,10 @@ pub(crate) struct RayHit {
 }
 
 /// A blast's rays from `origin`: each of `directions` (unit, with its share of the field; the
-/// shares sum to 1) carries that share of the blast's energy and momentum and stops on the first
-/// standing block it meets, which shadows everything behind it. A ray that meets none leaves.
-/// Coupling is the geometry's: the share of directions the blocks intercept.
+/// shares sum to 1) carries that share of the blast's energy, stops on the first standing block it
+/// meets, which shadows everything behind it, and pushes the face it meets ([`Blast::push`]). A ray
+/// that meets none leaves. Coupling is the geometry's: the share of directions the blocks
+/// intercept.
 pub(crate) fn blast_rays(
     blocks: &[Block],
     standing: impl Fn(usize) -> bool,
@@ -1061,11 +1170,11 @@ pub(crate) fn blast_rays(
     directions
         .iter()
         .filter_map(|&(dir, share)| {
-            first_hit(blocks, &standing, origin, dir).map(|(chunk, t)| RayHit {
+            first_hit(blocks, &standing, origin, dir).map(|(chunk, t, normal)| RayHit {
                 chunk,
                 at: origin + dir * t,
                 energy: blast.energy * share,
-                impulse: dir * (blast.momentum * share),
+                impulse: blast.push(share, t, dir, normal),
             })
         })
         .collect()
@@ -1605,5 +1714,72 @@ mod tests {
             );
         }
         assert!(told_apart, "the sweep tells the materials' radii apart");
+    }
+
+    /// THE BLAST'S IMPULSES ARE SWISDAK'S FITS: at Z = 1 and 10 m/kg^⅓ the reflected fit reads
+    /// 884.7 and 59.33 Pa·s per kg^⅓ and the incident 236.3 and 31.04 (DERIVED from the cited
+    /// rows), and the reflected agrees within 0.1 % with the same table's imperial row (psi·ms per
+    /// lb^⅓ at ft/lb^⅓, transcribed apart) converted to metric. A coefficient mistyped, or a branch
+    /// taken at the wrong Z, fails here; every blast push reads these values.
+    #[test]
+    fn the_blast_impulses_are_swisdaks_fits() {
+        const LB_PER_KG: f32 = 2.204_623;
+        const FT_PER_M: f32 = 3.280_84;
+        const KPA_PER_PSI: f32 = 6.894_757;
+        let imperial = |z_metric: f32| -> f32 {
+            let l = (z_metric * FT_PER_M / LB_PER_KG.cbrt()).ln();
+            let scaled = (5.9313 - 1.5622 * l + 0.1322 * l * l - 0.01123 * l * l * l).exp();
+            scaled * KPA_PER_PSI * LB_PER_KG.cbrt()
+        };
+        for (z, reflected, incident) in [(1.0, 884.7, 236.3), (10.0, 59.33, 31.04)] {
+            let r = REFLECTED_IMPULSE.at(z);
+            let i = INCIDENT_IMPULSE.at(z);
+            assert!(
+                (r / reflected - 1.0).abs() < 1e-3,
+                "reflected at Z {z}: {r}"
+            );
+            assert!(
+                (r / imperial(z) - 1.0).abs() < 1e-3,
+                "imperial at Z {z}: {r}"
+            );
+            assert!((i / incident - 1.0).abs() < 1e-3, "incident at Z {z}: {i}");
+        }
+    }
+
+    /// A BLAST RAY PUSHES THE FACE IT MEETS ALONG THE FACE'S NORMAL, WITH THE SPECIFIC IMPULSE
+    /// OVER THE PATCH IT STANDS FOR: square on, the reflected impulse over `4π share d²`; at 60°
+    /// the blend's quarter of the reflected and quarter of the incident, over twice the patch;
+    /// grazing, the patch stops growing at [`GRAZING_COS`]. A push along the ray, a patch without
+    /// its `1 / cos θ`, or the blend's weights swapped fails here; the structural check and the
+    /// launch speed of every group a blast frees read these pushes.
+    #[test]
+    fn a_blast_ray_pushes_its_face_along_the_normal() {
+        // W / 1.8 = 1 kg, so the scaled distance is the distance (fixture data).
+        let blast = Blast::of(TNT_ENERGY * SURFACE_BURST_FACTOR);
+        let share = 1.0 / BLAST_RAYS as f32;
+        let d = 2.0;
+        let patch = 4.0 * PI * share * d * d;
+        let (reflected, incident) = (REFLECTED_IMPULSE.at(d), INCIDENT_IMPULSE.at(d));
+        let close = |got: Vec3, want: Vec3| (got - want).length() <= 1e-4 * want.length();
+
+        let square = blast.push(share, d, Vec3::NEG_Z, Vec3::Z);
+        assert!(close(square, Vec3::NEG_Z * reflected * patch), "{square}");
+
+        let (sin, cos) = 60.0_f32.to_radians().sin_cos();
+        let oblique = blast.push(share, d, Vec3::new(sin, 0.0, -cos), Vec3::Z);
+        let blend = 0.25 * reflected + 0.25 * incident;
+        assert!(
+            close(oblique, Vec3::NEG_Z * blend * patch * 2.0),
+            "{oblique}"
+        );
+
+        let grazing = 0.01_f32;
+        let along = Vec3::new((1.0 - grazing * grazing).sqrt(), 0.0, -grazing);
+        let skim = blast.push(share, d, along, Vec3::Z);
+        let skim_impulse = blast.specific_impulse(d, grazing);
+        assert!(
+            close(skim, Vec3::NEG_Z * skim_impulse * patch / GRAZING_COS),
+            "{skim}"
+        );
     }
 }

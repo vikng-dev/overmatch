@@ -9,7 +9,8 @@
 //! * **Deposits.** A round's crossing deposits, in each chunk, the energy the walk says it lost
 //!   there ([`ArmourMark::Crossing`]), and pushes it with the momentum the round lost. The blast
 //!   tool (O) bursts a charge of 0.1–5 kg at 0–5 m standoff: a sphere of rays ([`blast_field`])
-//!   each stopping on the first chunk it meets with its share of the energy and the momentum.
+//!   each stopping on the first chunk it meets with its share of the energy, pushing the face it
+//!   meets with the blast's reflected impulse ([`model::Blast::push`]).
 //! * **Responses.** The game's fracture laws ([`crate::buildings::fracture`], through [`model`])
 //!   turn each deposit into dust (the pools), local cracks (the push rule) and structural cracks
 //!   (the structural check), then let every group with no path to the ground fall with the
@@ -327,8 +328,9 @@ impl Charge {
         }
     }
 
-    /// A charge of `mass` kg: its chemical energy, its casing's driven energy (none when bare), the
-    /// blast's energy (the difference) and momentum `√(2 C E)`, all J or N·s, and its radius (m).
+    /// A charge of `mass` kg: its chemical energy, its casing's driven energy (none when bare) and
+    /// the blast's energy (the difference), all J, the TNT charge that carries it (kg,
+    /// [`model::Blast::of`]), and its radius (m).
     fn blast(&self, mass: f32, cased: bool) -> Blast {
         let chemical = self.chemical * mass;
         let casing = if cased {
@@ -342,20 +344,20 @@ impl Charge {
             chemical,
             casing,
             energy,
-            momentum: (2.0 * mass * energy).sqrt(),
+            charge: model::Blast::of(energy).charge,
             radius: (3.0 * mass / (4.0 * std::f32::consts::PI * self.density)).cbrt(),
         }
     }
 }
 
-/// One charge's energies (J), momentum (N·s) and radius (m), filler `mass` kg.
+/// One charge's energies (J), TNT charge (kg) and radius (m), filler `mass` kg.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 struct Blast {
     mass: f32,
     chemical: f32,
     casing: f32,
     energy: f32,
-    momentum: f32,
+    charge: f32,
     radius: f32,
 }
 
@@ -847,7 +849,8 @@ fn wall_keys(mut p: KeysParam) {
         let eye = p.camera.translation;
         let dir = p.camera.forward().as_vec3();
         let state = &wall.state;
-        if let Some((_, t)) = model::first_hit(&wall.cut.blocks, |i| state.standing(i), eye, dir) {
+        if let Some((_, t, _)) = model::first_hit(&wall.cut.blocks, |i| state.standing(i), eye, dir)
+        {
             let at = eye + dir * t;
             p.queue.0.push(Deposit::Blast {
                 mass: MASSES[controls.mass],
@@ -1056,7 +1059,8 @@ struct Applied {
     /// Each loose group, its centroid, linear and angular velocity, and whether a structural crack
     /// bounds it.
     groups: Vec<(Vec<usize>, Vec3, Vec3, Vec3, bool)>,
-    /// A blast's charge, origin, coupled energy and momentum, and its drawn ray ends.
+    /// A blast's charge, origin, coupled energy, the impulse its rays pushed with (N·s, summed
+    /// unsigned), and its drawn ray ends.
     blast: Option<(Blast, Vec3, f32, f32, Vec<Vec3>)>,
 }
 
@@ -1113,20 +1117,17 @@ fn apply_deposit(
                 &wall.cut.blocks,
                 |i| state.standing(i),
                 origin,
-                model::Blast {
-                    energy: blast.energy,
-                    momentum: blast.momentum,
-                },
+                model::Blast::of(blast.energy),
                 field,
             );
             let coupled: f32 = hits.iter().map(|hit| hit.energy).sum();
-            let momentum: f32 = hits.iter().map(|hit| hit.impulse.length()).sum();
+            let pushed: f32 = hits.iter().map(|hit| hit.impulse.length()).sum();
             let drawn = hits
                 .iter()
                 .step_by(RAY_DRAW_STRIDE)
                 .map(|hit| hit.at)
                 .collect();
-            applied.blast = Some((blast, origin, coupled, momentum, drawn));
+            applied.blast = Some((blast, origin, coupled, pushed, drawn));
             Loading::blast(&hits)
         }
     };
@@ -1326,7 +1327,7 @@ fn apply_deposits(mut p: ApplyParam) {
             blast: applied
                 .blast
                 .as_ref()
-                .map(|(blast, _, coupled, momentum, _)| (*blast, *coupled, *momentum)),
+                .map(|(blast, _, coupled, pushed, _)| (*blast, *coupled, *pushed)),
         });
         if let Some(last) = &p.log.last {
             info!(
@@ -1498,7 +1499,7 @@ fn detail(
             wall.cut.structure.joints.len()
         ),
         format!(
-            "blast [O] {:.1} kg [, .] at {:.1} m [; '] {} [V]: {} chemical - {} casing (M/C {:.1}) = {}, p = sqrt(2 C E) = {:.0} N s",
+            "blast [O] {:.1} kg [, .] at {:.1} m [; '] {} [V]: {} chemical - {} casing (M/C {:.1}) = {} = {:.2} kg TNT",
             charge.mass,
             STANDOFFS[c.standoff],
             if c.cased { "cased" } else { "bare" },
@@ -1510,7 +1511,7 @@ fn detail(
                 0.0
             },
             joules(charge.energy),
-            charge.momentum,
+            charge.charge,
         ),
         format!(
             "last: {}: {} into {} chunks -> {} dust, {} local cracks, {} structural cracks in {} sections, {} groups fell ({} chunks)",
@@ -1525,14 +1526,13 @@ fn detail(
             last.fallen
         ),
     ];
-    if let Some((blast, coupled, momentum)) = last.blast {
+    if let Some((blast, coupled, pushed)) = last.blast {
         lines.push(format!(
-            "      blast coupled {} of {} ({:.0} %), {:.0} of {:.0} N s",
+            "      blast coupled {} of {} ({:.0} %), pushed {:.0} N s",
             joules(coupled),
             joules(blast.energy),
             100.0 * coupled / blast.energy.max(f32::EPSILON),
-            momentum,
-            blast.momentum
+            pushed
         ));
     }
     if let Some((demand, capacity)) = last.worst {

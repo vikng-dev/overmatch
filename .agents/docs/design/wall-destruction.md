@@ -228,6 +228,14 @@ Any future pressure response of internal HP pools needs its own receiver law.
 Room buildup and repeated diffraction are outside the direct-field adapter’s validity.
 Such cases remain unsupported until a transport model supplies their pressure histories.
 
+**Built** (`fracture::Blast::push`): impulse only, carried by the blast field's 4096 rays.
+- `W` is the TNT that carries the blast's energy, `E / 4.184 MJ/kg` (**ASSUMED**: impulse equivalence is energy equivalence).
+- `i_r(Z)` and `i_s(Z)` are Swisdak 1994's metric fits of the Kingery–Bulmash surface-burst impulses (**CITED** in the code); a burst in air reads them at `W / 1.8` (**CLAIMED** UFC surface-burst reflection factor).
+- Oblique: `i(θ) = i_r cos²θ + i_s (1 + cos²θ − 2 cos θ)` (**CLAIMED** ConWep blend, stated for pressure, read on impulse: **ASSUMED**).
+- A ray stopping on a chunk face pushes it along the face's inward normal with `i(Z, θ)` over the patch it stands for, `4π share d² / cos θ`, `cos θ` floored at 0.1.
+- Not built: the pulse shape, clearing, the negative phase, wall motion's feedback, and `Z` below 0.06 m/kg^⅓ (held at that edge).
+- It replaced the detonation products' momentum `√(2 C E)` shared over the rays: for the 88 mm HE fixture burst (1.47 MJ) on a 0.25 m brick cube square on, **DERIVED** launch speed 0.28 → 0.55 m/s at 1 m and 0.031 → 0.15 m/s at 3 m.
+
 ### Contact and near-contact blast
 
 Never extrapolate free-air tables to a charge touching a wall.

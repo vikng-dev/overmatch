@@ -226,7 +226,7 @@ fn fire_on_cue(
             let at = at + outward * radius;
             commands.trigger(WallCharge {
                 at,
-                blast: Blast::of(mass, energy),
+                blast: Blast::of(energy),
             });
             info!("capture: wall charge of {mass} kg ({energy:.0} J) at {at:?}");
         }

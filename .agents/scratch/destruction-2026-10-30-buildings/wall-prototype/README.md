@@ -149,11 +149,8 @@ The handbook toughness and strength are one property once the flaw size is the j
   the first chunk it meets. It never crosses brick.
 - **Coupling from geometry alone:** about half at contact, 47–49 %, with the charge's own radius
   and the wall's edges taking the rest. 20–21 % at 1 m, 5.4–5.5 % at 3 m (MEASURED).
-- **Push:** one textbook relation, K = p²/2m (kinetic energy of a mass; any first-year mechanics
-  text), so p = √(2 C E) with m the filler's mass, the detonation products. ASSUMED: the products
-  carry the momentum, and air swept up conserves it. Each ray stops inelastically: Δp = p_ray. A gas
-  reflecting off the wall would deliver up to twice that, so this is a lower bound. Cased: 115 /
-  1154 / 5771 N·s for 0.1 / 1 / 5 kg; bare 1 kg 2893 N·s (DERIVED).
+- **Push:** these captures pushed with the detonation products' momentum, p = √(2 C E), shared
+  over the rays; the reflected-impulse law replaced it (wall design, "Standoff blast", Built).
 - **Rounds push too:** the penetrator's mass × the speed it lost across the wall: 368 N·s for the
   88 AP (DERIVED from the walk's 278 kJ).
 

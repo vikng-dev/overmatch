@@ -7,10 +7,11 @@ use bevy::math::Vec3;
 use super::model::*;
 use super::{blast_field, brick, layout};
 
-/// A blast of 1 J and 1 N·s (fixture data): its rays' shares read straight off their hits.
+/// A blast of 1 J and no charge (fixture data): its rays' shares of the energy read straight off
+/// their hits.
 const UNIT_BLAST: Blast = Blast {
     energy: 1.0,
-    momentum: 1.0,
+    charge: 0.0,
 };
 
 /// SUPPORT IS CONNECTIVITY TO AN ANCHOR THROUGH INTACT JOINTS, on the baked wall. An intact wall

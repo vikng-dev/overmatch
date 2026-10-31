@@ -15,9 +15,9 @@
 //!   feeds the blast field ([`fracture::blast_rays`]) from its burst point, its energy the core's
 //!   chemical energy less the casing's share. A line pushes with all the momentum the round lost
 //!   in it ([`Projectile::lost_momentum`]: the share the crushed brick carries away is open); a
-//!   blast pushes with its rays' momentum. The laws then run in order: removal and the push rule
-//!   ([`fracture::strike`]), the structural check ([`fracture::structural`]), support
-//!   ([`fracture::fall`]).
+//!   blast pushes each face its rays stop on with its reflected impulse ([`Blast::push`]). The
+//!   laws then run in order: removal and the push rule ([`fracture::strike`]), the structural
+//!   check ([`fracture::structural`]), support ([`fracture::fall`]).
 //! * **Holes** ([`Hole`], drawn only): a line cuts a channel in each chunk it crosses and a blast a
 //!   dish in each chunk its rays stop on ([`holes_of`]); a chunk still standing after the deposit
 //!   keeps its hole in a per-chunk list ([`Live::holes`]), for the view to draw. No law, collider
@@ -413,7 +413,7 @@ struct RawDeposit {
     crossings: Vec<(Vec<(Entity, Vec3, Vec3, f32)>, Vec3, f32)>,
     /// Each field ray: where it was thrown from, where it stopped, and the energy it carried (J).
     rays: Vec<(Vec3, Vec3, f32)>,
-    /// A burst's blast: where, and its energy and momentum.
+    /// A burst's blast: where, and its energy and charge.
     blast: Option<(Vec3, Blast)>,
 }
 
@@ -477,7 +477,7 @@ fn read_shell(
             }
             ArmourMark::Burst { at, .. } => {
                 if let Some(burst) = marched.burst {
-                    deposit.blast = Some((*at, Blast::of(burst.core_mass, burst.blast)));
+                    deposit.blast = Some((*at, Blast::of(burst.blast)));
                 }
             }
             _ => {}
@@ -758,11 +758,14 @@ fn apply_deposits(mut p: DepositParam) {
                     }
                     let shape = shapes.entry(*root).or_insert_with(|| breakage.shape());
                     if let Some((Some(c), t)) = first_chunk(&kind.layout, shape, local, turned) {
+                        let normal = kind.layout.blocks[c]
+                            .entry_face(local, turned)
+                            .map_or(-turned, |(_, normal)| normal);
                         hits.push(fracture::RayHit {
                             chunk: c,
                             at: (local + turned * t) * frame.scale,
                             energy: blast.energy * share,
-                            impulse: turned * (blast.momentum * share),
+                            impulse: blast.push(share, t * frame.scale, turned, normal),
                         });
                     }
                 }
