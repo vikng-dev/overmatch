@@ -161,9 +161,16 @@ pub struct BulkFacts {
     /// laws then refuse the substance as a breakable material (`buildings::fracture::Masonry::of`).
     pub tensile: Option<f64>,
     /// The seam's mode-I fracture energy `G_f`, J/m²: the energy that opens a square metre of
-    /// seam, what the structural check charges a section. Stated with [`Self::tensile`] or not at
-    /// all (checked at parse).
+    /// seam, what the structural check charges a section. The opening and shear facts are
+    /// stated together or not at all (checked at parse).
     pub fracture_energy: Option<f64>,
+    /// Cohesive shear strength `c` of the seam without precompression, Pa. Required with the
+    /// opening properties for a breakable row; absent on bulk-only, unbreakable matter.
+    /// Stored for the punch-ring law; no law reads it yet.
+    pub shear_cohesion: Option<f64>,
+    /// Cohesive mode-II fracture energy `G_II`, J/m², excluding continuing friction work.
+    /// Required with [`Self::shear_cohesion`]. No law reads it yet.
+    pub shear_fracture_energy: Option<f64>,
 }
 
 /// What a round's burst block reads of the substance its burst core is made of. SI units.
@@ -367,8 +374,8 @@ impl BurstFile {
     }
 }
 
-/// A non-metal's bulk facts as authored: density (kg/m³), fracture toughness (Pa·√m) and,
-/// optionally, the seam's tensile strength (Pa).
+/// A non-metal's authored bulk facts: density (kg/m³), fracture toughness (Pa·√m), and an
+/// optional seam's opening and shear strengths (Pa) and fracture energies (J/m²).
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct BulkFile {
@@ -378,6 +385,8 @@ struct BulkFile {
     tensile: Option<Sourced<f64>>,
     #[serde(default)]
     fracture_energy: Option<Sourced<f64>>,
+    shear_cohesion: Option<Sourced<f64>>,
+    shear_fracture_energy: Option<Sourced<f64>>,
 }
 
 #[derive(Deserialize)]
@@ -451,6 +460,8 @@ fn converted(name: &str, file: SubstanceFile) -> Result<(Substance, Option<Strin
                     toughness: bulk.toughness.0,
                     tensile: bulk.tensile.map(|tensile| tensile.0),
                     fracture_energy: bulk.fracture_energy.map(|energy| energy.0),
+                    shear_cohesion: bulk.shear_cohesion.map(|cohesion| cohesion.0),
+                    shear_fracture_energy: bulk.shear_fracture_energy.map(|energy| energy.0),
                 }),
                 friction: friction.map(|friction| friction.0),
                 burst: burst.map(BurstFile::facts),
@@ -598,12 +609,21 @@ fn checked_hard(name: &str, substance: HardSubstance) -> Result<HardSubstance, S
             ("toughness", Some(bulk.toughness)),
             ("tensile", bulk.tensile),
             ("fracture_energy", bulk.fracture_energy),
+            ("shear_cohesion", bulk.shear_cohesion),
+            ("shear_fracture_energy", bulk.shear_fracture_energy),
         ];
-        if bulk.tensile.is_some() != bulk.fracture_energy.is_some() {
-            return Err(format!(
-                "substance {name:?}: a seam is stated by its tensile strength and its fracture \
-                 energy together, or not at all"
-            ));
+        let seam = &stated[2..];
+        if seam.iter().any(|(_, value)| value.is_some()) {
+            for (field, value) in seam {
+                if value.is_none() {
+                    return Err(format!(
+                        "substance {name:?}: bulk.{field} is missing from a breakable seam: \
+                         author tensile, fracture_energy, shear_cohesion (c, Pa) and \
+                         shear_fracture_energy (G_II, J/m²) together, each with its material \
+                         property source; bulk-only matter states none of these"
+                    ));
+                }
+            }
         }
         for (field, value) in stated
             .into_iter()
@@ -1002,6 +1022,92 @@ mod tests {
         ] {
             let err = SubstanceRegistry::from_ron(&row(&refused)).expect_err(&refused);
             assert!(matches!(err, SubstanceError::Parse(_)), "{err}");
+        }
+    }
+
+    /// BREAKABLE MATERIALS NEED BOTH SHEAR FACTS AT LOAD (the game's environment destruction
+    /// model). The bake and building loader must refuse an incomplete seam, naming its file,
+    /// row, missing field and repair, before a future punch ring can read a code default.
+    /// ASSUMED fixture values isolate the contract from changes in shipped material numbers.
+    #[test]
+    fn a_breakable_row_missing_either_shear_fact_is_refused_at_load() {
+        let cohesion = r#"shear_cohesion: Some((200000.0, Measured("fixture")))"#;
+        let energy = r#"shear_fracture_energy: Some((30.0, Measured("fixture")))"#;
+        let row = |shear: &str| {
+            with(&format!(
+                r#""Fixture": Hard(resistance: Effective((20.0, Tuned("fixture"))),
+                visual: "fixture", debris_half_angle_deg: (26.2, Tuned("fixture")),
+                bulk: Some((density: (1800.0, Tuned("fixture")),
+                    toughness: (5.0e5, Tuned("fixture")),
+                    tensile: Some((1.0e6, Tuned("fixture"))),
+                    fracture_energy: Some((10.0, Tuned("fixture"))), {shear}))),"#,
+            ))
+        };
+        let path = std::path::Path::new("fixture/materials.ron");
+        SubstanceRegistry::from_ron_at(path, &row(&format!("{cohesion}, {energy}")))
+            .expect("a complete sourced seam loads");
+        for (fields, missing) in [
+            (cohesion, "shear_fracture_energy"),
+            (energy, "shear_cohesion"),
+        ] {
+            let err = SubstanceRegistry::from_ron_at(path, &row(fields))
+                .unwrap_err()
+                .to_string();
+            for required in [
+                "fixture/materials.ron",
+                "Fixture",
+                missing,
+                "author",
+                "source",
+            ] {
+                assert!(err.contains(required), "{required}: {err}");
+            }
+        }
+        for (field, valid, other) in [
+            ("shear_cohesion", cohesion, energy),
+            ("shear_fracture_energy", energy, cohesion),
+        ] {
+            for value in ["0.0", "-1.0", "NaN", "inf"] {
+                let fields = format!(r#"{field}: Some(({value}, Measured("fixture"))), {other}"#);
+                let err = SubstanceRegistry::from_ron_at(path, &row(&fields))
+                    .unwrap_err()
+                    .to_string();
+                assert!(err.contains(field) && err.contains("positive"), "{err}");
+            }
+            let bare = if field == "shear_cohesion" {
+                "200000.0"
+            } else {
+                "30.0"
+            };
+            let fields = valid.replace(&format!(r#"({bare}, Measured("fixture"))"#), bare);
+            let err = SubstanceRegistry::from_ron_at(path, &row(&format!("{fields}, {other}")))
+                .unwrap_err()
+                .to_string();
+            assert!(err.contains("provenance"), "{err}");
+        }
+    }
+
+    /// EVERY SHIPPED BREAKABLE MATERIAL CARRIES THE SHEAR PAIR (the game's environment
+    /// destruction model). Every building's material seam needs both independently sourced
+    /// properties. This ranges over the registry, so a new material must meet the same gate.
+    #[test]
+    fn every_shipped_breakable_material_carries_both_shear_facts() {
+        let registry = SubstanceRegistry::shipped_static();
+        for (name, substance) in &registry.substances {
+            if let Some(bulk) = substance.hard().and_then(|hard| hard.bulk)
+                && bulk.tensile.is_some()
+            {
+                assert!(
+                    bulk.shear_cohesion
+                        .is_some_and(|value| value.is_finite() && value > 0.0),
+                    "{name}: c"
+                );
+                assert!(
+                    bulk.shear_fracture_energy
+                        .is_some_and(|value| value.is_finite() && value > 0.0),
+                    "{name}: G_II"
+                );
+            }
         }
     }
 

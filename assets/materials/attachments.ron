@@ -22,12 +22,17 @@
     // A mortar bed, as between a masonry's own courses: a wall coursed into the next at a corner, a
     // timber bedded on a wall (ASSUMED: a mortar bed holds a timber as it holds the next course).
     // Brick is the one masonry a building is of.
+    // Its c and G_II are also Brick's bulk values, sourced there once.
     "mortared": Seam("Brick"),
     // Timber nailed to timber or to a wall plate, as rafters to their plate and to each other at a
     // ridge: the nails per square metre of contact times one nail's withdrawal capacity, and its
     // withdrawal work. One nailing density stands for every nailed joint: a joint that plays as
     // nailed far more densely (a ridge's two nails per 0.6 m over its 0.0625 m mitred face, 53.3 per
     // m², DERIVED) is a kind of its own once play shows it needs one.
+    // Shear cohesion c and mode-II separation work G_II are unsourced for this reference
+    // nailing. The material source audit is recorded in
+    // .agents/scratch/collision-c6-shear-sources.md. The current laws read opening only; a
+    // punch-ring loader must refuse this kind until its lateral facts are supplied.
     "nailed": Stated(
         tensile_pa: (3240.0, Derived("one nail's withdrawal capacity × 10.7 nails per m² of
             contact. One nail: CLAIMED, not read (EN 1995-1-1:2004 §8.3.2, eqs. 8.24 and 8.25,

@@ -1,3 +1,4 @@
+// Subject: the game's environment destruction and damage model, game state only.
 // The global substance registry — the numeric half of the material library.
 //
 // The Blender side is `materials.blend` next to this file: one material datablock per entry,
@@ -44,7 +45,10 @@
 // reads the density for each chunk's mass; the buildings' fracture laws read the density, the
 // factor and the seam, and an element of a substance stating no seam never breaks; no law reads
 // the toughness yet. Optional, absent read as `None`, and never
-// stated beside `facts` (each states a density). A non-metal's
+// stated beside `facts` (each states a density). A breakable seam also requires `shear_cohesion`
+// (c, Pa, without precompression) and `shear_fracture_energy` (cohesive G_II, J/m², excluding
+// continuing friction work). All four seam facts are stated together or none is; an incomplete
+// breakable row is refused at load. No law reads the shear facts yet (collision lane 7). A non-metal's
 // effective factor is its compressive (crushing) strength over the reference flow strength
 // (~1 GPa), × 1000: a strength ratio, the reading the steels' DERIVED rows note, not a measured
 // penetration equivalence.
@@ -317,6 +321,19 @@
                     0.42 MPa·√m, over red spruce's tangential modulus, E_T ≈ 0.043 × E_L with E_L ≈
                     11.1 GPa at 12 % moisture (CLAIMED, not read: Wood Handbook Tables 5-1 and
                     5-3a, recalled), 0.48 GPa: 370 J/m²"))),
+                shear_cohesion: Some((8.9e6, Measured("red spruce, clear straight-grained wood,
+                    12 % moisture: shear parallel to grain 8900 kPa; USDA Forest Products
+                    Laboratory, Wood Handbook FPL-GTR-282 (2021), Chapter 5 Table 5-3a,
+                    https://research.fs.usda.gov/download/treesearch/62244.pdf, read primary.
+                    This is solid timber's seam, not the capacity of a nailed attachment"))),
+                shear_fracture_energy: Some((740.0, Derived("0.74 N/mm x 1000 = 740 J/m²:
+                    MEASURED overall mean for clear Norway spruce in RL mode II, Fruehmann,
+                    Tschegg and Stanzl-Tschegg, ICF10 (2001), paper ICF100694OR, A New
+                    Experimental Technique for Determining the Fracture Energy of Wood under
+                    Mode II Loading Conditions, Results and Conclusions,
+                    https://www.icfweb.org/Proceedings/ICF10A/72/ and /74/, read primary.
+                    ASSUMED spruce analogue for this scalar wood row; the source reports a
+                    specimen-size effect. Grain-resolved timber remains collision lane 8"))),
             )),
         ),
         // Fired clay brick: every building's masonry (`assets/buildings/<id>/<id>.building.ron`
@@ -356,6 +373,18 @@
                     mode-I fracture energy from van der Pluijm's couplet tests as Lourenco (1996)
                     restates them, 5-20 J/m²; the geometric mean taken (the wall prototype's
                     value)"))),
+                shear_cohesion: Some((0.165e6, Measured("cement-mortar and solid clay brick
+                    triplets (TC), Mohr-Coulomb intercept 0.165 MPa: Segura et al. (2021),
+                    Experimental comparison of two testing setups for characterizing the shear
+                    mechanical properties of masonry, Journal of Building Engineering 44,
+                    103277, section 3.3 and Table 5, doi:10.1016/j.jobe.2021.103277;
+                    https://upcommons.upc.edu/bitstream/2117/356908/1/Segura_et_al_JBE_2021_final.pdf,
+                    read primary. ASSUMED mortar-interface analogue, not brick-unit strength"))),
+                shear_fracture_energy: Some((28.4, Derived("0.0284 N/mm x 1000 = 28.4 J/m²:
+                    Segura et al. (2021), same TC material as shear_cohesion, section 3.3 and
+                    Figure 10c, cohesive mode-II energy extrapolated to zero normal stress by
+                    the authors' linear regression of the experimental results. Excludes the
+                    residual-friction work and the distinct G_II_2.5% integral. Read primary"))),
             )),
         ),
         // The 8.8 cm Pzgr. 39's burst core, named by its burst block's `core_substance`.
