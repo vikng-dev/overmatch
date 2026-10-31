@@ -16,6 +16,7 @@ use super::hosting::{Hosted, HostedConfig};
 use super::protocol::{
     LaunchedTurretPose, NetCrew, NetTank, ServoAngles, SetSpawnPoint, protocol_id,
 };
+use super::spawn_placement::SpawnPlacement;
 use super::{diagnostics, harness, open_gameplay_gate, physics, spawn_map};
 use crate::command::{ConsumeCommandEdges, TankCommand};
 use crate::damage::TankKnockedOut;
@@ -119,6 +120,7 @@ pub fn run() {
     app.add_systems(Startup, load_tank_sim_assets);
     app.init_resource::<PendingClients>();
     app.init_resource::<SpawnLane>();
+    app.insert_resource(SpawnPlacement::battle());
     app.init_resource::<SpawnOverrides>();
     app.init_resource::<CombatantIds>();
     app.insert_resource(BotCount::from_value(
@@ -476,7 +478,7 @@ const SPAWN_SEARCH_RINGS: [(f32, &[Vec2]); 6] = [
 /// Lifecycle: set/overwritten by [`receive_spawn_points`] on every accepted request, read by
 /// [`respawn_player_tanks`] on that client's next respawn, and PERSISTENT — it is NOT cleared on
 /// use, so every subsequent respawn keeps landing at the last point the player picked until they
-/// pick another. The initial join spawn ignores it entirely (lane logic owns first placement).
+/// pick another. The initial join spawn ignores it entirely (the automatic rule owns first placement).
 #[derive(Resource, Default)]
 struct SpawnOverrides(bevy::platform::collections::HashMap<Entity, Vec2>);
 
@@ -643,11 +645,19 @@ fn handle_new_clients(
 
 /// Spawns a complete authoritative tank for every queued client. View handles may still be
 /// loading; the simulation body comes from the eager blueprint.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "first spawn reads the checked map, mode, live tanks, assets and client identities"
+)]
 fn spawn_pending_tanks(
     mut pending: ResMut<PendingClients>,
     assets: Res<PendingTankAssets>,
     source: TankSimSource,
     mut lane: ResMut<SpawnLane>,
+    mut placement: ResMut<SpawnPlacement>,
+    manifest: Res<crate::map::MapManifest>,
+    tanks: Query<&Position, (With<NetTank>, Without<TankKnockedOut>)>,
+    connected: Query<(), With<Connected>>,
     mut combatants: ResMut<CombatantIds>,
     height: Option<Res<crate::terrain_grid::HeightGrid>>,
     mut commands: Commands,
@@ -656,20 +666,33 @@ fn spawn_pending_tanks(
         return;
     }
     let Some(content) = source.get() else {
+        // The eager simulation blueprint has not finished loading yet.
         return;
     };
-    // Harness override (`harness::spawn_pose`): place the tank onto a known resting contact for
-    // the beached-rest repro; unset in every normal run, so the default flat-pad spawn stands.
+    // The harness's exact resting-contact instrument keeps its authored pose and lanes. Ordinary
+    // joins use map points; Y is resolved from the authority's ground at the moment of spawn.
     let harness_pose = harness::spawn_pose();
     let spawn_rot = harness_pose.map_or(Quat::IDENTITY, |(_, rot)| rot);
-    let harness_pos = harness_pose.map(|(pos, _)| pos);
-    for (link, client_id) in pending.0.drain(..) {
-        // Fan each client out onto its own lane (lane 0 = the base pose, so the single-client and
-        // spawn-pose cases are unshifted); the counter persists so reconnects don't collide.
-        // The lane's XZ is unchanged; only its Y follows the ground now (`lane_spawn_pos`), so a
-        // join onto a hillside no longer starts inside the terrain.
-        let spawn_pos = lane_spawn_pos(harness_pos, lane.0, height.as_deref());
-        lane.0 += 1;
+    let mut live: Vec<Vec2> = tanks.iter().map(|position| position.0.xz()).collect();
+    for (link, client_id) in std::mem::take(&mut pending.0) {
+        if !connected.contains(link) {
+            // A queued join may disconnect while every authored point is too close.
+            continue;
+        }
+        let pos = if let Some((pose, _)) = harness_pose {
+            let pos = lane_spawn_pos(Some(pose), lane.0, height.as_deref());
+            lane.0 += 1;
+            pos
+        } else {
+            let Some(xz) = placement.choose(&manifest.spawn_points, &live) else {
+                // All points are inside the minimum: keep this join queued until one is free.
+                pending.0.push((link, client_id));
+                continue;
+            };
+            spawn_pos(height.as_deref(), xz)
+        };
+        // Commands are deferred: later clients in this pass must see the point already handed out.
+        live.push(pos.xz());
         let combatant = combatants.player(link);
         spawn_player_tank(
             &mut commands,
@@ -677,7 +700,7 @@ fn spawn_pending_tanks(
             &assets,
             link,
             client_id,
-            spawn_pos,
+            pos,
             spawn_rot,
             combatant,
             combatants.life(combatant),
@@ -927,40 +950,42 @@ fn respawn_dead_bots(
 #[derive(Component)]
 struct BotRespawnAt(f32);
 
-/// Server-authoritative PLAYER respawn (the friend-fight counterpart to the bot loop above): when a
-/// client's own tank is knocked out and the client latches a [`TankCommand::respawn`] edge, sweep the
-/// dead tank and spawn that client a fresh one through the same ownership path connect uses
-/// ([`spawn_player_tank`]).
-///
-/// **The death is VALIDATED on the authority, never trusted from the client.** The query is gated
-/// `With<TankKnockedOut>` — the emergent death label the server itself latched (`damage::mark_dead_tanks`
-/// at 0 living crew, `damage::process_cookoffs` on cookoff) off its OWN authoritative sim. A client
-/// that forges `respawn: true` while alive names a tank that carries no `TankKnockedOut`, so it never
-/// matches and nothing happens. `With<ControlledBy>` (read as `&ControlledBy`) scopes this to owned
-/// player tanks and excludes the ownerless bot, whose death→respawn is the separate timed
-/// [`respawn_dead_bots`] loop — the two never overlap.
-///
-/// Runs on the fixed clock in `GameplaySet`, `.before(ConsumeCommandEdges)`, exactly like [`drive_bot`]
-/// and every other command reader: `bridge_action_state_to_tank_command` has already written this
-/// tick's `respawn` edge (and, under input starvation, already CLEARED it via `TankCommand::clear_edges`,
-/// so a stale held-last input can't re-trigger a respawn), and `consume_edges` clears it at the tick's
-/// end — so a single latched edge respawns exactly once. The recursive root despawn drops the dead rig;
-/// `tank::sweep_launched_turret_on_root_despawn` (`On<Remove, Rig>`, mounted in `SimPlugin` on both
-/// ends) sweeps a cooked-off turret that detached from the root, so no launched turret leaks — the same
-/// guarantee `respawn_dead_bots` relies on.
+/// A legitimate crowded-map state: an accepted automatic respawn waits for a point outside the
+/// mode's minimum. The server retries without requiring another client input edge.
+#[derive(Component)]
+struct AwaitingSpawnPoint;
+
+/// The game's damage model: server-authoritative player respawn replaces an owned knocked-out
+/// tank only after a client request. A request remains pending while no automatic point is safe.
+/// The authority's `TankKnockedOut` marker validates eligibility; `ControlledBy` excludes bots.
+/// Runs in `GameplaySet` before `ConsumeCommandEdges`, after the command bridge. Both initial
+/// placement and automatic respawn use `SpawnPlacement`; the player's persistent spawn-map pick
+/// still wins. Recursive root despawn and `tank::sweep_launched_turret_on_root_despawn` sweep the
+/// old rig, including any detached turret.
 #[expect(
     clippy::too_many_arguments,
     reason = "a respawn sweep spanning dead tanks, remotes, occupancy, assets, sim source, spawn lane, overrides, terrain, obstacles and ids"
 )]
 fn respawn_player_tanks(
-    dead: Query<(Entity, &TankCommand, &ControlledBy, &CombatantId), With<TankKnockedOut>>,
+    dead: Query<
+        (
+            Entity,
+            &TankCommand,
+            &ControlledBy,
+            &CombatantId,
+            Option<&AwaitingSpawnPoint>,
+        ),
+        With<TankKnockedOut>,
+    >,
     remotes: Query<&RemoteId>,
     // Every tank root's live position — the occupancy set an override spawn checks against
     // (includes dead husks still on the field and the bot; excludes roots swept this pass).
-    tanks: Query<(Entity, &Position), With<NetTank>>,
+    tanks: Query<(Entity, &Position, Has<TankKnockedOut>), With<NetTank>>,
     assets: Res<PendingTankAssets>,
     source: TankSimSource,
     mut lane: ResMut<SpawnLane>,
+    mut placement: ResMut<SpawnPlacement>,
+    manifest: Res<crate::map::MapManifest>,
     overrides: Res<SpawnOverrides>,
     // The authority's own ground truth for spawn-map placement; absent in the flat-slab world.
     height: Option<Res<crate::terrain_grid::HeightGrid>>,
@@ -976,14 +1001,19 @@ fn respawn_player_tanks(
     // respawn this tick. Resolve the owner's `RemoteId` up front (the `PeerId` the fresh tank must be
     // predicted/owned by); an owner link mid-disconnect with no `RemoteId` is skipped rather than
     // respawned to a client that is leaving.
-    let requests: Vec<(Entity, Entity, PeerId, CombatantId)> = dead
+    let requests: Vec<(Entity, Entity, PeerId, CombatantId, bool)> = dead
         .iter()
-        .filter(|(_, command, _, _)| command.respawn)
-        .filter_map(|(root, _, controlled, combatant)| {
-            remotes
-                .get(controlled.owner)
-                .ok()
-                .map(|remote| (root, controlled.owner, remote.0, *combatant))
+        .filter(|(_, command, _, _, waiting)| command.respawn || waiting.is_some())
+        .filter_map(|(root, _, controlled, combatant, waiting)| {
+            remotes.get(controlled.owner).ok().map(|remote| {
+                (
+                    root,
+                    controlled.owner,
+                    remote.0,
+                    *combatant,
+                    waiting.is_some(),
+                )
+            })
         })
         .collect();
     if requests.is_empty() {
@@ -992,15 +1022,17 @@ fn respawn_player_tanks(
     let Some(content) = source.get() else {
         return;
     };
-    // A respawn takes the NEXT free lane (never reset — same rule a reconnecting client follows), so a
-    // fresh tank never lands on top of another body and NaNs the solver. The base pose honors the
-    // harness spawn-pose override exactly as the connect path does.
+    // The harness instrument retains its exact contact pose, as on initial join.
     let harness_pose = harness::spawn_pose();
     let spawn_rot = harness_pose.map_or(Quat::IDENTITY, |(_, rot)| rot);
     let harness_pos = harness_pose.map(|(pos, _)| pos);
-    // Roots being swept this pass are NOT occupancy: their colliders despawn in the same command
-    // flush the fresh tanks spawn in.
-    let sweeping: Vec<Entity> = requests.iter().map(|(root, ..)| *root).collect();
+    // Only successfully replaced roots leave occupancy: a crowded automatic spawn may wait.
+    let mut sweeping: Vec<Entity> = Vec::new();
+    let mut live: Vec<Vec2> = tanks
+        .iter()
+        .filter(|(_, _, knocked_out)| !knocked_out)
+        .map(|(_, position, _)| position.0.xz())
+        .collect();
     // What stands on the map, in the block encoding: the terrain blocks, then the buildings' bounds.
     let standing: Vec<Transform> = map
         .as_ref()
@@ -1012,16 +1044,15 @@ fn respawn_player_tanks(
     // Occupancy also includes the spots ALREADY HANDED OUT this pass: two clients respawning onto
     // the same click in the same tick would otherwise both read the pre-pass world and overlap.
     let mut placed_this_pass: Vec<Vec2> = Vec::new();
-    for (root, link, client_id, combatant) in requests {
-        // A spawn-map choice REPLACES the lane pose for this respawn (and stays chosen for the next
-        // one — see `SpawnOverrides`); the lane counter is left alone so the fallback placement is
-        // unchanged for everyone still using it. The Y is resolved on the authority.
-        let spawn_pos = match overrides.0.get(&link) {
+    for (root, link, client_id, combatant, waiting) in requests {
+        // Keep the player's spawn-map override and its occupancy nudge ahead of automatic choice.
+        let picked = overrides.0.get(&link);
+        let override_pos = match picked {
             Some(&xz) => {
                 let occupied: Vec<Vec2> = tanks
                     .iter()
-                    .filter(|(tank, _)| !sweeping.contains(tank))
-                    .map(|(_, position)| position.0.xz())
+                    .filter(|(tank, _, _)| *tank != root && !sweeping.contains(tank))
+                    .map(|(_, position, _)| position.0.xz())
                     .chain(placed_this_pass.iter().copied())
                     .collect();
                 match resolve_free_spawn_xz(
@@ -1053,13 +1084,29 @@ fn respawn_player_tanks(
                 }
             }
             None => None,
-        }
-        .unwrap_or_else(|| {
+        };
+        let spawn_pos = if let Some(pos) = override_pos {
+            pos
+        } else if picked.is_some() || harness_pos.is_some() {
+            // Existing override exhaustion and the harness instrument retain their lane placement.
             let pos = lane_spawn_pos(harness_pos, lane.0, height.as_deref());
             lane.0 += 1;
             pos
-        });
+        } else {
+            let Some(xz) = placement.choose(&manifest.spawn_points, &live) else {
+                if !waiting {
+                    info!(
+                        "server: player {client_id} respawn waiting — every map spawn point is inside the minimum distance"
+                    );
+                    commands.entity(root).insert(AwaitingSpawnPoint);
+                }
+                continue;
+            };
+            spawn_pos(height.as_deref(), xz)
+        };
         placed_this_pass.push(spawn_pos.xz());
+        live.push(spawn_pos.xz());
+        sweeping.push(root);
         // Recursive despawn sweeps the dead root and its attached rig; the `On<Remove, Rig>` observer
         // handles any cooked-off turret that had detached (see the system doc).
         commands.entity(root).despawn();
@@ -1245,6 +1292,223 @@ mod tests {
         );
     }
 
+    /// A real construction fixture keeps placement tests on the production spawn systems. The
+    /// shipped vehicle supplies fixture data only; every assertion is a generic spawn invariant.
+    fn placement_app() -> App {
+        let root = crate::assets::asset_root();
+        let spec_ron = std::fs::read_to_string(root.join(crate::tank::TANK_SPEC_PATH))
+            .expect("the shipped spec sheet");
+        let asset = crate::bake::certify_asset(
+            &root.join(crate::tank::TANK_SIM_GLB_PATH),
+            &spec_ron,
+            &crate::substances::SubstanceRegistry::shipped(),
+        )
+        .unwrap_or_else(|_| panic!("the shipped sim artifact certifies"));
+        let blueprint = crate::bake::TankBlueprint::new(
+            crate::tank::TANK_SPEC_PATH.to_owned(),
+            asset.geometry,
+            asset.spec,
+        );
+        let colliders = crate::track::bump_stop::TrackColliders::of_blueprint(
+            &blueprint,
+            &root.join(crate::tank::TANK_SIM_GLB_PATH),
+        );
+        let mut app = App::new();
+        // Lightyear's replicated-component removal hooks read this registry on despawn.
+        app.init_resource::<bevy_replicon::server::visibility::registry::FilterRegistry>()
+            .insert_resource(blueprint)
+            .insert_resource(colliders)
+            .insert_resource(PendingTankAssets {
+                spec: Handle::default(),
+                scene: None,
+            })
+            .insert_resource(crate::map::tests::fixture_manifest(750.0, 0.0, 50.0))
+            .insert_resource(SpawnPlacement::battle())
+            .init_resource::<PendingClients>()
+            .init_resource::<SpawnOverrides>()
+            .init_resource::<SpawnLane>()
+            .init_resource::<CombatantIds>()
+            .add_systems(Update, (spawn_pending_tanks, respawn_player_tanks).chain());
+        app
+    }
+
+    /// The game's damage model: automatic joins and respawns share the minimum, ignore knocked-out
+    /// tanks, and retry a blocked request after its input edge is gone. A player's map pick still
+    /// wins. Mutants: lane placement bypasses the minimum; counting the old root blocks an alone
+    /// respawn; losing the latch requires a second request; applying the rule to a pick rejects it.
+    #[test]
+    fn automatic_spawns_wait_and_retry_but_player_picks_still_win() {
+        let mut app = placement_app();
+        let client_id = PeerId::Netcode(1);
+        let link = app.world_mut().spawn((RemoteId(client_id), Connected)).id();
+        let blocker = app.world_mut().spawn((NetTank, Position(Vec3::ZERO))).id();
+        app.world_mut()
+            .resource_mut::<PendingClients>()
+            .0
+            .push((link, client_id));
+        app.update();
+        assert_eq!(
+            app.world().resource::<PendingClients>().0.len(),
+            1,
+            "the only authored point is too close to a live tank"
+        );
+        app.world_mut().entity_mut(blocker).insert(TankKnockedOut {
+            reason: crate::damage::KnockoutReason::CrewLoss,
+        });
+        app.update();
+        assert!(app.world().resource::<PendingClients>().0.is_empty());
+        let root = app
+            .world_mut()
+            .query_filtered::<Entity, With<ControlledBy>>()
+            .single(app.world())
+            .expect("the queued player now has a tank");
+        assert_eq!(
+            app.world()
+                .get::<Position>(root)
+                .expect("spawn pose")
+                .0
+                .xz(),
+            Vec2::ZERO
+        );
+        app.world_mut()
+            .entity_mut(blocker)
+            .remove::<TankKnockedOut>();
+        app.world_mut().entity_mut(root).insert((
+            TankKnockedOut {
+                reason: crate::damage::KnockoutReason::CrewLoss,
+            },
+            TankCommand {
+                respawn: true,
+                ..default()
+            },
+        ));
+        app.update();
+        assert!(app.world().get::<AwaitingSpawnPoint>(root).is_some());
+        app.world_mut()
+            .get_mut::<TankCommand>(root)
+            .expect("tank command")
+            .respawn = false;
+        app.world_mut().entity_mut(blocker).insert(TankKnockedOut {
+            reason: crate::damage::KnockoutReason::CrewLoss,
+        });
+        app.update();
+        assert!(
+            app.world().get_entity(root).is_err(),
+            "the pending request replaced its old root"
+        );
+        let fresh = app
+            .world_mut()
+            .query_filtered::<Entity, With<ControlledBy>>()
+            .single(app.world())
+            .expect("one replacement player tank");
+        let picked = Vec2::new(50.0, 0.0); // ASSUMED fixture point, inside the mode minimum.
+        app.world_mut()
+            .resource_mut::<SpawnOverrides>()
+            .0
+            .insert(link, picked);
+        app.world_mut()
+            .entity_mut(blocker)
+            .remove::<TankKnockedOut>();
+        app.world_mut().entity_mut(fresh).insert((
+            TankKnockedOut {
+                reason: crate::damage::KnockoutReason::CrewLoss,
+            },
+            TankCommand {
+                respawn: true,
+                ..default()
+            },
+        ));
+        app.update();
+        let pos = app
+            .world_mut()
+            .query_filtered::<&Position, With<ControlledBy>>()
+            .single(app.world())
+            .expect("the override still spawns a replacement")
+            .0
+            .xz();
+        assert_eq!(
+            pos, picked,
+            "the player's free pick wins over the automatic minimum"
+        );
+        assert_eq!(
+            app.world().resource::<SpawnOverrides>().0[&link],
+            picked,
+            "the player's choice persists after use"
+        );
+    }
+
+    /// Commands are deferred, so two queued joins must include earlier placements in the pass's
+    /// live set. A disconnected waiting player must not receive an orphan tank later.
+    #[test]
+    fn joining_players_see_same_pass_spawns_and_disconnected_waiters_are_removed() {
+        let mut app = placement_app();
+        for id in 1..=2 {
+            let peer = PeerId::Netcode(id);
+            let link = app.world_mut().spawn((RemoteId(peer), Connected)).id();
+            app.world_mut()
+                .resource_mut::<PendingClients>()
+                .0
+                .push((link, peer));
+        }
+        app.update();
+        assert_eq!(app.world().resource::<PendingClients>().0.len(), 1);
+        assert_eq!(
+            app.world_mut()
+                .query_filtered::<Entity, With<ControlledBy>>()
+                .iter(app.world())
+                .count(),
+            1,
+            "a second player cannot reuse the sole point"
+        );
+        let link = app.world().resource::<PendingClients>().0[0].0;
+        app.world_mut().entity_mut(link).remove::<Connected>();
+        app.update();
+        assert!(app.world().resource::<PendingClients>().0.is_empty());
+    }
+
+    /// Every map's authored automatic spawn points must clear its building footprints expanded
+    /// by the same occupancy radius as the player's spawn-map path. This catches placement edits
+    /// that would put an automatically spawned tank in a building, regardless of prototype id.
+    #[test]
+    fn authored_spawn_points_clear_building_footprints() {
+        let manifest = crate::map::tests::shipped_manifest();
+        for instance in &manifest.instances {
+            let pose = Transform {
+                translation: Vec3::new(instance.translation[0], 0.0, instance.translation[2]),
+                rotation: Quat::from_array(instance.rotation).normalize(),
+                scale: Vec3::from_array(instance.scale),
+            };
+            let block = match &manifest.prototypes[&instance.prototype] {
+                crate::map::Prototype::Building { min, max, .. } => {
+                    let (min, max) = (Vec3::from_array(*min), Vec3::from_array(*max));
+                    Transform {
+                        translation: pose.translation
+                            + pose.rotation * ((min + max) * 0.5 * pose.scale),
+                        rotation: pose.rotation,
+                        scale: (max - min) * pose.scale,
+                    }
+                }
+                crate::map::Prototype::Structure { asset } => crate::buildings::footprint(
+                    manifest
+                        .buildings
+                        .get(asset)
+                        .expect("map load resolved every structure"),
+                    pose,
+                ),
+                crate::map::Prototype::Tree { .. } | crate::map::Prototype::Fir { .. } => continue,
+            };
+            if let Some(footprint) = block_footprint(&block, None) {
+                for point in manifest.spawn_points.as_slice() {
+                    assert!(
+                        !footprint_denies(footprint, *point),
+                        "spawn {point:?} overlaps building {}",
+                        instance.id
+                    );
+                }
+            }
+        }
+    }
+
     /// An in-bounds request passes through untouched; an out-of-bounds one is CLAMPED into the
     /// playable square rather than refused, so a click near the map edge still places you. A
     /// non-finite request is REFUSED outright: a NaN spawn would NaN the solver the moment the
@@ -1301,6 +1565,10 @@ mod tests {
     fn every_netcode_spawn_point_lands_above_the_shipped_terrain() {
         use crate::terrain_grid::tests::{assert_spawn_clears_terrain, shipped_grid};
         let grid = shipped_grid();
+        let manifest = crate::map::tests::shipped_manifest();
+        for (index, &point) in manifest.spawn_points.as_slice().iter().enumerate() {
+            assert_spawn_clears_terrain(&grid, &format!("authored spawn {index}"), point);
+        }
         // Lanes fan out from the origin and the bots' homes from theirs; 8 covers far more clients
         // than a match holds.
         for lane in 0..8 {

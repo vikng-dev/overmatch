@@ -108,6 +108,8 @@ pub(crate) struct MapManifest {
     /// registration: the mask is stretched over the same world square the heightmap is, at
     /// whatever resolution it was cut at.
     pub(crate) masks_resolution: [u32; 2],
+    /// Nonempty, finite horizontal spawn points inside the declared map square.
+    pub(crate) spawn_points: SpawnPoints,
     /// The author's object placement, in file order.
     pub(crate) instances: Vec<InstanceRecord>,
     /// The game's library, keyed by the ids the placement uses. Every instance's prototype and
@@ -117,6 +119,34 @@ pub(crate) struct MapManifest {
     pub(crate) trees: TreeLibrary,
     /// Every building asset a [`Prototype::Structure`] names, loaded and validated ([`load`]).
     pub(crate) buildings: BuildingLibrary,
+}
+
+/// Authored XZ spawn points certified once at the map load edge. The private slice cannot be
+/// emptied or changed after validation; the server can always draw an index from it.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct SpawnPoints(Box<[Vec2]>);
+
+impl SpawnPoints {
+    pub(crate) fn checked(points: Vec<[f32; 2]>, half_extent: f32, path: &Path) -> Self {
+        assert!(
+            !points.is_empty(),
+            "map: {} field spawn_points is empty — author at least one XZ point",
+            path.display(),
+        );
+        let points: Box<[Vec2]> = points.into_iter().map(Vec2::from_array).collect();
+        for (index, point) in points.iter().enumerate() {
+            assert!(
+                point.is_finite() && point.abs().max_element() < half_extent,
+                "map: {} field spawn_points[{index}] = {point:?} — use finite XZ metres inside the terrain square",
+                path.display(),
+            );
+        }
+        Self(points)
+    }
+
+    pub(crate) fn as_slice(&self) -> &[Vec2] {
+        &self.0
+    }
 }
 
 impl MapManifest {
@@ -206,6 +236,7 @@ pub(crate) struct InstanceRecord {
 struct LevelFile {
     coordinate_system: CoordinateSystem,
     terrain: TerrainBlock,
+    spawn_points: Vec<[f32; 2]>,
     instances: Vec<InstanceRecord>,
     /// The author's prototype registry, read for its KEYS only (module doc). An export may omit
     /// the block.
@@ -585,6 +616,7 @@ pub(crate) fn parse(text: &str, library: &str, path: &Path) -> MapManifest {
         rows,
         masks: masks.asset,
         masks_resolution: masks.resolution,
+        spawn_points: SpawnPoints::checked(level.spawn_points, side_m * 0.5, path),
         instances: level.instances,
         prototypes,
         trees: TreeLibrary::default(),
@@ -622,7 +654,7 @@ pub(crate) mod tests {
                "sample_centers_xz":{{"pixel_0_0":[{min},{corner_z}]}},
                "height_decode":{{"offset_m":{offset_m},"scale_m":{scale_m}}}}},
                "masks":{{"asset":"m.png","resolution":[4,4]}}}},
-               "instances":[]}}"#,
+               "spawn_points":[[0,0]],"instances":[]}}"#,
             min = -half_m,
         )
     }
@@ -717,6 +749,37 @@ pub(crate) mod tests {
             manifest.extent.world_size_m > 0.0 && !manifest.instances.is_empty(),
             "the shipped map declares a world and objects on it",
         );
+    }
+
+    /// The server must never enter play with no automatic spawn candidates. Mutant: accepting an
+    /// empty list leaves the first alone player with no point to draw from.
+    #[test]
+    #[should_panic(expected = "fixture/level.json field spawn_points is empty")]
+    fn a_map_with_no_spawn_points_is_refused_at_load() {
+        let text = manifest_text(750.0, 0.0, 50.0, "+Z")
+            .replace("\"spawn_points\":[[0,0]]", "\"spawn_points\":[]");
+        parse(&text, EMPTY_LIBRARY, Path::new("fixture/level.json"));
+    }
+
+    /// Missing or out-of-world placement is refused at the edge, before the server samples it.
+    #[test]
+    fn spawn_points_must_be_present_finite_and_inside_the_map() {
+        let text = manifest_text(750.0, 0.0, 50.0, "+Z");
+        for replacement in [
+            "",
+            "\"spawn_points\":[[750,0]],",
+            "\"spawn_points\":[[1e100,0]],",
+        ] {
+            let invalid = text.replace("\"spawn_points\":[[0,0]],", replacement);
+            let refusal = std::panic::catch_unwind(|| {
+                parse(&invalid, EMPTY_LIBRARY, Path::new("fixture/level.json"));
+            })
+            .expect_err("invalid spawn data must be refused");
+            let message = refusal
+                .downcast_ref::<String>()
+                .expect("formatted load refusal");
+            assert!(message.contains("fixture/level.json") && message.contains("spawn_points"));
+        }
     }
 
     /// The surface-weight masks, pinned the way the heightmap is: DECODED from the shipped bytes,

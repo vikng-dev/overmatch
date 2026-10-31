@@ -90,6 +90,34 @@
       }
     }
   },
+  "spawn_points_note": "ASSUMED initial placement: a 300 m lattice, each point moved at most 60 m per axis to maximize clearance from every authored object origin. Ground height is resolved by the server; tune in play.",
+  "spawn_points": [
+    [-540, -660],
+    [-340, -600],
+    [60, -660],
+    [360, -560],
+    [540, -640],
+    [-640, -300],
+    [-240, -240],
+    [60, -240],
+    [240, -240],
+    [640, -360],
+    [-660, -60],
+    [-240, 60],
+    [40, 40],
+    [240, 20],
+    [660, 20],
+    [-540, 340],
+    [-240, 240],
+    [60, 240],
+    [240, 360],
+    [620, 280],
+    [-540, 540],
+    [-300, 580],
+    [40, 540],
+    [300, 540],
+    [620, 560]
+  ],
   "prototypes": {
     "house_proxy": {
       "asset": "house_proxy.glb",

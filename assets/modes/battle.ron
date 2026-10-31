@@ -1,0 +1,5 @@
+// ASSUMED starting distances in metres; both are provisional and tuned in play (#220).
+(
+    target_distance_m: 400.0,
+    minimum_distance_m: 200.0,
+)

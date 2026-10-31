@@ -63,6 +63,7 @@ mod shot_loss;
 mod shot_transport;
 // `pub(crate)` for `spawn_limit` — the clamp the spawn regression test resolves its corners at.
 pub(crate) mod spawn_map;
+mod spawn_placement;
 /// The sync margins on both wire timelines, derived from the measured link instead of pinned.
 mod sync_margin;
 #[cfg(test)]
