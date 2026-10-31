@@ -64,6 +64,7 @@ const BARLOW_TEXT_FILES: &[&str] = &[
     "src/damage_cam/pen_cam/game/killcam.rs",
     "src/state.rs",
     "src/ui_font.rs",
+    "src/net/battle_hud.rs",
     "src/net/client.rs",
     "src/net/death_screen.rs",
     "src/net/debug_hud.rs",

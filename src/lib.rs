@@ -950,6 +950,9 @@ impl Plugin for NetClientPlugin {
             // The `M` spawn map — net-client only: a top view of the terrain whose click asks the
             // authority to place this player's NEXT respawn there (nothing teleports now).
             net::spawn_map_plugin,
+            // The Battle's match UI — net-client only: the time left, the scoreboard held on Tab
+            // and the results, read from the replicated Battle and score.
+            net::battle_hud_plugin,
             // Player graphics settings + the Esc settings page + the render-scale render-app half,
             // all behind one mount. The page IS the Esc menu's content (`Overlay::Menu` already
             // blocks input, frees the cursor and owns the scrim), which is what the `OverlayMenu`

@@ -5,6 +5,8 @@ use bevy::prelude::*;
 
 mod admission;
 pub(crate) mod battle;
+/// The Battle's match UI: the time left on screen, the scoreboard on Tab and the results.
+mod battle_hud;
 /// The Battle mode's data: one file, parsed and checked once.
 mod battle_mode;
 mod client;
@@ -92,6 +94,7 @@ pub use client::run as run_client;
 /// Run the authoritative dedicated server.
 pub use server::run as run_server;
 
+pub(super) use battle_hud::plugin as battle_hud_plugin;
 pub(super) use death_screen::plugin as death_screen_plugin;
 pub(super) use debug_hud::plugin as debug_hud_plugin;
 pub(super) use hit_feel::plugin as hit_feel_plugin;

@@ -186,6 +186,7 @@ const MATCH_ROOTS: &[&str] = &[
     "DamageFlashNode",
     "TankNameplate",
     "LeaveMatchRoot",
+    "MatchUi",
 ];
 
 fn client_ui_app() -> App {
@@ -217,6 +218,7 @@ fn client_ui_app() -> App {
             super::debug_hud::plugin,
             super::hit_feel::plugin,
             super::death_screen::plugin,
+            super::battle_hud::plugin,
             super::spawn_map::plugin,
             super::client::connect_screen_plugin,
         ))

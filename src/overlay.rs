@@ -101,6 +101,13 @@ impl Overlay {
     /// carries no [`OverlayNode`]: it declares no presence, captures no input and owns no scrim.
     pub(crate) const PEN_CAM_CORNER_Z: i32 = 20;
 
+    /// The z-layer for the Battle's scoreboard (`net::battle_hud`): above [`Overlay::Death`], so a
+    /// board held on Tab while knocked out reads over the death banner, and below
+    /// [`Overlay::ConnectStatus`]. It carries no [`OverlayNode`]: it declares no presence, captures
+    /// no input and owns no scrim. It hides itself while [`input_blocked`] holds, so it never draws
+    /// over the menu, the spawn map or the reconnect screen whatever its rung.
+    pub(crate) const SCOREBOARD_Z: i32 = Overlay::Death.zindex() + 10;
+
     /// Whether this overlay CAPTURES input while active — play stops and the cursor frees. The menu is
     /// the obvious one; the reconnect screen too (there is no tank to drive until the link is back,
     /// and a visible cursor over "RECONNECTING…" is the honest state). Death and view-death do NOT block: the

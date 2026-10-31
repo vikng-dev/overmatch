@@ -65,6 +65,21 @@ and building-footprint checks. It has 36 candidates with minimum pair separation
 240 m. Moving players can still block candidates during combat, but a connected
 waiter cannot remain blocked across the next fresh combat layout.
 
+## Match UI
+
+`net::battle_hud` shows the replicated phase and score only. A clock line stays on screen:
+the wait for a first player, the time until combat, the time left in combat, the time left in
+results. The scoreboard lists rank, name, knockouts and losses in `rank` order; tied standings
+share a place. It shows while Tab is held in combat and without a key through results, where its
+title names the authority's winner (also marked on its row), the draw or no contest. It hides
+whenever an input-capturing overlay is latched and otherwise draws above the death banner.
+
+Countdowns run from the replicated deadline on the client's network tick (`ShotClock`). That tick
+leads the server's (DERIVED: a press is filed for a tick the server has not yet reached), so a line
+can read 0:00 briefly before the phase change arrives. No player name rides
+the wire, so a row reads `PLAYER <combatant id>`. The own row is unmarked: outside combat the
+client holds no tank, and so no replicated fact naming its own combatant.
+
 ## Verification
 
 The short-duration mode file `src/net/fixtures/battle-short.ron` drives the same
