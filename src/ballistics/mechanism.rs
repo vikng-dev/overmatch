@@ -266,18 +266,19 @@ impl Mechanism for SolidShot {
         // The game's damage model integrates dose at every volume boundary, including seams
         // inside an encounter whose substance set is constant. The force-law advance above stays
         // whole, so adding such a seam cannot change the round's state or its rest point.
-        let contacts: Vec<(&[VolumeContact], &VolumeContact)> = encounter
+        let contacts: Vec<(f32, &[VolumeContact], &VolumeContact)> = encounter
             .samples
             .iter()
             .flat_map(|sample| {
+                let strongest = overlap_factor(&sample.present);
                 sample
                     .present
                     .iter()
-                    .map(|contact| (sample.present.as_slice(), contact))
+                    .map(move |contact| (strongest, sample.present.as_slice(), contact))
             })
             .collect();
         let mut cuts = vec![0.0, consumed];
-        for (_, contact) in &contacts {
+        for (_, _, contact) in &contacts {
             cuts.push((contact.start - encounter.start).clamp(0.0, consumed));
             cuts.push((contact.end - encounter.start).clamp(0.0, consumed));
         }
@@ -294,11 +295,9 @@ impl Mechanism for SolidShot {
             }
         };
         let mut energies = vec![0.0; contacts.len()];
-        // Per contact, the metres of its covered stretch over which a stronger volume of its own
-        // sample is present, which take no dose, and whether it is the strongest anywhere: a
-        // contact that never is has no dosed chord, whatever the rounding of the metres.
-        let mut hidden = vec![0.0; contacts.len()];
-        let mut shown = vec![false; contacts.len()];
+        // The game's damage model holds each sample's substance set constant over an encounter,
+        // including an absorbed same-substance seam. Its strongest factor is therefore constant;
+        // active tied contacts divide that sample's one cost share, never multiply it.
         for bounds in cuts.windows(2) {
             let (a, b) = (bounds[0], bounds[1]);
             let inside = |contact: &VolumeContact| {
@@ -306,24 +305,16 @@ impl Mechanism for SolidShot {
             };
             let weights: Vec<f64> = contacts
                 .iter()
-                .enumerate()
-                .map(|(index, (layer, contact))| {
-                    if !inside(contact) {
+                .map(|(strongest, layer, contact)| {
+                    if !inside(contact) || contact.material.factor < *strongest {
                         return 0.0;
                     }
-                    let strongest = overlap_of(
-                        layer
-                            .iter()
-                            .filter(|other| inside(other))
-                            .map(|other| other.material.factor),
-                    );
-                    if contact.material.factor < strongest {
-                        hidden[index] += b - a;
-                        0.0
-                    } else {
-                        shown[index] = true;
-                        contact.material.factor as f64
-                    }
+                    // This active strongest contact is itself a tie, so the divisor is positive.
+                    let ties = layer
+                        .iter()
+                        .filter(|other| inside(other) && other.material.factor == *strongest)
+                        .count();
+                    contact.material.factor as f64 / ties as f64
                 })
                 .collect();
             let total: f64 = weights.iter().sum();
@@ -339,13 +330,12 @@ impl Mechanism for SolidShot {
         let effects = contacts
             .into_iter()
             .zip(energies)
-            .zip(hidden.into_iter().zip(shown))
-            .map(|(((_, contact), energy), (hidden, shown))| {
+            .map(|((strongest, _, contact), energy)| {
                 let covered = (consumed - (contact.start - encounter.start))
                     .min(contact.end - contact.start)
                     .max(0.0);
-                let chord = if shown {
-                    (covered - hidden).max(0.0) / disc
+                let chord = if contact.material.factor == strongest {
+                    covered / disc
                 } else {
                     0.0
                 };
@@ -549,8 +539,8 @@ mod tests {
     /// (§13.2's damage law): it takes the whole energy the round lost there, and the weaker volume
     /// none of it and no chord, so a pool clipped into a stronger one is never dosed through it.
     /// Two volumes of one factor both count: the energy is shared between them by cost. Field
-    /// directions follow the same rule (a part inside a plate is hidden by the plate's face), and
-    /// the HP tally relies on the line's doses summing to the energy lost. Factors are fixture
+    /// directions stop at their first entered hard volume; the HP tally relies on the line's
+    /// doses summing to the energy lost. Factors are fixture
     /// data.
     #[test]
     fn an_overlap_is_resisted_once_and_dosed_only_by_its_strongest_volume() {
@@ -615,6 +605,49 @@ mod tests {
                 (energy / (0.5 * lost) - 1.0).abs() < 1.0e-12,
                 "equal factors share: {energy} against half of {lost}"
             );
+        }
+    }
+
+    /// The game's damage model assigns each sample one maximum-factor cost share. Duplicating
+    /// a tied contact inside one sample must split that share, never take energy from another
+    /// sample; the pool tally relies on the sum still equalling the round's energy loss.
+    #[test]
+    fn tied_contacts_split_their_samples_share_once() {
+        let round = round();
+        for (a, b) in [(1000.0, 1000.0), (1000.0, 10.0)] {
+            let alone = round.advance(
+                round.at(800.0),
+                &encounter(0.05, 2, &[&[(1, a)], &[(3, b)]]),
+                &LIMITS,
+                &HEAD_ON,
+            );
+            for tied in [[(1, a), (2, a)], [(2, a), (1, a)]] {
+                let advance = round.advance(
+                    round.at(800.0),
+                    &encounter(0.05, 2, &[&tied, &[(3, b)]]),
+                    &LIMITS,
+                    &HEAD_ON,
+                );
+                assert_eq!(advance.state, alone.state, "a tie adds no resistance");
+                let lost = round.energy(round.at(800.0)) - round.energy(advance.state);
+                let mut sum = 0.0;
+                for &Effect::Line {
+                    address, energy, ..
+                } in &advance.effects
+                {
+                    let expected = if address == volume(3) {
+                        b as f64 / (a + b) as f64
+                    } else {
+                        0.5 * a as f64 / (a + b) as f64
+                    };
+                    assert!(
+                        (energy / lost - expected).abs() < 1.0e-12,
+                        "{address:?}: {energy} of {lost}, expected share {expected}"
+                    );
+                    sum += energy;
+                }
+                assert!((sum / lost - 1.0).abs() < 1.0e-12);
+            }
         }
     }
 

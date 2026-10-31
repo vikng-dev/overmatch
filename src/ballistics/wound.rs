@@ -1,4 +1,4 @@
-//! The witness pass (ADR-0040): what the hard world sent through each witness volume.
+//! The game's damage model: the witness pass (ADR-0040), read from the resolved hard world.
 //!
 //! A witness ([`super::WitnessVolume`]) is no layer of the walk, so nothing here feeds back into
 //! the hard world: the round's state, every field direction's strength and reach are decided
@@ -6,7 +6,7 @@
 //!
 //! - [`line`]: the round's axis legs ([`Leg`]), each sampled by the walk's own disc; per
 //!   witness, the disc-mean chord in the open (none inside a hard volume, [`solid`]), dosed
-//!   `chord × wound` (the round's crew line rate, reference-mm per metre).
+//!   by the round's crew line rate (code field `wound`).
 //! - [`entries`]: where a field direction enters each witness, which
 //!   [`super::resolve::field_direction`] doses at the direction's strength there times its share.
 //!
@@ -14,6 +14,9 @@
 //! ([`walk::witness_spans`]); a witness shell that does not alternate is the same structured
 //! [`WalkError`] a hard one would be. The laws are the design doc's §6
 //! (`.agents/docs/design/armor-penetration-and-damage.md`).
+
+use std::borrow::Cow;
+use std::collections::BTreeSet;
 
 use avian3d::prelude::SimpleCollider;
 use bevy::prelude::*;
@@ -182,25 +185,7 @@ fn solid(
     let Some((behind, walked)) = field_presence(context, &reach, at, axis)? else {
         return Ok(Vec::new());
     };
-    let mut out: Vec<(f64, f64)> = Vec::new();
-    for layer in walked
-        .layers
-        .iter()
-        .filter(|layer| !layer.present.is_empty())
-    {
-        let (a, b) = (
-            (layer.start - behind).max(0.0),
-            (layer.end - behind).min(length as f64),
-        );
-        if b <= a {
-            continue;
-        }
-        match out.last_mut() {
-            Some(last) if last.1 >= a => last.1 = last.1.max(b),
-            _ => out.push((a, b)),
-        }
-    }
-    Ok(out)
+    Ok(walked.occupied(behind, length as f64))
 }
 
 /// What of `spans` lies outside every interval of `solid`, both disjoint and ordered: the
@@ -234,15 +219,15 @@ fn open_spans(spans: &[(f64, f64)], solid: &[(f64, f64)]) -> Vec<(f64, f64)> {
 /// The round's line through every witness `admit` keeps, along `legs` in order: per witness, the
 /// disc-mean chord in the open summed over the legs (each leg's chord the mean over all its
 /// samples, each sample read along its own stretch, a sample that misses counting zero), its dose
-/// `chord × wound` reference-mm, the axis points where the line first entered it in the open and
-/// where it last left it or the legs end (each sample's point projected onto its leg's axis), and
-/// whether every sample that entered it on the last leg that met it came out within its own
-/// stretch. In order of first entry.
+/// from the round's crew line rate, the axis points where it first entered the open portion and
+/// where it last left that open portion or rested in it (each sample projected onto its leg's
+/// axis). `perforated` means the disc left those exposed portions, even when it then rests in
+/// a hidden portion of the same witness. In order of first exposed entry.
 ///
 /// THE STRONGEST-ONLY RULE (§13.2's damage law). A witness's chord inside any hard volume `admit`
-/// keeps ([`solid`]) takes no dose: a crew box clipped into a wall is dosed only over the chord
-/// it presents in the open, and one wholly inside armour is not met at all. A field direction
-/// already stops at the hard face that hides it ([`super::resolve::field_direction`]).
+/// keeps (the resolved leg's presence, or [`solid`] for an uncollected leg) takes no dose: a crew
+/// box clipped into a wall is dosed only over its open chord; one wholly inside armour is not met.
+/// A field direction already stops at the hard face that hides it ([`super::resolve::field_direction`]).
 ///
 /// With them, the axis of the first leg that met a witness (`None` when none did).
 ///
@@ -260,7 +245,7 @@ pub(crate) fn line(
         let longest = leg
             .samples
             .iter()
-            .map(|(_, length)| *length)
+            .map(|sample| sample.length)
             .fold(0.0, f32::max);
         if longest <= 0.0 {
             continue;
@@ -271,16 +256,21 @@ pub(crate) fn line(
         let reach = leg
             .samples
             .iter()
-            .map(|(offset, _)| offset.length())
+            .map(|sample| sample.offset.length())
             .fold(0.0, f32::max);
         let near = candidates(context, admit, leg.from, axis, longest, reach);
         if near.is_empty() {
+            for crossed in &mut out {
+                crossed.perforated = true;
+            }
             continue;
         }
-        // Per witness: summed chord over the samples, first entry and last exit along the axis,
-        // all samples left.
-        let mut met: Vec<(Entity, f64, f64, f64, bool)> = Vec::new();
-        for &(offset, length) in &leg.samples {
+        // The game's damage model records exposed portions across connected legs. A later leg
+        // wholly inside hard matter can clear the previous exposed portion without another dose.
+        let mut end_open = BTreeSet::new();
+        let mut met: Vec<(Entity, f64, f64, f64)> = Vec::new();
+        for sample in &leg.samples {
+            let (offset, length) = (sample.offset, sample.length);
             if length <= 0.0 {
                 continue;
             }
@@ -290,26 +280,34 @@ pub(crate) fn line(
             if found.is_empty() {
                 continue;
             }
-            let hard = solid(context, admit, at, leg.axis, length)?;
+            let hard = match &sample.hard {
+                Some(presence) => Cow::Borrowed(presence.as_slice()),
+                // Open flight and standalone inspection have no resolved hard walk to reuse.
+                None => Cow::Owned(solid(context, admit, at, leg.axis, length)?),
+            };
             for found in found {
                 let open = open_spans(&found.spans, &hard);
+                if open.last().is_some_and(|(_, end)| *end == length as f64) {
+                    end_open.insert(found.witness);
+                }
                 let (Some(&(first, _)), Some(&(_, last))) = (open.first(), open.last()) else {
                     continue;
                 };
                 let chord: f64 = open.iter().map(|(a, b)| b - a).sum();
                 let entry = along + first;
                 let exit = along + last;
-                let left = last < length as f64;
                 match met.iter_mut().find(|m| m.0 == found.witness) {
                     Some(m) => {
                         m.1 += chord;
                         m.2 = m.2.min(entry);
                         m.3 = m.3.max(exit);
-                        m.4 &= left;
                     }
-                    None => met.push((found.witness, chord, entry, exit, left)),
+                    None => met.push((found.witness, chord, entry, exit)),
                 }
             }
+        }
+        for crossed in &mut out {
+            crossed.perforated = !end_open.contains(&crossed.volume);
         }
         if met.is_empty() {
             continue;
@@ -317,7 +315,7 @@ pub(crate) fn line(
         incoming.get_or_insert(leg.axis);
         met.sort_by(|a, b| a.2.total_cmp(&b.2).then(a.0.cmp(&b.0)));
         let samples = leg.samples.len() as f64;
-        for (witness, chord, entry, exit, left) in met {
+        for (witness, chord, entry, exit) in met {
             let chord = (chord / samples) as f32;
             let entry = leg.from + axis * entry as f32;
             let end = leg.from + axis * exit as f32;
@@ -326,7 +324,7 @@ pub(crate) fn line(
                     crossed.chord += chord;
                     crossed.cost += chord * wound;
                     crossed.end = end;
-                    crossed.perforated = left;
+                    crossed.perforated = !end_open.contains(&witness);
                 }
                 None => out.push(VolumeCrossing {
                     volume: witness,
@@ -335,7 +333,7 @@ pub(crate) fn line(
                     chord,
                     cost: chord * wound,
                     energy: 0.0,
-                    perforated: left,
+                    perforated: !end_open.contains(&witness),
                 }),
             }
         }

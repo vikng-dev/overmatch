@@ -749,8 +749,8 @@ struck.
 A hard box's line dose is the kinetic energy the round lost crossing it, `½ m (v_in² − v_out²)`,
 `m` the mass that meets the plate (a sub-calibre round's core); a round that comes to rest in it
 deals all it had left, `½ m v_in²`. The energy lost between consecutive volume boundaries is shared
-among the strongest volumes present there by their cost, chord × factor, so the doses sum to the
-energy the round lost and a volume a stronger one overlaps takes none of it (§13.2). A seam
+among samples by their maximum factor, with each sample's share divided equally among its tied
+strongest volumes, so the doses sum to the energy the round lost and a volume a stronger one overlaps takes none of it (§13.2). A seam
 between touching volumes of one substance does not change the force-law advance; each volume
 still takes the energy lost at its own depths, never a length share of the whole crossing.
 **One rate** turns energy into HP for every hard pool, a tank's modules and a tree's trunk alike:
@@ -1291,8 +1291,8 @@ contributing its `material_factor`; `hp` stays an independent facet. Two kinds o
 the invariants, not chosen by taxonomy:
 
 - **Idempotent** — the same steel claimed twice charges once (the plate-junction fix).
-- **Monotone** — adding any volume never *reduces* protection anywhere (a gunner's arm clipped into
-  the turret wall cannot dilute the steel).
+- **Monotone** — adding any volume never *reduces* protection anywhere (a crew-station box clipped
+  into the turret wall cannot dilute the steel).
 - **Commutative** — authoring order can't matter.
 
 This is CSG union evaluated lazily on the 1D ray (Roth '82): overlapping *individually-manifold*
@@ -1303,18 +1303,21 @@ consequence rather than a rule. A witness (§6) contributes no factor: it is no 
 **Damage law:** where volumes overlap, **only the strongest material counts** (Yan, 2026-10-31,
 issue 191: a dosable part poking into armour is a modelling error). At each depth of each disc
 sample, the volumes of the highest factor present there take the energy the round lost at those
-depths (§6, the energy dose), shared by cost (chord × factor) when several tie; a volume a stronger
-one overlaps takes none of it, and its chord there is no part of its dosed chord. Sequential pools
+depths (§6, the energy dose). Each sample contributes its maximum factor once to the cost weights;
+its tied strongest volumes split that sample's energy share equally. A volume a stronger one
+overlaps takes none of it, and its chord there is no part of its dosed chord. Sequential pools
 take their own energy loss. A module half inside a plate is dosed over its open half only; of two
 overlapping modules, the stronger takes the overlap's whole dose. A witness's chord inside any hard
 volume takes no dose, and its chord in the open is dosed by its own law (§6): two crew overlapping
 each other each take their whole chord, a crewman clipped into a wall only what lies outside it,
-and neither charges the shell anything. Fields obey the same rule: a direction stops at the first
-volume it enters, so a part inside a plate is hidden by the plate's face (§5). The rule this
-replaced dosed every overlapping volume over its own presence chords, shared by cost.
+and neither charges the shell anything. Field directions use the first-entry stop law (§5): a
+part is hidden when the plate's face is entered first. A weaker part whose face comes first stops
+the direction itself, even if a stronger volume begins immediately behind it; near-equal factors
+do not blend those ordered faces into a strongest-only field stop. The line rule this replaced
+dosed every overlapping volume over its own presence chords, shared by cost.
 
 **Spall law:** at every **body exit** — a step to a lower factor, or to air — a spall cone is thrown
-with that body's own spend and speeds (§5), and its directions march under these same field laws.
+with that body's own spend and speeds (§5), and its directions use §5's first-entry field law.
 Everything on the wishlist emerges with no class rules:
 
 - Crew never spall: a witness is no body (§6), so it throws nothing.
@@ -1708,8 +1711,9 @@ Enforced mechanically, not by eyeball:
   faces (z-fighting in the x-ray render).
 - **Sub-caliber slop is harmless in both directions** — small overlaps union away; micro-gaps
   ε-weld (longitudinal) or self-heal at η ≈ 1 (lateral cracks). Don't sweat sub-caliber precision.
-- Components may clip into walls; the damage law doses no clipped chord (§13.2), so the slop is
-  harmless.
+- The game's damage model doses a component's line chord only outside stronger walls (§13.2).
+  Field directions still stop at the first entered hard face: a protruding component can take a
+  field dose before a wall hides it. The line's overlap tolerance is not a field-fit guarantee.
 - **Real openings are modeled honestly, not plugged** — the turret ring, MG ports, vision slits
   become caliber-gated, η-graded weakspots by the disc law. On the Tiger they are modelled as solid
   cast steel, so the disc law has no geometry to grade and the fuzzer finds no corridor at all.

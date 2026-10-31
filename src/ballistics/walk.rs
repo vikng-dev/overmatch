@@ -852,6 +852,26 @@ pub struct RayWalk {
 }
 
 impl RayWalk {
+    /// The game's damage model masks witness lines wherever any hard volume is present,
+    /// including zero-resistance matter. Return that union over a stretch, relative to `start`.
+    pub(crate) fn occupied(&self, start: f64, length: f64) -> Vec<(f64, f64)> {
+        let mut out: Vec<(f64, f64)> = Vec::new();
+        for layer in self.layers.iter().filter(|layer| !layer.present.is_empty()) {
+            let (a, b) = (
+                (layer.start - start).max(0.0),
+                (layer.end - start).min(length),
+            );
+            if b <= a {
+                continue;
+            }
+            match out.last_mut() {
+                Some(last) if last.1 >= a => last.1 = last.1.max(b),
+                _ => out.push((a, b)),
+            }
+        }
+        out
+    }
+
     /// Which shells a corridor RESTARTED at progress `t` would have to declare as initial
     /// presence.
     ///
@@ -3162,8 +3182,7 @@ pub struct ResolutionPlan<S> {
     /// Damage attribution needs no arbitration between bodies: each depth's dose goes to the
     /// strongest volume present there, ties sharing (§13.2). The IMPULSE does, when a crossing's
     /// presence set spans several rigid bodies — which can only happen when distinct bodies
-    /// overlap in space, since within one tank every volume shares the body. RULED 2026-08-07
-    /// (§13.5): the full momentum exchange goes to the body owning the ENTRANCE surface, the first
+    /// overlap in space, since within one tank every volume shares the body. Per §13.5, the full momentum exchange goes to the body owning the ENTRANCE surface, the first
     /// one physically touched; anything behind it is shoved through contact by the physics engine.
     /// So the caller routes the shove by
     /// [`ResolutionPlan::entrance`], not by these doses — they are the damage.

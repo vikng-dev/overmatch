@@ -2888,3 +2888,146 @@ fn the_replayed_first_contact_stops_resolve() {
         assert_eq!(logs.len(), 1, "replay {index}: one round");
     }
 }
+
+/// The game's damage-model fixtures: one axis sample through synthetic, closed hard slabs.
+fn exposed_walk(slabs: &[(Entity, f64, f64, f32)]) -> DiscWalk {
+    let mut hits = Vec::new();
+    for &(volume, start, end, _) in slabs {
+        for (triangle, t, entering) in [(0, start, true), (1, end, false)] {
+            hits.push(FaceHit {
+                volume,
+                primitive: volume,
+                shell: 0,
+                contact: walk::Contact::Face(triangle),
+                triangle,
+                t,
+                true_normal: if entering { Vec3::NEG_Z } else { Vec3::Z },
+                entering,
+            });
+        }
+    }
+    walk::walk_disc(
+        &DiscCorridor {
+            anchor: Vec3::ZERO,
+            origin: Vec3::ZERO,
+            axis: Vec3::Z,
+            length: 2.0,
+            radius: 0.0,
+            frame: DiscFrame::anchored(Vec3::Z).expect("a unit axis"),
+            samples: vec![SampleCorridor {
+                offset: Vec3::ZERO,
+                initial_presence: Vec::new(),
+                hits,
+            }],
+        },
+        &VolumeTable::new(
+            slabs
+                .iter()
+                .map(|&(volume, _, _, factor)| (volume, walk::VolumeMaterial::fixture(factor))),
+        ),
+        &WalkLaws::default(),
+    )
+    .expect("closed fixture slabs")
+}
+
+/// The game's damage model reports the dosed portion for hard volumes, as it does witnesses.
+/// Pool-emptying events and the pen cam must not use a buried face as the dose's entry or end;
+/// resting later in a hidden portion does not untraverse the exposed portion.
+#[test]
+fn hard_volume_records_use_only_exposed_contacts() {
+    let plate = Entity::from_raw_u32(1).unwrap();
+    let module = Entity::from_raw_u32(2).unwrap();
+    for (plate_span, module_span, rest, exposed, perforated) in [
+        ((0.25, 1.0), (0.75, 1.5), None, (1.0, 1.5), true),
+        ((1.0, 1.75), (0.5, 1.5), Some(1.25), (0.5, 1.0), true),
+        ((0.25, 1.0), (0.75, 1.5), Some(1.5), (1.0, 1.5), false),
+    ] {
+        let walked = exposed_walk(&[
+            (plate, plate_span.0, plate_span.1, 1000.0),
+            (module, module_span.0, module_span.1, 10.0),
+        ]);
+        let doses = [Dose {
+            address: module,
+            amount: 1.0,
+            source: DoseSource::Line {
+                chord: 0.5,
+                cost: 5.0,
+            },
+        }];
+        let crossed = volume_crossings(&walked, &walked.events[0], &doses, rest, &|point| point);
+        assert_eq!(crossed.len(), 1);
+        assert_eq!(crossed[0].entry, Vec3::Z * exposed.0);
+        assert_eq!(crossed[0].end, Vec3::Z * exposed.1);
+        assert_eq!(
+            crossed[0].perforated, perforated,
+            "the exposed portion must be left before a rest; an exact exit face is still held"
+        );
+    }
+}
+
+/// The game's damage model's resolved leg owns the hard presence used by the witness pass.
+/// A later collider read cannot replace it: a mutant that recasts this deliberately unreadable
+/// binding errors instead of reporting the already-resolved open chord.
+#[test]
+fn witness_lines_reuse_the_resolved_hard_presence() {
+    use crate::ballistics::{WitnessSurface, WitnessVolume};
+    let mut app = world_with_trimesh_plates(&[]);
+    let hard = app
+        .world_mut()
+        .spawn((
+            Transform::from_translation(Vec3::Z * 0.75),
+            RigidBody::Static,
+            Collider::sphere(0.5),
+            CollisionLayers::new([crate::Layer::Armor], LayerMask::ALL),
+            BallisticVolume {
+                material: walk::VolumeMaterial::fixture(STEEL),
+                substance: "fixture".to_owned(),
+            },
+        ))
+        .id();
+    let witness = app
+        .world_mut()
+        .spawn((
+            Transform::from_translation(Vec3::Z),
+            RigidBody::Static,
+            Collider::cuboid(0.25, 0.25, 1.5),
+            CollisionLayers::new([crate::Layer::Witness], LayerMask::ALL),
+            WitnessVolume {
+                substance: "fixture".to_owned(),
+            },
+            WitnessSurface,
+        ))
+        .id();
+    for _ in 0..8 {
+        app.update();
+    }
+    let walked = exposed_walk(&[(hard, 0.25, 1.0, STEEL)]);
+    let leg = Leg::new(Vec3::ZERO, Dir3::Z, 2.0, &[Vec3::ZERO]).with_presence(&walked);
+    let crossed = app
+        .world_mut()
+        .run_system_once(
+            move |world: ProjectileMarchWorld,
+                  colliders: Query<(
+                &'static Position,
+                &'static Rotation,
+                &'static Collider,
+                Option<&'static BallisticSurfaces>,
+            )>| {
+                let context = ResolveContext {
+                    world: &world,
+                    colliders: &colliders,
+                    deposit: false,
+                    laws: WalkLaws::default(),
+                };
+                super::super::wound::line(&context, &|_| true, std::slice::from_ref(&leg), 1.0)
+                    .expect("resolved hard presence is reused")
+                    .0
+            },
+        )
+        .expect("the witness system runs");
+    assert_eq!(crossed.len(), 1);
+    assert_eq!(crossed[0].volume, witness);
+    assert_eq!(crossed[0].entry, Vec3::Z);
+    assert_eq!(crossed[0].end, Vec3::Z * 1.75);
+    assert_eq!(crossed[0].chord, 0.75);
+}

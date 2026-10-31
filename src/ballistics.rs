@@ -1660,19 +1660,20 @@ pub enum CrossingEnd {
 #[derive(Clone, Copy, Debug)]
 pub struct VolumeCrossing {
     pub volume: Entity,
-    /// Where the line entered it and where it left it or came to rest in it, on the crossing's axis
-    /// (WORLD).
+    /// The game's damage model records the first entry and last exit (or rest) of its dosed,
+    /// exposed portions on the crossing's axis (WORLD); hidden contacts do not extend them.
     pub entry: Vec3,
     pub end: Vec3,
     /// Disc-mean chord (m).
     pub chord: f32,
-    /// Reference-mm: for hard matter the readout chord × factor, the steel it is worth; for a
-    /// witness its dose, chord × the round's crew line rate ([`ArmourMark::Wound`]).
+    /// Hard matter's reference-mm readout, chord × factor. A witness keeps the legacy
+    /// `chord × wound` conversion input here; its HP dose follows the round's crew line rate
+    /// ([`ArmourMark::Wound`]).
     pub cost: f32,
     /// The kinetic energy the round lost in it (J): hard matter's dose. Zero for a witness, which
     /// takes no energy and is dosed by `cost`.
     pub energy: f32,
-    /// The whole disc came out of it.
+    /// The whole disc traversed its exposed portions; it may still occupy a hidden portion.
     pub perforated: bool,
 }
 

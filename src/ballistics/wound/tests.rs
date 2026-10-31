@@ -745,3 +745,33 @@ fn a_crew_box_clipped_into_a_wall_is_dosed_only_over_its_open_chord() {
     );
     assert!(dose(&buried, "crewman").is_none_or(|dose| dose.line == 0.0));
 }
+
+/// The game's damage model reports exposed portions consistently across the approach and transit
+/// legs. A witness whose exposed chord was traversed before a rest inside a wall is perforated
+/// in that reporting sense; the hidden remainder must not extend its recorded endpoint.
+#[test]
+fn a_witness_record_ends_at_its_exposed_portion_when_rest_is_hidden() {
+    let wall = plate("wall", THICK, 0.0, Kind::Main);
+    let witness = cube(
+        "crewman",
+        1.0,
+        Vec3::new(0.0, 2.0, 0.0),
+        Kind::Witness(DEEP),
+    );
+    let fired = fire(&[wall, witness], WOUND);
+    let crossed = wounds(&fired, "crewman");
+    assert!(!crossed.is_empty());
+    let last = crossed.last().unwrap();
+    assert!(
+        last.perforated,
+        "the exposed portion ended before the hidden rest"
+    );
+    assert!(
+        (last.end.z - 0.5 * THICK).abs() < 1.0e-4,
+        "the endpoint is the wall's entry: {last:?}"
+    );
+    assert!(
+        fired.at.z < last.end.z && fired.at.z > -0.5 * THICK,
+        "the round rests inside the wall"
+    );
+}

@@ -1193,7 +1193,17 @@ impl Decision {
 pub(crate) struct Leg {
     pub from: Vec3,
     pub axis: Dir3,
-    pub samples: Vec<(Vec3, f32)>,
+    pub samples: Vec<SampleLeg>,
+}
+
+/// One sample of the game's damage-model line: its path and the resolved hard presence on it.
+/// Reordering samples carries their clipping masks with their paths.
+#[derive(Clone, Debug)]
+pub(crate) struct SampleLeg {
+    pub offset: Vec3,
+    pub length: f32,
+    /// `None` names a stretch not collected yet: open flight or standalone line inspection.
+    pub hard: Option<Vec<(f64, f64)>>,
 }
 
 impl Leg {
@@ -1204,7 +1214,11 @@ impl Leg {
             axis,
             samples: offsets
                 .iter()
-                .map(|offset| (*offset, length.max(0.0)))
+                .map(|offset| SampleLeg {
+                    offset: *offset,
+                    length: length.max(0.0),
+                    hard: None,
+                })
                 .collect(),
         }
     }
@@ -1218,9 +1232,30 @@ impl Leg {
             samples: offsets
                 .iter()
                 .zip(ends)
-                .map(|(offset, end)| (*offset, (*end - from - *offset).dot(*axis).max(0.0)))
+                .map(|(offset, end)| SampleLeg {
+                    offset: *offset,
+                    length: (*end - from - *offset).dot(*axis).max(0.0),
+                    hard: None,
+                })
                 .collect(),
         }
+    }
+
+    /// The game's damage model has already resolved these sample rays. Reuse their presence
+    /// rather than recasting at world-rounded origins. A sample with an uncollected suffix still
+    /// needs its entire stretch collected before the witness pass can clip against hard matter.
+    fn with_presence(mut self, walked: &DiscWalk) -> Self {
+        assert_eq!(
+            self.samples.len(),
+            walked.walks.len(),
+            "a resolved leg and its disc walk have the same sample identities"
+        );
+        for (sample, walk) in self.samples.iter_mut().zip(&walked.walks) {
+            if sample.length <= walked.length {
+                sample.hard = Some(walk.occupied(0.0, sample.length as f64));
+            }
+        }
+        self
     }
 }
 
@@ -1495,7 +1530,8 @@ pub(crate) fn decide(
                     origin: start + dir * examined,
                     seeds: entrance.resume_at(examined as f64, &context.laws),
                 },
-                leg: Leg::new(anchor + start, dir, examined, &entrance.offsets),
+                leg: Leg::new(anchor + start, dir, examined, &entrance.offsets)
+                    .with_presence(&entrance),
             })
         }
         Begin::Ricochet {
@@ -1516,9 +1552,14 @@ pub(crate) fn decide(
                     .offsets
                     .iter()
                     .zip(hand_offs)
-                    .map(|(offset, t)| (*offset, t as f32))
+                    .map(|(offset, t)| SampleLeg {
+                        offset: *offset,
+                        length: t as f32,
+                        hard: None,
+                    })
                     .collect(),
-            };
+            }
+            .with_presence(&entrance);
             Ok(Decision::Bounce(Bounce {
                 position,
                 normal: read.normal,
@@ -1558,7 +1599,7 @@ pub(crate) fn decide(
                 mass,
                 from,
                 dir,
-                &entrance.offsets,
+                &entrance,
                 bent,
                 speed,
                 owner,
@@ -1581,8 +1622,8 @@ fn bite(
     // Where the flight's position is, RELATIVE to the transit's anchor.
     from: Vec3,
     incoming: Dir3,
-    // The entrance disc's sample offsets, for the approach leg.
-    entrance_offsets: &[Vec3],
+    // The resolved entrance rays: the approach's offsets and hard presence.
+    entrance_walk: &DiscWalk,
     bent: Dir3,
     // m/s at the entrance.
     speed_in: f32,
@@ -1606,7 +1647,8 @@ fn bite(
         .iter()
         .map(|offset| transit.origin + *offset)
         .collect();
-    let mut way_in = Leg::ending_at(from, incoming, entrance_offsets, &handoffs);
+    let mut way_in = Leg::ending_at(from, incoming, &entrance_walk.offsets, &handoffs)
+        .with_presence(entrance_walk);
     way_in.from = world(from);
     let entrance = world(plan.entrance.position);
     let rest = match plan.outcome {
@@ -1670,15 +1712,17 @@ fn bite(
         end,
         legs: [
             way_in,
-            Leg::new(world(transit.origin), bent, flown, &transit.offsets),
+            Leg::new(world(transit.origin), bent, flown, &transit.offsets).with_presence(transit),
         ],
     }
 }
 
 /// How far the line got through each volume it put a chord into: the axis points where the disc's
-/// first sample met the volume and where its last left it (or the rest point, inside), from the
-/// crossing's encounter contacts. A volume is perforated when every sample's contact with it ends
-/// at or before `rest` — the whole disc came out — and always on a perforation (`rest` `None`).
+/// first sample entered its exposed portion and where its last left that portion (or rested in
+/// it), from dosed encounter contacts only. In the game's damage model, `perforated` means every
+/// exposed contact ended before `rest`, even if the round still occupies a hidden portion of the
+/// volume; a crossing without a rest traversed all of its exposed portions. An exact exit face
+/// has not been cleared at rest, matching [`walk::RayWalk::inside_at`]'s exit membership.
 fn volume_crossings(
     transit: &DiscWalk,
     event: &walk::DiscEvent,
@@ -1691,7 +1735,14 @@ fn volume_crossings(
         .encounters
         .iter()
         .flat_map(|encounter| &encounter.samples)
-        .flat_map(|sample| &sample.present)
+        .flat_map(|sample| {
+            let strongest = super::mechanism::overlap_factor(&sample.present);
+            sample
+                .present
+                .iter()
+                .filter(move |contact| contact.material.factor == strongest)
+        })
+        .filter(|contact| rest.is_none_or(|rest| contact.start < rest))
     {
         let span = spans
             .entry(contact.volume)
@@ -1706,12 +1757,17 @@ fn volume_crossings(
             let DoseSource::Line { chord, cost } = dose.source else {
                 return None;
             };
-            let &(start, end) = spans.get(&dose.address)?;
-            let perforated = rest.is_none_or(|rest| end <= rest);
+            let &(start, end) = spans
+                .get(&dose.address)
+                .expect("a positive Line deposit has an exposed contact in its resolved crossing");
+            let (end, perforated) = match rest {
+                Some(rest) if end >= rest => (rest, false),
+                _ => (end, true),
+            };
             Some(VolumeCrossing {
                 volume: dose.address,
                 entry: at(start),
-                end: at(if perforated { end } else { rest.unwrap_or(end) }),
+                end: at(end),
                 chord,
                 cost,
                 energy: dose.amount,
@@ -2012,8 +2068,8 @@ fn apply_bite(
     bodies: &mut Query<Forces>,
     commands: &mut Commands,
 ) {
-    // Transit damage: every HP-bearing volume is dosed the energy the round lost where it was the
-    // strongest volume present (§13.2's damage law), each deposit from the line's entry into its
+    // The game's damage model: transit doses give each HP-bearing volume the energy lost where
+    // it was the strongest volume present (§13.2's damage law), each deposit from the line's entry into its
     // own volume. Every deposit has that entry: `walk::finish` builds the bite's
     // deposits as Line doses only, each addressed to a volume present in the first event's
     // encounters, and `volume_crossings` builds one crossing per Line deposit from the same
