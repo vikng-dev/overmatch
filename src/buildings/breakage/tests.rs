@@ -1528,3 +1528,19 @@ fn a_body_at_rest_against_a_building_presses_it_once_and_starts_no_run() {
         "the press goes with its body"
     );
 }
+
+/// The game's damage model delivers each march before its shell despawns. Building deposits
+/// rely on that ordering: a missing shell is a bug, never permission to discard delivered lines.
+#[test]
+#[should_panic(expected = "ShellMarched is observed before its shell despawns")]
+fn a_march_without_its_shell_is_a_bug() {
+    let mut app = App::new();
+    app.init_resource::<WallQueue>().add_observer(read_shell);
+    app.world_mut().trigger(ShellMarched {
+        shell: Entity::PLACEHOLDER,
+        marks_from: 0,
+        cones_from: 0,
+        lines: Vec::new(),
+        burst: None,
+    });
+}

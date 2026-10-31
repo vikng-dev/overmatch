@@ -603,9 +603,9 @@ fn read_shell(
     if replica.is_some() {
         return;
     }
-    let Ok((marks, spall)) = shells.get(marched.shell) else {
-        return;
-    };
+    let (marks, spall) = shells.get(marched.shell).expect(
+        "ShellMarched is observed before its shell despawns, with its penetration marks intact",
+    );
     let mut deposit = RawDeposit::default();
     for mark in marks.log.get(marched.marks_from..).unwrap_or_default() {
         if let ArmourMark::Burst { at, .. } = mark
