@@ -73,8 +73,7 @@ jobs:
 
   # Compile-heavy checks share one matrix but run independently. The limit covers a cold cache: a
   # vendored crate's change re-keys it, and the tests lane then compiles for 28 min (MEASURED
-  # 2026-11-01) before its ~11 min of tests. A job stopped at its limit saves no cache, so a limit
-  # below that would fail every run after a vendor change.
+  # 2026-11-01, run 41248393247) before its tests; warm, the whole lane takes about 8 min.
   checks:
     runs-on: ubuntu-24.04
     timeout-minutes: 55
