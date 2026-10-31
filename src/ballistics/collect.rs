@@ -47,12 +47,9 @@ use super::BallisticSurfaces;
 use super::walk::{Contact, FaceHit, ShellKey, WalkError, WalkLaws};
 use crate::exact::Int;
 
-/// Faces one corridor may collect before the collector gives up.
-///
-/// A ceiling, not a budget: reaching it is [`WalkError::CorridorOverflow`], never a truncated list.
-/// The Tiger's densest ballistic primitive is a few thousand triangles TOTAL, and a ray crosses a
-/// vanishing fraction of them, so this is orders above anything real — it exists to turn a runaway
-/// (a degenerate mesh, a corridor extended past all reason) into a loud stop.
+/// Policy ceiling for one corridor's collected faces (ASSUMED work bound). A world whose finite
+/// candidate geometry exceeds it has broken the collector contract and panics in gameplay; the
+/// fuzzer reports it. Collection never returns a truncated face list.
 pub(crate) const MAX_FACES: usize = 4096;
 
 /// Bound on the f64 evaluation of the crossing determinant `−axis · ((b − a) × (c − a))`, as a
@@ -271,7 +268,7 @@ pub(crate) fn collect(
 ///
 /// - `topology_band(handoff)` — everything the seed declined. An entry it declined and this clamp
 ///   then dropped as already traversed is counted by nobody: the shell's exit arrives with nothing
-///   open, `UnexpectedExit`, and the round fails closed on a plate it bit into. A hand-off on a
+///   open, `UnexpectedExit`, and the round panics on a plate it bit into. A hand-off on a
 ///   face reads its seed at exactly that face's entry `t`, so that face alone would need no band;
 ///   the term covers every other entry the seed declined within the band: one beside the hand-off
 ///   face, or beside a restart read off no boundary (a perforation's resume point, a hand-off in
@@ -511,7 +508,10 @@ fn collect_convex(
     out: &mut Vec<FaceHit>,
 ) -> Result<(), WalkError> {
     if Dir3::new(axis).is_err() {
-        return Ok(());
+        return Err(WalkError::CollectorFailed {
+            volume: node,
+            reason: "a resolved rigid pose preserves the corridor's unit direction",
+        });
     }
     let failed = |reason| WalkError::CollectorFailed {
         volume: node,
@@ -845,7 +845,7 @@ fn admit_shell(boundaries: &[Boundary], length: f32, seeded: bool, reach: f32) -
 ///
 /// A transit corridor restarts at the plate's own exit, and on a SLOPED plate the exit triangles
 /// have extent along the ray, so the collector finds them well behind the origin; dragging them to
-/// `t = 0` is an exit with nothing open, `UnexpectedExit`, and the round fails closed on a plate it
+/// `t = 0` is an exit with nothing open, `UnexpectedExit`, and the round panics on a plate it
 /// perforated. Square plates hide it: their exit triangles are perpendicular to the ray and have no
 /// extent along it.
 ///
@@ -1482,7 +1482,7 @@ mod tests {
     /// outside the corridor's box and the prune drops it. [`admit`] is written for exactly this case
     /// ("behind the origin and unseeded → the ray is sitting on the face, clamp to `t = 0`") and
     /// never got the chance: the entry vanished, and the walk reported an exit it never entered
-    /// ([`WalkError::UnexpectedExit`]), which the driver fails closed on — a round that stopped dead
+    /// ([`WalkError::UnexpectedExit`]), which the driver panics on — a round that stopped dead
     /// on a plate it should have punched straight through.
     #[test]
     fn a_face_the_origin_sits_a_hair_past_is_still_collected() {
@@ -1522,7 +1522,7 @@ mod tests {
     /// [`super::MARCH_EPS`] beyond the face it is leaving, so a margin that grew to a whole nudge
     /// would re-collect the EXIT face of the plate just perforated — [`admit`] would clamp it to
     /// `t = 0`, and the walk would see an exit for a primitive it is not inside: `UnexpectedExit`,
-    /// fail-closed, a round stopped dead in mid-air a millimetre past the plate it just punched
+    /// contradictory, a round stopped dead in mid-air a millimetre past the plate it just punched
     /// through. The unclamped scaling term reaches exactly `MARCH_EPS` at 2.5 km, which is the map,
     /// so the ceiling is what stops one boundary bug from being traded for another.
     #[test]
@@ -1558,7 +1558,7 @@ mod tests {
         // BEHIND THE ORIGIN AND MEANING IT: already traversed, and not this corridor's to report.
         // A sloped plate's exit triangles have extent along the ray, so a transit corridor that
         // restarts at that exit finds them here — and dragging them to `t = 0` is an exit with
-        // nothing open, which the driver fails closed on.
+        // nothing open, which the driver panics on.
         for (behind, entry) in [-1.0e-3, -0.05, -1.0]
             .into_iter()
             .flat_map(|behind| [(behind, true), (behind, false)])
@@ -1697,8 +1697,7 @@ mod tests {
                     initial_presence: Vec::new(),
                     hits,
                 },
-                &VolumeTable::new([(node, super::super::walk::VolumeMaterial::fixture(1.0))])
-                    .expect("a usable factor"),
+                &VolumeTable::new([(node, super::super::walk::VolumeMaterial::fixture(1.0))]),
                 &laws,
             )
             .unwrap_or_else(|error| panic!("{name}: the interval pairs: {error:?}"));
@@ -1790,8 +1789,7 @@ mod tests {
                         initial_presence: if seeded { vec![key] } else { Vec::new() },
                         hits,
                     },
-                    &VolumeTable::new([(node, super::super::walk::VolumeMaterial::fixture(1.0))])
-                        .expect("a usable factor"),
+                    &VolumeTable::new([(node, super::super::walk::VolumeMaterial::fixture(1.0))]),
                     &laws,
                 ),
             )
@@ -1976,8 +1974,7 @@ mod tests {
             &super::super::walk::VolumeTable::new([(
                 node,
                 super::super::walk::VolumeMaterial::fixture(1.0),
-            )])
-            .expect("a usable factor"),
+            )]),
             &WalkLaws::default(),
         )?;
         Ok(walk
@@ -2247,7 +2244,7 @@ mod tests {
     /// breathes by that much.
     ///
     /// A ray a fraction of a micron inside that silhouette then falls OUTSIDE the rounded one, every
-    /// incident triangle declines it, and the walk sees no crossing at all: not a fail-closed error,
+    /// incident triangle declines it, and the walk sees no crossing at all: not a contradictory error,
     /// a silent zero.
     ///
     /// A 513 × 513 ULP grid centred on the box's own corner — the worst place on a closed surface to
@@ -2579,8 +2576,7 @@ mod tests {
             &super::super::walk::VolumeTable::new([(
                 node,
                 super::super::walk::VolumeMaterial::fixture(1.0),
-            )])
-            .expect("a usable factor"),
+            )]),
             &WalkLaws::default(),
         )
         .expect("a closed needle resolves");
@@ -3286,11 +3282,11 @@ mod tests {
         );
     }
 
-    /// A CONVEX CANDIDATE WITHOUT STORED FACES FAILS CLOSED: a shape the clip has no exact reading
+    /// The game's damage model refuses a convex candidate without stored faces: a shape the clip has no exact reading
     /// of is a structured error, never a cast's approximation and never a silent miss. The driver
-    /// fails the round closed on it, the way it does on an uncertified trimesh.
+    /// panics on it, as it does on an uncertified trimesh.
     #[test]
-    fn a_convex_candidate_without_stored_faces_fails_closed() {
+    fn a_convex_candidate_without_stored_faces_is_a_wiring_error() {
         let ball = Collider::sphere(1.0);
         assert!(
             clip_convex(

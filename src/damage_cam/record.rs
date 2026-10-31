@@ -291,7 +291,6 @@ fn steps_of(
                     rested: matches!(share.end, ShareEnd::Rest { .. }),
                 }
             }),
-            ArmourMark::Failed => Some(PathStep::Failed),
             // A witness's wound is a dose, never a step of the path: the hard world's marks alone
             // decide the verdict, and a dose reaches it as `Dosed` below. So is a burst's field.
             ArmourMark::Wound { .. } | ArmourMark::Burst { .. } => None,
@@ -409,7 +408,7 @@ fn share(
     })
 }
 
-/// Whether a mark belongs to `tank`. A failed walk names no volume and belongs to every tank.
+/// Whether a mark belongs to `tank`.
 fn touches(world: &World, mark: &ArmourMark, tank: Entity) -> bool {
     let owned = |volume: Entity| owned_by(world, volume, tank);
     match mark {
@@ -418,7 +417,6 @@ fn touches(world: &World, mark: &ArmourMark, tank: Entity) -> bool {
             volumes.iter().any(|crossed| owned(crossed.volume))
         }
         ArmourMark::Burst { tank: walked, .. } => *walked == Some(tank),
-        ArmourMark::Failed => true,
     }
 }
 
@@ -522,7 +520,7 @@ fn timeline(
     let mut speed = match marks.get(struck.from)? {
         ArmourMark::Bounce { speed_in, .. } | ArmourMark::Crossing { speed_in, .. } => *speed_in,
         ArmourMark::Wound { speed, .. } => *speed,
-        ArmourMark::Failed | ArmourMark::Burst { .. } => return None,
+        ArmourMark::Burst { .. } => return None,
     };
     legs.push((start, speed, first_touch));
     let mut last = start;
@@ -576,7 +574,6 @@ fn timeline(
                     }
                 }
             }
-            ArmourMark::Failed => return None,
             // The round's flight to the burst point, at the speed of the exit or bounce that last
             // started the burst trigger's delay: the speed the trigger counts that path at, so the
             // burst lies the delay after that exit (a round at rest there waits the mark's
@@ -718,7 +715,6 @@ pub(crate) fn report_from(
                 nose,
                 ..
             } => ledger.burst(index, (*at, *speed, *after, *sideways), *nose, log.burst),
-            ArmourMark::Failed => {}
         }
     }
 
@@ -755,7 +751,7 @@ pub(crate) fn report_from(
             -*incoming,
             *incoming,
         ),
-        ArmourMark::Failed | ArmourMark::Burst { .. } => return None,
+        ArmourMark::Burst { .. } => return None,
     };
     let normal = normal.normalize_or_zero();
     let incidence = (-incoming).dot(normal).clamp(-1.0, 1.0).acos();

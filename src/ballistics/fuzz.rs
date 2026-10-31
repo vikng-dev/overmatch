@@ -318,21 +318,17 @@ pub struct WalkFailure {
 /// The volume a [`WalkError`] blames, when it blames one.
 fn blamed_volume(error: &WalkError) -> Option<Entity> {
     match error {
-        WalkError::BadFactor { volume, .. }
-        | WalkError::UnknownVolume { volume }
-        | WalkError::RepeatedVolume { volume }
+        WalkError::UnknownVolume { volume }
         | WalkError::CollectorFailed { volume, .. }
-        | WalkError::CorridorOverflow { volume, .. }
-        | WalkError::UncertifiedStart { volume, .. } => Some(*volume),
-        WalkError::UnexpectedExit { key, .. }
-        | WalkError::UnexpectedEntry { key, .. }
-        | WalkError::UnrepresentableChord { key, .. } => Some(key.volume),
+        | WalkError::CorridorOverflow { volume, .. } => Some(*volume),
+        WalkError::UnexpectedExit { key, .. } | WalkError::UnexpectedEntry { key, .. } => {
+            Some(key.volume)
+        }
         WalkError::IncompleteCorridor { open, .. } => open.first().map(|key| key.volume),
         WalkError::BadCorridor { .. }
         | WalkError::CorridorMismatch { .. }
         | WalkError::UnattributedRun { .. }
         | WalkError::DegenerateEntryNormal { .. }
-        | WalkError::SubstanceFactorConflict { .. }
         | WalkError::UnsupportedControl
         | WalkError::DrainExhausted { .. } => None,
     }
@@ -341,9 +337,9 @@ fn blamed_volume(error: &WalkError) -> Option<Entity> {
 /// The SHELL a [`WalkError`] blames, when the error is about one.
 fn blamed_shell(error: &WalkError) -> Option<walk::ShellKey> {
     match error {
-        WalkError::UnexpectedExit { key, .. }
-        | WalkError::UnexpectedEntry { key, .. }
-        | WalkError::UnrepresentableChord { key, .. } => Some(*key),
+        WalkError::UnexpectedExit { key, .. } | WalkError::UnexpectedEntry { key, .. } => {
+            Some(*key)
+        }
         WalkError::IncompleteCorridor { open, .. } => open.first().copied(),
         _ => None,
     }
@@ -385,8 +381,8 @@ impl Report {
     /// Nothing the gate refuses: no violated invariant, no walk error, and no corridor to crew or
     /// ammunition.
     ///
-    /// HARD ZERO ON ALL THREE, and there is no exemption channel. A `WalkError` is a round that
-    /// stops dead in mid-armour, so one of them is a gameplay defect and a hundred are the same
+    /// The game's damage model requires zero on all three, with no exemption channel. A walk
+    /// contradiction panics in gameplay; the fuzzer reports its diagnostic. Any one is the same
     /// defect spreading — there is no rate at which the answer is "expected". A corridor is an
     /// effectively unarmoured route to a crew member or a magazine, which is the defect §13.6
     /// exists to find; it is named, and it is fixed in the model. A run that meets any of the three
@@ -953,12 +949,9 @@ impl Pass<'_, '_, '_> {
         ] {
             let mut entries: Vec<(Entity, walk::VolumeMaterial)> = volumes.entries().collect();
             entries.push((self.spares.volume, copy));
-            let Ok(table) = VolumeTable::new(entries) else {
-                continue;
-            };
-            let Ok(walked) = walk::walk_ray(0, &doubled, &table, &self.context.laws) else {
-                continue;
-            };
+            let table = VolumeTable::new(entries);
+            let walked = walk::walk_ray(0, &doubled, &table, &self.context.laws)
+                .unwrap_or_else(|error| error.panic());
             let bad = match kind {
                 ViolationKind::DuplicationChangedCost => walked.cost != base.cost,
                 _ => walked.cost < base.cost,
@@ -1183,76 +1176,96 @@ fn run_fuzz(
 
     for index in 0..config.rays {
         let ray = ray_for(index, &config, center, radius);
-        let walked = match pass.probe(&ray, 0.0) {
-            Ok(walked) => walked,
-            Err(error) => {
-                let volume = blamed_volume(&error).map_or_else(
-                    || "(no volume)".to_owned(),
-                    |entity| pass.volume_name(entity),
-                );
-                *report.walk_error_volumes.entry(volume.clone()).or_default() += 1;
-                report.walk_errors.push(WalkFailure {
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let walked = match pass.probe(&ray, 0.0) {
+                Ok(walked) => walked,
+                Err(error) => {
+                    let volume = blamed_volume(&error).map_or_else(
+                        || "(no volume)".to_owned(),
+                        |entity| pass.volume_name(entity),
+                    );
+                    *report.walk_error_volumes.entry(volume.clone()).or_default() += 1;
+                    report.walk_errors.push(WalkFailure {
+                        ray: index,
+                        origin: ray.origin,
+                        direction: ray.direction,
+                        volume,
+                        crossings: pass.blamed_crossings(&ray, &error),
+                        error: format!("{error:?}"),
+                    });
+                    return;
+                }
+            };
+            let axis = &walked.walks[0];
+            // The straight axis's witnesses, read by the witness pass: never part of the hard walk.
+            let witnessed = match Dir3::new(ray.direction).map_or(Ok(Vec::new()), |dir| {
+                wound::entries(&pass.context, &|_| true, ray.origin, dir, ray.length)
+            }) {
+                Ok(witnessed) => witnessed,
+                Err(error) => {
+                    record_failure(
+                        pass.drive_failure(
+                            index,
+                            DriveFailure {
+                                error,
+                                origin: ray.origin,
+                                direction: ray.direction,
+                            },
+                        ),
+                        &mut report,
+                    );
+                    Vec::new()
+                }
+            };
+            let crossed = axis.presence.iter().any(|presence| presence.chord > 0.0);
+            if crossed {
+                report.rays_crossing += 1;
+            }
+            check_ray_invariants(index, crossed, axis, &mut report);
+            if crossed && config.duplication_stride > 0 && index % config.duplication_stride == 0 {
+                pass.duplication_gate(index, &ray, &mut report);
+            }
+            survey_reach(axis, &witnessed, &pass, &mut report);
+            // ADMISSION: the floor probe, flown through the runtime's own mechanism along this line.
+            match drive(
+                &pass.context,
+                floor_body,
+                floor_speed,
+                ray.origin,
+                ray.direction,
+                ray.length,
+            ) {
+                Ok(flown) => cluster_findings(
+                    index,
+                    &ray,
+                    axis,
+                    &witnessed,
+                    &flown,
+                    &pass,
+                    &config,
+                    &mut regions,
+                    &mut report,
+                ),
+                Err(failure) => record_failure(pass.drive_failure(index, failure), &mut report),
+            }
+        }));
+        if let Err(payload) = result {
+            let error = payload
+                .downcast_ref::<String>()
+                .map(String::as_str)
+                .or_else(|| payload.downcast_ref::<&str>().copied())
+                .unwrap_or("a walk panicked with a non-text payload");
+            record_failure(
+                WalkFailure {
                     ray: index,
                     origin: ray.origin,
                     direction: ray.direction,
-                    volume,
-                    crossings: pass.blamed_crossings(&ray, &error),
-                    error: format!("{error:?}"),
-                });
-                continue;
-            }
-        };
-        let axis = &walked.walks[0];
-        // The straight axis's witnesses, read by the witness pass: never part of the hard walk.
-        let witnessed = match Dir3::new(ray.direction).map_or(Ok(Vec::new()), |dir| {
-            wound::entries(&pass.context, &|_| true, ray.origin, dir, ray.length)
-        }) {
-            Ok(witnessed) => witnessed,
-            Err(error) => {
-                record_failure(
-                    pass.drive_failure(
-                        index,
-                        DriveFailure {
-                            error,
-                            origin: ray.origin,
-                            direction: ray.direction,
-                        },
-                    ),
-                    &mut report,
-                );
-                Vec::new()
-            }
-        };
-        let crossed = axis.presence.iter().any(|presence| presence.chord > 0.0);
-        if crossed {
-            report.rays_crossing += 1;
-        }
-        check_ray_invariants(index, crossed, axis, &mut report);
-        if crossed && config.duplication_stride > 0 && index % config.duplication_stride == 0 {
-            pass.duplication_gate(index, &ray, &mut report);
-        }
-        survey_reach(axis, &witnessed, &pass, &mut report);
-        // ADMISSION: the floor probe, flown through the runtime's own mechanism along this line.
-        match drive(
-            &pass.context,
-            floor_body,
-            floor_speed,
-            ray.origin,
-            ray.direction,
-            ray.length,
-        ) {
-            Ok(flown) => cluster_findings(
-                index,
-                &ray,
-                axis,
-                &witnessed,
-                &flown,
-                &pass,
-                &config,
-                &mut regions,
+                    volume: "(panic)".to_owned(),
+                    crossings: Vec::new(),
+                    error: error.to_owned(),
+                },
                 &mut report,
-            ),
-            Err(failure) => record_failure(pass.drive_failure(index, failure), &mut report),
+            );
         }
     }
 

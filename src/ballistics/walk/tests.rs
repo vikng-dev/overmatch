@@ -103,7 +103,6 @@ fn table(entries: &[(u32, f32)]) -> VolumeTable {
             .iter()
             .map(|(v, f)| (volume(*v), VolumeMaterial::fixture(*f))),
     )
-    .expect("test factors are legal")
 }
 
 fn walk(corridor: &RayCorridor, volumes: &VolumeTable) -> RayWalk {
@@ -506,22 +505,25 @@ fn two_shells_on_one_entry_plane_stay_distinct() {
     assert_eq!(result.presence.len(), 2);
 }
 
-/// A factor that cannot participate in `max` or in a deterministic sum is rejected before any
-/// resolution — a `NaN` would poison both the field maximum and the sort order.
+/// The game's damage model reads factors validated at load. Invalid fixture construction must
+/// panic rather than let a poisoned factor enter the field relied on by every mechanism.
 #[test]
-fn non_finite_and_negative_factors_are_rejected_at_construction() {
+fn invalid_material_construction_panics() {
     for bad in [f32::NAN, f32::INFINITY, -1.0] {
-        assert!(matches!(
-            VolumeTable::new([(volume(1), VolumeMaterial::fixture(bad))]),
-            Err(WalkError::BadFactor { .. })
-        ));
+        assert!(
+            std::panic::catch_unwind(|| VolumeTable::new([(
+                volume(1),
+                VolumeMaterial::fixture(bad)
+            )]))
+            .is_err()
+        );
     }
-    let table = VolumeTable::new([(volume(1), VolumeMaterial::fixture(-0.0))]).unwrap();
+    let table = VolumeTable::new([(volume(1), VolumeMaterial::fixture(-0.0))]);
     assert_eq!(table.factor(volume(1)).unwrap().to_bits(), 0.0f32.to_bits());
 }
 
-/// One substance carries one factor, and one volume one entry: either violation is a named load
-/// error, never a silent choice between the two.
+/// The game's damage model relies on one factor per registry identity and one row per volume;
+/// an adapter that violates either invariant panics before integration.
 #[test]
 fn a_substance_has_one_factor_and_a_volume_one_entry() {
     let steel = VolumeMaterial::fixture(1000.0);
@@ -529,19 +531,67 @@ fn a_substance_has_one_factor_and_a_volume_one_entry() {
         factor: 2000.0,
         ..steel
     };
-    assert_eq!(
-        VolumeTable::new([(volume(1), steel), (volume(2), conflicting)]).unwrap_err(),
-        WalkError::SubstanceFactorConflict {
-            substance: steel.substance,
-            first: 1000.0,
-            second: 2000.0,
-        }
+    assert!(
+        std::panic::catch_unwind(|| VolumeTable::new([
+            (volume(1), steel),
+            (volume(2), conflicting)
+        ]))
+        .is_err()
+    );
+    assert!(
+        std::panic::catch_unwind(|| VolumeTable::new([(volume(1), steel), (volume(1), steel)]))
+            .is_err()
     );
     assert_eq!(
-        VolumeTable::new([(volume(1), steel), (volume(1), steel)]).unwrap_err(),
-        WalkError::RepeatedVolume { volume: volume(1) }
+        VolumeTable::new([(volume(1), steel), (volume(2), steel)])
+            .entries()
+            .count(),
+        2
     );
-    assert!(VolumeTable::new([(volume(1), steel), (volume(2), steel)]).is_ok());
+}
+
+/// The game's damage model cannot turn a walk contradiction into a stopped round. The live
+/// adapter's fatal boundary must panic with the shell-alternation invariant, in every build.
+#[test]
+#[should_panic(expected = "certified closed shells alternate from established membership")]
+fn a_walk_contradiction_panics_at_the_gameplay_boundary() {
+    let volumes = table(&[(1, 1000.0)]);
+    walk_ray(
+        0,
+        &corridor(2.0, vec![plate(1, 1, 0.5, 1.0)[1]]),
+        &volumes,
+        &WalkLaws::default(),
+    )
+    .unwrap_or_else(|error| error.panic());
+}
+
+/// The game's damage model validates parameters before clipping. NaN/inf must not disappear
+/// from the half-open hit list and make malformed geometry look like open air to the authority.
+#[test]
+fn malformed_corridors_cannot_become_open_air() {
+    let volumes = table(&[(1, 1000.0)]);
+    for bad in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+        let hits = plate(1, 1, bad, bad);
+        assert!(matches!(
+            walk_ray(
+                0,
+                &corridor(2.0, hits.clone()),
+                &volumes,
+                &WalkLaws::default()
+            ),
+            Err(WalkError::BadCorridor { .. })
+        ));
+        assert!(matches!(
+            witness_spans(0, 2.0, &hits),
+            Err(WalkError::BadCorridor { .. })
+        ));
+    }
+    let mut bad_axis = corridor(2.0, Vec::new());
+    bad_axis.axis = Vec3::splat(f32::NAN);
+    assert!(matches!(
+        walk_ray(0, &bad_axis, &volumes, &WalkLaws::default()),
+        Err(WalkError::BadCorridor { .. })
+    ));
 }
 
 /// A hit naming a volume with no factor is a bind gap, and a bind gap must not resolve to a default.
@@ -1752,7 +1802,6 @@ fn debris_table(entries: &[(u32, SubstanceId, f32, f32)]) -> VolumeTable {
             },
         )
     }))
-    .expect("test factors are legal")
 }
 
 /// The spall sources of a head-on 88 at [`AP_88_CAPABILITY`] through `slabs`.
@@ -2972,27 +3021,38 @@ fn a_chord_below_one_f32_ulp_is_charged_like_any_other() {
     assert_eq!(walked.cost, (1000.0 * (exit - enter)) as f32);
 }
 
-/// TWO CONTACTS AT ONE EXACT PARAMETER ARE REFUSED BY NAME.
-///
-/// The residue the charge arm leaves behind, and the only one: two features of one shell the ray
-/// meets at a bit-equal EXACT parameter. There is no order between them and no thickness to charge,
-/// and reading the pair as a zero-length touch would be a silent free crossing of whatever they
-/// bound. Tangent grade, measure zero, and named rather than swallowed.
+/// The game's damage model orders tied features by the symbolic outside/inside side, never
+/// arrival order. A tangent has zero limiting chord; an inside touch keeps its surrounding chord.
 #[test]
-fn two_contacts_at_one_exact_parameter_are_a_named_refusal() {
+fn tied_contacts_have_one_symbolic_order() {
     let volumes = table(&[(1, 1000.0)]);
-    let error = walk_ray(
-        0,
-        &corridor(2.0, plate(1, 1, 1.0, 1.0)),
-        &volumes,
-        &WalkLaws::default(),
-    )
-    .expect_err("an unrepresentable chord is not a zero one");
-    let WalkError::UnrepresentableChord { key, t, .. } = error else {
-        panic!("expected a named refusal, got {error:?}");
-    };
-    assert_eq!(key.shell, 0);
-    assert_eq!(t, 1.0);
+    for inside in [false, true] {
+        let mut hits = plate(1, 1, 1.0, 1.0);
+        if inside {
+            hits.extend(plate(1, 1, 0.5, 1.5));
+        }
+        let mut expected = None;
+        for reverse in [false, true] {
+            let mut hits = hits.clone();
+            // Distinct contacts even when the surrounding interval is present (fixture data).
+            for (i, hit) in hits.iter_mut().enumerate() {
+                hit.contact = Contact::Face(i as u32);
+            }
+            if reverse {
+                hits.reverse();
+            }
+            let walked = walk(&corridor(2.0, hits.clone()), &volumes);
+            assert_eq!(walked.cost, if inside { 1000.0 } else { 0.0 });
+            let witnessed =
+                witness_spans(0, 2.0, &hits).expect("the witness uses the same symbolic order");
+            let result = (walked.spans, witnessed);
+            if let Some(expected) = &expected {
+                assert_eq!(&result, expected);
+            } else {
+                expected = Some(result);
+            }
+        }
+    }
 }
 
 /// PAIRING ORDER IS THE PARAMETER'S, NOT THE HIT LIST'S.
@@ -3214,8 +3274,7 @@ fn an_interface_is_a_change_of_substance_never_of_volume_alone() {
         let volumes = VolumeTable::new([
             (volume(1), VolumeMaterial::fixture(1000.0)),
             (volume(2), second),
-        ])
-        .unwrap();
+        ]);
         let mut hits = plate(1, 0, 0.25, 0.5);
         hits.extend(plate(2, 0, 0.5, 0.75));
         let walked = walk_disc(
@@ -3868,7 +3927,7 @@ fn sequential_layers_advance_in_order_and_cost_both() {
 ///
 /// A seed is the walk's presence at the hand-off `t`, and outside the walked span there is none to
 /// read: behind the start lies ground the ray swept before this corridor, past the end ground no
-/// corridor has walked. A seed read there is a guess, and the transit resumed on it fails closed on
+/// corridor has walked. A seed read there is a guess, and the transit resumed on it panics on
 /// material the sample sits in (`UnexpectedExit`). The samples that never touch the surface hand
 /// off at the crossing's depth, clamped to the span: here a plate tilted 50° whose edge runs along
 /// the axis, met by half the disc just past the start and just short of the end, so a plane through

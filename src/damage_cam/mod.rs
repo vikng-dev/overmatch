@@ -86,15 +86,13 @@ pub enum PathStep {
     /// shows a pool ([`BoxDose::shown_lost`]). A dose that leaves every shown point in place is
     /// kept in the pool, shows nothing, and is not this step.
     Dosed,
-    /// A walk that failed closed: an error, never a pen cam.
-    Failed,
 }
 
 impl ShotVerdict {
     /// The verdict a path earns, or `None` when it opens no pen cam: no event at all (a ground
-    /// hit), or any walk that failed closed.
+    /// hit).
     pub fn of_path(steps: &[PathStep]) -> Option<Self> {
-        if steps.is_empty() || steps.contains(&PathStep::Failed) {
+        if steps.is_empty() {
             return None;
         }
         let perforated = steps.iter().any(|step| {
@@ -555,15 +553,12 @@ pub(crate) mod tests {
     /// The verdict reads the whole path, first rule wins: perforating armour anywhere is a
     /// penetration, whatever follows and whether or not any HP was lost; short of that any HP lost
     /// is damage, wherever it sits among the path's events; short of that a round that bounces
-    /// away is a ricochet and any other a non-pen. No event, or any failed walk, opens no pen cam.
+    /// away is a ricochet and any other a non-pen. No event opens no pen cam.
     #[test]
     fn the_shot_verdict_reads_the_whole_path() {
-        use PathStep::{Bounce, Dosed, Failed};
-        let cases: [(&[PathStep], Option<ShotVerdict>); 21] = [
+        use PathStep::{Bounce, Dosed};
+        let cases: [(&[PathStep], Option<ShotVerdict>); 18] = [
             (&[], None),
-            (&[Failed], None),
-            (&[ARMOUR_THROUGH, Failed], None),
-            (&[ARMOUR_THROUGH, Dosed, Failed], None),
             (&[Bounce], Some(ShotVerdict::Ricochet)),
             (&[ARMOUR_RESTED], Some(ShotVerdict::NonPen)),
             (&[ARMOUR_THROUGH], Some(ShotVerdict::Penetration)),

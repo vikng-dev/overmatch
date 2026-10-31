@@ -1025,7 +1025,6 @@ fn met_a_tank(log: &[ArmourMark], of_tank: impl Fn(Entity) -> bool) -> bool {
             volumes.iter().any(|crossing| of_tank(crossing.volume))
         }
         ArmourMark::Burst { tank, .. } => tank.is_some(),
-        ArmourMark::Failed => false,
     })
 }
 

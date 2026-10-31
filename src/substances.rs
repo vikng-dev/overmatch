@@ -625,15 +625,12 @@ fn checked_hard(name: &str, substance: HardSubstance) -> Result<HardSubstance, S
         Resistance::Effective(factor) => {
             if !factor.is_finite() {
                 return Err(format!(
-                    "substance {name:?} has a non-finite effective factor ({factor}) — a factor \
-                     is integrated along the chord, and NaN poisons the sum and the sort order"
+                    "substance {name:?} resistance.Effective is non-finite ({factor}) — author a finite nonnegative factor; NaN poisons the chord integral"
                 ));
             }
             if factor < 0.0 {
                 return Err(format!(
-                    "substance {name:?} has a negative effective factor ({factor}) — negative \
-                     resistance breaks §13.6 monotonicity: adding the volume would LOWER \
-                     protection along the ray"
+                    "substance {name:?} resistance.Effective is negative ({factor}) — author a finite nonnegative factor; negative resistance breaks monotonicity"
                 ));
             }
             // `-0.0` is canonicalized so "no resistance" has exactly one bit pattern; the walk
@@ -652,6 +649,11 @@ fn checked_hard(name: &str, substance: HardSubstance) -> Result<HardSubstance, S
 /// without a debugger.
 #[derive(Debug, Clone, PartialEq)]
 pub enum SubstanceError {
+    /// A load refusal with the exact source file, retaining its typed parser cause.
+    File {
+        path: std::path::PathBuf,
+        source: Box<SubstanceError>,
+    },
     /// The RON did not parse, or an entry was refused.
     Parse(String),
     /// The entries parsed, but the registry does not name exactly one reference.
@@ -669,6 +671,7 @@ pub enum SubstanceError {
 impl std::fmt::Display for SubstanceError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
+            Self::File { path, source } => write!(f, "{}: {source}", path.display()),
             Self::Parse(err) => write!(f, "materials.ron failed to parse: {err}"),
             Self::Reference(err) => write!(f, "materials.ron names no usable reference: {err}"),
             Self::Unknown { name, known } => write!(
@@ -693,6 +696,15 @@ impl std::fmt::Display for SubstanceError {
 }
 
 impl SubstanceRegistry {
+    /// The game's damage model refuses invalid materials at load, naming the actual file and
+    /// preserving the parser's field and repair. Raw in-memory fixtures use [`Self::from_ron`].
+    pub(crate) fn from_ron_at(path: &std::path::Path, text: &str) -> Result<Self, SubstanceError> {
+        Self::from_ron(text).map_err(|source| SubstanceError::File {
+            path: path.to_owned(),
+            source: Box::new(source),
+        })
+    }
+
     /// Parse a registry from RON text: every entry valid, and exactly one reference.
     pub fn from_ron(text: &str) -> Result<Self, SubstanceError> {
         let file: RegistryFile =
@@ -744,8 +756,11 @@ impl SubstanceRegistry {
     /// embedded tank spec: a broken authored contract is a build defect, not a runtime condition to
     /// degrade through.
     pub fn shipped() -> Self {
-        Self::from_ron(MATERIALS_RON)
-            .unwrap_or_else(|err| panic!("substances: embedded materials.ron is unusable: {err}"))
+        Self::from_ron_at(
+            std::path::Path::new("assets/materials/materials.ron"),
+            MATERIALS_RON,
+        )
+        .unwrap_or_else(|err| panic!("substances: embedded materials.ron is unusable: {err}"))
     }
 
     /// Every material datablock name the registry declares, in name order. The join key list
@@ -1205,12 +1220,19 @@ mod tests {
     /// A negative factor breaks §13.6 monotonicity — adding the volume would LOWER protection.
     #[test]
     fn a_negative_factor_fails_the_parse() {
-        let err = SubstanceRegistry::from_ron(&with(
+        let err = SubstanceRegistry::from_ron_at(std::path::Path::new("assets/materials/materials.ron"), &with(
             r#""Rubber": Hard(resistance: Effective((-50.0, Tuned("fixture"))), visual: "fixture", debris_half_angle_deg: (26.2, Tuned("fixture")), facts: None),"#,
         ))
         .expect_err("a negative factor must not parse");
         assert!(err.to_string().contains("Rubber"), "{err}");
         assert!(err.to_string().contains("negative"), "{err}");
+        for required in [
+            "assets/materials/materials.ron",
+            "resistance.Effective",
+            "author a finite nonnegative factor",
+        ] {
+            assert!(err.to_string().contains(required), "{err}");
+        }
     }
 
     /// A non-finite factor poisons the chord integral and the total order the walk sorts on.

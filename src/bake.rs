@@ -976,7 +976,7 @@ fn registry_at(path: Option<&Path>) -> Result<SubstanceRegistry, Vec<Finding>> {
         )]
     };
     let text = std::fs::read_to_string(path).map_err(|err| refused(err.to_string()))?;
-    SubstanceRegistry::from_ron(&text).map_err(|err| refused(err.to_string()))
+    SubstanceRegistry::from_ron_at(path, &text).map_err(|err| refused(err.to_string()))
 }
 
 /// The sibling spec sheet of a model, by the mechanical `<id>.glb` → `<id>.tank.ron` rule.

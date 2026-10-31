@@ -525,11 +525,10 @@ fn a_witness_takes_the_strength_that_reaches_it() {
     );
 }
 
-/// A witness whose own pass fails (one too large for any corridor, fixture geometry) leaves the
-/// hard world whole: every hard dose, every spall direction's reach and the shell's path as with
-/// no witness at all, and the witness dosed by nothing.
+/// The game's damage model reads finite witness geometry independently of the resolution
+/// corridor length. A large witness still takes its open chord; no quota silently removes it.
 #[test]
-fn a_failed_witness_pass_keeps_the_hard_world() {
+fn a_finite_witness_beyond_the_resolution_corridor_is_read() {
     let giant = cube(
         "giant",
         60.0,
@@ -538,14 +537,62 @@ fn a_failed_witness_pass_keeps_the_hard_world() {
     );
     let alone = fire(&hard_fixture(&[]), WOUND);
     let with = fire(&hard_fixture(&[giant]), WOUND);
+    assert!(dose(&with, "giant").is_some_and(|dose| dose.line > 0.0));
+    let marks = |fired: &FixtureFired| {
+        format!(
+            "{:?}",
+            fired
+                .log
+                .iter()
+                .filter(|mark| !matches!(mark, ArmourMark::Wound { .. }))
+                .collect::<Vec<_>>()
+        )
+    };
     assert_eq!(
-        hard_world(&with, &["giant"]),
-        hard_world(&alone, &["giant"])
+        marks(&with),
+        marks(&alone),
+        "witness geometry cannot change a hard crossing"
     );
-    assert!(dose(&with, "giant").is_none(), "{:?}", dose(&with, "giant"));
-    assert!(
-        dose(&with, "module").is_some_and(|dose| dose.field > 0.0),
-        "the hard world's own doses stand"
+    assert_eq!(with.at, alone.at);
+    assert_eq!(with.velocity, alone.velocity);
+}
+
+/// The game's damage model must not lose a witness dose on a broken collider binding. The
+/// authority panics on that invariant instead of keeping a partially resolved hard world.
+#[test]
+#[should_panic(
+    expected = "spawned ballistic colliders carry a resolved pose and certified trimesh or convex geometry"
+)]
+fn a_broken_witness_binding_panics() {
+    use avian3d::prelude::Collider;
+    let volumes: Vec<_> = hard_fixture(&[crewman(Kind::Witness(DEEP))])
+        .into_iter()
+        .map(|volume| (volume, 0, Quat::IDENTITY))
+        .collect();
+    fixture_fire_with(
+        &volumes,
+        LINE_FROM,
+        Vec3::NEG_Z * 800.0,
+        0,
+        FIXTURE_88,
+        |round| round.wound = WOUND,
+        |app| {
+            let witness = app
+                .world_mut()
+                .query::<(Entity, &Name)>()
+                .iter(app.world())
+                .find(|(_, name)| name.as_str() == "crewman")
+                .expect("the fixture witness")
+                .0;
+            app.world_mut()
+                .entity_mut(witness)
+                .insert(Collider::compound(vec![(
+                    Vec3::ZERO,
+                    Quat::IDENTITY,
+                    Collider::cuboid(0.6, 0.6, 0.6),
+                )]));
+            app.update();
+        },
     );
 }
 

@@ -73,7 +73,7 @@ pub(crate) enum Control {
     #[expect(
         dead_code,
         reason = "part of the mechanism interface; solid shot turns no round yet, and the driver \
-                  fails closed on it"
+                  panics on it"
     )]
     Redirect { direction: Vec3 },
     /// The round is at rest at the consumed progress.
@@ -82,7 +82,7 @@ pub(crate) enum Control {
     #[expect(
         dead_code,
         reason = "part of the mechanism interface; solid shot schedules nothing yet, and the driver \
-                  fails closed on it"
+                  panics on it"
     )]
     Schedule,
 }

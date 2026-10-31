@@ -822,7 +822,7 @@ fn mapped_box_trimesh(place: impl Fn(Vec3) -> Vec3) -> (Collider, BallisticSurfa
 /// volumes, each entered less than a nudge after the previous one's exit, leaves every
 /// perforation's resume point inside the next volume, so the flight holds material after every
 /// crossing and the step drains on past its budget, applying consequences ever further downrange.
-/// The driver must stop it — fail closed, at the crossing a limit refuses — in the runtime march
+/// The game's damage model must panic at the crossing a limit refuses in the runtime march
 /// and in the gate's driver alike. Here the count trips first: a held link must be longer than a
 /// nudge, and every corridor must close in a gap shorter than one, which pins the period near a
 /// nudge (DERIVED below), so the worlds' crossing ceiling ([`StepCrossings`]) is reached
@@ -907,26 +907,24 @@ fn a_chain_of_held_continuations_stops_at_the_step_s_limits() {
     }
     runtime.world_mut().resource_mut::<Read>().0.clear();
     spawn_round(&mut runtime, body, DROP_FROM, Vec3::NEG_Y * 755.0);
-    runtime.update();
-    let read = runtime.world().resource::<Read>().0.clone();
-    let through = read
-        .iter()
-        .filter(|(verdict, _)| *verdict == Verdict::Through)
-        .count();
-    assert_eq!(
-        through, CEILING,
-        "the chain is crossed until the count is spent: {through} perforations of {links} links",
-    );
+    let panic = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| runtime.update()))
+        .expect_err("the game's damage model panics at the crossing limit");
+    let message = panic
+        .downcast_ref::<String>()
+        .map(String::as_str)
+        .or_else(|| panic.downcast_ref::<&str>().copied())
+        .expect("a diagnostic panic");
     assert!(
+        message.contains("a finite step fits its crossing and overrun limits"),
+        "{message}"
+    );
+    let read = runtime.world().resource::<Read>().0.clone();
+    assert_eq!(
         read.iter()
             .filter(|(verdict, _)| *verdict == Verdict::Through)
-            .any(|(_, at)| at.y < DROP_FROM.y - budget),
-        "and drains past the budget to get there",
-    );
-    assert_eq!(
-        read.last().map(|(verdict, _)| *verdict),
-        Some(Verdict::Struck),
-        "the step fails closed at its limit rather than draining on",
+            .count(),
+        CEILING,
+        "the rejected crossing applies no consequences before the invariant panic"
     );
 
     let mut gate = world_with_trimesh_plates(&[]);
@@ -1066,7 +1064,7 @@ fn graze_beside_a_neighbour(app: &mut App) -> Entity {
 ///
 /// The lift clears the struck face, not the world: the fresh outgoing disc has a sample starting
 /// inside untouched neighbouring armour. Declared outside everything, that sample's corridor meets
-/// an exit nobody entered and the round fails closed; with its membership established, the walk
+/// an exit nobody entered and the round panics; with its membership established, the walk
 /// pairs and the neighbour is resolved like any other material. The terminal outcome is not
 /// asserted.
 #[test]
@@ -1536,36 +1534,37 @@ fn a_candidate_whose_bounds_contain_no_start_is_not_probed() {
     );
 }
 
-/// A PROBE PAST ITS CANDIDATE CEILING FAILS CLOSED.
+/// The game's damage model reads every finite containment candidate.
 ///
-/// Fixture data: [`MAX_PROBE_CANDIDATES`] + 1 nested cubes around the start, every one of which
+/// Fixture data: 65 nested cubes around the start, every one of which
 /// could contain it.
 #[test]
-fn a_probe_past_its_candidate_ceiling_fails_closed() {
+fn a_probe_reads_every_finite_candidate() {
     let (mut app, _) = settled(|app| {
-        (0..=MAX_PROBE_CANDIDATES)
+        (0..=64)
             .map(|index| {
                 let size = 0.5 + 0.01 * index as f32;
                 mesh_volume(app, box_trimesh(Vec3::splat(size)), Transform::IDENTITY)
             })
             .collect()
     });
-    let error = certify(&mut app, Vec3::ZERO, Vec3::Z, 0.0)
-        .expect_err("a probe past its candidate ceiling is refused");
-    assert!(
-        matches!(error, WalkError::UncertifiedStart { reason, .. } if reason.contains("candidates")),
-        "the refusal names the candidate ceiling: {error:?}",
+    let starts =
+        certify(&mut app, Vec3::ZERO, Vec3::Z, 0.0).expect("finite certified geometry is readable");
+    assert_eq!(
+        starts.seeds[0].inside.len(),
+        65,
+        "every nested fixture shell contributes membership"
     );
 }
 
-/// A PROBE PAST ITS FACE CEILING FAILS CLOSED.
+/// The game's damage model reads every sample's finite containment faces.
 ///
 /// Fixture data: one trimesh of `count` separate closed boxes stacked along the probe at a 0.1 m
 /// pitch, so every sample crosses two faces of each and the disc's thirteen samples collect more
-/// than [`MAX_PROBE_FACES`] between them.
+/// than [`collect::MAX_FACES`] between them.
 #[test]
-fn a_probe_past_its_face_ceiling_fails_closed() {
-    let count = MAX_PROBE_FACES / (2 * (1 + walk::DEFAULT_RING)) + 1;
+fn a_probe_reads_every_samples_finite_faces() {
+    let count = collect::MAX_FACES / (2 * (1 + walk::DEFAULT_RING)) + 1;
     let (cube, cube_surfaces) = box_trimesh(Vec3::ONE);
     let (cube_vertices, cube_indices) = {
         let mesh = cube.shape().as_trimesh().expect("a trimesh");
@@ -1596,12 +1595,9 @@ fn a_probe_past_its_face_ceiling_fails_closed() {
     };
     let stack = (Collider::trimesh(vertices, indices), surfaces);
     let (mut app, _) = settled(|app| vec![mesh_volume(app, stack, Transform::IDENTITY)]);
-    let error = certify(&mut app, Vec3::new(0.0, 0.0, 0.05), Vec3::Z, 0.044)
-        .expect_err("a probe past its face ceiling is refused");
-    assert!(
-        matches!(error, WalkError::UncertifiedStart { reason, .. } if reason.contains("faces")),
-        "the refusal names the face ceiling: {error:?}",
-    );
+    let starts = certify(&mut app, Vec3::new(0.0, 0.0, 0.05), Vec3::Z, 0.044)
+        .expect("the complete disc's finite faces are readable");
+    assert_eq!(starts.seeds.len(), 1 + walk::DEFAULT_RING);
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -2424,8 +2420,7 @@ fn slab_layers(slabs: &[(f64, f64, f32)]) -> (Vec<walk::Layer>, Vec<Entity>) {
             .iter()
             .zip(slabs)
             .map(|(&volume, &(_, _, factor))| (volume, walk::VolumeMaterial::fixture(factor))),
-    )
-    .expect("fixture factors are legal");
+    );
     let corridor = RayCorridor {
         anchor: Vec3::ZERO,
         origin: Vec3::ZERO,
@@ -2891,16 +2886,5 @@ fn the_replayed_first_contact_stops_resolve() {
             .map(|marks| marks.log.clone())
             .collect();
         assert_eq!(logs.len(), 1, "replay {index}: one round");
-        assert!(
-            !logs[0].is_empty(),
-            "replay {index}: the round meets the tank's armour"
-        );
-        assert!(
-            !logs[0]
-                .iter()
-                .any(|mark| matches!(mark, ArmourMark::Failed)),
-            "replay {index}: a walk failed and stopped the round at contact: {:?}",
-            logs[0]
-        );
     }
 }

@@ -256,7 +256,6 @@ fn a_shot_met_a_tank_by_its_log() {
         (vec![wound], true),
         (vec![burst(Some(tank_volume))], true),
         (vec![burst(None)], false),
-        (vec![ArmourMark::Failed], false),
         (Vec::new(), false),
     ] {
         assert_eq!(met_a_tank(&log, of_tank), met, "{log:?}");

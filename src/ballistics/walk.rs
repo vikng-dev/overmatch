@@ -61,8 +61,8 @@
 //! Unpairable topology returns a structured [`WalkError`] naming the sample, volume, primitive and
 //! violated invariant. The core NEVER synthesizes a missing exit, infers "we must have started
 //! inside", or charges zero and moves on — silent-zero armour is the exact defect class §13.1
-//! exists to kill. Deciding what to do with the error (bake/CI: hard failure; production authority:
-//! deterministic fail-closed) is the slice-2 adapter's job, not this module's.
+//! exists to kill. The live adapter panics on a contradiction in every build; the fuzzer retains the
+//! structured diagnostic so its report can name and replay the broken invariant.
 //!
 //! # Three tolerance domains, deliberately separate
 //!
@@ -269,42 +269,34 @@ pub struct VolumeTable {
 }
 
 impl VolumeTable {
-    /// Build the table, rejecting factors that cannot participate in `max` or in a deterministic
-    /// sum. A `NaN` poisons both the field maximum and the sort; a negative factor breaks
-    /// monotonicity (§13.6). Zero is canonicalized so `-0.0` cannot produce a second bit pattern
-    /// for "no material" and defeat the bit-equality coalescing in [`walk_ray`].
-    ///
-    /// One volume, one entry; one substance, one factor. Interfaces compare substance identity
-    /// while mechanisms read factors, so a substance carrying two factors would change resistance
-    /// where no interface is reported ([`WalkError::SubstanceFactorConflict`]), and a repeated
-    /// volume would have one of its materials silently dropped ([`WalkError::RepeatedVolume`]).
-    pub fn new(
-        entries: impl IntoIterator<Item = (Entity, VolumeMaterial)>,
-    ) -> Result<Self, WalkError> {
+    /// Build one row per volume from load-validated materials. The registry owns each substance's
+    /// sole factor; the spec parser refuses repeated declarations. Violations here are adapter
+    /// bugs, not another opportunity to parse or repair asset data.
+    pub fn new(entries: impl IntoIterator<Item = (Entity, VolumeMaterial)>) -> Self {
         let mut materials = BTreeMap::new();
         let mut factors: BTreeMap<SubstanceId, f32> = BTreeMap::new();
         for (volume, material) in entries {
             let factor = material.factor;
-            if !factor.is_finite() || factor < 0.0 {
-                return Err(WalkError::BadFactor { volume, factor });
-            }
+            assert!(
+                factor.is_finite() && factor >= 0.0,
+                "the load-validated substance registry supplies finite nonnegative resistance: {volume:?}, {factor}"
+            );
             let factor = if factor == 0.0 { 0.0 } else { factor };
             let declared = *factors.entry(material.substance).or_insert(factor);
-            if declared.to_bits() != factor.to_bits() {
-                return Err(WalkError::SubstanceFactorConflict {
-                    substance: material.substance,
-                    first: declared,
-                    second: factor,
-                });
-            }
-            if materials
-                .insert(volume, VolumeMaterial { factor, ..material })
-                .is_some()
-            {
-                return Err(WalkError::RepeatedVolume { volume });
-            }
+            assert_eq!(
+                declared.to_bits(),
+                factor.to_bits(),
+                "one registry identity supplies one resistance factor: {:?}",
+                material.substance
+            );
+            assert!(
+                materials
+                    .insert(volume, VolumeMaterial { factor, ..material })
+                    .is_none(),
+                "the adapter supplies each volume exactly once: {volume:?}"
+            );
         }
-        Ok(Self { materials })
+        Self { materials }
     }
 
     /// Every `(volume, material)` the table carries, in entity order.
@@ -507,16 +499,6 @@ impl Default for WalkLaws {
 /// A violated invariant, named precisely enough to fix the mesh or the adapter that produced it.
 #[derive(Clone, Debug, PartialEq)]
 pub enum WalkError {
-    /// A factor that cannot participate in `max` or in a deterministic sum.
-    BadFactor { volume: Entity, factor: f32 },
-    /// One substance declared at two factors in one volume table.
-    SubstanceFactorConflict {
-        substance: SubstanceId,
-        first: f32,
-        second: f32,
-    },
-    /// One volume supplied twice to a volume table.
-    RepeatedVolume { volume: Entity },
     /// A hit named a volume the table does not carry — a bind gap, never a defaultable factor.
     UnknownVolume { volume: Entity },
     /// The corridor itself is malformed (non-unit axis, non-finite length, a hit behind the origin).
@@ -543,19 +525,6 @@ pub enum WalkError {
         sample: usize,
         open: Vec<ShellKey>,
         length: f32,
-    },
-    /// Two distinct certified contacts of ONE shell whose EXACT ray parameters are bit-equal.
-    ///
-    /// Not the sub-f32 chord — that one is ordinary material, ordered and charged on the f64
-    /// parameter like any other traversal. This is the residue: two features of one shell the ray
-    /// meets at one indistinguishable parameter, which is tangent grade and measure zero. There is no
-    /// order between them and no thickness to charge, and reading the pair as a zero-length touch
-    /// would be a silent free crossing of whatever they actually bound — the defect class §13.1
-    /// exists to kill. So it is named instead.
-    UnrepresentableChord {
-        sample: usize,
-        key: ShellKey,
-        t: f64,
     },
     /// A stretch of positive union factor that no shell's presence interval covers.
     ///
@@ -589,14 +558,6 @@ pub enum WalkError {
     /// against the axis and their sum cannot vanish — `n̄` is well-defined by construction, which is
     /// precisely §13.5's repair of the point model's degenerate normal.
     DegenerateEntryNormal { coverage: f32 },
-    /// A fresh start's membership could not be established against a candidate volume: its shape is
-    /// neither a certified trimesh nor convex, so no containment probe can be trusted on it, or the
-    /// probe through the candidates' bounds would exceed the corridor ceiling. The start is never
-    /// declared outside instead.
-    UncertifiedStart {
-        volume: Entity,
-        reason: &'static str,
-    },
     /// A mechanism asked the crossing driver for a control it does not carry out (a redirect or a
     /// schedule). Never approximated by stopping or continuing.
     UnsupportedControl,
@@ -609,27 +570,68 @@ pub enum WalkError {
 }
 
 impl WalkError {
+    /// A bug in the game's damage model, fatal on the authority and replicas in every build.
+    /// The pure core returns diagnostics for corridor extension and the fuzzer; gameplay cannot
+    /// turn one into a stopped round, a missing dose or a guessed membership.
+    #[track_caller]
+    pub fn panic(self) -> ! {
+        let invariant = match &self {
+            Self::UnknownVolume { .. } => {
+                "every collected collider is bound to its spawned ballistic volume"
+            }
+            Self::BadCorridor { .. } => {
+                "the adapter constructs finite corridors on a unit direction"
+            }
+            Self::UnexpectedExit { .. } => {
+                "certified closed shells alternate from established membership"
+            }
+            Self::UnexpectedEntry { .. } => {
+                "certified embedded shells alternate without self-overlap"
+            }
+            Self::IncompleteCorridor { .. } => {
+                "the closing corridor must contain every opened shell's exit"
+            }
+            Self::UnattributedRun { .. } => {
+                "the field and presence are derived from the same crossings"
+            }
+            Self::CollectorFailed { .. } => {
+                "spawned ballistic colliders carry a resolved pose and certified trimesh or convex geometry"
+            }
+            Self::CorridorOverflow { .. } => {
+                "the finite candidate geometry must fit the collector's work ceiling"
+            }
+            Self::CorridorMismatch { .. } => {
+                "finish receives exactly the corridor requested by begin"
+            }
+            Self::DegenerateEntryNormal { .. } => {
+                "entry normals oppose the axis and have a nonzero aggregate"
+            }
+            Self::UnsupportedControl => {
+                "the mechanism requests only controls implemented by its driver"
+            }
+            Self::DrainExhausted { .. } => "a finite step fits its crossing and overrun limits",
+        };
+        panic!(
+            "game's damage model: {invariant}; {}: {self:?}",
+            self.kind()
+        );
+    }
+
     /// The stable name of the invariant this error breaks: one per variant, and one per
-    /// [`Mismatch`] for a corridor mismatch. It is the key the runtime's safe stop logs, so reports
-    /// from real matches group by it; a name is never reworded once shipped. A variant carrying a
+    /// [`Mismatch`] for a corridor mismatch. Diagnostics and fuzz reports group by it. A variant carrying a
     /// `reason` names the variant, and its reason travels beside it as context.
     pub fn kind(&self) -> &'static str {
         match self {
-            WalkError::BadFactor { .. } => "bad_factor",
-            WalkError::SubstanceFactorConflict { .. } => "substance_factor_conflict",
-            WalkError::RepeatedVolume { .. } => "repeated_volume",
             WalkError::UnknownVolume { .. } => "unknown_volume",
             WalkError::BadCorridor { .. } => "bad_corridor",
             WalkError::UnexpectedExit { .. } => "unexpected_exit",
             WalkError::UnexpectedEntry { .. } => "unexpected_entry",
             WalkError::IncompleteCorridor { .. } => "incomplete_corridor",
-            WalkError::UnrepresentableChord { .. } => "unrepresentable_chord",
             WalkError::UnattributedRun { .. } => "unattributed_run",
             WalkError::CollectorFailed { .. } => "collector_failed",
             WalkError::CorridorOverflow { .. } => "corridor_overflow",
             WalkError::CorridorMismatch { reason } => reason.kind(),
             WalkError::DegenerateEntryNormal { .. } => "degenerate_entry_normal",
-            WalkError::UncertifiedStart { .. } => "uncertified_start",
             WalkError::UnsupportedControl => "unsupported_control",
             WalkError::DrainExhausted { .. } => "drain_exhausted",
         }
@@ -986,7 +988,7 @@ fn canonical_crossings(order: &[&FaceHit]) -> Vec<Crossing> {
 ///
 /// The bake certifies embedding over the surface (`bake::embedding`), so alternation is a
 /// redundant runtime backstop rather than the only guard: a shell that could disprove it never
-/// reaches the world. It is kept fail-closed because a live collider is not the buffer the bake
+/// reaches the world. It is checked in every build because a live collider is not the buffer the bake
 /// judged — a pose, a scale or a collider swap can still put a ray somewhere the certificate does
 /// not cover.
 struct Field {
@@ -1034,7 +1036,7 @@ pub fn walk_ray(
             reason: "corridor length must be finite and non-negative",
         });
     }
-    if (corridor.axis.length_squared() - 1.0).abs() > 1.0e-3 {
+    if !corridor.axis.is_finite() || (corridor.axis.length_squared() - 1.0).abs() > 1.0e-3 {
         return Err(WalkError::BadCorridor {
             sample,
             reason: "corridor axis must be unit length",
@@ -1049,7 +1051,11 @@ pub fn walk_ray(
         .iter()
         .filter(|hit| hit.t < corridor.length as f64)
         .collect();
-    if order.iter().any(|hit| !hit.t.is_finite() || hit.t < 0.0) {
+    if corridor
+        .hits
+        .iter()
+        .any(|hit| !hit.t.is_finite() || hit.t < 0.0)
+    {
         return Err(WalkError::BadCorridor {
             sample,
             reason: "a face hit is behind the corridor origin or non-finite",
@@ -1167,9 +1173,9 @@ fn integrate_field(
 
     let mut i = 0usize;
     while i < crossings.len() {
-        // ONE BIT-EQUAL EXACT `t` IS ONE ATOMIC BATCH. Crossings that share the exact parameter have
-        // no order, so the field is read once, every crossing is applied, and the field is read
-        // again. That is what keeps seam invisibility bit-exact at an exact abutment: the outgoing
+        // ONE BIT-EQUAL EXACT `t` IS ONE ATOMIC BATCH. The field is read before and after
+        // the whole batch. A shell's symbolic side orders its tied contacts within the batch;
+        // distinct shells never acquire a transient factor step. That is what keeps seam invisibility bit-exact at an exact abutment: the outgoing
         // plate's exit and the incoming plate's entry cancel inside one batch, no transition is
         // emitted, and one span covers both plates (§13.6).
         let t = crossings[i].t;
@@ -1180,20 +1186,18 @@ fn integrate_field(
         let batch = &crossings[i..j];
         i = j;
 
-        // ONE SHELL MAY NOT APPEAR TWICE IN ONE BATCH. A batch is deliberately unordered, so two
-        // contacts of one shell inside it have no order and no thickness between them — tangent
-        // grade, and measure zero now that ordinary sub-f32 chords are carried exactly. Applying
-        // both would charge whatever they bound as nothing.
-        let mut seen: BTreeSet<ShellKey> = BTreeSet::new();
-        for crossing in batch {
-            if !seen.insert(crossing.key) {
-                return Err(WalkError::UnrepresentableChord {
-                    sample,
-                    key: crossing.key,
-                    t,
-                });
-            }
-        }
+        // Symbolic perturbation for the game's damage model: tied contacts of one shell
+        // alternate from its known side, then by contact identity. The real parameter is
+        // unchanged: a tangent chord has zero measure in the perturbation limit. Other shells
+        // remain in the same atomic batch, preserving exact abutment and union idempotence.
+        let mut batch: Vec<&Crossing> = batch.iter().collect();
+        batch.sort_by_key(|crossing| {
+            (
+                crossing.key,
+                (crossing.sign > 0) == field.open.contains_key(&crossing.key),
+                crossing.contact,
+            )
+        });
 
         let before = field.max_factor(volumes)?;
         let mut entry_normal = Vec3::ZERO;
@@ -1624,13 +1628,16 @@ pub fn witness_spans(
     length: f64,
     hits: &[FaceHit],
 ) -> Result<Vec<WitnessSpans>, WalkError> {
-    let order: Vec<&FaceHit> = hits.iter().filter(|hit| hit.t < length).collect();
-    if order.iter().any(|hit| !hit.t.is_finite() || hit.t < 0.0) {
+    if !length.is_finite()
+        || length < 0.0
+        || hits.iter().any(|hit| !hit.t.is_finite() || hit.t < 0.0)
+    {
         return Err(WalkError::BadCorridor {
             sample,
-            reason: "a face hit is behind the corridor origin or non-finite",
+            reason: "witness length and face parameters must be finite and nonnegative",
         });
     }
+    let order: Vec<&FaceHit> = hits.iter().filter(|hit| hit.t < length).collect();
     let mut crossings = canonical_crossings(&order);
     crossings.sort_by(|a, b| {
         a.t.total_cmp(&b.t)
@@ -1639,31 +1646,46 @@ pub fn witness_spans(
     });
     let mut open: BTreeMap<ShellKey, f64> = BTreeMap::new();
     let mut by_entity: BTreeMap<Entity, Vec<(f64, f64)>> = BTreeMap::new();
-    for crossing in &crossings {
-        let key = crossing.key;
-        if crossing.sign > 0 {
-            if open.insert(key, crossing.t).is_some() {
-                return Err(WalkError::UnexpectedEntry {
-                    sample,
-                    key,
-                    t: crossing.t,
-                    triangles: crossing.triangles.clone(),
-                });
-            }
-        } else {
-            let Some(opened) = open.remove(&key) else {
-                return Err(WalkError::UnexpectedExit {
-                    sample,
-                    key,
-                    t: crossing.t,
-                    triangles: crossing.triangles.clone(),
-                });
-            };
-            by_entity
-                .entry(key.volume)
-                .or_default()
-                .push((opened, crossing.t));
+    let mut i = 0;
+    while i < crossings.len() {
+        let mut j = i + 1;
+        while j < crossings.len() && crossings[j].t.to_bits() == crossings[i].t.to_bits() {
+            j += 1;
         }
+        crossings[i..j].sort_by_key(|crossing| {
+            (
+                crossing.key,
+                (crossing.sign > 0) == open.contains_key(&crossing.key),
+                crossing.contact,
+            )
+        });
+        for crossing in &crossings[i..j] {
+            let key = crossing.key;
+            if crossing.sign > 0 {
+                if open.insert(key, crossing.t).is_some() {
+                    return Err(WalkError::UnexpectedEntry {
+                        sample,
+                        key,
+                        t: crossing.t,
+                        triangles: crossing.triangles.clone(),
+                    });
+                }
+            } else {
+                let Some(opened) = open.remove(&key) else {
+                    return Err(WalkError::UnexpectedExit {
+                        sample,
+                        key,
+                        t: crossing.t,
+                        triangles: crossing.triangles.clone(),
+                    });
+                };
+                by_entity
+                    .entry(key.volume)
+                    .or_default()
+                    .push((opened, crossing.t));
+            }
+        }
+        i = j;
     }
     if !open.is_empty() {
         return Err(WalkError::IncompleteCorridor {

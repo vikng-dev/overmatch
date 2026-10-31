@@ -1010,7 +1010,7 @@ pub(crate) struct Held {
     /// Re-age fallback when [`ShotClock`] is unavailable.
     age: u32,
     /// Local contact normal for the first sanctioned bounce after this hold re-seeds; `None` for a
-    /// hold with no struck face (a fresh start that could not be certified, [`uncertified_start`]).
+    /// hold without a local contact normal.
     normal: Option<Vec3>,
 }
 
@@ -1621,8 +1621,6 @@ pub enum ArmourMark {
         /// The spall cones this crossing threw: the next `cones` of the shell's [`SpallMarks`].
         cones: usize,
     },
-    /// A walk that failed closed: the round stopped at contact with no crossing resolved.
-    Failed,
     /// The round's fuze ran out at `at` (design doc §5a, "The burst"), the round travelling at
     /// `speed` (zero for a round at rest). `nose` is the mass (kg) of the nose piece, which flies
     /// on from `at` unless the round was at rest.
@@ -1777,9 +1775,9 @@ pub enum ImpactSurface {
 /// Invariant: `Ricochet` is exactly a resolved deflection off armour, and only it carries a
 /// deflected direction (the local [`ImpactOutcome`] makes that structural). `Struck`
 /// is a stop at the face with no crossing resolved: every terrain strike, and an armour contact
-/// that ends without a crossing (a fail-closed walk, an unkeyed replica's neutral spark).
+/// that ends without a crossing (an unkeyed replica's neutral spark).
 /// `Stopped` entered the material and ended inside it; `Through` came out the
-/// far side. `Struck` on armour is a walk that failed closed, which opens no pen cam
+/// far side. `Struck` on armour is an unresolved replica contact, which opens no pen cam
 /// ([`crate::damage_cam::ShotVerdict`]).
 #[derive(Clone, Copy, PartialEq, Eq, Debug, serde::Serialize, serde::Deserialize)]
 pub enum Verdict {
@@ -3256,7 +3254,7 @@ fn resume_from_catch_up(
 /// settles it at its own index; returns the pool units removed. A replica takes nothing.
 ///
 /// The hard world is already resolved when this runs and nothing here reaches back into it, so a
-/// witness walk that fails closed doses nothing and leaves the round's flight as it was.
+/// contradiction in the witness walk is a bug and panics in every build.
 fn wound_legs(
     shell: &mut MarchingShell,
     context: &resolve::ResolveContext<'_, '_, '_>,
@@ -3268,18 +3266,8 @@ fn wound_legs(
     if !context.deposit {
         return 0;
     }
-    let (volumes, incoming) = match wound::line(context, admit, legs, shell.projectile.wound) {
-        Ok(found) => found,
-        Err(error) => {
-            error!(
-                shot = ?shell.shot.map(|shot| shot.0),
-                shell = ?shell.entity,
-                ?error,
-                "ballistics: the witness pass failed along the round's line; it doses nothing"
-            );
-            return 0;
-        }
-    };
+    let (volumes, incoming) = wound::line(context, admit, legs, shell.projectile.wound)
+        .unwrap_or_else(|error| error.panic());
     let Some(incoming) = incoming else {
         return 0;
     };
@@ -3317,9 +3305,7 @@ fn march_shell_step(
     bodies: &mut Query<Forces>,
     tick: &mut MarchTick,
 ) -> Option<MarchStep> {
-    let MarchTick {
-        now, dt, deposit, ..
-    } = *tick;
+    let MarchTick { dt, deposit, .. } = *tick;
     // Accumulate the authority's actual HP decrease across every direct crossing and spall fragment
     // this step. The caller's per-shell latch turns the aggregate into at most one discrete confirm.
     let mut damage_dealt = 0;
@@ -3383,30 +3369,12 @@ fn march_shell_step(
     // ([`ProjectileMarchWorld::crossing_reach`]) and any material a sample is held inside (see
     // [`next_surface`]), within the step's limits (`resolve::Budget`); what crosses the tick is
     // the axis position and the travel owed, never a sample's membership.
-    let mut flight = match launch(
-        shell, &context, &not_own, previous, dir, speed, radius, tick,
-    ) {
-        Ok(flight) => flight,
-        Err(step) => return Some(step),
-    };
+    let mut flight = launch(shell, &context, &not_own, previous, dir, speed, radius);
 
     loop {
-        // A bounce or a re-seed leaves a fresh disc: its membership is established before anything
-        // sweeps from it, or the round ends here ([`uncertified_start`]).
-        if let Err(error) = flight.settle(&context, &not_own, radius) {
-            holding = uncertified_start(
-                shell,
-                deposit,
-                flight.position,
-                flight.direction,
-                &error,
-                now,
-                tick.shot_trace,
-                tick.commands,
-            );
-            stopped = !holding;
-            break;
-        }
+        flight
+            .settle(&context, &not_own, radius)
+            .unwrap_or_else(|error| error.panic());
         let origin = flight.sweep_origin();
         let dir = flight.direction;
         let spread = flight.spread(radius).max(radius);
@@ -3479,7 +3447,6 @@ fn march_shell_step(
         };
         let contact = hit.map_or(0.0, |hit| hit.distance);
         let entry = origin + dir * contact;
-        let contact_normal = hit.map_or(-Vec3::from(dir), |hit| hit.normal);
 
         if let Some(hit) = hit {
             if stops_unresolved(shell, world, hit, entry, tick) {
@@ -3532,12 +3499,8 @@ fn march_shell_step(
 
         // The §13 union walk: decide the crossing from the flight as it stands, apply its
         // consequences, and advance the flight to where the next one starts.
-        // FAIL CLOSED. A structured walk error means the corridor could not be resolved honestly —
-        // unpairable topology, an unprobeable collider, a crossing that would not close inside 50 m,
-        // a step that would run past its limits. The round stops where it was: no perforation, no
-        // spall, no transit damage. Free penetration is the one outcome worse than a stopped shell,
-        // because it is indistinguishable from armour that was never modelled. The budget is charged
-        // BEFORE the crossing is applied, so a refused crossing lands none of its consequences.
+        // The game's damage model resolves only certified geometry. A contradictory walk is
+        // a bug in every build, never another armour verdict.
         let decided = resolve::decide(
             &context,
             &not_own,
@@ -3546,11 +3509,12 @@ fn march_shell_step(
             &flight,
             contact,
         )
-        .and_then(|decision| budget.charge(decision.charged()).map(|()| decision));
+        .and_then(|decision| budget.charge(decision.charged()).map(|()| decision))
+        .unwrap_or_else(|error| error.panic());
         // A corridor the disc found clear is open flight: an armed round whose delay runs out
         // inside it bursts there. The budget was charged the whole corridor, which is handed back;
         // the burst charges what it flies.
-        if let Ok(resolve::Decision::Clear { travel, .. }) = &decided
+        if let resolve::Decision::Clear { travel, .. } = &decided
             && let Some(at) = shell.projectile.fuze.due_within(*travel)
         {
             budget.fly(-*travel);
@@ -3564,25 +3528,15 @@ fn march_shell_step(
             bent = true;
             continue;
         }
-        let decision = match decided {
-            Ok(decision) => {
-                damage_dealt += wound_legs(
-                    shell,
-                    &context,
-                    &not_own,
-                    decision.legs(),
-                    flight.speed,
-                    health,
-                );
-                decision
-            }
-            Err(error) => {
-                walk_failed(shell, hit, entry, contact_normal, &error, tick.commands);
-                stop_at(shell, &mut flight, entry, contact);
-                stopped = true;
-                break;
-            }
-        };
+        let decision = decided;
+        damage_dealt += wound_legs(
+            shell,
+            &context,
+            &not_own,
+            decision.legs(),
+            flight.speed,
+            health,
+        );
         damage_dealt += resolve::apply(
             &decision,
             shell,
@@ -3638,13 +3592,7 @@ fn march_shell_step(
     })
 }
 
-/// The flight a step starts from, launched where the shell stands ([`resolve::Flight::launched`]);
-/// or, from an uncertified start, the step that ends or holds the round there
-/// ([`uncertified_start`]).
-#[expect(
-    clippy::too_many_arguments,
-    reason = "the march's own state threaded through; a struct would be built for this one call"
-)]
+/// The game's damage model launches from certified membership; a broken spawn or adapter panics.
 fn launch(
     shell: &mut MarchingShell,
     context: &resolve::ResolveContext<'_, '_, '_>,
@@ -3653,9 +3601,8 @@ fn launch(
     dir: Dir3,
     speed: f32,
     radius: f32,
-    tick: &mut MarchTick,
-) -> Result<resolve::Flight, MarchStep> {
-    let launched = resolve::Flight::launched(
+) -> resolve::Flight {
+    resolve::Flight::launched(
         context,
         not_own,
         shell.transform.translation,
@@ -3665,28 +3612,8 @@ fn launch(
         shell.projectile.disc,
         radius,
         shell.projectile.axis.take(),
-    );
-    launched.map_err(|error| {
-        let position = shell.transform.translation;
-        let holding = uncertified_start(
-            shell,
-            tick.deposit,
-            position,
-            dir,
-            &error,
-            tick.now,
-            tick.shot_trace,
-            tick.commands,
-        );
-        MarchStep {
-            position,
-            direction: dir,
-            speed,
-            stopped: !holding,
-            holding,
-            damage_dealt: 0,
-        }
-    })
+    )
+    .unwrap_or_else(|error| error.panic())
 }
 
 /// AUTHORITY: an unarmed `Impact` fuze reads the body the flight meets `contact` metres ahead
@@ -3709,12 +3636,10 @@ fn function_on_contact(
     else {
         return None;
     };
-    // A walk that cannot read the entrance leaves the fuze unarmed; the crossing's own walk then
-    // fails closed on the same corridor.
+    // The game's damage model reads the same certified entrance as the crossing driver.
     let (force, owner) =
         resolve::entry_force(context, not_own, &shell.projectile.round, flight, contact)
-            .ok()
-            .flatten()?;
+            .unwrap_or_else(|error| error.panic())?;
     shell
         .projectile
         .fuze
@@ -3968,13 +3893,9 @@ fn replica_contact(
         } => {
             // The same step limits the authority's crossings are held to, charged from
             // the flight's position.
-            if let Err(error) = budget.charge(hit.distance + MARCH_EPS) {
-                warn_once!(
-                    "ballistics: a replica's step ran out of its limits, stopping the \
-                     round: {error:?}"
-                );
-                return ReplicaSweep::Stopped;
-            }
+            budget
+                .charge(hit.distance + MARCH_EPS)
+                .unwrap_or_else(|error| error.panic());
             if let Some(new_dir) = direction {
                 // Carry the sampling basis through the sanctioned bend, exactly as the
                 // authority's own ricochet does. A replica that re-seeds on server
@@ -4005,104 +3926,6 @@ fn replica_contact(
         ReplicaArmorContact::Stopped => ReplicaSweep::Stopped,
         ReplicaArmorContact::Holding => ReplicaSweep::Holding,
     }
-}
-
-/// AUTHORITY: a union walk that failed stops the round at its contact, `entry`: logged, its record
-/// marked [`ArmourMark::Failed`] so it opens no pen cam, and a struck armour [`Impact`] shown
-/// there. The caller stops the flight at `entry`.
-///
-/// No outcome of the damage model is meant to arrive here: each error is a broken invariant, the
-/// stop is the safe answer to it, and the log line, keyed by the error's stable
-/// [`walk::WalkError::kind`], is the tripwire that reports it.
-fn walk_failed(
-    shell: &mut MarchingShell,
-    hit: Option<avian3d::prelude::RayHitData>,
-    entry: Vec3,
-    contact_normal: Vec3,
-    error: &walk::WalkError,
-    commands: &mut Commands,
-) {
-    error!(
-        kind = error.kind(),
-        shot = ?shell.shot.map(|shot| shot.0),
-        shell = ?shell.entity,
-        struck = ?hit.map(|hit| hit.entity),
-        ?error,
-        "ballistics: union walk failed, stopping the round at contact; it opens no \
-         pen cam"
-    );
-    shell.marks.log.push(ArmourMark::Failed);
-    commands.trigger(Impact {
-        position: entry,
-        normal: contact_normal,
-        caliber: shell.projectile.caliber(),
-        surface: ImpactSurface::Armor,
-        outcome: ImpactOutcome::Struck,
-    });
-}
-
-/// End the step at a fresh start whose membership could not be established
-/// ([`resolve::certified`]); the start is never declared outside. Returns whether the shell holds;
-/// otherwise it has stopped.
-///
-/// The authority fails the round closed where it stands, as for any walk error. A replica owns no
-/// armour verdict to show for it: a keyed shell holds hidden for the authority's next outcome, the
-/// lifecycle of an unresolved armour contact ([`resolve_replica_armor_contact`]) with no struck face
-/// to lift off, and an unkeyed one, which no outcome can reach, ends quietly.
-#[expect(
-    clippy::too_many_arguments,
-    reason = "the march's own state threaded through; a struct would be built for this one call"
-)]
-fn uncertified_start(
-    shell: &mut MarchingShell,
-    deposit: bool,
-    position: Vec3,
-    direction: Dir3,
-    error: &walk::WalkError,
-    now: u32,
-    shot_trace: &mut Option<ResMut<crate::shot_trace::ShotTrace>>,
-    commands: &mut Commands,
-) -> bool {
-    if deposit {
-        error!(
-            kind = error.kind(),
-            shot = ?shell.shot.map(|shot| shot.0),
-            shell = ?shell.entity,
-            ?position,
-            ?error,
-            "ballistics: a fresh start could not be certified, stopping the round; it opens no \
-             pen cam"
-        );
-        shell.marks.log.push(ArmourMark::Failed);
-        commands.trigger(Impact {
-            position,
-            normal: -Vec3::from(direction),
-            caliber: shell.projectile.caliber(),
-            surface: ImpactSurface::Armor,
-            outcome: ImpactOutcome::Struck,
-        });
-        return false;
-    }
-    warn_once!(
-        "ballistics: a replica's fresh start could not be certified, awaiting the authority: \
-         {error:?}"
-    );
-    let Some(shot) = shell.shot else {
-        return false;
-    };
-    commands.entity(shell.entity).insert(Held {
-        waited: 0,
-        age: 0,
-        normal: None,
-    });
-    crate::shot_trace::record(
-        shot_trace,
-        "contact",
-        now,
-        shot.0,
-        || json!({ "res": "hold", "why": "uncertified" }),
-    );
-    true
 }
 
 /// What lies ahead of a flight, for the next crossing.
@@ -4354,9 +4177,8 @@ struct FieldThrow<'a> {
 /// Walk every direction of `spread` about `throw`'s axis from its origin, direction `k` at
 /// strength `S·f_k`, standing for `1/N` of the field, through the volumes of `throw`'s tank alone
 /// ([`resolve::field_direction`]), adding its doses to `dose`; returns the rays in stratum order.
-/// A direction whose walk fails is fail-closed: it doses nothing, and the field logs its first
-/// error. A direction whose witness pass alone fails keeps its hard doses and reach and doses no
-/// witness; the field logs that once too.
+/// The game's damage model requires every direction and witness pass to pair; a contradiction
+/// panics in every build.
 fn walk_field(
     throw: &FieldThrow<'_>,
     spread: &spall_cone::Spread,
@@ -4373,8 +4195,6 @@ fn walk_field(
     };
     let reach = resolve::FieldReach::of_throw(context, &within, throw.origin);
     let mut rays = Vec::with_capacity(spread.directions_count());
-    let mut failed: Option<(usize, walk::WalkError)> = None;
-    let mut unwitnessed: Option<(usize, walk::WalkError)> = None;
     for (ray_dir, profile) in spread.directions(throw.axis) {
         let thrown = throw.strength * profile;
         let walked = resolve::field_direction(
@@ -4387,20 +4207,7 @@ fn walk_field(
             thrown,
             weight,
         );
-        let ray = match walked {
-            Ok(ray) => ray,
-            Err(error) => {
-                failed = Some(failed.map_or((1, error), |(count, first)| (count + 1, first)));
-                resolve::FieldRay {
-                    end: throw.origin,
-                    doses: Vec::new(),
-                    witness_error: None,
-                }
-            }
-        };
-        if let Some(error) = ray.witness_error.clone() {
-            unwitnessed = Some(unwitnessed.map_or((1, error), |(count, first)| (count + 1, first)));
-        }
+        let ray = walked.unwrap_or_else(|error| error.panic());
         dose.add_all(&ray.doses, |_| DoseContext::Field {
             origin: throw.origin,
         });
@@ -4413,21 +4220,6 @@ fn walk_field(
                 .map(|dose| (dose.address, dose.amount))
                 .collect(),
         });
-    }
-    if let Some((count, error)) = failed {
-        error!(
-            origin = ?throw.origin,
-            ?error,
-            "ballistics: {count} field direction(s) could not be walked; each doses nothing"
-        );
-    }
-    if let Some((count, error)) = unwitnessed {
-        error!(
-            origin = ?throw.origin,
-            ?error,
-            "ballistics: the witness pass failed on {count} field direction(s); each doses no \
-             witness and keeps its hard doses and reach"
-        );
     }
     rays
 }
@@ -6681,54 +6473,20 @@ mod march_tests {
         }
     }
 
-    /// A REPLICA THAT CANNOT CERTIFY A FRESH START SHOWS NO ARMOUR VERDICT FOR IT.
-    ///
-    /// The authority owns every armour verdict. A keyed replica whose fresh start cannot be
-    /// certified holds hidden, as at an unresolved armour contact, emitting nothing; the authority's
-    /// next outcome then governs it.
+    /// The game's damage model constructs readable ballistic shapes on both authority and
+    /// replicas. A compound inserted by a broken fixture is a wiring bug, never a hold or verdict.
     #[test]
-    fn a_replica_that_cannot_certify_a_start_holds_for_the_authority() {
-        let shot = a_shot();
+    #[should_panic(expected = "spawn constructs certified trimesh or convex ballistic geometry")]
+    fn a_replica_panics_on_an_unreadable_ballistic_shape() {
         let mut app = replica_world(SanctionedShots::default());
         spawn_uncertifiable(&mut app);
-        let shell = spawn_free_shell(&mut app, UNCERTIFIABLE_AT, Vec3::Z, 800.0, shot);
+        spawn_free_shell(&mut app, UNCERTIFIABLE_AT, Vec3::Z, 800.0, a_shot());
         app.update();
-        assert!(
-            app.world().resource::<ImpactLog>().0.is_empty(),
-            "no armour verdict is fabricated for an uncertified start",
-        );
-        assert!(
-            app.world().get::<Held>(shell).is_some(),
-            "the shell holds for the authority's outcome rather than ending",
-        );
-
-        let server_pos = UNCERTIFIABLE_AT + Vec3::Z * 0.4;
-        app.world_mut()
-            .resource_mut::<SanctionedShots>()
-            .insert_terminal(
-                shot,
-                SanctionedTerminal {
-                    position: server_pos,
-                    normal: Vec3::Z,
-                    verdict: TerminalVerdict::Through,
-                    impact_tick: 0, // inert (no `ShotClock` — overdue path off)
-                    after_bounces: 0,
-                },
-            );
-        app.update();
-        let impacts = app.world().resource::<ImpactLog>().0.clone();
-        assert_eq!(impacts.len(), 1, "the authority's terminal is the one read");
-        assert_eq!(impacts[0].verdict, Verdict::Through);
-        assert!(impacts[0].position.distance(server_pos) < 1.0e-6);
-        assert!(
-            app.world().get_entity(shell).is_err(),
-            "the sanctioned terminal ends the shell",
-        );
     }
 
     /// A pen cam opens only for a hit on armour that resolved one of its verdicts, read
     /// from the shell's whole logged path: the ricochet, the stop and the perforation each open
-    /// one; a ground hit and a fail-closed armour contact open none. Plate thicknesses and the 75°
+    /// one; a ground hit opens none. Plate thicknesses and the 75°
     /// graze are fixture data.
     #[test]
     fn a_pen_cam_opens_only_for_a_resolved_armour_hit() {
@@ -6785,29 +6543,16 @@ mod march_tests {
         assert_eq!(hits.len(), 1, "one ground read");
         assert_eq!(hits[0].surface, ImpactSurface::Terrain);
         assert_eq!(opened(&mut ground), None);
-
-        let mut failed = plate(0.10);
-        spawn_uncertifiable(&mut failed);
-        spawn_free_shell(&mut failed, UNCERTIFIABLE_AT, Vec3::Z, 800.0, a_shot());
-        failed.update();
-        let hits = failed.world().resource::<ImpactLog>().0.clone();
-        assert_eq!(hits.len(), 1, "one fail-closed read");
-        assert_eq!(hits[0].surface, ImpactSurface::Armor);
-        assert_eq!(opened(&mut failed), None);
     }
 
-    /// The authority fails an uncertified fresh start closed, where it stands.
+    /// The game's damage model requires the same certified-shape invariant on the authority.
     #[test]
-    fn the_authority_fails_an_uncertified_start_closed() {
+    #[should_panic(expected = "spawn constructs certified trimesh or convex ballistic geometry")]
+    fn the_authority_panics_on_an_unreadable_ballistic_shape() {
         let mut app = world_with_plate(Vec3::new(3.0, 3.0, 0.10), Vec3::new(0.0, 2.0, 0.0));
         spawn_uncertifiable(&mut app);
-        let shell = spawn_free_shell(&mut app, UNCERTIFIABLE_AT, Vec3::Z, 800.0, a_shot());
+        spawn_free_shell(&mut app, UNCERTIFIABLE_AT, Vec3::Z, 800.0, a_shot());
         app.update();
-        let impacts = app.world().resource::<ImpactLog>().0.clone();
-        assert_eq!(impacts.len(), 1, "one fail-closed read: {}", impacts.len());
-        assert_eq!(impacts[0].verdict, Verdict::Struck);
-        assert!(impacts[0].position.distance(UNCERTIFIABLE_AT) < 1.0e-6);
-        assert!(app.world().get_entity(shell).is_err(), "the round stops");
     }
 
     /// Regression: sanctioned bounces are consumed strictly by ordinal.
@@ -8858,51 +8603,16 @@ mod march_tests {
         assert_frame_spans_the_disc(&app, shell, "catch-up reseed");
     }
 
-    /// A CORRIDOR WHOLLY INSIDE ARMOUR IS NOT OPEN AIR.
-    ///
-    /// The convex narrow phase probes both ends with `solid: true`, and deep inside a solid both
-    /// answer zero while the backward boundary probe reaches no face. Reporting nothing is then the
-    /// obvious thing to do and the one thing that must not happen: an empty corridor is exactly what
-    /// open air looks like, so the walk finds no material, `begin` returns `Miss`, and the round
-    /// flies on through solid armour at zero cost with no `Impact` at all. Codex measured a shell
-    /// advancing a full tick inside a 100 m volume with nothing reported.
-    ///
-    /// Undeclared containment is now a `WalkError`, so the driver fails closed on it: the round
-    /// stops where it is, and there is a neutral armour read to see it by. Free penetration is the
-    /// one outcome worse than a stopped shell, because armour that silently is not there is
-    /// indistinguishable from armour that was never modelled.
+    /// The game's damage model cannot resolve a shell whose containing geometry exceeds the
+    /// closing corridor: membership is established, but the exit must still be reached. The
+    /// authority panics on this contradiction instead of recording a fabricated armour verdict.
     #[test]
-    fn a_shell_inside_a_convex_volume_fails_closed_instead_of_flying_through() {
-        // A hundred metres of steel, and the shell starts in the middle of it. `world_with_plate`
-        // builds its plate as a CUBOID, which is the convex narrow phase.
-        let mut app = world_with_plate(Vec3::splat(100.0), Vec3::new(0.0, 2.0, 0.0));
-        app.init_resource::<TerminalLog>();
-        app.add_observer(capture_terminal);
-        let origin = Vec3::new(0.0, 2.0, 0.0);
-        let shell = spawn_headon_shell_at(&mut app, a_shot(), origin);
+    #[should_panic(expected = "the closing corridor must contain every opened shell's exit")]
+    fn a_shell_in_an_unclosable_volume_panics() {
+        // Fixture data: a volume longer than the resolution corridor, with the round at its centre.
+        let mut app = world_with_plate(Vec3::splat(200.0), Vec3::new(0.0, 2.0, 0.0));
+        spawn_headon_shell_at(&mut app, a_shot(), Vec3::new(0.0, 2.0, 0.0));
         app.update();
-
-        let impacts = app.world().resource::<ImpactLog>().0.clone();
-        assert_eq!(
-            impacts.len(),
-            1,
-            "the round inside the block is reported, not flown through: {:?}",
-            impacts.iter().map(|i| i.position).collect::<Vec<_>>(),
-        );
-        assert!(matches!(impacts[0].surface, ImpactSurface::Armor));
-        assert!(
-            !impacts[0].verdict.entered(),
-            "fail-closed is a neutral read: no perforation was resolved, so none is claimed",
-        );
-        assert!(
-            impacts[0].position.distance(origin) < 0.1,
-            "and it stops where it was, not a tick downrange: {:?}",
-            impacts[0].position,
-        );
-        assert!(
-            app.world().get::<Projectile>(shell).is_none(),
-            "a fail-closed round is consumed, not left marching",
-        );
     }
 
     /// A CROSSING IS TWO SEGMENTS, AND THE TICK PAYS FOR BOTH.

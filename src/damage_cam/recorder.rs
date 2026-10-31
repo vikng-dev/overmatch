@@ -228,7 +228,6 @@ impl MarchRecorder<'_, '_> {
                     .filter_map(|crossed| owner(crossed.volume))
                     .collect(),
                 ArmourMark::Burst { tank, .. } => tank.iter().copied().collect(),
-                ArmourMark::Failed => Vec::new(),
             };
             touched.sort();
             touched.dedup();
@@ -580,7 +579,7 @@ fn sanctioned_outcome(marks: &[ArmourMark], from: usize) -> Option<u32> {
         .find(|mark| !matches!(mark, ArmourMark::Wound { .. }))?
     {
         ArmourMark::Bounce { .. } | ArmourMark::Crossing { .. } => u32::try_from(ordinal).ok(),
-        ArmourMark::Failed | ArmourMark::Wound { .. } | ArmourMark::Burst { .. } => None,
+        ArmourMark::Wound { .. } | ArmourMark::Burst { .. } => None,
     }
 }
 

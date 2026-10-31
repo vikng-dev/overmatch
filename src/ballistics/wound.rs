@@ -19,7 +19,7 @@ use avian3d::prelude::SimpleCollider;
 use bevy::prelude::*;
 
 use super::collect::{self, Corridor};
-use super::resolve::{FieldReach, Leg, MAX_CORRIDOR, PROBE_MARGIN, ResolveContext, field_presence};
+use super::resolve::{FieldReach, Leg, PROBE_MARGIN, ResolveContext, field_presence};
 use super::walk::{self, WalkError, WitnessSpans};
 use super::{VolumeCrossing, hit_ancestor};
 
@@ -128,20 +128,14 @@ fn presence(
     let Some(&(witness, _)) = kept.first() else {
         return Ok(None);
     };
-    let Some((enter, leave)) = line_in_box(axis, lo, hi) else {
-        return Err(WalkError::UncertifiedStart {
-            volume: witness,
-            reason: "a witness line misses the bounds its colliders were admitted by",
-        });
-    };
+    let (enter, leave) = line_in_box(axis, lo, hi).expect(
+        "the game's damage model admitted each witness collider on this line, so their union meets it");
     let behind = (-enter).max(0.0);
     let total = behind + leave.max(0.0);
-    if !total.is_finite() || total > MAX_CORRIDOR {
-        return Err(WalkError::UncertifiedStart {
-            volume: witness,
-            reason: "a witness line through its colliders' bounds exceeds the corridor ceiling",
-        });
-    }
+    assert!(
+        total.is_finite(),
+        "game's damage model: finite loaded witness bounds yield a finite probe"
+    );
     let mut hits = Vec::new();
     collect::collect(
         &Corridor {

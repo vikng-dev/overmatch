@@ -174,3 +174,47 @@ fn survey() {
     .expect("world");
     println!("{}", render(&report));
 }
+
+/// The game's damage model panics on a broken material binding. The fuzzer must retain each
+/// reproducing ray and continue, so one bug cannot hide the later rays in the same survey.
+#[test]
+fn a_walk_panic_is_reported_per_ray_and_the_hunt_continues() {
+    let mut app = probe_world().expect("the probe world builds");
+    for mut volume in app
+        .world_mut()
+        .query::<&mut super::super::BallisticVolume>()
+        .iter_mut(app.world_mut())
+    {
+        volume.material.factor = f32::NAN;
+    }
+    let config = FuzzConfig {
+        rays: 64,
+        duplication_stride: 0,
+        max_region_sweeps: 0,
+        ..default()
+    };
+    app.init_resource::<FuzzOutput>()
+        .insert_resource(FuzzJob(config.clone()))
+        .add_systems(Update, run_fuzz.run_if(resource_exists::<FuzzJob>));
+    app.update();
+    let report = &app.world().resource::<FuzzOutput>().0;
+    assert_eq!(report.rays, config.rays);
+    assert!(
+        report.walk_errors.len() > 1,
+        "the hunt must survive its first panic"
+    );
+    assert!(
+        report
+            .walk_errors
+            .windows(2)
+            .all(|pair| pair[0].ray < pair[1].ray)
+    );
+    assert!(
+        report
+            .walk_errors
+            .iter()
+            .all(|failure| failure.error.contains("finite nonnegative resistance"))
+    );
+    assert!(!report.is_clean());
+    assert!(!app.world().contains_resource::<FuzzJob>());
+}

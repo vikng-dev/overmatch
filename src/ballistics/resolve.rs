@@ -33,13 +33,12 @@
 //! ([`field_direction`]). The field law they serve — strength, profile, shadowing, dose — is the
 //! design doc's §5 (`.agents/docs/design/armor-penetration-and-damage.md`).
 //!
-//! # Fail closed, never free
+//! # The game's damage model fails at its earliest gate
 //!
-//! On any structured [`WalkError`] the round STOPS at the contact it was resolving: no perforation,
-//! no spall, no transit damage. A wrong answer here is free penetration, and free penetration is
-//! indistinguishable from armour that was never modelled — the defect class §13 exists to kill.
-//! Crashing a multiplayer authority is too strong a response; a stopped shell and a rate-limited
-//! warning is not.
+//! The asset door refuses invalid geometry and materials. Spawn binds certified shapes to their
+//! volumes. Every remaining walk contradiction is a bug: gameplay panics in every build, with
+//! the violated invariant and structured diagnostic. Only an incomplete intermediate corridor
+//! is retried, by extending it; no error becomes a stopped round or a skipped dose.
 
 use std::cell::OnceCell;
 
@@ -83,7 +82,7 @@ pub(crate) const MAX_CORRIDOR: f32 = 50.0;
 /// held crossings chained end to end can carry the flight arbitrarily far while each one stays
 /// certifiable, so exceeding this does not prove the geometry malformed. It bounds how far
 /// downrange one step may apply consequences; the value is set at the corridor's scale as policy,
-/// and a step that reaches it stops the round (fail closed).
+/// and a step that reaches it is a bug and panics.
 pub(crate) const MAX_OVERRUN: f32 = MAX_CORRIDOR;
 
 /// Ceiling on the crossings one step may decide — a chosen resource limit, not a certified bound.
@@ -92,7 +91,7 @@ pub(crate) const MAX_OVERRUN: f32 = MAX_CORRIDOR;
 /// disjoint faces, a bounce can return to a face already struck, and an empty span consumes distance
 /// rather than a face. [`collect::MAX_FACES`] bounds one corridor's collection, not a step. So the
 /// value reuses that scale as policy, bounding the work one step may do; a step that reaches it
-/// stops the round (fail closed), whether or not the geometry was well formed.
+/// panics, whether or not the geometry was well formed.
 pub(crate) const MAX_STEP_CROSSINGS: usize = collect::MAX_FACES;
 
 /// The crossing ceiling a world's steps run under in place of [`MAX_STEP_CROSSINGS`], when it names
@@ -161,8 +160,7 @@ impl Budget {
     }
 
     /// Charge one more crossing of `travel` metres, BEFORE its consequences are applied — or the
-    /// structured error that stops the round where it stands. Exhaustion fails closed: a round that
-    /// hits a limit stops; it is never waved through.
+    /// structured diagnostic that panics in gameplay. A refused crossing applies no consequences.
     pub(crate) fn charge(&mut self, travel: f32) -> Result<(), WalkError> {
         let crossings = self.crossings + 1;
         let remaining = self.remaining - travel;
@@ -190,7 +188,7 @@ impl Budget {
 /// projectile. Cost basis for the revisit, MEASURED on the M4 (branch `bench/disc-min-caliber`):
 /// 40 / 177 / 400 µs per impact at k = 1 / 5 / 13; free flight is
 /// k-independent. Precondition: the degenerate-bake volumes on the fuzzer residue list — a ring
-/// samples 13× more surface, so fail-closed impacts scale ~4% → 14% with k on today's asset.
+/// samples 13× more surface, so contradictory impacts scale ~4% → 14% with k on today's asset.
 pub(crate) const DISC_MIN_CALIBER: f32 = 0.020;
 
 /// The limits every crossing's mechanism advances under: a round is at rest once its readout would
@@ -330,26 +328,8 @@ pub(crate) fn layout(frame: &DiscFrame, radius: f32) -> Vec<Vec3> {
 /// to a candidate the probe set aside.
 pub(super) const PROBE_MARGIN: f32 = MARCH_EPS;
 
-/// Ceiling on the volumes one containment probe reads — a chosen resource limit, not a derived
-/// bound.
-///
-/// A probe runs one narrow phase per candidate per sample, so its work grows with the candidates
-/// whose bounds contain a start; nothing in the geometry bounds how many of those there are. The
-/// value is policy, set well above what probes read today (MEASURED: at most 4 candidates and 78
-/// faces per probe over the 25 402 probes the library's test suite runs, the §13.6 gate's CI-scale
-/// run included), and a start that reaches it fails closed ([`WalkError::UncertifiedStart`]),
-/// whether or not the geometry was well formed.
-pub(crate) const MAX_PROBE_CANDIDATES: usize = 64;
-
-/// Ceiling on the faces one containment probe collects, summed over its samples — a chosen
-/// resource limit, not a derived bound. It reuses one corridor's [`collect::MAX_FACES`] as policy;
-/// a probe that reaches it fails closed ([`WalkError::UncertifiedStart`]).
-///
-/// With [`MAX_PROBE_CANDIDATES`] it bounds what a probe COLLECTS and walks. It does not bound the
-/// triangles a candidate's narrow phase tests to find them: that is each candidate's own mesh, finite
-/// asset data with no geometry-independent cap.
-pub(crate) const MAX_PROBE_FACES: usize = collect::MAX_FACES;
-
+/// Containment work is bounded by the finite candidate geometry loaded into the world. It has no
+/// independent candidate or accumulated-disc quota: every admitted shell must be read.
 /// A fresh disc laid on `frame` at the world point `at`, travelling `axis`, with every sample's
 /// membership ESTABLISHED rather than declared.
 ///
@@ -375,9 +355,8 @@ pub(crate) const MAX_PROBE_FACES: usize = collect::MAX_FACES;
 /// start it lies within rounding of.
 ///
 /// Certified for the two shapes the collector reads honestly: a trimesh carrying its manifold
-/// certificate, and a convex solid. Any other shape is [`WalkError::UncertifiedStart`], as is a
-/// probe longer than [`MAX_CORRIDOR`] or past its work ceilings ([`MAX_PROBE_CANDIDATES`],
-/// [`MAX_PROBE_FACES`]); every structured error fails the round closed.
+/// certificate, and a convex solid. Spawn constructs only these shapes; another is a wiring bug.
+/// The probe spans its finite loaded geometry, independently of a resolution corridor's length.
 pub(crate) fn certified(
     context: &ResolveContext<'_, '_, '_>,
     not_own: &dyn Fn(Entity) -> bool,
@@ -441,12 +420,10 @@ fn certified_at(
             continue;
         }
         let shape = collider.shape_scaled();
-        if !matches!(shape.as_typed_shape(), TypedShape::TriMesh(_)) && !shape.is_convex() {
-            return Err(WalkError::UncertifiedStart {
-                volume: node,
-                reason: "a candidate is neither a certified trimesh nor convex",
-            });
-        }
+        assert!(
+            matches!(shape.as_typed_shape(), TypedShape::TriMesh(_)) || shape.is_convex(),
+            "game's damage model: spawn constructs certified trimesh or convex ballistic geometry: {node:?}"
+        );
         lo = lo.min(min);
         hi = hi.max(max);
         near.push((node, primitive));
@@ -463,12 +440,6 @@ fn certified_at(
                     ..seed
                 })
                 .collect(),
-        });
-    }
-    if near.len() > MAX_PROBE_CANDIDATES {
-        return Err(WalkError::UncertifiedStart {
-            volume: near[0].0,
-            reason: "the containment probe reads more candidates than its ceiling",
         });
     }
     // How far along `direction` the point leaves the box: past the first slab it leaves, it is
@@ -494,16 +465,12 @@ fn certified_at(
         .fold(0.0, f32::max)
         + PROBE_MARGIN;
     let length = behind + ahead;
-    if !length.is_finite() || length > MAX_CORRIDOR {
-        return Err(WalkError::UncertifiedStart {
-            volume: near[0].0,
-            reason: "the containment probe through the candidates' bounds exceeds the corridor \
-                     ceiling",
-        });
-    }
+    assert!(
+        length.is_finite(),
+        "game's damage model: loaded finite candidate bounds yield a finite containment probe"
+    );
 
     let mut samples = Vec::with_capacity(offsets.len());
-    let mut faces = 0;
     for offset in offsets {
         let mut hits = Vec::new();
         collect::collect(
@@ -521,13 +488,6 @@ fn certified_at(
             context.colliders,
             &mut hits,
         )?;
-        faces += hits.len();
-        if faces > MAX_PROBE_FACES {
-            return Err(WalkError::UncertifiedStart {
-                volume: near[0].0,
-                reason: "the containment probe collects more faces than its ceiling",
-            });
-        }
         samples.push(SampleCorridor {
             offset,
             initial_presence: Vec::new(),
@@ -709,9 +669,6 @@ pub(crate) struct FieldRay {
     pub end: Vec3,
     /// The doses it addressed, in entry order.
     pub doses: Vec<Dose>,
-    /// The witness pass's failure along this direction: `end` and the hard doses stand, and no
-    /// witness is dosed by it.
-    pub witness_error: Option<WalkError>,
 }
 
 /// The ordered presence along one direction of a field thrown from the world point `at`: the
@@ -726,7 +683,7 @@ pub(crate) struct FieldRay {
 /// itself. Candidates are the admitted volumes whose bounds, grown by [`PROBE_MARGIN`], the
 /// forward ray meets within [`MAX_CORRIDOR`]; the walk starts and ends outside the union of those
 /// grown bounds, so no candidate's face lies within the collector's sitting reach of either end.
-/// A walk longer than [`MAX_CORRIDOR`] is [`WalkError::UncertifiedStart`].
+/// Its containment probe spans the finite loaded bounds; it does not truncate their geometry.
 pub(crate) fn field_presence(
     context: &ResolveContext<'_, '_, '_>,
     field: &FieldReach,
@@ -772,22 +729,15 @@ pub(crate) fn field_presence(
     if near.is_empty() {
         return Ok(None);
     }
-    let Some((enter, leave)) = meets(lo, hi) else {
-        return Err(WalkError::UncertifiedStart {
-            volume: near[0].0,
-            reason: "a field direction's line misses the bounds its candidates were admitted by",
-        });
-    };
-    // `at` is inside the union or behind it, so the walk starts behind both.
+    let (enter, leave) = meets(lo, hi).expect(
+        "the game's damage model admitted each candidate on this line, so their union meets it",
+    );
     let behind = (-enter).max(0.0);
     let length = behind + leave.max(0.0);
-    if !length.is_finite() || length > MAX_CORRIDOR {
-        return Err(WalkError::UncertifiedStart {
-            volume: near[0].0,
-            reason: "a field direction's walk through the struck tank's bounds exceeds the \
-                     corridor ceiling",
-        });
-    }
+    assert!(
+        length.is_finite(),
+        "game's damage model: finite loaded bounds yield a finite field probe"
+    );
     let mut hits = Vec::new();
     collect::collect(
         &Corridor {
@@ -826,7 +776,7 @@ pub(crate) fn field_presence(
             initial_presence: Vec::new(),
             hits,
         },
-        &VolumeTable::new(entries)?,
+        &VolumeTable::new(entries),
         &context.laws,
     )?;
     Ok(Some((behind as f64, walked)))
@@ -853,8 +803,7 @@ pub(crate) fn field_presence(
 /// it stopped takes `strength × weight`, once, the arithmetic of a hard box's dose (a witness
 /// holding `at` is entered there). `end` and the hard dose are what they would be with no witness
 /// present. The doses are in entry order, a hard box before a witness entered at the same point. A
-/// witness pass that fails doses no witness and leaves `end` and the hard dose as they are
-/// ([`FieldRay::witness_error`]).
+/// contradiction in the witness pass propagates to the caller, which panics in gameplay.
 ///
 /// MONOTONICITY. Every dose is `strength × weight` or nothing, and adding a volume can only move
 /// the stop to an earlier entry or leave it where it is, so it raises no other volume's dose,
@@ -901,23 +850,16 @@ pub(crate) fn field_direction(
     } else {
         MAX_CORRIDOR
     };
-    let witness_error = match super::wound::entries_in(context, field, at, dir, ahead) {
-        Ok(entered) => {
-            for (witness, t) in entered {
-                let t = start + t;
-                if t < reach && strength > 0.0 && is_box(witness) {
-                    doses.push((t, dose(witness)));
-                }
-            }
-            None
+    for (witness, t) in super::wound::entries_in(context, field, at, dir, ahead)? {
+        let t = start + t;
+        if t < reach && strength > 0.0 && is_box(witness) {
+            doses.push((t, dose(witness)));
         }
-        Err(error) => Some(error),
-    };
+    }
     doses.sort_by(|a, b| a.0.total_cmp(&b.0));
     Ok(FieldRay {
         end,
         doses: doses.into_iter().map(|(_, dose)| dose).collect(),
-        witness_error,
     })
 }
 
@@ -1958,7 +1900,7 @@ pub(super) fn volume_table(
             }
         }
     }
-    VolumeTable::new(entries)
+    Ok(VolumeTable::new(entries))
 }
 
 /// Apply a decision's consequences on the runtime: HP, impulses, the shell's marks and path, spall,
