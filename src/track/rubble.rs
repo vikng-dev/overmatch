@@ -611,6 +611,50 @@ mod tests {
         );
     }
 
+    /// THE BELT GRIPS A PIECE BY BOTH SIDES' MATERIALS: a belt–piece contact's μ is the one pair
+    /// rule over the belt's coefficient and the piece's own row (`substances::PAIR_RULE`, the
+    /// geometric mean), so two pieces of different substances under one belt take different μ, each
+    /// `√(μ_belt · μ_piece)`. A piece whose friction carried a rule that lets one side win (the
+    /// `Max` that made every belt–brick pair the belt's 0.9) reads the same μ for both and fails
+    /// here; so does a belt that is not combined at all.
+    ///
+    /// FIXTURE DATA: belt 0.9, pieces 0.65 and 0.3.
+    #[test]
+    fn the_belt_grips_a_piece_by_both_sides_materials() {
+        let mut app = physics();
+        let rows = [0.65, 0.3];
+        let pieces = rows.map(|row| {
+            let body = piece(&mut app, 10.0 * row, 0.0);
+            app.world_mut()
+                .entity_mut(body)
+                .insert(contact_friction(row));
+            body
+        });
+        app.update();
+        let mus = app
+            .world_mut()
+            .run_system_once(move |rubble: RubbleQuery, bodies: Query<PieceData>| {
+                let near = rubble.near(Vec3::new(5.0, 0.0, 0.0), 10.0);
+                let gathered = RubbleBodies::gather(&rubble, &near, contact_friction(0.9), &bodies);
+                pieces.map(|body| {
+                    gathered
+                        .surfaces
+                        .iter()
+                        .find(|s| rubble.body_of(s.collider) == body)
+                        .expect("the piece was gathered")
+                        .mu
+                })
+            })
+            .expect("the gather system runs");
+        for (mu, row) in mus.into_iter().zip(rows) {
+            assert!(
+                (mu - (0.9_f32 * row).sqrt()).abs() < 1e-6,
+                "{mu} for a {row} piece"
+            );
+        }
+        assert!(mus[0] != mus[1]);
+    }
+
     /// A deterministic stream of fixture values in `[0, 1)`.
     struct Lcg(u64);
 
