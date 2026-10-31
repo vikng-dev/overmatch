@@ -10,14 +10,6 @@ use crate::tank::{RemoteServos, ServoIndex, ServoState, Tank, TankRoot, TankServ
 use crate::track::sim::TrackContacts;
 
 /// Log and latch corrupt physics state before Avian consumes it.
-///
-/// Colliders are read only where a checked component changed, or the entity became a collider,
-/// since this probe's previous run. Coverage is exact by induction: the first run reads every
-/// collider, each later run reads every value written since the one before, and a value whose
-/// change tick has not moved keeps the bits an earlier run found clean (a corrupt one latches the
-/// probe). That holds while every write to these components marks its change tick: no code in this
-/// crate, avian3d or lightyear calls `bypass_change_detection` on them. Tank bodies are read whole:
-/// there are few, and every step moves them.
 pub(crate) fn fixed_nan_probe(
     bodies: Query<
         (
@@ -37,15 +29,7 @@ pub(crate) fn fixed_nan_probe(
             Option<&Rotation>,
             Option<&ColliderTransform>,
         ),
-        (
-            With<ColliderOf>,
-            Or<(
-                Changed<ColliderOf>,
-                Changed<Position>,
-                Changed<Rotation>,
-                Changed<ColliderTransform>,
-            )>,
-        ),
+        With<ColliderOf>,
     >,
     mut latched: Local<bool>,
 ) {
