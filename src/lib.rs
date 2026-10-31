@@ -302,7 +302,7 @@ pub(crate) fn gpu_less_default_plugins(
 /// The dedicated server's plugin floor: [`gpu_less_default_plugins`] without the plugins that serve
 /// only a player's screen, speakers or hands, with task pools sized for the host
 /// (`net::server_host::host_task_pools`). Mounted by the server and by the bitprobe fixture, so
-/// the fixture simulates on the floor the authority runs.
+/// the fixture simulates on the floor the authority runs, with the same sizing rule.
 ///
 /// No authority system reads what a dropped plugin produces: UI nodes and text, sprites, picking
 /// pointers, input focus, accessibility, gamepads, the clipboard, audio, animation, gizmos, light

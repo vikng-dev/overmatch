@@ -1,7 +1,8 @@
-//! What the dedicated server's host gives it: the CPU it may use and and the threads it starts.
+//! What the dedicated server's host gives it: the CPU it may use and the threads it starts.
 //!
 //! - [`host_task_pools`] sizes Bevy's task pools for this host by the rule below;
-//!   `server_plugin_floor` mounts it, so the server and the bitprobe fixture run on the same pools.
+//!   `server_plugin_floor` mounts it, so the server and the bitprobe fixture follow the same
+//!   sizing rule.
 //! - [`log_startup`] prints one `server: host` line at startup: `available_parallelism`, each Bevy task
 //!   pool's thread count, and (Linux) the container's cgroup CPU quota and cpuset. An unreadable
 //!   value logs as `unknown`.
@@ -19,17 +20,28 @@
 //! multi-threaded executor scopes with `tick_task_pool_executor: false`), so compute = cores leaves
 //! no core idle in a parallel phase and starts no compute thread a core cannot run.
 //!
+//! The async thread is not a compute thread: Avian's tree tasks run alongside the narrow phase and
+//! the solver (spawned at `BroadPhaseSystems::Last`, blocked on at `SolverSystems::Finalize`,
+//! avian3d 0.7 `collider_tree/optimization.rs`), so the process can have cores + 1 busy threads.
+//! On 2 vCPU that stays inside the quota: the 2/1/1 runs on a 2.00 quota show zero throttling in
+//! all 12 windows at 134-148 % CPU (MEASURED, `perf-2026-10-31/*-t4*/*.server.json`).
+//!
 //! The core count is `std::thread::available_parallelism`. On Linux that is the smaller of the
-//! affinity mask (the cpuset) and the cgroup v1/v2 CPU quota rounded down (Rust 1.98 std,
-//! `sys/thread/unix.rs`), so a fractional quota gets no thread it cannot run. On Edgegap a 2.00-cpu
-//! quota over cpuset 0-15 reads 2 and a 1.00-cpu quota reads 1 (MEASURED, the startup lines of
+//! affinity mask (the cpuset) and the cgroup v1/v2 CPU quota rounded down, at least 1 (Rust 1.98
+//! std, `sys/thread/unix.rs`). A quota below 1 still runs 1/1/1. On Edgegap a 2.00-cpu quota over
+//! cpuset 0-15 reads 2 and a 1.00-cpu quota reads 1 (MEASURED, the startup lines of
 //! `.agents/scratch/perf-2026-10-31/`).
 //!
-//! Evidence, 30 tanks on Edgegap (that folder's README, TLDR 3; MEASURED): Bevy's stock split gives
-//! 2 vCPU pools of 1/1/1 (compute/async/io), and the server then held ~102 % of one core and ran no
-//! faster than on 1 vCPU (tick p50 17.5 against 18.5 ms). Pools 2/1/1 cut the tick p50 to 13.4 ms
-//! on alpha.4 and 10.9 ms on alpha.5; 2/2/2 was worse (14.6–15.2 ms). On 1 vCPU, a compute pool of
-//! 2 ran into the quota: tick p95 88 ms, throttled 441–472 ms of every second.
+//! On a many-core host the async pool is 1 where Bevy's stock split gives up to 3, which
+//! serializes Avian's up to 4 tree tasks (avian3d 0.7 `proxy_key.rs`). MEASURED on the M4, stock split against
+//! this sizing: physics p50 939/1062 -> 1129/1139 us and CPU 86/97 -> 119/121 %, while tick p50
+//! improved. Whether the async pool going 3 -> 1 or the E-cores cause it is DERIVED, not isolated.
+//! Edgegap is unaffected: the stock split already gave it async 1. Measure async 2 before a host
+//! larger than 2 vCPU ships.
+//!
+//! Evidence: on 2 vCPU the stock 1/1/1 held the server to ~102 % of one core, and 2/1/1 cut the
+//! tick p50 from 17.5 to 10.9 ms (MEASURED, `.agents/scratch/perf-2026-10-31/README.md`, TLDR 3).
+//! Provenance of the retired `OVERMATCH_SERVER_THREADS` lever is in the same folder.
 
 use core::num::NonZero;
 
@@ -199,10 +211,10 @@ pub(super) fn log_startup() {
 mod tests {
     use super::*;
 
-    /// The compute pool is exactly the cores the process may use: one fewer leaves a core idle
-    /// (pools 1/1/1 held a 2-vCPU host to ~102 % of one core), one more starts a thread no core can
-    /// run (2 compute threads on 1 vCPU ran into the quota). Async compute and IO keep one thread
-    /// each, the least that runs a spawned task. Every deployed server's pools rest on it.
+    /// The compute pool is exactly the cores the process may use: one fewer leaves a core idle,
+    /// one more starts a thread no core can run (module doc, "Task-pool sizing", with its MEASURED
+    /// runs). Async compute and IO keep one thread each, the least that runs a spawned task.
+    /// `server_plugin_floor` mounts this sizing on the server and the bitprobe fixture.
     #[test]
     fn the_compute_pool_gets_every_core_and_no_more() {
         for cores in [1, 2, 4, 10] {
