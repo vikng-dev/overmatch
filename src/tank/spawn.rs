@@ -158,6 +158,40 @@ impl<'a> TankContent<'a> {
     pub(crate) fn spec(self) -> &'a TankSpec {
         self.spec
     }
+
+    /// DERIVED conservative body radius in metres, from declared collision proxies and prepared
+    /// track shapes. Each ancestor contributes its translation and largest scale to a sphere;
+    /// rotations preserve that sphere, including arbitrary servo angles. This is construction
+    /// data from the eager blueprint, independent of presentation assets.
+    pub(crate) fn contact_radius(self) -> f32 {
+        let mut radius = self.track_colliders.contact_radius();
+        for &index in &self.geometry.collision_proxies {
+            let node = &self.geometry.nodes[index];
+            let mut proxy = node
+                .primitives
+                .iter()
+                .flat_map(|primitive| &primitive.positions)
+                .map(|point| Vec3::from(*point).length())
+                .fold(0.0, f32::max);
+            let mut ancestor = Some(index);
+            while let Some(index) = ancestor {
+                let node = &self.geometry.nodes[index];
+                proxy = transformed_radius(proxy, &node.transform);
+                ancestor = node.parent;
+            }
+            radius = radius.max(proxy);
+        }
+        assert!(
+            radius.is_finite() && radius > 0.0,
+            "the eager bake certifies finite, nonempty tank collision geometry"
+        );
+        radius
+    }
+}
+
+/// DERIVED triangle-inequality bound for a sphere through one authored local transform.
+fn transformed_radius(radius: f32, transform: &Transform) -> f32 {
+    transform.translation.length() + transform.scale.abs().max_element() * radius
 }
 
 /// The windowed compositions' load: the spec sheet and the view artifact's scene.
@@ -1059,6 +1093,30 @@ fn assemble_tank_body(commands: &mut Commands, root: Entity, content: TankConten
 mod proxy_tests {
     use super::*;
     use crate::bake::MeshGeometry;
+
+    /// Spawn clearance must enclose constructed points at any rotation, including mirrored and
+    /// nonuniform scale. Fixtures vary translation, scale and orientation independently; omitting
+    /// either construction term breaks the bound on a transformed point.
+    #[test]
+    fn construction_radius_encloses_rotated_scaled_and_offset_points() {
+        for translation in [Vec3::ZERO, Vec3::new(8.0, -3.0, 4.0)] {
+            for scale in [Vec3::ONE, Vec3::new(-3.0, 0.5, 2.0)] {
+                for angle in [0.0, 0.7, 2.1] {
+                    let transform = Transform {
+                        translation,
+                        scale,
+                        rotation: Quat::from_rotation_y(angle) * Quat::from_rotation_x(angle),
+                    };
+                    for point in [Vec3::X, Vec3::Y, Vec3::Z, Vec3::new(3.0, -4.0, 2.0)] {
+                        assert!(
+                            transform.transform_point(point).length()
+                                <= transformed_radius(point.length(), &transform) + 1e-5
+                        );
+                    }
+                }
+            }
+        }
+    }
 
     fn tetra(offset: f32) -> MeshGeometry {
         MeshGeometry {

@@ -48,18 +48,23 @@ impl SpawnPlacement {
         }
     }
 
-    pub(super) fn choose(&mut self, points: &SpawnPoints, live: &[Vec2]) -> Option<Vec2> {
+    pub(super) fn choose(
+        &mut self,
+        points: &SpawnPoints,
+        live: &[Vec2],
+        clearance: f32,
+    ) -> Option<Vec2> {
         let alone_index = if live.is_empty() {
             self.random_index(points.as_slice().len())
         } else {
             0 // No random draw is consumed when another tank is live.
         };
-        choose_spawn(points, live, &self.rule, alone_index)
+        choose_spawn(points, live, &self.rule, alone_index, clearance)
     }
 }
 
 /// Choose the authored point whose nearest live tank is closest to the mode's target distance,
-/// excluding every point strictly inside its minimum. Distances are horizontal metres; ties use
+/// excluding points inside either its minimum or the body construction clearance. Distances are horizontal metres; ties use
 /// authored order. With no live tanks, `alone_index` is the server's random draw into the checked
 /// nonempty points. This function has no RNG or world side effects.
 ///
@@ -70,6 +75,7 @@ fn choose_spawn(
     live: &[Vec2],
     rule: &SpawnRule,
     alone_index: usize,
+    clearance: f32,
 ) -> Option<Vec2> {
     if live.is_empty() {
         return Some(points.as_slice()[alone_index]);
@@ -82,7 +88,7 @@ fn choose_spawn(
                 .iter()
                 .map(|&tank| point.distance(tank))
                 .fold(f32::INFINITY, f32::min);
-            (nearest >= rule.minimum_distance_m)
+            (nearest >= rule.minimum_distance_m.max(clearance))
                 .then_some((point, (nearest - rule.target_distance_m).abs()))
         })
         .min_by(|(_, a), (_, b)| a.total_cmp(b))
@@ -113,7 +119,13 @@ mod tests {
     fn the_nearest_tank_distance_closest_to_the_target_wins() {
         let points = points(&[[40.0, 0.0], [0.0, 70.0], [80.0, 0.0], [0.0, 25.0]]);
         assert_eq!(
-            choose_spawn(&points, &[Vec2::ZERO, Vec2::new(45.0, 0.0)], &rule(), 0),
+            choose_spawn(
+                &points,
+                &[Vec2::ZERO, Vec2::new(45.0, 0.0)],
+                &rule(),
+                0,
+                0.0
+            ),
             Some(Vec2::new(80.0, 0.0)),
         );
     }
@@ -124,12 +136,12 @@ mod tests {
     fn an_inside_minimum_point_never_beats_an_available_point() {
         let candidates = points(&[[19.0, 0.0], [100.0, 0.0]]);
         assert_eq!(
-            choose_spawn(&candidates, &[Vec2::ZERO], &rule(), 0),
+            choose_spawn(&candidates, &[Vec2::ZERO], &rule(), 0, 0.0),
             Some(Vec2::new(100.0, 0.0))
         );
         let boundary = points(&[[20.0, 0.0]]);
         assert_eq!(
-            choose_spawn(&boundary, &[Vec2::ZERO], &rule(), 0),
+            choose_spawn(&boundary, &[Vec2::ZERO], &rule(), 0, 0.0),
             Some(Vec2::new(20.0, 0.0))
         );
     }
@@ -142,8 +154,24 @@ mod tests {
                 &points(&[[0.0, 0.0], [19.0, 0.0]]),
                 &[Vec2::ZERO],
                 &rule(),
-                0
+                0,
+                0.0
             ),
+            None
+        );
+    }
+
+    /// Construction clearance can exceed the mode's minimum. A larger body must defer instead
+    /// of overlapping another tank just because the mode's preferred spacing allowed its centre.
+    #[test]
+    fn physical_clearance_can_exceed_the_mode_minimum() {
+        let candidates = points(&[[21.0, 0.0], [50.0, 0.0]]);
+        assert_eq!(
+            choose_spawn(&candidates, &[Vec2::ZERO], &rule(), 0, 30.0),
+            Some(Vec2::new(50.0, 0.0))
+        );
+        assert_eq!(
+            choose_spawn(&points(&[[21.0, 0.0]]), &[Vec2::ZERO], &rule(), 0, 30.0),
             None
         );
     }
@@ -155,7 +183,7 @@ mod tests {
         let points = points(&[[0.0, 0.0], [10.0, 20.0], [-30.0, 0.0]]);
         for index in 0..points.as_slice().len() {
             assert_eq!(
-                choose_spawn(&points, &[], &rule(), index),
+                choose_spawn(&points, &[], &rule(), index, 0.0),
                 Some(points.as_slice()[index])
             );
         }
@@ -170,9 +198,9 @@ mod tests {
         let mut seen = Vec::new();
         for _ in 0..100 {
             let selected = a
-                .choose(&points, &[])
+                .choose(&points, &[], 0.0)
                 .expect("nonempty points with no live tanks");
-            assert_eq!(Some(selected), b.choose(&points, &[]));
+            assert_eq!(Some(selected), b.choose(&points, &[], 0.0));
             if !seen.contains(&selected) {
                 seen.push(selected);
             }
@@ -191,7 +219,7 @@ mod tests {
         for first in 0..manifest.spawn_points.as_slice().len() {
             let mut live = Vec::new();
             for _ in 0..capacity {
-                let point = choose_spawn(&manifest.spawn_points, &live, &mode.spawn, first)
+                let point = choose_spawn(&manifest.spawn_points, &live, &mode.spawn, first, 0.0)
                     .expect("author map points far enough apart to admit the configured capacity");
                 live.push(point);
             }

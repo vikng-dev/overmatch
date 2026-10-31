@@ -8,7 +8,7 @@
 //! ordinary solver contacts, including the structure contact reader. Terrain meets only the stop:
 //! side slices never carry the belt's ground support.
 
-use avian3d::prelude::{Collider, CollisionLayers, Friction, LayerMask};
+use avian3d::prelude::{Collider, CollisionLayers, Friction, LayerMask, SimpleCollider};
 use bevy::prelude::*;
 
 use super::derive::SuspensionParams;
@@ -52,6 +52,19 @@ impl TrackColliders {
             side_plates,
             friction,
         }
+    }
+
+    /// DERIVED root-centred sphere enclosing every prepared running-gear shape, in metres.
+    /// A sphere also bounds horizontal occupancy at any body orientation.
+    pub(crate) fn contact_radius(&self) -> f32 {
+        self.colliders
+            .values()
+            .chain(self.side_plates.values().flat_map(|pair| pair.iter()))
+            .map(|collider| {
+                let bounds = collider.aabb(Vec3::ZERO, Quat::IDENTITY);
+                bounds.min.abs().max(bounds.max.abs()).length()
+            })
+            .fold(0.0, f32::max)
     }
 
     /// A tank kind's shapes at its authored travel, prepared during startup extraction of the sim

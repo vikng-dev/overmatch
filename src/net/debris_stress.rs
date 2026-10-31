@@ -4,7 +4,7 @@
 //! releases.
 //!
 //! Every `period_s` of fixed time the server releases one breach of `pieces` dynamic fragments
-//! beside one tank, round-robin over every [`Tank`] root: a wall section [`WALL_OFFSET_M`] off the
+//! beside one tank, round-robin over every [`Tank`] root: a wall section outside the constructed
 //! hull's flank, its pieces 0–3 m above the ground and thrown toward the hull, so they land on and
 //! against hulls as well as on the terrain. A piece collides with `Layer::Terrain` (the ground,
 //! houses, trunks), `Layer::Vehicle` (the tanks' collision proxies) and the other pieces.
@@ -66,9 +66,6 @@ const FRAGMENT_HULL: [Vec3; 12] = [
 /// ASSUMED masonry density, kg/m³ (fixture).
 const DENSITY_KG_M3: f32 = 1_800.0;
 
-/// Horizontal distance from the tank root to the breach's near face, m. Fixture: outside the hull's
-/// flank for a tank up to ~6 m wide.
-const WALL_OFFSET_M: f32 = 3.5;
 /// The breach lattice's pitch, m: wider than the fragment's widest footprint at any release turn
 /// (0.62 m, DERIVED: its 0.28 m outer radius plus the ±0.15 rad tilt's lean), so no two pieces start
 /// overlapping.
@@ -280,6 +277,7 @@ fn breach(
     anchor: Vec3,
     heading: Quat,
     side: f32,
+    radius: f32,
     pieces: u32,
     first_seq: u64,
     ground: impl Fn(Vec2) -> Option<f32>,
@@ -294,7 +292,7 @@ fn breach(
             let seq = first_seq + u64::from(i);
             let (row, column, layer) = (i % ROWS, (i / ROWS) % columns, i / (ROWS * columns));
             let xz = anchor
-                + outward * (WALL_OFFSET_M + layer as f32 * LATTICE_M)
+                + outward * (radius + LATTICE_M + layer as f32 * LATTICE_M)
                 + along * ((column as f32 - centre) * LATTICE_M);
             let ground = ground(Vec2::new(xz.x, xz.z))?;
             let y = ground + GROUND_CLEARANCE_M + HALF_HEIGHT_M + row as f32 * LATTICE_M;
@@ -318,6 +316,7 @@ fn release_breaches(
     mut stress: ResMut<DebrisStress>,
     tanks: Query<(&Position, &Rotation), With<Tank>>,
     grid: Option<Res<HeightGrid>>,
+    source: crate::tank::TankSimSource,
     mut commands: Commands,
 ) {
     let now = time.elapsed_secs_f64();
@@ -347,6 +346,10 @@ fn release_breaches(
         anchor.0,
         heading.0,
         side,
+        source
+            .get()
+            .expect("a spawned tank was built from the eager blueprint")
+            .contact_radius(),
         stress.lever.pieces,
         stress.released,
         ground,
@@ -642,12 +645,20 @@ mod tests {
     fn a_breach_stands_beside_the_flank_and_is_thrown_at_the_hull() {
         let anchor = Vec3::new(10.0, 5.0, -4.0);
         let ground = 4.0;
-        let pieces = breach(anchor, Quat::IDENTITY, 1.0, 200, 0, |_| Some(ground));
+        let radius = 7.0; // ASSUMED fixture body radius, deliberately larger than the old offset.
+        let pieces = breach(anchor, Quat::IDENTITY, 1.0, radius, 200, 0, |_| {
+            Some(ground)
+        });
         assert_eq!(pieces.len(), 200);
         for piece in &pieces {
             let height = piece.position.y - HALF_HEIGHT_M - ground;
             assert!((0.0..=3.0).contains(&height), "{piece:?}");
-            assert!(piece.position.x - anchor.x >= WALL_OFFSET_M, "{piece:?}");
+            assert!(
+                piece.position.x - anchor.x
+                    + piece.position.abs().max_element() * f32::EPSILON * 4.0
+                    >= radius + LATTICE_M,
+                "{piece:?}"
+            );
             assert!(piece.velocity.x < 0.0, "thrown toward the hull: {piece:?}");
         }
         for (i, a) in pieces.iter().enumerate() {
@@ -658,6 +669,6 @@ mod tests {
                 );
             }
         }
-        assert!(breach(anchor, Quat::IDENTITY, 1.0, 10, 0, |_| None).is_empty());
+        assert!(breach(anchor, Quat::IDENTITY, 1.0, radius, 10, 0, |_| None).is_empty());
     }
 }
