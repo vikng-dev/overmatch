@@ -21,8 +21,9 @@
 //! shows when the round that made it is drawn arriving. A building with a swapped element draws its
 //! own mesh ([`broken_mesh`]): whole elements as before, a swapped element's standing chunks as
 //! their hulls, framed exactly as the element's faces, so a swapped wall looks unchanged until a
-//! chunk goes. Cracks are dark strips where an opened seam meets a wall face ([`crack_mesh`]). A
-//! fallen group draws its chunks' hulls on its body or carrier ([`piece_mesh`]).
+//! chunk goes; one with nothing left standing draws no mesh at all, never an empty one. Cracks are
+//! dark strips where an opened seam meets a wall face ([`crack_mesh`]). A fallen group draws its
+//! chunks' hulls on its body or carrier ([`piece_mesh`]).
 
 use bevy::mesh::{Indices, PrimitiveTopology};
 use bevy::prelude::*;
@@ -240,7 +241,9 @@ pub(crate) struct ShownShape(pub(crate) Shape);
 /// A building view's own mesh once it broke (the shared one before), and its cracks' child.
 #[derive(Component)]
 struct OwnMesh {
-    mesh: Handle<Mesh>,
+    /// `None` while nothing of the building stands: the view then holds no `Mesh3d` at all, since
+    /// bevy_render 0.19.1 logs every extraction of a zero-vertex mesh as `Use-after-free`.
+    mesh: Option<Handle<Mesh>>,
     cracks: Option<Entity>,
 }
 
@@ -295,10 +298,11 @@ fn present_record(
     }
 }
 
-/// Redraw a building whose shown shape moved: its view's own mesh and its cracks.
+/// Redraw a building whose shown shape moved: its view's own mesh and its cracks. A view holds a
+/// `Mesh3d` exactly while its building has a face to draw ([`OwnMesh::mesh`]).
 fn redraw(
     buildings: Query<(&Breakage, &ShownShape, &Children), Changed<ShownShape>>,
-    mut views: Query<(Entity, &mut Mesh3d, Option<&mut OwnMesh>), With<BuildingView>>,
+    mut views: Query<(Entity, Option<&mut Mesh3d>, Option<&mut OwnMesh>), With<BuildingView>>,
     look: Option<Res<CrackLook>>,
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: Option<ResMut<Assets<StandardMaterial>>>,
@@ -308,17 +312,28 @@ fn redraw(
         let Some(view) = children.iter().find(|child| views.contains(*child)) else {
             continue;
         };
-        let Ok((view, mut drawn, own)) = views.get_mut(view) else {
+        let Ok((view, drawn, own)) = views.get_mut(view) else {
             continue;
         };
         let kind = &breakage.kind;
-        let mesh = meshes.add(broken_mesh(&kind.asset, &kind.layout, &shown.0));
+        let broken = broken_mesh(&kind.asset, &kind.layout, &shown.0);
+        let mesh = (broken.count_vertices() > 0).then(|| meshes.add(broken));
         let cracks = crack_mesh(&kind.asset, &kind.layout, &shown.0).map(|m| meshes.add(m));
-        drawn.0 = mesh.clone();
+        match (&mesh, drawn) {
+            (Some(mesh), Some(mut drawn)) => drawn.0 = mesh.clone(),
+            (Some(mesh), None) => {
+                commands.entity(view).insert(Mesh3d(mesh.clone()));
+            }
+            (None, Some(_)) => {
+                commands.entity(view).remove::<Mesh3d>();
+            }
+            (None, None) => {}
+        }
         let mut crack_child = None;
         if let Some(mut own) = own {
-            meshes.remove(&own.mesh);
-            own.mesh = mesh;
+            if let Some(old) = std::mem::replace(&mut own.mesh, mesh) {
+                meshes.remove(&old);
+            }
             crack_child = own.cracks;
         } else {
             commands.entity(view).insert(OwnMesh { mesh, cracks: None });
@@ -559,5 +574,50 @@ mod tests {
             .sum();
         assert!(expected > 0);
         assert_eq!(timber_vertices, expected, "exactly the timber faces");
+    }
+
+    /// NO EMPTY MESH REACHES A RENDER ENTITY: a building with nothing left standing holds no
+    /// `Mesh3d` and leaves no zero-vertex mesh asset (bevy_render 0.19.1 logs every extraction of
+    /// one as `Use-after-free`), and a record reset that stands it again gives its view a mesh
+    /// back. The all-gone shape is ASSUMED fixture state, set directly rather than reached by law.
+    #[test]
+    fn a_building_with_nothing_standing_draws_no_mesh_until_it_stands_again() {
+        let kind = shipped_house();
+        let mut world = World::new();
+        world.init_resource::<Assets<Mesh>>();
+        let shared = world.resource_mut::<Assets<Mesh>>().add(mesh(&kind.asset));
+        let intact = Shape::intact(&kind.layout);
+        let root = world
+            .spawn((Breakage::new(kind, 1.0), ShownShape(intact.clone())))
+            .id();
+        let view = world
+            .spawn((BuildingView, Mesh3d(shared), ChildOf(root)))
+            .id();
+        let mut schedule = Schedule::default();
+        schedule.add_systems(redraw);
+        let mut show = |world: &mut World, shape: &Shape| {
+            world.get_mut::<ShownShape>(root).unwrap().0 = shape.clone();
+            schedule.run(world);
+            let meshes = world.resource::<Assets<Mesh>>();
+            assert!(
+                meshes.iter().all(|(_, mesh)| mesh.count_vertices() > 0),
+                "a zero-vertex mesh asset"
+            );
+            world
+                .get::<Mesh3d>(view)
+                .map(|drawn| meshes.get(&drawn.0).map_or(0, Mesh::count_vertices))
+        };
+
+        assert!(show(&mut world, &intact).is_some_and(|v| v > 0));
+        let gone = Shape {
+            swapped: vec![true; intact.swapped.len()],
+            fate: vec![Fate::Dust; intact.fate.len()],
+            cracked: intact.cracked.clone(),
+        };
+        assert_eq!(show(&mut world, &gone), None, "nothing stands: no mesh");
+        assert!(
+            show(&mut world, &intact).is_some_and(|v| v > 0),
+            "a reset stands the building again"
+        );
     }
 }
