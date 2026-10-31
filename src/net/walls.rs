@@ -1,11 +1,11 @@
 //! The wall ledger, about the game's environment destruction (game state only): one globally
 //! visible entity whose component lists every change the authority made to every building
-//! ([`WallEntry`]: a swap, dust, a crack or a fall, with its building's ordinal and tick),
+//! ([`WallEntry`]: a swap, dust, a hole, a crack or a fall, with its building's ordinal and tick),
 //! replicated as diffs — a client whose acknowledged ledger is within the last
 //! `Diffable::HISTORY_LEN` (64) appends receives only the entries past it, one further behind and
 //! a late joiner the whole list as a snapshot. A client copies it into its [`WallRecord`], from
 //! which `buildings::breakage` derives the colliders and `buildings::view` the drawn walls: the
-//! fates, cracks and swaps the clients derive are the authority's, entry for entry. A building's
+//! fates, cracks, swaps and holes the clients derive are the authority's, entry for entry. A building's
 //! index is its `MapInstance.ordinal` (bound into the map digest the handshake compares); a chunk's
 //! and a joint's are the bake's, read from the same building file on both ends.
 //!
@@ -100,7 +100,7 @@ fn receive_ledger(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::buildings::breakage::WallEvent;
+    use crate::buildings::breakage::{Hole, WallEvent};
 
     fn entry(event: WallEvent, tick: u32) -> WallEntry {
         WallEntry {
@@ -144,5 +144,46 @@ mod tests {
         let record = app.world().resource::<WallRecord>();
         assert_eq!(record.entries, vec![entry(WallEvent::Crack(2), 9)]);
         assert_ne!(record.generation, generation);
+    }
+
+    /// A HOLE CROSSES THE WIRE WHOLE, IN A LATE JOINER'S SNAPSHOT TOO: a ledger holding hole
+    /// entries, encoded as replicon encodes it (postcard) and decoded, is the same ledger; so is an
+    /// entry sent alone as a diff. One hole entry costs 20 bytes for the fixture cut (a chunk index
+    /// past 127, millimetres past ±63, a tick past four minutes at 64 Hz) and 33 at most. The
+    /// replicas' holes are these entries, and [`crate::buildings::breakage::HOLES_PER_CHUNK`]
+    /// bounds the record by them.
+    #[test]
+    fn a_hole_crosses_the_wire_whole() {
+        let typical = WallEntry {
+            building: 3,
+            event: WallEvent::Hole(
+                200,
+                Hole {
+                    from: [-120, 80, 100],
+                    to: [-118, 81, -100],
+                    radius: 51,
+                },
+            ),
+            tick: 20_000,
+        };
+        let widest = WallEntry {
+            building: u16::MAX,
+            event: WallEvent::Hole(
+                u16::MAX,
+                Hole {
+                    from: [i16::MIN; 3],
+                    to: [i16::MAX; 3],
+                    radius: u16::MAX,
+                },
+            ),
+            tick: u32::MAX,
+        };
+        let ledger = WallLedger(vec![typical, widest]);
+        let bytes = postcard::to_allocvec(&ledger).unwrap();
+        assert_eq!(postcard::from_bytes::<WallLedger>(&bytes).unwrap(), ledger);
+        let sent = postcard::to_allocvec(&typical).unwrap();
+        assert_eq!(postcard::from_bytes::<WallEntry>(&sent).unwrap(), typical);
+        assert_eq!(sent.len(), 20);
+        assert_eq!(postcard::to_allocvec(&widest).unwrap().len(), 33);
     }
 }

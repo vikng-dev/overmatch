@@ -18,9 +18,16 @@
 //!   blast pushes with its rays' momentum. The laws then run in order: removal and the push rule
 //!   ([`fracture::strike`]), the structural check ([`fracture::structural`]), support
 //!   ([`fracture::fall`]).
-//! * **The record** ([`WallRecord`]): every swap, dust, crack and fall, in authority order, with
-//!   its tick. The authority appends; the network carries it ([`crate::net`]'s ledger); a replica
-//!   rebuilds the same state from it ([`derive_from_record`]); the view presents it at the
+//! * **Holes** ([`Hole`], drawn only): a line cuts a channel in each chunk it crosses and a blast a
+//!   dish in each chunk its rays stop on ([`holes_of`]); a chunk still standing after the deposit
+//!   keeps its hole in a per-chunk list ([`Live::holes`]), for the view to draw. No law, collider
+//!   or mass reads a hole: they see the whole chunk, and [`Shape`] holds none. A hole holds no more
+//!   than the volume its energy crushed (`energy / crush`), so one the size of its chunk is a spent
+//!   pool, recorded as dust. A deposit that would leave a chunk holding more than
+//!   [`HOLES_PER_CHUNK`] crumbles it to dust first, before the laws run.
+//! * **The record** ([`WallRecord`]): every swap, dust, hole, crack and fall, in authority order,
+//!   with its tick. The authority appends; the network carries it ([`crate::net`]'s ledger); a
+//!   replica rebuilds the same state from it ([`derive_from_record`]); the view presents it at the
 //!   presentation clock ([`super::view`]).
 //! * **Loose groups** fall on the authority as one dynamic body each ([`WallPiece`]): its chunks
 //!   brick in ballistics on [`Layer::Armor`], colliding as [`Layer::Debris`], settled by the shared
@@ -69,6 +76,11 @@ const GRADE_M: f32 = 0.0;
 /// How far above grade a buried chunk's corner may sit, m: the bake's rounding of a corner it cut
 /// on the plane.
 const ON_GRADE_M: f32 = 1e-4;
+
+/// The most holes one chunk holds (module doc); the deposit that would add past it crumbles the
+/// chunk. ASSUMED: the bound on the list the view reads per chunk, and on the record's holes per
+/// chunk; no measured cost or look sets it yet.
+pub(crate) const HOLES_PER_CHUNK: usize = 16;
 
 /// The law's view of one building asset (module doc), at scale 1 in the building frame.
 #[derive(Debug, Clone, PartialEq)]
@@ -212,15 +224,48 @@ impl Layout {
     }
 }
 
+/// One hole in one chunk (module doc): the chunk's matter within `radius` of the segment
+/// `from`–`to`. A round's channel runs along its line; a blast's dish has `from == to`, a ball
+/// about its centre. In millimetres of the asset frame at scale 1, about the baked chunk's
+/// centroid ([`super::schema::Chunk::centroid`]), so it is the same hole at every instance scale;
+/// each coordinate saturates at the `i16` range, ±32.767 m from the centroid, which every point of
+/// a chunk under 65 m across stays within.
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct Hole {
+    pub(crate) from: [i16; 3],
+    pub(crate) to: [i16; 3],
+    pub(crate) radius: u16,
+}
+
+impl Hole {
+    /// The hole within `radius` of `from`–`to` (m, asset frame at scale 1) in a chunk whose
+    /// centroid is `centroid`, to the millimetre; `None` for one whose radius rounds to nothing.
+    pub(crate) fn cut(centroid: Vec3, from: Vec3, to: Vec3, radius: f32) -> Option<Self> {
+        let mm = |p: Vec3| {
+            ((p - centroid) * 1000.0)
+                .round()
+                .to_array()
+                .map(|x| x as i16)
+        };
+        let radius = (radius * 1000.0).round();
+        (radius >= 1.0).then(|| Self {
+            from: mm(from),
+            to: mm(to),
+            radius: radius as u16,
+        })
+    }
+}
+
 /// One change to a building, as the record carries it: the element swapped to its chunks, the
-/// chunk turned to dust, the joint cracked, the chunk fallen with a loose group. Indices are the
-/// [`Layout`]'s.
+/// chunk turned to dust, a hole cut in the chunk, the joint cracked, the chunk fallen with a loose
+/// group. Indices are the [`Layout`]'s.
 #[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum WallEvent {
     Swap(u16),
     Dust(u16),
     Crack(u16),
     Fall(u16),
+    Hole(u16, Hole),
 }
 
 /// One record entry: which building (its [`MapInstance`] ordinal), what changed, and the authority
@@ -259,7 +304,8 @@ impl Shape {
     }
 
     /// Apply one recorded change. An index past the layout is refused (logged): the map digest
-    /// the handshake compares makes it a broken peer, never a state to clamp into.
+    /// the handshake compares makes it a broken peer, never a state to clamp into. A hole leaves
+    /// the shape as it is (module doc).
     pub(crate) fn apply(&mut self, event: WallEvent) -> bool {
         let slot = |len: usize, i: u16| (usize::from(i) < len).then_some(usize::from(i));
         match event {
@@ -267,6 +313,7 @@ impl Shape {
             WallEvent::Dust(c) => slot(self.fate.len(), c).map(|c| self.fate[c] = Fate::Dust),
             WallEvent::Fall(c) => slot(self.fate.len(), c).map(|c| self.fate[c] = Fate::Fallen),
             WallEvent::Crack(j) => slot(self.cracked.len(), j).map(|j| self.cracked[j] = true),
+            WallEvent::Hole(c, _) => slot(self.fate.len(), c).map(|_| ()),
         }
         .is_some()
     }
@@ -278,13 +325,15 @@ impl Shape {
 }
 
 /// A building's live state: the structure the laws read at its instance scale, the laws' state,
-/// its shape, and the structural check's sections of the structure. The shape's fates and cracks
-/// are the state's, mirrored as the laws move them.
+/// its shape, the structural check's sections of the structure, and each chunk's holes. The
+/// shape's fates and cracks are the state's, mirrored as the laws move them.
 pub(crate) struct Live {
     pub(crate) structure: Structure,
     pub(crate) state: WallState,
     pub(crate) swapped: Vec<bool>,
     pub(crate) sections: SectionCache,
+    /// Per law chunk: its holes, in record order (module doc).
+    pub(crate) holes: Vec<Vec<Hole>>,
 }
 
 impl Live {
@@ -294,6 +343,7 @@ impl Live {
             state: WallState::new(&structure),
             swapped: vec![false; kind.layout.elements.len()],
             sections: SectionCache::default(),
+            holes: vec![Vec::new(); structure.chunks.len()],
             structure,
         }
     }
@@ -728,6 +778,7 @@ fn apply_deposits(mut p: DepositParam) {
             let frame = frames[&root];
             let kind = breakage.kind.clone();
             let (blast, blast_pushes) = Loading::blast(&taken.blast);
+            let holes = holes_of(&kind, frame.scale, &taken.lines, &blast);
             let loading = Loading::lines(&taken.lines)
                 .and(Loading::field(&taken.field))
                 .and(blast);
@@ -737,13 +788,14 @@ fn apply_deposits(mut p: DepositParam) {
                 live,
                 &loading,
                 taken.pushes.into_iter().chain(blast_pushes).collect(),
+                holes,
             );
             let building = identity.ordinal;
             let count = |f: fn(&WallEvent) -> bool| changes.events.iter().filter(|e| f(e)).count();
             debug!(
                 "buildings: {} took {:.0} J in {} chunks ({} lines, {} field stops, {} blast rays): \
-                 {} swapped, {} dust, {} cracks, {} structural sections {:?} (demand, capacity \
-                 N s m), {} chunks fell in {} groups",
+                 {} swapped, {} dust, {} holes, {} cracks, {} structural sections {:?} (demand, \
+                 capacity N s m), {} chunks fell in {} groups",
                 identity.id,
                 loading.energies.iter().map(|(_, e)| e).sum::<f32>(),
                 loading.energies.len(),
@@ -752,6 +804,7 @@ fn apply_deposits(mut p: DepositParam) {
                 taken.blast.len(),
                 count(|e| matches!(e, WallEvent::Swap(_))),
                 count(|e| matches!(e, WallEvent::Dust(_))),
+                count(|e| matches!(e, WallEvent::Hole(..))),
                 count(|e| matches!(e, WallEvent::Crack(_))),
                 changes.failures.len(),
                 changes
@@ -783,6 +836,43 @@ fn apply_deposits(mut p: DepositParam) {
     }
 }
 
+/// The holes one deposit cuts (module doc), each with its law chunk, in the baked chunk's frame
+/// ([`Hole`]); `lines` and `blast` in the building frame at the instance's `scale`. Each is sized
+/// by the volume its energy crushes, `energy / crush` ([`Masonry::crush`]): a line's channel runs
+/// along its chord, its radius the narrower of the cylinder about the chord and the ball that hold
+/// that volume (so a chord grazing a corner never cuts a disc wider than the ball); the blast's
+/// dish in a chunk is a ball about the chunk's source (its rays' energy-weighted mean stop) whose
+/// half holds it. ASSUMED: a channel's section is a circle and its width the energy's alone, not the
+/// round's diameter; a dish's centre lies on the chunk's face, so half its ball is in the chunk.
+fn holes_of(
+    kind: &BuildingKind,
+    scale: f32,
+    lines: &[(usize, Vec3, Vec3, f32)],
+    blast: &Loading,
+) -> Vec<(usize, Hole)> {
+    use std::f32::consts::PI;
+    let layout = &kind.layout;
+    let centroid =
+        |c: usize| Vec3::from_array(kind.asset.chunks[layout.chunks[c] as usize].centroid);
+    let crushed = |c: usize, energy: f32| energy / layout.materials[c].crush;
+    let channels = lines.iter().filter_map(|&(c, from, to, energy)| {
+        let volume = crushed(c, energy);
+        let ball = (0.75 * volume / PI).cbrt();
+        let radius = (volume / (PI * from.distance(to))).sqrt().min(ball);
+        Hole::cut(centroid(c), from / scale, to / scale, radius / scale).map(|hole| (c, hole))
+    });
+    let dishes = blast
+        .sources
+        .iter()
+        .zip(&blast.energies)
+        .filter_map(|(source, &(c, energy))| {
+            let radius = (1.5 * crushed(c, energy) / PI).cbrt();
+            let at = source.at / scale;
+            Hole::cut(centroid(c), at, at, radius / scale).map(|hole| (c, hole))
+        });
+    channels.chain(dishes).collect()
+}
+
 /// What the laws changed in one building: its record events in order, each loose group with the
 /// pushes on it (building frame), and the structural failures.
 #[derive(Debug, Default, PartialEq)]
@@ -792,17 +882,42 @@ pub(crate) struct Changes {
     pub(crate) failures: Vec<fracture::Failure>,
 }
 
-/// Run one deposit through the laws on `live` (module doc) and say what changed: the elements
-/// first touched swap, then the dust, the cracks (the push rule's, then the structural check's)
-/// and the falls, each ascending. A push on a chunk turned to dust went into crushing it and moves
-/// nothing.
+/// Run one deposit, with the `holes` it cuts ([`holes_of`]), through the laws on `live` (module
+/// doc) and say what changed: the elements first touched swap, then the dust, the holes kept, the
+/// cracks (the push rule's, then the structural check's) and the falls, each ascending but the
+/// holes, in deposit order. A chunk the holes would carry past [`HOLES_PER_CHUNK`] crumbles to dust
+/// before the laws run; a hole is kept only in a chunk standing after the removal, and no law
+/// reads one. A push on a chunk turned to dust went into crushing it and moves nothing.
 pub(crate) fn run_laws(
     layout: &Layout,
     live: &mut Live,
     loading: &Loading,
     pushes: Vec<Push>,
+    holes: Vec<(usize, Hole)>,
 ) -> Changes {
-    let struck = fracture::strike(&live.structure, &mut live.state, loading);
+    let mut cutting: BTreeMap<usize, usize> = BTreeMap::new();
+    for &(c, _) in &holes {
+        *cutting.entry(c).or_default() += 1;
+    }
+    let mut crumbled = Vec::new();
+    for (c, n) in cutting {
+        let pool = live.state.pool[c];
+        if live.holes[c].len() + n > HOLES_PER_CHUNK
+            && fracture::wear(&live.structure, &mut live.state, c, pool)
+        {
+            crumbled.push(c);
+        }
+    }
+    let mut struck = fracture::strike(&live.structure, &mut live.state, loading);
+    struck.dusted.extend(crumbled);
+    struck.dusted.sort_unstable();
+    let holes: Vec<(usize, Hole)> = holes
+        .into_iter()
+        .filter(|&(c, _)| live.state.standing(c))
+        .collect();
+    for &(c, hole) in &holes {
+        live.holes[c].push(hole);
+    }
     let pushes: Vec<Push> = pushes
         .into_iter()
         .filter(|push| live.state.standing(push.chunk))
@@ -845,6 +960,11 @@ pub(crate) fn run_laws(
         events.push(WallEvent::Swap(e as u16));
     }
     events.extend(struck.dusted.iter().map(|&c| WallEvent::Dust(c as u16)));
+    events.extend(
+        holes
+            .iter()
+            .map(|&(c, hole)| WallEvent::Hole(c as u16, hole)),
+    );
     events.extend(
         struck
             .cracked
@@ -1053,6 +1173,8 @@ fn derive_from_record(
         for event in events {
             if !shape.apply(event) {
                 error!("buildings: record event {event:?} names nothing of building {identity:?}");
+            } else if let WallEvent::Hole(c, hole) = event {
+                live.holes[usize::from(c)].push(hole);
             }
         }
         live.swapped = shape.swapped;

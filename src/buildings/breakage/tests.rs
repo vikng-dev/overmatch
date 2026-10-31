@@ -195,6 +195,7 @@ fn the_record_a_replica_derives_from_is_the_authoritys() {
         &mut authority,
         &Loading::field(&hits),
         Vec::new(),
+        Vec::new(),
     );
     for kind_of in [
         |e: &WallEvent| matches!(e, WallEvent::Swap(_)),
@@ -413,4 +414,305 @@ fn the_world_ball_keeps_every_ray_the_bounds_meet() {
             "corner {corner}"
         );
     }
+}
+
+/// A round's line through law chunk `c` of element `e` (building frame, unit scale): 10 cm along
+/// the element's extrusion axis about the chunk's centroid, carrying `share` of its full pool.
+fn line_through_chunk(
+    kind: &BuildingKind,
+    structure: &Structure,
+    e: usize,
+    c: usize,
+    share: f32,
+) -> (usize, Vec3, Vec3, f32) {
+    let w = kind.asset.elements[e].frame.w().normalize();
+    let chunk = &structure.chunks[c];
+    (
+        c,
+        chunk.centroid - w * 0.05,
+        chunk.centroid + w * 0.05,
+        share * fracture::full_pool(chunk),
+    )
+}
+
+/// A blast's single ray on law chunk `c` at its centroid, carrying `share` of its full pool, as
+/// the laws read it, with its push.
+fn blast_on(structure: &Structure, c: usize, share: f32) -> (Loading, Vec<Push>) {
+    let chunk = &structure.chunks[c];
+    Loading::blast(&[fracture::RayHit {
+        chunk: c,
+        at: chunk.centroid,
+        energy: share * fracture::full_pool(chunk),
+        impulse: Vec3::ZERO,
+    }])
+}
+
+/// The record entries of `changes` on the composed house (ordinal 3) at `tick`.
+fn entries(changes: &Changes, tick: u32) -> Vec<WallEntry> {
+    changes
+        .events
+        .iter()
+        .map(|&event| WallEntry {
+            building: 3,
+            event,
+            tick,
+        })
+        .collect()
+}
+
+/// The holes a replica's house holds.
+fn held_holes(app: &App, root: Entity) -> Vec<Vec<Hole>> {
+    app.world()
+        .get::<Breakage>(root)
+        .unwrap()
+        .live
+        .as_ref()
+        .expect("the record touched the house")
+        .holes
+        .clone()
+}
+
+/// THE CLIENTS HOLD THE AUTHORITY'S HOLES, A LATE JOINER TOO: two deposits on the authority's
+/// house, a round's line through one chunk and a blast's ray on another, each cut a hole the laws
+/// keep (a channel along the line, a dish about the stop); a replica fed the record as it grows and
+/// a late joiner fed it whole hold every chunk's holes as the authority does, in order. The view
+/// draws from a replica's lists, so a derive that dropped a hole event, put it in another chunk or
+/// kept it twice fails here.
+#[test]
+fn the_clients_hold_the_authoritys_holes_a_late_joiner_too() {
+    let kind = shipped_house();
+    let (e, [channel_chunk, dish_chunk, _]) = fixture_chunks(&kind);
+    let mut authority = Live::new(&kind, 1.0);
+    let lines = [line_through_chunk(
+        &kind,
+        &authority.structure,
+        e,
+        channel_chunk,
+        0.05,
+    )];
+    let first = run_laws(
+        &kind.layout,
+        &mut authority,
+        &Loading::lines(&lines),
+        Vec::new(),
+        holes_of(&kind, 1.0, &lines, &Loading::default()),
+    );
+    let (blast, pushes) = blast_on(&authority.structure, dish_chunk, 0.05);
+    let holes = holes_of(&kind, 1.0, &[], &blast);
+    let second = run_laws(&kind.layout, &mut authority, &blast, pushes, holes);
+    let [channel] = authority.holes[channel_chunk][..] else {
+        panic!("one channel: {:?}", authority.holes[channel_chunk]);
+    };
+    let [dish] = authority.holes[dish_chunk][..] else {
+        panic!("one dish: {:?}", authority.holes[dish_chunk]);
+    };
+    assert_ne!(channel.from, channel.to, "a channel runs along its line");
+    assert_eq!(dish.from, dish.to, "a dish is a ball about its stop");
+
+    let (mut growing, root) = composed(true);
+    for (changes, tick) in [(&first, 7), (&second, 9)] {
+        growing
+            .world_mut()
+            .resource_mut::<WallRecord>()
+            .entries
+            .extend(entries(changes, tick));
+        growing.update();
+    }
+    let (mut late, late_root) = composed(true);
+    late.world_mut().resource_mut::<WallRecord>().entries =
+        [entries(&first, 7), entries(&second, 9)].concat();
+    late.update();
+    assert_eq!(held_holes(&growing, root), authority.holes, "growing");
+    assert_eq!(held_holes(&late, late_root), authority.holes, "late joiner");
+}
+
+/// A HOLE CHANGES NO COLLIDER, MASS OR STRUCTURAL RESULT: two copies of the house take the same
+/// round twice (its line and its push), one cutting the line's hole and one not; the second
+/// round meets the holed chunk whole. Their events but the holes, their loose groups, structural
+/// failures, laws' state, swaps and chunk table are the same. A replica fed the record without its
+/// holes, then the holes, keeps the very same colliders and shape. The owner's decision (a hole is
+/// drawn only) rests on it: a hole read by a law, the mass or the colliders fails here.
+#[test]
+fn a_hole_changes_no_collider_mass_or_structural_result() {
+    let kind = shipped_house();
+    let (e, [c, ..]) = fixture_chunks(&kind);
+    let mut cut = Live::new(&kind, 1.0);
+    let mut whole = Live::new(&kind, 1.0);
+    let line = line_through_chunk(&kind, &cut.structure, e, c, 0.3);
+    let push = Push {
+        chunk: c,
+        at: cut.structure.chunks[c].centroid,
+        impulse: (line.2 - line.1).normalize() * 100.0,
+    };
+    let holes = holes_of(&kind, 1.0, &[line], &Loading::default());
+    let mut record = Vec::new();
+    for tick in [7, 9] {
+        let with = run_laws(
+            &kind.layout,
+            &mut cut,
+            &Loading::lines(&[line]),
+            vec![push],
+            holes.clone(),
+        );
+        let without = run_laws(
+            &kind.layout,
+            &mut whole,
+            &Loading::lines(&[line]),
+            vec![push],
+            Vec::new(),
+        );
+        assert!(
+            with.events.contains(&WallEvent::Hole(c as u16, holes[0].1)),
+            "round {tick} holes the chunk: {:?}",
+            with.events
+        );
+        let kept: Vec<WallEvent> = with
+            .events
+            .iter()
+            .copied()
+            .filter(|event| !matches!(event, WallEvent::Hole(..)))
+            .collect();
+        assert_eq!(kept, without.events);
+        assert_eq!(with.groups, without.groups);
+        assert_eq!(with.failures, without.failures);
+        record.extend(entries(&with, tick));
+    }
+    assert_eq!(cut.state, whole.state);
+    assert_eq!(cut.swapped, whole.swapped);
+    assert_eq!(cut.structure.chunks, whole.structure.chunks);
+
+    let (mut app, root) = composed(true);
+    let (holed, unholed): (Vec<WallEntry>, Vec<WallEntry>) = record
+        .into_iter()
+        .partition(|entry| matches!(entry.event, WallEvent::Hole(..)));
+    app.world_mut().resource_mut::<WallRecord>().entries = unholed;
+    app.update();
+    let colliders = |app: &mut App| {
+        let world = app.world_mut();
+        let mut chunks: Vec<(Entity, u16)> = world
+            .query::<(Entity, &BuildingChunk)>()
+            .iter(world)
+            .map(|(entity, chunk)| (entity, chunk.0))
+            .collect();
+        chunks.sort_unstable();
+        let mut elements: Vec<Entity> = world
+            .query_filtered::<Entity, With<BuildingElement>>()
+            .iter(world)
+            .collect();
+        elements.sort_unstable();
+        (
+            chunks,
+            elements,
+            world.get::<Breakage>(root).unwrap().shape(),
+        )
+    };
+    let before = colliders(&mut app);
+    assert!(!before.0.is_empty(), "the round swapped the element");
+    app.world_mut()
+        .resource_mut::<WallRecord>()
+        .entries
+        .extend(holed);
+    app.update();
+    assert_eq!(held_holes(&app, root)[c].len(), 2);
+    assert_eq!(colliders(&mut app), before, "the holes moved no collider");
+}
+
+/// PAST THE CAP A CHUNK CRUMBLES: a chunk keeps a hole from each of [`HOLES_PER_CHUNK`] rounds'
+/// lines, each far too weak to spend its pool; the next round, which would carry it past the cap,
+/// turns it to dust instead of holing it, so the record says `Dust` and the list stops at the cap.
+/// A cap that never fired would grow a chunk's list (and the record) without bound; one that fired
+/// early would crumble a chunk the view still draws.
+#[test]
+fn past_the_cap_a_chunk_crumbles() {
+    let kind = shipped_house();
+    let (e, [c, ..]) = fixture_chunks(&kind);
+    let mut live = Live::new(&kind, 1.0);
+    let line = line_through_chunk(&kind, &live.structure, e, c, 1e-3);
+    let holes = holes_of(&kind, 1.0, &[line], &Loading::default());
+    assert_eq!(holes.len(), 1);
+    for k in 1..=HOLES_PER_CHUNK + 1 {
+        let changes = run_laws(
+            &kind.layout,
+            &mut live,
+            &Loading::lines(&[line]),
+            Vec::new(),
+            holes.clone(),
+        );
+        let holed = changes
+            .events
+            .iter()
+            .any(|event| matches!(event, WallEvent::Hole(h, _) if usize::from(*h) == c));
+        let dusted = changes.events.contains(&WallEvent::Dust(c as u16));
+        if k <= HOLES_PER_CHUNK {
+            assert!(holed && !dusted, "round {k}: {:?}", changes.events);
+            assert_eq!(live.holes[c].len(), k);
+        } else {
+            assert!(dusted && !holed, "round {k}: {:?}", changes.events);
+            assert_eq!(live.state.fate[c], Fate::Dust);
+            assert_eq!(live.holes[c].len(), HOLES_PER_CHUNK);
+        }
+    }
+}
+
+/// A hole's volume against the crushed volume it should hold, and the relative bound the
+/// millimetre rounding allows.
+#[derive(Debug)]
+struct Volume {
+    held: f32,
+    crushed: f32,
+    bound: f32,
+}
+
+impl Volume {
+    fn check(&self) {
+        let error = (self.held - self.crushed).abs() / self.crushed;
+        assert!(error <= self.bound, "{self:?}: off by {error}");
+    }
+}
+
+/// A HOLE HOLDS THE VOLUME ITS ENERGY CRUSHED: a line's channel (its cylinder about the chord,
+/// narrower here than the ball) and a blast's dish (its half ball) each hold `energy / crush`, to
+/// the millimetre rounding of their radius and ends. The size rule rests on it: a hole is never
+/// the size of a chunk still standing, since that volume is a spent pool and recorded as dust. A
+/// radius off by a constant factor fails here.
+#[test]
+fn a_hole_holds_the_volume_its_energy_crushed() {
+    use std::f32::consts::PI;
+    let kind = shipped_house();
+    let (e, [c, ..]) = fixture_chunks(&kind);
+    let structure = kind.layout.structure(&kind.asset, 1.0);
+    let crush = structure.chunks[c].material.crush;
+    let metres = |p: [i16; 3]| Vec3::from_array(p.map(|v| f32::from(v) / 1000.0));
+
+    let line = line_through_chunk(&kind, &structure, e, c, 0.01);
+    let [(_, channel)] = holes_of(&kind, 1.0, &[line], &Loading::default())[..] else {
+        panic!("one channel");
+    };
+    let r = f32::from(channel.radius) / 1000.0;
+    let length = metres(channel.from).distance(metres(channel.to));
+    let crushed = line.3 / crush;
+    assert!(
+        r < (0.75 * crushed / PI).cbrt(),
+        "the cylinder is the narrower"
+    );
+    // DERIVED bounds: the radius rounds by up to half a millimetre, each end by up to half a
+    // millimetre per axis (the chord by up to √3 mm).
+    Volume {
+        held: PI * r * r * length,
+        crushed,
+        bound: 2.0 * 0.0005 / r + 0.0018 / length,
+    }
+    .check();
+
+    let (blast, _) = blast_on(&structure, c, 0.01);
+    let [(_, dish)] = holes_of(&kind, 1.0, &[], &blast)[..] else {
+        panic!("one dish");
+    };
+    let r = f32::from(dish.radius) / 1000.0;
+    Volume {
+        held: 2.0 / 3.0 * PI * r.powi(3),
+        crushed: blast.energies[0].1 / crush,
+        bound: 3.0 * 0.0005 / r,
+    }
+    .check();
 }

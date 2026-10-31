@@ -288,7 +288,9 @@ fn present_record(
             shape.apply(event);
         }
         match shown {
-            Some(mut shown) => shown.0 = shape,
+            Some(mut shown) => {
+                shown.set_if_neq(ShownShape(shape));
+            }
             None => {
                 commands.entity(root).insert(ShownShape(shape));
             }
