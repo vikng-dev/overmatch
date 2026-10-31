@@ -119,7 +119,7 @@ The Worker sees `closed` only at the next heartbeat, and a ticket attached while
 join closes, up to one `HEARTBEAT_INTERVAL_S` plus the client's poll and connect later. The game
 server's handshake, not the Worker, is the authority on late join.
 
-The Worker's early-access `CAPACITY` is 30 (ASSUMED player limit chosen in #220), as in
+The Worker's early-access `CAPACITY` is 30 (the owner's decision in #220), as in
 `contract/heartbeat.closed.request.json`. `contract/server-env.json` and
 `contract/heartbeat.request.json` retain capacity 10 (fixture data): the unchanged Rust
 `hosting::tests::the_contract_environment_parses_into_hosted_mode` and
