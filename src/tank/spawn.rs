@@ -1095,4 +1095,60 @@ mod proxy_tests {
             .collect();
         assert_eq!(parents, vec![node, node]);
     }
+
+    /// EVERY SPAWNED TANK CARRIES ITS KIND'S ENVELOPES, HOLDING EVERY COLLIDER IT STANDS (the
+    /// game's damage model: a round's crossing of a body runs until it has left the body's
+    /// envelope, design §13.5, "The envelope"). The root carries the kind's tank envelope and the
+    /// rig's turret node the kind's turret envelope, no other node one, and every collider under
+    /// the root at its spawn pose lies inside the root's. A spawn that drops either insert, or puts
+    /// one on another node, fails here. The shipped kind is fixture data; the assertions are the
+    /// class invariant every kind's spawn keeps.
+    #[test]
+    fn a_spawned_tank_carries_its_kinds_envelopes() {
+        let glb = crate::assets::asset_root().join(crate::tank::TANK_SIM_GLB_PATH);
+        let spec = crate::track::rig_geom::tiger_spec();
+        let geometry = crate::bake::extract_tank_geometry(
+            &glb,
+            &spec,
+            &crate::substances::SubstanceRegistry::shipped(),
+        )
+        .expect("the shipped glb extracts");
+        let blueprint =
+            crate::bake::TankBlueprint::new(crate::tank::TANK_SPEC_PATH.to_owned(), geometry, spec);
+        let envelopes = blueprint.envelopes();
+        let content = TankContent {
+            geometry: &blueprint.geometry,
+            spec: &blueprint.spec,
+            envelopes,
+        };
+        let mut world = World::new();
+        let root = world.spawn(Transform::IDENTITY).id();
+        assemble_tank_body(&mut world.commands(), root, content);
+        world.flush();
+
+        use bevy::math::bounding::Aabb3d;
+        let turret = world
+            .get::<Rig>(root)
+            .expect("the root carries its rig")
+            .turret;
+        let carried: Vec<(Entity, Aabb3d)> = world
+            .query::<(Entity, &crate::ballistics::Envelope)>()
+            .iter(&world)
+            .map(|(entity, envelope)| (entity, envelope.0))
+            .collect();
+        let expected: Vec<(Entity, Aabb3d)> = [(root, envelopes.tank), (turret, envelopes.turret)]
+            .into_iter()
+            .filter_map(|(entity, envelope)| Some((entity, envelope?)))
+            .collect();
+        assert!(
+            envelopes.tank.is_some() && envelopes.turret.is_some(),
+            "the fixture kind has captured geometry and a launchable turret, so both inserts run"
+        );
+        assert_eq!(carried.len(), expected.len(), "{carried:?}");
+        for pair in &expected {
+            assert!(carried.contains(pair), "{pair:?} not among {carried:?}");
+        }
+        let held = crate::ballistics::assert_envelope_holds(&world, root);
+        assert!(held > 0, "the root holds the tank's colliders");
+    }
 }

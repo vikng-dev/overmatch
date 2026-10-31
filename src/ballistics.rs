@@ -2298,7 +2298,8 @@ struct ProjectileMarchWorld<'w, 's> {
     witnesses: Query<'w, 's, &'static WitnessVolume>,
     witness_surfaces: Query<'w, 's, (), With<WitnessSurface>>,
     // Every free body's envelope, its pose, its colliders and the centre of mass the physics step
-    // turns it about: where a crossing begins and ends.
+    // turns it about: where a crossing begins and ends. Every free body with an envelope is a rigid
+    // body, so carries its centre of mass; the march refuses one that does not.
     envelopes: Query<
         'w,
         's,
@@ -2485,7 +2486,10 @@ impl ProjectileMarchWorld<'_, '_> {
                 let pad = Vec3A::splat(spread + extent * 2.0_f32.powi(-20) + MARCH_EPS + kick);
                 let (lo, hi) = (envelope.0.min - pad, envelope.0.max + pad);
                 let placed = self.placed_pose(position, rotation, colliders);
-                let integrated = centre.and_then(|centre| next.integrated_pose(body, centre));
+                let centre = centre.unwrap_or_else(|| {
+                    panic!("free body {body} carries an envelope but is no rigid body")
+                });
+                let integrated = next.integrated_pose(body, centre);
                 [Some(placed), Some((position.0, rotation.0)), integrated]
                     .into_iter()
                     .flatten()

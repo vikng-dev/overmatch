@@ -898,6 +898,45 @@ fn a_round_through_one_tank_into_a_second_resolves_both() {
     }
 }
 
+/// A REPLICA'S ROUND RUNS THROUGH AN ENVELOPE AS THE AUTHORITY'S DOES (design §13.5, "The replica
+/// runs the same march"). Through a static envelope that holds no armour, the tick that ends inside
+/// it runs on past its travel in both roles, and every tick ends at the same place owing the same
+/// overrun. The presented shell march relies on it to stand where the authority's round stands
+/// once each overrun is paid; a march whose envelope reach or payback depended on the role parts
+/// the two. Fixture data: a 3 m box at the hull's place, the round from [`FROM`].
+#[test]
+fn a_replicas_round_runs_through_an_envelope_as_the_authoritys() {
+    let track = |client: bool| {
+        let mut app = recording_world(client);
+        app.world_mut().spawn((
+            Transform::IDENTITY,
+            RigidBody::Static,
+            Envelope(bevy::math::bounding::Aabb3d::new(
+                Vec3::ZERO,
+                Vec3::splat(1.5),
+            )),
+        ));
+        settle(&mut app);
+        fire(&mut app, Vec3::new(0.0, 0.0, FROM), FireMechanism::Single);
+        (0..5)
+            .map(|_| {
+                app.update();
+                app.world_mut()
+                    .query::<(&Transform, &Projectile)>()
+                    .iter(app.world())
+                    .map(|(at, projectile)| (at.translation, projectile.owed))
+                    .collect::<Vec<_>>()
+            })
+            .collect::<Vec<_>>()
+    };
+    let (authority, replica) = (track(false), track(true));
+    assert!(
+        authority.iter().flatten().any(|&(_, owed)| owed > 0.0),
+        "a tick ends inside the envelope and runs on past its travel: {authority:?}"
+    );
+    assert_eq!(authority, replica);
+}
+
 /// A round that leaves a tank and strikes it again off another tank's armour: each encounter is its
 /// own record of the one shot, their losses partition the shot's loss on the tank, and a knockout
 /// the second encounter dealt is that encounter's. Fixture geometry: the round crosses the struck
