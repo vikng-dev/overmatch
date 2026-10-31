@@ -100,7 +100,8 @@ C  <  I  <  S  <  P .
 Client instrumented to log `P`, `S`, `C`, `I` (and `P − I`) once a second, reverted after (§ end).
 `S` computed from its definition `last_received_tick + RTT/2` (`RemoteTimeline::last_received_tick()`
 + `PingManager::rtt()`); `I` read from `InterpolationTimeline::now()`; `P`, `C` from the resources in
-§1. Harness: server `SPIKE_PERTURB=0 OVERMATCH_BOT=1`; client headless `SPIKE_SIM_LONG=1
+§1. Harness: server `SPIKE_PERTURB=0 OVERMATCH_BOT=1` (`SPIKE_PERTURB` deleted with the
+prediction machinery, ADR-0037); client headless `SPIKE_SIM_LONG=1
 SPIKE_SIMULATE_INPUT=1` (the ~20 s dead-straight course); client-side `RecvLinkConditioner` on the
 **inbound** link only (so measured RTT ≈ the one-way latency setting). macOS loopback, 2026-07-09,
 binary at working tree `8783520` + this instrumentation. First 4 samples/run dropped as sync

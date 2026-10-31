@@ -148,8 +148,8 @@ Windows-only at menu level, never boot into it.
   `settings::SHADOW_CASCADES`), exclusive video mode (if ever).
 - Persistence: RON; per-user config dir (macOS ~/Library/Application Support/dev.vikng.overmatch/
   settings.ron; Windows %APPDATA%\Overmatch; Linux XDG) — NOT next to exe (signed .app bundle is
-  read-only). Pure `settings_path_from(...)` mirroring assets::asset_root_from + OVERMATCH_SETTINGS
-  env override. Debounced atomic write-on-change; malformed file → warn + defaults, never panic;
+  read-only). Pure `settings_path_from(...)` mirroring assets::asset_root_from + an env override
+  (shipped as `OVERMATCH_CONFIG_DIR`). Debounced atomic write-on-change; malformed file → warn + defaults, never panic;
   `--reset-display` escape hatch; opening settings never writes.
 
 ## 5.4 Render scale implementation — Route A (recommended)

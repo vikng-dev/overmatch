@@ -86,8 +86,8 @@ presentation consumers (recoil microsim, belt view).
   is a legality report consumed as a belt-delta ledger, threshold-free.
 - `recoil_overlay` — the microsim-subtract own-recoil response (fork 1's candidate A).
 - `cursor_queue` — discrete facts present at the cursor crossing of their authority tick.
-- `extrapolate` — ε-bounded continuous gap-filler behind `OVERMATCH_EXTRAPOLATE` (fork 2's
-  candidate); its impulse-coincidence instrument now covers Fire/Damage classes only (the
+- `extrapolate` — ε-bounded continuous gap-filler, always on (fork 2's candidate); its
+  impulse-coincidence instrument now covers Fire/Damage classes only (the
   Shock source left with the wire fact).
 - `hit_feel` at arrival (under review, fork 2), the FRONTIER/INPUT-ARRIVAL instruments,
   the track-view snap detector (its render_error upper bracket is unpinned — the remaining

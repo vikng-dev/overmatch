@@ -68,9 +68,8 @@
 #   `SPIKE_SIM_IDLE=1 SPIKE_SIM_AIM_SWEEP=1`: parked, turret sweeping, no fire), BASE_FIELDS
 #   (`pen_cam_corner: Off, kill_cam: Off,`), SERVER_ENV (env words for a LOCAL server, e.g.
 #   `OVERMATCH_BOT=10`; it always gets OVERMATCH_SERVER_BIND=127.0.0.1, so it never listens on the
-#   network and the host firewall has nothing to ask), STATS_LEVER / STATS_PERIOD_S (the server
-#   stats lever, default OVERMATCH_SERVER_STATS_S=1, local server only: a deployment gets it from
-#   session.sh deploy).
+#   network and the host firewall has nothing to ask), STATS_PERIOD_S (the local server's
+#   OVERMATCH_SERVER_STATS_S, default 1, 0 unset: a deployment gets it from session.sh deploy).
 
 set -eu
 setopt null_glob
@@ -97,7 +96,6 @@ CLIENT_WORKLOAD="${CLIENT_WORKLOAD:-SPIKE_SIM_IDLE=1 SPIKE_SIM_AIM_SWEEP=1}"
 LOAD_WORKLOAD="${LOAD_WORKLOAD:-SPIKE_SIM_IDLE=1 SPIKE_SIM_AIM_SWEEP=1}"
 SERVER_ENV="${SERVER_ENV:-}"
 BASE_FIELDS="${BASE_FIELDS:-pen_cam_corner: Off, kill_cam: Off,}"
-STATS_LEVER="${STATS_LEVER:-OVERMATCH_SERVER_STATS_S}"
 STATS_PERIOD_S="${STATS_PERIOD_S:-1}"
 # A stand-in with session.sh's subcommands, for testing the chain by day (run-online-night.sh).
 SESSION="${EDGEGAP_SESSION:-$REPO/scripts/edgegap/session.sh}"
@@ -268,7 +266,7 @@ condition_gates() {
 
 {
   echo "target: $ADDR${DEPLOYMENT:+ (Edgegap deployment $DEPLOYMENT)}"
-  [[ "$TARGET" == local ]] && echo "local server: $BIN/overmatch-server  env [OVERMATCH_SERVER_BIND=127.0.0.1 $STATS_LEVER=$STATS_PERIOD_S $SERVER_ENV]"
+  [[ "$TARGET" == local ]] && echo "local server: $BIN/overmatch-server  env [OVERMATCH_SERVER_BIND=127.0.0.1 OVERMATCH_SERVER_STATS_S=$STATS_PERIOD_S $SERVER_ENV]"
   echo "base video fields: $BASE_FIELDS"
   echo "measured client: SPIKE_SIMULATE_INPUT=1 ${MODE_ENV[*]} workload [$CLIENT_WORKLOAD]; load clients: GPU-less, workload [$LOAD_WORKLOAD]"
   echo "client network: nettop -P -p <measured pid> -x at the window's edges, rates over the stream span"
@@ -281,7 +279,7 @@ if [[ "$TARGET" == local ]]; then
     exit 1
   fi
   stats_env=()
-  (( STATS_PERIOD_S > 0 )) && stats_env=("$STATS_LEVER=$STATS_PERIOD_S")
+  (( STATS_PERIOD_S > 0 )) && stats_env=("OVERMATCH_SERVER_STATS_S=$STATS_PERIOD_S")
   env BEVY_ASSET_ROOT="$ASSET_ROOT" OVERMATCH_SERVER_BIND=127.0.0.1 "${stats_env[@]}" ${=SERVER_ENV} \
     "$BIN/overmatch-server" >"$OUT/server.log" 2>&1 &
   SERVER_PID=$!

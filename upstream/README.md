@@ -99,7 +99,7 @@ milestone. 0.19.1 has shipped and both backports are retired; the files stay as 
   (→ deep rollbacks through chaotic contact, measured 5.6× median / 43× p90 correction amplification — the
   bill #8 pays down) and zero jitter cushion, so a late input becomes a **dropped trigger pull** (we fail
   closed on `for_tick`) instead of an unauthored round. An experiment to run (`SPIKE_INPUT_DELAY_TICKS=0`
-  already exists as the lever), not a free win. What #1 changes is that input delay becomes a *feel* knob
+  was the lever; removed in the one-timeline demolition, run it from 317d21e), not a free win. What #1 changes is that input delay becomes a *feel* knob
   we may tune by playtest instead of a correctness knob we must pin. Note the interaction with #13: lead
   and input delay trade one-for-one, and #13 bites at lead ≤ 0 — so 0-tick delay is also what keeps us
   clear of it.

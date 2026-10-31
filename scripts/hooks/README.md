@@ -21,9 +21,8 @@ travel with the repo instead of living in the un-versioned `.git/hooks`.
 | pre-push | `git lfs pre-push` — the LFS upload, and nothing else | the objects' upload time |
 
 **Everything else is CI's, post-hoc, on the pushed commit**: fmt, clippy, the test suite, and the
-asset door. The local gates that used to run here (fmt, clippy, the door, and `OVERMATCH_FULL=1`'s
-full `cargo test`, all steerable with `OVERMATCH_SKIP`) are retired — at one to two developers and
-no players, minutes of local wall clock to pre-empt a red badge is the expensive way to learn what
+asset door. The local gates that used to run here (fmt, clippy, the door, and an opt-in full
+`cargo test`) are retired — at one to two developers and no players, minutes of local wall clock to pre-empt a red badge is the expensive way to learn what
 CI says anyway.
 
 ## Never `git push --no-verify`
@@ -46,7 +45,7 @@ pre-push hook over a synthetic push.
 
 ## Trimming
 
-Trimmed three times, deliberately: `cargo test` and the LOD lane moved behind `OVERMATCH_FULL=1`
+Trimmed three times, deliberately: `cargo test` and the LOD lane moved behind an opt-in switch
 (2026-08-10), the LOD lane retired outright with the global manifest it verified (ADR 0035), and
 then every gate but the transport was cut (2026-08-16) when release confidence moved to the
 release pipeline's own artifact smoke.

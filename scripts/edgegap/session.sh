@@ -18,11 +18,10 @@
 #       POST /v1/deploy with a `profile-<utc>-<hex>` tag and a city filter, falling back through the
 #       cities (default: Singapore Tokyo Mumbai, or $EDGEGAP_CITIES) on a refusal or an ERROR
 #       deployment, until one turns READY. Arms the watchdog the moment an id exists. Prints the id.
-#       --bots N    sets the bot lever ($BOT_LEVER, default OVERMATCH_BOT) to N; 0 or absent: unset.
-#       --stats-s S sets the server-stats lever ($STATS_LEVER, default OVERMATCH_SERVER_STATS_S) to
-#                   S seconds (default 1); 0 leaves it unset. A server without the lever ignores it.
-#       --debris V  sets the debris stress lever ($DEBRIS_LEVER, default OVERMATCH_DEBRIS_STRESS) to
-#                   V, `<pieces>:<period_s>` (src/net/debris_stress.rs);
+#       --bots N    sets OVERMATCH_BOT to N; 0 or absent: unset.
+#       --stats-s S sets OVERMATCH_SERVER_STATS_S to S seconds (default 1); 0 leaves it unset. A
+#                   server without the lever ignores it.
+#       --debris V  sets OVERMATCH_DEBRIS_STRESS to V, `<pieces>:<period_s>` (src/net/debris_stress.rs);
 #                   `off` or absent: unset. A server older than the lever ignores it.
 #       --env K=V   any other server env var.
 #       --max-min M the watchdog's limit in minutes (default 90, or $EDGEGAP_PROFILE_MAX_MIN).
@@ -76,9 +75,6 @@ port_name="${EDGEGAP_PORT_NAME:-game}"
 token_file="${EDGEGAP_TOKEN_FILE:-$HOME/.config/overmatch/edgegap.token}"
 session_dir="${EDGEGAP_SESSION_DIR:-${TMPDIR:-/tmp}/overmatch-edgegap}"
 contract="$here/../../backend/contract/server-env.json"
-STATS_LEVER="${STATS_LEVER:-OVERMATCH_SERVER_STATS_S}"
-BOT_LEVER="${BOT_LEVER:-OVERMATCH_BOT}"
-DEBRIS_LEVER="${DEBRIS_LEVER:-OVERMATCH_DEBRIS_STRESS}"
 TAG_PREFIX="profile-"
 
 say() { printf '%s\n' "$*" >&2; }
@@ -430,9 +426,9 @@ cmd_deploy() {
   # ERROR: refused here instead.
   [[ "$debris" == off || "$debris" =~ ^[0-9]+:[0-9]+(\.[0-9]+)?$ ]] ||
     die "--debris wants <pieces>:<period_s> or off, got '$debris'"
-  ((bots > 0)) && envs+=("$BOT_LEVER=$bots")
-  ((stats_s > 0)) && envs+=("$STATS_LEVER=$stats_s")
-  [[ "$debris" != off ]] && envs+=("$DEBRIS_LEVER=$debris")
+  ((bots > 0)) && envs+=("OVERMATCH_BOT=$bots")
+  ((stats_s > 0)) && envs+=("OVERMATCH_SERVER_STATS_S=$stats_s")
+  [[ "$debris" != off ]] && envs+=("OVERMATCH_DEBRIS_STRESS=$debris")
 
   # The hosted contract's keys are refused: any one of them flips the server into hosted mode (or
   # half of it), which a scripted client cannot join.

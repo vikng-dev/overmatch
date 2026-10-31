@@ -913,30 +913,24 @@ mkdir -p "$REPO/scripts/hooks"
 cp "$_here/pushed_assets.sh" "$REPO/scripts/hooks/pushed_assets.sh"
 
 # One hook run with an empty ref list. Prints every shimmed command it ran, one per line.
-hook() {   # <env assignment>…
+hook() {
     : > "$LANE_LOG"
-    ( cd "$REPO" && PATH=$HOOK_BIN:$PATH env "$@" sh "$_here/pre-push" origin \
+    ( cd "$REPO" && PATH=$HOOK_BIN:$PATH sh "$_here/pre-push" origin \
         </dev/null > "$WORK/hook.out" 2>&1 ) || printf 'HOOK EXITED %s\n' "$?"
     cut -d' ' -f1-2 < "$LANE_LOG"
 }
 
 is "the hook runs the lfs upload and nothing else" \
-   "git-lfs pre-push" "$(hook OVERMATCH_LANE_PROBE=1)"
-
-# The transport is not a lane and cannot be named off: the retired switches are inert vocabulary
-# now, and a push that sets them still uploads its objects.
-is "…even when the retired lane switches are set" \
-   "git-lfs pre-push" \
-   "$(hook OVERMATCH_SKIP=lfs,fmt,clippy,assets,test OVERMATCH_FULL=1)"
+   "git-lfs pre-push" "$(hook)"
 
 # `git lfs pre-push` takes the remote as its argument; the hook passes its own through untouched.
 is "…and hands git-lfs the remote it was called with" \
    "git-lfs pre-push origin" \
-   "$(hook OVERMATCH_LANE_PROBE=1 >/dev/null; cut -d' ' -f1-3 < "$LANE_LOG")"
+   "$(hook >/dev/null; cut -d' ' -f1-3 < "$LANE_LOG")"
 
 is "…and says which transport it is" \
    "yes" \
-   "$(hook OVERMATCH_LANE_PROBE=1 >/dev/null
+   "$(hook >/dev/null
       grep -q 'pre-push ▸ git lfs pre-push' "$WORK/hook.out" && echo yes || echo no)"
 
 # THE CLOSED HALF, and the reason it is a text test: the shims above can only report commands they

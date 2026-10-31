@@ -273,8 +273,8 @@ at all, and the shallowest rollback window. Any retirement trades that away.
   amplification — wants
   [avian-solver-constraint-order.md](avian-solver-constraint-order.md)) and a zero jitter cushion, so a
   late input becomes a **dropped** trigger pull (we fail closed via `for_tick`) rather than an
-  unauthored round. An experiment to run — with `SPIKE_INPUT_DELAY_TICKS=0` the lever already exists —
-  not a free win.
+  unauthored round. An experiment to run — `SPIKE_INPUT_DELAY_TICKS=0` was the lever *[removed in the
+  one-timeline demolition; run it from 317d21e]* — not a free win.
 - Fix direction **4** (a "was this tick authored or inherited?" API, issue #492) would give us natively
   what `for_tick` re-derives. We would still keep `for_tick`: it is 20 B and it does not depend on
   upstream getting provenance right. But every *other* server-auth game would stop having to invent it.
