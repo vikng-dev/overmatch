@@ -1010,33 +1010,57 @@ fn capture_scripted_determinism_tick(
     run.digests.push(digests);
 }
 
+/// The sim's mutators run in two fixed schedules: driving, the weapon gate, firing and recoil in
+/// `FixedUpdate`; the projectile walk, after the physics step it reads, and the damage chain it
+/// feeds in `FixedPostUpdate`. Each schedule must hold its systems exactly once, and no two of them
+/// that write physical state, nor the walk and a damage system, nor the walk and a physics system,
+/// may run in an order the schedule leaves open.
 fn assert_simulation_mutators_are_ordered(app: &App) {
-    let world = app.world();
-    let schedules = world.resource::<bevy::ecs::schedule::Schedules>();
+    assert_mutators_are_ordered(
+        app,
+        FixedUpdate,
+        &[
+            "track::sim::apply_track_forces",
+            "shooting::tick_weapon_gate",
+            "shooting::fire",
+            "shooting::apply_recoil",
+        ],
+    );
+    assert_mutators_are_ordered(
+        app,
+        FixedPostUpdate,
+        &[
+            "ballistics::integrate_projectiles",
+            "damage::process_cookoffs",
+            "damage::kill_crew",
+        ],
+    );
+}
+
+fn assert_mutators_are_ordered(
+    app: &App,
+    label: impl bevy::ecs::schedule::ScheduleLabel,
+    expected: &[&str],
+) {
+    const WALK: &str = "ballistics::integrate_projectiles";
+    let schedule_name = format!("{label:?}");
+    let schedules = app.world().resource::<bevy::ecs::schedule::Schedules>();
     let schedule = schedules
-        .get(FixedUpdate)
-        .expect("the full sim installs FixedUpdate");
+        .get(label)
+        .unwrap_or_else(|| panic!("the full sim installs {schedule_name}"));
     let names: std::collections::HashMap<_, _> = schedule
         .systems()
-        .expect("FixedUpdate ran and initialized its systems")
+        .unwrap_or_else(|_| panic!("{schedule_name} ran and initialized its systems"))
         .map(|(key, system)| (key, system.name().to_string()))
         .collect();
-    for expected in [
-        "track::sim::apply_track_forces",
-        "shooting::tick_weapon_gate",
-        "shooting::fire",
-        "shooting::apply_recoil",
-        "ballistics::integrate_projectiles",
-        "damage::process_cookoffs",
-        "damage::kill_crew",
-    ] {
+    for expected in expected {
         assert_eq!(
             names
                 .values()
                 .filter(|name| name.ends_with(expected))
                 .count(),
             1,
-            "the schedule guard must find exactly one `{expected}` system",
+            "the schedule guard must find exactly one `{expected}` system in {schedule_name}",
         );
     }
     let conflicts: Vec<_> = schedule
@@ -1050,20 +1074,21 @@ fn assert_simulation_mutators_are_ordered(app: &App) {
                     || name.contains("shooting::tick_weapon_gate")
                     || name.contains("shooting::fire")
                     || name.contains("shooting::apply_recoil")
-                    || name.contains("ballistics::integrate_projectiles")
+                    || name.contains(WALK)
             };
-            let force_conflict = writes_physical_state(left) && writes_physical_state(right);
-            let projectile_damage_conflict = (left.contains("ballistics::integrate_projectiles")
-                && right.contains("damage::"))
-                || (right.contains("ballistics::integrate_projectiles")
-                    && left.contains("damage::"));
-            force_conflict || projectile_damage_conflict
+            let walk_beside = |prefix: &str| {
+                (left.contains(WALK) && right.contains(prefix))
+                    || (right.contains(WALK) && left.contains(prefix))
+            };
+            (writes_physical_state(left) && writes_physical_state(right))
+                || walk_beside("damage::")
+                || walk_beside("avian3d::")
         })
         .map(|(left, right)| (left.clone(), right.clone()))
         .collect();
     assert!(
         conflicts.is_empty(),
-        "simulation mutators need an explicit order: {conflicts:#?}",
+        "simulation mutators in {schedule_name} need an explicit order: {conflicts:#?}",
     );
 }
 
