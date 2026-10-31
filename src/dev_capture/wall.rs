@@ -2,8 +2,9 @@
 //! frame at or after app second `s`, a shipped round is fired square at a house wall, or a bare
 //! charge is set off against the foot of it, and the camera stands in front of that wall.
 //!
-//! `OVERMATCH_CAPTURE_WALL=<round key>[,<fuze mode index>]|x<kg>@<s>`, with `OVERMATCH_CAPTURE` set,
-//! on the offline root ([`offline_wall_plugin`]). The dedicated server mounts the same cue keyed by
+//! `OVERMATCH_CAPTURE_WALL=<shot>@<s>[;<shot>@<s>…]`, a shot `<round key>[,<fuze mode index>]` or
+//! `x<kg>`, with `OVERMATCH_CAPTURE` set, on the offline root ([`offline_wall_plugin`]); each shot
+//! goes off at its own second, all at one wall. The dedicated server mounts the same cue keyed by
 //! `OVERMATCH_CAPTURE_WALL` alone ([`server_wall_plugin`]): it fires and draws nothing, and logs the
 //! camera pose its hidden capture clients hold (`OVERMATCH_CAPTURE_POSE`), so every peer frames the
 //! one break the server made. The wall is chosen by class, the same on every run: the
@@ -12,6 +13,10 @@
 //! normal at the chunk nearest the pier's centre; a charge sits on the pier's outer face at its
 //! foot, its energy the first shipped burst core's chemical energy per kilogram times its mass, with
 //! no casing.
+//!
+//! `OVERMATCH_CAPTURE_WALL_SUN=1` turns the wall to the light: the pier is the one whose outer
+//! face looks most into the sun (then the largest, then the lowest element), and a round flies
+//! along the sun's rays at the same chunk, so the channel it cuts is one the sun shines down.
 
 use bevy::prelude::*;
 
@@ -36,11 +41,12 @@ enum What {
     Charge { mass: f32 },
 }
 
+/// The cue's shots in order, each with its second and whether it went off; whether the wall faces
+/// the sun ([`the_wall`]); the wall's framing once found.
 #[derive(Resource)]
 struct Cue {
-    what: What,
-    at: f32,
-    fired: bool,
+    shots: Vec<(What, f32, bool)>,
+    sun: bool,
     camera: Option<Transform>,
 }
 
@@ -70,8 +76,8 @@ pub(crate) fn server_wall_plugin(app: &mut App) {
 /// The cue `OVERMATCH_CAPTURE_WALL` names, `None` when unset or malformed (logged).
 fn cue_from_env() -> Option<Cue> {
     let raw = std::env::var("OVERMATCH_CAPTURE_WALL").ok()?;
-    let parse = || {
-        let (what, at) = raw.split_once('@')?;
+    let shot = |shot: &str| {
+        let (what, at) = shot.split_once('@')?;
         let at: f32 = at
             .parse()
             .ok()
@@ -89,10 +95,12 @@ fn cue_from_env() -> Option<Cue> {
                 )
             }
         };
+        Some((what, at, false))
+    };
+    let parse = || {
         Some(Cue {
-            what,
-            at,
-            fired: false,
+            shots: raw.split(';').map(shot).collect::<Option<_>>()?,
+            sun: std::env::var("OVERMATCH_CAPTURE_WALL_SUN").is_ok_and(|v| v == "1"),
             camera: None,
         })
     };
@@ -112,11 +120,13 @@ fn framing(outward: Vec3, aim: Vec3, foot: Vec3) -> Transform {
         .looking_at(look, Vec3::Y)
 }
 
-/// The wall (module doc): the pier's outward normal, the aim point on its outer face, the foot of
-/// that face, and a point inside the building a metre past its middle from the pier, at the aim's
-/// height, all world.
+/// The wall (module doc), the one facing into the sun's rays `light` (world, the way they travel)
+/// when given: the pier's outward normal, the aim point on its outer face, the foot of that face,
+/// and a point inside the building a metre past its middle from the pier, at the aim's height, all
+/// world.
 fn the_wall(
     buildings: &Query<(&MapInstance, &Transform, &Breakage)>,
+    light: Option<Vec3>,
 ) -> Option<(Vec3, Vec3, Vec3, Vec3)> {
     let (_, root, breakage) = buildings.iter().min_by(|a, b| {
         let reach = |t: &Transform| Vec2::new(t.translation.x, t.translation.z).length_squared();
@@ -126,26 +136,36 @@ fn the_wall(
     })?;
     let kind = &breakage.kind;
     let layout = &kind.layout;
+    let (lo, hi) = kind.bounds();
+    let outward_of = |e: usize| {
+        let w = kind.asset.elements[e].frame.w().normalize();
+        let centre = layout.element_blocks[e].center();
+        if (centre - (lo + hi) / 2.0).dot(w) >= 0.0 {
+            w
+        } else {
+            -w
+        }
+    };
+    let facing = |e: usize| light.map_or(0.0, |light| -(root.rotation * outward_of(e)).dot(light));
     let e = (0..kind.asset.elements.len())
         .filter(|&e| {
             kind.asset.elements[e].kind == ElementKind::Pier && layout.elements[e].is_some()
         })
         .max_by(|&a, &b| {
-            kind.asset.elements[a]
-                .volume()
-                .total_cmp(&kind.asset.elements[b].volume())
+            facing(a)
+                .total_cmp(&facing(b))
+                .then(
+                    kind.asset.elements[a]
+                        .volume()
+                        .total_cmp(&kind.asset.elements[b].volume()),
+                )
                 .then(b.cmp(&a))
         })?;
     let element = &kind.asset.elements[e];
-    let (lo, hi) = kind.bounds();
     let w = element.frame.w().normalize();
     let origin = Vec3::from_array(element.frame.origin);
     let centre = layout.element_blocks[e].center();
-    let outward = if (centre - (lo + hi) / 2.0).dot(w) >= 0.0 {
-        w
-    } else {
-        -w
-    };
+    let outward = outward_of(e);
     let outer = if outward == w {
         element.depth[1]
     } else {
@@ -176,7 +196,8 @@ fn fire_on_cue(
     buildings: Query<(&MapInstance, &Transform, &Breakage)>,
     mut commands: Commands,
 ) {
-    let Some((outward, aim, foot, inside)) = the_wall(&buildings) else {
+    let light = cue.sun.then(|| *crate::world::sun_transform().forward());
+    let Some((outward, aim, foot, inside)) = the_wall(&buildings, light) else {
         return;
     };
     if cue.camera.is_none() {
@@ -192,17 +213,33 @@ fn fire_on_cue(
         );
         cue.camera = Some(camera);
     }
-    if cue.fired || time.elapsed_secs() < cue.at {
-        return;
+    let now = time.elapsed_secs();
+    for (what, _, fired) in cue
+        .shots
+        .iter_mut()
+        .filter(|(_, at, fired)| !*fired && now >= *at)
+    {
+        *fired = true;
+        shoot(*what, (outward, aim, foot), light, &mut commands);
     }
-    cue.fired = true;
-    match cue.what {
+}
+
+/// Fire `what` at the wall (its outward normal, aim point and foot, world): a round along `light`
+/// when given, else square to the wall.
+fn shoot(
+    what: What,
+    (outward, aim, foot): (Vec3, Vec3, Vec3),
+    light: Option<Vec3>,
+    commands: &mut Commands,
+) {
+    match what {
         What::Round(round) => {
-            let origin = aim + outward * STANDOFF_M;
+            let along = light.unwrap_or(-outward);
+            let origin = aim - along * STANDOFF_M;
             commands.trigger(FireShell::of_round(
                 &round,
                 origin,
-                Dir3::new(-outward).unwrap_or(Dir3::NEG_Z),
+                Dir3::new(along).unwrap_or(Dir3::NEG_Z),
                 crate::spec::FireMechanism::Single,
                 true,
                 None,

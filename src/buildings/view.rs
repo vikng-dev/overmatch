@@ -23,7 +23,7 @@
 //! their hulls, framed exactly as the element's faces, so a swapped wall looks unchanged until a
 //! chunk goes; one with nothing left standing draws no mesh at all, never an empty one. Cracks are
 //! dark strips where an opened seam meets a wall face ([`crack_mesh`]). A fallen group draws its
-//! chunks' hulls on its body or carrier ([`piece_mesh`]).
+//! chunks' hulls on its body or carrier ([`piece_mesh`]), holes and all.
 //!
 //! # Holes
 //!
@@ -31,7 +31,10 @@
 //! material ([`crate::building_surface::holed`]) with its [`hole_table`] bound, and the shader skips
 //! the surface inside a hole and draws its inner wall, in the main pass and the shadow pass alike
 //! (`assets/shaders/building_holes.wgsl`). A swapped chunk's faces carry its index + 1 in the second
-//! UV's `y`, a whole element's 0, so a fragment finds its chunk's holes.
+//! UV's `y`, a whole element's 0, so a fragment finds its chunk's holes. A hole is matter missing
+//! from its chunk, so a chunk that falls keeps it: a fallen piece's faces carry their chunk's place
+//! in the piece + 1, and a piece whose chunks hold a hole wears its own copy with its
+//! [`piece_hole_table`] bound.
 
 use bevy::mesh::{Indices, PrimitiveTopology};
 use bevy::prelude::*;
@@ -119,11 +122,10 @@ impl Faces {
         }
     }
 
-    /// Law chunk `c`'s hull, drawn `offset` back, tagged with its holes (module doc) or not.
-    fn chunk(&mut self, asset: &BuildingAsset, layout: &Layout, c: usize, offset: Vec3, tag: bool) {
+    /// Law chunk `c`'s hull, drawn `offset` back, its faces tagged `tag` (module doc).
+    fn chunk(&mut self, asset: &BuildingAsset, layout: &Layout, c: usize, offset: Vec3, tag: f32) {
         let element = &asset.elements[usize::from(layout.element_of[c])];
         let timber = asset.materials[usize::from(element.material)] == TIMBER;
-        let tag = if tag { (c + 1) as f32 } else { 0.0 };
         for (n, corners) in layout.blocks[c].faces() {
             self.face(n, &corners, element.frame.w(), timber, offset, tag);
         }
@@ -157,7 +159,7 @@ pub(crate) fn broken_mesh(asset: &BuildingAsset, layout: &Layout, shape: &Shape)
         if *swapped {
             for c in layout.chunks_of(e) {
                 if shape.fate[c] == Fate::Standing {
-                    faces.chunk(asset, layout, c, Vec3::ZERO, true);
+                    faces.chunk(asset, layout, c, Vec3::ZERO, (c + 1) as f32);
                 }
             }
         } else {
@@ -168,7 +170,7 @@ pub(crate) fn broken_mesh(asset: &BuildingAsset, layout: &Layout, shape: &Shape)
 }
 
 /// A fallen group's mesh, its chunks' hulls about `origin` (asset frame, scale 1), framed where
-/// they stood.
+/// they stood, the `k`-th chunk's faces tagged `k + 1` (module doc).
 pub(crate) fn piece_mesh(
     asset: &BuildingAsset,
     layout: &Layout,
@@ -176,44 +178,76 @@ pub(crate) fn piece_mesh(
     origin: Vec3,
 ) -> Mesh {
     let mut faces = Faces::default();
-    for &c in chunks {
-        faces.chunk(asset, layout, usize::from(c), origin, false);
+    for (k, &c) in chunks.iter().enumerate() {
+        faces.chunk(asset, layout, usize::from(c), origin, (k + 1) as f32);
     }
     faces.mesh()
 }
 
-/// The hole table a building's material binds (module doc; the layout is
-/// `assets/shaders/building_holes.wgsl`'s), mesh-local metres: one header per law chunk, then each
-/// standing chunk's holes, at most [`HOLES_PER_CHUNK`], and its hull's planes. `None` when no
-/// standing chunk holds a hole.
+/// The hole table a building's material binds (module doc): one header per law chunk, the
+/// standing ones' holes and hulls. `None` when no standing chunk holds a hole.
 pub(crate) fn hole_table(
     asset: &BuildingAsset,
     layout: &Layout,
     shape: &Shape,
     holes: &[Vec<Hole>],
 ) -> Option<Vec<Vec4>> {
-    let mut table = vec![Vec4::ZERO; layout.chunks.len()];
-    let at = |centroid: Vec3, mm: [i16; 3]| centroid + Vec3::from_array(mm.map(f32::from)) / 1000.0;
-    for (c, holes) in holes.iter().enumerate() {
-        if holes.is_empty() || shape.fate.get(c) != Some(&Fate::Standing) {
+    let standing =
+        (0..layout.chunks.len()).map(|c| (shape.fate.get(c) == Some(&Fate::Standing)).then_some(c));
+    table(asset, layout, standing, holes, Vec3::ZERO)
+}
+
+/// The hole table a fallen piece's material binds (module doc): one header per chunk of the piece,
+/// in its order, their holes and hulls drawn `origin` back as [`piece_mesh`] draws them. `None`
+/// when none of its chunks holds a hole.
+pub(crate) fn piece_hole_table(
+    asset: &BuildingAsset,
+    layout: &Layout,
+    chunks: &[u16],
+    holes: &[Vec<Hole>],
+    origin: Vec3,
+) -> Option<Vec<Vec4>> {
+    let chunks = chunks.iter().map(|&c| Some(usize::from(c)));
+    table(asset, layout, chunks, holes, origin)
+}
+
+/// A hole table (the layout is `assets/shaders/building_holes.wgsl`'s), mesh-local metres: one
+/// header per slot, a slot being a face tag − 1 that names the law chunk it draws, or none; then
+/// each named chunk's holes, at most [`HOLES_PER_CHUNK`], and its hull's planes, all drawn
+/// `offset` back from the asset frame. `None` when no named chunk holds a hole.
+fn table(
+    asset: &BuildingAsset,
+    layout: &Layout,
+    slots: impl ExactSizeIterator<Item = Option<usize>>,
+    holes: &[Vec<Hole>],
+    offset: Vec3,
+) -> Option<Vec<Vec4>> {
+    let headers = slots.len();
+    let mut table = vec![Vec4::ZERO; headers];
+    for (slot, c) in slots.enumerate() {
+        let Some((c, holes)) = c.and_then(|c| Some((c, holes.get(c)?))) else {
+            continue;
+        };
+        if holes.is_empty() {
             continue;
         }
-        let centroid = Vec3::from_array(asset.chunks[layout.chunks[c] as usize].centroid);
+        let centroid = Vec3::from_array(asset.chunks[layout.chunks[c] as usize].centroid) - offset;
+        let at = |mm: [i16; 3]| centroid + Vec3::from_array(mm.map(f32::from)) / 1000.0;
         let kept = &holes[..holes.len().min(HOLES_PER_CHUNK)];
         let planes = &layout.blocks[c].planes;
-        table[c] = Vec4::new(
+        table[slot] = Vec4::new(
             table.len() as f32,
             kept.len() as f32,
             planes.len() as f32,
             0.0,
         );
         for hole in kept {
-            table.push(at(centroid, hole.from).extend(f32::from(hole.radius) / 1000.0));
-            table.push(at(centroid, hole.to).extend(0.0));
+            table.push(at(hole.from).extend(f32::from(hole.radius) / 1000.0));
+            table.push(at(hole.to).extend(0.0));
         }
-        table.extend(planes.iter().map(|(n, o)| n.extend(*o)));
+        table.extend(planes.iter().map(|(n, o)| n.extend(*o - n.dot(offset))));
     }
-    (table.len() > layout.chunks.len()).then_some(table)
+    (table.len() > headers).then_some(table)
 }
 
 /// A crack line's half width on a wall face, m (Resolution: about a mortar joint's, so a crack
@@ -538,43 +572,86 @@ fn dress_pieces(
         }
         let origin = weighted / mass.max(f32::EPSILON);
         let mesh = meshes.add(piece_mesh(&kind.asset, &kind.layout, &piece.chunks, origin));
+        let view = commands
+            .spawn((
+                ChildOf(entity),
+                Transform::from_scale(Vec3::splat(breakage.scale)),
+                Mesh3d(mesh),
+                MeshMaterial3d(look.surface.clone()),
+                crate::render_cost::CasterClass::House,
+            ))
+            .id();
         commands
             .entity(entity)
-            .insert((PieceDressed, Visibility::Hidden));
-        commands.spawn((
-            ChildOf(entity),
-            Transform::from_scale(Vec3::splat(breakage.scale)),
-            Mesh3d(mesh),
-            MeshMaterial3d(look.surface.clone()),
-            crate::render_cost::CasterClass::House,
-        ));
+            .insert((PieceDressed { view, origin }, Visibility::Hidden));
     }
 }
 
-/// A dressed piece: its mesh child is spawned.
+/// A dressed piece: its mesh child, and the point (asset frame, scale 1) its mesh is drawn about.
 #[derive(Component)]
-struct PieceDressed;
+struct PieceDressed {
+    view: Entity,
+    origin: Vec3,
+}
 
-/// A piece shows once its building's shown shape has its chunks fallen.
+/// A shown piece whose mesh wears its chunks' holes.
+#[derive(Component)]
+struct PieceHoled;
+
+/// A piece shows once its building's shown shape has its chunks fallen, and from then on wears its
+/// chunks' holes (module doc). Every one of them is shown by then: a hole precedes its chunk's fall
+/// in the record, and a chunk no longer standing takes none ([`super::breakage::run_laws`]).
 fn show_pieces(
-    mut pieces: Query<(&WallPiece, &mut Visibility), With<PieceDressed>>,
-    buildings: Query<(&MapInstance, &ShownShape)>,
+    mut pieces: Query<(
+        Entity,
+        &WallPiece,
+        &PieceDressed,
+        &mut Visibility,
+        Has<PieceHoled>,
+    )>,
+    buildings: Query<(&MapInstance, &Breakage, &ShownShape, Option<&ShownHoles>)>,
+    mut worn: Query<&mut MeshMaterial3d<BuildingMaterial>>,
+    mut surfaces: SurfaceStores,
+    mut commands: Commands,
 ) {
-    for (piece, mut visibility) in &mut pieces {
-        let fallen = buildings
+    for (entity, piece, dressed, mut visibility, holed) in &mut pieces {
+        let building = buildings
             .iter()
-            .find(|(identity, _)| identity.ordinal == piece.building)
-            .is_some_and(|(_, shown)| {
-                piece
-                    .chunks
-                    .first()
-                    .is_some_and(|&c| shown.0.fate.get(usize::from(c)) == Some(&Fate::Fallen))
-            });
+            .find(|(identity, ..)| identity.ordinal == piece.building);
+        let fallen = building.is_some_and(|(_, _, shown, _)| {
+            piece
+                .chunks
+                .first()
+                .is_some_and(|&c| shown.0.fate.get(usize::from(c)) == Some(&Fate::Fallen))
+        });
         visibility.set_if_neq(if fallen {
             Visibility::Inherited
         } else {
             Visibility::Hidden
         });
+        if !fallen || holed {
+            continue;
+        }
+        let table = building.and_then(|(_, breakage, _, holes)| {
+            let kind = &breakage.kind;
+            piece_hole_table(
+                &kind.asset,
+                &kind.layout,
+                &piece.chunks,
+                &holes?.0,
+                dressed.origin,
+            )
+        });
+        if table.is_some() {
+            let Ok(mut worn) = worn.get_mut(dressed.view) else {
+                continue;
+            };
+            let Some(surface) = surfaces.wear(table) else {
+                continue;
+            };
+            worn.0 = surface;
+        }
+        commands.entity(entity).insert(PieceHoled);
     }
 }
 
@@ -737,9 +814,10 @@ mod tests {
     }
 
     /// A FRAGMENT FINDS ITS OWN CHUNK'S HOLES. The shader reads a face's hole header at its tag − 1,
-    /// so every vertex of a swapped chunk's hull carries that chunk's index + 1, and every whole
-    /// element's and fallen piece's vertex 0, which reads no hole. A tag off by one draws a hole in
-    /// the neighbouring chunk; a tag on a whole element reads a header that is not its own.
+    /// so every vertex of a swapped chunk's hull carries that chunk's index + 1, every vertex of a
+    /// fallen piece's `k`-th chunk `k + 1` (its [`piece_hole_table`]'s header), and every whole
+    /// element's vertex 0, which reads no hole. A tag off by one draws a hole in the neighbouring
+    /// chunk; a tag on a whole element reads a header that is not its own.
     #[test]
     fn a_swapped_chunk_s_faces_carry_its_index_and_nothing_else_carries_one() {
         let kind = shipped_house();
@@ -763,10 +841,15 @@ mod tests {
             chunk_corners,
             "only the swapped chunks carry a tag"
         );
-        let piece = piece_mesh(asset, layout, &[chunks.start as u16], Vec3::ZERO);
+        let order = [chunks.start + 1, chunks.start];
+        let piece = piece_mesh(asset, layout, &order.map(|c| c as u16), Vec3::ZERO);
+        let tagged = tags(&piece);
+        let first = hull_corners(layout, order[0]);
+        assert_eq!(tagged.len(), first + hull_corners(layout, order[1]));
         assert!(
-            tags(&piece).iter().all(|&tag| tag == 0.0),
-            "a piece reads no hole"
+            tagged[..first].iter().all(|&tag| tag == 1.0)
+                && tagged[first..].iter().all(|&tag| tag == 2.0),
+            "a piece's chunks carry their place in it"
         );
     }
 
@@ -853,15 +936,9 @@ mod tests {
         );
     }
 
-    /// A HOLE IS DRAWN BY ITS BUILDING'S OWN MATERIAL, AND ONLY WHILE IT SHOWS: a building whose
-    /// shown holes stand wears a copy of the shared material, alpha-masked (the variant whose
-    /// shader and shadow pass test holes) and binding its table; one with none wears the shared
-    /// material, so every building without a hole keeps the opaque path. The hole is ASSUMED
-    /// fixture data.
-    #[test]
-    fn a_building_with_a_hole_wears_its_own_masked_material_until_the_hole_goes() {
-        let kind = shipped_house();
-        let mut world = World::new();
+    /// A world holding the stores a view draws from and the shared material ([`BuildingLook`]),
+    /// whose handle it returns.
+    fn shared_look(world: &mut World) -> Handle<BuildingMaterial> {
         world.init_resource::<Assets<Mesh>>();
         world.init_resource::<Assets<BuildingMaterial>>();
         world.init_resource::<Assets<ShaderBuffer>>();
@@ -883,6 +960,19 @@ mod tests {
         world.insert_resource(BuildingLook {
             surface: shared.clone(),
         });
+        shared
+    }
+
+    /// A HOLE IS DRAWN BY ITS BUILDING'S OWN MATERIAL, AND ONLY WHILE IT SHOWS: a building whose
+    /// shown holes stand wears a copy of the shared material, alpha-masked (the variant whose
+    /// shader and shadow pass test holes) and binding its table; one with none wears the shared
+    /// material, so every building without a hole keeps the opaque path. The hole is ASSUMED
+    /// fixture data.
+    #[test]
+    fn a_building_with_a_hole_wears_its_own_masked_material_until_the_hole_goes() {
+        let kind = shipped_house();
+        let mut world = World::new();
+        let shared = shared_look(&mut world);
         let (e, chunks) = chunked_element(&kind.layout);
         let mut shape = Shape::intact(&kind.layout);
         shape.swapped[e] = true;
@@ -939,6 +1029,110 @@ mod tests {
             *worn, shared,
             "with no hole it wears the shared material again"
         );
+    }
+
+    /// A FALLEN PIECE KEEPS ITS CHUNKS' HOLES (a hole is matter missing from its chunk): once its
+    /// chunks show fallen, a piece one of whose chunks holds a hole wears its own masked material
+    /// binding its [`piece_hole_table`], the capsule and the hull's planes drawn about the piece's
+    /// origin as its mesh is, so every vertex of the mesh lies on the hull the shader tests; a
+    /// piece of hole-free chunks keeps the shared material. A view that dropped a falling chunk's
+    /// holes, or drew them about the building's frame instead of the piece's, fails here. The
+    /// fates and the hole are ASSUMED fixture state, set directly rather than reached by law.
+    #[test]
+    fn a_fallen_piece_wears_its_chunks_holes() {
+        let kind = shipped_house();
+        let (asset, layout) = (&kind.asset, &kind.layout);
+        let mut world = World::new();
+        let shared = shared_look(&mut world);
+        let (_, chunks) = chunked_element(layout);
+        let (holed, plain) = (chunks.start, chunks.start + 1);
+        let mut shape = Shape::intact(layout);
+        shape.fate[holed] = Fate::Fallen;
+        shape.fate[plain] = Fate::Fallen;
+        let hole = Hole {
+            from: [0, -60, 0],
+            to: [0, 60, 0],
+            radius: 40,
+        };
+        let mut holes = ShownHoles(vec![Vec::new(); layout.chunks.len()]);
+        holes.0[holed].push(hole);
+        world.spawn((
+            MapInstance {
+                id: "house_0001".to_owned(),
+                ordinal: 3,
+            },
+            Breakage::new(kind.clone(), 1.0),
+            ShownShape(shape),
+            holes.clone(),
+        ));
+        let piece = |world: &mut World, c: usize| {
+            world
+                .spawn((
+                    WallPiece {
+                        building: 3,
+                        chunks: vec![c as u16],
+                    },
+                    Transform::IDENTITY,
+                ))
+                .id()
+        };
+        let (holed_piece, plain_piece) = (piece(&mut world, holed), piece(&mut world, plain));
+        let mut schedule = Schedule::default();
+        schedule.add_systems((dress_pieces, show_pieces).chain());
+        schedule.run(&mut world);
+        schedule.run(&mut world);
+
+        let worn = |world: &World, piece: Entity| {
+            let dressed = world.get::<PieceDressed>(piece).expect("dressed");
+            assert_eq!(world.get::<Visibility>(piece), Some(&Visibility::Inherited));
+            let view = dressed.view;
+            let material = world.get::<MeshMaterial3d<BuildingMaterial>>(view).unwrap();
+            let mesh = world.get::<Mesh3d>(view).unwrap();
+            (material.0.clone(), mesh.0.clone(), dressed.origin)
+        };
+        assert_eq!(worn(&world, plain_piece).0, shared, "no hole: shared");
+        let (material, mesh, origin) = worn(&world, holed_piece);
+        assert_ne!(material, shared, "a holed piece wears its own material");
+        let material = world
+            .resource::<Assets<BuildingMaterial>>()
+            .get(&material)
+            .unwrap();
+        assert_eq!(material.base.alpha_mode, AlphaMode::Mask(0.0));
+        let table = piece_hole_table(asset, layout, &[holed as u16], &holes.0, origin).unwrap();
+        let bound = world
+            .resource::<Assets<ShaderBuffer>>()
+            .get(&material.extension.holes)
+            .unwrap();
+        assert_eq!(bound.data, ShaderBuffer::from(table.clone()).data);
+
+        let centroid = Vec3::from_array(asset.chunks[layout.chunks[holed] as usize].centroid);
+        assert_eq!(
+            table[0],
+            Vec4::new(1.0, 1.0, layout.blocks[holed].planes.len() as f32, 0.0)
+        );
+        assert!(
+            (table[1] - (centroid - origin + Vec3::new(0.0, -0.06, 0.0)).extend(0.04)).length()
+                < 1e-6
+        );
+        let planes = &table[3..];
+        let Some(VertexAttributeValues::Float32x3(positions)) = world
+            .resource::<Assets<Mesh>>()
+            .get(&mesh)
+            .unwrap()
+            .attribute(Mesh::ATTRIBUTE_POSITION)
+        else {
+            panic!("positions");
+        };
+        for p in positions.iter().map(|p| Vec3::from_array(*p)) {
+            let out = planes
+                .iter()
+                .map(|plane| plane.truncate().dot(p) - plane.w)
+                .fold(f32::MIN, f32::max);
+            assert!(
+                out.abs() < 1e-4,
+                "vertex {p} off the hull the shader tests by {out}"
+            );
+        }
     }
 
     /// NO EMPTY MESH REACHES A RENDER ENTITY: a building with nothing left standing holds no
