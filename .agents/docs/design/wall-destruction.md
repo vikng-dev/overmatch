@@ -569,9 +569,9 @@ Retain recoil on the remaining material.
 **Server cost.**
 **DERIVED `O(N_e)`** extraction from ejected cells, followed by fragment-transport cost.
 
-**Tanks — OWNER DECISION.**
-Recommend replacing the accepted strength-scaled spall rule in tank-design section **5**.
-Strength influences fracture and ejection through the response; it is not an independent energy multiplier.
+**Tanks — decided (2026-10-31).**
+Wall ejecta never dose a tank: they are debris, drawn and simulated, with no potency.
+The tanks' own strength-scaled spall cone (tank-design section **5**) stays; budgeted ejecta would need constitutive profiles the model does not hold.
 
 The supplied burst factor is **ASSUMED 210** and the field emits its mathematical half.
 Its emission is therefore **DERIVED 105 times** driven casing energy.
@@ -790,11 +790,11 @@ A quoted spring force alone supplies none of the missing acceleration coupling.
 | Decision | Recommendation |
 |---|---|
 | Small-hole fidelity | **Decided:** a hole is a negative volume, drawn only; rounds, mass and strength ignore it (see Local response and holes). |
-| Rubble persistence and mobility | Retain gameplay-relevant occupied geometry throughout the match; let mass, friction and track contact determine climbing or pushing. Fine presentation debris may fade. |
-| Contact-damage scope | Exclude tank HP dose; allow structural fracture on landing and under pushing loads. |
-| Accepted strength-scaled spall | Replace it with budgeted ejecta for walls and tanks; validate the changed tank outcomes explicitly. |
-| Three-property material model | Keep the summary, add sourced constitutive and attachment profiles; do not infer missing properties from strength. |
-| Hard-pool dose | Exclude outgoing kinetic energy from absorbed damaging work; retain the shared conversion and abstract crew line rate. |
+| Rubble persistence and mobility | **Provisional (2026-10-31):** retain gameplay-relevant occupied geometry throughout the match; let mass, friction and track contact determine climbing or pushing. Fine presentation debris may fade. |
+| Contact-damage scope | **Decided (2026-10-31):** wall material never doses a tank, whether it falls, is pushed or is thrown off a hit; walls still fracture on landing and under pushing loads. |
+| Accepted strength-scaled spall | **Decided (2026-10-31):** wall ejecta are debris with no dose; the tanks' strength-scaled spall cone stays (see Spall as ejecta). |
+| Three-property material model | **Provisional (2026-10-31):** keep the summary, add sourced constitutive and attachment profiles; do not infer missing properties from strength. |
+| Hard-pool dose | **Provisional (2026-10-31):** exclude outgoing kinetic energy from absorbed damaging work; retain the shared conversion and abstract crew line rate. |
 | Rubble rest | **Decided (2026-10-31):** Avian's island sleep and wake on contact; no body-type switching. The game adds only the wake Avian lacks, when a support goes (see Rubble settlement and the cap). |
 | Debris cap | Cap detailed bodies and use finite-mass overflow; accept that total coarse work still needs a measured limit. No cap applies until a sleeping piece's per-tick cost is measured. |
-| Empirical acceptance data | Require verified source fixtures before declaring handbook validation complete; do not substitute plausible-looking prototype outcomes. |
+| Empirical acceptance data | **Provisional (2026-10-31):** require verified source fixtures before declaring handbook validation complete; do not substitute plausible-looking prototype outcomes. |
