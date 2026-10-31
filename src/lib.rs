@@ -300,15 +300,17 @@ pub(crate) fn gpu_less_default_plugins(
 /// only a player's screen, speakers or hands. Mounted by the server and by the bitprobe fixture, so
 /// the fixture simulates on the floor the authority runs.
 ///
-/// Each plugin dropped here registers systems and asset stores only for things no server entity
-/// carries and the server never loads: UI nodes and text, sprites, picking pointers, input focus,
-/// accessibility, gamepads, the clipboard, audio, animation, gizmos, lights and scenes. Its systems
-/// ran every frame for nothing. `LightPlugin` goes with `GizmoPlugin` because it mounts a
-/// light-gizmo group whose systems read the gizmo asset store. A plugin stays when a server system
-/// needs it or it touches simulated entities: `CameraPlugin`'s bounds pass inserts `Aabb` on the
-/// `Mesh3d` entities `world::spawn_environment` spawns on every composition, and that system
-/// writes the mesh, image and PBR asset stores. `GltfPlugin` stays because `PbrPlugin` registers a
-/// glTF extension handler at build.
+/// No authority system reads what a dropped plugin produces: UI nodes and text, sprites, picking
+/// pointers, input focus, accessibility, gamepads, the clipboard, audio, animation, gizmos, light
+/// clusters, frusta and cascades, and scenes. One server entity is of a kind these plugins serve:
+/// the sun `world::spawn_environment` spawns on every composition, a `DirectionalLight` that only
+/// the client's `settings::apply_settings` reads, so on the server it is an unused presentation
+/// entity. `LightPlugin` goes with `GizmoPlugin` because it mounts a light-gizmo group whose
+/// systems read the gizmo asset store. A plugin stays when a server system needs it or it touches
+/// simulated entities: `CameraPlugin`'s bounds pass inserts `Aabb` on the `Mesh3d` entities
+/// `world::spawn_environment` spawns on every composition, and that system writes the mesh, image
+/// and PBR asset stores. `GltfPlugin` stays because `PbrPlugin` registers a glTF extension handler
+/// at build.
 pub(crate) fn server_plugin_floor() -> bevy::app::PluginGroupBuilder {
     use bevy::{
         a11y, animation, audio, clipboard, gilrs, gizmos, gizmos_render, input_focus, light,
