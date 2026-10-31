@@ -616,7 +616,6 @@ fn launch_turrets_on_cookoff(
         (With<Turret>, Without<LaunchedTurret>),
     >,
     parents: Query<&ChildOf>,
-    locals: Query<&Transform>,
     mut commands: Commands,
 ) {
     for ammo_owner in &cooked_ammo {
@@ -626,12 +625,19 @@ fn launch_turrets_on_cookoff(
                 continue;
             }
             // Detached, the turret is the root avian composes its armour colliders' scale from
-            // (`ColliderTransform`), so it carries the scale the hierarchy composed for it, never
-            // one read back out of the world matrix: decomposing a rotated `GlobalTransform` rounds
-            // each column's length, which leaves a unit scale an ULP off 1, and the collector
-            // refuses armour at any scale but a bit-exact 1 (`ballistics::collect`).
+            // (`ColliderTransform`), and the collector refuses armour at any scale but a bit-exact
+            // 1 (`ballistics::collect`). So it carries unit scale, never one read back out of the
+            // world matrix: decomposing a rotated `GlobalTransform` rounds each column's length and
+            // can perturb a unit scale. Unit scale is what the hierarchy composes, bit for bit:
+            // the turret is the gunner chain's Yaw servo (`tank::spawn::resolve_rig_nodes`);
+            // `bake::certify_asset` refuses an asset unless every servo node and each of its
+            // ancestors is authored at scale exactly 1 (`L2.UNIT_SCALE` in
+            // `bake::declared_roles_resolve`); the sim nodes are spawned with those authored
+            // transforms (`tank::spawn::spawn_node_entities`) under a root asserted at unit scale
+            // (`tank::spawn::assemble_tank_body`); and the servos write rotation only
+            // (`tank::servo::drive_servos`, `tank::servo::restore_servo_truth`).
             let mut pose = global.compute_transform();
-            pose.scale = composed_scale(turret, &parents, &locals);
+            pose.scale = Vec3::ONE;
             let up = Vec3::from(global.up());
             let right = Vec3::from(global.right());
             let forward = Vec3::from(global.forward());
@@ -669,22 +675,6 @@ fn launch_turrets_on_cookoff(
                 ));
         }
     }
-}
-
-/// The scale `entity` reaches the world at as avian composes a collider's: the componentwise
-/// product of every `Transform::scale` from the hierarchy's root down to `entity`, root first
-/// (`ColliderTransform` propagation). A subtree re-rooted at `entity` with this scale keeps every
-/// collider's scale bit for bit.
-fn composed_scale(entity: Entity, parents: &Query<&ChildOf>, locals: &Query<&Transform>) -> Vec3 {
-    let mut chain = vec![entity];
-    while let Ok(parent) = parents.get(chain[chain.len() - 1]) {
-        chain.push(parent.parent());
-    }
-    chain
-        .iter()
-        .rev()
-        .filter_map(|&link| locals.get(link).ok())
-        .fold(Vec3::ONE, |scale, local| scale * local.scale)
 }
 
 fn is_descendant_of(mut entity: Entity, ancestor: Entity, parents: &Query<&ChildOf>) -> bool {
