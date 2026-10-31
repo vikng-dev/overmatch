@@ -931,8 +931,11 @@ pub(crate) fn mount_march_probe(app: &mut App) {
     app.init_resource::<MarchProbe>().add_systems(
         FixedPostUpdate,
         probe_march
+            .after(avian3d::prelude::PhysicsSystems::Writeback)
             .after(SimPhase::ColliderPoses)
-            .before(SimPhase::ProjectileMarch),
+            .before(SimPhase::ProjectileMarch)
+            .before(crate::buildings::breakage::WallLawSet)
+            .before(crate::trees::TreeFallSet),
     );
 }
 
