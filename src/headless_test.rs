@@ -2487,8 +2487,9 @@ fn a_server_composition_builds_no_track_prints() {
 /// collider (a filter that admits some layer) resolves, as Avian's narrow phase resolves it (its
 /// own `Friction`, else its body's, else `DefaultFriction`), to its material's row under
 /// `substances::PAIR_RULE`. The material is found by class, never by name: a ballistic volume's
-/// substance, a vehicle proxy's `colliders` entry, a bump stop's track steel, a graybox prototype's substance, and for the
-/// terrain the base ground type. A collider of no class, one falling back to Avian's default, or
+/// substance, a vehicle proxy's `colliders` entry, a rigid track collider's track steel (a bump
+/// stop or a side plate), a graybox prototype's substance, and for the terrain the base ground
+/// type. A collider of no class, one falling back to Avian's default, or
 /// one under another rule (a frictionless `Min` or a `Max`, either of which makes a pair's value
 /// one side's) fails here, naming it.
 #[test]
@@ -2560,6 +2561,9 @@ fn every_collider_carries_its_materials_friction_under_the_one_rule() {
         } else if world
             .get::<crate::track::bump_stop::BumpStop>(collider)
             .is_some()
+            || world
+                .get::<crate::track::bump_stop::SidePlate>(collider)
+                .is_some()
         {
             registry
                 .contact_friction(crate::track::bump_stop::SUBSTANCE)
