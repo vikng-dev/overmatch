@@ -203,6 +203,7 @@ fn place<'a>(instances: &[Instance<'a>], grid: &HeightGrid) -> Vec<Placement<'a>
 pub(crate) struct ViewAssets<'a> {
     pub(crate) server: &'a AssetServer,
     pub(crate) building_materials: &'a mut Assets<BuildingMaterial>,
+    pub(crate) buffers: &'a mut Assets<bevy::render::storage::ShaderBuffer>,
 }
 
 /// The view-side handles, built ONCE per world: one mesh per prototype, cloned per instance, and
@@ -293,6 +294,7 @@ impl ScatterView {
                 commands,
                 assets.server,
                 assets.building_materials,
+                assets.buffers,
             ),
             bark: materials.add(Color::srgb(0.26, 0.19, 0.13)),
             needle: materials.add(Color::srgb(0.11, 0.21, 0.13)),
@@ -546,6 +548,7 @@ mod tests {
         .init_asset::<Image>()
         .init_asset::<StandardMaterial>()
         .init_asset::<BuildingMaterial>()
+        .init_asset::<bevy::render::storage::ShaderBuffer>()
         .init_asset::<bevy::world_serialization::WorldAsset>();
         let grid = sloped_grid();
         let mut blocks: Vec<Transform> = Vec::new();
@@ -555,21 +558,26 @@ mod tests {
         world.resource_scope(|world, mut meshes: Mut<Assets<Mesh>>| {
             world.resource_scope(|world, mut materials: Mut<Assets<StandardMaterial>>| {
                 world.resource_scope(|world, mut buildings: Mut<Assets<BuildingMaterial>>| {
-                    let mut queue = bevy::ecs::world::CommandQueue::default();
-                    let mut commands = Commands::new(&mut queue, world);
-                    obstacles = spawn(
-                        &mut commands,
-                        &mut meshes,
-                        &mut materials,
-                        manifest,
-                        &grid,
-                        &mut blocks,
-                        server.as_ref().map(|server| ViewAssets {
-                            server,
-                            building_materials: &mut buildings,
-                        }),
+                    world.resource_scope(
+                        |world, mut buffers: Mut<Assets<bevy::render::storage::ShaderBuffer>>| {
+                            let mut queue = bevy::ecs::world::CommandQueue::default();
+                            let mut commands = Commands::new(&mut queue, world);
+                            obstacles = spawn(
+                                &mut commands,
+                                &mut meshes,
+                                &mut materials,
+                                manifest,
+                                &grid,
+                                &mut blocks,
+                                server.as_ref().map(|server| ViewAssets {
+                                    server,
+                                    building_materials: &mut buildings,
+                                    buffers: &mut buffers,
+                                }),
+                            );
+                            queue.apply(world);
+                        },
                     );
-                    queue.apply(world);
                 });
             });
         });

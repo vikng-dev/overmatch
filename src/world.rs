@@ -525,7 +525,7 @@ fn report_failed_terrain_map(
 
 #[expect(
     clippy::too_many_arguments,
-    reason = "spawns the environment: five asset stores, terrain, map, window, view profile, loader \
+    reason = "spawns the environment: six asset stores, terrain, map, window, view profile, loader \
               and the ablation lever"
 )]
 fn spawn_environment(
@@ -535,6 +535,9 @@ fn spawn_environment(
     mut terrain_materials: ResMut<Assets<crate::terrain_blend::TerrainMaterial>>,
     // The scatter buildings' one shared material (`building_surface`).
     mut building_materials: ResMut<Assets<crate::building_surface::BuildingMaterial>>,
+    // Its hole tables' store, which the shared material binds an empty one from: the render
+    // plugin's, so absent where nothing draws.
+    mut buffers: Option<ResMut<Assets<bevy::render::storage::ShaderBuffer>>>,
     // The track prints' two stores, which the ground's material reads (`track_prints`).
     mut images: ResMut<Assets<Image>>,
     grid: Option<Res<crate::terrain_grid::HeightGrid>>,
@@ -761,10 +764,14 @@ fn spawn_environment(
                 &manifest,
                 &grid,
                 &mut blocks,
-                (!windows.is_empty()).then(|| crate::scatter::ViewAssets {
-                    server: &asset_server,
-                    building_materials: &mut building_materials,
-                }),
+                buffers
+                    .as_deref_mut()
+                    .filter(|_| !windows.is_empty())
+                    .map(|buffers| crate::scatter::ViewAssets {
+                        server: &asset_server,
+                        building_materials: &mut building_materials,
+                        buffers,
+                    }),
             );
         }
         commands.insert_resource(TerrainMap {

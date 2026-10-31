@@ -14,6 +14,10 @@
 //
 // DERIVATIVES ARE TAKEN ONCE, UP FRONT. The roof branch is not uniform across a quad at the eaves,
 // so its fetches are `textureSampleGrad` with the UV's gradients computed outside the branch.
+//
+// HOLES ONLY WHERE THE MATERIAL MAY DISCARD. A building with a hole wears its own copy of the
+// material, alpha-masked (`buildings::view`), and only that variant compiles the hole path
+// (`building_holes.wgsl`): a building without one draws exactly as it would with no hole code.
 
 #import bevy_pbr::{
     forward_io::{Vertex, VertexOutput, FragmentOutput},
@@ -25,6 +29,9 @@
     pbr_functions::{alpha_discard, apply_pbr_lighting, main_pass_post_lighting_processing},
     pbr_types,
 }
+#ifdef MAY_DISCARD
+#import "shaders/building_holes.wgsl"::{hole_at, SEE_THROUGH, INNER_WALL}
+#endif
 
 struct BuildingSurfaceParams {
     // x: the roof pack's repeats per metre. yzw: unused.
@@ -107,6 +114,24 @@ fn fragment(in: VertexOutput, @builtin(front_facing) is_front: bool) -> Fragment
         // Metallic is not swapped: the material's metallic factor is hard zero, so either pack's
         // B channel multiplies out to a dielectric.
     }
+
+#ifdef MAY_DISCARD
+#ifdef VERTEX_UVS_B
+    // Through a hole the eye sees past the chunk, or the hole's inner wall: the face's own pack,
+    // lit where the wall is and facing into the hole, without the face's normal map.
+    let hole = hole_at(in.world_position.xyz, in.uv_b.y, in.instance_index);
+    if hole.kind == SEE_THROUGH {
+        discard;
+    }
+    if hole.kind == INNER_WALL {
+        pbr_input.world_position = vec4(hole.at, 1.0);
+        pbr_input.world_normal = hole.normal;
+        pbr_input.N = hole.normal;
+        pbr_input.V = pbr_functions::calculate_view(
+            pbr_input.world_position, pbr_input.is_orthographic);
+    }
+#endif
+#endif
 
     pbr_input.material.base_color = alpha_discard(pbr_input.material, pbr_input.material.base_color);
 

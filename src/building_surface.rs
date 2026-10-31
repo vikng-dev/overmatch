@@ -29,6 +29,14 @@
 //! horizontal side ([`ridge_axis`]), as a ridge would. A mesh that carries a second UV channel
 //! decides per vertex instead: its `x` is 1 on a timber face and 0 on masonry, so an element mesh's
 //! sill tops stay brick and its board edges stay timber.
+//!
+//! # Holes
+//!
+//! A building with a hole wears its own copy of the material ([`holed`]): alpha-masked, so bevy
+//! compiles and runs the hole path in the main pass and in the prepass the shadow pass draws
+//! (`assets/shaders/building_holes.wgsl`), with the building's hole table bound
+//! ([`crate::buildings::view::hole_table`]). The shared material binds [`no_holes`] and stays opaque,
+//! so every other building draws exactly as it would without the hole code.
 
 use bevy::asset::AssetLoadFailedEvent;
 use bevy::math::Affine2;
@@ -36,6 +44,7 @@ use bevy::mesh::{Indices, PrimitiveTopology};
 use bevy::pbr::{ExtendedMaterial, MaterialExtension};
 use bevy::prelude::*;
 use bevy::render::render_resource::{AsBindGroup, ShaderType};
+use bevy::render::storage::ShaderBuffer;
 use bevy::shader::ShaderRef;
 
 use crate::world::{MapEncoding, MapTiling, surface_map};
@@ -44,8 +53,11 @@ use crate::world::{MapEncoding, MapTiling, surface_map};
 /// parameter, extended with [`BuildingSurface`] (the [`ROOF`] pack).
 pub(crate) type BuildingMaterial = ExtendedMaterial<StandardMaterial, BuildingSurface>;
 
-/// The vertex stage (face units to metres) and the fragment (the roof swap), one file.
+/// The vertex stage (face units to metres) and the fragment (the roof swap, a hole), one file.
 const SHADER: &str = "shaders/building_surface.wgsl";
+
+/// The prepass fragment, which bevy runs only for a [`holed`] material: a hole's discard.
+const PREPASS_SHADER: &str = "shaders/building_surface_prepass.wgsl";
 
 /// One surface pack's contract: which pack it is and the real-world metres it was authored at.
 pub(crate) struct SurfacePack {
@@ -104,6 +116,10 @@ pub(crate) struct BuildingSurface {
     pub roof_normal: Handle<Image>,
     #[texture(104)]
     pub roof_arm: Handle<Image>,
+    /// The building's hole table ([`crate::buildings::view::hole_table`]), or [`no_holes`] on the
+    /// shared material, whose opaque variant never reads it.
+    #[storage(105, read_only)]
+    pub holes: Handle<ShaderBuffer>,
 }
 
 impl MaterialExtension for BuildingSurface {
@@ -114,6 +130,25 @@ impl MaterialExtension for BuildingSurface {
     fn fragment_shader() -> ShaderRef {
         SHADER.into()
     }
+
+    fn prepass_fragment_shader() -> ShaderRef {
+        PREPASS_SHADER.into()
+    }
+}
+
+/// The table the shared material binds: one empty record, as a storage binding holds at least one.
+pub(crate) fn no_holes() -> ShaderBuffer {
+    ShaderBuffer::from(vec![Vec4::ZERO])
+}
+
+/// `shared` for one building with holes, its `table` bound (module doc). Alpha-masked at a cutoff
+/// of 0, which no alpha falls below: the mask only makes bevy build the variant that may discard,
+/// in the main pass and in the shadow pass.
+pub(crate) fn holed(shared: &BuildingMaterial, table: Handle<ShaderBuffer>) -> BuildingMaterial {
+    let mut holed = shared.clone();
+    holed.base.alpha_mode = AlphaMode::Mask(0.0);
+    holed.extension.holes = table;
+    holed
 }
 
 /// The building maps whose load must succeed, held by id for [`report_failed_building_map`]. Only
@@ -128,6 +163,7 @@ pub(crate) fn material(
     commands: &mut Commands,
     server: &AssetServer,
     materials: &mut Assets<BuildingMaterial>,
+    buffers: &mut Assets<ShaderBuffer>,
 ) -> Handle<BuildingMaterial> {
     let load = |pack: &SurfacePack, map: &str, encoding: MapEncoding| {
         surface_map(server, &pack.path(map), encoding, MapTiling::Repeat)
@@ -170,6 +206,7 @@ pub(crate) fn material(
             roof_albedo,
             roof_normal,
             roof_arm,
+            holes: buffers.add(no_holes()),
         },
     })
 }
