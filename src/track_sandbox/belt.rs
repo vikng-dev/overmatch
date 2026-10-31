@@ -156,12 +156,7 @@ pub(super) fn apply_belt_support_field(
         hull_pos.0,
         super::rubble::footprint_sphere(&geom, &envelope),
     );
-    let mut pieces = RubbleBodies::gather(
-        &rubble,
-        &near,
-        crate::track::rubble::belt_friction(&params),
-        &bodies,
-    );
+    let mut pieces = RubbleBodies::gather(&rubble, &near, &bodies);
     let oracle = &field.0;
 
     // Phase 1 — both sides' contact passes at their pre-tick belt speeds (transmission-design
@@ -383,12 +378,9 @@ fn force_params(geom: &RigGeom, rig: &RigSpec, envelope: &EnvelopeLaw) -> ForceP
         support_damping_per_m: envelope.damping_per_m,
         engage_depth: rig.engage_depth,
         probe_reach: CONTACT_PROBE,
-        mu: MU,
         slip_saturation: SLIP_SATURATION,
         inertia: rig.belt_inertia,
-        // The declared park-target stiffness (forces.rs provenance doc): it gates the traction
-        // regime and the belt-hold; the shear law derives its own stiffness from μ·load/K.
-        grip_stiffness: crate::track::forces::grip_stiffness(MU, rig.weight_n),
+        grip: Some(rig.grip),
     }
 }
 
@@ -732,10 +724,9 @@ mod tests {
             support_damping_per_m: law.damping_per_m,
             engage_depth: engage,
             probe_reach: CONTACT_PROBE,
-            mu: MU,
             slip_saturation: SLIP_SATURATION,
             inertia: 1.0,
-            grip_stiffness: 0.0,
+            grip: None,
         };
         let affine = bevy::math::Affine3A::from_translation(Vec3::new(0.0, geom.hull_rest_y, 0.0));
         let mut total = 0.0;

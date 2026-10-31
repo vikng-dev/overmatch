@@ -137,6 +137,9 @@ struct RigSpec {
     engage_depth: f32,
     /// Reflected belt + drivetrain inertia (kg).
     belt_inertia: f32,
+    /// The track's material pair with the course and its pieces, from the tank's data: its track
+    /// substance on the game's base ground, the friction every course block carries.
+    grip: crate::track::forces::GripParams,
 }
 
 // --- Test course (module-level so the reset + trench floors can reference the trenches) ---
@@ -210,11 +213,9 @@ const CONTACT_PROBE: f32 = 0.5;
 // ([`RigSpec`]), not from constants here. What stays below is the FRICTION law, which is a property
 // of steel-on-ground, not of the vehicle. ---
 /// Slip speed (m/s) at which ground friction saturates to μ·load. Below it grip is ~proportional to
-/// slip (rolling); above it the track is sliding (the wheelspin/skid regime).
+/// slip (rolling); above it the track is sliding (the wheelspin/skid regime). The coefficient μ is
+/// the material pair, the tank's track on what it meets ([`RigSpec::grip`]).
 const SLIP_SATURATION: f32 = 0.4;
-/// Coulomb coefficient: an element's grip force is capped at μ × its elastic load (the
-/// element law is isotropic — turning resistance emerges from footprint geometry).
-const MU: f32 = 0.9;
 
 // --- Wheels carry NO force: the belt is the *sole* ground-contact system (carries the tank,
 // tractions, does walls/gaps). The VISUAL data direction is wheels-first
@@ -1144,6 +1145,7 @@ fn build_rig(
         weight_n: spec.mass * derive::G,
         engage_depth: track.suspension.engage,
         belt_inertia: track.powertrain.inertia,
+        grip: crate::track::forces::GripParams::of(spec),
     });
 
     // The calibrated contact-envelope law, lands in the same command flush as `RigGeom` (the
@@ -1327,7 +1329,7 @@ fn build_rig(
     spawn_track_colliders(
         &mut commands,
         hull,
-        &TrackColliders::new(&geom, &suspension.0),
+        &TrackColliders::new(&geom, &suspension.0, track.friction()),
     );
 
     // The authored counts as the panel/keyboard INTENT seam (see [`RigCounts`] / [`apply_rig_counts`]).
@@ -1409,6 +1411,7 @@ fn refresh_track_colliders(
     mut commands: Commands,
     geom: Res<RigGeom>,
     suspension: Res<RigSuspension>,
+    rig: Res<RigSpec>,
     hull: Single<Entity, With<Hull>>,
     existing: Query<Entity, Or<(With<BumpStop>, With<SidePlate>)>>,
 ) {
@@ -1421,7 +1424,7 @@ fn refresh_track_colliders(
     spawn_track_colliders(
         &mut commands,
         *hull,
-        &TrackColliders::new(&geom, &suspension.0),
+        &TrackColliders::new(&geom, &suspension.0, rig.grip.track),
     );
 }
 

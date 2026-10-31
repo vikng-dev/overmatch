@@ -19,6 +19,9 @@ TankSpec(
     // circle) is MEASURED off the glb markers now — one source of truth, in the model — so nothing
     // geometric is authored here (see track::rig_geom / track::marker_model).
     track: (
+        // The `materials.ron` row the links are of: its friction is the track's side of every
+        // contact pair, the belt on the ground or a piece, and its bump stops and side plates.
+        substance: "TrackSteel",
         link_count: 97,
         link_mass: 30.0,
         hinge_torque: 45.0,

@@ -83,7 +83,11 @@ fn side_plates_follow_the_true_shoe_faces_and_belt_bottom() {
         geom.model.lateral_min += bias;
         geom.model.lateral_max = geom.model.lateral_min + geom.model.width * width_scale;
         geom.model.width = geom.model.lateral_max - geom.model.lateral_min;
-        let shapes = TrackColliders::new(&geom, &params);
+        let shapes = TrackColliders::new(
+            &geom,
+            &params,
+            super::super::rig_geom::tiger_spec().track.friction(),
+        );
         for side in Side::ALL {
             for (edge_index, plate) in shapes.side_plates.get(side).iter().enumerate() {
                 let edge = geom.grip_columns(side)[edge_index * 2].0;
@@ -134,7 +138,11 @@ fn a_pivoting_track_shoves_a_piece_without_throwing_it_or_touching_terrain() {
         .track
         .suspension
         .params();
-    let shapes = TrackColliders::new(&geom, &params);
+    let shapes = TrackColliders::new(
+        &geom,
+        &params,
+        super::super::rig_geom::tiger_spec().track.friction(),
+    );
     let clearance = points(shapes.colliders.get(Side::Right))
         .iter()
         .map(|p| p.y + geom.hull_rest_y)
@@ -273,7 +281,11 @@ fn side_plate_contacts_reach_the_structure_contact_reader() {
         .track
         .suspension
         .params();
-    let shapes = TrackColliders::new(&geom, &params);
+    let shapes = TrackColliders::new(
+        &geom,
+        &params,
+        super::super::rig_geom::tiger_spec().track.friction(),
+    );
     let mut app = physics(Vec3::ZERO);
     let tank = body(&mut app, &geom, &shapes, RigidBody::Dynamic);
     let clearance = points(shapes.colliders.get(Side::Right))

@@ -107,7 +107,8 @@
 //     until a law reads the facts. Still NOT `Cast`: that is armour-grade.
 //   - `TrackSteel`: cast track-link steel, the Hadfield manganese class (ASSUMED; no source states
 //     a given vehicle's track alloy). Worn by no mesh yet: the track links draw through their own
-//     belt material.
+//     belt material. A tank sheet's `track.substance` names it: its friction is the track's side
+//     of every pair, the belt on the ground or a piece, and its bump stops and side plates.
 //   - `EngineBlock` = 150: homogenized box — grey cast iron ~0.4x RHA, ~30-40% metal fraction
 //     along a shot line -> 0.4 x 0.35 ~= 0.14. HL210 fork (first ~250 Tigers, aluminium
 //     block) would sit ~100; declare the vehicle's date to settle it. Transmission shares
@@ -220,7 +221,11 @@
                 Hadfield steel against the force law"))),
             visual: "track_steel",
             debris_half_angle_deg: (26.2, Unknown("no measured debris extent; RHA's value")),
-            friction: Some((0.5, Unknown("ASSUMED, no source read: RHA's value, the steel class"))),
+            friction: Some((1.62, Tuned("the owner-tuned grip of a track on the terrain, 0.9
+                (playtested 2026-07), on the base ground's 0.5: 0.9² / 0.5 = 1.62 (DERIVED), so the
+                pair rule reproduces it. Far above a steel sliding coefficient (0.4–0.8 on stone,
+                CLAIMED): the missing factor is the shoe's grousers biting into the ground, which no
+                law reads yet (#146)"))),
             facts: Some((
                 density: (7890.0, Derived("0.285 lb/in³ × 27 680 (kg/m³)/(lb/in³): CLAIMED for
                     austenitic manganese steel by a Columbia Steel alloy paper, read only in a search

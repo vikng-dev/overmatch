@@ -805,6 +805,7 @@ mod spawn_contract_tests {
         let track_colliders = crate::track::bump_stop::TrackColliders::new(
             &crate::track::rig_geom::tiger_rig(),
             &spec.track.suspension.params(),
+            spec.track.friction(),
         );
         let mut app = App::new();
         app.insert_resource(TankBlueprint::new(

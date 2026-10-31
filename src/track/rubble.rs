@@ -36,9 +36,9 @@
 //!   impulse `load × dt`, at most what stops the piece closing on the belt. Then the drag, along
 //!   the traction reaction's direction: its impulse, at most Coulomb's `μ × load × dt` (the
 //!   normal force the belt presses with over the tick, whether or not the piece is closing, so a
-//!   parked or pivoting hull still drags what it stands on; μ the belt's [`belt_friction`]
-//!   against the piece's collider, combined by the one pair rule every contact uses,
-//!   `substances::PAIR_RULE`), and at most what brings the piece, already pushed, to the belt
+//!   parked or pivoting hull still drags what it stands on; μ the contact's own pair, the track's
+//!   friction on the piece's ([`super::forces::BeltContact::mu`]), the same coefficient that
+//!   caps the hull's grip there), and at most what brings the piece, already pushed, to the belt
 //!   surface's velocity there. Each bound uses the piece's effective mass along it at the
 //!   contact, `1 / (1/m + (r×d)·I⁻¹(r×d))`, so neither part drives the piece past the belt along
 //!   its own direction. The drag's turn of the piece may open the contact along the normal (a
@@ -137,13 +137,6 @@ impl RubbleQuery<'_, '_> {
     }
 }
 
-/// The belt surface's friction against rubble: the track law's own grip coefficient
-/// ([`super::forces::ForceParams::mu`]) as one side of a pair, under the one pair rule, so a
-/// belt–piece contact is the geometric mean of the belt's and the piece's material rows.
-pub(crate) fn belt_friction(params: &super::forces::ForceParams) -> Friction {
-    crate::substances::contact_friction(params.mu)
-}
-
 /// What a dynamic piece's impulses read and write. Pieces lock no axes, so the effective mass
 /// [`PieceBody`] computes is the one avian's impulse applies against.
 pub(crate) type PieceData = (
@@ -195,7 +188,8 @@ impl PieceBody {
 
 /// One rubble collider near the tank, as the footprint check reads it: its convex shape at its
 /// tick-start world pose and bounds, its dynamic body's slot in [`RubbleBodies::bodies`] (`None`
-/// for a static or kinematic one, which takes nothing), and μ against the belt.
+/// for a static or kinematic one, which takes nothing), and the friction its surface brings to a
+/// pair.
 #[derive(Clone, Debug)]
 struct Surface {
     collider: Entity,
@@ -206,7 +200,7 @@ struct Surface {
     /// The convex boundary at the same tick-start pose, for clipping support to a footprint.
     triangles: Vec<[Vec3; 3]>,
     body: Option<usize>,
-    mu: f32,
+    friction: Friction,
 }
 
 impl Surface {
@@ -365,11 +359,10 @@ pub struct RubbleBodies {
 }
 
 impl RubbleBodies {
-    /// Read the `near` colliders' shapes and bodies, with `belt` the belt surface's friction.
+    /// Read the `near` colliders' shapes, frictions and bodies.
     pub(crate) fn gather<F: QueryFilter>(
         rubble: &RubbleQuery,
         near: &[Entity],
-        belt: Friction,
         bodies: &Query<PieceData, F>,
     ) -> Self {
         let mut out = Self::default();
@@ -407,7 +400,7 @@ impl RubbleBodies {
                 aabb: *aabb,
                 triangles: Surface::triangles(shape, position.0, rotation.0),
                 body: slot,
-                mu: belt.combine(rubble.friction(collider)).dynamic_coefficient,
+                friction: rubble.friction(collider),
             });
         }
         out
@@ -423,6 +416,12 @@ impl RubbleBodies {
     /// Whether `collider` belongs to a gathered dynamic piece.
     pub(crate) fn is_dynamic(&self, collider: Entity) -> bool {
         self.surface(collider).body.is_some()
+    }
+
+    /// The friction `collider`'s surface brings to a pair, as avian's narrow phase resolves it.
+    /// Only a collider from this snapshot may be read.
+    pub(crate) fn friction(&self, collider: Entity) -> Friction {
+        self.surface(collider).friction
     }
 
     /// The collider of a [`SlabOverlap::piece`].
@@ -528,9 +527,9 @@ pub(crate) fn piece_impulses(
         let Some(slot) = surface.body else {
             continue;
         };
-        let (collider, mu) = (surface.collider, surface.mu);
+        let collider = surface.collider;
         let body = &mut bodies.bodies[slot];
-        let impulse = contact_impulse(body, contact, mu, dt);
+        let impulse = contact_impulse(body, contact, dt);
         body.apply(impulse, contact.point);
         pushes.push(Push {
             body: body.entity,
@@ -544,8 +543,9 @@ pub(crate) fn piece_impulses(
 
 /// The impulse one contact puts on `body` (module doc): the push, then the drag sized against the
 /// pushed piece. `contact.normal` points from the piece to the belt and the traction is the
-/// belt's force on the hull, so the piece's side runs along `-normal` and `-traction`.
-fn contact_impulse(body: &PieceBody, contact: &BeltContact, mu: f32, dt: f32) -> Vec3 {
+/// belt's force on the hull, so the piece's side runs along `-normal` and `-traction`. The drag's
+/// Coulomb bound is the contact's own pair ([`BeltContact::mu`]).
+fn contact_impulse(body: &PieceBody, contact: &BeltContact, dt: f32) -> Vec3 {
     let (point, normal) = (contact.point, contact.normal);
     let load_j = contact.load.max(0.0) * dt;
     // The piece's velocity against the belt surface at the contact.
@@ -558,7 +558,7 @@ fn contact_impulse(body: &PieceBody, contact: &BeltContact, mu: f32, dt: f32) ->
     // How far the pushed piece lags the belt surface along the drag.
     let lag = -(rel + body.response(push, point)).dot(*dir);
     let drag = (contact.traction.length() * dt)
-        .min(mu * load_j)
+        .min(contact.mu * load_j)
         .min(body.effective_mass(point, *dir) * lag.max(0.0));
     push + *dir * drag
 }
@@ -587,8 +587,8 @@ mod tests {
     use super::*;
     use crate::substances::contact_friction;
     use crate::track::forces::{
-        ForceParams, GripElements, SideInput, SideReport, SideState, TravelField, contact_side,
-        grip_stiffness,
+        ForceParams, GripElements, GripParams, SideInput, SideReport, SideState, TravelField,
+        contact_side,
     };
     use crate::track::oracle::{BlockField, TerrainBlock, TerrainOracle};
 
@@ -687,7 +687,7 @@ mod tests {
         app.world_mut()
             .run_system_once(move |rubble: RubbleQuery, bodies: Query<PieceData>| {
                 let near = rubble.near(Vec3::ZERO, 5.0);
-                let pieces = RubbleBodies::gather(&rubble, &near, contact_friction(0.9), &bodies);
+                let pieces = RubbleBodies::gather(&rubble, &near, &bodies);
                 let mut slab = Slab {
                     origin: Vec3::new(0.0, 0.1, -0.1),
                     axis: Vec3::Z,
@@ -737,8 +737,7 @@ mod tests {
         app.update();
         app.world_mut()
             .run_system_once(move |rubble: RubbleQuery, bodies: Query<PieceData>| {
-                let pieces =
-                    RubbleBodies::gather(&rubble, &[short, long], contact_friction(0.9), &bodies);
+                let pieces = RubbleBodies::gather(&rubble, &[short, long], &bodies);
                 let mut slab = Slab {
                     origin: Vec3::Y * 0.1,
                     axis: Vec3::new(0.0, 0.6, 0.8),
@@ -779,6 +778,7 @@ mod tests {
             traction: Vec3::ZERO,
             belt_velocity: Vec3::ZERO,
             collider: Some(collider),
+            mu: 0.9,
         }
     }
 
@@ -810,8 +810,7 @@ mod tests {
             .world_mut()
             .run_system_once(move |rubble: RubbleQuery, mut bodies: Query<PieceData>| {
                 let near = rubble.near(Vec3::new(10.0, 0.0, 0.0), 15.0);
-                let mut pieces =
-                    RubbleBodies::gather(&rubble, &near, contact_friction(0.9), &bodies);
+                let mut pieces = RubbleBodies::gather(&rubble, &near, &bodies);
                 let pushes = piece_impulses(&mut pieces, &contacts, DT);
                 apply_pushes(&pushes, &mut bodies);
                 pushes
@@ -831,48 +830,121 @@ mod tests {
         );
     }
 
-    /// THE BELT GRIPS A PIECE BY BOTH SIDES' MATERIALS: a belt–piece contact's μ is the one pair
-    /// rule over the belt's coefficient and the piece's own row (`substances::PAIR_RULE`, the
-    /// geometric mean), so two pieces of different substances under one belt take different μ, each
-    /// `√(μ_belt · μ_piece)`. A piece whose friction carried a rule that lets one side win (the
-    /// `Max` that made every belt–brick pair the belt's 0.9) reads the same μ for both and fails
-    /// here; so does a belt that is not combined at all.
+    /// The saturated grip coefficient of every contact in `report` (`|f_lat| / load_elastic`, the
+    /// pad sliding sideways from zero strain), and the contacts' summed lateral grip (N).
+    fn sliding_grip(report: &SideReport) -> (Vec<f32>, f32) {
+        assert!(
+            !report.contacts.is_empty(),
+            "the sliding pad touched nothing"
+        );
+        let mus = report
+            .contacts
+            .iter()
+            .map(|c| c.f_lat.abs() / c.load_elastic)
+            .collect();
+        (mus, report.contacts.iter().map(|c| c.f_lat.abs()).sum())
+    }
+
+    /// THE BELT GRIPS BY THE MATERIAL PAIR IT MEETS, ON GROUND AND ON PIECES BY ONE RULE (#238).
+    /// One pad sliding sideways on two ground types takes saturated grip in the ratio of the pairs
+    /// the data gives, each `√(μ_track · μ_ground)` (`substances::PAIR_RULE`); over a piece it
+    /// takes the track's pair with the piece's row, and the piece's reaction is clamped by that
+    /// same coefficient. Driving feel, the extrapolation's traction bound and every piece reaction
+    /// rely on it. A law gripping at one coefficient everywhere, reading one side's row alone, or
+    /// leaving a piece's patch on the ground's pair fails here.
     ///
-    /// FIXTURE DATA: belt 0.9, pieces 0.65 and 0.3.
+    /// DATA: the seed tank's track substance and the shipped ground types of least and greatest
+    /// friction. FIXTURE DATA: the pad, a 0.3 piece, a 5 m/s sideways slide from zero strain.
     #[test]
-    fn the_belt_grips_a_piece_by_both_sides_materials() {
+    fn the_belt_grips_by_the_material_pair_on_ground_and_pieces() {
+        let track = crate::track::rig_geom::tiger_spec().track.friction();
+        let table = crate::ground_types::GroundTypes::load_shipped();
+        let (least, most) = table
+            .types
+            .values()
+            .map(|t| t.friction)
+            .fold((f32::INFINITY, f32::NEG_INFINITY), |(lo, hi), f| {
+                (lo.min(f), hi.max(f))
+            });
+        assert!(
+            most > least,
+            "the shipped ground types state one friction; the pair cannot be told apart"
+        );
+        let slide = Vec3::new(5.0, 0.0, 0.0);
+        let on_ground = |friction: f32| {
+            let grip = GripParams {
+                ground: contact_friction(friction),
+                ..pad_grip(track)
+            };
+            let report = pad_pass_gripping(
+                grip,
+                &ground(),
+                &RubbleBodies::default(),
+                Affine3A::IDENTITY,
+                SideState::default(),
+                slide,
+                &mut GripElements::for_links(30),
+            );
+            (grip.on_ground(), sliding_grip(&report))
+        };
+        let (pair_least, (mus_least, total_least)) = on_ground(least);
+        let (pair_most, (mus_most, total_most)) = on_ground(most);
+        for (mus, pair) in [(&mus_least, pair_least), (&mus_most, pair_most)] {
+            for mu in mus {
+                assert!((mu - pair).abs() < 1e-4 * pair, "grip {mu}, pair {pair}");
+            }
+        }
+        let ratio = total_most / total_least;
+        let expected = pair_most / pair_least;
+        println!(
+            "MEASURED sliding grip {total_least:.1} N and {total_most:.1} N, ratio {ratio:.6}; \
+             DERIVED pair ratio {expected:.6}"
+        );
+        assert!((ratio - expected).abs() < 1e-4 * expected);
+
+        let row = 0.3;
         let mut app = physics();
-        let rows = [0.65, 0.3];
-        let pieces = rows.map(|row| {
-            let body = piece(&mut app, 10.0 * row, 0.0);
-            app.world_mut()
-                .entity_mut(body)
-                .insert(contact_friction(row));
-            body
-        });
+        let piece = piece_box(
+            &mut app,
+            Vec3::new(0.0, 0.05, 0.0),
+            Vec3::new(0.4, 0.1, 2.4),
+        );
+        app.world_mut()
+            .entity_mut(piece)
+            .insert(contact_friction(row));
         app.update();
-        let mus = app
+        let grip = pad_grip(track);
+        let (report, mus, pushes) = app
             .world_mut()
             .run_system_once(move |rubble: RubbleQuery, bodies: Query<PieceData>| {
-                let near = rubble.near(Vec3::new(5.0, 0.0, 0.0), 10.0);
-                let gathered = RubbleBodies::gather(&rubble, &near, contact_friction(0.9), &bodies);
-                pieces.map(|body| {
-                    gathered
-                        .surfaces
-                        .iter()
-                        .find(|s| rubble.body_of(s.collider) == body)
-                        .expect("the piece was gathered")
-                        .mu
-                })
+                let near = rubble.near(Vec3::new(0.0, 0.1, 0.0), 3.0);
+                let mut pieces = RubbleBodies::gather(&rubble, &near, &bodies);
+                let report = pad_pass_gripping(
+                    grip,
+                    &ground(),
+                    &pieces,
+                    Affine3A::from_translation(Vec3::new(0.0, 0.1, 0.0)),
+                    SideState::default(),
+                    slide,
+                    &mut GripElements::for_links(30),
+                );
+                let pushes = piece_impulses(&mut pieces, &report.contacts, DT);
+                let mus = report.contacts.iter().map(|c| c.mu).collect::<Vec<_>>();
+                (sliding_grip(&report), mus, pushes)
             })
-            .expect("the gather system runs");
-        for (mu, row) in mus.into_iter().zip(rows) {
+            .expect("the piece pass runs");
+        let pair = grip.pair(contact_friction(row));
+        assert!(
+            pair < grip.on_ground(),
+            "the fixture piece must grip apart from the ground"
+        );
+        for mu in report.0.iter().chain(&mus) {
             assert!(
-                (mu - (0.9_f32 * row).sqrt()).abs() < 1e-6,
-                "{mu} for a {row} piece"
+                (mu - pair).abs() < 1e-4 * pair,
+                "grip {mu} on the piece, pair {pair}"
             );
         }
-        assert!(mus[0] != mus[1]);
+        assert!(!pushes.is_empty(), "the sliding pad dragged nothing");
     }
 
     /// A deterministic stream of fixture values in `[0, 1)`.
@@ -950,9 +1022,10 @@ mod tests {
                 traction: tangent,
                 belt_velocity: rng.vec(3.0),
                 collider: None,
+                mu: rng.range(0.0, 1.2),
             };
-            let mu = rng.range(0.0, 1.2);
-            let impulse = contact_impulse(&body, &contact, mu, DT);
+            let mu = contact.mu;
+            let impulse = contact_impulse(&body, &contact, DT);
 
             let normal_j = -impulse.dot(normal);
             let tangent_j = (impulse + normal * normal_j).length();
@@ -1024,9 +1097,34 @@ mod tests {
         }
     }
 
-    /// One contact pass of a fixture pad, with its complete shoe footprint and no suspension
-    /// travel. The tall return run leaves the piece tests clear of its inward probe origins.
+    /// The fixture pad's grip: `track` on a 0.9 field, at a 30 t vehicle's side weight (fixture
+    /// data).
+    fn pad_grip(track: Friction) -> GripParams {
+        GripParams {
+            track,
+            ground: contact_friction(0.9),
+            side_weight: 30_000.0 * 9.81 / 2.0,
+        }
+    }
+
+    /// [`pad_pass_gripping`] with a 0.9 track on the 0.9 field (fixture data).
     fn pad_pass<O: TerrainOracle>(
+        oracle: &O,
+        pieces: &RubbleBodies,
+        affine: Affine3A,
+        state: SideState,
+        vel: Vec3,
+        elements: &mut GripElements,
+    ) -> SideReport {
+        let grip = pad_grip(contact_friction(0.9));
+        pad_pass_gripping(grip, oracle, pieces, affine, state, vel, elements)
+    }
+
+    /// One contact pass of a fixture pad gripping by `grip`, with its complete shoe footprint and
+    /// no suspension travel. The tall return run leaves the piece tests clear of its inward probe
+    /// origins.
+    fn pad_pass_gripping<O: TerrainOracle>(
+        grip: GripParams,
         oracle: &O,
         pieces: &RubbleBodies,
         affine: Affine3A,
@@ -1055,10 +1153,9 @@ mod tests {
             support_damping_per_m: 1.0e5,
             engage_depth: 0.002,
             probe_reach: 0.5,
-            mu: 0.9,
             slip_saturation: 0.5,
             inertia: 500.0,
-            grip_stiffness: grip_stiffness(0.9, 30_000.0 * 9.81),
+            grip: Some(grip),
         };
         let (report, live) = contact_side(
             &input,
@@ -1103,8 +1200,7 @@ mod tests {
                 .run_system_once(move |rubble: RubbleQuery, mut bodies: Query<PieceData>| {
                     let mut elements = std::mem::take(&mut elements);
                     let near = rubble.near(Vec3::new(0.0, h, 0.0), 3.0);
-                    let mut pieces =
-                        RubbleBodies::gather(&rubble, &near, contact_friction(0.9), &bodies);
+                    let mut pieces = RubbleBodies::gather(&rubble, &near, &bodies);
                     let report = pad_pass(
                         &ground(),
                         &pieces,
@@ -1185,8 +1281,7 @@ mod tests {
             app.world_mut()
                 .run_system_once(move |rubble: RubbleQuery, bodies: Query<PieceData>| {
                     let near = rubble.near(Vec3::ZERO, 4.0);
-                    let pieces =
-                        RubbleBodies::gather(&rubble, &near, contact_friction(0.9), &bodies);
+                    let pieces = RubbleBodies::gather(&rubble, &near, &bodies);
                     let mut elements = GripElements::for_links(30);
                     let report = pad_pass(
                         &ground(),
@@ -1247,8 +1342,7 @@ mod tests {
             app.world_mut()
                 .run_system_once(move |rubble: RubbleQuery, bodies: Query<PieceData>| {
                     let near = rubble.near(Vec3::ZERO, 4.0);
-                    let pieces =
-                        RubbleBodies::gather(&rubble, &near, contact_friction(0.9), &bodies);
+                    let pieces = RubbleBodies::gather(&rubble, &near, &bodies);
                     let mut elements = GripElements::for_links(30);
                     let report = pad_pass(
                         &ground(),
@@ -1304,7 +1398,7 @@ mod tests {
             .world_mut()
             .run_system_once(move |rubble: RubbleQuery, bodies: Query<PieceData>| {
                 let near = rubble.near(Vec3::ZERO, 4.0);
-                let pieces = RubbleBodies::gather(&rubble, &near, contact_friction(0.9), &bodies);
+                let pieces = RubbleBodies::gather(&rubble, &near, &bodies);
                 let report = pad_pass(
                     &ground(),
                     &pieces,
@@ -1371,8 +1465,7 @@ mod tests {
             let actual = app
                 .world_mut()
                 .run_system_once(move |rubble: RubbleQuery, bodies: Query<PieceData>| {
-                    let pieces =
-                        RubbleBodies::gather(&rubble, &[piece], contact_friction(0.9), &bodies);
+                    let pieces = RubbleBodies::gather(&rubble, &[piece], &bodies);
                     bits(&flat_pass(&pieces))
                 })
                 .unwrap();

@@ -25,6 +25,7 @@
 //! - **Belt dynamics** are the joint drivetrain's (`track::transmission::step`): this module hands
 //!   it each side's summed ground reaction, and the caller advects the phase.
 
+use avian3d::prelude::Friction;
 use bevy::ecs::entity::Entity;
 use bevy::math::{Affine3A, Vec2, Vec3};
 use serde::{Deserialize, Serialize};
@@ -49,10 +50,41 @@ use crate::bitprobe::{ContactInputProbe, ElementOutputProbe};
 /// ratio ≈ 0.07 of the limit).
 pub const GRIP_SHEAR_MODULUS_M: f32 = 0.075;
 
-/// Grip stiffness (N/m of shear, per side): the side's nominal saturated grip `μ·W/2`
-/// developed over one shear modulus. Declared from vehicle weight + terrain — never tuned.
-pub fn grip_stiffness(mu: f32, weight_n: f32) -> f32 {
-    mu * weight_n / 2.0 / GRIP_SHEAR_MODULUS_M
+/// What the belt grips with: the friction its track and the terrain field bring to a contact, and
+/// the side's weight share. Absent from [`ForceParams::grip`], the law runs support only.
+#[derive(Clone, Copy, Debug)]
+pub struct GripParams {
+    /// The track's side of every pair ([`crate::spec::TrackSpec::friction`]).
+    pub track: Friction,
+    /// The terrain field's side: the ground type its collider carries
+    /// ([`crate::ground_types::GroundTypes::terrain_friction`]).
+    pub ground: Friction,
+    /// Nominal weight on one side (N), half the vehicle's: the scale of the element membership
+    /// bounds and the vehicle share of the transmission's shift-landing inertia.
+    pub side_weight: f32,
+}
+
+impl GripParams {
+    /// A tank's grip from its data: its track's substance on the terrain's base ground, at half
+    /// its weight.
+    pub(crate) fn of(spec: &crate::spec::TankSpec) -> Self {
+        Self {
+            track: spec.track.friction(),
+            ground: crate::ground_types::GroundTypes::load_shipped().terrain_friction(),
+            side_weight: spec.mass * super::derive::G / 2.0,
+        }
+    }
+
+    /// The coefficient the belt slides at on a surface carrying `surface`: the one pair rule
+    /// (`substances::PAIR_RULE`), combined as avian's narrow phase combines a pair.
+    pub fn pair(&self, surface: Friction) -> f32 {
+        self.track.combine(surface).dynamic_coefficient
+    }
+
+    /// The coefficient the belt slides at on the terrain field.
+    pub fn on_ground(&self) -> f32 {
+        self.pair(self.ground)
+    }
 }
 
 /// Bristle damping ratio: the elastic-zone bristle is an undamped integrator in the hull's
@@ -168,19 +200,18 @@ pub struct ForceParams {
     /// plain base (no `+ free_travel`) — the ray origin must sit at `face − base` for every
     /// station or zero-travel return-run origins start too deep (buried-origin saturation).
     pub probe_reach: f32,
-    /// Coulomb friction coefficient — the element law is isotropic, so this is the whole
-    /// friction story per element (μ × elastic load); turning resistance emerges from
-    /// footprint geometry, not from an authored lateral share.
-    pub mu: f32,
     /// Slip speed (m/s) normalizing the transmission's brake-engagement blend — the scale on
     /// which a belt counts as "moving".
     pub slip_saturation: f32,
     /// Reflected belt + drivetrain inertia (kg).
     pub inertia: f32,
-    /// Static-grip bristle stiffness per side (N/m of shear) — [`grip_stiffness`]. `0.0`
-    /// disables traction and belt-hold entirely (support only) — the envelope calibration
-    /// runs the law this way to measure penetration area without traction in the loop.
-    pub grip_stiffness: f32,
+    /// The traction law's inputs. Each contact's Coulomb coefficient is the pair its track makes
+    /// with the surface under it ([`GripParams::pair`]): the element law is isotropic, so that
+    /// pair is the whole friction story per element (μ × elastic load); turning resistance
+    /// emerges from footprint geometry, not from an authored lateral share. `None` runs support
+    /// only, with no traction or belt hold: the envelope calibration measures penetration area
+    /// without traction in the loop.
+    pub grip: Option<GripParams>,
 }
 
 /// THE traction state: per-element isotropic shear — the Wong & Chiang resultant-j /
@@ -332,6 +363,10 @@ pub struct BeltContact {
     pub belt_velocity: Vec3,
     /// The collider under the contact, `None` for the terrain field.
     pub collider: Option<Entity>,
+    /// The Coulomb coefficient of this contact's pair, the track on the surface under it
+    /// ([`GripParams::pair`]). The piece's reaction is clamped by the same coefficient
+    /// (`track::rubble::piece_impulses`). Zero on a support-only rig, which grips nothing.
+    pub mu: f32,
 }
 
 /// What one side's tick produced.
@@ -426,7 +461,7 @@ pub fn contact_side<O: TerrainOracle>(
         elements.strain.len(),
         elements.dwell.len(),
     );
-    let elements_mode = params.grip_stiffness > 0.0;
+    let elements_mode = params.grip.is_some();
 
     let (cols, held) = collect_column_contacts(
         input,
@@ -441,13 +476,19 @@ pub fn contact_side<O: TerrainOracle>(
         elements_mode,
         &mut report,
     );
-    let elem_g = if elements_mode {
-        update_grip_elements(&cols, &held, elements, params, dt, element_len, &mut report)
-    } else {
-        Vec::new()
+    let elem_g = match &params.grip {
+        Some(grip) => update_grip_elements(
+            &cols,
+            &held,
+            elements,
+            grip.side_weight,
+            dt,
+            element_len,
+            &mut report,
+        ),
+        None => Vec::new(),
     };
-    let (elem_sum, belt_reaction) =
-        emit_contact_forces(&mut report, &cols, &elem_g, params.mu, elements_mode);
+    let (elem_sum, belt_reaction) = emit_contact_forces(&mut report, &cols, &elem_g, elements_mode);
 
     // The grip slot carries the summed element force (long, lat) — telemetry only (the
     // element state is authoritative and lives with the caller). Belt dynamics (the joint
@@ -478,6 +519,8 @@ struct ColumnContact {
     belt_velocity: Vec3,
     /// The surface carrying this patch, `None` for the terrain field.
     collider: Option<Entity>,
+    /// [`BeltContact::mu`].
+    mu: f32,
     #[cfg(feature = "bitprobe")]
     probe_index: usize,
 }
@@ -903,6 +946,12 @@ fn collect_column_contacts<O: TerrainOracle>(
                 let (long_dir, lat_dir, has_plane, slip_long, slip_lat) =
                     contact_frame(affine, tan2, normal, vel, belt_speed);
                 let belt_velocity = hull_vel - long_dir * belt_speed;
+                // One rule for ground and pieces: the track's friction paired with the surface's.
+                // A support-only rig grips nothing.
+                let mu = params.grip.map_or(0.0, |grip| match collider {
+                    Some(collider) => grip.pair(pieces.friction(collider)),
+                    None => grip.on_ground(),
+                });
 
                 cols.push(ColumnContact {
                     p,
@@ -917,6 +966,7 @@ fn collect_column_contacts<O: TerrainOracle>(
                     element: material(i) * 3 + ci,
                     belt_velocity,
                     collider,
+                    mu,
                     #[cfg(feature = "bitprobe")]
                     probe_index,
                 });
@@ -980,13 +1030,14 @@ fn forget_departed_elements(kept: &[bool], elements: &mut GripElements) {
 /// left to emerge from footprint geometry.
 ///
 /// Advances `elements` in place and returns each contact's capped grip direction as
-/// `(longitudinal, lateral)` components of a unit-bounded vector — pass 2 scales it by μ × that
-/// contact's elastic load.
+/// `(longitudinal, lateral)` components of a unit-bounded vector — pass 2 scales it by that
+/// contact's μ × its elastic load. Membership bounds scale with `side_weight`
+/// ([`GripParams::side_weight`]).
 fn update_grip_elements(
     cols: &[ColumnContact],
     held: &[(usize, f32)],
     elements: &mut GripElements,
-    params: &ForceParams,
+    side_weight: f32,
     dt: f32,
     element_len: usize,
     report: &mut SideReport,
@@ -995,9 +1046,6 @@ fn update_grip_elements(
     #[cfg(not(feature = "bitprobe"))]
     let _ = &report;
 
-    // Membership bounds from the side's nominal weight, recovered from the declared
-    // stiffness (`grip_stiffness = μ·W/2/K`) — no new vehicle datum.
-    let side_weight = params.grip_stiffness * GRIP_SHEAR_MODULUS_M / params.mu;
     let enter = side_weight * GRIP_ELEMENT_ENTER_FRACTION;
     let leave = side_weight * GRIP_ELEMENT_LEAVE_FRACTION;
     let mut kept = vec![false; element_len];
@@ -1018,10 +1066,6 @@ fn update_grip_elements(
     for &(element, elastic) in held {
         membership_loads[element] += elastic;
     }
-    // The damping partner, normalized per unit budget: σ1 = 2ζ√(K·m) reduced through
-    // the stiffness derivation, at the LuGre-canonical ζ.
-    let d_coef =
-        2.0 * GRIP_ELEMENT_DAMPING_RATIO / (GRIP_SHEAR_MODULUS_M * params.mu * 9.81).sqrt();
     for (idx, c) in cols.iter().enumerate() {
         // ENTER above the high bound; STAY down to the low bound while already a member
         // (hysteresis + dwell refresh). Never the damped load's sign — see
@@ -1054,6 +1098,14 @@ fn update_grip_elements(
             advanced[c.element] = true;
         }
         let j1 = elements.strain[c.element];
+        if c.mu <= 0.0 {
+            // A frictionless pair has no grip budget, and its damping partner is unbounded.
+            continue;
+        }
+        // The damping partner, normalized per unit budget: σ1 = 2ζ√(σ0·m) with the element's
+        // stiffness σ0 = μN/K and mass share m = N/g, at the LuGre-canonical ζ and this
+        // contact's own pair μ.
+        let d_coef = 2.0 * GRIP_ELEMENT_DAMPING_RATIO / (GRIP_SHEAR_MODULUS_M * c.mu * 9.81).sqrt();
         let mut g = j1 / GRIP_SHEAR_MODULUS_M + sdot * d_coef;
         let g_len = g.length();
         if g_len > 1.0 {
@@ -1088,7 +1140,6 @@ fn emit_contact_forces(
     report: &mut SideReport,
     cols: &[ColumnContact],
     elem_g: &[Vec2],
-    mu: f32,
     elements_mode: bool,
 ) -> (Vec2, f32) {
     let mut elem_sum = Vec2::ZERO;
@@ -1112,7 +1163,7 @@ fn emit_contact_forces(
             // saturated friction ellipse — so steady sliding converges; what changes is a
             // physical relaxation lag (~C/K of slip distance) in force DIRECTION during fast
             // slides, and fuller sub-saturation traction.
-            let grip_el = mu * c.load_elastic;
+            let grip_el = c.mu * c.load_elastic;
             let g = elem_g[idx];
             f_long = grip_el * g.x;
             f_lat = grip_el * g.y;
@@ -1138,6 +1189,7 @@ fn emit_contact_forces(
             traction,
             belt_velocity: c.belt_velocity,
             collider: c.collider,
+            mu: c.mu,
         });
         #[cfg(feature = "bitprobe")]
         {
@@ -1196,10 +1248,13 @@ mod tests {
             support_damping_per_m: 1.0e5,
             engage_depth: 0.002,
             probe_reach: 0.5,
-            mu: 0.9,
             slip_saturation: 0.5,
             inertia: 500.0,
-            grip_stiffness: grip_stiffness(0.9, 30_000.0 * 9.81),
+            grip: Some(GripParams {
+                track: crate::substances::contact_friction(0.9),
+                ground: crate::substances::contact_friction(0.9),
+                side_weight: 30_000.0 * 9.81 / 2.0,
+            }),
         }
     }
 
@@ -1389,8 +1444,7 @@ mod tests {
                 Vec3::new(0.0, 0.0, 0.05),
             );
         }
-        let enter =
-            rig_params().grip_stiffness * GRIP_SHEAR_MODULUS_M / 0.9 * GRIP_ELEMENT_ENTER_FRACTION;
+        let enter = rig_params().grip.unwrap().side_weight * GRIP_ELEMENT_ENTER_FRACTION;
         assert!(
             report.contacts.iter().any(|c| c.load_elastic >= enter),
             "rig premise: grounded columns must clear the enter bound"
@@ -1465,7 +1519,7 @@ mod tests {
     #[test]
     fn element_member_fading_into_band_holds_strain() {
         let params = rig_params();
-        let side_weight = params.grip_stiffness * GRIP_SHEAR_MODULUS_M / params.mu;
+        let side_weight = params.grip.unwrap().side_weight;
         let enter = side_weight * GRIP_ELEMENT_ENTER_FRACTION;
         let leave = side_weight * GRIP_ELEMENT_LEAVE_FRACTION;
 
@@ -1533,8 +1587,7 @@ mod tests {
         let loop_pts = rect_loop(0.024_95);
         let mut state = SideState::default();
         let mut elems = GripElements::for_links(25);
-        let leave =
-            rig_params().grip_stiffness * GRIP_SHEAR_MODULUS_M / 0.9 * GRIP_ELEMENT_LEAVE_FRACTION;
+        let leave = rig_params().grip.unwrap().side_weight * GRIP_ELEMENT_LEAVE_FRACTION;
         for _ in 0..50 {
             let report = rig_tick(
                 &loop_pts,

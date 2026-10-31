@@ -192,13 +192,15 @@ pub(super) fn harness_setup(
     // Vehicle constants in the meta line come off the derived rig now, not from consts — an
     // analyzer reading a capture still gets the exact geometry that produced it.
     let (half_tread, hull_rest_y, thickness) = (geom.plane_x, geom.hull_rest_y, geom.thickness);
+    // `mu` is the course ground's pair, the coefficient every field contact grips at.
+    let mu = rig.grip.on_ground();
     writeln!(
         writer,
         // `"model":4` and `"view":"wrap"` are both pinned: the sandbox hosts only the promoted
         // field-belt model and only the kinematic-wrap view, and the fields stay for schema
         // stability with existing analyzers. `schema:2` = raw/shaped commands, quaternion + full
         // angular velocity, per-side contact arrays + aggregates.
-        "{{\"t\":\"meta\",\"model\":4,\"schema\":2,\"view\":\"wrap\",\"pose\":\"{}\",\"slope_deg\":{},\"z\":{:.3},\"warmup\":{},\"ticks\":{},\"throttle\":{:.3},\"steer\":{:.3},\"t2\":{},\"throttle2\":{:.3},\"steer2\":{:.3},\"slew\":{},\"fixed_dt\":{},\"half_tread\":{half_tread},\"mu\":{MU},\"slip_saturation\":{SLIP_SATURATION},\"weight\":{:.0},\"hull_rest_y\":{hull_rest_y},\"thickness\":{thickness}}}",
+        "{{\"t\":\"meta\",\"model\":4,\"schema\":2,\"view\":\"wrap\",\"pose\":\"{}\",\"slope_deg\":{},\"z\":{:.3},\"warmup\":{},\"ticks\":{},\"throttle\":{:.3},\"steer\":{:.3},\"t2\":{},\"throttle2\":{:.3},\"steer2\":{:.3},\"slew\":{},\"fixed_dt\":{},\"half_tread\":{half_tread},\"mu\":{mu},\"slip_saturation\":{SLIP_SATURATION},\"weight\":{:.0},\"hull_rest_y\":{hull_rest_y},\"thickness\":{thickness}}}",
         match harness.pose {
             None if harness.runway => "runway".into(),
             None => "lane".into(),

@@ -209,6 +209,7 @@ TankSpec(
     inertia_extents: (1.0, 1.0, 1.0),
     turret: (mass: 1.0, inertia_extents: (1.0, 1.0, 1.0)),
     track: (
+        substance: \"TrackSteel\",
         link_count: 3,
         link_mass: 1.0,
         hinge_torque: 1.0,

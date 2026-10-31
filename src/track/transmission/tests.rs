@@ -1,6 +1,6 @@
 use super::*;
 
-/// FIXTURE DATA: a lab contact law. Inertia, slip saturation and the grip-stiffness
+/// FIXTURE DATA: a lab contact law. Inertia, slip saturation and the grip
 /// envelope determine how the transmission exchanges force with these contacts.
 fn lab_fp() -> ForceParams {
     ForceParams {
@@ -10,10 +10,13 @@ fn lab_fp() -> ForceParams {
         support_damping_per_m: 80_000.0,
         engage_depth: 0.02,
         probe_reach: 0.5,
-        mu: 0.9,
         slip_saturation: 0.4,
         inertia: 8_000.0,
-        grip_stiffness: forces::grip_stiffness(0.9, 26_500.0 * 9.81),
+        grip: Some(forces::GripParams {
+            track: crate::substances::contact_friction(0.9),
+            ground: crate::substances::contact_friction(0.9),
+            side_weight: 26_500.0 * 9.81 / 2.0,
+        }),
     }
 }
 
@@ -814,7 +817,7 @@ fn steep_grade_after_upshift_corrects_before_lug() {
     let mut fp = lab_fp();
 
     fp.inertia = 16_000.0;
-    fp.grip_stiffness = forces::grip_stiffness(0.9, 57_000.0 * 9.81);
+    fp.grip.as_mut().unwrap().side_weight = 57_000.0 * 9.81 / 2.0;
     // The slope investigation's F4 operating point meeting a DERIVED 25-degree demand.
     let demand = 57_000.0 * 9.81 * 25.0_f32.to_radians().sin();
     let f4 = tp.gears_fwd[3];
@@ -1411,7 +1414,7 @@ fn steep_grade_full_loop_upshift_freeze_recover_confirm_correct() {
     let mut fp = lab_fp();
 
     fp.inertia = 45_000.0;
-    fp.grip_stiffness = forces::grip_stiffness(0.9, 57_000.0 * 9.81);
+    fp.grip.as_mut().unwrap().side_weight = 57_000.0 * 9.81 / 2.0;
     let light = 6_000.0f32; // per-side approach load
     let steep = 57_000.0 * 9.81 * 25.0_f32.to_radians().sin() / 2.0; // per side
     let start_rpm = tp.shift_up_rpm - 50.0;
@@ -2843,7 +2846,7 @@ fn parking_brake_stays_saturated_past_breach() {
 }
 
 /// Discrete passivity of the whole brake stack: against a brakeless baseline
-/// (`grip_stiffness = 0` disables park/hold; same drag, same drive), the brake's
+/// (no grip disables park/hold; same drag, same drive), the brake's
 /// contribution over one tick never pushes the belt PAST the baseline in its direction
 /// of motion, never reverses it through zero, and never increases |v_next| beyond the
 /// baseline's. Swept over speeds and reactions on both sides of capacity, latched and
@@ -2853,7 +2856,7 @@ fn brake_is_discretely_passive() {
     let tp = lab_tp();
     let fp_braked = lab_fp();
     let mut fp_free = lab_fp();
-    fp_free.grip_stiffness = 0.0;
+    fp_free.grip = None;
     for park in [false, true] {
         for v in [-0.6f32, -0.2, -0.03, 0.0, 0.03, 0.2, 0.6] {
             for r in [-1.5f32, -0.5, 0.0, 0.5, 1.5] {

@@ -410,6 +410,16 @@ const TANK_SPEC_RON: &str = include_str!(concat!(
     crate::assets::tank_file!(".tank.ron")
 ));
 
+/// [`TANK_SPEC_RON`] parsed once, for a bound that holds before any blueprint exists (the
+/// client's extrapolation horizon, `net::extrapolate`). The bake certifies the same text at
+/// startup, so a sheet that fails to parse here is a broken build.
+pub(crate) fn selected_spec() -> &'static TankSpec {
+    static SPEC: std::sync::LazyLock<TankSpec> = std::sync::LazyLock::new(|| {
+        ron::de::from_str(TANK_SPEC_RON).expect("the selected tank's embedded sheet parses")
+    });
+    &SPEC
+}
+
 /// Which primitives' mesh buffers the sim consumes, and why (§12):
 ///
 /// * **Ballistic volumes — DECLARED.** A node marches iff the sheet names it
@@ -1283,8 +1293,23 @@ pub(crate) fn extract_tank_geometry(
 /// Each declared collider whose substance the registry cannot give a contact friction: a name it
 /// lacks, a substance that is not hard, or a row that states no friction. Every collision proxy's
 /// hulls carry their substance's friction (`tank::proxy_friction`), so a sheet naming one of these
-/// is refused here, at the door and at the runtime bake, instead of at a tank's first spawn.
+/// is refused here, at the door and at the runtime bake, instead of at a tank's first spawn. The
+/// track's substance is refused on the same terms: every track contact carries its friction
+/// ([`crate::spec::TrackSpec::friction`]).
 fn collider_substances(spec: &TankSpec, registry: &SubstanceRegistry) -> Vec<Finding> {
+    let fix = "name a hard substance of `assets/materials/materials.ron` whose row states a \
+               `friction`, or give that row one";
+    let track = registry
+        .contact_friction(&spec.track.substance)
+        .err()
+        .map(|error| {
+            Finding::new(
+                &L2_SPEC,
+                Subject::door("track").element("substance"),
+                error,
+                fix,
+            )
+        });
     spec.colliders
         .iter()
         .filter_map(|collider| {
@@ -1293,10 +1318,10 @@ fn collider_substances(spec: &TankSpec, registry: &SubstanceRegistry) -> Vec<Fin
                 &L2_SPEC,
                 Subject::node(&collider.node).element("declared Collider substance"),
                 error,
-                "name a hard substance of `assets/materials/materials.ron` whose row states a \
-                 `friction`, or give that row one",
+                fix,
             ))
         })
+        .chain(track)
         .collect()
 }
 

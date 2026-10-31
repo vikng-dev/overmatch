@@ -29,10 +29,14 @@
 //! # DERIVATIONS
 //!
 //! ```text
-//! a_max   = μ·g                      μ = track::sim::MU (isotropic surface friction),
-//!                                    g = track::derive::G — hulls are traction-limited, so μg
-//!                                    bounds hull acceleration and ½·a_max·t² bounds the
-//!                                    constant-velocity projection error for a gap of t seconds.
+//! a_max   = μ·g                      μ = track::sim::terrain_grip (the selected tank's track
+//!                                    on the terrain's base ground, the material pair: 0.9 on
+//!                                    the shipped data), g = track::derive::G — hulls are
+//!                                    traction-limited, so μg bounds hull acceleration and
+//!                                    ½·a_max·t² bounds the constant-velocity projection error
+//!                                    for a gap of t seconds. A piece whose pair with the track
+//!                                    exceeds the ground's grips harder; the bound does not
+//!                                    cover a hull driving on rubble.
 //! ε_vis   = 12.08 mm                 the certified residual bar: the recoil microsim's
 //!                                    mid-bounce residual accepted as "real trajectory
 //!                                    difference" (commit 3bca010, wave-B certification).
@@ -93,9 +97,12 @@ const EPSILON_VIS_M: f32 = 0.012_08;
 /// info level roughly twice a minute). Diagnostics pacing only — no behavior reads it.
 const SUMMARY_PERIOD_SECS: f32 = 30.0;
 
-/// The traction ceiling: hulls are friction-limited, so no honest trajectory accelerates faster.
+/// The traction ceiling: hulls are friction-limited, so no honest trajectory on the terrain
+/// accelerates faster than the selected tank's track grips its base ground.
 fn a_max() -> f32 {
-    crate::track::sim::MU * crate::track::derive::G
+    static GRIP: std::sync::LazyLock<f32> =
+        std::sync::LazyLock::new(|| crate::track::sim::terrain_grip(crate::bake::selected_spec()));
+    *GRIP * crate::track::derive::G
 }
 
 /// The extrapolation horizon `g* = sqrt(2·ε_vis/a_max)`: the longest gap whose worst-case
@@ -766,12 +773,24 @@ mod tests {
         }
     }
 
-    /// THE HORIZON IS THE ε-BOUND INVERTED, recomputed here from the raw constants (μ = 0.9,
-    /// g = 9.81, ε_vis = 12.08 mm) independently of the production expression. Any structural
-    /// change to `horizon_secs` (dropping the 2, the sqrt, or either constant) reds one of these.
+    /// THE HORIZON IS THE ε-BOUND INVERTED, recomputed here from the raw inputs (μ the selected
+    /// tank's track and the base ground's rows under the pair rule, g = 9.81, ε_vis = 12.08 mm)
+    /// independently of the production expression. Any structural change to `horizon_secs`
+    /// (dropping the 2, the sqrt, or either constant) reds one of these.
     #[test]
     fn the_horizon_is_the_epsilon_bound_inverted() {
-        let expected = (2.0_f32 * 0.012_08 / (0.9 * 9.81)).sqrt();
+        let spec = crate::bake::selected_spec();
+        let registry = crate::substances::SubstanceRegistry::shipped_static();
+        let track = registry
+            .hard(&spec.track.substance)
+            .unwrap()
+            .friction
+            .unwrap();
+        let ground = crate::ground_types::GroundTypes::load_shipped()
+            .get(crate::terrain_blend::BASE_GROUND)
+            .friction;
+        let mu = (track * ground).sqrt();
+        let expected = (2.0_f32 * 0.012_08 / (mu * 9.81)).sqrt();
         assert!(
             (horizon_secs() - expected).abs() < 1e-6,
             "g* = sqrt(2·ε_vis/μg): derived {} s, expected {expected} s",

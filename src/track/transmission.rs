@@ -297,13 +297,13 @@ pub(crate) const POSTSHIFT_MARGIN_RPM: f32 = 150.0;
 /// DETERMINISTIC per-tick multiplicative stand-in for that exponential: 0.8 ≈ 1 − dt/τ
 /// (no `exp()` in sim code); over a 20-tick window the geometric sum charges an effective
 /// Σρᵏ ≈ 4.9 ticks of full reaction instead of the frozen model's 20. The predictor that
-/// applies this decay also decelerates the COUPLED vehicle mass, recovered from the grip
-/// law's own authoring identity — see [`predict_shift_landing_m`]. SIM POLICY.
+/// applies this decay also decelerates the COUPLED vehicle mass, the grip law's own side weight
+/// over g — see [`predict_shift_landing_m`]. SIM POLICY.
 const LANDING_REACTION_DECAY: f32 = 0.8;
 
-/// Standard gravity (m/s²) — the same constant the spec layer authors weights with
-/// (`spec.mass * 9.81` at the grip-stiffness authoring seam, `track::sim`). Needed here
-/// only to invert that identity for the landing predictor's coupled mass.
+/// Standard gravity (m/s²) — the same value the grip law authors its side weight with
+/// (`forces::GripParams::of`, through `track::derive::G`). Needed here
+/// only to turn that weight back into the landing predictor's coupled mass.
 const GRAVITY_M_PER_S2: f32 = 9.81;
 
 /// Crank-corroboration margin (rpm) above governed: past this floor a shaft reading is
@@ -1158,9 +1158,8 @@ fn engine_drag(tp: &TransmissionParams, omega_e: f32, u_fuel: f32) -> f32 {
 /// geometrically instead of staying frozen. And the mass that reaction decelerates is the
 /// COUPLED one: through the still-gripping (merely relaxing) bristle the belt pair carries
 /// the hull, so per side the inertia is `fp.inertia + (W/2)/g` — belt + reflected
-/// drivetrain plus this side's share of the sprung vehicle — with `W/2` recovered EXACTLY
-/// from the grip law's own authoring identity `grip_stiffness = μ·(W/2)/K`
-/// ([`forces::grip_stiffness`]; threshold-free inversion, no new vehicle datum). The old
+/// drivetrain plus this side's share of the sprung vehicle — `W/2` the grip law's own
+/// [`forces::GripParams::side_weight`], no new vehicle datum. The old
 /// frozen-`r_mean`-over-belt-inertia form charged a 57 t Tiger's window as if 32 t of
 /// reflected belt inertia alone absorbed 20 ticks of full driving reaction: on a 10% grade
 /// it predicted a 156 rpm landing against a 1550 rpm floor and refused F1→F2 forever
@@ -1170,7 +1169,7 @@ fn engine_drag(tp: &TransmissionParams, omega_e: f32, u_fuel: f32) -> f32 {
 ///
 /// Deterministic by construction: fixed `shift_ticks` iterations, one multiply-add per
 /// tick, no transcendentals — the exponential decay IS the per-tick multiplicative
-/// constant. A support-only rig (`grip_stiffness = 0`) contributes no vehicle mass and
+/// constant. A support-only rig (no [`forces::ForceParams::grip`]) contributes no vehicle mass and
 /// degenerates to the bare belt inertia, conservatively.
 ///
 /// DOMAIN: valid for the PROPULSIVE
@@ -1191,8 +1190,9 @@ pub(crate) fn predict_shift_landing_m(
     r_mean: f32,
     dt: f32,
 ) -> f32 {
-    let side_vehicle_mass =
-        fp.grip_stiffness * forces::GRIP_SHEAR_MODULUS_M / (fp.mu.max(1e-3) * GRAVITY_M_PER_S2);
+    let side_vehicle_mass = fp
+        .grip
+        .map_or(0.0, |grip| grip.side_weight / GRAVITY_M_PER_S2);
     let i_coupled = fp.inertia + side_vehicle_mass;
     let mut pm = m;
     let mut r = r_mean;
@@ -2416,7 +2416,7 @@ fn release_hill_hold(
 /// The reframed brake (design §3) applied to the assembled per-side sprocket forces: −R always
 /// reaches the belt; near zero command + zero belt speed the parking/service brake statically
 /// balances what the drivetrain doesn't, inside its capacity. `h` reuses the hold-blend
-/// SHAPE ([`forces::hold_blend`]) purely as the engagement envelope (tick-stable, exact at rest); `grip_stiffness = 0`
+/// SHAPE ([`forces::hold_blend`]) purely as the engagement envelope (tick-stable, exact at rest); a rig with no grip
 /// (support-only rigs, e.g. calibration) keeps the brake disengaged, like the hold it extends.
 fn apply_brake_stop_forces(
     q: &mut [f32; 2],
@@ -2433,9 +2433,9 @@ fn apply_brake_stop_forces(
         // rubbing at B_max instead of fading with speed); unlatched, the smooth entry blend h
         // (zero command + near-zero belt speed) eases the brake in during settle; the service
         // pedal is the driver-intent brake command. The paths are mutually exclusive by
-        // construction (service ⇒ a drive command ⇒ unlatched, h≈0). grip_stiffness = 0
-        // (support-only rigs) keeps the brake disengaged.
-        let h = if fp.grip_stiffness > 0.0 {
+        // construction (service ⇒ a drive command ⇒ unlatched, h≈0). A support-only rig (no
+        // grip) keeps the brake disengaged.
+        let h = if fp.grip.is_some() {
             if st.park {
                 1.0
             } else {

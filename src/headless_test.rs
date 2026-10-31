@@ -1053,8 +1053,18 @@ fn a_driving_tank_rides_onto_loose_pieces_through_its_belt_support() {
         }
     }
     let rise = app.world().get::<Position>(tank).unwrap().0.y - at.y;
+    // The support law spreads each column's spring over its share of the shoe width, and the strip
+    // beside a piece keeps pressing the ground while the rise stays under the free travel. A piece
+    // covering the share `s` of every grounded shoe then lifts the hull by `s·h` (DERIVED, level
+    // hull, ignoring the zero-travel sprocket and idler arcs).
+    let share = {
+        let geom = app.world().resource::<crate::track::rig_geom::RigGeom>();
+        let columns = geom.grip_columns(Side::Right);
+        dimensions[Side::Right.index()].1 / (columns[2].0 - columns[0].0).abs()
+    };
     println!(
-        "MEASURED driven hull rise {rise:.6} m over {height} m pieces; peak piece centre {max_piece_y:.6} m, peak speed {max_piece_speed:.6} m/s"
+        "MEASURED driven hull rise {rise:.6} m over {height} m pieces; peak piece centre {max_piece_y:.6} m, peak speed {max_piece_speed:.6} m/s; DERIVED coverage share {share:.4}, share-law rise {:.6} m",
+        share * height
     );
     assert!(
         carried,
@@ -2609,8 +2619,8 @@ fn a_server_composition_builds_no_track_prints() {
 /// collider (a filter that admits some layer) resolves, as Avian's narrow phase resolves it (its
 /// own `Friction`, else its body's, else `DefaultFriction`), to its material's row under
 /// `substances::PAIR_RULE`. The material is found by class, never by name: a ballistic volume's
-/// substance, a vehicle proxy's `colliders` entry, a rigid track collider's track steel (a bump
-/// stop or a side plate), a graybox prototype's substance, and for the terrain the base ground
+/// substance, a vehicle proxy's `colliders` entry, a rigid track collider's (a bump stop or a side
+/// plate) the sheet's `track.substance`, a graybox prototype's substance, and for the terrain the base ground
 /// type. A collider of no class, one falling back to Avian's default, or
 /// one under another rule (a frictionless `Min` or a `Max`, either of which makes a pair's value
 /// one side's) fails here, naming it.
@@ -2687,9 +2697,7 @@ fn every_collider_carries_its_materials_friction_under_the_one_rule() {
                 .get::<crate::track::bump_stop::SidePlate>(collider)
                 .is_some()
         {
-            registry
-                .contact_friction(crate::track::bump_stop::SUBSTANCE)
-                .unwrap()
+            registry.contact_friction(&spec.track.substance).unwrap()
         } else if layers.memberships.has_all(crate::Layer::Vehicle) {
             let node = parent
                 .and_then(|p| world.get::<Name>(p))

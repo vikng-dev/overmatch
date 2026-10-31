@@ -40,14 +40,13 @@ use crate::bitprobe::BitprobeCapture;
 
 use super::drive::{DriveAxes, shape_drive};
 use super::forces::{
-    BeltContact, ForceParams, GripElements, SideInput, SideReport, SideState, contact_side,
-    grip_stiffness,
+    BeltContact, ForceParams, GripElements, GripParams, SideInput, SideReport, SideState,
+    contact_side,
 };
 use super::oracle::TerrainOracle;
 use super::route::build_route;
 use super::rubble::{
-    PieceData, RubbleBodies, RubbleQuery, apply_pushes, belt_friction, footprint_radius,
-    piece_impulses,
+    PieceData, RubbleBodies, RubbleQuery, apply_pushes, footprint_radius, piece_impulses,
 };
 use super::side::Side;
 use super::terrain::TrackField;
@@ -55,12 +54,13 @@ use super::transmission::{
     self, TransmissionInput, TransmissionParams, TransmissionReport, TransmissionState,
 };
 
-// Surface friction policy (ADR-0007 bucket 3: a property of the track–ground PAIR, destined
-// for the terrain/ground-type mechanic — deliberately not vehicle spec). `pub(crate)`: the
-// traction ceiling `μg` bounds hull acceleration, so `net::extrapolate` derives its horizon
-// from this same constant.
-pub(crate) const MU: f32 = 0.9;
 const SLIP_SATURATION: f32 = 0.4;
+
+/// The coefficient `spec`'s track slides at on the terrain's base ground: the pair the belt grips
+/// the field with ([`GripParams::on_ground`]). `net::extrapolate` bounds hull acceleration by it.
+pub(crate) fn terrain_grip(spec: &crate::spec::TankSpec) -> f32 {
+    GripParams::of(spec).on_ground()
+}
 
 /// Per-tank belt state: server-authoritative, replicated to every client for the track view
 /// (quantised, `net::wire_quant`). Hashed into the determinism trace (`hblt`).
@@ -316,10 +316,12 @@ impl TrackGear {
         out.f32("force.support_damping_per_m", p.support_damping_per_m);
         out.f32("force.engage_depth", p.engage_depth);
         out.f32("force.probe_reach", p.probe_reach);
-        out.f32("force.mu", p.mu);
         out.f32("force.slip_saturation", p.slip_saturation);
         out.f32("force.inertia", p.inertia);
-        out.f32("force.grip_stiffness", p.grip_stiffness);
+        let grip = p.grip.expect("the game's running gear grips");
+        out.f32("force.grip.track", grip.track.dynamic_coefficient);
+        out.f32("force.grip.ground", grip.ground.dynamic_coefficient);
+        out.f32("force.grip.side_weight", grip.side_weight);
 
         let tp = &self.trans;
         out.f32("transmission.engine.idle_rpm", tp.engine.idle_rpm);
@@ -530,12 +532,9 @@ fn init_track_gear(blueprint: Res<TankBlueprint>, mut commands: Commands) {
             support_damping_per_m: cal.damping_per_m,
             engage_depth: spec.suspension.engage,
             probe_reach: 0.5,
-            mu: MU,
             slip_saturation: SLIP_SATURATION,
             inertia: spec.powertrain.inertia,
-            // Derived from authored mass via the declared park target (forces.rs) — not a
-            // spec field: the target is model policy, the vehicle datum is its weight.
-            grip_stiffness: grip_stiffness(MU, blueprint.spec.mass * 9.81),
+            grip: Some(GripParams::of(&blueprint.spec)),
         },
     });
 
@@ -721,8 +720,7 @@ fn apply_track_forces(
     entities.sort_unstable();
     near.sort_unstable();
     near.dedup();
-    let mut pieces =
-        RubbleBodies::gather(&rubble, &near, belt_friction(&gear.params), &pieces_query);
+    let mut pieces = RubbleBodies::gather(&rubble, &near, &pieces_query);
     for entity in entities {
         let (
             _,

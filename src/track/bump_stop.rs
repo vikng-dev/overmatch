@@ -17,10 +17,6 @@ use super::route::build_route;
 use super::side::{PerSide, Side};
 use crate::Layer;
 
-/// The `materials.ron` row the stop is of: the track shoe steel it stands in for. A named material
-/// in logic until the track's own substance is tank data (the pair-friction lane of #238).
-pub(crate) const SUBSTANCE: &str = "TrackSteel";
-
 /// One side's bump-stop collider, a child of its body.
 #[derive(Component, Clone, Copy, Debug)]
 pub(crate) struct BumpStop;
@@ -29,7 +25,8 @@ pub(crate) struct BumpStop;
 #[derive(Component, Clone, Copy, Debug)]
 pub(crate) struct SidePlate;
 
-/// One tank kind's body-local stops and side plates, with their substance's friction.
+/// One tank kind's body-local stops and side plates, with the friction of the track's substance
+/// ([`crate::spec::TrackSpec::friction`]).
 #[derive(Resource, Clone)]
 pub(crate) struct TrackColliders {
     colliders: PerSide<Collider>,
@@ -39,8 +36,9 @@ pub(crate) struct TrackColliders {
 }
 
 impl TrackColliders {
-    /// Cut the compression prisms and shoe-edge slices from `geom`.
-    pub(crate) fn new(geom: &RigGeom, params: &SuspensionParams) -> Self {
+    /// Cut the compression prisms and shoe-edge slices from `geom`, carrying `friction`, the
+    /// track's own ([`crate::spec::TrackSpec::friction`]).
+    pub(crate) fn new(geom: &RigGeom, params: &SuspensionParams, friction: Friction) -> Self {
         let colliders = PerSide::new(
             hull(prism(geom, Side::Left, params), Side::Left),
             hull(prism(geom, Side::Right, params), Side::Right),
@@ -49,9 +47,6 @@ impl TrackColliders {
             plates(geom, Side::Left, params),
             plates(geom, Side::Right, params),
         );
-        let friction = crate::substances::SubstanceRegistry::shipped_static()
-            .contact_friction(SUBSTANCE)
-            .unwrap_or_else(|err| panic!("the track collider's substance `{SUBSTANCE}`: {err}"));
         Self {
             colliders,
             side_plates,
@@ -74,7 +69,7 @@ impl TrackColliders {
             track.link_count,
             &params,
         );
-        Self::new(&geom, &params)
+        Self::new(&geom, &params, track.friction())
     }
 }
 

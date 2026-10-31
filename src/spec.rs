@@ -686,6 +686,10 @@ pub struct ViewSpec {
 #[derive(Deserialize, Clone)]
 #[serde(deny_unknown_fields)]
 pub struct TrackSpec {
+    /// The `assets/materials/materials.ron` row the links are of. Its friction is the track's side
+    /// of every contact pair ([`Self::friction`]): the belt on the ground or a piece, and the bump
+    /// stops and side plates. The bake refuses a row that states none (`L2.SPEC`).
+    pub substance: String,
     /// Links per side. With the MEASURED pitch this is the immutable material loop
     /// (`pitch × link_count`, exact — tooth lock); the pitch itself is read off the glb markers.
     pub link_count: usize,
@@ -710,6 +714,15 @@ pub struct TrackSpec {
 }
 
 impl TrackSpec {
+    /// The friction every surface of this track brings to a contact: its substance's row under the
+    /// one pair rule. A failure is a bug: the bake refuses a sheet whose track substance the
+    /// registry gives no friction for (`bake::collider_substances`).
+    pub(crate) fn friction(&self) -> avian3d::prelude::Friction {
+        crate::substances::SubstanceRegistry::shipped_static()
+            .contact_friction(&self.substance)
+            .unwrap_or_else(|err| panic!("the track's substance: {err}, yet the bake certified it"))
+    }
+
     /// Build the declared joint transmission through the same validated authoring seam used by
     /// spawn-time state construction and the runtime track gear. Geometry is no longer authored,
     /// so the CALLER supplies the measured sprocket pin-line radius and the half-tread (`plane_x`):
@@ -1728,6 +1741,7 @@ TankSpec(
     inertia_extents: (3.0, 2.0, 6.0),
     turret: (mass: 5_000.0, inertia_extents: (2.0, 1.0, 2.0)),
     track: (
+        substance: "TrackSteel",
         link_count: 80,
         link_mass: 20.0,
         hinge_torque: 30.0,

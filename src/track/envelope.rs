@@ -115,10 +115,9 @@ pub(crate) fn calibrate(
         support_damping_per_m: 0.0,
         engage_depth,
         probe_reach,
-        mu: 1.0,
         slip_saturation: 1.0,
         inertia: 1.0,
-        grip_stiffness: 0.0,
+        grip: None,
     };
     // Rest height over flat ground: the loop's pin belly sits `face_offset` above y = 0, so
     // the outer face exactly kisses the surface — the same datum `RigGeom::hull_rest_y`
@@ -131,7 +130,7 @@ pub(crate) fn calibrate(
     let affine =
         bevy::math::Affine3A::from_translation(Vec3::new(0.0, -belly_y + face_offset, 0.0));
     let mut area = 0.0;
-    // Calibration runs support-only (`grip_stiffness: 0.0` above skips the element regime),
+    // Calibration runs support-only (`grip: None` above skips the element regime),
     // but the law owns the slab shape — pass a correctly sized scratch field.
     let mut scratch = super::forces::GripElements::for_links(count);
     for side in sides {
