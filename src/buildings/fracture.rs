@@ -1036,7 +1036,8 @@ pub(crate) fn structural(
         return failures;
     }
     let mut steps = 0;
-    for _ in 0..64 {
+    // Every pass cracks a section and none closes again, so the passes end.
+    loop {
         let graph = graph(structure, state);
         let paths: Vec<Option<Vec<usize>>> = pushes
             .iter()
@@ -1207,13 +1208,15 @@ pub(crate) struct Weighed {
 /// with that chunk ([`held`]) hangs from the section's joints that border it, its one cut set:
 /// statics fixes the force and moment through it exactly, and [`weight_failure`] reads them as a
 /// stress. The worst section at or over its strength cracks, the chunks on either side of it are
-/// touched in turn, and the check repeats until none fails (64 sections at most, as the push
-/// check), so a failure can expose the next. A freed group falls by support ([`fall`]) and the
+/// touched in turn, and the check repeats until none fails (each pass cracks at least one joint
+/// and none closes, so the passes end), so a failure can expose the next. A freed group falls by support ([`fall`]) and the
 /// physics.
 ///
 /// A touched chunk that no section alone holds with a group (its weight reaching the ground through
 /// several sections at once, as a span between two piers, or through a cut set no single plane
-/// holds) stands unassessed and is counted ([`Weighed::unassessed`]): a static solve's to decide.
+/// holds, or a group that also bears on a rest or a cracked seam from below,
+/// [`bears_on_contact`]) stands unassessed and is counted ([`Weighed::unassessed`]): a static
+/// solve's to decide.
 /// A group inside a larger one a section holds (that span under the wall above it) is assessed
 /// only as part of the larger. A fall adds no touched chunk: a loose group has no intact joint to a
 /// grounded one, so it neither held nor hung on anything that stands. Reads the chunk table and
@@ -1230,7 +1233,17 @@ pub(crate) fn weigh(
         return weighed;
     }
     let mut touched = touched(structure, state, dusted, cracked, &mut weighed.steps);
-    for _ in 0..64 {
+    // Each chunk's joints, the anchors too: what a held group may bear on besides its section.
+    let mut incident = vec![Vec::new(); structure.chunks.len()];
+    for (index, joint) in structure.joints.iter().enumerate() {
+        incident[joint.a].push(index);
+        if let Side::Chunk(b) = joint.b {
+            incident[b].push(index);
+        }
+    }
+    weighed.steps += structure.joints.len();
+    // Every pass cracks at least one joint and none closes again, so the passes end.
+    loop {
         touched.retain(|&c| state.standing(c));
         if touched.is_empty() {
             break;
@@ -1260,7 +1273,10 @@ pub(crate) fn weigh(
                 let Some(group) = held(touched[k], section, &graph, &mut weighed.steps) else {
                     continue;
                 };
-                let failure = weight_failure(structure, section, &group, &mut weighed.steps);
+                let failure = (!bears_on_contact(structure, state, &incident, &group))
+                    .then(|| weight_failure(structure, section, &group, &mut weighed.steps))
+                    .flatten();
+                weighed.steps += group.len();
                 if let Some(failure) = failure {
                     for &other in &cut {
                         assessed[other] |= group.binary_search(&touched[other]).is_ok();
@@ -1315,6 +1331,45 @@ pub(crate) fn weigh(
         weighed.failures.push(failure);
     }
     weighed
+}
+
+/// Whether `group` (ascending) bears on a contact besides the section that holds it: a live joint
+/// from one of its chunks (`incident`, each chunk's joints) to a standing chunk outside it, or to
+/// the ground, that carries no tension but still carries compression, its normal toward the group
+/// rising past [`BEARS`]. Such a contact is a rest not yet opened, or a seam a crack opened: a
+/// crack opens a seam's tension, never its contact, and the chunks either side still touch. A
+/// group that bears on one is held through it and its section at once, a static solve's to read
+/// ([`weigh`]), as a span between two piers is.
+fn bears_on_contact(
+    structure: &Structure,
+    state: &WallState,
+    incident: &[Vec<usize>],
+    group: &[usize],
+) -> bool {
+    let inside = |c: usize| group.binary_search(&c).is_ok();
+    group.iter().any(|&chunk| {
+        incident[chunk].iter().any(|&j| {
+            let joint = &structure.joints[j];
+            let contact = match joint.bond {
+                Bond::Resting => !state.cracked[j],
+                Bond::Bonded(_) => state.cracked[j],
+            };
+            let outside = match joint.b {
+                Side::Chunk(b) => inside(b) != inside(joint.a),
+                Side::Ground => true,
+            };
+            if !contact || !outside || !state.live(joint) {
+                return false;
+            }
+            let toward = structure.chunks[chunk].centroid - joint.centroid;
+            let n = if toward.dot(joint.normal) >= 0.0 {
+                joint.normal
+            } else {
+                -joint.normal
+            };
+            n.y > BEARS
+        })
+    })
 }
 
 /// How far a rest's normal, turned toward the part it carries, must rise to bear that part: above
@@ -1969,7 +2024,7 @@ mod tests {
         pushes: &[Push],
     ) -> Vec<Failure> {
         let mut failures = Vec::new();
-        for _ in 0..64 {
+        loop {
             let graph = graph(structure, state);
             let mut worst: Option<(f32, Failure)> = None;
             for section in sections(structure, state) {
@@ -2085,7 +2140,7 @@ mod tests {
     ///
     /// AND A PUSH ON A LOOSE CHUNK BENDS NO SECTION: alone, it fails nothing. Were every section
     /// to hold the loose chunk (each cut leaves it as loose as before), its demand over capacity
-    /// would not fall with the section's distance, and one push on a freed chunk would crack 64
+    /// would not fall with the section's distance, and one push on a freed chunk would crack
     /// joints anywhere in the structure.
     #[test]
     fn the_pruned_structural_check_is_the_full_search() {
@@ -2724,6 +2779,55 @@ mod tests {
         assert_eq!(cracks(&weighed), Vec::new());
         assert!(fell.is_empty());
         assert_eq!(weighed.unassessed, beam);
+    }
+
+    /// AN ARM THAT STILL SITS ON A CRACKED SEAM OR A REST IS NO CANTILEVER: the fixture arm of four
+    /// cubes at 2 % over its cantilever limit ([`cantilever_limit`]) loses every prop but the
+    /// tip's, and the tip stands on that prop through a seam already cracked, or through a rest.
+    /// Either way the arm bears on the prop as well as hanging from its root, so the check cracks
+    /// nothing, nothing falls, and the arm's touched chunks stand unassessed. A check that read a
+    /// crack as the end of a contact, or a rest under brick as no support (a pier whose foot a
+    /// round cracked, weighed as hanging from the lintel beside it), fails here.
+    #[test]
+    fn an_arm_that_sits_on_a_cracked_seam_or_a_rest_is_no_cantilever() {
+        let n = 4;
+        let cells = propped_arm(n);
+        let props: Vec<usize> = (n as usize + 1..=2 * n as usize).collect();
+        let (tip, tip_prop) = (n as usize, 2 * n as usize);
+        let gone = &props[..props.len() - 1];
+        for rest in [false, true] {
+            let mut structure = cubes(&cells, 1, &props, cantilever_limit(n) * 1.02);
+            let seat = joint_between(&structure, tip, tip_prop);
+            let mut state = WallState::new(&structure);
+            if rest {
+                structure.joints[seat].bond = Bond::Resting;
+            } else {
+                state.cracked[seat] = true;
+            }
+            let loading = Loading {
+                sources: Vec::new(),
+                energies: gone
+                    .iter()
+                    .map(|&c| (c, full_pool(&structure.chunks[c])))
+                    .collect(),
+            };
+            let struck = strike(&structure, &mut state, &loading);
+            assert_eq!(struck.dusted, gone, "the props turn to dust");
+            let weighed = weigh(
+                &structure,
+                &mut state,
+                &struck.dusted,
+                &struck.cracked,
+                &mut SectionCache::default(),
+            );
+            assert_eq!(cracks(&weighed), Vec::new(), "rest {rest}");
+            assert!(fall(&structure, &mut state).is_empty(), "rest {rest}");
+            assert!(
+                (1..tip).all(|c| weighed.unassessed.contains(&c)),
+                "rest {rest}: {:?}",
+                weighed.unassessed
+            );
+        }
     }
 
     /// A REST NEVER CARRIES TENSION: a fixture cube run out from a support no section cuts, on a
