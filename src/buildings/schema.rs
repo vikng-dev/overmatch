@@ -15,9 +15,12 @@
 //!   collider; elements tile the building and never overlap.
 //! - A [`Chunk`] is the fracture bake's piece: a convex hull inside one element. An element's
 //!   chunks are a contiguous run of [`BuildingAsset::chunks`] ([`Element::chunks`]) and tile it.
+//! - A component is a part the generator builds as one (a brick wall, a wall plate, a roof plane):
+//!   each element names its own ([`Element::component`]).
 //! - A [`Joint`] is a contact face between two chunks: its area, centroid and the normal from the
-//!   first chunk into the second (NVIDIA Blast's bond). An [`Anchor`] is a chunk face on the
-//!   foundation plane (Blast's world bond).
+//!   first chunk into the second (NVIDIA Blast's bond), and what holds it ([`Bond`]): inside one
+//!   component its own seam, between two the bond the generator laid there. An [`Anchor`] is a
+//!   chunk face on the foundation plane (Blast's world bond), held by its chunk's own seam.
 //!
 //! The simulation reads chunks and joints only; it never reads how the bake chose the cuts.
 //!
@@ -29,7 +32,7 @@ use bevy::math::{Vec2, Vec3};
 use serde::{Deserialize, Serialize};
 
 /// The format revision this build reads and writes. A file of another revision is refused.
-pub const FORMAT: u32 = 1;
+pub const FORMAT: u32 = 2;
 
 /// How far a vertex, a centroid or a plane may sit from where the contract places it, metres:
 /// the f32 rounding of a building-sized coordinate, many times over, and far below any modelled
@@ -48,6 +51,8 @@ pub struct BuildingAsset {
     pub foundation_y_m: f32,
     /// The substance keys (`assets/materials/materials.ron`) elements and chunks name, by index.
     pub materials: Vec<String>,
+    /// The components' names, unique, by index ([`Element::component`]).
+    pub components: Vec<String>,
     pub elements: Vec<Element>,
     pub chunks: Vec<Chunk>,
     /// Ordered by `(a, b)`, each pair once.
@@ -105,6 +110,8 @@ pub struct Element {
     /// The split-tree path, `<wall>/<kind>_<n>`: unique within the building.
     pub name: String,
     pub kind: ElementKind,
+    /// Index into [`BuildingAsset::components`]: the component it is part of.
+    pub component: u16,
     /// Index into [`BuildingAsset::materials`].
     pub material: u8,
     pub frame: Frame,
@@ -192,6 +199,20 @@ pub struct Joint {
     pub centroid: [f32; 3],
     /// Unit, from `a` into `b`.
     pub normal: [f32; 3],
+    pub bond: Bond,
+}
+
+/// What holds a joint closed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum Bond {
+    /// Inside one component: the component's own seam, its chunks' material's.
+    Seam,
+    /// Between two components, bonded with the seam of [`BuildingAsset::materials`]`[_]` (a
+    /// wall's corner in mortar).
+    Bonded(u8),
+    /// Between two components, one set on the other: no pull strength and no fracture work, held
+    /// only while weight presses it together (a roof plane on its wall plate).
+    Resting,
 }
 
 /// One chunk face on the foundation plane: the ground holds it.
@@ -239,6 +260,14 @@ impl BuildingAsset {
         if self.elements.is_empty() || self.elements.len() > usize::from(u16::MAX) + 1 {
             return Err(format!("{} elements", self.elements.len()));
         }
+        if self.components.len() > usize::from(u16::MAX) + 1 {
+            return Err(format!("{} components", self.components.len()));
+        }
+        for (k, name) in self.components.iter().enumerate() {
+            if self.components[..k].contains(name) {
+                return Err(format!("component {name} is named twice"));
+            }
+        }
         let material = |index: u8, what: &str| {
             (usize::from(index) < self.materials.len())
                 .then_some(())
@@ -248,6 +277,12 @@ impl BuildingAsset {
         for (index, element) in self.elements.iter().enumerate() {
             let name = &element.name;
             material(element.material, name)?;
+            if usize::from(element.component) >= self.components.len() {
+                return Err(format!(
+                    "element {name} names component {}, past the table",
+                    element.component
+                ));
+            }
             if element.profile.len() < 3 || polygon_area(&element.profile) <= 0.0 {
                 return Err(format!(
                     "element {name}'s profile is no counter-clockwise polygon"
@@ -299,6 +334,21 @@ impl BuildingAsset {
             }
             if (Vec3::from_array(joint.normal).length() - 1.0).abs() > PLANE_TOLERANCE_M {
                 return Err(format!("joint {pair:?}'s normal is not unit"));
+            }
+            let component = |c: u32| {
+                let element = self.chunks[c as usize].element;
+                self.elements[usize::from(element)].component
+            };
+            let inside = component(joint.a) == component(joint.b);
+            match joint.bond {
+                Bond::Seam if !inside => {
+                    return Err(format!("joint {pair:?} is a seam between two components"));
+                }
+                Bond::Bonded(_) | Bond::Resting if inside => {
+                    return Err(format!("joint {pair:?} is a bond inside one component"));
+                }
+                Bond::Bonded(index) => material(index, &format!("joint {pair:?}"))?,
+                _ => {}
             }
             last = Some(pair);
         }

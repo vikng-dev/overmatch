@@ -62,6 +62,12 @@ pub fn bake(house: &House) -> Result<Baked, String> {
         )
         .expect("two materials")
     };
+    let mut components: Vec<String> = Vec::new();
+    for plan in &plans {
+        if !components.contains(&plan.component) {
+            components.push(plan.component.clone());
+        }
+    }
     let mut cuts = CutCount::default();
     let mut prisms = Vec::new();
     let mut elements = Vec::new();
@@ -86,6 +92,13 @@ pub fn bake(house: &House) -> Result<Baked, String> {
         elements.push(schema::Element {
             name: plan.name.clone(),
             kind: plan.kind,
+            component: u16::try_from(
+                components
+                    .iter()
+                    .position(|c| *c == plan.component)
+                    .expect("every plan's component is in the table"),
+            )
+            .map_err(|_| "more components than a u16 names")?,
             material,
             frame: schema::Frame {
                 origin: canon3(frame.origin),
@@ -112,8 +125,7 @@ pub fn bake(house: &House) -> Result<Baked, String> {
         format: schema::FORMAT,
         foundation_y_m: canon(foundation_y),
         materials: materials.iter().map(|m| m.key().to_owned()).collect(),
-        elements,
-        chunks,
+        components,
         joints: contact::joints(&prisms)
             .into_iter()
             .map(|joint| schema::Joint {
@@ -122,8 +134,11 @@ pub fn bake(house: &House) -> Result<Baked, String> {
                 area_m2: canon(joint.area),
                 centroid: canon3(joint.centroid),
                 normal: canon3(joint.normal),
+                bond: bond(&plans, &chunks, joint.a, joint.b),
             })
             .collect(),
+        elements,
+        chunks,
         anchors: contact::anchors(&prisms, foundation_y)
             .into_iter()
             .map(|anchor| schema::Anchor {
@@ -135,6 +150,29 @@ pub fn bake(house: &House) -> Result<Baked, String> {
     };
     asset.check()?;
     Ok(Baked { asset, cuts })
+}
+
+/// What holds the joint between chunks `a` and `b`: inside one component its seam; between two,
+/// a rest where either part is seated on the other ([`house::ElementPlan::seated`]), else the
+/// bond of chunk `a`'s material (masonry walls meeting at a corner, coursed into each other).
+fn bond(
+    plans: &[house::ElementPlan],
+    chunks: &[schema::Chunk],
+    a: usize,
+    b: usize,
+) -> schema::Bond {
+    let (ca, cb) = (&chunks[a], &chunks[b]);
+    let (pa, pb) = (
+        &plans[usize::from(ca.element)],
+        &plans[usize::from(cb.element)],
+    );
+    if pa.component == pb.component {
+        schema::Bond::Seam
+    } else if pa.seated || pb.seated {
+        schema::Bond::Resting
+    } else {
+        schema::Bond::Bonded(ca.material)
+    }
 }
 
 /// The canonical text of `asset`: RON, one element, chunk, joint or anchor per line.

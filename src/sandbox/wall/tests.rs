@@ -161,6 +161,7 @@ fn a_push_fails_the_section_at_its_fracture_impulse() {
                 area: 0.05,
                 centroid: Vec3::new(0.1, 0.0, 0.125),
                 normal: Vec3::Y,
+                bond: Bond::Bonded(material.seam),
             },
             Joint {
                 a: 0,
@@ -168,6 +169,7 @@ fn a_push_fails_the_section_at_its_fracture_impulse() {
                 area: 0.05,
                 centroid: Vec3::new(0.1, 0.2, 0.125),
                 normal: Vec3::Y,
+                bond: Bond::Bonded(material.seam),
             },
         ],
     };
@@ -177,7 +179,7 @@ fn a_push_fails_the_section_at_its_fracture_impulse() {
     let r = top.centroid - joint.centroid;
     let own = (3.0 * top.volume / (4.0 * std::f32::consts::PI)).cbrt();
     let inertia = top.mass * (r.length_squared() - r.x * r.x + 0.4 * own * own);
-    let capacity = (2.0 * inertia * material.fracture_energy * joint.area).sqrt();
+    let capacity = (2.0 * inertia * material.seam.fracture_energy * joint.area).sqrt();
     let at = Vec3::new(0.1, 0.4, 0.25);
     let lever = at.y - joint.centroid.y;
     for (scale, fails) in [(1.01, true), (0.99, false)] {

@@ -1537,8 +1537,8 @@ fn detail(
             "brick  rho {:.0} kg/m3   crush w {:.1} MJ/m3   seam ft {:.2} MPa   Gf {:.0} J/m2   {} chunks {} joints",
             m.density,
             m.crush / 1.0e6,
-            m.tensile / 1.0e6,
-            m.fracture_energy,
+            m.seam.tensile / 1.0e6,
+            m.seam.fracture_energy,
             wall.cut.structure.chunks.len(),
             wall.cut.structure.joints.len()
         ),

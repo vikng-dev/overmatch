@@ -130,8 +130,8 @@ pub struct BulkFacts {
     /// Mode I fracture toughness `K_IC`, Pa·√m. No law reads it yet.
     pub toughness: f64,
     /// The tensile strength across a seam between pre-cut chunks of this substance, Pa: what the
-    /// push rule compares the load at a joint with. `None` where none is sourced: an element of
-    /// such a substance never breaks.
+    /// push rule compares the load at a joint with. `None` where none is sourced:
+    /// such a substance's chunks never part at a seam.
     pub tensile: Option<f64>,
     /// The seam's mode-I fracture energy `G_f`, J/m²: the energy that opens a square metre of
     /// seam, what the structural check charges a section. Stated with [`Self::tensile`] or not at

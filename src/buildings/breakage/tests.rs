@@ -9,6 +9,7 @@ use bevy::time::TimeUpdateStrategy;
 
 use super::*;
 use crate::ballistics::MarchProbe;
+use crate::buildings::schema::ElementKind;
 use crate::buildings::tests::shipped_house;
 
 /// The breakage sim on the offline physics, the march probe, and the shipped house spawned at
@@ -748,4 +749,203 @@ fn a_hole_holds_the_volume_its_energy_crushed() {
         bound: 3.0 * 0.0005 / r,
     }
     .check();
+}
+
+/// The law chunks of every element of `component` (an index of the asset's components).
+fn component_chunks(kind: &BuildingKind, component: u16) -> Vec<usize> {
+    (0..kind.asset.elements.len())
+        .filter(|&e| kind.asset.elements[e].component == component)
+        .flat_map(|e| kind.layout.chunks_of(e))
+        .collect()
+}
+
+/// The components whose chunks the chunks of `part` rest on (each a live rest whose normal toward
+/// `part` rises), ascending.
+fn rests_on(kind: &BuildingKind, structure: &Structure, part: &[usize]) -> Vec<u16> {
+    let component =
+        |c: usize| kind.asset.elements[usize::from(kind.layout.element_of[c])].component;
+    let mut under: Vec<u16> = structure
+        .joints
+        .iter()
+        .filter(|joint| joint.bond == Bond::Resting)
+        .filter_map(|joint| {
+            let Side::Chunk(b) = joint.b else {
+                return None;
+            };
+            let (held, support) = match (part.contains(&joint.a), part.contains(&b)) {
+                (true, false) => (joint.a, b),
+                (false, true) => (b, joint.a),
+                _ => return None,
+            };
+            let toward = structure.chunks[held].centroid - joint.centroid;
+            (joint.normal.dot(toward).signum() * joint.normal.y > 0.0).then(|| component(support))
+        })
+        .collect();
+    under.sort_unstable();
+    under.dedup();
+    under
+}
+
+/// A ROOF PLANE STANDS ON ITS RESTS, BREAKABLE, AND FALLS WHEN THEY GO: on the shipped house
+/// (fixture data; the parts chosen by class: a roof plane, the components it rests on, the
+/// masonry its plate rests on), a light round through one of the plane's chunks wears it and
+/// moves nothing; a blast that turns one of its chunks to dust carves it and the plane stands.
+/// Shooting out the long wall under its plate (every standing unburied chunk of the masonry the
+/// plate rests on turned to dust) drops the plate, which bore on that wall alone; the plane
+/// stands on what else it rests on while its centre of mass lies over those rests, and falls
+/// whole once they go too. A check that let a rest carry tension would hold the plate up; one
+/// that read a roof's seams as a pull it could lose would break the plane apart.
+#[test]
+fn a_roof_plane_stands_on_its_rests_and_falls_when_they_go() {
+    let kind = shipped_house();
+    let layout = &kind.layout;
+    let elements = &kind.asset.elements;
+    let kinds = |kind_of: ElementKind| {
+        (0..elements.len())
+            .filter(|&e| elements[e].kind == kind_of)
+            .collect::<Vec<_>>()
+    };
+    let roof_element = kinds(ElementKind::Roof)[0];
+    let roof_component = kind.asset.elements[roof_element].component;
+    let roof = component_chunks(&kind, roof_component);
+    let fresh = || Live::new(&kind, 1.0);
+    let base = fresh();
+    let under_roof = rests_on(&kind, &base.structure, &roof);
+    let plate = kinds(ElementKind::WallPlate)
+        .into_iter()
+        .map(|e| kind.asset.elements[e].component)
+        .find(|c| under_roof.contains(c))
+        .expect("the roof plane rests on a wall plate");
+    let plate_chunks = component_chunks(&kind, plate);
+    let wall: Vec<u16> = rests_on(&kind, &base.structure, &plate_chunks);
+    let standing =
+        |live: &Live, chunks: &[usize]| chunks.iter().filter(|&&c| live.state.standing(c)).count();
+    println!(
+        "MEASURED: roof plane {} of {} chunks rests on components {:?}; its plate {} rests on {:?}",
+        kind.asset.components[usize::from(roof_component)],
+        roof.len(),
+        under_roof
+            .iter()
+            .map(|&c| &kind.asset.components[usize::from(c)])
+            .collect::<Vec<_>>(),
+        kind.asset.components[usize::from(plate)],
+        wall.iter()
+            .map(|&c| &kind.asset.components[usize::from(c)])
+            .collect::<Vec<_>>()
+    );
+
+    // Hit lightly: a round's line through the plane's chunk nearest its centre, a tenth of its
+    // pool, then a blast that spends one chunk's pool.
+    let centre = layout.element_blocks[roof_element].center();
+    let middle = *roof
+        .iter()
+        .min_by(|&&a, &&b| {
+            base.structure.chunks[a]
+                .centroid
+                .distance(centre)
+                .total_cmp(&base.structure.chunks[b].centroid.distance(centre))
+        })
+        .unwrap();
+    let mut live = fresh();
+    let line = line_through_chunk(&kind, &live.structure, roof_element, middle, 0.1);
+    let loading = Loading::lines(&[line]);
+    let changes = run_laws(layout, &mut live, &loading, Vec::new(), Vec::new());
+    assert!(changes.groups.is_empty() && changes.failures.is_empty());
+    assert_eq!(
+        standing(&live, &roof),
+        roof.len(),
+        "a light round moves nothing"
+    );
+    let (blast, pushes) = blast_on(&live.structure, middle, 1.0);
+    let changes = run_laws(layout, &mut live, &blast, pushes, Vec::new());
+    assert!(!live.state.standing(middle), "the blast spent the chunk");
+    assert!(changes.groups.is_empty(), "{:?}", changes.failures);
+    assert_eq!(
+        standing(&live, &roof),
+        roof.len() - 1,
+        "carved, the plane stands"
+    );
+
+    // Shoot out the long wall under the plate.
+    let mut live = fresh();
+    let wall_chunks: Vec<usize> = wall
+        .iter()
+        .flat_map(|&c| component_chunks(&kind, c))
+        .filter(|&c| !live.structure.chunks[c].buried)
+        .collect();
+    let dust = |live: &Live, chunks: &[usize]| Loading {
+        sources: Vec::new(),
+        energies: chunks
+            .iter()
+            .filter(|&&c| live.state.standing(c))
+            .map(|&c| (c, fracture::full_pool(&live.structure.chunks[c])))
+            .collect(),
+    };
+    let loading = dust(&live, &wall_chunks);
+    let changes = run_laws(layout, &mut live, &loading, Vec::new(), Vec::new());
+    let rests = |changes: &Changes| {
+        changes
+            .failures
+            .iter()
+            .filter(|f| f.load == fracture::Load::Rest)
+            .count()
+    };
+    println!(
+        "MEASURED: the long wall shot away ({} chunks to dust): {} rests opened, groups {:?}, plate \
+         standing {} of {}, roof plane standing {} of {}, weight steps {}",
+        loading.energies.len(),
+        rests(&changes),
+        changes
+            .groups
+            .iter()
+            .map(|(g, _)| g.len())
+            .collect::<Vec<_>>(),
+        standing(&live, &plate_chunks),
+        plate_chunks.len(),
+        standing(&live, &roof),
+        roof.len(),
+        changes.weight_steps
+    );
+    assert_eq!(standing(&live, &plate_chunks), 0, "the plate fell");
+    let others: Vec<u16> = under_roof.iter().copied().filter(|&c| c != plate).collect();
+    let others_hold = !others.is_empty();
+    assert_eq!(
+        standing(&live, &roof),
+        if others_hold { roof.len() } else { 0 },
+        "the plane stands only on what else it rests on"
+    );
+
+    // Then what else it rests on.
+    let rest_chunks: Vec<usize> = others
+        .iter()
+        .flat_map(|&c| component_chunks(&kind, c))
+        .filter(|&c| !live.structure.chunks[c].buried)
+        .collect();
+    let loading = dust(&live, &rest_chunks);
+    let changes = run_laws(layout, &mut live, &loading, Vec::new(), Vec::new());
+    println!(
+        "MEASURED: its other rests shot away ({} chunks to dust): {} rests opened, groups {:?}, \
+         roof plane standing {} of {}",
+        loading.energies.len(),
+        rests(&changes),
+        changes
+            .groups
+            .iter()
+            .map(|(g, _)| g.len())
+            .collect::<Vec<_>>(),
+        standing(&live, &roof),
+        roof.len()
+    );
+    assert_eq!(
+        standing(&live, &roof),
+        0,
+        "with its rests gone the plane fell"
+    );
+    assert!(
+        changes
+            .groups
+            .iter()
+            .any(|(g, _)| roof.iter().all(|c| g.contains(c))),
+        "it fell whole, one body"
+    );
 }

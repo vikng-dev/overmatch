@@ -3,8 +3,10 @@
 //! every change, and every peer derives the wall's colliders from that record.
 //!
 //! * **The law's view of a building** ([`Layout`], once per asset): the chunks of the elements
-//!   whose substance states a seam ([`Masonry::of`]), numbered in asset order, and the joints and
-//!   anchors among them. A chunk and a joint keep that number on the wire.
+//!   whose substance states bulk facts ([`Masonry::of`]), numbered in asset order, and the joints
+//!   and anchors among them, each holding by the bond the asset gives it ([`Bond`]: a seam inside
+//!   a component, the seam of the material a bond between components names, or a rest). A chunk
+//!   and a joint keep that number on the wire.
 //! * **First touch swaps an element.** An element stays one collider until a deposit, a crack, a
 //!   fall or dust touches one of its chunks; from then on each of its standing chunks is a static
 //!   collider of its substance ([`BuildingChunk`]) and the element's own collider is gone. A
@@ -51,10 +53,10 @@ use bevy::prelude::*;
 use serde::{Deserialize, Serialize};
 
 use super::fracture::{
-    self, Blast, Block, Chunk, Fate, Joint, Loading, Masonry, Push, SectionCache, Side, Structure,
-    WallState,
+    self, Blast, Block, Bond, Chunk, Fate, Joint, Loading, Masonry, Push, SectionCache, Side,
+    Structure, WallState,
 };
-use super::schema::BuildingAsset;
+use super::schema::{self, BuildingAsset};
 use super::{BuildingElement, BuildingKind};
 use crate::ballistics::{
     ArmourMark, BallisticVolume, CrossingEnd, Envelope, PenetrationMarks, Projectile, ShellMarched,
@@ -129,12 +131,20 @@ impl Layout {
         let mut joints = Vec::new();
         for joint in &asset.joints {
             if let (Some(a), Some(b)) = (law_of[joint.a as usize], law_of[joint.b as usize]) {
+                let bond = match joint.bond {
+                    schema::Bond::Seam => Bond::Bonded(materials[a].seam),
+                    schema::Bond::Bonded(m) => Bond::Bonded(
+                        masonry[usize::from(m)].map_or(fracture::Seam::NEVER, |m| m.seam),
+                    ),
+                    schema::Bond::Resting => Bond::Resting,
+                };
                 joints.push(Joint {
                     a,
                     b: Side::Chunk(b),
                     area: joint.area_m2,
                     centroid: Vec3::from_array(joint.centroid),
                     normal: Vec3::from_array(joint.normal),
+                    bond,
                 });
             }
         }
@@ -146,6 +156,7 @@ impl Layout {
                     area: anchor.area_m2,
                     centroid: Vec3::from_array(anchor.centroid),
                     normal: Vec3::Y,
+                    bond: Bond::Bonded(materials[a].seam),
                 });
             }
         }

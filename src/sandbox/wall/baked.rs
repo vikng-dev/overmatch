@@ -4,7 +4,9 @@
 
 use bevy::math::{Quat, Vec3};
 
-use super::model::{Block, Chunk, Cut, Joint, Masonry, Side, Structure, clip_polygon, plane_axes};
+use super::model::{
+    Block, Bond, Chunk, Cut, Joint, Masonry, Side, Structure, clip_polygon, plane_axes,
+};
 use crate::buildings::schema::BuildingAsset;
 
 /// Where a wall is set down: the world x its centre stands at, the world z its back face stands
@@ -117,6 +119,7 @@ pub(crate) fn wall_cut(
             area: j.area_m2,
             centroid,
             normal,
+            bond: Bond::Bonded(material.seam),
         });
         faces.push(polygon);
     }
@@ -135,6 +138,7 @@ pub(crate) fn wall_cut(
             area: anchor.area_m2,
             centroid,
             normal: Vec3::Y,
+            bond: Bond::Bonded(material.seam),
         });
         faces.push(polygon);
     }

@@ -62,6 +62,11 @@ pub enum Cutter {
 pub struct ElementPlan {
     pub name: String,
     pub kind: ElementKind,
+    /// The component it is part of: its wall, or the timber part it is.
+    pub component: String,
+    /// Set on what it touches rather than built into it: a timber part laid on masonry or on
+    /// another timber part, nothing fixing it. Every joint it makes with another component rests.
+    pub seated: bool,
     pub material: Material,
     pub prism: Prism,
     pub cutter: Cutter,
@@ -172,6 +177,8 @@ pub fn elements(house: &House) -> Vec<ElementPlan> {
         plans.push(ElementPlan {
             name: format!("{name}/plate"),
             kind: ElementKind::WallPlate,
+            component: format!("{name}/plate"),
+            seated: true,
             material: Material::Wood,
             prism: Prism {
                 frame: frame(u),
@@ -193,6 +200,8 @@ pub fn elements(house: &House) -> Vec<ElementPlan> {
         plans.push(ElementPlan {
             name: format!("{name}/roof"),
             kind: ElementKind::Roof,
+            component: format!("{name}/roof"),
+            seated: true,
             material: Material::Wood,
             prism: Prism {
                 frame: Frame {
@@ -252,6 +261,9 @@ fn wall_elements(
                 format!("{}/{label}_{index}", wall.name)
             },
             kind,
+            // A wall's piers, sills, lintels and gable are one brick wall, coursed in one bond.
+            component: wall.name.to_owned(),
+            seated: false,
             material: Material::Brick,
             prism: Prism {
                 frame: wall.frame,

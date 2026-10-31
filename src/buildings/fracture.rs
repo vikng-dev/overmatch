@@ -21,6 +21,10 @@
 //!   bending moment across it, reaches the seam's tensile strength. A part held through several
 //!   sections at once (a span between two piers) is left standing and counted: the design's step 3
 //!   (`.agents/docs/design/wall-destruction.md`, "Structural calculation").
+//! * **Rests** ([`unseated`], inside [`weigh`]). A joint between two components the building's
+//!   data marks resting ([`Bond::Resting`]: a roof plane on its plate) carries no tension: a part
+//!   whose only way to the ground is over rests stands while its centre of mass lies over the
+//!   rests that bear it, and is freed whole when it no longer does.
 //! * **Support** ([`loose_groups`]). A chunk group with no path of intact joints to a ground anchor
 //!   or to a buried chunk ([`Chunk::buried`]: the soil holds it) falls as one body.
 //! * **The blast field** ([`blast_rays`]). A charge's blast energy leaves it uniformly over the
@@ -55,34 +59,53 @@ pub(crate) struct Masonry {
     pub density: f32,
     /// The energy that turns one cubic metre to dust, J/m³.
     pub crush: f32,
-    /// The tensile strength across a seam, Pa.
+    /// The seam between its chunks: [`Seam::NEVER`] where the row states none.
+    pub seam: Seam,
+}
+
+/// A bonded seam's strength.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct Seam {
+    /// The tensile strength across it, Pa.
     pub tensile: f32,
-    /// The seam's mode-I fracture energy, J/m².
+    /// Its mode-I fracture energy, J/m².
     pub fracture_energy: f32,
 }
 
+impl Seam {
+    /// The seam of a substance whose row states none: no load reaches its strength or its
+    /// fracture energy, so it never opens; its chunks part only by dust or a rest giving way.
+    pub(crate) const NEVER: Self = Self {
+        tensile: f32::INFINITY,
+        fracture_energy: f32::INFINITY,
+    };
+}
+
 impl Masonry {
-    /// Substance `name`'s values, or `None` where its row states no seam (an element of it never
-    /// breaks). The density and the seam's strength and fracture energy are the row's bulk facts
-    /// (the registry refuses a row stating one of the seam's two without the other); the crush
-    /// energy is the static term of the walk's own force law at the row's factor (`factor / 1000 ×
-    /// a`, `a` the reference's cavity strength): the energy per volume the walk spends opening a
-    /// cavity in it. Refuses a name the registry does not hold as hard matter.
+    /// Substance `name`'s values, or `None` where its row states no bulk facts (an element of it
+    /// never breaks). The density and the seam's strength and fracture energy are the row's bulk
+    /// facts (the registry refuses a row stating one of the seam's two without the other; a row
+    /// stating neither has [`Seam::NEVER`]); the crush energy is the static term of the walk's own
+    /// force law at the row's factor (`factor / 1000 × a`, `a` the reference's cavity strength):
+    /// the energy per volume the walk spends opening a cavity in it. Refuses a name the registry
+    /// does not hold as hard matter.
     pub(crate) fn of(registry: &SubstanceRegistry, name: &str) -> Result<Option<Self>, String> {
         let hard = registry.hard(name).map_err(|err| err.to_string())?;
-        let Some((bulk, tensile, fracture_energy)) = hard.bulk.and_then(|bulk| {
-            bulk.tensile
-                .zip(bulk.fracture_energy)
-                .map(|(tensile, energy)| (bulk, tensile, energy))
-        }) else {
+        let Some(bulk) = hard.bulk else {
             return Ok(None);
         };
+        let seam =
+            bulk.tensile
+                .zip(bulk.fracture_energy)
+                .map_or(Seam::NEVER, |(tensile, energy)| Seam {
+                    tensile: tensile as f32,
+                    fracture_energy: energy as f32,
+                });
         let share = f64::from(hard.factor() / REFERENCE_FACTOR);
         Ok(Some(Self {
             density: bulk.density as f32,
             crush: (share * registry.reference_facts().cavity_strength()) as f32,
-            tensile: tensile as f32,
-            fracture_energy: fracture_energy as f32,
+            seam,
         }))
     }
 }
@@ -110,6 +133,18 @@ pub(crate) enum Side {
     Ground,
 }
 
+/// What holds a joint closed.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) enum Bond {
+    /// A seam: it opens under tension at its strength, and a push spends its fracture energy.
+    Bonded(Seam),
+    /// One part set on another: no pull strength and no fracture work. It holds only what bears
+    /// on it from above, so no tension check reads it (it lies in no section and on no path a
+    /// section cuts) and the push rule never opens it; it opens when the part it carries can no
+    /// longer stand on its rests ([`unseated`]).
+    Resting,
+}
+
 /// One joint of the graph: chunk `a` against `b`.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) struct Joint {
@@ -120,6 +155,17 @@ pub(crate) struct Joint {
     pub centroid: Vec3,
     /// Unit normal of the contact plane; its sign carries nothing.
     pub normal: Vec3,
+    pub bond: Bond,
+}
+
+impl Joint {
+    /// Its seam, `None` for a rest.
+    pub(crate) fn seam(&self) -> Option<Seam> {
+        match self.bond {
+            Bond::Bonded(seam) => Some(seam),
+            Bond::Resting => None,
+        }
+    }
 }
 
 /// A chunk table and its joint graph.
@@ -466,14 +512,9 @@ fn crushed_radii(sources: &[Source], material: &Masonry) -> Vec<f32> {
 
 /// The load the push rule puts on `joint` from `sources` (Pa, the mean of the Lamé normal stress
 /// over the joint's disc), each source clamped at its radius in `crushed` (its crushed radius in
-/// the joint's `material`, [`crushed_radii`]), and the threshold it is compared to: the seam's
+/// the joint's material, [`crushed_radii`]), and the threshold it is compared to: `seam`'s
 /// tensile strength.
-fn joint_load(
-    joint: &Joint,
-    material: &Masonry,
-    sources: &[Source],
-    crushed: &[f32],
-) -> (f32, f32) {
+fn joint_load(joint: &Joint, seam: &Seam, sources: &[Source], crushed: &[f32]) -> (f32, f32) {
     let load = disc(joint)
         .iter()
         .map(|(x, weight)| {
@@ -485,13 +526,15 @@ fn joint_load(
                     .sum::<f32>()
         })
         .sum();
-    (load, material.tensile)
+    (load, seam.tensile)
 }
 
-/// Crack every live, intact joint whose load from `sources` reaches its threshold
-/// ([`joint_load`]); returns the joints cracked now, ascending. A joint's material is its chunk
-/// `a`'s. The sources' crushed radii are taken once per crush energy the joints meet, keyed on its
-/// bits, not at each disc point of each joint: the same expression of the same values.
+/// Crack every live, intact bonded joint whose load from `sources` reaches its seam's threshold
+/// ([`joint_load`]); returns the joints cracked now, ascending. A joint's material, whose crush
+/// energy clamps the sources, is its chunk `a`'s; a rest is never cracked here
+/// ([`Bond::Resting`]). The sources' crushed radii are taken once per crush energy the joints
+/// meet, keyed on its bits, not at each disc point of each joint: the same expression of the same
+/// values.
 pub(crate) fn crack(
     structure: &Structure,
     state: &mut WallState,
@@ -503,6 +546,9 @@ pub(crate) fn crack(
     let mut radii: Vec<(u32, Vec<f32>)> = Vec::new();
     let mut cracked = Vec::new();
     for (index, joint) in structure.joints.iter().enumerate() {
+        let Some(seam) = joint.seam() else {
+            continue;
+        };
         if state.cracked[index] || !state.live(joint) {
             continue;
         }
@@ -515,7 +561,7 @@ pub(crate) fn crack(
                 radii.len() - 1
             }
         };
-        let (load, threshold) = joint_load(joint, &material, sources, &radii[at].1);
+        let (load, threshold) = joint_load(joint, &seam, sources, &radii[at].1);
         if load >= threshold {
             state.cracked[index] = true;
             cracked.push(index);
@@ -705,6 +751,10 @@ pub(crate) enum Load {
     /// The held group's weight ([`weigh`]): the peak tension across the section against its seam's
     /// tensile strength, Pa.
     Weight,
+    /// A group standing on rests alone that can no longer ([`unseated`]): how far its centre of
+    /// mass reaches past the rests that bear it, horizontally, against nothing, m (infinite when
+    /// none bears). The section is every rest it stood on.
+    Rest,
 }
 
 /// One structural failure: the section's joints, what loaded it, and the demand on it with the
@@ -717,8 +767,10 @@ pub(crate) struct Failure {
     pub capacity: f32,
 }
 
-/// The live, intact joints' graph: each chunk's neighbours with the joint between, each chunk's
-/// live anchors, and whether it is buried (held by the soil, never by a joint a section can cut).
+/// The live, intact bonded joints' graph: each chunk's neighbours with the joint between, each
+/// chunk's live anchors, and whether it is buried (held by the soil, never by a joint a section can
+/// cut). A rest is no edge: it carries no tension, so no section's group hangs on one, and a group
+/// whose only way to the ground is over rests is the rest check's ([`unseated`]).
 type Graph = (Vec<Vec<(usize, usize)>>, Vec<Vec<usize>>, Vec<bool>);
 
 fn graph(structure: &Structure, state: &WallState) -> Graph {
@@ -726,7 +778,7 @@ fn graph(structure: &Structure, state: &WallState) -> Graph {
     let mut neighbours = vec![Vec::new(); count];
     let mut anchors = vec![Vec::new(); count];
     for (index, joint) in structure.joints.iter().enumerate() {
-        if state.cracked[index] || !state.live(joint) {
+        if state.cracked[index] || !state.live(joint) || joint.seam().is_none() {
             continue;
         }
         match joint.b {
@@ -814,10 +866,10 @@ fn ground_path(
     None
 }
 
-/// The sections a structural check tries: every live intact joint alone, and every set of two or
-/// more live intact joints lying in one plane (normals parallel, offsets within a millimetre),
-/// each ascending, the singles first in joint order, then the planes in creation order. Read from
-/// the structure's joints and the state's cracks and fates alone.
+/// The sections a structural check tries: every live intact bonded joint alone, and every set of
+/// two or more live intact bonded joints lying in one plane (normals parallel, offsets within a
+/// millimetre), each ascending, the singles first in joint order, then the planes in creation
+/// order. Read from the structure's joints and the state's cracks and fates alone.
 fn sections(structure: &Structure, state: &WallState) -> Vec<Vec<usize>> {
     let mut planes: Vec<(Vec3, f32, Vec<usize>)> = Vec::new();
     // The planes by their offset's bucket ([`plane_bucket`]), each bucket in creation order. A
@@ -826,7 +878,7 @@ fn sections(structure: &Structure, state: &WallState) -> Vec<Vec<usize>> {
     let mut buckets: std::collections::HashMap<i64, Vec<usize>> = Default::default();
     let mut singles = Vec::new();
     for (index, joint) in structure.joints.iter().enumerate() {
-        if state.cracked[index] || !state.live(joint) {
+        if state.cracked[index] || !state.live(joint) || joint.seam().is_none() {
             continue;
         }
         singles.push(vec![index]);
@@ -1022,7 +1074,7 @@ fn section_failure(
             chunk.mass * (r.length_squared() - r.dot(axis).powi(2) + 0.4 * own * own)
         })
         .sum();
-    let toughness = structure.chunks[joints[0].a].material.fracture_energy;
+    let toughness = joints[0].seam()?.fracture_energy;
     Some(Failure {
         joints: section.to_vec(),
         load: Load::Push,
@@ -1133,19 +1185,32 @@ pub(crate) fn weigh(
                 weighed_with.dedup();
             }
         }
-        let Some((_, failure)) = worst else {
-            // A chunk with no path is loose and falls; one whose path is empty is buried, the
-            // soil's to hold.
-            weighed.unassessed = touched
-                .iter()
-                .zip(&paths)
-                .zip(&assessed)
-                .filter(|((_, path), assessed)| {
-                    path.as_ref().is_some_and(|path| !path.is_empty()) && !**assessed
-                })
-                .map(|((&c, _), _)| c)
-                .collect();
-            break;
+        let failure = match worst {
+            Some((_, failure)) => failure,
+            None => match unseated(
+                structure,
+                state,
+                &graph,
+                &touched,
+                &paths,
+                &mut weighed.steps,
+            ) {
+                Some(failure) => failure,
+                None => {
+                    // A chunk with no path stands on rests (the rest check held it) or is loose
+                    // and falls; one whose path is empty is buried, the soil's to hold.
+                    weighed.unassessed = touched
+                        .iter()
+                        .zip(&paths)
+                        .zip(&assessed)
+                        .filter(|((_, path), assessed)| {
+                            path.as_ref().is_some_and(|path| !path.is_empty()) && !**assessed
+                        })
+                        .map(|((&c, _), _)| c)
+                        .collect();
+                    break;
+                }
+            },
         };
         for &j in &failure.joints {
             state.cracked[j] = true;
@@ -1160,6 +1225,157 @@ pub(crate) fn weigh(
         weighed.failures.push(failure);
     }
     weighed
+}
+
+/// How far a rest's normal, turned toward the part it carries, must rise to bear that part: above
+/// the bake's rounding of a vertical face's normal (a millionth), far below any slope a part sits
+/// on. A rest at or under it (a part's end butted against a wall, a part hanging under another)
+/// bears nothing.
+const BEARS: f32 = 1e-3;
+
+/// The rest check, for the touched chunks with no bonded path to the ground (`paths`, one per
+/// chunk of `touched`, [`ground_path`]): each such chunk's bonded group (its chunks joined to it
+/// through intact bonded joints, `graph`) stands on rests alone. The rests that bear it (each a
+/// live intact rest joining it to a standing chunk outside, its normal toward the group rising past
+/// [`BEARS`]) are discs of their area in their planes, as the tension check reads a joint; the
+/// group stands while the vertical through its centre of mass passes inside the horizontal convex
+/// hull of those discs, where vertical forces in the rests alone hold its weight and its moment.
+/// The first group, in `touched` order, that does not stand opens every rest it stood on, as one
+/// [`Load::Rest`] failure; `None` when every group stands. A group with no rest left is loose,
+/// support's to drop ([`fall`]).
+///
+/// ASSUMED: friction holds a seated part from sliding (a roof plane at 3 : 4 on its plate stands
+/// though no friction in the material data reaches tan 36.87°, 0.75), and a rest bears no part of
+/// another's weight that reaches it through the part it carries: the check reads each group's own
+/// weight on its own rests. Once a part is freed, the physics' contact and friction decide whether
+/// it slides, rocks or settles. Adds the chunks it walks and the joints it reads to `steps`.
+fn unseated(
+    structure: &Structure,
+    state: &WallState,
+    (neighbours, ..): &Graph,
+    touched: &[usize],
+    paths: &[Option<Vec<usize>>],
+    steps: &mut usize,
+) -> Option<Failure> {
+    let mut seen = vec![false; structure.chunks.len()];
+    for (&start, path) in touched.iter().zip(paths) {
+        if path.is_some() || seen[start] {
+            continue;
+        }
+        seen[start] = true;
+        let mut group = vec![start];
+        let mut next = 0;
+        while let Some(&chunk) = group.get(next) {
+            next += 1;
+            *steps += 1;
+            for &(neighbour, _) in &neighbours[chunk] {
+                if !seen[neighbour] {
+                    seen[neighbour] = true;
+                    group.push(neighbour);
+                }
+            }
+        }
+        group.sort_unstable();
+        if let Some(failure) = unseat(structure, state, &group, steps) {
+            return Some(failure);
+        }
+    }
+    None
+}
+
+/// `group`'s rests and whether it stands on them ([`unseated`]): `None` when it stands or has no
+/// rest left.
+fn unseat(
+    structure: &Structure,
+    state: &WallState,
+    group: &[usize],
+    steps: &mut usize,
+) -> Option<Failure> {
+    let inside = |c: usize| group.binary_search(&c).is_ok();
+    let mut rests = Vec::new();
+    let mut rim: Vec<(f32, f32)> = Vec::new();
+    *steps += structure.joints.len() + group.len();
+    for (index, joint) in structure.joints.iter().enumerate() {
+        if joint.seam().is_some() || state.cracked[index] || !state.live(joint) {
+            continue;
+        }
+        let Side::Chunk(b) = joint.b else {
+            continue;
+        };
+        let held = match (inside(joint.a), inside(b)) {
+            (true, false) => joint.a,
+            (false, true) => b,
+            _ => continue,
+        };
+        rests.push(index);
+        let toward = structure.chunks[held].centroid - joint.centroid;
+        let n = if toward.dot(joint.normal) >= 0.0 {
+            joint.normal
+        } else {
+            -joint.normal
+        };
+        if n.y <= BEARS {
+            continue;
+        }
+        let (u, v) = plane_axes(n);
+        let radius = (joint.area / PI).sqrt();
+        rim.extend((0..8).map(|k| {
+            let angle = k as f32 * PI / 4.0;
+            let p = joint.centroid + (u * angle.cos() + v * angle.sin()) * radius;
+            (p.x, p.z)
+        }));
+    }
+    if rests.is_empty() {
+        return None;
+    }
+    let (mass, moment) = group.iter().fold((0.0, Vec3::ZERO), |(mass, moment), &i| {
+        let chunk = &structure.chunks[i];
+        (mass + chunk.mass, moment + chunk.centroid * chunk.mass)
+    });
+    let centre = moment / mass;
+    let reach = beyond(&mut rim, (centre.x, centre.z));
+    (reach > 0.0).then_some(Failure {
+        joints: rests,
+        load: Load::Rest,
+        demand: reach,
+        capacity: 0.0,
+    })
+}
+
+/// How far `p` lies outside the convex hull of `points` (reordered), m: the largest of its
+/// distances past the hull's edges, at most 0 inside, infinite when the points span no area.
+fn beyond(points: &mut [(f32, f32)], p: (f32, f32)) -> f32 {
+    let cross = |o: (f32, f32), a: (f32, f32), b: (f32, f32)| {
+        (a.0 - o.0) * (b.1 - o.1) - (a.1 - o.1) * (b.0 - o.0)
+    };
+    points.sort_by(|a, b| a.0.total_cmp(&b.0).then(a.1.total_cmp(&b.1)));
+    // Andrew's monotone chain: the lower hull left to right, then the upper right to left,
+    // counter-clockwise.
+    let mut hull: Vec<(f32, f32)> = Vec::with_capacity(points.len() + 1);
+    let push = |hull: &mut Vec<(f32, f32)>, floor: usize, q: (f32, f32)| {
+        while hull.len() >= floor && cross(hull[hull.len() - 2], hull[hull.len() - 1], q) <= 0.0 {
+            hull.pop();
+        }
+        hull.push(q);
+    };
+    for &q in points.iter() {
+        push(&mut hull, 2, q);
+    }
+    let lower = hull.len() + 1;
+    for &q in points.iter().rev().skip(1) {
+        push(&mut hull, lower, q);
+    }
+    // The upper chain ends on the first point again.
+    hull.pop();
+    if hull.len() < 3 {
+        return f32::INFINITY;
+    }
+    (0..hull.len())
+        .map(|k| {
+            let (a, b) = (hull[k], hull[(k + 1) % hull.len()]);
+            -cross(a, b, p) / (b.0 - a.0).hypot(b.1 - a.1)
+        })
+        .fold(f32::NEG_INFINITY, f32::max)
 }
 
 /// The standing chunks whose support a change moved ([`weigh`]), ascending: each side of a joint
@@ -1298,7 +1514,7 @@ fn weight_failure(
             let (du, dv) = offset(j);
             let rim = (joints[j].area / PI).sqrt();
             let peak = direct + gu * du + gv * dv + reach * rim;
-            (peak, structure.chunks[joints[j].a].material.tensile)
+            (peak, joints[j].seam().map_or(0.0, |seam| seam.tensile))
         })
         .max_by(|a, b| (a.0 / a.1).total_cmp(&(b.0 / b.1)))?;
     Some(Failure {
@@ -1543,6 +1759,7 @@ mod tests {
                 area: 0.04,
                 centroid: Vec3::new(0.2 * i as f32 - 0.1, 0.1, 0.0),
                 normal: Vec3::X,
+                bond: Bond::Bonded(material.seam),
             })
             .collect();
         joints.push(Joint {
@@ -1551,6 +1768,7 @@ mod tests {
             area: 0.04,
             centroid: Vec3::ZERO,
             normal: Vec3::Y,
+            bond: Bond::Bonded(material.seam),
         });
         Structure { chunks, joints }
     }
@@ -1584,6 +1802,7 @@ mod tests {
                         area: size * size,
                         centroid: at(c + 1.0, r + 0.5),
                         normal: Vec3::X,
+                        bond: Bond::Bonded(material.seam),
                     });
                 }
                 if row + 1 < h {
@@ -1593,6 +1812,7 @@ mod tests {
                         area: size * size,
                         centroid: at(c + 0.5, r + 1.0),
                         normal: Vec3::Y,
+                        bond: Bond::Bonded(material.seam),
                     });
                 }
                 if row == 0 {
@@ -1602,6 +1822,7 @@ mod tests {
                         area: size * size,
                         centroid: at(c + 0.5, 0.0),
                         normal: Vec3::Y,
+                        bond: Bond::Bonded(material.seam),
                     });
                 }
             }
@@ -1662,7 +1883,7 @@ mod tests {
         let mut planes: Vec<(Vec3, f32, Vec<usize>)> = Vec::new();
         let mut singles = Vec::new();
         for (index, joint) in structure.joints.iter().enumerate() {
-            if state.cracked[index] || !state.live(joint) {
+            if state.cracked[index] || !state.live(joint) || joint.seam().is_none() {
                 continue;
             }
             singles.push(vec![index]);
@@ -1853,21 +2074,24 @@ mod tests {
     /// THE LAWS READ THE MATERIAL FROM DATA: the shipped Brick's seam strength is its row's
     /// `tensile`, its crush energy the walk's own static resistance at its factor (135.5 MJ/m³,
     /// DERIVED in the prototype's README from 36.5 ref-mm/m), and a substance whose row states no
-    /// seam strength (the shipped Wood) has no values, so its elements never break. A law reading a
-    /// constant in place of the row, or breaking every substance, fails here.
+    /// seam strength (the shipped Wood) has a seam that never opens ([`Seam::NEVER`]). A law
+    /// reading a constant in place of the row, or breaking every substance, fails here.
     #[test]
     fn the_material_is_the_substance_row() {
         let registry = SubstanceRegistry::shipped_static();
         let brick = brick();
         let bulk = registry.hard("Brick").unwrap().bulk.unwrap();
-        assert_eq!(f64::from(brick.tensile), bulk.tensile.unwrap());
+        assert_eq!(f64::from(brick.seam.tensile), bulk.tensile.unwrap());
         assert_eq!(f64::from(brick.density), bulk.density);
         assert!(
             (brick.crush / 135.5e6 - 1.0).abs() < 0.01,
             "crush {}",
             brick.crush
         );
-        assert_eq!(Masonry::of(registry, "Wood"), Ok(None));
+        let wood = Masonry::of(registry, "Wood")
+            .unwrap()
+            .expect("Wood states bulk facts");
+        assert_eq!(wood.seam, Seam::NEVER);
         assert!(Masonry::of(registry, "Adobe").is_err());
     }
 
@@ -1950,7 +2174,7 @@ mod tests {
             let mid = 0.5 * (near + far);
             let sources = [source(mid)];
             let crushed = crushed_radii(&sources, &material);
-            if joint_load(&joint, &material, &sources, &crushed).0 >= material.tensile {
+            if joint_load(&joint, &material.seam, &sources, &crushed).0 >= material.seam.tensile {
                 near = mid;
             } else {
                 far = mid;
@@ -2004,7 +2228,8 @@ mod tests {
                         let joint = &structure.joints[j];
                         let material = material_of(joint);
                         let crushed = crushed_radii(&sources, &material);
-                        let (load, threshold) = joint_load(joint, &material, &sources, &crushed);
+                        let (load, threshold) =
+                            joint_load(joint, &material.seam, &sources, &crushed);
                         load >= threshold
                     })
                     .collect()
@@ -2124,6 +2349,7 @@ mod tests {
                         area: CUBE * CUBE,
                         centroid: (at(p) + at(q)) / 2.0,
                         normal: d.abs(),
+                        bond: Bond::Bonded(material.seam),
                     });
                 }
             }
@@ -2134,6 +2360,7 @@ mod tests {
             area: CUBE * CUBE,
             centroid: at(cells[a]) - Vec3::Y * CUBE / 2.0,
             normal: Vec3::Y,
+            bond: Bond::Bonded(material.seam),
         }));
         Structure { chunks, joints }
     }
@@ -2198,7 +2425,7 @@ mod tests {
     /// bending alone, whose peak `4 M / (π r³)` reaches `f_t` at `m* = π r³ f_t / (2 g s n²)`.
     fn cantilever_limit(n: i32) -> f32 {
         let r = (CUBE * CUBE / PI).sqrt();
-        PI * r.powi(3) * brick().tensile / (2.0 * GRAVITY * CUBE * (n * n) as f32)
+        PI * r.powi(3) * brick().seam.tensile / (2.0 * GRAVITY * CUBE * (n * n) as f32)
     }
 
     /// A CANTILEVER PAST ITS DERIVED LIMIT FALLS, AND ONE WITHIN IT STANDS: a fixture arm of four
@@ -2242,7 +2469,7 @@ mod tests {
         let panel: Vec<usize> = (2..cells.len()).collect();
         cells.extend([[0, 0, 0], [1, 0, 0]]);
         let props = vec![cells.len() - 2, cells.len() - 1];
-        let limit = brick().tensile * CUBE * CUBE / (deep as f32 * GRAVITY);
+        let limit = brick().seam.tensile * CUBE * CUBE / (deep as f32 * GRAVITY);
         for (share, falls) in [(0.98, false), (1.02, true)] {
             let structure = cubes(&cells, 2, &props, limit * share);
             let (_, weighed, fell) = dust_and_weigh(&structure, &props);
@@ -2330,5 +2557,63 @@ mod tests {
         assert_eq!(cracks(&weighed), Vec::new());
         assert!(fell.is_empty());
         assert_eq!(weighed.unassessed, beam);
+    }
+
+    /// A REST NEVER CARRIES TENSION: a fixture cube run out from a support no section cuts, on a
+    /// prop that turns to dust, at 2 % under the cantilever limit of its root joint
+    /// ([`cantilever_limit`]). Joined by a seam it hangs from the root and stands; joined by a
+    /// rest (its plane upright, so it bears nothing) it falls at that first change, every rest it
+    /// stood on opened as one [`Load::Rest`] failure, though no load reaches anything's strength.
+    /// The roof planes and wall plates of a building rely on it: a part set on another holds only
+    /// by bearing on it.
+    #[test]
+    fn a_rest_never_carries_tension() {
+        let cells = propped_arm(1);
+        let props = [2];
+        let mut structure = cubes(&cells, 1, &props, 0.98 * cantilever_limit(1));
+        let (_, weighed, fell) = dust_and_weigh(&structure, &props);
+        assert_eq!(
+            cracks(&weighed),
+            Vec::new(),
+            "bonded, it hangs within its limit"
+        );
+        assert!(fell.is_empty());
+        let root = joint_between(&structure, 0, 1);
+        structure.joints[root].bond = Bond::Resting;
+        let (state, weighed, fell) = dust_and_weigh(&structure, &props);
+        assert_eq!(cracks(&weighed), vec![(Load::Rest, vec![root])]);
+        assert!(state.cracked[root]);
+        assert_eq!(fell, vec![vec![1]]);
+    }
+
+    /// A SEATED PART STANDS WHILE ITS CENTRE OF MASS IS OVER ITS RESTS: a fixture bar of two cubes
+    /// joined by a seam, one resting on a support no section cuts, the other on a prop turned to
+    /// dust. The rest is a disc of its area, radius `r = √(A/π)` (DERIVED: the disc reading of a
+    /// joint), so the bar stands with its centre of mass `0.9 r` from the rest's centroid,
+    /// horizontally, and falls whole at `1.1 r`, its one rest opened. A check that weighed a seated
+    /// part by tension, or by the rest's centroid alone, fails here; a roof plane seated on its
+    /// plate and gables stands by it, and falls by it once those go.
+    #[test]
+    fn a_seated_part_stands_while_its_centre_is_over_its_rests() {
+        let cells = [[0, 0, 0], [0, 1, 0], [1, 1, 0], [1, 0, 0]];
+        let props = [3];
+        let radius = (CUBE * CUBE / PI).sqrt();
+        for (reach, falls) in [(0.9, false), (1.1, true)] {
+            let mut structure = cubes(&cells, 1, &props, 100.0);
+            let seat = joint_between(&structure, 0, 1);
+            structure.joints[seat].bond = Bond::Resting;
+            // The bar's centre lies `share` of a cube width from chunk 1 toward chunk 2.
+            let share = reach * radius / CUBE;
+            structure.chunks[1].mass = 100.0 * (1.0 - share);
+            structure.chunks[2].mass = 100.0 * share;
+            let (_, weighed, fell) = dust_and_weigh(&structure, &props);
+            if falls {
+                assert_eq!(cracks(&weighed), vec![(Load::Rest, vec![seat])]);
+                assert_eq!(fell, vec![vec![1, 2]]);
+            } else {
+                assert_eq!(cracks(&weighed), Vec::new(), "at {reach} r it stands");
+                assert!(fell.is_empty());
+            }
+        }
     }
 }

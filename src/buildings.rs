@@ -445,8 +445,10 @@ pub(crate) mod tests {
 
     /// A FILE THAT BREAKS THE CONTRACT DOES NOT LOAD: the shipped house parses and holds, and the
     /// same text naming another id, with an anchor lifted off the foundation plane, a joint out
-    /// of order, an element whose run skips a chunk, or a material the registry does not know, is
-    /// refused naming why.
+    /// of order, an element whose run skips a chunk, a seam between two components or a bond
+    /// inside one, or a material the registry does not know, is refused naming why. The laws read
+    /// a joint's strength from its bond, so a mislabelled joint would hold a rest in tension or
+    /// let a wall's own seam fall open.
     #[test]
     fn a_building_file_that_breaks_the_contract_is_refused() {
         let path = shipped_assets().join("buildings/house_1/house_1.building.ron");
@@ -473,6 +475,20 @@ pub(crate) mod tests {
                 .unwrap_err()
                 .contains("do not continue the run")
         );
+        let asset = BuildingAsset::from_ron(&text).unwrap();
+        for (from, to, refusal) in [
+            (schema::Bond::Resting, schema::Bond::Seam, "seam between"),
+            (schema::Bond::Seam, schema::Bond::Resting, "inside one"),
+        ] {
+            let mut wrong = asset.clone();
+            let joint = wrong
+                .joints
+                .iter_mut()
+                .find(|joint| joint.bond == from)
+                .expect("the shipped house holds seams and rests");
+            joint.bond = to;
+            assert!(wrong.check().unwrap_err().contains(refusal), "{refusal}");
+        }
         let unknown = text.replacen("\"Brick\"", "\"Adobe\"", 1);
         let err = BuildingKind::resolve("house_1", &unknown, registry).unwrap_err();
         assert!(err.contains("Adobe"), "{err}");
