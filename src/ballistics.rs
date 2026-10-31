@@ -5321,7 +5321,8 @@ mod march_tests {
     }
 
     /// Build an Avian world with one static steel plate (full extents `size`, centred at `at`, facing
-    /// ±Z) on the `Armor` layer, register the real march + the impact capture, and settle the physics
+    /// ±Z, carrying its [`Envelope`] as every spawned body does) on the `Armor` layer, register the
+    /// real march + the impact capture, and settle the physics
     /// so the spatial-query pipeline includes the plate before any shell is marched.
     ///
     /// SIM ONLY — the server's composition. A shell here is born bare, which is what almost every
@@ -5340,10 +5341,12 @@ mod march_tests {
 
     fn plate_world(size: Vec3, at: Vec3, view: bool) -> App {
         let mut app = bare_world(view);
+        let collider = Collider::cuboid(size.x, size.y, size.z);
         app.world_mut().spawn((
             Transform::from_translation(at),
             RigidBody::Static,
-            Collider::cuboid(size.x, size.y, size.z),
+            Envelope::of(&collider),
+            collider,
             CollisionLayers::new([Layer::Armor], LayerMask::ALL),
             BallisticVolume {
                 material: walk::VolumeMaterial::fixture(STEEL),
@@ -7585,14 +7588,18 @@ mod march_tests {
         (Collider::trimesh(vertices, indices), surfaces)
     }
 
-    /// A world of outward-wound trimesh plates, all one substance.
+    /// A world of outward-wound trimesh plates, all one substance, each a static body carrying its
+    /// envelope as every spawned body does ([`Envelope`]).
     pub(super) fn world_with_trimesh_plates(plates: &[(Vec3, Vec3)]) -> App {
         let mut app = world_with_plate(Vec3::splat(0.01), Vec3::new(0.0, -500.0, 0.0));
         for (size, at) in plates {
+            let (collider, surfaces) = box_trimesh(*size);
             app.world_mut().spawn((
                 Transform::from_translation(*at),
                 RigidBody::Static,
-                box_trimesh(*size),
+                Envelope::of(&collider),
+                collider,
+                surfaces,
                 CollisionLayers::new([Layer::Armor], LayerMask::ALL),
                 BallisticVolume {
                     material: walk::VolumeMaterial::fixture(STEEL),
