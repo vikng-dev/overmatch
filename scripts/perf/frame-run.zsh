@@ -21,13 +21,20 @@
 #
 # OFFSCREEN=1 (read from the environment, for every runner) is the mode that takes nobody's screen:
 # a hidden window whose cameras render into a 2560x1440 image at scale factor 2, the visible
-# harness's surface, with nothing presented (`SPIKE_FRAME_COST_OFFSCREEN`, src/frame_cost.rs). Its
+# harness's surface, with nothing presented (`OVERMATCH_WINDOW=offscreen`, src/frame_cost.rs). Its
 # numbers are measurements, not SMOKE fiction: every frame row proves the 3D camera drew, and the
 # analyzer gates on that and on the surface size. It omits only the compositor's share of a visible
 # frame (MEASURED within 0.1 ms p50 at 2 tanks, 0.7 ms at 30; focus-gap-diagnosis.md). The display
 # and occlusion gates have no subject offscreen, and the analyzer skips them on a stream whose
 # surface rows say offscreen.
 OFFSCREEN="${OFFSCREEN:-}"
+
+# The window mode (`OVERMATCH_WINDOW`, src/run_window.rs) every condition's client runs: a real
+# run's visible window, SMOKE's hidden one, or OFFSCREEN's image. Each child is handed it
+# explicitly, and each condition then proves it ran it (the client's `window: <mode>` line).
+FRAME_RUN_WINDOW=visible
+[[ -n "$SMOKE" ]] && FRAME_RUN_WINDOW=hidden
+[[ -n "$OFFSCREEN" ]] && FRAME_RUN_WINDOW=offscreen
 
 # The analyzer's presentation-gate relaxations, as an ARRAY. zsh does not word-split an unquoted
 # parameter expansion, so the obvious `${SMOKE:+--occluded-ok --display-ok --surface-ok}` reaches
@@ -77,12 +84,12 @@ frame_run_begin() {
     echo "REFUSING: SMOKE and OFFSCREEN are both set — pick plumbing fiction or an offscreen measurement" >&2
     exit 1
   fi
-  # A real run with the hidden-capture env exported would inherit it into every child, the window
-  # would never be shown, and every gate below would happily pass on free-run fiction. Refuse rather
-  # than silently scrub: an operator who exported it should decide whether they meant SMOKE=1.
-  if [[ -z "$SMOKE" && -z "$OFFSCREEN" && -n "${SPIKE_SIM_WINDOWED:-}" ]]; then
-    echo "REFUSING real run: SPIKE_SIM_WINDOWED is exported — a hidden window free-runs and every" >&2
-    echo "number would be fiction. unset it, or run SMOKE=1 for loudly-marked plumbing validation." >&2
+  # An exported window mode other than this run's would reach every child a runner starts outside
+  # a condition, and in a real run a hidden window free-runs: every number would be fiction. Refuse
+  # rather than silently override: an operator who exported one should decide which mode they meant.
+  if [[ -n "${OVERMATCH_WINDOW:-}" && "$OVERMATCH_WINDOW" != "$FRAME_RUN_WINDOW" ]]; then
+    echo "REFUSING: OVERMATCH_WINDOW=$OVERMATCH_WINDOW is exported but this run's window is" >&2
+    echo "$FRAME_RUN_WINDOW (SMOKE=1 hidden, OFFSCREEN=1 offscreen, neither visible). unset it." >&2
     exit 1
   fi
   [[ -x "$CLIENT" ]] || { echo "no client binary at $CLIENT — build it first (see the runbook)" >&2; exit 1; }
@@ -93,12 +100,12 @@ frame_run_begin() {
   rm -rf "$OUT"/cfg-*
 
   if [[ -n "$SMOKE" ]]; then
-    echo "SMOKE MODE: hidden window (SPIKE_SIM_WINDOWED=1) — the surface is Occluded, the loop" >&2
+    echo "SMOKE MODE: hidden window (OVERMATCH_WINDOW=hidden) — the surface is Occluded, the loop" >&2
     echo "free-runs, and every frame time below is FICTION. Plumbing validation only." >&2
     # The directory-level marker, so the numbers cannot later be mistaken for a measurement by
     # someone (or some agent) who finds the files without this terminal scrollback.
     cat >"$OUT/SMOKE-PLUMBING-ONLY.txt" <<'EOF'
-SMOKE / PLUMBING-ONLY run. The window was HIDDEN (SPIKE_SIM_WINDOWED=1): the surface is
+SMOKE / PLUMBING-ONLY run. The window was HIDDEN (OVERMATCH_WINDOW=hidden): the surface is
 Occluded, present is discarded, and the frame loop free-runs. Every frame time in this
 directory is fiction by construction. This run proves that rows flow and gates fire — nothing
 else. Do not quote these numbers.
@@ -148,14 +155,9 @@ frame_run_condition() {
   printf '(\n    version: 1,\n    %s\n    vsync_mode: Off,\n)\n' "$fields" >"$cfg/video.ron"
 
   echo "== $cond: ${fields} $* (${WARMUP_S}s warmup + ${DURATION_S}s measure) =="
-  # Real mode SCRUBS the hidden-capture env pair from the child even though the refusal already
-  # caught an exported SPIKE_SIM_WINDOWED — belt and suspenders, because run_offline's hidden mode
-  # silently activating is exactly the free-run fiction a capture must never emit. `env` takes its
-  # `-u` options before any assignment.
-  local extra=(-u SPIKE_SIM_WINDOWED -u SPIKE_SIM_VISIBLE -u SPIKE_FRAME_COST_OFFSCREEN)
-  [[ -n "$SMOKE" ]] && extra=(-u SPIKE_SIM_VISIBLE -u SPIKE_FRAME_COST_OFFSCREEN SPIKE_SIM_WINDOWED=1)
-  [[ -n "$OFFSCREEN" ]] && extra=(-u SPIKE_SIM_VISIBLE SPIKE_SIM_WINDOWED=1 SPIKE_FRAME_COST_OFFSCREEN=1)
-  env "${extra[@]}" \
+  # The child's window mode is named, never inherited: a real run whose client silently ran hidden is
+  # exactly the free-run fiction a capture must never emit. The gate after the run proves it took.
+  env OVERMATCH_WINDOW="$FRAME_RUN_WINDOW" \
     OVERMATCH_CONFIG_DIR="$cfg" SPIKE_FRAME_COST="$OUT/$cond.jsonl" BEVY_ASSET_ROOT="$ASSET_ROOT" \
     "$@" "$CLIENT" "${FRAME_RUN_CLIENT_ARGS[@]}" >"$log" 2>&1 &
   CLIENT_PID=$!
@@ -203,6 +205,10 @@ frame_run_condition() {
   # or produced a short/occluded stream is NOT evidence. Fail loud.
   [[ -f "$stream" ]] || frame_run_invalid "$cond" "no frame stream at $stream (SPIKE_FRAME_COST never armed?)"
   grep -q "settings: loaded $cfg/video.ron" "$log" || frame_run_invalid "$cond" "injected settings were not loaded (see $log)"
+  # The window mode the client ran, in its own words: a condition's assignments come after the
+  # runner's, so this is the line that refuses a visible run in a hidden mode and the reverse.
+  grep -q "window: $FRAME_RUN_WINDOW" "$log" \
+    || frame_run_invalid "$cond" "the client did not run a $FRAME_RUN_WINDOW window (no 'window: $FRAME_RUN_WINDOW' line; see $log)"
   if [[ -n "$OFFSCREEN" ]]; then
     # Offscreen nothing is presented, so no present mode paces the loop; a frame cap still would.
     grep -qE "frame_cost: effective present mode [A-Za-z]+, frame cap off" "$log" \

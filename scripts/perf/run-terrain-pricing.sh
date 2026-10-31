@@ -15,7 +15,7 @@ HERE="$(cd "$(dirname "$0")" && pwd)"
 export BIN
 export OFFSCREEN=1
 export OVERMATCH_UNATTENDED=1
-unset SMOKE SPIKE_SIM_WINDOWED SPIKE_SIM_VISIBLE SPIKE_ABLATE
+unset SMOKE OVERMATCH_WINDOW SPIKE_ABLATE
 DURATION="${DURATION_S:-60}"
 mkdir -p "$OUT"
 STATUS="$OUT/battery-status.txt"

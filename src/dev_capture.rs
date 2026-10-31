@@ -20,13 +20,11 @@
 //!
 //! # Invariant: a capture run shows no window
 //!
-//! On every root, whenever the plan takes frames and with no other variable: the primary window is
-//! created hidden and `Windowed`, settings never re-apply a persisted fullscreen to it
-//! (`settings::CaptureWindowPinned`), and on macOS the process renounces activation unless the
-//! root created the window hidden and renounced it itself. The run is unattended
-//! (`crate::unattended`): silent, and a focus loss never pauses it. A hidden window has no
-//! swapchain texture, and a window
-//! screenshot reads back nothing without one
+//! On every root, whenever the plan takes frames and with no other variable, the run is a hidden
+//! one (`run_window::hide`): the primary window is created hidden and `Windowed`, settings never
+//! re-apply a persisted fullscreen to it, on macOS the process renounces activation, and the run is
+//! unattended (silent, never paused by a focus loss). A hidden window has no swapchain texture,
+//! and a window screenshot reads back nothing without one
 //! (`bevy_render::view::window::screenshot::submit_screenshot_commands` skips the copy), so the
 //! frame is instead read back from an offscreen image that every window-targeting camera is
 //! pointed at one second before the first frame.
@@ -52,7 +50,6 @@ use bevy::prelude::*;
 use bevy::render::render_resource::TextureFormat;
 use bevy::render::view::screenshot::{Screenshot, ScreenshotCaptured, save_to_disk};
 use bevy::ui::IsDefaultUiCamera;
-use bevy::window::PrimaryWindow;
 
 use crate::sight::SightMode;
 
@@ -125,7 +122,7 @@ fn mount(app: &mut App, frames: &plan::Frames) {
             panic!("{}: frames.out: {}: {error}", plan::VARIABLE, dir.display())
         });
     }
-    unattended(app);
+    crate::run_window::hide(app);
     // The effects plugin only `init_resource`s the RNG, so this seed holds in either mount order.
     app.insert_resource(crate::vfx::ViewRng::seeded(VIEW_SEED));
     if let Some(step) = frames.step_s {
@@ -220,26 +217,6 @@ fn resolve_round(key: &str, mode: u8, field: &str) -> crate::rounds::Round {
             plan::VARIABLE
         )
     })
-}
-
-/// What a capture run implies on every root, with no variable of its own (module doc): the window
-/// hidden and pinned, and the run unattended.
-fn unattended(app: &mut App) {
-    hide_window(app);
-    pin_window(app);
-    crate::unattended::mount(app);
-}
-
-/// Keep the primary window a plain window for the whole run: `Windowed` at creation, so a persisted
-/// fullscreen never boots, and [`crate::settings::CaptureWindowPinned`], so settings never
-/// re-applies one later. On macOS either would order the window front whatever `visible` says.
-fn pin_window(app: &mut App) {
-    let world = app.world_mut();
-    let mut windows = world.query_filtered::<&mut Window, With<PrimaryWindow>>();
-    if let Ok(mut window) = windows.single_mut(world) {
-        window.mode = bevy::window::WindowMode::Windowed;
-    }
-    app.insert_resource(crate::settings::CaptureWindowPinned);
 }
 
 /// The plan's `fell` cue ([`plan::Fell`]) and whether it has fired.
@@ -424,23 +401,6 @@ fn frame_path(path: &Path, at: f32, frames: usize) -> PathBuf {
     path.with_file_name(format!("{stem}-{}s.{ext}", stamp(at)))
 }
 
-/// Create the primary window hidden. `WindowPlugin` has spawned the entity by now and `bevy_winit`
-/// reads `visible` when it creates the OS window, which is after every plugin's build.
-pub(crate) fn hide_window(app: &mut App) {
-    let world = app.world_mut();
-    let mut windows = world.query_filtered::<&mut Window, With<PrimaryWindow>>();
-    let Ok(mut window) = windows.single_mut(world) else {
-        warn!("capture: no primary window at mount; one created later will be visible");
-        return;
-    };
-    if !window.visible {
-        return;
-    }
-    window.visible = false;
-    #[cfg(target_os = "macos")]
-    app.add_systems(Startup, crate::platform::revoke_macos_activation);
-}
-
 #[expect(
     clippy::too_many_arguments,
     reason = "a dev capture spanning time, its state, images, cameras, gizmo config, sight mode and exit"
@@ -565,51 +525,7 @@ pub(crate) fn retarget_to(
 
 #[cfg(test)]
 mod tests {
-    use bevy::audio::{GlobalVolume, Volume};
-
     use super::*;
-
-    /// A CAPTURE RUN TAKES NO SCREEN AND NEVER PAUSES, on any root, with no variable of its own:
-    /// capture drivers run on a machine its owner is working at. The window a root described
-    /// visible and fullscreen is hidden and `Windowed` before winit creates it, settings are told
-    /// to leave it so, the run is silent, and a focus loss does not pause it. Mutants: dropping any
-    /// one of [`hide_window`], [`pin_window`] or `unattended::mount` fails an assert.
-    #[test]
-    fn a_capture_run_is_hidden_pinned_silent_and_never_paused() {
-        let mut app = App::new();
-        let window = app
-            .world_mut()
-            .spawn((
-                Window {
-                    mode: bevy::window::WindowMode::BorderlessFullscreen(
-                        bevy::window::MonitorSelection::Primary,
-                    ),
-                    ..default()
-                },
-                PrimaryWindow,
-            ))
-            .id();
-        unattended(&mut app);
-        // What a later `AudioPlugin` build writes. Only `PreStartup` runs: `Startup` holds the
-        // macOS activation revocation, which needs the process's main thread.
-        app.insert_resource(GlobalVolume::new(Volume::Linear(1.0)));
-        app.world_mut().run_schedule(PreStartup);
-        let window = app.world().get::<Window>(window).expect("the window");
-        assert!(!window.visible);
-        assert_eq!(window.mode, bevy::window::WindowMode::Windowed);
-        assert!(
-            app.world()
-                .contains_resource::<crate::settings::CaptureWindowPinned>()
-        );
-        assert!(
-            app.world()
-                .contains_resource::<crate::state::FocusPauseSuppressed>()
-        );
-        assert_eq!(
-            app.world().resource::<GlobalVolume>().volume.to_linear(),
-            0.0
-        );
-    }
 
     /// The capture times sort and fold times sharing a frame name into one frame, so two captures
     /// never race for one file.

@@ -14,7 +14,7 @@
 # scripted client always connects directly; a player's opens the Join menu against the baked
 # Worker), and the `SPIKE_*` harness contract (`src/net/harness.rs`), which is
 # how a client with no window, no GPU and no human runs a scripted session and exits on its own.
-# `SPIKE_SIMULATE_INPUT` without `SPIKE_SIM_WINDOWED` selects the GPU-less composition root
+# `SPIKE_SIMULATE_INPUT` with no `OVERMATCH_WINDOW` selects the GPU-less composition root
 # (`net::client::run` → `gpu_less_default_plugins`: wgpu `backends: None`, `WinitPlugin` disabled),
 # which is what makes this runnable on a headless runner at all.
 #

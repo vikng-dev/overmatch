@@ -20,7 +20,7 @@ choice:
    never points the clients at it; they dial the BAKED PRODUCTION droplet
    (`src/net/client.rs:43-46`, log line "source: baked default"). Verified by running it: both
    clients targeted `157.245.48.161:5888`.
-2. **`SPIKE_SIM_WINDOWED=1` on both clients.** A headless client cannot load the mipped-KTX2 tank
+2. **A window on both clients (`OVERMATCH_WINDOW=hidden`).** A headless client cannot load the mipped-KTX2 tank
    glb since `a43a557`: bevy_image 0.19's UASTC→uncompressed transcode slices the SOURCE level
    data with the DESTINATION block geometry (`bevy_image-0.19.0/src/ktx2.rs:209`) — every panic is
    exactly "expected w·h·4 (RGBA32), got w·h (UASTC at 16 B / 4×4 block)", a 4× mismatch on every

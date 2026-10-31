@@ -9,7 +9,7 @@
 # logs that as a rendering error and quits; nothing in `cargo test` can see it.
 #
 # So this boots the real client against the real map on the real adapter, and fails on any ERROR.
-# The window is HIDDEN (`SPIKE_SIM_WINDOWED=1`, no `SPIKE_SIM_VISIBLE`): frame times from a hidden
+# The window is HIDDEN (`OVERMATCH_WINDOW=hidden`): frame times from a hidden
 # window are fiction, but pipeline creation is not — the pipelines are created, validated and
 # compiled exactly as they are for a visible one. NEVER read a frame number out of this.
 #
@@ -51,7 +51,7 @@ trap 'exit 130' INT
 trap 'exit 143' TERM
 
 echo "== booting $CLIENT hidden for ${SECONDS_TO_RUN}s (log: $LOG)"
-SPIKE_SIM_WINDOWED=1 BEVY_ASSET_ROOT="$REPO" OVERMATCH_CONFIG_DIR="$CONFIG" \
+OVERMATCH_WINDOW=hidden BEVY_ASSET_ROOT="$REPO" OVERMATCH_CONFIG_DIR="$CONFIG" \
   "$CLIENT" --offline >"$LOG" 2>&1 &
 CLIENT_PID=$!
 

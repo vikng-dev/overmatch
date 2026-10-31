@@ -3,8 +3,8 @@
 # The online client's frame cost, its network bytes and the server's own stats, per condition,
 # against a dedicated server: a remote one (TARGET=<ip:port>, an Edgegap deployment started by
 # scripts/edgegap/session.sh) or a local one this runner starts (TARGET unset). The measured client
-# is the scripted one (SPIKE_SIMULATE_INPUT=1) with the game's full presentation stack
-# (SPIKE_SIM_WINDOWED=1, src/net/client.rs), so its frame rows are the online game's frames.
+# is the scripted one (SPIKE_SIMULATE_INPUT=1) with the game's full presentation stack (a window
+# from frame-run.zsh's mode, src/run_window.rs), so its frame rows are the online game's frames.
 #
 #   VISIBLE=1 TARGET=1.2.3.4:31085 DEPLOYMENT=<id> scripts/perf/run-online-cost.sh out/ \
 #     'alone|' 'plus4||LOAD_CLIENTS=4'
@@ -114,10 +114,6 @@ if (( modes != 1 )); then
   echo "or SMOKE=1 (hidden, plumbing only)" >&2
   exit 1
 fi
-# The hidden modes get the windowed pair from frame-run.zsh; the visible one asks for it here, per
-# condition, never exported (frame_run_begin refuses an exported SPIKE_SIM_WINDOWED in a real run).
-MODE_ENV=()
-[[ -n "$VISIBLE" ]] && MODE_ENV=(SPIKE_SIM_WINDOWED=1 SPIKE_SIM_VISIBLE=1)
 
 if [[ -n "$DEPLOYMENT" && "$TARGET" == local ]]; then
   echo "DEPLOYMENT is set but TARGET is not: give the deployment's ip:port (session.sh address)" >&2
@@ -198,8 +194,8 @@ server_snapshot() {
 launch_load() {
   local cond="$1" i
   for (( i = 1; i <= load_count; i++ )); do
-    env -u SPIKE_SIM_WINDOWED -u SPIKE_SIM_VISIBLE -u SPIKE_FRAME_COST_OFFSCREEN -u SPIKE_FRAME_COST \
-      SPIKE_SIMULATE_INPUT=1 OVERMATCH_SERVER="$ADDR" OVERMATCH_UNATTENDED=1 \
+    env -u SPIKE_FRAME_COST OVERMATCH_WINDOW=headless \
+      SPIKE_SIMULATE_INPUT=1 OVERMATCH_SERVER="$ADDR" \
       SPIKE_SIM_TICKS="$SIM_TICKS" BEVY_ASSET_ROOT="$ASSET_ROOT" ${=LOAD_WORKLOAD} \
       "$CLIENT" >"$OUT/$cond.load$i.log" 2>&1 &
     LOAD_PIDS+=($!)
@@ -268,7 +264,7 @@ condition_gates() {
   echo "target: $ADDR${DEPLOYMENT:+ (Edgegap deployment $DEPLOYMENT)}"
   [[ "$TARGET" == local ]] && echo "local server: $BIN/overmatch-server  env [OVERMATCH_SERVER_BIND=127.0.0.1 OVERMATCH_SERVER_STATS_S=$STATS_PERIOD_S $SERVER_ENV]"
   echo "base video fields: $BASE_FIELDS"
-  echo "measured client: SPIKE_SIMULATE_INPUT=1 ${MODE_ENV[*]} workload [$CLIENT_WORKLOAD]; load clients: GPU-less, workload [$LOAD_WORKLOAD]"
+  echo "measured client: SPIKE_SIMULATE_INPUT=1 OVERMATCH_WINDOW=$FRAME_RUN_WINDOW workload [$CLIENT_WORKLOAD]; load clients: GPU-less, workload [$LOAD_WORKLOAD]"
   echo "client network: nettop -P -p <measured pid> -x at the window's edges, rates over the stream span"
 } >>"$OUT/manifest.txt"
 
@@ -307,7 +303,7 @@ for spec in "${CONDITIONS[@]}"; do
       *) client_env+=("$word") ;;
     esac
   done
-  frame_run_condition "$cond" "$BASE_FIELDS $fields" "${MODE_ENV[@]}" \
+  frame_run_condition "$cond" "$BASE_FIELDS $fields" \
     SPIKE_SIMULATE_INPUT=1 OVERMATCH_SERVER="$ADDR" OVERMATCH_UNATTENDED=1 \
     SPIKE_SIM_TICKS="$SIM_TICKS" ${=CLIENT_WORKLOAD} "${client_env[@]}"
   ( cd "$REPO" && uv run scripts/perf/online_cost.py server-window --label "$cond" \

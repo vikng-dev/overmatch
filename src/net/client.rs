@@ -11,7 +11,7 @@ use std::net::{IpAddr, Ipv4Addr, SocketAddr, ToSocketAddrs};
 use bevy::app::ScheduleRunnerPlugin;
 use bevy::ecs::system::SystemParam;
 use bevy::prelude::*;
-use bevy::window::{PrimaryWindow, WindowMode};
+use bevy::window::PrimaryWindow;
 use lightyear::interpolation::timeline::InterpolationTimeline;
 use lightyear::prelude::client::*;
 use lightyear::prelude::input::client::InputSystems;
@@ -30,6 +30,7 @@ use crate::ballistics::{
     SanctionedTerminal, ShotSource, TerminalVerdict,
 };
 use crate::command::{DeviceCommand, TankCommand};
+use crate::run_window::RunWindow;
 use crate::state::{AppState, GameplaySet};
 use crate::tank::{
     Controlled as GameControlled, Muzzle, PendingTankAssets, TankRoot, TankSim, Weapon,
@@ -364,16 +365,22 @@ fn configure_link(simulate: bool, tick_duration: Duration) -> Result<LinkSetup, 
 
 pub fn run() {
     let simulate = harness::env_flag("SPIKE_SIMULATE_INPUT", false);
-    let sim_windowed = simulate && harness::env_flag("SPIKE_SIM_WINDOWED", false);
-    // The capture scripts are the only users of `SPIKE_SIM_WINDOWED`, and what they want is the
-    // RenderApp (KTX2 transcode needs a real GPU device), not a window — so the window defaults to
-    // hidden and stops stealing focus from the operator. `SPIKE_SIM_VISIBLE=1` restores the
-    // eyes-on diagnostic. A documentation capture (`dev_capture`'s plan) hides and pins the window
-    // itself, as on every root.
-    let hidden = sim_windowed && !harness::env_flag("SPIKE_SIM_VISIBLE", false);
+    // A scripted client is GPU-less unless the run asks for a window; a player's always has one.
+    let window = RunWindow::of_run(if simulate {
+        RunWindow::Headless
+    } else {
+        RunWindow::Visible
+    });
+    let headless = window == RunWindow::Headless;
+    assert!(
+        simulate || !headless,
+        "OVERMATCH_WINDOW=headless: only a scripted client (SPIKE_SIMULATE_INPUT) runs without a \
+         window"
+    );
 
     let mut app = App::new();
-    if simulate && !sim_windowed {
+    if headless {
+        info!("window: {}", window.name());
         app.add_plugins(crate::gpu_less_default_plugins(None))
             .add_plugins(ScheduleRunnerPlugin::run_loop(Duration::from_millis(2)))
             .init_resource::<harness::SimulateInput>();
@@ -389,42 +396,26 @@ pub fn run() {
         // Read the player's settings BEFORE the window is described — see `load_at_boot`, which
         // also inserts the values and the boot report into the app.
         let settings = crate::settings::load_at_boot(&mut app);
-        app.add_plugins(crate::default_plugins().set(WindowPlugin {
-            primary_window: Some(Window {
-                // `Unprobed` on purpose: the capability probe needs a surface, which needs
-                // this window — the mapping self-negotiates until the probe lands.
-                present_mode: settings.present_mode(crate::settings::PresentCaps::Unprobed),
-                // Described at creation so a persisted fullscreen boots fullscreen instead
-                // of flashing a window first. The monitor is `at_window_creation`'s and NOT
-                // the stored rung: naming an indexed display here would be cached
-                // unresolved by bevy and would make the `Startup` correction
-                // unrepresentable — see `settings::DisplaySelection`. A hidden capture
-                // client must NOT boot into the player's persisted fullscreen — it stays a
-                // plain window.
-                mode: if hidden {
-                    WindowMode::Windowed
-                } else {
-                    settings
+        app.add_plugins(
+            crate::default_plugins().set(WindowPlugin {
+                primary_window: Some(Window {
+                    // `Unprobed` on purpose: the capability probe needs a surface, which needs
+                    // this window — the mapping self-negotiates until the probe lands.
+                    present_mode: settings.present_mode(crate::settings::PresentCaps::Unprobed),
+                    // Described at creation so a persisted fullscreen boots fullscreen instead
+                    // of flashing a window first. The monitor is `at_window_creation`'s and NOT
+                    // the stored rung: naming an indexed display here would be cached
+                    // unresolved by bevy and would make the `Startup` correction
+                    // unrepresentable — see `settings::DisplaySelection`. A hidden run keeps it a
+                    // plain window (`run_window`).
+                    mode: settings
                         .window_mode
-                        .to_window_mode(settings.display.at_window_creation())
-                },
-                // macOS invariant: bevy creates every winit window `with_visible(false)`
-                // (for AccessKit) and then calls `set_visible(window.visible)`, which on
-                // macOS is `makeKeyAndOrderFront` — key + front REGARDLESS of `focused`
-                // (vendored bevy_winit winit_windows.rs:71,315-317; winit 0.30
-                // macos/window_delegate.rs:904-909). So `visible` is the only lever that
-                // stops a capture client stealing focus; `focused: false` would be a dead,
-                // misleading field.
-                //
-                // A hidden window's present returns `SurfaceError::Occluded` every frame
-                // (wgpu-hal metal surface.rs:122-157 workaround), so nothing ever
-                // vsync-blocks and the hidden frame loop free-runs — the ACCEPTED cost;
-                // see the measured note on `WinitSettings::continuous()` below.
-                visible: !hidden,
+                        .to_window_mode(settings.display.at_window_creation()),
+                    ..default()
+                }),
                 ..default()
             }),
-            ..default()
-        }));
+        );
         // Never drop below the 64 Hz tick: the default `WinitSettings::game()` throttles an
         // UNFOCUSED window to 60 Hz reactive updates — under tick rate, so an alt-tabbed client
         // drifts behind the server and resyncs on refocus (lightyear #1113's jitter class).
@@ -442,28 +433,10 @@ pub fn run() {
         // invisible surface's `SurfaceError::Occluded` skips the vsync block). Anyone re-trying
         // reactive must A/B it on a WARM cache.
         app.insert_resource(bevy::winit::WinitSettings::continuous());
-        if sim_windowed {
+        if simulate {
             app.init_resource::<harness::SimulateInput>();
         }
-        if hidden {
-            // The RUNTIME half of the hidden-window guard: the creation-time `mode`/`visible`
-            // fields above are not enough on their own, because `settings::apply_settings` would
-            // re-apply a persisted fullscreen a frame later. The marker is settings-OWNED (this
-            // side only inserts it) — see its doc for the layering reason.
-            app.insert_resource(crate::settings::CaptureWindowPinned);
-            // UNREACHABLE for a normal client: winit's `applicationDidFinishLaunching` makes even
-            // an invisible client the ACTIVE macOS app — it forces `ActivationPolicy::Regular`
-            // for an unbundled binary and then calls `activateIgnoringOtherApps` unconditionally
-            // (vendored winit 0.30 macos/app_state.rs:110-136) — so the capture process takes the
-            // menu bar and the keystroke sink once per launch, and the user's typing vanishes
-            // into a window that does not exist. bevy 0.19 exposes no macOS `EventLoopBuilder`
-            // hook to pre-empt that (`WinitPlugin`'s builder extensions cover
-            // x11/wayland/windows/android only), so the revocation must happen POST-launch:
-            // `Startup` runs after winit's didFinishLaunching, so it both revokes the policy and
-            // hands focus straight back.
-            #[cfg(target_os = "macos")]
-            app.add_systems(Startup, crate::platform::revoke_macos_activation);
-        }
+        crate::run_window::mount(&mut app, window);
     }
 
     // Register the shared protocol before creating the client link. The step lightyear publishes as
@@ -488,11 +461,12 @@ pub fn run() {
     // `Controlled` tank's `TankCommand` at render rate; `feed_action_state` (below) hands the
     // frame's `command::DeviceCommand` to lightyear each tick. Headless simulate mode keeps writing
     // `ActionState` directly instead (`buffer_input`) — no devices, no window, no presentation.
-    // Mounted for sim-windowed too: the device writers it brings fill `TankCommand` at render
-    // rate, but in simulate mode the reverse bridge overwrites that whole struct from the scripted
-    // `ActionState` every tick before any sim system reads it — the script rules, the presentation
-    // stack (camera, HUD, real rendering) still runs, which is exactly the diagnostic point.
-    if !simulate || sim_windowed {
+    // Mounted for a windowed scripted client too: the device writers it brings fill `TankCommand`
+    // at render rate, but in simulate mode the reverse bridge overwrites that whole struct from the
+    // scripted `ActionState` every tick before any sim system reads it — the script rules, the
+    // presentation stack (camera, HUD, real rendering) still runs, which is exactly the diagnostic
+    // point.
+    if !headless {
         app.add_plugins(NetClientPlugin);
     }
     if !simulate {
@@ -589,7 +563,7 @@ pub fn run() {
                 source.label()
             );
             install_matchmaking_link(&mut app, &api);
-            if !simulate || sim_windowed {
+            if !headless {
                 app.add_plugins(super::matchmaking::leave_ui_plugin);
             }
         }
@@ -599,7 +573,7 @@ pub fn run() {
     // The connect screens (joining, and "RECONNECTING…" in a match) are windowed presentation only —
     // headless automation has no window to draw it, and verifies the state machine via the log
     // lines `drive_connection` emits instead. Mounted on the same condition as `NetClientPlugin`.
-    if !simulate || sim_windowed {
+    if !headless {
         app.add_plugins(connect_screen_plugin)
             // The screen is derived after this frame's connection state and before any owner
             // declares an overlay from it.
@@ -700,7 +674,7 @@ pub fn run() {
     // `overlay::cursor_owner` from the `input_blocked` license, and the initial grab handled there
     // too. `gate_player_input`'s "captured cursor = license" gate opens on `grab_mode ==
     // Locked`, which the cursor owner drives. Headless simulate mounts no overlay authority (no window);
-    // `feed_action_state` stays out of sim_windowed (the scripted `buffer_input` owns the wire), so the
+    // `feed_action_state` stays out of a scripted client (the scripted `buffer_input` owns the wire), so the
     // authority's command-idling never fights the script.
 
     app.run();

@@ -135,16 +135,16 @@
 //! Pipelined rendering runs the render world a frame behind, so a row reads the count as of an
 //! earlier frame: that shifts the window by a frame and changes no rate.
 //!
-//! # Offscreen mode (`SPIKE_FRAME_COST_OFFSCREEN=1`)
+//! # Offscreen mode (`OVERMATCH_WINDOW=offscreen`)
 //!
-//! Rendering cost measured without anyone's screen. The window is hidden (the runner also sets
-//! `SPIKE_SIM_WINDOWED=1`, which `run_offline` reads before the window exists), and every
-//! window-targeting camera is pointed, from its first frame, at one image of [`SURFACE_LOGICAL`]
-//! logical pixels at scale factor [`OFFSCREEN_SCALE_FACTOR`]: 2560x1440 physical, the visible
-//! harness's surface. Nothing is presented, so the presentation signals have no subject: the window
-//! is never parked, pinned, raised or asked for its monitor. The surface rows read the 3D camera's
-//! own target size and carry `offscreen: true`, which makes the analyzer skip the display and
-//! occlusion gates and keep the surface and drawn ones. MEASURED with the `OVERMATCH_CAPTURE`
+//! Rendering cost measured without anyone's screen. The root hides the window (`crate::run_window`),
+//! and every window-targeting camera is pointed, from its first frame, at one image of
+//! [`SURFACE_LOGICAL`] logical pixels at scale factor [`OFFSCREEN_SCALE_FACTOR`]: 2560x1440
+//! physical, the visible harness's surface. Nothing is presented, so the presentation signals have
+//! no subject: the window is never parked, pinned, raised or asked for its monitor. The surface
+//! rows read the 3D camera's own target size and carry `offscreen: true`, which makes the analyzer
+//! skip the display and occlusion gates and keep the surface and drawn ones. MEASURED with the
+//! `OVERMATCH_CAPTURE`
 //! retarget this mode reuses: within 0.1 ms p50 of visible runs of the same binary at 2 tanks, and
 //! 0.7 ms at 30 (`focus-gap-diagnosis.md`). It omits the compositor's share of a visible frame.
 
@@ -160,6 +160,7 @@ use bevy::ui::IsDefaultUiCamera;
 use bevy::window::{PrimaryWindow, WindowOccluded};
 use serde_json::json;
 
+use crate::run_window::RunWindow;
 use crate::settings::{PresentCaps, Settings};
 use crate::trace::{JsonlSink, role_path};
 
@@ -208,8 +209,18 @@ struct FrameCost {
 }
 
 /// Mount the per-frame recorder when `SPIKE_FRAME_COST` is set.
+///
+/// # Panics
+///
+/// When the run is offscreen without it: nothing else renders into the offscreen image.
 pub fn client_plugin(app: &mut App) {
+    let offscreen = RunWindow::of_run(RunWindow::Visible) == RunWindow::Offscreen;
     let Some(path) = crate::env_value("SPIKE_FRAME_COST") else {
+        assert!(
+            !offscreen,
+            "OVERMATCH_WINDOW=offscreen renders into the frame-cost recorder's image: set \
+             SPIKE_FRAME_COST"
+        );
         return;
     };
     let resolved = role_path(&path, "client");
@@ -236,14 +247,13 @@ pub fn client_plugin(app: &mut App) {
                 .after(prepare_view_targets),
         );
     }
-    if crate::env_flag("SPIKE_FRAME_COST_OFFSCREEN", false) {
+    if offscreen {
         let size = SURFACE_LOGICAL * OFFSCREEN_SCALE_FACTOR;
         info!(
             "frame_cost: offscreen: hidden window, cameras render into a {}x{} image at scale \
              {OFFSCREEN_SCALE_FACTOR}",
             size.x, size.y,
         );
-        crate::dev_capture::hide_window(app);
         app.insert_resource(Offscreen { target: None });
         app.add_systems(
             Update,
@@ -384,7 +394,7 @@ fn hold_surface_pin(
 /// minute at a time; an occluded capture is already producing free-run fiction that the analyzer
 /// will reject, so at that moment the alternative to taking focus is not politeness, it is a
 /// discarded condition. This is the visible frame sweep, the opposite case to the hidden net-capture
-/// harness whose whole design is to never steal focus (`net::client`, `SPIKE_SIM_WINDOWED`).
+/// harness whose whole design is to never steal focus (`OVERMATCH_WINDOW=hidden`).
 ///
 /// Bounded to one request per poll, and loud each time: a window that asks and keeps losing leaves a
 /// legible trail instead of an invisible fight, and the occlusion rows still fail the run.

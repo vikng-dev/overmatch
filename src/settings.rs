@@ -2084,12 +2084,10 @@ fn shadow_distance_override() -> Option<f32> {
 }
 
 /// "An external capture harness has PINNED this window; settings must not manage it." Inserted by
-/// each harness that creates a hidden capture window — a documentation capture on any root
-/// (`dev_capture`), and `SPIKE_SIM_WINDOWED` without `SPIKE_SIM_VISIBLE` (`net::client::run`,
-/// `run_offline`) — whose window is deliberately `Windowed` +
-/// invisible: [`apply_settings`] re-applying a persisted fullscreen at runtime would order that
-/// window front on macOS regardless of `visible: false`, defeating the no-focus-steal guarantee
-/// the creation-time fields bought.
+/// every hidden run (`run_window::hide`: a documentation capture, `OVERMATCH_WINDOW=hidden` or
+/// `offscreen`), whose window is deliberately `Windowed` + invisible: [`apply_settings`]
+/// re-applying a persisted fullscreen at runtime would order that window front on macOS regardless
+/// of `visible: false`, defeating the no-focus-steal guarantee the creation-time fields bought.
 ///
 /// It lives HERE, not beside the harness, because of the layering gate
 /// (`src/net/tests/net_boundary.rs`): the sim/settings layer may never name the netcode layer —

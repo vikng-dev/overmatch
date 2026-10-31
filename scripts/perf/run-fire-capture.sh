@@ -40,9 +40,9 @@ CLIENT="$REPO/$BIN/overmatch"
 RUN_S="${RUN_S:-82}"
 STARTUP_GRACE_S="${STARTUP_GRACE_S:-60}"
 
-if [[ -n "${SPIKE_SIM_WINDOWED:-}" ]]; then
-  echo "REFUSING: SPIKE_SIM_WINDOWED is exported — a hidden window free-runs and every number" >&2
-  echo "would be fiction. unset it." >&2
+if [[ -n "${OVERMATCH_WINDOW:-}" && "$OVERMATCH_WINDOW" != visible ]]; then
+  echo "REFUSING: OVERMATCH_WINDOW=$OVERMATCH_WINDOW is exported — a hidden window free-runs and" >&2
+  echo "every number would be fiction. unset it." >&2
   exit 1
 fi
 [[ -x "$CLIENT" ]] || { echo "no client binary at $CLIENT — build it first" >&2; exit 1; }
@@ -82,7 +82,7 @@ for cond in "${CONDITIONS[@]}"; do
   printf '(\n    version: 1,\n    shadow_distance: M350,\n    vsync_mode: Off,\n)\n' >"$cfg/video.ron"
 
   echo "== $cond (${RUN_S}s) =="
-  env -u SPIKE_SIM_WINDOWED -u SPIKE_SIM_VISIBLE \
+  env OVERMATCH_WINDOW=visible \
     OVERMATCH_CONFIG_DIR="$cfg" \
     SPIKE_AUTO_FIRE=1 \
     SPIKE_FRAME_COST="$OUT/$cond.jsonl" \

@@ -1,8 +1,7 @@
 //! OS-level process and window helpers that belong to no game layer.
 
-/// Renounce macOS app activation for a hidden capture client — registered wherever a window is
-/// forced hidden: the networked client's hidden-capture path, `run_offline`'s hidden-capture mode,
-/// and the dev frame capture.
+/// Renounce macOS app activation for a hidden run — registered by the one place a window is
+/// forced hidden (`run_window::hide`).
 ///
 /// winit's `didFinishLaunching` forces `ActivationPolicy::Regular` on an unbundled binary and
 /// activates it unconditionally, and bevy 0.19 exposes no macOS `EventLoopBuilder` hook to

@@ -174,7 +174,7 @@ contact-free ticks, so it was never evidence of a replay-determinism failure in 
      Determinism eliminates the **divergence** error class (same inputs, different results); it
      cannot touch the **misprediction** class (unknown remote inputs). Those are separate budgets.
 5. **Keep the divergence budget honest with the tools built this session:** `SPIKE_SIM_LONG` +
-   `SPIKE_SIM_WINDOWED` + `SPIKE_SIM_AIM_SWEEP` reproduce the workload classes; `nan_tripwire`
+   `OVERMATCH_WINDOW=hidden` + `SPIKE_SIM_AIM_SWEEP` reproduce the workload classes; `nan_tripwire`
    names corruption; per-component thresholds are the tuning surface (velocity loose, position/
    rotation tight — discrete/gameplay-binary state must never be threshold-banded).
 

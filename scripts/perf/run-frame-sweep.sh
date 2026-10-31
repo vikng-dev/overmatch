@@ -31,8 +31,9 @@
 #     fully-occluded window's present returns SurfaceError::Occluded, nothing ever vsync-blocks,
 #     and the frame loop FREE-RUNS — frame times from a hidden window are fiction. The sweep
 #     steals focus once per condition (window churn); leave the machine alone while it runs.
-#     ENFORCED, not just documented: a real run refuses to start with SPIKE_SIM_WINDOWED
-#     exported (and scrubs it from the child's env regardless), the client records every
+#     ENFORCED, not just documented: a real run refuses to start with another
+#     OVERMATCH_WINDOW exported, names `visible` to every child and fails a condition whose
+#     client did not log `window: visible`; the client records every
 #     window-occlusion transition into the frame stream, and the analyzer fails any condition
 #     whose occluded interval overlaps the measurement window.
 #   * the window must be presented on the PRIMARY (built-in, 120 Hz ProMotion) display. This Mac

@@ -53,12 +53,12 @@ grep -q "listening" "$OUT/server.log"
 
 # OVERMATCH_SERVER: the local server this script just started, named explicitly (a scripted
 # client with no target falls back to the same address).
-# SPIKE_SIM_WINDOWED: a headless client cannot load the mipped-KTX2 tank glb — bevy_image 0.19
+# OVERMATCH_WINDOW=hidden: a headless client cannot load the mipped-KTX2 tank glb — bevy_image 0.19
 # slices the UASTC source with the RGBA32 destination block geometry on the uncompressed
 # transcode path, the path taken when no RenderApp exists (ktx2.rs:209). Windowed transcodes to
 # a 4x4-block GPU format and loads fine, so captures are windowed-only until the upstream fix.
 # DERIVED: the target runs 128 fixed ticks longer so it remains present for the later-started shooter.
-env SPIKE_SIMULATE_INPUT=1 SPIKE_SIM_WINDOWED=1 OVERMATCH_SERVER=127.0.0.1:5888 \
+env SPIKE_SIMULATE_INPUT=1 OVERMATCH_WINDOW=hidden OVERMATCH_SERVER=127.0.0.1:5888 \
   SPIKE_SIM_IDLE=1 SPIKE_SIM_TICKS="$((TICKS + 128))" \
   SPIKE_LATENCY_MS=80 SPIKE_JITTER_MS=10 SPIKE_SHOT_TRACE="$OUT/target" \
   BEVY_ASSET_ROOT="$REPO" "$CLIENT" >"$OUT/target.log" 2>&1 &
@@ -79,7 +79,7 @@ for _ in {1..150}; do
 done
 grep -q "client connected" "$OUT/server.log"
 
-env SPIKE_SIMULATE_INPUT=1 SPIKE_SIM_WINDOWED=1 OVERMATCH_SERVER=127.0.0.1:5888 \
+env SPIKE_SIMULATE_INPUT=1 OVERMATCH_WINDOW=hidden OVERMATCH_SERVER=127.0.0.1:5888 \
   SPIKE_SIM_TICKS="$TICKS" SPIKE_FIRE_SECONDARY=1 \
   SPIKE_AIM_POINT="-8,0,0" SPIKE_SIM_RANGE=12 SPIKE_LATENCY_MS=80 SPIKE_JITTER_MS=10 \
   SPIKE_SHOT_TRACE="$OUT/shooter" BEVY_ASSET_ROOT="$REPO" \

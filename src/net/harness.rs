@@ -23,15 +23,13 @@
 //! | `SPIKE_LATENCY_MS` | milliseconds; `0` | Receive-conditioner latency. |
 //! | `SPIKE_RENDER_COST` | path; off | Role-qualified per-render-pass CPU/GPU-time JSONL (client). |
 //! | `SPIKE_SHOT_TRACE` | path; off | Role-qualified shot-lifecycle JSONL. |
-//! | `SPIKE_SIMULATE_INPUT` | flag; off | Run the scripted client input harness. |
+//! | `SPIKE_SIMULATE_INPUT` | flag; off | Run the scripted client input harness: GPU-less unless `OVERMATCH_WINDOW` names a window (`crate::run_window`). |
 //! | `SPIKE_SIM_AIM_SWEEP` | flag; off | Sweep scripted aim around the tank. |
 //! | `SPIKE_SIM_IDLE` | flag; off | Zero-input scripted observation. |
 //! | `SPIKE_SIM_LONG` | flag; off | Extend the scripted drive and run. |
 //! | `SPIKE_SIM_RANGE` | metres; `800` | Scripted fire-control range. |
 //! | `SPIKE_SIM_REVERSE` | flag; off | Straight reverse scripted drive. |
 //! | `SPIKE_SIM_TICKS` | ticks; script default | Override scripted run length. |
-//! | `SPIKE_SIM_VISIBLE` | flag; off | Show the sim-windowed window (default: hidden — no focus steal). |
-//! | `SPIKE_SIM_WINDOWED` | flag; off | Keep the presentation stack in simulate mode (window hidden by default); in `--offline`, hidden-capture mode. |
 //! | `SPIKE_SPAWN_POSE` | `x,y,z,qx,qy,qz,qw`; off | Server spawn-pose override. |
 //! | `SPIKE_TRACE` | path; off | Role-qualified jitter/divergence JSONL. |
 //! | `SPIKE_TRACE_SIM_FIELDS` | flag; off | Add raw sim fields to trace tick rows. |

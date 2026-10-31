@@ -39,7 +39,7 @@ HERE="$(cd "$(dirname "$0")" && pwd)"
 REPO="$(cd "$HERE/../.." && pwd)"
 : "${BIN:?set BIN to the directory holding the overmatch binary under test}"
 export BIN
-unset SMOKE OFFSCREEN SPIKE_SIM_WINDOWED SPIKE_SIM_VISIBLE
+unset SMOKE OFFSCREEN OVERMATCH_WINDOW
 DURATION="${DURATION_S:-60}"
 mkdir -p "$OUT"
 STATUS="$OUT/battery-status.txt"

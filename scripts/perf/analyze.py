@@ -46,7 +46,7 @@ capture masquerades as a real measurement":
     nothing (.agents/scratch/perf-2026-10-29/focus-gap-diagnosis.md). (--undrawn-ok is SMOKE
     mode's: its hidden window never draws.)
 
-An OFFSCREEN stream (`SPIKE_FRAME_COST_OFFSCREEN`, src/frame_cost.rs) is one whose surface rows in
+An OFFSCREEN stream (`OVERMATCH_WINDOW=offscreen`, src/frame_cost.rs) is one whose surface rows in
 force over the measurement window all carry `offscreen: true`: its cameras render into an image at
 the expected surface size and nothing is presented. The display and occlusion gates have no subject
 there and are skipped; the surface and drawn gates apply unchanged.

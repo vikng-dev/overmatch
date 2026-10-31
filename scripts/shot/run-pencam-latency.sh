@@ -6,8 +6,8 @@
 #   LAT=<ms> JIT=<ms> [SEED=1] [RUN_S=200] [OUT=dir] scripts/shot/run-pencam-latency.sh
 #
 # LAT/JIT condition each client's RECEIVE path (server → client), the direction an explanation
-# travels; with both nonzero the jitter is seeded by SEED. Both clients run hidden (SPIKE_SIM_WINDOWED
-# without SPIKE_SIM_VISIBLE: no window, macOS activation revoked) and unattended.
+# travels; with both nonzero the jitter is seeded by SEED. Both clients run hidden
+# (OVERMATCH_WINDOW=hidden: no window, macOS activation revoked, unattended).
 
 set -eu
 # A failed glob is fatal under zsh defaults, so the rm below kills the run when OUT is fresh.
@@ -64,8 +64,8 @@ grep -q "listening" "$OUT/server.log"
 # as the offline target-fires scenario lays it), b's at a's front hull, so a round costs a
 # component, not the tank.
 client() {
-  env -u SPIKE_SIM_VISIBLE OVERMATCH_UNATTENDED=1 \
-    SPIKE_SIMULATE_INPUT=1 SPIKE_SIM_WINDOWED=1 OVERMATCH_SERVER=127.0.0.1:5888 \
+  env OVERMATCH_WINDOW=hidden \
+    SPIKE_SIMULATE_INPUT=1 OVERMATCH_SERVER=127.0.0.1:5888 \
     SPIKE_SIM_TICKS="$4" SPIKE_FIRE_PRIMARY=1 SPIKE_FIRE_SECONDARY=1 \
     SPIKE_FIRE_TICK="$3" SPIKE_FIRE_INTERVAL=256 \
     SPIKE_AIM_POINT="$2" SPIKE_SIM_RANGE=12 \

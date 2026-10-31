@@ -173,6 +173,9 @@ mod render_scale;
 /// line rate and burst, resolved and validated at parse; its muzzle speed is the firing gun's
 /// ([`guns`]).
 mod rounds;
+/// How a run shows its primary window (`OVERMATCH_WINDOW=headless|hidden|offscreen|visible`), and
+/// what a hidden one implies. See the module doc.
+mod run_window;
 /// The armor ballistics sandbox (`bin/armor_sandbox`). Public so the binary can mount it; not part
 /// of `GamePlugin`.
 pub mod sandbox;
@@ -1049,56 +1052,37 @@ impl Plugin for GamePlugin {
 /// connection entity, nothing that can attempt a connect.
 ///
 pub fn run_offline() {
-    // Hidden-capture mode, the same contract as the net client's capture path (`net::run_client`'s
-    // composition): `SPIKE_SIM_WINDOWED` without `SPIKE_SIM_VISIBLE` keeps the full presentation
-    // stack but creates the window invisible — `visible: false` is the ONLY macOS lever that stops
-    // a capture run stealing focus (bevy's `set_visible(true)` is `makeKeyAndOrderFront`; see the
-    // window-field comments in `net::client`). Used by `scripts/perf/run-frame-sweep.sh`'s SMOKE
-    // mode; a hidden window's present returns `SurfaceError::Occluded` so the frame loop
-    // FREE-RUNS — plumbing validation only, never a frame-time measurement.
-    let hidden = env_flag("SPIKE_SIM_WINDOWED", false) && !env_flag("SPIKE_SIM_VISIBLE", false);
+    let window = run_window::RunWindow::of_run(run_window::RunWindow::Visible);
     let mut app = App::new();
     // Read the player's settings BEFORE the window is described — see `load_at_boot`, which also
     // inserts the values and the boot report into the app.
     let settings = settings::load_at_boot(&mut app);
-    app.add_plugins(default_plugins().set(WindowPlugin {
-        primary_window: Some(Window {
-            // ASCII hyphen: `lib.rs` is scanned by the ui_ascii guard now that the
-            // offline feel label spawns `Text` here (default-font surface).
-            title: "Overmatch - offline".into(),
-            // `Unprobed` on purpose: the capability probe needs a surface, which needs this
-            // window — the mapping self-negotiates until the probe lands.
-            present_mode: settings.present_mode(settings::PresentCaps::Unprobed),
-            // Described at creation so a persisted fullscreen boots fullscreen instead of
-            // flashing a window first. The monitor is `at_window_creation`'s and NOT the
-            // stored rung: naming an indexed display here would be cached unresolved by
-            // bevy and would make the `Startup` correction unrepresentable — see
-            // `settings::DisplaySelection`. A hidden capture run must NOT boot into the
-            // player's persisted fullscreen — it stays a plain window.
-            mode: if hidden {
-                bevy::window::WindowMode::Windowed
-            } else {
-                settings
+    app.add_plugins(
+        default_plugins().set(WindowPlugin {
+            primary_window: Some(Window {
+                // ASCII hyphen: `lib.rs` is scanned by the ui_ascii guard now that the
+                // offline feel label spawns `Text` here (default-font surface).
+                title: "Overmatch - offline".into(),
+                // `Unprobed` on purpose: the capability probe needs a surface, which needs this
+                // window — the mapping self-negotiates until the probe lands.
+                present_mode: settings.present_mode(settings::PresentCaps::Unprobed),
+                // Described at creation so a persisted fullscreen boots fullscreen instead of
+                // flashing a window first. The monitor is `at_window_creation`'s and NOT the
+                // stored rung: naming an indexed display here would be cached unresolved by
+                // bevy and would make the `Startup` correction unrepresentable — see
+                // `settings::DisplaySelection`. A hidden run keeps it a plain window
+                // (`run_window`).
+                mode: settings
                     .window_mode
-                    .to_window_mode(settings.display.at_window_creation())
-            },
-            visible: !hidden,
+                    .to_window_mode(settings.display.at_window_creation()),
+                ..default()
+            }),
             ..default()
         }),
-        ..default()
-    }));
+    );
     // Same policy as the net client: never drop below the 64 Hz tick when unfocused.
     app.insert_resource(bevy::winit::WinitSettings::continuous());
-    if hidden {
-        // The runtime half of the hidden-window guard: without the pin, `settings` re-applying a
-        // persisted fullscreen a frame later would order the window front regardless of
-        // `visible: false` (see `settings::CaptureWindowPinned`).
-        app.insert_resource(settings::CaptureWindowPinned);
-        // Post-launch activation revocation — winit's didFinishLaunching has already made even an
-        // invisible unbundled binary the active app; see the doc on the shared function.
-        #[cfg(target_os = "macos")]
-        app.add_systems(Startup, platform::revoke_macos_activation);
-    }
+    run_window::mount(&mut app, window);
     app.add_plugins(GamePlugin);
     // Documentation frames; inert without `OVERMATCH_CAPTURE`. The tree-fall cue writes the
     // authority's tree state and the impact cue raises the impact seam with no shot behind it, so

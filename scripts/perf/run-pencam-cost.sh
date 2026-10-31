@@ -25,7 +25,7 @@
 #                   respawns, so the stream ends on the death screen.
 #   mp-on/off       a local dedicated server and the latency runner's duel
 #                   (scripts/shot/run-pencam-latency.sh): the MEASURED client connects first and
-#                   runs VISIBLE (SPIKE_SIM_VISIBLE=1), the opponent hidden. Both settings
+#                   runs VISIBLE (OVERMATCH_WINDOW=visible), the opponent hidden. Both settings
 #                   On / Off. The opponent's rounds knock the measured tank out about 30 s in
 #                   (MEASURED 2026-10-19), and the scripted client never respawns: the analysis
 #                   stops at the kill cam run's start (the on-run's mark, for both runs), where
@@ -164,7 +164,7 @@ for cond in "${CONDITIONS[@]}"; do
   if [[ "$mode" == offline ]]; then
     glass_env=()
     [[ -n "$glass" ]] && glass_env=(OVERMATCH_XRAY="$glass")
-    env -u SPIKE_SIM_WINDOWED -u SPIKE_SIM_VISIBLE \
+    env OVERMATCH_WINDOW=visible \
       OVERMATCH_UNATTENDED=1 OVERMATCH_CONFIG_DIR="$cfg" "${scen[@]}" "${glass_env[@]}" \
       SPIKE_FRAME_COST="$OUT/$cond.jsonl" RUST_LOG="$LOG_FILTER" BEVY_ASSET_ROOT="$REPO" \
       "$CLIENT" --offline >"$log" 2>&1 &
@@ -197,7 +197,7 @@ for cond in "${CONDITIONS[@]}"; do
     grep -q "listening" "$OUT/$cond.server.log" || invalid "$cond" "the server never listened"
     # The measured client: lane 0, visible, its guns on the opponent's engine bay.
     env OVERMATCH_UNATTENDED=1 OVERMATCH_CONFIG_DIR="$cfg" \
-      SPIKE_SIMULATE_INPUT=1 SPIKE_SIM_WINDOWED=1 SPIKE_SIM_VISIBLE=1 OVERMATCH_SERVER=127.0.0.1:5888 \
+      SPIKE_SIMULATE_INPUT=1 OVERMATCH_WINDOW=visible OVERMATCH_SERVER=127.0.0.1:5888 \
       SPIKE_SIM_TICKS="$((ticks + 128))" SPIKE_FIRE_PRIMARY=1 SPIKE_FIRE_SECONDARY=1 \
       SPIKE_FIRE_TICK=320 SPIKE_FIRE_INTERVAL=256 SPIKE_AIM_POINT="8,1.2,2.2" SPIKE_SIM_RANGE=12 \
       SPIKE_FRAME_COST="$OUT/$cond.jsonl" RUST_LOG="$LOG_FILTER" BEVY_ASSET_ROOT="$REPO" \
@@ -208,9 +208,9 @@ for cond in "${CONDITIONS[@]}"; do
       sleep 0.2
     done
     grep -q "client connected" "$OUT/$cond.server.log" || invalid "$cond" "the measured client never connected (see $log)"
-    # The opponent: lane 1, hidden and unattended, its guns on the measured tank's front hull.
-    env -u SPIKE_SIM_VISIBLE OVERMATCH_UNATTENDED=1 \
-      SPIKE_SIMULATE_INPUT=1 SPIKE_SIM_WINDOWED=1 OVERMATCH_SERVER=127.0.0.1:5888 \
+    # The opponent: lane 1, hidden (so unattended), its guns on the measured tank's front hull.
+    env OVERMATCH_WINDOW=hidden \
+      SPIKE_SIMULATE_INPUT=1 OVERMATCH_SERVER=127.0.0.1:5888 \
       SPIKE_SIM_TICKS="$ticks" SPIKE_FIRE_PRIMARY=1 SPIKE_FIRE_SECONDARY=1 \
       SPIKE_FIRE_TICK=448 SPIKE_FIRE_INTERVAL=256 SPIKE_AIM_POINT="-8,0.8,-2.2" SPIKE_SIM_RANGE=12 \
       BEVY_ASSET_ROOT="$REPO" \
