@@ -1125,9 +1125,9 @@ pub fn run_offline() {
     // plugin would put it in the packaged network client too, where scripted trigger edges would
     // ride the input bridge to a live server. See `command::offline_auto_fire_plugin`.
     app.add_plugins(command::offline_auto_fire_plugin);
-    // The same boundary: the parked target firing at the player (`OVERMATCH_TARGET_FIRES`) and
-    // the scripted x-ray preference (`OVERMATCH_XRAY`), for captures of the player's own
-    // tank struck.
+    // The same boundary: the parked target firing at the player (`OVERMATCH_TARGET=fires` or
+    // `kills`) and the scripted x-ray preference (`OVERMATCH_XRAY`), for captures of the player's
+    // own tank struck.
     app.add_plugins((
         tank::scenario::offline_target_fires_plugin,
         damage_cam::pen_cam::game::scripted_xray_plugin,

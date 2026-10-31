@@ -16,7 +16,7 @@ pub fn sp_spawn_plugin(app: &mut App) {
         Update,
         spawn_tank_when_loaded.run_if(in_state(AppState::Loading)),
     );
-    if target_ahead() {
+    if target_scenario().is_some() {
         app.add_systems(Update, aim_camera_at_target);
     }
 }
@@ -64,15 +64,42 @@ pub(crate) fn start_spot() -> Option<(Vec2, f32)> {
     Some((at, heading.to_radians()))
 }
 
-/// Is this process running the target-ahead placement (`OVERMATCH_TARGET_AHEAD=1`)?
-///
-/// A dev lever on the offline path only, for captures of the player's own hits (the pen cam's
-/// corner): the duel stands on the FAR pad ([`PROBE_FAR_DUEL_XZ`], both points measured flat),
-/// Tiger A facing Tiger B 17 m down its own −Z, B broadside across the line, and the camera turned
-/// once to look level down it ([`aim_camera_at_target`]), so the aim point is on B and
-/// `SPIKE_AUTO_FIRE`'s windows hit it with no input. Unset is every normal run.
-pub(crate) fn target_ahead() -> bool {
-    crate::env_flag("OVERMATCH_TARGET_AHEAD", false)
+/// The offline target scenario, `OVERMATCH_TARGET=ahead|fires|kills`: a dev lever on the offline
+/// path only, for captures of hits in the game's damage model. Every scenario parks the duel on the
+/// FAR pad ([`PROBE_FAR_DUEL_XZ`], both points measured flat) with the other tank 17 m down the
+/// player's own −Z and the camera turned to look level down the line ([`aim_camera_at_target`]).
+/// Unset is every normal run; any other value fails the boot naming it.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) enum TargetScenario {
+    /// The player's tank faces the target, which stands broadside, so the aim point is on it and
+    /// `SPIKE_AUTO_FIRE`'s windows hit it with no input (the pen cam's corner).
+    Ahead,
+    /// Both broadside, and the target fires into the player's flank on [`TARGET_FIRE_AT_S`] (the
+    /// pen cam's victim glass); see [`offline_target_fires_plugin`].
+    Fires,
+    /// Both broadside, and the target fires until the player's tank is knocked out (the kill cam);
+    /// see [`offline_target_fires_plugin`].
+    Kills,
+}
+
+/// The scenario `OVERMATCH_TARGET` names; `None` when unset or off.
+pub(crate) fn target_scenario() -> Option<TargetScenario> {
+    let spec = crate::env_value("OVERMATCH_TARGET")?;
+    Some(
+        TargetScenario::named(&spec)
+            .unwrap_or_else(|| panic!("OVERMATCH_TARGET={spec:?}: want ahead, fires or kills")),
+    )
+}
+
+impl TargetScenario {
+    fn named(spec: &str) -> Option<Self> {
+        match spec.trim() {
+            "ahead" => Some(Self::Ahead),
+            "fires" => Some(Self::Fires),
+            "kills" => Some(Self::Kills),
+            _ => None,
+        }
+    }
 }
 
 /// How long the target-ahead camera keeps re-aiming after the tanks spawn, s (TUNED: the duel
@@ -108,36 +135,22 @@ fn aim_camera_at_target(
 /// aim on the hull side above the running gear rather than into the wheels.
 const TARGET_AIM_RISE_M: f32 = 1.2;
 
-/// Is this process running the target-fires scenario (`OVERMATCH_TARGET_FIRES=1`, with
-/// [`target_ahead`])? See [`offline_target_fires_plugin`].
-fn target_fires_enabled() -> bool {
-    crate::env_flag("OVERMATCH_TARGET_FIRES", false)
-}
-
-/// Is this process running the target-kills scenario (`OVERMATCH_TARGET_KILLS=1`, with
-/// [`target_ahead`])? See [`offline_target_fires_plugin`].
-fn target_kills_enabled() -> bool {
-    crate::env_flag("OVERMATCH_TARGET_KILLS", false)
-}
-
-/// Dev-only, offline, under [`target_ahead`]: `OVERMATCH_TARGET_FIRES=1` turns the player's tank
-/// broadside to the parked target and has the target fire its main gun into the player's flank on
-/// [`TARGET_FIRE_AT_S`], for captures of the player's own tank struck (the pen cam's victim glass).
-/// From spawn the target lays its gun on the player's hull at [`TARGET_FIRE_AIM_LOCAL_M`]; at each
-/// scheduled time it pulls the trigger once.
+/// Dev-only, offline: [`TargetScenario::Fires`] turns the player's tank broadside to the parked
+/// target and has the target fire its main gun into the player's flank on [`TARGET_FIRE_AT_S`],
+/// for captures of the player's own tank struck (the pen cam's victim glass). From spawn the target
+/// lays its gun on the player's hull at [`TARGET_FIRE_AIM_LOCAL_M`]; at each scheduled time it
+/// pulls the trigger once.
 ///
-/// `OVERMATCH_TARGET_KILLS=1` (taking precedence over it) sets the same broadside, but the target
-/// lays its gun on the player's ammunition stowage nearest it and fires every
-/// [`TARGET_KILL_EVERY_S`] from [`TARGET_KILL_FROM_S`] until the player's tank is knocked out, for
-/// captures of the kill cam. The knockout is logged with its `Time<Real>` second.
+/// [`TargetScenario::Kills`] sets the same broadside, but the target lays its gun on the player's
+/// ammunition stowage nearest it and fires every [`TARGET_KILL_EVERY_S`] from
+/// [`TARGET_KILL_FROM_S`] until the player's tank is knocked out, for captures of the kill cam. The
+/// knockout is logged with its `Time<Real>` second.
 ///
 /// Mounted only by the offline composition (`run_offline`), as `command::offline_auto_fire_plugin`
 /// is: that root has no netcode, so the commands it writes never leave the process.
 pub fn offline_target_fires_plugin(app: &mut App) {
-    if !target_ahead() {
-        return;
-    }
-    if target_kills_enabled() {
+    let scenario = target_scenario();
+    if scenario == Some(TargetScenario::Kills) {
         info!(
             "target kills: armed, main gun from {TARGET_KILL_FROM_S} s every {TARGET_KILL_EVERY_S} s (Time<Real>)"
         );
@@ -148,7 +161,7 @@ pub fn offline_target_fires_plugin(app: &mut App) {
                 .in_set(RunFixedMainLoopSystems::BeforeFixedMainLoop)
                 .in_set(GameplaySet),
         );
-    } else if target_fires_enabled() {
+    } else if scenario == Some(TargetScenario::Fires) {
         info!("target fires: armed, main gun at {TARGET_FIRE_AT_S:?} s (Time<Real>)");
         app.add_systems(
             RunFixedMainLoop,
@@ -420,20 +433,18 @@ fn spawn_tank_when_loaded(
         next.set(AppState::Playing);
         return;
     }
-    let target = target_ahead();
-    let far = probe_far() || target;
+    let target = target_scenario();
+    let far = probe_far() || target.is_some();
     let duel = duel_spawn_xz(far);
-    let (a_turn, b_turn) = if target && (target_fires_enabled() || target_kills_enabled()) {
+    let (a_turn, b_turn) = match target {
         // Both broadside, A's flank to B's gun ([`offline_target_fires_plugin`]).
-        (
+        Some(TargetScenario::Fires | TargetScenario::Kills) => (
             Quat::from_rotation_y(FRAC_PI_2),
             Quat::from_rotation_y(FRAC_PI_2),
-        )
-    } else if target {
+        ),
         // A faces its own −Z, down the line to B; B stands broadside across it.
-        (Quat::IDENTITY, Quat::from_rotation_y(FRAC_PI_2))
-    } else {
-        (Quat::from_rotation_z(0.7), Quat::IDENTITY)
+        Some(TargetScenario::Ahead) => (Quat::IDENTITY, Quat::from_rotation_y(FRAC_PI_2)),
+        None => (Quat::from_rotation_z(0.7), Quat::IDENTITY),
     };
     // The player's own spawn, moved by the dev start lever when it is set.
     let (a_at, a_turn) = match start_spot() {
@@ -689,6 +700,23 @@ fn swap_controlled_tank(
     commands.entity(next).insert(Controlled);
 
     *mode = SightMode::ThirdPerson;
+}
+
+#[cfg(test)]
+mod target_scenario_tests {
+    use super::TargetScenario;
+
+    /// `scripts/perf/run-pencam-cost.sh` names its three conditions' scenarios by these words; a
+    /// renamed or dropped word fails each of those runs at boot.
+    #[test]
+    fn the_target_scenario_is_one_of_three_words() {
+        assert_eq!(TargetScenario::named("ahead"), Some(TargetScenario::Ahead));
+        assert_eq!(TargetScenario::named("fires"), Some(TargetScenario::Fires));
+        assert_eq!(TargetScenario::named(" kills"), Some(TargetScenario::Kills));
+        for refused in ["", "1", "Ahead", "fire", "ahead,fires"] {
+            assert_eq!(TargetScenario::named(refused), None, "{refused}");
+        }
+    }
 }
 
 #[cfg(test)]

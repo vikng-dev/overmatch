@@ -135,9 +135,9 @@ for cond in "${CONDITIONS[@]}"; do
   # Per-condition shape.
   mode=offline; corner=Off; killcam=Off; glass=""; armed=""; surfaces=(); scen=()
   case "$cond" in
-    corner-*)  run_s=82;  scen=(OVERMATCH_TARGET_AHEAD=1 SPIKE_AUTO_FIRE=1);        armed="auto_fire: armed";    surfaces=(corner) ;;
-    glass-*)   run_s=100; scen=(OVERMATCH_TARGET_AHEAD=1 OVERMATCH_TARGET_FIRES=1); armed="target fires: armed"; surfaces=(glass) ;;
-    killcam-*) run_s=100; scen=(OVERMATCH_TARGET_AHEAD=1 OVERMATCH_TARGET_KILLS=1); armed="target kills: armed"; surfaces=(killcam lesson) ;;
+    corner-*)  run_s=82;  scen=(OVERMATCH_TARGET=ahead SPIKE_AUTO_FIRE=1); armed="auto_fire: armed";    surfaces=(corner) ;;
+    glass-*)   run_s=100; scen=(OVERMATCH_TARGET=fires);                armed="target fires: armed"; surfaces=(glass) ;;
+    killcam-*) run_s=100; scen=(OVERMATCH_TARGET=kills);                armed="target kills: armed"; surfaces=(killcam lesson) ;;
     mp-*)      run_s=120; mode=mp;                                                  surfaces=(corner) ;;
   esac
   if [[ "$cond" == *-on ]]; then

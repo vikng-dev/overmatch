@@ -1,5 +1,5 @@
 //! `OVERMATCH_HULL_MARKS_DEMO=1`, a dev capture of the hull marks (the visual layer of the game's
-//! damage model) on the offline route, with `OVERMATCH_TARGET_AHEAD=1`'s placement: once the
+//! damage model) on the offline route, with `OVERMATCH_TARGET=ahead`'s placement: once the
 //! parked target's view has bound, three rays from the player's line of sight find three points on
 //! its armour, and each is struck as the authority's march would report it — a hole (`Through`),
 //! a dent (`Stopped`), a scratch (`Ricochet`, from a [`GRAZE_DEG`] graze along the face) — at the
@@ -10,7 +10,7 @@
 //! The hole, the dent and the scratch, with a hidden window:
 //!
 //! ```text
-//! SPIKE_SIM_WINDOWED=1 OVERMATCH_TARGET_AHEAD=1 OVERMATCH_HULL_MARKS_DEMO=1 \
+//! SPIKE_SIM_WINDOWED=1 OVERMATCH_TARGET=ahead OVERMATCH_HULL_MARKS_DEMO=1 \
 //!   OVERMATCH_CAPTURE=<dir>/hull-mark.png OVERMATCH_CAPTURE_AT=18,21,24 \
 //!   OVERMATCH_CAPTURE_UI=0 OVERMATCH_CAPTURE_GIZMOS=0 target/debug/overmatch --offline
 //! ```
