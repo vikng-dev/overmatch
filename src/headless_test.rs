@@ -866,6 +866,71 @@ fn gear_climb_monotone_tiger() {
     );
 }
 
+/// No authored speed cap bounds the game's tanks: the top gear at the fuel governor does. Full
+/// throttle on flat ground must reach the ladder's top gear, come within 3 % (ASSUMED acceptance
+/// band for rolling losses) of its DERIVED governed speed, and hold there: steady over the last
+/// second, and never past the rpm where the governor has cut the engine's torque to zero. A
+/// governor or ladder mutant that lets the hull run away, or stalls it short of top gear, fails.
+#[test]
+fn full_throttle_reaches_and_holds_the_governed_top_speed() {
+    let (mut app, tank) = booted_offline_sim();
+    face_positive_z(&mut app, tank);
+    let trans = app
+        .world()
+        .resource::<crate::track::sim::TrackGear>()
+        .trans()
+        .clone();
+    let governed = trans.governed_speed(false);
+    let governed_rpm = trans.engine.governed_rpm;
+    let cut_rpm = (0..10_000)
+        .map(|step| governed_rpm + step as f32)
+        .find(|&rpm| trans.torque_at(rpm) == 0.0)
+        .expect("the fuel governor cuts torque to zero past governed rpm");
+    let ceiling = governed * cut_rpm / governed_rpm;
+    let top = trans.gears_fwd.len() as u8;
+    let mut last_second = vec![];
+    let ticks = 40 * FIXED_TICKS_PER_SECOND;
+    for tick in 0..ticks {
+        drive_tick(&mut app, tank, 1.0, 0.0);
+        let world = app.world();
+        let speed = world
+            .get::<avian3d::prelude::LinearVelocity>(tank)
+            .expect("tank has linear velocity")
+            .0
+            .length();
+        assert!(
+            speed <= ceiling,
+            "tick {tick}: hull speed {speed:.3} m/s past the governor's torque cut-off \
+             {ceiling:.3} m/s"
+        );
+        if tick >= ticks - FIXED_TICKS_PER_SECOND {
+            last_second.push(speed);
+        }
+    }
+    let gear = app
+        .world()
+        .get::<crate::track::sim::TankTransmission>(tank)
+        .expect("tank carries transmission state")
+        .0
+        .gear;
+    let mean = last_second.iter().sum::<f32>() / last_second.len() as f32;
+    let spread = last_second.iter().copied().fold(f32::MIN, f32::max)
+        - last_second.iter().copied().fold(f32::MAX, f32::min);
+    println!(
+        "full throttle: F{gear}, mean {mean:.3} m/s over the last second (spread {spread:.4}), \
+         governed {governed:.3}, cut-off {ceiling:.3}"
+    );
+    assert_eq!(gear, top, "40 s of full throttle must reach the top gear");
+    assert!(
+        mean >= 0.97 * governed,
+        "top speed {mean:.3} m/s short of the governed {governed:.3} m/s"
+    );
+    assert!(
+        spread <= 0.01 * governed,
+        "top speed must hold steady (spread {spread:.4} m/s over the last second)"
+    );
+}
+
 #[derive(Resource, Default)]
 struct ScriptedDeterminismRun {
     digests: Vec<Vec<(String, crate::trace::CanonicalTankStateDigest)>>,
