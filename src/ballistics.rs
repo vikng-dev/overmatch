@@ -62,6 +62,8 @@ mod wound;
 /// see the module doc.
 mod collect;
 
+mod motion;
+
 /// The §13.6 ray fuzzer: random rays at the BOUND tank, the union-field invariants machine-checked,
 /// and every corridor reaching crew or ammunition reported with its admitting caliber and per-caliber
 /// η. A corridor fails the gate by name, unconditionally: an effectively unarmoured route into the
@@ -1915,7 +1917,12 @@ pub fn sim_plugin(app: &mut App) {
     // The game's damage model validates the shared crew HP pool and hard-pool energy rate at startup.
     box_classes::BoxClasses::shipped();
     energy_dose::joules_per_hp();
-    app.init_resource::<RetainSpentShells>()
+    app.init_resource::<motion::ColliderMotion>()
+        .add_systems(
+            FixedPostUpdate,
+            motion::snapshot.after(avian3d::prelude::PhysicsSystems::Writeback),
+        )
+        .init_resource::<RetainSpentShells>()
         .init_resource::<MarchMode>()
         .add_observer(on_fire_shell)
         .add_observer(on_impact)
