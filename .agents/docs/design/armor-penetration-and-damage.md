@@ -1478,42 +1478,44 @@ surface** — the first body physically touched. Anything behind it is shoved th
 the physics engine. Damage attribution stays per-presence as always; only the shove is routed.
 Revisit only if seam-threading shots ever matter.
 
-**The hand-off: each sample resumes on the piece it crossed (RULED 2026-10-31, #191).** The
-crossing is staged — the entrance is read along the incoming axis, the transit walked along the
-bent one — so every sample ray stops its entrance walk somewhere and resumes along the bend from
-there. It resumes on the face of the armour piece it actually crossed, at its own crossing point,
-never on one plane shared across the disc. The shared plane it replaces was the first piece's mean
-entrance plane, extrapolated across the whole disc, and at a graze it lies far from any face:
-across an 88's disc it spread the hand-offs over more than a metre of the incoming axis in two of
-the three replayed failures (MEASURED, #191 replays). It put samples past the face of a second
-piece the rest of the disc met behind or beside a grazed first one, past both faces of a thin
-curved wall (a barrel's far wall, crossed side-on from its bore), and behind a sample's start. A
-transit seeded there met an exit it never entered or skipped the piece, and the round stopped at
-first contact (`CorridorMismatch`, three per 240 s at 30 bots, MEASURED 2026-10-31 on the build
-after the turret-scale fix).
+**The hand-off: each sample resumes on the piece it crossed (RULED 2026-10-31, #191).** Only
+that is the owner's ruling; the crossing's join, the in-air depth and the read built on them are
+PROVISIONAL until he ratifies them. The crossing is staged — the entrance is read along the
+incoming axis, the transit walked along the bent one — so every sample ray stops its entrance
+walk somewhere and resumes along the bend from there. It resumes on the face of the armour piece
+it actually crossed, at its own crossing point, never on one plane shared across the disc. The
+shared plane it replaces was the first piece's mean entrance plane, extrapolated across the whole
+disc, and at a graze it lies far from any face: across an 88's disc it spread the hand-offs over
+more than a metre of the incoming axis in two of the three replayed failures (MEASURED, #191
+replays). It put samples past the face of a second piece the rest of the disc met behind or
+beside a grazed first one, past both faces of a thin curved wall (a barrel's far wall, crossed
+side-on from its bore), and behind a sample's start. A transit seeded there met an exit it never
+entered or skipped the piece, and the round stopped at first contact (`CorridorMismatch`, three
+per 240 s at 30 bots, MEASURED 2026-10-31 on the build after the turret-scale fix).
 
-- **The crossing** is the disc walk's first event, then every event that begins before the
-  crossing so far ends. Which of two pieces that overlap in depth is struck first, by however
-  little, decides nothing: they are one crossing in either order.
+- **The crossing** (PROVISIONAL) is the disc walk's first event, then every event that begins
+  before the crossing so far ends. Which of two pieces that overlap in depth is struck first, by
+  however little, decides nothing: they are one crossing in either order.
 - **Who hands off on a face.** Every sample whose first run is in a piece of the crossing, at
   that run's start.
 - **Everyone else** — a sample whose first face, if it has one, is in a piece that begins at or
-  past the crossing's end — hands off in air on its own ray, at the crossing's DEPTH: the read's
-  mean entry point, measured square to the incoming axis, clamped to the span between the
-  sample's start and the crossing's end. The uncovered part of the disc stays where the disc is;
-  a hand-off lies on ground the sample's walk covered and never depends on how far the corridor
-  reached. No sample hands off past the first face on its own ray, so nothing is seeded except
-  presence carried in from the crossing before.
-- **The entrance read is the crossing's faces.** `n̄`, η, the steel-equivalent thickness and the
-  bend are read over the first run of every sample that hands off on a face, so a disc meeting two
-  pieces that overlap in depth reads both surfaces, whichever it meets first. A run behind that
-  face on the sample's own ray (a hull side behind a fender) is the transit's, never summed into
-  the plate the round strikes. With one piece met face-first by every sample the read is that
-  piece's alone.
-- **A graze can bite.** A graze that would ricochet alone bites when the disc also meets a second
-  piece that begins before the grazed piece's crossing ends: the second face enters the read,
-  tilts `n̄` toward the round and can bring the incidence under the ricochet angle. Corners and
-  overhangs are where this happens (`a_graze_and_a_plate_struck_together_bite_as_one_crossing`).
+  past the crossing's end — hands off in air on its own ray, at the crossing's DEPTH
+  (PROVISIONAL): the read's mean entry point, measured square to the incoming axis, clamped to the
+  span between the sample's start and the crossing's end. The uncovered part of the disc stays
+  where the disc is; a hand-off lies on ground the sample's walk covered and never depends on how
+  far the corridor reached. No sample hands off past the first face on its own ray, so nothing is
+  seeded except presence carried in from the crossing before.
+- **The entrance read is the crossing's faces** (PROVISIONAL). `n̄`, η, the steel-equivalent
+  thickness and the bend are read over the first run of every sample that hands off on a face, so
+  a disc meeting two pieces that overlap in depth reads both surfaces, whichever it meets first. A
+  run behind that face on the sample's own ray (a hull side behind a fender) is the transit's,
+  never summed into the plate the round strikes. With one piece met face-first by every sample the
+  read is that piece's alone.
+- **A graze can bite**, under the provisional join and read. A graze that would ricochet alone
+  bites when the disc also meets a second piece that begins before the grazed piece's crossing
+  ends: the second face enters the read, tilts `n̄` toward the round and can bring the incidence
+  under the ricochet angle. Corners and overhangs are where this happens
+  (`a_graze_and_a_plate_struck_together_bite_as_one_crossing`).
 - **The transit crossing** is the transit corridor's crossing, by the same rule, and it begins at
   the hand-off. The flight resumes past the crossing's end, so a run that began inside it and was
   resolved apart from it would be skipped, or charged only from the resume point on.
@@ -1522,12 +1524,8 @@ after the turret-scale fix).
   model: it logs one error under a stable kind per failure reason (`WalkError::kind`), which a
   report from real matches groups by (#194).
 
-Measured after (2026-10-31, the same 240 s 30-bot run, twice): no `CorridorMismatch`. One stop
-remains, `unexpected_exit`: a round perforated a lower front plate as one tick ended, its seeds
-left one ring sample outside that plate, and the next tick's walk, against the struck tank moved
-since, found that sample inside it, 14 mm short of an exit (MEASURED in the run's log; the step
-replayed from a fresh start at a still tank resolves). That is a continuation carried across a
-tick boundary onto moving armour, not the hand-off.
+One stop the hand-off does not cause remains (`unexpected_exit`): a continuation carried across a
+tick onto moving armour, left to step 6b, atomic crossings (queued).
 
 Rejected: extending the entrance walk until it covers the shared plane wherever it lands (no less
 shared, and a longer walk meets more pieces to land past — failures rose from 3 to 7 in the same
