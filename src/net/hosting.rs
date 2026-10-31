@@ -123,17 +123,14 @@ impl HostedConfig {
             var: REPORT_SECRET,
             problem: "expected a non-empty token of visible ASCII characters",
         })?;
-        let capacity = match read(CAPACITY)? {
-            None => 10,
-            Some(raw) => raw
-                .parse::<u32>()
-                .ok()
-                .filter(|n| (1..=MAX_CAPACITY).contains(n))
-                .ok_or(ConfigError {
-                    var: CAPACITY,
-                    problem: "expected an integer from 1 to 256",
-                })?,
-        };
+        let capacity = required(CAPACITY)?
+            .parse::<u32>()
+            .ok()
+            .filter(|n| (1..=MAX_CAPACITY).contains(n))
+            .ok_or(ConfigError {
+                var: CAPACITY,
+                problem: "expected an integer from 1 to 256",
+            })?;
         let seconds = |var: &'static str, default: u64| -> Result<Duration, ConfigError> {
             match read(var)? {
                 None => Ok(Duration::from_secs(default)),
@@ -613,7 +610,7 @@ mod tests {
     #[test]
     fn optional_settings_take_their_contract_defaults() {
         let mut env = contract_env();
-        for var in [CAPACITY, HEARTBEAT_INTERVAL, EMPTY_EXIT] {
+        for var in [HEARTBEAT_INTERVAL, EMPTY_EXIT] {
             env.remove(var);
         }
         let config = hosted(&env);
@@ -627,9 +624,11 @@ mod tests {
         assert_eq!(config.heartbeat_interval, Duration::from_millis(2500));
     }
 
+    /// The operator must state capacity in hosted mode; omitting it refuses startup and names
+    /// the variable, so the Worker and the server never silently disagree about admission.
     #[test]
     fn a_malformed_setting_names_its_variable_and_never_its_value() {
-        for var in [API, NETCODE_KEY, REPORT_SECRET] {
+        for var in [API, NETCODE_KEY, REPORT_SECRET, CAPACITY] {
             let mut env = contract_env();
             env.remove(var);
             let err = parse(&env).expect_err("missing required setting");

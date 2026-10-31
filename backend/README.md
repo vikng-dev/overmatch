@@ -98,7 +98,7 @@ The Worker passes these through Edgegap `env_vars` (example: `contract/server-en
 | `OVERMATCH_API` | Worker base URL, e.g. `https://matchmaking.example` |
 | `OVERMATCH_NETCODE_KEY` | 64 hex chars = the 32-byte netcode private key (hidden in Edgegap) |
 | `OVERMATCH_REPORT_SECRET` | Bearer token for heartbeat and end (hidden in Edgegap) |
-| `OVERMATCH_CAPACITY` | Player cap, default 10 |
+| `OVERMATCH_CAPACITY` | Required player cap; missing or invalid refuses startup |
 | `OVERMATCH_HEARTBEAT_INTERVAL_S` | Heartbeat period, default 5 |
 | `OVERMATCH_EMPTY_EXIT_S` | Exit after this long with no players, default 300 |
 
