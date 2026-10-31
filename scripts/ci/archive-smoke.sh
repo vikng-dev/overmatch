@@ -75,7 +75,7 @@ dump() {
 
 # The server is started from its own directory: with no `BEVY_ASSET_ROOT` and no
 # `CARGO_MANIFEST_DIR`, `crate::assets::asset_root` resolves `assets/` beside the executable, which
-# is exactly how the shipped tarball is laid out (and where the server image points it).
+# is exactly how the shipped tarball is laid out (and how the server image runs it).
 echo "smoke: starting $server_bin"
 (
     cd "$(dirname "$server_bin")" || exit 1

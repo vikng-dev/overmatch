@@ -177,7 +177,7 @@ runs:
       run: cargo build --release --locked --bin overmatch-server
 
     # Stage a self-contained folder: the binary alongside the assets it opens, so on its host
-    # `BEVY_ASSET_ROOT=<extracted dir>` finds them and `./overmatch-server` just runs. The assets
+    # `./overmatch-server` resolves `assets/` beside itself and just runs, with no env. The assets
     # are the allowlist resolved above — the same list the LFS pull hydrated, read back rather than
     # recomputed. With deployed-sha=true, also drop a DEPLOYED_SHA marker inside the folder before
     # packing.

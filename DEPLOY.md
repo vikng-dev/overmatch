@@ -21,8 +21,8 @@ smoke lanes have passed. The registration's request bodies, its settings and the
 
 ## The server payload
 
-The image is the tarball's tree at `/opt/overmatch-server/{overmatch-server,assets/}` with
-`BEVY_ASSET_ROOT=/opt/overmatch-server`, listening on **UDP 5888**. `assets/` there is **only what
+The image is the tarball's tree at `/opt/overmatch-server/{overmatch-server,assets/}`, which the
+server resolves beside its binary with no env, listening on **UDP 5888**. `assets/` there is **only what
 the server opens**, an allowlist stated in `.github/actions/build-server/action.yml` rather than the
 client's whole tree:
 

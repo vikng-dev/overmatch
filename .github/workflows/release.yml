@@ -491,10 +491,11 @@ jobs:
   # no Linux sandbox to borrow either). So the server EXECUTABLE is the `smoke-fixture-server-*`
   # artifact — this same commit, compiled for MSVC on `build-client`'s Windows leg where the target
   # dir is warm — while its ASSETS are the shipped server tarball's, unpacked and handed to it
-  # through `BEVY_ASSET_ROOT` exactly as the server image does. That keeps the whole claim intact:
-  # the client under test is the shipped archive, byte for byte, and both halves of the
-  # `protocol_id` still have to agree — the compile-time fingerprint (same commit) and the runtime
-  # map digest (the shipped map bytes on the server side, the archive's own on the client's).
+  # through `BEVY_ASSET_ROOT`, the one rung that places them away from the binary. That keeps the
+  # whole claim intact: the client under test is the shipped archive, byte for byte, and both
+  # halves of the `protocol_id` still have to agree — the compile-time fingerprint (same commit)
+  # and the runtime map digest (the shipped map bytes on the server side, the archive's own on the
+  # client's).
   #
   # `build-server` stays a `needs` for that ASSET tree: this lane downloads the shipped Linux
   # tarball and runs the fixture against its unpacked assets. Nothing is compiled here.

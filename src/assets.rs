@@ -28,8 +28,9 @@ fn asset_root_from(
     env_root: Option<&str>,
     baked_manifest_dir: Option<&str>,
 ) -> PathBuf {
-    // `BEVY_ASSET_ROOT` wins over everything — the server image sets it
-    // (`.github/actions/server-image/Dockerfile`), and every harness script sets it too.
+    // `BEVY_ASSET_ROOT` wins over everything: it is the only rung that places assets away from a
+    // release-derived binary (perf scripts on `target/release`, bitprobe CI, the Windows smoke's
+    // server fixture).
     if let Some(root) = env_root {
         return Path::new(root).join("assets");
     }
@@ -126,8 +127,8 @@ mod tests {
     }
 
     /// `BEVY_ASSET_ROOT` wins over a set `CARGO_MANIFEST_DIR`, over a baked manifest dir and over
-    /// any exe layout — the dedicated server relies on this (it sets
-    /// `BEVY_ASSET_ROOT=/opt/overmatch-server`).
+    /// any exe layout — a release-derived binary run away from its assets (perf scripts, bitprobe
+    /// CI, the Windows smoke's server fixture) relies on this.
     #[test]
     fn env_root_wins_over_everything() {
         let got = asset_root_from(
