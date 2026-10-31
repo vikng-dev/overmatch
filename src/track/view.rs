@@ -1101,18 +1101,7 @@ mod tests {
                         .map(NodeId::Set)
                         .expect("TrackViewSet");
                     let to = system("resolve_visual_scopes");
-                    let (dependency, hierarchy) =
-                        (graph.dependency().graph(), graph.hierarchy().graph());
-                    let (mut stack, mut seen) = (vec![from], Vec::new());
-                    let mut reached = false;
-                    while let Some(at) = stack.pop() {
-                        reached |= at == to;
-                        if !seen.contains(&at) {
-                            seen.push(at);
-                            stack.extend(dependency.neighbors(at));
-                            stack.extend(hierarchy.neighbors(at));
-                        }
-                    }
+                    let reached = super::super::schedule_path::orders(graph, from, to);
                     assert!(
                         reached,
                         "the caster swap must be ordered before scope resolution"

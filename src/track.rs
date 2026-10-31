@@ -30,6 +30,8 @@ pub(crate) mod loop_geom;
 pub(crate) mod marker_model;
 pub(crate) mod rig_geom;
 pub mod route;
+#[cfg(test)]
+pub(crate) mod schedule_path;
 // The belt's SHADOW CASTER: a low-poly ribbon swept along the same drawn polyline the shoes are
 // placed on, so the 1.08 M-triangle shoe pool can stop being re-submitted into every cascade. Pure
 // geometry + the mode knob; `view` owns the entities.

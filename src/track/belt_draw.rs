@@ -981,18 +981,7 @@ mod tests {
             let (Some(from), Some(to)) = (node(first.intern()), node(then.intern())) else {
                 return false;
             };
-            let edges = graph.dependency().graph();
-            let (mut stack, mut seen) = (vec![from], Vec::new());
-            while let Some(at) = stack.pop() {
-                if at == to {
-                    return true;
-                }
-                if !seen.contains(&at) {
-                    seen.push(at);
-                    stack.extend(edges.neighbors(at));
-                }
-            }
-            false
+            super::super::schedule_path::orders(graph, from, to)
         }
 
         #[derive(Resource, Default)]
