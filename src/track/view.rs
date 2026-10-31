@@ -1306,10 +1306,8 @@ mod tests {
     /// Invariant: no empty mesh reaches a render entity. On every frame of a bound rig's life,
     /// the frames before its first fit included, every `Mesh3d` names a mesh with positions and
     /// vertices, no mesh asset is empty, and a ribbon gets its `Mesh3d` on the frame its belt is
-    /// silenced, never apart. The renderer relies on the first two: bevy_render 0.19.1 logs every
-    /// extraction of a zero-vertex mesh as `Use-after-free`, and a `Mesh3d` on a mesh with no
-    /// positions fails the shadow prepass pipeline's validation, which quits the client. The
-    /// caster swap relies on the third. The late fit here is a replica bound before its
+    /// silenced, never apart. The renderer relies on the first two (why:
+    /// [`shadow_proxy::ProxySide::mesh`]); the caster swap relies on the third. The late fit here is a replica bound before its
     /// interpolated `TrackDrive` is visible (`drive_track_views` skips a tank without one), the
     /// route ASSUMED for the client's quits on a respawn wave; the frame count is ASSUMED, the rig
     /// is fixture data, and no pass condition reads its counts.
