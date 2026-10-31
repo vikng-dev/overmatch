@@ -592,6 +592,11 @@ impl Origin {
             Self::Field => 0.0,
             Self::Body { mass, .. } => mass,
         };
+        // A locked source has no response along the contact normal. Its plastic share is the
+        // infinite-source-mass limit, including an inverse hinge mass rounded to zero.
+        if mass.is_infinite() {
+            return 0.0;
+        }
         1.0 / (1.0 + mass * inverse_mass)
     }
 }
@@ -4002,6 +4007,23 @@ mod tests {
             }
         }
     }
+    /// A LOCKED SOURCE NEVER CONTRIBUTES PLASTIC DEMAND (the game's environment destruction
+    /// model). Hinge demand relies on a finite share even when a squared lever underflows to
+    /// zero. ASSUMED fixture inverse masses span zero, subnormal and ordinary responses;
+    /// DERIVED infinite-source-mass share is zero throughout.
+    #[test]
+    fn a_locked_sources_share_is_zero_even_when_hinge_response_underflows() {
+        let locked = Origin::Body {
+            body: Entity::PLACEHOLDER,
+            mass: f32::INFINITY,
+            speed: 0.0,
+        };
+        for inverse in [0.0, 1e-45, 1e-30, 1.0] {
+            assert_eq!(locked.share(inverse), 0.0, "inverse mass {inverse}");
+            assert_eq!(Origin::Field.share(inverse), 1.0);
+        }
+    }
+
     /// A BODY'S DEMAND IS ITS PLASTIC EXCHANGE WITH THE HELD HINGE MASS (the game's
     /// environment destruction model). The section and seated-part laws rely on that share;
     /// feeding them the whole blow, the group's free mass, or its total mass fails the sweep.
