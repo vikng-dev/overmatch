@@ -248,7 +248,13 @@ pub fn specs(root: &Path) -> Result<Vec<(PathBuf, House)>, String> {
     let dir = root.join(SPECS_DIR);
     let mut paths: Vec<PathBuf> = std::fs::read_dir(&dir)
         .map_err(|err| format!("{}: {err}", dir.display()))?
-        .filter_map(|entry| entry.ok().map(|entry| entry.path()))
+        .map(|entry| {
+            entry
+                .map(|entry| entry.path())
+                .map_err(|err| format!("{}: {err}", dir.display()))
+        })
+        .collect::<Result<Vec<_>, _>>()?
+        .into_iter()
         .filter(|path| {
             path.file_name()
                 .and_then(|name| name.to_str())
@@ -385,14 +391,14 @@ mod tests {
 
     /// THE CHUNKS TILE THEIR ELEMENTS: each element's chunks sum to its volume, each chunk lies
     /// inside its element's bounds, and the chunks are about the size the rule aims at (no
-    /// dimension of a masonry chunk past two and a half brick modules, a gable corner's widest).
-    /// A cut that dropped a sliver, or let two chunks overlap, breaks the volume sum; a row that
-    /// never split breaks the size.
+    /// dimension of a chunk a masonry cutter made past two and a half of that cutter's modules, a
+    /// gable corner's widest). A cut that dropped a sliver, or let two chunks overlap, breaks the
+    /// volume sum; a row that never split breaks the size.
     #[test]
     fn the_chunks_tile_each_element() {
         for (house, baked) in shipped() {
             let asset = &baked.asset;
-            for element in &asset.elements {
+            for (element, plan) in asset.elements.iter().zip(house::elements(&house)) {
                 let [first, end] = element.chunks;
                 let run = &asset.chunks[first as usize..end as usize];
                 let sum: f32 = run.iter().map(|chunk| chunk.volume_m3).sum();
@@ -418,7 +424,7 @@ mod tests {
                             element.name
                         );
                     }
-                    if asset.materials[usize::from(chunk.material)] == "Brick" {
+                    if let house::Cutter::Masonry { module, .. } = plan.cutter {
                         let (clo, chi) = chunk.hull.iter().fold(
                             (glam::Vec3::INFINITY, glam::Vec3::NEG_INFINITY),
                             |(lo, hi), &p| {
@@ -430,7 +436,7 @@ mod tests {
                         );
                         let size = chi - clo;
                         assert!(
-                            size.max_element() <= 2.5 * house.module_m as f32,
+                            size.max_element() <= 2.5 * module as f32,
                             "{}: a chunk of {} spans {size}",
                             house.id,
                             element.name
@@ -563,6 +569,41 @@ mod tests {
             let err = House::from_ron(&glued).unwrap_err();
             for part in ["glued_", ATTACHMENTS_PATH, "name one of those"] {
                 assert!(err.contains(part), "{part}: {err}");
+            }
+        }
+    }
+
+    /// A HOUSE THE GENERATOR CANNOT LAY OUT IS REFUSED BEFORE ANY GEOMETRY: the generator lays a
+    /// pier before, between and after a wall's openings in `u` order, so an opening past the
+    /// wall's face or one over the next leaves a negative pier, and a timber piece range with no
+    /// finite top is a cut that never ends. Mutant: a check that drops the span, the order or the
+    /// range's top passes one of these to the generator.
+    #[test]
+    fn a_house_the_generator_cannot_lay_out_is_refused() {
+        for (_, house) in specs(&crate::repo_root()).expect("the shipped specs parse") {
+            let (_, end) = house.wall_span("east");
+            let mut past = house.clone();
+            past.walls
+                .east
+                .last_mut()
+                .expect("the east wall has openings")
+                .u
+                .1 = end + 1.0;
+            let mut over = house.clone();
+            let first = over.walls.east[0].u;
+            over.walls.east.push(spec::Opening {
+                u: (first.1 - 0.1, first.1 + 0.1),
+                courses: over.walls.east[0].courses,
+            });
+            let mut endless = house.clone();
+            endless.cuts.plate_piece_m.1 = f64::INFINITY;
+            for (case, broken, field) in [
+                ("past the wall", past, "pier"),
+                ("over the next", over, "pier"),
+                ("an endless piece", endless, "plate_piece_m"),
+            ] {
+                let err = broken.check().unwrap_err();
+                assert!(err.contains(field), "{}: {case}: {err}", house.id);
             }
         }
     }

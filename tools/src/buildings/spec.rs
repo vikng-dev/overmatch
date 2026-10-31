@@ -5,6 +5,8 @@ use overmatch::buildings::attachments::Attachments;
 use overmatch::buildings::schema::ElementKind;
 use serde::Deserialize;
 
+use super::house::Material;
+
 /// One house (the file's own comments carry each field's meaning and units).
 #[derive(Debug, Clone, PartialEq, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -24,10 +26,27 @@ pub struct House {
     pub board_thickness_m: f64,
     pub boards_per_slope: u32,
     pub gable_overhang_m: f64,
+    /// What each part is made of.
+    pub materials: PartMaterials,
     pub walls: Walls,
     /// What holds the parts of two components where they touch, by their elements' kinds.
     pub joins: Vec<Join>,
     pub cuts: Cuts,
+}
+
+/// What each part of the house is made of, as keys of `assets/materials/materials.ron`. The parts'
+/// construction is the generator's: the walls are coursed masonry (`course_m`, `module_m`), the
+/// plates and the roof timber (`board_*`, the cut rule's pieces); which matter each is built of is
+/// this house's.
+#[derive(Debug, Clone, Copy, PartialEq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PartMaterials {
+    /// The masonry unit of every wall: piers, sills, lintels and gables.
+    pub walls: Material,
+    /// The wall plates on the long walls' tops.
+    pub plates: Material,
+    /// The roof planes' boards.
+    pub roof: Material,
 }
 
 /// What holds every joint between an element of one of `kinds` and an element of the other (in
@@ -86,7 +105,7 @@ impl House {
         Ok(house)
     }
 
-    fn check(&self) -> Result<(), String> {
+    pub(super) fn check(&self) -> Result<(), String> {
         let positive = |v: f64| v.is_finite() && v > 0.0;
         for (name, value) in [
             ("width_m", self.width_m),
@@ -117,7 +136,7 @@ impl House {
             ("board_piece_m", self.cuts.board_piece_m),
             ("plate_piece_m", self.cuts.plate_piece_m),
         ] {
-            if !(positive(low) && low <= high) {
+            if !(positive(low) && positive(high) && low <= high) {
                 return Err(format!("{name} ({low}, {high}) is no length range"));
             }
         }
@@ -138,8 +157,44 @@ impl House {
                     ));
                 }
             }
+            // The generator splits the wall into a pier before, between and after the openings,
+            // in `u` order: each one lies inside the wall's face with a pier of some width on
+            // either side, so no two overlap or touch and none reaches a corner.
+            let (start, end) = self.wall_span(wall);
+            let mut spans: Vec<(f64, f64)> = openings.iter().map(|opening| opening.u).collect();
+            spans.sort_by(|a, b| a.0.total_cmp(&b.0));
+            let mut from = start;
+            for (low, high) in spans {
+                if !(low.is_finite() && high.is_finite() && from < low) {
+                    return Err(format!(
+                        "{wall} has an opening at u {low}..{high} that leaves no pier before it \
+                         (the wall's face runs {start}..{end}; openings may not overlap)"
+                    ));
+                }
+                from = high;
+            }
+            if from >= end {
+                return Err(format!(
+                    "{wall}'s last opening ends at u {from}, leaving no pier before the wall's \
+                     end at {end}"
+                ));
+            }
         }
         Ok(())
+    }
+
+    /// The `u` range of `wall`'s face, the axis its openings are placed along: the long walls (east,
+    /// west) run the full length, and the gable walls (north, south) stand between their inner
+    /// faces.
+    pub fn wall_span(&self, wall: &str) -> (f64, f64) {
+        match wall {
+            "east" | "west" => (-0.5 * self.length_m, 0.5 * self.length_m),
+            "north" | "south" => {
+                let inner = 0.5 * self.width_m - self.wall_thickness_m;
+                (-inner, inner)
+            }
+            other => unreachable!("`Walls::iter` names four walls, not {other:?}"),
+        }
     }
 }
 

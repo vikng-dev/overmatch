@@ -123,25 +123,25 @@ pub fn elements(house: &House) -> Vec<ElementPlan> {
         (
             "east",
             frame(DVec3::NEG_Z),
-            (-half_l, half_l),
+            house.wall_span("east"),
             (inner_w, half_w),
         ),
         (
             "west",
             frame(DVec3::Z),
-            (-half_l, half_l),
+            house.wall_span("west"),
             (inner_w, half_w),
         ),
         (
             "north",
             frame(DVec3::X),
-            (-inner_w, inner_w),
+            house.wall_span("north"),
             (half_l - t, half_l),
         ),
         (
             "south",
             frame(DVec3::NEG_X),
-            (-inner_w, inner_w),
+            house.wall_span("south"),
             (half_l - t, half_l),
         ),
     ];
@@ -177,7 +177,7 @@ pub fn elements(house: &House) -> Vec<ElementPlan> {
             name: format!("{name}/plate"),
             kind: ElementKind::WallPlate,
             component: format!("{name}/plate"),
-            material: Material::Wood,
+            material: house.materials.plates,
             prism: Prism {
                 frame: frame(u),
                 profile: vec![
@@ -199,7 +199,7 @@ pub fn elements(house: &House) -> Vec<ElementPlan> {
             name: format!("{name}/roof"),
             kind: ElementKind::Roof,
             component: format!("{name}/roof"),
-            material: Material::Wood,
+            material: house.materials.roof,
             prism: Prism {
                 frame: Frame {
                     origin: DVec3::new(0.0, ridge_y, 0.0),
@@ -258,9 +258,9 @@ fn wall_elements(
                 format!("{}/{label}_{index}", wall.name)
             },
             kind,
-            // A wall's piers, sills, lintels and gable are one brick wall, coursed in one bond.
+            // A wall's piers, sills, lintels and gable are one masonry wall, coursed in one bond.
             component: wall.name.to_owned(),
-            material: Material::Brick,
+            material: house.materials.walls,
             prism: Prism {
                 frame: wall.frame,
                 profile,

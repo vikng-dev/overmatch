@@ -29,6 +29,9 @@ House(
     board_thickness_m: 0.05,
     boards_per_slope: 14,
     gable_overhang_m: 0.3,
+    // What each part is made of (`assets/materials/materials.ron` keys): the walls' masonry unit,
+    // the wall plates and the roof boards.
+    materials: (walls: Brick, plates: Wood, roof: Wood),
     // Openings per wall, `u` along the wall in its own frame (east and west: `u` = −z and +z; north
     // and south: `u` = +x and −x), heights in courses from the foundation. Windows 1.0 m wide from
     // 0.9 m to 2.025 m over the ground point; the door 0.9 m wide from the ground point up.
