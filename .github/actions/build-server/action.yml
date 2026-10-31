@@ -69,16 +69,18 @@ runs:
     #                                    geometry artifact the server opens (ADR 0035)
     #   <id>/<id>.lod.json               geometry_lod::load_certificate, which panics without it
     #   <id>/<id>.tank.ron               the spec sheet, loaded through the AssetServer
+    #   terrain/ground_types.ron         crate::ground_types::GroundTypes::load_shipped, the friction
+    #                                    the terrain collider carries (world::spawn_environment);
+    #                                    it panics without it
     #
     # WHAT IS DELIBERATELY ABSENT, each proven client-only by the plugin that loads it: `<id>.glb`,
     # the 64 MB view artifact (geometry_lod::view_plugin, mounted only by the client roots);
     # `shell/shell.glb`, the main-gun round's model, loaded only by ballistics::view_plugin — the
     # server mounts ballistics::sim_plugin, which spawns a bare projectile and opens nothing; the
-    # terrain KTX2 and `terrain/ground_types.ron` (behind `!windows.is_empty()`, and the server
-    # builds no primary window); the vfx atlases, the shaders and the fonts
-    # (vfx/render_scale/ui_font plugins, client roots only); and `materials/materials.ron` and the
-    # `ballistics/`, `guns/` and `rounds/` RON, which are `include_str!`d into the binary rather
-    # than read.
+    # terrain KTX2 (behind `!windows.is_empty()`, and the server builds no primary window); the
+    # vfx atlases, the shaders and the fonts (vfx/render_scale/ui_font plugins, client roots only);
+    # and `materials/materials.ron` and the `ballistics/`, `guns/` and `rounds/` RON, which are
+    # `include_str!`d into the binary rather than read.
     #
     # The vehicles are DISCOVERED by the same trio rule the door and the hook use, so a second
     # vehicle ships without a line here. A named path that is missing is a FAILURE, not a smaller
@@ -117,6 +119,7 @@ runs:
               -not -path 'assets/maps/*/derived/*'
             find assets/trees -type f -name '*.ron'
             find assets/buildings -type f -name '*.building.ron'
+            echo assets/terrain/ground_types.ron
           } | LC_ALL=C sort
         )
         for path in "${paths[@]}"; do
