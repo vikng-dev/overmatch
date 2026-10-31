@@ -53,7 +53,7 @@ pair on the base ground.
 
 Decision: keep the owner-tuned grip of 0.9 on the shipped ground. Under the pair rule, the base
 ground's 0.5 needs a track row of 0.9² / 0.5 = 1.62 (DERIVED), recorded as `Tuned` in
-`materials.ron`. That is far above a steel sliding coefficient. The missing factor is the shoe's
+`materials.ron`. That is far above a steel sliding coefficient (ASSUMED 0.4–0.8 on stone). The missing factor is the shoe's
 grousers biting into the ground (#146). The same row now sets the bump stops' and side plates'
 pairs: with a brick (0.65), √(1.62 · 0.65) = 1.03, against 0.57 before.
 

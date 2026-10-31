@@ -221,11 +221,11 @@
                 Hadfield steel against the force law"))),
             visual: "track_steel",
             debris_half_angle_deg: (26.2, Unknown("no measured debris extent; RHA's value")),
-            friction: Some((1.62, Tuned("the owner-tuned grip of a track on the terrain, 0.9
-                (playtested 2026-07), on the base ground's 0.5: 0.9² / 0.5 = 1.62 (DERIVED), so the
-                pair rule reproduces it. Far above a steel sliding coefficient (0.4–0.8 on stone,
-                CLAIMED): the missing factor is the shoe's grousers biting into the ground, which no
-                law reads yet (#146)"))),
+            friction: Some((1.62, Tuned("the owner-tuned grip of a track on the terrain, 0.9, on
+                the base ground's 0.5: 0.9² / 0.5 = 1.62 (DERIVED), so the pair rule reproduces it.
+                Far above a steel sliding coefficient (ASSUMED 0.4–0.8 on stone, no source read):
+                the missing factor is the shoe's grousers biting into the ground, which no law reads
+                yet (#146)"))),
             facts: Some((
                 density: (7890.0, Derived("0.285 lb/in³ × 27 680 (kg/m³)/(lb/in³): CLAIMED for
                     austenitic manganese steel by a Columbia Steel alloy paper, read only in a search
