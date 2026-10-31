@@ -847,24 +847,20 @@ fn segment_pose(
     }
 }
 
-/// The collision filter of a standing segment: hulls contact it and rounds walk it.
-fn standing_layers() -> CollisionLayers {
+/// The collision filter of a segment in every state: hulls contact it and rounds walk it. A
+/// piece that falls is the same wood it was standing, so what it collides with is the body's,
+/// never the state's, and a contact with it is the shared contact law's (its substance's
+/// friction, `kind.friction`).
+fn segment_layers() -> CollisionLayers {
     CollisionLayers::new([Layer::Terrain, Layer::Armor], LayerMask::ALL)
 }
 
-/// The collision filter of a lying segment: a hard body for the walk, no longer an obstacle for
-/// a hull (A2).
-fn lying_layers() -> CollisionLayers {
-    CollisionLayers::new([Layer::Armor], LayerMask::NONE)
-}
-
 /// Every peer derives the whole body from the state on every change of it (ADR-0016, A10),
-/// never from the body before: standing, every segment stands at its spawn height on
-/// [`standing_layers`] with its pool present (a full one where it had none) and the root holds
-/// no resting pose, fall path, stop or transition tick; down, the resting pose and the fall's
-/// path to it are derived ([`resting_pose`], [`FallPath::new`]) and recorded at the path's first
-/// pose, every segment from the cut up goes onto [`lying_layers`] and every segment's pool is
-/// gone — one break per tree, so what is down, stump included, takes no more dose. Every segment
+/// never from the body before: standing, every segment stands at its spawn height with its pool
+/// present (a full one where it had none) and the root holds no resting pose, fall path, stop or
+/// transition tick; down, the resting pose and the fall's path to it are derived
+/// ([`resting_pose`], [`FallPath::new`]) and recorded at the path's first pose, and every
+/// segment's pool is gone — one break per tree, so what is down, stump included, takes no more dose. Every segment
 /// stands here; [`pose_falls`] moves the piece along its path. A tree back to standing (a
 /// replaced ledger) or down at another cut derives exactly as one that never held the old state,
 /// its setter having cleared the old state's stop.
@@ -884,7 +880,6 @@ fn derive_state(
         &TreeSegment,
         &mut Transform,
         &Collider,
-        &CollisionLayers,
         Has<ComponentHealth>,
     )>,
     grid: Option<Res<HeightGrid>>,
@@ -918,24 +913,14 @@ fn derive_state(
         };
         let mut parts = Vec::with_capacity(children.len());
         for &child in children {
-            let Ok((&TreeSegment(k), mut local, collider, layers, has_pool)) =
-                segments.get_mut(child)
+            let Ok((&TreeSegment(k), mut local, collider, has_pool)) = segments.get_mut(child)
             else {
                 continue;
             };
             let k = usize::from(k);
             let pose = Transform::from_xyz(0.0, body.prefix[k], 0.0);
-            let filter = if cut.is_some_and(|cut| k >= cut) {
-                lying_layers()
-            } else {
-                standing_layers()
-            };
             local.set_if_neq(pose);
             parts.push((collider.clone(), pose.translation, pose.rotation));
-            // An immutable component: replaced only when the state moves it.
-            if *layers != filter {
-                commands.entity(child).insert(filter);
-            }
             match cut {
                 Some(_) if has_pool => {
                     commands.entity(child).remove::<ComponentHealth>();
@@ -1322,7 +1307,7 @@ pub(crate) fn spawn(
             ChildOf(root),
             Transform::from_xyz(0.0, bottom, 0.0),
             collider,
-            standing_layers(),
+            segment_layers(),
             kind.friction,
             BallisticVolume {
                 material: kind.material,
@@ -2783,18 +2768,20 @@ pub(crate) mod tests {
     }
 
     /// EVERY PEER DERIVES THE WHOLE BODY FROM THE STATE, IN EVERY ORDER (ADR-0016, A2, A10):
-    /// down, the stump's segments keep their place and their standing filter, every segment from
-    /// the cut up leaves the vertical onto the lying filter — the cut's segment at the recorded
-    /// seat beside the stump, the ones above it along the fall — the resting pose is recorded,
+    /// down, the stump's segments keep their place, every segment from the cut up leaves the
+    /// vertical — the cut's segment at the recorded seat beside the stump, the ones above it along
+    /// the fall — and every segment, lying or not, keeps the body's collision filter, so a hull
+    /// meets a fallen trunk as it met the standing one; the resting pose is recorded,
     /// the setter's transition tick stays and every segment's pool is gone, the stump's too;
-    /// back to standing, every segment stands at its spawn height on the standing filter, the
+    /// back to standing, every segment stands at its spawn height on that filter, the
     /// pose and the transition tick are gone and every segment's own pool is back, full; down at
     /// another cut, the segments the new cut spares stand again and the rest lie; in every state
     /// the root's envelope holds every segment as derived (the game's damage model ends a round's
     /// crossing outside it, `ballistics::Envelope`). A derive that skips `Standing`, touches only
     /// the segments at and above the new cut, turns the piece about the stump's top instead of the
     /// seat, leaves a pool on the stump, leaves a pool, the pose or the tick from the state before,
-    /// or keeps the standing envelope under a lying trunk reds this.
+    /// takes a lying segment out of a hull's contacts, or keeps the standing envelope under a
+    /// lying trunk reds this.
     #[test]
     fn every_state_derives_the_whole_body_from_the_state() {
         let (mut app, root) =
@@ -2869,13 +2856,17 @@ pub(crate) mod tests {
             "the seat is beside the stump, on the ground, below the stump's top: {}",
             resting.seat
         );
-        assert_eq!(down_1[1].1, lying_layers());
+        assert_eq!(
+            down_1[1].1,
+            segment_layers(),
+            "a lying segment keeps its filter"
+        );
         let top = down_1[2].0.translation;
         assert!(
             top.x > 1.9 && top.y < 2.2 && top.z.abs() < 1e-5,
             "the top segment lies toward +x: {top}"
         );
-        assert_eq!(down_1[2].1, lying_layers());
+        assert_eq!(down_1[2].1, segment_layers());
         assert!(
             (down_1[2].0.rotation * Vec3::Y).x > 0.99,
             "the lying segment's axis points along the fall"
@@ -2909,13 +2900,13 @@ pub(crate) mod tests {
             "the tip lies toward +z: {:?}",
             down_2[2].0
         );
-        assert_eq!(down_2[2].1, lying_layers());
+        assert_eq!(down_2[2].1, segment_layers());
 
         set(&mut app, TreeState::Down { cut: 0, dir: 128 });
         let down_0 = segments_of(&app, root);
         assert!(
-            down_0.iter().all(|(_, layers)| *layers == lying_layers()),
-            "cut 0: every segment lies"
+            down_0.iter().all(|(_, layers)| *layers == segment_layers()),
+            "cut 0: every lying segment keeps its filter"
         );
         assert!(
             down_0
