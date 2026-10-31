@@ -41,7 +41,7 @@
 //!
 //! Evidence: on 2 vCPU the stock 1/1/1 held the server to ~102 % of one core, and 2/1/1 cut the
 //! tick p50 from 17.5 to 10.9 ms (MEASURED, `.agents/scratch/perf-2026-10-31/README.md`, TLDR 3).
-//! Provenance of the retired `OVERMATCH_SERVER_THREADS` lever is in the same folder.
+//! Provenance of the retired thread-count lever is in the same folder.
 
 use core::num::NonZero;
 

@@ -1588,8 +1588,8 @@ mod tests {
             .split_once("pub(crate) fn attach_replicated_tank_body")
             .expect("replicated attachment function exists")
             .1
-            .split_once("fn first_geometry_ancestor")
-            .expect("next function bounds the attachment body")
+            .split_once("\n}")
+            .expect("the attachment function's closing brace bounds its body")
             .0;
         assert!(
             !attach.contains("tank_transmission("),
