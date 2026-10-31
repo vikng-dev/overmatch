@@ -411,6 +411,15 @@ Any shared spall source must respect rear surfaces and intervening separations.
 
 ## Structural calculation
 
+**Direction (owner decision, 2026-10-31).**
+A building is made of components (a brick wall, a timber roof, a window), never single bricks; a chunk stays the smallest simulated unit.
+Inside a component, chunks join by the component's own seams (mortar in a brick wall).
+Between components, the building data declares each joint: **bonded**, with a strength, or **resting**, with no pull strength, held only by weight and friction; resting appears only where the generator sets one component on another (a roof on its wall plates, a lintel on its piers).
+Weight breaks structures: when a wall changes, a weight check finds parts that have lost too much support and cracks them at their weakest joint; a resting joint gives way as soon as gravity can tip or drop its part, and physics takes over from there.
+Built in steps: (1) gravity enters the existing section check, exact wherever one cut set holds a group; (2) bonded and resting joints between components; (3) a full static weight solve only if spans held at both ends visibly need it.
+The every-tick compliant-seam model below stays the reference model, not the build: its only extra visible effects are sagging and swaying, at a per-tick server and network cost.
+Survey of shipped games and costs: `.agents/scratch/destruction-2026-10-31-collapse/collapse-survey.md`.
+
 Use rigid blocks with distributed, compliant seams and finite mass.
 Face quadrature transmits force and bending moment.
 
@@ -501,7 +510,7 @@ A failed base can leave a wall rocking on unilateral contact.
 Toppling follows gravity and motion, not a fracture-energy threshold with a tipping surcharge.
 
 Activate the connected load path until the omitted region’s reaction error is below the declared tolerance.
-Do not restrict failure to individual seams or coplanar cut sets.
+Do not restrict failure to individual seams or coplanar cut sets (a later stage: step 1 of the direction above checks single cut sets).
 
 ### Force versus impulse
 
@@ -806,5 +815,6 @@ A quoted spring force alone supplies none of the missing acceleration coupling.
 | Three-property material model | **Provisional (2026-10-31):** keep the summary, add sourced constitutive and attachment profiles; do not infer missing properties from strength. |
 | Hard-pool dose | **Provisional (2026-10-31):** exclude outgoing kinetic energy from absorbed damaging work; retain the shared conversion and abstract crew line rate. |
 | Rubble rest | **Decided (2026-10-31):** Avian's island sleep and wake on contact; no body-type switching. The game adds only the wake Avian lacks, when a support goes (see Rubble settlement and the cap). |
+| Structural collapse | **Decided (2026-10-31):** components with bonded or resting joints between them; a weight check when a wall changes, in steps (see Structural calculation). |
 | Debris cap | Cap detailed bodies and use finite-mass overflow; accept that total coarse work still needs a measured limit. No cap applies until a sleeping piece's per-tick cost is measured. |
 | Empirical acceptance data | **Provisional (2026-10-31):** require verified source fixtures before declaring handbook validation complete; do not substitute plausible-looking prototype outcomes. |
