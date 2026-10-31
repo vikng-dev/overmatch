@@ -138,7 +138,8 @@ pub(crate) enum Bond {
     /// One part set on another: no pull strength and no fracture work. It holds only what bears
     /// on it from above, so no tension check reads it (it lies in no section and on no path a
     /// section cuts) and the push rule never opens it; it opens when the part it carries can no
-    /// longer stand on its rests ([`unseated`]).
+    /// longer stand on its rests ([`unseated`]), or when a push carries that part over them
+    /// ([`structural`]).
     Resting,
 }
 
@@ -1041,7 +1042,10 @@ fn plane_bucket(offset: f32) -> i64 {
 /// leaves only by toppling over it), 0 for a group beside or under its section. The worst failing
 /// section cracks first, and the check repeats until none fails, so a failure can expose the next.
 /// The freed group is the physics' from then on, with its weight, contact and friction
-/// ([`super::breakage`] launches it with the momentum pushed into it).
+/// ([`super::breakage`] launches it with the momentum pushed into it). A pushed part that stands on
+/// rests alone (no bonded path to the ground) is turned the same way about the rests that bear it,
+/// with no seam to open: every rest it stood on opens when the push pays for carrying it over
+/// their hinge.
 ///
 /// The group a section holds is the part of the pushed chunks' component that loses its last path
 /// to the ground with the section's joints removed ([`held`]): a group no push reaches takes no
@@ -1116,7 +1120,82 @@ pub(crate) fn structural(
         }
         failures.push(failure);
     }
+    // A push on a part that stands on rests alone (no bonded path to the ground: a roof plane on
+    // its plate) turns it about the rests that bear it as about a section with no seam; when the
+    // push pays for carrying its weight over their hinge, every rest it stood on opens and the
+    // part leaves with its pushes.
+    let graph = graph(structure, state);
+    let mut seen = vec![false; structure.chunks.len()];
+    for push in pushes {
+        if !state.standing(push.chunk)
+            || seen[push.chunk]
+            || ground_path(push.chunk, &graph, &mut steps).is_some()
+        {
+            continue;
+        }
+        let group = bonded_group(push.chunk, &graph, &mut seen);
+        let (rests, bearing) = rests_of(structure, state, &group);
+        if bearing.is_empty() {
+            continue;
+        }
+        if let Some(failure) = section_failure(structure, &bearing, &group, pushes)
+            && failure.demand >= failure.capacity
+        {
+            for &j in &rests {
+                state.cracked[j] = true;
+            }
+            failures.push(Failure {
+                joints: rests,
+                ..failure
+            });
+        }
+    }
     failures
+}
+
+/// The chunks joined to `start` through `graph`'s intact bonded joints, ascending, each marked in
+/// `seen`.
+fn bonded_group(start: usize, (neighbours, ..): &Graph, seen: &mut [bool]) -> Vec<usize> {
+    seen[start] = true;
+    let mut group = vec![start];
+    let mut next = 0;
+    while let Some(&chunk) = group.get(next) {
+        next += 1;
+        for &(neighbour, _) in &neighbours[chunk] {
+            if !seen[neighbour] {
+                seen[neighbour] = true;
+                group.push(neighbour);
+            }
+        }
+    }
+    group.sort_unstable();
+    group
+}
+
+/// The live, intact rests joining `group` (ascending) to a standing chunk outside it, ascending,
+/// and those of them that bear it: their normal toward the group rising past [`BEARS`].
+fn rests_of(structure: &Structure, state: &WallState, group: &[usize]) -> (Vec<usize>, Vec<usize>) {
+    let inside = |c: usize| group.binary_search(&c).is_ok();
+    let (mut rests, mut bearing) = (Vec::new(), Vec::new());
+    for (index, joint) in structure.joints.iter().enumerate() {
+        if joint.seam().is_some() || state.cracked[index] || !state.live(joint) {
+            continue;
+        }
+        let Side::Chunk(b) = joint.b else {
+            continue;
+        };
+        let held = match (inside(joint.a), inside(b)) {
+            (true, false) => joint.a,
+            (false, true) => b,
+            _ => continue,
+        };
+        rests.push(index);
+        let toward = structure.chunks[held].centroid - joint.centroid;
+        if toward.dot(joint.normal).signum() * joint.normal.y > BEARS {
+            bearing.push(index);
+        }
+    }
+    (rests, bearing)
 }
 
 /// The demand and capacity of `section` holding `group` under `pushes` ([`structural`]), `None`
@@ -1139,9 +1218,21 @@ fn section_failure(
         (mass + chunk.mass, at + chunk.centroid * chunk.mass)
     });
     let com = weighted / mass;
-    // The plane's normal toward the group: a group point moving along it leaves the section.
-    let n = joints[0].normal;
-    let n = if n.dot(com - centre) >= 0.0 { n } else { -n };
+    // The plane's normal toward the group, a group point moving along it leaving the section: the
+    // joints' own, each turned toward the group, by area (one normal for a plane of joints).
+    let n = joints
+        .iter()
+        .map(|joint| {
+            let n = joint.normal;
+            joint.area
+                * if n.dot(com - joint.centroid) >= 0.0 {
+                    n
+                } else {
+                    -n
+                }
+        })
+        .sum::<Vec3>()
+        .try_normalize()?;
     let on_group = || {
         pushes
             .iter()
@@ -1187,10 +1278,11 @@ fn section_failure(
     } else {
         0.0
     };
-    let cohesion = joints
+    // A rest has no fracture work: only its seam's opens a bonded joint.
+    let cohesion: f32 = joints
         .iter()
-        .map(|joint| joint.seam().map(|seam| seam.fracture_energy * joint.area))
-        .sum::<Option<f32>>()?;
+        .filter_map(|joint| Some(joint.seam()?.fracture_energy * joint.area))
+        .sum();
     Some(Failure {
         joints: section.to_vec(),
         load: Load::Push,
@@ -2892,6 +2984,56 @@ mod tests {
         assert_eq!(cracks(&weighed), vec![(Load::Rest, vec![root])]);
         assert!(state.cracked[root]);
         assert_eq!(fell, vec![vec![1]]);
+    }
+
+    /// A PUSH LIFTS A SEATED PART OVER ITS RESTS AT ITS DERIVED IMPULSE: a fixture cube resting on
+    /// an anchored one, pushed at its top edge along -z. Its rest has no seam, so the push pays
+    /// only for raising its centre of mass over the hinge, the rest disc's rim toward -z: capacity
+    /// `√(2 I m g (√(h² + r²) − h))`, `I` its inertia about the hinge, `h` its centre's height over
+    /// the rest and `r` the disc's radius (DERIVED, fixture geometry). At 1 % over, the rest opens
+    /// and the cube falls with its push; at 1 % under, it stays seated. A push that never reached a
+    /// part held by rests alone (a roof plane a blast under it cannot lift), or that opened one on
+    /// any push, fails here.
+    #[test]
+    fn a_push_lifts_a_seated_part_over_its_rests_at_its_derived_impulse() {
+        let mass = 28.8;
+        let mut structure = cubes(&[[0, 0, 0], [0, 1, 0]], 0, &[0], mass);
+        let rest = joint_between(&structure, 0, 1);
+        structure.joints[rest].bond = Bond::Resting;
+        let joint = structure.joints[rest];
+        let top = structure.chunks[1];
+        let rim = (joint.area / PI).sqrt();
+        let hinge = joint.centroid - Vec3::Z * rim;
+        let r = top.centroid - hinge;
+        let own = (3.0 * top.volume / (4.0 * PI)).cbrt();
+        let inertia = mass * (r.length_squared() - r.x * r.x + 0.4 * own * own);
+        let lift = mass * GRAVITY * (r.y.hypot(r.z) - r.y);
+        let capacity = (2.0 * inertia * lift).sqrt();
+        let at = top.centroid + Vec3::new(0.0, CUBE / 2.0, CUBE / 2.0);
+        let lever = at.y - joint.centroid.y;
+        for (scale, opens) in [(1.01, true), (0.99, false)] {
+            let mut state = WallState::new(&structure);
+            let push = Push {
+                chunk: 1,
+                at,
+                impulse: Vec3::NEG_Z * (scale * capacity / lever),
+            };
+            let failures = structural(
+                &structure,
+                &mut state,
+                &[push],
+                &mut SectionCache::default(),
+            );
+            assert_eq!(state.cracked[rest], opens, "{scale} x capacity");
+            let fell = fall(&structure, &mut state);
+            if opens {
+                assert_eq!(failures.len(), 1);
+                assert_eq!(failures[0].joints, vec![rest]);
+                assert_eq!(fell, vec![vec![1]]);
+            } else {
+                assert!(failures.is_empty() && fell.is_empty(), "{scale} x capacity");
+            }
+        }
     }
 
     /// A SEATED PART STANDS WHILE ITS CENTRE OF MASS IS OVER ITS RESTS: a fixture bar of two cubes
