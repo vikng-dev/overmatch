@@ -162,7 +162,89 @@ pub fn client_plugin(app: &mut App) {
 
 /// MP server: the authority's emissions (fire, ricochet, terminal, and damage confirmation).
 pub fn server_plugin(app: &mut App) {
-    install(app, "server");
+    if install(app, "server") {
+        app.add_observer(record_walk_crossings)
+            .add_observer(record_unresolved_contact)
+            .add_systems(FixedLast, record_walk_world);
+    }
+}
+
+/// The game's damage model: crossing events by body kind, one row per kind in each mark.
+/// `scripts/shot/run-walk.py` uses these rows to distinguish real crossings from a bare contact.
+fn record_walk_crossings(
+    marched: On<crate::ballistics::ShellMarched>,
+    marks: Query<&crate::ballistics::PenetrationMarks>,
+    kinds: Query<(
+        Has<crate::damage::VolumeOf>,
+        Has<crate::trees::TreeSegment>,
+        Has<crate::buildings::BuildingElement>,
+        Has<crate::buildings::breakage::BuildingChunk>,
+    )>,
+    clock: Res<crate::ShotClock>,
+    mut trace: ResMut<ShotTrace>,
+) {
+    let marks = marks
+        .get(marched.shell)
+        .expect("a marched shell carries its penetration log");
+    for mark in &marks.log[marched.marks_from..] {
+        let crate::ballistics::ArmourMark::Crossing { volumes, end, .. } = mark else {
+            continue; // Bounces, witness lines and bursts have no material crossing.
+        };
+        let mut seen = std::collections::BTreeSet::new();
+        for volume in volumes {
+            let kind = match kinds.get(volume.volume) {
+                Ok((true, _, _, _)) => "tank",
+                Ok((_, true, _, _)) => "tree",
+                Ok((_, _, true, _) | (_, _, _, true)) => "wall",
+                Ok(_) => "other",
+                // A frozen crossing can outlive geometry removed by an earlier consequence.
+                Err(_) => "retired",
+            };
+            seen.insert(kind);
+        }
+        trace.global_row(
+            "walk_crossing",
+            clock.0,
+            json!({
+                "kinds": seen,
+                "through": matches!(end, crate::ballistics::CrossingEnd::Exit { .. }),
+            }),
+        );
+    }
+}
+
+/// The game's damage model: an authority armour contact must have a resolved verdict.
+fn record_unresolved_contact(
+    impact: On<crate::ballistics::Impact>,
+    clock: Res<crate::ShotClock>,
+    mut trace: ResMut<ShotTrace>,
+) {
+    if impact.surface == crate::ballistics::ImpactSurface::Armor
+        && matches!(impact.outcome, crate::ballistics::ImpactOutcome::Struck)
+    {
+        trace.global_row("walk_first_contact_stop", clock.0, json!({}));
+    }
+}
+
+/// The game's damage model: scene and destruction census in simulation ticks, without a cost timer.
+fn record_walk_world(
+    clock: Res<crate::ShotClock>,
+    trees: Query<(), With<crate::trees::TreeBody>>,
+    tanks: Query<(), With<crate::tank::Tank>>,
+    walls: Res<crate::buildings::breakage::WallRecord>,
+    mut trace: ResMut<ShotTrace>,
+) {
+    // DERIVED: the shipping fixed clock has 64 ticks per simulation second.
+    if clock.0.is_multiple_of(64) {
+        trace.global_row(
+            "walk_world",
+            clock.0,
+            json!({
+                "trees": trees.iter().count(), "tanks": tanks.iter().count(),
+                "wall_changes": walls.entries.len(),
+            }),
+        );
+    }
 }
 
 #[cfg(test)]
