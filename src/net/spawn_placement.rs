@@ -179,4 +179,22 @@ mod tests {
         }
         assert_eq!(seen.len(), points.as_slice().len());
     }
+    /// A full stationary lobby must spawn without requiring an earlier player to move. Each
+    /// possible first random point is exercised; subsequent spawns use the production rule.
+    /// This is a map/mode/capacity contract, independent of the tank's identity or geometry.
+    #[test]
+    fn authored_points_admit_a_full_stationary_lobby_from_every_first_point() {
+        let manifest = crate::map::tests::shipped_manifest();
+        let mode = super::super::battle_mode::BattleMode::shipped();
+        // Fixture lobby size: the owner's early-access capacity decision (#220).
+        let capacity = 30;
+        for first in 0..manifest.spawn_points.as_slice().len() {
+            let mut live = Vec::new();
+            for _ in 0..capacity {
+                let point = choose_spawn(&manifest.spawn_points, &live, &mode.spawn, first)
+                    .expect("author map points far enough apart to admit the configured capacity");
+                live.push(point);
+            }
+        }
+    }
 }
