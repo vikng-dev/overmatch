@@ -1,6 +1,6 @@
 // s5_oblique_through: an 88 through the hull side at 55 degrees: the cone's axis leans from the path toward the plate normal
 // Recorded by the real march from `scenarios.ron` (`ballistics::pen_cam`); do not edit.
-// Re-record with `PEN_CAM_BLESS=1 cargo test --lib pen_cam::bless -- --ignored`.
+// Re-record with `OVERMATCH_BLESS=1 cargo test --lib pen_cam::bless -- --ignored`.
 (
     synthetic: false,
     vehicle: Some("tiger_1/tiger_1.tank.ron"),

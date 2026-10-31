@@ -1,6 +1,6 @@
 // s16_restart_at_rest: s4's line fired with the 88's burst round: the road wheel's first disc arms the fuze, its rubber and far disc restart the delay, and the lower hull side stops the round 21 mm in; it bursts at rest there when the delay ends, a flat band about the line with no nose piece to fly on, and the plate around it stops every direction of its field
 // Recorded by the real march from `scenarios.ron` (`ballistics::pen_cam`); do not edit.
-// Re-record with `PEN_CAM_BLESS=1 cargo test --lib pen_cam::bless -- --ignored`.
+// Re-record with `OVERMATCH_BLESS=1 cargo test --lib pen_cam::bless -- --ignored`.
 (
     synthetic: false,
     vehicle: Some("tiger_1/tiger_1.tank.ron"),

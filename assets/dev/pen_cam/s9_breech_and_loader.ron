@@ -1,6 +1,6 @@
 // s9_breech_and_loader: the turret traversed 30 degrees: an 88 through its side knocks out two boxes, the breech and the gunner station, and leaves the loader station reduced
 // Recorded by the real march from `scenarios.ron` (`ballistics::pen_cam`); do not edit.
-// Re-record with `PEN_CAM_BLESS=1 cargo test --lib pen_cam::bless -- --ignored`.
+// Re-record with `OVERMATCH_BLESS=1 cargo test --lib pen_cam::bless -- --ignored`.
 (
     synthetic: false,
     vehicle: Some("tiger_1/tiger_1.tank.ron"),

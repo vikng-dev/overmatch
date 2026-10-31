@@ -1298,40 +1298,36 @@ mod tests {
     }
 
     /// The directions and weights are the same bits on every target: pinned raw IEEE bits of a
-    /// few directions for two fixture axes. MEASURED on macOS arm64; a red run on another target
-    /// means the generator is not reproducible there.
+    /// few directions for two fixture axes, in [`PINNED_BITS_PATH`]. MEASURED on macOS arm64; a red
+    /// run on another target means the generator is not reproducible there. `OVERMATCH_BLESS=1`
+    /// ([`crate::tests::bless`]) rewrites the file from this run; bless only on macOS arm64, and
+    /// only for a change meant to move the directions.
     #[test]
     fn the_directions_are_pinned_to_the_bit() {
         let spread = spread(24, RATIO);
         let axes = [Dir3::Z, Dir3::new(Vec3::new(0.3, -0.2, 0.9)).unwrap()];
-        let mut bits = Vec::new();
+        let mut lines = String::new();
         for axis in axes {
             let directions: Vec<(Dir3, f32)> = spread.directions(axis).collect();
             for k in [0usize, 5, 23] {
                 let (direction, weight) = directions[k];
                 let v = Vec3::from(direction);
-                bits.push([
-                    v.x.to_bits(),
-                    v.y.to_bits(),
-                    v.z.to_bits(),
-                    weight.to_bits(),
-                ]);
+                let [x, y, z, w] = [v.x, v.y, v.z, weight].map(f32::to_bits);
+                lines.push_str(&format!("{x:#010x} {y:#010x} {z:#010x} {w:#010x}\n"));
             }
         }
-        if std::env::var_os("OVERMATCH_SPALL_CONE_SHOW").is_some() {
-            println!("{bits:#010x?}");
+        if crate::tests::bless() {
+            std::fs::write(PINNED_BITS_PATH, &lines).expect("the pinned file is writable");
+            return;
         }
-        assert_eq!(bits, PINNED_BITS);
+        assert_eq!(lines, PINNED_BITS);
     }
 
-    /// `[x, y, z, f_k]` bits of directions 0, 5 and 23 about each fixture axis. MEASURED on macOS
-    /// arm64; print them with `OVERMATCH_SPALL_CONE_SHOW=1` and `--nocapture`.
-    const PINNED_BITS: [[u32; 4]; 6] = [
-        [0xbd7c_0403, 0x0000_0000, 0x3f7f_83d6, 0x3f51_733f],
-        [0xbe2f_7939, 0x3ddf_3e69, 0x3f7a_aa31, 0x3f30_2361],
-        [0xbdb9_6be7, 0x3ece_0de5, 0x3f69_3447, 0x3db1_e40d],
-        [0x3e80_3da4, 0xbe52_d5ba, 0x3f72_2b8d, 0x3f51_733f],
-        [0x3e17_0fd6, 0xbdc3_392d, 0x3f7c_0537, 0x3f30_2361],
-        [0x3e63_916b, 0x3e52_d1ce, 0x3f73_f864, 0x3db1_e40d],
-    ];
+    /// `x y z f_k` bits of directions 0, 5 and 23 about each fixture axis, one line each.
+    const PINNED_BITS: &str = include_str!("spall_cone.pinned");
+
+    const PINNED_BITS_PATH: &str = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/src/ballistics/spall_cone.pinned"
+    );
 }

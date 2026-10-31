@@ -60,9 +60,10 @@
 //!
 //! A red run prints the first differing record and its full text on this target. Running the
 //! test on macOS arm64 with `OVERMATCH_FIELD_CASTS_SHOW=<label prefix>` and `--nocapture` prints
-//! the reference text of the records it names. `OVERMATCH_FIELD_CASTS_REPIN=1` rewrites the pinned
-//! file and prints the new total for [`PINNED_TOTAL`]; re-pin only on macOS arm64, and only for a
-//! change meant to move the casts (geometry, the cast path, the cone shape, an engine bump).
+//! the reference text of the records it names. `OVERMATCH_BLESS=1` ([`crate::tests::bless`])
+//! rewrites the pinned file and prints the new total for [`PINNED_TOTAL`]; re-pin only on macOS
+//! arm64, and only for a change meant to move the casts (geometry, the cast path, the cone shape,
+//! an engine bump).
 
 use std::fmt::Write as _;
 use std::time::Duration;
@@ -784,7 +785,7 @@ fn the_field_casts_digest_to_the_pinned_value() {
             );
         }
     }
-    if std::env::var_os("OVERMATCH_FIELD_CASTS_REPIN").is_some() {
+    if crate::tests::bless() {
         std::fs::write(PINNED_PATH, &joined).expect("the pinned file is writable");
         println!(
             "re-pinned {} records; PINNED_TOTAL = 0x{total:016x}",

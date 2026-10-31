@@ -21,3 +21,11 @@ mod flow_boundary;
 mod gpu_layout;
 mod shape_cast_reachability;
 mod ui_ascii;
+
+/// `OVERMATCH_BLESS=1`, the one switch of every pinned-output test: set, a test that pins an output
+/// to a file writes today's output to that file, and the diff is the review. Its
+/// users: `ballistics::pen_cam::bless_scenarios`, the field-cast digest
+/// (`ballistics::field_casts`) and the spall cone's direction bits (`ballistics::spall_cone`).
+pub(crate) fn bless() -> bool {
+    crate::env_flag("OVERMATCH_BLESS", false)
+}

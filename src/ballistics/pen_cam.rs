@@ -355,8 +355,8 @@ fn render(scenario: &Scenario, report: &PenetrationReport) -> String {
         .expect("a record serializes");
     format!(
         "// {}: {}\n// Recorded by the real march from `{SCENARIO_LIST}` (`ballistics::pen_cam`); do \
-         not edit.\n// Re-record with `PEN_CAM_BLESS=1 cargo test --lib pen_cam::bless -- --ignored`.\n\
-         {body}\n",
+         not edit.\n// Re-record with `OVERMATCH_BLESS=1 cargo test --lib pen_cam::bless -- \
+         --ignored`.\n{body}\n",
         scenario.name, scenario.shows
     )
 }
@@ -371,15 +371,16 @@ fn scenarios() -> Vec<Scenario> {
 }
 
 /// Re-records every scenario file from today's march (ignored; a tool, run on demand):
-/// `PEN_CAM_BLESS=1 cargo test --lib pen_cam::bless -- --ignored` writes them, and the diff is the
-/// review; without `PEN_CAM_BLESS` it records and checks but writes nothing. A record is written
+/// `OVERMATCH_BLESS=1 cargo test --lib pen_cam::bless -- --ignored` writes them
+/// ([`crate::tests::bless`]), and the diff is the review; without it the test records and checks
+/// but writes nothing. A record is written
 /// only when its scenario earns its stated verdict, its own path reads that verdict, it is
 /// self-consistent, and its round is a registry key.
 #[test]
-#[ignore = "a tool: PEN_CAM_BLESS=1 re-records the scenario files"]
+#[ignore = "a tool: OVERMATCH_BLESS=1 re-records the scenario files"]
 fn bless_scenarios() {
     let dir = crate::assets::asset_root().join(SCENARIO_DIR);
-    let bless = std::env::var_os("PEN_CAM_BLESS").is_some();
+    let bless = crate::tests::bless();
     for scenario in &scenarios() {
         let report = record_scenario(scenario);
         assert_eq!(

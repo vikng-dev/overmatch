@@ -1,6 +1,6 @@
 // s15_unarmed_overpen: s6's line fired with the 88's burst round: neither the deck nor the floor holds the 35 reference-mm that arms the fuze, so the round flies through as s6's solid shot does, its record s6's but for the round
 // Recorded by the real march from `scenarios.ron` (`ballistics::pen_cam`); do not edit.
-// Re-record with `PEN_CAM_BLESS=1 cargo test --lib pen_cam::bless -- --ignored`.
+// Re-record with `OVERMATCH_BLESS=1 cargo test --lib pen_cam::bless -- --ignored`.
 (
     synthetic: false,
     vehicle: Some("tiger_1/tiger_1.tank.ron"),
