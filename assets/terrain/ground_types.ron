@@ -21,7 +21,7 @@
                 darkening: 0.05,
                 roughness_gain: 1.0,
             ),
-            friction: Some(0.6),
+            friction: 0.6,
         ),
         "dirt": (
             print: (
@@ -30,7 +30,7 @@
                 darkening: 0.2,
                 roughness_gain: 0.9,
             ),
-            friction: Some(0.5),
+            friction: 0.5,
         ),
         "gravel": (
             print: (
@@ -39,7 +39,7 @@
                 darkening: 0.2,
                 roughness_gain: 1.0,
             ),
-            friction: Some(0.5),
+            friction: 0.5,
         ),
         "mud": (
             print: (
@@ -48,7 +48,7 @@
                 darkening: 0.3,
                 roughness_gain: 0.6,
             ),
-            friction: Some(0.3),
+            friction: 0.3,
         ),
         "sand": (
             print: (
@@ -57,7 +57,7 @@
                 darkening: 0.12,
                 roughness_gain: 0.9,
             ),
-            friction: Some(0.4),
+            friction: 0.4,
         ),
     },
 )

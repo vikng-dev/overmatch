@@ -8,10 +8,11 @@
 //! one collider, so it carries the base pack's ground ([`GroundTypes::terrain_friction`]); the
 //! track law's own ground grip does not read it. A type is a record with one block per consumer,
 //! so the handling a type will drive later (rolling resistance, sinking) joins as a sibling of
-//! [`GroundType::print`] without touching the print's fields; every field is `#[serde(default)]`,
-//! so a file written before a field existed still loads, and a consumer refuses a value the file
-//! does not state. A field the table does not know, and a friction outside its domain (finite,
-//! not negative), are refused at load ([`GroundTypes::parse`]).
+//! [`GroundType::print`] without touching the print's fields. Every field is required: the table
+//! states each value with its provenance (below), and nothing in code stands in for one. A missing
+//! field, a field the table does not know, a value outside its domain, and a table lacking a
+//! ground a terrain pack names are all refused at load, naming the ground and the field
+//! ([`GroundTypes::parse`]).
 //!
 //! # A print's depth
 //!
@@ -42,30 +43,18 @@ use serde::{Deserialize, Serialize};
 /// The table's path under the asset root.
 pub(crate) const GROUND_TYPES_PATH: &str = "terrain/ground_types.ron";
 
-/// How one ground type takes a track print.
+/// How one ground type takes a track print. Each field's domain is [`GroundTypes::parse`]'s.
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
-#[serde(default, deny_unknown_fields)]
+#[serde(deny_unknown_fields)]
 pub(crate) struct PrintResponse {
-    /// Print depth per unit of ground pressure, mm per kPa.
+    /// Print depth per unit of ground pressure, mm per kPa: finite, not negative.
     pub(crate) softness_mm_per_kpa: f32,
-    /// The deepest print this ground takes, mm, whatever the pressure.
+    /// The deepest print this ground takes, mm, whatever the pressure: finite, not negative.
     pub(crate) depth_cap_mm: f32,
-    /// The share of the ground's albedo a print takes away where a sole lay, 0..1.
+    /// The share of the ground's albedo a print takes away where a sole lay, 0..=1.
     pub(crate) darkening: f32,
-    /// Roughness multiplier where a sole lay: below 1 reads wet.
+    /// Roughness multiplier where a sole lay, finite and positive: below 1 reads wet.
     pub(crate) roughness_gain: f32,
-}
-
-impl Default for PrintResponse {
-    /// A ground that takes no print and shows none.
-    fn default() -> Self {
-        Self {
-            softness_mm_per_kpa: 0.0,
-            depth_cap_mm: 0.0,
-            darkening: 0.0,
-            roughness_gain: 1.0,
-        }
-    }
 }
 
 impl PrintResponse {
@@ -78,26 +67,26 @@ impl PrintResponse {
             / 1000.0
     }
 
-    /// The albedo multiplier where a sole lay.
+    /// The albedo multiplier where a sole lay: 0..=1, as `darkening` is.
     pub(crate) fn albedo_gain(&self) -> f32 {
-        1.0 - self.darkening.clamp(0.0, 1.0)
+        1.0 - self.darkening
     }
 }
 
 /// One ground type: one block per thing the ground drives.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Serialize, Deserialize)]
-#[serde(default, deny_unknown_fields)]
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub(crate) struct GroundType {
     pub(crate) print: PrintResponse,
     /// The friction coefficient this ground brings to a contact, dimensionless: one side's value
     /// ([`crate::substances::PAIR_RULE`] combines it with the other side's), finite and not
-    /// negative ([`GroundTypes::parse`]). `None` where the file states none.
-    pub(crate) friction: Option<f32>,
+    /// negative ([`GroundTypes::parse`]).
+    pub(crate) friction: f32,
 }
 
 /// The table, keyed by the name a pack's contract uses.
-#[derive(Resource, Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
-#[serde(default, deny_unknown_fields)]
+#[derive(Resource, Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub(crate) struct GroundTypes {
     pub(crate) types: BTreeMap<String, GroundType>,
 }
@@ -128,19 +117,66 @@ impl GroundTypes {
         Self::parse(&text).map_err(|err| format!("{}: {err}", path.display()))
     }
 
-    /// The table `text` holds, or why it is refused: a malformed file, a field the table does not
-    /// know, or a ground whose friction is negative or not finite (the pair rule's square root
-    /// would make it a NaN contact friction).
+    /// The table `text` holds, or why it is refused: a malformed file, a missing field or one the
+    /// table does not know, a value outside its domain (a negative or non-finite friction is a NaN
+    /// contact friction under the pair rule's square root; a darkening outside 0..=1 is an albedo
+    /// gain no material holds; a negative depth or softness prints upward), or a table lacking a
+    /// ground a terrain pack names ([`crate::terrain_blend::BASE_GROUND`],
+    /// [`crate::terrain_blend::BLEND_LAYERS`]).
     pub(crate) fn parse(text: &str) -> Result<Self, String> {
         let table: Self = ron::de::from_str(text).map_err(|err| err.to_string())?;
         for (name, ground) in &table.types {
-            if let Some(friction) = ground.friction
-                && !(friction.is_finite() && friction >= 0.0)
-            {
+            let print = &ground.print;
+            for (field, value, in_domain, domain) in [
+                (
+                    "friction",
+                    ground.friction,
+                    ground.friction.is_finite() && ground.friction >= 0.0,
+                    "a finite coefficient of 0 or more",
+                ),
+                (
+                    "print.softness_mm_per_kpa",
+                    print.softness_mm_per_kpa,
+                    print.softness_mm_per_kpa.is_finite() && print.softness_mm_per_kpa >= 0.0,
+                    "finite and 0 or more",
+                ),
+                (
+                    "print.depth_cap_mm",
+                    print.depth_cap_mm,
+                    print.depth_cap_mm.is_finite() && print.depth_cap_mm >= 0.0,
+                    "finite and 0 or more",
+                ),
+                (
+                    "print.darkening",
+                    print.darkening,
+                    (0.0..=1.0).contains(&print.darkening),
+                    "a share in 0..=1",
+                ),
+                (
+                    "print.roughness_gain",
+                    print.roughness_gain,
+                    print.roughness_gain.is_finite() && print.roughness_gain > 0.0,
+                    "a finite multiplier above 0",
+                ),
+            ] {
+                if !in_domain {
+                    return Err(format!(
+                        "ground type {name:?}: `{field}` is {value}; state it as {domain}"
+                    ));
+                }
+            }
+        }
+        let packs = std::iter::once(crate::terrain_blend::BASE_GROUND).chain(
+            crate::terrain_blend::BLEND_LAYERS
+                .iter()
+                .map(|layer| layer.ground),
+        );
+        for ground in packs {
+            if !table.types.contains_key(ground) {
                 return Err(format!(
-                    "ground type {name:?}: `friction` is {friction}, and a friction coefficient \
-                     is finite and not negative; state it as `Some(<coefficient>)` with a \
-                     coefficient of 0 or more"
+                    "a terrain pack is ground type {ground:?}, which the table lacks (it has \
+                     {:?}); add a {ground:?} entry with its print block and friction",
+                    table.types.keys().collect::<Vec<_>>()
                 ));
             }
         }
@@ -160,18 +196,14 @@ impl GroundTypes {
     }
 
     /// The friction the terrain collider carries: the base pack's ground
-    /// ([`crate::terrain_blend::BASE_GROUND`]) under the one pair rule. A table that states none
-    /// for it aborts, naming the type (ADR-0011): a terrain without a stated friction would fall
-    /// back to Avian's default.
+    /// ([`crate::terrain_blend::BASE_GROUND`], a key [`Self::parse`] requires) under the one pair
+    /// rule.
     pub(crate) fn terrain_friction(&self) -> avian3d::prelude::Friction {
-        let name = crate::terrain_blend::BASE_GROUND;
-        let friction = self.get(name).friction.unwrap_or_else(|| {
-            panic!("ground type {name:?} states no friction, and the terrain collider is it")
-        });
-        crate::substances::contact_friction(friction)
+        crate::substances::contact_friction(self.get(crate::terrain_blend::BASE_GROUND).friction)
     }
 
-    /// The type named `name`; a pack naming a type the table lacks aborts, naming both.
+    /// The type named `name`. Every pack's ground is a key ([`Self::parse`]), so a lookup that
+    /// misses is a caller naming a ground no pack is, and aborts naming both.
     pub(crate) fn get(&self, name: &str) -> &GroundType {
         self.types.get(name).unwrap_or_else(|| {
             panic!(
@@ -204,20 +236,38 @@ impl GroundTypes {
 mod tests {
     use super::*;
 
-    /// CONCRETE PRINTS NO DEPTH: a ground with no softness takes no print at any pressure, which is
-    /// what keeps a road a road under the heaviest tank. The shipped table's hardest type is the
-    /// one the owner reads as concrete, and every softer type prints.
+    /// A minimal table text: every ground a terrain pack names, each with `print` and `friction`
+    /// authored, the first one (`gravel`, the base pack's) carrying `gravel` in place of its block.
+    /// FIXTURE DATA: the numbers are round and stand for no ground.
+    fn table_text(gravel: &str) -> String {
+        let block = "print: (softness_mm_per_kpa: 0.5, depth_cap_mm: 50.0, darkening: 0.2, \
+                     roughness_gain: 1.0), friction: 0.5";
+        format!(
+            "(types: {{\"gravel\": ({gravel}), \"dirt\": ({block}), \"sand\": ({block}), \
+             \"mud\": ({block})}})"
+        )
+    }
+
+    /// A RIGID GROUND PRINTS NO DEPTH: a ground with no softness takes no print at any pressure,
+    /// which is what keeps a road a road under the heaviest tank. FIXTURE DATA (a labelled
+    /// zero-softness response); the class invariant holds for every shipped row too: a row prints
+    /// exactly when its softness and its cap are both above zero.
     #[test]
-    fn concrete_prints_no_depth() {
-        let table = GroundTypes::load(&GroundTypes::shipped_path()).expect("the shipped table");
-        let concrete = table.get("concrete").print;
+    fn a_ground_with_no_softness_prints_no_depth() {
+        let rigid = PrintResponse {
+            softness_mm_per_kpa: 0.0,
+            depth_cap_mm: 150.0,
+            darkening: 0.0,
+            roughness_gain: 1.0,
+        };
         for kpa in [0.0, 50.0, 111.0, 255.0] {
-            assert_eq!(concrete.depth_m(kpa), 0.0, "concrete at {kpa} kPa");
+            assert_eq!(rigid.depth_m(kpa), 0.0, "a rigid ground at {kpa} kPa");
         }
+        let table = GroundTypes::load(&GroundTypes::shipped_path()).expect("the shipped table");
         for (name, ground) in &table.types {
-            if name != "concrete" {
-                assert!(ground.print.depth_m(100.0) > 0.0, "{name} takes a print");
-            }
+            let print = ground.print;
+            let prints = print.softness_mm_per_kpa > 0.0 && print.depth_cap_mm > 0.0;
+            assert_eq!(print.depth_m(100.0) > 0.0, prints, "{name}");
         }
     }
 
@@ -247,39 +297,89 @@ mod tests {
         }
     }
 
-    /// EVERY GROUND STATES ITS FRICTION: the terrain collider carries the base pack's
-    /// ([`GroundTypes::terrain_friction`]), and every pack's ground is a candidate for it, so a type
-    /// without one fails here before a terrain falls back to Avian's default. Its domain is the
-    /// load's ([`a_friction_out_of_domain_is_refused_at_load_naming_the_ground`]).
+    /// A GROUND THAT STATES TOO LITTLE IS REFUSED AT LOAD: a ground with no `print` block would
+    /// take no print and a ground with no `friction` would hand the terrain collider Avian's
+    /// default, and a table lacking a pack's ground would leave that pack nothing to read. Each is
+    /// refused at parse, naming what is missing, so no consumer meets one. Mutant: a
+    /// `#[serde(default)]` on either field, or a parse that skips the pack check, loads one of
+    /// these. The terrain collider reads the base ground's friction under the pair rule.
     #[test]
-    fn every_ground_states_its_friction() {
-        let table = GroundTypes::load(&GroundTypes::shipped_path()).expect("the shipped table");
-        for (name, ground) in &table.types {
-            assert!(ground.friction.is_some(), "{name} states no friction");
+    fn a_ground_that_states_too_little_is_refused_at_load() {
+        let block = "print: (softness_mm_per_kpa: 0.5, depth_cap_mm: 50.0, darkening: 0.2, \
+                     roughness_gain: 1.0)";
+        for (missing, gravel) in [("print", "friction: 0.5"), ("friction", block)] {
+            let error = GroundTypes::parse(&table_text(gravel)).expect_err(missing);
+            assert!(error.contains(missing), "{missing}: {error}");
         }
-        let terrain = table.terrain_friction();
-        assert_eq!(terrain.combine_rule, crate::substances::PAIR_RULE);
+        let without_mud = table_text(&format!("{block}, friction: 0.5"))
+            .replace(", \"mud\": (", ", \"marsh\": (");
+        let error = GroundTypes::parse(&without_mud).expect_err("a pack's ground is missing");
+        assert!(error.contains("\"mud\""), "{error}");
+        let table = GroundTypes::parse(&table_text(&format!("{block}, friction: 0.5")))
+            .expect("the full fixture table loads");
+        assert_eq!(
+            table.terrain_friction().combine_rule,
+            crate::substances::PAIR_RULE
+        );
     }
 
-    /// A FRICTION OUT OF DOMAIN IS REFUSED AT LOAD, NAMING THE GROUND: a negative coefficient under
-    /// the pair rule's `√(μa·μb)` is a NaN contact friction, and an infinite one an unbounded grip,
-    /// so neither may reach a contact; every terrain collider and the prints read the table through
-    /// [`GroundTypes::parse`]. Mutant: a parse that skips the check, or checks only one of sign and
-    /// finiteness, loads one of these. A zero friction is in domain and loads, and a misspelt field
-    /// is refused rather than read as a ground that states none.
+    /// A VALUE OUT OF DOMAIN IS REFUSED AT LOAD, NAMING THE GROUND AND THE FIELD: a negative
+    /// friction under the pair rule's `√(μa·μb)` is a NaN contact friction and an infinite one an
+    /// unbounded grip; a darkening outside 0..=1 is an albedo gain no material holds; a negative
+    /// softness or cap prints upward, and a roughness gain of 0 or less is no surface. Every
+    /// terrain collider and the prints read the table through [`GroundTypes::parse`]. Mutant: a
+    /// parse that skips a field's check, or checks only one of sign and finiteness, loads one of
+    /// these. A zero friction is in domain and loads, and a misspelt field is refused rather than
+    /// read as a ground that states none.
     #[test]
-    fn a_friction_out_of_domain_is_refused_at_load_naming_the_ground() {
-        let table = |friction: &str| format!("(types: {{\"mud\": (friction: {friction})}})");
-        for bad in ["Some(-0.1)", "Some(inf)", "Some(-inf)", "Some(NaN)"] {
-            let error = GroundTypes::parse(&table(bad)).expect_err(bad);
-            assert!(
-                error.contains("\"mud\"") && error.contains("`friction`"),
-                "{bad}: {error}"
-            );
+    fn a_value_out_of_domain_is_refused_at_load_naming_the_ground() {
+        let gravel =
+            |softness: &str, cap: &str, darkening: &str, roughness: &str, friction: &str| {
+                format!(
+                    "print: (softness_mm_per_kpa: {softness}, depth_cap_mm: {cap}, darkening: \
+                 {darkening}, roughness_gain: {roughness}), friction: {friction}"
+                )
+            };
+        let ok = ["0.5", "50.0", "0.2", "1.0", "0.5"];
+        let fields = [
+            "print.softness_mm_per_kpa",
+            "print.depth_cap_mm",
+            "print.darkening",
+            "print.roughness_gain",
+            "friction",
+        ];
+        let bad: [&[&str]; 5] = [
+            &["-0.1", "inf", "NaN"],
+            &["-1.0", "inf", "NaN"],
+            &["-0.1", "1.1", "NaN"],
+            &["0.0", "-1.0", "inf", "NaN"],
+            &["-0.1", "inf", "-inf", "NaN"],
+        ];
+        for (index, field) in fields.iter().enumerate() {
+            for value in bad[index] {
+                let mut values = ok;
+                values[index] = value;
+                let [softness, cap, darkening, roughness, friction] = values;
+                let text = table_text(&gravel(softness, cap, darkening, roughness, friction));
+                let error = GroundTypes::parse(&text).expect_err(value);
+                assert!(
+                    error.contains("\"gravel\"") && error.contains(&format!("`{field}`")),
+                    "{field} {value}: {error}"
+                );
+            }
         }
-        let zero = GroundTypes::parse(&table("Some(0.0)")).expect("zero is in domain");
-        assert_eq!(zero.get("mud").friction, Some(0.0));
-        assert!(GroundTypes::parse("(types: {\"mud\": (fricton: Some(0.5))})").is_err());
+        let [softness, cap, darkening, roughness, _] = ok;
+        let zero = GroundTypes::parse(&table_text(&gravel(
+            softness, cap, darkening, roughness, "0.0",
+        )))
+        .expect("zero friction is in domain");
+        assert_eq!(zero.get("gravel").friction, 0.0);
+        let misspelt = table_text(&gravel(softness, cap, darkening, roughness, "0.5")).replacen(
+            "friction:",
+            "fricton:",
+            1,
+        );
+        assert!(GroundTypes::parse(&misspelt).is_err());
     }
 
     /// A saved table reads back as the table: the owner's tuned values survive the round trip
