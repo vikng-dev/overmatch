@@ -332,8 +332,11 @@ pub(crate) struct TankSurface {
     #[uniform(100)]
     pub params: TankSurfaceParams,
     /// The visual's albedo where the surface shows it, else [`SurfaceVehicles`]'s stand-in. Bevy
-    /// binds the image's own sampler beside it, so this binding always holds an image carrying the
-    /// repeating surface sampler: left empty, bevy's fallback would clamp every map and the pattern.
+    /// binds the image's own sampler beside it, so a finished surface ([`surface_material`]) always
+    /// holds an image carrying the repeating surface sampler here: left empty, bevy's fallback would
+    /// clamp every map and the pattern. A waiting surface ([`waiting_material`]) leaves it empty
+    /// and never samples through that fallback: its flags are 0, and the shader reads a map or the
+    /// pattern only under `FLAG_MAPS`, or `FLAG_PAINT` with `FLAG_CAMO`.
     #[texture(101)]
     #[sampler(102)]
     pub visual_albedo: Option<Handle<Image>>,
