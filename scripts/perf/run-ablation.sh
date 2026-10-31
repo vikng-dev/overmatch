@@ -19,9 +19,9 @@
 #
 # Useful levers: `msaa:`, `render_scale:`, `shadow_distance:`, `shadow_cascades:`,
 # `shadow_resolution:`, `track_prints:` (video.ron, src/settings.rs); OVERMATCH_PROBE_TANKS;
-# SPIKE_ABLATE=bloom,env_light,depth_prepass,depth_copy,ui and SPIKE_PHASE_COUNTS=1
+# SPIKE_ABLATE=bloom,env_light,depth_prepass,ui and SPIKE_PHASE_COUNTS=1
 #   (inset_half, inset_masks, inset_bloom price the pen cam corner: run-pencam-attribution.sh)
-#   (src/render_cost.rs; depth_copy = bevy's own depth prepass instead of the main-pass copy).
+#   (src/render_cost.rs).
 # OVERMATCH_BATTLE=1 is the battle scene (src/tank/battle.rs): 30 tanks moving and firing on a
 # seeded script in place of the duel. Its first full 10 s summary window began 10 s into the stream
 # (MEASURED, warm dev build), so a run carrying it takes WARMUP_S=30, room for a cold start; the
@@ -31,8 +31,6 @@
 #     'battle-b||OVERMATCH_BATTLE=1' 'probes-b||OVERMATCH_PROBE_TANKS=30'
 # Caster exclusions (instruments, not product settings): SPIKE_ABLATE=terrain-casters,
 #   tree-casters,house-casters,tank-casters (comma-separated; each removes only that class's casting).
-# SPIKE_ABLATE=terrain-field is the terrain's raster shadow (terrain casting into the cascades, no
-#   baked field, src/terrain_shadow.rs): the A/B for the bake, e.g. 'raster||SPIKE_ABLATE=terrain-field'.
 # SPIKE_ABLATE=terrain_macro (no per-pixel macro tint) and terrain_layers (base pack only, no
 #   painted-layer loop) are shader-def levers on the terrain material (src/terrain_blend.rs,
 #   assets/shaders/terrain_blend.wgsl); the picture goes flatter. Battery: run-terrain-pricing.sh.

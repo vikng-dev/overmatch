@@ -98,6 +98,8 @@ pub(crate) enum RangeWallCase {
 #[derive(Deserialize, Debug, Clone, Copy, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub(crate) enum Demo {
+    /// Side-by-side certified shoe LOD levels on the offline root (`lod_showcase`).
+    LodShowcase,
     /// The hull marks, struck on the parked target (`hull_marks::demo`).
     HullMarks,
     /// The track prints, driven at world `(x, z)` on travel heading `heading_deg` (from `+Z`
@@ -404,6 +406,15 @@ pub(crate) fn plan() -> Option<&'static CapturePlan> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The tracked inspection recipe must remain a valid input to the one scene-selection edge.
+    #[test]
+    fn the_lod_inspection_recipe_selects_the_showcase() {
+        let plan = CapturePlan::parse(include_str!("../../scripts/capture/lod-showcase.ron"))
+            .expect("the tracked showcase plan parses and validates");
+        assert_eq!(plan.scene.demo, Some(Demo::LodShowcase));
+        assert!(plan.frames.is_none());
+    }
 
     /// EVERY FIELD OF THE GRAMMAR PARSES TO ITS OWN SLOT, bare or as `Some(…)`, and the frame times
     /// come out sorted and folded: the drivers write plans by hand from the struct docs, and every

@@ -619,7 +619,7 @@ fn spawn_probe_tanks(
 }
 
 /// Stand up the LOD showcase INSTEAD of the duel: the player at the map's edge, and one clamped
-/// pair per switch in the shoe chain (`OVERMATCH_LOD_SHOWCASE` — see [`crate::lod_showcase`]).
+/// pair per switch in the shoe chain (capture-plan `LodShowcase` — see [`crate::lod_showcase`]).
 ///
 /// It replaces the duel rather than adding to it because the whole scene is the instrument: a
 /// second free Tiger parked at (10, 5) is 490 m off to one side of a range everything else is laid
@@ -640,10 +640,11 @@ fn spawn_lod_showcase(
     // a pair belongs where its switch actually happens in the session it is being judged in.
     let switches = crate::lod_showcase::shoe_switches(certificate, view);
     let deviations = crate::lod_showcase::shoe_deviations(certificate);
-    for line in crate::lod_showcase::legend(&switches, &deviations) {
+    let stage = crate::lod_showcase::Stage::new(crate::terrain_grid::world_extent(grid));
+    for line in crate::lod_showcase::legend(&switches, &deviations, stage) {
         info!("{line}");
     }
-    for (index, tank) in crate::lod_showcase::layout(&switches)
+    for (index, tank) in crate::lod_showcase::layout(&switches, stage)
         .into_iter()
         .enumerate()
     {

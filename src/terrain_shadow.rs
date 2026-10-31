@@ -503,9 +503,8 @@ mod tests {
     }
 
     /// With the field baked, no terrain level casts into the cascades (the field carries the
-    /// shadow) while every level still receives (tanks' and trees' shadows fall on it); the raster
-    /// arm keeps them casting. Spawned through the world's own terrain path, resolved by the render
-    /// policy, read off bevy's own markers.
+    /// shadow) while every level still receives tanks' and trees' shadows. Spawned through the
+    /// world's terrain path, resolved by the render policy, read off Bevy's own markers.
     #[test]
     fn baked_terrain_leaves_the_cascades_caster_lists() {
         use bevy::ecs::system::RunSystemOnce;
@@ -515,14 +514,11 @@ mod tests {
         use crate::terrain_lod::TerrainLodEntity;
 
         let terrain = grid(17, 30.0, |x, z| (0.3 * x).sin() + (0.2 * z).cos());
-        for (scope, casts) in [
-            (VisualScope::BAKED_CASTER, false),
-            (VisualScope::WORLD_SOLID, true),
-        ] {
+        {
+            let scope = VisualScope::BAKED_CASTER;
             let mut app = App::new();
             app.add_plugins(crate::render_policy::plugin)
                 .init_resource::<Assets<Mesh>>();
-            let terrain = terrain.clone();
             app.world_mut()
                 .run_system_once(
                     move |mut commands: Commands, mut meshes: ResMut<Assets<Mesh>>| {
@@ -545,7 +541,7 @@ mod tests {
                 .collect();
             assert!(!levels.is_empty(), "the terrain spawned no level");
             for (not_caster, not_receiver) in levels {
-                assert_eq!(not_caster, !casts, "{scope:?}: a level's casting");
+                assert!(not_caster, "{scope:?}: a baked terrain level still casts");
                 assert!(!not_receiver, "{scope:?}: a level stopped receiving");
             }
         }

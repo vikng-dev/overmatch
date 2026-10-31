@@ -62,18 +62,9 @@
 //! 1. **Shadows.** While the terrain's sun shadow is the baked field (`terrain_shadow`), no level
 //!    casts: the field reads the canonical grid. A level still RECEIVES at its own height, so an
 //!    edge on it moves by its deviation times `cot 17°`, the same factor as below. What follows is
-//!    the raster arm (`SPIKE_ABLATE=terrain-field`). Terrain casts under the shipped 17° sun, and
-//!    the vendored `check_dir_light_mesh_visibility` consults `VisibilityRange` while collecting
-//!    directional shadow casters, so a switched level casts the switched shadow — the shadow pass
-//!    selects the same LOD the main camera did. A vertical occluder change `δh` moves its shadow
-//!    edge horizontally by `δh·cot 17° ≈ 3.27 δh` on a flat receiver, and further where the
-//!    ground runs near-parallel to the light — so the positional rung underprices it by 3.27×.
-//!    DERIVED from the worst kept level (0.4946 m at the 50 cm rung) the edge can move ~1.6 m in
-//!    world space. On screen it is much smaller, because a horizontal displacement seen from tank
-//!    height is heavily foreshortened and because a level is only shown at or beyond the distance
-//!    where its own deviation is sub-pixel: the worst edge shift reads as ~1–2 px on this map at
-//!    `ShadowDistance` m1000, which is the setting at which the cascades reach the ranges where
-//!    coarse levels are selected at all. Below m1000 there is nothing to see.
+//!    the receiving edge: a vertical displacement `δh` moves its intersection with the baked
+//!    field by `δh·cot 17° ≈ 3.27 δh` on a flat receiver (DERIVED). Terrain geometry never casts
+//!    into the cascades, so changing its LOD cannot move the shadow field itself.
 //!
 //! 2. **Grazing-LOS first-hit slide.** Projected error cannot see motion ALONG a pixel ray. Near
 //!    tangency the intersection satisfies `δt ≈ δh / (d_y − ∇h·d_xz)`, whose denominator goes to

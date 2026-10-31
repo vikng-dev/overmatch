@@ -539,7 +539,6 @@ fn spawn_environment(
     // `terrain_lod::adapt_ranges` writes the real thresholds on the first frame with facts.
     view: Option<Res<crate::view::ViewProfile>>,
     asset_server: Res<AssetServer>,
-    // `SPIKE_ABLATE=terrain-field` selects the raster terrain shadow (`render_cost`).
     ablate: Option<Res<crate::render_cost::Ablate>>,
 ) {
     let mut blocks: Vec<Transform> = Vec::new();
@@ -718,24 +717,16 @@ fn spawn_environment(
             // no build product that can go stale against the surface the sim reads. Tangent
             // generation (ADR-0011, required with no fallback) happens per level inside `spawn`.
             //
-            // The ground's sun shadow is baked from the same grid (`terrain_shadow`) and every
-            // receiver samples it, so no level casts into the cascades; the raster arm keeps them
-            // casting.
-            let baked = !ablate.as_deref().is_some_and(|ablate| ablate.terrain_field);
-            if baked {
-                crate::terrain_shadow::install(&mut commands, &mut images, &grid, toward_sun());
-            }
+            // The same heightfield supplies the baked sun shadow to every receiver. Terrain
+            // geometry does not also cast into the cascades.
+            crate::terrain_shadow::install(&mut commands, &mut images, &grid, toward_sun());
             crate::terrain_lod::spawn(
                 &mut commands,
                 &mut meshes,
                 &material,
                 &grid,
                 view.as_deref().copied(),
-                if baked {
-                    crate::render_policy::VisualScope::BAKED_CASTER
-                } else {
-                    crate::render_policy::VisualScope::WORLD_SOLID
-                },
+                crate::render_policy::VisualScope::BAKED_CASTER,
             );
         }
         // The map's object scatter (`scatter`): proxies and bodies posed from the shipped level file

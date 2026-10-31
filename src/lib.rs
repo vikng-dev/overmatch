@@ -115,11 +115,7 @@ mod hud;
 mod hull_marks;
 /// A data file's table keyed by name, refusing a duplicated key at parse.
 mod keyed_map;
-/// `OVERMATCH_LOD_SHOWCASE=1`: a flat map, the player at one edge, and a clamped PAIR of Tigers at
-/// every switch distance in the shoe LOD chain — the two meshes the pipeline's rendered-difference
-/// gate compared, side by side, at the range it compared them. A dev eyeball harness for a gate
-/// verdict (the L2→L3 switch scores 1.674 against an 0.5 allowance); adds nothing to a process that
-/// does not set the variable.
+/// Capture-plan LOD inspection: certified fine/coarse shoe pairs at each reachable switch range.
 mod lod_showcase;
 /// The map manifest (`assets/maps/<id>/level.json`): map selection, the ONE parse of the file that
 /// declares a map's terrain block, its object placement and the coordinate conventions it was
@@ -1013,8 +1009,8 @@ impl Plugin for GamePlugin {
             // The single-player scenario: two-tank duel spawn, first tank controlled.
             tank::sp_spawn_plugin,
             // The LOD eyeball harness's runtime half — the per-tank shoe clamp and its one-shot
-            // camera aim. Adds NO systems unless `OVERMATCH_LOD_SHOWCASE` is set, and the scenario
-            // spawn above lays out the pairs instead of the duel under the same variable.
+            // camera aim. Adds NO systems unless the capture plan selects `LodShowcase`, and the scenario
+            // spawn above lays out the pairs instead of the duel under that same scene selection.
             lod_showcase::plugin,
             ClientPlugin,
             // The shot clock, and each pen cam record explained to the player without a hop.

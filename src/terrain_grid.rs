@@ -678,7 +678,7 @@ pub(crate) fn decode_height_grid(
         let size = GRID_RESOLUTION;
         let samples = vec![0.0_f32; (size as usize) * (size as usize)];
         info!(
-            "terrain: OVERMATCH_LOD_SHOWCASE set — {size}x{size} grid FLATTENED to y = 0 (oracle, \
+            "terrain: LodShowcase scene selected — {size}x{size} grid FLATTENED to y = 0 (oracle, \
              collider and render mesh all from these samples)",
         );
         commands.insert_resource(HeightGrid::new(samples.into(), size, extent));

@@ -50,9 +50,6 @@
 //!   per command. Read after the phases are batched, in `PrepareBindGroups`.
 //! * **`SPIKE_ABLATE=<feature>[,<feature>…]`**: render features removed, to measure what each costs
 //!   by difference. `bloom` and `depth_prepass` remove those components from every `Camera3d`;
-//!   `depth_copy` removes `scene_depth::MainPassDepth`, so the camera's scene depth is drawn by
-//!   bevy's own depth prepass again instead of copied from its main pass (the A/B for that copy;
-//!   the picture is meant to stay the same, and it is chosen before the first frame renders);
 //!   `env_light` stops `world` from filtering the sky's environment light and giving it to views;
 //!   `ui` hides every UI root, which removes the UI's extraction and drawing but not its layout. An
 //!   unknown name panics at boot, so a typo cannot read as a free feature. Never part of a shipped
@@ -65,15 +62,6 @@
 //!   material (`terrain_blend::TerrainAblate`); the picture changes (flatter ground).
 //!   `terrain-casters`, `tree-casters`, `house-casters`, `tank-casters` suppress only casting
 //!   through render policy; receivers and main-view geometry retain their roles.
-//!   `terrain-field` selects the raster terrain shadow instead of the baked one
-//!   (`terrain_shadow`): no field is baked and the terrain casts into the cascades again. Without
-//!   it the terrain casts nothing, so `terrain-casters` changes nothing on the heightmap world.
-//! * **`SPIKE_MESH_REMOVALS=1`**: every [`PHASE_COUNT_PERIOD_S`], one `mesh_removals:` log line:
-//!   the mesh-instance removals bevy's GPU mesh extraction queued per frame since the last line, and
-//!   how many of them had an instance to remove. Read after extraction, before
-//!   `collect_meshes_for_gpu_building` applies them (issue #173; the vendored `bevy_pbr`'s
-//!   `OVERMATCH_PATCH.md`). It walks every queued removal every frame, so it is a counter, never on
-//!   during a frame-time measurement.
 //! * `SPIKE_SHADOW_FILTER=gaussian|hardware|temporal`, `SPIKE_SHADOW_SPLITS=<metres,...>` and
 //!   `SPIKE_SHADOW_OVERLAP=<proportion>` independently override stock shadow controls at boot.
 //!   Explicit splits select count and envelope; overlap and filter leave both untouched.
@@ -86,10 +74,9 @@ use bevy::core_pipeline::core_3d::{AlphaMask3d, Opaque3d, Transparent3d};
 use bevy::core_pipeline::prepass::{AlphaMask3dPrepass, DepthPrepass, Opaque3dPrepass};
 use bevy::diagnostic::DiagnosticsStore;
 use bevy::light::{CascadeShadowConfig, ShadowFilteringMethod};
-use bevy::pbr::{
-    RenderMeshInstanceGpuQueue, RenderMeshInstanceGpuQueues, RenderMeshInstances, Shadow,
-    collect_meshes_for_gpu_building,
-};
+use bevy::pbr::Shadow;
+#[cfg(test)]
+use bevy::pbr::{RenderMeshInstanceGpuQueue, RenderMeshInstanceGpuQueues};
 use bevy::platform::time::Instant;
 use bevy::post_process::bloom::Bloom;
 use bevy::prelude::*;
@@ -99,13 +86,13 @@ use bevy::render::render_phase::{
     BinnedPhaseItem, BinnedRenderPhase, SortedPhaseItem, ViewBinnedRenderPhases,
     ViewSortedRenderPhases,
 };
+#[cfg(test)]
 use bevy::render::sync_world::MainEntity;
 use bevy::render::view::RetainedViewEntity;
 use bevy::render::{Render, RenderApp, RenderSystems};
 use serde_json::json;
 
 use crate::render_policy::CameraProfile;
-use crate::scene_depth::MainPassDepth;
 use crate::trace::{JsonlSink, role_path};
 
 /// Seconds between `phase_census:` reports: the census is a step function of the scene, so a few
@@ -113,15 +100,13 @@ use crate::trace::{JsonlSink, role_path};
 const PHASE_COUNT_PERIOD_S: f64 = 5.0;
 
 /// Render features removed by `SPIKE_ABLATE` (module doc). Read by `world::light_battlefield_views`
-/// for `env_light` and by `world::spawn_environment` for `terrain_field`; the other fields act here.
+/// for `env_light`; the other fields act here or on the terrain material.
 #[derive(Resource, Clone, Copy, Default, Debug)]
 pub(crate) struct Ablate {
     bloom: bool,
     pub(crate) env_light: bool,
     depth_prepass: bool,
-    depth_copy: bool,
     ui: bool,
-    pub(crate) terrain_field: bool,
     terrain_casters: bool,
     tree_casters: bool,
     house_casters: bool,
@@ -158,9 +143,7 @@ impl Ablate {
                 "bloom" => ablate.bloom = true,
                 "env_light" => ablate.env_light = true,
                 "depth_prepass" => ablate.depth_prepass = true,
-                "depth_copy" => ablate.depth_copy = true,
                 "ui" => ablate.ui = true,
-                "terrain-field" => ablate.terrain_field = true,
                 "terrain-casters" => ablate.terrain_casters = true,
                 "tree-casters" => ablate.tree_casters = true,
                 "house-casters" => ablate.house_casters = true,
@@ -303,7 +286,7 @@ fn ablation_instruments(app: &mut App) {
         let ablate = Ablate::parse(&list).unwrap_or_else(|unknown| {
             panic!(
                 "SPIKE_ABLATE: unknown feature {unknown:?} (known: bloom, env_light, \
-                 depth_prepass, depth_copy, ui, terrain-field, terrain-casters, tree-casters, \
+                 depth_prepass, ui, terrain-casters, tree-casters, \
                  house-casters, tank-casters, inset_half, inset_masks, inset_bloom, terrain_macro, \
                  terrain_layers)"
             )
@@ -324,21 +307,9 @@ fn ablation_instruments(app: &mut App) {
             log_phase_census.in_set(RenderSystems::PrepareBindGroups),
         );
     }
-    if crate::env_flag("SPIKE_MESH_REMOVALS", false).unwrap_or_else(crate::refuse_start)
-        && let Some(render_app) = app.get_sub_app_mut(RenderApp)
-    {
-        render_app.add_systems(
-            Render,
-            log_mesh_removals
-                .in_set(RenderSystems::PrepareMeshes)
-                .before(collect_meshes_for_gpu_building),
-        );
-    }
 }
 
-/// `depth_copy` relies on running in the first `Update`, after the `Startup` that spawns the camera
-/// and before the first extraction: the render world must never see the marker leave a camera it
-/// has drawn (`scene_depth`, "Chosen at boot").
+/// Apply pricing ablations to the cameras that own the selected features.
 fn ablate_camera_features(
     mut commands: Commands,
     ablate: Res<Ablate>,
@@ -347,13 +318,12 @@ fn ablate_camera_features(
             Entity,
             Has<Bloom>,
             Has<DepthPrepass>,
-            Has<MainPassDepth>,
             Option<&CameraProfile>,
         ),
         With<Camera3d>,
     >,
 ) {
-    for (camera, bloom, depth_prepass, depth_copy, profile) in &cameras {
+    for (camera, bloom, depth_prepass, profile) in &cameras {
         if ablate.bloom && bloom {
             commands.entity(camera).remove::<Bloom>();
         }
@@ -363,9 +333,6 @@ fn ablate_camera_features(
         }
         if ablate.depth_prepass && depth_prepass {
             commands.entity(camera).remove::<DepthPrepass>();
-        }
-        if ablate.depth_copy && depth_copy {
-            commands.entity(camera).remove::<MainPassDepth>();
         }
     }
 }
@@ -422,6 +389,7 @@ fn log_phase_census(
 
 /// The removals bevy's GPU mesh extraction queued this frame, every worker's queue together. Valid
 /// between `MeshExtractionSystems` and `collect_meshes_for_gpu_building`, which drains them.
+#[cfg(test)]
 pub(crate) fn queued_mesh_removals(
     queues: &mut RenderMeshInstanceGpuQueues,
 ) -> impl Iterator<Item = MainEntity> + '_ {
@@ -433,55 +401,6 @@ pub(crate) fn queued_mesh_removals(
         };
         removed.iter().copied()
     })
-}
-
-/// `mesh_removals:` totals since the last line.
-#[derive(Default)]
-struct RemovalWindow {
-    next: Option<Instant>,
-    frames: u64,
-    queued: u64,
-    live: u64,
-}
-
-/// Render world: the `mesh_removals:` lines of the module doc. Absent queues mean CPU mesh building,
-/// which queues no removals.
-fn log_mesh_removals(
-    queues: Option<ResMut<RenderMeshInstanceGpuQueues>>,
-    instances: Res<RenderMeshInstances>,
-    mut window: Local<RemovalWindow>,
-) {
-    let Some(mut queues) = queues else {
-        return;
-    };
-    window.frames += 1;
-    for entity in queued_mesh_removals(&mut queues) {
-        window.queued += 1;
-        if instances.mesh_asset_id(entity).is_some() {
-            window.live += 1;
-        }
-    }
-    let now = Instant::now();
-    let Some(next) = window.next else {
-        window.next = Some(now + core::time::Duration::from_secs_f64(PHASE_COUNT_PERIOD_S));
-        return;
-    };
-    if now < next {
-        return;
-    }
-    let frames = window.frames as f64;
-    info!(
-        "mesh_removals: frames={} queued={} live={} queued_per_frame={:.1} live_per_frame={:.1}",
-        window.frames,
-        window.queued,
-        window.live,
-        window.queued as f64 / frames,
-        window.live as f64 / frames,
-    );
-    *window = RemovalWindow {
-        next: Some(now + core::time::Duration::from_secs_f64(PHASE_COUNT_PERIOD_S)),
-        ..default()
-    };
 }
 
 /// One phase's indirect draw commands this frame, all views together (module doc).
@@ -825,7 +744,6 @@ mod tests {
     fn ablation_list_parses_known_features_and_rejects_unknown_ones() {
         let ablate = Ablate::parse("bloom, env_light,,ui").expect("known features");
         assert!(ablate.bloom && ablate.env_light && ablate.ui && !ablate.depth_prepass);
-        assert!(!ablate.depth_copy);
         let ablate = Ablate::parse("inset_half,inset_masks,inset_bloom").expect("inset levers");
         assert!(ablate.inset_half && ablate.inset_masks && ablate.inset_bloom && !ablate.bloom);
         let terrain = Ablate::parse("terrain_macro")
@@ -836,8 +754,6 @@ mod tests {
             .expect("terrain lever")
             .terrain_ablate();
         assert!(terrain.base_only && !terrain.macro_tint);
-        let ablate = Ablate::parse("depth_copy").expect("known feature");
-        assert!(ablate.depth_copy && !ablate.depth_prepass);
         assert_eq!(
             Ablate::parse("bloom,envlight").unwrap_err(),
             "envlight",

@@ -1,0 +1,3 @@
+// View-only LOD inspection, selected through the one capture-plan input. No frames are requested;
+// the orchestrator's capture batch supplies its own frame times and view settings.
+(scene: (demo: LodShowcase))

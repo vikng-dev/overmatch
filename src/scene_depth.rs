@@ -39,8 +39,7 @@
 //! * **Chosen at boot.** The marker must not leave a camera the render world has already drawn with
 //!   it. Bevy's prepass phases are retained: they queue only entities that became visible or
 //!   changed, so a phase recreated mid-run would miss everything already on screen. The
-//!   `SPIKE_ABLATE=depth_copy` lever removes the marker in the first `Update`, before the first
-//!   extraction.
+//!   marker therefore remains for the camera's lifetime.
 //!
 //! # What differs from the prepass depth
 //!
@@ -189,7 +188,7 @@ fn copy_main_pass_depth(
 ) {
     let (depth, prepass) = view.into_inner();
     let Some(copy) = &prepass.depth else {
-        return;
+        return; // Before the render target's first preparation there is no depth attachment to copy.
     };
     ctx.command_encoder().copy_texture_to_texture(
         depth.texture.as_image_copy(),
@@ -224,7 +223,7 @@ mod tests {
     /// The prepass draws nothing for a served camera: its two prepass phases are gone after
     /// [`drop_prepass_phases`], which is what makes bevy's specialize, queue and `run_prepass_system`
     /// skip the view. A camera without the marker keeps both, so the real prepass still runs for
-    /// it (the `SPIKE_ABLATE=depth_copy` arm and any other prepass camera rely on that), and a marked
+    /// it (cameras needing normals or motion vectors rely on their own prepass), and a marked
     /// camera that also asks for normals keeps both (its normals come from the prepass draw).
     #[test]
     fn a_served_camera_has_no_prepass_phases_and_others_keep_theirs() {
