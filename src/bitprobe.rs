@@ -453,7 +453,9 @@ fn scripted_input(tick: u32) -> (f32, f32) {
 
 fn build_app() -> App {
     let mut app = App::new();
-    app.add_plugins(crate::gpu_less_default_plugins(None))
+    // The network authority's plugin floor, so the fixture tank simulates beside the same bevy
+    // systems the dedicated server runs.
+    app.add_plugins(crate::server_plugin_floor())
         .insert_resource(TimeUpdateStrategy::ManualDuration(Duration::ZERO));
 
     // Match the network authority's Avian policy (`net::physics::physics_plugins`): interpolation

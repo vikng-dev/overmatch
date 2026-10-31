@@ -294,6 +294,58 @@ pub(crate) fn gpu_less_default_plugins(
         .disable::<bevy::winit::WinitPlugin>()
 }
 
+/// The dedicated server's plugin floor: [`gpu_less_default_plugins`] without the plugins that serve
+/// only a player's screen, speakers or hands. Mounted by the server and by the bitprobe fixture, so
+/// the fixture simulates on the floor the authority runs.
+///
+/// Each plugin dropped here registers systems and asset stores only for things no server entity
+/// carries and the server never loads: UI nodes and text, sprites, picking pointers, input focus,
+/// accessibility, gamepads, the clipboard, audio, animation, gizmos, lights and scenes. Its systems
+/// ran every frame for nothing. `LightPlugin` goes with `GizmoPlugin` because it mounts a
+/// light-gizmo group whose systems read the gizmo asset store. A plugin stays when a server system
+/// needs it or it touches simulated entities: `CameraPlugin`'s bounds pass inserts `Aabb` on the
+/// `Mesh3d` entities `world::spawn_environment` spawns on every composition, and that system
+/// writes the mesh, image and PBR asset stores. `GltfPlugin` stays because `PbrPlugin` registers a
+/// glTF extension handler at build.
+pub(crate) fn server_plugin_floor() -> bevy::app::PluginGroupBuilder {
+    use bevy::{
+        a11y, animation, audio, clipboard, gilrs, gizmos, gizmos_render, input_focus, light,
+        picking, scene, sprite, sprite_render, text, ui, ui_render, ui_widgets,
+        world_serialization,
+    };
+    gpu_less_default_plugins(None)
+        .disable::<ui::UiPlugin>()
+        .disable::<ui_render::UiRenderPlugin>()
+        .disable::<ui_widgets::popover::PopoverPlugin>()
+        .disable::<ui_widgets::ButtonPlugin>()
+        .disable::<ui_widgets::CheckboxPlugin>()
+        .disable::<ui_widgets::ListBoxPlugin>()
+        .disable::<ui_widgets::MenuPlugin>()
+        .disable::<ui_widgets::RadioGroupPlugin>()
+        .disable::<ui_widgets::ScrollAreaPlugin>()
+        .disable::<ui_widgets::ScrollbarPlugin>()
+        .disable::<ui_widgets::SliderPlugin>()
+        .disable::<ui_widgets::EditableTextInputPlugin>()
+        .disable::<text::TextPlugin>()
+        .disable::<sprite::SpritePlugin>()
+        .disable::<sprite_render::SpriteRenderPlugin>()
+        .disable::<picking::input::PointerInputPlugin>()
+        .disable::<picking::PickingPlugin>()
+        .disable::<picking::InteractionPlugin>()
+        .disable::<input_focus::InputFocusPlugin>()
+        .disable::<input_focus::InputDispatchPlugin>()
+        .disable::<a11y::AccessibilityPlugin>()
+        .disable::<gilrs::GilrsPlugin>()
+        .disable::<clipboard::ClipboardPlugin>()
+        .disable::<audio::AudioPlugin>()
+        .disable::<animation::AnimationPlugin>()
+        .disable::<gizmos::GizmoPlugin>()
+        .disable::<gizmos_render::GizmoRenderPlugin>()
+        .disable::<light::LightPlugin>()
+        .disable::<scene::ScenePlugin>()
+        .disable::<world_serialization::WorldSerializationPlugin>()
+}
+
 /// The windowed clients' `RenderPlugin`: stock settings everywhere except macOS, where the two
 /// GPU-query wgpu features are removed before device creation. Mounted by every windowed client
 /// composition root (the net client and the offline route) — never by the GPU-less server, which

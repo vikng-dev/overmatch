@@ -71,7 +71,7 @@ pub fn run() {
             std::process::exit(2);
         }
     };
-    let mut plugins = crate::gpu_less_default_plugins(None);
+    let mut plugins = crate::server_plugin_floor();
     if let Some(threads) = &threads {
         plugins = plugins.set(TaskPoolPlugin {
             task_pool_options: TaskPoolOptions::with_num_threads(threads.0),
