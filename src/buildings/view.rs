@@ -238,12 +238,10 @@ struct CrackLook(Handle<StandardMaterial>);
 #[derive(Component, Clone, Debug, PartialEq)]
 pub(crate) struct ShownShape(pub(crate) Shape);
 
-/// A building view's own mesh once it broke (the shared one before), and its cracks' child.
+/// A broken building view's cracks' child. The view's own mesh lives in its `Mesh3d` alone: a
+/// replaced or removed handle frees the old asset.
 #[derive(Component)]
 struct OwnMesh {
-    /// `None` while nothing of the building stands: the view then holds no `Mesh3d` at all, since
-    /// bevy_render 0.19.1 logs every extraction of a zero-vertex mesh as `Use-after-free`.
-    mesh: Option<Handle<Mesh>>,
     cracks: Option<Entity>,
 }
 
@@ -299,10 +297,11 @@ fn present_record(
 }
 
 /// Redraw a building whose shown shape moved: its view's own mesh and its cracks. A view holds a
-/// `Mesh3d` exactly while its building has a face to draw ([`OwnMesh::mesh`]).
+/// `Mesh3d` exactly while its building has a face to draw: a zero-vertex mesh never reaches the
+/// renderer (see [`crate::track::shadow_proxy::ProxySide::mesh`]).
 fn redraw(
     buildings: Query<(&Breakage, &ShownShape, &Children), Changed<ShownShape>>,
-    mut views: Query<(Entity, Option<&mut Mesh3d>, Option<&mut OwnMesh>), With<BuildingView>>,
+    mut views: Query<(Entity, Option<&mut Mesh3d>, Option<&OwnMesh>), With<BuildingView>>,
     look: Option<Res<CrackLook>>,
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: Option<ResMut<Assets<StandardMaterial>>>,
@@ -329,17 +328,14 @@ fn redraw(
             }
             (None, None) => {}
         }
-        let mut crack_child = None;
-        if let Some(mut own) = own {
-            if let Some(old) = std::mem::replace(&mut own.mesh, mesh) {
-                meshes.remove(&old);
+        match own {
+            Some(OwnMesh {
+                cracks: Some(child),
+            }) => commands.entity(*child).despawn(),
+            Some(_) => {}
+            None => {
+                commands.entity(view).insert(OwnMesh { cracks: None });
             }
-            crack_child = own.cracks;
-        } else {
-            commands.entity(view).insert(OwnMesh { mesh, cracks: None });
-        }
-        if let Some(child) = crack_child {
-            commands.entity(child).despawn();
         }
         let material = match (&look, materials.as_deref_mut()) {
             (Some(look), _) => Some(look.0.clone()),
@@ -577,8 +573,8 @@ mod tests {
     }
 
     /// NO EMPTY MESH REACHES A RENDER ENTITY: a building with nothing left standing holds no
-    /// `Mesh3d` and leaves no zero-vertex mesh asset (bevy_render 0.19.1 logs every extraction of
-    /// one as `Use-after-free`), and a record reset that stands it again gives its view a mesh
+    /// `Mesh3d` and leaves no zero-vertex mesh asset (see
+    /// [`crate::track::shadow_proxy::ProxySide::mesh`]), and a record reset that stands it again gives its view a mesh
     /// back. The all-gone shape is ASSUMED fixture state, set directly rather than reached by law.
     #[test]
     fn a_building_with_nothing_standing_draws_no_mesh_until_it_stands_again() {
