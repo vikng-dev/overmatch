@@ -145,6 +145,12 @@ instead of material alone.
   proxies, the crew boxes and the track belt keep theirs. LOD rungs wear their source primitive's
   material (`geometry_lod`), and the pen cam's x-ray dresses and restores the surface material like
   the standard one.
+- **Loading.** The swap happens the frame the view lands, before the visual's maps and the pattern
+  have loaded, and bevy draws nothing of a material whose images are not yet on the GPU. Until they
+  land, a surface material wears its glb material's own look (less its normal map) and binds no
+  image of its own; it is rewritten in place a frame after the last one lands, so rungs and the
+  x-ray, which hold its handle, follow. A painted visual never loads its pack's albedo: paint
+  covers it whole.
 - **Projection.** The plates' UVs are collapsed (scout §1.2), so the shader projects triplanar,
   never through UVs. The projection frame is the vehicle's **rest frame up to the nearest moving
   part**: each primitive's mesh-local position through its node chain, stopping below the first node

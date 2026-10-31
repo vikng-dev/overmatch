@@ -27,6 +27,12 @@
 //!   reads row 0. The shader's rest frame (`assets/shaders/tank_surface.wgsl`) is the mesh-local
 //!   frame through every node up to, and not including, the first the tank file articulates
 //!   ([`rest_row`]), so plates of one rigid part share it and a moving part carries it.
+//! - A SURFACE IS DRAWN WHILE ITS MAPS LOAD. The dress swaps materials the frame the view lands,
+//!   before the visual's maps and the pattern have loaded, and bevy draws nothing of a material
+//!   whose images are not yet on the GPU. So a fresh surface material wears its glb material's own
+//!   look and binds no image of its own ([`waiting_material`]); [`finish_waiting`] rewrites it in
+//!   place once its images have landed. The handle never changes, so rungs and the x-ray, which
+//!   hold it, follow without a swap of their own.
 //! - A RUNG WEARS ITS SOURCE'S MATERIAL AND TAG: `geometry_lod` copies both, so a LOD switch changes
 //!   the silhouette and nothing else.
 //! - Rows are rigid up to a uniform scale: the shader takes their 3×3 as the normal's rotation and
@@ -356,6 +362,20 @@ pub(crate) struct TankSurface {
     pub rest_frames: Handle<ShaderBuffer>,
 }
 
+impl TankSurface {
+    /// Every image the surface binds.
+    fn images(&self) -> impl Iterator<Item = &Handle<Image>> {
+        [
+            &self.visual_albedo,
+            &self.visual_normal,
+            &self.visual_arm,
+            &self.camo_pattern,
+        ]
+        .into_iter()
+        .flatten()
+    }
+}
+
 impl MaterialExtension for TankSurface {
     fn fragment_shader() -> ShaderRef {
         SHADER.into()
@@ -508,6 +528,32 @@ fn surface_material(
     }
 }
 
+/// What a surface draws until the images of the material it becomes (`made`) land: its glb
+/// material's own look, binding no image of the surface's own, so bevy prepares it at once. The glb
+/// material's normal map goes: the surface shader draws the geometric normal without maps, and a
+/// normal map flips bevy's pipeline key (`StandardMaterialKey::NORMAL_MAP`), so keeping it would
+/// leave the rewrite waiting on a pipeline of its own. Every other field `made` changes is a factor
+/// or a texture outside the key, so both share one pipeline.
+fn waiting_material(
+    original: &StandardMaterial,
+    made: &TankSurfaceMaterial,
+) -> TankSurfaceMaterial {
+    TankSurfaceMaterial {
+        base: StandardMaterial {
+            normal_map_texture: None,
+            ..original.clone()
+        },
+        extension: TankSurface {
+            params: TankSurfaceParams::default(),
+            visual_albedo: None,
+            visual_normal: None,
+            visual_arm: None,
+            camo_pattern: None,
+            rest_frames: made.extension.rest_frames.clone(),
+        },
+    }
+}
+
 // ---------------------------------------------------------------------------------------------
 // The dress
 // ---------------------------------------------------------------------------------------------
@@ -529,6 +575,8 @@ pub(crate) struct SurfaceVehicles {
     looks: HashMap<String, Look>,
     /// The livery's coat, its pattern loaded on first use.
     coat: Option<Coat>,
+    /// Surface materials wearing their glb look while their images load.
+    waiting: Vec<Waiting>,
     /// Every map and pattern loaded, held by id for [`report_failed_surface_map`].
     required: HashSet<AssetId<Image>>,
     /// A 1×1 white image carrying the surface sampler ([`surface_sampler`]): what binding 101
@@ -554,6 +602,7 @@ impl FromWorld for SurfaceVehicles {
             vehicles: HashMap::new(),
             looks: HashMap::new(),
             coat: None,
+            waiting: Vec::new(),
             required: HashSet::new(),
             stand_in: world.resource_mut::<Assets<Image>>().add(stand_in),
         }
@@ -752,7 +801,12 @@ impl Dress<'_, '_> {
         let base = self.standard.get(original).cloned().unwrap_or_default();
         let rest_frames = self.vehicles.vehicles[&scene].rest_frames.clone();
         let made = surface_material(&base, &look, &coat, &self.vehicles.stand_in, rest_frames);
-        let handle = self.surfaces.add(made);
+        let handle = self.surfaces.add(waiting_material(&base, &made));
+        self.vehicles.waiting.push(Waiting {
+            handle: handle.clone(),
+            made,
+            landed: false,
+        });
         self.vehicles
             .vehicles
             .get_mut(&scene)
@@ -866,8 +920,8 @@ fn dress_on_ready(ready: On<WorldInstanceReady>, mut dress: Dress) {
 }
 
 /// Surface a failed surface-map load (ADR-0011, the stance `world::report_failed_terrain_map`
-/// takes). A map that fails to decode leaves the material unprepared, and bevy then draws no
-/// armour at all while every collider stands. Required, in-repo asset ⇒ panic.
+/// takes). A map that fails to decode never lands, so its surfaces would wear their glb look for
+/// the rest of the session with nobody told. Required, in-repo asset ⇒ panic.
 fn report_failed_surface_map(
     mut failures: MessageReader<AssetLoadFailedEvent<Image>>,
     vehicles: Res<SurfaceVehicles>,
@@ -881,6 +935,46 @@ fn report_failed_surface_map(
     }
 }
 
+/// A surface material drawing its glb look ([`waiting_material`]) while the images of the material
+/// it becomes load.
+struct Waiting {
+    handle: Handle<TankSurfaceMaterial>,
+    made: TankSurfaceMaterial,
+    /// Every image `made` binds was in the store at the previous check.
+    landed: bool,
+}
+
+/// Rewrite each waiting surface material in place into the one it becomes, at the first check
+/// after the one that found every image it binds in the store. A rewritten material leaves the
+/// render world until it prepares again, and bevy prepares materials and uploads images in one
+/// render step in no set order (`MaterialPlugin` names no dependency on `GpuImage`, bevy_pbr
+/// `material.rs`): rewritten the frame its last image landed, the surface could miss that frame.
+/// An image in the store at one check has been extracted and uploaded by the next, since no
+/// `RenderAssetBytesPerFrame` budget is set and an upload never waits for a later frame.
+fn finish_waiting(
+    mut vehicles: ResMut<SurfaceVehicles>,
+    images: Res<Assets<Image>>,
+    mut surfaces: ResMut<Assets<TankSurfaceMaterial>>,
+) {
+    if vehicles.waiting.is_empty() {
+        return;
+    }
+    for waiting in std::mem::take(&mut vehicles.waiting) {
+        if waiting.landed {
+            if let Some(mut material) = surfaces.get_mut(&waiting.handle) {
+                *material = waiting.made;
+            }
+        } else {
+            let landed = waiting
+                .made
+                .extension
+                .images()
+                .all(|image| images.contains(image));
+            vehicles.waiting.push(Waiting { landed, ..waiting });
+        }
+    }
+}
+
 /// Mounted on the windowed roots beside `geometry_lod::view_plugin`: the material's render half is
 /// behind the render app, and the dress only ever runs where a view scene lands.
 pub(crate) fn plugin(app: &mut App) {
@@ -888,7 +982,7 @@ pub(crate) fn plugin(app: &mut App) {
         .insert_resource(SurfaceData::shipped())
         .init_resource::<SurfaceVehicles>()
         .add_observer(dress_on_ready)
-        .add_systems(Update, report_failed_surface_map);
+        .add_systems(Update, (report_failed_surface_map, finish_waiting));
 }
 
 #[cfg(test)]
@@ -920,8 +1014,8 @@ mod tests {
 
     /// THE SHIPPED MAPS ARE WHAT THE MATERIAL BINDS. Each pack's three maps and the selected
     /// livery's pattern are real KTX2 (not Git LFS pointers) that bevy's own loader transcodes,
-    /// 1024² with a full mip chain: a map that fails to load leaves the armour undrawn while its
-    /// collider stands, and one without mips shimmers at every range. Pinned against
+    /// 1024² with a full mip chain: a map that fails to load stops the game
+    /// ([`report_failed_surface_map`]), and one without mips shimmers at every range. Pinned against
     /// `CompressedImageFormats::BC`, as the terrain's maps are.
     #[test]
     fn the_shipped_surface_maps_are_mipmapped_1k_ktx2() {
@@ -1133,6 +1227,105 @@ mod tests {
             3,
             "the albedo once, the normal and ARM once"
         );
+    }
+
+    /// A SURFACE IS DRAWN WHILE ITS MAPS LOAD. Bevy leaves a material unprepared, and its meshes
+    /// undrawn, while an image it binds is not on the GPU; the maps start loading only when the
+    /// view lands. So a fresh surface material binds no image of its own and wears its glb
+    /// material's look (less the normal map, which the shader replaces), and is rewritten in place
+    /// into the surface one check after every image it binds is in the store: the render world
+    /// uploads a landed image before it prepares a material rewritten a frame later. A mutant
+    /// binding the maps at once, rewriting the same check the last image lands, or never
+    /// rewriting fails here.
+    #[test]
+    fn a_surface_wears_its_glb_look_until_its_images_land() {
+        let mut app = dress_app();
+        let scene: Handle<WorldAsset> = app
+            .world_mut()
+            .resource_mut::<Assets<WorldAsset>>()
+            .add(WorldAsset::new(World::new()));
+        let glb = StandardMaterial {
+            base_color: Color::srgb(0.2, 0.4, 0.6),
+            perceptual_roughness: 0.3,
+            metallic: 0.7,
+            normal_map_texture: Some(Handle::default()),
+            ..default()
+        };
+        let (worn_material, decor_material) = {
+            let mut standard = app.world_mut().resource_mut::<Assets<StandardMaterial>>();
+            (
+                standard.add(glb.clone()),
+                standard.add(StandardMaterial::default()),
+            )
+        };
+        let (root, worn, _) = spawn_view(&mut app, &scene, &worn_material, &decor_material);
+        app.world_mut()
+            .run_system_once(move |mut dress: Dress| dress.vehicle(root))
+            .expect("the dress runs");
+        let handle = app
+            .world()
+            .get::<MeshMaterial3d<TankSurfaceMaterial>>(worn)
+            .expect("the worn primitive wears the surface")
+            .0
+            .clone();
+        let material = |app: &App| {
+            app.world()
+                .resource::<Assets<TankSurfaceMaterial>>()
+                .get(&handle)
+                .expect("the surface material")
+                .clone()
+        };
+        let waiting = |material: &TankSurfaceMaterial| {
+            material.extension.images().next().is_none()
+                && material.extension.params.flags == 0
+                && material.base.base_color == glb.base_color
+                && material.base.perceptual_roughness == glb.perceptual_roughness
+                && material.base.metallic == glb.metallic
+                && material.base.normal_map_texture.is_none()
+        };
+        assert!(
+            waiting(&material(&app)),
+            "the glb look while the images load"
+        );
+
+        let finish = |app: &mut App| {
+            app.world_mut()
+                .run_system_once(finish_waiting)
+                .expect("the check runs");
+        };
+        finish(&mut app);
+        assert!(waiting(&material(&app)), "no image has landed");
+
+        let pending: Vec<AssetId<Image>> = app.world().resource::<SurfaceVehicles>().waiting[0]
+            .made
+            .extension
+            .images()
+            .map(Handle::id)
+            .collect();
+        let bound = pending.len();
+        assert!(bound > 1, "fixture data: the worn visual binds maps");
+        let mut images = app.world_mut().resource_mut::<Assets<Image>>();
+        for id in pending {
+            if !images.contains(id) {
+                images
+                    .insert(id, Image::default())
+                    .expect("a live handle's id");
+            }
+        }
+        finish(&mut app);
+        assert!(
+            waiting(&material(&app)),
+            "not rewritten the check its images land"
+        );
+        finish(&mut app);
+        let made = material(&app);
+        assert!(!waiting(&made), "rewritten a check after its images land");
+        assert_eq!(
+            made.extension.images().count(),
+            bound,
+            "it binds its images"
+        );
+        assert!(app.world().resource::<SurfaceVehicles>().waiting.is_empty());
     }
 
     /// One vehicle's view as a scene lands it: a root with two nodes, the outer moved, the inner
