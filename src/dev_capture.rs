@@ -91,17 +91,6 @@ pub fn plugin(app: &mut App) {
 }
 
 fn mount(app: &mut App, frames: &plan::Frames) {
-    if frames.ambiguities {
-        use bevy::ecs::schedule::{LogLevel, ScheduleBuildSettings, ScheduleLabel};
-        for label in [Update.intern(), PostUpdate.intern()] {
-            app.edit_schedule(label, |schedule| {
-                schedule.set_build_settings(ScheduleBuildSettings {
-                    ambiguity_detection: LogLevel::Warn,
-                    ..schedule.get_build_settings()
-                });
-            });
-        }
-    }
     let size = frames.size();
     info!(
         "capture: {} at {:?} s, sight {}, {}x{}, ui {}, gizmos {}",
@@ -177,11 +166,6 @@ fn mount(app: &mut App, frames: &plan::Frames) {
                 .before(TransformSystems::Propagate),
             );
         }
-    }
-    if let Some(tab) = &frames.settings {
-        app.insert_resource(
-            crate::settings::CapturePage::named(tab).expect("the plan's tab is validated"),
-        );
     }
     app.insert_resource(Capture {
         path: frames.out.clone(),

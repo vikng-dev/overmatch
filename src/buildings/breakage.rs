@@ -24,8 +24,7 @@
 //!   elements, the moving bodies (a loose piece, a hull, a launched turret) and every other surface
 //!   (the ground, a standing tree); one that stops on a moving body pushes it the same way, through
 //!   avian at the point it stops, and deposits nothing, and one on any other surface does nothing.
-//!   A capture's dust ([`WallDust`]) spends the full pool of each chunk it
-//!   names that stands above grade, and nothing else. The laws then run in order: removal and the
+//!   The laws then run in order: removal and the
 //!   push rule ([`fracture::strike`]), the structural check ([`fracture::structural`]), the weight
 //!   check on what those changed ([`fracture::weigh`]), support ([`fracture::fall`]).
 //! * **Holes** ([`Hole`], drawn only): a line cuts a channel in each chunk it crosses, the cylinder
@@ -452,8 +451,6 @@ struct RawDeposit {
     rays: Vec<(Vec3, Vec3, f32)>,
     /// A burst's blast: where, and its energy and charge.
     blast: Option<(Vec3, Blast)>,
-    /// A capture's dust ([`WallDust`]): the building's root and the law chunks it names.
-    dust: Option<(Entity, Vec<usize>)>,
 }
 
 /// The deposits the march raised this tick.
@@ -471,23 +468,6 @@ pub(crate) struct WallCharge {
 fn set_off(charge: On<WallCharge>, mut queue: ResMut<WallQueue>) {
     queue.0.push(RawDeposit {
         blast: Some((charge.at, charge.blast)),
-        ..default()
-    });
-}
-
-/// AUTHORITY: law chunks of the building at root `building` turned to dust at the next deposits,
-/// each that stands and is not buried taking its full pool: no source, so no push rule, push or
-/// hole. Its user is the capture's wall cue (`crate::dev_capture`), shooting out whole parts of a
-/// house.
-#[derive(Event, Debug, Clone)]
-pub(crate) struct WallDust {
-    pub(crate) building: Entity,
-    pub(crate) chunks: Vec<usize>,
-}
-
-fn queue_dust(dust: On<WallDust>, mut queue: ResMut<WallQueue>) {
-    queue.0.push(RawDeposit {
-        dust: Some((dust.building, dust.chunks.clone())),
         ..default()
     });
 }
@@ -647,8 +627,6 @@ struct Taken {
     field: Vec<(usize, Vec3, f32)>,
     blast: Vec<fracture::RayHit>,
     pushes: Vec<Push>,
-    /// A capture's dust ([`WallDust`]).
-    dust: Vec<usize>,
 }
 
 #[derive(bevy::ecs::system::SystemParam)]
@@ -816,9 +794,6 @@ fn apply_deposits(mut p: DepositParam) {
         if let Some((origin, blast)) = deposit.blast {
             cast_blast(&mut p, &frames, &mut shapes, &mut taken, origin, blast);
         }
-        if let Some((root, chunks)) = deposit.dust {
-            taken.entry(root).or_default().dust = chunks;
-        }
         for (root, taken) in taken {
             let Ok((_, identity, transform, mut breakage)) = p.buildings.get_mut(root) else {
                 continue;
@@ -828,20 +803,9 @@ fn apply_deposits(mut p: DepositParam) {
             let (blast, blast_pushes) = Loading::blast(&taken.blast);
             let holes = holes_of(&kind, frame.scale, &taken.lines, &blast);
             let live = breakage.live();
-            let dust = Loading {
-                sources: Vec::new(),
-                energies: taken
-                    .dust
-                    .iter()
-                    .map(|&c| (c, &live.structure.chunks[c]))
-                    .filter(|&(c, chunk)| live.state.standing(c) && !chunk.buried)
-                    .map(|(c, chunk)| (c, fracture::full_pool(chunk)))
-                    .collect(),
-            };
             let loading = Loading::lines(&taken.lines)
                 .and(Loading::field(&taken.field))
-                .and(blast)
-                .and(dust);
+                .and(blast);
             let changes = run_laws(
                 &kind.layout,
                 live,
@@ -1584,7 +1548,6 @@ pub(crate) fn sim_plugin(app: &mut App) {
         .init_resource::<WallRecord>()
         .add_observer(read_shell)
         .add_observer(set_off)
-        .add_observer(queue_dust)
         .configure_sets(
             FixedPostUpdate,
             WallLawSet.after(crate::state::SimPhase::ProjectileMarch),

@@ -158,14 +158,6 @@ pub(crate) struct Frames {
     /// Who places the player's camera ([`Camera`]). Default the player's own writers.
     #[serde(default)]
     pub(crate) camera: Camera,
-    /// Hold the settings page open on this tab (`video` or `gameplay`), its first row selected, on
-    /// a root that mounts the page. The values it shows are the run's `video.ron`; point
-    /// `OVERMATCH_CONFIG_DIR` at a scratch directory to stage them.
-    #[serde(default)]
-    pub(crate) settings: Option<String>,
-    /// Report `Update` and `PostUpdate` schedule ambiguities.
-    #[serde(default)]
-    pub(crate) ambiguities: bool,
 }
 
 /// Who places the player's camera. One enum, so a pose and a follow cannot both be asked for.
@@ -227,19 +219,15 @@ pub(crate) enum ShotTarget {
     Ground,
 }
 
-/// Shots at one house wall, each at its own second; `sun` picks the wall facing the sun and fires
-/// along its rays.
+/// Shots at one house wall, each at its own second.
 #[derive(Deserialize, Debug, Clone, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct Wall {
     pub(crate) shots: Vec<WallShot>,
-    #[serde(default)]
-    pub(crate) sun: bool,
 }
 
-/// One shot at the wall, at app second `at`: a shipped round square at it, a bare charge of `kg`
-/// set off at its foot, or the house's elements and components `names` shot out, below `below_m`
-/// (building frame) when given (`dev_capture::wall`'s module doc).
+/// One shot at the wall, at app second `at`: a shipped round square at it, or a bare charge of
+/// `kg` set off at its foot (`dev_capture::wall`'s module doc).
 #[derive(Deserialize, Debug, Clone, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub(crate) enum WallShot {
@@ -251,12 +239,6 @@ pub(crate) enum WallShot {
     },
     Charge {
         kg: f32,
-        at: f32,
-    },
-    Dust {
-        names: Vec<String>,
-        #[serde(default)]
-        below_m: Option<f32>,
         at: f32,
     },
 }
@@ -331,11 +313,6 @@ impl CapturePlan {
                     }
                 }
             }
-            if let Some(tab) = &frames.settings
-                && crate::settings::CapturePage::named(tab).is_none()
-            {
-                return Err(format!("frames.settings: no settings tab is named {tab:?}"));
-            }
         }
         if let Some(fell) = &self.fell
             && !fell.at.is_finite()
@@ -395,19 +372,6 @@ impl CapturePlan {
                             return Err(format!("wall.shots: a charge of {kg} kg"));
                         }
                     }
-                    WallShot::Dust {
-                        ref names,
-                        below_m,
-                        at,
-                    } => {
-                        finite_at("wall.shots", at)?;
-                        if names.is_empty() || names.iter().any(String::is_empty) {
-                            return Err(format!("wall.shots: dust names {names:?}"));
-                        }
-                        if below_m.is_some_and(|below| !below.is_finite()) {
-                            return Err(format!("wall.shots: dust below {below_m:?} m"));
-                        }
-                    }
                 }
             }
         }
@@ -457,8 +421,6 @@ mod tests {
                     sight: true,
                     step_s: 0.0078125,
                     camera: Pose(eye: (1.0, 2.0, 3.0), look: (0.0, 0.0, 0.0)),
-                    settings: Some("video"),
-                    ambiguities: true,
                 ),
                 fell: (instance: "tree_0001", at: 4.0, cut: 1, dir: 3),
                 impacts: [(x: 1.0, z: -2.0, calibre_m: 0.088, at: 5.0)],
@@ -467,9 +429,7 @@ mod tests {
                     shots: [
                         Round(round: "88mm_AP", at: 7.0),
                         Charge(kg: 2.0, at: 8.0),
-                        Dust(names: ["east", "north"], below_m: 0.225, at: 9.0),
                     ],
-                    sun: true,
                 ),
                 scene: (
                     sun_elevation_deg: 12.5,
@@ -484,7 +444,7 @@ mod tests {
         assert_eq!(frames.out, PathBuf::from("out/f.png"));
         assert_eq!(frames.at, vec![9.0, 12.0]);
         assert_eq!(frames.size(), UVec2::new(640, 360));
-        assert!(!frames.ui && !frames.gizmos && frames.sight && frames.ambiguities);
+        assert!(!frames.ui && !frames.gizmos && frames.sight);
         assert_eq!(frames.step_s, Some(0.0078125));
         assert_eq!(
             frames.camera,
@@ -493,7 +453,6 @@ mod tests {
                 look: (0.0, 0.0, 0.0),
             }
         );
-        assert_eq!(frames.settings.as_deref(), Some("video"));
         assert_eq!(
             plan.fell,
             Some(Fell {
@@ -531,13 +490,7 @@ mod tests {
                         at: 7.0,
                     },
                     WallShot::Charge { kg: 2.0, at: 8.0 },
-                    WallShot::Dust {
-                        names: vec!["east".into(), "north".into()],
-                        below_m: Some(0.225),
-                        at: 9.0,
-                    },
                 ],
-                sun: true,
             })
         );
         assert_eq!(
@@ -575,9 +528,8 @@ mod tests {
         let frames = plan.frames.as_ref().expect("frames");
         assert_eq!(frames.at, vec![6.0]);
         assert_eq!(frames.size(), UVec2::new(2560, 1440));
-        assert!(frames.ui && frames.gizmos && !frames.sight && !frames.ambiguities);
+        assert!(frames.ui && frames.gizmos && !frames.sight);
         assert_eq!((frames.step_s, frames.camera), (None, Camera::Player));
-        assert_eq!(frames.settings, None);
         assert_eq!(
             (&plan.fell, plan.impacts.is_empty(), &plan.shot, &plan.wall),
             (&None, true, &None, &None)
@@ -596,7 +548,7 @@ mod tests {
 
     /// A PLAN THAT CANNOT MEAN WHAT IT SAYS FAILS THE BOOT, NAMING ITS FIELD (ADR-0011): a typo, a
     /// missing path, an empty or negative time, a zero side, a non-positive step, a degenerate
-    /// pose, an unknown tab, a non-positive calibre or charge, an empty dust name, a sun at or past
+    /// pose, a non-positive calibre or charge, a sun at or past
     /// the zenith, an unknown demo. Each was a silent default or a skipped cue under the variables
     /// the plan replaced.
     #[test]
@@ -635,10 +587,6 @@ mod tests {
                 "up",
             ),
             (
-                r#"(frames: (out: "f.png", settings: "audio"))"#.to_owned(),
-                "frames.settings",
-            ),
-            (
                 "(impacts: [(x: 0.0, z: 0.0, calibre_m: 0.0, at: 1.0)])".to_owned(),
                 "impacts",
             ),
@@ -649,10 +597,6 @@ mod tests {
             ("(wall: (shots: []))".to_owned(), "wall.shots"),
             (
                 "(wall: (shots: [Charge(kg: 0.0, at: 1.0)]))".to_owned(),
-                "wall.shots",
-            ),
-            (
-                r#"(wall: (shots: [Dust(names: ["east", ""], at: 1.0)]))"#.to_owned(),
                 "wall.shots",
             ),
             (

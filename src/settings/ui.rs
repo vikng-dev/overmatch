@@ -901,8 +901,6 @@ pub(super) fn plugin(app: &mut App) {
         .add_systems(
             Update,
             (
-                // First, so a capture's pin overrides whatever the root's declarer just wrote.
-                pin_for_capture.run_if(resource_exists::<CapturePage>),
                 // Input first, then the refresh reads the same frame's result — so a keypress
                 // repaints immediately instead of one frame late.
                 (keyboard_input, mouse_input),
@@ -947,36 +945,6 @@ pub(super) fn declare_from_pause_state(
     visible.set_if_neq(SettingsPageVisible(
         *state.get() == crate::state::AppState::Paused,
     ));
-}
-
-/// Holds the page open on one tab, its first row selected, whatever the pause surface declares —
-/// the capture lever `dev_capture` inserts for a capture plan's `frames.settings`. Nothing else
-/// inserts it, so a shipped run never sees it.
-#[derive(Resource, Clone, Copy, Debug)]
-pub(crate) struct CapturePage(Tab);
-
-impl CapturePage {
-    /// The tab whose label is `name`, any case.
-    pub(crate) fn named(name: &str) -> Option<Self> {
-        Tab::ORDER
-            .into_iter()
-            .find(|tab| tab.label().eq_ignore_ascii_case(name.trim()))
-            .map(Self)
-    }
-}
-
-/// [`CapturePage`]'s system. Writes the tab once, so the page is otherwise left as the player's
-/// input would leave it.
-fn pin_for_capture(
-    pin: Res<CapturePage>,
-    mut visible: ResMut<SettingsPageVisible>,
-    mut page: ResMut<Page>,
-) {
-    visible.set_if_neq(SettingsPageVisible(true));
-    if page.tab != pin.0 {
-        page.open(pin.0);
-        page.step(1, |_| true);
-    }
 }
 
 fn spawn_page(
@@ -2276,18 +2244,6 @@ mod tests {
             "one row per driven value — and the PRESET hint says \"nine rows\"",
         );
         assert_eq!(DRIVEN_ROWS, 9, "the PRESET hint says \"nine rows\"");
-    }
-
-    /// The capture lever names a tab by its label, in any case, and nothing else.
-    #[test]
-    fn a_capture_names_a_tab_by_its_label() {
-        for tab in Tab::ORDER {
-            assert_eq!(
-                CapturePage::named(&tab.label().to_lowercase()).map(|pin| pin.0),
-                Some(tab),
-            );
-        }
-        assert!(CapturePage::named("audio").is_none());
     }
 
     /// The slider mapping round-trips through the Row API for every ladder stop of every slider
