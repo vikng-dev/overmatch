@@ -10,7 +10,10 @@ emptied, knocked out. Decided with Yan on 2026-10-26; the research behind it is 
 ## Decisions taken (settled; do not reopen in the lanes)
 - Trees first; buildings reuse the skeleton (identity, HP, state, wire word, client derive, props build).
 - States on the wire, never physics. One word per tree.
-- A fallen trunk blocks rounds and sight, NOT hulls: tanks roll over it without a bump this slice.
+- A fallen trunk blocks rounds, sight and hulls: a lying piece keeps the collision it stood with
+  (A2), so a hull meets it under the shared contact law. The slice's first call, "NOT hulls: tanks
+  roll over it without a bump", is withdrawn: a piece that falls is the same wood, so what it
+  collides with is the body's, never the state's.
 - Realistic sizes from a species table with provenance, not the graybox 14–19 m.
 - The trunk is a stack of ~1.5–2 m segments; a cut snaps to a segment boundary; k = 0 is a whole-tree fell.
 - Dose empties the pool → `Down { cut: segment of the emptying hit's entry height, dir: the round's horizontal direction }` (falls away from the shooter).
@@ -61,7 +64,7 @@ The canopy appears only in the view. The sim side is built from this file at spa
 
 ### 5. Layers and bodies
 - Standing: one static body per tree, a compound of capsules (one per segment), memberships `[Terrain, Armor]`, with `BallisticVolume` of the species' substance so the union walk charges chord × factor and the dose feeds the pool.
-- Down: the stump (segments `0..cut`) keeps the standing memberships; the lying piece (segments `cut..`) is a static compound on `[Armor]` only.
+- Down: the stump (segments `0..cut`) and the lying piece (segments `cut..`) both keep the standing memberships and filter (A2).
 - Canopy and caps: no collider.
 
 ### 6. Identity
@@ -87,7 +90,7 @@ Lane A ships a first, ugly `assets/trees/fir_1/` trio within its first hour and 
 
 ## Amendments after Codex's design review (2026-10-26, `codex-slice1-design/verdict.md`): these override the sections above where they differ
 A1. **Bodies.** No `Collider::compound`: the walk's convex collector assumes one entry/exit interval and compound shapes are uncertifiable (`src/ballistics/collect.rs:164, 425`). One static body per tree, each segment its own child entity with its own convex collider under the tree's `BallisticVolume` (ancestry lookup: `src/ballistics.rs:1839`). A segment's shape is the convex hull of two 12-gon rings (r_bottom at 0, r_top at height_m), so boundaries are flat and exact; no capsules. The cut segment is found from the hit's entry height in the instance's local frame against the segment prefix sums (`cut` = the segment containing the height; a height exactly on a boundary belongs to the upper segment); avian's hit data carries no subshape identity.
-A2. **Fallen filters.** The lying piece: memberships `[Armor]`, filters `NONE` (the cast-only armour pattern); rays select by membership, hulls (filters `ALL`) never contact it.
+A2. **One filter in every state.** Every segment carries memberships `[Terrain, Armor]`, filters `ALL`, set at spawn and never changed by the state (`trees::segment_layers`): hulls, debris and rounds meet a lying piece as they met the standing tree, and a hull's contact with it carries the segment's substance friction under the one pair rule. Rejected: the lying piece on `[Armor]` with filters `NONE` (the cast-only armour pattern), which rays selected and hulls never contacted; a fallen piece is the same wood, so its collision is the body's, not the state's. Known limit: a falling piece is a static body re-posed per tick, so the solver gives it no velocity, and a hull under a falling trunk is pushed out at the solver's overlap speed (avian's `max_overlap_solve_speed`), not struck with the trunk's momentum.
 A3. **Word encoding.** `Standing = 0`; `Down = ((cut + 1) << 8) | dir`; explicit encode/decode (not serde-derived); `cut < segments.len() ≤ 255`; non-canonical words rejected on decode.
 A4. **Transition tick.** Each ledger entry carries the server tick of the transition: `(index: u16, word: u16, tick: u32)`. Presentation fuses to the cursor (ADR-0037, `src/net/cursor_queue.rs`): animation phase = cursor time − tick; a late joiner's old entries are already at rest. "Nothing else crosses the wire" is amended to this.
 A5. **Caps.** Interior cut k ≥ 1 reveals `cap_top_{k-1}` and `cap_bottom_{k}`; cut 0 reveals `cap_bottom_0` only. Segment nodes: identity rotation, unit scale, the translation chain only. Extras bind view parts; the RON alone supplies sim pivots and dimensions (ADR-0014).
