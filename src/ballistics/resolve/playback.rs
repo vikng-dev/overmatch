@@ -5,61 +5,7 @@
 use super::*;
 use crate::ballistics::{DoseContext, ShotDose, SpallCone, SpallMarks};
 
-struct Stretch {
-    from: Vec3,
-    axis: Dir3,
-    length: f64,
-    before: f64,
-    after: f64,
-    seconds: f64,
-}
-
-impl Stretch {
-    fn speed_at(&self, round: &SolidShot, fraction: f64) -> f64 {
-        round.speed_between(self.before, self.after, fraction)
-    }
-
-    fn seconds_at(&self, round: &SolidShot, fraction: f64) -> f64 {
-        if fraction <= 0.0 {
-            return 0.0;
-        }
-        if fraction >= 1.0 {
-            return self.seconds;
-        }
-        round.flight_time(
-            super::super::mechanism::SolidShotState { speed: self.before },
-            super::super::mechanism::SolidShotState {
-                speed: self.speed_at(round, fraction),
-            },
-            self.length * fraction,
-        )
-    }
-
-    fn at(&self, round: &SolidShot, seconds: f64) -> (Vec3, f32) {
-        let fraction = if seconds >= self.seconds {
-            1.0
-        } else if seconds <= 0.0 {
-            0.0
-        } else {
-            // A monotone clock, including rest, has one path point for this elapsed time.
-            // DERIVED: bisection's path interval is narrower than length / 2^48.
-            let (mut lo, mut hi) = (0.0, 1.0);
-            for _ in 0..48 {
-                let mid = (lo + hi) * 0.5;
-                if self.seconds_at(round, mid) < seconds {
-                    lo = mid;
-                } else {
-                    hi = mid;
-                }
-            }
-            (lo + hi) * 0.5
-        };
-        (
-            self.from + self.axis * (self.length * fraction) as f32,
-            self.speed_at(round, fraction) as f32,
-        )
-    }
-}
+use super::super::path::{FlightOutcome, PathImpact, Span as Stretch};
 
 struct Crossing {
     decision: Decision,
@@ -439,6 +385,75 @@ impl Playback {
                 },
             ),
         );
+    }
+
+    /// The game's damage model exports the very stretches the authority plays, with no topology.
+    pub(crate) fn public_path(
+        &self,
+        shot: crate::ShotId,
+        sequence: u32,
+        tick: u32,
+        fraction: f64,
+        ordinal: u32,
+        drag_k: f32,
+    ) -> FlightOutcome {
+        let world = self.flight_at_end();
+        let (stopped, impact) = match self.world_decision() {
+            Decision::Clear { .. } => (false, None),
+            Decision::Bounce(bounce) => (
+                false,
+                Some(PathImpact::Bounce {
+                    at: bounce.position,
+                    normal: bounce.normal,
+                    direction: *bounce.direction,
+                    ordinal,
+                }),
+            ),
+            Decision::Bite(bite) => match bite.end {
+                BiteEnd::Embedded { at, .. } => (
+                    true,
+                    Some(PathImpact::Stopped {
+                        at,
+                        normal: bite.normal,
+                        ordinal,
+                    }),
+                ),
+                BiteEnd::Perforated { .. } => (
+                    false,
+                    Some(PathImpact::Through {
+                        at: bite.entrance,
+                        normal: bite.normal,
+                        ordinal,
+                    }),
+                ),
+            },
+        };
+        FlightOutcome {
+            body: self.crossing.round.body(),
+            drag_k,
+            shot,
+            sequence,
+            tick,
+            fraction,
+            spans: self.crossing.path.clone(),
+            carrier: self.carrier,
+            resume: world.0,
+            velocity: world.1,
+            stopped,
+            impact,
+        }
+    }
+
+    fn flight_at_end(&self) -> (Vec3, Vec3) {
+        let end = self.crossing.at(self.crossing.seconds);
+        (
+            end.position + self.carrier * self.crossing.seconds as f32,
+            end.direction * end.speed + self.carrier,
+        )
+    }
+
+    pub(crate) fn seconds(&self) -> f64 {
+        self.crossing.seconds
     }
 
     pub(crate) fn in_moving_frame(&mut self, velocity: Vec3) {

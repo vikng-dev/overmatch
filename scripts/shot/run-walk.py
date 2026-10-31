@@ -5,6 +5,7 @@ import argparse
 from collections import Counter
 import json
 import os
+import signal
 from pathlib import Path
 import subprocess
 import sys
@@ -46,7 +47,8 @@ def run_one(root, out, seconds, index):
             elapsed = time.monotonic() - live
         finally:
             if server.poll() is None:
-                server.terminate()
+                # Bevy's terminal handler exits the app and flushes the final trace buffers.
+                server.send_signal(signal.SIGINT)
             try:
                 server.wait(timeout=10)
             except subprocess.TimeoutExpired:

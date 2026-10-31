@@ -2,62 +2,11 @@
 # requires-python = ">=3.11"
 # dependencies = ["numpy"]
 # ///
-"""The shot-lifecycle instrument's offline join (src/shot_trace.rs, `SPIKE_SHOT_TRACE`).
+"""The game's damage model: join fire, public-path playback, damage receipts and trail evidence.
 
-This script joins a recorded client/server run and measures the visible shot lifecycle.
-The transport has two deliberately separate policies: automatic-fire facts get three
-bounded visual send opportunities; single-fire facts and private damage get one reliable
-application send. It reports which nonempty-target calls Lightyear accepted into each policy.
-
-It joins the role-suffixed client and server JSONL traces a `SPIKE_SHOT_TRACE` run
-writes and reports, per shot:
-
-  - LIFECYCLE RECONSTRUCTION: fired → broadcast → received (deduped?) → shell spawned →
-    contact → held(n ticks) → re-seeded / confirmed / dissolved → end.
-  - HOLD-TIME HISTOGRAM: how long shells ACTUALLY held, split by how the hold ended
-    (re-seeded from a keyframe / resolved at a confirm / expired). This is the number
-    that sizes `RICOCHET_HOLD_TICKS`: the window must cover the tail, and every
-    `expired` is a shot whose picture was lost.
-  - ARRIVAL LEAD: `recv_tick − server_tick` for keyframes and confirms — the client's
-    prediction lead plus one-way latency, `(P − S) + OWL`. A client shell reaches the
-    plate at local tick ≈ the server's bounce tick (both timelines index the same
-    trajectory), so this distribution IS the cause of the hold histogram, and the hold
-    window must cover it.
-  - COPIES PER EVENT: how many nonempty-target application sends Lightyear accepted for each fact,
-    split into reliable and visual policies. Keyframes are identified by their bounce
-    sequence, so multiple bounces from one shot cannot be conflated.
-  - CARRY-THROUGH: of every ricochet the authority sanctioned, what fraction actually
-    re-seeded a client shell — vs dissolved before consumption, delivered but never
-    consumed, or never delivered.
-  - DEDUP: how often repeated visual copies were rejected by the receive gate.
-  - EXACTLY-ONCE: shots whose cosmetic shell spawned more than once (a dedup failure) or
-    never spawned, plus authored damaging
-    shots that raised zero or multiple marker boundaries.
-  - TRAIL CONSUMPTION: whether every received sanctioned bounce reached a captured ribbon
-    station strictly after its authoritative re-anchor, rather than stopping at impact/path state.
-
-Cross-process joining uses the stable match-local `(combatant, weapon, fire_tick)` key.
-It is deliberately plain wire data rather than a receiver-local entity reference, so two
-simultaneous same-slot shots remain distinct and a post-respawn outcome remains joinable.
-
-Delivery accounting: tick-exact identity binds authoritative facts, but it does NOT bind a
-client's own prediction to the server's execution. The server fails closed on unattested
-input ticks (ADR-0022/0029), so under jitter a client's own predicted fire may be RE-TIMED
-(executed 1-3 ticks later than predicted) or REJECTED outright (the server never executes
-the predicted round and fires on its own later schedule instead). That is the attestation
-design working, not a delivery defect, so the analyzer CLASSIFIES those own-tank identity
-drifts (`retimed_own_prediction`, `rejected_own_prediction`, `own_echo`) instead of failing
-them; cross-tank fires keep strict tick-exact exactly-once semantics. Classification never
-excuses the transport: a re-timed or echoed own round must still show delivery (`fire_rx`),
-and a run whose client capture ends well before the server's is refused outright rather
-than scored against a shrunken client trace.
-
-Ticks are converted to milliseconds with the trace's own `tick_hz` (from the `meta` row),
-so a re-tuned tick rate does not silently rescale the report.
-
-Usage:
-    uv run scripts/shot/analyze.py --client S.client.jsonl --server S.server.jsonl
-        [--samples N] [--json]
+Automatic fire announcements use bounded visual copies. Resolved paths and private damage use
+reliable delivery. Public paths are identified by (ShotId, sequence), with no client armour test
+or contact wait. The report distinguishes arrival from playback at the shared presentation cursor.
 """
 
 from __future__ import annotations
@@ -70,16 +19,13 @@ from pathlib import Path
 
 import numpy as np
 
-# DERIVED policy: the hold window is "adequate" if it covers this share of observed
-# arrival leads.
-COVERAGE_TARGET = 0.99
 # DERIVED from `ballistics::TRACER_MAX_CALIBER`: at/above this, the shell owns the smoke ribbon
 # whose post-bounce consumption rows are under analysis.
 MAIN_GUN_MIN_CALIBER = 0.02
 # End-of-trace exclusion window: a server fire within this many ticks of the client trace's
 # last recorded row (on either side) cannot fairly be scored as lost — the capture stopped
-# before the ~8-tick (p50) catch-up delivery could land. 16 ticks is the hold-window scale and
-# comfortably covers the observed fire catch-up distribution. Twice this window is also the
+# before catch-up delivery could land. ASSUMED diagnostic tail allowance: 16 ticks.
+# Twice this window is also the
 # maximum client/server trace-end skew the strict verifier accepts before refusing the run.
 TRACE_END_WINDOW_TICKS = 16
 
@@ -134,42 +80,20 @@ def fmt_ticks(values, hz: float) -> str:
     )
 
 
-def histogram(values, bound: int) -> list[str]:
-    """A text histogram of hold ticks, one bucket per tick up to the configured window
-    bound (the constant under test), plus an over-the-bound bucket."""
-    if not len(values):
-        return ["      (no holds recorded)"]
-    counts = defaultdict(int)
-    for v in values:
-        counts[int(v)] += 1
-    top = max(counts.values())
-    lines = []
-    for t in range(0, bound + 2):
-        n = counts.get(t, 0)
-        if t == bound + 1:
-            n = sum(c for k, c in counts.items() if k > bound)
-            label = f">{bound}"
-        else:
-            label = str(t)
-        bar = "#" * int(round(40 * n / top)) if top else ""
-        lines.append(f"      {label:>4}t  {n:>6}  {bar}")
-    return lines
-
-
 def analyze(cmeta: dict, crows: list[dict], smeta: dict, srows: list[dict]) -> dict:
     hz = float(cmeta.get("tick_hz") or smeta.get("tick_hz") or 64)
-    hold_bound = int(cmeta.get("hold_ticks") or smeta.get("hold_ticks") or 16)
     # --- index every row by shot key -----------------------------------------------------
     server: dict[tuple[int, int, int], dict] = defaultdict(lambda: defaultdict(list))
     for r in srows:
         # `send` joins below; `transport` and `reliable_outbox` are per-tick aggregates with no
         # ShotId (`src/shot_trace.rs`).
-        if r["k"] in ("send", "transport", "reliable_outbox"):
+        if r["k"] in ("send", "transport", "reliable_outbox") or not all(k in r for k in ("c", "w", "ft")):
             continue
         server[shot_key(r)][r["k"]].append(r)
     client: dict[tuple[int, int, int], dict] = defaultdict(lambda: defaultdict(list))
     for r in crows:
-        client[shot_key(r)][r["k"]].append(r)
+        if all(k in r for k in ("c", "w", "ft")):
+            client[shot_key(r)][r["k"]].append(r)
 
     # Send rows preserve the normal ShotId and add `age`, `rel`, and (for keyframes) `seq`.
     sends_by_key: dict[tuple[int, int, int], list[dict]] = defaultdict(list)
@@ -352,21 +276,11 @@ def analyze(cmeta: dict, crows: list[dict], smeta: dict, srows: list[dict]) -> d
         if client[k].get("fire_rx") and not client[k].get("spawn") and not client[k].get("end")
     ]
 
-    # --- hold-time histogram --------------------------------------------------------------
-    holds = {"bounce": [], "terminal": [], "expired": []}
-    for r in crows:
-        if r["k"] == "hold":
-            holds.setdefault(r.get("res", "?"), []).append(r.get("held", 0))
-    all_holds = [h for v in holds.values() for h in v]
-
     # --- fire catch-up: (P − S) + one-way latency, per observed FireEvent -----------------
     # The direct measurement of the "~10-tick catch-up" that ADR-0032 records as DERIVED, never
     # measured. Own shots carry cu=0 by construction, so only observed fire matters here.
     fire_cu = [r["cu"] for r in crows if r["k"] == "fire_rx" and not r.get("dup") and "cu" in r]
 
-    # --- arrival lead (the hold window's cause) -------------------------------------------
-    kf_lead = [tick_diff(r["t"], r["bt"]) for r in crows if r["k"] == "kf_rx" and not r.get("dup")]
-    cf_lead = [tick_diff(r["t"], r["it"]) for r in crows if r["k"] == "cf_rx" and not r.get("dup")]
     dmg_lead = [
         tick_diff(r["t"], r["dt"])
         for r in crows
@@ -378,13 +292,13 @@ def analyze(cmeta: dict, crows: list[dict], smeta: dict, srows: list[dict]) -> d
     # policy, not a guess based on weapon type. A keyframe's sequence is part of its identity;
     # falling back to zero would silently merge a later bounce with bounce zero.
     copies: dict[str, dict[str, list[int]]] = {
-        "reliable": {"fire": [], "kf": [], "cf": [], "dmg": []},
-        "visual": {"fire": [], "kf": [], "cf": [], "dmg": []},
+        "reliable": {"fire": [], "path": [], "dmg": []},
+        "visual": {"fire": [], "path": [], "dmg": []},
     }
-    missing_kf_send_sequence = 0
+    missing_path_send_sequence = 0
     for key, kinds in server.items():
         sends = sends_by_key.get(key, [])
-        for stream in ("fire", "cf", "dmg"):
+        for stream in ("fire", "dmg"):
             for emission in kinds.get(stream, []):
                 matching = [r for r in sends if r.get("s") == stream]
                 for policy, reliable in (("reliable", True), ("visual", False)):
@@ -394,67 +308,35 @@ def analyze(cmeta: dict, crows: list[dict], smeta: dict, srows: list[dict]) -> d
                             for r in matching
                         )
                     )
-        for kf in kinds.get("kf", []):  # a shot may bounce more than once
+        for kf in kinds.get("path_tx", []):  # a shot may bounce more than once
             seq = kf.get("seq")
-            matching = [r for r in sends if r.get("s") == "kf" and r.get("seq") == seq]
-            if any(r.get("s") == "kf" and "seq" not in r for r in sends):
-                missing_kf_send_sequence += 1
+            matching = [r for r in sends if r.get("s") == "path" and r.get("seq") == seq]
+            if any(r.get("s") == "path" and "seq" not in r for r in sends):
+                missing_path_send_sequence += 1
             for policy, reliable in (("reliable", True), ("visual", False)):
-                copies[policy]["kf"].append(
+                copies[policy]["path"].append(
                     sum(r.get("rel") is reliable and int(r.get("rcpt", 1)) > 0 for r in matching)
                 )
 
-    # --- carry-through: the fate of every sanctioned ricochet -----------------------------
-    def consumed_bounce(kinds: dict, seq: int) -> str | None:
-        for r in kinds.get("hold", []):
-            if r.get("res") == "bounce" and r.get("seq") == seq:
-                return "reseeded_hold"
-        for r in kinds.get("contact", []):
-            if r.get("res") == "pre_bounce" and r.get("seq") == seq:
-                return "reseeded_prearmed"
-        for r in kinds.get("overdue", []):
-            if r.get("res") == "bounce" and r.get("seq") == seq:
-                return "reseeded_overdue"
-        return None
-
-    # Own shots are KEPT here, unlike in the delivery accounting above: the shooter's own shell
-    # consumes its own keyframes (that is the fall-of-shot read the whole carry-through exists
-    # for — `receive_fire_events` deliberately does not drop keyframes for locally-fired tanks).
-    carry = defaultdict(int)
+    # A path may arrive before fire or after its cursor crossing. Sequence joins are exact.
+    paths = defaultdict(int)
     for key, kinds in server.items():
-        for kf in kinds.get("kf", []):
-            seq = kf.get("seq", 0)
-            ckinds = client.get(key, {})
-            got = any(r.get("seq") == seq and not r.get("dup") for r in ckinds.get("kf_rx", []))
-            outcome = consumed_bounce(ckinds, seq)
-            if outcome:
-                carry[outcome] += 1
-            elif not got:
-                carry["never_delivered"] += 1
-            elif any(r.get("res") == "expired" for r in ckinds.get("hold", [])):
-                carry["dissolved"] += 1
+        if key not in observed_expected and key not in own_identity:
+            continue
+        for sent in kinds.get("path_tx", []):
+            seq = sent.get("seq")
+            received = [r for r in client.get(key, {}).get("path_rx", []) if r.get("seq") == seq]
+            if any(r.get("result") == "Inserted" for r in received):
+                paths["delivered"] += 1
+            elif received:
+                paths["refused"] += 1
             else:
-                carry["never_consumed"] += 1
-
-    # --- terminals ------------------------------------------------------------------------
-    term = defaultdict(int)
-    for key, kinds in server.items():
-        for _cf in kinds.get("cf", []):
-            ckinds = client.get(key, {})
-            got = any(not r.get("dup") for r in ckinds.get("cf_rx", []))
-            resolved = (
-                any(r.get("res") == "terminal" for r in ckinds.get("hold", []))
-                or any(r.get("res") == "pre_term" for r in ckinds.get("contact", []))
-                or any(r.get("res") == "terminal" for r in ckinds.get("overdue", []))
-            )
-            if resolved:
-                term["resolved"] += 1
-            elif not got:
-                term["never_delivered"] += 1
-            elif any(r.get("res") == "expired" for r in ckinds.get("hold", [])):
-                term["dissolved"] += 1
-            else:
-                term["never_consumed"] += 1
+                paths["missing_delivery"] += 1
+            if any(r.get("seq") == seq for r in client.get(key, {}).get("path_done", [])):
+                paths["completed"] += 1
+            elif received and sent.get("impact") != "state":
+                # A still-future effect at the trace boundary is observable as pending.
+                paths["pending"] += 1
 
     # --- how each observed shell's picture ENDED ------------------------------------------
     ends = defaultdict(int)
@@ -492,8 +374,10 @@ def analyze(cmeta: dict, crows: list[dict], smeta: dict, srows: list[dict]) -> d
         is_main_gun = any(float(fire.get("cal", 0.0)) >= MAIN_GUN_MIN_CALIBER for fire in kinds.get("fire", []))
         if not is_main_gun:
             continue
-        for kf in kinds.get("kf", []):
-            seq = kf.get("seq", 0)
+        for kf in kinds.get("path_tx", []):
+            if kf.get("impact") != "bounce":
+                continue
+            seq = kf["ordinal"]
             rows = [r for r in client.get(key, {}).get("trail", []) if r.get("seq") == seq]
             if any(r.get("res") == "post_bounce_consumed" for r in rows):
                 trail["consumed"] += 1
@@ -505,16 +389,6 @@ def analyze(cmeta: dict, crows: list[dict], smeta: dict, srows: list[dict]) -> d
                 trail["ribbon_missing"] += 1
             else:
                 trail["no_row"] += 1
-    catchup_holds = sum(
-        1 for r in crows if r["k"] == "catchup" and r.get("res") == "armor_hold"
-    )
-
-    # --- window sizing verdict ------------------------------------------------------------
-    # The hold window must cover the arrival lead's tail: a keyframe that lands later than the
-    # window is a dissolved shot. Sized off the OBSERVED leads (not the observed holds, which
-    # are already truncated BY the window — the histogram cannot see past its own bound).
-    need = pct(kf_lead + cf_lead, COVERAGE_TARGET * 100) if (kf_lead or cf_lead) else float("nan")
-
     # Reattach sends only for lifecycle reconstruction after all shot accounting above. This keeps
     # an unscoped aggregate `transport` row and any malformed send from creating a phantom shot.
     for key, sends in sends_by_key.items():
@@ -522,8 +396,6 @@ def analyze(cmeta: dict, crows: list[dict], smeta: dict, srows: list[dict]) -> d
 
     return {
         "hz": hz,
-        "hold_bound": hold_bound,
-        "overdue_ticks": cmeta.get("overdue_ticks") or smeta.get("overdue_ticks"),
         "server_fires": len(fired),
         "own_shots": len(own_matched),
         "own_predicted": len(own),
@@ -550,26 +422,19 @@ def analyze(cmeta: dict, crows: list[dict], smeta: dict, srows: list[dict]) -> d
         "dup_rows": dup_rows,
         "multi_spawn": len(multi_spawn),
         "no_spawn": len(no_spawn),
-        "holds": {k: v for k, v in holds.items()},
-        "all_holds": all_holds,
         "fire_cu": fire_cu,
-        "kf_lead": kf_lead,
-        "cf_lead": cf_lead,
         "dmg_lead": dmg_lead,
         "copies": copies,
-        "missing_kf_send_sequence": missing_kf_send_sequence,
+        "missing_path_send_sequence": missing_path_send_sequence,
         "transport": transport,
         # Whether the trace carries `send` rows AT ALL. A trace recorded before the server's single
         # send site was instrumented has none, and every copy count would read as a (meaningless) zero
         # — say "not instrumented", never "this event rode no datagrams".
         "sends_seen": sum(1 for r in srows if r["k"] == "send"),
-        "carry": dict(carry),
-        "term": dict(term),
+        "paths": dict(paths),
         "ends": dict(ends),
         "damage": damage,
         "trail": dict(trail),
-        "catchup_holds": catchup_holds,
-        "need_ticks": need,
         "server": server,
         "client": client,
         "expected_keys": sorted(observed_expected),
@@ -606,11 +471,8 @@ def verification_failures(summary: dict) -> list[str]:
     add("duplicate_shots", summary["multi_spawn"])
     add("no_spawn_shots", summary["no_spawn"])
 
-    carry = summary["carry"]
-    add(
-        "sanctioned_bounce_carry_failures",
-        sum(carry.get(outcome, 0) for outcome in ("dissolved", "never_consumed", "never_delivered")),
-    )
+    paths = summary["paths"]
+    add("public_path_failures", paths.get("missing_delivery", 0) + paths.get("refused", 0))
 
     damage = summary["damage"]
     add("missing_shooter_damage_confirms", damage["missing_delivery"])
@@ -642,18 +504,18 @@ def reconstruct(key: tuple[int, int, int], s: dict, c: dict) -> list[str]:
             events.append((r["t"], "C", kind, r))
     events.sort(key=lambda e: (e[0], e[1] != "S"))
     out = [f"    shot combatant={key[0]} weapon={key[1]} fire_tick={key[2]}"]
-    for stream in ("fire", "kf", "cf", "dmg"):
-        emissions = s.get(stream, [])
+    for stream in ("fire", "path", "dmg"):
+        emissions = s.get("path_tx" if stream == "path" else stream, [])
         for emission in emissions:
-            seq = emission.get("seq") if stream == "kf" else None
+            seq = emission.get("seq") if stream == "path" else None
             sent = [
                 r for r in s.get("send", [])
-                if r.get("s") == stream and (stream != "kf" or r.get("seq") == seq)
+                if r.get("s") == stream and (stream != "path" or r.get("seq") == seq)
             ]
             if sent:
                 visual = sum(r.get("rel") is False and int(r.get("rcpt", 1)) > 0 for r in sent)
                 reliable = sum(r.get("rel") is True and int(r.get("rcpt", 1)) > 0 for r in sent)
-                detail = f" seq={seq}" if stream == "kf" else ""
+                detail = f" seq={seq}" if stream == "path" else ""
                 out.append(
                     f"      [S] accepted {stream:<4}{detail} visual×{visual} reliable×{reliable}"
                 )
@@ -666,198 +528,12 @@ def reconstruct(key: tuple[int, int, int], s: dict, c: dict) -> list[str]:
     return out
 
 
-def report(a: dict, samples: int) -> None:
-    hz = a["hz"]
-    ms = 1000.0 / hz
-    line = "=" * 92
-    print(line)
-    print("  SHOT-LIFECYCLE INSTRUMENT — client/server ShotId join")
-    print(line)
-    print(
-        f"  tick_hz={hz:.0f}   configured: RICOCHET_HOLD_TICKS={a['hold_bound']} "
-        f"({a['hold_bound'] * ms:.0f} ms)   OVERDUE_MARGIN_TICKS={a['overdue_ticks']}"
-    )
-
-    print("\n  DELIVERY  (shots the server broadcast that this client should observe)")
-    print(f"    analyzable server fires      {a['server_fires']}")
-    print(f"      of which this client's own {a['own_shots']}  (tick-exact prediction matches — never echoed back)")
-    print(f"    unaddressed (no recipient)   {a['unaddressed']}   (fired on a tick with no client connected)")
-    print(f"    expected on this client      {a['expected']}   (cross-tank fires; strict exactly-once)")
-    print(f"    delivered                    {a['delivered']}")
-    print(f"    LOST (never arrived)         {a['lost']}")
-    print(
-        f"    duplicate events rejected    {a['dup_rows']}   "
-        "(repeated visual copies rejected by ShotId dedup)"
-    )
-
-    print("\n  OWN-TANK FIRE IDENTITY  (input attestation is fail-closed — ADR-0022/0029)")
-    print(
-        f"    retimed predictions          {a['retimed_own_prediction']}   "
-        "(server executed the client's own round 1-3 ticks after the predicted tick)"
-    )
-    if a["retimed_delta_hist"]:
-        deltas = "  ".join(f"+{d}t×{n}" for d, n in sorted(a["retimed_delta_hist"].items()))
-        print(f"      re-timing histogram        {deltas}")
-    print(
-        f"    retimed but LOST             {a['retimed_lost']}   "
-        "(paired server fire with no fire_rx — a genuine delivery loss, strict-fatal)"
-    )
-    print(
-        f"    rejected predictions         {a['rejected_own_prediction']}   "
-        "(server declined the unattested tick and never executed the predicted round)"
-    )
-    if a["rejected_own_keys"]:
-        ticks = "  ".join(f"w{w}:{ft}" for _c, w, ft in a["rejected_own_keys"])
-        print(f"      predicted fire ticks       {ticks}")
-    print(
-        f"    own echoes delivered         {a['own_echo_delivered']}   "
-        "(server-scheduled own rounds seen as fire_rx; spawn rightly echo-dropped)"
-    )
-    print(
-        f"    own echoes LOST              {a['own_echo_lost']}   "
-        "(echo with no fire_rx — a genuine delivery loss, strict-fatal)"
-    )
-    print(
-        f"    excluded_at_trace_end        {a['excluded_at_trace_end']}   "
-        f"(server fired within {a['trace_end_window_ticks']} ticks of the client capture's end, "
-        "either side — delivery unobservable)"
-    )
-    if a["client_trace_end_gap_ticks"] > 2 * a["trace_end_window_ticks"]:
-        print(
-            f"    CLIENT TRACE ENDS EARLY      {a['client_trace_end_gap_ticks']} ticks before the "
-            "server trace — capture overlap not established; strict REFUSES this run"
-        )
-
-    print("\n  EXACTLY-ONCE SHELL SPAWN")
-    print(f"    shots spawning >1 shell      {a['multi_spawn']}   (must be 0 — a ShotId dedup failure)")
-    print(f"    delivered but never spawned  {a['no_spawn']}   (bore/tick guard rejected the event)")
-
-    print("\n  HOLD-TIME HISTOGRAM  (ticks a client shell froze at armor awaiting the verdict)")
-    for res in ("bounce", "terminal", "expired"):
-        v = a["holds"].get(res, [])
-        print(f"    ended {res:<9}{fmt_ticks(v, hz)}")
-    print(f"    all holds      {fmt_ticks(a['all_holds'], hz)}")
-    print()
-    for l in histogram(a["all_holds"], a["hold_bound"]):
-        print(l)
-
-    print("\n  ARRIVAL LEAD  (recv tick − server tick = (P − S) + one-way latency)")
-    print(f"    fire catch-up      {fmt_ticks(a['fire_cu'], hz)}")
-    print(f"    ricochet keyframes {fmt_ticks(a['kf_lead'], hz)}")
-    print(f"    impact confirms    {fmt_ticks(a['cf_lead'], hz)}")
-    print(f"    damage confirms    {fmt_ticks(a['dmg_lead'], hz)}")
-    if not np.isnan(a["need_ticks"]):
-        verdict = "ADEQUATE" if a["need_ticks"] <= a["hold_bound"] else "TOO SHORT"
-        print(
-            f"\n    SIZING: covering {COVERAGE_TARGET:.0%} of observed arrivals needs "
-            f"{a['need_ticks']:.0f} ticks ({a['need_ticks'] * ms:.0f} ms); "
-            f"RICOCHET_HOLD_TICKS = {a['hold_bound']} → {verdict}"
-        )
-
-    print("\n  APPLICATION SEND ACCEPTANCES PER FACT  (nonempty target, split by policy)")
-    if not a["sends_seen"]:
-        print("      (no `send` rows — trace predates the server's single-send-site instrumentation)")
-    else:
-        for policy, label in (("visual", "visual (automatic; up to 3)"), ("reliable", "reliable (single/damage; 1)")):
-            print(f"    {label}")
-            for stream, stream_label in (("fire", "fires"), ("kf", "keyframes"), ("cf", "terminals"), ("dmg", "damages")):
-                v = a["copies"][policy][stream]
-                if not v:
-                    continue
-                arr = np.asarray(v, dtype=float)
-                print(f"      {stream_label:<11} n={len(arr):<5d} min={arr.min():.0f}  p50={pct(arr, 50):.1f}  max={arr.max():.0f}")
-        if a["missing_kf_send_sequence"]:
-            print(f"    INCOMPLETE SCHEMA: {a['missing_kf_send_sequence']} keyframe emission(s) cannot be matched: `send.seq` is absent.")
-    transport = a["transport"]
-    if transport["rows"]:
-        print(
-            "    transport trace totals: "
-            + "  ".join(
-                f"{field}={transport[field]}"
-                for field in (
-                    "visual_selected",
-                    "visual_facts_send_accepted",
-                    "visual_batches_send_accepted",
-                    "visual_wire_bytes_send_accepted_upper_bound",
-                    "visual_expired",
-                    "visual_budget_deferred_producers",
-                    "reliable_public_queued",
-                    "private_damage_queued",
-                    "public_no_recipient_facts",
-                    "private_damage_no_recipient_facts",
-                    "send_call_errors",
-                    "send_call_error_facts",
-                )
-            )
-        )
-        print(
-            f"    peak visual queue depth={transport['max_visual_queue_depth']}  "
-            f"peak targeted public recipients={transport['max_public_recipient_count']}"
-        )
-        config = "  ".join(
-            f"{field}={transport[field]}"
-            for field in (
-                "visual_copy_opportunities",
-                "visual_ttl_ticks",
-                "visual_batch_wire_limit",
-                "visual_tick_wire_limit",
-            )
-            if field in transport
-        )
-        if config:
-            print(f"    recorded transport config (DERIVED): {config}")
-
-    print("\n  CARRY-THROUGH  (fate of every ricochet the authority sanctioned)")
-    total = sum(a["carry"].values())
-    for k in (
-        "reseeded_hold",
-        "reseeded_prearmed",
-        "reseeded_overdue",
-        "dissolved",
-        "never_consumed",
-        "never_delivered",
-    ):
-        n = a["carry"].get(k, 0)
-        share = f"{100.0 * n / total:5.1f}%" if total else "    —"
-        print(f"    {k:<20} {n:>6}  {share}")
-    if total:
-        ok = sum(a["carry"].get(k, 0) for k in ("reseeded_hold", "reseeded_prearmed", "reseeded_overdue"))
-        print(f"    carry-through rate   {100.0 * ok / total:5.1f}%  ({ok}/{total})")
-
-    print("\n  TERMINALS  (fate of every ImpactConfirm the authority emitted)")
-    ttotal = sum(a["term"].values())
-    for k in ("resolved", "dissolved", "never_consumed", "never_delivered"):
-        n = a["term"].get(k, 0)
-        share = f"{100.0 * n / ttotal:5.1f}%" if ttotal else "    —"
-        print(f"    {k:<20} {n:>6}  {share}")
-
-    print("\n  SHOOTER MARKERS  (discrete authority damage facts for this client's authored shots)")
-    damage = a["damage"]
-    print(f"    server damage facts          {damage['server']:>6}")
-    print(f"    authored by this client      {damage['authored_expected']:>6}")
-    print(f"    fresh own confirms received  {damage['delivered']:>6}")
-    print(f"    marker boundaries reached    {damage['marked']:>6}")
-    print(f"    MISSING delivery             {damage['missing_delivery']:>6}")
-    print(f"    MISSING marker after receive {damage['missing_marker']:>6}")
-    print(f"    duplicate markers            {damage['duplicate_markers']:>6}")
-    print(f"    stray/non-authored markers   {damage['stray_markers']:>6}")
-
-    print("\n  MAIN-GUN TRAIL  (renderer consumed a station strictly after each sanctioned bounce)")
-    trail = a["trail"]
-    for outcome in ("consumed", "unrendered", "anchor_missing", "ribbon_missing", "no_row"):
-        print(f"    {outcome:<20} {trail.get(outcome, 0):>6}")
-    print(f"    catch-up armor holds         {a['catchup_holds']:>6}")
-
-    print("\n  SHELL ENDINGS  (how each client shell's picture ended)")
-    for why, n in sorted(a["ends"].items(), key=lambda kv: -kv[1]):
-        print(f"    {why:<20} {n:>6}")
-
-    if samples:
-        print("\n  LIFECYCLE RECONSTRUCTION  (first {} shots)".format(samples))
-        for key in a["expected_keys"][:samples]:
-            for l in reconstruct(key, a["server"].get(key, {}), a["client"].get(key, {})):
-                print(l)
-    print()
+def report(summary: dict, samples: int) -> None:
+    payload = {k: v for k, v in summary.items() if k not in ("server", "client", "expected_keys")}
+    print(json.dumps(payload, indent=2, default=float))
+    for key in summary["expected_keys"][:samples]:
+        for line in reconstruct(key, summary["server"].get(key, {}), summary["client"].get(key, {})):
+            print(line)
 
 
 def main() -> int:
@@ -885,10 +561,6 @@ def main() -> int:
     failures = verification_failures(a)
     if args.json:
         payload = {k: v for k, v in a.items() if k not in ("server", "client", "expected_keys")}
-        payload["hold_p50"] = pct(a["all_holds"], 50)
-        payload["hold_p99"] = pct(a["all_holds"], 99)
-        payload["kf_lead_p99"] = pct(a["kf_lead"], 99)
-        payload["dmg_lead_p99"] = pct(a["dmg_lead"], 99)
         print(json.dumps(payload, indent=2, default=float))
     else:
         report(a, args.samples)

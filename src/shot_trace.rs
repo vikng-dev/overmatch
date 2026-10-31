@@ -11,7 +11,7 @@ use bevy::prelude::*;
 use serde_json::{Value, json};
 
 use crate::ShotId;
-use crate::ballistics::{OVERDUE_MARGIN_TICKS, RICOCHET_HOLD_TICKS, SanctionedShots};
+use crate::ballistics::SanctionedShots;
 use crate::trace::{JsonlSink, role_path};
 
 /// The open shot-lifecycle sink. Present iff `SPIKE_SHOT_TRACE` was set at startup ([`install`]
@@ -146,16 +146,12 @@ fn write_meta(mut trace: ResMut<ShotTrace>, fixed: Res<Time<Fixed>>) {
         "role": role,
         "tick_hz": tick_hz,
         "ver": env!("CARGO_PKG_VERSION"),
-        "hold_ticks": RICOCHET_HOLD_TICKS,
-        "overdue_ticks": OVERDUE_MARGIN_TICKS,
         "max_age_secs": SanctionedShots::MAX_AGE_SECS,
-        "max_bounces_per_shot": SanctionedShots::MAX_BOUNCES_PER_SHOT,
     });
     trace.sink.write(&row);
 }
 
-/// MP client: the receiving/consuming half of a public shot's life (fire/keyframe/terminal arrivals
-/// and the cosmetic shell's spawn → catch-up/contact → hold → resolution → trail → end).
+/// The game's damage model: client fire/path arrival, cursor playback and trail consumption.
 pub fn client_plugin(app: &mut App) {
     install(app, "client");
 }
@@ -169,7 +165,7 @@ pub fn server_plugin(app: &mut App) {
     }
 }
 
-/// The game's damage model: crossing events by body kind, one row per kind in each mark.
+/// The game's damage model: crossing events by body kind, one contribution per kind in each mark.
 /// `scripts/shot/run-walk.py` uses these rows to distinguish real crossings from a bare contact.
 fn record_walk_crossings(
     marched: On<crate::ballistics::ShellMarched>,

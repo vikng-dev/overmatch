@@ -566,7 +566,7 @@ fn collect_server_shots(stamped: Query<&Shot, Added<Shot>>, mut shots: ResMut<Se
     }
 }
 
-/// Every ricochet the authority sanctioned (and therefore put on the wire as a `RicochetKeyframe`).
+/// Every ricochet the authority sanctioned (and therefore put on the wire as a a public flight outcome).
 #[derive(Resource, Default)]
 struct ServerBounces(Vec<(ShotId, u32)>);
 
@@ -609,16 +609,14 @@ fn collect_shell_calibers(fire: On<FireShell>, mut calibers: ResMut<ShellCaliber
     }
 }
 
-/// A hidden keyed shell created by the catch-up armor path (a spawn fast-forwarded into a
-/// contact). Under the cursor clock the steady delayed-observer link must record NONE: the round
-/// waits in the `CursorQueue` and presents at its own tick, age ~0, at the muzzle — a hold here
-/// means a presentation site aged the shell on the arrival clock again.
+/// The game's damage model: replicas have no hidden contact wait. Every cosmetic shell stays
+/// drawable until its server path ends; an unexpected hidden root violates that contract.
 #[derive(Resource, Default)]
-struct ClientCatchUpArmorHolds(Vec<ShotId>);
+struct ClientHiddenShells(Vec<ShotId>);
 
-fn collect_catch_up_armor_holds(
+fn collect_hidden_shells(
     shells: Query<(&Shot, &Visibility), Added<Shot>>,
-    mut holds: ResMut<ClientCatchUpArmorHolds>,
+    mut holds: ResMut<ClientHiddenShells>,
 ) {
     for (shot, visibility) in &shells {
         if *visibility == Visibility::Hidden {
@@ -628,8 +626,8 @@ fn collect_catch_up_armor_holds(
 }
 
 /// Every carried-through bounce the client RENDERED: an `Impact` carrying a deflection is, by
-/// construction, a server-sanctioned ricochet re-seeded onto the cosmetic shell (the pre-armed, held,
-/// and overdue paths all fire one; a dissolved shell fires none). The count is the carry-through.
+/// construction, a server-sanctioned ricochet played from its immutable path. The count is the
+/// carry-through.
 #[derive(Resource, Default)]
 struct ClientBounces(u32);
 
@@ -846,7 +844,7 @@ fn build_client(port: u16, client_id: u64, seed: u64, role: HarnessClient) -> Ap
     app.add_observer(collect_shell_calibers);
     app.init_resource::<ClientBounces>();
     app.init_resource::<ClientRenderedBounces>();
-    app.init_resource::<ClientCatchUpArmorHolds>();
+    app.init_resource::<ClientHiddenShells>();
     app.init_resource::<ClientHitConfirms>();
     app.init_resource::<PrivateCombatArrivals>();
     app.add_observer(collect_client_shells);
@@ -854,7 +852,7 @@ fn build_client(port: u16, client_id: u64, seed: u64, role: HarnessClient) -> Ap
     app.add_observer(collect_client_hit_confirm);
     app.add_observer(count_private_crew_arrival);
     app.add_observer(count_private_weapon_gate_arrival);
-    app.add_systems(FixedFirst, collect_catch_up_armor_holds);
+    app.add_systems(FixedFirst, collect_hidden_shells);
     if role == HarnessClient::Observer {
         app.add_systems(
             PostUpdate,
@@ -1140,11 +1138,7 @@ fn every_shot_spawns_exactly_one_shell_under_ten_percent_loss() {
         .resource::<ClientRenderedBounces>()
         .0
         .clone();
-    let observer_catch_up_holds = observer
-        .world()
-        .resource::<ClientCatchUpArmorHolds>()
-        .0
-        .clone();
+    let observer_catch_up_holds = observer.world().resource::<ClientHiddenShells>().0.clone();
     let shooter_spawned = shooter.world().resource::<ClientShells>().0.clone();
     let damaged = server.world().resource::<ServerDamages>().0.clone();
     let shooter_hit_confirms = shooter.world().resource::<ClientHitConfirms>().0.clone();
@@ -1310,8 +1304,8 @@ fn every_shot_spawns_exactly_one_shell_under_ten_percent_loss() {
         fired.len(),
     );
 
-    // CARRY-THROUGH: every ricochet the authority sanctioned re-seeded the observer's shell. A
-    // missing outcome would show up as a dissolved shell and no deflecting `Impact`.
+    // The game's damage model: every public ricochet plays on the observer's path and produces
+    // its deflecting `Impact`, including under transport loss.
     assert!(
         !bounced.is_empty(),
         "the authority resolved no ricochet at all — the plate geometry no longer produces one, so \
@@ -1322,7 +1316,7 @@ fn every_shot_spawns_exactly_one_shell_under_ten_percent_loss() {
         bounced.len(),
         "the observer carried through {observer_carried} of the {} ricochets the authority sanctioned at \
          {:.0}% loss ({observer_dropped} payloads dropped) — a keyframe was lost and its shell dissolved \
-         (or the hold expired before the keyframe arrived)",
+         (or its public path was never played)",
         bounced.len(),
         LOSS * 100.0,
     );

@@ -8,7 +8,12 @@ use bevy::prelude::*;
 use crate::ballistics::{PenetrationMarks, ShellPath, TracerStreak};
 
 pub(super) fn plugin(app: &mut App) {
-    app.add_systems(Update, clamp_tracer_streaks);
+    app.add_systems(
+        PostUpdate,
+        clamp_tracer_streaks
+            .after(crate::ballistics::path::PathPresent)
+            .before(bevy::transform::TransformSystems::Propagate),
+    );
 }
 
 /// Re-derive each tracer streak child from the round's distance-flown-since-anchor (muzzle or last

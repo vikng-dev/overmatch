@@ -12,9 +12,11 @@ use serde_json::json;
 
 use super::protocol::{
     DamageChannel, DamageConfirm, DamageReceipt, FireChannel, FireEvent, FireVisualBatch,
-    FireVisualFact, ImpactConfirm, OutcomeChannel, RicochetKeyframe,
+    FireVisualFact, OutcomeChannel,
 };
-use crate::ballistics::{FireShell, Projectile, ShellDamage, ShellRicochet, ShellTerminal, Shot};
+use crate::ballistics::{
+    FireShell, FlightOutcome, Projectile, ShellDamage, ShellRicochet, ShellTerminal, Shot,
+};
 use crate::spec::FireMechanism;
 
 /// DERIVED STARTING DEFAULT: the emission plus the next two send opportunities gives each
@@ -353,7 +355,6 @@ impl From<FireMechanism> for DeliveryClass {
 
 struct ShotRoute {
     owner: Option<Entity>,
-    class: DeliveryClass,
 }
 
 struct PrivateDamage {
@@ -379,6 +380,10 @@ impl ShotTransport {
         metrics: &mut ShotTransportMetrics,
     ) {
         match (class, fact) {
+            (_, fact @ FireVisualFact::Outcome(_)) => {
+                self.reliable_public.push_back(fact);
+                metrics.reliable_public_enqueued += 1;
+            }
             (DeliveryClass::Automatic, fact) => self.visual.enqueue(fact, now, metrics),
             (DeliveryClass::Single, fact) => {
                 self.reliable_public.push_back(fact);
@@ -394,6 +399,7 @@ pub(super) fn install_server(app: &mut App) {
     app.init_resource::<ShotTransportMetrics>();
     app.init_resource::<ReliableOutboxLedger>();
     app.add_observer(queue_fire);
+    app.add_observer(queue_path);
     app.add_observer(queue_ricochet);
     app.add_observer(queue_terminal);
     app.add_observer(queue_damage);
@@ -443,11 +449,7 @@ fn queue_fire(
         .get(source.tank)
         .ok()
         .map(|control| control.owner);
-    if transport
-        .routes
-        .insert(shot, ShotRoute { owner, class })
-        .is_some()
-    {
+    if transport.routes.insert(shot, ShotRoute { owner }).is_some() {
         warn!("server: duplicate ShotId route replaced: {shot:?}");
     }
 
@@ -481,15 +483,10 @@ fn queue_fire(
 fn queue_ricochet(
     ricochet: On<ShellRicochet>,
     timeline: Res<LocalTimeline>,
-    mut transport: ResMut<ShotTransport>,
-    mut metrics: ResMut<ShotTransportMetrics>,
+    transport: Res<ShotTransport>,
     mut shot_trace: Option<ResMut<crate::shot_trace::ShotTrace>>,
 ) {
-    let Some(class) = transport
-        .routes
-        .get(&ricochet.shot)
-        .map(|route| route.class)
-    else {
+    if !transport.routes.contains_key(&ricochet.shot) {
         return;
     };
     crate::shot_trace::record(
@@ -497,36 +494,20 @@ fn queue_ricochet(
         "kf",
         timeline.tick().0,
         ricochet.shot,
-        || json!({ "seq": ricochet.sequence }),
-    );
-    let keyframe = RicochetKeyframe {
-        shot: ricochet.shot,
-        origin: ricochet.origin,
-        direction: ricochet.direction,
-        speed: ricochet.speed,
-        bounce_tick: timeline.tick(),
-        sequence: ricochet.sequence,
-    };
-    transport.enqueue_public(
-        FireVisualFact::Ricochet(keyframe),
-        class,
-        timeline.tick(),
-        &mut metrics,
+        || {
+            json!({ "seq": ricochet.sequence, "o": ricochet.origin.to_array(),
+            "d": ricochet.direction.to_array(), "speed": ricochet.speed })
+        },
     );
 }
 
 fn queue_terminal(
     terminal: On<ShellTerminal>,
     timeline: Res<LocalTimeline>,
-    mut transport: ResMut<ShotTransport>,
-    mut metrics: ResMut<ShotTransportMetrics>,
+    transport: Res<ShotTransport>,
     mut shot_trace: Option<ResMut<crate::shot_trace::ShotTrace>>,
 ) {
-    let Some(class) = transport
-        .routes
-        .get(&terminal.shot)
-        .map(|route| route.class)
-    else {
+    if !transport.routes.contains_key(&terminal.shot) {
         return;
     };
     crate::shot_trace::record(
@@ -534,22 +515,49 @@ fn queue_terminal(
         "cf",
         timeline.tick().0,
         terminal.shot,
-        || json!({ "pen": terminal.verdict.entered(), "ab": terminal.after_bounces }),
+        || {
+            json!({ "pen": terminal.verdict.entered(), "ab": terminal.after_bounces,
+            "p": terminal.position.to_array(), "n": terminal.normal.to_array() })
+        },
     );
-    let confirm = ImpactConfirm {
-        shot: terminal.shot,
-        position: terminal.position,
-        normal: terminal.normal,
-        verdict: terminal.verdict.into(),
-        impact_tick: timeline.tick(),
-        after_bounces: terminal.after_bounces,
+}
+
+/// The game's damage model publishes immutable paths reliably for every weapon class.
+/// A complex crossing may exceed an unfragmented visual batch; the reliable lane fragments it.
+fn queue_path(
+    outcome: On<FlightOutcome>,
+    mut transport: ResMut<ShotTransport>,
+    mut metrics: ResMut<ShotTransportMetrics>,
+    timeline: Res<LocalTimeline>,
+    mut shot_trace: Option<ResMut<crate::shot_trace::ShotTrace>>,
+) {
+    let (impact, ordinal) = match outcome.impact {
+        Some(crate::ballistics::path::PathImpact::Bounce { ordinal, .. }) => {
+            ("bounce", Some(ordinal))
+        }
+        Some(crate::ballistics::path::PathImpact::Through { ordinal, .. }) => {
+            ("through", Some(ordinal))
+        }
+        Some(crate::ballistics::path::PathImpact::Stopped { ordinal, .. }) => {
+            ("stopped", Some(ordinal))
+        }
+        Some(crate::ballistics::path::PathImpact::Ground { .. }) => ("ground", None),
+        None => ("state", None),
     };
-    transport.enqueue_public(
-        FireVisualFact::Impact(confirm),
-        class,
-        timeline.tick(),
-        &mut metrics,
+    crate::shot_trace::record(
+        &mut shot_trace,
+        "path_tx",
+        timeline.tick().0,
+        outcome.shot,
+        || {
+            json!({ "seq": outcome.sequence, "start": outcome.tick, "fraction": outcome.fraction,
+            "seconds": outcome.seconds(), "impact": impact, "ordinal": ordinal })
+        },
     );
+    transport
+        .reliable_public
+        .push_back(FireVisualFact::Outcome(outcome.clone()));
+    metrics.reliable_public_enqueued += 1;
 }
 
 fn queue_damage(
@@ -701,13 +709,8 @@ fn flush_shot_transport(
             FireVisualFact::Fire(event) => {
                 sender.send::<FireEvent, OutcomeChannel>(event, server, &NetworkTarget::All)
             }
-            FireVisualFact::Ricochet(keyframe) => sender.send::<RicochetKeyframe, OutcomeChannel>(
-                keyframe,
-                server,
-                &NetworkTarget::All,
-            ),
-            FireVisualFact::Impact(confirm) => {
-                sender.send::<ImpactConfirm, OutcomeChannel>(confirm, server, &NetworkTarget::All)
+            FireVisualFact::Outcome(outcome) => {
+                sender.send::<FlightOutcome, OutcomeChannel>(outcome, server, &NetworkTarget::All)
             }
         };
         if let Err(err) = result {
@@ -855,15 +858,14 @@ fn flush_shot_transport(
 fn fact_stream(fact: &FireVisualFact) -> &'static str {
     match fact {
         FireVisualFact::Fire(_) => "fire",
-        FireVisualFact::Ricochet(_) => "kf",
-        FireVisualFact::Impact(_) => "cf",
+        FireVisualFact::Outcome(_) => "path",
     }
 }
 
 fn fact_sequence(fact: &FireVisualFact) -> Option<u32> {
     match fact {
-        FireVisualFact::Ricochet(keyframe) => Some(keyframe.sequence),
-        FireVisualFact::Fire(_) | FireVisualFact::Impact(_) => None,
+        FireVisualFact::Outcome(outcome) => Some(outcome.sequence),
+        FireVisualFact::Fire(_) => None,
     }
 }
 
@@ -914,21 +916,6 @@ mod tests {
             round: 0,
             fuze_mode: 0,
             fire_tick: Tick(tick),
-        })
-    }
-
-    fn ricochet(combatant: u64, weapon: u8, tick: u32) -> FireVisualFact {
-        FireVisualFact::Ricochet(RicochetKeyframe {
-            shot: crate::ShotId {
-                combatant: crate::CombatantId(combatant),
-                weapon,
-                fire_tick: tick,
-            },
-            origin: Vec3::ZERO,
-            direction: Vec3::X,
-            speed: 500.0,
-            bounce_tick: Tick(tick),
-            sequence: 0,
         })
     }
 
@@ -1232,80 +1219,6 @@ mod tests {
     }
 
     #[test]
-    fn residual_budget_admits_a_smaller_repair_after_fresh_refusal() {
-        let mut queue = VisualQueue::default();
-        let mut metrics = ShotTransportMetrics::default();
-        let repair = ricochet(1, 0, 100);
-        let fresh_cost = single_fact_wire_upper_bound(&fire(2, 0, 101));
-        let repair_cost = single_fact_wire_upper_bound(&repair);
-        assert!(
-            repair_cost < fresh_cost,
-            "the repair is the smaller known payload"
-        );
-        // The scenario needs the byte budget left, after fresh fires and smaller fresh facts fill
-        // it, to refuse one more fire yet fit the old repair. Which count of smaller facts does
-        // that depends on the wire encoding's sizes, so it is derived from them, not hand-picked:
-        // the residual is `(limit − k·repair) mod fresh`.
-        let smaller_fresh_count = (1..=16)
-            .find(|k| (VISUAL_TICK_WIRE_LIMIT - k * repair_cost) % fresh_cost >= repair_cost)
-            .expect("some count of smaller facts leaves exactly room for the repair");
-        let fresh_count = (VISUAL_TICK_WIRE_LIMIT - smaller_fresh_count * repair_cost) / fresh_cost;
-        assert!(
-            fresh_count * fresh_cost + smaller_fresh_count * repair_cost + fresh_cost
-                > VISUAL_TICK_WIRE_LIMIT,
-            "the larger fresh payload must be refused after smaller fresh facts fill the budget"
-        );
-        assert!(
-            fresh_count * fresh_cost + smaller_fresh_count * repair_cost + repair_cost
-                <= VISUAL_TICK_WIRE_LIMIT,
-            "the residual budget fits the old repair"
-        );
-
-        queue.enqueue(repair, Tick(100), &mut metrics);
-        queue.drain_batches(Tick(100), &mut metrics);
-        for combatant in 2..=fresh_count as u64 + 1 {
-            queue.enqueue(fire(combatant, 0, 101), Tick(101), &mut metrics);
-        }
-        let first_ricochet_combatant = fresh_count as u64 + 2;
-        for combatant in
-            first_ricochet_combatant..first_ricochet_combatant + smaller_fresh_count as u64
-        {
-            queue.enqueue(ricochet(combatant, 0, 101), Tick(101), &mut metrics);
-        }
-        queue.enqueue(
-            fire(
-                first_ricochet_combatant + smaller_fresh_count as u64,
-                0,
-                101,
-            ),
-            Tick(101),
-            &mut metrics,
-        );
-
-        let facts: Vec<_> = queue
-            .drain_batches(Tick(101), &mut metrics)
-            .into_iter()
-            .flat_map(|batch| batch.facts)
-            .collect();
-        assert_eq!(
-            facts
-                .iter()
-                .filter(|fact| fact.authority_tick() == Tick(101))
-                .count(),
-            fresh_count + smaller_fresh_count,
-            "fresh facts still consume every admission they can"
-        );
-        assert!(
-            facts.iter().any(|fact| {
-                fact.authority_tick() == Tick(100) && matches!(fact, FireVisualFact::Ricochet(_))
-            }),
-            "a smaller repair uses residual capacity after every fitting fresh fact was selected"
-        );
-        assert_eq!(metrics.visual_fresh_budget_refusal_attempts, 1);
-        assert_eq!(metrics.visual_repair_budget_refusal_attempts, 0);
-    }
-
-    #[test]
     fn saturated_ticks_resume_with_producers_refused_by_the_previous_tick() {
         let mut queue = VisualQueue::default();
         let mut metrics = ShotTransportMetrics::default();
@@ -1372,31 +1285,17 @@ mod tests {
         );
     }
 
-    /// Public facts route by `DeliveryClass`, never by fact kind: a Single shot's fire, ricochet
-    /// and impact all ride the reliable outbox; an Automatic weapon's ride the bounded visual queue.
+    /// The game's damage model: resolved paths are reliable for both weapon classes;
+    /// only automatic fire announcements use the bounded visual queue.
     #[test]
-    fn single_shot_continuations_are_reliable_but_automatic_continuations_are_bounded() {
+    fn resolved_paths_are_reliable_for_every_weapon_class() {
         let shot = crate::ShotId {
             combatant: crate::CombatantId(7),
             weapon: 0,
             fire_tick: 100,
         };
-        let ricochet = FireVisualFact::Ricochet(RicochetKeyframe {
-            shot,
-            origin: Vec3::ZERO,
-            direction: Vec3::X,
-            speed: 500.0,
-            bounce_tick: Tick(104),
-            sequence: 0,
-        });
-        let impact = FireVisualFact::Impact(ImpactConfirm {
-            shot,
-            position: Vec3::X,
-            normal: Vec3::NEG_X,
-            verdict: crate::ballistics::Verdict::Stopped,
-            impact_tick: Tick(108),
-            after_bounces: 1,
-        });
+        let ricochet = FireVisualFact::Outcome(crate::ballistics::path_fixture(shot, 104));
+        let impact = FireVisualFact::Outcome(crate::ballistics::path_fixture(shot, 108));
 
         let mut single = ShotTransport::default();
         let mut single_metrics = ShotTransportMetrics::default();
@@ -1438,8 +1337,8 @@ mod tests {
             Tick(108),
             &mut automatic_metrics,
         );
-        assert_eq!(automatic.reliable_public.len(), 0);
-        assert_eq!(automatic.visual.len(), 2);
-        assert_eq!(automatic_metrics.visual_enqueued, 2);
+        assert_eq!(automatic.reliable_public.len(), 2);
+        assert_eq!(automatic.visual.len(), 0);
+        assert_eq!(automatic_metrics.reliable_public_enqueued, 2);
     }
 }

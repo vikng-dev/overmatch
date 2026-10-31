@@ -553,13 +553,10 @@ fn recorded(
     })
 }
 
-/// The ordinal, among a shot's sanctioned outcomes, of the one a replica draws as the impact of the
-/// encounter whose first mark is `marks[from]`: bounces take 0, 1, … in order
-/// ([`ShellRicochet::sequence`]) and the end takes the count of bounces before it
-/// ([`ShellTerminal::after_bounces`]). The authority sanctions each bounce before its first crossing
-/// and that crossing as the end, nothing after it, so an encounter opened past the first crossing
-/// (the round perforated one tank and went on into another, or back into the same one) has none:
-/// no replica draws its impact.
+/// The game's damage model: the explanation's first-receipt ordinal for the encounter whose
+/// first mark is `marks[from]`. Bounces take their sequence and the initial crossing takes the
+/// count of preceding bounces (`ShellTerminal::after_bounces`). Later crossings render from
+/// public paths, but this explanation receipt mapper returns `None` for those encounters.
 ///
 /// [`ShellRicochet::sequence`]: crate::ballistics::ShellRicochet
 /// [`ShellTerminal::after_bounces`]: crate::ballistics::ShellTerminal
@@ -571,7 +568,7 @@ fn sanctioned_outcome(marks: &[ArmourMark], from: usize) -> Option<u32> {
     {
         return None;
     }
-    // A wound mark is no outcome the authority sends: the ordinal counts bounces, and the outcome
+    // A witness mark is no outcome the authority sends: the ordinal counts bounces, and the outcome
     // drawn is the encounter's first hard mark.
     let ordinal = before
         .iter()

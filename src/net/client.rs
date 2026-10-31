@@ -21,13 +21,11 @@ use serde_json::json;
 
 use super::cursor_queue::CursorQueue;
 use super::protocol::{
-    DamageConfirm, DamageReceipt, FireEvent, FireVisualBatch, FireVisualFact, ImpactConfirm,
-    NetTank, RicochetKeyframe, protocol_id,
+    DamageConfirm, DamageReceipt, FireEvent, FireVisualBatch, FireVisualFact, NetTank, protocol_id,
 };
 use super::{diagnostics, harness, open_gameplay_gate, physics, rig};
 use crate::ballistics::{
-    MAX_COSMETIC_CATCH_UP_TICKS, SanctionedBounce, SanctionedBounceInsert, SanctionedShots,
-    SanctionedTerminal, ShotSource, TerminalVerdict,
+    FlightOutcome, MAX_COSMETIC_CATCH_UP_TICKS, SanctionedInsert, SanctionedShots, ShotSource,
 };
 use crate::command::{DeviceCommand, TankCommand};
 use crate::run_window::RunWindow;
@@ -592,6 +590,7 @@ pub fn run() {
     app.add_observer(diagnostics::log_connected)
         .add_observer(reset_shot_receive_state)
         .add_observer(reset_link_state)
+        .add_observer(retire_link_shells)
         .add_observer(claim_input_slot)
         .add_systems(
             Update,
@@ -1486,6 +1485,19 @@ fn reset_link_state(
     *impulses = default();
 }
 
+/// The game's damage model: this composition has one server link, and its cosmetic paths
+/// cannot receive a terminal after that link ends. Retire those shells with the clock's scope.
+fn retire_link_shells(
+    _ended: On<Remove, Connected>,
+    shells: Query<Entity, With<crate::ballistics::Projectile>>,
+    mut commands: Commands,
+) {
+    for shell in &shells {
+        // A received path end can already have queued retirement in this same command flush.
+        commands.entity(shell).try_despawn();
+    }
+}
+
 /// A new transport connection starts a new receipt/presentation identity scope.
 ///
 /// INVARIANT: Lightyear does not carry message-channel backlog across connections. Clearing these
@@ -1514,8 +1526,7 @@ fn reset_shot_receive_state(
 pub(super) struct FireInbox<'w, 's> {
     batch_receivers: Query<'w, 's, &'static mut MessageReceiver<FireVisualBatch>>,
     fire_receivers: Query<'w, 's, &'static mut MessageReceiver<FireEvent>>,
-    keyframe_receivers: Query<'w, 's, &'static mut MessageReceiver<RicochetKeyframe>>,
-    confirm_receivers: Query<'w, 's, &'static mut MessageReceiver<ImpactConfirm>>,
+    outcome_receivers: Query<'w, 's, &'static mut MessageReceiver<FlightOutcome>>,
 }
 
 /// The client's fire-presentation books that [`receive_fire_events`] writes: recoil kicks owed to
@@ -1528,15 +1539,15 @@ pub(super) struct FireLedgers<'w> {
     held: ResMut<'w, HeldFireEvents>,
     pending_fires: ResMut<'w, PendingFireEvents>,
     sanctioned: ResMut<'w, SanctionedShots>,
+    path_clock: ResMut<'w, crate::ballistics::PathClock>,
 }
 
-/// Drain public fire, keyframe, and terminal facts.
+/// The game's damage model: drain fire announcements and resolved public paths.
 ///
 /// New fires are validated and held for the interpolation cursor ([`HeldFireEvents`]); the release
 /// pass in this same drain spawns each one's cosmetic shell and enqueues its recoil when the cursor
-/// crosses the fire tick (immediately, for an event the cursor already passed). Keyframes and
-/// terminals arm the sanctioned outcome buffer at arrival — their presentation is slaved to the
-/// shell's own flight, not to this seam. Damage confirmation is owner-private and handled by
+/// crosses the fire tick (immediately, for an event the cursor already passed). Paths enter the
+/// validated buffer at arrival and sample the same fractional cursor in `ballistics::path`. Damage confirmation is owner-private and handled by
 /// [`receive_damage_confirms`].
 ///
 /// This must run in `Update`: Lightyear clears undrained message receivers in `Last`, while a frame
@@ -1569,8 +1580,7 @@ pub(super) fn receive_fire_events(
     let FireInbox {
         mut batch_receivers,
         mut fire_receivers,
-        mut keyframe_receivers,
-        mut confirm_receivers,
+        mut outcome_receivers,
     } = inbox;
     let FireLedgers {
         mut pending,
@@ -1578,11 +1588,15 @@ pub(super) fn receive_fire_events(
         mut held,
         mut pending_fires,
         mut sanctioned,
+        mut path_clock,
     } = ledgers;
     let now = timeline.tick();
     let cursor = cursor
         .filter(|timeline| timeline.is_synced())
         .map(|timeline| (timeline.tick(), f64::from(timeline.overstep().to_f32())));
+    let (tick, fraction) = cursor.unwrap_or((now, 0.0));
+    path_clock.tick = tick.0;
+    path_clock.fraction = fraction;
     for mut receiver in &mut batch_receivers {
         for batch in receiver.receive() {
             for fact in batch.facts {
@@ -1607,14 +1621,9 @@ pub(super) fn receive_fire_events(
             consume_fire_event(&event, now, cursor, &mut seen, &mut held, &mut shot_trace);
         }
     }
-    for mut receiver in &mut keyframe_receivers {
-        for keyframe in receiver.receive() {
-            consume_ricochet_keyframe(&keyframe, now, &mut sanctioned, &mut shot_trace);
-        }
-    }
-    for mut receiver in &mut confirm_receivers {
-        for confirm in receiver.receive() {
-            consume_impact_confirm(&confirm, now, &mut sanctioned, &mut shot_trace);
+    for mut receiver in &mut outcome_receivers {
+        for outcome in receiver.receive() {
+            consume_flight_outcome(outcome, now, &mut sanctioned, &mut shot_trace);
         }
     }
     release_due_fire_events(
@@ -1660,11 +1669,8 @@ fn consume_fire_visual_fact(
         FireVisualFact::Fire(event) => {
             consume_fire_event(&event, now, cursor, seen, held, shot_trace)
         }
-        FireVisualFact::Ricochet(keyframe) => {
-            consume_ricochet_keyframe(&keyframe, now, sanctioned, shot_trace)
-        }
-        FireVisualFact::Impact(confirm) => {
-            consume_impact_confirm(&confirm, now, sanctioned, shot_trace)
+        FireVisualFact::Outcome(outcome) => {
+            consume_flight_outcome(outcome, now, sanctioned, shot_trace)
         }
     }
 }
@@ -1712,78 +1718,28 @@ fn consume_fire_event(
     }
 }
 
-fn consume_ricochet_keyframe(
-    keyframe: &RicochetKeyframe,
+/// The game's damage model validates an outside path once, at network ingress.
+fn consume_flight_outcome(
+    outcome: FlightOutcome,
     now: Tick,
     sanctioned: &mut SanctionedShots,
     shot_trace: &mut Option<ResMut<crate::shot_trace::ShotTrace>>,
 ) {
-    if Dir3::new(keyframe.direction).is_err() {
-        return;
-    }
-    let result = sanctioned.insert(
-        keyframe.shot,
-        SanctionedBounce {
-            origin: keyframe.origin,
-            direction: keyframe.direction,
-            speed: keyframe.speed,
-            bounce_tick: keyframe.bounce_tick.0,
-            sequence: keyframe.sequence,
-        },
-    );
-    let duplicate = result == SanctionedBounceInsert::Duplicate;
-    crate::shot_trace::record(
-        shot_trace,
-        "kf_rx",
-        now.0,
-        keyframe.shot,
-        || json!({ "dup": duplicate, "bt": keyframe.bounce_tick.0, "seq": keyframe.sequence }),
-    );
-    if result == SanctionedBounceInsert::Capacity {
-        crate::shot_trace::record(
-            shot_trace,
-            "drop",
-            now.0,
-            keyframe.shot,
-            || json!({ "s": "kf", "res": "sanctioned_bounce_capacity", "seq": keyframe.sequence }),
+    let (shot, sequence) = (outcome.shot, outcome.sequence);
+    let result = sanctioned.insert(outcome);
+    if let SanctionedInsert::Refused(error) = result {
+        warn!(
+            ?shot,
+            ?error,
+            "client: refused invalid public flight outcome"
         );
     }
-}
-
-fn consume_impact_confirm(
-    confirm: &ImpactConfirm,
-    now: Tick,
-    sanctioned: &mut SanctionedShots,
-    shot_trace: &mut Option<ResMut<crate::shot_trace::ShotTrace>>,
-) {
-    // A terminal entered the material; a confirm naming any other verdict is malformed and is not
-    // buffered as one.
-    let Ok(verdict) = TerminalVerdict::try_from(confirm.verdict) else {
-        crate::shot_trace::record(
-            shot_trace,
-            "cf_rx",
-            now.0,
-            confirm.shot,
-            || json!({ "res": "not_terminal" }),
-        );
-        return;
-    };
-    let fresh = sanctioned.insert_terminal(
-        confirm.shot,
-        SanctionedTerminal {
-            position: confirm.position,
-            normal: confirm.normal,
-            verdict,
-            impact_tick: confirm.impact_tick.0,
-            after_bounces: confirm.after_bounces,
-        },
-    );
     crate::shot_trace::record(
         shot_trace,
-        "cf_rx",
+        "path_rx",
         now.0,
-        confirm.shot,
-        || json!({ "dup": !fresh, "it": confirm.impact_tick.0, "pen": confirm.verdict.entered() }),
+        shot,
+        || json!({ "seq": sequence, "result": format!("{result:?}") }),
     );
 }
 
@@ -2877,6 +2833,25 @@ mod tests {
         assert!(world.resource::<ImpulseTicks>().is_empty());
     }
 
+    /// The game's damage model: a disconnected server cannot finish a cosmetic path.
+    /// A new connection must never inherit a round frozen on the previous server's cursor.
+    #[test]
+    fn a_link_ending_retires_its_server_clocked_cosmetic_shells() {
+        let mut app = App::new();
+        app.add_observer(retire_link_shells);
+        let shell = app
+            .world_mut()
+            .spawn(crate::ballistics::Projectile::view_test_round(0.088))
+            .id();
+        let link = app
+            .world_mut()
+            .spawn((RemoteId(PeerId::Netcode(99)), Connected))
+            .id();
+        app.world_mut().entity_mut(link).remove::<Connected>();
+        app.world_mut().flush();
+        assert!(app.world().get_entity(shell).is_err());
+    }
+
     #[test]
     fn duplicate_damage_receipts_trace_two_receives_and_one_marker_boundary() {
         let path = std::env::temp_dir().join(format!(
@@ -3427,14 +3402,7 @@ mod tests {
                         &mut trace,
                     );
                     consume_fire_visual_fact(
-                        FireVisualFact::Ricochet(RicochetKeyframe {
-                            shot,
-                            origin: Vec3::ZERO,
-                            direction: Vec3::NEG_Z,
-                            speed: 600.0,
-                            bounce_tick: Tick(43),
-                            sequence: 0,
-                        }),
+                        FireVisualFact::Outcome(crate::ballistics::path_fixture(shot, 43)),
                         Tick(43),
                         None,
                         &mut seen,

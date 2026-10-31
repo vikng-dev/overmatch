@@ -19,6 +19,11 @@ from analyze import analyze, verification_failures  # noqa: E402
 
 
 def row(kind: str, tick: int, combatant: int, fire_tick: int, **extra) -> dict:
+    if kind == "path_tx":
+        extra.setdefault("impact", "bounce")
+        extra.setdefault("ordinal", extra.get("seq", 0))
+    if kind == "path_rx":
+        extra.setdefault("result", "Duplicate" if extra.get("dup") else "Inserted")
     return {"k": kind, "t": tick, "c": combatant, "w": 0, "ft": fire_tick, **extra}
 
 
@@ -29,7 +34,7 @@ class JoinIntegrityTests(unittest.TestCase):
             row("fire", 10, 100, 10, o=[0.0, 0.0, 0.0], cal=0.088),
             row("dmg", 12, 100, 10, hp=5.0),
             row("fire", 10, 200, 10, o=[10.0, 0.0, 0.0], cal=0.088),
-            row("kf", 11, 200, 10, seq=0),
+            row("path_tx", 11, 200, 10, seq=0),
             # One clean observed shot proves the report still analyzes uncontaminated groups.
             row("fire", 20, 300, 20, o=[20.0, 0.0, 0.0], cal=0.0079),
         ]
@@ -37,7 +42,8 @@ class JoinIntegrityTests(unittest.TestCase):
             row("fire_rx", 11, 100, 10, dup=False, o=[0.0, 0.0, 0.0]),
             row("marker", 13, 100, 10),
             row("fire_rx", 11, 200, 10, dup=False, o=[10.0, 0.0, 0.0]),
-            row("hold", 12, 200, 10, res="bounce", held=1, seq=0),
+            row("path_rx", 12, 200, 10, seq=0),
+            row("path_done", 12, 200, 10, seq=0),
             row("fire_rx", 21, 300, 20, dup=False),
             row("spawn", 21, 300, 20, src="obs"),
         ]
@@ -48,8 +54,7 @@ class JoinIntegrityTests(unittest.TestCase):
         self.assertEqual(result["expected"], 3)
         self.assertEqual(result["delivered"], 3)
         self.assertEqual(result["damage"]["server"], 1)
-        self.assertEqual(result["all_holds"], [1])
-        self.assertEqual(result["carry"], {"reseeded_hold": 1})
+        self.assertEqual(result["paths"], {"delivered": 1, "completed": 1})
 
 
 class StrictVerificationTests(unittest.TestCase):
@@ -123,12 +128,12 @@ class StrictVerificationTests(unittest.TestCase):
     def test_main_gun_sanctioned_bounce_reaches_post_bounce_trail_station(self) -> None:
         server = [
             row("fire", 10, 100, 10, cal=0.088),
-            row("kf", 12, 100, 10, seq=0),
+            row("path_tx", 12, 100, 10, seq=0),
         ]
         client = [
             row("spawn", 10, 100, 10, src="own"),
-            row("kf_rx", 13, 100, 10, seq=0, dup=False, bt=12),
-            row("hold", 13, 100, 10, seq=0, res="bounce", held=1),
+            row("path_rx", 13, 100, 10, seq=0, dup=False, bt=12),
+            row("path_done", 13, 100, 10, seq=0, res="bounce", held=1),
             row("trail", 13, 100, 10, seq=0, res="post_bounce_consumed"),
         ]
 
@@ -140,17 +145,17 @@ class StrictVerificationTests(unittest.TestCase):
     def test_strict_rejects_main_gun_trail_with_no_row_or_unrendered_result(self) -> None:
         server = [
             row("fire", 10, 100, 10, cal=0.088),
-            row("kf", 12, 100, 10, seq=0),
+            row("path_tx", 12, 100, 10, seq=0),
             row("fire", 20, 100, 20, cal=0.088),
-            row("kf", 22, 100, 20, seq=0),
+            row("path_tx", 22, 100, 20, seq=0),
         ]
         client = [
             row("spawn", 10, 100, 10, src="own"),
-            row("kf_rx", 13, 100, 10, seq=0, dup=False, bt=12),
-            row("hold", 13, 100, 10, seq=0, res="bounce", held=1),
+            row("path_rx", 13, 100, 10, seq=0, dup=False, bt=12),
+            row("path_done", 13, 100, 10, seq=0, res="bounce", held=1),
             row("spawn", 20, 100, 20, src="own"),
-            row("kf_rx", 23, 100, 20, seq=0, dup=False, bt=22),
-            row("hold", 23, 100, 20, seq=0, res="bounce", held=1),
+            row("path_rx", 23, 100, 20, seq=0, dup=False, bt=22),
+            row("path_done", 23, 100, 20, seq=0, res="bounce", held=1),
             row("trail", 23, 100, 20, seq=0, res="post_bounce_unrendered"),
         ]
 
@@ -168,7 +173,7 @@ class StrictVerificationTests(unittest.TestCase):
             row("fire", 20, 100, 20, cal=0.0079),
             row("fire", 30, 100, 30, cal=0.0079),
             row("fire", 40, 100, 40, cal=0.0079),
-            row("kf", 42, 100, 40, seq=0),
+            row("path_tx", 42, 100, 40, seq=0),
             row("fire", 50, 100, 50, cal=0.0079),
             row("fire", 50, 200, 50, cal=0.0079),
         ]
@@ -189,7 +194,7 @@ class StrictVerificationTests(unittest.TestCase):
                 "lost_shots=3",
                 "duplicate_shots=1",
                 "no_spawn_shots=1",
-                "sanctioned_bounce_carry_failures=1",
+                "public_path_failures=1",
             ],
         )
 
@@ -457,18 +462,18 @@ class TransportCopyTests(unittest.TestCase):
     def test_copy_counts_keep_multiple_bounces_separate_and_split_policy(self) -> None:
         server = [
             row("fire", 10, 100, 10, cal=0.0079),
-            row("kf", 12, 100, 10, seq=0),
-            row("kf", 14, 100, 10, seq=1),
+            row("path_tx", 12, 100, 10, seq=0),
+            row("path_tx", 14, 100, 10, seq=1),
             # Automatic-fire visual facts get three bounded copies.
             row("send", 10, 100, 10, s="fire", age=0, rel=False, bb=100),
             row("send", 11, 100, 10, s="fire", age=1, rel=False, bb=100),
             row("send", 12, 100, 10, s="fire", age=2, rel=False, bb=100),
-            row("send", 12, 100, 10, s="kf", seq=0, age=0, rel=False, bb=100),
-            row("send", 13, 100, 10, s="kf", seq=0, age=1, rel=False, bb=100),
-            row("send", 14, 100, 10, s="kf", seq=0, age=2, rel=False, bb=100),
-            row("send", 14, 100, 10, s="kf", seq=1, age=0, rel=False, bb=100),
-            row("send", 15, 100, 10, s="kf", seq=1, age=1, rel=False, bb=100),
-            row("send", 16, 100, 10, s="kf", seq=1, age=2, rel=False, bb=100),
+            row("send", 12, 100, 10, s="path", seq=0, age=0, rel=False, bb=100),
+            row("send", 13, 100, 10, s="path", seq=0, age=1, rel=False, bb=100),
+            row("send", 14, 100, 10, s="path", seq=0, age=2, rel=False, bb=100),
+            row("send", 14, 100, 10, s="path", seq=1, age=0, rel=False, bb=100),
+            row("send", 15, 100, 10, s="path", seq=1, age=1, rel=False, bb=100),
+            row("send", 16, 100, 10, s="path", seq=1, age=2, rel=False, bb=100),
             # A single-fire damage fact is one reliable application send.
             row("dmg", 17, 100, 10, hp=5.0),
             row("send", 17, 100, 10, s="dmg", age=0, rel=True, bb=None),
@@ -477,23 +482,23 @@ class TransportCopyTests(unittest.TestCase):
         result = analyze({"tick_hz": 64}, [], {"tick_hz": 64}, server)
 
         self.assertEqual(result["copies"]["visual"]["fire"], [3])
-        self.assertEqual(result["copies"]["visual"]["kf"], [3, 3])
+        self.assertEqual(result["copies"]["visual"]["path"], [3, 3])
         self.assertEqual(result["copies"]["reliable"]["dmg"], [1])
-        self.assertEqual(result["copies"]["reliable"]["kf"], [0, 0])
-        self.assertEqual(result["missing_kf_send_sequence"], 0)
+        self.assertEqual(result["copies"]["reliable"]["path"], [0, 0])
+        self.assertEqual(result["missing_path_send_sequence"], 0)
 
     def test_missing_keyframe_send_sequence_is_not_assigned_to_bounce_zero(self) -> None:
         server = [
             row("fire", 10, 100, 10, cal=0.0079),
-            row("kf", 12, 100, 10, seq=0),
-            row("kf", 14, 100, 10, seq=1),
-            row("send", 12, 100, 10, s="kf", age=0, rel=False, bb=100),
+            row("path_tx", 12, 100, 10, seq=0),
+            row("path_tx", 14, 100, 10, seq=1),
+            row("send", 12, 100, 10, s="path", age=0, rel=False, bb=100),
         ]
 
         result = analyze({"tick_hz": 64}, [], {"tick_hz": 64}, server)
 
-        self.assertEqual(result["copies"]["visual"]["kf"], [0, 0])
-        self.assertEqual(result["missing_kf_send_sequence"], 2)
+        self.assertEqual(result["copies"]["visual"]["path"], [0, 0])
+        self.assertEqual(result["missing_path_send_sequence"], 2)
 
     def test_transport_summary_aggregates_whole_trace_and_preserves_config(self) -> None:
         server = [

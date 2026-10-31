@@ -16,7 +16,7 @@ use lightyear::prelude::*;
 use serde::{Deserialize, Serialize};
 
 use super::disclosure::{NetTankStatus, apply_net_tank_status};
-use crate::ballistics::{ComponentHealth, Verdict};
+use crate::ballistics::ComponentHealth;
 use crate::command::{DeviceClaim, TankCommand};
 use crate::damage::{CrewStation, Crewman, Dead, LaunchedTurret, PendingSwap, TankVolumes};
 use crate::damage_cam::wire::ShotExplanation;
@@ -65,7 +65,7 @@ use crate::{CombatantId, CombatantLife, ShotId};
 /// arrival forces the rollback that restores the sub-threshold hull velocity a hit actually
 /// produced. New wire type and new registration: surface, own-type graph, and REV all move.
 ///
-/// REV 23 (naming the victim on an impact): [`RicochetKeyframe`] and [`ImpactConfirm`] each gain
+/// REV 23 (naming the victim on an impact): the ricochet message and the impact message each gain
 /// `victim: Option<CombatantId>` — the body the authority gave the impulse to. Without it the owner
 /// can tell WHICH EPISODE a spark belongs to (the authority tick already rides both facts) but not
 /// WHOSE HULL, so `net::adoption`'s ordering rule could release one tank's shove against a spark
@@ -105,7 +105,7 @@ use crate::{CombatantId, CombatantLife, ShotId};
 /// REV 27 (one authoritative timeline): the prediction-era wire surface leaves. Every client
 /// renders every hull — its own included — from the interpolated server stream, so `.predict()`
 /// registrations, rollback conditions, and correction fns are gone; `HullShock` (REV 22/24/25),
-/// the `victim` fields on `RicochetKeyframe`/`ImpactConfirm` (REV 23), and the element-grip
+/// the `victim` fields on `ricochet message`/`impact message` (REV 23), and the element-grip
 /// netcode (`NetTrackGripAnchor`, `TrackGripElements` replicate-once, the grip checkpoint/resync
 /// channels and messages — ADR-0027) all leave the wire with their adoption/prediction consumers.
 /// Surface, own-type graph, and REV all move. Note on the servo ULP bands that leave with the
@@ -139,7 +139,7 @@ use crate::{CombatantId, CombatantLife, ShotId};
 /// capability law reads beside mass and calibre. Own-type graph and REV move; capability itself
 /// never rides the wire.
 ///
-/// REV 31 (a public impact outcome): [`ImpactConfirm`]'s `penetrated` bool becomes a [`Verdict`]
+/// REV 31 (a public impact outcome): the impact message's `penetrated` bool becomes a [`crate::ballistics::Verdict`]
 /// (`Through` / `Stopped` / `Ricochet` / `Struck`), so a peer can tell a round that stopped in the
 /// plate from one that went through, and a deflection from a stop that resolved no crossing. New
 /// embedded enum: own-type graph and REV move.
@@ -226,7 +226,7 @@ use crate::{CombatantId, CombatantLife, ShotId};
 ///
 /// [`WallPiece`]: crate::buildings::breakage::WallPiece
 /// [`WallEvent`]: crate::buildings::breakage::WallEvent
-pub const PROTOCOL_REV: u32 = 43;
+pub const PROTOCOL_REV: u32 = 44;
 
 /// Compatibility tag derived from the complete pinned wire manifest plus the crate version. This
 /// is the runtime handshake value: version-exact, so a version bump intentionally changes it.
@@ -441,24 +441,21 @@ impl MapEntities for FireEvent {
 #[derive(Clone, Serialize, Deserialize)]
 pub enum FireVisualFact {
     Fire(FireEvent),
-    Ricochet(RicochetKeyframe),
-    Impact(ImpactConfirm),
+    Outcome(crate::ballistics::FlightOutcome),
 }
 
 impl FireVisualFact {
     pub fn shot_id(&self) -> ShotId {
         match self {
             Self::Fire(event) => event.shot_id(),
-            Self::Ricochet(keyframe) => keyframe.shot,
-            Self::Impact(confirm) => confirm.shot,
+            Self::Outcome(outcome) => outcome.shot,
         }
     }
 
     pub fn authority_tick(&self) -> Tick {
         match self {
             Self::Fire(event) => event.fire_tick,
-            Self::Ricochet(keyframe) => keyframe.bounce_tick,
-            Self::Impact(confirm) => confirm.impact_tick,
+            Self::Outcome(outcome) => Tick(outcome.tick),
         }
     }
 }
@@ -487,52 +484,6 @@ impl MapEntities for FireVisualBatch {
             fact.map_entities(mapper);
         }
     }
-}
-
-/// An authority-sanctioned post-bounce continuation.
-///
-/// Clients re-seed the cosmetic shell from this state instead of colliding it against interpolated
-/// armor. Delivery follows the shot mechanism; `sequence` supplies causality independent of arrival
-/// order.
-#[derive(Clone, Serialize, Deserialize)]
-pub struct RicochetKeyframe {
-    /// The stable shot identity this bounce belongs to. It is never entity-mapped.
-    pub shot: ShotId,
-    /// The exact server bounce point — where the observer re-seeds the shell.
-    pub origin: Vec3,
-    /// Post-bounce travel direction (guarded to `Dir3` on receipt).
-    pub direction: Vec3,
-    /// Post-bounce speed (m/s).
-    pub speed: f32,
-    /// The server `Tick` the bounce resolved on (stamped from the server's `LocalTimeline`).
-    pub bounce_tick: Tick,
-    /// This bounce's 0-based ordinal within the shot — the SAME count an observer derives from its
-    /// shell's own ricochets, so bounces re-seed in the order the server resolved them.
-    pub sequence: u32,
-}
-
-/// The authority-sanctioned terminal of a shot at armor.
-///
-/// Perforation ends the external cosmetic shell at the entry face while the authority may continue
-/// through internal volumes. Delivery follows the shot mechanism. `after_bounces` prevents a terminal
-/// from visually skipping an earlier continuation that arrived later.
-#[derive(Clone, Serialize, Deserialize)]
-pub struct ImpactConfirm {
-    /// The stable shot identity this terminal belongs to. It is never entity-mapped.
-    pub shot: ShotId,
-    /// The server's impact position (embed point, or the perforation's entry face).
-    pub position: Vec3,
-    /// The struck face's outward normal, from the server's raycast. No `Dir3` guard on receipt:
-    /// `Impact` consumers normalize with a fallback by contract (see `ballistics::Impact::normal`).
-    pub normal: Vec3,
-    /// The server's verdict at the struck face: whether the round stopped in the material or went
-    /// through. Its `entered()` gates the flame lick exactly as the local read does.
-    pub verdict: Verdict,
-    /// The server `Tick` the impact resolved on. Audit / future RTT-adaptive use, like
-    /// [`RicochetKeyframe::bounce_tick`] — the client resolves on receipt, not by re-aging.
-    pub impact_tick: Tick,
-    /// Ricochets the authority resolved before this terminal (the client's ordering gate).
-    pub after_bounces: u32,
 }
 
 /// Stable identity for an owner-private damage confirmation. The receipt is plain data and remains
@@ -573,8 +524,8 @@ pub struct DamageConfirm {
 /// Public unordered-unreliable channel for bounded automatic-fire visual batches.
 pub struct FireChannel;
 
-/// Public reliable channel for individual single-shot [`FireEvent`], [`RicochetKeyframe`], and
-/// [`ImpactConfirm`] facts.
+/// Public reliable channel for individual single-shot [`FireEvent`], the ricochet message, and
+/// the impact message facts.
 pub struct OutcomeChannel;
 
 /// Owner-private reliable channel for individual [`DamageConfirm`] facts.
@@ -989,8 +940,7 @@ const WIRE_SURFACE: &[&str] = &[
     "SpawnChannel|OrderedReliable|ClientToServer",
     "FireVisualBatch",
     "FireEvent",
-    "RicochetKeyframe",
-    "ImpactConfirm",
+    "FlightOutcome",
     "DamageConfirm",
     "ShotExplanation",
     "SetSpawnPoint",
@@ -1010,7 +960,7 @@ const WIRE_SURFACE: &[&str] = &[
 ];
 
 /// Pinned hash for the ordered wire surface and a direct handshake-fingerprint input.
-const WIRE_SURFACE_HASH: u64 = 0xb764_85d6_94ca_578d;
+const WIRE_SURFACE_HASH: u64 = 0xe862_3986_909d_2198;
 
 // ---------------------------------------------------------------------------
 // Deep wire-surface coverage (field-level + external-dep skew)
@@ -1052,7 +1002,7 @@ const WIRE_SURFACE_HASH: u64 = 0xb764_85d6_94ca_578d;
 /// The pinned hash of the OWN wire-facing type DEFINITIONS (field layout, not just names). Re-pin it
 /// whenever a wire-facing struct/enum definition changes; house process also bumps
 /// [`PROTOCOL_REV`]. The tripwire prints the new value. See the block above for the coverage model.
-const WIRE_TYPES_HASH: u64 = 0x6265_838a_c8fd_e3b4;
+const WIRE_TYPES_HASH: u64 = 0x8e73_a1f3_b2bf_1bbf;
 
 /// The pinned `Cargo.lock` versions of the external crates whose types ride the wire (avian's
 /// replicated physics components; lightyear's wire framing / input protocol). A bump of either can
@@ -1067,6 +1017,7 @@ pub(crate) fn plugin(app: &mut App) {
     // `increment_local_tick`); publish it before every `GameplaySet` consumer, especially
     // `shooting::fire`, which must put the id on its initial FireShell event.
     app.init_resource::<crate::ShotClock>();
+    app.init_resource::<crate::ballistics::PathClock>();
     app.init_resource::<crate::WeaponClock>();
     app.add_systems(FixedUpdate, publish_shot_clock.before(GameplaySet));
     app.component::<NetTank>().replicate();
@@ -1149,9 +1100,7 @@ pub(crate) fn plugin(app: &mut App) {
     app.register_message::<FireEvent>()
         .add_map_entities()
         .add_direction(NetworkDirection::ServerToClient);
-    app.register_message::<RicochetKeyframe>()
-        .add_direction(NetworkDirection::ServerToClient);
-    app.register_message::<ImpactConfirm>()
+    app.register_message::<crate::ballistics::FlightOutcome>()
         .add_direction(NetworkDirection::ServerToClient);
     // Damage receipts deliberately contain no entity references: their channel is already
     // owner-private, so mapping a shooter replica would make post-respawn confirmation fragile.
@@ -1908,8 +1857,10 @@ mod tests {
         ("src/net/protocol.rs", "FireVisualFact"),
         ("src/net/protocol.rs", "FireEvent"),
         ("src/spec.rs", "FireMechanism"),
-        ("src/net/protocol.rs", "RicochetKeyframe"),
-        ("src/net/protocol.rs", "ImpactConfirm"),
+        ("src/ballistics/path.rs", "FlightOutcome"),
+        ("src/ballistics/path.rs", "Span"),
+        ("src/ballistics/path.rs", "PathImpact"),
+        ("src/ballistics.rs", "RoundBody"),
         ("src/ballistics.rs", "Verdict"),
         ("src/net/protocol.rs", "DamageReceipt"),
         ("src/net/protocol.rs", "DamageConfirm"),

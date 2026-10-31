@@ -1,5 +1,4 @@
-//! Ballistics PRESENTATION: the shell scene, the MG tracer streak, and the visibility a hold draws
-//! with.
+//! The game's damage-model presentation: the shell scene and the MG tracer streak.
 //!
 //! Mounted by the client composition roots alone — `ClientPlugin`, `NetClientPlugin`, and the armor
 //! sandbox (which mounts `ballistics` but NOT `vfx`, which is why this view half is owned here rather
@@ -15,7 +14,7 @@ use bevy::prelude::*;
 
 use crate::render_policy::VisualScope;
 
-use super::{Held, Projectile, ShellPath, TRACER_MAX_CALIBER, TracerRound};
+use super::{Projectile, ShellPath, TRACER_MAX_CALIBER, TracerRound};
 
 pub fn plugin(app: &mut App) {
     app.add_systems(Startup, setup_assets)
@@ -23,9 +22,7 @@ pub fn plugin(app: &mut App) {
         // (`FixedUpdate` for local fire, `Update` for the net client's re-raise), and an ordinary
         // system in either one would leave a net-spawned round undressed for a frame — at 755 m/s
         // that is a ~12 m gap between the muzzle and the head of its streak.
-        .add_observer(dress_projectile)
-        .add_observer(hide_held_shell)
-        .add_observer(show_released_shell);
+        .add_observer(dress_projectile);
 }
 
 /// Marks a projectile dressed with the main-gun shell scene — the DURABLE "this is a shell-class
@@ -100,13 +97,13 @@ fn setup_assets(
 }
 
 /// The main-gun dressing, as a description: the scene root, the classification marker `vfx` reads,
-/// and the visibility the round's hold state implies.
-fn shell_dressing(assets: &ProjectileAssets, held: bool) -> impl Bundle {
+/// and its inherited visibility.
+fn shell_dressing(assets: &ProjectileAssets) -> impl Bundle {
     (
         ShellVisual,
         WorldAssetRoot(assets.scene.clone()),
         // Root visibility so the instantiated scene (and any effect child) inherits it.
-        held_visibility(held),
+        Visibility::Inherited,
     )
 }
 
@@ -125,46 +122,25 @@ fn tracer_dressing(assets: &TracerAssets, streak: TracerStreak, flown: f32) -> i
     )
 }
 
-/// What a shell in [`Held`] draws as: a hold is an INVISIBLE stop — no frozen round hanging on the
-/// plate while the client waits for the authority's verdict.
-fn held_visibility(held: bool) -> Visibility {
-    if held {
-        Visibility::Hidden
-    } else {
-        Visibility::Inherited
-    }
-}
-
 /// Dress a newly born projectile: main-gun scene, MG tracer streak, or nothing at all.
 ///
 /// Bevy 0.19 writes the entire spawn bundle before it fires `Add`, so the round read here is the
-/// complete one `on_fire_shell` authored — caliber, path and hold state included.
+/// complete one `on_fire_shell` authored — caliber and path included.
 fn dress_projectile(
     add: On<Add, Projectile>,
     // `Without<WorldAssetRoot>` is the idempotency guard. Nothing in the tree re-inserts `Projectile`
     // today: `shooting::fire` suppresses `FireShell` on a replayed tick, and a projectile is not a
     // rollback-restored entity, so a replay raises no second birth. Insurance, not a live branch.
-    shells: Query<
-        (
-            &Projectile,
-            &Transform,
-            &ShellPath,
-            Has<Held>,
-            Has<TracerRound>,
-        ),
-        Without<WorldAssetRoot>,
-    >,
+    shells: Query<(&Projectile, &Transform, &ShellPath, Has<TracerRound>), Without<WorldAssetRoot>>,
     assets: Res<ProjectileAssets>,
     tracer_assets: Res<TracerAssets>,
     mut commands: Commands,
 ) {
-    let Ok((projectile, transform, path, held, tracer)) = shells.get(add.entity) else {
+    let Ok((projectile, transform, path, tracer)) = shells.get(add.entity) else {
         return;
     };
     if projectile.caliber() >= TRACER_MAX_CALIBER {
-        commands
-            .entity(add.entity)
-            .insert(shell_dressing(&assets, held));
+        commands.entity(add.entity).insert(shell_dressing(&assets));
     } else if tracer {
         // Scale with travel speed, with a floor for slow rounds.
         let streak = TracerStreak {
@@ -179,38 +155,8 @@ fn dress_projectile(
         commands
             .entity(add.entity)
             // The root carries the visibility the streak child inherits.
-            .insert(held_visibility(held))
+            .insert(Visibility::Inherited)
             .with_child(tracer_dressing(&tracer_assets, streak, flown));
     }
     // A non-tracer MG round is dressed with nothing: it flies, raycasts and lands unseen.
-}
-
-/// A mid-flight hold hides whatever this round draws. The `With<Visibility>` filter IS the "is it
-/// dressed" test — only [`dress_projectile`] puts one on a projectile, so an undrawn non-tracer MG
-/// round never acquires render state just by holding.
-fn hide_held_shell(
-    add: On<Add, Held>,
-    dressed: Query<(), (With<Projectile>, With<Visibility>)>,
-    mut commands: Commands,
-) {
-    if dressed.contains(add.entity) {
-        commands.entity(add.entity).insert(held_visibility(true));
-    }
-}
-
-/// Releasing the hold — the authority's keyframe arrived, or it expired — shows the round again.
-///
-/// `try_insert`: a shell whose hold ends in a sanctioned TERMINAL is despawned in the same command
-/// flush, and a despawn removes `Held` too. There is nothing left to show, and the write must be
-/// silent rather than warn on a recycled id.
-fn show_released_shell(
-    remove: On<Remove, Held>,
-    dressed: Query<(), (With<Projectile>, With<Visibility>)>,
-    mut commands: Commands,
-) {
-    if dressed.contains(remove.entity) {
-        commands
-            .entity(remove.entity)
-            .try_insert(held_visibility(false));
-    }
 }

@@ -71,7 +71,7 @@ impl MarkKind {
     pub(crate) const ALL: [Self; 3] = [Self::Scratch, Self::Dent, Self::Hole];
 
     /// The mark a strike leaves, from its public verdict at the face alone, so every observer's
-    /// hull agrees with the outcome every observer was told (`ImpactConfirm`).
+    /// hull agrees with the outcome every observer was told (the public flight outcome).
     ///
     /// A round that came to rest inside the tank after going through the face (lodged) has the
     /// face verdict `Through`, and leaves the same hole as one that left the tank. `Struck` is a

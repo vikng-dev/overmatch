@@ -593,6 +593,8 @@ fn spawn_shot_round(
                 disc: walk::DiscFrame::anchored(direction).expect("a shot fires along a real axis"),
                 axis: None,
                 playback: Default::default(),
+                path_sequence: 0,
+                replica: None,
             },
             DamageReport::default(),
             TerminalReport::default(),

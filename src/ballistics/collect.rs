@@ -1109,7 +1109,7 @@ struct TriangleClaim {
 /// Ours rather than parry's for two reasons: parry's kernel answers "nearest hit, normal flipped to
 /// oppose the ray", which discards exactly the orientation §13.4's pairing runs on; and keeping the
 /// arithmetic here keeps it ours to hold stable (`parry ≤ 0.29`'s raycasts were not cross-platform
-/// reproducible — the same reason the terrain cast is ours, see `cast_march_segment`).
+/// reproducible — the same reason the terrain cast is ours, see `HeightGrid::cast_ray`).
 ///
 /// Double-sided by construction: the sign of `det` is not tested, so a face is reported whichever
 /// way the ray meets it. That is the point — an exit face is a crossing too.

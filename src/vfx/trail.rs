@@ -67,7 +67,12 @@ pub(super) fn mount_loss_harness(app: &mut App) {
         .add_message::<TrailStationMeshEvidence>()
         .add_observer(attach_trail)
         .add_observer(flush_removed_shell_path)
-        .add_systems(PostUpdate, update_trails.in_set(TrailHarnessSet));
+        .add_systems(
+            PostUpdate,
+            update_trails
+                .in_set(TrailHarnessSet)
+                .after(crate::ballistics::path::PathPresent),
+        );
     let material = app
         .world_mut()
         .resource_mut::<Assets<VfxTrailMaterial>>()

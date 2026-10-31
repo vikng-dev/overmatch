@@ -19,9 +19,7 @@
 //!
 //! Member class: the fire announcement (`net::client::HeldFireEvents`, covering opponent fire
 //! and the fused own echo). The own being-hit cue presents at arrival by design — reaction
-//! time. Ricochet/impact facts stay OUT: they arm the sanctioned-outcome buffer for the cosmetic
-//! shell march, whose presentation is already slaved to the shell's own flight and
-//! `crate::ShotClock` re-aging (ADR-0021).
+//! time. Public flight paths enter their own buffer and sample this same fractional cursor.
 
 use std::collections::VecDeque;
 

@@ -110,10 +110,9 @@ impl Budget {
         self.remaining > 0.0 || flight.holds_material()
     }
 
-    /// Spend `seconds` of flight. A spend past the remaining seconds ends the tick at zero: the
-    /// spends that reach it are metres converted back to seconds, whose f32 rounding can exceed
-    /// the remainder they were cut from, and a replica's re-seed, which charges its boundary nudge
-    /// (`MARCH_EPS / speed`) beyond the contact it met. No clock below zero carries into the tick.
+    /// Spend `seconds` of flight, saturating the remaining clock at zero. The gate charges a
+    /// complete decision; runtime playback truncates at the tick boundary. Open-air metres
+    /// converted through f32 can also round past the remainder they were cut from.
     pub(crate) fn fly(&mut self, seconds: f64) {
         assert!(
             seconds.is_finite() && seconds >= 0.0,
@@ -261,7 +260,7 @@ pub(crate) struct AxisStart {
 
 impl AxisStart {
     /// The same start re-anchored at itself, as [`Interior::rebased`].
-    fn rebased(self) -> Self {
+    pub(crate) fn rebased(self) -> Self {
         let anchor = self.anchor + self.origin;
         Self {
             origin: self.origin - (anchor - self.anchor),
@@ -940,7 +939,7 @@ fn first_solid(
 /// # Where a sweep starts
 ///
 /// A sample may start a sweep only where its membership is KNOWN: at its own start in the
-/// continuation ([`Interior`]). A flight without one — just bounced, or a replica just re-seeded —
+/// continuation ([`Interior`]). An authority flight without one — just bounced —
 /// has a fresh disc to lay, square to `direction` at `position`, and [`settle`](Self::settle)
 /// establishes its membership before anything sweeps from it. Nothing nudges past a start: a face
 /// within a nudge ahead would be stepped over with its entry owned by nobody, and the sample would
@@ -1013,7 +1012,7 @@ impl Flight {
         })
     }
 
-    /// Lay the fresh disc a bounce or a re-seed left — on `frame` at `position`, square to
+    /// Lay the fresh disc a bounce left — on `frame` at `position`, square to
     /// `direction` — with its membership established ([`certified`]). A flight that already has its
     /// starts is left alone.
     pub(crate) fn settle(

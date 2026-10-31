@@ -1868,3 +1868,64 @@ fn a_slowed_impact_delay_bursts_where_its_seconds_run_out() {
         left * r
     );
 }
+
+/// The game's damage model: production discovery publishes complete, serializable paths before
+/// playback spans later ticks. Replicas can replay those facts without the target's geometry.
+#[test]
+fn production_discovery_exports_a_valid_clock_before_crossing_playback_finishes() {
+    #[derive(Resource, Default)]
+    struct Paths(Vec<FlightOutcome>);
+    fn capture(outcome: On<FlightOutcome>, mut paths: ResMut<Paths>) {
+        paths.0.push(outcome.clone());
+    }
+    let mut app = recording_world(false);
+    app.insert_resource(crate::ShotClock(100))
+        .init_resource::<Paths>()
+        .add_observer(capture);
+    tank(
+        &mut app,
+        Vec3::ZERO,
+        0.0,
+        Vec3::ZERO,
+        &[("slab", Vec3::new(3.0, 3.0, 0.12), Vec3::ZERO, Kind::Plate)],
+    );
+    settle(&mut app);
+    let shot = crate::ShotId {
+        combatant: crate::CombatantId(7),
+        weapon: 0,
+        fire_tick: 100,
+    };
+    let stepped = freeflight_step(
+        Vec3::NEG_Z * SPEED,
+        fixture_drag_k(FIXTURE_88.caliber, FIXTURE_88.mass),
+        TICK.as_secs_f32(),
+    );
+    // DERIVED fixture placement: first contact is one millimetre short of this tick's endpoint.
+    fire_along(
+        &mut app,
+        Vec3::new(0.0, 0.0, 0.06 - stepped.z * TICK.as_secs_f32() - 0.001),
+        Dir3::NEG_Z,
+        FireMechanism::Single,
+        Some(shot),
+    );
+    run(&mut app, 1);
+    let paths = &app.world().resource::<Paths>().0;
+    assert!(
+        !paths.is_empty(),
+        "discovery publishes when the first contact is reached"
+    );
+    let path = paths
+        .iter()
+        .find(|path| !path.spans.is_empty())
+        .expect("material playback has a path");
+    assert_eq!(path.validate(), Ok(()));
+    assert!(
+        f64::from(path.tick - 100) + path.fraction + path.seconds() / TICK.as_secs_f64() > 1.0,
+        "the declared clock includes material that will play in a later tick"
+    );
+    let bytes = postcard::to_allocvec(path).unwrap();
+    let decoded: FlightOutcome = postcard::from_bytes(&bytes).unwrap();
+    assert_eq!(decoded.validate(), Ok(()));
+    assert_eq!(decoded.seconds(), path.seconds());
+    assert_eq!(decoded.resume, path.resume);
+}
