@@ -17,7 +17,8 @@
 //!   in it ([`Projectile::lost_momentum`]: the share the crushed brick carries away is open); a
 //!   blast pushes each face its rays stop on with its reflected impulse ([`Blast::push`]). The
 //!   laws then run in order: removal and the push rule ([`fracture::strike`]), the structural
-//!   check ([`fracture::structural`]), support ([`fracture::fall`]).
+//!   check ([`fracture::structural`]), the weight check on what those changed
+//!   ([`fracture::weigh`]), support ([`fracture::fall`]).
 //! * **Holes** ([`Hole`], drawn only): a line cuts a channel in each chunk it crosses and a blast a
 //!   dish in each chunk its rays stop on ([`holes_of`]); a chunk still standing after the deposit
 //!   keeps its hole in a per-chunk list ([`Live::holes`]), for the view to draw. No law, collider
@@ -794,30 +795,8 @@ fn apply_deposits(mut p: DepositParam) {
                 holes,
             );
             let building = identity.ordinal;
-            let count = |f: fn(&WallEvent) -> bool| changes.events.iter().filter(|e| f(e)).count();
-            debug!(
-                "buildings: {} took {:.0} J in {} chunks ({} lines, {} field stops, {} blast rays): \
-                 {} swapped, {} dust, {} holes, {} cracks, {} structural sections {:?} (demand, \
-                 capacity N s m), {} chunks fell in {} groups",
-                identity.id,
-                loading.energies.iter().map(|(_, e)| e).sum::<f32>(),
-                loading.energies.len(),
-                taken.lines.len(),
-                taken.field.len(),
-                taken.blast.len(),
-                count(|e| matches!(e, WallEvent::Swap(_))),
-                count(|e| matches!(e, WallEvent::Dust(_))),
-                count(|e| matches!(e, WallEvent::Hole(..))),
-                count(|e| matches!(e, WallEvent::Crack(_))),
-                changes.failures.len(),
-                changes
-                    .failures
-                    .iter()
-                    .map(|f| (f.demand, f.capacity))
-                    .collect::<Vec<_>>(),
-                count(|e| matches!(e, WallEvent::Fall(_))),
-                changes.groups.len(),
-            );
+            let counts = [taken.lines.len(), taken.field.len(), taken.blast.len()];
+            log_changes(&identity.id, &loading, counts, &changes);
             p.record
                 .entries
                 .extend(changes.events.iter().map(|&event| WallEntry {
@@ -837,6 +816,37 @@ fn apply_deposits(mut p: DepositParam) {
             }
         }
     }
+}
+
+/// Log what one deposit did to a building (debug): `id` the building's, `counts` its deposit's
+/// lines, field stops and blast rays.
+fn log_changes(id: &str, loading: &Loading, counts: [usize; 3], changes: &Changes) {
+    let count = |f: fn(&WallEvent) -> bool| changes.events.iter().filter(|e| f(e)).count();
+    debug!(
+        "buildings: {id} took {:.0} J in {} chunks ({} lines, {} field stops, {} blast rays): {} \
+         swapped, {} dust, {} holes, {} cracks, {} structural sections {:?} (load, demand, \
+         capacity: N s m for a push, Pa for weight), weight check {} steps with {} touched chunks \
+         unassessed, {} chunks fell in {} groups",
+        loading.energies.iter().map(|(_, e)| e).sum::<f32>(),
+        loading.energies.len(),
+        counts[0],
+        counts[1],
+        counts[2],
+        count(|e| matches!(e, WallEvent::Swap(_))),
+        count(|e| matches!(e, WallEvent::Dust(_))),
+        count(|e| matches!(e, WallEvent::Hole(..))),
+        count(|e| matches!(e, WallEvent::Crack(_))),
+        changes.failures.len(),
+        changes
+            .failures
+            .iter()
+            .map(|f| (f.load, f.demand, f.capacity))
+            .collect::<Vec<_>>(),
+        changes.weight_steps,
+        changes.unassessed.len(),
+        count(|e| matches!(e, WallEvent::Fall(_))),
+        changes.groups.len(),
+    );
 }
 
 /// The holes one deposit cuts (module doc), each with its law chunk, in the baked chunk's frame
@@ -877,20 +887,24 @@ fn holes_of(
 }
 
 /// What the laws changed in one building: its record events in order, each loose group with the
-/// pushes on it (building frame), and the structural failures.
+/// pushes on it (building frame), the structural failures (the push check's, then the weight
+/// check's), and the weight check's unassessed chunks and operation count ([`fracture::Weighed`]).
 #[derive(Debug, Default, PartialEq)]
 pub(crate) struct Changes {
     pub(crate) events: Vec<WallEvent>,
     pub(crate) groups: Vec<(Vec<usize>, Vec<Push>)>,
     pub(crate) failures: Vec<fracture::Failure>,
+    pub(crate) unassessed: Vec<usize>,
+    pub(crate) weight_steps: usize,
 }
 
 /// Run one deposit, with the `holes` it cuts ([`holes_of`]), through the laws on `live` (module
 /// doc) and say what changed: the elements first touched swap, then the dust, the holes kept, the
-/// cracks (the push rule's, then the structural check's) and the falls, each ascending but the
-/// holes, in deposit order. A chunk the holes would carry past [`HOLES_PER_CHUNK`] crumbles to dust
-/// before the laws run; a hole is kept only in a chunk standing after the removal, and no law
-/// reads one. A push on a chunk turned to dust went into crushing it and moves nothing.
+/// cracks (the push rule's, then the structural check's, then the weight check's) and the falls,
+/// each ascending but the holes, in deposit order. A chunk the holes would carry past
+/// [`HOLES_PER_CHUNK`] crumbles to dust before the laws run; a hole is kept only in a chunk
+/// standing after the removal, and no law reads one. A push on a chunk turned to dust went into
+/// crushing it and moves nothing.
 pub(crate) fn run_laws(
     layout: &Layout,
     live: &mut Live,
@@ -925,12 +939,26 @@ pub(crate) fn run_laws(
         .into_iter()
         .filter(|push| live.state.standing(push.chunk))
         .collect();
-    let failures = fracture::structural(
+    let mut failures = fracture::structural(
         &live.structure,
         &mut live.state,
         &pushes,
         &mut live.sections,
     );
+    let pushed: Vec<usize> = struck
+        .cracked
+        .iter()
+        .chain(failures.iter().flat_map(|failure| &failure.joints))
+        .copied()
+        .collect();
+    let weighed = fracture::weigh(
+        &live.structure,
+        &mut live.state,
+        &struck.dusted,
+        &pushed,
+        &mut live.sections,
+    );
+    failures.extend(weighed.failures);
     let structural: Vec<usize> = failures
         .iter()
         .flat_map(|failure| failure.joints.iter().copied())
@@ -991,6 +1019,8 @@ pub(crate) fn run_laws(
         events,
         groups,
         failures,
+        unassessed: weighed.unassessed,
+        weight_steps: weighed.steps,
     }
 }
 

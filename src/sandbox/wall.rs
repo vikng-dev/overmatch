@@ -13,8 +13,8 @@
 //!   meets with the blast's reflected impulse ([`model::Blast::push`]).
 //! * **Responses.** The game's fracture laws ([`crate::buildings::fracture`], through [`model`])
 //!   turn each deposit into dust (the pools), local cracks (the push rule) and structural cracks
-//!   (the structural check), then let every group with no path to the ground fall with the
-//!   momentum pushed into it.
+//!   (the structural check, then the weight check on what changed), then let every group with no
+//!   path to the ground fall with the momentum pushed into it.
 //! * **The view.** Each chunk's pool as heat, local cracks in cyan and structural ones in
 //!   magenta, a dust puff where a chunk went, loose groups as falling bodies on the default layer
 //!   (out of ballistics; grey-blue when a local crack freed them, purple when a structural one
@@ -431,7 +431,11 @@ struct Outcome {
     local: usize,
     structural: usize,
     sections: usize,
+    /// The first push failure's and the first weight failure's demand and capacity.
     worst: Option<(f32, f32)>,
+    weight: Option<(f32, f32)>,
+    unassessed: usize,
+    weight_steps: usize,
     groups: usize,
     fallen: usize,
     spall: f32,
@@ -1066,6 +1070,9 @@ struct Applied {
     dusted: Vec<usize>,
     local: usize,
     failures: Vec<model::Failure>,
+    /// The weight check's unassessed touched chunks and its operation count ([`model::Weighed`]).
+    unassessed: usize,
+    weight_steps: usize,
     /// Each loose group, its centroid, linear and angular velocity, and whether a structural crack
     /// bounds it.
     groups: Vec<(Vec<usize>, Vec3, Vec3, Vec3, bool)>,
@@ -1144,8 +1151,6 @@ fn apply_deposit(
     applied.deposited = loading.energies.iter().map(|(_, e)| e).sum();
     applied.chunks = loading.energies.len();
     let struck = model::strike(&wall.cut.structure, &mut wall.state, &loading);
-    applied.worn = struck.worn;
-    applied.dusted = struck.dusted;
     applied.local = struck.cracked.len();
     // A push on a chunk turned to dust went into crushing it, and moves nothing.
     let pushes: Vec<Push> = pushes
@@ -1158,6 +1163,24 @@ fn apply_deposit(
         &pushes,
         &mut wall.sections,
     );
+    let pushed: Vec<usize> = struck
+        .cracked
+        .iter()
+        .chain(applied.failures.iter().flat_map(|failure| &failure.joints))
+        .copied()
+        .collect();
+    let weighed = model::weigh(
+        &wall.cut.structure,
+        &mut wall.state,
+        &struck.dusted,
+        &pushed,
+        &mut wall.sections,
+    );
+    applied.failures.extend(weighed.failures);
+    applied.unassessed = weighed.unassessed.len();
+    applied.weight_steps = weighed.steps;
+    applied.worn = struck.worn;
+    applied.dusted = struck.dusted;
     for failure in &applied.failures {
         for &j in &failure.joints {
             wall.structural[j] = true;
@@ -1316,6 +1339,13 @@ fn apply_deposits(mut p: ApplyParam) {
                 rays.clone(),
             ));
         }
+        let first = |load: model::Load| {
+            applied
+                .failures
+                .iter()
+                .find(|failure| failure.load == load)
+                .map(|failure| (failure.demand, failure.capacity))
+        };
         p.log.last = Some(Outcome {
             what,
             deposited: applied.deposited,
@@ -1324,10 +1354,10 @@ fn apply_deposits(mut p: ApplyParam) {
             local: applied.local,
             structural: applied.failures.iter().map(|f| f.joints.len()).sum(),
             sections: applied.failures.len(),
-            worst: applied
-                .failures
-                .first()
-                .map(|failure| (failure.demand, failure.capacity)),
+            worst: first(model::Load::Push),
+            weight: first(model::Load::Weight),
+            unassessed: applied.unassessed,
+            weight_steps: applied.weight_steps,
             groups: applied.groups.len(),
             fallen: applied.groups.iter().map(|(group, ..)| group.len()).sum(),
             spall: match &deposit {
@@ -1342,8 +1372,9 @@ fn apply_deposits(mut p: ApplyParam) {
         if let Some(last) = &p.log.last {
             info!(
                 "wall prototype: {}: {:.0} J into {} chunks, {} dust, {} local cracks, \
-                 {} structural cracks in {} sections (first {:?} N s m demand, capacity), {} groups \
-                 fell ({} chunks), exit cones {:.0} J, blast {:?} (coupled J, N s)",
+                 {} structural cracks in {} sections (first push {:?} N s m and first weight {:?} \
+                 Pa demand, capacity), weight check {} steps with {} touched chunks unassessed, \
+                 {} groups fell ({} chunks), exit cones {:.0} J, blast {:?} (coupled J, N s)",
                 last.what,
                 last.deposited,
                 last.chunks,
@@ -1352,6 +1383,9 @@ fn apply_deposits(mut p: ApplyParam) {
                 last.structural,
                 last.sections,
                 last.worst,
+                last.weight,
+                last.weight_steps,
+                last.unassessed,
                 last.groups,
                 last.fallen,
                 last.spall,
@@ -1550,6 +1584,17 @@ fn detail(
             "      first structural failure: angular impulse {demand:.0} N s m against sqrt(2 I Gf A) = {capacity:.0} N s m"
         ));
     }
+    if let Some((demand, capacity)) = last.weight {
+        lines.push(format!(
+            "      first weight failure: peak tension {:.0} kPa against the seam's {:.0} kPa",
+            demand / 1e3,
+            capacity / 1e3
+        ));
+    }
+    lines.push(format!(
+        "      weight check: {} steps, {} touched chunks unassessed (held through several sections)",
+        last.weight_steps, last.unassessed
+    ));
     // `+ 0.0`: an empty sum is -0.0, which would print a sign.
     let witness = log.witness.iter().sum::<f32>() + 0.0;
     lines.push(format!(

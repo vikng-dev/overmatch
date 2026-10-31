@@ -417,6 +417,7 @@ Inside a component, chunks join by the component's own seams (mortar in a brick 
 Between components, the building data declares each joint: **bonded**, with a strength, or **resting**, with no pull strength, held only by weight and friction; resting appears only where the generator sets one component on another (a roof on its wall plates, a lintel on its piers).
 Weight breaks structures: when a wall changes, a weight check finds parts that have lost too much support and cracks them at their weakest joint; a resting joint gives way as soon as gravity can tip or drop its part, and physics takes over from there.
 Built in steps: (1) gravity enters the existing section check, exact wherever one cut set holds a group; (2) bonded and resting joints between components; (3) a full static weight solve only if spans held at both ends visibly need it.
+Step (1) runs as `fracture::weigh`: tension only (the weight's direct pull plus its bending moment, each joint a disc of its area), from the chunks a change touched; a touched chunk no single section holds stands unassessed and is counted.
 The every-tick compliant-seam model below stays the reference model, not the build: its only extra visible effects are sagging and swaying, at a per-tick server and network cost.
 Survey of shipped games and costs: `.agents/scratch/destruction-2026-10-31-collapse/collapse-survey.md`.
 
