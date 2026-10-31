@@ -141,7 +141,6 @@ pub fn run() {
             receive_spawn_points,
             spawn_pending_tanks,
             spawn_bots,
-            schedule_bot_respawn,
             respawn_dead_bots,
             open_gameplay_gate,
             diagnostics::log_sim_evidence,
@@ -884,43 +883,24 @@ fn spawn_bot_entity(
     )
 }
 
-/// Schedules a bot's respawn the tick its root gains [`TankKnockedOut`] — the emergent death label
-/// (`damage::mark_dead_tanks` at 0 living crew, `damage::process_cookoffs` on cookoff). Stamps the
-/// virtual-clock instant 5 s out onto [`BotRespawnAt`]; the `Without<BotRespawnAt>` filter keeps a
-/// second death label (e.g. crew-loss after a cookoff) from rescheduling. Reads the same
-/// `Time<Virtual>` clock the respawn consumer and `spawn_pending_tanks` do.
-fn schedule_bot_respawn(
-    dead: Query<Entity, (With<Bot>, Added<TankKnockedOut>, Without<BotRespawnAt>)>,
-    time: Res<Time<Virtual>>,
-    mut commands: Commands,
-) {
-    for bot in &dead {
-        commands
-            .entity(bot)
-            .insert(BotRespawnAt(time.elapsed_secs() + 5.0));
-        info!("server: bot {bot} knocked out; respawning in 5s");
-    }
-}
-
-/// When a scheduled [`BotRespawnAt`] comes due, sweep the knocked-out bot and spawn a fresh one at
-/// its own home through the same blueprint-backed constructor.
+/// The game's damage model: replace a knocked-out bot once the same scored opening used by
+/// players is due. Its combatant and life select the mode's wait on the authority clock.
 fn respawn_dead_bots(
-    dead: Query<(Entity, &BotRespawnAt, &Rig, &CombatantId, &Bot)>,
+    dead: Query<(Entity, &CombatantLife, &Rig, &CombatantId, &Bot), With<TankKnockedOut>>,
     assets: Res<PendingTankAssets>,
     source: TankSimSource,
-    time: Res<Time<Virtual>>,
+    gate: RespawnGate,
     height: Option<Res<crate::terrain_grid::HeightGrid>>,
     mut combatants: ResMut<CombatantIds>,
     mut commands: Commands,
 ) {
-    let now = time.elapsed_secs();
     // (root, its Rig.turret) for every bot now due. Capture the turret handle BEFORE despawning the
     // root: if the bot cooked off, `damage::launch_turrets_on_cookoff` stripped the turret's
     // `ChildOf` and made it a free body, so it is NOT a descendant of the root and the recursive
     // root despawn below would miss it — leaking one launched turret per respawn.
     let due: Vec<(Entity, Entity, CombatantId, Bot)> = dead
         .iter()
-        .filter(|(_, at, _, _, _)| now >= at.0)
+        .filter(|(_, life, _, combatant, _)| gate.opening(**combatant, **life) == Opening::Open)
         .map(|(root, _, rig, combatant, bot)| (root, rig.turret, *combatant, *bot))
         .collect();
     if due.is_empty() {
@@ -948,12 +928,6 @@ fn respawn_dead_bots(
         info!("server: respawned bot as {fresh} (was {root})");
     }
 }
-
-/// Marker scheduling a bot respawn: the `Time<Virtual>` timestamp (secs) at which the dead bot is
-/// swept and a fresh one spawned. Inserted by [`schedule_bot_respawn`], consumed by
-/// [`respawn_dead_bots`].
-#[derive(Component)]
-struct BotRespawnAt(f32);
 
 /// A legitimate crowded-map state: an accepted automatic respawn waits for a point outside the
 /// mode's minimum. The server retries without requiring another client input edge.
@@ -1426,6 +1400,46 @@ mod tests {
             .query_filtered::<Entity, With<ControlledBy>>()
             .single(app.world())
             .expect("one replacement player tank");
+    }
+
+    /// The game's damage model: bots and players are combatants under the same mode wait.
+    /// The bot's old life survives until the opening, then exactly one replacement keeps its id.
+    #[test]
+    fn a_bot_respawns_at_its_scored_opening_and_never_before() {
+        let mut app = placement_app();
+        app.insert_resource(BotCount(1))
+            .add_systems(Update, (spawn_bots, respawn_dead_bots).chain());
+        app.update();
+        let root = app
+            .world_mut()
+            .query_filtered::<Entity, With<Bot>>()
+            .single(app.world())
+            .expect("one fixture bot");
+        let combatant = *app
+            .world()
+            .get::<CombatantId>(root)
+            .expect("spawn identity");
+        knock_out(&mut app, root);
+        advance(&mut app, shipped_wait().ticks() - 1);
+        app.update();
+        assert!(
+            app.world().get_entity(root).is_ok(),
+            "no bot respawn before the opening"
+        );
+        advance(&mut app, 1);
+        app.update();
+        assert!(
+            app.world().get_entity(root).is_err(),
+            "the old life is swept at the opening"
+        );
+        let (fresh, id, life) = app
+            .world_mut()
+            .query_filtered::<(Entity, &CombatantId, &CombatantLife), With<Bot>>()
+            .single(app.world())
+            .expect("exactly one replacement bot");
+        assert_ne!(fresh, root);
+        assert_eq!(*id, combatant);
+        assert_eq!(*life, CombatantLife(1));
     }
 
     /// The game's damage model: automatic joins and respawns share the minimum, ignore knocked-out
