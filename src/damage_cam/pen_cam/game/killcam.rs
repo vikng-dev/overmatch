@@ -1,3 +1,5 @@
+//! The game's damage-model view, game state only.
+//!
 //! The victim kill cam in play: the struck player's own tank knocked out by a recorded shot, shown
 //! in the four beats of the kill cam's law ([`super::super::killcam`]) on the real clock, then the
 //! death screen.
@@ -75,7 +77,7 @@ use crate::overlay::{Overlay, OverlaySet, Overlays};
 use crate::render_policy::CameraProfile;
 use crate::settings::{KillCam as KillCamSetting, ReduceMotion, Settings};
 use crate::sight::SightMode;
-use crate::spec::{TankSpecHandle, ViewKind};
+use crate::spec::{TankSpec, TankSpecHandle, ViewKind};
 use crate::state::{EscapeAction, EscapeRouted};
 use crate::tank::{Controlled, Tank, TankViews, ViewNode, rig_world_pose};
 use crate::ui_font::UiFonts;
@@ -132,25 +134,33 @@ struct Killing {
 
 impl Killing {
     /// `stored`, the killing record of `life`, taken `since` seconds after the knockout fact: its
-    /// killer named by the shooter's live tank file where one stands in `scene`, its range where
+    /// killer named by the shooter's loaded tank data where one stands in `scene`, its range where
     /// the record has the muzzle.
     fn taken(stored: &StoredExplanation, scene: &Scene, life: TankLife, since: f32) -> Self {
         let report = &stored.report;
         let range_m = report
             .muzzle
             .map(|muzzle| Vec3::from(muzzle).distance(Vec3::from(report.impact.point)));
+        // A shooter may have left the match before the record arrives. A live shooter's
+        // spawn retains its loaded spec handle, so missing data there is a construction bug.
         let vehicle = scene
             .shooters
             .iter()
             .find(|(_, id, _, _)| **id == stored.explanation.shot.combatant)
-            .and_then(|(_, _, _, spec)| spec?.0.path())
-            .map(|path| path.path().to_string_lossy().into_owned());
+            .map(|(_, _, _, handle)| {
+                let handle =
+                    handle.expect("a live shooter carries its tank spec handle from spawn");
+                scene
+                    .specs
+                    .get(&handle.0)
+                    .expect("a live shooter's strong handle retains its loaded tank spec")
+            });
         Self {
             life,
             stored: stored.clone(),
             timely: stored.presence == ImpactPresence::Presented && since <= RECORD_WAIT_S,
             after_s: since,
-            killer: Killer::of_vehicle(vehicle.as_deref(), &report.round),
+            killer: Killer::of_vehicle(vehicle, &report.round),
             range_m,
         }
     }
@@ -460,6 +470,7 @@ pub(super) struct Scene<'w, 's> {
         ),
         With<PlayerView>,
     >,
+    specs: Res<'w, Assets<TankSpec>>,
     view_nodes: Query<'w, 's, &'static ViewNode>,
     globals: Query<'w, 's, &'static GlobalTransform>,
     parents: Query<'w, 's, &'static ChildOf>,

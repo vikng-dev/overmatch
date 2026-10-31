@@ -1,3 +1,5 @@
+//! The game's damage-model view, game state only.
+//!
 //! The struck tank's stage view ([`StageView`]), which the corner draws: the vehicle's view glb,
 //! named by the record's tank file, placed so the hull node sits at the origin (the record's
 //! frame), with collision proxies hidden and every servo the tank file declares turned to the
@@ -18,16 +20,10 @@ use crate::tank::{ServoRole, servo_pose};
 /// The hull node every tank view names; the record's frame is its frame.
 pub(super) const HULL_NODE: &str = "Hull";
 
-#[derive(Component, Clone, Copy, PartialEq, Eq, Debug)]
-pub enum ViewRoot {
-    Stage,
-}
-
 /// A mesh of a tank view, classified once: the names of its node and its ancestors up to the
 /// view's root, and the material it was authored with.
 #[derive(Component)]
 pub struct ViewMesh {
-    pub root: ViewRoot,
     pub names: Vec<String>,
     pub original: Handle<StandardMaterial>,
     pub tier: Tier,
@@ -109,7 +105,6 @@ impl StageView {
                 WorldAssetRoot(scene),
                 Transform::IDENTITY,
                 Visibility::Hidden,
-                ViewRoot::Stage,
                 VisualScope::PEN_CAM_STAGE,
                 SourceDetail,
                 CornerRig,
@@ -209,17 +204,12 @@ pub(super) fn chain_and_tier(
     (chain, tier, proxy)
 }
 
-/// What the view mesh `entity` of the view `root` is, whose vehicle's tank file is `spec`: the
+/// What the view mesh `entity` is, whose vehicle's tank file is `spec`: the
 /// names of its node chain up to the view's root (where `is_root` holds), nearest first, its
 /// authored material `original` named `material`, and its tier; and whether it is a collision
 /// proxy.
-#[expect(
-    clippy::too_many_arguments,
-    reason = "classifies one mesh: its entity, root, materials and spec, and the hierarchy reads with the root predicate"
-)]
 fn classify(
     entity: Entity,
-    root: ViewRoot,
     original: Handle<StandardMaterial>,
     material: Option<&str>,
     spec: &TankSpec,
@@ -230,7 +220,6 @@ fn classify(
     let (chain, tier, proxy) = chain_and_tier(entity, material, spec, parents, is_root, names);
     (
         ViewMesh {
-            root,
             names: chain,
             original,
             tier,
@@ -341,7 +330,6 @@ pub fn prepare_stage(
         };
         let (mesh, proxy) = classify(
             entity,
-            ViewRoot::Stage,
             material.0.clone(),
             material_name.map(|name| name.0.as_str()),
             spec,

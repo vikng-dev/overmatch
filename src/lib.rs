@@ -309,7 +309,7 @@ pub(crate) fn default_plugins() -> bevy::app::PluginGroupBuilder {
 /// its primary window, the run's window mode (`OVERMATCH_WINDOW`, [`run_window`]; visible when
 /// unset) applied before winit creates that window, and the unattended lever
 /// (`OVERMATCH_UNATTENDED`, [`unattended`]). Every windowed root is built on it (the offline game,
-/// the windowed network client, both sandboxes and the pen cam demo), so a run that asked for a
+/// the windowed network client, both sandboxes), so a run that asked for a
 /// hidden window shows none and one that asked for silence makes no sound, on any root.
 ///
 /// # Panics

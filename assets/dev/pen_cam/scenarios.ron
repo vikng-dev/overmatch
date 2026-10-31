@@ -1,5 +1,5 @@
 #![enable(implicit_some)]
-// The pen cam demo's scripted shots (`demo/ux-spec.md` §5), recorded by the real march at the
+// The game's damage-model recorder's scripted shots, the pen cam tests' fixtures, at the
 // bound tank (`ballistics::pen_cam`). Positions are metres in the target's spawn frame: the tank
 // root at the origin, -Z its front, +Y up; a pose turns the tank under the shot. `verdict` is what
 // the shot earns on the bound tank today, checked on every run. `round` names a key of the round

@@ -1,3 +1,5 @@
+//! The game's damage-model view, game state only.
+//!
 //! The victim kill cam's law: what the struck player sees when a record knocks their own tank out,
 //! which the game's driver ([`super::game`]'s kill cam) plays on the real clock. Four beats,
 //! counted from the killing shot's world impact ([`Beats`]):
@@ -58,47 +60,43 @@ pub(super) const CARD_ENTER_S: f32 = 0.18;
 /// The card's accent bar.
 const ACCENT_PX: f32 = 3.0;
 
-/// Who fired the killing round, as the victim's copy of the record names them: each part only
-/// where the record and the files it names supply it, so a card shows what is known.
+/// Who fired the round in the game's damage model, as the victim's record and the live
+/// shooter's loaded tank data name them.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Killer {
     /// The shooter's name, where the record names a shooter.
     pub player: Option<String>,
-    /// The shooter's vehicle as its tank file names it to players, where that file reads.
+    /// The live shooter's loaded vehicle name; absent when no live shooter remains.
     pub vehicle: Option<String>,
-    /// The round's display name and muzzle speed (m/s), where the registry has the round; never
-    /// its registry key.
-    pub round: Option<(String, f32)>,
+    /// The registered round's display name, and muzzle speed (m/s) when its key identifies
+    /// one gun. A record carries no firing-gun key, so several candidates leave its launch speed unknown.
+    pub round: (String, Option<f32>),
 }
 
 impl Killer {
-    /// The killer with no name, fired from the tank file `vehicle` (relative to the asset root)
-    /// with the round `round` (a round registry key): the vehicle's display name read from that
-    /// tank file, and the round's display name and muzzle speed from the registry. A tank file
-    /// that does not read or a round the registry lacks leaves that part unknown.
-    pub fn of_vehicle(vehicle: Option<&str>, round: &str) -> Self {
-        let vehicle = vehicle.and_then(|vehicle| {
-            let path = crate::assets::asset_root().join(vehicle);
-            let spec = std::fs::read_to_string(&path)
-                .map_err(|e| e.to_string())
-                .and_then(|text| ron::de::from_str::<TankSpec>(&text).map_err(|e| e.to_string()));
-            spec.inspect_err(|e| warn!("kill cam: the shooter's tank file {}: {e}", path.display()))
-                .ok()
-                .map(|spec| spec.display_name)
-        });
-        let round = crate::rounds::RoundRegistry::shipped()
+    /// The game's damage-model killer card reads the live shooter's already-loaded tank data.
+    /// No live shooter is a legitimate absence (left the match, or a replay after disconnect).
+    /// A record's round key is the authority's registry key; a miss is a broken record invariant.
+    pub fn of_vehicle(vehicle: Option<&TankSpec>, round: &str) -> Self {
+        let name = crate::rounds::RoundRegistry::shipped()
             .name(round)
-            .map_err(crate::guns::GunError::Round)
-            .and_then(|name| {
-                let fired = crate::guns::GunRegistry::shipped().round_by_key(round)?;
-                Ok((name.to_owned(), fired.muzzle_speed))
-            })
-            .inspect_err(|e| warn!("kill cam: the round {round}: {e}"))
-            .ok();
+            .expect("a record's round key belongs to the loaded registry")
+            .to_owned();
+        let speed = Self::muzzle_speed(round, crate::guns::GunRegistry::shipped());
         Self {
             player: None,
-            vehicle,
-            round,
+            vehicle: vehicle.map(|spec| spec.display_name.clone()),
+            round: (name, speed),
+        }
+    }
+
+    /// The game's damage-model record names a round key, without its gun's key. Several guns may legitimately
+    /// chamber it; without the gun identity, its launch speed is absent rather than guessed.
+    fn muzzle_speed(round: &str, guns: &crate::guns::GunRegistry) -> Option<f32> {
+        match guns.round_by_key(round) {
+            Ok(fired) => Some(fired.muzzle_speed),
+            Err(crate::guns::GunError::Ambiguous { .. }) => None,
+            Err(err) => panic!("the loaded gun registry chambers every recorded round: {err}"),
         }
     }
 }
@@ -289,9 +287,11 @@ pub fn card_lines(killer: &Killer, range_m: Option<f32>) -> [String; 3] {
         text.and_then(drawable)
             .unwrap_or_else(|| missing.to_owned())
     };
-    let round = match &killer.round {
-        Some((name, speed)) => format!("{}    {speed:.0} m/s", shown(Some(name), "UNKNOWN ROUND")),
-        None => "UNKNOWN ROUND".to_owned(),
+    let (name, speed) = &killer.round;
+    let name = shown(Some(name), "UNKNOWN ROUND");
+    let round = match speed {
+        Some(speed) => format!("{name}    {speed:.0} m/s"),
+        None => name,
     };
     [
         shown(killer.player.as_deref(), "UNKNOWN PLAYER"),
@@ -639,16 +639,46 @@ mod tests {
         assert!((pose.translation.distance(rig.victim_pivot) - ORBIT_FAR).abs() < 1e-2);
     }
 
+    /// The game's damage-model records carry registered rounds. A corrupted record must fail
+    /// explicitly rather than display a plausible card with an unknown round.
+    #[test]
+    #[should_panic(expected = "a record's round key belongs to the loaded registry")]
+    fn an_unregistered_record_round_is_a_bug() {
+        Killer::of_vehicle(None, "<unregistered>");
+    }
+
+    /// The game's damage-model card keeps a round's name when its gun is unknown. FIXTURE DATA:
+    /// cloning one valid gun under another key creates a real ambiguous registry lookup; the
+    /// presentation must omit the speed instead of panicking or inventing a source gun.
+    #[test]
+    fn a_round_chambered_by_several_guns_has_no_known_launch_speed() {
+        let rounds = crate::rounds::RoundRegistry::shipped();
+        let original = crate::guns::GunRegistry::shipped();
+        let mut files = crate::armaments_index::GUN_FILES.to_vec();
+        let (gun, text) = files[0];
+        let round = rounds
+            .keys()
+            .find(|key| original.round(gun, key).is_ok())
+            .expect("a loaded gun chambers at least one round");
+        let mut copy = format!("{gun}_fixture_copy");
+        while files.iter().any(|(key, _)| *key == copy) {
+            copy.push('_');
+        }
+        files.push((&copy, text));
+        let guns = crate::guns::GunRegistry::from_files(&files, rounds).unwrap();
+        assert_eq!(Killer::muzzle_speed(round, &guns), None);
+    }
+
     /// The card's data lines draw in the shipped font: an undrawable name falls back to saying it
     /// is unknown, a partly drawable one keeps what draws; a record with no shooter names neither,
-    /// and one with no muzzle shows no range. A round the registry lacks reads as unknown, and every
-    /// registered round is named by its display name, never by its registry key.
+    /// and one with no muzzle shows no range. Every registered round is named by its display
+    /// name, never by its registry key.
     #[test]
     fn the_card_draws_only_what_the_font_covers() {
         let mut killer = Killer {
             player: Some("\u{864E}\u{738B}".into()),
             vehicle: Some("Tiger \u{864E} I".into()),
-            round: Some(("Probe Mk. 1".into(), 773.0)),
+            round: ("Probe Mk. 1".into(), Some(773.0)),
         };
         let [name, vehicle, round] = card_lines(&killer, Some(700.0));
         assert_eq!(name, "UNKNOWN PLAYER");
@@ -661,12 +691,8 @@ mod tests {
             ("UNKNOWN PLAYER", "UNKNOWN VEHICLE")
         );
         assert_eq!(round, "Probe Mk. 1    773 m/s");
-        killer.round = None;
-        assert_eq!(card_lines(&killer, None)[2], "UNKNOWN ROUND");
-        assert_eq!(
-            card_lines(&Killer::of_vehicle(None, "<unregistered>"), None)[2],
-            "UNKNOWN ROUND"
-        );
+        killer.round.1 = None;
+        assert_eq!(card_lines(&killer, None)[2], "Probe Mk. 1");
         let registry = crate::rounds::RoundRegistry::shipped();
         for key in registry.keys() {
             let [_, _, round] = card_lines(&Killer::of_vehicle(None, key), None);

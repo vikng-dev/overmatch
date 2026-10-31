@@ -1,3 +1,5 @@
+//! The game's damage-model view, game state only.
+//!
 //! The corner slot in play: the shooter's corner, each explanation of the local player's own hit
 //! on another tank in the frame for its verdict ([`CornerKind::of`]). One owner, one slot. The
 //! player's own tank is never a turn here: the x-ray ([`xray`]) dresses the live tank in the
@@ -684,12 +686,7 @@ mod tests {
                 .expect("the tank file parses");
         let world = app.world_mut();
         let root = world
-            .spawn((
-                Transform::IDENTITY,
-                Visibility::Hidden,
-                view::ViewRoot::Stage,
-                CornerRig,
-            ))
+            .spawn((Transform::IDENTITY, Visibility::Hidden, CornerRig))
             .id();
         world.spawn((
             Name::new(view::HULL_NODE),

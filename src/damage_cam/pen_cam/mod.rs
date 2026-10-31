@@ -1,3 +1,5 @@
+//! The game's damage-model view, game state only.
+//!
 //! The pen cam: a hit explained in a corner inset, top-right over the game, one frame per verdict
 //! — the see-through hull for a penetration, the plate slice for a non-pen, the outside view for a
 //! ricochet or for damage — opening 0.2 s after the impact and closing on its own. Specification:
@@ -92,14 +94,11 @@ pub struct Exhibit {
 #[derive(Resource, Default)]
 pub struct Exhibits(pub Vec<Exhibit>);
 
-/// How the presentation draws: the player's reduce-motion setting, and the viewer's drag on the
-/// corner camera, which the game leaves at rest.
+/// How the game's damage-model presentation draws: the player's reduce-motion setting.
 #[derive(Resource, Clone, PartialEq, Debug, Default)]
 pub struct Knobs {
     /// No orbit or drift, and the record's events land with short fades.
     pub reduce_motion: bool,
-    /// The viewer's drag on the corner camera (yaw, pitch; rad).
-    pub orbit: Vec2,
 }
 
 /// Every entity the corner spawns for its own drawing: the inset camera, its lights, the shell, the

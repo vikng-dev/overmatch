@@ -1,3 +1,5 @@
+//! The game's damage-model view tests, game state only.
+
 use super::super::tests::{
     STEP_S, census, corner_app_with, default_image_kept, receive, stage_of, step,
 };
@@ -163,6 +165,33 @@ fn killed_in(
         receive(&mut app, explanation, &vocabulary);
     }
     (app, player, camera)
+}
+
+/// The game's damage-model card uses the live shooter's loaded data, even for a handle with
+/// no disk path. A reparse mutant would lose the in-memory display name this fixture authors.
+#[test]
+fn the_killer_card_reads_the_live_shooters_loaded_spec() {
+    let (mut app, player, camera) = app(Settings::default());
+    let record = report(RECORD);
+    let path = crate::assets::asset_root().join(record.vehicle.as_deref().unwrap());
+    let mut spec: TankSpec = ron::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
+    spec.display_name = "Loaded fixture vehicle".to_owned();
+    let handle = app.world_mut().resource_mut::<Assets<TankSpec>>().add(spec);
+    assert!(
+        handle.path().is_none(),
+        "the fixture has no file to reparse"
+    );
+    app.world_mut()
+        .spawn((STRUCK, Tank, TankSpecHandle(handle)));
+    let (app, _, _) = killed_in((app, player, camera), -1.0);
+    let killing = victim(&app)
+        .record
+        .as_ref()
+        .expect("the killing record arrived");
+    assert_eq!(
+        killing.killer.vehicle.as_deref(),
+        Some("Loaded fixture vehicle")
+    );
 }
 
 /// A knockout plays its killing record whichever arrives first, within the window: the hit beat
