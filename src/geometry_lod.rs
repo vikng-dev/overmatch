@@ -120,8 +120,7 @@ pub(crate) struct SourceDetail;
 ///
 /// BOTH ladders the certificate feeds obey it — [`attach_rungs`] spawns no sibling and writes no
 /// band, and `track::link_view`'s belt selector is not scheduled, so a track belt keeps the
-/// authored shoe it spawns with. The terrain ladder is a different certificate and has its own
-/// clamp (`terrain_lod::TerrainLodClamp`).
+/// authored shoe it spawns with. The terrain ladder is a different certificate.
 #[derive(Resource)]
 pub(crate) struct SourceDetailOnly;
 
