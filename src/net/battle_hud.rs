@@ -6,7 +6,8 @@
 //! Every view reads the replicated [`BattleState`] and [`Scoreboard`] (one entity) and the
 //! client's shared presentation tick ([`InterpolationTimeline`]); it
 //! never advances a phase, breaks a tie or chooses a winner. The board orders standings by the
-//! server's own [`rank`]. Before the first snapshot there is no Battle to show: both views hide.
+//! server's own [`rank`]. Before the first snapshot, or while the shared presentation clock is
+//! synchronizing, there is no timed Battle view to show: both views hide.
 //!
 //! No player name rides the wire yet, so a row names its combatant by its replicated
 //! [`CombatantId`]. Rendered strings stay within the bundled font's coverage
@@ -297,6 +298,8 @@ fn spawn_battle_hud(mut commands: Commands, fonts: Res<UiFonts>) {
                 position_type: PositionType::Absolute,
                 top: Val::Percent(14.0),
                 width: Val::Percent(100.0),
+                height: Val::Percent(78.0),
+                align_items: AlignItems::Start,
                 justify_content: JustifyContent::Center,
                 ..default()
             },
@@ -305,6 +308,8 @@ fn spawn_battle_hud(mut commands: Commands, fonts: Res<UiFonts>) {
             root.spawn((
                 Node {
                     flex_direction: FlexDirection::Column,
+                    max_height: Val::Percent(100.0),
+                    min_height: Val::Px(0.0),
                     padding: UiRect::all(Val::Px(16.0)),
                     row_gap: Val::Px(10.0),
                     border_radius: BorderRadius::all(Val::Px(4.0)),
@@ -365,6 +370,22 @@ fn spawn_battle_hud(mut commands: Commands, fonts: Res<UiFonts>) {
         });
 }
 
+/// No usable Battle view also clears its table position, so a replacement link cannot inherit
+/// the previous link's scrolled roster.
+fn hide_views(
+    roots: &mut Query<(&MatchUi, &mut Visibility)>,
+    viewports: &mut Query<(&ComputedNode, &mut ScrollPosition), With<BoardViewport>>,
+) {
+    for (_, mut visibility) in roots.iter_mut() {
+        visibility.set_if_neq(Visibility::Hidden);
+    }
+    for (_, mut scroll) in viewports.iter_mut() {
+        if scroll.0 != Vec2::ZERO {
+            scroll.0 = Vec2::ZERO;
+        }
+    }
+}
+
 /// Rewrite and show the clock line and the board from the replicated Battle and score. The board
 /// shows only while nothing captures input ([`overlay::input_blocked`]).
 #[expect(
@@ -385,9 +406,7 @@ fn update_battle_hud(
         Ok(replicated) => replicated,
         // Before the first snapshot, or between links: no Battle to show.
         Err(QuerySingleError::NoEntities(_)) => {
-            for (_, mut visibility) in &mut roots {
-                visibility.set_if_neq(Visibility::Hidden);
-            }
+            hide_views(&mut roots, &mut viewports);
             return;
         }
         Err(QuerySingleError::MultipleEntities(_)) => panic!(
@@ -395,10 +414,16 @@ fn update_battle_hud(
              entities before a replacement arrives"
         ),
     };
-    let now = clock
-        .expect("a replicated Battle arrives only where the shared presentation clock is installed")
-        .tick()
-        .0;
+    let clock = clock.expect(
+        "a replicated Battle arrives only where the shared presentation clock is installed",
+    );
+    if !clock.is_synced() {
+        // The first snapshot, or a reconnect, can precede a usable presentation-time estimate.
+        // Do not invent a deadline offset while its timeline is still synchronizing.
+        hide_views(&mut roots, &mut viewports);
+        return;
+    }
+    let now = clock.tick().0;
     let view = View::of(battle.phase, now, time.timestep());
     let board_shown =
         view.shows_board(keys.pressed(BOARD_KEY)) && !overlay::input_blocked(&overlays, true);
@@ -450,6 +475,7 @@ mod tests {
     use super::*;
     use crate::net::battle::LateJoin;
     use crate::net::score::Respawn;
+    use lightyear::prelude::TimelineSync;
 
     fn standing(combatant: u64, knockouts: u32, losses: u32) -> Standing {
         Standing {
@@ -557,6 +583,72 @@ mod tests {
         );
     }
 
+    /// A replicated deadline is not meaningful against an unsynchronized cursor. Players must
+    /// see neither a fabricated countdown nor an early results board while the clock settles.
+    #[test]
+    fn the_view_waits_for_its_shared_presentation_clock() {
+        let mut app = app(Duration::from_millis(500));
+        let replica = app
+            .world_mut()
+            .spawn((
+                BattleState {
+                    number: 1,
+                    phase: BattlePhase::Results {
+                        ends_at: 100,
+                        outcome: BattleOutcome::Draw,
+                    },
+                },
+                Scoreboard::default(),
+            ))
+            .id();
+        app.world_mut()
+            .resource_mut::<InterpolationTimeline>()
+            .set_synced(false);
+        app.update();
+        assert_eq!(clock_line(&mut app), None);
+        assert!(!shown(&mut app, MatchUi::Scoreboard));
+        app.world_mut()
+            .resource_mut::<InterpolationTimeline>()
+            .set_synced(true);
+        app.update();
+        assert_eq!(clock_line(&mut app).as_deref(), Some("RESULTS 0:50"));
+        assert!(shown(&mut app, MatchUi::Scoreboard));
+        let viewport = {
+            let world = app.world_mut();
+            world
+                .query_filtered::<Entity, With<BoardViewport>>()
+                .single(world)
+                .unwrap()
+        };
+        app.world_mut()
+            .get_mut::<ScrollPosition>(viewport)
+            .unwrap()
+            .0
+            .y = 250.0;
+        app.world_mut()
+            .resource_mut::<InterpolationTimeline>()
+            .set_synced(false);
+        app.update();
+        assert_eq!(
+            app.world().get::<ScrollPosition>(viewport).unwrap().0.y,
+            0.0
+        );
+        app.world_mut()
+            .resource_mut::<InterpolationTimeline>()
+            .set_synced(true);
+        app.world_mut()
+            .get_mut::<ScrollPosition>(viewport)
+            .unwrap()
+            .0
+            .y = 250.0;
+        app.world_mut().entity_mut(replica).despawn();
+        app.update();
+        assert_eq!(
+            app.world().get::<ScrollPosition>(viewport).unwrap().0.y,
+            0.0
+        );
+    }
+
     fn app(fixed: Duration) -> App {
         let mut app = App::new();
         app.insert_resource(UiFonts {
@@ -571,6 +663,9 @@ mod tests {
         app.world_mut()
             .resource_mut::<Overlays>()
             .declare_in_match(true);
+        app.world_mut()
+            .resource_mut::<InterpolationTimeline>()
+            .set_synced(true);
         mount_bare(&mut app);
         app
     }
