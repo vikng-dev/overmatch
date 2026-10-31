@@ -25,15 +25,24 @@
 //! THE STATE. [`TreeState`] is `Standing` or `Down { cut, dir }`: the segment the trunk broke at
 //! and the fall azimuth's bin. The authority sets it once — when a segment's pool empties
 //! ([`PoolEmptied`]: the cut is that segment, the direction the dose's own) or when a ram's
-//! torque beats `fell_k × dbh³` — and every peer derives the rest from it: the body here, the glb
-//! and the fall's presentation in [`view`], which the sim never waits on. One break per tree: a
-//! tree that is down holds no pool.
+//! torque beats `fell_k × dbh³` — with the tick it fell at ([`Fell`]), and every peer derives the
+//! rest from the two: the body here, the glb and the fall's presentation in [`view`], which the
+//! sim never waits on. One break per tree: a tree that is down holds no pool.
+//!
+//! THE FALL IS A MOTION, NEVER A PLACEMENT. The piece above the cut is a rigid physical pendulum
+//! about the cut's centre ([`Pendulum`]: its moments from the taper, its starting spin the least
+//! push that tips it), turned under gravity tick by tick until it meets the terrain, then, for a
+//! cut above the base, slid off the stump to its seat ([`FallPath`], ending on [`Resting`]). Every
+//! peer derives the same path from the state, the body and the terrain, and stands the body at
+//! the path's tick: the authority counts its ticks, a replica reads them off its presentation
+//! cursor. A piece that meets another static body first rests where it met it ([`Stopped`]), a
+//! fact only the authority decides and the ledger carries.
 //!
 //! THE BODY IN THE PHYSICS WORLD. The body is derived and placed in avian's world — collider
-//! poses, bounds and the trees a spatial query walks — in the frame its state changes
-//! ([`derive_systems`]), so the first march after that frame, the next fixed tick's, reads the
-//! derived body. The authority derives after the tick's physics step: a transition a march makes
-//! is read by the march of the next tick, never by later shells of the same tick.
+//! poses, bounds and the trees a spatial query walks — in every frame its state changes or its
+//! fall moves it ([`derive_systems`]), so the first march after that frame, the next fixed tick's,
+//! reads the derived body. The authority derives after the tick's physics step: a transition a
+//! march makes is read by the march of the next tick, never by later shells of the same tick.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::f32::consts::{FRAC_PI_2, PI};
@@ -42,8 +51,8 @@ use std::sync::Arc;
 
 use avian3d::collider_tree::{ColliderTrees, update_moved_collider_aabbs};
 use avian3d::prelude::{
-    Collider, ColliderTransform, CollisionLayers, ContactGraph, ContactPair, LayerMask, Position,
-    RigidBody, Rotation,
+    Collider, ColliderOf, ColliderTransform, CollisionLayers, ContactGraph, ContactPair, LayerMask,
+    Position, RigidBody, Rotation, SpatialQuery, SpatialQueryFilter,
 };
 use avian3d::schedule::PhysicsSystems;
 use bevy::ecs::schedule::ScheduleConfigs;
@@ -52,6 +61,7 @@ use bevy::prelude::*;
 
 use crate::Layer;
 use crate::ballistics::{BallisticVolume, ComponentHealth, Envelope, PoolEmptied, VolumeMaterial};
+use crate::buildings::fracture::GRAVITY;
 use crate::provenance::Sourced;
 use crate::scatter::MapInstance;
 use crate::substances::SubstanceRegistry;
@@ -418,8 +428,8 @@ pub(crate) struct TreeSegment(pub(crate) u8);
 
 /// The authority tick a tree's state last changed at (`ShotClock` units, the wire's `tick`).
 /// Inserted beside the `Down` state by whoever sets it — the authority's laws here, the ledger
-/// apply on a replica — so the presentation fuses the fall to the tick it happened at; removed
-/// by [`derive_state`] when the state stands, as every derived marker is.
+/// apply on a replica — so a replica and the presentation run the fall from the tick it happened
+/// at; removed by [`derive_state`] when the state stands, as every derived marker is.
 #[derive(Component, Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct Fell {
     pub(crate) tick: u32,
@@ -611,6 +621,10 @@ pub(crate) fn resting_pose(
 /// the engines differ: avian's collider `Rotation` is the root's `Rotation` — derived from the
 /// spawn transform's affine — times this, normalized, and the renderer composes affines.
 pub(crate) fn fall_rotation(resting: &Resting, root: Quat, angle: f32) -> Quat {
+    // Upright is the identity itself, never one of its signed-zero twins.
+    if angle == 0.0 {
+        return Quat::IDENTITY;
+    }
     let axis = root.inverse() * Vec3::new(resting.dz, 0.0, -resting.dx);
     let (s, c) = (libm::sinf(0.5 * angle), libm::cosf(0.5 * angle));
     Quat::from_xyzw(axis.x * s, axis.y * s, axis.z * s, c)
@@ -622,6 +636,215 @@ pub(crate) fn fall_rotation(resting: &Resting, root: Quat, angle: f32) -> Quat {
 /// bits. Zero for a zero seat.
 pub(crate) fn seat_in_root(resting: &Resting, root: Quat) -> Vec3 {
     root.inverse() * resting.seat
+}
+
+/// Gauss–Legendre's three nodes on `[0, 1]` and their weights: exact for a polynomial of degree
+/// five or less, which every moment of a linearly tapered segment is (degree four at most).
+const GAUSS_3: [(f64, f64); 3] = [
+    (0.112_701_665_379_258_31, 5.0 / 18.0),
+    (0.5, 8.0 / 18.0),
+    (0.887_298_334_620_741_7, 5.0 / 18.0),
+];
+
+/// The most ticks a fall may take to come to rest: two minutes at 64 Hz. A path longer than that
+/// is a law that does not end, a bug (ADR-0011).
+const MAX_FALL_TICKS: usize = 64 * 120;
+
+/// The piece above a cut as a rigid physical pendulum about the cut's centre, from the taper at
+/// the instance's scale: uniform wood, so its density cancels from every term. `omega2` is
+/// `Ω² = g M₁ / I` (s⁻²), for the piece's first moment of volume `M₁` above the cut and its
+/// second moment `I` about the horizontal axis through the cut's centre (`∫ z² dV` plus each
+/// disc's own `π a⁴ / 4`); `θ'' = Ω² sin θ` turns it. `spin` (rad/s) is the speed it starts at:
+/// the least push that tips a piece standing on its cut face lifts its centre of mass, `d` above
+/// the cut, over the cut's rim `r`, so `½ I ω₀² = g V (√(d² + r²) − d)` (DERIVED). A harder push
+/// (a ram's whole angular impulse) is not carried by the state, so every fall starts at the least.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) struct Pendulum {
+    pub(crate) omega2: f64,
+    pub(crate) spin: f64,
+}
+
+impl Pendulum {
+    pub(crate) fn of(body: &TreeBody, cut: usize) -> Self {
+        let (mut volume, mut moment, mut inertia) = (0.0_f64, 0.0_f64, 0.0_f64);
+        for j in cut..body.kind.segments.len() {
+            let z0 = f64::from(body.prefix[j] - body.prefix[cut]);
+            let h = f64::from(body.prefix[j + 1] - body.prefix[j]);
+            let bottom = f64::from(body.kind.segments[j].r_bottom_m * body.scale);
+            let top = f64::from(body.kind.r_top_m(j) * body.scale);
+            for (u, w) in GAUSS_3 {
+                let (z, a) = (z0 + u * h, bottom + (top - bottom) * u);
+                let area = std::f64::consts::PI * a * a;
+                volume += w * h * area;
+                moment += w * h * z * area;
+                inertia += w * h * (z * z * area + 0.25 * area * a * a);
+            }
+        }
+        let g = f64::from(GRAVITY);
+        let d = moment / volume;
+        let rim = f64::from(body.kind.segments[cut].r_bottom_m * body.scale);
+        let lift = libm::sqrt(d * d + rim * rim) - d;
+        Self {
+            omega2: g * moment / inertia,
+            spin: libm::sqrt(2.0 * g * volume * lift / inertia),
+        }
+    }
+
+    /// One fixed-step RK4 step of `θ'' = Ω² sin θ` from `(θ, ω)` over `dt` seconds: f64 and
+    /// libm's sine in one fixed order, so every peer steps the same bits.
+    fn step(self, (theta, omega): (f64, f64), dt: f64) -> (f64, f64) {
+        let accel = |theta: f64| self.omega2 * libm::sin(theta);
+        let (t1, w1) = (omega, accel(theta));
+        let (t2, w2) = (omega + 0.5 * dt * w1, accel(theta + 0.5 * dt * t1));
+        let (t3, w3) = (omega + 0.5 * dt * w2, accel(theta + 0.5 * dt * t2));
+        let (t4, w4) = (omega + dt * w3, accel(theta + dt * t3));
+        (
+            theta + dt / 6.0 * (t1 + 2.0 * t2 + 2.0 * t3 + t4),
+            omega + dt / 6.0 * (w1 + 2.0 * w2 + 2.0 * w3 + w4),
+        )
+    }
+}
+
+/// A fallen tree's motion, derived once from its body, its state and the terrain on every peer
+/// ([`Self::new`]), and the tick of it the body stands at. Each pose is the turn of the piece
+/// above the cut — the angle about [`fall_rotation`]'s axis — and its pivot, the butt's centre,
+/// in the root's frame, one per authority tick since the fall: the first upright at the cut, the
+/// last exactly the [`Resting`] pose. A peer stands the body at pose `k` ([`pose_falls`]); the
+/// view presents between two of them.
+#[derive(Component, Debug, Clone, PartialEq)]
+pub(crate) struct FallPath {
+    poses: Vec<(f32, Vec3)>,
+    /// The pose the piece first meets the terrain at: where the pendulum's turn ends.
+    landed: u32,
+    /// The pose the body stands at.
+    pub(crate) k: u32,
+}
+
+impl FallPath {
+    /// The path of the piece above `cut` to `resting`, under a root turned by `root`, sampled every
+    /// `dt` seconds. Stage A: the [`Pendulum`] from upright at its starting spin, stepped
+    /// ([`Pendulum::step`]) until its angle reaches the hinge, which that tick's pose takes
+    /// exactly — the piece meets the terrain within it. For a cut at the base that pose is the rest.
+    /// Stage B, for a cut above the base: the butt, at rest on the stump's top, slides off to the
+    /// seat accelerating at `g` along the chord between them (`½ g t²` of its length), and the turn
+    /// runs from the hinge to the resting tilt in proportion; the tick it arrives takes the rest
+    /// exactly. Panics past [`MAX_FALL_TICKS`] (ADR-0011): every law here ends.
+    pub(crate) fn new(body: &TreeBody, cut: usize, resting: &Resting, root: Quat, dt: f64) -> Self {
+        let law = Pendulum::of(body, cut);
+        let pivot = Vec3::Y * body.prefix[cut];
+        let seat = seat_in_root(resting, root);
+        let hinge = f64::from(resting.hinge);
+        let mut poses = vec![(0.0, pivot)];
+        let mut motion = (0.0, law.spin);
+        loop {
+            motion = law.step(motion, dt);
+            if motion.0 >= hinge {
+                break;
+            }
+            poses.push((motion.0 as f32, pivot));
+            assert!(
+                poses.len() < MAX_FALL_TICKS,
+                "trees: a fall that does not land"
+            );
+        }
+        let landed = u32::try_from(poses.len()).expect("bounded by MAX_FALL_TICKS");
+        if cut == 0 {
+            poses.push((resting.tilt, seat));
+            return Self {
+                poses,
+                landed,
+                k: 0,
+            };
+        }
+        poses.push((resting.hinge, pivot));
+        let chord = f64::from((seat - pivot).length());
+        for j in 1.. {
+            let t = f64::from(j) * dt;
+            let u = 0.5 * f64::from(GRAVITY) * t * t / chord;
+            if u >= 1.0 {
+                poses.push((resting.tilt, seat));
+                break;
+            }
+            let u = u as f32;
+            poses.push((
+                resting.hinge + (resting.tilt - resting.hinge) * u,
+                pivot + (seat - pivot) * u,
+            ));
+            assert!(
+                poses.len() < MAX_FALL_TICKS,
+                "trees: a slide that does not seat"
+            );
+        }
+        Self {
+            poses,
+            landed,
+            k: 0,
+        }
+    }
+
+    /// The last pose's index: the tick since the fall the piece comes to rest at.
+    pub(crate) fn last(&self) -> u32 {
+        u32::try_from(self.poses.len() - 1).expect("bounded by MAX_FALL_TICKS")
+    }
+
+    /// The tick since the fall the piece first meets the terrain at.
+    pub(crate) fn landed(&self) -> u32 {
+        self.landed
+    }
+
+    /// Pose `k`, the rest past the last.
+    pub(crate) fn pose(&self, k: u32) -> (f32, Vec3) {
+        self.poses[k.min(self.last()) as usize]
+    }
+
+    /// The pose `ticks` (fractional) since the fall: upright before it, the chord between the
+    /// two poses around it (the angle and the pivot each lerped), the rest from the last on.
+    pub(crate) fn at(&self, ticks: f64) -> (f32, Vec3) {
+        if ticks.is_nan() || ticks <= 0.0 {
+            return self.poses[0];
+        }
+        let k = ticks.floor();
+        if k >= f64::from(self.last()) {
+            return self.pose(self.last());
+        }
+        let (k, s) = (k as usize, (ticks - k) as f32);
+        let ((a0, p0), (a1, p1)) = (self.poses[k], self.poses[k + 1]);
+        if s == 0.0 {
+            return (a0, p0);
+        }
+        (a0 + (a1 - a0) * s, p0 + (p1 - p0) * s)
+    }
+}
+
+/// The authority tick a falling tree's piece met another static body at, and rests at from then
+/// on (the game's environment destruction): set by the authority's [`stop_falls`], applied from
+/// the ledger on a replica, removed with the state's next change. Final: a piece resting on a
+/// body stays there.
+#[derive(Component, Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct Stopped {
+    pub(crate) tick: u32,
+}
+
+/// The pose of a down tree's segment `j` at `(angle, pivot)` of its fall: standing below the cut
+/// and while the piece is upright, else turned rigidly about the pivot by [`fall_rotation`] and
+/// set at the pivot plus its height above the cut, turned the same.
+fn segment_pose(
+    body: &TreeBody,
+    resting: &Resting,
+    root: Quat,
+    cut: usize,
+    j: usize,
+    (angle, pivot): (f32, Vec3),
+) -> Transform {
+    if j < cut || angle == 0.0 {
+        return Transform::from_xyz(0.0, body.prefix[j], 0.0);
+    }
+    let turn = fall_rotation(resting, root, angle);
+    Transform {
+        translation: pivot + turn * (Vec3::Y * (body.prefix[j] - body.prefix[cut])),
+        rotation: turn,
+        scale: Vec3::ONE,
+    }
 }
 
 /// The collision filter of a standing segment: hulls contact it and rounds walk it.
@@ -638,17 +861,13 @@ fn lying_layers() -> CollisionLayers {
 /// Every peer derives the whole body from the state on every change of it (ADR-0016, A10),
 /// never from the body before: standing, every segment stands at its spawn height on
 /// [`standing_layers`] with its pool present (a full one where it had none) and the root holds
-/// no resting pose or transition tick; down, the stump's segments stand the same and every
-/// segment from the cut up lies in the resting pose on [`lying_layers`], the pose is recorded
-/// and every segment's pool is gone — one break per tree, so what is down, stump included, takes
-/// no more dose. In either state the root's [`Envelope`] is the segments' bounds as derived. A
-/// tree back to standing (a replaced ledger) or down at another cut derives exactly as one that
-/// never held the old state.
-///
-/// The lying piece is turned rigidly about the seat — the butt's resting centre, which is the
-/// cut's bottom only for a cut at the base — so in the root's frame each lying segment is turned
-/// by [`fall_rotation`] at the resting tilt and sits at the seat ([`seat_in_root`]) plus its
-/// height above the cut, turned the same.
+/// no resting pose, fall path, stop or transition tick; down, the resting pose and the fall's
+/// path to it are derived ([`resting_pose`], [`FallPath::new`]) and recorded at the path's first
+/// pose, every segment from the cut up goes onto [`lying_layers`] and every segment's pool is
+/// gone — one break per tree, so what is down, stump included, takes no more dose. Every segment
+/// stands here; [`pose_falls`] moves the piece along its path. A tree back to standing (a
+/// replaced ledger) or down at another cut derives exactly as one that never held the old state,
+/// its setter having cleared the old state's stop.
 fn derive_state(
     mut trees: Query<
         (
@@ -669,6 +888,7 @@ fn derive_state(
         Has<ComponentHealth>,
     )>,
     grid: Option<Res<HeightGrid>>,
+    step: Res<Time<Fixed>>,
     mut commands: Commands,
 ) {
     // Trees are placed by the map whose grid this is; a composition without the grid (the flat
@@ -676,16 +896,24 @@ fn derive_state(
     let Some(grid) = grid else {
         return;
     };
+    let dt = step.timestep().as_secs_f64();
     for (root, state, body, transform, children, mut envelope) in &mut trees {
-        let fallen = match *state {
-            TreeState::Standing => None,
+        let cut = match *state {
+            TreeState::Standing => {
+                commands
+                    .entity(root)
+                    .remove::<(Resting, FallPath, Stopped, Fell)>();
+                None
+            }
             TreeState::Down { cut, dir } => {
                 let resting = resting_pose(body, transform.translation, cut, dir, |x, z| {
                     grid.height_at(x, z)
                 });
-                let turn = fall_rotation(&resting, transform.rotation, resting.tilt);
-                let seat = seat_in_root(&resting, transform.rotation);
-                Some((usize::from(cut), resting, turn, seat))
+                let path = FallPath::new(body, usize::from(cut), &resting, transform.rotation, dt);
+                // A stop is the setter's: the ledger's apply clears the last state's with the
+                // state and may carry this one's in the same frame.
+                commands.entity(root).insert((resting, path));
+                Some(usize::from(cut))
             }
         };
         let mut parts = Vec::with_capacity(children.len());
@@ -696,19 +924,11 @@ fn derive_state(
                 continue;
             };
             let k = usize::from(k);
-            let (pose, filter) = match fallen {
-                Some((cut, _, turn, seat)) if k >= cut => {
-                    let pose = Transform {
-                        translation: seat + turn * (Vec3::Y * (body.prefix[k] - body.prefix[cut])),
-                        rotation: turn,
-                        scale: Vec3::ONE,
-                    };
-                    (pose, lying_layers())
-                }
-                _ => (
-                    Transform::from_xyz(0.0, body.prefix[k], 0.0),
-                    standing_layers(),
-                ),
+            let pose = Transform::from_xyz(0.0, body.prefix[k], 0.0);
+            let filter = if cut.is_some_and(|cut| k >= cut) {
+                lying_layers()
+            } else {
+                standing_layers()
             };
             local.set_if_neq(pose);
             parts.push((collider.clone(), pose.translation, pose.rotation));
@@ -716,7 +936,7 @@ fn derive_state(
             if *layers != filter {
                 commands.entity(child).insert(filter);
             }
-            match fallen {
+            match cut {
                 Some(_) if has_pool => {
                     commands.entity(child).remove::<ComponentHealth>();
                 }
@@ -735,29 +955,206 @@ fn derive_state(
         ) {
             envelope.set_if_neq(derived);
         }
-        match fallen {
-            Some((_, resting, _, _)) => {
-                commands.entity(root).insert(resting);
+    }
+}
+
+/// Every peer stands each down tree whose path moved at its path's pose `k`: the stump's segments
+/// upright, the piece's turned about its pivot ([`segment_pose`]) — so each lying segment, at the
+/// rest, is turned by [`fall_rotation`] at the resting tilt and sits at the seat
+/// ([`seat_in_root`]) plus its height above the cut, turned the same. The root's [`Envelope`]
+/// holds every segment at this pose and, while the piece still moves, at the next one: the march
+/// reads it as a body whose parts stay inside it through the next tick.
+fn pose_falls(
+    mut trees: Query<
+        (
+            &TreeState,
+            &TreeBody,
+            &Transform,
+            &Children,
+            &FallPath,
+            &Resting,
+            Has<Stopped>,
+            &mut Envelope,
+        ),
+        (Changed<FallPath>, Without<TreeSegment>),
+    >,
+    mut segments: Query<(&TreeSegment, &mut Transform, &Collider), Without<TreeBody>>,
+) {
+    for (state, body, transform, children, path, resting, stopped, mut envelope) in &mut trees {
+        let TreeState::Down { cut, .. } = *state else {
+            continue;
+        };
+        let cut = usize::from(cut);
+        let now = path.pose(path.k);
+        let next = (!stopped && path.k < path.last()).then(|| path.pose(path.k + 1));
+        let mut parts = Vec::with_capacity(2 * children.len());
+        for &child in children {
+            let Ok((&TreeSegment(j), mut local, collider)) = segments.get_mut(child) else {
+                continue;
+            };
+            let j = usize::from(j);
+            let pose = segment_pose(body, resting, transform.rotation, cut, j, now);
+            local.set_if_neq(pose);
+            parts.push((collider.clone(), pose.translation, pose.rotation));
+            if let Some(next) = next {
+                let ahead = segment_pose(body, resting, transform.rotation, cut, j, next);
+                parts.push((collider.clone(), ahead.translation, ahead.rotation));
             }
-            None => {
-                commands.entity(root).remove::<(Resting, Fell)>();
-            }
+        }
+        if let Some(derived) = Envelope::holding(
+            parts
+                .iter()
+                .map(|(collider, at, turn)| (collider, *at, *turn)),
+        ) {
+            envelope.set_if_neq(derived);
         }
     }
 }
 
-/// Every peer places a re-derived tree's segment colliders in the physics world in the frame the
-/// state changes: each segment's `ColliderTransform`, `Position` and `Rotation` take the values
+/// The authority's fall clock: every moving fall advances one pose per fixed tick, from the pose
+/// its derive recorded in the tick it fell; a stopped one and one at rest hold. The tick a fall
+/// comes to rest is logged with its MEASURED durations.
+fn advance_falls(
+    mut trees: Query<
+        (
+            &mut FallPath,
+            &TreeBody,
+            &Resting,
+            Option<&crate::scatter::MapInstance>,
+        ),
+        Without<Stopped>,
+    >,
+    step: Res<Time<Fixed>>,
+) {
+    let dt = step.timestep().as_secs_f64();
+    for (mut path, body, resting, identity) in &mut trees {
+        if path.is_added() || path.k >= path.last() {
+            continue;
+        }
+        path.k += 1;
+        if path.k == path.last() {
+            info!(
+                "trees: {} ({} m tall, scale {}) meets the ground {} ticks after it fell \
+                 ({:.3} s, MEASURED), turned {:.3}°, and rests after {} ({:.3} s)",
+                identity.map_or("a tree", |identity| identity.id.as_str()),
+                body.prefix[body.prefix.len() - 1],
+                body.scale,
+                path.landed(),
+                f64::from(path.landed()) * dt,
+                resting.hinge.to_degrees(),
+                path.last(),
+                f64::from(path.last()) * dt,
+            );
+        }
+    }
+}
+
+/// A replica's fall clock: each fall stands at the tick its presentation cursor ([`FallClock`])
+/// reads since the fall, held at its stop and at its rest, so the body the replica's march reads
+/// is the one its hulls are drawn beside.
+fn follow_falls(
+    clock: Option<Res<FallClock>>,
+    mut trees: Query<(&mut FallPath, &Fell, Option<&Stopped>)>,
+) {
+    // The net client publishes the cursor; a replica without one has no fall to follow yet.
+    let Some(clock) = clock else {
+        return;
+    };
+    let since = |fell: &Fell, tick: u32| (tick.wrapping_sub(fell.tick) as i32).max(0) as u32;
+    for (mut path, fell, stopped) in &mut trees {
+        let mut k = since(fell, clock.tick).min(path.last());
+        if let Some(stopped) = stopped {
+            k = k.min(since(fell, stopped.tick));
+        }
+        if path.k != k {
+            path.k = k;
+        }
+    }
+}
+
+/// The authority's rule for a falling piece that meets another body: before a fall advances, the
+/// piece's every segment at the next pose is tested against the colliders of the walk
+/// (`Armor`) that belong to another static body — a standing or lying tree, a standing building
+/// element — and a piece that would overlap one rests at the pose it stands at, from this tick
+/// ([`Stopped`]). The terrain is the law's own end and no `Armor`; a moving body (a hull, a loose
+/// piece) is no support a piece stays on, so it is not one.
+#[allow(
+    clippy::type_complexity,
+    reason = "one query of the falling tree's parts"
+)]
+fn stop_falls(
+    spatial: Option<SpatialQuery>,
+    trees: Query<
+        (
+            Entity,
+            &TreeState,
+            &TreeBody,
+            &Position,
+            &Rotation,
+            &Children,
+            &FallPath,
+            &Resting,
+            &Fell,
+        ),
+        Without<Stopped>,
+    >,
+    segments: Query<(&TreeSegment, &Collider)>,
+    bodies: Query<&ColliderOf>,
+    kinds: Query<&RigidBody>,
+    mut commands: Commands,
+) {
+    let Some(spatial) = spatial else {
+        return;
+    };
+    for (root, state, body, position, rotation, children, path, resting, fell) in &trees {
+        let TreeState::Down { cut, .. } = *state else {
+            continue;
+        };
+        if path.k >= path.last() {
+            continue;
+        }
+        let cut = usize::from(cut);
+        let next = path.pose(path.k + 1);
+        let filter =
+            SpatialQueryFilter::from_mask(Layer::Armor).with_excluded_entities(children.iter());
+        let support = |hit: Entity| {
+            bodies.get(hit).is_ok_and(|of| {
+                of.body != root && kinds.get(of.body).is_ok_and(RigidBody::is_static)
+            })
+        };
+        let meets = children.iter().any(|child| {
+            let Ok((&TreeSegment(j), collider)) = segments.get(child) else {
+                return false;
+            };
+            let j = usize::from(j);
+            if j < cut {
+                return false;
+            }
+            let local = segment_pose(body, resting, rotation.0, cut, j, next);
+            let at = position.0 + rotation.0 * local.translation;
+            let turn = (rotation.0 * local.rotation).normalize();
+            spatial
+                .shape_intersections(collider, at, turn, &filter)
+                .into_iter()
+                .any(support)
+        });
+        if meets {
+            commands.entity(root).insert(Stopped {
+                tick: fell.tick.wrapping_add(path.k),
+            });
+        }
+    }
+}
+
+/// Every peer places a re-derived or moved tree's segment colliders in the physics world in the
+/// frame the state changes or the fall moves it ([`Moved`]): each segment's `ColliderTransform`, `Position` and `Rotation` take the values
 /// avian's propagation (`propagate_collider_transforms`) and child update
 /// (`update_child_collider_position`) compute from the derived transforms — the same expressions
 /// on the same inputs, so the next physics step rewrites the same bits. The `ColliderTransform`
 /// is written with them because lightyear recomputes a child collider's pose from it after each
 /// fixed loop once that pose has changed (`LightyearAvianPlugin::update_child_collider_position`).
 fn place_segment_colliders(
-    trees: Query<
-        (&Transform, &Position, &Rotation, &Children),
-        (Changed<TreeState>, Without<TreeSegment>),
-    >,
+    trees: Query<(&Transform, &Position, &Rotation, &Children), Moved>,
     mut segments: Query<
         (
             &Transform,
@@ -790,19 +1187,31 @@ fn place_segment_colliders(
     }
 }
 
-/// The body derive as every peer schedules it: [`derive_state`], then
-/// [`place_segment_colliders`], then avian's own refit of moved colliders
+/// A tree root whose body this frame's derive moved: its state changed or its fall advanced.
+type Moved = (
+    Or<(Changed<TreeState>, Changed<FallPath>)>,
+    Without<TreeSegment>,
+);
+
+/// The body derive as every peer schedules it: [`derive_state`], the fall's clock (the authority
+/// counts its ticks, [`advance_falls`]; a replica reads its cursor, [`follow_falls`]),
+/// [`pose_falls`], [`place_segment_colliders`], then avian's own refit of moved colliders
 /// ([`update_moved_collider_aabbs`]: their bounds and the collider trees a spatial query walks)
-/// in any frame a tree's state changed. A march runs in `FixedUpdate`, before the physics step,
-/// so the march of the first fixed tick after the derive reads the derived body; without the
+/// in any frame a tree's body moved. A march runs in `FixedUpdate`, before the physics step, so
+/// the march of the first fixed tick after the derive reads the derived body; without the
 /// placement it would read the pose of the last step, one tick behind the state.
 pub(crate) fn derive_systems() -> ScheduleConfigs<ScheduleSystem> {
     (
         derive_state,
+        (
+            advance_falls.run_if(not(resource_exists::<ClientReplica>)),
+            follow_falls.run_if(resource_exists::<ClientReplica>),
+        ),
+        pose_falls,
         place_segment_colliders,
         update_moved_collider_aabbs::<Collider>
             .run_if(resource_exists::<ColliderTrees>)
-            .run_if(any_match_filter::<(Changed<TreeState>, Without<TreeSegment>)>),
+            .run_if(any_match_filter::<Moved>),
     )
         .chain()
 }
@@ -1078,8 +1487,9 @@ fn fell_on_ram(
 
 /// The sim half: the authority's state transitions and the body derived from them. The emptying
 /// observer is mounted in every composition (a replica's march empties no pool, so it never
-/// fires on a client); the ram rule and the derive after it run only where this process is the
-/// authority — a replica derives in the frame its ledger lands (`net::destruction`).
+/// fires on a client); the ram rule, the stop rule and the derive after them run only where this
+/// process is the authority — a replica derives in the frame its ledger lands and in every frame
+/// its cursor moves a fall (`net::destruction`).
 pub(crate) fn sim_plugin(app: &mut App) {
     app.add_observer(fell_on_pool_emptied)
         .configure_sets(
@@ -1089,7 +1499,7 @@ pub(crate) fn sim_plugin(app: &mut App) {
         .add_systems(
             FixedPostUpdate,
             (
-                fell_on_ram
+                (fell_on_ram, stop_falls)
                     .in_set(TreeFallSet)
                     .run_if(not(resource_exists::<ClientReplica>)),
                 derive_systems()
@@ -1598,7 +2008,7 @@ pub(crate) mod tests {
     }
 
     /// A BODY ASLEEP ON A TRUNK WAKES WHEN THE TREE FALLS: a cube asleep on the standing fixture
-    /// trunk's tip wakes in the step after the trunk is re-posed lying, and falls. Avian wakes
+    /// trunk's tip wakes in the step after the fall first moves the trunk, and falls. Avian wakes
     /// nothing when a static collider moves, so a world without the game's wake for a moved
     /// support (`debris::wake_on_static_moved`) leaves the cube hanging where the tip stood.
     #[test]
@@ -1670,16 +2080,16 @@ pub(crate) mod tests {
         app.world_mut()
             .entity_mut(tree)
             .insert(TreeState::Down { cut: 0, dir: 0 });
-        // The tick that re-poses the trunk after its step, then the step that reads the move.
+        // The tick the trunk falls at, upright; the tick its fall first moves it, after the step;
+        // then the step that reads the move.
+        app.update();
         app.update();
         app.update();
         assert!(
             app.world().get::<Sleeping>(cube).is_none(),
             "the fall wakes it"
         );
-        for _ in 0..16 {
-            app.update();
-        }
+        settle(&mut app, tree);
         assert!(
             app.world().get::<Position>(cube).unwrap().0.y < tip - 0.1,
             "it falls"
@@ -2314,11 +2724,13 @@ pub(crate) mod tests {
         );
     }
 
-    /// A derive bed: the fixture tree spawned at `pose` on `grid`, the derive in `Update`.
+    /// A derive bed: the fixture tree spawned at `pose` on `grid`, the authority's derive in
+    /// `Update` — one update, one tick of a fall — at the game's 64 Hz step.
     pub(crate) fn derive_bed(grid: HeightGrid, pose: Transform) -> (App, Entity) {
         let mut app = App::new();
-        app.insert_resource(grid);
-        app.add_systems(Update, derive_state);
+        app.insert_resource(grid)
+            .insert_resource(Time::<Fixed>::from_hz(64.0))
+            .add_systems(Update, derive_systems());
         let mut queue = bevy::ecs::world::CommandQueue::default();
         let mut commands = Commands::new(&mut queue, app.world());
         spawn(
@@ -2337,6 +2749,19 @@ pub(crate) mod tests {
             .single(app.world())
             .expect("one root");
         (app, root)
+    }
+
+    /// Update `app` until `root`'s fall is at rest: its path's last pose. Panics on a tree with no
+    /// fall, or one that never rests.
+    pub(crate) fn settle(app: &mut App, root: Entity) {
+        for _ in 0..MAX_FALL_TICKS {
+            app.update();
+            let path = app.world().get::<FallPath>(root).expect("a fall");
+            if path.k == path.last() {
+                return;
+            }
+        }
+        panic!("the fall never rested");
     }
 
     /// The segments' local transforms and filters, in segment order.
@@ -2406,8 +2831,10 @@ pub(crate) mod tests {
             *app.world_mut().get_mut::<TreeState>(root).unwrap() = state;
             if let TreeState::Down { .. } = state {
                 app.world_mut().entity_mut(root).insert(Fell { tick: 7 });
+                settle(app, root);
+            } else {
+                app.update();
             }
-            app.update();
             assert_eq!(
                 crate::ballistics::assert_envelope_holds(app.world(), root),
                 3
@@ -2465,8 +2892,10 @@ pub(crate) mod tests {
              per square metre)"
         );
         assert!(
-            app.world().get::<Resting>(root).is_none() && app.world().get::<Fell>(root).is_none(),
-            "no pose and no transition tick standing"
+            app.world().get::<Resting>(root).is_none()
+                && app.world().get::<Fell>(root).is_none()
+                && app.world().get::<FallPath>(root).is_none(),
+            "no pose, no path and no transition tick standing"
         );
 
         set(&mut app, TreeState::Down { cut: 2, dir: 64 });
@@ -2576,7 +3005,7 @@ pub(crate) mod tests {
                     );
                     *app.world_mut().get_mut::<TreeState>(root).unwrap() =
                         TreeState::Down { cut, dir };
-                    app.update();
+                    settle(&mut app, root);
                     let segments = segments_of(&app, root);
                     assert_eq!(segments.len(), 3);
                     let mut digest = 0xcbf2_9ce4_8422_2325_u64;
@@ -2624,6 +3053,399 @@ pub(crate) mod tests {
         assert_eq!(
             rows, PINNED,
             "the lying pose moved; the rows now read:\n{listing}"
+        );
+    }
+
+    /// The game's 64 Hz step, seconds.
+    const DT: f64 = 1.0 / 64.0;
+
+    /// The law's time from upright to `hinge`, seconds: `∫₀^hinge dθ / ω(θ)` for the energy's
+    /// `ω² = ω₀² + 2Ω²(1 − cos θ)`, by a composite Simpson's rule of 2¹⁶ panels in f64 — a
+    /// quadrature of the law, independent of the path's integrator.
+    fn law_time(law: Pendulum, hinge: f64) -> f64 {
+        let n = 1_u32 << 16;
+        let h = hinge / f64::from(n);
+        let f = |theta: f64| {
+            1.0 / (law.spin * law.spin + 2.0 * law.omega2 * (1.0 - theta.cos())).sqrt()
+        };
+        let inner: f64 = (1..n)
+            .map(|i| f(f64::from(i) * h) * if i % 2 == 1 { 4.0 } else { 2.0 })
+            .sum();
+        (f(0.0) + f(hinge) + inner) * h / 3.0
+    }
+
+    /// The shipped tree kind `id` (fixture selection: its numbers are read, never asserted).
+    fn shipped_kind(id: &str) -> Arc<TreeKind> {
+        TreeLibrary::load(Path::new("assets"), [id])
+            .get(id)
+            .expect("the shipped kind")
+            .clone()
+    }
+
+    /// THE PENDULUM'S MOMENTS ARE THE TAPER'S: for a single-segment cylinder (fixture data, 10 m
+    /// of 0.2 m radius) the law reads the closed forms — `Ω² = g (L/2) / (L²/3 + r²/4)` and
+    /// `ω₀² = 2g (√((L/2)² + r²) − L/2) / (L²/3 + r²/4)` (DERIVED, per unit volume, the density
+    /// cancelling) — and for the tapered fixture above each cut it reads a midpoint sum of 10⁵
+    /// discs. A law that drops a disc's own `π a⁴ / 4`, reads the base radius for the whole
+    /// piece, or takes its moments about the base rather than the cut reds this; the fall's every
+    /// duration rests on these two numbers.
+    #[test]
+    fn the_pendulum_moments_are_the_tapers() {
+        let cylinder = TreeAsset {
+            species: "fixture".to_owned(),
+            segments: vec![Segment {
+                height_m: 10.0,
+                r_bottom_m: 0.2,
+            }],
+            r_tip_m: 0.2,
+        };
+        let kind = Arc::new(resolve(cylinder, &fixture_table(), &fixture_wood()).expect("holds"));
+        let law = Pendulum::of(&TreeBody::new(kind, 1.0), 0);
+        let (l, r, g) = (10.0_f64, f64::from(0.2_f32), f64::from(GRAVITY));
+        let inertia = l * l / 3.0 + r * r / 4.0;
+        let omega2 = g * (l / 2.0) / inertia;
+        let spin = (2.0 * g * (((l / 2.0).powi(2) + r * r).sqrt() - l / 2.0) / inertia).sqrt();
+        assert!(
+            (law.omega2 / omega2 - 1.0).abs() < 1e-9,
+            "{law:?} for Ω² {omega2}"
+        );
+        assert!(
+            (law.spin / spin - 1.0).abs() < 1e-9,
+            "{law:?} for ω₀ {spin}"
+        );
+
+        let body = TreeBody::new(fixture_kind(), 1.0);
+        for cut in 0..3 {
+            let (mut volume, mut moment, mut inertia) = (0.0, 0.0, 0.0);
+            let base = f64::from(body.prefix[cut]);
+            let length = f64::from(body.prefix[3]) - base;
+            let n = 100_000;
+            for i in 0..n {
+                let z = (f64::from(i) + 0.5) / f64::from(n) * length;
+                let a = f64::from(body.radius_at((base + z) as f32));
+                let dv = std::f64::consts::PI * a * a * length / f64::from(n);
+                volume += dv;
+                moment += z * dv;
+                inertia += (z * z + a * a / 4.0) * dv;
+            }
+            let law = Pendulum::of(&body, cut);
+            let d = moment / volume;
+            let rim = f64::from(body.radius_at(body.prefix[cut]));
+            let spin = (2.0 * g * volume * ((d * d + rim * rim).sqrt() - d) / inertia).sqrt();
+            assert!(
+                (law.omega2 / (g * moment / inertia) - 1.0).abs() < 1e-4,
+                "cut {cut}: {law:?}"
+            );
+            assert!((law.spin / spin - 1.0).abs() < 1e-3, "cut {cut}: {law:?}");
+        }
+    }
+
+    /// THE FALL TIME FOLLOWS THE PENDULUM LAW: the tick a piece first meets the terrain is the
+    /// first at or past the law's own time to the hinge (`law_time`), so the path's MEASURED
+    /// time to it lies in `[T, T + dt)` of the DERIVED `T`, for the fixture at every cut on flat
+    /// ground and on a slope and for the shipped kind (fixture selection) at its base and at its
+    /// middle segment. An integrator that drifts (an Euler step), a fall that ends a tick late or
+    /// early, or a duration not from the law (a tuned speed) reds this. The fall's presentation
+    /// and every peer's body rely on the path being the law's.
+    #[test]
+    fn the_fall_time_follows_the_pendulum_law() {
+        let flat = |_: f32, _: f32| 0.0;
+        let slope = |x: f32, _: f32| x / 10.0;
+        let fixture = TreeBody::new(fixture_kind(), 1.0);
+        let shipped = TreeBody::new(shipped_kind("fir_1"), 1.0);
+        let middle = u8::try_from(shipped.kind.segments.len() / 2).expect("a byte");
+        let cases: [(&TreeBody, u8, &dyn Fn(f32, f32) -> f32); 8] = [
+            (&fixture, 0, &flat),
+            (&fixture, 1, &flat),
+            (&fixture, 2, &flat),
+            (&fixture, 0, &slope),
+            (&fixture, 1, &slope),
+            (&shipped, 0, &flat),
+            (&shipped, middle, &flat),
+            (&shipped, 0, &slope),
+        ];
+        for (body, cut, height) in cases {
+            let resting = resting_pose(body, Vec3::ZERO, cut, 0, height);
+            let path = FallPath::new(body, usize::from(cut), &resting, Quat::IDENTITY, DT);
+            let derived = law_time(
+                Pendulum::of(body, usize::from(cut)),
+                f64::from(resting.hinge),
+            );
+            let measured = f64::from(path.landed()) * DT;
+            eprintln!(
+                "{} m tall, cut {cut}: lands at {measured:.4} s (MEASURED), the law's {derived:.4} s \
+                 (DERIVED); rests at {:.4} s",
+                body.prefix[body.prefix.len() - 1],
+                f64::from(path.last()) * DT
+            );
+            assert!(
+                measured >= derived - 1e-6 && measured < derived + DT + 1e-6,
+                "cut {cut}: the path lands at {measured} s, the law at {derived} s"
+            );
+        }
+    }
+
+    /// A FALL IS A MOTION FROM POSE TO POSE, NEVER A PLACEMENT (the walk law, #191): the path's
+    /// first pose is the standing body itself — every segment where it stood — and its last the
+    /// resting pose, bit for bit; between, no point of the piece moves further in a tick than the
+    /// law's fastest speed carries it (the hinge's energy `ω²` about the pivot at the piece's
+    /// reach, plus the slide's `√(2 g C)` over its chord `C` and the turn it carries, DERIVED
+    /// bound, 1 % slack), and the turn never runs backwards before the piece lands. Fixture
+    /// trunk, every cut, flat and sloped, under a yaw. A derive that lays the piece down in one
+    /// tick moves its tip metres at once and reds this; so does a path whose first pose is not
+    /// upright, or whose last is not the rest the sim and the view share.
+    #[test]
+    fn a_fall_is_continuous_from_the_standing_pose_to_the_rest() {
+        let yaw = Quat::from_xyzw(0.0, libm::sinf(0.35), 0.0, libm::cosf(0.35));
+        let body = TreeBody::new(fixture_kind(), 1.0);
+        let grids: [(&str, fn(f32, f32) -> f32, Vec3); 2] = [
+            ("flat", |_, _| 0.0, Vec3::ZERO),
+            ("slope", |x, _| x / 10.0, Vec3::new(100.0, 10.0, 0.0)),
+        ];
+        let g = f64::from(GRAVITY);
+        for (label, height, base) in grids {
+            for cut in [0_u8, 1, 2] {
+                for dir in [0_u8, 64, 200] {
+                    let c = usize::from(cut);
+                    let resting = resting_pose(&body, base, cut, dir, height);
+                    let path = FallPath::new(&body, c, &resting, yaw, DT);
+                    let law = Pendulum::of(&body, c);
+                    let at = |k: u32| -> Vec<Transform> {
+                        (0..3)
+                            .map(|j| segment_pose(&body, &resting, yaw, c, j, path.pose(k)))
+                            .collect()
+                    };
+                    let standing: Vec<Transform> = (0..3)
+                        .map(|j| Transform::from_xyz(0.0, body.prefix[j], 0.0))
+                        .collect();
+                    assert_eq!(
+                        at(0),
+                        standing,
+                        "{label} cut {cut}: the fall starts standing"
+                    );
+                    let rest = path.pose(path.last());
+                    assert_eq!(
+                        (rest.0.to_bits(), rest.1.to_array().map(f32::to_bits)),
+                        (
+                            resting.tilt.to_bits(),
+                            seat_in_root(&resting, yaw).to_array().map(f32::to_bits)
+                        ),
+                        "{label} cut {cut}: the fall ends on the rest"
+                    );
+                    let reach = f64::from(body.prefix[3] - body.prefix[c] + body.radius_at(0.0));
+                    let hinge = f64::from(resting.hinge);
+                    let fastest = (law.spin * law.spin
+                        + 2.0 * law.omega2 * (1.0 - hinge.cos()).max(0.0))
+                    .sqrt();
+                    // The slide's longest tick: its last, from rest at `g` over the chord `C`,
+                    // at most `√(2 g C) dt + ½ g dt²` along it, and the turn the same share of
+                    // `tilt − hinge` (DERIVED). A cut at the base slides nowhere.
+                    let chord = f64::from(
+                        (seat_in_root(&resting, yaw) - Vec3::Y * body.prefix[c]).length(),
+                    );
+                    let (slide, turn) = if c == 0 {
+                        (0.0, 0.0)
+                    } else {
+                        let slide = (2.0 * g * chord).sqrt() * DT + 0.5 * g * DT * DT;
+                        (
+                            slide,
+                            f64::from((resting.tilt - resting.hinge).abs()) * slide / chord,
+                        )
+                    };
+                    let bound = ((fastest * DT + turn) * reach + slide) as f32 * 1.01;
+                    // The farthest point a segment carries: its top ring's rim.
+                    let ends = |poses: &[Transform]| -> Vec<Vec3> {
+                        poses
+                            .iter()
+                            .enumerate()
+                            .flat_map(|(j, pose)| {
+                                let h = body.prefix[j + 1] - body.prefix[j];
+                                let r = body.radius_at(body.prefix[j]);
+                                [
+                                    Vec3::new(r, 0.0, 0.0),
+                                    Vec3::new(-r, h, 0.0),
+                                    Vec3::new(0.0, h, r),
+                                ]
+                                .map(|point| pose.transform_point(point))
+                            })
+                            .collect()
+                    };
+                    for k in 0..path.last() {
+                        let (now, next) = (ends(&at(k)), ends(&at(k + 1)));
+                        let step = now
+                            .iter()
+                            .zip(&next)
+                            .map(|(a, b)| a.distance(*b))
+                            .fold(0.0_f32, f32::max);
+                        assert!(
+                            step <= bound,
+                            "{label} cut {cut} dir {dir}: tick {k} moves a point {step} m, the \
+                             law's bound {bound} m"
+                        );
+                        if k < path.landed() {
+                            assert!(
+                                path.pose(k + 1).0 >= path.pose(k).0,
+                                "{label} cut {cut}: the turn runs backwards at tick {k}"
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// THE AUTHORITY AND A REPLICA STAND A FALL AT THE SAME POSE EVERY TICK (ADR-0016, ADR-0037):
+    /// the same fixture tree, yawed on a slope and felled at authority tick 40 above its base, is
+    /// derived by the authority counting its own ticks and by a replica reading its presentation
+    /// cursor at the same tick; at every tick from the fall to past its rest the two hold every
+    /// segment's local transform to the bit. A replica a tick off its cursor, a path that reads
+    /// anything but the state, the body, the terrain and the fixed step, or an authority that
+    /// counts the fall's own tick as a step reds this. Every client's colliders and its glb rest
+    /// on it.
+    #[test]
+    fn the_authority_and_a_replica_stand_a_fall_at_the_same_pose_every_tick() {
+        let yaw = Quat::from_xyzw(0.0, libm::sinf(0.35), 0.0, libm::cosf(0.35));
+        let pose = Transform::from_xyz(100.0, 10.0, 0.0).with_rotation(yaw);
+        let slope = |x: f32, _: f32| x / 10.0;
+        let (mut authority, a_root) = derive_bed(fixture_grid(slope), pose);
+        let (mut replica, r_root) = derive_bed(fixture_grid(slope), pose);
+        let fell = 40;
+        replica
+            .init_resource::<ClientReplica>()
+            .insert_resource(FallClock {
+                tick: fell,
+                overstep: 0.0,
+            });
+        for (app, root) in [(&mut authority, a_root), (&mut replica, r_root)] {
+            app.world_mut()
+                .entity_mut(root)
+                .insert((TreeState::Down { cut: 1, dir: 200 }, Fell { tick: fell }));
+        }
+        let bits = |app: &App, root: Entity| -> Vec<[u32; 7]> {
+            segments_of(app, root)
+                .iter()
+                .map(|(local, _)| {
+                    let (t, r) = (local.translation, local.rotation);
+                    [t.x, t.y, t.z, r.x, r.y, r.z, r.w].map(f32::to_bits)
+                })
+                .collect()
+        };
+        let mut moved = 0;
+        let mut last = None;
+        for k in 0..400_u32 {
+            authority.update();
+            replica.world_mut().resource_mut::<FallClock>().tick = fell + k;
+            replica.update();
+            let (a, r) = (bits(&authority, a_root), bits(&replica, r_root));
+            assert_eq!(a, r, "tick {k} since the fall");
+            moved += usize::from(last.is_some_and(|last| last != a));
+            last = Some(a);
+        }
+        let path = authority.world().get::<FallPath>(a_root).expect("a fall");
+        assert_eq!(path.k, path.last(), "the fall rested within the run");
+        assert!(moved > 10, "the pose moved tick by tick: {moved} changes");
+    }
+
+    /// A TREE RESTING ON ANOTHER BODY STOPS THERE (the game's environment destruction): in a
+    /// physics world, a fixture tree felled whole toward a standing one 2.5 m away rests against
+    /// it — a stop recorded at the tick its next pose would overlap the other trunk, before the
+    /// piece meets the ground, its pose held from then on with its tip metres up — while the same
+    /// tree felled with nothing in its way lands. A rule that never reads the other body lays the
+    /// piece through the standing trunk to the ground; one that stops on the terrain or on the
+    /// tree's own stump stops the lone tree too. Both red this.
+    #[test]
+    fn a_tree_resting_on_another_body_stops_there() {
+        use avian3d::prelude::{Gravity, PhysicsPlugins};
+        use bevy::time::TimeUpdateStrategy;
+        use std::time::Duration;
+        let mut app = App::new();
+        app.add_plugins((
+            MinimalPlugins,
+            bevy::transform::TransformPlugin,
+            AssetPlugin::default(),
+            PhysicsPlugins::default(),
+            sim_plugin,
+        ))
+        .init_asset::<Mesh>()
+        .insert_resource(Gravity(Vec3::NEG_Y * GRAVITY))
+        .insert_resource(fixture_grid(|_, _| 0.0))
+        .insert_resource(TimeUpdateStrategy::ManualDuration(Duration::from_micros(
+            15_625,
+        )));
+        while app.plugins_state() == bevy::app::PluginsState::Adding {
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        app.finish();
+        app.cleanup();
+        let kind = fixture_kind();
+        let tree = |app: &mut App, at: Vec3, ordinal: u16| -> Entity {
+            let world = app.world_mut();
+            let mut queue = bevy::ecs::world::CommandQueue::default();
+            let mut commands = Commands::new(&mut queue, world);
+            let root = spawn(
+                &mut commands,
+                &kind,
+                MapInstance {
+                    id: format!("fir_{ordinal}"),
+                    ordinal,
+                },
+                Transform::from_translation(at),
+            );
+            queue.apply(world);
+            root
+        };
+        let leaning = tree(&mut app, Vec3::ZERO, 0);
+        tree(&mut app, Vec3::new(2.5, 0.0, 0.0), 1);
+        let lone = tree(&mut app, Vec3::new(0.0, 0.0, 20.0), 2);
+        for _ in 0..4 {
+            app.update();
+        }
+        for root in [leaning, lone] {
+            app.world_mut()
+                .entity_mut(root)
+                .insert((TreeState::Down { cut: 0, dir: 0 }, Fell { tick: 100 }));
+        }
+        for _ in 0..MAX_FALL_TICKS {
+            app.update();
+            let path = app.world().get::<FallPath>(lone).expect("a fall");
+            if path.k == path.last() {
+                break;
+            }
+        }
+        let world = app.world();
+        let lone_path = world.get::<FallPath>(lone).expect("a fall");
+        assert!(
+            world.get::<Stopped>(lone).is_none() && lone_path.k == lone_path.last(),
+            "the lone tree lands and rests"
+        );
+        let stopped = *world
+            .get::<Stopped>(leaning)
+            .expect("the leaning tree stopped on the other");
+        let path = world.get::<FallPath>(leaning).expect("a fall").clone();
+        assert_eq!(
+            stopped.tick,
+            100 + path.k,
+            "the stop is the tick it holds at"
+        );
+        assert!(
+            path.k > 0 && path.k < path.landed(),
+            "it stopped mid-fall, before the ground: pose {} of {}",
+            path.k,
+            path.landed()
+        );
+        let tip = segments_of(&app, leaning)[2].0;
+        let top = tip.transform_point(Vec3::Y * 2.0);
+        assert!(
+            top.y > 4.0,
+            "its tip rests metres up, on the other trunk: {top}"
+        );
+        for _ in 0..32 {
+            app.update();
+        }
+        assert_eq!(
+            app.world().get::<FallPath>(leaning).expect("a fall").k,
+            path.k,
+            "the stop holds"
         );
     }
 }

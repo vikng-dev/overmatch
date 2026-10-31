@@ -23,7 +23,9 @@ use bevy::prelude::*;
 use bevy::transform::TransformSystems;
 use bevy::world_serialization::{WorldAssetRoot, WorldInstanceReady};
 
-use super::{FallClock, Fell, Resting, TreeBody, TreeKind, TreeState, fall_rotation, seat_in_root};
+use super::{
+    FallClock, FallPath, Fell, Resting, Stopped, TreeBody, TreeKind, TreeState, fall_rotation,
+};
 use crate::{ClientReplica, ShotClock};
 
 /// Marks a tree's view root, a child of the tree's root at the instance's uniform scale: every
@@ -416,105 +418,52 @@ fn draw(
     commands.entity(view).insert(index);
 }
 
-/// The fall's duration, seconds: longer for a longer piece, within a watchable window.
-/// DERIVED (contract §6): 0.08 s per metre of fallen length, clamped to [1, 3] s.
-fn fall_duration_s(fallen_length_m: f32) -> f32 {
-    (0.08 * fallen_length_m).clamp(1.0, 3.0)
-}
-
-/// The butt's slide off the stump to its seat, seconds: the free fall over its drop,
-/// `sqrt(2 × drop / g)` at g = 9.81 m/s² (DERIVED), within a watchable window of [0.2, 1] s.
-/// A seat at or above the stump's top (an uphill fall) drops nothing and takes the floor.
-fn slide_duration_s(drop_m: f32) -> f32 {
-    (2.0 * drop_m / 9.81).sqrt().clamp(0.2, 1.0)
-}
-
-/// The cut's trunk node `seconds` into its fall: the angle of its turn and its translation in
-/// its parent's frame, from its bound `standing` translation (asset metres). Stage A, over
-/// [`fall_duration_s`] of the fallen length: the node turns about its own origin from upright to
-/// the hinge with a `phase²` easing (a fall accelerates), translated as it stood. Stage B, for a
-/// cut above the base, over [`slide_duration_s`] of the butt's drop from the stump's top to the
-/// seat: the origin moves to its rest with `phase²` (a drop accelerates) while the turn runs
-/// from the hinge to the resting tilt linearly; at its end the translation is exactly the rest
-/// and the angle exactly the tilt. For a cut at the base the hinge is the tilt and the seat is
-/// zero, so the fall ends with A. The rest translation is the standing one moved by the seat's
-/// offset from the cut's bottom in the root's frame ([`seat_in_root`]), in asset metres: the
-/// chain is under the view root's uniform scale and carries no rotation (A5), so a parent-frame
-/// offset is the root-frame offset over that scale.
-fn fall_pose(
-    body: &TreeBody,
-    resting: &Resting,
-    root: Quat,
-    cut: usize,
-    standing: Vec3,
-    seconds: f32,
-) -> (f32, Vec3) {
-    let tip = body.prefix.len() - 1;
-    let fall = fall_duration_s(body.prefix[tip] - body.prefix[cut]);
-    let phase = (seconds / fall).clamp(0.0, 1.0);
-    if cut == 0 || phase < 1.0 {
-        return (resting.hinge * phase * phase, standing);
-    }
-    let drop = (body.prefix[cut] - resting.seat.y).max(0.0);
-    let slide = ((seconds - fall) / slide_duration_s(drop)).clamp(0.0, 1.0);
-    let rest = standing + (seat_in_root(resting, root) - Vec3::Y * body.prefix[cut]) / body.scale;
-    if slide >= 1.0 {
-        return (resting.tilt, rest);
-    }
-    (
-        resting.hinge + (resting.tilt - resting.hinge) * slide,
-        standing + (rest - standing) * (slide * slide),
-    )
-}
-
 /// Present a tree's state on its segmented hierarchy, from the state alone (ADR-0016): standing,
 /// every trunk node upright at its bound translation and every cap hidden; down, the cut's trunk
-/// node — the chain's translations carry the piece above — falls in two stages ([`fall_pose`]):
-/// it turns about its own origin by [`fall_rotation`] from upright to the hinge, then its origin
-/// drops to the seat while it turns on to the resting tilt, where its rotation is the sim's lying
+/// node — the chain's translations carry the piece above — follows the fall's path
+/// ([`FallPath::at`]): turned by [`fall_rotation`] at the path's angle, its origin the path's
+/// pivot as an offset from the cut's bottom, so at the rest its rotation is the sim's lying
 /// segments' own and its origin the seat. The time is read off [`FallClock`] against the
-/// transition tick (ADR-0037: the fall STARTS when the cursor crosses its tick, however late the
-/// entry arrived, and completes [`fall_duration_s`] and then, above the base,
-/// [`slide_duration_s`] later), and of the caps exactly the pair the cut reveals (A5: `cap_top`
-/// below the cut and `cap_bottom` of the cut) shows. Written when the state, the body's resting
-/// pose or the built hierarchy is new, and on every frame the cut's trunk is not at the turn and
-/// the translation the clock derives — through the fall and on the frame it completes; a
-/// hierarchy built for a tree in either state is presented in the frame it is built, a tree long
-/// down with both stages complete. A tree drawing its standing meshes has no hierarchy and is
-/// skipped. The sim never waits on this.
+/// transition tick, held at a stop (ADR-0037: the fall STARTS when the cursor crosses its tick,
+/// however late the entry arrived), and of the caps exactly the pair the cut reveals (A5:
+/// `cap_top` below the cut and `cap_bottom` of the cut) shows. The pivot's offset is in the root's
+/// frame, world metres; the chain is under the view root's uniform scale and carries no rotation
+/// (A5), so the node's parent-frame offset is it over that scale. Written when the state, the
+/// body's path or the built hierarchy is new, and on every frame the cut's trunk is not at the
+/// pose the clock derives — through the fall and on the frame it completes; a hierarchy built for
+/// a tree in either state is presented in the frame it is built. A tree drawing its standing
+/// meshes has no hierarchy and is skipped. The sim never waits on this.
 fn present_fall(
     clock: Res<FallClock>,
-    step: Res<Time<Fixed>>,
     trees: Query<(
         Ref<TreeState>,
         &TreeBody,
         Option<&Fell>,
-        Option<Ref<Resting>>,
+        Option<&Stopped>,
+        Option<&Resting>,
+        Option<Ref<FallPath>>,
         &Transform,
         &Children,
     )>,
     views: Query<Ref<TreeViewNodes>>,
     mut nodes: Query<(&mut Transform, &mut Visibility), Without<TreeBody>>,
 ) {
-    let dt = step.timestep().as_secs_f32();
-    for (state, body, fell, resting, transform, children) in &trees {
+    for (state, body, fell, stopped, resting, path, transform, children) in &trees {
         let Some(view) = children.iter().find_map(|child| views.get(child).ok()) else {
             continue;
         };
         // The cut and its trunk node's pose this frame: none standing, none until the body's
-        // pose is derived.
-        let turned = match (*state, fell, resting.as_deref()) {
-            (TreeState::Down { cut, .. }, Some(fell), Some(resting)) => {
+        // path is derived.
+        let turned = match (*state, fell, resting, path.as_deref()) {
+            (TreeState::Down { cut, .. }, Some(fell), Some(resting), Some(path)) => {
                 let cut = usize::from(cut);
-                let seconds = clock.since(fell.tick) as f32 * dt;
-                let (angle, translation) = fall_pose(
-                    body,
-                    resting,
-                    transform.rotation,
-                    cut,
-                    view.standing[cut],
-                    seconds,
-                );
+                let mut ticks = clock.since(fell.tick);
+                if let Some(stopped) = stopped {
+                    ticks = ticks.min(f64::from(stopped.tick.wrapping_sub(fell.tick) as i32));
+                }
+                let (angle, pivot) = path.at(ticks);
+                let translation =
+                    view.standing[cut] + (pivot - Vec3::Y * body.prefix[cut]) / body.scale;
                 Some((
                     cut,
                     fall_rotation(resting, transform.rotation, angle),
@@ -525,7 +474,7 @@ fn present_fall(
         };
         let fresh = state.is_changed()
             || view.is_added()
-            || resting.as_ref().is_some_and(|resting| resting.is_changed());
+            || path.as_ref().is_some_and(|path| path.is_added());
         // An unchanged tree is redrawn while its cut's trunk is not at the pose this frame
         // derives: every frame of the fall, and the frame the last stage completes, which writes
         // the resting pose; at rest the two agree and the tree is skipped.
@@ -616,9 +565,13 @@ pub(crate) fn plugin(app: &mut App) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::trees::tests::{derive_bed, fixture_grid, fixture_kind, segments_of};
+    use crate::trees::seat_in_root;
+    use crate::trees::tests::{derive_bed, fixture_grid, fixture_kind, segments_of, settle};
     use bevy::mesh::VertexAttributeValues;
     use std::f32::consts::FRAC_PI_2;
+
+    /// The game's 64 Hz step, seconds.
+    const DT: f64 = 1.0 / 64.0;
 
     /// The fixture's view under a tree root at `pose` (the root's own transform, unit scale) in
     /// `state` with `resting`, presented at clock tick `tick` after a transition at tick 0: the
@@ -638,12 +591,15 @@ mod tests {
             tick,
             overstep: 0.0,
         })
-        .insert_resource(Time::<Fixed>::from_hz(64.0))
         .add_systems(Update, present_fall);
         let body = TreeBody::new(fixture_kind(), scale);
+        let TreeState::Down { cut, .. } = state else {
+            panic!("a fall presents a down tree");
+        };
+        let path = FallPath::new(&body, usize::from(cut), &resting, pose.rotation, DT);
         let world = app.world_mut();
         let root = world
-            .spawn((state, Fell { tick: 0 }, resting, body.clone(), pose))
+            .spawn((state, Fell { tick: 0 }, resting, path, body.clone(), pose))
             .id();
         let view = world
             .spawn((ChildOf(root), Transform::from_scale(Vec3::splat(scale))))
@@ -737,7 +693,7 @@ mod tests {
             };
             let (mut app, root) = derive_bed(fixture_grid(height), spawn_pose);
             *app.world_mut().get_mut::<TreeState>(root).unwrap() = state;
-            app.update();
+            settle(&mut app, root);
             let resting = *app.world().get::<Resting>(root).expect("the pose");
             let root_pose = Transform {
                 scale: Vec3::ONE,
@@ -770,30 +726,22 @@ mod tests {
         }
     }
 
-    /// THE FALL ENDS ON THE RESTING POSE, STAGE BY STAGE: an unchanged tree whose clock advances
-    /// through its fall has its cut's trunk node, through stage A, at its bound translation with
-    /// a partial turn, and at A's end exactly the hinge's turn; through stage B, between the
-    /// bound translation and the rest with a turn between the hinge and the tilt; and from B's
-    /// end, at exactly the rest translation and exactly the turn of the whole tilt — the bits the
-    /// derive computes at rest, which the sim's lying piece shares. A seat no lower than the
-    /// stump's top drops nothing, and B takes its 0.2 s floor. A presentation that stops
-    /// redrawing once a phase reaches one, before writing that frame's pose, leaves the node
-    /// short of the rest; one that moves the origin during A reds this, and one that ends B at
-    /// `hinge + (tilt − hinge)` instead of the tilt itself reds the third case, whose pair —
-    /// hinge 90°, tilt 0.3 rad, fixture data — is a DERIVED f32 counterexample: that sum reads
-    /// one ulp above 0.3. Mid-B the origin drops with `phase²` and the turn runs linearly from
-    /// the hinge to the tilt, read off the tick count independently of the presentation's own
-    /// arithmetic; a linear drop, a quadratic turn or a reversed trajectory reds that frame.
+    /// THE VIEW FOLLOWS THE FALL'S PATH AND ENDS ON THE REST: an unchanged tree whose clock
+    /// advances through its fall has its cut's trunk node, at each whole tick, turned by exactly
+    /// the path's angle at that tick and set at exactly the path's pivot offset from the cut's
+    /// bottom, over the scale — upright where it was bound at the fall's own tick, still bound
+    /// while the pendulum turns, off its binding once the butt slides; between two ticks, on the
+    /// chord between their poses; from the rest on, exactly the rest translation and the turn of
+    /// the whole tilt — the bits the derive computes at rest, which the sim's lying piece shares —
+    /// and there it stays. A frame with no time passed redraws nothing. A presentation with a
+    /// timing of its own (a tuned duration, an easing), one that stops redrawing a frame early,
+    /// or one that ends at `hinge + (tilt − hinge)` instead of the tilt (fixture data: hinge 90°,
+    /// tilt 0.3 rad, a DERIVED f32 counterexample, that sum one ulp above 0.3) reds this.
     #[test]
-    fn a_fall_ends_on_the_resting_pose() {
+    fn the_view_follows_the_fall_path_and_ends_on_the_rest() {
         let yaw = Quat::from_xyzw(0.0, libm::sinf(0.35), 0.0, libm::cosf(0.35));
         let body = TreeBody::new(fixture_kind(), 1.0);
-        // The fixture's piece above cut 1 is 4 m, a one-second stage A: 64 ticks at 64 Hz
-        // (DERIVED). Its butt drops 1.8 m from the stump's 2 m top to a seat 0.2 m up in
-        // 0.606 s, 38.8 ticks (DERIVED: sqrt(2 × 1.8 / 9.81)); a seat 2.5 m up drops nothing,
-        // 0.2 s, 12.8 ticks. The third case is the first with the rounding-sensitive tilt.
-        for (seat_y, b_ticks, tilt) in [(0.2_f32, 39_u32, 1.6_f32), (2.5, 13, 1.6), (0.2, 39, 0.3)]
-        {
+        for (seat_y, tilt) in [(0.2_f32, 1.6_f32), (2.5, 1.6), (0.2, 0.3)] {
             let resting = Resting {
                 hinge: FRAC_PI_2,
                 tilt,
@@ -801,12 +749,12 @@ mod tests {
                 dx: 1.0,
                 dz: 0.0,
             };
+            let path = FallPath::new(&body, 1, &resting, yaw, DT);
             let mut app = App::new();
             app.insert_resource(FallClock {
                 tick: 0,
                 overstep: 0.0,
             })
-            .insert_resource(Time::<Fixed>::from_hz(64.0))
             .add_systems(Update, present_fall);
             let world = app.world_mut();
             let root = world
@@ -814,6 +762,7 @@ mod tests {
                     TreeState::Down { cut: 1, dir: 0 },
                     Fell { tick: 0 },
                     resting,
+                    path.clone(),
                     body.clone(),
                     Transform::from_rotation(yaw),
                 ))
@@ -841,78 +790,71 @@ mod tests {
                 caps_bottom: vec![None; 3],
             });
             let node = |app: &App| *app.world().get::<Transform>(trunks[1]).unwrap();
-            let at = |app: &mut App, tick: u32| {
-                app.world_mut().resource_mut::<FallClock>().tick = tick;
+            let at = |app: &mut App, tick: u32, overstep: f64| {
+                *app.world_mut().resource_mut::<FallClock>() = FallClock { tick, overstep };
                 app.update();
             };
             let bits = |rotation: Quat| rotation.to_array().map(f32::to_bits);
-            let hinge_turn = fall_rotation(&resting, yaw, resting.hinge);
-            let rest_turn = fall_rotation(&resting, yaw, resting.tilt);
-            let rest =
-                standing[1] + (seat_in_root(&resting, yaw) - Vec3::Y * body.prefix[1]) / body.scale;
-            at(&mut app, 32);
-            let mid_a = node(&app);
-            assert_eq!(
-                mid_a.translation, standing[1],
-                "stage A: the node stands where it was bound"
-            );
-            assert!(
-                mid_a.rotation != Quat::IDENTITY && mid_a.rotation != hinge_turn,
-                "stage A: a partial turn"
-            );
-            at(&mut app, 32);
-            assert_eq!(
-                node(&app),
-                mid_a,
-                "a frame with no time passed redraws nothing"
-            );
-            at(&mut app, 64);
-            assert_eq!(
-                bits(node(&app).rotation),
-                bits(hinge_turn),
-                "A's end: the hinge"
-            );
-            assert_eq!(node(&app).translation, standing[1]);
-            at(&mut app, 64 + b_ticks / 2);
-            let mid_b = node(&app);
-            let drop = (body.prefix[1] - seat_y).max(0.0);
-            let slide = ((64 + b_ticks / 2) as f32 / 64.0 - 1.0) / slide_duration_s(drop);
-            let dropped = standing[1] + (rest - standing[1]) * (slide * slide);
-            let turning = fall_rotation(
-                &resting,
-                yaw,
-                resting.hinge + (resting.tilt - resting.hinge) * slide,
-            );
-            assert!(
-                mid_b.translation.abs_diff_eq(dropped, 1e-5),
-                "seat {seat_y}: stage B drops the origin with phase²: {} for {dropped}",
-                mid_b.translation
-            );
-            assert!(
-                mid_b.rotation.abs_diff_eq(turning, 1e-5),
-                "seat {seat_y}: stage B turns linearly from the hinge to the tilt: {} for {turning}",
-                mid_b.rotation
-            );
-            at(&mut app, 64 + b_ticks - 1);
+            let expected = |(angle, pivot): (f32, Vec3)| {
+                (
+                    fall_rotation(&resting, yaw, angle),
+                    standing[1] + (pivot - Vec3::Y * body.prefix[1]) / body.scale,
+                )
+            };
+            for k in 0..=path.last() {
+                at(&mut app, k, 0.0);
+                let (turn, translation) = expected(path.pose(k));
+                let presented = node(&app);
+                assert_eq!(
+                    bits(presented.rotation),
+                    bits(turn),
+                    "seat {seat_y}: tick {k}'s turn"
+                );
+                assert_eq!(
+                    presented.translation.to_array().map(f32::to_bits),
+                    translation.to_array().map(f32::to_bits),
+                    "seat {seat_y}: tick {k}'s translation"
+                );
+                if k == 0 || k <= path.landed() {
+                    assert_eq!(presented.translation, standing[1], "tick {k}: still bound");
+                }
+            }
             assert_ne!(
                 node(&app).translation,
-                rest,
-                "seat {seat_y}: a tick short of B's end is short of the rest"
+                standing[1],
+                "seat {seat_y}: the butt left the stump"
             );
-            at(&mut app, 64 + b_ticks);
-            let landed = node(&app);
+            at(&mut app, 3, 0.5);
+            let (a3, p3) = path.pose(3);
+            let (a4, p4) = path.pose(4);
+            let (turn, translation) = expected((a3 + (a4 - a3) * 0.5, p3 + (p4 - p3) * 0.5));
+            assert!(
+                node(&app).rotation.abs_diff_eq(turn, 1e-6)
+                    && node(&app).translation.abs_diff_eq(translation, 1e-6),
+                "between two ticks, on their chord"
+            );
+            let rest = standing[1] + (seat_in_root(&resting, yaw) - Vec3::Y * body.prefix[1]);
+            for tick in [path.last(), path.last() + 300] {
+                at(&mut app, tick, 0.0);
+                let landed = node(&app);
+                assert_eq!(
+                    landed.translation.to_array().map(f32::to_bits),
+                    rest.to_array().map(f32::to_bits),
+                    "seat {seat_y}: the rest translation"
+                );
+                assert_eq!(
+                    bits(landed.rotation),
+                    bits(fall_rotation(&resting, yaw, resting.tilt)),
+                    "seat {seat_y}: the resting turn"
+                );
+            }
+            let before = node(&app);
+            app.update();
             assert_eq!(
-                landed.translation.to_array().map(f32::to_bits),
-                rest.to_array().map(f32::to_bits),
-                "seat {seat_y}: the frame B completes writes the rest translation"
+                node(&app),
+                before,
+                "a frame with no time passed redraws nothing"
             );
-            assert_eq!(
-                bits(landed.rotation),
-                bits(rest_turn),
-                "seat {seat_y}: and the resting turn"
-            );
-            at(&mut app, 300);
-            assert_eq!(node(&app), landed, "and the node stays there");
         }
     }
 
@@ -993,8 +935,10 @@ mod tests {
         let set = |app: &mut App, state: TreeState, resting: Option<Resting>| {
             let mut tree = app.world_mut().entity_mut(root);
             tree.insert(state);
-            if let Some(resting) = resting {
-                tree.insert((Fell { tick: 0 }, resting));
+            if let (TreeState::Down { cut, .. }, Some(resting)) = (state, resting) {
+                let body = TreeBody::new(fixture_kind(), 1.0);
+                let path = FallPath::new(&body, usize::from(cut), &resting, Quat::IDENTITY, DT);
+                tree.insert((Fell { tick: 0 }, resting, path));
             }
             app.update();
         };
@@ -1321,16 +1265,19 @@ mod tests {
         app.update();
         assert_eq!(meshes_under(&mut app, root), standing);
 
+        let resting = Resting {
+            hinge: FRAC_PI_2,
+            tilt: 1.2,
+            seat: Vec3::new(0.4, 0.2, 0.0),
+            dx: 1.0,
+            dz: 0.0,
+        };
+        let body = TreeBody::new(fixture_kind(), 1.0);
         app.world_mut().entity_mut(root).insert((
             TreeState::Down { cut: 1, dir: 0 },
             Fell { tick: 1000 },
-            Resting {
-                hinge: FRAC_PI_2,
-                tilt: 1.2,
-                seat: Vec3::new(0.4, 0.2, 0.0),
-                dx: 1.0,
-                dz: 0.0,
-            },
+            resting,
+            FallPath::new(&body, 1, &resting, Quat::IDENTITY, DT),
         ));
         app.update();
         let segments = meshes_under(&mut app, root);

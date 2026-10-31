@@ -221,9 +221,14 @@ use crate::{CombatantId, CombatantLife, ShotId};
 /// channel or a blast's crater dish in one chunk, drawn only: two `i16` millimetre points about
 /// the baked chunk's centroid and a `u16` millimetre radius. Own-type graph and REV move.
 ///
+///
+/// REV 43 (#191, a felled tree falls): the destruction ledger's entry becomes the enum
+/// `LedgerEntry::{State, Stopped}`, a state transition as before or the authority tick a falling
+/// piece met another body at, which every peer holds the fall at. Own-type graph and REV move.
+///
 /// [`WallPiece`]: crate::buildings::breakage::WallPiece
 /// [`WallEvent`]: crate::buildings::breakage::WallEvent
-pub const PROTOCOL_REV: u32 = 42;
+pub const PROTOCOL_REV: u32 = 43;
 
 /// Compatibility tag derived from the complete pinned wire manifest plus the crate version. This
 /// is the runtime handshake value: version-exact, so a version bump intentionally changes it.
@@ -1020,7 +1025,7 @@ const WIRE_SURFACE_HASH: u64 = 0xb764_85d6_94ca_578d;
 /// The pinned hash of the OWN wire-facing type DEFINITIONS (field layout, not just names). Re-pin it
 /// whenever a wire-facing struct/enum definition changes; house process also bumps
 /// [`PROTOCOL_REV`]. The tripwire prints the new value. See the block above for the coverage model.
-const WIRE_TYPES_HASH: u64 = 0x7eae_98ef_0283_d8a4;
+const WIRE_TYPES_HASH: u64 = 0x6265_838a_c8fd_e3b4;
 
 /// The pinned `Cargo.lock` versions of the external crates whose types ride the wire (avian's
 /// replicated physics components; lightyear's wire framing / input protocol). A bump of either can

@@ -2236,7 +2236,7 @@ mod reverse_throw {
 }
 
 /// THE LYING PIECE'S COLLIDERS LIE DOWN IN THE PHYSICS WORLD (A2, ADR-0016): a tree felled on the
-/// shipped terrain has, within a few ticks, its tip segment carried in avian's own bounds — the
+/// shipped terrain has, once its fall rests, its tip segment carried in avian's own bounds — the
 /// `ColliderAabb` its broad phase reads — where the body's own data puts it, and its stump's
 /// bounds where they stood; the segments between derive by the same law and are not read here.
 /// Standing, the tip's bounds hold its bottom and top centres, `prefix[n-1]` and `prefix[n]` up
@@ -2248,7 +2248,7 @@ mod reverse_throw {
 #[test]
 fn a_felled_trees_colliders_lie_down_in_the_physics_world() {
     use crate::map::Prototype;
-    use crate::trees::{Resting, TreeBody, TreeState};
+    use crate::trees::{FallPath, Resting, TreeBody, TreeState};
     use avian3d::prelude::ColliderAabb;
 
     let shipped = crate::map::tests::shipped_manifest();
@@ -2331,7 +2331,15 @@ fn a_felled_trees_colliders_lie_down_in_the_physics_world() {
     }
     let cut = 1;
     *app.world_mut().get_mut::<TreeState>(root).unwrap() = TreeState::Down { cut, dir: 0 };
-    for _ in 0..3 {
+    // The fall's ticks to its rest, then the step that refits the bounds after the last pose.
+    for _ in 0..64 * 120 {
+        app.update();
+        let path = app.world().get::<FallPath>(root).expect("a fall");
+        if path.k == path.last() {
+            break;
+        }
+    }
+    for _ in 0..2 {
         app.update();
     }
     let down = bounds(&app);

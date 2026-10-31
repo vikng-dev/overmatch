@@ -1358,7 +1358,8 @@ pub struct BallisticVolume {
 /// envelope, at every pose its servos can take. Every such body carries one, built at spawn from
 /// its data: from the bake (`bake::TankEnvelopes`), from its parts' bounds ([`Self::holding`],
 /// [`Self::of`]) or from its kind's bounds (`buildings::spawn`); a tree's is re-derived with its
-/// body (`trees::derive_state`). Which body takes which, why a step then never ends inside or beside
+/// body (`trees::derive_state`) and, while it falls, holds this tick's pose and the next one's
+/// (`trees::pose_falls`). Which body takes which, why a step then never ends inside or beside
 /// armour, and what still puts armour over a step's start are design §13.5's ("The envelope").
 #[derive(Component, Clone, Copy, Debug, PartialEq)]
 pub(crate) struct Envelope(pub(crate) bevy::math::bounding::Aabb3d);
@@ -2431,8 +2432,9 @@ impl ProjectileMarchWorld<'_, '_> {
     /// nothing else puts armour where it was not. What breaks it puts armour over the next step's
     /// start, which certification ([`resolve::certified`]) reads as a start inside it and the walk
     /// as a crossing of its exit: a collision or a blast's push in the next step; a body placed
-    /// without being integrated there (a loose piece a deposit launches after this march, a felled
-    /// trunk laid by `trees::derive_systems`); a frame of the sandbox's per-frame march
+    /// without being integrated there (a loose piece a deposit launches after this march, a
+    /// falling trunk's piece moved a tick along its fall by `trees::derive_systems`, the colliders
+    /// of a static body no step integrates); a frame of the sandbox's per-frame march
     /// ([`MarchMode::Demo`]) spanning other than one physics step.
     fn crossing_reach(
         &self,
