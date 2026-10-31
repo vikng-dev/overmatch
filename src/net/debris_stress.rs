@@ -36,6 +36,7 @@ use lightyear::prelude::*;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
+use super::harness::{LeverError, env_text};
 use crate::Layer;
 use crate::buildings::breakage::WallPiece;
 use crate::debris::DebrisPiece;
@@ -91,7 +92,7 @@ struct Lever {
 impl Lever {
     /// `None` is off; a malformed value is an error, so a stress run never measures a server that
     /// silently ignored its lever.
-    fn parse(value: Option<&str>) -> Result<Option<Self>, String> {
+    fn parse(value: Option<&str>) -> Result<Option<Self>, LeverError> {
         let Some(value) = value.map(str::trim) else {
             return Ok(None);
         };
@@ -101,7 +102,13 @@ impl Lever {
         {
             return Ok(None);
         }
-        let malformed = || format!("{LEVER}={value}: want <pieces>:<period_s>, or off");
+        let malformed = || {
+            LeverError::invalid(
+                LEVER,
+                value,
+                "<u32 pieces>:<finite positive period_s>, or off",
+            )
+        };
         let fields: Vec<&str> = value.split(':').map(str::trim).collect();
         let [pieces, period_s] = fields[..] else {
             return Err(malformed());
@@ -194,12 +201,12 @@ fn fragment_collider() -> Collider {
 
 /// Every server: a carrier for each building piece and every moved piece's pose onto its carrier.
 /// Then the lever, when armed; a malformed value is refused.
-pub(super) fn install_server(app: &mut App) -> Result<(), String> {
+pub(super) fn install_server(app: &mut App) -> Result<(), LeverError> {
     app.add_observer(carry_wall_piece).add_systems(
         FixedPostUpdate,
         publish_poses.in_set(crate::state::SimPhase::Publish),
     );
-    let Some(lever) = Lever::parse(std::env::var(LEVER).ok().as_deref())? else {
+    let Some(lever) = Lever::parse(env_text(LEVER)?.as_deref())? else {
         return Ok(());
     };
     info!(

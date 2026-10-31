@@ -436,7 +436,7 @@ pub fn client_plugin(app: &mut App) {
 /// mounts this" is not expressible in the type system).
 pub fn offline_auto_fire_plugin(app: &mut App) {
     let armed = app.world().get_resource::<AutoFireArmed>().map_or_else(
-        || crate::env_flag("SPIKE_AUTO_FIRE", false),
+        || crate::env_flag("SPIKE_AUTO_FIRE", false).unwrap_or_else(crate::refuse_start),
         |armed| armed.0,
     );
     if !armed {

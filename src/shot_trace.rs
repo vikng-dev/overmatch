@@ -115,7 +115,8 @@ pub(crate) fn record_global(
 /// Open the role-qualified sink and register the `meta` row — only when `SPIKE_SHOT_TRACE` is set.
 /// Returns `true` iff armed, mirroring [`crate::cost::install`]'s contract.
 fn install(app: &mut App, role: &'static str) -> bool {
-    let Some(path) = crate::env_value("SPIKE_SHOT_TRACE") else {
+    let Some(path) = crate::env_value("SPIKE_SHOT_TRACE").unwrap_or_else(crate::refuse_start)
+    else {
         return false;
     };
     let resolved = role_path(&path, role);

@@ -16,7 +16,7 @@ const VARIABLE: &str = "OVERMATCH_UNATTENDED";
 
 /// Mounted by every windowed root (`crate::windowed_runtime`); inert unless [`VARIABLE`] is on.
 pub(crate) fn plugin(app: &mut App) {
-    if crate::env_flag(VARIABLE, false) {
+    if crate::env_flag(VARIABLE, false).unwrap_or_else(crate::refuse_start) {
         info!("unattended: {VARIABLE} — silent, a focus loss never pauses");
         mount(app);
     }

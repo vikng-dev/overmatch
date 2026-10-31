@@ -72,7 +72,7 @@ pub fn plugin(app: &mut App) {
 /// by `terrain_grid`'s decode (which flattens the world instead of loading it) and by `world`'s
 /// scatter call (which skips the map's objects). Those four are the whole of its reach.
 pub(crate) fn enabled() -> bool {
-    crate::env_flag("OVERMATCH_LOD_SHOWCASE", false)
+    crate::env_flag("OVERMATCH_LOD_SHOWCASE", false).unwrap_or_else(crate::refuse_start)
 }
 
 /// Where the player stands: hard against the map's west edge, on the centre line.

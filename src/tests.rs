@@ -27,5 +27,5 @@ mod ui_ascii;
 /// users: `ballistics::pen_cam::bless_scenarios`, the field-cast digest
 /// (`ballistics::field_casts`) and the spall cone's direction bits (`ballistics::spall_cone`).
 pub(crate) fn bless() -> bool {
-    crate::env_flag("OVERMATCH_BLESS", false)
+    crate::env_flag("OVERMATCH_BLESS", false).unwrap_or_else(crate::refuse_start)
 }

@@ -215,7 +215,8 @@ struct FrameCost {
 /// When the run is offscreen without it: nothing else renders into the offscreen image.
 pub fn client_plugin(app: &mut App) {
     let offscreen = RunWindow::of_run(RunWindow::Visible) == RunWindow::Offscreen;
-    let Some(path) = crate::env_value("SPIKE_FRAME_COST") else {
+    let Some(path) = crate::env_value("SPIKE_FRAME_COST").unwrap_or_else(crate::refuse_start)
+    else {
         assert!(
             !offscreen,
             "OVERMATCH_WINDOW=offscreen renders into the frame-cost recorder's image: set \

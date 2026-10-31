@@ -7,9 +7,9 @@
 //! dedicated server reads the same variable for [`Script::spawn_pose`]. `scripts/harness/idle.ron`
 //! is a worked script, checked by a test.
 //!
-//! The other levers stay variables. Boolean/value switches treat `0`, `false` (case-insensitive),
-//! and the empty string as off; every other non-numeric value is on. Numeric values retain ordinary
-//! parsing (including a meaningful zero) and ignore an empty string.
+//! The other levers stay variables. Flags accept `1/true/on/yes` or `0/false/off/no/empty`,
+//! case-insensitively. Text levers treat empty, zero, false and off as disabled. Numbers preserve
+//! zero; malformed numbers, unknown flag words and non-UTF-8 values refuse startup.
 //!
 //! | Variable / flag | Kind and default | Effect |
 //! |---|---|---|
@@ -147,59 +147,124 @@ impl Default for Aim {
     }
 }
 
-/// The server's spawned tank pose: translation `pos` in world metres and the xyzw quaternion
-/// `rot`, normalized on read so a hand-entered pose lands as a valid `Rotation`. Places the tank
-/// onto a known resting contact so a beached-rest repro is deterministic.
+/// A spawn pose checked and normalized at the script edge. Downstream spawns hold the parsed
+/// position and unit rotation; they never normalize operator input again.
 #[derive(Deserialize, Debug, Clone, Copy, PartialEq)]
-#[serde(deny_unknown_fields)]
+#[serde(try_from = "AuthoredSpawnPose")]
 pub(crate) struct SpawnPose {
-    pub(crate) pos: (f32, f32, f32),
-    pub(crate) rot: (f32, f32, f32, f32),
+    pub(crate) pos: Vec3,
+    pub(crate) rot: Quat,
 }
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct AuthoredSpawnPose {
+    pos: (f32, f32, f32),
+    rot: (f32, f32, f32, f32),
+}
+
+impl TryFrom<AuthoredSpawnPose> for SpawnPose {
+    type Error = ScriptError;
+
+    fn try_from(raw: AuthoredSpawnPose) -> Result<Self, Self::Error> {
+        let pos = Vec3::from(raw.pos);
+        let rot = Vec4::from(raw.rot);
+        if !pos.is_finite() || !rot.is_finite() || rot.abs().max_element() == 0.0 {
+            return Err(ScriptError::Invalid {
+                field: "spawn_pose",
+                problem: "use a finite position and a finite nonzero rotation",
+            });
+        }
+        // Scaling before normalization avoids squared-length overflow and underflow, including
+        // finite hand-entered quaternions with very large or very small magnitudes.
+        let unit = (rot / rot.abs().max_element()).normalize();
+        Ok(Self {
+            pos,
+            rot: Quat::from_xyzw(unit.x, unit.y, unit.z, unit.w),
+        })
+    }
+}
+
+#[derive(Debug)]
+pub(crate) enum ScriptError {
+    Syntax(ron::error::SpannedError),
+    Invalid {
+        field: &'static str,
+        problem: &'static str,
+    },
+}
+impl std::fmt::Display for ScriptError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Syntax(error) => write!(f, "{error}"),
+            Self::Invalid { field, problem } => write!(f, "{field}: {problem}"),
+        }
+    }
+}
+impl std::error::Error for ScriptError {}
+
+#[derive(Debug)]
+enum ScriptLoadError {
+    Read(std::io::Error),
+    Parse(ScriptError),
+}
+impl std::fmt::Display for ScriptLoadError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Read(error) => write!(f, "{error}"),
+            Self::Parse(error) => write!(f, "{error}"),
+        }
+    }
+}
+impl std::error::Error for ScriptLoadError {}
 
 impl Script {
     /// The script `text` holds, validated; the error names the field.
-    fn parse(text: &str) -> Result<Self, String> {
+    fn parse(text: &str) -> Result<Self, ScriptError> {
         let script: Self = ron::Options::default()
             .with_default_extension(ron::extensions::Extensions::IMPLICIT_SOME)
             .from_str(text)
-            .map_err(|error| error.to_string())?;
+            .map_err(ScriptError::Syntax)?;
         script.validate()?;
         Ok(script)
     }
 
-    fn load(path: &Path) -> Result<Self, String> {
-        let text = std::fs::read_to_string(path).map_err(|error| error.to_string())?;
-        Self::parse(&text)
+    fn load(path: &Path) -> Result<Self, ScriptLoadError> {
+        let text = std::fs::read_to_string(path).map_err(ScriptLoadError::Read)?;
+        Self::parse(&text).map_err(ScriptLoadError::Parse)
     }
 
-    fn validate(&self) -> Result<(), String> {
+    fn validate(&self) -> Result<(), ScriptError> {
         if let Drive::Fire {
             primary: false,
             secondary: false,
         } = self.drive
         {
-            return Err("drive: a Fire workload fires the primary, the secondary or both".into());
+            return Err(ScriptError::Invalid {
+                field: "drive",
+                problem: "a Fire workload fires the primary, the secondary or both",
+            });
         }
         match self.aim {
             Aim::Point(point) if !Vec3::from(point).is_finite() => {
-                return Err(format!("aim: {point:?} is not a finite point"));
+                return Err(ScriptError::Invalid {
+                    field: "aim",
+                    problem: "use a finite point",
+                });
             }
             Aim::Sweep if matches!(self.drive, Drive::Fire { .. }) => {
-                return Err("aim: a Fire workload aims at a point, not a sweep".into());
+                return Err(ScriptError::Invalid {
+                    field: "aim",
+                    problem: "a Fire workload needs a point",
+                });
             }
             _ => {}
         }
         if !(self.range_m.is_finite() && self.range_m > 0.0) {
-            return Err(format!("range_m: {} is not a positive range", self.range_m));
-        }
-        if let Some(SpawnPose { pos, rot }) = self.spawn_pose {
-            let rot = Vec4::from(rot);
-            if !(Vec3::from(pos).is_finite() && rot.is_finite() && rot.length() > 0.0) {
-                return Err(format!(
-                    "spawn_pose: {pos:?} {rot:?} is not a finite position and rotation"
-                ));
-            }
+            return Err(ScriptError::Invalid {
+                field: "range_m",
+                problem: "use a finite positive range",
+            });
         }
         Ok(())
     }
@@ -207,16 +272,15 @@ impl Script {
 
 /// This process's script, read once from the file [`VARIABLE`] names; `None` when it is unset.
 ///
-/// # Panics
-///
-/// When the variable names a file that is missing or holds no valid script ([`Script`]).
+/// An unreadable or invalid script refuses startup with its path and typed cause.
 pub(crate) fn script() -> Option<&'static Script> {
     static SCRIPT: OnceLock<Option<Script>> = OnceLock::new();
     SCRIPT
         .get_or_init(|| {
             let path = PathBuf::from(std::env::var_os(VARIABLE)?);
-            let script = Script::load(&path)
-                .unwrap_or_else(|error| panic!("{VARIABLE}={}: {error}", path.display()));
+            let script = Script::load(&path).unwrap_or_else(|error| {
+                refuse_start(format!("{VARIABLE}={}: {error}", path.display()))
+            });
             Some(script)
         })
         .as_ref()
@@ -341,37 +405,116 @@ pub(crate) fn simulate_watchdog(
     }
 }
 
-fn value_is_enabled(value: &str) -> bool {
-    let value = value.trim();
-    !value.is_empty() && value != "0" && !value.eq_ignore_ascii_case("false")
+/// Invalid operator input. Absence is separate from malformed input so a typo cannot select a
+/// default or silently disable an instrument.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum LeverError {
+    NotUnicode {
+        name: String,
+    },
+    Invalid {
+        name: String,
+        value: String,
+        expected: &'static str,
+    },
 }
 
-fn parse_env_flag(value: Option<&str>, default: bool) -> bool {
-    value.map(value_is_enabled).unwrap_or(default)
-}
-
-/// Read a `SPIKE_*` boolean using the shared off vocabulary.
-pub(crate) fn env_flag(name: &str, default: bool) -> bool {
-    parse_env_flag(std::env::var(name).ok().as_deref(), default)
-}
-
-/// Read a non-numeric `SPIKE_*` value, treating the shared off vocabulary as absent.
-pub(crate) fn env_value(name: &str) -> Option<String> {
-    std::env::var(name)
-        .ok()
-        .filter(|value| value_is_enabled(value))
-}
-
-/// Parse a numeric `SPIKE_*` value. Numeric zero remains meaningful; empty values are ignored.
-pub(crate) fn env_parse<T: std::str::FromStr>(name: &str) -> Option<T> {
-    std::env::var(name).ok().and_then(|value| {
-        let value = value.trim();
-        if value.is_empty() {
-            None
-        } else {
-            value.parse().ok()
+impl LeverError {
+    pub(crate) fn invalid(name: &str, value: impl Into<String>, expected: &'static str) -> Self {
+        Self::Invalid {
+            name: name.into(),
+            value: value.into(),
+            expected,
         }
-    })
+    }
+}
+
+impl std::fmt::Display for LeverError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::NotUnicode { name } => write!(f, "{name}: value must be UTF-8"),
+            Self::Invalid {
+                name,
+                value,
+                expected,
+            } => write!(f, "{name}={value:?}: expected {expected}"),
+        }
+    }
+}
+impl std::error::Error for LeverError {}
+
+/// Startup adapters refuse outside input visibly, with a failing process status, before running.
+pub(crate) fn refuse_start<T>(error: impl std::fmt::Display) -> T {
+    eprintln!("overmatch: fatal: {error}");
+    std::process::exit(2)
+}
+
+fn parse_env_text(
+    name: &str,
+    value: Option<std::ffi::OsString>,
+) -> Result<Option<String>, LeverError> {
+    value
+        .map(|value| {
+            value
+                .into_string()
+                .map_err(|_| LeverError::NotUnicode { name: name.into() })
+        })
+        .transpose()
+}
+
+/// Read text without confusing a non-UTF-8 value with an unset variable.
+pub(crate) fn env_text(name: &str) -> Result<Option<String>, LeverError> {
+    parse_env_text(name, std::env::var_os(name))
+}
+
+fn parse_env_flag(name: &str, value: Option<&str>, default: bool) -> Result<bool, LeverError> {
+    let Some(value) = value else {
+        return Ok(default);
+    };
+    match value.trim().to_ascii_lowercase().as_str() {
+        "" | "0" | "false" | "off" | "no" => Ok(false),
+        "1" | "true" | "on" | "yes" => Ok(true),
+        _ => Err(LeverError::invalid(
+            name,
+            value,
+            "1/true/on/yes or 0/false/off/no/empty",
+        )),
+    }
+}
+
+/// Read a boolean operator lever using an explicit on/off vocabulary.
+pub(crate) fn env_flag(name: &str, default: bool) -> Result<bool, LeverError> {
+    parse_env_flag(name, env_text(name)?.as_deref(), default)
+}
+
+/// Read a path or other text lever; empty, zero, false and off disable it.
+pub(crate) fn env_value(name: &str) -> Result<Option<String>, LeverError> {
+    Ok(env_text(name)?.filter(|value| {
+        let value = value.trim();
+        !(value.is_empty()
+            || value == "0"
+            || value.eq_ignore_ascii_case("false")
+            || value.eq_ignore_ascii_case("off"))
+    }))
+}
+
+fn parse_env_number<T: std::str::FromStr>(
+    name: &str,
+    value: Option<&str>,
+) -> Result<Option<T>, LeverError> {
+    value
+        .map(|value| {
+            value
+                .trim()
+                .parse()
+                .map_err(|_| LeverError::invalid(name, value, std::any::type_name::<T>()))
+        })
+        .transpose()
+}
+
+/// Parse an operator's number. Only an unset variable is absent; malformed or empty is an error.
+pub(crate) fn env_parse<T: std::str::FromStr>(name: &str) -> Result<Option<T>, LeverError> {
+    parse_env_number(name, env_text(name)?.as_deref())
 }
 
 /// Harness-only receive conditioner selected by `SPIKE_JITTER_SEED`.
@@ -392,6 +535,39 @@ pub(crate) struct SeededRecvConditioner {
     pending: BTreeMap<Instant, VecDeque<RecvPayload>>,
 }
 
+/// A checked periodic receive stall. Only the parser constructs it, so the conditioner holds a
+/// positive recurrence and an open interval without revalidating raw operator input.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct Burst {
+    duration: Duration,
+    period: Duration,
+}
+
+impl Burst {
+    pub(crate) fn parse(
+        burst_ms: u64,
+        period_ticks: u32,
+        tick: Duration,
+    ) -> Result<Option<Self>, LeverError> {
+        if burst_ms == 0 && period_ticks == 0 {
+            return Ok(None);
+        }
+        let malformed = || {
+            LeverError::invalid(
+                "SPIKE_BURST_MS / SPIKE_BURST_PERIOD_TICKS",
+                format!("{burst_ms}/{period_ticks}"),
+                "both zero (off), or positive with burst shorter than its period",
+            )
+        };
+        let period = tick.checked_mul(period_ticks).ok_or_else(malformed)?;
+        let duration = Duration::from_millis(burst_ms);
+        if duration.is_zero() || duration >= period {
+            return Err(malformed());
+        }
+        Ok(Some(Self { duration, period }))
+    }
+}
+
 /// Periodic receive stall, phase-anchored to a fixed epoch: every window `[k·period, k·period +
 /// burst)` after the epoch delivers nothing, and a packet whose delay lands it inside a window is
 /// pushed to that window's end — the whole window's packets arrive together, exactly the measured
@@ -405,8 +581,7 @@ struct BurstSpec {
 impl BurstSpec {
     /// Defer a ready timestamp out of the burst window it landed in, if any.
     fn defer(&self, ready_at: Instant) -> Instant {
-        let phase_nanos =
-            ready_at.duration_since(self.epoch).as_nanos() % self.period.as_nanos().max(1);
+        let phase_nanos = ready_at.duration_since(self.epoch).as_nanos() % self.period.as_nanos();
         if phase_nanos < self.burst.as_nanos() {
             ready_at + self.burst - nanos_duration(phase_nanos)
         } else {
@@ -434,10 +609,10 @@ impl SeededRecvConditioner {
 
     /// Arm the periodic burst, anchored at `epoch` (the conditioner's install instant in
     /// production; explicit here so tests control the phase).
-    pub(crate) fn with_burst(mut self, burst: Duration, period: Duration, epoch: Instant) -> Self {
+    pub(crate) fn with_burst(mut self, burst: Burst, epoch: Instant) -> Self {
         self.burst = Some(BurstSpec {
-            burst,
-            period,
+            burst: burst.duration,
+            period: burst.period,
             epoch,
         });
         self
@@ -533,8 +708,6 @@ fn seeded_delay_ms(seed: u64, packet_index: u64, latency_ms: u64, jitter_ms: u64
 /// `None` without a script or a pose.
 pub(crate) fn spawn_pose() -> Option<(Vec3, Quat)> {
     let SpawnPose { pos, rot } = script()?.spawn_pose?;
-    let pos = Vec3::from(pos);
-    let rot = Quat::from_xyzw(rot.0, rot.1, rot.2, rot.3).normalize();
     info!("server: harness spawn pose pos={pos:?} rot={rot:?}");
     Some((pos, rot))
 }
@@ -577,8 +750,8 @@ mod tests {
                 fire_tick: 320,
                 fire_interval: 128,
                 spawn_pose: Some(SpawnPose {
-                    pos: (149.3, 8.75, 293.9),
-                    rot: (0.0, 0.0, 0.0, 1.0),
+                    pos: Vec3::new(149.3, 8.75, 293.9),
+                    rot: bevy::math::Quat::IDENTITY,
                 }),
             }
         );
@@ -628,9 +801,23 @@ mod tests {
         ] {
             let error = Script::parse(text).expect_err("the script is refused");
             assert!(
-                error.contains(field),
+                error.to_string().contains(field),
                 "{text}: {error:?} names no `{field}`"
             );
+        }
+    }
+
+    /// Finite scaled rotations describe the same pose at the script edge. The server relies on
+    /// receiving a unit quaternion even when squaring the authored magnitude would overflow or
+    /// underflow. Fixture magnitudes exercise both numeric extremes.
+    #[test]
+    fn spawn_rotations_are_normalized_once_without_magnitude_overflow() {
+        for magnitude in ["1e30", "1e-30"] {
+            let text =
+                format!("(spawn_pose: (pos: (0, 0, 0), rot: (0, {magnitude}, 0, {magnitude})))");
+            let pose = Script::parse(&text).unwrap().spawn_pose.unwrap();
+            assert!(pose.rot.is_normalized());
+            assert!((pose.rot * Vec3::NEG_Z).distance(Vec3::NEG_X) < 1e-5);
         }
     }
 
@@ -679,19 +866,72 @@ mod tests {
         assert_eq!(script.drive, Drive::Idle);
     }
 
+    /// Operator typos must fail instead of changing the workload. The pure parsers exercise the
+    /// production edge without mutating this test process's environment.
     #[test]
     fn env_flag_value_parsing_truth_table() {
-        for off in ["0", "false", "FALSE", "FaLsE", "", "  false  ", "   "] {
-            assert!(!parse_env_flag(Some(off), true), "{off:?} must be off");
+        for off in ["0", "false", "FALSE", "off", "no", "", "  false  ", "   "] {
+            assert!(!parse_env_flag("FLAG", Some(off), true).unwrap(), "{off:?}");
         }
-        for on in ["1", "true", "yes", "no", "00", "anything"] {
-            assert!(parse_env_flag(Some(on), false), "{on:?} must be on");
+        for on in ["1", "true", "TRUE", "on", "yes"] {
+            assert!(parse_env_flag("FLAG", Some(on), false).unwrap(), "{on:?}");
         }
-        assert!(parse_env_flag(None, true), "missing uses the true default");
-        assert!(
-            !parse_env_flag(None, false),
-            "missing uses the false default"
+        for bad in ["00", "anything", "treu"] {
+            assert!(
+                parse_env_flag("FLAG", Some(bad), false)
+                    .unwrap_err()
+                    .to_string()
+                    .contains("FLAG")
+            );
+        }
+        assert!(parse_env_flag("FLAG", None, true).unwrap());
+        assert!(!parse_env_flag("FLAG", None, false).unwrap());
+        assert_eq!(super::parse_env_number::<u64>("COUNT", None), Ok(None));
+        assert_eq!(
+            super::parse_env_number::<u64>("COUNT", Some("0")),
+            Ok(Some(0))
         );
+        for bad in ["", "8O", "-1", "18446744073709551616"] {
+            assert!(
+                super::parse_env_number::<u64>("COUNT", Some(bad))
+                    .unwrap_err()
+                    .to_string()
+                    .contains("COUNT")
+            );
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn non_utf8_operator_input_is_an_error_not_absence() {
+        use std::os::unix::ffi::OsStringExt;
+        assert_eq!(
+            super::parse_env_text("ADDRESS", Some(std::ffi::OsString::from_vec(vec![0xff]))),
+            Err(super::LeverError::NotUnicode {
+                name: "ADDRESS".into()
+            })
+        );
+    }
+
+    /// Partial or impossible stalls must fail at startup instead of disabling the conditioner or
+    /// dividing by a zero recurrence. Fixture tick and periods are deliberately small.
+    #[test]
+    fn a_burst_requires_a_positive_open_interval() {
+        let tick = Duration::from_millis(10);
+        assert_eq!(super::Burst::parse(0, 0, tick).unwrap(), None);
+        assert_eq!(
+            super::Burst::parse(60, 33, tick).unwrap(),
+            Some(super::Burst {
+                duration: Duration::from_millis(60),
+                period: Duration::from_millis(330),
+            })
+        );
+        for (duration, period) in [(1, 0), (0, 1), (10, 1), (11, 1), (u64::MAX, 1)] {
+            assert!(
+                super::Burst::parse(duration, period, tick).is_err(),
+                "{duration}/{period}"
+            );
+        }
     }
 
     #[test]

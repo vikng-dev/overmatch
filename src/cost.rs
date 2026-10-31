@@ -99,7 +99,8 @@ struct CostTrace {
 
 /// Open the role-qualified sink and register recorder systems when tracing is armed.
 fn install(app: &mut App, role: &'static str) -> bool {
-    let Some(path) = crate::env_value("SPIKE_COST_TRACE") else {
+    let Some(path) = crate::env_value("SPIKE_COST_TRACE").unwrap_or_else(crate::refuse_start)
+    else {
         return false;
     };
     let resolved = role_path(&path, role);
@@ -110,7 +111,9 @@ fn install(app: &mut App, role: &'static str) -> bool {
             return false;
         }
     };
-    let warmup: u64 = crate::env_parse("SPIKE_COST_WARMUP").unwrap_or(384);
+    let warmup: u64 = crate::env_parse("SPIKE_COST_WARMUP")
+        .unwrap_or_else(crate::refuse_start)
+        .unwrap_or(384);
     info!(
         "cost: recording {role} rows to {} (warmup {warmup} ticks)",
         resolved.display()

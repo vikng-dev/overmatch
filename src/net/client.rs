@@ -111,7 +111,7 @@ struct SeededLink {
     latency_ms: u64,
     jitter_ms: u64,
     /// `(burst, period)`.
-    burst: Option<(Duration, Duration)>,
+    burst: Option<harness::Burst>,
 }
 
 impl ClientLinkTemplate {
@@ -154,8 +154,8 @@ impl ClientLinkTemplate {
         self.seeded.map(|link| {
             let mut seeded =
                 harness::SeededRecvConditioner::new(link.seed, link.latency_ms, link.jitter_ms);
-            if let Some((burst, period)) = link.burst {
-                seeded = seeded.with_burst(burst, period, lightyear::core::time::Instant::now());
+            if let Some(burst) = link.burst {
+                seeded = seeded.with_burst(burst, lightyear::core::time::Instant::now());
             }
             seeded
         })
@@ -260,15 +260,71 @@ struct LinkSetup {
     template: ClientLinkTemplate,
 }
 
+/// Typed startup failures retain address syntax, DNS and operator-input causes.
+#[derive(Debug)]
+enum LinkSetupError {
+    Lever(harness::LeverError),
+    Server {
+        target: String,
+        origin: &'static str,
+        cause: EndpointError,
+    },
+}
+
+impl From<harness::LeverError> for LinkSetupError {
+    fn from(error: harness::LeverError) -> Self {
+        Self::Lever(error)
+    }
+}
+
+impl std::fmt::Display for LinkSetupError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Lever(error) => write!(f, "{error}"),
+            Self::Server {
+                target,
+                origin,
+                cause,
+            } => write!(
+                f,
+                "cannot resolve target server {target:?} from {origin}: {cause}"
+            ),
+        }
+    }
+}
+impl std::error::Error for LinkSetupError {}
+
+#[derive(Debug)]
+enum EndpointError {
+    Empty,
+    EmptyHost,
+    InvalidPort(String),
+    InvalidAddress,
+    Resolution(io::Error),
+}
+
+impl std::fmt::Display for EndpointError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Empty => f.write_str("address is empty"),
+            Self::EmptyHost => f.write_str("hostname is empty"),
+            Self::InvalidPort(port) => write!(f, "invalid port {port:?}"),
+            Self::InvalidAddress => f.write_str("invalid socket address or hostname"),
+            Self::Resolution(error) => write!(f, "{error}"),
+        }
+    }
+}
+impl std::error::Error for EndpointError {}
+
 /// Reads `OVERMATCH_SERVER`, `OVERMATCH_API` and the `SPIKE_*` receive-conditioning
 /// knobs. A direct target that does not resolve is the error: the client has nowhere to connect.
-fn configure_link(simulate: bool, tick_duration: Duration) -> Result<LinkSetup, String> {
+fn configure_link(simulate: bool, tick_duration: Duration) -> Result<LinkSetup, LinkSetupError> {
     // A direct target is resolved once at startup. Raw socket addresses bypass DNS; hostnames
     // select their resolver's first IPv4 result because the UDP transport binds an IPv4 wildcard
     // (`ClientLinkTemplate::bundle`). The scripted harness has no menu to click, so it always
     // connects directly.
-    let environment = std::env::var("OVERMATCH_SERVER").ok();
-    let api = std::env::var("OVERMATCH_API").ok();
+    let environment = harness::env_text("OVERMATCH_SERVER")?;
+    let api = harness::env_text("OVERMATCH_API")?;
     let mode = if simulate {
         ClientMode::Direct(choose_server(environment.as_deref()))
     } else {
@@ -278,14 +334,12 @@ fn configure_link(simulate: bool, tick_duration: Duration) -> Result<LinkSetup, 
         ClientMode::Direct(selection) => {
             let server_addr = parse_server_endpoint(selection.raw)
                 .and_then(|endpoint| {
-                    resolve_server_endpoint(&endpoint).map_err(|error| error.to_string())
+                    resolve_server_endpoint(&endpoint).map_err(EndpointError::Resolution)
                 })
-                .map_err(|error| {
-                    format!(
-                        "cannot resolve target server {:?} from {}: {error}",
-                        selection.raw,
-                        selection.source.label()
-                    )
+                .map_err(|cause| LinkSetupError::Server {
+                    target: selection.raw.to_owned(),
+                    origin: selection.source.label(),
+                    cause,
                 })?;
             LinkTarget::Direct {
                 server_addr,
@@ -311,16 +365,23 @@ fn configure_link(simulate: bool, tick_duration: Duration) -> Result<LinkSetup, 
     // Optional receive conditioning for local diagnostics — OFF by default: any non-zero default
     // delays every inbound packet, and with it HUD Ping, on a real server. Set `SPIKE_LATENCY_MS` /
     // `SPIKE_JITTER_MS` explicitly when you want a fake path.
-    let latency_ms: u64 = harness::env_parse("SPIKE_LATENCY_MS").unwrap_or(0);
-    let jitter_ms: u64 = harness::env_parse("SPIKE_JITTER_MS").unwrap_or(0);
-    let jitter_seed: Option<u64> = harness::env_parse("SPIKE_JITTER_SEED");
+    let latency_ms: u64 = harness::env_parse("SPIKE_LATENCY_MS")?.unwrap_or(0);
+    let jitter_ms: u64 = harness::env_parse("SPIKE_JITTER_MS")?.unwrap_or(0);
+    let jitter_seed: Option<u64> = harness::env_parse("SPIKE_JITTER_SEED")?;
     // The periodic burst (both values set = armed): `60 / 33` reproduces the measured field link.
-    let burst_ms: u64 = harness::env_parse("SPIKE_BURST_MS").unwrap_or(0);
-    let burst_period_ticks: u64 = harness::env_parse("SPIKE_BURST_PERIOD_TICKS").unwrap_or(0);
-    let burst = (burst_ms > 0 && burst_period_ticks > 0).then(|| {
-        let ticks = u32::try_from(burst_period_ticks).expect("a burst period fits ticks in u32");
-        (Duration::from_millis(burst_ms), tick_duration * ticks)
-    });
+    let burst_ms: u64 = harness::env_parse("SPIKE_BURST_MS")?.unwrap_or(0);
+    let burst_period_ticks: u32 = harness::env_parse("SPIKE_BURST_PERIOD_TICKS")?.unwrap_or(0);
+    let burst = harness::Burst::parse(burst_ms, burst_period_ticks, tick_duration)?;
+    // Lightyear's stock conditioner stores milliseconds and adds jitter in i32. Check before
+    // its narrowing conversion so operator input cannot wrap or overflow inside the dependency.
+    if latency_ms > i32::MAX as u64 || jitter_ms > i32::MAX as u64 - latency_ms {
+        return Err(harness::LeverError::invalid(
+            "SPIKE_LATENCY_MS / SPIKE_JITTER_MS",
+            format!("{latency_ms}/{jitter_ms}"),
+            "a sum no larger than i32::MAX milliseconds (Lightyear's representation)",
+        )
+        .into());
+    }
     let (conditioner, seeded) = match recv_conditioner_mode(
         latency_ms,
         jitter_ms,
@@ -493,10 +554,7 @@ pub fn run() {
 
     let LinkSetup { target, template } = match configure_link(simulate, tick_duration) {
         Ok(link) => link,
-        Err(error) => {
-            error!("client: {error}; exiting");
-            return;
-        }
+        Err(error) => harness::refuse_start(error),
     };
     let input_delay = shipping_input_delay();
     // The install-time sync margins hold only over a session's pre-arm window; `net::sync_margin`'s
@@ -1154,10 +1212,10 @@ fn update_connect_status(
 }
 
 /// Parse without touching DNS so address shape and source precedence remain unit-testable offline.
-fn parse_server_endpoint(raw: &str) -> Result<ServerEndpoint, String> {
+fn parse_server_endpoint(raw: &str) -> Result<ServerEndpoint, EndpointError> {
     let raw = raw.trim();
     if raw.is_empty() {
-        return Err("address is empty".to_string());
+        return Err(EndpointError::Empty);
     }
     if let Ok(address) = raw.parse::<SocketAddr>() {
         return Ok(ServerEndpoint::Socket(address));
@@ -1177,14 +1235,14 @@ fn parse_server_endpoint(raw: &str) -> Result<ServerEndpoint, String> {
         Some((name, port)) if !name.contains(':') => {
             let port = port
                 .parse::<u16>()
-                .map_err(|_| format!("invalid port {port:?}"))?;
+                .map_err(|_| EndpointError::InvalidPort(port.to_owned()))?;
             (name, port)
         }
-        Some(_) => return Err("invalid socket address or hostname".to_string()),
+        Some(_) => return Err(EndpointError::InvalidAddress),
         None => (raw, SERVER_PORT),
     };
     if name.is_empty() {
-        return Err("hostname is empty".to_string());
+        return Err(EndpointError::EmptyHost);
     }
     Ok(ServerEndpoint::Host {
         name: name.to_string(),

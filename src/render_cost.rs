@@ -262,9 +262,9 @@ impl ShadowControls {
 }
 
 fn shadow_controls(app: &mut App) {
-    let filter = crate::env_value("SPIKE_SHADOW_FILTER");
-    let splits = crate::env_value("SPIKE_SHADOW_SPLITS");
-    let overlap = crate::env_value("SPIKE_SHADOW_OVERLAP");
+    let filter = crate::env_value("SPIKE_SHADOW_FILTER").unwrap_or_else(crate::refuse_start);
+    let splits = crate::env_value("SPIKE_SHADOW_SPLITS").unwrap_or_else(crate::refuse_start);
+    let overlap = crate::env_value("SPIKE_SHADOW_OVERLAP").unwrap_or_else(crate::refuse_start);
     if filter.is_none() && splits.is_none() && overlap.is_none() {
         return;
     }
@@ -299,7 +299,7 @@ fn apply_shadow_filter(
 
 /// Mount the two ablation instruments of the module doc, each only when its env var is set.
 fn ablation_instruments(app: &mut App) {
-    if let Some(list) = crate::env_value("SPIKE_ABLATE") {
+    if let Some(list) = crate::env_value("SPIKE_ABLATE").unwrap_or_else(crate::refuse_start) {
         let ablate = Ablate::parse(&list).unwrap_or_else(|unknown| {
             panic!(
                 "SPIKE_ABLATE: unknown feature {unknown:?} (known: bloom, env_light, \
@@ -316,7 +316,7 @@ fn ablation_instruments(app: &mut App) {
                 ablate_ui.before(VisibilitySystems::VisibilityPropagate),
             );
     }
-    if crate::env_flag("SPIKE_PHASE_COUNTS", false)
+    if crate::env_flag("SPIKE_PHASE_COUNTS", false).unwrap_or_else(crate::refuse_start)
         && let Some(render_app) = app.get_sub_app_mut(RenderApp)
     {
         render_app.add_systems(
@@ -324,7 +324,7 @@ fn ablation_instruments(app: &mut App) {
             log_phase_census.in_set(RenderSystems::PrepareBindGroups),
         );
     }
-    if crate::env_flag("SPIKE_MESH_REMOVALS", false)
+    if crate::env_flag("SPIKE_MESH_REMOVALS", false).unwrap_or_else(crate::refuse_start)
         && let Some(render_app) = app.get_sub_app_mut(RenderApp)
     {
         render_app.add_systems(
@@ -598,7 +598,8 @@ struct RenderCost {
 pub fn client_plugin(app: &mut App) {
     ablation_instruments(app);
     shadow_controls(app);
-    let Some(path) = crate::env_value("SPIKE_RENDER_COST") else {
+    let Some(path) = crate::env_value("SPIKE_RENDER_COST").unwrap_or_else(crate::refuse_start)
+    else {
         return;
     };
     let resolved = role_path(&path, "client");

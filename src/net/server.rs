@@ -62,13 +62,12 @@ pub fn run() {
             std::process::exit(2);
         }
     };
-    let bind = match bind_ip(std::env::var("OVERMATCH_SERVER_BIND").ok().as_deref()) {
-        Ok(bind) => bind,
-        Err(err) => {
-            eprintln!("overmatch-server: fatal: {err}");
-            std::process::exit(2);
-        }
-    };
+    let bind = harness::env_text("OVERMATCH_SERVER_BIND")
+        .and_then(|value| bind_ip(value.as_deref()))
+        .unwrap_or_else(harness::refuse_start);
+    let bot_count = harness::env_text("OVERMATCH_BOT")
+        .and_then(|value| BotCount::from_value(value.as_deref()))
+        .unwrap_or_else(harness::refuse_start);
     let mut app = App::new();
     app.add_plugins(crate::server_plugin_floor())
         // Headless composition needs its own application runner.
@@ -94,7 +93,7 @@ pub fn run() {
     app.add_plugins(SimPlugin);
     app.add_plugins(crate::trace::server_plugin);
     app.add_plugins(crate::cost::server_plugin);
-    super::server_stats::install(&mut app);
+    super::server_stats::install(&mut app).unwrap_or_else(harness::refuse_start);
     app.add_plugins(crate::shot_trace::server_plugin);
     super::shot_transport::install_server(&mut app);
     super::shot_explanation::install_server(&mut app);
@@ -125,9 +124,7 @@ pub fn run() {
     // `<id>.sim.glb`.
     app.add_systems(Startup, load_tank_sim_assets);
     install_battle(&mut app, BattleMode::shipped(), TICK);
-    app.insert_resource(BotCount::from_value(
-        std::env::var("OVERMATCH_BOT").ok().as_deref(),
-    ));
+    app.insert_resource(bot_count);
 
     app.add_systems(
         Update,
@@ -242,12 +239,12 @@ fn cycle_battles(
 /// address is named. `127.0.0.1` keeps a local run off the network, and so out of the host
 /// firewall's way. A value that is not an address is refused at launch rather than widened to
 /// every interface.
-fn bind_ip(value: Option<&str>) -> Result<Ipv4Addr, String> {
+fn bind_ip(value: Option<&str>) -> Result<Ipv4Addr, harness::LeverError> {
     match value.map(str::trim) {
         None | Some("") => Ok(Ipv4Addr::UNSPECIFIED),
-        Some(value) => value
-            .parse()
-            .map_err(|_| format!("OVERMATCH_SERVER_BIND={value} is not an IPv4 address")),
+        Some(value) => value.parse().map_err(|_| {
+            harness::LeverError::invalid("OVERMATCH_SERVER_BIND", value, "an IPv4 address")
+        }),
     }
 }
 
@@ -874,8 +871,15 @@ fn bot_home_xz(index: u32) -> Vec2 {
 struct BotCount(u32);
 
 impl BotCount {
-    fn from_value(value: Option<&str>) -> Self {
-        Self(value.map_or(0, |value| value.trim().parse().unwrap_or(1)))
+    fn from_value(value: Option<&str>) -> Result<Self, harness::LeverError> {
+        match value.map(str::trim) {
+            None => Ok(Self(0)),
+            Some("") => Ok(Self(1)),
+            Some(value) if value.eq_ignore_ascii_case("on") => Ok(Self(1)),
+            Some(value) => value.parse().map(Self).map_err(|_| {
+                harness::LeverError::invalid("OVERMATCH_BOT", value, "a u32 count, on, or empty")
+            }),
+        }
     }
 }
 
@@ -1290,12 +1294,15 @@ mod tests {
     /// bot every existing harness asks for; one that ignores the number caps the load at one tank.
     #[test]
     fn the_bot_lever_is_a_count_and_bare_means_one() {
-        assert_eq!(BotCount::from_value(None), BotCount(0));
-        assert_eq!(BotCount::from_value(Some("")), BotCount(1));
-        assert_eq!(BotCount::from_value(Some("on")), BotCount(1));
-        assert_eq!(BotCount::from_value(Some("1")), BotCount(1));
-        assert_eq!(BotCount::from_value(Some(" 4 ")), BotCount(4));
-        assert_eq!(BotCount::from_value(Some("0")), BotCount(0));
+        assert_eq!(BotCount::from_value(None).unwrap(), BotCount(0));
+        assert_eq!(BotCount::from_value(Some("")).unwrap(), BotCount(1));
+        assert_eq!(BotCount::from_value(Some("on")).unwrap(), BotCount(1));
+        assert_eq!(BotCount::from_value(Some("1")).unwrap(), BotCount(1));
+        assert_eq!(BotCount::from_value(Some(" 4 ")).unwrap(), BotCount(4));
+        assert_eq!(BotCount::from_value(Some("0")).unwrap(), BotCount(0));
+        for bad in ["ten", "-1", "1O", "4294967296"] {
+            assert!(BotCount::from_value(Some(bad)).is_err(), "{bad}");
+        }
     }
 
     /// N bots are N complete tanks: one spawn pass builds every one from the blueprint, each its own

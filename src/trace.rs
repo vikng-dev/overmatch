@@ -129,7 +129,7 @@ pub(crate) fn role_path(path: &str, role: &str) -> PathBuf {
 /// it. Returns `true` iff tracing is armed, so each composition plugin registers its recorders only
 /// in a traced run (dropping per-frame `resource_exists` gating). Called once per composition root.
 fn install(app: &mut App, role: &'static str) -> bool {
-    let Some(path) = crate::env_value("SPIKE_TRACE") else {
+    let Some(path) = crate::env_value("SPIKE_TRACE").unwrap_or_else(crate::refuse_start) else {
         return false;
     };
     let resolved = role_path(&path, role);
@@ -141,7 +141,8 @@ fn install(app: &mut App, role: &'static str) -> bool {
         }
     };
     info!("trace: recording {role} rows to {}", resolved.display());
-    let sim_fields = crate::env_flag("SPIKE_TRACE_SIM_FIELDS", false);
+    let sim_fields =
+        crate::env_flag("SPIKE_TRACE_SIM_FIELDS", false).unwrap_or_else(crate::refuse_start);
     app.insert_resource(TraceWriter {
         sink,
         role,

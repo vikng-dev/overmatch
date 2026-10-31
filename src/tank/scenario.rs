@@ -40,7 +40,7 @@ const START_SPOTS: [(&str, f32, f32, f32); 3] = [
 /// When the variable is set to anything [`parse_start`] refuses: a capture or a measurement that
 /// asked for a spot must never frame the duel as if it were that spot.
 pub(crate) fn start_spot() -> Option<(Vec2, f32)> {
-    let spec = crate::env_value("OVERMATCH_START")?;
+    let spec = crate::env_value("OVERMATCH_START").unwrap_or_else(crate::refuse_start)?;
     let (at, heading) = parse_start(&spec).unwrap_or_else(|| {
         panic!(
             "OVERMATCH_START={spec:?}: want <x>,<z>[,<heading°>] (finite numbers) or one of {:?}",
@@ -103,10 +103,12 @@ pub(crate) enum TargetScenario {
 ///
 /// When the variable names no scenario, or names one other than `ahead` under the demo.
 pub(crate) fn target_scenario() -> Option<TargetScenario> {
-    let named = crate::env_value("OVERMATCH_TARGET").map(|spec| {
-        TargetScenario::named(&spec)
-            .unwrap_or_else(|| panic!("OVERMATCH_TARGET={spec:?}: want ahead, fires or kills"))
-    });
+    let named = crate::env_value("OVERMATCH_TARGET")
+        .unwrap_or_else(crate::refuse_start)
+        .map(|spec| {
+            TargetScenario::named(&spec)
+                .unwrap_or_else(|| panic!("OVERMATCH_TARGET={spec:?}: want ahead, fires or kills"))
+        });
     let demo = crate::dev_capture::plan().and_then(|plan| plan.scene.demo)
         == Some(crate::dev_capture::plan::Demo::HullMarks);
     if !demo {
@@ -364,7 +366,7 @@ const PROBE_FAR_NEAR_Z: f32 = 160.0;
 /// A dev/profiling lever on the offline path only, like [`spawn_probe_tanks`]'s own count: unset is
 /// every normal run, and nothing outside the probe grid consults it.
 pub(crate) fn probe_far() -> bool {
-    crate::env_flag("OVERMATCH_PROBE_FAR", false)
+    crate::env_flag("OVERMATCH_PROBE_FAR", false).unwrap_or_else(crate::refuse_start)
 }
 
 /// The duel's two spawn points under the placement in force. `far` is [`probe_far`] — passed rather
@@ -568,7 +570,9 @@ fn spawn_probe_tanks(
     grid: Option<&crate::terrain_grid::HeightGrid>,
     far: bool,
 ) {
-    let Some(total) = crate::env_parse::<usize>("OVERMATCH_PROBE_TANKS") else {
+    let Some(total) =
+        crate::env_parse::<usize>("OVERMATCH_PROBE_TANKS").unwrap_or_else(crate::refuse_start)
+    else {
         return;
     };
     let extra = total.saturating_sub(DUEL_SPAWN_XZ.len());

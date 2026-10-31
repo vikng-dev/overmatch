@@ -3,8 +3,8 @@
 //! stdout (a container's logs). `println!` rather than the log macros, so the line reaches stdout
 //! whatever `RUST_LOG` filters.
 //!
-//! The lever's value is the period in seconds. Present but empty or non-numeric, it is
-//! [`DEFAULT_PERIOD`]; unset, `0` or `false`, the line is off.
+//! The lever's value is a positive finite period in seconds. Empty or `on` selects
+//! [`DEFAULT_PERIOD`]; unset, `0`, `off` or `false` is off. Other values refuse startup.
 //!
 //! JSON fields:
 //! - `period_s`: the wall time the line covers, which can exceed the period by one frame;
@@ -48,6 +48,7 @@ use lightyear::prelude::server::ClientOf;
 use serde_json::{Value, json};
 
 use super::debris_stress::DebrisCensus;
+use super::harness::{LeverError, env_text};
 use super::server_host::{Throttle, read_throttle};
 use crate::ballistics::Projectile;
 use crate::cost::{TickClock, TickClosed, arm_tick_clock};
@@ -63,9 +64,9 @@ const DEFAULT_PERIOD: Duration = Duration::from_secs(10);
 const PREFIX: &str = "server_stats";
 
 /// Arm the stats line when the lever is set.
-pub(super) fn install(app: &mut App) {
-    let Some(period) = period_from(std::env::var(LEVER).ok().as_deref()) else {
-        return;
+pub(super) fn install(app: &mut App) -> Result<(), LeverError> {
+    let Some(period) = period_from(env_text(LEVER)?.as_deref())? else {
+        return Ok(());
     };
     info!(
         "server: stats line every {:.1} s on stdout ({LEVER})",
@@ -98,19 +99,36 @@ pub(super) fn install(app: &mut App) {
             .run_if(resource_changed::<ServerTick>),
     );
     app.add_systems(Last, emit_line);
+    Ok(())
 }
 
 /// The lever's value as a period; `None` is off.
-fn period_from(value: Option<&str>) -> Option<Duration> {
-    let value = value?.trim();
-    if value.eq_ignore_ascii_case("false") {
-        return None;
+fn period_from(value: Option<&str>) -> Result<Option<Duration>, LeverError> {
+    let Some(value) = value.map(str::trim) else {
+        return Ok(None);
+    };
+    if ["0", "false", "off"]
+        .iter()
+        .any(|off| value.eq_ignore_ascii_case(off))
+    {
+        return Ok(None);
     }
-    match value.parse::<f64>() {
-        Ok(secs) if secs.is_finite() && secs > 0.0 => Some(Duration::from_secs_f64(secs)),
-        Ok(_) => None,
-        Err(_) => Some(DEFAULT_PERIOD),
+    if value.is_empty() || value.eq_ignore_ascii_case("on") {
+        return Ok(Some(DEFAULT_PERIOD));
     }
+    let malformed = || {
+        LeverError::invalid(
+            LEVER,
+            value,
+            "positive finite seconds representable as a nonzero Duration, on/empty, or 0/false/off",
+        )
+    };
+    let secs = value.parse::<f64>().map_err(|_| malformed())?;
+    let period = Duration::try_from_secs_f64(secs).map_err(|_| malformed())?;
+    if period.is_zero() {
+        return Err(malformed());
+    }
+    Ok(Some(period))
 }
 
 #[derive(Resource)]
@@ -407,12 +425,18 @@ mod tests {
     /// server; one that ignores the number pins every host to the default.
     #[test]
     fn the_lever_is_a_period_in_seconds_present_means_on() {
-        assert_eq!(period_from(None), None);
-        assert_eq!(period_from(Some("0")), None);
-        assert_eq!(period_from(Some("false")), None);
-        assert_eq!(period_from(Some("2.5")), Some(Duration::from_millis(2500)));
-        assert_eq!(period_from(Some("")), Some(DEFAULT_PERIOD));
-        assert_eq!(period_from(Some("on")), Some(DEFAULT_PERIOD));
+        assert_eq!(period_from(None).unwrap(), None);
+        assert_eq!(period_from(Some("0")).unwrap(), None);
+        assert_eq!(period_from(Some("false")).unwrap(), None);
+        assert_eq!(
+            period_from(Some("2.5")).unwrap(),
+            Some(Duration::from_millis(2500))
+        );
+        assert_eq!(period_from(Some("")).unwrap(), Some(DEFAULT_PERIOD));
+        assert_eq!(period_from(Some("on")).unwrap(), Some(DEFAULT_PERIOD));
+        for bad in ["5s", "-1", "NaN", "inf", "1e100", "0.000000000001"] {
+            assert!(period_from(Some(bad)).is_err(), "{bad}");
+        }
     }
 
     /// One line per period. A period that never restarts prints a line every frame from the first

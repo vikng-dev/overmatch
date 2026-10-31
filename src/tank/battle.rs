@@ -88,7 +88,7 @@ use crate::view::PlayerView;
 /// Is this process running the battle scene? A dev lever, `OVERMATCH_BATTLE`, read by the
 /// scenario's spawn (which lays out this scene instead of the duel) and by [`offline_plugin`].
 pub(crate) fn enabled() -> bool {
-    crate::env_flag("OVERMATCH_BATTLE", false)
+    crate::env_flag("OVERMATCH_BATTLE", false).unwrap_or_else(crate::refuse_start)
 }
 
 /// The script's seed (ASSUMED: any value; the issue's number).
