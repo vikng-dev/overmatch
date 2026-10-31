@@ -190,6 +190,7 @@ fn digest(bits: &[[u32; 7]]) -> u64 {
         })
 }
 
+/// The run's digest covers every tick; the motion and the touches count from tick `from` on.
 fn report(label: &str, run: &Run, from: usize) {
     let first = run.positions[from];
     let last = *run.positions.last().unwrap();
@@ -201,27 +202,28 @@ fn report(label: &str, run: &Run, from: usize) {
         .iter()
         .fold(0.0_f32, |m, p| if p.abs() > m.abs() { *p } else { m });
     println!(
-        "{label}: digest {:016x}; from tick {from}: travelled {:.3} m (xz), hull rise max {:.3} m, \
-         pitch extreme {:.2}°, final speed {:.3} m/s, end {last:.3}",
+        "{label}: digest {:016x}; from tick {from} at {first:.3}: travelled {:.3} m (xz), hull \
+         rise max {:.3} m, pitch extreme {:.2}°, final speed {:.3} m/s, end {last:.3}",
         digest(&run.bits),
         Vec2::new(last.x - first.x, last.z - first.z).length(),
         rise,
         pitch,
         run.speeds.last().unwrap(),
     );
-    let loaded = run.touches.iter().filter(|t| t.belt_load > 0.0).count();
+    let touches: Vec<&Touch> = run.touches.iter().filter(|t| t.tick >= from).collect();
+    let loaded = touches.iter().filter(|t| t.belt_load > 0.0).count();
     println!(
         "{label}: {} hull-collider contact points with a normal impulse ({loaded} while the belts \
          carried load), over {} ticks",
-        run.touches.len(),
-        run.touches
+        touches.len(),
+        touches
             .iter()
             .map(|t| t.tick)
             .collect::<std::collections::BTreeSet<_>>()
             .len(),
     );
     let mut groups: std::collections::BTreeMap<(String, &str), Vec<&Touch>> = Default::default();
-    for touch in &run.touches {
+    for touch in touches {
         groups
             .entry((touch.hull_part.clone(), touch.other))
             .or_default()
@@ -260,11 +262,15 @@ fn friction_bed() {
     );
     report("flat runway, full throttle", &flat, WARMUP);
     let pile = run(
-        "x=-13,z=1,warmup=192,ticks=960,throttle=0.5,t2=832,throttle2=0.0,out=/dev/null",
-        WARMUP + 960,
+        "x=-13,z=1,warmup=192,ticks=640,throttle=0.3,t2=448,throttle2=0.0,out=/dev/null",
+        WARMUP + 640,
     );
-    report("rubble pile, half throttle 10 s", &pile, WARMUP);
-    report("rubble pile, stopped on it 5 s", &pile, 832);
+    report("rubble pile, 0.3 throttle 4 s then none", &pile, WARMUP);
+    report(
+        "rubble pile, at rest on it, the last 3 s",
+        &pile,
+        WARMUP + 448,
+    );
     let wall = run(
         "x=-18,z=1,warmup=192,ticks=640,throttle=1.0,out=/dev/null",
         WARMUP + 640,

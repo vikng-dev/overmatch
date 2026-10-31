@@ -1559,46 +1559,88 @@ fn track_sandbox_boots_headless() {
 #[ignore = "a measurement bed, run on demand"]
 fn heightfield_drive_bed() {
     use avian3d::prelude::{ColliderOf, ContactGraph, Position, Rotation};
+    use std::collections::BTreeMap;
+
+    /// One phase's pose-bit digest and the tank's collider contacts that carried a normal
+    /// impulse, by the tank's collider node and what it touched: (points, Σ impulse N·s).
+    fn phase(
+        app: &mut App,
+        label: &str,
+        ticks: usize,
+        tank: Entity,
+        mut drive: impl FnMut(&mut App),
+    ) {
+        let mut digest = 0xcbf2_9ce4_8422_2325_u64;
+        let mut touches: BTreeMap<(String, &str), (usize, f32)> = BTreeMap::new();
+        for _ in 0..ticks {
+            drive(app);
+            let world = app.world();
+            let p = world.get::<Position>(tank).unwrap().0;
+            let r = world.get::<Rotation>(tank).unwrap().0;
+            for w in p.to_array().into_iter().chain(r.to_array()) {
+                for b in w.to_bits().to_le_bytes() {
+                    digest = (digest ^ u64::from(b)).wrapping_mul(0x0100_0000_01b3);
+                }
+            }
+            let body = |c: Entity| world.get::<ColliderOf>(c).map_or(c, |of| of.body);
+            let node = |c: Entity| {
+                world
+                    .get::<ChildOf>(c)
+                    .and_then(|parent| world.get::<Name>(parent.parent()))
+                    .map_or_else(|| "?".to_owned(), |name| name.as_str().to_owned())
+            };
+            for pair in world.resource::<ContactGraph>().iter_active() {
+                let (ours, other) = if body(pair.collider1) == tank {
+                    (pair.collider1, pair.collider2)
+                } else if body(pair.collider2) == tank {
+                    (pair.collider2, pair.collider1)
+                } else {
+                    continue;
+                };
+                let kind = if world.get::<Tank>(body(other)).is_some() {
+                    "a tank"
+                } else {
+                    "the world"
+                };
+                for point in pair.manifolds.iter().flat_map(|m| m.points.iter()) {
+                    if point.normal_impulse > 0.0 {
+                        let entry = touches.entry((node(ours), kind)).or_default();
+                        entry.0 += 1;
+                        entry.1 += point.normal_impulse;
+                    }
+                }
+            }
+        }
+        let p = app.world().get::<Position>(tank).unwrap().0;
+        println!("heightfield {label}: digest {digest:016x}, ends at {p:?}, contacts {touches:?}");
+    }
+
     let mut app = booted_sim_on(Some(crate::terrain_grid::tests::shipped_grid()));
     start_fixed_clock(&mut app);
-    for _ in 0..120 {
-        app.update();
-    }
     let tank = app
         .world_mut()
         .query_filtered::<Entity, (With<Tank>, With<Controlled>)>()
         .single(app.world())
         .expect("one controlled tank");
-    // Away from the duel partner, so the drive meets only the terrain.
-    face_positive_z(&mut app, tank);
-    let start = app.world().get::<Position>(tank).unwrap().0;
-    let mut digest = 0xcbf2_9ce4_8422_2325_u64;
-    let mut touches = 0usize;
-    for _ in 0..640 {
-        drive_tick(&mut app, tank, 1.0, 0.0);
-        let world = app.world();
-        let p = world.get::<Position>(tank).unwrap().0;
-        let r = world.get::<Rotation>(tank).unwrap().0;
-        for w in p.to_array().into_iter().chain(r.to_array()) {
-            for b in w.to_bits().to_le_bytes() {
-                digest = (digest ^ u64::from(b)).wrapping_mul(0x0100_0000_01b3);
-            }
-        }
-        let graph = world.resource::<ContactGraph>();
-        let ours = |c: Entity| world.get::<ColliderOf>(c).is_some_and(|of| of.body == tank);
-        touches += graph
-            .iter_active()
-            .filter(|pair| ours(pair.collider1) || ours(pair.collider2))
-            .flat_map(|pair| pair.manifolds.iter().flat_map(|m| m.points.iter()))
-            .filter(|point| point.normal_impulse > 0.0)
-            .count();
+    phase(&mut app, "settle after spawn", 120, tank, |app| {
+        app.update()
+    });
+    // Away from the duel partner (`face_positive_z`), so the drive meets only the terrain.
+    {
+        let mut e = app.world_mut().entity_mut(tank);
+        e.get_mut::<Rotation>().unwrap().0 = Quat::from_rotation_y(std::f32::consts::PI);
+        e.get_mut::<avian3d::prelude::LinearVelocity>().unwrap().0 = Vec3::ZERO;
+        e.get_mut::<avian3d::prelude::AngularVelocity>().unwrap().0 = Vec3::ZERO;
     }
-    let world = app.world();
-    let p = world.get::<Position>(tank).unwrap().0;
-    let r = world.get::<Rotation>(tank).unwrap().0;
-    println!(
-        "heightfield straight drive: digest {digest:016x}, from {start:?} to {p:?} {r:?}, \
-         {touches} tank-collider contact points with a normal impulse"
+    phase(&mut app, "settle after the turn", 120, tank, |app| {
+        app.update()
+    });
+    phase(
+        &mut app,
+        "straight drive, full throttle",
+        640,
+        tank,
+        |app| drive_tick(app, tank, 1.0, 0.0),
     );
 }
 
