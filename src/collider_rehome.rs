@@ -2,29 +2,15 @@
 //! under the body it belongs to now. Game state only.
 //!
 //! THE INVARIANT: every contact pair names the bodies its two colliders belong to now. Avian 0.7
-//! records a pair's bodies once, when its broad phase makes the pair (`ContactEdge::body1`/`body2`,
-//! the same on `ContactPair`), and never rewrites them when a collider's [`ColliderOf`] changes.
-//! Who relies on the invariant, inside Avian:
-//! * the island manager links a touching pair into the island of the bodies the pair names
-//!   (`PhysicsIslands::add_contact`), while a body's despawn or type switch (`remove_body_on` in
-//!   `collision/narrow_phase/mod.rs`) and an island split (`split_island`) find a body's pairs
-//!   through the colliders it holds now (`RigidBodyColliders`). A pair naming its collider's former
-//!   body stays linked where none of those walks looks: the island is split or removed under it,
-//!   and the next unlink corrupts the island lists, which panics inside Avian;
-//! * the solver applies the pair's contact impulses to the bodies it names.
-//!
-//! The game rehomes colliders in one place: a cooked-off tank's turret becomes its own body
-//! (`damage::launch_turrets_on_cookoff`), under colliders that were the hull's, and the pairs they
-//! held before the launch go on naming the hull.
+//! records a pair's bodies once, when its broad phase makes the pair, and never rewrites them when a
+//! collider's [`ColliderOf`] changes; a stale pair corrupts Avian's island lists. The game rehomes
+//! colliders in one place, `damage::launch_turrets_on_cookoff`.
 //!
 //! [`drop_stale_pairs`] runs whenever `ColliderOf` is inserted. When one of the collider's pairs
-//! names another body for it, the collider is disabled and enabled again in one command batch.
-//! Avian's own removal (`remove_collider_on`, on `Add<ColliderDisabled>`) unlinks each pair from
-//! the constraint graph and its island and sends `CollisionEnd` for a touching one; enabling puts
-//! the collider back in its broad-phase tree marked moved, so the next physics step makes its pairs
-//! again, naming the new body (a touching one sends `CollisionStart`). A collider whose pairs all
-//! name its body, as after a body type switch that re-inserts `ColliderOf` unchanged, is left
-//! alone. Record of the Avian defect: `upstream/avian-collider-rehome-stale-pair-bodies.md`.
+//! names another body for it, the collider is disabled and enabled again in one command batch, so
+//! Avian removes the pairs and the broad phase remakes them under the new body. A re-insert naming
+//! the same body is left alone. Mechanism, evidence and removal condition:
+//! `upstream/avian-collider-rehome-stale-pair-bodies.md`.
 
 use avian3d::prelude::{ColliderDisabled, ColliderOf, ContactGraph};
 use bevy::prelude::*;
