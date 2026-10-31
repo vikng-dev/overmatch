@@ -1136,15 +1136,13 @@ pub fn run_offline() {
     // The same boundary: the battle scene's driver (`OVERMATCH_BATTLE`) writes every tank's
     // command, the controlled tank's included.
     app.add_plugins(tank::battle::offline_plugin);
-    // The game's cosmetic hull-mark demo fabricates marks and takes the camera in dev builds.
-    #[cfg(all(feature = "dev_tools", debug_assertions))]
+    // The game's cosmetic hull-mark demo (`OVERMATCH_HULL_MARKS_DEMO`) fabricates marks and takes
+    // the camera; inert unless its variable is set.
+    #[cfg(feature = "dev_tools")]
     app.add_plugins(hull_marks::demo::offline_plugin);
-    // The game's cosmetic track-print demo drives the player's tank and takes the camera; an
-    // optimized build carries it only under the `track_prints_demo` feature.
-    #[cfg(all(
-        feature = "dev_tools",
-        any(debug_assertions, feature = "track_prints_demo")
-    ))]
+    // The game's cosmetic track-print demo (`OVERMATCH_TRACK_PRINTS_DEMO`) drives the player's tank
+    // and takes the camera; inert unless its variable is set.
+    #[cfg(feature = "dev_tools")]
     app.add_plugins(track_prints::demo::offline_plugin);
     // The ground-type tuning panel, shown while paused; egui compiles only into `dev_ui` builds.
     #[cfg(feature = "dev_ui")]

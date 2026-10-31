@@ -14,9 +14,8 @@
 # and level lighting, parallax or sun. Default order: mud-lighting mud-parallax mud-sun
 # base-lighting base-parallax base-sun. Deltas print per ground against its lighting condition.
 #
-# Build: an optimized build carries the demo only under the `track_prints_demo` feature, and the
-# measured build takes the shipped feature set plus that one (no dev_ui, no bitprobe):
-#   scripts/serial-cargo build --locked --release --bin overmatch --features track_prints_demo
+# Build: the measured build is the shipped one (no dev_ui, no bitprobe), which carries the demo:
+#   scripts/serial-cargo build --locked --release --bin overmatch
 #
 # Validity: every precondition and gate of the frame sweep (run-frame-sweep.sh's runbook, code in
 # frame-run.zsh), plus this runner's own gates, per condition:

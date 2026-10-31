@@ -129,10 +129,6 @@ default = ["dev_tools"]
 dev_tools = []
 bitprobe = ["dep:flate2"]
 dev_ui = ["dep:bevy_egui"]
-# The track-print demo (`OVERMATCH_TRACK_PRINTS_DEMO`, `src/track_prints/demo.rs`) in an optimized
-# build, for the frame-cost measurement's scene (`scripts/perf/run-track-prints-cost.sh`). Dev builds
-# carry the demo through `debug_assertions`; no shipped build enables this.
-track_prints_demo = ["dev_tools"]
 
 # The one home for lint policy, for every package of the workspace (each opts in with
 # `[lints] workspace = true`). Levels are `warn`: CI's `clippy -- -D warnings` promotes them to

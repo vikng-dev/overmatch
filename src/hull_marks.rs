@@ -25,7 +25,7 @@
 //! [`MarkBuilder`]. The view — decals, textures, the client's diff — is `vfx::hull_marks`, mounted
 //! by every windowed composition.
 
-#[cfg(all(feature = "dev_tools", debug_assertions))]
+#[cfg(feature = "dev_tools")]
 pub(crate) mod demo;
 
 use std::collections::VecDeque;
@@ -588,26 +588,6 @@ pub(crate) mod tests {
                 (MarkKind::Dent, 20),
                 (MarkKind::Hole, 20)
             ],
-        );
-    }
-
-    /// The game's cosmetic hull-mark demo can fabricate marks and take the camera. Release
-    /// builds retain the default `dev_tools` feature, so that feature alone cannot guard it.
-    /// This source-boundary tripwire checks both the module and its offline mount without
-    /// compiling a second copy of the engine under the release profile.
-    #[test]
-    fn the_demo_is_excluded_from_release_even_with_dev_tools() {
-        let compact = |source: &str| source.split_whitespace().collect::<String>();
-        let guard = "#[cfg(all(feature=\"dev_tools\",debug_assertions))]";
-        assert!(
-            compact(include_str!("hull_marks.rs")).contains(&format!("{guard}pub(crate)moddemo;")),
-            "the demo module must be absent from release builds",
-        );
-        assert!(
-            compact(include_str!("lib.rs")).contains(&format!(
-                "{guard}app.add_plugins(hull_marks::demo::offline_plugin);"
-            )),
-            "the offline demo mount must have the same release boundary",
         );
     }
 }

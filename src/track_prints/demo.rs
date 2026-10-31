@@ -25,8 +25,7 @@
 //! ```
 //!
 //! Mounted only by the offline composition (`run_offline`): nothing it writes leaves the process.
-//! Compiled into dev builds, and into an optimized one only under the `track_prints_demo` feature,
-//! which no shipped build enables.
+//! Compiled into every build, inert unless `OVERMATCH_TRACK_PRINTS_DEMO` is set.
 
 use avian3d::prelude::{AngularVelocity, LinearVelocity, Position, Rotation};
 use bevy::prelude::*;
