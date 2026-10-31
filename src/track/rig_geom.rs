@@ -687,9 +687,12 @@ fn convex_hull_ccw(mut pts: Vec<Vec2>) -> Vec<Vec2> {
     if pts.len() < 3 {
         return pts;
     }
-    // Turn left (positive cross) to stay on the hull; pop right/collinear turns.
+    // Turn left (positive cross) to stay on the hull; pop right/collinear turns. Each chain starts
+    // from an empty buffer: built into one shared buffer, the upper pass could pop back into the
+    // lower chain and drop a lone rightmost apex.
     let cross = |o: Vec2, a: Vec2, b: Vec2| (a - o).perp_dot(b - o);
-    let half = |iter: &mut dyn Iterator<Item = Vec2>, out: &mut Vec<Vec2>| {
+    let chain = |iter: &mut dyn Iterator<Item = Vec2>| {
+        let mut out: Vec<Vec2> = Vec::new();
         for p in iter {
             while out.len() >= 2 && cross(out[out.len() - 2], out[out.len() - 1], p) <= 0.0 {
                 out.pop();
@@ -697,10 +700,10 @@ fn convex_hull_ccw(mut pts: Vec<Vec2>) -> Vec<Vec2> {
             out.push(p);
         }
         out.pop(); // the shared endpoint reappears as the next chain's start
+        out
     };
-    let mut hull = Vec::new();
-    half(&mut pts.iter().copied(), &mut hull); // lower chain, left → right
-    half(&mut pts.iter().rev().copied(), &mut hull); // upper chain, right → left
+    let mut hull = chain(&mut pts.iter().copied()); // lower chain, left → right
+    hull.extend(chain(&mut pts.iter().rev().copied())); // upper chain, right → left
     if let Some(&first) = hull.first() {
         hull.push(first);
     }
@@ -827,11 +830,12 @@ pub(crate) fn tiger_rig() -> RigGeom {
 mod tests {
     use super::*;
 
-    /// Inside the CHAIN regime (`n_min ≤ n < n_droop`) the inextensible loop goes taut before the
-    /// springs bottom, so the reachable droop is strictly short of the spring deflection — and the
-    /// defining fact of the clamp is that the taut wrap of the clamped droop pose exactly fills the
-    /// material loop `link_count · pitch`. The shipped Tiger's window is one link wide, so its top
-    /// (`n_droop − 1`) is the count to probe.
+    /// Inside the CHAIN regime the inextensible loop goes taut before the springs bottom, so the
+    /// reachable droop is strictly short of the spring deflection — and the defining fact of the
+    /// clamp is that the taut wrap of the clamped droop pose exactly fills the material loop
+    /// `link_count · pitch`. The count probed is the TOP Chain count, the one with the most droop
+    /// left under the clamp: `n_droop` rounds `P_droop / pitch`, so that is `n_droop` itself when
+    /// the rounding went down and `n_droop − 1` when it went up.
     #[test]
     fn the_chain_clamp_shortens_the_droop_and_pins_the_wrap_to_the_loop() {
         let p = SuspensionParams::default();
@@ -839,7 +843,14 @@ mod tests {
         let spring = derive::static_deflection(p.ride_frequency);
         let w = base.link_window(&p);
 
-        let n = w.n_droop - 1;
+        let chain_limited = |n: usize| {
+            base.rebuild(base.teeth, n, &p).link_window(&p).limiter == DroopLimiter::Chain
+        };
+        let n = if chain_limited(w.n_droop) {
+            w.n_droop
+        } else {
+            w.n_droop - 1
+        };
         assert!(
             n >= w.n_min,
             "expected a chain-limited count to exist (n_min {} n_droop {})",
@@ -1213,6 +1224,34 @@ mod tests {
                 (b - a).perp_dot(p - a) / e.length().max(1e-9)
             })
             .fold(f32::INFINITY, f32::min)
+    }
+
+    /// The hull keeps every extreme vertex, so it encloses every input point: the hard-stop
+    /// collider is extruded from it, and a dropped vertex dents the backstop by that vertex's arc
+    /// sagitta. The fixture is a convex pentagon whose rightmost apex stands alone, its lower
+    /// neighbour just left of it — where an upper chain sharing the lower chain's buffer pops
+    /// the apex.
+    #[test]
+    fn the_convex_hull_keeps_a_lone_extreme_apex() {
+        let pts = vec![
+            Vec2::new(0.0, 0.0),
+            Vec2::new(0.0, 1.0),
+            Vec2::new(0.9, 0.0),
+            Vec2::new(0.89, 1.0),
+            Vec2::new(1.0, 0.5),
+        ];
+        let hull = convex_hull_ccw(pts.clone());
+        assert_eq!(
+            hull.len(),
+            pts.len() + 1,
+            "every point is a vertex, closed: {hull:?}"
+        );
+        for p in pts {
+            assert!(
+                inset(&hull, p) >= -1e-6,
+                "{p} lies outside the hull {hull:?}"
+            );
+        }
     }
 
     /// The wrap must be CLOSED and CONVEX — the twin properties `Collider::convex_hull` relies on.
