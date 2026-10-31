@@ -6,8 +6,8 @@
 //! `SANDBOX_HARNESS="z=-5,warmup=192,ticks=640,throttle=0.25,steer=0.4,out=/tmp/run.jsonl"`
 //! - `pose` spawn preset: `lane` (default; uses `z`) or `slope_up`/`slope_down`/`slope_left`/
 //!   `slope_right` — parked on the 20° pad facing up/down/across the fall line,
-//! - `z` spawn lane position, `warmup` settle ticks at zero input, `ticks` recorded ticks after
-//!   warmup, `throttle`/`steer` constant drive during the recorded window (`t2` +
+//! - `x`, `z` spawn lane position (`x` defaults to 0; the rubble yard's spot is `x=-13,z=1`),
+//!   `warmup` settle ticks at zero input, `ticks` recorded ticks after warmup, `throttle`/`steer` constant drive during the recorded window (`t2` +
 //!   `throttle2`/`steer2` switch both at one tick: reversal slam, pivot entry, slalom flip),
 //!   `out` JSONL path. Unknown keys and values are errors. The retired `model` key alone is
 //!   accepted and ignored so historical `model=4` scenario strings keep working.
@@ -30,6 +30,8 @@ pub(super) struct Harness {
     /// Spawn preset: `None` = the flat lane at `z`; `Some(yaw)` = the slope pad, hull yawed
     /// `yaw` radians on the incline (0 = nose uphill).
     pose: Option<f32>,
+    /// Lane spawn position (x, z); `x` reaches the rubble yard off the lane's left edge.
+    x: f32,
     z: f32,
     warmup: u64,
     ticks: u64,
@@ -57,6 +59,7 @@ impl Default for Harness {
     fn default() -> Self {
         Self {
             pose: None,
+            x: 0.0,
             z: 0.0,
             warmup: 192,
             ticks: 640,
@@ -127,6 +130,7 @@ fn parse_spec(spec: &str) -> Result<Harness, String> {
                     }
                 };
             }
+            "x" => h.x = parse_number(key, value)?,
             "z" => h.z = parse_number(key, value)?,
             "warmup" => h.warmup = parse_number(key, value)?,
             "ticks" => h.ticks = parse_number(key, value)?,
@@ -208,7 +212,7 @@ pub(super) fn harness_setup(
             Transform::from_xyz(RUNWAY_SPAWN.x, geom.hull_rest_y, RUNWAY_SPAWN.z)
                 .with_rotation(Quat::from_rotation_y(-std::f32::consts::FRAC_PI_2))
         }
-        None => Transform::from_xyz(0.0, geom.hull_rest_y, harness.z),
+        None => Transform::from_xyz(harness.x, geom.hull_rest_y, harness.z),
     };
     lin.0 = Vec3::ZERO;
     ang.0 = Vec3::ZERO;
@@ -299,6 +303,10 @@ pub(super) fn harness_record(
     contacts: Res<BeltContacts>,
     belt: Res<BeltSpeed>,
     phase: Res<BeltPhase>,
+    (touches, pieces): (
+        Res<super::rubble::RubbleTouches>,
+        Query<(&LinearVelocity, &AngularVelocity), With<crate::debris::DebrisPiece>>,
+    ),
     mut exit: MessageWriter<AppExit>,
 ) {
     let (transform, lin, ang) = *hull;
@@ -380,6 +388,27 @@ pub(super) fn harness_record(
         side_rows(Side::Right),
     )
     .unwrap();
+    // Rubble telemetry (`r` line), only on a tick whose contacts pressed on a body, so open-ground
+    // captures stay byte-stable: contacts on bodies, those on dynamic ones, the sum and max
+    // |reaction| (N), and the fastest piece's linear (m/s) and angular (rad/s) speed.
+    if !touches.0.is_empty() {
+        let dynamic = touches.0.iter().filter(|t| t.dynamic).count();
+        let sum: f32 = touches.0.iter().map(|t| t.reaction.length()).sum();
+        let max = touches
+            .0
+            .iter()
+            .map(|t| t.reaction.length())
+            .fold(0.0f32, f32::max);
+        let (v, w) = pieces.iter().fold((0.0f32, 0.0f32), |(v, w), (lv, av)| {
+            (v.max(lv.0.length()), w.max(av.0.length()))
+        });
+        writeln!(
+            log.writer,
+            "{{\"t\":\"r\",\"k\":{k},\"touches\":{},\"dynamic\":{dynamic},\"reaction_sum\":{sum:.0},\"reaction_max\":{max:.0},\"piece_v\":{v:.4},\"piece_w\":{w:.4}}}",
+            touches.0.len(),
+        )
+        .unwrap();
+    }
     // Per-element strain telemetry (`e` line): per side, the count of elements holding strain and
     // Σ|j| / max|j| (m). A separate line from `k`, so the `k` lines stay byte-stable for the
     // capture-diff gates. Contact-loss erasure shows as a `jsum` sawtooth with no hull motion — the
@@ -464,6 +493,7 @@ mod tests {
             parsed,
             Harness {
                 pose: Some(std::f32::consts::FRAC_PI_2),
+                x: 0.0,
                 z: -5.5,
                 warmup: 12,
                 ticks: 34,

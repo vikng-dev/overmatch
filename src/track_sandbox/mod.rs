@@ -62,6 +62,9 @@ mod link_view;
 // Owns the [`MeshState`] / [`VolumeState`] enums the panel and [`VizLayers`] use.
 mod belt;
 mod mesh_layers;
+// The rubble yard: loose brick pieces and a standing wall section cut from the shipped house, for
+// the belts to climb and push.
+mod rubble;
 // The RUNNING-GEAR render layer: the glb's own wheel/sprocket/idler nodes, bound by name and driven
 // from the suspension travel + the belt phase. Without it the model's wheels sit frozen while the
 // shoes scroll past them — `articulate_wheels_field` would be updating a number nothing rendered.
@@ -362,6 +365,7 @@ pub fn plugin(app: &mut App) {
         .init_resource::<VizLayers>()
         .init_resource::<TautReference>()
         .init_resource::<TerrainField>()
+        .init_resource::<rubble::RubbleTouches>()
         // The kinematic wrap's per-side filter memory — `conform_belts_field` owns the mutation,
         // the reseat paths drop it. There is no config beside it: the feel tiers are unconditional
         // parameter-free laws.
@@ -383,6 +387,7 @@ pub fn plugin(app: &mut App) {
                 // A harness run must not steal the user's cursor while it captures.
                 grab_cursor.run_if(not(resource_exists::<harness::Harness>)),
                 spawn_environment,
+                rubble::spawn_rubble_yard,
                 configure_collider_gizmos,
             ),
         )
@@ -435,6 +440,7 @@ pub fn plugin(app: &mut App) {
                 log_state,
                 draw_contacts,
                 draw_sample_points,
+                rubble::draw_rubble,
             )
                 // Everything above reads the rig (its resources or its `Hull`/`RigWheel`
                 // entities), so it all waits for the deferred build.
@@ -473,6 +479,13 @@ pub fn plugin(app: &mut App) {
     // never into `bin/overmatch`. It brings its own `EguiPlugin` and runs in `EguiPrimaryContextPass`.
     #[cfg(feature = "dev_ui")]
     app.add_plugins(panel::plugin);
+
+    // A capture run's window is invisible (`bin/track_sandbox`), but winit has already made the
+    // process the active app; give the activation back.
+    #[cfg(target_os = "macos")]
+    if std::env::var_os("OVERMATCH_CAPTURE").is_some() {
+        app.add_systems(Startup, crate::platform::revoke_macos_activation);
+    }
 
     // The scripted capture harness (`SANDBOX_HARNESS` env var): scenario in, JSONL out, exit.
     // Bit-REPEATABLE (step 25b): virtual time advances exactly one fixed tick per rendered frame
@@ -849,13 +862,19 @@ struct ResetSpot(usize);
 
 /// The `R` drop spots: a quick tour of the test cases. `z` is the lane position; all drop at the
 /// resting ride height.
-const RESET_SPOTS: [(f32, &str); 4] = [
-    (0.0, "flat ground"),
-    (-TRENCHES[0].0, "narrow trench"),
-    (-TRENCHES[1].0, "wide trench (pure diagonal bridge)"),
+const RESET_SPOTS: [(f32, f32, &str); 5] = [
+    (0.0, 0.0, "flat ground"),
+    (0.0, -TRENCHES[0].0, "narrow trench"),
+    (0.0, -TRENCHES[1].0, "wide trench (pure diagonal bridge)"),
     (
+        0.0,
         -TRENCHES[2].0,
         "pit (swallows the whole rig - drop in, grind out)",
+    ),
+    (
+        rubble::RUBBLE_SPOT.x,
+        rubble::RUBBLE_SPOT.y,
+        "rubble yard (brick pile ahead, wall section on the left)",
     ),
 ];
 
@@ -1630,10 +1649,10 @@ fn reset_rig(
         return;
     }
     requested.0 = false;
-    let (z, label) = RESET_SPOTS[spot.0];
+    let (x, z, label) = RESET_SPOTS[spot.0];
     spot.0 = (spot.0 + 1) % RESET_SPOTS.len();
     let (mut transform, mut lin, mut ang) = hull.into_inner();
-    *transform = Transform::from_xyz(0.0, geom.hull_rest_y, z);
+    *transform = Transform::from_xyz(x, geom.hull_rest_y, z);
     lin.0 = Vec3::ZERO;
     ang.0 = Vec3::ZERO;
     *belt = BeltSpeed::default();
@@ -1651,7 +1670,7 @@ fn reset_rig(
         susp.dy = 0.0;
         susp.dvel = 0.0;
     }
-    info!("reset → {label} (z = {z:.1})");
+    info!("reset → {label} (x = {x:.1}, z = {z:.1})");
 }
 
 /// How far past `[n_min, n_droop]` the link-count knob may roam, in LINKS. Sized in loop metres,

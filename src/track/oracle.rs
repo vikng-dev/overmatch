@@ -16,10 +16,11 @@
 //!   spawn the terrain colliders (the sandbox's step-19..25 field, generalized), which is the
 //!   whole surface in the sandbox and the obstacle layer on the map.
 //!
-//! An Avian `SpatialQuery` adapter for non-block geometry is a per-system construction (the
-//! query is a borrowed `SystemParam` and cannot live in a resource) and would land with its
-//! first consumer; nothing has needed one.
+//! Geometry that is not a block (a building's elements and chunks, loose pieces) is an Avian
+//! collider: [`super::rubble::RubbleOracle`] folds it onto this field per system, because the
+//! query is a borrowed `SystemParam` and cannot live in a resource.
 
+use bevy::ecs::entity::Entity;
 use bevy::math::{Mat3, Quat, Vec2, Vec3};
 
 use crate::terrain_grid::HeightGrid;
@@ -32,6 +33,23 @@ pub trait TerrainOracle {
     /// (buried origin saturates to `reach`, like a contact cast). Positive = past the surface,
     /// negative = clearance.
     fn depth_along(&self, station: Vec3, out: Vec3, reach: f32) -> f32;
+
+    /// [`Self::depth_along`] with the body whose surface the first hit lies on. The terrain
+    /// field is no body, so an oracle of terrain alone answers `None`.
+    fn probe(&self, station: Vec3, out: Vec3, reach: f32) -> Probe {
+        Probe {
+            depth: self.depth_along(station, out, reach),
+            body: None,
+        }
+    }
+}
+
+/// One probe's answer: the directional depth ([`TerrainOracle::depth_along`]'s semantics) and
+/// the rigid body hit first, `None` where the first hit is the terrain field.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Probe {
+    pub depth: f32,
+    pub body: Option<Entity>,
 }
 
 /// Edge rounding radius (m) of the block field: every authored box is evaluated as a rounded

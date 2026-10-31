@@ -996,7 +996,7 @@ pub(crate) fn run_laws(
 
 /// A law chunk's collider shape for an instance at `scale`, about `origin` (building frame,
 /// scaled), its faces moved in by `gap` m.
-fn chunk_collider(
+pub(crate) fn chunk_collider(
     kind: &BuildingKind,
     c: usize,
     scale: f32,

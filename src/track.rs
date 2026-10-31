@@ -30,6 +30,7 @@ pub(crate) mod loop_geom;
 pub(crate) mod marker_model;
 pub(crate) mod rig_geom;
 pub mod route;
+pub(crate) mod rubble;
 #[cfg(test)]
 pub(crate) mod schedule_path;
 // The belt's SHADOW CASTER: a low-poly ribbon swept along the same drawn polyline the shoes are

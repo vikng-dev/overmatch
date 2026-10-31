@@ -176,7 +176,7 @@ pub(crate) struct BuildingBody;
 
 /// The collision filter of an intact element and of a standing chunk: hulls contact it and
 /// rounds walk it.
-fn element_layers() -> CollisionLayers {
+pub(crate) fn element_layers() -> CollisionLayers {
     CollisionLayers::new([Layer::Terrain, Layer::Armor], LayerMask::ALL)
 }
 

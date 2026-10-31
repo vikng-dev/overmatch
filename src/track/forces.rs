@@ -25,6 +25,7 @@
 //! - **Belt dynamics**: constant-power engine curve under a low-speed force cap, a governor
 //!   chasing `command × max_speed`, ground reaction, reflected inertia; phase advection.
 
+use bevy::ecs::entity::Entity;
 use bevy::math::{Affine3A, Vec2, Vec3};
 use serde::{Deserialize, Serialize};
 
@@ -316,6 +317,9 @@ pub struct SideInput<'a> {
 pub struct ForceApp {
     pub force: Vec3,
     pub point: Vec3,
+    /// The body the contact presses on, `None` for the terrain field: the caller applies
+    /// `-force` at `point` to it in the same tick when it is dynamic (equal and opposite).
+    pub body: Option<Entity>,
 }
 
 /// One contact's telemetry (viz / traces). `load` is the ACTUAL damped load applied this
@@ -334,6 +338,8 @@ pub struct BeltContact {
     pub f_lat: f32,
     pub normal: Vec3,
     pub traction: Vec3,
+    /// The body under the contact, `None` for the terrain field.
+    pub body: Option<Entity>,
 }
 
 /// What one side's tick produced.
@@ -556,6 +562,8 @@ struct ColumnContact {
     slip_lat: f32,
     /// Flat material-element index (`link * 3 + column`) — the per-element grip key.
     element: usize,
+    /// The body of the column's deepest probe, `None` for the terrain field.
+    body: Option<Entity>,
     #[cfg(feature = "bitprobe")]
     probe_index: usize,
 }
@@ -717,15 +725,16 @@ fn collect_column_contacts<O: TerrainOracle>(
             // reach of phantom penetration whose load points DOWN (−out), a self-burying
             // feedback (measured: the headless Tiger tail-sunk at 1.46 m of 4 s full
             // throttle).
-            let pen = [
-                oracle.depth_along(ca + face_a, out, params.probe_reach + travel[0]),
-                oracle.depth_along(
+            let probes = [
+                oracle.probe(ca + face_a, out, params.probe_reach + travel[0]),
+                oracle.probe(
                     (ca + cb) / 2.0 + face_m,
                     out,
                     params.probe_reach + travel[1],
                 ),
-                oracle.depth_along(cb + face_b, out, params.probe_reach + travel[2]),
+                oracle.probe(cb + face_b, out, params.probe_reach + travel[2]),
             ];
+            let pen = probes.map(|probe| probe.depth);
             #[cfg(feature = "bitprobe")]
             let probe_index = {
                 let (query_a, query_m, query_b) =
@@ -767,8 +776,26 @@ fn collect_column_contacts<O: TerrainOracle>(
             let t_c = sample_halves(x_c, len, travel);
             let p = ca + axis * x_c + out * (params.face_offset + t_c - pen_c);
 
+            // The column's resultant presses on the body of its deepest probe (the first such
+            // probe in a/m/b order): one body per column, the one carrying most of the profile.
+            let body = probes
+                .iter()
+                .fold((f32::NEG_INFINITY, None), |(deepest, body), probe| {
+                    if probe.depth > deepest {
+                        (probe.depth, probe.body)
+                    } else {
+                        (deepest, body)
+                    }
+                })
+                .1;
+
             // Support: penalty spring along the belt's own inward normal, at the column's
-            // share of the per-metre coefficients.
+            // share of the per-metre coefficients. Damping and slip read the hull's velocity
+            // alone, on a body as on the ground: a body's own motion enters only through its
+            // pose. Fed back through the slip, a light piece's velocity drives the grip
+            // damper explicitly past its stability bound (DERIVED: c·dt/m ≈ 6 for one 10 kN
+            // column on a 27 kg brick chunk at 64 Hz, against 2), while its own ground
+            // contact, solved implicitly by avian, holds it.
             let normal = -out;
             let vel = vel_at(p);
             let engage = (pen_max / params.engage_depth).clamp(0.0, 1.0);
@@ -807,6 +834,7 @@ fn collect_column_contacts<O: TerrainOracle>(
                 slip_long,
                 slip_lat,
                 element: material(i) * 3 + ci,
+                body,
                 #[cfg(feature = "bitprobe")]
                 probe_index,
             });
@@ -965,6 +993,7 @@ fn emit_contact_forces(
         report.apps.push(ForceApp {
             force: c.normal * c.load,
             point: c.p,
+            body: c.body,
         });
 
         let mut f_long = 0.0;
@@ -988,6 +1017,7 @@ fn emit_contact_forces(
             report.apps.push(ForceApp {
                 force: traction,
                 point: c.p,
+                body: c.body,
             });
             belt_reaction += f_long;
         }
@@ -1002,6 +1032,7 @@ fn emit_contact_forces(
             f_lat,
             normal: c.normal,
             traction,
+            body: c.body,
         });
         #[cfg(feature = "bitprobe")]
         {
