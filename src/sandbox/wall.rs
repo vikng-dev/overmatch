@@ -50,7 +50,7 @@ use bevy::mesh::{Indices, PrimitiveTopology};
 use bevy::prelude::*;
 
 use self::baked::Placement;
-use self::model::{Block, Cut, Loading, Masonry, Push, SectionCache, WallState};
+use self::model::{Block, Cut, Load, Masonry, SectionCache, WallState};
 use super::{FreeFlyCam, SEED_SPEC, UI_LEFT, panel_capturing};
 use crate::ballistics::{
     ArmourMark, BallisticVolume, CrossingEnd, FireShell, PenetrationMarks, SpallMarks,
@@ -1081,31 +1081,25 @@ struct Applied {
     blast: Option<(Blast, Vec3, f32, f32, Vec<Vec3>)>,
 }
 
-/// A round's crossing as the laws read it: its lines ([`Loading::lines`]), and the round's lost
-/// momentum shared among the chunks by the energy each took, at its chord's midpoint.
-fn line_loading(
-    lines: &[(usize, Vec3, Vec3, f32)],
-    along: Vec3,
-    momentum: f32,
-) -> (Loading, Vec<Push>) {
+/// A round's crossing as the laws read it: its lines ([`Load::line`]), each blowing with the
+/// round's lost momentum shared among the chunks by the energy each took.
+fn line_loads(lines: &[(usize, Vec3, Vec3, f32)], along: Vec3, momentum: f32) -> Vec<Load> {
     let total: f32 = lines.iter().map(|line| line.3).sum();
-    let pushes = if total > 0.0 {
-        lines
-            .iter()
-            .map(|&(chunk, entry, end, energy)| Push {
-                chunk,
-                at: (entry + end) / 2.0,
-                impulse: along * (momentum * energy / total),
-            })
-            .collect()
-    } else {
-        Vec::new()
-    };
-    (Loading::lines(lines), pushes)
+    lines
+        .iter()
+        .flat_map(|&(chunk, entry, end, energy)| {
+            let blow = if total > 0.0 {
+                along * (momentum * energy / total)
+            } else {
+                Vec3::ZERO
+            };
+            Load::line(chunk, entry, end, energy, blow)
+        })
+        .collect()
 }
 
 /// Run one deposit through the game's laws: the wear and dust, the local cracks, the structural
-/// check, and the loose groups with the velocities the pushes on them give.
+/// check, and the loose groups with the velocities the blows on them give.
 fn apply_deposit(
     wall: &mut Wall,
     controls: &WallControls,
@@ -1114,13 +1108,13 @@ fn apply_deposit(
     deposit: &Deposit,
 ) -> Applied {
     let mut applied = Applied::default();
-    let (loading, pushes) = match deposit {
+    let loads = match deposit {
         Deposit::Line {
             lines,
             along,
             momentum,
             ..
-        } => line_loading(lines, *along, *momentum),
+        } => line_loads(lines, *along, *momentum),
         &Deposit::Blast {
             mass,
             standoff,
@@ -1145,22 +1139,26 @@ fn apply_deposit(
                 .map(|hit| hit.at)
                 .collect();
             applied.blast = Some((blast, origin, coupled, pushed, drawn));
-            Loading::blast(&hits)
+            Load::blast(&hits)
         }
     };
-    applied.deposited = loading.energies.iter().map(|(_, e)| e).sum();
-    applied.chunks = loading.energies.len();
-    let struck = model::strike(&wall.cut.structure, &mut wall.state, &loading);
+    applied.deposited = loads.iter().map(|load| load.energy).sum();
+    applied.chunks = loads
+        .iter()
+        .map(|load| load.chunk)
+        .collect::<std::collections::BTreeSet<_>>()
+        .len();
+    let struck = model::strike(&wall.cut.structure, &mut wall.state, &loads);
     applied.local = struck.cracked.len();
-    // A push on a chunk turned to dust went into crushing it, and moves nothing.
-    let pushes: Vec<Push> = pushes
+    // A load on a chunk turned to dust went into crushing it, and moves nothing.
+    let loads: Vec<Load> = loads
         .into_iter()
-        .filter(|push| wall.state.standing(push.chunk))
+        .filter(|load| wall.state.standing(load.chunk))
         .collect();
     applied.failures = model::structural(
         &wall.cut.structure,
         &mut wall.state,
-        &pushes,
+        &loads,
         &mut wall.sections,
     );
     let pushed: Vec<usize> = struck
@@ -1198,13 +1196,13 @@ fn apply_deposit(
         let piece =
             (group.iter().map(|&i| chunks[i].volume).sum::<f32>() / group.len() as f32).cbrt();
         let on_group = || {
-            pushes
+            loads
                 .iter()
-                .filter(|push| group.binary_search(&push.chunk).is_ok())
+                .filter(|load| group.binary_search(&load.chunk).is_ok())
         };
-        let impulse: Vec3 = on_group().map(|push| push.impulse).sum();
+        let impulse: Vec3 = on_group().map(|load| load.blow).sum();
         let angular: Vec3 = on_group()
-            .map(|push| (push.at - centroid).cross(push.impulse))
+            .map(|load| (load.at - centroid).cross(load.blow))
             .sum();
         let inertia: f32 = group
             .iter()
@@ -1339,11 +1337,11 @@ fn apply_deposits(mut p: ApplyParam) {
                 rays.clone(),
             ));
         }
-        let first = |load: model::Load| {
+        let first = |cause: model::Cause| {
             applied
                 .failures
                 .iter()
-                .find(|failure| failure.load == load)
+                .find(|failure| failure.cause == cause)
                 .map(|failure| (failure.demand, failure.capacity))
         };
         p.log.last = Some(Outcome {
@@ -1354,8 +1352,8 @@ fn apply_deposits(mut p: ApplyParam) {
             local: applied.local,
             structural: applied.failures.iter().map(|f| f.joints.len()).sum(),
             sections: applied.failures.len(),
-            worst: first(model::Load::Push),
-            weight: first(model::Load::Weight),
+            worst: first(model::Cause::Push),
+            weight: first(model::Cause::Weight),
             unassessed: applied.unassessed,
             weight_steps: applied.weight_steps,
             groups: applied.groups.len(),

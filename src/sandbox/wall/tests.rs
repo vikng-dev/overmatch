@@ -90,23 +90,30 @@ fn renumbering_the_chunks_changes_no_outcome() {
                 .total_cmp(&b.distance(layout.centre()))
         })
         .expect("the wall has chunks");
-    let sources = [Source {
-        energy: 1.0e6,
-        at: centre,
-    }];
-    let pushes = |structure: &Structure| -> Vec<Push> {
+    let source = |structure: &Structure| -> [Load; 1] {
+        [Load {
+            chunk: (0..structure.chunks.len())
+                .find(|&i| structure.chunks[i].centroid == centre)
+                .expect("the centre is a chunk's centroid"),
+            at: centre,
+            energy: 1.0e6,
+            blow: Vec3::ZERO,
+        }]
+    };
+    let pushes = |structure: &Structure| -> Vec<Load> {
         (0..structure.chunks.len())
             .filter(|&i| structure.chunks[i].centroid.distance(centre) < 0.5)
-            .map(|i| Push {
+            .map(|i| Load {
                 chunk: i,
                 at: structure.chunks[i].centroid,
-                impulse: Vec3::NEG_Z * 400.0,
+                energy: 0.0,
+                blow: Vec3::NEG_Z * 400.0,
             })
             .collect()
     };
     let outcome = |structure: &Structure| {
         let mut state = WallState::new(structure);
-        crack(structure, &mut state, &sources);
+        crack(structure, &mut state, &source(structure));
         structural(
             structure,
             &mut state,
@@ -191,10 +198,11 @@ fn a_push_fails_the_section_at_its_fracture_impulse() {
     let lever = at.y - joint.centroid.y;
     for (scale, fails) in [(1.01, true), (0.99, false)] {
         let mut state = WallState::new(&structure);
-        let push = Push {
+        let push = Load {
             chunk: 1,
             at,
-            impulse: Vec3::NEG_Z * (scale * capacity / lever),
+            energy: 0.0,
+            blow: Vec3::NEG_Z * (scale * capacity / lever),
         };
         let failures = structural(
             &structure,

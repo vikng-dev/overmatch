@@ -194,8 +194,7 @@ fn the_record_a_replica_derives_from_is_the_authoritys() {
     let changes = run_laws(
         &kind.layout,
         &mut authority,
-        &Loading::field(&hits),
-        Vec::new(),
+        &Load::field(&hits),
         Vec::new(),
     );
     for kind_of in [
@@ -469,11 +468,19 @@ fn line_through_chunk(
     )
 }
 
-/// A blast's single ray on law chunk `c` at its centroid, carrying `share` of its full pool, as
-/// the laws read it, with its push.
-fn blast_on(structure: &Structure, c: usize, share: f32) -> (Loading, Vec<Push>) {
+/// Rounds' lines as the laws read them with no blow ([`Load::line`]).
+fn line_loads(lines: &[(usize, Vec3, Vec3, f32)]) -> Vec<Load> {
+    lines
+        .iter()
+        .flat_map(|&(c, entry, end, energy)| Load::line(c, entry, end, energy, Vec3::ZERO))
+        .collect()
+}
+
+/// A blast's single ray on law chunk `c` at its centroid, carrying `share` of its full pool and
+/// no impulse, as the laws read it.
+fn blast_on(structure: &Structure, c: usize, share: f32) -> Vec<Load> {
     let chunk = &structure.chunks[c];
-    Loading::blast(&[fracture::RayHit {
+    Load::blast(&[fracture::RayHit {
         chunk: c,
         at: chunk.centroid,
         energy: share * fracture::full_pool(chunk),
@@ -527,13 +534,12 @@ fn the_clients_hold_the_authoritys_holes_a_late_joiner_too() {
     let first = run_laws(
         &kind.layout,
         &mut authority,
-        &Loading::lines(&lines),
-        Vec::new(),
-        holes_of(&kind, 1.0, &lines, &Loading::default()),
+        &line_loads(&lines),
+        holes_of(&kind, 1.0, &lines, &[]),
     );
-    let (blast, pushes) = blast_on(&authority.structure, dish_chunk, 0.05);
+    let blast = blast_on(&authority.structure, dish_chunk, 0.05);
     let holes = holes_of(&kind, 1.0, &[], &blast);
-    let second = run_laws(&kind.layout, &mut authority, &blast, pushes, holes);
+    let second = run_laws(&kind.layout, &mut authority, &blast, holes);
     let [channel] = authority.holes[channel_chunk][..] else {
         panic!("one channel: {:?}", authority.holes[channel_chunk]);
     };
@@ -573,28 +579,18 @@ fn a_hole_changes_no_collider_mass_or_structural_result() {
     let mut cut = Live::new(&kind, 1.0);
     let mut whole = Live::new(&kind, 1.0);
     let line = line_through_chunk(&kind, &cut.structure, e, c, 0.3);
-    let push = Push {
+    let push = Load {
         chunk: c,
         at: cut.structure.chunks[c].centroid,
-        impulse: (line.2 - line.1).normalize() * 100.0,
+        energy: 0.0,
+        blow: (line.2 - line.1).normalize() * 100.0,
     };
-    let holes = holes_of(&kind, 1.0, &[line], &Loading::default());
+    let loads: Vec<Load> = line_loads(&[line]).into_iter().chain([push]).collect();
+    let holes = holes_of(&kind, 1.0, &[line], &[]);
     let mut record = Vec::new();
     for tick in [7, 9] {
-        let with = run_laws(
-            &kind.layout,
-            &mut cut,
-            &Loading::lines(&[line]),
-            vec![push],
-            holes.clone(),
-        );
-        let without = run_laws(
-            &kind.layout,
-            &mut whole,
-            &Loading::lines(&[line]),
-            vec![push],
-            Vec::new(),
-        );
+        let with = run_laws(&kind.layout, &mut cut, &loads, holes.clone());
+        let without = run_laws(&kind.layout, &mut whole, &loads, Vec::new());
         assert!(
             with.events.contains(&WallEvent::Hole(c as u16, holes[0].1)),
             "round {tick} holes the chunk: {:?}",
@@ -662,16 +658,10 @@ fn past_the_cap_a_chunk_crumbles() {
     let (e, [c, ..]) = fixture_chunks(&kind);
     let mut live = Live::new(&kind, 1.0);
     let line = line_through_chunk(&kind, &live.structure, e, c, 1e-3);
-    let holes = holes_of(&kind, 1.0, &[line], &Loading::default());
+    let holes = holes_of(&kind, 1.0, &[line], &[]);
     assert_eq!(holes.len(), 1);
     for k in 1..=HOLES_PER_CHUNK + 1 {
-        let changes = run_laws(
-            &kind.layout,
-            &mut live,
-            &Loading::lines(&[line]),
-            Vec::new(),
-            holes.clone(),
-        );
+        let changes = run_laws(&kind.layout, &mut live, &line_loads(&[line]), holes.clone());
         let holed = changes
             .events
             .iter()
@@ -719,7 +709,7 @@ fn a_hole_holds_the_volume_its_energy_crushed() {
     let metres = |p: [i16; 3]| Vec3::from_array(p.map(|v| f32::from(v) / 1000.0));
 
     let line = line_through_chunk(&kind, &structure, e, c, 0.01);
-    let [(_, channel)] = holes_of(&kind, 1.0, &[line], &Loading::default())[..] else {
+    let [(_, channel)] = holes_of(&kind, 1.0, &[line], &[])[..] else {
         panic!("one channel");
     };
     let r = f32::from(channel.radius) / 1000.0;
@@ -738,14 +728,14 @@ fn a_hole_holds_the_volume_its_energy_crushed() {
     }
     .check();
 
-    let (blast, _) = blast_on(&structure, c, 0.01);
+    let blast = blast_on(&structure, c, 0.01);
     let [(_, dish)] = holes_of(&kind, 1.0, &[], &blast)[..] else {
         panic!("one dish");
     };
     let r = f32::from(dish.radius) / 1000.0;
     Volume {
         held: 2.0 / 3.0 * PI * r.powi(3),
-        crushed: blast.energies[0].1 / crush,
+        crushed: blast[0].energy / crush,
         bound: 3.0 * 0.0005 / r,
     }
     .check();
@@ -869,29 +859,25 @@ fn a_nailed_roof_stays_when_struck_and_breaks_its_nails_when_its_walls_go() {
         .unwrap();
     let mut live = fresh();
     let line = line_through_chunk(&kind, &live.structure, roof_element, middle, 0.1);
-    let push = Push {
+    let push = Load {
         chunk: middle,
         at: line.1,
-        impulse: (line.2 - line.1).normalize() * (line.3 / 773.0),
+        energy: 0.0,
+        blow: (line.2 - line.1).normalize() * (line.3 / 773.0),
     };
-    let changes = run_laws(
-        layout,
-        &mut live,
-        &Loading::lines(&[line]),
-        vec![push],
-        Vec::new(),
-    );
+    let loads: Vec<Load> = line_loads(&[line]).into_iter().chain([push]).collect();
+    let changes = run_laws(layout, &mut live, &loads, Vec::new());
     println!(
         "MEASURED: a round through the plane's middle ({:.0} J, {:.0} N s): {} failures, {} groups",
         line.3,
-        push.impulse.length(),
+        push.blow.length(),
         changes.failures.len(),
         changes.groups.len()
     );
     assert!(changes.groups.is_empty() && changes.failures.is_empty());
     assert_eq!(standing(&live, &roof), roof.len(), "a round moves nothing");
-    let (blast, pushes) = blast_on(&live.structure, middle, 1.0);
-    let changes = run_laws(layout, &mut live, &blast, pushes, Vec::new());
+    let blast = blast_on(&live.structure, middle, 1.0);
+    let changes = run_laws(layout, &mut live, &blast, Vec::new());
     assert!(!live.state.standing(middle), "the blast spent the chunk");
     assert!(changes.groups.is_empty(), "{:?}", changes.failures);
     assert_eq!(
@@ -900,65 +886,76 @@ fn a_nailed_roof_stays_when_struck_and_breaks_its_nails_when_its_walls_go() {
         "carved, the roof stands"
     );
 
-    // Shoot out the long wall under the plate, then the gables.
+    // Shoot out the long wall under the plate, then the gables: every standing unburied chunk's
+    // pool spent by the removal alone (a load's energy would also stress the joints about it), then
+    // the laws that follow a removal with no blow, the weight check on the dust and support.
     let mut live = fresh();
-    let dust = |live: &Live, chunks: &[usize]| Loading {
-        sources: Vec::new(),
-        energies: chunks
-            .iter()
-            .filter(|&&c| live.state.standing(c) && !live.structure.chunks[c].buried)
-            .map(|&c| (c, fracture::full_pool(&live.structure.chunks[c])))
-            .collect(),
+    let shoot_out = |live: &mut Live, chunks: &[usize]| {
+        let mut dusted = Vec::new();
+        for &c in chunks {
+            let chunk = &live.structure.chunks[c];
+            if live.state.standing(c)
+                && !chunk.buried
+                && fracture::wear(
+                    &live.structure,
+                    &mut live.state,
+                    c,
+                    fracture::full_pool(chunk),
+                )
+            {
+                dusted.push(c);
+            }
+        }
+        dusted.sort_unstable();
+        let weighed = fracture::weigh(
+            &live.structure,
+            &mut live.state,
+            &dusted,
+            &[],
+            &mut live.sections,
+        );
+        let groups = fracture::fall(&live.structure, &mut live.state);
+        (dusted.len(), weighed, groups)
     };
     let wall_chunks: Vec<usize> = wall
         .iter()
         .flat_map(|&c| component_chunks(&kind, c))
         .collect();
-    let loading = dust(&live, &wall_chunks);
-    let changes = run_laws(layout, &mut live, &loading, Vec::new(), Vec::new());
+    let (dusted, weighed, groups) = shoot_out(&mut live, &wall_chunks);
     println!(
         "MEASURED: the long wall shot away ({} chunks to dust): {} failures, groups {:?}, plate \
          standing {} of {}, roof standing {} of {}, weight steps {}",
-        loading.energies.len(),
-        changes.failures.len(),
-        changes
-            .groups
-            .iter()
-            .map(|(g, _)| g.len())
-            .collect::<Vec<_>>(),
+        dusted,
+        weighed.failures.len(),
+        groups.iter().map(Vec::len).collect::<Vec<_>>(),
         standing(&live, &plate_chunks),
         plate_chunks.len(),
         standing(&live, &roof),
         roof.len(),
-        changes.weight_steps
+        weighed.steps
     );
-    assert!(changes.failures.is_empty(), "{:?}", changes.failures);
+    assert!(weighed.failures.is_empty(), "{:?}", weighed.failures);
     assert_eq!(standing(&live, &plate_chunks), plate_chunks.len());
     assert_eq!(standing(&live, &roof), roof.len(), "the roof stands");
 
-    let loading = dust(&live, &gables);
-    let changes = run_laws(layout, &mut live, &loading, Vec::new(), Vec::new());
+    let (dusted, weighed, groups) = shoot_out(&mut live, &gables);
     let joints = &live.structure.joints;
     println!(
         "MEASURED: the gables shot away too ({} chunks to dust): failures {:?}, groups {:?}, roof \
          standing {} of {}",
-        loading.energies.len(),
-        changes
+        dusted,
+        weighed
             .failures
             .iter()
-            .map(|f| (f.load, f.joints.len(), f.demand, f.capacity))
+            .map(|f| (f.cause, f.joints.len(), f.demand, f.capacity))
             .collect::<Vec<_>>(),
-        changes
-            .groups
-            .iter()
-            .map(|(g, _)| g.len())
-            .collect::<Vec<_>>(),
+        groups.iter().map(Vec::len).collect::<Vec<_>>(),
         standing(&live, &roof),
         roof.len()
     );
-    assert!(!changes.failures.is_empty());
-    for failure in &changes.failures {
-        assert_eq!(failure.load, fracture::Load::Weight, "{failure:?}");
+    assert!(!weighed.failures.is_empty());
+    for failure in &weighed.failures {
+        assert_eq!(failure.cause, fracture::Cause::Weight, "{failure:?}");
         assert!(failure.joints.iter().all(|&j| fixed(&joints[j])));
     }
     assert_eq!(
@@ -1013,8 +1010,7 @@ fn a_channel_is_the_cylinder_it_crossed_open_across_each_face() {
         let s = ((x - a).dot(ab) / ab.length_squared()).clamp(0.0, 1.0);
         x.distance(a + ab * s)
     };
-    let [(_, channel)] = holes_of(&kind, 1.0, &[(c, entry, exit, energy)], &Loading::default())[..]
-    else {
+    let [(_, channel)] = holes_of(&kind, 1.0, &[(c, entry, exit, energy)], &[])[..] else {
         panic!("one channel");
     };
     let radius = f32::from(channel.radius) / 1000.0;
@@ -1052,8 +1048,7 @@ fn a_channel_is_the_cylinder_it_crossed_open_across_each_face() {
     );
 
     let rest = (entry + exit) / 2.0;
-    let [(_, blind)] = holes_of(&kind, 1.0, &[(c, entry, rest, energy)], &Loading::default())[..]
-    else {
+    let [(_, blind)] = holes_of(&kind, 1.0, &[(c, entry, rest, energy)], &[])[..] else {
         panic!("one blind channel");
     };
     assert!(

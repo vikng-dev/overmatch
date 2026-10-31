@@ -64,8 +64,8 @@ use serde::{Deserialize, Serialize};
 
 use super::attachments::Attachments;
 use super::fracture::{
-    self, Blast, Block, Bond, Chunk, Fate, Joint, Loading, Masonry, Push, SectionCache, Side,
-    Structure, WallState,
+    self, Blast, Block, Bond, Chunk, Fate, Joint, Load, Masonry, SectionCache, Side, Structure,
+    WallState,
 };
 use super::schema::{self, BuildingAsset};
 use super::{BuildingElement, BuildingKind};
@@ -619,14 +619,16 @@ fn first_chunk(
     best
 }
 
-/// What a building took this tick, in its frame (scaled): lines, field stops, blast hits and
-/// pushes.
+/// What a building took this tick, in its frame (scaled): lines and their loads, field stops and
+/// blast hits.
 #[derive(Default)]
 struct Taken {
+    /// Each line's share of a chunk `(chunk, entry, end, energy J)`, which its hole reads.
     lines: Vec<(usize, Vec3, Vec3, f32)>,
+    /// Those lines' loads, each with its share of the round's lost momentum ([`Load::line`]).
+    line_loads: Vec<Load>,
     field: Vec<(usize, Vec3, f32)>,
     blast: Vec<fracture::RayHit>,
-    pushes: Vec<Push>,
 }
 
 #[derive(bevy::ecs::system::SystemParam)]
@@ -745,13 +747,12 @@ fn apply_deposits(mut p: DepositParam) {
                     let part = energy * (t1 - t0) / chord;
                     let (from, to) = ((a + dir * t0) * frame.scale, (a + dir * t1) * frame.scale);
                     into.lines.push((c, from, to, part));
-                    if total > 0.0 {
-                        into.pushes.push(Push {
-                            chunk: c,
-                            at: (from + to) / 2.0,
-                            impulse: turned * (impulse * part / total),
-                        });
-                    }
+                    let blow = if total > 0.0 {
+                        turned * (impulse * part / total)
+                    } else {
+                        Vec3::ZERO
+                    };
+                    into.line_loads.extend(Load::line(c, from, to, part, blow));
                 }
             }
         }
@@ -800,22 +801,19 @@ fn apply_deposits(mut p: DepositParam) {
             };
             let frame = frames[&root];
             let kind = breakage.kind.clone();
-            let (blast, blast_pushes) = Loading::blast(&taken.blast);
+            let blast = Load::blast(&taken.blast);
             let holes = holes_of(&kind, frame.scale, &taken.lines, &blast);
             let live = breakage.live();
-            let loading = Loading::lines(&taken.lines)
-                .and(Loading::field(&taken.field))
-                .and(blast);
-            let changes = run_laws(
-                &kind.layout,
-                live,
-                &loading,
-                taken.pushes.into_iter().chain(blast_pushes).collect(),
-                holes,
-            );
+            let loads: Vec<Load> = taken
+                .line_loads
+                .into_iter()
+                .chain(Load::field(&taken.field))
+                .chain(blast)
+                .collect();
+            let changes = run_laws(&kind.layout, live, &loads, holes);
             let building = identity.ordinal;
             let counts = [taken.lines.len(), taken.field.len(), taken.blast.len()];
-            log_changes(&identity.id, &loading, counts, &changes);
+            log_changes(&identity.id, &loads, counts, &changes);
             p.record
                 .entries
                 .extend(changes.events.iter().map(|&event| WallEntry {
@@ -823,31 +821,36 @@ fn apply_deposits(mut p: DepositParam) {
                     event,
                     tick,
                 }));
-            for (group, pushes) in changes.groups {
+            for (group, loads) in changes.groups {
                 spawn_piece(
                     &mut p.commands,
                     &kind,
                     &live.structure,
                     (building, frame.scale, *transform),
                     &group,
-                    &pushes,
+                    &loads,
                 );
             }
         }
     }
 }
 
-/// Log what one deposit did to a building (debug): `id` the building's, `counts` its deposit's
-/// lines, field stops and blast rays.
-fn log_changes(id: &str, loading: &Loading, counts: [usize; 3], changes: &Changes) {
+/// Log what one deposit did to a building (debug): `id` the building's, `loads` its deposit's,
+/// `counts` its lines, field stops and blast rays.
+fn log_changes(id: &str, loads: &[Load], counts: [usize; 3], changes: &Changes) {
     let count = |f: fn(&WallEvent) -> bool| changes.events.iter().filter(|e| f(e)).count();
     debug!(
         "buildings: {id} took {:.0} J in {} chunks ({} lines, {} field stops, {} blast rays): {} \
-         swapped, {} dust, {} holes, {} cracks, {} structural sections {:?} (load, demand, \
+         swapped, {} dust, {} holes, {} cracks, {} structural sections {:?} (cause, demand, \
          capacity: N s m for a push, Pa for weight), weight check {} steps with {} touched chunks \
          unassessed, {} chunks fell in {} groups",
-        loading.energies.iter().map(|(_, e)| e).sum::<f32>(),
-        loading.energies.len(),
+        loads.iter().map(|load| load.energy).sum::<f32>(),
+        loads
+            .iter()
+            .filter(|load| load.energy > 0.0)
+            .map(|load| load.chunk)
+            .collect::<std::collections::BTreeSet<_>>()
+            .len(),
         counts[0],
         counts[1],
         counts[2],
@@ -859,7 +862,7 @@ fn log_changes(id: &str, loading: &Loading, counts: [usize; 3], changes: &Change
         changes
             .failures
             .iter()
-            .map(|f| (f.load, f.demand, f.capacity))
+            .map(|f| (f.cause, f.demand, f.capacity))
             .collect::<Vec<_>>(),
         changes.weight_steps,
         changes.unassessed.len(),
@@ -1041,18 +1044,19 @@ enum Stop {
 }
 
 /// The holes one deposit cuts (module doc), each with its law chunk, in the baked chunk's frame
-/// ([`Hole`]); `lines` and `blast` in the building frame at the instance's `scale`. Each is sized
-/// by the volume its energy crushes, `energy / crush` ([`Masonry::crush`]): a line's channel runs
-/// along its chord, its radius the narrower of the cylinder about the chord and the ball that hold
-/// that volume (so a chord grazing a corner never cuts a disc wider than the ball); the blast's
-/// dish in a chunk is a ball about the chunk's source (its rays' energy-weighted mean stop) whose
-/// half holds it. ASSUMED: a channel's section is a circle and its width the energy's alone, not the
-/// round's diameter; a dish's centre lies on the chunk's face, so half its ball is in the chunk.
+/// ([`Hole`]); `lines` and the blast's loads `blast` ([`Load::blast`]) in the building frame at
+/// the instance's `scale`. Each is sized by the volume its energy crushes, `energy / crush`
+/// ([`Masonry::crush`]): a line's channel runs along its chord, its radius the narrower of the
+/// cylinder about the chord and the ball that hold that volume (so a chord grazing a corner never
+/// cuts a disc wider than the ball); the blast's dish in a chunk is a ball about the chunk's load
+/// (its rays' energy-weighted mean stop) whose half holds it. ASSUMED: a channel's section is a
+/// circle and its width the energy's alone, not the round's diameter; a dish's centre lies on the
+/// chunk's face, so half its ball is in the chunk.
 fn holes_of(
     kind: &BuildingKind,
     scale: f32,
     lines: &[(usize, Vec3, Vec3, f32)],
-    blast: &Loading,
+    blast: &[Load],
 ) -> Vec<(usize, Hole)> {
     use std::f32::consts::PI;
     let layout = &kind.layout;
@@ -1066,15 +1070,11 @@ fn holes_of(
         let (from, to) = open_ends(&layout.blocks[c], from / scale, to / scale, scale);
         Hole::cut(centroid(c), from, to, radius / scale).map(|hole| (c, hole))
     });
-    let dishes = blast
-        .sources
-        .iter()
-        .zip(&blast.energies)
-        .filter_map(|(source, &(c, energy))| {
-            let radius = (1.5 * crushed(c, energy) / PI).cbrt();
-            let at = source.at / scale;
-            Hole::cut(centroid(c), at, at, radius / scale).map(|hole| (c, hole))
-        });
+    let dishes = blast.iter().filter_map(|load| {
+        let radius = (1.5 * crushed(load.chunk, load.energy) / PI).cbrt();
+        let at = load.at / scale;
+        Hole::cut(centroid(load.chunk), at, at, radius / scale).map(|hole| (load.chunk, hole))
+    });
     channels.chain(dishes).collect()
 }
 
@@ -1117,29 +1117,28 @@ fn open_ends(block: &Block, from: Vec3, to: Vec3, scale: f32) -> (Vec3, Vec3) {
 }
 
 /// What the laws changed in one building: its record events in order, each loose group with the
-/// pushes on it (building frame), the structural failures (the push check's, then the weight
+/// loads on it (building frame), the structural failures (the push check's, then the weight
 /// check's), and the weight check's unassessed chunks and operation count ([`fracture::Weighed`]).
 #[derive(Debug, Default, PartialEq)]
 pub(crate) struct Changes {
     pub(crate) events: Vec<WallEvent>,
-    pub(crate) groups: Vec<(Vec<usize>, Vec<Push>)>,
+    pub(crate) groups: Vec<(Vec<usize>, Vec<Load>)>,
     pub(crate) failures: Vec<fracture::Failure>,
     pub(crate) unassessed: Vec<usize>,
     pub(crate) weight_steps: usize,
 }
 
-/// Run one deposit, with the `holes` it cuts ([`holes_of`]), through the laws on `live` (module
-/// doc) and say what changed: the elements first touched swap, then the dust, the holes kept, the
-/// cracks (the push rule's, then the structural check's, then the weight check's) and the falls,
-/// each ascending but the holes, in deposit order. A chunk the holes would carry past
+/// Run one deposit's `loads`, with the `holes` it cuts ([`holes_of`]), through the laws on `live`
+/// (module doc) and say what changed: the elements first touched swap, then the dust, the holes
+/// kept, the cracks (the push rule's, then the structural check's, then the weight check's) and the
+/// falls, each ascending but the holes, in deposit order. A chunk the holes would carry past
 /// [`HOLES_PER_CHUNK`] crumbles to dust before the laws run; a hole is kept only in a chunk
-/// standing after the removal, and no law reads one. A push on a chunk turned to dust went into
+/// standing after the removal, and no law reads one. A load on a chunk turned to dust went into
 /// crushing it and moves nothing.
 pub(crate) fn run_laws(
     layout: &Layout,
     live: &mut Live,
-    loading: &Loading,
-    pushes: Vec<Push>,
+    loads: &[Load],
     holes: Vec<(usize, Hole)>,
 ) -> Changes {
     let mut cutting: BTreeMap<usize, usize> = BTreeMap::new();
@@ -1155,7 +1154,7 @@ pub(crate) fn run_laws(
             crumbled.push(c);
         }
     }
-    let mut struck = fracture::strike(&live.structure, &mut live.state, loading);
+    let mut struck = fracture::strike(&live.structure, &mut live.state, loads);
     struck.dusted.extend(crumbled);
     struck.dusted.sort_unstable();
     let holes: Vec<(usize, Hole)> = holes
@@ -1165,16 +1164,13 @@ pub(crate) fn run_laws(
     for &(c, hole) in &holes {
         live.holes[c].push(hole);
     }
-    let pushes: Vec<Push> = pushes
-        .into_iter()
-        .filter(|push| live.state.standing(push.chunk))
+    let loads: Vec<Load> = loads
+        .iter()
+        .filter(|load| live.state.standing(load.chunk))
+        .copied()
         .collect();
-    let mut failures = fracture::structural(
-        &live.structure,
-        &mut live.state,
-        &pushes,
-        &mut live.sections,
-    );
+    let mut failures =
+        fracture::structural(&live.structure, &mut live.state, &loads, &mut live.sections);
     let pushed: Vec<usize> = struck
         .cracked
         .iter()
@@ -1237,9 +1233,9 @@ pub(crate) fn run_laws(
     let groups = groups
         .into_iter()
         .map(|group| {
-            let on_group = pushes
+            let on_group = loads
                 .iter()
-                .filter(|push| group.binary_search(&push.chunk).is_ok())
+                .filter(|load| group.binary_search(&load.chunk).is_ok())
                 .copied()
                 .collect();
             (group, on_group)
@@ -1286,7 +1282,7 @@ fn chunk_volume(kind: &BuildingKind, c: usize) -> BallisticVolume {
 }
 
 /// One loose group's colliders about its chunks' centre of mass (building frame), and the linear
-/// and angular velocity (building frame) its pushes give it: the pushes' impulse over its mass,
+/// and angular velocity (building frame) the blows of `loads` give it: their impulse over its mass,
 /// their angular momentum about its centre of mass through its own inertia tensor, both from the
 /// colliders it falls with at their substance's density. Momentum conserved: a group leaves with
 /// the impulse pushed into it, no more.
@@ -1295,7 +1291,7 @@ pub(crate) fn launch(
     structure: &Structure,
     scale: f32,
     group: &[usize],
-    pushes: &[Push],
+    loads: &[Load],
 ) -> (Vec3, Vec<(usize, Collider)>, Vec3, Vec3) {
     use avian3d::dynamics::rigid_body::mass_properties::bevy_heavy::{
         ComputeMassProperties3d, MassProperties3d,
@@ -1315,11 +1311,11 @@ pub(crate) fn launch(
         .iter()
         .map(|(c, shape)| shape.mass_properties(chunks[*c].material.density))
         .fold(MassProperties3d::default(), |sum, part| sum + part);
-    let impulse: Vec3 = pushes.iter().map(|push| push.impulse).sum();
+    let impulse: Vec3 = loads.iter().map(|load| load.blow).sum();
     let com = centroid + total.center_of_mass;
-    let angular: Vec3 = pushes
+    let angular: Vec3 = loads
         .iter()
-        .map(|push| (push.at - com).cross(push.impulse))
+        .map(|load| (load.at - com).cross(load.blow))
         .sum();
     let spin = if total.mass > 0.0 {
         total.angular_inertia_tensor().inverse() * angular
@@ -1335,16 +1331,16 @@ pub(crate) fn launch(
 }
 
 /// Spawn one loose group's body (module doc): at its chunks' centre of mass, turned as its
-/// building `(ordinal, scale, root pose)`, moving as its pushes leave it ([`launch`]).
+/// building `(ordinal, scale, root pose)`, moving as the blows of `loads` leave it ([`launch`]).
 fn spawn_piece(
     commands: &mut Commands,
     kind: &Arc<BuildingKind>,
     structure: &Structure,
     (building, scale, root): (u16, f32, Transform),
     group: &[usize],
-    pushes: &[Push],
+    loads: &[Load],
 ) {
-    let (centroid, colliders, velocity, spin) = launch(kind, structure, scale, group, pushes);
+    let (centroid, colliders, velocity, spin) = launch(kind, structure, scale, group, loads);
     let at = root.translation + root.rotation * centroid;
     let mut elements: Vec<&str> = group
         .iter()

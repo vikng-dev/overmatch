@@ -8,15 +8,19 @@
 //! anchor). The laws read only those two; a chunk's convex hull ([`Block`]) serves the colliders,
 //! the views and the geometry probes that say which chunk a deposit landed in, never a law.
 //!
-//! * **Removal** ([`wear`]). A chunk's pool is its crush energy, `crush × volume` (J); a deposit
-//!   wears it, and a chunk whose pool is spent is turned to dust.
-//! * **Cracks: the push rule** ([`crack`]). Each live joint's load from the deposit's [`Source`]s
-//!   is compared with the seam's tensile strength; a joint at or over it is cracked loose. The
-//!   load is the elastic stress about the cavity a source crushed. Sources superpose; a joint does
-//!   not remember a load below its threshold.
-//! * **Structure** ([`structural`]). A push on a group that one section alone holds to the ground
-//!   cracks the section when its angular impulse about the section's hinge would spend the
-//!   section's fracture energy and, where the section bears the group, topple the group over it.
+//! Every source enters the laws as loads ([`Load`]): the energy (J) it spends crushing matter at one
+//! point of one chunk, and the momentum (N·s), its blow, it delivers there.
+//!
+//! * **Removal** ([`wear`]). A chunk's pool is its crush energy, `crush × volume` (J); a load's
+//!   energy wears it, and a chunk whose pool is spent is turned to dust.
+//! * **Cracks: the push rule** ([`crack`]). Each live joint's stress from the loads' energies is
+//!   compared with the seam's tensile strength; a joint at or over it is cracked loose. The stress
+//!   is the elastic one about the cavity a load's energy crushed. Loads superpose; a joint does
+//!   not remember a stress below its threshold.
+//! * **Structure** ([`structural`]). The loads' blows on a group that one section alone holds to
+//!   the ground crack the section when their angular impulse about the section's hinge would spend
+//!   the section's fracture energy and, where the section bears the group, topple the group over
+//!   it.
 //! * **Weight** ([`weigh`]). After a wall changes, each group that one section alone holds and
 //!   whose support the change moved cracks the section when its weight, as a direct pull and a
 //!   bending moment across it, reaches the seam's tensile strength. A part held through several
@@ -36,12 +40,13 @@
 //!   silhouette intercepts ([`intercepted`]). The wall design
 //!   (`.agents/docs/design/wall-destruction.md`, "Standoff blast") owns the model.
 //!
-//! A deposit becomes point sources ([`Loading`]): a round's line in each chunk is split every
-//! [`LINE_STEP`]; a field's rays give one source per chunk they stop on, at the energy-weighted mean
-//! of their stops. Gaps these laws leave open (the wall prototype's README and the 2026-10-30 design
-//! review): a chunk partly crushed stays whole, the share of a round's lost momentum the crushed
-//! brick carries away is unknown (the struck chunks keep all of it), and a blast is an impulse, not
-//! a pressure over time. The README beside the prototype's captures
+//! A round's line in each chunk becomes loads [`LINE_STEP`] apart along its chord ([`Load::line`]);
+//! a field's or a blast's rays give one load per chunk they stop on, at the energy-weighted mean of
+//! their stops ([`Load::field`], [`Load::blast`]). Gaps these laws leave open (the wall
+//! prototype's README and the 2026-10-30 design review): a chunk partly crushed stays whole, the
+//! share of a round's lost momentum the crushed brick carries away is unknown (the struck chunks
+//! keep all of it), and a blast is an impulse, not a pressure over time. The README beside the
+//! prototype's captures
 //! (`.agents/scratch/destruction-2026-10-30-buildings/wall-prototype/README.md`) owns the
 //! derivations, the values' sources and the verdicts.
 
@@ -511,24 +516,97 @@ pub(crate) fn wear(
     dust
 }
 
-/// One point of a deposit: `energy` J at `at`.
+/// One load on a structure, about the game's environment destruction (game state only): what one
+/// source puts through one point of one chunk in one deposit. Its energy is what it spends
+/// crushing matter at its point, which wears the chunk's pool and stresses the joints about the
+/// cavity it opens ([`strike`]); its blow is the momentum it delivers there, which bends the
+/// sections that hold the chunk and leaves with a group it frees ([`structural`]). Every source is
+/// a field's, whose blow its own law fixes: a round's line ([`Load::line`]), a fragment's or spall
+/// ray's stop ([`Load::field`]), a blast ray's ([`Load::blast`]). The wall design owns the model
+/// (`.agents/docs/design/wall-destruction.md`, "Bodies in contact").
 #[derive(Clone, Copy, Debug, PartialEq)]
-pub(crate) struct Source {
-    pub energy: f32,
+pub(crate) struct Load {
+    /// The chunk it enters.
+    pub chunk: usize,
+    /// Where, in the structure's frame, m.
     pub at: Vec3,
+    /// J.
+    pub energy: f32,
+    /// N·s.
+    pub blow: Vec3,
 }
 
-impl Source {
-    /// The radius of the ball this source alone crushes in `material`, m: where the field is
-    /// clamped, since nothing inside it is left to load.
+impl Load {
+    /// A round's line through `chunk` from `entry` to `end`, spending `energy` J and delivering
+    /// `blow` N·s: one load at the middle of each of the chord's steps of at most [`LINE_STEP`],
+    /// the steps sharing both evenly.
+    pub(crate) fn line(
+        chunk: usize,
+        entry: Vec3,
+        end: Vec3,
+        energy: f32,
+        blow: Vec3,
+    ) -> impl Iterator<Item = Self> {
+        let chord = end - entry;
+        let n = (chord.length() / LINE_STEP).ceil().max(1.0) as usize;
+        (0..n).map(move |k| Self {
+            chunk,
+            at: entry + chord * ((k as f32 + 0.5) / n as f32),
+            energy: energy / n as f32,
+            blow: blow / n as f32,
+        })
+    }
+
+    /// A field's rays, each `(chunk, where it stopped, energy J)`, as loads ([`Load::per_chunk`])
+    /// with no blow: a fragment's momentum is not carried.
+    pub(crate) fn field(hits: &[(usize, Vec3, f32)]) -> Vec<Self> {
+        Self::per_chunk(
+            hits.iter()
+                .map(|&(chunk, at, energy)| (chunk, at, energy, Vec3::ZERO)),
+        )
+    }
+
+    /// A blast's ray hits as loads ([`Load::per_chunk`]), each chunk's blow the impulse its rays
+    /// pushed its faces with.
+    pub(crate) fn blast(hits: &[RayHit]) -> Vec<Self> {
+        Self::per_chunk(
+            hits.iter()
+                .map(|hit| (hit.chunk, hit.at, hit.energy, hit.impulse)),
+        )
+    }
+
+    /// Ray stops `(chunk, where, energy J, impulse N·s)` summed per chunk: one load each, at the
+    /// energy-weighted mean of its stops, in chunk order. A chunk its stops gave no energy has no
+    /// such mean and takes no load: the impulse its stops carried is dropped with it.
+    fn per_chunk(stops: impl Iterator<Item = (usize, Vec3, f32, Vec3)>) -> Vec<Self> {
+        let mut per: std::collections::BTreeMap<usize, (f32, Vec3, Vec3)> = Default::default();
+        for (chunk, at, energy, impulse) in stops {
+            let entry = per.entry(chunk).or_default();
+            entry.0 += energy;
+            entry.1 += at * energy;
+            entry.2 += impulse;
+        }
+        per.into_iter()
+            .filter(|(_, (energy, ..))| *energy > 0.0)
+            .map(|(chunk, (energy, weighted, blow))| Self {
+                chunk,
+                at: weighted / energy,
+                energy,
+                blow,
+            })
+            .collect()
+    }
+
+    /// The radius of the ball this load's energy alone crushes in `material`, m: where its stress
+    /// is clamped, since nothing inside it is left to load.
     fn crushed(&self, material: &Masonry) -> f32 {
         (3.0 * self.energy / (4.0 * PI * material.crush)).cbrt()
     }
 
     /// The normal stress on a plane of normal `n` at `x`, Pa, tension positive: the Lamé field of a
-    /// spherical cavity the deposit crushed, at pressure the crush energy (`P r_c³ = 3E/4π`),
+    /// spherical cavity the load's energy crushed, at pressure the crush energy (`P r_c³ = 3E/4π`),
     /// radial `−3E/(4π d³)` and hoop `+3E/(8π d³)`, the distance clamped at `crushed`, this
-    /// source's crushed radius in the joint's material ([`Source::crushed`]).
+    /// load's crushed radius in the joint's material ([`Load::crushed`]).
     fn lame(&self, x: Vec3, n: Vec3, crushed: f32) -> f32 {
         let offset = x - self.at;
         let length = offset.length();
@@ -559,16 +637,16 @@ fn disc(joint: &Joint) -> [(Vec3, f32); 7] {
     points
 }
 
-/// Each source's crushed radius in `material`, in source order ([`Source::crushed`]).
-fn crushed_radii(sources: &[Source], material: &Masonry) -> Vec<f32> {
+/// Each source's crushed radius in `material`, in source order ([`Load::crushed`]).
+fn crushed_radii(sources: &[Load], material: &Masonry) -> Vec<f32> {
     sources.iter().map(|s| s.crushed(material)).collect()
 }
 
-/// The load the push rule puts on `joint` from `sources` (Pa, the mean of the Lamé normal stress
-/// over the joint's disc), each source clamped at its radius in `crushed` (its crushed radius in
-/// the joint's material, [`crushed_radii`]), and the threshold it is compared to: `seam`'s
-/// tensile strength.
-fn joint_load(joint: &Joint, seam: &Seam, sources: &[Source], crushed: &[f32]) -> (f32, f32) {
+/// The stress the push rule puts on `joint` from the loads `sources` (Pa, the mean of the Lamé
+/// normal stress over the joint's disc), each clamped at its radius in `crushed` (its crushed
+/// radius in the joint's material, [`crushed_radii`]), and the threshold it is compared to:
+/// `seam`'s tensile strength.
+fn joint_load(joint: &Joint, seam: &Seam, sources: &[Load], crushed: &[f32]) -> (f32, f32) {
     let load = disc(joint)
         .iter()
         .map(|(x, weight)| {
@@ -583,17 +661,18 @@ fn joint_load(joint: &Joint, seam: &Seam, sources: &[Source], crushed: &[f32]) -
     (load, seam.tensile)
 }
 
-/// Crack every live, intact bonded joint whose load from `sources` reaches its seam's threshold
-/// ([`joint_load`]); returns the joints cracked now, ascending. A joint's material, whose crush
-/// energy clamps the sources, is its chunk `a`'s; a rest is never cracked here
-/// ([`Bond::Resting`]). The sources' crushed radii are taken once per crush energy the joints
-/// meet, keyed on its bits, not at each disc point of each joint: the same expression of the same
-/// values.
-pub(crate) fn crack(
-    structure: &Structure,
-    state: &mut WallState,
-    sources: &[Source],
-) -> Vec<usize> {
+/// Crack every live, intact bonded joint whose stress from the energies of `loads` reaches its
+/// seam's threshold ([`joint_load`]); returns the joints cracked now, ascending. A load that spends
+/// no energy crushes no cavity and stresses nothing. A joint's material, whose crush energy clamps
+/// the loads, is its chunk `a`'s; a rest is never cracked here ([`Bond::Resting`]). The loads'
+/// crushed radii are taken once per crush energy the joints meet, keyed on its bits, not at each
+/// disc point of each joint: the same expression of the same values.
+pub(crate) fn crack(structure: &Structure, state: &mut WallState, loads: &[Load]) -> Vec<usize> {
+    let sources: Vec<Load> = loads
+        .iter()
+        .filter(|load| load.energy > 0.0)
+        .copied()
+        .collect();
     if sources.is_empty() {
         return Vec::new();
     }
@@ -611,12 +690,12 @@ pub(crate) fn crack(
         let at = match radii.iter().position(|(crush, _)| *crush == key) {
             Some(at) => at,
             None => {
-                radii.push((key, crushed_radii(sources, &material)));
+                radii.push((key, crushed_radii(&sources, &material)));
                 radii.len() - 1
             }
         };
-        let (load, threshold) = joint_load(joint, &seam, sources, &radii[at].1);
-        if load >= threshold {
+        let (stress, threshold) = joint_load(joint, &seam, &sources, &radii[at].1);
+        if stress >= threshold {
             state.cracked[index] = true;
             cracked.push(index);
         }
@@ -690,65 +769,6 @@ pub(crate) fn first_hit(
         .min_by(|a, b| a.1.total_cmp(&b.1))
 }
 
-/// One deposit as the laws read it: its point sources, and the energy (J) each chunk took.
-#[derive(Clone, Debug, Default, PartialEq)]
-pub(crate) struct Loading {
-    pub sources: Vec<Source>,
-    pub energies: Vec<(usize, f32)>,
-}
-
-impl Loading {
-    /// A round's lines, each `(chunk, entry, end, energy J)`: each chunk's line split into point
-    /// sources [`LINE_STEP`] apart, sharing its energy evenly.
-    pub(crate) fn lines(lines: &[(usize, Vec3, Vec3, f32)]) -> Self {
-        let mut sources = Vec::new();
-        for &(_, entry, end, energy) in lines {
-            let chord = end - entry;
-            let n = (chord.length() / LINE_STEP).ceil().max(1.0) as usize;
-            for k in 0..n {
-                sources.push(Source {
-                    energy: energy / n as f32,
-                    at: entry + chord * ((k as f32 + 0.5) / n as f32),
-                });
-            }
-        }
-        Self {
-            sources,
-            energies: lines.iter().map(|&(i, _, _, e)| (i, e)).collect(),
-        }
-    }
-
-    /// A field's rays, each `(chunk, where it stopped, energy J)`, summed per chunk: each chunk a
-    /// source at the energy-weighted mean of its stops, in chunk order.
-    pub(crate) fn field(hits: &[(usize, Vec3, f32)]) -> Self {
-        let mut per: std::collections::BTreeMap<usize, (f32, Vec3)> = Default::default();
-        for &(chunk, at, energy) in hits {
-            let entry = per.entry(chunk).or_default();
-            entry.0 += energy;
-            entry.1 += at * energy;
-        }
-        let mut loading = Self::default();
-        for (chunk, (energy, weighted)) in per {
-            if energy <= 0.0 {
-                continue;
-            }
-            loading.sources.push(Source {
-                energy,
-                at: weighted / energy,
-            });
-            loading.energies.push((chunk, energy));
-        }
-        loading
-    }
-
-    /// Both deposits as one: their sources superpose.
-    pub(crate) fn and(mut self, other: Self) -> Self {
-        self.sources.extend(other.sources);
-        self.energies.extend(other.energies);
-        self
-    }
-}
-
 /// What one deposit did: the chunks it wore without emptying, the chunks it turned to dust and
 /// the joints it cracked, each ascending and without repeats.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -758,24 +778,25 @@ pub(crate) struct Struck {
     pub cracked: Vec<usize>,
 }
 
-/// Run `loading` through the removal and the push rule, in that order: every chunk's energy wears
-/// its pool, then every source loads the joints still live. Support is the caller's next step
-/// ([`loose_groups`], [`fall`]), so a check that must see the cracks before support (the
-/// sandbox's structural one) runs between.
-pub(crate) fn strike(structure: &Structure, state: &mut WallState, loading: &Loading) -> Struck {
+/// Run `loads` through the removal and the push rule, in that order: every load's energy wears
+/// its chunk's pool, then every load's energy stresses the joints still live ([`crack`]). A load
+/// that spends no energy wears nothing. Support is the caller's next step ([`loose_groups`],
+/// [`fall`]), so a check that must see the cracks before support (the structural one) runs
+/// between.
+pub(crate) fn strike(structure: &Structure, state: &mut WallState, loads: &[Load]) -> Struck {
     let mut struck = Struck::default();
-    for &(chunk, energy) in &loading.energies {
-        if wear(structure, state, chunk, energy) {
-            struck.dusted.push(chunk);
-        } else if state.standing(chunk) {
-            struck.worn.push(chunk);
+    for load in loads.iter().filter(|load| load.energy > 0.0) {
+        if wear(structure, state, load.chunk, load.energy) {
+            struck.dusted.push(load.chunk);
+        } else if state.standing(load.chunk) {
+            struck.worn.push(load.chunk);
         }
     }
     struck.worn.sort_unstable();
     struck.worn.dedup();
     struck.worn.retain(|chunk| state.standing(*chunk));
     struck.dusted.sort_unstable();
-    struck.cracked = crack(structure, state, &loading.sources);
+    struck.cracked = crack(structure, state, loads);
     struck
 }
 
@@ -788,17 +809,9 @@ pub(crate) fn fall(structure: &Structure, state: &mut WallState) -> Vec<Vec<usiz
     groups
 }
 
-/// One push on a chunk: the impulse (N·s) delivered at `at`.
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub(crate) struct Push {
-    pub chunk: usize,
-    pub at: Vec3,
-    pub impulse: Vec3,
-}
-
 /// What loaded a failed section, and so the units of its demand and capacity.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum Load {
+pub(crate) enum Cause {
     /// A push turning a group about a section's hinge ([`structural`]), or a part over the hinge of
     /// the rests it stands on ([`unseat`]): the angular impulse about the hinge against the impulse
     /// that would pay for opening the section and lifting the group over it, N·s·m.
@@ -824,11 +837,11 @@ pub(crate) enum Load {
 }
 
 /// One structural failure: the section's joints, what loaded it, and the demand on it with the
-/// capacity it was compared with, in its load's units.
+/// capacity it was compared with, in its cause's units.
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct Failure {
     pub joints: Vec<usize>,
-    pub load: Load,
+    pub cause: Cause,
     pub demand: f32,
     pub capacity: f32,
 }
@@ -1050,49 +1063,51 @@ fn plane_bucket(offset: f32) -> i64 {
     (f64::from(offset) * 1e3).floor() as i64
 }
 
-/// The structural check: a push turns the group a section alone holds to the ground about the
-/// section's hinge, the edge of the section that the turn presses (the bending axis is that of the
-/// pushes' angular impulse in the plane about the section's centroid, `Σ (x − c) × J`), and the
-/// section fails when the angular impulse about the hinge reaches the impulse whose rotational
-/// energy pays for opening the section and for carrying the group's weight with it,
-/// `√(2 I (Σ G_f A + E_g))`: `I` the group's moment of inertia about the hinge (each chunk a ball
-/// of its volume), `Σ G_f A` each joint's seam fracture energy over its area, and `E_g` the work
-/// against gravity of raising the group's centre of mass over the hinge where the section bears
-/// the group's weight (the section a push opens carries its load: a group standing on its section
-/// leaves only by toppling over it), 0 for a group beside or under its section. The worst failing
-/// section cracks first, and the check repeats until none fails, so a failure can expose the next.
-/// The freed group is the physics' from then on, with its weight, contact and friction
-/// ([`super::breakage`] launches it with the momentum pushed into it). A pushed part that stands on
-/// rests alone (no bonded path to the ground) is the rest law's ([`unseat`]): every rest it stood
-/// on opens when the push can carry it over them, turned about their hinge as a section is with no
-/// seam to open, or slid along them against their friction.
+/// The structural check: the loads' blows (a load with none pushes nothing) turn the group a
+/// section alone holds to the ground about the section's hinge, the edge of the section that the
+/// turn presses (the bending axis is that of the blows' angular impulse in the plane about the
+/// section's centroid, `Σ (x − c) × J`), and the section fails when the angular impulse about the
+/// hinge reaches the impulse whose rotational energy pays for opening the section and for carrying
+/// the group's weight with it, `√(2 I (Σ G_f A + E_g))`: `I` the group's moment of inertia about
+/// the hinge (each chunk a ball of its volume), `Σ G_f A` each joint's seam fracture energy over
+/// its area, and `E_g` the work against gravity of raising the group's centre of mass over the
+/// hinge where the section bears the group's weight (the section a blow opens carries its load: a
+/// group standing on its section leaves only by toppling over it), 0 for a group beside or under
+/// its section. The worst failing section cracks first, and the check repeats until none fails, so
+/// a failure can expose the next. The freed group is the physics' from then on, with its weight,
+/// contact and friction ([`super::breakage`] launches it with the momentum pushed into it). A
+/// pushed part that stands on rests alone (no bonded path to the ground) is the rest law's
+/// ([`unseat`]): every rest it stood on opens when the blows can carry it over them, turned about
+/// their hinge as a section is with no seam to open, or slid along them against their friction.
 ///
 /// The group a section holds is the part of the pushed chunks' component that loses its last path
-/// to the ground with the section's joints removed ([`held`]): a group no push reaches takes no
-/// demand, and a push on a chunk with no path to the ground left (the push rule freed it) bends no
-/// section, its group leaving as a body with that push ([`super::breakage`]). Only the sections
-/// that cut a push's path to the ground are searched for it ([`ground_path`]). Reads the chunk
-/// table and the joint graph only; `sections` is `structure`'s cache of them ([`SectionCache`]).
+/// to the ground with the section's joints removed ([`held`]): a group no blow reaches takes no
+/// demand, and a blow on a chunk with no path to the ground left (the push rule freed it) bends no
+/// section, its group leaving as a body with that blow ([`super::breakage`]). Only the sections
+/// that cut a pushed chunk's path to the ground are searched for it ([`ground_path`]). Reads the
+/// chunk table and the joint graph only; `sections` is `structure`'s cache of them
+/// ([`SectionCache`]).
 pub(crate) fn structural(
     structure: &Structure,
     state: &mut WallState,
-    pushes: &[Push],
+    loads: &[Load],
     sections: &mut SectionCache,
 ) -> Vec<Failure> {
     let mut failures = Vec::new();
-    if pushes.is_empty() {
+    let pushed = pushed(structure, loads);
+    if pushed.is_empty() {
         return failures;
     }
     let mut steps = 0;
     // Every pass cracks a section and none closes again, so the passes end.
     loop {
         let graph = graph(structure, state);
-        let paths: Vec<Option<Vec<usize>>> = pushes
+        let paths: Vec<Option<Vec<usize>>> = pushed
             .iter()
-            .map(|push| {
+            .map(|&chunk| {
                 state
-                    .standing(push.chunk)
-                    .then(|| ground_path(push.chunk, &graph, &mut steps))
+                    .standing(chunk)
+                    .then(|| ground_path(chunk, &graph, &mut steps))
                     .flatten()
             })
             .collect();
@@ -1100,8 +1115,8 @@ pub(crate) fn structural(
         let mut worst: Option<(f32, Failure)> = None;
         let (all, cutting) = sections.cutting(structure, state, &paths);
         for section in cutting.iter().map(|&s| &all[s]) {
-            // The pushes whose path the section cuts, in push order: the only pushes the search
-            // reads for it.
+            // The pushed chunks whose path the section cuts, in their order: the only ones the
+            // search reads for it.
             let mut cut: Vec<usize> = section
                 .iter()
                 .flat_map(|&joint| crossing[joint].iter().copied())
@@ -1112,11 +1127,11 @@ pub(crate) fn structural(
             cut.sort_unstable();
             cut.dedup();
             let mut group: Vec<usize> = Vec::new();
-            for push in cut.into_iter().map(|k| &pushes[k]) {
-                if group.binary_search(&push.chunk).is_ok() {
+            for chunk in cut.into_iter().map(|k| pushed[k]) {
+                if group.binary_search(&chunk).is_ok() {
                     continue;
                 }
-                if let Some(reached) = held(push.chunk, section, &graph, &mut steps) {
+                if let Some(reached) = held(chunk, section, &graph, &mut steps) {
                     group.extend(reached);
                     group.sort_unstable();
                     group.dedup();
@@ -1125,7 +1140,7 @@ pub(crate) fn structural(
             if group.is_empty() {
                 continue;
             }
-            if let Some(failure) = section_failure(structure, section, &group, pushes) {
+            if let Some(failure) = section_failure(structure, section, &group, loads) {
                 let ratio = failure.demand / failure.capacity;
                 if ratio >= 1.0 && worst.as_ref().is_none_or(|(w, _)| ratio > *w) {
                     worst = Some((ratio, failure));
@@ -1141,18 +1156,16 @@ pub(crate) fn structural(
         failures.push(failure);
     }
     // A pushed part that stands on rests alone (no bonded path to the ground) leaves with its
-    // pushes when the rest law opens every rest it stood on.
+    // blows when the rest law opens every rest it stood on.
     let graph = graph(structure, state);
     let mut seen = vec![false; structure.chunks.len()];
-    for push in pushes {
-        if !state.standing(push.chunk)
-            || seen[push.chunk]
-            || ground_path(push.chunk, &graph, &mut steps).is_some()
+    for &chunk in &pushed {
+        if !state.standing(chunk) || seen[chunk] || ground_path(chunk, &graph, &mut steps).is_some()
         {
             continue;
         }
-        let group = bonded_group(push.chunk, &graph, &mut seen);
-        if let Some(failure) = unseat(structure, state, &group, pushes, &mut steps) {
+        let group = bonded_group(chunk, &graph, &mut seen);
+        if let Some(failure) = unseat(structure, state, &group, loads, &mut steps) {
             for &j in &failure.joints {
                 state.cracked[j] = true;
             }
@@ -1160,6 +1173,19 @@ pub(crate) fn structural(
         }
     }
     failures
+}
+
+/// The chunks a blow of `loads` reaches, each once, in the order of its first such load.
+fn pushed(structure: &Structure, loads: &[Load]) -> Vec<usize> {
+    let mut seen = vec![false; structure.chunks.len()];
+    let mut pushed = Vec::new();
+    for load in loads {
+        if load.blow != Vec3::ZERO && !seen[load.chunk] {
+            seen[load.chunk] = true;
+            pushed.push(load.chunk);
+        }
+    }
+    pushed
 }
 
 /// The chunks joined to `start` through `graph`'s intact bonded joints, ascending, each marked in
@@ -1181,13 +1207,13 @@ fn bonded_group(start: usize, (neighbours, ..): &Graph, seen: &mut [bool]) -> Ve
     group
 }
 
-/// The demand and capacity of `section` holding `group` under `pushes` ([`structural`]), `None`
-/// when the pushes bend it about no axis.
+/// The demand and capacity of `section` holding `group` under the blows of `loads`
+/// ([`structural`]), `None` when they bend it about no axis.
 fn section_failure(
     structure: &Structure,
     section: &[usize],
     group: &[usize],
-    pushes: &[Push],
+    loads: &[Load],
 ) -> Option<Failure> {
     let joints: Vec<&Joint> = section.iter().map(|&j| &structure.joints[j]).collect();
     let area: f32 = joints.iter().map(|joint| joint.area).sum();
@@ -1217,12 +1243,12 @@ fn section_failure(
         .sum::<Vec3>()
         .try_normalize()?;
     let on_group = || {
-        pushes
+        loads
             .iter()
-            .filter(|push| group.binary_search(&push.chunk).is_ok())
+            .filter(|load| group.binary_search(&load.chunk).is_ok())
     };
     let moment: Vec3 = on_group()
-        .map(|push| (push.at - centre).cross(push.impulse))
+        .map(|load| (load.at - centre).cross(load.blow))
         .sum();
     let bending = moment - n * moment.dot(n);
     if bending.length() <= 0.0 {
@@ -1236,7 +1262,7 @@ fn section_failure(
         .map(|joint| across.dot(joint.centroid - centre) - (joint.area / PI).sqrt())
         .fold(f32::INFINITY, f32::min);
     let hinge = centre + across * back;
-    let total: Vec3 = on_group().map(|push| push.impulse).sum();
+    let total: Vec3 = on_group().map(|load| load.blow).sum();
     let demand = (moment + (centre - hinge).cross(total)).dot(axis);
     if demand <= 0.0 {
         return None;
@@ -1268,7 +1294,7 @@ fn section_failure(
         .sum();
     Some(Failure {
         joints: section.to_vec(),
-        load: Load::Push,
+        cause: Cause::Push,
         demand,
         capacity: (2.0 * inertia * (cohesion + lift)).sqrt(),
     })
@@ -1508,9 +1534,9 @@ fn unseated(
 }
 
 /// The rest law: whether `group` (ascending), a part with no bonded path to the ground, leaves the
-/// rests it stands on under its weight and the `pushes` on its chunks. Its rests are the live
-/// intact rests joining it to standing chunks outside it; those that bear it are the ones whose
-/// normal toward it rises past [`BEARS`], each a disc of its area in its plane (the tension
+/// rests it stands on under its weight and the blows of `loads` on its chunks. Its rests are the
+/// live intact rests joining it to standing chunks outside it; those that bear it are the ones
+/// whose normal toward it rises past [`BEARS`], each a disc of its area in its plane (the tension
 /// check's reading of a joint), pressed evenly over their area by what holds the part up
 /// (ASSUMED: the rests' shares of the load are statically indeterminate, and an even pressure is
 /// the reading that needs no stiffness). Each bearing rest's friction coefficient is its pair's,
@@ -1520,27 +1546,27 @@ fn unseated(
 /// friction can turn against the slide, exact where the rests are parallel), the part leaves, in
 /// this order of reading:
 ///
-/// 1. tipped by its weight ([`Load::Tip`]) when the vertical through its centre of mass passes
+/// 1. tipped by its weight ([`Cause::Tip`]) when the vertical through its centre of mass passes
 ///    outside the horizontal convex hull of the bearing discs, where vertical forces in the rests
 ///    alone can no longer hold its weight's moment;
-/// 2. slid by its weight ([`Load::Slide`]) when the slope beats the friction, `tan θ > μ`;
-/// 3. turned over by the pushes ([`Load::Push`]) when their angular impulse about the bearing
+/// 2. slid by its weight ([`Cause::Slide`]) when the slope beats the friction, `tan θ > μ`;
+/// 3. turned over by the blows ([`Cause::Push`]) when their angular impulse about the bearing
 ///    rests' hinge pays for lifting the part over it, a section with no seam to open
-///    ([`section_failure`]), which reads only their moment, so a push through the centre along
+///    ([`section_failure`]), which reads only their moment, so a blow through the centre along
 ///    the rests' normal turns nothing;
-/// 4. lifted off by the pushes ([`Load::Lift`]) when their impulse along `N̂`, away from the
+/// 4. lifted off by the blows ([`Cause::Lift`]) when their impulse along `N̂`, away from the
 ///    rests (which carry no tension), raises the part's centre of mass by its own height over
 ///    them against gravity's share along `N̂`: `J·N̂ ≥ m √(2 g N̂_y h)`, `h` the centre's height
 ///    along `N̂` over the bearing discs' area centroid. ASSUMED: lifted by as much as it stood
 ///    over its seat, the part has left it; a lower hop lands it back where it stood, which the
 ///    law reads as staying;
-/// 5. shoved off by the pushes ([`Load::Shove`]) when their impulse along the rests, net of the
+/// 5. shoved off by the blows ([`Cause::Shove`]) when their impulse along the rests, net of the
 ///    friction impulse their press into the rests raises, `p = |J_t| − μ max(−J·N̂, 0)`, gives
 ///    the part the energy to slide its centre of mass off the bearing hull along that impulse
 ///    against friction and with gravity's share along the slope: `p ≥ √(2 m W)`, `W = m g d (μ
 ///    cos θ + t_y)`, `d` the slide's length in the rests' plane and `t` its unit direction. The
-///    weight is held to raise no friction impulse during a push (ASSUMED: a push is
-///    instantaneous) and the part to slide in contact the whole way (ASSUMED: a push that also
+///    weight is held to raise no friction impulse during a blow (ASSUMED: a blow is
+///    instantaneous) and the part to slide in contact the whole way (ASSUMED: a blow that also
 ///    lifts it slides it farther than this reads).
 ///
 /// Any of them opens every rest the part stood on, as one failure; `None` when it stays, and when
@@ -1552,7 +1578,7 @@ fn unseat(
     structure: &Structure,
     state: &WallState,
     group: &[usize],
-    pushes: &[Push],
+    loads: &[Load],
     steps: &mut usize,
 ) -> Option<Failure> {
     let inside = |c: usize| group.binary_search(&c).is_ok();
@@ -1602,10 +1628,10 @@ fn unseat(
     if rests.is_empty() {
         return None;
     }
-    let open = |load, demand, capacity| {
+    let open = |cause, demand, capacity| {
         Some(Failure {
             joints: rests.clone(),
-            load,
+            cause,
             demand,
             capacity,
         })
@@ -1618,27 +1644,30 @@ fn unseat(
     let hull = convex_hull(&mut rim);
     let reach = beyond(&hull, (centre.x, centre.z));
     if reach > 0.0 {
-        return open(Load::Tip, reach, 0.0);
+        return open(Cause::Tip, reach, 0.0);
     }
     // The hull spans an area, so some rest bears and `N` rises.
     let friction = grip / normal.length();
     let slope = normal.x.hypot(normal.z) / normal.y;
     if slope > friction {
-        return open(Load::Slide, slope, friction);
+        return open(Cause::Slide, slope, friction);
     }
-    if !pushes.iter().any(|push| inside(push.chunk)) {
+    if !loads
+        .iter()
+        .any(|load| load.blow != Vec3::ZERO && inside(load.chunk))
+    {
         return None;
     }
-    if let Some(turn) = section_failure(structure, &bearing, group, pushes)
+    if let Some(turn) = section_failure(structure, &bearing, group, loads)
         && turn.demand >= turn.capacity
     {
-        return open(Load::Push, turn.demand, turn.capacity);
+        return open(Cause::Push, turn.demand, turn.capacity);
     }
     let support = normal.normalize();
-    let total: Vec3 = pushes
+    let total: Vec3 = loads
         .iter()
-        .filter(|push| inside(push.chunk))
-        .map(|push| push.impulse)
+        .filter(|load| inside(load.chunk))
+        .map(|load| load.blow)
         .sum();
     let press = total.dot(support);
     if press > 0.0 {
@@ -1646,7 +1675,7 @@ fn unseat(
         let height = (centre - seat / area).dot(support).max(0.0);
         let capacity = mass * (2.0 * GRAVITY * support.y * height).sqrt();
         if press >= capacity {
-            return open(Load::Lift, press, capacity);
+            return open(Cause::Lift, press, capacity);
         }
     }
     let along = total - support * press;
@@ -1662,7 +1691,7 @@ fn unseat(
     let work = mass * GRAVITY * slide * (friction * support.y + t.y);
     let capacity = (2.0 * mass * work.max(0.0)).sqrt();
     if net >= capacity {
-        return open(Load::Shove, net, capacity);
+        return open(Cause::Shove, net, capacity);
     }
     None
 }
@@ -1872,7 +1901,7 @@ fn weight_failure(
         .max_by(|a, b| (a.0 / a.1).total_cmp(&(b.0 / b.1)))?;
     Some(Failure {
         joints: border.into_iter().map(|(j, _)| j).collect(),
-        load: Load::Weight,
+        cause: Cause::Weight,
         demand,
         capacity,
     })
@@ -2092,43 +2121,6 @@ pub(crate) fn blast_rays(
         .collect()
 }
 
-impl Loading {
-    /// A blast's ray hits as a field deposit ([`Loading::field`]), and their pushes: per chunk the
-    /// summed impulse at the energy-weighted mean of its hits.
-    pub(crate) fn blast(hits: &[RayHit]) -> (Self, Vec<Push>) {
-        let loading = Self::field(
-            &hits
-                .iter()
-                .map(|hit| (hit.chunk, hit.at, hit.energy))
-                .collect::<Vec<_>>(),
-        );
-        let mut pushes: Vec<Push> = Vec::new();
-        for hit in hits {
-            match pushes.iter_mut().find(|push| push.chunk == hit.chunk) {
-                Some(push) => push.impulse += hit.impulse,
-                None => pushes.push(Push {
-                    chunk: hit.chunk,
-                    at: Vec3::ZERO,
-                    impulse: hit.impulse,
-                }),
-            }
-        }
-        for push in &mut pushes {
-            if let Some((source, _)) = loading
-                .sources
-                .iter()
-                .zip(&loading.energies)
-                .find(|(_, (chunk, _))| *chunk == push.chunk)
-            {
-                push.at = source.at;
-            }
-        }
-        pushes.retain(|push| loading.energies.iter().any(|(c, _)| *c == push.chunk));
-        pushes.sort_by_key(|push| push.chunk);
-        (loading, pushes)
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2224,12 +2216,13 @@ mod tests {
         Structure { chunks, joints }
     }
 
-    /// The structural check as specified, every section searched with [`held`] for every push
-    /// whose chunk still reaches the ground: the reference the pruned check answers to.
+    /// The structural check as specified, every section searched with [`held`] for every load
+    /// with a blow whose chunk still reaches the ground: the reference the pruned check answers
+    /// to.
     fn structural_by_full_search(
         structure: &Structure,
         state: &mut WallState,
-        pushes: &[Push],
+        loads: &[Load],
     ) -> Vec<Failure> {
         let mut failures = Vec::new();
         loop {
@@ -2237,14 +2230,14 @@ mod tests {
             let mut worst: Option<(f32, Failure)> = None;
             for section in sections(structure, state) {
                 let mut group: Vec<usize> = Vec::new();
-                for push in pushes {
-                    if !state.standing(push.chunk)
-                        || group.binary_search(&push.chunk).is_ok()
-                        || held(push.chunk, &[], &graph, &mut 0).is_some()
+                for load in loads.iter().filter(|load| load.blow != Vec3::ZERO) {
+                    if !state.standing(load.chunk)
+                        || group.binary_search(&load.chunk).is_ok()
+                        || held(load.chunk, &[], &graph, &mut 0).is_some()
                     {
                         continue;
                     }
-                    if let Some(reached) = held(push.chunk, &section, &graph, &mut 0) {
+                    if let Some(reached) = held(load.chunk, &section, &graph, &mut 0) {
                         group.extend(reached);
                         group.sort_unstable();
                         group.dedup();
@@ -2253,7 +2246,7 @@ mod tests {
                 if group.is_empty() {
                     continue;
                 }
-                if let Some(failure) = section_failure(structure, &section, &group, pushes) {
+                if let Some(failure) = section_failure(structure, &section, &group, loads) {
                     let ratio = failure.demand / failure.capacity;
                     if ratio >= 1.0 && worst.as_ref().is_none_or(|(w, _)| ratio > *w) {
                         worst = Some((ratio, failure));
@@ -2354,14 +2347,15 @@ mod tests {
     fn the_pruned_structural_check_is_the_full_search() {
         let (w, h) = (8, 6);
         let structure = grid(w, h);
-        let push = |chunk: usize, impulse: Vec3| Push {
+        let push = |chunk: usize, blow: Vec3| Load {
             chunk,
             at: structure.chunks[chunk].centroid + Vec3::Z * 0.125,
-            impulse,
+            energy: 0.0,
+            blow,
         };
         let top = (h - 1) * w + w / 2;
         let loose = 2 * w + 1;
-        let cases: [(Vec<usize>, Vec<Push>); 3] = [
+        let cases: [(Vec<usize>, Vec<Load>); 3] = [
             (Vec::new(), vec![push(top, Vec3::Z * 1600.0)]),
             (
                 Vec::new(),
@@ -2496,23 +2490,24 @@ mod tests {
 
     /// A POOL WEARS, THEN EMPTIES: energy under a chunk's pool leaves it standing and worn; the
     /// rest of its pool turns it to dust, and a dusted chunk takes no more and joins nothing, so a
-    /// chunk beyond it with no other path to the ground falls. A mutant that dusts on the first
-    /// deposit, or that leaves a dusted chunk holding its joints, fails here.
+    /// chunk beyond it with no other path to the ground falls. The removal alone ([`wear`]): a
+    /// load's energy also stresses the joints about it ([`strike`]). A mutant that dusts on the
+    /// first deposit, or that leaves a dusted chunk holding its joints, fails here.
     #[test]
     fn a_spent_pool_turns_a_chunk_to_dust_and_drops_what_it_held() {
         let structure = row(3);
         let mut state = WallState::new(&structure);
         let pool = full_pool(&structure.chunks[1]);
-        let half = Loading {
-            sources: Vec::new(),
-            energies: vec![(1, pool / 2.0)],
-        };
-        let struck = strike(&structure, &mut state, &half);
-        assert_eq!(struck.worn, vec![1]);
-        assert!(struck.dusted.is_empty());
+        assert!(
+            !wear(&structure, &mut state, 1, pool / 2.0),
+            "half a pool wears"
+        );
+        assert!(state.standing(1) && state.pool[1] < pool, "worn");
         assert!(fall(&structure, &mut state).is_empty());
-        let struck = strike(&structure, &mut state, &half);
-        assert_eq!(struck.dusted, vec![1]);
+        assert!(
+            wear(&structure, &mut state, 1, pool / 2.0),
+            "the rest of it dusts"
+        );
         assert!(!wear(&structure, &mut state, 1, pool), "dust takes no more");
         assert_eq!(fall(&structure, &mut state), vec![vec![2]]);
         assert_eq!(state.fate, vec![Fate::Standing, Fate::Dust, Fate::Fallen]);
@@ -2564,9 +2559,11 @@ mod tests {
         let structure = row(2);
         let joint = structure.joints[0];
         let material = structure.chunks[0].material;
-        let source = |d: f32| Source {
-            energy: 1.0e5,
+        let source = |d: f32| Load {
+            chunk: 0,
             at: joint.centroid + Vec3::Y * d,
+            energy: 1.0e5,
+            blow: Vec3::ZERO,
         };
         let (mut near, mut far) = (0.0_f32, 5.0_f32);
         for _ in 0..60 {
@@ -2607,20 +2604,17 @@ mod tests {
                 chunk.material = soft;
             }
         }
-        let (left, right) = (
-            structure.chunks[w + w / 2 - 1].centroid,
-            structure.chunks[w + w / 2].centroid,
-        );
+        let (left, right) = (w + w / 2 - 1, w + w / 2);
         let mut told_apart = false;
         for step in 0..40 {
             let energy = 1.0e4 * 10.0_f32.powf(step as f32 / 10.0);
-            let sources = [
-                Source { energy, at: right },
-                Source {
-                    energy: energy / 2.0,
-                    at: left,
-                },
-            ];
+            let source = |chunk: usize, energy: f32| Load {
+                chunk,
+                at: structure.chunks[chunk].centroid,
+                energy,
+                blow: Vec3::ZERO,
+            };
+            let sources = [source(right, energy), source(left, energy / 2.0)];
             let rule = |material_of: &dyn Fn(&Joint) -> Masonry| -> Vec<usize> {
                 (0..structure.joints.len())
                     .filter(|&j| {
@@ -2643,6 +2637,61 @@ mod tests {
             );
         }
         assert!(told_apart, "the sweep tells the materials' radii apart");
+    }
+
+    /// A SOURCE'S LOADS CARRY ITS ENERGY AND ITS MOMENTUM WHOLE: a fixture line's loads lie at
+    /// most [`LINE_STEP`] apart along its chord, sum to its energy and its blow, and their blows'
+    /// moment about any point is the whole blow's at the chord's midpoint; a blast's ray hits give
+    /// one load per chunk, in chunk order, each the sum of the chunk's hits' energy and impulse at
+    /// the energy-weighted mean of its stops. The structural check and a freed group's launch read
+    /// a line's momentum through its loads, and a blast's dish and push the one point of each
+    /// chunk: a line that multiplied or shifted its blow, or a blast that parted a chunk's energy
+    /// from its push, fails here.
+    #[test]
+    fn a_sources_loads_carry_its_energy_and_momentum_whole() {
+        let close = |got: Vec3, want: Vec3| (got - want).length() <= 1e-5 * want.length();
+        let (entry, end) = (Vec3::new(0.0, 0.1, 0.0), Vec3::new(0.23, 0.05, 0.02));
+        let (energy, blow) = (3.0e4, Vec3::new(40.0, -10.0, 5.0));
+        let loads: Vec<Load> = Load::line(2, entry, end, energy, blow).collect();
+        assert_eq!(loads.len(), 5, "a 0.236 m chord in steps of at most 5 cm");
+        assert!(loads.iter().all(|load| load.chunk == 2));
+        assert!(
+            loads
+                .windows(2)
+                .all(|pair| pair[0].at.distance(pair[1].at) <= LINE_STEP)
+        );
+        let spent: f32 = loads.iter().map(|load| load.energy).sum();
+        assert!((spent / energy - 1.0).abs() < 1e-6, "{spent} J");
+        assert!(close(loads.iter().map(|load| load.blow).sum(), blow));
+        let pivot = Vec3::new(1.0, -2.0, 0.5);
+        let moment: Vec3 = loads
+            .iter()
+            .map(|load| (load.at - pivot).cross(load.blow))
+            .sum();
+        assert!(close(moment, ((entry + end) / 2.0 - pivot).cross(blow)));
+
+        let hit = |chunk: usize, at: Vec3, energy: f32, impulse: Vec3| RayHit {
+            chunk,
+            at,
+            energy,
+            impulse,
+        };
+        let (a, b, c) = (Vec3::X, Vec3::Y, Vec3::new(0.0, 0.0, 2.0));
+        let (i, j) = (Vec3::new(3.0, 0.0, -1.0), Vec3::new(-1.0, 2.0, 0.0));
+        let loads = Load::blast(&[
+            hit(3, a, 1.0, i),
+            hit(1, b, 2.0, Vec3::Z),
+            hit(3, c, 3.0, j),
+        ]);
+        let chunks: Vec<usize> = loads.iter().map(|load| load.chunk).collect();
+        assert_eq!(chunks, vec![1, 3]);
+        assert_eq!(
+            (loads[0].at, loads[0].energy, loads[0].blow),
+            (b, 2.0, Vec3::Z)
+        );
+        assert_eq!(loads[1].energy, 4.0);
+        assert!(close(loads[1].at, (a + c * 3.0) / 4.0));
+        assert!(close(loads[1].blow, i + j));
     }
 
     /// THE BLAST'S IMPULSES ARE SWISDAK'S FITS: at Z = 1 and 10 m/kg^⅓ the reflected fit reads
@@ -2800,39 +2849,44 @@ mod tests {
         Structure { chunks, joints }
     }
 
-    /// Turn the chunks `props` (ascending) to dust, run the weight check on that change, then
-    /// support: the state, the check's result and the groups that fell.
+    /// Spend each of `chunks`' pool ([`wear`]), the removal alone with no stress about it: the
+    /// chunks it turned to dust, ascending.
+    fn spend(structure: &Structure, state: &mut WallState, chunks: &[usize]) -> Vec<usize> {
+        let mut dusted: Vec<usize> = chunks
+            .iter()
+            .copied()
+            .filter(|&c| wear(structure, state, c, full_pool(&structure.chunks[c])))
+            .collect();
+        dusted.sort_unstable();
+        dusted
+    }
+
+    /// Turn the chunks `props` (ascending) to dust ([`spend`]), run the weight check on that
+    /// change, then support: the state, the check's result and the groups that fell.
     fn dust_and_weigh(
         structure: &Structure,
         props: &[usize],
     ) -> (WallState, Weighed, Vec<Vec<usize>>) {
         let mut state = WallState::new(structure);
-        let loading = Loading {
-            sources: Vec::new(),
-            energies: props
-                .iter()
-                .map(|&c| (c, full_pool(&structure.chunks[c])))
-                .collect(),
-        };
-        let struck = strike(structure, &mut state, &loading);
-        assert_eq!(struck.dusted, props, "the props turn to dust");
+        let dusted = spend(structure, &mut state, props);
+        assert_eq!(dusted, props, "the props turn to dust");
         let weighed = weigh(
             structure,
             &mut state,
-            &struck.dusted,
-            &struck.cracked,
+            &dusted,
+            &[],
             &mut SectionCache::default(),
         );
         let fell = fall(structure, &mut state);
         (state, weighed, fell)
     }
 
-    /// Each failure's load and joints.
-    fn cracks(weighed: &Weighed) -> Vec<(Load, Vec<usize>)> {
+    /// Each failure's cause and joints.
+    fn cracks(weighed: &Weighed) -> Vec<(Cause, Vec<usize>)> {
         weighed
             .failures
             .iter()
-            .map(|failure| (failure.load, failure.joints.clone()))
+            .map(|failure| (failure.cause, failure.joints.clone()))
             .collect()
     }
 
@@ -2880,7 +2934,7 @@ mod tests {
             let (_, weighed, fell) = dust_and_weigh(&structure, &props);
             if falls {
                 let root = joint_between(&structure, 0, 1);
-                assert_eq!(cracks(&weighed), vec![(Load::Weight, vec![root])]);
+                assert_eq!(cracks(&weighed), vec![(Cause::Weight, vec![root])]);
                 assert_eq!(fell, vec![arm.clone()]);
             } else {
                 assert_eq!(cracks(&weighed), Vec::new(), "within the limit");
@@ -2913,7 +2967,7 @@ mod tests {
                     joint_between(&structure, 0, panel[panel.len() - 2]),
                     joint_between(&structure, 1, panel[panel.len() - 1]),
                 ];
-                assert_eq!(cracks(&weighed), vec![(Load::Weight, top)]);
+                assert_eq!(cracks(&weighed), vec![(Cause::Weight, top)]);
                 assert_eq!(fell, vec![panel.clone()]);
             } else {
                 assert_eq!(cracks(&weighed), Vec::new(), "within the limit");
@@ -2938,37 +2992,17 @@ mod tests {
         let mut sections = SectionCache::default();
         let idle = weigh(&structure, &mut state, &[], &[], &mut sections);
         assert_eq!(idle, Weighed::default(), "no change, no work");
-        let worn = Loading {
-            sources: Vec::new(),
-            energies: vec![(2, full_pool(&structure.chunks[2]) / 2.0)],
-        };
-        let struck = strike(&structure, &mut state, &worn);
-        assert_eq!(struck.worn, vec![2]);
-        let idle = weigh(
-            &structure,
-            &mut state,
-            &struck.dusted,
-            &struck.cracked,
-            &mut sections,
-        );
+        let half = full_pool(&structure.chunks[2]) / 2.0;
+        assert!(!wear(&structure, &mut state, 2, half), "worn, not dust");
+        let idle = weigh(&structure, &mut state, &[], &[], &mut sections);
         assert_eq!(idle, Weighed::default(), "a wear alone, no work");
         assert!(fall(&structure, &mut state).is_empty());
 
         let tip = n as usize;
-        let dust = Loading {
-            sources: Vec::new(),
-            energies: vec![(tip, full_pool(&structure.chunks[tip]))],
-        };
-        let struck = strike(&structure, &mut state, &dust);
-        let weighed = weigh(
-            &structure,
-            &mut state,
-            &struck.dusted,
-            &struck.cracked,
-            &mut sections,
-        );
+        let dusted = spend(&structure, &mut state, &[tip]);
+        let weighed = weigh(&structure, &mut state, &dusted, &[], &mut sections);
         let root = joint_between(&structure, 0, 1);
-        assert_eq!(cracks(&weighed), vec![(Load::Weight, vec![root])]);
+        assert_eq!(cracks(&weighed), vec![(Cause::Weight, vec![root])]);
         assert!(weighed.steps > 0);
     }
 
@@ -3017,20 +3051,13 @@ mod tests {
             } else {
                 state.cracked[seat] = true;
             }
-            let loading = Loading {
-                sources: Vec::new(),
-                energies: gone
-                    .iter()
-                    .map(|&c| (c, full_pool(&structure.chunks[c])))
-                    .collect(),
-            };
-            let struck = strike(&structure, &mut state, &loading);
-            assert_eq!(struck.dusted, gone, "the props turn to dust");
+            let dusted = spend(&structure, &mut state, gone);
+            assert_eq!(dusted, gone, "the props turn to dust");
             let weighed = weigh(
                 &structure,
                 &mut state,
-                &struck.dusted,
-                &struck.cracked,
+                &dusted,
+                &[],
                 &mut SectionCache::default(),
             );
             assert_eq!(cracks(&weighed), Vec::new(), "rest {rest}");
@@ -3047,7 +3074,7 @@ mod tests {
     /// prop that turns to dust, at 2 % under the cantilever limit of its root joint
     /// ([`cantilever_limit`]). Joined by a seam it hangs from the root and stands; joined by a
     /// rest (its plane upright, so it bears nothing) it falls at that first change, every rest it
-    /// stood on opened as one [`Load::Tip`] failure, though no load reaches anything's strength.
+    /// stood on opened as one [`Cause::Tip`] failure, though no load reaches anything's strength.
     /// The roof planes and wall plates of a building rely on it: a part set on another holds only
     /// by bearing on it.
     #[test]
@@ -3065,7 +3092,7 @@ mod tests {
         let root = joint_between(&structure, 0, 1);
         structure.joints[root].bond = Bond::Resting;
         let (state, weighed, fell) = dust_and_weigh(&structure, &props);
-        assert_eq!(cracks(&weighed), vec![(Load::Tip, vec![root])]);
+        assert_eq!(cracks(&weighed), vec![(Cause::Tip, vec![root])]);
         assert!(state.cracked[root]);
         assert_eq!(fell, vec![vec![1]]);
     }
@@ -3097,10 +3124,11 @@ mod tests {
         let lever = at.y - joint.centroid.y;
         for (scale, opens) in [(1.01, true), (0.99, false)] {
             let mut state = WallState::new(&structure);
-            let push = Push {
+            let push = Load {
                 chunk: 1,
                 at,
-                impulse: Vec3::NEG_Z * (scale * capacity / lever),
+                energy: 0.0,
+                blow: Vec3::NEG_Z * (scale * capacity / lever),
             };
             let failures = structural(
                 &structure,
@@ -3142,7 +3170,7 @@ mod tests {
             structure.chunks[2].mass = 100.0 * share;
             let (_, weighed, fell) = dust_and_weigh(&structure, &props);
             if falls {
-                assert_eq!(cracks(&weighed), vec![(Load::Tip, vec![seat])]);
+                assert_eq!(cracks(&weighed), vec![(Cause::Tip, vec![seat])]);
                 assert_eq!(fell, vec![vec![1, 2]]);
             } else {
                 assert_eq!(cracks(&weighed), Vec::new(), "at {reach} r it stands");
@@ -3178,7 +3206,7 @@ mod tests {
     /// 0.5 % over or under the pair's coefficient (the geometric mean of the two rows, the one
     /// pair rule, about 0.57, DERIVED). The stop turns to dust. The block's centre of mass lies
     /// well over its rest, so only the slope can free it: over, its one rest opens as a
-    /// [`Load::Slide`] failure and the block falls; under, it stands. A law that held
+    /// [`Cause::Slide`] failure and the block falls; under, it stands. A law that held
     /// every seated part by friction, read one side's coefficient (wood's 0.5, brick's 0.65) or
     /// another pair rule (the mean, 0.9 % over the geometric), fails here; a timber laid unfixed on
     /// a slope slides by it.
@@ -3200,7 +3228,7 @@ mod tests {
             let structure = tilted(structure, (share * friction).atan());
             let (_, weighed, fell) = dust_and_weigh(&structure, &[stop]);
             if slides {
-                assert_eq!(cracks(&weighed), vec![(Load::Slide, vec![seat])]);
+                assert_eq!(cracks(&weighed), vec![(Cause::Slide, vec![seat])]);
                 let failure = &weighed.failures[0];
                 assert!((failure.demand / failure.capacity / share - 1.0).abs() < 1e-4);
                 assert_eq!(fell, vec![vec![1]]);
@@ -3231,10 +3259,11 @@ mod tests {
         let capacity = mass * (2.0 * GRAVITY * height).sqrt();
         for (scale, opens) in [(1.01, true), (0.99, false)] {
             let mut state = WallState::new(&structure);
-            let push = Push {
+            let push = Load {
                 chunk: 1,
                 at: top,
-                impulse: Vec3::Y * (scale * capacity),
+                energy: 0.0,
+                blow: Vec3::Y * (scale * capacity),
             };
             let failures = structural(
                 &structure,
@@ -3244,11 +3273,15 @@ mod tests {
             );
             let fell = fall(&structure, &mut state);
             if opens {
-                let loads: Vec<(Load, Vec<usize>)> = failures
+                let causes: Vec<(Cause, Vec<usize>)> = failures
                     .iter()
-                    .map(|failure| (failure.load, failure.joints.clone()))
+                    .map(|failure| (failure.cause, failure.joints.clone()))
                     .collect();
-                assert_eq!(loads, vec![(Load::Lift, vec![rest])], "{scale} x capacity");
+                assert_eq!(
+                    causes,
+                    vec![(Cause::Lift, vec![rest])],
+                    "{scale} x capacity"
+                );
                 assert_eq!(fell, vec![vec![1]], "{scale} x capacity");
             } else {
                 assert!(failures.is_empty() && fell.is_empty(), "{scale} x capacity");
@@ -3278,10 +3311,11 @@ mod tests {
         let capacity = mass * (2.0 * friction * GRAVITY * radius).sqrt();
         for (along, press, opens) in [(1.01, 0.0, true), (0.99, 0.0, false), (1.01, 0.05, false)] {
             let mut state = WallState::new(&structure);
-            let push = Push {
+            let push = Load {
                 chunk: 1,
                 at: joint.centroid,
-                impulse: Vec3::NEG_Z * (along * capacity)
+                energy: 0.0,
+                blow: Vec3::NEG_Z * (along * capacity)
                     + Vec3::NEG_Y * (press * capacity / friction),
             };
             let failures = structural(
@@ -3293,11 +3327,11 @@ mod tests {
             let fell = fall(&structure, &mut state);
             let case = format!("{along} x along, {press} back by the press");
             if opens {
-                let loads: Vec<(Load, Vec<usize>)> = failures
+                let causes: Vec<(Cause, Vec<usize>)> = failures
                     .iter()
-                    .map(|failure| (failure.load, failure.joints.clone()))
+                    .map(|failure| (failure.cause, failure.joints.clone()))
                     .collect();
-                assert_eq!(loads, vec![(Load::Shove, vec![rest])], "{case}");
+                assert_eq!(causes, vec![(Cause::Shove, vec![rest])], "{case}");
                 assert_eq!(fell, vec![vec![1]], "{case}");
             } else {
                 assert!(failures.is_empty() && fell.is_empty(), "{case}");
