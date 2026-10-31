@@ -24,7 +24,15 @@
 //!   elements, the moving bodies (a loose piece, a hull, a launched turret) and every other surface
 //!   (the ground, a standing tree); one that stops on a moving body pushes it the same way, through
 //!   avian at the point it stops, and deposits nothing, and one on any other surface does nothing.
-//!   The laws then run in order: removal and the
+//! * **Contacts** (the authority's, each physics step, [`read_contacts`]): every point the solver
+//!   moved momentum through between a dynamic body and a building's breakable element or chunk
+//!   ([`ContactTransfers`]) loads the chunk there (an intact element's: the chunk whose hull holds
+//!   the point, [`contact_load`]) with its blow and press, each contact split at its body's rest
+//!   speed ([`ContactTransfers::split`]), all of a step's points one deposit. A point on an
+//!   unbreakable element loads nothing. A body asleep against a building presses it with what its
+//!   contact last held ([`RestingLoads`]): every run of the laws on that building carries the
+//!   press once, and it starts none. No body is read by its kind.
+//! * **The order.** The laws run each deposit, building by building, in order: removal and the
 //!   push rule ([`fracture::strike`]), the structural check ([`fracture::structural`]), the weight
 //!   check on what those changed ([`fracture::weigh`]), support ([`fracture::fall`]).
 //! * **Holes** ([`Hole`], drawn only): a line cuts a channel in each chunk it crosses, the cylinder
@@ -64,12 +72,13 @@ use serde::{Deserialize, Serialize};
 
 use super::attachments::Attachments;
 use super::fracture::{
-    self, Blast, Block, Bond, Chunk, Fate, Joint, Load, Masonry, SectionCache, Side, Structure,
-    WallState,
+    self, Blast, Block, Bond, Chunk, Fate, Joint, Load, Masonry, Origin, SectionCache, Side,
+    Structure, WallState,
 };
 use super::schema::{self, BuildingAsset};
 use super::{BuildingElement, BuildingKind};
 use crate::ballistics::{ArmourMark, BallisticVolume, PenetrationMarks, ShellMarched, SpallMarks};
+use crate::contact_transfer::{ContactTransfer, ContactTransfers};
 use crate::scatter::MapInstance;
 use crate::{ClientReplica, Layer, ShotClock};
 
@@ -449,11 +458,122 @@ struct RawDeposit {
     rays: Vec<(Vec3, Vec3, f32)>,
     /// A burst's blast: where, and its energy and charge.
     blast: Option<(Vec3, Blast)>,
+    /// A physics step's body contacts, each its building's root and its load ([`contact_load`]).
+    contacts: Vec<(Entity, Load)>,
 }
 
-/// The deposits the march raised this tick.
+/// The deposits the march and the contacts raised this tick.
 #[derive(Resource, Default)]
 struct WallQueue(Vec<RawDeposit>);
+
+/// Per building root, as of the last physics step: the presses of the bodies asleep against it
+/// ([`crate::contact_transfer::Resting`]), each a load with no blow ([`contact_load`]). Every run
+/// of the laws on the building carries them; none starts one.
+#[derive(Resource, Default)]
+struct RestingLoads(BTreeMap<Entity, Vec<Load>>);
+
+/// The colliders a contact point can lie on: a building's element or chunk, under its root.
+type BuildingColliders<'w, 's> = Query<
+    'w,
+    's,
+    (
+        Option<&'static BuildingElement>,
+        Option<&'static BuildingChunk>,
+        &'static ChildOf,
+    ),
+>;
+
+/// AUTHORITY: each physics step's body contacts on the buildings as loads, read once a step
+/// (module doc): every point on a breakable element or chunk queued, the step's as one deposit,
+/// with the blow and press its transfer splits into; and every resting point's press as its
+/// building's ([`RestingLoads`]). A structure that is no building (a tree) reads its own.
+fn read_contacts(
+    transfers: Res<ContactTransfers>,
+    mut read: Local<u64>,
+    colliders: BuildingColliders,
+    buildings: Query<(&Transform, &Breakage)>,
+    mut queue: ResMut<WallQueue>,
+    mut resting: ResMut<RestingLoads>,
+) {
+    if transfers.steps() == *read {
+        return;
+    }
+    *read = transfers.steps();
+    let contacts: Vec<(Entity, Load)> = transfers
+        .split()
+        .filter_map(|(point, blow, press)| contact_load(&colliders, &buildings, point, blow, press))
+        .collect();
+    resting.0.clear();
+    for rest in transfers.resting() {
+        if let Some((root, load)) = contact_load(
+            &colliders,
+            &buildings,
+            &rest.transfer,
+            Vec3::ZERO,
+            rest.press(),
+        ) {
+            resting.0.entry(root).or_default().push(load);
+        }
+    }
+    if !contacts.is_empty() {
+        queue.0.push(RawDeposit {
+            contacts,
+            ..default()
+        });
+    }
+}
+
+/// The load a body's contact point `transfer` puts on a building, with `blow` (N·s) and `press`
+/// (N) in world terms: on the chunk whose collider the point lies on, or for an intact element
+/// the element's chunk whose hull holds the point (the hull nearest it, by [`Block::outside`],
+/// ties to the lower index), turned into the building's frame; with the building's root. `None`
+/// when the structure is no building (a tree) and on an element that never breaks, which the laws
+/// do not read. Reads the body's entity only to name the load's origin.
+fn contact_load(
+    colliders: &BuildingColliders,
+    buildings: &Query<(&Transform, &Breakage)>,
+    transfer: &ContactTransfer,
+    blow: Vec3,
+    press: Vec3,
+) -> Option<(Entity, Load)> {
+    let (transform, breakage) = buildings.get(transfer.structure).ok()?;
+    let (element, chunk, parent) = colliders.get(transfer.structure_collider).expect(
+        "a building collider the last physics step touched stands until the laws' next refit",
+    );
+    assert_eq!(
+        parent.parent(),
+        transfer.structure,
+        "a building's collider is its root's child"
+    );
+    let layout = &breakage.kind.layout;
+    let frame = Frame::new(transform, breakage.scale, breakage.kind.bounds());
+    let local = frame.unscaled(transfer.point);
+    let chunk = match (element, chunk) {
+        (_, Some(&BuildingChunk(c))) => usize::from(c),
+        (Some(&BuildingElement(e)), None) => {
+            layout.chunks_of(usize::from(e)).min_by(|&a, &b| {
+                layout.blocks[a]
+                    .outside(local)
+                    .total_cmp(&layout.blocks[b].outside(local))
+            })?
+        }
+        (None, None) => panic!(
+            "buildings: collider {:?} of building {:?} is neither an element nor a chunk",
+            transfer.structure_collider, transfer.structure
+        ),
+    };
+    Some((
+        transfer.structure,
+        Load {
+            chunk,
+            at: local * frame.scale,
+            energy: 0.0,
+            blow: frame.turn(blow),
+            press: frame.turn(press),
+            origin: Origin::Body(transfer.body),
+        },
+    ))
+}
 
 /// AUTHORITY: a charge set off at `at` (world), its blast fed to the blast field at the next
 /// deposits, as a burst's is.
@@ -617,8 +737,8 @@ fn first_chunk(
     best
 }
 
-/// What a building took this tick, in its frame (scaled): lines and their loads, field stops and
-/// blast hits.
+/// What a building took of one deposit, in its frame (scaled): lines and their loads, field
+/// stops, blast hits and contacts.
 #[derive(Default)]
 struct Taken {
     /// Each line's share of a chunk `(chunk, entry, end, energy J)`, which its hole reads.
@@ -627,20 +747,14 @@ struct Taken {
     line_loads: Vec<Load>,
     field: Vec<(usize, Vec3, f32)>,
     blast: Vec<fracture::RayHit>,
+    contacts: Vec<Load>,
 }
 
 #[derive(bevy::ecs::system::SystemParam)]
 struct DepositParam<'w, 's> {
     queue: ResMut<'w, WallQueue>,
-    volumes: Query<
-        'w,
-        's,
-        (
-            Option<&'static BuildingElement>,
-            Option<&'static BuildingChunk>,
-            &'static ChildOf,
-        ),
-    >,
+    resting: Res<'w, RestingLoads>,
+    volumes: BuildingColliders<'w, 's>,
     buildings: Query<
         'w,
         's,
@@ -793,6 +907,9 @@ fn apply_deposits(mut p: DepositParam) {
         if let Some((origin, blast)) = deposit.blast {
             cast_blast(&mut p, &frames, &mut shapes, &mut taken, origin, blast);
         }
+        for &(root, load) in &deposit.contacts {
+            taken.entry(root).or_default().contacts.push(load);
+        }
         for (root, taken) in taken {
             let Ok((_, identity, transform, mut breakage)) = p.buildings.get_mut(root) else {
                 continue;
@@ -801,17 +918,29 @@ fn apply_deposits(mut p: DepositParam) {
             let kind = breakage.kind.clone();
             let blast = Load::blast(&taken.blast);
             let holes = holes_of(&kind, frame.scale, &taken.lines, &blast);
-            let live = breakage.live();
+            // A run that changes nothing leaves the colliders as they stand: only a recorded
+            // change marks the building for the refit (`reconcile`).
+            let live = breakage.bypass_change_detection().live();
+            let resting = p.resting.0.get(&root).map_or(&[][..], Vec::as_slice);
             let loads: Vec<Load> = taken
                 .line_loads
                 .into_iter()
                 .chain(Load::field(&taken.field))
                 .chain(blast)
+                .chain(taken.contacts.iter().copied())
+                .chain(resting.iter().copied())
                 .collect();
             let changes = run_laws(&kind.layout, live, &loads, holes);
             let building = identity.ordinal;
-            let counts = [taken.lines.len(), taken.field.len(), taken.blast.len()];
-            log_changes(&identity.id, &loads, counts, &changes);
+            let counts = [
+                taken.lines.len(),
+                taken.field.len(),
+                taken.blast.len(),
+                taken.contacts.len() + resting.len(),
+            ];
+            if !changes.events.is_empty() || loads.iter().any(|load| load.energy > 0.0) {
+                log_changes(&identity.id, &loads, counts, &changes);
+            }
             p.record
                 .entries
                 .extend(changes.events.iter().map(|&event| WallEntry {
@@ -829,19 +958,23 @@ fn apply_deposits(mut p: DepositParam) {
                     &loads,
                 );
             }
+            if !changes.events.is_empty() {
+                breakage.set_changed();
+            }
         }
     }
 }
 
 /// Log what one deposit did to a building (debug): `id` the building's, `loads` its deposit's,
-/// `counts` its lines, field stops and blast rays.
-fn log_changes(id: &str, loads: &[Load], counts: [usize; 3], changes: &Changes) {
+/// `counts` its lines, field stops, blast rays and contact points.
+fn log_changes(id: &str, loads: &[Load], counts: [usize; 4], changes: &Changes) {
     let count = |f: fn(&WallEvent) -> bool| changes.events.iter().filter(|e| f(e)).count();
     debug!(
-        "buildings: {id} took {:.0} J in {} chunks ({} lines, {} field stops, {} blast rays): {} \
-         swapped, {} dust, {} holes, {} cracks, {} structural sections {:?} (cause, demand, \
-         capacity: N s m for a push, Pa for weight), weight check {} steps with {} touched chunks \
-         unassessed, {} chunks fell in {} groups",
+        "buildings: {id} took {:.0} J in {} chunks ({} lines, {} field stops, {} blast rays, {} \
+         contact points from {} bodies pressing {:.0} N): {} swapped, {} dust, {} holes, {} \
+         cracks, {} structural sections {:?} (cause, demand, capacity: N s m for a push, Pa for \
+         weight), weight check {} steps with {} touched chunks unassessed, {} chunks fell in {} \
+         groups",
         loads.iter().map(|load| load.energy).sum::<f32>(),
         loads
             .iter()
@@ -852,6 +985,16 @@ fn log_changes(id: &str, loads: &[Load], counts: [usize; 3], changes: &Changes) 
         counts[0],
         counts[1],
         counts[2],
+        counts[3],
+        loads
+            .iter()
+            .filter_map(|load| match load.origin {
+                Origin::Body(body) => Some(body),
+                Origin::Field => None,
+            })
+            .collect::<std::collections::BTreeSet<_>>()
+            .len(),
+        loads.iter().map(|load| load.press.length()).sum::<f32>(),
         count(|e| matches!(e, WallEvent::Swap(_))),
         count(|e| matches!(e, WallEvent::Dust(_))),
         count(|e| matches!(e, WallEvent::Hole(..))),
@@ -1132,7 +1275,11 @@ pub(crate) struct Changes {
 /// falls, each ascending but the holes, in deposit order. A chunk the holes would carry past
 /// [`HOLES_PER_CHUNK`] crumbles to dust before the laws run; a hole is kept only in a chunk
 /// standing after the removal, and no law reads one. A load on a chunk turned to dust went into
-/// crushing it and moves nothing.
+/// crushing it and moves nothing. The structural check and a freed group's launch read a field's
+/// blow alone: they take a blow whole, and a body's reaches a group only as its plastic share
+/// against the group's mass (the wall design, "Bodies in contact"), so whole it would hand a light
+/// group a heavy body's momentum. A body's load bends no section and launches nothing, and no law
+/// reads a press.
 pub(crate) fn run_laws(
     layout: &Layout,
     live: &mut Live,
@@ -1164,7 +1311,7 @@ pub(crate) fn run_laws(
     }
     let loads: Vec<Load> = loads
         .iter()
-        .filter(|load| live.state.standing(load.chunk))
+        .filter(|load| live.state.standing(load.chunk) && load.origin == Origin::Field)
         .copied()
         .collect();
     let mut failures =
@@ -1530,6 +1677,7 @@ pub(crate) struct WallReplicaSet;
 pub(crate) fn sim_plugin(app: &mut App) {
     let authority = not(resource_exists::<ClientReplica>);
     app.init_resource::<WallQueue>()
+        .init_resource::<RestingLoads>()
         .init_resource::<WallRecord>()
         .add_observer(read_shell)
         .add_observer(set_off)
@@ -1539,7 +1687,7 @@ pub(crate) fn sim_plugin(app: &mut App) {
         )
         .add_systems(
             FixedPostUpdate,
-            (apply_deposits, refit_systems())
+            (read_contacts, apply_deposits, refit_systems())
                 .chain()
                 .in_set(WallLawSet)
                 .run_if(authority),

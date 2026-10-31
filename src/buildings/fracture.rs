@@ -9,7 +9,8 @@
 //! the views and the geometry probes that say which chunk a deposit landed in, never a law.
 //!
 //! Every source enters the laws as loads ([`Load`]): the energy (J) it spends crushing matter at one
-//! point of one chunk, and the momentum (N·s), its blow, it delivers there.
+//! point of one chunk, the momentum (N·s), its blow, it delivers there, the force (N), its press,
+//! it holds there through the tick, and its origin ([`Origin`]): a field, or a body in contact.
 //!
 //! * **Removal** ([`wear`]). A chunk's pool is its crush energy, `crush × volume` (J); a load's
 //!   energy wears it, and a chunk whose pool is spent is turned to dust.
@@ -52,6 +53,7 @@
 
 use std::f32::consts::PI;
 
+use bevy::ecs::entity::Entity;
 use bevy::math::Vec3;
 
 use crate::substances::{REFERENCE_FACTOR, SubstanceRegistry};
@@ -272,6 +274,15 @@ impl Block {
             }
         }
         Self::hull(points)
+    }
+
+    /// How far `at` lies outside this shape past its farthest bounding plane, m; 0 inside or on
+    /// it. Exact over a face, short of the distance off an edge or a corner.
+    pub fn outside(&self, at: Vec3) -> f32 {
+        self.planes
+            .iter()
+            .map(|(n, o)| n.dot(at) - o)
+            .fold(0.0, f32::max)
     }
 
     /// The bounding box's centre.
@@ -520,10 +531,12 @@ pub(crate) fn wear(
 /// source puts through one point of one chunk in one deposit. Its energy is what it spends
 /// crushing matter at its point, which wears the chunk's pool and stresses the joints about the
 /// cavity it opens ([`strike`]); its blow is the momentum it delivers there, which bends the
-/// sections that hold the chunk and leaves with a group it frees ([`structural`]). Every source is
-/// a field's, whose blow its own law fixes: a round's line ([`Load::line`]), a fragment's or spall
-/// ray's stop ([`Load::field`]), a blast ray's ([`Load::blast`]). The wall design owns the model
-/// (`.agents/docs/design/wall-destruction.md`, "Bodies in contact").
+/// sections that hold the chunk and leaves with a group it frees ([`structural`]); its press is
+/// the force it holds there through the tick. A field's blow is its own law's: a round's line
+/// ([`Load::line`]), a fragment's or spall ray's stop ([`Load::field`]), a blast ray's
+/// ([`Load::blast`]), none of which presses. A body's contact (`super::breakage`) spends no energy
+/// and its blow and press are what the solver moved through the point. The wall design owns the
+/// model (`.agents/docs/design/wall-destruction.md`, "Bodies in contact").
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) struct Load {
     /// The chunk it enters.
@@ -534,6 +547,20 @@ pub(crate) struct Load {
     pub energy: f32,
     /// N·s.
     pub blow: Vec3,
+    /// N.
+    pub press: Vec3,
+    pub origin: Origin,
+}
+
+/// Where a load comes from: what its blow shares momentum with.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Origin {
+    /// A field (a round's line, a fragment, a blast): its blow is its own law's, and it has no
+    /// mass to share with what it frees.
+    Field,
+    /// A body in contact, by its entity: it shares its blow's momentum with whatever the blow
+    /// frees.
+    Body(Entity),
 }
 
 impl Load {
@@ -554,6 +581,8 @@ impl Load {
             at: entry + chord * ((k as f32 + 0.5) / n as f32),
             energy: energy / n as f32,
             blow: blow / n as f32,
+            press: Vec3::ZERO,
+            origin: Origin::Field,
         })
     }
 
@@ -593,6 +622,8 @@ impl Load {
                 at: weighted / energy,
                 energy,
                 blow,
+                press: Vec3::ZERO,
+                origin: Origin::Field,
             })
             .collect()
     }
@@ -2352,6 +2383,8 @@ mod tests {
             at: structure.chunks[chunk].centroid + Vec3::Z * 0.125,
             energy: 0.0,
             blow,
+            press: Vec3::ZERO,
+            origin: Origin::Field,
         };
         let top = (h - 1) * w + w / 2;
         let loose = 2 * w + 1;
@@ -2564,6 +2597,8 @@ mod tests {
             at: joint.centroid + Vec3::Y * d,
             energy: 1.0e5,
             blow: Vec3::ZERO,
+            press: Vec3::ZERO,
+            origin: Origin::Field,
         };
         let (mut near, mut far) = (0.0_f32, 5.0_f32);
         for _ in 0..60 {
@@ -2613,6 +2648,8 @@ mod tests {
                 at: structure.chunks[chunk].centroid,
                 energy,
                 blow: Vec3::ZERO,
+                press: Vec3::ZERO,
+                origin: Origin::Field,
             };
             let sources = [source(right, energy), source(left, energy / 2.0)];
             let rule = |material_of: &dyn Fn(&Joint) -> Masonry| -> Vec<usize> {
@@ -3129,6 +3166,8 @@ mod tests {
                 at,
                 energy: 0.0,
                 blow: Vec3::NEG_Z * (scale * capacity / lever),
+                press: Vec3::ZERO,
+                origin: Origin::Field,
             };
             let failures = structural(
                 &structure,
@@ -3264,6 +3303,8 @@ mod tests {
                 at: top,
                 energy: 0.0,
                 blow: Vec3::Y * (scale * capacity),
+                press: Vec3::ZERO,
+                origin: Origin::Field,
             };
             let failures = structural(
                 &structure,
@@ -3317,6 +3358,8 @@ mod tests {
                 energy: 0.0,
                 blow: Vec3::NEG_Z * (along * capacity)
                     + Vec3::NEG_Y * (press * capacity / friction),
+                press: Vec3::ZERO,
+                origin: Origin::Field,
             };
             let failures = structural(
                 &structure,

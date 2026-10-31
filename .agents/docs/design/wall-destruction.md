@@ -332,16 +332,26 @@ Per substep that is the post-relax accumulated impulse less the share of the pre
 **MEASURED** 2026-10-26 on the game's 64 Hz, 6-substep solver, in a capture record not committed: it reads 1.90 × F·dt under a tank's sustained push, 1.56 × the hull's momentum change in a 5 km/h ram, 1.01× and 1.00× at 10 and 20 km/h.
 The reading (`contact_transfer`) sums Avian's public solver state for every contact between a structure and a dynamic body; the vendored crate is not patched.
 Its test holds each step's reading to the body's momentum change; there a 1000 kg cube pressed on a wall by 5 kN reads F·dt to within 10⁻⁵ through the reading and 2.000 × F·dt through `normal_impulse` (**MEASURED**, fixture data).
-A contact's transfer `J` splits at the body's rest speed, Avian's own `SleepThreshold` (0.15 m/s by default), below which the library calls a body at rest:
+A contact's transfer splits at the body's rest speed, Avian's own `SleepThreshold` (0.15 m/s by default), below which the library calls a body at rest.
+The split is a contact's (one manifold: its points `i` share a normal `n`), not a point's:
 
 ```text
-v_n   = max(0, closing speed along n)
-blow  = n · min(J·n, m_b v_n)    when v_n exceeds the rest speed, else 0
-press = (J − blow) / dt
+v_i     = closing speed at point i along n
+blow    = n · min(Σ_i J_i·n, Σ m_i v_i over the points with v_i above the rest speed)
+blow_i  = blow × J_i·n / Σ_j J_j·n
+press_i = (J_i − blow_i) / dt
 ```
 
-`m_b` is the solver's effective mass of the body along `n` at the point.
+`m_i` is the solver's effective mass of the body along `n` at point `i`.
+The solver's split of one contact's momentum among its points is its own, so a cap point by point reads short: **MEASURED** on a 0.4 m brick cube striking house_1's wall square on at 3 m/s (fixture data), 106, 67, 112 and 67 N·s through four corners whose closing momentum is 88.6 N·s each, which reads 88 % of the cube's 354 N·s capped point by point and 99.5 % capped over the contact.
 A ram's first tick is a blow plus that tick's engine press; a parked push is a press.
+
+A body at rest against a structure (a pile on a wall, or a body Avian's `ConstantForce` holds there, which wakes nothing) leaves the solver when it sleeps, and the solver moves nothing through its contact.
+The reading keeps the points of the last step it did move them, once, while Avian holds the pair sleeping and touching, and drops them when the pair wakes or ends.
+Their press stands on the structure: every run of the laws on it carries the press once, and the press starts no run, so rubble asleep on a wall costs nothing until something else loads the wall.
+
+Status after lane 3 (#235): every contact reaches the laws as a load with its blow, press and origin, and changes nothing yet.
+No law reads a press until lane 5, and the structural check and a freed group's launch read a field's blow alone until lane 4 gives a body's its plastic share: read whole, a heavy body's blow would hand a light group its momentum.
 
 **Two limits on every section.**
 A force must beat the section's strength: the weight check generalised, gravity one force beside each press and each blow's least mean force `blow / dt`.

@@ -23,14 +23,24 @@
 //! vendored crate is not patched for any of it.
 //!
 //! WHAT IT HOLDS. The last physics step's points, in Avian's constraint order, until the next step
-//! replaces them: a system in the next tick's `FixedUpdate` reads the step that ended the tick
-//! before. Filled on the authority only, where the destruction laws run; a replica's stays empty.
+//! replaces them, with the step's length and a count of the steps summed, so a reader that keeps
+//! the count it last read reads each step once ([`ContactTransfers::steps`]). Each contact splits at
+//! its body's rest speed into a blow and a press ([`ContactTransfers::split`]).
+//!
+//! RESTING CONTACTS. A sleeping body leaves the solver, so a body that comes to rest pressing a
+//! structure (a pile on a wall, a body Avian's `ConstantForce` holds there: neither wakes it) would
+//! read nothing. The reading keeps such a pair's points from the last step the solver moved them,
+//! once, while Avian holds the pair sleeping and touching, and drops them when it wakes or ends
+//! ([`ContactTransfers::resting`]): its press stands on the structure ([`Resting::press`]) and is no
+//! new transfer.
+//!
+//! Filled on the authority only, where the destruction laws run; a replica's stays empty.
 
 use avian3d::dynamics::solver::SolverConfig;
 use avian3d::dynamics::solver::constraint_graph::ConstraintGraph;
 use avian3d::dynamics::solver::contact::ContactConstraintPoint;
 use avian3d::dynamics::solver::schedule::{SolverSystems, SubstepSchedule, SubstepSolverSystems};
-use avian3d::prelude::{ContactGraph, PhysicsSchedule};
+use avian3d::prelude::{ContactGraph, PhysicsLengthUnit, PhysicsSchedule, SleepThreshold};
 use bevy::prelude::*;
 
 use crate::ClientReplica;
@@ -43,10 +53,6 @@ pub(crate) struct StructureBody;
 
 /// One contact point between a structure and a dynamic body, over one physics step.
 #[derive(Debug, Clone, Copy, PartialEq)]
-#[allow(
-    dead_code,
-    reason = "no law reads a transfer yet; the contacts-into-buildings task of #235 is its reader"
-)]
 pub(crate) struct ContactTransfer {
     /// The structure's body.
     pub(crate) structure: Entity,
@@ -69,12 +75,37 @@ pub(crate) struct ContactTransfer {
     /// How fast the body closed on the structure along the normal before the solve (m/s);
     /// negative when the two were parting.
     pub(crate) closing_speed: f32,
+    /// The body's rest speed (m/s): Avian's own, under which the library lets the body sleep
+    /// (its `SleepThreshold::linear`, in `PhysicsLengthUnit`s).
+    pub(crate) rest_speed: f32,
 }
 
-/// Every structure contact's transfer over the last physics step (module doc).
+/// A point of a pair whose body sleeps against a structure (module doc): its transfer over the
+/// last step the solver moved it, and that step's length (s).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) struct Resting {
+    pub(crate) transfer: ContactTransfer,
+    pub(crate) dt: f32,
+}
+
+impl Resting {
+    /// The force it holds on the structure (N): the whole of its last transfer over that step.
+    /// Its body sleeps, closing on nothing, so none of it is a blow.
+    pub(crate) fn press(&self) -> Vec3 {
+        -self.transfer.impulse / self.dt
+    }
+}
+
+/// Every structure contact's transfer over the last physics step, and every resting contact's
+/// (module doc).
 #[derive(Resource, Debug, Default)]
 pub(crate) struct ContactTransfers {
     points: Vec<ContactTransfer>,
+    resting: Vec<Resting>,
+    /// The last step's length, s.
+    dt: f32,
+    /// The steps summed.
+    steps: u64,
     /// The constraints kept this step: where each lies in Avian's constraint graph, its first
     /// point's index in `points`, and `+1` when the dynamic body is the constraint's second body
     /// (the one Avian applies `+impulse` to), `−1` when it is the first.
@@ -93,13 +124,54 @@ struct Kept {
 }
 
 impl ContactTransfers {
-    /// The last step's points, in Avian's constraint order.
-    #[allow(
-        dead_code,
-        reason = "no law reads a transfer yet; the contacts-into-buildings task of #235 is its reader"
-    )]
-    pub(crate) fn points(&self) -> &[ContactTransfer] {
-        &self.points
+    /// The points of every pair whose body sleeps against a structure, each pair once, in the
+    /// order their bodies fell asleep.
+    pub(crate) fn resting(&self) -> &[Resting] {
+        &self.resting
+    }
+
+    /// How many steps the reading has summed, the last step's points the latest.
+    pub(crate) fn steps(&self) -> u64 {
+        self.steps
+    }
+
+    /// The last step's points, each with the blow and the press the structure took through it,
+    /// in Avian's constraint order: each constraint's transfer split at its body's rest speed (the
+    /// wall design, `.agents/docs/design/wall-destruction.md`, "Bodies in contact"). A
+    /// constraint's blow is the momentum its body's closing delivered (N·s): its points' `m_b v_n`
+    /// summed over those closing faster than the rest speed, `m_b` each point's effective mass,
+    /// and never more than the solver moved along the normal; it falls on the points in shares of
+    /// what the solver moved through each along the normal. A point's press is the rest of its
+    /// transfer, held through the step (N), friction included. The split is the constraint's, not
+    /// the point's: the solver's split of one contact's momentum among its points is its own
+    /// (MEASURED: a cube striking a wall square on at 3 m/s, 106, 67, 112 and 67 N·s through its
+    /// four corners, each corner's closing momentum 88.6 N·s).
+    pub(crate) fn split(&self) -> impl Iterator<Item = (&ContactTransfer, Vec3, Vec3)> {
+        let ends = self
+            .kept
+            .iter()
+            .skip(1)
+            .map(|kept| kept.first)
+            .chain([self.points.len()]);
+        self.kept.iter().zip(ends).flat_map(move |(kept, end)| {
+            let points = &self.points[kept.first..end];
+            let along = |point: &ContactTransfer| point.impulse.dot(point.normal);
+            let moved: f32 = points.iter().map(along).sum();
+            let closing: f32 = points
+                .iter()
+                .filter(|point| point.closing_speed > point.rest_speed)
+                .map(|point| point.effective_mass * point.closing_speed)
+                .sum();
+            let blow = closing.min(moved);
+            points.iter().map(move |point| {
+                let blow = if moved > 0.0 {
+                    point.normal * (blow * along(point) / moved)
+                } else {
+                    Vec3::ZERO
+                };
+                (point, -blow, (blow - point.impulse) / self.dt)
+            })
+        })
     }
 }
 
@@ -112,17 +184,45 @@ fn friction(point: &ContactConstraintPoint) -> Vec2 {
         .map_or(Vec2::ZERO, |part| part.impulse)
 }
 
-/// Before the substeps: a record for every point of every constraint with a structure on one side.
+/// Before the substeps: the resting pairs brought up to date, then a record for every point of
+/// every constraint with a structure on one side. `time` is the physics clock Avian runs its
+/// schedule on.
 fn keep(
     graph: Res<ConstraintGraph>,
     contacts: Res<ContactGraph>,
     structures: Query<(), With<StructureBody>>,
+    rests: Query<&SleepThreshold>,
+    length_unit: Res<PhysicsLengthUnit>,
+    time: Res<Time>,
     mut transfers: ResMut<ContactTransfers>,
 ) {
-    let ContactTransfers { points, kept, last } = &mut *transfers;
+    let ContactTransfers {
+        points,
+        resting,
+        dt,
+        steps,
+        kept,
+        last,
+    } = &mut *transfers;
+    let asleep = |transfer: &ContactTransfer| {
+        contacts
+            .get(transfer.structure_collider, transfer.body_collider)
+            .is_some_and(|(edge, pair)| edge.is_sleeping() && pair.is_touching())
+    };
+    // A pair that woke or ended drops its rest; one whose body slept after the last step rests
+    // with that step's transfer. A sleeping pair builds no constraint, so no pair is both.
+    resting.retain(|rest| asleep(&rest.transfer));
+    resting.extend(
+        points
+            .iter()
+            .filter(|point| asleep(point))
+            .map(|&transfer| Resting { transfer, dt: *dt }),
+    );
     points.clear();
     kept.clear();
     last.clear();
+    *dt = time.delta_secs();
+    *steps += 1;
     for (color, colored) in graph.colors.iter().enumerate() {
         for (index, constraint) in colored.contact_constraints.iter().enumerate() {
             let structure_first = match (
@@ -170,6 +270,11 @@ fn keep(
                 first: points.len(),
                 sign,
             });
+            let rest_speed = rests
+                .get(body)
+                .expect("Avian requires a SleepThreshold on every body its solver moves")
+                .linear
+                * length_unit.0;
             for (point, contact) in constraint.points.iter().zip(&manifold.points) {
                 points.push(ContactTransfer {
                     structure,
@@ -181,6 +286,7 @@ fn keep(
                     impulse: Vec3::ZERO,
                     effective_mass: point.normal_part.effective_mass,
                     closing_speed: -point.normal_speed,
+                    rest_speed,
                 });
                 last.push((point.normal_part.impulse, friction(point)));
             }
@@ -195,7 +301,9 @@ fn add_substep(
     mut transfers: ResMut<ContactTransfers>,
 ) {
     let unapplied = 1.0 - config.warm_start_coefficient;
-    let ContactTransfers { points, kept, last } = &mut *transfers;
+    let ContactTransfers {
+        points, kept, last, ..
+    } = &mut *transfers;
     for constraint_at in kept.iter() {
         let constraint =
             &graph.colors[constraint_at.color].contact_constraints[constraint_at.index];
@@ -215,7 +323,9 @@ fn add_substep(
 
 /// After restitution: the increment it added along every kept point's normal.
 fn add_restitution(graph: Res<ConstraintGraph>, mut transfers: ResMut<ContactTransfers>) {
-    let ContactTransfers { points, kept, last } = &mut *transfers;
+    let ContactTransfers {
+        points, kept, last, ..
+    } = &mut *transfers;
     for constraint_at in kept.iter() {
         let constraint =
             &graph.colors[constraint_at.color].contact_constraints[constraint_at.index];
@@ -349,7 +459,7 @@ mod tests {
             "the update steps physics once"
         );
         let mut transfer = Vec3::ZERO;
-        for point in app.world().resource::<ContactTransfers>().points() {
+        for point in &app.world().resource::<ContactTransfers>().points {
             if point.body == body {
                 assert_eq!(point.structure, structure, "the point names its structure");
                 transfer += point.impulse;
@@ -447,6 +557,102 @@ mod tests {
             assert!(
                 !orders.is_empty() && orders.iter().all(|first| *first),
                 "w {warm_start}: the press's pair names the structure first: {orders:?}"
+            );
+        }
+    }
+
+    /// Every step's points on `body` split ([`ContactTransfers::split`]) over `ticks` updates: per
+    /// step, the blow and press summed and the transfer the structure took (`−impulse`).
+    fn splits(app: &mut App, body: Entity, ticks: usize) -> Vec<(Vec3, Vec3, Vec3)> {
+        (0..ticks)
+            .map(|_| {
+                app.update();
+                let transfers = app.world().resource::<ContactTransfers>();
+                let mut sums = (Vec3::ZERO, Vec3::ZERO, Vec3::ZERO);
+                for (point, blow, press) in transfers.split().filter(|(p, ..)| p.body == body) {
+                    sums.0 += blow;
+                    sums.1 += press;
+                    sums.2 -= point.impulse;
+                }
+                sums
+            })
+            .collect()
+    }
+
+    /// A CONTACT IS A BLOW ABOVE ITS BODY'S OWN REST SPEED AND A PRESS BELOW IT (the game's
+    /// environment destruction model): a 1000 kg cube striking the structure square on at 3 m/s
+    /// delivers a blow of its closing momentum, 3000 N·s along the normal into the structure
+    /// within 1 % (DERIVED: a cube's corner point has a quarter of its effective mass along a face
+    /// normal, so the four points' `m_b v_n` sum to `m v`), though restitution moves half as much
+    /// again; each step's blow and press over the step make up its whole transfer. The same
+    /// strike by a cube whose `SleepThreshold` puts its rest speed above 3 m/s only presses, and a
+    /// cube a steady 5 kN holds on the structure presses 5 kN within 0.5 % with no blow. The
+    /// destruction laws rely on the split (the wall design, "Bodies in contact"): the strength
+    /// limit reads the press, the energy limit and the give-back the blow. A split at a fixed
+    /// rest speed (the strike above its body's own), at the whole normal transfer (4500 N·s), or
+    /// one that drops a striking step's press fails here. Fixture numbers are fixture data.
+    #[test]
+    fn a_contact_is_a_blow_above_its_bodys_rest_speed_and_a_press_below_it() {
+        let structure_way = Vec3::X;
+        for slow_to_rest in [false, true] {
+            let mut app = world(1.0);
+            wall(&mut app);
+            let striker = cube(&mut app, Vec3::new(-1.3, 0.0, 0.0), Vec3::X * 3.0);
+            if slow_to_rest {
+                app.world_mut().entity_mut(striker).insert(SleepThreshold {
+                    linear: 4.0,
+                    angular: 0.15,
+                });
+            }
+            let steps = splits(&mut app, striker, 30);
+            let dt = app.world().resource::<ContactTransfers>().dt;
+            let blow: Vec3 = steps.iter().map(|(blow, ..)| *blow).sum();
+            let normal: f32 = steps
+                .iter()
+                .map(|(.., taken)| taken.dot(structure_way))
+                .sum();
+            assert!(
+                normal > 1.4 * 3000.0,
+                "rest speed raised {slow_to_rest}: restitution moves more than the closing \
+                 momentum, {normal} N·s"
+            );
+            for (tick, (blow, press, taken)) in steps.iter().enumerate() {
+                assert!(
+                    (*blow + *press * dt - *taken).length() <= 1e-3,
+                    "tick {tick}: blow {blow} and press {press} make up the transfer {taken}"
+                );
+            }
+            if slow_to_rest {
+                assert_eq!(
+                    blow,
+                    Vec3::ZERO,
+                    "a strike under its body's rest speed presses"
+                );
+            } else {
+                assert!(
+                    (blow - structure_way * 3000.0).length() <= 0.01 * 3000.0,
+                    "the strike's blow {blow} against its closing momentum 3000 N·s"
+                );
+            }
+        }
+
+        let mut app = world(1.0);
+        let pressed = cube(&mut app, Vec3::new(-0.75, 0.0, 0.0), Vec3::ZERO);
+        app.world_mut().entity_mut(pressed).insert(SleepingDisabled);
+        app.update();
+        wall(&mut app);
+        app.world_mut()
+            .entity_mut(pressed)
+            .insert(ConstantForce::new(5000.0, 0.0, 0.0));
+        for (tick, (blow, press, _)) in splits(&mut app, pressed, 40).iter().enumerate().skip(20) {
+            assert_eq!(
+                *blow,
+                Vec3::ZERO,
+                "press tick {tick}: a held body delivers no blow"
+            );
+            assert!(
+                (*press - structure_way * 5000.0).length() <= 0.005 * 5000.0,
+                "press tick {tick}: the press {press} against 5 kN"
             );
         }
     }

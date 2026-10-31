@@ -98,6 +98,8 @@ fn renumbering_the_chunks_changes_no_outcome() {
             at: centre,
             energy: 1.0e6,
             blow: Vec3::ZERO,
+            press: Vec3::ZERO,
+            origin: Origin::Field,
         }]
     };
     let pushes = |structure: &Structure| -> Vec<Load> {
@@ -108,6 +110,8 @@ fn renumbering_the_chunks_changes_no_outcome() {
                 at: structure.chunks[i].centroid,
                 energy: 0.0,
                 blow: Vec3::NEG_Z * 400.0,
+                press: Vec3::ZERO,
+                origin: Origin::Field,
             })
             .collect()
     };
@@ -203,6 +207,8 @@ fn a_push_fails_the_section_at_its_fracture_impulse() {
             at,
             energy: 0.0,
             blow: Vec3::NEG_Z * (scale * capacity / lever),
+            press: Vec3::ZERO,
+            origin: Origin::Field,
         };
         let failures = structural(
             &structure,

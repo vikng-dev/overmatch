@@ -12,8 +12,9 @@ use crate::ballistics::MarchProbe;
 use crate::buildings::schema::ElementKind;
 use crate::buildings::tests::shipped_house;
 
-/// The breakage sim on the offline physics, the march probe, and the shipped house spawned at
-/// the origin (unit scale), one fixed tick per update. `replica` adds the replica marker.
+/// The breakage sim on the offline physics with the solver's contact reading, the march probe,
+/// and the shipped house spawned at the origin (unit scale), one fixed tick per update. `replica`
+/// adds the replica marker.
 fn composed(replica: bool) -> (App, Entity) {
     let mut app = App::new();
     app.add_plugins((
@@ -23,6 +24,7 @@ fn composed(replica: bool) -> (App, Entity) {
         crate::offline_physics(),
         sim_plugin,
         crate::debris::sim_plugin,
+        crate::contact_transfer::sim_plugin,
         crate::ballistics::mount_march_probe,
     ))
     .init_asset::<Mesh>()
@@ -551,6 +553,8 @@ fn a_hole_changes_no_collider_mass_or_structural_result() {
         at: cut.structure.chunks[c].centroid,
         energy: 0.0,
         blow: (line.2 - line.1).normalize() * 100.0,
+        press: Vec3::ZERO,
+        origin: Origin::Field,
     };
     let loads: Vec<Load> = line_loads(&[line]).into_iter().chain([push]).collect();
     let holes = holes_of(&kind, 1.0, &[line], &[]);
@@ -831,6 +835,8 @@ fn a_nailed_roof_stays_when_struck_and_breaks_its_nails_when_its_walls_go() {
         at: line.1,
         energy: 0.0,
         blow: (line.2 - line.1).normalize() * (line.3 / 773.0),
+        press: Vec3::ZERO,
+        origin: Origin::Field,
     };
     let loads: Vec<Load> = line_loads(&[line]).into_iter().chain([push]).collect();
     let changes = run_laws(layout, &mut live, &loads, Vec::new());
@@ -1284,5 +1290,241 @@ fn a_sleeping_loose_piece_wakes_to_a_blast() {
     assert!(
         velocity.x < 0.0,
         "it leaves away from the burst: {velocity}"
+    );
+}
+
+/// Per update, the contact loads [`read_contacts`] queued in it, each with its building's root.
+#[derive(Resource, Default)]
+struct QueuedContacts(Vec<Vec<(Entity, Load)>>);
+
+fn keep_queued_contacts(queue: Res<WallQueue>, mut kept: ResMut<QueuedContacts>) {
+    kept.0.push(
+        queue
+            .0
+            .iter()
+            .flat_map(|deposit| deposit.contacts.iter().copied())
+            .collect(),
+    );
+}
+
+/// [`composed`] (the authority's) with each tick's queued contact loads kept between the reader
+/// and the laws ([`QueuedContacts`]), its clocks started.
+fn composed_keeping_contacts() -> (App, Entity) {
+    let (mut app, root) = composed(false);
+    app.init_resource::<QueuedContacts>().add_systems(
+        FixedPostUpdate,
+        keep_queued_contacts
+            .after(read_contacts)
+            .before(apply_deposits),
+    );
+    for _ in 0..3 {
+        app.update();
+    }
+    app.world_mut().resource_mut::<QueuedContacts>().0.clear();
+    (app, root)
+}
+
+/// The side of the fixture's cubes, m, and their mass at brick density, kg (fixture data).
+const CUBE_SIDE: f32 = 0.4;
+const CUBE_KG: f32 = 1845.0 * CUBE_SIDE * CUBE_SIDE * CUBE_SIDE;
+
+/// A dynamic cube of [`CUBE_SIDE`] at brick density, colliding as a loose piece does, centred at
+/// `at` and moving at `velocity` (fixture data).
+fn contact_cube(app: &mut App, at: Vec3, velocity: Vec3) -> Entity {
+    app.world_mut()
+        .spawn((
+            RigidBody::Dynamic,
+            Position(at),
+            Rotation::default(),
+            Collider::cuboid(CUBE_SIDE, CUBE_SIDE, CUBE_SIDE),
+            ColliderDensity(1845.0),
+            piece_layers(),
+            LinearVelocity(velocity),
+        ))
+        .id()
+}
+
+/// A flat patch of the shipped house's outer wall met from outside along +x: a breakable
+/// element, a point on its face and the unit direction into it, where the face stands square to
+/// the approach and the rays through the centre and the four corners of a [`CUBE_SIDE`] square
+/// about the point all meet that element first at the same depth (the fixture's choice by class,
+/// searched from the middle of the bounds outward).
+fn wall_face(kind: &BuildingKind) -> (usize, Vec3, Vec3) {
+    let layout = &kind.layout;
+    let (lo, hi) = kind.bounds();
+    let dir = Vec3::X;
+    let half = CUBE_SIDE / 2.0;
+    let fractions = [0.5, 0.4, 0.6, 0.3, 0.7, 0.2, 0.8];
+    for fy in fractions {
+        for fz in fractions {
+            let origin = Vec3::new(lo.x - 1.0, lo.y.lerp(hi.y, fy), lo.z.lerp(hi.z, fz));
+            let first = |offset: Vec3| {
+                fracture::first_hit(&layout.element_blocks, |_| true, origin + offset, dir)
+            };
+            let Some((e, t, normal)) = first(Vec3::ZERO) else {
+                continue;
+            };
+            let flat = [(1.0, 1.0), (1.0, -1.0), (-1.0, 1.0), (-1.0, -1.0)]
+                .into_iter()
+                .all(|(a, b)| {
+                    first(Vec3::new(0.0, a * half, b * half))
+                        .is_some_and(|(k, s, _)| k == e && (s - t).abs() < 1e-3)
+                });
+            if layout.elements[e].is_some() && normal.dot(dir) < -0.9999 && flat {
+                return (e, origin + dir * t, dir);
+            }
+        }
+    }
+    panic!("the shipped house shows a flat patch of breakable wall to +x");
+}
+
+/// NO BODY'S KIND ENTERS A CONTACT'S LOADS (the game's environment destruction model): a plain
+/// dynamic body (a hull's or a launched turret's stand-in) and a wall piece, alike in shape, mass
+/// and motion, striking the shipped house's wall at the same point at 3 m/s, put the same loads on
+/// the house, step by step, each naming its own body; the strike's blow is the cube's closing
+/// momentum into the wall within 1 % (DERIVED: a cube's corner points' effective masses sum to its
+/// own) and each load lies on a chunk of the struck element, on the chunk's hull within the step's
+/// approach (fixture data, 5 cm), and spends no energy. The collision model rests on it (#232: no
+/// marker for which bodies may break things): a reader that reads a marker (a piece's, a tank's)
+/// to keep, drop or scale a contact fails here, as does a contact loaded off its chunk, and a
+/// blow capped point by point (88 % of the closing momentum here, MEASURED: the solver's own split
+/// of the contact among the corners, [`ContactTransfers::split`]).
+#[test]
+fn no_bodys_kind_enters_a_contacts_loads() {
+    let kind = shipped_house();
+    let (e, face, w) = wall_face(&kind);
+    let start = face - w * (CUBE_SIDE / 2.0 + 0.3);
+    let strike = |wall_piece: bool| {
+        let (mut app, root) = composed_keeping_contacts();
+        let cube = contact_cube(&mut app, start, w * 3.0);
+        if wall_piece {
+            app.world_mut().entity_mut(cube).insert((
+                WallPiece {
+                    building: 3,
+                    chunks: vec![0],
+                },
+                crate::debris::DebrisPiece,
+            ));
+        }
+        for _ in 0..30 {
+            app.update();
+        }
+        let ticks = std::mem::take(&mut app.world_mut().resource_mut::<QueuedContacts>().0);
+        assert_eq!(ticks.len(), 30, "one physics step and one read an update");
+        for (on, load) in ticks.iter().flatten() {
+            assert_eq!(*on, root, "the house takes the loads");
+            assert_eq!(load.origin, Origin::Body(cube), "each load names its body");
+        }
+        ticks
+    };
+    let (plain, piece) = (strike(false), strike(true));
+    let strip = |ticks: &[Vec<(Entity, Load)>]| -> Vec<Vec<Load>> {
+        ticks
+            .iter()
+            .map(|tick| {
+                tick.iter()
+                    .map(|&(_, load)| Load {
+                        origin: Origin::Field,
+                        ..load
+                    })
+                    .collect()
+            })
+            .collect()
+    };
+    assert_eq!(
+        strip(&plain),
+        strip(&piece),
+        "a wall piece's loads are a plain body's"
+    );
+    let loads: Vec<Load> = plain.into_iter().flatten().map(|(_, load)| load).collect();
+    assert!(!loads.is_empty(), "the cube strikes the wall");
+    let blow: Vec3 = loads.iter().map(|load| load.blow).sum();
+    let closing = CUBE_KG * 3.0;
+    assert!(
+        (blow - w * closing).length() <= 0.01 * closing,
+        "the strike's blow {blow} against its closing momentum {closing} N·s along {w}"
+    );
+    let layout = &kind.layout;
+    for load in &loads {
+        assert!(
+            layout.chunks_of(e).contains(&load.chunk),
+            "{load:?} on the struck element's chunks"
+        );
+        assert!(
+            layout.blocks[load.chunk].outside(load.at) <= 0.05,
+            "{load:?} on its chunk's hull"
+        );
+        assert_eq!(load.energy, 0.0, "a contact crushes nothing");
+    }
+}
+
+/// A BODY AT REST AGAINST A BUILDING PRESSES IT ONCE AND STARTS NO RUN (the game's environment
+/// destruction model): a cube a steady 400 N holds on the shipped house's wall falls asleep
+/// there, and from then on its building's resting loads ([`RestingLoads`]) hold its press, 400 N
+/// into the wall within 0.5 % with no blow, its points once, the same every tick it sleeps, while
+/// the reader queues nothing for it, so the laws run on the house only when something else loads
+/// it; once the cube is gone its press goes. The weight check a crack starts relies on a sleeping
+/// pile's press (the wall design, "Bodies in contact"), and the server's per-tick cost of rubble
+/// at rest on walls on its starting no run. A reading that drops a sleeping pair (a press of
+/// nothing), keeps it after its body goes, adds it again each tick, or replays it as a new
+/// deposit fails here. Fixture numbers are fixture data.
+#[test]
+fn a_body_at_rest_against_a_building_presses_it_once_and_starts_no_run() {
+    let kind = shipped_house();
+    let (_, face, w) = wall_face(&kind);
+    let (mut app, root) = composed_keeping_contacts();
+    let cube = contact_cube(&mut app, face - w * (CUBE_SIDE / 2.0 + 0.002), Vec3::ZERO);
+    app.world_mut()
+        .entity_mut(cube)
+        .insert(ConstantForce(w * 400.0));
+    (0..640)
+        .find(|_| {
+            app.update();
+            app.world().get::<Sleeping>(cube).is_some()
+        })
+        .expect("the held cube came to rest asleep within 10 s");
+    app.world_mut().resource_mut::<QueuedContacts>().0.clear();
+    let mut held: Option<Vec<Load>> = None;
+    for tick in 0..40 {
+        app.update();
+        assert!(
+            app.world().get::<Sleeping>(cube).is_some(),
+            "tick {tick}: the cube sleeps"
+        );
+        let queued = std::mem::take(&mut app.world_mut().resource_mut::<QueuedContacts>().0);
+        assert!(
+            queued.iter().all(Vec::is_empty),
+            "tick {tick}: a sleeping body's contact queues nothing: {queued:?}"
+        );
+        let resting = app.world().resource::<RestingLoads>();
+        let loads = resting.0.get(&root).cloned().unwrap_or_default();
+        assert_eq!(
+            resting.0.len(),
+            1,
+            "tick {tick}: one building holds a press"
+        );
+        assert!(!loads.is_empty(), "tick {tick}: the house holds the press");
+        let press: Vec3 = loads.iter().map(|load| load.press).sum();
+        assert!(
+            (press - w * 400.0).length() <= 0.005 * 400.0,
+            "tick {tick}: the resting press {press} against 400 N along {w}"
+        );
+        for load in &loads {
+            assert_eq!(
+                (load.blow, load.energy, load.origin),
+                (Vec3::ZERO, 0.0, Origin::Body(cube)),
+                "tick {tick}: a resting load is its body's press alone"
+            );
+        }
+        match &held {
+            Some(held) => assert_eq!(held, &loads, "tick {tick}: the press stands unchanged"),
+            None => held = Some(loads),
+        }
+    }
+    app.world_mut().entity_mut(cube).despawn();
+    app.update();
+    assert!(
+        app.world().resource::<RestingLoads>().0.is_empty(),
+        "the press goes with its body"
     );
 }
