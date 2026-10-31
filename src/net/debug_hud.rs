@@ -204,11 +204,13 @@ fn jitter_readout(spread: Duration, tick: Duration, horizon: Duration) -> (Strin
 
 #[expect(
     clippy::too_many_arguments,
-    reason = "a debug readout of time, diagnostics, tick, arrival delay and links, with two locals"
+    reason = "a debug readout of time, diagnostics, tick, arrival delay, links and the setting, \
+              with two locals"
 )]
 fn update_debug_hud(
     time: Res<Time>,
     mut since_refresh: Local<f32>,
+    settings: Res<Settings>,
     diagnostics: Res<DiagnosticsStore>,
     tick: Res<TickDuration>,
     estimator: Res<ArrivalDelay>,
@@ -223,6 +225,11 @@ fn update_debug_hud(
     // `Local<f32>` accumulator vs. a threshold, cf. `net::diagnostics`).
     *since_refresh += time.delta_secs();
     if *since_refresh < REFRESH_SECS {
+        return;
+    }
+    // A hidden card is not written; its refresh stays due, so it shows current values. The arming
+    // latch waits with it: `warmed` never falls within a link, so a late latch arms the same.
+    if !card_shown(settings.debug_panel, !links.is_empty()) {
         return;
     }
     *since_refresh = 0.0;
@@ -268,8 +275,8 @@ fn update_debug_hud(
             Metric::Fps => (format!("{fps:.0}"), TEXT),
             Metric::Frame => (format!("{frame_ms:.1} ms"), TEXT),
         };
-        *text = Text::new(value);
-        color.0 = tint;
+        crate::ui_font::set_text(text.reborrow(), &value);
+        color.set_if_neq(TextColor(tint));
     }
 }
 
