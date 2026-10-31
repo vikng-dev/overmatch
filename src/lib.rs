@@ -67,8 +67,8 @@ pub(crate) mod damage;
 /// shipped view of a hit, mounted by both client roots. Its recorder runs in [`SimPlugin`] on the
 /// authority.
 pub mod damage_cam;
-/// Server-simulated pieces settling (the game's environment destruction): the freeze, wake and cap
-/// rule every loose piece follows. Authority only.
+/// Server-simulated pieces at rest (the game's environment destruction): avian's island sleep and
+/// the one wake it lacks, the rule every loose piece follows.
 mod debris;
 #[cfg(feature = "dev_tools")]
 mod debug;
@@ -758,7 +758,7 @@ impl Plugin for SimPlugin {
             (damage_cam::recorder::plugin, damage_cam::delivery::plugin),
         ));
         // Buildings breaking (the game's environment destruction): the authority's laws and
-        // record, every peer's colliders from it, and the rule loose pieces settle by. Separate
+        // record, every peer's colliders from it, and the rule loose pieces rest by. Separate
         // call: the tuple above is at bevy's 15-plugin arity limit.
         app.add_plugins((buildings::breakage::sim_plugin, debris::sim_plugin));
     }

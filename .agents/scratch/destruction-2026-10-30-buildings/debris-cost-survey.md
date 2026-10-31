@@ -269,6 +269,58 @@ Everything in A is server-only and changes no input to any client, so all of it 
 5. **Price the game's own falls** before more lever runs: one real wall group per period instead of
    single hulls. Group bodies with child colliders cost differently.
 
+## 6. After the switch to native sleep (2026-10-31)
+
+The owner chose B1's first half: rubble rests through Avian's island sleep, and the freeze rule
+and its cap are gone (`src/debris.rs`; decision in `wall-destruction.md`, "Rubble settlement and the
+cap"). F1, F2, F3, F4, F5, F6 and F9 no longer apply. The game keeps one wake Avian lacks: a
+sleeping piece wakes when a collider it touches goes. Without it, a piece stays asleep in mid-air
+after its static support despawns (MEASURED: the test fails with the observer removed).
+
+New counts, MEASURED over 10 s on a fixture lattice of 54 cubes, 0.4 m, 2 cm apart, beside a
+3 × 2 × 6 m box that never sleeps (a driven tank's stand-in):
+
+| Case | Touching the box | Awake of 54 | Active pairs | Sleeping pairs |
+|---|---|---|---|---|
+| No box | 0 | 0 | 329 | 54 |
+| Flush against the box | 2 | 3 | 351 | 51 |
+| Pressed 1 cm into the box | 15 | 18 | 366 | 36 |
+| Thrown at the box, 2 m/s | 6 | 36 | 308 | 18 |
+| Pressed, box free to sleep | 18 | 0 | 329 | 73 |
+
+- **The risk B1 named is real.** An island sleeps whole, so a pile against a hull stays awake
+  through every piece touching it. At the README's ~8–9 µs per live piece per M4 tick, the thrown
+  case's 30 extra awake pieces cost ~0.26 ms per tick per such pile (DERIVED). Under the freeze rule
+  only the 6 hull-touching pieces stayed live. Avian offers nothing per body: `Sleeping` on one body
+  sleeps its whole island, the tank included. A contact that generates no constraints does not link
+  islands, but then the tank passes through the rubble.
+- **A sleeping body is not free (new, A7).** `ContactGraph::sleep_entity_with` moves only touching
+  pairs to the sleeping set. A non-touching pair whose AABBs still overlap stays active, and the
+  narrow phase recomputes its manifolds every tick (`system_param.rs`, the `active_pairs_mut` loop
+  has no sleep test). The fully sleeping pile keeps 329 such pairs, ~6 per piece. A vendored-avian
+  patch candidate: move a non-touching pair to the sleeping set when its other body is asleep or
+  static, and back when either wakes. The per-pair price, and with it whether sleeping pieces need
+  a cap, is the next pricing lane's.
+
+The §4 B trade-offs, with what these counts add:
+
+| # | Status and numbers |
+|---|---|
+| B1 | Sleep: done. The other half, freezing an at-rest piece whose island a tank keeps awake, is not done: it would bring back the type switch for exactly the thrown case above (30 of 54 pieces). |
+| B2 | No debris-to-debris collision: each piece becomes its own island, so the thrown case would keep only the 6 hull-touching pieces awake, and nearly all of the 329 near pairs of a sleeping pile are piece-to-piece (DERIVED). Rubble interpenetrates. |
+| B3 | Fine debris as client cosmetics: no new numbers. |
+| B4 | Shorter rest: now Avian's `TimeToSleep` resource (shared with every body) or a per-piece `SleepThreshold` component. Tanks never sleep while track forces act, so a shorter global time leaves tanks unchanged (DERIVED from `track/sim.rs`: a non-zero force wakes a body). No new numbers. |
+| B5 | Cheaper shapes: no new numbers; fewer hull vertices would also cheapen the near pairs above. |
+| B6 | Global substeps: no new numbers. |
+| B7 | Merge settled rubble: would remove a sleeping pile's near pairs (329 for 54 pieces); otherwise small. |
+| B8 | Baked falls: no new numbers. |
+| B9 | Remove on sleep: no new numbers; still contradicts the persistence decision. |
+
+A4 and A5 after the switch: a static proxy now changes only when a building swaps, dusts or drops a
+chunk, so A4's per-tick static-tree clone no longer runs on every freeze and wake ([I]). A5 still
+applies to awake resting pieces, such as the 36 in the thrown case, whose jitter still reaches
+their carriers.
+
 ## Source index
 
 Repository (read 2026-10-31):

@@ -24,7 +24,7 @@
 //!   the cgroup's `cpu.stat` (microseconds throttled, enforcement periods throttled); null off
 //!   Linux or where the file is unreadable;
 //! - `debris`: present only while the debris stress lever is armed (`net::debris_stress`): its
-//!   `live` and `frozen` pieces at the line, and its cumulative counts.
+//!   `live` (awake) and `sleeping` pieces at the line, and its cumulative counts.
 //!
 //! `cpu_pct`, `rss_mb` and the throttle fields are null where the platform gives no reading.
 //!
@@ -494,7 +494,7 @@ mod tests {
                 max: 250.0,
                 overruns: 0,
             }),
-            debris: Some(json!({"live": 35, "frozen": 140})),
+            debris: Some(json!({"live": 35, "sleeping": 140})),
             clients: 2,
             tanks: 6,
             projectiles: 3,
@@ -531,7 +531,7 @@ mod tests {
                 "send_us": {"p50": 120.0, "p95": 180.1, "max": 250.0},
                 "throttled_usec": 45000,
                 "nr_throttled": 3,
-                "debris": {"live": 35, "frozen": 140},
+                "debris": {"live": 35, "sleeping": 140},
             })
         );
 

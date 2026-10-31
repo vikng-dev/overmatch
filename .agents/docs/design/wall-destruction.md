@@ -642,7 +642,10 @@ Wake the contacted piece and affected support island before solving that contact
 The first tank touch therefore meets finite mass and transfers opposing momentum in the same step.
 
 **Stand-in.**
-Supported equilibria may leave detailed dynamics while retaining geometry, material, mass and wake dependencies.
+Rubble rests through Avian's island sleep (`src/debris.rs`).
+A piece stays a dynamic body all match; an island sleeps once every body in it has stayed under Avian's sleep thresholds for its `TimeToSleep`, and keeps its geometry, mass and contacts asleep.
+An awake body that starts touching a sleeping island wakes it before the solver runs, so the first touch meets finite mass.
+Avian wakes nothing when a support with no dynamic body goes; the game wakes every sleeping piece touching a collider as it goes.
 A rest timer is debounce, not proof of support.
 
 **Server cost.**
@@ -664,6 +667,16 @@ Never rigidly weld unrelated pieces merely to reduce body count.
 A detailed-body cap does not bound total coarse-solver work.
 Arbitrary persistent, independently moving rubble cannot have both exact behaviour and a fixed total computation bound.
 Measure that worst case and report the resource limit explicitly.
+
+**OWNER DECISION (2026-10-31) — rest by the library's sleep, not a freeze rule.**
+Rubble rests through Avian's island sleep and its wake on contact.
+No resting piece switches to a static body: a switch rebuilt the piece's contacts and woke its island, and the switching undid Avian's own sleep (`.agents/scratch/destruction-2026-10-30-buildings/debris-cost-survey.md`, §2).
+No cap applies until a sleeping piece's per-tick cost is measured.
+
+Two costs of the library's sleep, MEASURED as counts over 10 s on a fixture lattice of 54 cubes, 0.4 m, 2 cm apart:
+
+- An island sleeps whole. A tank applies track forces every tick, so it never sleeps, and every piece connected to it through touching pieces stays awake. Six pieces thrown against a hull kept 36 of 54 awake. Pressed against a hull, 15 touching kept 18 awake. With a body free to sleep in the tank's place, all 54 slept.
+- Avian moves only touching pairs to its sleeping set. The fully sleeping pile kept 329 non-touching near pairs active, and the narrow phase recomputes those every tick; 54 touching pairs slept.
 
 ## Validation without outcome tuning
 
@@ -782,5 +795,6 @@ A quoted spring force alone supplies none of the missing acceleration coupling.
 | Accepted strength-scaled spall | Replace it with budgeted ejecta for walls and tanks; validate the changed tank outcomes explicitly. |
 | Three-property material model | Keep the summary, add sourced constitutive and attachment profiles; do not infer missing properties from strength. |
 | Hard-pool dose | Exclude outgoing kinetic energy from absorbed damaging work; retain the shared conversion and abstract crew line rate. |
-| Debris cap | Cap detailed bodies and use finite-mass overflow; accept that total coarse work still needs a measured limit. |
+| Rubble rest | **Decided (2026-10-31):** Avian's island sleep and wake on contact; no body-type switching. The game adds only the wake Avian lacks, when a support goes (see Rubble settlement and the cap). |
+| Debris cap | Cap detailed bodies and use finite-mass overflow; accept that total coarse work still needs a measured limit. No cap applies until a sleeping piece's per-tick cost is measured. |
 | Empirical acceptance data | Require verified source fixtures before declaring handbook validation complete; do not substitute plausible-looking prototype outcomes. |
