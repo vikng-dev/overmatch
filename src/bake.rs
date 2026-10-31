@@ -208,10 +208,12 @@ impl MeshGeometry {
     /// sandbox. A loose part is a connected component of the triangle mesh after welding by exact
     /// position ([`weld`]): glTF splits a vertex wherever the normal or UV differs, so connectivity
     /// by index would cut a flat-shaded box into six quads. Vertices no triangle references belong
-    /// to no part; a triangle indexing past the POSITION buffer is dropped.
+    /// to no part.
     ///
     /// `None` when the primitive has no part or any part has no hull (avian's `convex_hull`
-    /// refuses a degenerate point set). Built on the first call ([`ColliderCache`]).
+    /// refuses a degenerate point set); the bake gate refuses a collision proxy with either, or
+    /// with a triangle past its POSITION buffer (`declared_roles_resolve`). Built on the first call
+    /// ([`ColliderCache`]).
     pub(crate) fn convex_hull_colliders(&self) -> Option<Vec<Collider>> {
         self.colliders
             .hulls
@@ -254,13 +256,14 @@ impl MeshGeometry {
         // first-occurrence order of their vertices, deterministically.
         let mut referenced: HashSet<u32> = HashSet::new();
         for triangle in self.indices.as_chunks::<3>().0 {
-            let Some(ids) = triangle
+            let ids = triangle
                 .iter()
-                .map(|&corner| welded.get(corner as usize).copied())
-                .collect::<Option<Vec<u32>>>()
-            else {
-                continue;
-            };
+                .map(|&corner| {
+                    *welded.get(corner as usize).expect(
+                        "the bake gate refuses a collision proxy's triangle past its vertices",
+                    )
+                })
+                .collect::<Vec<u32>>();
             referenced.extend(ids.iter().copied());
             let roots = [
                 find(&mut parent, ids[0]),
@@ -443,7 +446,9 @@ fn classify<'p>(
     };
     Some(Ok(PrimitiveSubstance {
         name: material.to_owned(),
-        id: registry.id(material).ok()?,
+        id: registry
+            .id(material)
+            .expect("a key the registry just resolved has an id in it"),
         matter,
     }))
 }
@@ -1362,9 +1367,10 @@ impl MeshCapture<'_> {
         }
         let mut primitives = Vec::new();
         for (index, substance) in captured {
-            let Some(primitive) = mesh.primitives().nth(index) else {
-                continue;
-            };
+            let primitive = mesh
+                .primitives()
+                .nth(index)
+                .expect("`captured` indexes this mesh's own primitives");
             let reader = primitive.reader(|b| self.buffers.get(b.index()).map(Vec::as_slice));
             let Some(positions) = reader.read_positions() else {
                 findings.push(Finding::new(
@@ -1491,6 +1497,24 @@ fn declared_roles_resolve(
             NodeRole::Collider if node.primitives.is_empty() => {
                 Some("it holds no mesh data at all".to_string())
             }
+            NodeRole::Collider
+                if node.primitives.iter().any(|p| {
+                    p.indices.len() % 3 != 0
+                        || p.indices.iter().any(|&i| i as usize >= p.positions.len())
+                }) =>
+            {
+                Some("its mesh data holds a triangle past its vertices".to_string())
+            }
+            // The spawn builds one convex hull per loose part from these buffers; a part with no
+            // hull (a flat or degenerate point set) is a proxy that cannot collide.
+            NodeRole::Collider
+                if node
+                    .primitives
+                    .iter()
+                    .any(|p| p.convex_hull_colliders().is_none()) =>
+            {
+                Some("a loose part of its mesh has no convex hull (flat or degenerate)".to_string())
+            }
             // Armour is drawn geometry that casts its own shadow; a node that is both would be
             // silenced and stood in for by itself.
             NodeRole::ShadowProxy if ballistic => Some("it is declared armour".to_string()),
@@ -1558,7 +1582,6 @@ fn shadow_compare_on_instance_ready(
     let Some(blueprint) = blueprint.as_deref() else {
         // Startup extraction precedes any instantiation; absence is a wiring bug, not a race.
         fail(vec!["TankBlueprint resource missing at bind".into()]);
-        return;
     };
     let geometry = &blueprint.geometry;
     // The tank root's descendants hold TWO same-named trees since step 1: the data-spawned sim
@@ -1566,8 +1589,11 @@ fn shadow_compare_on_instance_ready(
     // the sim parts, whose transforms are the extracted values by construction.
     let skeleton: std::collections::HashSet<Entity> = sim_parts
         .get(ready.entity)
-        .map(|parts| parts.0.values().copied().collect())
-        .unwrap_or_default();
+        .expect("a tank root holds its SimParts from spawn (tank::spawn), before its scene loads")
+        .0
+        .values()
+        .copied()
+        .collect();
     let mut mismatches: Vec<String> = Vec::new();
 
     // Scene side: every named descendant that is a glTF NODE. Mesh data always spawns as child
@@ -1720,18 +1746,16 @@ fn shadow_compare_on_instance_ready(
     }
 }
 
-/// Shadow verdict: fatal in debug (the equivalence proof failed — phase 1 must not build on it),
-/// loud-but-alive in release.
-fn fail(mismatches: Vec<String>) {
+/// Shadow verdict: fatal in every build. The sim was built from the extracted geometry, so a scene
+/// that disagrees with it is a tank whose view and simulation are two different vehicles.
+fn fail(mismatches: Vec<String>) -> ! {
     for m in &mismatches {
         error!("bake: SHADOW-BAKE mismatch: {m}");
     }
-    if cfg!(debug_assertions) {
-        panic!(
-            "bake: shadow compare failed with {} mismatches (see log)",
-            mismatches.len()
-        );
-    }
+    panic!(
+        "bake: shadow compare failed with {} mismatches (see log)",
+        mismatches.len()
+    );
 }
 
 /// Nearest ancestor of `entity` (below `root`) that is an extracted node, by name — tolerant of
@@ -2460,6 +2484,32 @@ mod tests {
         });
         let findings = verify("unindexed-proxy", &nodes, &spec);
         assert_eq!(refusals(&findings), ["L2.ROLE_COHERENCE"]);
+
+        // A proxy the spawn cannot build its hulls from: a triangle past the vertices, and a part
+        // whose points are one point (no hull). Both are refused here, so `spawn_proxy_parts`
+        // never meets them.
+        for (case, positions, indices) in [
+            (
+                "proxy-past-vertices",
+                solid(ART, [0.0, 0.0, 0.0]).positions,
+                vec![0, 1, 9],
+            ),
+            ("proxy-no-hull", vec![[0.0, 0.0, 0.0]; 3], vec![0, 1, 2]),
+        ] {
+            let (mut nodes, spec) = sound_vehicle();
+            nodes[2] = Node::new("Proxy").child_of("Hull").holding(Primitive {
+                material: ART.into(),
+                positions,
+                indices,
+            });
+            let findings = verify(case, &nodes, &spec);
+            assert_eq!(
+                refusals(&findings),
+                ["L2.ROLE_COHERENCE"],
+                "{case}: {}",
+                render(&findings)
+            );
+        }
 
         // A component facet on a node the march never meets is inert.
         let (nodes, _) = sound_vehicle();

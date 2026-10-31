@@ -860,9 +860,12 @@ fn spawn_proxy_parts(
     primitive: &crate::bake::MeshGeometry,
     friction: Friction,
 ) {
-    let colliders = primitive
-        .convex_hull_colliders()
-        .unwrap_or_else(|| panic!("collision proxy `{node_name}` has a degenerate hull source"));
+    let colliders = primitive.convex_hull_colliders().unwrap_or_else(|| {
+        panic!(
+            "collision proxy `{node_name}`: the bake gate certifies every proxy's hulls \
+             (declared_roles_resolve)"
+        )
+    });
     for collider in colliders {
         commands.spawn((
             ChildOf(parent),
