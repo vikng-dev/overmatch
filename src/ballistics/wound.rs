@@ -5,8 +5,8 @@
 //! without it, and this pass only reads what they were. Two intersections dose a witness:
 //!
 //! - [`line`]: the round's axis legs ([`Leg`]), each sampled by the walk's own disc; per
-//!   witness, the disc-mean chord, dosed `chord × wound` (the round's crew line rate,
-//!   reference-mm per metre).
+//!   witness, the disc-mean chord in the open (none inside a hard volume, [`solid`]), dosed
+//!   `chord × wound` (the round's crew line rate, reference-mm per metre).
 //! - [`entries`]: where a field direction enters each witness, which
 //!   [`super::resolve::field_direction`] doses at the direction's strength there times its share.
 //!
@@ -19,7 +19,7 @@ use avian3d::prelude::SimpleCollider;
 use bevy::prelude::*;
 
 use super::collect::{self, Corridor};
-use super::resolve::{FieldReach, Leg, MAX_CORRIDOR, PROBE_MARGIN, ResolveContext};
+use super::resolve::{FieldReach, Leg, MAX_CORRIDOR, PROBE_MARGIN, ResolveContext, field_presence};
 use super::walk::{self, WalkError, WitnessSpans};
 use super::{VolumeCrossing, hit_ancestor};
 
@@ -168,12 +168,87 @@ fn presence(
     Ok((!spans.is_empty()).then_some(WitnessSpans { witness, spans }))
 }
 
+/// Where the line `at + t·axis` lies inside any hard volume `admit` keeps, for `t ∈ [0, length]`:
+/// disjoint, ordered intervals in metres from `at`. Read by the field's presence walk
+/// ([`field_presence`]) over every hard collider whose bounds meet the stretch, so it is the
+/// collector and pairing law of every corridor, walked from outside those bounds, and what `at`
+/// starts inside is the parity of crossings behind it, never assumed.
+fn solid(
+    context: &ResolveContext<'_, '_, '_>,
+    admit: &dyn Fn(Entity) -> bool,
+    at: Vec3,
+    axis: Dir3,
+    length: f32,
+) -> Result<Vec<(f64, f64)>, WalkError> {
+    let reach = FieldReach::within(
+        context,
+        admit,
+        collect::swept_aabb(at, Vec3::from(axis), length, 0.0),
+    );
+    let Some((behind, walked)) = field_presence(context, &reach, at, axis)? else {
+        return Ok(Vec::new());
+    };
+    let mut out: Vec<(f64, f64)> = Vec::new();
+    for layer in walked
+        .layers
+        .iter()
+        .filter(|layer| !layer.present.is_empty())
+    {
+        let (a, b) = (
+            (layer.start - behind).max(0.0),
+            (layer.end - behind).min(length as f64),
+        );
+        if b <= a {
+            continue;
+        }
+        match out.last_mut() {
+            Some(last) if last.1 >= a => last.1 = last.1.max(b),
+            _ => out.push((a, b)),
+        }
+    }
+    Ok(out)
+}
+
+/// What of `spans` lies outside every interval of `solid`, both disjoint and ordered: the
+/// witness's presence in the open. With no solid interval among them it is `spans` unchanged.
+fn open_spans(spans: &[(f64, f64)], solid: &[(f64, f64)]) -> Vec<(f64, f64)> {
+    let mut out = Vec::new();
+    for &(start, end) in spans {
+        let mut from = start;
+        for &(enter, leave) in solid {
+            if leave <= from {
+                continue;
+            }
+            if enter >= end {
+                break;
+            }
+            if enter > from {
+                out.push((from, enter));
+            }
+            from = leave;
+            if from >= end {
+                break;
+            }
+        }
+        if from < end {
+            out.push((from, end));
+        }
+    }
+    out
+}
+
 /// The round's line through every witness `admit` keeps, along `legs` in order: per witness, the
-/// disc-mean chord summed over the legs (each leg's chord the mean over all its samples, each
-/// sample read along its own stretch, a sample that misses counting zero), its dose `chord × wound`
-/// reference-mm, the axis points where the line first entered it and where it last left it or the
-/// legs end (each sample's point projected onto its leg's axis), and whether every sample that
-/// entered it on the last leg that met it came out within its own stretch. In order of first entry.
+/// disc-mean chord in the open summed over the legs (each leg's chord the mean over all its
+/// samples, each sample read along its own stretch, a sample that misses counting zero), its dose
+/// `chord × wound` reference-mm, the axis points where the line first entered it in the open and
+/// where it last left it or the legs end (each sample's point projected onto its leg's axis), and
+/// whether every sample that entered it on the last leg that met it came out within its own
+/// stretch. In order of first entry.
+///
+/// THE STRONGEST-ONLY RULE (§13.2's damage law). A witness's chord inside any hard volume `admit`
+/// keeps ([`solid`]) takes no dose: a crew box clipped into a wall is dosed only over the chord
+/// it presents in the open, and one wholly inside armour is not met at all. A field direction
+/// already stops at the hard face that hides it ([`super::resolve::field_direction`]).
 ///
 /// With them, the axis of the first leg that met a witness (`None` when none did).
 ///
@@ -216,10 +291,19 @@ pub(crate) fn line(
                 continue;
             }
             let along = offset.dot(axis) as f64;
-            for found in spans(context, &near, leg.from + offset, axis, length)? {
-                let chord: f64 = found.spans.iter().map(|(a, b)| b - a).sum();
-                let entry = along + found.spans[0].0;
-                let last = found.spans[found.spans.len() - 1].1;
+            let at = leg.from + offset;
+            let found = spans(context, &near, at, axis, length)?;
+            if found.is_empty() {
+                continue;
+            }
+            let hard = solid(context, admit, at, leg.axis, length)?;
+            for found in found {
+                let open = open_spans(&found.spans, &hard);
+                let (Some(&(first, _)), Some(&(_, last))) = (open.first(), open.last()) else {
+                    continue;
+                };
+                let chord: f64 = open.iter().map(|(a, b)| b - a).sum();
+                let entry = along + first;
                 let exit = along + last;
                 let left = last < length as f64;
                 match met.iter_mut().find(|m| m.0 == found.witness) {

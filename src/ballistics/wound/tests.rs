@@ -645,3 +645,56 @@ fn a_witness_beside_an_oblique_bend_is_read_along_each_samples_own_path() {
         "{chord} vs {expected} (DERIVED)"
     );
 }
+
+/// THE STRONGEST-ONLY RULE on the line (§13.2's damage law): a witness's chord inside a hard
+/// volume takes no dose. A crew box clipped into a plate reads, on the line, as its open part
+/// alone, and one wholly inside the plate is not met at all, as a field direction is stopped by
+/// the plate's face before it. The HP tally and pen cam read these chords; a line that dosed the
+/// overlapped chord would dose a box clipped into armour through the armour. Fixture geometry:
+/// the front plate's back face at `z = -THIN / 2`, a 0.5 m square box over `z ∈ [-0.25, 0]`,
+/// 0.225 m of it in the open (DERIVED); the buried box over `z ∈ [-0.015, 0.015]`.
+#[test]
+fn a_crew_box_clipped_into_a_wall_is_dosed_only_over_its_open_chord() {
+    let box_over = |near: f32, far: f32| {
+        (
+            "crewman",
+            Vec3::new(0.5, 0.5, near - far),
+            Vec3::new(0.0, 2.0, (near + far) / 2.0),
+            Kind::Witness(DEEP),
+        )
+    };
+    let chord = |fired: &FixtureFired| -> f32 {
+        wounds(fired, "crewman")
+            .iter()
+            .map(|crossed| crossed.chord)
+            .sum()
+    };
+    let back = -THIN / 2.0;
+    let clipped = fire(&hard_fixture(&[box_over(0.0, -0.25)]), WOUND);
+    let open = fire(&hard_fixture(&[box_over(back, -0.25)]), WOUND);
+    let (clipped_chord, open_chord) = (chord(&clipped), chord(&open));
+    assert!(
+        (clipped_chord - (back + 0.25)).abs() < 1.0e-4,
+        "the clipped box's chord is its open part's: {clipped_chord} (DERIVED {})",
+        back + 0.25
+    );
+    assert!(
+        (clipped_chord - open_chord).abs() < 1.0e-4,
+        "{clipped_chord} against the open part alone, {open_chord}"
+    );
+    for crossed in wounds(&clipped, "crewman") {
+        assert_eq!(
+            crossed.cost,
+            crossed.chord * WOUND,
+            "dose = open chord × wound"
+        );
+    }
+    assert!(dose(&clipped, "crewman").is_some_and(|dose| dose.line > 0.0));
+
+    let buried = fire(&hard_fixture(&[box_over(0.015, -0.015)]), WOUND);
+    assert!(
+        wounds(&buried, "crewman").is_empty(),
+        "a box wholly inside the plate is not met by the line"
+    );
+    assert!(dose(&buried, "crewman").is_none_or(|dose| dose.line == 0.0));
+}

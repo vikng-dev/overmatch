@@ -388,7 +388,7 @@ _Avoid_: a dose in reference-mm (reference-mm is a penetration and armour readou
 The joules of energy lost per HP point, one rate for every dose but a crew station's chord, a tank's modules, a tree's trunk and every field alike (`joules_per_hp`, `assets/ballistics/energy_dose.ron`, TUNED). Each pool's authored HP alone says how sturdy it is.
 
 **Line dose**:
-What a round deposits along its path in the game's damage model: into a hard pool, the kinetic energy it loses there, shared among overlapping volumes at that depth and converted at one **energy-to-HP rate** for every hard pool; a stopped round deposits all its remaining energy. Into a witness, the chord times the round's **crew line rate**.
+What a round deposits along its path in the game's damage model: into a hard pool, the kinetic energy it loses there, taken by the strongest volume present at that depth (volumes of one factor share it; a weaker overlapped volume takes none) and converted at one **energy-to-HP rate** for every hard pool; a stopped round deposits all its remaining energy. Into a witness, its chord in the open (none inside a hard volume) times the round's **crew line rate**.
 _Avoid_: transit damage; cost (the chord's reference-mm readout, chord × factor, is never a dose)
 
 **Pool unit**:

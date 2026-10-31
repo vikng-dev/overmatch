@@ -2044,9 +2044,9 @@ fn apply_bite(
     bodies: &mut Query<Forces>,
     commands: &mut Commands,
 ) {
-    // Transit damage: every HP-bearing volume is charged for the material OF ITS OWN the round chewed
-    // (§13.2's damage law — no ownership, no priority, no argmax), each deposit from the line's
-    // entry into its own volume. Every deposit has that entry: `walk::finish` builds the bite's
+    // Transit damage: every HP-bearing volume is dosed the energy the round lost where it was the
+    // strongest volume present (§13.2's damage law), each deposit from the line's entry into its
+    // own volume. Every deposit has that entry: `walk::finish` builds the bite's
     // deposits as Line doses only, each addressed to a volume present in the first event's
     // encounters, and `volume_crossings` builds one crossing per Line deposit from the same
     // encounters.

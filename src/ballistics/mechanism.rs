@@ -12,7 +12,8 @@
 //! `.agents/scratch/damage-cam-2026-10-08/research/recommendation-solid-shot.md`, Parts 1 and 5.
 //! What this module still decides by a compatibility rule rather than a law is the overmatch switch
 //! ([`OvermatchProjection`]); what it decides by a modelling convention rather than a law is how an
-//! authoring overlap of different substances resists ([`overlap_factor`]).
+//! authoring overlap of different substances resists ([`overlap_factor`]) and is dosed: only its
+//! strongest volume counts ([`SolidShot`]'s advance, §13.2).
 
 use bevy::prelude::*;
 
@@ -215,11 +216,12 @@ impl Mechanism for SolidShot {
     ///
     /// THE ENERGY DOSE. The round loses `½ m (v_in² − v_out²)` over the advance, and all of
     /// `½ m v_in²` when it comes to rest in it: a stopped round deals what it had left, whatever
-    /// `limits.rest` leaves its readout at. Between consecutive volume boundaries, each volume
-    /// present takes that energy in proportion to its cost at those depths (§13.2's law: no
-    /// ownership), so the volumes' doses sum to the energy lost, and an overlap resisted once by
-    /// its most resistant substance still doses each of its volumes. An advance that covers no
-    /// contact deals nothing.
+    /// `limits.rest` leaves its readout at. Between consecutive volume boundaries, each sample's
+    /// strongest volumes there (the highest factor present in that sample, ties all of them) take
+    /// that energy in proportion to their cost at those depths, and a weaker volume overlapped by
+    /// a stronger one takes none of it (§13.2's damage law), so the doses sum to the energy lost.
+    /// A volume's `chord` and `cost` are its dosed ones: its chord less what a stronger volume
+    /// covers in its own sample. An advance that covers no contact deals nothing.
     fn advance(
         &self,
         state: SolidShotState,
@@ -264,13 +266,18 @@ impl Mechanism for SolidShot {
         // The game's damage model integrates dose at every volume boundary, including seams
         // inside an encounter whose substance set is constant. The force-law advance above stays
         // whole, so adding such a seam cannot change the round's state or its rest point.
-        let contacts: Vec<_> = encounter
+        let contacts: Vec<(&[VolumeContact], &VolumeContact)> = encounter
             .samples
             .iter()
-            .flat_map(|sample| &sample.present)
+            .flat_map(|sample| {
+                sample
+                    .present
+                    .iter()
+                    .map(|contact| (sample.present.as_slice(), contact))
+            })
             .collect();
         let mut cuts = vec![0.0, consumed];
-        for contact in &contacts {
+        for (_, contact) in &contacts {
             cuts.push((contact.start - encounter.start).clamp(0.0, consumed));
             cuts.push((contact.end - encounter.start).clamp(0.0, consumed));
         }
@@ -287,30 +294,61 @@ impl Mechanism for SolidShot {
             }
         };
         let mut energies = vec![0.0; contacts.len()];
+        // Per contact, the metres of its covered stretch over which a stronger volume of its own
+        // sample is present, which take no dose, and whether it is the strongest anywhere: a
+        // contact that never is has no dosed chord, whatever the rounding of the metres.
+        let mut hidden = vec![0.0; contacts.len()];
+        let mut shown = vec![false; contacts.len()];
         for bounds in cuts.windows(2) {
             let (a, b) = (bounds[0], bounds[1]);
-            let present = contacts.iter().enumerate().filter(|(_, contact)| {
+            let inside = |contact: &VolumeContact| {
                 contact.start - encounter.start < b && contact.end - encounter.start > a
-            });
-            let total: f64 = present
-                .clone()
-                .map(|(_, contact)| contact.material.factor as f64)
-                .sum();
+            };
+            let weights: Vec<f64> = contacts
+                .iter()
+                .enumerate()
+                .map(|(index, (layer, contact))| {
+                    if !inside(contact) {
+                        return 0.0;
+                    }
+                    let strongest = overlap_of(
+                        layer
+                            .iter()
+                            .filter(|other| inside(other))
+                            .map(|other| other.material.factor),
+                    );
+                    if contact.material.factor < strongest {
+                        hidden[index] += b - a;
+                        0.0
+                    } else {
+                        shown[index] = true;
+                        contact.material.factor as f64
+                    }
+                })
+                .collect();
+            let total: f64 = weights.iter().sum();
             let energy = (lost_at(b) - lost_at(a)).max(0.0);
             if total > 0.0 {
-                for (index, contact) in present {
-                    energies[index] += energy * (contact.material.factor as f64 / total);
+                for (index, weight) in weights.into_iter().enumerate() {
+                    if weight > 0.0 {
+                        energies[index] += energy * (weight / total);
+                    }
                 }
             }
         }
         let effects = contacts
             .into_iter()
             .zip(energies)
-            .map(|(contact, energy)| {
+            .zip(hidden.into_iter().zip(shown))
+            .map(|(((_, contact), energy), (hidden, shown))| {
                 let covered = (consumed - (contact.start - encounter.start))
                     .min(contact.end - contact.start)
                     .max(0.0);
-                let chord = covered / disc;
+                let chord = if shown {
+                    (covered - hidden).max(0.0) / disc
+                } else {
+                    0.0
+                };
                 Effect::Line {
                     address: contact.volume,
                     chord,
@@ -507,64 +545,109 @@ mod tests {
     }
 
     /// THE UNION-FIELD OVERLAP RULE. An overlap of two different substances is resisted once, by
-    /// the most resistant of them; every volume in it still takes a dose, its cost at its own
-    /// factor (no ownership), and the energy the round lost is shared between them by those costs,
-    /// so the overlap deals what the strong volume alone would have.
+    /// the most resistant of them, in either listing order, and only the strongest volume is dosed
+    /// (§13.2's damage law): it takes the whole energy the round lost there, and the weaker volume
+    /// none of it and no chord, so a pool clipped into a stronger one is never dosed through it.
+    /// Two volumes of one factor both count: the energy is shared between them by cost. Field
+    /// directions follow the same rule (a part inside a plate is hidden by the plate's face), and
+    /// the HP tally relies on the line's doses summing to the energy lost. Factors are fixture
+    /// data.
     #[test]
-    fn an_overlap_is_resisted_once_by_its_most_resistant_substance() {
+    fn an_overlap_is_resisted_once_and_dosed_only_by_its_strongest_volume() {
         let round = round();
-        let alone = round.advance(
-            round.at(800.0),
-            &encounter(0.05, 1, &[&[(1, 1000.0)]]),
-            &LIMITS,
-            &HEAD_ON,
-        );
-        let overlapped = round.advance(
-            round.at(800.0),
-            &encounter(0.05, 1, &[&[(1, 1000.0), (2, 10.0)]]),
-            &LIMITS,
-            &HEAD_ON,
-        );
-        assert_eq!(alone.state, overlapped.state);
-        let listed_weak_first = round.advance(
-            round.at(800.0),
-            &encounter(0.05, 1, &[&[(2, 10.0), (1, 1000.0)]]),
-            &LIMITS,
-            &HEAD_ON,
-        );
-        assert_eq!(alone.state, listed_weak_first.state);
-        let lost = 0.5 * BODY.mass as f64 * (800.0f64.powi(2) - alone.state.speed.powi(2));
-        let lines: Vec<(Entity, f64, f64, f64)> = overlapped
-            .effects
-            .iter()
-            .map(
-                |&Effect::Line {
-                     address,
-                     chord,
-                     cost,
-                     energy,
-                 }| (address, chord, cost, energy),
-            )
-            .collect();
-        assert_eq!(
-            lines
+        let lines = |advance: &Advance<SolidShotState>| -> Vec<(Entity, f64, f64, f64)> {
+            advance
+                .effects
                 .iter()
-                .map(|&(address, chord, cost, _)| (address, chord, cost))
-                .collect::<Vec<_>>(),
-            vec![
-                (volume(1), 0.05, 0.05 * 1000.0),
-                (volume(2), 0.05, 0.05 * 10.0)
-            ]
+                .map(
+                    |&Effect::Line {
+                         address,
+                         chord,
+                         cost,
+                         energy,
+                     }| (address, chord, cost, energy),
+                )
+                .collect()
+        };
+        for (strong, weak) in [(1000.0, 10.0), (50.0, 10.0)] {
+            let alone = round.advance(
+                round.at(800.0),
+                &encounter(0.05, 1, &[&[(1, strong)]]),
+                &LIMITS,
+                &HEAD_ON,
+            );
+            let lost = 0.5 * BODY.mass as f64 * (800.0f64.powi(2) - alone.state.speed.powi(2));
+            for listed in [[(1, strong), (2, weak)], [(2, weak), (1, strong)]] {
+                let overlapped = round.advance(
+                    round.at(800.0),
+                    &encounter(0.05, 1, &[&listed]),
+                    &LIMITS,
+                    &HEAD_ON,
+                );
+                assert_eq!(alone.state, overlapped.state);
+                for (address, chord, cost, energy) in lines(&overlapped) {
+                    if address == volume(1) {
+                        assert_eq!((chord, cost), (0.05, 0.05 * strong as f64));
+                        assert!(
+                            (energy / lost - 1.0).abs() < 1.0e-12,
+                            "the strongest takes what the round lost: {energy} against {lost}"
+                        );
+                    } else {
+                        assert_eq!(
+                            (chord, cost, energy),
+                            (0.0, 0.0, 0.0),
+                            "the weaker volume ({weak} under {strong}) is not dosed"
+                        );
+                    }
+                }
+            }
+        }
+        let equal = round.advance(
+            round.at(800.0),
+            &encounter(0.05, 1, &[&[(1, 40.0), (2, 40.0)]]),
+            &LIMITS,
+            &HEAD_ON,
         );
-        let (strong, weak) = (lines[0].3, lines[1].3);
+        let lost = 0.5 * BODY.mass as f64 * (800.0f64.powi(2) - equal.state.speed.powi(2));
+        for (address, chord, cost, energy) in lines(&equal) {
+            assert_eq!((chord, cost), (0.05, 0.05 * 40.0), "{address}");
+            assert!(
+                (energy / (0.5 * lost) - 1.0).abs() < 1.0e-12,
+                "equal factors share: {energy} against half of {lost}"
+            );
+        }
+    }
+
+    /// The strongest volume is read per sample: a weak volume one sample meets in the open is
+    /// dosed by its own cost's share even where another sample of the disc meets a stronger
+    /// volume, since no stronger volume covers it at its own points. Factors are fixture data.
+    #[test]
+    fn a_volume_is_hidden_only_by_a_stronger_one_in_its_own_sample() {
+        let round = round();
+        let advance = round.advance(
+            round.at(800.0),
+            &encounter(0.05, 2, &[&[(1, 1000.0)], &[(2, 10.0)]]),
+            &LIMITS,
+            &HEAD_ON,
+        );
+        let lost = 0.5 * BODY.mass as f64 * (800.0f64.powi(2) - advance.state.speed.powi(2));
+        let energy = |index: u32| {
+            advance
+                .effects
+                .iter()
+                .find_map(
+                    |&Effect::Line {
+                         address, energy, ..
+                     }| (address == volume(index)).then_some(energy),
+                )
+                .expect("both volumes are dosed")
+        };
         assert!(
-            ((strong + weak) / lost - 1.0).abs() < 1.0e-12,
-            "the overlap deals what the round lost: {strong} + {weak} against {lost}"
+            (energy(2) / lost - 10.0 / 1010.0).abs() < 1.0e-12,
+            "the open weak volume keeps its cost share: {} of {lost}",
+            energy(2)
         );
-        assert!(
-            (weak / strong - 10.0 / 1000.0).abs() < 1.0e-12,
-            "shared by cost: {weak} against {strong}"
-        );
+        assert!(((energy(1) + energy(2)) / lost - 1.0).abs() < 1.0e-12);
     }
 
     /// THE ENERGY DOSE. A round's line dose is the kinetic energy it lost across the chord, so two

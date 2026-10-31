@@ -749,8 +749,8 @@ struck.
 A hard box's line dose is the kinetic energy the round lost crossing it, `½ m (v_in² − v_out²)`,
 `m` the mass that meets the plate (a sub-calibre round's core); a round that comes to rest in it
 deals all it had left, `½ m v_in²`. The energy lost between consecutive volume boundaries is shared
-among the volumes present there by their cost, chord × factor, so the doses sum to the energy
-the round lost and an overlap resisted once still doses each of its volumes (§13.2). A seam
+among the strongest volumes present there by their cost, chord × factor, so the doses sum to the
+energy the round lost and a volume a stronger one overlaps takes none of it (§13.2). A seam
 between touching volumes of one substance does not change the force-law advance; each volume
 still takes the energy lost at its own depths, never a length share of the whole crossing.
 **One rate** turns energy into HP for every hard pool, a tank's modules and a tree's trunk alike:
@@ -833,10 +833,10 @@ law (epic #103); the field's dose is under it (§5).
 is no layer of the walk (§13), so the shell and the field cross it as air. Once the hard world has
 resolved the shot, each witness box takes:
 
-- **the line:** `chord × wound`, `chord` the disc-mean chord the shell's legs cut through it (the
-  walk's own k-sample disc, §13.5, each sample that misses counting zero; a leg ends at the rest
-  point of a shell stopped inside it), `wound` the **round's** crew line rate (reference-mm per metre,
-  the round file, TUNED);
+- **the line:** `chord × wound`, `chord` the disc-mean chord the shell's legs cut through it in
+  the open, none of it inside a hard volume (§13.2; the walk's own k-sample disc, §13.5, each
+  sample that misses counting zero; a leg ends at the rest point of a shell stopped inside it),
+  `wound` the **round's** crew line rate (reference-mm per metre, the round file, TUNED);
 - **the field:** each spall direction entering it, at its strength there × its share (§5).
 
 Both go through the same `ShotDose` tally, units and once-per-box conversion as a hard box's, and
@@ -1300,17 +1300,18 @@ plates behave exactly as their boolean union, without ever building the merged m
 is the special case of `max` over {absent, factor}; "steel beats rubber" is `1000 ≫ 50`, a
 consequence rather than a rule. A witness (§6) contributes no factor: it is no part of the field.
 
-**Damage law:** every HP-bearing hard volume is costed **over its own presence chords, at its own
-factor** — no ownership, no priority, no argmax — and takes that cost's share of the energy the
-round lost at those depths (§6, the energy dose). Sequential pools take their own energy loss;
-only volumes present at the same depths share a dose. The error a component clipped into armor
-introduces is bounded by its share of the energy lost over `overlap_depth`, and is only reachable
-if the shell actually penetrated
-that deep — at which point it was hitting the component anyway. Two modules overlapping each
-other: both deposit, the round slowed once, the energy it lost shared between them, nothing needs
-to win. A witness is dosed over its own
-chord by its own law (§6), so two crew overlapping each other, or a crewman overlapping a wall,
-each take their whole chord and charge the shell nothing.
+**Damage law:** where volumes overlap, **only the strongest material counts** (Yan, 2026-10-31,
+issue 191: a dosable part poking into armour is a modelling error). At each depth of each disc
+sample, the volumes of the highest factor present there take the energy the round lost at those
+depths (§6, the energy dose), shared by cost (chord × factor) when several tie; a volume a stronger
+one overlaps takes none of it, and its chord there is no part of its dosed chord. Sequential pools
+take their own energy loss. A module half inside a plate is dosed over its open half only; of two
+overlapping modules, the stronger takes the overlap's whole dose. A witness's chord inside any hard
+volume takes no dose, and its chord in the open is dosed by its own law (§6): two crew overlapping
+each other each take their whole chord, a crewman clipped into a wall only what lies outside it,
+and neither charges the shell anything. Fields obey the same rule: a direction stops at the first
+volume it enters, so a part inside a plate is hidden by the plate's face (§5). The rule this
+replaced dosed every overlapping volume over its own presence chords, shared by cost.
 
 **Spall law:** at every **body exit** — a step to a lower factor, or to air — a spall cone is thrown
 with that body's own spend and speeds (§5), and its directions march under these same field laws.
@@ -1654,7 +1655,8 @@ Enforced mechanically, not by eyeball:
   faces (z-fighting in the x-ray render).
 - **Sub-caliber slop is harmless in both directions** — small overlaps union away; micro-gaps
   ε-weld (longitudinal) or self-heal at η ≈ 1 (lateral cracks). Don't sweat sub-caliber precision.
-- Components may clip into walls; the damage law makes the slop harmless.
+- Components may clip into walls; the damage law doses no clipped chord (§13.2), so the slop is
+  harmless.
 - **Real openings are modeled honestly, not plugged** — the turret ring, MG ports, vision slits
   become caliber-gated, η-graded weakspots by the disc law. On the Tiger they are modelled as solid
   cast steel, so the disc law has no geometry to grade and the fuzzer finds no corridor at all.
@@ -1677,7 +1679,7 @@ Enforced mechanically, not by eyeball:
 **Open tabs (§13):** k (sample count) and the ring layout; the weld-ε value; whether ricochet-shock
 on exposed components adopts the same factor-step gate; the
 lateral-asymmetry kick (§13.5, deliberately omitted). Material near-ties need nothing: `max`
-needs no tie-break for cost, and damage has no ownership at all.
+needs no tie-break for cost, and damage shares a tie by cost (§13.2).
 **Track belt ballistics (RULED IN, 2026-08-07, design pending):** Yan — links, sprockets and
 idlers "should be part of the ballistics, and track links will even have health later."
 Sprocket/idler are rig-mounted and land as ordinary Cast volumes. The BELT is the open design:

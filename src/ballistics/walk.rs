@@ -1568,8 +1568,8 @@ fn boundary_events(corridor: &RayCorridor, runs: &[WeldedRun]) -> Vec<BoundaryEv
     events
 }
 
-/// Union each entity's primitive intervals, then charge its own chord at its own factor (§13.2's
-/// damage law: no ownership, no priority, no argmax).
+/// Union each entity's primitive intervals, then read its own chord at its own factor: what the ray
+/// presents of it, a readout. The dose is the mechanism's ([`super::mechanism::SolidShot`], §13.2).
 fn entity_presence(
     intervals: &[(ShellKey, f64, f64)],
     volumes: &VolumeTable,
@@ -3137,12 +3137,13 @@ pub struct ResolutionPlan<S> {
     /// The line's doses, one per volume it put a positive chord into, summed over the crossing in
     /// volume order ([`DoseSource::Line`]): each the energy the round lost in that volume, joules.
     ///
-    /// Damage attribution is per-presence and needs no arbitration (§13.2: no ownership, no
-    /// priority, no argmax). The IMPULSE does, when a crossing's presence set spans several rigid
-    /// bodies — which can only happen when distinct bodies overlap in space, since within one tank
-    /// every volume shares the body. RULED 2026-08-07 (§13.5): the full momentum exchange goes to
-    /// the body owning the ENTRANCE surface, the first one physically touched; anything behind it
-    /// is shoved through contact by the physics engine. So the caller routes the shove by
+    /// Damage attribution needs no arbitration between bodies: each depth's dose goes to the
+    /// strongest volume present there, ties sharing (§13.2). The IMPULSE does, when a crossing's
+    /// presence set spans several rigid bodies — which can only happen when distinct bodies
+    /// overlap in space, since within one tank every volume shares the body. RULED 2026-08-07
+    /// (§13.5): the full momentum exchange goes to the body owning the ENTRANCE surface, the first
+    /// one physically touched; anything behind it is shoved through contact by the physics engine.
+    /// So the caller routes the shove by
     /// [`ResolutionPlan::entrance`], not by these doses — they are the damage.
     pub deposits: Vec<Dose>,
     /// One per body exit the round reached, in order: every exit before a stop throws, and the body

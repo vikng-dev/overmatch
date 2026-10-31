@@ -2044,8 +2044,8 @@ fn only_a_softer_step_throws() {
 }
 
 /// Enough capability and the same stack perforates: full cost spent, the crewman charged for HIS
-/// chord at HIS factor (§13.2's damage law — no ownership, no argmax), the doses the energy the
-/// round lost, the crewman's the energy lost in him, and the exit throws spall.
+/// chord at HIS factor (§13.2's damage law: no stronger volume overlaps him), the doses the energy
+/// the round lost, the crewman's the energy lost in him, and the exit throws spall.
 #[test]
 fn a_perforation_charges_every_entity_for_its_own_material() {
     let laws = WalkLaws::default();
@@ -2200,7 +2200,8 @@ fn a_weaker_volume_inside_steel_cannot_dilute_it_in_either_id_order() {
             bare.events, clipped.events,
             "only the exposed union boundary is an event"
         );
-        // …and the flesh is still charged for ITS OWN chord, at its own factor (§13.2's damage law).
+        // …and the flesh still presents ITS OWN chord, at its own factor: a presence readout, the
+        // dose being the steel's (§13.2's damage law).
         let share = clipped
             .presence
             .iter()
@@ -3723,6 +3724,67 @@ fn partial_overlaps_share_only_the_energy_lost_while_both_are_present() {
         assert!(
             (actual / expected - 1.0).abs() < 1.0e-10,
             "pool {index}: {actual} J against its own {expected} J"
+        );
+    }
+}
+
+/// THE STRONGEST-ONLY DOSE AT DEPTH (§13.2's damage law). A pool half inside a plate is dosed only
+/// over its open half: the plate takes the energy the round lost wherever the plate is present,
+/// the overlap included, and the pool the energy lost behind the plate's back face, its chord the
+/// open half alone. A share of the overlap sent into the pool would dose a component clipped into
+/// armour through steel the round had not yet got past; the HP tally and pen cam read these doses
+/// and chords. Fixture data: an 88-class body, a 0.02 m reference plate, a pool of a tenth of its
+/// factor over 0.01–0.03 m.
+#[test]
+fn a_pool_half_inside_a_plate_is_dosed_only_over_its_open_half() {
+    let body = super::super::RoundBody {
+        mass: 10.2,
+        caliber: 0.088,
+        nose_factor: 0.5,
+    };
+    let round = SolidShot::bind(body, SubstanceRegistry::shipped_static());
+    let state = round.at(800.0);
+    let limits = Limits { rest: 0.0 };
+    let geometry = Geometry {
+        axis: AXIS,
+        entrance_normal: -AXIS,
+    };
+    let (plate, pool) = (REFERENCE_FACTOR, 0.1 * REFERENCE_FACTOR);
+    let through_plate = round.advance(
+        state,
+        &stretch(0.0, 0.02, true, &[(1, plate)]),
+        &limits,
+        &geometry,
+    );
+    let joined = advance_through(
+        &round,
+        state,
+        &[
+            stretch(0.0, 0.01, true, &[(1, plate)]),
+            stretch(0.01, 0.02, true, &[(1, plate), (2, pool)]),
+            stretch(0.02, 0.03, true, &[(2, pool)]),
+        ],
+        &limits,
+        &geometry,
+    )
+    .unwrap();
+    assert!(joined.stop.is_none(), "the fixture round perforates");
+    let energy = |from: f64, to: f64| 0.5 * body.mass as f64 * (from.powi(2) - to.powi(2));
+    let behind = through_plate.state.speed;
+    for (index, chord, expected) in [
+        (1, 0.02, energy(state.speed, behind)),
+        (2, 0.01, energy(behind, joined.state.speed)),
+    ] {
+        let line = joined.doses[&volume(index)];
+        assert!(
+            (line.chord - chord).abs() < 1.0e-12,
+            "volume {index}: chord {} against {chord}",
+            line.chord
+        );
+        assert!(
+            (line.energy / expected - 1.0).abs() < 1.0e-9,
+            "volume {index}: {} J against {expected} J",
+            line.energy
         );
     }
 }
