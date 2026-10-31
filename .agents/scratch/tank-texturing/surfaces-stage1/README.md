@@ -25,8 +25,9 @@ in red) and `comparison.json` from the PNGs.
 | `sandbox_mid` | the same from about 22 m | **0** |
 
 The changed pixels are the tank and the bloom around it (`difference/`); the ground and sky are
-untouched beyond that halo. **The sandbox pair is byte-identical**: the x-ray dresses and restores a
-surface-material mesh exactly as it did the standard one.
+untouched beyond that halo. **The sandbox pair is byte-identical**: with the x-ray on, a
+surface-material mesh is dressed exactly as the standard one was. No still turns the x-ray off, so
+none of them shows its restore.
 
 `after-only/`, with no before twin:
 

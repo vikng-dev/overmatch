@@ -6,7 +6,10 @@
 A camouflage pattern is a MASK, not a picture: one palette colour's coverage per channel (R the
 livery's first camouflage colour, G its second, B its third), linear, 0 where the base paint shows.
 A livery recolours it (`assets/<tank>/<tank>.livery.ron`), so the same file serves any palette and
-any vehicle. Channels never overlap: where the first colour covers, the second is cut away.
+any vehicle. Coverage is non-negative in every channel and sums to at most 1 at every texel: the
+second colour is cut by the first (`second *= 1 - first`), so a soft edge carries both and never
+more than full cover. The PNG's rounding and the KTX2 encode can push a sum just past 1; the shader
+(`assets/shaders/tank_surface.wgsl`) scales such a sum back.
 
 THE LOOK (ASSUMED, a design choice, not a reconstruction of any documented scheme): wavy bands
 sprayed over the base coat, two interleaved families running diagonally, each band's width wandering

@@ -188,8 +188,11 @@ fn fragment(in: VertexOutput, @builtin(front_facing) is_front: bool) -> Fragment
                     project(dpy, axis) * s).rgb;
             }
             coverage *= vec3(surface.camo_r.a, surface.camo_g.a, surface.camo_b.a);
-            // The pattern's channels never overlap; a sum past 1 (filtering at a shared edge) is
-            // scaled back so the base paint never goes negative.
+            // A pattern's coverage is non-negative and sums to at most 1 per texel
+            // (`scripts/visuals/camo_stripes.py` cuts the second colour by the first), and linear
+            // filtering and the projection blend keep that bound. Quantisation and compression can
+            // push a sum just past 1, and a pattern made otherwise further: such a sum is scaled
+            // back so the base paint's weight never goes negative.
             coverage /= max(1.0, coverage.r + coverage.g + coverage.b);
             albedo = albedo * (1.0 - coverage.r - coverage.g - coverage.b)
                 + surface.camo_r.rgb * coverage.r

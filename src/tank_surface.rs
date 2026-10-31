@@ -21,7 +21,7 @@
 //!
 //! - ONE MATERIAL PER (VEHICLE, MATERIAL): made at the vehicle's first bind and shared by every
 //!   instance of it ([`SurfaceVehicles`]), so a battle of one vehicle type draws as many surface
-//!   materials as the glb has materials, as it did before.
+//!   materials as the glb has materials.
 //! - THE REST TABLE IS BUILT ONCE PER VEHICLE and never resized: row 0 is the identity, then one row
 //!   per node path of the first bind. A later instance finds its rows by node path; an untagged mesh
 //!   reads row 0. The shader's rest frame (`assets/shaders/tank_surface.wgsl`) is the mesh-local
@@ -36,7 +36,7 @@
 //! - A RUNG WEARS ITS SOURCE'S MATERIAL AND TAG: `geometry_lod` copies both, so a LOD switch changes
 //!   the silhouette and nothing else.
 //! - Rows are rigid up to a uniform scale: the shader takes their 3×3 as the normal's rotation and
-//!   renormalises. A node with a non-uniform scale is warned about once.
+//!   renormalises. A node whose scale strays past [`UNIFORM_SCALE_TOLERANCE`] is warned about once.
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 
@@ -81,6 +81,12 @@ const FLAG_PAINT: u32 = 2;
 const FLAG_CAMO: u32 = 4;
 /// The most camouflage colours a pattern carries: its R, G and B coverage.
 const CAMO_COLOURS: usize = 3;
+/// How far a rest row's axis lengths may differ, relative to the first, before its node is warned
+/// about as non-uniformly scaled. The shader turns normals by the row's 3×3 where the inverse
+/// transpose is due, so a stretch of `1 + s` along one axis leans a normal by at most about `s` rad
+/// (DERIVED: the angle between `M n` and `M⁻ᵀ n` for `M = diag(1 + s, 1, 1)`, at its worst 45° off
+/// the axis): under 0.06° here, below anything a pixel shows (ASSUMED).
+const UNIFORM_SCALE_TOLERANCE: f32 = 1e-3;
 
 // ---------------------------------------------------------------------------------------------
 // The data
@@ -720,10 +726,9 @@ impl Dress<'_, '_> {
                     rest.matrix3.z_axis,
                 ]
                 .map(|axis| axis.length());
-                if lengths
-                    .iter()
-                    .any(|length| (length - lengths[0]).abs() > 1e-3)
-                {
+                if lengths.iter().any(|length| {
+                    (length - lengths[0]).abs() > UNIFORM_SCALE_TOLERANCE * lengths[0]
+                }) {
                     warn_once!(
                         "tank surface: node {path:?} carries a non-uniform scale; its surface's \
                          normals lean"
@@ -990,7 +995,7 @@ mod tests {
     #[test]
     fn the_shipped_surface_maps_are_mipmapped_1k_ktx2() {
         use bevy::image::{CompressedImageFormats, ktx2_buffer_to_image};
-        // 1024² ⇒ 11 levels down to 1×1.
+        // DERIVED: 1024² halves to 1×1 in log2(1024) = 10 steps, so 11 levels.
         const FULL_MIP_CHAIN: u32 = 11;
         let data = shipped();
         let mut files: Vec<(String, bool)> = Vec::new();
@@ -1040,7 +1045,7 @@ mod tests {
         let linear = Srgb([255, 128, 0]).linear();
         assert_eq!(linear.x, 1.0);
         assert_eq!(linear.z, 0.0);
-        // sRGB 128 is about 0.216 in linear light, not 0.5.
+        // DERIVED from the sRGB curve: ((128/255 + 0.055) / 1.055)^2.4 = 0.2159, not 0.5.
         assert!((linear.y - 0.216).abs() < 0.002, "{linear}");
     }
 
