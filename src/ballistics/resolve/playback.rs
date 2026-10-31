@@ -106,6 +106,8 @@ pub(crate) struct Playback {
     elapsed: f64,
     next_effect: usize,
     mark: Option<usize>,
+    carrier: Vec3,
+    frames: Vec<(Entity, crate::damage_cam::record::HullFrame)>,
 }
 
 impl Crossing {
@@ -374,6 +376,8 @@ impl Playback {
             elapsed: 0.0,
             next_effect: 0,
             mark: None,
+            carrier: Vec3::ZERO,
+            frames: context.world.hull_frames(),
         }
     }
 
@@ -398,8 +402,107 @@ impl Playback {
         );
     }
 
+    pub(crate) fn in_moving_frame(&mut self, velocity: Vec3) {
+        self.carrier = velocity;
+    }
+
     pub(crate) fn flight(&self) -> Flight {
-        self.crossing.at(self.elapsed)
+        let mut flight = self.crossing.at(self.elapsed);
+        if self.carrier != Vec3::ZERO {
+            flight.position += self.carrier * self.elapsed as f32;
+            let velocity = flight.direction * flight.speed + self.carrier;
+            flight.speed = velocity.length();
+            if let Ok(direction) = Dir3::new(velocity) {
+                flight.frame = flight.frame.transport(*flight.direction, *direction);
+                flight.direction = direction;
+                flight.speed = velocity.length();
+            }
+            if let Some(interior) = &mut flight.continuation {
+                interior.anchor += self.carrier * self.elapsed as f32;
+            }
+        }
+        flight
+    }
+
+    fn point(&self, point: Vec3) -> Vec3 {
+        if self.carrier == Vec3::ZERO {
+            return point;
+        }
+        point
+            + self.carrier
+                * self
+                    .crossing
+                    .seconds_to(self.crossing.point_distance(point)) as f32
+    }
+
+    fn volume(&self, mut volume: VolumeCrossing) -> VolumeCrossing {
+        volume.entry = self.point(volume.entry);
+        volume.end = self.point(volume.end);
+        volume
+    }
+
+    fn dose_context(&self, context: DoseContext, moment: f64) -> DoseContext {
+        match context {
+            DoseContext::Line { entry, along } => DoseContext::Line {
+                entry: self.point(entry),
+                along,
+            },
+            DoseContext::Field { origin } => DoseContext::Field {
+                origin: origin + self.carrier * moment as f32,
+            },
+        }
+    }
+
+    fn world_decision(&self) -> Decision {
+        let mut decision = self.crossing.decision.clone();
+        if self.carrier == Vec3::ZERO {
+            return decision;
+        }
+        let end = self.crossing.at(self.crossing.seconds);
+        let velocity = end.direction * end.speed + self.carrier;
+        let direction = Dir3::new(velocity).unwrap_or(end.direction); // At world rest the heading is retained.
+        match &mut decision {
+            Decision::Clear {
+                resume,
+                continuation,
+                ..
+            } => {
+                *resume = self.point(*resume);
+                continuation.anchor += self.carrier * self.crossing.seconds as f32;
+            }
+            Decision::Bounce(bounce) => {
+                bounce.position = self.point(bounce.position);
+                bounce.resume = self.point(bounce.resume);
+                bounce.direction = direction;
+                bounce.speed = velocity.length();
+            }
+            Decision::Bite(bite) => {
+                bite.entrance = self.point(bite.entrance);
+                bite.volumes = bite
+                    .volumes
+                    .iter()
+                    .map(|volume| self.volume(*volume))
+                    .collect();
+                match &mut bite.end {
+                    BiteEnd::Embedded { at, .. } => *at = self.point(*at),
+                    BiteEnd::Perforated {
+                        exit,
+                        resume,
+                        direction: out,
+                        speed,
+                        continuation,
+                        ..
+                    } => {
+                        *exit = self.point(*exit);
+                        *resume = self.point(*resume);
+                        *out = direction;
+                        *speed = velocity.length();
+                        continuation.anchor += self.carrier * self.crossing.seconds as f32;
+                    }
+                }
+            }
+        }
+        decision
     }
 
     /// The game's damage model delivers due effects without reading geometry again. Returns
@@ -425,6 +528,7 @@ impl Playback {
             if *moment > target {
                 break;
             }
+            let first_mark = shell.marks.log.len();
             match effect {
                 Effect::FuzeEntry {
                     force,
@@ -436,7 +540,7 @@ impl Playback {
                     .fuze
                     .entered(*force, *speed, *owner, *approach),
                 Effect::Mark => {
-                    let Decision::Bite(bite) = &self.crossing.decision else {
+                    let Decision::Bite(bite) = self.world_decision() else {
                         panic!("only a bite schedules a crossing mark");
                     };
                     self.mark = Some(shell.marks.log.len());
@@ -464,14 +568,18 @@ impl Playback {
                     momentum,
                 } => {
                     lines.push(super::super::DeliveredLine {
-                        crossing: *crossing,
+                        crossing: self.volume(*crossing),
                         incoming: match &self.crossing.decision {
                             Decision::Bite(bite) => *bite.incoming,
                             _ => panic!("only a bite deposits a material line"),
                         },
                         momentum: *momentum,
                     });
-                    shell.dose.add_units(crossing.volume, *units, *context);
+                    shell.dose.add_units(
+                        crossing.volume,
+                        *units,
+                        self.dose_context(*context, *moment),
+                    );
                     removed += shell.dose.settle(
                         health,
                         true,
@@ -483,27 +591,36 @@ impl Playback {
                     incoming,
                     speed,
                 } => {
+                    let crossing = self.volume(*crossing);
                     shell
                         .dose
-                        .add_wounds(std::slice::from_ref(crossing), **incoming);
+                        .add_wounds(std::slice::from_ref(&crossing), **incoming);
                     let mark = shell.marks.log.len();
                     shell.marks.log.push(ArmourMark::Wound {
                         incoming: **incoming,
                         speed: *speed,
-                        volumes: vec![*crossing],
+                        volumes: vec![crossing],
                     });
                     removed += shell.dose.settle(health, true, mark);
                 }
                 Effect::Cone { cone, gated, doses } => {
                     for &(address, units, context) in doses {
-                        shell.dose.add_units(address, units, context);
+                        shell
+                            .dose
+                            .add_units(address, units, self.dose_context(context, *moment));
                     }
                     shell.spall.gated += gated;
                     let mark = self
                         .mark
                         .expect("an exit field follows its crossing's entrance mark");
                     if let Some(cone) = cone {
-                        shell.spall.cones.push(cone.clone());
+                        let mut cone = cone.clone();
+                        let shift = self.carrier * *moment as f32;
+                        cone.origin += shift;
+                        for ray in &mut cone.rays {
+                            ray.end += shift;
+                        }
+                        shell.spall.cones.push(cone);
                         let ArmourMark::Crossing { cones, .. } = &mut shell.marks.log[mark] else {
                             panic!("a playback mark remains its own crossing");
                         };
@@ -511,7 +628,7 @@ impl Playback {
                     }
                     removed += shell.dose.settle(health, true, mark);
                 }
-                Effect::Finish => match &self.crossing.decision {
+                Effect::Finish => match &self.world_decision() {
                     Decision::Clear { .. } => {}
                     Decision::Bounce(bounce) => {
                         apply_bounce(bounce, shell, terminal_emitted, bodies, commands);
@@ -528,6 +645,14 @@ impl Playback {
                     ),
                 },
             }
+            for mark in first_mark..shell.marks.log.len() {
+                for &(tank, frame) in &self.frames {
+                    shell.marks.frames.insert(
+                        (mark, tank),
+                        frame.translated(self.carrier * *moment as f32),
+                    );
+                }
+            }
             self.next_effect += 1;
         }
         self.elapsed = target;
@@ -535,6 +660,6 @@ impl Playback {
     }
 
     pub(crate) fn into_decision(self) -> Decision {
-        self.crossing.decision
+        self.world_decision()
     }
 }

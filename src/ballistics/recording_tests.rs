@@ -684,31 +684,16 @@ fn hull() -> [Volume; 3] {
 /// between its plates, 1.5 m from each.
 const FROM: f32 = 37.8;
 
-/// A fixture tank of [`hull`] at rest at `at`, carrying its envelope as a tank's spawn does
-/// ([`Envelope`]): the bound of its boxes in its frame, exact for boxes square to that frame on a
-/// body with no servos. Returns the root and each volume.
-fn enveloped_tank(app: &mut App, at: Vec3) -> (Entity, Vec<Entity>) {
-    let volumes = hull();
-    let (root, spawned) = tank(app, at, 0.0, Vec3::ZERO, &volumes);
-    let (min, max) = volumes.iter().fold(
-        (Vec3::INFINITY, Vec3::NEG_INFINITY),
-        |(min, max), &(_, size, centre, _)| {
-            (min.min(centre - size * 0.5), max.max(centre + size * 0.5))
-        },
-    );
-    app.world_mut()
-        .entity_mut(root)
-        .insert(Envelope(bevy::math::bounding::Aabb3d::from_min_max(
-            min, max,
-        )));
-    (root, spawned)
+/// The game's damage model: a fixture hull at rest, ready for motion on the test's interval.
+fn hull_tank(app: &mut App, at: Vec3) -> (Entity, Vec<Entity>) {
+    tank(app, at, 0.0, Vec3::ZERO, &hull())
 }
 
 /// The game's damage model: collider poses, delivered impacts and whether immutable playback
 /// remains at the end of the tick.
 struct TickReads {
     poses: Vec<(Vec3, Quat)>,
-    impacts: Vec<(Vec3, Verdict)>,
+    impacts: Vec<Vec<(f32, Verdict)>>,
     playing: bool,
 }
 
@@ -716,13 +701,8 @@ struct TickReads {
 /// pose is read after the physics interval off its front plate (each of `fronts`, square to the
 /// hull at [`hull`]'s front centre): the completed collider pose the game's damage-model walk reads.
 fn fire_and_read(app: &mut App, fronts: &[Entity], from: Vec3, ticks: usize) -> Vec<TickReads> {
-    let log = Arc::new(std::sync::Mutex::new(Vec::new()));
-    let sink = log.clone();
-    app.add_observer(move |impact: On<Impact>| {
-        sink.lock()
-            .unwrap()
-            .push((impact.position, impact.outcome.verdict()));
-    });
+    app.insert_resource(RetainSpentShells(true));
+    let mut seen = 0;
     fire(app, from, FireMechanism::Single);
     let centre = hull()[0].2;
     (0..ticks)
@@ -744,49 +724,69 @@ fn fire_and_read(app: &mut App, fronts: &[Entity], from: Vec3, ticks: usize) -> 
                 .query::<&Projectile>()
                 .iter(app.world())
                 .any(|projectile| !projectile.playback.is_empty());
+            let mut impacts = vec![Vec::new(); fronts.len()];
+            let world = app.world_mut();
+            for marks in world.query::<&PenetrationMarks>().iter(world) {
+                for (index, mark) in marks.log.iter().enumerate().skip(seen) {
+                    let (at, verdict) = match mark {
+                        ArmourMark::Crossing { entrance, end, .. } => (
+                            *entrance,
+                            match end {
+                                CrossingEnd::Rest { .. } => Verdict::Stopped,
+                                CrossingEnd::Exit { .. } => Verdict::Through,
+                            },
+                        ),
+                        ArmourMark::Bounce { position, .. } => (*position, Verdict::Ricochet),
+                        _ => continue,
+                    };
+                    for (tank, front) in fronts.iter().enumerate() {
+                        let owner = world.get::<VolumeOf>(*front).unwrap().tank();
+                        let frame = marks
+                            .frames
+                            .get(&(index, owner))
+                            .expect("a runtime contact carries its sampled frame");
+                        let (position, rotation) = frame.pose();
+                        let z = (rotation.inverse() * (at - position)).z;
+                        if z.abs() < 2.0 {
+                            impacts[tank].push((z, verdict));
+                        }
+                    }
+                }
+                seen = marks.log.len();
+            }
             TickReads {
                 poses,
-                impacts: std::mem::take(&mut *log.lock().unwrap()),
+                impacts,
                 playing,
             }
         })
         .collect()
 }
 
-/// The game's damage model reads each face once against the discovery pose, even if delivery
-/// spans ticks while the fixture body moves. The first delivered face pins that discovery pose.
+/// The game's damage model: every contact is stated in its own frozen hull frame, even
+/// when delivery spans ticks. A tick-end pose substituted for it moves the face off its plane.
 fn crossed_whole(reads: &[TickReads], tank: usize) -> usize {
     let faces = hull().map(|(_, size, centre, _)| centre.z + size.z * 0.5);
-    let hull_z = |tick: &TickReads, at: Vec3| {
-        let (position, rotation) = tick.poses[tank];
-        (rotation.inverse() * (at - position)).z
-    };
-    let ticks: Vec<usize> = (0..reads.len())
-        .filter(|&i| {
-            reads[i]
-                .impacts
-                .iter()
-                .any(|&(at, _)| hull_z(&reads[i], at).abs() < 2.0)
-        })
-        .collect();
-    let tick = *ticks.first().expect("the fixture tank is crossed");
-    let read: Vec<(f32, Verdict)> = reads
+    let tick = reads
         .iter()
-        .flat_map(|read| &read.impacts)
-        .map(|&(at, verdict)| (hull_z(&reads[tick], at), verdict))
-        .filter(|(z, _)| z.abs() < 2.0)
+        .position(|read| !read.impacts[tank].is_empty())
+        .expect("the fixture tank is crossed");
+    let read: Vec<_> = reads
+        .iter()
+        .flat_map(|read| &read.impacts[tank])
+        .copied()
         .collect();
     for &(z, _) in &read {
         assert!(
-            faces.iter().any(|face| (z - face).abs() < 1.0e-3),
-            "tank {tank}: a read at hull z {z}, on none of its faces {faces:?}"
+            faces.iter().any(|face| (z - face).abs() < 1e-3),
+            "contact is on its sampled face: {z}, {faces:?}"
         );
     }
     for plate in [faces[0], faces[2]] {
         assert!(
             read.iter()
-                .any(|&(z, verdict)| (z - plate).abs() < 1.0e-3 && verdict.entered()),
-            "tank {tank}: the plate at hull z {plate} is read and perforated: {read:?}"
+                .any(|&(z, verdict)| (z - plate).abs() < 1e-3 && verdict.entered()),
+            "the plate at {plate} is perforated: {read:?}"
         );
     }
     tick
@@ -798,7 +798,7 @@ fn crossed_whole(reads: &[TickReads], tank: usize) -> usize {
 fn a_moving_tanks_crossing_resolves_against_its_pose_at_contact() {
     for pose in [ChildPose::Avian, ChildPose::Networked] {
         let mut app = recording_world_under(false, pose);
-        let (tank, volumes) = enveloped_tank(&mut app, Vec3::ZERO);
+        let (tank, volumes) = hull_tank(&mut app, Vec3::ZERO);
         settle(&mut app);
         app.world_mut()
             .entity_mut(tank)
@@ -826,8 +826,8 @@ fn a_moving_tanks_crossing_resolves_against_its_pose_at_contact() {
 fn a_round_through_one_tank_into_a_second_resolves_both() {
     for pose in [ChildPose::Avian, ChildPose::Networked] {
         let mut app = recording_world_under(false, pose);
-        let (near, near_volumes) = enveloped_tank(&mut app, Vec3::ZERO);
-        let (far, far_volumes) = enveloped_tank(&mut app, Vec3::new(0.0, 0.0, -9.0));
+        let (near, near_volumes) = hull_tank(&mut app, Vec3::ZERO);
+        let (far, far_volumes) = hull_tank(&mut app, Vec3::new(0.0, 0.0, -9.0));
         settle(&mut app);
         for (tank, speed) in [(near, 10.0), (far, -10.0)] {
             app.world_mut()
@@ -852,37 +852,6 @@ fn a_round_through_one_tank_into_a_second_resolves_both() {
             );
         }
     }
-}
-
-/// The game's damage model: an empty discovery envelope consumes no extra flight seconds.
-/// Authority and replica free flight must stay identical through it. Dimensions are fixture data.
-#[test]
-fn a_replicas_round_runs_through_an_envelope_as_the_authoritys() {
-    let track = |client: bool| {
-        let mut app = recording_world(client);
-        app.world_mut().spawn((
-            Transform::IDENTITY,
-            RigidBody::Static,
-            Envelope(bevy::math::bounding::Aabb3d::new(
-                Vec3::ZERO,
-                Vec3::splat(1.5),
-            )),
-        ));
-        settle(&mut app);
-        fire(&mut app, Vec3::new(0.0, 0.0, FROM), FireMechanism::Single);
-        (0..5)
-            .map(|_| {
-                app.update();
-                app.world_mut()
-                    .query::<(&Transform, &Projectile)>()
-                    .iter(app.world())
-                    .map(|(at, _)| at.translation)
-                    .collect::<Vec<_>>()
-            })
-            .collect::<Vec<_>>()
-    };
-    let (authority, replica) = (track(false), track(true));
-    assert_eq!(authority, replica);
 }
 
 /// A round that leaves a tank and strikes it again off another tank's armour: each encounter is its
@@ -1388,5 +1357,177 @@ fn a_walk_push_changes_position_only_in_the_next_physics_step() {
     assert!(
         app.world().get::<Position>(body).unwrap().x > origin.x,
         "the next physics step integrates the walk's impulse"
+    );
+}
+
+/// The game's damage model: a face approaching at fixture 10 m/s must be met in the tick
+/// whose tick-start snapshot misses it (DERIVED 1-in-80 snapshot window: 10/800).
+/// The authority relies on contact discovery never leaving the next tick inside that face.
+#[test]
+fn an_approaching_face_is_met_before_the_next_start() {
+    let mut app = recording_world(false);
+    app.insert_resource(RetainSpentShells(true));
+    let (root, plates) = tank(
+        &mut app,
+        Vec3::ZERO,
+        0.0,
+        Vec3::ZERO,
+        &[(
+            "moving plate",
+            Vec3::new(4.0, 4.0, 0.05),
+            Vec3::ZERO,
+            Kind::Plate,
+        )],
+    );
+    settle(&mut app);
+    app.world_mut()
+        .entity_mut(root)
+        .insert(LinearVelocity(Vec3::Z * 10.0));
+    fire(&mut app, Vec3::new(0.0, 0.0, 12.60), FireMechanism::Single);
+    app.update();
+    let mut query = app.world_mut().query::<&PenetrationMarks>();
+    let speeds: Vec<_> = query
+        .iter(app.world())
+        .flat_map(|marks| &marks.log)
+        .filter_map(|mark| match mark {
+            ArmourMark::Crossing {
+                speed_in, volumes, ..
+            } if volumes.iter().any(|v| v.volume == plates[0]) => Some(*speed_in),
+            ArmourMark::Bounce { speed_in, .. } => Some(*speed_in),
+            _ => None,
+        })
+        .collect();
+    assert!(
+        !speeds.is_empty(),
+        "the moving face contacts this tick despite a snapshot miss"
+    );
+    assert!(
+        speeds[0] > SPEED,
+        "approach increases relative impact speed: {}",
+        speeds[0]
+    );
+    for _ in 0..3 {
+        app.update();
+    }
+}
+
+/// The game's damage model: a receding plate takes world velocity minus its point velocity.
+/// A world-speed mutant overstates potency; the mechanism and recorded impact rely on this read.
+#[test]
+fn a_receding_body_takes_a_slower_impact() {
+    let mut app = recording_world(false);
+    app.insert_resource(RetainSpentShells(true));
+    let (root, _) = tank(
+        &mut app,
+        Vec3::ZERO,
+        0.0,
+        Vec3::ZERO,
+        &[(
+            "moving plate",
+            Vec3::new(4.0, 4.0, 0.05),
+            Vec3::ZERO,
+            Kind::Plate,
+        )],
+    );
+    settle(&mut app);
+    app.world_mut()
+        .entity_mut(root)
+        .insert(LinearVelocity(Vec3::NEG_Z * 10.0));
+    fire(&mut app, Vec3::new(0.0, 0.0, 5.0), FireMechanism::Single);
+    app.update();
+    let mut query = app.world_mut().query::<&PenetrationMarks>();
+    let speeds: Vec<_> = query
+        .iter(app.world())
+        .flat_map(|marks| &marks.log)
+        .filter_map(|mark| match mark {
+            ArmourMark::Crossing { speed_in, .. } | ArmourMark::Bounce { speed_in, .. } => {
+                Some(*speed_in)
+            }
+            _ => None,
+        })
+        .collect();
+    assert!(!speeds.is_empty(), "the receding plate is reached");
+    assert!(
+        (speeds[0]
+            - (freeflight_step(
+                Vec3::NEG_Z * SPEED,
+                fixture_drag_k(FIXTURE_88.caliber, FIXTURE_88.mass),
+                TICK.as_secs_f32()
+            )
+            .length()
+                - 10.0))
+            .abs()
+            < 0.01,
+        "relative fixture impact: {}",
+        speeds[0]
+    );
+}
+
+/// The game's damage model: the round's real impulse launches a loose piece faster than the
+/// round along its line. The next interval must meet it as a second ordinary contact, rather
+/// than letting tick-end geometry cover the next discovery start. Mass is fixture data.
+#[test]
+fn a_piece_launched_faster_than_the_round_is_met_again() {
+    let mut app = recording_world(false);
+    app.insert_resource(RetainSpentShells(true))
+        .insert_resource(avian3d::prelude::Gravity(Vec3::ZERO));
+    let (piece, _) = tank(
+        &mut app,
+        Vec3::new(0.0, 20.0, 5.0),
+        0.0,
+        Vec3::ZERO,
+        &[(
+            "loose plate",
+            Vec3::new(4.0, 4.0, 0.05),
+            Vec3::ZERO,
+            Kind::Plate,
+        )],
+    );
+    app.world_mut()
+        .entity_mut(piece)
+        .insert((RigidBody::Dynamic, Mass(0.1)));
+    settle(&mut app);
+    fire_along(
+        &mut app,
+        Vec3::Y * 20.0,
+        Dir3::Z,
+        FireMechanism::Single,
+        None,
+    );
+    app.update();
+    let piece_speed = app.world().get::<LinearVelocity>(piece).unwrap().z;
+    let mut shells = app.world_mut().query::<(&Projectile, &PenetrationMarks)>();
+    let (projectile, marks) = shells.single(app.world()).unwrap();
+    assert!(
+        piece_speed > projectile.velocity.z,
+        "the actual impulse launched the fixture piece faster: {piece_speed} > {}",
+        projectile.velocity.z
+    );
+    let first = marks
+        .log
+        .iter()
+        .filter(|mark| {
+            matches!(
+                mark,
+                ArmourMark::Crossing { .. } | ArmourMark::Bounce { .. }
+            )
+        })
+        .count();
+    assert_eq!(first, 1, "the first contact resolved");
+    app.update();
+    let (_, marks) = shells.single(app.world()).unwrap();
+    let contacts = marks
+        .log
+        .iter()
+        .filter(|mark| {
+            matches!(
+                mark,
+                ArmourMark::Crossing { .. } | ArmourMark::Bounce { .. }
+            )
+        })
+        .count();
+    assert!(
+        contacts > first,
+        "the overtaking piece is an ordinary second contact"
     );
 }

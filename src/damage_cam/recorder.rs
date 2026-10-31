@@ -200,7 +200,7 @@ impl MarchRecorder<'_, '_> {
         &mut self,
         shell: Entity,
         recording: Option<Mut<ShotRecording>>,
-        marks: &[ArmourMark],
+        marks: &PenetrationMarks,
         marks_from: usize,
         dose: &ShotDose,
         emptied_from: usize,
@@ -220,7 +220,7 @@ impl MarchRecorder<'_, '_> {
         };
         let owner = |volume: Entity| owners.get(volume).ok().map(VolumeOf::tank);
         let tick = self.clock.as_ref().map_or(0, |clock| clock.0);
-        for (index, mark) in marks.iter().enumerate().skip(marks_from) {
+        for (index, mark) in marks.log.iter().enumerate().skip(marks_from) {
             let mut touched: Vec<Entity> = match mark {
                 ArmourMark::Bounce { struck, .. } => owner(*struck).into_iter().collect(),
                 ArmourMark::Crossing { volumes, .. } | ArmourMark::Wound { volumes, .. } => volumes
@@ -263,7 +263,10 @@ impl MarchRecorder<'_, '_> {
                     }
                 };
                 let struck = &mut recording.struck[at];
-                if !matches!(struck.frames.last(), Some((_, None))) {
+                if let Some(frame) = marks.frames.get(&(index, tank)) {
+                    struck.frames.push((index, Some(*frame)));
+                    recorder.unposed |= struck.servo_deg.is_none();
+                } else if !matches!(struck.frames.last(), Some((_, None))) {
                     struck.frames.push((index, None));
                     recorder.unposed = true;
                 }
@@ -342,7 +345,9 @@ fn pose_struck(world: &mut World) {
                 .map(|spent| &spent.recording),
         )
         .flat_map(|recording| &recording.struck)
-        .filter(|struck| matches!(struck.frames.last(), Some((_, None))))
+        .filter(|struck| {
+            struck.servo_deg.is_none() || matches!(struck.frames.last(), Some((_, None)))
+        })
         .map(|struck| struck.tank)
         .collect();
     tanks.sort();

@@ -486,14 +486,12 @@ fn spawn_targets(
             ..default()
         });
         let collider = Collider::cuboid(3.0, 3.0, thickness);
-        let envelope = crate::ballistics::Envelope::of(&collider);
         commands.spawn((
             Mesh3d(meshes.add(Cuboid::new(3.0, 3.0, thickness))),
             MeshMaterial3d(material),
             Transform::from_xyz(x, 2.0, 0.0),
             RigidBody::Static,
             collider,
-            envelope,
             CollisionLayers::new([Layer::Armor], LayerMask::ALL),
             BallisticVolume {
                 material: crate::ballistics::VolumeMaterial::of(

@@ -28,6 +28,7 @@ pub(super) struct Poses {
 #[derive(Resource, Default)]
 pub(super) struct ColliderMotion {
     pub colliders: HashMap<Entity, Poses>,
+    pub bodies: HashMap<Entity, Poses>,
     /// DERIVED conservative displacement of any collider point, used to grow a tree query.
     pub largest_motion: f32,
 }
@@ -76,7 +77,18 @@ pub(super) fn seed_births(
     mut history: ResMut<ColliderMotion>,
     colliders: Colliders,
     bodies: Query<(&Position, &Rotation)>,
+    roots: Query<(Entity, &Position, &Rotation), With<RigidBody>>,
 ) {
+    for (entity, position, rotation) in &roots {
+        let pose = Pose {
+            position: position.0,
+            rotation: rotation.0,
+        };
+        history.bodies.entry(entity).or_insert(Poses {
+            from: pose,
+            to: pose,
+        });
+    }
     for (entity, position, rotation, collider, owner, local) in &colliders {
         if collider.is_changed() || !history.colliders.contains_key(&entity) {
             let pose = composed_pose(entity, position, rotation, owner, local, &bodies);
@@ -118,6 +130,7 @@ pub(super) fn snapshot(
     mut history: ResMut<ColliderMotion>,
     colliders: Colliders,
     bodies: Query<(&Position, &Rotation)>,
+    roots: Query<(Entity, &Position, &Rotation), With<RigidBody>>,
 ) {
     let mut next = HashMap::with_capacity(colliders.iter().len());
     let mut largest_motion = 0.0f32;
@@ -130,6 +143,17 @@ pub(super) fn snapshot(
         largest_motion = largest_motion.max(displacement);
         next.insert(entity, poses);
     }
+    history.bodies = roots
+        .iter()
+        .map(|(entity, position, rotation)| {
+            let to = Pose {
+                position: position.0,
+                rotation: rotation.0,
+            };
+            let from = history.bodies.get(&entity).map_or(to, |poses| poses.to);
+            (entity, Poses { from, to })
+        })
+        .collect();
     history.colliders = next;
     history.largest_motion = largest_motion;
 }
@@ -167,9 +191,276 @@ fn point_motion_bound(poses: Poses, collider: &Collider) -> f32 {
     if bound == 0.0 { 0.0 } else { bound.next_up() }
 }
 
+impl Pose {
+    pub(super) fn local(self, point: Vec3) -> Vec3 {
+        self.rotation.inverse() * (point - self.position)
+    }
+}
+
+impl Poses {
+    pub(super) fn at(self, fraction: f32) -> Pose {
+        if self.from == self.to {
+            return self.to;
+        }
+        Pose {
+            position: self.from.position.lerp(self.to.position, fraction),
+            rotation: self.from.rotation.slerp(self.to.rotation, fraction),
+        }
+    }
+
+    /// The game's damage model: the struck point's velocity on the declared lerp/slerp chord.
+    /// Collider origins include child servo and recoil offsets, rather than only body velocity.
+    pub(super) fn velocity_at(self, fraction: f32, local: Vec3, dt: f32) -> Vec3 {
+        if self.from == self.to {
+            return Vec3::ZERO;
+        }
+        let mut delta = self.to.rotation * self.from.rotation.inverse();
+        if delta.w < 0.0 {
+            delta = -delta;
+        } // The same shortest arc as quaternion slerp.
+        let angular = delta.to_scaled_axis() / dt;
+        (self.to.position - self.from.position) / dt
+            + angular.cross(self.at(fraction).rotation * local)
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+pub(super) struct Sweep {
+    pub from: f32,
+    pub to: f32,
+    pub dt: f32,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub(super) struct ContactMotion {
+    pub fraction: f32,
+    pub point: Vec3,
+    pub velocity: Vec3,
+}
+
+/// The game's damage model: one collider's local endpoint chord. The collector keeps a unit
+/// local axis; its distance is converted back to a shared tick fraction before candidates compete.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "one moving candidate and one world segment"
+)]
+pub(super) fn sweep_collider(
+    poses: Poses,
+    sweep: Sweep,
+    node: Entity,
+    primitive: Entity,
+    collider: &Collider,
+    surfaces: Option<&super::BallisticSurfaces>,
+    start: Vec3,
+    end: Vec3,
+) -> Option<(ContactMotion, Vec3)> {
+    let from = poses.at(sweep.from);
+    let to = poses.at(sweep.to);
+    let a = from.local(start);
+    let b = to.local(end);
+    let relative = b - a;
+    // With no relative movement there is no entry, but an inside start is still a bug. A probe
+    // along a fixed local axis reads its boundary without inventing relative motion.
+    let axis = Dir3::new(relative).map_or(Vec3::Z, |axis| *axis);
+    let distance = relative.length();
+    let bounds = collider.aabb(Vec3::ZERO, Quat::IDENTITY);
+    let far = (bounds.min - a).abs().max((bounds.max - a).abs()).length();
+    let behind = (far + super::MARCH_EPS).next_up();
+    let length = (behind + distance.max(behind)).next_up();
+    let laws = super::walk::WalkLaws::default();
+    let mut hits = Vec::new();
+    super::collect::collect_collider(
+        &super::collect::Corridor {
+            anchor: Vec3::ZERO,
+            origin: a,
+            axis,
+            length,
+            behind,
+            seeded: &[],
+            handoff: None,
+            laws: &laws,
+        },
+        node,
+        primitive,
+        collider,
+        surfaces,
+        Position(Vec3::ZERO),
+        Rotation::IDENTITY,
+        &mut hits,
+    )
+    .unwrap_or_else(|error| error.panic());
+    let (entry, normal) = super::walk::discovery_entry(
+        &hits,
+        f64::from(behind),
+        super::walk::topology_band(f64::from(a.length()), &laws)
+            .min(f64::from(super::MARCH_EPS) * 0.25),
+    )?;
+    if distance == 0.0 || entry > f64::from(distance) {
+        return None;
+    }
+    let part = (entry / f64::from(distance)).clamp(0.0, 1.0) as f32;
+    let fraction = sweep.from + (sweep.to - sweep.from) * part;
+    let pose = poses.at(fraction);
+    let local = a + relative * part;
+    Some((
+        ContactMotion {
+            fraction,
+            point: pose.position + pose.rotation * local,
+            velocity: poses.velocity_at(fraction, local, sweep.dt),
+        },
+        pose.rotation * normal,
+    ))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The game's damage model: the collider-local chord finds an overtaking piece as an
+    /// ordinary entering face. A world-only ray misses it; subsequent discovery relies on this.
+    #[test]
+    fn a_faster_piece_meets_the_round_from_behind() {
+        let collider = Collider::cuboid(2.0, 2.0, 0.1);
+        let poses = Poses {
+            from: Pose {
+                position: Vec3::NEG_Z,
+                rotation: Quat::IDENTITY,
+            },
+            to: Pose {
+                position: Vec3::Z * 19.0,
+                rotation: Quat::IDENTITY,
+            },
+        };
+        let (contact, normal) = sweep_collider(
+            poses,
+            Sweep {
+                from: 0.0,
+                to: 1.0,
+                dt: 0.015625,
+            },
+            Entity::PLACEHOLDER,
+            Entity::PLACEHOLDER,
+            &collider,
+            None,
+            Vec3::ZERO,
+            Vec3::Z * 12.5,
+        )
+        .expect("overtaking contact");
+        assert!((contact.fraction - 0.95 / 7.5).abs() < 1e-6);
+        assert_eq!(contact.velocity, Vec3::Z * 1280.0);
+        assert_eq!(normal, Vec3::Z);
+    }
+
+    /// The game's damage model: even a shallow inside discovery start is a bug. The caller
+    /// relies on refusing it before the contact handoff's face tolerance could hide it.
+    #[test]
+    #[should_panic(expected = "discovery starts outside")]
+    fn discovery_refuses_a_shallow_inside_start() {
+        let pose = Pose {
+            position: Vec3::ZERO,
+            rotation: Quat::IDENTITY,
+        };
+        sweep_collider(
+            Poses {
+                from: pose,
+                to: pose,
+            },
+            Sweep {
+                from: 0.0,
+                to: 1.0,
+                dt: 0.015625,
+            },
+            Entity::PLACEHOLDER,
+            Entity::PLACEHOLDER,
+            &Collider::cuboid(1.0, 1.0, 1.0),
+            None,
+            Vec3::new(0.0, 0.0, 0.4999),
+            Vec3::NEG_Z,
+        );
+    }
+
+    /// The game's damage model: static discovery retains the original Avian hit distance and
+    /// normal bits. The mechanism relies on this cutover changing no static contact arithmetic.
+    #[test]
+    fn static_discovery_keeps_the_original_contact_bits() {
+        use bevy::ecs::system::RunSystemOnce;
+        let mut app = super::super::march_tests::world_with_trimesh_plates(&[(
+            Vec3::new(4.0, 4.0, 0.05),
+            Vec3::new(0.0, 2.0, 0.0),
+        )]);
+        app.init_resource::<ColliderMotion>();
+        app.world_mut().run_system_once(snapshot).unwrap();
+        app.world_mut()
+            .run_system_once(|world: super::super::ProjectileMarchWorld| {
+                for x in [0.0, 0.99, 1.99, 2.02] {
+                    let origin = Vec3::new(x, 2.0, 5.0);
+                    let offsets = super::super::resolve::layout(
+                        &super::super::walk::DiscFrame::anchored(Vec3::NEG_Z).unwrap(),
+                        0.044,
+                    );
+                    let mut reference = None;
+                    for offset in &offsets {
+                        if let Some(hit) = world.spatial.cast_ray_predicate(
+                            origin + *offset,
+                            Dir3::NEG_Z,
+                            12.5,
+                            true,
+                            &avian3d::prelude::SpatialQueryFilter::from_mask(crate::Layer::Armor),
+                            &|_| true,
+                        ) && reference.is_none_or(|best: avian3d::prelude::RayHitData| {
+                            hit.distance < best.distance
+                        }) {
+                            reference = Some(hit);
+                        }
+                    }
+                    world.sweep.set(Some(Sweep {
+                        from: 0.0,
+                        to: 1.0,
+                        dt: 0.015625,
+                    }));
+                    let found = super::super::cast_disc_segment(
+                        &world,
+                        &offsets,
+                        origin,
+                        Dir3::NEG_Z,
+                        12.5,
+                        &|_| true,
+                    );
+                    match (reference, found) {
+                        (Some(expected), Some(super::super::SegmentHit::Armor(actual))) => {
+                            assert_eq!(actual.entity, expected.entity);
+                            assert_eq!(actual.distance.to_bits(), expected.distance.to_bits());
+                            assert_eq!(
+                                actual.normal.to_array().map(f32::to_bits),
+                                expected.normal.to_array().map(f32::to_bits)
+                            );
+                        }
+                        (None, None) => {}
+                        _ => panic!("static discovery changed contact presence"),
+                    }
+                }
+            })
+            .unwrap();
+    }
+
+    /// The game's damage model: angular contact velocity follows the same shortest arc as
+    /// posing, including equivalent signed endpoint quaternions. Relative potency relies on it.
+    #[test]
+    fn point_velocity_uses_the_posing_arc_and_local_lever() {
+        let poses = Poses {
+            from: Pose {
+                position: Vec3::ZERO,
+                rotation: Quat::IDENTITY,
+            },
+            to: Pose {
+                position: Vec3::X * 2.0,
+                rotation: -Quat::from_rotation_z(0.5),
+            },
+        }; // Fixture displacement 2 m, turn 0.5 rad, duration 1 s.
+        let lever = poses.at(0.5).rotation * Vec3::X;
+        let expected = Vec3::X * 2.0 + Vec3::Z.cross(lever) * 0.5;
+        assert!(poses.velocity_at(0.5, Vec3::X, 1.0).distance(expected) < 1e-6);
+    }
 
     fn app() -> App {
         let mut app = App::new();

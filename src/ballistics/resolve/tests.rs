@@ -1202,9 +1202,7 @@ fn certified_then_resumed(
                     laws: WalkLaws::default(),
                 };
                 let frame = DiscFrame::anchored(swept).expect("a real direction");
-                let flight = Flight::launched(
-                    &context,
-                    &|_| true,
+                let mut flight = Flight::launched(
                     at,
                     Dir3::new(swept).expect("a direction"),
                     Dir3::new(launch).expect("a direction"),
@@ -1212,7 +1210,15 @@ fn certified_then_resumed(
                     frame,
                     radius,
                     None,
-                )?;
+                );
+                flight.continuation = Some(certified(
+                    &context,
+                    &|_| true,
+                    at,
+                    Dir3::new(swept).expect("a direction"),
+                    frame,
+                    radius,
+                )?);
                 let starts = flight
                     .continuation
                     .clone()

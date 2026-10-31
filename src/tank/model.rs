@@ -453,13 +453,13 @@ pub struct WeaponIndex(pub usize);
 /// Compose tick-truth local transforms from the physics root. Simulation must not read
 /// `GlobalTransform`, which belongs to the interpolated render frame. Returns `None` when the node
 /// is no longer under `root`.
-pub(crate) fn rig_world_pose(
+pub(crate) fn rig_world_pose<F: bevy::ecs::query::QueryFilter>(
     node: Entity,
     root: Entity,
     root_position: Vec3,
     root_rotation: Quat,
     parents: &Query<&ChildOf>,
-    locals: &Query<&Transform>,
+    locals: &Query<&Transform, F>,
 ) -> Option<(Vec3, Quat)> {
     let mut chain = Vec::new();
     let mut entity = node;

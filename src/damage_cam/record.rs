@@ -73,6 +73,11 @@ pub(crate) struct HullFrame {
 }
 
 impl HullFrame {
+    /// The game's damage model carries the frozen scene along the crossing's resolved world path.
+    pub(crate) fn translated(self, shift: Vec3) -> Self {
+        Self::posed(self.pose.0 + shift, self.pose.1)
+    }
+
     /// The frame of a hull node posed at `position`, `rotation` (WORLD).
     pub(crate) fn posed(position: Vec3, rotation: Quat) -> Self {
         Self {

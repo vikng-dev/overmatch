@@ -17,14 +17,11 @@ use crate::substances::SubstanceRegistry;
 use crate::tank::{ServoRole, SimParts, TrackSide, rig_world_pose};
 
 mod embedding;
-/// A tank kind's envelopes, computed from the bake's data (design §13.5, "The envelope").
-mod envelope;
 #[cfg(test)]
 mod fixture;
 /// The one finding shape every stage of the asset door emits.
 mod report;
 
-pub(crate) use envelope::TankEnvelopes;
 use report::sorted;
 pub use report::{Check, Finding, Severity, Stage, Subject, has_error, render};
 
@@ -371,26 +368,16 @@ pub(crate) struct TankBlueprint {
     pub file: String,
     pub geometry: Arc<TankGeometry>,
     pub spec: Arc<TankSpec>,
-    /// Computed from `geometry` and `spec` by [`TankBlueprint::new`], once per kind.
-    envelopes: TankEnvelopes,
 }
 
 impl TankBlueprint {
-    /// A tank kind's blueprint, with its envelopes computed here from its data, so every spawn of
-    /// the kind shares one result.
+    /// A tank kind's synchronous spawn data, shared by every instance.
     pub(crate) fn new(file: String, geometry: TankGeometry, spec: TankSpec) -> Self {
-        let envelopes = TankEnvelopes::of(&geometry, &spec);
         Self {
             file,
             geometry: Arc::new(geometry),
             spec: Arc::new(spec),
-            envelopes,
         }
-    }
-
-    /// The kind's envelopes, which every spawn of it carries ([`crate::ballistics::Envelope`]).
-    pub(crate) fn envelopes(&self) -> TankEnvelopes {
-        self.envelopes
     }
 }
 

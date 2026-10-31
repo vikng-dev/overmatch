@@ -1568,15 +1568,16 @@ advance between these queries. The playback clock then delivers the already-deci
 - **A start inside a collider is a bug**, and panics. Playback inside its already-decided crossing
   is not a new contact-discovery start. Bodies move rather than being placed: a felled tree falls.
 
-**Implementation boundary.** This paragraph specifies the target law, not a claim that all of it
-has landed. Seconds, immutable timed crossings, collider endpoint history, post-physics walk and
-consumer ordering, and removal of distance overrun and the per-frame march mode are implemented.
-Contact discovery still needs the look-back body-frame segment; until that cutover,
-`Envelope`, `NextStep` and `ProjectileMarchWorld::crossing_reach` remain temporary discovery
-machinery. The redesign also removes envelope baking and spawn inserts, pose prediction, tick-start
-containment certification, the flat-world terrain arm and treating an armour
-collider without a ballistic volume as ground (that case becomes an error). Those deletions belong
-to the later lanes; this law does not certify the old envelope model's pose assumptions.
+**Runtime contract.** The endpoint-local segment discovers contact, then every collector,
+normalization probe, witness line and field reads the same lerp/slerp scene at that fraction.
+The struck point's velocity is collider-origin translation plus angular velocity crossed with its
+rotated local contact offset; child servo and recoil motion therefore participate. The mechanism
+uses the round's velocity minus this velocity. Its immutable relative path is carried back to world
+by the struck point's constant contact velocity, including each timed effect and sampled recording
+frame. No second world clock advances while that crossing is decided. Held material completes in
+that scene; separated contacts return to relative discovery at the elapsed tick fraction. Ground
+is only the declared height grid; geometry-only fixtures have no ground. An Armor collider without
+ballistic-volume ancestry is a bug at discovery. No envelope or future-pose prediction participates.
 
 ### 13.6 Invariants — the machine-checkable contract
 

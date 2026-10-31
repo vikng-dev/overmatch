@@ -69,9 +69,7 @@ use super::fracture::{
 };
 use super::schema::{self, BuildingAsset};
 use super::{BuildingElement, BuildingKind};
-use crate::ballistics::{
-    ArmourMark, BallisticVolume, Envelope, PenetrationMarks, ShellMarched, SpallMarks,
-};
+use crate::ballistics::{ArmourMark, BallisticVolume, PenetrationMarks, ShellMarched, SpallMarks};
 use crate::scatter::MapInstance;
 use crate::{ClientReplica, Layer, ShotClock};
 
@@ -1359,12 +1357,6 @@ fn spawn_piece(
         velocity.length(),
         spin.length(),
     );
-    // Its envelope from its colliders, which never move on it (`ballistics::Envelope`).
-    let envelope = Envelope::holding(
-        colliders
-            .iter()
-            .map(|(_, collider)| (collider, Vec3::ZERO, Quat::IDENTITY)),
-    );
     // `Position`/`Rotation` before the body: it never flushes with avian's placeholder pose.
     let mut piece = commands.spawn((
         Name::new("WallPiece"),
@@ -1381,9 +1373,6 @@ fn spawn_piece(
         LinearVelocity(root.rotation * velocity),
         AngularVelocity(root.rotation * spin),
     ));
-    if let Some(envelope) = envelope {
-        piece.insert(envelope);
-    }
     piece.with_children(|parent| {
         for (c, collider) in colliders {
             parent.spawn((

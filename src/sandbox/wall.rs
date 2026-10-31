@@ -677,7 +677,6 @@ fn setup_wall(
             MeshMaterial3d(witness[0].clone()),
             Transform::from_translation(tile.center()),
             RigidBody::Static,
-            crate::ballistics::Envelope::of(&collider),
             collider,
             CollisionLayers::new([Layer::Armor], LayerMask::ALL),
             BallisticVolume {
@@ -767,7 +766,6 @@ fn spawn_wall(commands: &mut Commands, meshes: &mut Assets<Mesh>, assets: &WallA
                     MeshMaterial3d(assets.heat[0].clone()),
                     Transform::from_translation(block.center()),
                     RigidBody::Static,
-                    crate::ballistics::Envelope::of(&collider),
                     collider,
                     CollisionLayers::new([Layer::Armor], LayerMask::ALL),
                     BallisticVolume {

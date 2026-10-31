@@ -17,7 +17,7 @@ use super::model::{
 use super::servo::{RemoteServos, ServoCommand, ServoIndex, ServoRest, ServoRole, ServoSpec};
 use super::view::{SimParts, bind_tank_view};
 use crate::Layer;
-use crate::bake::{TankBlueprint, TankEnvelopes, TankGeometry};
+use crate::bake::{TankBlueprint, TankGeometry};
 use crate::ballistics::{
     ArmorVolume, BallisticSurfaces, BallisticVolume, ComponentHealth, ComponentVolume,
     ExternalArmour, VolumeMaterial, WitnessSurface, WitnessVolume,
@@ -129,7 +129,6 @@ impl TankSimSource<'_> {
         Some(TankContent {
             geometry: &blueprint.geometry,
             spec: &blueprint.spec,
-            envelopes: blueprint.envelopes(),
         })
     }
 }
@@ -139,7 +138,6 @@ impl TankSimSource<'_> {
 pub(crate) struct TankContent<'a> {
     geometry: &'a TankGeometry,
     spec: &'a TankSpec,
-    envelopes: TankEnvelopes,
 }
 
 impl<'a> TankContent<'a> {
@@ -398,7 +396,7 @@ fn resolve_rig_nodes<'a>(geometry: &'a TankGeometry, spec: &'a TankSpec) -> RigN
 
     // The gunner's chain feeds the rig's `turret`/`gun` (optic, camera, launched-turret): the
     // declared Pitch node + the Yaw servo above it in the extracted topology
-    // (`bake::turret_node`, which the envelope bake reads too) — the binder never guesses which of
+    // (`bake::turret_node`) — the binder never guesses which of
     // several yaw/pitch mounts is the main one.
     let servo_nodes_with_role = |role: ServoRole| -> HashSet<usize> {
         servo_entries
@@ -1001,19 +999,6 @@ fn assemble_tank_body(commands: &mut Commands, root: Entity, content: TankConten
     let muzzle = entity_at(nodes.primary_muzzle);
     commands.entity(hull).insert(Hull);
     commands.entity(gun).insert(Gun);
-    // Each body's envelope, from the kind's bake: the tank's on its root, the turret's on the
-    // turret, live once a cook-off launches it free.
-    let envelopes = content.envelopes;
-    if let Some(envelope) = envelopes.tank {
-        commands
-            .entity(root)
-            .insert(crate::ballistics::Envelope(envelope));
-    }
-    if let Some(envelope) = envelopes.turret {
-        commands
-            .entity(turret)
-            .insert(crate::ballistics::Envelope(envelope));
-    }
     let (tx, ty, tz) = spec.turret.inertia_extents;
     commands.entity(turret).insert((
         Turret,
@@ -1103,61 +1088,5 @@ mod proxy_tests {
             .map(|(_, child_of)| child_of.parent())
             .collect();
         assert_eq!(parents, vec![node, node]);
-    }
-
-    /// EVERY SPAWNED TANK CARRIES ITS KIND'S ENVELOPES, HOLDING EVERY COLLIDER IT STANDS (the
-    /// game's damage model: a round's crossing of a body runs until it has left the body's
-    /// envelope, design §13.5, "The envelope"). The root carries the kind's tank envelope and the
-    /// rig's turret node the kind's turret envelope, no other node one, and every collider under
-    /// the root at its spawn pose lies inside the root's. A spawn that drops either insert, or puts
-    /// one on another node, fails here. The shipped kind is fixture data; the assertions are the
-    /// class invariant every kind's spawn keeps.
-    #[test]
-    fn a_spawned_tank_carries_its_kinds_envelopes() {
-        let glb = crate::assets::asset_root().join(crate::tank::TANK_SIM_GLB_PATH);
-        let spec = crate::track::rig_geom::tiger_spec();
-        let geometry = crate::bake::extract_tank_geometry(
-            &glb,
-            &spec,
-            &crate::substances::SubstanceRegistry::shipped(),
-        )
-        .expect("the shipped glb extracts");
-        let blueprint =
-            crate::bake::TankBlueprint::new(crate::tank::TANK_SPEC_PATH.to_owned(), geometry, spec);
-        let envelopes = blueprint.envelopes();
-        let content = TankContent {
-            geometry: &blueprint.geometry,
-            spec: &blueprint.spec,
-            envelopes,
-        };
-        let mut world = World::new();
-        let root = world.spawn(Transform::IDENTITY).id();
-        assemble_tank_body(&mut world.commands(), root, content);
-        world.flush();
-
-        use bevy::math::bounding::Aabb3d;
-        let turret = world
-            .get::<Rig>(root)
-            .expect("the root carries its rig")
-            .turret;
-        let carried: Vec<(Entity, Aabb3d)> = world
-            .query::<(Entity, &crate::ballistics::Envelope)>()
-            .iter(&world)
-            .map(|(entity, envelope)| (entity, envelope.0))
-            .collect();
-        let expected: Vec<(Entity, Aabb3d)> = [(root, envelopes.tank), (turret, envelopes.turret)]
-            .into_iter()
-            .filter_map(|(entity, envelope)| Some((entity, envelope?)))
-            .collect();
-        assert!(
-            envelopes.tank.is_some() && envelopes.turret.is_some(),
-            "the fixture kind has captured geometry and a launchable turret, so both inserts run"
-        );
-        assert_eq!(carried.len(), expected.len(), "{carried:?}");
-        for pair in &expected {
-            assert!(carried.contains(pair), "{pair:?} not among {carried:?}");
-        }
-        let held = crate::ballistics::assert_envelope_holds(&world, root);
-        assert!(held > 0, "the root holds the tank's colliders");
     }
 }

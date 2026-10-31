@@ -134,12 +134,13 @@ pub(crate) struct Corridor<'a> {
 /// Ordering is NOT this function's job: [`super::walk::walk_ray`] imposes its own total order over
 /// `(t, volume, primitive, triangle)`, so the broad phase's traversal order cannot reach the result.
 /// What IS this function's job is completeness — every crossing, or an error.
-pub(crate) fn collect(
+/// The game's damage model: all collectors in one crossing read the same sampled scene.
+pub(super) fn collect(
     corridor: &Corridor<'_>,
-    // Candidate colliders, already filtered to armour the shell may hit (layer + self-exclusion).
     candidates: &[(Entity, Entity)],
     colliders: &Query<(&Position, &Rotation, &Collider, Option<&BallisticSurfaces>)>,
     out: &mut Vec<FaceHit>,
+    pose: &dyn Fn(Entity) -> Option<super::motion::Pose>,
 ) -> Result<(), WalkError> {
     for &(node, primitive) in candidates {
         let Ok((position, rotation, collider, surfaces)) = colliders.get(primitive) else {
@@ -150,95 +151,113 @@ pub(crate) fn collect(
                 reason: "a candidate collider has no resolved pose",
             });
         };
-        // Into the collider's local frame: one inverse rotation, rather than transforming every
-        // triangle out to world space.
-        let inverse = rotation.inverse();
-        // ORDER IS THE POINT. `anchor - position.0` is a difference of two WORLD positions, so it is
-        // near-exact when they are close (and its magnitude is metres, not kilometres); the
-        // corridor's own offset is then added at that scale. Forming the corridor's world position
-        // first and subtracting afterwards would round it to the world grid — 0.24 mm at the edge of
-        // the map — and hand the narrow phase a ray that starts a quarter millimetre off the face it
-        // was computed from.
-        let local_origin = inverse * ((corridor.anchor - position.0) + corridor.origin);
-        let local_axis = inverse * corridor.axis;
-        let reach = sitting_reach(
-            corridor.handoff,
-            corridor.origin,
-            local_origin,
-            corridor.laws,
-        );
-        let seeded = |shell: u32| {
-            corridor.seeded.contains(&ShellKey {
-                volume: node,
-                primitive,
-                shell,
-            })
-        };
+        let sampled = pose(primitive);
+        let position = sampled.map_or(*position, |pose| Position(pose.position));
+        let rotation = sampled.map_or(*rotation, |pose| Rotation(pose.rotation));
+        collect_collider(
+            corridor, node, primitive, collider, surfaces, position, rotation, out,
+        )?;
+    }
+    Ok(())
+}
 
-        let before = out.len();
-        let shape = collider.shape_scaled().as_typed_shape();
-        match shape {
-            TypedShape::TriMesh(mesh) => {
-                // SURFACE IDENTITY IS NOT OPTIONAL FOR ARMOUR. Without it the walk cannot tell two
-                // shells closing at one `t` from one shell claimed twice, and it must not guess —
-                // so a trimesh whose certificate is missing or the wrong length is an unprobed
-                // candidate, which is the same silence as an absent one.
-                let surfaces = surfaces
-                    .filter(|surfaces| {
-                        surfaces.shells.len() == mesh.num_triangles()
-                            && surfaces.corners.len() == mesh.num_triangles()
-                    })
-                    .ok_or(WalkError::CollectorFailed {
-                        volume: node,
-                        reason: "a trimesh candidate carries no per-triangle manifold certificate",
-                    })?;
-                // THE CERTIFICATE IS ABOUT THE UNSCALED BUFFER. Everything `bake::manifold_gate`
-                // proved — closure, winding, positive volume, the welded ids the contacts below are
-                // named with — it proved on the authored positions, which is why it refuses a
-                // ballistic node that is not unit-scale. Avian re-derives the scaled shape from
-                // whatever the hierarchy says at the time, so the live scale is checked HERE too:
-                // this is what catches a spawn-time or runtime mutation the bake never saw.
-                // Bit-exact, not near: there is no scale that is almost 1.
-                if collider.scale().to_array().map(f32::to_bits) != [1.0f32.to_bits(); 3] {
-                    return Err(WalkError::CollectorFailed {
-                        volume: node,
-                        reason: "a collider reached the world at a scale other than 1",
-                    });
-                }
-                collect_trimesh(
-                    mesh,
-                    local_origin,
-                    local_axis,
-                    corridor.length,
-                    corridor.behind,
-                    node,
-                    primitive,
-                    surfaces,
-                    &seeded,
-                    *rotation,
-                    reach,
-                    out,
-                )?
+#[expect(
+    clippy::too_many_arguments,
+    reason = "one candidate's geometry and resolved pose"
+)]
+pub(super) fn collect_collider(
+    corridor: &Corridor<'_>,
+    node: Entity,
+    primitive: Entity,
+    collider: &Collider,
+    surfaces: Option<&BallisticSurfaces>,
+    position: Position,
+    rotation: Rotation,
+    out: &mut Vec<FaceHit>,
+) -> Result<(), WalkError> {
+    // Into the collider's local frame: one inverse rotation, rather than transforming every
+    // triangle out to world space.
+    let inverse = rotation.inverse();
+    // ORDER IS THE POINT. `anchor - position.0` is a difference of two WORLD positions, so it is
+    // near-exact when they are close (and its magnitude is metres, not kilometres); the
+    // corridor's own offset is then added at that scale. Forming the corridor's world position
+    // first and subtracting afterwards would round it to the world grid — 0.24 mm at the edge of
+    // the map — and hand the narrow phase a ray that starts a quarter millimetre off the face it
+    // was computed from.
+    let local_origin = inverse * ((corridor.anchor - position.0) + corridor.origin);
+    let local_axis = inverse * corridor.axis;
+    let reach = sitting_reach(
+        corridor.handoff,
+        corridor.origin,
+        local_origin,
+        corridor.laws,
+    );
+    let seeded = |shell: u32| {
+        corridor.seeded.contains(&ShellKey {
+            volume: node,
+            primitive,
+            shell,
+        })
+    };
+
+    let shape = collider.shape_scaled().as_typed_shape();
+    match shape {
+        TypedShape::TriMesh(mesh) => {
+            // SURFACE IDENTITY IS NOT OPTIONAL FOR ARMOUR. Without it the walk cannot tell two
+            // shells closing at one `t` from one shell claimed twice, and it must not guess —
+            // so a trimesh whose certificate is missing or the wrong length is an unprobed
+            // candidate, which is the same silence as an absent one.
+            let surfaces = surfaces
+                .filter(|surfaces| {
+                    surfaces.shells.len() == mesh.num_triangles()
+                        && surfaces.corners.len() == mesh.num_triangles()
+                })
+                .ok_or(WalkError::CollectorFailed {
+                    volume: node,
+                    reason: "a trimesh candidate carries no per-triangle manifold certificate",
+                })?;
+            // THE CERTIFICATE IS ABOUT THE UNSCALED BUFFER. Everything `bake::manifold_gate`
+            // proved — closure, winding, positive volume, the welded ids the contacts below are
+            // named with — it proved on the authored positions, which is why it refuses a
+            // ballistic node that is not unit-scale. Avian re-derives the scaled shape from
+            // whatever the hierarchy says at the time, so the live scale is checked HERE too:
+            // this is what catches a spawn-time or runtime mutation the bake never saw.
+            // Bit-exact, not near: there is no scale that is almost 1.
+            if collider.scale().to_array().map(f32::to_bits) != [1.0f32.to_bits(); 3] {
+                return Err(WalkError::CollectorFailed {
+                    volume: node,
+                    reason: "a collider reached the world at a scale other than 1",
+                });
             }
-            // The sandbox slabs and the trees' trunk segments. A convex solid is one closed
-            // surface by definition, so its shell id is `0` and there is nothing to look up.
-            _ => collect_convex(
-                shape,
+            collect_trimesh(
+                mesh,
                 local_origin,
                 local_axis,
-                *rotation,
-                corridor,
+                corridor.length,
+                corridor.behind,
                 node,
                 primitive,
-                seeded(0),
+                surfaces,
+                &seeded,
+                rotation,
                 reach,
                 out,
-            )?,
+            )?
         }
-        debug_assert!(
-            out[before..].iter().all(|hit| hit.t.is_finite()),
-            "the collector emitted a non-finite crossing"
-        );
+        // The sandbox slabs and the trees' trunk segments. A convex solid is one closed
+        // surface by definition, so its shell id is `0` and there is nothing to look up.
+        _ => collect_convex(
+            shape,
+            local_origin,
+            local_axis,
+            rotation,
+            corridor,
+            node,
+            primitive,
+            seeded(0),
+            reach,
+            out,
+        )?,
     }
     Ok(())
 }

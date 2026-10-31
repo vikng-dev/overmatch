@@ -550,8 +550,7 @@ pub struct RecoilSpec {
     pub damping: f32,
     /// The recoil stop: the farthest the barrel travels back from battery, in METRES, the buffer's
     /// mechanical limit. No run of kicks carries the barrel past it (`shooting::apply_recoil`), so
-    /// it bounds the stroke the tank's envelope sweeps (`bake::envelope`). `validate()` refuses one
-    /// that is not finite and positive.
+    /// `validate()` refuses a stop that is not finite and positive.
     pub max_length: Sourced<f32>,
 }
 
@@ -2195,8 +2194,7 @@ TankSpec(
     }
 
     /// `validate()` refuses a recoil stop that is not a finite positive length, naming the weapon.
-    /// `shooting::apply_recoil` holds the barrel at the stop and `bake::envelope` sweeps the stroke
-    /// to it: a NaN stop compares false and never holds, an infinite one bounds nothing, and one at
+    /// `shooting::apply_recoil` holds the barrel at the stop: a NaN stop compares false and never holds, an infinite one bounds nothing, and one at
     /// or ahead of battery leaves no stroke. A mutant that drops any arm of the check loads these.
     #[test]
     fn validate_rejects_a_recoil_stop_that_is_not_a_positive_length() {
@@ -2217,7 +2215,7 @@ TankSpec(
     }
 
     /// The servo window contract (`ServoSpec::travel_window_fault`): the sim clamps to the window
-    /// and the envelope sweeps it, so one that is inverted or excludes the spawn angle 0 is refused
+    /// so one that is inverted or excludes the spawn angle 0 is refused
     /// at load, the same refusal `certify_asset` reports as `L2.SPEC`.
     #[test]
     fn validate_rejects_a_servo_window_that_excludes_its_spawn_angle() {

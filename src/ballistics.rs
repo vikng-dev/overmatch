@@ -4,8 +4,7 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use avian3d::prelude::{
-    Collider, ColliderAabb, ColliderTransform, ComputedCenterOfMass, Forces, Position,
-    ReadRigidBodyForces, RigidBody, RigidBodyColliders, Rotation, SpatialQuery, SpatialQueryFilter,
+    Collider, ColliderAabb, Forces, Position, Rotation, SpatialQuery, SpatialQueryFilter,
 };
 use bevy::ecs::system::SystemParam;
 use bevy::prelude::*;
@@ -757,22 +756,8 @@ enum SegmentHit {
     Terrain { distance: f32, normal: Vec3 },
 }
 
-/// First surface along one march segment: armor and terrain probed SEPARATELY, nearer wins.
-///
-/// Armor KEEPS the Avian/parry spatial query — tank volumes are posed, entity-owned geometry the
-/// march must then keep probing (thickness, exit faces, ancestry, HP). Terrain, though, comes
-/// from [`HeightGrid::cast_ray`] whenever the heightmap world is live: parry's raycast float
-/// path is not one the deterministic sim may depend on — parry ≤ 0.29's raycasts were not
-/// cross-platform reproducible (SIMD dot-product non-associativity; parry 0.29 changelog) — and
-/// we cannot pin a third-party float path, while the ground is the one world-spanning surface
-/// every shell crosses. The exact caster reads the SAME triangular surface the collider carries
-/// (the ONE-SURFACE invariant, `terrain_grid` module doc), so within float rounding the hit is
-/// unchanged; the arithmetic is now ours to keep bit-stable. The flat fallback world (slab +
-/// authored test course, dev-only — no [`HeightGrid`] resource) keeps the parry terrain cast.
-///
-/// Splitting the old single `Terrain | Armor` cast into two and folding by min preserves its
-/// semantics exactly: parry returned the nearest hit across both layers, and the predicate was
-/// vacuous on terrain (nothing on the `Terrain` layer has `VolumeOf` ancestry).
+/// The game's damage model: replica catch-up queries armour and the declared height grid.
+/// Geometry-only fixtures without a grid have no ground surface.
 fn cast_march_segment(
     spatial: &SpatialQuery,
     grid: Option<&HeightGrid>,
@@ -789,20 +774,9 @@ fn cast_march_segment(
         &SpatialQueryFilter::from_mask(Layer::Armor),
         not_own,
     );
-    let terrain: Option<(f32, Vec3)> = match grid {
-        Some(grid) => grid
-            .cast_ray(origin, Vec3::from(dir), max)
-            .map(|hit| (hit.t, hit.normal)),
-        None => spatial
-            .cast_ray(
-                origin,
-                dir,
-                max,
-                true,
-                &SpatialQueryFilter::from_mask(Layer::Terrain),
-            )
-            .map(|hit| (hit.distance, hit.normal)),
-    };
+    let terrain = grid
+        .and_then(|grid| grid.cast_ray(origin, Vec3::from(dir), max))
+        .map(|hit| (hit.t, hit.normal));
     match (armor, terrain) {
         (Some(armor), Some((distance, normal))) if distance < armor.distance => {
             Some(SegmentHit::Terrain { distance, normal })
@@ -842,67 +816,118 @@ fn cast_disc_segment(
         .iter()
         .map(|offset| offset.length())
         .fold(0.0, f32::max);
-    let armor = if offsets.len() <= 1 {
-        world.spatial.cast_ray_predicate(
-            origin,
-            dir,
-            max,
-            true,
-            &SpatialQueryFilter::from_mask(Layer::Armor),
-            not_own,
-        )
-    } else {
-        let mut near_armor = false;
+    let armor = {
+        let sweep = world.sweep.get().unwrap_or(motion::Sweep {
+            from: 0.0,
+            to: 1.0,
+            dt: 1.0,
+        }); // Standalone static queries have no interval clock.
+        let mut nearest: Option<(avian3d::prelude::RayHitData, motion::ContactMotion)> = None;
         world.spatial.aabb_intersections_with_aabb_callback(
-            collect::swept_aabb(origin, Vec3::from(dir), max, reach),
+            collect::swept_aabb(origin, *dir, max, reach + world.motion_padding()),
             |entity| {
-                // ACCUMULATE, never assign. Avian 0.7 walks its collider trees with `for_each`, so a
-                // `false` return ends only the CURRENT tree's traversal — the remaining trees are
-                // walked regardless. An assignment therefore lets whatever is visited after the
-                // armour candidate overwrite the answer, and the static tree's terrain heightfield,
-                // whose AABB is the whole world box, is in every corridor there is.
-                near_armor |= world.armour(entity).is_some() && not_own(entity);
-                // Stop this tree at the first candidate: this asks IF, not WHICH.
-                !near_armor
+                if !world
+                    .layers
+                    .get(entity)
+                    .is_ok_and(|layers| layers.memberships.has_all(Layer::Armor))
+                {
+                    return true;
+                }
+                let (node, _) = world.armour(entity).expect(
+                    "game's damage model: an Armor collider requires BallisticVolume ancestry",
+                );
+                if !not_own(entity) {
+                    return true;
+                }
+                let (position, rotation, collider, surfaces) = world
+                    .geometry
+                    .get(entity)
+                    .expect("game's damage model: every tree candidate has resolved geometry");
+                let poses = match world.motion.as_ref() {
+                    Some(history) => *history.colliders.get(&entity).expect(
+                        "game's damage model: every tree candidate has captured endpoint poses",
+                    ),
+                    None => {
+                        // Standalone static fixtures do not simulate collider motion.
+                        let pose = motion::Pose {
+                            position: position.0,
+                            rotation: rotation.0,
+                        };
+                        motion::Poses {
+                            from: pose,
+                            to: pose,
+                        }
+                    }
+                };
+                for &offset in offsets {
+                    let swept = motion::sweep_collider(
+                        poses,
+                        sweep,
+                        node,
+                        entity,
+                        collider,
+                        surfaces,
+                        origin + offset,
+                        origin + offset + dir * max,
+                    );
+                    let (mut contact, hit) = if poses.from == poses.to {
+                        let Some((distance, normal)) = collider.cast_ray(
+                            *position,
+                            *rotation,
+                            origin + offset,
+                            *dir,
+                            max,
+                            true,
+                        ) else {
+                            continue;
+                        };
+                        (
+                            motion::ContactMotion {
+                                fraction: sweep.from + (sweep.to - sweep.from) * distance / max,
+                                point: origin + offset + dir * distance,
+                                velocity: Vec3::ZERO,
+                            },
+                            avian3d::prelude::RayHitData {
+                                entity,
+                                distance,
+                                normal,
+                            },
+                        )
+                    } else {
+                        let Some((contact, normal)) = swept else {
+                            continue;
+                        };
+                        let part = (contact.fraction - sweep.from) / (sweep.to - sweep.from);
+                        (
+                            contact,
+                            avian3d::prelude::RayHitData {
+                                entity,
+                                distance: part * max,
+                                normal: normal.normalize(),
+                            },
+                        )
+                    };
+                    contact.point -= offset;
+                    if nearest.as_ref().is_none_or(|(best, _)| {
+                        hit.distance < best.distance
+                            || (hit.distance == best.distance && entity < best.entity)
+                    }) {
+                        nearest = Some((hit, contact));
+                    }
+                }
+                true
             },
         );
-        if near_armor {
-            let mut nearest: Option<avian3d::prelude::RayHitData> = None;
-            for &offset in offsets {
-                let hit = world.spatial.cast_ray_predicate(
-                    origin + offset,
-                    dir,
-                    max,
-                    true,
-                    &SpatialQueryFilter::from_mask(Layer::Armor),
-                    not_own,
-                );
-                if let Some(hit) = hit
-                    && nearest.is_none_or(|best| hit.distance < best.distance)
-                {
-                    nearest = Some(hit);
-                }
-            }
-            nearest
-        } else {
-            None
-        }
+        world
+            .contact_motion
+            .set(nearest.as_ref().map(|(_, motion)| *motion));
+        nearest.map(|(hit, _)| hit)
     };
-    let terrain: Option<(f32, Vec3)> = match world.grid.as_deref() {
-        Some(grid) => grid
-            .cast_ray(origin, Vec3::from(dir), max)
-            .map(|hit| (hit.t, hit.normal)),
-        None => world
-            .spatial
-            .cast_ray(
-                origin,
-                dir,
-                max,
-                true,
-                &SpatialQueryFilter::from_mask(Layer::Terrain),
-            )
-            .map(|hit| (hit.distance, hit.normal)),
-    };
+    let terrain = world
+        .grid
+        .as_deref()
+        .and_then(|grid| grid.cast_ray(origin, Vec3::from(dir), max))
+        .map(|hit| (hit.t, hit.normal));
     match (armor, terrain) {
         (Some(armor), Some((distance, normal))) if distance < armor.distance => {
             Some(SegmentHit::Terrain { distance, normal })
@@ -1221,7 +1246,7 @@ pub(crate) struct Projectile {
     disc: walk::DiscFrame,
     /// Where the axis sample stands as the last step ended ([`resolve::AxisStart`]): a position
     /// held as anchor plus offset, so open flight never re-rounds it at world spacing. Discovery
-    /// lays a fresh disc only when no immutable playback remains, outside every [`Envelope`],
+    /// lays a fresh disc only when no immutable playback remains, outside resolved material,
     /// and establishes its membership ([`resolve::certified`]).
     ///
     /// `None` at spawn, in every spawn path, and after a sanctioned catch-up: the step lays its disc
@@ -1336,90 +1361,6 @@ pub struct BallisticVolume {
                   deliberately"
     )]
     pub substance: String,
-}
-
-/// Temporary discovery bounds in the body's own frame: every primitive under the body lies inside
-/// them at every servo pose. Built from spawn data (`bake::TankEnvelopes`, [`Self::holding`],
-/// [`Self::of`] or `buildings::spawn`); a tree's is re-derived with its body
-/// (`trees::derive_state`) and, while it falls, holds this tick's pose and the next one's
-/// (`trees::pose_falls`). Discovery freezes a chain through the bounds
-/// ([`ProjectileMarchWorld::crossing_reach`]); playback spends its real seconds. The replacement
-/// contact law is design §13.5's implementation boundary
-/// (`.agents/docs/design/armor-penetration-and-damage.md`).
-#[derive(Component, Clone, Copy, Debug, PartialEq)]
-pub(crate) struct Envelope(pub(crate) bevy::math::bounding::Aabb3d);
-
-impl Envelope {
-    /// The envelope of a body whose every primitive is one of `parts`, each a collider at its
-    /// place in the body's frame: the union of their bounds there. `None` for a body with no part.
-    /// For a body whose parts never move on it; a servo's sweep is the bake's
-    /// (`bake::TankEnvelopes`).
-    pub(crate) fn holding<'a>(
-        parts: impl IntoIterator<Item = (&'a Collider, Vec3, Quat)>,
-    ) -> Option<Self> {
-        use avian3d::prelude::SimpleCollider;
-        parts
-            .into_iter()
-            .map(|(collider, at, turn)| collider.aabb(at, turn))
-            .map(|aabb| (aabb.min, aabb.max))
-            .reduce(|(lo, hi), (min, max)| (lo.min(min), hi.max(max)))
-            .map(|(min, max)| Self(bevy::math::bounding::Aabb3d::from_min_max(min, max)))
-    }
-
-    /// The envelope of a body whose one collider is `collider`, at the body's origin.
-    pub(crate) fn of(collider: &Collider) -> Self {
-        use avian3d::prelude::SimpleCollider;
-        let aabb = collider.aabb(Vec3::ZERO, Quat::IDENTITY);
-        Self(bevy::math::bounding::Aabb3d::from_min_max(
-            aabb.min, aabb.max,
-        ))
-    }
-}
-
-/// Assert that `root`'s [`Envelope`] holds every collider of the body: the root's own, at its
-/// origin, and every descendant's at its place on the root, its transforms composed down the
-/// hierarchy. Returns how many it checked; panics on the first collider outside, on a body with no
-/// envelope, and on a scaled descendant, whose collider's bounds this does not scale. The slack is
-/// the march's own pad for the sim's f32 placement, `extent · 2^-20`
-/// (`ProjectileMarchWorld::crossing_reach`).
-#[cfg(test)]
-pub(crate) fn assert_envelope_holds(world: &World, root: Entity) -> usize {
-    use avian3d::prelude::SimpleCollider;
-    let envelope = world
-        .get::<Envelope>(root)
-        .unwrap_or_else(|| panic!("body {root} carries no envelope"))
-        .0;
-    let mut parts = Vec::new();
-    let mut open = vec![(root, Transform::IDENTITY)];
-    while let Some((node, place)) = open.pop() {
-        if let Some(collider) = world.get::<Collider>(node) {
-            parts.push((node, collider, place));
-        }
-        for &child in world.get::<Children>(node).into_iter().flatten() {
-            let local = *world
-                .get::<Transform>(child)
-                .unwrap_or_else(|| panic!("part {child} of body {root} has no transform"));
-            assert_eq!(
-                local.scale,
-                Vec3::ONE,
-                "part {child} of body {root} is scaled"
-            );
-            open.push((child, place * local));
-        }
-    }
-    let extent = Vec3::from(envelope.min.abs().max(envelope.max.abs())).max_element();
-    for (part, collider, local) in &parts {
-        let aabb = collider.aabb(local.translation, local.rotation);
-        let slack = extent * 2.0_f32.powi(-20);
-        assert!(
-            Vec3::from(envelope.min).cmple(aabb.min + slack).all()
-                && Vec3::from(envelope.max).cmpge(aabb.max - slack).all(),
-            "collider {part} of body {root} spans {:?}..{:?}, outside its envelope {envelope:?}",
-            aabb.min,
-            aabb.max,
-        );
-    }
-    parts.len()
 }
 
 /// A witness volume (ADR-0040): a crew box. Not matter — it is no layer of the armour walk, never
@@ -1574,6 +1515,9 @@ pub struct PenetrationMarks {
     /// Every armour event the authority's march resolved, in march order: the whole path a pen cam
     /// record is read from. A replica's march decides no armour and logs nothing.
     pub log: Vec<ArmourMark>,
+    /// The game's damage model: immutable sampled hull frames, addressed by mark and owner.
+    pub(crate) frames:
+        std::collections::BTreeMap<(usize, Entity), crate::damage_cam::record::HullFrame>,
 }
 
 /// One armour event of a shell's flight, as the authority's march resolved it. Positions WORLD,
@@ -2059,18 +2003,14 @@ fn on_fire_shell(
                 reach,
                 &not_own,
             ) {
-                // An Armor-layer hit without volume ancestry stays classified terrain — the
-                // exact rule the live march's `resolved` branch applies.
                 let (distance, normal, surface) = match &hit {
-                    SegmentHit::Armor(hit) => (
-                        hit.distance,
-                        hit.normal,
-                        if hit_ancestor(hit.entity, &volumes, &parents).is_some() {
-                            ImpactSurface::Armor
-                        } else {
-                            ImpactSurface::Terrain
-                        },
-                    ),
+                    SegmentHit::Armor(hit) => {
+                        assert!(
+                            hit_ancestor(hit.entity, &volumes, &parents).is_some(),
+                            "game's damage model: an Armor collider requires BallisticVolume ancestry"
+                        );
+                        (hit.distance, hit.normal, ImpactSurface::Armor)
+                    }
                     SegmentHit::Terrain { distance, normal } => {
                         (*distance, *normal, ImpactSurface::Terrain)
                     }
@@ -2272,6 +2212,23 @@ struct ProjectileMarchNet<'w> {
 /// parameter instead of five, exactly as [`ProjectileMarchNet`] groups the net state.
 #[derive(SystemParam)]
 struct ProjectileMarchWorld<'w, 's> {
+    motion: Option<Res<'w, motion::ColliderMotion>>,
+    layers: Query<'w, 's, &'static avian3d::prelude::CollisionLayers>,
+    rigs: Query<'w, 's, (Entity, &'static crate::tank::Rig)>,
+    locals: Query<'w, 's, &'static Transform, Without<Projectile>>,
+    moment: Local<'s, std::cell::Cell<Option<f32>>>,
+    sweep: Local<'s, std::cell::Cell<Option<motion::Sweep>>>,
+    contact_motion: Local<'s, std::cell::Cell<Option<motion::ContactMotion>>>,
+    geometry: Query<
+        'w,
+        's,
+        (
+            &'static Position,
+            &'static Rotation,
+            &'static Collider,
+            Option<&'static BallisticSurfaces>,
+        ),
+    >,
     spatial: SpatialQuery<'w, 's>,
     // Each collider's broad-phase bounds, the ones `spatial`'s AABB queries test a reached leaf
     // against: a field throw reads its candidates from them ([`resolve::FieldReach`]).
@@ -2280,8 +2237,8 @@ struct ProjectileMarchWorld<'w, 's> {
     owners: Query<'w, 's, &'static VolumeOf>,
     parents: Query<'w, 's, &'static ChildOf>,
     // The heightmap ground, when the heightmap world is live: the march's terrain contacts read
-    // the exact deterministic caster, not parry (see [`cast_march_segment`]). Absent on the flat
-    // fallback world, where the parry terrain cast remains.
+    // the exact deterministic caster (see [`cast_march_segment`]). Geometry-only fixtures may
+    // omit the ground.
     grid: Option<Res<'w, HeightGrid>>,
     // The cone shape the march throws when a world names one (the cost probe); the shipped shape
     // otherwise.
@@ -2296,64 +2253,53 @@ struct ProjectileMarchWorld<'w, 's> {
     // armour classification.
     witnesses: Query<'w, 's, &'static WitnessVolume>,
     witness_surfaces: Query<'w, 's, (), With<WitnessSurface>>,
-    // Every free body's envelope, its pose, its colliders and the centre of mass the physics step
-    // turns it about: where a crossing begins and ends. Every free body with an envelope is a rigid
-    // body, so carries its centre of mass; the march refuses one that does not.
-    envelopes: Query<
-        'w,
-        's,
-        (
-            Entity,
-            &'static Envelope,
-            &'static Position,
-            &'static Rotation,
-            Option<&'static RigidBodyColliders>,
-            Option<&'static ComputedCenterOfMass>,
-        ),
-        Without<ChildOf>,
-    >,
-    // A body's child colliders as the physics step placed them, and their place on the body.
-    placed: Query<
-        'w,
-        's,
-        (
-            &'static Position,
-            &'static Rotation,
-            &'static ColliderTransform,
-        ),
-        Without<RigidBody>,
-    >,
-}
-
-/// The physics step between this march and the next, as the march sees it: its duration, and the
-/// bodies whose velocities it integrates. Read through the march's own [`Forces`], so a crossing's
-/// impulse earlier in the march ([`apply_hit_impulse`]) is in them.
-#[derive(Clone, Copy)]
-struct NextStep<'a, 'w, 's> {
-    bodies: &'a Query<'w, 's, Forces>,
-    dt: f32,
-}
-
-impl NextStep<'_, '_, '_> {
-    /// The pose `body` stands at once the step has integrated it at its current velocities:
-    /// avian's own integration (`integrate_positions`), which moves the body's centre of mass
-    /// `centre` (body frame) at its linear velocity and turns the body about it
-    /// (`writeback_solver_bodies`). `None` for a body at rest, which stays where it stands, and
-    /// for one the physics step does not integrate.
-    fn integrated_pose(&self, body: Entity, centre: &ComputedCenterOfMass) -> Option<(Vec3, Quat)> {
-        let body = self.bodies.get(body).ok()?;
-        let (linear, angular) = (body.linear_velocity(), body.angular_velocity());
-        if linear == Vec3::ZERO && angular == Vec3::ZERO {
-            return None;
-        }
-        let (position, rotation) = (body.position().0, body.rotation().0);
-        let turn = (Quat::from_scaled_axis(angular * self.dt) * rotation).normalize();
-        let at = position + linear * self.dt + rotation * centre.0 - turn * centre.0;
-        Some((at, turn))
-    }
 }
 
 impl ProjectileMarchWorld<'_, '_> {
+    fn pose(&self, entity: Entity) -> Option<motion::Pose> {
+        let fraction = self.moment.get()?;
+        let motion = self.motion.as_ref()?; // Static query fixtures carry no interval history.
+        Some(motion.colliders.get(&entity).expect(
+            "game's damage model: a frozen-scene candidate belongs to the captured collider interval"
+        ).at(fraction))
+    }
+
+    fn hull_frames(&self) -> Vec<(Entity, crate::damage_cam::record::HullFrame)> {
+        let (Some(fraction), Some(history)) = (self.moment.get(), self.motion.as_ref()) else {
+            return Vec::new(); // Standalone static fixtures have no captured interval.
+        };
+        self.rigs
+            .iter()
+            .map(|(tank, rig)| {
+                let pose = history
+                    .bodies
+                    .get(&tank)
+                    .expect("game's damage model: a tank rig has a captured body pose")
+                    .at(fraction);
+                let (at, turn) = crate::tank::rig_world_pose(
+                    rig.hull,
+                    tank,
+                    pose.position,
+                    pose.rotation,
+                    &self.parents,
+                    &self.locals,
+                )
+                .expect("game's damage model: the hull belongs to its rig hierarchy");
+                (tank, crate::damage_cam::record::HullFrame::posed(at, turn))
+            })
+            .collect()
+    }
+
+    fn motion_padding(&self) -> f32 {
+        if self.moment.get().is_some() || self.sweep.get().is_some() {
+            self.motion
+                .as_ref()
+                .map_or(0.0, |motion| motion.largest_motion)
+        } else {
+            0.0
+        }
+    }
+
     /// The armour volume a collider belongs to: its nearest [`BallisticVolume`] ancestor. `None`
     /// for terrain and for a witness's collider, whatever node a witness is parented under — a
     /// witness is never a layer of the walk (ADR-0040).
@@ -2372,95 +2318,6 @@ impl ProjectileMarchWorld<'_, '_> {
         } else {
             self.armour(collider).map(|(node, _)| node)
         }
-    }
-
-    /// The game's damage model: the completed body pose read back from a composed child collider,
-    /// as the recorder reads its hull frame. A body with no child collider uses its own pose.
-    /// Production refreshes children before every walk in every composition.
-    fn placed_pose(
-        &self,
-        position: &Position,
-        rotation: &Rotation,
-        colliders: Option<&RigidBodyColliders>,
-    ) -> (Vec3, Quat) {
-        colliders
-            .and_then(|colliders| {
-                colliders
-                    .iter()
-                    .find_map(|collider| self.placed.get(collider).ok())
-            })
-            .map(|(at, turn, local)| {
-                let body = turn.0 * local.rotation.0.inverse();
-                (at.0 - body * local.translation, body)
-            })
-            .unwrap_or((position.0, rotation.0))
-    }
-
-    /// The game's damage model: discovery reach through the union of body envelopes. The box
-    /// grows by sample spread, the bake's DERIVED `extent * 2^-20` placement allowance,
-    /// `MARCH_EPS`, and the DERIVED `2 |g| dt^2` acceleration pad with ASSUMED friction at most one.
-    /// It is tested at collider placement, the body pose and a velocity-integrated next pose.
-    ///
-    /// This prediction assumes the next physics step adds no motion beyond that pad. Solver
-    /// impulses, a later push or derived topology can violate it; it does not establish moving
-    /// surface contact. The replacement body-frame law lives in the design doc's walk section.
-    fn crossing_reach(
-        &self,
-        origin: Vec3,
-        dir: Dir3,
-        travel: f32,
-        spread: f32,
-        shooter: Option<Entity>,
-        next: NextStep,
-    ) -> f32 {
-        let span = |lo: Vec3A, hi: Vec3A, (position, rotation): (Vec3, Quat)| {
-            let inverse = rotation.inverse();
-            let from = Vec3A::from(inverse * (origin - position));
-            let along = Vec3A::from(inverse * Vec3::from(dir));
-            let (mut enter, mut leave) = (f32::NEG_INFINITY, f32::INFINITY);
-            for i in 0..3 {
-                if along[i] == 0.0 {
-                    if from[i] < lo[i] || from[i] > hi[i] {
-                        return None;
-                    }
-                } else {
-                    let (a, b) = ((lo[i] - from[i]) / along[i], (hi[i] - from[i]) / along[i]);
-                    enter = enter.max(a.min(b));
-                    leave = leave.min(a.max(b));
-                }
-            }
-            (enter <= leave && leave > 0.0).then_some((enter, leave))
-        };
-        let kick = 2.0 * GRAVITY.length() * next.dt * next.dt;
-        let spans: Vec<(f32, f32)> = self
-            .envelopes
-            .iter()
-            .filter(|(body, ..)| Some(*body) != shooter)
-            .flat_map(|(body, envelope, position, rotation, colliders, centre)| {
-                let extent = envelope.0.min.abs().max(envelope.0.max.abs()).max_element();
-                let pad = Vec3A::splat(spread + extent * 2.0_f32.powi(-20) + MARCH_EPS + kick);
-                let (lo, hi) = (envelope.0.min - pad, envelope.0.max + pad);
-                let placed = self.placed_pose(position, rotation, colliders);
-                let centre = centre.unwrap_or_else(|| {
-                    panic!("free body {body} carries an envelope but is no rigid body")
-                });
-                let integrated = next.integrated_pose(body, centre);
-                [Some(placed), Some((position.0, rotation.0)), integrated]
-                    .into_iter()
-                    .flatten()
-                    .filter_map(move |pose| span(lo, hi, pose))
-            })
-            .collect();
-        let mut reach = travel.max(0.0);
-        while let Some(leave) = spans
-            .iter()
-            .filter(|(enter, leave)| *enter <= reach && reach < *leave)
-            .map(|&(_, leave)| leave)
-            .reduce(f32::max)
-        {
-            reach = leave;
-        }
-        reach
     }
 
     /// The game's damage model: one step's seconds under this world's crossing ceiling.
@@ -2672,7 +2529,7 @@ fn integrate_projectiles(
             recorder.note(
                 entity,
                 recording,
-                &shell.marks.log,
+                shell.marks,
                 marks_from,
                 shell.dose,
                 emptied_from,
@@ -3281,6 +3138,9 @@ fn march_shell_step(
     tick: &mut MarchTick,
 ) -> Option<MarchStep> {
     let MarchTick { dt, deposit, .. } = *tick;
+    world.moment.set(Some(0.0));
+    world.sweep.set(None);
+    world.contact_motion.set(None);
     // Accumulate the authority's actual HP decrease across every direct crossing and spall fragment
     // this step. The caller's per-shell latch turns the aggregate into at most one discrete confirm.
     let mut damage_dealt = 0;
@@ -3355,7 +3215,7 @@ fn march_shell_step(
     // supplies its own world path and speed until playback reaches its end.
     let mut flight = match playback.front() {
         Some(playing) => playing.flight(),
-        None => launch(shell, &context, &not_own, previous, dir, speed, radius),
+        None => launch(shell, previous, dir, speed, radius),
     };
 
     loop {
@@ -3396,35 +3256,24 @@ fn march_shell_step(
             break;
         }
 
+        let from = (1.0 - budget.remaining() as f32 / dt).clamp(0.0, 1.0);
+        world.moment.set(Some(from));
         flight
             .settle(&context, &not_own, radius)
             .unwrap_or_else(|error| error.panic());
         let origin = flight.sweep_origin();
         let dir = flight.direction;
-        let spread = flight.spread(radius).max(radius);
-        let next = NextStep {
-            bodies: &*bodies,
-            dt,
-        };
-        let reach = world.crossing_reach(
-            origin,
-            dir,
-            budget.remaining() as f32 * flight.speed,
-            spread,
-            shooter,
-            next,
-        );
-        if reach <= MARCH_EPS && !flight.holds_material() {
-            break;
-        }
         let within = budget.remaining() as f32 * flight.speed;
+        world.sweep.set(Some(motion::Sweep { from, to: 1.0, dt }));
+        world.contact_motion.set(None);
+        let reach = within;
         let ahead = match next_surface(world, &flight, radius, reach, &not_own) {
             Ahead::Armor(hit) if hit.distance > within => Ahead::Open,
             Ahead::Terrain { distance, .. } if distance > within => Ahead::Open,
             ahead => ahead,
         };
         // The game's damage model spends only the remaining seconds in open air. A discovery
-        // envelope may extend the scan, never this physical displacement. An unbent segment
+        // interval bounds the scan and physical displacement. An unbent segment
         // retains the catch-up kernel's exact displacement.
         let displacement = if bent { dir * within } else { stepped * dt };
         // An armed round whose delay runs out short of what lies ahead bursts in the open.
@@ -3478,16 +3327,10 @@ fn march_shell_step(
             // the continuation alone knows where it starts.
             Ahead::Held => None,
         };
-        let contact = hit.map_or(0.0, |hit| hit.distance);
+        let mut contact = hit.map_or(0.0, |hit| hit.distance);
         let entry = origin + dir * contact;
 
         if let Some(hit) = hit {
-            if stops_unresolved(shell, world, hit, entry, tick) {
-                stop_at(shell, &mut flight, entry, contact);
-                stopped = true;
-                break;
-            }
-
             // Replica armor state machine: consume a buffered bounce/terminal, otherwise hold a
             // keyed shell hidden; an unkeyed replica shell ends locally. INVARIANT: every replica
             // arm below continues or breaks, so the physical armor resolution after it is
@@ -3512,6 +3355,41 @@ fn march_shell_step(
             }
         }
 
+        let moving = world.contact_motion.take();
+        world.sweep.set(None);
+        let mut carrier = Vec3::ZERO;
+        if let Some(moving) = moving {
+            world.moment.set(Some(moving.fraction));
+            if world.motion_padding() > 0.0 {
+                let leg = resolve::Leg::new(origin, dir, contact, &flight.sample_offsets(radius));
+                damage_dealt += wound_legs(shell, &context, &not_own, &[leg], flight.speed, health);
+                budget.fly(f64::from(contact / flight.speed));
+                shell.projectile.fuze.flown(contact);
+                carrier = moving.velocity;
+                let relative = flight.direction * flight.speed - carrier;
+                let direction = Dir3::new(relative).expect(
+                    "game's damage model: an entering relative sweep has nonzero relative velocity",
+                );
+                flight.direction = direction;
+                flight.speed = relative.length();
+                flight.position = moving.point;
+                // The game's damage model admits simultaneous geometry in the one frozen
+                // contact scene. This is contact-time membership, never tick-start discovery.
+                flight.continuation = Some(
+                    resolve::certified(
+                        &context,
+                        &not_own,
+                        moving.point,
+                        direction,
+                        flight.frame,
+                        radius,
+                    )
+                    .unwrap_or_else(|error| error.panic()),
+                );
+                contact = 0.0;
+                bent = true;
+            }
+        }
         if let Some((ended, removed)) = function_on_contact(
             shell,
             &context,
@@ -3526,6 +3404,12 @@ fn march_shell_step(
                 stopped = true;
                 break;
             }
+            let velocity = flight.direction * flight.speed + carrier;
+            if let Ok(direction) = Dir3::new(velocity) {
+                flight.frame = flight.frame.transport(*flight.direction, *direction);
+                flight.direction = direction;
+            } // At world rest the heading is retained.
+            flight.speed = velocity.length();
             bent = true;
             continue;
         }
@@ -3536,11 +3420,12 @@ fn march_shell_step(
             &not_own,
             &flight,
             contact,
-            dt,
-            bodies,
             health,
             &mut budget,
         );
+        for playing in &mut playback {
+            playing.in_moving_frame(carrier);
+        }
     }
     // An armed round that stopped short of its delay bursts where it lies, at rest, when the
     // delay's remainder runs out (its mark's `after`); its field settles this tick.
@@ -3557,6 +3442,8 @@ fn march_shell_step(
     };
     shell.projectile.playback = playback;
 
+    world.moment.set(None);
+    world.sweep.set(None);
     Some(MarchStep {
         position: flight.position,
         direction: flight.direction,
@@ -3568,19 +3455,15 @@ fn march_shell_step(
     })
 }
 
-/// The game's damage model launches from certified membership; a broken spawn or adapter panics.
+/// The game's damage model launches an outside disc; discovery refuses an inside start.
 fn launch(
     shell: &mut MarchingShell,
-    context: &resolve::ResolveContext<'_, '_, '_>,
-    not_own: &dyn Fn(Entity) -> bool,
     previous: Dir3,
     dir: Dir3,
     speed: f32,
     radius: f32,
 ) -> resolve::Flight {
     resolve::Flight::launched(
-        context,
-        not_own,
         shell.transform.translation,
         previous,
         dir,
@@ -3589,24 +3472,17 @@ fn launch(
         radius,
         shell.projectile.axis.take(),
     )
-    .unwrap_or_else(|error| error.panic())
 }
 
 /// The game's damage model freezes the current discovery chain before playback starts. The
-/// envelope and held-sample discovery rules remain the contact adapter's; no tick re-collects
-/// a chain that is already being played back.
-#[expect(
-    clippy::too_many_arguments,
-    reason = "the immutable planner borrows the march's flight, world and resource budget"
-)]
+/// held samples finish in the frozen scene. Separated contacts return to relative discovery;
+/// no tick re-collects a chain that is already being played back.
 fn decide_playback(
     shell: &MarchingShell,
     context: &resolve::ResolveContext<'_, '_, '_>,
     admit: &dyn Fn(Entity) -> bool,
     flight: &resolve::Flight,
     contact: f32,
-    dt: f32,
-    bodies: &Query<Forces>,
     health: &Query<&mut ComponentHealth>,
     budget: &mut resolve::Budget,
 ) -> std::collections::VecDeque<resolve::Playback> {
@@ -3614,7 +3490,6 @@ fn decide_playback(
     let mut flight = flight.clone();
     let mut fuze = shell.projectile.fuze;
     let radius = resolve::disc_radius(shell.projectile.body().caliber);
-    let shooter = shell.source.map(|source| source.tank);
     let mut contact = Some(contact);
     loop {
         flight
@@ -3650,17 +3525,10 @@ fn decide_playback(
                 .unwrap_or_else(|error| error.panic())
             }
         } else {
-            let reach = context.world.crossing_reach(
-                flight.sweep_origin(),
-                flight.direction,
-                0.0,
-                flight.spread(radius).max(radius),
-                shooter,
-                NextStep { bodies, dt },
-            );
-            if reach <= MARCH_EPS && !flight.holds_material() {
+            if !flight.holds_material() {
                 break;
             }
+            let reach = resolve::FIELD_REACH;
             match next_surface(context.world, &flight, radius, reach, admit) {
                 Ahead::Armor(hit) if context.world.armour(hit.entity).is_some() => {
                     contact = Some(hit.distance);
@@ -3920,49 +3788,6 @@ fn strike_ground(shell: &MarchingShell, entry: Vec3, normal: Vec3, tick: &mut Ma
     }
 }
 
-/// Whether the round stops dead at its first surface, `hit`, with no crossing resolved, and the
-/// struck [`Impact`] it shows at `entry`: where the hit's ancestry holds no ballistic volume, which
-/// is terrain. The caller stops the flight at `entry`.
-fn stops_unresolved(
-    shell: &MarchingShell,
-    world: &ProjectileMarchWorld,
-    hit: avian3d::prelude::RayHitData,
-    entry: Vec3,
-    tick: &mut MarchTick,
-) -> bool {
-    let MarchTick { now, deposit, .. } = *tick;
-    let (shot_trace, commands) = (&mut *tick.shot_trace, &mut *tick.commands);
-    let shot = shell.shot;
-    // The struck `BallisticVolume` sits on the hit's ancestry (`hit_ancestor`, the shared
-    // hierarchy-resolution rule). No volume in the ancestry ⇒ classified terrain (an
-    // Armor-layer entity without ownership). The crossing itself finds every volume for
-    // itself; this read only tells armour from terrain.
-    if world.armour(hit.entity).is_none() {
-        commands.trigger(Impact {
-            position: entry,
-            normal: hit.normal,
-            caliber: shell.projectile.caliber(),
-            surface: ImpactSurface::Terrain,
-            outcome: ImpactOutcome::Struck,
-        });
-        // A terrain stop is the one shot terminal that needs NO confirm: static,
-        // pose-independent geometry, so both ends already agree (ADR-0021's invariant).
-        // Recorded on the client so the analyzer can close the lifecycle of a shot that
-        // simply never reached armor, instead of filing it as never-consumed.
-        if !deposit && let Some(shot) = shot {
-            crate::shot_trace::record(
-                shot_trace,
-                "end",
-                now,
-                shot.0,
-                || json!({ "why": "terrain" }),
-            );
-        }
-        return true;
-    }
-    false
-}
-
 /// How a replica's armour contact ends the sweep that met it ([`replica_contact`]).
 enum ReplicaSweep {
     /// The flight re-seeded from the authority's bounce; the step marches on.
@@ -4044,8 +3869,7 @@ enum Ahead {
         normal: Vec3,
     },
     Armor(avian3d::prelude::RayHitData),
-    /// The flight holds a continuation inside material and the cast found no surface: the
-    /// continuation's own corridor resolves it.
+    /// The game's damage model: held material belongs to the frozen crossing, never discovery.
     Held,
 }
 
@@ -4077,23 +3901,19 @@ fn next_surface(
     budget: f32,
     not_own: &dyn Fn(Entity) -> bool,
 ) -> Ahead {
-    let held = flight.holds_material();
-    let reach = if held {
-        budget.max(resolve::FIELD_REACH)
-    } else {
-        budget
-    };
+    if flight.holds_material() {
+        return Ahead::Held;
+    }
     match cast_disc_segment(
         world,
         &flight.sample_offsets(radius),
         flight.sweep_origin(),
         flight.direction,
-        reach,
+        budget,
         not_own,
     ) {
         Some(SegmentHit::Armor(hit)) => Ahead::Armor(hit),
         Some(SegmentHit::Terrain { distance, normal }) => Ahead::Terrain { distance, normal },
-        None if held => Ahead::Held,
         None => Ahead::Open,
     }
 }
@@ -4413,6 +4233,7 @@ fn on_impact(impact: On<Impact>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use bevy::ecs::system::RunSystemOnce;
 
     /// A context for a deposit whose origin the test does not read.
     const FIXTURE_CONTEXT: DoseContext = DoseContext::Line {
@@ -4441,7 +4262,6 @@ mod tests {
     /// gained since the last, and the pool stops at zero. Fixture doses (reference-mm).
     #[test]
     fn a_shots_dose_is_converted_once_per_box() {
-        use bevy::ecs::system::RunSystemOnce;
         let mut world = World::new();
         let target = world.spawn(ComponentHealth::full(30)).id();
         world.spawn(ShotDose::default());
@@ -5056,7 +4876,6 @@ mod march_tests {
         AngularInertia, AngularVelocity, Collider, CollisionLayers, GravityScale, LayerMask,
         LinearVelocity, Mass, NoAutoAngularInertia, NoAutoMass, PhysicsPlugins, RigidBody,
     };
-    use bevy::ecs::system::RunSystemOnce;
     use bevy::time::TimeUpdateStrategy;
 
     use super::*;
@@ -5158,7 +4977,7 @@ mod march_tests {
     }
 
     /// Build an Avian world with one static steel plate (full extents `size`, centred at `at`, facing
-    /// ±Z, carrying its [`Envelope`] as every spawned body does) on the `Armor` layer, register the
+    /// ±Z) on the `Armor` layer, register the
     /// real march + the impact capture, and settle the physics
     /// so the spatial-query pipeline includes the plate before any shell is marched.
     ///
@@ -5182,7 +5001,6 @@ mod march_tests {
         app.world_mut().spawn((
             Transform::from_translation(at),
             RigidBody::Static,
-            Envelope::of(&collider),
             collider,
             CollisionLayers::new([Layer::Armor], LayerMask::ALL),
             BallisticVolume {
@@ -5411,7 +5229,7 @@ mod march_tests {
     /// march's very first cast struck the shooter's own armour a centimetre out — embedding the round on
     /// the authority, and fail-closing the tracer on every net client. The plate here stands for that
     /// mantlet: a round fired from INSIDE it must fly straight out if the plate belongs to its shooter,
-    /// and must still be stopped by the very same plate if it does not. That second half is the point —
+    /// and the very same plate must stop a foreign round entering from outside. That second half is the point —
     /// this is an exclusion, not a hole in the armour.
     #[test]
     fn a_shell_ignores_the_tank_that_fired_it() {
@@ -5434,7 +5252,7 @@ mod march_tests {
             let plate = plates.single(app.world()).expect("one plate");
             app.world_mut().entity_mut(plate).insert(VolumeOf(tank));
 
-            let origin = Vec3::new(0.0, 2.0, 0.0);
+            let origin = Vec3::new(0.0, 2.0, if own { 0.0 } else { 0.4 });
             let dir = Vec3::NEG_Z;
             let shell = app
                 .world_mut()
@@ -6578,7 +6396,7 @@ mod march_tests {
     /// The game's damage model constructs readable ballistic shapes on both authority and
     /// replicas. A compound inserted by a broken fixture is a wiring bug, never a hold or verdict.
     #[test]
-    #[should_panic(expected = "spawn constructs certified trimesh or convex ballistic geometry")]
+    #[should_panic(expected = "spawned ballistic colliders carry a resolved pose")]
     fn a_replica_panics_on_an_unreadable_ballistic_shape() {
         let mut app = replica_world(SanctionedShots::default());
         spawn_uncertifiable(&mut app);
@@ -6649,7 +6467,7 @@ mod march_tests {
 
     /// The game's damage model requires the same certified-shape invariant on the authority.
     #[test]
-    #[should_panic(expected = "spawn constructs certified trimesh or convex ballistic geometry")]
+    #[should_panic(expected = "spawned ballistic colliders carry a resolved pose")]
     fn the_authority_panics_on_an_unreadable_ballistic_shape() {
         let mut app = world_with_plate(Vec3::new(3.0, 3.0, 0.10), Vec3::new(0.0, 2.0, 0.0));
         spawn_uncertifiable(&mut app);
@@ -7377,8 +7195,7 @@ mod march_tests {
         (Collider::trimesh(vertices, indices), surfaces)
     }
 
-    /// A world of outward-wound trimesh plates, all one substance, each a static body carrying its
-    /// envelope as every spawned body does ([`Envelope`]).
+    /// The game's damage model: outward-wound trimesh plates of one substance, each a static body.
     pub(super) fn world_with_trimesh_plates(plates: &[(Vec3, Vec3)]) -> App {
         let mut app = world_with_plate(Vec3::splat(0.01), Vec3::new(0.0, -500.0, 0.0));
         for (size, at) in plates {
@@ -7386,7 +7203,6 @@ mod march_tests {
             app.world_mut().spawn((
                 Transform::from_translation(*at),
                 RigidBody::Static,
-                Envelope::of(&collider),
                 collider,
                 surfaces,
                 CollisionLayers::new([Layer::Armor], LayerMask::ALL),
@@ -7974,12 +7790,11 @@ mod march_tests {
     /// The resume fixture above, with the round's travel for the tick ending half a nudge past the
     /// plate's exit: the perforation leaves the axis sample inside the tilted volume (its entry lies
     /// before the resumption plane, so the seed owns it), and the tick's budget runs out before that
-    /// volume's exit. Neither volume carries an envelope, so no crossing reach carries the step on;
+    /// volume's exit. Held samples carry that crossing to completion;
     /// the held sample's drain alone does, closing the volume past the travel within the step
     /// ([`next_surface`]). A march that let the travel end the step would start the next inside the
     /// volume with nothing declared, read its exit as `UnexpectedExit`, and panic on armour it
-    /// had already entered. No shipped body is without its envelope; this pins the drain that
-    /// Playback retains that immutable continuation until its real path moment.
+    /// had already entered. Playback retains that immutable continuation until its real path moment.
     #[test]
     fn a_held_samples_drain_closes_its_material_past_the_travel() {
         const TILT: f32 = 65.0;
@@ -8330,37 +8145,15 @@ mod march_tests {
         stepped: Vec3,
         frame: walk::DiscFrame,
     ) -> resolve::Flight {
-        let mut app = world_with_trimesh_plates(&[]);
-        app.world_mut()
-            .run_system_once(
-                move |world: ProjectileMarchWorld,
-                      colliders: Query<(
-                    &'static Position,
-                    &'static Rotation,
-                    &'static Collider,
-                    Option<&'static BallisticSurfaces>,
-                )>| {
-                    let context = resolve::ResolveContext {
-                        world: &world,
-                        colliders: &colliders,
-                        deposit: false,
-                        laws: walk::WalkLaws::default(),
-                    };
-                    resolve::Flight::launched(
-                        &context,
-                        &|_| true,
-                        position,
-                        swept,
-                        Dir3::new(stepped).expect("a direction"),
-                        stepped.length(),
-                        frame,
-                        resolve::disc_radius(FIXTURE_88.caliber),
-                        None,
-                    )
-                },
-            )
-            .expect("the launch system runs")
-            .expect("open air certifies")
+        resolve::Flight::launched(
+            position,
+            swept,
+            Dir3::new(stepped).expect("a direction"),
+            stepped.length(),
+            frame,
+            resolve::disc_radius(FIXTURE_88.caliber),
+            None,
+        )
     }
 
     /// Every sample's start after `launched` is a point the last sweep left it at — the disc laid on

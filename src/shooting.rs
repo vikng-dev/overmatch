@@ -469,7 +469,7 @@ fn apply_recoil(
         state.recoil_offset += state.recoil_velocity * dt;
         // The two stops: battery ahead (the barrel can't return past its rest position) and the
         // recoil stop behind (the buffer's limit). Each holds the barrel and zeroes its velocity,
-        // so no run of kicks carries it past either; `bake::envelope` sweeps the stroke between.
+        // so no run of kicks carries it past either mechanical stop.
         if state.recoil_offset < 0.0 {
             state.recoil_offset = 0.0;
             state.recoil_velocity = 0.0;
@@ -1347,8 +1347,7 @@ mod tests {
 
     /// Invariant: a recoiling barrel never travels past its recoil stop, however fast it is kicked,
     /// and stops dead there: `apply_recoil` holds the offset at `max_length` and zeroes the velocity.
-    /// The tank envelope (`bake::envelope`) sweeps the stroke only as far as the stop, so it relies
-    /// on this bound. A kick every tick, the fastest any weapon fires (`arm` spaces shots at least
+    /// A kick every tick, the fastest any weapon fires (`arm` spaces shots at least
     /// a tick apart), drives the spring past the stop; a mutant that drops the clamp carries the
     /// barrel through it, and one that keeps the velocity at the stop leaves it moving there.
     #[test]

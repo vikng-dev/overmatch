@@ -1,6 +1,6 @@
 //! Servo mechanism. Window contract (design `armor-penetration-and-damage.md` §13.5): a `Limited`
 //! travel is finite with `min <= 0 <= max`, certify refuses any other, and `drive_servos` keeps
-//! `current` inside it on every tick; the envelope sweeps exactly that window.
+//! `current` inside it on every tick.
 
 use bevy::prelude::*;
 use serde::{Deserialize, Serialize};
@@ -370,8 +370,7 @@ mod tests {
 
     /// Invariant: a `Limited` servo's `current` stays inside `travel_limits()` on every tick, for any
     /// start inside the window and any target, including one beyond either limit and one sweeping
-    /// at full slew. The envelope sweeps only the window, so a mount outside it is a part the
-    /// damage model's reachability test would call unreachable.
+    /// at full slew. The declared mechanical travel is the servo controller's invariant.
     #[test]
     fn a_limited_servo_never_leaves_its_window() {
         let mut world = World::new();

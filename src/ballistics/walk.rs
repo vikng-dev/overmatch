@@ -983,6 +983,50 @@ fn canonical_crossings(order: &[&FaceHit]) -> Vec<Crossing> {
         .collect()
 }
 
+/// The game's damage model: first entry from an outside discovery start. Every candidate is
+/// collected through its far bound, so an initial exit proves an invalid inside start even when
+/// that exit lies beyond this tick's movement. Tangent feature fans own no boundary.
+pub(super) fn discovery_entry(
+    hits: &[FaceHit],
+    start: f64,
+    boundary_band: f64,
+) -> Option<(f64, Vec3)> {
+    let order: Vec<&FaceHit> = hits.iter().collect();
+    let mut crossings = canonical_crossings(&order);
+    crossings.sort_by(|a, b| {
+        a.t.total_cmp(&b.t)
+            .then_with(|| a.key.cmp(&b.key))
+            .then_with(|| a.contact.cmp(&b.contact))
+    });
+    let mut inside = std::collections::BTreeSet::new();
+    for crossing in crossings
+        .iter()
+        .filter(|crossing| crossing.t < start || (crossing.t == start && crossing.sign < 0))
+    {
+        if crossing.sign > 0 {
+            inside.insert(crossing.key);
+        } else {
+            inside.remove(&crossing.key);
+        }
+    }
+    // The game's damage model uses the same topological boundary band as the crossing
+    // handoff. A represented point on a face can round just behind it; that face is contact,
+    // not interior. Deeper membership remains a bug, including a shallow convex start.
+    inside.retain(|key| {
+        !crossings
+            .iter()
+            .any(|crossing| crossing.key == *key && (crossing.t - start).abs() <= boundary_band)
+    });
+    assert!(
+        inside.is_empty(),
+        "game's damage model: discovery starts outside every collider; starts inside {inside:?}"
+    );
+    crossings
+        .iter()
+        .find(|crossing| crossing.t >= start - boundary_band && crossing.sign > 0)
+        .map(|crossing| ((crossing.t - start).max(0.0), crossing.normal))
+}
+
 /// The live union field: which shells are open, and therefore what `max(factor)` is.
 ///
 /// Openness is a BOOLEAN, not a depth. A closed, outward-wound, EMBEDDED shell crossed transversely

@@ -18,7 +18,7 @@
 use std::borrow::Cow;
 use std::collections::BTreeSet;
 
-use avian3d::prelude::SimpleCollider;
+use avian3d::prelude::{Rotation, SimpleCollider};
 use bevy::prelude::*;
 
 use super::collect::{self, Corridor};
@@ -39,7 +39,7 @@ fn candidates(
     let world = context.world;
     let mut out = Vec::new();
     world.spatial.aabb_intersections_with_aabb_callback(
-        collect::swept_aabb(from, axis, length, radius),
+        collect::swept_aabb(from, axis, length, radius + world.motion_padding()),
         |entity| {
             if world.witness_surfaces.contains(entity)
                 && admit(entity)
@@ -119,7 +119,11 @@ fn presence(
                 reason: "a witness collider has no resolved pose",
             });
         };
-        let bounds = collider.aabb(position.0, *rotation);
+        let pose = context.world.pose(primitive);
+        let bounds = collider.aabb(
+            pose.map_or(position.0, |pose| pose.position),
+            pose.map_or(*rotation, |pose| Rotation(pose.rotation)),
+        );
         let (min, max) = (bounds.min - at - margin, bounds.max - at + margin);
         if line_in_box(axis, min, max).is_none_or(|(enter, leave)| leave < 0.0 || enter > length) {
             continue;
@@ -154,6 +158,7 @@ fn presence(
         &kept,
         context.colliders,
         &mut hits,
+        &|entity| context.world.pose(entity),
     )?;
     let (behind, length) = (behind as f64, length as f64);
     let spans: Vec<(f64, f64)> = walk::witness_spans(0, total as f64, &hits)?

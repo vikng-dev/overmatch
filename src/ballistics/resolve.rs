@@ -178,7 +178,7 @@ pub(crate) fn disc_radius(caliber: f32) -> f32 {
 /// or by nobody. The flight converts to world only for its cast and for presentation.
 ///
 /// Membership belongs to discovery. An immutable playback result retains its completed path;
-/// the next discovery chain lays a fresh disc only after leaving every envelope ([`super::Envelope`]).
+/// the next discovery chain starts only after the held material is resolved.
 #[derive(Clone, Debug)]
 pub(crate) struct Interior {
     /// WORLD anchor of the corridor the seeds were read on.
@@ -191,7 +191,8 @@ pub(crate) struct Interior {
 
 impl Interior {
     /// A layout at `position` with every sample outside everything — true only where no armour is
-    /// near the samples, which [`certified`] establishes before it lays one.
+    /// near the samples. Relative discovery verifies fresh starts; [`certified`] reads
+    /// contact-time membership in the frozen scene.
     pub(crate) fn laid(position: Vec3, offsets: Vec<Vec3>) -> Self {
         Self {
             anchor: position,
@@ -246,7 +247,7 @@ impl Interior {
 /// Where the axis sample stands as a step ends: a WORLD anchor and the start relative to it
 /// ([`Interior::anchor`], [`Interior::origin`]), so the next step's layout keeps what world
 /// rounding of a re-taken anchor loses. A position only: what a sample is inside never crosses a
-/// tick ([`super::Envelope`]).
+/// tick.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) struct AxisStart {
     pub anchor: Vec3,
@@ -364,7 +365,11 @@ fn certified_at(
                 reason: "a candidate collider has no resolved pose",
             });
         };
-        let bounds = collider.aabb(position.0, *rotation);
+        let pose = context.world.pose(primitive);
+        let bounds = collider.aabb(
+            pose.map_or(position.0, |pose| pose.position),
+            pose.map_or(*rotation, |pose| Rotation(pose.rotation)),
+        );
         let (min, max) = (bounds.min - at, bounds.max - at);
         let margin = Vec3::splat(PROBE_MARGIN);
         if !offsets
@@ -441,6 +446,7 @@ fn certified_at(
             &near,
             context.colliders,
             &mut hits,
+            &|entity| context.world.pose(entity),
         )?;
         samples.push(SampleCorridor {
             offset,
@@ -530,7 +536,13 @@ impl Reached {
                 .colliders
                 .get(self.collider)
                 .ok()
-                .map(|(position, rotation, collider, _)| collider.aabb(position.0, *rotation))
+                .map(|(position, rotation, collider, _)| {
+                    let pose = context.world.pose(self.collider);
+                    collider.aabb(
+                        pose.map_or(position.0, |pose| pose.position),
+                        pose.map_or(*rotation, |pose| Rotation(pose.rotation)),
+                    )
+                })
         })
     }
 }
@@ -565,12 +577,19 @@ impl FieldReach {
     ) -> Self {
         let world = context.world;
         let (mut hard, mut witnesses) = (Vec::new(), Vec::new());
-        world
-            .spatial
-            .aabb_intersections_with_aabb_callback(region, |entity| {
+        world.spatial.aabb_intersections_with_aabb_callback(
+            ColliderAabb::from_min_max(
+                region.min - Vec3::splat(world.motion_padding()),
+                region.max + Vec3::splat(world.motion_padding()),
+            ),
+            |entity| {
                 let Ok(&broad) = world.aabbs.get(entity) else {
                     return true;
                 };
+                let broad = ColliderAabb::from_min_max(
+                    broad.min - Vec3::splat(world.motion_padding()),
+                    broad.max + Vec3::splat(world.motion_padding()),
+                );
                 if let Some((node, _)) = world.armour(entity) {
                     if admit(entity) {
                         hard.push(Reached {
@@ -588,7 +607,8 @@ impl FieldReach {
                     witnesses.push((node, entity, broad));
                 }
                 true
-            });
+            },
+        );
         hard.sort_unstable_by_key(|reached| (reached.node, reached.collider));
         witnesses.sort_unstable_by_key(|&(node, collider, _)| (node, collider));
         Self {
@@ -707,6 +727,7 @@ pub(crate) fn field_presence(
         &near,
         context.colliders,
         &mut hits,
+        &|entity| context.world.pose(entity),
     )?;
     let mut entries: Vec<(Entity, walk::VolumeMaterial)> = Vec::new();
     for hit in &hits {
@@ -917,23 +938,9 @@ pub(crate) struct Flight {
 }
 
 impl Flight {
-    /// A step's flight from a fresh disc laid on `frame` at the axis start `axis` (or, with none,
-    /// at `position`), square to `swept`, its membership established ([`certified`]). Nothing a
-    /// sample was inside is carried into new discovery: its preceding immutable chain ends
-    /// outside every envelope ([`super::Envelope`]). Playback itself can span ticks.
-    ///
-    /// The last sweep ran along `swept`; the flight now travels along `direction`. The disc stays
-    /// square to `swept` and each sample's ray simply bends: no bend is too large for this, a
-    /// reversal included. `frame` is transported through the bend by minimal rotation for the next
-    /// fresh layout. The disc's sampled cross-section projects by `|cos θ|` of the bend, in the
-    /// plane of the bend (DERIVED: 0.12 % narrower for a 2.8° drop).
-    #[expect(
-        clippy::too_many_arguments,
-        reason = "the flight's whole state plus the world its fresh starts are certified against"
-    )]
+    /// The game's damage model: a new discovery disc starts outside material. Its sweep
+    /// verifies that invariant; no tick-start containment probe supplies membership.
     pub(crate) fn launched(
-        context: &ResolveContext<'_, '_, '_>,
-        not_own: &dyn Fn(Entity) -> bool,
         position: Vec3,
         swept: Dir3,
         direction: Dir3,
@@ -941,7 +948,7 @@ impl Flight {
         frame: DiscFrame,
         radius: f32,
         axis: Option<AxisStart>,
-    ) -> Result<Self, WalkError> {
+    ) -> Self {
         let start = axis.map_or(
             AxisStart {
                 anchor: position,
@@ -949,14 +956,15 @@ impl Flight {
             },
             AxisStart::rebased,
         );
-        let starts = certified_at(context, not_own, start, swept, frame, radius)?;
-        Ok(Self {
+        let mut starts = Interior::laid(start.anchor, layout(&frame, radius));
+        starts.origin = start.origin;
+        Self {
             position: starts.world_origin(),
             direction,
             speed,
             frame: frame.transport(Vec3::from(swept), Vec3::from(direction)),
             continuation: Some(starts),
-        })
+        }
     }
 
     /// Lay the fresh disc a bounce or a re-seed left — on `frame` at `position`, square to
@@ -994,16 +1002,6 @@ impl Flight {
             Some(interior) => interior.seeds.iter().map(|seed| seed.offset).collect(),
             None => layout(&self.frame, radius),
         }
-    }
-
-    /// The farthest any sample starts from the axis start: a fresh disc's `radius`, and wherever
-    /// the starts stand once an oblique perforation has staggered them along the plate (for a
-    /// planar exit, design §13.5 states the bound).
-    pub(crate) fn spread(&self, radius: f32) -> f32 {
-        self.sample_offsets(radius)
-            .iter()
-            .map(|offset| offset.length())
-            .fold(0.0, f32::max)
     }
 
     /// A continuation holds a sample inside material ([`Interior::holds_material`]).
@@ -1915,7 +1913,8 @@ fn closing_walk(
             let horizon = ((far
                 + stagger
                 + f64::from(context.laws.weld_max_lookahead)
-                + f64::from(PROBE_MARGIN)) as f32)
+                + f64::from(PROBE_MARGIN)
+                + f64::from(context.world.motion_padding())) as f32)
                 .next_up();
             assert!(
                 horizon.is_finite(),
@@ -1947,7 +1946,12 @@ pub(super) fn candidates(
 ) -> Vec<(Entity, Entity)> {
     let mut out = Vec::new();
     context.world.spatial.aabb_intersections_with_aabb_callback(
-        collect::swept_aabb(origin, axis, length, radius),
+        collect::swept_aabb(
+            origin,
+            axis,
+            length,
+            radius + context.world.motion_padding(),
+        ),
         |entity| {
             // Ancestry IS the armour test: only a collider under a `BallisticVolume` node resolves,
             // which is the same rule the march has always used to tell armour from terrain; a
@@ -2017,6 +2021,7 @@ pub(super) fn build_corridor(
             &candidates,
             context.colliders,
             &mut hits,
+            &|entity| context.world.pose(entity),
         )?;
         samples.push(SampleCorridor {
             offset,
