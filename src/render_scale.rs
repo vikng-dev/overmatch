@@ -114,11 +114,12 @@ use bevy::render::extract_component::{ExtractComponent, ExtractComponentPlugin};
 use bevy::render::extract_resource::{ExtractResource, ExtractResourcePlugin};
 use bevy::render::render_resource::binding_types::{sampler, texture_2d, uniform_buffer};
 use bevy::render::render_resource::{
-    BindGroupEntries, BindGroupLayoutDescriptor, BindGroupLayoutEntries, CachedRenderPipelineId,
-    ColorTargetState, ColorWrites, FilterMode, FragmentState, LoadOp, MultisampleState, Operations,
-    PipelineCache, RenderPassColorAttachment, RenderPassDescriptor, RenderPipelineDescriptor,
-    Sampler, SamplerBindingType, SamplerDescriptor, ShaderStages, SpecializedRenderPipeline,
-    SpecializedRenderPipelines, StoreOp, TextureFormat, TextureSampleType,
+    BindGroupEntries, BindGroupLayoutDescriptor, BindGroupLayoutEntries, CachedPipelineState,
+    CachedRenderPipelineId, ColorTargetState, ColorWrites, FilterMode, FragmentState, LoadOp,
+    MultisampleState, Operations, PipelineCache, RenderPassColorAttachment, RenderPassDescriptor,
+    RenderPipelineDescriptor, Sampler, SamplerBindingType, SamplerDescriptor, ShaderStages,
+    SpecializedRenderPipeline, SpecializedRenderPipelines, StoreOp, TextureFormat,
+    TextureSampleType,
 };
 use bevy::render::renderer::{RenderContext, RenderDevice, ViewQuery};
 use bevy::render::view::{
@@ -474,10 +475,18 @@ fn render_scale_upscale(
 ) {
     let (target, upscale_id, view_offset) = view.into_inner();
     let Some(pipeline) = pipeline_cache.get_render_pipeline(upscale_id.0) else {
-        return;
+        match pipeline_cache.get_render_pipeline_state(upscale_id.0) {
+            CachedPipelineState::Err(bevy::shader::ShaderCacheError::ProcessShaderError(err)) => {
+                panic!("the shipped render-scale shader must compile: {err}");
+            }
+            CachedPipelineState::Err(bevy::shader::ShaderCacheError::CreateShaderModule(err)) => {
+                panic!("the shipped render-scale shader must create its GPU module: {err}");
+            }
+            _ => return, // Queued, creating, or awaiting shader imports: no pipeline exists yet.
+        }
     };
     let Some(view_binding) = view_uniforms.uniforms.binding() else {
-        return;
+        return; // The render world's first view-uniform upload has not produced a binding yet.
     };
 
     // Flips the view's main texture: everything downstream reads the upscaled result. This is a

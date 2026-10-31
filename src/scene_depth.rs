@@ -151,7 +151,7 @@ fn provide_depth_texture(
 ) {
     for (entity, camera, msaa) in &views {
         let Some(physical_size) = camera.physical_target_size else {
-            continue;
+            continue; // A target that has not acquired a size cannot own a depth attachment yet.
         };
         let size = physical_size.to_extents();
         let texture = texture_cache.get(

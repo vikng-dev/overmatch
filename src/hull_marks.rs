@@ -297,7 +297,10 @@ impl MarkBuilder<'_, '_> {
         if caliber_mm(strike.caliber) < MIN_MARK_CALIBER_MM {
             return None;
         }
-        let root = self.owners.get(strike.struck).ok()?.tank();
+        let Ok(owner) = self.owners.get(strike.struck) else {
+            return None; // Standalone environment volumes have no vehicle ownership or hull record.
+        };
+        let root = owner.tank();
         if !self.marked_roots.contains(root) {
             return None; // Trees, structures and independently simulated detached parts keep no hull record.
         }

@@ -21,8 +21,8 @@ use crate::render_policy::{CameraProfile, VisualScope};
 use crate::spec::ViewKind;
 use crate::state::{GameplaySet, PlayerInputSet};
 use crate::tank::{
-    Controlled, RemoteServos, ServoIndex, ServoSpec, ServoState, Tank, TankServos, TankViews,
-    rig_world_pose, shortest_angle,
+    Controlled, RemoteServos, ServoIndex, ServoSpec, Tank, TankServos, TankViews, rig_world_pose,
+    shortest_angle,
 };
 use crate::view::PlayerView;
 
@@ -348,19 +348,30 @@ impl LiveServos<'_, '_> {
     /// one — every replica, the own hull included — else the authoritative [`TankServos`] snapshot.
     /// The optic clamps intent against the gun's live lay, so it must read the integrator that is
     /// moving it.
-    fn angle(&self, tank: Entity, servo: Entity) -> Option<f32> {
-        let slot = self.slots.get(servo).ok()?;
-        self.remote
-            .get(tank)
-            .ok()
-            .and_then(|servos| servos.0.get(slot.0))
-            .or_else(|| {
-                self.states
-                    .get(tank)
-                    .ok()
-                    .and_then(|servos| servos.states.get(slot.0))
-            })
-            .map(ServoState::current)
+    fn angle(&self, tank: Entity, servo: Entity) -> f32 {
+        let slot = self
+            .slots
+            .get(servo)
+            .expect("every declared rig servo receives its index at complete spawn");
+        let state = if let Ok(servos) = self.remote.get(tank) {
+            servos
+                .0
+                .get(slot.0)
+                .expect("the replica's complete servo vector covers every declared slot")
+        } else {
+            self.states
+                .get(tank)
+                .expect("a controlled rig has either replica or authoritative servo state")
+                .states
+                .get(slot.0)
+                .expect("the authority's complete servo vector covers every declared slot")
+        };
+        let angle = state.current();
+        assert!(
+            angle.is_finite(),
+            "the live servo integrator holds finite angles"
+        );
+        angle
     }
 }
 
@@ -410,9 +421,10 @@ pub(crate) fn drive_gunner_aim(
     if let Some(point) = committed_point
         && !moved
     {
-        if let Ok(mut command) = tank_commands.get_mut(tank) {
-            command.aim = Some(AimIntent::HullLocal(point));
-        }
+        tank_commands
+            .get_mut(tank)
+            .expect("Tank requires its command component in the same construction flush")
+            .aim = Some(AimIntent::HullLocal(point));
         return;
     }
 
@@ -436,12 +448,8 @@ pub(crate) fn drive_gunner_aim(
     let sensitivity = SENSITIVITY_PER_FOV * fov;
 
     // The margin below clamps intent against the gun's live lay — see [`LiveServos::angle`].
-    let Some(t_current) = servos.angle(tank, rig.turret) else {
-        return;
-    };
-    let Some(g_current) = servos.angle(tank, rig.gun) else {
-        return;
-    };
+    let t_current = servos.angle(tank, rig.turret);
+    let g_current = servos.angle(tank, rig.gun);
 
     // Superelevation for the dialed range; the gun's live pitch carries it, so the sight line (which
     // the intent tracks) is the gun's lay minus the lob. One binding for that scalar: the seed and
@@ -457,29 +465,27 @@ pub(crate) fn drive_gunner_aim(
     // `aim::drive_aim_servos` lays from (`rig_world_pose`, never `GlobalTransform`), so the
     // decomposition below, the clamps against the live lay, and the servo convergence all measure
     // their angles from one origin. The hull frame anchors the committed point's local form.
-    let Ok((root_position, root_rotation)) = poses.get(tank) else {
-        return;
-    };
-    let Some((hull_position, hull_rotation)) = rig_world_pose(
+    let (root_position, root_rotation) = poses
+        .get(tank)
+        .expect("a controlled tank is constructed with its authoritative or replicated pose");
+    let (hull_position, hull_rotation) = rig_world_pose(
         rig.hull,
         tank,
         root_position.0,
         root_rotation.0,
         &parents,
         &locals,
-    ) else {
-        return;
-    };
-    let Some((mount_world, _)) = rig_world_pose(
+    )
+    .expect("the controlled rig's hull remains in its spawn-built pose chain");
+    let (mount_world, _) = rig_world_pose(
         rig.gun,
         tank,
         root_position.0,
         root_rotation.0,
         &parents,
         &locals,
-    ) else {
-        return;
-    };
+    )
+    .expect("the controlled rig's gun mount remains in its spawn-built pose chain");
     let hull_affine = Affine3A::from_rotation_translation(hull_rotation, hull_position);
     let mount_local = hull_affine.inverse().transform_point3(mount_world);
     assert!(
@@ -572,14 +578,32 @@ pub(crate) fn drive_gunner_aim(
     if let Some(point) = publish.store {
         committed.set(tank, point);
     }
-    if let Ok(mut command) = tank_commands.get_mut(tank) {
-        command.aim = Some(AimIntent::HullLocal(publish.command_aim));
-    }
+    tank_commands
+        .get_mut(tank)
+        .expect("Tank requires its command component in the same construction flush")
+        .aim = Some(AimIntent::HullLocal(publish.command_aim));
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Optic intent follows the replica's live lay. A malformed replica vector must fail rather
+    /// than silently borrowing the authority vector's different angle for the same slot.
+    #[test]
+    #[should_panic(expected = "replica's complete servo vector")]
+    fn an_incomplete_replica_servo_vector_cannot_read_authority_state() {
+        use bevy::ecs::system::RunSystemOnce;
+        let mut app = App::new();
+        let tank = app
+            .world_mut()
+            .spawn((TankServos::for_count(1), RemoteServos(Vec::new())))
+            .id();
+        let servo = app.world_mut().spawn(ServoIndex(0)).id();
+        app.world_mut()
+            .run_system_once(move |live: LiveServos| live.angle(tank, servo))
+            .expect("the fixture supplies every system resource");
+    }
 
     use crate::render_policy;
     use crate::spec::Optics;

@@ -254,8 +254,13 @@ struct LastReportVariant(Option<usize>);
 /// `net::fire_presentation` uses — and its authored clip list is the whole gate: a weapon with an
 /// empty list is silent, and a shell with no shooter (a sandbox or test round) belongs to no
 /// weapon at all.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the report reads shot identity, source liveness, authored clips and view-only playback state"
+)]
 fn on_weapon_report(
     fire: On<FireShell>,
+    roots: Query<(), With<crate::tank::Tank>>,
     weapons: Query<(&Weapon, &WeaponIndex, &TankRoot), With<Muzzle>>,
     asset_server: Res<AssetServer>,
     mut clips: ResMut<SfxClips>,
@@ -270,11 +275,20 @@ fn on_weapon_report(
     let Some(shooter) = fire.shooter else {
         return;
     };
-    let Some(weapon) = weapons.iter().find_map(|(weapon, slot, tank)| {
+    let mut matching = weapons.iter().filter_map(|(weapon, slot, tank)| {
         (slot.0 == shooter.weapon && tank.0 == shooter.tank).then_some(weapon)
-    }) else {
-        return;
+    });
+    let Some(weapon) = matching.next() else {
+        assert!(
+            !roots.contains(shooter.tank),
+            "a live shot source has its complete authored weapon slot"
+        );
+        return; // A deferred presentation can outlive its despawned source; there is no emitter now.
     };
+    assert!(
+        matching.next().is_none(),
+        "one source and slot identify exactly one weapon"
+    );
     let Some(variant) = pick_variant(&mut rng, weapon.report_clips.len(), last.0) else {
         return;
     };

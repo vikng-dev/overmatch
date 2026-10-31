@@ -102,9 +102,9 @@ pub(crate) fn spawn_status_panel(mut commands: Commands, fonts: Res<UiFonts>) {
 }
 
 /// One weapon's status readout, split out so the precedence is unit-testable without standing up the
-/// whole ECS panel. `no_fire` is the per-weapon fire gate (dead gunner/breech/barrel) — an *unusable*
+/// whole ECS panel. `no_fire` is the per-weapon fire gate (gunner/breech/barrel out of action) — an *unusable*
 /// weapon. The crew-gate/no-fire state wins over any timer readout: a weapon that can't fire must not
-/// tease a reload or swap countdown (a dead gun's ready deadline advances to preserve its remaining
+/// tease a reload or swap countdown (an out-of-action gun's ready deadline advances to preserve its remaining
 /// work, so the derived countdown would otherwise stick forever).
 fn weapon_status(
     fire_cycle: FireCycle,
@@ -165,7 +165,7 @@ fn round_line(weapon_name: &str, rounds: &[WeaponRound], load: &WeaponLoad) -> O
     Some(line)
 }
 
-/// Render the controlled tank's vitals card: crew alive/total, Drive + Gunner-sight effectiveness,
+/// Render the controlled tank's vitals card: crew available/total, Drive + Gunner-sight effectiveness,
 /// each weapon's reload/fire state (`READY` / `x.xs` / `no-fire`), and the round choice of each
 /// weapon that has one ([`round_line`]). A pure view over the controlled tank's local components.
 #[expect(

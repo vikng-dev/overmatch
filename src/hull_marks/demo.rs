@@ -92,12 +92,18 @@ fn strike_target(
     if time.elapsed_secs() < STRIKE_FROM_S {
         return;
     }
-    let (Ok(camera), Ok(player)) = (camera.single(), player.single()) else {
-        return;
+    let Some(player) = crate::tank::controlled_one(player.single()) else {
+        return; // The offline duel has not been admitted yet.
     };
-    let Some((target, pose, parts)) = target.iter().next() else {
-        return;
-    };
+    if target.is_empty() {
+        return; // Admission constructs the target before this scenario can strike it.
+    }
+    let (target, pose, parts) = target
+        .single()
+        .expect("the hull-mark inspection scene constructs exactly one target");
+    let camera = camera
+        .single()
+        .expect("the admitted inspection scene has one PlayerView");
     if !parts.0.values().any(|&part| bound.contains(part)) {
         return;
     }
@@ -106,7 +112,8 @@ fn strike_target(
         .filter(|(_, root)| root.0 == player)
         .flat_map(|(weapon, _)| weapon.rounds.iter())
         .map(|round| round.round.flying.caliber)
-        .fold(0.0_f32, f32::max);
+        .reduce(f32::max)
+        .expect("the inspection player's complete weapon list carries at least one round");
     let aim = pose.translation() + Vec3::Y * AIM_RISE_M;
     let forward = (aim - camera.translation()).normalize();
     let right = forward.cross(Vec3::Y).normalize();
@@ -121,18 +128,12 @@ fn strike_target(
     .enumerate()
     {
         let origin = aim + right * offset - forward * 4.0;
-        let Some(hit) = spatial.cast_ray(origin, Dir3::new(forward).unwrap(), 10.0, true, &filter)
-        else {
-            warn!("hull marks demo: ray {index} met no armour");
-            continue;
-        };
+        let hit = spatial.cast_ray(origin, Dir3::new(forward).expect("the inspection ray has a finite nonzero bearing"), 10.0, true, &filter)
+            .unwrap_or_else(|| panic!("hull marks demo: ray {index} met no armour — reposition the inspection ray on the declared target"));
         let volume = std::iter::once(hit.entity)
             .chain(parents.get(hit.entity).ok().map(ChildOf::parent))
             .find(|&entity| volumes.get(entity).is_ok_and(|of| of.tank() == target));
-        let Some(volume) = volume else {
-            warn!("hull marks demo: ray {index} met armour that is not the target's");
-            continue;
-        };
+        let volume = volume.unwrap_or_else(|| panic!("hull marks demo: ray {index} met armour outside the declared target — reposition the inspection ray"));
         let at = origin + forward * hit.distance;
         let normal = hit.normal.normalize();
         let incoming = if verdict == Verdict::Ricochet {

@@ -486,12 +486,16 @@ fn on_main_gun_fire(
     let origin = fire.origin;
     let dir = Vec3::from(fire.direction);
     // Distance LOD: with no camera (headless harness) treat as near.
-    let near = camera
-        .single()
-        .map(|cam| {
-            cam.translation().distance_squared(origin) < FAR_FULL_DRESSING * FAR_FULL_DRESSING
-        })
-        .unwrap_or(true);
+    let near = if camera.is_empty() {
+        true // The headless effect harness exercises the complete recipe without a viewer.
+    } else {
+        camera
+            .single()
+            .expect("exactly one camera declares PlayerView")
+            .translation()
+            .distance_squared(origin)
+            < FAR_FULL_DRESSING * FAR_FULL_DRESSING
+    };
 
     // --- Flash core: one camera-facing additive billboard, 1–2 frames. A random one of the four
     // scorch-starburst atlas frames (the anti-strobe frame pick — nothing lives long enough to
@@ -744,7 +748,7 @@ fn spawn_ground_dust(
             Some(bore_dir) => (radial * (1.0 - GROUND_DUST_BORE_BIAS)
                 + bore_dir * GROUND_DUST_BORE_BIAS)
                 .try_normalize()
-                .unwrap_or(bore_dir),
+                .expect("the bore bias exceeds one half, so its two unit terms cannot cancel"),
             None => radial,
         };
         let start_size = GROUND_DUST_SIZE.0 * bore;
@@ -817,12 +821,16 @@ fn on_mg_fire(
     let origin = fire.origin;
     let dir = Vec3::from(fire.direction);
     // Distance LOD, same shape as the 88's: with no camera (headless harness) treat as near.
-    let near = camera
-        .single()
-        .map(|cam| {
-            cam.translation().distance_squared(origin) < FAR_FULL_DRESSING * FAR_FULL_DRESSING
-        })
-        .unwrap_or(true);
+    let near = if camera.is_empty() {
+        true // The headless effect harness exercises the complete recipe without a viewer.
+    } else {
+        camera
+            .single()
+            .expect("exactly one camera declares PlayerView")
+            .translation()
+            .distance_squared(origin)
+            < FAR_FULL_DRESSING * FAR_FULL_DRESSING
+    };
 
     // --- Flash core: one small camera-facing additive billboard on the MG's own round-glow sprite.
     // The core sprite is single-frame (full-image lanes below — the glow is the WHOLE image, not an

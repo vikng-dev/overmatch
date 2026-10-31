@@ -74,7 +74,15 @@ fn read_scatter_crossings(
 ) {
     let is_proxy = |entity: Entity| proxies.contains(entity);
     let filter = SpatialQueryFilter::from_mask(Layer::Terrain);
-    let camera = camera.single().ok();
+    let camera = if camera.is_empty() {
+        None // A headless crossing harness has no viewer.
+    } else {
+        Some(
+            camera
+                .single()
+                .expect("exactly one camera declares PlayerView"),
+        )
+    };
     for (shell, transform, projectile, probe) in &mut shells {
         let current = transform.translation;
         let Some(mut probe) = probe else {
@@ -113,7 +121,7 @@ fn read_scatter_crossings(
             .unwrap_or_else(|| -Vec3::from(direction));
         let to_camera = camera
             .map(|cam| cam.translation() - position)
-            .unwrap_or(Vec3::Z);
+            .unwrap_or(Vec3::Z); // No viewer in the headless harness: orientation is unobserved.
         let feedback = *proxies
             .get(hit.entity)
             .expect("the cast predicate admitted this material-bearing proxy");

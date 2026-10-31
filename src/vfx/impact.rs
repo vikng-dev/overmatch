@@ -536,10 +536,15 @@ fn spawn_impact_read(
 ) {
     let normal = *Dir3::new(impact.normal)
         .expect("the resolved impact carries a finite nonzero surface normal");
-    let to_camera = camera
-        .single()
-        .map(|cam| cam.translation() - impact.position)
-        .unwrap_or(Vec3::Z);
+    let to_camera = if camera.is_empty() {
+        Vec3::Z // A headless effect harness has no viewer; orientation has no visible consequence.
+    } else {
+        camera
+            .single()
+            .expect("exactly one camera declares PlayerView")
+            .translation()
+            - impact.position
+    };
     match impact.surface {
         ImpactSurface::Terrain => {
             spawn_terrain_read(impact.position, normal, to_camera, impact.caliber, &mut kit)
@@ -773,9 +778,9 @@ fn spawn_big_splash(position: Vec3, normal: Vec3, to_camera: Vec3, kit: &mut Imp
     // by EJECTA_UP_BIAS, then spread), each a dirt-recolored stretched streak launched at speed and
     // falling under DEBRIS_GRAVITY. The streak's ORIENTATION is baked at spawn from the launch
     // direction, so it holds the ballistic-initial heading for its ~0.3 s life.
-    let up_axis = (normal * (1.0 - EJECTA_UP_BIAS) + Vec3::Y * EJECTA_UP_BIAS)
-        .try_normalize()
-        .unwrap_or(Vec3::Y);
+    // DERIVED: bias > 1/2 bounds the length below by 2*bias - 1, even for opposite unit inputs.
+    let up_axis = *Dir3::new(normal * (1.0 - EJECTA_UP_BIAS) + Vec3::Y * EJECTA_UP_BIAS)
+        .expect("the upward bias of unit directions defines a finite nonzero ejecta axis");
     let count =
         EJECTA_COUNT.0 + (rng.next_f32() * (EJECTA_COUNT.1 - EJECTA_COUNT.0 + 1) as f32) as u32;
     for _ in 0..count.min(EJECTA_COUNT.1) {
@@ -955,11 +960,15 @@ fn spawn_big_armor(
     } = kit;
     // The spark fan's axis: straight off the surface normal, or leaned toward the deflected outgoing
     // direction on a ricochet (a bounce throws its sparks the way it kicked off).
-    let axis = match outcome.deflection().and_then(|d| d.try_normalize()) {
-        Some(defl) => (normal * (1.0 - ARMOR_SPARK_DEFLECT_BIAS) + defl * ARMOR_SPARK_DEFLECT_BIAS)
-            .try_normalize()
-            .unwrap_or(normal),
-        None => normal,
+    let axis = match outcome.deflection() {
+        Some(deflection) => {
+            let defl = *Dir3::new(deflection)
+                .expect("a resolved bounce carries a finite nonzero outgoing direction");
+            // DERIVED: bias > 1/2 prevents two unit terms from cancelling.
+            *Dir3::new(normal * (1.0 - ARMOR_SPARK_DEFLECT_BIAS) + defl * ARMOR_SPARK_DEFLECT_BIAS)
+                .expect("the deflection bias defines a finite nonzero spark axis")
+        }
+        None => normal, // A non-bounce has no outgoing bearing; its fan follows the surface normal.
     };
     let (tan_a, tan_b) = axis.any_orthonormal_pair();
 
@@ -1099,7 +1108,11 @@ fn ground_orientation(normal: Vec3, roll: f32) -> Quat {
 /// camera" (trick 8). Computed once at spawn: a spark lives ~0.15 s, the camera doesn't move
 /// enough to matter. `dir` must be unit-length.
 fn spark_orientation(dir: Vec3, to_camera: Vec3) -> Quat {
-    // The camera direction's component perpendicular to the streak axis; parallel/degenerate views
+    assert!(
+        dir.is_finite() && to_camera.is_finite(),
+        "spark orientation inputs are finite"
+    );
+    // The camera direction's component perpendicular to the streak axis; parallel/coincident views
     // fall back to any perpendicular (the streak is then seen end-on — invisible either way).
     let z = (to_camera - dir * to_camera.dot(dir))
         .try_normalize()
@@ -1177,6 +1190,19 @@ mod tests {
             .query_filtered::<Entity, With<Billboard>>()
             .iter(app.world())
             .count()
+    }
+
+    /// Two declared player views are a composition bug. Replacing that state with an arbitrary
+    /// facing vector would silently render the impact for neither declared viewer.
+    #[test]
+    #[should_panic(expected = "exactly one camera declares PlayerView")]
+    fn duplicate_player_views_cannot_pick_an_impact_orientation() {
+        let mut app = harness();
+        for _ in 0..2 {
+            app.world_mut()
+                .spawn((PlayerView, GlobalTransform::IDENTITY));
+        }
+        trigger_impact(&mut app, Vec3::Y, BIG_CALIBER);
     }
 
     /// A non-sparking substance produces powder alone. A class-based metal recipe would add a

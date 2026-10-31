@@ -1,4 +1,5 @@
-//! Gunner sight *presentation*: the HUD widgets that draw the sight picture.
+//! Gunner sight presentation: the HUD widgets that draw the sight picture.
+//! Crew status is the game's damage-model state: HP pools at stations.
 //!
 //! Everything here is view-layer — it reads the sight's state (mode, the shared
 //! [`aim::CommittedAim`], the dialed [`Ranging`]) and the rendered camera pose, and writes only UI
@@ -34,8 +35,8 @@ use super::{SightMode, sight_line, view_available};
 #[derive(Component)]
 struct IntentReticle;
 
-/// Full-screen black overlay shown when the active view's crewman is dead, plus a center prompt
-/// telling the player to switch to the other view. Hidden when the view is alive.
+/// Full-screen black overlay shown when the active view's crewman is out of action, plus a center prompt
+/// telling the player to switch to the other view. Hidden while that station is available.
 #[derive(Component)]
 struct ViewDeathOverlay;
 
@@ -161,9 +162,9 @@ fn spawn_intent_reticle(mut commands: Commands) {
     ));
 }
 
-/// The full-screen black overlay + center prompt, shown when the active view's crewman is dead.
-/// The prompt tells the player to press Lshift to switch to the other view (if its crewman is
-/// alive). Solid black — "your crewman's eyes are gone" (design §7a, view-death model).
+/// The full-screen black overlay + center prompt, shown when the active view's crewman is out of action.
+/// The prompt offers Lshift only when the other view's station is available. An out-of-action
+/// station supplies no sight picture in the game's damage model (design §7a).
 fn spawn_view_death_overlay(mut commands: Commands, fonts: Res<UiFonts>) {
     commands
         .spawn((
@@ -734,18 +735,17 @@ impl KillCamView<'_, '_> {
     }
 }
 
-/// Show/hide the black overlay + prompt when the active view's crewman is dead. The prompt tells
-/// the player to press Lshift to switch to the other view if its crewman is alive; if both are
-/// dead, the prompt says so (the tank is effectively dead — 0 living crew imminent).
+/// Show/hide the black overlay + prompt when the active view's crewman is out of action. The prompt tells
+/// the player to press Lshift to switch to the other view if its crewman is available; if both
+/// view stations are out of action, the prompt says so.
 ///
 /// On the NET client this participates in the overlay authority: it runs in
 /// [`overlay::OverlaySet::Declare`] and only DECLARES `Overlay::ViewDead` presence (+ refreshes the
 /// prompt text), leaving the visibility swap to the shared `overlay::apply_overlay_visibility`
 /// reconciler that runs AFTER `Declare`. That split is the ordering fix: the one-scrim decision reads a
 /// fully-declared set, so this black is suppressed entirely whenever a higher overlay (the death screen
-/// above all, but also the menu / connect screen) owns the scrim — whole-crew death shows "YOU DIED",
-/// not this black. In single-player the `Overlays` resource is absent (`Option` is `None`) and this
-/// system sets the node's visibility itself, standalone as before: crewman down → black + prompt.
+/// above all, but also the menu / connect screen) owns the scrim. In single-player the `Overlays`
+/// resource is absent and this system sets visibility itself: station out of action → black + prompt.
 ///
 /// Where the kill cam is mounted ([`KillCamGate`]), a knocked-out tank's view is the kill cam's and
 /// then its death screen's: no black.
@@ -766,7 +766,7 @@ fn update_view_death_overlay(
     };
 
     // The active view's crewman is down — the standalone condition for wanting this overlay. Gated on a
-    // controlled tank existing (no station to be dead without one).
+    // controlled tank existing (there is no station without a tank).
     let crewman_down =
         has_controlled && !kill_cam.owns() && !view_available(&controlled, &views, active_view);
 
@@ -797,9 +797,9 @@ fn update_view_death_overlay(
     if crewman_down {
         let other_available = view_available(&controlled, &views, other_view);
         let prompt = if other_available {
-            format!("Crewman down — [Lshift] for {other_label}")
+            format!("Crewman out of action — [Lshift] for {other_label}")
         } else {
-            "All view crew down".to_string()
+            "All view crew out of action".to_string()
         };
         set_text(text.reborrow(), &prompt);
     }
