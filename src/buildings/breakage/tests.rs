@@ -1051,20 +1051,28 @@ fn a_channel_is_the_cylinder_it_crossed_open_across_each_face() {
 /// A fixture burst's blast energy, J: the 88 mm HE burst's (fixture data).
 const FIXTURE_BLAST_J: f32 = 1.47e6;
 
-/// A loose body of brick density that collides with nothing, so only a blast moves it: a cube of
-/// side `side` m at `at` (fixture data), a debris body that is no wall piece.
-fn loose_cube(app: &mut App, at: Vec3, side: f32) -> Entity {
+/// A dynamic cube of brick density on `layer` that collides with nothing, so only a blast moves
+/// it: side `side` m at `at` (fixture data).
+fn moving_cube(app: &mut App, at: Vec3, side: f32, layer: Layer) -> Entity {
     app.world_mut()
         .spawn((
-            DebrisPiece,
             RigidBody::Dynamic,
             Position(at),
             Rotation::default(),
             Collider::cuboid(side, side, side),
             ColliderDensity(1845.0),
-            CollisionLayers::new([Layer::Debris], LayerMask::NONE),
+            CollisionLayers::new([layer], LayerMask::NONE),
         ))
         .id()
+}
+
+/// A loose piece: a debris body that is no wall piece.
+fn loose_cube(app: &mut App, at: Vec3, side: f32) -> Entity {
+    let cube = moving_cube(app, at, side, Layer::Debris);
+    app.world_mut()
+        .entity_mut(cube)
+        .insert(crate::debris::DebrisPiece);
+    cube
 }
 
 /// Every blast direction whose ray from `origin` meets a collider of `body`, through avian's own
@@ -1101,64 +1109,72 @@ fn charge(app: &mut App, at: Vec3) {
     app.update();
 }
 
-/// A BLAST RAY THAT STOPS ON A LOOSE PIECE PUSHES IT BY ITS SHARE AND DEPOSITS NOTHING: a loose
-/// cube between a fixture burst and a standing chunk of the house leaves with the momentum of the
-/// rays that meet it, each its share's reflected impulse at the distance and on the face avian's
-/// cast gives ([`Blast::push`]), and the chunk it shades keeps its full pool, though the same burst
-/// wears it with no cube there. A ray that pushed a piece and went on into the wall, a push of the
-/// wrong share, distance or face, or a piece the rays pass through, fails here; every rubble pile a
-/// blast meets rests on it.
+/// A BLAST RAY THAT STOPS ON A MOVING BODY PUSHES IT BY ITS SHARE AND DEPOSITS NOTHING: a loose
+/// piece, or a dynamic body that is no piece (a launched turret's stand-in), between a fixture burst
+/// and a standing chunk of the house leaves with the momentum of the rays that meet it, each its
+/// share's reflected impulse at the distance and on the face avian's cast gives ([`Blast::push`]),
+/// and the chunk it shades keeps its full pool, though the same burst wears it with nothing there.
+/// A body's armour volume is no surface: the rays pass it and wear the chunk. A ray that pushed a
+/// body and went on into the wall, a push of the wrong share, distance or face, a moving body the
+/// rays pass through, or one they meet by kind rather than by being a moving body, fails here;
+/// every rubble pile and hull a blast meets rests on it.
 #[test]
-fn a_ray_that_stops_on_a_loose_piece_pushes_it_by_its_share_and_deposits_nothing() {
+fn a_ray_that_stops_on_a_moving_body_pushes_it_by_its_share_and_deposits_nothing() {
     let kind = shipped_house();
     let (e, [c, ..]) = fixture_chunks(&kind);
     let (near, w, _) = through(&kind, e, c, 0.0);
-    // The burst a metre before the chunk's near face, the cube half-way (fixture data).
+    // The burst a metre before the chunk's near face, the body half-way (fixture data).
     let origin = near - *w * 0.5;
     let blast = Blast::of(FIXTURE_BLAST_J);
-    let pool_after = |cube: bool| {
+    let after = |spawn: Option<&dyn Fn(&mut App) -> Entity>| {
         let (mut app, root) = composed(false);
-        let cube = cube.then(|| loose_cube(&mut app, near, 0.4));
+        let body = spawn.map(|spawn| spawn(&mut app));
         app.update();
         app.update();
-        // The rays that meet the cube before any of the house's blockers (the house stands at the
+        // The rays that meet the body before any of the house's blockers (the house stands at the
         // origin at unit scale, so its frame is the world).
-        let expected = cube.map(|cube| {
-            let intact = Shape::intact(&kind.layout);
-            let rays: Vec<_> = rays_on(&mut app, cube, origin)
+        let intact = Shape::intact(&kind.layout);
+        let rays: Vec<_> = body.map_or_else(Vec::new, |body| {
+            rays_on(&mut app, body, origin)
                 .into_iter()
                 .filter(|&(dir, _, d, _)| {
                     first_chunk(&kind.layout, &intact, origin, dir).is_none_or(|(_, t)| t > d)
                 })
-                .collect();
-            assert!(rays.len() > 100, "the cube is in the field");
-            rays.iter()
-                .map(|&(dir, share, d, normal)| {
-                    blast.push(share, d, dir, normal.try_normalize().unwrap_or(-dir))
-                })
-                .sum::<Vec3>()
+                .collect()
         });
+        let expected: Vec3 = rays
+            .iter()
+            .map(|&(dir, share, d, normal)| blast.push(share, d, dir, normal))
+            .sum();
         charge(&mut app, origin);
-        if let (Some(cube), Some(expected)) = (cube, expected) {
+        let momentum = body.map_or(Vec3::ZERO, |body| {
             let world = app.world();
-            let momentum = world.get::<ComputedMass>(cube).unwrap().value()
-                * world.get::<LinearVelocity>(cube).unwrap().0;
-            assert!(
-                (momentum - expected).length() <= 1e-3 * expected.length(),
-                "the cube leaves with {momentum}, its rays pushed {expected}"
-            );
-        }
+            world.get::<ComputedMass>(body).unwrap().value()
+                * world.get::<LinearVelocity>(body).unwrap().0
+        });
         let breakage = app.world().get::<Breakage>(root).unwrap();
         let live = breakage.live.as_ref().expect("the burst reached the house");
-        (
-            live.state.pool[c],
-            fracture::full_pool(&live.structure.chunks[c]),
-        )
+        let wears = live.state.pool[c] < fracture::full_pool(&live.structure.chunks[c]);
+        (rays.len(), momentum, expected, wears)
     };
-    let (shaded, full) = pool_after(true);
-    assert_eq!(shaded, full, "the shaded chunk takes nothing");
-    let (bare, _) = pool_after(false);
-    assert!(bare < full, "with no cube the burst wears the chunk");
+    let (.., bare) = after(None);
+    assert!(bare, "with nothing there the burst wears the chunk");
+    let piece = |app: &mut App| loose_cube(app, near, 0.4);
+    let other = |app: &mut App| moving_cube(app, near, 0.4, Layer::Vehicle);
+    for spawn in [&piece as &dyn Fn(&mut App) -> Entity, &other] {
+        let (rays, momentum, expected, wears) = after(Some(spawn));
+        assert!(rays > 100, "the body is in the field");
+        assert!(
+            (momentum - expected).length() <= 1e-3 * expected.length(),
+            "the body leaves with {momentum}, its rays pushed {expected}"
+        );
+        assert!(!wears, "the shaded chunk takes nothing");
+    }
+    let armour = |app: &mut App| moving_cube(app, near, 0.4, Layer::Armor);
+    let (rays, momentum, _, wears) = after(Some(&armour));
+    assert!(rays > 100, "the armour volume is in the field");
+    assert_eq!(momentum, Vec3::ZERO, "an armour volume takes no push");
+    assert!(wears, "and the rays pass it to the chunk");
 }
 
 /// A LOOSE PIECE SHADOWED BY A STANDING CHUNK TAKES NOTHING: a fixture burst half a metre before a

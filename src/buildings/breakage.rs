@@ -19,11 +19,11 @@
 //!   in it ([`Projectile::lost_momentum`]: the share the crushed brick carries away is open); a
 //!   blast pushes each face its rays stop on with its reflected impulse ([`Blast::push`]). A blast
 //!   ray stops on the nearest of every building's standing chunks and unbreakable elements and the
-//!   loose pieces within its reach ([`Blast::reach`]); one that stops on a loose piece pushes it
-//!   the same way, through avian at the point it stops, and deposits nothing. The laws then run in
-//!   order: removal and the push rule ([`fracture::strike`]), the structural check
-//!   ([`fracture::structural`]), the weight check on what those changed ([`fracture::weigh`]),
-//!   support ([`fracture::fall`]).
+//!   moving bodies within its reach ([`Blast::reach`]: a loose piece, a hull, a launched turret);
+//!   one that stops on a moving body pushes it the same way, through avian at the point it stops,
+//!   and deposits nothing. The laws then run in order: removal and the push rule
+//!   ([`fracture::strike`]), the structural check ([`fracture::structural`]), the weight check on
+//!   what those changed ([`fracture::weigh`]), support ([`fracture::fall`]).
 //! * **Holes** ([`Hole`], drawn only): a line cuts a channel in each chunk it crosses, the cylinder
 //!   about its chord, open across each face it crosses ([`open_ends`]), and a blast a dish in each
 //!   chunk its rays stop on ([`holes_of`]); a chunk still standing after the deposit
@@ -52,7 +52,8 @@ use std::sync::Arc;
 use avian3d::collider_tree::{ColliderTrees, update_moved_collider_aabbs};
 use avian3d::prelude::{
     AngularVelocity, Collider, ColliderAabb, ColliderDensity, ColliderOf, CollisionLayers, Forces,
-    LinearVelocity, Position, Rotation, SpatialQuery, SpatialQueryFilter, WriteRigidBodyForces,
+    LinearVelocity, Position, RigidBody, Rotation, SpatialQuery, SpatialQueryFilter,
+    WriteRigidBodyForces,
 };
 use bevy::math::DVec3;
 use bevy::prelude::*;
@@ -68,7 +69,6 @@ use crate::ballistics::{
     ArmourMark, BallisticVolume, CrossingEnd, Envelope, PenetrationMarks, Projectile, ShellMarched,
     SpallMarks,
 };
-use crate::debris::DebrisPiece;
 use crate::scatter::MapInstance;
 use crate::{ClientReplica, Layer, ShotClock};
 
@@ -652,23 +652,29 @@ struct DepositParam<'w, 's> {
     clock: Option<Res<'w, ShotClock>>,
     record: ResMut<'w, WallRecord>,
     commands: Commands<'w, 's>,
-    /// The loose pieces a blast's rays meet ([`pieces_near`]) and push.
+    /// The moving bodies a blast's rays meet ([`moving_near`]) and push.
     spatial: SpatialQuery<'w, 's>,
     collider_of: Query<'w, 's, &'static ColliderOf>,
-    pieces: Query<'w, 's, Forces, With<DebrisPiece>>,
+    bodies: Query<'w, 's, (Forces, &'static RigidBody)>,
 }
 
-/// The colliders of every loose piece (a [`DebrisPiece`] body) whose bounds meet the cube of
-/// half-side `reach` m about `origin`, ascending: the only colliders a blast's rays test.
-fn pieces_near(p: &DepositParam, origin: Vec3, reach: f32) -> Vec<Entity> {
+/// The layers of a moving body's collision proxy, the only colliders a blast's rays meet on one:
+/// a tank's armour and witness volumes ([`Layer`]) are its ballistics, not its surface.
+const MOVING_SURFACE: [Layer; 2] = [Layer::Vehicle, Layer::Debris];
+
+/// The colliders of every dynamic body whose bounds meet the cube of half-side `reach` m about
+/// `origin`, ascending: with [`MOVING_SURFACE`], the only colliders a blast's rays test. A static
+/// body is a building's (its own walk) or the ground's, which no ray stops on.
+fn moving_near(p: &DepositParam, origin: Vec3, reach: f32) -> Vec<Entity> {
     let mut near = Vec::new();
     p.spatial.aabb_intersections_with_aabb_callback(
         ColliderAabb::new(origin, Vec3::splat(reach)),
         |collider| {
-            if p.collider_of
-                .get(collider)
-                .is_ok_and(|of| p.pieces.contains(of.body))
-            {
+            if p.collider_of.get(collider).is_ok_and(|of| {
+                p.bodies
+                    .get(of.body)
+                    .is_ok_and(|(_, body)| body.is_dynamic())
+            }) {
                 near.push(collider);
             }
             true
@@ -859,9 +865,9 @@ fn log_changes(id: &str, loading: &Loading, counts: [usize; 3], changes: &Change
 }
 
 /// One blast's rays from `origin` (module doc): each stops on the nearest of every building's
-/// present blockers ([`first_chunk`]) and the loose pieces within the blast's reach
-/// ([`pieces_near`]). A ray on a standing chunk joins its building's take; a ray on a loose piece
-/// pushes the piece through avian at the point it stops, and deposits nothing.
+/// present blockers ([`first_chunk`]) and the moving bodies within the blast's reach
+/// ([`moving_near`]). A ray on a standing chunk joins its building's take; a ray on a moving body
+/// pushes the body through avian at the point it stops, and deposits nothing.
 fn cast_blast(
     p: &mut DepositParam,
     frames: &BTreeMap<Entity, Frame>,
@@ -871,7 +877,7 @@ fn cast_blast(
     blast: Blast,
 ) {
     let reach = blast.reach();
-    let near = pieces_near(p, origin, reach);
+    let near = moving_near(p, origin, reach);
     // Per building a ray may meet: the origin in its frame, and its bounds.
     let mut views: BTreeMap<Entity, (Vec3, Block)> = BTreeMap::new();
     let mut thrown: Vec<(Entity, Vec3, Vec3)> = Vec::new();
@@ -902,7 +908,7 @@ fn cast_blast(
                 stop = Some((*root, chunk, t, t * frame.scale));
             }
         }
-        let piece = if near.is_empty() {
+        let moving = if near.is_empty() {
             None
         } else {
             Dir3::new(dir).ok().and_then(|ray| {
@@ -911,20 +917,23 @@ fn cast_blast(
                     ray,
                     stop.map_or(reach, |(.., d)| d.min(reach)),
                     true,
-                    &SpatialQueryFilter::default(),
+                    &SpatialQueryFilter::from_mask(MOVING_SURFACE),
                     &|collider| near.binary_search(&collider).is_ok(),
                 )
             })
         };
-        if let Some(hit) = piece {
-            if let Ok(of) = p.collider_of.get(hit.entity) {
-                let normal = hit.normal.try_normalize().unwrap_or(-dir);
-                thrown.push((
-                    of.body,
-                    origin + dir * hit.distance,
-                    blast.push(share, hit.distance, dir, normal),
-                ));
-            }
+        if let Some(hit) = moving {
+            let of = p
+                .collider_of
+                .get(hit.entity)
+                .expect("a collider in reach has a body");
+            // A ray from inside a body stops at 0 m with no face normal; its patch, so its push,
+            // is 0 there whatever the normal.
+            thrown.push((
+                of.body,
+                origin + dir * hit.distance,
+                blast.push(share, hit.distance, dir, hit.normal),
+            ));
         } else if let Some((root, Some(c), t, d)) = stop
             && let Ok((_, _, _, breakage)) = p.buildings.get(root)
         {
@@ -943,15 +952,14 @@ fn cast_blast(
     }
     if !thrown.is_empty() {
         debug!(
-            "buildings: a blast pushed loose pieces with {} rays ({:.1} N s)",
+            "buildings: a blast pushed moving bodies with {} rays ({:.1} N s)",
             thrown.len(),
             thrown.iter().map(|(.., i)| i.length()).sum::<f32>(),
         );
     }
     for (body, at, impulse) in thrown {
-        if let Ok(mut forces) = p.pieces.get_mut(body) {
-            forces.apply_linear_impulse_at_point(impulse, at);
-        }
+        let (mut forces, _) = p.bodies.get_mut(body).expect("a body in reach is dynamic");
+        forces.apply_linear_impulse_at_point(impulse, at);
     }
 }
 
@@ -1295,7 +1303,7 @@ fn spawn_piece(
         Position(at),
         Rotation(root.rotation),
         Visibility::default(),
-        DebrisPiece,
+        crate::debris::DebrisPiece,
         crate::eased_dynamic_body(),
         LinearVelocity(root.rotation * velocity),
         AngularVelocity(root.rotation * spin),
