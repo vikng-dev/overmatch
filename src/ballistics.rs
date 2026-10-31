@@ -104,8 +104,8 @@ use sanctioned::{SanctionedCatchUp, catch_up_sanctioned_chain};
 
 /// The march's boundary nudge: a crossing that leaves a face it resolved — a perforation's exit, a
 /// bounce's struck face — resumes this far past it, so the next sweep does not re-touch it. Never
-/// applied past a face nothing resolved: a fresh disc starts where it is laid, with its membership
-/// established there ([`resolve::certified`]).
+/// applied past a face nothing resolved: fresh discovery starts where its disc was laid and
+/// refuses interior membership. Contact-time handoffs use [`resolve::certified`].
 ///
 /// Shared with [`resolve`] because the two must agree: the interior seed a crossing hands forward
 /// describes the point the NEXT corridor starts from, and that point is nudged. A seed read one
@@ -1247,7 +1247,7 @@ pub(crate) struct Projectile {
     /// Where the axis sample stands as the last step ended ([`resolve::AxisStart`]): a position
     /// held as anchor plus offset, so open flight never re-rounds it at world spacing. Discovery
     /// lays a fresh disc only when no immutable playback remains, outside resolved material,
-    /// and establishes its membership ([`resolve::certified`]).
+    /// and discovery verifies its outside start.
     ///
     /// `None` at spawn, in every spawn path, and after a sanctioned catch-up: the step lays its disc
     /// at the shell's translation. Never on the wire: a replica derives its own from the same spawn
@@ -3048,7 +3048,7 @@ fn finish_at_sanctioned_terminal(
 /// guaranteed to stay outside the face it bounced off; it only keeps a zero-age release from laying
 /// its fresh disc behind that face. Without it the resume stays on the authority's unlifted chain.
 /// Either way any discontinuity is cosmetic, the next authority outcome governs, and the next
-/// step's fresh disc has its membership established ([`resolve::certified`]) rather than declared.
+/// step's fresh disc is checked by discovery, whose outside-start invariant still applies.
 fn resume_from_catch_up(
     shell: &mut MarchingShell,
     caught_up: &SanctionedCatchUp,
@@ -6370,8 +6370,8 @@ mod march_tests {
     /// Where the uncertifiable fixture sits: far from the plate, in open air. Fixture data.
     const UNCERTIFIABLE_AT: Vec3 = Vec3::new(0.0, 20.0, 5.0);
 
-    /// An armour volume no containment probe can read — a compound, neither a certified trimesh nor
-    /// convex — around [`UNCERTIFIABLE_AT`], so a fresh start laid there cannot be certified.
+    /// The game's damage model: a compound, neither a certified trimesh nor convex, around
+    /// [`UNCERTIFIABLE_AT`]. Discovery refuses geometry outside the collector's shape contract.
     /// Settled before returning.
     fn spawn_uncertifiable(app: &mut App) {
         app.world_mut().spawn((

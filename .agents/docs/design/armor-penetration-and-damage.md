@@ -1577,7 +1577,10 @@ by the struck point's constant contact velocity, including each timed effect and
 frame. No second world clock advances while that crossing is decided. Held material completes in
 that scene; separated contacts return to relative discovery at the elapsed tick fraction. Ground
 is only the declared height grid; geometry-only fixtures have no ground. An Armor collider without
-ballistic-volume ancestry is a bug at discovery. No envelope or future-pose prediction participates.
+ballistic-volume ancestry is a bug at discovery. No envelope or future-pose prediction participates. Discovery uses the existing topological
+boundary band to recognize a represented point on a face after f32 coordinate conversion; an
+interior start beyond that band panics. This is face classification during the sweep, not a
+containment certificate supplying tick-start membership.
 
 ### 13.6 Invariants — the machine-checkable contract
 

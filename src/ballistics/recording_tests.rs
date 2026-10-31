@@ -1531,3 +1531,94 @@ fn a_piece_launched_faster_than_the_round_is_met_again() {
         "the overtaking piece is an ordinary second contact"
     );
 }
+
+/// The game's damage model: a third body arriving laterally at first contact belongs to the
+/// same frozen union. Its tick-end bounds miss the round, so this also pins broad-phase motion
+/// padding. A collector using the live pose would omit its dose. All dimensions are fixture data.
+#[test]
+fn a_third_body_arriving_at_contact_uses_the_same_sampled_scene() {
+    let mut app = recording_world(false);
+    app.insert_resource(RetainSpentShells(true));
+    let (_, first) = tank(
+        &mut app,
+        Vec3::ZERO,
+        0.0,
+        Vec3::ZERO,
+        &[(
+            "front plate",
+            Vec3::new(4.0, 4.0, 0.05),
+            Vec3::ZERO,
+            Kind::Plate,
+        )],
+    );
+    let (lateral, third) = tank(
+        &mut app,
+        Vec3::new(-0.5, 0.0, 0.0),
+        0.0,
+        Vec3::ZERO,
+        &[(
+            "arriving plate",
+            Vec3::new(0.2, 4.0, 0.05),
+            Vec3::ZERO,
+            Kind::Crew(DEEP),
+        )],
+    );
+    app.world_mut()
+        .entity_mut(third[0])
+        .insert(BallisticVolume {
+            material: walk::VolumeMaterial::fixture(STEEL * 2.0),
+            substance: "fixture".into(),
+        });
+    settle(&mut app);
+    app.world_mut()
+        .entity_mut(lateral)
+        .insert(LinearVelocity(Vec3::X * 64.0));
+    let stepped = freeflight_step(
+        Vec3::NEG_Z * SPEED,
+        fixture_drag_k(FIXTURE_88.caliber, FIXTURE_88.mass),
+        TICK.as_secs_f32(),
+    );
+    let from = Vec3::new(0.0, 0.0, 0.025 - stepped.z * TICK.as_secs_f32() * 0.5);
+    fire(&mut app, from, FireMechanism::Single);
+    app.update();
+    let at_end = app.world().get::<Position>(third[0]).unwrap().x;
+    assert!(at_end > 0.4, "the end snapshot misses the round's disc");
+    assert!(
+        hp(&app, third[0]) < DEEP_UNITS,
+        "the arriving body is present in the frozen crossing and takes its dose"
+    );
+    let mut logs = app.world_mut().query::<&PenetrationMarks>();
+    let crossing = logs
+        .single(app.world())
+        .unwrap()
+        .log
+        .iter()
+        .find_map(|mark| match mark {
+            ArmourMark::Crossing { volumes, .. } => Some(volumes),
+            _ => None,
+        })
+        .expect("an ordinary crossing");
+    assert!(
+        crossing.iter().any(|volume| volume.volume == third[0]),
+        "the crossing records the arriving material"
+    );
+    assert!(app.world().get::<BallisticVolume>(first[0]).is_some());
+}
+
+/// The game's damage model: outside discovery is a runtime invariant, not a launch-time
+/// containment certificate. An unrelated owner cannot turn an interior start into a crossing.
+#[test]
+#[should_panic(expected = "discovery starts outside every collider")]
+fn runtime_discovery_refuses_a_foreign_interior_start() {
+    let mut app = recording_world(false);
+    tank(
+        &mut app,
+        Vec3::ZERO,
+        0.0,
+        Vec3::ZERO,
+        &[("plate", Vec3::new(2.0, 2.0, 0.5), Vec3::ZERO, Kind::Plate)],
+    );
+    settle(&mut app);
+    fire(&mut app, Vec3::ZERO, FireMechanism::Single);
+    app.update();
+}

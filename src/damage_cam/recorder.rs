@@ -12,9 +12,9 @@
 //!
 //! A recorded shell is born with its [`ShotRecording`]. After each march step the shell notes every
 //! tank its new marks touch ([`MarchRecorder::note`]): an encounter opened has the tank's
-//! components' pools read there, and each tick that logs marks on it opens a hull frame.
-//! [`pose_struck`] fills those frames in the same tick from the pose the march's colliders were
-//! placed at, before the damage consequences can detach a turret. A shell that despawns hands its
+//! components' pools read there. Runtime marks carry their immutable contact-time hull frames;
+//! [`pose_struck`] fills frames for standalone static fixtures and reads servo angles before
+//! damage consequences can detach a turret. A shell that despawns hands its
 //! logs to the [`ShotRecorder`] ([`keep_spent`]), so a record never depends on how long the shell
 //! lives.
 //!
@@ -144,7 +144,8 @@ struct Struck {
     from: usize,
     /// Its components and the pool units each held when the encounter opened.
     boxes: Vec<(Entity, u32)>,
-    /// `(first mark, hull frame)` per tick that logged marks on it; `None` until posed.
+    /// `(first mark, hull frame)` per sampled contact; standalone static fixtures are unposed
+    /// until the post-march recorder reads their frame.
     frames: Vec<(usize, Option<HullFrame>)>,
     servo_deg: Option<BTreeMap<String, f32>>,
     killed: Option<KnockoutReason>,
@@ -330,8 +331,8 @@ fn keep_spent(
     });
 }
 
-/// Fill every unposed frame with the struck hull's frame as the march resolved this tick's marks,
-/// and each struck tank's servo angles the first time.
+/// The game's damage model: fill standalone static frames and read each struck tank's servo
+/// angles the first time. Runtime contact frames are already carried by immutable playback.
 fn pose_struck(world: &mut World) {
     world.resource_mut::<ShotRecorder>().unposed = false;
     let mut live = world.query::<&ShotRecording>();
