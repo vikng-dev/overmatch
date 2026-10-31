@@ -35,11 +35,13 @@ use crate::ballistics::{BallisticVolume, Envelope, VolumeMaterial};
 use crate::scatter::MapInstance;
 use crate::substances::SubstanceRegistry;
 
+pub mod attachments;
 pub(crate) mod breakage;
 pub(crate) mod fracture;
 pub mod schema;
 pub(crate) mod view;
 
+use attachments::Attachments;
 use schema::BuildingAsset;
 
 /// Directory under the asset root holding one folder per building asset.
@@ -66,9 +68,14 @@ pub(crate) struct BuildingKind {
 }
 
 impl BuildingKind {
-    /// Resolve asset `id`'s text against the substance registry. Every refusal is a broken ship
-    /// (ADR-0011): the message names what, the caller names the file.
-    fn resolve(id: &str, text: &str, registry: &SubstanceRegistry) -> Result<Self, String> {
+    /// Resolve asset `id`'s text against the substance registry and the attachment kinds. Every
+    /// refusal is a broken ship (ADR-0011): the message names what, the caller names the file.
+    fn resolve(
+        id: &str,
+        text: &str,
+        registry: &SubstanceRegistry,
+        attachments: &Attachments,
+    ) -> Result<Self, String> {
         let asset = BuildingAsset::from_ron(text)?;
         if asset.id != id {
             return Err(format!("names itself {:?}", asset.id));
@@ -101,7 +108,7 @@ impl BuildingKind {
             .iter()
             .map(|name| fracture::Masonry::of(registry, name))
             .collect::<Result<Vec<_>, _>>()?;
-        let layout = breakage::Layout::of(&asset, &masonry)?;
+        let layout = breakage::Layout::of(&asset, &masonry, attachments)?;
         Ok(Self {
             asset,
             materials,
@@ -142,6 +149,7 @@ impl BuildingLibrary {
     pub(crate) fn load<'a>(root: &Path, ids: impl IntoIterator<Item = &'a str>) -> Self {
         let ids: BTreeSet<&str> = ids.into_iter().collect();
         let registry = SubstanceRegistry::shipped_static();
+        let attachments = Attachments::shipped_static();
         let mut library = Self::default();
         for id in ids {
             let path = root
@@ -151,7 +159,7 @@ impl BuildingLibrary {
             let text = std::fs::read_to_string(&path).unwrap_or_else(|err| {
                 panic!("buildings: {} cannot be read: {err}", path.display())
             });
-            let kind = BuildingKind::resolve(id, &text, registry)
+            let kind = BuildingKind::resolve(id, &text, registry, attachments)
                 .unwrap_or_else(|err| panic!("buildings: {}: {err}", path.display()));
             library.texts.push(text);
             library.kinds.insert(id.to_owned(), Arc::new(kind));
@@ -445,17 +453,19 @@ pub(crate) mod tests {
     /// A FILE THAT BREAKS THE CONTRACT DOES NOT LOAD: the shipped house parses and holds, and the
     /// same text naming another id, with an anchor lifted off the foundation plane, a joint out
     /// of order, an element whose run skips a chunk, a seam between two components or a bond
-    /// inside one, a bond naming a fixing past the table, a stated fixing of no strength, or a
-    /// material the registry does not know, is refused naming why. The laws read a joint's
-    /// strength from its bond, so a mislabelled joint would hold a rest in tension, let a wall's
-    /// own seam fall open, or nail a roof down by nothing.
+    /// inside one, a bond naming an attachment kind past the table, a kind named twice, a kind
+    /// the shared list does not hold, or a material the registry does not know, is refused naming
+    /// why. The laws read a joint's strength from its bond, so a mislabelled joint would hold a
+    /// rest in tension, let a wall's own seam fall open, or nail a roof down by nothing.
     #[test]
     fn a_building_file_that_breaks_the_contract_is_refused() {
         let path = shipped_assets().join("buildings/house_1/house_1.building.ron");
         let text = std::fs::read_to_string(&path).unwrap();
         let registry = SubstanceRegistry::shipped_static();
-        BuildingKind::resolve("house_1", &text, registry).expect("the shipped house holds");
-        assert!(BuildingKind::resolve("house_2", &text, registry).is_err());
+        let attachments = Attachments::shipped_static();
+        let resolve = |id: &str, text: &str| BuildingKind::resolve(id, text, registry, attachments);
+        resolve("house_1", &text).expect("the shipped house holds");
+        assert!(resolve("house_2", &text).is_err());
         let mut asset = BuildingAsset::from_ron(&text).unwrap();
         asset.anchors[0].centroid[1] += 0.1;
         assert!(
@@ -476,40 +486,39 @@ pub(crate) mod tests {
                 .contains("do not continue the run")
         );
         let asset = BuildingAsset::from_ron(&text).unwrap();
+        let attached = |bond: schema::Bond| matches!(bond, schema::Bond::Attached(_));
         for (from, to, refusal) in [
-            (schema::Bond::Resting, schema::Bond::Seam, "seam between"),
-            (schema::Bond::Seam, schema::Bond::Resting, "inside one"),
+            (true, schema::Bond::Seam, "seam between"),
+            (false, schema::Bond::Attached(0), "inside one"),
         ] {
             let mut wrong = asset.clone();
             let joint = wrong
                 .joints
                 .iter_mut()
-                .find(|joint| joint.bond == from)
-                .expect("the shipped house holds seams and rests");
+                .find(|joint| attached(joint.bond) == from)
+                .expect("the shipped house holds seams and attached bonds");
             joint.bond = to;
             assert!(wrong.check().unwrap_err().contains(refusal), "{refusal}");
         }
         let mut wrong = asset.clone();
-        let fixed = wrong
+        let joint = wrong
             .joints
             .iter_mut()
-            .find(|joint| matches!(joint.bond, schema::Bond::Fixed(_)))
-            .expect("the shipped house holds fixed bonds");
-        fixed.bond = schema::Bond::Fixed(u8::MAX);
+            .find(|joint| attached(joint.bond))
+            .expect("the shipped house holds attached bonds");
+        joint.bond = schema::Bond::Attached(u8::MAX);
         assert!(wrong.check().unwrap_err().contains("past the table"));
         let mut wrong = asset;
-        let stated = wrong
-            .fixings
-            .iter_mut()
-            .find(|fixing| matches!(fixing, schema::Fixing::Stated { .. }))
-            .expect("the shipped house states a fixing");
-        *stated = schema::Fixing::Stated {
-            tensile_pa: 0.0,
-            fracture_energy_j_per_m2: 1.0,
-        };
-        assert!(wrong.check().unwrap_err().contains("states no strength"));
+        wrong.attachments.push(wrong.attachments[0].clone());
+        assert!(wrong.check().unwrap_err().contains("named twice"));
+        let glued = text.replacen("\"nailed\"", "\"glued\"", 1);
+        assert_ne!(glued, text, "the shipped house names a nailed joint");
+        let err = resolve("house_1", &glued).unwrap_err();
+        for part in ["attachments[", "\"glued\"", attachments::ATTACHMENTS_PATH] {
+            assert!(err.contains(part), "{part}: {err}");
+        }
         let unknown = text.replacen("\"Brick\"", "\"Adobe\"", 1);
-        let err = BuildingKind::resolve("house_1", &unknown, registry).unwrap_err();
+        let err = resolve("house_1", &unknown).unwrap_err();
         assert!(err.contains("Adobe"), "{err}");
     }
 }

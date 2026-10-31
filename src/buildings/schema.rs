@@ -19,23 +19,23 @@
 //!   each element names its own ([`Element::component`]).
 //! - A [`Joint`] is a contact face between two chunks: its area, centroid and the normal from the
 //!   first chunk into the second (NVIDIA Blast's bond), and what holds it ([`Bond`]): inside one
-//!   component its own seam; between two, a fixing of the building's ([`Fixing`]: mortar, nails)
-//!   or nothing, one part laid on the other, as the building's construction says of that pair. An
-//!   [`Anchor`] is a chunk face on the foundation plane (Blast's world bond), held by its chunk's
-//!   own seam.
+//!   component its own seam; between two, the attachment kind the building's construction names
+//!   for that pair (mortared, nailed, resting), from the shared list
+//!   ([`super::attachments`]), which holds every joint strength. An [`Anchor`] is a chunk face on
+//!   the foundation plane (Blast's world bond), held by its chunk's own seam.
 //!
 //! The simulation reads chunks and joints only; it never reads how the bake chose the cuts.
 //!
 //! [`BuildingAsset::check`] is the format's contract: every index in range, every element's chunk
-//! run contiguous and covering, every joint and anchor of positive area, every fixing it states of
-//! positive strength, every anchor on the foundation plane. The game refuses a file that breaks it
-//! (ADR-0011).
+//! run contiguous and covering, every joint and anchor of positive area, every attachment kind
+//! named once, every anchor on the foundation plane. The game refuses a file that breaks it, and
+//! one naming a material or an attachment kind its registries do not hold (ADR-0011).
 
 use bevy::math::{Vec2, Vec3};
 use serde::{Deserialize, Serialize};
 
 /// The format revision this build reads and writes. A file of another revision is refused.
-pub const FORMAT: u32 = 3;
+pub const FORMAT: u32 = 4;
 
 /// How far a vertex, a centroid or a plane may sit from where the contract places it, metres:
 /// the f32 rounding of a building-sized coordinate, many times over, and far below any modelled
@@ -54,8 +54,9 @@ pub struct BuildingAsset {
     pub foundation_y_m: f32,
     /// The substance keys (`assets/materials/materials.ron`) elements and chunks name, by index.
     pub materials: Vec<String>,
-    /// What the bonds between components hold by, by index ([`Bond::Fixed`]).
-    pub fixings: Vec<Fixing>,
+    /// The attachment kinds (`assets/materials/attachments.ron`) the bonds between components
+    /// name, by index ([`Bond::Attached`]).
+    pub attachments: Vec<String>,
     /// The components' names, unique, by index ([`Element::component`]).
     pub components: Vec<String>,
     pub elements: Vec<Element>,
@@ -212,27 +213,10 @@ pub struct Joint {
 pub enum Bond {
     /// Inside one component: the component's own seam, its chunks' material's.
     Seam,
-    /// Between two components, held by [`BuildingAsset::fixings`]`[_]` (a wall's corner in mortar,
-    /// a roof plane nailed to its plate).
-    Fixed(u8),
-    /// Between two components, one laid on the other with nothing fixing it: no pull strength and
-    /// no fracture work, held only by its weight and the friction of the two materials (a roof
-    /// plane laid on a gable's rake).
-    Resting,
-}
-
-/// What a bond between two components holds by: the seam the laws open it by.
-#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
-pub enum Fixing {
-    /// The seam of [`BuildingAsset::materials`]`[_]`: a masonry's own mortar, as between its
-    /// courses (a wall coursed into the next at a corner, a timber bedded on a wall).
-    Seam(u8),
-    /// A seam the building states (nails): its tensile strength across the joint's area, Pa, and
-    /// its mode-I fracture energy, J/m².
-    Stated {
-        tensile_pa: f32,
-        fracture_energy_j_per_m2: f32,
-    },
+    /// Between two components, held as the attachment kind [`BuildingAsset::attachments`]`[_]`
+    /// holds (a wall's corner mortared, a roof plane nailed to its plate, a roof plane resting on
+    /// a gable's rake).
+    Attached(u8),
 }
 
 /// One chunk face on the foundation plane: the ground holds it.
@@ -283,12 +267,17 @@ impl BuildingAsset {
         if self.components.len() > usize::from(u16::MAX) + 1 {
             return Err(format!("{} components", self.components.len()));
         }
-        if self.fixings.len() > usize::from(u8::MAX) + 1 {
-            return Err(format!("{} fixings", self.fixings.len()));
+        if self.attachments.len() > usize::from(u8::MAX) + 1 {
+            return Err(format!("{} attachment kinds", self.attachments.len()));
         }
         for (k, name) in self.components.iter().enumerate() {
             if self.components[..k].contains(name) {
                 return Err(format!("component {name} is named twice"));
+            }
+        }
+        for (k, kind) in self.attachments.iter().enumerate() {
+            if self.attachments[..k].contains(kind) {
+                return Err(format!("attachment kind {kind:?} is named twice"));
             }
         }
         let material = |index: u8, what: &str| {
@@ -296,20 +285,6 @@ impl BuildingAsset {
                 .then_some(())
                 .ok_or_else(|| format!("{what} names material {index}, past the table"))
         };
-        for (index, fixing) in self.fixings.iter().enumerate() {
-            match *fixing {
-                Fixing::Seam(m) => material(m, &format!("fixing {index}"))?,
-                Fixing::Stated {
-                    tensile_pa,
-                    fracture_energy_j_per_m2,
-                } => {
-                    let positive = |v: f32| v.is_finite() && v > 0.0;
-                    if !(positive(tensile_pa) && positive(fracture_energy_j_per_m2)) {
-                        return Err(format!("fixing {index} states no strength"));
-                    }
-                }
-            }
-        }
         let mut next = 0u32;
         for (index, element) in self.elements.iter().enumerate() {
             let name = &element.name;
@@ -381,12 +356,12 @@ impl BuildingAsset {
                 Bond::Seam if !inside => {
                     return Err(format!("joint {pair:?} is a seam between two components"));
                 }
-                Bond::Fixed(_) | Bond::Resting if inside => {
+                Bond::Attached(_) if inside => {
                     return Err(format!("joint {pair:?} is a bond inside one component"));
                 }
-                Bond::Fixed(index) if usize::from(index) >= self.fixings.len() => {
+                Bond::Attached(index) if usize::from(index) >= self.attachments.len() => {
                     return Err(format!(
-                        "joint {pair:?} names fixing {index}, past the table"
+                        "joint {pair:?} names attachment kind {index}, past the table"
                     ));
                 }
                 _ => {}

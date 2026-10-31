@@ -1,12 +1,9 @@
 //! `tools/buildings/<id>.house.ron`: the house generator's input. Read by the bake only; the game
 //! never sees it.
 
-use std::collections::BTreeMap;
-
+use overmatch::buildings::attachments::Attachments;
 use overmatch::buildings::schema::ElementKind;
 use serde::Deserialize;
-
-use super::house::Material;
 
 /// One house (the file's own comments carry each field's meaning and units).
 #[derive(Debug, Clone, PartialEq, Deserialize)]
@@ -30,18 +27,17 @@ pub struct House {
     pub walls: Walls,
     /// What holds the parts of two components where they touch, by their elements' kinds.
     pub joins: Vec<Join>,
-    /// The fixings a join may name, by name.
-    pub fixings: BTreeMap<String, Fixing>,
     pub cuts: Cuts,
 }
 
 /// What holds every joint between an element of one of `kinds` and an element of the other (in
-/// either order) where the two lie in different components.
+/// either order) where the two lie in different components: the attachment kind `by` names
+/// (`assets/materials/attachments.ron`).
 #[derive(Debug, Clone, PartialEq, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Join {
     pub kinds: (ElementKind, ElementKind),
-    pub by: Hold,
+    pub by: String,
 }
 
 impl Join {
@@ -49,28 +45,6 @@ impl Join {
     pub fn joins(&self, (a, b): (ElementKind, ElementKind)) -> bool {
         self.kinds == (a, b) || self.kinds == (b, a)
     }
-}
-
-/// How one part is held to another it touches.
-#[derive(Debug, Clone, PartialEq, Deserialize)]
-pub enum Hold {
-    /// By a fixing of [`House::fixings`], named.
-    Fixed(String),
-    /// Laid on it, nothing fixing it: held by weight and friction alone.
-    Resting,
-}
-
-/// A fixing between two components (the spec's comments carry each value's source).
-#[derive(Debug, Clone, Copy, PartialEq, Deserialize)]
-pub enum Fixing {
-    /// The seam of a material: a masonry's own mortar.
-    Seam(Material),
-    /// A seam stated here: its tensile strength across the joint's area, Pa, and its mode-I
-    /// fracture energy, J/m².
-    Stated {
-        tensile_pa: f64,
-        fracture_energy_j_per_m2: f64,
-    },
 }
 
 /// The openings of each wall.
@@ -104,7 +78,8 @@ pub struct Cuts {
 }
 
 impl House {
-    /// Parse a spec's text, refusing one whose numbers describe no house.
+    /// Parse a spec's text, refusing one whose numbers describe no house, and a join naming an
+    /// attachment kind the shared list does not hold.
     pub fn from_ron(text: &str) -> Result<Self, String> {
         let house: Self = ron::from_str(text).map_err(|err| err.to_string())?;
         house.check()?;
@@ -150,31 +125,9 @@ impl House {
             if self.joins[..k].iter().any(|other| other.joins(join.kinds)) {
                 return Err(format!("the join of {:?} is stated twice", join.kinds));
             }
-            if let Hold::Fixed(name) = &join.by
-                && !self.fixings.contains_key(name)
-            {
-                return Err(format!(
-                    "the join of {:?} names fixing {name:?}, which is not stated",
-                    join.kinds
-                ));
-            }
-        }
-        for (name, fixing) in &self.fixings {
-            if !self
-                .joins
-                .iter()
-                .any(|join| join.by == Hold::Fixed(name.clone()))
-            {
-                return Err(format!("fixing {name:?} holds no join"));
-            }
-            if let Fixing::Stated {
-                tensile_pa,
-                fracture_energy_j_per_m2,
-            } = *fixing
-                && !(positive(tensile_pa) && positive(fracture_energy_j_per_m2))
-            {
-                return Err(format!("fixing {name:?} states no strength"));
-            }
+            Attachments::shipped_static()
+                .holds(&join.by)
+                .map_err(|err| format!("the join of {:?}, by: {err}", join.kinds))?;
         }
         for (wall, openings) in self.walls.iter() {
             for opening in openings {

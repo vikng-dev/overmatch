@@ -46,42 +46,22 @@ House(
         south: [(u: (-0.5, 0.5), courses: (18, 33))],
     ),
     // How the parts of two components are held where they touch, by their elements' kinds (either
-    // order); inside a component its chunks hold by its own seam. The bake refuses a touching pair
-    // no join names, and a join no pair makes.
+    // order): the attachment kind (`assets/materials/attachments.ron`, which holds every kind's
+    // strength); inside a component its chunks hold by its own seam. The bake refuses a touching
+    // pair no join names, a join no pair makes, and a kind the list does not hold.
     joins: [
         // The walls coursed into each other at the corners.
-        (kinds: (Pier, Pier), by: Fixed("mortar")),
+        (kinds: (Pier, Pier), by: "mortared"),
         // Each wall plate bedded on its long wall, and each gable laid up against a plate's end.
-        (kinds: (Pier, WallPlate), by: Fixed("mortar")),
-        (kinds: (Lintel, WallPlate), by: Fixed("mortar")),
-        (kinds: (Gable, WallPlate), by: Fixed("mortar")),
+        (kinds: (Pier, WallPlate), by: "mortared"),
+        (kinds: (Lintel, WallPlate), by: "mortared"),
+        (kinds: (Gable, WallPlate), by: "mortared"),
         // The rafters skew-nailed to the plates, and each pair nailed at the ridge.
-        (kinds: (WallPlate, Roof), by: Fixed("plate_nails")),
-        (kinds: (Roof, Roof), by: Fixed("ridge_nails")),
+        (kinds: (WallPlate, Roof), by: "nailed"),
+        (kinds: (Roof, Roof), by: "nailed"),
         // The roof laid on the gables' rakes, nothing fixing it there.
-        (kinds: (Gable, Roof), by: Resting),
+        (kinds: (Gable, Roof), by: "resting"),
     ],
-    // The fixings the joins name. Nails are stated as a seam over the joint's contact area: the
-    // nails over that area times one nail's withdrawal capacity, and its withdrawal work.
-    //
-    // One nail: CLAIMED, not read (EN 1995-1-1:2004 §8.3.2, eqs. 8.24 and 8.25, recalled): a
-    // smooth nail's characteristic withdrawal strength f_ax = 20e-6 ρ_k² N/mm², ρ_k 350 kg/m³ for
-    // C24 spruce (EN 338, recalled), 2.45 N/mm², times its diameter and its point's penetration.
-    // ASSUMED: a 3.1 × 75 mm wire nail, 40 mm into the timber it holds, so 304 N, DERIVED; its
-    // withdrawal force falls linearly from that peak to nothing over the 40 mm, so 6.1 J, DERIVED.
-    // ASSUMED: rafters at 600 mm centres, each skew-nailed to its plate with two nails and nailed to
-    // its pair at the ridge with two more.
-    fixings: {
-        // The brick row's seam (`materials.ron`): ASSUMED, a mortar bed holds a timber as it holds
-        // the next course.
-        "mortar": Seam(Brick),
-        // Two nails per 0.6 m of plate over the roof's 0.3125 m contact strip on it (the 0.25 m wall
-        // over the 3 : 4 slope's cosine 0.8): 10.7 nails per m², 3.24 kPa and 65 J/m², DERIVED.
-        "plate_nails": Stated(tensile_pa: 3240.0, fracture_energy_j_per_m2: 65.0),
-        // Two nails per 0.6 m of ridge over its 0.0625 m mitred face (the 50 mm boards over the
-        // cosine 0.8): 53.3 nails per m², 16.2 kPa and 325 J/m², DERIVED.
-        "ridge_nails": Stated(tensile_pa: 16200.0, fracture_energy_j_per_m2: 325.0),
-    },
     // The fracture bake's cut rule (`tools/src/buildings/fracture.rs`).
     cuts: (
         // Chunk rows, in courses: every row boundary is a bed joint.

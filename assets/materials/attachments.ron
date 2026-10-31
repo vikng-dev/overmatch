@@ -1,0 +1,47 @@
+// The attachment kinds: how two parts of a building hold together where they touch, in the game's
+// environment destruction (game state only). One shared list, beside `materials.ron`: a building's
+// spec names a kind for each pair of parts it joins (`tools/buildings/<id>.house.ron`, its
+// `joins`), the bake writes those names into the building (`assets/buildings/<id>/<id>.building.ron`,
+// its `attachments`), and the game reads each name here at load, refusing one this list does not
+// hold. Inside one component its chunks hold by the component's own seam, never by a kind here.
+//
+// No fastener is modelled: a kind is a seam spread over the joint's whole contact area, never a
+// count of nails or bolts (`.agents/docs/design/wall-destruction.md`, "Attachment kinds").
+//
+// Every kind is one of three:
+// - `Seam("<substance>")`: the seam of that row of `materials.ron` (its bulk `tensile` and
+//   `fracture_energy`), the numbers' one source.
+// - `Stated(tensile_pa, fracture_energy_j_per_m2)`: a seam this list states: its tensile strength
+//   across the joint's area, Pa, and its mode-I fracture energy, J/m², each authored
+//   `(value, Kind("source or reason"))` (`src/provenance.rs`). A kind missing either does not load.
+// - `Resting`: one part laid on the other with nothing fixing it: no pull strength and no fracture
+//   work, held by its weight and the friction of the two materials alone.
+//
+// Bolted and welded join the list once a building or a vehicle uses them.
+{
+    // A mortar bed, as between a masonry's own courses: a wall coursed into the next at a corner, a
+    // timber bedded on a wall (ASSUMED: a mortar bed holds a timber as it holds the next course).
+    // Brick is the one masonry a building is of.
+    "mortared": Seam("Brick"),
+    // Timber nailed to timber or to a wall plate, as rafters to their plate and to each other at a
+    // ridge: the nails per square metre of contact times one nail's withdrawal capacity, and its
+    // withdrawal work. One nailing density stands for every nailed joint: a joint that plays as
+    // nailed far more densely (a ridge's two nails per 0.6 m over its 0.0625 m mitred face, 53.3 per
+    // m², DERIVED) is a kind of its own once play shows it needs one.
+    "nailed": Stated(
+        tensile_pa: (3240.0, Derived("one nail's withdrawal capacity × 10.7 nails per m² of
+            contact. One nail: CLAIMED, not read (EN 1995-1-1:2004 §8.3.2, eqs. 8.24 and 8.25,
+            recalled): a smooth nail's characteristic withdrawal strength f_ax = 20e-6 ρ_k² N/mm²,
+            ρ_k 350 kg/m³ for C24 spruce (EN 338, recalled), 2.45 N/mm², times its diameter and its
+            point's penetration; ASSUMED a 3.1 × 75 mm wire nail 40 mm into the timber it holds,
+            so 304 N. The density: ASSUMED two nails per 0.6 m of joint (rafters at 600 mm
+            centres, each skew-nailed to its plate with two) over a 0.3125 m contact strip (a
+            0.25 m wall top under a 3 : 4 slope, over its cosine 0.8): 10.7 per m², 3.24 kPa")),
+        fracture_energy_j_per_m2: (65.0, Derived("one nail's withdrawal work × 10.7 nails per m²
+            of contact (the density `tensile_pa` states): ASSUMED, its withdrawal force falls
+            linearly from its 304 N peak to nothing over its 40 mm penetration, so 6.1 J a nail,
+            and 65 J/m²")),
+    ),
+    // Laid on the other part, nothing fixing it: a roof plane on a gable's rake.
+    "resting": Resting,
+}

@@ -5,8 +5,9 @@
 //! * **The law's view of a building** ([`Layout`], once per asset): the chunks of the elements
 //!   whose substance states bulk facts ([`Masonry::of`]), numbered in asset order, and the joints
 //!   and anchors among them, each holding by the bond the asset gives it ([`Bond`]: a seam inside
-//!   a component, the seam of the fixing a bond between components names, or a rest). A chunk
-//!   and a joint keep that number on the wire.
+//!   a component; between two, what the attachment kind it names holds by
+//!   ([`super::attachments`]: a seam, or a rest)). A chunk and a joint keep that number on the
+//!   wire.
 //! * **First touch swaps an element.** An element stays one collider until a deposit, a crack, a
 //!   fall or dust touches one of its chunks; from then on each of its standing chunks is a static
 //!   collider of its substance ([`BuildingChunk`]) and the element's own collider is gone. A
@@ -62,6 +63,7 @@ use bevy::math::DVec3;
 use bevy::prelude::*;
 use serde::{Deserialize, Serialize};
 
+use super::attachments::Attachments;
 use super::fracture::{
     self, Blast, Block, Bond, Chunk, Fate, Joint, Loading, Masonry, Push, SectionCache, Side,
     Structure, WallState,
@@ -115,9 +117,24 @@ pub(crate) struct Layout {
 
 impl Layout {
     /// The layout of `asset`, its materials' values `masonry` (per asset material, `None` for a
-    /// substance that never breaks). Refuses an asset whose law chunks or joints overrun the
-    /// wire's 16-bit numbers, and a fixing taking the seam of a material that states none.
-    pub(crate) fn of(asset: &BuildingAsset, masonry: &[Option<Masonry>]) -> Result<Self, String> {
+    /// substance that never breaks), its attachment kinds read in `attachments`. Refuses an asset
+    /// naming a kind the list does not hold, and one whose law chunks or joints overrun the wire's
+    /// 16-bit numbers.
+    pub(crate) fn of(
+        asset: &BuildingAsset,
+        masonry: &[Option<Masonry>],
+        attachments: &Attachments,
+    ) -> Result<Self, String> {
+        let attached = asset
+            .attachments
+            .iter()
+            .enumerate()
+            .map(|(k, kind)| {
+                attachments
+                    .bond(kind)
+                    .map_err(|err| format!("attachments[{k}]: {err}"))
+            })
+            .collect::<Result<Vec<_>, _>>()?;
         let mut chunks = Vec::new();
         let mut element_of = Vec::new();
         let mut materials = Vec::new();
@@ -142,26 +159,7 @@ impl Layout {
             if let (Some(a), Some(b)) = (law_of[joint.a as usize], law_of[joint.b as usize]) {
                 let bond = match joint.bond {
                     schema::Bond::Seam => Bond::Bonded(materials[a].seam),
-                    schema::Bond::Fixed(f) => {
-                        Bond::Bonded(match asset.fixings[usize::from(f)] {
-                            schema::Fixing::Seam(m) => masonry[usize::from(m)]
-                                .ok_or_else(|| {
-                                    format!(
-                                        "fixing {f} takes the seam of material {m}, which states \
-                                         none to hold it by"
-                                    )
-                                })?
-                                .seam,
-                            schema::Fixing::Stated {
-                                tensile_pa,
-                                fracture_energy_j_per_m2,
-                            } => fracture::Seam {
-                                tensile: tensile_pa,
-                                fracture_energy: fracture_energy_j_per_m2,
-                            },
-                        })
-                    }
-                    schema::Bond::Resting => Bond::Resting,
+                    schema::Bond::Attached(k) => attached[usize::from(k)],
                 };
                 joints.push(Joint {
                     a,
