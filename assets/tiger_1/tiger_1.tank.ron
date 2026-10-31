@@ -232,9 +232,9 @@ TankSpec(
     // assets/materials/materials.blend) supplies its resistance, keyed by substance name. Each
     // entry says what the volume is beyond armour: main armour `(main: true)`, external armour
     // `(external: true)`, or a component with an hp pool and consequence facets (crew / ammo /
-    // function). A key naming no ballistic volume fails loud at bind, and the material-implied
-    // lints catch the reverse (Flesh with no crew facet, Ammunition with no ammo facet,
-    // EngineBlock with no entry).
+    // function). A key naming no ballistic volume fails loud at bind, a witness substance (Flesh)
+    // with no crew facet is refused at load, and every part a gate requires must be a facet some
+    // volume here declares.
     volumes: {
         // hp is in whole HP points: the line's dose converts at ballistics::HP_PER_REFERENCE_MM,
         // the field's at assets/ballistics/spall_cone.ron's calibration. A crew station authors

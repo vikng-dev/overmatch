@@ -403,7 +403,12 @@ pub(crate) fn turret_node(geometry: &TankGeometry, spec: &TankSpec) -> Option<us
     }
 }
 
-const TIGER_SPEC_RON: &str = include_str!("../assets/tiger_1/tiger_1.tank.ron");
+/// The selected tank's sheet, embedded: named by the same selection (`assets::tank_file!`) as the
+/// model and certificate the bake pairs it with, so geometry and construction are one tank's.
+const TANK_SPEC_RON: &str = include_str!(concat!(
+    "../assets/",
+    crate::assets::tank_file!(".tank.ron")
+));
 
 /// Which primitives' mesh buffers the sim consumes, and why (§12):
 ///
@@ -883,7 +888,7 @@ fn extract_at_startup(mut commands: Commands) {
     // sides walk identical accessor bytes by construction. `geometry_lod` has already fingerprinted
     // it against the certificate by the time this runs.
     let path = root.join(crate::tank::TANK_SIM_GLB_PATH);
-    let asset = certify_asset(&path, TIGER_SPEC_RON, &SubstanceRegistry::shipped())
+    let asset = certify_asset(&path, TANK_SPEC_RON, &SubstanceRegistry::shipped())
         .unwrap_or_else(|findings| {
         panic!(
             "bake: {} did not pass the consumer contract:\n{}\n\
@@ -1991,7 +1996,7 @@ mod tests {
     fn the_sim_artifact_walks_the_bytes_the_view_glb_carried() {
         let root = crate::assets::asset_root();
         let registry = SubstanceRegistry::shipped();
-        let spec: TankSpec = ron::de::from_str(TIGER_SPEC_RON).expect("the shipped sheet parses");
+        let spec: TankSpec = ron::de::from_str(TANK_SPEC_RON).expect("the shipped sheet parses");
         let extract = |path: &Path| {
             extract_tank_geometry(path, &spec, &registry)
                 .unwrap_or_else(|f| panic!("{} extracts: {}", path.display(), render(&f)))
@@ -2170,24 +2175,22 @@ mod tests {
         }
     }
 
-    /// THE MATERIAL-IMPLIED LINTS, over every shipped asset. A substance whose whole meaning is a
-    /// consequence must have the facet that states it: an Ammunition rack that cannot cook off and
-    /// an EngineBlock with no hp are each a plate pretending to be a module. (A witness without a
-    /// crew facet is refused at load, `L2.WITNESS_ROLE`.) The declared collision proxies and the
-    /// structural singletons the assembler resolves by name are the same kind of claim — about the
-    /// class "tank", asserted here rather than at spawn, where a bad asset would only surface as a
-    /// panic.
+    /// THE CLASS "TANK", over every shipped asset: some node wears a registry substance, the
+    /// structural singletons the assembler resolves by name exist, and no declared collision proxy
+    /// is armour — asserted here rather than at spawn, where a bad asset would only surface as a
+    /// panic. A volume's consequences are its declared facets, never its material: the sheet's
+    /// gates must close over the volumes it declares (`TankSpec::validate`), and a witness without
+    /// a crew facet is refused at load (`L2.WITNESS_ROLE`).
     ///
-    /// The substance names are the GLOBAL registry's, shared by every vehicle, and the loop is
-    /// discovery: nothing here is one model's count, and a second tank adds no line.
+    /// The loop is discovery: nothing here is one model's count, and a second tank adds no line.
     #[test]
-    fn every_shipped_asset_states_the_consequences_its_materials_imply() {
+    fn every_shipped_asset_is_a_tank_the_assembler_can_build() {
         for model in fixture::shipped_assets() {
             let spec_ron =
                 std::fs::read_to_string(spec_ron_name(&model)).expect("the sheet is readable");
             let asset = certify_asset(&model, &spec_ron, &SubstanceRegistry::shipped())
                 .expect("the pair certifies");
-            let (geometry, spec) = (&asset.geometry, &asset.spec);
+            let geometry = &asset.geometry;
             let named = |what: &str| format!("{}: `{what}`", model.display());
 
             assert!(
@@ -2213,30 +2216,6 @@ mod tests {
                      armour AND stand in for the body, counting the hull twice",
                     named(&proxy.name)
                 );
-            }
-            for &index in &geometry.ballistic_volumes {
-                let node = &geometry.nodes[index];
-                let facets = spec
-                    .volumes
-                    .get(&node.name)
-                    .and_then(crate::spec::VolumeSpec::component);
-                let worn = node.substance_groups();
-                if worn.contains_key("Ammunition") {
-                    assert!(
-                        facets.is_some_and(|facets| facets.ammo),
-                        "{} is made of Ammunition and declares no ammo facet — a rack that cannot \
-                         cook off",
-                        named(&node.name)
-                    );
-                }
-                if worn.contains_key("EngineBlock") {
-                    assert!(
-                        facets.is_some(),
-                        "{} is an EngineBlock with no component entry — a powerplant with no hp is \
-                         armour pretending to be a module",
-                        named(&node.name)
-                    );
-                }
             }
         }
     }

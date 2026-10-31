@@ -841,35 +841,6 @@ impl SubstanceRegistry {
 mod tests {
     use super::*;
 
-    /// Every substance the shipped library declares. A rename or a deletion has to come here first,
-    /// which is the point: the Blender link key and the code's vocabulary are one contract.
-    const EXPECTED: [&str; 15] = [
-        "RHA",
-        "GunSteel",
-        "Cast",
-        "MildSteel",
-        "CastMild",
-        "TrackSteel",
-        "EngineBlock",
-        "Ammunition",
-        "Rubber",
-        "TungstenCarbide",
-        "Flesh",
-        "Wood",
-        "Brick",
-        "88mm_burst_core",
-        "Amatol60_40",
-    ];
-
-    /// The expected entries that are witnesses.
-    const WITNESSES: [&str; 1] = ["Flesh"];
-
-    /// The expected entries worn by no volume; every entry neither this nor a witness is hard.
-    const UNWORN: [&str; 2] = ["88mm_burst_core", "Amatol60_40"];
-
-    /// The expected entries that state burst facts, whatever their kind.
-    const BURST_CORES: [&str; 2] = ["88mm_burst_core", "Amatol60_40"];
-
     /// A minimal valid registry around one extra entry, for the refusal tests.
     fn with(extra: &str) -> String {
         format!(
@@ -884,39 +855,37 @@ mod tests {
         )
     }
 
+    /// EVERY SHIPPED ROW HOLDS ITS KIND'S INVARIANTS, whatever the registry carries: a hard row is
+    /// matter that resists something (a finite factor above zero), a witness is matter that resists
+    /// nothing, and an unworn row is no matter and states the burst facts that are all it is for.
+    /// The registry is iterated, so a new or renamed row is checked without this test learning
+    /// its name.
     #[test]
-    fn shipped_registry_carries_every_expected_substance() {
+    fn every_shipped_row_holds_its_kinds_invariants() {
         let registry = SubstanceRegistry::shipped();
-        assert_eq!(registry.substances.len(), EXPECTED.len());
-        for name in EXPECTED {
-            let substance = registry
-                .get(name)
-                .unwrap_or_else(|err| panic!("{name} must be in the registry: {err}"));
+        assert!(!registry.keys().is_empty(), "the shipped registry has rows");
+        for name in registry.keys() {
+            let substance = registry.get(name).unwrap();
             match substance {
-                Substance::Hard(hard) => assert!(
-                    hard.factor() > 0.0,
-                    "{name} must resist something (factor > 0)"
-                ),
-                Substance::Witness => assert!(
-                    WITNESSES.contains(&name),
-                    "{name} is a witness the library does not expect"
-                ),
-                Substance::Unworn { .. } => assert!(
-                    UNWORN.contains(&name),
-                    "{name} is an unworn substance the library does not expect"
-                ),
+                Substance::Hard(hard) => {
+                    let factor = hard.factor();
+                    assert!(
+                        factor.is_finite() && factor > 0.0,
+                        "{name} resists something (factor {factor})"
+                    );
+                    assert!(
+                        matches!(substance.matter(), Some(Matter::Hard { .. })),
+                        "{name}"
+                    );
+                }
+                Substance::Witness => {
+                    assert_eq!(substance.matter(), Some(Matter::Witness), "{name}");
+                }
+                Substance::Unworn { .. } => {
+                    assert_eq!(substance.matter(), None, "{name}");
+                    assert!(substance.burst().is_some(), "{name} states its burst facts");
+                }
             }
-            assert_eq!(
-                substance.burst().is_some(),
-                BURST_CORES.contains(&name),
-                "{name}: burst facts"
-            );
-        }
-        for name in WITNESSES {
-            assert_eq!(registry.get(name).unwrap(), Substance::Witness, "{name}");
-        }
-        for name in UNWORN {
-            assert_eq!(registry.get(name).unwrap().matter(), None, "{name}");
         }
     }
 

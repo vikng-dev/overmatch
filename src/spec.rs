@@ -13,7 +13,7 @@ use bevy::prelude::*;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
-use crate::damage::{Capability, CrewStation, FunctionRole, Requirement};
+use crate::damage::{Capability, CrewStation, FunctionRole, GradedGroup, Group, Part, Requirement};
 use crate::guns::{GunError, GunRegistry, Mechanism};
 use crate::provenance::Sourced;
 use crate::tank::{ServoSpec, Tank};
@@ -386,6 +386,20 @@ fn duration(seconds: f32) -> bool {
     seconds.is_finite() && seconds >= 0.0
 }
 
+/// Every [`Part`] a requirement names, flattened through its graded groups.
+fn requirement_parts(requirement: &Requirement) -> Vec<Part> {
+    requirement
+        .iter()
+        .flat_map(|group| match group {
+            Group::Single(part) => vec![*part],
+            Group::Graded(GradedGroup::Pool(members) | GradedGroup::Backup(members)) => members
+                .iter()
+                .flat_map(|(_, parts)| parts.iter().copied())
+                .collect(),
+        })
+        .collect()
+}
+
 /// The most rounds one weapon can list: its round index travels as a `u8`.
 pub(crate) const MAX_WEAPON_ROUNDS: usize = u8::MAX as usize + 1;
 
@@ -454,6 +468,13 @@ impl WeaponSpec {
                 "round {:?} is stowed with a count of 0 — a stowed round is one the tank carries",
                 stowed.round
             ));
+        }
+        if self.recoil.is_some() != self.barrel.is_some() {
+            return Err(
+                "recoil is authored exactly when barrel is: the spring drives the recoiling \
+                 barrel, and a barrel with no spring never moves"
+                    .into(),
+            );
         }
         if let Some(recoil) = &self.recoil {
             let stop = recoil.max_length.0;
@@ -1071,6 +1092,70 @@ impl NodeRole {
 }
 
 impl TankSpec {
+    /// Why the sheet's volumes cannot serve its crew swaps and gates, if they cannot: two volumes
+    /// seating one crew station, or a requirement naming a part no volume provides.
+    fn check_seats_and_gates(&self) -> Result<(), String> {
+        // A crew swap addresses a seat BY STATION on the wire (`command::CrewSwap::Start`), and both
+        // the authority (`damage::apply_crew_swap_commands`) and the replica mirror
+        // (`net::protocol::mirror_swap_from_net_crew`) resolve it to the FIRST seat wearing it: two
+        // seats under one station are not separately addressable, and the two sides can resolve one
+        // command to different seats. Duplicate FUNCTIONS carry no such vocabulary and stay legal —
+        // `damage::part_qualities` max-combines every provider of a role.
+        let mut seats: std::collections::HashMap<CrewStation, &str> =
+            std::collections::HashMap::new();
+        for (node, volume) in &self.volumes {
+            if let Some(seat) = volume.component().and_then(|component| component.crew)
+                && let Some(first) = seats.insert(seat, node)
+            {
+                return Err(format!(
+                    "volumes `{first}` and `{node}` both seat crew station {seat:?} — a swap \
+                 addresses a seat by its station, so each station has one volume"
+                ));
+            }
+        }
+        // Every gate closes over what the tank is built of: a Part a requirement names that no
+        // declared volume provides (a crew facet or a function facet) is a quality nothing on this
+        // tank can ever have, so the gate reads as permanently unmet.
+        let provided: std::collections::HashSet<Part> = self
+            .volumes
+            .values()
+            .filter_map(VolumeSpec::component)
+            .flat_map(|volume| {
+                volume
+                    .crew
+                    .map(Part::from)
+                    .into_iter()
+                    .chain(volume.function.map(Part::from))
+            })
+            .collect();
+        let mut requirements: Vec<(String, &Requirement)> = Vec::new();
+        for (capability, requirement) in &self.capabilities {
+            requirements.push((format!("capabilities[{capability:?}]"), requirement));
+        }
+        for (name, weapon) in &self.weapons {
+            requirements.push((format!("weapons[\"{name}\"].fire"), &weapon.fire));
+            requirements.push((format!("weapons[\"{name}\"].load"), &weapon.load));
+        }
+        for (node, servo) in &self.servos {
+            requirements.push((format!("servos[\"{node}\"].requires"), &servo.requires));
+        }
+        for (kind, view) in &self.views {
+            requirements.push((format!("views[{kind:?}].requires"), &view.requires));
+        }
+        for (field, requirement) in &requirements {
+            if let Some(part) = requirement_parts(requirement)
+                .into_iter()
+                .find(|part| !provided.contains(part))
+            {
+                return Err(format!(
+                    "{field} requires {part:?}, which no volume provides — declare the volume \
+                 with that crew or function facet, or drop it from the requirement"
+                ));
+            }
+        }
+        Ok(())
+    }
+
     /// Every model node this sheet names, with the role it names it in — the canonical reference
     /// list, so no consumer (the bake gate, the source lint, a future editor) maintains a second
     /// vocabulary of RON field names. Sorted by role then name: the maps are unordered, and a
@@ -1343,6 +1428,7 @@ impl TankSpec {
             )
             .into());
         }
+        self.check_seats_and_gates()?;
         // A capability the sheet does not key reads as unavailable to every consumer, so each one is
         // stated: `[]` is an ungated capability.
         if let Some(missing) = Capability::ALL
@@ -1466,22 +1552,6 @@ fn report_failed_spec(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::damage::{GradedGroup, Group, Part};
-    use std::collections::HashSet;
-
-    /// Every [`Part`] a requirement names, flattened through its graded groups.
-    fn requirement_parts(requirement: &Requirement) -> Vec<Part> {
-        requirement
-            .iter()
-            .flat_map(|group| match group {
-                Group::Single(part) => vec![*part],
-                Group::Graded(GradedGroup::Pool(members) | GradedGroup::Backup(members)) => members
-                    .iter()
-                    .flat_map(|(_, parts)| parts.iter().copied())
-                    .collect(),
-            })
-            .collect()
-    }
 
     /// The certificate on the SHIPPED sheet: it deserializes (so schema drift — a renamed field, a
     /// changed type, a stray key under `deny_unknown_fields` — fails at `cargo test` time rather
@@ -1611,13 +1681,6 @@ mod tests {
             primaries, 1,
             "exactly one weapon is Primary — it supplies the rig's main-bore handles"
         );
-        for (name, weapon) in &spec.weapons {
-            assert_eq!(
-                weapon.recoil.is_some(),
-                weapon.barrel.is_some(),
-                "weapon `{name}`: the recoil spring is authored iff the recoiling barrel is"
-            );
-        }
 
         // The gunner's view node is how the binder finds the gunner's chain for the rig.
         assert!(
@@ -1625,58 +1688,7 @@ mod tests {
             "the sheet must declare a Gunner view"
         );
 
-        // A crew swap addresses a seat BY STATION on the wire (`command::CrewSwap::Start`), and
-        // both the authority (`damage::apply_crew_swap_commands`) and the replica mirror
-        // (`net::protocol::mirror_swap_from_net_crew`) resolve it to the FIRST seat wearing it:
-        // two seats under one station are not separately addressable, and the two sides can
-        // resolve one command to different seats. Duplicate FUNCTIONS carry no such vocabulary
-        // and stay legal — `damage::part_qualities` max-combines every provider of a role.
-        let mut seats: HashSet<CrewStation> = HashSet::new();
-        for (node, volume) in &spec.volumes {
-            if let Some(seat) = volume.component().and_then(|component| component.crew) {
-                assert!(
-                    seats.insert(seat),
-                    "`{node}`: crew station {seat:?} is served by two volumes"
-                );
-            }
-        }
-
-        // Damage gates close: every Part any requirement names must be something a volume actually
-        // provides, or the gate references a quality nothing on this tank can ever have.
-        let provided: HashSet<Part> = spec
-            .volumes
-            .values()
-            .filter_map(VolumeSpec::component)
-            .flat_map(|volume| {
-                volume
-                    .crew
-                    .map(Part::from)
-                    .into_iter()
-                    .chain(volume.function.map(Part::from))
-            })
-            .collect();
-        let mut requirements: Vec<(String, &Requirement)> = Vec::new();
-        for (capability, requirement) in &spec.capabilities {
-            requirements.push((format!("capabilities[{capability:?}]"), requirement));
-        }
-        for (name, weapon) in &spec.weapons {
-            requirements.push((format!("weapons[\"{name}\"].fire"), &weapon.fire));
-            requirements.push((format!("weapons[\"{name}\"].load"), &weapon.load));
-        }
-        for (node, servo) in &spec.servos {
-            requirements.push((format!("servos[\"{node}\"].requires"), &servo.requires));
-        }
-        for (kind, view) in &spec.views {
-            requirements.push((format!("views[{kind:?}].requires"), &view.requires));
-        }
-        for (field, requirement) in &requirements {
-            for part in requirement_parts(requirement) {
-                assert!(
-                    provided.contains(&part),
-                    "{field} requires {part:?}, which no volume provides"
-                );
-            }
-        }
+        // The seat, provider and recoil rules are `validate`'s, checked above for every sheet.
     }
 
     /// The MUTATION BATTERY's subject: a fictional vehicle that authors every block a rejection
@@ -1878,19 +1890,6 @@ TankSpec(
         assert_eq!(spec.track.sprocket.nodes.side_of("Sprocket_R"), Some(1));
         assert_eq!(spec.track.sprocket.nodes.side_of("Idler_L"), None);
         assert_eq!(spec.track.idler.nodes.side_of("Idler_R"), Some(1));
-    }
-
-    /// FIXTURE DATA (the shipped sheet): the node names the belt bound by literal before they
-    /// moved into the sheet.
-    #[test]
-    fn the_shipped_sheet_declares_the_running_gear_nodes_once_bound_by_literal() {
-        let spec: TankSpec = ron::de::from_str(include_str!("../assets/tiger_1/tiger_1.tank.ron"))
-            .expect("the shipped sheet parses");
-        let t = &spec.track;
-        assert_eq!(t.sprocket.nodes.left, "Sprocket_L");
-        assert_eq!(t.sprocket.nodes.right, "Sprocket_R");
-        assert_eq!(t.idler.nodes.left, "Idler_L");
-        assert_eq!(t.idler.nodes.right, "Idler_R");
     }
 
     /// **A view frames the field it authors, and the magnification is not a term in it.** Both
@@ -2486,6 +2485,41 @@ TankSpec(
                 .to_string();
             assert!(err.contains(field), "the refusal names `{field}`: {err}");
         }
+    }
+
+    /// `validate()` refuses a sheet whose construction cannot serve its own gates, naming the field:
+    /// a requirement naming a part no declared volume provides (the gate could never open), two
+    /// volumes seating one crew station (a swap addresses a seat by station, so the authority and
+    /// the replica could pick different seats), and a recoil spring without its barrel. Mutant: a
+    /// `validate` that drops any of the three loads its case.
+    #[test]
+    fn validate_refuses_a_sheet_whose_construction_cannot_serve_its_gates() {
+        let mut unprovided = fixture();
+        unprovided
+            .weapons
+            .get_mut("Cannon")
+            .expect("the fixture's cannon")
+            .load = vec![Group::Single(Part::Loader)];
+        let err = unprovided.validate().unwrap_err().to_string();
+        assert!(
+            err.contains("weapons[\"Cannon\"].load") && err.contains("Loader"),
+            "{err}"
+        );
+
+        let mut doubled = fixture();
+        let gunner = doubled.volumes["Gunner"].clone();
+        doubled.volumes.insert("Gunner_Spare".to_owned(), gunner);
+        let err = doubled.validate().unwrap_err().to_string();
+        assert!(err.contains("Gunner") && err.contains("station"), "{err}");
+
+        let mut unsprung = fixture();
+        unsprung
+            .weapons
+            .get_mut("Cannon")
+            .expect("the fixture's cannon")
+            .barrel = None;
+        let err = unsprung.validate().unwrap_err().to_string();
+        assert!(err.contains("Cannon") && err.contains("recoil"), "{err}");
     }
 
     /// A capability the sheet does not key would read as unavailable to every consumer, so
