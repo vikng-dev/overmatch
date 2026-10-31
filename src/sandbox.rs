@@ -22,7 +22,7 @@
 //! * **Text only at a glance.** The view carries the selected round's name (its speed beside it only
 //!   when overridden, [`round_line`]), the aim dot and the key legend, hidden until H. The look shows
 //!   the target's crew and module state, so no crew bar or status card is mounted; the egui panel
-//!   holds the controls and what the picture cannot show (time rate, march cadence).
+//!   holds the controls and what the picture cannot show (time rate).
 //!
 //! Sandbox controls use real time so inspection remains available while simulation time is paused.
 //!
@@ -319,8 +319,6 @@ pub fn plugin(app: &mut App) {
     .init_resource::<TargetLife>()
     // Keep spent shells frozen in place (with their tracer + marks) for inspection.
     .insert_resource(ballistics::RetainSpentShells(true))
-    // Default to smooth per-frame motion; `T` toggles to the true fixed-rate cadence.
-    .insert_resource(ballistics::MarchMode::Demo)
     .init_resource::<ArmourOverlay>()
     .init_resource::<SpeedIndex>()
     .init_resource::<ShotParams>()
@@ -364,7 +362,6 @@ pub fn plugin(app: &mut App) {
             time_controls.run_if(not(panel_capturing)),
             toggle_full_pause,
             clear_shots,
-            toggle_march_mode,
             spawn_target_from_blueprint,
             (toggle_armour_overlay, draw_armour_overlay).chain(),
             (
@@ -954,16 +951,6 @@ fn time_controls(
     }
 }
 
-/// `T` toggles the shell march between real (true fixed server cadence) and demo (smooth per-frame).
-fn toggle_march_mode(keys: Res<ButtonInput<KeyCode>>, mut mode: ResMut<ballistics::MarchMode>) {
-    if keys.just_pressed(KeyCode::KeyT) {
-        *mode = match *mode {
-            ballistics::MarchMode::Real => ballistics::MarchMode::Demo,
-            ballistics::MarchMode::Demo => ballistics::MarchMode::Real,
-        };
-    }
-}
-
 /// Tracer: each shell's accumulated path as a gizmo polyline, of the shells that met no tank.
 fn draw_shell_paths(mut gizmos: Gizmos, paths: Query<&ShellPath, Without<MetTank>>) {
     for path in &paths {
@@ -1109,7 +1096,6 @@ fn spawn_hud(mut commands: Commands, fonts: Res<crate::ui_font::UiFonts>) {
              R  rebuild\n\
              Space  freeze\n\
              Up / Down  slow-mo\n\
-             T  march cadence\n\
              Esc  free cursor\n\
              H  keys\n\
              wall: 1-5 law  K cut  N new  B round  F fire\n\

@@ -62,7 +62,7 @@ enum ChildPose {
 }
 
 /// The game's sim composition minus the tank asset: the march, the damage consequences and the
-/// recorder, on the fixed tick with the physics step after it. `client` adds the net client's
+/// recorder, on the fixed tick after the physics step. `client` adds the net client's
 /// replica marker.
 fn recording_world(client: bool) -> App {
     recording_world_under(client, ChildPose::Avian)
@@ -416,7 +416,7 @@ fn a_shell_despawned_after_the_shot_keeps_its_record() {
         let mut app = recording_world(false);
         if despawn {
             app.add_systems(
-                FixedUpdate,
+                FixedPostUpdate,
                 despawn_struck
                     .after(SimPhase::ProjectileMarch)
                     .before(crate::damage::DamageConsequences),
@@ -717,9 +717,8 @@ struct TickReads {
 }
 
 /// Fire the fixture 88 along `-Z` from `from` and run `ticks` fixed ticks, reading each. A tank's
-/// pose is read before the tick off its front plate (each of `fronts`, square to the hull at
-/// [`hull`]'s front centre): the collider the march casts against, which the physics step placed
-/// from the tank's pose at that step's start, a step behind a moving body's own `Position`.
+/// pose is read after the physics interval off its front plate (each of `fronts`, square to the
+/// hull at [`hull`]'s front centre): the completed collider pose the game's damage-model walk reads.
 fn fire_and_read(app: &mut App, fronts: &[Entity], from: Vec3, ticks: usize) -> Vec<TickReads> {
     let log = Arc::new(std::sync::Mutex::new(Vec::new()));
     let sink = log.clone();
@@ -732,6 +731,7 @@ fn fire_and_read(app: &mut App, fronts: &[Entity], from: Vec3, ticks: usize) -> 
     let centre = hull()[0].2;
     (0..ticks)
         .map(|_| {
+            app.update();
             let poses = fronts
                 .iter()
                 .map(|&front| {
@@ -743,7 +743,6 @@ fn fire_and_read(app: &mut App, fronts: &[Entity], from: Vec3, ticks: usize) -> 
                     )
                 })
                 .collect();
-            app.update();
             let playing = app
                 .world_mut()
                 .query::<&Projectile>()
@@ -1348,4 +1347,50 @@ fn interleaved_fractional_doses_record_the_shown_point_the_shot_took() {
     assert_eq!(report.impact.verdict, ShotVerdict::Damaged);
     assert_eq!(lost(&report, "fixture box"), 800);
     assert_eq!(report.doses[0].shown_taken, Some(1));
+}
+
+/// The game's damage model: a walk's push is a next-step input. The physics consumer must
+/// integrate it exactly once after the walk; moving the walk before physics moves the body early.
+#[test]
+fn a_walk_push_changes_position_only_in_the_next_physics_step() {
+    let mut app = recording_world(false);
+    app.insert_resource(avian3d::prelude::Gravity(Vec3::ZERO));
+    // Fixture data: a unit-mass cube away from every other collider.
+    let origin = Vec3::splat(50.0);
+    let body = app
+        .world_mut()
+        .spawn((
+            Transform::from_translation(origin),
+            RigidBody::Dynamic,
+            Collider::cuboid(1.0, 1.0, 1.0),
+            Mass(1.0),
+            NoAutoMass,
+        ))
+        .id();
+    settle(&mut app);
+    app.add_systems(
+        FixedPostUpdate,
+        (move |mut bodies: Query<Forces>, mut applied: Local<bool>| {
+            if !*applied {
+                apply_hit_impulse(&mut bodies, body, Vec3::X, origin);
+                *applied = true;
+            }
+        })
+        .in_set(SimPhase::ProjectileMarch),
+    );
+    app.update();
+    assert!(
+        app.world().get::<LinearVelocity>(body).unwrap().x > 0.0,
+        "the walk delivered its impulse"
+    );
+    assert_eq!(
+        app.world().get::<Position>(body).unwrap().0,
+        origin,
+        "completed physics cannot integrate a later walk's impulse"
+    );
+    app.update();
+    assert!(
+        app.world().get::<Position>(body).unwrap().x > origin.x,
+        "the next physics step integrates the walk's impulse"
+    );
 }

@@ -16,7 +16,6 @@ use super::protocol::{
 };
 use crate::ballistics::{FireShell, Projectile, ShellDamage, ShellRicochet, ShellTerminal, Shot};
 use crate::spec::FireMechanism;
-use crate::state::GameplaySet;
 
 /// DERIVED STARTING DEFAULT: the emission plus the next two send opportunities gives each
 /// automatic-fire visual three bounded chances without creating reliable cosmetic debt.
@@ -399,7 +398,10 @@ pub(super) fn install_server(app: &mut App) {
     app.add_observer(queue_terminal);
     app.add_observer(queue_damage);
     app.add_observer(forget_route_on_projectile_removal);
-    app.add_systems(FixedUpdate, flush_shot_transport.after(GameplaySet));
+    app.add_systems(
+        FixedPostUpdate,
+        flush_shot_transport.in_set(crate::state::SimPhase::Publish),
+    );
     app.add_systems(
         PostUpdate,
         observe_reliable_outbox.after(TransportSystems::Send),

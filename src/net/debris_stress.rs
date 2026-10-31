@@ -197,7 +197,7 @@ fn fragment_collider() -> Collider {
 pub(super) fn install_server(app: &mut App) -> Result<(), String> {
     app.add_observer(carry_wall_piece).add_systems(
         FixedPostUpdate,
-        publish_poses.after(PhysicsSystems::StepSimulation),
+        publish_poses.in_set(crate::state::SimPhase::Publish),
     );
     let Some(lever) = Lever::parse(std::env::var(LEVER).ok().as_deref())? else {
         return Ok(());

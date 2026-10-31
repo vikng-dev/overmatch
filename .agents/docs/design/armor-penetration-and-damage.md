@@ -1563,11 +1563,12 @@ intervals share both endpoint poses, so their chords agree at the boundary.
   is not a new contact-discovery start. Bodies move rather than being placed: a felled tree falls.
 
 **Implementation boundary.** This paragraph specifies the target law, not a claim that all of it
-has landed. Seconds, immutable timed crossings and removal of distance overrun are implemented.
-Lane `walk-w2` owns contact discovery and the look-back body-frame segment; until it lands,
+has landed. Seconds, immutable timed crossings, collider endpoint history, post-physics walk and
+consumer ordering, and removal of distance overrun and the per-frame march mode are implemented.
+Contact discovery still needs the look-back body-frame segment; until that cutover,
 `Envelope`, `NextStep` and `ProjectileMarchWorld::crossing_reach` remain temporary discovery
 machinery. The redesign also removes envelope baking and spawn inserts, pose prediction, tick-start
-containment certification, the Demo march mode, the flat-world terrain arm and treating an armour
+containment certification, the flat-world terrain arm and treating an armour
 collider without a ballistic volume as ground (that case becomes an error). Those deletions belong
 to the later lanes; this law does not certify the old envelope model's pose assumptions.
 

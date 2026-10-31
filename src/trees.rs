@@ -456,6 +456,10 @@ impl FallClock {
 #[derive(SystemSet, Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub(crate) struct TreeFallSet;
 
+/// The game's damage model: collider topology and falling poses are derived after all walks.
+#[derive(SystemSet, Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) struct TreeDerived;
+
 /// A fallen tree's resting pose, derived once from its state and the terrain: the piece above
 /// `cut` lies tilted by `tilt` radians from upright toward the horizontal unit direction
 /// `(dx, dz)`, turned about `seat` — the resting centre of its butt (the cut boundary), an
@@ -1163,9 +1167,8 @@ type Moved = (
 /// counts its ticks, [`advance_falls`]; a replica reads its cursor, [`follow_falls`]),
 /// [`pose_falls`], [`place_segment_colliders`], then avian's own refit of moved colliders
 /// ([`update_moved_collider_aabbs`]: their bounds and the collider trees a spatial query walks)
-/// in any frame a tree's body moved. A march runs in `FixedUpdate`, before the physics step, so
-/// the march of the first fixed tick after the derive reads the derived body; without the
-/// placement it would read the pose of the last step, one tick behind the state.
+/// in any frame a tree's body moved. The authority derives topology after the game's damage-model
+/// walk; the next physics interval starts with this derived body. A replica derives on receipt.
 pub(crate) fn derive_systems() -> ScheduleConfigs<ScheduleSystem> {
     (
         derive_state,
@@ -1462,6 +1465,7 @@ pub(crate) fn sim_plugin(app: &mut App) {
                     .in_set(TreeFallSet)
                     .run_if(not(resource_exists::<ClientReplica>)),
                 derive_systems()
+                    .in_set(TreeDerived)
                     .after(TreeFallSet)
                     .run_if(not(resource_exists::<ClientReplica>)),
             ),

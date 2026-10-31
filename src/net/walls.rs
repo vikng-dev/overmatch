@@ -34,8 +34,12 @@ impl Diffable for WallLedger {
 }
 
 pub(super) fn install_server(app: &mut App) {
-    app.add_systems(Startup, spawn_ledger)
-        .add_systems(FixedUpdate, publish_record.after(WallLawSet));
+    app.add_systems(Startup, spawn_ledger).add_systems(
+        FixedPostUpdate,
+        publish_record
+            .after(WallLawSet)
+            .in_set(crate::state::SimPhase::Publish),
+    );
 }
 
 pub(super) fn install_client(app: &mut App) {

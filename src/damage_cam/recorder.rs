@@ -277,7 +277,7 @@ pub(crate) fn plugin(app: &mut App) {
         .add_message::<RecordedShot>()
         .add_observer(keep_spent)
         .add_systems(
-            FixedUpdate,
+            FixedPostUpdate,
             (
                 pose_struck
                     .after(SimPhase::ProjectileMarch)
@@ -288,7 +288,7 @@ pub(crate) fn plugin(app: &mut App) {
                     finish_records.run_if(|recorder: Res<ShotRecorder>| recorder.open > 0),
                 )
                     .chain()
-                    .after(DamageConsequences),
+                    .in_set(SimPhase::RecordedConsequences),
             )
                 .in_set(GameplaySet)
                 .run_if(not(resource_exists::<ClientReplica>)),
@@ -376,11 +376,9 @@ fn pose_struck(world: &mut World) {
     }
 }
 
-/// The hull frame of `tank` the march's colliders were placed in this tick. The march casts
-/// against each child collider's pose, which the physics step writes from the body's pose at the
-/// step's start composed with the collider's [`ColliderTransform`]; that body pose is read back off
-/// any child collider, the body's own pose where it has none (a body whose volumes are bodies of
-/// their own).
+/// The game's damage model: the hull frame of `tank` at completed collider placement, before
+/// consequences can detach its parts. The body pose is read back from a composed child collider,
+/// or from the body itself when its volumes are bodies of their own.
 fn hull_frame(world: &mut World, tank: Entity) -> Option<HullFrame> {
     let hull = world.get::<Rig>(tank)?.hull;
     let child = world.get::<RigidBodyColliders>(tank).and_then(|colliders| {

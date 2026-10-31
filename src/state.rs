@@ -27,14 +27,17 @@ pub enum AppState {
 #[derive(SystemSet, Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct GameplaySet;
 
-/// Cross-feature fixed-step order: drive forces, weapon impulse, recoil spring, then projectile
-/// march. Each phase can change physical state read by the next one.
+/// Cross-feature fixed-step phases. Forces and recoil precede physics; collider poses and the
+/// game's damage-model walk follow it. `ballistics::sim_plugin` declares the post-physics order.
 #[derive(SystemSet, Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub(crate) enum SimPhase {
     DrivingForces,
     WeaponFire,
     Recoil,
+    ColliderPoses,
     ProjectileMarch,
+    RecordedConsequences,
+    Publish,
 }
 
 /// The device-reading player-input systems — free-look mouse-orbit, gunner aim, the Lshift view
@@ -122,9 +125,12 @@ pub fn sim_plugin(app: &mut App) {
                 SimPhase::DrivingForces,
                 SimPhase::WeaponFire,
                 SimPhase::Recoil,
-                SimPhase::ProjectileMarch,
             )
                 .chain(),
+        )
+        .configure_sets(
+            FixedPostUpdate,
+            GameplaySet.run_if(in_state(AppState::Playing)),
         )
         .configure_sets(PostUpdate, GameplaySet.run_if(in_state(AppState::Playing)))
         .configure_sets(

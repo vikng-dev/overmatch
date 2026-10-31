@@ -924,11 +924,16 @@ pub(crate) struct MarchProbe {
     pub(crate) reached: Vec<Vec<Option<Entity>>>,
 }
 
-/// Mounts [`probe_march`] in `FixedUpdate`, the march's schedule, with an empty [`MarchProbe`].
+/// The game's damage model: mount [`probe_march`] after completed collider placement, beside
+/// the production walk, with an empty [`MarchProbe`].
 #[cfg(test)]
 pub(crate) fn mount_march_probe(app: &mut App) {
-    app.init_resource::<MarchProbe>()
-        .add_systems(FixedUpdate, probe_march);
+    app.init_resource::<MarchProbe>().add_systems(
+        FixedPostUpdate,
+        probe_march
+            .after(SimPhase::ColliderPoses)
+            .before(SimPhase::ProjectileMarch),
+    );
 }
 
 /// Casts every [`MarchProbe`] ray through the march's query against the world as a march in the
@@ -954,26 +959,6 @@ fn probe_march(world: ProjectileMarchWorld, mut probe: ResMut<MarchProbe>) {
 /// for inspection — instead of despawning. The game despawns (default); the sandbox opts in.
 #[derive(Resource, Default)]
 pub struct RetainSpentShells(pub bool);
-
-/// How the shell march is integrated. The game uses `Real`; the sandbox can toggle to `Demo`.
-#[derive(Resource, Clone, Copy, PartialEq, Eq, Default)]
-pub enum MarchMode {
-    /// On the fixed server-rate step (`Time<Fixed>`) — the true simulation cadence, so slow-motion
-    /// shows the actual discrete hops.
-    #[default]
-    Real,
-    /// Per-frame on virtual time (`Time<Virtual>`) — smooth continuous motion for demoing
-    /// (frame-rate dependent; the velocity, hence penetration, is unchanged).
-    Demo,
-}
-
-fn march_real(mode: Res<MarchMode>) -> bool {
-    *mode == MarchMode::Real
-}
-
-fn march_demo(mode: Res<MarchMode>) -> bool {
-    *mode == MarchMode::Demo
-}
 
 /// Firing tank and weapon slot. Included in the initial shell bundle for self-exclusion and server
 /// fire attribution.
@@ -1917,30 +1902,51 @@ pub fn sim_plugin(app: &mut App) {
     // The game's damage model validates the shared crew HP pool and hard-pool energy rate at startup.
     box_classes::BoxClasses::shipped();
     energy_dose::joules_per_hp();
-    app.init_resource::<motion::ColliderMotion>()
-        .add_systems(
-            FixedPostUpdate,
-            motion::snapshot.after(avian3d::prelude::PhysicsSystems::Writeback),
+    app.configure_sets(
+        FixedPostUpdate,
+        (
+            avian3d::prelude::PhysicsSystems::Writeback,
+            SimPhase::ColliderPoses,
+            SimPhase::ProjectileMarch,
+            DamageConsequences,
+            SimPhase::RecordedConsequences,
+            crate::buildings::breakage::WallLawSet,
+            crate::trees::TreeFallSet,
+            crate::trees::TreeDerived,
+            SimPhase::Publish,
         )
-        .init_resource::<RetainSpentShells>()
-        .init_resource::<MarchMode>()
-        .add_observer(on_fire_shell)
-        .add_observer(on_impact)
-        // The same march, integrated on whichever clock the mode selects: `Real` on the fixed
-        // server step (`Res<Time>` is `Time<Fixed>` here), `Demo` per-frame on virtual time
-        // (`Res<Time>` is `Time<Virtual>` here). One reads as the true sim, the other as smooth.
-        .add_systems(
-            FixedUpdate,
-            integrate_projectiles
-                .in_set(GameplaySet)
-                .in_set(SimPhase::ProjectileMarch)
-                .before(DamageConsequences)
-                .run_if(march_real),
+            .chain(),
+    )
+    .init_resource::<motion::ColliderMotion>()
+    .add_systems(
+        FixedPostUpdate,
+        motion::seed_births
+            .after(avian3d::prelude::PhysicsSystems::Prepare)
+            .before(avian3d::prelude::PhysicsSystems::StepSimulation),
+    )
+    .add_systems(
+        FixedPostUpdate,
+        (
+            motion::place_children,
+            avian3d::collider_tree::update_moved_collider_aabbs::<Collider>
+                .run_if(resource_exists::<avian3d::collider_tree::ColliderTrees>),
+            motion::snapshot,
         )
-        .add_systems(
-            Update,
-            integrate_projectiles.in_set(GameplaySet).run_if(march_demo),
-        );
+            .chain()
+            .in_set(SimPhase::ColliderPoses),
+    )
+    .init_resource::<RetainSpentShells>()
+    .add_observer(on_fire_shell)
+    .add_observer(on_impact)
+    // The game's damage model walks the completed physics interval. Its impulses affect
+    // the next physics step; all consequences and publications follow in the phase chain.
+    .add_systems(
+        FixedPostUpdate,
+        integrate_projectiles
+            .in_set(GameplaySet)
+            .in_set(SimPhase::ProjectileMarch)
+            .before(DamageConsequences),
+    );
 }
 
 /// Spawn a shell from `FireShell`, using fixed-tick catch-up when requested.
@@ -2437,9 +2443,8 @@ impl ProjectileMarchWorld<'_, '_> {
     /// start, which certification ([`resolve::certified`]) reads as a start inside it and the walk
     /// as a crossing of its exit: a collision or a blast's push in the next step; a body placed
     /// without being integrated there (a loose piece a deposit launches after this march, a
-    /// falling trunk's piece moved a tick along its fall by `trees::derive_systems`, the colliders
-    /// of a static body no step integrates); a frame of the sandbox's per-frame march
-    /// ([`MarchMode::Demo`]) spanning other than one physics step.
+    /// falling trunk's piece moved a tick along its fall by `trees::derive_systems`, or the colliders
+    /// of a static body no step integrates).
     fn crossing_reach(
         &self,
         origin: Vec3,
@@ -5258,8 +5263,8 @@ mod march_tests {
         .init_resource::<RetainSpentShells>()
         .init_resource::<ImpactLog>()
         .add_observer(capture_impact)
-        // The real march, run every Update (the `march_demo`/`march_real` run-if only selects the
-        // clock; here `Res<Time>` is the virtual clock the manual duration steps).
+        // The game's damage-model march on a fixture-controlled clock: each update advances
+        // the manual virtual duration independently of the production schedule.
         .add_systems(Update, integrate_projectiles);
 
         if view {

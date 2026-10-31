@@ -1586,11 +1586,11 @@ pub(crate) fn sim_plugin(app: &mut App) {
         .add_observer(set_off)
         .add_observer(queue_dust)
         .configure_sets(
-            FixedUpdate,
+            FixedPostUpdate,
             WallLawSet.after(crate::state::SimPhase::ProjectileMarch),
         )
         .add_systems(
-            FixedUpdate,
+            FixedPostUpdate,
             (apply_deposits, refit_systems())
                 .chain()
                 .in_set(WallLawSet)

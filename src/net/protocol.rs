@@ -18,9 +18,7 @@ use serde::{Deserialize, Serialize};
 use super::disclosure::{NetTankStatus, apply_net_tank_status};
 use crate::ballistics::{ComponentHealth, Verdict};
 use crate::command::{DeviceClaim, TankCommand};
-use crate::damage::{
-    CrewStation, Crewman, DamageConsequences, Dead, LaunchedTurret, PendingSwap, TankVolumes,
-};
+use crate::damage::{CrewStation, Crewman, Dead, LaunchedTurret, PendingSwap, TankVolumes};
 use crate::damage_cam::wire::ShotExplanation;
 use crate::fingerprint::{fingerprint_field, fnv1a_64};
 use crate::state::GameplaySet;
@@ -1207,19 +1205,15 @@ pub(crate) fn plugin(app: &mut App) {
             publish_servo_angles,
             publish_net_crew,
             publish_launched_turret_pose,
-        ),
+        )
+            .in_set(crate::state::SimPhase::Publish),
     );
     app.add_systems(
         FixedUpdate,
         (apply_servo_angles, apply_launched_turret_pose).in_set(GameplaySet),
     );
     // Client: realize owner-private crew details. Public knockout state is applied separately.
-    app.add_systems(
-        FixedUpdate,
-        apply_net_crew
-            .in_set(GameplaySet)
-            .before(DamageConsequences),
-    );
+    app.add_systems(FixedUpdate, apply_net_crew.in_set(GameplaySet));
     // Realized once a frame, after replication has received the status and before the device is
     // claimed and read: every tick of the frame, and the device, see the knockout from the frame it
     // arrives in.

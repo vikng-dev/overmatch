@@ -70,8 +70,12 @@ struct Applied {
 }
 
 pub(super) fn install_server(app: &mut App) {
-    app.add_systems(Startup, spawn_ledger)
-        .add_systems(FixedPostUpdate, publish_falls.after(TreeFallSet));
+    app.add_systems(Startup, spawn_ledger).add_systems(
+        FixedPostUpdate,
+        publish_falls
+            .after(TreeFallSet)
+            .in_set(crate::state::SimPhase::Publish),
+    );
 }
 
 pub(super) fn install_client(app: &mut App) {
@@ -250,7 +254,7 @@ mod tests {
     /// The trees' sim half on the network's physics — avian as `net::physics` mounts it, and
     /// lightyear's after-loop child collider update — with the fixture grid and `trees` fixture
     /// trees on it, one per ordinal, each yawed 0.7 rad (fixture data: the placement composes a
-    /// turned root), and the march probe in `FixedUpdate`. A replica adds the ledger's apply and
+    /// turned root), and the game's damage-model march probe after physics. A replica adds the ledger's apply and
     /// its marker; the authority is the composition without them.
     fn composed(replica: bool, trees: u16) -> (App, Vec<Entity>) {
         let mut app = App::new();

@@ -303,7 +303,7 @@ pub(crate) fn knockout_from_counts(
     }
 }
 
-/// The damage-consequence chain (cookoff → crew death → tank-death label → turret launch). Labeled
+/// The game's damage-model consequence chain (cookoff → crew knockout → tank label → turret launch). Labeled
 /// so any producer of this tick's `ComponentHealth` can order itself BEFORE it: the authority's local
 /// deposition (`ballistics`, same-frame in `GameplaySet`) lands before the consequences read HP. On
 /// the net client this whole chain is gated off. Owner-private `NetCrew` realizes detail, while
@@ -334,7 +334,7 @@ pub fn plugin(app: &mut App) {
             .run_if(not(resource_exists::<crate::ClientReplica>)),
     )
     .add_systems(
-        FixedUpdate,
+        FixedPostUpdate,
         (
             tick_swaps,
             process_cookoffs,

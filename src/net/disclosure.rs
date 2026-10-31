@@ -75,8 +75,10 @@ impl VisibilityFilter for CombatDisclosure {
 /// Installed with the server's player and bot spawn constructors, which attach both the filter and
 /// public status in the initial replicated bundle.
 pub(super) fn install_server(app: &mut App) {
-    app.add_visibility_filter::<CombatDisclosure>()
-        .add_systems(FixedPostUpdate, publish_net_tank_status);
+    app.add_visibility_filter::<CombatDisclosure>().add_systems(
+        FixedPostUpdate,
+        publish_net_tank_status.in_set(crate::state::SimPhase::Publish),
+    );
 }
 
 fn publish_net_tank_status(

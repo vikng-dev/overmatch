@@ -28,7 +28,6 @@ use bevy::prelude::*;
 use bevy::time::Virtual;
 use bevy_egui::{EguiContexts, EguiPlugin, EguiPrimaryContextPass, egui};
 
-use crate::ballistics::MarchMode;
 use crate::damage_cam::pen_cam::game::XRay;
 use crate::tank::Weapon;
 
@@ -54,7 +53,6 @@ struct Write<'w> {
     xray: ResMut<'w, XRay>,
     overlay: ResMut<'w, ArmourOverlay>,
     shot: ResMut<'w, ShotParams>,
-    march: ResMut<'w, MarchMode>,
     speed: ResMut<'w, SpeedIndex>,
     time: ResMut<'w, Time<Virtual>>,
     clear: ResMut<'w, ClearRequested>,
@@ -94,7 +92,6 @@ fn panel(mut contexts: EguiContexts, mut w: Write, gun: Query<&Weapon, With<Rang
     let mut look = w.xray.on;
     let mut overlay = *w.overlay;
     let mut shot = *w.shot;
-    let mut march_real = *w.march == MarchMode::Real;
     let mut speed_idx = w.speed.0;
     let mut paused = w.time.is_paused();
     let time_scale = w.time.relative_speed();
@@ -121,15 +118,11 @@ fn panel(mut contexts: EguiContexts, mut w: Write, gun: Query<&Weapon, With<Rang
 
                 egui::CollapsingHeader::new("Time")
                     .default_open(false)
-                    .show(ui, |ui| {
-                        time_section(ui, &mut paused, &mut speed_idx, &mut march_real)
-                    });
+                    .show(ui, |ui| time_section(ui, &mut paused, &mut speed_idx));
 
                 egui::CollapsingHeader::new("Telemetry")
                     .default_open(true)
-                    .show(ui, |ui| {
-                        telemetry_section(ui, time_scale, paused, march_real)
-                    });
+                    .show(ui, |ui| telemetry_section(ui, time_scale, paused));
 
                 egui::CollapsingHeader::new("Scene")
                     .default_open(false)
@@ -158,14 +151,6 @@ fn panel(mut contexts: EguiContexts, mut w: Write, gun: Query<&Weapon, With<Rang
     }
     if shot != *w.shot {
         *w.shot = shot;
-    }
-    let want_march = if march_real {
-        MarchMode::Real
-    } else {
-        MarchMode::Demo
-    };
-    if want_march != *w.march {
-        *w.march = want_march;
     }
     // The slow-mo ladder: changing the index resumes and re-scales virtual time (mirrors the `Up`/
     // `Down` `time_controls` path). Only touch the clock on a real change.
@@ -251,14 +236,9 @@ fn shot_section(
     }
 }
 
-/// The sim-clock controls: freeze, the slow-mo ladder, and the march-cadence A/B — the panel homes
-/// for `Space`, `Up`/`Down`, and `T`.
-fn time_section(
-    ui: &mut egui::Ui,
-    paused: &mut bool,
-    speed_idx: &mut usize,
-    march_real: &mut bool,
-) {
+/// The sim-clock controls: freeze and the slow-mo ladder, the panel homes for `Space` and
+/// `Up`/`Down`. The game's damage-model march uses the physics tick in every composition.
+fn time_section(ui: &mut egui::Ui, paused: &mut bool, speed_idx: &mut usize) {
     ui.checkbox(paused, "freeze");
     ui.separator();
     ui.label("slow-mo");
@@ -274,26 +254,14 @@ fn time_section(
             }
         }
     });
-    ui.separator();
-    ui.label("march cadence");
-    ui.radio_value(march_real, false, MARCH_DEMO);
-    ui.radio_value(march_real, true, MARCH_REAL);
 }
 
-/// The march cadences' names: [`MarchMode::Demo`] marches each frame, [`MarchMode::Real`] each
-/// fixed tick, as the server does.
-const MARCH_DEMO: &str = "per frame";
-const MARCH_REAL: &str = "per tick";
-
-/// What the picture cannot show: the clock's rate and the march cadence. Monospace so the
-/// columns line up.
-fn telemetry_section(ui: &mut egui::Ui, time_scale: f32, paused: bool, march_real: bool) {
+/// The clock's rate, in a fixed-width readout.
+fn telemetry_section(ui: &mut egui::Ui, time_scale: f32, paused: bool) {
     let rate = if paused {
         "paused".to_string()
     } else {
         format!("{time_scale:.3}x")
     };
-    let march = if march_real { MARCH_REAL } else { MARCH_DEMO };
     ui.monospace(format!("time     {rate}"));
-    ui.monospace(format!("march    {march}"));
 }
