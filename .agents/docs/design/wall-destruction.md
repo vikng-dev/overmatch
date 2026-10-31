@@ -390,7 +390,6 @@ The body gets back `blow − J_launch` at the contact point, so a body that brea
 Momentum is conserved by construction, and no energy is created (**DERIVED**: with `m_red = m_b m_f / (m_b + m_f)`, the body's loss exceeds the group's gain by `½ m_red v_n²`, the plastic loss the fracture work is drawn from).
 The launch reads the free mass, never the hinge mass, which grows without bound near the hinge and would create energy.
 **DERIVED limit check:** at fixed blow, a source mass tending to zero gives the field's whole blow in both demand and launch; an infinite source mass gives a vanishing share.
-The study's test wording that uses a very large source mass for the field limit contradicts this formula; the tests follow the formula.
 
 Simultaneous departures connected by shared source bodies in one contact deposit share a kinetic budget across buildings; disjoint contacts remain independent.
 Each point first takes its free-mass share. Those impulses keep their relative sizes, then one scale caps their combined exchange at the common velocity along that combined impulse.

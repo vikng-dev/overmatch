@@ -567,7 +567,8 @@ pub(crate) enum Origin {
     /// mass to share with what it frees.
     Field,
     /// A body in contact, by its entity: it shares its blow's momentum with whatever the blow
-    /// frees. `mass` is its effective mass along the contact normal at the load point, kg.
+    /// frees. `mass` is the body's effective mass along the contact normal at the combined
+    /// blow's centroid, kg, shared by that contact's points ([`crate::contact_transfer`]).
     Body {
         body: Entity,
         mass: f32,
