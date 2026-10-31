@@ -1,7 +1,8 @@
 //! The marker-driven track model: reads the sharp sources of truth out of the glb (the `Pin_*`
 //! marker empties, the `Link_Box` shoe volume, the `Sprocket_*` / `Idler_*` rig meshes, and the
 //! road-wheel mesh radii) and derives the geometry its consumers render and simulate
-//! ([`super::rig_geom`] assembles it into the sandbox's rig; [`crate::track_sandbox::suspension_viz`] draws it).
+//! ([`super::rig_geom`] assembles it into the running gear the game's startup extraction, the
+//! track sandbox and the development measurement tool all build from).
 //! This is the "new model" — nothing here reads the RON's geometry fields (pitch, thickness,
 //! plane_x, width, sprocket/idler centre, wheel_radius); those all come from the model now. Only
 //! `mass` still comes from the spec, and it is passed IN as a scalar so this module cannot reach
@@ -17,8 +18,7 @@
 //! under scaled ancestors (`Link` carries 0.808, the wheels 4.34), so a position taken without the
 //! scale chain is simply the wrong place. What that composed transform yields is both datums this
 //! module needs — a node's authored ORIGIN (the axle of every body of revolution: sprocket, idler,
-//! road wheel) and its vertices in world space (which answer sizes: radii, the shoe's faces). When
-//! the model graduates into the game this measurement moves into the bake.
+//! road wheel) and its vertices in world space (which answer sizes: radii, the shoe's faces).
 //!
 //! **The width rule.** The geometric model is purely 2-D in the SIDE PLANE `(z, y)` — circles,
 //! routes, droop, perimeter, the link window all ignore the lateral axis. Width enters in exactly
@@ -226,16 +226,16 @@ impl DerivedModel {
     }
 }
 
-/// Abort the sandbox because the glb cannot answer the marker read.
+/// Refuse the glb because it cannot answer the marker read.
 ///
-/// **Why a panic, in a file that otherwise only warns.** This is `bin/track_sandbox`, a dev tool
-/// whose entire job is to MEASURE the Tiger — not the shipped client, where refusing to start would
-/// cost a player a session. The alternative (run on substituted geometry) is what shipped before,
-/// and it failed in the worst possible way: the tool kept working, drew a rig, printed numbers, and
-/// they were a different tank's. A tool that refuses to start costs a re-export; a tool that lies
-/// costs a day of chasing a suspension model that was never wrong. So the failure is loud, it is at
-/// rig-build time — before a single frame is drawn — and it is unconditional. It also matches how
-/// [`crate::bake`] already answers an unreadable glb.
+/// **Why a panic, in a file that otherwise only warns.** The running gear is shipped data read
+/// during startup extraction of the sim artifact (the bake's track colliders and the game's track
+/// gear), by the track sandbox and by the measurement tool: a gap is refused before play in every
+/// one of them. The alternative (run on substituted geometry) failed in the worst possible way: the
+/// tool kept working, drew a rig, printed numbers, and they were a different tank's. Refusing costs
+/// a re-export; running on a substitute costs a day of chasing a suspension model that was never
+/// wrong. So the failure is loud, it is at rig-build time — before a single frame is drawn — and it
+/// is unconditional, as [`crate::bake`] answers an unreadable glb.
 ///
 /// **One message, everything in it.** The panic string is the whole diagnosis: every missing node at
 /// once (never the first one per rebuild cycle — that is what [`MissingNodes`] accumulates for), the
@@ -247,9 +247,9 @@ fn refuse(gap: &ModelGap, glb_path: &Path) -> ! {
     panic!(
         "track model: {} could not answer the marker read — {gap}.\n\
          \n\
-         The suspension sandbox measures the track geometry (pitch, shoe faces, lateral plane, \
-         sprocket/idler centres, wheel tread) ONLY from these glb nodes: empties [{}], meshes [{}]. \
-         There is NO fallback to the RON's authored geometry: substituting it once let this tool \
+         The running gear's geometry (pitch, shoe faces, lateral plane, sprocket/idler centres, \
+         wheel tread) is measured ONLY from these glb nodes: empties [{}], meshes [{}]. \
+         There is NO fallback to the RON's authored geometry: substituting it once let the sandbox \
          measure a different tank while it looked like it was working, so a gap is fatal by policy.\n\
          \n\
          Fix it one of two ways: re-export {} with the node(s) named above restored under exactly \
