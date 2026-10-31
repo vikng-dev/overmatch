@@ -34,22 +34,30 @@ pub trait TerrainOracle {
     /// negative = clearance.
     fn depth_along(&self, station: Vec3, out: Vec3, reach: f32) -> f32;
 
-    /// [`Self::depth_along`] with the body whose surface the first hit lies on. The terrain
-    /// field is no body, so an oracle of terrain alone answers `None`.
+    /// [`Self::depth_along`] with the collider whose surface the first hit lies on. The terrain
+    /// field is no collider, so an oracle of terrain alone answers `None`.
     fn probe(&self, station: Vec3, out: Vec3, reach: f32) -> Probe {
         Probe {
             depth: self.depth_along(station, out, reach),
-            body: None,
+            collider: None,
         }
+    }
+
+    /// The world velocity (m/s) of `collider`'s surface at `point`, for a collider this oracle's
+    /// [`Self::probe`] named. The terrain field never moves; an oracle that names no collider is
+    /// never asked.
+    fn surface_velocity(&self, collider: Entity, point: Vec3) -> Vec3 {
+        let _ = (collider, point);
+        Vec3::ZERO
     }
 }
 
 /// One probe's answer: the directional depth ([`TerrainOracle::depth_along`]'s semantics) and
-/// the rigid body hit first, `None` where the first hit is the terrain field.
+/// the collider hit first, `None` where the first hit is the terrain field.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Probe {
     pub depth: f32,
-    pub body: Option<Entity>,
+    pub collider: Option<Entity>,
 }
 
 /// Edge rounding radius (m) of the block field: every authored box is evaluated as a rounded

@@ -35,7 +35,7 @@ use crate::track::forces::{
     ForceParams, SideInput, SideReport, SideState, contact_side, phase_decompose,
 };
 use crate::track::oracle::{BlockField, TerrainOracle};
-use crate::track::rubble::{RubbleQuery, apply_reactions};
+use crate::track::rubble::{PieceData, RubbleBodies, RubbleQuery, apply_pushes, piece_impulses};
 use crate::track::transmission::{self, TransmissionInput, TransmissionParams};
 use crate::track::wheels::{
     WHEEL_LIFT_RISE_OMEGA, WheelParams, wheel_lift_step, wheel_lift_target,
@@ -130,9 +130,9 @@ pub(super) fn apply_belt_support_field(
     ),
     rig: (Res<RigGeom>, Res<RigSpec>, Res<EnvelopeLaw>),
     rubble: RubbleQuery,
-    // Every body but the hull: the reactions the rubble takes.
+    // Every body but the hull: the impulses the rubble takes.
     (mut bodies, mut touches): (
-        Query<(Forces, &avian3d::prelude::RigidBody), Without<Hull>>,
+        Query<PieceData, Without<Hull>>,
         ResMut<super::rubble::RubbleTouches>,
     ),
 ) {
@@ -154,7 +154,13 @@ pub(super) fn apply_belt_support_field(
 
     let params = force_params(&geom, &rig_spec, &envelope);
     let near = rubble.near(hull_pos.0, super::rubble::probe_sphere(&geom, &envelope));
-    let oracle = super::rubble::oracle(&field, &rubble, &near);
+    let mut pieces = RubbleBodies::gather(
+        &rubble,
+        &near,
+        avian3d::prelude::Friction::new(params.mu),
+        &bodies,
+    );
+    let oracle = super::rubble::oracle(&field, &rubble, &near, &pieces);
 
     // Phase 1 — both sides' contact passes at their pre-tick belt speeds (transmission-design
     // §2 scheduling: the joint drivetrain needs both reactions before either belt
@@ -230,7 +236,7 @@ pub(super) fn apply_belt_support_field(
     };
 
     // Phase 3 — apply forces in the same per-side report order as ever, commit the state. A
-    // force that pressed on a dynamic body goes back on it, reversed, in the same tick.
+    // dynamic piece under a contact takes its clamped impulse in the same tick.
     touches.0.clear();
     for (si, report) in reports.into_iter().enumerate() {
         let side = Side::ALL[si];
@@ -238,21 +244,23 @@ pub(super) fn apply_belt_support_field(
         for app in &report.apps {
             forces.apply_force_at_point(app.force, app.point);
         }
-        for reaction in apply_reactions(&report.apps, &mut bodies) {
+        let pushes = piece_impulses(&mut pieces, &report.contacts, dt);
+        apply_pushes(&pushes, &mut bodies);
+        for push in &pushes {
             touches.0.push(super::rubble::Touch {
-                point: reaction.point,
-                body: reaction.body,
+                point: push.point,
+                body: push.body,
                 dynamic: true,
-                reaction: reaction.force,
+                reaction: push.impulse / dt,
             });
         }
-        for app in &report.apps {
-            if let Some(body) = app.body
-                && !bodies.get(body).is_ok_and(|(_, rb)| rb.is_dynamic())
+        for c in &report.contacts {
+            if let Some(collider) = c.collider
+                && !pieces.is_dynamic(collider)
             {
                 touches.0.push(super::rubble::Touch {
-                    point: app.point,
-                    body,
+                    point: c.point,
+                    body: rubble.body_of(collider),
                     dynamic: false,
                     reaction: Vec3::ZERO,
                 });
@@ -422,7 +430,8 @@ pub(super) fn articulate_wheels_field(
         hull.translation(),
         super::rubble::probe_sphere(&geom, &envelope),
     );
-    let oracle = super::rubble::oracle(&field, &rubble, &near);
+    let still = RubbleBodies::default();
+    let oracle = super::rubble::oracle(&field, &rubble, &near, &still);
     let down = affine.transform_vector3(Vec3::NEG_Y).normalize_or_zero();
     // Per side: the lateral stations are the measured shoe columns, signed per-side.
     let params = Side::ALL.map(|side| WheelParams {
@@ -575,7 +584,8 @@ pub(super) fn conform_belts_field(
         hull.translation(),
         super::rubble::probe_sphere(&geom, &envelope),
     );
-    let oracle = super::rubble::oracle(&field, &rubble, &near);
+    let still = RubbleBodies::default();
+    let oracle = super::rubble::oracle(&field, &rubble, &near, &still);
     let out = wrap::step(&input, &oracle, &mut memory.states);
 
     for side in Side::ALL {
@@ -641,7 +651,8 @@ pub(super) fn draw_sample_points(
         hull.translation(),
         super::rubble::probe_sphere(&geom, &envelope),
     );
-    let oracle = super::rubble::oracle(&field, &rubble, &near);
+    let still = RubbleBodies::default();
+    let oracle = super::rubble::oracle(&field, &rubble, &near, &still);
     // Hull lateral axis: column offsets are hull-x measurements (per-side signed shoe faces).
     let lat_axis = affine.transform_vector3(Vec3::X);
     for side in Side::ALL {
@@ -697,7 +708,7 @@ pub(super) fn draw_sample_points(
                 for s in [ca + face_a, (ca + cb) / 2.0 + face_m, cb + face_b] {
                     // Orange into the terrain field, red into a body, grey when clear.
                     let probe = oracle.probe(s, out, CONTACT_PROBE);
-                    let color = match (probe.depth > 0.0, probe.body) {
+                    let color = match (probe.depth > 0.0, probe.collider) {
                         (false, _) => CAST_COLOR,
                         (true, None) => TRACTION_FORCE_COLOR,
                         (true, Some(_)) => Color::srgb(1.0, 0.2, 0.2),

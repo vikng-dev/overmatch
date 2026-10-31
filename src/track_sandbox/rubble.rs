@@ -4,9 +4,9 @@
 //! parks the rig facing the pile; the harness reaches it with `x=`/`z=`.
 //!
 //! Gizmos, always on (they draw only where a contact presses on a body): a dot on the contact,
-//! cyan on a static body and red on a dynamic one, with a line to the body it pressed; a dynamic
-//! body's reaction draws as an orange arrow at [`FORCE_VIZ_SCALE`]. The casts layer (`9`) colours
-//! each probe that lands in a body red.
+//! cyan on a static body and red on a dynamic one, with a line to the body it pressed; the impulse
+//! a dynamic body took draws as an orange arrow of its mean force over the tick at
+//! [`FORCE_VIZ_SCALE`]. The casts layer (`9`) colours each probe that lands in a body red.
 
 use avian3d::prelude::{ColliderDensity, Position, RigidBody, Rotation};
 use bevy::prelude::*;
@@ -14,7 +14,7 @@ use bevy::prelude::*;
 use crate::buildings::BuildingLibrary;
 use crate::buildings::breakage::{BuildingChunk, chunk_collider, piece_layers};
 use crate::debris::DebrisPiece;
-use crate::track::rubble::{RubbleOracle, RubbleQuery, probe_radius};
+use crate::track::rubble::{RubbleBodies, RubbleOracle, RubbleQuery, probe_radius};
 
 use super::belt::{EnvelopeLaw, TerrainField};
 use super::{CONTACT_PROBE, FORCE_VIZ_SCALE, RigGeom, Side, belt_loop};
@@ -40,9 +40,10 @@ pub(super) struct RubbleTouches(pub(super) Vec<Touch>);
 pub(super) struct Touch {
     pub(super) point: Vec3,
     pub(super) body: Entity,
-    /// Whether the body is dynamic, so took the reaction.
+    /// Whether the body is dynamic, so took an impulse.
     pub(super) dynamic: bool,
-    /// The reaction the body took (N, world), zero for a static body.
+    /// The impulse the body took over the tick, as a mean force (N, world); zero for a static
+    /// body.
     pub(super) reaction: Vec3,
 }
 
@@ -73,16 +74,19 @@ pub(super) fn probe_sphere(geom: &RigGeom, envelope: &EnvelopeLaw) -> f32 {
     )
 }
 
-/// The rig's oracle this tick: the course field with the rubble `near` the hull folded on.
+/// The rig's oracle this tick: the course field with the rubble `near` the hull folded on, the
+/// pieces' velocities read from `bodies`.
 pub(super) fn oracle<'a, 'w, 's>(
     field: &'a TerrainField,
     rubble: &'a RubbleQuery<'w, 's>,
     near: &'a [Entity],
+    bodies: &'a RubbleBodies,
 ) -> RubbleOracle<'a, 'w, 's, crate::track::oracle::BlockField> {
     RubbleOracle {
         ground: &field.0,
         rubble,
         near,
+        bodies,
     }
 }
 

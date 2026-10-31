@@ -317,9 +317,9 @@ pub struct SideInput<'a> {
 pub struct ForceApp {
     pub force: Vec3,
     pub point: Vec3,
-    /// The body the contact presses on, `None` for the terrain field: the caller applies
-    /// `-force` at `point` to it in the same tick when it is dynamic (equal and opposite).
-    pub body: Option<Entity>,
+    /// The collider the contact presses on, `None` for the terrain field. What the collider's
+    /// body takes back is the caller's (`track::rubble::piece_impulses`), never `-force`.
+    pub collider: Option<Entity>,
 }
 
 /// One contact's telemetry (viz / traces). `load` is the ACTUAL damped load applied this
@@ -338,8 +338,12 @@ pub struct BeltContact {
     pub f_lat: f32,
     pub normal: Vec3,
     pub traction: Vec3,
-    /// The body under the contact, `None` for the terrain field.
-    pub body: Option<Entity>,
+    /// The belt surface's world velocity at the contact (m/s): the hull's velocity there less
+    /// the pre-tick belt speed along the drive direction (the hull's velocity alone where the
+    /// contact has no tangent plane).
+    pub belt_velocity: Vec3,
+    /// The collider under the contact, `None` for the terrain field.
+    pub collider: Option<Entity>,
 }
 
 /// What one side's tick produced.
@@ -562,8 +566,10 @@ struct ColumnContact {
     slip_lat: f32,
     /// Flat material-element index (`link * 3 + column`) — the per-element grip key.
     element: usize,
-    /// The body of the column's deepest probe, `None` for the terrain field.
-    body: Option<Entity>,
+    /// [`BeltContact::belt_velocity`].
+    belt_velocity: Vec3,
+    /// The collider of the column's deepest probe, `None` for the terrain field.
+    collider: Option<Entity>,
     #[cfg(feature = "bitprobe")]
     probe_index: usize,
 }
@@ -776,28 +782,31 @@ fn collect_column_contacts<O: TerrainOracle>(
             let t_c = sample_halves(x_c, len, travel);
             let p = ca + axis * x_c + out * (params.face_offset + t_c - pen_c);
 
-            // The column's resultant presses on the body of its deepest probe (the first such
-            // probe in a/m/b order): one body per column, the one carrying most of the profile.
-            let body = probes
+            // The column's resultant presses on the collider of its deepest probe (the first
+            // such probe in a/m/b order): one collider per column, the one carrying most of the
+            // profile.
+            let collider = probes
                 .iter()
-                .fold((f32::NEG_INFINITY, None), |(deepest, body), probe| {
+                .fold((f32::NEG_INFINITY, None), |(deepest, collider), probe| {
                     if probe.depth > deepest {
-                        (probe.depth, probe.body)
+                        (probe.depth, probe.collider)
                     } else {
-                        (deepest, body)
+                        (deepest, collider)
                     }
                 })
                 .1;
 
             // Support: penalty spring along the belt's own inward normal, at the column's
             // share of the per-metre coefficients. Damping and slip read the hull's velocity
-            // alone, on a body as on the ground: a body's own motion enters only through its
-            // pose. Fed back through the slip, a light piece's velocity drives the grip
-            // damper explicitly past its stability bound (DERIVED: c·dt/m ≈ 6 for one 10 kN
-            // column on a 27 kg brick chunk at 64 Hz, against 2), while its own ground
-            // contact, solved implicitly by avian, holds it.
+            // relative to the surface it presses: a piece's own motion enters the slip, which
+            // is stable because the piece takes back only a clamped impulse
+            // (`track::rubble::piece_impulses`), never the explicit reaction.
             let normal = -out;
-            let vel = vel_at(p);
+            let hull_vel = vel_at(p);
+            let vel = match collider {
+                Some(collider) => hull_vel - oracle.surface_velocity(collider, p),
+                None => hull_vel,
+            };
             let engage = (pen_max / params.engage_depth).clamp(0.0, 1.0);
             let load_elastic = weight * params.support_stiffness_per_m * area * engage;
             let load = weight
@@ -822,6 +831,7 @@ fn collect_column_contacts<O: TerrainOracle>(
 
             let (long_dir, lat_dir, has_plane, slip_long, slip_lat) =
                 contact_frame(affine, tan2, normal, vel, belt_speed);
+            let belt_velocity = hull_vel - long_dir * belt_speed;
 
             cols.push(ColumnContact {
                 p,
@@ -834,7 +844,8 @@ fn collect_column_contacts<O: TerrainOracle>(
                 slip_long,
                 slip_lat,
                 element: material(i) * 3 + ci,
-                body,
+                belt_velocity,
+                collider,
                 #[cfg(feature = "bitprobe")]
                 probe_index,
             });
@@ -993,7 +1004,7 @@ fn emit_contact_forces(
         report.apps.push(ForceApp {
             force: c.normal * c.load,
             point: c.p,
-            body: c.body,
+            collider: c.collider,
         });
 
         let mut f_long = 0.0;
@@ -1017,7 +1028,7 @@ fn emit_contact_forces(
             report.apps.push(ForceApp {
                 force: traction,
                 point: c.p,
-                body: c.body,
+                collider: c.collider,
             });
             belt_reaction += f_long;
         }
@@ -1032,7 +1043,8 @@ fn emit_contact_forces(
             f_lat,
             normal: c.normal,
             traction,
-            body: c.body,
+            belt_velocity: c.belt_velocity,
+            collider: c.collider,
         });
         #[cfg(feature = "bitprobe")]
         {
