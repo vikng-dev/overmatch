@@ -66,8 +66,9 @@ every local run held the machine lock. Labels: MEASURED, DERIVED, ASSUMED.
 
      On one vCPU, keep one compute thread.
 4. **The measured client cannot stay on a debris-loaded Edgegap server.**
-   - It timed out and exited at every armed level but one (2 vCPU, 12:2, default threads),
-     on both sizes.
+   - It exited early at every armed level but one (2 vCPU, 12:2, default threads), on both
+     sizes. Not a timeout: each of the 13 early exits is bevy_render quitting on a wgpu
+     validation error a few frames after a bot respawn wave (#192; side findings).
    - The server curves in (1) therefore come from client-less deployments: the simulation alone,
      with no replication send. Send to one link was 0.1–1.8 ms on the M4 (off to ~5000 live)
      and ~0.4 ms on Edgegap at zero debris.
@@ -183,9 +184,9 @@ Each directory has `conditions.tsv`, the per-condition `*.server.json`, a stats-
 
 | Run | Directory | Conditions | Notes |
 |---|---|---|---|
-| 1 vCPU, 1 client | `edgegap-1vcpu/` | 3 of 10 | The zero ran VALID: 17.6 / 22.9 ms, 52.6 Hz, client down 6.4 kB/s. At 12:2 and 50:2 the client timed out. The chain then stopped: an HTTP 429 (Edgegap's rate limit) on the log pull read as "0 bots spawned". |
+| 1 vCPU, 1 client | `edgegap-1vcpu/` | 3 of 10 | The zero ran VALID: 17.6 / 22.9 ms, 52.6 Hz, client down 6.4 kB/s. At 12:2 and 50:2 the client exited early (#192). The chain then stopped: an HTTP 429 (Edgegap's rate limit) on the log pull read as "0 bots spawned". |
 | 1 vCPU, no client | `edgegap-1vcpu-noclient/` | 8 of 8 | The curve in TLDR 1. |
-| 2 vCPU, 1 client, threads default / 1 | `edgegap-2vcpu/` | 16 of 16 | The client timed out in every armed condition but `d07-12:2-tdefault`, so most server windows are short (43–131 lines). Down 6.4–6.7 kB/s at zero debris, 27.3 kB/s at ~277 live. |
+| 2 vCPU, 1 client, threads default / 1 | `edgegap-2vcpu/` | 16 of 16 | The client exited early in every armed condition but `d07-12:2-tdefault` (#192), so most server windows are short (43–131 lines). Down 6.4–6.7 kB/s at zero debris, 27.3 kB/s at ~277 live. |
 | 2 vCPU, no client | `edgegap-2vcpu-noclient/` | 7 of 8 | The repeat of 100:2 was stopped mid-window by the client chain's final `stop-all-profile` sweep. |
 | 2 vCPU, no client, threads=4 | `edgegap-2vcpu-noclient-t4/`, `-t4b/` | 8 of 8 | Pools 2/1/1. Two palindromes: zero and 50:2, then 12:2 and 100:2. |
 | 1 vCPU, no client, threads=4 | `edgegap-1vcpu-noclient-t4/` | 2 of 2 | Zero debris only (TLDR 3). |
@@ -201,8 +202,15 @@ Each directory has `conditions.tsv`, the per-condition `*.server.json`, a stats-
 - **Damage model, game state only:** "ballistics: union walk failed, stopping the round at
   contact" appears 15–27 times in a few minutes at 30 tanks, on alpha.3 and alpha.4 alike. 9 of 18
   in one run give the reason "a collider reached the world at a scale other than 1".
-- **The scripted client exits when the server falls behind.** It timed out whenever an Edgegap
-  server ran far below 64 Hz. A player would see the same disconnect.
+- **The client's early exits were a render error, not a timeout (#192, MEASURED from the
+  `edgegap-*` client logs).** All 13 end in `Quitting the application due to Validation
+  RenderError` (`pbr_prepass_pipeline`: vertex input `Location[0]` not provided), exit status 0.
+  Each follows, in the same frame, one bevy_render "Use-after-free" line per empty mesh: the track
+  shadow-proxy ribbons a respawn wave spawns empty until their first belt fit
+  (`src/track/view.rs`, `attach_shadow_proxies`). Only debris-armed runs show it. One run
+  (`d05-…-t1`) also lost its link first: a 3468 ms client frame, past netcode's 3 s timeout,
+  then a reconnect. Reproduced locally (stall lever plus debris lever): the same quit on the
+  first respawn wave.
 - **The debris rule churns.** `wake_ahead` compares every frozen piece with every moving body each
   tick (`src/debris.rs`, `wake_ahead`). Frozen pieces were MEASURED expensive in the no-cap
   calibration above.
