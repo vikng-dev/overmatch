@@ -724,8 +724,8 @@ fn derive_state(
 /// avian's propagation (`propagate_collider_transforms`) and child update
 /// (`update_child_collider_position`) compute from the derived transforms — the same expressions
 /// on the same inputs, so the next physics step rewrites the same bits. The `ColliderTransform`
-/// is written with them because lightyear rewrites every child collider's pose from it after
-/// each fixed loop (`LightyearAvianPlugin::update_child_collider_position`).
+/// is written with them because lightyear recomputes a child collider's pose from it after each
+/// fixed loop once that pose has changed (`LightyearAvianPlugin::update_child_collider_position`).
 fn place_segment_colliders(
     trees: Query<
         (&Transform, &Position, &Rotation, &Children),
