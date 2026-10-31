@@ -276,7 +276,20 @@ impl Mechanism for SolidShot {
             (
                 length,
                 SolidShotState {
-                    speed: self.speed_at(potential - drop),
+                    // The game's damage model: integrate the loss from the incoming speed.
+                    // A gap has zero drop and preserves that speed bit for bit. Inverting its
+                    // unchanged potential can instead round upward and break the flight clock.
+                    speed: if drop == 0.0 {
+                        before
+                    } else if drop == potential {
+                        // Exact rest is an endpoint, not a cancellation of two squared speeds.
+                        0.0
+                    } else {
+                        (before * before
+                            + (before * before + 1.0 / self.inertia) * libm::expm1(-drop))
+                        .max(0.0)
+                        .sqrt()
+                    },
                 },
                 Control::Continue,
             )
@@ -621,6 +634,27 @@ mod tests {
         let state = round.at(800.0);
         assert_eq!(round.flight_time(state, state, 2.0), 2.0 / 800.0);
         assert_eq!(round.flight_time(round.at(0.0), round.at(0.0), 0.0), 0.0);
+    }
+
+    /// The game's damage model: an unresisted gap in a crossing preserves speed exactly;
+    /// playback relies on its clock remaining monotone after a resisted stretch.
+    #[test]
+    fn an_unresisted_gap_preserves_the_speed_a_material_left() {
+        let round = round();
+        // Fixture data: the slab leaves a speed whose potential round-trip rounds upward.
+        let before = round.advance(
+            round.at(82.0),
+            &encounter(0.001, 1, &[&[(1, 1000.0)]]),
+            &LIMITS,
+            &HEAD_ON,
+        );
+        assert_eq!(before.control, Control::Continue);
+        let gap = 0.001;
+        let after = round.advance(before.state, &encounter(gap, 1, &[]), &LIMITS, &HEAD_ON);
+        let seconds = round.flight_time(before.state, after.state, after.consumed);
+        assert_eq!(after.state, before.state);
+        assert_eq!(seconds, gap / before.state.speed);
+        assert!(after.effects.is_empty(), "air deposits no dose");
     }
 
     /// The game's damage model's clock and energy dose compose over one material path. A
