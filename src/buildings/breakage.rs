@@ -1127,6 +1127,7 @@ fn spawn_piece(
                     collider,
                     ColliderDensity(structure.chunks[c].material.density),
                     piece_layers(),
+                    kind.piece_friction(c),
                     chunk_volume(kind, c),
                 ));
             }

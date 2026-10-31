@@ -200,7 +200,7 @@ TankSpec(
     display_name: \"Fixture\",
     mass: 1.0,
     inertia_extents: (1.0, 1.0, 1.0),
-    turret: (mass: 1.0, inertia_extents: (1.0, 1.0, 1.0)),
+    turret: (mass: 1.0, inertia_extents: (1.0, 1.0, 1.0), substance: \"RHA\"),
     track: (
         link_count: 3,
         link_mass: 1.0,

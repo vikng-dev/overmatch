@@ -132,6 +132,9 @@
                 .agents/scratch/damage-cam-2026-10-08/research/ap-aphe-2026-10-23/shape-law.md
                 §2.1–2.2, its source [4]. Those extents are 97 % contours, so the ball's bound
                 may sit up to about 2° wider (§2.2, Quantile)")),
+            friction: Some((0.5, Unknown("ASSUMED: bare steel against soil, no source read; Avian's own
+                default coefficient. The pair's value is Avian's combine of this and the other
+                side's"))),
             facts: Some((
                 density: (7850.0, Unknown("generic structural-steel density, carried as the force
                     law's former reference density; Q2 read no RHA-specific value (4340 MEASURED at
@@ -166,6 +169,9 @@
                 ballistically (research pass 2026-08-07)"))),
             visual: "cast_steel",
             debris_half_angle_deg: (26.2, Unknown("no measured debris extent; RHA's value")),
+            friction: Some((0.5, Unknown("ASSUMED: bare steel against soil, no source read; Avian's own
+                default coefficient. The pair's value is Avian's combine of this and the other
+                side's"))),
             facts: None,
         ),
         "MildSteel": Hard(
@@ -288,6 +294,9 @@
                 ~1 GPa, × 1000; the conifers' value, the forest's wood"))),
             visual: "wood",
             debris_half_angle_deg: (26.2, Unknown("no measured debris extent; RHA's value")),
+            friction: Some((0.5, Unknown("ASSUMED: wood on soil, no source read (wood on brick 0.6,
+                CLAIMED: read only in a search summary of RoyMech's 'Coefficients of Friction',
+                2026-10-31)"))),
             facts: None,
             bulk: Some((
                 density: (448.0, Derived("red spruce specific gravity 0.40 at 12 % moisture (oven-dry
@@ -312,6 +321,10 @@
                 flow strength ~1 GPa, × 1000"))),
             visual: "brick",
             debris_half_angle_deg: (26.2, Unknown("no measured debris extent; RHA's value")),
+            friction: Some((0.65, Measured("CLAIMED, not read in full: brick sliding on brick, 0.65–0.7 across the
+                tables RoyMech's 'Coefficients of Friction' (roymech.co.uk) reproduces, read only in a
+                search summary 2026-10-31; the low end taken, a loose piece's contact being as often with
+                soil (brick on dry clay 0.5, on sand 0.4, same tables) as with brick"))),
             facts: None,
             bulk: Some((
                 density: (1845.0, Measured("London stock brick, Engineering ToolBox 'Bricks -

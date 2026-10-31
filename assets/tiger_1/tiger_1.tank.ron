@@ -6,8 +6,9 @@ TankSpec(
     inertia_extents: (3.0, 2.0, 6.3),
     // The turret as the free body a cook-off launch makes of it: its mass (kg) and the full
     // dimensions (m) of the box standing in for its angular-inertia distribution. ASSUMED
-    // round figures; no source read.
-    turret: ( mass: 8_000.0, inertia_extents: (3.0, 1.2, 2.4) ),
+    // round figures; no source read. `substance` is the row of `materials.ron` whose friction its
+    // collision shapes take once launched.
+    turret: ( mass: 8_000.0, inertia_extents: (3.0, 1.2, 2.4), substance: "RHA" ),
     // Continuous track (track architecture §7). link_count 97 = the marker-derived window's
     // lowest SPRING-limited count (window 96..97 at ride_frequency 1.2 Hz): full suspension
     // travel with the minimum slack that permits it — playtest-confirmed 2026-07-24. The real

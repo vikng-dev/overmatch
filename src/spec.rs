@@ -996,13 +996,16 @@ pub struct IdlerSpec {
 /// The turret's rigid-body data for the free flight after a cook-off launch (the damage model's
 /// launched-turret consequence). Mirrors the hull's [`TankSpec::mass`] and
 /// [`TankSpec::inertia_extents`].
-#[derive(Deserialize, Clone, Copy)]
+#[derive(Deserialize, Clone)]
 #[serde(deny_unknown_fields)]
 pub struct TurretSpec {
     /// Mass (kg) of the turret with everything it carries.
     pub mass: f32,
     /// Full box dimensions (x, y, z metres) approximating its angular-inertia distribution.
     pub inertia_extents: (f32, f32, f32),
+    /// The substance (`assets/materials/materials.ron`) the launched turret's collision shapes
+    /// take their friction from; its row must state one.
+    pub substance: String,
 }
 
 /// One model node name per track side.
@@ -1760,7 +1763,7 @@ TankSpec(
     display_name: "Fixture",
     mass: 30_000.0,
     inertia_extents: (3.0, 2.0, 6.0),
-    turret: (mass: 5_000.0, inertia_extents: (2.0, 1.0, 2.0)),
+    turret: (mass: 5_000.0, inertia_extents: (2.0, 1.0, 2.0), substance: "RHA"),
     track: (
         link_count: 80,
         link_mass: 20.0,

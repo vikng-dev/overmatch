@@ -211,6 +211,11 @@ pub struct HardSubstance {
     /// A non-metal's bulk facts, or `None` where none are sourced. Never stated beside
     /// [`Self::facts`] (checked at parse).
     pub bulk: Option<BulkFacts>,
+    /// The dynamic friction coefficient this substance brings to a contact, dimensionless, or
+    /// `None` where none is stated. Avian combines the two sides of a pair under its rule, so this
+    /// is one side's value, not the pair's. Read by every body that rests on the ground by
+    /// contact: a loose building piece, a launched turret.
+    pub friction: Option<f32>,
     /// The facts a round's burst block reads where the substance is a burst core too, or `None`.
     /// The walk never reads them.
     pub burst: Option<BurstFacts>,
@@ -224,6 +229,14 @@ impl HardSubstance {
             Resistance::Reference => REFERENCE_FACTOR,
             Resistance::Effective(factor) => factor,
         }
+    }
+
+    /// [`Self::friction`], or an error naming `name` where the row states none: for a body whose
+    /// contact must not fall back to Avian's default.
+    pub fn friction_of(&self, name: &str) -> Result<f32, String> {
+        self.friction.ok_or_else(|| {
+            format!("substance {name:?} states no friction, and this body rests on it by contact")
+        })
     }
 
     /// kg/m³, from whichever facts the row states, or `None` where it states neither.
@@ -297,6 +310,8 @@ enum SubstanceFile {
         facts: Option<FactsFile>,
         #[serde(default)]
         bulk: Option<BulkFile>,
+        #[serde(default)]
+        friction: Option<Sourced<f32>>,
         #[serde(default)]
         burst: Option<BurstFile>,
     },
@@ -384,6 +399,7 @@ fn converted(name: &str, file: SubstanceFile) -> Result<(Substance, Option<Strin
             debris_half_angle_deg,
             facts,
             bulk,
+            friction,
             burst,
         } => {
             if visual.trim().is_empty() {
@@ -410,6 +426,7 @@ fn converted(name: &str, file: SubstanceFile) -> Result<(Substance, Option<Strin
                     tensile: bulk.tensile.map(|tensile| tensile.0),
                     fracture_energy: bulk.fracture_energy.map(|energy| energy.0),
                 }),
+                friction: friction.map(|friction| friction.0),
                 burst: burst.map(BurstFile::facts),
             };
             (Substance::Hard(hard), Some(visual))
@@ -536,6 +553,13 @@ fn checked_burst(name: &str, facts: BurstFacts) -> Result<(), String> {
 }
 
 fn checked_hard(name: &str, substance: HardSubstance) -> Result<HardSubstance, String> {
+    if let Some(friction) = substance.friction
+        && !(friction.is_finite() && friction >= 0.0)
+    {
+        return Err(format!(
+            "substance {name:?}: friction must be finite and not negative (got {friction})"
+        ));
+    }
     if let Some(bulk) = &substance.bulk {
         if substance.facts.is_some() {
             return Err(format!(
@@ -880,6 +904,41 @@ mod tests {
             let err = SubstanceRegistry::from_ron(&with(refused))
                 .expect_err("a hard row without a visual must not parse");
             assert!(matches!(err, SubstanceError::Parse(_)), "{err}");
+        }
+    }
+
+    /// A ROW'S FRICTION IS OPTIONAL AND IN DOMAIN: absent reads as `None` (and `friction_of`
+    /// refuses it, naming the row, for a body that must not fall back to Avian's default), a stated
+    /// value is carried, and a negative or non-finite one is refused. The launched turret and the
+    /// loose building pieces read it.
+    #[test]
+    fn a_rows_friction_is_optional_and_in_domain() {
+        let row = |extra: &str| {
+            with(&format!(
+                r#""Clay": Hard(resistance: Effective((20.0, Tuned("fixture"))), visual: "fixture", debris_half_angle_deg: (26.2, Tuned("fixture")), facts: None{extra}),"#
+            ))
+        };
+        let bare = SubstanceRegistry::from_ron(&row("")).unwrap();
+        assert_eq!(bare.hard("Clay").unwrap().friction, None);
+        assert!(
+            bare.hard("Clay")
+                .unwrap()
+                .friction_of("Clay")
+                .unwrap_err()
+                .contains("Clay")
+        );
+        let stated =
+            SubstanceRegistry::from_ron(&row(r#", friction: Some((0.7, Tuned("fixture")))"#))
+                .unwrap();
+        assert_eq!(stated.hard("Clay").unwrap().friction_of("Clay"), Ok(0.7));
+        for bad in ["-0.1", "inf"] {
+            assert!(
+                SubstanceRegistry::from_ron(&row(&format!(
+                    r#", friction: Some(({bad}, Tuned("fixture")))"#
+                )))
+                .is_err(),
+                "{bad}"
+            );
         }
     }
 

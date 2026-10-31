@@ -54,6 +54,9 @@ pub(crate) struct BuildingKind {
     pub(crate) asset: BuildingAsset,
     /// Per entry of the asset's material table: the substance as the walk reads it.
     materials: Vec<VolumeMaterial>,
+    /// Per entry of the asset's material table: the dynamic friction coefficient its substance
+    /// brings to a contact (`materials.ron`).
+    friction: Vec<f32>,
     /// The elements' bounds in the building frame at scale 1, `(min, max)`.
     bounds: (Vec3, Vec3),
     /// What the fracture laws read of it.
@@ -73,6 +76,16 @@ impl BuildingKind {
             .iter()
             .map(|name| VolumeMaterial::of(registry, name).map_err(|err| err.to_string()))
             .collect::<Result<Vec<_>, _>>()?;
+        let friction = asset
+            .materials
+            .iter()
+            .map(|name| {
+                registry
+                    .hard(name)
+                    .map_err(|err| err.to_string())
+                    .and_then(|hard| hard.friction_of(name))
+            })
+            .collect::<Result<Vec<_>, _>>()?;
         let bounds = asset
             .elements
             .iter()
@@ -89,9 +102,20 @@ impl BuildingKind {
         Ok(Self {
             asset,
             materials,
+            friction,
             bounds,
             layout,
         })
+    }
+
+    /// Law chunk `c`'s collision friction once loose: its element's substance's, combined by
+    /// `Max` so a hull's frictionless proxy (`tank::spawn::spawn_proxy_parts`, rule `Min`) meets
+    /// the piece at the piece's own value, and the ground at the larger of the two.
+    pub(crate) fn piece_friction(&self, c: usize) -> avian3d::prelude::Friction {
+        use avian3d::prelude::{CoefficientCombine, Friction};
+        let element = &self.asset.elements[usize::from(self.layout.element_of[c])];
+        Friction::new(self.friction[usize::from(element.material)])
+            .with_combine_rule(CoefficientCombine::Max)
     }
 
     /// The elements' bounds in the building frame at scale 1, `(min, max)`.
@@ -300,6 +324,33 @@ pub(crate) mod tests {
             BTreeSet::from(["Brick".to_owned(), "Wood".to_owned()])
         );
         assert!(world.get::<RigidBody>(root).is_some());
+    }
+
+    /// A LOOSE PIECE GRIPS A HULL AND KEEPS ITS MATERIAL AGAINST THE GROUND: a tank collision
+    /// proxy is frictionless under `Min` (`tank::spawn::spawn_proxy_parts`, so the track model owns
+    /// the hull's grip on terrain), which beats every other rule but `Max`. Each chunk of the
+    /// shipped house, loose, combines with that proxy at its own substance's row, and with a default-friction terrain at no less than the terrain's; the
+    /// proxy against that terrain stays zero. A piece on any other rule, or without its row's
+    /// value, fails here.
+    #[test]
+    fn a_loose_piece_resolves_to_its_own_friction_against_a_hull_proxy() {
+        use avian3d::prelude::{CoefficientCombine, Friction};
+        let kind = shipped_house();
+        let proxy = Friction::ZERO.with_combine_rule(CoefficientCombine::Min);
+        let terrain = Friction::new(0.5);
+        assert_eq!(proxy.combine(terrain).dynamic_coefficient, 0.0);
+        assert!(!kind.layout.chunks.is_empty());
+        for c in 0..kind.layout.chunks.len() {
+            let piece = kind.piece_friction(c);
+            let element = &kind.asset.elements[usize::from(kind.layout.element_of[c])];
+            let row = SubstanceRegistry::shipped_static()
+                .hard(&kind.asset.materials[usize::from(element.material)])
+                .unwrap()
+                .friction
+                .unwrap();
+            assert_eq!(proxy.combine(piece).dynamic_coefficient, row);
+            assert_eq!(terrain.combine(piece).dynamic_coefficient, row.max(0.5));
+        }
     }
 
     /// THE INSTANCE'S SCALE SCALES THE WALLS, NOT THE ROOT (the trees' convention): at scale 1.5

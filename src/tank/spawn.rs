@@ -1006,11 +1006,17 @@ fn assemble_tank_body(commands: &mut Commands, root: Entity, content: TankConten
             .insert(crate::ballistics::Envelope(envelope));
     }
     let (tx, ty, tz) = spec.turret.inertia_extents;
+    let friction = crate::substances::SubstanceRegistry::shipped_static()
+        .hard(&spec.turret.substance)
+        .map_err(|err| err.to_string())
+        .and_then(|hard| hard.friction_of(&spec.turret.substance))
+        .unwrap_or_else(|err| panic!("turret substance: {err}"));
     commands.entity(turret).insert((
         Turret,
         TurretBody {
             mass: spec.turret.mass,
             inertia_extents: Vec3::new(tx, ty, tz),
+            friction,
         },
     ));
 

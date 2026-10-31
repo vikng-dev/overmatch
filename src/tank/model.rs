@@ -20,6 +20,8 @@ pub struct TurretBody {
     pub mass: f32,
     /// Full box dimensions (m) standing in for the angular-inertia distribution.
     pub inertia_extents: Vec3,
+    /// The dynamic friction coefficient its collision shapes take once launched: its substance's.
+    pub friction: f32,
 }
 
 #[derive(Component)]
