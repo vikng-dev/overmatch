@@ -80,8 +80,7 @@ presentation consumers (recoil microsim, belt view).
 ## Surviving levers (all threshold-clean by design, or named as debt)
 
 - `interp_delay` — the derived delay law; no smoothing, no hysteresis.
-- `sync_margin` — derived margins, both wire directions; `OVERMATCH_INPUT_MARGIN_MS` /
-  `OVERMATCH_INTERP_MARGIN_MS` pin them for experiments.
+- `sync_margin` — derived margins, both wire directions.
 - `fire_presentation` — client owns fire start/stop and cadence; the replicated `WeaponGate`
   is a legality report consumed as a belt-delta ledger, threshold-free.
 - `recoil_overlay` — the microsim-subtract own-recoil response (fork 1's candidate A).

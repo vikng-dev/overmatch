@@ -63,13 +63,6 @@
 //! Together the objective pays the floor plus exactly the measured spread `Q_p − min`, split at the
 //! median between coverage and deadband.
 //!
-//! # Levers
-//!
-//! Mirroring `OVERMATCH_INTERP_DELAY_MS`: `OVERMATCH_INPUT_MARGIN_MS` and
-//! `OVERMATCH_INTERP_MARGIN_MS` SET pin that timeline's whole fixed margin (jitter multiple zeroed,
-//! deadband zeroed) — the certification instrument for deliberately-undersized runs; UNSET runs
-//! the derived law. A pinned uplink margin applies regardless of drive mode.
-//!
 //! Research basis: `.agents/scratch/adaptive-cursor-frontier-2026-08-15.md` §1;
 //! uplink failure-mode inventory: `.agents/scratch/input-lead-budget-2026-08-14.md`.
 
@@ -361,14 +354,6 @@ pub(super) fn refresh_arrival_stats(
     estimator.refresh(&mut scratch);
 }
 
-/// `OVERMATCH_INPUT_MARGIN_MS`: SET pins the input timeline's fixed margin for the session; UNSET
-/// runs the derived law once the own tank's role resolves interpolated.
-#[derive(Resource, Debug, Clone, Copy, PartialEq, Eq)]
-enum InputMarginMode {
-    Fixed(Duration),
-    Derived,
-}
-
 /// What the per-frame rewrite rebuilds `InputTimelineConfig` from: the sync config `net::client`
 /// installed (controller bounds live there) and the SAME input-delay config it installed —
 /// carried whole so the rebuild cannot change the delay's shape.
@@ -389,17 +374,6 @@ fn derived_input_sync(installed: SyncConfig, stats: &ArrivalStats, tick: Duratio
     }
 }
 
-/// The certification pin: the whole fixed margin in one term, the jitter term and the deadband
-/// zeroed, so the objective is exactly `rtt/2 + margin + 1 tick` regardless of measured jitter.
-fn fixed_input_sync(installed: SyncConfig, margin: Duration, tick: Duration) -> SyncConfig {
-    SyncConfig {
-        jitter_multiple: 0,
-        jitter_margin: in_ticks(margin, tick),
-        error_margin: 0.0,
-        ..installed
-    }
-}
-
 /// The downlink sync margins: the Gaussian chain zeroed (the quantile law in `net::interp_delay`
 /// subsumes it) over the half-tick floor. `error_margin` stays default — the interpolation
 /// objective never pays it (it shapes only that timeline's speed controller), so shrinking it buys
@@ -412,67 +386,31 @@ fn derived_interp_sync() -> SyncConfig {
     }
 }
 
-/// The downlink certification pin, same shape as [`fixed_input_sync`].
-fn fixed_interp_sync(margin: Duration, tick: Duration) -> SyncConfig {
-    SyncConfig {
-        jitter_multiple: 0,
-        jitter_margin: in_ticks(margin, tick),
-        ..SyncConfig::default()
-    }
-}
-
 fn in_ticks(duration: Duration, tick: Duration) -> f32 {
     (duration.as_secs_f64() / tick.as_secs_f64()) as f32
 }
 
-/// Resolve both margin modes, mount the estimator and the uplink deriving system, and hand back
-/// the interpolation config with its sync margins applied (static per session — the live factor,
-/// the quantile spread, reaches the downlink through `net::interp_delay`'s per-frame `min_delay`
-/// write instead). Single call site (`net::client`), so each env var is read exactly once.
+/// Mount the estimator and the uplink deriving system, and hand back the interpolation config
+/// with its sync margins applied (static per session — the live factor, the quantile spread,
+/// reaches the downlink through `net::interp_delay`'s per-frame `min_delay` write instead).
 pub(super) fn install(
     app: &mut App,
-    tick: Duration,
     installed: SyncConfig,
     input_delay: InputDelayConfig,
     mut interpolation: InterpolationConfig,
 ) -> InterpolationConfig {
-    let input_mode = match super::harness::env_parse::<u64>("OVERMATCH_INPUT_MARGIN_MS") {
-        Some(ms) => InputMarginMode::Fixed(Duration::from_millis(ms)),
-        None => InputMarginMode::Derived,
-    };
-    match input_mode {
-        InputMarginMode::Fixed(margin) => info!(
-            "net: input sync margin FIXED {} ms, jitter term off [OVERMATCH_INPUT_MARGIN_MS] — \
-             derived law off",
-            margin.as_millis()
-        ),
-        InputMarginMode::Derived => info!(
-            "net: input sync margin DERIVED = {CONTENT_PHASE_MEAN_TICKS} tick floor + \
-             stream-measured (Qp−Q50) coverage + (Q50−min) deadband, arming when the own hull \
-             rides the server stream [OVERMATCH_INPUT_MARGIN_MS unset]"
-        ),
-    }
-    interpolation.sync = match super::harness::env_parse::<u64>("OVERMATCH_INTERP_MARGIN_MS") {
-        Some(ms) => {
-            let margin = Duration::from_millis(ms);
-            info!(
-                "net: interpolation sync margin FIXED {ms} ms, jitter term off \
-                 [OVERMATCH_INTERP_MARGIN_MS] — derived margins off"
-            );
-            fixed_interp_sync(margin, tick)
-        }
-        None => {
-            info!(
-                "net: interpolation sync margin DERIVED = {CONTENT_PHASE_MEAN_TICKS} x tick \
-                 floor, jitter chain 0 (the arrival-delay quantile in min_delay subsumes it) \
-                 [OVERMATCH_INTERP_MARGIN_MS unset]"
-            );
-            derived_interp_sync()
-        }
-    };
+    info!(
+        "net: input sync margin DERIVED = {CONTENT_PHASE_MEAN_TICKS} tick floor + \
+         stream-measured (Qp−Q50) coverage + (Q50−min) deadband, arming when the own hull rides \
+         the server stream"
+    );
+    info!(
+        "net: interpolation sync margin DERIVED = {CONTENT_PHASE_MEAN_TICKS} x tick floor, jitter \
+         chain 0 (the arrival-delay quantile in min_delay subsumes it)"
+    );
+    interpolation.sync = derived_interp_sync();
     app.init_resource::<ArrivalDelay>();
     app.add_observer(record_packet_arrival);
-    app.insert_resource(input_mode);
     app.insert_resource(InputSyncBase {
         sync: installed,
         input_delay,
@@ -487,17 +425,16 @@ pub(super) fn install(
     interpolation
 }
 
-/// Rewrite the input timeline's sync margins ahead of the frame's timeline sync. Derived mode
-/// waits for the own tank to resolve `Interpolated` and then latches for the session (the role
+/// Rewrite the input timeline's sync margins ahead of the frame's timeline sync. The law waits
+/// for the own tank to resolve `Interpolated` and then latches for the session (the role
 /// cannot change mid-session; a respawn gap must not revert the margins). The rebuild reuses the
 /// installed `InputDelayConfig` by value and assigns in place — no insert, so lightyear's
 /// input-delay recompute observer never runs and the delay stays byte-identical.
 #[expect(
     clippy::too_many_arguments,
-    reason = "a system spanning margin mode, sync base, tick, arrival delay, the own tank's role, the timeline config and three locals"
+    reason = "a system spanning sync base, tick, arrival delay, the own tank's role, the timeline config and three locals"
 )]
 fn derive_input_margins(
-    mode: Res<InputMarginMode>,
     base: Res<InputSyncBase>,
     tick: Res<TickDuration>,
     estimator: Res<ArrivalDelay>,
@@ -515,11 +452,7 @@ fn derive_input_margins(
     mut written: Local<Option<(u8, f32, f32)>>,
     mut logged: Local<Option<Duration>>,
 ) {
-    let fixed = match *mode {
-        InputMarginMode::Fixed(margin) => Some(margin),
-        InputMarginMode::Derived => None,
-    };
-    if fixed.is_none() && !*armed {
+    if !*armed {
         if own.is_empty() {
             return;
         }
@@ -527,16 +460,13 @@ fn derive_input_margins(
         info!("net: input sync margins ARMED derived — own hull rides the server stream");
     }
     if let Some(mut config) = config {
-        let sync = match fixed {
-            Some(margin) => fixed_input_sync(base.sync, margin, tick.0),
-            None => derived_input_sync(base.sync, &estimator.stats, tick.0),
-        };
+        let sync = derived_input_sync(base.sync, &estimator.stats, tick.0);
         let key = (sync.jitter_multiple, sync.jitter_margin, sync.error_margin);
         if *written == Some(key) {
             return;
         }
         let coverage = estimator.stats.coverage();
-        if fixed.is_none() && logged.is_none_or(|last| last.abs_diff(coverage) >= LOG_STEP) {
+        if logged.is_none_or(|last| last.abs_diff(coverage) >= LOG_STEP) {
             info!(
                 "net: input sync margins floor+coverage {:.2} t, deadband {:.2} t ({})",
                 sync.jitter_margin,
@@ -561,8 +491,7 @@ mod tests {
     use lightyear_transport::plugin::PacketReceived;
 
     use super::{
-        ArrivalDelay, ArrivalStats, derived_input_sync, derived_interp_sync, fixed_input_sync,
-        fixed_interp_sync, record_packet_arrival,
+        ArrivalDelay, ArrivalStats, derived_input_sync, derived_interp_sync, record_packet_arrival,
     };
     use crate::state::AppState;
 
@@ -813,18 +742,6 @@ mod tests {
         assert_close(cold.error_margin, 0.0, "cold-start deadband");
     }
 
-    /// The fixed lever pins the WHOLE margin: jitter term off, deadband off, floor = the pinned
-    /// duration in ticks. Fails if any term stays live or the ms→tick conversion drifts.
-    #[test]
-    fn fixed_lever_pins_the_whole_margin() {
-        let sync = fixed_input_sync(installed(), Duration::from_micros(7_812), TICK);
-        assert_eq!(sync.jitter_multiple, 0, "jitter term must be off");
-        assert_close(sync.error_margin, 0.0, "deadband must be off");
-        assert_close(sync.jitter_margin, 0.49997, "margin in ticks");
-        let two_ticks = fixed_input_sync(installed(), Duration::from_micros(31_250), TICK);
-        assert_close(two_ticks.jitter_margin, 2.0, "31.25 ms is two ticks");
-    }
-
     /// The downlink margins: the Gaussian chain zeroed (the quantile subsumes it), the half-tick
     /// floor kept, the deadband left default (the interpolation objective never pays it). Fails if
     /// the multiple survives, the floor moves, or the deadband is dragged along.
@@ -838,8 +755,5 @@ mod tests {
             SyncConfig::default().error_margin,
             "interp deadband stays default",
         );
-        let fixed = fixed_interp_sync(Duration::from_micros(15_625), TICK);
-        assert_eq!(fixed.jitter_multiple, 0, "pinned margin has no jitter term");
-        assert_close(fixed.jitter_margin, 1.0, "15.625 ms is one tick");
     }
 }

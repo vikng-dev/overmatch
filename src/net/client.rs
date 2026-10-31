@@ -570,21 +570,15 @@ pub fn run() {
                 .in_set(lightyear::link::LinkReceiveSystems::ApplyConditioner),
         );
     }
-    // Mounts the deriving system and resolves `OVERMATCH_INTERP_DELAY_MS`; the returned config is
-    // the entity's starting value, rewritten every frame unless the env var pins it.
+    // Mounts the deriving system; the returned config is the entity's starting value, rewritten
+    // every frame.
     let interpolation = super::interp_delay::install(&mut app, tick_duration);
     // Mounts the sync-margin laws on both wire timelines: the input timeline's floor/deadband
-    // (rewritten every frame once the own tank's role resolves interpolated, or pinned by
-    // `OVERMATCH_INPUT_MARGIN_MS`) and the interpolation timeline's sync margins (static for the
-    // session, or pinned by `OVERMATCH_INTERP_MARGIN_MS`). Receives the SAME `input_delay` the
+    // (rewritten every frame once the own tank's role resolves interpolated) and the interpolation
+    // timeline's sync margins (static for the session). Receives the SAME `input_delay` the
     // timeline below is built with, so its rebuilds cannot change the delay's shape.
-    let interpolation = super::sync_margin::install(
-        &mut app,
-        tick_duration,
-        sync_config,
-        input_delay,
-        interpolation,
-    );
+    let interpolation =
+        super::sync_margin::install(&mut app, sync_config, input_delay, interpolation);
     // Buffer-edge starvation instruments and the bounded extrapolation gap-filler.
     super::extrapolate::install(&mut app);
     // Both timeline configs are app-global resources. Inserted AFTER `ClientPlugins`, so
@@ -707,15 +701,6 @@ pub fn run() {
     // The server's spawn decision, read off the markers that actually arrived. Unconditional: which
     // clock the own hull moves on is the first thing any capture of this session must state.
     app.add_systems(Update, log_local_tank_role);
-    // Ownership trace (opt-in via `OVERMATCH_OWNERSHIP_TRACE`): once per second, log every
-    // `NetTank`'s ownership markers, so a two-client loopback run can confirm that each client's
-    // OWN tank is the sole carrier of `Controlled`/`InputMarker`/`Predicted` and every opponent is
-    // `Interpolated`+`Remote` only — the axis a duplicated client id corrupts (an opponent arriving
-    // with `Controlled`/`Predicted`; see [`configure_link`]). Registered only when the env var is
-    // present, so normal runs stay quiet.
-    if std::env::var("OVERMATCH_OWNERSHIP_TRACE").is_ok() {
-        app.add_systems(Update, log_tank_ownership);
-    }
     if simulate {
         app.add_systems(Update, harness::simulate_watchdog)
             .add_systems(
@@ -1409,33 +1394,6 @@ fn log_local_tank_role(
     };
     *logged = true;
     info!("client: own tank {entity} drives INTERPOLATED (server stream)");
-}
-
-/// Opt-in ownership trace. Only the local tank may carry `Controlled` and `InputMarker`.
-fn log_tank_ownership(
-    tanks: Query<
-        (
-            Entity,
-            Has<GameControlled>,
-            Has<InputMarker<TankCommand>>,
-            Has<Interpolated>,
-            Has<Remote>,
-        ),
-        With<NetTank>,
-    >,
-    time: Res<Time>,
-    mut next: Local<f32>,
-) {
-    let now = time.elapsed_secs();
-    if now < *next {
-        return;
-    }
-    *next = now + 1.0;
-    for (entity, controlled, input_marker, interpolated, remote) in &tanks {
-        info!(
-            "ownership: {entity} controlled={controlled} input_marker={input_marker} interpolated={interpolated} remote={remote}"
-        );
-    }
 }
 
 /// Barrel recoil kicks awaiting the sim clock: `(shooter root, weapon slot)` per opponent shot,

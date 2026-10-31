@@ -1516,11 +1516,7 @@ mod tests {
         use bevy::prelude::Entity;
         use std::sync::Arc;
         use std::time::Instant;
-        let frames: usize = std::env::var("OVERMATCH_PRINT_BENCH_FRAMES")
-            .ok()
-            .and_then(|s| s.parse().ok())
-            .unwrap_or(180);
-        assert!(frames > 0);
+        let frames: usize = 180;
         let grid = HeightGrid::new(
             vec![0.0; 1025 * 1025].into(),
             1025,

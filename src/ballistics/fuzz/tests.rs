@@ -164,15 +164,11 @@ fn a_run_is_a_pure_function_of_its_seed() {
 }
 
 /// SURVEY (`cargo test -- --ignored survey --nocapture`): the full report at CI scale, for a human.
-/// Set `FUZZ_FLOOR` to raise the finding floor and see the graded weakspots above the gate's line.
 #[test]
 #[ignore]
 fn survey() {
     let report = fuzz(&FuzzConfig {
         rays: 20_000,
-        finding_floor: std::env::var("FUZZ_FLOOR")
-            .ok()
-            .and_then(|v| v.parse().ok()),
         ..default()
     })
     .expect("world");

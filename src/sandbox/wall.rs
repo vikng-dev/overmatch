@@ -123,11 +123,7 @@ pub(super) fn plugin(app: &mut App) {
         info!("wall prototype: capture case {case:?}");
         // The range keeps the cursor free under an autopilot; the script is one.
         if !app.world().contains_resource::<Autopilot>() {
-            app.insert_resource(Autopilot {
-                pose: None,
-                fly: None,
-                fire: Default::default(),
-            });
+            app.insert_resource(Autopilot { pose: None });
         }
         app.insert_resource(WallScript {
             case,

@@ -77,15 +77,6 @@ fn slewed(current: Duration, target: Duration, step: Duration) -> Duration {
     }
 }
 
-/// `OVERMATCH_INTERP_DELAY_MS`: SET pins `min_delay` for the session — the certification instrument
-/// needs deliberately-undersized runs (report §5.3) and the A/B against the retired 100 ms pin.
-/// UNSET runs the derived law.
-#[derive(Resource, Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) enum DelayMode {
-    Fixed(Duration),
-    Derived,
-}
-
 /// The law. The send interval is one tick — the server replicates every tick (`send_interval = 0`,
 /// the degenerate `src/net/tests/net_interp_delay.rs` pins), so the gap to the next keyframe is
 /// one tick.
@@ -95,39 +86,22 @@ fn derived_min_delay(rtt: Duration, stats: &ArrivalStats, tick: Duration) -> Dur
     rtt / 2 + stats.spread().saturating_sub(super::extrapolate::horizon()) + tick
 }
 
-/// Resolve the mode, mount the deriving system, and hand back the initial
-/// `InterpolationConfig` resource. Single call site (`net::client`), so the env var is read
-/// exactly once.
+/// Mount the deriving system and hand back the initial `InterpolationConfig` resource.
 pub(super) fn install(app: &mut App, tick: Duration) -> InterpolationConfig {
-    let mode = match super::harness::env_parse::<u64>("OVERMATCH_INTERP_DELAY_MS") {
-        Some(ms) => DelayMode::Fixed(Duration::from_millis(ms)),
-        None => DelayMode::Derived,
-    };
-    let defaults = InterpolationConfig::default();
-    let initial = match mode {
-        DelayMode::Fixed(delay) => delay,
-        // No RTT or arrival sample exists before the link opens; the law at rtt = spread = 0 is
-        // the one-interval gap term alone, and `derive_interpolation_delay` overwrites this before
-        // the first `SyncSystems::Sync`.
-        DelayMode::Derived => derived_min_delay(Duration::ZERO, &ArrivalStats::default(), tick),
-    };
-    match mode {
-        DelayMode::Fixed(delay) => info!(
-            "net: interpolation min_delay FIXED {} ms [OVERMATCH_INTERP_DELAY_MS] — derived law off",
-            delay.as_millis()
-        ),
-        DelayMode::Derived => info!(
-            "net: interpolation min_delay DERIVED = rtt/2 + max(Qp − min − g*, 0) + one tick \
-             ({:.1} ms cold) [OVERMATCH_INTERP_DELAY_MS unset]",
-            millis(initial)
-        ),
-    }
-    app.insert_resource(mode);
+    // No RTT or arrival sample exists before the link opens; the law at rtt = spread = 0 is the
+    // one-interval gap term alone, and `derive_interpolation_delay` overwrites this before the
+    // first `SyncSystems::Sync`.
+    let initial = derived_min_delay(Duration::ZERO, &ArrivalStats::default(), tick);
+    info!(
+        "net: interpolation min_delay DERIVED = rtt/2 + max(Qp − min − g*, 0) + one tick \
+         ({:.1} ms cold)",
+        millis(initial)
+    );
     app.add_systems(
         PostUpdate,
         derive_interpolation_delay.before(SyncSystems::Sync),
     );
-    defaults.with_min_delay(initial)
+    InterpolationConfig::default().with_min_delay(initial)
 }
 
 /// Follow the measured link every frame, ahead of the frame's timeline sync (and after
@@ -135,7 +109,6 @@ pub(super) fn install(app: &mut App, tick: Duration) -> InterpolationConfig {
 /// [`MAX_SLEW_PER_FRAME_TICKS`] per frame toward the law's value. The `!=` guard keeps change
 /// detection quiet while the follower sits on its target.
 pub(super) fn derive_interpolation_delay(
-    mode: Res<DelayMode>,
     tick: Res<TickDuration>,
     estimator: Res<ArrivalDelay>,
     config: Option<ResMut<InterpolationConfig>>,
@@ -144,9 +117,6 @@ pub(super) fn derive_interpolation_delay(
     mut armed: Local<Option<u64>>,
     mut logged: Local<Option<Duration>>,
 ) {
-    if matches!(*mode, DelayMode::Fixed(_)) {
-        return;
-    }
     if *armed != Some(estimator.link()) {
         if !estimator.stats.warmed() {
             // Pre-arm the installed default rides unchanged (module doc: warmup arming).
@@ -312,7 +282,6 @@ mod tests {
     #[test]
     fn a_step_target_walks_to_the_law_inside_the_deadband() {
         let mut world = World::new();
-        world.insert_resource(super::DelayMode::Derived);
         world.insert_resource(TickDuration(TICK));
         let mut estimator = ArrivalDelay::default();
         // A beyond-horizon spread appearing at once: the law's value steps ~47.7 ms upward.
@@ -350,7 +319,6 @@ mod tests {
     #[test]
     fn the_writer_holds_the_installed_default_until_the_estimator_warms() {
         let mut world = World::new();
-        world.insert_resource(super::DelayMode::Derived);
         world.insert_resource(TickDuration(TICK));
         let mut estimator = ArrivalDelay::default();
         // The observed startup pollution: Qp 243 ms before the distribution is valid.

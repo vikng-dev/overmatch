@@ -50,8 +50,7 @@
 //!
 //! # Repeatable
 //!
-//! [`Plan::new`] is a pure function of the seed (`OVERMATCH_BATTLE_SEED`, default [`DEFAULT_SEED`])
-//! and the layout: the lanes, every shot's time and aim and every burst. Its [`Plan::digest`] is
+//! [`Plan::new`] is a pure function of the seed ([`SEED`]) and the layout: the lanes, every shot's time and aim and every burst. Its [`Plan::digest`] is
 //! logged at arm time, so two runs' logs show they ran one script. The script runs on the virtual
 //! clock from [`SETTLE_S`] after the spawn; shots are released on that clock, whatever the physics
 //! did, and each lane is a fixed route the tank steers back onto, so paths repeat within the
@@ -92,13 +91,8 @@ pub(crate) fn enabled() -> bool {
     cfg!(feature = "dev_tools") && crate::env_flag("OVERMATCH_BATTLE", false)
 }
 
-/// The script's seed when `OVERMATCH_BATTLE_SEED` is unset (ASSUMED: any value; the issue's
-/// number).
-const DEFAULT_SEED: u64 = 153;
-
-fn seed() -> u64 {
-    crate::env_parse("OVERMATCH_BATTLE_SEED").unwrap_or(DEFAULT_SEED)
-}
+/// The script's seed (ASSUMED: any value; the issue's number).
+const SEED: u64 = 153;
 
 // ---- Layout: fixture data for the shipped map, DERIVED from its level.json and heightmap ----
 
@@ -415,7 +409,7 @@ pub(super) fn spawn(
     grid: Option<&HeightGrid>,
     manifest: Option<&MapManifest>,
 ) {
-    let plan = Plan::new(seed());
+    let plan = Plan::new(SEED);
     for (index, tank) in plan.tanks.iter().enumerate() {
         let root = super::scenario::spawn_tank(
             commands,
@@ -875,10 +869,10 @@ mod tests {
     /// schedule on the same lanes.
     #[test]
     fn the_script_is_the_seeds_alone() {
-        let plan = Plan::new(DEFAULT_SEED);
-        assert_eq!(plan, Plan::new(DEFAULT_SEED));
-        assert_eq!(plan.digest(), Plan::new(DEFAULT_SEED).digest());
-        let other = Plan::new(DEFAULT_SEED + 1);
+        let plan = Plan::new(SEED);
+        assert_eq!(plan, Plan::new(SEED));
+        assert_eq!(plan.digest(), Plan::new(SEED).digest());
+        let other = Plan::new(SEED + 1);
         assert_ne!(plan.digest(), other.digest());
         for (a, b) in plan.tanks.iter().zip(&other.tanks) {
             assert_eq!(
@@ -953,7 +947,7 @@ mod tests {
     /// overrun bound that put one tank in another's line fails here.
     #[test]
     fn no_line_of_fire_comes_near_another_lane() {
-        let plan = Plan::new(DEFAULT_SEED);
+        let plan = Plan::new(SEED);
         for (index, tank) in plan.tanks.iter().enumerate() {
             for &aim in &tank.aims {
                 for (start, end) in lines_of_fire(tank.lane, aim, LINE_REACH_M) {
@@ -1027,7 +1021,7 @@ mod tests {
             !trees.is_empty() && !buildings.is_empty(),
             "the shipped map's scatter"
         );
-        let plan = Plan::new(DEFAULT_SEED);
+        let plan = Plan::new(SEED);
         let bodies: Vec<(Vec2, Vec2)> = plan.tanks.iter().map(|tank| body(tank.lane)).collect();
         for (index, tank) in plan.tanks.iter().enumerate() {
             let (from, to) = stretched(tank.lane, OVERRUN_M);
