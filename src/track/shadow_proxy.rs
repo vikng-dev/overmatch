@@ -179,7 +179,8 @@ impl ProxyMode {
     }
 }
 
-/// How many frames a bound rig may go without a ribbon before the silence is worth a warning.
+/// How many fitted frames a bound rig may go without a ribbon before the silence is worth a
+/// warning (counted as [`ProxySide::pending_frames`] counts).
 ///
 /// The swap is atomic (see [`ProxySide::mesh`]) so an unbuilt proxy costs nothing but performance
 /// — the shoes are still casting and the picture is still right. But "the optimisation quietly did
@@ -210,8 +211,11 @@ pub(crate) struct ProxySide {
     /// that exists makes the worst case "the optimisation did not happen", which is a cost, not a
     /// bug.
     pub(crate) mesh: Option<Handle<Mesh>>,
-    /// Frames since bind with no ribbon yet — the counter behind [`PROXY_READY_GRACE_FRAMES`].
-    /// Stops counting once [`ProxySide::mesh`] exists.
+    /// Fitted frames since bind with no ribbon yet — the counter behind
+    /// [`PROXY_READY_GRACE_FRAMES`]. It counts only frames that reach [`ProxySide::fit`] with joints
+    /// that cannot close a loop, and stops once [`ProxySide::mesh`] exists. A tank
+    /// `drive_track_views` skips (no `TrackField`, no `TrackDrive` yet) never reaches `fit`, so
+    /// those late-fit routes never advance it and never report `Overdue`.
     pub(crate) pending_frames: u32,
     /// This side's cross-section, resolved from the measured shoe at bind.
     pub(crate) section: Section,
@@ -232,7 +236,7 @@ pub(crate) enum ProxyStep {
         mesh: Handle<Mesh>,
         triangles: usize,
     },
-    /// [`PROXY_READY_GRACE_FRAMES`] have passed with no ribbon. Say so, once.
+    /// [`PROXY_READY_GRACE_FRAMES`] fitted frames have passed with no ribbon. Say so, once.
     Overdue,
 }
 
