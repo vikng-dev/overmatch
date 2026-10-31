@@ -19,7 +19,7 @@
 //! an awake body that is no piece (a driven tank) shares its island and stays awake while it
 //! touches, with every piece that touches it in turn. A tank never sleeps (DERIVED): a non-zero
 //! force call resets the sleep timer (`dynamics/rigid_body/forces/query_data.rs:345,687`) and the
-//! track code applies forces every tick (`src/track/sim.rs:870`).
+//! track code applies forces every tick (`track::sim::apply_track_forces`).
 //!
 //! THE ONE WAKE AVIAN LACKS ([`wake_on_collider_gone`]): avian wakes no body when a collider it
 //! touches goes without a dynamic body of its own (the TODO at `collision/narrow_phase/mod.rs:414`),
