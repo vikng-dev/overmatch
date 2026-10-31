@@ -49,7 +49,8 @@
 //!   presentation clock ([`super::view`]).
 //! * **Loose groups** fall on the authority as one dynamic body each ([`WallPiece`]): its chunks
 //!   brick in ballistics on [`Layer::Armor`], colliding as [`Layer::Debris`], settled by the shared
-//!   rule ([`crate::debris`]). It leaves with the momentum pushed into it, its spin the angular
+//!   rule ([`crate::debris`]). It leaves with the fields' blows and each body's plastic share,
+//!   returning the rest at the contact point ([`give_back`]); its spin is the exchanged angular
 //!   momentum over its own inertia tensor; gravity, contact and friction decide whether a group
 //!   a cracked section freed rocks back or topples. A later blast's impulse on it is a write to
 //!   its velocity and sleep timer, which wakes it asleep (avian's `wake_on_changed`).
@@ -570,7 +571,11 @@ fn contact_load(
             energy: 0.0,
             blow: frame.turn(blow),
             press: frame.turn(press),
-            origin: Origin::Body(transfer.body),
+            origin: Origin::Body {
+                body: transfer.body,
+                mass: transfer.effective_mass,
+                speed: transfer.closing_speed,
+            },
         },
     ))
 }
@@ -754,6 +759,7 @@ struct Taken {
 struct DepositParam<'w, 's> {
     queue: ResMut<'w, WallQueue>,
     resting: Res<'w, RestingLoads>,
+    transfers: Res<'w, ContactTransfers>,
     volumes: BuildingColliders<'w, 's>,
     buildings: Query<
         'w,
@@ -910,6 +916,7 @@ fn apply_deposits(mut p: DepositParam) {
         for &(root, load) in &deposit.contacts {
             taken.entry(root).or_default().contacts.push(load);
         }
+        let mut departures = Vec::new();
         for (root, taken) in taken {
             let Ok((_, identity, transform, mut breakage)) = p.buildings.get_mut(root) else {
                 continue;
@@ -948,19 +955,33 @@ fn apply_deposits(mut p: DepositParam) {
                     event,
                     tick,
                 }));
+            give_back(&mut p.bodies, frame, &changes.returns);
             for (group, loads) in changes.groups {
-                spawn_piece(
-                    &mut p.commands,
-                    &kind,
-                    &live.structure,
-                    (building, frame.scale, *transform),
-                    &group,
-                    &loads,
-                );
+                let launch = launch(&kind, &live.structure, frame.scale, &group, &loads);
+                departures.push(Departure {
+                    kind: kind.clone(),
+                    building,
+                    scale: frame.scale,
+                    root: *transform,
+                    group,
+                    launch,
+                });
             }
             if !changes.events.is_empty() {
                 breakage.set_changed();
             }
+        }
+        cap_exchanges(&mut departures, |body| p.transfers.inertia(body));
+        for departure in departures {
+            let frame = Frame::new(&departure.root, departure.scale, departure.kind.bounds());
+            give_back(&mut p.bodies, frame, &departure.launch.returns);
+            spawn_piece(
+                &mut p.commands,
+                &departure.kind,
+                (departure.building, departure.root),
+                &departure.group,
+                departure.launch,
+            );
         }
     }
 }
@@ -989,7 +1010,7 @@ fn log_changes(id: &str, loads: &[Load], counts: [usize; 4], changes: &Changes) 
         loads
             .iter()
             .filter_map(|load| match load.origin {
-                Origin::Body(body) => Some(body),
+                Origin::Body { body, .. } => Some(body),
                 Origin::Field => None,
             })
             .collect::<std::collections::BTreeSet<_>>()
@@ -1267,6 +1288,32 @@ pub(crate) struct Changes {
     pub(crate) failures: Vec<fracture::Failure>,
     pub(crate) unassessed: Vec<usize>,
     pub(crate) weight_steps: usize,
+    /// Body blows on chunks with no carrier in this deposit, returned whole in building terms.
+    /// Dust has no carrier; a chunk freed by an earlier deposit already launched there.
+    pub(crate) returns: Vec<BodyReturn>,
+}
+
+/// Momentum the rigid structure took beyond a departing chunk's plastic exchange: the source
+/// body, contact point (m) and returned impulse (N·s), in the building's frame.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct BodyReturn {
+    body: Entity,
+    at: Vec3,
+    impulse: Vec3,
+}
+
+impl BodyReturn {
+    fn of(load: &Load, launched: Vec3) -> Option<Self> {
+        match load.origin {
+            Origin::Field => None,
+            Origin::Body { body, .. } if load.blow != Vec3::ZERO => Some(Self {
+                body,
+                at: load.at,
+                impulse: load.blow - launched,
+            }),
+            Origin::Body { .. } => None,
+        }
+    }
 }
 
 /// Run one deposit's `loads`, with the `holes` it cuts ([`holes_of`]), through the laws on `live`
@@ -1274,12 +1321,11 @@ pub(crate) struct Changes {
 /// kept, the cracks (the push rule's, then the structural check's, then the weight check's) and the
 /// falls, each ascending but the holes, in deposit order. A chunk the holes would carry past
 /// [`HOLES_PER_CHUNK`] crumbles to dust before the laws run; a hole is kept only in a chunk
-/// standing after the removal, and no law reads one. A load on a chunk turned to dust went into
-/// crushing it and moves nothing. The structural check and a freed group's launch read a field's
-/// blow alone: they take a blow whole, and a body's reaches a group only as its plastic share
-/// against the group's mass (the wall design, "Bodies in contact"), so whole it would hand a light
-/// group a heavy body's momentum. A body's load bends no section and launches nothing, and no law
-/// reads a press.
+/// standing after the removal, and no law reads one. A field load on a chunk turned to dust
+/// went into crushing it and moves nothing; a body's blow there is returned whole because dust
+/// has no carrier. A chunk freed by an earlier deposit also has no carrier in this deposit and
+/// returns the body's blow whole. A held section reads the body's plastic share against its hinge effective mass;
+/// a freed group's launch reads its free effective mass. No law reads a press.
 pub(crate) fn run_laws(
     layout: &Layout,
     live: &mut Live,
@@ -1309,9 +1355,14 @@ pub(crate) fn run_laws(
     for &(c, hole) in &holes {
         live.holes[c].push(hole);
     }
+    let returns = loads
+        .iter()
+        .filter(|load| !live.state.standing(load.chunk))
+        .filter_map(|load| BodyReturn::of(load, Vec3::ZERO))
+        .collect();
     let loads: Vec<Load> = loads
         .iter()
-        .filter(|load| live.state.standing(load.chunk) && load.origin == Origin::Field)
+        .filter(|load| live.state.standing(load.chunk))
         .copied()
         .collect();
     let mut failures =
@@ -1392,6 +1443,7 @@ pub(crate) fn run_laws(
         failures,
         unassessed: weighed.unassessed,
         weight_steps: weighed.steps,
+        returns,
     }
 }
 
@@ -1426,18 +1478,44 @@ fn chunk_volume(kind: &BuildingKind, c: usize) -> BallisticVolume {
     }
 }
 
-/// One loose group's colliders about its chunks' centre of mass (building frame), and the linear
-/// and angular velocity (building frame) the blows of `loads` give it: their impulse over its mass,
-/// their angular momentum about its centre of mass through its own inertia tensor, both from the
-/// colliders it falls with at their substance's density. Momentum conserved: a group leaves with
-/// the impulse pushed into it, no more.
+/// One freed group's collider frame and departure in building terms, and the source bodies'
+/// give-back. The mass and inertia are those of these exact colliders at their data's density.
+#[derive(Debug)]
+pub(crate) struct Launch {
+    centroid: Vec3,
+    colliders: Vec<(usize, Collider)>,
+    velocity: Vec3,
+    spin: Vec3,
+    returns: Vec<BodyReturn>,
+    mass: f32,
+    inertia: Mat3,
+    body_velocity: Vec3,
+    body_spin: Vec3,
+    exchanges: Vec<(Load, Vec3)>,
+}
+
+/// A freed carrier staged until every building in the deposit has answered its contacts.
+/// One source can free groups in several buildings; their combined exchange is bounded once.
+struct Departure {
+    kind: Arc<BuildingKind>,
+    building: u16,
+    scale: f32,
+    root: Transform,
+    group: Vec<usize>,
+    launch: Launch,
+}
+
+/// One loose group's colliders about its chunks' centre of mass (building frame) and departure:
+/// each field blow launches whole, each body blow only its plastic share against the group's free
+/// effective mass at the load point. The rest returns to its source at that point. The wall
+/// design ("Bodies in contact") owns the momentum and energy derivation.
 pub(crate) fn launch(
     kind: &BuildingKind,
     structure: &Structure,
     scale: f32,
     group: &[usize],
     loads: &[Load],
-) -> (Vec3, Vec<(usize, Collider)>, Vec3, Vec3) {
+) -> Launch {
     use avian3d::dynamics::rigid_body::mass_properties::bevy_heavy::{
         ComputeMassProperties3d, MassProperties3d,
     };
@@ -1450,42 +1528,188 @@ pub(crate) fn launch(
         / mass;
     let colliders: Vec<(usize, Collider)> = group
         .iter()
-        .filter_map(|&c| chunk_collider(kind, c, scale, centroid, LOOSE_GAP_M).map(|s| (c, s)))
+        .map(|&c| {
+            let collider = chunk_collider(kind, c, scale, centroid, LOOSE_GAP_M)
+                .expect("a freed chunk's baked hull is a nondegenerate convex collider");
+            (c, collider)
+        })
         .collect();
     let total = colliders
         .iter()
         .map(|(c, shape)| shape.mass_properties(chunks[*c].material.density))
         .fold(MassProperties3d::default(), |sum, part| sum + part);
-    let impulse: Vec3 = loads.iter().map(|load| load.blow).sum();
+    assert!(total.mass > 0.0, "a freed group has occupied mass");
+    let inverse_inertia = total.angular_inertia_tensor().inverse();
     let com = centroid + total.center_of_mass;
-    let angular: Vec3 = loads
-        .iter()
-        .map(|load| (load.at - com).cross(load.blow))
-        .sum();
-    let spin = if total.mass > 0.0 {
-        total.angular_inertia_tensor().inverse() * angular
-    } else {
-        Vec3::ZERO
-    };
-    (
+    let mut impulse = Vec3::ZERO;
+    let mut angular = Vec3::ZERO;
+    let mut returns = Vec::new();
+    let mut body_impulse = Vec3::ZERO;
+    let mut body_angular = Vec3::ZERO;
+    let mut exchanges = Vec::new();
+    for load in loads {
+        // A press, or a field carrying only crushing energy, launches no momentum.
+        if load.blow == Vec3::ZERO {
+            continue;
+        }
+        let arm = (load.at - com).cross(load.blow.normalize());
+        let inverse_mass = 1.0 / total.mass + arm.dot(inverse_inertia * arm);
+        let launched = load.blow * load.origin.share(inverse_mass);
+        impulse += launched;
+        angular += (load.at - com).cross(launched);
+        if let Some(returned) = BodyReturn::of(load, launched) {
+            body_impulse += launched;
+            body_angular += (load.at - com).cross(launched);
+            returns.push(returned);
+            exchanges.push((*load, launched));
+        }
+    }
+    Launch {
         centroid,
         colliders,
-        impulse / total.mass.max(f32::EPSILON),
-        spin,
-    )
+        velocity: impulse / total.mass,
+        spin: inverse_inertia * angular,
+        returns,
+        mass: total.mass,
+        inertia: total.angular_inertia_tensor().to_mat3(),
+        body_velocity: body_impulse / total.mass,
+        body_spin: inverse_inertia * body_angular,
+        exchanges,
+    }
+}
+
+/// Cap simultaneous plastic exchanges by their common velocity along the combined impulse.
+/// The shares from `launch` fix each point's relative impulse. DERIVED: scaling them by `s`
+/// changes total kinetic energy by `-s W + s² Q/2`; its minimum is `s = W/Q`. `W` is the
+/// source work less the carrier's field-driven motion, and `Q` sums every carrier's and every
+/// source body's combined linear/angular response. Counting a source per point would miss the
+/// cross terms and can create energy. An isolated contact already has this plastic minimum.
+fn cap_exchanges(
+    departures: &mut [Departure],
+    inertia_of: impl Fn(Entity) -> crate::contact_transfer::BodyInertia,
+) {
+    // Carriers couple only through a shared source. Disjoint collisions must not change one
+    // another's exchange, even when the reader queued them in the same physics deposit.
+    let mut parent: Vec<usize> = (0..departures.len()).collect();
+    let root = |parent: &[usize], mut index: usize| {
+        while parent[index] != index {
+            index = parent[index];
+        }
+        index
+    };
+    let mut owner = BTreeMap::new();
+    for (index, departure) in departures.iter().enumerate() {
+        for (load, _) in &departure.launch.exchanges {
+            let Origin::Body { body, .. } = load.origin else {
+                unreachable!("only body blows have a source exchange");
+            };
+            if let Some(other) = owner.insert(body, index) {
+                let (a, b) = (root(&parent, index), root(&parent, other));
+                parent[a.max(b)] = a.min(b);
+            }
+        }
+    }
+    let mut components: BTreeMap<usize, Vec<usize>> = BTreeMap::new();
+    for (index, departure) in departures.iter().enumerate() {
+        if !departure.launch.exchanges.is_empty() {
+            components
+                .entry(root(&parent, index))
+                .or_default()
+                .push(index);
+        }
+    }
+    for component in components.values() {
+        cap_connected_exchanges(departures, component, &inertia_of);
+    }
+}
+
+/// Bound one connected set of source bodies and carriers, with all source cross terms retained.
+fn cap_connected_exchanges(
+    departures: &mut [Departure],
+    component: &[usize],
+    inertia_of: &impl Fn(Entity) -> crate::contact_transfer::BodyInertia,
+) {
+    let mut sources: BTreeMap<Entity, (Vec3, Vec3)> = BTreeMap::new();
+    let (mut work, mut quadratic) = (0.0_f64, 0.0_f64);
+    for departure in component.iter().map(|&index| &departures[index]) {
+        let launch = &departure.launch;
+        let field_velocity = launch.velocity - launch.body_velocity;
+        let field_spin = launch.spin - launch.body_spin;
+        work -= f64::from(
+            launch.mass * field_velocity.dot(launch.body_velocity)
+                + field_spin.dot(launch.inertia * launch.body_spin),
+        );
+        quadratic += f64::from(
+            launch.mass * launch.body_velocity.length_squared()
+                + launch.body_spin.dot(launch.inertia * launch.body_spin),
+        );
+        for (load, impulse) in &launch.exchanges {
+            let Origin::Body { body, speed, .. } = load.origin else {
+                unreachable!("only body blows have a source exchange");
+            };
+            let inertia = inertia_of(body);
+            let at = departure.root.translation + departure.root.rotation * load.at;
+            let impulse_world = departure.root.rotation * *impulse;
+            let source = sources.entry(body).or_default();
+            source.0 += impulse_world;
+            source.1 += (at - inertia.centre).cross(impulse_world);
+            work += f64::from(impulse.length() * speed);
+        }
+    }
+    for (body, (impulse, angular)) in sources {
+        let inertia = inertia_of(body);
+        quadratic += f64::from(
+            impulse.dot(inertia.inverse_mass * impulse)
+                + angular.dot(inertia.inverse_inertia * angular),
+        );
+    }
+    assert!(
+        work.is_finite() && quadratic.is_finite() && quadratic > 0.0,
+        "finite contact velocities, impulses and occupied carrier mass give a finite positive response"
+    );
+    let scale = (work / quadratic).clamp(0.0, 1.0) as f32;
+    for &index in component {
+        let launch = &mut departures[index].launch;
+        launch.velocity += launch.body_velocity * (scale - 1.0);
+        launch.spin += launch.body_spin * (scale - 1.0);
+        for (returned, (load, impulse)) in launch.returns.iter_mut().zip(&launch.exchanges) {
+            returned.impulse = load.blow - *impulse * scale;
+        }
+    }
+}
+
+/// Return a departing chunk's excess solver impulse immediately, at the original world point.
+/// A structure that held supplies no return; presses remain with the standing structure.
+fn give_back(bodies: &mut Query<(Forces, &RigidBody)>, frame: Frame, returns: &[BodyReturn]) {
+    for returned in returns {
+        let (mut body, kind) = bodies
+            .get_mut(returned.body)
+            .expect("a contact's dynamic source survives the same tick's building laws");
+        assert!(kind.is_dynamic(), "a contact's source is a dynamic body");
+        body.apply_linear_impulse_at_point(
+            frame.rotation * returned.impulse,
+            frame.translation + frame.rotation * returned.at,
+        );
+    }
 }
 
 /// Spawn one loose group's body (module doc): at its chunks' centre of mass, turned as its
-/// building `(ordinal, scale, root pose)`, moving as the blows of `loads` leave it ([`launch`]).
+/// building `(ordinal, root pose)`, moving as its bounded plastic exchange leaves it ([`launch`]).
 fn spawn_piece(
     commands: &mut Commands,
     kind: &Arc<BuildingKind>,
-    structure: &Structure,
-    (building, scale, root): (u16, f32, Transform),
+    (building, root): (u16, Transform),
     group: &[usize],
-    loads: &[Load],
+    launch: Launch,
 ) {
-    let (centroid, colliders, velocity, spin) = launch(kind, structure, scale, group, loads);
+    let Launch {
+        centroid,
+        colliders,
+        velocity,
+        spin,
+        mass,
+        ..
+    } = launch;
     let at = root.translation + root.rotation * centroid;
     let mut elements: Vec<&str> = group
         .iter()
@@ -1500,7 +1724,7 @@ fn spawn_piece(
         "buildings: building {building} drops {} chunks ({:.0} kg, of {elements:?}) at {at:?}, \
          leaving at {:.3} m/s spinning {:.3} rad/s",
         group.len(),
-        group.iter().map(|&c| structure.chunks[c].mass).sum::<f32>(),
+        mass,
         velocity.length(),
         spin.length(),
     );
@@ -1525,7 +1749,7 @@ fn spawn_piece(
             parent.spawn((
                 Transform::IDENTITY,
                 collider,
-                ColliderDensity(structure.chunks[c].material.density),
+                ColliderDensity(kind.layout.materials[c].density),
                 piece_layers(),
                 kind.chunk_friction(c),
                 chunk_volume(kind, c),

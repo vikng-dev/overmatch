@@ -36,11 +36,17 @@
 //!
 //! Filled on the authority only, where the destruction laws run; a replica's stays empty.
 
+use std::collections::BTreeMap;
+
 use avian3d::dynamics::solver::SolverConfig;
 use avian3d::dynamics::solver::constraint_graph::ConstraintGraph;
 use avian3d::dynamics::solver::contact::ContactConstraintPoint;
 use avian3d::dynamics::solver::schedule::{SolverSystems, SubstepSchedule, SubstepSolverSystems};
-use avian3d::prelude::{ContactGraph, PhysicsLengthUnit, PhysicsSchedule, SleepThreshold};
+use avian3d::dynamics::solver::solver_body::SolverBodyInertia;
+use avian3d::prelude::{
+    ComputedCenterOfMass, ContactGraph, PhysicsLengthUnit, PhysicsSchedule, Position, Rotation,
+    SleepThreshold,
+};
 use bevy::prelude::*;
 
 use crate::ClientReplica;
@@ -96,11 +102,21 @@ impl Resting {
     }
 }
 
+/// A contact source's solver inertia at the step's start, in world terms, including locked
+/// axes. Shared by all its contacts: launch must count their combined momentum and torque once.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct BodyInertia {
+    pub(crate) centre: Vec3,
+    pub(crate) inverse_mass: Vec3,
+    pub(crate) inverse_inertia: Mat3,
+}
+
 /// Every structure contact's transfer over the last physics step, and every resting contact's
 /// (module doc).
 #[derive(Resource, Debug, Default)]
 pub(crate) struct ContactTransfers {
     points: Vec<ContactTransfer>,
+    inertias: BTreeMap<Entity, BodyInertia>,
     resting: Vec<Resting>,
     /// The last step's length, s.
     dt: f32,
@@ -124,6 +140,14 @@ struct Kept {
 }
 
 impl ContactTransfers {
+    /// The source inertia recorded with this step's contacts, shared across all its points.
+    pub(crate) fn inertia(&self, body: Entity) -> BodyInertia {
+        *self
+            .inertias
+            .get(&body)
+            .expect("a departing body's load came from this step's recorded contacts")
+    }
+
     /// The points of every pair whose body sleeps against a structure, each pair once, in the
     /// order their bodies fell asleep.
     pub(crate) fn resting(&self) -> &[Resting] {
@@ -191,13 +215,20 @@ fn keep(
     graph: Res<ConstraintGraph>,
     contacts: Res<ContactGraph>,
     structures: Query<(), With<StructureBody>>,
-    rests: Query<&SleepThreshold>,
+    bodies: Query<(
+        &SleepThreshold,
+        &SolverBodyInertia,
+        &Position,
+        &Rotation,
+        &ComputedCenterOfMass,
+    )>,
     length_unit: Res<PhysicsLengthUnit>,
     time: Res<Time>,
     mut transfers: ResMut<ContactTransfers>,
 ) {
     let ContactTransfers {
         points,
+        inertias,
         resting,
         dt,
         steps,
@@ -219,6 +250,7 @@ fn keep(
             .map(|&transfer| Resting { transfer, dt: *dt }),
     );
     points.clear();
+    inertias.clear();
     kept.clear();
     last.clear();
     *dt = time.delta_secs();
@@ -270,11 +302,15 @@ fn keep(
                 first: points.len(),
                 sign,
             });
-            let rest_speed = rests
-                .get(body)
-                .expect("Avian requires a SleepThreshold on every body its solver moves")
-                .linear
-                * length_unit.0;
+            let (rest, inertia, position, rotation, com) = bodies.get(body).expect(
+                "Avian requires sleeping, pose and solver inertia on every dynamic contact body",
+            );
+            let rest_speed = rest.linear * length_unit.0;
+            inertias.entry(body).or_insert_with(|| BodyInertia {
+                centre: position.0 + rotation.0 * com.0,
+                inverse_mass: inertia.effective_inv_mass(),
+                inverse_inertia: inertia.effective_inv_angular_inertia().to_mat3(),
+            });
             for (point, contact) in constraint.points.iter().zip(&manifold.points) {
                 points.push(ContactTransfer {
                     structure,
@@ -462,6 +498,15 @@ mod tests {
         for point in &app.world().resource::<ContactTransfers>().points {
             if point.body == body {
                 assert_eq!(point.structure, structure, "the point names its structure");
+                let inertia = app.world().resource::<ContactTransfers>().inertia(body);
+                let arm = (point.point - inertia.centre).cross(point.normal);
+                let inverse_mass = point.normal.dot(inertia.inverse_mass * point.normal)
+                    + arm.dot(inertia.inverse_inertia * arm);
+                assert!(
+                    (inverse_mass.recip() - point.effective_mass).abs()
+                        <= 2e-5 * point.effective_mass,
+                    "the source snapshot reproduces the solver's point effective mass"
+                );
                 transfer += point.impulse;
             }
         }

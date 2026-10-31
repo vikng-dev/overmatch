@@ -553,14 +553,32 @@ pub(crate) struct Load {
 }
 
 /// Where a load comes from: what its blow shares momentum with.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) enum Origin {
     /// A field (a round's line, a fragment, a blast): its blow is its own law's, and it has no
     /// mass to share with what it frees.
     Field,
     /// A body in contact, by its entity: it shares its blow's momentum with whatever the blow
-    /// frees.
-    Body(Entity),
+    /// frees. `mass` is its effective mass along the contact normal at the load point, kg.
+    Body {
+        body: Entity,
+        mass: f32,
+        /// Closing speed along the normal at the solver's start, m/s; shared launch caps read it.
+        speed: f32,
+    },
+}
+
+impl Origin {
+    /// The plastic share against a receiver's inverse effective mass (kg⁻¹). DERIVED:
+    /// `m_receiver / (m_source + m_receiver)`, written without an infinite hinge mass when
+    /// a load acts on the hinge. A field is the zero-source-mass limit of this same exchange.
+    pub(crate) fn share(self, inverse_mass: f32) -> f32 {
+        let mass = match self {
+            Self::Field => 0.0,
+            Self::Body { mass, .. } => mass,
+        };
+        1.0 / (1.0 + mass * inverse_mass)
+    }
 }
 
 impl Load {
@@ -1098,7 +1116,8 @@ fn plane_bucket(offset: f32) -> i64 {
 /// section alone holds to the ground about the section's hinge, the edge of the section that the
 /// turn presses (the bending axis is that of the blows' angular impulse in the plane about the
 /// section's centroid, `Σ (x − c) × J`), and the section fails when the angular impulse about the
-/// hinge reaches the impulse whose rotational energy pays for opening the section and for carrying
+/// hinge, with each body's plastic share against the hinge effective mass, reaches the
+/// impulse whose rotational energy pays for opening the section and for carrying
 /// the group's weight with it, `√(2 I (Σ G_f A + E_g))`: `I` the group's moment of inertia about
 /// the hinge (each chunk a ball of its volume), `Σ G_f A` each joint's seam fracture energy over
 /// its area, and `E_g` the work against gravity of raising the group's centre of mass over the
@@ -1293,11 +1312,6 @@ fn section_failure(
         .map(|joint| across.dot(joint.centroid - centre) - (joint.area / PI).sqrt())
         .fold(f32::INFINITY, f32::min);
     let hinge = centre + across * back;
-    let total: Vec3 = on_group().map(|load| load.blow).sum();
-    let demand = (moment + (centre - hinge).cross(total)).dot(axis);
-    if demand <= 0.0 {
-        return None;
-    }
     let inertia: f32 = group
         .iter()
         .map(|&i| {
@@ -1307,6 +1321,21 @@ fn section_failure(
             chunk.mass * (r.length_squared() - r.dot(axis).powi(2) + 0.4 * own * own)
         })
         .sum();
+    let demand: f32 = on_group()
+        .map(|load| {
+            let moment = (load.at - hinge).cross(load.blow).dot(axis);
+            // A zero blow has no direction and contributes no angular impulse.
+            let lever = if load.blow == Vec3::ZERO {
+                0.0
+            } else {
+                moment / load.blow.length()
+            };
+            moment * load.origin.share(lever * lever / inertia)
+        })
+        .sum();
+    if demand <= 0.0 {
+        return None;
+    }
     // The work the turn does against the group's weight where the section bears it (`n` rising,
     // the weight pressing the plane): the opened group still stands on the plane and leaves only
     // past the hinge, its centre of mass raised to the top of its circle about it when the turn
@@ -1698,7 +1727,7 @@ fn unseat(
     let total: Vec3 = loads
         .iter()
         .filter(|load| inside(load.chunk))
-        .map(|load| load.blow)
+        .map(|load| load.blow * load.origin.share(1.0 / mass))
         .sum();
     let press = total.dot(support);
     if press > 0.0 {
@@ -3380,5 +3409,91 @@ mod tests {
                 assert!(failures.is_empty() && fell.is_empty(), "{case}");
             }
         }
+    }
+    /// A BODY'S DEMAND IS ITS PLASTIC EXCHANGE WITH THE HELD HINGE MASS (the game's
+    /// environment destruction model). The section and seated-part laws rely on that share;
+    /// feeding them the whole blow, the group's free mass, or its total mass fails the sweep.
+    /// The field and vanishing-source-mass verdicts agree on either side of failure. Fixture
+    /// masses and heights below are ASSUMED; the hinge inertia and demands are DERIVED.
+    #[test]
+    fn body_demand_uses_the_held_hinge_mass_and_fields_are_the_zero_mass_limit() {
+        let mass = 28.8;
+        let structure = cubes(&[[0, 0, 0], [0, 1, 0]], 0, &[0], mass);
+        let section = [joint_between(&structure, 0, 1)];
+        let joint = structure.joints[section[0]];
+        let top = structure.chunks[1];
+        let hinge = joint.centroid - Vec3::Z * (joint.area / PI).sqrt();
+        let r = top.centroid - hinge;
+        let own = (3.0 * top.volume / (4.0 * PI)).cbrt();
+        let inertia = mass * (r.length_squared() - r.x * r.x + 0.4 * own * own);
+        for height in [1e-4, 0.05, 0.2, 1.0] {
+            let at = hinge + Vec3::Y * height;
+            let field = Load {
+                chunk: 1,
+                at,
+                energy: 0.0,
+                blow: Vec3::NEG_Z * 100.0,
+                press: Vec3::ZERO,
+                origin: Origin::Field,
+            };
+            let failure = section_failure(&structure, &section, &[1], &[field]).unwrap();
+            let lever = at.y - hinge.y;
+            let hinge_mass = inertia / (lever * lever);
+            for ratio in [0.001, 0.1, 1.0, 10.0, 1000.0] {
+                let origin = Origin::Body {
+                    body: Entity::PLACEHOLDER,
+                    mass: ratio * hinge_mass,
+                    speed: 3.0,
+                };
+                let body = Load { origin, ..field };
+                let reduced = section_failure(&structure, &section, &[1], &[body]).unwrap();
+                let expected = failure.demand / (1.0 + ratio);
+                assert!(
+                    (reduced.demand - expected).abs() <= expected * 2e-5,
+                    "height {height}, ratio {ratio}: {} vs {expected}",
+                    reduced.demand
+                );
+                assert_eq!(reduced.capacity, failure.capacity);
+            }
+            for scale in [0.99, 1.01] {
+                let field = Load {
+                    blow: field.blow * (scale * failure.capacity / failure.demand),
+                    ..field
+                };
+                let body = Load {
+                    origin: Origin::Body {
+                        body: Entity::PLACEHOLDER,
+                        mass: 1e-12,
+                        speed: 3.0,
+                    },
+                    ..field
+                };
+                let mut left = WallState::new(&structure);
+                let mut right = left.clone();
+                let a = structural(
+                    &structure,
+                    &mut left,
+                    &[field],
+                    &mut SectionCache::default(),
+                );
+                let b = structural(
+                    &structure,
+                    &mut right,
+                    &[body],
+                    &mut SectionCache::default(),
+                );
+                assert_eq!(left, right, "height {height}, threshold scale {scale}");
+                assert_eq!(a, b, "a field is the vanishing-source-mass exchange");
+            }
+        }
+        let origin = Origin::Body {
+            body: Entity::PLACEHOLDER,
+            mass: 1e12,
+            speed: 3.0,
+        };
+        assert!(
+            origin.share(1.0) < 1e-11,
+            "an infinite source mass is the opposite limit"
+        );
     }
 }

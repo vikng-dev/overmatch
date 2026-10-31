@@ -350,8 +350,11 @@ A body at rest against a structure (a pile on a wall, or a body Avian's `Constan
 The reading keeps the points of the last step it did move them, once, while Avian holds the pair sleeping and touching, and drops them when the pair wakes or ends.
 Their press stands on the structure: every run of the laws on it carries the press once, and the press starts no run, so rubble asleep on a wall costs nothing until something else loads the wall.
 
-Status after lane 3 (#235): every contact reaches the laws as a load with its blow, press and origin, and changes nothing yet.
-No law reads a press until lane 5, and the structural check and a freed group's launch read a field's blow alone until lane 4 gives a body's its plastic share: read whole, a heavy body's blow would hand a light group its momentum.
+Contacts reach the laws with their blow, press and source effective mass at each point.
+The structural energy check reads the body's plastic share against the held hinge mass; rest lift and slide read the share against the translating group's mass.
+A freed group launches against its free collider mass and inertia, and the source receives the rest at the world contact in the same post-physics law pass, before the next solver step.
+A body blow on dust returns whole: dust has no dynamic carrier. A held chunk returns nothing; the failing tick's press stays with the standing structure.
+No law reads a press until the strength-with-forces slice, and local punch rings and masonry shear data remain unbuilt; this slice does not establish that a tank can break a wall.
 
 **Two limits on every section.**
 A force must beat the section's strength: the weight check generalised, gravity one force beside each press and each blow's least mean force `blow / dt`.
@@ -367,6 +370,16 @@ A group that breaks free leaves with the plastic share against its free effectiv
 The body gets back `blow − J_launch` at the contact point, so a body that breaks through slows by the momentum the freed group took, no more.
 Momentum is conserved by construction, and no energy is created (**DERIVED**: with `m_red = m_b m_f / (m_b + m_f)`, the body's loss exceeds the group's gain by `½ m_red v_n²`, the plastic loss the fracture work is drawn from).
 The launch reads the free mass, never the hinge mass, which grows without bound near the hinge and would create energy.
+**DERIVED limit check:** at fixed blow, a source mass tending to zero gives the field's whole blow in both demand and launch; an infinite source mass gives a vanishing share.
+The study's test wording that uses a very large source mass for the field limit contradicts this formula; the tests follow the formula.
+
+Simultaneous departures connected by shared source bodies in one contact deposit share a kinetic budget across buildings; disjoint contacts remain independent.
+Each point first takes its free-mass share. Those impulses keep their relative sizes, then one scale caps their combined exchange at the common velocity along that combined impulse.
+**DERIVED:** with scale `s`, total kinetic energy changes by `-s W + s² Q/2`, so the plastic minimum is `s = W/Q`, clamped to the interval from zero to one.
+`W` is the impulses' work against the sources' closing velocities, less the freed groups' field-driven motion; `Q` sums every freed group's linear and angular response and each source body's response to its **combined** impulse and torque.
+The source response uses the solver's recorded inertia, including locked axes. A source is counted once even when it frees several groups; several sources freeing one group count that carrier once.
+Fields keep their whole impulse. The cap can only reduce body shares, and the complement still returns at each contact point.
+This prevents independent shares from creating energy when simultaneous contacts share bodies. It preserves the isolated-contact formula; it does not re-solve the relative contact distribution chosen by the static solver.
 
 **Rejected: option A**, every piece a finite-mass body joined by breakable springs inside the solver: the compliant-seam reference model below, run in Avian with custom joints.
 Its visible result is the same, since masonry does not visibly flex, and no study could bound its cost: **DERIVED** 34,890 bodies and 97,980 joints and anchors with 30 houses in play, from house_1's 1,163 chunks, 3,185 joints and 81 anchors (**MEASURED**, `house_1.building.ron`).
