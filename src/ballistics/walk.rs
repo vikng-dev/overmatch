@@ -1993,6 +1993,9 @@ pub struct DiscWalk {
     pub radius: f32,
     /// Lateral offsets, index-aligned with `walks`. `offsets[0]` is `ZERO` — the AXIS sample.
     pub offsets: Vec<Vec3>,
+    /// Metres each sample's walk covers from its own start: what it can say anything about is
+    /// `t ∈ [0, length]`.
+    pub length: f32,
     /// The per-sample walks, RETAINED. The staged handoff has to export which primitives each
     /// sample is inside at the transit plane, and neither the events nor the per-entity presence
     /// carry primitive identity — without this the caller would have to infer the seed state, which
@@ -2185,6 +2188,7 @@ pub fn walk_disc(
         frame: corridor.frame,
         radius: corridor.radius,
         offsets: corridor.samples.iter().map(|s| s.offset).collect(),
+        length: corridor.length,
         walks,
         events,
     })
@@ -2857,8 +2861,26 @@ pub fn begin(entrance: &DiscWalk, shot: &Shot, laws: &WalkLaws) -> Begin {
     // The handoff plane is the mean entrance surface; the transit ray is the DISC AXIS crossing it.
     // `axis · n̄ < 0` always (every contributing entry face leans against the ray), so this cannot
     // divide by zero.
+    //
+    // A sample hands off where its ray crosses that plane, kept to the span its own walk covered,
+    // `[0, length]`: outside it the walk holds no presence to seed from. Behind the start lies ground
+    // the ray swept before this corridor (`resolve::Interior`), already charged; past the end, ground
+    // no corridor has walked. The plane leaves that span on the samples that never touched the
+    // surface whenever the mean surface is oblique to them: the far wall of a bore met across its
+    // width, a curved face met at a graze. Clamped, a sample's transit begins on ground it walked, so
+    // it neither walks charged material twice nor starts past material it has not met.
     let denominator = entrance.axis.dot(normal);
-    let plane = |from: Vec3| ((event.entry_position - from).dot(normal) / denominator) as f64;
+    let length = f64::from(entrance.length);
+    let plane = |from: Vec3| {
+        let t = ((event.entry_position - from).dot(normal) / denominator) as f64;
+        if t < 0.0 {
+            0.0
+        } else if t > length {
+            length
+        } else {
+            t
+        }
+    };
     let axis_t = plane(entrance.origin);
     let handoff = entrance.origin + entrance.axis * axis_t as f32;
     let seeds = entrance

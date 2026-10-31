@@ -616,6 +616,7 @@ fn launch_turrets_on_cookoff(
         (With<Turret>, Without<LaunchedTurret>),
     >,
     parents: Query<&ChildOf>,
+    locals: Query<&Transform>,
     mut commands: Commands,
 ) {
     for ammo_owner in &cooked_ammo {
@@ -624,7 +625,13 @@ fn launch_turrets_on_cookoff(
             if !is_descendant_of(turret, tank, &parents) {
                 continue;
             }
-            let pose = global.compute_transform();
+            // Detached, the turret is the root avian composes its armour colliders' scale from
+            // (`ColliderTransform`), so it carries the scale the hierarchy composed for it, never
+            // one read back out of the world matrix: decomposing a rotated `GlobalTransform` rounds
+            // each column's length, which leaves a unit scale an ULP off 1, and the collector
+            // refuses armour at any scale but a bit-exact 1 (`ballistics::collect`).
+            let mut pose = global.compute_transform();
+            pose.scale = composed_scale(turret, &parents, &locals);
             let up = Vec3::from(global.up());
             let right = Vec3::from(global.right());
             let forward = Vec3::from(global.forward());
@@ -662,6 +669,22 @@ fn launch_turrets_on_cookoff(
                 ));
         }
     }
+}
+
+/// The scale `entity` reaches the world at as avian composes a collider's: the componentwise
+/// product of every `Transform::scale` from the hierarchy's root down to `entity`, root first
+/// (`ColliderTransform` propagation). A subtree re-rooted at `entity` with this scale keeps every
+/// collider's scale bit for bit.
+fn composed_scale(entity: Entity, parents: &Query<&ChildOf>, locals: &Query<&Transform>) -> Vec3 {
+    let mut chain = vec![entity];
+    while let Ok(parent) = parents.get(chain[chain.len() - 1]) {
+        chain.push(parent.parent());
+    }
+    chain
+        .iter()
+        .rev()
+        .filter_map(|&link| locals.get(link).ok())
+        .fold(Vec3::ONE, |scale, local| scale * local.scale)
 }
 
 fn is_descendant_of(mut entity: Entity, ancestor: Entity, parents: &Query<&ChildOf>) -> bool {
@@ -828,6 +851,111 @@ mod tests {
             world.get::<AngularInertia>(turret).unwrap().tensor(),
             expected.tensor()
         );
+    }
+
+    /// A launched turret's armour reaches the world at a bit-exact unit scale, whatever pose the
+    /// tank and turret were in. The collector refuses armour at any other scale
+    /// (`ballistics::collect`), and avian composes each collider's scale from its root's
+    /// `Transform` (`ColliderTransform`), so a turret whose scale is read back out of its rotated
+    /// world matrix, an ULP off 1 for most poses, fails closed every round that meets it.
+    ///
+    /// FIXTURE DATA: sixteen poses, at least one of whose world matrix decomposes off 1 (asserted,
+    /// so the test cannot pass vacuously).
+    #[test]
+    fn a_launched_turret_keeps_its_armour_at_unit_scale() {
+        use super::*;
+        use avian3d::prelude::{Collider, PhysicsPlugins, RigidBody};
+        use bevy::time::TimeUpdateStrategy;
+        use std::time::Duration;
+
+        let mut app = App::new();
+        app.add_plugins((
+            MinimalPlugins,
+            bevy::transform::TransformPlugin,
+            // Avian's collider cache reads `AssetEvent<Mesh>`.
+            AssetPlugin::default(),
+            PhysicsPlugins::default(),
+        ))
+        .init_asset::<Mesh>()
+        .insert_resource(TimeUpdateStrategy::ManualDuration(Duration::from_millis(
+            16,
+        )))
+        .add_systems(Update, launch_turrets_on_cookoff);
+        // Avian registers its diagnostics resources in `Plugin::finish`, which a bare `update()`
+        // loop skips.
+        while app.plugins_state() == bevy::app::PluginsState::Adding {
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        app.finish();
+        app.cleanup();
+
+        let mut tanks = Vec::new();
+        let mut armour = Vec::new();
+        let mut decomposes_off_one = false;
+        for i in 0..16 {
+            let i = i as f32;
+            let hull = Transform::from_xyz(20.0 * i, 0.0, 0.0).with_rotation(Quat::from_euler(
+                EulerRot::YXZ,
+                0.37 * i,
+                0.05 * i,
+                -0.03 * i,
+            ));
+            let ring =
+                Transform::from_xyz(0.0, 1.5, 0.3).with_rotation(Quat::from_rotation_y(0.2 * i));
+            decomposes_off_one |= (GlobalTransform::from(hull) * ring)
+                .compute_transform()
+                .scale
+                .to_array()
+                .map(f32::to_bits)
+                != [1.0f32.to_bits(); 3];
+            let tank = app.world_mut().spawn((hull, RigidBody::Static)).id();
+            let turret = app
+                .world_mut()
+                .spawn((
+                    Turret,
+                    TurretBody {
+                        mass: 1000.0,
+                        inertia_extents: Vec3::ONE,
+                    },
+                    ring,
+                    ChildOf(tank),
+                ))
+                .id();
+            armour.push(
+                app.world_mut()
+                    .spawn((
+                        Collider::cuboid(1.0, 0.5, 1.0),
+                        Transform::IDENTITY,
+                        ChildOf(turret),
+                    ))
+                    .id(),
+            );
+            tanks.push(tank);
+        }
+        assert!(
+            decomposes_off_one,
+            "no fixture pose decomposes off a unit scale, so nothing here is tested"
+        );
+        // The world matrices are propagated before anything cooks off.
+        for _ in 0..4 {
+            app.update();
+        }
+        for &tank in &tanks {
+            app.world_mut().spawn((VolumeOf(tank), CookedOff));
+        }
+        for _ in 0..4 {
+            app.update();
+        }
+        for collider in armour {
+            let parent = app.world().get::<ChildOf>(collider).unwrap().parent();
+            assert!(app.world().get::<LaunchedTurret>(parent).is_some());
+            let scale = app.world().get::<Collider>(collider).unwrap().scale();
+            assert_eq!(
+                scale.to_array().map(f32::to_bits),
+                [1.0f32.to_bits(); 3],
+                "a launched turret's armour reached the world at scale {scale:?}"
+            );
+        }
     }
 
     /// FIXTURE DATA (the shipped sheet): the launched turret's mass and inertia box before they

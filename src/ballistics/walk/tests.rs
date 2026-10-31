@@ -3836,3 +3836,49 @@ fn sequential_layers_advance_in_order_and_cost_both() {
     assert!(!hard_first.doses.contains_key(&volume(2)));
     assert!(soft_first.doses.contains_key(&volume(1)));
 }
+
+/// Every sample hands off on the span its own entrance walk covered, `t ∈ [0, length]`.
+///
+/// A seed is the walk's presence at the hand-off `t`, and outside the walked span there is none to
+/// read: behind the start lies ground the ray swept before this corridor, past the end ground no
+/// corridor has walked. A seed read there is a guess, and the transit resumed on it fails closed on
+/// material the sample sits in (`UnexpectedExit`). The mean entrance plane leaves the span on the
+/// samples that never touched the surface when it is oblique to them: here a plate tilted 50° whose
+/// edge runs along the axis, met by half the disc just past the start (its plane crosses the other
+/// half behind it) and just short of the end (past it).
+///
+/// FIXTURE DATA: the tilt, depths and chords; a thin plate near the end so its exit closes inside
+/// the corridor.
+#[test]
+fn every_hand_off_lies_on_the_span_its_sample_walked() {
+    let laws = WalkLaws::default();
+    let tilt = 50f32.to_radians();
+    let normal = Vec3::new(0.0, tilt.sin(), -tilt.cos());
+    let frame = DiscFrame::from_axis_and_reference(AXIS, Vec3::Y).unwrap();
+    let offsets = disc_offsets(&frame, 0.044, DEFAULT_RING);
+    let length = 2.0;
+    // (front face on the axis, chord, which side of the disc meets the plate)
+    for (front, chord, met_above) in [(0.02, 0.1, true), (1.98, 0.005, false)] {
+        let corridor = disc_along(
+            Vec3::ZERO,
+            AXIS,
+            frame,
+            0.044,
+            length,
+            &[Slab::at(1, 0, front, normal, chord)],
+            |index| (offsets[index].y >= 0.0) == met_above || offsets[index].y == 0.0,
+        );
+        let walked = walk_disc(&corridor, &table(&[(1, 1000.0)]), &laws).unwrap();
+        let Begin::Transit(request) = begin(&walked, &AP_88, &laws) else {
+            panic!("front {front}: the plate is entered")
+        };
+        for seed in &request.seeds {
+            assert!(
+                (0.0..=f64::from(length)).contains(&seed.t),
+                "front {front}: sample {} hands off at t = {} on a walk of [0, {length}]",
+                seed.sample,
+                seed.t
+            );
+        }
+    }
+}
