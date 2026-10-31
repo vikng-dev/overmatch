@@ -109,12 +109,44 @@ const FILE_HEADER: &str = "\
 // ordered by hand, paving gripping best and mud least.
 ";
 
+/// Why the table could not be read or written: the file's I/O, its RON, a value [`GroundTypes::parse`]
+/// refuses, or the table's own serialization. Each keeps its source, so the editor's status line
+/// (`track_prints::tuning`) and the load-time panic say which.
+#[derive(Debug)]
+pub(crate) enum GroundTableError {
+    /// Reading or writing `path` failed.
+    Io {
+        path: PathBuf,
+        source: std::io::Error,
+    },
+    /// The text is not the table's RON (a malformed file, a missing or unknown field).
+    Ron(ron::error::SpannedError),
+    /// The text parses and states a value outside its domain, or lacks a pack's ground: the
+    /// refusal names the ground and the field.
+    Refused(String),
+    /// The table could not be written as RON.
+    Serialize(ron::Error),
+}
+
+impl std::fmt::Display for GroundTableError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Io { path, source } => write!(f, "{}: {source}", path.display()),
+            Self::Ron(err) => write!(f, "{err}"),
+            Self::Refused(why) => f.write_str(why),
+            Self::Serialize(err) => write!(f, "cannot write the table as RON: {err}"),
+        }
+    }
+}
+
 impl GroundTypes {
     /// The table at `path`, or why it could not be read.
-    pub(crate) fn load(path: &Path) -> Result<Self, String> {
-        let text =
-            std::fs::read_to_string(path).map_err(|err| format!("{}: {err}", path.display()))?;
-        Self::parse(&text).map_err(|err| format!("{}: {err}", path.display()))
+    pub(crate) fn load(path: &Path) -> Result<Self, GroundTableError> {
+        let text = std::fs::read_to_string(path).map_err(|source| GroundTableError::Io {
+            path: path.to_owned(),
+            source,
+        })?;
+        Self::parse(&text)
     }
 
     /// The table `text` holds, or why it is refused: a malformed file, a missing field or one the
@@ -123,8 +155,8 @@ impl GroundTypes {
     /// gain no material holds; a negative depth or softness prints upward), or a table lacking a
     /// ground a terrain pack names ([`crate::terrain_blend::BASE_GROUND`],
     /// [`crate::terrain_blend::BLEND_LAYERS`]).
-    pub(crate) fn parse(text: &str) -> Result<Self, String> {
-        let table: Self = ron::de::from_str(text).map_err(|err| err.to_string())?;
+    pub(crate) fn parse(text: &str) -> Result<Self, GroundTableError> {
+        let table: Self = ron::de::from_str(text).map_err(GroundTableError::Ron)?;
         for (name, ground) in &table.types {
             let print = &ground.print;
             for (field, value, in_domain, domain) in [
@@ -160,9 +192,9 @@ impl GroundTypes {
                 ),
             ] {
                 if !in_domain {
-                    return Err(format!(
+                    return Err(GroundTableError::Refused(format!(
                         "ground type {name:?}: `{field}` is {value}; state it as {domain}"
-                    ));
+                    )));
                 }
             }
         }
@@ -173,11 +205,11 @@ impl GroundTypes {
         );
         for ground in packs {
             if !table.types.contains_key(ground) {
-                return Err(format!(
+                return Err(GroundTableError::Refused(format!(
                     "a terrain pack is ground type {ground:?}, which the table lacks (it has \
                      {:?}); add a {ground:?} entry with its print block and friction",
                     table.types.keys().collect::<Vec<_>>()
-                ));
+                )));
             }
         }
         Ok(table)
@@ -192,7 +224,8 @@ impl GroundTypes {
     /// prints, so it aborts naming the file (ADR-0011).
     pub(crate) fn load_shipped() -> Self {
         let path = Self::shipped_path();
-        Self::load(&path).unwrap_or_else(|err| panic!("the ground-type table: {err}"))
+        Self::load(&path)
+            .unwrap_or_else(|err| panic!("the ground-type table {}: {err}", path.display()))
     }
 
     /// The friction the terrain collider carries: the base pack's ground
@@ -215,20 +248,25 @@ impl GroundTypes {
     }
 
     /// The table as the file holds it.
-    pub(crate) fn to_file_text(&self) -> Result<String, String> {
+    pub(crate) fn to_file_text(&self) -> Result<String, GroundTableError> {
         let body = ron::ser::to_string_pretty(self, ron::ser::PrettyConfig::new())
-            .map_err(|err| err.to_string())?;
+            .map_err(GroundTableError::Serialize)?;
         Ok(format!("{FILE_HEADER}{body}\n"))
     }
 
     /// Write the table to `path`, replacing it through a sibling temporary file so a failed write
     /// never leaves half a table.
-    pub(crate) fn save(&self, path: &Path) -> Result<(), String> {
+    pub(crate) fn save(&self, path: &Path) -> Result<(), GroundTableError> {
         let text = self.to_file_text()?;
         let temporary = path.with_extension("ron.tmp");
-        std::fs::write(&temporary, text)
-            .map_err(|err| format!("{}: {err}", temporary.display()))?;
-        std::fs::rename(&temporary, path).map_err(|err| format!("{}: {err}", path.display()))
+        std::fs::write(&temporary, text).map_err(|source| GroundTableError::Io {
+            path: temporary.clone(),
+            source,
+        })?;
+        std::fs::rename(&temporary, path).map_err(|source| GroundTableError::Io {
+            path: path.to_owned(),
+            source,
+        })
     }
 }
 
@@ -308,12 +346,16 @@ mod tests {
         let block = "print: (softness_mm_per_kpa: 0.5, depth_cap_mm: 50.0, darkening: 0.2, \
                      roughness_gain: 1.0)";
         for (missing, gravel) in [("print", "friction: 0.5"), ("friction", block)] {
-            let error = GroundTypes::parse(&table_text(gravel)).expect_err(missing);
+            let error = GroundTypes::parse(&table_text(gravel))
+                .expect_err(missing)
+                .to_string();
             assert!(error.contains(missing), "{missing}: {error}");
         }
         let without_mud = table_text(&format!("{block}, friction: 0.5"))
             .replace(", \"mud\": (", ", \"marsh\": (");
-        let error = GroundTypes::parse(&without_mud).expect_err("a pack's ground is missing");
+        let error = GroundTypes::parse(&without_mud)
+            .expect_err("a pack's ground is missing")
+            .to_string();
         assert!(error.contains("\"mud\""), "{error}");
         let table = GroundTypes::parse(&table_text(&format!("{block}, friction: 0.5")))
             .expect("the full fixture table loads");
@@ -361,7 +403,7 @@ mod tests {
                 values[index] = value;
                 let [softness, cap, darkening, roughness, friction] = values;
                 let text = table_text(&gravel(softness, cap, darkening, roughness, friction));
-                let error = GroundTypes::parse(&text).expect_err(value);
+                let error = GroundTypes::parse(&text).expect_err(value).to_string();
                 assert!(
                     error.contains("\"gravel\"") && error.contains(&format!("`{field}`")),
                     "{field} {value}: {error}"

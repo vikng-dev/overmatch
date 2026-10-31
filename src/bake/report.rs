@@ -10,17 +10,14 @@ use std::fmt;
 ///
 /// `Door` precedes every pass: it carries the door's own mechanical refusals, which happen before a
 /// check OF the asset can be reached — an input the door failed to supply is not a defect of the
-/// model.
+/// model. The `.blend` source pass (`L1.*`) is the Blender side's (`scripts/tank/`) and emits no
+/// finding of this shape; a stage joins here with its first check.
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug)]
 pub enum Stage {
     /// The wrapper's own mechanical refusals (`door.*`).
     Door,
-    /// The `.blend` source pass (`L1.*`).
-    Source,
     /// The shared consumer contract (`L2.*`) — this module's callers.
     Consumer,
-    /// The GLB derivation: texture encode and repack (`D.*`).
-    Derivation,
 }
 
 /// A finding's tier. Declared in report order, so a sort puts the build-failing rows first.
