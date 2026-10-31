@@ -101,7 +101,7 @@ TankSpec(
                     // OLVAR OG 40 12 16, 8F/4R [ANCHOR]. Per-gear top speeds @ 3000 rpm
                     // [ANCHOR — hamby / Jentz]; R1–R4 mirror F1–F4 [ANCHOR]. Reductions
                     // derive at build against the spec's own sprocket radius (the
-                    // 19-vs-20-tooth discrepancy rule). DERIVED F8 @ governed 2500 → 10.48 m/s.
+                    // 19-vs-20-tooth discrepancy rule). DERIVED F8 @ governed 2500 → 10.509 m/s.
                     forward_speeds_kmh: [2.8, 4.3, 6.2, 9.2, 14.1, 20.9, 30.5, 45.4],
                     reverse_speeds_kmh: [2.8, 4.3, 6.2, 9.2],
                     // Auto-shift bands (INFERRED policy): up at 92% of governed; down at
