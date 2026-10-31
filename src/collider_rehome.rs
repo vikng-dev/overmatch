@@ -32,7 +32,7 @@ use bevy::prelude::*;
 /// `On<Insert, ColliderOf>`: drop the collider's pairs when any names another body for it.
 pub(crate) fn drop_stale_pairs(
     rehomed: On<Insert, ColliderOf>,
-    colliders: Query<&ColliderOf, Without<ColliderDisabled>>,
+    colliders: Query<&ColliderOf>,
     graph: Option<Res<ContactGraph>>,
     mut commands: Commands,
 ) {
