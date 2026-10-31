@@ -7,6 +7,7 @@ import { describe, expect, it } from "vitest";
 import endReq from "../contract/end.request.json";
 import errorRes from "../contract/error.response.json";
 import heartbeatReq from "../contract/heartbeat.request.json";
+import closedHeartbeatReq from "../contract/heartbeat.closed.request.json";
 import joinReq from "../contract/join.request.json";
 import joinRes from "../contract/join.response.json";
 import locationsRes from "../contract/locations.response.json";
@@ -81,6 +82,18 @@ describe("contract/*.json matches the handlers", () => {
 		await age("0.5.0", 61_000);
 		await runDurableObjectAlarm(registry("0.5.0"));
 		conforms(await (await call("POST", "/v1/join/status", { ticket: t })).json(), failedRes);
+	});
+
+	it("the closed heartbeat example keeps a running Battle registered for the game server", async () => {
+		await join(joinReq);
+		const s = launched();
+		edgegap.ready(edgegap.deployment(0));
+		await webhook(s.id);
+		const res = await call("POST", `/v1/servers/${s.id}/heartbeat`, closedHeartbeatReq, { authorization: `Bearer ${s.secret}` });
+		expect(res.status).toBe(204);
+		expect(await registry("0.5.0").snapshot()).toEqual([
+			expect.objectContaining({ id: s.id, state: "ready", server_state: closedHeartbeatReq.state, outcome: null, ended_at: null }),
+		]);
 	});
 
 	it("error", async () => {

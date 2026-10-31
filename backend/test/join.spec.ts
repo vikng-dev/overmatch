@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { bringUp, call, join, launched, registry, ticket } from "./helpers";
+import { bringUp, call, heartbeat, join, launched, registry, ticket } from "./helpers";
 
 const V = "0.5.0";
 
@@ -107,6 +107,30 @@ describe("join-or-create", () => {
 		await call("POST", `/v1/servers/${s.id}/heartbeat`, { players: 1, capacity: 10, state: "closing" }, { authorization: `Bearer ${s.secret}` });
 		await join({ version: V, locations: ["Paris"], pings: {} });
 		expect(edgegap.count("POST", "/v1/deploy")).toBe(2);
+	});
+
+	it("routes a new ticket to an open server even when a closed Battle has room and a better ping", async () => {
+		await join({ version: V, locations: ["Paris"], pings: {} });
+		const closed = await bringUp(0, 4);
+		expect((await heartbeat(closed.id, closed.secret, { players: 4, capacity: 10, state: "closed" })).status).toBe(204);
+		await join({ version: V, locations: ["London"], pings: {} });
+		const open = await bringUp(1, 1);
+
+		const t = await join({ version: V, locations: ["Paris", "London"], pings: { Paris: 10, London: 40 } });
+		expect((await ticket(t)).key).toBe(open.key);
+		expect(edgegap.count("POST", "/v1/deploy")).toBe(2);
+	});
+
+	it("starts a new server for a ticket when the only Battle with room is closed", async () => {
+		await join({ version: V, locations: ["Paris"], pings: {} });
+		const closed = await bringUp(0, 1);
+		expect((await heartbeat(closed.id, closed.secret, { players: 1, capacity: 10, state: "closed" })).status).toBe(204);
+
+		const t = await join({ version: V, locations: ["Paris"], pings: {} });
+		expect(edgegap.count("POST", "/v1/deploy")).toBe(2);
+		expect(await ticket(t)).toEqual({ state: "starting" });
+		const next = await bringUp(1, 1);
+		expect((await ticket(t)).key).toBe(next.key);
 	});
 
 	it("versions never share servers", async () => {

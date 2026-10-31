@@ -48,7 +48,7 @@ type ServerRow = {
 	reason: string | null;
 	players: number;
 	capacity: number;
-	server_state: "open" | "closing" | null;
+	server_state: HeartbeatRequest["state"] | null;
 	address: string | null;
 	port: number | null;
 	netcode_key: string;
@@ -91,7 +91,7 @@ export type ServerSnapshot = {
 	reason: string | null;
 	players: number;
 	capacity: number;
-	server_state: "open" | "closing" | null;
+	server_state: HeartbeatRequest["state"] | null;
 	address: string | null;
 	port: number | null;
 	created_at: number;

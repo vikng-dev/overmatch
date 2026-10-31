@@ -65,12 +65,13 @@ export interface TicketResponse {
 	reason?: string;
 }
 
-/** What the server reports. `state` "open" accepts joins; "closing" refuses them (round over, exit
- *  pending). Fullness is derived from `players` and `capacity`, never reported. */
+/** What the server reports. `state` "open" accepts joins; "closed" keeps the Battle running with
+ *  joins shut until the next fill-up; "closing" refuses joins because exit is pending.
+ *  Fullness is derived from `players` and `capacity`, never reported. */
 export interface HeartbeatRequest {
 	players: number;
 	capacity: number;
-	state: "open" | "closing";
+	state: "open" | "closed" | "closing";
 }
 
 export interface EndRequest {

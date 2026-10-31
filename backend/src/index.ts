@@ -57,7 +57,7 @@ function parseHeartbeat(b: unknown): HeartbeatRequest | string {
 	const { players, capacity, state } = b as Record<string, unknown>;
 	if (!Number.isInteger(players) || (players as number) < 0) return "players: expected a non-negative integer";
 	if (!Number.isInteger(capacity) || (capacity as number) < 1) return "capacity: expected a positive integer";
-	if (state !== "open" && state !== "closing") return 'state: expected "open" or "closing"';
+	if (state !== "open" && state !== "closed" && state !== "closing") return 'state: expected "open", "closed" or "closing"';
 	return { players: players as number, capacity: capacity as number, state };
 }
 

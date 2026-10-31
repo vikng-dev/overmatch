@@ -54,6 +54,31 @@ describe("heartbeats", () => {
 		await res.text();
 	});
 
+	it("refuse an unknown admission state without changing the registered server", async () => {
+		await join({ version: V, locations: ["Paris"], pings: {} });
+		const s = await bringUp(0, 1);
+		const before = await registry(V).snapshot();
+		const res = await call("POST", `/v1/servers/${s.id}/heartbeat`, { players: 2, capacity: 10, state: "paused" }, { authorization: `Bearer ${s.secret}` });
+		expect(res.status).toBe(400);
+		expect(await res.json()).toEqual({ error: 'state: expected "open", "closed" or "closing"' });
+		expect(await registry(V).snapshot()).toEqual(before);
+	});
+
+	it("round-trip open to closed to open so the next fill-up reuses the same server", async () => {
+		const existing = await join({ version: V, locations: ["Paris"], pings: {} });
+		const s = await bringUp(0, 1);
+		for (const state of ["open", "closed", "open"] as const) {
+			expect((await heartbeat(s.id, s.secret, { players: 1, capacity: 10, state })).status).toBe(204);
+			expect(await registry(V).snapshot()).toEqual([
+				expect.objectContaining({ id: s.id, state: "ready", server_state: state, outcome: null, ended_at: null }),
+			]);
+			expect((await ticket(existing)).key).toBe(s.key);
+		}
+		const next = await join({ version: V, locations: ["Paris"], pings: {} });
+		expect((await ticket(next)).key).toBe(s.key);
+		expect(edgegap.count("POST", "/v1/deploy")).toBe(1);
+	});
+
 	it("before the ready webhook fetch the address themselves", async () => {
 		const t = await join({ version: V, locations: ["Paris"], pings: {} });
 		const s = launched();
@@ -209,6 +234,28 @@ describe("the alarm", () => {
 		await runDurableObjectAlarm(registry(V));
 		expect(await registry(V).snapshot()).toEqual([]);
 		expect(await runDurableObjectAlarm(registry(V))).toBe(false);
+	});
+
+	it("keeps a heartbeating closed Battle while reaping a silent server and forgetting an ended one", async () => {
+		await join({ version: V, locations: ["Paris"], pings: {} });
+		const closed = await bringUp(0, 1);
+		expect((await heartbeat(closed.id, closed.secret, { players: 1, capacity: 10, state: "closed" })).status).toBe(204);
+		await join({ version: V, locations: ["London"], pings: {} });
+		const silent = await bringUp(1, 1);
+		await join({ version: V, locations: ["Tokyo"], pings: {} });
+		const ended = await bringUp(2, 1);
+		expect((await call("POST", `/v1/servers/${ended.id}/end`, {}, { authorization: `Bearer ${ended.secret}` })).status).toBe(204);
+
+		await age(V, 601 * S); // DERIVED: beyond ENDED_RETENTION_S and HEARTBEAT_DEADLINE_S.
+		expect((await heartbeat(closed.id, closed.secret, { players: 1, capacity: 10, state: "closed" })).status).toBe(204);
+		expect(await runDurableObjectAlarm(registry(V))).toBe(true);
+		const rows = await registry(V).snapshot();
+		expect(rows.find((r) => r.id === closed.id)).toMatchObject({ state: "ready", server_state: "closed", outcome: null, ended_at: null });
+		expect(rows.find((r) => r.id === silent.id)).toMatchObject({ state: "ended", outcome: "lost" });
+		expect(rows.find((r) => r.id === ended.id)).toBeUndefined();
+		expect(edgegap.deployment(0).status).toBe("Status.READY");
+		expect(edgegap.count("DELETE", `/v1/stop/${closed.deploymentId}`)).toBe(0);
+		expect(await session(closed.id)).toMatchObject({ outcome: null, ended_at: null });
 	});
 });
 

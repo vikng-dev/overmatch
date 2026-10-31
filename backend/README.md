@@ -104,9 +104,14 @@ The Worker passes these through Edgegap `env_vars` (example: `contract/server-en
 
 The server must: listen on its fixed UDP port (`game` in the Edgegap version); send its first
 heartbeat as soon as it listens and then every interval (`{players, capacity, state}`, full record,
-`state` `"open"` or `"closing"`); exit on a 410; and on empty-timeout or any clean exit, POST `end`
+`state` `"open"`, `"closed"` or `"closing"`); exit on a 410; and on empty-timeout or any clean exit, POST `end`
 and then exit. The Worker drops a ready server after `HEARTBEAT_DEADLINE_S` without a heartbeat and
 stops its deployment.
+
+`open` accepts joins while below capacity. `closed` means the Battle is running with late join
+closed: it receives no new tickets, stays registered while heartbeats continue, and may return to
+`open` for the next fill-up. `closing` means the server has decided to exit and accepts no joins.
+The Worker must accept `closed` before game servers start reporting it (#240).
 
 ## Configuration
 

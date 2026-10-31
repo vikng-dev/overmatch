@@ -2,7 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 import { adminPage } from "../src/admin";
 import { Registry } from "../src/registry";
 import { sweep, SWEEP_MAX_STOPS } from "../src/sweep";
-import { bringUp, call, env, expectStatus, join, launched, registry } from "./helpers";
+import { bringUp, call, env, expectStatus, heartbeat, join, launched, registry } from "./helpers";
 
 const V = "0.5.0";
 const S = 1000;
@@ -26,6 +26,19 @@ async function leakedAfterEnd(n: number, location: string): Promise<string> {
 }
 
 describe("the orphan sweep", () => {
+	it("keeps a closed Battle's live claim while stopping an ended deployment", async () => {
+		await join({ version: V, locations: ["Paris"], pings: {} });
+		const closed = await bringUp(0, 1);
+		expectStatus(await heartbeat(closed.id, closed.secret, { players: 1, capacity: 10, state: "closed" }), 204);
+		const ended = await leakedAfterEnd(1, "London");
+
+		expect(await sweep(env)).toMatchObject({ listed: 2, stopped: 1, failed: 0, error: null });
+		expect(running(closed.deploymentId)).toBe(true);
+		expect(running(ended)).toBe(false);
+		expect((await registry(V).snapshot()).find((r) => r.id === closed.id)).toMatchObject({ state: "ready", server_state: "closed", outcome: null, ended_at: null });
+		expect(edgegap.count("DELETE", `/v1/stop/${closed.deploymentId}`)).toBe(0);
+	});
+
 	it("never stops a tagged deployment whose status names no version, and counts it unattributed", async () => {
 		const orphan = edgegap.foreign([UNKNOWN_TAG]);
 		const other = edgegap.foreign(["someone-else"]);
