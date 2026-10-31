@@ -22,16 +22,16 @@
 //!   the ground crack the section when their angular impulse about the section's hinge would spend
 //!   the section's fracture energy and, where the section bears the group, topple the group over
 //!   it.
-//! * **Weight** ([`weigh`]). After a wall changes, each group that one section alone holds and
-//!   whose support the change moved cracks the section when its weight, as a direct pull and a
-//!   bending moment across it, reaches the seam's tensile strength. A part held through several
-//!   sections at once (a span between two piers) is left standing and counted: the design's step 3
-//!   (`.agents/docs/design/wall-destruction.md`, "Structural calculation").
+//! * **Strength** ([`weigh`]). From changed supports and pressed chunks, each group that one
+//!   section alone holds is checked under gravity plus the loads' presses. Their resultant force
+//!   and moment set the section's peak tensile stress. A part held through several sections at
+//!   once stays unassessed and is counted; the wall design's "Structural calculation" owns that
+//!   limit and the alternatives.
 //! * **Rests** ([`unseat`], inside [`weigh`] and [`structural`]). A joint between two components
 //!   the building's data marks resting ([`Bond::Resting`]: a beam laid on a wall, nothing fixing
-//!   it) carries no tension: a part whose only way to the ground is over rests stands while its
-//!   centre of mass lies over the rests that bear it and their slope is within the friction of
-//!   their pairs, and while no push can carry it over them, turned or slid; else it is freed whole.
+//!   it) carries no tension: the resultant of gravity and presses must bear into the rests, its
+//!   pressure centre inside their bearing hull, its tangent within their friction. A blow can
+//!   also carry the part off, turned or slid; then it is freed whole.
 //! * **Support** ([`loose_groups`]). A chunk group with no path of intact joints to a ground anchor
 //!   or to a buried chunk ([`Chunk::buried`]: the soil holds it) falls as one body.
 //! * **The blast field** ([`blast_rays`]). A charge's blast energy leaves it uniformly over the
@@ -534,7 +534,8 @@ pub(crate) fn wear(
 /// crushing matter at its point, which wears the chunk's pool and stresses the joints about the
 /// cavity it opens ([`strike`]); its blow is the momentum it delivers there, which bends the
 /// sections that hold the chunk and leaves with a group it frees ([`structural`]); its press is
-/// the force it holds there through the tick. A field's blow is its own law's: a round's line
+/// the force it holds there through the tick, read with gravity by [`weigh`]. A field's blow is
+/// its own law's: a round's line
 /// ([`Load::line`]), a fragment's or spall ray's stop ([`Load::field`]), a blast ray's
 /// ([`Load::blast`]), none of which presses. A body's contact (`super::breakage`) spends no energy
 /// and its blow and press are what the solver moved through the point. The wall design owns the
@@ -882,15 +883,17 @@ pub(crate) enum Cause {
     /// the rests it stands on ([`unseat`]): the angular impulse about the hinge against the impulse
     /// that would pay for opening the section and lifting the group over it, N·s·m.
     Push,
-    /// The held group's weight ([`weigh`]): the peak tension across the section against its seam's
+    /// Gravity and presses on the held group ([`weigh`]): peak tension against its seam's
     /// tensile strength, Pa.
     Weight,
-    /// A part standing on rests alone tipped off them by its weight ([`unseat`]): how far its
-    /// centre of mass reaches past the rests that bear it, horizontally, against nothing, m
+    /// A sustained resultant lifts a part off its bearing rests: force away from them, N.
+    LiftForce,
+    /// A part tipped off its rests by gravity and presses ([`unseat`]): how far its pressure
+    /// centre reaches past the bearing hull, horizontally, against nothing, m
     /// (infinite when none bears). The section is every rest it stood on, as for the two below.
     Tip,
-    /// A part standing on rests alone slid down them by its weight ([`unseat`]): the tangent of
-    /// their slope against the friction coefficient their pairs raise, dimensionless.
+    /// A part slid by gravity and presses ([`unseat`]): tangent force over compression against
+    /// the friction coefficient their pairs raise, dimensionless.
     Slide,
     /// A part standing on rests alone lifted off them by a push ([`unseat`]): the push's impulse
     /// along their normal away from them, against the impulse that raises the part's centre of
@@ -1232,7 +1235,14 @@ pub(crate) fn structural(
             continue;
         }
         let group = bonded_group(chunk, &graph, &mut seen);
-        if let Some(failure) = unseat(structure, state, &group, loads, &mut steps) {
+        if let Some(failure) = unseat(
+            structure,
+            state,
+            &group,
+            loads,
+            Vec3::NEG_Y * GRAVITY,
+            &mut steps,
+        ) {
             for &j in &failure.joints {
                 state.cracked[j] = true;
             }
@@ -1403,11 +1413,11 @@ pub(crate) struct Weighed {
     pub steps: usize,
 }
 
-/// The weight check, run after a wall changed: the chunks whose support the change moved
-/// ([`touched`]: each side of a joint in `cracked`, each chunk joined to one in `dusted`, ascending)
-/// are the only ones it starts from, so a wall nothing changed costs nothing and a building the
-/// bake made too weak to stand stays up until a change reaches the weak part. For each section
-/// that cuts a touched chunk's path to the ground ([`ground_path`]), the group it alone holds
+/// The strength check under gravity plus `loads`' presses. It starts from pressed chunks and
+/// chunks whose support changed ([`touched`]: each side of a joint in `cracked`, each neighbour of
+/// `dusted`, ascending), plus `unloaded` chunks whose former press disappeared. With none of
+/// those seeds it does no work. For each section cutting a touched chunk's path to the ground
+/// ([`ground_path`]), the group it alone holds
 /// with that chunk ([`held`]) hangs from the section's joints that border it, its one cut set:
 /// statics fixes the force and moment through it exactly, and [`weight_failure`] reads them as a
 /// stress. The worst section at or over its strength cracks, the chunks on either side of it are
@@ -1415,7 +1425,7 @@ pub(crate) struct Weighed {
 /// and none closes, so the passes end), so a failure can expose the next. A freed group falls by support ([`fall`]) and the
 /// physics.
 ///
-/// A touched chunk that no section alone holds with a group (its weight reaching the ground through
+/// A touched chunk that no section alone holds with a group (its loads reaching the ground through
 /// several sections at once, as a span between two piers, or through a cut set no single plane
 /// holds, or a group that also bears on a rest or a cracked seam from below,
 /// [`bears_on_contact`]) stands unassessed and is counted ([`Weighed::unassessed`]): a static
@@ -1429,13 +1439,28 @@ pub(crate) fn weigh(
     state: &mut WallState,
     dusted: &[usize],
     cracked: &[usize],
+    loads: &[Load],
+    unloaded: &[usize],
     sections: &mut SectionCache,
 ) -> Weighed {
     let mut weighed = Weighed::default();
-    if dusted.is_empty() && cracked.is_empty() {
+    if dusted.is_empty()
+        && cracked.is_empty()
+        && unloaded.is_empty()
+        && !loads.iter().any(|load| load.press != Vec3::ZERO)
+    {
         return weighed;
     }
     let mut touched = touched(structure, state, dusted, cracked, &mut weighed.steps);
+    touched.extend(
+        loads
+            .iter()
+            .filter(|load| load.press != Vec3::ZERO)
+            .map(|load| load.chunk),
+    );
+    touched.extend_from_slice(unloaded);
+    touched.sort_unstable();
+    touched.dedup();
     // Each chunk's joints, the anchors too: what a held group may bear on besides its section.
     let mut incident = vec![Vec::new(); structure.chunks.len()];
     for (index, joint) in structure.joints.iter().enumerate() {
@@ -1478,7 +1503,16 @@ pub(crate) fn weigh(
                     continue;
                 };
                 let failure = (!bears_on_contact(structure, state, &incident, &group))
-                    .then(|| weight_failure(structure, section, &group, &mut weighed.steps))
+                    .then(|| {
+                        weight_failure(
+                            structure,
+                            section,
+                            &group,
+                            loads,
+                            Vec3::NEG_Y * GRAVITY,
+                            &mut weighed.steps,
+                        )
+                    })
                     .flatten();
                 weighed.steps += group.len();
                 if let Some(failure) = failure {
@@ -1503,6 +1537,7 @@ pub(crate) fn weigh(
                 &graph,
                 &touched,
                 &paths,
+                loads,
                 &mut weighed.steps,
             ) {
                 Some(failure) => failure,
@@ -1585,7 +1620,8 @@ const BEARS: f32 = 1e-3;
 /// The rest check, for the touched chunks with no bonded path to the ground (`paths`, one per
 /// chunk of `touched`, [`ground_path`]): each such chunk's bonded group (its chunks joined to it
 /// through intact bonded joints, `graph`) stands on rests alone, and the rest law reads it under
-/// its weight ([`unseat`], no push). The first group, in `touched` order, that leaves its rests is
+/// gravity and the presses in `loads` ([`unseat`]). The first group, in `touched` order, that leaves
+/// its rests is
 /// the failure; `None` when every group stays. Adds the chunks it walks and the joints it reads to
 /// `steps`.
 fn unseated(
@@ -1594,6 +1630,7 @@ fn unseated(
     graph: &Graph,
     touched: &[usize],
     paths: &[Option<Vec<usize>>],
+    loads: &[Load],
     steps: &mut usize,
 ) -> Option<Failure> {
     let mut seen = vec![false; structure.chunks.len()];
@@ -1603,7 +1640,14 @@ fn unseated(
         }
         let group = bonded_group(start, graph, &mut seen);
         *steps += group.len();
-        if let Some(failure) = unseat(structure, state, &group, &[], steps) {
+        if let Some(failure) = unseat(
+            structure,
+            state,
+            &group,
+            loads,
+            Vec3::NEG_Y * GRAVITY,
+            steps,
+        ) {
             return Some(failure);
         }
     }
@@ -1611,7 +1655,8 @@ fn unseated(
 }
 
 /// The rest law: whether `group` (ascending), a part with no bonded path to the ground, leaves the
-/// rests it stands on under its weight and the blows of `loads` on its chunks. Its rests are the
+/// rests it stands on under gravity and the presses and blows of `loads` on its chunks. Its rests
+/// are the
 /// live intact rests joining it to standing chunks outside it; those that bear it are the ones
 /// whose normal toward it rises past [`BEARS`], each a disc of its area in its plane (the tension
 /// check's reading of a joint), pressed evenly over their area by what holds the part up
@@ -1623,10 +1668,10 @@ fn unseated(
 /// friction can turn against the slide, exact where the rests are parallel), the part leaves, in
 /// this order of reading:
 ///
-/// 1. tipped by its weight ([`Cause::Tip`]) when the vertical through its centre of mass passes
-///    outside the horizontal convex hull of the bearing discs, where vertical forces in the rests
-///    alone can no longer hold its weight's moment;
-/// 2. slid by its weight ([`Cause::Slide`]) when the slope beats the friction, `tan θ > μ`;
+/// 1. lifted by the sustained resultant ([`Cause::LiftForce`]) when it pulls away from the rests;
+///    tipped ([`Cause::Tip`]) when its pressure centre, fixed by the resultant moment, crosses
+///    outside the horizontal bearing hull (ASSUMED: bearing plane at the discs' mean height);
+/// 2. slid ([`Cause::Slide`]) when tangent force exceeds friction times normal compression;
 /// 3. turned over by the blows ([`Cause::Push`]) when their angular impulse about the bearing
 ///    rests' hinge pays for lifting the part over it, a section with no seam to open
 ///    ([`section_failure`]), which reads only their moment, so a blow through the centre along
@@ -1650,12 +1695,14 @@ fn unseated(
 /// it has no rest left (it is loose, support's to drop, [`fall`]). Once the part is freed the
 /// physics' contact and friction decide whether it slides, rocks or settles. ASSUMED: a rest bears
 /// no part of another's weight that reaches it through the part it carries; the law reads each
-/// part's own weight on its own rests. Adds the joints and chunks it reads to `steps`.
+/// part's own weight and external presses on its own rests. Adds the joints and chunks it reads
+/// to `steps`.
 fn unseat(
     structure: &Structure,
     state: &WallState,
     group: &[usize],
     loads: &[Load],
+    gravity: Vec3,
     steps: &mut usize,
 ) -> Option<Failure> {
     let inside = |c: usize| group.binary_search(&c).is_ok();
@@ -1719,15 +1766,38 @@ fn unseat(
     });
     let centre = moment / mass;
     let hull = convex_hull(&mut rim);
-    let reach = beyond(&hull, (centre.x, centre.z));
-    if reach > 0.0 {
-        return open(Cause::Tip, reach, 0.0);
+    if hull.len() < 3 {
+        return open(Cause::Tip, f32::INFINITY, 0.0);
     }
-    // The hull spans an area, so some rest bears and `N` rises.
+    // ASSUMED: non-coplanar bearing discs share one plane at their area centroid's height,
+    // as their horizontal bearing hull does. The resultant's moment fixes its pressure centre.
+    let area: f32 = bearing.iter().map(|&j| structure.joints[j].area).sum();
+    let seat_centre = seat / area;
+    let (force, torque) = force_wrench(structure, group, loads, gravity, seat_centre);
+    let support = normal.normalize();
+    let compression = -force.dot(support);
+    if force.y > 0.0 || compression < 0.0 {
+        return open(Cause::LiftForce, force.y.max(-compression), 0.0);
+    }
+    if force.y == 0.0 && torque != Vec3::ZERO {
+        return open(Cause::Tip, f32::INFINITY, 0.0);
+    }
+    if force.y < 0.0 {
+        let pressure_centre = seat_centre + Vec3::new(torque.z / force.y, 0.0, -torque.x / force.y);
+        let reach = beyond(&hull, (pressure_centre.x, pressure_centre.z));
+        if reach > 0.0 {
+            return open(Cause::Tip, reach, 0.0);
+        }
+    }
     let friction = grip / normal.length();
-    let slope = normal.x.hypot(normal.z) / normal.y;
-    if slope > friction {
-        return open(Cause::Slide, slope, friction);
+    let tangent = (force + support * compression).length();
+    if tangent > friction * compression {
+        let ratio = if compression > 0.0 {
+            tangent / compression
+        } else {
+            f32::INFINITY
+        };
+        return open(Cause::Slide, ratio, friction);
     }
     if !loads
         .iter()
@@ -1740,7 +1810,6 @@ fn unseat(
     {
         return open(Cause::Push, turn.demand, turn.capacity);
     }
-    let support = normal.normalize();
     let total: Vec3 = loads
         .iter()
         .filter(|load| inside(load.chunk))
@@ -1876,11 +1945,43 @@ fn touched(
     touched
 }
 
+/// The group's resultant force (N) and moment about `about` (N m). Gravity is an acceleration,
+/// supplying one force at each chunk's centroid; each external press supplies another at its point.
+fn force_wrench(
+    structure: &Structure,
+    group: &[usize],
+    loads: &[Load],
+    gravity: Vec3,
+    about: Vec3,
+) -> (Vec3, Vec3) {
+    let result = group
+        .iter()
+        .map(|&c| {
+            let chunk = &structure.chunks[c];
+            (chunk.centroid, gravity * chunk.mass)
+        })
+        .chain(
+            loads
+                .iter()
+                .filter(|load| group.binary_search(&load.chunk).is_ok())
+                .map(|load| (load.at, load.press)),
+        )
+        .fold((Vec3::ZERO, Vec3::ZERO), |(force, moment), (at, push)| {
+            (force + push, moment + (at - about).cross(push))
+        });
+    assert!(
+        result.0.is_finite() && result.1.is_finite(),
+        "finite chunk weights and presses have a finite resultant force and moment"
+    );
+    result
+}
+
 /// The peak tension across the joints of `section` that border `group` (ascending), the group the
 /// section alone holds ([`weigh`]), against their seam's tensile strength: `None` when the group
-/// lies on both sides of the section's plane. The joints carry the group's weight `W` and its
-/// moment about their area centroid `c`, `M = Σ (x − c) × m g`; read as a stress linear over the
-/// plane (Navier: plane sections stay plane), the direct pull is `−W·n / A` (`n` the plane's normal
+/// lies on both sides of the section's plane. The joints carry resultant force `F = Σ m g + Σ P`
+/// and moment `M = Σ (x − c) × F_i` about their area centroid `c`, each press `P` at its point.
+/// Read as a stress linear over the plane (Navier: plane sections stay plane), direct pull is
+/// `F·n / A` (`n` the plane's normal
 /// toward the group, tension positive, so a group hanging below its section pulls and one standing
 /// on it presses), and the bending part `M_b` of the moment (in the plane) sets the stress's
 /// gradient `g` from `J g = n × M_b`, `J` the joints' second moment of area about `c`. Each joint
@@ -1896,6 +1997,8 @@ fn weight_failure(
     structure: &Structure,
     section: &[usize],
     group: &[usize],
+    loads: &[Load],
+    gravity: Vec3,
     steps: &mut usize,
 ) -> Option<Failure> {
     let inside = |c: usize| group.binary_search(&c).is_ok();
@@ -1920,7 +2023,7 @@ fn weight_failure(
             Some((j, if toward.dot(n) >= 0.0 { n } else { -n }))
         })
         .collect();
-    *steps += section.len() + group.len() + border.len();
+    *steps += section.len() + group.len() + border.len() + loads.len();
     let &(_, normal) = border.first()?;
     if border.iter().any(|(_, n)| n.dot(normal) <= 0.0) {
         return None;
@@ -1932,15 +2035,8 @@ fn weight_failure(
         .map(|&(j, _)| joints[j].centroid * joints[j].area)
         .sum::<Vec3>()
         / area;
-    let (mass, moment) = group.iter().fold((0.0, Vec3::ZERO), |(mass, moment), &i| {
-        let chunk = &structure.chunks[i];
-        let weight = Vec3::NEG_Y * (GRAVITY * chunk.mass);
-        (
-            mass + chunk.mass,
-            moment + (chunk.centroid - centre).cross(weight),
-        )
-    });
-    let direct = -mass * GRAVITY * normal.y / area;
+    let (force, moment) = force_wrench(structure, group, loads, gravity, centre);
+    let direct = force.dot(normal) / area;
     let bending = moment - normal * moment.dot(normal);
     let (u, v) = plane_axes(normal);
     let offset = |j: usize| {
@@ -3256,6 +3352,8 @@ mod tests {
             &mut state,
             &dusted,
             &[],
+            &[],
+            &[],
             &mut SectionCache::default(),
         );
         let fell = fall(structure, &mut state);
@@ -3371,17 +3469,25 @@ mod tests {
         let structure = cubes(&cells, 1, &[], 3.0 * cantilever_limit(n));
         let mut state = WallState::new(&structure);
         let mut sections = SectionCache::default();
-        let idle = weigh(&structure, &mut state, &[], &[], &mut sections);
+        let idle = weigh(&structure, &mut state, &[], &[], &[], &[], &mut sections);
         assert_eq!(idle, Weighed::default(), "no change, no work");
         let half = full_pool(&structure.chunks[2]) / 2.0;
         assert!(!wear(&structure, &mut state, 2, half), "worn, not dust");
-        let idle = weigh(&structure, &mut state, &[], &[], &mut sections);
+        let idle = weigh(&structure, &mut state, &[], &[], &[], &[], &mut sections);
         assert_eq!(idle, Weighed::default(), "a wear alone, no work");
         assert!(fall(&structure, &mut state).is_empty());
 
         let tip = n as usize;
         let dusted = spend(&structure, &mut state, &[tip]);
-        let weighed = weigh(&structure, &mut state, &dusted, &[], &mut sections);
+        let weighed = weigh(
+            &structure,
+            &mut state,
+            &dusted,
+            &[],
+            &[],
+            &[],
+            &mut sections,
+        );
         let root = joint_between(&structure, 0, 1);
         assert_eq!(cracks(&weighed), vec![(Cause::Weight, vec![root])]);
         assert!(weighed.steps > 0);
@@ -3438,6 +3544,8 @@ mod tests {
                 &structure,
                 &mut state,
                 &dusted,
+                &[],
+                &[],
                 &[],
                 &mut SectionCache::default(),
             );
@@ -3829,5 +3937,191 @@ mod tests {
             origin.share(1.0) < 1e-11,
             "an infinite source mass is the opposite limit"
         );
+    }
+    /// GRAVITY IS ONE FORCE (the game's environment destruction model, study test 5).
+    /// The authority's strength and rest verdicts must be identical when the group's weight is
+    /// supplied instead as one press at its mass centroid with gravity off. Special-casing weight in
+    /// either the direct force or bending moment, or ignoring presses on rests, breaks this.
+    #[test]
+    fn gravity_is_one_force_at_the_groups_mass_centroid() {
+        let cells: Vec<_> = propped_arm(4).into_iter().take(5).collect();
+        for fraction in [0.98, 1.02] {
+            let structure = cubes(&cells, 1, &[], fraction * cantilever_limit(4));
+            let group = [1, 2, 3, 4];
+            let section = [joint_between(&structure, 0, 1)];
+            let mass: f32 = group.iter().map(|&c| structure.chunks[c].mass).sum();
+            let centroid = group
+                .iter()
+                .map(|&c| structure.chunks[c].centroid * structure.chunks[c].mass)
+                .sum::<Vec3>()
+                / mass;
+            let presses = [Load {
+                chunk: group[0],
+                at: centroid,
+                energy: 0.0,
+                blow: Vec3::ZERO,
+                press: Vec3::NEG_Y * (GRAVITY * mass),
+                peak: None,
+                origin: Origin::Field,
+            }];
+            let weight = weight_failure(
+                &structure,
+                &section,
+                &group,
+                &[],
+                Vec3::NEG_Y * GRAVITY,
+                &mut 0,
+            )
+            .unwrap();
+            let pressed =
+                weight_failure(&structure, &section, &group, &presses, Vec3::ZERO, &mut 0).unwrap();
+            assert_eq!(weight.joints, pressed.joints);
+            assert_eq!(weight.capacity, pressed.capacity);
+            assert!((weight.demand - pressed.demand).abs() < 1e-5 * weight.capacity);
+            assert_eq!(weight.demand >= weight.capacity, fraction > 1.0);
+            assert_eq!(pressed.demand >= pressed.capacity, fraction > 1.0);
+        }
+        let mut structure = cubes(&[[0, 0, 0], [0, 1, 0]], 0, &[0], 28.8);
+        let rest = joint_between(&structure, 0, 1);
+        structure.joints[rest].bond = Bond::Resting;
+        // ASSUMED fixture shifts: inside the bearing disc, and well outside it.
+        for shift in [0.0, 2.0 * CUBE] {
+            structure.chunks[1].centroid.x = structure.joints[rest].centroid.x + shift;
+            let top = structure.chunks[1];
+            let press = Load {
+                chunk: 1,
+                at: top.centroid,
+                energy: 0.0,
+                blow: Vec3::ZERO,
+                press: Vec3::NEG_Y * (top.mass * GRAVITY),
+                peak: None,
+                origin: Origin::Field,
+            };
+            let state = WallState::new(&structure);
+            let weight = unseat(&structure, &state, &[1], &[], Vec3::NEG_Y * GRAVITY, &mut 0);
+            let pressed = unseat(&structure, &state, &[1], &[press], Vec3::ZERO, &mut 0);
+            assert_eq!(weight, pressed);
+            assert_eq!(weight.is_some(), shift > 0.0);
+        }
+    }
+
+    /// A SUSTAINED FORCE OVERTURNS INDEPENDENTLY OF THE TICK (the game's environment destruction
+    /// model, study test 6). The authority's resting-panel law reads N, never N s: a force reading
+    /// built from F dt / dt must free the panel under 6 kN and hold under 4.5 kN at every rate.
+    /// ASSUMED fixture: 4 x 2 x 0.25 m, density 1845 kg/m3, sufficient base friction; DERIVED
+    /// mass 3690 kg, restoring moment 4524.9 N m, and force height 1 m above the bearing plane.
+    #[test]
+    fn sustained_overturning_is_independent_of_tick_rate() {
+        let mut structure = cubes(&[[0, 0, 0], [0, 1, 0]], 1, &[], 3690.0);
+        structure.chunks[1].centroid = Vec3::Y;
+        structure.chunks[1].volume = 2.0;
+        for chunk in &mut structure.chunks {
+            chunk.material.friction = 1.0;
+        }
+        // ASSUMED fixture bearing discs: their outer edges coincide with the panel's footprint.
+        let radius = 0.001;
+        structure.joints = [-1.0, 1.0]
+            .into_iter()
+            .flat_map(|x| {
+                [-1.0, 1.0].into_iter().map(move |z| Joint {
+                    a: 0,
+                    b: Side::Chunk(1),
+                    area: PI * radius * radius,
+                    centroid: Vec3::new(x * (2.0 - radius), 0.0, z * (0.125 - radius)),
+                    normal: Vec3::Y,
+                    bond: Bond::Resting,
+                })
+            })
+            .collect();
+        for hz in [64.0, 128.0, 256.0] {
+            let dt = 1.0 / hz;
+            for (force, leaves) in [(4500.0, false), (6000.0, true)] {
+                let load = Load {
+                    chunk: 1,
+                    at: Vec3::Y,
+                    energy: 0.0,
+                    blow: Vec3::ZERO,
+                    press: Vec3::Z * ((force * dt) / dt),
+                    peak: None,
+                    origin: Origin::Field,
+                };
+                let mut state = WallState::new(&structure);
+                let result = weigh(
+                    &structure,
+                    &mut state,
+                    &[],
+                    &[],
+                    &[load],
+                    &[],
+                    &mut SectionCache::default(),
+                );
+                assert_eq!(!result.failures.is_empty(), leaves, "{force} N at {hz} Hz");
+                assert_eq!(
+                    !fall(&structure, &mut state).is_empty(),
+                    leaves,
+                    "support agrees"
+                );
+                if leaves {
+                    assert_eq!(result.failures[0].cause, Cause::Tip);
+                }
+                println!("MEASURED panel {force} N at {hz} Hz: leaves {leaves}");
+            }
+        }
+    }
+
+    /// STATIC PRESSES SLIDE ONLY PAST FRICTION AND LIFT ONLY AGAINST COMPRESSION (the game's
+    /// environment destruction model). A resting component's authority law must read the force
+    /// resultant, including a stabilizing normal press. Ignoring that press or using impulse
+    /// capacities for steady forces fails these analytical limits (DERIVED from fixture mass,
+    /// gravity and paired friction; mass and load multipliers are ASSUMED fixture data).
+    #[test]
+    fn static_presses_respect_friction_and_bearing_compression() {
+        let mut structure = cubes(&[[0, 0, 0], [0, 1, 0]], 0, &[0], 28.8);
+        let rest = joint_between(&structure, 0, 1);
+        structure.joints[rest].bond = Bond::Resting;
+        let chunk = structure.chunks[1];
+        let weight = chunk.mass * GRAVITY;
+        let friction = crate::substances::pair_friction(
+            structure.chunks[0].material.friction,
+            chunk.material.friction,
+        );
+        let load = Load {
+            chunk: 1,
+            at: structure.joints[rest].centroid,
+            energy: 0.0,
+            blow: Vec3::ZERO,
+            press: Vec3::ZERO,
+            peak: None,
+            origin: Origin::Field,
+        };
+        for (force, expected) in [
+            (Vec3::Z * (0.99 * friction * weight), None),
+            (Vec3::Z * (1.01 * friction * weight), Some(Cause::Slide)),
+            (
+                Vec3::Z * (1.01 * friction * weight) - Vec3::Y * weight,
+                None,
+            ),
+            (Vec3::Y * (0.99 * weight), None),
+            (Vec3::Y * (1.01 * weight), Some(Cause::LiftForce)),
+        ] {
+            let mut state = WallState::new(&structure);
+            let result = weigh(
+                &structure,
+                &mut state,
+                &[],
+                &[],
+                &[Load {
+                    press: force,
+                    ..load
+                }],
+                &[],
+                &mut SectionCache::default(),
+            );
+            assert_eq!(
+                result.failures.first().map(|failure| failure.cause),
+                expected,
+                "{force}"
+            );
+        }
     }
 }

@@ -886,6 +886,8 @@ fn a_nailed_roof_stays_when_struck_and_breaks_its_nails_when_its_walls_go() {
             &mut live.state,
             &dusted,
             &[],
+            &[],
+            &[],
             &mut live.sections,
         );
         let groups = fracture::fall(&live.structure, &mut live.state);
@@ -2178,5 +2180,150 @@ fn tiny_exchanges_keep_their_plastic_share_without_underflow() {
                 .length()
                 <= f64::from(speed) * 2e-5 + f64::from(f32::from_bits(1))
         );
+    }
+}
+
+/// IDENTICAL HELD PRESSES REUSE THEIR VERDICT (the game's environment destruction model).
+/// The authority avoids repeating a steady push's strength walk, but a changed point, magnitude,
+/// or topology must recheck. Decreasing a stabilizing load cannot reuse the previous verdict.
+#[test]
+fn held_presses_recheck_changed_force_points_and_topology() {
+    let kind = shipped_house();
+    let c = kind
+        .layout
+        .structure(&kind.asset, 1.0)
+        .chunks
+        .iter()
+        .position(|chunk| chunk.buried)
+        .expect("the fixture has a soil-held chunk");
+    let mut live = Live::new(&kind, 1.0);
+    let mut press = Load {
+        chunk: c,
+        at: live.structure.chunks[c].centroid,
+        energy: 0.0,
+        blow: Vec3::ZERO,
+        press: Vec3::X,
+        peak: None,
+        origin: Origin::Field,
+    };
+    let run = |live: &mut Live, loads: &[Load]| run_laws(&kind.layout, live, loads, Vec::new());
+    assert!(run(&mut live, &[press]).weight_steps > 0);
+    assert_eq!(
+        run(&mut live, &[press]).weight_steps,
+        0,
+        "identical press holds"
+    );
+    press.press *= 0.5;
+    assert!(
+        run(&mut live, &[press]).weight_steps > 0,
+        "even a decrease rechecks"
+    );
+    assert_eq!(run(&mut live, &[press]).weight_steps, 0);
+    let removed = Load {
+        press: Vec3::ZERO,
+        ..press
+    };
+    assert!(
+        run(&mut live, &[removed]).weight_steps > 0,
+        "removal rechecks gravity at the old point"
+    );
+    assert_eq!(
+        run(&mut live, &[removed]).weight_steps,
+        0,
+        "removal has been checked"
+    );
+    press.press *= 4.0;
+    assert!(run(&mut live, &[press]).weight_steps > 0, "growth rechecks");
+    press.at += Vec3::Y * 0.01;
+    assert!(run(&mut live, &[press]).weight_steps > 0, "line moves");
+    assert_eq!(run(&mut live, &[press]).weight_steps, 0);
+    let (_, [other, _, _]) = fixture_chunks(&kind);
+    let dust = Load {
+        chunk: other,
+        at: live.structure.chunks[other].centroid,
+        energy: live.state.pool[other],
+        press: Vec3::ZERO,
+        ..press
+    };
+    assert!(
+        run(&mut live, &[press, dust]).weight_steps > 0,
+        "topology changes"
+    );
+    assert_eq!(
+        run(&mut live, &[press]).weight_steps,
+        0,
+        "the topology change already checked the final held verdict"
+    );
+}
+
+/// A STEP'S PRESSES JOIN EVERY DEPOSIT ONCE (the game's environment destruction model).
+/// The authority's strength check needs awake and sleeping presses while processing any load,
+/// in either deposit order. Dropping the awake press after its own contact deposit clears the
+/// held gate; counting it twice doubles the force. The soil-held fixture isolates that input
+/// invariant from fracture, using ASSUMED small forces and a zero-energy crossing.
+#[test]
+fn awake_and_sleeping_presses_join_every_deposit_once() {
+    use bevy::ecs::system::RunSystemOnce;
+    for contact_first in [false, true] {
+        let (mut app, root) = composed(false);
+        let kind = app.world().get::<Breakage>(root).unwrap().kind.clone();
+        let structure = kind.layout.structure(&kind.asset, 1.0);
+        let c = structure
+            .chunks
+            .iter()
+            .position(|chunk| chunk.buried)
+            .unwrap();
+        let at = structure.chunks[c].centroid;
+        let volume = app
+            .world_mut()
+            .query::<(Entity, &BuildingElement, &ChildOf)>()
+            .iter(app.world())
+            .find(|(_, element, parent)| {
+                parent.parent() == root && element.0 == kind.layout.element_of[c]
+            })
+            .unwrap()
+            .0;
+        let active = Load {
+            chunk: c,
+            at,
+            energy: 0.0,
+            blow: Vec3::ZERO,
+            press: Vec3::X,
+            peak: None,
+            origin: Origin::Field,
+        };
+        let sleeping = Load {
+            at: at + Vec3::Y * 0.001,
+            press: Vec3::X * 2.0,
+            ..active
+        };
+        app.world_mut()
+            .resource_mut::<RestingLoads>()
+            .0
+            .insert(root, vec![sleeping]);
+        let contacts = RawDeposit {
+            contacts: vec![(root, active)],
+            ..default()
+        };
+        let crossing = RawDeposit {
+            crossings: vec![(
+                vec![(volume, at - Vec3::X * 0.001, at + Vec3::X * 0.001, 0.0)],
+                Vec3::X,
+                0.0,
+            )],
+            ..default()
+        };
+        let deposits = if contact_first {
+            vec![contacts, crossing]
+        } else {
+            vec![crossing, contacts]
+        };
+        app.world_mut().resource_mut::<WallQueue>().0 = deposits;
+        app.world_mut().run_system_once(apply_deposits).unwrap();
+        let mut breakage = app.world_mut().get_mut::<Breakage>(root).unwrap();
+        let live = breakage.live();
+        let force: Vec3 = live.held_presses.iter().map(|&(_, _, force)| force).sum();
+        assert_eq!(force, Vec3::X * 3.0, "contact first: {contact_first}");
+        assert_eq!(live.held_presses.len(), 2, "each point once");
     }
 }

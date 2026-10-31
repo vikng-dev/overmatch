@@ -1170,6 +1170,8 @@ fn apply_deposit(
         &mut wall.state,
         &struck.dusted,
         &pushed,
+        &loads,
+        &[],
         &mut wall.sections,
     );
     applied.failures.extend(weighed.failures);

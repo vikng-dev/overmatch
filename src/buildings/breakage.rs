@@ -31,7 +31,8 @@
 //!   speed ([`ContactTransfers::split`]), all of a step's points one deposit. A point on an
 //!   unbreakable element loads nothing. A body asleep against a building presses it with what its
 //!   contact last held ([`RestingLoads`]): every run of the laws on that building carries the
-//!   press once, and it starts none. No body is read by its kind.
+//!   press once, and it starts none. Awake contacts' presses likewise join every deposit in
+//!   the physics step, once per point. No body is read by its kind.
 //! * **The order.** The laws run each deposit, building by building, in order: removal and the
 //!   push rule ([`fracture::strike`]), the structural check ([`fracture::structural`]), the weight
 //!   check on what those changed ([`fracture::weigh`]), support ([`fracture::fall`]).
@@ -388,6 +389,9 @@ pub(crate) struct Live {
     pub(crate) state: WallState,
     pub(crate) swapped: Vec<bool>,
     pub(crate) sections: SectionCache,
+    /// Presses already checked against the current topology: chunk, point (m), force (N).
+    /// Decreases are rechecked too: removing a stabilizing force can expose another's demand.
+    held_presses: Vec<(usize, Vec3, Vec3)>,
     /// Per law chunk: its holes, in record order (module doc).
     pub(crate) holes: Vec<Vec<Hole>>,
 }
@@ -399,6 +403,7 @@ impl Live {
             state: WallState::new(&structure),
             swapped: vec![false; kind.layout.elements.len()],
             sections: SectionCache::default(),
+            held_presses: Vec::new(),
             holes: vec![Vec::new(); structure.chunks.len()],
             structure,
         }
@@ -833,6 +838,17 @@ fn apply_deposits(mut p: DepositParam) {
     if p.queue.0.is_empty() {
         return;
     }
+    // A press lasts through the physics step, including every other deposit in this pass.
+    // The contact deposit retains its blow; its press joins every run exactly once here.
+    let mut presses: BTreeMap<Entity, Vec<Load>> = BTreeMap::new();
+    for &(root, load) in p.queue.0.iter().flat_map(|deposit| &deposit.contacts) {
+        if load.press != Vec3::ZERO {
+            presses.entry(root).or_default().push(Load {
+                blow: Vec3::ZERO,
+                ..load
+            });
+        }
+    }
     let tick = p.clock.as_deref().map_or(0, |clock| clock.0);
     let frames: BTreeMap<Entity, Frame> = p
         .buildings
@@ -948,12 +964,17 @@ fn apply_deposits(mut p: DepositParam) {
             // change marks the building for the refit (`reconcile`).
             let live = breakage.bypass_change_detection().live();
             let resting = p.resting.0.get(&root).map_or(&[][..], Vec::as_slice);
+            let pressing = presses.get(&root).map_or(&[][..], Vec::as_slice);
             let loads: Vec<Load> = taken
                 .line_loads
                 .into_iter()
                 .chain(Load::field(&taken.field))
                 .chain(blast)
-                .chain(taken.contacts.iter().copied())
+                .chain(taken.contacts.iter().map(|load| Load {
+                    press: Vec3::ZERO,
+                    ..*load
+                }))
+                .chain(pressing.iter().copied())
                 .chain(resting.iter().copied())
                 .collect();
             let changes = run_laws(&kind.layout, live, &loads, holes);
@@ -962,7 +983,7 @@ fn apply_deposits(mut p: DepositParam) {
                 taken.lines.len(),
                 taken.field.len(),
                 taken.blast.len(),
-                taken.contacts.len() + resting.len(),
+                taken.contacts.len().max(pressing.len()) + resting.len(),
             ];
             if !changes.events.is_empty() || loads.iter().any(|load| load.energy > 0.0) {
                 log_changes(&identity.id, &loads, counts, &changes);
@@ -1344,8 +1365,11 @@ impl BodyReturn {
 /// standing after the removal, and no law reads one. A field load on a chunk turned to dust
 /// went into crushing it and moves nothing; a body's blow there is returned whole because dust
 /// has no carrier. A queued contact on a chunk freed by an earlier deposit keeps the solver's
-/// stop: its carrier already launched, so refunding that contact would overlap the departing body. A held section reads the body's plastic share against its hinge effective mass;
-/// a freed group's launch reads its free effective mass. No law reads a press.
+/// stop: its carrier already launched, so refunding that contact would overlap the departing body.
+/// A held section reads the body's plastic share against its hinge effective mass; a freed group
+/// launches against its free effective mass. Gravity plus presses reach the strength and rest
+/// laws from changed supports and pressed chunks. An identical press set on unchanged topology
+/// reuses its held verdict; every changed force or point, including a decrease, rechecks.
 pub(crate) fn run_laws(
     layout: &Layout,
     live: &mut Live,
@@ -1393,11 +1417,25 @@ pub(crate) fn run_laws(
         .chain(failures.iter().flat_map(|failure| &failure.joints))
         .copied()
         .collect();
+    let presses: Vec<_> = loads
+        .iter()
+        .filter(|load| load.press != Vec3::ZERO)
+        .map(|load| (load.chunk, load.at, load.press))
+        .collect();
+    let unloaded: Vec<_> = live
+        .held_presses
+        .iter()
+        .map(|&(chunk, ..)| chunk)
+        .filter(|chunk| !presses.iter().any(|&(current, ..)| current == *chunk))
+        .collect();
+    let recheck = !struck.dusted.is_empty() || !pushed.is_empty() || presses != live.held_presses;
     let weighed = fracture::weigh(
         &live.structure,
         &mut live.state,
         &struck.dusted,
         &pushed,
+        if recheck { &loads } else { &[] },
+        &unloaded,
         &mut live.sections,
     );
     failures.extend(weighed.failures);
@@ -1406,6 +1444,9 @@ pub(crate) fn run_laws(
         .flat_map(|failure| failure.joints.iter().copied())
         .collect();
     let groups = fracture::fall(&live.structure, &mut live.state);
+    // The strength loop reached a held verdict on the final topology. A fall removes only
+    // groups with no live support path, so it changes no remaining held group's load path.
+    live.held_presses = presses;
     let joints = &live.structure.joints;
     let cracked_sides = struck
         .cracked
