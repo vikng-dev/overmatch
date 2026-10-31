@@ -366,8 +366,9 @@ impl TreeState {
 }
 
 /// A tree's body as spawned: its kind at the instance's uniform scale, every dimension here in
-/// world metres.
+/// world metres. A structure, whose contacts the solver's reading keeps.
 #[derive(Component, Debug, Clone)]
+#[require(crate::contact_transfer::StructureBody)]
 pub(crate) struct TreeBody {
     pub(crate) kind: Arc<TreeKind>,
     /// Segment bottoms above the base, then the tip: `prefix[k]` is segment `k`'s bottom,

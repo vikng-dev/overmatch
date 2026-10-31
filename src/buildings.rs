@@ -182,8 +182,9 @@ impl BuildingLibrary {
 #[component(immutable)]
 pub(crate) struct BuildingElement(pub(crate) u16);
 
-/// A building's root.
+/// A building's root: a structure, whose contacts the solver's reading keeps.
 #[derive(Component, Debug, Clone, Copy)]
+#[require(crate::contact_transfer::StructureBody)]
 pub(crate) struct BuildingBody;
 
 /// The collision filter of an intact element and of a standing chunk: hulls contact it and

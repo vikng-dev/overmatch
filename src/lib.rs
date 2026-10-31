@@ -52,6 +52,10 @@ mod collider_rehome;
 /// The command layer: device reads → player bindings → per-tank serializable `TankCommand`. The
 /// seam authoritative multiplayer hangs off; sim modules consume commands, never devices.
 mod command;
+/// What the physics solver moved through each contact between a standing structure and a dynamic
+/// body, per step (the game's environment destruction): the reading a body's contact load comes
+/// from. Mounted by `SimPlugin`.
+mod contact_transfer;
 /// The fixed-tick wall clock and the per-fixed-tick sim-COST recorder (`SPIKE_COST_TRACE=<path>`): an
 /// env-gated JSONL log of FixedUpdate tick time, the `ballistics::integrate_projectiles` share of it,
 /// and entity/projectile counts — the reusable measurement rig for the machine-gun-march cost spike.
@@ -750,9 +754,14 @@ impl Plugin for SimPlugin {
             (damage_cam::recorder::plugin, damage_cam::delivery::plugin),
         ));
         // Buildings breaking (the game's environment destruction): the authority's laws and
-        // record, every peer's colliders from it, and the rule loose pieces rest by. Separate
-        // call: the tuple above is at bevy's 15-plugin arity limit.
-        app.add_plugins((buildings::breakage::sim_plugin, debris::sim_plugin));
+        // record, every peer's colliders from it, the rule loose pieces rest by, and the solver's
+        // reading of every structure contact. Separate call: the tuple above is at bevy's
+        // 15-plugin arity limit.
+        app.add_plugins((
+            buildings::breakage::sim_plugin,
+            debris::sim_plugin,
+            contact_transfer::sim_plugin,
+        ));
     }
 }
 
