@@ -1037,10 +1037,10 @@ fn a_tank_too_soft_for_its_springs_rests_on_its_bump_stops() {
         let press: f32 = world
             .resource::<ContactTransfers>()
             .split()
-            .filter(|(point, _, _)| {
+            .filter(|(point, _, _, _)| {
                 point.body == tank && world.get::<BumpStop>(point.body_collider).is_some()
             })
-            .map(|(_, _, press)| -press.y)
+            .map(|(_, _, press, _)| -press.y)
             .sum();
         if press > 0.0 {
             pressed_ticks += 1;
