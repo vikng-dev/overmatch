@@ -56,7 +56,7 @@ use super::fracture::{
 use super::schema::BuildingAsset;
 use super::{BuildingElement, BuildingKind};
 use crate::ballistics::{
-    ArmourMark, BallisticVolume, CrossingEnd, PenetrationMarks, Projectile, ShellMarched,
+    ArmourMark, BallisticVolume, CrossingEnd, Envelope, PenetrationMarks, Projectile, ShellMarched,
     SpallMarks,
 };
 use crate::scatter::MapInstance;
@@ -1103,35 +1103,43 @@ fn spawn_piece(
         velocity.length(),
         spin.length(),
     );
+    // Its envelope from its colliders, which never move on it (`ballistics::Envelope`).
+    let envelope = Envelope::holding(
+        colliders
+            .iter()
+            .map(|(_, collider)| (collider, Vec3::ZERO, Quat::IDENTITY)),
+    );
     // `Position`/`Rotation` before the body: it never flushes with avian's placeholder pose.
-    commands
-        .spawn((
-            Name::new("WallPiece"),
-            WallPiece {
-                building,
-                chunks: group.iter().map(|&c| c as u16).collect(),
-            },
-            Transform::from_translation(at).with_rotation(root.rotation),
-            Position(at),
-            Rotation(root.rotation),
-            Visibility::default(),
-            crate::debris::DebrisPiece,
-            crate::eased_dynamic_body(),
-            LinearVelocity(root.rotation * velocity),
-            AngularVelocity(root.rotation * spin),
-        ))
-        .with_children(|parent| {
-            for (c, collider) in colliders {
-                parent.spawn((
-                    Transform::IDENTITY,
-                    collider,
-                    ColliderDensity(structure.chunks[c].material.density),
-                    piece_layers(),
-                    kind.piece_friction(c),
-                    chunk_volume(kind, c),
-                ));
-            }
-        });
+    let mut piece = commands.spawn((
+        Name::new("WallPiece"),
+        WallPiece {
+            building,
+            chunks: group.iter().map(|&c| c as u16).collect(),
+        },
+        Transform::from_translation(at).with_rotation(root.rotation),
+        Position(at),
+        Rotation(root.rotation),
+        Visibility::default(),
+        crate::debris::DebrisPiece,
+        crate::eased_dynamic_body(),
+        LinearVelocity(root.rotation * velocity),
+        AngularVelocity(root.rotation * spin),
+    ));
+    if let Some(envelope) = envelope {
+        piece.insert(envelope);
+    }
+    piece.with_children(|parent| {
+        for (c, collider) in colliders {
+            parent.spawn((
+                Transform::IDENTITY,
+                collider,
+                ColliderDensity(structure.chunks[c].material.density),
+                piece_layers(),
+                kind.piece_friction(c),
+                chunk_volume(kind, c),
+            ));
+        }
+    });
 }
 
 /// A loose chunk's filter: brick in ballistics ([`Layer::Armor`]), colliding as debris with the

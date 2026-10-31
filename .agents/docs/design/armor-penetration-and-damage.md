@@ -1534,14 +1534,20 @@ depends on the corridor's length: moving a hand-off by `δ` along the incoming a
 bent ray `b` sideways by `δ (u − b (u·b))`, DERIVED).
 
 **The envelope: a crossing resolves at one instant (PROVISIONAL, owner decision 2026-10-31,
-#191).** From the moment a round enters a tank's envelope until it has left every envelope, its
-crossing is resolved at one instant against the tanks as they stand, so no continuation is carried
+#191).** From the moment a round enters a body's envelope until it has left every envelope, its
+crossing is resolved at one instant against the bodies as they stand, so no continuation is carried
 across a tick boundary onto moving armour (the `unexpected_exit` above).
 
 - **What it is.** An invisible axis-aligned box, never a collider, in the body's own frame (the
   tank root's). It holds every part the bake captures (armour, components, crew boxes, collision
   proxies) at every angle each servo can take within the sheet's travel window, a full turn for a
   continuous traverse, so it holds the turret's whole sweep and the gun's whole elevation range.
+- **Every body the walk can cross carries one**, built at spawn from its data, no class of body
+  special (ADR-0034). A body with no servo carries its own colliders' bounds in its frame
+  (`ballistics::Envelope::holding`): a building (every element and every chunk a swap can stand),
+  a loose wall piece, a tree (re-derived with its body when its state moves a segment,
+  `trees::derive_state`), a sandbox target. A static body needs no sweep; a moving one is covered
+  by the two poses below.
 - **How it is computed.** Once per tank kind at load, in the bake that extracts the armour
   (`bake::envelope`, carried on `TankBlueprint::envelopes`), as a pure function of the extracted
   geometry and the sheet's servos: conservative and threshold-free. Each servo's subtree enters its
@@ -1558,9 +1564,11 @@ across a tick boundary onto moving armour (the `unexpected_exit` above).
   whose travel ends inside an envelope runs on, past its travel, until the round's line has left
   every envelope it is inside; overlapping envelopes chain into one crossing, and an envelope the
   round reaches only after leaving another, beyond the step's travel, is the next step's crossing.
-  The test grows each box by the disc's radius, by `extent · 2^-20` and by `MARCH_EPS` for its own
-  world-to-body arithmetic (`ProjectileMarchWorld::crossing_reach`). The shooter's own envelope is
-  passed through, as its volumes are.
+  The test grows each box by the farthest any sample starts from the axis (`resolve::Flight::spread`:
+  the disc's radius, and up to `r / cos(incidence)` once an oblique perforation staggers the starts
+  along the plate), by `extent · 2^-20` and by `MARCH_EPS` for its own world-to-body arithmetic
+  (`ProjectileMarchWorld::crossing_reach`). The shooter's own envelope is passed through, as its
+  volumes are.
 - **An envelope stands at two poses (step 6c).** The physics step places a body's child colliders
   from the body's pose at the step's start, so the walk casts against a moving body a step behind
   its own `Position` (0.16 m on a tank at 10 m/s, DERIVED), and the next step's walk will cast
@@ -1575,9 +1583,10 @@ across a tick boundary onto moving armour (the `unexpected_exit` above).
 - **No armour state crosses a tick.** The shell carries its axis position (anchor plus offset, so
   open flight never re-rounds it at world spacing) and the travel the last crossing flew past its
   step (`Projectile::owed`), which the next step's travel is short by: no travel is created or
-  lost. Every step lays a fresh disc and establishes its membership (`resolve::certified`). A body
-  with no envelope (a debris piece) still drains a sample held inside its material within the step
-  (`next_surface`), and its next step's membership is established against its pose then.
+  lost. Every step lays a fresh square disc at the axis start and establishes its membership
+  (`resolve::certified`). As every body carries an envelope, the step ended where that re-squaring
+  moves no sample over armour and no moving body's collider lag reaches the next step: an oblique
+  perforation ending a tick reads its plate once (`an_oblique_perforation_that_ends_a_tick_reads_its_plate_once`).
 - **The replica runs the same march**, so the presented shell march extends through envelopes and
   owes its overrun exactly as the authority's does; its armour contacts still take the authority's
   outcomes.

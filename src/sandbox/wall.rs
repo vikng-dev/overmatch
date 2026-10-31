@@ -659,6 +659,7 @@ fn setup_wall(
     let tile_mesh = meshes.add(Cuboid::new(TILE - 0.01, TILE - 0.01, 0.01));
     for index in 0..TILES.0 * TILES.1 {
         let tile = witness_tile(index);
+        let collider = Collider::cuboid(TILE, TILE, 0.01);
         commands.spawn((
             Name::new("witness tile"),
             WitnessTile(index),
@@ -666,7 +667,8 @@ fn setup_wall(
             MeshMaterial3d(witness[0].clone()),
             Transform::from_translation(tile.center()),
             RigidBody::Static,
-            Collider::cuboid(TILE, TILE, 0.01),
+            envelope_of(&collider),
+            collider,
             CollisionLayers::new([Layer::Armor], LayerMask::ALL),
             BallisticVolume {
                 material: wood,
@@ -734,6 +736,12 @@ fn chunk_collider(block: &Block, gap: f32) -> Collider {
         .expect("a bake chunk has volume")
 }
 
+/// The envelope of a static body whose one collider is `collider`, at the body's origin.
+fn envelope_of(collider: &Collider) -> crate::ballistics::Envelope {
+    crate::ballistics::Envelope::holding([(collider, Vec3::ZERO, Quat::IDENTITY)])
+        .expect("one part")
+}
+
 /// Spawn a new wall: one static chunk per block, full pools, nothing cracked.
 fn spawn_wall(commands: &mut Commands, meshes: &mut Assets<Mesh>, assets: &WallAssets) -> Wall {
     let cut = layout().cut.clone();
@@ -745,6 +753,7 @@ fn spawn_wall(commands: &mut Commands, meshes: &mut Assets<Mesh>, assets: &WallA
     for (index, block) in cut.blocks.iter().enumerate() {
         let mesh = meshes.add(chunk_mesh(block));
         chunk_meshes.push(mesh.clone());
+        let collider = chunk_collider(block, 0.0);
         entities.push(Some(
             commands
                 .spawn((
@@ -754,7 +763,8 @@ fn spawn_wall(commands: &mut Commands, meshes: &mut Assets<Mesh>, assets: &WallA
                     MeshMaterial3d(assets.heat[0].clone()),
                     Transform::from_translation(block.center()),
                     RigidBody::Static,
-                    chunk_collider(block, 0.0),
+                    envelope_of(&collider),
+                    collider,
                     CollisionLayers::new([Layer::Armor], LayerMask::ALL),
                     BallisticVolume {
                         material: brick_material,

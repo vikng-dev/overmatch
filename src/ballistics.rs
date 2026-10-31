@@ -1352,8 +1352,70 @@ pub struct BallisticVolume {
 /// round has left every envelope, and resolves whole in the step that entered it
 /// ([`ProjectileMarchWorld::crossing_reach`]). Read only on a body that is no entity's child: a
 /// turret carries its own from spawn, and it is live once a cook-off launches the turret free.
-#[derive(Component, Clone, Copy, Debug)]
+///
+/// Every body the walk can cross carries one, built at spawn from its data: a tank's from the
+/// bake, swept over its servos; a body with no servo, from its own colliders ([`Self::holding`]):
+/// a building, a loose wall piece, a tree (re-derived with its body when its state changes,
+/// `trees::derive_state`), a sandbox target. A step then never ends inside or beside armour, so
+/// nothing a sample is inside, and no collider lag of a moving body, ever reaches the next step.
+#[derive(Component, Clone, Copy, Debug, PartialEq)]
 pub(crate) struct Envelope(pub(crate) bevy::math::bounding::Aabb3d);
+
+impl Envelope {
+    /// The envelope of a body whose every primitive is one of `parts`, each a collider at its
+    /// place in the body's frame: the union of their bounds there. `None` for a body with no part.
+    /// For a body whose parts never move on it; a servo's sweep is the bake's
+    /// (`bake::TankEnvelopes`).
+    pub(crate) fn holding<'a>(
+        parts: impl IntoIterator<Item = (&'a Collider, Vec3, Quat)>,
+    ) -> Option<Self> {
+        use avian3d::prelude::SimpleCollider;
+        parts
+            .into_iter()
+            .map(|(collider, at, turn)| collider.aabb(at, turn))
+            .map(|aabb| (aabb.min, aabb.max))
+            .reduce(|(lo, hi), (min, max)| (lo.min(min), hi.max(max)))
+            .map(|(min, max)| Self(bevy::math::bounding::Aabb3d::from_min_max(min, max)))
+    }
+}
+
+/// Assert that `root`'s [`Envelope`] holds every collider of the body: the root's own, at its
+/// origin, and each child's at the child's place on it. Returns how many it checked; panics on
+/// the first collider outside, or on a body with no envelope.
+#[cfg(test)]
+pub(crate) fn assert_envelope_holds(world: &World, root: Entity) -> usize {
+    use avian3d::prelude::SimpleCollider;
+    let envelope = world
+        .get::<Envelope>(root)
+        .unwrap_or_else(|| panic!("body {root} carries no envelope"))
+        .0;
+    let own = world
+        .get::<Collider>(root)
+        .map(|collider| (root, collider, Transform::IDENTITY));
+    let children = world.get::<Children>(root).into_iter().flatten();
+    let parts: Vec<_> = own
+        .into_iter()
+        .chain(children.filter_map(|&child| {
+            Some((
+                child,
+                world.get::<Collider>(child)?,
+                *world.get::<Transform>(child)?,
+            ))
+        }))
+        .collect();
+    for (part, collider, local) in &parts {
+        let aabb = collider.aabb(local.translation, local.rotation);
+        let slack = 1.0e-5 * Vec3::from(envelope.min.abs().max(envelope.max.abs())).max_element();
+        assert!(
+            Vec3::from(envelope.min).cmple(aabb.min + slack).all()
+                && Vec3::from(envelope.max).cmpge(aabb.max - slack).all(),
+            "collider {part} of body {root} spans {:?}..{:?}, outside its envelope {envelope:?}",
+            aabb.min,
+            aabb.max,
+        );
+    }
+    parts.len()
+}
 
 /// A witness volume (ADR-0040): a crew box. Not matter — it is no layer of the armour walk, never
 /// resists the shell, never shadows a spall direction and never throws one. It is wounded by what
@@ -2287,13 +2349,16 @@ impl ProjectileMarchWorld<'_, '_> {
             .unwrap_or((position.0, rotation.0))
     }
 
-    /// How far along `dir` from `origin` a step with `travel` metres left must carry a disc of
-    /// `radius`: `travel`, or, where the point `travel` ahead lies inside an envelope, on until the
-    /// line has left every envelope it is inside, overlapping ones chained into one crossing. The
-    /// shooter's own envelope is passed through, as its volumes are ([`not_own_volume`]).
+    /// How far along `dir` from the axis start `origin` a step with `travel` metres left must carry
+    /// samples standing at most `spread` from the axis ([`resolve::Flight::spread`]): `travel`, or,
+    /// where the point `travel` ahead lies inside an envelope, on until the line has left every
+    /// envelope it is inside, overlapping ones chained into one crossing. The shooter's own
+    /// envelope is passed through, as its volumes are ([`not_own_volume`]).
     ///
-    /// Each envelope is grown by the disc's `radius`, so a sample outside the grown box is outside
-    /// the body's every primitive; by `extent · 2^-20` for the sim's f32 placement (the bake's
+    /// Each envelope is grown by `spread`: an axis start outside the box grown by it on some axis
+    /// leaves every sample, at most `spread` from it, outside the box, so outside the body's every
+    /// primitive, and a square disc laid there next step moves each sample only within that reach
+    /// of the axis; by `extent · 2^-20` for the sim's f32 placement (the bake's
     /// contract, `bake::envelope`); and by [`MARCH_EPS`] for this test's own world-to-body
     /// arithmetic and the body pose's read-back ([`Self::placed_pose`]) (DERIVED: a world f32 past
     /// 2048 m is spaced 2.44e-4 m, and the two take three roundings of it). Growing it only moves
@@ -2311,7 +2376,7 @@ impl ProjectileMarchWorld<'_, '_> {
         origin: Vec3,
         dir: Dir3,
         travel: f32,
-        radius: f32,
+        spread: f32,
         shooter: Option<Entity>,
     ) -> f32 {
         let span = |lo: Vec3A, hi: Vec3A, (position, rotation): (Vec3, Quat)| {
@@ -2338,7 +2403,7 @@ impl ProjectileMarchWorld<'_, '_> {
             .filter(|(body, ..)| Some(*body) != shooter)
             .flat_map(|(_, envelope, position, rotation, colliders)| {
                 let extent = envelope.0.min.abs().max(envelope.0.max.abs()).max_element();
-                let pad = Vec3A::splat(radius + extent * 2.0_f32.powi(-20) + MARCH_EPS);
+                let pad = Vec3A::splat(spread + extent * 2.0_f32.powi(-20) + MARCH_EPS);
                 let (lo, hi) = (envelope.0.min - pad, envelope.0.max + pad);
                 let placed = self.placed_pose(position, rotation, colliders);
                 [placed, (position.0, rotation.0)]
@@ -3279,7 +3344,8 @@ fn march_shell_step(
         }
         let origin = flight.sweep_origin();
         let dir = flight.direction;
-        let reach = world.crossing_reach(origin, dir, budget.remaining(), radius, shooter);
+        let spread = flight.spread(radius);
+        let reach = world.crossing_reach(origin, dir, budget.remaining(), spread, shooter);
         if reach <= MARCH_EPS && !flight.holds_material() {
             break;
         }
@@ -7807,16 +7873,9 @@ mod march_tests {
         })
     }
 
-    /// An 88 falling straight down at 800 m/s from `height` through two 20 mm steel plates at
-    /// y = 1 and y = 0, after one step of the test world. `envelopes` are `(centre, half extents)`
-    /// boxes, each on its own static body. Returns the impacts, the readout speed, the shell's
-    /// translation, its owed travel, and the step's travel budget. FIXTURE DATA. Straight down, so
-    /// gravity stays along the line and every placement crosses the same faces at the same speed.
-    fn fall_through_two_plates(
-        height: f32,
-        envelopes: &[(Vec3, Vec3)],
-    ) -> (Vec<Captured>, f32, Vec3, f32, f32) {
-        const DT: f32 = 0.016;
+    /// Two 20 mm steel plates at y = 1 and y = 0, and `envelopes`, `(centre, half extents)` boxes
+    /// each on its own static body. FIXTURE DATA.
+    fn two_plates_world(envelopes: &[(Vec3, Vec3)]) -> App {
         let plate = Vec3::new(1.0, 0.02, 1.0);
         let mut app =
             world_with_trimesh_plates(&[(plate, Vec3::new(0.0, 1.0, 0.0)), (plate, Vec3::ZERO)]);
@@ -7830,6 +7889,20 @@ mod march_tests {
         for _ in 0..2 {
             app.update();
         }
+        app
+    }
+
+    /// An 88 falling straight down at 800 m/s from `height` through two 20 mm steel plates at
+    /// y = 1 and y = 0 ([`two_plates_world`]), after one step of the test world. `envelopes` are `(centre, half extents)`
+    /// boxes, each on its own static body. Returns the impacts, the readout speed, the shell's
+    /// translation, its owed travel, and the step's travel budget. FIXTURE DATA. Straight down, so
+    /// gravity stays along the line and every placement crosses the same faces at the same speed.
+    fn fall_through_two_plates(
+        height: f32,
+        envelopes: &[(Vec3, Vec3)],
+    ) -> (Vec<Captured>, f32, Vec3, f32, f32) {
+        const DT: f32 = 0.016;
+        let mut app = two_plates_world(envelopes);
         let velocity = Vec3::NEG_Y * 800.0;
         let stepped = freeflight_step(
             velocity,
@@ -7895,6 +7968,49 @@ mod march_tests {
         assert!(
             (owed - (0.5 - at.y)).abs() < 1.0e-3,
             "the step owes exactly what it flew past its travel: {owed}, flown to {at}",
+        );
+    }
+
+    /// A CROSSING'S OVERRUN IS TIME-NEUTRAL: THE NEXT STEP PAYS IT BACK.
+    ///
+    /// The straddling placement above, run one tick more. The first step flies past its travel to
+    /// leave the envelope; the second flies its own travel short by that overrun, so over the two
+    /// steps the round has flown exactly the two steps' travel (each the free-flight kernel's speed
+    /// at the step's start × dt) and owes nothing once paid. The authority and every replica rely
+    /// on it to come back to the clock's position after a crossing. A march whose next step flew
+    /// its whole travel, or flew the paying step as the unbent kernel's `stepped × dt`, runs ahead
+    /// by the overrun.
+    #[test]
+    fn a_crossings_overrun_is_paid_back_by_the_next_step() {
+        const DT: f32 = 0.016;
+        let envelope = [(Vec3::new(0.0, 0.5, 0.0), Vec3::new(0.6, 0.6, 0.6))];
+        let (_, _, _, _, budget) = fall_through_two_plates(3.0, &envelope);
+        let height = 0.5 + budget;
+        let mut app = two_plates_world(&envelope);
+        let shell = spawn_round(
+            &mut app,
+            FIXTURE_88,
+            Vec3::new(0.0, height, 0.0),
+            Vec3::NEG_Y * 800.0,
+        );
+        app.update();
+        let projectile = app.world().get::<Projectile>(shell).unwrap();
+        let overrun = projectile.owed;
+        assert!(
+            overrun > 0.1,
+            "the first step crosses the envelope past its travel: {overrun}"
+        );
+        let second = freeflight_step(projectile.velocity, projectile.drag_k, DT).length() * DT;
+        app.update();
+        let owed = app.world().get::<Projectile>(shell).unwrap().owed;
+        let at = app.world().get::<Transform>(shell).unwrap().translation;
+        assert_eq!(owed, 0.0, "the open-air step pays the overrun back whole");
+        let flown = height - at.y;
+        assert!(
+            (flown - (budget + second)).abs() < 1.0e-3 && at.xz().length() < 1.0e-4,
+            "over the two steps the round flew {flown} m to {at}, not their travel {} m \
+             ({budget} + {second}), the first step's overrun being {overrun} m",
+            budget + second,
         );
     }
 
@@ -8434,20 +8550,22 @@ mod march_tests {
         assert_starts_on_the_last_sweep(&flight, position, &frame);
     }
 
-    /// AN OBLIQUE PERFORATION THAT ENDS A TICK RESUMES ON ITS SEEDS.
+    /// AN OBLIQUE PERFORATION THAT ENDS A TICK READS ITS PLATE ONCE.
     ///
     /// A disc that perforates an oblique plate resumes each sample one nudge past the aggregate exit
     /// along its own ray, so the starts are staggered along the plate — up to `r·tan(incidence)`
-    /// ahead of or behind the axis (DERIVED: 76 mm for an 88 at 60°). When that perforation is the
-    /// step's last crossing, the next tick must resume from those same starts
-    /// ([`resolve::Interior`]); a disc laid square at the axis's resume point puts every sample the
-    /// stagger had ahead of it back inside the plate it left, reading that plate's exit with nothing
-    /// declared, and the round fails closed in mid-air past the plate.
+    /// ahead of or behind the axis (DERIVED: 76 mm for an 88 at 60°). Every step lays a fresh square
+    /// disc at the axis start ([`resolve::AxisStart`]), so the step must end where that re-squaring
+    /// moves no sample over armour: outside the plate's [`Envelope`] grown by the starts' spread
+    /// ([`ProjectileMarchWorld::crossing_reach`]). A step that ended at the travel would put the
+    /// samples the stagger had ahead back inside the plate, which the next step crosses a second
+    /// time: a second read and a second charge of the round's energy, or a fail-closed exit with
+    /// nothing declared.
     ///
     /// Fixture data: an 88 at 60° through 20 mm, from 200 stand-offs 0.2 mm apart across a 4 cm
     /// window centred on the tick's end, so the perforation lands at every phase of the boundary.
     #[test]
-    fn an_oblique_perforation_that_ends_a_tick_resumes_on_its_seeds() {
+    fn an_oblique_perforation_that_ends_a_tick_reads_its_plate_once() {
         const DT: f32 = 0.016;
         const STANDOFFS: usize = 200;
         let incidence = 60.0_f32.to_radians();
@@ -8461,8 +8579,26 @@ mod march_tests {
         let budget = stepped.length() * DT;
         let face = Vec3::new(0.0, 2.0, 0.51);
         // The plate never changes, so each stand-off re-spawns only the round.
-        let mut app = world_with_trimesh_plates(&[slab(0.02, 0.5)]);
-        let mut failed = Vec::new();
+        let (size, centre) = slab(0.02, 0.5);
+        let mut app = world_with_trimesh_plates(&[(size, centre)]);
+        let plate = app
+            .world_mut()
+            .query_filtered::<Entity, With<BallisticVolume>>()
+            .iter(app.world())
+            .find(|&volume| {
+                app.world()
+                    .get::<Transform>(volume)
+                    .is_some_and(|at| at.translation == centre)
+            })
+            .expect("the slab");
+        app.world_mut()
+            .entity_mut(plate)
+            .insert(Envelope(bevy::math::bounding::Aabb3d::new(
+                Vec3::ZERO,
+                size * 0.5,
+            )));
+        app.update();
+        let mut misread = Vec::new();
         for index in 0..STANDOFFS {
             // The face lies this far short of the tick's travel: the crossing ends the tick for
             // stand-offs whose perforation spends what is left of it.
@@ -8477,16 +8613,21 @@ mod march_tests {
                 app.update();
             }
             let impacts = std::mem::take(&mut app.world_mut().resource_mut::<ImpactLog>().0);
-            if failed_closed(&impacts) {
-                failed.push(short);
+            let reads: Vec<Verdict> = impacts
+                .iter()
+                .filter(|impact| matches!(impact.surface, ImpactSurface::Armor))
+                .map(|impact| impact.verdict)
+                .collect();
+            if reads.len() != 1 || failed_closed(&impacts) {
+                misread.push((short, reads));
             }
             let _ = app.world_mut().try_despawn(shell);
         }
         assert!(
-            failed.is_empty(),
-            "{} of {STANDOFFS} stand-offs failed closed past the plate they perforated, with the face \
-             this far short of the tick's travel: {failed:?}",
-            failed.len(),
+            misread.is_empty(),
+            "{} of {STANDOFFS} stand-offs did not read the plate exactly once, with the face this \
+             far short of the tick's travel: {misread:?}",
+            misread.len(),
         );
     }
 

@@ -1075,6 +1075,15 @@ impl Flight {
         }
     }
 
+    /// The farthest any sample starts from the axis start: a fresh disc's `radius`, and up to
+    /// `r / cos(incidence)` once an oblique perforation has staggered the starts along the plate.
+    pub(crate) fn spread(&self, radius: f32) -> f32 {
+        self.sample_offsets(radius)
+            .iter()
+            .map(|offset| offset.length())
+            .fold(0.0, f32::max)
+    }
+
     /// A continuation holds a sample inside material ([`Interior::holds_material`]).
     pub(crate) fn holds_material(&self) -> bool {
         self.continuation

@@ -27,10 +27,11 @@ use std::path::Path;
 use std::sync::Arc;
 
 use avian3d::prelude::{Collider, CollisionLayers, LayerMask, RigidBody};
+use bevy::math::bounding::Aabb3d;
 use bevy::prelude::*;
 
 use crate::Layer;
-use crate::ballistics::{BallisticVolume, VolumeMaterial};
+use crate::ballistics::{BallisticVolume, Envelope, VolumeMaterial};
 use crate::scatter::MapInstance;
 use crate::substances::SubstanceRegistry;
 
@@ -57,7 +58,8 @@ pub(crate) struct BuildingKind {
     /// Per entry of the asset's material table: the dynamic friction coefficient its substance
     /// brings to a contact (`materials.ron`).
     friction: Vec<f32>,
-    /// The elements' bounds in the building frame at scale 1, `(min, max)`.
+    /// The bounds of the elements and of every chunk that tiles them, in the building frame at
+    /// scale 1, `(min, max)`: every collider the building ever stands, intact or broken.
     bounds: (Vec3, Vec3),
     /// What the fracture laws read of it.
     pub(crate) layout: breakage::Layout,
@@ -90,6 +92,12 @@ impl BuildingKind {
             .elements
             .iter()
             .flat_map(schema::Element::points)
+            .chain(
+                asset
+                    .chunks
+                    .iter()
+                    .flat_map(|chunk| chunk.hull.iter().map(|point| Vec3::from_array(*point))),
+            )
             .fold((Vec3::INFINITY, Vec3::NEG_INFINITY), |(lo, hi), p| {
                 (lo.min(p), hi.max(p))
             });
@@ -118,7 +126,8 @@ impl BuildingKind {
             .with_combine_rule(CoefficientCombine::Max)
     }
 
-    /// The elements' bounds in the building frame at scale 1, `(min, max)`.
+    /// The bounds of the elements and their chunks in the building frame at scale 1,
+    /// `(min, max)`.
     pub(crate) fn bounds(&self) -> (Vec3, Vec3) {
         self.bounds
     }
@@ -202,6 +211,8 @@ fn element_bundle(kind: &BuildingKind, k: usize, scale: f32) -> impl Bundle {
 /// Spawn one building of `kind` at `pose`, the ground pose: the authored XZ, the grid's Y, the
 /// authored yaw and uniform scale. A tilted or non-uniformly scaled instance is refused (ADR-0011):
 /// a building stands on its foundation plane. Returns the root; the body is whole without a view.
+/// Its [`Envelope`] is the kind's bounds at the instance's scale: a static body, and every element
+/// and chunk collider it stands stays inside them.
 pub(crate) fn spawn(
     commands: &mut Commands,
     kind: &Arc<BuildingKind>,
@@ -232,6 +243,10 @@ pub(crate) fn spawn(
             RigidBody::Static,
             identity,
             BuildingBody,
+            Envelope(Aabb3d::from_min_max(
+                kind.bounds.0 * scale,
+                kind.bounds.1 * scale,
+            )),
             breakage::Breakage::new(kind.clone(), scale),
         ))
         .id();
@@ -324,6 +339,37 @@ pub(crate) mod tests {
             BTreeSet::from(["Brick".to_owned(), "Wood".to_owned()])
         );
         assert!(world.get::<RigidBody>(root).is_some());
+    }
+
+    /// EVERY COLLIDER A BUILDING EVER STANDS LIES INSIDE ITS ENVELOPE (the game's damage model:
+    /// a round's crossing of the building runs until it has left the envelope, so a step never
+    /// ends beside a wall, `ballistics::Envelope`): each intact element's, and each chunk's that
+    /// a swap stands in its place, at the instance's scale (1.5, fixture data). A spawn without
+    /// the envelope, or one built from the elements alone where a chunk reaches past them, or at
+    /// scale 1, fails here.
+    #[test]
+    fn every_collider_a_building_stands_lies_inside_its_envelope() {
+        let kind = shipped_house();
+        let scale = 1.5;
+        let pose = Transform::from_xyz(5.0, 2.0, -3.0)
+            .with_rotation(Quat::from_rotation_y(0.7))
+            .with_scale(Vec3::splat(scale));
+        let (world, root) = spawned(&kind, pose);
+        let elements = crate::ballistics::assert_envelope_holds(&world, root);
+        assert_eq!(elements, kind.asset.elements.len());
+        let envelope = world.get::<Envelope>(root).unwrap().0;
+        for c in 0..kind.layout.chunks.len() {
+            let collider = breakage::chunk_collider(&kind, c, scale, Vec3::ZERO, 0.0)
+                .expect("a shipped chunk has volume");
+            let aabb = collider.aabb(Vec3::ZERO, Quat::IDENTITY);
+            assert!(
+                envelope.min.cmple(aabb.min.into()).all()
+                    && envelope.max.cmpge(aabb.max.into()).all(),
+                "chunk {c} spans {:?}..{:?}, outside the envelope {envelope:?}",
+                aabb.min,
+                aabb.max,
+            );
+        }
     }
 
     /// A LOOSE PIECE GRIPS A HULL AND KEEPS ITS MATERIAL AGAINST THE GROUND: a tank collision

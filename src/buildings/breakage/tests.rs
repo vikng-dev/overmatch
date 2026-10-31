@@ -305,6 +305,39 @@ fn a_round_meets_a_fallen_piece_as_its_substance() {
     assert!(world.get::<WallPiece>(body).is_some());
 }
 
+/// A LOOSE PIECE CARRIES AN ENVELOPE HOLDING EVERY COLLIDER IT FALLS WITH (the game's damage
+/// model: a round's crossing of the piece runs until it has left the envelope, at both of the
+/// moving body's poses, `ballistics::Envelope`). A group of three chunks spawned through
+/// `spawn_piece` from a turned building (fixture pose): a piece spawned without its envelope, or
+/// with one that misses a chunk, fails here.
+#[test]
+fn a_loose_piece_carries_an_envelope_holding_its_colliders() {
+    let kind = shipped_house();
+    let (_, chunks) = fixture_chunks(&kind);
+    let live = Live::new(&kind, 1.0);
+    let at = Transform::from_xyz(30.0, 0.0, 0.0).with_rotation(Quat::from_rotation_y(0.7));
+    let mut world = World::new();
+    let mut queue = bevy::ecs::world::CommandQueue::default();
+    let mut commands = Commands::new(&mut queue, &world);
+    spawn_piece(
+        &mut commands,
+        &kind,
+        &live.structure,
+        (3, 1.0, at),
+        &chunks,
+        &[],
+    );
+    queue.apply(&mut world);
+    let piece = world
+        .query_filtered::<Entity, With<WallPiece>>()
+        .single(&world)
+        .expect("one piece");
+    assert_eq!(
+        crate::ballistics::assert_envelope_holds(&world, piece),
+        chunks.len()
+    );
+}
+
 /// A FALLEN PIECE COMES TO REST ASLEEP, A DYNAMIC BODY STILL: a group spawned by `spawn_piece`
 /// above a static slab falls, lands and sleeps there (never in the air), and keeps
 /// `RigidBody::Dynamic`. The server's per-tick cost of settled rubble rests on it: a spawn that

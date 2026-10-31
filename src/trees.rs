@@ -19,7 +19,8 @@
 //! the round by chord × factor and doses each segment the energy the round lost at that segment's
 //! depths, so a dose charges only the segments it crosses. Never a compound: the walk's convex
 //! collector reads one solid per collider. The instance's uniform scale is applied to the
-//! dimensions at spawn and the root's own scale is one.
+//! dimensions at spawn and the root's own scale is one. The root carries its [`Envelope`], its
+//! segments' bounds in its frame, re-derived with the body whenever the state moves a segment.
 //!
 //! THE STATE. [`TreeState`] is `Standing` or `Down { cut, dir }`: the segment the trunk broke at
 //! and the fall azimuth's bin. The authority sets it once — when a segment's pool empties
@@ -50,7 +51,7 @@ use bevy::ecs::system::ScheduleSystem;
 use bevy::prelude::*;
 
 use crate::Layer;
-use crate::ballistics::{BallisticVolume, ComponentHealth, PoolEmptied, VolumeMaterial};
+use crate::ballistics::{BallisticVolume, ComponentHealth, Envelope, PoolEmptied, VolumeMaterial};
 use crate::provenance::Sourced;
 use crate::scatter::MapInstance;
 use crate::substances::SubstanceRegistry;
@@ -634,21 +635,30 @@ fn lying_layers() -> CollisionLayers {
 /// no resting pose or transition tick; down, the stump's segments stand the same and every
 /// segment from the cut up lies in the resting pose on [`lying_layers`], the pose is recorded
 /// and every segment's pool is gone — one break per tree, so what is down, stump included, takes
-/// no more dose. A tree back to standing (a replaced ledger) or down at another cut derives
-/// exactly as one that never held the old state.
+/// no more dose. In either state the root's [`Envelope`] is the segments' bounds as derived. A
+/// tree back to standing (a replaced ledger) or down at another cut derives exactly as one that
+/// never held the old state.
 ///
 /// The lying piece is turned rigidly about the seat — the butt's resting centre, which is the
 /// cut's bottom only for a cut at the base — so in the root's frame each lying segment is turned
 /// by [`fall_rotation`] at the resting tilt and sits at the seat ([`seat_in_root`]) plus its
 /// height above the cut, turned the same.
 fn derive_state(
-    trees: Query<
-        (Entity, &TreeState, &TreeBody, &Transform, &Children),
+    mut trees: Query<
+        (
+            Entity,
+            &TreeState,
+            &TreeBody,
+            &Transform,
+            &Children,
+            &mut Envelope,
+        ),
         (Changed<TreeState>, Without<TreeSegment>),
     >,
     mut segments: Query<(
         &TreeSegment,
         &mut Transform,
+        &Collider,
         &CollisionLayers,
         Has<ComponentHealth>,
     )>,
@@ -660,7 +670,7 @@ fn derive_state(
     let Some(grid) = grid else {
         return;
     };
-    for (root, state, body, transform, children) in &trees {
+    for (root, state, body, transform, children, mut envelope) in &mut trees {
         let fallen = match *state {
             TreeState::Standing => None,
             TreeState::Down { cut, dir } => {
@@ -672,8 +682,11 @@ fn derive_state(
                 Some((usize::from(cut), resting, turn, seat))
             }
         };
+        let mut parts = Vec::with_capacity(children.len());
         for &child in children {
-            let Ok((&TreeSegment(k), mut local, layers, has_pool)) = segments.get_mut(child) else {
+            let Ok((&TreeSegment(k), mut local, collider, layers, has_pool)) =
+                segments.get_mut(child)
+            else {
                 continue;
             };
             let k = usize::from(k);
@@ -692,6 +705,7 @@ fn derive_state(
                 ),
             };
             local.set_if_neq(pose);
+            parts.push((collider.clone(), pose.translation, pose.rotation));
             // An immutable component: replaced only when the state moves it.
             if *layers != filter {
                 commands.entity(child).insert(filter);
@@ -707,6 +721,13 @@ fn derive_state(
                 }
                 _ => {}
             }
+        }
+        if let Some(derived) = Envelope::holding(
+            parts
+                .iter()
+                .map(|(collider, at, turn)| (collider, *at, *turn)),
+        ) {
+            envelope.set_if_neq(derived);
         }
         match fallen {
             Some((_, resting, _, _)) => {
@@ -851,9 +872,21 @@ pub(crate) fn spawn(
         pose.rotation,
     );
     let body = TreeBody::new(kind.clone(), scale);
-    let segments: Vec<(f32, u32)> = (0..kind.segments.len())
-        .map(|k| (body.prefix[k], body.segment_hp(k)))
+    let segments: Vec<(f32, u32, Collider)> = (0..kind.segments.len())
+        .map(|k| {
+            (
+                body.prefix[k],
+                body.segment_hp(k),
+                segment_collider(kind, k, scale),
+            )
+        })
         .collect();
+    let envelope = Envelope::holding(
+        segments
+            .iter()
+            .map(|(bottom, _, collider)| (collider, Vec3::new(0.0, *bottom, 0.0), Quat::IDENTITY)),
+    )
+    .expect("resolve refuses a tree with no segment");
     let root = commands
         .spawn((
             Name::new(format!("tree {}", identity.id)),
@@ -866,13 +899,14 @@ pub(crate) fn spawn(
             TreeState::Standing,
             identity,
             body,
+            envelope,
         ))
         .id();
-    for (k, (bottom, hp)) in segments.into_iter().enumerate() {
+    for (k, (bottom, hp, collider)) in segments.into_iter().enumerate() {
         commands.spawn((
             ChildOf(root),
             Transform::from_xyz(0.0, bottom, 0.0),
-            segment_collider(kind, k, scale),
+            collider,
             standing_layers(),
             BallisticVolume {
                 material: kind.material,
@@ -1737,6 +1771,11 @@ pub(crate) mod tests {
                 && world.get::<BallisticVolume>(root).is_none(),
             "the root holds no pool and is no volume"
         );
+        assert_eq!(
+            crate::ballistics::assert_envelope_holds(&world, root),
+            kind.segments.len(),
+            "the root's envelope holds every segment"
+        );
         assert_eq!(transform.scale, Vec3::ONE);
         assert_eq!(transform.translation, pose.translation);
         assert_eq!(
@@ -2227,10 +2266,12 @@ pub(crate) mod tests {
     /// the setter's transition tick stays and every segment's pool is gone, the stump's too;
     /// back to standing, every segment stands at its spawn height on the standing filter, the
     /// pose and the transition tick are gone and every segment's own pool is back, full; down at
-    /// another cut, the segments the new cut spares stand again and the rest lie. A derive that
-    /// skips `Standing`, touches only the segments at and above the new cut, turns the piece
-    /// about the stump's top instead of the seat, leaves a pool on the stump, or leaves a pool,
-    /// the pose or the tick from the state before reds this.
+    /// another cut, the segments the new cut spares stand again and the rest lie; in every state
+    /// the root's envelope holds every segment as derived (the game's damage model ends a round's
+    /// crossing outside it, `ballistics::Envelope`). A derive that skips `Standing`, touches only
+    /// the segments at and above the new cut, turns the piece about the stump's top instead of the
+    /// seat, leaves a pool on the stump, leaves a pool, the pose or the tick from the state before,
+    /// or keeps the standing envelope under a lying trunk reds this.
     #[test]
     fn every_state_derives_the_whole_body_from_the_state() {
         let (mut app, root) =
@@ -2255,6 +2296,10 @@ pub(crate) mod tests {
             "standing at spawn: every segment's pool stays, no pose"
         );
         assert_eq!(
+            crate::ballistics::assert_envelope_holds(app.world(), root),
+            3
+        );
+        assert_eq!(
             segments_of(&app, root),
             spawned,
             "standing derives the spawn"
@@ -2267,6 +2312,10 @@ pub(crate) mod tests {
                 app.world_mut().entity_mut(root).insert(Fell { tick: 7 });
             }
             app.update();
+            assert_eq!(
+                crate::ballistics::assert_envelope_holds(app.world(), root),
+                3
+            );
         };
         set(&mut app, TreeState::Down { cut: 1, dir: 0 });
         assert_eq!(

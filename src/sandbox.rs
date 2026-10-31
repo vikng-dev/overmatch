@@ -495,12 +495,17 @@ fn spawn_targets(
             alpha_mode: AlphaMode::Blend,
             ..default()
         });
+        let collider = Collider::cuboid(3.0, 3.0, thickness);
+        let envelope =
+            crate::ballistics::Envelope::holding([(&collider, Vec3::ZERO, Quat::IDENTITY)])
+                .expect("one part");
         commands.spawn((
             Mesh3d(meshes.add(Cuboid::new(3.0, 3.0, thickness))),
             MeshMaterial3d(material),
             Transform::from_xyz(x, 2.0, 0.0),
             RigidBody::Static,
-            Collider::cuboid(3.0, 3.0, thickness),
+            collider,
+            envelope,
             CollisionLayers::new([Layer::Armor], LayerMask::ALL),
             BallisticVolume {
                 material: crate::ballistics::VolumeMaterial::of(
