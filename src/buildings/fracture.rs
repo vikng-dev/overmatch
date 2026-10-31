@@ -2458,11 +2458,54 @@ struct Ring {
     mass: f32,
 }
 
+/// ASSUMED dimensionless f32 roundoff allowance for normalized dot/cross candidates in
+/// [`translation`]. This is numerical resolution, not clearance through a neighbouring body.
+const TRANSLATION_EPS: f32 = 32.0 * f32::EPSILON;
+
+/// The unit translation doing most work under `push` without moving into any boundary normal.
+/// DERIVED: the admissible directions form a convex polyhedral cone in three dimensions. Its
+/// closest direction to the load is the load itself, a projection onto one active plane, or an
+/// edge formed by two planes. A feasible single-plane projection of a violated constraint is
+/// already the cone projection; otherwise compare all feasible edges. `None` means the cone
+/// offers no direction on which the load does positive work (parallel planes add no edge).
+fn translation(push: Vec3, normals: impl Iterator<Item = Vec3> + Clone) -> Option<Vec3> {
+    let push = push.try_normalize()?;
+    let allowed = |d: Vec3| normals.clone().all(|n| d.dot(n) <= TRANSLATION_EPS);
+    if allowed(push) {
+        return Some(push);
+    }
+    for n in normals.clone() {
+        let into = push.dot(n);
+        if into > 0.0
+            && let Some(d) = (push - n * into).try_normalize()
+            && allowed(d)
+        {
+            return Some(d);
+        }
+    }
+    let (mut best, mut work) = (None, 0.0);
+    for (index, a) in normals.clone().enumerate() {
+        for b in normals.clone().skip(index + 1) {
+            // Parallel boundary planes intersect in a plane, not a new edge direction.
+            let Some(edge) = a.cross(b).try_normalize() else {
+                continue;
+            };
+            let along = if edge.dot(push) >= 0.0 { edge } else { -edge };
+            let candidate = along.dot(push);
+            if candidate > work && allowed(along) {
+                best = Some(along);
+                work = candidate;
+            }
+        }
+    }
+    best
+}
+
 /// The punch ring of `group` (ascending) pushed along `push` (`incident`, each chunk's joints): a
 /// rigid translation of the group out through every live joint to what stands outside it. The
-/// translation is `push`'s direction projected off each such joint it would press the group into
-/// (a group cannot move into matter that bears it), one joint after another (ASSUMED: exact for
-/// the bake's orthogonal faces). Each intact bonded joint of the ring, its normal `n` out of the
+/// translation does the most work under `push` without entering any neighbour's half-space
+/// ([`translation`]); the constraint uses the authored joint normals, including nonorthogonal
+/// faces. Each intact bonded joint of the ring, its normal `n` out of the
 /// group, opens by `⟨−d·n⟩` and slides by `|d − (d·n) n|` per unit of translation `d`; its
 /// strength is `A (f_t ⟨open⟩ + c ⟨slide⟩)` and its work `A (G_I ⟨open⟩ + G_II ⟨slide⟩)`, the
 /// linear mode interaction (the wall design, "Bodies in contact"). A rest, or a seam a
@@ -2506,18 +2549,7 @@ fn ring(
             contacts.push((j, n));
         }
     }
-    let mut along = push.try_normalize()?;
-    for _ in 0..3 {
-        for &(_, n) in &contacts {
-            let into = along.dot(n);
-            if into > 0.0 {
-                along = (along - n * into).try_normalize()?;
-            }
-        }
-    }
-    if contacts.iter().any(|&(_, n)| along.dot(n) > ON_PLANE) {
-        return None;
-    }
+    let along = translation(push, contacts.iter().map(|&(_, n)| n))?;
     let (mut strength, mut work) = (0.0, 0.0);
     for &(j, n) in &contacts {
         let joint = &structure.joints[j];
@@ -5024,6 +5056,71 @@ mod tests {
             (Cause::Punch, &opened)
         );
         assert!((failures[0].demand / failures[0].capacity - 2.0).abs() < 1e-3);
+    }
+
+    /// A NONORTHOGONAL RING KEEPS ITS ADMISSIBLE TRANSLATION (the game's environment destruction
+    /// model). The side normals of a triangular prism surround its cross-section: a plug can
+    /// leave only along its extrusion. The punch laws must find that direction under an oblique
+    /// load, in either sense and under every boundary ordering; a fixed number of successive
+    /// plane projections can retain an inadmissible residue and silently reject the ring.
+    /// ASSUMED fixture geometry; direction and shear work are DERIVED from that geometry.
+    #[test]
+    fn an_oblique_push_finds_a_nonorthogonal_rings_translation() {
+        let material = brick();
+        let normals = [
+            Vec3::X,
+            Vec3::new(-0.5, 3.0_f32.sqrt() / 2.0, 0.0),
+            Vec3::new(-0.5, -3.0_f32.sqrt() / 2.0, 0.0),
+        ];
+        let chunk = |centroid| Chunk {
+            volume: 0.01,
+            centroid,
+            mass: 28.8,
+            material,
+            buried: false,
+        };
+        let mut chunks = vec![chunk(Vec3::ZERO)];
+        chunks.extend(normals.map(|n| chunk(n * 0.25)));
+        let joints: Vec<Joint> = normals
+            .iter()
+            .enumerate()
+            .map(|(i, &n)| Joint {
+                a: 0,
+                b: Side::Chunk(i + 1),
+                area: 0.05,
+                centroid: n * 0.125,
+                normal: n,
+                bond: Bond::Bonded(material.seam),
+            })
+            .collect();
+        for order in [
+            [0, 1, 2],
+            [0, 2, 1],
+            [1, 0, 2],
+            [1, 2, 0],
+            [2, 0, 1],
+            [2, 1, 0],
+        ] {
+            let structure = Structure {
+                chunks: chunks.clone(),
+                joints: order.map(|j| joints[j]).to_vec(),
+            };
+            let state = WallState::new(&structure);
+            for sense in [-1.0, 1.0] {
+                let ring = ring(
+                    &structure,
+                    &state,
+                    &incident(&structure),
+                    &[0],
+                    Vec3::new(1.0, 1.0, sense),
+                )
+                .expect("the extrusion remains unobstructed");
+                assert!((ring.along - Vec3::Z * sense).length() < TRANSLATION_EPS);
+                let (cohesion, energy) = brick_shear();
+                assert!((ring.strength / (3.0 * 0.05 * cohesion) - 1.0).abs() < 1e-5);
+                assert!((ring.work / (3.0 * 0.05 * energy) - 1.0).abs() < 1e-5);
+            }
+        }
     }
 
     /// A SOLVER STEP BOUNDS A BODY CONTACT'S PEAK FROM BELOW (the game's environment destruction
