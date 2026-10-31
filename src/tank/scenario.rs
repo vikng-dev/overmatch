@@ -32,36 +32,49 @@ const START_SPOTS: [(&str, f32, f32, f32); 3] = [
 
 /// The dev start lever, `OVERMATCH_START=<x>,<z>[,<heading°>]` or `OVERMATCH_START=<spot>` (one of
 /// [`START_SPOTS`]): a normal, drivable offline game whose player tank spawns there, heading
-/// `heading°` from `+Z` toward `+X`, rather than at the duel. World XZ and radians out. Unset, or
-/// unreadable (logged), is every normal run; a dev lever on the offline path only, like
-/// [`target_ahead`].
+/// `heading°` from `+Z` toward `+X`, rather than at the duel. World XZ and radians out. Unset is
+/// every normal run; a dev lever on the offline path only, like [`target_scenario`].
+///
+/// # Panics
+///
+/// When the variable is set to anything [`parse_start`] refuses: a capture or a measurement that
+/// asked for a spot must never frame the duel as if it were that spot.
 pub(crate) fn start_spot() -> Option<(Vec2, f32)> {
-    let spec = std::env::var("OVERMATCH_START").ok()?;
-    let named = START_SPOTS
-        .iter()
-        .find(|(name, ..)| name.eq_ignore_ascii_case(spec.trim()))
-        .map(|&(_, x, z, heading)| (Vec2::new(x, z), heading));
-    let parsed = || {
-        let parts: Vec<f32> = spec
-            .split(',')
-            .map(|part| part.trim().parse().ok())
-            .collect::<Option<_>>()?;
-        match parts[..] {
-            [x, z] => Some((Vec2::new(x, z), 0.0)),
-            [x, z, heading] => Some((Vec2::new(x, z), heading)),
-            _ => None,
-        }
-    };
-    let Some((at, heading)) = named.or_else(parsed) else {
-        warn!(
-            "OVERMATCH_START: want <x>,<z>[,<heading°>] or one of {:?}, got {spec:?} — the duel's \
-             spawn stands",
+    let spec = crate::env_value("OVERMATCH_START")?;
+    let (at, heading) = parse_start(&spec).unwrap_or_else(|| {
+        panic!(
+            "OVERMATCH_START={spec:?}: want <x>,<z>[,<heading°>] (finite numbers) or one of {:?}",
             START_SPOTS.map(|(name, ..)| name)
-        );
-        return None;
-    };
+        )
+    });
     info!("OVERMATCH_START: the player's tank spawns at {at} heading {heading}°");
     Some((at, heading.to_radians()))
+}
+
+/// The spot `spec` names, world XZ and heading in degrees: a [`START_SPOTS`] name (any case), or
+/// two or three finite comma-separated numbers; `None` for anything else.
+fn parse_start(spec: &str) -> Option<(Vec2, f32)> {
+    let spec = spec.trim();
+    if let Some(&(_, x, z, heading)) = START_SPOTS
+        .iter()
+        .find(|(name, ..)| name.eq_ignore_ascii_case(spec))
+    {
+        return Some((Vec2::new(x, z), heading));
+    }
+    let parts: Vec<f32> = spec
+        .split(',')
+        .map(|part| {
+            part.trim()
+                .parse()
+                .ok()
+                .filter(|value: &f32| value.is_finite())
+        })
+        .collect::<Option<_>>()?;
+    match parts[..] {
+        [x, z] => Some((Vec2::new(x, z), 0.0)),
+        [x, z, heading] => Some((Vec2::new(x, z), heading)),
+        _ => None,
+    }
 }
 
 /// The offline target scenario, `OVERMATCH_TARGET=ahead|fires|kills`: a dev lever on the offline
@@ -704,7 +717,32 @@ fn swap_controlled_tank(
 
 #[cfg(test)]
 mod target_scenario_tests {
-    use super::TargetScenario;
+    use bevy::math::Vec2;
+
+    use super::{START_SPOTS, TargetScenario, parse_start};
+
+    /// `OVERMATCH_START` READS A NAMED SPOT OR TWO OR THREE FINITE NUMBERS, AND NOTHING ELSE: the
+    /// forest cost runs and the house captures set it, and a typo that fell back to the duel would
+    /// frame the duel as the spot they asked for, so `start_spot` refuses whatever this refuses.
+    #[test]
+    fn the_start_lever_reads_a_spot_or_coordinates_and_nothing_else() {
+        let (name, x, z, heading) = START_SPOTS[0];
+        assert_eq!(parse_start(name), Some((Vec2::new(x, z), heading)));
+        assert_eq!(
+            parse_start(&name.to_uppercase()),
+            Some((Vec2::new(x, z), heading))
+        );
+        assert_eq!(parse_start("540,570"), Some((Vec2::new(540.0, 570.0), 0.0)));
+        assert_eq!(
+            parse_start(" -396.32, 195.23 ,229.5"),
+            Some((Vec2::new(-396.32, 195.23), 229.5))
+        );
+        for refused in [
+            "", "mudd", "540", "540;570", "1,2,3,4", "nan,0", "0,inf", "540,570,",
+        ] {
+            assert_eq!(parse_start(refused), None, "{refused}");
+        }
+    }
 
     /// `scripts/perf/run-pencam-cost.sh` names its three conditions' scenarios by these words; a
     /// renamed or dropped word fails each of those runs at boot.
