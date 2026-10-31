@@ -15,11 +15,13 @@ from typing import BinaryIO, Iterator
 
 MAGIC = b"OMBP\x01\r\n\0"
 
-# Fields a writer wrote without declaring: seam -> (the declared field it follows, the field).
-# Dumps from before the writer declared `band_confirm_ticks` write its word after
-# `grade_confirm_ticks` under an 18-field `transmission_state` schema; naming it here lets such a
-# dump diff against itself and against a dump that declares all 19.
-UNNAMED_LEGACY_FIELDS = {
+# Every seam's payload is exactly as wide as its schema declares, with one accepted exception: a
+# `transmission_state` schema without `band_confirm_ticks` over a payload one word wider (DERIVED
+# from the writer's field list: 18 declared fields, 19 words). The extra word is
+# `band_confirm_ticks`, written after `grade_confirm_ticks`; the reader declares it there, so the
+# dump compares as the 19-field schema it carries. A schema without the field over a payload as
+# wide as declared (DERIVED: 18 fields, 18 words) predates the field and is read as declared.
+UNDECLARED_FIELDS = {
     "transmission_state": ("grade_confirm_ticks", {"name": "band_confirm_ticks", "type": "u32"}),
 }
 
@@ -35,17 +37,6 @@ def read_exact(stream: BinaryIO, size: int, context: str) -> bytes:
     return data
 
 
-def name_unnamed_legacy_fields(header: dict) -> None:
-    for seam in header["seams"]:
-        legacy = UNNAMED_LEGACY_FIELDS.get(seam["name"])
-        if legacy is None or seam.get("layout") != "fields":
-            continue
-        after, field = legacy
-        names = [declared["name"] for declared in seam["fields"]]
-        if field["name"] not in names and after in names:
-            seam["fields"].insert(names.index(after) + 1, dict(field))
-
-
 @dataclass(frozen=True)
 class SeamPayload:
     stored_hash: int
@@ -56,6 +47,22 @@ class SeamPayload:
 class Tick:
     number: int
     seams: tuple[SeamPayload, ...]
+
+
+def declare_undeclared_fields(schemas: list[dict], first: Tick | None) -> None:
+    """Declare an `UNDECLARED_FIELDS` word where the first tick's payload carries it undeclared."""
+    if first is None:
+        return
+    for schema, payload in zip(schemas, first.seams):
+        undeclared = UNDECLARED_FIELDS.get(schema["name"])
+        if undeclared is None or schema["layout"] != "fields":
+            continue
+        after, field = undeclared
+        names = [declared["name"] for declared in schema["fields"]]
+        if field["name"] in names or after not in names:
+            continue
+        if len(payload.words) == len(names) + 1:
+            schema["fields"].insert(names.index(after) + 1, dict(field))
 
 
 class Dump:
@@ -77,8 +84,9 @@ class Dump:
                 raise DumpError(f"{path}: unsupported format {self.header.get('format')!r}")
             if self.header.get("version") != 1:
                 raise DumpError(f"{path}: unsupported version {self.header.get('version')!r}")
-            name_unnamed_legacy_fields(self.header)
             self.seam_schemas = self.header["seams"]
+            self.first_tick = self.read_tick()
+            declare_undeclared_fields(self.seam_schemas, self.first_tick)
         except Exception:
             self.stream.close()
             raise
@@ -86,42 +94,53 @@ class Dump:
     def close(self) -> None:
         self.stream.close()
 
-    def ticks(self) -> Iterator[Tick]:
-        while True:
-            tick_raw = self.stream.read(4)
-            if not tick_raw:
-                return
-            if len(tick_raw) != 4:
-                raise DumpError(f"{self.path}: truncated tick number")
-            number = struct.unpack("<I", tick_raw)[0]
-            seams: list[SeamPayload] = []
-            for schema in self.seam_schemas:
-                seam_name = schema["name"]
-                seam_header = read_exact(
-                    self.stream, 12, f"{self.path} tick {number} seam {seam_name} header"
-                )
-                stored_hash, word_count = struct.unpack("<QI", seam_header)
-                payload = read_exact(
-                    self.stream,
-                    word_count * 4,
-                    f"{self.path} tick {number} seam {seam_name} payload",
-                )
-                words = struct.unpack(f"<{word_count}I", payload) if word_count else ()
-                if schema["layout"] == "records":
-                    if not words:
-                        raise DumpError(
-                            f"{self.path}: tick {number} seam {seam_name} has no record count"
-                        )
-                    expected_words = 1 + words[0] * len(schema["record_fields"])
-                else:
-                    expected_words = len(schema["fields"])
-                if word_count != expected_words:
+    def read_tick(self) -> Tick | None:
+        tick_raw = self.stream.read(4)
+        if not tick_raw:
+            return None
+        if len(tick_raw) != 4:
+            raise DumpError(f"{self.path}: truncated tick number")
+        number = struct.unpack("<I", tick_raw)[0]
+        seams: list[SeamPayload] = []
+        for schema in self.seam_schemas:
+            seam_name = schema["name"]
+            seam_header = read_exact(
+                self.stream, 12, f"{self.path} tick {number} seam {seam_name} header"
+            )
+            stored_hash, word_count = struct.unpack("<QI", seam_header)
+            payload = read_exact(
+                self.stream,
+                word_count * 4,
+                f"{self.path} tick {number} seam {seam_name} payload",
+            )
+            words = struct.unpack(f"<{word_count}I", payload) if word_count else ()
+            seams.append(SeamPayload(stored_hash, words))
+        return Tick(number, tuple(seams))
+
+    def check_widths(self, tick: Tick) -> None:
+        for schema, payload in zip(self.seam_schemas, tick.seams):
+            seam_name = schema["name"]
+            words = payload.words
+            if schema["layout"] == "records":
+                if not words:
                     raise DumpError(
-                        f"{self.path}: tick {number} seam {seam_name} declares {word_count} "
-                        f"words; schema requires {expected_words}"
+                        f"{self.path}: tick {tick.number} seam {seam_name} has no record count"
                     )
-                seams.append(SeamPayload(stored_hash, words))
-            yield Tick(number, tuple(seams))
+                expected_words = 1 + words[0] * len(schema["record_fields"])
+            else:
+                expected_words = len(schema["fields"])
+            if len(words) != expected_words:
+                raise DumpError(
+                    f"{self.path}: tick {tick.number} seam {seam_name} declares {len(words)} "
+                    f"words; schema requires {expected_words}"
+                )
+
+    def ticks(self) -> Iterator[Tick]:
+        tick, self.first_tick = self.first_tick, None
+        while tick is not None:
+            self.check_widths(tick)
+            yield tick
+            tick = self.read_tick()
 
 
 @dataclass(frozen=True)
