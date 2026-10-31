@@ -548,7 +548,7 @@ fn redraw(
 /// dressed once it holds a pose: an interpolated one takes its first when the cursor reaches it.
 fn dress_pieces(
     pieces: Query<(Entity, &WallPiece), (With<Transform>, Without<PieceDressed>)>,
-    buildings: Query<(&MapInstance, &Breakage)>,
+    buildings: Query<(Entity, &MapInstance, &Breakage)>,
     look: Option<Res<BuildingLook>>,
     mut meshes: ResMut<Assets<Mesh>>,
     mut commands: Commands,
@@ -557,9 +557,9 @@ fn dress_pieces(
         return;
     };
     for (entity, piece) in &pieces {
-        let Some((_, breakage)) = buildings
+        let Some((building, _, breakage)) = buildings
             .iter()
-            .find(|(identity, _)| identity.ordinal == piece.building)
+            .find(|(_, identity, _)| identity.ordinal == piece.building)
         else {
             continue;
         };
@@ -581,15 +581,22 @@ fn dress_pieces(
                 crate::render_cost::CasterClass::House,
             ))
             .id();
-        commands
-            .entity(entity)
-            .insert((PieceDressed { view, origin }, Visibility::Hidden));
+        commands.entity(entity).insert((
+            PieceDressed {
+                building,
+                view,
+                origin,
+            },
+            Visibility::Hidden,
+        ));
     }
 }
 
-/// A dressed piece: its mesh child, and the point (asset frame, scale 1) its mesh is drawn about.
+/// A dressed piece: its building's root, resolved from the piece's ordinal once, at dressing; its
+/// mesh child; and the point (asset frame, scale 1) its mesh is drawn about.
 #[derive(Component)]
 struct PieceDressed {
+    building: Entity,
     view: Entity,
     origin: Vec3,
 }
@@ -609,16 +616,15 @@ fn show_pieces(
         &mut Visibility,
         Has<PieceHoled>,
     )>,
-    buildings: Query<(&MapInstance, &Breakage, &ShownShape, Option<&ShownHoles>)>,
+    buildings: Query<(&Breakage, &ShownShape, Option<&ShownHoles>)>,
     mut worn: Query<&mut MeshMaterial3d<BuildingMaterial>>,
     mut surfaces: SurfaceStores,
     mut commands: Commands,
 ) {
     for (entity, piece, dressed, mut visibility, holed) in &mut pieces {
-        let building = buildings
-            .iter()
-            .find(|(identity, ..)| identity.ordinal == piece.building);
-        let fallen = building.is_some_and(|(_, _, shown, _)| {
+        // A piece whose building has despawned is hidden.
+        let building = buildings.get(dressed.building).ok();
+        let fallen = building.is_some_and(|(_, shown, _)| {
             piece
                 .chunks
                 .first()
@@ -632,7 +638,7 @@ fn show_pieces(
         if !fallen || holed {
             continue;
         }
-        let table = building.and_then(|(_, breakage, _, holes)| {
+        let table = building.and_then(|(breakage, _, holes)| {
             let kind = &breakage.kind;
             piece_hole_table(
                 &kind.asset,
