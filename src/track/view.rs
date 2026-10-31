@@ -699,9 +699,6 @@ fn attach_shadow_proxies(
         }
         // Intent only — deliberately says nothing about triangles or silenced shoes, because at this
         // point neither exists. `drive_track_views` logs the MEASURED geometry when the swap lands.
-        // (The line this replaces claimed "2 ribbons of 776 triangles" from `rig.count * 8` on the
-        // frame the ribbons were still empty, and that false success signal is what a reviewer read
-        // as proof the proxy was working while it cast nothing at all.)
         info!(
             "track shadow proxy: {mode:?} — 2 ribbons spawned for {} shoes/side, awaiting first fit",
             rig.count
