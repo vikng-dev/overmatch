@@ -3,6 +3,8 @@
 //! tank against them (design `armor-penetration-and-damage.md` §13.5, "The envelope", provisional;
 //! nothing reads them yet).
 //!
+//! Window contract (§13.5): a `Limited` servo travel is finite with `min <= 0 <= max`, which certify refuses otherwise (`ServoSpec::travel_window_fault`), and `drive_servos` never leaves.
+//!
 //! Entry point: [`TankEnvelopes::of`], a pure function of the bake's data (the extracted geometry and
 //! the tank sheet's servos), computed once per tank kind at load and shared by every spawn through
 //! [`super::TankBlueprint`].

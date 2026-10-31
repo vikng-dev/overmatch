@@ -1273,6 +1273,11 @@ impl TankSpec {
                 .into());
             }
         }
+        for (node, servo) in &self.servos {
+            if let Some(fault) = servo.travel_window_fault() {
+                return Err(format!("servo `{node}`: {fault}").into());
+            }
+        }
         // The two explicit node-list declarations that replaced the name scans. Both are required
         // structure — a tank with no collision proxy falls through the world, one with no roadwheel
         // on a side has no belt to drive — and a duplicate is a node bound twice, which for
@@ -2309,6 +2314,29 @@ TankSpec(
             );
         }
         assert!(fixture().validate().is_ok(), "the fixture's own stop loads");
+    }
+
+    /// The servo window contract (`ServoSpec::travel_window_fault`): the sim clamps to the window
+    /// and the envelope sweeps it, so one that is inverted or excludes the spawn angle 0 is refused
+    /// at load, the same refusal `certify_asset` reports as `L2.SPEC`.
+    #[test]
+    fn validate_rejects_a_servo_window_that_excludes_its_spawn_angle() {
+        use crate::tank::{ServoRole, ServoSpec};
+        for (min, max) in [(5.0, -5.0), (5.0, 20.0), (-20.0, -5.0), (f32::NAN, 1.0)] {
+            let mut spec = fixture();
+            spec.servos.insert(
+                "Bad_Pitch".to_owned(),
+                ServoSpec::test_limited(ServoRole::Pitch, 10.0, 10.0, min, max),
+            );
+            let err = spec.validate().unwrap_err().to_string();
+            assert!(err.contains("Bad_Pitch"), "window ({min}, {max}): {err}");
+        }
+        let mut spec = fixture();
+        spec.servos.insert(
+            "Good_Pitch".to_owned(),
+            ServoSpec::test_limited(ServoRole::Pitch, 10.0, 10.0, -8.0, 15.0),
+        );
+        assert!(spec.validate().is_ok());
     }
 
     /// Transmission-block runtime invariants: non-finite capacities NaN out the
