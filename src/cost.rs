@@ -134,7 +134,6 @@ fn write_meta(mut cost: ResMut<CostTrace>, fixed: Res<Time<Fixed>>, role: Res<Co
         "tick_hz": tick_hz,
         "ver": env!("CARGO_PKG_VERSION"),
         "warmup": cost.warmup,
-        "mgsc": crate::env_flag("SPIKE_MG_SHORTCIRCUIT", false),
     });
     cost.sink.write(&row);
 }

@@ -558,7 +558,6 @@ fn shot_world() -> App {
         16,
     )))
     .insert_resource(RetainSpentShells(true))
-    .insert_resource(MgShortCircuit(false))
     .add_systems(Update, integrate_projectiles);
     app
 }

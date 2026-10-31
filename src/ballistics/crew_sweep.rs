@@ -180,7 +180,6 @@ fn sweep_world(directions: Option<usize>) -> App {
     let mut app = probe_world().expect("the bound tank builds");
     app.insert_resource(TimeUpdateStrategy::ManualDuration(STEP))
         .insert_resource(RetainSpentShells(true))
-        .insert_resource(MgShortCircuit(false))
         .add_systems(Update, integrate_projectiles);
     if let Some(directions) = directions {
         app.insert_resource(spall_cone::SpallLaw(spall_cone::ConeShape::shipped_at(

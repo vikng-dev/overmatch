@@ -89,8 +89,8 @@
 //! shadow proxy overrides its tank-root ancestor by construction.
 //!
 //! Hiding the ribbon INSIDE the shoes instead — the third fallback, no trick at all — was measured
-//! and rejected: [`ProxyMode::Visible`] paints it magenta, and the magenta shows through the gaps
-//! between consecutive shoes all around the belt. A track is a chain of plates, not a surface, and
+//! and rejected: painted magenta, the ribbon shows through the gaps between consecutive shoes all
+//! around the belt. A track is a chain of plates, not a surface, and
 //! there is nowhere inside it to hide.
 //!
 //! # The cross-section is the measured shoe, with no fudge
@@ -127,58 +127,6 @@ use bevy::prelude::*;
 
 use super::loop_geom;
 
-/// Which caster arrangement a session runs. `OVERMATCH_TRACK_SHADOW_PROXY`, a dev instrument in the
-/// shape of [`crate::env_parse`]'s other knobs — the A/B is the whole point of the prototype, and a
-/// rebuild per arm would make the two arms different binaries.
-#[derive(Resource, Clone, Copy, PartialEq, Eq, Debug, Default)]
-pub(crate) enum ProxyMode {
-    /// `off` — no proxy at all; the real shoes cast, exactly as they shipped. The BEFORE arm.
-    Off,
-    /// `static` — the ribbon is built ONCE, from the first frame's belt, and then rides the hull
-    /// unchanged. Cheapest possible proxy and an upper bound on what the mechanism can buy; wrong
-    /// over rough ground, where the real belt conforms and this one does not.
-    Static,
-    /// `dynamic` — the ribbon is rebuilt every frame from that frame's belt polyline. One `Mesh`
-    /// asset per tank SIDE (never shared: two tanks are on different ground).
-    #[default]
-    Dynamic,
-    /// `visible` — the dynamic ribbon wearing an opaque magenta material instead of the invisible
-    /// one, so the proxy can be EYEBALLED: where it sits inside the shoes, whether it follows the
-    /// belt around the sprocket, how much of it shows through. Diagnostic only.
-    Visible,
-}
-
-impl ProxyMode {
-    /// Read the knob. Unset is [`ProxyMode::Dynamic`]; an unrecognised value is a typo worth
-    /// hearing about rather than silently ignoring, so it logs and falls back.
-    pub(crate) fn from_env() -> Self {
-        let Ok(raw) = std::env::var("OVERMATCH_TRACK_SHADOW_PROXY") else {
-            return Self::default();
-        };
-        match raw.trim().to_ascii_lowercase().as_str() {
-            "off" | "0" => Self::Off,
-            "static" => Self::Static,
-            "dynamic" | "1" => Self::Dynamic,
-            "visible" => Self::Visible,
-            other => {
-                warn!("OVERMATCH_TRACK_SHADOW_PROXY={other:?} is not off/static/dynamic/visible");
-                Self::default()
-            }
-        }
-    }
-
-    /// Whether the real shoes should stop casting — every mode that spawns a proxy.
-    pub(crate) const fn silences_links(self) -> bool {
-        !matches!(self, Self::Off)
-    }
-
-    /// Whether the ribbon follows changes in the live belt. [`ProxyMode::Static`] bakes once
-    /// and rides the hull; the other modes update only when hull-local joints change.
-    pub(crate) const fn follows_belt(self) -> bool {
-        matches!(self, Self::Dynamic | Self::Visible)
-    }
-}
-
 /// How many fitted frames a bound rig may go without a ribbon before the silence is worth a
 /// warning (counted as [`ProxySide::pending_frames`] counts).
 ///
@@ -203,8 +151,7 @@ pub(crate) struct ProxySide {
     /// mesh with no positions fails the shadow prepass pipeline's validation (vertex input
     /// `Location[0]` not provided), which quits the client.
     ///
-    /// `Some` is also the CASTER SWAP's readiness and the gate that makes [`ProxyMode::Static`] a
-    /// one-shot bake. The shoes are silenced on the frame it is set, never at spawn: the first fit
+    /// `Some` is also the CASTER SWAP's readiness. The shoes are silenced on the frame it is set, never at spawn: the first fit
     /// can legitimately be late (no `TrackField` yet, a replica whose interpolated `TrackDrive` is
     /// not yet visible, a mid-bind belt with under three joints), and silencing the shoes before it
     /// lands is a tank with NO belt shadow at all, silently. Silencing them only against geometry
@@ -253,9 +200,11 @@ impl ProxySide {
         }
     }
 
-    /// Fold one frame's drawn pin `joints` into the ribbon and say what the caller must do.
-    /// `follows_belt` is [`ProxyMode::follows_belt`]. `meshes` is dereferenced mutably only when
-    /// the ribbon is created or changes, so a settled ribbon leaves a `ResMut` store unchanged.
+    /// Fold one frame's drawn pin `joints` into the ribbon and say what the caller must do. The
+    /// ribbon follows the live belt: one `Mesh` asset per tank SIDE (never shared: two tanks are on
+    /// different ground), rewritten in place only when the hull-local joints change. `meshes` is
+    /// dereferenced mutably only when the ribbon is created or changes, so a settled ribbon leaves
+    /// a `ResMut` store unchanged.
     ///
     /// This is the atomicity, in the one place it can be tested without a GPU: the mesh asset is
     /// created on the first frame the joints close a loop, already holding that loop, the shoes are
@@ -265,11 +214,9 @@ impl ProxySide {
         &mut self,
         mut meshes: impl DerefMut<Target = Assets<Mesh>>,
         joints: &[Vec2],
-        follows_belt: bool,
     ) -> ProxyStep {
         if let Some(handle) = &self.mesh {
-            if follows_belt
-                && self.ribbon.needs_update(joints)
+            if self.ribbon.needs_update(joints)
                 && let Some(mut mesh) = meshes.get_mut(handle)
             {
                 self.ribbon.write(&mut mesh, joints, self.section);
@@ -355,16 +302,6 @@ impl Section {
 /// silhouette.
 pub(crate) fn proxy_material() -> StandardMaterial {
     StandardMaterial::default()
-}
-
-/// The material [`ProxyMode::Visible`] uses instead: ordinary opaque magenta, so the ribbon can be
-/// looked at rather than argued about.
-pub(crate) fn visible_probe_material() -> StandardMaterial {
-    StandardMaterial {
-        base_color: Color::srgb(1.0, 0.0, 1.0),
-        unlit: true,
-        ..default()
-    }
 }
 
 /// A bound ribbon has a fixed station count, loop winding and cross-section. Rebinding the rig
@@ -772,14 +709,14 @@ mod tests {
         let mut side = fresh_side();
         for joints in [vec![], ring(2, 1.0)] {
             for _ in 0..10 {
-                assert_eq!(side.fit(&mut meshes, &joints, true), ProxyStep::Idle);
+                assert_eq!(side.fit(&mut meshes, &joints), ProxyStep::Idle);
             }
         }
         assert!(side.mesh.is_none(), "no loop, no ribbon");
         assert!(meshes.is_empty(), "no loop, no mesh asset");
 
         let stations = ring(48, 2.0);
-        let ProxyStep::Silence { mesh, triangles } = side.fit(&mut meshes, &stations, true) else {
+        let ProxyStep::Silence { mesh, triangles } = side.fit(&mut meshes, &stations) else {
             panic!("the first closed loop is the swap");
         };
         assert_eq!(side.mesh.as_ref(), Some(&mesh));
@@ -791,7 +728,7 @@ mod tests {
         let moved: Vec<Vec2> = stations.iter().map(|p| *p * 1.01).collect();
         for joints in [&moved, &stations, &vec![]] {
             assert_eq!(
-                side.fit(&mut meshes, joints, true),
+                side.fit(&mut meshes, joints),
                 ProxyStep::Idle,
                 "the swap is a one-shot: re-silencing every frame is a per-frame command flush"
             );
@@ -816,7 +753,7 @@ mod tests {
         let mut side = fresh_side();
         let mut overdue = 0;
         for _ in 0..(PROXY_READY_GRACE_FRAMES * 3) {
-            match side.fit(&mut meshes, &[], true) {
+            match side.fit(&mut meshes, &[]) {
                 ProxyStep::Overdue => overdue += 1,
                 ProxyStep::Idle => {}
                 ProxyStep::Silence { .. } => panic!("nothing to silence against"),

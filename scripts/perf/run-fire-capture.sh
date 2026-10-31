@@ -14,18 +14,9 @@
 #   idle 0-20s | MG held 20-50s | idle 50-60s | main gun 60-75s | idle 75s+
 #
 # Usage: run-fire-capture.sh <out-dir> [condition ...]
-# Conditions are `name:MUZZLE_SHADOWS` pairs, where the lever is one of the knob's EXPLICIT tokens
-# (`main-only` = the shipped policy, `on` = the pre-2026-07-31 legacy policy, `off` = no muzzle
-# light casts). Default is all three: the shipped arm, the legacy arm it was chosen over, and the
-# off baseline — the A/B that isolates muzzle-light shadow cost (bevy has no shadow-pass diagnostic
-# span, so SPIKE_RENDER_COST cannot see it — the lever is the only instrument).
-#
-# Naming the shipped policy rather than relying on the default is deliberate and load-bearing: the
-# arm labelled `shipped` used to export `on`, which STOPPED being the shipped policy the day the
-# default moved to MainGunOnly, and nothing in the run said so. Each condition now also verifies the
-# policy the client itself RESOLVED (`muzzle_shadows: resolved <token>` in its log) against the
-# token asked for, so a renamed, typo'd or dropped lever fails the run instead of quietly measuring
-# the default arm twice.
+# Conditions are run names, each one fresh client playing the shipped game (default: one run,
+# `shipped`); several names are repeated runs, for run-to-run spread. Main-gun muzzle lights cast
+# shadows and MG rounds' do not (`MG_LIGHT_CASTS`, `vfx::muzzle`).
 #
 # Validity conditions are the frame sweep's, for the same reasons (see run-frame-sweep.sh):
 # visible unoccluded frontmost window, machine quiet, hands off, warm shader cache. Gates enforced
@@ -40,7 +31,7 @@
 set -eu
 setopt null_glob
 
-OUT="${1:?usage: run-fire-capture.sh <out-dir> [name:shadowlever ...]}"
+OUT="${1:?usage: run-fire-capture.sh <out-dir> [condition ...]}"
 shift || true
 REPO="$(cd "$(dirname "$0")/../.." && pwd)"
 BIN="${BIN:-target/release}"
@@ -58,7 +49,7 @@ fi
 
 CONDITIONS=("$@")
 if (( ${#CONDITIONS[@]} == 0 )); then
-  CONDITIONS=("shipped:main-only" "legacy-on:on" "mgshadow-off:off")
+  CONDITIONS=("shipped")
 fi
 
 mkdir -p "$OUT"
@@ -82,9 +73,7 @@ trap 'exit 143' TERM
   echo "host: $(uname -m) $(sysctl -n machdep.cpu.brand_string 2>/dev/null || uname -p)"
 } >"$OUT/manifest.txt"
 
-for entry in "${CONDITIONS[@]}"; do
-  cond="${entry%%:*}"
-  lever="${entry#*:}"
+for cond in "${CONDITIONS[@]}"; do
 
   cfg="$OUT/cfg-$cond"
   mkdir -p "$cfg"
@@ -92,10 +81,9 @@ for entry in "${CONDITIONS[@]}"; do
   # frame times are the workload's, not the display's.
   printf '(\n    version: 1,\n    shadow_distance: M350,\n    vsync_mode: Off,\n)\n' >"$cfg/video.ron"
 
-  echo "== $cond: OVERMATCH_MUZZLE_SHADOWS=$lever (${RUN_S}s) =="
+  echo "== $cond (${RUN_S}s) =="
   env -u SPIKE_SIM_WINDOWED -u SPIKE_SIM_VISIBLE \
     OVERMATCH_CONFIG_DIR="$cfg" \
-    OVERMATCH_MUZZLE_SHADOWS="$lever" \
     SPIKE_AUTO_FIRE=1 \
     SPIKE_FRAME_COST="$OUT/$cond.jsonl" \
     SPIKE_RENDER_COST="$OUT/$cond.render.jsonl" \
@@ -139,14 +127,6 @@ for entry in "${CONDITIONS[@]}"; do
   [[ -f "$stream" ]] || { echo "$cond INVALID: no frame stream at $stream" >&2; exit 1; }
   grep -q "settings: loaded $cfg/video.ron" "$OUT/$cond.log" || { echo "$cond INVALID: injected settings were not loaded" >&2; exit 1; }
   grep -q "auto_fire: armed" "$OUT/$cond.log" || { echo "$cond INVALID: the scripted trigger never armed — nothing fired" >&2; exit 1; }
-  # The condition's WHOLE POINT: the client must have resolved the policy this arm asked for. An
-  # unrecognized token falls back to the default silently inside the client, so the arm's identity
-  # is only real if the client says so.
-  resolved="$(grep -m1 -o 'muzzle_shadows: resolved [a-z-]*' "$OUT/$cond.log" | awk '{print $3}')"
-  if [[ "$resolved" != "$lever" ]]; then
-    echo "$cond INVALID: asked for OVERMATCH_MUZZLE_SHADOWS=$lever but the client resolved '${resolved:-<nothing logged>}' — this arm is not measuring what it claims" >&2
-    exit 1
-  fi
   # The render-cost half was requested, so its absence is a failed run, not a quiet one: before
   # 2026-07-31 the offline root never mounted `render_cost::client_plugin` and this stream was
   # never written, while the capture still reported success.
@@ -168,7 +148,6 @@ for entry in "${CONDITIONS[@]}"; do
     echo "$cond: $(grep -m1 -o 'frame_cost: effective present mode.*' "$OUT/$cond.log")"
     echo "$cond: occlusion transitions in stream: $(grep -c '"occluded"' "$stream" || true)"
     echo "$cond: auto-fire phases: $(grep -c 'auto_fire: phase' "$OUT/$cond.log" || true)"
-    echo "$cond: muzzle-shadow policy resolved by the client: $resolved (asked $lever)"
     echo "$cond: render-cost rows: $(wc -l <"$render_stream" | tr -d ' ')"
   } >>"$OUT/manifest.txt"
   echo "   $cond OK: $(wc -l <"$stream" | tr -d ' ') rows"

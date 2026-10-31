@@ -17,11 +17,11 @@
 //! # The switch
 //!
 //! One decision per tank, on the camera distance from the player's view to the tank's root
-//! ([`TankShadowProxy::side`]). Every assembly of a tank is written by one system in one frame, so a
+//! ([`switch_side`]). Every assembly of a tank is written by one system in one frame, so a
 //! tank never casts from a mix. Bevy selects a mesh per camera and not per cascade, so the camera
 //! distance is the selector the stock renderer offers.
 //!
-//! The range is one generic value, [`DEFAULT_SWITCH_M`], and not the LOD certificate's law. That law
+//! The range is one generic value, [`SWITCH_M`], and not the LOD certificate's law. That law
 //! would switch where the proxy's deviation from the drawn surface, amplified by `cot(sun elevation)`
 //! on flat ground, projects under the pixel budget; the certificate records no proxy deviation, and a
 //! surface deviation is set by the thinnest feature a proxy omits (a whip antenna is metres of
@@ -43,76 +43,24 @@ use crate::view::PlayerView;
 /// tank. ASSUMED: the shipped cascade ladder's last-cascade near bound, DERIVED as the geometric
 /// split `√(40 × 350) = 118.3 m` (`settings.rs`), rounded up, so tanks in the two finer cascades keep
 /// their drawn casters. The pricing battery (#169) owns the final value.
-pub(crate) const DEFAULT_SWITCH_M: f32 = 120.0;
+const SWITCH_M: f32 = 120.0;
 
 /// How far inside the switch range a tank must come back before it returns to its drawn casters, as
 /// a fraction of the range. ASSUMED: a flip rewrites the scopes of every caster in the tank's
 /// assemblies, and a camera parked on the range would otherwise pay that every frame.
 const SWITCH_HYSTERESIS: f32 = 0.05;
 
-/// Which caster arrangement a session runs, from `OVERMATCH_TANK_SHADOW_PROXY`: a dev instrument
-/// in the shape of the track's `OVERMATCH_TRACK_SHADOW_PROXY`, so the arms of an A/B are one binary.
-#[derive(Resource, Clone, Copy, PartialEq, Debug)]
-pub(crate) enum TankShadowProxy {
-    /// `off`: no proxy casts, and declared proxies are hidden like collision proxies. The arrangement
-    /// before proxies existed.
-    Off,
-    /// unset, `on`, or a number of metres: proxies cast for tanks at least this far from the
-    /// player's view.
-    Beyond(f32),
-    /// `always`: proxies cast at every distance, so a proxy's shadow can be looked at up close.
-    Always,
-}
-
-impl TankShadowProxy {
-    /// Read the knob. Unset is [`DEFAULT_SWITCH_M`]; an unrecognised value logs and falls back.
-    pub(crate) fn from_env() -> Self {
-        let Ok(raw) = std::env::var("OVERMATCH_TANK_SHADOW_PROXY") else {
-            return Self::Beyond(DEFAULT_SWITCH_M);
-        };
-        Self::parse(&raw).unwrap_or_else(|| {
-            warn!(
-                "OVERMATCH_TANK_SHADOW_PROXY={raw:?} is not off/on/always or a positive number of \
-                 metres"
-            );
-            Self::Beyond(DEFAULT_SWITCH_M)
-        })
-    }
-
-    fn parse(raw: &str) -> Option<Self> {
-        match raw.trim().to_ascii_lowercase().as_str() {
-            "off" => Some(Self::Off),
-            "on" => Some(Self::Beyond(DEFAULT_SWITCH_M)),
-            "always" => Some(Self::Always),
-            metres => metres
-                .parse::<f32>()
-                .ok()
-                .filter(|m| m.is_finite() && *m > 0.0)
-                .map(Self::Beyond),
+/// THE SWITCH LAW: the side a tank's swap takes at `distance_m` from the player's view, given the
+/// side it is on and the range `switch_m` ([`SWITCH_M`] in play). Beyond the range it is the
+/// proxies; back inside the range by the hysteresis band it is the drawn geometry; between the two,
+/// and for a distance that is not a number (no view to measure from), it holds.
+fn switch_side(switch_m: f32, current: CasterSwap, distance_m: f32) -> CasterSwap {
+    match current {
+        CasterSwap::Detail if distance_m >= switch_m => CasterSwap::Proxy,
+        CasterSwap::Proxy if distance_m < switch_m * (1.0 - SWITCH_HYSTERESIS) => {
+            CasterSwap::Detail
         }
-    }
-
-    /// Whether declared proxies are bound as casters at all.
-    pub(crate) const fn binds(self) -> bool {
-        !matches!(self, Self::Off)
-    }
-
-    /// THE SWITCH LAW: the side a tank's swap takes at `distance_m` from the player's view, given
-    /// the side it is on. Beyond the range it is the proxies; back inside the range by the
-    /// hysteresis band it is the drawn geometry; between the two, and for a distance that is not a
-    /// number (no view to measure from), it holds.
-    pub(crate) fn side(self, current: CasterSwap, distance_m: f32) -> CasterSwap {
-        match self {
-            Self::Off => CasterSwap::Detail,
-            Self::Always => CasterSwap::Proxy,
-            Self::Beyond(switch_m) => match current {
-                CasterSwap::Detail if distance_m >= switch_m => CasterSwap::Proxy,
-                CasterSwap::Proxy if distance_m < switch_m * (1.0 - SWITCH_HYSTERESIS) => {
-                    CasterSwap::Detail
-                }
-                _ => current,
-            },
-        }
+        _ => current,
     }
 }
 
@@ -226,19 +174,19 @@ impl CasterPlan {
     }
 }
 
-/// Put every bound tank on the side [`TankShadowProxy::side`] gives its distance from the player's
-/// view. Writes scopes only on a flip; a quiet frame changes nothing.
+/// Put every bound tank on the side [`switch_side`] gives its distance from the player's view.
+/// Writes scopes only on a flip; a quiet frame changes nothing.
 pub(crate) fn switch_tank_casters(
-    mode: Res<TankShadowProxy>,
     views: Query<&GlobalTransform, With<PlayerView>>,
     mut tanks: Query<(&GlobalTransform, &mut TankCasterSwap)>,
     mut scopes: Query<&mut VisualScope>,
 ) {
-    // No declared view, or several, measures no distance; `side` then holds every tank where it is.
+    // No declared view, or several, measures no distance; the law then holds every tank where it
+    // is.
     let eye = views.single().ok().map(GlobalTransform::translation);
     for (anchor, mut swap) in &mut tanks {
         let distance = eye.map_or(f32::NAN, |eye| eye.distance(anchor.translation()));
-        let side = mode.side(swap.side, distance);
+        let side = switch_side(SWITCH_M, swap.side, distance);
         if side == swap.side {
             continue;
         }
@@ -268,15 +216,14 @@ mod tests {
     /// for whatever value the pricing battery settles on.
     #[test]
     fn the_switch_flips_at_the_range_and_returns_inside_the_band() {
-        for switch_m in [1.0, DEFAULT_SWITCH_M, 900.0] {
-            let mode = TankShadowProxy::Beyond(switch_m);
+        for switch_m in [1.0, SWITCH_M, 900.0] {
             let back = switch_m * (1.0 - SWITCH_HYSTERESIS);
             let steps: Vec<f32> = (0..=400)
                 .map(|i| switch_m * 2.0 * i as f32 / 400.0)
                 .collect();
             let mut side = CasterSwap::Detail;
             for &d in &steps {
-                side = mode.side(side, d);
+                side = switch_side(switch_m, side, d);
                 assert_eq!(
                     side == CasterSwap::Proxy,
                     d >= switch_m,
@@ -284,7 +231,7 @@ mod tests {
                 );
             }
             for &d in steps.iter().rev() {
-                side = mode.side(side, d);
+                side = switch_side(switch_m, side, d);
                 assert_eq!(
                     side == CasterSwap::Proxy,
                     d >= back,
@@ -294,31 +241,11 @@ mod tests {
         }
     }
 
-    /// The two instrument arms ignore distance, and a distance nobody measured moves no tank.
+    /// A distance nobody measured (no view, or several) moves no tank, on either side.
     #[test]
-    fn the_instrument_arms_ignore_distance_and_no_view_holds() {
+    fn an_unmeasured_distance_holds_the_side() {
         for side in [CasterSwap::Detail, CasterSwap::Proxy] {
-            for d in [0.0, 50.0, 1.0e6, f32::NAN] {
-                assert_eq!(TankShadowProxy::Off.side(side, d), CasterSwap::Detail);
-                assert_eq!(TankShadowProxy::Always.side(side, d), CasterSwap::Proxy);
-            }
-            assert_eq!(TankShadowProxy::Beyond(100.0).side(side, f32::NAN), side);
-        }
-    }
-
-    /// The knob's spellings; a value that is not one is refused rather than read as a range.
-    #[test]
-    fn the_knob_parses_its_arms() {
-        use TankShadowProxy::*;
-        assert_eq!(TankShadowProxy::parse("off"), Some(Off));
-        assert_eq!(
-            TankShadowProxy::parse(" On "),
-            Some(Beyond(DEFAULT_SWITCH_M))
-        );
-        assert_eq!(TankShadowProxy::parse("always"), Some(Always));
-        assert_eq!(TankShadowProxy::parse("75.5"), Some(Beyond(75.5)));
-        for refused in ["0", "-3", "nan", "inf", "near"] {
-            assert_eq!(TankShadowProxy::parse(refused), None, "{refused}");
+            assert_eq!(switch_side(SWITCH_M, side, f32::NAN), side);
         }
     }
 
@@ -342,7 +269,6 @@ mod tests {
         fn new() -> Self {
             let mut app = App::new();
             app.add_plugins(render_policy::plugin)
-                .insert_resource(TankShadowProxy::Beyond(DEFAULT_SWITCH_M))
                 .add_systems(Update, switch_tank_casters);
             let world = app.world_mut();
             let root = world

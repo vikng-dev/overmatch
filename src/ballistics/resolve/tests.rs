@@ -2868,7 +2868,6 @@ fn the_replayed_first_contact_stops_resolve() {
             std::time::Duration::from_micros(15_625),
         ))
         .insert_resource(RetainSpentShells(true))
-        .insert_resource(crate::ballistics::MgShortCircuit(false))
         .add_systems(Update, crate::ballistics::integrate_projectiles)
         .add_observer(crate::ballistics::on_fire_shell);
         let mut fire = crate::ballistics::FireShell::of_round(

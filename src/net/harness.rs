@@ -21,7 +21,6 @@
 //! | `SPIKE_JITTER_MS` | milliseconds; `0` | Receive-conditioner jitter. |
 //! | `SPIKE_JITTER_SEED` | `u64`; off | Make active receive jitter reproducible by packet index. |
 //! | `SPIKE_LATENCY_MS` | milliseconds; `0` | Receive-conditioner latency. |
-//! | `SPIKE_MG_SHORTCIRCUIT` | flag; off | Experimental MG march short-circuit. |
 //! | `SPIKE_RENDER_COST` | path; off | Role-qualified per-render-pass CPU/GPU-time JSONL (client). |
 //! | `SPIKE_SHOT_TRACE` | path; off | Role-qualified shot-lifecycle JSONL. |
 //! | `SPIKE_SIMULATE_INPUT` | flag; off | Run the scripted client input harness. |

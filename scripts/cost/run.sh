@@ -15,10 +15,8 @@
 # Scenarios (each: fresh server, so server/client cost files pair 1:1):
 #   idle1   1 tank, stationary, no fire      — the baseline tick
 #   fire1   1 tank, stationary, dual-MG held — 1 tank firing (rounds strike terrain ~40 m out)
-#   fire1sc fire1 + SPIKE_MG_SHORTCIRCUIT    — A/B: resolution machinery skipped (matters on armor)
 #   fire2   2 tanks firing                   — 2 tanks firing (server cost only; client files split)
 #   armor1  A fires into a stationary target B at ~8 m — rounds strike ARMOR (full penetration march)
-#   armor1sc armor1 + SPIKE_MG_SHORTCIRCUIT  — A/B arm for the armor path
 #   loft1   short run, lofted aim, no landing — a 0→~150 projectile-population SWEEP for the per-shell
 #           march slope (rounds never impact, so keep it SHORT; a long loft run leaks shells)
 set -u
@@ -35,7 +33,7 @@ cd "$REPO" || exit 1
 
 # Which scenarios to run: the positional args, or all of them.
 SCENARIOS=("$@")
-[ ${#SCENARIOS[@]} -eq 0 ] && SCENARIOS=(idle1 fire1 fire1sc fire2 armor1 armor1sc loft1)
+[ ${#SCENARIOS[@]} -eq 0 ] && SCENARIOS=(idle1 fire1 fire2 armor1 loft1)
 want() { [[ " ${SCENARIOS[*]} " == *" $1 "* ]]; }
 
 # Boot a fresh server. $1=base(SPIKE_COST_TRACE) ; extra env as further args.
@@ -72,13 +70,6 @@ if want fire1; then
   stop_server
 fi
 
-if want fire1sc; then
-  echo "== fire1sc (MG short-circuit A/B) =="
-  start_server fire1sc SPIKE_MG_SHORTCIRCUIT=1
-  run_client fire1sc "$TICKS" SPIKE_FIRE_SECONDARY=1 SPIKE_MG_SHORTCIRCUIT=1
-  stop_server
-fi
-
 if want fire2; then
   echo "== fire2 (2 tanks firing; server cost is the target) =="
   start_server fire2
@@ -97,17 +88,6 @@ if want armor1; then
   CB=$!
   sleep 1                                                    # let B spawn on lane 0 first
   run_client armor1 "$TICKS" SPIKE_FIRE_SECONDARY=1 SPIKE_AIM_POINT="-8,0,0" SPIKE_SIM_RANGE=12
-  wait "$CB" 2>/dev/null
-  stop_server
-fi
-
-if want armor1sc; then
-  echo "== armor1sc (armor A/B arm) =="
-  start_server armor1sc SPIKE_MG_SHORTCIRCUIT=1
-  run_client armor1scb "$TICKS" SPIKE_SIM_IDLE=1 &
-  CB=$!
-  sleep 1
-  run_client armor1sc "$TICKS" SPIKE_FIRE_SECONDARY=1 SPIKE_MG_SHORTCIRCUIT=1 SPIKE_AIM_POINT="-8,0,0" SPIKE_SIM_RANGE=12
   wait "$CB" 2>/dev/null
   stop_server
 fi

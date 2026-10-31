@@ -1778,8 +1778,8 @@ pub enum ImpactSurface {
 /// Invariant: `Ricochet` is exactly a resolved deflection off armour, and only it carries a
 /// deflected direction (the local [`ImpactOutcome`] makes that structural). `Struck`
 /// is a stop at the face with no crossing resolved: every terrain strike, and an armour contact
-/// that ends without a crossing (a fail-closed walk, an unkeyed replica's neutral spark, the
-/// short-circuit probe). `Stopped` entered the material and ended inside it; `Through` came out the
+/// that ends without a crossing (a fail-closed walk, an unkeyed replica's neutral spark).
+/// `Stopped` entered the material and ended inside it; `Through` came out the
 /// far side. `Struck` on armour is a walk that failed closed, which opens no pen cam
 /// ([`crate::damage_cam::ShotVerdict`]).
 #[derive(Clone, Copy, PartialEq, Eq, Debug, serde::Serialize, serde::Deserialize)]
@@ -1906,15 +1906,6 @@ pub(crate) struct Impact {
 #[derive(Component)]
 pub struct ImpactMarker;
 
-/// Default-off A/B cost probe that stops sub-20 mm rounds at their first surface.
-///
-/// Invariant: it does not apply to main-gun rounds and is never enabled by default.
-#[derive(Resource, Clone, Copy, Default)]
-pub struct MgShortCircuit(pub bool);
-
-/// Caliber ceiling (m) for [`MgShortCircuit`].
-const MG_SHORTCIRCUIT_CALIBER_MAX: f32 = 0.020;
-
 /// The SIMULATION half: the flight, the armor resolution, and the impact seam. It opens no asset,
 /// builds no mesh or material, and writes no `Visibility` — a shell born here is a bare simulation
 /// entity, and [`view::plugin`] (client roots only) is what dresses one.
@@ -1930,10 +1921,6 @@ pub fn sim_plugin(app: &mut App) {
     energy_dose::joules_per_hp();
     app.init_resource::<RetainSpentShells>()
         .init_resource::<MarchMode>()
-        .insert_resource(MgShortCircuit(crate::env_flag(
-            "SPIKE_MG_SHORTCIRCUIT",
-            false,
-        )))
         .add_observer(on_fire_shell)
         .add_observer(on_impact)
         // The same march, integrated on whichever clock the mode selects: `Real` on the fixed
@@ -2618,8 +2605,6 @@ fn integrate_projectiles(
     mut health: Query<&mut ComponentHealth>,
     retain: Res<RetainSpentShells>,
     net: ProjectileMarchNet,
-    // EXPERIMENTAL cost-attribution A/B lever (`SPIKE_MG_SHORTCIRCUIT`, default off — see the type).
-    shortcircuit: Res<MgShortCircuit>,
     // The fixed-tick clock (`SPIKE_COST_TRACE`, or the server stats line): absent unless a consumer
     // armed it, so an unmeasured run pays only the `Option` check. This system's whole wall-time is
     // stamped into it.
@@ -2709,7 +2694,6 @@ fn integrate_projectiles(
             &colliders,
             &mut health,
             &mut bodies,
-            shortcircuit.0,
             &mut tick,
         ) else {
             continue;
@@ -3332,9 +3316,6 @@ fn march_shell_step(
     )>,
     health: &mut Query<&mut ComponentHealth>,
     bodies: &mut Query<Forces>,
-    // EXPERIMENTAL cost-attribution A/B arm (`SPIKE_MG_SHORTCIRCUIT`, default off — see
-    // [`MgShortCircuit`]).
-    shortcircuit: bool,
     tick: &mut MarchTick,
 ) -> Option<MarchStep> {
     let MarchTick {
@@ -3487,7 +3468,7 @@ fn march_shell_step(
                         .fuze
                         .entered(f64::INFINITY, speed, None, distance);
                 }
-                strike_ground(shell, entry, normal, shortcircuit, tick);
+                strike_ground(shell, entry, normal, tick);
                 stop_at(shell, &mut flight, entry, distance);
                 stopped = true;
                 break;
@@ -3502,7 +3483,7 @@ fn march_shell_step(
         let contact_normal = hit.map_or(-Vec3::from(dir), |hit| hit.normal);
 
         if let Some(hit) = hit {
-            if stops_unresolved(shell, world, hit, entry, shortcircuit, tick) {
+            if stops_unresolved(shell, world, hit, entry, tick) {
                 stop_at(shell, &mut flight, entry, contact);
                 stopped = true;
                 break;
@@ -3879,20 +3860,12 @@ fn burst_here(
     (ended, removed)
 }
 
-/// The ground stops the shell at `entry`: the struck terrain [`Impact`], the same whether or not
-/// the MG short-circuit is armed, and on a client the lifecycle row closing the shot, which the
-/// short-circuit does not record. The caller stops the flight at `entry`.
-fn strike_ground(
-    shell: &MarchingShell,
-    entry: Vec3,
-    normal: Vec3,
-    shortcircuit: bool,
-    tick: &mut MarchTick,
-) {
+/// The ground stops the shell at `entry`: the struck terrain [`Impact`], and on a client the
+/// lifecycle row closing the shot. The caller stops the flight at `entry`.
+fn strike_ground(shell: &MarchingShell, entry: Vec3, normal: Vec3, tick: &mut MarchTick) {
     let MarchTick { now, deposit, .. } = *tick;
     let (shot_trace, commands) = (&mut *tick.shot_trace, &mut *tick.commands);
     let shot = shell.shot;
-    let shorted = shortcircuit && shell.projectile.caliber() < MG_SHORTCIRCUIT_CALIBER_MAX;
     commands.trigger(Impact {
         position: entry,
         normal,
@@ -3903,10 +3876,7 @@ fn strike_ground(
     // A terrain stop is the one shot terminal that needs NO confirm: static, pose-independent
     // geometry, so both ends already agree (ADR-0021's invariant). Recorded on the client so the
     // analyzer can close the lifecycle of a shot that simply never reached armor.
-    if !shorted
-        && !deposit
-        && let Some(shot) = shot
-    {
+    if !deposit && let Some(shot) = shot {
         crate::shot_trace::record(
             shot_trace,
             "end",
@@ -3918,44 +3888,18 @@ fn strike_ground(
 }
 
 /// Whether the round stops dead at its first surface, `hit`, with no crossing resolved, and the
-/// struck [`Impact`] it shows at `entry`: under the MG short-circuit, or where the hit's ancestry
-/// holds no ballistic volume, which is terrain. The caller stops the flight at `entry`.
+/// struck [`Impact`] it shows at `entry`: where the hit's ancestry holds no ballistic volume, which
+/// is terrain. The caller stops the flight at `entry`.
 fn stops_unresolved(
     shell: &MarchingShell,
     world: &ProjectileMarchWorld,
     hit: avian3d::prelude::RayHitData,
     entry: Vec3,
-    shortcircuit: bool,
     tick: &mut MarchTick,
 ) -> bool {
     let MarchTick { now, deposit, .. } = *tick;
     let (shot_trace, commands) = (&mut *tick.shot_trace, &mut *tick.commands);
     let shot = shell.shot;
-    // EXPERIMENTAL B-arm (`SPIKE_MG_SHORTCIRCUIT`): a sub-20 mm round stops dead at the
-    // first surface, skipping the entire penetration-resolution march below
-    // (thickness/span probes, ricochet, spall, HP). Population-preserving — same
-    // despawn-on-contact as the live path — so the A−B tick-cost delta isolates the
-    // resolution machinery. Default off (see the type).
-    if shortcircuit && shell.projectile.caliber() < MG_SHORTCIRCUIT_CALIBER_MAX {
-        // Classify the first surface from the hit's volume ancestry (the same
-        // `hit_ancestor` rule the full march uses just below) so the read is honest even in
-        // the B-arm. The short-circuit stops dead without resolving penetration, so
-        // `Struck`.
-        let surface = if world.armour(hit.entity).is_some() {
-            ImpactSurface::Armor
-        } else {
-            ImpactSurface::Terrain
-        };
-        commands.trigger(Impact {
-            position: entry,
-            normal: hit.normal,
-            caliber: shell.projectile.caliber(),
-            surface,
-            outcome: ImpactOutcome::Struck,
-        });
-        return true;
-    }
-
     // The struck `BallisticVolume` sits on the hit's ancestry (`hit_ancestor`, the shared
     // hierarchy-resolution rule). No volume in the ancestry ⇒ classified terrain (an
     // Armor-layer entity without ownership). The crossing itself finds every volume for
@@ -5383,7 +5327,6 @@ mod march_tests {
             16,
         )))
         .init_resource::<RetainSpentShells>()
-        .insert_resource(MgShortCircuit(false))
         .init_resource::<ImpactLog>()
         .add_observer(capture_impact)
         // The real march, run every Update (the `march_demo`/`march_real` run-if only selects the

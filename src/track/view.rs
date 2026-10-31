@@ -31,7 +31,7 @@ use super::gear_phase::{gear_spin_transform, spin_angle, sprocket_tooth_tip, too
 use super::link_view::{self, BeltFrames, LinkTemplate, Stragglers};
 use super::oracle::{BlockField, TerrainOracle};
 use super::rig_geom::RigGeom;
-use super::shadow_proxy::{self, ProxyMode, ProxySide, ProxyStep};
+use super::shadow_proxy::{self, ProxySide, ProxyStep};
 use super::side::Side;
 use super::sim::TrackDrive;
 use super::terrain::TrackField;
@@ -51,9 +51,7 @@ pub fn view_plugin(app: &mut App) {
     // procedural boxes and hid neither node until 2026-07-26, so every session drew a stray white
     // marker box and a loose shoe parked beside the hull.
     app.add_plugins(link_view::template_plugin);
-    // The belt's shadow caster ([`super::shadow_proxy`]). The knob is read ONCE, at plugin build:
-    // the A/B is a launch-time arm, not something a frame gets to change.
-    app.insert_resource(ProxyMode::from_env());
+    // The belt's shadow caster ([`super::shadow_proxy`]).
     app.add_systems(Update, (bind_track_rigs, attach_shadow_proxies).chain());
     // Before scope resolution: the caster swap gives the ribbon its `Mesh3d` here, and a mesh that
     // resolves a frame late is drawn by the camera on the default channel for that frame.
@@ -333,9 +331,8 @@ struct RigSide {
     /// shoe is authored outboard of the pin plane, and the shadow ribbon's section is centred on it.
     link_center_x: f32,
     /// This side's SHADOW CASTER ([`super::shadow_proxy`]): the low-poly ribbon that casts the
-    /// belt's shadow so the 1 520-triangle shoes do not have to. `None` under [`ProxyMode::Off`]
-    /// (the shoes cast, exactly as they shipped) and for the one frame between the rig binding and
-    /// [`attach_shadow_proxies`] running.
+    /// belt's shadow so the 1 520-triangle shoes do not have to. `None` for the one frame between
+    /// the rig binding and [`attach_shadow_proxies`] running.
     proxy: Option<ProxySide>,
 }
 
@@ -640,7 +637,6 @@ fn bind_track_rigs(
 /// been fitted once anyway. The `.chain()` that orders it after the bind puts a sync point between
 /// them, so `Added<TrackRig>` sees the rig in the bind's own frame.
 fn attach_shadow_proxies(
-    mode: Res<ProxyMode>,
     geom: Option<Res<RigGeom>>,
     mut rigs: Query<(Entity, &mut TrackRig), Added<TrackRig>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
@@ -648,20 +644,14 @@ fn attach_shadow_proxies(
     mut material: Local<Option<Handle<StandardMaterial>>>,
     mut commands: Commands,
 ) {
-    if !mode.silences_links() || rigs.is_empty() {
+    if rigs.is_empty() {
         return;
     }
     let Some(geom) = geom else {
         return;
     };
     let material = material
-        .get_or_insert_with(|| {
-            materials.add(if *mode == ProxyMode::Visible {
-                shadow_proxy::visible_probe_material()
-            } else {
-                shadow_proxy::proxy_material()
-            })
-        })
+        .get_or_insert_with(|| materials.add(shadow_proxy::proxy_material()))
         .clone();
     for (root, mut rig) in &mut rigs {
         for (si, side) in rig.sides.iter_mut().enumerate() {
@@ -673,14 +663,8 @@ fn attach_shadow_proxies(
                 }),
                 // Invisible to every camera, visible to every light — the ribbon's whole contract,
                 // declared instead of smuggled through a material (`render_policy`). It overrides
-                // the tank root's scope, so it keeps casting whichever view the player is in;
-                // `ProxyMode::Visible` is the one mode that wants to be LOOKED at, so it becomes
-                // ordinary world geometry instead.
-                if *mode == ProxyMode::Visible {
-                    VisualScope::WORLD_SOLID
-                } else {
-                    VisualScope::SHADOW_PROXY
-                },
+                // the tank root's scope, so it keeps casting whichever view the player is in.
+                VisualScope::SHADOW_PROXY,
                 MeshMaterial3d(material.clone()),
                 // Identity: the ribbon is authored directly in hull space, the frame the belt
                 // joints already live in.
@@ -700,7 +684,7 @@ fn attach_shadow_proxies(
         // Intent only — deliberately says nothing about triangles or silenced shoes, because at this
         // point neither exists. `drive_track_views` logs the MEASURED geometry when the swap lands.
         info!(
-            "track shadow proxy: {mode:?} — 2 ribbons spawned for {} shoes/side, awaiting first fit",
+            "track shadow proxy: 2 ribbons spawned for {} shoes/side, awaiting first fit",
             rig.count
         );
     }
@@ -711,7 +695,7 @@ fn attach_shadow_proxies(
 /// propagation, so the whole tank renders one consistent frame.
 #[expect(
     clippy::too_many_arguments,
-    reason = "the per-frame track view: clock, field, gear, blueprint, proxy mode and meshes, tanks, views and belt tables"
+    reason = "the per-frame track view: clock, field, gear, blueprint, proxy meshes, tanks, views and belt tables"
 )]
 fn drive_track_views(
     time: Res<Time>,
@@ -722,10 +706,8 @@ fn drive_track_views(
     // per frame — well below the SystemParam ceiling.
     gear: Res<super::sim::TrackGear>,
     blueprint: Res<TankBlueprint>,
-    // The shadow ribbon's arm and the assets it writes into: one `Mesh` per tank SIDE, created by
-    // its first fit and rewritten in place under [`ProxyMode::Dynamic`] (never shared — two tanks
-    // stand on different ground).
-    mode: Res<ProxyMode>,
+    // The assets the shadow ribbons write into: one `Mesh` per tank SIDE, created by its first fit
+    // and rewritten in place (never shared — two tanks stand on different ground).
     mut proxy_meshes: ResMut<Assets<Mesh>>,
     mut tanks: Query<(&Transform, &TrackDrive, &mut TrackRig)>,
     mut views: Query<&mut Transform, Without<TrackRig>>,
@@ -911,20 +893,15 @@ fn drive_track_views(
             {
                 frames.set_changed();
             }
-            // The SHADOW CASTER, on the same joints ([`super::shadow_proxy`]). Under `Static` this
-            // runs once and the ribbon rides the hull unchanged; live modes retain the topology
-            // and update positions only when these hull-local joints change.
+            // The SHADOW CASTER, on the same joints ([`super::shadow_proxy`]). The ribbon retains
+            // its topology and updates positions only when these hull-local joints change.
             //
             // This is also where the CASTER SWAP happens, and it is atomic on purpose: the ribbon
             // gets its mesh and the shoes are silenced on the frame the first fit closes a loop,
             // never at spawn and never apart ([`shadow_proxy::ProxySide::mesh`]). Both writes are
             // resolved this frame: `TrackViewSet` runs before `ScopeResolution`.
             if let Some(proxy) = &mut side.proxy {
-                match proxy.fit(
-                    proxy_meshes.reborrow(),
-                    &out[si].joints,
-                    mode.follows_belt(),
-                ) {
+                match proxy.fit(proxy_meshes.reborrow(), &out[si].joints) {
                     ProxyStep::Idle => {}
                     // The shoes keep rendering at full detail to the camera at every distance — this
                     // is a CASTER swap, not an LOD. `PROXIED_CASTER` is the preset that says so: it
@@ -938,7 +915,7 @@ fn drive_track_views(
                             .entity(side.belt)
                             .insert(VisualScope::PROXIED_CASTER);
                         info!(
-                            "track shadow proxy: {mode:?} side {si} — ribbon built, {triangles} \
+                            "track shadow proxy: side {si} — ribbon built, {triangles} \
                              triangles MEASURED; {} shoes silenced",
                             rig.count
                         );
@@ -1232,7 +1209,6 @@ mod tests {
             ))
             .id();
         world.insert_resource(Assets::<Mesh>::default());
-        world.insert_resource(ProxyMode::Dynamic);
         world.insert_resource(TrackField {
             revision: Some(0),
             field: Some(print_ground(vec![])),
@@ -1324,7 +1300,6 @@ mod tests {
             .id();
         world.insert_resource(Assets::<Mesh>::default());
         world.insert_resource(Assets::<StandardMaterial>::default());
-        world.insert_resource(ProxyMode::Dynamic);
         world.insert_resource(TrackField {
             revision: Some(0),
             field: Some(print_ground(vec![])),

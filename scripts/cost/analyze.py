@@ -102,7 +102,6 @@ def summarize(label, path):
     return {
         "label": label,
         "role": meta.get("role", "?"),
-        "mgsc": meta.get("mgsc", False),
         "n": len(ticks),
         "dur": dur,
         "us": us,
@@ -116,7 +115,7 @@ def summarize(label, path):
 
 
 def print_block(s):
-    print(f"\n=== {s['label']}  (role={s['role']}  mg_shortcircuit={s['mgsc']}) ===")
+    print(f"\n=== {s['label']}  (role={s['role']}) ===")
     print(f"  ticks {s['n']}  ({s['dur']:.1f} s)   tanks {min(s['nt'])}-{max(s['nt'])}"
           f"   entities {min(s['ne'])}-{max(s['ne'])}   march re-runs(mc>1): "
           f"{sum(1 for m in s['mc'] if m > 1)}")

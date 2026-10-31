@@ -83,7 +83,6 @@ fn recording_world_under(client: bool, pose: ChildPose) -> App {
         crate::damage::plugin,
         crate::damage_cam::recorder::plugin,
     ));
-    app.insert_resource(MgShortCircuit(false));
     if client {
         app.insert_resource(ClientReplica);
     }
