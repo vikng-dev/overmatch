@@ -227,16 +227,50 @@ pub(crate) fn offline_fell_plugin(app: &mut App) {
         done: false,
     };
     info!("capture: {cue:?}");
-    app.insert_resource(cue).add_systems(
-        FixedPostUpdate,
-        fell_on_cue
-            .in_set(crate::trees::TreeFallSet)
-            .run_if(not(resource_exists::<crate::ClientReplica>)),
+    app.insert_resource(cue)
+        .add_systems(PostStartup, check_fell_target)
+        .add_systems(
+            FixedPostUpdate,
+            fell_on_cue
+                .in_set(crate::trees::TreeFallSet)
+                .run_if(not(resource_exists::<crate::ClientReplica>)),
+        );
+}
+
+/// The cued tree, resolved at boot: the map's trees spawn at `Startup`, from data, so the plan's
+/// `fell.instance` and `fell.cut` are checked once they stand and a plan naming a tree the map
+/// lacks, or a cut its trunk has not, fails the run before any frame.
+fn check_fell_target(
+    cue: Res<FellCue>,
+    trees: Query<(&crate::scatter::MapInstance, &crate::trees::TreeBody)>,
+) {
+    let (_, body) = trees
+        .iter()
+        .find(|(instance, _)| instance.id == cue.instance)
+        .unwrap_or_else(|| {
+            panic!(
+                "{}: fell.instance: the map has no tree {:?}",
+                plan::VARIABLE,
+                cue.instance
+            )
+        });
+    let segments = body.kind.segments.len();
+    assert!(
+        usize::from(cue.cut) < segments,
+        "{}: fell.cut: {} is past the {segments} segments of {:?}",
+        plan::VARIABLE,
+        cue.cut,
+        cue.instance
     );
 }
 
 /// Fell the cued tree on the first fixed tick at or after its second, as the laws do: the state
 /// and the transition's tick, in the fall set, so the body derives the same tick.
+///
+/// # Panics
+///
+/// When the tree is already down at its second: the cue cannot fall it, and a run that went on
+/// would frame a fall that never happened.
 fn fell_on_cue(
     time: Res<Time>,
     clock: Option<Res<crate::ShotClock>>,
@@ -253,19 +287,17 @@ fn fell_on_cue(
         return;
     }
     cue.done = true;
-    let Some((root, _, body, mut state)) = trees
+    let (root, _, _, mut state) = trees
         .iter_mut()
         .find(|(_, instance, _, _)| instance.id == cue.instance)
-    else {
-        warn!("capture: no tree is map instance {:?}", cue.instance);
-        return;
-    };
-    if usize::from(cue.cut) >= body.kind.segments.len()
-        || *state != crate::trees::TreeState::Standing
-    {
-        warn!("capture: {cue:?} cannot fall: the tree is {:?}", *state);
-        return;
-    }
+        .expect("the cued tree was found at boot (`check_fell_target`), and trees never despawn");
+    assert!(
+        *state == crate::trees::TreeState::Standing,
+        "{}: fell: {:?} is {:?} at its cue, so it cannot fall",
+        plan::VARIABLE,
+        cue.instance,
+        *state
+    );
     *state = crate::trees::TreeState::Down {
         cut: cue.cut,
         dir: cue.dir,
@@ -510,6 +542,25 @@ pub(crate) fn retarget_to(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A FELL CUE NAMING A TREE THE MAP LACKS FAILS THE RUN AT BOOT: the cue used to log and let the
+    /// run exit `Success` with frames of a fall that never happened. A map with no tree at all is
+    /// the class case (the check reads the spawned trees and nothing else). Mutant: a check that
+    /// skips a missing tree returns here.
+    #[test]
+    #[should_panic(expected = "fell.instance: the map has no tree")]
+    fn a_fell_cue_naming_no_tree_fails_at_boot() {
+        let mut app = App::new();
+        app.insert_resource(FellCue {
+            instance: "tree_9999".into(),
+            at: 1.0,
+            cut: 0,
+            dir: 0,
+            done: false,
+        })
+        .add_systems(PostStartup, check_fell_target);
+        app.update();
+    }
 
     /// The capture times sort and fold times sharing a frame name into one frame, so two captures
     /// never race for one file.

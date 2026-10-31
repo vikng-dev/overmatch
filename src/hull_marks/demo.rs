@@ -1,6 +1,6 @@
 //! A capture plan's `scene.demo: HullMarks` (`dev_capture::plan::Demo`), a dev capture of the hull
-//! marks (the visual layer of the game's damage model) on the offline route, with
-//! `OVERMATCH_TARGET=ahead`'s placement: once the
+//! marks (the visual layer of the game's damage model) on the offline route. The demo parks the
+//! target ahead (`tank::scenario::target_scenario`), so the plan is the run's one input: once the
 //! parked target's view has bound, three rays from the player's line of sight find three points on
 //! its armour, and each is struck as the authority's march would report it — a hole (`Through`),
 //! a dent (`Stopped`), a scratch (`Ricochet`, from a [`GRAZE_DEG`] graze along the face) — at the
@@ -15,7 +15,7 @@
 //!     frames: (out: "<dir>/hull-mark.png", at: [18.0, 21.0, 24.0], ui: false, gizmos: false),
 //!     scene: (demo: Some(HullMarks)),
 //! )
-//! OVERMATCH_TARGET=ahead OVERMATCH_CAPTURE=<plan>.ron target/debug/overmatch --offline
+//! OVERMATCH_CAPTURE=<plan>.ron target/debug/overmatch --offline
 //! ```
 //!
 //! Mounted only by the offline composition (`run_offline`), as `tank::scenario`'s target-fires

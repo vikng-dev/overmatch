@@ -95,13 +95,28 @@ pub(crate) enum TargetScenario {
     Kills,
 }
 
-/// The scenario `OVERMATCH_TARGET` names; `None` when unset or off.
+/// The scenario `OVERMATCH_TARGET` names, or [`TargetScenario::Ahead`] under a capture plan's
+/// hull-marks demo, whose strikes need the target parked ahead (`hull_marks::demo`), so the plan
+/// is that capture's one input; `None` when neither asks.
+///
+/// # Panics
+///
+/// When the variable names no scenario, or names one other than `ahead` under the demo.
 pub(crate) fn target_scenario() -> Option<TargetScenario> {
-    let spec = crate::env_value("OVERMATCH_TARGET")?;
-    Some(
+    let named = crate::env_value("OVERMATCH_TARGET").map(|spec| {
         TargetScenario::named(&spec)
-            .unwrap_or_else(|| panic!("OVERMATCH_TARGET={spec:?}: want ahead, fires or kills")),
-    )
+            .unwrap_or_else(|| panic!("OVERMATCH_TARGET={spec:?}: want ahead, fires or kills"))
+    });
+    let demo = crate::dev_capture::plan().and_then(|plan| plan.scene.demo)
+        == Some(crate::dev_capture::plan::Demo::HullMarks);
+    if !demo {
+        return named;
+    }
+    assert!(
+        named.is_none_or(|scenario| scenario == TargetScenario::Ahead),
+        "OVERMATCH_TARGET={named:?}: the capture plan's HullMarks demo parks the target ahead"
+    );
+    Some(TargetScenario::Ahead)
 }
 
 impl TargetScenario {

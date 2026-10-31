@@ -53,6 +53,7 @@ pub(crate) fn offline_wall_plugin(app: &mut App) {
     };
     app.insert_resource(cue)
         .insert_resource(crate::camera::CameraCaptive(true))
+        .add_systems(PostStartup, check_wall_target)
         .add_systems(Update, fire_on_cue);
     let placed = super::plan()
         .and_then(|plan| plan.frames.as_ref())
@@ -68,7 +69,9 @@ pub(crate) fn offline_wall_plugin(app: &mut App) {
 /// The dedicated server's cue (module doc): it fires, and its clients frame the wall.
 pub(crate) fn server_wall_plugin(app: &mut App) {
     if let Some(cue) = cue_from_plan() {
-        app.insert_resource(cue).add_systems(Update, fire_on_cue);
+        app.insert_resource(cue)
+            .add_systems(PostStartup, check_wall_target)
+            .add_systems(Update, fire_on_cue);
     }
 }
 
@@ -171,17 +174,35 @@ fn the_house<'a>(
         .map(|(_, transform, breakage)| (transform, breakage))
 }
 
+/// The wall, resolved at boot: the map's buildings spawn at `Startup`, from data, so a plan whose
+/// `wall` cue finds no breakable house with a pier fails the run before any frame.
+fn check_wall_target(buildings: Query<(&MapInstance, &Transform, &Breakage)>) {
+    assert!(
+        the_house(&buildings).and_then(the_wall).is_some(),
+        "{}: wall: the map has no breakable house with a pier to shoot at",
+        super::plan::VARIABLE
+    );
+}
+
 /// Find the wall and frame it (logging the pose), then fire the cue on its second.
+///
+/// # Panics
+///
+/// When a shot is due and the wall it was cued at is gone: a run that went on would frame a shot
+/// that never happened.
 fn fire_on_cue(
     time: Res<Time>,
     mut cue: ResMut<Cue>,
     buildings: Query<(&MapInstance, &Transform, &Breakage)>,
     mut commands: Commands,
 ) {
-    let Some((transform, breakage)) = the_house(&buildings) else {
-        return;
-    };
-    let Some((outward, aim, foot, inside)) = the_wall((transform, breakage)) else {
+    let now = time.elapsed_secs();
+    let Some((outward, aim, foot, inside)) = the_house(&buildings).and_then(the_wall) else {
+        assert!(
+            !cue.shots.iter().any(|(_, at, fired)| !*fired && now >= *at),
+            "{}: wall: a shot is due at {now} s and the house's wall is gone",
+            super::plan::VARIABLE
+        );
         return;
     };
     if cue.camera.is_none() {
@@ -197,7 +218,6 @@ fn fire_on_cue(
         );
         cue.camera = Some(camera);
     }
-    let now = time.elapsed_secs();
     for (what, _, fired) in cue
         .shots
         .iter_mut()
