@@ -756,8 +756,8 @@ impl Plugin for SimPlugin {
             (damage_cam::recorder::plugin, damage_cam::delivery::plugin),
         ));
         // Buildings breaking (the game's environment destruction): the authority's laws and
-        // record, every peer's colliders from it, and the rule loose pieces settle by. Separate call: the tuple above is
-        // at bevy's 15-plugin arity limit.
+        // record, every peer's colliders from it, and the rule loose pieces settle by. Separate
+        // call: the tuple above is at bevy's 15-plugin arity limit.
         app.add_plugins((buildings::breakage::sim_plugin, debris::sim_plugin));
     }
 }
