@@ -1,4 +1,4 @@
-//! Controlled-tank crew UI and swap selection.
+//! The game's damage-model view: controlled-tank crew status and swap selection.
 //!
 //! UI selection emits [`CrewSwap`]; simulation validates and executes the swap.
 
@@ -10,7 +10,7 @@ use crate::damage::{
     TankVolumes, VolumeFacets, VolumeOf, capability_effectiveness, evaluate, part_qualities,
 };
 use crate::flow::{Flow, FlowScoped, InMatchSystems, MatchResourceExt};
-use crate::spec::{FireCycle, ViewKind};
+use crate::spec::FireCycle;
 use crate::tank::{
     Controlled, TankRoot, TankViews, Weapon, WeaponIndex, WeaponLoad, WeaponLoads, WeaponRound,
 };
@@ -128,7 +128,7 @@ fn weapon_status(
             } else if belt_remaining == 0 {
                 // Dry belt = swap in flight; the timer freezes (and this readout with it) while the
                 // gun crew can't work the swap. Only reached when the gun CAN fire (no_fire is
-                // false) — a crew-dead MG reads `no-fire`, not a stuck `SWAP` countdown.
+                // false) — a knocked-out MG crew reads `no-fire`, not a stuck `SWAP` countdown.
                 format!("SWAP {remaining_secs:.1}s")
             } else {
                 format!("{belt_remaining} rds")
@@ -146,9 +146,9 @@ fn round_line(weapon_name: &str, rounds: &[WeaponRound], load: &WeaponLoad) -> O
         return None;
     }
     let name = |index: u8| {
-        let Some(round) = rounds.get(usize::from(index)) else {
-            return "-".to_owned();
-        };
+        let round = rounds
+            .get(usize::from(index))
+            .expect("a weapon load indexes the same stowage built at spawn");
         let mode = load
             .fuze_mode(rounds, index)
             .and_then(|mode| round.fuze_modes().get(usize::from(mode)))
@@ -196,16 +196,17 @@ fn update_status_panel(
     let Ok((mut text, mut visibility)) = panel.single_mut() else {
         return;
     };
-    // Show the first controlled tank (exactly one on a client). Hide the whole card — text AND its
-    // background — whenever none resolves, so no empty dark panel lingers in the corner.
-    let Some((tank, volumes, caps, views, knocked_out)) = tank.iter().next() else {
+    // No local rig before spawn or between possessions: hide the card and its background.
+    let Some((tank, volumes, caps, views, knocked_out)) =
+        crate::tank::controlled_one(tank.single())
+    else {
         set_text(text.reborrow(), "");
         visibility.set_if_neq(Visibility::Hidden);
         return;
     };
     visibility.set_if_neq(Visibility::Visible);
 
-    // Crew alive/total: this tank's seats, a seat down when flagged `Dead` (the notion the crew bar
+    // Crew active/total: this tank's seats, a seat down when flagged `Dead` (the notion the crew bar
     // draws too).
     let mut total = 0;
     let mut alive = 0;
@@ -222,12 +223,9 @@ fn update_status_panel(
     // live gate. Part qualities resolved once for the sight + weapon gates below.
     let quality = part_qualities(volumes, &facets);
     let drive = capability_effectiveness(Some(volumes), Some(caps), Capability::Drive, &facets);
-    let gunner = views
-        .0
-        .get(&ViewKind::Gunner)
-        .map_or(0.0, |view| evaluate(&view.requires, &quality));
+    let gunner = evaluate(&views.gunner.requires, &quality);
 
-    // Weapons: name + per-fire-mode state, flagged `no-fire` when the fire gate is unmet (dead
+    // Weapons: name + per-fire-mode state, flagged `no-fire` when the fire gate is unmet (knocked-out
     // gunner/loader/breech). A `Single` reads as the classic READY / reload countdown; an
     // `Automatic` shows its belt count, or the swap countdown while the belt is dry. Sorted by
     // name so the order is stable frame to frame.
@@ -238,9 +236,11 @@ fn update_status_panel(
             // Fire-gate state is the root's tick-correlated `WeaponGate`, addressed by slot.
             let state = gates
                 .get(root.0)
-                .ok()
-                .and_then(|gate| gate.weapons.get(slot.0).copied())
-                .unwrap_or_default();
+                .expect("complete tank roots carry their weapon gate")
+                .weapons
+                .get(slot.0)
+                .copied()
+                .expect("weapon and gate slots are built together at spawn");
             let remaining_secs =
                 state.remaining_ticks(weapon_clock.0) as f32 * fixed_time.timestep().as_secs_f32();
             let no_fire = evaluate(&weapon.fire, &quality) <= 0.0;
@@ -250,11 +250,13 @@ fn update_status_panel(
                 remaining_secs,
                 state.belt_remaining,
             );
-            let rounds = loads
+            let load = loads
                 .get(root.0)
-                .ok()
-                .and_then(|loads| loads.weapons.get(slot.0))
-                .and_then(|load| round_line(&weapon.name, &weapon.rounds, load));
+                .expect("complete tank roots carry their weapon loads")
+                .weapons
+                .get(slot.0)
+                .expect("weapon and load slots are built together at spawn");
+            let rounds = round_line(&weapon.name, &weapon.rounds, load);
             (
                 weapon.name.to_string(),
                 format!("{} {}", weapon.name, status),
@@ -315,7 +317,7 @@ fn crew_swap_input(
     let Some(slot) = DIGITS.iter().position(|k| keys.just_pressed(*k)) else {
         return;
     };
-    let Ok((tank, pending, mut command)) = tank.single_mut() else {
+    let Some((tank, pending, mut command)) = crate::tank::controlled_one(tank.single_mut()) else {
         return;
     };
 
@@ -348,7 +350,7 @@ fn crew_swap_input(
 }
 
 /// Render the controlled tank's crew bar: `N: Seat` per seat in enum order, plus the occupant (when
-/// foreign) and a dead mark. The selected source is bracketed `[..]`; a pending swap marks both seats
+/// foreign) and an out-of-action mark. The selected source is bracketed `[..]`; a pending swap marks both seats
 /// `~..~` and shows its countdown.
 fn update_crew_bar(
     select: Res<CrewSelect>,
@@ -359,7 +361,7 @@ fn update_crew_bar(
     let Ok(mut text) = bar.single_mut() else {
         return;
     };
-    let Ok((tank, pending)) = tank.single() else {
+    let Some((tank, pending)) = crate::tank::controlled_one(tank.single()) else {
         set_text(text.reborrow(), "");
         return;
     };
@@ -376,13 +378,13 @@ fn update_crew_bar(
         .enumerate()
         .map(|(i, (entity, seat, crewman, dead))| {
             // Notes after the seat name: who is actually manning it (when foreign), and whether the
-            // occupant is dead — e.g. "Loader (Commander, dead)".
+            // station is out of action — e.g. "Loader (Commander, out of action)".
             let mut notes: Vec<&str> = Vec::new();
             if crewman.home != *seat {
                 notes.push(crewman.home.label());
             }
             if *dead {
-                notes.push("dead");
+                notes.push("out of action");
             }
             let detail = if notes.is_empty() {
                 String::new()
@@ -423,13 +425,13 @@ mod tests {
 
     /// The crew-gate/no-fire state wins over every timer readout, in BOTH fire modes: a weapon that
     /// can't fire reads `no-fire`, never a (frozen) reload or swap countdown. This is the regression
-    /// guard for the dry-belt MG whose swap timer froze on a crew-dead gun and showed a permanently
+    /// guard for the dry-belt MG whose swap timer froze on a gun with its crew out of action and showed a permanently
     /// stuck `SWAP` countdown instead of `no-fire`.
     #[test]
     fn no_fire_wins_over_frozen_timers() {
-        // Automatic, dry belt, gun crew dead: the swap timer is frozen — must read `no-fire`.
+        // Automatic, dry belt, gun crew out of action: the swap timer is frozen — must read `no-fire`.
         assert_eq!(weapon_status(AUTO, true, 2.7, 0), "no-fire");
-        // Single, mid-reload, fire crew dead: the reload is frozen — must read `no-fire`.
+        // Single, mid-reload, fire crew out of action: the reload is frozen — must read `no-fire`.
         assert_eq!(weapon_status(SINGLE, true, 1.4, 0), "no-fire");
     }
 

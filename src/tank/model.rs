@@ -1,5 +1,3 @@
-use std::collections::HashMap;
-
 use bevy::prelude::*;
 use serde::{Deserialize, Serialize};
 
@@ -37,6 +35,20 @@ pub struct Tank;
 #[derive(Component)]
 pub struct Controlled;
 
+/// No controlled tank is a legitimate state before spawn and between possessions. Multiple
+/// matches violate local input ownership and must never read as that absence.
+pub(crate) fn controlled_one<T>(
+    result: Result<T, bevy::ecs::query::QuerySingleError>,
+) -> Option<T> {
+    match result {
+        Ok(one) => Some(one),
+        Err(bevy::ecs::query::QuerySingleError::NoEntities(_)) => None,
+        Err(bevy::ecs::query::QuerySingleError::MultipleEntities(_)) => {
+            panic!("a player controls at most one tank; multiple Controlled entities matched")
+        }
+    }
+}
+
 /// Required rig handles, resolved and validated during complete construction.
 #[derive(Component)]
 pub struct Rig {
@@ -54,9 +66,21 @@ pub struct ViewConfig {
     pub requires: Requirement,
 }
 
-/// Authored view configurations keyed by player-facing view kind.
+/// Both player views, complete at spawn. A missing authored kind is refused by the spec gate.
 #[derive(Component)]
-pub struct TankViews(pub HashMap<ViewKind, ViewConfig>);
+pub struct TankViews {
+    pub gunner: ViewConfig,
+    pub commander: ViewConfig,
+}
+
+impl TankViews {
+    pub fn get(&self, kind: ViewKind) -> &ViewConfig {
+        match kind {
+            ViewKind::Gunner => &self.gunner,
+            ViewKind::Commander => &self.commander,
+        }
+    }
+}
 
 #[derive(Component)]
 pub struct Muzzle;

@@ -413,8 +413,10 @@ fn update_ranging_reticle(
     // table / view gun bind, or with no viewport to project into, every mark hides together.
     let mark = (*mode == SightMode::Gunner)
         .then(|| {
-            let rig = controlled.single().ok()?;
-            let table = tables.get(rig.muzzle).ok()?;
+            let rig = crate::tank::controlled_one(controlled.single())?;
+            let table = tables
+                .get(rig.muzzle)
+                .expect("the primary muzzle receives its range table at spawn");
             let gun = gun
                 .get(ViewNode::resolve(view_nodes.get(rig.gun).ok(), rig.gun))
                 .ok()?;
@@ -485,7 +487,7 @@ fn mask_rim(viewport: Vec2, fov: f32) -> (f32, f32) {
     // units a landscape viewport frames off its width and a portrait one off its height, through
     // this one line.
     let radius = 0.5 * MASK_SPAN_FRACTION * viewport.max_element() / viewport.y;
-    debug_assert!(
+    assert!(
         radius >= projected_bound(fov, viewport.x / viewport.y) - 1e-6,
         "the mask draws a {radius} rim inside the bound the cursor is clamped to, so the intent \
          can leave the glass",
@@ -639,13 +641,14 @@ fn update_optic_mask(
     let (camera, cam_transform) = *camera;
     let glass = (*mode == SightMode::Gunner)
         .then(|| {
-            let rig = controlled.single().ok()?;
+            let rig = crate::tank::controlled_one(controlled.single())?;
             let gun = gun
                 .get(ViewNode::resolve(view_nodes.get(rig.gun).ok(), rig.gun))
                 .ok()?;
             let theta = tables
                 .get(rig.muzzle)
-                .map_or(0.0, |table| table.superelevation(ranging.range));
+                .expect("the primary muzzle receives its range table at spawn")
+                .superelevation(ranging.range);
             // The same field the camera's projection was set to and the cursor's bound was taken
             // against, from the same authored optic.
             optic_glass(
@@ -692,13 +695,13 @@ fn update_intent_reticle(
         *visibility = Visibility::Hidden;
         return;
     }
-    let Ok((tank, rig)) = controlled.single() else {
+    let Some((tank, rig)) = crate::tank::controlled_one(controlled.single()) else {
         *visibility = Visibility::Hidden;
         return;
     };
-    let Ok(hull) = hull.get(rig.hull) else {
-        return;
-    };
+    let hull = hull
+        .get(rig.hull)
+        .expect("the complete rig's hull has its global pose");
     let Some(local) = committed.get(tank) else {
         *visibility = Visibility::Hidden;
         return;

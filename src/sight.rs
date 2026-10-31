@@ -1,4 +1,4 @@
-//! Gunner sight input and aim-point commitment.
+//! The game's damage-model view: gunner sight input and aim-point commitment.
 //!
 //! The presentation half — every HUD widget that draws the sight picture — lives behind
 //! [`reticle`], which this module mounts and otherwise touches only to raise a [`Toast`].
@@ -28,18 +28,16 @@ use crate::view::PlayerView;
 
 use reticle::Toast;
 
-/// Whether the controlled tank's `kind` view is usable — its authored `requires` met (a dead
-/// gunner closes the optic, a dead commander closes third-person). A missing view is unusable.
+/// Whether the controlled tank's `kind` view is usable — its authored `requires` met (a knocked-out
+/// gunner closes the optic, a knocked-out commander closes third-person). No controlled tank
+/// before spawn or between possessions means neither view is available.
 fn view_available(
     controlled: &ControlledTank,
     views: &Query<&TankViews, With<Controlled>>,
     kind: ViewKind,
 ) -> bool {
-    views
-        .single()
-        .ok()
-        .and_then(|v| v.0.get(&kind))
-        .is_some_and(|config| controlled.meets(&config.requires))
+    crate::tank::controlled_one(views.single())
+        .is_some_and(|views| controlled.meets(&views.get(kind).requires))
 }
 
 /// Which view the player is in. Default is the third-person commander view.
@@ -225,7 +223,7 @@ fn mark_view_subject_body(
     controlled: Query<Entity, With<Controlled>>,
     mut tanks: Query<(Entity, &mut VisualScope), With<Tank>>,
 ) {
-    let subject = controlled.single().ok();
+    let subject = crate::tank::controlled_one(controlled.single());
     for (tank, mut scope) in &mut tanks {
         scope.set_if_neq(if Some(tank) == subject {
             VisualScope::VIEW_SUBJECT_BODY
@@ -400,8 +398,12 @@ pub(crate) fn drive_gunner_aim(
         return;
     };
 
-    // Treat non-finite memory as absent so a fresh finite resolve can replace it.
-    let committed_point = committed.get(tank).filter(|point| point.is_finite());
+    let committed_point = committed.get(tank).inspect(|point| {
+        assert!(
+            point.is_finite(),
+            "the committed aim stores finite hull-local points"
+        );
+    });
     let moved = motion.delta != Vec2::ZERO;
 
     // Fast path before pose guards so [`resume_commit`]'s preserved point is always re-authored.
@@ -447,7 +449,8 @@ pub(crate) fn drive_gunner_aim(
     // it was clamped against.
     let theta = tables
         .get(rig.muzzle)
-        .map_or(0.0, |table| table.superelevation(ranging.range));
+        .expect("the primary muzzle receives its range table at complete spawn")
+        .superelevation(ranging.range);
     let sight_now = g_current - theta;
 
     // The sight's origin: the gun mount (elevation pivot), from the SAME physics-truth chain
@@ -479,14 +482,10 @@ pub(crate) fn drive_gunner_aim(
     };
     let hull_affine = Affine3A::from_rotation_translation(hull_rotation, hull_position);
     let mount_local = hull_affine.inverse().transform_point3(mount_world);
-    // NaN discipline for the resolve inputs: a poisoned pose frame must reach neither the raycast
-    // nor the store — a non-finite resolve would poison the shared memory itself. Skip the frame
-    // (the fast path above has already re-authored a held commitment; a fresh tank skips one seed
-    // frame). `mount_local` finite implies the hull affine is too, so `dir_world` below stays
-    // finite whenever these pass.
-    if !(mount_world.is_finite() && mount_local.is_finite()) {
-        return;
-    }
+    assert!(
+        mount_world.is_finite() && mount_local.is_finite(),
+        "a complete rig has finite hull and gun-mount poses"
+    );
 
     // Resume the one committed intention into yaw/pitch — the shared `CommittedAim`, whether it was
     // set by the commander commit (`aim::commit_aim`) or by this system's own last resolve. The
@@ -515,14 +514,14 @@ pub(crate) fn drive_gunner_aim(
     let pitch_limits = sight_pitch_limits(
         servo_specs
             .get(rig.gun)
-            .ok()
-            .and_then(ServoSpec::travel_limits),
+            .expect("the rig gun is a declared pitch servo at spawn")
+            .travel_limits(),
         theta,
     );
     let yaw_limits = servo_specs
         .get(rig.turret)
-        .ok()
-        .and_then(ServoSpec::travel_limits);
+        .expect("the rig turret is a declared yaw servo at spawn")
+        .travel_limits();
     intent.pitch = clamp_to_travel(intent.pitch, pitch_limits);
     intent.yaw = clamp_to_travel(intent.yaw, yaw_limits);
 
@@ -551,12 +550,8 @@ pub(crate) fn drive_gunner_aim(
     // `drive_aim_servos` lobs it by the superelevation, raising the bore above the line of sight,
     // so this stays the intention.
     let dir_local = intent.local_dir();
-    // Fallible direction: a NaN-poisoned pose or committed value this frame (rollback edge) must
-    // not be resolved and re-stored — that would poison the shared memory itself. Skip the frame,
-    // the same idiom as the bore dot and `drive_aim_servos`' non-finite hold.
-    let Ok(dir_world) = Dir3::new(hull_rotation * dir_local) else {
-        return;
-    };
+    let dir_world = Dir3::new(hull_rotation * dir_local)
+        .expect("finite rig rotation and bounded intent define a nonzero world direction");
     let distance = aim_distance(
         &spatial,
         Ray3d::new(mount_world, dir_world),

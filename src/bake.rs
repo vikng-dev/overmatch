@@ -2307,7 +2307,7 @@ mod tests {
         load: [],
     )},
     views: {Gunner: (node: "Sight", optics: Magnified(magnification: 2.0, field_deg: 30.0),
-        requires: [])},"#,
+        requires: []), Commander: (node: "Sight", optics: Unaided(60.0), requires: [])},"#,
         );
         let asset = fixture::write("canon", &nodes, &declared);
         let json =
@@ -2338,6 +2338,7 @@ mod tests {
                 ("roadwheels[1].node", "Station_R"),
                 ("weapons[\"Main\"].muzzle", "Muzzle"),
                 ("weapons[\"Main\"].barrel", "Recoil"),
+                ("views[Commander].node", "Sight"),
                 ("views[Gunner].node", "Sight"),
             ]
         );

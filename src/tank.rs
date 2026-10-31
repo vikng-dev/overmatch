@@ -21,6 +21,7 @@ mod view;
 
 #[cfg(test)]
 pub use model::WeaponState;
+pub(crate) use model::controlled_one;
 pub(crate) use model::rig_world_pose;
 #[allow(
     unused_imports,

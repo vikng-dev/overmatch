@@ -612,6 +612,8 @@ pub enum ViewKind {
 }
 
 impl ViewKind {
+    pub const ALL: [Self; 2] = [Self::Gunner, Self::Commander];
+
     pub fn label(self) -> &'static str {
         match self {
             ViewKind::Gunner => "Gunner sight",
@@ -1052,7 +1054,8 @@ pub struct TankSpec {
     /// consts. Required; `{}` is an unarmed vehicle.
     pub weapons: HashMap<String, WeaponSpec>,
     /// Crew viewpoints (camera/optic anchors) keyed by [`ViewKind`]. The gunner's also identifies
-    /// the gunner's chain for the rig's main-bore handles. Required; `{}` declares none.
+    /// the gunner's chain for the rig's main-bore handles. Every playable rig states both kinds;
+    /// unarmed structural tooling fixtures may declare none.
     pub views: HashMap<ViewKind, ViewSpec>,
     /// Per-tank capability requirements (design §7b). Each capability maps to a list of requirement
     /// groups (AND'd): a bare `Part` is mandatory; `Pool(..)`/`Backup(..)` express graded redundancy.
@@ -1482,6 +1485,19 @@ impl TankSpec {
             .into());
         }
         self.check_armament()?;
+        // A playable rig supplies both camera modes. Unarmed structural tooling fixtures have
+        // no rig and may declare no views; the complete spawn already requires a primary weapon.
+        if self
+            .weapons
+            .values()
+            .any(|weapon| weapon.trigger == Trigger::Primary)
+        {
+            for kind in ViewKind::ALL {
+                if !self.views.contains_key(&kind) {
+                    return Err(format!("views lacks {kind:?} — author every player view with its node, optics and requires").into());
+                }
+            }
+        }
         // Every view's FOV is a DIVISOR downstream, not merely a camera setting: both LOD ladders
         // derive every switch distance through `2·tan(fov/2)`
         // (`view::ViewFacts::sub_pixel_distance_m`) and the sight derives its cursor-travel margin
@@ -1830,10 +1846,29 @@ TankSpec(
     },
     views: {
         Gunner: (node: "Cannon_Sight", optics: Magnified(magnification: 2.5, field_deg: 25.0), requires: [Gunner]),
+        Commander: (node: "Cannon_Sight", optics: Unaided(60.0), requires: []),
     },
     capabilities: { Drive: [] },
 )
 "#;
+
+    /// Spawned rigs and both camera modes rely on complete authored views; a renamed or omitted
+    /// kind must refuse at load, before a camera could invent its field or availability.
+    #[test]
+    fn a_playable_rig_requires_every_player_view() {
+        for kind in ViewKind::ALL {
+            let mut spec = fixture();
+            spec.views.remove(&kind);
+            let error = spec
+                .validate()
+                .expect_err("a playable view was omitted")
+                .to_string();
+            assert!(
+                error.contains("views") && error.contains(&format!("{kind:?}")),
+                "{error}"
+            );
+        }
+    }
 
     /// A fresh, unmutated [`FIXTURE_RON`] sheet.
     fn fixture() -> TankSpec {

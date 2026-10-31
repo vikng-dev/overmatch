@@ -635,8 +635,23 @@ fn device(app: &mut App, player: Entity, camera: Entity) {
         .init_resource::<bevy::input::mouse::AccumulatedMouseMotion>();
     let world = app.world_mut();
     world.spawn(Window::default());
-    let [hull, turret, gun, muzzle] =
-        std::array::from_fn(|_| world.spawn((Transform::IDENTITY, ChildOf(player))).id());
+    let [hull, turret, gun, muzzle] = std::array::from_fn(|_| {
+        world
+            .spawn((
+                Transform::IDENTITY,
+                GlobalTransform::IDENTITY,
+                ChildOf(player),
+            ))
+            .id()
+    });
+    world.entity_mut(hull).insert(crate::tank::Hull);
+    // FIXTURE DATA: a complete optic has a range table and propagated hull/gun poses at spawn.
+    world
+        .entity_mut(muzzle)
+        .insert(crate::firecontrol::RangeTable::test_rows(&[
+            (0.0, 0.0),
+            (4000.0, 0.04),
+        ]));
     for seat in [CrewStation::Commander, CrewStation::Gunner] {
         world.spawn((seat, crate::damage::VolumeOf(player)));
     }
@@ -651,11 +666,10 @@ fn device(app: &mut App, player: Entity, camera: Entity) {
             gun,
             muzzle,
         },
-        TankViews(
-            [(ViewKind::Gunner, open()), (ViewKind::Commander, open())]
-                .into_iter()
-                .collect(),
-        ),
+        TankViews {
+            gunner: open(),
+            commander: open(),
+        },
         TankCommand::default(),
         Transform::IDENTITY,
         avian3d::prelude::Position::default(),

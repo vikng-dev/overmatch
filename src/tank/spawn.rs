@@ -937,6 +937,18 @@ fn spawn_proxy_parts(
     }
 }
 
+/// The complete rig's camera record: the spec gate requires every kind before spawn.
+fn authored_view(spec: &TankSpec, kind: ViewKind) -> ViewConfig {
+    let view = spec
+        .views
+        .get(&kind)
+        .expect("the spec gate certifies every playable view");
+    ViewConfig {
+        fov: view.optics.vertical_fov(),
+        requires: view.requires.clone(),
+    }
+}
+
 /// The root's own authored body: ADR-0011 mass, inertia extents, and center of mass (proxies add
 /// no mass), the capability + view configuration, the per-slot sim state, and the rig handles.
 #[expect(
@@ -969,20 +981,10 @@ fn insert_root_components(
         // Per-tank capability requirements (design §7b) — drives `capability_effectiveness`.
         TankCapabilities(spec.capabilities.clone()),
         // Per-view FOV + gating requirement (camera FOV, view-death gate).
-        TankViews(
-            spec.views
-                .iter()
-                .map(|(kind, view)| {
-                    (
-                        *kind,
-                        ViewConfig {
-                            fov: view.optics.vertical_fov(),
-                            requires: view.requires.clone(),
-                        },
-                    )
-                })
-                .collect(),
-        ),
+        TankViews {
+            gunner: authored_view(spec, ViewKind::Gunner),
+            commander: authored_view(spec, ViewKind::Commander),
+        },
         // Root visibility owns the gunner-view hide: set to `Hidden`, `InheritedVisibility`
         // propagates `HIDDEN` to every descendant mesh, so the gunner optic (camera parked at
         // the gun pivot, inside the mantlet) sees no own-tank geometry — no near-plane clipping.

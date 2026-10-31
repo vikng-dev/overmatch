@@ -1,4 +1,4 @@
-//! Camera transform kernels.
+//! The game's damage-model view: camera transform kernels.
 //!
 //! The game's third-person orbit camera provides free-aim look, scroll-to-zoom dolly, and
 //! ground-collision pull-in. The camera is also the aiming device, so look direction stays the
@@ -153,20 +153,21 @@ pub struct OrbitCameraSet;
 /// The turret-ring pivot as an offset in the tank root's local frame. The camera orbits
 /// `root · this`, so it reads the body's interpolated root `Transform` rather than the turret's
 /// (one-frame-stale) `GlobalTransform`. Computed once from the sim skeleton's local-transform
-/// chain — spawn-complete data, available the first frame (`None` only before any tank exists).
+/// chain for the current controlled entity. Possession changes invalidate the cache; `None`
+/// names the gap before spawn or between possessions.
 #[derive(Resource, Default)]
-pub(crate) struct TurretPivot(Option<Vec3>);
+pub(crate) struct TurretPivot(Option<(Entity, Vec3)>);
 
 impl TurretPivot {
     /// The offset, once a controlled tank has supplied it.
     pub(crate) fn offset(&self) -> Option<Vec3> {
-        self.0
+        self.0.map(|(_, offset)| offset)
     }
 
     /// A pivot at `offset`, for a test without a tank's skeleton.
     #[cfg(test)]
     pub(crate) fn at(offset: Vec3) -> Self {
-        Self(Some(offset))
+        Self(Some((Entity::PLACEHOLDER, offset)))
     }
 }
 
@@ -274,25 +275,23 @@ fn capture_turret_pivot(
     parents: Query<&ChildOf>,
     locals: Query<&Transform>,
 ) {
-    if pivot.0.is_some() {
-        return;
-    }
-    // Computed from the controlled tank's own turret. The Tigers are identical, so the offset holds
-    // across a swap; a future asymmetric pair would recompute this per controlled tank.
-    let Ok((tank, rig)) = controlled.single() else {
+    let Some((tank, rig)) = crate::tank::controlled_one(controlled.single()) else {
+        pivot.0 = None; // Before spawn or between possessions there is no camera anchor.
         return;
     };
-    let Some((position, _)) = rig_world_pose(
+    if pivot.0.is_some_and(|(owner, _)| owner == tank) {
+        return;
+    }
+    let (position, _) = rig_world_pose(
         rig.turret,
         tank,
         Vec3::ZERO,
         Quat::IDENTITY,
         &parents,
         &locals,
-    ) else {
-        return;
-    };
-    pivot.0 = Some(position);
+    )
+    .expect("a controlled rig's turret has its complete spawn-time chain to the root");
+    pivot.0 = Some((tank, position));
 }
 
 /// The vertical FOV (radians) every consumer assumes before it can read a real one — a conservative
@@ -310,12 +309,10 @@ pub const GUNNER_FOV_FALLBACK: f32 = 0.12;
 
 /// The controlled tank's authored FOV for `kind`, or `fallback` before the rig binds.
 pub fn view_fov(views: &Query<&TankViews, With<Controlled>>, kind: ViewKind, fallback: f32) -> f32 {
-    views
-        .single()
-        .ok()
-        .and_then(|v| v.0.get(&kind))
-        .map(|config| config.fov)
-        .unwrap_or(fallback)
+    match crate::tank::controlled_one(views.single()) {
+        Some(views) => views.get(kind).fov,
+        None => fallback, // No local rig before spawn or during a possession gap.
+    }
 }
 
 fn spawn_camera(mut commands: Commands) {
@@ -364,13 +361,9 @@ fn orbit_look(
     if !follow.0 {
         return;
     }
-    // Freeze mouse-look when there is no controlled tank/pivot to orbit — the tankless death→respawn
-    // gap, or CONNECTING. Without a body to re-anchor to, `orbit_camera` can't reposition the camera,
-    // so the locked cursor's motion here would re-point it at nothing and the player would respawn
-    // facing a random direction. This is the guard the wave-4 orbit split (62da9bd) dropped: it
-    // mirrors the `(pivot.0, tank.single())` check `orbit_camera` uses to place the body, so ONLY the
-    // mouse-delta rotation gates — `orbit_camera`'s follow half keeps tracking the tank behind the menu.
-    if pivot.0.is_none() || tank.is_empty() {
+    // Before spawn or between possessions there is no rig to anchor the view. Only mouse-look
+    // freezes; placement continues following a controlled tank behind an open menu.
+    if pivot.offset().is_none() || crate::tank::controlled_one(tank.single()).is_none() {
         return;
     }
     let mut transform = camera.into_inner();
@@ -428,7 +421,9 @@ fn orbit_camera(
     if let Projection::Perspective(p) = projection.as_mut() {
         p.fov = view_fov(&views, ViewKind::Commander, std::f32::consts::FRAC_PI_4);
     }
-    let (Some(turret_local), Ok(tank_transform)) = (pivot.0, tank.single()) else {
+    let (Some(turret_local), Some(tank_transform)) =
+        (pivot.offset(), crate::tank::controlled_one(tank.single()))
+    else {
         return;
     };
 
@@ -473,28 +468,34 @@ fn reaim_orbit_on_optic_exit(
     if *mode != SightMode::ThirdPerson {
         return;
     }
-    let Ok((tank_entity, rig)) = controlled.single() else {
+    let Some((tank_entity, rig)) = crate::tank::controlled_one(controlled.single()) else {
         return;
     };
     let Some(local) = committed.get(tank_entity) else {
         return;
     };
-    let (Some(turret_local), Ok(tank_transform)) = (pivot.0, tank.single()) else {
+    let (Some(turret_local), Some(tank_transform)) =
+        (pivot.offset(), crate::tank::controlled_one(tank.single()))
+    else {
         return;
     };
-    let Ok(hull_transform) = hull.get(rig.hull) else {
-        return;
-    };
+    let hull_transform = hull
+        .get(rig.hull)
+        .expect("a controlled rig's hull is constructed with its global pose");
 
     // The target uses the propagated hull pose while the pivot uses the current rendered root pose;
     // this view-only transition can therefore span one render frame while moving.
     let target = hull_transform.affine().transform_point3(local);
     let pivot_point = orbit_pivot(tank_transform, turret_local);
-    // Fallible: a zero/non-finite span (a poisoned pose on the toggle frame) must not NaN the
-    // camera rotation — keep the current direction instead.
-    let Ok(direction) = Dir3::new(target - pivot_point) else {
-        return;
-    };
+    let span = target - pivot_point;
+    assert!(
+        span.is_finite(),
+        "a committed aim and the rendered pivot have finite poses"
+    );
+    if span == Vec3::ZERO {
+        return; // A commitment exactly at the orbit pivot has no bearing to re-aim toward.
+    }
+    let direction = Dir3::new(span).expect("the finite, nonzero aim span defines a direction");
     camera.into_inner().look_to(direction, Vec3::Y);
 }
 
@@ -564,29 +565,35 @@ fn gunner_camera(
     ranging: Res<Ranging>,
     tables: Query<&RangeTable>,
 ) {
-    let Ok((tank, rig)) = controlled.single() else {
+    let Some((tank, rig)) = crate::tank::controlled_one(controlled.single()) else {
         return;
     };
     // The VIEW gun (design §6C): the optic must ride the render-smoothed pose — the sim gun's
     // chain steps at tick rate since the sim/view split.
-    let Ok(gun) = gun.get(ViewNode::resolve(view_nodes.get(rig.gun).ok(), rig.gun)) else {
-        return;
-    };
-    let Ok(hull) = hull.get(rig.hull) else {
-        return;
-    };
+    let gun = gun
+        .get(ViewNode::resolve(view_nodes.get(rig.gun).ok(), rig.gun))
+        .expect("a controlled rig's gun has its global pose, including before view binding");
+    let hull = hull
+        .get(rig.hull)
+        .expect("a controlled rig's hull has its global pose");
     let (mut transform, mut global_transform, mut projection) = camera.into_inner();
 
     let theta = tables
         .get(rig.muzzle)
-        .map_or(0.0, |table| table.superelevation(ranging.range));
+        .expect("the primary muzzle receives its range table at complete spawn")
+        .superelevation(ranging.range);
     let rotation = gun.rotation();
     let eye = gun.translation();
     let look = blended_look(
         &hull.affine(),
         eye,
         sight_line(rotation, theta),
-        committed.get(tank).filter(|point| point.is_finite()),
+        committed.get(tank).inspect(|point| {
+            assert!(
+                point.is_finite(),
+                "the committed aim stores finite hull-local points"
+            );
+        }),
         GUNNER_BLEND,
     );
     place_optic_camera(
@@ -602,8 +609,8 @@ fn gunner_camera(
 
 /// Park the (parentless) camera at `eye` looking along world `dir`, writing both `Transform` (for
 /// next frame's bookkeeping) and `GlobalTransform` (for *this* frame's render + HUD reprojection —
-/// propagation already ran), and setting the perspective FOV. A non-finite/zero `dir` is a no-op
-/// that keeps the last good pose (a poisoned pose frame must not NaN the camera).
+/// propagation already ran), and setting the perspective FOV. Finite pose inputs and a nonzero
+/// direction are invariants of the gun's sight line and the bounded intent blend.
 fn place_optic_camera(
     transform: &mut Transform,
     global_transform: &mut GlobalTransform,
@@ -613,9 +620,12 @@ fn place_optic_camera(
     up: Vec3,
     fov: f32,
 ) {
-    let Ok(dir) = Dir3::new(dir) else {
-        return;
-    };
+    assert!(
+        eye.is_finite() && up.is_finite(),
+        "the gun's optic pose is finite"
+    );
+    let dir =
+        Dir3::new(dir).expect("the gun's sight and bounded intent blend define a finite direction");
     if let Projection::Perspective(p) = projection {
         p.fov = fov;
     }
@@ -628,6 +638,85 @@ fn place_optic_camera(
 mod tests {
     use super::*;
     use crate::sight::BLEND_SAMPLES;
+
+    /// Camera anchoring belongs to the currently possessed construction, and must be cleared in
+    /// the tankless gap. Reusing the first tank's offset breaks respawn on a different rig.
+    #[test]
+    fn the_orbit_pivot_follows_possession_and_clears_between_tanks() {
+        let mut app = App::new();
+        app.init_resource::<TurretPivot>()
+            .add_systems(Update, capture_turret_pivot);
+        let root = app
+            .world_mut()
+            .spawn((Controlled, Transform::IDENTITY))
+            .id();
+        let turret = app
+            .world_mut()
+            .spawn((Transform::from_xyz(0.0, 2.0, 0.0), ChildOf(root)))
+            .id();
+        app.world_mut().entity_mut(root).insert(Rig {
+            hull: root,
+            turret,
+            gun: turret,
+            muzzle: turret,
+        });
+        app.update();
+        assert_eq!(
+            app.world().resource::<TurretPivot>().offset(),
+            Some(Vec3::Y * 2.0)
+        );
+        app.world_mut().entity_mut(root).remove::<Controlled>();
+        app.update();
+        assert_eq!(app.world().resource::<TurretPivot>().offset(), None);
+        let other = app
+            .world_mut()
+            .spawn((Controlled, Transform::IDENTITY))
+            .id();
+        let turret = app
+            .world_mut()
+            .spawn((Transform::from_xyz(1.0, 4.0, 0.0), ChildOf(other)))
+            .id();
+        app.world_mut().entity_mut(other).insert(Rig {
+            hull: other,
+            turret,
+            gun: turret,
+            muzzle: turret,
+        });
+        app.update();
+        assert_eq!(
+            app.world().resource::<TurretPivot>().offset(),
+            Some(Vec3::new(1.0, 4.0, 0.0))
+        );
+        app.world_mut().entity_mut(other).remove::<Controlled>();
+        app.world_mut().entity_mut(root).insert(Controlled);
+        app.update();
+        assert_eq!(
+            app.world().resource::<TurretPivot>().offset(),
+            Some(Vec3::Y * 2.0)
+        );
+    }
+
+    /// A duplicate control owner must fail, because treating it as a tankless gap would silently
+    /// freeze input and the camera while leaving ambiguous ownership alive.
+    #[test]
+    #[should_panic(expected = "a player controls at most one tank")]
+    fn duplicate_control_is_not_a_tankless_camera_state() {
+        let mut app = App::new();
+        app.init_resource::<TurretPivot>()
+            .add_systems(Update, capture_turret_pivot);
+        for _ in 0..2 {
+            app.world_mut().spawn((
+                Controlled,
+                Rig {
+                    hull: Entity::PLACEHOLDER,
+                    turret: Entity::PLACEHOLDER,
+                    gun: Entity::PLACEHOLDER,
+                    muzzle: Entity::PLACEHOLDER,
+                },
+            ));
+        }
+        app.update();
+    }
 
     /// The angle between two directions, via `atan2` on the cross/dot pair — never `acos` of a dot
     /// product, which loses most of the f32 mantissa near 1, and these are angles that should be 0.
