@@ -43,7 +43,7 @@ use std::sync::Arc;
 use avian3d::collider_tree::{ColliderTrees, update_moved_collider_aabbs};
 use avian3d::prelude::{
     Collider, ColliderTransform, CollisionLayers, ContactGraph, ContactPair, LayerMask, Position,
-    RigidBody, Rotation,
+    RigidBody, Rotation, Sleeping,
 };
 use avian3d::schedule::PhysicsSystems;
 use bevy::ecs::schedule::ScheduleConfigs;
@@ -747,6 +747,8 @@ fn derive_state(
 /// on the same inputs, so the next physics step rewrites the same bits. The `ColliderTransform`
 /// is written with them because lightyear recomputes a child collider's pose from it after each
 /// fixed loop once that pose has changed (`LightyearAvianPlugin::update_child_collider_position`).
+/// A segment that moves wakes every sleeping body it touched ([`crate::debris::wake_touching`]):
+/// avian wakes nothing when a static collider moves.
 fn place_segment_colliders(
     trees: Query<
         (&Transform, &Position, &Rotation, &Children),
@@ -761,6 +763,9 @@ fn place_segment_colliders(
         ),
         With<TreeSegment>,
     >,
+    contacts: Option<Res<ContactGraph>>,
+    sleeping: Query<(), With<Sleeping>>,
+    mut commands: Commands,
 ) {
     for (root, body_position, body_rotation, children) in &trees {
         let parent = ColliderTransform::from(*root);
@@ -776,10 +781,13 @@ fn place_segment_colliders(
                 scale: parent.scale * local.scale,
             };
             collider.set_if_neq(placed);
-            position.set_if_neq(Position(
+            let moved = position.set_if_neq(Position(
                 body_position.0 + body_rotation * placed.translation,
-            ));
-            rotation.set_if_neq((body_rotation.0 * placed.rotation.0).normalize().into());
+            )) | rotation
+                .set_if_neq((body_rotation.0 * placed.rotation.0).normalize().into());
+            if moved && let Some(contacts) = &contacts {
+                crate::debris::wake_touching(child, contacts, &sleeping, &mut commands);
+            }
         }
     }
 }
@@ -1587,6 +1595,93 @@ pub(crate) mod tests {
             app.world().get::<TreeState>(nudged),
             Some(&TreeState::Standing),
             "a launched turret rolls off"
+        );
+    }
+
+    /// A BODY ASLEEP ON A TRUNK WAKES WHEN THE TREE FALLS: a cube asleep on the standing fixture
+    /// trunk's tip wakes in the tick the trunk is re-posed lying, and falls. Avian wakes nothing
+    /// when a static collider moves, so a placement that re-poses the segments without
+    /// [`crate::debris::wake_touching`] leaves the cube hanging where the tip stood.
+    #[test]
+    fn a_body_asleep_on_a_trunk_wakes_when_the_tree_falls() {
+        use avian3d::prelude::{ColliderDensity, Gravity, PhysicsPlugins};
+        use bevy::time::TimeUpdateStrategy;
+        use std::time::Duration;
+        let mut app = App::new();
+        app.add_plugins((
+            MinimalPlugins,
+            bevy::transform::TransformPlugin,
+            AssetPlugin::default(),
+            PhysicsPlugins::default(),
+            sim_plugin,
+            crate::debris::sim_plugin,
+        ))
+        .init_asset::<Mesh>()
+        .insert_resource(Gravity(Vec3::NEG_Y * 9.81))
+        .insert_resource(fixture_grid(|_, _| 0.0))
+        .insert_resource(TimeUpdateStrategy::ManualDuration(Duration::from_micros(
+            15_625,
+        )));
+        while app.plugins_state() == bevy::app::PluginsState::Adding {
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        app.finish();
+        app.cleanup();
+        let kind = fixture_kind();
+        let tip: f32 = kind.segments.iter().map(|segment| segment.height_m).sum();
+        let tree = {
+            let world = app.world_mut();
+            let mut queue = bevy::ecs::world::CommandQueue::default();
+            let mut commands = Commands::new(&mut queue, world);
+            let tree = spawn(
+                &mut commands,
+                &kind,
+                MapInstance {
+                    id: "fir_0".to_owned(),
+                    ordinal: 0,
+                },
+                Transform::IDENTITY,
+            );
+            queue.apply(world);
+            tree
+        };
+        // A 6 cm cube wholly over the trunk's 5 cm-radius tip (fixture data). It rocks on the tip's
+        // ring past avian's thresholds, so once settled it is put to sleep by avian's own lever
+        // (`Sleeping` inserted sleeps its island).
+        let cube = app
+            .world_mut()
+            .spawn((
+                Position(Vec3::Y * (tip + 0.031)),
+                Rotation::default(),
+                RigidBody::Dynamic,
+                Collider::cuboid(0.06, 0.06, 0.06),
+                ColliderDensity(1000.0),
+            ))
+            .id();
+        for _ in 0..128 {
+            app.update();
+        }
+        app.world_mut().entity_mut(cube).insert(Sleeping);
+        app.update();
+        let rested = app.world().get::<Position>(cube).unwrap().0.y;
+        assert!(
+            app.world().get::<Sleeping>(cube).is_some() && (rested - tip).abs() < 0.05,
+            "the cube sleeps on the tip, at {rested} m"
+        );
+        app.world_mut()
+            .entity_mut(tree)
+            .insert(TreeState::Down { cut: 0, dir: 0 });
+        app.update();
+        assert!(
+            app.world().get::<Sleeping>(cube).is_none(),
+            "the fall wakes it"
+        );
+        for _ in 0..16 {
+            app.update();
+        }
+        assert!(
+            app.world().get::<Position>(cube).unwrap().0.y < tip - 0.1,
+            "it falls"
         );
     }
 

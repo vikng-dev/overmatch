@@ -21,11 +21,20 @@
 //! force call resets the sleep timer (`dynamics/rigid_body/forces/query_data.rs:345,687`) and the
 //! track code applies forces every tick (`track::sim::apply_track_forces`).
 //!
-//! THE ONE WAKE AVIAN LACKS ([`wake_on_collider_gone`]): avian wakes no body when a collider it
-//! touches goes without a dynamic body of its own (the TODO at `collision/narrow_phase/mod.rs:414`),
-//! so a building chunk turned to dust under a sleeping piece would leave the piece hanging. Every
-//! sleeping piece touching a collider as it goes wakes. A piece stays all match: nothing here
-//! despawns one.
+//! THE WAKES AVIAN LACKS. Avian wakes no body when a support with no dynamic body of its own goes,
+//! is disabled or moves (the TODO in `collision/narrow_phase/mod.rs`, `remove_collider`), so a
+//! building chunk turned to dust under a sleeping piece would leave it hanging. The rule wakes
+//! every sleeping body, a piece or any other (a launched turret), that touches a support as it:
+//! * goes ([`wake_on_collider_gone`]: `Discard` runs before avian's `Remove` drops the pairs);
+//! * goes with its body ([`wake_on_body_gone`]: a static root despawned with child colliders,
+//!   whose pairs avian's `Remove<RigidBody>` drops before the children's queued despawn);
+//! * is disabled ([`wake_on_collider_disabled`]): avian drops the pairs in an `Add` observer that
+//!   Bevy may run before this one, so the rule reads bounds instead: every sleeping body with a
+//!   collider whose bounds come within avian's contact tolerance of the support's;
+//! * moves, when the game moves a static collider: the mover calls [`wake_touching`]
+//!   (`trees::place_segment_colliders`).
+//!
+//! A piece stays all match: nothing here despawns one.
 //!
 //! HOW MANY PIECES (DERIVED from `buildings::breakage`): a chunk leaves its building at most once
 //! and a loose piece never splits, so the pieces of a map never exceed its breakable chunks, and
@@ -42,15 +51,15 @@ use bevy::prelude::*;
 #[derive(Component, Clone, Copy, Debug)]
 pub(crate) struct DebrisPiece;
 
-/// A collider about to go: every sleeping piece it touches wakes. `Discard` runs before avian's
-/// own `Remove` observer drops the collider's contact pairs, so they are still there to read.
-fn wake_on_collider_gone(
-    gone: On<Discard, ColliderMarker>,
-    contacts: Res<ContactGraph>,
-    sleeping: Query<(), (With<DebrisPiece>, With<Sleeping>)>,
-    mut commands: Commands,
+/// Wake every sleeping body in a touching pair with `collider` in avian's contact graph: removing
+/// `Sleeping` wakes its island (avian's `wake_on_remove_sleeping` hook).
+pub(crate) fn wake_touching(
+    collider: Entity,
+    contacts: &ContactGraph,
+    sleeping: &Query<(), With<Sleeping>>,
+    commands: &mut Commands,
 ) {
-    for edge in contacts.contact_edges_with(gone.entity) {
+    for edge in contacts.contact_edges_with(collider) {
         if !edge.is_touching() {
             continue;
         }
@@ -62,9 +71,66 @@ fn wake_on_collider_gone(
     }
 }
 
+/// A collider about to go: every sleeping body it touches wakes (module doc).
+fn wake_on_collider_gone(
+    gone: On<Discard, ColliderMarker>,
+    contacts: Res<ContactGraph>,
+    sleeping: Query<(), With<Sleeping>>,
+    mut commands: Commands,
+) {
+    wake_touching(gone.entity, &contacts, &sleeping, &mut commands);
+}
+
+/// A body about to go or change type: every sleeping body touching any of its colliders wakes
+/// (module doc).
+fn wake_on_body_gone(
+    gone: On<Discard, RigidBody>,
+    bodies: Query<&RigidBodyColliders>,
+    contacts: Res<ContactGraph>,
+    sleeping: Query<(), With<Sleeping>>,
+    mut commands: Commands,
+) {
+    let Ok(colliders) = bodies.get(gone.entity) else {
+        return;
+    };
+    for collider in colliders {
+        wake_touching(collider, &contacts, &sleeping, &mut commands);
+    }
+}
+
+/// A collider disabled: every sleeping body with a collider whose bounds come within avian's
+/// contact tolerance of its bounds wakes (module doc).
+fn wake_on_collider_disabled(
+    disabled: On<Add, ColliderDisabled>,
+    aabbs: Query<&ColliderAabb>,
+    spatial: SpatialQuery,
+    collider_of: Query<&ColliderOf>,
+    config: Res<NarrowPhaseConfig>,
+    sleeping: Query<(), With<Sleeping>>,
+    mut commands: Commands,
+) {
+    let Ok(aabb) = aabbs.get(disabled.entity) else {
+        return;
+    };
+    let grown = ColliderAabb::from_min_max(
+        aabb.min - Vec3::splat(config.contact_tolerance),
+        aabb.max + Vec3::splat(config.contact_tolerance),
+    );
+    spatial.aabb_intersections_with_aabb_callback(grown, |other| {
+        if let Ok(&ColliderOf { body }) = collider_of.get(other)
+            && sleeping.contains(body)
+        {
+            commands.entity(body).try_remove::<Sleeping>();
+        }
+        true
+    });
+}
+
 /// Mount the rule.
 pub(crate) fn sim_plugin(app: &mut App) {
-    app.add_observer(wake_on_collider_gone);
+    app.add_observer(wake_on_collider_gone)
+        .add_observer(wake_on_body_gone)
+        .add_observer(wake_on_collider_disabled);
 }
 
 #[cfg(test)]
@@ -139,17 +205,16 @@ mod tests {
             .expect("the piece came to rest and slept within 10 s")
     }
 
-    /// A SLEEPING PIECE WAKES WHEN WHAT IT RESTS ON GOES: a piece asleep on a static slab is awake
-    /// in the tick after the slab despawns (a chunk turned to dust under it), and falls. Avian
-    /// wakes nothing for a static collider's removal, so a mutant that drops
-    /// [`wake_on_collider_gone`] leaves the piece hanging where the slab was.
-    #[test]
-    fn a_sleeping_piece_wakes_when_its_support_goes() {
-        let mut app = settling(Vec3::NEG_Y * 9.81);
-        let support = slab(&mut app, 1.0);
-        let resting = piece(&mut app, Vec3::Y * 1.25);
-        until_asleep(&mut app, resting);
-        app.world_mut().entity_mut(support).despawn();
+    /// The same cube with no [`DebrisPiece`]: a launched turret's stand-in (fixture data).
+    fn other_body(app: &mut App, at: Vec3) -> Entity {
+        let body = piece(app, at);
+        app.world_mut().entity_mut(body).remove::<DebrisPiece>();
+        body
+    }
+
+    /// `resting`, asleep on a support at 1 m that `go` has just taken away: awake in the tick
+    /// after, and fallen below the support's top within 16 more.
+    fn wakes_and_falls(app: &mut App, resting: Entity) {
         app.update();
         assert!(app.world().get::<Sleeping>(resting).is_none(), "it woke");
         for _ in 0..16 {
@@ -159,6 +224,65 @@ mod tests {
             app.world().get::<Position>(resting).unwrap().0.y < 1.1,
             "it falls"
         );
+    }
+
+    /// A SLEEPING BODY WAKES WHEN WHAT IT RESTS ON GOES, A PIECE OR ANY OTHER: a piece, and a body
+    /// that is no piece (a launched turret), asleep on a static slab wake in the tick after the
+    /// slab despawns (a chunk turned to dust under them) and fall. Avian wakes nothing for a
+    /// static collider's removal, so a mutant that drops [`wake_on_collider_gone`], or wakes only
+    /// pieces, leaves a body hanging where the slab was.
+    #[test]
+    fn a_sleeping_body_wakes_when_its_support_goes() {
+        for spawn in [piece as fn(&mut App, Vec3) -> Entity, other_body] {
+            let mut app = settling(Vec3::NEG_Y * 9.81);
+            let support = slab(&mut app, 1.0);
+            let resting = spawn(&mut app, Vec3::Y * 1.25);
+            until_asleep(&mut app, resting);
+            app.world_mut().entity_mut(support).despawn();
+            wakes_and_falls(&mut app, resting);
+        }
+    }
+
+    /// A SLEEPING BODY WAKES WHEN ITS SUPPORT'S STATIC ROOT GOES WITH IT: a body asleep on a slab
+    /// that is the child collider of a static root wakes when the root is despawned, and falls.
+    /// The children's despawn is queued after avian's `Remove<RigidBody>` has dropped their pairs,
+    /// so a mutant that drops [`wake_on_body_gone`] leaves the body hanging.
+    #[test]
+    fn a_sleeping_body_wakes_when_its_supports_root_goes() {
+        let mut app = settling(Vec3::NEG_Y * 9.81);
+        let at = Vec3::new(0.0, 0.5, 0.0);
+        let root = app
+            .world_mut()
+            .spawn((
+                Transform::from_translation(at),
+                Position(at),
+                RigidBody::Static,
+            ))
+            .id();
+        app.world_mut().spawn((
+            ChildOf(root),
+            Transform::IDENTITY,
+            Collider::cuboid(20.0, 1.0, 20.0),
+            CollisionLayers::new([Layer::Terrain], LayerMask::ALL),
+        ));
+        let resting = piece(&mut app, Vec3::Y * 1.25);
+        until_asleep(&mut app, resting);
+        app.world_mut().entity_mut(root).despawn();
+        wakes_and_falls(&mut app, resting);
+    }
+
+    /// A SLEEPING BODY WAKES WHEN ITS SUPPORT IS DISABLED: a body asleep on a static slab wakes
+    /// when the slab takes `ColliderDisabled`, and falls through it. Avian drops the slab's pairs
+    /// and wakes no other body, so a mutant that drops [`wake_on_collider_disabled`] leaves the
+    /// body hanging over a slab it no longer meets.
+    #[test]
+    fn a_sleeping_body_wakes_when_its_support_is_disabled() {
+        let mut app = settling(Vec3::NEG_Y * 9.81);
+        let support = slab(&mut app, 1.0);
+        let resting = piece(&mut app, Vec3::Y * 1.25);
+        until_asleep(&mut app, resting);
+        app.world_mut().entity_mut(support).insert(ColliderDisabled);
+        wakes_and_falls(&mut app, resting);
     }
 
     /// A BODY THAT TRULY DISTURBS A SLEEPING PIECE WAKES IT AND MEETS FINITE MASS: a hovering body

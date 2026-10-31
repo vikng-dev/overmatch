@@ -665,7 +665,7 @@ The first tank touch therefore meets finite mass and transfers opposing momentum
 Rubble rests through Avian's island sleep (`src/debris.rs`).
 A piece stays a dynamic body all match; an island sleeps once every body in it has stayed under Avian's sleep thresholds for its `TimeToSleep`, and keeps its geometry, mass and contacts asleep.
 An awake body that starts touching a sleeping island wakes it before the solver runs, so the first touch meets finite mass.
-Avian wakes nothing when a support with no dynamic body goes; the game wakes every sleeping piece touching a collider as it goes.
+Avian wakes nothing when a support with no dynamic body goes, is disabled or moves; the game wakes every sleeping body touching it, a piece or any other (`src/debris.rs`).
 A rest timer is debounce, not proof of support.
 
 **Server cost.**
