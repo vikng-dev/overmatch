@@ -8,7 +8,7 @@
 //! and presentation diagnostics; simulation never reads the asset handle.
 
 use bevy::asset::io::Reader;
-use bevy::asset::{AssetLoader, LoadContext, LoadState};
+use bevy::asset::{AssetLoadFailedEvent, AssetLoader, LoadContext, LoadState};
 use bevy::prelude::*;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -1418,9 +1418,25 @@ pub fn plugin(app: &mut App) {
 /// parse/schema/IO error is fatal — we log the carried `AssetLoadError` and **panic in every
 /// build**. (The schema test catches this class pre-ship; this is the runtime backstop for a bad
 /// hot-reload or a file that slipped through.)
-fn report_failed_spec(asset_server: Res<AssetServer>, tank: Query<&TankSpecHandle, With<Tank>>) {
-    for handle in &tank {
+///
+/// Checked on its two triggers: a tank's handle when it arrives, for a sheet that failed first,
+/// and each failure as it arrives, for a tank already holding that sheet. A failure no tank holds
+/// (the pen cam's stage view of a peer's vehicle) is not this check's.
+fn report_failed_spec(
+    asset_server: Res<AssetServer>,
+    mut failures: MessageReader<AssetLoadFailedEvent<TankSpec>>,
+    arrived: Query<&TankSpecHandle, (With<Tank>, Changed<TankSpecHandle>)>,
+    tanks: Query<&TankSpecHandle, With<Tank>>,
+) {
+    for handle in &arrived {
         if let LoadState::Failed(err) = asset_server.load_state(&handle.0) {
+            error!("required tank spec sheet failed to load: {err}");
+            panic!("required tank spec sheet failed to load: {err}");
+        }
+    }
+    for failure in failures.read() {
+        if tanks.iter().any(|handle| handle.0.id() == failure.id) {
+            let err = &failure.error;
             error!("required tank spec sheet failed to load: {err}");
             panic!("required tank spec sheet failed to load: {err}");
         }
