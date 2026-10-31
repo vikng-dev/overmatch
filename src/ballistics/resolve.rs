@@ -963,25 +963,19 @@ pub(crate) struct Flight {
 }
 
 impl Flight {
-    /// The game's damage model: a new discovery disc starts outside material. Its sweep
-    /// verifies that invariant; no tick-start containment probe supplies membership. A disc no
-    /// sweep has reached is placed through [`Self::born`] instead.
+    /// The game's damage model: a new discovery disc on the axis start the last sweep reached,
+    /// outside material by the walk law. Its sweep verifies that invariant; no tick-start
+    /// containment probe supplies membership. A disc no sweep has reached is placed through
+    /// [`Self::born`] instead.
     pub(crate) fn launched(
-        position: Vec3,
         swept: Dir3,
         direction: Dir3,
         speed: f32,
         frame: DiscFrame,
         radius: f32,
-        axis: Option<AxisStart>,
+        axis: AxisStart,
     ) -> Self {
-        let start = axis.map_or(
-            AxisStart {
-                anchor: position,
-                origin: Vec3::ZERO,
-            },
-            AxisStart::rebased,
-        );
+        let start = axis.rebased();
         let mut starts = Interior::laid(start.anchor, layout(&frame, radius));
         starts.origin = start.origin;
         Self {

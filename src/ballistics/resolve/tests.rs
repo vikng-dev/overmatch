@@ -1203,13 +1203,15 @@ fn certified_then_resumed(
                 };
                 let frame = DiscFrame::anchored(swept).expect("a real direction");
                 let mut flight = Flight::launched(
-                    at,
                     Dir3::new(swept).expect("a direction"),
                     Dir3::new(launch).expect("a direction"),
                     SPEED,
                     frame,
                     radius,
-                    None,
+                    AxisStart {
+                        anchor: at,
+                        origin: Vec3::ZERO,
+                    },
                 );
                 flight.continuation = Some(certified(
                     &context,

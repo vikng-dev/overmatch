@@ -3526,9 +3526,7 @@ fn launch(
     let position = shell.transform.translation;
     let frame = shell.projectile.disc;
     match shell.projectile.axis.take() {
-        Some(axis) => {
-            resolve::Flight::launched(position, previous, dir, speed, frame, radius, Some(axis))
-        }
+        Some(axis) => resolve::Flight::launched(previous, dir, speed, frame, radius, axis),
         None => resolve::Flight::born(
             context, not_own, position, previous, dir, speed, frame, radius,
         )
@@ -8234,8 +8232,8 @@ mod march_tests {
         }
     }
 
-    /// A step's flight launched in open air from a fresh start: [`resolve::Flight::launched`] with
-    /// no persisted starts, in a world with no armour near.
+    /// A step's flight launched in open air: [`resolve::Flight::launched`] on an axis start at
+    /// `position` with no rounding carried, in a world with no armour near.
     fn launched_in_open_air(
         position: Vec3,
         swept: Dir3,
@@ -8243,13 +8241,15 @@ mod march_tests {
         frame: walk::DiscFrame,
     ) -> resolve::Flight {
         resolve::Flight::launched(
-            position,
             swept,
             Dir3::new(stepped).expect("a direction"),
             stepped.length(),
             frame,
             resolve::disc_radius(FIXTURE_88.caliber),
-            None,
+            resolve::AxisStart {
+                anchor: position,
+                origin: Vec3::ZERO,
+            },
         )
     }
 
