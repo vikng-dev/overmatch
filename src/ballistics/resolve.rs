@@ -528,9 +528,14 @@ impl Reached {
 }
 
 impl FieldReach {
-    /// The reach of a field thrown from `at`. A direction's queries sweep at most [`MAX_CORRIDOR`]
-    /// from `at` along a unit axis, or the cube of that half-side about it ([`horizon`]), so the
-    /// cube a metre wider holds every one of their boxes, the metre covering the rounding.
+    /// The reach of a field thrown from `at`. Every box a direction queries spans `at` to `at +
+    /// axis × L` with `L ≤` [`MAX_CORRIDOR`] (the presence corridor's, or the witness pass's to a
+    /// stop on that walk, whose crossings lie short of its length), or is the cube of half-side
+    /// [`MAX_CORRIDOR`] about `at` ([`horizon`]); the cube a metre wider holds every one. DERIVED
+    /// from IEEE 754 round-to-nearest, at any magnitude of `at`: each face is an f32 `at + a`
+    /// rounded and the wide cube's `at ± 51 m` rounded, and rounding is monotone, so a face with
+    /// `|a| ≤ 51 m` stays inside. ASSUMED: `|axis_i × L| ≤ 51 m`, which a unit axis meets with a
+    /// metre of room (bevy's `Dir3` panics in debug builds when its length is about 1 % off).
     pub(crate) fn of_throw(
         context: &ResolveContext<'_, '_, '_>,
         admit: &dyn Fn(Entity) -> bool,
