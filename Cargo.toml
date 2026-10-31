@@ -219,12 +219,6 @@ split-debuginfo = "off"
 opt-level = 3
 debug = 0
 
-[profile.dev-full]
-inherits = "dev"
-debug = 2
-# A debugger needs the object files that `dev` stops keeping.
-split-debuginfo = "unpacked"
-
 # The edit loop's test profile: `scripts/serial-cargo test` builds under it unless the caller names a
 # profile. Dev's default thin-local LTO pass is 33–39 s of a ~50 s crate rebuild whatever the edit;
 # without it a one-line edit rebuilds in ~18 s and tests run ~20 % slower (MEASURED,

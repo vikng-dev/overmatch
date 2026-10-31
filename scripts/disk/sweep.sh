@@ -3,9 +3,10 @@
 #
 # Two leaks, two reapers, over the main tree and every `git worktree list` entry:
 # - rustc on macOS leaves a superseded set of `*.rcgu.o` in `target/*/deps` on every rebuild
-#   (rust-lang/rust#161824). `split-debuginfo = "off"` stops new ones in the dev profile; profiles
-#   that keep "unpacked" (dev-full) still leak. Cargo does not fingerprint these files, so deleting
-#   ones older than 12 h leaves every unit Fresh and is safe while a build runs.
+#   (rust-lang/rust#161824). `split-debuginfo = "off"` stops new ones in the dev profile; a profile
+#   left on cargo's macOS default for debug info, "unpacked" (`profiling`), still leaks. Cargo does
+#   not fingerprint these files, so deleting ones older than 12 h leaves every unit Fresh and is
+#   safe while a build runs.
 # - Incremental state: every feature set, target kind and profile gets its own
 #   `incremental/<crate>-<hash>` directory, rustc garbage-collects only the sessions INSIDE one, and
 #   nothing ever removes a directory whose combination is no longer built (MEASURED 2026-10-22: 164
