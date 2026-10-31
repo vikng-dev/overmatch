@@ -74,9 +74,10 @@ share a place. It shows while Tab is held in combat and without a key through re
 title names the authority's winner (also marked on its row), the draw or no contest. It hides
 whenever an input-capturing overlay is latched and otherwise draws above the death banner.
 
-Countdowns run from the replicated deadline on the client's network tick (`ShotClock`). That tick
-leads the server's (DERIVED: a press is filed for a tick the server has not yet reached), so a line
-can read 0:00 briefly before the phase change arrives. No player name rides
+Countdowns run from the replicated deadline on the shared presentation timeline
+(`InterpolationTimeline`), the clock used to sample the server stream. Input time deliberately
+leads the server and must not advance the match display. The replicated phase alone changes
+the view; a countdown reaching zero cannot start or end combat. No player name rides
 the wire, so a row reads `PLAYER <combatant id>`. The own row is unmarked: outside combat the
 client holds no tank, and so no replicated fact naming its own combatant.
 

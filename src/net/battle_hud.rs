@@ -4,7 +4,7 @@
 //! authority's result marked.
 //!
 //! Every view reads the replicated [`BattleState`] and [`Scoreboard`] (one entity) and the
-//! client's network tick ([`ShotClock`], the clock the death screen's respawn countdown reads); it
+//! client's shared presentation tick ([`InterpolationTimeline`]); it
 //! never advances a phase, breaks a tie or chooses a winner. The board orders standings by the
 //! server's own [`rank`]. Before the first snapshot there is no Battle to show: both views hide.
 //!
@@ -22,10 +22,12 @@ use bevy::prelude::*;
 
 use super::battle::{BattleOutcome, BattlePhase, BattleState};
 use super::score::{Scoreboard, Standing, rank};
+use crate::CombatantId;
 use crate::flow::{Flow, FlowScoped, InMatchSystems};
 use crate::overlay::{self, Overlay, Overlays};
 use crate::ui_font::{PANEL_BG, TEXT, UiFonts, set_text};
-use crate::{CombatantId, ShotClock};
+use lightyear::interpolation::timeline::InterpolationTimeline;
+use lightyear::prelude::NetworkTimeline;
 
 /// Held to show the scoreboard during combat.
 const BOARD_KEY: KeyCode = KeyCode::Tab;
@@ -96,7 +98,7 @@ impl View {
     }
 }
 
-/// Whole seconds, rounded up, from the client's tick `now` to the authority's `deadline`; zero
+/// Whole seconds, rounded up, from the presentation tick `now` to the authority's `deadline`; zero
 /// once it is due, while the phase change is still in flight. Rounded up so the line reads zero
 /// only once the deadline has come. DERIVED: the wrapped signed difference is exact because the
 /// server's phase spans never exceed `i32::MAX` ticks (`battle::CycleRules`).
@@ -345,7 +347,7 @@ fn spawn_battle_hud(mut commands: Commands, fonts: Res<UiFonts>) {
 /// shows only while nothing captures input ([`overlay::input_blocked`]).
 fn update_battle_hud(
     battles: Query<(&BattleState, &Scoreboard)>,
-    clock: Option<Res<ShotClock>>,
+    clock: Option<Res<InterpolationTimeline>>,
     time: Res<Time<Fixed>>,
     keys: Res<ButtonInput<KeyCode>>,
     overlays: Res<Overlays>,
@@ -367,7 +369,8 @@ fn update_battle_hud(
         ),
     };
     let now = clock
-        .expect("a replicated Battle arrives only where the network clock is published")
+        .expect("a replicated Battle arrives only where the shared presentation clock is installed")
+        .tick()
         .0;
     let view = View::of(battle.phase, now, time.timestep());
     let board_shown =
@@ -459,7 +462,8 @@ mod tests {
             body: Handle::default(),
         })
         .insert_resource(Time::<Fixed>::from_duration(fixed))
-        .init_resource::<ShotClock>()
+        .init_resource::<InterpolationTimeline>()
+        .init_resource::<crate::ShotClock>()
         .init_resource::<ButtonInput<KeyCode>>()
         .init_resource::<Overlays>();
         app.world_mut()
@@ -531,7 +535,13 @@ mod tests {
         assert_eq!(clock_line(&mut app).as_deref(), Some("WAITING FOR PLAYERS"));
         assert!(!shown(&mut app, MatchUi::Scoreboard));
 
-        app.world_mut().resource_mut::<ShotClock>().0 = 40;
+        // Fixture input time leads presentation time. The match display must follow the latter.
+        app.world_mut().resource_mut::<crate::ShotClock>().0 = 400;
+        app.world_mut()
+            .resource_mut::<InterpolationTimeline>()
+            .set_now(lightyear::core::time::TickInstant::from(
+                lightyear::core::tick::Tick(40),
+            ));
         set_phase(&mut app, BattlePhase::FillUp { ends_at: Some(100) });
         app.update();
         assert_eq!(
