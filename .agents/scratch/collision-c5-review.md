@@ -20,6 +20,6 @@ Reviewed prerequisite commits `ea77e880`, `47d0eab3`, `f1a435ab` against AGENTS.
 ## Deferred collision-lane findings
 
 - Degenerate hull: refused before play by the layout load gate, naming the hull field and rebake fix.
-- A queued contact on a chunk already freed by an earlier deposit: the carrier already launched. Retain the solver stop for that stale contact until the next physics step can contact the carrier. Dust alone refunds the whole blow. This is the named absence of a standing receiver, not a second launch or refund.
+- A queued contact on a chunk already freed by an earlier deposit returns its whole blow. Its carrier already launched; retaining the static stop would remove momentum from the source without giving it to a receiver. The next physics step resolves contact with the dynamic carrier. Dust also returns the whole blow, because it has no carrier.
 - Tiny exchange: carry products and source sums in double precision; a wholly rounded-away response has zero exchange and returns the unspent blow. The fixture sweeps ordinary, tiny and subnormal inputs.
 - Design prose: state the field's zero-source-mass limit directly, without retelling the study's contradictory test wording.
