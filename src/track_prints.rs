@@ -120,6 +120,9 @@ struct TankPrints {
     memory: ShoeMemory,
     /// The root's pose last frame: the teleport detector's previous frame.
     last: Option<Affine3A>,
+    /// Whether this frame's pose differs from `last` (a first pose counts): a still root's belts
+    /// read nothing new from it.
+    moved: bool,
     seen: bool,
 }
 
@@ -396,13 +399,25 @@ fn snapped(previous: Affine3A, now: Affine3A) -> bool {
 /// Stamp every grounded shoe whose press deepened or which moved, on every belt, at this frame's
 /// drawn pose: each material link of the belt's table carried through the belt's own
 /// `GlobalTransform`, the pose the belt draws it at. No GPU readback; the table is the CPU's.
+///
+/// A belt is read when one of its inputs moved since the last run: its table, its pose, its
+/// tank's pose, or the ground, template or rig. With none moved its shoes' contacts are the ones
+/// already observed, and observing a contact again changes no memory and stamps nothing
+/// ([`stamper::ShoeMemory::observe`]), so a settled tank's belts are skipped whole.
 fn stamp_shoes(
     mut prints: ResMut<TrackPrints>,
     grid: Res<HeightGrid>,
     template: Res<LinkTemplate>,
     geom: Res<RigGeom>,
     tanks: Query<(Entity, &GlobalTransform), With<Tank>>,
-    belts: Query<(Entity, &ShoeBelt, &BeltFrames, &ChildOf, &GlobalTransform)>,
+    belts: Query<(
+        Entity,
+        &ShoeBelt,
+        Ref<BeltFrames>,
+        &ChildOf,
+        Ref<GlobalTransform>,
+    )>,
+    mut laid: Local<Vec<StampEntry>>,
 ) {
     let TrackPrints {
         law,
@@ -425,20 +440,24 @@ fn stamp_shoes(
         if tank.last.is_some_and(|last| snapped(last, now)) {
             tank.memory.reset();
         }
+        tank.moved = tank.last != Some(now);
         tank.last = Some(now);
         tank.seen = true;
     }
     memory.retain(|_, tank| tank.seen);
+    let refit = grid.is_changed() || template.is_changed() || geom.is_changed();
 
     let ground = |xz: Vec2| {
         grid.contains_xz(xz.x, xz.y)
             .then(|| grid.height_at(xz.x, xz.y))
     };
-    let mut laid = Vec::new();
     for (entity, belt, frames, parent, at) in &belts {
         let Some(tank) = memory.get_mut(&parent.parent()) else {
             continue;
         };
+        if !refit && !tank.moved && !frames.is_changed() && !at.is_changed() {
+            continue;
+        }
         let Some(hull) = tank.last.map(|pose| pose.inverse()) else {
             continue;
         };
@@ -470,7 +489,7 @@ fn stamp_shoes(
             }
         }
     }
-    for entry in laid {
+    for entry in laid.drain(..) {
         stores.stamp(&entry, shoes, law);
     }
 }
