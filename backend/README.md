@@ -113,6 +113,12 @@ closed: it receives no new tickets, stays registered while heartbeats continue, 
 `open` for the next fill-up. `closing` means the server has decided to exit and accepts no joins.
 The Worker must accept `closed` before game servers start reporting it (#240).
 
+The Worker sees `closed` only at the next heartbeat, and a ticket attached while its server was
+`open` keeps that server: its status answer stays `ready` (a connecting client polls it for
+`failed` alone, so the Worker cannot take it back). A player can therefore still arrive after late
+join closes, up to one `HEARTBEAT_INTERVAL_S` plus the client's poll and connect later. The game
+server's handshake, not the Worker, is the authority on late join.
+
 The Worker's early-access `CAPACITY` is 30 (ASSUMED player limit chosen in #220), as in
 `contract/heartbeat.closed.request.json`. `contract/server-env.json` and
 `contract/heartbeat.request.json` retain capacity 10 (fixture data): the unchanged Rust
