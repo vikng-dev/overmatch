@@ -521,7 +521,7 @@ fn the_killing_shot_alone_is_attributed() {
         Vec3::ZERO,
         &plated(ONE, Kind::Crew(DEEP)),
     );
-    // Only one crewman decides the tank: the rear box is a module.
+    // Fixture staffing: only the front crew-station HP pool decides the knockout; the rear box is a module.
     app.world_mut()
         .entity_mut(volumes[2])
         .remove::<CrewStation>();
@@ -596,7 +596,10 @@ fn a_round_from_a_knocks_out_b_crediting_a_a_knockout_and_b_a_loss() {
         let mut app = recording_world(false);
         crate::net::score::mount(&mut app, wait);
         app.init_resource::<crate::ShotClock>();
-        app.world_mut().spawn(Scoreboard::default());
+        app.world_mut().spawn((
+            Scoreboard::default(),
+            crate::net::battle::BattleState::combat_fixture(),
+        ));
         app.world_mut().spawn((a, CombatantLife(0)));
         let (root, volumes) = tank(
             &mut app,
@@ -605,7 +608,7 @@ fn a_round_from_a_knocks_out_b_crediting_a_a_knockout_and_b_a_loss() {
             Vec3::ZERO,
             &plated(ONE, Kind::Crew(DEEP)),
         );
-        // Only one crewman decides the tank: the rear box is a module.
+        // Fixture staffing: only the front crew-station HP pool decides the knockout; the rear box is a module.
         app.world_mut()
             .entity_mut(volumes[2])
             .remove::<CrewStation>();

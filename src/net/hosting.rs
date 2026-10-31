@@ -28,6 +28,8 @@ use lightyear::prelude::server::{ClientOf, NetcodeServer, Started};
 use lightyear::prelude::{Connected, Linked};
 use serde::Serialize;
 
+use super::admission::JoinAdmission;
+
 /// Upper bound on one heartbeat or end call, connect to last body byte.
 const HTTP_TIMEOUT: Duration = Duration::from_secs(5);
 
@@ -208,11 +210,12 @@ struct Heartbeat {
     state: ServerState,
 }
 
-/// `open` accepts joins; `closing` tells the Worker this server has decided to exit.
+/// `open` accepts joins; `closed` keeps the Battle live without joins; `closing` exits.
 #[derive(Serialize, Debug, Clone, Copy, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
 enum ServerState {
     Open,
+    Closed,
     Closing,
 }
 
@@ -303,6 +306,7 @@ impl ExitReason {
 struct Shared {
     players: AtomicU32,
     closing: AtomicBool,
+    closed: AtomicBool,
     unknown: AtomicBool,
     exit: Mutex<Option<ExitReason>>,
 }
@@ -314,6 +318,8 @@ impl Shared {
             capacity,
             state: if self.closing.load(Ordering::Relaxed) {
                 ServerState::Closing
+            } else if self.closed.load(Ordering::Relaxed) {
+                ServerState::Closed
             } else {
                 ServerState::Open
             },
@@ -425,16 +431,17 @@ impl Hosted {
     }
 
     pub(super) fn install(&self, app: &mut App) {
-        app.insert_resource(HostingLink {
-            shared: self.shared.clone(),
-            control: self.control.clone(),
-            listening: false,
-            empty: EmptyTimer::new(self.empty_exit),
-        })
-        .add_systems(
-            Update,
-            (announce_listening, track_players, exit_when_unknown).chain(),
-        );
+        app.init_resource::<JoinAdmission>()
+            .insert_resource(HostingLink {
+                shared: self.shared.clone(),
+                control: self.control.clone(),
+                listening: false,
+                empty: EmptyTimer::new(self.empty_exit),
+            })
+            .add_systems(
+                Update,
+                (announce_listening, track_players, exit_when_unknown).chain(),
+            );
     }
 
     /// After `App::run` returns: stop and join the reporter, then post `end` unless the Worker
@@ -514,14 +521,22 @@ fn announce_listening(
 /// Publish the connected-player count and exit after `OVERMATCH_EMPTY_EXIT_S` with none.
 fn track_players(
     clients: Query<(), (With<ClientOf>, With<Connected>)>,
+    admission: Res<JoinAdmission>,
+    battles: Query<&super::battle::BattleState>,
     time: Res<Time<Real>>,
     mut link: ResMut<HostingLink>,
     mut exit: MessageWriter<AppExit>,
 ) {
     let players = clients.iter().count() as u32;
     link.shared.players.store(players, Ordering::Relaxed);
+    link.shared
+        .closed
+        .store(!admission.is_open(), Ordering::Relaxed);
     let limit = link.empty.limit;
-    if link.empty.expired(players, time.elapsed()) {
+    let battle = battles
+        .single()
+        .expect("the hosted server starts its Battle before tracking players");
+    if link.empty.expired(players, time.elapsed()) && !battle.is_combat() {
         info!("hosting: no players for {limit:?}; exiting");
         link.shared.decide_exit(ExitReason::Empty(limit));
         exit.write(AppExit::Success);
@@ -808,10 +823,16 @@ mod tests {
             serde_json::to_value(shared.heartbeat(10)).unwrap()["state"],
             "open"
         );
+        shared.players.store(4, Ordering::Relaxed);
+        shared.closed.store(true, Ordering::Relaxed);
+        assert_eq!(
+            serde_json::to_value(shared.heartbeat(30)).expect("heartbeat JSON"),
+            contract("heartbeat.closed.request.json")
+        );
         shared.decide_exit(ExitReason::Empty(Duration::from_secs(1)));
         let body = serde_json::to_value(shared.heartbeat(10)).unwrap();
         assert_eq!(body["state"], "closing");
-        assert_eq!(body["players"], 3);
+        assert_eq!(body["players"], 4);
     }
 
     #[test]
@@ -857,6 +878,8 @@ mod tests {
         let mut app = App::new();
         app.add_plugins(MinimalPlugins);
         app.add_message::<AppExit>();
+        app.world_mut()
+            .spawn(super::super::battle::BattleState::default());
         hosted.install(&mut app);
         app.update();
         assert_eq!(app.should_exit(), Some(AppExit::Success));
@@ -896,6 +919,8 @@ mod tests {
         let mut app = App::new();
         app.add_plugins(MinimalPlugins);
         app.add_message::<AppExit>();
+        app.world_mut()
+            .spawn(super::super::battle::BattleState::default());
         hosted.install(&mut app);
         let deadline = Instant::now() + Duration::from_secs(10);
         while app.should_exit().is_none() {
@@ -910,16 +935,59 @@ mod tests {
         assert_eq!(end.body["reason"], "empty for 0.05 s");
     }
 
+    /// The hosting empty timeout must not shorten the Battle's promised full combat span.
+    /// Once combat reaches results, an already-expired empty timeout can retire the server.
+    #[test]
+    fn an_empty_server_finishes_combat_before_its_empty_timeout_retires_it() {
+        use crate::net::battle::{BattleOutcome, BattlePhase, BattleState};
+        let mut app = App::new();
+        let shared = Arc::new(Shared::default());
+        let (control, _receiver) = mpsc::channel();
+        app.add_plugins(MinimalPlugins)
+            .add_message::<AppExit>()
+            .init_resource::<JoinAdmission>()
+            .insert_resource(TimeUpdateStrategy::ManualDuration(TICK))
+            .insert_resource(HostingLink {
+                shared: shared.clone(),
+                control,
+                listening: true,
+                // Fixture timeout: expires well before the fixture combat's deadline.
+                empty: EmptyTimer::new(TICK),
+            })
+            .add_systems(Update, track_players);
+        let battle = app.world_mut().spawn(BattleState::combat_fixture()).id();
+        for _ in 0..4 {
+            app.update();
+        }
+        assert!(app.should_exit().is_none(), "empty combat runs in full");
+        assert!(!shared.closing.load(Ordering::Relaxed));
+        app.world_mut()
+            .get_mut::<BattleState>(battle)
+            .expect("Battle")
+            .phase = BattlePhase::Results {
+            ends_at: 100,
+            outcome: BattleOutcome::NoContest,
+        };
+        app.update();
+        assert!(
+            app.should_exit().is_some(),
+            "expired emptiness retires after combat"
+        );
+        assert!(shared.closing.load(Ordering::Relaxed));
+    }
+
     fn capped_server(port: u16, config: &HostedConfig) -> App {
         let mut app = base_app();
         app.add_plugins(ServerPlugins {
             tick_duration: TICK,
         });
         crate::net::protocol::plugin(&mut app);
+        let admission = JoinAdmission::default();
+        app.insert_resource(admission.clone());
         let server = app
             .world_mut()
             .spawn((
-                crate::net::server::netcode_server(Some(config)),
+                crate::net::server::netcode_server(Some(config), admission),
                 LocalAddr(SocketAddr::new(Ipv4Addr::LOCALHOST.into(), port)),
                 ServerUdpIo::default(),
             ))
@@ -1026,5 +1094,217 @@ mod tests {
         };
         assert!(client_state(&mut first).0, "the admitted client stays");
         assert_eq!(connected_on_server(&mut server), 1, "{reason}");
+    }
+    /// The server's short-mode headless run uses the production clock and wire registrations:
+    /// fill-up, open combat, closed combat, results and another occupied fill-up all replicate.
+    /// Heartbeats follow the same admission gate. A late join is refused with its typed cause,
+    /// and the production joining Text shows it while the original player remains connected.
+    #[test]
+    fn a_short_mode_cycles_replicates_and_refuses_a_late_join_with_its_reason() {
+        use crate::CombatantId;
+        use crate::net::admission::JoinRefusal;
+        use crate::net::battle::{BattleOutcome, BattlePhase, BattleState, LateJoin};
+        use crate::net::score::{Respawn, Scoreboard, Standing};
+
+        let _udp = lock_real_udp_test();
+        let config = hosted(&contract_env());
+        let port = free_port();
+        let mut server = capped_server(port, &config);
+        let mode =
+            crate::net::battle_mode::BattleMode::parse(include_str!("fixtures/battle-short.ron"));
+        crate::net::server::install_battle(&mut server, mode, TICK);
+        server.add_observer(crate::net::server::attach_replication_sender);
+        let shared = Arc::new(Shared::default());
+        let (control, _receiver) = mpsc::channel();
+        server
+            .insert_resource(HostingLink {
+                shared: shared.clone(),
+                control,
+                listening: true,
+                empty: EmptyTimer::new(Duration::from_secs(3600)),
+            })
+            .add_message::<AppExit>()
+            .add_systems(Update, track_players);
+        let mut first = client(port, 1, config.netcode_key());
+        finish(&mut server);
+        finish(&mut first);
+        let mut late: Option<App> = None;
+        let mut refused = false;
+        let mut scored = false;
+        let mut score_replicated = false;
+        let mut server_phases = std::collections::BTreeSet::new();
+        let mut client_phases = std::collections::BTreeSet::new();
+        let mut published = Vec::new();
+        let phase_key = |state: BattleState| {
+            (
+                state.number,
+                match state.phase {
+                    BattlePhase::FillUp { ends_at: None } => "idle",
+                    BattlePhase::FillUp { ends_at: Some(_) } => "fill-up",
+                    BattlePhase::Combat {
+                        late_join: LateJoin::Open { .. },
+                        ..
+                    } => "combat-open",
+                    BattlePhase::Combat {
+                        late_join: LateJoin::Closed,
+                        ..
+                    } => "combat-closed",
+                    BattlePhase::Results { .. } => "results",
+                },
+            )
+        };
+        for step in 0..2_000 {
+            server.update();
+            std::thread::sleep(Duration::from_micros(300));
+            first.update();
+            if let Some(late) = &mut late {
+                late.update();
+            }
+            std::thread::sleep(Duration::from_micros(300));
+            let state = *server
+                .world_mut()
+                .query::<&BattleState>()
+                .single(server.world())
+                .expect("one Battle");
+            published.push(state);
+            server_phases.insert(phase_key(state));
+            let heartbeat = shared.heartbeat(config.capacity);
+            assert_eq!(
+                heartbeat.state,
+                if state.accepts_joins() {
+                    ServerState::Open
+                } else {
+                    ServerState::Closed
+                }
+            );
+            if matches!(state.phase, BattlePhase::Combat { .. }) && !scored {
+                // Fixture standing makes replication and the authority's result observable.
+                server
+                    .world_mut()
+                    .query::<&mut Scoreboard>()
+                    .single_mut(server.world_mut())
+                    .expect("one board")
+                    .0
+                    .push(Standing {
+                        combatant: CombatantId(77),
+                        knockouts: 3,
+                        losses: 1,
+                        respawn: Respawn::NeverKnockedOut,
+                    });
+                scored = true;
+            }
+            if matches!(
+                state.phase,
+                BattlePhase::Combat {
+                    late_join: LateJoin::Closed,
+                    ..
+                }
+            ) && late.is_none()
+            {
+                let mut newcomer = client(port, 2, config.netcode_key());
+                crate::net::client::mount_refusal_probe(&mut newcomer);
+                finish(&mut newcomer);
+                late = Some(newcomer);
+            }
+            if let BattlePhase::Results { outcome, .. } = state.phase {
+                assert_eq!(outcome, BattleOutcome::Winner(CombatantId(77)));
+            }
+            let world = first.world_mut();
+            for (received, board) in world.query::<(&BattleState, &Scoreboard)>().iter(world) {
+                assert!(
+                    published.contains(received),
+                    "clients receive an authority state including its exact deadline"
+                );
+                client_phases.insert(phase_key(*received));
+                score_replicated |= board.0.iter().any(|standing| {
+                    standing.combatant == CombatantId(77)
+                        && standing.knockouts == 3
+                        && standing.losses == 1
+                });
+                if received.number == 2 {
+                    assert!(board.0.is_empty(), "the new Battle resets its score");
+                }
+            }
+            if let Some(late) = &mut late {
+                let (reason, label) = crate::net::client::refusal_probe(late);
+                if let Some(reason) = reason {
+                    assert_eq!(reason, JoinRefusal::BattleClosed);
+                    assert_eq!(label, reason.message());
+                    assert!(!client_state(late).0, "a refused player never connects");
+                    refused = true;
+                }
+            }
+            if state.number == 2 && client_phases.contains(&(2, "fill-up")) {
+                assert!(
+                    client_state(&mut first).0,
+                    "the admitted player stays connected across Battles"
+                );
+                assert!(refused && score_replicated);
+                for phase in ["fill-up", "combat-open", "combat-closed", "results"] {
+                    assert!(server_phases.contains(&(1, phase)), "server missed {phase}");
+                    assert!(
+                        client_phases.contains(&(1, phase)),
+                        "replica missed {phase}"
+                    );
+                }
+                eprintln!(
+                    "MEASURED: short-mode headless run observed all cycle phases and matching heartbeats; typed late-join refusal rendered; score and exact phase deadlines replicated; completed at fixture step {step}"
+                );
+                return;
+            }
+        }
+        panic!(
+            "the short-mode cycle never completed: server {server_phases:?}, client {client_phases:?}"
+        );
+    }
+
+    /// A ticket's handshake can start while open and return its challenge after admission closes.
+    /// The second handshake stage must recheck the same gate, and preserve the refusal for the UI.
+    #[test]
+    fn a_challenge_issued_while_open_cannot_connect_after_admission_closes() {
+        use crate::net::admission::JoinRefusal;
+        let _udp = lock_real_udp_test();
+        let config = hosted(&contract_env());
+        let port = free_port();
+        let mut server = capped_server(port, &config);
+        let admission = server.world().resource::<JoinAdmission>().clone();
+        let mut joining = client(port, 10, config.netcode_key());
+        crate::net::client::mount_refusal_probe(&mut joining);
+        finish(&mut server);
+        finish(&mut joining);
+        let mut challenged = false;
+        for _ in 0..2_000 {
+            server.update();
+            if !challenged
+                && !server
+                    .world_mut()
+                    .query_filtered::<(), (With<LinkOf>, With<Connecting>)>()
+                    .iter(server.world())
+                    .collect::<Vec<_>>()
+                    .is_empty()
+            {
+                admission.set_open(false);
+                challenged = true;
+            }
+            joining.update();
+            std::thread::sleep(Duration::from_micros(300));
+            let (refusal, label) = crate::net::client::refusal_probe(&mut joining);
+            if let Some(refusal) = refusal {
+                assert!(challenged, "the initial request passed while open");
+                assert_eq!(refusal, JoinRefusal::BattleClosed);
+                assert_eq!(label, refusal.message());
+                assert!(!client_state(&mut joining).0);
+                assert_eq!(
+                    server
+                        .world_mut()
+                        .query_filtered::<(), (With<ClientOf>, With<Connected>)>()
+                        .iter(server.world())
+                        .count(),
+                    0
+                );
+                return;
+            }
+        }
+        panic!("the challenge-crossing refusal never arrived");
     }
 }

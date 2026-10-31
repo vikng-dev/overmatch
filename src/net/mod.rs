@@ -3,6 +3,8 @@
 use avian3d::schedule::PhysicsSystems;
 use bevy::prelude::*;
 
+mod admission;
+pub(crate) mod battle;
 /// The Battle mode's data: one file, parsed and checked once.
 mod battle_mode;
 mod client;

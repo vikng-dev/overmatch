@@ -3,6 +3,7 @@
 //! Every hull — the own tank included — renders from the interpolated server stream; client
 //! presentation never pauses the simulation while the authority continues ticking.
 
+use super::admission::JoinRefusal;
 use core::time::Duration;
 use std::hash::{BuildHasher, Hasher};
 use std::io;
@@ -709,6 +710,8 @@ struct ConnectRetry {
     /// A retry fired at least [`RECONNECT_GIVE_UP_S`] after `down_since` has failed: the match is
     /// given up. Cleared on `Connected`.
     exhausted: bool,
+    /// An authenticated refusal is terminal and supplies the visible cause.
+    refusal: Option<JoinRefusal>,
 }
 
 /// Seconds of real time a once-connected matchmaking link keeps reconnecting before the client
@@ -761,7 +764,8 @@ const MISMATCH_HINT_AFTER_ATTEMPTS: u32 = 3;
 ///     `world::plugin` builds the real terrain on both sides; the track force probes sample it.)
 ///   - **`Connecting`** — a connect is in flight (netcode `SendingConnectionRequest`/
 ///     `ChallengeResponse`); wait it out.
-///   - **`Disconnected` after initiating** — the attempt failed (timeout / denied / link drop) and
+///   - **authenticated denial** — retain its typed cause for the visible label and stop retries.
+///   - **`Disconnected` after initiating** — the attempt failed (timeout / link drop) and
 ///     netcode inserted `Disconnected`. Arm a backoff, then fire a fresh `Connect` when it elapses.
 ///     A fresh `Connect` re-runs netcode's handshake on the same link: while the entity is still
 ///     `Linked` (a transient netcode disconnect), lightyear's UDP `LinkStart` skips it, so the retry
@@ -776,18 +780,26 @@ fn drive_connection(
             Has<Connected>,
             Has<Connecting>,
             Option<&Disconnected>,
+            &NetcodeClient,
         ),
         (With<NetcodeClient>, Without<Leaving>),
     >,
     mut retry: ResMut<ConnectRetry>,
     mut commands: Commands,
 ) {
-    let Ok((entity, connected, connecting, disconnected)) = client.single() else {
+    let Ok((entity, connected, connecting, disconnected, netcode)) = client.single() else {
         return;
     };
 
+    if let Some(reason) = netcode.inner.denied_reason() {
+        retry.refusal = Some(JoinRefusal::from_netcode(reason));
+        retry.next_retry_at = None;
+        return;
+    }
+
     let now = real.elapsed_secs_f64();
     if connected {
+        retry.refusal = None;
         retry.connected_once = true;
         retry.attempts = 0;
         retry.next_retry_at = None;
@@ -853,6 +865,28 @@ fn drive_connection(
         }
         Some(_) => {}
     }
+}
+
+/// A headless adapter for the real refusal reader and its rendered joining label.
+#[cfg(test)]
+pub(super) fn mount_refusal_probe(app: &mut App) {
+    app.init_resource::<ConnectRetry>()
+        .add_systems(Update, (drive_connection, update_joining_screen).chain());
+    app.world_mut().resource_mut::<ConnectRetry>().initiated = true;
+    app.world_mut().spawn((Text::default(), JoiningText));
+}
+
+#[cfg(test)]
+pub(super) fn refusal_probe(app: &mut App) -> (Option<JoinRefusal>, String) {
+    let refusal = app.world().resource::<ConnectRetry>().refusal;
+    let label = app
+        .world_mut()
+        .query_filtered::<&Text, With<JoiningText>>()
+        .single(app.world())
+        .expect("the joining probe has one label")
+        .0
+        .clone();
+    (refusal, label)
 }
 
 /// The screen this client is on, from its link (`flow::flow_of`): no link is the Join menu, a link
@@ -970,6 +1004,14 @@ fn close_verdict(
     gone: Option<String>,
 ) -> Option<super::matchmaking::MatchClosed> {
     use super::matchmaking::MatchClosed;
+    if let Some(refusal) = retry.refusal {
+        let reason = refusal.message().to_owned();
+        return Some(if retry.connected_once {
+            MatchClosed::Ended(reason)
+        } else {
+            MatchClosed::Unreachable(reason)
+        });
+    }
     if let Some(reason) = gone {
         return Some(if retry.connected_once {
             MatchClosed::Ended(reason)
@@ -1031,7 +1073,10 @@ pub(super) fn connect_screen_plugin(app: &mut App) {
 
 /// The joining screen's label, and the failed-attempt count it renders.
 #[derive(Component)]
-struct JoiningText(u32);
+struct JoiningText;
+
+#[derive(Component)]
+struct ConnectStatusText;
 
 /// Spawn the persistent reconnect overlay; [`update_connect_status`] declares its presence, while
 /// `overlay::apply_overlay_visibility` owns visibility. The `OverlayNode` hook stamps its z.
@@ -1044,7 +1089,7 @@ fn spawn_connect_status(mut commands: Commands, fonts: Res<UiFonts>) {
             Visibility::Hidden,
         ),
         "RECONNECTING…",
-        (),
+        ConnectStatusText,
         Some(Color::srgba(0.0, 0.0, 0.0, 0.6)),
     );
 }
@@ -1056,7 +1101,7 @@ fn spawn_joining_screen(mut commands: Commands, fonts: Res<UiFonts>) {
         &fonts.hud,
         crate::flow::FlowScoped(crate::flow::Flow::Joining),
         joining_label(0),
-        JoiningText(0),
+        JoiningText,
         Some(Color::srgba(0.01, 0.02, 0.03, 0.94)),
     );
 }
@@ -1078,11 +1123,14 @@ fn joining_label(attempts: u32) -> String {
 }
 
 /// Rewrite the joining label when the attempt count it renders changes.
-fn update_joining_screen(retry: Res<ConnectRetry>, mut text: Query<(&mut Text, &mut JoiningText)>) {
-    for (mut text, mut shown) in &mut text {
-        if shown.0 != retry.attempts {
-            shown.0 = retry.attempts;
-            text.0 = joining_label(retry.attempts);
+fn update_joining_screen(retry: Res<ConnectRetry>, mut text: Query<&mut Text, With<JoiningText>>) {
+    let label = retry.refusal.map_or_else(
+        || joining_label(retry.attempts),
+        |reason| reason.message().to_owned(),
+    );
+    for mut text in &mut text {
+        if text.0 != label {
+            text.0.clone_from(&label);
         }
     }
 }
@@ -1092,9 +1140,17 @@ fn update_joining_screen(retry: Res<ConnectRetry>, mut text: Query<(&mut Text, &
 fn update_connect_status(
     links: Query<Has<Connected>, (With<NetcodeClient>, Without<Leaving>)>,
     mut overlays: ResMut<crate::overlay::Overlays>,
+    retry: Res<ConnectRetry>,
+    mut labels: Query<&mut Text, With<ConnectStatusText>>,
 ) {
     let down = links.iter().any(|connected| !connected);
     overlays.declare(crate::overlay::Overlay::ConnectStatus, down);
+    let label = retry.refusal.map_or("RECONNECTING…", JoinRefusal::message);
+    for mut text in &mut labels {
+        if text.0 != label {
+            text.0 = label.to_owned();
+        }
+    }
 }
 
 /// Parse without touching DNS so address shape and source precedence remain unit-testable offline.

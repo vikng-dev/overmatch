@@ -13,6 +13,7 @@ use bevy::prelude::*;
 use lightyear::prelude::*;
 use serde::{Deserialize, Serialize};
 
+use super::battle::{BattleOutcome, BattleState};
 use crate::damage::{KnockoutCause, TankKnockout};
 use crate::{CombatantId, CombatantLife, ShotClock};
 
@@ -52,6 +53,25 @@ pub(crate) enum Opening {
 }
 
 impl Scoreboard {
+    /// The game's damage model: resolve the Battle from the scored standings, including players
+    /// who disconnected. Empty boards name no contest; tied best standings name a draw.
+    pub(super) fn outcome(&self) -> BattleOutcome {
+        let Some(best) = self.0.iter().min_by(|a, b| rank(a, b)) else {
+            return BattleOutcome::NoContest;
+        };
+        if self
+            .0
+            .iter()
+            .filter(|standing| rank(standing, best).is_eq())
+            .count()
+            > 1
+        {
+            BattleOutcome::Draw
+        } else {
+            BattleOutcome::Winner(best.combatant)
+        }
+    }
+
     fn standing_mut(&mut self, combatant: CombatantId) -> Option<&mut Standing> {
         self.0
             .iter_mut()
@@ -92,13 +112,6 @@ impl Scoreboard {
 
 /// The ranking: more knockouts first, then fewer losses; `Equal` is a draw. `Less` ranks `a` above
 /// `b`, so sorting a board by it lists the winner first.
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "its reader, the scoreboard (#243), is not yet built"
-    )
-)]
 pub(crate) fn rank(a: &Standing, b: &Standing) -> Ordering {
     b.knockouts.cmp(&a.knockouts).then(a.losses.cmp(&b.losses))
 }
@@ -191,6 +204,7 @@ fn spawn_scoreboard(mut commands: Commands) {
     commands.spawn((
         Name::new("Scoreboard"),
         Scoreboard::default(),
+        BattleState::default(),
         Replicate::to_clients(NetworkTarget::All),
     ));
 }
@@ -224,14 +238,18 @@ fn score_knockout(
     tanks: Query<(&CombatantId, &CombatantLife)>,
     clock: Res<ShotClock>,
     wait: Res<RespawnWait>,
-    mut boards: Query<&mut Scoreboard>,
+    mut boards: Query<(&mut Scoreboard, &BattleState)>,
 ) {
     let (&victim, &life) = tanks
         .get(knockout.tank)
         .expect("every server tank root carries its spawn identity from its spawn");
-    let mut board = boards
-        .single_mut()
-        .expect("server startup spawns exactly one scoreboard before any combatant spawns");
+    let (mut board, battle) = boards.single_mut().expect(
+        "server startup spawns exactly one scoreboard and Battle before any combatant spawns",
+    );
+    if !battle.is_combat() {
+        // The phase boundary owns scoring; fixtures and pending consequences cannot score outside combat.
+        return;
+    }
     let standing = board
         .standing_mut(victim)
         .expect("a combatant's standing opens at its first spawn");
@@ -317,6 +335,75 @@ mod tests {
         assert_eq!(
             credit(victim, KnockoutCause::NoKeyedRound),
             Credit::NoShooter
+        );
+    }
+
+    /// The game's damage model: result consumers rely on the authority choosing the unique best
+    /// standing, preserving a tie, and naming an empty contest without inventing a winner.
+    #[test]
+    fn the_authority_reports_a_winner_a_draw_or_no_contest() {
+        assert_eq!(Scoreboard::default().outcome(), BattleOutcome::NoContest);
+        assert_eq!(
+            Scoreboard(vec![standing(1, 3, 5), standing(2, 3, 1)]).outcome(),
+            BattleOutcome::Winner(CombatantId(2))
+        );
+        assert_eq!(
+            Scoreboard(vec![standing(1, 3, 1), standing(2, 3, 1)]).outcome(),
+            BattleOutcome::Draw
+        );
+    }
+
+    /// The game's damage model: only combat can change score. Fill-up and results ignore a
+    /// knockout fact; the result and the retained table stay consistent until the next fill-up.
+    #[test]
+    fn nothing_scores_outside_combat() {
+        use super::super::battle::{BattlePhase, LateJoin};
+        let mut app = App::new();
+        app.init_resource::<ShotClock>();
+        mount(
+            &mut app,
+            RespawnWait::new(Duration::from_secs(1), Duration::from_millis(10)),
+        );
+        let board = app
+            .world_mut()
+            .spawn((Scoreboard::default(), BattleState::default()))
+            .id();
+        let tank = app
+            .world_mut()
+            .spawn((CombatantId(1), CombatantLife(0)))
+            .id();
+        let knockout = TankKnockout {
+            tank,
+            cause: KnockoutCause::NoKeyedRound,
+        };
+        app.world_mut().trigger(knockout);
+        assert_eq!(
+            app.world().get::<Scoreboard>(board).expect("board").0[0].losses,
+            0
+        );
+        app.world_mut()
+            .get_mut::<BattleState>(board)
+            .expect("Battle")
+            .phase = BattlePhase::Combat {
+            ends_at: 100,
+            late_join: LateJoin::Closed,
+        };
+        app.world_mut().trigger(knockout);
+        assert_eq!(
+            app.world().get::<Scoreboard>(board).expect("board").0[0].losses,
+            1
+        );
+        app.world_mut()
+            .get_mut::<BattleState>(board)
+            .expect("Battle")
+            .phase = BattlePhase::Results {
+            ends_at: 200,
+            outcome: BattleOutcome::Winner(CombatantId(1)),
+        };
+        app.world_mut().trigger(knockout);
+        assert_eq!(
+            app.world().get::<Scoreboard>(board).expect("board").0[0].losses,
+            1
         );
     }
 

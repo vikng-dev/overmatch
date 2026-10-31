@@ -11,6 +11,8 @@ use lightyear::prelude::input::server::{InputValidationAppExt, authorize_control
 use lightyear::prelude::server::*;
 use lightyear::prelude::*;
 
+use super::admission::JoinAdmission;
+use super::battle::{BattleState, Boundary, CycleRules, in_combat};
 use super::battle_mode::BattleMode;
 use super::disclosure::{CombatDisclosure, NetTankStatus};
 use super::hosting::{Hosted, HostedConfig};
@@ -103,11 +105,13 @@ pub fn run() {
     // Lightyear visibility hooks require `ReplicationSender` on each remote link.
     app.add_observer(attach_replication_sender);
 
+    let admission = JoinAdmission::default();
+    app.insert_resource(admission.clone());
     let server = app
         .world_mut()
         .spawn((
             Name::new("Server"),
-            netcode_server(hosted.as_ref()),
+            netcode_server(hosted.as_ref(), admission),
             LocalAddr(SocketAddr::new(bind.into(), PORT)),
             ServerUdpIo::default(),
         ))
@@ -120,14 +124,7 @@ pub fn run() {
     // no textures, no rungs (ADR-0035); the walk's geometry arrives through `bake`'s extraction of
     // `<id>.sim.glb`.
     app.add_systems(Startup, load_tank_sim_assets);
-    app.init_resource::<PendingClients>();
-    app.init_resource::<SpawnLane>();
-    // The mode's data, parsed and checked once: its spawn distances and its respawn wait.
-    let mode = BattleMode::shipped();
-    app.insert_resource(SpawnPlacement::new(mode.spawn));
-    super::score::install_server(&mut app, RespawnWait::new(mode.respawn_wait, TICK));
-    app.init_resource::<SpawnOverrides>();
-    app.init_resource::<CombatantIds>();
+    install_battle(&mut app, BattleMode::shipped(), TICK);
     app.insert_resource(BotCount::from_value(
         std::env::var("OVERMATCH_BOT").ok().as_deref(),
     ));
@@ -135,13 +132,12 @@ pub fn run() {
     app.add_systems(
         Update,
         (
-            handle_new_clients,
+            (handle_new_clients, spawn_pending_tanks.run_if(in_combat)).chain(),
             // Drain the spawn-map lane at frame rate: lightyear clears an undrained `MessageReceiver`
             // in `Last` every frame (the same rule `grip::answer_resync_requests` follows in `Update`).
             receive_spawn_points,
-            spawn_pending_tanks,
-            spawn_bots,
-            respawn_dead_bots,
+            spawn_bots.run_if(in_combat),
+            respawn_dead_bots.run_if(in_combat),
             open_gameplay_gate,
             diagnostics::log_sim_evidence,
         ),
@@ -153,6 +149,7 @@ pub fn run() {
             // Command writers must run before edge consumption.
             drive_bot.in_set(GameplaySet).before(ConsumeCommandEdges),
             respawn_player_tanks
+                .run_if(in_combat)
                 .in_set(GameplaySet)
                 .before(ConsumeCommandEdges),
         ),
@@ -166,6 +163,78 @@ pub fn run() {
     app.run();
     if let Some(hosting) = hosting {
         hosting.finish();
+    }
+}
+
+/// Install the production Battle clock and score. The short-mode headless probe mounts this same
+/// composition, with the same netcode gate, rather than reproducing the phase machine in a test.
+pub(super) fn install_battle(app: &mut App, mode: BattleMode, tick: Duration) {
+    app.init_resource::<PendingClients>()
+        .init_resource::<SpawnLane>()
+        .init_resource::<SpawnOverrides>()
+        .init_resource::<CombatantIds>()
+        .init_resource::<JoinAdmission>()
+        .insert_resource(CycleRules::new(&mode, tick));
+    super::score::install_server(app, RespawnWait::new(mode.respawn_wait, tick));
+    app.insert_resource(SpawnPlacement::new(mode.spawn));
+    app.add_systems(
+        FixedUpdate,
+        cycle_battles
+            .after(super::protocol::publish_shot_clock)
+            .before(GameplaySet),
+    );
+}
+
+/// Advance before gameplay reads this tick. No combatant or flying round survives the results
+/// boundary; connected links persist and are queued together when the next combat begins.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "one atomic phase boundary spans clock, score, admission, connected links and combat cleanup"
+)]
+fn cycle_battles(
+    clock: Res<crate::ShotClock>,
+    rules: Res<CycleRules>,
+    mut battles: Query<(&mut BattleState, &mut super::score::Scoreboard)>,
+    admission: Res<JoinAdmission>,
+    clients: Query<(Entity, &RemoteId), (With<ClientOf>, With<Connected>)>,
+    mut pending: ResMut<PendingClients>,
+    mut overrides: ResMut<SpawnOverrides>,
+    mut lane: ResMut<SpawnLane>,
+    combat: Query<Entity, Or<(With<NetTank>, With<crate::ballistics::Projectile>)>>,
+    mut commands: Commands,
+) {
+    let (mut battle, mut score) = battles
+        .single_mut()
+        .expect("server startup spawns exactly one Battle with its scoreboard");
+    let previous = *battle;
+    let mut next = *battle;
+    match next.advance(clock.0, !clients.is_empty(), &rules, &score) {
+        Boundary::Combat => {
+            pending.0 = clients
+                .iter()
+                .map(|(link, remote)| (link, remote.0))
+                .collect()
+        }
+        Boundary::Results => {
+            pending.0.clear();
+            for root in &combat {
+                commands.entity(root).despawn();
+            }
+        }
+        Boundary::FillUp => {
+            score.0.clear();
+            overrides.0.clear();
+            lane.0 = 0;
+        }
+        Boundary::None => {}
+    }
+    admission.set_open(next.accepts_joins());
+    if previous != next {
+        *battle = next;
+        info!(
+            "server: Battle {} {:?} at tick {}",
+            battle.number, battle.phase, clock.0
+        );
     }
 }
 
@@ -185,7 +254,10 @@ fn bind_ip(value: Option<&str>) -> Result<Ipv4Addr, String> {
 /// The netcode endpoint. Hosted: the Worker's per-match key and its player cap, past which the
 /// handshake answers `ServerFull`. Otherwise: the all-zero dev key every client's
 /// `Authentication::Manual` holds, and lightyear's default cap.
-pub(super) fn netcode_server(hosted: Option<&HostedConfig>) -> NetcodeServer {
+pub(super) fn netcode_server(
+    hosted: Option<&HostedConfig>,
+    admission: JoinAdmission,
+) -> NetcodeServer {
     let defaults = NetcodeConfig::default();
     NetcodeServer::new(NetcodeConfig {
         // Must match the client's `Authentication::Manual.protocol_id`.
@@ -199,6 +271,7 @@ pub(super) fn netcode_server(hosted: Option<&HostedConfig>) -> NetcodeServer {
         // The server cannot know its own public address to list it in
         // `additional_expected_addresses`.
         server_addr_check: false,
+        connection_request_handler: Some(std::sync::Arc::new(admission)),
         ..defaults
     })
 }
@@ -643,7 +716,10 @@ fn handle_new_clients(
 ) {
     for (link, remote) in &new {
         info!("server: client connected: {remote} (link {link})");
-        pending.0.push((link, remote.0));
+        if !pending.0.iter().any(|(queued, _)| *queued == link) {
+            // The combat boundary may already have queued this newly connected link.
+            pending.0.push((link, remote.0));
+        }
     }
 }
 
@@ -805,7 +881,7 @@ impl BotCount {
 
 /// Spawn the [`BotCount`] ownerless bots once, each at its own [`bot_home_xz`].
 fn spawn_bots(
-    mut spawned: Local<bool>,
+    bots: Query<(), With<Bot>>,
     count: Res<BotCount>,
     assets: Res<PendingTankAssets>,
     source: TankSimSource,
@@ -813,13 +889,12 @@ fn spawn_bots(
     height: Option<Res<crate::terrain_grid::HeightGrid>>,
     mut commands: Commands,
 ) {
-    if *spawned || count.0 == 0 {
+    if !bots.is_empty() || count.0 == 0 {
         return;
     }
     let Some(content) = source.get() else {
         return;
     };
-    *spawned = true;
     for index in 0..count.0 {
         let bot = Bot {
             home: bot_home_xz(index),
@@ -1321,11 +1396,168 @@ mod tests {
             .init_resource::<SpawnLane>()
             .init_resource::<CombatantIds>()
             .init_resource::<crate::ShotClock>()
-            .add_systems(Update, (spawn_pending_tanks, respawn_player_tanks).chain());
+            .add_systems(
+                Update,
+                (
+                    spawn_pending_tanks.run_if(in_combat),
+                    respawn_player_tanks.run_if(in_combat),
+                )
+                    .chain(),
+            );
         super::super::score::mount(&mut app, shipped_wait());
-        app.world_mut()
-            .spawn(super::super::score::Scoreboard::default());
+        app.world_mut().spawn((
+            super::super::score::Scoreboard::default(),
+            BattleState::combat_fixture(),
+        ));
         app
+    }
+
+    /// The game's match flow: connected players get no tank before combat, exactly one fresh life
+    /// at each combat boundary, and no tank through results and fill-up. A connection landing on
+    /// the boundary must not spawn twice. Unchanged ticks must not dirty the replicated score or
+    /// phase, whose whole snapshots would otherwise be sent every tick to every player.
+    #[test]
+    fn cycle_boundaries_spawn_fresh_lives_once_and_keep_unchanged_snapshots_clean() {
+        use super::super::battle::BattlePhase;
+        use super::super::score::Scoreboard;
+        let mut app = placement_app();
+        let mode = BattleMode::parse(include_str!("fixtures/battle-short.ron"));
+        app.insert_resource(CycleRules::new(&mode, TICK))
+            .init_resource::<JoinAdmission>()
+            .insert_resource(crate::map::tests::shipped_manifest())
+            .add_systems(
+                Update,
+                (cycle_battles, handle_new_clients)
+                    .chain()
+                    .before(spawn_pending_tanks),
+            );
+        let board = app
+            .world_mut()
+            .query_filtered::<Entity, With<Scoreboard>>()
+            .single(app.world())
+            .expect("one fixture board");
+        *app.world_mut()
+            .get_mut::<BattleState>(board)
+            .expect("Battle") = BattleState::default();
+        let link = app
+            .world_mut()
+            .spawn((RemoteId(PeerId::Netcode(1)), Connected, ClientOf))
+            .id();
+        app.update();
+        let BattlePhase::FillUp {
+            ends_at: Some(fill_end),
+        } = app.world().get::<BattleState>(board).expect("Battle").phase
+        else {
+            panic!("first player starts fill-up");
+        };
+        assert_eq!(
+            app.world_mut()
+                .query_filtered::<(), With<NetTank>>()
+                .iter(app.world())
+                .count(),
+            0
+        );
+        advance(&mut app, fill_end - 1);
+        app.update();
+        assert_eq!(
+            app.world_mut()
+                .query_filtered::<(), With<NetTank>>()
+                .iter(app.world())
+                .count(),
+            0
+        );
+        // Fixture peer joins on the combat boundary itself.
+        app.world_mut()
+            .spawn((RemoteId(PeerId::Netcode(2)), Connected, ClientOf));
+        advance(&mut app, 1);
+        app.update();
+        let roots: Vec<_> = app
+            .world_mut()
+            .query_filtered::<(Entity, &ControlledBy, &CombatantId), With<NetTank>>()
+            .iter(app.world())
+            .map(|(root, owner, id)| (root, owner.owner, *id))
+            .collect();
+        assert_eq!(roots.len(), 2, "exactly one tank per connected link");
+        let &(old_root, _, combatant) = roots
+            .iter()
+            .find(|(_, owner, _)| *owner == link)
+            .expect("first player's tank");
+        app.world_mut().clear_trackers();
+        advance(&mut app, 1);
+        app.update();
+        assert_eq!(
+            app.world_mut()
+                .query_filtered::<(), Changed<BattleState>>()
+                .iter(app.world())
+                .count(),
+            0
+        );
+        assert_eq!(
+            app.world_mut()
+                .query_filtered::<(), Changed<Scoreboard>>()
+                .iter(app.world())
+                .count(),
+            0
+        );
+        let BattlePhase::Combat {
+            ends_at: combat_end,
+            ..
+        } = app.world().get::<BattleState>(board).expect("Battle").phase
+        else {
+            panic!("combat started");
+        };
+        let now = app.world().resource::<crate::ShotClock>().0;
+        advance(&mut app, combat_end - now);
+        app.update();
+        assert!(
+            app.world().get_entity(old_root).is_err(),
+            "results sweeps the combat life"
+        );
+        assert_eq!(
+            app.world_mut()
+                .query_filtered::<(), With<NetTank>>()
+                .iter(app.world())
+                .count(),
+            0
+        );
+        let BattlePhase::Results {
+            ends_at: results_end,
+            ..
+        } = app.world().get::<BattleState>(board).expect("Battle").phase
+        else {
+            panic!("results started");
+        };
+        advance(&mut app, results_end - combat_end);
+        app.update();
+        assert!(
+            app.world()
+                .get::<Scoreboard>(board)
+                .expect("board")
+                .0
+                .is_empty()
+        );
+        let BattlePhase::FillUp {
+            ends_at: Some(next_start),
+        } = app.world().get::<BattleState>(board).expect("Battle").phase
+        else {
+            panic!("connected players start the next fill-up");
+        };
+        assert!(app.world().get::<Connected>(link).is_some());
+        advance(&mut app, next_start - results_end);
+        app.update();
+        let fresh: Vec<_> = app
+            .world_mut()
+            .query_filtered::<(Entity, &CombatantId, &CombatantLife), With<NetTank>>()
+            .iter(app.world())
+            .map(|(root, id, life)| (root, *id, *life))
+            .collect();
+        assert_eq!(fresh.len(), 2);
+        let &(root, _, life) = fresh
+            .iter()
+            .find(|(_, id, _)| *id == combatant)
+            .expect("first player returns");
+        assert_ne!(root, old_root);
+        assert_eq!(life, CombatantLife(1));
     }
 
     /// The shipped mode's respawn wait on the server's tick.

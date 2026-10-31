@@ -4,4 +4,9 @@
     target_distance_m: 400.0,
     minimum_distance_m: 200.0,
     respawn_wait_s: 10.0,
+    // Owner decisions (#220), provisional for play; seconds on the authority clock.
+    fill_up_s: 60.0,
+    combat_s: 900.0,
+    late_join_s: 600.0,
+    results_s: 15.0,
 )

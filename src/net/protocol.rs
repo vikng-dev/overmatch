@@ -228,9 +228,13 @@ use crate::{CombatantId, CombatantLife, ShotId};
 /// [`Scoreboard`](super::score::Scoreboard) lists each combatant's knockouts, losses and its
 /// knocked-out life's respawn opening, replicated whole. Surface and own-type graph move.
 ///
+/// REV 46 (#240, the Battle cycle): `BattleState` carries the authority's phase, tick deadlines,
+/// Battle number and result. Netcode retains authenticated refusal causes and rechecks admission
+/// at challenge completion. The packet format is unchanged; the replicated surface and type graph move.
+///
 /// [`WallPiece`]: crate::buildings::breakage::WallPiece
 /// [`WallEvent`]: crate::buildings::breakage::WallEvent
-pub const PROTOCOL_REV: u32 = 45;
+pub const PROTOCOL_REV: u32 = 46;
 
 /// Compatibility tag derived from the complete pinned wire manifest plus the crate version. This
 /// is the runtime handshake value: version-exact, so a version bump intentionally changes it.
@@ -745,7 +749,7 @@ fn mirror_swap_from_net_crew(
 }
 
 /// Republish the network timeline as net-neutral sim vocabulary before every gameplay tick.
-fn publish_shot_clock(
+pub(super) fn publish_shot_clock(
     mut shot_clock: ResMut<crate::ShotClock>,
     mut weapon_clock: ResMut<crate::WeaponClock>,
     timeline: Res<LocalTimeline>,
@@ -937,6 +941,7 @@ const WIRE_SURFACE: &[&str] = &[
     "WallLedger",
     "WallPiece",
     "Scoreboard",
+    "BattleState",
     // Message channels (`Name|Mode|Direction`), followed by their message types.
     "FireChannel|UnorderedUnreliable|ServerToClient",
     "OutcomeChannel|UnorderedReliable|ServerToClient",
@@ -965,7 +970,7 @@ const WIRE_SURFACE: &[&str] = &[
 ];
 
 /// Pinned hash for the ordered wire surface and a direct handshake-fingerprint input.
-const WIRE_SURFACE_HASH: u64 = 0x7f38_8ab7_ad8d_2286;
+const WIRE_SURFACE_HASH: u64 = 0x96fc_6e23_e239_5c55;
 
 // ---------------------------------------------------------------------------
 // Deep wire-surface coverage (field-level + external-dep skew)
@@ -1007,7 +1012,7 @@ const WIRE_SURFACE_HASH: u64 = 0x7f38_8ab7_ad8d_2286;
 /// The pinned hash of the OWN wire-facing type DEFINITIONS (field layout, not just names). Re-pin it
 /// whenever a wire-facing struct/enum definition changes; house process also bumps
 /// [`PROTOCOL_REV`]. The tripwire prints the new value. See the block above for the coverage model.
-const WIRE_TYPES_HASH: u64 = 0x5f94_5d2d_c70f_fa12;
+const WIRE_TYPES_HASH: u64 = 0xf15843185f59a52e;
 
 /// The pinned `Cargo.lock` versions of the external crates whose types ride the wire (avian's
 /// replicated physics components; lightyear's wire framing / input protocol). A bump of either can
@@ -1067,6 +1072,7 @@ pub(crate) fn plugin(app: &mut App) {
     // The match score (one world entity): sent whole when a knockout changes it, a late joiner
     // takes it once.
     app.component::<super::score::Scoreboard>().replicate();
+    app.component::<super::battle::BattleState>().replicate();
 
     // Automatic-fire visuals may be lost or reordered. Application ShotId dedup and bounded copies
     // repair ordinary loss without retaining stale cosmetic debt in the transport.
@@ -1857,6 +1863,10 @@ mod tests {
         ("src/buildings/breakage.rs", "Hole"),
         ("src/buildings/breakage.rs", "WallPiece"),
         ("src/net/score.rs", "Scoreboard"),
+        ("src/net/battle.rs", "BattleState"),
+        ("src/net/battle.rs", "BattlePhase"),
+        ("src/net/battle.rs", "LateJoin"),
+        ("src/net/battle.rs", "BattleOutcome"),
         ("src/net/score.rs", "Standing"),
         ("src/net/score.rs", "Respawn"),
         ("src/net/protocol.rs", "FireChannel"),
@@ -2045,10 +2055,10 @@ mod tests {
     }
 
     /// The own wire CODECS: modules whose functions, not a type's serde derive, decide the bytes a
-    /// registered component rides as (`replicate_with`). Each file's whole source, comments and
-    /// whitespace stripped, folds into [`WIRE_TYPES_HASH`] after the type definitions, so a step,
-    /// range or bit-layout change re-pins it. Codec tests live in a child file, outside the fold.
-    const WIRE_CODEC_SOURCES: &[&str] = &["src/net/wire_quant.rs"];
+    /// registered component rides as (`replicate_with`), or the custom netcode refusal code an
+    /// application decodes. Each file's whole source, comments and whitespace stripped, folds
+    /// into [`WIRE_TYPES_HASH`] after the type definitions. Codec tests live outside this fold.
+    const WIRE_CODEC_SOURCES: &[&str] = &["src/net/wire_quant.rs", "src/net/admission.rs"];
 
     /// FNV-1a over every own wire type's normalized definition, then every codec's normalized
     /// source, each terminated by `\n` (so no two distinct sets collide by concatenation) — the same
