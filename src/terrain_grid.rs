@@ -861,26 +861,36 @@ pub(crate) fn gaussian_smooth(samples: &[f32], size: usize) -> Vec<f32> {
 /// full `[-WORLD_HALF_EXTENT, +WORLD_HALF_EXTENT]` square.
 ///
 /// Orientation is pinned EMPIRICALLY by `oracle_matches_collider_at_seeded_points` below (the
-/// classic transposed-heightfield bug fails its seeded noise-grid comparison): through avian
-/// 0.7's `Collider::heightfield(Vec<Vec<f32>>, scale)`, the OUTER Vec index runs along world X
-/// and the INNER index along world Z (avian flattens row-major into a parry matrix whose
-/// effective layout lands this way — trust the raycast, not the doc comments). The field is
-/// centered on the origin with `scale.x`/`scale.z` as TOTAL spans and `scale.y` multiplying the
-/// raw heights. Parry splits each cell along the anti-diagonal, which is exactly what
-/// [`HeightGrid::height_at`] evaluates — `oracle_matches_collider_at_seeded_points` pins the
-/// two surfaces together to millimetres.
+/// classic transposed-heightfield bug fails its seeded noise-grid comparison): the parry matrix
+/// is filled row-major as avian 0.7's `Collider::heightfield(Vec<Vec<f32>>, scale)` fills it, so
+/// the ROW index runs along world X and the COLUMN index along world Z (trust the raycast, not
+/// the doc comments). The field is centered on the origin with `scale.x`/`scale.z` as TOTAL spans
+/// and `scale.y` multiplying the raw heights. Parry splits each cell along the anti-diagonal,
+/// which is exactly what [`HeightGrid::height_at`] evaluates —
+/// `oracle_matches_collider_at_seeded_points` pins the two surfaces together to millimetres.
+///
+/// Built with parry's `FIX_INTERNAL_EDGES`, which avian's constructor does not set: a contact
+/// against one triangle keeps its normal inside the cone of that triangle and its neighbours, so
+/// a body crossing a triangle edge on a continuous surface is pushed along the surface normal,
+/// never back off the edge (`a_frictionless_edge_slides_across_flat_terrain_at_speed`). Only
+/// contact-manifold generation reads the flag; ray, shape and point queries are unchanged.
 pub(crate) fn heightfield_collider(grid: &HeightGrid) -> Collider {
+    use avian3d::parry::shape::{HeightFieldFlags, SharedShape};
+    use avian3d::parry::utils::Array2;
+
     let n = grid.size() as usize;
-    let mut rows: Vec<Vec<f32>> = Vec::with_capacity(n);
+    let mut heights = Vec::with_capacity(n * n);
     for i in 0..n {
-        let mut row = Vec::with_capacity(n);
         for j in 0..n {
-            row.push(grid.sample(i, j));
+            heights.push(grid.sample(i, j));
         }
-        rows.push(row);
     }
     let world = grid.world_size();
-    Collider::heightfield(rows, Vec3::new(world, 1.0, world))
+    Collider::from(SharedShape::heightfield_with_flags(
+        Array2::new(n, n, heights),
+        Vec3::new(world, 1.0, world),
+        HeightFieldFlags::FIX_INTERNAL_EDGES,
+    ))
 }
 
 /// The client-only terrain render meshes: the grid's OWN samples as vertices (the ONE-SURFACE
@@ -1599,5 +1609,89 @@ pub(crate) mod tests {
     fn a_spawn_outside_the_world_span_fails_loud() {
         let grid = grid_from(9, |_, _| 40);
         spawn_pos(Some(&grid), Vec2::new(FIXTURE_HALF + 1.0, 0.0));
+    }
+
+    /// A FRICTIONLESS BODY RIDING ITS LEADING BOTTOM EDGE ACROSS FLAT TERRAIN KEEPS ITS SPEED: the
+    /// collider's contacts on a flat field push only along the field's normal, at every triangle
+    /// edge the body crosses. A box pitched so its leading bottom edge is its lowest point, held
+    /// at that pitch, slides frictionless along +Z across the grid lines; on flat ground nothing
+    /// may take its horizontal speed. Without the internal-edge fix, the next triangle's contact
+    /// takes that triangle's edge as its feature, its normal leans toward horizontal, and the
+    /// solver stops the box dead within a tick — the stop a tank's rear hull edge meets when it
+    /// reverses off a slope onto flat ground. Every dynamic body the terrain collider supports
+    /// (tank hull backstops, debris, launched turrets) relies on this. The box, pitch, speed and
+    /// the 1.465 m spacing (the shipped map's) are fixture data.
+    #[test]
+    fn a_frictionless_edge_slides_across_flat_terrain_at_speed() {
+        use avian3d::prelude::{
+            CoefficientCombine, Friction, LinearVelocity, LockedAxes, PhysicsPlugins, Position,
+            RigidBody, Rotation,
+        };
+        use bevy::time::TimeUpdateStrategy;
+        use std::time::Duration;
+
+        const SIZE: u32 = 33;
+        const SPACING_M: f32 = 1.465;
+        const SPEED: f32 = 4.0;
+        const PITCH_DEG: f32 = 10.0;
+        let extent = TerrainExtent {
+            world_size_m: (SIZE - 1) as f32 * SPACING_M,
+            ..FIXTURE_EXTENT
+        };
+        let grid = HeightGrid::new(vec![0.0; (SIZE * SIZE) as usize].into(), SIZE, extent);
+
+        let mut app = App::new();
+        app.add_plugins((
+            MinimalPlugins,
+            bevy::transform::TransformPlugin,
+            AssetPlugin::default(),
+            PhysicsPlugins::default(),
+        ))
+        .init_asset::<Mesh>()
+        .insert_resource(TimeUpdateStrategy::ManualDuration(Duration::from_micros(
+            15_625,
+        )));
+        while app.plugins_state() == bevy::app::PluginsState::Adding {
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        app.finish();
+        app.cleanup();
+        app.world_mut()
+            .spawn((RigidBody::Static, heightfield_collider(&grid)));
+        // Pitched about +X, the box's +Z bottom edge is its lowest point: that edge leads.
+        let half = Vec3::new(1.0, 0.25, 1.5);
+        let pitch = Quat::from_rotation_x(PITCH_DEG.to_radians());
+        let lowest = (pitch * Vec3::new(0.0, -half.y, half.z)).y;
+        let body = app
+            .world_mut()
+            .spawn((
+                RigidBody::Dynamic,
+                Collider::cuboid(2.0 * half.x, 2.0 * half.y, 2.0 * half.z),
+                Friction::ZERO.with_combine_rule(CoefficientCombine::Min),
+                LockedAxes::ROTATION_LOCKED,
+                Position(Vec3::new(0.3, 0.005 - lowest, -8.0 * SPACING_M - 0.4)),
+                Rotation(pitch),
+                LinearVelocity(Vec3::Z * SPEED),
+            ))
+            .id();
+        let mut slowest = SPEED;
+        let mut grid_lines = 0.0;
+        let start = app.world().get::<Position>(body).unwrap().0.z;
+        for _ in 0..128 {
+            app.update();
+            let v = app.world().get::<LinearVelocity>(body).unwrap().0;
+            slowest = slowest.min(v.z);
+            grid_lines = (app.world().get::<Position>(body).unwrap().0.z - start) / SPACING_M;
+        }
+        assert!(
+            slowest > 0.95 * SPEED,
+            "a frictionless box on flat terrain fell from {SPEED} m/s to {slowest:.2} m/s after \
+             {grid_lines:.1} grid lines: a terrain contact pushed it backwards (an internal-edge \
+             normal)",
+        );
+        assert!(
+            grid_lines > 4.0,
+            "the box crossed only {grid_lines:.1} grid lines: the fixture did not reach the edges",
+        );
     }
 }

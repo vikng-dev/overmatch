@@ -1780,6 +1780,326 @@ fn forest_tick_cost_bed() {
     }
 }
 
+/// THE REVERSE THROW (#188) — a measurement bed, never a gate (`-- --ignored reverse_throw_bed
+/// --nocapture`): the controlled tank reverses at full throttle down a slope onto flat ground and
+/// over one raised line of grid samples, on a synthetic grid at the shipped map's 1.465 m spacing.
+/// Per variant it prints the root's peak upward speed and pitch rate and the largest single-tick
+/// hull-terrain impulse, with that contact's normal, depth and hull-frame point: a rigid hull
+/// backstop, the heightfield's internal-edge normals and the overlap push-out each leave a
+/// different signature. The variants that clear the collider's `FIX_INTERNAL_EDGES` rebuild the
+/// heightfield avian's own constructor builds. Fixture numbers (slope, ridge height, spawn) are
+/// fixture data.
+mod reverse_throw {
+    use super::*;
+    use avian3d::dynamics::solver::SolverConfig;
+    use avian3d::parry::shape::{HeightFieldFlags, SharedShape};
+    use avian3d::prelude::{
+        AngularVelocity, Collider, Collisions, LinearVelocity, Position, Rotation,
+    };
+    use bevy::ecs::system::RunSystemOnce;
+
+    use crate::terrain_grid::{FIXTURE_EXTENT, HeightGrid, TerrainExtent};
+
+    const SIZE: u32 = 129;
+    const SPACING_M: f32 = 1.465;
+    const FOOT_J: u32 = 64;
+    const RIDGE_J: u32 = FOOT_J + 3;
+    const SLOPE_CELLS: u32 = 20;
+    const SPAWN_Z: f32 = -10.0;
+    const DRIVE_TICKS: usize = 8 * FIXED_TICKS_PER_SECOND;
+
+    #[derive(Clone, Copy)]
+    enum Ridge {
+        None,
+        /// One row of samples along world X, `j` constant: the crest is a grid line.
+        Row,
+        /// The samples with `i + j` constant: the crest runs along cell diagonals.
+        Diagonal,
+    }
+
+    #[derive(Clone, Copy)]
+    struct Variant {
+        label: &'static str,
+        slope_deg: f32,
+        ridge: Ridge,
+        ridge_m: f32,
+        clear_internal_edges: bool,
+        max_overlap_solve_speed: Option<f32>,
+    }
+
+    /// One hull-terrain manifold: `normal` points from the terrain into the tank, `depth` is the
+    /// deepest point's penetration (negative: a speculative contact, still apart), `impulse` the
+    /// tick's summed normal impulse (N s), `local` the points' mean in the root's frame.
+    struct HullHit {
+        tick: usize,
+        normal: Vec3,
+        depth: f32,
+        impulse: f32,
+        local: Vec3,
+    }
+
+    impl HullHit {
+        fn text(&self) -> String {
+            let (n, l) = (self.normal, self.local);
+            format!(
+                "n ({:5.2} {:5.2} {:5.2}) d {:6.3} J {:7.0} at ({:5.2} {:5.2} {:5.2})",
+                n.x, n.y, n.z, self.depth, self.impulse, l.x, l.y, l.z,
+            )
+        }
+    }
+
+    /// A slope rising toward −Z that meets flat ground at row `FOOT_J`, plus the variant's ridge.
+    fn grid(v: Variant) -> HeightGrid {
+        let rise_per_cell = SPACING_M * v.slope_deg.to_radians().tan();
+        let mut samples = Vec::with_capacity((SIZE * SIZE) as usize);
+        for j in 0..SIZE {
+            for i in 0..SIZE {
+                let slope_h = rise_per_cell * FOOT_J.saturating_sub(j).min(SLOPE_CELLS) as f32;
+                let on_ridge = match v.ridge {
+                    Ridge::None => false,
+                    Ridge::Row => j == RIDGE_J,
+                    Ridge::Diagonal => i + j == SIZE / 2 + RIDGE_J,
+                };
+                samples.push(slope_h + if on_ridge { v.ridge_m } else { 0.0 });
+            }
+        }
+        let extent = TerrainExtent {
+            world_size_m: (SIZE - 1) as f32 * SPACING_M,
+            ..FIXTURE_EXTENT
+        };
+        HeightGrid::new(samples.into(), SIZE, extent)
+    }
+
+    /// The terrain collider's entity, with the variant's collider and solver overrides applied.
+    fn terrain(app: &mut App, v: Variant) -> Entity {
+        let world = app.world_mut();
+        let terrain = world
+            .query::<(Entity, &Collider)>()
+            .iter(world)
+            .find(|(_, c)| c.shape().as_heightfield().is_some())
+            .map(|(e, _)| e)
+            .expect("the heightfield terrain collider");
+        if v.clear_internal_edges {
+            let mut collider = world.get_mut::<Collider>(terrain).unwrap();
+            let mut field = collider.shape().as_heightfield().unwrap().clone();
+            field.set_flags(HeightFieldFlags::empty());
+            collider.set_shape(SharedShape::new(field));
+        }
+        if let Some(speed) = v.max_overlap_solve_speed {
+            world.resource_mut::<SolverConfig>().max_overlap_solve_speed = speed;
+        }
+        terrain
+    }
+
+    fn place(app: &mut App, entity: Entity, at: Vec3, rot: Quat) {
+        let mut e = app.world_mut().entity_mut(entity);
+        e.get_mut::<Position>().unwrap().0 = at;
+        e.get_mut::<Rotation>().unwrap().0 = rot;
+        e.get_mut::<LinearVelocity>().unwrap().0 = Vec3::ZERO;
+        e.get_mut::<AngularVelocity>().unwrap().0 = Vec3::ZERO;
+    }
+
+    /// Every manifold between `tank`'s colliders and the terrain after the last step.
+    fn hull_hits(app: &mut App, tank: Entity, terrain: Entity, tick: usize) -> Vec<HullHit> {
+        let pos = app.world().get::<Position>(tank).unwrap().0;
+        let rot = app.world().get::<Rotation>(tank).unwrap().0;
+        app.world_mut()
+            .run_system_once(move |collisions: Collisions| {
+                collisions
+                    .collisions_with(terrain)
+                    .filter(|pair| pair.body1 == Some(tank) || pair.body2 == Some(tank))
+                    .flat_map(|pair| {
+                        let flip = if pair.collider1 == terrain { 1.0 } else { -1.0 };
+                        pair.manifolds.iter().map(move |m| HullHit {
+                            tick,
+                            normal: m.normal * flip,
+                            depth: m
+                                .points
+                                .iter()
+                                .map(|p| p.penetration)
+                                .fold(f32::MIN, f32::max),
+                            impulse: m.points.iter().map(|p| p.normal_impulse).sum(),
+                            local: rot.inverse()
+                                * (m.points.iter().map(|p| p.point).sum::<Vec3>()
+                                    / m.points.len().max(1) as f32
+                                    - pos),
+                        })
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .unwrap()
+    }
+
+    /// The tick's kinematics and belt loads (total, and behind 1.8 m in the hull frame: the idler
+    /// end), one trace line.
+    fn kinematics(app: &App, tank: Entity, tick: usize) -> (Vec3, f32, String) {
+        let world = app.world();
+        let pos = world.get::<Position>(tank).unwrap().0;
+        let rot = world.get::<Rotation>(tank).unwrap().0;
+        let vel = world.get::<LinearVelocity>(tank).unwrap().0;
+        let pitch_rate = world
+            .get::<AngularVelocity>(tank)
+            .unwrap()
+            .0
+            .dot(rot * Vec3::X);
+        let pitch_deg = (rot * Vec3::NEG_Z).y.asin().to_degrees();
+        let (rear, all) =
+            world
+                .get::<crate::track::sim::TrackContacts>(tank)
+                .map_or((0.0, 0.0), |sides| {
+                    sides.0.iter().flatten().fold((0.0, 0.0), |(rear, all), c| {
+                        let z = (rot.inverse() * (c.point - pos)).z;
+                        (rear + if z > 1.8 { c.load } else { 0.0 }, all + c.load)
+                    })
+                });
+        let line = format!(
+            "t{tick:3} z {:6.2} y {:5.2} vz {:5.2} vy {:5.2} pitch {pitch_deg:6.2} rate \
+             {pitch_rate:5.2} belt {:5.0} kN rear {:4.0} kN",
+            pos.z,
+            pos.y,
+            vel.z,
+            vel.y,
+            all / 1000.0,
+            rear / 1000.0,
+        );
+        (vel, pitch_rate, line)
+    }
+
+    fn run(v: Variant) {
+        let ground = grid(v);
+        let mut app = booted_sim_on(Some(ground.clone()));
+        let terrain = terrain(&mut app, v);
+        start_fixed_clock(&mut app);
+        let world = app.world_mut();
+        let tank = world
+            .query_filtered::<Entity, (With<Tank>, With<Controlled>)>()
+            .single(world)
+            .expect("one controlled tank");
+        let other = world
+            .query_filtered::<Entity, (With<Tank>, Without<Controlled>)>()
+            .single(world)
+            .expect("the duel partner");
+        place(&mut app, other, Vec3::new(50.0, 3.0, 40.0), Quat::IDENTITY);
+        // The ride height on flat ground, read rather than assumed.
+        place(&mut app, tank, Vec3::new(0.0, 3.0, 40.0), Quat::IDENTITY);
+        for _ in 0..240 {
+            app.update();
+        }
+        let rest = app.world().get::<Position>(tank).unwrap().0.y - ground.height_at(0.0, 40.0);
+        // Nose up the slope (hull forward is −Z), so full reverse runs down it.
+        let pitch = Quat::from_rotation_x(v.slope_deg.to_radians());
+        let start = Vec3::new(0.0, ground.height_at(0.0, SPAWN_Z) + rest + 0.3, SPAWN_Z);
+        place(&mut app, tank, start, pitch);
+        for _ in 0..120 {
+            app.update();
+        }
+
+        let mut peak_vy = (0.0_f32, 0);
+        let mut peak_pitch_rate = (0.0_f32, 0);
+        let mut peak_hit: Option<HullHit> = None;
+        let mut deepest = (f32::MIN, 0);
+        let mut trace: Vec<String> = Vec::new();
+        for tick in 0..DRIVE_TICKS {
+            drive_tick(&mut app, tank, -1.0, 0.0);
+            let (vel, pitch_rate, mut line) = kinematics(&app, tank, tick);
+            if vel.y > peak_vy.0 {
+                peak_vy = (vel.y, tick);
+            }
+            if pitch_rate.abs() > peak_pitch_rate.0.abs() {
+                peak_pitch_rate = (pitch_rate, tick);
+            }
+            for hit in hull_hits(&mut app, tank, terrain, tick) {
+                line += &format!(" | {}", hit.text());
+                if hit.depth > deepest.0 {
+                    deepest = (hit.depth, tick);
+                }
+                if peak_hit.as_ref().is_none_or(|p| hit.impulse > p.impulse) {
+                    peak_hit = Some(hit);
+                }
+            }
+            trace.push(line);
+        }
+
+        eprintln!(
+            "reverse throw [{}]: peak vy {:.2} m/s at t{}; peak pitch rate {:.2} rad/s at t{}; \
+             deepest hull contact {:.3} m at t{}",
+            v.label,
+            peak_vy.0,
+            peak_vy.1,
+            peak_pitch_rate.0,
+            peak_pitch_rate.1,
+            deepest.0,
+            deepest.1,
+        );
+        match &peak_hit {
+            Some(h) => eprintln!("  largest hull impulse at t{}: {}", h.tick, h.text()),
+            None => eprintln!("  no hull-terrain contact"),
+        }
+        let centre = peak_hit.as_ref().map_or(peak_vy.1, |h| h.tick);
+        for line in &trace[centre.saturating_sub(16)..(centre + 8).min(trace.len())] {
+            eprintln!("  {line}");
+        }
+    }
+
+    #[test]
+    #[ignore = "a measurement bed, run on demand"]
+    fn reverse_throw_bed() {
+        let base = Variant {
+            label: "",
+            slope_deg: 12.0,
+            ridge: Ridge::Row,
+            ridge_m: 0.25,
+            clear_internal_edges: false,
+            max_overlap_solve_speed: None,
+        };
+        let cleared = Variant {
+            clear_internal_edges: true,
+            ..base
+        };
+        let variants = [
+            Variant {
+                label: "A shipped collider",
+                ..base
+            },
+            Variant {
+                label: "B internal-edge fix cleared",
+                ..cleared
+            },
+            Variant {
+                label: "C fix cleared, max_overlap_solve_speed 0.5",
+                max_overlap_solve_speed: Some(0.5),
+                ..cleared
+            },
+            Variant {
+                label: "D diagonal ridge",
+                ridge: Ridge::Diagonal,
+                ..base
+            },
+            Variant {
+                label: "D' diagonal ridge, fix cleared",
+                ridge: Ridge::Diagonal,
+                ..cleared
+            },
+            Variant {
+                label: "E no ridge",
+                ridge: Ridge::None,
+                ..base
+            },
+            Variant {
+                label: "E' no ridge, fix cleared",
+                ridge: Ridge::None,
+                ..cleared
+            },
+        ];
+        let only = std::env::var("OVERMATCH_THROW_VARIANT").ok();
+        for v in variants {
+            if only.as_deref().is_none_or(|o| v.label.starts_with(o)) {
+                run(v);
+            }
+        }
+    }
+}
+
 /// THE LYING PIECE'S COLLIDERS LIE DOWN IN THE PHYSICS WORLD (A2, ADR-0016): a tree felled on the
 /// shipped terrain has, within a few ticks, its tip segment carried in avian's own bounds — the
 /// `ColliderAabb` its broad phase reads — where the body's own data puts it, and its stump's
