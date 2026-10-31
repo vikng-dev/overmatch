@@ -9,7 +9,7 @@ TankSpec(
     // round figures; no source read.
     turret: ( mass: 8_000.0, inertia_extents: (3.0, 1.2, 2.4) ),
     // Continuous track (track architecture §7). link_count 97 = the marker-derived window's
-    // lowest SPRING-limited count (window 96..97 at ride_frequency 1.2 Hz): full suspension
+    // lowest SPRING-limited count (window 95..96 at ride_frequency 1.2 Hz): full suspension
     // travel with the minimum slack that permits it — playtest-confirmed 2026-07-24. The real
     // Tiger ran 96/side (chain-limited, as a tensioned track is); revisit if belt-tension
     // forces ever land. Window recomputes when ride_frequency moves — recheck after retuning.
@@ -196,8 +196,9 @@ TankSpec(
             damping_ratio: 0.35,
             // Compression travel above rest (m) — the red hard stop. Tuned in the sandbox
             // 2026-07-24: raised until the compression wrap clears the hull; note the belly
-            // hand-off — past ~0.10 m the unsprung idler/sprocket own the red belly, so the
-            // extra travel here mostly widens the per-wheel stop, not the collider floor.
+            // hand-off — past ~0.15 m (DERIVED: idler rim bottom minus road-wheel rim bottom, off
+            // the mesh) the unsprung idler/sprocket own the red belly, so the extra travel here
+            // mostly widens the per-wheel stop, not the collider floor.
             bump_stop: 0.200,
             // Contact engage-ramp depth (m): the penetration over which a contact ramps from
             // zero to full support — the anti-pop smoothing of the contact law.

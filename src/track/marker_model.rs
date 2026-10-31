@@ -51,8 +51,7 @@ const IDLER: &str = "Idler_R";
 /// The road-wheel station the tread radius is read from. Since the re-export the wheels are single
 /// unsuffixed nodes (the `_Ballistic`/`_Visual` split is gone) carrying a non-unit local scale and a
 /// 180° Y rotation, and each node is a full TWO-DISC station — all of which [`GlbNodes::read`]'s
-/// full `T·R·S` composition and [`measure_mesh`]'s origin-centred radius handle. Station 0 is an
-/// EVEN station (0/2/4/6 measure 0.3870, the odd ones 0.3885 — the interleaved pack alternates).
+/// full `T·R·S` composition and [`measure_mesh`]'s origin-centred radius handle.
 const WHEEL: &str = "Wheel_R_0";
 
 /// THE CONTRACT with the export, in the two flavours [`GlbNodes::read`] resolves. Kept as lists
