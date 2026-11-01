@@ -56,15 +56,31 @@ pub(crate) mod launch;
 use avian3d::prelude::*;
 use bevy::prelude::*;
 
-/// Shared presentation cursor for the environment's discrete record, in authority ticks.
-#[derive(Resource, Debug, Default, Clone, Copy)]
-pub(crate) struct PresentationClock {
-    pub(crate) tick: u32,
-    pub(crate) overstep: f64,
+/// Shared environment presentation cursor. A replica waits until its interpolation timeline
+/// is synchronized; an authority or a tank-less view fixture owns an explicit tick cursor.
+#[derive(Resource, Debug, Clone, Copy)]
+pub(crate) enum PresentationClock {
+    Waiting,
+    At { tick: u32, overstep: f64 },
+}
+impl Default for PresentationClock {
+    fn default() -> Self {
+        // Offline view fixtures start at the explicit zero cursor; the replica adapter installs
+        // Waiting before its first update, and only a synchronized server cursor can replace it.
+        Self::At {
+            tick: 0,
+            overstep: 0.0,
+        }
+    }
 }
 impl PresentationClock {
-    pub(crate) fn since(self, since: u32) -> f64 {
-        f64::from(self.tick.wrapping_sub(since) as i32) + self.overstep
+    pub(crate) fn since(self, since: u32) -> Option<f64> {
+        match self {
+            Self::Waiting => None,
+            Self::At { tick, overstep } => {
+                Some(f64::from(tick.wrapping_sub(since) as i32) + overstep)
+            }
+        }
     }
 }
 

@@ -443,6 +443,35 @@ pub(crate) enum TreeState {
     },
 }
 
+/// A malformed peer tree word, refused once at the topology receive boundary.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum TreeWordError {
+    StandingDirectionBits(u16),
+    CutOutside {
+        word: u16,
+        cut: u16,
+        segments: usize,
+    },
+}
+impl std::fmt::Display for TreeWordError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::StandingDirectionBits(word) => {
+                write!(f, "tree word {word:#06x}: standing with direction bits")
+            }
+            Self::CutOutside {
+                word,
+                cut,
+                segments,
+            } => write!(
+                f,
+                "tree word {word:#06x}: cut {cut} on a tree of {segments} segments"
+            ),
+        }
+    }
+}
+impl std::error::Error for TreeWordError {}
+
 impl TreeState {
     /// The state's wire word: `Standing` is `0`, `Down { cut, dir }` is `((cut + 1) << 8) | dir`.
     /// The `+ 1` keeps every `Down` word non-zero, so the high byte alone tells the two apart and
@@ -463,22 +492,22 @@ impl TreeState {
     /// The inverse of [`Self::encode`] for a tree of `segments` segments; a word that no state
     /// of that tree encodes to (`Standing` with direction bits, a cut at or past the last segment)
     /// is refused rather than clamped, so a peer never derives a pose the authority did not set.
-    pub(crate) fn decode(word: u16, segments: usize) -> Result<Self, String> {
+    pub(crate) fn decode(word: u16, segments: usize) -> Result<Self, TreeWordError> {
         let (high, dir) = (word >> 8, (word & 0xFF) as u8);
         if high == 0 {
             return if word == 0 {
                 Ok(Self::Standing)
             } else {
-                Err(format!(
-                    "tree word {word:#06x}: standing with direction bits"
-                ))
+                Err(TreeWordError::StandingDirectionBits(word))
             };
         }
         let cut = high - 1;
         if usize::from(cut) >= segments {
-            return Err(format!(
-                "tree word {word:#06x}: cut {cut} on a tree of {segments} segments"
-            ));
+            return Err(TreeWordError::CutOutside {
+                word,
+                cut,
+                segments,
+            });
         }
         Ok(Self::Down {
             cut: cut as u8,
@@ -1391,6 +1420,18 @@ pub(crate) mod tests {
     fn the_wire_word_round_trips_every_state_and_refuses_the_rest() {
         let segments = 3;
         assert_eq!(TreeState::Standing.encode(), 0);
+        assert_eq!(
+            TreeState::decode(0x0040, segments),
+            Err(TreeWordError::StandingDirectionBits(0x0040))
+        );
+        assert_eq!(
+            TreeState::decode(0x0400, segments),
+            Err(TreeWordError::CutOutside {
+                word: 0x0400,
+                cut: 3,
+                segments
+            })
+        );
         assert_eq!(TreeState::decode(0, segments), Ok(TreeState::Standing));
         for cut in 0..segments as u8 {
             for dir in [0u8, 1, 64, 255] {

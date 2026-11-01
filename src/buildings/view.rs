@@ -382,7 +382,11 @@ fn present_record(
     }
     let due = record.entries[presented.1..]
         .iter()
-        .take_while(|entry| clock.since(entry.tick) >= 0.0)
+        .take_while(|entry| {
+            clock
+                .since(entry.tick)
+                .is_some_and(|elapsed| elapsed >= 0.0)
+        })
         .count();
     if due == 0 {
         return;
@@ -696,8 +700,10 @@ fn publish_sim_clock(
     let Some(tick) = tick else {
         return; // Tank-less view fixtures keep their explicit cursor.
     };
-    clock.tick = tick.0;
-    clock.overstep = step.overstep_fraction_f64();
+    *clock = PresentationClock::At {
+        tick: tick.0,
+        overstep: step.overstep_fraction_f64(),
+    };
 }
 
 /// The breaks' view, on every root that draws: the record presented at the presentation clock,

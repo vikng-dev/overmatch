@@ -57,8 +57,12 @@ pub(super) fn install_server(app: &mut App) {
 }
 pub(super) fn install_client(app: &mut App) {
     install_apply(app);
-    app.init_resource::<PresentationClock>()
-        .add_systems(Update, publish_presentation_clock.before(apply_ledger));
+    app.insert_resource(PresentationClock::Waiting).add_systems(
+        Update,
+        publish_presentation_clock
+            .before(apply_ledger)
+            .before(crate::buildings::breakage::WallReplicaSet),
+    );
 }
 pub(crate) fn install_apply(app: &mut App) {
     app.init_resource::<CurrentWorld>()
@@ -173,15 +177,15 @@ fn apply_ledger(
 
 fn publish_presentation_clock(
     cursor: Option<Res<InterpolationTimeline>>,
-    local: Res<LocalTimeline>,
     mut clock: ResMut<PresentationClock>,
 ) {
-    let (tick, overstep) = match cursor.filter(|timeline| timeline.is_synced()) {
-        Some(timeline) => (timeline.tick(), f64::from(timeline.overstep().to_f32())),
-        None => (local.tick(), 0.0),
+    *clock = match cursor.filter(|timeline| timeline.is_synced()) {
+        Some(timeline) => PresentationClock::At {
+            tick: timeline.tick().0,
+            overstep: f64::from(timeline.overstep().to_f32()),
+        },
+        None => PresentationClock::Waiting,
     };
-    clock.tick = tick.0;
-    clock.overstep = overstep;
 }
 
 /// The static collision copy of a streamed trunk; its carrier owns its lifetime.
@@ -282,7 +286,9 @@ fn attach_trunks(
                 ChildOf(root),
                 Transform::from_translation(Vec3::Y * body.prefix[k] - centroid),
                 crate::trees::replica_segment_collider(body, k),
-                TreeSegment(k as u8),
+                TreeSegment(
+                    u8::try_from(k).expect("tree load bounds every segment index by the wire byte"),
+                ),
                 crate::buildings::breakage::piece_layers(),
                 body.kind.friction,
                 crate::ballistics::BallisticVolume {
@@ -357,6 +363,30 @@ mod tests {
     use avian3d::prelude::*;
     use bevy::time::TimeUpdateStrategy;
     use std::time::Duration;
+
+    /// Before sync the wall view must hold every discrete event, even an event at tick zero.
+    /// A local-timeline substitution would expose destruction ahead of the server stream.
+    #[test]
+    fn an_unsynchronized_replica_has_no_presentation_cursor() {
+        use bevy::ecs::system::RunSystemOnce;
+        let mut app = App::new();
+        super::install_client(&mut app);
+        assert!(matches!(
+            app.world().resource::<PresentationClock>(),
+            PresentationClock::Waiting
+        ));
+        *app.world_mut().resource_mut::<PresentationClock>() = PresentationClock::At {
+            tick: 100,
+            overstep: 0.5,
+        };
+        app.world_mut()
+            .run_system_once(super::publish_presentation_clock)
+            .unwrap();
+        let clock = *app.world().resource::<PresentationClock>();
+        for tick in [0, 1, 100, u32::MAX] {
+            assert_eq!(clock.since(tick), None);
+        }
+    }
 
     fn replica() -> (App, Entity) {
         let mut app = App::new();
