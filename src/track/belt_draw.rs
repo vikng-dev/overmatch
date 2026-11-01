@@ -502,7 +502,19 @@ fn repeatable(shoe: &Mesh, count: usize) -> Result<(), String> {
     let Ok(attributes) = shoe.try_attributes() else {
         return Err("its data lives in the render world only".into());
     };
+    // Repetition offsets each copy's indices by one vertex count and copies every attribute whole,
+    // so one attribute longer than the rest would shift every later link's corners.
+    let mut length = None;
     for (attribute, values) in attributes {
+        if *length.get_or_insert(values.len()) != values.len() {
+            return Err(format!(
+                "attribute `{}` has {} values where the others have {}; every vertex attribute \
+                 needs one value per vertex",
+                attribute.name,
+                values.len(),
+                length.expect("set by the first attribute"),
+            ));
+        }
         let finite = match values {
             VertexAttributeValues::Float32(values) => values.iter().all(|v| v.is_finite()),
             VertexAttributeValues::Float32x2(values) => {
@@ -1139,6 +1151,22 @@ mod tests {
         assert!(canonical_reach(&source, Vec3::splat(f32::MAX)).is_err());
         let bad = fixture_shoe().with_inserted_indices(Indices::U32(vec![0, 1, 99]));
         assert!(repeatable(&bad, 4).unwrap_err().contains("indexes past"));
+    }
+
+    /// Repetition offsets each link's indices by the shoe's vertex count while copying every
+    /// attribute whole, so each attribute must hold exactly one value per vertex. Bevy's own count
+    /// is the shortest attribute's: four positions under three normals would draw every later
+    /// link's triangles from its neighbour's positions.
+    #[test]
+    fn shoe_certification_refuses_attributes_of_unequal_length() {
+        let bad = fixture_shoe()
+            .with_inserted_attribute(Mesh::ATTRIBUTE_NORMAL, vec![[0.0, 0.0, 1.0]; 3])
+            .with_inserted_attribute(Mesh::ATTRIBUTE_UV_0, vec![[0.0, 0.0]; 3])
+            .with_inserted_attribute(Mesh::ATTRIBUTE_TANGENT, vec![[1.0, 0.0, 0.0, 1.0]; 3])
+            .with_inserted_indices(Indices::U16(vec![0, 1, 2]));
+        let refusal = repeatable(&bad, 4).expect_err("unequal attributes cannot repeat");
+        assert!(refusal.contains("one value per vertex"), "{refusal}");
+        assert!(repeated_shoe(&bad, 4).is_err());
     }
 
     /// Loading is a temporary absence, while malformed loaded data must refuse before any
