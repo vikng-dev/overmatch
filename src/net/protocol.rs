@@ -817,13 +817,27 @@ fn mirror_swap_from_net_crew(
     }
 }
 
-/// Republish the network timeline as net-neutral sim vocabulary before every gameplay tick.
+/// Republish the network timeline as net-neutral sim vocabulary before every gameplay tick: the
+/// game's one tick, the fixed ticks run, wrapping ([`crate::sim_tick`]). Lightyear 0.30's `Tick`
+/// saturates at `u32::MAX` instead of wrapping (`lightyear_core::tick::Tick`'s `AddAssign`), so
+/// its timeline stops counting at that end. Below the end the published tick is the timeline's;
+/// each fixed tick the timeline is held there advances it by one more, so a deadline armed across
+/// the end matures as every other does.
 pub(super) fn publish_shot_clock(
     mut shot_clock: ResMut<crate::ShotClock>,
     mut weapon_clock: ResMut<crate::WeaponClock>,
     timeline: Res<LocalTimeline>,
+    mut held_at_end: Local<u32>,
 ) {
     let tick = timeline.tick().0;
+    let tick = if tick == u32::MAX {
+        let past = tick.wrapping_add(*held_at_end);
+        *held_at_end = held_at_end.wrapping_add(1);
+        past
+    } else {
+        *held_at_end = 0;
+        tick
+    };
     shot_clock.0 = tick;
     weapon_clock.0 = tick;
 }
@@ -2457,6 +2471,46 @@ mod tests {
         let mut tl = LocalTimeline::default();
         tl.apply_delta(tick);
         tl
+    }
+
+    /// The game's damage model: fire eligibility. The published tick keeps counting where
+    /// lightyear's saturating timeline stops, so a weapon deadline armed at its end matures. The
+    /// weapon gate and the respawn opening rely on one wrapping tick in network compositions.
+    #[test]
+    fn the_published_tick_wraps_where_the_network_timeline_saturates() {
+        let mut world = World::new();
+        let mut end = timeline_at(i32::MAX);
+        end.apply_delta(i32::MAX);
+        end.apply_delta(1);
+        assert_eq!(end.tick().0, u32::MAX, "fixture: the timeline at its end");
+        world.insert_resource(end);
+        world.init_resource::<crate::ShotClock>();
+        world.init_resource::<crate::WeaponClock>();
+        let mut schedule = Schedule::default();
+        schedule.add_systems(publish_shot_clock);
+        let mut gate = crate::tank::WeaponGateState::default();
+        let mut published = Vec::new();
+        for _ in 0..4 {
+            // Lightyear's own increment, which holds the timeline at its end.
+            world.resource_mut::<LocalTimeline>().apply_delta(1);
+            schedule.run(&mut world);
+            let now = world.resource::<crate::WeaponClock>().0;
+            assert_eq!(world.resource::<crate::ShotClock>().0, now);
+            if published.is_empty() {
+                gate.arm(
+                    crate::sim_tick::SimTick::new(now),
+                    crate::sim_tick::TickSpan::try_from(2).expect("fixture span"),
+                );
+            }
+            published.push((
+                now,
+                gate.deadline_reached(crate::sim_tick::SimTick::new(now)),
+            ));
+        }
+        assert_eq!(
+            published,
+            [(u32::MAX, false), (0, false), (1, true), (2, true)]
+        );
     }
 
     /// The game's damage model: a registry-only fuze or gun edit must refuse at connect even
