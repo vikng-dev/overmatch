@@ -22,17 +22,20 @@
 //!   share of the ray's cone the struck chunk or body intercepts, and crushes a chunk there where
 //!   its peak pressure beats the chunk's dynamic compressive strength ([`Blast::crushed`]). A
 //!   blast ray stops, within its
-//!   reach ([`Blast::reach`]), on the nearest of every building's standing chunks and unbreakable
-//!   elements, the moving bodies (a loose piece, a hull, a launched turret) and every other surface
-//!   (the ground, a standing tree); one that stops on a moving body pushes it the same way, through
-//!   avian at the point it stops. A tree stop loads that segment through the tree laws; terrain
-//!   and other nonstructural surfaces only shade the field.
+//!   reach ([`Blast::reach`]), on the nearest of every chunk group's standing chunks (a placed
+//!   building's or a moving group's) and a placed building's unbreakable elements, the other moving
+//!   bodies (a hull, a launched turret) and every other surface (the ground, a standing tree); one
+//!   that stops on such a body pushes it the same way, through avian at the point it stops. A
+//!   tree stop loads that segment through the tree laws; terrain and other nonstructural surfaces
+//!   only shade the field.
 //! * **Contacts** (the authority's, each physics step, [`read_contacts`]): every point the solver
-//!   moved momentum through between a dynamic body and a building's breakable element or chunk
-//!   ([`ContactTransfers`]) loads the chunk there (an intact element's: the chunk whose hull holds
-//!   the point, [`contact_load`]) with its blow and press, each contact split at its body's rest
-//!   speed ([`ContactTransfers::split`]), all of a step's points one deposit. A point on an
-//!   unbreakable element loads nothing. A body asleep against a building presses it with what its
+//!   moved momentum through between a chunk group (a placed building's breakable element or chunk,
+//!   or a moving group's chunk) and another body ([`ContactTransfers`]) loads the chunk there (an
+//!   intact element's: the chunk whose hull holds the point, [`contact_load`]) with its blow and
+//!   press, each contact split at its body's rest speed ([`ContactTransfers::split`]), all of a
+//!   step's points one deposit. On a placed building the source exchanges its blow plastically
+//!   ([`Origin::Body`]); on a moving group the solver already moved both bodies
+//!   ([`Origin::Contact`]). A point on an unbreakable element loads nothing. A body asleep against a building presses it with what its
 //!   contact last held ([`RestingLoads`]): every run of the laws on that building carries the
 //!   press once, and it starts none. Awake contacts' presses likewise join every deposit in
 //!   the physics step, once per point. No body is read by its kind.
@@ -58,6 +61,13 @@
 //!   momentum over its own inertia tensor; gravity, contact and friction decide whether a group
 //!   a cracked section freed rocks back or topples. A later blast's impulse on it is a write to
 //!   its velocity and sleep timer, which wakes it asleep (avian's `wake_on_changed`).
+//! * **A moving group is a chunk group too**: its body carries its own [`Breakage`], its owned
+//!   chunks standing and the rest dust, so the deposits and contacts that reach it run the same
+//!   laws in its accelerating frame ([`fracture::in_group_frames`], its spin read from the body).
+//!   A seam that fails there splits it at that tick: [`PendingSplit`] stages the new groups until
+//!   the tick's plastic returns reach the parent, `split_groups` spawns them with the parent's
+//!   rigid velocity field and despawns it, and [`RetirePiece`] keeps the parent's final pose and
+//!   retirement tick on the wire, so replicas hand its chunks over at the shared cursor.
 //!
 //! THE BODY IN THE PHYSICS WORLD. A state change reaches avian's world in the frame it is made
 //! ([`reconcile`], then avian's refit of moved colliders), so the next tick's march reads it.
@@ -2089,14 +2099,18 @@ fn spawn_group(commands: &mut Commands, departure: Departure, finalize: bool) {
     });
 }
 
-/// A seam failure's new groups, staged until all same-tick plastic returns have reached the
-/// parent. No source can disappear before a simultaneous launch finishes exchanging with it.
+/// A split retiring its parent group's body at `tick`, triggered as `split_groups` despawns it:
+/// the server keeps the parent's carrier with its final pose and this tick
+/// (`net::debris_stress`), so replicas draw the parent until its replacements take over.
 #[derive(Event)]
 pub(crate) struct RetirePiece {
     pub(crate) entity: Entity,
     pub(crate) tick: u32,
 }
 
+/// A seam failure's new groups, each with its law state, staged on the parent until all
+/// same-tick plastic returns have reached it: no source disappears before a simultaneous launch
+/// finishes exchanging with it. `split_groups` spawns them at `tick`.
 #[derive(Component)]
 struct PendingSplit {
     children: Vec<(Vec<usize>, Live)>,
