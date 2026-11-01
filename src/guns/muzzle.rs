@@ -1407,7 +1407,7 @@ mod tests {
         let without_hider = LOOK_RON.replacen("flash_hider:", "flash_hider_gone:", 1);
         assert!(MuzzleLook::parse(&without_hider).is_err());
         let unsourced = LOOK_RON.replacen(
-            r#"lifetime_s: (0.03, Tuned("TASTE: two frames at 60 Hz, every gun")),"#,
+            r#"lifetime_s: (0.03, Taste("muzzle: TASTE: two frames at 60 Hz, every gun")),"#,
             "lifetime_s: 0.03,",
             1,
         );
