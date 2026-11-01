@@ -607,6 +607,8 @@ fn forget_route_on_projectile_removal(
     shots: Query<&Shot>,
     mut transport: ResMut<ShotTransport>,
 ) {
+    // A projectile without a `Shot` is an unkeyed tool or environment emission: it never had a
+    // route (`queue_fire`).
     if let Ok(shot) = shots.get(remove.entity) {
         transport.routes.remove(&shot.0);
     }
