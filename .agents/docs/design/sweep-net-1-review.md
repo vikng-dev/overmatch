@@ -63,8 +63,9 @@ locked workspace/all-target CI clippy with `dev_ui,bitprobe`, its targeted tests
 The live hosted smoke stayed ignored because it calls the Worker and can deploy; three
 measurement beds stayed ignored. No full suite or performance measurement was run.
 
-The owner should batch feel review and pricing of the full receipt-spread buffer. Clean links
-keep the interval floor; variable receipt streams can require more presentation delay. This is
+The owner should batch feel review and pricing of the full receipt-spread buffer. A clean link
+pays its measured spread (MEASURED before/after in `net-motion-contract.md`, a few ms on
+loopback); variable receipt streams can require more presentation delay. This is
 a deliberate removal of an unsupported error certificate, not a new feel certification. Later
 inventory lanes EH-N2–N4 remain outside this dispatch and were not swept into this change.
 

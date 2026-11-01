@@ -18,9 +18,12 @@
 //! min_delay = rtt/2 + headroom
 //! ```
 //!
-//! The buffer covers the full measured receipt spread. No positive extrapolation horizon has an
-//! error bound in the presence of unknown impulses; the contract and rejected traction bound live
-//! in `.agents/docs/design/net-motion-contract.md`.
+//! The buffer covers the full measured spread: `Q_p` of the lateness each packet had at the last
+//! read that lacked it, over the 60 s ring, less the drain-stamped 2 s min (`net::sync_margin`).
+//! It is bounded by the link's own worst lateness in that ring; a client frame stall adds nothing
+//! to it. No positive extrapolation horizon has an error bound in the presence of unknown
+//! impulses; the contract and rejected traction bound live in
+//! `.agents/docs/design/net-motion-contract.md`.
 //!
 //! The rtt/2 term stays on the ping EWMA (it cancels the anchor, which is built from the same
 //! EWMA); every jitter term now comes from the measured stream. The Gaussian margin chain on top
@@ -86,8 +89,7 @@ pub(super) fn install(app: &mut App, tick: Duration) -> InterpolationConfig {
     // first `SyncSystems::Sync`.
     let initial = derived_min_delay(Duration::ZERO, &ArrivalStats::default(), tick);
     info!(
-        "net: interpolation min_delay DERIVED = rtt/2 + max(Qp − min − g*, 0) + one tick \
-         ({:.1} ms cold)",
+        "net: interpolation min_delay DERIVED = rtt/2 + (Qp − min) + one tick ({:.1} ms cold)",
         millis(initial)
     );
     app.add_systems(

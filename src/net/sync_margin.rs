@@ -14,12 +14,15 @@
 //! A packet that brings no new tick carries content already superseded, so it is not a sample.
 //! Per sample the estimator records the relative arrival delay
 //! `d_i = arrival_instant − remote_tick × tick` (epoch-anchored; only differences of `d_i` carry
-//! meaning) and maintains:
+//! meaning) twice, once per bound of the frame that drained it (see [`record_packet_arrival`]):
+//! drain-stamped `d_i`, and the lateness the cursor saw `l_i = d_i − frame` (the frame before the
+//! drain was the last read that lacked the packet). It maintains:
 //!
 //! - `min{d_i}` over the [`SPIKE_WINDOW`] — the fastest recent packet, the anchor that absorbs
 //!   path shifts and clock skew (NetEQ's ~2 s spike window precedent; tracks the measured 0.52 s
-//!   burst period with margin);
-//! - an eviction ring of [`ring_cap`] samples exposing the empirical quantile `Q_p` and the median.
+//!   burst period with margin), and `min{l_i}` beside it for the uplink's deadband;
+//! - an eviction ring of [`ring_cap`] `l_i` samples exposing the empirical quantile `Q_p` and the
+//!   median.
 //!
 //! Relative-arrival delay, not inter-arrival: an EWMA of gaps reads a slowly accumulating delay as
 //! "each gap normal" while the buffer starves (the NetEQ migration rationale; a test below pins
@@ -126,6 +129,9 @@ const LOG_STEP: Duration = Duration::from_millis(2);
 /// laws. Values are epoch-relative seconds — only their differences carry meaning.
 #[derive(Debug, Clone, Copy, Default, PartialEq)]
 pub(super) struct ArrivalStats {
+    /// `min{d_i}`: the drain-stamped anchor, the downlink spread's reference.
+    anchor_s: f64,
+    /// `min{l_i}`: the uplink deadband's reference, on the ring's own stamp.
     min_s: f64,
     q50_s: f64,
     qp_s: f64,
@@ -136,9 +142,11 @@ pub(super) struct ArrivalStats {
 }
 
 impl ArrivalStats {
-    /// `Q_p − min`: the whole measured spread — the downlink headroom term.
+    /// `Q_p{l} − min{d}`: the whole measured spread — the downlink headroom term. Bounded by the
+    /// ring's worst presentation lateness over its 60 s against the window's fastest packet; a
+    /// client stall adds nothing to it (see [`record_packet_arrival`]).
     pub(super) fn spread(&self) -> Duration {
-        Duration::from_secs_f64((self.qp_s - self.min_s).max(0.0))
+        Duration::from_secs_f64((self.qp_s - self.anchor_s).max(0.0))
     }
 
     /// `Q_p − Q_50`: the burst tail above the median — the uplink coverage term, and the
@@ -163,6 +171,7 @@ impl ArrivalStats {
     #[cfg(test)]
     pub(super) fn test_spread(spread_s: f64) -> Self {
         Self {
+            anchor_s: 0.0,
             min_s: 0.0,
             q50_s: 0.0,
             qp_s: spread_s,
@@ -188,9 +197,9 @@ pub(super) struct ArrivalDelay {
     /// First-sample anchor `(arrival_secs, remote_tick)`; every `d_i` is relative to it, so the
     /// meaningless absolute offset between the two clocks cancels.
     epoch: Option<(f64, Tick)>,
-    /// `(arrival_secs, d_i)` pruned to [`SPIKE_WINDOW`] — the min anchor.
-    window: VecDeque<(f64, f64)>,
-    /// `d_i` eviction ring of [`ring_cap`] samples — the quantile distribution.
+    /// `(arrival_secs, d_i, l_i)` pruned to [`SPIKE_WINDOW`] — the min anchors.
+    window: VecDeque<(f64, f64, f64)>,
+    /// `l_i` eviction ring of [`ring_cap`] samples — the quantile distribution.
     ring: VecDeque<f64>,
     /// Newest remote tick seen on any packet (numeric max) — the "server has simulated through
     /// here" bound `net::fire_presentation`'s heal deadlines read.
@@ -207,7 +216,9 @@ pub(super) struct ArrivalDelay {
 }
 
 impl ArrivalDelay {
-    fn record(&mut self, arrival_secs: f64, remote_tick: Tick, tick_secs: f64) {
+    /// One drained packet: `arrival_secs` is its drain frame's stamp and `frame_secs` that
+    /// frame's length.
+    fn record(&mut self, arrival_secs: f64, frame_secs: f64, remote_tick: Tick, tick_secs: f64) {
         // One sample per new remote tick: a packet that advances nothing is not a sample.
         if self
             .newest_remote
@@ -217,12 +228,13 @@ impl ArrivalDelay {
         }
         let (epoch_secs, epoch_tick) = *self.epoch.get_or_insert((arrival_secs, remote_tick));
         let d = (arrival_secs - epoch_secs) - f64::from(remote_tick - epoch_tick) * tick_secs;
-        self.window.push_back((arrival_secs, d));
+        let late = d - frame_secs;
+        self.window.push_back((arrival_secs, d, late));
         let horizon = arrival_secs - SPIKE_WINDOW.as_secs_f64();
-        while self.window.front().is_some_and(|(at, _)| *at < horizon) {
+        while self.window.front().is_some_and(|(at, ..)| *at < horizon) {
             self.window.pop_front();
         }
-        self.ring.push_back(d);
+        self.ring.push_back(late);
         if self.ring.len() > ring_cap() {
             self.ring.pop_front();
         }
@@ -242,11 +254,10 @@ impl ArrivalDelay {
             self.stats = ArrivalStats::default();
             return;
         }
-        let min_s = self
-            .window
-            .iter()
-            .map(|(_, d)| *d)
-            .fold(f64::INFINITY, f64::min);
+        let (anchor_s, min_s) = self.window.iter().fold(
+            (f64::INFINITY, f64::INFINITY),
+            |(anchor, min), (_, d, late)| (anchor.min(*d), min.min(*late)),
+        );
         scratch.clear();
         scratch.extend(self.ring.iter().copied());
         let n = scratch.len();
@@ -262,11 +273,12 @@ impl ArrivalDelay {
         // worth of per-tick samples.
         let warmed = self.ring.len() >= warmup_ring_floor()
             && self.epoch.zip(self.window.back()).is_some_and(
-                |((epoch_secs, _), (newest_at, _))| {
+                |((epoch_secs, _), (newest_at, ..))| {
                     newest_at - epoch_secs >= SPIKE_WINDOW.as_secs_f64()
                 },
             );
         self.stats = ArrivalStats {
+            anchor_s,
             min_s,
             q50_s,
             qp_s,
@@ -315,10 +327,22 @@ impl ArrivalDelay {
     }
 }
 
-/// Feed synchronized, in-play receipt samples. Receipt time includes the frame that drains the
-/// socket, so the estimator covers client scheduling stalls as well as path delay. Those delays
-/// can starve the presentation buffer too; excluding them would understate the observed spread.
-/// Before play or synchronization there is no established stream to estimate.
+/// Feed the estimator from every received transport packet — the tick-stamped arrival stream the
+/// ping estimator never reads. Samples enter only while `AppState::Playing` is active and the
+/// `InterpolationTimeline` reports synced: before either there is no established stream.
+///
+/// THE DRAIN FRAME: a packet is stamped on `Time<Real>` when its frame drains the socket, so its
+/// socket arrival lies inside that frame — after the previous frame's read, by this one's. The
+/// cursor reads once per frame, after the drain, so the packet was missing only from the reads
+/// before this frame, the last of them one frame earlier: the lateness presentation can starve on
+/// is `d_i − frame`, which the quantile ring takes. The drain stamp `d_i` anchors the min (a packet
+/// drained the moment it lands carries no error). A client stall therefore reads as no lateness:
+/// the ticks queued during it were not yet due at the read before it, while a link burst drained
+/// by ordinary frames keeps its depth less one frame. The ring taking `d_i` alone was MEASURED on
+/// clean loopback to hold `min_delay` at 113.8 ms (headless) and 1170.0 ms (hidden) after the own
+/// tank's arrival stall; the before/after table is in `.agents/docs/design/net-motion-contract.md`.
+/// A stall's own samples pull the window's `min{l_i}` down for its 2 s, widening only the uplink's
+/// deadband (`bulk`) meanwhile (MEASURED hidden: 1128.8 ms for ~2 s).
 fn record_packet_arrival(
     event: On<PacketReceived>,
     time: Res<Time<Real>>,
@@ -333,6 +357,7 @@ fn record_packet_arrival(
     }
     estimator.record(
         time.elapsed_secs_f64(),
+        time.delta_secs_f64(),
         event.remote_tick,
         tick.0.as_secs_f64(),
     );
@@ -511,6 +536,7 @@ mod tests {
 
     fn stats(min_ms: f64, q50_ms: f64, qp_ms: f64) -> ArrivalStats {
         ArrivalStats {
+            anchor_s: min_ms / 1000.0,
             min_s: min_ms / 1000.0,
             q50_s: q50_ms / 1000.0,
             qp_s: qp_ms / 1000.0,
@@ -520,16 +546,99 @@ mod tests {
     }
 
     /// Drive a synthetic arrival series through the estimator: ticks at exact cadence, one sample
-    /// per tick with a KNOWN delay pattern, then refresh and read the digest.
+    /// per tick with a KNOWN delay pattern, each drained the moment it lands (a zero-length
+    /// frame: both stamps agree), then refresh and read the digest.
     fn fed(delays_ms: impl IntoIterator<Item = f64>) -> ArrivalDelay {
         let mut estimator = ArrivalDelay::default();
         for (i, delay_ms) in delays_ms.into_iter().enumerate() {
             let tick = Tick(1_000 + i as u32);
             let arrival = i as f64 * TICK_SECS + delay_ms / 1000.0;
-            estimator.record(arrival, tick, TICK_SECS);
+            estimator.record(arrival, 0.0, tick, TICK_SECS);
         }
         estimator.refresh(&mut Vec::new());
         estimator
+    }
+
+    /// Drive per-tick packets, each `path_ms` after its send, through a client whose frames read
+    /// every `frame_ms` — except one frame stalled `stall_ms` long starting at `stall_at_s` — and
+    /// read the digest. Every packet is stamped at the frame that drains it, with that frame's
+    /// length, as `record_packet_arrival` stamps it.
+    fn drained(path_ms: f64, frame_ms: f64, stall_at_s: f64, stall_ms: f64) -> ArrivalDelay {
+        let mut frames = Vec::new();
+        let mut at = 0.0;
+        while at < 4.0 {
+            let step = if at <= stall_at_s && at + frame_ms / 1000.0 > stall_at_s {
+                stall_ms / 1000.0
+            } else {
+                frame_ms / 1000.0
+            };
+            at += step;
+            frames.push((at, step));
+        }
+        let mut estimator = ArrivalDelay::default();
+        for i in 0..240_u32 {
+            let lands = f64::from(i) * TICK_SECS + path_ms / 1000.0;
+            let &(drain, frame) = frames
+                .iter()
+                .find(|(end, _)| *end >= lands)
+                .expect("the frames outlast the packets");
+            estimator.record(drain, frame, Tick(1_000 + i), TICK_SECS);
+        }
+        estimator.refresh(&mut Vec::new());
+        estimator
+    }
+
+    /// A CLIENT STALL IS NOT LINK DELAY: the ticks a stalled frame drains at once were not due at
+    /// the read before it, so a 1.1 s stall (FIXTURE DATA at the scale of the hidden loopback run's
+    /// own-tank stall) on a clean 60 fps stream leaves the spread inside one ordinary frame. Mutant:
+    /// the quantile on the drain stamp alone reads the stall whole (~1.1 s) and reds; the anchor on
+    /// the ring's stamp reads the stall as an early packet and reds the same way.
+    #[test]
+    fn a_client_stall_adds_nothing_to_the_spread() {
+        let clean = drained(5.0, 1000.0 / 60.0, 1.5, 1000.0 / 60.0);
+        let stalled = drained(5.0, 1000.0 / 60.0, 1.5, 1100.0);
+        let spread_ms = |estimator: &ArrivalDelay| estimator.stats.spread().as_secs_f64() * 1000.0;
+        assert!(
+            spread_ms(&clean) <= 1000.0 / 60.0,
+            "a clean stream pays at most one frame (got {} ms)",
+            spread_ms(&clean)
+        );
+        assert!(
+            spread_ms(&stalled) <= 1000.0 / 60.0,
+            "the stall adds nothing (got {} ms)",
+            spread_ms(&stalled)
+        );
+    }
+
+    /// A LINK BURST DRAINED BY ORDINARY FRAMES KEEPS ITS DEPTH: packets held 60 ms in the path
+    /// starve the reads between, which keep running, so the spread covers the burst less at most
+    /// one frame. Mutant: subtracting more than the drain frame from a sample (stamping it at an
+    /// earlier read than the last one that lacked it) hides the burst and reds.
+    #[test]
+    fn a_link_burst_under_ordinary_frames_keeps_its_depth() {
+        let frame = 1000.0 / 60.0;
+        let mut frames = Vec::new();
+        let mut at = 0.0;
+        while at < 4.0 {
+            at += frame / 1000.0;
+            frames.push(at);
+        }
+        let mut estimator = ArrivalDelay::default();
+        for i in 0..240_u32 {
+            let burst = if i % 33 == 0 { 60.0 } else { 0.0 };
+            let lands = f64::from(i) * TICK_SECS + (5.0 + burst) / 1000.0;
+            let drain = *frames
+                .iter()
+                .find(|end| **end >= lands)
+                .expect("the frames outlast the packets");
+            estimator.record(drain, frame / 1000.0, Tick(1_000 + i), TICK_SECS);
+        }
+        estimator.refresh(&mut Vec::new());
+        let spread_ms = estimator.stats.spread().as_secs_f64() * 1000.0;
+        assert!(
+            spread_ms >= 60.0 - frame,
+            "the burst's depth less one frame is covered (got {spread_ms} ms)"
+        );
     }
 
     /// THE MEASURED BURST SIGNATURE (60 ms every 33 ticks) IS COVERED WITHIN ONE SEND INTERVAL:
@@ -584,6 +693,7 @@ mod tests {
         for i in 0..100_u32 {
             sparse.record(
                 f64::from(i) * 2.0 * TICK_SECS,
+                0.0,
                 Tick(1_000 + 2 * i),
                 TICK_SECS,
             );
@@ -596,7 +706,7 @@ mod tests {
         // Dense: 5 ms arrivals fill the ring inside 0.7 s.
         let mut dense = ArrivalDelay::default();
         for i in 0..140_u32 {
-            dense.record(f64::from(i) * 0.005, Tick(1_000 + i), TICK_SECS);
+            dense.record(f64::from(i) * 0.005, 0.0, Tick(1_000 + i), TICK_SECS);
         }
         dense.refresh(&mut Vec::new());
         assert!(
@@ -617,7 +727,7 @@ mod tests {
         estimator.reset_for_new_link();
         estimator.refresh(&mut Vec::new());
         assert_eq!(estimator.stats, ArrivalStats::default());
-        estimator.record(0.0, Tick(5), TICK_SECS);
+        estimator.record(0.0, 0.0, Tick(5), TICK_SECS);
         estimator.refresh(&mut Vec::new());
         assert_eq!(
             estimator.stats.samples, 1,
@@ -641,17 +751,18 @@ mod tests {
             (0.017, 1_001),
             (0.030, 1_000),
         ] {
-            estimator.record(at, Tick(tick), TICK_SECS);
+            estimator.record(at, 0.0, Tick(tick), TICK_SECS);
         }
         assert_eq!(estimator.samples, 2, "two ticks, two samples");
         assert_eq!(estimator.ring.len(), 2);
         assert_eq!(estimator.newest_remote, Some(Tick(1_001)));
     }
 
-    /// THE RECORDING GATE IS Playing ∧ a synced InterpolationTimeline ∧ an unstalled frame: an
-    /// arrival while any conjunct is down never enters the estimator. Mutant: delete the guard's
-    /// early return in `record_packet_arrival` (or any conjunct) — the matching trigger records and
-    /// its count assertion reds; the ordinary-frame triggers pin that the gated path still records.
+    /// THE RECORDING GATE IS Playing ∧ a synced InterpolationTimeline: an arrival while either
+    /// conjunct is down never enters the estimator. Mutant: delete the guard's early return in
+    /// `record_packet_arrival` (or either conjunct) — the matching trigger records and its count
+    /// assertion reds; the in-play triggers pin that the gated path still records, a stalled
+    /// drain included (its lateness is the ring's to correct, not the gate's to drop).
     #[test]
     fn pre_gate_arrivals_never_enter_the_estimator() {
         let mut app = App::new();
@@ -695,29 +806,11 @@ mod tests {
             1,
             "playing ∧ synced records — the observer stays live"
         );
-        // A stalled drain is still an observed receipt delay and enters the distribution.
         let now = app.world().resource::<Time<Real>>().startup();
         let mut real = app.world_mut().resource_mut::<Time<Real>>();
         real.update_with_instant(now);
         real.update_with_instant(now + Duration::from_millis(500));
-        assert_eq!(
-            arrive(&mut app, 1_004),
-            2,
-            "a stalled receipt is part of the full delivery spread"
-        );
-        let last = app
-            .world()
-            .resource::<Time<Real>>()
-            .last_update()
-            .expect("updated");
-        app.world_mut()
-            .resource_mut::<Time<Real>>()
-            .update_with_instant(last + TICK);
-        assert_eq!(
-            arrive(&mut app, 1_005),
-            3,
-            "the next ordinary frame records again"
-        );
+        assert_eq!(arrive(&mut app, 1_004), 2, "a stalled drain still records");
     }
 
     /// THE MIN ANCHOR FORGETS ON THE SPIKE WINDOW: after a path improvement, the min re-anchors
