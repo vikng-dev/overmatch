@@ -1047,6 +1047,16 @@ fn moving_near(p: &DepositParam, origin: Vec3, reach: f32) -> Vec<Entity> {
     near
 }
 
+/// The field loads whose blow moves a moving group's body once the laws have run on `state`: a
+/// field's blow on a chunk it turned to dust went into crushing it and moves nothing.
+fn field_blows<'a>(loads: &'a [Load], state: &'a WallState) -> impl Iterator<Item = &'a Load> {
+    loads.iter().filter(|load| {
+        matches!(load.origin, Origin::Field)
+            && load.blow != Vec3::ZERO
+            && state.fate[load.chunk] != Fate::Dust
+    })
+}
+
 /// Map resolved crossings to owned construction chunks, independent of the group's motion.
 fn take_lines(
     p: &DepositParam,
@@ -1223,21 +1233,22 @@ fn apply_deposits(mut p: DepositParam) {
                 .chain(pressing.iter().copied())
                 .chain(resting.iter().copied())
                 .collect();
+            let mut changes = run_laws(&kind.layout.element_of, live, &loads, holes);
+            // A moving group is already a body: a field's blow moves it directly, at the point
+            // it struck, except where it turned its chunk to dust and went into crushing it
+            // (`run_laws`), as on a standing building.
             if moving.is_some() {
                 let (mut body, _) = p
                     .bodies
                     .get_mut(root)
                     .expect("a moving chunk group is a physics body");
-                for load in &loads {
-                    if matches!(load.origin, Origin::Field) && load.blow != Vec3::ZERO {
-                        body.apply_linear_impulse_at_point(
-                            frame.rotation * load.blow,
-                            frame.translation + frame.rotation * load.at,
-                        );
-                    }
+                for load in field_blows(&loads, &live.state) {
+                    body.apply_linear_impulse_at_point(
+                        frame.rotation * load.blow,
+                        frame.translation + frame.rotation * load.at,
+                    );
                 }
             }
-            let mut changes = run_laws(&kind.layout.element_of, live, &loads, holes);
             if moving.is_some() {
                 changes
                     .events

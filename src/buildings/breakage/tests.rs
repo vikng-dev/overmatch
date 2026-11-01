@@ -3193,3 +3193,28 @@ fn an_unbreakable_element_blocks_only_its_placed_building() {
         None
     );
 }
+
+/// A moving group's field blows reach its body only where their chunk still stands after the
+/// laws: a blow on a chunk it turned to dust went into crushing it, as on a standing building,
+/// and must not reach the parent velocity its split children inherit. ASSUMED fixture loads.
+#[test]
+fn a_field_blow_on_a_dusted_chunk_moves_no_moving_group() {
+    let kind = shipped_house();
+    let (_, [a, b, _]) = fixture_chunks(&kind);
+    let live = Live::new(&kind, 1.0);
+    let mut state = live.state.clone();
+    state.fate[a] = Fate::Dust;
+    let blow = |chunk: usize| Load {
+        chunk,
+        at: live.structure.chunks[chunk].centroid,
+        energy: 1.0,
+        crushed: 0.0,
+        blow: Vec3::X,
+        press: Vec3::ZERO,
+        peak: None,
+        origin: Origin::Field,
+    };
+    let loads = [blow(a), blow(b)];
+    let moved: Vec<usize> = field_blows(&loads, &state).map(|load| load.chunk).collect();
+    assert_eq!(moved, vec![b]);
+}
