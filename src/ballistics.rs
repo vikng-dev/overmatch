@@ -441,9 +441,9 @@ pub(crate) fn dose_units(dose: f32) -> u64 {
 /// [`DOSE_UNITS_PER_HP`], widened to f64 (exact), one IEEE division and multiply and a round to
 /// nearest, ties away from zero, so it is the same on every target. Every dose but a witness's
 /// chord enters a total through this: a hard box's line deposit, a bounce's shock and every field
-/// deposit (a hard box's and a witness's alike), so one joule is worth the same HP whatever put it
-/// there. A deposit converts to the same units wherever it is summed (the shot's tally, the pen cam
-/// record's emptying deposit). Finite, nonnegative internal energy is required; a broken line or
+/// deposit (a hard box's and a witness's alike). Field joules encode HP already set by each
+/// mechanism's own unit; their encoding cancels this division. A deposit converts to the same
+/// units wherever it is summed (the shot's tally, the pen cam record's emptying deposit). Finite, nonnegative internal energy is required; a broken line or
 /// field deposit is a bug. The cast saturates a valid contribution above the accumulator's range.
 pub(crate) fn energy_units(energy: f32) -> u64 {
     assert!(
@@ -1936,11 +1936,11 @@ pub struct ImpactMarker;
 /// builds no mesh or material, and writes no `Visibility` — a shell born here is a bare simulation
 /// entity, and [`view::plugin`] (client roots only) is what dresses one.
 pub fn sim_plugin(app: &mut App) {
-    // The spall cone's shape, its energy share and a burst's field are authored data: parsed and
-    // validated here, while the app is built, so a malformed file stops startup rather than the
+    // The game's damage-model cone shape, HP-per-joule units and burst field are authored data:
+    // parsed and validated here, while the app is built, so a malformed file stops startup rather than the
     // first throw.
     spall_cone::ConeShape::shipped();
-    spall_cone::energy_share();
+    spall_cone::cone_emitted_hp_per_joule();
     spall_cone::BurstFields::shipped();
     // The game's damage model validates the shared crew HP pool, the hard-pool energy rate and the
     // walk's angle laws at startup.
@@ -3693,9 +3693,9 @@ fn next_surface(
 /// AUTHORITY: throw an armed round's burst field (design doc §5a, "The burst") from where `flight`
 /// stands, about its direction, at the carried `speed`, recording it as the shell's
 /// [`SpallMarks::burst`] and adding its doses to the shot's [`ShotDose`]. Its strength `S` (J) is
-/// its own driven energy, what its explosive gives the wall ([`burst::Burst::energy`]), times the
-/// burst fields' factor ([`spall_cone::BurstFields::strength`]): nothing the round lost reaching
-/// `flight` enters it. Its field is the ring at ratio `speed / v_s`
+/// its emitted HP (driven wall energy times its declared HP-per-joule unit), encoded in
+/// the field transport representation ([`spall_cone::BurstFields::strength`]): nothing the round
+/// lost reaching `flight` enters it. Its field is the ring at ratio `speed / v_s`
 /// ([`spall_cone::BurstFields::field`]), walked through every spatially reached volume, leaving
 /// none. A field whose emission converts to no pool unit is not thrown, as a cone's is not
 /// ([`throw_spall_cone`]). The game's damage model requires a derived field to stay inside the
@@ -3807,8 +3807,9 @@ fn walk_field(
 /// Throw the spall cone of one body exit, appending it to the shell's record and its doses to the
 /// shot's [`ShotDose`] (design doc §5). Returns whether it was thrown.
 ///
-/// Strength `S` is [`walk::SpallSource::strength`], in joules: the cone's share of the energy the
-/// round lost across the body. A cone whose whole emission `S/2` converts to no pool unit at the
+/// The game's damage-model strength `S` is [`walk::SpallSource::strength`], in transport joules:
+/// the cone's emitted HP (its declared unit times energy lost, weighted by exit material), encoded
+/// for the field walker. A cone whose whole emission `S/2` converts to no pool unit at the
 /// energy rate ([`energy_units`], the rate every one of its doses converts at; [`pool_units_of`],
 /// the quantum a pool keeps) is not thrown: no direction is walked and nothing is recorded. `S/2`
 /// is the most one box can take from it, since every direction doses a box at most once and the

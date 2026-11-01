@@ -1,14 +1,14 @@
-// The energy-to-HP rate of the game's damage model: how every dose of energy turns into HP points.
+// The game's damage-model line and bounce-shock unit: joules lost per HP point.
 // Read by `src/ballistics/energy_dose.rs`, embedded and parsed once, validated at parse.
 //
 // A hard pool's line dose is the kinetic energy the round lost crossing it, ½ m (v_in² − v_out²),
 // shared among the volumes present at each depth by their cost (chord × factor); a round
 // that comes to rest inside it deals all it had left. A bounce's shock is the energy the round lost
-// at the face it struck, and a field's deposits are shares of the energy its source lost or drove
-// (`assets/ballistics/spall_cone.ron`). One rate covers all of them, a tank's modules and a tree's
-// trunk alike, a hard pool and a crew station alike for a field: a pool's authored HP alone says
-// how sturdy it is. A crew station's line dose alone keeps its own law (the round's crew line
-// rate, `wound` in `assets/rounds/`). The law is design doc §§5–6,
+// at the face it struck. This rate covers those line and shock doses, a tank's modules and a
+// tree's trunk alike. Fields have their own emitted-HP-per-joule units in `spall_cone.ron`; their
+// transport deposits divide by this rate only to cancel the encoding into transport joules.
+// A crew station's line dose keeps its own law (the round's crew line rate, `wound` in
+// `assets/rounds/`). The law is design doc §§5–6,
 // `.agents/docs/design/armor-penetration-and-damage.md`.
 //
 // PROVENANCE: every value is authored `(value, Kind("source or reason"))`, Kind names the value's job

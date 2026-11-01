@@ -1,6 +1,6 @@
 //! The game's damage model: the spall cone's shape — its axis rule and the directions it is sampled by —, the field law
 //! that weights those directions and sets the cone's half-angle ([`FieldDescriptor`]), the cone's
-//! strength per joule of the energy its round lost across the body it left ([`energy_share`]), and
+//! emitted HP per joule of the energy its round lost across the body it left ([`cone_emitted_hp_per_joule`]), and
 //! a burst's field data ([`BurstFields`]), read from `assets/ballistics/spall_cone.ron`.
 //! The law the shape serves — strength, profile, shadowing, dose — is design doc §5
 //! (`.agents/docs/design/armor-penetration-and-damage.md`); the throw that applies it is
@@ -8,14 +8,14 @@
 //!
 //! # Units
 //!
-//! A field's strength `S` is energy, in joules: a cone's is [`energy_share`] of the kinetic energy
-//! its round lost across the body it left, times the exited substance's strength against the
-//! reference steel, capped at 1 (`walk::SpallSource::strength`); a burst's is its own
-//! driven energy, the kinetic energy its explosive gives the wall (`burst::Burst::energy`), times
-//! the burst block's factor ([`BurstFields::strength`]), nothing the round lost entering it. Every
-//! field deposit is joules too, and turns
-//! into HP points at the one energy-to-HP rate every hard pool's line dose converts at
-//! (`energy_dose::joules_per_hp`, through `ballistics::energy_units`).
+//! A cone emits its [`cone_emitted_hp_per_joule`] times the kinetic energy lost at the plate,
+//! weighted by the exit material's strength ratio (`walk::SpallSource::strength`). A burst emits
+//! its [`BurstFields::emitted_hp_per_joule`] times its wall's driven energy (`burst::Burst::energy`).
+//! Each mechanism has one authored HP-per-joule unit; the design narrative is in §§5–6.
+//!
+//! The field walker and records carry strength `S` in transport joules, with total emission
+//! `S × EMITTED_SHARE / energy_dose::joules_per_hp` HP. Converting a mechanism's unit to that
+//! representation cancels both factors; the line unit is not another field potency control.
 //!
 //! # The field law
 //!
@@ -330,7 +330,7 @@ pub(crate) enum AxisRule {
 struct ShapeFile {
     axis: Sourced<AxisRule>,
     directions: Sourced<usize>,
-    energy_share: Sourced<f32>,
+    cone_emitted_hp_per_joule: Sourced<f64>,
     burst: BurstFile,
 }
 
@@ -338,19 +338,17 @@ struct ShapeFile {
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct BurstFile {
-    driven_energy_factor: Sourced<f32>,
+    emitted_hp_per_joule: Sourced<f64>,
     ring_half_width_deg: Sourced<f32>,
     ring_directions: Sourced<usize>,
 }
 
-/// A burst's field, validated (design doc §5a, "The burst"): its strength per joule of its driven
-/// energy, the ring's half-width, and the shape the ring is thrown in, sampled by its own
-/// direction count and passing as the spall cone's directions do.
+/// The game's damage-model burst field: its emitted HP per joule of wall energy, the ring's
+/// half-width, and the shape sampled by its own direction count.
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct BurstFields {
-    /// Joules of strength `S` per joule of the driven energy `½ M v_s²`; finite, positive and
-    /// normal.
-    driven_energy_factor: f32,
+    /// Emitted HP per joule of driven wall energy; finite, positive and normal.
+    emitted_hp_per_joule: f64,
     /// The ring's half-width `h` (rad), in `(0, π/2)`.
     ring_half_width: f32,
     ring: ConeShape,
@@ -370,17 +368,13 @@ impl BurstFields {
         Self::from_file(&file, ring)
     }
 
-    /// Validate `file`'s burst block, its ring sampled by `ring` strata: refuses a driven-energy
-    /// factor that is not finite, positive and normal, a half-width outside `(0°, 90°)` and a direction
+    /// Validate `file`'s burst block, its ring sampled by `ring` strata: refuses an HP-per-joule
+    /// unit that is not finite, positive and normal, a half-width outside `(0°, 90°)` and a direction
     /// count outside the shape's domain, naming the field.
     fn from_file(file: &ShapeFile, ring: usize) -> Result<Self, String> {
         let burst = &file.burst;
-        let factor = burst.driven_energy_factor.0;
-        if !factor.is_normal() || factor < 0.0 {
-            return Err(format!(
-                "burst.driven_energy_factor must be finite, positive and normal (got {factor})"
-            ));
-        }
+        let unit = burst.emitted_hp_per_joule.0;
+        validate_emission_unit(unit, "burst.emitted_hp_per_joule")?;
         let degrees = burst.ring_half_width_deg.0;
         if !(degrees > 0.0 && degrees < 90.0) {
             return Err(format!(
@@ -388,7 +382,7 @@ impl BurstFields {
             ));
         }
         Ok(Self {
-            driven_energy_factor: factor,
+            emitted_hp_per_joule: unit,
             ring_half_width: (degrees as f64).to_radians() as f32,
             ring: ConeShape::new(file.axis.0, ring)
                 .map_err(|err| format!("burst.ring_directions: {err}"))?,
@@ -420,12 +414,12 @@ impl BurstFields {
         &FIELDS
     }
 
-    /// The strength `S` (J) of a burst whose explosive drives its wall with `energy` J, the
-    /// driven energy `½ M v_s²` (`burst::Burst::energy`): `energy × driven_energy_factor`, one f64
-    /// product cast once, so the same bits on every target. The field carries its own driven
-    /// energy, never a share of what the round lost reaching the burst point.
+    /// The game's damage-model field transport strength for `energy` joules driven into the wall.
+    /// Its emitted HP is `energy × emitted_hp_per_joule`: the transport normalization and line
+    /// unit cancel at deposit conversion. The coefficient is rounded to f32 before the energy
+    /// product, matching the walker's strength representation.
     pub(crate) fn strength(&self, energy: f32) -> f32 {
-        (energy as f64 * self.driven_energy_factor as f64) as f32
+        (energy as f64 * field_strength_per_joule(self.emitted_hp_per_joule) as f64) as f32
     }
 
     /// The shape every burst field is thrown in, the ring's: a decoder rebuilds a burst field's
@@ -444,38 +438,53 @@ impl BurstFields {
     }
 }
 
-/// The cone's strength per joule of the kinetic energy its round lost across the body it left,
-/// parsed once. Panics on a malformed file, as [`ConeShape::shipped`] does; [`super::sim_plugin`]
-/// reads it while the app is built.
-///
-/// A cone's strength `S` (J) is this share of that energy ([`super::walk::SpallSource::strength`]),
-/// and the cone emits `S/2` ([`EMITTED_SHARE`]); its deposits convert at the energy rate every hard
-/// pool's line dose converts at ([`super::energy_units`]). It sets the potency of every cone at once
-/// and nothing else: the shape and the field law both conserve a cone's emitted total.
-pub(crate) fn energy_share() -> f32 {
-    static SHARE: std::sync::LazyLock<f32> = std::sync::LazyLock::new(|| {
+/// The game's damage-model emitted HP per joule lost across the exited body, parsed once.
+/// The material's strength ratio weights that energy. A malformed file stops startup in
+/// [`super::sim_plugin`].
+pub(crate) fn cone_emitted_hp_per_joule() -> f64 {
+    static UNIT: std::sync::LazyLock<f64> = std::sync::LazyLock::new(|| {
         crate::provenance::shipped("assets/ballistics/spall_cone.ron", || {
-            energy_share_from_ron(SPALL_CONE_RON)
+            cone_emitted_hp_per_joule_from_ron(SPALL_CONE_RON)
         })
         .unwrap_or_else(|err| {
-            panic!("spall cone: embedded spall_cone.ron's energy share is unusable: {err}")
+            panic!("spall cone: embedded spall_cone.ron's HP-per-joule unit is unusable: {err}")
         })
     });
-    *SHARE
+    *UNIT
 }
 
-/// Parse a shape file's cone energy share, refusing one that is not finite, positive and normal: a
-/// zero share would switch every cone off through the pool quantum gate, and a negative one would
-/// throw negative strengths.
-fn energy_share_from_ron(text: &str) -> Result<f32, String> {
+/// Refuse an HP-per-joule unit that is not finite, positive and normal before play.
+fn cone_emitted_hp_per_joule_from_ron(text: &str) -> Result<f64, String> {
     let file: ShapeFile = ron::de::from_str(text).map_err(|err| err.to_string())?;
-    let share = file.energy_share.0;
-    if !share.is_normal() || share < 0.0 {
+    let unit = file.cone_emitted_hp_per_joule.0;
+    validate_emission_unit(unit, "cone_emitted_hp_per_joule")?;
+    Ok(unit)
+}
+
+/// The game's damage-model transport coefficient consumed by `walk::SpallSource::strength`
+/// and its pool-quantum fixture. The coefficient encodes HP rather than a physical energy share:
+/// it represents the cone's HP-per-joule unit in the walker's strength units.
+pub(crate) fn energy_share() -> f32 {
+    field_strength_per_joule(cone_emitted_hp_per_joule())
+}
+
+/// Convert emitted HP per source joule into the field transport representation. The weights emit
+/// [`EMITTED_SHARE`] of strength and deposits divide by the line's joules per HP, so these exact
+/// representation factors cancel; neither adds an authored field potency control.
+fn field_strength_per_joule(unit: f64) -> f32 {
+    (unit / f64::from(EMITTED_SHARE) * super::energy_dose::joules_per_hp()) as f32
+}
+
+/// Refuse units the field's f32 transport cannot carry at startup, naming the authored field.
+fn validate_emission_unit(unit: f64, field: &str) -> Result<(), String> {
+    let coefficient = field_strength_per_joule(unit);
+    if !unit.is_normal() || unit < 0.0 || !coefficient.is_normal() || coefficient < 0.0 {
         return Err(format!(
-            "energy_share must be finite, positive and normal (got {share})"
+            "{field} must be finite, positive and normal, with a representable field strength; \
+             author a positive HP-per-joule unit within the field's f32 range (got {unit})"
         ));
     }
-    Ok(share)
+    Ok(())
 }
 
 /// One direction of a cone in the cone's own frame: `cos θ`, the two lateral components
@@ -777,23 +786,23 @@ mod tests {
         spread.strata().map(|[.., f]| f as f64).collect()
     }
 
-    /// A fixture shape file whose first fields are `fields`, its cone's energy share 0.5.
+    /// A fixture shape file whose first fields are `fields`, its cone's HP-per-joule unit 0.5.
     fn file(fields: &str) -> String {
         format!(
             r#"({fields}, directions: (24, Fixture("fixture")),
-            energy_share: (0.5, Fixture("fixture")), {BURST})"#
+            cone_emitted_hp_per_joule: (0.5, Fixture("fixture")), {BURST})"#
         )
     }
 
-    /// A fixture burst block, its driven-energy factor 1.0.
-    const BURST: &str = r#"burst: (driven_energy_factor: (1.0, Fixture("fixture")),
+    /// A fixture burst block, its HP-per-joule unit 1.0.
+    const BURST: &str = r#"burst: (emitted_hp_per_joule: (1.0, Fixture("fixture")),
         ring_half_width_deg: (10.0, Fixture("fixture")), ring_directions: (24, Fixture("fixture")))"#;
 
-    /// A fixture shape file whose burst block's fields are `fields`, its cone's energy share 0.5.
+    /// A fixture shape file whose burst block's fields are `fields`, its cone's HP-per-joule unit 0.5.
     fn burst_file(fields: &str) -> String {
         format!(
             r#"(axis: (ExitDirection, Fixture("fixture")), directions: (24, Fixture("fixture")),
-            energy_share: (0.5, Fixture("fixture")), burst: ({fields}))"#
+            cone_emitted_hp_per_joule: (0.5, Fixture("fixture")), burst: ({fields}))"#
         )
     }
 
@@ -819,14 +828,14 @@ mod tests {
         }
     }
 
-    /// A shape value authored without its provenance is refused at parse, the cone's energy share
+    /// A shape value authored without its provenance is refused at parse, the cone's HP-per-joule unit
     /// and the burst block's values too.
     #[test]
     fn a_shape_value_without_provenance_is_refused() {
         let sourced = file(r#"axis: (ExitDirection, Fixture("fixture"))"#);
         assert!(ConeShape::from_ron(&sourced).is_ok());
         assert!(BurstFields::from_ron(&sourced).is_ok());
-        assert_eq!(energy_share_from_ron(&sourced), Ok(0.5));
+        assert_eq!(cone_emitted_hp_per_joule_from_ron(&sourced), Ok(0.5));
         for (value, bare) in [
             (
                 r#"axis: (ExitDirection, Fixture("fixture"))"#,
@@ -834,12 +843,12 @@ mod tests {
             ),
             (r#"directions: (24, Fixture("fixture"))"#, "directions: 24"),
             (
-                r#"energy_share: (0.5, Fixture("fixture"))"#,
-                "energy_share: 0.5",
+                r#"cone_emitted_hp_per_joule: (0.5, Fixture("fixture"))"#,
+                "cone_emitted_hp_per_joule: 0.5",
             ),
             (
-                r#"driven_energy_factor: (1.0, Fixture("fixture"))"#,
-                "driven_energy_factor: 1.0",
+                r#"emitted_hp_per_joule: (1.0, Fixture("fixture"))"#,
+                "emitted_hp_per_joule: 1.0",
             ),
             (
                 r#"ring_half_width_deg: (10.0, Fixture("fixture"))"#,
@@ -854,56 +863,59 @@ mod tests {
             assert_ne!(bare, sourced, "{value}");
             let error = ConeShape::from_ron(&bare).expect_err(&bare);
             assert!(error.contains("provenance"), "{bare}: {error}");
-            let error = energy_share_from_ron(&bare).expect_err(&bare);
+            let error = cone_emitted_hp_per_joule_from_ron(&bare).expect_err(&bare);
             assert!(error.contains("provenance"), "{bare}: {error}");
             let error = BurstFields::from_ron(&bare).expect_err(&bare);
             assert!(error.contains("provenance"), "{bare}: {error}");
         }
     }
 
-    /// The cone's energy share is the file's: a shape file's value is what the parse carries, and
+    /// The cone's HP-per-joule unit is the file's: a shape file's value is what the parse carries, and
     /// the shipped one is the shipped file's. One that is zero, negative, subnormal or not finite
-    /// is refused at parse naming the field: every cone's strength is that share of the energy its
-    /// round lost, so a zero would silently switch every cone off through the pool quantum gate and
+    /// is refused at parse naming the field: every cone's emission scales by that unit and the
+    /// energy its round lost, so a zero would silently switch every cone off through the pool quantum gate and
     /// a negative one throw negative strengths.
     #[test]
-    fn the_cone_energy_share_is_read_from_the_file_and_must_be_positive() {
+    fn the_cone_hp_unit_is_read_from_the_file_and_must_be_positive() {
         let with = |share: &str| {
             file(r#"axis: (ExitDirection, Fixture("fixture"))"#).replacen(
-                "energy_share: (0.5",
-                &format!("energy_share: ({share}"),
+                "cone_emitted_hp_per_joule: (0.5",
+                &format!("cone_emitted_hp_per_joule: ({share}"),
                 1,
             )
         };
-        assert_eq!(energy_share_from_ron(&with("2.5")), Ok(2.5));
+        assert_eq!(cone_emitted_hp_per_joule_from_ron(&with("2.5")), Ok(2.5));
         assert_eq!(
-            energy_share(),
+            cone_emitted_hp_per_joule(),
             crate::provenance::shipped("assets/ballistics/spall_cone.ron", || {
-                energy_share_from_ron(SPALL_CONE_RON)
+                cone_emitted_hp_per_joule_from_ron(SPALL_CONE_RON)
             })
             .unwrap()
         );
-        for share in ["0.0", "-0.5", "1.0e-40", "NaN", "inf"] {
-            let error = energy_share_from_ron(&with(share)).expect_err(share);
-            assert!(error.contains("energy_share"), "{share}: {error}");
+        for share in ["0.0", "-0.5", "1.0e-310", "1e-300", "1e300", "NaN", "inf"] {
+            let error = cone_emitted_hp_per_joule_from_ron(&with(share)).expect_err(share);
+            assert!(
+                error.contains("cone_emitted_hp_per_joule"),
+                "{share}: {error}"
+            );
         }
     }
 
     /// A burst block is read from the file: its count samples the ring's shape, every burst
-    /// field's, its half-width the ring's field, its driven-energy factor the strength
-    /// `energy × driven_energy_factor`; the shipped one is the shipped file's. A factor that is
+    /// field's, its half-width the ring's field, its HP-per-joule unit the emitted HP
+    /// `energy × emitted_hp_per_joule`; the shipped one is the shipped file's. A unit that is
     /// zero, negative, subnormal or not finite, a half-width outside `(0°, 90°)` and a direction
     /// count outside `1..=MAX_DIRECTIONS` are refused at parse naming the field: a burst's
-    /// strength scales by the factor, and the ring's law refuses such a band at the first throw. A count for
-    /// another burst shape is no field of the block: every burst is a ring.
+    /// emitted HP scales by the unit, and the ring's law refuses such a band at the first throw.
+    /// A count for another burst shape is no field of the block: every burst is a ring.
     #[test]
     fn a_burst_block_is_read_and_its_domain_is_refused() {
         let read = BurstFields::from_ron(&burst_file(
-            r#"driven_energy_factor: (2.0, Fixture("fixture")),
+            r#"emitted_hp_per_joule: (2.0, Fixture("fixture")),
             ring_half_width_deg: (30.0, Fixture("fixture")), ring_directions: (24, Fixture("fixture"))"#,
         ))
         .unwrap();
-        assert_eq!(read.strength(150_000.0), 300_000.0);
+        assert_eq!(read.strength(150_000.0), 1_800_000_000.0); // Fixture: 300,000 emitted HP.
         let (ring, shape) = read.field(0.5);
         assert_eq!(
             ring,
@@ -919,7 +931,7 @@ mod tests {
             .unwrap()
         );
         let sourced = burst_file(
-            r#"driven_energy_factor: (1.0, Fixture("fixture")),
+            r#"emitted_hp_per_joule: (1.0, Fixture("fixture")),
             ring_half_width_deg: (10.0, Fixture("fixture")), ring_directions: (24, Fixture("fixture"))"#,
         );
         let ball = sourced.replacen(
@@ -933,8 +945,17 @@ mod tests {
         for (value, refused, field) in [
             (
                 "(1.0",
-                ["(0.0", "(-1.0", "(1.0e-40", "(NaN", "(inf"].as_slice(),
-                "driven_energy_factor",
+                [
+                    "(0.0",
+                    "(-1.0",
+                    "(1.0e-310",
+                    "(1e-300",
+                    "(1e300",
+                    "(NaN",
+                    "(inf",
+                ]
+                .as_slice(),
+                "emitted_hp_per_joule",
             ),
             (
                 "(10.0",
@@ -954,6 +975,82 @@ mod tests {
                 assert!(error.contains(field), "{field} {refused}: {error}");
             }
         }
+    }
+
+    /// The game's damage model emits exactly one mechanism unit times source energy (within
+    /// f32 transport rounding), with the cone's existing material weighting. Pools and the pen
+    /// cam rely on no second authored potency factor. Fixture energies span zero and two scales;
+    /// fixture material ratios cover reference and softer exits. A second conversion or using
+    /// the cone's unit for the ring breaks the invariant.
+    #[test]
+    fn each_mechanisms_emitted_hp_is_its_unit_times_its_energy() {
+        let hp = |strength: f32| {
+            f64::from(strength) * f64::from(EMITTED_SHARE)
+                / super::super::energy_dose::joules_per_hp()
+        };
+        let fields = BurstFields::shipped();
+        for energy in [0.0, 1234.0, 2_703_500.0] {
+            // Fixture data: joules.
+            for ratio in [0.04, 1.0] {
+                // Fixture data: material strength ratios.
+                let source = super::super::walk::SpallSource {
+                    t: 0.0,
+                    position: Vec3::ZERO,
+                    face: None,
+                    direction: Vec3::ZERO,
+                    exited: Vec::new(),
+                    spend: 0.0,
+                    energy,
+                    debris_ratio: 1.0,
+                    strength_ratio: ratio,
+                    exit_speed: 0.0,
+                };
+                let expected = cone_emitted_hp_per_joule() * f64::from(energy) * f64::from(ratio);
+                assert!((hp(source.strength()) - expected).abs() <= expected * 2e-7);
+            }
+            let expected = fields.emitted_hp_per_joule * f64::from(energy);
+            assert!((hp(fields.strength(energy)) - expected).abs() <= expected * 2e-7);
+        }
+        // Fixture data: an independent unit, so hard-coding the shipped conversion fails too.
+        for unit in [0.002, 0.125] {
+            let fields = BurstFields::from_ron(&burst_file(&format!(
+                r#"emitted_hp_per_joule: ({unit}, Fixture("fixture")),
+                ring_half_width_deg: (10.0, Fixture("fixture")),
+                ring_directions: (24, Fixture("fixture"))"#,
+            )))
+            .unwrap();
+            let energy = 1234.0; // Fixture data: joules.
+            assert!(
+                (hp(fields.strength(energy)) - unit * f64::from(energy)).abs()
+                    <= unit * f64::from(energy) * 2e-7
+            );
+        }
+    }
+
+    /// The game's damage-model field emission preserves the reference cone and shipped ring
+    /// fixture totals; every existing field cast and pen-cam record relies on the same transport
+    /// strengths to the bit. Fixture coefficients pin that representation, not a physical share.
+    #[test]
+    fn the_reference_emission_totals_are_unchanged() {
+        let rate = super::super::energy_dose::joules_per_hp();
+        let cone_energy = 2_703_500.0_f32; // Fixture: reference plate's lost energy, J.
+        let cone_strength = energy_share() * cone_energy;
+        assert_eq!(cone_strength, 0.88 * cone_energy); // Fixture: transport coefficient.
+        let cone_hp = f64::from(cone_strength) * f64::from(EMITTED_SHARE) / rate;
+        assert_eq!((cone_hp * 10.0).round() / 10.0, 396.5); // Fixture: emitted HP, one decimal.
+
+        let burst = crate::rounds::RoundRegistry::shipped()
+            .get("88mm_APHE_ring")
+            .unwrap()
+            .burst
+            .unwrap(); // Fixture: shipped ring construction.
+        let ring_strength = BurstFields::shipped().strength(burst.energy);
+        assert_eq!(ring_strength, (f64::from(burst.energy) * 210.0) as f32);
+        let ring_hp = f64::from(ring_strength) * f64::from(EMITTED_SHARE) / rate;
+        assert_eq!((ring_hp * 1000.0).round() / 1000.0, 13_920.837); // Fixture: emitted HP.
+        eprintln!(
+            "MEASURED game's damage-model emission: cone {cone_hp:.6} HP; ring {ring_hp:.6} HP"
+        );
     }
 
     /// The law's domain is a finite ratio `λ ≥ 0`: a negative or non-finite ratio is refused under

@@ -2,13 +2,12 @@
 // The spall cone's shape and its potency — the field thrown from every body exit a round
 // reaches —, and a burst's field. Read by `src/ballistics/spall_cone.rs`, embedded and parsed once,
 // validated at parse.
-// The law itself (strength, the ball law's centre-weighted profile, shadowing, dose) is design doc
-// §5, `.agents/docs/design/armor-penetration-and-damage.md`; this file holds its shape data and the
-// share of the energy its round lost that a cone's strength is. A field's strength and every one of
-// its deposits are joules, and turn into HP points at the one energy-to-HP rate every dose converts
-// at (`assets/ballistics/energy_dose.ron`). A cone's half-angle and profile are not here: both
-// follow from its field's ratio, the exit layer's substance's (`debris_half_angle_deg` in
-// `assets/materials/materials.ron`).
+// The law (emitted HP, the ball law's centre-weighted profile, shadowing, dose) is design doc
+// §§5–6, `.agents/docs/design/armor-penetration-and-damage.md`. Each mechanism declares its own
+// emitted HP per source joule. Field strengths and deposits use transport joules internally;
+// their conversion through `energy_dose.ron` cancels, rather than setting field potency.
+// A cone's half-angle and profile follow from its exit layer's debris ratio in
+// `assets/materials/materials.ron`.
 //
 // Every value here is a choice the owner can change by editing this file alone; none is a
 // constant of the law. The playtest fork on the axis is F5 in
@@ -38,56 +37,29 @@
         6.25 HP on average (DERIVED: S·f_k / 3000 J per HP / 64, S = 2.40 MJ MEASURED from the s1
         record). The count changes how finely a box's dose is resolved, never the emitted total")),
 
-    // The cone's strength S (J) per joule of the kinetic energy its round lost across the body it
-    // left, ½ m (v_entry² − v_exit²), m the mass that meets the plate (a sub-calibre round's core):
-    // the energy the line's dose is (`energy_dose.ron`). The cone emits S/2 in all, and its
-    // deposits convert at that file's rate. It sets the potency of every cone at once and nothing
-    // else: the shape and the field law both conserve a cone's emitted total.
-    energy_share: (0.88, StandIn("Stand-in for the debris cloud's own mass and speed: provisional
-        (issue 116, owner decision 2026-10-28: the simplest model): set so that the reference case
-        throws a cone of the strength the retired law (spend × κ × (v_exit / v_entry)² × (d / 88
-        mm)², converting at 70 HP points per reference-mm) gave it. The reference case: the
-        reference 88 mm APCBC round (10.2 kg, nose factor 7/24) at its 773 m/s muzzle speed
-        perforating its reference plate, 100 mm of reference steel at normal impact (ASSUMED: the
-        plate the retired rate was set against, the s1 cone's, is 101 mm at 10.9°). DERIVED from the
-        force law: the round reads 114.93 reference-mm at 773 m/s and leaves the plate at 259.69
-        m/s; the retired law's S was 100 × (259.69 / 773)² = 11.286 reference-mm, emitting 395.0 HP
-        points; the round loses ½ × 10.2 × (773² − 259.69²) = 2.7035 MJ; a cone emitting 395.0 HP
-        points at 3000 J per HP has S = 2.3701 MJ, so the share is 2.3701 / 2.7035 = 0.877, rounded
-        to 0.88 (the reference cone emits 396.5 HP points, +0.4 %). Its knockout radius for the 30
-        HP crew pool at a 0.2 m² mean face through RHA (α = 26.2°, Ω_c = 0.646 sr) is 2.02 m at an
-        average spot and 2.63 m on the axis (DERIVED: R = sqrt(2 f(θ) E A / (pool Ω_c)), E = S/2 in
-        HP points, f = ½ and 0.842). A round loses more energy through a thicker plate, so a barely
-        perforating round throws the strongest cone of a plate and a thin plate a weak one")),
+    // Total HP emitted per joule lost across the exited body, before its material strength ratio.
+    // DERIVED: 0.88 × 1/2 / 3000; the field weights' half-strength normalization is included.
+    cone_emitted_hp_per_joule: (0.00014666666666666666, Unit("provisional emitted HP per joule lost
+        at the plate; balance lives here. Set against the retired reference cone's 395.0 HP target,
+        rounded to the scale emitting 396.5 HP (DERIVED). Replaced by the missing fragment-hit law:
+        fragments empty crew-station HP pools by hits rather than energy caught on a face. Design
+        doc §§5–6, .agents/docs/design/armor-penetration-and-damage.md, owns the derivation")),
 
     // A burst's field (design doc §5a, "The burst"): thrown from the burst point about the round's
     // flight direction, its ratio the carried speed over the burst's greatest sideways speed v_s,
-    // through the struck tank's volumes, passing as the spall cone's directions do, its deposits
-    // converting at `energy_dose.ron`'s rate. Every burst is a ring: the wall around the burst
-    // core is driven as a band about the flight axis, and the nose piece flies on.
+    // through spatially reached volumes, passing as the spall cone's directions do. Every burst
+    // is a ring: the wall around the burst core is driven as a band about the flight axis, and the
+    // nose piece flies on.
     burst: (
-        // The burst's strength S (J) per joule of its own driven energy: the kinetic energy its
-        // explosive gives the wall, ½ M v_s², M the wall and v_s the greatest sideways speed, DERIVED
-        // per round at load (`Burst::energy`, `src/ballistics/burst.rs`). The field carries that
-        // energy times this factor and emits S/2 in all; nothing the round lost reaching the burst
-        // point enters it, since a burst's energy comes from its explosive. At 1 the field would
-        // carry its driven energy and nothing more; the factor that keeps every shipped burst as
-        // strong as it was is far from 1.
-        driven_energy_factor: (210.0, StandIn("Stand-in for burst fragment dose from the fragments
-            themselves: provisional, flagged for the owner: the burst's potency set against an HP
-            target, not against the energy its wall carries, so the factor is far above 1: the ring
-            emits 105 times its driven energy. DERIVED to keep every burst's potency: 1.0
-            reference-mm per kJ of driven energy at 70 HP points per reference-mm is 0.07 HP points
-            per J, × 3000 J per HP = 210 J of strength per J driven, the same HP from every burst.
-            That rate was set against an even sphere at rest, the burst's ball until playtest fork
-            F7 retired it: a crew box presenting a 0.2 m² face (a crew station's) fully inside it,
-            2.0 m from the burst, has its 30 HP pool emptied. DERIVED: the box catches A/(4πR²) of
-            the emission E = S/2, and its knockout radius is R = sqrt(E A / (30 × 4π)), E in HP
-            points; R = 2.0 m needs E = 7540 HP points against the 214.8 kJ that ball drove (the 8.8
-            cm Pzgr. 39 less its core). The ring at rest is 5.76 times as bright in its band, R =
-            4.75 m (design doc §5a, DERIVED). A field that carried only its driven energy (factor 2,
-            emitting ½ M v_s²) would emit 132.6 HP points from the shipped ring's 397.7 kJ against
-            13,922 at 210 (DERIVED), a knockout radius 10.2 times shorter")),
+        // Total HP emitted per joule driven into the wall, independent of the line and cone units.
+        // DERIVED: 210 × 1/2 / 3000, including the field weights' normalization.
+        emitted_hp_per_joule: (0.035, Unit("provisional emitted HP per joule driven into the wall;
+            balance lives here. Set against the retired even-sphere target: a 0.2 m² face at 2.0 m
+            has its 30 HP pool emptied; the shipped ring emits 13,920.84 HP (MEASURED by the reference
+            emission test). Replaced by the
+            missing fragment-hit law: fragments empty crew-station HP pools by hits rather than
+            energy caught on a face. Design doc §§5–6,
+            .agents/docs/design/armor-penetration-and-damage.md, owns the derivation")),
         // h (degrees): the ring spans θ_c − h to θ_c + h of polar angle from the flight axis,
         // θ_c = atan(1/λ), uniform over that band; its near edge is held at the axis.
         ring_half_width_deg: (10.0, Unknown("provisional (owner's brief 4b): the band the wall's
