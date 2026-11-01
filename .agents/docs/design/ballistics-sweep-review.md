@@ -553,3 +553,63 @@ resolver, march, fuzzer, recorder, pen-cam, field-cast, headless and citation te
 ignored instruments. MEASURED: all 43 whole-tree citation, font, net-boundary and bake guards
 passed again. The field-cast pin is unchanged by producer cleanup. All lane changes are committed
 on the lane branch; no push, capture, pricing or deployment was performed.
+
+## Review of sweep-ball-4
+
+Subject: the game's damage model and its shot records, game state only. Two blind reviews read the
+twelve commits from "preserve the client's legitimate firing-pose resync gap" to "remove unread
+cone-source producer state". Each finding was decided against the code; each P1 has a test that
+builds the state and failed on main.
+
+- **R6, P1 (Codex), verified, fixed** in "admit a round at rest inside overlapping plates". A round
+  that stops inside two overlapping armour volumes of one tank leaves both without an exit (the walk
+  exposes tied strongest contacts in each); admission accepted a retaining plate only last, and the
+  authority's delivery `expect` panicked. A plate without an exit now belongs to a record whose
+  round rests; a perforated plate inside a retaining one may follow it in path order.
+- **R7, P1 (Codex), verified, fixed** in "admit a departure between path nodes of a shared
+  crossing". A crossing spanning overlapping tanks ends the first tank's record `Left` where its own
+  volumes end, between the crossing's entrance and rest nodes; admission required a node. A
+  departure now lies on the path polyline within the same DERIVED wire bound. A burst keeps its
+  node requirement: a burst starts a leg of the path. The plan already projects a departure.
+- **R8, P1 (Claude), verified, fixed** in "name a husk's launched turret instead of panicking its
+  record". A cook-off launch removes the turret's `ServoIndex` while `TankServos` keeps its slot,
+  so a later round into the husk tripped `servo_angles`' slot/node assert. `servo_angles` now
+  returns `ServoPose::Detached` while a `LaunchedTurret` names the tank; that encounter finishes
+  without a record. An encounter opened while the rig was mounted keeps its pre-launch pose. The
+  launched turret despawns with its root (`tank::integrity::sweep_launched_turret_on_root_despawn`),
+  so the detached state lasts the husk's life (DERIVED from that observer).
+- **R9, P2 (Codex), verified, fixed** in "refuse a local record that omits a declared servo". Local
+  admission let a simulated record omit a declared servo, which presentation drew at rest. No
+  shipped loader reads local records today (only the corpus tests), so it had no effect yet.
+  `PenetrationReport::load`, the one local gate that resolves the vehicle, now refuses a simulated
+  record whose servos differ from its tank file's, naming the servo; synthetic clips keep rest.
+- **Claude P3s, verified, not fixed** (files outside this lane's changes): `shooting::fire`'s
+  replica pose gap skips trigger, readiness and round bookkeeping that fused own fire could still do without
+  the pose (the netcode lane owns the client resync path); `potency`'s test-only `Band::Nothing`
+  colour arm and its assertion guard no shipped value; the `rounds` module doc still names a fuze
+  `position`. The `aim` cardinality P3 was a verification gap, already fixed forward on main by
+  "give the UI ownership app the player view and tank specs a live client has".
+
+The same class, swept: every `assert`/`expect` the reviewed range added on the record and delivery
+path holds by construction against husks, launched turrets, overlapping tanks, a despawned shooter
+and a resync. The mounted-rig slot assert holds because spawn gives every servo entry a node with
+its slot and only the launch removes one. The posed-before-finish `expect` holds because
+`pose_struck` runs after the march and before the same tick's finish, and a despawned tank returns
+first. The offline vocabulary `expect` holds because `build_vocabulary` runs in `PreUpdate` once
+the blueprint exists, before any fixed tick of a tank spawned from it. The build `expect`s in
+offline delivery and `net::shot_explanation` hold because every remaining encoder refusal is met by
+the producer: keyed shots and combatant lives on every authority tank, i32 mm/µs ranges, one
+consequence per emptied pool, cones thrown in the shipped shape, burst fields thrown from the
+burst point, and the semantic checks above. A despawned shooter only drops its projection's
+recipient; a resync is a client-side typed refusal (`Receipt::Refused`).
+
+Owner decision: a husk struck after its turret launched now opens no pen cam. Showing it would need
+the record to state a detached node (its pose, or its absence from the hull) on the wire and on the
+stage; no angle states it.
+
+Review-fix verification: format and workspace/all-target clippy passed. MEASURED: before the
+fixes, the three P1 tests failed on main with "only the last plate can retain the round", "the
+departure point must be a path point" and the slot/node assert (left 1, right 2). After them,
+MEASURED: 288 damage_cam, pen-cam, recording, shot-explanation, citation and whole-tree guard
+(font, net-boundary, bake) tests passed; four ignored. Every corpus record loads through the new
+servo edge. No capture or pricing.
