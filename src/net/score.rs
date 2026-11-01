@@ -14,7 +14,8 @@ use lightyear::prelude::*;
 use serde::{Deserialize, Serialize};
 
 use super::battle::{BattleOutcome, BattleState};
-use crate::damage::{KnockoutCause, TankKnockout};
+use crate::damage::{KnockoutCause, KnockoutReason, LaunchedTurret, TankKnockedOut, TankKnockout};
+use crate::tank::TankRoot;
 use crate::{CombatantId, CombatantLife, ShotClock};
 
 /// Every combatant's standing, in the order each first spawned.
@@ -231,18 +232,81 @@ fn open_standing(
     }
 }
 
+/// Whether a knocked-out tank's turret left it. A separate fact from the knockout's kind: today
+/// every cook-off launches the turret, and the launch may become a chance on a cook-off.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TurretFate {
+    Mounted,
+    Launched,
+}
+
+/// The server's one knockout line: the life, the knockout's kind, the turret's fate and the credit,
+/// read from the state the authority holds at the transition.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct KnockoutLine {
+    victim: CombatantId,
+    life: CombatantLife,
+    kind: KnockoutReason,
+    turret: TurretFate,
+    credit: Credit,
+}
+
+impl KnockoutLine {
+    /// `tank`'s line: its knockout kind from its [`TankKnockedOut`], its turret launched when a
+    /// [`LaunchedTurret`] names it as root.
+    fn read(
+        tank: Entity,
+        cause: KnockoutCause,
+        tanks: &Query<(&CombatantId, &CombatantLife, &TankKnockedOut)>,
+        launched: &Query<&TankRoot, With<LaunchedTurret>>,
+    ) -> Self {
+        let (&victim, &life, knocked_out) = tanks.get(tank).expect(
+            "every server tank root carries its spawn identity, and its knockout transition \
+             follows its TankKnockedOut",
+        );
+        Self {
+            victim,
+            life,
+            kind: knocked_out.reason,
+            turret: if launched.iter().any(|root| root.0 == tank) {
+                TurretFate::Launched
+            } else {
+                TurretFate::Mounted
+            },
+            credit: credit(victim, cause),
+        }
+    }
+}
+
+impl std::fmt::Display for KnockoutLine {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let turret = match self.turret {
+            TurretFate::Mounted => "mounted",
+            TurretFate::Launched => "launched",
+        };
+        write!(
+            f,
+            "server: combatant {} life {} knocked out by {}, turret {turret} ({:?})",
+            self.victim.0,
+            self.life.0,
+            self.kind.label(),
+            self.credit
+        )
+    }
+}
+
 /// The knockout transition, scored: a loss and the respawn's opening for the knocked-out tank's
 /// combatant, a knockout for the combatant its [`Credit`] names.
 fn score_knockout(
     knockout: On<TankKnockout>,
-    tanks: Query<(&CombatantId, &CombatantLife)>,
+    tanks: Query<(&CombatantId, &CombatantLife, &TankKnockedOut)>,
+    launched: Query<&TankRoot, With<LaunchedTurret>>,
     clock: Res<ShotClock>,
     wait: Res<RespawnWait>,
     mut boards: Query<(&mut Scoreboard, &BattleState)>,
 ) {
-    let (&victim, &life) = tanks
-        .get(knockout.tank)
-        .expect("every server tank root carries its spawn identity from its spawn");
+    let line = KnockoutLine::read(knockout.tank, knockout.cause, &tanks, &launched);
+    let (victim, life) = (line.victim, line.life);
     let (mut board, battle) = boards.single_mut().expect(
         "server startup spawns exactly one scoreboard and Battle before any combatant spawns",
     );
@@ -258,8 +322,7 @@ fn score_knockout(
         life,
         tick: clock.0.wrapping_add(wait.ticks),
     };
-    let credit = credit(victim, knockout.cause);
-    match credit {
+    match line.credit {
         Credit::Shooter(shooter) => {
             board
                 .standing_mut(shooter)
@@ -268,10 +331,7 @@ fn score_knockout(
         }
         Credit::NoShooter | Credit::OwnRound => {}
     }
-    info!(
-        "server: combatant {} life {} knocked out ({credit:?})",
-        victim.0, life.0
-    );
+    info!("{line}");
 }
 
 #[cfg(test)]
@@ -370,7 +430,13 @@ mod tests {
             .id();
         let tank = app
             .world_mut()
-            .spawn((CombatantId(1), CombatantLife(0)))
+            .spawn((
+                CombatantId(1),
+                CombatantLife(0),
+                TankKnockedOut {
+                    reason: KnockoutReason::CrewLoss,
+                },
+            ))
             .id();
         let knockout = TankKnockout {
             tank,
@@ -404,6 +470,61 @@ mod tests {
         assert_eq!(
             app.world().get::<Scoreboard>(board).expect("board").0[0].losses,
             1
+        );
+    }
+
+    /// The game's damage model's server log: the one knockout line names the knockout's kind and,
+    /// as its own fact, whether the turret launched, both read from the authority's state at the
+    /// transition. A cook-off that launched the turret and a crew loss with it mounted; the
+    /// identities are fixture data.
+    #[test]
+    fn the_knockout_line_names_its_kind_and_the_turrets_fate() {
+        use bevy::ecs::system::RunSystemOnce;
+        let mut world = World::new();
+        let cooked = world
+            .spawn((
+                CombatantId(1),
+                CombatantLife(0),
+                TankKnockedOut {
+                    reason: KnockoutReason::Cookoff,
+                },
+            ))
+            .id();
+        world.spawn((LaunchedTurret, TankRoot(cooked)));
+        let crew = world
+            .spawn((
+                CombatantId(2),
+                CombatantLife(3),
+                TankKnockedOut {
+                    reason: KnockoutReason::CrewLoss,
+                },
+            ))
+            .id();
+        let lines = world
+            .run_system_once(
+                move |tanks: Query<(&CombatantId, &CombatantLife, &TankKnockedOut)>,
+                      launched: Query<&TankRoot, With<LaunchedTurret>>| {
+                    [cooked, crew].map(|tank| {
+                        KnockoutLine::read(tank, KnockoutCause::NoKeyedRound, &tanks, &launched)
+                    })
+                },
+            )
+            .unwrap();
+        assert_eq!(
+            (lines[0].kind, lines[0].turret),
+            (KnockoutReason::Cookoff, TurretFate::Launched)
+        );
+        assert_eq!(
+            (lines[1].kind, lines[1].turret),
+            (KnockoutReason::CrewLoss, TurretFate::Mounted)
+        );
+        assert_eq!(
+            lines[0].to_string(),
+            "server: combatant 1 life 0 knocked out by ammo cookoff, turret launched (NoShooter)"
+        );
+        assert_eq!(
+            lines[1].to_string(),
+            "server: combatant 2 life 3 knocked out by crew loss, turret mounted (NoShooter)"
         );
     }
 
