@@ -849,19 +849,23 @@ fn toggle_full_pause(
 }
 
 /// `c` wipes the board: every shell (in-flight or frozen) with its tracer + penetration marks, and
-/// the target's HP pools refilled and knockouts cleared — so you can start a clean shot.
+/// each target's HP pools refilled and knockouts cleared — so you can start a clean shot. A target
+/// whose turret launched stays the husk it is: a refill cannot remount the turret, and a living
+/// tank keeps every registered servo node on its rig (`damage_cam::record::servo_angles`). `r`
+/// rebuilds it.
 #[expect(
     clippy::too_many_arguments,
-    reason = "a sandbox command sweeping shells, health and three damage-state markers"
+    reason = "a sandbox command sweeping shells, health, three damage-state markers and launches"
 )]
 fn clear_shots(
     keys: Res<ButtonInput<KeyCode>>,
     mut requested: ResMut<ClearRequested>,
     shots: Query<Entity, With<ShellPath>>,
-    mut health: Query<&mut ComponentHealth>,
-    dead: Query<Entity, With<Dead>>,
-    cooked_off: Query<Entity, With<CookedOff>>,
+    mut health: Query<(&mut ComponentHealth, Option<&VolumeOf>)>,
+    dead: Query<(Entity, &VolumeOf), With<Dead>>,
+    cooked_off: Query<(Entity, &VolumeOf), With<CookedOff>>,
     knocked_out: Query<Entity, With<TankKnockedOut>>,
+    launched: Query<&TankRoot, With<LaunchedTurret>>,
     mut commands: Commands,
 ) {
     // `C` or the panel's Scene button. Consume the flag on the frame it fires so the deref (and its
@@ -876,18 +880,29 @@ fn clear_shots(
     for entity in &shots {
         commands.entity(entity).despawn();
     }
+    let husks: HashSet<Entity> = launched.iter().map(|root| root.0).collect();
+    let restorable =
+        |owner: Option<&VolumeOf>| owner.is_none_or(|owner| !husks.contains(&owner.tank()));
     // Reset accumulated component damage so the next shot reads against a fresh target.
-    for mut hp in &mut health {
-        hp.refill();
+    for (mut hp, owner) in &mut health {
+        if restorable(owner) {
+            hp.refill();
+        }
     }
-    for entity in &dead {
-        commands.entity(entity).remove::<Dead>();
+    for (entity, owner) in &dead {
+        if restorable(Some(owner)) {
+            commands.entity(entity).remove::<Dead>();
+        }
     }
-    for entity in &cooked_off {
-        commands.entity(entity).remove::<CookedOff>();
+    for (entity, owner) in &cooked_off {
+        if restorable(Some(owner)) {
+            commands.entity(entity).remove::<CookedOff>();
+        }
     }
     for entity in &knocked_out {
-        commands.entity(entity).remove::<TankKnockedOut>();
+        if !husks.contains(&entity) {
+            commands.entity(entity).remove::<TankKnockedOut>();
+        }
     }
 }
 

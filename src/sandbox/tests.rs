@@ -442,3 +442,47 @@ fn an_invalid_range_round_selection_is_a_construction_bug() {
         },
     );
 }
+
+/// The game's damage model: the range's clear never leaves a living tank whose turret launched.
+/// A living target's next recorded round reads every registered servo node on its rig
+/// (`damage_cam::record::servo_angles`), and a launched turret has left the rig; only the
+/// rebuild remounts it. A target with its turret mounted is refilled and its knockout cleared.
+/// Pools and stations are fixture data.
+#[test]
+fn clearing_the_range_keeps_a_launched_turret_tank_a_husk() {
+    use crate::damage::KnockoutReason;
+    use bevy::ecs::system::RunSystemOnce;
+    let mut world = World::new();
+    world.init_resource::<ButtonInput<KeyCode>>();
+    world.insert_resource(ClearRequested(true));
+    let tank = |world: &mut World| {
+        let root = world
+            .spawn(TankKnockedOut {
+                reason: KnockoutReason::Cookoff,
+            })
+            .id();
+        let mut pool = ComponentHealth::full(10);
+        pool.drain();
+        let crew = world.spawn((pool, Dead, VolumeOf(root))).id();
+        (root, crew)
+    };
+    let (husk, husk_crew) = tank(&mut world);
+    let (mounted, mounted_crew) = tank(&mut world);
+    world.spawn((LaunchedTurret, TankRoot(husk)));
+    world.run_system_once(clear_shots).unwrap();
+    assert!(
+        world.get::<TankKnockedOut>(husk).is_some()
+            && world.get::<Dead>(husk_crew).is_some()
+            && world.get::<ComponentHealth>(husk_crew).unwrap().is_empty(),
+        "a tank whose turret launched stays a husk"
+    );
+    assert!(
+        world.get::<TankKnockedOut>(mounted).is_none()
+            && world.get::<Dead>(mounted_crew).is_none()
+            && !world
+                .get::<ComponentHealth>(mounted_crew)
+                .unwrap()
+                .is_empty(),
+        "a mounted target is refilled and back in action"
+    );
+}
