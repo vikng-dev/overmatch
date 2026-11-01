@@ -272,3 +272,21 @@ Gates: formatting, CI clippy and 44 collider/history/headless/citation tests pas
 | All child placement passes, combined | 611–1 077 us/tick | Deferred to batched pricing |
 
 These rows overlap: the combined row includes the individual rows. No new tick timing was taken.
+
+## server-perf-2: sort only dynamic belt reactions
+
+"driving: skip reaction sorting for contacts without dynamic recipients (#250)" classifies each
+contact from the tick-start snapshot before constructing its sort key. Terrain-field support
+has no recipient, and fixed or kinematic construction takes no dynamic impulse, so these
+contacts leave before the canonical sort. Fixed structural reactions are already staged by
+`record_static_contacts`; this changes no reaction outcome. Dynamic contacts keep the same
+lexicographic geometry-bit key, stable relative order and sequential impulse arithmetic. The
+key is a fixed-size array rather than a per-contact vector.
+
+`field_and_fixed_support_never_enter_the_dynamic_reaction_sort` alternates field and fixed
+contacts and measures sort-key construction. It failed on the preceding implementation with
+32 keys and passes with 0 (MEASURED test counts, same fixture). The full targeted check passed
+335 tests, including driving, recorded paths, collider history, contact transfer, headless and
+real-UDP world reconstruction, plus the whole-tree guards; 3 existing tests were ignored
+(MEASURED test-harness counts). No golden or physical parameter changed. New tick times remain
+deferred to batched pricing.

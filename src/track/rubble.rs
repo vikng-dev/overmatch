@@ -397,6 +397,8 @@ pub struct RubbleBodies {
     active: Vec<usize>,
     #[cfg(test)]
     surface_checks: std::cell::Cell<usize>,
+    #[cfg(test)]
+    reaction_sort_keys: std::cell::Cell<usize>,
     pub(crate) bodies: Vec<PieceBody>,
 }
 
@@ -662,28 +664,41 @@ pub(crate) fn piece_impulses<'c>(
     belt_held: &[Entity],
     dt: f32,
 ) -> Vec<Push> {
-    let mut contacts: Vec<&BeltContact> = contacts.into_iter().collect();
-    let key = |c: &BeltContact| {
-        [c.point, c.normal, c.traction, c.belt_velocity]
-            .map(|v| v.to_array().map(f32::to_bits))
-            .concat()
-            .into_iter()
-            .chain([c.load.to_bits(), c.mu.to_bits()])
-            .collect::<Vec<u32>>()
-    };
-    contacts.sort_by_cached_key(|c| key(c));
-    let mut pushes = Vec::new();
+    let mut dynamic = Vec::new();
     for contact in contacts {
-        // The field has no body to push; every collider contact came from this snapshot.
+        // Field support has no recipient, and static or kinematic recipients take no impulses.
         let Some(collider) = contact.collider else {
             continue;
         };
         let surface = bodies.surface(collider);
-        // Static and kinematic construction carries support without taking dynamic impulses.
-        let Some(slot) = surface.body else {
-            continue;
-        };
-        let collider = surface.collider;
+        let Some(slot) = surface.body else { continue };
+        dynamic.push((contact, slot, collider));
+    }
+    dynamic.sort_by_cached_key(|(contact, _, _)| {
+        #[cfg(test)]
+        bodies
+            .reaction_sort_keys
+            .set(bodies.reaction_sort_keys.get() + 1);
+        // The same lexicographic geometry key, on the stack rather than in per-contact vectors.
+        [
+            contact.point.x.to_bits(),
+            contact.point.y.to_bits(),
+            contact.point.z.to_bits(),
+            contact.normal.x.to_bits(),
+            contact.normal.y.to_bits(),
+            contact.normal.z.to_bits(),
+            contact.traction.x.to_bits(),
+            contact.traction.y.to_bits(),
+            contact.traction.z.to_bits(),
+            contact.belt_velocity.x.to_bits(),
+            contact.belt_velocity.y.to_bits(),
+            contact.belt_velocity.z.to_bits(),
+            contact.load.to_bits(),
+            contact.mu.to_bits(),
+        ]
+    });
+    let mut pushes = Vec::new();
+    for (contact, slot, collider) in dynamic {
         let body = &mut bodies.bodies[slot];
         let impulse = if belt_held.contains(&body.entity) {
             -source_force(contact) * dt
@@ -1875,6 +1890,41 @@ mod tests {
         }
         out.push(report.belt_reaction.to_bits());
         out
+    }
+
+    /// Ground and fixed construction have no dynamic impulse to size, so they must never enter
+    /// the geometry-key sort. The dedicated server relies on field-only driving doing no reaction
+    /// key construction. Fixture contacts alternate the ground and one standing chunk.
+    #[test]
+    fn field_and_fixed_support_never_enter_the_dynamic_reaction_sort() {
+        let mut app = physics();
+        let (_, chunk) = standing_chunk(&mut app, 0.0, 0.0);
+        app.update();
+        app.world_mut()
+            .run_system_once(move |rubble: RubbleQuery, bodies: Query<PieceData>| {
+                let mut pieces = RubbleBodies::gather(&rubble, &[chunk], &bodies);
+                let contacts: Vec<_> = (0..32)
+                    .map(|i| {
+                        let mut contact = press(Vec3::Z * i as f32, chunk, 100.0);
+                        if i % 2 == 0 {
+                            contact.collider = None;
+                        }
+                        contact
+                    })
+                    .collect();
+                let pushes = piece_impulses(&mut pieces, &contacts, &[], DT);
+                assert!(pushes.is_empty());
+                assert_eq!(
+                    pieces.reaction_sort_keys.get(),
+                    0,
+                    "contacts without dynamic recipients must not construct sort keys"
+                );
+                println!(
+                    "MEASURED fixture reaction keys: {}",
+                    pieces.reaction_sort_keys.get()
+                );
+            })
+            .unwrap();
     }
 
     /// Each tank's links visit only its own tick-start candidates, in the original gather order.
