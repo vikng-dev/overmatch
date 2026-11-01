@@ -65,10 +65,18 @@ fn lab_tp() -> TransmissionParams {
     .expect("lab transmission authoring must be valid")
 }
 
-/// The shipped Tiger's declared drivetrain authoring (mirrors tiger_1.tank.ron — down band
-/// 1150 with the RON's rationale), kept local to arithmetic tests so they exercise the same
-/// authored curve and speed anchors without reaching through the ECS/spec adapter. Exposed
-/// as the authoring struct so validator tests can mutate one field and re-validate.
+/// FIXTURE DATA: per-side belt inertia (kg) at the scale the shipped sheet's construction sum
+/// derives (DERIVED 4,749.86 kg, `reflected-track-inertia.md`), rounded. The arithmetic tests
+/// assert the scheduler at this coupling; none is a pass condition on the shipped vehicle.
+const TIGER_BELT_INERTIA: f32 = 4_750.0;
+
+/// FIXTURE DATA modelled on the shipped Tiger's declared drivetrain: the torque curve, speed
+/// anchors, bands, steering table, clutch and brakes as tiger_1.tank.ron states them (down band
+/// 1150 with the RON's rationale). The sprocket radius, half-tread and belt inertia are fixture
+/// values at the sheet's scale, not its measured or derived ones. Kept local to arithmetic tests
+/// so they exercise the authored curve and speed anchors without reaching through the ECS/spec
+/// adapter. Exposed as the authoring struct so validator tests can mutate one field and
+/// re-validate.
 fn tiger_authoring() -> TransmissionAuthoring<'static> {
     TransmissionAuthoring {
         idle_rpm: 600.0,
@@ -101,7 +109,7 @@ fn tiger_authoring() -> TransmissionAuthoring<'static> {
         drag_fraction: 0.25,
         engine_inertia_kgm2: 4.0,
         clutch_capacity_nm: 2400.0,
-        belt_inertia: 16_000.0,
+        belt_inertia: TIGER_BELT_INERTIA,
         shift_secs: 0.31,
         shift_addressing: ShiftAddressing::Direct,
         sprocket_radius_m: 19.0 * 0.130 / std::f32::consts::TAU,
@@ -159,7 +167,7 @@ fn grade_reserve_veto_blocks_f3_to_f4_on_20_degrees() {
     tp.shift_down_rpm = 800.0;
     let mut fp = lab_fp();
 
-    fp.inertia = 16_000.0;
+    fp.inertia = TIGER_BELT_INERTIA;
     let shaft = 980.0 * RPM_TO_RAD * tp.sprocket_radius / tp.gears_fwd[3];
 
     let mut flat = TransmissionState {
@@ -206,7 +214,7 @@ fn direct_and_sequential_execute_the_same_grade_target_differently() {
     base.shift_ticks = 2;
     let mut fp = lab_fp();
 
-    fp.inertia = 16_000.0;
+    fp.inertia = TIGER_BELT_INERTIA;
     let shaft = 600.0 * RPM_TO_RAD * base.sprocket_radius / base.gears_fwd[5];
     let demand = 57_000.0 * 9.81 * 20.0_f32.to_radians().sin();
     let seeded = |tp: &TransmissionParams| TransmissionState {
@@ -286,6 +294,11 @@ fn hill_hold_engages_selects_launch_gear_and_releases_on_capability() {
     tp.shift_addressing = ShiftAddressing::Direct;
     let mut fp = lab_fp();
 
+    // FIXTURE: a belt about 3.4 times [`TIGER_BELT_INERTIA`]. At that derived-scale inertia the
+    // release gate's one-tick clutch-lock force stays below demand + margin in F3, so the hold
+    // re-targets F2 and F1 and releases in F1 with both belts still at rest (MEASURED): the gate
+    // and the hold's target selection disagree. Routed to the owner, `sweep-drive-3-review.md`
+    // part 9.
     fp.inertia = 16_000.0;
     let demand = 57_000.0 * 9.81 * 20.0_f32.to_radians().sin();
     // A reverse climb's command and reactions are NEGATIVE (demand projects through dir = −1).
@@ -371,7 +384,7 @@ fn synthetic_weak_powertrain_30_deg_at_rest_enters_grade_limit() {
     tp.clutch_capacity = 100.0;
     let mut fp = lab_fp();
 
-    fp.inertia = 16_000.0;
+    fp.inertia = TIGER_BELT_INERTIA;
     let demand = 57_000.0 * 9.81 * 30.0_f32.to_radians().sin();
     let max_launch_force = tp
         .gears_fwd
@@ -439,7 +452,7 @@ fn hill_hold_rechecks_capability_while_latched() {
     tp.shift_ticks = 0;
     let mut fp = lab_fp();
 
-    fp.inertia = 16_000.0;
+    fp.inertia = TIGER_BELT_INERTIA;
     let demand = 57_000.0 * 9.81 * 20.0_f32.to_radians().sin();
     let mut st = TransmissionState {
         gear: 5,
@@ -474,7 +487,7 @@ fn hill_hold_margin_short_capable_gear_can_release() {
     tp.shift_ticks = 0;
     let mut fp = lab_fp();
 
-    fp.inertia = 16_000.0;
+    fp.inertia = TIGER_BELT_INERTIA;
     tp.clutch_capacity = tp.torque_at(0.0);
     let modeled = available_force_in_gear(&tp, 0.0, tp.gears_fwd[0]);
     let demand = modeled - 10_000.0;
@@ -517,7 +530,7 @@ fn hill_hold_release_cooldown_never_overridden_then_relatches() {
     tp.shift_ticks = 0;
     let mut fp = lab_fp();
 
-    fp.inertia = 16_000.0;
+    fp.inertia = TIGER_BELT_INERTIA;
     tp.clutch_capacity = tp.torque_at(0.0);
     let modeled = available_force_in_gear(&tp, 0.0, tp.gears_fwd[0]);
     let release_demand = modeled - 10_000.0;
@@ -595,7 +608,7 @@ fn hill_hold_engages_only_near_rest() {
     tp.shift_ticks = 2;
     let mut fp = lab_fp();
 
-    fp.inertia = 16_000.0;
+    fp.inertia = TIGER_BELT_INERTIA;
     let demand = 57_000.0 * 9.81 * 20.0_f32.to_radians().sin();
     let run = |reverse: bool, throttle: f32, m: f32| -> TransmissionState {
         let gear = if reverse { 4 } else { 5 };
@@ -818,7 +831,7 @@ fn steep_grade_after_upshift_corrects_before_lug() {
     tp.shift_ticks = 2;
     let mut fp = lab_fp();
 
-    fp.inertia = 16_000.0;
+    fp.inertia = TIGER_BELT_INERTIA;
     fp.grip.as_mut().unwrap().side_weight = 57_000.0 * 9.81 / 2.0;
     // The slope investigation's F4 operating point meeting a DERIVED 25-degree demand.
     let demand = 57_000.0 * 9.81 * 25.0_f32.to_radians().sin();
@@ -999,7 +1012,7 @@ fn overrun_below_ceiling_holds_gear_for_engine_braking() {
     tp.shift_ticks = 2;
     let mut fp = lab_fp();
 
-    fp.inertia = 16_000.0;
+    fp.inertia = TIGER_BELT_INERTIA;
     // Deep past the old governed + 150 firing floor, still under the curve-top ceiling.
     let overrun_rpm = (tp.engine.governed_rpm + tp.max_curve_rpm()) / 2.0;
     assert!(
@@ -1053,7 +1066,7 @@ fn protective_rescue_walks_ladder_under_guard_or_holds() {
     );
     let mut fp = lab_fp();
 
-    fp.inertia = 16_000.0;
+    fp.inertia = TIGER_BELT_INERTIA;
     let ceiling = tp.max_curve_rpm();
     let guard = (ceiling + OVERREV_MARGIN_RPM) * RPM_TO_RAD;
     let m_of = |gear: u8, rpm: f32| {
@@ -1145,7 +1158,7 @@ fn protective_rescue_walks_ladder_under_guard_or_holds() {
 fn sequential_rescue_steps_toward_static_target() {
     let mut fp = lab_fp();
 
-    fp.inertia = 16_000.0;
+    fp.inertia = TIGER_BELT_INERTIA;
     let overrun_rpm = tiger_tp().max_curve_rpm() + 1_500.0;
 
     let mut tp = tiger_tp();
@@ -1217,7 +1230,7 @@ fn flat_downshift_window_does_not_latch_hill_hold() {
     let tp = tiger_tp();
     let mut fp = lab_fp();
 
-    fp.inertia = 16_000.0;
+    fp.inertia = TIGER_BELT_INERTIA;
     let residual = reserve_floor(&fp, &tp) * 0.5; // DERIVED fixture: below model/contact resolution.
     let mut st = TransmissionState {
         gear: 3,
@@ -1364,7 +1377,7 @@ fn crank_rescue_not_preempted_by_deficit_machinery() {
     tp.shift_ticks = 2;
     let mut fp = lab_fp();
 
-    fp.inertia = 16_000.0;
+    fp.inertia = TIGER_BELT_INERTIA;
     let overrun_rpm = tp.max_curve_rpm() + 100.0;
     let shaft = overrun_rpm * RPM_TO_RAD * tp.sprocket_radius / tp.gears_fwd[4];
     let mut st = TransmissionState {
@@ -1548,7 +1561,7 @@ fn overrun_slip_guard_bounds_crank_at_top_gear() {
     let tp = tiger_tp();
     let mut fp = lab_fp();
 
-    fp.inertia = 16_000.0;
+    fp.inertia = TIGER_BELT_INERTIA;
     let guard = (tp.max_curve_rpm() + OVERREV_MARGIN_RPM) * RPM_TO_RAD;
     // The field-class overrun: a belt speed implying ~6000 rpm in top reverse gear.
     let m = -(6_000.0 * RPM_TO_RAD * tp.sprocket_radius / tp.gears_rev[3]);
@@ -1857,7 +1870,7 @@ fn protective_upshift_fires_under_brake_steer_and_fuel_cut() {
     tp.shift_ticks = 2;
     let mut fp = lab_fp();
 
-    fp.inertia = 16_000.0;
+    fp.inertia = TIGER_BELT_INERTIA;
     // Past the mechanical-protection ceiling (and so also past the governor-cut end).
     let overrun_rpm = tp.max_curve_rpm() + 200.0;
     let g4 = tp.gears_fwd[3];
@@ -1917,7 +1930,7 @@ fn upshift_arms_refuse_overrun_shaft_without_crank() {
     tp.shift_ticks = 2;
     let mut fp = lab_fp();
 
-    fp.inertia = 16_000.0;
+    fp.inertia = TIGER_BELT_INERTIA;
     let spike_rpm = tp.engine.governed_rpm + 200.0;
     let shaft = spike_rpm * RPM_TO_RAD * tp.sprocket_radius / tp.gears_fwd[5];
     for throttle in [1.0, 0.0] {
@@ -1966,7 +1979,7 @@ fn confirmed_deficit_without_target_falls_through_to_legal_upshift() {
     tp.shift_ticks = 2;
     let mut fp = lab_fp();
 
-    fp.inertia = 16_000.0;
+    fp.inertia = TIGER_BELT_INERTIA;
     let dead_zone_rpm = tp.engine.governed_rpm + 120.0;
     let shaft = dead_zone_rpm * RPM_TO_RAD * tp.sprocket_radius / tp.gears_fwd[4];
     let demand = 20_000.0;
@@ -2005,7 +2018,7 @@ fn demand_ema_seeds_from_first_sample_and_converges() {
     let tp = tiger_tp();
     let mut fp = lab_fp();
 
-    fp.inertia = 16_000.0;
+    fp.inertia = TIGER_BELT_INERTIA;
     // Mid-band F4 operating point: no band, reserve, or hill-hold decision interferes.
     let shaft = 1_700.0 * RPM_TO_RAD * tp.sprocket_radius / tp.gears_fwd[3];
     let mut st = TransmissionState {
