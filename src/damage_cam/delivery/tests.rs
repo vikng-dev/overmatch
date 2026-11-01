@@ -357,13 +357,13 @@ fn offline_play_delivers_the_same_projections() {
         let mut app = App::new();
         app.add_plugins(MinimalPlugins).add_plugins(offline_plugin);
         app.insert_resource(vocabulary.clone());
-        app.insert_resource(WeaponClock(42));
+        app.insert_resource(WeaponClock(crate::sim_tick::SimTick::new(42)));
         app.world_mut().spawn((player, Controlled));
         let mut recorded_shot = recorded(&report, SHOOTER, 1200, life(1));
         recorded_shot.outcome = None;
         app.world_mut().write_message(recorded_shot);
         app.world_mut().run_schedule(FixedUpdate);
-        assert_eq!(app.world().resource::<ShotClock>().0, 42);
+        assert_eq!(app.world().resource::<ShotClock>().0.raw(), 42);
 
         let store = app.world().resource::<ShotExplanations>();
         let stored: Vec<&StoredExplanation> = store.iter().map(|(_, stored)| stored).collect();
@@ -393,7 +393,7 @@ fn a_free_shooter_holding_its_target_keeps_both_projections() {
     let mut app = App::new();
     app.add_plugins(MinimalPlugins).add_plugins(offline_plugin);
     app.insert_resource(vocabulary);
-    app.insert_resource(WeaponClock(0));
+    app.insert_resource(WeaponClock(crate::sim_tick::SimTick::new(0)));
     app.world_mut().spawn((SHOOTER, FreeShooter));
     app.world_mut().spawn((STRUCK, Controlled));
     let mut recorded_shot = recorded(&report, SHOOTER, 1200, life(1));
@@ -423,7 +423,7 @@ fn offline_recording_requires_vocabulary_readiness() {
     let mut app = App::new();
     app.add_plugins(MinimalPlugins)
         .add_plugins(offline_plugin)
-        .insert_resource(WeaponClock(0));
+        .insert_resource(WeaponClock(crate::sim_tick::SimTick::new(0)));
     app.world_mut().run_schedule(FixedUpdate);
     app.world_mut()
         .write_message(recorded(&report, SHOOTER, 1200, life(1)));

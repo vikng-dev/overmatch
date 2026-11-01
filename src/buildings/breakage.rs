@@ -1161,7 +1161,7 @@ fn apply_deposits(mut p: DepositParam) {
             });
         }
     }
-    let tick = p.clock.as_deref().map_or(0, |clock| clock.0);
+    let tick = p.clock.as_deref().map_or(0, |clock| clock.0.raw());
     let frames: BTreeMap<Entity, Frame> = p
         .buildings
         .iter()

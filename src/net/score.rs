@@ -42,7 +42,7 @@ pub(crate) enum Respawn {
     NeverKnockedOut,
     /// Its life `life` was the last knocked out; its respawn opens at authority tick `tick`
     /// ([`ShotClock`] units, wrapping).
-    Opens { life: CombatantLife, tick: u32 },
+    Opens { life: CombatantLife, tick: SimTick },
 }
 
 /// Whether a knocked-out life's respawn is open at a tick.
@@ -110,7 +110,7 @@ impl Scoreboard {
                 life: knocked,
                 tick,
             } if knocked == life => {
-                let opens = SimTick::new(tick);
+                let opens = tick;
                 Some(if now.has_reached(opens) {
                     Opening::Open
                 } else {
@@ -185,7 +185,7 @@ impl RespawnGate<'_, '_> {
         self.boards
             .single()
             .expect("server startup spawns exactly one scoreboard before any combatant spawns")
-            .opening(combatant, life, SimTick::new(self.clock.0))
+            .opening(combatant, life, self.clock.0)
             .expect(
                 "the knockout transition (`TankKnockout`) scored this life's opening the tick it \
                  was knocked out",
@@ -320,7 +320,7 @@ fn score_knockout(
     standing.losses += 1;
     standing.respawn = Respawn::Opens {
         life,
-        tick: SimTick::new(clock.0).after(wait.ticks).raw(),
+        tick: clock.0.after(wait.ticks),
     };
     match line.credit {
         Credit::Shooter(shooter) => {
@@ -580,7 +580,7 @@ mod tests {
             Scoreboard(vec![Standing {
                 respawn: Respawn::Opens {
                     life: CombatantLife(1),
-                    tick,
+                    tick: SimTick::new(tick),
                 },
                 ..standing(5, 0, 1)
             }])

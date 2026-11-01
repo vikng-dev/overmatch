@@ -241,7 +241,9 @@ fn cycle_battles(
         *battle = next;
         info!(
             "server: Battle {} {:?} at tick {}",
-            battle.number, battle.phase, clock.0
+            battle.number,
+            battle.phase,
+            clock.0.raw()
         );
     }
 }
@@ -1597,10 +1599,7 @@ mod tests {
             standing.losses = 1;
         }
         let now = app.world().resource::<crate::ShotClock>().0;
-        advance(
-            &mut app,
-            crate::sim_tick::SimTick::new(now).remaining_until(combat_end),
-        );
+        advance(&mut app, now.remaining_until(combat_end));
         app.update();
         assert!(
             app.world().get_entity(old_root).is_err(),
@@ -1709,7 +1708,7 @@ mod tests {
             *app.world().get::<TankCommand>(tank).unwrap(),
             TankCommand::default()
         );
-        app.world_mut().resource_mut::<crate::ShotClock>().0 = end.raw();
+        app.world_mut().resource_mut::<crate::ShotClock>().0 = end;
         app.world_mut().run_schedule(FixedUpdate);
         assert!(app.world().get::<BattleState>(board).unwrap().is_combat());
         let parsed = *app.world().get::<ParsedTankCommand>(tank).unwrap();
@@ -1739,7 +1738,7 @@ mod tests {
     /// Advance the authority tick by `ticks`.
     fn advance(app: &mut App, ticks: u32) {
         let mut clock = app.world_mut().resource_mut::<crate::ShotClock>();
-        clock.0 = clock.0.wrapping_add(ticks);
+        clock.0 = clock.0.after(crate::sim_tick::TickSpan::of(ticks));
     }
 
     /// The respawn opens the mode's wait after the knockout, on the server: a request one tick

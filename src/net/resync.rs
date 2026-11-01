@@ -371,7 +371,7 @@ mod tests {
                 .count()
                 > roots.len()
         );
-        let clock = world.resource::<crate::WeaponClock>().0;
+        let clock = world.resource::<crate::WeaponClock>().0.raw();
         for tick in [90, 91, 92, 100, 101] {
             cursor(&mut app, tick);
             app.update();
@@ -388,7 +388,7 @@ mod tests {
             }
         }
         assert!(
-            app.world().resource::<crate::WeaponClock>().0 > clock,
+            app.world().resource::<crate::WeaponClock>().0.raw() > clock,
             "the fixed gameplay loop, including shooting, must actually run"
         );
     }

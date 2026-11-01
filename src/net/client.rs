@@ -2353,9 +2353,9 @@ pub(super) fn age_sanctioned_shots(mut sanctioned: ResMut<SanctionedShots>, time
 ///
 /// Bounded by construction: lightyear's `Tick` is a MONOTONIC `u32` that does not wrap, and
 /// `Sub<Tick>` returns the signed difference saturated to the `i32` range — never a naive `u32`
-/// subtraction that would underflow. (A `u32` tick is exhausted after ~777 days at 64 Hz; no
-/// session gets near it.) So any pair of ticks, however far apart, lands in one of the arms below,
-/// which is what the saturation test pins.
+/// subtraction that would underflow. The network publication boundary refuses timeline
+/// exhaustion, so no privately wrapped gameplay tick enters this numerically ordered domain.
+/// Outside-input ticks remain bounded by these arms, as the saturation test pins.
 ///   - elapsed < 0: the fire tick is AHEAD of our current tick. The server fires at a tick ≤ its
 ///     own now, and the local (input) timeline runs ahead of the server, so this only happens on
 ///     clock skew or a malicious tick — don't rewind; spawn at the muzzle (`Some(0)`).

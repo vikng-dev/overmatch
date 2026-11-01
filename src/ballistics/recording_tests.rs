@@ -814,7 +814,7 @@ fn a_round_from_a_knocks_out_b_crediting_a_a_knockout_and_b_a_loss() {
     };
     let opened = Respawn::Opens {
         life: CombatantLife(0),
-        tick: wait.ticks(),
+        tick: crate::sim_tick::SimTick::new(wait.ticks()),
     };
     assert_eq!(
         scored(a),
@@ -1458,7 +1458,7 @@ fn a_record_names_the_struck_life_its_ticks_and_the_hull_pose() {
     let first = 500;
     let mut recorded = Vec::new();
     for tick in first..first + 8 {
-        app.insert_resource(crate::ShotClock(tick));
+        app.insert_resource(crate::ShotClock(crate::sim_tick::SimTick::new(tick)));
         recorded.extend(run(&mut app, 1));
     }
     assert_eq!(recorded.len(), 1);
@@ -2159,7 +2159,7 @@ fn production_discovery_exports_a_valid_clock_before_crossing_playback_finishes(
         paths.0.push(outcome.clone());
     }
     let mut app = recording_world(false);
-    app.insert_resource(crate::ShotClock(100))
+    app.insert_resource(crate::ShotClock(crate::sim_tick::SimTick::new(100)))
         .init_resource::<Paths>()
         .add_observer(capture);
     tank(

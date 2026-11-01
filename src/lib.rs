@@ -642,14 +642,19 @@ pub(crate) struct ClientReplica;
 /// ballistics ages sanctioned outcomes and stamps lifecycle rows against it; sandbox shells, with no
 /// clock, are unkeyed.
 #[derive(Resource, Default)]
-pub(crate) struct ShotClock(pub u32);
+pub(crate) struct ShotClock(pub sim_tick::SimTick);
 
 /// Current simulation tick used by the tick-correlated weapon gate. Network compositions publish
 /// `LocalTimeline` into it before gameplay; non-network compositions
 /// advance it once after each playing fixed tick, wrapping freely. Deadline ordering belongs
 /// to [`sim_tick::SimTick`], never the numeric order of this clock's counter.
 #[derive(Resource, Default)]
-pub(crate) struct WeaponClock(pub u32);
+pub(crate) struct WeaponClock(pub sim_tick::SimTick);
+
+/// The composition publishes the weapon clock; the local fallback must not advance it.
+/// Network compositions install this ownership marker alongside their timeline publisher.
+#[derive(Resource)]
+pub(crate) struct PublishedWeaponClock;
 
 /// Physics collision layers. View/aim queries that want the ground (camera terrain ray, sight
 /// probes) filter to `Terrain` only, so they ignore vehicle colliders. Shared infra, hence at

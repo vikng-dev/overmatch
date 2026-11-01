@@ -420,7 +420,7 @@ pub(super) fn install_server(app: &mut App) {
 
 fn queue_fire(
     fire: On<FireShell>,
-    timeline: Res<LocalTimeline>,
+    clock: Res<crate::ShotClock>,
     controlled: Query<&ControlledBy>,
     combatants: Query<&crate::CombatantId>,
     mut transport: ResMut<ShotTransport>,
@@ -445,7 +445,7 @@ fn queue_fire(
         .expect("the tank load gate limits weapon slots to the wire's u8");
     assert_eq!(
         (shot.combatant, shot.weapon, shot.fire_tick),
-        (combatant, weapon, timeline.tick().0),
+        (combatant, weapon, clock.0.raw()),
         "the authority's spawn-time ShotId agrees with its firing source and tick"
     );
 
@@ -474,7 +474,7 @@ fn queue_fire(
         fuze_mode: fire.fuze_mode,
         fire_tick: Tick(shot.fire_tick),
     };
-    crate::shot_trace::record(&mut shot_trace, "fire", timeline.tick().0, shot, || {
+    crate::shot_trace::record(&mut shot_trace, "fire", clock.0.raw(), shot, || {
         json!({
             "o": [event.origin.x, event.origin.y, event.origin.z],
             "tr": event.tracer,
@@ -484,7 +484,7 @@ fn queue_fire(
     transport.enqueue_public(
         FireVisualFact::Fire(event),
         class,
-        timeline.tick(),
+        Tick(clock.0.raw()),
         &mut metrics,
     );
 }
@@ -929,6 +929,7 @@ mod tests {
     fn authority_fire_fixture() -> (World, impl Fn() -> FireShell) {
         let mut world = World::new();
         world.init_resource::<LocalTimeline>();
+        world.init_resource::<crate::ShotClock>();
         world.init_resource::<ShotTransport>();
         world.init_resource::<ShotTransportMetrics>();
         world.add_observer(queue_fire);
@@ -1026,6 +1027,7 @@ mod tests {
         let mut timeline = LocalTimeline::default();
         timeline.apply_delta(TICK.into());
         world.insert_resource(timeline);
+        world.insert_resource(crate::ShotClock(crate::sim_tick::SimTick::new(TICK.into())));
         world.init_resource::<ShotTransport>();
         world.init_resource::<ShotTransportMetrics>();
         world.add_observer(queue_fire);

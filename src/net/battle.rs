@@ -113,12 +113,11 @@ impl BattleState {
     /// it never ends combat early. `Boundary::FillUp` asks the caller to clear the frozen score.
     pub(super) fn advance(
         &mut self,
-        now: u32,
+        now: SimTick,
         occupied: bool,
         rules: &CycleRules,
         score: &Scoreboard,
     ) -> Boundary {
-        let now = SimTick::new(now);
         match self.phase {
             BattlePhase::FillUp { ends_at: None } if occupied => {
                 self.phase = BattlePhase::FillUp {
@@ -283,23 +282,32 @@ mod tests {
         let mut battle = BattleState::default();
         let score = Scoreboard::default();
         let start = u32::MAX - 2;
-        battle.advance(start, false, &rules, &score);
+        battle.advance(SimTick::new(start), false, &rules, &score);
         assert_eq!(battle.phase, BattlePhase::FillUp { ends_at: None });
-        battle.advance(start, true, &rules, &score);
+        battle.advance(SimTick::new(start), true, &rules, &score);
         assert_eq!(
-            battle.advance(start + 1, false, &rules, &score),
+            battle.advance(SimTick::new(start + 1), false, &rules, &score),
             Boundary::None
         );
         assert_eq!(
-            battle.advance(u32::MAX, false, &rules, &score),
+            battle.advance(SimTick::new(u32::MAX), false, &rules, &score),
             Boundary::Combat
         );
         assert!(battle.accepts_joins());
-        battle.advance(0, false, &rules, &score);
+        battle.advance(SimTick::new(0), false, &rules, &score);
         assert!(!battle.accepts_joins());
-        assert_eq!(battle.advance(2, false, &rules, &score), Boundary::None);
-        assert_eq!(battle.advance(3, false, &rules, &score), Boundary::Results);
-        assert_eq!(battle.advance(5, false, &rules, &score), Boundary::FillUp);
+        assert_eq!(
+            battle.advance(SimTick::new(2), false, &rules, &score),
+            Boundary::None
+        );
+        assert_eq!(
+            battle.advance(SimTick::new(3), false, &rules, &score),
+            Boundary::Results
+        );
+        assert_eq!(
+            battle.advance(SimTick::new(5), false, &rules, &score),
+            Boundary::FillUp
+        );
         assert_eq!(battle.number, 2);
         assert_eq!(battle.phase, BattlePhase::FillUp { ends_at: None });
         assert!(battle.accepts_joins());

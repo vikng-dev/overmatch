@@ -200,7 +200,7 @@ fn record_walk_crossings(
         }
         trace.global_row(
             "walk_crossing",
-            clock.0,
+            clock.0.raw(),
             json!({
                 "kinds": seen,
                 "through": matches!(end, crate::ballistics::CrossingEnd::Exit { .. }),
@@ -220,7 +220,7 @@ fn record_unresolved_contact(
         crate::ballistics::ImpactSurface::Material(_)
     ) && matches!(impact.outcome, crate::ballistics::ImpactOutcome::Struck)
     {
-        trace.global_row("walk_first_contact_stop", clock.0, json!({}));
+        trace.global_row("walk_first_contact_stop", clock.0.raw(), json!({}));
     }
 }
 
@@ -233,10 +233,10 @@ fn record_walk_world(
     mut trace: ResMut<ShotTrace>,
 ) {
     // DERIVED: the shipping fixed clock has 64 ticks per simulation second.
-    if clock.0.is_multiple_of(64) {
+    if clock.0.raw().is_multiple_of(64) {
         trace.global_row(
             "walk_world",
-            clock.0,
+            clock.0.raw(),
             json!({
                 "trees": trees.iter().count(), "tanks": tanks.iter().count(),
                 "wall_changes": walls.entries.len(),

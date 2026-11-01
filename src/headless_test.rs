@@ -1754,7 +1754,7 @@ fn armor_sandbox_boots_headless() {
     // The weapon clock advances one tick per fixed step, as the game's does: each range round's
     // `ShotId` names its tick.
     assert!(
-        app.world().resource::<crate::WeaponClock>().0 > 0,
+        app.world().resource::<crate::WeaponClock>().0.raw() > 0,
         "the armor sandbox's weapon clock never advanced — every range round would share tick 0",
     );
 

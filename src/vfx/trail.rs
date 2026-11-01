@@ -455,7 +455,7 @@ fn flush_removed_shell_path(
     let Ok((path, marks, shot)) = shells.get(remove.entity) else {
         return; // MG/no-scene shell: it never owns a smoke ribbon.
     };
-    let now = present.as_deref().map_or(0, |present| present.0);
+    let now = present.as_deref().map_or(0, |present| present.0.raw());
     let Some(mut trail) = trails.iter_mut().find(|trail| trail.shell == remove.entity) else {
         if let Some(shot) = shot {
             crate::shot_trace::record(&mut shot_trace, "trail", now, shot.0, || {
@@ -493,7 +493,7 @@ fn update_trails(
     mut commands: Commands,
 ) {
     let dt = time.delta_secs();
-    let now = present.as_deref().map_or(0, |present| present.0);
+    let now = present.as_deref().map_or(0, |present| present.0.raw());
     let cam = camera.single().map(|c| c.translation()).unwrap_or(Vec3::Y);
     for (entity, mut trail, mesh) in &mut trails {
         // Age first, then expire from the tail.

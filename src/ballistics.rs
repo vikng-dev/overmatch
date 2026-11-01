@@ -1997,7 +1997,7 @@ fn on_fire_shell(
     )>,
     mut commands: Commands,
 ) {
-    let now = shot_clock.as_deref().map_or(0, |clock| clock.0);
+    let now = shot_clock.as_deref().map_or(0, |clock| clock.0.raw());
     if fire.catch_up_ticks > MAX_COSMETIC_CATCH_UP_TICKS {
         warn!(
             catch_up_ticks = fire.catch_up_ticks,
@@ -2440,7 +2440,7 @@ fn integrate_projectiles(
     }
 
     // The published authority tick stamps immutable paths. It is absent on tank-less fixtures.
-    let present = shot_clock.map(|clock| clock.0);
+    let present = shot_clock.map(|clock| clock.0.raw());
     // The tick every shot-lifecycle row this march writes is stamped with (the tick each cosmetic
     // shell lives at). Never read on the authority — every row site is `!deposit`.
     let now = present.unwrap_or(0);

@@ -262,7 +262,7 @@ impl MarchRecorder<'_, '_> {
         let Some(mut recording) = recording else {
             return;
         };
-        let tick = self.clock.as_ref().map_or(0, |clock| clock.0);
+        let tick = self.clock.as_ref().map_or(0, |clock| clock.0.raw());
         for (index, tank) in events {
             let latest = recording
                 .struck
@@ -613,7 +613,9 @@ fn recorded(
         shot: recording.shot,
         encounter: struck.encounter,
         contact_tick: struck.contact_tick,
-        completion_tick: world.get_resource::<ShotClock>().map_or(0, |clock| clock.0),
+        completion_tick: world
+            .get_resource::<ShotClock>()
+            .map_or(0, |clock| clock.0.raw()),
         outcome: sanctioned_outcome(log.marks, struck.from),
         hull,
         report,

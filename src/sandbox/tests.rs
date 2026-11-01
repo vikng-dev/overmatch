@@ -153,14 +153,14 @@ fn the_range_fires_the_selected_round_as_its_data_states() {
         "a step back from the first round wraps to the last and drops the override"
     );
 
-    app.world_mut().resource_mut::<ShotClock>().0 = 7;
+    app.world_mut().resource_mut::<ShotClock>().0 = crate::sim_tick::SimTick::new(7);
     tap(&mut app, |bindings| bindings.fire_primary);
     let own = expected(&app, camera, last, last_round.muzzle_speed, 7);
     assert_eq!(app.world().resource::<Shells>().0, vec![own]);
 
     let override_speed = last_round.muzzle_speed * 0.5;
     app.world_mut().resource_mut::<ShotParams>().muzzle_speed = Some(override_speed);
-    app.world_mut().resource_mut::<ShotClock>().0 = 8;
+    app.world_mut().resource_mut::<ShotClock>().0 = crate::sim_tick::SimTick::new(8);
     tap(&mut app, |bindings| bindings.fire_primary);
     let overridden = expected(&app, camera, last, override_speed, 8);
     assert_eq!(app.world().resource::<Shells>().0.last(), Some(&overridden));
@@ -172,11 +172,11 @@ fn the_range_fires_the_selected_round_as_its_data_states() {
 #[test]
 fn the_range_fires_one_round_per_tick() {
     let (mut app, _) = range();
-    app.world_mut().resource_mut::<ShotClock>().0 = 3;
+    app.world_mut().resource_mut::<ShotClock>().0 = crate::sim_tick::SimTick::new(3);
     tap(&mut app, |bindings| bindings.fire_primary);
     tap(&mut app, |bindings| bindings.fire_primary);
     assert_eq!(app.world().resource::<Shells>().0.len(), 1);
-    app.world_mut().resource_mut::<ShotClock>().0 = 4;
+    app.world_mut().resource_mut::<ShotClock>().0 = crate::sim_tick::SimTick::new(4);
     tap(&mut app, |bindings| bindings.fire_primary);
     let ticks: Vec<_> = app
         .world()

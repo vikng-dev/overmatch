@@ -725,7 +725,7 @@ fn fire(
     gun: Query<&Weapon, With<RangeGun>>,
     shot: Res<ShotParams>,
     clock: Res<ShotClock>,
-    mut last_tick: Local<Option<u32>>,
+    mut last_tick: Local<Option<crate::sim_tick::SimTick>>,
     mut commands: Commands,
 ) {
     let gun = gun
@@ -743,7 +743,7 @@ fn fire(
         (camera, transform, combatant),
         gun,
         *shot,
-        clock.0,
+        clock.0.raw(),
     );
     *last_tick = Some(clock.0);
 }

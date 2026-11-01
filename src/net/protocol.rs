@@ -237,7 +237,8 @@ use crate::{CombatantId, CombatantLife, ShotId};
 /// REV 61 (#238): `WeaponGateState` decodes through its phase rule and refuses paused load work
 /// beside a belt with rounds left. Its encoding is unchanged; its definition moves.
 /// REV 62 (#247): a fired round carries its birth at the source collider exit beside the muzzle.
-pub const PROTOCOL_REV: u32 = 62;
+/// REV 63 (#238): respawn openings carry the shared SimTick deadline type.
+pub const PROTOCOL_REV: u32 = 63;
 
 /// Compatibility tag derived from the complete pinned wire manifest plus the crate version. This
 /// is the runtime handshake value: version-exact, so a version bump intentionally changes it.
@@ -820,27 +821,36 @@ fn mirror_swap_from_net_crew(
     }
 }
 
-/// Republish the network timeline as net-neutral sim vocabulary before every gameplay tick: the
-/// game's one tick, the fixed ticks run, wrapping ([`crate::sim_tick`]). Lightyear 0.30's `Tick`
-/// saturates at `u32::MAX` instead of wrapping (`lightyear_core::tick::Tick`'s `AddAssign`), so
-/// its timeline stops counting at that end. Below the end the published tick is the timeline's;
-/// each fixed tick the timeline is held there advances it by one more, so a deadline armed across
-/// the end matures as every other does.
+/// A network session cannot advance past Lightyear's numeric timeline. Continuing there would
+/// freeze input and replication ordering even if gameplay kept a private wrapping counter.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct NetworkTickExhausted;
+
+impl std::fmt::Display for NetworkTickExhausted {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("network timeline exhausted; restart the session before play can continue")
+    }
+}
+
+/// The sole conversion from the live network timeline to the gameplay deadline domain. The
+/// exhausted transport tick is refused, so no independently extended tick can be published.
+fn network_gameplay_tick(tick: Tick) -> Result<crate::sim_tick::SimTick, NetworkTickExhausted> {
+    if tick.0 == u32::MAX {
+        Err(NetworkTickExhausted)
+    } else {
+        Ok(crate::sim_tick::SimTick::new(tick.0))
+    }
+}
+
+/// Republish the same network tick for every gameplay consumer before the gameplay pass.
+/// Offline compositions advance their own wrapping tick; network compositions require an
+/// advancing transport timeline and refuse its exhaustion visibly at this boundary.
 pub(super) fn publish_shot_clock(
     mut shot_clock: ResMut<crate::ShotClock>,
     mut weapon_clock: ResMut<crate::WeaponClock>,
     timeline: Res<LocalTimeline>,
-    mut held_at_end: Local<u32>,
 ) {
-    let tick = timeline.tick().0;
-    let tick = if tick == u32::MAX {
-        let past = tick.wrapping_add(*held_at_end);
-        *held_at_end = held_at_end.wrapping_add(1);
-        past
-    } else {
-        *held_at_end = 0;
-        tick
-    };
+    let tick = network_gameplay_tick(timeline.tick()).unwrap_or_else(super::harness::refuse_start);
     shot_clock.0 = tick;
     weapon_clock.0 = tick;
 }
@@ -1102,7 +1112,7 @@ const WIRE_SURFACE_HASH: u64 = 0xc0256acf39c3f9da;
 /// The pinned hash of the OWN wire-facing type DEFINITIONS (field layout, not just names). Re-pin it
 /// whenever a wire-facing struct/enum definition changes; house process also bumps
 /// [`PROTOCOL_REV`]. The tripwire prints the new value. See the block above for the coverage model.
-const WIRE_TYPES_HASH: u64 = 0x7dde0908f93634cd;
+const WIRE_TYPES_HASH: u64 = 0xe4d52473344892b9;
 
 /// The pinned `Cargo.lock` versions of the external crates whose types ride the wire (avian's
 /// replicated physics components; lightyear's wire framing / input protocol). A bump of either can
@@ -1116,6 +1126,7 @@ pub(crate) fn plugin(app: &mut App) {
     // `LocalTimeline` is incremented by lightyear in `FixedFirst` (lightyear_core's
     // `increment_local_tick`); publish it before every `GameplaySet` consumer, especially
     // `shooting::fire`, which must put the id on its initial FireShell event.
+    app.insert_resource(crate::PublishedWeaponClock);
     app.init_resource::<crate::ShotClock>();
     app.init_resource::<crate::ballistics::PathClock>();
     app.init_resource::<crate::WeaponClock>();
@@ -2476,43 +2487,34 @@ mod tests {
         tl
     }
 
-    /// The game's damage model: fire eligibility. The published tick keeps counting where
-    /// lightyear's saturating timeline stops, so a weapon deadline armed at its end matures. The
-    /// weapon gate and the respawn opening rely on one wrapping tick in network compositions.
+    /// The game's damage model: shot identity, deadline gates and replica catch-up all read
+    /// the transport timeline. Joining processes cannot invent a private epoch at its end.
     #[test]
-    fn the_published_tick_wraps_where_the_network_timeline_saturates() {
+    fn network_publication_has_no_private_epoch_and_refuses_exhaustion() {
         let mut world = World::new();
-        let mut end = timeline_at(i32::MAX);
-        end.apply_delta(i32::MAX);
-        end.apply_delta(1);
-        assert_eq!(end.tick().0, u32::MAX, "fixture: the timeline at its end");
-        world.insert_resource(end);
+        let mut timeline = timeline_at(i32::MAX);
+        timeline.apply_delta(i32::MAX);
+        world.insert_resource(timeline);
         world.init_resource::<crate::ShotClock>();
         world.init_resource::<crate::WeaponClock>();
         let mut schedule = Schedule::default();
         schedule.add_systems(publish_shot_clock);
-        let mut gate = crate::tank::WeaponGateState::default();
-        let mut published = Vec::new();
-        for _ in 0..4 {
-            // Lightyear's own increment, which holds the timeline at its end.
-            world.resource_mut::<LocalTimeline>().apply_delta(1);
+        for _ in 0..3 {
             schedule.run(&mut world);
+            let transport = world.resource::<LocalTimeline>().tick();
             let now = world.resource::<crate::WeaponClock>().0;
+            assert_eq!(now.raw(), transport.0);
             assert_eq!(world.resource::<crate::ShotClock>().0, now);
-            if published.is_empty() {
-                gate.arm(
-                    crate::sim_tick::SimTick::new(now),
-                    crate::sim_tick::TickSpan::try_from(2).expect("fixture span"),
-                );
-            }
-            published.push((
-                now,
-                gate.deadline_reached(crate::sim_tick::SimTick::new(now)),
-            ));
+            assert_eq!(
+                network_gameplay_tick(transport),
+                Ok(now),
+                "a new process reads the same tick without local history"
+            );
         }
+        world.resource_mut::<LocalTimeline>().apply_delta(1);
         assert_eq!(
-            published,
-            [(u32::MAX, false), (0, false), (1, true), (2, true)]
+            network_gameplay_tick(world.resource::<LocalTimeline>().tick()),
+            Err(NetworkTickExhausted)
         );
     }
 

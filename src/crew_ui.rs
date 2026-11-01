@@ -259,8 +259,7 @@ fn update_status_panel(
                 .copied()
                 .expect("weapon and gate slots are built together at spawn");
             let remaining_secs =
-                state.remaining_ticks(crate::sim_tick::SimTick::new(weapon_clock.0)) as f32
-                    * fixed_time.timestep().as_secs_f32();
+                state.remaining_ticks(weapon_clock.0) as f32 * fixed_time.timestep().as_secs_f32();
             let no_fire = evaluate(&weapon.fire, &quality) <= 0.0;
             let status = weapon_status(
                 weapon.fire_cycle,

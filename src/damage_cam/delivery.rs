@@ -321,8 +321,8 @@ pub(crate) fn expire_explanations(time: Res<Time<Virtual>>, mut store: ResMut<Sh
 
 /// Single-player: the shot clock, and every record explained to the player, without a network hop.
 ///
-/// The clock is [`WeaponClock`]'s tick, published before gameplay as the network compositions
-/// publish theirs, so every round the player's tank and its opponents fire carries a [`ShotId`].
+/// The clock copies [`WeaponClock`]'s [`crate::sim_tick::SimTick`] before gameplay, as network
+/// compositions publish theirs, so every round the player's tank and its opponents fire carries a [`ShotId`].
 /// Each tank the scenario spawns carries its combatant identity from spawn.
 pub(crate) fn offline_plugin(app: &mut App) {
     app.init_resource::<ShotClock>()

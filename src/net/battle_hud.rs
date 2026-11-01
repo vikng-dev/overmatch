@@ -1302,7 +1302,7 @@ mod tests {
         assert!(!shown(&mut app, MatchUi::Scoreboard));
 
         // Fixture input time leads presentation time. The match display must follow the latter.
-        app.world_mut().resource_mut::<crate::ShotClock>().0 = 400;
+        app.world_mut().resource_mut::<crate::ShotClock>().0 = crate::sim_tick::SimTick::new(400);
         app.world_mut()
             .resource_mut::<InterpolationTimeline>()
             .set_now(lightyear::core::time::TickInstant::from(

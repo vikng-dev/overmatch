@@ -14,7 +14,7 @@ pub(crate) use birth::outside_source;
 use crate::ballistics::{FireShell, ShotSource};
 use crate::command::{ConsumeCommandEdges, TankCommand};
 use crate::damage::{TankVolumes, VolumeFacets, requirement_met};
-use crate::sim_tick::{SimTick, TickSpan};
+use crate::sim_tick::TickSpan;
 use crate::spec::{FireCycle, Trigger};
 use crate::state::{AppState, GameplaySet, SimPhase};
 use crate::tank::{
@@ -99,7 +99,9 @@ pub fn plugin(app: &mut App) {
         .add_systems(Startup, check_weapon_timestep)
         .add_systems(
             FixedLast,
-            advance_weapon_clock.run_if(in_state(AppState::Playing)),
+            advance_weapon_clock
+                .run_if(in_state(AppState::Playing))
+                .run_if(not(resource_exists::<crate::PublishedWeaponClock>)),
         )
         .add_systems(
             FixedUpdate,
@@ -126,7 +128,7 @@ fn check_weapon_timestep(time: Res<Time<Fixed>>) {
 /// Advance the local-only fallback clock after a completed fixed tick. Network compositions
 /// overwrite it from `LocalTimeline` before the next gameplay pass.
 pub(crate) fn advance_weapon_clock(mut clock: ResMut<crate::WeaponClock>) {
-    clock.0 = SimTick::new(clock.0).after(TickSpan::ONE).raw();
+    clock.0 = clock.0.after(TickSpan::ONE);
 }
 
 /// Why a weapon's [`TankRoot`] resolves: [`crate::tank`]'s assembly spawns every weapon under its
@@ -161,7 +163,7 @@ fn tick_weapon_gate(
     replica: Option<Res<crate::ClientReplica>>,
     controlled: Query<(), With<crate::tank::Controlled>>,
 ) {
-    let now = SimTick::new(clock.0);
+    let now = clock.0;
     for (weapon, slot, root) in &weapons {
         let tank_volumes = tanks.get(root.0).expect(WEAPON_ROOT_IS_A_TANK);
         // A client holds no gate for another player's tank: `WeaponGate` is owner-private
@@ -378,7 +380,7 @@ fn fire(
                 combatant: *combatant,
                 weapon: u8::try_from(slot.0)
                     .expect("the tank load gate limits weapon slots to the wire's u8"),
-                fire_tick: clock.0,
+                fire_tick: clock.0.raw(),
             }
         });
         // Fused own fire suppresses exactly the rounds the server will echo: a keyed shot's shell,
@@ -467,7 +469,7 @@ fn fire(
                     }
                 }
             };
-            state.arm(SimTick::new(weapon_clock.0), delay);
+            state.arm(weapon_clock.0, delay);
         }
     }
 }
@@ -678,6 +680,22 @@ mod tests {
         assert_eq!(peer.remaining_ticks(at(u32::MAX - 1)), 2);
     }
 
+    /// The game's damage model: the published clock is also the UI's legality clock. The
+    /// local fallback must not put it one tick ahead between network publications.
+    /// FIXTURE DATA: the publisher holds both clocks at tick 42 between fixed ticks.
+    #[test]
+    fn a_published_weapon_clock_never_advances_between_network_ticks() {
+        let mut app = pause_test_app();
+        app.insert_resource(crate::PublishedWeaponClock)
+            .insert_resource(crate::WeaponClock(SimTick::new(42)))
+            .insert_resource(crate::ShotClock(SimTick::new(42)));
+        app.world_mut().run_schedule(FixedLast);
+        assert_eq!(
+            app.world().resource::<crate::WeaponClock>().0,
+            app.world().resource::<crate::ShotClock>().0
+        );
+    }
+
     /// The game's damage model: weapon eligibility assumes the asset parser's timestep.
     /// Even an unarmed composition must refuse a mismatch at startup, before play.
     #[test]
@@ -704,9 +722,9 @@ mod tests {
         assert!(!gate.deadline_reached(at(2)));
         assert!(gate.deadline_reached(at(3)));
         let mut world = World::new();
-        world.insert_resource(crate::WeaponClock(u32::MAX));
+        world.insert_resource(crate::WeaponClock(crate::sim_tick::SimTick::new(u32::MAX)));
         world.run_system_once(advance_weapon_clock).unwrap();
-        assert_eq!(world.resource::<crate::WeaponClock>().0, 0);
+        assert_eq!(world.resource::<crate::WeaponClock>().0.raw(), 0);
         // A peer's complete typed gate, including the last counter value, is safe to pause.
         let wire = serde_json::to_vec(&gate).unwrap();
         let mut peer: WeaponGateState = serde_json::from_slice(&wire).unwrap();
@@ -882,7 +900,7 @@ mod tests {
         let mut fixed = Time::<Fixed>::default();
         fixed.set_timestep_hz(64.0);
         world.insert_resource(fixed);
-        world.insert_resource(crate::WeaponClock(0));
+        world.insert_resource(crate::WeaponClock(crate::sim_tick::SimTick::new(0)));
         world
     }
 
@@ -986,7 +1004,10 @@ mod tests {
         let ready_tick = gate_state(app.world(), root)
             .ready_tick()
             .expect("a reload is armed");
-        while !crate::sim_tick::SimTick::new(app.world().resource::<crate::WeaponClock>().0)
+        while !app
+            .world()
+            .resource::<crate::WeaponClock>()
+            .0
             .has_reached(ready_tick)
         {
             gun_tick(app, root, false, None);
@@ -1004,7 +1025,7 @@ mod tests {
     fn advance(world: &mut World, ticks: u32) {
         for _ in 0..ticks {
             let mut clock = world.resource_mut::<crate::WeaponClock>();
-            clock.0 = clock.0.saturating_add(1);
+            clock.0 = clock.0.after(TickSpan::ONE);
             world.run_system_once(tick_weapon_gate).unwrap();
         }
     }
@@ -1197,7 +1218,7 @@ mod tests {
             what: &str,
         ) {
             let paused_gate = gate_state(app.world(), root);
-            assert_eq!(app.world().resource::<crate::WeaponClock>().0, clock);
+            assert_eq!(app.world().resource::<crate::WeaponClock>().0.raw(), clock);
 
             set_app_state(&mut app, crate::state::AppState::Paused);
             for _ in 0..paused_ticks {
@@ -1206,7 +1227,7 @@ mod tests {
             }
             assert_eq!(gate_state(app.world(), root), paused_gate, "{what}");
             assert_eq!(
-                app.world().resource::<crate::WeaponClock>().0,
+                app.world().resource::<crate::WeaponClock>().0.raw(),
                 clock,
                 "the fallback clock must not consume {what} time while paused"
             );
@@ -1356,7 +1377,7 @@ mod tests {
         }
 
         let mut world = test_world();
-        world.insert_resource(crate::ShotClock(81));
+        world.insert_resource(crate::ShotClock(crate::sim_tick::SimTick::new(81)));
         world.init_resource::<FiredShot>();
         world.add_observer(capture);
         let (_root, _) = spawn_mg_rig(&mut world, Vec::new());
@@ -1378,7 +1399,7 @@ mod tests {
     #[should_panic(expected = "network tank fired without spawn-complete CombatantId")]
     fn network_fire_rejects_a_root_missing_its_spawn_identity() {
         let mut world = test_world();
-        world.insert_resource(crate::ShotClock(81));
+        world.insert_resource(crate::ShotClock(crate::sim_tick::SimTick::new(81)));
         let (root, _) = spawn_mg_rig(&mut world, Vec::new());
         world.entity_mut(root).remove::<crate::CombatantId>();
 
@@ -1414,7 +1435,7 @@ mod tests {
         }
 
         let mut world = test_world();
-        world.insert_resource(crate::ShotClock(81));
+        world.insert_resource(crate::ShotClock(crate::sim_tick::SimTick::new(81)));
         world.init_resource::<FireShellCount>();
         world.add_observer(count_fire_shells);
         let (root, _) = spawn_mg_rig(&mut world, Vec::new());

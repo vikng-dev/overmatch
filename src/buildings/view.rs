@@ -774,7 +774,7 @@ fn publish_sim_clock(
         return; // Tank-less view fixtures keep their explicit cursor.
     };
     *clock = PresentationClock::At {
-        tick: tick.0,
+        tick: tick.0.raw(),
         overstep: step.overstep_fraction_f64(),
     };
 }
