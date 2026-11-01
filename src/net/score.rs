@@ -160,17 +160,9 @@ impl RespawnWait {
     /// the server is: a wait longer than an opening can count ahead (`i32::MAX` ticks, the wrapped
     /// signed difference [`Scoreboard::opening`] reads) stops startup.
     pub(crate) fn new(wait: Duration, tick: Duration) -> Self {
-        let ticks = wait.as_nanos().div_ceil(tick.as_nanos());
-        let ticks = u32::try_from(ticks)
-            .ok()
-            .and_then(|ticks| TickSpan::try_from(ticks).ok())
-            .unwrap_or_else(|| {
-                panic!(
-                    "assets/modes/battle.ron: respawn_wait_s is {ticks} ticks, more than an \
-                     opening counts ahead ({}) — fix the mode data",
-                    i32::MAX
-                )
-            });
+        let ticks = TickSpan::from_duration(wait, tick).unwrap_or_else(|err| {
+            panic!("assets/modes/battle.ron: respawn_wait_s: {err} — fix the mode data or timestep")
+        });
         Self { ticks }
     }
 

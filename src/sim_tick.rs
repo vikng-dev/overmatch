@@ -38,6 +38,7 @@ pub struct TickSpan(u32);
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum TickSpanError {
     OutsideHorizon(u128),
+    ZeroTimestep,
     /// Seconds that are no duration: negative, NaN or infinite.
     NotADuration(f32),
 }
@@ -49,6 +50,7 @@ impl std::fmt::Display for TickSpanError {
                 f,
                 "tick span {ticks} must be under 2^31 fixed ticks; reduce the duration"
             ),
+            Self::ZeroTimestep => write!(f, "the fixed timestep must be positive"),
             Self::NotADuration(seconds) => write!(f, "{seconds} s must be a duration >= 0 s"),
         }
     }
@@ -88,11 +90,20 @@ impl TickSpan {
     pub fn from_secs(seconds: f32) -> Result<Self, TickSpanError> {
         let duration = std::time::Duration::try_from_secs_f32(seconds)
             .map_err(|_| TickSpanError::NotADuration(seconds))?;
-        let ticks = duration.as_nanos().div_ceil(sim_timestep().as_nanos());
-        u32::try_from(ticks)
-            .ok()
-            .and_then(|ticks| Self::try_from(ticks).ok())
-            .ok_or(TickSpanError::OutsideHorizon(ticks))
+        Self::from_duration(duration, sim_timestep())
+    }
+    /// Quantize a duration once at its composition's timestep, rounding up and refusing spans
+    /// outside the signed deadline horizon. Battle and weapon load gates share this law.
+    pub fn from_duration(
+        duration: std::time::Duration,
+        timestep: std::time::Duration,
+    ) -> Result<Self, TickSpanError> {
+        if timestep.is_zero() {
+            return Err(TickSpanError::ZeroTimestep);
+        }
+        let ticks = duration.as_nanos().div_ceil(timestep.as_nanos());
+        let count = u32::try_from(ticks).map_err(|_| TickSpanError::OutsideHorizon(ticks))?;
+        Self::try_from(count)
     }
     /// At least one tick: a deadline armed now cannot mature in the tick that armed it.
     pub const fn at_least_one(self) -> Self {
@@ -101,8 +112,7 @@ impl TickSpan {
 }
 
 /// The sim's fixed timestep: Bevy's default, the one every composition runs its fixed loop at
-/// (none sets another). Spans parsed at load assume it; [`assert_sim_timestep`] checks it where
-/// they are spent.
+/// (none sets another). Spans parsed at load assume it; the weapon composition checks it at startup.
 pub fn sim_timestep() -> std::time::Duration {
     bevy::time::Time::<bevy::time::Fixed>::default().timestep()
 }
@@ -120,6 +130,33 @@ pub fn assert_sim_timestep(timestep: std::time::Duration) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    /// Battle and weapon load gates rely on the same ceiling and horizon at any timestep.
+    /// FIXTURE DATA: exact, fractional and zero durations at two fixed rates.
+    #[test]
+    fn every_duration_gate_uses_one_quantization_law() {
+        use std::time::Duration;
+        for timestep in [sim_timestep(), Duration::from_millis(10)] {
+            for count in [0, 1, 31, TickSpan::MAX] {
+                assert_eq!(
+                    TickSpan::from_duration(timestep * count, timestep),
+                    Ok(TickSpan::of(count))
+                );
+            }
+            assert_eq!(
+                TickSpan::from_duration(Duration::from_nanos(1), timestep),
+                Ok(TickSpan::ONE)
+            );
+            assert!(matches!(
+                TickSpan::from_duration(timestep * (TickSpan::MAX + 1), timestep),
+                Err(TickSpanError::OutsideHorizon(_))
+            ));
+        }
+        assert_eq!(
+            TickSpan::from_duration(Duration::ZERO, Duration::ZERO),
+            Err(TickSpanError::ZeroTimestep)
+        );
+    }
+
     /// Battle and weapon callers rely on the same deadline relation across wrap and at the
     /// largest admitted span. Equality is due, and one tick short is not.
     #[test]

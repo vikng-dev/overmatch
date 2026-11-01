@@ -71,15 +71,9 @@ pub(super) struct CycleRules {
 impl CycleRules {
     pub(super) fn new(mode: &BattleMode, tick: Duration) -> Self {
         let ticks = |field, span: Duration| {
-            let count = span.as_nanos().div_ceil(tick.as_nanos());
-            u32::try_from(count)
-                .ok()
-                .and_then(|count| TickSpan::try_from(count).ok())
-                .unwrap_or_else(|| {
-                    panic!(
-                        "assets/modes/battle.ron: {field} exceeds the authority deadline horizon — reduce the duration"
-                    )
-                })
+            TickSpan::from_duration(span, tick).unwrap_or_else(|err| {
+                panic!("assets/modes/battle.ron: {field}: {err} — reduce the duration or fix the timestep")
+            })
         };
         Self {
             fill_up: ticks("fill_up_s", mode.fill_up),
