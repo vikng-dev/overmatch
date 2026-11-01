@@ -1355,6 +1355,33 @@ fn a_round_resting_inside_overlapping_plates_is_admitted() {
     admitted(&report).expect("a round at rest in overlapping plates is a record");
 }
 
+/// A crossing that spans two tanks' overlapping plates: the round leaves tank A's plate inside the
+/// crossing and comes to rest in tank B's. A's record has the round leave A on its path, between
+/// two of its nodes, and that record is admitted. B's 500 mm plate begins 15 mm inside A's 50 mm
+/// one (fixture data).
+#[test]
+fn a_departure_inside_a_shared_crossing_is_admitted() {
+    let volumes = [
+        (plate("front", THIN, 0.0, Kind::Main), 0, Quat::IDENTITY),
+        (plate("behind", THICK, -0.24, Kind::Main), 1, Quat::IDENTITY),
+    ];
+    let a = fixture_shot_at(&volumes, LINE_FROM, Vec3::NEG_Z, 0);
+    let RoundEnd::Left { at } = a.end else {
+        panic!("A's record has the round leave A: {:?}", a.end);
+    };
+    assert!(
+        a.path
+            .iter()
+            .all(|node| Vec3::from(node.point).distance(Vec3::from(at)) > 1.0e-3),
+        "the departure lies between path nodes: {at:?} on {:?}",
+        a.path
+    );
+    admitted(&a).expect("a departure inside a shared crossing is a record");
+    let b = fixture_shot_at(&volumes, LINE_FROM, Vec3::NEG_Z, 1);
+    assert!(b.rested(), "{:?}", b.end);
+    admitted(&b).expect("the round's rest in B is a record");
+}
+
 /// A round that glances off one plate and then stops in another rests in the second: the recorder's
 /// end is the last mark's, not the bounce's. The 75° graze and the far plate's place are fixture
 /// data.

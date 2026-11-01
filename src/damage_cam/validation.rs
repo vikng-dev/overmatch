@@ -217,11 +217,28 @@ fn check_path(report: &PenetrationReport) -> Result<(), ValidationError> {
     let within = |a: Vec3, b: Vec3| {
         a.distance(b) <= 0.002 + 8.0 * f32::EPSILON * a.abs().max(b.abs()).max_element()
     };
+    // A burst starts a leg of the path, so it is one of its nodes.
     let on_path = |point: [f32; 3]| {
         report
             .path
             .iter()
             .any(|p| within(Vec3::from(p.point), Vec3::from(point)))
+    };
+    // A departure lies on the path, a node or between two: a crossing that spans overlapping
+    // tanks leaves the first inside the crossing, and that tank's path has no node there.
+    let on_line = |point: [f32; 3]| {
+        let point = Vec3::from(point);
+        report.path.windows(2).any(|pair| {
+            let (a, b) = (Vec3::from(pair[0].point), Vec3::from(pair[1].point));
+            let span = b - a;
+            let along = span.length_squared();
+            let s = if along > 0.0 {
+                ((point - a).dot(span) / along).clamp(0.0, 1.0)
+            } else {
+                0.0
+            };
+            within(a + span * s, point)
+        })
     };
     let first = report.path[0].t;
     let last = report.path[report.path.len() - 1].t;
@@ -239,9 +256,9 @@ fn check_path(report: &PenetrationReport) -> Result<(), ValidationError> {
         }
     }
     match &report.end {
-        RoundEnd::Left { at } if !on_path(*at) => {
+        RoundEnd::Left { at } if !on_line(*at) => {
             return Err(ValidationError::Path(
-                "the departure point must be a path point",
+                "the departure point must lie on the path",
             ));
         }
         RoundEnd::Rest { volume }
