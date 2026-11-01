@@ -5,7 +5,8 @@
 //! law's sizes for its muzzle energy and its gun's muzzle shape (`guns::muzzle`; the law is the
 //! design record's "The muzzle law", `.agents/docs/design/view-sweep-review.md`). No calibre,
 //! weapon kind or viewer distance selects a layer's size, life or light; the constants below are
-//! the shipped sprite sheets' playback and the renderer's caps, shared by every gun.
+//! the shipped sprite sheets' playback, erosion rules and renderer caps; sprite taste is
+//! `MuzzleVfxAssets::renderer`, loaded from the same taste file as the emission law.
 //!
 //! Layers: the flash core, the fireball, the fill glow, the flame planes (a forward jet and any
 //! side jets), the gas smoke, the ground blast's dust cloud and the transient light. The core, the
@@ -35,9 +36,6 @@ use super::billboard::{
     VfxParams, gradient_lut, smoothstep, spawn_billboard, unit_quad,
 };
 
-/// Emissive boost on the flash LUT's heat lane — well above 1.0 so bloom catches the whole flash.
-const FLASH_GLOW: f32 = 14.0;
-
 // --- The fireball sheet: a 12-frame explosion flipbook played once over the emission's lifetime.
 
 /// Atlas grid and frame count — [`MuzzleVfxAssets::blast_atlas`]'s two sheets share it
@@ -48,28 +46,15 @@ const BLAST_FRAMES: u32 = 12;
 /// How many baked sheets are in the rotation — [`MuzzleVfxAssets::blast_atlas`]'s length and
 /// [`blast_pick`]'s range.
 const BLAST_SHEETS: usize = 2;
-/// Overall alpha, erosion sharpness and emissive boost. The boost sits under [`FLASH_GLOW`] — a
-/// fireball with volume, not a second blinding spike — and the soft sharpness keeps the smoke fringe
-/// as fringe.
-const BLAST_ALPHA: f32 = 0.85;
-const BLAST_SHARPNESS: f32 = 1.3;
-const BLAST_GLOW: f32 = 6.0;
 /// Erosion threshold at death. Low, unlike every other muzzle layer: the sheet ALREADY animates its
 /// own dissolution, and the die-off is the blast LUT's cooling term (which reaches black at the last
 /// LUT row, so the layer is gone before it despawns). Erosion here only thins the fringe — ramped to
 /// 1.0 it instead eats the fireball into confetti through the middle of the sequence.
 const BLAST_EROSION: f32 = 0.3;
 
-/// The fill glow's look: LOW overall alpha (billboard `fade.w`) and a softened emissive boost
-/// (`glow.x`) — a fill glow, not a second hot core. Its size and life are the emission's.
-const FLASH_GLOW_CARD_ALPHA: f32 = 0.35;
-const FLASH_GLOW_CARD_GLOW: f32 = 4.0;
-
-/// Smoke sprite playback: frames/s over the 4-frame atlas, roll-rate bound (rad/s) and the faint
-/// heat young smoke carries (it is lit by the flash for the first instants).
+/// Smoke sprite playback: frames/s over the 4-frame atlas, roll-rate bound (rad/s).
 const SMOKE_FRAME_RATE: f32 = 5.0;
 const SMOKE_SPIN_MAX: f32 = 0.6;
-const SMOKE_GLOW: f32 = 5.0;
 
 /// Shared muzzle-light population cap; oldest lights are evicted first.
 const LIGHT_CAP: usize = 12;
@@ -79,7 +64,7 @@ const GROUND_DUST_FRAME_RATE: f32 = 3.0;
 const GROUND_DUST_SPIN_MAX: f32 = 0.35;
 
 /// The erosion threshold a dust puff reaches at the end of its life: the dust sheet's own signal
-/// ceiling, so a puff dissolves over its whole authored lifetime. MEASURED on `impact_dust.png`'s
+/// ceiling, so a puff dissolves over its whole resolved lifetime. MEASURED on `impact_dust.png`'s
 /// signal (red × alpha) histogram under the shader's erosion at this layer's sharpness: a ramp to
 /// 1.0 halves a puff's coverage at 17 % of its life and quarters it at 28 %; a ramp to 0.5
 /// quarters it at 55 % and leaves 5 % at 90 %.
@@ -102,6 +87,7 @@ pub(super) fn plugin(app: &mut App) {
 /// gradient LUTs (one grayscale sprite set, recolored per effect — the LUT trick).
 #[derive(Resource)]
 pub(super) struct MuzzleVfxAssets {
+    pub(super) renderer: crate::guns::MuzzleRenderer,
     pub(super) quad: Handle<Mesh>,
     /// The starburst core: a 2×2 scorch-starburst atlas (a spiky radial star per shot).
     pub(super) core_atlas: Handle<Image>,
@@ -137,7 +123,7 @@ impl MuzzleVfxAssets {
                 fade: Vec4::new(0.0, sharpness, 0.0, 1.0),
                 // glow.y = 1.0: the additive blend contract (see `vfx_billboard.wgsl`) — premultiply
                 // by coverage so transparent texels add nothing (kills the old orange square).
-                glow: Vec4::new(FLASH_GLOW, 1.0, 0.0, 0.0),
+                glow: Vec4::new(self.renderer.flash_boost, 1.0, 0.0, 0.0),
             },
             atlas,
             lut: self.flash_lut.clone(),
@@ -149,10 +135,10 @@ impl MuzzleVfxAssets {
     /// Rides the flash's additive pipeline (no new permutation), with its own 4×3 grid lanes,
     /// softer erosion and a lower boost.
     fn blast_material(&self, atlas: Handle<Image>) -> BillboardLook {
-        let mut material = self.flash_material(atlas, BLAST_SHARPNESS);
+        let mut material = self.flash_material(atlas, self.renderer.fireball_sharpness);
         material.params.frame = Vec4::new(0.0, BLAST_COLS, BLAST_ROWS, 0.0);
-        material.params.fade.w = BLAST_ALPHA;
-        material.params.glow.x = BLAST_GLOW;
+        material.params.fade.w = self.renderer.fireball_opacity;
+        material.params.glow.x = self.renderer.fireball_boost;
         material.lut = self.blast_lut.clone();
         material
     }
@@ -164,8 +150,8 @@ impl MuzzleVfxAssets {
                 frame: Vec4::new(0.0, 2.0, 2.0, 0.0),
                 // Moderate sharpness: soft dissolve edges on the puff. w, the overall opacity, is
                 // the emission's: the consumer writes it per puff.
-                fade: Vec4::new(0.0, 2.6, 0.0, 1.0),
-                glow: Vec4::new(SMOKE_GLOW, 0.0, SOFT_PARTICLE_DEPTH, 0.0),
+                fade: Vec4::new(0.0, self.renderer.smoke_sharpness, 0.0, 1.0),
+                glow: Vec4::new(self.renderer.smoke_boost, 0.0, SOFT_PARTICLE_DEPTH, 0.0),
             },
             atlas: self.smoke_atlas.clone(),
             lut: self.smoke_lut.clone(),
@@ -182,7 +168,7 @@ impl MuzzleVfxAssets {
         BillboardLook {
             params: VfxParams {
                 frame: Vec4::new(0.0, 2.0, 2.0, 0.0),
-                fade: Vec4::new(0.0, 2.2, 0.0, opacity),
+                fade: Vec4::new(0.0, self.renderer.dust_sharpness, 0.0, opacity),
                 glow: Vec4::new(light - 1.0, 0.0, SOFT_PARTICLE_DEPTH, 0.0),
             },
             atlas: self.dust_atlas.clone(),
@@ -238,6 +224,7 @@ pub(super) fn setup_muzzle_assets(
         (color, heat)
     });
     commands.insert_resource(MuzzleVfxAssets {
+        renderer: crate::guns::MuzzleLook::shipped().renderer,
         quad: unit_quad(&mut meshes),
         core_atlas: asset_server.load(super::Texture::FlashCore.path()),
         blast_atlas: [
@@ -475,13 +462,18 @@ fn dress_fire(fire: On<FireShell>, mut kit: MuzzleKit) {
     let core_size = kit.rng.range(core.diameter_m.0, core.diameter_m.1);
     let (core_material, core_frames, core_start) = match core.sprite {
         CoreSprite::Starburst => (
-            kit.assets
-                .flash_material(kit.assets.core_atlas.clone(), 2.0),
+            kit.assets.flash_material(
+                kit.assets.core_atlas.clone(),
+                kit.assets.renderer.core_sharpness,
+            ),
             4,
             kit.rng.range(0.0, 4.0).floor(),
         ),
         CoreSprite::Glow => {
-            let mut material = kit.assets.flash_material(kit.assets.mg_core.clone(), 2.0);
+            let mut material = kit.assets.flash_material(
+                kit.assets.mg_core.clone(),
+                kit.assets.renderer.core_sharpness,
+            );
             // The glow is the whole image, not an atlas cell.
             material.params.frame = Vec4::new(0.0, 1.0, 1.0, 0.0);
             (material, 1, 0.0)
@@ -538,10 +530,13 @@ fn dress_fire(fire: On<FireShell>, mut kit: MuzzleKit) {
     // --- Fill glow: one soft additive round-glow billboard behind the core, sized off it, eroding
     // out over its own life.
     if near && let Some(glow_card) = emission.glow {
-        let mut glow = kit.assets.flash_material(kit.assets.mg_core.clone(), 1.5);
+        let mut glow = kit.assets.flash_material(
+            kit.assets.mg_core.clone(),
+            kit.assets.renderer.glow_sharpness,
+        );
         glow.params.frame = Vec4::new(0.0, 1.0, 1.0, 0.0);
-        glow.params.glow.x = FLASH_GLOW_CARD_GLOW;
-        glow.params.fade.w = FLASH_GLOW_CARD_ALPHA;
+        glow.params.glow.x = kit.assets.renderer.glow_boost;
+        glow.params.fade.w = kit.assets.renderer.glow_opacity;
         let size = core_size * glow_card.scale;
         let roll = kit.rng.range(0.0, std::f32::consts::TAU);
         kit.billboard(BillboardSpec {
@@ -669,9 +664,10 @@ fn spawn_flame_jet(
         // Sprite +Y (flame up) onto the axis, then rolled around it.
         let rotation = Quat::from_axis_angle(axis, base_roll + f32::from(i) * step)
             * Quat::from_rotation_arc(Vec3::Y, axis);
-        let material = kit
-            .assets
-            .flash_material(kit.assets.flame_atlas.clone(), 2.0);
+        let material = kit.assets.flash_material(
+            kit.assets.flame_atlas.clone(),
+            kit.assets.renderer.flame_sharpness,
+        );
         kit.billboard(BillboardSpec {
             material,
             lifetime: flames.lifetime_s,
@@ -703,7 +699,7 @@ fn blast_pick(rng: &mut ViewRng) -> usize {
 /// The ground height (m) under `muzzle` when the gas reaches it, else `None`: no decoded terrain
 /// (`grid`) and no ground is known, and outside the grid's span the world ends at the collider edge
 /// — [`crate::terrain_grid::HeightGrid::height_at`] would hand back a clamped phantom there. A
-/// muzzle higher than the gun's `reach_m` over that surface lifts nothing.
+/// muzzle higher than the shot's `reach_m` over that surface lifts nothing.
 fn dust_ground_y(
     grid: Option<&crate::terrain_grid::HeightGrid>,
     muzzle: Vec3,
@@ -720,7 +716,7 @@ fn dust_ground_y(
 /// The ground blast's dust cloud: wide alpha-blend puffs born on the ground under the muzzle and
 /// pushed outward, each along an azimuth pulled toward the bore's by the emission's `bore_bias`.
 /// The painted grounds under the muzzle are the cloud's `sources` (`terrain_blend::dust_sources`):
-/// their shares sum to the share of the gun's rolled puff count the ground lifts, and each puff
+/// their shares sum to the share of the shot's rolled puff count the ground lifts, and each puff
 /// is one source's soil, drawn by share, in that ground's albedo lit by `light`.
 fn spawn_ground_dust(
     muzzle: Vec3,
@@ -877,6 +873,7 @@ mod tests {
                 [(); BLAST_SHEETS].map(|()| images.add(Image::default()))
             });
         app.insert_resource(MuzzleVfxAssets {
+            renderer: crate::guns::MuzzleLook::shipped().renderer,
             quad: Handle::default(),
             core_atlas: Handle::default(),
             blast_atlas,
@@ -1088,6 +1085,33 @@ mod tests {
         }
     }
 
+    /// The game's muzzle rendering: independent taste fields reach the material uniforms.
+    /// A hardcoded renderer boost or opacity would prevent the owner's file from controlling it.
+    /// FIXTURE DATA: distinct values for each covered layer, unrelated to shipped taste.
+    #[test]
+    fn sprite_materials_read_the_taste_file() {
+        let mut app = harness();
+        let mut assets = app.world_mut().resource_mut::<MuzzleVfxAssets>();
+        assets.renderer.flash_boost = 9.0;
+        assets.renderer.fireball_boost = 3.0;
+        assets.renderer.fireball_opacity = 0.42;
+        assets.renderer.fireball_sharpness = 0.7;
+        assets.renderer.smoke_boost = 1.7;
+        assets.renderer.smoke_sharpness = 0.8;
+        assets.renderer.dust_sharpness = 0.9;
+        let flash = assets.flash_material(Handle::default(), assets.renderer.core_sharpness);
+        assert_eq!(flash.params.glow.x, 9.0);
+        let blast = assets.blast_material(Handle::default());
+        assert_eq!(blast.params.glow.x, 3.0);
+        assert_eq!(blast.params.fade.w, 0.42);
+        assert_eq!(blast.params.fade.y, 0.7);
+        let smoke = assets.smoke_material();
+        assert_eq!(smoke.params.glow.x, 1.7);
+        assert_eq!(smoke.params.fade.y, 0.8);
+        let dust = assets.dust_material(0.5, Handle::default(), 2.0);
+        assert_eq!(dust.params.fade.y, 0.9);
+    }
+
     /// The game's damage-model view draws each muzzle shape's statement and only it: at one
     /// energy, a shape's forward planes lie along the bore, its side jets' planes (two jets, if
     /// it states them) leave across it, and only a shape stating a fireball plays one. A mutant
@@ -1178,11 +1202,11 @@ mod tests {
         puffs
     }
 
-    /// The ground blast's reach is the gun's: a muzzle within it over known terrain lifts the
-    /// authored puff count, sitting on that surface; the ground below the reach lifts none, and an
+    /// The ground blast's reach is the shot's: a muzzle within it over known terrain lifts the
+    /// resolved puff count, sitting on that surface; the ground below the reach lifts none, and an
     /// emission without a ground blast lifts none at any height.
     #[test]
-    fn ground_dust_needs_the_ground_within_the_guns_reach() {
+    fn ground_dust_needs_the_ground_within_the_shots_reach() {
         let blast = MuzzleEmission::fixture_cannon()
             .ground_blast
             .expect("the full fixture states a ground blast");
@@ -1220,7 +1244,7 @@ mod tests {
         );
     }
 
-    /// The ground's own response decides how much of the gun's cloud it gives up: fully erodible
+    /// The ground's own response decides how much of the shot's cloud it gives up: fully erodible
     /// ground lifts the rolled count, half-erodible ground half of it (rounded), and a nonerodible
     /// ground under the same muzzle lifts nothing. A world without a drawn ground states no
     /// erodibility and lifts nothing either. A mutant that ignores the ground fails.
@@ -1353,24 +1377,23 @@ mod tests {
         assert_eq!(red(0.75), 0.4);
     }
 
-    /// MEASURED, `--nocapture`: each shipped gun's ground blast on each shipped ground, the base
-    /// slot standing in for that ground. Class invariants only: a ground lifts the gun's rolled
-    /// range scaled by its erodibility, every puff of its own soil, at the gun's metres and life.
+    /// MEASURED, `--nocapture`: each shipped shot's ground blast on each shipped ground, the base
+    /// slot standing in for that ground. Class invariants only: a ground lifts the shot's rolled
+    /// range scaled by its erodibility, every puff of its own soil, at the shot's metres and life.
     #[test]
     fn every_shipped_blast_lifts_each_grounds_own_soil() {
         const SHOTS: usize = 24;
         let shipped = crate::ground_types::GroundTypes::load_shipped();
-        let mut blasts: Vec<(&str, MuzzleEmission)> = crate::guns::GunRegistry::shipped()
+        let blasts: Vec<(&str, &str, MuzzleEmission)> = crate::guns::GunRegistry::shipped()
             .fired_rounds()
             .filter(|(_, _, round)| round.muzzle.ground_blast.is_some())
-            .map(|(gun, _, round)| (gun, round.muzzle))
+            .map(|(gun, key, round)| (gun, key, round.muzzle))
             .collect();
-        blasts.dedup_by_key(|(gun, _)| *gun);
         assert!(
             !blasts.is_empty(),
             "no shipped gun lifts dust: the survey would be vacuous"
         );
-        for (gun, muzzle) in blasts {
+        for (gun, round, muzzle) in blasts {
             let blast = muzzle.ground_blast.expect("filtered on a blast");
             for (name, ground) in &shipped.types {
                 let erodibility = ground.dust.erodibility;
@@ -1384,7 +1407,7 @@ mod tests {
                 for shot in 0..SHOTS {
                     // One shot per app, each under its own view seed: the rolls differ, and no
                     // ring eviction can recycle a puff's id between shots.
-                    // The muzzle stands half its gun's reach over the ground: inside it whatever
+                    // The muzzle stands half this shot's reach over the ground: inside it whatever
                     // the shot's energy.
                     let mut app = harness_ground(FIRE_ORIGIN.y - 0.5 * blast.reach_m);
                     app.insert_resource(ViewRng::seeded(shot as u64));
@@ -1397,14 +1420,14 @@ mod tests {
                     let count = puffs.len();
                     assert!(
                         (range.0..=range.1).contains(&count),
-                        "{gun} on {name}: {count} puffs outside {range:?}"
+                        "{gun}/{round} on {name}: {count} puffs outside {range:?}"
                     );
                     for &(puff, size, _) in &puffs {
                         let soil = puff_soil(&mut app, puff).0;
                         assert_eq!(
                             soil,
                             stored_linear(ground.dust.colour_srgb),
-                            "{gun} on {name}"
+                            "{gun}/{round} on {name}"
                         );
                         assert!((size - blast.birth_diameter_m).abs() < 1e-4);
                         let billboard = app.world().get::<Billboard>(puff).expect("a billboard");
@@ -1412,12 +1435,12 @@ mod tests {
                         let lifetime = billboard.lifetime;
                         assert!(
                             (blast.end_diameter_m.0..=blast.end_diameter_m.1).contains(&end),
-                            "{gun} on {name}: spawned diameter {end} outside {:?}",
+                            "{gun}/{round} on {name}: spawned diameter {end} outside {:?}",
                             blast.end_diameter_m
                         );
                         assert!(
                             (blast.lifetime_s.0..=blast.lifetime_s.1).contains(&lifetime),
-                            "{gun} on {name}: spawned lifetime {lifetime} outside {:?}",
+                            "{gun}/{round} on {name}: spawned lifetime {lifetime} outside {:?}",
                             blast.lifetime_s
                         );
                         ends = (ends.0.min(end), ends.1.max(end));
@@ -1426,7 +1449,7 @@ mod tests {
                     (least, most) = (least.min(count), most.max(count));
                 }
                 eprintln!(
-                    "MEASURED {gun} on {name} (erodibility {erodibility}, soil {:?}): {least}-{most} \
+                    "MEASURED {gun}/{round} on {name} (erodibility {erodibility}, soil {:?}): {least}-{most} \
                      puffs over {SHOTS} shots, {:.2} m at birth to {:.2}-{:.2} m, {:.3}-{:.3} s",
                     ground.dust.colour_srgb,
                     blast.birth_diameter_m,
@@ -1440,10 +1463,10 @@ mod tests {
     }
 
     /// The cloud's metres are the emission's (ADR-0023: physical inputs only, never the viewer): a
-    /// puff is born at the authored diameter and lifts at the authored rise; doubling both in the
-    /// data doubles both on screen. A mutant reading a shared constant or the calibre fails.
+    /// puff is born at the resolved diameter and lifts at the resolved rise; doubling both in the
+    /// emission doubles both on screen. A mutant reading a shared constant or the calibre fails.
     #[test]
-    fn ground_dust_reads_the_authored_cloud() {
+    fn ground_dust_reads_the_resolved_cloud() {
         const LIFT_SECS: f32 = 1.0;
         fn puff(muzzle: MuzzleEmission) -> (f32, f32) {
             let mut app = harness_ground(0.0);
@@ -1530,11 +1553,11 @@ mod tests {
         }
     }
 
-    /// The fireball plays its authored geometry: a diameter inside the authored range, the
-    /// authored standoff and lifetime, once through the sheet. An emission stating no fireball
+    /// The fireball plays its resolved geometry: a diameter inside the resolved range, the
+    /// resolved standoff and lifetime, once through the sheet. An emission stating no fireball
     /// draws none.
     #[test]
-    fn the_fireball_plays_its_authored_geometry() {
+    fn the_fireball_plays_its_resolved_geometry() {
         let fireball = MuzzleEmission::fixture_cannon()
             .fireball
             .expect("the full fixture states a fireball");

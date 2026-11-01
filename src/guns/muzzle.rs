@@ -223,6 +223,7 @@ struct LookFile {
     light: LightFile,
     ground_blast: GroundBlastFile,
     shapes: ShapesFile,
+    renderer: RendererFile,
 }
 
 #[derive(Deserialize)]
@@ -300,6 +301,41 @@ struct GroundBlastFile {
     opacity: Sourced<f32>,
 }
 
+/// Sprite appearance shared by all shots. Values are taste, independent of energy.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RendererFile {
+    flash_boost: Sourced<f32>,
+    core_sharpness: Sourced<f32>,
+    flame_sharpness: Sourced<f32>,
+    fireball_opacity: Sourced<f32>,
+    fireball_boost: Sourced<f32>,
+    fireball_sharpness: Sourced<f32>,
+    glow_opacity: Sourced<f32>,
+    glow_boost: Sourced<f32>,
+    glow_sharpness: Sourced<f32>,
+    smoke_boost: Sourced<f32>,
+    smoke_sharpness: Sourced<f32>,
+    dust_sharpness: Sourced<f32>,
+}
+
+/// Validated sprite taste; the renderer applies it without a per-gun override.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct MuzzleRenderer {
+    pub(crate) flash_boost: f32,
+    pub(crate) core_sharpness: f32,
+    pub(crate) flame_sharpness: f32,
+    pub(crate) fireball_opacity: f32,
+    pub(crate) fireball_boost: f32,
+    pub(crate) fireball_sharpness: f32,
+    pub(crate) glow_opacity: f32,
+    pub(crate) glow_boost: f32,
+    pub(crate) glow_sharpness: f32,
+    pub(crate) smoke_boost: f32,
+    pub(crate) smoke_sharpness: f32,
+    pub(crate) dust_sharpness: f32,
+}
+
 /// One row per [`MuzzleShape`]: a field per variant, so a shape without its row does not parse.
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -359,6 +395,7 @@ pub(crate) struct MuzzleLook {
     ground_blast: GroundBlast,
     brake: Shape,
     hider: Shape,
+    pub(crate) renderer: MuzzleRenderer,
 }
 
 /// The core at the reference energy, before its shape's sprite and share.
@@ -552,6 +589,52 @@ impl MuzzleLook {
         let birth = number("smoke.birth_diameter_m", smoke.birth_diameter_m, true)?;
         let end = number("smoke.end_diameter_m", smoke.end_diameter_m, true)?;
         Ok(Self {
+            renderer: MuzzleRenderer {
+                flash_boost: number("renderer.flash_boost", file.renderer.flash_boost, true)?,
+                core_sharpness: number(
+                    "renderer.core_sharpness",
+                    file.renderer.core_sharpness,
+                    true,
+                )?,
+                flame_sharpness: number(
+                    "renderer.flame_sharpness",
+                    file.renderer.flame_sharpness,
+                    true,
+                )?,
+                fireball_opacity: share(
+                    "renderer.fireball_opacity",
+                    file.renderer.fireball_opacity,
+                    false,
+                )?,
+                fireball_boost: number(
+                    "renderer.fireball_boost",
+                    file.renderer.fireball_boost,
+                    true,
+                )?,
+                fireball_sharpness: number(
+                    "renderer.fireball_sharpness",
+                    file.renderer.fireball_sharpness,
+                    true,
+                )?,
+                glow_opacity: share("renderer.glow_opacity", file.renderer.glow_opacity, false)?,
+                glow_boost: number("renderer.glow_boost", file.renderer.glow_boost, true)?,
+                glow_sharpness: number(
+                    "renderer.glow_sharpness",
+                    file.renderer.glow_sharpness,
+                    true,
+                )?,
+                smoke_boost: number("renderer.smoke_boost", file.renderer.smoke_boost, true)?,
+                smoke_sharpness: number(
+                    "renderer.smoke_sharpness",
+                    file.renderer.smoke_sharpness,
+                    true,
+                )?,
+                dust_sharpness: number(
+                    "renderer.dust_sharpness",
+                    file.renderer.dust_sharpness,
+                    true,
+                )?,
+            },
             reference_j,
             duration_exponent,
             jitter,
@@ -1154,6 +1237,43 @@ mod tests {
                 .unwrap_err()
                 .contains("fireball.growth")
         );
+    }
+
+    /// The game's muzzle rendering: every sprite taste input is required and validated at load.
+    /// The owner must be able to author these independently of gun identity and energy.
+    #[test]
+    fn sprite_taste_is_required_and_refuses_invalid_values() {
+        for field in [
+            "flash_boost",
+            "core_sharpness",
+            "flame_sharpness",
+            "fireball_opacity",
+            "fireball_boost",
+            "fireball_sharpness",
+            "glow_opacity",
+            "glow_boost",
+            "glow_sharpness",
+            "smoke_boost",
+            "smoke_sharpness",
+            "dust_sharpness",
+        ] {
+            let key = format!("{field}:");
+            let start = LOOK_RON.find(&key).expect("the required sprite field") + key.len();
+            let start = start + LOOK_RON[start..].find('(').expect("a sourced value") + 1;
+            let end = start
+                + LOOK_RON[start..]
+                    .find(',')
+                    .expect("a value before provenance");
+            let mut changed = LOOK_RON.to_owned();
+            changed.replace_range(start..end, "-1.0");
+            assert!(
+                MuzzleLook::parse(&changed)
+                    .unwrap_err()
+                    .contains(&format!("renderer.{field}"))
+            );
+            let missing = LOOK_RON.replace(&key, &format!("missing_{field}:"));
+            assert!(MuzzleLook::parse(&missing).is_err());
+        }
     }
 
     /// The taste file refuses, naming the field, a value the law cannot draw: a duration exponent

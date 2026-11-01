@@ -76,7 +76,7 @@ pub(super) fn spawn_prewarm_rig(
     // a live one, then re-tagged as rig members with culling disabled. Each one's family material
     // outlives the rig, so its bind group is ready for the first live sprite of that family.
     for material in [
-        muzzle.flash_material(muzzle.core_atlas.clone(), 2.0),
+        muzzle.flash_material(muzzle.core_atlas.clone(), muzzle.renderer.core_sharpness),
         muzzle.smoke_material(),
         // The impact sparks' template: same Add-blend quad pipeline as the flash (which also covers
         // the additive ping), but its own family — warming it readies the spark bind group too. The

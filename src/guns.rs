@@ -49,7 +49,7 @@ use crate::spec::FireMechanism;
 
 pub(crate) use muzzle::{
     CoreSprite, FlameJet, Flames, FlashLight, GroundBlast, MuzzleEmission, MuzzleEnergy,
-    MuzzleEnergyError, MuzzleLook, MuzzleShape,
+    MuzzleEnergyError, MuzzleLook, MuzzleRenderer, MuzzleShape,
 };
 
 /// One gun as authored.

@@ -72,6 +72,22 @@
         lifetime_s: ((1.7, 2.1), Tuned("TASTE: the dust cloud's life")),
         opacity: (0.5, Tuned("TASTE: the dust's overall opacity")),
     ),
+    // ASSUMED sprite taste, preserved from the accepted renderer look. These values do not
+    // scale with energy: they describe each sheet's coverage and emissive response.
+    renderer: (
+        flash_boost: (14.0, Tuned("TASTE: shared flash boost")),
+        core_sharpness: (2.0, Tuned("TASTE: shared core sharpness")),
+        flame_sharpness: (2.0, Tuned("TASTE: shared flame sharpness")),
+        fireball_opacity: (0.85, Tuned("TASTE: shared fireball opacity")),
+        fireball_boost: (6.0, Tuned("TASTE: shared fireball boost")),
+        fireball_sharpness: (1.3, Tuned("TASTE: shared fireball sharpness")),
+        glow_opacity: (0.35, Tuned("TASTE: shared glow opacity")),
+        glow_boost: (4.0, Tuned("TASTE: shared glow boost")),
+        glow_sharpness: (1.5, Tuned("TASTE: shared glow sharpness")),
+        smoke_boost: (5.0, Tuned("TASTE: shared smoke boost")),
+        smoke_sharpness: (2.6, Tuned("TASTE: shared smoke sharpness")),
+        dust_sharpness: (2.2, Tuned("TASTE: shared dust sharpness")),
+    ),
     shapes: (
         // Baffles at the muzzle turn most of the gas out sideways: a starburst core, a short
         // forward flame, a jet each side swept a little back, the fireball and the fill glow.
