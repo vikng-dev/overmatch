@@ -443,6 +443,7 @@ fn spawn_owned_shooter(
                     weapons: vec![WeaponGateState {
                         timing: crate::tank::WeaponTiming::Ready,
                         belt_remaining: OWNER_BELT,
+                        ..Default::default()
                     }],
                 },
                 TankServos::for_count(2),
@@ -1170,6 +1171,7 @@ fn every_shot_spawns_exactly_one_shell_under_ten_percent_loss() {
                     == [WeaponGateState {
                         timing: crate::tank::WeaponTiming::Ready,
                         belt_remaining: OWNER_BELT,
+                        ..Default::default()
                     }]
         });
     let observer_has_public_status = observer

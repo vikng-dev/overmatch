@@ -273,6 +273,47 @@ pub struct WeaponState {
     pub rounds_fired: u32,
 }
 
+/// The game's damage model: a positive load rate, bounded by full capability.
+/// NaN and zero cannot reach deadline division, including from a peer. The checked domain
+/// contains no NaN, so equality is reflexive and the atomic gate can implement `Eq`.
+#[derive(Clone, Copy, PartialEq, Debug, Serialize, Deserialize)]
+#[serde(try_from = "f32")]
+pub struct LoadRate(f32);
+
+impl Eq for LoadRate {}
+
+impl Default for LoadRate {
+    fn default() -> Self {
+        Self(1.0)
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct InvalidLoadRate(f32);
+
+impl std::fmt::Display for InvalidLoadRate {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "load rate {} must be finite and in (0, 1]", self.0)
+    }
+}
+
+impl TryFrom<f32> for LoadRate {
+    type Error = InvalidLoadRate;
+    fn try_from(rate: f32) -> Result<Self, Self::Error> {
+        if rate > 0.0 && rate <= 1.0 {
+            Ok(Self(rate))
+        } else {
+            Err(InvalidLoadRate(rate))
+        }
+    }
+}
+
+impl LoadRate {
+    pub fn get(self) -> f32 {
+        self.0
+    }
+}
+
 /// The game's damage model: one weapon's fire eligibility and belt supply. Its timing enum
 /// makes an unarmed-but-paused state unrepresentable, including at the peer deserialization edge.
 /// Paused work is load work, a `Single`'s reload or a dry belt's swap, so a pause holds an empty
@@ -282,6 +323,8 @@ pub struct WeaponState {
 pub struct WeaponGateState {
     pub timing: WeaponTiming,
     pub belt_remaining: u32,
+    /// Rate used to derive the active deadline, retained through a pause.
+    pub load_rate: LoadRate,
 }
 
 /// [`WeaponGateState`]'s decoded fields before its phase rule is checked: the same fields in the
@@ -290,6 +333,7 @@ pub struct WeaponGateState {
 struct WeaponGateWire {
     timing: WeaponTiming,
     belt_remaining: u32,
+    load_rate: LoadRate,
 }
 
 /// A decoded gate no authority can produce.
@@ -321,6 +365,7 @@ impl TryFrom<WeaponGateWire> for WeaponGateState {
             timing => Ok(Self {
                 timing,
                 belt_remaining: wire.belt_remaining,
+                load_rate: wire.load_rate,
             }),
         }
     }
@@ -346,6 +391,7 @@ impl WeaponGateState {
     pub fn for_cycle(cycle: &FireCycle) -> Self {
         Self {
             timing: WeaponTiming::Ready,
+            load_rate: LoadRate::default(),
             belt_remaining: match cycle {
                 FireCycle::Single { .. } => 0,
                 FireCycle::Automatic { belt_size, .. } => *belt_size,
@@ -390,9 +436,45 @@ impl WeaponGateState {
 
     /// At least one tick prevents duplicate emission in a tick.
     pub fn arm(&mut self, now: SimTick, delay: TickSpan) {
+        self.load_rate = LoadRate::default();
         self.timing = WeaponTiming::Loading {
             ready_tick: now.after(delay.at_least_one()),
         };
+    }
+
+    /// The game's damage model: arm base work at its current capability rate. No available
+    /// worker freezes the base work immediately; a later positive rate resumes that same work.
+    pub fn arm_load(&mut self, now: SimTick, base: TickSpan, effectiveness: f32) {
+        self.arm(now, base);
+        self.load_at_rate(now, effectiveness);
+    }
+
+    /// The game's damage model: at a rate change, preserve completed work and re-derive the
+    /// remaining interval once (`old remaining × old rate / new rate`, ceiling to a tick).
+    /// Unchanged rates leave the absolute deadline untouched; paused ticks consume no work.
+    pub fn load_at_rate(&mut self, now: SimTick, effectiveness: f32) {
+        if effectiveness == 0.0 {
+            self.pause(now);
+            return;
+        }
+        let rate = LoadRate::try_from(effectiveness)
+            .expect("requirement evaluation serves effectiveness in [0, 1]");
+        self.resume(now);
+        if self.load_rate != rate {
+            if let WeaponTiming::Loading { ready_tick } = self.timing {
+                let remaining = f64::from(now.remaining_until(ready_tick))
+                    * f64::from(self.load_rate.get())
+                    / f64::from(rate.get());
+                assert!(
+                    remaining.ceil() <= f64::from(TickSpan::MAX),
+                    "TankSpec admits load work only within the deadline horizon at every positive rate"
+                );
+                self.timing = WeaponTiming::Loading {
+                    ready_tick: now.after(TickSpan::of(remaining.ceil() as u32)),
+                };
+            }
+            self.load_rate = rate;
+        }
     }
 
     /// Freeze load work on entry. Repeated unmet ticks leave the gate byte-identical, and a past

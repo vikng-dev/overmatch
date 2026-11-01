@@ -238,7 +238,7 @@ use crate::{CombatantId, CombatantLife, ShotId};
 /// beside a belt with rounds left. Its encoding is unchanged; its definition moves.
 /// REV 62 (#247): a fired round carries its birth at the source collider exit beside the muzzle.
 /// REV 63 (#238): respawn openings carry the shared SimTick deadline type.
-pub const PROTOCOL_REV: u32 = 63;
+pub const PROTOCOL_REV: u32 = 64;
 
 /// Compatibility tag derived from the complete pinned wire manifest plus the crate version. This
 /// is the runtime handshake value: version-exact, so a version bump intentionally changes it.
@@ -1125,7 +1125,7 @@ const WIRE_SURFACE_HASH: u64 = 0xc0256acf39c3f9da;
 /// The pinned hash of the OWN wire-facing type DEFINITIONS (field layout, not just names). Re-pin it
 /// whenever a wire-facing struct/enum definition changes; house process also bumps
 /// [`PROTOCOL_REV`]. The tripwire prints the new value. See the block above for the coverage model.
-const WIRE_TYPES_HASH: u64 = 0xe4d52473344892b9;
+const WIRE_TYPES_HASH: u64 = 0xe1cba587085a19c1;
 
 /// The pinned `Cargo.lock` versions of the external crates whose types ride the wire (avian's
 /// replicated physics components; lightyear's wire framing / input protocol). A bump of either can
@@ -2007,6 +2007,7 @@ mod tests {
         ("src/track/transmission.rs", "SchedulerState"),
         ("src/tank/model.rs", "WeaponGate"),
         ("src/tank/model.rs", "WeaponGateState"),
+        ("src/tank/model.rs", "LoadRate"),
         ("src/tank/model.rs", "WeaponTiming"),
         ("src/sim_tick.rs", "SimTick"),
         ("src/sim_tick.rs", "TickSpan"),

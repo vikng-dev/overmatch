@@ -202,6 +202,7 @@ pub(super) fn hash_tank_state(state: &TankState) -> TankStateHash {
             // Belt count and absolute deadline are the complete authoritative fire gate. Contrast
             // `rounds_fired`, deliberately excluded because it only chooses cosmetic tracers.
             hrl.write_u32(weapon.belt_remaining);
+            hrl.write_f32(weapon.load_rate.get());
         }
     }
     // The round choice rides the gate stream: `loaded` is the round the slot's next shot fires and
@@ -321,6 +322,7 @@ fn test_weapon_gate() -> WeaponGate {
                 ready_tick: crate::sim_tick::SimTick::new(1_250),
             },
             belt_remaining: 47,
+            ..Default::default()
         }],
     }
 }
@@ -963,15 +965,15 @@ mod tests {
         assert_eq!(
             base,
             CanonicalTankStateDigest {
-                simulation: 13_273_883_614_073_939_632,
-                rollback: 13_210_661_411_403_520_878,
+                simulation: 3_703_399_603_721_080_535,
+                rollback: 133_287_615_517_132_249,
                 position: 5_276_285_167_157_175_194,
                 rotation: 5_407_327_877_548_523_030,
                 linear_velocity: 8_825_002_124_784_658_797,
                 angular_velocity: 15_886_300_944_198_297_253,
                 drive: 3_269_583_271_824_065_410,
                 servo: 14_071_911_453_643_095_408,
-                weapon_gate: 2_827_740_641_294_898_011,
+                weapon_gate: 5_217_450_181_278_491_660,
                 recoil: 12_037_784_973_900_930_602,
                 belts: 16_317_528_332_690_472_771,
                 transmission: 16_561_026_162_406_393_170,

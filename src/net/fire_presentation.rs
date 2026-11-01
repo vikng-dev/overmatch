@@ -960,6 +960,7 @@ mod tests {
         WeaponGateState {
             timing: crate::tank::WeaponTiming::Ready,
             belt_remaining: belt,
+            ..Default::default()
         }
     }
 

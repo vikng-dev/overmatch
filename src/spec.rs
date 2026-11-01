@@ -1447,6 +1447,66 @@ impl TankSpec {
                 ));
             }
         }
+        // The game's damage model: load deadlines must fit even at the smallest positive
+        // module pool share or foreign-station competence. An emptied contributor may disappear,
+        // so each graded group's floor uses its smallest member, not their full sum or maximum.
+        for (name, weapon) in &self.weapons {
+            let part_floor = |part: Part| {
+                self.volumes
+                    .values()
+                    .filter_map(VolumeSpec::component)
+                    .filter_map(|volume| {
+                        if volume.crew.map(Part::from) == Some(part) {
+                            let station = volume.crew.expect("the matching crew facet is present");
+                            Some(
+                                self.volumes
+                                    .values()
+                                    .filter_map(VolumeSpec::component)
+                                    .filter_map(|volume| volume.crew)
+                                    .map(|home| crate::damage::competence(home, station))
+                                    .fold(1.0_f32, f32::min),
+                            )
+                        } else if volume.function.map(Part::from) == Some(part) {
+                            Some(
+                                1.0 / crate::ballistics::ComponentHealth::full(volume.hp).capacity()
+                                    as f32,
+                            )
+                        } else {
+                            None
+                        }
+                    })
+                    .fold(1.0_f32, f32::min)
+            };
+            let floor = weapon
+                .load
+                .iter()
+                .map(|group| match group {
+                    Group::Single(part) => part_floor(*part),
+                    Group::Graded(GradedGroup::Pool(members) | GradedGroup::Backup(members)) => {
+                        members
+                            .iter()
+                            .map(|(coefficient, parts)| {
+                                parts
+                                    .iter()
+                                    .fold(*coefficient, |rate, part| rate * part_floor(*part))
+                            })
+                            .fold(1.0_f32, f32::min)
+                    }
+                })
+                .fold(1.0_f32, f32::min);
+            let delay = match weapon.fire_cycle {
+                FireCycle::Single { reload } => reload,
+                FireCycle::Automatic { swap, .. } => swap,
+            };
+            if (f64::from(delay.at_least_one().raw()) / f64::from(floor)).ceil()
+                > f64::from(TickSpan::MAX)
+                || floor == 0.0
+            {
+                return Err(format!(
+                    "weapons[\"{name}\"].load: base work / minimum positive effectiveness exceeds the signed deadline horizon; shorten reload/swap, reduce module pools or raise requirement coefficients"
+                ));
+            }
+        }
         Ok(())
     }
 
@@ -3222,6 +3282,23 @@ TankSpec(
             );
         }
         with_load_coefficient(1.0).expect("a full ceiling is a share");
+    }
+
+    /// The game's damage model: rate consumers must never discover an unrepresentable
+    /// reload during play. Fixture coefficients exercise the smallest positive-rate horizon.
+    #[test]
+    fn load_work_outside_the_reduced_rate_horizon_is_refused_before_play() {
+        for coefficient in [1e-12, f32::MIN_POSITIVE] {
+            let mut spec = fixture();
+            spec.weapons.get_mut("Cannon").unwrap().load = vec![Group::Graded(
+                GradedGroup::Backup(vec![(coefficient, vec![Part::Gunner])]),
+            )];
+            let error = spec.validate().unwrap_err().to_string();
+            assert!(
+                error.contains("weapons[\"Cannon\"].load") && error.contains("deadline horizon"),
+                "{error}"
+            );
+        }
     }
 
     /// A capability the sheet does not key would read as unavailable to every consumer, so

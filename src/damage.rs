@@ -580,10 +580,20 @@ pub fn requirement_met(
     requirement: &Requirement,
     volumes: &Query<VolumeFacets>,
 ) -> bool {
+    requirement_effectiveness(tank_volumes, requirement, volumes) > 0.0
+}
+
+/// The game's damage model: the rate served by a weapon or other local requirement.
+/// Before a tank's volumes exist it supplies no work.
+pub fn requirement_effectiveness(
+    tank_volumes: Option<&TankVolumes>,
+    requirement: &Requirement,
+    volumes: &Query<VolumeFacets>,
+) -> f32 {
     let Some(tank_volumes) = tank_volumes else {
-        return false;
+        return 0.0;
     };
-    evaluate(requirement, &part_qualities(tank_volumes, volumes)) > 0.0
+    evaluate(requirement, &part_qualities(tank_volumes, volumes))
 }
 
 /// The player's tank, bundled for the control systems (drive input, aiming, sight, shooting). It

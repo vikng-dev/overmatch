@@ -13,7 +13,7 @@ pub(crate) use birth::outside_source;
 
 use crate::ballistics::{FireShell, ShotSource};
 use crate::command::{ConsumeCommandEdges, TankCommand};
-use crate::damage::{TankVolumes, VolumeFacets, requirement_met};
+use crate::damage::{TankVolumes, VolumeFacets, requirement_effectiveness, requirement_met};
 use crate::sim_tick::TickSpan;
 use crate::spec::{FireCycle, Trigger};
 use crate::state::{AppState, GameplaySet, SimPhase};
@@ -180,13 +180,10 @@ fn tick_weapon_gate(
         }
         match weapon.fire_cycle {
             FireCycle::Single { .. } => {
-                if requirement_met(tank_volumes, &weapon.load, &volumes) {
-                    state.resume(now);
-                    if state.deadline_reached(now) {
-                        state.finish();
-                    }
-                } else {
-                    state.pause(now);
+                let effectiveness = requirement_effectiveness(tank_volumes, &weapon.load, &volumes);
+                state.load_at_rate(now, effectiveness);
+                if state.deadline_reached(now) {
+                    state.finish();
                 }
             }
             FireCycle::Automatic { belt_size, .. } => {
@@ -434,7 +431,15 @@ fn fire(
                     }
                 }
             };
-            state.arm(weapon_clock.0, delay);
+            if matches!(weapon.fire_cycle, FireCycle::Single { .. }) {
+                state.arm_load(
+                    weapon_clock.0,
+                    delay,
+                    requirement_effectiveness(tank_volumes, &weapon.load, &volumes),
+                );
+            } else {
+                state.arm(weapon_clock.0, delay);
+            }
         }
     }
 }
@@ -608,19 +613,22 @@ mod tests {
                 .unwrap_err()
                 .to_string()
         };
-        let error =
-            refused(r#"{"timing":{"Paused":{"work":2147483648,"since":0}},"belt_remaining":0}"#);
+        let error = refused(
+            r#"{"timing":{"Paused":{"work":2147483648,"since":0}},"belt_remaining":0,"load_rate":1.0}"#,
+        );
         assert!(error.contains("under 2^31"), "{error}");
-        let error = refused(r#"{"timing":{"Paused":{"work":3,"since":0}},"belt_remaining":5}"#);
+        let error = refused(
+            r#"{"timing":{"Paused":{"work":3,"since":0}},"belt_remaining":5,"load_rate":1.0}"#,
+        );
         assert!(error.contains("empty belt"), "{error}");
         let valid: WeaponGateState = serde_json::from_str(
-            r#"{"timing":{"Paused":{"work":3,"since":0}},"belt_remaining":0}"#,
+            r#"{"timing":{"Paused":{"work":3,"since":0}},"belt_remaining":0,"load_rate":1.0}"#,
         )
         .expect("a paused swap holds an empty belt");
         assert_eq!(valid.remaining_ticks(at(0)), 4);
         // DERIVED wire fixtures: Paused's variant index, then its work, start and belt count.
         for (work, belt) in [(1_u32 << 31, 0_u32), (3, 5)] {
-            let wire = postcard::to_allocvec(&(2_u32, work, 0_u32, belt)).unwrap();
+            let wire = postcard::to_allocvec(&(2_u32, work, 0_u32, belt, 1.0_f32)).unwrap();
             assert!(postcard::from_bytes::<WeaponGateState>(&wire).is_err());
         }
         let mut valid = WeaponGateState::default();
@@ -631,6 +639,21 @@ mod tests {
             postcard::from_bytes::<WeaponGateState>(&bytes).unwrap(),
             valid
         );
+    }
+
+    /// The game's damage model: peer rates are parsed before deadline arithmetic. Fixture
+    /// zero, negative, above-full and non-finite rates must be visibly refused on the wire.
+    #[test]
+    fn a_peer_cannot_seed_an_invalid_load_rate() {
+        for rate in [0.0_f32, -1.0, 1.1, f32::INFINITY, f32::NAN] {
+            let wire = postcard::to_allocvec(&(0_u32, 0_u32, rate)).unwrap();
+            assert!(postcard::from_bytes::<WeaponGateState>(&wire).is_err());
+            if rate.is_finite() {
+                let json = format!(r#"{{"timing":"Ready","belt_remaining":0,"load_rate":{rate}}}"#);
+                let error = serde_json::from_str::<WeaponGateState>(&json).unwrap_err();
+                assert!(error.to_string().contains("load rate"), "{error}");
+            }
+        }
     }
 
     /// The game's damage model: every absolute counter value in a valid peer gate is safe at
@@ -1190,6 +1213,7 @@ mod tests {
                     ready_tick: crate::sim_tick::SimTick::new(32)
                 },
                 belt_remaining: 0,
+                ..default()
             },
         );
 
@@ -1199,6 +1223,77 @@ mod tests {
         assert_eq!(gate_state(&world, root).ready_tick(), None);
         world.run_system_once(fire).unwrap();
         assert_eq!(weapon_state(&mut world, root).rounds_fired, 2);
+    }
+
+    /// The game's damage model: the loader's competence is a reload rate, not an on/off gate.
+    /// A fixed-span mutant fails the deadline. Fixture: the half-second main-gun test rig.
+    #[test]
+    fn a_backfilled_loader_reloads_at_its_competence() {
+        let mut world = test_world();
+        let root = spawn_main_gun_rig(&mut world);
+        let loader = world
+            .query_filtered::<Entity, With<CrewStation>>()
+            .single(&world)
+            .unwrap();
+        world.entity_mut(loader).insert(Crewman {
+            home: CrewStation::Driver,
+        });
+        world
+            .query_filtered::<&mut Weapon, With<Muzzle>>()
+            .single_mut(&mut world)
+            .unwrap()
+            .load = vec![crate::damage::Group::Single(crate::damage::Part::Loader)];
+        world.run_system_once(fire).unwrap();
+        let rate = crate::damage::competence(CrewStation::Driver, CrewStation::Loader);
+        let expected = (32.0_f64 / f64::from(rate)).ceil() as u32;
+        assert_eq!(gate_state(&world, root).ready_tick(), Some(at(expected)));
+        advance(&mut world, expected - 1);
+        assert!(!gate_state(&world, root).is_ready());
+        advance(&mut world, 1);
+        assert!(gate_state(&world, root).is_ready());
+    }
+
+    /// The game's damage model: the loader preserves completed work across a pause and each
+    /// rate change. The UI and fire legality rely on one stable deadline between changes.
+    /// Fixture: 32 base ticks; changes after 8 and 4 working ticks, 10 paused ticks.
+    #[test]
+    fn reload_preserves_work_through_pause_and_rate_changes() {
+        let mut world = test_world();
+        let root = spawn_main_gun_rig(&mut world);
+        let loader = world
+            .query_filtered::<Entity, With<CrewStation>>()
+            .single(&world)
+            .unwrap();
+        world
+            .query_filtered::<&mut Weapon, With<Muzzle>>()
+            .single_mut(&mut world)
+            .unwrap()
+            .load = vec![crate::damage::Group::Single(crate::damage::Part::Loader)];
+        world.run_system_once(fire).unwrap();
+        advance(&mut world, 8);
+        world.entity_mut(loader).insert(Crewman {
+            home: CrewStation::Driver,
+        });
+        world.run_system_once(tick_weapon_gate).unwrap();
+        let deadline = gate_state(&world, root).ready_tick().unwrap();
+        assert_eq!(deadline, at(48));
+        advance(&mut world, 4);
+        assert_eq!(gate_state(&world, root).ready_tick(), Some(deadline));
+        world.entity_mut(loader).insert(Dead);
+        world.run_system_once(tick_weapon_gate).unwrap();
+        let frozen = gate_state(&world, root);
+        advance(&mut world, 10);
+        assert_eq!(gate_state(&world, root), frozen);
+        world.entity_mut(loader).remove::<Dead>().insert(Crewman {
+            home: CrewStation::Loader,
+        });
+        world.run_system_once(tick_weapon_gate).unwrap();
+        // DERIVED: ceil(36 remaining ticks × foreign competence) = 22 native ticks.
+        assert_eq!(gate_state(&world, root).ready_tick(), Some(at(44)));
+        advance(&mut world, 21);
+        assert!(!gate_state(&world, root).is_ready());
+        advance(&mut world, 1);
+        assert!(gate_state(&world, root).is_ready());
     }
 
     /// An offline pause freezes every weapon's absolute deadline, the main gun's reload and the
