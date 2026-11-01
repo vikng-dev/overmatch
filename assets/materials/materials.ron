@@ -438,6 +438,11 @@
                         compression mean E = 118.23 MPa; Zulkifli et al. 2021, Table 3, read primary
                         at the compressive_strength URL. Same specimens as compressive_strength,
                         ASSUMED analogue for the scalar timber; not the longitudinal modulus"))),
+                    tensile_dif: Some((1.0, Tuned("ASSUMED: no dynamic tensile ratio for spruce
+                        across the grain was read, so the scab law holds this row's static
+                        tension perpendicular to grain (bulk.tensile); the #237 study's choice. A
+                        sourced across-grain tensile DIF is the missing truth; this one is not
+                        borrowed from the compressive DIF"))),
                 )),
                 shear_cohesion: Some((8.9e6, Measured("red spruce, clear straight-grained wood,
                     12 % moisture: shear parallel to grain 8900 kPa; USDA Forest Products
@@ -528,6 +533,12 @@
                         42.75 MPa and prism strengths 10.34 and 13.79 MPa gives f'm = 12.265 MPa;
                         E_m = 700 f'm = 8.586 GPa, rounded to 8.6 GPa. ASSUMED effective masonry
                         modulus for the scalar material, not the intact brick unit's modulus"))),
+                    tensile_dif: Some((3.1, Measured("CLAIMED, not read: masonry-joint tensile
+                        dynamic increase factor 3.1 at about 1 /s, Burnett et al. (2007) as
+                        Pereira et al. restate it, cited by the #237 study (survey/blast-claude.md
+                        section 3). It raises this row's bulk.tensile, the joint's modulus of
+                        rupture, to the scab law's dynamic tensile strength, 2.14 MPa (DERIVED).
+                        ASSUMED effective plateau over the pulse's strain rate"))),
                 )),
                 shear_cohesion: Some((0.165e6, Measured("cement-mortar and solid clay brick
                     triplets (TC), Mohr-Coulomb intercept 0.165 MPa: Segura et al. (2021),

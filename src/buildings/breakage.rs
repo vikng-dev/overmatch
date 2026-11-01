@@ -1027,7 +1027,7 @@ fn apply_deposits(mut p: DepositParam) {
             };
             let frame = frames[&root];
             let kind = breakage.kind.clone();
-            let blast = Load::blast(&taken.blast);
+            let blast = blast_loads(&identity.id, &kind, frame.scale, &taken.blast);
             let holes = holes_of(&kind, frame.scale, &taken.lines, &blast);
             // A run that changes nothing leaves the colliders as they stand: only a recorded
             // change marks the building for the refit (`reconcile`).
@@ -1095,6 +1095,28 @@ fn apply_deposits(mut p: DepositParam) {
             );
         }
     }
+}
+
+/// A blast's ray hits on one building as its loads ([`Load::blast`]), each face's Law 2 read on
+/// its chunk's hull at the instance's `scale`; logs the rear scabs thrown (debug).
+fn blast_loads(id: &str, kind: &BuildingKind, scale: f32, hits: &[fracture::RayHit]) -> Vec<Load> {
+    let (loads, scabs) = Load::blast(hits, |c| fracture::Backing {
+        block: &kind.layout.blocks[c],
+        scale,
+        material: kind.layout.materials[c],
+    });
+    if !scabs.is_empty() {
+        debug!(
+            "buildings: {id} took {} rear scabs, {:.2} kg carrying {:.1} N s",
+            scabs.len(),
+            scabs.iter().map(|scab| scab.mass).sum::<f32>(),
+            scabs
+                .iter()
+                .map(|scab| scab.momentum().length())
+                .sum::<f32>(),
+        );
+    }
+    loads
 }
 
 /// Log what one deposit did to a building (debug): `id` the building's, `loads` its deposit's,
@@ -1277,6 +1299,7 @@ fn cast_blast(
                     energy: blast.energy * share,
                     impulse: blast.push(share, d, turned, normal),
                     peak: blast.peak(share, d, turned, normal),
+                    pressure: blast.peak_pressure(d, -turned.dot(normal)),
                     crushed: blast.crushed(
                         &breakage.kind.layout.materials[c],
                         share,

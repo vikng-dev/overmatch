@@ -1146,7 +1146,12 @@ fn apply_deposit(
                 .map(|hit| hit.at)
                 .collect();
             applied.blast = Some((blast, origin, coupled, pushed, drawn));
-            Load::blast(&hits)
+            Load::blast(&hits, |i| model::Backing {
+                block: &wall.cut.blocks[i],
+                scale: 1.0,
+                material: structure.chunks[i].material,
+            })
+            .0
         }
     };
     applied.deposited = loads.iter().map(|load| load.energy).sum();

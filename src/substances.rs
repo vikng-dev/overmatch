@@ -181,7 +181,8 @@ pub struct BulkFacts {
 
 /// Material inputs of the game's environment blast laws. SI units. The crush law (Law 1,
 /// `buildings::fracture::Compaction`) reads the compression, its ratio and the fully dense
-/// density; the modulus awaits the scab law. Sources and the scope of each analogue
+/// density; the scab law (Law 2, `buildings::fracture::Spall`) reads the modulus and the tensile
+/// ratio, which raises the row's `bulk.tensile`. Sources and the scope of each analogue
 /// live in `assets/materials/materials.ron` and `.agents/scratch/blast-b3-material-sources.md`.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct BlastFacts {
@@ -197,6 +198,9 @@ pub struct BlastFacts {
     pub solid_density: f64,
     /// Young's modulus in the direction represented by the material row, Pa.
     pub youngs_modulus: f64,
+    /// Dynamic/static tensile-strength ratio over the row's `bulk.tensile`, at least one: a
+    /// reference-rate datum whose rate its provenance states, as [`Self::compressive_dif`] is.
+    pub tensile_dif: f64,
 }
 
 /// What a round's burst block reads of the substance its burst core is made of. SI units.
@@ -247,6 +251,11 @@ impl SubstanceId {
 /// One substance's entry: matter the walk resists with, a witness the walk never sees, or a
 /// substance no volume wears.
 #[derive(Clone, Copy, Debug, PartialEq)]
+#[expect(
+    clippy::large_enum_variant,
+    reason = "a load-time table of tens of rows, read in place; a boxed hard row would cost Copy \
+              and an indirection on every walk lookup to save a few hundred bytes"
+)]
 pub enum Substance {
     /// A layer of the walk.
     Hard(HardSubstance),
@@ -426,13 +435,17 @@ impl BulkFile {
             || self.shear_cohesion.is_some()
             || self.shear_fracture_energy.is_some();
         let blast = match self.blast {
-            Some(file) => Some(file.facts(name, self.density.0)?),
+            Some(file) => Some(file.facts(
+                name,
+                self.density.0,
+                self.tensile.as_ref().map(|value| value.0),
+            )?),
             None if breakable => {
                 return Err(format!(
                     "substance {name:?}: bulk.blast is missing from a breakable material: author \
                      compressive_strength (Pa), compressive_dif and its compressive_dif_strain_rate \
-                     (1/s), solid_density (kg/m³) and youngs_modulus (Pa), each with its \
-                     material-property source"
+                     (1/s), solid_density (kg/m³), youngs_modulus (Pa) and tensile_dif, each \
+                     with its material-property source"
                 ));
             }
             // Bulk-only matter is unbreakable, so the blast material laws never read it.
@@ -460,10 +473,13 @@ struct BlastFile {
     compressive_dif_strain_rate: Option<Sourced<f64>>,
     solid_density: Option<Sourced<f64>>,
     youngs_modulus: Option<Sourced<f64>>,
+    tensile_dif: Option<Sourced<f64>>,
 }
 
 impl BlastFile {
-    fn facts(self, name: &str, density: f64) -> Result<BlastFacts, String> {
+    /// The block's facts for a row of bulk `density` (kg/m³) and static `tensile` strength (Pa),
+    /// or why the row is refused.
+    fn facts(self, name: &str, density: f64, tensile: Option<f64>) -> Result<BlastFacts, String> {
         let required = |field, value: Option<Sourced<f64>>| {
             let value = value
                 .ok_or_else(|| {
@@ -490,7 +506,20 @@ impl BlastFile {
             )?,
             solid_density: required("solid_density", self.solid_density)?,
             youngs_modulus: required("youngs_modulus", self.youngs_modulus)?,
+            tensile_dif: required("tensile_dif", self.tensile_dif)?,
         };
+        let tensile = tensile.ok_or_else(|| {
+            format!(
+                "substance {name:?}: bulk.tensile is missing beside bulk.blast: the scab law \
+                 raises it by tensile_dif; author the static tensile strength with its source"
+            )
+        })?;
+        if facts.tensile_dif < 1.0 {
+            return Err(format!(
+                "substance {name:?}: bulk.blast.tensile_dif must be at least one; author the \
+                 dynamic/static tensile ratio with its material-property source"
+            ));
+        }
         if facts.compressive_dif < 1.0 {
             return Err(format!(
                 "substance {name:?}: bulk.blast.compressive_dif must be at least one; author the \
@@ -517,6 +546,14 @@ impl BlastFile {
         for (field, value) in [
             ("compressive_strength * compressive_dif", strength),
             ("solid_density (compaction front speed)", front_speed),
+            (
+                "tensile_dif (dynamic tensile strength)",
+                tensile * facts.tensile_dif,
+            ),
+            (
+                "youngs_modulus (bar wave speed)",
+                (facts.youngs_modulus / density).sqrt(),
+            ),
         ] {
             let stored = value as f32;
             if !stored.is_finite() || stored <= 0.0 {
@@ -1184,7 +1221,8 @@ mod tests {
                         compressive_dif: Some((2.0, Tuned("fixture"))),
                         compressive_dif_strain_rate: Some((100.0, Tuned("fixture"))),
                         solid_density: Some((2500.0, Tuned("fixture"))),
-                        youngs_modulus: Some((8e9, Tuned("fixture")))))))),"#,
+                        youngs_modulus: Some((8e9, Tuned("fixture"))),
+                        tensile_dif: Some((3.0, Tuned("fixture")))))))),"#,
             ))
         };
         let path = std::path::Path::new("fixture/materials.ron");
@@ -1244,6 +1282,7 @@ mod tests {
             ("compressive_dif_strain_rate", "100.0"),
             ("solid_density", "2500.0"),
             ("youngs_modulus", "8e9"),
+            ("tensile_dif", "3.0"),
         ];
         let authored: Vec<String> = fields
             .iter()
@@ -1303,6 +1342,8 @@ mod tests {
             (0, "1e40", "compressive_strength"),
             (0, "1e-100", "compressive_strength"),
             (1, "1e40", "compressive_dif"),
+            (5, "0.5", "tensile_dif"),
+            (5, "1e40", "tensile_dif"),
         ] {
             let mut invalid = authored.clone();
             invalid[index] = authored[index].replace(fields[index].1, value);

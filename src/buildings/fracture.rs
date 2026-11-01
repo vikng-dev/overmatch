@@ -84,6 +84,8 @@ pub(crate) struct Masonry {
     pub crush: f32,
     /// How a blast's pulse crushes it (Law 1, [`Compaction`]).
     pub compaction: Compaction,
+    /// How a blast's pulse throws a rear scab off it (Law 2, [`Spall`]).
+    pub spall: Spall,
     /// The seam between its chunks.
     pub seam: Seam,
     /// The friction coefficient its surface brings to a contact, dimensionless: one side of a
@@ -131,6 +133,32 @@ pub(crate) struct Compaction {
     /// volumetric strain to lock-up at the row's fully dense density `ρ_s` (DERIVED: the locking
     /// idealization compacts the pores shut and no further).
     pub front_speed: f32,
+}
+
+/// How a material throws a rear scab under a blast's pulse, about the game's environment
+/// destruction (game state only): Law 2's material inputs ([`scab`]). The wall design ("Standoff
+/// blast", Law 2) owns the model.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct Spall {
+    /// The bar wave speed `c = √(E / ρ)`, m/s, DERIVED from the row's Young's modulus and density:
+    /// what turns the pulse's duration into its length `λ = c τ`.
+    pub bar_speed: f32,
+    /// The dynamic tensile strength `σ_t,d`, Pa: the row's static tensile strength (`bulk.tensile`)
+    /// times its stated tensile dynamic increase factor, read as one effective plateau (ASSUMED,
+    /// as [`Compaction::strength`] is).
+    pub tensile: f32,
+}
+
+impl Spall {
+    /// The spall inputs of a row of bulk `density` (kg/m³) and static `tensile` strength (Pa)
+    /// stating `facts`. The registry refuses a row whose products are not positive and finite in
+    /// f32.
+    fn of(facts: &BlastFacts, density: f64, tensile: f64) -> Self {
+        Self {
+            bar_speed: (facts.youngs_modulus / density).sqrt() as f32,
+            tensile: (tensile * facts.tensile_dif) as f32,
+        }
+    }
 }
 
 impl Compaction {
@@ -202,6 +230,7 @@ impl Masonry {
             density: bulk.density as f32,
             crush: (share * registry.reference_facts().cavity_strength()) as f32,
             compaction: Compaction::of(&blast, bulk.density),
+            spall: Spall::of(&blast, bulk.density, f64::from(seam.tensile)),
             seam,
             friction,
         }))
@@ -762,8 +791,14 @@ impl Load {
     /// shared by its rays, so their pushes are parallel and this point preserves their angular
     /// impulse about every pivot. Opposing faces stay separate even if their blows cancel.
     /// Energy never gates the volume or the push: a pressure load needs neither chemical-energy
-    /// wear nor a Lamé source to exist.
-    pub(crate) fn blast(hits: &[RayHit]) -> Vec<Self> {
+    /// wear nor a Lamé source to exist. Each face then meets Law 2 ([`scab`]) on the chunk
+    /// `backing` names: a scab it throws takes its momentum off the face's blow, and its volume
+    /// leaves the chunk's pool as one more load at the back point, with no blow. Returns the loads
+    /// and the scabs.
+    pub(crate) fn blast<'a>(
+        hits: &[RayHit],
+        backing: impl Fn(usize) -> Backing<'a>,
+    ) -> (Vec<Self>, Vec<Scab>) {
         let mut faces = std::collections::BTreeMap::new();
         for hit in hits {
             let weight = hit.impulse.length();
@@ -776,7 +811,7 @@ impl Load {
                 continue;
             }
             let key = (hit.chunk, hit.normal.to_array().map(f32::to_bits));
-            let (load, total) = faces.entry(key).or_insert_with(|| {
+            let (load, total, rays) = faces.entry(key).or_insert_with(|| {
                 (
                     Self {
                         chunk: hit.chunk,
@@ -789,8 +824,10 @@ impl Load {
                         origin: Origin::Field,
                     },
                     0.0,
+                    Vec::new(),
                 )
             });
+            rays.push(hit);
             load.at += hit.at * weight;
             load.energy += hit.energy;
             load.crushed += hit.crushed;
@@ -801,13 +838,28 @@ impl Load {
                 .expect("a blast load states its peak force") += hit.peak;
             *total += weight;
         }
-        faces
-            .into_values()
-            .map(|(mut load, weight)| {
-                load.at /= weight;
-                load
-            })
-            .collect()
+        let (mut loads, mut removals, mut scabs) = (Vec::new(), Vec::new(), Vec::new());
+        for (mut load, weight, rays) in faces.into_values() {
+            load.at /= weight;
+            let backing = backing(load.chunk);
+            if let Some(thrown) = scab(&rays, &load, &backing) {
+                load.blow -= thrown.momentum();
+                removals.push(Self {
+                    chunk: load.chunk,
+                    at: thrown.at,
+                    energy: 0.0,
+                    crushed: thrown.mass / backing.material.density,
+                    blow: Vec3::ZERO,
+                    press: Vec3::ZERO,
+                    peak: None,
+                    origin: Origin::Field,
+                });
+                scabs.push(thrown);
+            }
+            loads.push(load);
+        }
+        loads.extend(removals);
+        (loads, scabs)
     }
 
     /// The part of this load's blow a section's energy limit reads under `reading`: `√g` of a
@@ -3089,8 +3141,112 @@ pub(crate) fn crush_factor(r: f32) -> f32 {
     }
 }
 
+/// What Law 2 reads of the chunk a blast face loads ([`Load::blast`]): its hull, the hits' frame's
+/// scale over the hull's (a building instance's), and its material.
+pub(crate) struct Backing<'a> {
+    pub block: &'a Block,
+    pub scale: f32,
+    pub material: Masonry,
+}
+
+/// A rear scab (Law 2), about the game's environment destruction (game state only): the layer a
+/// loaded face's reflected tension throws off its chunk's back face ([`scab`]).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct Scab {
+    pub chunk: usize,
+    /// The back-face point it leaves from, opposite the face's load, m.
+    pub at: Vec3,
+    /// kg.
+    pub mass: f32,
+    /// m/s, along the face's push.
+    pub velocity: Vec3,
+}
+
+impl Scab {
+    /// What it carries away, N·s: taken off the face's blow, so the pushed chunk and the scab
+    /// share the face's momentum.
+    pub(crate) fn momentum(&self) -> Vec3 {
+        self.velocity * self.mass
+    }
+}
+
+/// Law 2, the rear scab, on one loaded face (its `rays`, aggregated as `load`) of the chunk
+/// `backing` names; the wall design ("Standoff blast", Law 2) owns the model. The ligament `L`
+/// is the chunk's depth behind the face along its inward normal, to its farthest corner (a box's
+/// thickness), and the back point `b` lies `L` behind the face's load. The face's compression
+/// reaches `b` as `σ_b`: the Boussinesq sum over the face's patches of `3 L³ / (2π R⁵)` times each
+/// patch's transmitted force `min(P, σ_c,d) A`, which for a uniform load over a plane is the
+/// load itself (the solid-angle mean the #237 study names). The pulse lasts `τ = 2J / F`
+/// (`2i / P` of the face's blow and peak force) and is `λ = c τ` long. Reflected at the free back
+/// face as tension, it lifts a scab where `σ_b min(1, 2L / λ) ≥ σ_t,d`, of thickness
+/// `δ = λ σ_t,d / (2 σ_b)` (where the net tension first reaches the strength; at most `L`), at
+/// `v = (2σ_b − σ_t,d) / (ρ c)`. Its footprint is the area its transmitted force covers at `σ_b`,
+/// `F_t / σ_b`, bounded by the chunk's silhouette along the normal (DERIVED: the scab then carries
+/// at most `J F_t / F` of the face's momentum, never more than its blow). ASSUMED: the back face
+/// is free (a bonded chunk behind reflects as open air), the crater's depth is not taken off the
+/// ligament, and the gate reads one back point. `None` where the gate fails. Every input is the
+/// face's and its row's; no body type enters.
+pub(crate) fn scab(rays: &[&RayHit], load: &Load, backing: &Backing) -> Option<Scab> {
+    let normal = rays
+        .first()
+        .expect("a loaded face has at least one ray")
+        .normal;
+    let material = &backing.material;
+    let Spall { bar_speed, tensile } = material.spall;
+    let crush = material.compaction.strength;
+    let local = load.at / backing.scale;
+    let ligament = backing
+        .block
+        .points
+        .iter()
+        .map(|corner| normal.dot(local - *corner))
+        .fold(0.0_f32, f32::max)
+        * backing.scale;
+    let back = load.at - normal * ligament;
+    let (mut stress, mut transmitted) = (0.0_f32, 0.0_f32);
+    for ray in rays {
+        let force = ray.peak.length();
+        let through = if ray.pressure > crush {
+            force * crush / ray.pressure
+        } else {
+            force
+        };
+        let reach = (ray.at - back).length();
+        stress += 3.0 * ligament.powi(3) / (2.0 * PI * reach.powi(5)) * through;
+        transmitted += through;
+    }
+    let peak = load
+        .peak
+        .expect("a blast face states its peak force")
+        .length();
+    assert!(
+        peak > 0.0,
+        "a blast face with a positive blow peaks at a positive force"
+    );
+    let length = bar_speed * 2.0 * load.blow.length() / peak;
+    if stress * (2.0 * ligament / length).min(1.0) < tensile {
+        return None;
+    }
+    let thickness = length * tensile / (2.0 * stress);
+    let speed = (2.0 * stress - tensile) / (material.density * bar_speed);
+    let shadow = silhouette(&backing.block.face_areas(), -normal) * backing.scale.powi(2);
+    let mass = material.density * thickness * (transmitted / stress).min(shadow);
+    let thrown = Scab {
+        chunk: load.chunk,
+        at: back,
+        mass,
+        velocity: -normal * speed,
+    };
+    assert!(
+        thrown.momentum().length() <= load.blow.length() * (1.0 + 1e-4),
+        "a scab carries at most its face's blow: {thrown:?} from {load:?}"
+    );
+    Some(thrown)
+}
+
 /// One blast ray's arrival: the chunk it stopped on, where, its energy (J), impulse (N·s), peak
-/// force (N, [`Blast::peak`]) and the volume it crushes (m³, [`Blast::crushed`]).
+/// force (N, [`Blast::peak`]), the peak overpressure on its patch (Pa, [`Blast::peak_pressure`])
+/// and the volume it crushes (m³, [`Blast::crushed`]).
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) struct RayHit {
     pub chunk: usize,
@@ -3100,6 +3256,8 @@ pub(crate) struct RayHit {
     pub energy: f32,
     pub impulse: Vec3,
     pub peak: Vec3,
+    /// The patch's peak overpressure, Pa: intensive, so a share of the cone keeps it whole.
+    pub pressure: f32,
     pub crushed: f32,
 }
 
@@ -3143,6 +3301,7 @@ pub(crate) fn blast_rays(
                 energy: blast.energy * share,
                 impulse: blast.push(share, t, dir, normal),
                 peak: blast.peak(share, t, dir, normal),
+                pressure: blast.peak_pressure(t, -dir.dot(normal)),
                 crushed: blast.crushed(&material(chunk), share, t, dir, normal),
             })
         })
@@ -3762,7 +3921,8 @@ mod tests {
             "nonparallel fragment pushes preserve their moment"
         );
 
-        // Each hit crushes its energy's tenth, m³ (fixture data).
+        // Each hit crushes its energy's tenth, m³, over a square metre of patch, on the top face
+        // of a slab far too weak a load to scab (fixture data).
         let hit = |chunk: usize, at: Vec3, energy: f32, (impulse, peak): (Vec3, Vec3)| RayHit {
             chunk,
             at,
@@ -3770,16 +3930,26 @@ mod tests {
             energy,
             impulse,
             peak,
+            pressure: peak.length(),
             crushed: energy / 10.0,
         };
-        let (a, b, c) = (Vec3::X, Vec3::Y, Vec3::new(0.0, 0.0, 2.0));
+        let slab = Block::cuboid(Vec3::new(-5.0, -5.0, -1.0), Vec3::new(5.0, 5.0, 0.0));
+        let (a, b, c) = (Vec3::X, Vec3::Y, Vec3::new(0.0, 2.0, 0.0));
         let (i, j) = (Vec3::new(3.0, 0.0, -1.0), Vec3::new(-1.0, 2.0, 0.0));
         let (f, g) = (Vec3::new(2.0e5, 0.0, 0.0), Vec3::new(0.0, -3.0e5, 1.0e5));
-        let loads = Load::blast(&[
-            hit(3, a, 1.0, (i, f)),
-            hit(1, b, 2.0, (Vec3::Z, Vec3::Y)),
-            hit(3, c, 3.0, (j, g)),
-        ]);
+        let (loads, scabs) = Load::blast(
+            &[
+                hit(3, a, 1.0, (i, f)),
+                hit(1, b, 2.0, (Vec3::Z, Vec3::Y)),
+                hit(3, c, 3.0, (j, g)),
+            ],
+            |_| Backing {
+                block: &slab,
+                scale: 1.0,
+                material: brick(),
+            },
+        );
+        assert!(scabs.is_empty(), "{scabs:?}");
         let chunks: Vec<usize> = loads.iter().map(|load| load.chunk).collect();
         assert_eq!(chunks, vec![1, 3]);
         assert_eq!(
@@ -3815,19 +3985,27 @@ mod tests {
             energy,
             impulse: -normal * impulse,
             peak: -normal * (100.0 * impulse),
+            pressure: 100.0,
             crushed: impulse * 1e-5,
         };
+        // Two faces of one slab, loaded far too weakly to scab (fixture data).
+        let slab = Block::cuboid(Vec3::new(-10.0, -10.0, -1.0), Vec3::new(10.0, 10.0, 3.0));
         let hits = [
             hit(Vec3::new(1.0, 2.0, 3.0), Vec3::Z, 2.0, 50.0),
             hit(Vec3::new(4.0, -2.0, 3.0), Vec3::Z, 8.0, 1.0),
-            hit(Vec3::new(2.0, 4.0, 5.0), Vec3::NEG_Z, 10.0, 0.0),
+            hit(Vec3::new(2.0, 4.0, -1.0), Vec3::NEG_Z, 10.0, 0.0),
         ];
         for no_energy in [false, true] {
             let hits = hits.map(|hit| RayHit {
                 energy: if no_energy { 0.0 } else { hit.energy },
                 ..hit
             });
-            let loads = Load::blast(&hits);
+            let (loads, scabs) = Load::blast(&hits, |_| Backing {
+                block: &slab,
+                scale: 1.0,
+                material: brick(),
+            });
+            assert!(scabs.is_empty(), "{scabs:?}");
             assert_eq!(loads.len(), 2, "opposing faces retain their own loads");
             let expected: Vec3 = hits.iter().map(|hit| hit.impulse).sum();
             let delivered: Vec3 = loads.iter().map(|load| load.blow).sum();
@@ -4112,13 +4290,25 @@ mod tests {
             energy,
             impulse: Vec3::NEG_Z,
             peak: Vec3::NEG_Z,
+            pressure: 1.0,
             crushed,
+        };
+        // A hull about the fixture chunk; its one newton peak is far too weak to scab.
+        let hull = Block::cuboid(chunk.centroid - 0.05, chunk.centroid + 0.05);
+        let backing = |_: usize| Backing {
+            block: &hull,
+            scale: 1.0,
+            material: chunk.material,
         };
         let pools: Vec<f32> = [1.0, 1.0e3 * chunk.material.crush * chunk.volume]
             .into_iter()
             .map(|energy| {
                 let mut state = WallState::new(&structure);
-                strike(&structure, &mut state, &Load::blast(&[hit(energy)]));
+                strike(
+                    &structure,
+                    &mut state,
+                    &Load::blast(&[hit(energy)], backing).0,
+                );
                 assert_eq!(state.fate[0], Fate::Standing, "{energy} J");
                 state.pool[0]
             })
@@ -4168,7 +4358,13 @@ mod tests {
             ..hit
         };
         let mut state = WallState::new(&structure);
-        let struck = strike(&structure, &mut state, &Load::blast(&[heavy]));
+        let (loads, scabs) = Load::blast(&[heavy], |_| Backing {
+            block: &cube[0],
+            scale: 1.0,
+            material: brick(),
+        });
+        assert!(scabs.is_empty(), "a far pulse throws no scab: {scabs:?}");
+        let struck = strike(&structure, &mut state, &loads);
         assert!(
             struck.worn.is_empty() && struck.dusted.is_empty(),
             "{struck:?}"
