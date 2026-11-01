@@ -1233,7 +1233,8 @@ fn graph(structure: &Structure, state: &WallState) -> Graph {
 /// reference fixes which side a section holds, the side the group swings about it, and every
 /// section is assessed. Rooting every loaded chunk instead would leave a group touching along
 /// its whole length with no section to assess. The reference is no tensile anchor: the
-/// support/fall graph never reads it. A group with no external load has no root and no demand.
+/// support/fall graph never reads it. With no external resultant, the first chunk fixes the
+/// reference: uniform free fall has no demand, while spin can still load internal seams.
 fn loaded_graph(structure: &Structure, state: &WallState, loads: &[Load]) -> Graph {
     let mut graph = graph(structure, state);
     let mut accelerating = vec![false; structure.chunks.len()];
@@ -1258,9 +1259,11 @@ fn loaded_graph(structure: &Structure, state: &WallState, loads: &[Load]) -> Gra
             .copied()
             .filter(|&c| held[c] > 0.0)
             .max_by(|&a, &b| held[a].total_cmp(&held[b]).then(b.cmp(&a)));
-        if let Some(reference) = reference {
-            graph.2[reference] = true;
-        }
+        let reference = match reference {
+            Some(reference) => reference,
+            None => group[0], // A nonempty group still needs a reference for spin-only demand.
+        };
+        graph.2[reference] = true;
     }
     graph
 }
@@ -1275,8 +1278,9 @@ fn loaded_graph(structure: &Structure, state: &WallState, loads: &[Load]) -> Gra
 /// chunks also carry the centripetal `−m ω × (ω × r)` and the gyroscopic share of the frame's
 /// angular acceleration, `α_g = −I⁻¹ (ω × I ω)` (Euler's equations), so the residual wrench
 /// still vanishes (DERIVED: each chunk's own sphere inertia is isotropic, so `ω × Σ I_own ω`
-/// is zero). A group no external load reaches this run is not framed: the laws run on a
-/// deposit, so a spinning group in flight is assessed at its next contact.
+/// is zero). Every unsupported group is framed, even when dust consumed all its external
+/// sources. The laws run on a deposit, so spin in otherwise undisturbed flight is assessed
+/// at the next deposit.
 /// No new load is applied to physics: these inertial loads exist only during assessment.
 pub(crate) fn in_group_frames(
     structure: &Structure,
@@ -1290,9 +1294,6 @@ pub(crate) fn in_group_frames(
             .iter()
             .filter(|load| group.binary_search(&load.chunk).is_ok())
             .collect();
-        if sources.is_empty() {
-            continue;
-        } // Uniform free fall supplies no relative demand.
         let mass: f32 = group.iter().map(|&c| structure.chunks[c].mass).sum();
         let centre = group
             .iter()
@@ -4053,6 +4054,31 @@ mod tests {
                 (Vec3::ZERO, Vec3::ZERO)
             );
         }
+    }
+
+    /// Dust can remove every externally loaded chunk while the surviving group is still
+    /// freely accelerating. Its rests must not acquire construction-frame weight.
+    /// Fixture: three row chunks, the first two resting together, the struck third dusted.
+    #[test]
+    fn dusting_the_only_source_does_not_restore_gravity_to_a_free_group() {
+        let mut slab = unsupported_slab(3);
+        slab.joints[0].bond = Bond::Resting;
+        let load = Load {
+            chunk: 2,
+            at: slab.chunks[2].centroid,
+            crushed: full_pool(&slab.chunks[2]),
+            blow: Vec3::Y,
+            origin: Origin::Field,
+            ..slab_contact(&slab, 0.0)
+        };
+        let (state, changes) = assess_slab(slab, &[load]);
+        assert_eq!(state.fate[2], Fate::Dust);
+        assert!(
+            !state.cracked[0],
+            "free fall does not open an unloaded rest"
+        );
+        assert_eq!(changes.groups.len(), 1);
+        assert_eq!(changes.groups[0].0, vec![0, 1]);
     }
 
     /// A single occupied chunk has no seam to fail. Its contact may change its rigid motion

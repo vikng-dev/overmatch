@@ -800,14 +800,14 @@ wrench vanishes with spin too. ASSUMED inertia for assessing demand remains the 
 equal-volume sphere per chunk with parallel-axis terms; point couples account for each sphere's
 own angular inertia. This is distinct from the exact occupied collider inertia used to spawn and
 split physics bodies. The frame's residual rigid force and moment are tested. The laws run on a
-deposit, so a group no external load reaches is not framed: a spinning group in flight is
-assessed at its next contact.
+deposit. Every unsupported group is framed even when dust consumes all its external sources;
+a spinning group in otherwise undisturbed flight is assessed at its next deposit.
 
 A moving group's contacts are known loads (the solver's impulses), not unknown supports, so the
-group is determinate in its frame. One reference chunk per group, the one its external loads hold
-hardest (`|J| + |F| Δt`, lowest index on a tie), roots the section search and fixes which side
-each section holds; it confers no tensile anchor, and zero-reaction speculative points never
-become it. Every section is assessed, a group touching along its whole length included; an even
+group is determinate in its frame. One reference chunk per group roots the section search and
+fixes which side each section holds: the one its external loads hold hardest (`|J| + |F| Δt`,
+lowest index on a tie), or the first chunk when no external resultant remains. It confers no
+tensile anchor, and zero-reaction speculative points never select it. Every section is assessed, a group touching along its whole length included; an even
 landing loads none, since each chunk's share meets its own inertia. Punch rings grow from the
 chunks external loads reach, never from the frame's inertial loads, which reach every chunk.
 Opposed sources seed separate coherent patches (positive work along a source resultant); their
