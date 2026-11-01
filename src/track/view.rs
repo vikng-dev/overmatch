@@ -27,7 +27,7 @@ use crate::render_policy::VisualScope;
 use crate::tank::{Roadwheel, Tank, TrackSide, ViewNode};
 
 use super::belt_draw::BeltAssets;
-use super::gear_phase::{gear_spin_transform, spin_angle, tooth_angle};
+use super::gear_phase::{GearFrame, hull_from_parent, spin_angle, tooth_angle};
 use super::link_view::{self, BeltFrames, LinkTemplate, Stragglers};
 use super::oracle::{BlockField, TerrainOracle};
 use super::rig_geom::RigGeom;
@@ -304,19 +304,18 @@ struct RigSide {
     /// Sprocket/idler visual mesh nodes. Each now carries its own axle-origin translation in its
     /// authored node transform (bake invariant `rotating_nodes_carry_their_own_axle_origin`), so
     /// they are posed by composing the belt spin ONTO that captured REST transform
-    /// (`gear_spin_transform`) — never by overwriting translation/scale, which would drag the node
+    /// (`GearFrame::pose`) — never by overwriting translation/scale, which would drag the node
     /// to the tank origin the moment the spin is near zero.
     sprocket_view: Entity,
     /// The sprocket node's authored REST transform, captured at bind — the pose the spin rides on.
-    sprocket_rest: Transform,
+    sprocket_rest: GearFrame,
     /// Where zero belt phase seats the first pin on this side (`RigGeom::belt_origin_angle`), and
-    /// where this sprocket's mesh carries a tooth TIP at rest (`sprocket_tooth_tip`, measured off
-    /// the glb). Together they PHASE-lock the teeth to the pins, not merely rate-lock them.
+    /// where the sheet places its reference tooth tip at rest. Together they PHASE-lock the teeth to the pins, not merely rate-lock them.
     sprocket_origin: f32,
     sprocket_tooth_tip: f32,
     idler_view: Entity,
     /// The idler node's authored REST transform, captured at bind (see `sprocket_rest`).
-    idler_rest: Transform,
+    idler_rest: GearFrame,
     /// This side's BELT ([`link_view::ShoeBelt`]): the identity-posed entity that draws every shoe
     /// of the side from its [`BeltFrames`] table — the same template, placement and mirrored
     /// left-side mesh the sandbox draws, so the two tools cannot disagree about what this track
@@ -336,7 +335,7 @@ struct RigWheel {
     /// differs from `plane_x`) and rest rotation (preserved under spin: a future model's wheels
     /// may author non-identity rests).
     pivot: Vec3,
-    rest_rotation: Quat,
+    frame: GearFrame,
     /// This station's PIN-LINE radius (m), from the measured [`RigGeom::rest`] circle — per station,
     /// not one shared wheel radius (the Tiger's interleaved discs alternate ~1.5 mm).
     radius: f32,
@@ -393,8 +392,9 @@ fn bind_track_rigs(
     template: Option<Res<LinkTemplate>>,
     tanks: Query<Entity, (With<Tank>, Without<TrackRig>)>,
     children: Query<&Children>,
+    parents: Query<&ChildOf>,
     names: Query<&Name>,
-    wheels: Query<(&Roadwheel, &Transform, Option<&ViewNode>)>,
+    wheels: Query<(&Roadwheel, Option<&ViewNode>)>,
     // Sprocket/idler REST poses and their tooth-tip mesh calibration are read here at bind: node
     // transforms for the rest capture and the mesh-space→hull composition, mesh primitives for the
     // sprocket tooth ring.
@@ -415,15 +415,23 @@ fn bind_track_rigs(
     let spec = &blueprint.spec.track;
     let belt_len = geom.belt_len();
     'tank: for root in &tanks {
-        let mut side_wheels: [Vec<(Vec3, Quat, Entity)>; 2] = [Vec::new(), Vec::new()];
+        let mut side_wheels: [Vec<(Vec3, GearFrame, Entity)>; 2] = [Vec::new(), Vec::new()];
         let mut sprocket_view = [None, None];
         let mut idler_view = [None, None];
         for entity in children.iter_descendants(root) {
-            if let Ok((wheel, transform, view)) = wheels.get(entity) {
+            if let Ok((wheel, view)) = wheels.get(entity) {
                 // Presentation not attached yet — try again next frame.
                 let Some(view) = view else { continue 'tank };
                 let si = (wheel.side == TrackSide::Right) as usize;
-                side_wheels[si].push((transform.translation, transform.rotation, view.0));
+                let rest = *node_transforms
+                    .get(view.0)
+                    .expect("an attached wheel view keeps its authored Transform");
+                let parent = hull_from_parent(view.0, root, &parents, &node_transforms)
+                    .expect("a wheel ViewNode belongs to its owning hull hierarchy");
+                let frame = GearFrame::new(rest, parent).unwrap_or_else(|fault| {
+                    panic!("{}: roadwheel view {:?}: {fault}", blueprint.file, view.0)
+                });
+                side_wheels[si].push((parent.transform_point3(rest.translation), frame, view.0));
             } else if let Ok(name) = names.get(entity) {
                 if let Some(side) = spec.sprocket.nodes.side_of(name) {
                     sprocket_view[side] = Some(entity);
@@ -468,19 +476,18 @@ fn bind_track_rigs(
             blueprint.file
         );
 
-        // Capture the sprocket/idler REST transforms (the pose the belt spin rides on) and measure
-        // each sprocket's tooth-tip phase off its own mesh — the phase-lock calibration. Both must
-        // succeed BEFORE anything is spawned: a mesh a frame late (or a node transform not yet
-        // present) just retries next frame rather than binding a mis-meshed sprocket or leaving a
-        // half-bound rig (a belt drawn on one side only) behind.
-        let (Ok(&sl_rest), Ok(&sr_rest), Ok(&il_rest), Ok(&ir_rest)) = (
-            node_transforms.get(sl),
-            node_transforms.get(sr),
-            node_transforms.get(il),
-            node_transforms.get(ir),
-        ) else {
-            continue;
+        // Capture each fixed node in its actual parent frame, before transform propagation.
+        let frame = |node| {
+            let rest = *node_transforms
+                .get(node)
+                .expect("a declared gear view keeps its authored Transform");
+            let parent = hull_from_parent(node, root, &parents, &node_transforms)
+                .expect("a declared gear view belongs to its owning hull hierarchy");
+            GearFrame::new(rest, parent).unwrap_or_else(|fault| {
+                panic!("{}: running-gear view {node:?}: {fault}", blueprint.file)
+            })
         };
+        let (sl_rest, sr_rest, il_rest, ir_rest) = (frame(sl), frame(sr), frame(il), frame(ir));
         // The tooth datum is construction data, not a statistic of decorative view vertices.
         let (sl_tip, sr_tip) = (
             spec.sprocket.tooth_tip_rad.left,
@@ -514,25 +521,23 @@ fn bind_track_rigs(
         // Zip each view wheel (sorted front→rear) with its measured pin-line radius from the rest
         // circles' MIDDLE (`rest[0]` is the sprocket, `rest.last()` the idler). Counts were checked
         // equal above.
-        let rig_wheels = |list: Vec<(Vec3, Quat, Entity)>,
+        let rig_wheels = |list: Vec<(Vec3, GearFrame, Entity)>,
                           rest: &[(Vec2, f32)],
                           treads: &[crate::spec::WheelTread]|
          -> Vec<RigWheel> {
             list.into_iter()
                 .zip(rest[1..rest.len() - 1].iter())
                 .zip(treads)
-                .map(
-                    |(((pivot, rest_rotation, view), &(_, radius)), tread)| RigWheel {
-                        pivot,
-                        rest_rotation,
-                        radius,
-                        tread: tread.clone(),
-                        dy: 0.0,
-                        dvel: 0.0,
-                        target: Default::default(),
-                        view,
-                    },
-                )
+                .map(|(((pivot, frame, view), &(_, radius)), tread)| RigWheel {
+                    pivot,
+                    frame,
+                    radius,
+                    tread: tread.clone(),
+                    dy: 0.0,
+                    dvel: 0.0,
+                    target: Default::default(),
+                    view,
+                })
                 .collect()
         };
         let sides = [
@@ -909,16 +914,11 @@ fn drive_track_views(
             // phase scrolls the lower run toward +Z) — `spin_angle` is the single flip point if a
             // future model's conventions differ. Per-station radius → per-wheel roll radius + spin.
             for wheel in &side.wheels {
-                if let Ok(mut tr) = views.get_mut(wheel.view) {
-                    let roll_r = wheel.radius - rig.pin_to_inner;
-                    let spin = Quat::from_rotation_x(spin_angle(phases[si], roll_r));
-                    let pose = Transform {
-                        translation: wheel.pivot + Vec3::Y * wheel.dy,
-                        rotation: wheel.rest_rotation * spin,
-                        ..*tr
-                    };
-                    tr.set_if_neq(pose);
-                }
+                let mut transform = views
+                    .get_mut(wheel.view)
+                    .expect("a bound wheel view keeps its transform until the rig is invalidated");
+                let angle = spin_angle(phases[si], wheel.radius - rig.pin_to_inner);
+                transform.set_if_neq(wheel.frame.pose(wheel.dy, angle));
             }
             // The sprocket and idler both carry their own axle-origin translation, so they are
             // posed by composing the spin onto their captured REST transform (never overwriting it):
@@ -932,7 +932,10 @@ fn drive_track_views(
             // over the stationary belly run rolls at the inner-face radius; subtracting
             // `pin_to_inner` here over-rotates the idler by ~7%.
             let pitch = rig.belt_len / rig.count as f32;
-            if let Ok(mut tr) = views.get_mut(side.sprocket_view) {
+            {
+                let mut tr = views
+                    .get_mut(side.sprocket_view)
+                    .expect("a bound sprocket view lives with its rig");
                 let angle = tooth_angle(
                     phases[si],
                     pitch,
@@ -940,11 +943,14 @@ fn drive_track_views(
                     side.sprocket_origin,
                     side.sprocket_tooth_tip,
                 );
-                tr.set_if_neq(gear_spin_transform(&side.sprocket_rest, angle));
+                tr.set_if_neq(side.sprocket_rest.pose(0.0, angle));
             }
-            if let Ok(mut tr) = views.get_mut(side.idler_view) {
+            {
+                let mut tr = views
+                    .get_mut(side.idler_view)
+                    .expect("a bound idler view lives with its rig");
                 let angle = spin_angle(phases[si], side.idler.1);
-                tr.set_if_neq(gear_spin_transform(&side.idler_rest, angle));
+                tr.set_if_neq(side.idler_rest.pose(0.0, angle));
             }
         }
     }
@@ -1090,7 +1096,11 @@ mod tests {
                     .zip(geom.wheel_treads.get(side))
                     .map(|(&(center, radius), tread)| RigWheel {
                         pivot: Vec3::new(plane_x, center.y, center.x),
-                        rest_rotation: Quat::IDENTITY,
+                        frame: GearFrame::new(
+                            Transform::from_translation(Vec3::new(plane_x, center.y, center.x)),
+                            Affine3A::IDENTITY,
+                        )
+                        .unwrap(),
                         radius,
                         tread: tread.clone(),
                         dy: 0.0,
@@ -1100,11 +1110,11 @@ mod tests {
                     })
                     .collect(),
                 sprocket_view: spawn_pose(world),
-                sprocket_rest: Transform::IDENTITY,
+                sprocket_rest: GearFrame::new(Transform::IDENTITY, Affine3A::IDENTITY).unwrap(),
                 sprocket_origin: geom.belt_origin_angle(side),
                 sprocket_tooth_tip: 0.0,
                 idler_view: spawn_pose(world),
-                idler_rest: Transform::IDENTITY,
+                idler_rest: GearFrame::new(Transform::IDENTITY, Affine3A::IDENTITY).unwrap(),
                 belt: world
                     .spawn((
                         Transform::IDENTITY,

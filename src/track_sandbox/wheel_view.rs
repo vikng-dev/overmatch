@@ -51,10 +51,9 @@
 //! Y flip or a non-unit scale therefore changes nothing: travel is still hull-up, spin is still
 //! about the hull's lateral axis, and the authored scale survives.
 
-use bevy::math::Affine3A;
 use bevy::prelude::*;
 
-use crate::track::gear_phase::{gear_transform, spin_angle, tooth_angle};
+use crate::track::gear_phase::{GearFrame, hull_from_parent, spin_angle, tooth_angle};
 
 use super::belt::BeltPhase;
 use super::rig_geom::RigGeom;
@@ -101,16 +100,8 @@ pub(super) enum GearRole {
 pub(super) struct GearNode {
     side: Side,
     role: GearRole,
-    /// The node's AUTHORED local transform, captured once at bind. Every frame's pose is built from
-    /// this, never from the previous frame's — so the layer has no state to drift and switching it
-    /// off restores the model's own pose exactly.
-    rest: Transform,
-    /// The hull's up axis, expressed in this node's PARENT space and scaled by that space's metric:
-    /// adding `up * dy` moves the node exactly `dy` metres of HULL space, whatever sits in between.
-    up: Vec3,
-    /// The hull's lateral axis in the same parent space — the axle the wheel spins about. Unit
-    /// length, because it is a rotation axis and not a displacement.
-    axle: Vec3,
+    /// The checked authored parent-space pose shared with the game's track view.
+    frame: GearFrame,
     /// Road wheels only: the suspension station whose `dy` this node rides.
     station: Option<Entity>,
     /// Sprockets only: the side-plane angle at which this mesh carries a tooth TIP in its authored
@@ -174,7 +165,9 @@ fn bind_gear_nodes(
         let Some(hull_from_parent) = hull_from_parent(entity, hull, &parents, &transforms) else {
             continue;
         };
-        let parent_from_hull = hull_from_parent.inverse();
+        let frame = GearFrame::new(*local, hull_from_parent).unwrap_or_else(|fault| {
+            panic!("{}: running-gear node {name}: {fault}", blueprint.file)
+        });
         let station = if role == GearRole::Road {
             let mut matches = stations
                 .iter()
@@ -215,11 +208,7 @@ fn bind_gear_nodes(
             GearNode {
                 side,
                 role,
-                rest: *local,
-                up: parent_from_hull.transform_vector3(Vec3::Y),
-                axle: parent_from_hull
-                    .transform_vector3(Vec3::X)
-                    .try_normalize().expect("the baked scene hierarchy has nonsingular transforms, so its lateral axis is nonzero"),
+                frame,
                 station,
                 tooth_tip,
                 rolling_radius,
@@ -238,34 +227,6 @@ fn bind_gear_nodes(
             },
         ));
     }
-}
-
-/// Compose every transform strictly between `hull` and `node` — i.e. the space `node`'s own
-/// `Transform` is expressed in, as seen from the hull body.
-///
-/// `None` if `node` is not a descendant of `hull`. The walk is up the `ChildOf` chain rather than a
-/// `GlobalTransform` difference on purpose: global transforms are propagated at the END of the
-/// frame, so on the frame a scene instantiates they are all still identity, and a bind that trusted
-/// them would silently record the wrong axes.
-fn hull_from_parent(
-    node: Entity,
-    hull: Entity,
-    parents: &Query<&ChildOf>,
-    transforms: &Query<&Transform>,
-) -> Option<Affine3A> {
-    let mut chain = Vec::new();
-    let mut current = parents.get(node).ok()?.parent();
-    while current != hull {
-        chain.push(current);
-        current = parents.get(current).ok()?.parent();
-    }
-    // Root-most first: the composition reads hull → … → parent, left to right.
-    Some(chain.iter().rev().fold(Affine3A::IDENTITY, |m, &entity| {
-        m * transforms
-            .get(entity)
-            .expect("every glTF ancestor in the hull hierarchy carries its authored Transform")
-            .compute_affine()
-    }))
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -287,7 +248,7 @@ fn drive_running_gear(
         if !viz.running_gear {
             // The authored pose, not the last driven one: the layer's OFF state is the model as
             // Blender ships it, which is exactly the A/B you want against the derived rest gear.
-            transform.set_if_neq(node.rest);
+            transform.set_if_neq(node.frame.rest());
             continue;
         }
         let travel = phase.get(node.side);
@@ -322,7 +283,7 @@ fn drive_running_gear(
             // inner-face radius (2026-07-25 review; the game view agrees).
             GearRole::Idler => (0.0, spin_angle(travel, idler_pin_radius(&geom, node.side))),
         };
-        transform.set_if_neq(gear_transform(&node.rest, node.up, node.axle, dy, angle));
+        transform.set_if_neq(node.frame.pose(dy, angle));
     }
 }
 

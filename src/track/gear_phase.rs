@@ -4,6 +4,7 @@
 //! Sprockets turn one tooth per material link and seat the reference tooth declared in the tank
 //! sheet at half a tooth beyond the route origin. No view mesh can change those datums.
 
+use bevy::math::Affine3A;
 use bevy::prelude::*;
 
 // ---------------------------------------------------------------------------------------------
@@ -94,11 +95,77 @@ pub(crate) fn gear_transform(
     }
 }
 
-/// [`gear_transform`] for a HULL-FRAMED, hull-FIXED role (sprocket / idler): no travel, and the axle
-/// is the hull's own `+X` because the node's parent chain to the root is identity. The game's gear
-/// nodes are exactly that case.
-pub(crate) fn gear_spin_transform(rest: &Transform, angle: f32) -> Transform {
-    gear_transform(rest, Vec3::ZERO, Vec3::X, 0.0, angle)
+/// A checked parent-space pose for a rigid running-gear node. Parent scale must be uniform:
+/// otherwise a hull-axis rotation needs shear, which a local `Transform` cannot represent.
+#[derive(Clone, Copy)]
+pub(crate) struct GearFrame {
+    rest: Transform,
+    up: Vec3,
+    axle: Vec3,
+}
+
+#[derive(Debug)]
+pub(crate) struct GearFrameFault;
+
+impl std::fmt::Display for GearFrameFault {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("running-gear parent axes must be finite, orthogonal and uniformly scaled; bake parent scale/shear into the mesh before export")
+    }
+}
+
+impl GearFrame {
+    pub(crate) fn new(rest: Transform, hull_from_parent: Affine3A) -> Result<Self, GearFrameFault> {
+        let axes = [Vec3::X, Vec3::Y, Vec3::Z].map(|axis| hull_from_parent.transform_vector3(axis));
+        let scale2 = axes[0].length_squared();
+        // ASSUMED f32 representation tolerance for composed uniform parent frames.
+        let tolerance = 128.0 * f32::EPSILON * scale2;
+        if !scale2.is_finite()
+            || scale2 <= 0.0
+            || axes
+                .iter()
+                .any(|axis| !axis.is_finite() || (axis.length_squared() - scale2).abs() > tolerance)
+            || axes[0].dot(axes[1]).abs() > tolerance
+            || axes[0].dot(axes[2]).abs() > tolerance
+            || axes[1].dot(axes[2]).abs() > tolerance
+        {
+            return Err(GearFrameFault);
+        }
+        let parent_from_hull = hull_from_parent.inverse();
+        let handedness = axes[0].cross(axes[1]).dot(axes[2]).signum();
+        let axle = parent_from_hull.transform_vector3(Vec3::X) * handedness;
+        Ok(Self {
+            rest,
+            up: parent_from_hull.transform_vector3(Vec3::Y),
+            axle: axle.try_normalize().ok_or(GearFrameFault)?,
+        })
+    }
+
+    pub(crate) fn rest(&self) -> Transform {
+        self.rest
+    }
+
+    pub(crate) fn pose(&self, dy: f32, angle: f32) -> Transform {
+        gear_transform(&self.rest, self.up, self.axle, dy, angle)
+    }
+}
+
+/// Compose the authored parent chain before transform propagation. `None` names a node outside
+/// this hull; a linked ancestor without its authored transform is a construction bug.
+pub(crate) fn hull_from_parent(
+    node: Entity,
+    hull: Entity,
+    parents: &Query<&ChildOf>,
+    transforms: &Query<&Transform>,
+) -> Option<Affine3A> {
+    let mut chain = Vec::new();
+    let mut current = parents.get(node).ok()?.parent();
+    while current != hull {
+        chain.push(current);
+        current = parents.get(current).ok()?.parent();
+    }
+    Some(chain.iter().rev().fold(Affine3A::IDENTITY, |frame, &entity| {
+        frame * transforms.get(entity).expect("every glTF ancestor in the hull hierarchy keeps its authored Transform").compute_affine()
+    }))
 }
 
 #[cfg(test)]
@@ -113,6 +180,39 @@ mod tests {
     /// calibration term that silently dropped out of the rate math would show up here.
     const ORIGIN: f32 = 1.5199;
     const MESH_TIP: f32 = 0.0163;
+
+    /// The game and sandbox pose wheels in their actual parent frame. The hull-space rim
+    /// motion must keep its direction through a flipped node and rotated/scaled parent; a
+    /// post-multiplied spin or a parent-local X axis breaks this invariant.
+    #[test]
+    fn a_bound_wheel_rotates_about_the_hull_axis_in_its_parent_frame() {
+        let parent = Transform {
+            translation: Vec3::new(0.3, 0.2, -0.4),
+            rotation: Quat::from_rotation_z(0.4),
+            scale: Vec3::splat(0.8),
+        }
+        .compute_affine();
+        let rest = Transform {
+            translation: Vec3::new(1.0, 0.5, 0.0),
+            rotation: Quat::from_rotation_y(std::f32::consts::PI),
+            scale: Vec3::splat(0.7),
+        };
+        let frame = GearFrame::new(rest, parent).expect("uniform fixture parent frame");
+        let (dy, angle) = (0.045, -0.7); // Fixture travel (m) and spin (rad).
+        let point = Vec3::new(0.0, -0.4, 0.0);
+        let axle = parent.transform_point3(rest.translation);
+        let before = parent.transform_point3(rest.transform_point(point));
+        let expected = axle + Quat::from_rotation_x(angle) * (before - axle) + Vec3::Y * dy;
+        let after = parent.transform_point3(frame.pose(dy, angle).transform_point(point));
+        assert!((after - expected).length() < 1e-5);
+        assert!(
+            GearFrame::new(
+                rest,
+                Transform::from_scale(Vec3::new(1.0, 2.0, 1.0)).compute_affine()
+            )
+            .is_err()
+        );
+    }
 
     /// The rolling wheels turn the way a wheel turns: driving forward scrolls the belly toward `+z`,
     /// so the wheel's CONTACT POINT must travel `+z` with it, and the arc it sweeps must equal the
@@ -164,7 +264,7 @@ mod tests {
         // The game's hull-fixed entry point carries the captured REST translation verbatim:
         // overwriting it drags the node to the tank origin at phase zero.
         assert_eq!(
-            gear_spin_transform(&rest, angle).translation,
+            gear_transform(&rest, Vec3::ZERO, Vec3::X, 0.0, angle).translation,
             rest.translation
         );
 

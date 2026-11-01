@@ -10,7 +10,7 @@
 
 use std::path::Path;
 
-use bevy::math::{Vec2, Vec3};
+use bevy::math::{Affine3A, Vec2, Vec3};
 use bevy::prelude::Resource;
 
 use crate::bake::TankBlueprint;
@@ -220,9 +220,9 @@ impl RigGeom {
                 Side::Right => nodes.right.clone(),
             };
             let centre = |name: String, field: &str| {
-                let node = blueprint.geometry.nodes.iter().find(|node| node.name == name)
+                let index = blueprint.geometry.nodes.iter().position(|node| node.name == name)
                     .unwrap_or_else(|| panic!("{}: {field} names missing node {name}; restore the axle node or update its construction reference", blueprint.file));
-                let at = node.root_position;
+                let at = axle_position(blueprint, index);
                 assert!(at.is_finite(), "{}: {field} axle must be finite; repair the node transform", blueprint.file);
                 Vec2::new(at.z, at.y)
             };
@@ -717,8 +717,32 @@ fn window_of(
     )
 }
 
-/// Hull-local centres of one side's road wheels, front→rear. The blueprint's `root_position` is
-/// already model-root-relative — i.e. hull-local — so nothing is re-offset here.
+/// Resolve and certify an axle's full authored frame before publishing any running gear.
+fn axle_position(blueprint: &TankBlueprint, index: usize) -> Vec3 {
+    let node = &blueprint.geometry.nodes[index];
+    let mut chain = Vec::new();
+    let mut cursor = node.parent;
+    while let Some(parent) = cursor {
+        chain.push(parent);
+        cursor = blueprint.geometry.nodes[parent].parent;
+    }
+    let parent = chain
+        .iter()
+        .rev()
+        .fold(Affine3A::IDENTITY, |frame, &index| {
+            frame * blueprint.geometry.nodes[index].transform.compute_affine()
+        });
+    super::gear_phase::GearFrame::new(node.transform, parent).unwrap_or_else(|fault| {
+        panic!(
+            "{}: running-gear node {}: {fault}",
+            blueprint.file, node.name
+        )
+    });
+    parent.transform_point3(node.transform.translation)
+}
+
+/// Hull-local centres of one side's road wheels, front→rear, composed through the full authored
+/// parent chain so rotated or scaled construction groups cannot change the axle frame.
 fn side_wheel_centres(blueprint: &TankBlueprint, side: Side) -> Vec<Vec3> {
     let want = track_side(side);
     let mut centres: Vec<Vec3> = blueprint
@@ -726,7 +750,7 @@ fn side_wheel_centres(blueprint: &TankBlueprint, side: Side) -> Vec<Vec3> {
         .roadwheels
         .iter()
         .filter(|(_, s)| *s == want)
-        .map(|&(i, _)| blueprint.geometry.nodes[i].root_position)
+        .map(|&(i, _)| axle_position(blueprint, i))
         .collect();
     centres.sort_by(|a, b| a.z.total_cmp(&b.z));
     centres
@@ -740,13 +764,12 @@ fn side_wheel_treads(blueprint: &TankBlueprint, side: Side) -> Vec<crate::spec::
         .iter()
         .filter(|wheel| wheel.side == track_side(side))
         .map(|wheel| {
-            let node = blueprint
+            let index = *blueprint
                 .geometry
-                .nodes
-                .iter()
-                .find(|node| node.name == wheel.node)
+                .by_name
+                .get(&wheel.node)
                 .expect("the bake resolves every declared roadwheel node");
-            (node.root_position.z, wheel.tread.clone())
+            (axle_position(blueprint, index).z, wheel.tread.clone())
         })
         .collect();
     stations.sort_by(|a, b| a.0.total_cmp(&b.0));
