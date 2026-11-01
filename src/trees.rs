@@ -893,7 +893,7 @@ const MAX_FALL_TICKS: usize = 64 * 120;
 /// disc's own `π a⁴ / 4`); `θ'' = Ω² sin θ` turns it. `spin` (rad/s) is the speed it starts at:
 /// the least push that tips a piece standing on its cut face lifts its centre of mass, `d` above
 /// the cut, over the cut's rim `r`, so `½ I ω₀² = g V (√(d² + r²) − d)` (DERIVED). A harder push
-/// (a ram's whole angular impulse) is not carried by the state, so every fall starts at the least.
+/// (a body's whole blow) is not carried by the state, so every fall starts at the least.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub(crate) struct Pendulum {
     pub(crate) omega2: f64,
