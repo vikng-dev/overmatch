@@ -2604,7 +2604,11 @@ fn march_shell_step(
     // The game's damage model: the provisional rule in `not_own_volume` makes the firing tank
     // transparent for every cast below. Only the authority walks geometry; replicas play its path.
     let shooter = shell.source.map(|source| source.tank);
-    let not_own = |entity: Entity| not_own_volume(entity, shooter, &world.owners, &world.parents);
+    let resting = std::cell::RefCell::new(Vec::new());
+    let not_own = |entity: Entity| {
+        !resting.borrow().contains(&entity)
+            && not_own_volume(entity, shooter, &world.owners, &world.parents)
+    };
     // Gravity and drag on the velocity through the free-flight kernel the FireEvent catch-up folds
     // ([`fast_forward_shell`]). An unbent open-air step flies exactly `stepped × dt`. The march may
     // *bend* the direction (normalization / ricochet), so we carry direction + speed and rebuild the
@@ -2693,6 +2697,7 @@ fn march_shell_step(
             damage_dealt += removed;
             budget.fly(spent);
             flight = playing.flight();
+            resting.borrow_mut().clear();
             bent = true;
             if !complete {
                 playback.push_front(playing);
@@ -2839,29 +2844,18 @@ fn march_shell_step(
                 let offsets = flight.sample_offsets(radius);
                 let relative = flight.direction * flight.speed - carrier;
                 if relative == Vec3::ZERO {
-                    // The game's damage model: material born around a round sharing its velocity
-                    // gives the crossing no motion and no clock (travel over zero speed). The
-                    // round keeps that world velocity to the tick boundary or an armed delay's
-                    // end; its next step reads the membership again where it then stands.
+                    // The game's damage model: this collider has no relative traversal, but
+                    // other bodies can still meet the world path during the remaining seconds.
+                    // Rediscover without this resting material until another crossing changes
+                    // the velocity; the next tick reads all membership again.
+                    resting.borrow_mut().push(
+                        hit.expect("relative-rest contact was discovered on an addressed collider")
+                            .entity,
+                    );
                     flight.position = moving.point;
                     flight.continuation = None;
-                    let wait = budget.remaining() as f32;
-                    let due = shell.projectile.fuze.wait_at_rest(wait);
-                    let rested = if due {
-                        shell.projectile.fuze.delay_left().expect(
-                            "only an armed fuze expires while the game's damage model waits at rest",
-                        )
-                    } else {
-                        wait
-                    };
-                    flight.fly(carrier * rested);
-                    budget.fly(f64::from(rested));
-                    if due {
-                        damage_dealt += burst_here(shell, &context, &flight, 0.0, health).1;
-                        publish_path_state(shell, tick, &budget, &flight, true, None);
-                        stopped = true;
-                    }
-                    break;
+                    bent = true;
+                    continue;
                 }
                 let direction = Dir3::new(relative).expect(
                     "game's damage model: posed collider motion and flight give finite relative velocity",

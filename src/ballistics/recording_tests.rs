@@ -2386,3 +2386,58 @@ fn a_slowing_shared_crossing_in_a_moving_frame_is_admitted() {
             .expect("a slowing moving crossing is a legitimate record");
     }
 }
+
+/// The game's damage model: resting relative to one material cannot hide a different body's
+/// plate later in the same tick; collision discovery still owns the remaining world path.
+/// All dimensions and velocities below are fixture data.
+#[test]
+fn relative_rest_still_discovers_a_separate_plate_in_the_same_tick() {
+    let mut app = recording_world(false);
+    app.insert_resource(RetainSpentShells(true));
+    settle(&mut app);
+    fire(&mut app, Vec3::new(0.0, 20.0, 30.0), FireMechanism::Single);
+    app.update();
+    let mut shells = app.world_mut().query::<(&mut Transform, &mut Projectile)>();
+    let (mut pose, mut projectile) = shells.single_mut(app.world_mut()).unwrap();
+    let at = Vec3::new(0.0, 20.0, 32.0);
+    pose.translation = at;
+    projectile.axis = Some(resolve::AxisStart {
+        anchor: at,
+        origin: Vec3::ZERO,
+    });
+    let velocity = Vec3::NEG_Z * 640.0;
+    projectile.drag_k = 0.0;
+    projectile.velocity = velocity - GRAVITY * TICK.as_secs_f32();
+    let (_, carrier) = tank(
+        &mut app,
+        at,
+        0.0,
+        velocity,
+        &[("carrier", Vec3::splat(2.0), Vec3::ZERO, Kind::Plate)],
+    );
+    let (_, separate) = tank(
+        &mut app,
+        at + Vec3::NEG_Z * 5.0,
+        0.0,
+        Vec3::ZERO,
+        &[(
+            "separate",
+            Vec3::new(4.0, 4.0, 0.5),
+            Vec3::ZERO,
+            Kind::Plate,
+        )],
+    );
+    // The containing material has no relative traversal, regardless of its resistance.
+    assert_ne!(carrier[0], separate[0]);
+    app.update();
+    let mut logs = app.world_mut().query::<&PenetrationMarks>();
+    let marks: Vec<_> = logs
+        .iter(app.world())
+        .flat_map(|marks| &marks.log)
+        .collect();
+    assert!(
+        marks.iter().any(|mark| matches!(mark,
+        ArmourMark::Crossing { volumes, .. } if volumes.iter().any(|v| v.volume == separate[0]))),
+        "the separate plate must resolve before this tick ends: {marks:?}"
+    );
+}
