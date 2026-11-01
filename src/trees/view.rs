@@ -60,8 +60,8 @@ pub(crate) fn attach(
         TreeView,
         crate::render_cost::CasterClass::Tree,
     ));
-    let (id, assets) = (kind.id.clone(), assets.clone());
-    commands.queue(move |world: &mut World| request_template(world, id, &assets));
+    let (id, segments, assets) = (kind.id.clone(), kind.segments.len(), assets.clone());
+    commands.queue(move |world: &mut World| request_template(world, id, segments, &assets));
 }
 
 /// Every tree kind's view template by kind id: `None` while its glb loads.
@@ -70,11 +70,14 @@ pub(crate) struct TreeTemplates(HashMap<String, Option<TreeTemplate>>);
 
 /// The hidden glb instance a kind's template is read from, by kind id.
 #[derive(Component)]
-struct TreeViewSource(String);
+struct TreeViewSource {
+    id: String,
+    segments: usize,
+}
 
 /// Start reading kind `id`'s template unless it is read or loading: one hidden, unparented instance
 /// of the kind's glb scene, read and despawned once it is ready ([`read_template`]).
-fn request_template(world: &mut World, id: String, assets: &AssetServer) {
+fn request_template(world: &mut World, id: String, segments: usize, assets: &AssetServer) {
     {
         let mut templates = world.get_resource_or_init::<TreeTemplates>();
         if templates.0.contains_key(&id) {
@@ -87,7 +90,7 @@ fn request_template(world: &mut World, id: String, assets: &AssetServer) {
         .spawn((
             WorldAssetRoot(scene),
             Visibility::Hidden,
-            TreeViewSource(id),
+            TreeViewSource { id, segments },
         ))
         .observe(read_template);
 }
@@ -98,7 +101,7 @@ fn refuse_failed_templates(
     sources: Query<(&TreeViewSource, &WorldAssetRoot)>,
     server: Res<AssetServer>,
 ) {
-    for (TreeViewSource(id), root) in &sources {
+    for (TreeViewSource { id, .. }, root) in &sources {
         if let LoadState::Failed(err) = server.load_state(&root.0) {
             panic!("trees: the view of kind {id} (trees/{id}/{id}.glb) failed to load: {err}");
         }
@@ -137,7 +140,8 @@ pub(crate) struct TreeTemplate {
 impl TreeTemplate {
     /// The template of `nodes`, its standing meshes merged ([`standing_meshes`]) and added to
     /// `meshes`. Primitives that cannot merge are a broken ship, refused against kind `id`.
-    fn new(id: &str, nodes: Vec<TemplateNode>, meshes: &mut Assets<Mesh>) -> Self {
+    fn new(id: &str, segments: usize, nodes: Vec<TemplateNode>, meshes: &mut Assets<Mesh>) -> Self {
+        check_bindings(id, segments, &nodes);
         let merged = standing_meshes(&nodes, meshes).unwrap_or_else(|why| {
             panic!(
                 "trees: {id}.glb's standing primitives do not merge ({why}); export every \
@@ -156,6 +160,44 @@ impl TreeTemplate {
             .map(|(mesh, material)| (meshes.add(mesh), material))
             .collect();
         Self { nodes, standing }
+    }
+}
+
+/// Refuse a broken view at template load, before its standing meshes can be drawn. The
+/// segmented view needs exactly one trunk and both caps per declared segment, even if the
+/// first instance never falls.
+fn check_bindings(id: &str, segments: usize, nodes: &[TemplateNode]) {
+    let mut bound = vec![[false; 3]; segments];
+    for node in nodes {
+        let Some((part, segment)) = node.part else {
+            continue; // Unmarked grouping and primitive nodes bind no part.
+        };
+        let slot = match part {
+            Part::Trunk => 0,
+            Part::CapTop => 1,
+            Part::CapBottom => 2,
+            Part::Canopy => continue, // Canopy nodes carry no segmented binding.
+        };
+        assert!(
+            segment < segments,
+            "trees: trees/{id}/{id}.glb tree_segment {segment} for tree_part {part:?} is outside {segments} segments; re-export against its tree asset"
+        );
+        assert!(
+            !bound[segment][slot],
+            "trees: trees/{id}/{id}.glb repeats tree_part {part:?} at tree_segment {segment}; export each trunk and cap binding once"
+        );
+        bound[segment][slot] = true;
+    }
+    for (segment, parts) in bound.iter().enumerate() {
+        for (slot, part) in [Part::Trunk, Part::CapTop, Part::CapBottom]
+            .iter()
+            .enumerate()
+        {
+            assert!(
+                parts[slot],
+                "trees: trees/{id}/{id}.glb is missing tree_part {part:?} at tree_segment {segment}; export one trunk and both caps for every segment"
+            );
+        }
     }
 }
 
@@ -209,9 +251,10 @@ fn read_template(
     mut templates: ResMut<TreeTemplates>,
     mut commands: Commands,
 ) {
-    let Ok(TreeViewSource(id)) = sources.get(ready.entity) else {
-        return;
-    };
+    let source = sources
+        .get(ready.entity)
+        .expect("the template observer is mounted only on its source instance");
+    let id = &source.id;
     // Breadth first, so every entity follows its parent.
     let mut order: Vec<(Entity, Option<usize>)> = children
         .get(ready.entity)
@@ -240,7 +283,7 @@ fn read_template(
             }
         })
         .collect();
-    let template = TreeTemplate::new(id, nodes, &mut meshes);
+    let template = TreeTemplate::new(id, source.segments, nodes, &mut meshes);
     templates.0.insert(id.clone(), Some(template));
     commands.entity(ready.entity).despawn();
 }
@@ -670,6 +713,43 @@ mod tests {
         }
     }
 
+    /// A standing view must refuse bad part bindings at load: waiting until a fall would
+    /// accept invisible or unposeable segments into play. ASSUMED fixture nodes and segment count.
+    #[test]
+    fn template_load_refuses_missing_duplicate_and_outside_part_bindings() {
+        let mut meshes = Assets::<Mesh>::default();
+        let mut materials = Assets::<StandardMaterial>::default();
+        let (nodes, _, _) = fixture_nodes(&mut meshes, &mut materials);
+        check_bindings("fixture", 3, &nodes);
+        for mutation in 0..3 {
+            let mut broken = nodes.clone();
+            let index = broken
+                .iter()
+                .position(|node| node.part == Some((Part::Trunk, 1)))
+                .unwrap();
+            match mutation {
+                0 => broken[index].part = None,
+                1 => broken.push(broken[index].clone()),
+                _ => broken[index].part = Some((Part::Trunk, 3)),
+            }
+            let refused = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                TreeTemplate::new("fixture", 3, broken, &mut meshes);
+            }))
+            .expect_err("bad bindings must fail at template construction");
+            let reason = refused
+                .downcast_ref::<String>()
+                .expect("binding refusal names its repair");
+            for required in [
+                "trees/fixture/fixture.glb",
+                "tree_part",
+                "tree_segment",
+                "export",
+            ] {
+                assert!(reason.contains(required), "{reason}");
+            }
+        }
+    }
+
     /// THE STANDING MESHES ARE THE STANDING PRIMITIVES, BIT FOR BIT: the template's standing view
     /// is one mesh per material in first-use order — bark, then needles, no cut wood — and each is
     /// its material's primitives in node order, every position its own lifted by its node's
@@ -735,7 +815,7 @@ mod tests {
         let mut materials = Assets::<StandardMaterial>::default();
         let (nodes, _, _) = fixture_nodes(&mut meshes, &mut materials);
         let drawn = nodes.iter().filter(|node| node.mesh.is_some()).count();
-        let template = TreeTemplate::new("fixture", nodes, &mut meshes);
+        let template = TreeTemplate::new("fixture", 3, nodes, &mut meshes);
         let standing = template.standing.clone();
         let mut app = App::new();
         app.add_plugins(plugin)
