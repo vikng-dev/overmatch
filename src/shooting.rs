@@ -118,7 +118,10 @@ pub fn plugin(app: &mut App) {
 /// Advance the local-only fallback clock after a completed fixed tick. Network compositions
 /// overwrite it from `LocalTimeline` before the next gameplay pass.
 pub(crate) fn advance_weapon_clock(mut clock: ResMut<crate::WeaponClock>) {
-    clock.0 = clock.0.saturating_add(1);
+    clock.0 = clock
+        .0
+        .checked_add(1)
+        .expect(crate::tank::SESSION_TICK_RANGE);
 }
 
 /// Why a weapon's [`TankRoot`] resolves: [`crate::tank`]'s assembly spawns every weapon under its
@@ -587,10 +590,10 @@ mod tests {
     const MAIN_GUN_CYCLE: FireCycle = FireCycle::Single { reload_secs: 0.5 };
 
     /// The absolute gate's tick arithmetic never wraps: deadlines compare in numeric order (a
-    /// deadline at `u32::MAX` is not reached at tick 0), the last tick is reachable, no deadline is
-    /// ready at every tick, and a delay, pause or resume past the tick range fail-stops.
+    /// deadline at `u32::MAX` is not reached at tick 0), the last tick is reachable, and an unarmed
+    /// gate is ready at every tick.
     #[test]
-    fn absolute_gate_freezes_when_the_tick_range_is_exhausted() {
+    fn absolute_gate_deadlines_keep_numeric_order_to_the_last_tick() {
         let at_the_end = WeaponGateState {
             ready_tick: Some(u32::MAX),
             paused_at_tick: None,
@@ -612,49 +615,49 @@ mod tests {
         assert!(unarmed.deadline_reached(u32::MAX));
         assert_eq!(unarmed.remaining_ticks(0), 0);
         assert_eq!(unarmed.remaining_ticks(u32::MAX), 0);
+    }
 
-        let exhausted = WeaponGateState {
-            ready_tick: None,
-            paused_at_tick: Some(u32::MAX),
-            belt_remaining: 0,
-        };
+    /// A delay, a pause's deferral or a resume's shift past the tick range is a bug in every
+    /// build: no session runs 776 days (`SESSION_TICK_RANGE`), and a gate that quietly stopped
+    /// would disarm the weapon for the rest of the session unseen.
+    #[test]
+    #[should_panic(expected = "776 days")]
+    fn arming_past_the_tick_range_is_a_bug() {
+        WeaponGateState::default().arm(u32::MAX - 1, 3);
+    }
 
-        let mut armed = WeaponGateState::default();
-        armed.arm(u32::MAX - 1, 3);
-        assert_eq!(armed, exhausted, "an unrepresentable delay must fail-stop");
-        assert!(!armed.is_ready());
-        assert!(armed.is_exhausted());
-        assert_eq!(armed.remaining_ticks(u32::MAX), u32::MAX);
-
+    #[test]
+    #[should_panic(expected = "776 days")]
+    fn pausing_past_the_tick_range_is_a_bug() {
         let mut paused = WeaponGateState {
             ready_tick: Some(u32::MAX),
             paused_at_tick: None,
             belt_remaining: 0,
         };
         paused.pause(u32::MAX - 1);
-        assert_eq!(paused, exhausted, "an unrepresentable pause must fail-stop");
+    }
 
+    #[test]
+    #[should_panic(expected = "776 days")]
+    fn resuming_past_the_tick_range_is_a_bug() {
         let mut resumed = WeaponGateState {
             ready_tick: Some(u32::MAX),
             paused_at_tick: Some(u32::MAX - 2),
             belt_remaining: 0,
         };
         resumed.resume(u32::MAX);
-        assert_eq!(
-            resumed, exhausted,
-            "an unrepresentable resume shift must fail-stop"
-        );
     }
 
+    /// The local clock reaches its last tick and refuses to advance past it, as the gate does.
     #[test]
-    fn fallback_weapon_clock_saturates() {
+    #[should_panic(expected = "776 days")]
+    fn the_fallback_weapon_clock_past_its_range_is_a_bug() {
         let mut world = World::new();
         world.insert_resource(crate::WeaponClock(u32::MAX - 1));
 
         world.run_system_once(advance_weapon_clock).unwrap();
         assert_eq!(world.resource::<crate::WeaponClock>().0, u32::MAX);
         world.run_system_once(advance_weapon_clock).unwrap();
-        assert_eq!(world.resource::<crate::WeaponClock>().0, u32::MAX);
     }
 
     /// A minimal `Automatic` rig the real `fire`/`tick_weapon_gate` systems run over: a tank root
@@ -1059,26 +1062,6 @@ mod tests {
         assert_eq!(gate_state(&world, root).ready_tick, None);
         world.run_system_once(fire).unwrap();
         assert_eq!(weapon_state(&mut world, root).rounds_fired, 2);
-    }
-
-    #[test]
-    fn saturated_clock_refuses_repeated_shots() {
-        let mut world = test_world();
-        world.resource_mut::<crate::WeaponClock>().0 = u32::MAX;
-        let root = spawn_main_gun_rig(&mut world);
-
-        world.run_system_once(fire).unwrap();
-        assert_eq!(weapon_state(&mut world, root).rounds_fired, 1);
-        assert!(gate_state(&world, root).is_exhausted());
-
-        world.run_system_once(tick_weapon_gate).unwrap();
-        world.run_system_once(fire).unwrap();
-        assert_eq!(
-            weapon_state(&mut world, root).rounds_fired,
-            1,
-            "a clock pinned at MAX must not repeatedly mature a saturated deadline"
-        );
-        assert!(gate_state(&world, root).is_exhausted());
     }
 
     /// An offline pause freezes every weapon's absolute deadline, the main gun's reload and the

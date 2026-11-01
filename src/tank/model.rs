@@ -275,10 +275,9 @@ pub struct WeaponState {
 /// freezes crew work without changing this component again until work resumes; there is no per-tick
 /// countdown.
 ///
-/// Lightyear ticks saturate rather than wrap. If arming or shifting a deadline would exceed
-/// `u32::MAX`, the gate fail-stops as `(ready_tick: None, paused_at_tick: Some(u32::MAX))`. That
-/// otherwise-unreachable pair is permanently not-ready, so a clock pinned at its maximum cannot
-/// repeatedly fire a deadline that saturated to the same tick.
+/// Deadlines are absolute `u32` ticks and never wrap. No session exhausts them: 2^32 ticks at the
+/// 64 Hz fixed tick is 776 days (DERIVED). A deadline past the range is a bug, and panics
+/// ([`SESSION_TICK_RANGE`]).
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default, Serialize, Deserialize)]
 pub struct WeaponGateState {
     pub ready_tick: Option<u32>,
@@ -286,9 +285,12 @@ pub struct WeaponGateState {
     pub belt_remaining: u32,
 }
 
-impl WeaponGateState {
-    const EXHAUSTED_TICK: u32 = u32::MAX;
+/// Why a weapon clock's arithmetic stays inside `u32`: the bound every gate deadline and the
+/// local clock's advance rely on.
+pub(crate) const SESSION_TICK_RANGE: &str = "a session's weapon clock stays far below u32::MAX: \
+     2^32 ticks at 64 Hz is 776 days (DERIVED), longer than any session runs";
 
+impl WeaponGateState {
     /// Loaded spawn state; automatic weapons start with a full belt.
     pub fn for_cycle(cycle: &FireCycle) -> Self {
         Self {
@@ -305,23 +307,18 @@ impl WeaponGateState {
         self.ready_tick.is_none() && self.paused_at_tick.is_none()
     }
 
-    pub fn is_exhausted(self) -> bool {
-        self.ready_tick.is_none() && self.paused_at_tick == Some(Self::EXHAUSTED_TICK)
-    }
-
     /// Whether an armed deadline is due in Lightyear's ordinary numeric tick order. An absent
-    /// deadline remains due; [`Self::is_ready`] separately distinguishes ready from fail-stopped.
+    /// deadline is due.
     pub fn deadline_reached(self, now: u32) -> bool {
         self.ready_tick.is_none_or(|ready_tick| now >= ready_tick)
     }
 
     pub fn arm(&mut self, now: u32, delay_ticks: u32) {
-        if let Some(ready_tick) = now.checked_add(delay_ticks.max(1)) {
-            self.ready_tick = Some(ready_tick);
-            self.paused_at_tick = None;
-        } else {
-            self.freeze_exhausted();
-        }
+        self.ready_tick = Some(
+            now.checked_add(delay_ticks.max(1))
+                .expect(SESSION_TICK_RANGE),
+        );
+        self.paused_at_tick = None;
     }
 
     /// Freeze a crew-gated reload/swap. Repeated unmet ticks leave the gate byte-identical.
@@ -329,42 +326,31 @@ impl WeaponGateState {
         if let (Some(ready_tick), None) = (self.ready_tick, self.paused_at_tick) {
             // This first unmet tick must not consume work, so defer once on entry. Later paused
             // ticks are accounted for in one shift on resume.
-            if let Some(ready_tick) = ready_tick.checked_add(1) {
-                self.ready_tick = Some(ready_tick);
-                self.paused_at_tick = Some(now);
-            } else {
-                self.freeze_exhausted();
-            }
+            self.ready_tick = Some(ready_tick.checked_add(1).expect(SESSION_TICK_RANGE));
+            self.paused_at_tick = Some(now);
         }
     }
 
     /// Resume crew work by shifting the deadline once by the paused interval.
     pub fn resume(&mut self, now: u32) {
+        // Not paused: no crew work waits to be shifted.
         let (Some(ready_tick), Some(paused_at_tick)) = (self.ready_tick, self.paused_at_tick)
         else {
             return;
         };
         let later_paused_ticks = now.saturating_sub(paused_at_tick).saturating_sub(1);
-        if let Some(ready_tick) = ready_tick.checked_add(later_paused_ticks) {
-            self.ready_tick = Some(ready_tick);
-            self.paused_at_tick = None;
-        } else {
-            self.freeze_exhausted();
-        }
+        self.ready_tick = Some(
+            ready_tick
+                .checked_add(later_paused_ticks)
+                .expect(SESSION_TICK_RANGE),
+        );
+        self.paused_at_tick = None;
     }
 
     pub fn remaining_ticks(self, now: u32) -> u32 {
-        if self.is_exhausted() {
-            return u32::MAX;
-        }
         let effective_now = self.paused_at_tick.unwrap_or(now);
         self.ready_tick
             .map_or(0, |ready_tick| ready_tick.saturating_sub(effective_now))
-    }
-
-    fn freeze_exhausted(&mut self) {
-        self.ready_tick = None;
-        self.paused_at_tick = Some(Self::EXHAUSTED_TICK);
     }
 }
 

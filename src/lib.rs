@@ -645,7 +645,8 @@ pub(crate) struct ShotClock(pub u32);
 
 /// Current simulation tick used by the tick-correlated weapon gate. Network compositions publish
 /// `LocalTimeline` into it before gameplay; non-network compositions
-/// advance it once after each playing fixed tick and saturate at `u32::MAX` like Lightyear.
+/// advance it once after each playing fixed tick. No session reaches `u32::MAX`
+/// ([`tank::SESSION_TICK_RANGE`]).
 #[derive(Resource, Default)]
 pub(crate) struct WeaponClock(pub u32);
 

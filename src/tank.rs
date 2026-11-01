@@ -19,6 +19,7 @@ mod shadow_proxy;
 mod spawn;
 mod view;
 
+pub(crate) use model::SESSION_TICK_RANGE;
 #[cfg(test)]
 pub use model::WeaponState;
 pub(crate) use model::controlled_one;
