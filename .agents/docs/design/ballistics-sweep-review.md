@@ -250,3 +250,51 @@ R2 final validation: format and workspace/all-target clippy passed. MEASURED: 45
 passed, including the real server composition, the late-dressing canary and all required
 whole-tree citation, font, network-boundary and bake guards. The broader final batch above
 also passed the protocol checks, pen-cam records and unchanged cross-platform field-cast pin.
+
+## Review of sweep-ball-2
+
+Reviewed `8f63e9c3^..4381e25c` against the three lenses and for correctness.
+
+- **P1, fixed (`owned_losses`):** once fields reach every volume, a burst or cone near the firing
+  tank can dose its own pools, and hit confirmation counted every tank-owned pool: a self-dose
+  raised `ShellDamage`, the shooter's marker read as a hit. It now excludes the shooter's tank.
+- **Field admission (B5) is the physical reading.** A field now doses the firer's own exterior and
+  any neighbour where the old filter silenced it; hard volumes still stop each direction at
+  entry, so interior crew are reached only where the geometry lets a direction in. Attribution is
+  unchanged. New finding (base-truths, P2): the round's own line stays transparent to its firer's
+  volumes for the whole flight (`not_own_volume`), a per-object rule where the truth is the
+  muzzle's clearance; a ricochet back into the firer passes through it.
+- **Verified, no finding:** the pen cam's body resolves from the record's round key, which decode
+  takes from the shipped registry's vocabulary, so `Plan::new`'s panic is a bug outcome; that
+  commit touched no wire file. The contact recipe is a required authored enum on a local event.
+  Every law-override resource and its insert sites are test-only. The retired crew-sweep arm
+  leaves a test-only module. At rest, `Fuze::at_speed(0)` keeps the last positive clock speed,
+  so `wait_at_rest` spends the armed delay in seconds. B1, B4 and B6 were rightly left.
+- **P3:** `prepare_round` keeps the last model's material when a body-less record shows
+  (harmless: pieces are gated on a body); an unregistered synthetic clip draws no body; the field
+  horizon now unions every reached hard collider (unpriced).
+
+## Part 3: error-handling and code-branching follow-ups
+
+Fixed, each its own commit: the shooting state (B09–B18, B20–B23: spawn invariants are expects;
+a client's missing gate and loads for another player's tank and its `Static` replica body are
+named absences); aim, walk, field reach, trace and atlas invariants (B27, B42, B47, B55,
+B64–B67); a malformed `OVERMATCH_XRAY` window refuses the start (B69); certified hard bodies
+fail loudly (B61); the trace hasher feeds the one FNV-1a; test-only record readers, CPU shader
+mirrors and their constants compile into tests alone; each trace lever names its user.
+
+Already fixed at this base: B01 (a burst core's facts are required), B19, B24–B26, B41,
+B43–B46 (the walk redesign), B51–B54.
+
+**Client resync (P1, fixed):** the collider history ran on clients, whose replica hulls lose
+`Position` for a frame at an interpolation resync; `place_children` panicked. A client marches
+no round (ADR-0037), so the history now runs only where the walk runs.
+
+Left for part 4: B02/B03 (asserting a dose's sign first needs the line energy proven
+non-negative); record/codec validation B56–B60; staging B62–B63, B68, B70, B71 and the slice
+plane's `unwrap_or`; B72/B73 (the recorder may pose a despawned tank, an absence to name
+first); the P3 singleton and direction-fallback groups; `RecordedShot::tank`/`shooter`;
+`SpallCone`'s pin-only fields; `potency::band` (its `Band::Nothing` has no other constructor);
+the `pen_cam_demo` and `ballistic_fuzzer` CLI users; the `Cargo.toml` comment; `RoundFile`'s
+`#[serde(default)]` optional blocks (new); `SPIKE_TRACE_SIM_FIELDS`, whose only user is the
+ADR-0029/0030 capture (owner: keep, or delete with those ADR lines).
