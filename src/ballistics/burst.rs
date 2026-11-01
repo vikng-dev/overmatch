@@ -144,7 +144,11 @@ impl Burst {
             Trigger::SpendExit { arming_spend } => arming_spend,
             Trigger::Impact { sensitivity_n } => sensitivity_n,
         };
-        for (field, value) in [("fuze threshold", threshold), ("delay", inputs.delay)] {
+        for (field, value) in [
+            ("fuze threshold", f64::from(threshold)),
+            ("delay", f64::from(inputs.delay)),
+            ("chemical energy", inputs.chemical_energy),
+        ] {
             if !value.is_finite() || value < 0.0 {
                 return Err(format!(
                     "{field} must be finite and not negative (got {value})"
@@ -169,6 +173,42 @@ impl Burst {
         }
         let driven = parts.wall_mass;
         let sideways_speed = inputs.speed_constant / (driven / inputs.core_mass + 0.5).sqrt();
+        let casing_energy = 0.5 * driven * sideways_speed * sideways_speed;
+        let chemical = inputs.core_mass * inputs.chemical_energy;
+        // Zero chemical energy names unsourced chemistry in BurstInputs; the sourced Gurney
+        // speed still drives a casing, but no airblast energy is claimed for that core.
+        let blast = if inputs.chemical_energy == 0.0 {
+            0.0
+        } else {
+            if !chemical.is_finite() || chemical < casing_energy {
+                return Err(
+                    "chemical energy must cover the casing kinetic energy; author consistent \
+                    core chemistry and speed_constant from their sources"
+                        .into(),
+                );
+            }
+            chemical - casing_energy
+        };
+        for (field, value) in [
+            ("sideways_speed", sideways_speed),
+            ("casing kinetic energy", casing_energy),
+            ("casing ejection momentum", driven * sideways_speed),
+        ] {
+            let stored = value as f32;
+            if !stored.is_finite() || stored <= 0.0 {
+                return Err(format!(
+                    "{field} must be finite and positive in simulation units; \
+                    author usable core mass, cavity diameter and speed_constant with their sources"
+                ));
+            }
+        }
+        if !(blast as f32).is_finite() {
+            return Err(
+                "chemical energy leaves an unrepresentable airblast energy; author a finite \
+                energy in simulation units with its source"
+                    .into(),
+            );
+        }
         Ok(Self {
             trigger: inputs.trigger,
             delay: inputs.delay,
@@ -177,13 +217,11 @@ impl Burst {
                 ..round
             },
             sideways_speed: sideways_speed as f32,
-            energy: (0.5 * driven * sideways_speed * sideways_speed) as f32,
+            energy: casing_energy as f32,
             core_mass: inputs.core_mass as f32,
             filler_setback,
             charge_radius,
-            blast: (inputs.core_mass * inputs.chemical_energy
-                - 0.5 * driven * sideways_speed * sideways_speed)
-                .max(0.0) as f32,
+            blast: blast as f32,
         })
     }
 }
@@ -452,6 +490,43 @@ mod tests {
             let error = Burst::derived(round, STEEL, &inputs).unwrap_err();
             assert!(error.contains("filler"), "{error}");
         }
+    }
+
+    /// EACH JOULE OF THE GAME'S BURST CHEMISTRY IS COUNTED ONCE (study test 5). The environment
+    /// airblast and casing loads rely on `blast + casing_KE = C e`, to f32 storage precision. A
+    /// source that restores the casing's share to the blast, or counts another driven mass,
+    /// breaks this invariant. ASSUMED fixture charges and round construction.
+    #[test]
+    fn each_joule_of_chemistry_is_counted_once() {
+        let (round, mut inputs) = fixture();
+        inputs.chemical_energy = 4.184e6;
+        let mut worst = 0.0_f64;
+        for mass in [0.02, 0.06, 0.12] {
+            inputs.core_mass = mass;
+            let parts = Parts::of(round, STEEL, &inputs).unwrap();
+            let burst = Burst::derived(round, STEEL, &inputs).unwrap();
+            let chemical = inputs.core_mass * inputs.chemical_energy;
+            let casing = 0.5 * parts.wall_mass * f64::from(burst.sideways_speed).powi(2);
+            let residual =
+                ((f64::from(burst.blast) + f64::from(burst.energy)) / chemical - 1.0).abs();
+            worst = worst.max(residual);
+            assert!(residual <= f64::from(f32::EPSILON), "{residual}");
+            assert!(
+                (f64::from(burst.energy) / casing - 1.0).abs() <= 2.0 * f64::from(f32::EPSILON)
+            );
+        }
+        println!("MEASURED chemistry split: maximum relative residual {worst:.6e}");
+        for invalid in [f64::NAN, f64::INFINITY, -1.0, 1.0, f64::MAX] {
+            inputs.chemical_energy = invalid;
+            let error = Burst::derived(round, STEEL, &inputs).unwrap_err();
+            assert!(error.contains("chemical energy"), "{error}");
+        }
+        inputs.chemical_energy = 0.0;
+        assert_eq!(
+            Burst::derived(round, STEEL, &inputs).unwrap().blast,
+            0.0,
+            "unsourced chemistry claims no airblast energy"
+        );
     }
 
     /// `v_s = K (M/C + ½)^−½` with `M` the wall, and the energy `½ M v_s²`: the burst's field ratio

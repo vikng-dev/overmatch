@@ -1203,6 +1203,7 @@ fn an_emptying_is_timed_at_the_deposit_that_emptied_the_pool() {
         exit_speed: SPEED,
         strength: cone,
         rays: vec![SpallRay {
+            direction: Dir3::NEG_Z,
             end: z(3.5),
             strength: cone,
             doses: vec![(ammo, cone)],

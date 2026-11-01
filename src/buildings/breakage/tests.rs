@@ -189,12 +189,12 @@ fn the_record_a_replica_derives_from_is_the_authoritys() {
         })
         .collect();
     assert!(!neighbours.is_empty());
-    let hits: Vec<(usize, Vec3, f32)> = neighbours
+    let hits: Vec<(usize, Vec3, f32, Vec3)> = neighbours
         .iter()
         .map(|&c| {
             let chunk = &structure.chunks[c];
             let energy = 2.0 * fracture::full_pool(chunk) * chunk.material.crush;
-            (c, chunk.centroid, energy)
+            (c, chunk.centroid, energy, Vec3::ZERO)
         })
         .collect();
     let changes = run_laws(
@@ -456,7 +456,7 @@ fn line_loads(structure: &Structure, lines: &[(usize, Vec3, Vec3, f32)]) -> Vec<
         .collect()
 }
 
-/// A blast's single ray on law chunk `c` at its centroid, crushing `share` of its full pool, with
+/// A fixture crushed-volume load on law chunk `c` at its centroid, taking `share` of its pool, with
 /// the energy a line crushing as much would spend (the push rule's source) and no impulse or peak
 /// force, as the laws read it.
 fn blast_on(structure: &Structure, c: usize, share: f32) -> Vec<Load> {
@@ -2534,4 +2534,123 @@ fn a_burst_touching_a_face_crushes_it_from_its_filler_center() {
         "a contacting burst crushes the face above its material threshold"
     );
     app.world_mut().despawn(shell);
+}
+
+/// THE GAME'S CASING LOADS CARRY ONE PHYSICAL ENERGY BUDGET AND ITS EJECTION MOMENTUM (study
+/// test 5). The environment adapter must not amplify physical transport with the HP field's
+/// potency, nor lose a contact ray's direction. Both the wall's volume pool and its launch rely
+/// on it. ASSUMED fixture round, angular profiles and stop points; no particular breach is pinned.
+#[test]
+fn casing_loads_count_each_joule_once_and_carry_their_ejection_momentum() {
+    use crate::ballistics::burst::{Burst, BurstInputs, Parts};
+    use crate::ballistics::spall_cone::FieldDescriptor;
+    use crate::ballistics::{BurstField, RoundBody, SpallRay};
+    let body = RoundBody {
+        mass: 10.0,
+        caliber: 0.088,
+        nose_factor: 0.5,
+    };
+    let inputs = BurstInputs {
+        trigger: crate::rounds::fuze::Trigger::Impact {
+            sensitivity_n: 30.0,
+        },
+        delay: 0.0,
+        core_mass: 0.06,
+        core_density: 1650.0,
+        speed_constant: 2680.0,
+        chemical_energy: 4.184e6,
+        base_mass: 0.33,
+        cavity_diameter: 0.0357,
+        filler_setback: 0.18,
+    };
+    let burst = Burst::derived(body, 7800.0, &inputs).unwrap();
+    let driven = Parts::of(body, 7800.0, &inputs).unwrap().wall_mass;
+    // ASSUMED capacity fixture: finite energy and finite momentum must not overflow the
+    // intermediate doubling of the energy. The adapter's datatype gate relies on it.
+    let large = Burst {
+        energy: f32::MAX * 0.75,
+        sideways_speed: 1000.0,
+        ..burst
+    };
+    let field = BurstField {
+        origin: Vec3::ZERO,
+        axis: Dir3::Z,
+        field: FieldDescriptor::ball(0.0),
+        strength: 1.0,
+        rays: vec![SpallRay {
+            direction: Dir3::X,
+            end: Vec3::ZERO,
+            strength: 1.0,
+            doses: Vec::new(),
+        }],
+    };
+    let payload = RayDeposit::casing(&field, &large);
+    let expected = (2.0 * f64::from(large.energy) / f64::from(large.sideways_speed)) as f32;
+    assert!(payload[0].blow.is_finite());
+    assert_eq!(payload[0].blow, Vec3::X * expected);
+    for potency in [1.0_f32, 9.0] {
+        let field = BurstField {
+            origin: Vec3::ZERO,
+            axis: Dir3::Z,
+            field: FieldDescriptor::ball(0.0),
+            strength: burst.energy * potency,
+            rays: vec![
+                SpallRay {
+                    direction: Dir3::X,
+                    end: Vec3::ZERO,
+                    strength: 2.0 * potency,
+                    doses: Vec::new(),
+                },
+                SpallRay {
+                    direction: Dir3::Y,
+                    end: Vec3::new(1.0, 2.0, 3.0),
+                    strength: 6.0 * potency,
+                    doses: Vec::new(),
+                },
+            ],
+        };
+        let rays = RayDeposit::casing(&field, &burst);
+        let energy: f64 = rays.iter().map(|ray| f64::from(ray.energy)).sum();
+        let chemistry = inputs.core_mass * inputs.chemical_energy;
+        assert!(
+            ((energy + f64::from(burst.blast)) / chemistry - 1.0).abs()
+                <= 2.0 * f64::from(f32::EPSILON)
+        );
+        let momentum: f64 = rays.iter().map(|ray| f64::from(ray.blow.length())).sum();
+        assert!(
+            (momentum / (driven * f64::from(burst.sideways_speed)) - 1.0).abs()
+                <= 2.0 * f64::from(f32::EPSILON)
+        );
+        assert!(
+            rays[0].blow.x > 0.0 && rays[0].end == Vec3::ZERO,
+            "a contact stop retains the emitted direction and momentum"
+        );
+        let (mut app, _) = composed(false);
+        let shell = app
+            .world_mut()
+            .spawn((
+                PenetrationMarks::default(),
+                SpallMarks {
+                    burst: Some(field),
+                    ..default()
+                },
+            ))
+            .id();
+        app.world_mut().trigger(ShellMarched {
+            shell,
+            marks_from: 0,
+            cones_from: 0,
+            lines: Vec::new(),
+            burst: Some(burst),
+        });
+        let queue = app.world().resource::<WallQueue>();
+        assert_eq!(queue.0.len(), 1);
+        let delivered: Vec3 = queue.0[0].rays.iter().map(|ray| ray.blow).sum();
+        let expected: Vec3 = rays.iter().map(|ray| ray.blow).sum();
+        assert_eq!(
+            delivered, expected,
+            "the live shell observer queues the physical blow"
+        );
+        app.world_mut().despawn(shell);
+    }
 }

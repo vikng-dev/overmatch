@@ -81,7 +81,9 @@ use super::fracture::{
 };
 use super::schema::{self, BuildingAsset};
 use super::{BuildingElement, BuildingKind};
-use crate::ballistics::{ArmourMark, BallisticVolume, PenetrationMarks, ShellMarched, SpallMarks};
+use crate::ballistics::{
+    ArmourMark, BallisticVolume, BurstField, PenetrationMarks, ShellMarched, SpallMarks,
+};
 use crate::contact_transfer::{ContactTransfer, ContactTransfers};
 use crate::scatter::MapInstance;
 use crate::{ClientReplica, Layer, ShotClock};
@@ -474,12 +476,51 @@ struct RawDeposit {
     /// Each crossing: its lines `(volume, entry, end, energy J)`, its unit travel, and the momentum
     /// its strength term took (N·s).
     crossings: Vec<(Vec<(Entity, Vec3, Vec3, f32)>, Vec3, f32)>,
-    /// Each field ray: where it was thrown from, where it stopped, and the energy it carried (J).
-    rays: Vec<(Vec3, Vec3, f32)>,
+    /// Each field ray's physical energy, direction, stop and blow.
+    rays: Vec<RayDeposit>,
     /// A burst's blast: where, and its energy and charge.
     blast: Option<(Vec3, Blast)>,
     /// A physics step's body contacts, each its building's root and its load ([`contact_load`]).
     contacts: Vec<(Entity, Load)>,
+}
+
+/// The game's environment destruction model: a field ray's payload at its stop. A spall ray
+/// carries the existing energy reading and no sourced fragment mass; a casing ray carries its
+/// physical energy and ejection momentum, independent of the HP field's potency multiplier.
+#[derive(Debug)]
+struct RayDeposit {
+    end: Vec3,
+    direction: Dir3,
+    energy: f32,
+    blow: Vec3,
+}
+
+impl RayDeposit {
+    /// Normalize the recorded angular profile to the casing's one kinetic budget. DERIVED:
+    /// `p = 2E / v_s`, so the summed scalar ejection momentum is `M v_s`, and none of this
+    /// chemical energy returns to the airblast. The existing ring is the angular sampling
+    /// approximation; carried flight energy is not part of the ejection budget.
+    fn casing(field: &BurstField, burst: &crate::ballistics::burst::Burst) -> Vec<Self> {
+        let total: f64 = field.rays.iter().map(|ray| f64::from(ray.strength)).sum();
+        assert!(
+            total.is_finite() && total > 0.0,
+            "a recorded burst field has a positive finite angular profile"
+        );
+        field
+            .rays
+            .iter()
+            .map(|ray| {
+                let energy = (f64::from(burst.energy) * f64::from(ray.strength) / total) as f32;
+                Self {
+                    end: ray.end,
+                    direction: ray.direction,
+                    energy,
+                    blow: ray.direction
+                        * (2.0 * f64::from(energy) / f64::from(burst.sideways_speed)) as f32,
+                }
+            })
+            .collect()
+    }
 }
 
 /// The deposits the march and the contacts raised this tick.
@@ -670,19 +711,18 @@ fn read_shell(
     }
     if let Some(spall) = spall {
         let cones = spall.cones.get(marched.cones_from..).unwrap_or_default();
-        let thrown = cones.iter().map(|cone| (cone.origin, &cone.rays)).chain(
-            spall
-                .burst
-                .as_ref()
-                .filter(|_| marched.burst.is_some())
-                .map(|field| (field.origin, &field.rays)),
-        );
-        for (origin, rays) in thrown {
-            let share = 1.0 / rays.len().max(1) as f32;
-            deposit.rays.extend(
-                rays.iter()
-                    .map(|ray| (origin, ray.end, ray.strength * share)),
-            );
+        for cone in cones {
+            let share = 1.0 / cone.rays.len().max(1) as f32;
+            deposit.rays.extend(cone.rays.iter().map(|ray| RayDeposit {
+                end: ray.end,
+                direction: ray.direction,
+                energy: ray.strength * share,
+                blow: Vec3::ZERO,
+            }));
+        }
+        // No recorded field means the source emitted no field above the HP field's quantum.
+        if let (Some(burst), Some(field)) = (marched.burst, spall.burst.as_ref()) {
+            deposit.rays.extend(RayDeposit::casing(field, &burst));
         }
     }
     if !deposit.crossings.is_empty() || !deposit.rays.is_empty() || deposit.blast.is_some() {
@@ -789,7 +829,7 @@ struct Taken {
     lines: Vec<(usize, Vec3, Vec3, f32)>,
     /// Those lines' loads, each with its share of the round's lost momentum ([`Load::line`]).
     line_loads: Vec<Load>,
-    field: Vec<(usize, Vec3, f32)>,
+    field: Vec<(usize, Vec3, f32, Vec3)>,
     blast: Vec<fracture::RayHit>,
     contacts: Vec<Load>,
 }
@@ -938,9 +978,10 @@ fn apply_deposits(mut p: DepositParam) {
         }
         // Each building's shape as the deposit found it, read once per deposit.
         let mut shapes: BTreeMap<Entity, Shape> = BTreeMap::new();
-        for &(origin, end, energy) in &deposit.rays {
-            let dir = (end - origin).normalize_or_zero();
-            if dir == Vec3::ZERO || energy <= 0.0 {
+        for ray in &deposit.rays {
+            let (end, dir, energy) = (ray.end, Vec3::from(ray.direction), ray.energy);
+            // An angular stratum with zero profile emits no energy or momentum.
+            if energy == 0.0 {
                 continue;
             }
             for (root, frame) in &frames {
@@ -964,11 +1005,12 @@ fn apply_deposits(mut p: DepositParam) {
                     first_chunk(&kind.layout, shape, local - turned * back, turned)
                     && (t - back).abs() * frame.scale <= STOP_TOLERANCE_M
                 {
-                    taken
-                        .entry(*root)
-                        .or_default()
-                        .field
-                        .push((c, local * frame.scale, energy));
+                    taken.entry(*root).or_default().field.push((
+                        c,
+                        local * frame.scale,
+                        energy,
+                        frame.turn(ray.blow),
+                    ));
                 }
             }
         }

@@ -50,9 +50,9 @@
 //!   (`.agents/docs/design/wall-destruction.md`, "Standoff blast") owns the model.
 //!
 //! A round's line in each chunk becomes loads [`LINE_STEP`] apart along its chord ([`Load::line`]);
-//! a field's rays give one energy-weighted load per chunk ([`Load::field`]); a blast gives one
-//! impulse-weighted load per chunk face ([`Load::blast`]), preserving the pushes' angular impulse. Gaps these laws leave open (the wall
-//! prototype's README and the 2026-10-30 design review): a chunk partly crushed stays whole, the
+//! a field's ray stops keep their own loads ([`Load::field`]); a blast gives one impulse-weighted
+//! load per chunk face ([`Load::blast`]). Both preserve the pushes' angular impulse. Gaps these
+//! laws leave open (the wall prototype's README and the 2026-10-30 design review): a chunk partly crushed stays whole, the
 //! share of a round's lost momentum the crushed brick carries away is unknown (the struck chunks
 //! keep all of it), and a blast's peak force acts only against the section and rest laws'
 //! strength, never as a press.
@@ -123,7 +123,9 @@ pub(crate) enum Shear {
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) struct Compaction {
     /// The dynamic compressive strength `σ_c,d`, Pa: the row's quasi-static compressive strength
-    /// times its stated dynamic increase factor.
+    /// times its stated dynamic increase factor at the row's reference rate. ASSUMED effective
+    /// plateau: the law supplies no per-pulse strain rate; applicability is a validation limit
+    /// recorded in the wall design's material-data section.
     pub strength: f32,
     /// The slowest compaction front's speed `u_c = √(σ_c,d ε_v / ρ)`, m/s, `ε_v = 1 − ρ / ρ_s` the
     /// volumetric strain to lock-up at the row's fully dense density `ρ_s` (DERIVED: the locking
@@ -734,24 +736,26 @@ impl Load {
         })
     }
 
-    /// A field's rays, each `(chunk, where it stopped, energy J)`, as loads ([`Load::per_chunk`])
-    /// with no blow and so no peak force: a fragment's momentum is not carried. Each chunk's
-    /// energy crushes its volume at the chunk's crush energy, `crush(chunk)` J/m³
-    /// ([`Masonry::crush`]).
-    pub(crate) fn field(hits: &[(usize, Vec3, f32)], crush: impl Fn(usize) -> f32) -> Vec<Self> {
-        Self::per_chunk(hits.iter().map(|&(chunk, at, energy)| {
-            (
+    /// The game's environment destruction model: each field ray's `(chunk, stop, energy J,
+    /// blow N·s)` becomes a load at its actual stop, crushing `energy / crush(chunk)` m³. Keeping
+    /// individual points preserves angular impulse for nonparallel fragment pushes. A kinetic
+    /// fragment states no peak force; its blow uses the same impulsive limit as a kinetic line.
+    pub(crate) fn field(
+        hits: &[(usize, Vec3, f32, Vec3)],
+        crush: impl Fn(usize) -> f32,
+    ) -> Vec<Self> {
+        hits.iter()
+            .map(|&(chunk, at, energy, blow)| Self {
                 chunk,
                 at,
                 energy,
-                energy / crush(chunk),
-                Vec3::ZERO,
-                Vec3::ZERO,
-            )
-        }))
-        .into_iter()
-        .map(|load| Self { peak: None, ..load })
-        .collect()
+                crushed: energy / crush(chunk),
+                blow,
+                press: Vec3::ZERO,
+                peak: None,
+                origin: Origin::Field,
+            })
+            .collect()
     }
 
     /// One load per (chunk, face), at its rays' impulse-weighted centroid. The face normal is
@@ -802,36 +806,6 @@ impl Load {
             .map(|(mut load, weight)| {
                 load.at /= weight;
                 load
-            })
-            .collect()
-    }
-
-    /// Ray stops `(chunk, where, energy J, crushed m³, impulse N·s, peak force N)` summed per
-    /// chunk: one load each, at the energy-weighted mean of its stops, in chunk order. A chunk its
-    /// stops gave no energy has no such mean and takes no load: the volume, impulse and peak
-    /// force its stops carried are dropped with it.
-    fn per_chunk(stops: impl Iterator<Item = (usize, Vec3, f32, f32, Vec3, Vec3)>) -> Vec<Self> {
-        let mut per: std::collections::BTreeMap<usize, (f32, Vec3, f32, Vec3, Vec3)> =
-            Default::default();
-        for (chunk, at, energy, crushed, impulse, peak) in stops {
-            let entry = per.entry(chunk).or_default();
-            entry.0 += energy;
-            entry.1 += at * energy;
-            entry.2 += crushed;
-            entry.3 += impulse;
-            entry.4 += peak;
-        }
-        per.into_iter()
-            .filter(|(_, (energy, ..))| *energy > 0.0)
-            .map(|(chunk, (energy, weighted, crushed, blow, peak))| Self {
-                chunk,
-                at: weighted / energy,
-                energy,
-                crushed,
-                blow,
-                press: Vec3::ZERO,
-                peak: Some(peak),
-                origin: Origin::Field,
             })
             .collect()
     }
@@ -3768,11 +3742,24 @@ mod tests {
             .sum();
         assert!(close(moment, ((entry + end) / 2.0 - pivot).cross(blow)));
         assert!(loads.iter().all(|load| load.peak.is_none()));
-        let field = Load::field(&[(4, entry, 2.0), (4, end, 1.0)], |_| 2.0);
-        assert!(field.len() == 1 && field[0].peak.is_none(), "{field:?}");
+        let field = Load::field(&[(4, entry, 2.0, Vec3::X), (4, end, 1.0, Vec3::Z)], |_| 2.0);
+        assert!(
+            field.len() == 2 && field.iter().all(|load| load.peak.is_none()),
+            "{field:?}"
+        );
         assert_eq!(
-            field[0].crushed, 1.5,
-            "a fragment crushes its energy's volume"
+            field.iter().map(|load| load.crushed).sum::<f32>(),
+            1.5,
+            "fragments crush their energy's volume"
+        );
+        let delivered: Vec3 = field
+            .iter()
+            .map(|load| (load.at - pivot).cross(load.blow))
+            .sum();
+        let expected = (entry - pivot).cross(Vec3::X) + (end - pivot).cross(Vec3::Z);
+        assert!(
+            close(delivered, expected),
+            "nonparallel fragment pushes preserve their moment"
         );
 
         // Each hit crushes its energy's tenth, m³ (fixture data).
@@ -4046,6 +4033,46 @@ mod tests {
         assert!(hits[0].crushed > 0.0 && hits[0].impulse.z > 0.0);
     }
 
+    /// CRUSH WORK STAYS WITHIN THE GAME'S BLAST BUDGET (study test 5). The independent audit is
+    /// `work = sigma_c,d epsilon_v volume = rho u_c^2 volume`; the Law 1 input remains pressure
+    /// and impulse. The field budget relies on no hidden energy source in the crater response.
+    /// ASSUMED bare-charge fixtures and planar geometry; the sourced rows supply each material.
+    #[test]
+    fn crush_work_is_an_audit_within_half_the_blast_energy() {
+        let blocks = [Block::cuboid(
+            Vec3::new(-1.0, -1.0, 0.0),
+            Vec3::new(1.0, 1.0, 0.25),
+        )];
+        let directions = ball_directions(4096);
+        let mut largest = 0.0_f32;
+        for material in [brick(), wood()] {
+            for mass in [0.1_f32, 1.0, 5.0] {
+                // ASSUMED fixture filler density, kg/m3; DERIVED equal-volume sphere radius.
+                let radius = (3.0 * mass / (4.0 * PI * 1600.0)).cbrt();
+                let blast = Blast::of(mass * TNT_ENERGY, radius);
+                for range in [radius, 0.1_f32.max(radius), 0.5, 1.0] {
+                    let hits = blast_rays(
+                        &blocks,
+                        |_| true,
+                        |_| material,
+                        Vec3::new(0.0, 0.0, -range),
+                        blast,
+                        &directions,
+                    );
+                    let volume: f32 = hits.iter().map(|hit| hit.crushed).sum();
+                    let work = volume * material.density * material.compaction.front_speed.powi(2);
+                    let fraction = work / blast.energy;
+                    largest = largest.max(fraction);
+                    assert!(
+                        fraction <= 0.5,
+                        "{material:?}, {mass} kg at {range} m: {fraction}"
+                    );
+                }
+            }
+        }
+        println!("MEASURED maximum crush-work / blast-energy fraction {largest:.6e}");
+    }
+
     /// MOMENTUM SETS THE CRUSHED MASS (the game's environment destruction model, the #237 study's
     /// test 1). At a fixed peak pressure a face patch of each shipped breakable material crushes
     /// `Δm = J f(σ_c,d / P) / u_c`, so doubling its impulse doubles the mass; and the pool takes
@@ -4150,10 +4177,12 @@ mod tests {
     }
 
     /// How far the ray sampler's crushed volume may stray from its finest cast, relative: MEASURED
-    /// at most 3e-4 over the fixtures of [`crushed_mass_is_representation_independent`] (1024 to
+    /// at most 3.17e-4 over the fixtures of [`crushed_mass_is_representation_independent`] (1024 to
     /// 65536 rays, one block or 8 × 8 chunks), a margin of about three over it (ASSUMED). A near
     /// burst's crush lies where its rays are densest; the far field, where the sampler's coverage
-    /// varies with distance (#204), crushes nothing.
+    /// varies with distance (#204), is not certified by these fixtures. Their standoff fields
+    /// do not beat this material's crush threshold; larger charges and other rows need their
+    /// own sampling evidence.
     const SAMPLED_CRUSH_SPREAD: f32 = 1e-3;
 
     /// CRUSHED MASS IS REPRESENTATION-INDEPENDENT (the game's environment destruction model, the
@@ -4222,7 +4251,7 @@ mod tests {
                     let volume = crushed(blocks, rays);
                     let spread = volume / finest - 1.0;
                     println!(
-                        "MEASURED {name}, {form}, {rays} rays: crushed {:.4e} m³, {:+.4} of \
+                        "MEASURED {name}, {form}, {rays} rays: crushed {:.4e} m³, {:+.6e} of \
                          one block at 65536",
                         volume, spread
                     );

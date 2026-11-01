@@ -1578,6 +1578,9 @@ pub struct VolumeCrossing {
 /// body it met, or the struck tank's horizon when it met none), and the boxes it dosed.
 #[derive(Clone)]
 pub struct SpallRay {
+    /// The game's damage model: the emitted direction remains known when a ray stops at its
+    /// origin. Environment fragment momentum follows this direction, including contact stops.
+    pub direction: Dir3,
     pub end: Vec3,
     /// The strength (J) the direction was thrown with: the cone's `S` times its profile.
     pub strength: f32,
@@ -3428,6 +3431,7 @@ fn walk_field(
             origin: throw.origin,
         });
         rays.push(SpallRay {
+            direction: ray_dir,
             end: ray.end,
             strength: thrown,
             doses: ray
