@@ -825,7 +825,8 @@ impl Load {
             .collect()
     }
 
-    /// One load per (chunk, face), at its rays' impulse-weighted centroid. The face normal is
+    /// One load per (chunk, face) of `hits`, each ray keyed by the chunk it stopped on, at its
+    /// rays' impulse-weighted centroid. The face normal is
     /// shared by its rays, so their pushes are parallel and this point preserves their angular
     /// impulse about every pivot. Opposing faces stay separate even if their blows cancel.
     /// Energy never gates the volume or the push: a pressure load needs neither chemical-energy
@@ -834,11 +835,11 @@ impl Load {
     /// leaves the chunk's pool as one more load at the back point, with no blow. Returns the loads
     /// and the scabs.
     pub(crate) fn blast<'a>(
-        hits: &[RayHit],
+        hits: &[(usize, RayHit)],
         backing: impl Fn(usize) -> Backing<'a>,
     ) -> (Vec<Self>, Vec<Scab>) {
         let mut faces = std::collections::BTreeMap::new();
-        for hit in hits {
+        for (chunk, hit) in hits {
             let weight = hit.impulse.length();
             if weight == 0.0 {
                 // A cone whose intercepted share is zero delivers nothing.
@@ -848,11 +849,11 @@ impl Load {
                 );
                 continue;
             }
-            let key = (hit.chunk, hit.normal.to_array().map(f32::to_bits));
+            let key = (*chunk, hit.normal.to_array().map(f32::to_bits));
             let (load, total, rays) = faces.entry(key).or_insert_with(|| {
                 (
                     Self {
-                        chunk: hit.chunk,
+                        chunk: *chunk,
                         at: Vec3::ZERO,
                         energy: 0.0,
                         crushed: 0.0,
@@ -3412,12 +3413,11 @@ pub(crate) fn scab(rays: &[&RayHit], load: &Load, backing: &Backing) -> Option<S
     Some(thrown)
 }
 
-/// One blast ray's arrival: the chunk it stopped on, where, its energy (J), impulse (N·s), peak
+/// One blast ray's arrival on the surface its stop key names ([`trace_blast`]): where, its energy (J), impulse (N·s), peak
 /// force (N, [`Blast::peak`]), the peak overpressure on its patch (Pa, [`Blast::peak_pressure`])
 /// and the volume it crushes (m³, [`Blast::crushed`]).
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) struct RayHit {
-    pub chunk: usize,
     pub at: Vec3,
     /// Outward normal of the struck face; all rays on that face carry the same normal.
     pub normal: Vec3,
@@ -3438,7 +3438,6 @@ pub(crate) struct RayHit {
 /// `material` is absent for targets whose own law reads only the delivered impulse.
 pub(crate) struct BlastSurface<K> {
     pub target: K,
-    pub chunk: usize,
     pub at: Vec3,
     pub normal: Vec3,
     pub direction: Vec3,
@@ -3481,7 +3480,6 @@ pub(crate) fn trace_blast<K: Ord + Copy>(
             Some((
                 hit.target,
                 RayHit {
-                    chunk: hit.chunk,
                     at: hit.at,
                     normal: hit.normal,
                     energy: blast.energy * share,
@@ -3522,7 +3520,7 @@ pub(crate) fn sample_blocks(
     origin: Vec3,
     blast: Blast,
     directions: &[(Vec3, f32)],
-) -> Vec<RayHit> {
+) -> Vec<(usize, RayHit)> {
     let mut faces = std::collections::BTreeMap::new();
     trace_blast(blast, directions, |dir| {
         let (chunk, distance, normal) = first_hit(blocks, &standing, origin, dir)?;
@@ -3531,7 +3529,6 @@ pub(crate) fn sample_blocks(
             .or_insert_with(|| blocks[chunk].face_areas());
         Some(BlastSurface {
             target: chunk,
-            chunk,
             at: origin + dir * distance,
             normal,
             direction: dir,
@@ -3540,9 +3537,6 @@ pub(crate) fn sample_blocks(
             material: Some(material(chunk)),
         })
     })
-    .into_iter()
-    .map(|(_, hit)| hit)
-    .collect()
 }
 
 #[cfg(test)]
@@ -4150,16 +4144,20 @@ mod tests {
 
         // ASSUMED fixture volumes over patches on the slab's top face. Every blow and peak is
         // along its inward normal, far too weak to scab; no energy-to-volume path enters.
-        let hit = |chunk: usize, at: Vec3, crushed: f32, (impulse, peak): (Vec3, Vec3)| RayHit {
-            chunk,
-            at,
-            normal: Vec3::Z,
-            energy: 0.0,
-            impulse,
-            peak,
-            pressure: peak.length(),
-            crushed,
-            depth: 0.0,
+        let hit = |chunk: usize, at: Vec3, crushed: f32, (impulse, peak): (Vec3, Vec3)| {
+            (
+                chunk,
+                RayHit {
+                    at,
+                    normal: Vec3::Z,
+                    energy: 0.0,
+                    impulse,
+                    peak,
+                    pressure: peak.length(),
+                    crushed,
+                    depth: 0.0,
+                },
+            )
         };
         let slab = Block::cuboid(Vec3::new(-5.0, -5.0, -1.0), Vec3::new(5.0, 5.0, 0.0));
         let (a, b, c) = (Vec3::X, Vec3::Y, Vec3::new(0.0, 2.0, 0.0));
@@ -4208,7 +4206,6 @@ mod tests {
     #[test]
     fn impulse_weighted_centroids_preserve_angular_impulse_without_an_energy_gate() {
         let hit = |at: Vec3, normal: Vec3, impulse: f32, energy: f32| RayHit {
-            chunk: 3,
             at,
             normal,
             energy,
@@ -4230,7 +4227,8 @@ mod tests {
                 energy: if no_energy { 0.0 } else { hit.energy },
                 ..hit
             });
-            let (loads, scabs) = Load::blast(&hits, |_| Backing {
+            let keyed = hits.map(|hit| (3, hit));
+            let (loads, scabs) = Load::blast(&keyed, |_| Backing {
                 block: &slab,
                 scale: 1.0,
                 material: brick(),
@@ -4582,7 +4580,7 @@ mod tests {
             &[(Vec3::Z, share)],
         );
         assert_eq!(hits.len(), 1);
-        assert!(hits[0].crushed > 0.0 && hits[0].impulse.z > 0.0);
+        assert!(hits[0].1.crushed > 0.0 && hits[0].1.impulse.z > 0.0);
     }
 
     /// CRUSH WORK STAYS WITHIN THE GAME'S BLAST BUDGET (study test 5). The independent audit is
@@ -4611,7 +4609,7 @@ mod tests {
                         blast,
                         &directions,
                     );
-                    let volume: f32 = hits.iter().map(|hit| hit.crushed).sum();
+                    let volume: f32 = hits.iter().map(|(_, hit)| hit.crushed).sum();
                     let work = volume * material.density * material.compaction.front_speed.powi(2);
                     let fraction = work / blast.energy;
                     largest = largest.max(fraction);
@@ -4658,7 +4656,6 @@ mod tests {
         let chunk = &structure.chunks[0];
         let crushed = 0.25 * full_pool(chunk);
         let hit = |energy: f32| RayHit {
-            chunk: 0,
             at: chunk.centroid,
             normal: Vec3::Z,
             energy,
@@ -4683,7 +4680,7 @@ mod tests {
                 strike(
                     &structure,
                     &mut state,
-                    &Load::blast(&[hit(energy)], backing).0,
+                    &Load::blast(&[(0, hit(energy))], backing).0,
                 );
                 assert_eq!(state.fate[0], Fate::Standing, "{energy} J");
                 state.pool[0]
@@ -4727,7 +4724,7 @@ mod tests {
             blast,
             &[(Vec3::Z, 1e-6)],
         );
-        let [hit] = hits[..] else {
+        let [(_, hit)] = hits[..] else {
             panic!("one ray meets the cube: {hits:?}");
         };
         assert!(blast.peak_pressure(20.0, 1.0) < 0.1 * brick().compaction.strength);
@@ -4739,7 +4736,7 @@ mod tests {
             ..hit
         };
         let mut state = WallState::new(&structure);
-        let (loads, scabs) = Load::blast(&[heavy], |_| Backing {
+        let (loads, scabs) = Load::blast(&[(0, heavy)], |_| Backing {
             block: &cube[0],
             scale: 1.0,
             material: brick(),
@@ -4819,7 +4816,7 @@ mod tests {
                     &ball_directions(rays),
                 )
                 .iter()
-                .map(|hit| hit.crushed)
+                .map(|(_, hit)| hit.crushed)
                 .sum()
             };
             let finest = crushed(&slab, 65_536);
@@ -4881,9 +4878,9 @@ mod tests {
         assert!(kept < 1.0, "the far ray's cone outgrows the face");
         let want = Blast::reflected_pressure(10.0) * Blast::section(share, 10.0) * kept;
         assert!(
-            (hits[0].peak - Vec3::Z * want).length() <= 1e-4 * want,
+            (hits[0].1.peak - Vec3::Z * want).length() <= 1e-4 * want,
             "{} against {want}",
-            hits[0].peak
+            hits[0].1.peak
         );
     }
 
@@ -4956,12 +4953,12 @@ mod tests {
             assert_eq!(hits.len(), 1, "{d} m");
             let want = REFLECTED_IMPULSE.at(d) * section * kept;
             assert!(
-                (hits[0].impulse - Vec3::Z * want).length() <= 1e-4 * want,
+                (hits[0].1.impulse - Vec3::Z * want).length() <= 1e-4 * want,
                 "{d} m: {} against {want}",
-                hits[0].impulse
+                hits[0].1.impulse
             );
             let energy = blast.energy * share * kept;
-            assert!((hits[0].energy - energy).abs() <= 1e-4 * energy, "{d} m");
+            assert!((hits[0].1.energy - energy).abs() <= 1e-4 * energy, "{d} m");
         }
         assert!(Blast::section(share, 0.5) < face && Blast::section(share, 10.0) > face);
         assert!(hit(blast.reach() + 0.5).is_empty(), "past reach");
@@ -6551,7 +6548,6 @@ mod tests {
     fn scab_face(material: &Masonry, blow: f32) -> (RayHit, Block) {
         let pressure = material.compaction.strength;
         let hit = RayHit {
-            chunk: 0,
             at: Vec3::ZERO,
             normal: Vec3::NEG_Z,
             energy: 0.0,
@@ -6581,7 +6577,7 @@ mod tests {
         let material = brick();
         let (hit, slab) = scab_face(&material, scab_blow(&material, 0.1));
         let thrown = |depth| {
-            Load::blast(&[RayHit { depth, ..hit }], |_| Backing {
+            Load::blast(&[(0, RayHit { depth, ..hit })], |_| Backing {
                 block: &slab,
                 scale: 1.0,
                 material,
@@ -6666,7 +6662,7 @@ mod tests {
                 material,
                 contacts,
             };
-            let (_, scabs) = Load::blast(&[hit], |_| backing(&[]));
+            let (_, scabs) = Load::blast(&[(0, hit)], |_| backing(&[]));
             let [scab] = scabs[..] else {
                 panic!("the fixture pulse scabs: {scabs:?}")
             };
@@ -6679,7 +6675,7 @@ mod tests {
             );
             let (normal, _) = wedge.planes.iter().find(|(n, _)| n.z > 0.0).unwrap();
             let contact = Joint {
-                a: hit.chunk,
+                a: 0,
                 b: Side::Ground,
                 area: 4.0 * scale.powi(2) / normal.z,
                 centroid: scab.at,
@@ -6687,7 +6683,7 @@ mod tests {
                 bond: Bond::Bonded(material.seam),
             };
             assert!(
-                Load::blast(&[hit], |_| backing(std::slice::from_ref(&contact)))
+                Load::blast(&[(0, hit)], |_| backing(std::slice::from_ref(&contact)))
                     .1
                     .is_empty(),
                 "a contact on the actual rear plane covers it"
@@ -6708,7 +6704,7 @@ mod tests {
         for x in [f32::from_bits(edge.to_bits() - 1), edge, edge.next_up()] {
             let at = Vec3::new(x, 0.0, 0.0);
             assert_eq!(slab.exit(at, Vec3::Z), 0.25, "{x}: the slab's thickness");
-            let (_, scabs) = Load::blast(&[RayHit { at, ..hit }], |_| Backing {
+            let (_, scabs) = Load::blast(&[(0, RayHit { at, ..hit })], |_| Backing {
                 block: &slab,
                 scale: 1.0,
                 material,
@@ -6744,7 +6740,7 @@ mod tests {
             bond: Bond::Bonded(material.seam),
         };
         let thrown = |contacts: &[Joint]| {
-            Load::blast(&[hit], |_| Backing {
+            Load::blast(&[(0, hit)], |_| Backing {
                 block: &slab,
                 scale: 1.0,
                 material,
@@ -6824,7 +6820,7 @@ mod tests {
                 .into_iter()
                 .map(|lengths| {
                     let (hit, slab) = scab_face(&material, scab_blow(&material, lengths));
-                    let (_, scabs) = Load::blast(&[hit], |_| Backing {
+                    let (_, scabs) = Load::blast(&[(0, hit)], |_| Backing {
                         block: &slab,
                         scale: 1.0,
                         material,
@@ -6880,7 +6876,7 @@ mod tests {
             let [scab] = scabs[..] else {
                 panic!("the near burst scabs the {thickness} m slab's back: {scabs:?}");
             };
-            let delivered: Vec3 = hits.iter().map(|hit| hit.impulse).sum();
+            let delivered: Vec3 = hits.iter().map(|(_, hit)| hit.impulse).sum();
             let kept: Vec3 = loads.iter().map(|load| load.blow).sum();
             assert!(
                 (kept + scab.momentum() - delivered).length() <= 1e-4 * delivered.length(),
@@ -6925,7 +6921,7 @@ mod tests {
             .expect("the renamed row states bulk facts");
         let scab = |material: Masonry, loaded: &Masonry| {
             let (hit, slab) = scab_face(loaded, scab_blow(loaded, 0.1));
-            let (_, scabs) = Load::blast(&[hit], |_| Backing {
+            let (_, scabs) = Load::blast(&[(0, hit)], |_| Backing {
                 block: &slab,
                 scale: 1.0,
                 material,

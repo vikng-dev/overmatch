@@ -256,7 +256,7 @@ fn blast_coupling_falls_with_standoff() {
             &field,
         )
         .iter()
-        .map(|hit| hit.energy)
+        .map(|(_, hit)| hit.energy)
         .sum::<f32>()
             / FIXTURE_BLAST.energy
     };
@@ -276,7 +276,7 @@ fn blast_coupling_falls_with_standoff() {
             &field,
         )
         .iter()
-        .map(|hit| hit.energy)
+        .map(|(_, hit)| hit.energy)
         .sum::<f32>()
             / FIXTURE_BLAST.energy
     };

@@ -921,7 +921,7 @@ struct Taken {
     /// Those lines' loads, each with its share of the round's lost momentum ([`Load::line`]).
     line_loads: Vec<Load>,
     field: Vec<(usize, Vec3, f32, Vec3)>,
-    blast: Vec<fracture::RayHit>,
+    blast: Vec<(usize, fracture::RayHit)>,
     contacts: Vec<Load>,
 }
 
@@ -1202,7 +1202,7 @@ fn blast_loads(
     id: &str,
     kind: &BuildingKind,
     scale: f32,
-    hits: &[fracture::RayHit],
+    hits: &[(usize, fracture::RayHit)],
     live: &Live,
 ) -> Vec<Load> {
     if hits.is_empty() {
@@ -1374,7 +1374,6 @@ fn cast_blast(
                 let into = root.rotation.inverse();
                 return Some(fracture::BlastSurface {
                     target: Stop::Trunk(parent.parent(), segment),
-                    chunk: usize::from(segment),
                     at: into * (origin + dir * hit.distance - root.translation),
                     normal: into * hit.normal,
                     direction: into * dir,
@@ -1385,7 +1384,6 @@ fn cast_blast(
             }
             return Some(fracture::BlastSurface {
                 target: Stop::Body(hit.entity),
-                chunk: 0,
                 at: origin + dir * hit.distance,
                 normal: hit.normal,
                 direction: dir,
@@ -1414,7 +1412,6 @@ fn cast_blast(
             * frame.scale;
         Some(fracture::BlastSurface {
             target: Stop::Chunk(root, c),
-            chunk: c,
             at: (local + turned * t) * frame.scale,
             normal,
             direction: turned,
@@ -1425,7 +1422,7 @@ fn cast_blast(
     });
     for (target, hit) in hits {
         match target {
-            Stop::Chunk(root, _) => taken.entry(root).or_default().blast.push(hit),
+            Stop::Chunk(root, c) => taken.entry(root).or_default().blast.push((c, hit)),
             Stop::Trunk(root, segment) => {
                 p.trunks
                     .get_mut(root)

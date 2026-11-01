@@ -1172,12 +1172,12 @@ fn apply_deposit(
                 model::Blast::of(blast.energy, blast.radius, blast.products),
                 field,
             );
-            let coupled: f32 = hits.iter().map(|hit| hit.energy).sum();
-            let pushed: f32 = hits.iter().map(|hit| hit.impulse.length()).sum();
+            let coupled: f32 = hits.iter().map(|(_, hit)| hit.energy).sum();
+            let pushed: f32 = hits.iter().map(|(_, hit)| hit.impulse.length()).sum();
             let drawn = hits
                 .iter()
                 .step_by(RAY_DRAW_STRIDE)
-                .map(|hit| hit.at)
+                .map(|(_, hit)| hit.at)
                 .collect();
             applied.blast = Some((blast, origin, coupled, pushed, drawn));
             let contacts: Vec<_> = state.contacts(structure).collect();
