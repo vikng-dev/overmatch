@@ -1937,6 +1937,13 @@ mod tests {
             Node::new("Station_R")
                 .child_of("Hull")
                 .holding(solid(SUBSTANCE, [6.0, 0.0, 0.0])),
+            // The game's damage model: fixture construction seats the two-crew floor.
+            Node::new("Fixture_SeatA")
+                .child_of("Hull")
+                .holding(solid("Flesh", [0.0, 6.0, 0.0])),
+            Node::new("Fixture_SeatB")
+                .child_of("Hull")
+                .holding(solid("Flesh", [0.0, 9.0, 0.0])),
         ];
         let spec = fixture::spec(
             &["Proxy"],
@@ -2330,6 +2337,32 @@ mod tests {
         assert_eq!(refusals(&verify_asset(&asset.glb, None)), ["L2.SPEC"]);
     }
 
+    /// The game's damage model: a tank file below the crew floor refuses at the asset door,
+    /// naming the file, the crew field and its repair before spawn can turn it into a loss.
+    #[test]
+    fn the_asset_door_refuses_a_file_below_the_crew_floor() {
+        for count in [0, 1] {
+            let (nodes, sheet) = sound_vehicle();
+            let mut sheet = sheet.replace("\"Fixture_SeatB\": (crew: BowGunner)", "");
+            if count == 0 {
+                sheet = sheet.replace("\"Fixture_SeatA\": (crew: Commander)", "");
+            }
+            // A removed map entry leaves its comma; an empty entry is not RON.
+            sheet = sheet.replace(", ,", ",").replace(", }", " }");
+            let asset = fixture::write(&format!("crew-floor-{count}"), &nodes, &sheet);
+            let findings = verify_asset(&asset.glb, None);
+            let report = render(&findings);
+            assert_eq!(refusals(&findings), ["L2.SPEC"], "{report}");
+            assert!(
+                report.contains(".tank.ron")
+                    && report.contains("volumes.*.crew")
+                    && report.contains("at least two")
+                    && report.contains("add"),
+                "{report}"
+            );
+        }
+    }
+
     /// The canon file — the document shape the Blender source pass parses, and the two canonical
     /// lists inside it. Python maintains no vocabulary of RON field names or substance keys, so
     /// this is the only place either is pinned.
@@ -2382,6 +2415,8 @@ mod tests {
             references,
             [
                 ("servos", "Turret_Yaw"),
+                ("volumes", "Fixture_SeatA"),
+                ("volumes", "Fixture_SeatB"),
                 ("volumes", "Plate"),
                 ("colliders", "Proxy"),
                 ("roadwheels[0].node", "Station_L"),
@@ -2766,12 +2801,7 @@ mod tests {
         let findings = verify("scaled-hull", &nodes, &spec);
         assert_eq!(
             refusals(&findings),
-            [
-                "L2.UNIT_SCALE",
-                "L2.UNIT_SCALE",
-                "L2.UNIT_SCALE",
-                "L2.UNIT_SCALE"
-            ],
+            vec!["L2.UNIT_SCALE"; 1 + ron::de::from_str::<TankSpec>(&spec).unwrap().volumes.len()],
             "{}",
             render(&findings)
         );

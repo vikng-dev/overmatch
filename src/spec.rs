@@ -1219,6 +1219,15 @@ impl TankSpec {
                 ));
             }
         }
+        // The game's damage model requires at least two crew in action to start a Battle.
+        // Construction below that floor is an authoring fault, never a scored spawn knockout.
+        if seats.len() < 2 {
+            return Err(format!(
+                "volumes.*.crew declares {} crew stations; a tank needs at least two — add \
+                 volumes with distinct crew stations until at least two are declared",
+                seats.len()
+            ));
+        }
         // Every gate closes over what the tank is built of: a Part a requirement names that no
         // declared volume provides (a crew facet or a function facet) is a quality nothing on this
         // tank can ever have, so the gate reads as permanently unmet.
@@ -1938,6 +1947,7 @@ TankSpec(
     },
     volumes: {
         "Gunner": (crew: Gunner),
+        "Driver": (crew: Driver),
         "Breech": (hp: 80, function: Breech),
         "Hull_Plate": (main: true),
         "Wheel_L_0": (external: true),
@@ -1996,6 +2006,31 @@ TankSpec(
                 .to_string();
             assert!(
                 error.contains("views") && error.contains(&format!("{kind:?}")),
+                "{error}"
+            );
+        }
+    }
+
+    /// The game's damage model: construction must admit the two-crew floor before spawn;
+    /// scoring and device ownership rely on a valid sheet starting in action.
+    #[test]
+    fn validate_refuses_fewer_than_two_crew_stations() {
+        for count in [1, 0] {
+            let mut spec = fixture();
+            spec.volumes.retain(|_, volume| {
+                volume.component().is_none_or(|part| {
+                    part.crew
+                        .is_none_or(|seat| count == 1 && seat == CrewStation::Gunner)
+                })
+            });
+            let error = spec
+                .validate()
+                .expect_err("a tank below the crew floor must refuse before play")
+                .to_string();
+            assert!(
+                error.contains("volumes")
+                    && error.contains("crew")
+                    && error.contains("at least two"),
                 "{error}"
             );
         }

@@ -201,6 +201,10 @@ pub(super) fn spec_with(
                 .iter()
                 .map(|node| format!("\"{node}\": (main: true)")),
         )
+        .chain([
+            "\"Fixture_SeatA\": (crew: Commander)".to_owned(),
+            "\"Fixture_SeatB\": (crew: BowGunner)".to_owned(),
+        ])
         .collect::<Vec<_>>()
         .join(", ");
     format!(

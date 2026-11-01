@@ -4,10 +4,10 @@
 //! capabilities that need it; and a tank carries a knocked-out label. Ballistics owns *how* a dose
 //! is deposited; this module owns what an emptied pool means.
 //!
-//! **Knockout model (design §1a-A, under test):** there is no crew-count knockout gate. A tank is
-//! knocked out only when every crew member is. Capability effectiveness is per-capability (§7b): a
-//! capability scores in [0, 1] from its requirement groups against the live world — crew still in
-//! action and modules whose pools are not empty supply quality, combined `min` across groups. The
+//! A tank is knocked out when fewer than two crew members remain in action. Capability
+//! effectiveness is per-capability: a capability scores in [0, 1] from its requirement groups
+//! against the live world — crew still in action and modules whose pools are not empty supply
+//! quality, combined `min` across groups. The
 //! requirements are per-tank RON data. `TankKnockedOut` survives as a *label only* — it never gates
 //! sim capability (on the client it takes the player's device from the tank:
 //! `command::DeviceOwner`). A cookoff empties every crew HP pool of its tank at once and launches
@@ -830,6 +830,24 @@ mod tests {
             world.query::<&CookedOff>().iter(&world).count(),
             1,
             "only the emptied ammunition pool cooks off"
+        );
+        // The game's damage model latches the cause read by scoring. A later cook-off empties
+        // the remaining pools but cannot replace an already decided crew-loss label.
+        let already_out = world
+            .spawn(TankKnockedOut {
+                reason: KnockoutReason::CrewLoss,
+            })
+            .id();
+        world.spawn((CrewStation::Gunner, pool(false), VolumeOf(already_out)));
+        world.spawn((CrewStation::Driver, pool(false), VolumeOf(already_out)));
+        world.spawn((Ammo, pool(true), VolumeOf(already_out)));
+        world.run_system_once(process_cookoffs).unwrap();
+        world.run_system_once(kill_crew).unwrap();
+        world.run_system_once(mark_dead_tanks).unwrap();
+        assert_eq!(
+            world.get::<TankKnockedOut>(already_out).unwrap().reason,
+            KnockoutReason::CrewLoss,
+            "a later cook-off cannot rewrite a latched cause"
         );
     }
 
