@@ -775,10 +775,11 @@ fn bend_toward(dir: Dir3, target: Dir3, angle: f32) -> Dir3 {
         .expect("a unit direction turned by a unit quaternion keeps unit length")
 }
 
-/// Ray-cast predicate that excludes the firing tank's ballistic volumes for the whole flight.
-///
-/// Invariant: source identity controls collision filtering only; [`crate::ClientReplica`] controls
-/// authority to deposit damage. Remote cosmetic shells therefore retain the source identity.
+/// The game's damage model: provisional transparency to the firing tank for the whole flight.
+/// Authored muzzle/bore clearance does not yet establish an outside start; the measurement and
+/// owner decision live in `.agents/docs/design/ballistics-sweep-review.md`. This also excludes
+/// later returns into the firing tank. Source identity filters geometry; the replica role alone
+/// controls authority to march and deposit dose.
 fn not_own_volume(
     entity: Entity,
     shooter: Option<Entity>,
@@ -2318,10 +2319,9 @@ fn integrate_projectiles(
         // A network identity is absent on tank-less sandbox fire.
         Option<&Shot>,
         // The tank that fired this shell, when it was fired BY one — `on_fire_shell` attaches it from
-        // `FireShell::shooter` on every attributed shot (the authority's, the shooter's own predicted
-        // round, AND an observer's replica). Read here ONLY to exclude that tank's own volumes from the
-        // march ([`not_own_volume`]) — never to deposit anything. `None` for the sandbox's tank-less
-        // camera fire, which excludes nothing.
+        // `FireShell::shooter` on every attributed shot. The authority reads it for provisional own
+        // geometry exclusion ([`not_own_volume`]) and hit confirmation attribution; a replica marches
+        // nothing. `None` for the sandbox's tank-less camera fire, which excludes nothing.
         Option<&ShotSource>,
         // The pen cam recording of a recorded round (authority main-gun rounds only).
         Option<&mut ShotRecording>,
@@ -2605,10 +2605,8 @@ fn march_shell_step(
     // this step. The caller's per-shell latch turns the aggregate into at most one discrete confirm.
     let mut damage_dealt = 0;
     let mut lines = Vec::new();
-    // SHOOTER SELF-EXCLUSION (see [`not_own_volume`]): this round is transparent to the tank that
-    // fired it, for every cast below. Identical on the authority and on a replica — the one place
-    // both ends must agree about the shooter's own geometry, or the server's damage model and the
-    // client's cosmetic model describe different worlds.
+    // The game's damage model: the provisional rule in `not_own_volume` makes the firing tank
+    // transparent for every cast below. Only the authority walks geometry; replicas play its path.
     let shooter = shell.source.map(|source| source.tank);
     let not_own = |entity: Entity| not_own_volume(entity, shooter, &world.owners, &world.parents);
     // Gravity and drag on the velocity through the free-flight kernel the FireEvent catch-up folds
@@ -4509,12 +4507,9 @@ mod march_tests {
         app
     }
 
-    /// The game's damage model: the collider history the walk reads is kept only where the walk
-    /// runs. A client's replica hull loses `Position` for one frame at an interpolation-timeline
-    /// resync (lightyear 0.30's `queue_history_presence`); a client keeping the history panicked
-    /// in `motion::place_children` on that gap within a second of combat in the 2026-11-01 local
-    /// Battle runs. The authority keeps its history (the walk's sweeps read it); a replica keeps
-    /// none and survives the gap. A mutant mounting the history on every role fails both.
+    /// The game's damage model: only the authority's walk consumes collider history. A replica
+    /// has an interpolation timeline whose resync can remove its hull pose temporarily; it must
+    /// survive that gap and retain no walk history. The authority keeps normal interval history.
     /// FIXTURE DATA: a static hull with one child collider.
     #[test]
     fn a_client_keeps_no_collider_history_and_survives_a_resync_gap() {
@@ -4755,16 +4750,10 @@ mod march_tests {
         }
     }
 
-    /// SHOOTER SELF-EXCLUSION ([`not_own_volume`]): a round is transparent to the tank that FIRED it.
-    ///
-    /// The tiger's coax fires from inside its own mantlet on every round after a burst's first (its
-    /// recoiling barrel retracts the muzzle ~10 cm; the muzzle clears the mantlet by ~7 cm), so the
-    /// march's very first cast struck the shooter's own armour a centimetre out — embedding the round on
-    /// the authority, and fail-closing the tracer on every net client. The plate here stands for that
-    /// mantlet: a round fired from INSIDE it must fly straight out if the plate belongs to its shooter,
-    /// and must still be stopped by the very same plate if it does not: a round's birth reads its
-    /// membership where it stands ([`launch`]). That second half is the point — this is an
-    /// exclusion, not a hole in the armour.
+    /// The game's damage model: the provisional whole-flight exclusion admits a round born
+    /// inside its firing tank's geometry. The same material still stops a foreign round. This
+    /// fixture pins the retained rule while authored bore/clearance facts remain an owner decision;
+    /// the measured construction counterexamples live in the ballistics sweep review.
     #[test]
     fn a_shell_ignores_the_tank_that_fired_it() {
         use crate::damage::VolumeOf;
@@ -4818,7 +4807,7 @@ mod march_tests {
                 assert!(
                     hits.is_empty(),
                     "a round fired from inside its OWN tank's armour must pass straight through it — \
-                     the coax fires from inside its own mantlet every burst; got {} impact(s)",
+                     the fixture starts inside its source volume; got {} impact(s)",
                     hits.len(),
                 );
                 let flown = app

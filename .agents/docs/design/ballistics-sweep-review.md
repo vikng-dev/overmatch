@@ -385,3 +385,46 @@ Semantic-admission verification: format and workspace/all-target clippy passed. 
 record, codec, pen-cam, recorder-integration, explanation-transport, protocol and citation tests
 passed; four ignored. The existing deliberately unplaced burst-dose clip is now explicitly
 synthetic. All recorded corpus reports pass the new edge without changing their data.
+
+## Whole-flight source transparency: measured, retained for the owner
+
+Subject: the game's damage model, game state only. The premise needed to delete `not_own_volume`
+is false: actual authored muzzle starts are not all outside their own solid volumes. The lane
+removed the predicate's filtering entirely, ran the shot suites and CI-scale fuzzer, and compared
+every mounted round at neutral servos under zero and full authored recoil. The temporary audit
+used the real spawned rig/muzzle pose, certified birth membership, `FireShell` and the real march;
+it was removed with the losing experimental arm. No geometry or physical law was changed.
+
+MEASURED software results: baseline 451 tests passed; without filtering 450 passed and only
+`a_shell_ignores_the_tank_that_fired_it` failed (it explicitly pins the retained rule). The fuzzer,
+pen-cam corpus, field-cast pin, recorder, public-path/network and headless shot gates were unchanged.
+Of the ten mounted-round/recoil cases, exactly these three changed:
+
+| Mounted fixture configuration | Own volumes at birth, MEASURED | Unfiltered outcome, MEASURED |
+|---|---|---|
+| Coax / 7.9mm_AP, zero recoil | Coax_MG_Barrel | Stops after 0.0142822 m; barrel reduced by one shown HP point |
+| Coax / 7.9mm_AP, full authored recoil | Coax_MG_Barrel | Stops after 0.0142822 m; barrel reduced by one shown HP point |
+| HullMG / 7.9mm_AP, full authored recoil | Hull_MG_Ball and Hull_MG_Mantlet | Stops after 0.0158691 m; no shown pool loss |
+
+With filtering each travels 93.2575836 m in the measured march window. The other seven cases
+(neutral HullMG, and both recoil endpoints of each mounted main-gun round) have clear starts and
+unchanged outcomes. These are fixture measurements of the current data, never a vehicle-specific
+pass condition. The earlier comment claiming a coax/mantlet start did not describe these measured
+neutral-servo configurations; it is replaced by the generic retained-rule invariant.
+
+The missing facts are authored bore/launch clearance through solid barrel, ball and mantlet
+volumes over the recoil envelope, rather than ownership as a physical property. Moving the start
+past a guessed distance would hide those facts again. The fuzzer's rays carry no shooter and
+already admit all volumes, so it cannot establish own-muzzle clearance. MEASURED: the existing
+`a_round_that_strikes_a_tank_again_records_each_encounter` fixture still resolves a wall-reflected
+path back into the same compound tank. DERIVED: own-source identity supplies no geometric reason
+to exclude such a later encounter; the retained predicate would do so. Ground return is currently
+stopped by the unresolved B6 ground law. Decision: retain the rule pending the owner's bore and
+clearance contract, explicitly including its whole-flight self-intersection defect. The source
+comments now state authority-only walking and the current attribution readers. No experiment
+switch or second path remains.
+
+Restored-rule verification: format and workspace/all-target clippy passed. MEASURED: 108 march,
+recorder, pen-cam, fuzzer and citation tests passed; four ignored. The temporary audit and unfiltered
+arm are absent from the tree. The history regression's capture-history comment is also replaced
+by its current role and resync invariant (the review's P3 comment finding is fixed).
