@@ -45,7 +45,7 @@
 //! and never a hull strike, a hull mark or the pen cam corner (which has its own transient
 //! budget). Respawning was rejected because the offline path never respawns and a respawn changes
 //! the population inside the window; targets that cannot be knocked out would be a damage-model
-//! override for one scene. Each summary line counts strikes near a tank and knocked-out tanks, so a
+//! override for one scene. Each summary line counts strikes on declared tank volumes and knocked-out tanks, so a
 //! run that broke the rule says so.
 //!
 //! # Repeatable
@@ -60,8 +60,8 @@
 //!
 //! `battle: armed …` at the spawn, then one `battle: window <a>..<b> s real: full|short …` line per
 //! [`WINDOW_S`] of `Time<Real>` (the frame stream's clock): `full` when every tank moved at least
-//! [`MOVED_MIN_M`] and fired at least one round in that window, no armour strike landed within
-//! [`STRUCK_TANK_M`] of a battle tank, nothing was knocked out, and no tank overran or strayed
+//! [`MOVED_MIN_M`] and fired at least one round in that window, no armour strike named a battle
+//! tank's declared volume, nothing was knocked out, and no tank overran or strayed
 //! past the bounds the clearance test assumed. `scripts/perf/run-ablation.sh` gates a condition
 //! carrying `OVERMATCH_BATTLE=1` on those lines.
 //!
@@ -75,7 +75,7 @@ use bevy::prelude::*;
 
 use super::model::{Tank, TankRoot, Weapon, WeaponIndex};
 use super::spawn::{TankContent, TankPresentation};
-use crate::ballistics::{FireShell, Impact, ImpactSurface};
+use crate::ballistics::{FireShell, Impact, ImpactSurface, ShellStrike};
 use crate::command::{AimIntent, TankCommand};
 use crate::damage::TankKnockedOut;
 use crate::map::{MapManifest, Prototype};
@@ -180,10 +180,6 @@ const BRAKE_MPS2: f32 = 0.8;
 const WINDOW_S: f32 = 10.0;
 /// A tank counts as moving in a window when its path in it is at least this long, m (ASSUMED).
 const MOVED_MIN_M: f32 = 5.0;
-/// An armour strike this close to a battle tank's centre is counted as a strike on it, m: a hull's
-/// farthest surface from its centre, with room (ASSUMED). Farther ones are trees'.
-const STRUCK_TANK_M: f32 = 6.0;
-
 // Every window of a running script holds a main-gun shot from every tank.
 const _: () = assert!(SHOT_GAP_S.1 < WINDOW_S);
 
@@ -490,6 +486,7 @@ pub fn offline_plugin(app: &mut App) {
         .init_resource::<Tally>()
         .add_observer(count_round)
         .add_observer(count_strike)
+        .add_observer(count_armour_strike)
         .add_systems(
             RunFixedMainLoop,
             drive
@@ -565,9 +562,14 @@ fn drive(
     let t = now - start;
     runs.tanks.resize(plan.tanks.len(), Run::default());
     for (slot, mut command, position, rotation, velocity) in &mut tanks {
-        let (Some(script), Some(run)) = (plan.tanks.get(slot.0), runs.tanks.get_mut(slot.0)) else {
-            continue;
-        };
+        let script = plan
+            .tanks
+            .get(slot.0)
+            .expect("spawn assigns each BattleSlot from this Plan");
+        let run = runs
+            .tanks
+            .get_mut(slot.0)
+            .expect("Runs is resized to this Plan before driving");
         // Lay on the held shot's aim from the spawn on, so the first shot finds the gun laid.
         while script
             .shots
@@ -656,8 +658,13 @@ fn steer_toward(rotation: Quat, from: Vec3, toward: Vec2) -> f32 {
 /// Hold the player's camera on the strip's axis at [`CAMERA_PITCH_DEG`], every frame: the orbit
 /// camera places its body behind the camera tank along whatever rotation this leaves.
 fn hold_camera(mut camera: Query<&mut Transform, With<PlayerView>>) {
-    let Ok(mut camera) = camera.single_mut() else {
-        return;
+    let mut camera = match camera.single_mut() {
+        Ok(camera) => camera,
+        // The player's view is not yet declared during scene startup.
+        Err(bevy::ecs::query::QuerySingleError::NoEntities(_)) => return,
+        Err(error @ bevy::ecs::query::QuerySingleError::MultipleEntities(_)) => {
+            panic!("the offline root declares one PlayerView: {error}")
+        }
     };
     // A camera faces its own −Z: a yaw of `heading + π` looks along the heading.
     let rotation = Quat::from_euler(
@@ -681,7 +688,7 @@ struct Tally {
     main: Vec<u32>,
     secondary: Vec<u32>,
     terrain: u32,
-    /// Armour strikes within [`STRUCK_TANK_M`] of a battle tank, and the rest (trees).
+    /// In the game's damage model, resolved faces on battle-owned volumes and other armour.
     on_tanks: u32,
     elsewhere: u32,
     overrun_m: f32,
@@ -709,43 +716,56 @@ fn count_round(
     weapons: Query<(&Weapon, &WeaponIndex, &TankRoot)>,
     mut tally: ResMut<Tally>,
 ) {
+    // Unkeyed tool/environment emissions have no battle shooter to count.
     let Some(source) = fire.shooter else {
         return;
     };
+    // Emissions by tanks outside this scripted scene are not battle evidence.
     let Ok(slot) = slots.get(source.tank) else {
         return;
     };
-    let primary = weapons.iter().any(|(weapon, index, root)| {
-        root.0 == source.tank && index.0 == source.weapon && weapon.trigger == Trigger::Primary
-    });
+    let (weapon, _, _) = weapons
+        .iter()
+        .find(|(_, index, root)| root.0 == source.tank && index.0 == source.weapon)
+        .expect("a battle tank's FireShell names one of its spawn-built weapons");
+    let primary = weapon.trigger == Trigger::Primary;
     let counts = if primary {
         &mut tally.main
     } else {
         &mut tally.secondary
     };
-    if let Some(count) = counts.get_mut(slot.0) {
-        *count += 1;
+    *counts
+        .get_mut(slot.0)
+        .expect("battle evidence is sized to Plan before its scheduled fire begins") += 1;
+}
+
+/// In the game's damage model, terrain impacts have no volume identity and are counted here.
+/// Armour ownership comes from `ShellStrike`, the resolved face's identity-bearing event.
+fn count_strike(impact: On<Impact>, mut tally: ResMut<Tally>) {
+    if impact.surface == ImpactSurface::Terrain {
+        tally.terrain += 1;
     }
 }
 
-/// Count each strike by the surface it met, an armour strike by whether a battle tank's centre is
-/// within [`STRUCK_TANK_M`] of it; name the first [`TANK_STRIKES_LOGGED`] strikes on a tank, which
-/// the layout promises never happen.
-fn count_strike(
-    impact: On<Impact>,
-    tanks: Query<(&BattleSlot, &Position)>,
+/// In the game's damage model, classify each resolved armour face by its declared volume owner.
+/// A nearby environment face is not a tank face; distance from the hull origin is irrelevant.
+fn count_armour_strike(
+    strike: On<ShellStrike>,
+    owners: Query<Option<&crate::damage::VolumeOf>>,
+    tanks: Query<Option<&BattleSlot>>,
     mut tally: ResMut<Tally>,
     mut logged: Local<u32>,
 ) {
-    if impact.surface == ImpactSurface::Terrain {
-        tally.terrain += 1;
-        return;
-    }
-    let nearest = tanks
-        .iter()
-        .map(|(slot, position)| (slot.0, position.0.distance(impact.position)))
-        .min_by(|a, b| a.1.total_cmp(&b.1));
-    let Some((tank, distance)) = nearest.filter(|&(_, distance)| distance <= STRUCK_TANK_M) else {
+    // Environment volumes have no battle owner; neither do volumes whose owning life is gone.
+    let owner = owners
+        .get(strike.struck)
+        .expect("a resolved face's volume lives through its synchronous ShellStrike observers");
+    let tank = owner.and_then(|owner| {
+        tanks
+            .get(owner.tank())
+            .expect("VolumeOf names a live relationship owner")
+    });
+    let Some(slot) = tank else {
         tally.elsewhere += 1;
         return;
     };
@@ -753,15 +773,16 @@ fn count_strike(
     if *logged < TANK_STRIKES_LOGGED {
         *logged += 1;
         warn!(
-            "battle: a {:.1} mm round struck armour at {:.1}, {distance:.1} m from battle tank \
-             {tank}",
-            impact.caliber * 1000.0,
-            impact.position,
+            "battle: a {:.1} mm round struck battle tank {} volume {:?} at {:.1}",
+            strike.caliber * 1000.0,
+            slot.0,
+            strike.struck,
+            strike.at
         );
     }
 }
 
-/// How many strikes on a tank [`count_strike`] describes in the log.
+/// ASSUMED log-volume bound for game-model strikes on battle tanks.
 const TANK_STRIKES_LOGGED: u32 = 20;
 
 /// Add each battle tank's path since the last frame, and the worst overrun and drift off its lane.
@@ -777,9 +798,10 @@ fn track_motion(
         tally.reset(plan.tanks.len());
     }
     for (slot, position) in &tanks {
-        let Some(script) = plan.tanks.get(slot.0) else {
-            continue;
-        };
+        let script = plan
+            .tanks
+            .get(slot.0)
+            .expect("spawn assigns each BattleSlot from this Plan");
         let here = Vec2::new(position.0.x, position.0.z);
         if let Some(last) = tally.last[slot.0] {
             tally.path_m[slot.0] += last.distance(here);
@@ -1107,5 +1129,37 @@ mod tests {
             steer_toward(facing_z, Vec3::ZERO, Vec2::new(-10.0, 0.0)),
             1.0
         );
+    }
+}
+
+#[cfg(test)]
+mod ownership_tests {
+    use super::*;
+
+    /// In the game's damage model, evidence follows the struck volume's owner even when the
+    /// face is far from that owner's origin; a nearby environment face stays environment.
+    #[test]
+    fn resolved_ownership_not_proximity_classifies_armour_strikes() {
+        let mut app = App::new();
+        app.init_resource::<Tally>()
+            .add_observer(count_armour_strike);
+        let tank = app
+            .world_mut()
+            .spawn((BattleSlot(0), Position(Vec3::ZERO)))
+            .id();
+        let owned = app.world_mut().spawn(crate::damage::VolumeOf(tank)).id();
+        let environment = app.world_mut().spawn_empty().id();
+        app.world_mut().trigger(crate::hull_marks::tests::strike(
+            owned,
+            Vec3::X * 100.0,
+            crate::ballistics::Verdict::Stopped,
+        ));
+        app.world_mut().trigger(crate::hull_marks::tests::strike(
+            environment,
+            Vec3::ZERO,
+            crate::ballistics::Verdict::Stopped,
+        ));
+        let tally = app.world().resource::<Tally>();
+        assert_eq!((tally.on_tanks, tally.elsewhere), (1, 1));
     }
 }
