@@ -56,9 +56,8 @@
 //! the shot and what it lost, the record of what the shot found. The kill and its reason are
 //! public (every client reads them in the tank status), so the attribution rides every projection.
 //! The victim gets its own tank's full record; a killed victim also gets the kill cam's lesson
-//! ([`Audience`]). A combatant in both roles gets one message, the victim's: a round is
-//! transparent to the tank that fired it, so the two meet only when a round fired by one life
-//! strikes the combatant's next.
+//! ([`Audience`]). A combatant in both roles gets one message, the victim's: its own round struck
+//! it, once that round has cleared its source's box, or a round fired by one life struck its next.
 //! Nobody else gets anything.
 //!
 //! # Encoded sizes
