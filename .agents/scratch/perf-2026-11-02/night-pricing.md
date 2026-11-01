@@ -25,7 +25,7 @@ for a headless bed: the machine lock held, 0 `rustc` running at start, the bed f
 | 1 | Spall field: dot picture 256, centre-only | same | a field | cone p50 12 576–12 597 µs (19x); ring p50 33 519–34 086 (16x) | as above | passed, 2 runs | #204 |
 | 1 | Spall field: shipped sampler on main | main | the field casts' 24 cones, 64 walks each | p50 578–589 µs, p95 1 348–1 367 (1.07x the fields tree's, per-cone median) | the same bed on the fields tree: p50 547–552, p95 1 158–1 168 | passed, 3 runs each | #204 |
 | 2 | Track prints skip still belts (client frame) | its parent, 2026-11-01 | 30 tanks at rest, visible window, `release` | ms a frame: p50 16.41–16.43, p95 29.62–29.67; not resolved: under the noise floor (the parent's own two runs differ 0.39 ms p50, 1.67 ms p95) | parent: p50 16.12–16.51, p95 29.62–31.29 | passed, A/B/B/A | #234 |
-| 2 | The other speed-ups since the last pricing | | | not priced (item 2 says why) | | | #186, #188, #191 |
+| 2 | The other speed-ups since the last pricing | their commits | sampled 30-tank server | not re-priced: each was timed before and after in its own commit (CLAIMED, item 2) | | | #186, #188 |
 | 3 | Weight check, per change | main | one chunk to dust, 1 003 chunks | p50 1 193–1 201 µs, p95 2 080–2 096 µs | no change: 0 | passed, 3 runs | #189 |
 | 3 | Weight check, long-wall shot | main | 204 chunks to dust at once | p50 1 344–1 391 µs, p95 1 407–1 449 µs (71 965 steps) | as above | passed, 3 runs | #189 |
 | 3 | Weight check, then the gables | main | 118 more chunks | p50 12 314–12 534 µs, p95 12 727–12 791 µs | as above | passed, 3 runs | #189 |
@@ -166,18 +166,24 @@ occlusion in it, the 3D camera drew on at least 99 % of frames, 28 probe tanks s
   difference. The saving is under this A/B's noise floor, about 0.4 ms p50 (DERIVED from that
   spread). A frame is as long as the slower of the main world and the render pipeline; whether
   the main world bounds this one, where the saving would show, is not measured.
-- **Not priced, and why.** Each needs its own bed at its parent's tree of 2026-10-31 or 11-01,
-  none of which exists; none was built tonight:
-  - "ballistics: a field throw reads the broad phase once for all its directions (#186)": a
-    server-side throw; item 1's sampler is on a tree that already has it.
-  - "buildings: the push rule takes each source's crushed radius once per material (#188)" and
-    "buildings: the deposits skip a building whose ball a blast ray or a field stop misses
-    (#188)": the building deposit path, per shot.
-  - "ballistics: record live crossing evidence without cost sampling (#191)": the march, per shot.
+- **Not re-priced: the others were timed when they landed.** Each carries its own MEASURED
+  before and after in its commit message (sampled 30-tank server, 60 s, thread time per system;
+  whole tick A/B/B/A together), CLAIMED here and not re-measured, since a re-price needs a bed at
+  each parent's tree of 2026-10-31:
+  - "ballistics: a field throw reads the broad phase once for all its directions (#186)":
+    `integrate_projectiles` 448 -> 220 ms of thread time, `resolve::candidates` 204 -> 0.
+  - "buildings: the deposits skip a building whose ball a blast ray or a field stop misses
+    (#188)": `apply_deposits` 252 -> 111 ms.
+  - "buildings: the push rule takes each source's crushed radius once per material (#188)":
+    `fracture::strike` 13 -> 7 ms.
   - "tank: build a tank's armour trimeshes and hull colliders once, shared by every spawn
-    (#186)": a cost per spawn, not per frame or tick.
+    (#186)": `respawn_dead_bots` 97 -> 1 ms over 24 respawns, a cost per spawn.
+  - The first, second and fourth with the rest of their lane's volley fixes, whole tick, as each
+    of those commits states it: worst second 178.2 / 192.4 -> 107.2 / 109.0 ms.
   - Server-perf-2's four speed-ups were priced against their parent tree by "perf: price
-    server-perf-2 against server-perf-1's tree (#250)" (CLAIMED there, not re-measured).
+    server-perf-2 against server-perf-1's tree (#250)" (CLAIMED there).
+  - "ballistics: record live crossing evidence without cost sampling (#191)" is instrumentation
+    (an optional shot trace), not a speed-up; not priced.
 
 ## Item 3: the building weight check
 
