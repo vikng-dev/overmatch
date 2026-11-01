@@ -38,7 +38,6 @@ pub struct TickSpan(u32);
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum TickSpanError {
     OutsideHorizon(u128),
-    ZeroTimestep,
     /// Seconds that are no duration: negative, NaN or infinite.
     NotADuration(f32),
 }
@@ -50,7 +49,6 @@ impl std::fmt::Display for TickSpanError {
                 f,
                 "tick span {ticks} must be under 2^31 fixed ticks; reduce the duration"
             ),
-            Self::ZeroTimestep => write!(f, "the fixed timestep must be positive"),
             Self::NotADuration(seconds) => write!(f, "{seconds} s must be a duration >= 0 s"),
         }
     }
@@ -98,9 +96,10 @@ impl TickSpan {
         duration: std::time::Duration,
         timestep: std::time::Duration,
     ) -> Result<Self, TickSpanError> {
-        if timestep.is_zero() {
-            return Err(TickSpanError::ZeroTimestep);
-        }
+        assert!(
+            !timestep.is_zero(),
+            "composition timesteps are positive code constants"
+        );
         let ticks = duration.as_nanos().div_ceil(timestep.as_nanos());
         let count = u32::try_from(ticks).map_err(|_| TickSpanError::OutsideHorizon(ticks))?;
         Self::try_from(count)
@@ -151,10 +150,14 @@ mod tests {
                 Err(TickSpanError::OutsideHorizon(_))
             ));
         }
-        assert_eq!(
-            TickSpan::from_duration(Duration::ZERO, Duration::ZERO),
-            Err(TickSpanError::ZeroTimestep)
-        );
+    }
+
+    /// Composition code owns the timestep; a zero constant is a bug, never outside input.
+    #[test]
+    #[should_panic(expected = "composition timesteps are positive code constants")]
+    fn a_zero_composition_timestep_is_a_bug() {
+        TickSpan::from_duration(std::time::Duration::ZERO, std::time::Duration::ZERO)
+            .expect("the zero timestep must panic before a duration verdict");
     }
 
     /// Battle and weapon callers rely on the same deadline relation across wrap and at the

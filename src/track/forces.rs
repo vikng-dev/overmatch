@@ -969,8 +969,9 @@ fn collect_column_contacts<O: TerrainOracle>(
                 // relative to the surface it presses; recipient motion enters both terms.
                 // The recipient's reaction law (`track::rubble::piece_impulses`) runs later: a
                 // body the explicit step integrates this spring against stably takes the whole
-                // opposite force, any other the sequentially clamped impulse. Both read
-                // tick-start velocities.
+                // opposite force; any other takes a sequentially clamped impulse. Clamped sizing
+                // reads the recipient's velocity after preceding pushes; whole-force sizing
+                // reads no velocity.
                 let normal = -out;
                 let hull_vel = vel_at(p);
                 let vel = match collider {

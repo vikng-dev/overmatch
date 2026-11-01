@@ -402,3 +402,21 @@ was made. The only build diagnostic was the existing linker unwind-section size 
 MEASURED completion clock check: 2026-11-01 17:06:16 UTC. DERIVED elapsed: 63 minutes
 20 seconds. G1 is unchanged; its feel call, pricing, captures, merge and push remain
 with the orchestrator.
+
+
+## Part 8: verification of the sweep-drive-7 doubles
+
+Subject: the game's driving model and damage-model timing, game state only.
+The law-inertia lane checked both review reports against the implementation.
+
+| Reviewer | Finding | Verified / not a defect | Fixed in (subject) |
+|---|---|---|---|
+| Claude | P3: `collect_column_contacts` claims both recipient laws read tick-start velocity | Verified: loose-piece pushes update the snapshot before the next clamp; belt-integrated recipients read no velocity. | "driving: resolve the sweep-drive-7 review leftovers (#259)" |
+| Claude | P3: `WeaponSpec` has a second serde parse path with no caller | Verified: tank mounts deserialize through the named `WeaponSpecFile` map. Direct serde admission is deleted; the conversion remains the named map's implementation. | same |
+| Claude | P3: `TickSpanError::ZeroTimestep` represents a code-constant fault as outside input | Verified: both production callers supply code-owned timesteps. Zero now panics as a bug, with a regression naming that invariant. | same |
+| Codex | P3: `FireMode::Automatic` links to the moved tracer field | Verified: the field belongs to `WeaponSpecFile`; the rustdoc link now addresses that field. | same |
+| Codex | P2: `belt_held` is a per-body rule | Routed to law-hull-work; its code is outside this lane. | routed |
+| Claude | P3: `queue_fire` clock cross-check compares one clock to itself | Routed to sweep-net-8; its code is outside this lane. | routed |
+
+MEASURED verification for the review leftovers: formatting and locked workspace/all-target CI
+clippy passed; the targeted `spec sim_tick track::forces doc_citations` batch passed **58 tests**.

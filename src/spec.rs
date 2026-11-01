@@ -305,7 +305,7 @@ pub enum FireMode {
     /// [`crate::tank::WeaponGateState::belt_remaining`]) over an INFINITE reserve (a stowage count
     /// is read by no reserve yet): running dry automatically starts a belt swap of
     /// `belt_swap_secs`, and the *swap* is what the weapon's `load` requirement gates, same as the
-    /// 88's reload. The belt's tracer mix is the mount's [`WeaponSpec::tracer_every`].
+    /// 88's reload. The belt's tracer mix is the mount's [`WeaponSpecFile::tracer_every`].
     Automatic { belt_size: u32, belt_swap_secs: f32 },
 }
 
@@ -369,8 +369,7 @@ impl FireMode {
 
 /// A mount whose fire mode and gun were joined at the data edge. Spawn copies `fire_cycle`;
 /// authored seconds and the raw mode are held only by the deserializer's `WeaponSpecFile`.
-#[derive(Deserialize, Clone)]
-#[serde(try_from = "WeaponSpecFile")]
+#[derive(Clone)]
 pub struct WeaponSpec {
     pub trigger: Trigger,
     pub muzzle: String,
