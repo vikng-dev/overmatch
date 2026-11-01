@@ -49,6 +49,7 @@ pub(crate) struct MuzzleEnergy(f32);
 pub(crate) enum MuzzleEnergyError {
     Mass(f32),
     Speed(f32),
+    Energy { mass: f32, speed: f32 },
 }
 
 impl MuzzleEnergy {
@@ -60,11 +61,13 @@ impl MuzzleEnergy {
         if !(speed_mps.is_finite() && speed_mps > 0.0) {
             return Err(MuzzleEnergyError::Speed(speed_mps));
         }
-        let joules = 0.5 * mass_kg * speed_mps * speed_mps;
-        assert!(
-            joules.is_finite() && joules > 0.0,
-            "a finite positive mass and speed give a finite positive energy (got {joules} J)"
-        );
+        let joules = (0.5 * f64::from(mass_kg) * f64::from(speed_mps).powi(2)) as f32;
+        if !(joules.is_finite() && joules > 0.0) {
+            return Err(MuzzleEnergyError::Energy {
+                mass: mass_kg,
+                speed: speed_mps,
+            });
+        }
         Ok(Self(joules))
     }
 
@@ -633,8 +636,11 @@ impl MuzzleLook {
         shape: MuzzleShape,
         energy: MuzzleEnergy,
         mechanism: Mechanism,
-    ) -> MuzzleEmission {
+    ) -> Result<MuzzleEmission, String> {
         let ratio = energy.joules() / self.reference_j;
+        if !(ratio.is_finite() && ratio > 0.0) {
+            return Err("reference_energy_j and shot energy produce an unrepresentable ratio; adjust the reference energy or the shot's mass/speed".into());
+        }
         let length = ratio.powf(LENGTH_EXPONENT);
         let area = ratio.powf(AREA_EXPONENT);
         let gas_life = ratio.powf(self.duration_exponent);
@@ -647,17 +653,15 @@ impl MuzzleLook {
             Mechanism::Single => 1,
             Mechanism::Automatic { cyclic_rpm } => {
                 let shots = (self.smoke.puff_interval_s * cyclic_rpm / 60.0).ceil();
-                assert!(
-                    shots.is_finite() && shots >= 0.0 && shots < u32::MAX as f32,
-                    "a load-validated cyclic rate and puff interval give a finite shot count (got \
-                     {shots})"
-                );
+                if !(shots.is_finite() && shots >= 0.0 && shots < u32::MAX as f32) {
+                    return Err("smoke.puff_interval_s and cyclic_rpm produce an unrepresentable shot count; reduce the interval or cyclic rate".into());
+                }
                 (shots as u32).max(1)
             }
         };
         let (core, fireball, smoke, blast) =
             (self.core, self.fireball, self.smoke, self.ground_blast);
-        MuzzleEmission {
+        let emission = MuzzleEmission {
             core: FlashCore {
                 sprite: shape.sprite,
                 diameter_m: jittered(core.diameter_m * length * shape.core_share),
@@ -714,7 +718,83 @@ impl MuzzleLook {
                 lifetime_s: scaled(blast.lifetime_s, gas_life),
                 ..blast
             }),
+        };
+        emission.validate()?;
+        Ok(emission)
+    }
+}
+
+impl MuzzleEmission {
+    /// Refuse unrepresentable scaled fields and the renderer's derived sizes at the load edge.
+    /// The error names the taste field; the registry adds the gun and ammunition row.
+    fn validate(&self) -> Result<(), String> {
+        let check = |field, value, positive| number(field, Sourced(value), positive).map(|_| ());
+        let range = |field, (lo, hi), positive| -> Result<(), String> {
+            check(field, lo, positive)?;
+            check(field, hi, positive)
+        };
+        range("core.diameter_m", self.core.diameter_m, true)?;
+        check("core.standoff_m", self.core.standoff_m, false)?;
+        check(
+            "core.end_scale",
+            self.core.diameter_m.1 * self.core.end_scale,
+            true,
+        )?;
+        for jet in
+            std::iter::once(self.flames.forward).chain(self.flames.side_jets.map(|side| side.jet))
+        {
+            range("flames.length_m", jet.length_m, true)?;
+            check(
+                "flames.width_ratio",
+                jet.length_m.1 * self.flames.width_ratio,
+                true,
+            )?;
+            check(
+                "flames.end_scale",
+                jet.length_m.1 * self.flames.end_scale,
+                true,
+            )?;
         }
+        if let Some(fireball) = self.fireball {
+            range("fireball.diameter_m", fireball.diameter_m, true)?;
+            check(
+                "fireball.growth",
+                fireball.diameter_m.1 * fireball.growth,
+                true,
+            )?;
+            check("fireball.standoff_m", fireball.standoff_m, false)?;
+            check("fireball.lifetime_s", fireball.lifetime_s, true)?;
+        }
+        if let Some(glow) = self.glow {
+            let size = self.core.diameter_m.1 * glow.scale;
+            check("glow.scale", size, true)?;
+            check("glow.end_scale", size * glow.end_scale, true)?;
+        }
+        if let Some(smoke) = self.smoke {
+            range("smoke.diameter_m", smoke.diameter_m, true)?;
+            check("smoke.standoff_m", smoke.standoff_m, false)?;
+            check("smoke.lifetime_s", smoke.lifetime_s, true)?;
+            check("smoke.rise_mps", smoke.rise_mps, false)?;
+            check("smoke.push_mps", smoke.push_mps, false)?;
+        }
+        check("light.peak_lm", self.light.peak_lm, true)?;
+        check("light.range_m", self.light.range_m, true)?;
+        check("light.radius_m", self.light.radius_m, false)?;
+        check("light.standoff_m", self.light.standoff_m, false)?;
+        if let Some(blast) = self.ground_blast {
+            check("ground_blast.reach_m", blast.reach_m, true)?;
+            check(
+                "ground_blast.birth_diameter_m",
+                blast.birth_diameter_m,
+                true,
+            )?;
+            range("ground_blast.end_diameter_m", blast.end_diameter_m, true)?;
+            range("ground_blast.spread_m", blast.spread_m, true)?;
+            range("ground_blast.push_mps", blast.push_mps, true)?;
+            check("ground_blast.rise_mps", blast.rise_mps, false)?;
+            range("ground_blast.lifetime_s", blast.lifetime_s, true)?;
+        }
+        Ok(())
     }
 }
 
@@ -893,7 +973,7 @@ mod tests {
     /// dimmer or shorter-reaching light or a shorter-lived or smaller smoke, and the largest
     /// sizes and the light strictly grow. The consistency the owner asked of the muzzle relies on
     /// it; a mutant that inverts a law's exponent, reads a fixed size or saturates a curve fails.
-    /// FIXTURE DATA: an energy ladder over six decades, no gun's.
+    /// FIXTURE DATA: an energy ladder over twelve decades, no gun's.
     #[test]
     fn a_larger_muzzle_energy_never_draws_a_smaller_flash_dimmer_light_or_shorter_smoke() {
         let look = MuzzleLook::shipped();
@@ -908,8 +988,8 @@ mod tests {
                 Mechanism::Automatic { cyclic_rpm: 750.0 },
             ] {
                 for pair in ladder.windows(2) {
-                    let small = magnitudes(&look.emission(shape, pair[0], mechanism));
-                    let large = magnitudes(&look.emission(shape, pair[1], mechanism));
+                    let small = magnitudes(&look.emission(shape, pair[0], mechanism).unwrap());
+                    let large = magnitudes(&look.emission(shape, pair[1], mechanism).unwrap());
                     assert_eq!(
                         small.len(),
                         large.len(),
@@ -941,25 +1021,51 @@ mod tests {
         }
     }
 
-    /// The game's damage-model view: the shape alone picks the layers. At one energy the muzzle
-    /// brake states side jets, a fireball and a glow, and the flash hider none of them; both
-    /// state smoke and the ground blast, and each core wears its shape's sprite. Energy changes
-    /// no layer's presence. A mutant that lets the energy or a shared default pick a layer fails.
+    /// The game's damage-model view: each independent shape flag survives parsing, resolution
+    /// and energy scaling. The renderer relies on exactly the requested layers, even when taste
+    /// choices differ from the shipped combinations. FIXTURE DATA: every Boolean combination.
     #[test]
     fn each_shape_states_its_layers_and_energy_never_adds_one() {
-        let look = MuzzleLook::shipped();
-        for joules in [3.0e3_f32, 3.0e6] {
-            let energy = MuzzleEnergy::of(2.0, (joules).sqrt()).expect("a positive fixture");
-            let brake = look.emission(MuzzleShape::MuzzleBrake, energy, Mechanism::Single);
-            assert!(brake.flames.side_jets.is_some() && brake.fireball.is_some());
-            assert!(brake.glow.is_some());
-            assert_eq!(brake.core.sprite, CoreSprite::Starburst);
-            let hider = look.emission(MuzzleShape::FlashHider, energy, Mechanism::Single);
-            assert!(hider.flames.side_jets.is_none() && hider.fireball.is_none());
-            assert!(hider.glow.is_none());
-            assert_eq!(hider.core.sprite, CoreSprite::Glow);
-            for emission in [brake, hider] {
-                assert!(emission.smoke.is_some() && emission.ground_blast.is_some());
+        for mask in 0..16 {
+            let flags = std::array::from_fn::<_, 4, _>(|bit| mask & (1 << bit) != 0);
+            let mut file: LookFile = ron::de::from_str(LOOK_RON).unwrap();
+            let row = &mut file.shapes.muzzle_brake;
+            row.fireball = Sourced(flags[0]);
+            row.glow = Sourced(flags[1]);
+            row.smoke = Sourced(flags[2]);
+            row.ground_blast = Sourced(flags[3]);
+            let statement = file.shapes.muzzle_brake.resolve("fixture").unwrap();
+            assert_eq!(
+                [
+                    statement.fireball,
+                    statement.glow,
+                    statement.smoke,
+                    statement.ground_blast
+                ],
+                flags
+            );
+            let mut look = MuzzleLook::shipped().clone();
+            look.brake = statement;
+            look.hider = statement;
+            for shape in SHAPES {
+                for joules in [3.0e3_f32, 3.0e6] {
+                    let energy = MuzzleEnergy::of(2.0, joules.sqrt()).unwrap();
+                    let emission = look.emission(shape, energy, Mechanism::Single).unwrap();
+                    assert_eq!(
+                        [
+                            emission.fireball.is_some(),
+                            emission.glow.is_some(),
+                            emission.smoke.is_some(),
+                            emission.ground_blast.is_some()
+                        ],
+                        flags
+                    );
+                    assert_eq!(emission.core.sprite, statement.sprite);
+                    assert_eq!(
+                        emission.flames.side_jets.is_some(),
+                        statement.side_jets.is_some()
+                    );
+                }
             }
         }
     }
@@ -973,6 +1079,7 @@ mod tests {
         let energy = MuzzleEnergy::of(0.01, 800.0).expect("a positive fixture");
         let every = |mechanism| {
             look.emission(MuzzleShape::FlashHider, energy, mechanism)
+                .unwrap()
                 .smoke
                 .expect("the hider states smoke")
                 .every_rounds
@@ -1003,6 +1110,49 @@ mod tests {
         assert_eq!(
             MuzzleEnergy::of(2.0, 10.0).map(MuzzleEnergy::joules),
             Ok(100.0)
+        );
+    }
+
+    /// The game's damage-model view: outside representable muzzle scales must be refused at
+    /// load, before the renderer can receive infinite dimensions. FIXTURE DATA: tiny reference.
+    #[test]
+    fn scaling_outside_the_emissions_domain_is_refused() {
+        let look = MuzzleLook::parse(&LOOK_RON.replace(
+            "reference_energy_j: (1.0e6,",
+            "reference_energy_j: (1.0e-40,",
+        ))
+        .unwrap();
+        let energy = MuzzleEnergy::of(2.0, 1000.0).unwrap();
+        let error = look
+            .emission(MuzzleShape::MuzzleBrake, energy, Mechanism::Single)
+            .unwrap_err();
+        assert!(error.contains("reference_energy_j"));
+        // FIXTURE DATA: a representable final energy must not be lost to intermediate rounding.
+        assert!(MuzzleEnergy::of(f32::from_bits(1), 1e20).unwrap().joules() > 0.0);
+        for (mass, speed) in [(1e30, 1e5), (1e-30, 1e-10)] {
+            assert!(matches!(
+                MuzzleEnergy::of(mass, speed),
+                Err(MuzzleEnergyError::Energy { .. })
+            ));
+        }
+        let look = MuzzleLook::shipped();
+        assert!(
+            look.emission(
+                MuzzleShape::FlashHider,
+                energy,
+                Mechanism::Automatic {
+                    cyclic_rpm: f32::MAX
+                }
+            )
+            .unwrap_err()
+            .contains("cyclic_rpm")
+        );
+        let mut look = look.clone();
+        look.fireball.growth = f32::MAX;
+        assert!(
+            look.emission(MuzzleShape::MuzzleBrake, energy, Mechanism::Single)
+                .unwrap_err()
+                .contains("fireball.growth")
         );
     }
 

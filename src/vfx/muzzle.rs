@@ -1103,7 +1103,7 @@ mod tests {
         for shape in [MuzzleShape::MuzzleBrake, MuzzleShape::FlashHider] {
             let statement = look.shape(shape);
             let mut app = harness();
-            let emission = look.emission(shape, energy, Mechanism::Single);
+            let emission = look.emission(shape, energy, Mechanism::Single).unwrap();
             fire_with(&mut app, emission, SLOW, CANNON_CALIBER, 0, false);
             let (mut forward, mut side) = (0u8, 0u8);
             let world = app.world_mut();

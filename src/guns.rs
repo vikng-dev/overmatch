@@ -251,12 +251,17 @@ fn resolved(key: &str, file: GunFile, rounds: &RoundRegistry) -> Result<Gun, Str
                      {mass}, so the shot has no muzzle energy — author the round's finite \
                      positive launched mass"
                     ),
+                    MuzzleEnergyError::Energy { mass, speed } => format!(
+                        "assets/rounds/{round_key}.round.ron's mass ({mass}) and assets/guns/{key}.gun.ron's ammunition[{round_key:?}].muzzle_speed ({speed}) produce an unrepresentable energy — author mass and speed whose energy is finite and positive"
+                    ),
                     MuzzleEnergyError::Speed(speed) => format!(
                         "assets/guns/{key}.gun.ron's ammunition[{round_key:?}].muzzle_speed is \
                      {speed}, so the shot has no muzzle energy — author a finite positive speed"
                     ),
                 })?;
-            let muzzle = look.emission(shape, energy, mechanism);
+            let muzzle = look.emission(shape, energy, mechanism).map_err(|error| format!(
+                "assets/guns/{key}.gun.ron's ammunition[{round_key:?}] with assets/vfx/muzzle.ron: {error}"
+            ))?;
             let round = facts
                 .fired_at(speed, muzzle)
                 .map_err(|reason| format!("ammunition {round_key:?} at {speed} m/s: {reason}"))?;
@@ -449,6 +454,25 @@ mod tests {
         )
     }
 
+    /// The game's damage-model view: unrepresentable outside shot data is refused at registry
+    /// admission with both source paths and fields. The renderer must never receive this shot.
+    /// FIXTURE DATA: an excessive speed on a synthetic ammunition row.
+    #[test]
+    fn an_unrepresentable_shot_names_its_data_files_before_play() {
+        let rounds = fixture_rounds(&["Probe"]);
+        let text = gun_file("Fixture", "0.05", &[("Probe", "1e30")]);
+        let error = GunRegistry::from_files(&[("Gun", &text)], &rounds).unwrap_err();
+        for field in [
+            "assets/rounds/Probe.round.ron",
+            "mass",
+            "assets/guns/Gun.gun.ron",
+            "muzzle_speed",
+            "unrepresentable energy",
+        ] {
+            assert!(error.to_string().contains(field), "{error}");
+        }
+    }
+
     /// The game's damage model: a gun fires each round of its table as the round registry states
     /// it, at the table's speed and with the muzzle emission the muzzle law gives that row's
     /// energy and the gun's shape, whether looked up by gun or by round alone. Spawn and the shot
@@ -467,8 +491,9 @@ mod tests {
             GunRegistry::from_files(&[("Gun", &text)], &rounds).expect("the fixture gun loads");
         for (key, speed) in [("Probe", 700.0), ("Other", 650.0)] {
             let energy = MuzzleEnergy::of(5.0, speed).expect("a positive fixture");
-            let muzzle =
-                MuzzleLook::shipped().emission(MuzzleShape::FlashHider, energy, Mechanism::Single);
+            let muzzle = MuzzleLook::shipped()
+                .emission(MuzzleShape::FlashHider, energy, Mechanism::Single)
+                .unwrap();
             let expected = rounds
                 .get(key)
                 .expect("the fixture registry carries every key it was built with")
