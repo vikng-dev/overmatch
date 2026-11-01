@@ -48,8 +48,8 @@ use super::breakage::{
 use super::fracture::{Fate, Side, clip_polygon};
 use super::schema::BuildingAsset;
 use crate::building_surface::{BuildingMaterial, holed};
+use crate::debris::PresentationClock;
 use crate::scatter::MapInstance;
-use crate::trees::FallClock;
 
 /// The substance key whose faces wear the timber pack; every other wears the masonry pack.
 const TIMBER: &str = "Wood";
@@ -341,12 +341,12 @@ struct OwnMesh {
     cracks: Option<Entity>,
 }
 
-/// Present the record up to the presentation clock ([`FallClock`]: the interpolation cursor on a
+/// Present the record up to the presentation clock ([`PresentationClock`]: the interpolation cursor on a
 /// replica, the sim tick elsewhere), so a break appears when the round that made it is drawn
 /// arriving (ADR-0037), and redraw every building whose shown shape moved.
 fn present_record(
     record: Res<WallRecord>,
-    clock: Res<FallClock>,
+    clock: Res<PresentationClock>,
     mut presented: Local<(u32, usize)>,
     mut buildings: Query<(
         Entity,
@@ -663,13 +663,32 @@ fn show_pieces(
 
 /// The breaks' view, on every root that draws: the record presented at the presentation clock,
 /// the broken buildings redrawn, the fallen groups dressed and shown.
+fn publish_sim_clock(
+    tick: Option<Res<crate::ShotClock>>,
+    step: Res<Time<Fixed>>,
+    mut clock: ResMut<PresentationClock>,
+) {
+    let Some(tick) = tick else {
+        return;
+    }; // Tank-less view fixtures keep their explicit cursor.
+    clock.tick = tick.0;
+    clock.overstep = step.overstep_fraction_f64();
+}
+
 pub(crate) fn plugin(app: &mut App) {
-    app.add_systems(
-        Update,
-        (present_record, redraw, dress_pieces, show_pieces)
-            .chain()
-            .after(WallReplicaSet),
-    );
+    app.init_resource::<PresentationClock>()
+        .add_systems(
+            Update,
+            publish_sim_clock
+                .before(present_record)
+                .run_if(not(resource_exists::<crate::ClientReplica>)),
+        )
+        .add_systems(
+            Update,
+            (present_record, redraw, dress_pieces, show_pieces)
+                .chain()
+                .after(WallReplicaSet),
+        );
 }
 
 #[cfg(test)]

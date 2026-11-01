@@ -220,10 +220,6 @@ use crate::{CombatantId, CombatantLife, ShotId};
 /// the baked chunk's centroid and a `u16` millimetre radius. Own-type graph and REV move.
 ///
 ///
-/// REV 43 (#191, a felled tree falls): the destruction ledger's entry becomes the enum
-/// `LedgerEntry::{State, Stopped}`, a state transition as before or the authority tick a falling
-/// piece met another body at, which every peer holds the fall at. Own-type graph and REV move.
-///
 /// REV 45 (#241, the match score): one globally visible entity's
 /// [`Scoreboard`](super::score::Scoreboard) lists each combatant's knockouts, losses and its
 /// knocked-out life's respawn opening, replicated whole. Surface and own-type graph move.
@@ -234,7 +230,9 @@ use crate::{CombatantId, CombatantLife, ShotId};
 ///
 /// [`WallPiece`]: crate::buildings::breakage::WallPiece
 /// [`WallEvent`]: crate::buildings::breakage::WallEvent
-pub const PROTOCOL_REV: u32 = 54;
+/// REV 55 (#236): tree motion uses the interpolated debris pose stream. The topology ledger
+/// carries only a state word; each freed trunk's TreePiece identifies its map tree and cut.
+pub const PROTOCOL_REV: u32 = 55;
 
 /// Compatibility tag derived from the complete pinned wire manifest plus the crate version. This
 /// is the runtime handshake value: version-exact, so a version bump intentionally changes it.
@@ -995,6 +993,7 @@ const WIRE_SURFACE: &[&str] = &[
     "DebrisPose",
     "WallLedger",
     "WallPiece",
+    "TreePiece",
     "Scoreboard",
     "BattleState",
     // Message channels (`Name|Mode|Direction`), followed by their message types.
@@ -1024,7 +1023,7 @@ const WIRE_SURFACE: &[&str] = &[
 ];
 
 /// Pinned hash for the ordered wire surface and a direct handshake-fingerprint input.
-const WIRE_SURFACE_HASH: u64 = 0x4fa8a9525007f08a;
+const WIRE_SURFACE_HASH: u64 = 0xa2c802e70ee420aa;
 
 // ---------------------------------------------------------------------------
 // Deep wire-surface coverage (field-level + external-dep skew)
@@ -1066,7 +1065,7 @@ const WIRE_SURFACE_HASH: u64 = 0x4fa8a9525007f08a;
 /// The pinned hash of the OWN wire-facing type DEFINITIONS (field layout, not just names). Re-pin it
 /// whenever a wire-facing struct/enum definition changes; house process also bumps
 /// [`PROTOCOL_REV`]. The tripwire prints the new value. See the block above for the coverage model.
-const WIRE_TYPES_HASH: u64 = 0xef9a15fea7157bc0;
+const WIRE_TYPES_HASH: u64 = 0x163917c1e723b6f1;
 
 /// The pinned `Cargo.lock` versions of the external crates whose types ride the wire (avian's
 /// replicated physics components; lightyear's wire framing / input protocol). A bump of either can
@@ -1123,6 +1122,7 @@ pub(crate) fn plugin(app: &mut App) {
     // with the carrier.
     app.component::<crate::buildings::breakage::WallPiece>()
         .replicate();
+    app.component::<crate::trees::TreePiece>().replicate();
     // The match score (one world entity): sent whole when a knockout changes it, a late joiner
     // takes it once.
     app.component::<super::score::Scoreboard>().replicate();
@@ -1972,6 +1972,7 @@ mod tests {
         ("src/buildings/breakage.rs", "WallEvent"),
         ("src/buildings/breakage.rs", "Hole"),
         ("src/buildings/breakage.rs", "WallPiece"),
+        ("src/trees/motion.rs", "TreePiece"),
         ("src/net/score.rs", "Scoreboard"),
         ("src/net/battle.rs", "BattleState"),
         ("src/net/battle.rs", "BattlePhase"),

@@ -6,7 +6,7 @@
 //! the shipped kinds) and shared by every tree of the kind, so the renderer instances them. A tree
 //! that is down draws the glb's segmented hierarchy, cut caps included, rebuilt from the kind's
 //! [`TreeTemplate`] in the frame its state leaves `Standing` ([`draw_trees`]), and the fall is
-//! presented on it from the state and its transition tick ([`present_fall`]). A tree standing
+//! presented on it from the authoritative body pose ([`present_fall`]). A tree standing
 //! again draws its standing meshes again; a settled tree keeps the segmented hierarchy.
 //!
 //! THE TEMPLATE. Read once per kind off one hidden, unparented instance of the kind's glb scene
@@ -23,10 +23,8 @@ use bevy::prelude::*;
 use bevy::transform::TransformSystems;
 use bevy::world_serialization::{WorldAssetRoot, WorldInstanceReady};
 
-use super::{
-    FallClock, FallPath, Fell, Resting, Stopped, TreeBody, TreeKind, TreeState, fall_rotation,
-};
-use crate::{ClientReplica, ShotClock};
+use super::{TreeBody, TreeKind, TreePiece, TreeState};
+use crate::scatter::MapInstance;
 
 /// Marks a tree's view root, a child of the tree's root at the instance's uniform scale: every
 /// mesh the tree draws hangs under it.
@@ -418,76 +416,41 @@ fn draw(
     commands.entity(view).insert(index);
 }
 
-/// Present a tree's state on its segmented hierarchy, from the state alone (ADR-0016): standing,
-/// every trunk node upright at its bound translation and every cap hidden; down, the cut's trunk
-/// node — the chain's translations carry the piece above — follows the fall's path
-/// ([`FallPath::at`]): turned by [`fall_rotation`] at the path's angle, its origin the path's
-/// pivot as an offset from the cut's bottom, so at the rest its rotation is the sim's lying
-/// segments' own and its origin the seat. The time is read off [`FallClock`] against the
-/// transition tick, held at a stop (ADR-0037: the fall STARTS when the cursor crosses its tick,
-/// however late the entry arrived), and of the caps exactly the pair the cut reveals (A5:
-/// `cap_top` below the cut and `cap_bottom` of the cut) shows. The pivot's offset is in the root's
-/// frame, world metres; the chain is under the view root's uniform scale and carries no rotation
-/// (A5), so the node's parent-frame offset is it over that scale. Written when the state, the
-/// body's path or the built hierarchy is new, and on every frame the cut's trunk is not at the
-/// pose the clock derives — through the fall and on the frame it completes; a hierarchy built for
-/// a tree in either state is presented in the frame it is built. A tree drawing its standing
-/// meshes has no hierarchy and is skipped. The sim never waits on this.
+/// The game's environment destruction view: the cut node follows the freed body's world pose.
+/// Its ancestors retain the stump's placement and uniform scale. A missing carrier is the
+/// receive interval before the authoritative pose stream arrives; the view stays upright then.
 fn present_fall(
-    clock: Res<FallClock>,
     trees: Query<(
         Ref<TreeState>,
         &TreeBody,
-        Option<&Fell>,
-        Option<&Stopped>,
-        Option<&Resting>,
-        Option<Ref<FallPath>>,
+        &MapInstance,
         &Transform,
         &Children,
     )>,
+    pieces: Query<(&TreePiece, &Transform)>,
     views: Query<Ref<TreeViewNodes>>,
-    mut nodes: Query<(&mut Transform, &mut Visibility), Without<TreeBody>>,
+    mut nodes: Query<(&mut Transform, &mut Visibility), (Without<TreeBody>, Without<TreePiece>)>,
 ) {
-    for (state, body, fell, stopped, resting, path, transform, children) in &trees {
+    for (state, body, identity, root, children) in &trees {
         let Some(view) = children.iter().find_map(|child| views.get(child).ok()) else {
-            continue;
+            continue; // The standing instanced representation has no segmented hierarchy.
         };
-        // The cut and its trunk node's pose this frame: none standing, none until the body's
-        // path is derived.
-        let turned = match (*state, fell, resting, path.as_deref()) {
-            (TreeState::Down { cut, .. }, Some(fell), Some(resting), Some(path)) => {
-                let cut = usize::from(cut);
-                let mut ticks = clock.since(fell.tick);
-                if let Some(stopped) = stopped {
-                    ticks = ticks.min(f64::from(stopped.tick.wrapping_sub(fell.tick) as i32));
-                }
-                let (angle, pivot) = path.at(ticks);
-                let translation =
-                    view.standing[cut] + (pivot - Vec3::Y * body.prefix[cut]) / body.scale;
-                Some((
-                    cut,
-                    fall_rotation(resting, transform.rotation, angle),
-                    translation,
-                ))
-            }
-            _ => None,
+        let turned = match *state {
+            TreeState::Standing => None,
+            TreeState::Down { cut, .. } => pieces
+                .iter()
+                .find(|(piece, _)| piece.tree == identity.ordinal && piece.cut == cut)
+                .map(|(_, pose)| {
+                    let turn = root.rotation.inverse() * pose.rotation;
+                    let pivot = root.rotation.inverse() * (pose.translation - root.translation)
+                        + turn
+                            * (Vec3::Y * body.prefix[usize::from(cut)] - body.piece_centroid(cut));
+                    let cut = usize::from(cut);
+                    let translation =
+                        view.standing[cut] + (pivot - Vec3::Y * body.prefix[cut]) / body.scale;
+                    (cut, turn, translation)
+                }),
         };
-        let fresh = state.is_changed()
-            || view.is_added()
-            || path.as_ref().is_some_and(|path| path.is_added());
-        // An unchanged tree is redrawn while its cut's trunk is not at the pose this frame
-        // derives: every frame of the fall, and the frame the last stage completes, which writes
-        // the resting pose; at rest the two agree and the tree is skipped.
-        let behind = turned.is_some_and(|(cut, turn, translation)| {
-            view.trunks[cut]
-                .and_then(|trunk| nodes.get(trunk).ok())
-                .is_some_and(|(local, _)| {
-                    local.rotation != turn || local.translation != translation
-                })
-        });
-        if !fresh && !behind {
-            continue;
-        }
         for (k, trunk) in view.trunks.iter().enumerate() {
             let (rotation, translation) = match turned {
                 Some((cut, turn, translation)) if k == cut => (turn, translation),
@@ -530,31 +493,9 @@ fn present_fall(
     }
 }
 
-/// The authority's (and single-player's) presentation clock: the sim tick plus the fixed step's
-/// overstep. A replica's is the interpolation cursor, written by the net client instead.
-fn publish_sim_fall_clock(
-    tick: Option<Res<ShotClock>>,
-    step: Res<Time<Fixed>>,
-    mut clock: ResMut<FallClock>,
-) {
-    // A composition with no clock (the sandboxes, the headless sim) keeps its falls unkeyed, as
-    // its shells are.
-    let Some(tick) = tick else {
-        return;
-    };
-    clock.tick = tick.0;
-    clock.overstep = step.overstep_fraction_f64();
-}
-
-/// The view half, mounted by the windowed roots: the presentation clock, each tree's
-/// representation, and the fall on the segmented hierarchy.
+/// The view half: each tree's representation and the streamed pose on its segmented hierarchy.
 pub(crate) fn plugin(app: &mut App) {
-    app.init_resource::<FallClock>()
-        .init_resource::<TreeTemplates>()
-        .add_systems(
-            Update,
-            publish_sim_fall_clock.run_if(not(resource_exists::<ClientReplica>)),
-        )
+    app.init_resource::<TreeTemplates>()
         .add_systems(
             SpawnScene,
             draw_trees.after(SceneSpawnerSystems::WorldInstanceSpawn),
@@ -565,457 +506,8 @@ pub(crate) fn plugin(app: &mut App) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::trees::seat_in_root;
-    use crate::trees::tests::{derive_bed, fixture_grid, fixture_kind, segments_of, settle};
+    use crate::trees::tests::fixture_kind;
     use bevy::mesh::VertexAttributeValues;
-    use std::f32::consts::FRAC_PI_2;
-
-    /// The game's 64 Hz step, seconds.
-    const DT: f64 = 1.0 / 64.0;
-
-    /// The fixture's view under a tree root at `pose` (the root's own transform, unit scale) in
-    /// `state` with `resting`, presented at clock tick `tick` after a transition at tick 0: the
-    /// view's root under the tree at the instance's `scale`, the trunk nodes nested under it
-    /// bottom-up, each at its segment's base in its parent's frame in asset metres (fixture
-    /// data, the glb's nesting); the trunk nodes' world rotations and positions composed down
-    /// the chain, bottom first.
-    fn presented(
-        pose: Transform,
-        scale: f32,
-        state: TreeState,
-        resting: Resting,
-        tick: u32,
-    ) -> Vec<(Quat, Vec3)> {
-        let mut app = App::new();
-        app.insert_resource(FallClock {
-            tick,
-            overstep: 0.0,
-        })
-        .add_systems(Update, present_fall);
-        let body = TreeBody::new(fixture_kind(), scale);
-        let TreeState::Down { cut, .. } = state else {
-            panic!("a fall presents a down tree");
-        };
-        let path = FallPath::new(&body, usize::from(cut), &resting, pose.rotation, DT);
-        let world = app.world_mut();
-        let root = world
-            .spawn((state, Fell { tick: 0 }, resting, path, body.clone(), pose))
-            .id();
-        let view = world
-            .spawn((ChildOf(root), Transform::from_scale(Vec3::splat(scale))))
-            .id();
-        let mut parent = view;
-        let mut trunks = Vec::new();
-        let mut standing = Vec::new();
-        for k in 0..body.kind.segments.len() {
-            let lift = if k == 0 {
-                0.0
-            } else {
-                body.kind.segments[k - 1].height_m
-            };
-            let translation = Vec3::new(0.0, lift, 0.0);
-            parent = world
-                .spawn((
-                    ChildOf(parent),
-                    Transform::from_translation(translation),
-                    Visibility::Inherited,
-                ))
-                .id();
-            trunks.push(parent);
-            standing.push(translation);
-        }
-        let n = trunks.len();
-        world.entity_mut(view).insert(TreeViewNodes {
-            trunks: trunks.iter().copied().map(Some).collect(),
-            standing,
-            caps_top: vec![None; n],
-            caps_bottom: vec![None; n],
-        });
-        app.update();
-        let world = app.world();
-        let mut chain = pose.mul_transform(*world.get::<Transform>(view).unwrap());
-        trunks
-            .iter()
-            .map(|trunk| {
-                chain = chain.mul_transform(*world.get::<Transform>(*trunk).unwrap());
-                (chain.rotation, chain.translation)
-            })
-            .collect()
-    }
-
-    /// THE SIM AND THE VIEW LAY THE PIECE DOWN TO THE SAME BITS: for every row of the lying-pose
-    /// pins (cuts 0 and 1 on flat ground, on the slope and at the grid's edge, in three bins,
-    /// under a yaw), for the yawed fixture down at cut 2 and for one at scale 1.5, each lying
-    /// segment's world rotation composed from the sim's body — the root's over the segment's —
-    /// equals, bit for bit, its trunk node's composed down the view's chain at rest, and each
-    /// lying segment's world position is within 1e-4 m of its node's (DERIVED: the chain's sum
-    /// and the scale division round differently from the sim's one addition; positions are
-    /// root-relative, tens of metres, where an f32 ulp is under 1e-5). Both take
-    /// [`fall_rotation`] and [`seat_in_root`] under the same root; a sim or a view that builds
-    /// its turn by another route — the world tilt conjugated by the root's inverse, say —
-    /// differs in the last bits, a view that leaves the butt on the stump is `2r` off, and a
-    /// rest translation not divided by the scale is off by the seat's offset times the scale's
-    /// excess; each reds this.
-    #[test]
-    fn the_sim_and_the_view_lay_the_piece_down_to_the_same_bits() {
-        let yaw = Quat::from_xyzw(0.0, libm::sinf(0.35), 0.0, libm::cosf(0.35));
-        let flat: fn(f32, f32) -> f32 = |_, _| 0.0;
-        let slope: fn(f32, f32) -> f32 = |x, _| x / 10.0;
-        let mut cases = Vec::new();
-        for (height, base) in [
-            (flat, Vec3::ZERO),
-            (slope, Vec3::new(100.0, 10.0, 0.0)),
-            (slope, Vec3::new(499.0, 49.9, 0.0)),
-        ] {
-            for cut in [0_u8, 1] {
-                for dir in [0_u8, 64, 200] {
-                    cases.push((height, base, 1.0_f32, TreeState::Down { cut, dir }));
-                }
-            }
-        }
-        cases.push((
-            flat,
-            Vec3::new(5.0, 0.0, 5.0),
-            1.0,
-            TreeState::Down { cut: 2, dir: 0 },
-        ));
-        cases.push((
-            flat,
-            Vec3::new(5.0, 0.0, 5.0),
-            1.5,
-            TreeState::Down { cut: 1, dir: 64 },
-        ));
-        for (height, base, scale, state) in cases {
-            let spawn_pose = Transform {
-                translation: base,
-                rotation: yaw,
-                scale: Vec3::splat(scale),
-            };
-            let (mut app, root) = derive_bed(fixture_grid(height), spawn_pose);
-            *app.world_mut().get_mut::<TreeState>(root).unwrap() = state;
-            settle(&mut app, root);
-            let resting = *app.world().get::<Resting>(root).expect("the pose");
-            let root_pose = Transform {
-                scale: Vec3::ONE,
-                ..spawn_pose
-            };
-            let sim: Vec<(Quat, Vec3)> = segments_of(&app, root)
-                .iter()
-                .map(|(local, _)| {
-                    let world = root_pose.mul_transform(*local);
-                    (world.rotation, world.translation)
-                })
-                .collect();
-            let view = presented(root_pose, scale, state, resting, 1000);
-            let TreeState::Down { cut, .. } = state else {
-                unreachable!()
-            };
-            for k in usize::from(cut)..sim.len() {
-                assert_eq!(
-                    sim[k].0.to_array().map(f32::to_bits),
-                    view[k].0.to_array().map(f32::to_bits),
-                    "{state:?} at {base}, scale {scale}, segment {k}: rotation"
-                );
-                assert!(
-                    sim[k].1.abs_diff_eq(view[k].1, 1e-4),
-                    "{state:?} at {base}, scale {scale}, segment {k}: the sim at {}, the view at {}",
-                    sim[k].1,
-                    view[k].1
-                );
-            }
-        }
-    }
-
-    /// THE VIEW FOLLOWS THE FALL'S PATH AND ENDS ON THE REST: an unchanged tree whose clock
-    /// advances through its fall has its cut's trunk node, at each whole tick, turned by exactly
-    /// the path's angle at that tick and set at exactly the path's pivot offset from the cut's
-    /// bottom, over the scale — upright where it was bound at the fall's own tick, still bound
-    /// while the pendulum turns, off its binding once the butt slides; between two ticks, on the
-    /// chord between their poses; from the rest on, exactly the rest translation and the turn of
-    /// the whole tilt — the bits the derive computes at rest, which the sim's lying piece shares —
-    /// and there it stays. A frame with no time passed redraws nothing. A presentation with a
-    /// timing of its own (a tuned duration, an easing), one that stops redrawing a frame early,
-    /// or one that ends at `hinge + (tilt − hinge)` instead of the tilt (fixture data: hinge 90°,
-    /// tilt 0.3 rad, a DERIVED f32 counterexample, that sum one ulp above 0.3) reds this.
-    #[test]
-    fn the_view_follows_the_fall_path_and_ends_on_the_rest() {
-        let yaw = Quat::from_xyzw(0.0, libm::sinf(0.35), 0.0, libm::cosf(0.35));
-        let body = TreeBody::new(fixture_kind(), 1.0);
-        for (seat_y, tilt) in [(0.2_f32, 1.6_f32), (2.5, 1.6), (0.2, 0.3)] {
-            let resting = Resting {
-                hinge: FRAC_PI_2,
-                tilt,
-                seat: Vec3::new(0.4, seat_y, 0.0),
-                dx: 1.0,
-                dz: 0.0,
-            };
-            let path = FallPath::new(&body, 1, &resting, yaw, DT);
-            let mut app = App::new();
-            app.insert_resource(FallClock {
-                tick: 0,
-                overstep: 0.0,
-            })
-            .add_systems(Update, present_fall);
-            let world = app.world_mut();
-            let root = world
-                .spawn((
-                    TreeState::Down { cut: 1, dir: 0 },
-                    Fell { tick: 0 },
-                    resting,
-                    path.clone(),
-                    body.clone(),
-                    Transform::from_rotation(yaw),
-                ))
-                .id();
-            let view = world.spawn((ChildOf(root), Transform::IDENTITY)).id();
-            let standing: Vec<Vec3> = (0..3)
-                .map(|k| Vec3::new(0.0, 2.0 * k as f32, 0.0))
-                .collect();
-            let trunks: Vec<Entity> = standing
-                .iter()
-                .map(|translation| {
-                    world
-                        .spawn((
-                            ChildOf(view),
-                            Transform::from_translation(*translation),
-                            Visibility::Inherited,
-                        ))
-                        .id()
-                })
-                .collect();
-            world.entity_mut(view).insert(TreeViewNodes {
-                trunks: trunks.iter().copied().map(Some).collect(),
-                standing: standing.clone(),
-                caps_top: vec![None; 3],
-                caps_bottom: vec![None; 3],
-            });
-            let node = |app: &App| *app.world().get::<Transform>(trunks[1]).unwrap();
-            let at = |app: &mut App, tick: u32, overstep: f64| {
-                *app.world_mut().resource_mut::<FallClock>() = FallClock { tick, overstep };
-                app.update();
-            };
-            let bits = |rotation: Quat| rotation.to_array().map(f32::to_bits);
-            let expected = |(angle, pivot): (f32, Vec3)| {
-                (
-                    fall_rotation(&resting, yaw, angle),
-                    standing[1] + (pivot - Vec3::Y * body.prefix[1]) / body.scale,
-                )
-            };
-            for k in 0..=path.last() {
-                at(&mut app, k, 0.0);
-                let (turn, translation) = expected(path.pose(k));
-                let presented = node(&app);
-                assert_eq!(
-                    bits(presented.rotation),
-                    bits(turn),
-                    "seat {seat_y}: tick {k}'s turn"
-                );
-                assert_eq!(
-                    presented.translation.to_array().map(f32::to_bits),
-                    translation.to_array().map(f32::to_bits),
-                    "seat {seat_y}: tick {k}'s translation"
-                );
-                if k == 0 || k <= path.landed() {
-                    assert_eq!(presented.translation, standing[1], "tick {k}: still bound");
-                }
-            }
-            assert_ne!(
-                node(&app).translation,
-                standing[1],
-                "seat {seat_y}: the butt left the stump"
-            );
-            at(&mut app, 3, 0.5);
-            let (a3, p3) = path.pose(3);
-            let (a4, p4) = path.pose(4);
-            let (turn, translation) = expected((a3 + (a4 - a3) * 0.5, p3 + (p4 - p3) * 0.5));
-            assert!(
-                node(&app).rotation.abs_diff_eq(turn, 1e-6)
-                    && node(&app).translation.abs_diff_eq(translation, 1e-6),
-                "between two ticks, on their chord"
-            );
-            let rest = standing[1] + (seat_in_root(&resting, yaw) - Vec3::Y * body.prefix[1]);
-            for tick in [path.last(), path.last() + 300] {
-                at(&mut app, tick, 0.0);
-                let landed = node(&app);
-                assert_eq!(
-                    landed.translation.to_array().map(f32::to_bits),
-                    rest.to_array().map(f32::to_bits),
-                    "seat {seat_y}: the rest translation"
-                );
-                assert_eq!(
-                    bits(landed.rotation),
-                    bits(fall_rotation(&resting, yaw, resting.tilt)),
-                    "seat {seat_y}: the resting turn"
-                );
-            }
-            let before = node(&app);
-            app.update();
-            assert_eq!(
-                node(&app),
-                before,
-                "a frame with no time passed redraws nothing"
-            );
-        }
-    }
-
-    /// THE GLB PRESENTS THE STATE AND NOTHING BEFORE IT: standing, every trunk node upright at
-    /// its bound translation and every cap hidden; down at a cut, that trunk node alone turned
-    /// to the resting tilt and moved to its seat (the fall long landed) and exactly the cap pair
-    /// the cut reveals shown; back to standing, upright at the bound translation and hidden
-    /// again; down at another cut, the old trunk upright and in place and the old caps hidden.
-    /// A presentation that only reveals, only turns the current cut's node, leaves a node where
-    /// the fall put it, or skips `Standing` reds this.
-    #[test]
-    fn the_glb_presents_every_state_from_the_state() {
-        let mut app = App::new();
-        app.insert_resource(FallClock {
-            tick: 1000,
-            overstep: 0.0,
-        })
-        .insert_resource(Time::<Fixed>::from_hz(64.0))
-        .add_systems(Update, present_fall);
-        let world = app.world_mut();
-        let root = world
-            .spawn((
-                TreeState::Standing,
-                TreeBody::new(fixture_kind(), 1.0),
-                Transform::IDENTITY,
-            ))
-            .id();
-        let view = world.spawn((ChildOf(root), Transform::IDENTITY)).id();
-        let node = |world: &mut World, translation: Vec3| {
-            world
-                .spawn((
-                    ChildOf(view),
-                    Transform::from_translation(translation),
-                    Visibility::Inherited,
-                ))
-                .id()
-        };
-        let standing: Vec<Vec3> = (0..3)
-            .map(|k| Vec3::new(0.0, 2.0 * k as f32, 0.0))
-            .collect();
-        let trunks: Vec<Entity> = standing.iter().map(|at| node(world, *at)).collect();
-        let caps_top: Vec<Entity> = (0..3).map(|_| node(world, Vec3::ZERO)).collect();
-        let caps_bottom: Vec<Entity> = (0..3).map(|_| node(world, Vec3::ZERO)).collect();
-        world.entity_mut(view).insert(TreeViewNodes {
-            trunks: trunks.iter().copied().map(Some).collect(),
-            standing: standing.clone(),
-            caps_top: caps_top.iter().copied().map(Some).collect(),
-            caps_bottom: caps_bottom.iter().copied().map(Some).collect(),
-        });
-        let shown = |app: &App, caps: &[Entity]| -> Vec<bool> {
-            caps.iter()
-                .map(|cap| app.world().get::<Visibility>(*cap) == Some(&Visibility::Inherited))
-                .collect()
-        };
-        let turned = |app: &App| -> Vec<bool> {
-            trunks
-                .iter()
-                .map(|trunk| {
-                    app.world().get::<Transform>(*trunk).unwrap().rotation != Quat::IDENTITY
-                })
-                .collect()
-        };
-        let moved = |app: &App| -> Vec<bool> {
-            trunks
-                .iter()
-                .zip(&standing)
-                .map(|(trunk, at)| app.world().get::<Transform>(*trunk).unwrap().translation != *at)
-                .collect()
-        };
-        app.update();
-        assert_eq!(shown(&app, &caps_top), [false; 3], "standing: no cap");
-        assert_eq!(shown(&app, &caps_bottom), [false; 3]);
-        assert_eq!(turned(&app), [false; 3], "standing: upright");
-        assert_eq!(moved(&app), [false; 3], "standing: in place");
-
-        // Standing again leaves the last tick and pose on the root: the derive that drops them is
-        // not mounted here, and the presentation reads the state first.
-        let set = |app: &mut App, state: TreeState, resting: Option<Resting>| {
-            let mut tree = app.world_mut().entity_mut(root);
-            tree.insert(state);
-            if let (TreeState::Down { cut, .. }, Some(resting)) = (state, resting) {
-                let body = TreeBody::new(fixture_kind(), 1.0);
-                let path = FallPath::new(&body, usize::from(cut), &resting, Quat::IDENTITY, DT);
-                tree.insert((Fell { tick: 0 }, resting, path));
-            }
-            app.update();
-        };
-        let east = Resting {
-            hinge: FRAC_PI_2,
-            tilt: 1.2,
-            seat: Vec3::new(0.4, 0.2, 0.0),
-            dx: 1.0,
-            dz: 0.0,
-        };
-        set(&mut app, TreeState::Down { cut: 1, dir: 0 }, Some(east));
-        assert_eq!(turned(&app), [false, true, false], "cut 1: its trunk turns");
-        assert_eq!(
-            moved(&app),
-            [false, true, false],
-            "cut 1: its trunk alone leaves the stump"
-        );
-        let turn = app.world().get::<Transform>(trunks[1]).unwrap().rotation;
-        assert!(
-            (turn * Vec3::Y).abs_diff_eq(Vec3::new(libm::sinf(1.2), libm::cosf(1.2), 0.0), 1e-5),
-            "the trunk's axis leans to +x by the tilt: {}",
-            turn * Vec3::Y
-        );
-        assert_eq!(
-            shown(&app, &caps_top),
-            [true, false, false],
-            "cap_top below the cut"
-        );
-        assert_eq!(
-            shown(&app, &caps_bottom),
-            [false, true, false],
-            "cap_bottom of the cut"
-        );
-
-        set(&mut app, TreeState::Standing, None);
-        assert_eq!(turned(&app), [false; 3], "standing again: upright");
-        assert_eq!(
-            moved(&app),
-            [false; 3],
-            "standing again: at the bound translation"
-        );
-        assert_eq!(shown(&app, &caps_top), [false; 3], "standing again: no cap");
-        assert_eq!(shown(&app, &caps_bottom), [false; 3]);
-
-        set(
-            &mut app,
-            TreeState::Down { cut: 0, dir: 64 },
-            Some(Resting {
-                hinge: 1.0,
-                tilt: 1.0,
-                seat: Vec3::ZERO,
-                dx: 0.0,
-                dz: 1.0,
-            }),
-        );
-        assert_eq!(moved(&app), [false; 3], "cut 0: the butt stays at the base");
-        assert_eq!(
-            turned(&app),
-            [true, false, false],
-            "cut 0: the first trunk turns"
-        );
-        assert_eq!(
-            shown(&app, &caps_top),
-            [false; 3],
-            "cut 0 reveals no cap_top"
-        );
-        assert_eq!(shown(&app, &caps_bottom), [true, false, false]);
-
-        set(&mut app, TreeState::Down { cut: 2, dir: 0 }, Some(east));
-        assert_eq!(
-            turned(&app),
-            [false, false, true],
-            "cut 2: the old trunk stands again"
-        );
-        assert_eq!(shown(&app, &caps_top), [false, true, false]);
-        assert_eq!(shown(&app, &caps_bottom), [false, false, true]);
-    }
 
     /// One template node at `translation` under `parent`, with `part` and a drawn `mesh`.
     fn node(
@@ -1160,7 +652,7 @@ mod tests {
     }
 
     /// The fixture view bed: the view plugin's own schedule over the fixture kind's template,
-    /// read, at fall clock tick 1000. Returns the app, the template's standing meshes and its
+    /// read. Returns the app, the template's standing meshes and its
     /// node count with a mesh.
     fn view_bed() -> (
         App,
@@ -1175,11 +667,6 @@ mod tests {
         let standing = template.standing.clone().expect("the fixture merges");
         let mut app = App::new();
         app.add_plugins(plugin)
-            .insert_resource(FallClock {
-                tick: 1000,
-                overstep: 0.0,
-            })
-            .insert_resource(Time::<Fixed>::from_hz(64.0))
             .insert_resource(TreeTemplates(HashMap::from([(
                 fixture_kind().id.clone(),
                 Some(template),
@@ -1193,6 +680,10 @@ mod tests {
         let root = world
             .spawn((
                 TreeState::Standing,
+                MapInstance {
+                    id: "fixture".to_owned(),
+                    ordinal: 0,
+                },
                 TreeBody::new(fixture_kind(), scale),
                 Transform::IDENTITY,
             ))
@@ -1250,89 +741,57 @@ mod tests {
         }
     }
 
-    /// THE FIRST FALL BUILDS THE SEGMENTED VIEW IN ITS OWN FRAME: in the one update whose state
-    /// leaves `Standing`, the standing meshes go and every node of the template is spawned under
-    /// the view, its every primitive drawn, indexed and presented in that frame. With the clock at
-    /// the transition's tick every trunk node stands upright at its bound translation, so that
-    /// frame draws the standing geometry and nothing pops, while exactly the cut's cap pair shows.
-    /// The fall then runs on those same entities, and the tree standing again draws its two
-    /// standing meshes. A swap a frame late, a hierarchy rebuilt every frame, or a presentation
-    /// before the build reds this.
+    /// The streamed body is the view's sole motion source. Renderer users rely on the cut node
+    /// moving in the same frame the segmented view is built, even after a late template load.
+    /// ASSUMED fixture pose, scale and cut; a local fall integrator or an ignored carrier fails.
     #[test]
-    fn the_first_fall_builds_the_segmented_view_in_its_frame() {
+    fn the_segmented_view_follows_the_authoritative_body_pose() {
         let (mut app, standing, drawn) = view_bed();
-        let (root, view) = spawn_tree(&mut app, 1.0);
+        let (root, view) = spawn_tree(&mut app, 1.5);
         app.update();
         assert_eq!(meshes_under(&mut app, root), standing);
-
-        let resting = Resting {
-            hinge: FRAC_PI_2,
-            tilt: 1.2,
-            seat: Vec3::new(0.4, 0.2, 0.0),
-            dx: 1.0,
-            dz: 0.0,
-        };
-        let body = TreeBody::new(fixture_kind(), 1.0);
-        app.world_mut().entity_mut(root).insert((
-            TreeState::Down { cut: 1, dir: 0 },
-            Fell { tick: 1000 },
-            resting,
-            FallPath::new(&body, 1, &resting, Quat::IDENTITY, DT),
-        ));
+        let body = app.world().get::<TreeBody>(root).unwrap().clone();
+        let pose = Transform::from_xyz(3.0, 2.0, -1.0).with_rotation(Quat::from_rotation_z(-1.0));
+        let piece = app
+            .world_mut()
+            .spawn((TreePiece { tree: 0, cut: 1 }, pose))
+            .id();
+        app.world_mut()
+            .entity_mut(root)
+            .insert(TreeState::Down { cut: 1, dir: 0 });
         app.update();
-        let segments = meshes_under(&mut app, root);
-        assert_eq!(segments.len(), drawn, "every primitive drawn");
-        assert!(
-            standing.iter().all(|mesh| !segments.contains(mesh)),
-            "no standing mesh left"
-        );
-        let world = app.world();
-        let index = world
-            .get::<TreeViewNodes>(view)
-            .expect("indexed in the frame");
-        let trunks: Vec<Entity> = index.trunks.iter().map(|trunk| trunk.unwrap()).collect();
-        for (k, trunk) in trunks.iter().enumerate() {
-            let local = world.get::<Transform>(*trunk).unwrap();
-            assert_eq!(local.rotation, Quat::IDENTITY, "trunk {k}: upright");
-            assert_eq!(local.translation, index.standing[k], "trunk {k}: in place");
-        }
-        let shown = |caps: &[Option<Entity>]| -> Vec<bool> {
-            caps.iter()
-                .map(|cap| world.get::<Visibility>(cap.unwrap()) == Some(&Visibility::Inherited))
-                .collect()
-        };
-        assert_eq!(
-            shown(&index.caps_top),
-            [true, false, false],
-            "cap_top below the cut"
-        );
-        assert_eq!(
-            shown(&index.caps_bottom),
-            [false, true, false],
-            "cap_bottom of the cut"
-        );
-
-        app.world_mut().resource_mut::<FallClock>().tick = 1032;
-        app.update();
+        assert_eq!(meshes_under(&mut app, root).len(), drawn);
         let index = app.world().get::<TreeViewNodes>(view).unwrap();
+        let cut = index.trunks[1].unwrap();
+        let local = *app.world().get::<Transform>(cut).unwrap();
+        let parent = Transform::from_scale(Vec3::splat(body.scale))
+            .mul_transform(Transform::from_translation(index.standing[0]));
+        let world = parent.mul_transform(local);
+        let expected =
+            pose.translation + pose.rotation * (Vec3::Y * body.prefix[1] - body.piece_centroid(1));
+        assert!(world.translation.abs_diff_eq(expected, 1e-5));
+        assert!(world.rotation.abs_diff_eq(pose.rotation, 1e-5));
         assert_eq!(
-            index
-                .trunks
-                .iter()
-                .map(|trunk| trunk.unwrap())
-                .collect::<Vec<_>>(),
-            trunks,
-            "the fall runs on the hierarchy it built"
+            app.world().get::<Visibility>(index.caps_top[0].unwrap()),
+            Some(&Visibility::Inherited)
         );
-        assert_ne!(
-            app.world().get::<Transform>(trunks[1]).unwrap().rotation,
-            Quat::IDENTITY,
-            "the cut's trunk turns"
+        assert_eq!(
+            app.world().get::<Visibility>(index.caps_bottom[1].unwrap()),
+            Some(&Visibility::Inherited)
         );
-
+        let mut next = pose;
+        next.translation += Vec3::X;
+        app.world_mut().entity_mut(piece).insert(next);
+        app.update();
+        assert!(
+            (app.world().get::<Transform>(cut).unwrap().translation.x
+                - local.translation.x
+                - 1.0 / body.scale)
+                .abs()
+                < 1e-5
+        );
         app.world_mut().entity_mut(root).insert(TreeState::Standing);
         app.update();
-        assert_eq!(meshes_under(&mut app, root), standing, "standing again");
-        assert!(app.world().get::<TreeViewNodes>(view).is_none());
+        assert_eq!(meshes_under(&mut app, root), standing);
     }
 }

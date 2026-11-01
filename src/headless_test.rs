@@ -2503,22 +2503,15 @@ mod reverse_throw {
     }
 }
 
-/// THE LYING PIECE'S COLLIDERS LIE DOWN IN THE PHYSICS WORLD (A2, ADR-0016): a tree felled on the
-/// shipped terrain has, once its fall rests, its tip segment carried in avian's own bounds — the
-/// `ColliderAabb` its broad phase reads — where the body's own data puts it, and its stump's
-/// bounds where they stood; the segments between derive by the same law and are not read here.
-/// Standing, the tip's bounds hold its bottom and top centres, `prefix[n-1]` and `prefix[n]` up
-/// the root's axis; down, they hold the same centres laid along the root's resting record — the
-/// record's seat, then the height above the cut along `(dx sin t, cos t, dz sin t)` — and no
-/// longer the standing top. A static body's child collider whose bounds avian refreshed
-/// only at insert leaves the fallen trunk standing for every hull and round; a lying piece
-/// placed off its pivot lies outside its own record. Both red this.
+/// A freed trunk's segment bounds follow its finite-mass physics body, while the stump stays
+/// where it stood. The game's damage-model casts and hull contacts rely on these live bounds;
+/// moving only the view or leaving child colliders under the map body fails this fixture.
 #[test]
-fn a_felled_trees_colliders_lie_down_in_the_physics_world() {
+fn a_felled_trees_colliders_follow_its_dynamic_body() {
     use crate::map::Prototype;
-    use crate::trees::{FallPath, Resting, TreeBody, TreeState};
+    use crate::trees::{TreeBody, TreePiece, TreeState};
     use avian3d::prelude::ColliderAabb;
-
+    use avian3d::prelude::{Position, RigidBody, Rotation};
     let shipped = crate::map::tests::shipped_manifest();
     // Fixture selection: one tree kind the shipped map places. Every bound below is read from the
     // spawned body's own data and its resting record, never from this kind's numbers.
@@ -2598,37 +2591,70 @@ fn a_felled_trees_colliders_lie_down_in_the_physics_world() {
         );
     }
     let cut = 1;
-    *app.world_mut().get_mut::<TreeState>(root).unwrap() = TreeState::Down { cut, dir: 0 };
-    // The fall's ticks to its rest, then the step that refits the bounds after the last pose.
-    for _ in 0..64 * 120 {
-        app.update();
-        let path = app.world().get::<FallPath>(root).expect("a fall");
-        if path.k == path.last() {
-            break;
-        }
-    }
-    for _ in 0..2 {
-        app.update();
-    }
-    let down = bounds(&app);
-    assert_eq!(down[0], standing[0], "the stump's bounds stay");
-    let tip_down = down[n - 1];
-    let resting = *app
+    let parts = app
         .world()
-        .get::<Resting>(root)
-        .expect("the resting record");
-    let (sin, cos) = (libm::sinf(resting.tilt), libm::cosf(resting.tilt));
-    let laid = Vec3::new(resting.dx * sin, cos, resting.dz * sin);
-    for k in [n - 1, n] {
-        let point = base + resting.seat + laid * (prefix[k] - prefix[usize::from(cut)]);
+        .get::<crate::trees::TreeParts>(root)
+        .unwrap()
+        .0
+        .clone();
+    let body = app.world().get::<TreeBody>(root).unwrap();
+    let mass: f32 = body.structure.chunks[usize::from(cut)..]
+        .iter()
+        .map(|chunk| chunk.mass)
+        .sum();
+    let at = body.structure.chunks[n - 1].centroid;
+    app.world_mut().entity_mut(root).insert((
+        TreeState::Down { cut, dir: 0 },
+        crate::trees::TrunkLoads(vec![crate::buildings::fracture::Load {
+            chunk: n - 1,
+            at,
+            blow: Vec3::X * mass * 2.0,
+            press: Vec3::ZERO,
+            energy: 0.0,
+            crushed: 0.0,
+            peak: None,
+            origin: crate::buildings::fracture::Origin::Field,
+        }]),
+    ));
+    for _ in 0..128 {
+        app.update();
+    }
+    let piece = app
+        .world_mut()
+        .query_filtered::<Entity, With<TreePiece>>()
+        .single(app.world())
+        .unwrap();
+    assert_eq!(
+        app.world().get::<RigidBody>(piece),
+        Some(&RigidBody::Dynamic)
+    );
+    assert_eq!(
+        *app.world().get::<ColliderAabb>(parts[0]).unwrap(),
+        standing[0]
+    );
+    let tip = parts[n - 1];
+    let bound = app.world().get::<ColliderAabb>(tip).unwrap();
+    let position = app.world().get::<Position>(tip).unwrap().0;
+    let rotation = app.world().get::<Rotation>(tip).unwrap().0;
+    for point in [
+        position,
+        position + rotation * Vec3::Y * (prefix[n] - prefix[n - 1]),
+    ] {
         assert!(
-            holds(&tip_down, point),
-            "down: the tip segment's bounds {tip_down:?} hold its laid centre {point}"
+            holds(bound, point),
+            "the live tip bounds {bound:?} hold {point}"
         );
     }
     assert!(
-        !holds(&tip_down, standing_top),
-        "down: the tip segment's bounds {tip_down:?} left the standing top {standing_top}"
+        !holds(bound, standing_top),
+        "the tip left its standing bound"
+    );
+    assert_eq!(
+        app.world()
+            .get::<avian3d::prelude::ColliderOf>(tip)
+            .unwrap()
+            .body,
+        piece
     );
 }
 

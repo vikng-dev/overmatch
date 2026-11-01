@@ -1,6 +1,6 @@
 //! Server-simulated pieces at rest, in the game's environment destruction (game state only): the
-//! one rule every loose piece follows, a building's fallen chunks ([`crate::buildings::breakage`])
-//! and the debris stress lever's fixture fragments (`net::debris_stress`) alike. The authority
+//! one rule every loose piece follows: a building's fallen chunks ([`crate::buildings::breakage`]),
+//! a freed trunk and the debris stress lever's fixture fragments (`net::debris_stress`). The authority
 //! alone simulates a piece; a replica draws it at the pose the network carries. A piece is a body
 //! with [`DebrisPiece`]; its colliders are the body's own ([`RigidBodyColliders`]). Paths below
 //! are under `vendor/avian3d-0.7.0-child-pose/src/`.
@@ -32,7 +32,7 @@
 //!   Bevy may run before this one, so the rule reads bounds instead: every sleeping body with a
 //!   collider whose bounds come within avian's contact tolerance of the support's;
 //! * moves ([`wake_on_static_moved`]: a static body's collider re-posed, by its own [`Position`]
-//!   or [`Rotation`] or by its body's, as a falling tree's trunk is), read inside the step before
+//!   or [`Rotation`] or by its body's), read inside the step before
 //!   the broad phase, while the last step's pairs still stand. It relies on the vendored avian and
 //!   lightyear child-pose writers (`vendor/avian3d-0.7.0-child-pose`,
 //!   `vendor/lightyear_avian3d-0.30.1-child-pose`) writing a child collider's pose only when its
@@ -41,17 +41,32 @@
 //!
 //! A piece stays all match: nothing here despawns one.
 //!
-//! HOW MANY PIECES (DERIVED from `buildings::breakage`): a chunk leaves its building at most once
-//! and a loose piece never splits, so the pieces of a map never exceed its breakable chunks, and
+//! HOW MANY BUILDING PIECES (DERIVED from `buildings::breakage`): a chunk leaves its building at most once
+//! and a loose piece never splits, so the building pieces of a map never exceed its breakable chunks, and
 //! nothing else limits them. The shipped map's bound is 86,062 (MEASURED: 1,163 chunks in
 //! `assets/buildings/house_1/house_1.building.ron`, 1,005 brick and 158 wood, every element's
 //! material stating a seam, times the 74 `house_proxy` placements in
 //! `assets/maps/kalinovo/level.json`).
+//! Each map tree can additionally free at most one trunk body (DERIVED from `trees::TreeState`).
 //! Awake pieces are the ones in the solver. A sleeping piece's own per-tick cost and an awake pile
 //! held by a tank's island (above) are both unpriced.
 
+pub(crate) mod launch;
+
 use avian3d::prelude::*;
 use bevy::prelude::*;
+
+/// Shared presentation cursor for the environment's discrete record, in authority ticks.
+#[derive(Resource, Debug, Default, Clone, Copy)]
+pub(crate) struct PresentationClock {
+    pub(crate) tick: u32,
+    pub(crate) overstep: f64,
+}
+impl PresentationClock {
+    pub(crate) fn since(self, since: u32) -> f64 {
+        f64::from(self.tick.wrapping_sub(since) as i32) + self.overstep
+    }
+}
 
 /// A piece body under the rule. A piece spawns dynamic with it.
 #[derive(Component, Clone, Copy, Debug)]

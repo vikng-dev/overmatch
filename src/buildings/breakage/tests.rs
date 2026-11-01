@@ -1922,7 +1922,6 @@ fn simultaneous_exchanges_keep_momentum_and_spend_one_kinetic_budget() {
         let departure = |loads: &[Load]| Departure {
             kind: kind.clone(),
             building: 0,
-            scale: 1.0,
             root: Transform::IDENTITY,
             group: vec![c],
             launch: launch(&kind, &structure, 1.0, &[c], loads),
@@ -2219,7 +2218,6 @@ fn tiny_exchanges_keep_their_plastic_share_without_underflow() {
         let mut departures = [Departure {
             kind: kind.clone(),
             building: 0,
-            scale: 1.0,
             root: Transform::IDENTITY,
             group: vec![c],
             launch: launch(&kind, &structure, 1.0, &[c], &[load]),
@@ -2463,8 +2461,8 @@ fn no_elements_kind_or_name_enters_the_laws() {
         );
         let contacts: Vec<Joint> = live.state.contacts(&live.structure).collect();
         let (loads, _) = Load::blast(&hits, |c| fracture::Backing {
-            block: &layout.blocks[c],
             scale: 1.0,
+            block: &layout.blocks[c],
             material: live.structure.chunks[c].material,
             contacts: &contacts,
         });
@@ -2674,4 +2672,16 @@ fn casing_loads_count_each_joule_once_and_carry_their_ejection_momentum() {
         );
         app.world_mut().despawn(shell);
     }
+}
+
+/// Convert building fixture departures to the shared mechanics input.
+fn cap_exchanges(
+    departures: &mut [Departure],
+    inertia: impl Fn(Entity) -> crate::contact_transfer::BodyInertia,
+) {
+    let mut motions: Vec<_> = departures
+        .iter_mut()
+        .map(|departure| (&departure.root, &mut departure.launch))
+        .collect();
+    crate::debris::launch::cap_exchanges(&mut motions, inertia);
 }

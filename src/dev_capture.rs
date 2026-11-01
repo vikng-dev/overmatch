@@ -270,8 +270,9 @@ fn check_fell_target(
     );
 }
 
-/// Fell the cued tree on the first fixed tick at or after its second, as the laws do: the state
-/// and the transition's tick, in the fall set, so the body derives the same tick.
+/// The environment capture cue frees its chosen section with an explicit fixture blow.
+/// ASSUMED operator fixture: horizontal momentum for a free translation of 1 m/s, applied
+/// at the freed group's centre. The runtime law never invents this launch momentum.
 ///
 /// # Panics
 ///
@@ -279,7 +280,6 @@ fn check_fell_target(
 /// would frame a fall that never happened.
 fn fell_on_cue(
     time: Res<Time>,
-    clock: Res<crate::ShotClock>,
     mut cue: ResMut<FellCue>,
     mut trees: Query<(
         Entity,
@@ -293,7 +293,7 @@ fn fell_on_cue(
         return;
     }
     cue.done = true;
-    let (root, _, _, mut state) = trees
+    let (root, _, body, mut state) = trees
         .iter_mut()
         .find(|(_, instance, _, _)| instance.id == cue.instance)
         .expect("the cued tree was found at boot (`check_fell_target`), and trees never despawn");
@@ -308,9 +308,23 @@ fn fell_on_cue(
         cut: cue.cut,
         dir: cue.dir,
     };
-    commands
-        .entity(root)
-        .insert(crate::trees::Fell { tick: clock.0 });
+    let (dx, dz) = crate::trees::azimuth(cue.dir);
+    let mass: f32 = body.structure.chunks[usize::from(cue.cut)..]
+        .iter()
+        .map(|chunk| chunk.mass)
+        .sum();
+    commands.entity(root).insert(crate::trees::TrunkLoads(vec![
+        crate::buildings::fracture::Load {
+            chunk: usize::from(cue.cut),
+            at: body.piece_centroid(cue.cut),
+            blow: Vec3::new(dx, 0.0, dz) * mass,
+            press: Vec3::ZERO,
+            energy: 0.0,
+            crushed: 0.0,
+            peak: None,
+            origin: crate::buildings::fracture::Origin::Field,
+        },
+    ]));
     info!(
         "capture: {} falls at {:.4} s, cut {}, bin {}",
         cue.instance,

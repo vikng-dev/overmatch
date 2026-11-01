@@ -25,7 +25,8 @@
 //!   reach ([`Blast::reach`]), on the nearest of every building's standing chunks and unbreakable
 //!   elements, the moving bodies (a loose piece, a hull, a launched turret) and every other surface
 //!   (the ground, a standing tree); one that stops on a moving body pushes it the same way, through
-//!   avian at the point it stops, and deposits nothing, and one on any other surface does nothing.
+//!   avian at the point it stops. A tree stop loads that segment through the tree laws; terrain
+//!   and other nonstructural surfaces only shade the field.
 //! * **Contacts** (the authority's, each physics step, [`read_contacts`]): every point the solver
 //!   moved momentum through between a dynamic body and a building's breakable element or chunk
 //!   ([`ContactTransfers`]) loads the chunk there (an intact element's: the chunk whose hull holds
@@ -70,6 +71,7 @@ use avian3d::prelude::{
     LinearVelocity, Position, RigidBody, Rotation, SpatialQuery, SpatialQueryFilter,
     WriteRigidBodyForces,
 };
+
 use bevy::math::DVec3;
 use bevy::prelude::*;
 use serde::{Deserialize, Serialize};
@@ -85,6 +87,7 @@ use crate::ballistics::{
     ArmourMark, BallisticVolume, BurstField, PenetrationMarks, ShellMarched, SpallMarks,
 };
 use crate::contact_transfer::{ContactTransfer, ContactTransfers};
+use crate::debris::launch::{BodyReturn, Launch, LaunchPlugin, PendingLaunch, launch_colliders};
 use crate::scatter::MapInstance;
 use crate::{ClientReplica, Layer, ShotClock};
 
@@ -841,8 +844,17 @@ struct Taken {
 struct DepositParam<'w, 's> {
     queue: ResMut<'w, WallQueue>,
     resting: Res<'w, RestingLoads>,
-    transfers: Res<'w, ContactTransfers>,
     volumes: BuildingColliders<'w, 's>,
+    tree_segments: Query<'w, 's, (&'static crate::trees::TreeSegment, &'static ChildOf)>,
+    trunks: Query<
+        'w,
+        's,
+        (
+            &'static crate::trees::TreeState,
+            &'static Transform,
+            &'static mut crate::trees::TrunkLoads,
+        ),
+    >,
     buildings: Query<
         'w,
         's,
@@ -1075,7 +1087,6 @@ fn apply_deposits(mut p: DepositParam) {
                 departures.push(Departure {
                     kind: kind.clone(),
                     building,
-                    scale: frame.scale,
                     root: *transform,
                     group,
                     launch,
@@ -1085,10 +1096,7 @@ fn apply_deposits(mut p: DepositParam) {
                 breakage.set_changed();
             }
         }
-        cap_exchanges(&mut departures, |body| p.transfers.inertia(body));
         for departure in departures {
-            let frame = Frame::new(&departure.root, departure.scale, departure.kind.bounds());
-            give_back(&mut p.bodies, frame, &departure.launch.returns);
             spawn_piece(
                 &mut p.commands,
                 &departure.kind,
@@ -1184,7 +1192,8 @@ fn log_changes(id: &str, loads: &[Load], counts: [usize; 4], changes: &Changes) 
 /// nearest of every building's present blockers ([`first_chunk`]), the moving bodies
 /// ([`moving_near`]) and every other surface on [`SURFACES`] (the ground, a standing tree). A ray
 /// on a standing chunk joins its building's take; a ray on a moving body pushes the body through
-/// avian at the point it stops, and deposits nothing; a ray on any other surface does nothing.
+/// avian at the point it stops. A trunk stop loads its segment through the tree laws; other
+/// static surfaces only shade the field.
 /// Each chunk and body collider takes the share of its rays' cones its silhouette intercepts
 /// ([`fracture::intercepted`]): a chunk's from its faces, a collider's from its bounds, the
 /// silhouette of the box that holds it. A collider holding `origin` shades nothing and takes
@@ -1220,6 +1229,7 @@ fn cast_blast(
     let mut stops: Vec<(Stop, f32, f32)> = Vec::new();
     let mut chunk_hits: Vec<(Entity, fracture::RayHit)> = Vec::new();
     let mut thrown: Vec<(Entity, Vec3, Vec3)> = Vec::new();
+    let mut trunk_hits = Vec::new();
     for &(dir, share) in fracture::blast_directions() {
         // The nearest present blocker of every building: its root, its law chunk (`None`,
         // an unbreakable element), its distance in the building frame and in metres.
@@ -1259,8 +1269,43 @@ fn cast_blast(
             )
         });
         if let Some(hit) = surface {
-            // The ground, a standing tree or another static surface stops the ray with nothing.
             if near.binary_search(&hit.entity).is_err() {
+                // Terrain and other nonstructural surfaces shade the field. A trunk segment
+                // routes this same world-visible ray to the shared tree laws; no second cast
+                // can push a tree through the wall or ground that blocked this one.
+                if let Ok((&crate::trees::TreeSegment(segment), parent)) =
+                    p.tree_segments.get(hit.entity)
+                    && let Ok((state, root, _)) = p.trunks.get(parent.parent())
+                    && !matches!(*state, crate::trees::TreeState::Down { cut, .. } if segment < cut)
+                {
+                    let aabb = p
+                        .aabbs
+                        .get(hit.entity)
+                        .expect("a world-ray target has collider bounds");
+                    let size = aabb.max - aabb.min;
+                    let shown = dir.x.abs() * size.y * size.z
+                        + dir.y.abs() * size.x * size.z
+                        + dir.z.abs() * size.x * size.y;
+                    stops.push((
+                        Stop::Trunk(parent.parent(), segment),
+                        Blast::section(share, blast.distance(hit.distance)),
+                        shown,
+                    ));
+                    let into = root.rotation.inverse();
+                    trunk_hits.push((
+                        parent.parent(),
+                        Load {
+                            chunk: usize::from(segment),
+                            at: into * (origin + dir * hit.distance - root.translation),
+                            blow: into * blast.push(share, hit.distance, dir, hit.normal),
+                            peak: Some(into * blast.peak(share, hit.distance, dir, hit.normal)),
+                            press: Vec3::ZERO,
+                            energy: 0.0,
+                            crushed: 0.0,
+                            origin: Origin::Field,
+                        },
+                    ));
+                }
                 continue;
             }
             let of = p
@@ -1325,10 +1370,12 @@ fn cast_blast(
     // The stops are in ray order, bodies and chunks interleaved; each list reads its own in order.
     let mut body_kept = Vec::with_capacity(thrown.len());
     let mut chunk_kept = Vec::with_capacity(chunk_hits.len());
+    let mut trunk_kept = Vec::with_capacity(trunk_hits.len());
     for ((stop, ..), k) in stops.iter().zip(fracture::intercepted(&stops)) {
         match stop {
             Stop::Body(_) => body_kept.push(k),
             Stop::Chunk(..) => chunk_kept.push(k),
+            Stop::Trunk(..) => trunk_kept.push(k),
         }
     }
     for ((root, hit), k) in chunk_hits.into_iter().zip(chunk_kept) {
@@ -1351,6 +1398,16 @@ fn cast_blast(
                 .sum::<f32>(),
         );
     }
+    for ((root, mut load), kept) in trunk_hits.into_iter().zip(trunk_kept) {
+        load.blow *= kept;
+        load.peak = load.peak.map(|peak| peak * kept);
+        p.trunks
+            .get_mut(root)
+            .expect("the world-ray tree survives this structural pass")
+            .2
+            .0
+            .push(load);
+    }
     for ((body, at, impulse), k) in thrown.into_iter().zip(body_kept) {
         let (mut forces, _) = p.bodies.get_mut(body).expect("a body in reach is dynamic");
         forces.apply_linear_impulse_at_point(impulse * k, at);
@@ -1363,6 +1420,7 @@ fn cast_blast(
 enum Stop {
     Chunk(Entity, usize),
     Body(Entity),
+    Trunk(Entity, u8),
 }
 
 /// The holes one deposit cuts (module doc), each with its law chunk, in the baked chunk's frame
@@ -1452,29 +1510,6 @@ pub(crate) struct Changes {
     /// Body blows on chunks with no carrier in this deposit, returned whole in building terms:
     /// dust has none, and a chunk an earlier deposit freed already launched as its own body.
     pub(crate) returns: Vec<BodyReturn>,
-}
-
-/// Momentum the rigid structure took beyond a departing chunk's plastic exchange: the source
-/// body, contact point (m) and returned impulse (N·s), in the building's frame.
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub(crate) struct BodyReturn {
-    body: Entity,
-    at: Vec3,
-    impulse: Vec3,
-}
-
-impl BodyReturn {
-    fn of(load: &Load, launched: Vec3) -> Option<Self> {
-        match load.origin {
-            Origin::Field => None,
-            Origin::Body { body, .. } if load.blow != Vec3::ZERO => Some(Self {
-                body,
-                at: load.at,
-                impulse: load.blow - launched,
-            }),
-            Origin::Body { .. } => None,
-        }
-    }
 }
 
 /// Run one deposit's `loads`, with the `holes` it cuts ([`holes_of`]), through the laws on `live`
@@ -1660,28 +1695,11 @@ fn chunk_volume(kind: &BuildingKind, c: usize) -> BallisticVolume {
     }
 }
 
-/// One freed group's collider frame and departure in building terms, and the source bodies'
-/// give-back. The mass and inertia are those of these exact colliders at their data's density.
-#[derive(Debug)]
-pub(crate) struct Launch {
-    centroid: Vec3,
-    colliders: Vec<(usize, Collider)>,
-    velocity: Vec3,
-    spin: Vec3,
-    returns: Vec<BodyReturn>,
-    mass: f32,
-    inertia: Mat3,
-    body_velocity: Vec3,
-    body_spin: Vec3,
-    exchanges: Vec<(Load, Vec3)>,
-}
-
 /// A freed carrier staged until every building in the deposit has answered its contacts.
 /// One source can free groups in several buildings; their combined exchange is bounded once.
 struct Departure {
     kind: Arc<BuildingKind>,
     building: u16,
-    scale: f32,
     root: Transform,
     group: Vec<usize>,
     launch: Launch,
@@ -1698,9 +1716,6 @@ pub(crate) fn launch(
     group: &[usize],
     loads: &[Load],
 ) -> Launch {
-    use avian3d::dynamics::rigid_body::mass_properties::bevy_heavy::{
-        ComputeMassProperties3d, MassProperties3d,
-    };
     let chunks = &structure.chunks;
     let mass: f32 = group.iter().map(|&i| chunks[i].mass).sum();
     let centroid = group
@@ -1716,151 +1731,7 @@ pub(crate) fn launch(
             (c, collider)
         })
         .collect();
-    let total = colliders
-        .iter()
-        .map(|(c, shape)| shape.mass_properties(chunks[*c].material.density))
-        .fold(MassProperties3d::default(), |sum, part| sum + part);
-    assert!(total.mass > 0.0, "a freed group has occupied mass");
-    let inverse_inertia = total.angular_inertia_tensor().inverse();
-    let com = centroid + total.center_of_mass;
-    let mut impulse = Vec3::ZERO;
-    let mut angular = Vec3::ZERO;
-    let mut returns = Vec::new();
-    let mut body_impulse = Vec3::ZERO;
-    let mut body_angular = Vec3::ZERO;
-    let mut exchanges = Vec::new();
-    for load in loads {
-        // A press, or a field carrying only crushing energy, launches no momentum.
-        if load.blow == Vec3::ZERO {
-            continue;
-        }
-        let arm = (load.at - com).cross(load.blow.as_dvec3().normalize().as_vec3());
-        let inverse_mass = 1.0 / total.mass + arm.dot(inverse_inertia * arm);
-        let launched = load.blow * load.origin.share(inverse_mass);
-        impulse += launched;
-        angular += (load.at - com).cross(launched);
-        if let Some(returned) = BodyReturn::of(load, launched) {
-            body_impulse += launched;
-            body_angular += (load.at - com).cross(launched);
-            returns.push(returned);
-            exchanges.push((*load, launched));
-        }
-    }
-    Launch {
-        centroid,
-        colliders,
-        velocity: impulse / total.mass,
-        spin: inverse_inertia * angular,
-        returns,
-        mass: total.mass,
-        inertia: total.angular_inertia_tensor().to_mat3(),
-        body_velocity: body_impulse / total.mass,
-        body_spin: inverse_inertia * body_angular,
-        exchanges,
-    }
-}
-
-/// Cap simultaneous plastic exchanges by their common velocity along the combined impulse.
-/// The shares from `launch` fix each point's relative impulse. DERIVED: scaling them by `s`
-/// changes total kinetic energy by `-s W + s² Q/2`; its minimum is `s = W/Q`. `W` is the
-/// source work less the carrier's field-driven motion, and `Q` sums every carrier's and every
-/// source body's combined linear/angular response. Counting a source per point would miss the
-/// cross terms and can create energy. An isolated contact already has this plastic minimum.
-fn cap_exchanges(
-    departures: &mut [Departure],
-    inertia_of: impl Fn(Entity) -> crate::contact_transfer::BodyInertia,
-) {
-    // Carriers couple only through a shared source. Disjoint collisions must not change one
-    // another's exchange, even when the reader queued them in the same physics deposit.
-    let mut parent: Vec<usize> = (0..departures.len()).collect();
-    let root = |parent: &[usize], mut index: usize| {
-        while parent[index] != index {
-            index = parent[index];
-        }
-        index
-    };
-    let mut owner = BTreeMap::new();
-    for (index, departure) in departures.iter().enumerate() {
-        for (load, _) in &departure.launch.exchanges {
-            let Origin::Body { body, .. } = load.origin else {
-                unreachable!("only body blows have a source exchange");
-            };
-            if let Some(other) = owner.insert(body, index) {
-                let (a, b) = (root(&parent, index), root(&parent, other));
-                parent[a.max(b)] = a.min(b);
-            }
-        }
-    }
-    let mut components: BTreeMap<usize, Vec<usize>> = BTreeMap::new();
-    for (index, departure) in departures.iter().enumerate() {
-        if !departure.launch.exchanges.is_empty() {
-            components
-                .entry(root(&parent, index))
-                .or_default()
-                .push(index);
-        }
-    }
-    for component in components.values() {
-        cap_connected_exchanges(departures, component, &inertia_of);
-    }
-}
-
-/// Bound one connected set of source bodies and carriers, with all source cross terms retained.
-fn cap_connected_exchanges(
-    departures: &mut [Departure],
-    component: &[usize],
-    inertia_of: &impl Fn(Entity) -> crate::contact_transfer::BodyInertia,
-) {
-    let mut sources: BTreeMap<Entity, (DVec3, DVec3)> = BTreeMap::new();
-    let (mut work, mut quadratic) = (0.0_f64, 0.0_f64);
-    for departure in component.iter().map(|&index| &departures[index]) {
-        let launch = &departure.launch;
-        let field_velocity = launch.velocity - launch.body_velocity;
-        let field_spin = launch.spin - launch.body_spin;
-        let body_velocity = launch.body_velocity.as_dvec3();
-        let body_spin = launch.body_spin.as_dvec3();
-        let inertia = launch.inertia.as_dmat3();
-        work -= f64::from(launch.mass) * field_velocity.as_dvec3().dot(body_velocity)
-            + field_spin.as_dvec3().dot(inertia * body_spin);
-        quadratic += f64::from(launch.mass) * body_velocity.length_squared()
-            + body_spin.dot(inertia * body_spin);
-        for (load, impulse) in &launch.exchanges {
-            let Origin::Body { body, speed, .. } = load.origin else {
-                unreachable!("only body blows have a source exchange");
-            };
-            let inertia = inertia_of(body);
-            let at = departure.root.translation + departure.root.rotation * load.at;
-            let impulse_world = (departure.root.rotation * *impulse).as_dvec3();
-            let source = sources.entry(body).or_default();
-            source.0 += impulse_world;
-            source.1 += (at - inertia.centre).as_dvec3().cross(impulse_world);
-            work += impulse.as_dvec3().length() * f64::from(speed);
-        }
-    }
-    for (body, (impulse, angular)) in sources {
-        let inertia = inertia_of(body);
-        quadratic += impulse.dot(inertia.inverse_mass.as_dvec3() * impulse)
-            + angular.dot(inertia.inverse_inertia.as_dmat3() * angular);
-    }
-    assert!(
-        work.is_finite() && quadratic.is_finite() && quadratic >= 0.0,
-        "finite contact velocities, impulses and occupied carrier mass give a finite nonnegative response"
-    );
-    // DERIVED: squaring an f32 impulse in f64 retains even its smallest subnormal. A launch
-    // rounded wholly to zero has no exchange to scale; return its source's blow whole.
-    let scale = if quadratic > 0.0 {
-        (work / quadratic).clamp(0.0, 1.0) as f32
-    } else {
-        0.0
-    };
-    for &index in component {
-        let launch = &mut departures[index].launch;
-        launch.velocity += launch.body_velocity * (scale - 1.0);
-        launch.spin += launch.body_spin * (scale - 1.0);
-        for (returned, (load, impulse)) in launch.returns.iter_mut().zip(&launch.exchanges) {
-            returned.impulse = load.blow - *impulse * scale;
-        }
-    }
+    launch_colliders(centroid, colliders, |c| chunks[c].material.density, loads)
 }
 
 /// Return a departing chunk's excess solver impulse immediately, at the original world point.
@@ -1885,17 +1756,17 @@ fn spawn_piece(
     kind: &Arc<BuildingKind>,
     (building, root): (u16, Transform),
     group: &[usize],
-    launch: Launch,
+    mut launch: Launch,
 ) {
+    let colliders = std::mem::take(&mut launch.colliders);
     let Launch {
         centroid,
-        colliders,
         velocity,
         spin,
         mass,
         ..
-    } = launch;
-    let at = root.translation + root.rotation * centroid;
+    } = &launch;
+    let at = root.translation + root.rotation * *centroid;
     let mut elements: Vec<&str> = group
         .iter()
         .map(|&c| {
@@ -1926,8 +1797,9 @@ fn spawn_piece(
         Visibility::default(),
         crate::debris::DebrisPiece,
         crate::eased_dynamic_body(),
-        LinearVelocity(root.rotation * velocity),
-        AngularVelocity(root.rotation * spin),
+        LinearVelocity(root.rotation * *velocity),
+        AngularVelocity(root.rotation * *spin),
+        PendingLaunch::new(root, launch),
     ));
     piece.with_children(|parent| {
         for (c, collider) in colliders {
@@ -2089,6 +1961,9 @@ pub(crate) struct WallLawSet;
 pub(crate) struct WallReplicaSet;
 
 pub(crate) fn sim_plugin(app: &mut App) {
+    if !app.is_plugin_added::<LaunchPlugin>() {
+        app.add_plugins(LaunchPlugin);
+    }
     let authority = not(resource_exists::<ClientReplica>);
     app.init_resource::<WallQueue>()
         .init_resource::<RestingLoads>()

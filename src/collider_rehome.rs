@@ -4,7 +4,7 @@
 //! THE INVARIANT: every contact pair names the bodies its two colliders belong to now. Avian 0.7
 //! records a pair's bodies once, when its broad phase makes the pair, and never rewrites them when a
 //! collider's [`ColliderOf`] changes; a stale pair corrupts Avian's island lists. The game rehomes
-//! colliders in one place, `damage::launch_turrets_on_cookoff`.
+//! colliders when a turret launches or a trunk breaks free.
 //!
 //! [`drop_stale_pairs`] runs whenever `ColliderOf` is inserted. When one of the collider's pairs
 //! names another body for it, the collider is disabled and enabled again in one command batch, so
@@ -44,7 +44,16 @@ pub(crate) fn drop_stale_pairs(
 
 /// Mount the rule wherever the simulation runs.
 pub(crate) fn plugin(app: &mut App) {
-    app.add_observer(drop_stale_pairs);
+    if !app.is_plugin_added::<RehomePlugin>() {
+        app.add_plugins(RehomePlugin);
+    }
+}
+
+struct RehomePlugin;
+impl Plugin for RehomePlugin {
+    fn build(&self, app: &mut App) {
+        app.add_observer(drop_stale_pairs);
+    }
 }
 
 #[cfg(test)]

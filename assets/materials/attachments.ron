@@ -22,8 +22,9 @@
 // - `RootPlate(overturning_nm_per_kg)`: a trunk's root plate in its soil, joining the trunk to the
 //   ground and no two parts: its critical overturning moment per kilogram of FRESH STEM MASS,
 //   N·m/kg, multiplied by a mass in kg with no extra g, authored `(value, Kind("source"))`. An
-//   ultimate moment: the plate states no separation work, so a blow that beats its strength pays
-//   only the lift of the tree over its hinge. Each row binds its species, soil and rooting depth.
+//   ultimate moment only. ASSUMED rigid-plastic release with zero separation work: the source
+//   supplies no work measurement, so a blow pays only the lift over the hinge. This is not a
+//   measured zero root-separation energy. Each row binds its species, soil and rooting depth.
 //
 // Every root plate here describes unrotted trees on freely draining mineral soil, rooting depth
 // 40-80 cm (MEASURED domain of Nicoll's A2 class). Applying that site profile to the game's trees

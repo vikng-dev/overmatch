@@ -1,20 +1,12 @@
-//! The destruction ledger: one globally visible entity whose component lists every tree state
-//! transition the authority has made, replicated as diffs — a client whose acknowledged ledger is
-//! within the last `Diffable::HISTORY_LEN` (64) appends receives only the entries past it, one
-//! further behind and a late joiner the whole list as a snapshot — and replicon's per-tick change
-//! scan touches one entity instead of one per tree.
-//!
-//! An entry names its tree by `MapInstance.ordinal` (id-sorted, dense, bound into the map digest
-//! the handshake compares, so both peers number the same trees the same way or never match) and
-//! is one of two facts: a state transition — `TreeState::encode`'s word and the authority tick of
-//! the transition, from which every peer runs the same fall on its own clock, the replica's the
-//! interpolation cursor (ADR-0037) — or a stop, the authority tick a falling piece met another
-//! body at (`trees::Stopped`). The replica decodes the word against its own copy of the tree and
-//! refuses one that names no state of it, and a stop on a tree that is not down; everything else
-//! about a fallen tree — colliders, pools, pose, view — it derives (ADR-0016).
+//! The game's environment destruction ledger (game state only): topology changes replicate as
+//! append-only diffs. Freed trunks use the same interpolated pose carrier as wall pieces;
+//! replicas construct static collision copies and never integrate their motion (ADR-0037).
 
-use std::collections::HashMap;
-
+use super::debris_stress::DebrisPose;
+use crate::debris::PresentationClock;
+use crate::scatter::MapInstance;
+use crate::trees::{LooseTrunk, TreeBody, TreeFallSet, TreePiece, TreeSegment, TreeState};
+use avian3d::prelude::{Position, RigidBody, Rotation};
 use bevy::ecs::error::Result;
 use bevy::ecs::query::QuerySingleError;
 use bevy::prelude::*;
@@ -22,48 +14,31 @@ use bevy_replicon::prelude::{Diffable, EntityCommandsDiffExt};
 use lightyear::interpolation::timeline::InterpolationTimeline;
 use lightyear::prelude::*;
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 
-use crate::scatter::MapInstance;
-use crate::trees::{FallClock, Fell, Stopped, TreeBody, TreeFallSet, TreeState, derive_systems};
-
-/// One fact about one tree, by its ordinal (`index`) and an authority tick.
+/// A topology fact. The body stream carries motion; no fall clock or latched stop travels here.
 #[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum LedgerEntry {
-    /// The tree's state became the one `word` encodes, at `tick`.
-    State { index: u16, word: u16, tick: u32 },
-    /// The tree's falling piece met another body at `tick` and rests there.
-    Stopped { index: u16, tick: u32 },
+    State { index: u16, word: u16 },
 }
-
 impl LedgerEntry {
     fn index(self) -> u16 {
-        match self {
-            Self::State { index, .. } | Self::Stopped { index, .. } => index,
-        }
+        let Self::State { index, .. } = self;
+        index
     }
 }
 
-/// Every transition so far, in authority order. Appended only through replicon's diff path,
-/// `Diffable::HISTORY_LEN` left at its default (64): a client acknowledged within the last 64
-/// appends receives the entries past its cursor, one further behind or freshly joined the whole
-/// list.
+/// Every topology transition so far, in authority order, replicated by append-only diff.
 #[derive(Component, Serialize, Deserialize, Debug, Default, Clone, PartialEq, Eq)]
 pub(crate) struct DestructionLedger(pub(crate) Vec<LedgerEntry>);
-
 impl Diffable for DestructionLedger {
     type Diff = LedgerEntry;
-
     fn apply_diff(&mut self, diff: &LedgerEntry) -> Result<()> {
         self.0.push(*diff);
         Ok(())
     }
 }
 
-/// What this replica has applied to its trees: which ledger entity, and how many of its entries.
-/// A ledger is one replicated entity per link — lightyear despawns every replicated entity when
-/// a link ends (`lightyear_replication::client::on_replication_disconnect`) and the next server's
-/// arrives as a new one — so another entity is another authority's record: every tree stands
-/// again and the record is consumed from its first entry.
 #[derive(Resource, Default)]
 struct Applied {
     ledger: Option<Entity>,
@@ -78,25 +53,25 @@ pub(super) fn install_server(app: &mut App) {
             .in_set(crate::state::SimPhase::Publish),
     );
 }
-
 pub(super) fn install_client(app: &mut App) {
     install_apply(app);
-    app.init_resource::<FallClock>()
-        .add_systems(Update, publish_fall_clock.before(apply_ledger));
+    app.init_resource::<PresentationClock>()
+        .add_systems(Update, publish_presentation_clock.before(apply_ledger));
 }
-
-/// The ledger's consumption and the body derive it orders, in `Update`: replicon receives in
-/// `PreUpdate` and the fixed loop runs before `Update`, so a replica deriving only in the fixed
-/// loop would leave a received fall's colliders standing until the next fixed tick — a frame
-/// that runs none leaves them standing a frame longer. The derive stands each fall at the
-/// presentation cursor of this frame and places the colliders in the physics world
-/// ([`derive_systems`]), so the march of the next fixed tick reads the body the cursor says; the
-/// presentation reads it this frame.
 pub(crate) fn install_apply(app: &mut App) {
-    app.init_resource::<Applied>()
-        .add_systems(Update, (apply_ledger, derive_systems()).chain());
+    app.init_resource::<Applied>().add_systems(
+        Update,
+        (
+            apply_ledger,
+            crate::trees::derive_systems(),
+            attach_trunks,
+            follow_trunks,
+            crate::trees::place_colliders,
+            crate::trees::refit_colliders(),
+        )
+            .chain(),
+    );
 }
-
 fn spawn_ledger(mut commands: Commands) {
     commands.spawn((
         Name::new("DestructionLedger"),
@@ -104,51 +79,30 @@ fn spawn_ledger(mut commands: Commands) {
         Replicate::to_clients(NetworkTarget::All),
     ));
 }
-
-/// Authority: every tree whose state left `Standing` this tick becomes a state entry, and every
-/// falling piece that met another body this tick a stop.
 fn publish_falls(
-    fallen: Query<(&MapInstance, &TreeState, &Fell), Changed<TreeState>>,
-    stopped: Query<(&MapInstance, &Stopped), Added<Stopped>>,
+    fallen: Query<(&MapInstance, &TreeState), Changed<TreeState>>,
     ledgers: Query<Entity, With<DestructionLedger>>,
     mut commands: Commands,
 ) {
-    let ledger = ledgers.single().expect(
-        "authority startup spawns exactly one destruction ledger before publishing tree transitions",
-    );
-    let states = fallen
-        .iter()
-        .filter(|(_, state, _)| **state != TreeState::Standing)
-        .map(|(identity, state, fell)| LedgerEntry::State {
-            index: identity.ordinal,
-            word: state.encode(),
-            tick: fell.tick,
-        });
-    let stops = stopped
-        .iter()
-        .map(|(identity, stopped)| LedgerEntry::Stopped {
-            index: identity.ordinal,
-            tick: stopped.tick,
-        });
-    for entry in states.chain(stops) {
-        commands
-            .entity(ledger)
-            .apply_diff::<DestructionLedger>(entry);
+    let ledger = ledgers.single().expect("authority startup spawns exactly one destruction ledger before publishing tree transitions");
+    for (identity, state) in &fallen {
+        if *state != TreeState::Standing {
+            commands
+                .entity(ledger)
+                .apply_diff::<DestructionLedger>(LedgerEntry::State {
+                    index: identity.ordinal,
+                    word: state.encode(),
+                });
+        }
     }
 }
 
-/// Replica: apply every entry not yet applied to the tree its index names. A word no state of
-/// that tree encodes to is refused and logged, never clamped into a pose the authority did not
-/// set, and so is a stop on a tree that is not down; an index no tree carries is a map mismatch
-/// the handshake should have refused. A state entry clears the stop of the state before it. A ledger
-/// other than the one applied so far (another link's) first stands every tree back up — the
-/// derive then drops its pose and transition tick — so a tree the new record never names stands
-/// and one it names falls as it says; the record is then consumed from its first entry.
+/// Apply topology from the active authority. Invalid peer words are refused visibly; replacing
+/// the ledger first resets every map tree so a reconnect cannot retain another world's cuts.
 fn apply_ledger(
     ledgers: Query<(Entity, &DestructionLedger)>,
     mut applied: ResMut<Applied>,
     mut trees: Query<(Entity, &MapInstance, &TreeBody, &mut TreeState)>,
-    mut commands: Commands,
 ) {
     let (ledger, entries) = match ledgers.single() {
         Ok(ledger) => ledger,
@@ -171,9 +125,8 @@ fn apply_ledger(
                 applied.entries
             );
         }
-        for (tree, _, _, mut state) in &mut trees {
+        for (_, _, _, mut state) in &mut trees {
             state.set_if_neq(TreeState::Standing);
-            commands.entity(tree).remove::<Stopped>();
         }
         *applied = Applied {
             ledger: Some(ledger),
@@ -195,40 +148,21 @@ fn apply_ledger(
         let (_, _, body, mut state) = trees
             .get_mut(tree)
             .expect("by_ordinal enumerates this same tree query in this system call");
-        match entry {
-            LedgerEntry::State { word, tick, .. } => {
-                match TreeState::decode(word, body.kind.segments.len()) {
-                    Ok(decoded) => {
-                        *state = decoded;
-                        commands
-                            .entity(tree)
-                            .insert(Fell { tick })
-                            .remove::<Stopped>();
-                    }
-                    Err(reason) => {
-                        error!("destruction ledger: entry {entry:?} refused: {reason}");
-                    }
-                }
+        let LedgerEntry::State { word, .. } = entry;
+        match TreeState::decode(word, body.kind.segments.len()) {
+            Ok(decoded) => {
+                *state = decoded;
             }
-            LedgerEntry::Stopped { tick, .. } => {
-                if *state == TreeState::Standing {
-                    error!("destruction ledger: entry {entry:?} refused: the tree stands");
-                } else {
-                    commands.entity(tree).insert(Stopped { tick });
-                }
-            }
+            Err(reason) => error!("destruction ledger: entry {entry:?} refused: {reason}"),
         }
     }
     applied.entries = entries.0.len();
 }
 
-/// Replica: the presentation clock is the interpolation cursor once it has synced — the time the
-/// hulls draw at — and the local tick before that (announcements present at arrival, as the fire
-/// queue's no-cursor fallback does).
-fn publish_fall_clock(
+fn publish_presentation_clock(
     cursor: Option<Res<InterpolationTimeline>>,
     local: Res<LocalTimeline>,
-    mut clock: ResMut<FallClock>,
+    mut clock: ResMut<PresentationClock>,
 ) {
     let (tick, overstep) = match cursor.filter(|timeline| timeline.is_synced()) {
         Some(timeline) => (timeline.tick(), f64::from(timeline.overstep().to_f32())),
@@ -238,439 +172,455 @@ fn publish_fall_clock(
     clock.overstep = overstep;
 }
 
+/// The static collision copy of a streamed trunk; its carrier owns its lifetime.
+#[derive(Component)]
+struct ReplicaTrunk {
+    carrier: Entity,
+    tree: Entity,
+    cut: u8,
+}
+#[derive(Component)]
+struct TrunkAttached;
+
+/// A peer carrier is refused visibly at its map-data boundary, before collision construction.
+#[derive(Debug, PartialEq, Eq)]
+enum TrunkCarrierError {
+    UnknownTree(u16),
+    CutOutside { cut: u8, segments: usize },
+    TopologyMismatch { cut: u8, recorded: u8 },
+}
+impl std::fmt::Display for TrunkCarrierError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::UnknownTree(tree) => write!(f, "map tree {tree} is absent"),
+            Self::CutOutside { cut, segments } => {
+                write!(f, "cut {cut} is outside the tree's {segments} segments")
+            }
+            Self::TopologyMismatch { cut, recorded } => {
+                write!(f, "carrier cut {cut} differs from recorded cut {recorded}")
+            }
+        }
+    }
+}
+impl std::error::Error for TrunkCarrierError {}
+
+fn resolve_carrier(
+    piece: TreePiece,
+    tree: Option<(&TreeBody, TreeState)>,
+) -> std::result::Result<Option<&TreeBody>, TrunkCarrierError> {
+    let (body, state) = tree.ok_or(TrunkCarrierError::UnknownTree(piece.tree))?;
+    if usize::from(piece.cut) >= body.kind.segments.len() {
+        return Err(TrunkCarrierError::CutOutside {
+            cut: piece.cut,
+            segments: body.kind.segments.len(),
+        });
+    }
+    match state {
+        TreeState::Standing => Ok(None), // Carrier arrival may precede the topology diff.
+        TreeState::Down { cut, .. } if cut == piece.cut => Ok(Some(body)),
+        TreeState::Down { cut, .. } => Err(TrunkCarrierError::TopologyMismatch {
+            cut: piece.cut,
+            recorded: cut,
+        }),
+    }
+}
+
+fn attach_trunks(
+    carriers: Query<(Entity, &TreePiece, &DebrisPose), Without<TrunkAttached>>,
+    trees: Query<(Entity, &MapInstance, &TreeBody, &TreeState)>,
+    mut commands: Commands,
+) {
+    for (carrier, piece, pose) in &carriers {
+        let tree = trees
+            .iter()
+            .find(|(_, identity, _, _)| identity.ordinal == piece.tree);
+        let body = match resolve_carrier(*piece, tree.map(|(_, _, body, state)| (body, *state))) {
+            Ok(Some(body)) => body,
+            Ok(None) => continue, // The topology diff has not arrived yet.
+            Err(error) => {
+                error!("tree carrier {carrier:?} refused: {error}");
+                commands.entity(carrier).insert(TrunkAttached);
+                continue;
+            }
+        };
+        let tree = tree
+            .expect("carrier resolution succeeded for this map tree")
+            .0;
+        let centroid = body.piece_centroid(piece.cut);
+        let root = commands
+            .spawn((
+                ReplicaTrunk {
+                    carrier,
+                    tree,
+                    cut: piece.cut,
+                },
+                LooseTrunk,
+                pose.transform(),
+                Position(pose.position),
+                Rotation(pose.rotation),
+                RigidBody::Static,
+            ))
+            .id();
+        for k in usize::from(piece.cut)..body.kind.segments.len() {
+            commands.spawn((
+                ChildOf(root),
+                Transform::from_translation(Vec3::Y * body.prefix[k] - centroid),
+                crate::trees::replica_segment_collider(body, k),
+                TreeSegment(k as u8),
+                crate::buildings::breakage::piece_layers(),
+                body.kind.friction,
+                crate::ballistics::BallisticVolume {
+                    material: body.kind.material,
+                    substance: body.kind.substance.clone(),
+                },
+            ));
+        }
+        commands.entity(carrier).insert(TrunkAttached);
+    }
+}
+
+/// Lightyear inserts an interpolated DebrisPose only when the cursor reaches its first sample
+/// (`lightyear_interpolation::interpolate`, `update_confirmed_history`). Until then the topology
+/// can already be known, but the standing colliders must remain present. The copy takes over in
+/// the same frame its pose becomes present, including frames with no physics tick.
+fn follow_trunks(
+    carriers: Query<&DebrisPose>,
+    trees: Query<(&TreeState, &crate::trees::TreeParts)>,
+    mut trunks: Query<(
+        Entity,
+        &ReplicaTrunk,
+        &Children,
+        &mut Transform,
+        &mut Position,
+        &mut Rotation,
+    )>,
+    mut commands: Commands,
+) {
+    for (entity, trunk, children, mut transform, mut position, mut rotation) in &mut trunks {
+        let Ok(pose) = carriers.get(trunk.carrier) else {
+            commands.entity(entity).despawn(); // Disconnect removed the authority's carrier.
+            continue;
+        };
+        let Ok((state, parts)) = trees.get(trunk.tree) else {
+            commands.entity(entity).despawn(); // The local map was unloaded with its tree roots.
+            continue;
+        };
+        let active = matches!(*state, TreeState::Down { cut, .. } if cut == trunk.cut);
+        if active {
+            for &part in parts.0.iter().skip(usize::from(trunk.cut)) {
+                commands
+                    .entity(part)
+                    .insert_if_new(avian3d::prelude::ColliderDisabled);
+            }
+        }
+        for &child in children {
+            if active {
+                commands
+                    .entity(child)
+                    .remove::<avian3d::prelude::ColliderDisabled>();
+            } else {
+                commands
+                    .entity(child)
+                    .insert_if_new(avian3d::prelude::ColliderDisabled);
+            }
+        }
+        transform.set_if_neq(pose.transform());
+        position.set_if_neq(Position(pose.position));
+        rotation.set_if_neq(Rotation(pose.rotation));
+    }
+}
+
 #[cfg(test)]
 mod tests {
+    use super::*;
+    use avian3d::prelude::*;
+    use bevy::time::TimeUpdateStrategy;
     use std::time::Duration;
 
-    use avian3d::prelude::{Position, Rotation};
-    use bevy::time::TimeUpdateStrategy;
-
-    use super::*;
-    use crate::ballistics::{ComponentHealth, MarchProbe, PoolEmptied};
-    use crate::trees::{FallPath, Resting};
-
-    /// Authority publication cannot silently discard transitions without its startup singleton.
-    /// A mutant that returns on a missing ledger hides this composition bug from the server.
-    #[test]
-    #[should_panic(expected = "authority startup spawns exactly one destruction ledger")]
-    fn publishing_without_the_startup_ledger_is_a_bug() {
-        let mut app = App::new();
-        app.add_systems(Update, publish_falls);
-        app.update();
-    }
-
-    /// A replica's pre-snapshot wait ends when its single ledger arrives, so late joiners
-    /// consume the authority record instead of treating absence as an initialization failure.
-    #[test]
-    fn a_replica_waits_for_its_first_ledger() {
-        let mut app = App::new();
-        app.init_resource::<Applied>()
-            .add_systems(Update, apply_ledger);
-        app.update();
-        assert!(app.world().resource::<Applied>().ledger.is_none());
-        let ledger = app.world_mut().spawn(DestructionLedger::default()).id();
-        app.update();
-        assert_eq!(app.world().resource::<Applied>().ledger, Some(ledger));
-    }
-
-    /// Two active ledgers would mix authorities. A single-query skip mutant would hide the
-    /// composition bug and leave every replica tree on its previous state indefinitely.
-    #[test]
-    #[should_panic(expected = "a replica has one active authority ledger")]
-    fn a_replica_with_two_authority_ledgers_is_a_bug() {
-        let mut app = App::new();
-        app.init_resource::<Applied>()
-            .add_systems(Update, apply_ledger);
-        for _ in 0..2 {
-            app.world_mut().spawn(DestructionLedger::default());
-        }
-        app.update();
-    }
-
-    /// What stands in for replicon's receive: entries landing on the ledger in `PreUpdate`.
-    #[derive(Resource, Default)]
-    struct Incoming(Vec<LedgerEntry>);
-
-    fn receive(mut incoming: ResMut<Incoming>, mut ledgers: Query<&mut DestructionLedger>) {
-        let Ok(mut ledger) = ledgers.single_mut() else {
-            return;
-        };
-        for entry in incoming.0.drain(..) {
-            ledger.apply_diff(&entry).expect("an append");
-        }
-    }
-
-    /// The trees' sim half on the network's physics — avian as `net::physics` mounts it, and
-    /// lightyear's after-loop child collider update — with the fixture grid and `trees` fixture
-    /// trees on it, one per ordinal, each yawed 0.7 rad (fixture data: the placement composes a
-    /// turned root), and the game's damage-model march probe after physics. A replica adds the ledger's apply and
-    /// its marker; the authority is the composition without them.
-    fn composed(replica: bool, trees: u16) -> (App, Vec<Entity>) {
+    fn replica() -> (App, Entity) {
         let mut app = App::new();
         app.add_plugins((
             MinimalPlugins,
             bevy::transform::TransformPlugin,
             AssetPlugin::default(),
-            super::super::physics::physics_plugins(),
-            super::super::physics::plugin,
+            PhysicsPlugins::default(),
             crate::contact_transfer::sim_plugin,
             crate::trees::sim_plugin,
-            crate::ballistics::mount_march_probe,
+            crate::debris::sim_plugin,
+            install_apply,
         ))
         .init_asset::<Mesh>()
-        .insert_resource(crate::trees::tests::fixture_grid(|_, _| 0.0))
-        .add_systems(
-            RunFixedMainLoop,
-            lightyear::avian3d::plugin::LightyearAvianPlugin::update_child_collider_position
-                .in_set(RunFixedMainLoopSystems::AfterFixedMainLoop),
-        );
-        if replica {
-            app.add_plugins(install_apply)
-                .init_resource::<crate::ClientReplica>()
-                .init_resource::<Incoming>()
-                .add_systems(PreUpdate, receive);
-        }
+        .init_resource::<crate::ClientReplica>()
+        .insert_resource(TimeUpdateStrategy::ManualDuration(Duration::from_micros(
+            15_625,
+        )));
         while app.plugins_state() == bevy::app::PluginsState::Adding {
             std::thread::sleep(Duration::from_millis(1));
         }
         app.finish();
         app.cleanup();
-        let kind = crate::trees::tests::fixture_kind();
-        let world = app.world_mut();
         let mut queue = bevy::ecs::world::CommandQueue::default();
-        let mut commands = Commands::new(&mut queue, world);
-        for ordinal in 0..trees {
-            crate::trees::spawn(
-                &mut commands,
-                &kind,
-                MapInstance {
-                    id: format!("fir_{ordinal}"),
-                    ordinal,
-                },
-                Transform::from_xyz(0.0, 0.0, 20.0 * f32::from(ordinal))
-                    .with_rotation(Quat::from_rotation_y(0.7)),
-            );
-        }
-        queue.apply(world);
-        let mut roots: Vec<(u16, Entity)> = world
-            .query::<(Entity, &MapInstance)>()
-            .iter(world)
-            .map(|(entity, identity)| (identity.ordinal, entity))
-            .collect();
-        roots.sort_unstable();
-        (app, roots.into_iter().map(|(_, entity)| entity).collect())
-    }
-
-    /// A replica whose presentation cursor stands long past every fall these tests make: each
-    /// received fall derives at its rest in the frame it lands.
-    fn replica(trees: u16) -> (App, Vec<Entity>) {
-        let (mut app, roots) = composed(true, trees);
-        app.insert_resource(FallClock {
-            tick: 100_000,
-            overstep: 0.0,
-        });
-        (app, roots)
-    }
-
-    /// Each frame advances virtual time by `micros`: 15 625 is one fixed tick at 64 Hz, 0 none.
-    fn frame_time(app: &mut App, micros: u64) {
-        app.insert_resource(TimeUpdateStrategy::ManualDuration(Duration::from_micros(
-            micros,
-        )));
-    }
-
-    /// Each segment's collider pose in avian's world, in segment order, as bit patterns.
-    fn placements(app: &App, root: Entity) -> Vec<[u32; 7]> {
-        let world = app.world();
-        world
-            .get::<Children>(root)
-            .expect("segments")
-            .iter()
-            .filter_map(|child| {
-                let position = world.get::<Position>(child)?.0;
-                let rotation = world.get::<Rotation>(child)?.0;
-                Some(
-                    [
-                        position.x, position.y, position.z, rotation.x, rotation.y, rotation.z,
-                        rotation.w,
-                    ]
-                    .map(f32::to_bits),
-                )
-            })
-            .collect()
-    }
-
-    /// Segment `k` of `root`: the armour volume a march reaches on that part of the trunk.
-    fn segment(app: &App, root: Entity, k: usize) -> Entity {
-        app.world().get::<Children>(root).expect("segments")[k]
-    }
-
-    /// Two probe rays against the fixture trunk at the origin, felled `Down { cut: 1, dir: 0 }`
-    /// on flat ground (fixture data; DERIVED: the 4 m piece above the cut reaches no ground by
-    /// 100°, so it lies at 90°, along +x at 2 m). The first crosses where segment 1 stood, 3 m up,
-    /// clear of the lying piece; the second comes down at x = 3 m onto segment 2 where it lies,
-    /// clear of the standing trunk. Each is the disc of an 88 mm round (fixture data), so the
-    /// probe takes the march's broad-phase test as well as its casts.
-    fn aim_probe(app: &mut App) {
-        let mut probe = app.world_mut().resource_mut::<MarchProbe>();
-        probe.radius = 0.044;
-        probe.rays = vec![
-            (Vec3::new(0.0, 3.0, -5.0), Dir3::Z, 10.0),
-            (Vec3::new(3.0, 10.0, 0.0), Dir3::NEG_Y, 20.0),
-        ];
-    }
-
-    /// A RECEIVED FALL REACHES THE BODY IN THE FRAME IT LANDS AND THE MARCH AT THE NEXT FIXED
-    /// TICK, WHETHER THAT FRAME RUNS A TICK OR NOT: an entry arriving in `PreUpdate` of a frame
-    /// that runs none leaves `Update` with the tree's state, its transition tick, its resting
-    /// pose and its segments' lying transforms all set, and the march of the next fixed tick —
-    /// the live first-contact query, through avian's collider trees — reads the lying piece. A
-    /// replica deriving only in the fixed loop reds the first half; one that leaves the colliders
-    /// to the next physics step reads the standing trunk in that march and reds the second. The
-    /// step that follows rewrites the placed collider poses bit for bit: the placement computes
-    /// what avian would, so the sim never sees two poses for one state.
-    #[test]
-    fn a_received_fall_reaches_the_next_ticks_march() {
-        let (mut app, roots) = replica(1);
-        aim_probe(&mut app);
-        app.world_mut().spawn(DestructionLedger::default());
-        frame_time(&mut app, 15_625);
-        app.update();
-        app.update();
-        let settled = app.world().resource::<MarchProbe>().reached.clone();
-        let (standing, lying) = (segment(&app, roots[0], 1), segment(&app, roots[0], 2));
-        assert_eq!(
-            settled.last(),
-            Some(&vec![Some(standing), None]),
-            "the march reads the trunk standing"
-        );
-        // The receive frame: no time passes, so no fixed tick runs.
-        frame_time(&mut app, 0);
-        app.world_mut()
-            .resource_mut::<Incoming>()
-            .0
-            .push(LedgerEntry::State {
-                index: 0,
-                word: TreeState::Down { cut: 1, dir: 0 }.encode(),
-                tick: 9,
-            });
-        app.update();
-        let world = app.world();
-        assert_eq!(
-            world.get::<TreeState>(roots[0]),
-            Some(&TreeState::Down { cut: 1, dir: 0 })
-        );
-        assert_eq!(world.get::<Fell>(roots[0]), Some(&Fell { tick: 9 }));
-        assert!(
-            world.get::<Resting>(roots[0]).is_some(),
-            "the pose, this frame"
-        );
-        let tip = world
-            .get::<Children>(roots[0])
-            .unwrap()
-            .iter()
-            .last()
-            .unwrap();
-        let local = world.get::<Transform>(tip).unwrap();
-        assert!(
-            local.translation.xz().length() > 1.9 && local.rotation != Quat::IDENTITY,
-            "the tip's transform lies, this frame: {local:?}"
-        );
-        assert_eq!(
-            world.resource::<MarchProbe>().reached.len(),
-            settled.len(),
-            "the receive frame ran no fixed tick"
-        );
-        let placed = placements(&app, roots[0]);
-        frame_time(&mut app, 15_625);
-        app.update();
-        assert_eq!(
-            app.world()
-                .resource::<MarchProbe>()
-                .reached
-                .get(settled.len()),
-            Some(&vec![None, Some(lying)]),
-            "the next tick's march reads the piece lying"
-        );
-        assert_eq!(
-            placements(&app, roots[0]),
-            placed,
-            "the physics step rewrites the placement's own bits"
-        );
-    }
-
-    /// THE AUTHORITY'S MARCH READS THE FALL AS IT MOVES: a segment's pool emptied in tick N
-    /// (segment 1's, 3 m up the fixture trunk, along +x) fells the tree at that segment in that
-    /// tick; tick N's march, which reads the body before the derive at the end of the tick, finds
-    /// the trunk standing, as does tick N + 1's — the fall's first step has barely turned the
-    /// piece — and once the fall has come to rest the march — the live first-contact query,
-    /// through avian's collider trees — reads the lying piece. A derive that lays the piece down
-    /// at once reads it lying at N + 1; one that leaves the colliders to the next physics step
-    /// never reads the rest the body reached. Both red this.
-    #[test]
-    fn the_authoritys_march_reads_the_fall_as_it_moves() {
-        #[derive(Resource)]
-        struct Empty(Option<Entity>);
-
-        fn empty(mut pending: ResMut<Empty>, mut commands: Commands) {
-            if let Some(segment) = pending.0.take() {
-                commands.trigger(PoolEmptied {
-                    entity: segment,
-                    at: Vec3::new(0.0, 3.0, 0.0),
-                    along: Some(Vec3::X),
-                });
-            }
-        }
-
-        let (mut app, roots) = composed(false, 1);
-        aim_probe(&mut app);
-        app.insert_resource(Empty(None))
-            .add_systems(FixedPreUpdate, empty);
-        frame_time(&mut app, 15_625);
-        app.update();
-        app.update();
-        let before = app.world().resource::<MarchProbe>().reached.len();
-        let (standing, lying) = (segment(&app, roots[0], 1), segment(&app, roots[0], 2));
-        app.world_mut().resource_mut::<Empty>().0 = Some(standing);
-        app.update();
-        app.update();
-        let world = app.world();
-        assert_eq!(
-            world.get::<TreeState>(roots[0]),
-            Some(&TreeState::Down { cut: 1, dir: 0 })
-        );
-        let reached = &world.resource::<MarchProbe>().reached;
-        assert_eq!(
-            reached.get(before),
-            Some(&vec![Some(standing), None]),
-            "tick N's march reads the trunk standing"
-        );
-        assert_eq!(
-            reached.get(before + 1),
-            Some(&vec![Some(standing), None]),
-            "tick N + 1's march reads the piece barely turned"
-        );
-        for _ in 0..1000 {
-            let path = app.world().get::<FallPath>(roots[0]).expect("a fall");
-            if path.k == path.last() {
-                break;
-            }
-            app.update();
-        }
-        app.update();
-        assert_eq!(
-            app.world().resource::<MarchProbe>().reached.last(),
-            Some(&vec![None, Some(lying)]),
-            "the march after the rest reads the piece lying"
-        );
-    }
-
-    /// A RECEIVED STOP HOLDS THE FALL WHERE THE AUTHORITY STOPPED IT: a replica receiving a fall
-    /// at tick 9 and its stop at tick 29 stands the piece at the fall's twentieth pose however far
-    /// its cursor runs, and a stop on a tree that stands is refused, never applied. A replica that
-    /// ignores the stop lays the piece to its rest; one that reads the stop's tick as a pose index
-    /// stands it at pose 29. Both red this.
-    #[test]
-    fn a_received_stop_holds_the_fall_where_the_authority_stopped_it() {
-        let (mut app, roots) = replica(2);
-        frame_time(&mut app, 15_625);
-        app.world_mut().spawn(DestructionLedger(vec![
-            LedgerEntry::State {
-                index: 0,
-                word: TreeState::Down { cut: 0, dir: 0 }.encode(),
-                tick: 9,
+        let mut commands = Commands::new(&mut queue, app.world());
+        let root = crate::trees::spawn(
+            &mut commands,
+            &crate::trees::tests::fixture_kind(),
+            MapInstance {
+                id: "fixture".into(),
+                ordinal: 3,
             },
-            LedgerEntry::Stopped { index: 0, tick: 29 },
-            LedgerEntry::Stopped { index: 1, tick: 30 },
-        ]));
-        app.update();
-        app.update();
-        let world = app.world();
-        let path = world.get::<FallPath>(roots[0]).expect("a fall");
-        assert_eq!(path.k, 20, "held at the stop's pose");
-        assert!(path.last() > 20, "short of its rest");
-        assert_eq!(world.get::<Stopped>(roots[0]), Some(&Stopped { tick: 29 }));
-        assert!(
-            world.get::<Stopped>(roots[1]).is_none()
-                && world.get::<TreeState>(roots[1]) == Some(&TreeState::Standing),
-            "a stop on a standing tree is refused"
+            Transform::from_xyz(2.0, 0.0, 1.0),
         );
+        queue.apply(app.world_mut());
+        (app, root)
     }
 
-    /// ANOTHER LEDGER IS ANOTHER AUTHORITY'S RECORD: a link's ledger fells tree A; the next
-    /// link's ledger — a new entity of the same length — names only tree B. Tree A stands again
-    /// (its tick, its pose and its lying transforms gone, its segment pools kept) and tree B
-    /// falls; a replica that remembers only a length skips B and leaves A down.
+    /// The authority has one startup ledger. Losing it is a composition bug, never a silent
+    /// missed topology publication that leaves clients' trees standing.
     #[test]
-    fn a_replaced_ledger_stands_every_tree_it_does_not_name() {
-        let (mut app, roots) = replica(2);
-        app.insert_resource(TimeUpdateStrategy::ManualDuration(Duration::from_micros(
-            15_625,
-        )));
-        let first = app
+    #[should_panic(expected = "authority startup spawns exactly one destruction ledger")]
+    fn publication_requires_the_authoritys_ledger() {
+        let mut app = App::new();
+        app.add_systems(Update, publish_falls);
+        app.update();
+    }
+
+    /// Before a snapshot there is no record to apply. A second authority record is a bug; a
+    /// single-query skip would otherwise hide the mixed-authority state from replica users.
+    #[test]
+    #[should_panic(expected = "a replica has one active authority ledger")]
+    fn two_authority_ledgers_are_a_bug() {
+        let mut app = App::new();
+        app.init_resource::<Applied>()
+            .add_systems(Update, apply_ledger);
+        app.update();
+        app.world_mut().spawn(DestructionLedger::default());
+        app.world_mut().spawn(DestructionLedger::default());
+        app.update();
+    }
+
+    /// Topology diffs keep their exact word, malformed peer words are refused, and reconnect
+    /// starts from the replacement authority. World geometry relies on no old cut surviving.
+    #[test]
+    fn topology_applies_once_refuses_invalid_words_and_resets_on_reconnect() {
+        let (mut app, root) = replica();
+        app.update();
+        assert_eq!(
+            app.world().get::<TreeState>(root),
+            Some(&TreeState::Standing)
+        );
+        let state = TreeState::Down { cut: 1, dir: 64 };
+        let ledger = app
             .world_mut()
             .spawn(DestructionLedger(vec![LedgerEntry::State {
-                index: 0,
-                word: TreeState::Down { cut: 0, dir: 64 }.encode(),
-                tick: 3,
+                index: 3,
+                word: state.encode(),
             }]))
             .id();
         app.update();
+        assert_eq!(app.world().get::<TreeState>(root), Some(&state));
+        app.world_mut()
+            .get_mut::<DestructionLedger>(ledger)
+            .unwrap()
+            .apply_diff(&LedgerEntry::State {
+                index: 3,
+                word: 0xffff,
+            })
+            .unwrap();
+        app.update();
+        assert_eq!(app.world().get::<TreeState>(root), Some(&state));
+        assert_eq!(app.world().resource::<Applied>().entries, 2);
+        app.world_mut().entity_mut(ledger).despawn();
+        app.world_mut().spawn(DestructionLedger::default());
+        app.update();
         assert_eq!(
-            app.world().get::<TreeState>(roots[0]),
-            Some(&TreeState::Down { cut: 0, dir: 64 }),
-            "the first link's ledger fells A"
+            app.world().get::<TreeState>(root),
+            Some(&TreeState::Standing)
         );
-        let spawned = |app: &App, root: Entity| -> Vec<Transform> {
-            let world = app.world();
-            world
-                .get::<Children>(root)
-                .unwrap()
+        let parts = &app.world().get::<crate::trees::TreeParts>(root).unwrap().0;
+        assert!(
+            parts
                 .iter()
-                .filter_map(|child| world.get::<Transform>(child).copied())
-                .collect()
-        };
-        let a_down = spawned(&app, roots[0]);
-        let b_standing = spawned(&app, roots[1]);
-        // The link ends: lightyear despawns the replicated ledger; the next server's arrives.
-        app.world_mut().entity_mut(first).despawn();
+                .all(|&part| app.world().get::<ColliderDisabled>(part).is_none())
+        );
+    }
+
+    /// Malformed carrier identity is external input, refused before creating collision state.
+    /// Replica construction relies on each cause remaining distinct from a legitimate wait.
+    #[test]
+    fn carrier_identity_refusals_are_typed_and_a_pre_topology_carrier_waits() {
+        let body = TreeBody::new(crate::trees::tests::fixture_kind(), 1.0);
+        let piece = TreePiece { tree: 3, cut: 1 };
+        assert_eq!(
+            resolve_carrier(piece, None).unwrap_err(),
+            TrunkCarrierError::UnknownTree(3)
+        );
+        assert!(
+            resolve_carrier(piece, Some((&body, TreeState::Standing)))
+                .unwrap()
+                .is_none()
+        );
+        assert_eq!(
+            resolve_carrier(
+                TreePiece { cut: 3, ..piece },
+                Some((&body, TreeState::Standing))
+            )
+            .unwrap_err(),
+            TrunkCarrierError::CutOutside {
+                cut: 3,
+                segments: 3
+            }
+        );
+        assert_eq!(
+            resolve_carrier(piece, Some((&body, TreeState::Down { cut: 2, dir: 0 }))).unwrap_err(),
+            TrunkCarrierError::TopologyMismatch {
+                cut: 1,
+                recorded: 2
+            }
+        );
+    }
+
+    /// Topology can arrive before the cursor reaches a trunk's birth. Client casts must still
+    /// meet the standing wood then, and switch once, in the frame the first pose is inserted.
+    /// A replica that disables on ledger arrival creates an invisible collision gap.
+    #[test]
+    fn standing_colliders_remain_until_the_first_pose_is_present() {
+        let (mut app, root) = replica();
+        app.update();
+        let marker = TreePiece { tree: 3, cut: 1 };
+        let carrier = app.world_mut().spawn(marker).id();
         app.world_mut()
             .spawn(DestructionLedger(vec![LedgerEntry::State {
-                index: 1,
+                index: 3,
                 word: TreeState::Down { cut: 1, dir: 0 }.encode(),
-                tick: 5,
             }]));
         app.update();
-        let world = app.world();
-        assert_eq!(
-            world.get::<TreeState>(roots[0]),
-            Some(&TreeState::Standing),
-            "A stands: the new record never names it"
-        );
+        let parts = app
+            .world()
+            .get::<crate::trees::TreeParts>(root)
+            .unwrap()
+            .0
+            .clone();
         assert!(
-            world.get::<Fell>(roots[0]).is_none() && world.get::<Resting>(roots[0]).is_none(),
-            "A's tick and pose are gone"
-        );
-        assert!(
-            world
-                .get::<Children>(roots[0])
-                .unwrap()
+            parts
                 .iter()
-                .all(|segment| world.get::<ComponentHealth>(segment).is_some()),
-            "A's segment pools are kept"
+                .all(|&part| app.world().get::<ColliderDisabled>(part).is_none())
         );
         assert_eq!(
-            spawned(&app, roots[0]),
-            b_standing,
-            "A's segments stand as spawned"
+            app.world_mut()
+                .query::<&ReplicaTrunk>()
+                .iter(app.world())
+                .count(),
+            0
+        );
+        app.insert_resource(TimeUpdateStrategy::ManualDuration(Duration::ZERO));
+        app.world_mut().entity_mut(carrier).insert(DebrisPose {
+            position: Vec3::new(8.0, 2.0, -1.0),
+            rotation: Quat::from_rotation_z(-0.8),
+        });
+        app.update();
+        assert!(app.world().get::<ColliderDisabled>(parts[0]).is_none());
+        assert!(
+            parts
+                .iter()
+                .skip(1)
+                .all(|&part| app.world().get::<ColliderDisabled>(part).is_some())
         );
         assert_eq!(
-            world.get::<TreeState>(roots[1]),
-            Some(&TreeState::Down { cut: 1, dir: 0 }),
-            "B falls as the new record says"
+            app.world_mut()
+                .query::<&ReplicaTrunk>()
+                .iter(app.world())
+                .count(),
+            1
         );
-        assert_eq!(world.get::<Fell>(roots[1]), Some(&Fell { tick: 5 }));
-        assert_ne!(spawned(&app, roots[1]), b_standing, "B's segments lie");
-        assert_ne!(spawned(&app, roots[0]), a_down);
+    }
+
+    /// The replicated pose is the sole motion source, including on a render frame with no fixed
+    /// tick and a late join straight into a moving trunk. Client casts rely on child poses being
+    /// placed in that frame. No client body becomes dynamic, and losing the carrier removes its
+    /// collision copy. ASSUMED fixture poses and cut, independent of a trajectory or asset name.
+    #[test]
+    fn a_late_replica_follows_only_the_pose_stream_even_without_a_physics_tick() {
+        let (mut app, root) = replica();
+        app.update();
+        let first = DebrisPose {
+            position: Vec3::new(8.0, 3.0, -2.0),
+            rotation: Quat::from_rotation_z(-1.1),
+        };
+        let carrier = app
+            .world_mut()
+            .spawn((TreePiece { tree: 3, cut: 1 }, first))
+            .id();
+        app.update();
+        assert_eq!(
+            app.world_mut()
+                .query::<&ReplicaTrunk>()
+                .iter(app.world())
+                .count(),
+            0,
+            "carrier waits for topology"
+        );
+        app.world_mut()
+            .spawn(DestructionLedger(vec![LedgerEntry::State {
+                index: 3,
+                word: TreeState::Down { cut: 1, dir: 0 }.encode(),
+            }]));
+        app.update();
+        let ghost = app
+            .world_mut()
+            .query_filtered::<Entity, With<ReplicaTrunk>>()
+            .single(app.world())
+            .unwrap();
+        assert_eq!(
+            app.world().get::<Position>(ghost),
+            Some(&Position(first.position))
+        );
+        app.insert_resource(TimeUpdateStrategy::ManualDuration(Duration::ZERO));
+        let next = DebrisPose {
+            position: Vec3::new(-4.0, 2.0, 5.0),
+            rotation: Quat::from_rotation_x(0.7),
+        };
+        app.world_mut().entity_mut(carrier).insert(next);
+        app.update();
+        assert_eq!(
+            app.world().get::<Position>(ghost),
+            Some(&Position(next.position))
+        );
+        assert_eq!(
+            app.world().get::<Rotation>(ghost),
+            Some(&Rotation(next.rotation))
+        );
+        let centroid = app.world().get::<TreeBody>(root).unwrap().piece_centroid(1);
+        let prefix = app.world().get::<TreeBody>(root).unwrap().prefix.clone();
+        let children = app.world().get::<Children>(ghost).unwrap();
+        for &child in children {
+            let k = usize::from(app.world().get::<TreeSegment>(child).unwrap().0);
+            let expected = next.position + next.rotation * (Vec3::Y * prefix[k] - centroid);
+            assert!(
+                app.world()
+                    .get::<Position>(child)
+                    .unwrap()
+                    .0
+                    .abs_diff_eq(expected, 1e-5)
+            );
+        }
+        assert!(
+            app.world_mut()
+                .query::<&RigidBody>()
+                .iter(app.world())
+                .all(RigidBody::is_static)
+        );
+        let parts = &app.world().get::<crate::trees::TreeParts>(root).unwrap().0;
+        assert!(
+            parts
+                .iter()
+                .skip(1)
+                .all(|&part| app.world().get::<ColliderDisabled>(part).is_some())
+        );
+        app.world_mut().entity_mut(carrier).despawn();
+        app.update();
+        assert!(
+            app.world().get_entity(ghost).is_err(),
+            "disconnect removes the static stream copy"
+        );
     }
 }

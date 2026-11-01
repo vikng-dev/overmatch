@@ -199,10 +199,12 @@ fn fragment_collider() -> Collider {
 /// Every server: a carrier for each building piece and every moved piece's pose onto its carrier.
 /// Then the lever, when armed; a malformed value is refused.
 pub(super) fn install_server(app: &mut App) -> Result<(), LeverError> {
-    app.add_observer(carry_wall_piece).add_systems(
-        FixedPostUpdate,
-        publish_poses.in_set(crate::state::SimPhase::Publish),
-    );
+    app.add_observer(carry_wall_piece)
+        .add_observer(carry_tree_piece)
+        .add_systems(
+            FixedPostUpdate,
+            publish_poses.in_set(crate::state::SimPhase::Publish),
+        );
     let Some(lever) = Lever::parse(env_text(LEVER)?.as_deref())? else {
         return Ok(());
     };
@@ -251,6 +253,39 @@ fn carry_wall_piece(
             Replicate::to_clients(NetworkTarget::All),
             // ONE TIMELINE: a piece draws at the interpolation cursor, with the hulls and the
             // record's presentation (`buildings::view`), never at its pose's arrival.
+            InterpolationTarget::to_clients(NetworkTarget::All),
+        ))
+        .id();
+    commands.entity(added.entity).insert(Carrier(carrier));
+}
+
+/// A freed trunk uses the same one-pose interpolated carrier as a wall piece.
+fn carry_tree_piece(
+    added: On<Add, crate::trees::TreePiece>,
+    pieces: Query<(
+        &crate::trees::TreePiece,
+        Option<(&Position, &Rotation)>,
+        Has<DebrisPose>,
+    )>,
+    mut commands: Commands,
+) {
+    let (piece, pose, carrier) = pieces
+        .get(added.entity)
+        .expect("an added tree piece exists in its Add observer");
+    if carrier {
+        return;
+    }
+    let (position, rotation) =
+        pose.expect("every freed trunk is spawned with its complete physics pose");
+    let carrier = commands
+        .spawn((
+            Name::new("TreePieceCarrier"),
+            DebrisPose {
+                position: position.0,
+                rotation: rotation.0,
+            },
+            *piece,
+            Replicate::to_clients(NetworkTarget::All),
             InterpolationTarget::to_clients(NetworkTarget::All),
         ))
         .id();
@@ -470,16 +505,24 @@ fn build_view(
 /// A carrier's pose as its transform, from arrival; a lever carrier also takes the fixture mesh.
 fn attach_view(
     view: Option<Res<DebrisView>>,
-    arrived: Query<(Entity, &DebrisPose, Has<WallPiece>), Added<DebrisPose>>,
+    arrived: Query<
+        (
+            Entity,
+            &DebrisPose,
+            Has<WallPiece>,
+            Has<crate::trees::TreePiece>,
+        ),
+        Added<DebrisPose>,
+    >,
     mut commands: Commands,
 ) {
-    for (carrier, pose, wall) in &arrived {
+    for (carrier, pose, wall, tree) in &arrived {
         let mut entity = commands.entity(carrier);
         // A building piece's view may already hold it hidden until its fall is presented.
         entity
             .insert(pose.transform())
             .insert_if_new(Visibility::default());
-        if let (false, Some(view)) = (wall, view.as_deref()) {
+        if let (false, false, Some(view)) = (wall, tree, view.as_deref()) {
             entity.insert((
                 Mesh3d(view.mesh.clone()),
                 MeshMaterial3d(view.material.clone()),
@@ -524,6 +567,26 @@ mod tests {
         world.flush();
         let carrier = world.get::<Carrier>(piece).expect("the piece is carried").0;
         assert_eq!(world.get::<DebrisPose>(carrier).unwrap().position, at);
+        assert!(world.get::<Carrier>(carrier).is_none());
+        assert_eq!(world.query::<&DebrisPose>().iter(&world).count(), 1);
+    }
+
+    /// A trunk and its carrier share one interpolated pose path, with no recursive carrier.
+    /// Clients rely on the immutable map/cut identity travelling with that pose.
+    #[test]
+    fn a_trunk_gets_one_interpolated_carrier_and_the_carrier_none() {
+        let mut world = World::new();
+        world.add_observer(carry_tree_piece);
+        let marker = crate::trees::TreePiece { tree: 4, cut: 1 };
+        let at = Vec3::new(2.0, 3.0, -1.0);
+        let piece = world
+            .spawn((marker, Position(at), Rotation::default()))
+            .id();
+        world.flush();
+        let carrier = world.get::<Carrier>(piece).unwrap().0;
+        assert_eq!(world.get::<crate::trees::TreePiece>(carrier), Some(&marker));
+        assert_eq!(world.get::<DebrisPose>(carrier).unwrap().position, at);
+        assert!(world.get::<InterpolationTarget>(carrier).is_some());
         assert!(world.get::<Carrier>(carrier).is_none());
         assert_eq!(world.query::<&DebrisPose>().iter(&world).count(), 1);
     }
