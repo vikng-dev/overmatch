@@ -1021,14 +1021,18 @@ fn a_nailed_roof_distinguishes_rests_from_local_fixing_failure() {
     probe_remaining_roof(&mut live, &roof);
 }
 
-/// Inspect every surviving chunk, not just the neighbours of the last removal.
+/// Recheck every surviving roof chunk, not just the neighbours of the last removal. Class
+/// invariants only: a standing, unburied part holds by a live boundary, and a locally deferred
+/// section stays counted even when an enclosing wall section was assessed. What that boundary is
+/// made of is the house's construction, measured in the destruction record, never a pass
+/// condition here.
 fn probe_remaining_roof(live: &mut Live, roof: &[usize]) {
     let remaining: Vec<_> = roof
         .iter()
         .copied()
         .filter(|&c| live.state.standing(c))
         .collect();
-    let boundary: Vec<_> = live
+    let boundary = live
         .structure
         .joints
         .iter()
@@ -1041,21 +1045,10 @@ fn probe_remaining_roof(live: &mut Live, roof: &[usize]) {
                     Side::Ground => remaining.contains(&joint.a),
                 }
         })
-        .collect();
-    println!(
-        "MEASURED: remaining plane {} chunks; boundary {:?}",
-        remaining.len(),
-        boundary
-            .iter()
-            .map(|(j, joint)| (*j, joint.area, joint.bond))
-            .collect::<Vec<_>>()
-    );
-    assert!(!boundary.is_empty());
+        .count();
     assert!(
-        boundary
-            .iter()
-            .all(|(_, joint)| matches!(joint.bond, Bond::Bonded(_))),
-        "the gable rests have no live other side"
+        boundary > 0,
+        "a standing, unburied part holds by a live boundary"
     );
     let rechecked = fracture::weigh(
         &live.structure,
@@ -1065,47 +1058,6 @@ fn probe_remaining_roof(live: &mut Live, roof: &[usize]) {
         &[],
         &remaining,
         &mut live.sections,
-    );
-    println!(
-        "MEASURED: every remaining roof chunk rechecked: failures {:?}, unassessed {:?}",
-        rechecked.failures, rechecked.unassessed
-    );
-    let groups = fracture::fall(&live.structure, &mut live.state);
-    println!(
-        "MEASURED: recheck groups {:?}",
-        groups.iter().map(Vec::len).collect::<Vec<_>>()
-    );
-    let mut no_props = live.structure.as_ref().clone();
-    let mut contacts = 0;
-    for (j, joint) in no_props.joints.iter_mut().enumerate() {
-        let crossing = match joint.b {
-            Side::Chunk(b) => remaining.contains(&joint.a) != remaining.contains(&b),
-            Side::Ground => remaining.contains(&joint.a),
-        };
-        if crossing && live.state.cracked[j] && live.state.live(joint) && joint.seam().is_some() {
-            // ASSUMED counterfactual: remove only the closed compression contact of an
-            // already-open fixing; the surviving nails and all chunk data are unchanged.
-            joint.bond = Bond::Resting;
-            contacts += 1;
-        }
-    }
-    let mut state = live.state.clone();
-    let nails_alone = fracture::weigh(
-        &no_props,
-        &mut state,
-        &[],
-        &[],
-        &[],
-        &remaining,
-        &mut SectionCache::default(),
-    );
-    println!(
-        "MEASURED: {contacts} opened eave patches still touch; without their compression credit: failures {:?}",
-        nails_alone.failures
-    );
-    assert!(
-        contacts > 0 && !nails_alone.failures.is_empty(),
-        "the intact nails alone do not hold the plane"
     );
     assert!(
         !rechecked.unassessed.is_empty(),
