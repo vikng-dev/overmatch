@@ -395,9 +395,8 @@ fn present_record(
         );
         holes.0.resize(shape.fate.len(), Vec::new());
         for event in events {
-            if shape.apply(event)
-                && let WallEvent::Hole(c, hole) = event
-            {
+            shape.apply(event);
+            if let WallEvent::Hole(c, hole) = event {
                 holes.0[usize::from(c)].push(hole);
             }
         }
@@ -418,6 +417,11 @@ fn present_record(
             }
         }
     }
+    assert!(
+        events.is_empty(),
+        "a wall record names only buildings this map places: {:?}",
+        events.keys().collect::<Vec<_>>()
+    );
 }
 
 /// The stores a building's own material is made in ([`crate::building_surface::holed`]): absent

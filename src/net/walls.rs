@@ -18,7 +18,11 @@ use bevy_replicon::prelude::{Diffable, EntityCommandsDiffExt};
 use lightyear::prelude::*;
 use serde::{Deserialize, Serialize};
 
-use crate::buildings::breakage::{WallEntry, WallLawSet, WallRecord, WallReplicaSet};
+use crate::buildings::breakage::{
+    Breakage, Layout, WallEntry, WallLawSet, WallRecord, WallReplicaSet,
+};
+use crate::scatter::MapInstance;
+use std::collections::HashMap;
 
 /// Every change so far, in authority order. Appended only through replicon's diff path,
 /// `Diffable::HISTORY_LEN` left at its default (64).
@@ -83,8 +87,14 @@ fn publish_record(
 /// A ledger shorter than what was copied from the same entity is a malformed peer record: the
 /// authority only appends, and a replicon snapshot carries its whole list. It is logged, and the
 /// record is replaced by the list as it now stands, as for another link's.
+///
+/// Each new entry is checked against this map's buildings before the record holds it
+/// ([`WallEntry::admitted`]): one naming a building the map does not place, or an element, chunk
+/// or joint past its layout, is a malformed peer entry, refused and logged with its
+/// [`crate::buildings::breakage::WallEntryError`], so every record the derivations read holds only what they can apply.
 fn receive_ledger(
     ledgers: Query<(Entity, &WallLedger)>,
+    buildings: Query<(&MapInstance, &Breakage)>,
     mut copied: Local<(Option<Entity>, usize)>,
     mut record: ResMut<WallRecord>,
 ) {
@@ -111,7 +121,16 @@ fn receive_ledger(
         *copied = (Some(ledger), 0);
     }
     if entries.0.len() > copied.1 {
-        record.entries.extend_from_slice(&entries.0[copied.1..]);
+        let layouts: HashMap<u16, &Layout> = buildings
+            .iter()
+            .map(|(identity, breakage)| (identity.ordinal, &breakage.kind.layout))
+            .collect();
+        for entry in &entries.0[copied.1..] {
+            match entry.admitted(|building| layouts.get(&building).copied()) {
+                Ok(entry) => record.entries.push(entry),
+                Err(error) => error!("wall ledger: peer entry {entry:?} refused: {error}"),
+            }
+        }
         copied.1 = entries.0.len();
     }
 }
@@ -119,7 +138,7 @@ fn receive_ledger(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::buildings::breakage::{Hole, WallEvent};
+    use crate::buildings::breakage::{Hole, WallEntryError, WallEvent};
 
     fn entry(event: WallEvent, tick: u32) -> WallEntry {
         WallEntry {
@@ -129,6 +148,57 @@ mod tests {
         }
     }
 
+    /// A replica's receive edge with the shipped house placed as building 1 (fixture ordinal).
+    fn replica() -> App {
+        let mut app = App::new();
+        app.init_resource::<WallRecord>()
+            .add_systems(Update, receive_ledger);
+        app.world_mut().spawn((
+            MapInstance {
+                id: "fixture_house".to_owned(),
+                ordinal: 1,
+            },
+            Breakage::new(crate::buildings::tests::shipped_house(), 1.0),
+        ));
+        app
+    }
+
+    /// A PEER ENTRY THE MAP CANNOT HOLD NEVER REACHES THE RECORD: one naming a building the map
+    /// does not place, or an element, chunk or joint past its layout, is refused where it
+    /// arrives, and the entries around it still land in order. The derivations rely on it: they
+    /// apply every record entry by `expect`, so an admitted bad entry would panic a replica, and
+    /// one silently consumed would leave its building half-applied.
+    #[test]
+    fn a_peer_entry_the_map_cannot_hold_is_refused_at_receipt() {
+        let mut app = replica();
+        let unknown = WallEntry {
+            building: 7,
+            ..entry(WallEvent::Swap(0), 4)
+        };
+        let ledger = vec![
+            entry(WallEvent::Swap(0), 3),
+            unknown,
+            entry(WallEvent::Dust(u16::MAX), 5),
+            entry(WallEvent::Crack(u16::MAX), 6),
+            entry(WallEvent::Crack(2), 7),
+        ];
+        app.world_mut().spawn(WallLedger(ledger));
+        app.update();
+        assert_eq!(
+            app.world().resource::<WallRecord>().entries,
+            vec![entry(WallEvent::Swap(0), 3), entry(WallEvent::Crack(2), 7)]
+        );
+        let layout = &crate::buildings::tests::shipped_house().layout;
+        assert_eq!(
+            unknown.admitted(|_| None),
+            Err(WallEntryError::UnknownBuilding(7))
+        );
+        assert_eq!(
+            entry(WallEvent::Fall(u16::MAX), 0).admitted(|_| Some(layout)),
+            Err(WallEntryError::OutsideLayout(1, WallEvent::Fall(u16::MAX)))
+        );
+    }
+
     /// THE RECORD IS THE LEDGER, ENTRY FOR ENTRY, AND ANOTHER LEDGER REPLACES IT: a link's ledger
     /// growing by diff reaches the record in order; the next link's ledger (a new entity, shorter)
     /// replaces the record and moves its generation, so every building derived from the old one
@@ -136,9 +206,7 @@ mod tests {
     /// the old record would keep a previous server's holes.
     #[test]
     fn the_record_follows_the_ledger_and_another_ledger_replaces_it() {
-        let mut app = App::new();
-        app.init_resource::<WallRecord>()
-            .add_systems(Update, receive_ledger);
+        let mut app = replica();
         let first = app
             .world_mut()
             .spawn(WallLedger(vec![entry(WallEvent::Swap(0), 3)]))

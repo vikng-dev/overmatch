@@ -280,6 +280,19 @@ impl Layout {
         }
     }
 
+    /// Whether `event` names an element, law chunk or joint of this layout: what a record entry
+    /// for this building must name ([`Shape::apply`]).
+    pub(crate) fn admits(&self, event: WallEvent) -> bool {
+        let within = |len: usize, i: u16| usize::from(i) < len;
+        match event {
+            WallEvent::Swap(e) => within(self.elements.len(), e),
+            WallEvent::Dust(c) | WallEvent::Fall(c) | WallEvent::Hole(c, _) => {
+                within(self.chunks.len(), c)
+            }
+            WallEvent::Crack(j) => within(self.joints.len(), j),
+        }
+    }
+
     /// The law chunks of `element`, empty for one that never breaks.
     pub(crate) fn chunks_of(&self, element: usize) -> std::ops::Range<usize> {
         self.elements[element].map_or(0..0, |(a, b)| usize::from(a)..usize::from(b))
@@ -341,6 +354,47 @@ pub(crate) struct WallEntry {
     pub(crate) tick: u32,
 }
 
+/// Why a peer's wall entry is refused where it arrives (`net::walls`), before any record holds it.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) enum WallEntryError {
+    /// The entry names a building ordinal this map does not place.
+    UnknownBuilding(u16),
+    /// The entry's event names an element, chunk or joint past its building's layout.
+    OutsideLayout(u16, WallEvent),
+}
+
+impl std::fmt::Display for WallEntryError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::UnknownBuilding(building) => {
+                write!(f, "building {building} is not placed by this map")
+            }
+            Self::OutsideLayout(building, event) => {
+                write!(f, "{event:?} lies outside building {building}'s layout")
+            }
+        }
+    }
+}
+
+impl std::error::Error for WallEntryError {}
+
+impl WallEntry {
+    /// The entry checked against the map's buildings by ordinal: the one gate a peer's entry
+    /// passes before a record holds it.
+    pub(crate) fn admitted<'a>(
+        self,
+        layout_of: impl Fn(u16) -> Option<&'a Layout>,
+    ) -> Result<Self, WallEntryError> {
+        let layout =
+            layout_of(self.building).ok_or(WallEntryError::UnknownBuilding(self.building))?;
+        if layout.admits(self.event) {
+            Ok(self)
+        } else {
+            Err(WallEntryError::OutsideLayout(self.building, self.event))
+        }
+    }
+}
+
 /// Every change to every building so far, in authority order (module doc). `generation` moves
 /// when the record is replaced (a replica's next link): whoever derives from it starts over.
 #[derive(Resource, Debug, Default, Clone, PartialEq)]
@@ -367,19 +421,39 @@ impl Shape {
         }
     }
 
-    /// Apply one recorded change. An index past the layout is refused (logged): the map digest
-    /// the handshake compares makes it a broken peer, never a state to clamp into. A hole leaves
-    /// the shape as it is (module doc).
-    pub(crate) fn apply(&mut self, event: WallEvent) -> bool {
-        let slot = |len: usize, i: u16| (usize::from(i) < len).then_some(usize::from(i));
+    /// Apply one recorded change. A record holds only events its building's layout admits
+    /// ([`Layout::admits`]): the authority's laws write them, and a replica refuses a peer's
+    /// others where they arrive ([`WallEntryError`]). A hole leaves the shape as it is (module
+    /// doc).
+    pub(crate) fn apply(&mut self, event: WallEvent) {
+        let slot = |len: usize, i: u16| {
+            assert!(
+                usize::from(i) < len,
+                "a wall record holds only events inside its building's layout: {event:?}"
+            );
+            usize::from(i)
+        };
         match event {
-            WallEvent::Swap(e) => slot(self.swapped.len(), e).map(|e| self.swapped[e] = true),
-            WallEvent::Dust(c) => slot(self.fate.len(), c).map(|c| self.fate[c] = Fate::Dust),
-            WallEvent::Fall(c) => slot(self.fate.len(), c).map(|c| self.fate[c] = Fate::Fallen),
-            WallEvent::Crack(j) => slot(self.cracked.len(), j).map(|j| self.cracked[j] = true),
-            WallEvent::Hole(c, _) => slot(self.fate.len(), c).map(|_| ()),
+            WallEvent::Swap(e) => {
+                let e = slot(self.swapped.len(), e);
+                self.swapped[e] = true;
+            }
+            WallEvent::Dust(c) => {
+                let c = slot(self.fate.len(), c);
+                self.fate[c] = Fate::Dust;
+            }
+            WallEvent::Fall(c) => {
+                let c = slot(self.fate.len(), c);
+                self.fate[c] = Fate::Fallen;
+            }
+            WallEvent::Crack(j) => {
+                let j = slot(self.cracked.len(), j);
+                self.cracked[j] = true;
+            }
+            WallEvent::Hole(c, _) => {
+                slot(self.fate.len(), c);
+            }
         }
-        .is_some()
     }
 
     /// Whether law chunk `c` stands as a collider of its own: its element swapped, it standing.
@@ -1866,9 +1940,8 @@ fn derive_from_record(
         let live = breakage.live();
         let mut shape = live.shape();
         for event in events {
-            if !shape.apply(event) {
-                error!("buildings: record event {event:?} names nothing of building {identity:?}");
-            } else if let WallEvent::Hole(c, hole) = event {
+            shape.apply(event);
+            if let WallEvent::Hole(c, hole) = event {
                 live.holes[usize::from(c)].push(hole);
             }
         }
@@ -1876,9 +1949,11 @@ fn derive_from_record(
         live.state.fate = shape.fate;
         live.state.cracked = shape.cracked;
     }
-    for ordinal in by_ordinal.keys() {
-        error!("buildings: the record names building {ordinal}, which this map does not place");
-    }
+    assert!(
+        by_ordinal.is_empty(),
+        "a wall record names only buildings this map places: {:?}",
+        by_ordinal.keys().collect::<Vec<_>>()
+    );
     applied.1 = record.entries.len();
 }
 
