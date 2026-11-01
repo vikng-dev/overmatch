@@ -304,6 +304,16 @@ impl GunRegistry {
         })
     }
 
+    /// Every fired configuration, identified by both gun and round. Instruments must retain the
+    /// gun: several guns may chamber the same round at different muzzle speeds.
+    pub(crate) fn fired_rounds(&self) -> impl Iterator<Item = (&str, &str, Round)> {
+        self.guns.iter().flat_map(|(gun_key, gun)| {
+            gun.ammunition
+                .iter()
+                .map(move |(round_key, round)| (gun_key.as_str(), round_key.as_str(), *round))
+        })
+    }
+
     /// Round `round` fired from gun `gun`, at the speed its ammunition table gives it; a hard error
     /// naming an unknown gun, an unknown round, or a round the gun does not chamber.
     pub(crate) fn round(&self, gun: &str, round: &str) -> Result<Round, GunError> {
@@ -442,8 +452,8 @@ mod tests {
         }
     }
 
-    /// Every round the selected sheet stows reads, as spawn resolves it, exactly as the one gun
-    /// whose table lists it fires it: the registry-to-mount resolution every shipped sheet relies
+    /// Every round the selected sheet stows reads, as spawn resolves it, exactly as its mount's gun
+    /// fires it: the registry-to-mount resolution every shipped sheet relies
     /// on, a class invariant that names no round and pins no value.
     #[test]
     fn every_stowed_round_reads_through_its_mount_gun() {
@@ -457,11 +467,6 @@ mod tests {
                 let key = stowed.round.as_str();
                 assert_eq!(
                     guns.round(&weapon.gun, key).as_ref(),
-                    Ok(&round),
-                    "{mount}: {key}"
-                );
-                assert_eq!(
-                    guns.round_by_key(key).as_ref(),
                     Ok(&round),
                     "{mount}: {key}"
                 );
@@ -617,6 +622,19 @@ mod tests {
             &rounds,
         )
         .expect("the fixture guns load");
+        // The game's damage-model instruments must exercise both speeds of shared ammunition.
+        let configurations: Vec<_> = guns
+            .fired_rounds()
+            .map(|(gun, round, fired)| (gun, round, fired.muzzle_speed))
+            .collect();
+        assert_eq!(
+            configurations,
+            [
+                ("Long", "Other", 700.0),
+                ("Long", "Probe", 800.0),
+                ("Short", "Probe", 600.0),
+            ]
+        );
         assert_eq!(guns.round("Long", "Probe").unwrap().muzzle_speed, 800.0);
         assert_eq!(guns.round("Short", "Probe").unwrap().muzzle_speed, 600.0);
         assert_eq!(guns.round_by_key("Other").unwrap().muzzle_speed, 700.0);

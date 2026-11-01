@@ -66,6 +66,8 @@ use crate::tank::{TankSimSource, spawn_headless_tank};
 #[derive(Clone, Copy, Debug)]
 pub struct ProbeRound {
     pub name: &'static str,
+    /// The firing gun; absent for separately authored hypothetical probes.
+    pub gun: Option<&'static str>,
     /// Metres.
     pub caliber: f32,
     /// Kilograms.
@@ -78,6 +80,13 @@ pub struct ProbeRound {
 }
 
 impl ProbeRound {
+    fn label(&self) -> String {
+        match self.gun {
+            Some(gun) => format!("{gun}/{}", self.name),
+            None => self.name.to_owned(),
+        }
+    }
+
     /// What the capability law and the crossing mechanism read off this round.
     pub(super) fn body(&self) -> RoundBody {
         RoundBody {
@@ -99,6 +108,7 @@ impl ProbeRound {
 /// shipped round; their nose factor 0.3 is a labelled fixture value.
 const HYPOTHETICAL_PROBES: &[ProbeRound] = &[
     ProbeRound {
+        gun: None,
         name: "20mm (hypothetical)",
         caliber: 0.020,
         mass: 0.148,
@@ -106,6 +116,7 @@ const HYPOTHETICAL_PROBES: &[ProbeRound] = &[
         speed: 830.0,
     },
     ProbeRound {
+        gun: None,
         name: "37mm (hypothetical)",
         caliber: 0.037,
         mass: 0.685,
@@ -113,6 +124,7 @@ const HYPOTHETICAL_PROBES: &[ProbeRound] = &[
         speed: 762.0,
     },
     ProbeRound {
+        gun: None,
         name: "57mm (hypothetical)",
         caliber: 0.057,
         mass: 2.87,
@@ -120,6 +132,7 @@ const HYPOTHETICAL_PROBES: &[ProbeRound] = &[
         speed: 815.0,
     },
     ProbeRound {
+        gun: None,
         name: "75mm (hypothetical)",
         caliber: 0.075,
         mass: 6.8,
@@ -127,6 +140,7 @@ const HYPOTHETICAL_PROBES: &[ProbeRound] = &[
         speed: 790.0,
     },
     ProbeRound {
+        gun: None,
         name: "122mm (hypothetical)",
         caliber: 0.122,
         mass: 25.0,
@@ -136,30 +150,31 @@ const HYPOTHETICAL_PROBES: &[ProbeRound] = &[
 ];
 
 /// The guns every opening is measured against, ASCENDING by caliber (the sweep takes the first that
-/// admits, so order is load-bearing; ties keep name order): every shipped round as its gun fires
-/// it — the body that meets the plate, at its gun's muzzle speed, named by its key, resolved
+/// admits, so order is load-bearing; ties keep gun/name order): every shipped round as each gun fires
+/// it — the body that meets the plate, at its gun's muzzle speed, identified by gun and round, resolved
 /// through the gun registry so the instrument measures the configuration the game fires — and the
 /// [`HYPOTHETICAL_PROBES`].
 pub fn probe_rounds() -> &'static [ProbeRound] {
     static PROBES: std::sync::LazyLock<Vec<ProbeRound>> = std::sync::LazyLock::new(|| {
         let guns = crate::guns::GunRegistry::shipped();
-        let mut probes: Vec<ProbeRound> = crate::rounds::RoundRegistry::shipped()
-            .keys()
-            .map(|key| {
-                let round = guns
-                    .round_by_key(key)
-                    .expect("the gun registry's load proves every shipped round is chambered");
-                ProbeRound {
-                    name: key,
-                    caliber: round.penetrator.caliber,
-                    mass: round.penetrator.mass,
-                    nose_factor: round.penetrator.nose_factor,
-                    speed: round.muzzle_speed,
-                }
+        let mut probes: Vec<ProbeRound> = guns
+            .fired_rounds()
+            .map(|(gun, key, round)| ProbeRound {
+                name: key,
+                gun: Some(gun),
+                caliber: round.penetrator.caliber,
+                mass: round.penetrator.mass,
+                nose_factor: round.penetrator.nose_factor,
+                speed: round.muzzle_speed,
             })
             .chain(HYPOTHETICAL_PROBES.iter().copied())
             .collect();
-        probes.sort_by(|a, b| a.caliber.total_cmp(&b.caliber).then(a.name.cmp(b.name)));
+        probes.sort_by(|a, b| {
+            a.caliber
+                .total_cmp(&b.caliber)
+                .then(a.gun.cmp(&b.gun))
+                .then(a.name.cmp(b.name))
+        });
         probes
     });
     &PROBES
@@ -1741,7 +1756,7 @@ pub fn render(report: &Report) -> String {
             region.entry_local,
             region
                 .admitting
-                .map_or("nothing".to_owned(), |i| probe_rounds()[i].name.to_owned()),
+                .map_or("nothing".to_owned(), |i| probe_rounds()[i].label()),
         );
     }
     out
@@ -1777,8 +1792,7 @@ fn render_region(out: &mut String, region: &Region) {
         region
             .admitting
             .map_or("(closed to every gun)".to_owned(), |i| probe_rounds()[i]
-                .name
-                .to_owned()),
+                .label()),
     );
     let _ = writeln!(out, "\n| round | η | capability | admits |");
     let _ = writeln!(out, "|---|---|---|---|");
@@ -1786,7 +1800,7 @@ fn render_region(out: &mut String, region: &Region) {
         let _ = writeln!(
             out,
             "| {} | {:.3} | {:.0} | {} |",
-            round.name,
+            round.label(),
             measurement.eta,
             measurement.capability,
             if measurement.admits() { "yes" } else { "no" },
