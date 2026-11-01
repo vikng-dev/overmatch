@@ -810,6 +810,8 @@ each section holds; it confers no tensile anchor, and zero-reaction speculative 
 become it. Every section is assessed, a group touching along its whole length included; an even
 landing loads none, since each chunk's share meets its own inertia. Punch rings grow from the
 chunks external loads reach, never from the frame's inertial loads, which reach every chunk.
+Opposed sources seed separate coherent patches (positive work along a source resultant); their
+union remains a candidate for distributed loads that cooperate on one ring.
 The energy terms (a section's `E_g`, a rest's lift capacity and shove work) read the group's
 field: gravity on a standing group, its frame's body force on a moving one, so a group lying on
 its support feels its weight and one in free fall feels none. A failure that frees a group in a

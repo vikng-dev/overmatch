@@ -1628,7 +1628,7 @@ pub(crate) fn structural(
     // A punch ring grows from where an external blow lands. A group frame's inertial blows
     // reach every chunk of its group; seeded there, the first ring would be the whole group,
     // which has no boundary, and no local punch would be read.
-    let struck_at = pushed_by(structure, loads, external);
+    let struck_at = ring_seeds(structure, loads, |load| load.blow);
     // Every pass cracks an intact joint (asserted where it cracks) and none closes again, so
     // the passes end.
     loop {
@@ -1988,11 +1988,7 @@ pub(crate) fn weigh(
     let incident = incident(structure);
     weighed.steps += structure.joints.len();
     // Rings grow from external presses, as the push check's grow from external blows.
-    let pressed: Vec<usize> = loads
-        .iter()
-        .filter(|load| load.press != Vec3::ZERO && external(load))
-        .map(|load| load.chunk)
-        .collect();
+    let pressed = ring_seeds(structure, loads, |load| load.press);
     // Every pass cracks an intact joint (asserted where it cracks) and none closes again, so
     // the passes end.
     loop {
@@ -2896,70 +2892,110 @@ fn incident(structure: &Structure) -> Vec<Vec<usize>> {
     incident
 }
 
+/// External resultants on loaded chunks, in source order. Inertial response is not a source
+/// patch: it reaches every chunk, while a punch starts where outside loads enter the group.
+fn ring_seeds(
+    structure: &Structure,
+    loads: &[Load],
+    force: impl Fn(&Load) -> Vec3,
+) -> Vec<(usize, Vec3)> {
+    let mut pushes = vec![Vec3::ZERO; structure.chunks.len()];
+    let mut chunks = Vec::new();
+    for load in loads.iter().filter(|load| external(load)) {
+        let push = force(load);
+        if push != Vec3::ZERO {
+            if !chunks.contains(&load.chunk) {
+                chunks.push(load.chunk);
+            }
+            pushes[load.chunk] += push;
+        }
+    }
+    chunks.into_iter().map(|c| (c, pushes[c])).collect()
+}
+
 /// How many rings of bonded neighbours a punch-ring candidate grows past the loaded chunks
 /// (Resolution). The laws compare these candidates by demand over capacity; they do not search
 /// every connected group. Nonuniform seam strengths or concave groups need not have increasing
 /// capacity as a candidate grows, so this bound can omit a weaker ring.
 const RING_GROWTH: usize = 2;
 
-/// The punch-ring candidates about the standing chunks of `seeds`: the seeds, then the seeds grown
+/// The punch-ring candidates about coherent loaded patches and their union: each patch, then it grown
 /// by one and by [`RING_GROWTH`] rings of neighbours through `graph`'s intact bonded joints, each
 /// split into its bonded components, each component ascending, in growth order and without
 /// repeats. Adds the chunks it reaches to `steps`.
 fn ring_groups(
     state: &WallState,
     (neighbours, ..): &Graph,
-    seeds: &[usize],
+    seeds: &[(usize, Vec3)],
     steps: &mut usize,
 ) -> Vec<Vec<usize>> {
-    let mut grown = vec![false; neighbours.len()];
-    let mut members: Vec<usize> = Vec::new();
-    for &chunk in seeds {
-        if state.standing(chunk) && !grown[chunk] {
-            grown[chunk] = true;
-            members.push(chunk);
+    let mut groups: Vec<Vec<usize>> = Vec::new();
+    // A coherent loaded patch does positive work along one source's resultant. Opposed
+    // sources need separate patches; the union also permits distributed loads to cooperate.
+    let mut patches = Vec::new();
+    for &(_, push) in seeds {
+        let patch: Vec<usize> = seeds
+            .iter()
+            .filter(|(_, other)| other.dot(push) > 0.0)
+            .map(|&(chunk, _)| chunk)
+            .collect();
+        if !patch.is_empty() && !patches.contains(&patch) {
+            patches.push(patch);
         }
     }
-    let mut frontier = members.clone();
-    let mut groups: Vec<Vec<usize>> = Vec::new();
-    for ring in 0..=RING_GROWTH {
-        if ring > 0 {
-            let mut next = Vec::new();
-            for &chunk in &frontier {
-                for &(neighbour, _) in &neighbours[chunk] {
-                    if !grown[neighbour] && state.standing(neighbour) {
-                        grown[neighbour] = true;
-                        next.push(neighbour);
-                    }
-                }
+    let union: Vec<usize> = seeds.iter().map(|&(chunk, _)| chunk).collect();
+    if !patches.contains(&union) {
+        patches.push(union);
+    }
+    for seeds in &patches {
+        let mut grown = vec![false; neighbours.len()];
+        let mut members: Vec<usize> = Vec::new();
+        for &chunk in seeds {
+            if state.standing(chunk) && !grown[chunk] {
+                grown[chunk] = true;
+                members.push(chunk);
             }
-            if next.is_empty() {
-                break;
-            }
-            members.extend_from_slice(&next);
-            frontier = next;
         }
-        let mut seen = vec![false; neighbours.len()];
-        for &start in &members {
-            if seen[start] {
-                continue;
-            }
-            seen[start] = true;
-            let mut component = vec![start];
-            let mut next = 0;
-            while let Some(&chunk) = component.get(next) {
-                next += 1;
-                *steps += 1;
-                for &(neighbour, _) in &neighbours[chunk] {
-                    if grown[neighbour] && !seen[neighbour] {
-                        seen[neighbour] = true;
-                        component.push(neighbour);
+        let mut frontier = members.clone();
+        for ring in 0..=RING_GROWTH {
+            if ring > 0 {
+                let mut next = Vec::new();
+                for &chunk in &frontier {
+                    for &(neighbour, _) in &neighbours[chunk] {
+                        if !grown[neighbour] && state.standing(neighbour) {
+                            grown[neighbour] = true;
+                            next.push(neighbour);
+                        }
                     }
                 }
+                if next.is_empty() {
+                    break;
+                }
+                members.extend_from_slice(&next);
+                frontier = next;
             }
-            component.sort_unstable();
-            if !groups.contains(&component) {
-                groups.push(component);
+            let mut seen = vec![false; neighbours.len()];
+            for &start in &members {
+                if seen[start] {
+                    continue;
+                }
+                seen[start] = true;
+                let mut component = vec![start];
+                let mut next = 0;
+                while let Some(&chunk) = component.get(next) {
+                    next += 1;
+                    *steps += 1;
+                    for &(neighbour, _) in &neighbours[chunk] {
+                        if grown[neighbour] && !seen[neighbour] {
+                            seen[neighbour] = true;
+                            component.push(neighbour);
+                        }
+                    }
+                }
+                component.sort_unstable();
+                if !groups.contains(&component) {
+                    groups.push(component);
+                }
             }
         }
     }
@@ -4030,6 +4066,32 @@ mod tests {
         assert_eq!(changes.groups.len(), 2);
     }
 
+    /// Opposed axial contacts separate a bonded pair even though their resultant is zero.
+    /// The moving-group law must assess each loaded neighbourhood, not just their union.
+    /// Fixture: binary-exact geometry keeps this a pull with no bending axis.
+    #[test]
+    fn opposed_contacts_pull_a_pair_apart() {
+        let mut slab = unsupported_slab(2);
+        for (c, chunk) in slab.chunks.iter_mut().enumerate() {
+            chunk.centroid = Vec3::new(c as f32 * 0.25, 0.5, 0.0);
+            chunk.volume = 0.015625;
+            chunk.mass = chunk.material.density * chunk.volume;
+        }
+        slab.joints[0].centroid = Vec3::new(0.125, 0.5, 0.0);
+        slab.joints[0].area = 0.0625;
+        let mut left = slab_contact(&slab, 0.0);
+        left.blow = Vec3::NEG_X * 1000.0;
+        let right = Load {
+            chunk: 1,
+            at: slab.chunks[1].centroid,
+            blow: -left.blow,
+            ..left
+        };
+        let (state, changes) = assess_slab(slab, &[left, right]);
+        assert_eq!(state.cracked, vec![true]);
+        assert_eq!(changes.groups.len(), 2);
+    }
+
     /// A group touching along its whole length still has sections: its contacts are known
     /// loads, and one reference fixes the side each section holds. Rooting every loaded chunk
     /// left this slab with no section to assess, however hard its end was struck. ASSUMED
@@ -4320,7 +4382,7 @@ mod tests {
                     }
                 }
             }
-            let pushed = pushed(structure, loads);
+            let pushed = ring_seeds(structure, loads, |load| load.blow);
             for group in ring_groups(state, &graph, &pushed, &mut 0) {
                 if let Some(failure) =
                     ring_failure(structure, state, &incident(structure), &group, loads)
