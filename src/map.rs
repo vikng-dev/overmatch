@@ -584,6 +584,16 @@ pub(crate) fn parse(text: &str, library: &str, path: &Path) -> MapManifest {
             path.display(),
         );
     }
+    for instance in &level.instances {
+        for (axis, value) in instance.scale.iter().enumerate() {
+            assert!(
+                value.is_finite() && *value > 0.0,
+                "map: {} instance {:?} field scale[{axis}] = {value}; author a finite positive scale on every axis",
+                path.display(),
+                instance.id
+            );
+        }
+    }
     let heightmap = level.terrain.heightmap;
     let side_m = heightmap.world_extent_xz.side_m(path);
     let rows = heightmap.row_order(path);
@@ -716,6 +726,28 @@ pub(crate) mod tests {
         manifest.trees = TreeLibrary::load(&shipped_assets(), ["fir_1"]);
         manifest.buildings = BuildingLibrary::load(&shipped_assets(), ["house_1"]);
         manifest
+    }
+
+    /// The collider-spawning layer relies on the file gate refusing collapsed or inverted
+    /// placements. Every refusal must identify the manifest, instance, field and repair.
+    #[test]
+    fn instance_scale_is_refused_at_the_manifest_with_its_repair() {
+        for axis in 0..3 {
+            for bad in [0.0, -1.0] {
+                let mut record: serde_json::Value = serde_json::from_str(HOUSE_INSTANCE).unwrap();
+                record["scale"][axis] = serde_json::json!(bad);
+                let text = manifest_text(500.0, 0.0, 100.0, "+Z")
+                    .replace(r#""instances":[]"#, &format!(r#""instances":[{record}]"#));
+                let refused = std::panic::catch_unwind(|| {
+                    parse(&text, HOUSE_LIBRARY, Path::new("fixture/level.json"));
+                })
+                .expect_err("bad scale must fail before a manifest reaches scatter");
+                let reason = refused.downcast_ref::<String>().unwrap();
+                for required in ["fixture/level.json", "house_0001", "scale[", "author"] {
+                    assert!(reason.contains(required), "{reason}");
+                }
+            }
+        }
     }
 
     /// THE MANIFEST IS THE MAP (`terrain_grid::decode_height_grid`): the shipped tree must carry
