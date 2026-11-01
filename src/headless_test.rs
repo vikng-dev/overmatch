@@ -2000,6 +2000,7 @@ fn a_main_gun_round_damages_a_tank_on_the_shipped_map() {
 
     app.world_mut().trigger(FireShell {
         effects: crate::rounds::FlightEffects::fixture_traced(),
+        muzzle: crate::guns::MuzzleEmission::fixture_cannon(),
         origin,
         direction,
         speed: 755.0,

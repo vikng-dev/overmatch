@@ -66,6 +66,7 @@ mod tests {
     fn fire_shell(catch_up: u32, shot: Option<crate::ShotId>) -> FireShell {
         FireShell {
             effects: crate::rounds::FlightEffects::fixture_traced(),
+            muzzle: crate::guns::MuzzleEmission::fixture_cannon(),
             origin: MUZZLE,
             direction: Dir3::NEG_Z,
             speed: 755.0,

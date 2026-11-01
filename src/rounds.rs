@@ -119,6 +119,8 @@ pub(crate) struct Round {
     pub(crate) fuze_mode: u8,
     /// Authored view-only emissions, carried through both fire paths from round data.
     pub(crate) effects: FlightEffects,
+    /// The firing gun's authored muzzle emission ([`crate::guns::MuzzleEmission`]), view only.
+    pub(crate) muzzle: crate::guns::MuzzleEmission,
 }
 
 /// One round as its file and its type resolve it, before a gun gives it a muzzle speed: its
@@ -143,7 +145,11 @@ impl RoundFacts {
     /// The round fired at `muzzle_speed` (m/s), or why the capability law cannot state it there:
     /// the body, the penetrator and a burst's nose piece each inside the law's domain at that speed
     /// ([`round_in_domain`]), so a round outside it never reaches the march.
-    pub(crate) fn fired_at(&self, muzzle_speed: f32) -> Result<Round, String> {
+    pub(crate) fn fired_at(
+        &self,
+        muzzle_speed: f32,
+        muzzle: crate::guns::MuzzleEmission,
+    ) -> Result<Round, String> {
         round_in_domain(self.body, muzzle_speed).map_err(|reason| {
             format!(
                 "the round (nose {:?}) is outside the capability law's domain: {reason}",
@@ -169,6 +175,7 @@ impl RoundFacts {
             burst: self.burst,
             fuze_mode: self.fuze.as_ref().map_or(0, |f| f.default_mode),
             effects: self.effects,
+            muzzle,
         })
     }
 }
@@ -666,7 +673,7 @@ pub(crate) mod tests {
             .map_err(|err| err.to_string())?
             .get("Probe")
             .map_err(|err| err.to_string())?
-            .fired_at(700.0)
+            .fired_at(700.0, crate::guns::MuzzleEmission::fixture_cannon())
     }
 
     /// Every shipped round loads, with a core that states its facts and a display name of its own

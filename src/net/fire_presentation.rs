@@ -1173,6 +1173,7 @@ mod tests {
     fn local_and_reconstructed_own_rounds_both_count() {
         let fire = |origin| FireShell {
             effects: crate::rounds::FlightEffects::fixture_traced(),
+            muzzle: crate::guns::MuzzleEmission::fixture_cannon(),
             origin: Vec3::ZERO,
             direction: Dir3::NEG_Z,
             speed: 755.0,

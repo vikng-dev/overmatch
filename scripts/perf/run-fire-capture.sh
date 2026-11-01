@@ -15,8 +15,9 @@
 #
 # Usage: run-fire-capture.sh <out-dir> [condition ...]
 # Conditions are run names, each one fresh client playing the shipped game (default: one run,
-# `shipped`); several names are repeated runs, for run-to-run spread. Main-gun muzzle lights cast
-# shadows and MG rounds' do not (`vfx::muzzle`, `on_mg_fire`).
+# `shipped`); several names are repeated runs, for run-to-run spread. A muzzle light casts shadows
+# when its gun's authored lifetime or refire interval is long enough (`vfx::muzzle`,
+# `spawn_muzzle_light`): the shipped main gun's do, the shipped machine gun's do not.
 #
 # Validity conditions are the frame sweep's, for the same reasons (see run-frame-sweep.sh):
 # visible unoccluded frontmost window, machine quiet, hands off, warm shader cache. Gates enforced

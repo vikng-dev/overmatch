@@ -14,7 +14,9 @@
 //! `caliber`: its nominal calibre (m); `ammunition`: `{ "<round key>": (muzzle_speed: (m/s, Kind)) }`;
 //! `mechanism`: `Single` (one round per trigger edge) or `Automatic(cyclic_rpm: (rpm, Kind))` (a
 //! belt fired on a held trigger, one round every 60/rpm s); `report_clips`: the gun's report takes
-//! (asset-relative paths, one rolled per round fired; `[]` is a silent gun, a decision). The names
+//! (asset-relative paths, one rolled per round fired; `[]` is a silent gun, a decision); `muzzle`:
+//! the gun's view-only muzzle emission, every layer's presence and value sourced
+//! ([`MuzzleEmission`], `guns::muzzle`), which every round it fires carries. The names
 //! and the calibre are validated and read by nothing yet. Every number is authored
 //! `(value, Kind("source or reason"))` ([`crate::provenance`]); a value without one does not load.
 //! A tank's mount names its gun ([`crate::spec::WeaponSpec::gun`]): the mount's reload or belt joins
@@ -30,6 +32,8 @@
 //!
 //! [`RoundFacts::fired_at`]: crate::rounds::RoundFacts::fired_at
 
+mod muzzle;
+
 use serde::Deserialize;
 use std::collections::BTreeMap;
 
@@ -37,6 +41,8 @@ use crate::keyed_map::KeyedMap;
 use crate::provenance::Sourced;
 use crate::rounds::{Round, RoundError, RoundRegistry};
 use crate::spec::FireMechanism;
+
+pub(crate) use muzzle::{CoreSprite, FlashLight, GroundBlast, MuzzleEmission};
 
 /// One gun as authored.
 #[derive(Deserialize)]
@@ -47,6 +53,7 @@ struct GunFile {
     ammunition: KeyedMap<AmmunitionFile>,
     mechanism: MechanismFile,
     report_clips: Vec<String>,
+    muzzle: muzzle::File,
 }
 
 /// A gun's mechanism as authored.
@@ -200,6 +207,7 @@ fn resolved(file: GunFile, rounds: &RoundRegistry) -> Result<Gun, String> {
             Mechanism::Automatic { cyclic_rpm }
         }
     };
+    let muzzle = file.muzzle.resolve()?;
     if file.ammunition.0.is_empty() {
         return Err("the ammunition table is empty — a gun chambers at least one round".into());
     }
@@ -213,7 +221,7 @@ fn resolved(file: GunFile, rounds: &RoundRegistry) -> Result<Gun, String> {
                 .map_err(|err| format!("ammunition: {err}"))?;
             let speed = row.muzzle_speed.0;
             let round = facts
-                .fired_at(speed)
+                .fired_at(speed, muzzle)
                 .map_err(|reason| format!("ammunition {key:?} at {speed} m/s: {reason}"))?;
             Ok((key, round))
         })
@@ -376,7 +384,34 @@ mod tests {
             .join(", ");
         format!(
             r#"(names: [({name:?}, Tuned("fixture"))], caliber: ({caliber}, Tuned("fixture")),
-                ammunition: {{ {rows} }}, mechanism: {mechanism}, report_clips: [])"#
+                ammunition: {{ {rows} }}, mechanism: {mechanism}, report_clips: [],
+                muzzle: {FIXTURE_MUZZLE})"#
+        )
+    }
+
+    /// FIXTURE DATA: a rifle-scale muzzle emission, each value with a fixture provenance.
+    const FIXTURE_MUZZLE: &str = r#"(
+        core: (sprite: (Glow, Tuned("fixture")), diameter_m: ((0.3, 0.5), Tuned("fixture")),
+            standoff_m: (0.1, Tuned("fixture")), lifetime_s: (0.03, Tuned("fixture")),
+            end_scale: (1.0, Tuned("fixture"))),
+        flames: (count: (1, Tuned("fixture")), length_m: ((0.4, 0.8), Tuned("fixture")),
+            width_ratio: (0.5, Tuned("fixture")), lifetime_s: (0.03, Tuned("fixture")),
+            end_scale: (1.0, Tuned("fixture"))),
+        fireball: (None, Tuned("fixture")),
+        glow: (None, Tuned("fixture")),
+        smoke: (None, Tuned("fixture")),
+        light: (peak_lm: (1.0e6, Tuned("fixture")), range_m: (16.0, Tuned("fixture")),
+            lifetime_s: (0.05, Tuned("fixture")), radius_m: (0.1, Tuned("fixture")),
+            standoff_m: (0.3, Tuned("fixture")), colour_srgb: ((1.0, 0.7, 0.4), Tuned("fixture")),
+            tracer_gain: (1.0, Tuned("fixture"))),
+        ground_blast: (None, Tuned("fixture")),
+    )"#;
+
+    /// An inline fixture gun file closed with [`FIXTURE_MUZZLE`].
+    fn with_muzzle(text: &str) -> String {
+        text.replace(
+            "report_clips: [])",
+            &format!("report_clips: [], muzzle: {FIXTURE_MUZZLE})"),
         )
     }
 
@@ -403,6 +438,7 @@ mod tests {
             "7.9mm_AP",
             Round {
                 effects: crate::rounds::FlightEffects::NONE,
+                muzzle: MuzzleEmission::fixture_cannon(),
                 body: RoundBody {
                     mass: 0.0118,
                     caliber: 0.0079,
@@ -430,6 +466,7 @@ mod tests {
             "88mm_AP",
             Round {
                 effects: crate::rounds::FlightEffects::NONE,
+                muzzle: MuzzleEmission::fixture_cannon(),
                 body: PZGR_39,
                 flying: PZGR_39,
                 penetrator: PZGR_39,
@@ -445,6 +482,7 @@ mod tests {
             "88mm_APCR",
             Round {
                 effects: crate::rounds::FlightEffects::NONE,
+                muzzle: MuzzleEmission::fixture_cannon(),
                 body: RoundBody {
                     mass: 7.3,
                     caliber: 0.088,
@@ -477,6 +515,7 @@ mod tests {
             "88mm_APHE_ring",
             Round {
                 effects: crate::rounds::FlightEffects::NONE,
+                muzzle: MuzzleEmission::fixture_cannon(),
                 body: PZGR_39,
                 flying: PZGR_39,
                 penetrator: PZGR_39,
@@ -506,6 +545,7 @@ mod tests {
             "88mm_HE",
             Round {
                 effects: crate::rounds::FlightEffects::NONE,
+                muzzle: MuzzleEmission::fixture_cannon(),
                 body: RoundBody {
                     mass: 9.30,
                     caliber: 0.088,
@@ -556,6 +596,7 @@ mod tests {
     fn every_rounds_physical_facts_read_through_its_gun_bit_for_bit_as_pinned() {
         let physical = |mut round: Round| {
             round.effects = crate::rounds::FlightEffects::NONE;
+            round.muzzle = MuzzleEmission::fixture_cannon();
             round
         };
         let guns = GunRegistry::shipped();
@@ -651,10 +692,11 @@ mod tests {
             .expect("the fixture belt gun loads");
         for (text, word) in [
             (
-                r#"(names: [], caliber: (0.05, Tuned("x")),
+                with_muzzle(
+                    r#"(names: [], caliber: (0.05, Tuned("x")),
                     ammunition: { "Probe": (muzzle_speed: (700.0, Tuned("x"))) },
-                    mechanism: Single, report_clips: [])"#
-                    .to_owned(),
+                    mechanism: Single, report_clips: [])"#,
+                ),
                 "names",
             ),
             (
@@ -691,19 +733,21 @@ mod tests {
         }
         for (text, word) in [
             (
-                r#"(names: [("Gun Mk. 1", Tuned("x"))], caliber: (0.05, Tuned("x")),
+                with_muzzle(
+                    r#"(names: [("Gun Mk. 1", Tuned("x"))], caliber: (0.05, Tuned("x")),
                     ammunition: { "Probe": (muzzle_speed: 700.0) }, mechanism: Single,
-                    report_clips: [])"#
-                    .to_owned(),
+                    report_clips: [])"#,
+                ),
                 "provenance",
             ),
             (belt("Automatic(cyclic_rpm: 600.0)"), "provenance"),
             (
-                r#"(names: [("Gun Mk. 1", Tuned("x"))], caliber: (0.05, Tuned("x")),
+                with_muzzle(
+                    r#"(names: [("Gun Mk. 1", Tuned("x"))], caliber: (0.05, Tuned("x")),
                     ammunition: { "Probe": (muzzle_speed: (700.0, Tuned("x"))),
                                   "Probe": (muzzle_speed: (710.0, Tuned("x"))) },
-                    mechanism: Single, report_clips: [])"#
-                    .to_owned(),
+                    mechanism: Single, report_clips: [])"#,
+                ),
                 "twice",
             ),
         ] {

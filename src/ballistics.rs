@@ -1121,6 +1121,8 @@ pub struct FireShell {
     pub fuze_mode: u8,
     /// The game's damage-model view: emissions authored by the round, never inferred from calibre.
     pub(crate) effects: crate::rounds::FlightEffects,
+    /// The firing gun's authored muzzle emission ([`crate::rounds::Round::muzzle`]), view only.
+    pub(crate) muzzle: crate::guns::MuzzleEmission,
     /// Fire mechanism at the source.
     pub mechanism: crate::spec::FireMechanism,
     /// Firing source for self-exclusion and authority attribution.
@@ -1162,6 +1164,7 @@ impl FireShell {
             burst: round.burst,
             fuze_mode: round.fuze_mode,
             effects: round.effects,
+            muzzle: round.muzzle,
             mechanism,
             tracer,
             shooter,
@@ -4824,6 +4827,7 @@ mod march_tests {
         app.add_observer(on_fire_shell);
         app.world_mut().trigger(FireShell {
             effects: crate::rounds::FlightEffects::fixture_traced(),
+            muzzle: crate::guns::MuzzleEmission::fixture_cannon(),
             origin: Vec3::new(0.0, 2.0, 2.0),
             direction: Dir3::NEG_Z,
             speed: 800.0,
@@ -4870,6 +4874,7 @@ mod march_tests {
         let shooter = Entity::PLACEHOLDER;
         app.world_mut().trigger(FireShell {
             effects: crate::rounds::FlightEffects::fixture_traced(),
+            muzzle: crate::guns::MuzzleEmission::fixture_cannon(),
             origin: Vec3::new(0.0, 2.0, 2.0),
             direction: Dir3::NEG_Z,
             speed: 800.0,
@@ -4924,6 +4929,7 @@ mod march_tests {
         app.add_observer(on_fire_shell);
         app.world_mut().trigger(FireShell {
             effects: crate::rounds::FlightEffects::fixture_traced(),
+            muzzle: crate::guns::MuzzleEmission::fixture_cannon(),
             origin: Vec3::new(0.0, 2.0, 2.0),
             direction: Dir3::NEG_Z,
             speed: SPEED,

@@ -1,15 +1,25 @@
 //! The game's damage-model view, game state only.
 //!
-//! View-only muzzle dressing for [`FireShell`] events.
+//! View-only muzzle dressing for [`FireShell`] events: one consumer for every gun, reading the
+//! firing gun's authored emission ([`crate::guns::MuzzleEmission`], carried on the shot). No
+//! calibre, weapon kind or viewer distance selects a layer's size, life or light; the constants
+//! below are the shipped sprite sheets' playback and the renderer's caps, shared by every gun.
+//!
+//! Layers: the flash core, the fireball, the fill glow, the flame planes, the gas smoke, the ground
+//! blast's dust cloud and the transient light. The core, the fireball and the light draw at any
+//! range; beyond [`FAR_FULL_DRESSING`] the other layers are skipped, a cost bound on overdraw that
+//! never resizes what is drawn.
 //!
 //! Invariant (ADR-0014): spawned entities are render-only. Light and billboard rings bound replay
 //! duplicates; stale remote shots do not replay an already-expired flash.
 
+use bevy::ecs::system::SystemParam;
 use bevy::prelude::*;
 
 // `STALE_FIRE_TICKS` is shared with the sim-side catch-up impact gate (`ballistics::on_fire_shell`)
 // so the muzzle flash and the impact phantom fall stale together — one constant, no drift.
-use crate::ballistics::{FireShell, STALE_FIRE_TICKS, TRACER_MAX_CALIBER};
+use crate::ballistics::{FireShell, STALE_FIRE_TICKS};
+use crate::guns::{CoreSprite, GroundBlast};
 use crate::spec::FireCycle;
 use crate::tank::{TankRoot, Weapon, WeaponIndex};
 use crate::view::PlayerView;
@@ -20,29 +30,10 @@ use super::billboard::{
     VfxParams, gradient_lut, smoothstep, spawn_billboard, unit_quad,
 };
 
-/// Flash core lifetime in seconds. The 88's hot layers are STAGGERED — core dies first, then the
-/// flame planes ([`FLASH_PLANE_LIFETIME`]), then the glow card ([`FLASH_GLOW_CARD_LIFETIME`]), then
-/// the gas smoke ([`SMOKE_LIFETIME`]) — and every one of them is at maximum size on frame one
-/// (`end_size` below `start_size`; nothing in the flash cluster grows in).
-const FLASH_LIFETIME: f32 = 0.026;
-/// Flame-plane lifetime (s): outlives the core, dead well before the glow card.
-const FLASH_PLANE_LIFETIME: f32 = 0.045;
-/// Core flash diameter range in metres.
-const FLASH_CORE_SIZE: (f32, f32) = (3.5, 4.6);
-/// Shrink factors the hot layers ease to over their life (< 1: born maximal, collapsing).
-const FLASH_CORE_SHRINK: f32 = 0.85;
-const FLASH_PLANE_SHRINK: f32 = 0.9;
-const FLASH_GLOW_CARD_SHRINK: f32 = 0.9;
-/// Directional flame-plane length range in metres and width ratio.
-const FLASH_PLANE_LENGTH: (f32, f32) = (4.3, 6.4);
-const FLASH_PLANE_WIDTH_RATIO: f32 = 0.55;
 /// Emissive boost on the flash LUT's heat lane — well above 1.0 so bloom catches the whole flash.
 const FLASH_GLOW: f32 = 14.0;
 
-// --- The 88's BLAST CORE: a real 12-frame explosion flipbook, played once, that carries the
-// fireball the whole muzzle moment is built around. Every metric is authored at [`BLAST_CALIBER`]
-// and scales LINEARLY with the firing bore (ADR-0023). The flash core above stays the frame-one
-// blinding spike inside it; the flame planes stay the directional jets.
+// --- The fireball sheet: a 12-frame explosion flipbook played once over the emission's lifetime.
 
 /// Atlas grid and frame count — [`MuzzleVfxAssets::blast_atlas`]'s two sheets share it
 /// (`scripts/vfx/blast_atlas.py`).
@@ -52,18 +43,6 @@ const BLAST_FRAMES: u32 = 12;
 /// How many baked sheets are in the rotation — [`MuzzleVfxAssets::blast_atlas`]'s length and
 /// [`blast_pick`]'s range.
 const BLAST_SHEETS: usize = 2;
-/// The bore (m) the metres and seconds below are authored against; the blast scales `caliber / this`.
-const BLAST_CALIBER: f32 = 0.088;
-/// Quad diameter range (m). The sprite's fireball spans ~a third of its cell on frame one and ~three
-/// quarters by the last, so the rendered ball runs ~3 m at ignition through ~5 m at its hottest.
-const BLAST_SIZE: (f32, f32) = (8.0, 9.5);
-/// Quad growth over life: the gas keeps pushing outward past the sprite's own expansion.
-const BLAST_GROWTH: f32 = 1.12;
-/// Standoff down the bore (m) of the fireball's centre from the muzzle.
-const BLAST_STANDOFF: f32 = 1.8;
-/// Billboard lifetime (s) — and, through [`Flipbook::Once`], the window the whole sheet plays in:
-/// one cell per 60 Hz frame at the reference bore.
-const BLAST_LIFETIME: f32 = 0.2;
 /// Overall alpha, erosion sharpness and emissive boost. The boost sits under [`FLASH_GLOW`] — a
 /// fireball with volume, not a second blinding spike — and the soft sharpness keeps the smoke fringe
 /// as fringe.
@@ -76,112 +55,33 @@ const BLAST_GLOW: f32 = 6.0;
 /// 1.0 it instead eats the fireball into confetti through the middle of the sequence.
 const BLAST_EROSION: f32 = 0.3;
 
-/// The 88's fireball glow card: ONE soft additive billboard behind the starburst core — the classic
-/// card that sells fireball VOLUME between the 2-frame flash and the lingering smoke. Camera-facing,
-/// ~1.5× the core, LOW alpha, on the round-glow (`mg_core`) sprite, and it erodes out over its own
-/// lifetime — the LAST beat of the flash cluster, still an order of magnitude under the smoke.
-/// Rides the same additive billboard pipeline as the flash (no new permutation, so the prewarm rig
-/// already covers it).
-const FLASH_GLOW_CARD_SCALE: f32 = 1.5;
-const FLASH_GLOW_CARD_LIFETIME: f32 = 0.075;
-/// LOW overall alpha (billboard `fade.w`) and a softened emissive boost (`glow.x`) — a fill glow, not
-/// a second hot core.
+/// The fill glow's look: LOW overall alpha (billboard `fade.w`) and a softened emissive boost
+/// (`glow.x`) — a fill glow, not a second hot core. Its size and life are the emission's.
 const FLASH_GLOW_CARD_ALPHA: f32 = 0.35;
 const FLASH_GLOW_CARD_GLOW: f32 = 4.0;
 
-/// Lingering muzzle smoke: lifetime (s), size ease (m), and its drift (up + a muzzle-gas push).
-/// The one 88 layer that grows IN — birth is ~half the end size, and it outlives the whole flash
-/// cluster by an order of magnitude.
-const SMOKE_LIFETIME: f32 = 1.5;
-const SMOKE_SIZE: (f32, f32) = (2.2, 4.2);
-const SMOKE_RISE: f32 = 0.55;
-const SMOKE_PUSH: f32 = 1.3;
-/// Slow flipbook playback for the smoke (frames/s over the 4-frame atlas) and its roll rate (rad/s).
+/// Smoke sprite playback: frames/s over the 4-frame atlas, roll-rate bound (rad/s) and the faint
+/// heat young smoke carries (it is lit by the flash for the first instants).
 const SMOKE_FRAME_RATE: f32 = 5.0;
 const SMOKE_SPIN_MAX: f32 = 0.6;
-/// Faint heat on young smoke (it is lit by the flash for the first instants).
 const SMOKE_GLOW: f32 = 5.0;
 
-/// Main-gun light peak (lm), range (m), and lifetime (s) — a flash-and-out envelope: cubic decay
-/// off the first-frame peak, dark inside ~55 ms. Stays strictly longer than the MG glimmer's
-/// ([`MG_LIGHT_LIFETIME`]).
-const LIGHT_PEAK_LUMENS: f32 = 8.0e6;
-const LIGHT_RANGE: f32 = 35.0;
-const LIGHT_LIFETIME: f32 = 0.055;
 /// Shared muzzle-light population cap; oldest lights are evicted first.
 const LIGHT_CAP: usize = 12;
-/// The MG tracer-round brightness spike: a tracer round's muzzle light is this much brighter than a
-/// ball round's, so the flicker still reads harder exactly when a streak leaves the barrel.
-const MG_TRACER_LIGHT_BOOST: f32 = 1.5;
 
-// --- The muzzle GROUND DUST cloud (main gun only): the blast wave lifting the earth under the
-// barrel. Gated on the muzzle sitting within [`GROUND_DUST_MAX_HEIGHT`] of the terrain below it
-// ([`crate::terrain_grid::HeightGrid::height_at`] — no grid resource means no known ground and no
-// cloud). Every metric below is authored at [`GROUND_DUST_CALIBER`] and scales LINEARLY with the
-// firing bore (ADR-0023: physical inputs only — the camera never enters this).
-
-/// Muzzle height above the ground under it (m) at which the blast still lifts dust.
-const GROUND_DUST_MAX_HEIGHT: f32 = 2.5;
-/// The bore (m) the sizes/speeds below are authored against; the cloud scales `caliber / this`.
-const GROUND_DUST_CALIBER: f32 = 0.088;
-/// Puffs per shot, inclusive range.
-const GROUND_DUST_COUNT: (u32, u32) = (5, 8);
-/// Puff size ease (m): birth diameter → end of life (the cloud billows as it spreads).
-const GROUND_DUST_SIZE: (f32, f32) = (1.8, 5.0);
-/// Birth-offset range (m) from the ground point under the muzzle, along each puff's own azimuth.
-const GROUND_DUST_SPREAD: (f32, f32) = (0.4, 3.0);
-/// Outward drift speed range (m/s) and the slow lift that keeps the cloud hugging the ground; both
-/// scale with the bore like every other metric here.
-const GROUND_DUST_PUSH: (f32, f32) = (1.8, 4.0);
-const GROUND_DUST_RISE: f32 = 0.35;
-/// How far each puff's random azimuth is pulled onto the bore azimuth (0 = radial ring, 1 = all
-/// straight down-bore).
-const GROUND_DUST_BORE_BIAS: f32 = 0.65;
-/// Cloud lifetime range (s) — the slowest muzzle layer, well past the gas smoke.
-const GROUND_DUST_LIFETIME: (f32, f32) = (2.0, 2.5);
-/// Overall alpha of a puff, its flipbook rate (frames/s over the 4-frame dust atlas), and its roll
-/// rate bound (rad/s).
-const GROUND_DUST_ALPHA: f32 = 0.5;
+/// Dust sprite playback: frames/s over the 4-frame dust atlas, and its roll-rate bound (rad/s).
 const GROUND_DUST_FRAME_RATE: f32 = 3.0;
 const GROUND_DUST_SPIN_MAX: f32 = 0.35;
 
-// --- The MG's dressing knobs (slice B): the 88's machinery at rifle scale.
-
-/// MG flash lifetime (s): ~1–2 frames — even tighter than the 88's (a small flash that lingers
-/// reads as a sputtering candle, not gunfire).
-const MG_FLASH_LIFETIME: f32 = 0.03;
-/// MG core flash size range (m) — a rifle-calibre pop, an order of magnitude under the 88's
-/// fireball. The RANGE is also the per-shot size jitter.
-const MG_FLASH_CORE_SIZE: (f32, f32) = (0.3, 0.55);
-/// The single near-only MG flame plane: length range (m); shares the 88's width ratio.
-const MG_FLASH_PLANE_LENGTH: (f32, f32) = (0.45, 0.8);
-/// MG muzzle light — now on EVERY round (a per-round light at 750 rpm reads as a continuous muzzle
-/// glimmer; the tracer round spikes [`MG_TRACER_LIGHT_BOOST`]× brighter so the streak still pops).
-/// Dimmer, shorter, tighter than the 88's.
-const MG_LIGHT_PEAK_LUMENS: f32 = 1.2e6;
-const MG_LIGHT_RANGE: f32 = 16.0;
-const MG_LIGHT_LIFETIME: f32 = 0.05;
-/// MG smoke ration: one faint puff every this many MG rounds (across both guns — it is cosmetic
-/// cadence, not per-barrel state). Per-round puffs at the cyclic rate are the overdraw trap.
-const MG_SMOKE_EVERY: u32 = 4;
-/// The MG puff: shorter, smaller, fainter than the 88's (alpha multiplier well under the 88's
-/// 0.85), with a gentler rise and muzzle-gas push.
-const MG_SMOKE_LIFETIME: f32 = 0.7;
-const MG_SMOKE_SIZE: (f32, f32) = (0.3, 1.0);
-const MG_SMOKE_ALPHA: f32 = 0.45;
-const MG_SMOKE_RISE: f32 = 0.4;
-const MG_SMOKE_PUSH: f32 = 0.7;
-
-/// Beyond this camera distance (m) only the core + light spawn (LOD by distance — the cheap half
-/// of the overdraw discipline).
+/// Beyond this camera distance (m) only the core, the fireball and the light spawn: a cost bound on
+/// near-field overdraw. It skips layers and never changes the size of a drawn one.
 const FAR_FULL_DRESSING: f32 = 400.0;
 
 pub(super) fn plugin(app: &mut App) {
     app.init_resource::<MuzzleLightRing>()
-        .init_resource::<MgSmokeCadence>()
+        .init_resource::<SmokeCadence>()
         .add_systems(Startup, setup_muzzle_assets)
-        .add_observer(on_main_gun_fire)
-        .add_observer(on_mg_fire)
+        .add_observer(dress_fire)
         .add_systems(Update, decay_muzzle_lights);
 }
 
@@ -190,17 +90,16 @@ pub(super) fn plugin(app: &mut App) {
 #[derive(Resource)]
 pub(super) struct MuzzleVfxAssets {
     pub(super) quad: Handle<Mesh>,
-    /// The 88's flash core: a 2×2 scorch-starburst atlas (a spiky radial star per shot).
+    /// The starburst core: a 2×2 scorch-starburst atlas (a spiky radial star per shot).
     pub(super) core_atlas: Handle<Image>,
-    /// The 88's blast core: two 4×3 explosion flipbooks, one picked per shot. Two sheets rather
+    /// The fireball: two 4×3 explosion flipbooks, one picked per shot. Two sheets rather
     /// than one is the anti-repetition trick at sprite scale — the sequence inside a sheet is
     /// fixed (it starts on its most violent frame and plays once), so the variation has to come
     /// from WHICH fireball plays. KTX2, unlike every other sprite here: this one is the only
     /// billboard drawn at unbounded range, so it is the only one that needs a mip chain (bevy's
     /// PNG loader produces a single level) — see `scripts/vfx/blast_atlas.py`.
     blast_atlas: [Handle<Image>; BLAST_SHEETS],
-    /// The MG's flash core: a single small round glow (`light_01`) — a rifle-scale pop, not the 88's
-    /// starburst.
+    /// The round-glow core and the fill glow: a single small round glow (`light_01`).
     mg_core: Handle<Image>,
     flame_atlas: Handle<Image>,
     smoke_atlas: Handle<Image>,
@@ -251,10 +150,9 @@ impl MuzzleVfxAssets {
         BillboardLook {
             params: VfxParams {
                 frame: Vec4::new(0.0, 2.0, 2.0, 0.0),
-                // Moderate sharpness: soft dissolve edges on the puff. w is the 88's overall alpha
-                // (nudged up from 0.85 so early smoke has more presence for the flash to hand off to);
-                // the MG puff overrides it down to `MG_SMOKE_ALPHA`.
-                fade: Vec4::new(0.0, 2.6, 0.0, 0.92),
+                // Moderate sharpness: soft dissolve edges on the puff. w, the overall opacity, is
+                // the emission's: the consumer writes it per puff.
+                fade: Vec4::new(0.0, 2.6, 0.0, 1.0),
                 glow: Vec4::new(SMOKE_GLOW, 0.0, SOFT_PARTICLE_DEPTH, 0.0),
             },
             atlas: self.smoke_atlas.clone(),
@@ -263,14 +161,14 @@ impl MuzzleVfxAssets {
         }
     }
 
-    /// The ground-dust material template: the billow atlas through the earth LUT, alpha-blend
-    /// occluding mass with no heat (lifted soil is lit mass, never an emitter). Rides the smoke's
-    /// already-warmed Blend pipeline.
-    fn dust_material(&self) -> BillboardLook {
+    /// The ground-dust material template at overall `opacity`: the billow atlas through the earth
+    /// LUT, alpha-blend occluding mass with no heat (lifted soil is lit mass, never an emitter).
+    /// Rides the smoke's already-warmed Blend pipeline.
+    fn dust_material(&self, opacity: f32) -> BillboardLook {
         BillboardLook {
             params: VfxParams {
                 frame: Vec4::new(0.0, 2.0, 2.0, 0.0),
-                fade: Vec4::new(0.0, 2.2, 0.0, GROUND_DUST_ALPHA),
+                fade: Vec4::new(0.0, 2.2, 0.0, opacity),
                 glow: Vec4::new(0.0, 0.0, SOFT_PARTICLE_DEPTH, 0.0),
             },
             atlas: self.dust_atlas.clone(),
@@ -356,8 +254,8 @@ pub(super) fn setup_muzzle_assets(
 }
 
 /// A live muzzle light's age plus the scale it was born with; [`decay_muzzle_lights`] drives the
-/// intensity fall and the despawn from these. Per-light `peak`/`lifetime` is what lets the 88 and
-/// the MGs share one decay system at different scales.
+/// intensity fall and the despawn from these. Per-light `peak`/`lifetime` is what lets every gun
+/// share one decay system at its own scale.
 #[derive(Component)]
 struct MuzzleLight {
     age: f32,
@@ -373,10 +271,6 @@ struct MuzzleLight {
 /// Live muzzle lights, oldest first — the refire leak bound (see [`LIGHT_CAP`]).
 #[derive(Resource, Default)]
 struct MuzzleLightRing(std::collections::VecDeque<Entity>);
-
-/// Belt-position counter for the MG smoke ration ([`MG_SMOKE_EVERY`]); ticks once per MG round.
-#[derive(Resource, Default)]
-struct MgSmokeCadence(u32);
 
 /// ASSUMED shadow-read window (s): a persistent light or an isolated flash casts; repeated
 /// flashes shorter than this do not. MEASURED evidence for the short/repeating regime:
@@ -410,20 +304,16 @@ fn refire_interval(
 
 /// Spawn a transient light into the shared ring. Its life and minimum refire interval decide
 /// whether a shadow can read; weapon kind does not enter the decision.
-#[expect(
-    clippy::too_many_arguments,
-    reason = "one light: the sinks, then each argument a separate dimension of the light"
-)]
 fn spawn_muzzle_light(
     commands: &mut Commands,
     ring: &mut MuzzleLightRing,
     position: Vec3,
     peak: f32,
-    range: f32,
-    lifetime: f32,
-    radius: f32,
+    light: &crate::guns::FlashLight,
     refire_interval: Option<f32>,
 ) {
+    let lifetime = light.lifetime_s;
+    let [red, green, blue] = light.colour_srgb;
     let light = commands
         .spawn((
             MuzzleLight {
@@ -433,10 +323,10 @@ fn spawn_muzzle_light(
                 lifetime,
             },
             PointLight {
-                color: Color::srgb(1.0, 0.72, 0.42),
+                color: Color::srgb(red, green, blue),
                 intensity: peak,
-                range,
-                radius,
+                range: light.range_m,
+                radius: light.radius_m,
                 shadow_maps_enabled: lifetime >= SHADOW_READ_WINDOW_S
                     || refire_interval.is_none_or(|interval| interval >= SHADOW_READ_WINDOW_S),
                 ..default()
@@ -453,43 +343,56 @@ fn spawn_muzzle_light(
     crate::push_capped_entity(commands, &mut ring.0, light, LIGHT_CAP);
 }
 
-/// Dress a main-gun shot: blast core + flash cluster + muzzle light + lingering smoke + the
-/// ground-dust cloud a low barrel lifts, all view entities hung off the `FireShell` geometry
-/// (origin + bore direction).
-/// MG-calibre rounds pass through untouched — their dressing is slice B, on this same machinery.
-#[expect(
-    clippy::too_many_arguments,
-    reason = "dresses a main-gun shot: assets, materials, two rings, rng, camera, weapon cadence and terrain"
-)]
-fn on_main_gun_fire(
-    fire: On<FireShell>,
-    assets: Res<MuzzleVfxAssets>,
-    mut materials: BillboardMaterials,
-    mut ring: ResMut<BillboardRing>,
-    mut light_ring: ResMut<MuzzleLightRing>,
-    mut rng: ResMut<ViewRng>,
-    camera: Query<&GlobalTransform, With<PlayerView>>,
-    weapons: Query<(&Weapon, &TankRoot, &WeaponIndex)>,
-    // The decoded terrain surface, when the world has one — the ground-dust gate's only query.
-    grid: Option<Res<crate::terrain_grid::HeightGrid>>,
-    mut commands: Commands,
-) {
-    // The same boundary as the shell-scene branch in `ballistics::view`: this dressing is
-    // the main gun's.
-    if fire.caliber < TRACER_MAX_CALIBER {
-        return;
+/// Every presented shot's counter for a gun's smoke ration
+/// ([`crate::guns::MuzzleEmission::smoke`]'s `every_rounds`); it ticks once per non-stale shot.
+#[derive(Resource, Default)]
+struct SmokeCadence(u32);
+
+/// What the one muzzle consumer writes into and reads beside the shot.
+#[derive(SystemParam)]
+struct MuzzleKit<'w, 's> {
+    assets: Res<'w, MuzzleVfxAssets>,
+    materials: BillboardMaterials<'w>,
+    ring: ResMut<'w, BillboardRing>,
+    light_ring: ResMut<'w, MuzzleLightRing>,
+    cadence: ResMut<'w, SmokeCadence>,
+    rng: ResMut<'w, ViewRng>,
+    camera: Query<'w, 's, &'static GlobalTransform, With<PlayerView>>,
+    weapons: Query<'w, 's, (&'static Weapon, &'static TankRoot, &'static WeaponIndex)>,
+    /// The decoded terrain surface, when the world has one: the ground blast's only height query.
+    grid: Option<Res<'w, crate::terrain_grid::HeightGrid>>,
+    commands: Commands<'w, 's>,
+}
+
+impl MuzzleKit<'_, '_> {
+    fn billboard(&mut self, spec: BillboardSpec) {
+        spawn_billboard(
+            &mut self.commands,
+            &mut self.materials,
+            &mut self.ring,
+            self.assets.quad.clone(),
+            spec,
+        );
     }
+}
+
+/// Dress one shot from its gun's authored emission, hung off the `FireShell` geometry (origin and
+/// bore direction).
+fn dress_fire(fire: On<FireShell>, mut kit: MuzzleKit) {
     // Stale remote shot: the flash moment is long past — skip, don't play late.
     if fire.catch_up_ticks > STALE_FIRE_TICKS {
         return;
     }
+    let emission = fire.muzzle;
+    // The ration counts every non-stale shot, near or far, so the cadence is a property of the
+    // firing, not of the camera.
+    kit.cadence.0 = kit.cadence.0.wrapping_add(1);
     let origin = fire.origin;
     let dir = Vec3::from(fire.direction);
-    // Distance LOD: with no camera (headless harness) treat as near.
-    let near = if camera.is_empty() {
+    let near = if kit.camera.is_empty() {
         true // The headless effect harness exercises the complete recipe without a viewer.
     } else {
-        camera
+        kit.camera
             .single()
             .expect("exactly one camera declares PlayerView")
             .translation()
@@ -497,202 +400,194 @@ fn on_main_gun_fire(
             < FAR_FULL_DRESSING * FAR_FULL_DRESSING
     };
 
-    // --- Flash core: one camera-facing additive billboard, 1–2 frames. A random one of the four
-    // scorch-starburst atlas frames (the anti-strobe frame pick — nothing lives long enough to
-    // animate) plus random roll + size, so no two shots match.
-    let core_size = rng.range(FLASH_CORE_SIZE.0, FLASH_CORE_SIZE.1);
-    spawn_billboard(
-        &mut commands,
-        &mut materials,
-        &mut ring,
-        assets.quad.clone(),
-        BillboardSpec {
-            material: assets.flash_material(assets.core_atlas.clone(), 2.0),
-            lifetime: FLASH_LIFETIME,
-            origin: origin + dir * 1.0,
-            drift: Vec3::ZERO,
-            frames: 4,
-            flipbook: Flipbook::Loop {
-                start: rng.range(0.0, 4.0).floor(),
-                rate: 0.0,
-            },
-            start_size: core_size,
-            end_size: core_size * FLASH_CORE_SHRINK,
-            aspect: Vec3::ONE,
-            roll: rng.range(0.0, std::f32::consts::TAU),
-            spin: 0.0,
-            erosion_end: 0.0,
-            rotation: None,
+    // --- Flash core: one camera-facing additive billboard, born at its largest. The starburst
+    // atlas gets a random one of its four frames per shot (nothing lives long enough to animate);
+    // random roll and size, so no two shots match.
+    let core = emission.core;
+    let core_size = kit.rng.range(core.diameter_m.0, core.diameter_m.1);
+    let (core_material, core_frames, core_start) = match core.sprite {
+        CoreSprite::Starburst => (
+            kit.assets
+                .flash_material(kit.assets.core_atlas.clone(), 2.0),
+            4,
+            kit.rng.range(0.0, 4.0).floor(),
+        ),
+        CoreSprite::Glow => {
+            let mut material = kit.assets.flash_material(kit.assets.mg_core.clone(), 2.0);
+            // The glow is the whole image, not an atlas cell.
+            material.params.frame = Vec4::new(0.0, 1.0, 1.0, 0.0);
+            (material, 1, 0.0)
+        }
+    };
+    let core_roll = kit.rng.range(0.0, std::f32::consts::TAU);
+    kit.billboard(BillboardSpec {
+        material: core_material,
+        lifetime: core.lifetime_s,
+        origin: origin + dir * core.standoff_m,
+        drift: Vec3::ZERO,
+        frames: core_frames,
+        flipbook: Flipbook::Loop {
+            start: core_start,
+            rate: 0.0,
         },
-    );
+        start_size: core_size,
+        end_size: core_size * core.end_scale,
+        aspect: Vec3::ONE,
+        roll: core_roll,
+        spin: 0.0,
+        erosion_end: 0.0,
+        rotation: None,
+    });
 
-    // --- Blast core: the fireball flipbook, played ONCE from its most violent frame. Not gated on
-    // `near`: it is the shot's primary read at any range, and one quad on the main gun's ~3 s
-    // cadence is not the near-field overdraw the LOD gate bounds.
-    let bore = fire.caliber / BLAST_CALIBER;
-    let blast_size = rng.range(BLAST_SIZE.0, BLAST_SIZE.1) * bore;
-    let blast_lifetime = BLAST_LIFETIME * bore;
-    spawn_billboard(
-        &mut commands,
-        &mut materials,
-        &mut ring,
-        assets.quad.clone(),
-        BillboardSpec {
-            material: assets.blast_material(assets.blast_atlas[blast_pick(&mut rng)].clone()),
-            lifetime: blast_lifetime,
-            origin: origin + dir * (BLAST_STANDOFF * bore),
+    // --- Fireball: the flipbook, played ONCE from its most violent frame. Drawn at any range: it
+    // is the shot's primary read, one quad per shot.
+    if let Some(fireball) = emission.fireball {
+        let size = kit.rng.range(fireball.diameter_m.0, fireball.diameter_m.1);
+        let sheet = blast_pick(&mut kit.rng);
+        let roll = kit.rng.range(0.0, std::f32::consts::TAU);
+        let material = kit
+            .assets
+            .blast_material(kit.assets.blast_atlas[sheet].clone());
+        kit.billboard(BillboardSpec {
+            material,
+            lifetime: fireball.lifetime_s,
+            origin: origin + dir * fireball.standoff_m,
             drift: Vec3::ZERO,
             frames: BLAST_FRAMES,
-            // A real sequence from its ignition frame — no random start offset and no wrap: the
-            // per-shot variation is which sheet plays. `Once` spreads the sheet over `lifetime`,
-            // which already carries the bore scale, so the playback rate needs no separate one.
+            // A real sequence from its ignition frame: `Once` spreads the sheet over the
+            // emission's lifetime, so the playback needs no rate of its own.
             flipbook: Flipbook::Once,
-            start_size: blast_size,
-            end_size: blast_size * BLAST_GROWTH,
+            start_size: size,
+            end_size: size * fireball.growth,
             aspect: Vec3::ONE,
-            roll: rng.range(0.0, std::f32::consts::TAU),
+            roll,
             spin: 0.0,
             erosion_end: BLAST_EROSION,
             rotation: None,
-        },
-    );
+        });
+    }
 
-    // --- Fireball glow card: one soft additive round-glow billboard behind the core, LOW alpha and
-    // a softened boost, ~1.5× the core. It is the one element allowed to outlive the 2-frame flash
-    // (its own ~0.1 s, eroding out fast) — the volume that bridges the flash and the smoke. Near-only
-    // dressing: beyond FAR_FULL_DRESSING only the core + light carry the read (see the module LOD
-    // contract), so the glow card is gated with the planes and smoke below.
-    if near {
-        let mut glow = assets.flash_material(assets.mg_core.clone(), 1.5);
+    // --- Fill glow: one soft additive round-glow billboard behind the core, sized off it, eroding
+    // out over its own life.
+    if near && let Some(glow_card) = emission.glow {
+        let mut glow = kit.assets.flash_material(kit.assets.mg_core.clone(), 1.5);
         glow.params.frame = Vec4::new(0.0, 1.0, 1.0, 0.0);
         glow.params.glow.x = FLASH_GLOW_CARD_GLOW;
         glow.params.fade.w = FLASH_GLOW_CARD_ALPHA;
-        let glow_size = core_size * FLASH_GLOW_CARD_SCALE;
-        spawn_billboard(
-            &mut commands,
-            &mut materials,
-            &mut ring,
-            assets.quad.clone(),
-            BillboardSpec {
-                material: glow,
-                lifetime: FLASH_GLOW_CARD_LIFETIME,
-                origin: origin + dir * 1.0,
-                drift: Vec3::ZERO,
-                frames: 1,
-                flipbook: Flipbook::Loop {
-                    start: 0.0,
-                    rate: 0.0,
-                },
-                start_size: glow_size,
-                end_size: glow_size * FLASH_GLOW_CARD_SHRINK,
-                aspect: Vec3::ONE,
-                roll: rng.range(0.0, std::f32::consts::TAU),
-                spin: 0.0,
-                // Erode out fast over its short life — this is the "fade" that lets it linger without
-                // the flash lingering.
-                erosion_end: 1.0,
-                rotation: None,
+        let size = core_size * glow_card.scale;
+        let roll = kit.rng.range(0.0, std::f32::consts::TAU);
+        kit.billboard(BillboardSpec {
+            material: glow,
+            lifetime: glow_card.lifetime_s,
+            origin: origin + dir * core.standoff_m,
+            drift: Vec3::ZERO,
+            frames: 1,
+            flipbook: Flipbook::Loop {
+                start: 0.0,
+                rate: 0.0,
             },
-        );
+            start_size: size,
+            end_size: size * glow_card.end_scale,
+            aspect: Vec3::ONE,
+            roll,
+            spin: 0.0,
+            erosion_end: 1.0,
+            rotation: None,
+        });
     }
 
-    // --- Directional flame planes: two bore-aligned quads, ~90° apart around the bore, each on a
-    // random frame of the 4-flame atlas (the random-start-frame anti-repetition trick — per SHOT
-    // here, since nothing lives long enough to animate).
-    if near {
-        let base_roll = rng.range(0.0, std::f32::consts::TAU);
-        let plane_frame = rng.range(0.0, 4.0).floor();
-        for i in 0..2 {
-            let length = rng.range(FLASH_PLANE_LENGTH.0, FLASH_PLANE_LENGTH.1);
-            // Sprite +Y (flame up) onto the bore, then rolled around the bore so the two planes
-            // cross; the quad's center sits ~45% down the flame so the base hugs the muzzle.
-            let rotation =
-                Quat::from_axis_angle(dir, base_roll + i as f32 * std::f32::consts::FRAC_PI_2)
-                    * Quat::from_rotation_arc(Vec3::Y, dir);
-            spawn_billboard(
-                &mut commands,
-                &mut materials,
-                &mut ring,
-                assets.quad.clone(),
-                BillboardSpec {
-                    material: assets.flash_material(assets.flame_atlas.clone(), 2.0),
-                    lifetime: FLASH_PLANE_LIFETIME,
-                    origin: origin + dir * (length * 0.45),
-                    drift: Vec3::ZERO,
-                    frames: 4,
-                    flipbook: Flipbook::Loop {
-                        start: (plane_frame + i as f32) % 4.0,
-                        rate: 0.0,
-                    },
-                    start_size: length,
-                    end_size: length * FLASH_PLANE_SHRINK,
-                    aspect: Vec3::new(FLASH_PLANE_WIDTH_RATIO, 1.0, 1.0),
-                    roll: 0.0,
-                    spin: 0.0,
-                    erosion_end: 0.0,
-                    rotation: Some(rotation),
+    // --- Directional flame planes: bore-aligned quads evenly crossed around the bore, on
+    // consecutive frames of the 4-flame atlas from a random start.
+    let flames = emission.flames;
+    if near && flames.count > 0 {
+        let base_roll = kit.rng.range(0.0, std::f32::consts::TAU);
+        let plane_frame = kit.rng.range(0.0, 4.0).floor();
+        let step = std::f32::consts::PI / f32::from(flames.count);
+        for i in 0..flames.count {
+            let length = kit.rng.range(flames.length_m.0, flames.length_m.1);
+            // Sprite +Y (flame up) onto the bore, then rolled around it; the quad's centre sits
+            // ~45% down the flame so the base hugs the muzzle.
+            let rotation = Quat::from_axis_angle(dir, base_roll + f32::from(i) * step)
+                * Quat::from_rotation_arc(Vec3::Y, dir);
+            let material = kit
+                .assets
+                .flash_material(kit.assets.flame_atlas.clone(), 2.0);
+            kit.billboard(BillboardSpec {
+                material,
+                lifetime: flames.lifetime_s,
+                origin: origin + dir * (length * 0.45),
+                drift: Vec3::ZERO,
+                frames: 4,
+                flipbook: Flipbook::Loop {
+                    start: (plane_frame + f32::from(i)) % 4.0,
+                    rate: 0.0,
                 },
-            );
+                start_size: length,
+                end_size: length * flames.end_scale,
+                aspect: Vec3::new(flames.width_ratio, 1.0, 1.0),
+                roll: 0.0,
+                spin: 0.0,
+                erosion_end: 0.0,
+                rotation: Some(rotation),
+            });
         }
     }
 
-    // --- Lingering smoke puff: one alpha-blended eroding billboard, random start frame/roll/spin,
-    // rising and pushed along the bore by the muzzle gas.
-    if near {
-        spawn_billboard(
-            &mut commands,
-            &mut materials,
-            &mut ring,
-            assets.quad.clone(),
-            BillboardSpec {
-                material: assets.smoke_material(),
-                lifetime: SMOKE_LIFETIME,
-                origin: origin + dir * 1.6,
-                drift: Vec3::Y * SMOKE_RISE + dir * SMOKE_PUSH,
-                frames: 4,
-                flipbook: Flipbook::Loop {
-                    start: rng.range(0.0, 4.0),
-                    rate: SMOKE_FRAME_RATE,
-                },
-                start_size: SMOKE_SIZE.0,
-                end_size: SMOKE_SIZE.1,
-                aspect: Vec3::ONE,
-                roll: rng.range(0.0, std::f32::consts::TAU),
-                spin: rng.range(-SMOKE_SPIN_MAX, SMOKE_SPIN_MAX),
-                erosion_end: 1.0,
-                rotation: None,
+    // --- Gas smoke: one alpha-blended eroding puff on the gun's ration, rising and pushed along
+    // the bore.
+    if near
+        && let Some(smoke) = emission.smoke
+        && kit.cadence.0.is_multiple_of(smoke.every_rounds)
+    {
+        let mut material = kit.assets.smoke_material();
+        material.params.fade.w = smoke.opacity;
+        let start = kit.rng.range(0.0, 4.0);
+        let roll = kit.rng.range(0.0, std::f32::consts::TAU);
+        let spin = kit.rng.range(-SMOKE_SPIN_MAX, SMOKE_SPIN_MAX);
+        kit.billboard(BillboardSpec {
+            material,
+            lifetime: smoke.lifetime_s,
+            origin: origin + dir * smoke.standoff_m,
+            drift: Vec3::Y * smoke.rise_mps + dir * smoke.push_mps,
+            frames: 4,
+            flipbook: Flipbook::Loop {
+                start,
+                rate: SMOKE_FRAME_RATE,
             },
-        );
+            start_size: smoke.diameter_m.0,
+            end_size: smoke.diameter_m.1,
+            aspect: Vec3::ONE,
+            roll,
+            spin,
+            erosion_end: 1.0,
+            rotation: None,
+        });
     }
 
-    // --- Ground dust: the blast lifting the earth under a low barrel. Near-only like the rest of
-    // the full dressing (the LOD contract is about COST — the cloud's metres come from the bore,
-    // never from the camera), and only when the terrain under the muzzle is close enough to lift.
-    if near && let Some(ground_y) = dust_ground_y(grid.as_deref(), origin) {
-        spawn_ground_dust(
-            origin,
-            dir,
-            ground_y,
-            fire.caliber,
-            &assets,
-            &mut materials,
-            &mut ring,
-            &mut rng,
-            &mut commands,
-        );
+    // --- Ground blast: the gas lifting the ground under a low barrel.
+    if near
+        && let Some(blast) = emission.ground_blast
+        && let Some(ground_y) = dust_ground_y(kit.grid.as_deref(), origin, blast.reach_m)
+    {
+        spawn_ground_dust(origin, dir, ground_y, &blast, &mut kit);
     }
 
-    // --- Muzzle light: transient, first frame hottest (Vlambeer: the environment lighting up IS a
-    // large share of the perceived power). Its lifetime and refire cadence decide casting.
+    // --- Muzzle light: transient, first frame hottest. Its lifetime and refire cadence decide
+    // casting.
+    let light = emission.light;
+    let peak = if fire.tracer {
+        light.peak_lm * light.tracer_gain
+    } else {
+        light.peak_lm
+    };
+    let refire = refire_interval(&fire, &kit.weapons);
     spawn_muzzle_light(
-        &mut commands,
-        &mut light_ring,
-        origin + dir * 1.2,
-        LIGHT_PEAK_LUMENS,
-        LIGHT_RANGE,
-        LIGHT_LIFETIME,
-        0.4,
-        refire_interval(&fire, &weapons),
+        &mut kit.commands,
+        &mut kit.light_ring,
+        origin + dir * light.standoff_m,
+        peak,
+        &light,
+        refire,
     );
 }
 
@@ -703,247 +598,79 @@ fn blast_pick(rng: &mut ViewRng) -> usize {
     (rng.next_f32() * BLAST_SHEETS as f32) as usize
 }
 
-/// The ground height (m) under `muzzle` when a shot there lifts dust, else `None`: no decoded
-/// terrain (`grid`) and no ground is known, and outside the grid's span the world ends at the
-/// collider edge — [`crate::terrain_grid::HeightGrid::height_at`] would hand back a clamped
-/// phantom there. A muzzle higher than [`GROUND_DUST_MAX_HEIGHT`] over that surface raises nothing.
-fn dust_ground_y(grid: Option<&crate::terrain_grid::HeightGrid>, muzzle: Vec3) -> Option<f32> {
+/// The ground height (m) under `muzzle` when the gas reaches it, else `None`: no decoded terrain
+/// (`grid`) and no ground is known, and outside the grid's span the world ends at the collider edge
+/// — [`crate::terrain_grid::HeightGrid::height_at`] would hand back a clamped phantom there. A
+/// muzzle higher than the gun's `reach_m` over that surface lifts nothing.
+fn dust_ground_y(
+    grid: Option<&crate::terrain_grid::HeightGrid>,
+    muzzle: Vec3,
+    reach_m: f32,
+) -> Option<f32> {
     let grid = grid?;
     if !grid.contains_xz(muzzle.x, muzzle.z) {
         return None;
     }
     let ground = grid.height_at(muzzle.x, muzzle.z);
-    (muzzle.y - ground <= GROUND_DUST_MAX_HEIGHT).then_some(ground)
+    (muzzle.y - ground <= reach_m).then_some(ground)
 }
 
-/// The ground-dust cloud: [`GROUND_DUST_COUNT`] wide alpha-blend puffs born on the ground under the
-/// muzzle and pushed outward, each along an azimuth pulled toward the bore's by
-/// [`GROUND_DUST_BORE_BIAS`]. Sizes, offsets and push speeds scale linearly with `caliber` against
-/// [`GROUND_DUST_CALIBER`]; the puffs ride the smoke's Blend pipeline and the shared billboard ring.
-#[expect(
-    clippy::too_many_arguments,
-    reason = "one dust cloud: its pose, ground height and caliber, and the billboard sinks"
-)]
+/// The ground blast's dust cloud: wide alpha-blend puffs born on the ground under the muzzle and
+/// pushed outward, each along an azimuth pulled toward the bore's by the emission's `bore_bias`.
 fn spawn_ground_dust(
     muzzle: Vec3,
     dir: Vec3,
     ground_y: f32,
-    caliber: f32,
-    assets: &MuzzleVfxAssets,
-    materials: &mut BillboardMaterials,
-    ring: &mut BillboardRing,
-    rng: &mut ViewRng,
-    commands: &mut Commands,
+    blast: &GroundBlast,
+    kit: &mut MuzzleKit,
 ) {
-    let bore = caliber / GROUND_DUST_CALIBER;
     let base = Vec3::new(muzzle.x, ground_y, muzzle.z);
     // The bore's ground-plane azimuth; a vertical barrel has none, and the cloud stays a plain ring.
     let bore_xz = Vec3::new(dir.x, 0.0, dir.z).try_normalize();
-    let count = GROUND_DUST_COUNT.0
-        + (rng.next_f32() * (GROUND_DUST_COUNT.1 - GROUND_DUST_COUNT.0 + 1) as f32) as u32;
-    for _ in 0..count.min(GROUND_DUST_COUNT.1) {
-        let theta = rng.range(0.0, std::f32::consts::TAU);
+    let (lo, hi) = blast.puffs;
+    let count = lo + (kit.rng.next_f32() * (hi - lo + 1) as f32) as u32;
+    for _ in 0..count.min(hi) {
+        let theta = kit.rng.range(0.0, std::f32::consts::TAU);
         let radial = Vec3::new(theta.cos(), 0.0, theta.sin());
         let away = match bore_xz {
-            Some(bore_dir) => (radial * (1.0 - GROUND_DUST_BORE_BIAS)
-                + bore_dir * GROUND_DUST_BORE_BIAS)
+            Some(bore_dir) => (radial * (1.0 - blast.bore_bias) + bore_dir * blast.bore_bias)
                 .try_normalize()
-                .expect("the bore bias exceeds one half, so its two unit terms cannot cancel"),
+                .expect(
+                    "the gun file's bore bias exceeds one half, so its unit terms cannot cancel",
+                ),
             None => radial,
         };
-        let start_size = GROUND_DUST_SIZE.0 * bore;
-        let end_size = rng.range(GROUND_DUST_SIZE.1 * 0.75, GROUND_DUST_SIZE.1) * bore;
-        let offset = rng.range(GROUND_DUST_SPREAD.0, GROUND_DUST_SPREAD.1) * bore;
-        let push = rng.range(GROUND_DUST_PUSH.0, GROUND_DUST_PUSH.1) * bore;
-        spawn_billboard(
-            commands,
-            materials,
-            ring,
-            assets.quad.clone(),
-            BillboardSpec {
-                material: assets.dust_material(),
-                lifetime: rng.range(GROUND_DUST_LIFETIME.0, GROUND_DUST_LIFETIME.1),
-                // Half a birth diameter up: the puff's lower edge sits ON the surface.
-                origin: base + away * offset + Vec3::Y * (start_size * 0.5),
-                drift: away * push + Vec3::Y * (GROUND_DUST_RISE * bore),
-                frames: 4,
-                flipbook: Flipbook::Loop {
-                    start: rng.range(0.0, 4.0),
-                    rate: GROUND_DUST_FRAME_RATE,
-                },
-                start_size,
-                end_size,
-                aspect: Vec3::ONE,
-                roll: rng.range(0.0, std::f32::consts::TAU),
-                spin: rng.range(-GROUND_DUST_SPIN_MAX, GROUND_DUST_SPIN_MAX),
-                erosion_end: 1.0,
-                rotation: None,
-            },
-        );
-    }
-}
-
-/// Dress an MG shot (slice B): a small 1–2-frame flash (core + one near-only flame plane), a dim
-/// short muzzle light on TRACER rounds only, and one faint puff every [`MG_SMOKE_EVERY`] rounds.
-/// Everything per-shot randomized (flame frame, roll, size) — at 750 rpm identical repeated
-/// flashes strobe. Main-gun-calibre rounds pass through untouched (their dressing is
-/// [`on_main_gun_fire`]); staleness and distance LOD gates are the 88's exactly.
-#[expect(
-    clippy::too_many_arguments,
-    reason = "dresses an MG shot: assets, materials, two rings, smoke cadence, rng, camera and weapon cadence"
-)]
-fn on_mg_fire(
-    fire: On<FireShell>,
-    assets: Res<MuzzleVfxAssets>,
-    mut materials: BillboardMaterials,
-    mut ring: ResMut<BillboardRing>,
-    mut light_ring: ResMut<MuzzleLightRing>,
-    mut cadence: ResMut<MgSmokeCadence>,
-    mut rng: ResMut<ViewRng>,
-    camera: Query<&GlobalTransform, With<PlayerView>>,
-    weapons: Query<(&Weapon, &TankRoot, &WeaponIndex)>,
-    mut commands: Commands,
-) {
-    // The complement of the 88 observer's gate — the SAME boundary the shell-scene/tracer split
-    // uses, so every round is dressed by exactly one of the two observers.
-    if fire.caliber >= TRACER_MAX_CALIBER {
-        return;
-    }
-    // Stale remote burst (net catch-up past ~250 ms): skip, don't play late.
-    if fire.catch_up_ticks > STALE_FIRE_TICKS {
-        return;
-    }
-    // The smoke ration counts every non-stale MG round, near or far, so the cadence is a property
-    // of the burst, not of the camera.
-    cadence.0 = cadence.0.wrapping_add(1);
-    let smoke_due = cadence.0.is_multiple_of(MG_SMOKE_EVERY);
-
-    let origin = fire.origin;
-    let dir = Vec3::from(fire.direction);
-    // Distance LOD, same shape as the 88's: with no camera (headless harness) treat as near.
-    let near = if camera.is_empty() {
-        true // The headless effect harness exercises the complete recipe without a viewer.
-    } else {
-        camera
-            .single()
-            .expect("exactly one camera declares PlayerView")
-            .translation()
-            .distance_squared(origin)
-            < FAR_FULL_DRESSING * FAR_FULL_DRESSING
-    };
-
-    // --- Flash core: one small camera-facing additive billboard on the MG's own round-glow sprite.
-    // The core sprite is single-frame (full-image lanes below — the glow is the WHOLE image, not an
-    // atlas cell), so its per-shot variation is roll + size jitter; the flame plane carries the
-    // frame variation.
-    let mut core = assets.flash_material(assets.mg_core.clone(), 2.0);
-    core.params.frame = Vec4::new(0.0, 1.0, 1.0, 0.0);
-    let core_size = rng.range(MG_FLASH_CORE_SIZE.0, MG_FLASH_CORE_SIZE.1);
-    spawn_billboard(
-        &mut commands,
-        &mut materials,
-        &mut ring,
-        assets.quad.clone(),
-        BillboardSpec {
-            material: core,
-            lifetime: MG_FLASH_LIFETIME,
-            origin: origin + dir * 0.15,
-            drift: Vec3::ZERO,
-            frames: 1,
+        let start_size = blast.birth_diameter_m;
+        let end_size = kit
+            .rng
+            .range(blast.end_diameter_m.0, blast.end_diameter_m.1);
+        let offset = kit.rng.range(blast.spread_m.0, blast.spread_m.1);
+        let push = kit.rng.range(blast.push_mps.0, blast.push_mps.1);
+        let lifetime = kit.rng.range(blast.lifetime_s.0, blast.lifetime_s.1);
+        let start = kit.rng.range(0.0, 4.0);
+        let roll = kit.rng.range(0.0, std::f32::consts::TAU);
+        let spin = kit.rng.range(-GROUND_DUST_SPIN_MAX, GROUND_DUST_SPIN_MAX);
+        let material = kit.assets.dust_material(blast.opacity);
+        kit.billboard(BillboardSpec {
+            material,
+            lifetime,
+            // Half a birth diameter up: the puff's lower edge sits ON the surface.
+            origin: base + away * offset + Vec3::Y * (start_size * 0.5),
+            drift: away * push + Vec3::Y * blast.rise_mps,
+            frames: 4,
             flipbook: Flipbook::Loop {
-                start: 0.0,
-                rate: 0.0,
+                start,
+                rate: GROUND_DUST_FRAME_RATE,
             },
-            start_size: core_size,
-            end_size: core_size * 1.2,
+            start_size,
+            end_size,
             aspect: Vec3::ONE,
-            roll: rng.range(0.0, std::f32::consts::TAU),
-            spin: 0.0,
-            erosion_end: 0.0,
+            roll,
+            spin,
+            erosion_end: 1.0,
             rotation: None,
-        },
-    );
-
-    // --- One bore-aligned flame plane, near only: a random frame of the 4-flame atlas per shot
-    // plus a random roll around the bore (survey trick 2 — the anti-strobe variation).
-    if near {
-        let length = rng.range(MG_FLASH_PLANE_LENGTH.0, MG_FLASH_PLANE_LENGTH.1);
-        let rotation = Quat::from_axis_angle(dir, rng.range(0.0, std::f32::consts::TAU))
-            * Quat::from_rotation_arc(Vec3::Y, dir);
-        spawn_billboard(
-            &mut commands,
-            &mut materials,
-            &mut ring,
-            assets.quad.clone(),
-            BillboardSpec {
-                material: assets.flash_material(assets.flame_atlas.clone(), 2.0),
-                lifetime: MG_FLASH_LIFETIME,
-                origin: origin + dir * (length * 0.45),
-                drift: Vec3::ZERO,
-                frames: 4,
-                flipbook: Flipbook::Loop {
-                    start: rng.range(0.0, 4.0).floor(),
-                    rate: 0.0,
-                },
-                start_size: length,
-                end_size: length * 1.1,
-                aspect: Vec3::new(FLASH_PLANE_WIDTH_RATIO, 1.0, 1.0),
-                roll: 0.0,
-                spin: 0.0,
-                erosion_end: 0.0,
-                rotation: Some(rotation),
-            },
-        );
+        });
     }
-
-    // --- Rationed smoke: one faint short puff every few rounds, near only (a sub-pixel puff at
-    // range is pure overdraw).
-    if near && smoke_due {
-        let mut smoke = assets.smoke_material();
-        smoke.params.fade.w = MG_SMOKE_ALPHA;
-        spawn_billboard(
-            &mut commands,
-            &mut materials,
-            &mut ring,
-            assets.quad.clone(),
-            BillboardSpec {
-                material: smoke,
-                lifetime: MG_SMOKE_LIFETIME,
-                origin: origin + dir * 0.4,
-                drift: Vec3::Y * MG_SMOKE_RISE + dir * MG_SMOKE_PUSH,
-                frames: 4,
-                flipbook: Flipbook::Loop {
-                    start: rng.range(0.0, 4.0),
-                    rate: SMOKE_FRAME_RATE,
-                },
-                start_size: MG_SMOKE_SIZE.0,
-                end_size: MG_SMOKE_SIZE.1,
-                aspect: Vec3::ONE,
-                roll: rng.range(0.0, std::f32::consts::TAU),
-                spin: rng.range(-SMOKE_SPIN_MAX, SMOKE_SPIN_MAX),
-                erosion_end: 1.0,
-                rotation: None,
-            },
-        );
-    }
-
-    // The game's damage-model view gives each shot a glimmer. Its lifetime and the loaded
-    // weapon's cadence select shadows through the same rule as every other muzzle light.
-    let peak = if fire.tracer {
-        MG_LIGHT_PEAK_LUMENS * MG_TRACER_LIGHT_BOOST
-    } else {
-        MG_LIGHT_PEAK_LUMENS
-    };
-    spawn_muzzle_light(
-        &mut commands,
-        &mut light_ring,
-        origin + dir * 0.3,
-        peak,
-        MG_LIGHT_RANGE,
-        MG_LIGHT_LIFETIME,
-        0.1,
-        refire_interval(&fire, &weapons),
-    );
 }
 
 /// Decay each muzzle light hard (cubic — most of the drop in the first frames) and despawn at its
@@ -977,20 +704,21 @@ fn decay_muzzle_lights(
 mod tests {
     use super::*;
     use crate::ballistics::FireShellOrigin;
+    use crate::guns::MuzzleEmission;
     use bevy::render::storage::ShaderBuffer;
 
     use crate::vfx::billboard::{
         Billboard, BillboardFamilies, VfxBillboardMaterial, age_billboards,
     };
 
-    /// Minimal app carrying what BOTH fire observers + the agers read: bare asset stores, a
+    /// Minimal app carrying what the fire observer and the agers read: bare asset stores, a
     /// fixed-seed view RNG, no camera (distance LOD treats that as near — full dressing), and NO
-    /// height grid (so the ground-dust gate finds no known ground; `with_ground` adds one).
+    /// height grid (so the ground blast finds no known ground; `harness_ground` adds one).
     fn harness() -> App {
         let mut app = App::new();
         app.init_resource::<BillboardRing>()
             .init_resource::<MuzzleLightRing>()
-            .init_resource::<MgSmokeCadence>()
+            .init_resource::<SmokeCadence>()
             .init_resource::<Assets<Mesh>>()
             .init_resource::<Assets<Image>>()
             .init_resource::<Assets<VfxBillboardMaterial>>()
@@ -998,14 +726,12 @@ mod tests {
             .init_resource::<BillboardFamilies>()
             .init_resource::<Time>()
             .insert_resource(ViewRng::seeded(42))
-            .add_observer(on_main_gun_fire)
-            .add_observer(on_mg_fire)
+            .add_observer(dress_fire)
             // BOTH agers: the dressing's contract is what a layer RENDERS after n frames, and the
             // billboard half of it is unreadable without `age_billboards` running.
             .add_systems(Update, (age_billboards, decay_muzzle_lights));
         // The two blast sheets get DISTINCT handles (everything else can share the default one):
-        // which sheet a shot picked is only readable off its material, so the pick test needs
-        // them to be tellable apart.
+        // which sheet a shot picked is only readable off its material.
         let blast_atlas = app
             .world_mut()
             .resource_scope(|_, mut images: Mut<Assets<Image>>| {
@@ -1027,7 +753,7 @@ mod tests {
         app
     }
 
-    /// The harness with a FLAT terrain surface at `height` under it — what the ground-dust gate
+    /// The harness with a FLAT terrain surface at `height` under it — what the ground blast
     /// measures the muzzle against (the shots below fire from y = 2.0).
     fn harness_ground(height: f32) -> App {
         let mut app = harness();
@@ -1043,18 +769,24 @@ mod tests {
     /// The muzzle every test shot leaves from.
     const FIRE_ORIGIN: Vec3 = Vec3::new(1.0, 2.0, 3.0);
 
-    fn fire_round(app: &mut App, caliber: f32, catch_up_ticks: u32, tracer: bool) {
-        // FIXTURE DATA: a rapid belt and a slower single-shot cycle; no weapon identity is a rule.
-        let cycle = if caliber <= MG_CALIBER {
-            FireCycle::Automatic {
-                cyclic_rpm: 750.0,
-                belt_size: 100,
-                belt_swap_secs: 1.0,
-                tracer_every: 1,
-            }
-        } else {
-            FireCycle::Single { reload_secs: 1.0 }
-        };
+    /// FIXTURE DATA: a slow single-shot cycle and a rapid belt; no weapon identity is a rule.
+    const SLOW: FireCycle = FireCycle::Single { reload_secs: 1.0 };
+    const BELT: FireCycle = FireCycle::Automatic {
+        cyclic_rpm: 750.0,
+        belt_size: 100,
+        belt_swap_secs: 1.0,
+        tracer_every: 1,
+    };
+
+    /// One shot of `caliber` (m) carrying `muzzle`, from a live weapon on `cycle`.
+    fn fire_with(
+        app: &mut App,
+        muzzle: MuzzleEmission,
+        cycle: FireCycle,
+        caliber: f32,
+        catch_up_ticks: u32,
+        tracer: bool,
+    ) {
         let root = app.world_mut().spawn_empty().id();
         app.world_mut().spawn((
             Weapon {
@@ -1073,6 +805,7 @@ mod tests {
         ));
         app.world_mut().trigger(FireShell {
             effects: crate::rounds::FlightEffects::fixture_traced(),
+            muzzle,
             origin: FIRE_ORIGIN,
             direction: Dir3::X,
             speed: 773.0,
@@ -1099,12 +832,36 @@ mod tests {
         app.world_mut().flush();
     }
 
-    fn fire(app: &mut App, caliber: f32, catch_up_ticks: u32) {
-        fire_round(app, caliber, catch_up_ticks, true);
+    /// A shot carrying the full fixture dressing.
+    fn cannon(app: &mut App, catch_up_ticks: u32) {
+        fire_with(
+            app,
+            MuzzleEmission::fixture_cannon(),
+            SLOW,
+            CANNON_CALIBER,
+            catch_up_ticks,
+            true,
+        );
     }
 
-    /// The 7.9 mm coax — the MG-calibre side of the boundary.
-    const MG_CALIBER: f32 = 0.0079;
+    /// A shot carrying the rationed fixture dressing.
+    fn rifle(app: &mut App, catch_up_ticks: u32, tracer: bool) {
+        fire_with(
+            app,
+            MuzzleEmission::fixture_rifle(),
+            BELT,
+            RIFLE_CALIBER,
+            catch_up_ticks,
+            tracer,
+        );
+    }
+
+    /// FIXTURE DATA, metres: a large and a small flying body.
+    const CANNON_CALIBER: f32 = 0.088;
+    const RIFLE_CALIBER: f32 = 0.0079;
+
+    /// The full fixture's airborne layers: core + fireball + glow + 2 planes + smoke.
+    const CANNON_AIRBORNE: usize = 6;
 
     fn billboards(app: &mut App) -> usize {
         app.world_mut()
@@ -1128,60 +885,58 @@ mod tests {
         app.update();
     }
 
-    /// An 88 shot over unknown ground spawns the airborne main-gun dressing — blast core + flash
-    /// core + glow card + 2 planes + smoke (6 billboards) and 1 light (the ground-dust cloud needs
-    /// a terrain surface;
-    /// see `ground_dust_needs_a_low_barrel_over_known_ground`) — and an MG-calibre round gets the
-    /// MG dressing instead: core +
-    /// 1 flame plane (no smoke on the first round — the ration counts from 1) at a fraction of the
-    /// 88's size, plus its own dim light (now on EVERY round). Each round is dressed by exactly ONE
-    /// observer.
+    /// The game's damage-model view dresses each shot from the emission it carries and never from
+    /// its calibre: the full emission on a small body draws every authored layer, the rationed one
+    /// on a large body draws only its core and plane, at its own scale. A mutant that reinstates a
+    /// calibre split, or sizes a layer off the body, fails here.
     #[test]
-    fn main_gun_and_mg_split_the_dressing() {
-        let mut app = harness();
-        fire(&mut app, 0.088, 0);
-        assert_eq!(
-            billboards(&mut app),
-            6,
-            "88: blast core + flash core + glow card + 2 planes + smoke"
+    fn each_shot_is_dressed_from_its_emission_never_its_calibre() {
+        let mut full = harness();
+        fire_with(
+            &mut full,
+            MuzzleEmission::fixture_cannon(),
+            SLOW,
+            RIFLE_CALIBER,
+            0,
+            true,
         );
-        assert_eq!(lights(&mut app), 1);
+        assert_eq!(billboards(&mut full), CANNON_AIRBORNE);
+        assert_eq!(lights(&mut full), 1);
 
-        let mut mg = harness();
-        fire_round(&mut mg, MG_CALIBER, 0, true);
-        assert_eq!(billboards(&mut mg), 2, "MG: core + 1 flame plane");
-        assert_eq!(lights(&mut mg), 1, "every MG round carries a light");
-        // Scale discipline: every MG flash element is well under the 88's smallest core.
-        let world = mg.world_mut();
-        let mut q = world.query::<&Billboard>();
-        for billboard in q.iter(world) {
+        let mut rationed = harness();
+        fire_with(
+            &mut rationed,
+            MuzzleEmission::fixture_rifle(),
+            BELT,
+            CANNON_CALIBER,
+            0,
+            true,
+        );
+        assert_eq!(billboards(&mut rationed), 2, "core + 1 flame plane");
+        assert_eq!(lights(&mut rationed), 1);
+        let largest = MuzzleEmission::fixture_rifle().flames.length_m.1;
+        let world = rationed.world_mut();
+        for billboard in world.query::<&Billboard>().iter(world) {
             assert!(
-                billboard.start_size < FLASH_CORE_SIZE.0,
-                "MG dressing must stay rifle-scale (got {} m)",
+                billboard.start_size <= largest,
+                "the rationed dressing keeps its own scale (got {} m)",
                 billboard.start_size
             );
         }
     }
 
-    /// Distance LOD contract: beyond `FAR_FULL_DRESSING` only the two cores + light spawn — the
-    /// glow card, flame planes and smoke are all near-only. A camera parked well past the cutoff
-    /// must leave the 88 with exactly TWO billboards (blast core + flash core) and its light.
-    /// Guards the glow card against silently re-escaping the gate.
+    /// Distance LOD contract: beyond `FAR_FULL_DRESSING` only the core, the fireball and the light
+    /// spawn — the glow, flame planes and smoke are near-only.
     #[test]
-    fn far_88_shot_drops_to_core_and_light() {
+    fn a_far_shot_drops_to_core_fireball_and_light() {
         let mut app = harness();
-        // Park a camera far past the 400 m cutoff from the fixed shot origin (1, 2, 3).
         app.world_mut().spawn((
             Camera3d::default(),
             PlayerView,
             GlobalTransform::from_translation(Vec3::new(2000.0, 0.0, 0.0)),
         ));
-        fire(&mut app, 0.088, 0);
-        assert_eq!(
-            billboards(&mut app),
-            2,
-            "far 88: blast core + flash core only (no glow card, planes, or smoke)"
-        );
+        cannon(&mut app, 0);
+        assert_eq!(billboards(&mut app), 2, "far: fireball + core only");
         assert_eq!(
             lights(&mut app),
             1,
@@ -1191,8 +946,7 @@ mod tests {
 
     /// The ground-dust puffs of the last shot in SPAWN order: `(entity, rendered diameter,
     /// rendered position)` each. The flipbook rate is the discriminator — no other muzzle layer
-    /// plays at [`GROUND_DUST_FRAME_RATE`] — and the entity sort keeps a given puff at a stable
-    /// index across ticks that despawn its neighbours.
+    /// plays at [`GROUND_DUST_FRAME_RATE`].
     fn dust_puffs(app: &mut App) -> Vec<(Entity, f32, Vec3)> {
         let world = app.world_mut();
         let mut q = world.query::<(Entity, &Billboard, &Transform)>();
@@ -1207,25 +961,25 @@ mod tests {
         puffs
     }
 
-    /// The ground-dust gate: an 88 fired a couple of metres over known terrain lifts a cloud of
-    /// [`GROUND_DUST_COUNT`] puffs sitting on that surface; the same shot with the ground far below
-    /// lifts none, and an MG round never lifts dust at all.
+    /// The ground blast's reach is the gun's: a muzzle within it over known terrain lifts the
+    /// authored puff count, sitting on that surface; the ground below the reach lifts none, and an
+    /// emission without a ground blast lifts none at any height.
     #[test]
-    fn ground_dust_needs_a_low_barrel_over_known_ground() {
-        // Muzzle at y = 2.0, ground at y = 0.0 — inside GROUND_DUST_MAX_HEIGHT.
+    fn ground_dust_needs_the_ground_within_the_guns_reach() {
+        let blast = MuzzleEmission::fixture_cannon()
+            .ground_blast
+            .expect("the full fixture states a ground blast");
+        // Muzzle at y = 2.0, ground at y = 0.0: inside the fixture's 2.5 m reach.
         let mut low = harness_ground(0.0);
-        fire(&mut low, 0.088, 0);
+        cannon(&mut low, 0);
         let puffs = dust_puffs(&mut low);
         assert!(
-            (GROUND_DUST_COUNT.0 as usize..=GROUND_DUST_COUNT.1 as usize).contains(&puffs.len()),
-            "dust puff count {} outside {GROUND_DUST_COUNT:?}",
-            puffs.len()
+            (blast.puffs.0 as usize..=blast.puffs.1 as usize).contains(&puffs.len()),
+            "dust puff count {} outside {:?}",
+            puffs.len(),
+            blast.puffs
         );
-        assert_eq!(
-            billboards(&mut low),
-            6 + puffs.len(),
-            "the airborne dressing plus the cloud"
-        );
+        assert_eq!(billboards(&mut low), CANNON_AIRBORNE + puffs.len());
         for (_, size, position) in &puffs {
             assert!(
                 position.y >= 0.0 && position.y <= size * 0.5 + 1e-3,
@@ -1234,30 +988,30 @@ mod tests {
             );
         }
 
-        // The same shot with the surface 6 m down: nothing to lift.
         let mut high = harness_ground(-6.0);
-        fire(&mut high, 0.088, 0);
-        assert!(dust_puffs(&mut high).is_empty(), "a high barrel lifts none");
-        assert_eq!(billboards(&mut high), 6);
+        cannon(&mut high, 0);
+        assert!(
+            dust_puffs(&mut high).is_empty(),
+            "beyond the reach lifts none"
+        );
 
-        // The MG's dressing has no ground layer at any height.
-        let mut mg = harness_ground(0.0);
-        fire_round(&mut mg, MG_CALIBER, 0, true);
-        assert!(dust_puffs(&mut mg).is_empty(), "no dust off a rifle bore");
-        assert_eq!(billboards(&mut mg), 2);
+        let mut none = harness_ground(0.0);
+        rifle(&mut none, 0, true);
+        assert!(
+            dust_puffs(&mut none).is_empty(),
+            "no authored blast, no dust"
+        );
     }
 
-    /// The cloud is scaled by the BORE, never by the viewer (ADR-0023): doubling the caliber
-    /// doubles every metre the cloud renders — the puff's diameter at birth AND the height it has
-    /// LIFTED after a second of drift (the vertical lift carries the same ratio as the radial
-    /// push, so the cloud keeps its shape at any bore).
+    /// The cloud's metres are the emission's (ADR-0023: physical inputs only, never the viewer): a
+    /// puff is born at the authored diameter and lifts at the authored rise; doubling both in the
+    /// data doubles both on screen. A mutant reading a shared constant or the calibre fails.
     #[test]
-    fn ground_dust_scales_with_the_bore() {
-        /// One shot at `caliber`: the first puff's rendered diameter at birth, and how far it has
-        /// risen [`LIFT_SECS`] later.
-        fn puff(caliber: f32) -> (f32, f32) {
+    fn ground_dust_reads_the_authored_cloud() {
+        const LIFT_SECS: f32 = 1.0;
+        fn puff(muzzle: MuzzleEmission) -> (f32, f32) {
             let mut app = harness_ground(0.0);
-            fire(&mut app, caliber, 0);
+            fire_with(&mut app, muzzle, SLOW, CANNON_CALIBER, 0, true);
             let (entity, size, born) = dust_puffs(&mut app)[0];
             // The arming frame, then the drift frame (see `age_billboards`).
             advance(&mut app, 0.0);
@@ -1269,25 +1023,24 @@ mod tests {
                 .translation;
             (size, lifted.y - born.y)
         }
-        const LIFT_SECS: f32 = 1.0;
-
-        let (small, small_lift) = puff(GROUND_DUST_CALIBER);
-        assert!((small - GROUND_DUST_SIZE.0).abs() < 1e-4);
+        let authored = MuzzleEmission::fixture_cannon();
+        let blast = authored.ground_blast.expect("fixture blast");
+        let (size, lift) = puff(authored);
+        assert!((size - blast.birth_diameter_m).abs() < 1e-4);
         assert!(
-            (small_lift - GROUND_DUST_RISE * LIFT_SECS).abs() < 1e-4,
-            "at the authored bore the lift IS GROUND_DUST_RISE (rose {small_lift} m in \
-             {LIFT_SECS} s)"
+            (lift - blast.rise_mps * LIFT_SECS).abs() < 1e-4,
+            "rose {lift} m"
         );
 
-        let (big, big_lift) = puff(GROUND_DUST_CALIBER * 2.0);
-        assert!(
-            (big - small * 2.0).abs() < 1e-4,
-            "twice the bore, twice the puff: {small} → {big}"
-        );
-        assert!(
-            (big_lift - small_lift * 2.0).abs() < 1e-4,
-            "twice the bore, twice the lift: {small_lift} → {big_lift}"
-        );
+        let mut doubled = authored;
+        doubled.ground_blast = Some(GroundBlast {
+            birth_diameter_m: blast.birth_diameter_m * 2.0,
+            rise_mps: blast.rise_mps * 2.0,
+            ..blast
+        });
+        let (big, big_lift) = puff(doubled);
+        assert!((big - size * 2.0).abs() < 1e-4, "{size} → {big}");
+        assert!((big_lift - lift * 2.0).abs() < 1e-4, "{lift} → {big_lift}");
     }
 
     /// The blast cores alive right now, in spawn order. [`BLAST_FRAMES`] is the discriminator — no
@@ -1341,51 +1094,68 @@ mod tests {
         }
     }
 
-    /// The fireball is scaled by the BORE, never by the viewer (ADR-0023): doubling the caliber
-    /// doubles the quad, the standoff and the lifetime — and because [`Flipbook::Once`] spreads the
-    /// sheet over that lifetime, the playthrough scales with it and needs no rate of its own.
+    /// The fireball plays its authored geometry: a diameter inside the authored range, the
+    /// authored standoff and lifetime, once through the sheet. An emission stating no fireball
+    /// draws none.
     #[test]
-    fn blast_core_scales_with_the_bore() {
-        fn core(caliber: f32) -> (f32, f32, f32, Flipbook) {
-            let mut app = harness();
-            fire(&mut app, caliber, 0);
-            let entity = blast_cores(&mut app)[0];
-            let core = app.world().get::<Billboard>(entity).expect("blast core");
-            let standoff = core.origin.distance(FIRE_ORIGIN);
-            (core.start_size, core.lifetime, standoff, core.flipbook)
-        }
+    fn the_fireball_plays_its_authored_geometry() {
+        let fireball = MuzzleEmission::fixture_cannon()
+            .fireball
+            .expect("the full fixture states a fireball");
+        let mut app = harness();
+        cannon(&mut app, 0);
+        let entity = blast_cores(&mut app)[0];
+        let core = app.world().get::<Billboard>(entity).expect("fireball");
+        assert_eq!(
+            core.flipbook,
+            Flipbook::Once,
+            "the sheet is a sequence, not a loop"
+        );
+        assert!((fireball.diameter_m.0..=fireball.diameter_m.1).contains(&core.start_size));
+        assert!((core.lifetime - fireball.lifetime_s).abs() < 1e-6);
+        assert!((core.origin.distance(FIRE_ORIGIN) - fireball.standoff_m).abs() < 1e-4);
 
-        let (small, small_life, small_standoff, book) = core(BLAST_CALIBER);
-        let (big, big_life, big_standoff, _) = core(BLAST_CALIBER * 2.0);
-        assert_eq!(book, Flipbook::Once, "the sheet is a sequence, not a loop");
-        for (what, small, big) in [
-            ("fireball", small, big),
-            ("burn", small_life, big_life),
-            ("standoff", small_standoff, big_standoff),
-        ] {
-            assert!(
-                (big - small * 2.0).abs() < 1e-3,
-                "twice the bore must be twice the {what}: {small} → {big}"
-            );
-        }
+        let mut none = harness();
+        rifle(&mut none, 0, true);
+        assert!(blast_cores(&mut none).is_empty());
     }
 
-    /// The game's damage-model view applies the shared light rule to both dressing paths.
-    /// FIXTURE DATA: the slower single-shot cycle casts and the short rapid-belt flash does not;
-    /// a caller that still hardcodes its shadow decision fails the cadence/duration cases below.
+    /// The game's damage-model view applies the shared light rule to every shot. FIXTURE DATA: the
+    /// slower single-shot cycle casts and the short rapid-belt flash does not; a caller that
+    /// hardcodes its shadow decision fails the cadence/duration cases below.
     #[test]
-    fn both_dressing_paths_use_their_loaded_flash_cadence() {
-        let mut main = harness();
-        fire(&mut main, 0.088, 0);
-        let world = main.world_mut();
+    fn every_shot_uses_its_loaded_flash_cadence() {
+        let mut slow = harness();
+        cannon(&mut slow, 0);
+        let world = slow.world_mut();
         let mut q = world.query::<&PointLight>();
-        assert!(q.single(world).expect("one 88 light").shadow_maps_enabled);
+        assert!(q.single(world).expect("one light").shadow_maps_enabled);
 
-        let mut mg = harness();
-        fire_round(&mut mg, MG_CALIBER, 0, true);
-        let world = mg.world_mut();
+        let mut belt = harness();
+        rifle(&mut belt, 0, true);
+        let world = belt.world_mut();
         let mut q = world.query::<&PointLight>();
-        assert!(!q.single(world).expect("one MG light").shadow_maps_enabled);
+        assert!(!q.single(world).expect("one light").shadow_maps_enabled);
+    }
+
+    /// A tracer multiplies the light's peak by the emission's `tracer_gain`; a plain shot glows at
+    /// the authored peak.
+    #[test]
+    fn a_tracer_scales_the_light_by_its_authored_gain() {
+        let light = MuzzleEmission::fixture_rifle().light;
+        for (tracer, peak) in [
+            (false, light.peak_lm),
+            (true, light.peak_lm * light.tracer_gain),
+        ] {
+            let mut app = harness();
+            rifle(&mut app, 0, tracer);
+            let world = app.world_mut();
+            let point = world
+                .query::<&PointLight>()
+                .single(world)
+                .expect("one light");
+            assert_eq!(point.intensity, peak, "tracer {tracer}");
+        }
     }
 
     /// The game's damage-model fire cause can outlive its firing source. The view must still
@@ -1439,14 +1209,16 @@ mod tests {
             let mut world = World::new();
             let mut queue = bevy::ecs::world::CommandQueue::default();
             let mut commands = Commands::new(&mut queue, &world);
+            let light = crate::guns::FlashLight {
+                lifetime_s: lifetime,
+                ..MuzzleEmission::fixture_rifle().light
+            };
             spawn_muzzle_light(
                 &mut commands,
                 &mut MuzzleLightRing::default(),
                 Vec3::ZERO,
                 1.0,
-                1.0,
-                lifetime,
-                0.1,
+                &light,
                 interval,
             );
             queue.apply(&mut world);
@@ -1458,73 +1230,75 @@ mod tests {
         }
     }
 
-    /// MG smoke is rationed to every [`MG_SMOKE_EVERY`]-th round — per-round puffs at the cyclic
-    /// rate are the overdraw trap the survey warns about.
+    /// A rationed smoke puffs every `every_rounds`-th shot — per-round puffs at the cyclic rate
+    /// are the overdraw trap.
     #[test]
-    fn mg_smoke_spawns_every_nth_round() {
+    fn smoke_spawns_on_the_guns_ration() {
+        let every = MuzzleEmission::fixture_rifle()
+            .smoke
+            .expect("the rationed fixture smokes")
+            .every_rounds;
         let mut app = harness();
-        let rounds = MG_SMOKE_EVERY * 2;
+        let rounds = every * 2;
         for _ in 0..rounds {
-            fire_round(&mut app, MG_CALIBER, 0, false);
+            rifle(&mut app, 0, false);
         }
         // Each round spawns core + flame plane; every Nth adds one puff.
-        let expected = (rounds * 2 + rounds / MG_SMOKE_EVERY) as usize;
+        let expected = (rounds * 2 + rounds / every) as usize;
         assert_eq!(
             billboards(&mut app),
             expected,
-            "2/round + 1 puff per {MG_SMOKE_EVERY}"
+            "2/round + 1 puff per {every}"
         );
     }
 
-    /// A stale remote shot (catch-up beyond ~250 ms) skips the dressing rather than playing late —
-    /// both guns.
+    /// A stale remote shot (catch-up beyond ~250 ms) skips the dressing rather than playing late.
     #[test]
     fn stale_remote_fire_skips_dressing() {
         let mut app = harness();
-        fire(&mut app, 0.088, STALE_FIRE_TICKS + 1);
+        cannon(&mut app, STALE_FIRE_TICKS + 1);
         assert_eq!(billboards(&mut app), 0);
         assert_eq!(lights(&mut app), 0);
-        fire(&mut app, MG_CALIBER, STALE_FIRE_TICKS + 1);
-        assert_eq!(billboards(&mut app), 0, "stale MG burst skips too");
+        rifle(&mut app, STALE_FIRE_TICKS + 1, true);
+        assert_eq!(billboards(&mut app), 0, "stale burst skips too");
         assert_eq!(lights(&mut app), 0);
         // At or under the boundary the dressing still plays (~150 ms catch-up is the normal case).
-        fire(&mut app, 0.088, STALE_FIRE_TICKS);
-        assert_eq!(billboards(&mut app), 6);
+        cannon(&mut app, STALE_FIRE_TICKS);
+        assert_eq!(billboards(&mut app), CANNON_AIRBORNE);
     }
 
     /// The muzzle light decays monotonically from its first-frame peak and despawns at end of
-    /// life — the "first frame hottest" contract, which holds through a whole rendered frame: a
-    /// light aged on its spawn frame would first draw a third of the way down its 55 ms envelope.
+    /// life — the "first frame hottest" contract, which holds through a whole rendered frame.
     #[test]
     fn muzzle_light_decays_then_despawns() {
+        let light = MuzzleEmission::fixture_cannon().light;
         let mut app = harness();
-        fire(&mut app, 0.088, 0);
+        cannon(&mut app, 0);
         let world = app.world_mut();
         let mut q = world.query::<(&MuzzleLight, &PointLight)>();
         let (_, point) = q.single(world).expect("one light");
-        assert_eq!(point.intensity, LIGHT_PEAK_LUMENS, "born at peak");
-        assert!(point.shadow_maps_enabled, "the 88 light casts");
+        assert_eq!(point.intensity, light.peak_lm, "born at peak");
 
-        // Frame one at 60 fps — a third of the light's whole life, and it is still at peak.
+        // Frame one at 60 fps — and it is still at peak.
         advance(&mut app, 1.0 / 60.0);
         let world = app.world_mut();
         let mut q = world.query::<&PointLight>();
         assert_eq!(
             q.single(world).expect("alive on frame one").intensity,
-            LIGHT_PEAK_LUMENS,
+            light.peak_lm,
             "the first RENDERED frame is the peak, not one frame down the decay"
         );
 
-        advance(&mut app, LIGHT_LIFETIME * 0.5);
+        advance(&mut app, light.lifetime_s * 0.5);
         let world = app.world_mut();
         let mut q = world.query::<(&MuzzleLight, &PointLight)>();
         let (_, point) = q.single(world).expect("still alive mid-decay");
         assert!(
-            point.intensity < LIGHT_PEAK_LUMENS * 0.5,
+            point.intensity < light.peak_lm * 0.5,
             "cubic decay front-loads the drop"
         );
 
-        advance(&mut app, LIGHT_LIFETIME);
+        advance(&mut app, light.lifetime_s);
         assert_eq!(lights(&mut app), 0, "expired light must despawn");
     }
 
@@ -1535,7 +1309,7 @@ mod tests {
         let mut app = harness();
         let mut spawned = Vec::with_capacity(LIGHT_CAP + 5);
         for _ in 0..LIGHT_CAP + 5 {
-            fire(&mut app, 0.088, 0);
+            cannon(&mut app, 0);
             spawned.push(
                 *app.world()
                     .resource::<MuzzleLightRing>()

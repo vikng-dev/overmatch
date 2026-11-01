@@ -35,8 +35,11 @@ const CAMERA_UP_M: f32 = 0.6;
 
 #[derive(Clone, Debug)]
 enum What {
-    Round(crate::rounds::Round),
-    Charge { mass: f32 },
+    /// Boxed: a fired round carries its gun's whole muzzle emission.
+    Round(Box<crate::rounds::Round>),
+    Charge {
+        mass: f32,
+    },
 }
 
 /// The cue's shots in order, each with its second and whether it went off; the wall's framing
@@ -83,7 +86,7 @@ fn cue_from_plan() -> Option<Cue> {
         .iter()
         .map(|shot| match shot {
             WallShot::Round { round, mode, at } => (
-                What::Round(super::resolve_round(round, *mode, "wall.shots")),
+                What::Round(Box::new(super::resolve_round(round, *mode, "wall.shots"))),
                 *at,
                 false,
             ),
