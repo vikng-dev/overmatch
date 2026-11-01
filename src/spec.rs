@@ -310,8 +310,8 @@ pub enum FireMode {
 }
 
 /// A mount's fire mechanism joined with its gun's ([`WeaponSpec::fire_cycle`]): what the fire
-/// system runs, built at spawn from data. The mount's fire mode and its gun's mechanism are of one
-/// family by construction.
+/// system runs, parsed at the data edge and copied at spawn. The mount's fire mode and its
+/// gun's mechanism are of one family by construction.
 /// Its delays are fixed-tick spans, parsed once from the authored seconds
 /// ([`crate::sim_tick::TickSpan::from_secs`]).
 #[derive(Clone, Copy, PartialEq, Debug)]
@@ -367,12 +367,58 @@ impl FireMode {
     }
 }
 
-/// One weapon's data, keyed by logical name in [`TankSpec::weapons`]. `muzzle` (the bore the shot
-/// leaves from) and the optional recoiling `barrel` are model node names; the weapon's aiming chain
-/// is *not* declared here — it's the muzzle's servo ancestors, derived from the model hierarchy.
+/// A mount whose fire mode and gun were joined at the data edge. Spawn copies `fire_cycle`;
+/// authored seconds and the raw mode are held only by the deserializer's `WeaponSpecFile`.
+#[derive(Deserialize, Clone)]
+#[serde(try_from = "WeaponSpecFile")]
+pub struct WeaponSpec {
+    pub trigger: Trigger,
+    pub muzzle: String,
+    pub barrel: Option<String>,
+    pub gun: String,
+    pub stowage: Vec<StowageEntry>,
+    pub fire_cycle: FireCycle,
+    pub recoil: Option<RecoilSpec>,
+    pub fire: Requirement,
+    pub load: Requirement,
+}
+
+impl TryFrom<WeaponSpecFile> for WeaponSpec {
+    type Error = String;
+    fn try_from(file: WeaponSpecFile) -> Result<Self, Self::Error> {
+        let fire_cycle = file.fire_cycle()?;
+        Ok(Self {
+            trigger: file.trigger,
+            muzzle: file.muzzle,
+            barrel: file.barrel,
+            gun: file.gun,
+            stowage: file.stowage,
+            fire_cycle,
+            recoil: file.recoil,
+            fire: file.fire,
+            load: file.load,
+        })
+    }
+}
+
+/// Keep the logical mount name on a refusal raised while joining its authored mode and gun.
+fn deserialize_weapons<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<HashMap<String, WeaponSpec>, D::Error> {
+    HashMap::<String, WeaponSpecFile>::deserialize(deserializer)?
+        .into_iter()
+        .map(|(name, file)| {
+            WeaponSpec::try_from(file)
+                .map(|weapon| (name.clone(), weapon))
+                .map_err(|err| serde::de::Error::custom(format!("weapon `{name}`: {err}")))
+        })
+        .collect()
+}
+
+/// The authored mount at the deserialization edge; its durations leave this type as tick spans.
 #[derive(Deserialize, Clone)]
 #[serde(deny_unknown_fields)]
-pub struct WeaponSpec {
+struct WeaponSpecFile {
     /// Fire input this weapon answers to. The single `Primary` also marks the rig's main bore.
     /// Pure input *routing* (which command field the weapon reads) — the fire mechanism, and with
     /// it the edge-vs-level input semantics, comes from [`Self::fire_mode`].
@@ -387,7 +433,7 @@ pub struct WeaponSpec {
     /// report the weapon plays.
     pub gun: String,
     /// The rounds the tank carries for this mount, in order, and how many of each, each fired from
-    /// [`Self::gun`] ([`Self::resolved_rounds`]). The first is the default — the round the weapon
+    /// [`Self::gun`] ([`WeaponSpec::resolved_rounds`]). The first is the default — the round the weapon
     /// spawns loaded with and selected; the crew selects among them. `validate()` refuses an empty
     /// list, a round stowed twice, a count of zero, a round no registry carries or the gun does not
     /// chamber, and more than [`MAX_WEAPON_ROUNDS`] (a round is addressed by its `u8` index here,
@@ -537,7 +583,7 @@ impl WeaponSpec {
                 }
             }
         }
-        let cycle = self.fire_cycle()?;
+        let cycle = self.fire_cycle;
         self.resolved_rounds().map_err(|err| err.to_string())?;
         // A tracer_every of 0 is legal: a tracerless belt. Every delay was parsed by fire_cycle.
         if let FireCycle::Automatic { belt_size: 0, .. } = cycle {
@@ -547,12 +593,14 @@ impl WeaponSpec {
         }
         Ok(())
     }
+}
 
+impl WeaponSpecFile {
     /// The mount's fire mode joined with its gun's mechanism and its belt's tracer mix; an error
     /// naming what disagrees: a gun no registry carries, a fire mode of another family than the
     /// gun's mechanism, a `tracer_every` on a single-shot mount or none on a belt. On a validated
     /// spec this is `Ok`.
-    pub(crate) fn fire_cycle(&self) -> Result<FireCycle, String> {
+    fn fire_cycle(&self) -> Result<FireCycle, String> {
         let gun = GunRegistry::shipped()
             .gun(&self.gun)
             .map_err(|err| err.to_string())?;
@@ -1075,6 +1123,7 @@ pub struct TankSpec {
     /// its bore (+ optional recoiling barrel) node and carries its ballistics/reload/recoil; the
     /// binder attaches a `Weapon` the shooting systems read. Replaces the hardcoded `shooting.rs`
     /// consts. Required; `{}` is an unarmed vehicle.
+    #[serde(deserialize_with = "deserialize_weapons")]
     pub weapons: HashMap<String, WeaponSpec>,
     /// Crew viewpoints (camera/optic anchors) keyed by [`ViewKind`]. The gunner's also identifies
     /// the gunner's chain for the rig's main-bore handles. Every playable rig states both kinds;
@@ -1364,14 +1413,14 @@ impl TankSpec {
     /// The rejections and their failure modes:
     /// - `Automatic { belt_size: 0 }` — a permanently dry belt: the swap timer is only armed *inside*
     ///   `fire()`, which a dry belt blocks, so the weapon can never fire *or* swap. Bricked.
-    /// - `Automatic { belt_swap_secs: < 0.0 }` / `Single { reload_secs: < 0.0 }` — a negative timer.
+    /// - Negative or unrepresentable authored delays are refused while deserializing `WeaponSpec`.
     /// - A mount whose fire mode and its gun's mechanism disagree (a belt on a single-shot gun, a
     ///   `tracer_every` on a single-shot mount, none on a belt): `fire_cycle` refuses the pair.
     /// - A recoil stop (`RecoilSpec::max_length`) that is not finite and positive: a NaN stop
     ///   compares false and never holds the barrel, and one at or ahead of battery leaves no stroke.
     /// - A recoil spring the live barrel cannot integrate: a kick or stiffness that is not finite
     ///   and positive, a damping that is not finite and non-negative.
-    /// - A reload or belt swap that is no duration (negative or not finite).
+    /// - A reload or belt swap reaches validation only after parsing into a checked tick span.
     /// - Hull or turret body data (mass, inertia extents) that is not finite and positive.
     ///
     /// The gun's own numbers are the gun registry's to refuse (`crate::guns`): a cyclic rate that is
@@ -2229,6 +2278,69 @@ TankSpec(
         }
     }
 
+    /// The game's damage model: weapon eligibility. Spawn relies on the parsed cycle being
+    /// retained, and asset authors need the mount and field on a refusal at that same edge.
+    #[test]
+    fn the_weapon_edge_retains_its_cycle_and_names_invalid_mounts() {
+        let spec = fixture();
+        for (name, weapon) in &spec.weapons {
+            let spawned =
+                crate::tank::Weapon::of_spec(name, weapon, None).expect("validated fixture weapon");
+            assert_eq!(spawned.fire_cycle, weapon.fire_cycle);
+        }
+        // DERIVED fixture duration: beyond the default timestep's signed deadline horizon.
+        let invalid = FIXTURE_RON.replace(
+            "Single(reload_secs: 3.0)",
+            "Single(reload_secs: 100000000.0)",
+        );
+        let err = ron::de::from_str::<TankSpec>(&invalid)
+            .err()
+            .expect("invalid duration is refused while parsing")
+            .to_string();
+        assert!(
+            err.contains("Cannon") && err.contains("reload_secs"),
+            "{err}"
+        );
+    }
+
+    /// Fixture input reconstructed from the fixture sheet solely for malformed-data tests.
+    fn raw_weapon(base: &str) -> WeaponSpecFile {
+        let sheet = fixture();
+        let weapon = &sheet.weapons[base];
+        let (fire_mode, tracer_every) = match weapon.fire_cycle {
+            FireCycle::Single { reload } => (
+                FireMode::Single {
+                    reload_secs: reload.secs(),
+                },
+                None,
+            ),
+            FireCycle::Automatic {
+                belt_size,
+                swap,
+                tracer_every,
+                ..
+            } => (
+                FireMode::Automatic {
+                    belt_size,
+                    belt_swap_secs: swap.secs(),
+                },
+                Some(tracer_every),
+            ),
+        };
+        WeaponSpecFile {
+            trigger: weapon.trigger,
+            muzzle: weapon.muzzle.clone(),
+            barrel: weapon.barrel.clone(),
+            gun: weapon.gun.clone(),
+            stowage: weapon.stowage.clone(),
+            fire_mode,
+            tracer_every,
+            recoil: weapon.recoil.clone(),
+            fire: weapon.fire.clone(),
+            load: weapon.load.clone(),
+        }
+    }
+
     /// The fixture sheet with its `base` mount cloned as a `Secondary` "Phantom" (the fixture's
     /// cannon stays its one `Primary`) and edited by `edit`, validated; the error as text.
     fn with_phantom(base: &str, edit: impl FnOnce(&mut WeaponSpec)) -> Result<(), String> {
@@ -2342,13 +2454,14 @@ TankSpec(
             ),
             ("MG", FireMode::Single { reload_secs: 1.0 }, None),
         ] {
-            let err = with_phantom(base, |weapon| {
-                weapon.fire_mode = fire_mode;
-                weapon.tracer_every = tracer_every;
-            })
-            .unwrap_err();
+            let mut weapon = raw_weapon(base);
+            weapon.fire_mode = fire_mode;
+            weapon.tracer_every = tracer_every;
+            let err = WeaponSpec::try_from(weapon)
+                .err()
+                .expect("crossed mechanism is refused");
             assert!(
-                err.contains("Phantom") && err.contains("fire_mode") && err.contains("family"),
+                err.contains("fire_mode") && err.contains("family"),
                 "{base}: {err}"
             );
         }
@@ -2359,11 +2472,12 @@ TankSpec(
     #[test]
     fn a_tracer_mix_is_authored_exactly_on_a_belt_mount() {
         for (base, tracer_every) in [("Cannon", Some(5)), ("MG", None)] {
-            let err = with_phantom(base, |weapon| weapon.tracer_every = tracer_every).unwrap_err();
-            assert!(
-                err.contains("Phantom") && err.contains("tracer_every"),
-                "{base}: {err}"
-            );
+            let mut weapon = raw_weapon(base);
+            weapon.tracer_every = tracer_every;
+            let err = WeaponSpec::try_from(weapon)
+                .err()
+                .expect("tracer mismatch is refused");
+            assert!(err.contains("tracer_every"), "{base}: {err}");
         }
     }
 
@@ -2381,10 +2495,13 @@ TankSpec(
                 FireMode::Single { .. } => "Cannon",
                 FireMode::Automatic { .. } => "MG",
             };
-            let mut weapon = spec.weapons[base].clone();
+            let mut weapon = raw_weapon(base);
             weapon.fire_mode = mode;
             weapon.trigger = Trigger::Secondary;
-            spec.weapons.insert(name.to_string(), weapon);
+            spec.weapons.insert(
+                name.to_string(),
+                WeaponSpec::try_from(weapon).expect("valid fixture durations"),
+            );
             spec
         };
 
@@ -2402,22 +2519,6 @@ TankSpec(
             "{err}"
         );
 
-        // Negative belt-swap timer.
-        let err = with_weapon(
-            "NegSwap",
-            FireMode::Automatic {
-                belt_size: 150,
-                belt_swap_secs: -1.0,
-            },
-        )
-        .validate()
-        .unwrap_err()
-        .to_string();
-        assert!(
-            err.contains("NegSwap") && err.contains("belt_swap_secs"),
-            "{err}"
-        );
-
         // A single-shot reload or a belt swap that is no fixed-tick span: the sheet refuses each
         // by name where `TickSpan::from_secs` parses it.
         for secs in [
@@ -2429,28 +2530,28 @@ TankSpec(
             67_108_860.0,
             33_554_432.0,
         ] {
-            let err = with_weapon("BadReload", FireMode::Single { reload_secs: secs })
-                .validate()
-                .unwrap_err()
-                .to_string();
-            assert!(
-                err.contains("BadReload") && err.contains("reload_secs"),
-                "{secs}: {err}"
-            );
-            let err = with_weapon(
-                "BadSwap",
-                FireMode::Automatic {
-                    belt_size: 150,
-                    belt_swap_secs: secs,
-                },
-            )
-            .validate()
-            .unwrap_err()
-            .to_string();
-            assert!(
-                err.contains("BadSwap") && err.contains("belt_swap_secs"),
-                "{secs}: {err}"
-            );
+            for (base, mode, field) in [
+                (
+                    "Cannon",
+                    FireMode::Single { reload_secs: secs },
+                    "reload_secs",
+                ),
+                (
+                    "MG",
+                    FireMode::Automatic {
+                        belt_size: 150,
+                        belt_swap_secs: secs,
+                    },
+                    "belt_swap_secs",
+                ),
+            ] {
+                let mut weapon = raw_weapon(base);
+                weapon.fire_mode = mode;
+                let err = WeaponSpec::try_from(weapon)
+                    .err()
+                    .expect("invalid span refused at parsing");
+                assert!(err.contains(field), "{secs}: {err}");
+            }
         }
 
         // Track: a non-positive link_mass parses but yields zero-inverse-mass chain constraints —
@@ -2482,11 +2583,14 @@ TankSpec(
                 belt_swap_secs: 0.0,
             },
         );
-        stealth
+        if let FireCycle::Automatic { tracer_every, .. } = &mut stealth
             .weapons
             .get_mut("Stealth")
             .expect("the stealth mount")
-            .tracer_every = Some(0);
+            .fire_cycle
+        {
+            *tracer_every = 0;
+        }
         assert!(
             stealth.validate().is_ok(),
             "tracer_every: 0 is a legal tracerless belt; belt_swap_secs: 0 is a legal instant refill"

@@ -241,12 +241,7 @@ fn weapon_gate(spec: &TankSpec) -> WeaponGate {
     WeaponGate {
         weapons: weapons
             .into_iter()
-            .map(|(name, weapon)| {
-                let cycle = weapon.fire_cycle().unwrap_or_else(|err| {
-                    panic!("weapon `{name}`: {err} — the spec's validate() joins every mount with its gun")
-                });
-                WeaponGateState::for_cycle(&cycle)
-            })
+            .map(|(_, weapon)| WeaponGateState::for_cycle(&weapon.fire_cycle))
             .collect(),
     }
 }

@@ -204,7 +204,7 @@ impl Weapon {
         Ok(Self {
             name: name.to_owned(),
             rounds,
-            fire_cycle: spec.fire_cycle()?,
+            fire_cycle: spec.fire_cycle,
             recoil: spec.recoil.clone(),
             barrel,
             fire: spec.fire.clone(),
