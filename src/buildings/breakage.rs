@@ -1879,8 +1879,8 @@ pub(crate) fn run_laws(
             let on_group = loads
                 .iter()
                 .filter(|load| group.binary_search(&load.chunk).is_ok())
-                .copied()
-                .collect();
+                .copied();
+            let on_group = fracture::debit_work(&live.structure, &failures, &group, on_group);
             (group, on_group)
         })
         .collect();

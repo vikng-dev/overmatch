@@ -1207,6 +1207,61 @@ pub(crate) struct Failure {
     pub capacity: f32,
 }
 
+impl Failure {
+    /// The share of its blows' kinetic energy an opening leaves them, 1 for a strength opening.
+    /// DERIVED: an energy cause compares a demand `D` with `√(2 M W)` in one modal mass `M`, so
+    /// the blows carried `D²/2M` and the opening spent `W = C²/2M` of it, `1 − (C/D)²` left.
+    fn kept(&self) -> f32 {
+        match self.cause {
+            Cause::Push | Cause::Lift | Cause::Shove | Cause::Punch => {
+                (1.0 - (self.capacity / self.demand).powi(2)).max(0.0)
+            }
+            Cause::Weight | Cause::LiftForce | Cause::Tip | Cause::Slide | Cause::PunchForce => 1.0,
+        }
+    }
+}
+
+/// `loads` on the freed `group` with each body's blow reduced by the work the energy openings
+/// bounding the group drew from it (the game's building destruction model). A body's blow is
+/// the momentum the solver's static stop took from its source; the launch gives the group its
+/// plastic share of it and returns the rest ([`crate::debris::launch::BodyReturn`]), so scaling
+/// the blow by `√kept` leaves the pair `kept` of the kinetic energy it would keep, and the
+/// momentum it gives up stays with the standing structure the seams held to. Each opening's
+/// work is shared by its blows in proportion to the energy each carried; a field's share comes
+/// from its own source, the zero-source-mass limit, whose energy the blow does not bound.
+pub(crate) fn debit_work(
+    structure: &Structure,
+    failures: &[Failure],
+    group: &[usize],
+    loads: impl IntoIterator<Item = Load>,
+) -> Vec<Load> {
+    let bounds = |failure: &Failure| {
+        failure.joints.iter().any(|&j| {
+            let joint = &structure.joints[j];
+            let inside = |c: usize| group.binary_search(&c).is_ok();
+            inside(joint.a)
+                || match joint.b {
+                    Side::Chunk(b) => inside(b),
+                    Side::Ground => false,
+                }
+        })
+    };
+    let kept: f32 = failures
+        .iter()
+        .filter(|failure| bounds(failure))
+        .map(Failure::kept)
+        .product();
+    loads
+        .into_iter()
+        .map(|mut load| {
+            if matches!(load.origin, Origin::Body { .. }) {
+                load.blow *= kept.sqrt();
+            }
+            load
+        })
+        .collect()
+}
+
 /// The live, intact bonded joints' graph: each chunk's neighbours with the joint between, each
 /// chunk's live anchors, and whether it is buried (held by the soil, never by a joint a section can
 /// cut). A rest is no edge: it carries no tension, so no section's group hangs on one, and a group
@@ -7444,6 +7499,62 @@ mod tests {
         assert!(
             failure.demand > failure.capacity,
             "the pair work opens the ring"
+        );
+    }
+
+    /// AN OPENING SPENDS THE WORK IT READ (the game's building destruction model). The energy
+    /// gate pays a ring's seams from the pushing pair's kinetic energy; the launch and the
+    /// source's give-back then carry what is left, never the whole, or each opening creates
+    /// its seams' work. FIXTURE: the slow ram above, 50 t at 0.2 m/s (1000 J) on the 28.8 kg plug.
+    #[test]
+    fn an_opening_debits_its_seams_work_from_the_pushing_pair() {
+        let cells = [[-1, 0, 0], [1, 0, 0], [0, -1, 0], [0, 1, 0], [0, 0, 0]];
+        let structure = cubes(&cells, 4, &[], 28.8);
+        let state = WallState::new(&structure);
+        let incident = incident(&structure);
+        let ring = ring(&structure, &state, &incident, &[4], Vec3::NEG_Z).unwrap();
+        let (mass, speed) = (50_000.0_f32, 0.2_f32);
+        let load = Load {
+            chunk: 4,
+            at: structure.chunks[4].centroid,
+            energy: 0.0,
+            crushed: 0.0,
+            blow: Vec3::NEG_Z * mass * speed,
+            press: Vec3::ZERO,
+            peak: None,
+            origin: Origin::Body {
+                body: Entity::PLACEHOLDER,
+                mass,
+                speed,
+                step: STEP,
+            },
+        };
+        let failure = ring_failure(&structure, &state, &incident, &[4], &[load]).unwrap();
+        assert!(failure.demand > failure.capacity, "the ring opens");
+        let loads = debit_work(&structure, &[failure], &[4], [load]);
+        let centroid = structure.chunks[4].centroid;
+        let launch = crate::debris::launch::launch_colliders(
+            centroid,
+            vec![(4, avian3d::prelude::Collider::cuboid(CUBE, CUBE, CUBE))],
+            |_| 28.8 / CUBE.powi(3),
+            &loads,
+        );
+        // The solver's static stop left the source at rest; the give-back is all its motion.
+        let returned: Vec3 = launch.returns.iter().map(|r| r.impulse).sum();
+        let before = 0.5 * mass * speed * speed;
+        let plug = 0.5 * launch.mass * launch.velocity.length_squared()
+            + 0.5 * launch.spin.dot(launch.inertia * launch.spin);
+        let source = returned.length_squared() / (2.0 * mass);
+        println!(
+            "DERIVED: before {before} J, seams {} J, after: plug {plug} J, source {source} J",
+            ring.work
+        );
+        assert!(launch.velocity.z < 0.0, "the plug still leaves");
+        assert!(
+            plug + source <= before - ring.work + 1e-2,
+            "the pair keeps {} J of {before} J after spending {} J",
+            plug + source,
+            ring.work
         );
     }
 
