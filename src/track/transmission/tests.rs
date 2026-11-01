@@ -478,7 +478,7 @@ fn hill_hold_margin_short_capable_gear_can_release() {
     let modeled = available_force_in_gear(&tp, 0.0, tp.gears_fwd[0]);
     let demand = modeled - 10_000.0;
     assert!(
-        modeled - demand < reserve_margin(demand),
+        modeled - demand < reserve_margin(&fp, &tp, demand),
         "fixture gear must be capable but margin-short"
     );
     let mut st = TransmissionState {
@@ -667,8 +667,8 @@ fn correction_priority_fixture() -> (ForceParams, TransmissionParams, f32, f32) 
     let lower = available_force_in_gear(&tp, shaft, tp.gears_fwd[0]);
     let upper = available_force_in_gear(&tp, shaft, tp.gears_fwd[2]);
     let demand = current + 12_000.0;
-    assert!(lower - demand >= reserve_margin(demand));
-    assert!(upper - demand >= reserve_margin(demand));
+    assert!(lower - demand >= reserve_margin(&fp, &tp, demand));
+    assert!(upper - demand >= reserve_margin(&fp, &tp, demand));
     (fp, tp, shaft, demand)
 }
 
@@ -704,7 +704,7 @@ fn confirmed_deficit_precedes_upshift_arm() {
         "fixture's predicted F3 landing must clear the fix-1a gate (the landing leg)"
     );
     assert!(
-        modeled_reserve_in_gear(&tp, shaft, g_up, demand) >= reserve_margin(demand),
+        modeled_reserve_in_gear(&tp, shaft, g_up, demand) >= reserve_margin(&fp, &tp, demand),
         "fixture's F3 reserve must clear the margin (the reserve leg)"
     );
     let contender = |grade_confirm_ticks: u8| TransmissionState {
@@ -756,21 +756,22 @@ fn confirmed_deficit_precedes_upshift_arm() {
 fn confirmed_deficit_defers_through_post_upshift_dwell() {
     let (fp, tp, shaft, _) = correction_priority_fixture();
     // A SHALLOW deficit: 4 kN below zero reserve, well inside the margin scale
-    // (0.1·demand + 10 kN), so the deferral — not the deep override — owns it.
+    // (the demand fraction plus vehicle-scale resolution), so the deferral — not the deep override — owns it.
     let current = available_force_in_gear(&tp, shaft, tp.gears_fwd[1]);
     let demand = current + 4_000.0;
     assert!(
-        demand - current < reserve_margin(demand),
+        demand - current < reserve_margin(&fp, &tp, demand),
         "fixture must be a SHALLOW deficit (depth {} vs margin {})",
         demand - current,
-        reserve_margin(demand)
+        reserve_margin(&fp, &tp, demand)
     );
     assert!(
         shaft * tp.gears_fwd[1] / tp.sprocket_radius / RPM_TO_RAD > tp.shift_up_rpm,
         "fixture must keep the ordinary upshift arm live above the band"
     );
     assert!(
-        available_force_in_gear(&tp, shaft, tp.gears_fwd[2]) - demand >= reserve_margin(demand),
+        available_force_in_gear(&tp, shaft, tp.gears_fwd[2]) - demand
+            >= reserve_margin(&fp, &tp, demand),
         "fixture's upper gear must be capable — the upshift is refused by the HOLD, \
              not by its own reserve gate"
     );
@@ -823,7 +824,7 @@ fn steep_grade_after_upshift_corrects_before_lug() {
     let f4 = tp.gears_fwd[3];
     let shaft0 = 980.0 * RPM_TO_RAD * tp.sprocket_radius / f4;
     assert!(
-        demand - available_force_in_gear(&tp, shaft0, f4) > reserve_margin(demand),
+        demand - available_force_in_gear(&tp, shaft0, f4) > reserve_margin(&fp, &tp, demand),
         "fixture must be a deep deficit for F4"
     );
     let mut st = TransmissionState {
@@ -1205,7 +1206,7 @@ fn sequential_rescue_steps_toward_static_target() {
 
 /// The hill-hold latch's window-deficit arm is scoped by the
 /// ABSOLUTE reserve floor — it fires only when the window-masked demand EMA exceeds
-/// [`RESERVE_MARGIN_FLOOR_N`] (10 kN, the stage-C jitter/truth divide; owner-based
+/// [`reserve_floor`] (the construction/contact-scale resolution; owner-based
 /// scoping was tried and broke the 20-degree Sequential band-cascade rescue the arm was
 /// built for). Before the fix, ANY paid window with ANY positive demand EMA latched: an
 /// ordinary tall-gear band downshift near rest on FLAT ground with a few kN of residual
@@ -1216,15 +1217,16 @@ fn flat_downshift_window_does_not_latch_hill_hold() {
     let mut fp = lab_fp();
 
     fp.inertia = 16_000.0;
+    let residual = reserve_floor(&fp, &tp) * 0.5; // DERIVED fixture: below model/contact resolution.
     let mut st = TransmissionState {
         gear: 3,
-        demand_n: 5_000.0,
+        demand_n: residual,
         demand_initialized: true,
         ..fresh(&tp)
     };
     // Near rest under W on the flat: the band downshift chain commits immediately and
     // opens its paid window (capable — light demand, huge low-gear reserve).
-    let inp = input(1.0, 0.0, [0.01; 2], [2_500.0; 2]);
+    let inp = input(1.0, 0.0, [0.01; 2], [residual / 2.0; 2]);
     step(&fp, &tp, &mut st, &inp);
     assert_eq!(st.gear, 2, "the ordinary band downshift must commit");
     assert!(st.shift_ticks > 0, "its window must be in flight");
@@ -3444,4 +3446,46 @@ fn clutch_seam_hysteresis_kills_boundary_chatter() {
             "tick {tick}: an in-band oscillation must not declutch after engagement"
         );
     }
+}
+
+/// Scheduler headroom must scale with the complete vehicle and respond to its contact material.
+/// A retained absolute force floor or a drivetrain-only floor breaks one of these invariants.
+#[test]
+fn reserve_resolution_scales_with_drive_and_contact_capacity() {
+    let mut fp = lab_fp();
+    let mut tp = lab_tp();
+    let demand = 20_000.0; // Fixture demand (N).
+    let before = reserve_margin(&fp, &tp, demand);
+    let scale = 4.0; // Fixture force/mass scale, dimensionless.
+    fp.grip.as_mut().unwrap().side_weight *= scale;
+    tp.peak_torque_nm *= scale;
+    tp.clutch_capacity *= scale;
+    assert!((reserve_margin(&fp, &tp, demand * scale) - before * scale).abs() < 0.01);
+    let firm = reserve_floor(&fp, &tp);
+    fp.grip.as_mut().unwrap().ground = crate::substances::contact_friction(0.001);
+    assert!(reserve_floor(&fp, &tp) < firm);
+}
+
+/// An individually finite authoring cannot publish unusable derived ratios. The live coupling
+/// and scheduler rely on this load gate instead of encountering infinities during play.
+#[test]
+fn derived_parameter_overflow_is_refused_at_construction() {
+    let mut authoring = tiger_authoring();
+    authoring.sprocket_radius_m = f32::MAX;
+    assert!(
+        TransmissionParams::from_authoring(&authoring)
+            .unwrap_err()
+            .to_string()
+            .contains("derived")
+    );
+    let mut authoring = tiger_authoring();
+    authoring.half_tread_m = f32::MIN_POSITIVE;
+    let radii = vec![(f32::MAX, f32::MAX); authoring.forward_speeds_kmh.len()];
+    authoring.steer_radii_m = &radii;
+    assert!(
+        TransmissionParams::from_authoring(&authoring)
+            .unwrap_err()
+            .to_string()
+            .contains("derived steering curvature")
+    );
 }

@@ -72,7 +72,7 @@
 //! sample slowly (pessimistic about LOSING load). The filter freezes through shift windows.
 //! For every gear `j`, full-throttle capability at current speed is
 //! `F_j = min(torque_at(rpm_j), clutch_capacity)·G_j/r_s` and reserve is `R_j = F_j − D`.
-//! Upshifts retain every stage-A/B gate, add `R_next ≥ 0.10·D + 10 kN`, and must hold the FULL
+//! Upshifts retain every stage-A/B gate, require `reserve_margin` of headroom, and hold the FULL
 //! ordinary-upshift predicate — band AND landing AND reserve, every condition the commit
 //! itself needs — for [`UPSHIFT_CONFIRM_TICKS`] consecutive decision ticks, HARD-reset on any
 //! tick the predicate fails. A negative current reserve held for [`GRADE_CONFIRM_TICKS`]
@@ -182,7 +182,7 @@
 //! | [`REVERSAL_DWELL_TICKS`] | SIM POLICY |
 //! | [`OVERREV_MARGIN_RPM`] | SIM POLICY |
 //! | [`RESERVE_MARGIN_FRACTION`] | SIM POLICY |
-//! | [`RESERVE_MARGIN_FLOOR_N`] | SIM POLICY |
+//! | [`RESERVE_CAPACITY_FRACTION`] | SIM POLICY |
 //! | [`DEMAND_FILTER_TICKS`] | SIM POLICY |
 //! | [`DEMAND_FALL_FILTER_TICKS`] | SIM POLICY |
 //! | [`GRADE_CONFIRM_TICKS`] | SIM POLICY |
@@ -344,11 +344,9 @@ pub(crate) const OVERREV_MARGIN_RPM: f32 = 100.0;
 /// zero-acceleration knife edge without encoding a vehicle-specific force. SIM POLICY.
 const RESERVE_MARGIN_FRACTION: f32 = 0.10;
 
-/// Stage-C absolute reserve floor (N, both tracks together) — the common low-load/jitter floor.
-/// DERIVED policy value: 10 kN is large enough to dominate contact-reaction float jitter yet only
-/// 1.8% of the Tiger's weight and about half the fractional margin on the DERIVED 191.2 kN
-/// 20-degree demand. SIM POLICY.
-pub(crate) const RESERVE_MARGIN_FLOOR_N: f32 = 10_000.0;
+/// ASSUMED scheduler resolution policy, dimensionless: reserve a small fraction of the
+/// vehicle's bounded drive/contact capacity even when measured demand is near zero.
+const RESERVE_CAPACITY_FRACTION: f32 = 0.02;
 
 /// Stage-C load filter RISE time scale in fixed decision ticks. An EMA divisor of eight is a
 /// deterministic ~0.125 s DERIVED low-pass at the 64 Hz SIM POLICY; the state freezes while the box is declutched so
@@ -664,6 +662,13 @@ impl TransmissionParams {
         }
         for (field, ok) in [
             (
+                "sprocket radius and track half-tread",
+                a.sprocket_radius_m.is_finite()
+                    && a.sprocket_radius_m > 0.0
+                    && a.half_tread_m.is_finite()
+                    && a.half_tread_m > 0.0,
+            ),
+            (
                 "gearbox speeds",
                 a.forward_speeds_kmh
                     .iter()
@@ -799,7 +804,7 @@ impl TransmissionParams {
         // Genuine neutral-steer scale: 1st gear tight curvature × 1st gear governed speed.
         let v1_governed = a.forward_speeds_kmh[0] / 3.6 * (a.governed_rpm / a.rated_rpm);
         let neutral_d_full = steer_kappa[0].0 * v1_governed;
-        Ok(Self {
+        let derived = Self {
             engine: EngineParams {
                 idle_rpm: a.idle_rpm,
                 governed_rpm: a.governed_rpm,
@@ -824,7 +829,53 @@ impl TransmissionParams {
             shift_addressing: a.shift_addressing,
             peak_torque_rpm,
             peak_torque_nm,
-        })
+        };
+        derived.check_derived(a.belt_inertia)?;
+        Ok(derived)
+    }
+
+    /// The authored scalars can each be finite while their ratios, squared coupling terms or
+    /// force capacities overflow/underflow. Refuse those coupled outputs before publication.
+    fn check_derived(&self, belt_inertia: f32) -> Result<(), BevyError> {
+        let fail = |field: &str| {
+            BevyError::from(format!(
+                "track.powertrain.transmission: non-finite or nonpositive derived {field}; correct gearbox speeds, steering radii, sprocket radius or inertia"
+            ))
+        };
+        for &gear in self.gears_fwd.iter().chain(&self.gears_rev) {
+            let coupling = gear / self.sprocket_radius;
+            let inverse_inertia =
+                1.0 / self.engine_inertia + coupling * coupling / (2.0 * belt_inertia);
+            let force = self.peak_torque_nm.min(self.clutch_capacity) * coupling;
+            if ![gear, coupling, inverse_inertia, force]
+                .into_iter()
+                .all(|value| value.is_finite() && value > 0.0)
+            {
+                return Err(fail("gear reduction, coupling divisor or drive force"));
+            }
+        }
+        for &(tight, wide) in &self.steer_kappa {
+            if ![tight, wide]
+                .into_iter()
+                .all(|value| value.is_finite() && value > 0.0 && (1.0 + value * value).is_finite())
+            {
+                return Err(fail("steering curvature"));
+            }
+        }
+        if !(2.0 * belt_inertia).is_finite()
+            || !self.neutral_d_full.is_finite()
+            || self.neutral_d_full <= 0.0
+            || !(2.0 * self.brake_capacity_n).is_finite()
+            || !(2.0 * self.steer_capacity_n).is_finite()
+            || ![self.governed_speed(false), self.governed_speed(true)]
+                .into_iter()
+                .all(|speed| speed.is_finite() && speed > 0.0)
+        {
+            return Err(fail(
+                "neutral speed, governed speed or paired force capacity",
+            ));
+        }
+        Ok(())
     }
 
     /// DERIVED top-gear speed (m/s) at the fuel governor's rpm for the selected ladder.
@@ -1211,9 +1262,21 @@ fn available_force_in_gear(tp: &TransmissionParams, shaft: f32, gear: f32) -> f3
     tp.torque_at(rpm).min(tp.clutch_capacity) * gear / tp.sprocket_radius
 }
 
-/// Positive capability headroom required of a selected gear (N, both tracks together).
-pub(crate) fn reserve_margin(demand: f32) -> f32 {
-    demand.max(0.0) * RESERVE_MARGIN_FRACTION + RESERVE_MARGIN_FLOOR_N
+/// DERIVED low-demand headroom (N): a fraction of the lesser of drivetrain force capacity and
+/// nominal material-pair grip. A support-only calibration has no grip population and no such floor.
+fn reserve_floor(fp: &ForceParams, tp: &TransmissionParams) -> f32 {
+    let contact = match fp.grip {
+        Some(grip) => 2.0 * grip.side_weight * grip.on_ground(),
+        None => 0.0,
+    };
+    let reduction = tp.gears_fwd[0].max(tp.gears_rev[0]);
+    let drive = tp.peak_torque_nm.min(tp.clutch_capacity) * reduction / tp.sprocket_radius;
+    RESERVE_CAPACITY_FRACTION * drive.min(contact)
+}
+
+/// DERIVED positive capability headroom (N, both tracks), from actual demand and vehicle scale.
+pub(crate) fn reserve_margin(fp: &ForceParams, tp: &TransmissionParams, demand: f32) -> f32 {
+    demand.max(0.0) * RESERVE_MARGIN_FRACTION + reserve_floor(fp, tp)
 }
 
 /// Modeled full-throttle reserve for one gear at the current shaft speed.
@@ -1235,6 +1298,7 @@ pub(crate) fn modeled_reserve_in_gear(
 /// toward it (which may not yet clear margin); later decisions can continue after speed falls.
 fn select_grade_target(
     tp: &TransmissionParams,
+    fp: &ForceParams,
     ladder: &[f32],
     shaft: f32,
     current: u8,
@@ -1243,7 +1307,7 @@ fn select_grade_target(
     if current <= 1 || shaft <= -PARK_ENGAGE_SPEED {
         return None;
     }
-    let margin = reserve_margin(demand);
+    let margin = reserve_margin(fp, tp, demand);
     let ideal = (1..current).rev().find(|&gear| {
         available_force_in_gear(tp, shaft, ladder[(gear - 1) as usize]) - demand >= margin
     })?;
@@ -1259,6 +1323,7 @@ fn select_grade_target(
 /// is what separates a truthful grade limit from a margin-short but physically capable launch.
 fn select_hill_hold_target(
     tp: &TransmissionParams,
+    fp: &ForceParams,
     ladder: &[f32],
     shaft: f32,
     current: u8,
@@ -1272,7 +1337,7 @@ fn select_hill_hold_target(
                 && modeled_reserve_in_gear(tp, shaft, ratio, demand) >= minimum
         })
     };
-    highest_with_reserve(reserve_margin(demand)).or_else(|| highest_with_reserve(0.0))
+    highest_with_reserve(reserve_margin(fp, tp, demand)).or_else(|| highest_with_reserve(0.0))
 }
 
 /// Commit one grade-target event according to the vehicle's addressing capability.
@@ -1299,12 +1364,13 @@ fn commit_grade_shift(st: &mut TransmissionState, tp: &TransmissionParams, targe
 fn refresh_hill_hold(
     st: &mut TransmissionState,
     tp: &TransmissionParams,
+    fp: &ForceParams,
     ladder: &[f32],
     shaft: f32,
     rollback_rescue: bool,
 ) -> bool {
     let downshift_allowed = shaft > -PARK_ENGAGE_SPEED || rollback_rescue;
-    match select_hill_hold_target(tp, ladder, shaft, st.gear, st.demand_n) {
+    match select_hill_hold_target(tp, fp, ladder, shaft, st.gear, st.demand_n) {
         Some(target) if target < st.gear && downshift_allowed => {
             // A latched rollback that the current gear plus full brakes cannot arrest is the
             // deliberate exception to both ordinary grade-shift guards: this downshift is crew
@@ -1622,6 +1688,7 @@ fn update_demand_filter(
 fn update_hill_hold(
     st: &mut TransmissionState,
     tp: &TransmissionParams,
+    fp: &ForceParams,
     ladder: &[f32],
     shaft: f32,
     propulsive: f32,
@@ -1651,19 +1718,10 @@ fn update_hill_hold(
             // loses the climb inside an otherwise-capable landing gear — the 20° Sequential
             // approach loses it through ORDINARY band-down windows (scheduler Normal, no
             // retained target), so the arm cannot be scoped to a grade-scheduler owner.
-            // Scoped instead by the ABSOLUTE reserve floor: a window-masked load is a
-            // grade-class load only past [`RESERVE_MARGIN_FLOOR_N`] — the same 10 kN that
-            // separates load truth from contact jitter everywhere in stage C. Below it
-            // ("any positive demand", the old form), an ordinary tall-gear downshift near
-            // rest on FLAT ground with a few kN of residual demand EMA false-latched HILL
-            // HOLD out of nowhere.
-            //
-            // BANKED (quality-tier): a SUSTAINED flat load above the 10 kN floor during a
-            // near-rest paid window — towing, terrain-snag, or collision classes, none of
-            // which exist in the game today — would still false-latch here (brakes on, HILL
-            // HOLD shown, released on capability like any hold). Revisit this arm if such
-            // mechanics ever land.
-            || (st.shift_ticks > 0 && st.demand_n > RESERVE_MARGIN_FLOOR_N);
+            // A paid interruption masks transmitted force. Only demand above the vehicle's
+            // model/contact-scale resolution counts as a grade load rather than residual contact
+            // variation. This bound scales with the construction and its material pair.
+            || (st.shift_ticks > 0 && st.demand_n > reserve_floor(fp, tp));
         if !st.hill_hold && in_engagement_zone && !hold_cooldown_active && effective_deficit {
             st.hill_hold = true;
         }
@@ -1682,7 +1740,7 @@ fn update_hill_hold(
             let braked_rollback_rescue =
                 real_rollback && current_reserve + 2.0 * tp.brake_capacity_n < 0.0;
             hill_hold_step_committed =
-                refresh_hill_hold(st, tp, ladder, shaft, braked_rollback_rescue);
+                refresh_hill_hold(st, tp, fp, ladder, shaft, braked_rollback_rescue);
         }
     }
     hill_hold_step_committed
@@ -1808,7 +1866,7 @@ fn run_shift_decision(
     // cascade; a changed capability target retargets while retaining the original HUD `from`.
     if !grade_step_committed && st.grade_target > 0 {
         let selected = (propulsive > 0.0 && current_reserve < 0.0)
-            .then(|| select_grade_target(tp, ladder, shaft, st.gear, st.demand_n))
+            .then(|| select_grade_target(tp, fp, ladder, shaft, st.gear, st.demand_n))
             .flatten()
             .filter(|&target| target < st.gear);
         if let Some(target) = selected {
@@ -1862,7 +1920,7 @@ fn run_shift_decision(
         && current_reserve < 0.0
         && st.grade_confirm_ticks >= GRADE_CONFIRM_TICKS;
     let deficit_target = confirmed_deficit
-        .then(|| select_grade_target(tp, ladder, shaft, st.gear, st.demand_n))
+        .then(|| select_grade_target(tp, fp, ladder, shaft, st.gear, st.demand_n))
         .flatten();
 
     // A confirmed reserve deficit is a CORRECTION, not a preference: with a target it
@@ -1898,7 +1956,7 @@ fn run_shift_decision(
     // decelerates into the near-rest hill-hold path, whose latch + full brake envelope
     // and launch-gear selection are the designed owners of an arrested climb — that
     // fallback is deliberate, not accidental.
-    let deep_deficit = -current_reserve > reserve_margin(st.demand_n);
+    let deep_deficit = -current_reserve > reserve_margin(fp, tp, st.demand_n);
     let deficit_deferred = deficit_target.is_some() && dwell_blocks(-1) && !deep_deficit;
     let mut deficit_step_committed = false;
     if let Some(target) = deficit_target
@@ -1962,7 +2020,7 @@ fn run_shift_decision(
             let next_reserve = modeled_reserve_in_gear(tp, shaft, g_up, st.demand_n);
             landing_shaft > 0.0
                 && shaft_rpm_of(landing_shaft, g_up) >= tp.shift_down_rpm + POSTSHIFT_MARGIN_RPM
-                && next_reserve >= reserve_margin(st.demand_n)
+                && next_reserve >= reserve_margin(fp, tp, st.demand_n)
         };
     if upshift_ready {
         st.band_confirm_ticks = st.band_confirm_ticks.saturating_add(1);
@@ -2393,6 +2451,7 @@ fn power_conservation_scale(
 fn release_hill_hold(
     st: &mut TransmissionState,
     tp: &TransmissionParams,
+    fp: &ForceParams,
     shaft: f32,
     g: f32,
     dir: f32,
@@ -2404,7 +2463,7 @@ fn release_hill_hold(
         return;
     }
     let selected_reserve = modeled_reserve_in_gear(tp, shaft, g, st.demand_n);
-    let release_margin = reserve_margin(st.demand_n).min(selected_reserve.max(0.0) * 0.5);
+    let release_margin = reserve_margin(fp, tp, st.demand_n).min(selected_reserve.max(0.0) * 0.5);
     if dir * f_c >= st.demand_n + release_margin {
         st.hill_hold = false;
         st.hold_reengage_ticks = HOLD_REENGAGE_TICKS;
@@ -2596,7 +2655,7 @@ pub fn step(
         modeled_reserve_in_gear(tp, shaft, ladder[(st.gear - 1) as usize], st.demand_n);
 
     let hill_hold_step_committed =
-        update_hill_hold(st, tp, ladder, shaft, propulsive, current_reserve);
+        update_hill_hold(st, tp, fp, ladder, shaft, propulsive, current_reserve);
 
     let r_mean = (inp.reactions[0] + inp.reactions[1]) / 2.0;
     // Ordinary grade shifts still require a forward landing. The braked rollback rescue commits
@@ -2721,7 +2780,7 @@ pub fn step(
     let f_s = f_s_pre_scale * power_scale;
 
     let hill_brake_active = st.hill_hold;
-    release_hill_hold(st, tp, shaft, g, dir, f_c);
+    release_hill_hold(st, tp, fp, shaft, g, dir, f_c);
 
     // --- Integrate the crank: J·ω̇_e = τ_free − τ_c (the transmitted torque scaled by the
     // power gate exactly as the belt-side force was — one bookkeeping for both ends of the
