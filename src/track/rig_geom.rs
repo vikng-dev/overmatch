@@ -1116,6 +1116,44 @@ mod tests {
         }
     }
 
+    /// Running-gear admission is the gate that refuses a construction the joint drive cannot
+    /// represent, before any `TrackGear` exists, naming the sheet: unequal side inertias panic in
+    /// `RigGeom::build` with the file and the refusal. FIXTURE DATA: the shipped sheet with its
+    /// left sprocket moment doubled. A mutant deleting the admission call builds the rig, and the
+    /// sheet then reaches `init_track_gear`'s expect, which names no file.
+    #[test]
+    fn running_gear_admission_refuses_unequal_side_inertia_naming_the_sheet() {
+        let glb = crate::assets::asset_root().join(crate::tank::TANK_SIM_GLB_PATH);
+        let mut spec = tiger_spec();
+        spec.track.sprocket.spin_inertia_kgm2.0.left *= 2.0;
+        let geometry = crate::bake::extract_tank_geometry(
+            &glb,
+            &spec,
+            &crate::substances::SubstanceRegistry::shipped(),
+        )
+        .expect("the Tiger glb extracts");
+        let (teeth, link_count) = (spec.track.sprocket.teeth, spec.track.link_count);
+        let blueprint = TankBlueprint::new(crate::tank::TANK_SPEC_PATH.to_owned(), geometry, spec);
+        let refusal = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            RigGeom::build(
+                &blueprint,
+                &glb,
+                teeth,
+                link_count,
+                &SuspensionParams::default(),
+            )
+        }))
+        .err()
+        .expect("unequal side inertias must be refused at running-gear admission");
+        let message = refusal
+            .downcast_ref::<String>()
+            .expect("the refusal is a formatted message");
+        assert!(
+            message.contains(crate::tank::TANK_SPEC_PATH) && message.contains("differs by side"),
+            "{message}"
+        );
+    }
+
     /// Live count tuning uses the same address bound as file admission, before replacing a rig.
     #[test]
     fn live_rig_counts_cannot_exceed_the_table_address() {
