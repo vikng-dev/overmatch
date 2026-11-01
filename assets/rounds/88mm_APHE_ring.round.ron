@@ -48,6 +48,7 @@
             hold for cyclonite/wax 90/10), over an ASSUMED cavity length of 70 mm (no source gives
             it; a slender base cavity, longer than it is wide), d = sqrt(4 V / (pi L)) = 35.29 mm, authored
             as 35.3 mm. The burst law re-derives the length from d, the mass and the density: 70.0 mm")),
+        filler_setback: (0.182, Derived("DERIVED cylinder-equivalent estimate rounded to 0.182 m: half the 0.070 m cavity plus the derived nose mass 6.971 kg divided by body-steel density 7800 kg/m3 and full-calibre area. ASSUMED axial geometry; no sourced axial drawing. This author datum locates the filler centre behind the tip, independently of the fuze delay")),
     )),
     effects: (
         ember: (Some((

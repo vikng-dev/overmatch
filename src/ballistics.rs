@@ -1521,6 +1521,8 @@ pub enum ArmourMark {
     /// on from `at` unless the round was at rest.
     Burst {
         at: Vec3,
+        /// The game's environment airblast origin: the authored filler centre, behind the tip.
+        field_origin: Vec3,
         speed: f32,
         /// Seconds from the round reaching `at` to the burst: the delay's remainder for a round at
         /// rest, zero in flight. The march settles the field in the tick the round stopped; the
@@ -3208,6 +3210,7 @@ fn burst_here(
     let nose = burst.nose;
     shell.marks.log.push(ArmourMark::Burst {
         at: flight.position,
+        field_origin: burst.filler_center(flight.position, flight.direction),
         speed,
         after,
         sideways: burst.sideways_speed,
@@ -7250,6 +7253,8 @@ mod march_tests {
             energy: 1.0e6,
             core_mass: 0.5,
             blast: 0.0,
+            filler_setback: 0.18,
+            charge_radius: 0.04,
         }));
         march_round(
             &mut app,

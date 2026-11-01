@@ -180,6 +180,8 @@ fn the_spend_exit_fuze_keeps_todays_bursts_and_doses() {
         energy: 397_738.22,
         core_mass: shipped.core_mass,
         blast: shipped.blast,
+        filler_setback: shipped.filler_setback,
+        charge_radius: shipped.charge_radius,
     };
     assert_eq!(shipped, today, "the shipped burst, field for field");
     // Per slab: the bursts as (position, speed, seconds waited at rest); the pool units the shot

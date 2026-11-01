@@ -1126,7 +1126,7 @@ const CRUSHING_BLAST_J: f32 = 200.0 * 4.184e6;
 
 /// Set off the fixture charge at `at`, and run the tick that applies it and the one after.
 fn charge(app: &mut App, at: Vec3) {
-    set_off(app, at, Blast::of(FIXTURE_BLAST_J));
+    set_off(app, at, Blast::of(FIXTURE_BLAST_J, 1e-3));
 }
 
 /// Set off `blast` at `at`, and run the tick that applies it and the one after.
@@ -1153,7 +1153,7 @@ fn a_ray_that_stops_on_a_moving_body_pushes_it_by_its_share_and_deposits_nothing
     let (near, w, _) = through(&kind, e, c, 0.0);
     // The burst a metre before the chunk's near face, the body half-way (fixture data).
     let origin = near - *w * 0.5;
-    let blast = Blast::of(CRUSHING_BLAST_J);
+    let blast = Blast::of(CRUSHING_BLAST_J, 1e-3);
     let after = |spawn: Option<&dyn Fn(&mut App) -> Entity>| {
         let (mut app, root) = composed(false);
         let body = spawn.map(|spawn| spawn(&mut app));
@@ -1273,7 +1273,7 @@ fn the_ground_stops_a_blast_and_a_body_holding_the_burst_shades_nothing() {
     moving_cube(&mut app, origin, 0.4, Layer::Vehicle);
     app.update();
     app.update();
-    set_off(&mut app, origin, Blast::of(CRUSHING_BLAST_J));
+    set_off(&mut app, origin, Blast::of(CRUSHING_BLAST_J, 1e-3));
     let breakage = app.world().get::<Breakage>(root).unwrap();
     let live = breakage.live.as_ref().expect("the burst reached the house");
     assert!(
@@ -2427,7 +2427,7 @@ fn no_elements_kind_or_name_enters_the_laws() {
         element.material = (element.material + 1) % materials;
     }
     let (lo, hi) = kind.bounds();
-    let blast = Blast::of(5.0 * 4.184e6);
+    let blast = Blast::of(5.0 * 4.184e6, 1e-3);
     let origin = Vec3::new(hi.x + 6.0, lo.y + 1.0, 0.5 * (lo.z + hi.z));
     let run = |asset: &BuildingAsset| {
         let layout = Layout::of(asset, &masonry, attachments).unwrap();
@@ -2469,4 +2469,69 @@ fn no_elements_kind_or_name_enters_the_laws() {
         other_changes, changes,
         "a material changes the law's outcome"
     );
+}
+
+/// A BURST WHOSE TIP TOUCHES A FACE CRUSHES IT FROM THE FILLER CENTRE (the game's environment
+/// destruction model). The live shell observer must preserve the authored origin and radius
+/// through the deposit queue; a tip-origin field or zero-area contact patch fails here. The
+/// contact crater relies on it. The round and house are ASSUMED fixture data; the pass condition
+/// is the generic Law 1 threshold, not a particular breach or tank.
+#[test]
+fn a_burst_touching_a_face_crushes_it_from_its_filler_center() {
+    let (mut app, root) = composed(false);
+    let kind = shipped_house();
+    let (element, [chunk, ..]) = fixture_chunks(&kind);
+    let (ahead, axis, _) = through(&kind, element, chunk, 0.0);
+    let tip = ahead + axis * 0.5;
+    let burst = crate::tank::WeaponRound::resolve("88mm_HE")
+        .unwrap()
+        .round
+        .burst
+        .unwrap();
+    let field_origin = burst.filler_center(tip, axis);
+    let blast = Blast::of(burst.blast, burst.charge_radius);
+    assert!(
+        blast.peak_pressure(burst.filler_setback, 1.0)
+            > kind.layout.materials[chunk].compaction.strength,
+        "the fixture field exceeds the material's crush threshold"
+    );
+    let shell = app
+        .world_mut()
+        .spawn(PenetrationMarks {
+            log: vec![ArmourMark::Burst {
+                at: tip,
+                field_origin,
+                speed: 0.0,
+                after: 0.0,
+                sideways: burst.sideways_speed,
+                nose: burst.nose.mass,
+                tank: None,
+            }],
+            ..default()
+        })
+        .id();
+    app.world_mut().trigger(ShellMarched {
+        shell,
+        marks_from: 0,
+        cones_from: 0,
+        lines: Vec::new(),
+        burst: Some(burst),
+    });
+    let queued = app.world().resource::<WallQueue>();
+    assert_eq!(queued.0.len(), 1);
+    assert_eq!(queued.0[0].blast, Some((field_origin, blast)));
+    app.update();
+    app.update();
+    let live = app
+        .world()
+        .get::<Breakage>(root)
+        .unwrap()
+        .live
+        .as_ref()
+        .unwrap();
+    assert!(
+        live.state.pool[chunk] < fracture::full_pool(&live.structure.chunks[chunk]),
+        "a contacting burst crushes the face above its material threshold"
+    );
+    app.world_mut().despawn(shell);
 }

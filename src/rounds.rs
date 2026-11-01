@@ -31,9 +31,9 @@
 //!   reference-mm spent in one body and then left, or `Impact(sensitivity_n: …)`, the resisting
 //!   force (N) at contact. `modes` is the ordered list of `(name, delay_s)` the crew picks among,
 //!   `default_mode` the name of the one a round is loaded with. Every value is sourced.
-//! - `burst: Some((core_substance, core_mass, base_mass, cavity_diameter))`: a substance-table key
+//! - `burst: Some((core_substance, core_mass, base_mass, cavity_diameter, filler_setback))`: a substance-table key
 //!   whose row states burst facts, the core's and the base parts' masses (kg) and the cavity's
-//!   diameter (m). Every burst is a ring. The burst is derived here, once, at the default mode
+//!   diameter and the filler centre's distance behind the tip (m). Every burst is a ring. The burst is derived here, once, at the default mode
 //!   ([`crate::ballistics::burst::Burst::derived`]), and rides the round to the shot; its story is
 //!   design doc §5a, "The burst". A round without the block is inert. A burst and a fuze are
 //!   authored together.
@@ -201,7 +201,7 @@ struct RoundFile {
 }
 
 /// A burst block as authored: the substance its core is made of, the core's mass, the base parts'
-/// mass (kg) and the cavity's diameter (m). It names no shape: every burst is a ring. What sets it
+/// mass (kg), the cavity's diameter and the filler centre's setback from the tip (m). It names no shape: every burst is a ring. What sets it
 /// off is the round's fuze block.
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -210,6 +210,7 @@ struct BurstFile {
     core_mass: Sourced<f64>,
     base_mass: Sourced<f64>,
     cavity_diameter: Sourced<f64>,
+    filler_setback: Sourced<f64>,
 }
 
 /// A penetrator as authored: its mass (kg) and calibre (m). Its nose is the round's.
@@ -465,6 +466,7 @@ fn resolved(
                 chemical_energy: facts.chemical_energy.unwrap_or(0.0),
                 base_mass: block.base_mass.0,
                 cavity_diameter: block.cavity_diameter.0,
+                filler_setback: block.filler_setback.0,
             };
             Some(
                 Burst::derived(body, core.density, &inputs)
@@ -1008,7 +1010,7 @@ pub(crate) mod tests {
                 core_substance: ({core:?}, Tuned("x")),
 
                 core_mass: (0.02, Tuned("x")), base_mass: (0.1, Tuned("x")),
-                cavity_diameter: (0.02, Tuned("x"))))"#
+                cavity_diameter: (0.02, Tuned("x")), filler_setback: (0.15, Tuned("x"))))"#
         );
         RoundRegistry::from_files(
             &[("Probe", &file(&fields, &extra))],
@@ -1051,6 +1053,7 @@ pub(crate) mod tests {
             chemical_energy: 0.0,
             base_mass: 0.1,
             cavity_diameter: 0.02,
+            filler_setback: 0.15,
         };
         for core in ["Fixture core", "Fixture hard core"] {
             let fused = fired(with_burst(core, false)).unwrap();

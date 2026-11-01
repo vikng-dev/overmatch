@@ -231,6 +231,7 @@ fn a_shot_met_a_tank_by_its_log() {
     };
     let burst = |tank: Option<Entity>| ArmourMark::Burst {
         at: Vec3::ZERO,
+        field_origin: Vec3::ZERO,
         speed: 0.0,
         after: 0.0,
         sideways: 0.0,

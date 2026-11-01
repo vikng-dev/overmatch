@@ -7,9 +7,9 @@
 //!
 //! Units: masses kg, lengths m, speeds m/s, the delay s, the arming threshold reference-mm, the
 //! impact sensitivity N, the energy J. Everything here is derived once, at load, in f64 with IEEE `+`, `−`, `×`, `/` and
-//! `sqrt` alone, and stored in f32, so a round's burst is the same bits on every target.
+//! `sqrt` and deterministic `libm::cbrt`, and stored in f32, so a round's burst is the same bits on every target.
 
-use bevy::prelude::Entity;
+use bevy::prelude::{Dir3, Entity, Vec3};
 
 use super::RoundBody;
 use crate::rounds::fuze::Trigger;
@@ -34,6 +34,8 @@ pub(crate) struct BurstInputs {
     pub(crate) base_mass: f64,
     /// The cavity's diameter.
     pub(crate) cavity_diameter: f64,
+    /// Authored distance from the tip to the filler centre along the negative flight axis (m).
+    pub(crate) filler_setback: f64,
 }
 
 /// The round's parts, DERIVED from its body, its body steel's density and its burst block: the
@@ -104,9 +106,20 @@ pub(crate) struct Burst {
     /// The blast's energy (J): the core's chemical energy less what the casing took,
     /// `C · e − ½ M v_s²`, at least zero. What the buildings' blast field carries.
     pub(crate) blast: f32,
+    /// Authored distance behind the tip (m), used by the environment airblast.
+    pub(crate) filler_setback: f32,
+    /// Equal-volume filler-sphere radius (m), DERIVED from core mass and density. The blast's
+    /// distance floor keeps its point-source fit outside that charge.
+    pub(crate) charge_radius: f32,
 }
 
 impl Burst {
+    /// The game's environment blast originates at the authored filler centre, while the fuze's
+    /// march position remains the tip. The field's geometry is independent of fuze timing.
+    pub(crate) fn filler_center(&self, tip: Vec3, axis: Dir3) -> Vec3 {
+        tip - axis * self.filler_setback
+    }
+
     /// The burst of `round` (its whole body, of body steel `steel_density`) under `inputs`; refuses
     /// a non-finite or non-positive input and parts that leave no nose ([`Parts::of`]).
     pub(crate) fn derived(
@@ -120,6 +133,7 @@ impl Burst {
             ("speed constant", inputs.speed_constant),
             ("base mass", inputs.base_mass),
             ("cavity diameter", inputs.cavity_diameter),
+            ("filler setback", inputs.filler_setback),
             ("body steel density", steel_density),
         ] {
             if !value.is_finite() || value <= 0.0 {
@@ -138,6 +152,21 @@ impl Burst {
             }
         }
         let parts = Parts::of(round, steel_density, inputs)?;
+        let charge_radius =
+            libm::cbrt(3.0 * inputs.core_mass / (4.0 * std::f64::consts::PI * inputs.core_density))
+                as f32;
+        let filler_setback = inputs.filler_setback as f32;
+        if !charge_radius.is_finite()
+            || charge_radius <= 0.0
+            || !filler_setback.is_finite()
+            || filler_setback < charge_radius
+        {
+            return Err(
+                "filler_setback must be finite and at least the positive equal-volume \
+                charge radius in simulation units; author the filler centre behind the tip"
+                    .into(),
+            );
+        }
         let driven = parts.wall_mass;
         let sideways_speed = inputs.speed_constant / (driven / inputs.core_mass + 0.5).sqrt();
         Ok(Self {
@@ -150,6 +179,8 @@ impl Burst {
             sideways_speed: sideways_speed as f32,
             energy: (0.5 * driven * sideways_speed * sideways_speed) as f32,
             core_mass: inputs.core_mass as f32,
+            filler_setback,
+            charge_radius,
             blast: (inputs.core_mass * inputs.chemical_energy
                 - 0.5 * driven * sideways_speed * sideways_speed)
                 .max(0.0) as f32,
@@ -344,6 +375,7 @@ pub(super) fn fixture_inputs() -> BurstInputs {
         chemical_energy: 0.0,
         base_mass: 0.33,
         cavity_diameter: 0.0357,
+        filler_setback: 0.18,
     }
 }
 
@@ -393,6 +425,33 @@ mod tests {
                 ..round
             }
         );
+    }
+
+    /// THE GAME'S ENVIRONMENT AIRBLAST STARTS AT THE AUTHORED FILLER CENTRE. The tip remains
+    /// the fuze's march position; changing a sourced setback changes only the origin metadata.
+    /// The contact field relies on the source lying behind the face instead of on it. A tip
+    /// origin, a forward offset, or a radius inferred from blast energy breaks this invariant.
+    /// ASSUMED fixture geometry and filler data.
+    #[test]
+    fn the_filler_center_and_radius_come_from_the_burst_data() {
+        let (round, mut inputs) = fixture();
+        let radius =
+            (3.0 * inputs.core_mass / (4.0 * std::f64::consts::PI * inputs.core_density)).cbrt();
+        let tip = Vec3::new(3.0, 4.0, 5.0);
+        for setback in [0.12, 0.3] {
+            inputs.filler_setback = setback;
+            let burst = Burst::derived(round, STEEL, &inputs).unwrap();
+            assert!((f64::from(burst.charge_radius) / radius - 1.0).abs() < 1e-6);
+            assert_eq!(
+                burst.filler_center(tip, Dir3::NEG_Z),
+                tip + Vec3::Z * setback as f32
+            );
+        }
+        for invalid in [0.0, -1.0, f64::NAN, f64::INFINITY, radius / 2.0, 1e100] {
+            inputs.filler_setback = invalid;
+            let error = Burst::derived(round, STEEL, &inputs).unwrap_err();
+            assert!(error.contains("filler"), "{error}");
+        }
     }
 
     /// `v_s = K (M/C + ½)^−½` with `M` the wall, and the energy `½ M v_s²`: the burst's field ratio

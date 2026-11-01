@@ -40,6 +40,7 @@
         base_mass: (0.3, Tuned("ASSUMED: the base parts behind the cavity; no source gives them")),
         cavity_diameter: (0.065, Tuned("ASSUMED: no source gives the cavity; with the core it
             DERIVES a 0.171 m cavity, about two calibres")),
+        filler_setback: (0.178, Derived("DERIVED cylinder-equivalent estimate rounded to 0.178 m: half the 0.171 m cavity plus the derived nose mass 4.409 kg divided by body-steel density 7800 kg/m3 and full-calibre area. ASSUMED axial geometry; no sourced axial drawing. This author datum locates the filler centre behind the tip, independently of the fuze delay")),
     )),
     effects: (
         ember: (None, Unknown("ASSUMED: untraced shell; no base-tracer composition is authored")),

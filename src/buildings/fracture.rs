@@ -2929,20 +2929,43 @@ const REFLECTED_PRESSURE: SwisdakFit = SwisdakFit {
 
 /// A blast: its energy (J) and its charge `W` (kg of TNT), the TNT that carries that energy
 /// (ASSUMED: impulse equivalence is energy equivalence; the wall design notes they need not agree).
-#[derive(Clone, Copy, Debug, Default, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) struct Blast {
     pub energy: f32,
     pub charge: f32,
+    /// Positive charge radius (m), the lower bound of point-source field distances.
+    pub radius: f32,
 }
 
 impl Blast {
-    /// A blast of `energy` J in the air.
-    pub(crate) fn of(energy: f32) -> Self {
-        let energy = energy.max(0.0);
+    /// A blast of `energy` J in the air from a charge of `radius` m. Production radii come from
+    /// filler data; idealized tests use an ASSUMED small positive fixture radius.
+    pub(crate) fn of(energy: f32, radius: f32) -> Self {
+        let radius = (radius.is_finite() && radius > 0.0)
+            .then_some(radius)
+            .expect(
+                "a blast's charge-radius floor is positive and finite, supplied by its filler data",
+            );
+        assert!(
+            energy.is_finite() && energy >= 0.0,
+            "a blast carries finite nonnegative energy"
+        );
         Self {
             energy,
             charge: energy / TNT_ENERGY,
+            radius,
         }
+    }
+
+    /// A point-source field is evaluated no closer than the charge's radius. Geometry still
+    /// records the actual face point, including a charge embedded in material; only the field's
+    /// distance and its cone section use this floor.
+    pub(crate) fn distance(&self, distance: f32) -> f32 {
+        (distance.is_finite() && distance >= 0.0)
+            .then_some(distance.max(self.radius))
+            .expect(
+                "a blast ray has a finite nonnegative distance and a positive charge-radius floor",
+            )
     }
 
     /// How far the blast reaches, m: the reflected fit's last scaled distance at this charge, where
@@ -2970,7 +2993,7 @@ impl Blast {
         if scale <= 0.0 {
             return 0.0;
         }
-        let z = distance / scale;
+        let z = self.distance(distance) / scale;
         let cos = cos.clamp(0.0, 1.0);
         scale
             * (REFLECTED_IMPULSE.at(z) * cos * cos
@@ -2993,7 +3016,7 @@ impl Blast {
         if scale <= 0.0 {
             return 0.0;
         }
-        let z = distance / scale;
+        let z = self.distance(distance) / scale;
         let cos = cos.clamp(0.0, 1.0);
         Self::reflected_pressure(z) * cos * cos
             + INCIDENT_PRESSURE.at(z) * 1e3 * (1.0 - cos) * (1.0 - cos)
@@ -3012,6 +3035,7 @@ impl Blast {
     /// ([`Self::patch`]), pushed into the face (a pressure acts along the normal). A face smaller
     /// than the cone takes its intercepted share of this ([`intercepted`]).
     pub(crate) fn push(&self, share: f32, distance: f32, dir: Vec3, normal: Vec3) -> Vec3 {
+        let distance = self.distance(distance);
         let cos = -dir.dot(normal);
         -normal * (self.specific_impulse(distance, cos) * Self::patch(share, distance, cos))
     }
@@ -3020,6 +3044,7 @@ impl Blast {
     /// overpressure there ([`Self::peak_pressure`]) over the patch, into the face. A face smaller
     /// than the cone takes its intercepted share of this, as of the push.
     pub(crate) fn peak(&self, share: f32, distance: f32, dir: Vec3, normal: Vec3) -> Vec3 {
+        let distance = self.distance(distance);
         let cos = -dir.dot(normal);
         -normal * (self.peak_pressure(distance, cos) * Self::patch(share, distance, cos))
     }
@@ -3036,6 +3061,7 @@ impl Blast {
         dir: Vec3,
         normal: Vec3,
     ) -> f32 {
+        let distance = self.distance(distance);
         let cos = -dir.dot(normal);
         material.crushed_by(
             self.peak_pressure(distance, cos),
@@ -3131,7 +3157,11 @@ pub(crate) fn blast_rays(
             let faces = faces
                 .entry(chunk)
                 .or_insert_with(|| blocks[chunk].face_areas());
-            stops.push((chunk, Blast::section(share, t), silhouette(faces, dir)));
+            stops.push((
+                chunk,
+                Blast::section(share, blast.distance(t)),
+                silhouette(faces, dir),
+            ));
             Some(RayHit {
                 chunk,
                 at: origin + dir * t,
@@ -3912,8 +3942,8 @@ mod tests {
         }
         // W / 1.8 = 1 kg and 8 kg: the same scaled distance at twice the range (fixture data).
         let (one, eight) = (
-            Blast::of(TNT_ENERGY * SURFACE_BURST_FACTOR),
-            Blast::of(8.0 * TNT_ENERGY * SURFACE_BURST_FACTOR),
+            Blast::of(TNT_ENERGY * SURFACE_BURST_FACTOR, 1e-3),
+            Blast::of(8.0 * TNT_ENERGY * SURFACE_BURST_FACTOR, 1e-3),
         );
         for (d, cos) in [(0.5, 1.0), (3.0, 0.4), (12.0, 0.0)] {
             let (near, far) = (one.peak_pressure(d, cos), eight.peak_pressure(2.0 * d, cos));
@@ -3976,6 +4006,44 @@ mod tests {
                 "r {r}: {absorbed} against {g}"
             );
         }
+    }
+
+    /// A CHARGE'S RADIUS FLOORS EVERY POINT-SOURCE FIELD TERM (the game's environment
+    /// destruction model). The contact adapter relies on a finite loaded patch even when the
+    /// geometric stop lies at the source. A floor on pressure alone leaves zero impulse and
+    /// crush; a missing floor on interception scales that patch inconsistently. ASSUMED fixture
+    /// radius and energy; the class condition is peak pressure above the material strength.
+    #[test]
+    fn the_charge_radius_floors_a_contact_patch_and_its_crush() {
+        let blast = Blast::of(1.47e6, 0.05);
+        let material = brick();
+        let share = 1.0 / BLAST_RAYS as f32;
+        assert_eq!(blast.distance(0.0), blast.radius);
+        for distance in [0.0, blast.radius / 2.0, blast.radius] {
+            let impulse = blast.push(share, distance, Vec3::Z, Vec3::NEG_Z);
+            let peak = blast.peak(share, distance, Vec3::Z, Vec3::NEG_Z);
+            let crushed = blast.crushed(&material, share, distance, Vec3::Z, Vec3::NEG_Z);
+            assert!(impulse.z > 0.0 && peak.z > 0.0 && crushed > 0.0);
+            assert_eq!(
+                impulse,
+                blast.push(share, blast.radius, Vec3::Z, Vec3::NEG_Z)
+            );
+            assert_eq!(peak, blast.peak(share, blast.radius, Vec3::Z, Vec3::NEG_Z));
+        }
+        let blocks = [Block::cuboid(
+            Vec3::new(-1.0, -1.0, 0.0),
+            Vec3::new(1.0, 1.0, 0.25),
+        )];
+        let hits = blast_rays(
+            &blocks,
+            |_| true,
+            |_| material,
+            Vec3::ZERO,
+            blast,
+            &[(Vec3::Z, share)],
+        );
+        assert_eq!(hits.len(), 1);
+        assert!(hits[0].crushed > 0.0 && hits[0].impulse.z > 0.0);
     }
 
     /// MOMENTUM SETS THE CRUSHED MASS (the game's environment destruction model, the #237 study's
@@ -4050,7 +4118,7 @@ mod tests {
         }
         // W / 1.8 = 1000 kg at 20 m: Z = 2 m/kg^⅓, a peak far under brick's dynamic strength
         // with a long, heavy pulse (fixture burst).
-        let blast = Blast::of(1000.0 * TNT_ENERGY * SURFACE_BURST_FACTOR);
+        let blast = Blast::of(1000.0 * TNT_ENERGY * SURFACE_BURST_FACTOR, 1e-3);
         let cube = [Block::cuboid(Vec3::splat(-0.125), Vec3::splat(0.125))];
         let origin = Vec3::new(0.0, 0.0, -20.125);
         let hits = blast_rays(
@@ -4132,7 +4200,7 @@ mod tests {
             ("88 mm HE burst", 1.47e6_f32, 0.1_f32),
             ("bare 5 kg", 5.0 * TNT_ENERGY, 0.3),
         ] {
-            let blast = Blast::of(energy);
+            let blast = Blast::of(energy, 1e-3);
             let origin = Vec3::new(0.1, -0.05, -standoff);
             let crushed = |blocks: &[Block], rays: usize| -> f32 {
                 blast_rays(
@@ -4176,7 +4244,7 @@ mod tests {
     #[test]
     fn a_blast_rays_peak_force_is_its_peak_pressure_over_its_pushs_patch() {
         // W / 1.8 = 1 kg, so the scaled distance is the distance (fixture data).
-        let blast = Blast::of(TNT_ENERGY * SURFACE_BURST_FACTOR);
+        let blast = Blast::of(TNT_ENERGY * SURFACE_BURST_FACTOR, 1e-3);
         let share = 1.0 / BLAST_RAYS as f32;
         let d = 2.0;
         for angle in [0.0_f32, 60.0, 89.4] {
@@ -4221,7 +4289,7 @@ mod tests {
     #[test]
     fn a_blast_ray_pushes_its_face_along_the_normal() {
         // W / 1.8 = 1 kg, so the scaled distance is the distance (fixture data).
-        let blast = Blast::of(TNT_ENERGY * SURFACE_BURST_FACTOR);
+        let blast = Blast::of(TNT_ENERGY * SURFACE_BURST_FACTOR, 1e-3);
         let share = 1.0 / BLAST_RAYS as f32;
         let d = 2.0;
         let patch = 4.0 * PI * share * d * d;
@@ -4259,7 +4327,7 @@ mod tests {
     #[test]
     fn a_ray_pushes_only_the_face_it_meets_and_stops_at_reach() {
         // W / 1.8 = 1 kg, so the scaled distance is the distance and reach is the fit's edge.
-        let blast = Blast::of(TNT_ENERGY * SURFACE_BURST_FACTOR);
+        let blast = Blast::of(TNT_ENERGY * SURFACE_BURST_FACTOR, 1e-3);
         let share = 1.0 / BLAST_RAYS as f32;
         let face = CUBE * CUBE;
         let cube = [Block::cuboid(Vec3::ZERO, Vec3::splat(CUBE))];

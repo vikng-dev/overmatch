@@ -261,7 +261,7 @@ fn shoot(what: &What, (outward, aim, foot): (Vec3, Vec3, Vec3), commands: &mut C
             let at = at + outward * radius;
             commands.trigger(WallCharge {
                 at,
-                blast: Blast::of(energy),
+                blast: Blast::of(energy, radius),
             });
             info!("capture: wall charge of {mass} kg ({energy:.0} J) at {at:?}");
         }

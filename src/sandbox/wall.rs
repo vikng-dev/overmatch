@@ -333,13 +333,14 @@ impl Charge {
             0.0
         };
         let energy = (chemical - casing).max(0.0);
+        let radius = (3.0 * mass / (4.0 * std::f32::consts::PI * self.density)).cbrt();
         Blast {
             mass,
             chemical,
             casing,
             energy,
-            charge: model::Blast::of(energy).charge,
-            radius: (3.0 * mass / (4.0 * std::f32::consts::PI * self.density)).cbrt(),
+            charge: model::Blast::of(energy, radius).charge,
+            radius,
         }
     }
 }
@@ -1134,7 +1135,7 @@ fn apply_deposit(
                 |i| state.standing(i),
                 |i| structure.chunks[i].material,
                 origin,
-                model::Blast::of(blast.energy),
+                model::Blast::of(blast.energy, blast.radius),
                 field,
             );
             let coupled: f32 = hits.iter().map(|hit| hit.energy).sum();

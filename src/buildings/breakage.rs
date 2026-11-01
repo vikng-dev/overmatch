@@ -652,10 +652,10 @@ fn read_shell(
     );
     let mut deposit = RawDeposit::default();
     for mark in marks.log.get(marched.marks_from..).unwrap_or_default() {
-        if let ArmourMark::Burst { at, .. } = mark
+        if let ArmourMark::Burst { field_origin, .. } = mark
             && let Some(burst) = marched.burst
         {
-            deposit.blast = Some((*at, Blast::of(burst.blast)));
+            deposit.blast = Some((*field_origin, Blast::of(burst.blast, burst.charge_radius)));
         }
     }
     // The game's damage model exposes only lines whose path moments fell in this tick. A
@@ -1199,7 +1199,7 @@ fn cast_blast(
                 + dir.z.abs() * size.x * size.y;
             stops.push((
                 Stop::Body(hit.entity),
-                Blast::section(share, hit.distance),
+                Blast::section(share, blast.distance(hit.distance)),
                 shown,
             ));
             thrown.push((
@@ -1221,7 +1221,11 @@ fn cast_blast(
                 turned,
             ) * frame.scale
                 * frame.scale;
-            stops.push((Stop::Chunk(root, c), Blast::section(share, d), shown));
+            stops.push((
+                Stop::Chunk(root, c),
+                Blast::section(share, blast.distance(d)),
+                shown,
+            ));
             chunk_hits.push((
                 root,
                 fracture::RayHit {
