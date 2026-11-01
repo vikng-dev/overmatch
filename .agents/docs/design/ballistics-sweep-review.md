@@ -435,8 +435,8 @@ that short barrel-length segment; no capture or raster-occlusion claim was made.
 
 The birth is the bore's first open point. The weapon declares its bore-start distance behind the
 muzzle, in the recoiling weapon's frame, with provenance. From that start the bore line is walked
-forward through the intervals of the source's convex Vehicle-layer proxies; the first point outside all of them, one
-nudge past the face it leaves, is the birth. A mount no proxy holds is born at the mount, and a
+forward through the intervals of the source's convex Vehicle-layer proxies; the first point
+outside all of them, one nudge past the face it leaves, is the birth. A mount no proxy holds is born at the mount, and a
 proxy past a gap does not move the birth: a wall in that gap is the march's to meet.
 
 Deferred alternative in #247: colliding barrels, a hollow bore and a round born at the breech.
@@ -859,9 +859,9 @@ B1, B2, B3, B4, B6, B13 and `SPIKE_TRACE_SIM_FIELDS` remain owner calls.
 
 Subject: the game's damage model, game state only.
 
-**#254, the server's `UnexpectedExit` in `integrate_projectiles`.** `walk::begin` seeds each
-transit sample with membership read on its incoming ray at its hand-off, and the transit corridor
-sweeps the bent ray from the same start. A sample that hands off on a face sits off it by its
+**A reproduced transit-membership failure while investigating #254.** Before bent-ray
+certification, `walk::begin` supplied each transit sample with membership read on its incoming
+ray at its hand-off, while the transit corridor swept the bent ray from the same start. A sample that hands off on a face sits off it by its
 rounding, and a ray that grazes that face turns the offset into a distance along the ray: the
 rounding over the graze's sine. The two rays can then place the face on opposite sides of the
 start, beyond both the band the seed declines and the corridor's clamp. Neither owns the face, and
@@ -872,23 +872,26 @@ same crossing after about 140 s (sample 11, exit triangle 106, t = 0.1819 m). A 
 a cupola. One ring sample entered the hatch's face 59 0.355 m along its incoming ray, 0.30 m deeper
 than the faces the rest of the disc entered, and handed off there. Its bent transit ray then left
 the hatch with no entry. A collider-history checker found no stale pose or history in about
-7 680 ticks. The struck primitive was a tank's hatch volume, not a building chunk, which rules out
-the lead from the server-perf-2 review. No `src/track/` or `src/net/` change was needed.
+7 680 ticks. The struck primitive in this reproduction was a tank's hatch volume. That does
+not identify the original incident's body or rule out the server-perf-2 lead: its original log
+records sample 2, triangle 11 and t = 0.6176264910893549 m (MEASURED), a different crossing.
+No with/without bisect of the original incident was run. No `src/track/` or `src/net/` change
+was needed for the reproduced mechanism.
 
-Fixed in "ballistics: read a transit's membership on its own rays (#254)".
+The reproduced mechanism was fixed in "ballistics: read a transit's membership on its own rays (#254)".
 `resolve::transit_starts` certifies every transit start on the bent ray, with the probe that
 resumed flights already use. `certified_samples` hands back the offsets it was given, so the probe
 and the corridor form each start in one arithmetic. The regression test
 `a_hand_off_face_the_bent_axis_grazes_is_owned_once` sweeps a block's overhanging side face from
 1 to 16 degrees of graze, near the world origin and 1.6 km from it. With the incoming-ray seeds its
 first pose fails with `UnexpectedExit` (MEASURED). The seeded Battle, rebuilt with the fix, ran
-332 s without a panic (MEASURED). `walk::TransitRequest::seeds` still carries the incoming-ray
-membership. The collider driver reads only its offsets; the walk core's analytic tests read the
-rest.
+332 s without a panic (MEASURED). The transit request now carries only hand-off offsets;
+incoming membership was removed in "ballistics: keep only bent-ray transit membership (#254)".
+The production-driver mutant and analytic-fixture follow-through are recorded below.
 
 | Reviewer | Finding | Disposition | Fixed in (commit subject) |
 |---|---|---|---|
-| Codex | P1: queued decisions keep source transparency after box clearance | verified | open |
+| Codex | P1: queued decisions keep source transparency after box clearance | verified | ballistics: end queued discovery at source-box clearance (#247) |
 | Codex | P2: the reverse ray skips earlier open bore segments | verified | shooting: start a mounted round at its bore's first open point (#247) |
 | Codex | P2: a bore that misses every proxy panics at fire | verified | shooting: start a mounted round at its bore's first open point (#247) |
 | Codex | P3: this record states PROTOCOL_REV 61 | verified | docs: record the sweep-ball-8 review and the transit membership (#247, #254) |
@@ -896,23 +899,81 @@ rest.
 | Claude | P2: the source box is rebuilt for every cleared round | verified | ballistics: build no source box for a cleared round (#247) |
 | Claude | P3: the tracer assertion never reads the drawn streak | verified | vfx: test that a round born behind its muzzle streaks from its birth (#247) |
 | Claude | P3: the disclosure doc states the deleted whole-flight rule | verified | damage_cam: state the disclosure rule after box clearance (#247) |
-| Claude | P3: `FireShell::of_round` defaults `birth` to the muzzle | verified | open |
-| Claude | P3: blank lines after `birth:` in `src/net` literals | verified | open |
+| Claude | P3: `FireShell::of_round` defaults `birth` to the muzzle | verified | ballistics: require the physical birth when constructing a shot (#247) |
+| Claude | P3: blank lines after `birth:` in `src/net` literals | verified | ballistics: require the physical birth when constructing a shot (#247) |
 
 - Birth: the old reverse ray from beyond the envelope returned the foremost exit of the whole
   line, so a proxy past a gap moved the birth past a wall in the gap; and a bore line that met no
   proxy hit its `expect`. Both are DERIVED from that code. `a_gap_in_the_envelope_ends_the_walk_at_its_first_open_point`
   and `a_mount_outside_the_envelope_is_born_at_the_mount` state each case. The mount reaches
-  `outside_source` as a distance along the bore. A mount ahead of its own muzzle is a broken
-  invariant and panics.
+  `outside_source` as a distance along the bore. The current start is the negative of the
+  required, load-validated bore length, independent of the tank root and recoil travel.
 - Source box: a cleared round never reads its box again, so it now builds none. Behaviour is
   unchanged and the cost was not measured.
 - Tracer: `a_streak_born_behind_its_muzzle_is_drawn_from_its_birth` reads the drawn streak in the
   real sim, view and streak world. It checks that the tail sits on the birth while the streak is
   shorter than nominal. The recording test keeps only its path assertions.
-- Left open: Codex P1 is verified by reading. `decide_playback` discovers the next surface against
-  every body out to the struck body's completion reach. It uses the `admit` the chain started
-  with, and that reach can pass the source box exit. The fix re-reads clearance per planned
-  decision and caps discovery at the box exit; it is a lane of its own. The `of_round` default and
-  the blank lines live in `src/net` call sites, which are outside this lane's scope.
+- Follow-through: the queued-source finding and the two net call-site P3s were left open by
+  sweep-ball-9. Their verified fixes and gates are recorded below.
 
+
+## Review of sweep-ball-9 and queued source clearance
+
+Subject: the game's damage model, game state only. Both blind reviews were present and read
+again before this table was written. Each finding was checked against the code; the inherited
+constructor and net-literal P3s are included.
+
+| Reviewer | Finding | Verified / not a defect | Fixed in (commit subject) |
+|---|---|---|---|
+| Codex | P1: queued decisions retain source exclusion after clearance | verified | ballistics: end queued discovery at source-box clearance (#247) |
+| Codex | P2: a fixed weapon infers its mount from an arbitrary body origin | verified | shooting: author the bore start independently of the body origin (#247) |
+| Claude | P2: the transit regression bypasses the runtime driver | verified | ballistics: keep only bent-ray transit membership (#254) |
+| Claude | P2: incoming transit membership remains as a losing alternative | verified | ballistics: keep only bent-ray transit membership (#254) |
+| Claude | P2: an outside-envelope birth meets its own source volumes | not a defect | no source-type exemption; see the box-law disposition below |
+| Claude | P2: independent GJK rays can lose the reverse intersection | verified | shooting: clip source envelopes on one local bore line (#247) |
+| Claude | P3: probe, corridor and playback renormalize the transit axis differently | verified | ballistics: keep only bent-ray transit membership (#254) |
+| Claude | P3: mount/muzzle ordering is checked late under recoil | verified | shooting: author the bore start independently of the body origin (#247) |
+| Claude | P3: the canonical hand-off narrative states incoming-only membership | verified | ballistics: keep only bent-ray transit membership (#254) |
+| Claude | P3: the reproduced hatch crossing is attributed to the original #254 incident | verified | docs: record verified sweep-ball-9 findings (#247, #254) |
+| Claude (inherited) | P3: the constructor defaults physical birth to the muzzle | verified | ballistics: require the physical birth when constructing a shot (#247) |
+| Claude (inherited) | P3: blank lines follow net birth literals | verified | ballistics: require the physical birth when constructing a shot (#247) |
+
+MEASURED regressions and dispositions:
+
+- `queued_decisions_meet_source_armour_after_leaving_its_box` failed before its fix. Its
+  foreign body has a first plate inside the source box, an outside reflector, and a later plate
+  beyond the source on the reflected path. The return now resolves source armour with positive
+  cost and deposits dose in the source. The source-clearance section above owns the rule.
+- `a_fixed_weapon_above_the_envelope_fires_with_its_root_ahead_of_its_muzzle` failed at the
+  old mount-order assertion. A fixed bore now uses required construction data. Missing,
+  non-finite and non-positive bore lengths are refused at load. The asset's model projections
+  are DERIVED; its choice of pivot as bore start is explicitly ASSUMED in that data, pending a
+  measured breech distance. No code infers a start from a servo or tank root.
+- `grazing_a_source_proxy_never_loses_one_end_of_its_interval` reproduced the reverse-cast
+  `expect` on finite convex-cube fixture geometry. It now passes using the walk's face clip.
+- Restoring incoming seeding in the production `decide` made
+  `a_hand_off_face_the_bent_axis_grazes_is_owned_once` fail with `UnexpectedExit`. The runtime
+  mutant is removed. The strengthened test reaches `decide`; the request no longer has incoming
+  membership to pass back, and analytic fixtures certify their bent rays.
+- The outside-envelope claim conflates individual collider/proxy AABBs with `source_box`:
+  that box encloses every collider registered to the source body, including its ballistic
+  volumes. Being outside each collider's AABB does not establish being outside their enclosing
+  box. A birth actually outside the enclosing
+  box has already cleared it under the chosen law; material it later meets, including its own,
+  is ordinary material. The inaccurate mount inference is removed by the authored bore start,
+  without adding an exception to clearance.
+- The original #254 log was checked against its issue and local server log. Its crossing differs
+  from the reproduced hatch crossing, so the earlier attribution and dismissal of the
+  server-perf-2 lead are withdrawn. The original incident's body and cause remain unestablished.
+
+MEASURED gates: source-clearance checks passed 235 tests; the shared-clip checks passed 239;
+authored-bore/load/net checks passed 623; transit/walk checks passed 353; explicit-birth,
+replay/net checks passed 681. Ignored instruments were left ignored. Each code commit passed
+formatting, workspace/all-target CI clippy with `dev_ui,bitprobe`, and citation checks. The final
+whole-tree guards passed 44 tests (MEASURED): `doc_citations`, `ui_ascii`, `net_boundary` and
+`bake::`; formatting and workspace/all-target CI clippy passed again.
+
+Wire definitions are unchanged, so PROTOCOL_REV deliberately remains 62. No `src/track/`,
+`ShotClock`, `WeaponClock` or `Respawn::Opens::tick` definition changed. The shared seams are
+`Weapon` in `src/tank/model.rs` and mechanical weapon-fixture initialization in `src/net` and
+VFX; no tick-type overlap was edited. No captures, pricing, pushes or issue comments were made.
