@@ -2420,10 +2420,12 @@ fn integrate_projectiles(
             // Each pool this step emptied, with the deposit that did it: its own entry into the
             // box, never the crossing's entrance, which a neighbouring volume shares.
             for &address in &shell.dose.emptied()[emptied_from..] {
-                let (at, along) = match shell.dose.emptier(address) {
-                    Some(DoseContext::Line { entry, along }) => (entry, Some(along)),
-                    Some(DoseContext::Field { origin }) => (origin, None),
-                    None => (step.position, Some(Vec3::from(step.direction))),
+                let (at, along) = match shell.dose.emptier(address).expect(
+                    "the game's damage model records the emptying deposit's context when settle \
+                     appends an emptied pool",
+                ) {
+                    DoseContext::Line { entry, along } => (entry, Some(along)),
+                    DoseContext::Field { origin } => (origin, None),
                 };
                 commands.trigger(PoolEmptied {
                     entity: address,
@@ -2551,7 +2553,7 @@ fn wound_legs(
     let (volumes, incoming) = wound::line(context, admit, legs, shell.projectile.wound)
         .unwrap_or_else(|error| error.panic());
     let Some(incoming) = incoming else {
-        return 0;
+        return 0; // No witness chord lies on these resolved legs.
     };
     shell.dose.add_wounds(&volumes, Vec3::from(incoming));
     shell.marks.log.push(ArmourMark::Wound {
@@ -3384,9 +3386,10 @@ fn next_surface(
 /// its own driven energy, what its explosive gives the wall ([`burst::Burst::energy`]), times the
 /// burst fields' factor ([`spall_cone::BurstFields::strength`]): nothing the round lost reaching
 /// `flight` enters it. Its field is the ring at ratio `speed / v_s`
-/// ([`spall_cone::BurstFields::field`]), walked through every spatially reached volume, leaving none. A field whose emission converts to no pool unit
-/// is not thrown, as a cone's is not ([`throw_spall_cone`]); one outside its law's domain throws
-/// nothing and logs why.
+/// ([`spall_cone::BurstFields::field`]), walked through every spatially reached volume, leaving
+/// none. A field whose emission converts to no pool unit is not thrown, as a cone's is not
+/// ([`throw_spall_cone`]). The game's damage model requires a derived field to stay inside the
+/// law's domain: the round and law are validated before play, so a contradiction is a bug.
 fn throw_burst(
     shell: &mut MarchingShell,
     context: &resolve::ResolveContext<'_, '_, '_>,
@@ -3406,21 +3409,19 @@ fn throw_burst(
         strength: fields.strength(burst.energy),
         exited: &[],
     };
+    assert!(
+        throw.strength.is_finite() && throw.strength >= 0.0,
+        "the game's damage model derives finite nonnegative burst strength from validated energy",
+    );
     if pool_units_of(energy_units(throw.strength * spall_cone::EMITTED_SHARE)) == 0 {
         shell.spall.gated += 1;
         return;
     }
     let (field, law) = fields.field(speed / burst.sideways_speed);
-    let spread = match law.spread(field) {
-        Ok(spread) => spread,
-        Err(error) => {
-            error!(
-                origin = ?throw.origin,
-                "ballistics: a burst field is not thrown, its field is outside the law: {error}"
-            );
-            return;
-        }
-    };
+    let spread = law.spread(field).expect(
+        "the game's damage model derives a burst field from a validated round, finite speed and \
+         configured field law; it must remain inside that law's domain",
+    );
     let rays = walk_field(&throw, &spread, shell.dose, context, is_box);
     shell.spall.burst = Some(BurstField {
         origin: throw.origin,
@@ -3504,9 +3505,9 @@ fn walk_field(
 /// the spread ([`spall_cone::Spread`]) carries `S·f_k` and stands for `1/N` of the cone, walked
 /// through every spatially reached volume ([`walk_field`]). It never doses the body
 /// that threw it, the volumes the exit leaves ([`walk::SpallSource::exited`]): the energy the
-/// round lost there is their line dose, counted once. A ratio outside the
-/// law's domain throws nothing and logs why; substances refuse one at load, so only a fixture
-/// reaches it.
+/// round lost there is their line dose, counted once. The game's damage model requires the
+/// source ratio and direction to remain inside the law's domain: substances are validated at
+/// load and the crossing derives the source from a resolved flight.
 fn throw_spall_cone(
     spall: &mut SpallMarks,
     dose: &mut ShotDose,
@@ -3520,21 +3521,23 @@ fn throw_spall_cone(
         .as_deref()
         .map_or(spall_cone::ConeShape::shipped(), |law| &law.0);
     let strength = source.strength();
+    assert!(
+        strength.is_finite() && strength >= 0.0,
+        "the game's damage model derives finite nonnegative spall strength from crossing energy",
+    );
     if pool_units_of(energy_units(strength * spall_cone::EMITTED_SHARE)) == 0 {
         spall.gated += 1;
         return false;
     }
-    let spread = match shape.spread(spall_cone::FieldDescriptor::ball(source.debris_ratio)) {
-        Ok(spread) => spread,
-        Err(error) => {
-            error!(
-                origin = ?source.position,
-                "ballistics: a spall cone is not thrown, its field is outside the law: {error}"
-            );
-            return false;
-        }
-    };
-    let direction = Dir3::new(source.direction).unwrap_or(Dir3::NEG_Z);
+    let spread = shape
+        .spread(spall_cone::FieldDescriptor::ball(source.debris_ratio))
+        .expect(
+            "the game's damage model takes a spall source's ratio from its load-validated \
+             material; the derived field must stay inside the configured law's domain",
+        );
+    let direction = Dir3::new(source.direction).expect(
+        "the game's damage model derives a spall source from the resolved flight direction",
+    );
     let throw = FieldThrow {
         origin: source.position,
         axis: shape.axis(source.face, direction),

@@ -63,3 +63,20 @@ agreement tests now compare recorded line energy directly, independently of fiel
 than relying on ownership to silence fields. MEASURED: all 41 resolver/citation tests passed;
 format and workspace/all-target clippy passed.
 The cross-platform field-cast pin also passed without re-pinning.
+
+## Remaining internal failures (B28–B38)
+
+- Already fixed by the walk redesign: B28 witness-walk failures, B29 failed walks, B30 uncertified
+  starts, B31 entry-force errors, B33 field-direction errors, B34 witness-pass errors and B38
+  crossing-count exhaustion now panic through their classified walk invariant. B8's overrun
+  envelope is gone; containment closes against finite loaded geometry instead.
+- Fixed B32/B35: a derived burst or spall field outside its configured law is an unconditional
+  bug, naming its validated inputs. Non-finite/negative strength and an invalid source direction
+  also panic instead of disappearing at the quantization gate or taking a default heading.
+- Fixed B37: every pool appended by `ShotDose::settle` has its emptying deposit's context. The
+  consumer now requires it; the step endpoint no longer invents an entry or direction.
+- B36 remains for a separate change: a zero free-flight step currently skips the whole march.
+
+MEASURED: all 98 targeted march, resolver, field-law and citation tests passed. Format and
+workspace/all-target clippy passed. The law's existing refusal tests exercise invalid field
+ratios; march tests cover both line and field emptying contexts.
