@@ -1211,12 +1211,13 @@ fn engine_drag(tp: &TransmissionParams, omega_e: f32, u_fuel: f32) -> f32 {
 /// relative motion (~5 ticks — see [`LANDING_REACTION_DECAY`]), so the reaction DECAYS
 /// geometrically instead of staying frozen. And the mass that reaction decelerates is the
 /// COUPLED one: through the still-gripping (merely relaxing) bristle the belt pair carries
-/// the hull, so per side the inertia is `fp.inertia + (W/2)/g` — belt + reflected
-/// drivetrain plus this side's share of the sprung vehicle — `W/2` the grip law's own
-/// [`forces::GripParams::side_weight`], no new vehicle datum. The old
-/// frozen-`r_mean`-over-belt-inertia form charged a 57 t Tiger's window as if 32 t of
-/// reflected belt inertia alone absorbed 20 ticks of full driving reaction: on a 10% grade
-/// it predicted a 156 rpm landing against a 1550 rpm floor and refused F1→F2 forever
+/// the hull, so per side the inertia is `fp.inertia + (W/2)/g` — the belt's links and wheel
+/// moments reflected at belt speed, plus this side's share of the sprung vehicle — `W/2` the
+/// grip law's own [`forces::GripParams::side_weight`], no new vehicle datum. The rejected
+/// frozen-`r_mean`-over-belt-inertia form charges the window to the belt inertia alone: on a
+/// 57 t Tiger with an authored 32 t of belt inertia across both sides absorbing 20 ticks of
+/// full driving reaction, on a 10% grade it predicted a 156 rpm landing against a 1550 rpm
+/// floor and refused F1→F2 forever
 /// (measured governor-pinned at 2591 rpm / 0.67 m/s), while the same tank climbed F1→F4 on
 /// the flat. Units stay the live mean-axis convention (the per-side integration
 /// `v += (Q − R)/I·dt`): per-side mean reaction over per-side inertia.

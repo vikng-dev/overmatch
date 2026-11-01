@@ -133,7 +133,9 @@ struct RigSpec {
     /// is compliant, not a hard edge. Well below the static sink, so it sets the behaviour at the
     /// contact boundary, not the ride height.
     engage_depth: f32,
-    /// Reflected belt + drivetrain inertia (kg).
+    /// DERIVED per-side belt inertia (kg): the links plus the wheel moments reflected at belt
+    /// speed ([`crate::spec::TrackSpec::reflected_inertia`]). The engine crank stays on the
+    /// engine side of the clutch.
     belt_inertia: f32,
     /// The track's material pair with the course and its pieces, from the tank's data: its track
     /// substance on the game's base ground, the friction every course block carries.
