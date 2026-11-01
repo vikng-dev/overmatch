@@ -1421,7 +1421,7 @@ impl TankSpec {
             }
         }
         for (node, servo) in &self.servos {
-            if let Some(fault) = servo.travel_window_fault() {
+            if let Some(fault) = servo.admission_fault() {
                 return Err(format!("servo `{node}`: {fault}").into());
             }
         }
@@ -2588,7 +2588,7 @@ TankSpec(
         }
     }
 
-    /// The servo window contract (`ServoSpec::travel_window_fault`): the sim clamps to the window
+    /// The servo window contract (`ServoSpec::admission_fault`): the sim clamps to the window
     /// so one that is inverted or excludes the spawn angle 0 is refused
     /// at load, the same refusal `certify_asset` reports as `L2.SPEC`.
     #[test]

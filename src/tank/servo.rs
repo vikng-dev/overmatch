@@ -42,8 +42,8 @@ pub struct ServoSpec {
     /// Slew acceleration, degrees/second².
     accel: f32,
     travel: Travel,
-    /// Damage/crew requirement whose effectiveness scales slew speed. Required: an authored `[]`
-    /// slews at full speed whatever the crew's state.
+    /// In the game's damage model (game state only), this requirement scales slew effectiveness.
+    /// Required: an authored `[]` slews at full speed independently of the HP pools.
     pub(crate) requires: Requirement,
 }
 
@@ -61,10 +61,17 @@ impl ServoSpec {
         }
     }
 
-    /// Why this servo's authored travel breaks the window contract, or `None` when it keeps it.
+    /// Why this servo's authored limits violate admission, or `None` when they hold.
     /// The contract: a `Limited` window is finite with `min <= 0 <= max` (a servo spawns at angle 0,
     /// so the window holds its own start), and `drive_servos` never lets `current` leave it.
-    pub(crate) fn travel_window_fault(&self) -> Option<String> {
+    pub(crate) fn admission_fault(&self) -> Option<String> {
+        for (field, value) in [("max_speed", self.max_speed), ("accel", self.accel)] {
+            if !value.is_finite() || value <= 0.0 || value.to_radians() <= 0.0 {
+                return Some(format!(
+                    "{field} must be finite and positive in degrees and runtime radians; author a representable motor limit"
+                ));
+            }
+        }
         let Travel::Limited { min, max } = self.travel else {
             return None;
         };
@@ -181,6 +188,27 @@ fn servo_rotation(spec: &ServoSpec, rest: &ServoRest, angle: f32) -> Quat {
     servo_pose(spec.role, rest.0, angle)
 }
 
+/// Replicas carry the remote integrator; authority-only roots carry TankServos. A registered
+/// slot must resolve in its selected source, even when both snapshots coexist during receipt.
+fn registered_state<'a>(
+    root: Entity,
+    slot: usize,
+    authority: &'a Query<&TankServos>,
+    remote: &'a Query<&RemoteServos>,
+) -> &'a ServoState {
+    let states = if let Ok(remote) = remote.get(root) {
+        &remote.0
+    } else {
+        &authority
+            .get(root)
+            .expect("a registered servo's root carries its authoritative or remote mechanism state")
+            .states
+    };
+    states
+        .get(slot)
+        .expect("every registered servo slot belongs to its selected mechanism state")
+}
+
 /// Restore sim-node transforms from rollback state before any fixed-step gameplay reader runs.
 pub(crate) fn restore_servo_truth(
     mut q: Query<(
@@ -196,19 +224,7 @@ pub(crate) fn restore_servo_truth(
     for (mut transform, spec, rest, slot, root) in &mut q {
         // Replicas carry `RemoteServos` permanently and it takes precedence; the `TankServos` arm
         // serves the server and single-player, where no `RemoteServos` exists.
-        let state = remote_servos
-            .get(root.0)
-            .ok()
-            .and_then(|servos| servos.0.get(slot.0))
-            .or_else(|| {
-                servos
-                    .get(root.0)
-                    .ok()
-                    .and_then(|servos| servos.states.get(slot.0))
-            });
-        let Some(state) = state else {
-            continue;
-        };
+        let state = registered_state(root.0, slot.0, &servos, &remote_servos);
         let rotation = servo_rotation(spec, rest, state.current);
         if transform.rotation != rotation {
             transform.rotation = rotation;
@@ -233,29 +249,39 @@ pub(crate) fn drive_servos(
 ) {
     let dt = time.delta_secs();
     for (mut transform, spec, rest, command, slot, root) in &mut q {
+        // Absence of RemoteServos selects the authority integrator; a missing selected state
+        // or slot is a broken spawn bundle, never a reason to freeze a mechanism silently.
         let mut remote = remote_servos.get_mut(root.0).ok();
         let mut authoritative = if remote.is_none() {
-            servos.get_mut(root.0).ok()
+            Some(
+                servos
+                    .get_mut(root.0)
+                    .expect("an authority servo's root carries its mechanism state"),
+            )
         } else {
             None
         };
-        let state = remote
-            .as_mut()
-            .and_then(|servos| servos.0.get_mut(slot.0))
-            .or_else(|| {
-                authoritative
-                    .as_mut()
-                    .and_then(|servos| servos.states.get_mut(slot.0))
-            });
-        let Some(state) = state else { continue };
+        let state = if let Some(remote) = remote.as_deref_mut() {
+            remote
+                .0
+                .get_mut(slot.0)
+                .expect("every registered servo slot belongs to its selected mechanism state")
+        } else {
+            authoritative
+                .as_deref_mut()
+                .expect("the authority integrator was selected")
+                .states
+                .get_mut(slot.0)
+                .expect("every registered servo slot belongs to its selected mechanism state")
+        };
         // Preserve the prior fixed-step value for view interpolation.
         state.previous = state.current;
 
         // Requirement effectiveness scales slew; zero freezes the mount.
-        let slew = tanks
+        let volumes = tanks
             .get(root.0)
-            .map(|tv| evaluate(&spec.requires, &part_qualities(tv, &facets)))
-            .unwrap_or(0.0);
+            .expect("an admitted tank with a servo carries its volume relationship target");
+        let slew = evaluate(&spec.requires, &part_qualities(volumes, &facets));
 
         // Specs author degrees; runtime state and commands use radians.
         let max_speed = spec.max_speed.to_radians() * slew;
@@ -329,22 +355,10 @@ pub(super) fn interpolate_servos(
 ) {
     let alpha = time.overstep_fraction();
     for (mut transform, view_of) in &mut views {
-        let Ok((spec, rest, slot, root)) = servos.get(view_of.0) else {
-            continue;
-        };
-        let state = remote_states
-            .get(root.0)
-            .ok()
-            .and_then(|servos| servos.0.get(slot.0))
-            .or_else(|| {
-                states
-                    .get(root.0)
-                    .ok()
-                    .and_then(|servos| servos.states.get(slot.0))
-            });
-        let Some(state) = state else {
-            continue;
-        };
+        let (spec, rest, slot, root) = servos.get(view_of.0).expect(
+            "ViewServo links a live sim servo; detach removes the view's servo binding in the same flush",
+        );
+        let state = registered_state(root.0, slot.0, &states, &remote_states);
         let angle = state.previous + shortest_angle(state.current - state.previous) * alpha;
         // Guarded write: a settled mount must not re-dirty the view transform every frame.
         let rotation = servo_rotation(spec, rest, angle);
@@ -383,8 +397,8 @@ mod tests {
                 states: vec![ServoState::default()],
             })
             .id();
-        // `drive_servos` reads slew from the tank's volumes; an empty requirement evaluates to 1, but
-        // a tank with no `TankVolumes` at all reads 0 and freezes the mount.
+        // The game's damage model: an explicitly empty requirement evaluates to full capability.
+        // The relationship still supplies the complete root bundle the mechanism reads.
         world.spawn(crate::damage::VolumeOf(root));
         let servo = world
             .spawn((
@@ -434,12 +448,78 @@ mod tests {
         }
     }
 
-    /// The window contract `travel_window_fault` names: inverted, non-finite and zero-excluding
+    /// Both limited and continuous motors must publish finite, positive runtime limits. A zero,
+    /// non-finite or underflowed rate would silently freeze or corrupt the integrator.
+    #[test]
+    fn motor_limits_refuse_invalid_values_before_play() {
+        for value in [0.0, -1.0, f32::NAN, f32::INFINITY, f32::from_bits(1)] {
+            let spec = ServoSpec::test_continuous(ServoRole::Yaw, value, 1.0);
+            assert!(spec.admission_fault().unwrap().contains("max_speed"));
+            let spec = ServoSpec::test_limited(ServoRole::Yaw, 1.0, value, -1.0, 1.0);
+            assert!(spec.admission_fault().unwrap().contains("accel"));
+        }
+    }
+
+    /// The selected remote source must own its slot; an authority snapshot cannot stand in for
+    /// a malformed remote vector. Both fixed-step restoration and integration rely on this.
+    fn missing_remote_slot() -> World {
+        let mut world = World::new();
+        world.insert_resource(Time::<()>::default());
+        let root = world
+            .spawn((
+                TankServos {
+                    states: vec![ServoState::default()],
+                },
+                RemoteServos(vec![]),
+            ))
+            .id();
+        world.spawn((
+            Transform::default(),
+            ServoSpec::test_continuous(ServoRole::Yaw, 1.0, 1.0),
+            ServoRest(Quat::IDENTITY),
+            ServoCommand::default(),
+            ServoIndex(0),
+            TankRoot(root),
+        ));
+        world
+    }
+
+    #[test]
+    #[should_panic(
+        expected = "every registered servo slot belongs to its selected mechanism state"
+    )]
+    fn restoration_refuses_a_slot_missing_from_the_selected_source() {
+        missing_remote_slot()
+            .run_system_once(restore_servo_truth)
+            .unwrap();
+    }
+
+    #[test]
+    #[should_panic(
+        expected = "every registered servo slot belongs to its selected mechanism state"
+    )]
+    fn integration_refuses_a_slot_missing_from_the_selected_source() {
+        missing_remote_slot().run_system_once(drive_servos).unwrap();
+    }
+
+    /// Presentation relies on the source/view lifetime contract; an orphan must not freeze at its
+    /// last pose after a missing source is silently mistaken for a loading state.
+    #[test]
+    #[should_panic(expected = "ViewServo links a live sim servo")]
+    fn interpolation_refuses_an_orphaned_binding() {
+        let mut world = World::new();
+        world.insert_resource(Time::<Fixed>::default());
+        let source = world.spawn_empty().id();
+        world.spawn((Transform::default(), ViewOf(source), ViewServo));
+        world.run_system_once(interpolate_servos).unwrap();
+    }
+
+    /// The window contract `admission_fault` names: inverted, non-finite and zero-excluding
     /// windows are refused; a continuous mount and a window holding 0 are not.
     #[test]
     fn the_window_contract_refuses_inverted_and_zero_excluding_travel() {
         let fault = |min, max| {
-            ServoSpec::test_limited(ServoRole::Pitch, 1.0, 1.0, min, max).travel_window_fault()
+            ServoSpec::test_limited(ServoRole::Pitch, 1.0, 1.0, min, max).admission_fault()
         };
         assert!(fault(-10.0, 20.0).is_none());
         assert!(fault(0.0, 20.0).is_none());
@@ -451,7 +531,7 @@ mod tests {
         assert!(fault(-1.0, f32::INFINITY).is_some());
         assert!(
             ServoSpec::test_continuous(ServoRole::Yaw, 1.0, 1.0)
-                .travel_window_fault()
+                .admission_fault()
                 .is_none()
         );
     }
