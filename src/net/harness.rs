@@ -1044,12 +1044,12 @@ mod tests {
     #[test]
     fn watchdog_bounds_launch_once_and_execution_from_release() {
         use super::super::battle::BattlePhase;
-        use crate::sim_tick::SimTick;
+        use crate::sim_tick::{SimTick, TickSpan};
         let tick = Duration::from_secs_f64(1.0 / 64.0);
         let mut sim = SimulateInput::new(&Script::parse("(ticks: 6400)").unwrap());
         let now = SimTick::new(u32::MAX - 3);
         let fill_up = BattlePhase::FillUp {
-            ends_at: Some(now.after(640)),
+            ends_at: Some(now.after(TickSpan::try_from(640).expect("fixture span"))),
         };
         // A replicated phase without a tank does not excuse a missing input slot.
         sim.account_fill_up(fill_up, now, tick);
