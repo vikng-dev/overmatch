@@ -556,6 +556,34 @@ mod tests {
         }
     }
 
+    /// The game's damage model partitions a finite nonnegative energy loss into finite
+    /// nonnegative line deposits. Quantization relies on that sign even at rest, tiny chords and
+    /// overlaps. FIXTURE DATA: independent speeds, chords and material factors span those edges.
+    #[test]
+    fn line_energy_remains_nonnegative_at_resistance_and_rest_edges() {
+        let round = round();
+        for speed in [0.0, 0.001, 1.0, 100.0, 1000.0] {
+            for length in [0.0, 1.0e-14, 1.0e-7, 0.01, 10.0] {
+                for factor in [0.0, 0.001, 10.0, 1000.0] {
+                    let state = round.at(speed);
+                    let advance = round.advance(
+                        state,
+                        &encounter(length, 2, &[&[(1, factor)], &[(2, factor), (3, factor)]]),
+                        &LIMITS,
+                        &HEAD_ON,
+                    );
+                    let mut total = 0.0;
+                    for Effect::Line { energy, .. } in advance.effects {
+                        assert!(energy.is_finite() && energy >= 0.0);
+                        total += energy;
+                        super::super::energy_units(energy as f32);
+                    }
+                    assert!(total <= round.energy(state) * (1.0 + 1.0e-12));
+                }
+            }
+        }
+    }
+
     /// One stretch advances the speed by the rigid force law integrated in closed form from the
     /// reference steel's facts: `v₁² = (v₀² + a/k) · exp(−s · 2 A k L / m) − a/k`, `s` the disc-mean
     /// share of the reference force.

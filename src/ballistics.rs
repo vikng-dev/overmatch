@@ -419,8 +419,13 @@ const _: () = assert!(DOSE_UNITS_PER_POOL_UNIT * POOL_UNITS_PER_HP as u64 == DOS
 
 /// One dose contribution of `dose` reference-mm in whole dose units: widened to f64 (exact), one
 /// IEEE multiply and a round to nearest, ties away from zero, so it is the same on every target. A
-/// negative or NaN dose is none; the cast saturates.
+/// finite, nonnegative internal dose is required; a broken deposit is a bug. The cast saturates
+/// a valid contribution above the accumulator's range.
 pub(crate) fn dose_units(dose: f32) -> u64 {
+    assert!(
+        dose.is_finite() && dose >= 0.0,
+        "the game's damage model quantizes finite nonnegative dose from validated deposits"
+    );
     (f64::from(dose) * DOSE_UNITS_PER_REFERENCE_MM as f64).round() as u64
 }
 
@@ -431,8 +436,13 @@ pub(crate) fn dose_units(dose: f32) -> u64 {
 /// chord enters a total through this: a hard box's line deposit, a bounce's shock and every field
 /// deposit (a hard box's and a witness's alike), so one joule is worth the same HP whatever put it
 /// there. A deposit converts to the same units wherever it is summed (the shot's tally, the pen cam
-/// record's emptying deposit). A negative or NaN energy is none; the cast saturates.
+/// record's emptying deposit). Finite, nonnegative internal energy is required; a broken line or
+/// field deposit is a bug. The cast saturates a valid contribution above the accumulator's range.
 pub(crate) fn energy_units(energy: f32) -> u64 {
+    assert!(
+        energy.is_finite() && energy >= 0.0,
+        "the game's damage model quantizes finite nonnegative energy from resolved losses"
+    );
     (f64::from(energy) / energy_dose::joules_per_hp() * DOSE_UNITS_PER_HP as f64).round() as u64
 }
 
@@ -471,8 +481,8 @@ pub(crate) fn least_shown_hp() -> f64 {
 }
 
 /// The pool units one dose of `dose` reference-mm (a witness's chord) converts to: [`dose_units`]
-/// then [`pool_units_of`], the conversion a box's per-shot total takes. A negative or NaN dose
-/// converts to none.
+/// then [`pool_units_of`], the conversion a box's per-shot total takes. Invalid internal dose
+/// fails the same invariant as every production deposit.
 #[cfg(test)]
 pub(crate) fn pool_units(dose: f32) -> u32 {
     pool_units_of(dose_units(dose))
@@ -3620,8 +3630,8 @@ mod tests {
         along: Vec3::NEG_Z,
     };
 
-    /// A dose converts to the nearest pool unit, ties away from zero; none for a negative or NaN
-    /// dose. Fixture doses (reference-mm, 10 HP points each).
+    /// The game's damage model converts valid dose to the nearest pool unit, ties away from zero.
+    /// Fixture doses (reference-mm, DERIVED 10 HP points each).
     #[test]
     fn a_dose_converts_to_the_nearest_pool_unit() {
         assert_eq!(pool_units(0.0), 0);
@@ -3632,8 +3642,18 @@ mod tests {
             "half a unit, a tie, rounds away from zero"
         );
         assert_eq!(pool_units(3.0), 30 * POOL_UNITS_PER_HP);
-        assert_eq!(pool_units(-1.0), 0);
-        assert_eq!(pool_units(f32::NAN), 0);
+    }
+
+    /// The game's damage model never turns a broken deposit into zero through a saturating cast.
+    /// Pool settlement and its recorded dose rely on both conversion edges rejecting invalid input.
+    #[test]
+    fn invalid_dose_and_energy_are_bugs_before_quantization() {
+        for invalid in [-1.0, f32::NAN, f32::INFINITY, f32::NEG_INFINITY] {
+            assert!(std::panic::catch_unwind(|| dose_units(invalid)).is_err());
+            assert!(std::panic::catch_unwind(|| energy_units(invalid)).is_err());
+        }
+        assert_eq!(dose_units(0.0), 0);
+        assert_eq!(energy_units(0.0), 0);
     }
 
     /// A box loses its shot's dose converted once on its total: doses each below half a pool unit

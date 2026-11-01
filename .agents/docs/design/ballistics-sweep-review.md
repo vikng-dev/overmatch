@@ -338,3 +338,17 @@ shooting and citation tests passed, including both resync-pose gaps and authorit
 
 R4 verification: format and workspace/all-target clippy passed. MEASURED: all 24 shooting and
 citation tests passed. No other P1/P2 introduced by sweep-ball-3 was found in the reviewed diff.
+
+## Part 4: dose-domain invariants (B02/B03)
+
+Subject: the game's damage model, game state only. Both quantizers now require finite,
+nonnegative contributions before a float-to-integer cast can erase invalid input. The line law
+already forms a nonnegative kinetic-energy loss, partitions it with nonnegative cost weights,
+and bounds each subinterval loss at zero; no new physical clamp was added. The independent edge
+control spans rest, gaps, tiny chords, tied overlaps and finite material resistance, checking
+nonnegative deposits and their total against the incoming kinetic energy. Invalid dose/energy
+controls require failure rather than a zero deposit. Positive accumulator saturation is retained:
+it caps an overlarge valid contribution, while pool settlement still caps at the available pool.
+
+B02/B03 verification: format and workspace/all-target clippy passed. MEASURED: 115 targeted
+quantization, mechanism, march, pen-cam, fuzzer and citation tests passed; four instruments ignored.
