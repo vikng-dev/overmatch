@@ -444,3 +444,19 @@ Staging verification: format and workspace/all-target clippy passed. MEASURED: 1
 field-cast, headless and citation tests passed; six ignored. The field-cast pin is unchanged.
 Missing-node and malformed-descriptor controls fail explicitly; the shared stage fixture now
 spawns every servo its fixture spec declares.
+
+## Remaining derived directions
+
+Subject: the game's damage model, game state only. The resolver requires the ricochet and transit
+axes constructed by its checked entrance; neither substitutes the incoming direction. A walk
+requires finite normalized entrance axes/normals after its named vanishing-aggregate case.
+Sampling-frame construction refuses invalid axes or references; transport requires valid flight
+axes and a lateral reference that survives its unit rotation. It never re-anchors or returns the
+old basis on failure. The verified glam normalization uses the same reciprocal-and-multiply
+operations as the previous successful path. Clipped corridor endpoints explicitly name their
+missing face; any interior boundary missing its collected normal is a bug.
+
+Direction verification: format and workspace/all-target clippy passed. MEASURED: 361 walk,
+resolver, march, fuzzer, pen-cam, field-cast, headless and citation tests passed; seven ignored.
+The existing field-cast pin stayed bit-identical. The endpoint-convention comment then received
+a fresh format, clippy and citation check (three passed); no behavior changed after the broader run.

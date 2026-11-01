@@ -4292,3 +4292,23 @@ fn a_crossing_resolves_the_same_however_far_its_entrance_was_walked() {
         "the plate behind resolves the same"
     );
 }
+
+/// The game's damage model may refuse an invalid spawn basis, but must never replace a broken
+/// transported frame with another roll. The round's sampling continuity relies on that distinction.
+#[test]
+fn invalid_sampling_frames_are_refused_without_reanchoring() {
+    for axis in [Vec3::ZERO, Vec3::NAN] {
+        assert!(DiscFrame::anchored(axis).is_none());
+    }
+    assert!(DiscFrame::from_axis_and_reference(Vec3::Z, Vec3::NAN).is_none());
+    let frame = DiscFrame::anchored(Vec3::Z).unwrap();
+    let reversed = frame.transport(Vec3::Z, Vec3::NEG_Z);
+    assert!(reversed.u.dot(Vec3::NEG_Z).abs() < 1.0e-5);
+    assert!(reversed.u.cross(reversed.v).dot(Vec3::NEG_Z) > 0.99);
+    assert!(std::panic::catch_unwind(|| frame.transport(Vec3::Z, Vec3::ZERO)).is_err());
+    let collapsed = DiscFrame {
+        u: Vec3::Z,
+        v: Vec3::X,
+    };
+    assert!(std::panic::catch_unwind(|| collapsed.transport(Vec3::Z, Vec3::Z)).is_err());
+}

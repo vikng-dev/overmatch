@@ -1165,10 +1165,16 @@ pub fn walk_ray(
                 }
             })
             .map(unit_or_zero)
-            // A run that opens at the corridor origin (declared initial presence) has no entry face
-            // in this corridor; the incoming axis is the honest stand-in — the same fallback the
-            // serial resolver uses for a degenerate normal.
-            .unwrap_or(if entry { -corridor.axis } else { corridor.axis })
+            .unwrap_or_else(|| {
+                // The game's damage model: a seeded/clipped corridor endpoint lacks a collected
+                // face in this interval; its axial normal is the endpoint convention.
+                assert!(
+                    if entry { t == 0.0 && !corridor.initial_presence.is_empty() }
+                    else { t == corridor.length as f64 },
+                    "the game's damage model gives every material boundary inside a corridor its collected face normal"
+                );
+                if entry { -corridor.axis } else { corridor.axis }
+            })
     };
 
     let runs = weld_runs(
@@ -1814,10 +1820,10 @@ impl DiscFrame {
     /// Build the SPAWN basis from an explicit reference direction. The caller owns the choice, so no
     /// world-axis branch can hide inside the core.
     pub fn from_axis_and_reference(axis: Vec3, reference: Vec3) -> Option<Self> {
-        let axis = axis.normalize_or_zero();
+        let axis = axis.try_normalize()?;
         let u = reference - axis * axis.dot(reference);
         let len = u.length();
-        if axis == Vec3::ZERO || len < 1.0e-4 {
+        if !len.is_finite() || len < 1.0e-4 {
             return None;
         }
         let u = u / len;
@@ -1837,16 +1843,18 @@ impl DiscFrame {
     /// so a ring ray starts inside geometry the axis has not reached and the walk reports an exit it
     /// never entered.
     pub fn transport(&self, from: Vec3, to: Vec3) -> Self {
-        let to = to.normalize_or_zero();
-        let rotation = Quat::from_rotation_arc(from.normalize_or_zero(), to);
+        let from = from.try_normalize().expect(
+            "the game's damage model transports its sampling frame from a finite nonzero flight axis"
+        );
+        let to = to.try_normalize().expect(
+            "the game's damage model transports its sampling frame onto a finite nonzero flight axis"
+        );
+        let rotation = Quat::from_rotation_arc(from, to);
         let carried = rotation * self.u;
         let u = carried - to * to.dot(carried);
-        match Self::from_axis_and_reference(to, u) {
-            Some(frame) => frame,
-            // The carried vector collapsed onto the axis (a near-reversal, or a frame that was never
-            // perpendicular). Re-anchor rather than return a basis that is not one.
-            None => Self::anchored(to).unwrap_or(*self),
-        }
+        Self::from_axis_and_reference(to, u).expect(
+            "the game's damage model transports a valid lateral basis by a unit rotation; its reference cannot collapse onto the new axis"
+        )
     }
 }
 
@@ -3112,12 +3120,12 @@ pub fn begin(entrance: &DiscWalk, shot: &Shot, laws: &WalkLaws) -> Result<Begin,
         overmatched,
     };
 
-    let Ok(axis) = Dir3::new(entrance.axis) else {
-        return Ok(Begin::Miss);
-    };
-    let Ok(surface) = Dir3::new(normal) else {
-        return Ok(Begin::Miss);
-    };
+    let axis = Dir3::new(entrance.axis).expect(
+        "the game's damage model validates a finite nonzero corridor axis before reading its entrance"
+    );
+    let surface = Dir3::new(normal).expect(
+        "the game's damage model reads a finite collected entry normal after excluding a vanishing aggregate"
+    );
 
     // η scales the deflection ANGLE as well as the speed lost (§13.5). A graze that turned the
     // round as hard as a square bounce made 1 mm of aim the difference between "flies past" and

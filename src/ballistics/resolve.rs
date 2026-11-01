@@ -1536,7 +1536,9 @@ pub(crate) fn decide(
         } => {
             let struck = read.volume;
             let position = anchor + read.position;
-            let out = Dir3::new(direction).unwrap_or(dir);
+            let out = Dir3::new(direction).expect(
+                "the game's damage model derives a finite nonzero ricochet direction from checked unit directions"
+            );
             let kept = speed * speed_scale;
             let approach = (read.position - from).dot(Vec3::from(dir)).max(0.0);
             let way_in = Leg {
@@ -1581,7 +1583,9 @@ pub(crate) fn decide(
         Begin::Transit(request) => {
             // --- TRANSIT: re-collected along the BENT axis, seeded from the handoff. The entrance
             // hits describe the incoming rays and cannot describe this.
-            let bent = Dir3::new(request.axis).unwrap_or(dir);
+            let bent = Dir3::new(request.axis).expect(
+                "the game's damage model constructs a normalized transit axis at the checked entrance"
+            );
             let transit = closing_walk(
                 context,
                 not_own,
