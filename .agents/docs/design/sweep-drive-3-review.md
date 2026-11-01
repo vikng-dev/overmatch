@@ -329,3 +329,75 @@ counters (`src/damage_cam/delivery.rs` reads them); typing either means editing 
 (`GRIP_SHEAR_MODULUS_M`) is unchanged.
 
 MEASURED completion clock check: 2026-11-01 21:14:30 +0700. DERIVED elapsed: 40 minutes 19 seconds.
+
+## Part 7: blind reviews of part 6 and the remaining tick counters
+
+Subject: the game's driving and damage model, game state only; weapon changes concern fire
+identity and eligibility. Lane `sweep-drive-7`, bay-1, based on main at "docs: record the view-6
+review verification (#215)". MEASURED start: 2026-11-01 16:02:56 UTC. This extends part 6;
+its provisional clock extension and descriptions of reaction sizing are rechecked here.
+
+### Every blind-review finding
+
+| Reviewer | Finding | Verified / not a defect | Fixed in (subject) |
+|---|---|---|---|
+| Codex | C2: sandbox sizes piece reactions separately per track | Verified: `apply_belt_support_field` called the shared sequential clamp once per side, allowing left-side impulses to change the right side's input before the canonical sort. Both side reports now enter one production `piece_impulses` call. | "driving: size both sandbox tracks in the production reaction pass (#238)" |
+| Codex | C1: wrapped published tick disagrees with transport and crashes attributed fire | Verified: the second saturated timeline tick publishes 0, while `queue_fire` asserted it was MAX. The private extension is deleted; network publication refuses transport exhaustion and fire transport reads the published clock used at spawn. | "net: use one admitted timeline for fire and deadline clocks (#238)" |
+| Claude | L1: the same disagreement also invalidates client fire catch-up and replica path ages | Verified, same counter-end witness: fire tick 0 against a saturated local or interpolation cursor. The session now refuses before that state exists; native numeric catch-up remains the network law. | same |
+| Claude | L2: a late join starts a different process-local counter at saturation | Verified: `held_at_end` started at zero in each process regardless of authority elapsed time. There is no per-process extension now; an exhausted network session is refused rather than independently continued. | same |
+| Codex | C3: parsed `FireCycle` is discarded and durations are parsed again at spawn | Verified by the call graph: `checked`, `weapon_gate` and `Weapon::of_spec` each called `fire_cycle`. Deserialization now consumes `WeaponSpecFile` into a `WeaponSpec` holding the joined cycle; spawn only copies it. | "weapons: retain the fire cycle parsed at the data edge (#238)" |
+| Claude | L3: the support-law comment claims every recipient takes a clamp | Verified: `piece_impulses` gives belt-integrated recipients the whole reaction. The comment now states both recipient laws and the tick-start velocity invariant. | "driving: state the actual support coupling invariant (#238)" |
+| Claude | L4: reaction ordering and source-mass docs contradict their implementations | Verified: the reaction pass sorts all sources geometrically; `contact_mass` uses a distribution of normals, reducing to a centroid only when co-normal. The docs state these invariants. | "contact: document canonical reactions and distributed source mass (#238)" |
+| Claude | L5: field contacts sort and allocate per-contact vector keys | Not a defect on this base: already fixed by "driving: skip reaction sorting for contacts without dynamic recipients (#250)". The filter precedes key construction, the key is an array, and `field_and_fixed_support_never_enter_the_dynamic_reaction_sort` checks zero keys. | already fixed on main |
+| Claude | L6: belt integration membership should depend on current support, and resting loose pieces take no normal reaction | Not a defect in the implemented law. Membership identifies the force-stepped construction, including an airborne or overturned source; removing it on contact loss would discard that source's incoming reaction. The separate loose-piece clamp intentionally gives a resting piece no normal impulse, pinned by the existing resting-piece test. It is an asymmetric approximation, not momentum conservation; the module doc now says that explicitly. | documentation clarified in "contact: document canonical reactions and distributed source mass (#238)" |
+| Claude | L7: duration ceiling and horizon are implemented three times | Verified by reading the three constructors. `TickSpan::from_duration` now owns quantization, including a typed zero-timestep refusal; weapon seconds, Battle phases and respawn waits call it. | "timing: share duration quantization across every span gate (#238)" |
+| Claude | L8: the composition timestep check happens only on fire | Verified: a nondefault fixed step with no armed weapon reached play unchecked. The weapon plugin now checks its fixed step at startup, before any gate or shot can run. | "weapons: refuse a mismatched timestep before play (#238)" |
+
+### Clock decision and remaining-counter scope
+
+Part 6's private extension was not a valid continuation of the network session: input,
+replication, fire release and interpolation are numerically ordered by Lightyear. Network play
+therefore reads that single finite timeline and refuses its exhausted endpoint with a typed error,
+a visible restart instruction and process status 2. No per-process epoch is retained. Offline
+play continues to wrap. Both publication resources carry `SimTick`, as does `Respawn::Opens::tick`;
+raw values are extracted only at existing wire, recording and presentation boundaries. REV 63
+and the wire type fingerprint deliberately record the respawn definition change; its transparent
+encoding remains the same.
+
+The `src/ballistics.rs`, `src/ballistics/recording_tests.rs`, damage-camera and presentation edits
+are only clock constructors or raw-value boundary conversions. No ballistic law is changed. G1
+(`GRIP_SHEAR_MODULUS_M`) is unchanged. No captures, pricing, agents, issue comments or pushes.
+
+### Additional clock finding and regression evidence
+
+Verified additional finding: `FixedLast` advanced the local weapon fallback even in a network
+composition, leaving it one tick ahead of both `LocalTimeline` and `ShotClock` between fixed
+steps. `PublishedWeaponClock` now names the composition that owns publication; the local fallback
+runs only without that owner. Fixed in "net: use one admitted timeline for fire and deadline
+clocks (#238)". Offline advancement and its pause/wrap behavior remain covered.
+
+MEASURED mutant evidence: the per-track sandbox pass gave one contact **22.881598 N·s** where
+the production pass gave **19.58482 N·s**, reversing those magnitudes at the other contact. The
+strengthened comparison sorts results by contact position, so this is a sizing failure rather
+than merely output order. Without the ownership guard the weapon clock read **43** against the
+published clock's **42**. Moving the timestep check into the fixed loop allowed a nondefault-rate
+composition through an explicitly present empty startup schedule. Removing the exhaustion gate
+admitted `SimTick(4294967295)` instead of returning `NetworkTickExhausted`. Each mutant failed its
+regression; all mutant source is restored before the final gates.
+
+### Final verification
+
+MEASURED final broad batch: **774 passed, 8 ignored**. This includes all `net::`,
+weapon/spec/tank timing, recording and delivery, sandbox belt reactions, track/contact tests,
+`pen_cam`, `field_casts`, `headless_test`, and the whole-tree guards. The Battle advance API
+also carries `SimTick` directly; it does not unwrap and reconstruct the published clock.
+
+Each implementation commit passed `cargo fmt --all --check`, locked workspace/all-target
+CI clippy, its targeted tests and `doc_citations`. MEASURED final whole-tree guard batch
+(`doc_citations ui_ascii net_boundary bake::`): **44 passed, 0 ignored**.
+The four counter/sizing/startup regressions pass with all mutants removed. No full-suite run
+was made. The only build diagnostic was the existing linker unwind-section size warning.
+
+MEASURED completion clock check: 2026-11-01 17:06:16 UTC. DERIVED elapsed: 63 minutes
+20 seconds. G1 is unchanged; its feel call, pricing, captures, merge and push remain
+with the orchestrator.
