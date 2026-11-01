@@ -200,6 +200,25 @@ fn tick_weapon_gate(
     }
 }
 
+/// The game's damage model: the node a weapon's bore pivots about, where the bore begins. The
+/// muzzle's nearest servo node (its aiming chain, derived from the model hierarchy), or the root
+/// for a weapon fixed to its body.
+fn bore_mount(
+    muzzle: Entity,
+    root: Entity,
+    parents: &Query<&ChildOf>,
+    servos: &Query<(), With<crate::tank::ServoIndex>>,
+) -> Entity {
+    let mut node = muzzle;
+    while node != root && !servos.contains(node) {
+        node = parents
+            .get(node)
+            .expect("a muzzle's hierarchy reaches its root")
+            .parent();
+    }
+    node
+}
+
 /// Fire each tank's weapons whose trigger its command holds this tick — THE one fire system, a
 /// `match` on [`FireCycle`] per weapon, never per-mechanism systems (the schedule edges above are
 /// determinism-load-bearing and must stay singular). `Trigger` is pure input ROUTING (which
@@ -228,7 +247,10 @@ fn fire(
     mut sims: Query<&mut TankSim>,
     (mut gates, loads): (Query<&mut WeaponGate>, Query<&WeaponLoads>),
     mut bodies: Query<Forces, With<Tank>>,
-    proxies: Query<(Entity, &Collider, &CollisionLayers)>,
+    (proxies, servos): (
+        Query<(Entity, &Collider, &CollisionLayers)>,
+        Query<(), With<crate::tank::ServoIndex>>,
+    ),
     parents: Query<&ChildOf>,
     locals: Query<&Transform>,
     // Present only on a net client, where own fire is FUSED: a keyed round's one presentation is
@@ -385,7 +407,21 @@ fn fire(
                         .map(|(at, turn)| (at, turn, shape))
                 })
                 .collect();
-            event.birth = outside_source(muzzle_position, bore, &shapes);
+            let (pivot, _) = rig_world_pose(
+                bore_mount(muzzle_entity, root.0, &parents, &servos),
+                root.0,
+                position.0,
+                rotation.0,
+                &parents,
+                &locals,
+            )
+            .expect("a weapon's mount is the muzzle or one of its ancestors up to the root");
+            event.birth = outside_source(
+                muzzle_position,
+                bore,
+                (pivot - muzzle_position).dot(*bore),
+                &shapes,
+            );
             commands.trigger(event);
         }
         // Kick the barrel back (root-resident recoil state); apply_recoil springs it home. The

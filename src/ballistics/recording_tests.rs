@@ -2505,9 +2505,11 @@ fn barrel_through_plate(owned: bool) {
         }),
         None,
     );
+    // The weapon pivots at the source's centre, six metres back along the bore.
     fire.birth = crate::shooting::outside_source(
         muzzle,
         Dir3::NEG_Z,
+        -6.0,
         &[(source_at, Quat::IDENTITY, &shape)],
     );
     app.world_mut().trigger(fire);
