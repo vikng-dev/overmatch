@@ -374,6 +374,7 @@ impl FireMode {
 pub struct WeaponSpec {
     pub trigger: Trigger,
     pub muzzle: String,
+    pub(crate) bore_length: Sourced<f32>,
     pub barrel: Option<String>,
     pub gun: String,
     pub stowage: Vec<StowageEntry>,
@@ -390,6 +391,7 @@ impl TryFrom<WeaponSpecFile> for WeaponSpec {
         Ok(Self {
             trigger: file.trigger,
             muzzle: file.muzzle,
+            bore_length: file.bore_length,
             barrel: file.barrel,
             gun: file.gun,
             stowage: file.stowage,
@@ -2341,6 +2343,7 @@ TankSpec(
         WeaponSpecFile {
             trigger: weapon.trigger,
             muzzle: weapon.muzzle.clone(),
+            bore_length: weapon.bore_length,
             barrel: weapon.barrel.clone(),
             gun: weapon.gun.clone(),
             stowage: weapon.stowage.clone(),
