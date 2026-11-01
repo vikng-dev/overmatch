@@ -474,3 +474,70 @@ original sand-dust sequence and the final board at both fixtures. The board stil
 after the full-repair placement fix. The owner must judge the dust's prominence, soil colour and
 persistence, and the compact board's readability and scrolling. The ground cloud is thin in this
 exact dust pose and reads most clearly in the early post-shot frame; no taste was retuned.
+
+
+## Lane 6: blind-review verification of sweep-view-5
+
+Subject: the game's HUD and muzzle effects, game state only; where hits come up, the game's damage
+model. The lane starts at main's "net: pin the merged wire types at PROTOCOL_REV 62 (#247)". Review
+files are the session's `scratchpad/codex/review-sweep-view-5-codex.md` and
+`review-sweep-view-5-claude.md`. No muzzle or dust taste value changed; no captures, no pricing.
+
+| reviewer | finding | verified / not a defect | fixed in (subject) |
+| --- | --- | --- | --- |
+| Codex | P2: the live inset leaves the Tab board no usable height; its test hides it with short vitals | verified | `hud: fit the Tab board to the real panels, paged by whole standings (#215)` |
+| Claude | P2: the inset-clearance test swaps in a 5-line vitals card; the real state leaves no row | verified (same defect) | `hud: fit the Tab board to the real panels, paged by whole standings (#215)` |
+| Codex | P2: flame validation misses the combined end-width product | verified | `guns: refuse a flame plane whose end width overflows (#245)` |
+| Claude | P3: no test checks that each `MuzzleShape` resolves its own row | verified | `guns: pin each muzzle shape to its own taste row (#245)` |
+| Claude | P3: the flank test meets side jets only while shipped taste states them | verified | `vfx: meet the flank checks whatever the shipped shapes state (#245)` |
+| Claude | P3: the material test covers 7 of the 12 sprite taste fields | verified | `vfx: read all twelve sprite taste fields off the dressed layers (#245)` |
+| Claude | P3: `HudDock` variants are read by no placement code | verified | `hud: fit the Tab board to the real panels, paged by whole standings (#215)` |
+| Claude | P3: the `Kills` header is mixed case beside all-caps siblings | verified | `hud: set the board's kill count header in the board's case (#215)` |
+| Claude | P3: Page Down steps by pixel height, so the header scrolls away and rows are cut | verified | `hud: fit the Tab board to the real panels, paged by whole standings (#215)` |
+
+**Breaking inputs.** Each new or rewritten test was run red first against the old code or a
+temporary mutant, in one batch (MEASURED, all five failed as below); every mutant is removed.
+
+- Inset: the real corner root at 1280×720 / effective UI scale 2 (FIXTURE DATA) with the full
+  vitals card left the old board's table 27.5 logical px tall (MEASURED): the header line and no
+  standing. The real 12-line card, not the 5-line one, is what the shipped tank shows.
+- Flame end width: `width_ratio = end_scale = 1e20` at the reference energy (FIXTURE DATA) was
+  admitted; each checked product stays finite (about 2.9e20 m, DERIVED) while the renderer's
+  `transform.scale.x = width_ratio × length × end_scale` is about 2.9e40, beyond f32 (DERIVED).
+- Shape rows: the mutant `MuzzleShape::FlashHider => self.brake` passed every old test; the new
+  test fails it (the hider answered with the brake's row).
+- Flanks: with side jets added to every shape the duplicated-flank mutant fails as `(4, 0)` planes
+  instead of `(2, 2)`, whatever the shipped rows state.
+- Sprite taste: the mutant `flash_material(.., 2.0)` in `spawn_flame_jet` failed the new test
+  (flame sharpness 2.0 against the fixture's 0.32); the shipped value equals the old literal, which
+  is why the old test could not see it.
+
+**The board's layout model.** The three HUD findings share one cause: placement reserved every
+dock alike and the board scrolled one tall text by the pixel. Docks are now `HudDock::Fixed`
+(vitals, clock, crew, drive, diagnostics: never covered) or `HudDock::Transient` (the hit inset).
+The board states two sizes, `hud::ModalExtent`: the least region that holds every column, the
+header and one standing, and its natural size. Placement ranks maximal clear regions first by
+holding the least size, then by how much of the natural size each shows, the larger on a tie. The
+inset yields only when the region clear of the fixed panels alone serves the board strictly
+better. The table lists whole standings from a first row under each column's header. Page Up/Down
+move whole pages and the last page is full; Left/Right still scroll columns. The tests mount the
+real system over the real spawners, fonts and the corner's real UI root, with the shipped seed
+tank's readout text (the twelve-line vitals card) as fixture data.
+
+MEASURED with thirty standings (FIXTURE DATA): 1280×720 / scale 2 lists 6 standings beside the full
+vitals card, and 6 with the inset up, which the board then covers; 1280×720 / scale 1 lists 30
+beside the inset; 1920×1080 / scale 1 lists 30. Without the least-size rank the small target took
+the 143.5-logical-px-wide region beside the vitals card and listed 11 standings with the columns
+cut (MEASURED); the board keeps its columns instead. The narrow-board fixture moves to 640×1080, as
+a 960×1080 window now holds every column. The header reads `KILLS`, in the case of its sibling
+headers.
+
+**Gates.** Before each commit: formatting and workspace CI clippy passed. MEASURED final groups: 59
+targeted tests over `guns::muzzle`, `vfx::muzzle`, `hud::`, `overlay` and `crew_ui` (58 passed with
+the narrow fixture's old window, which the least-size rank no longer makes scroll, then the HUD's
+14 passed with the new window); 44 whole-tree guards (`doc_citations`, `ui_ascii`, `net_boundary`,
+`bake::`). No captures, pricing, pushes or issue comments.
+
+The owner judges whether the small target should keep every column (6 standings a page) or list
+more standings with the columns paged sideways (11), and the all-caps `KILLS`.
+
