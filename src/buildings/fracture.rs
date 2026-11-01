@@ -2168,7 +2168,7 @@ fn bears_on_contact(
                     grounded[if inside(b) { joint.a } else { b }]
                 }
                 Side::Chunk(_) => false,
-                Side::Ground => true,
+                Side::Ground => grounded[chunk],
             };
             if !contact || !outside || !state.live(joint) {
                 return false;
@@ -3895,6 +3895,22 @@ pub(crate) fn sample_blocks(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A cracked anchor belongs to placed construction. A released group's old base cannot
+    /// defer its sections as if a ground contact still held it. Fixture: a detached row pair.
+    #[test]
+    fn a_detached_anchor_is_not_a_ground_contact() {
+        let slab = row(2);
+        let mut state = WallState::new(&slab);
+        state.cracked[1] = true;
+        assert!(!bears_on_contact(
+            &slab,
+            &state,
+            &incident(&slab),
+            &[false, false],
+            &[0],
+        ));
+    }
 
     /// A fixture physics step, s: the game's 64 Hz tick (fixture data).
     const STEP: f32 = 1.0 / 64.0;
