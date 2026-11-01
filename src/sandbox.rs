@@ -540,9 +540,7 @@ fn spawn_target_from_blueprint(
     let Some(pending) = pending else {
         return; // No initial target or rebuild is pending.
     };
-    let Some(content) = source.get() else {
-        return; // The synchronous spawn data has not reached the load gate yet.
-    };
+    let content = source.get();
     spawn_complete_tank(
         &mut commands,
         content,

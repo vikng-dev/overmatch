@@ -39,9 +39,7 @@ pub(crate) fn attach_replicated_rig(
     if tanks.is_empty() {
         return;
     }
-    let Some(content) = source.get() else {
-        return;
-    };
+    let content = source.get();
     for entity in &tanks {
         info!("client: {entity} replicated tank gets local sim body");
         attach_replicated_tank_body(

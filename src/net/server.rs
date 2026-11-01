@@ -736,10 +736,7 @@ fn spawn_pending_tanks(
     if pending.0.is_empty() {
         return;
     }
-    let Some(content) = source.get() else {
-        // The eager simulation blueprint has not finished loading yet.
-        return;
-    };
+    let content = source.get();
     // The harness's exact resting-contact instrument keeps its authored pose and lanes. Ordinary
     // joins use map points; Y is resolved from the authority's ground at the moment of spawn.
     let harness_pose = harness::spawn_pose();
@@ -898,9 +895,7 @@ fn spawn_bots(
     if !bots.is_empty() || count.0 == 0 {
         return;
     }
-    let Some(content) = source.get() else {
-        return;
-    };
+    let content = source.get();
     for index in 0..count.0 {
         let bot = Bot {
             home: bot_home_xz(index, content.contact_radius()),
@@ -987,9 +982,7 @@ fn respawn_dead_bots(
     if due.is_empty() {
         return;
     }
-    let Some(content) = source.get() else {
-        return;
-    };
+    let content = source.get();
     for (root, turret, combatant, bot) in due {
         // Recursive despawn sweeps the root and its attached rig (children + relationship targets).
         commands.entity(root).despawn();
@@ -1055,9 +1048,9 @@ fn respawn_player_tanks(
     height: Option<Res<crate::terrain_grid::HeightGrid>>,
     // The world's standing geometry (the scatter's graybox buildings, as blocks, and its
     // buildings of the destruction model, as obstacles): occupancy an override spawn checks
-    // against exactly like a live tank. Absent in bare test worlds.
-    map: Option<Res<TerrainMap>>,
-    obstacles: Option<Res<SpawnObstacles>>,
+    // against exactly like a live tank. `world` inserts both at startup in every world.
+    map: Res<TerrainMap>,
+    obstacles: Res<SpawnObstacles>,
     mut combatants: ResMut<CombatantIds>,
     mut commands: Commands,
 ) {
@@ -1092,9 +1085,7 @@ fn respawn_player_tanks(
     if requests.is_empty() {
         return;
     }
-    let Some(content) = source.get() else {
-        return;
-    };
+    let content = source.get();
     // The harness instrument retains its exact contact pose, as on initial join.
     let harness_pose = harness::spawn_pose();
     let spawn_rot = harness_pose.map_or(Quat::IDENTITY, |(_, rot)| rot);
@@ -1107,13 +1098,7 @@ fn respawn_player_tanks(
         .map(|(_, position, _)| position.0.xz())
         .collect();
     // What stands on the map, in the block encoding: the terrain blocks, then the buildings' bounds.
-    let standing: Vec<Transform> = map
-        .as_ref()
-        .map_or(&[][..], |map| &map.blocks)
-        .iter()
-        .chain(obstacles.as_ref().map_or(&[][..], |obstacles| &obstacles.0))
-        .copied()
-        .collect();
+    let standing: Vec<Transform> = map.blocks.iter().chain(&obstacles.0).copied().collect();
     // Occupancy also includes the spots ALREADY HANDED OUT this pass: two clients respawning onto
     // the same click in the same tick would otherwise both read the pre-pass world and overlap.
     let mut placed_this_pass: Vec<Vec2> = Vec::new();
@@ -1370,9 +1355,7 @@ mod tests {
 
         let radius = app
             .world_mut()
-            .run_system_once(|source: TankSimSource| {
-                source.get().expect("fixture blueprint").contact_radius()
-            })
+            .run_system_once(|source: TankSimSource| source.get().contact_radius())
             .unwrap();
         let world = app.world_mut();
         let bots: Vec<(Vec2, CombatantId)> = world
@@ -1470,6 +1453,12 @@ mod tests {
             })
             .insert_resource(crate::map::tests::fixture_manifest(750.0, 0.0, 50.0))
             .insert_resource(SpawnPlacement::new(BattleMode::shipped().spawn))
+            // Fixture world: no standing blocks or buildings.
+            .insert_resource(TerrainMap {
+                revision: 0,
+                blocks: Vec::new(),
+            })
+            .init_resource::<SpawnObstacles>()
             .init_resource::<PendingClients>()
             .init_resource::<SpawnOverrides>()
             .init_resource::<SpawnLane>()
@@ -1889,9 +1878,7 @@ mod tests {
         let mut fixture = placement_app();
         let radius = fixture
             .world_mut()
-            .run_system_once(|source: TankSimSource| {
-                source.get().expect("fixture blueprint").contact_radius()
-            })
+            .run_system_once(|source: TankSimSource| source.get().contact_radius())
             .unwrap();
         let manifest = crate::map::tests::shipped_manifest();
         for instance in &manifest.instances {

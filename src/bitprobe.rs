@@ -409,9 +409,7 @@ fn spawn_fixture(
     if fixture.is_some() {
         return;
     }
-    let Some(content) = source.get() else {
-        return;
-    };
+    let content = source.get();
     let tank = spawn_headless_tank(
         &mut commands,
         content,

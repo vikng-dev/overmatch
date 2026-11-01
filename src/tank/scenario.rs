@@ -423,9 +423,7 @@ fn spawn_tank_when_loaded(
     if !pending.loaded(&asset_server) {
         return;
     }
-    let Some(content) = source.get() else {
-        return;
-    };
+    let content = source.get();
     // Both bodies simulate; only the Controlled marker selects input ownership. Each spawn point is
     // horizontal — the ground under it is sampled NOW, through the one rule every spawn path shares
     // (`terrain_grid::spawn_pos`: footprint max + clearance), so the duel lands on whatever world
@@ -791,7 +789,9 @@ mod spawn_contract_tests {
     struct SourceProbe(bool);
 
     fn probe_unresolved_handle(source: TankSimSource, mut probe: ResMut<SourceProbe>) {
-        probe.0 = source.get().is_some();
+        // Running at all is the proof: the param validated on the blueprint and colliders alone.
+        let _content = source.get();
+        probe.0 = true;
     }
 
     #[test]

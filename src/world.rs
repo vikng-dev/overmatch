@@ -789,6 +789,8 @@ fn spawn_environment(
         revision: 0,
         blocks,
     });
+    // The course stands no buildings: every block is terrain.
+    commands.insert_resource(SpawnObstacles::default());
 }
 
 /// Spawn a static, unit-cube collision block scaled/posed by `transform` (the Avian idiom: a

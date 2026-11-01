@@ -346,10 +346,7 @@ fn release_breaches(
         anchor.0,
         heading.0,
         side,
-        source
-            .get()
-            .expect("a spawned tank was built from the eager blueprint")
-            .contact_radius(),
+        source.get().contact_radius(),
         stress.lever.pieces,
         stress.released,
         ground,

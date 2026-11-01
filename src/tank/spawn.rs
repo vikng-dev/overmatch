@@ -125,26 +125,23 @@ pub(crate) const TANK_SIM_GLB_PATH: &str = crate::assets::tank_file!(".sim.glb")
 pub(crate) const TANK_SPEC_PATH: &str = crate::assets::tank_file!(".tank.ron");
 
 /// Synchronous construction data. This source never reads Bevy asset readiness.
+///
+/// Required resources: `bake` inserts the blueprint and its track colliders in one `Startup`
+/// command flush, before any schedule a spawn system runs in, so a system reading this source in a
+/// world without them is a composition bug and fails its parameter validation.
 #[derive(SystemParam)]
 pub(crate) struct TankSimSource<'w> {
-    blueprint: Option<Res<'w, TankBlueprint>>,
-    track_colliders: Option<Res<'w, TrackColliders>>,
+    blueprint: Res<'w, TankBlueprint>,
+    track_colliders: Res<'w, TrackColliders>,
 }
 
 impl TankSimSource<'_> {
-    /// `None` before the bake has run: the blueprint and its track colliders land in one command flush,
-    /// so no state holds one without the other.
-    pub(crate) fn get(&self) -> Option<TankContent<'_>> {
-        let blueprint = self.blueprint.as_deref()?;
-        let track_colliders = self
-            .track_colliders
-            .as_deref()
-            .expect("the bake inserts a blueprint and its track colliders together");
-        Some(TankContent {
-            geometry: &blueprint.geometry,
-            spec: &blueprint.spec,
-            track_colliders,
-        })
+    pub(crate) fn get(&self) -> TankContent<'_> {
+        TankContent {
+            geometry: &self.blueprint.geometry,
+            spec: &self.blueprint.spec,
+            track_colliders: &self.track_colliders,
+        }
     }
 }
 
