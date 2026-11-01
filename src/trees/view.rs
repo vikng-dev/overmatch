@@ -165,18 +165,28 @@ impl TreeTemplate {
 
 /// Refuse a broken view at template load, before its standing meshes can be drawn. The
 /// segmented view needs exactly one trunk and both caps per declared segment, even if the
-/// first instance never falls.
+/// first instance never falls, and each of them draws: some mesh's nearest binding (its own or an
+/// ancestor's) is that one. A binding with no mesh leaves its segment's collider undrawn.
 fn check_bindings(id: &str, segments: usize, nodes: &[TemplateNode]) {
     let mut bound = vec![[false; 3]; segments];
+    let mut drawn = vec![[false; 3]; segments];
+    // Each node's nearest binding, its own first; a parent precedes its children.
+    let mut nearest: Vec<Option<(Part, usize)>> = Vec::with_capacity(nodes.len());
     for node in nodes {
+        let binding = node.part.or_else(|| node.parent.and_then(|p| nearest[p]));
+        nearest.push(binding);
+        if node.mesh.is_some()
+            && let Some((part, segment)) = binding
+            && let Some(slot) = slot_of(part)
+            && segment < segments
+        {
+            drawn[segment][slot] = true;
+        }
         let Some((part, segment)) = node.part else {
             continue; // Unmarked grouping and primitive nodes bind no part.
         };
-        let slot = match part {
-            Part::Trunk => 0,
-            Part::CapTop => 1,
-            Part::CapBottom => 2,
-            Part::Canopy => continue, // Canopy nodes carry no segmented binding.
+        let Some(slot) = slot_of(part) else {
+            continue; // Canopy nodes carry no segmented binding.
         };
         assert!(
             segment < segments,
@@ -197,7 +207,21 @@ fn check_bindings(id: &str, segments: usize, nodes: &[TemplateNode]) {
                 parts[slot],
                 "trees: trees/{id}/{id}.glb is missing tree_part {part:?} at tree_segment {segment}; export one trunk and both caps for every segment"
             );
+            assert!(
+                drawn[segment][slot],
+                "trees: trees/{id}/{id}.glb binds tree_part {part:?} at tree_segment {segment} to no mesh; export its primitives under the binding node"
+            );
         }
+    }
+}
+
+/// A segmented binding's slot (trunk, top cap, bottom cap); the canopy binds no segment.
+fn slot_of(part: Part) -> Option<usize> {
+    match part {
+        Part::Trunk => Some(0),
+        Part::CapTop => Some(1),
+        Part::CapBottom => Some(2),
+        Part::Canopy => None,
     }
 }
 
@@ -759,6 +783,51 @@ mod tests {
             ] {
                 assert!(reason.contains(required), "{reason}");
             }
+        }
+    }
+
+    /// EVERY BINDING DRAWS: complete trunk and cap bindings whose meshes are gone, all of them or
+    /// one trunk's alone, leave a segment's collider undrawn, so the template is refused when it
+    /// is read. A check of the merged standing view alone passes the second. ASSUMED fixture nodes.
+    #[test]
+    fn a_binding_without_its_mesh_is_refused() {
+        let mut meshes = Assets::<Mesh>::default();
+        let mut materials = Assets::<StandardMaterial>::default();
+        let (nodes, _, _) = fixture_nodes(&mut meshes, &mut materials);
+        let trunk = nodes
+            .iter()
+            .position(|node| node.part == Some((Part::Trunk, 1)))
+            .expect("the fixture binds trunk 1");
+        let one_trunk: Vec<TemplateNode> = nodes
+            .iter()
+            .map(|node| TemplateNode {
+                mesh: if node.parent == Some(trunk) && node.part.is_none() {
+                    None
+                } else {
+                    node.mesh.clone()
+                },
+                ..node.clone()
+            })
+            .collect();
+        let every: Vec<TemplateNode> = nodes
+            .iter()
+            .map(|node| TemplateNode {
+                mesh: None,
+                ..node.clone()
+            })
+            .collect();
+        for (broken, segment) in [(every, 0), (one_trunk, 1)] {
+            let refused = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                TreeTemplate::new("fixture", 3, broken, &mut meshes);
+            }))
+            .expect_err("a binding without its mesh must fail at template construction");
+            let reason = refused
+                .downcast_ref::<String>()
+                .expect("the refusal names its repair");
+            assert!(
+                reason.contains(&format!("Trunk at tree_segment {segment} to no mesh")),
+                "{reason}"
+            );
         }
     }
 
