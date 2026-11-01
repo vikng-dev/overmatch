@@ -18,8 +18,10 @@
 //! first touch swaps the element to its chunks, and the fracture laws ([`fracture`]) wear, crack
 //! and drop them ([`breakage`]). Each root carries its [`breakage::Breakage`] from spawn.
 //!
-//! NOT TERRAIN. No element enters the [`crate::world::TerrainMap`] block list: the belts never
-//! climb a wall and the floor inside is the terrain (playtest fork F9). Spawn avoidance reads each
+//! NOT TERRAIN. No element enters the [`crate::world::TerrainMap`] block list, so the terrain
+//! field stays immutable and the floor inside is the terrain (playtest fork F9). The belts meet a
+//! standing element or chunk only as a collider of the rubble overlay (`track::rubble`'s
+//! `RubbleQuery`), as they meet loose pieces. Spawn avoidance reads each
 //! building's bounds through [`crate::world::SpawnObstacles`] instead ([`footprint`]).
 
 use std::collections::{BTreeMap, BTreeSet};

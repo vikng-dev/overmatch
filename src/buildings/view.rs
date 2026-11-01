@@ -661,20 +661,21 @@ fn show_pieces(
     }
 }
 
-/// The breaks' view, on every root that draws: the record presented at the presentation clock,
-/// the broken buildings redrawn, the fallen groups dressed and shown.
+/// Off a replica the presentation clock is the sim's own tick and the fixed step's overstep.
 fn publish_sim_clock(
     tick: Option<Res<crate::ShotClock>>,
     step: Res<Time<Fixed>>,
     mut clock: ResMut<PresentationClock>,
 ) {
     let Some(tick) = tick else {
-        return;
-    }; // Tank-less view fixtures keep their explicit cursor.
+        return; // Tank-less view fixtures keep their explicit cursor.
+    };
     clock.tick = tick.0;
     clock.overstep = step.overstep_fraction_f64();
 }
 
+/// The breaks' view, on every root that draws: the record presented at the presentation clock,
+/// the broken buildings redrawn, the fallen groups dressed and shown.
 pub(crate) fn plugin(app: &mut App) {
     app.init_resource::<PresentationClock>()
         .add_systems(
