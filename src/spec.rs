@@ -425,6 +425,9 @@ struct WeaponSpecFile {
     pub trigger: Trigger,
     /// Bore node — shot origin + direction.
     pub muzzle: String,
+    /// The game's damage model: distance behind the muzzle to the bore's start (m), in the
+    /// recoiling weapon's frame. Required construction data, finite and positive at load.
+    pub(crate) bore_length: Sourced<f32>,
     /// Recoiling barrel node, if the weapon reciprocates; omitted → no recoil (e.g. a coax).
     #[serde(default)]
     pub barrel: Option<String>,
@@ -517,6 +520,12 @@ impl WeaponSpec {
     /// stowage, the recoil stop, the gun, the fire mode against the gun's mechanism, the tracer mix,
     /// the timers).
     fn checked(&self) -> Result<(), String> {
+        if !self.bore_length.0.is_finite() || self.bore_length.0 <= 0.0 {
+            return Err(format!(
+                "bore_length must be finite and positive (got {}) — author the distance from the muzzle back to the bore start in metres",
+                self.bore_length.0,
+            ));
+        }
         if self.stowage.is_empty() {
             return Err(
                 "stowage is empty — a mount stows at least one round, the one it spawns \
@@ -2012,6 +2021,7 @@ TankSpec(
         "Cannon": (
             trigger: Primary,
             muzzle: "Cannon_Muzzle",
+            bore_length: (1.0, Tuned("fixture construction")),
             barrel: "Cannon_Recoil",
             gun: "kwk36_l56",
             stowage: [
@@ -2026,6 +2036,7 @@ TankSpec(
         "MG": (
             trigger: Secondary,
             muzzle: "MG_Muzzle",
+            bore_length: (1.0, Tuned("fixture construction")),
             gun: "mg34",
             stowage: [(round: "7.9mm_AP", count: (1000, Tuned("fixture")))],
             fire_mode: Automatic(belt_size: 100, belt_swap_secs: 3.0),
@@ -2600,6 +2611,29 @@ TankSpec(
                 .validate()
                 .is_ok(),
             "reload_secs: 0 is a legal instant reload"
+        );
+    }
+
+    /// The game's damage model: fire consumes the authored bore start without inferring a
+    /// pivot from the tank root. Load admission must refuse an invalid or missing distance.
+    #[test]
+    fn validate_requires_a_finite_positive_bore_length() {
+        for length in [0.0, -0.1, f32::NAN, f32::INFINITY] {
+            let mut spec = fixture();
+            spec.weapons.get_mut("Cannon").unwrap().bore_length = Sourced(length);
+            let error = spec.validate().unwrap_err().to_string();
+            assert!(
+                error.contains("Cannon") && error.contains("bore_length"),
+                "{error}"
+            );
+        }
+        let absent = FIXTURE_RON.replace(
+            "            bore_length: (1.0, Tuned(\"fixture construction\")),\n",
+            "",
+        );
+        assert!(
+            ron::de::from_str::<TankSpec>(&absent).is_err(),
+            "the bore start is required data"
         );
     }
 

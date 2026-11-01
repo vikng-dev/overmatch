@@ -360,6 +360,10 @@ TankSpec(
         "MainGun": (
             trigger: Primary,
             muzzle: "Main_Gun_Muzzle",
+            bore_length: (4.1488614, Derived("DERIVED from the battery muzzle-to-Main_Gun_Pitch
+                bore projection in tiger_1.sim.glb; ASSUMED that this pivot locates the bore start.
+                The start moves with barrel recoil; replace this construction assumption with a
+                measured breech-to-muzzle distance when available")),
             barrel: "Main_Gun_Recoil",
             gun: "kwk36_l56",
             // The rounds it carries and how many: keys in assets/rounds/, each one's speed the
@@ -391,6 +395,10 @@ TankSpec(
         "Coax": (
             trigger: Secondary,
             muzzle: "Coax_MG_Muzzle",
+            bore_length: (0.4525745, Derived("DERIVED from the battery muzzle-to-Main_Gun_Pitch
+                bore projection in tiger_1.sim.glb; ASSUMED that this pivot locates the bore start.
+                The start moves with barrel recoil; replace this construction assumption with a
+                measured breech-to-muzzle distance when available")),
             barrel: "Coax_MG_Recoil",
             gun: "mg34",
             stowage: [
@@ -413,6 +421,10 @@ TankSpec(
         "HullMG": (
             trigger: Secondary,
             muzzle: "Hull_MG_Muzzle",
+            bore_length: (0.22281814, Derived("DERIVED from the battery muzzle-to-Hull_MG_Pitch
+                bore projection in tiger_1.sim.glb; ASSUMED that this pivot locates the bore start.
+                The start moves with barrel recoil; replace this construction assumption with a
+                measured breech-to-muzzle distance when available")),
             barrel: "Hull_MG_Recoil",
             gun: "mg34",
             stowage: [

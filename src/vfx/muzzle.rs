@@ -956,6 +956,7 @@ mod tests {
         {
             app.world_mut().spawn((
                 Weapon {
+                    bore_length: 0.4,
                     name: "fixture".to_owned(),
                     rounds: Vec::new(),
                     fire_cycle: cycle,

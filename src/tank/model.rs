@@ -95,6 +95,8 @@ pub struct GunBarrel;
 pub struct Weapon {
     /// Logical authored name, distinct from the muzzle node name.
     pub name: String,
+    /// The game's damage model: validated distance from the muzzle back to the bore start (m).
+    pub bore_length: f32,
     /// Every round the weapon can load, in authored order; index 0 is the default. A slot's
     /// [`WeaponLoad`] and a fired round's `ShotSource::round` index this list.
     pub rounds: Vec<WeaponRound>,
@@ -203,6 +205,7 @@ impl Weapon {
             .to_vec();
         Ok(Self {
             name: name.to_owned(),
+            bore_length: spec.bore_length.0,
             rounds,
             fire_cycle: spec.fire_cycle,
             recoil: spec.recoil.clone(),

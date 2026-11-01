@@ -2381,6 +2381,7 @@ mod tests {
     weapons: {"Main": (
         trigger: Primary,
         muzzle: "Muzzle",
+        bore_length: (1.0, Tuned("fixture construction")),
         barrel: "Recoil",
         gun: "kwk36_l56",
         stowage: [(round: "88mm_AP", count: (1, Tuned("fixture")))],

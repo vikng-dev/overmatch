@@ -3019,6 +3019,7 @@ mod tests {
     /// fields `kick_recoil`'s gate reads; the rest are filled to satisfy the struct.
     fn weapon(recoil: Option<RecoilSpec>, barrel: Option<Entity>) -> Weapon {
         Weapon {
+            bore_length: 0.4,
             name: "MainGun".into(),
             rounds: vec![crate::tank::WeaponRound::resolve("88mm_AP").expect("a shipped round")],
             fire_cycle: FireCycle::Single {

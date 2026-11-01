@@ -1773,6 +1773,7 @@ mod tests {
             TankRoot(root),
             GlobalTransform::from(Transform::from_xyz(1.0, 2.0, 3.0)),
             Weapon {
+                bore_length: 0.4,
                 name: "test gun".into(),
                 rounds: ["88mm_AP", "88mm_APCR"]
                     .map(|key| crate::tank::WeaponRound::resolve(key).expect("a shipped round"))

@@ -4,9 +4,10 @@ use avian3d::prelude::Collider;
 use bevy::prelude::*;
 
 /// The game's damage model: the first point of the bore, walked forward from its mount, that lies
-/// outside every shape of the source's physics envelope. `mount` is the point the weapon pivots
-/// about, measured along the bore from the muzzle: zero or negative, since a bore never starts past
-/// its own muzzle. A bore that leaves the envelope behind its muzzle (a barrel through a turret
+/// outside every shape of the source's physics envelope. `mount` is the authored bore start,
+/// measured along the bore from the muzzle: zero or negative. Firing supplies the negative of
+/// the load-validated bore length, so recoil cannot move the muzzle behind that start. A bore that
+/// leaves the envelope behind its muzzle (a barrel through a turret
 /// face) is born at that face, one that the envelope still holds at the muzzle is born at the
 /// envelope's forward boundary, and one whose mount stands outside every shape is born at the
 /// mount. The ordinary march owns everything from this point on, including any barrel length still

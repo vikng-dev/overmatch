@@ -146,6 +146,7 @@ fn arm_fixture_weapons(add: On<Add, NetTank>, mut commands: Commands) {
             WeaponIndex(slot),
             TankRoot(add.entity),
             Weapon {
+                bore_length: 0.4,
                 name: format!("fixture {slot}"),
                 rounds: rounds.clone(),
                 fire_cycle: crate::spec::FireCycle::Single {

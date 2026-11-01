@@ -433,9 +433,9 @@ the event's visual muzzle remains separate through cursor release. DERIVED: a fi
 at 773 m/s lasts about 6.47 ms, less than the 15.625 ms fixed step. The trace therefore includes
 that short barrel-length segment; no capture or raster-occlusion claim was made.
 
-The birth is the bore's first open point. From the weapon's mount (the muzzle's nearest servo
-node, or the tank root for a weapon fixed to its body) the bore line is walked forward through the
-intervals of the source's convex Vehicle-layer proxies; the first point outside all of them, one
+The birth is the bore's first open point. The weapon declares its bore-start distance behind the
+muzzle, in the recoiling weapon's frame, with provenance. From that start the bore line is walked
+forward through the intervals of the source's convex Vehicle-layer proxies; the first point outside all of them, one
 nudge past the face it leaves, is the birth. A mount no proxy holds is born at the mount, and a
 proxy past a gap does not move the birth: a wall in that gap is the march's to meet.
 

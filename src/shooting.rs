@@ -208,25 +208,6 @@ fn tick_weapon_gate(
     }
 }
 
-/// The game's damage model: the node a weapon's bore pivots about, where the bore begins. The
-/// muzzle's nearest servo node (its aiming chain, derived from the model hierarchy), or the root
-/// for a weapon fixed to its body.
-fn bore_mount(
-    muzzle: Entity,
-    root: Entity,
-    parents: &Query<&ChildOf>,
-    servos: &Query<(), With<crate::tank::ServoIndex>>,
-) -> Entity {
-    let mut node = muzzle;
-    while node != root && !servos.contains(node) {
-        node = parents
-            .get(node)
-            .expect("a muzzle's hierarchy reaches its root")
-            .parent();
-    }
-    node
-}
-
 /// Fire each tank's weapons whose trigger its command holds this tick — THE one fire system, a
 /// `match` on [`FireCycle`] per weapon, never per-mechanism systems (the schedule edges above are
 /// determinism-load-bearing and must stay singular). `Trigger` is pure input ROUTING (which
@@ -255,10 +236,7 @@ fn fire(
     mut sims: Query<&mut TankSim>,
     (mut gates, loads): (Query<&mut WeaponGate>, Query<&WeaponLoads>),
     mut bodies: Query<Forces, With<Tank>>,
-    (proxies, servos): (
-        Query<(Entity, &Collider, &CollisionLayers)>,
-        Query<(), With<crate::tank::ServoIndex>>,
-    ),
+    proxies: Query<(Entity, &Collider, &CollisionLayers)>,
     parents: Query<&ChildOf>,
     locals: Query<&Transform>,
     // Present only on a net client, where own fire is FUSED: a keyed round's one presentation is
@@ -414,21 +392,7 @@ fn fire(
                         .map(|(at, turn)| (at, turn, shape))
                 })
                 .collect();
-            let (pivot, _) = rig_world_pose(
-                bore_mount(muzzle_entity, root.0, &parents, &servos),
-                root.0,
-                position.0,
-                rotation.0,
-                &parents,
-                &locals,
-            )
-            .expect("a weapon's mount is the muzzle or one of its ancestors up to the root");
-            event.birth = outside_source(
-                muzzle_position,
-                bore,
-                (pivot - muzzle_position).dot(*bore),
-                &shapes,
-            );
+            event.birth = outside_source(muzzle_position, bore, -weapon.bore_length, &shapes);
             commands.trigger(event);
         }
         // Kick the barrel back (root-resident recoil state); apply_recoil springs it home. The
@@ -766,6 +730,11 @@ mod tests {
         spawn_main_gun_rig(&mut world);
         let muzzle = Vec3::NEG_Z * 5.0;
         world
+            .query::<&mut Weapon>()
+            .single_mut(&mut world)
+            .unwrap()
+            .bore_length = 5.0;
+        world
             .query_filtered::<&mut Transform, With<Muzzle>>()
             .single_mut(&mut world)
             .unwrap()
@@ -784,6 +753,33 @@ mod tests {
         assert!(
             birth.z < -1.0 && birth.z > -1.01,
             "physical birth is the source's forward exit: {birth:?}"
+        );
+    }
+
+    /// The game's damage model: a fixed bore above its source envelope fires independently of
+    /// the body's arbitrary origin. Fixture data puts that origin ahead of the muzzle projection.
+    #[test]
+    fn a_fixed_weapon_above_the_envelope_fires_with_its_root_ahead_of_its_muzzle() {
+        let mut world = test_world();
+        spawn_main_gun_rig(&mut world);
+        let muzzle = Vec3::new(0.0, 2.0, 1.0);
+        world
+            .query_filtered::<&mut Transform, With<Muzzle>>()
+            .single_mut(&mut world)
+            .unwrap()
+            .translation = muzzle;
+        let points = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let captured = points.clone();
+        world.add_observer(move |fire: On<FireShell>| {
+            captured.lock().unwrap().push((fire.origin, fire.birth))
+        });
+        world.run_system_once(fire).unwrap();
+        let points = points.lock().unwrap();
+        assert_eq!(points.len(), 1, "a clear fixed bore must fire");
+        assert_eq!(points[0].0, muzzle);
+        assert!(
+            points[0].1.z >= muzzle.z,
+            "the bore starts behind its muzzle"
         );
     }
 
@@ -823,6 +819,7 @@ mod tests {
             Transform::default(),
             ChildOf(root),
             Weapon {
+                bore_length: 0.4,
                 name: "MG".into(),
                 rounds: vec![WeaponRound::resolve("7.9mm_AP").expect("a shipped round")],
                 fire_cycle: MG_CYCLE,
@@ -871,6 +868,7 @@ mod tests {
             Transform::default(),
             ChildOf(root),
             Weapon {
+                bore_length: 0.4,
                 name: "88 mm".into(),
                 rounds: ["88mm_AP", "88mm_APCR"]
                     .map(|key| WeaponRound::resolve(key).expect("a shipped round"))
