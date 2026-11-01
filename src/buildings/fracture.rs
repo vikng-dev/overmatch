@@ -1566,7 +1566,8 @@ fn plane_bucket(offset: f32) -> i64 {
 /// impulse whose rotational energy pays for opening the section and for carrying
 /// the group's weight with it, `√(2 I (Σ G_f A + E_g))`: `I` the group's moment of inertia about
 /// the hinge (each chunk a ball of its volume), `Σ G_f A` each joint's seam fracture energy over
-/// its area, and `E_g` the work against gravity of raising the group's centre of mass over the
+/// its area, and `E_g` the work against its field ([`field`]: gravity, or a moving group's frame
+/// body force) of raising the group's centre of mass over the
 /// hinge where the section bears the group's weight (the section a blow opens carries its load: a
 /// group standing on its section leaves only by toppling over it), 0 for a group beside or under
 /// its section. The worst failing section cracks first, and the check repeats until none fails, so
@@ -1746,6 +1747,31 @@ fn bonded_group(start: usize, (neighbours, ..): &Graph, seen: &mut [bool]) -> Ve
     group
 }
 
+/// The field `group` (ascending) stands in, as the direction it presses against (`up`, unit)
+/// and the body force per unit mass along it (m/s²): on a standing group, gravity, `(Y, g)`
+/// exactly. In a loose group's frame ([`in_group_frames`]) it is gravity less the frame's
+/// acceleration, which the group's inertial presses carry: a group lying on its support feels
+/// its weight there, one in uniform free fall feels nothing (`(0, 0)`). The energy terms of the
+/// section and rest laws (raising a part over its hinge or its seat, sliding it off) read it;
+/// their force checks already see it through the presses.
+fn field(structure: &Structure, group: &[usize], loads: &[Load]) -> (Vec3, f32) {
+    let inertial = loads.iter().filter(|load| {
+        matches!(load.origin, Origin::Inertia { .. }) && group.binary_search(&load.chunk).is_ok()
+    });
+    let press: Vec3 = inertial.clone().map(|load| load.press).sum();
+    if inertial.count() == 0 {
+        return (Vec3::Y, GRAVITY);
+    }
+    let mass: f32 = group.iter().map(|&c| structure.chunks[c].mass).sum();
+    let body_force = Vec3::NEG_Y * GRAVITY + press / mass;
+    let g = body_force.length();
+    if g > 0.0 {
+        (-body_force / g, g)
+    } else {
+        (Vec3::ZERO, 0.0)
+    }
+}
+
 /// The demand and capacity of `section` holding `group` under the blows of `loads`
 /// ([`structural`]), `None` when they bend it about no axis. `pulse` is what the turn's strength
 /// leaves the blows ([`Reading`], [`Load::felt`]), the caller's: a seam's Navier tension resists a
@@ -1834,11 +1860,13 @@ fn section_failure(
     // the weight pressing the plane): the opened group still stands on the plane and leaves only
     // past the hinge, its centre of mass raised to the top of its circle about it when the turn
     // starts it upward. A group beside or under its section has nothing under it once it opens.
+    // "Up" and the weight are the group's field's ([`field`]): gravity on a standing group, its
+    // frame's body force on a moving one.
+    let (up, g) = field(structure, group, loads);
     let r = (com - hinge) - axis * (com - hinge).dot(axis);
-    let up = axis.cross(r).y;
-    let accelerating = on_group().any(|load| matches!(load.origin, Origin::Inertia { .. }));
-    let lift = if !accelerating && n.y > 0.0 && up > 0.0 {
-        mass * GRAVITY * (r.y.hypot(up) - r.y)
+    let (height, rising) = (r.dot(up), axis.cross(r).dot(up));
+    let lift = if n.dot(up) > 0.0 && rising > 0.0 {
+        mass * g * (height.hypot(rising) - height)
     } else {
         0.0
     };
@@ -2167,55 +2195,8 @@ fn unseated(
     None
 }
 
-/// The rest law: whether `group` (ascending), a part with no bonded path to the ground, leaves the
-/// rests it stands on under gravity and the presses and blows of `loads` on its chunks. Its rests
-/// are the
-/// live intact rests joining it to standing chunks outside it; those that bear it are the ones
-/// whose normal toward it rises past [`BEARS`], each a disc of its area in its plane (the tension
-/// check's reading of a joint), pressed evenly over their area by what holds the part up
-/// (ASSUMED: the rests' shares of the load are statically indeterminate, and an even pressure is
-/// the reading that needs no stiffness). Each bearing rest's friction coefficient is its pair's,
-/// its two materials' rows under the one pair rule ([`crate::substances::pair_friction`]). With
-/// `N = Σ A n` over the bearing rests, `θ` its tilt from vertical and `μ = Σ μ_i A_i / |N|` the
-/// friction the even pressure raises per unit of the load along `N` (ASSUMED: each rest's
-/// friction can turn against the slide, exact where the rests are parallel), the part leaves, in
-/// this order of reading:
-///
-/// 1. lifted by the sustained resultant ([`Cause::LiftForce`]) when it pulls away from the rests;
-///    tipped ([`Cause::Tip`]) when its pressure centre, fixed by the resultant moment, crosses
-///    outside the horizontal bearing hull (ASSUMED: bearing plane at the discs' mean height);
-/// 2. slid ([`Cause::Slide`]) when tangent force exceeds friction times normal compression;
-/// 3. turned over by the blows ([`Cause::Push`]) when their angular impulse about the bearing
-///    rests' hinge pays for lifting the part over it, a section with no seam to open
-///    ([`section_failure`]), which reads only their moment, so a blow through the centre along
-///    the rests' normal turns nothing;
-/// 4. lifted off by the blows ([`Cause::Lift`]) when their impulse along `N̂`, away from the
-///    rests (which carry no tension), raises the part's centre of mass by its own height over
-///    them against gravity's share along `N̂`: `J·N̂ ≥ m √(2 g N̂_y h)`, `h` the centre's height
-///    along `N̂` over the bearing discs' area centroid. ASSUMED: lifted by as much as it stood
-///    over its seat, the part has left it; a lower hop lands it back where it stood, which the
-///    law reads as staying;
-/// 5. shoved off by the blows ([`Cause::Shove`]) when their impulse along the rests, net of the
-///    friction impulse their press into the rests raises, `p = |J_t| − μ max(−J·N̂, 0)`, gives
-///    the part the energy to slide its centre of mass off the bearing hull along that impulse
-///    against friction and with gravity's share along the slope: `p ≥ √(2 m W)`, `W = m g d (μ
-///    cos θ + t_y)`, `d` the slide's length in the rests' plane and `t` its unit direction. The
-///    weight is held to raise no friction impulse during a blow (ASSUMED: a blow is
-///    instantaneous) and the part to slide in contact the whole way (ASSUMED: a blow that also
-///    lifts it slides it farther than this reads).
-///
-/// In 3–5 a pulse's blow (one stating its peak force, [`Load::peak`]) counts by `√g` of its
-/// mode's strength over the peaks ([`plastic_demand`], [`strength_ratio`]): the share of the
-/// peak forces at which, with gravity and the presses, the sustained law's twin of that mode
-/// fails (tipping for 3, lifting for 4, sliding for 5). A far burst whose peak the part's weight
-/// and friction hold moves it by no blow.
-///
-/// Any of them opens every rest the part stood on, as one failure; `None` when it stays, and when
-/// it has no rest left (it is loose, support's to drop, [`fall`]). Once the part is freed the
-/// physics' contact and friction decide whether it slides, rocks or settles. ASSUMED: a rest bears
-/// no part of another's weight that reaches it through the part it carries; the law reads each
-/// part's own weight and external presses on its own rests. Adds the joints and chunks it reads
-/// to `steps`.
+/// A bearing plane of the rest law ([`unseat`]): the rests' mean normal `N̂` toward the part,
+/// the seat (their area centroid), their friction, and their hull drawn in the plane's axes.
 struct BearingPlane<'a> {
     normal: Vec3,
     centre: Vec3,
@@ -2252,6 +2233,58 @@ impl BearingPlane<'_> {
     }
 }
 
+/// The rest law: whether `group` (ascending), a part with no bonded path to the ground, leaves the
+/// rests it stands on under its field ([`field`]: gravity on a standing part, its frame's body
+/// force on a moving one, with direction `û` and magnitude `g`) and the presses and blows of
+/// `loads` on its chunks. Its rests are the live intact rests joining it to standing chunks
+/// outside it; those that bear it are the ones whose normal toward it rises along `û` past
+/// [`BEARS`] (along the load itself in a frame with no field), each a disc of its area in its
+/// plane (the tension check's reading of a joint), pressed evenly over their area by what holds
+/// the part up (ASSUMED: the rests' shares of the load are statically indeterminate, and an even
+/// pressure is the reading that needs no stiffness). Each bearing rest's friction coefficient is
+/// its pair's, its two materials' rows under the one pair rule
+/// ([`crate::substances::pair_friction`]). With `N = Σ A n` over the bearing rests and
+/// `μ = Σ μ_i A_i / |N|` the friction the even pressure raises per unit of the load along `N`
+/// (ASSUMED: each rest's friction can turn against the slide, exact where the rests are
+/// parallel), the bearing hull is the discs' rims projected into the plane normal to `N̂`
+/// (ASSUMED: non-coplanar discs share that plane through their area centroid), and the part
+/// leaves, in this order of reading:
+///
+/// 1. lifted by the sustained resultant ([`Cause::LiftForce`]) when it pulls away from the rests;
+///    tipped ([`Cause::Tip`]) when its pressure centre, fixed by the resultant moment, crosses
+///    outside the bearing hull;
+/// 2. slid ([`Cause::Slide`]) when tangent force exceeds friction times normal compression;
+/// 3. turned over by the blows ([`Cause::Push`]) when their angular impulse about the bearing
+///    rests' hinge pays for lifting the part over it, a section with no seam to open
+///    ([`section_failure`]), which reads only their moment, so a blow through the centre along
+///    the rests' normal turns nothing;
+/// 4. lifted off by the blows ([`Cause::Lift`]) when their impulse along `N̂`, away from the
+///    rests (which carry no tension), raises the part's centre of mass by its own height over
+///    them against the field's share along `N̂`: `J·N̂ ≥ m √(2 g (N̂·û) h)`, `h` the centre's
+///    height along `N̂` over the bearing discs' area centroid. ASSUMED: lifted by as much as it
+///    stood over its seat, the part has left it; a lower hop lands it back where it stood, which
+///    the law reads as staying;
+/// 5. shoved off by the blows ([`Cause::Shove`]) when their impulse along the rests, net of the
+///    friction impulse their press into the rests raises, `p = |J_t| − μ max(−J·N̂, 0)`, gives
+///    the part the energy to slide its centre of mass off the bearing hull along that impulse
+///    against friction and with the field's share along the slope: `p ≥ √(2 m W)`,
+///    `W = m g d (μ (N̂·û) + t·û)`, `d` the slide's length in the bearing plane and `t` its unit
+///    direction. The weight is held to raise no friction impulse during a blow (ASSUMED: a blow
+///    is instantaneous) and the part to slide in contact the whole way (ASSUMED: a blow that also
+///    lifts it slides it farther than this reads).
+///
+/// In 3–5 a pulse's blow (one stating its peak force, [`Load::peak`]) counts by `√g` of its
+/// mode's strength over the peaks ([`plastic_demand`], [`strength_ratio`]): the share of the
+/// peak forces at which, with gravity and the presses, the sustained law's twin of that mode
+/// fails (tipping for 3, lifting for 4, sliding for 5). A far burst whose peak the part's weight
+/// and friction hold moves it by no blow.
+///
+/// Any of them opens every rest the part stood on, as one failure; `None` when it stays, and when
+/// it has no rest left (it is loose, support's to drop, [`fall`]). Once the part is freed the
+/// physics' contact and friction decide whether it slides, rocks or settles. ASSUMED: a rest bears
+/// no part of another's weight that reaches it through the part it carries; the law reads each
+/// part's own weight and external presses on its own rests. Adds the joints and chunks it reads
+/// to `steps`.
 fn unseat(
     structure: &Structure,
     state: &WallState,
@@ -2261,10 +2294,7 @@ fn unseat(
     steps: &mut usize,
 ) -> Option<Failure> {
     let inside = |c: usize| group.binary_search(&c).is_ok();
-    let accelerating = loads
-        .iter()
-        .any(|load| inside(load.chunk) && matches!(load.origin, Origin::Inertia { .. }));
-    let acceleration = if accelerating { 0.0 } else { GRAVITY };
+    let (up, g) = field(structure, group, loads);
     let (mut rests, mut bearing) = (Vec::new(), Vec::new());
     let mut rim_points: Vec<Vec3> = Vec::new();
     let (resultant, torque_at_origin) =
@@ -2303,10 +2333,12 @@ fn unseat(
         } else {
             -joint.normal
         };
-        let reference = if accelerating {
-            -demand.normalize_or_zero()
+        // A rest bears what presses the part against it: the field, or in a frame with none
+        // (an impulse in free flight) the load itself.
+        let reference = if g > 0.0 {
+            up
         } else {
-            Vec3::Y
+            -demand.normalize_or_zero()
         };
         if n.dot(reference) <= BEARS {
             continue;
@@ -2361,8 +2393,9 @@ fn unseat(
     if hull.len() < 3 {
         return open(Cause::Tip, f32::INFINITY, 0.0);
     }
-    // ASSUMED: non-coplanar bearing discs share one plane at their area centroid's height,
-    // as their horizontal bearing hull does. The resultant's moment fixes its pressure centre.
+    // ASSUMED: non-coplanar bearing discs share one plane through their area centroid,
+    // normal to `N̂`, the plane their bearing hull is drawn in. The resultant's moment fixes its
+    // pressure centre.
     let area: f32 = bearing.iter().map(|&j| structure.joints[j].area).sum();
     let seat_centre = seat / area;
     let (force, torque) = force_wrench(structure, group, loads, gravity, seat_centre, |load| {
@@ -2371,9 +2404,9 @@ fn unseat(
     let friction = grip / normal.length();
     // The sustained law on a resultant force `f` (N) and moment `t` (N m) about the seat: it
     // lifts the part when it pulls away from the rests; it tips it by how far its pressure
-    // centre lies past the bearing hull, infinitely when a resultant with no vertical part
-    // still overturns it about a horizontal axis; it slides it when its tangent beats friction
-    // times its compression.
+    // centre lies past the bearing hull, infinitely when a resultant with no part along `N̂`
+    // still overturns it about an axis in the bearing plane; it slides it when its tangent
+    // beats friction times its compression.
     let plane = BearingPlane {
         normal: support,
         centre: seat_centre,
@@ -2453,8 +2486,7 @@ fn unseat(
     let press = felt(lift_pulse).dot(support);
     if press > 0.0 {
         let height = (centre - seat_centre).dot(support).max(0.0);
-
-        let capacity = mass * (2.0 * acceleration * support.y.max(0.0) * height).sqrt();
+        let capacity = mass * (2.0 * g * support.dot(up).max(0.0) * height).sqrt();
         if press >= capacity {
             return open(Cause::Lift, press, capacity);
         }
@@ -2466,12 +2498,10 @@ fn unseat(
     if net <= 0.0 {
         return None;
     }
-    // `t` lies in the rests' plane, which the slope check held within `atan μ` of level, so its
-    // horizontal part is at least `cos θ` long.
+    // `t` lies in the bearing plane, where the hull is drawn: the slide is measured there.
     let t = along.normalize();
-
     let slide = exit(&hull, project(centre), project(t));
-    let work = mass * acceleration * slide * (friction * support.y + t.y);
+    let work = mass * g * slide * (friction * support.dot(up) + t.dot(up));
     let capacity = (2.0 * mass * work.max(0.0)).sqrt();
     if net >= capacity {
         return open(Cause::Shove, net, capacity);
@@ -3999,6 +4029,42 @@ mod tests {
         let (state, changes) = assess_slab(slab, &loads);
         assert_eq!(state.cracked, vec![false, false]);
         assert_eq!(changes.groups.len(), 1);
+    }
+
+    /// A moving group lying on its support feels its weight in its own frame: a part resting
+    /// on it leaves only when a blow pays to lift it over its hinge or shove it off against
+    /// that weight, as a standing rest's does. Zeroing the frame's weight in those energy terms
+    /// (exact only in free fall) opened the rest under any blow at all. ASSUMED fixture: two
+    /// row chunks stacked on one rest, the ground's press holding both up.
+    #[test]
+    fn a_rest_on_a_lying_group_holds_by_its_weight() {
+        for (blow, stays) in [(0.01, true), (100.0, false)] {
+            let mut stack = unsupported_slab(2);
+            stack.chunks[1].centroid = Vec3::new(0.0, 0.3, 0.0);
+            stack.joints[0].centroid = Vec3::new(0.0, 0.2, 0.0);
+            stack.joints[0].normal = Vec3::Y;
+            stack.joints[0].bond = Bond::Resting;
+            let weight: f32 = stack.chunks.iter().map(|chunk| chunk.mass).sum::<f32>() * GRAVITY;
+            let mut ground = slab_contact(&stack, 0.0);
+            ground.press = Vec3::Y * weight;
+            let struck = Load {
+                chunk: 1,
+                at: stack.chunks[1].centroid,
+                energy: 0.0,
+                crushed: 0.0,
+                blow: Vec3::X * blow,
+                press: Vec3::ZERO,
+                peak: None,
+                origin: Origin::Field,
+            };
+            let (_, changes) = assess_slab(stack, &[ground, struck]);
+            assert_eq!(
+                changes.groups.len(),
+                if stays { 1 } else { 2 },
+                "{blow} N s: {:?}",
+                changes.failures
+            );
+        }
     }
 
     /// The choice of reference point must not add a resultant. Section tractions rely on
