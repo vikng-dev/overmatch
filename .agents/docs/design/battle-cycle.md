@@ -81,7 +81,7 @@ arrives, but cannot draw or supply a trunk collision copy in the next world.
 The boundary does not change the shared presentation delay: motion within a Battle
 still comes from its authority stream. The phase transition itself selects the
 new construction immediately, consistently with the match UI's replicated phase.
-The wire surface deliberately moves to protocol revision 57.
+The current wire contract is `net::protocol::PROTOCOL_REV`.
 
 Contact readings and resting loads are keyed by complete ECS entity identities and
 are refreshed by the next authority physics step; the prior step has already
@@ -137,13 +137,13 @@ The lane performs no deployment.
 
 The minimum distance is never relaxed. A crowded automatic join or requested
 respawn waits and retries; a phase boundary clears pending placement, and the
-next combat places all connected players from an empty combatant field.
+next fill-up places all connected players from an empty combatant field.
 
 MEASURED: the expanded authored candidate set admits the owner's 30-player
 stationary lobby from every possible first point; all candidates pass ground
 and building-footprint checks. It has 36 candidates with minimum pair separation
 240 m. Moving players can still block candidates during combat, but a connected
-waiter cannot remain blocked across the next fresh combat layout.
+waiter cannot remain blocked across the next fresh fill-up layout.
 
 ## Match UI
 
@@ -197,11 +197,16 @@ pending writes whose old image never reached the GPU. Arrival-order coverage als
 reconstructs without a fixed update and reconnects to a new authority whose Battle
 number coincides with the previous authority's.
 
-The release smoke (`scripts/ci/archive-smoke.sh`) runs against the shipped mode with its 60 s
-fill-up, and the scripted client's watchdog keeps its one rule: the client takes its input slot
-on joining the fill-up. MEASURED 2026-11-01, this lane's dev server and headless client on
-loopback: input slot 2.95 s after the client's first log line and 16 ms after `client:
-connected`, while the server's Battle 1 fill-up ran; script complete 4.02 s later; exit status 0.
+The release smoke (`scripts/ci/archive-smoke.sh`) uses the shipped mode. The harness claims its
+input slot during fill-up but advances its script only after replicated combat release; the
+watchdog budgets both the remaining fill-up and the released script separately.
+
+MEASURED 2026-11-01 for `lane/sweep-net-7`: the end-of-lane smoke ran once with this bay's dev
+server and client, headless and unattended under the machine lock on loopback. The client
+connected and claimed its input slot during fill-up. Its harness clock reported the slot at
+1.628 s, combat release at 61.093 s (script tick zero), and completion at 65.088 s after 256 idle
+script ticks; exit status was zero. Formatting, CI clippy, targeted suites and the final whole-tree
+`doc_citations`, `ui_ascii`, `net_boundary` and `bake::` guards passed.
 
 ## World-reset review
 
@@ -230,3 +235,6 @@ Both blind reviews concern the game's match flow and damage model, game state on
 | Claude | No test covers either hold arm at the gameplay-to-brake seam | verified: both missing-arm mutants fail independently; the production selector is shared with the repair test, which asserts repair braking, release after completion and phase braking without a repair | `track: guard repair and phase holds at the drive-target seam (#253)` |
 | Codex | A combined census inequality lets either later-generation ledger consumer hide the other's failure | verified: first-generation-only wall and tree mutants fail independently at their own assertions; the later-generation wall record, derived building elements and tree state are checked separately | `net: verify each later-generation environment consumer independently (#253)` |
 | Claude | A fill-up-only connection opens a ghost standing that can win or tie the later result | verified: spawning a waiting combatant populates the old board before combat; a solo fill-up departure can therefore win without participating | `net: open standings only for combat participants (#253)`; combat release opens existing tanks, combat spawns open once, and combat standings survive disconnect and respawn |
+| Claude | Harness scripts run out inside fill-up and silently exercise no combat | verified, already fixed on main | `net: start harness scripts at combat release (#253)`; `held_ticks_advance_nothing_and_release_writes_tick_zero` and the end-of-lane smoke verify the production release clock |
+| Claude | Crowded-placement prose says combat queues the fresh layout | verified: `Boundary::FillUp` queues it; combat retains those tanks | `docs: record the fill-up review and measured release smoke (#253)` |
+| Lane | The narrative names a pre-merge protocol revision instead of the current wire contract | verified against `net::protocol::PROTOCOL_REV` | `docs: record the fill-up review and measured release smoke (#253)`; refer to the contract's symbol |
