@@ -164,15 +164,20 @@ fn tick_weapon_gate(
     volumes: Query<VolumeFacets>,
     weapons: Query<(&Weapon, &WeaponIndex, &TankRoot), With<Muzzle>>,
     mut gates: Query<&mut WeaponGate>,
+    replica: Option<Res<crate::ClientReplica>>,
+    controlled: Query<(), With<crate::tank::Controlled>>,
 ) {
     let now = clock.0;
     for (weapon, slot, root) in &weapons {
         let tank_volumes = tanks.get(root.0).expect(WEAPON_ROOT_IS_A_TANK);
         // A client holds no gate for another player's tank: `WeaponGate` is owner-private
         // (`net::disclosure::CombatDisclosure`), so that tank's readiness is the server's alone.
-        let Ok(mut gate) = gates.get_mut(root.0) else {
+        if replica.is_some() && !controlled.contains(root.0) && !gates.contains(root.0) {
             continue;
-        };
+        }
+        let mut gate = gates.get_mut(root.0).expect(
+            "an authority or locally controlled weapon root has its spawn-complete private gate",
+        );
         let state = gate.weapons.get_mut(slot.0).expect(SLOT_IN_GATE);
         if state.ready_tick.is_none() {
             continue;
@@ -242,6 +247,7 @@ fn fire(
     // tick must draw no shell and no barrel kick. Absent everywhere else (server / SP / sandbox),
     // where this system presents locally.
     replica: Option<Res<crate::ClientReplica>>,
+    controlled: Query<(), With<crate::tank::Controlled>>,
     // Present in a composed network app, where `net::protocol` republishes the `LocalTimeline`
     // before `GameplaySet`, so an attributed local FireShell is born with the identity that changes
     // its ballistic hold/keyframe behaviour; and in single-player, whose clock
@@ -273,9 +279,19 @@ fn fire(
         };
         // A client fires no other player's tank: its `WeaponGate` and `WeaponLoads` are
         // owner-private (`net::disclosure::CombatDisclosure`) and never reach this client.
-        let (Ok(tank_gate), Ok(tank_loads)) = (gates.get(root.0), loads.get(root.0)) else {
+        if replica.is_some()
+            && !controlled.contains(root.0)
+            && !gates.contains(root.0)
+            && !loads.contains(root.0)
+        {
             continue;
-        };
+        }
+        let tank_gate = gates.get(root.0).expect(
+            "an authority or locally controlled weapon root has its spawn-complete private gate",
+        );
+        let tank_loads = loads
+            .get(root.0)
+            .expect("a weapon root with a private gate also has its spawn-complete private loads");
         // Ready = no active absolute deadline, plus rounds for an `Automatic`. A dry belt remains
         // firm even if malformed state ever carries no deadline.
         let state = tank_gate.weapons.get(slot.0).expect(SLOT_IN_GATE);
@@ -787,6 +803,34 @@ mod tests {
         let root = spawn_main_gun_rig(&mut world);
         world.entity_mut(root).remove::<Position>();
         world.run_system_once(fire).unwrap();
+    }
+
+    /// The game's damage model: only another player's client replica legitimately lacks private
+    /// weapon state. An authority/controlled root missing it must fail before silently holding fire.
+    #[test]
+    fn missing_private_weapon_state_is_only_a_remote_client_absence() {
+        for (replica, controlled) in [(false, false), (true, false), (true, true)] {
+            for ticking in [false, true] {
+                let mut world = test_world();
+                let root = spawn_main_gun_rig(&mut world);
+                if replica {
+                    world.insert_resource(crate::ClientReplica);
+                }
+                if controlled {
+                    world.entity_mut(root).insert(crate::tank::Controlled);
+                }
+                world.entity_mut(root).remove::<(WeaponGate, WeaponLoads)>();
+                let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    if ticking {
+                        world.run_system_once(tick_weapon_gate).unwrap();
+                    } else {
+                        world.run_system_once(fire).unwrap();
+                    }
+                }));
+                assert_eq!(result.is_ok(), replica && !controlled);
+                assert_eq!(weapon_state(&mut world, root).rounds_fired, 0);
+            }
+        }
     }
 
     fn pause_test_app() -> App {

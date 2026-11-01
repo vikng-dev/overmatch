@@ -329,3 +329,12 @@ Reviewed `f1647a4f^..0f4a7493` against the three lenses and the part-3 brief.
 
 R3 verification: format and workspace/all-target clippy passed. MEASURED: all 23 targeted
 shooting and citation tests passed, including both resync-pose gaps and authority refusal.
+
+- **R4, P2, fixed:** the named private gate/load absence in `tick_weapon_gate` and `fire`
+  still accepted missing state on authority and controlled roots. Only an uncontrolled client
+  tank may lack both private components; partial private state or absence on the authority or
+  controlled tank now fails its construction invariant. The control runs both systems on all
+  three role/ownership cases and checks that no failed case consumes round bookkeeping.
+
+R4 verification: format and workspace/all-target clippy passed. MEASURED: all 24 shooting and
+citation tests passed. No other P1/P2 introduced by sweep-ball-3 was found in the reviewed diff.
