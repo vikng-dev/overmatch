@@ -144,25 +144,39 @@ pub(crate) const GRIP_ELEMENT_LOSS_DWELL_TICKS: u8 = 8;
 /// `pitch` can round up to exactly `pitch`, which `resample`'s internal `rem_euclid` would
 /// silently treat as offset 0 — the wrap count must advance with it.
 ///
-/// CONTRACT: `pitch` is a finite positive link pitch and the wrap count is representable in
-/// `i64`. A degenerate pitch (denormal/zero) would send `phase/pitch` past `i64::MAX` and the
-/// cast saturates rather than wrapping cleanly — the force path can't reach this (a degenerate
-/// pitch exits before material identity), but the guard documents the assumption for other
-/// callers.
+/// CONTRACT: pitch is finite and positive, phase is finite, and the whole-pitch quotient fits
+/// the signed material-link address. These are checked in every build before integer conversion.
 pub fn phase_decompose(phase: f64, pitch: f32) -> (i64, f32) {
-    debug_assert!(
-        pitch > 1e-6,
-        "phase_decompose needs a finite positive pitch"
+    assert!(
+        pitch.is_finite() && pitch > 0.0 && phase.is_finite(),
+        "phase decomposition requires finite travel and finite positive pitch"
     );
     let p = f64::from(pitch);
     let r = phase.rem_euclid(p);
-    let mut wraps = ((phase - r) / p).round() as i64;
+    let whole = ((phase - r) / p).round();
+    assert!(
+        whole >= i64::MIN as f64 && whole < -(i64::MIN as f64),
+        "the material-link wrap count must fit its signed address before conversion"
+    );
+    let mut wraps = whole as i64;
     let mut offset = r as f32;
     if offset >= pitch {
-        wraps += 1;
+        wraps = wraps
+            .checked_add(1)
+            .expect("the rounded station offset must keep a representable material-link address");
         offset = 0.0;
     }
     (wraps, offset)
+}
+
+/// The material link at a station after whole-pitch travel. Wide subtraction keeps the full
+/// admitted wrap range addressable; the remainder is a bijection over the nonempty link loop.
+pub(crate) fn material_link(station: usize, wraps: i64, count: usize) -> usize {
+    assert!(
+        count > 0,
+        "a material-link address belongs to a nonempty admitted loop"
+    );
+    (station as i128 - i128::from(wraps)).rem_euclid(count as i128) as usize
 }
 
 /// `1 − smoothstep` on [0, 1] — the hold blend. The transmission reads it as the
@@ -419,9 +433,8 @@ pub fn clipped_linear_piece(x0: f32, x1: f32, p0: f32, p1: f32) -> (f32, f32, f3
 /// and must construct it pre-sized to `count * 3` ([`GripElements::for_links`]); wrong-length
 /// slabs violate the spawn invariant and panic in every build.
 ///
-/// Returns the report (with `state.speed`/`state.phase` still the INPUT values) plus `true` iff
-/// the station geometry was live — the condition under which the caller integrates the belt at
-/// all (a degenerate loop returns untouched state).
+/// Returns the report with `state.speed`/`state.phase` still the input values. The caller commits
+/// transmission and belt state after both sides report; invalid construction panics.
 #[expect(
     clippy::too_many_arguments,
     reason = "one side's contact pass: input, state, pose, clock, params, oracle, velocity field and grip elements"
@@ -436,19 +449,24 @@ pub fn contact_side<O: TerrainOracle>(
     pieces: &RubbleBodies,
     vel_at: impl Fn(Vec3) -> Vec3,
     elements: &mut GripElements,
-) -> (SideReport, bool) {
+) -> SideReport {
     let mut report = SideReport {
         state,
         ..Default::default()
     };
 
-    let pitch = polyline_len(input.loop_pts) / input.count.max(1) as f32;
+    assert!(
+        input.count >= 3,
+        "admitted running gear has enough material links to enclose a belt"
+    );
+    let pitch = polyline_len(input.loop_pts) / input.count as f32;
     let (wraps, station_offset) = phase_decompose(state.phase, pitch);
     let mut stations = resample(input.loop_pts, pitch, station_offset);
     stations.truncate(input.count);
-    if stations.len() < 3 {
-        return (report, false);
-    }
+    assert!(
+        stations.len() >= 3,
+        "admitted running gear resamples to a closed contact loop; reject degenerate construction before publication"
+    );
 
     // The caller owns fixed-size slabs constructed at spawn by `GripElements::for_links`.
     // A size mismatch is a construction bug; resizing here would erase valid contact strain.
@@ -497,7 +515,7 @@ pub fn contact_side<O: TerrainOracle>(
     // transmission both key on.
     report.state.grip = elem_sum;
     report.belt_reaction = belt_reaction;
-    (report, true)
+    report
 }
 
 /// One station segment × one lateral column, after support has resolved but before any force
@@ -741,8 +759,7 @@ fn collect_column_contacts<O: TerrainOracle>(
     // material link there is `i − wraps` (mod count) — when the sampling offset wraps, the
     // identity shift absorbs the jump (the witness-link mapping). `wraps` and the offset come
     // from the SAME [`phase_decompose`] call — the pair is consistent by construction.
-    let material =
-        |i: usize| -> usize { (i as i64 - wraps).rem_euclid(input.count as i64) as usize };
+    let material = |i: usize| material_link(i, wraps, input.count);
 
     // The pin axis in world space: column offsets are hull-x measurements (shoe faces
     // relative to the pin plane), so they shift along the hull's lateral axis — never along
@@ -1208,6 +1225,62 @@ fn emit_contact_forces(
 mod tests {
     use super::*;
 
+    /// Force and view material identities must remain a permutation across the entire admitted
+    /// wrap range. Signed subtraction at either extreme would panic or wrap in different builds.
+    #[test]
+    fn material_addresses_cover_the_loop_at_extreme_wrap_counts() {
+        for wraps in [i64::MIN, -1, 0, i64::MAX] {
+            let mut links: Vec<_> = (0..40)
+                .map(|station| material_link(station, wraps, 40))
+                .collect();
+            links.sort_unstable();
+            assert_eq!(links, (0..40).collect::<Vec<_>>());
+        }
+    }
+
+    /// Material identity must never be computed from a non-finite pitch/travel or a saturated
+    /// integer cast. Grip history and the shoe table rely on the same checked decomposition.
+    #[test]
+    fn phase_decomposition_refuses_invalid_or_unaddressable_inputs() {
+        for (phase, pitch) in [
+            (0.0, 0.0),
+            (0.0, -1.0),
+            (0.0, f32::NAN),
+            (0.0, f32::INFINITY),
+            (f64::NAN, 1.0),
+            (f64::INFINITY, 1.0),
+            (f64::MAX, 1.0),
+            (1.0, f32::from_bits(1)),
+        ] {
+            assert!(std::panic::catch_unwind(|| phase_decompose(phase, pitch)).is_err());
+        }
+    }
+
+    /// A contact pass cannot silently succeed without an enclosing material loop. Both drive
+    /// adapters rely on this construction invariant when committing transmission and belt state.
+    #[test]
+    #[should_panic(expected = "admitted running gear has enough material links")]
+    fn a_contact_pass_refuses_a_non_enclosing_link_count() {
+        let input = SideInput {
+            loop_pts: &rect_loop(0.02),
+            count: 2,
+            plane_x: 0.0,
+            columns: TEST_COLUMNS,
+            travel: TravelField { knots: &[] },
+        };
+        contact_side(
+            &input,
+            SideState::default(),
+            Affine3A::IDENTITY,
+            1.0 / 64.0,
+            &rig_params(),
+            &FlatGround { surface_y: 0.0 },
+            &RubbleBodies::default(),
+            |_| Vec3::ZERO,
+            &mut GripElements::for_links(2),
+        );
+    }
+
     /// Flat horizontal ground: terrain fills `y < surface_y`. Direction-agnostic on purpose
     /// — only the loop's bottom run ever probes into it in the rig below.
     struct FlatGround {
@@ -1273,7 +1346,7 @@ mod tests {
             // Empty knots: a rest-anchored zero-droop pad (the fixture's free_travel is 0).
             travel: TravelField { knots: &[] },
         };
-        let (report, _) = contact_side(
+        let report = contact_side(
             &input,
             *state,
             Affine3A::IDENTITY,
@@ -1327,7 +1400,7 @@ mod tests {
             columns: TEST_COLUMNS,
             travel: TravelField { knots: &knots },
         };
-        let (report, live) = contact_side(
+        let report = contact_side(
             &input,
             SideState::default(),
             Affine3A::IDENTITY,
@@ -1338,7 +1411,6 @@ mod tests {
             |_| Vec3::ZERO,
             &mut GripElements::for_links(25),
         );
-        assert!(live);
         assert!(
             report.contacts.is_empty(),
             "the return run must meet the ceiling at its FACE, not at a phantom suspension \
@@ -1348,7 +1420,7 @@ mod tests {
         // Receipt: the ceiling IS inside the ungated band's reach — drop it to the face line
         // and the top run must contact (the gate must not have killed top-run contact
         // outright).
-        let (report, _) = contact_side(
+        let report = contact_side(
             &input,
             SideState::default(),
             Affine3A::IDENTITY,
@@ -1383,7 +1455,7 @@ mod tests {
                 columns: TEST_COLUMNS,
                 travel: TravelField { knots },
             };
-            let (report, live) = contact_side(
+            contact_side(
                 &input,
                 SideState::default(),
                 Affine3A::IDENTITY,
@@ -1393,9 +1465,7 @@ mod tests {
                 &RubbleBodies::default(),
                 |_| Vec3::ZERO,
                 &mut GripElements::for_links(25),
-            );
-            assert!(live);
-            report
+            )
         };
 
         // Rest datum: a kissing face has zero penetration — no contacts at all.

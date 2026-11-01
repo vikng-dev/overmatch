@@ -1527,7 +1527,7 @@ mod tests {
             inertia: 500.0,
             grip: Some(grip),
         };
-        let (report, live) = contact_side(
+        contact_side(
             &input,
             state,
             affine,
@@ -1537,9 +1537,7 @@ mod tests {
             pieces,
             |_| vel,
             elements,
-        );
-        assert!(live);
-        report
+        )
     }
 
     /// The fixture pad just into flat ground, driving and sliding.

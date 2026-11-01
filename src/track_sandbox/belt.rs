@@ -166,7 +166,6 @@ pub(super) fn apply_belt_support_field(
     // application never feeds back into the velocity field, so evaluating R's contacts
     // before applying L's forces is exact.
     let mut reports: [SideReport; 2] = [SideReport::default(), SideReport::default()];
-    let mut live = [false; 2];
     for side in Side::ALL {
         // The fixed advected ring on this side's REST pin line, closed for the core. Per side, not
         // one mirrored loop: the derived running gear is measured per side, so nothing here assumes
@@ -192,7 +191,7 @@ pub(super) fn apply_belt_support_field(
             grip: *grip.0.get(side),
         };
         let elements = grip_elements.0.get_mut(side);
-        let (report, ok) = contact_side(
+        let report = contact_side(
             &side_input,
             state,
             affine,
@@ -204,7 +203,6 @@ pub(super) fn apply_belt_support_field(
             elements,
         );
         reports[side.index()] = report;
-        live[side.index()] = ok;
     }
 
     // Phase 2 — ONE joint drivetrain solve on the vehicle's declared tables.
@@ -270,13 +268,11 @@ pub(super) fn apply_belt_support_field(
         *dynamics.engine.get_mut(side) = tr.forces[si];
         *dynamics.reaction.get_mut(side) = report.belt_reaction;
         *grip.0.get_mut(side) = report.state.grip;
-        if live[si] {
-            // Phase advects at the PRE-update speed (the belt advects before it re-integrates).
-            let pre = belt.get(side);
-            let advected = phase.get(side) + f64::from(pre * dt);
-            belt.set(side, tr.next_speeds[si]);
-            phase.set(side, advected);
-        }
+        // Phase advects at the PRE-update speed (the belt advects before it re-integrates).
+        let pre = belt.get(side);
+        let advected = phase.get(side) + f64::from(pre * dt);
+        belt.set(side, tr.next_speeds[si]);
+        phase.set(side, advected);
     }
 }
 
@@ -752,7 +748,7 @@ mod tests {
                     knots: law.knots.get(side),
                 },
             };
-            let (report, live) = contact_side(
+            let report = contact_side(
                 &input,
                 SideState::default(),
                 affine,
@@ -763,7 +759,6 @@ mod tests {
                 |_| Vec3::ZERO,
                 &mut crate::track::forces::GripElements::for_links(geom.link_count),
             );
-            assert!(live);
             total += report.contacts.iter().map(|c| c.load_elastic).sum::<f32>();
         }
         assert!(

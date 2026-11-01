@@ -141,7 +141,7 @@ pub(crate) fn calibrate(
             columns: side.columns,
             travel: TravelField { knots: side.knots },
         };
-        let (report, _) = contact_side(
+        let report = contact_side(
             &input,
             SideState::default(),
             affine,
@@ -154,11 +154,10 @@ pub(crate) fn calibrate(
         );
         area += report.contacts.iter().map(|c| c.load_elastic).sum::<f32>();
     }
-    debug_assert!(
-        area > 0.0,
+    assert!(
+        area.is_finite() && area > 0.0,
         "the rest pose must intrude into its own droop envelope"
     );
-    let area = area.max(1e-6);
     let mass = weight_n / super::derive::G;
     let c_total = super::derive::damping_coefficient(mass, ride_frequency, damping_ratio);
     EnvelopeCalibration {
@@ -171,6 +170,32 @@ pub(crate) fn calibrate(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Calibration must refuse an envelope with no supporting area instead of inventing spring
+    /// coefficients from an epsilon. Published gear relies on finite positive support capacity.
+    #[test]
+    #[should_panic(expected = "the rest pose must intrude into its own droop envelope")]
+    fn a_zero_area_envelope_is_refused_in_every_build() {
+        let loop_pts = rect_loop(0.0);
+        let side = || EnvelopeSide {
+            loop_pts: &loop_pts,
+            plane_x: 0.0,
+            knots: &[],
+            columns: [(-0.1, 0.25), (0.0, 0.5), (0.1, 0.25)],
+        };
+        // FIXTURE DATA: exact ground-level faces and no travel knots produce zero support area.
+        calibrate(
+            &[side(), side()],
+            20,
+            0.0,
+            0.002,
+            0.5,
+            10_000.0,
+            0.1,
+            1.0,
+            0.5,
+        );
+    }
 
     /// A rectangular pin loop whose belly run is exactly 2 m at `bottom_y`, closed.
     fn rect_loop(bottom_y: f32) -> Vec<Vec2> {

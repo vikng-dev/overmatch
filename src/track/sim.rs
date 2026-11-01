@@ -610,7 +610,6 @@ pub(crate) fn belt_tick<O: TerrainOracle>(
     // shape), indexed by `side.index()`; `plane_x`'s sign is the side's (`Side::plane_x` is an
     // exact ±1 flip).
     let mut reports: [SideReport; 2] = [SideReport::default(), SideReport::default()];
-    let mut live = [false; 2];
     for side in Side::ALL {
         let si = side.index();
         let input = SideInput {
@@ -628,7 +627,7 @@ pub(crate) fn belt_tick<O: TerrainOracle>(
             phase: ds.phase,
             grip: bevy::math::Vec2::new(rig.grip.sides[si][0], rig.grip.sides[si][1]),
         };
-        let (report, ok) = contact_side(
+        let report = contact_side(
             &input,
             state,
             affine,
@@ -640,7 +639,6 @@ pub(crate) fn belt_tick<O: TerrainOracle>(
             &mut rig.elements.sides[si],
         );
         reports[si] = report;
-        live[si] = ok;
     }
     let tr = transmission::step(
         &gear.params,
@@ -656,15 +654,12 @@ pub(crate) fn belt_tick<O: TerrainOracle>(
         },
     );
     for (si, report) in reports.iter().enumerate() {
-        if live[si] {
-            let pre_speed = rig.drive.sides[si].speed;
-            rig.drive.sides[si] = TrackDriveSide {
-                speed: tr.next_speeds[si],
-                // Phase advects at the PRE-update speed — `contact_side` evaluated the
-                // stations there.
-                phase: rig.drive.sides[si].phase + f64::from(pre_speed * dt),
-            };
-        }
+        let pre_speed = rig.drive.sides[si].speed;
+        rig.drive.sides[si] = TrackDriveSide {
+            speed: tr.next_speeds[si],
+            // Phase advects at the PRE-update speed — contact evaluation used those stations.
+            phase: rig.drive.sides[si].phase + f64::from(pre_speed * dt),
+        };
         rig.grip.sides[si] = [report.state.grip.x, report.state.grip.y];
     }
     (reports, tr)

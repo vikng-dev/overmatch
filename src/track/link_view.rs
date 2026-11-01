@@ -189,7 +189,7 @@ use crate::geometry_lod::certificate::Rung;
 use crate::geometry_lod::{Chain, ChainRef};
 use crate::view::{PlayerView, ViewError, ViewProfile};
 
-use super::forces::phase_decompose;
+use super::forces::{material_link, phase_decompose};
 use super::rig_geom::RigGeom;
 use super::side::{PerSide, Side};
 
@@ -578,12 +578,8 @@ impl BeltFrames {
         if n == 0 {
             return false;
         }
-        let q = if pitch > 1e-6 {
-            phase_decompose(phase, pitch).0
-        } else {
-            0
-        };
-        let link = |i: usize| (i as i64 - q).rem_euclid(n as i64) as usize;
+        let q = phase_decompose(phase, pitch).0;
+        let link = |i: usize| material_link(i, q, n);
         let count = stations.len();
         let m = if count < 3 { 0 } else { count.min(n) };
         let mut changed = false;
