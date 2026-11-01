@@ -430,3 +430,17 @@ fn a_non_finite_position_is_refused_at_the_wire_edge() {
         assert!(error.to_string().contains("position must be finite"));
     }
 }
+
+/// A peer's impossible smallest-three coordinates cannot become a normalized plausible pose.
+/// The writer's unit-quaternion domain leaves room for its omitted largest component.
+#[test]
+fn an_impossible_rotation_is_refused_at_the_wire_edge() {
+    for bytes in [[0; 6], [u8::MAX; 6]] {
+        let error = read_rotation(&mut Bytes::from(bytes.to_vec())).unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("rotation has no valid omitted component")
+        );
+    }
+}

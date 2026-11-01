@@ -234,7 +234,7 @@ use crate::{CombatantId, CombatantLife, ShotId};
 ///
 /// [`WallPiece`]: crate::buildings::breakage::WallPiece
 /// [`WallEvent`]: crate::buildings::breakage::WallEvent
-pub const PROTOCOL_REV: u32 = 53;
+pub const PROTOCOL_REV: u32 = 54;
 
 /// Compatibility tag derived from the complete pinned wire manifest plus the crate version. This
 /// is the runtime handshake value: version-exact, so a version bump intentionally changes it.
@@ -1066,7 +1066,7 @@ const WIRE_SURFACE_HASH: u64 = 0x4fa8a9525007f08a;
 /// The pinned hash of the OWN wire-facing type DEFINITIONS (field layout, not just names). Re-pin it
 /// whenever a wire-facing struct/enum definition changes; house process also bumps
 /// [`PROTOCOL_REV`]. The tripwire prints the new value. See the block above for the coverage model.
-const WIRE_TYPES_HASH: u64 = 0x224d3889e3865da3;
+const WIRE_TYPES_HASH: u64 = 0xef9a15fea7157bc0;
 
 /// The pinned `Cargo.lock` versions of the external crates whose types ride the wire (avian's
 /// replicated physics components; lightyear's wire framing / input protocol). A bump of either can

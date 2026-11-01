@@ -96,7 +96,13 @@ pub(super) fn read_rotation(message: &mut Bytes) -> Result<Quat> {
         *component = (code as f64 / ROTATION_CODES * 2.0 - 1.0) / std::f64::consts::SQRT_2;
         sum += *component * *component;
     }
-    let magnitude = (1.0 - sum).max(0.0).sqrt();
+    // DERIVED: the writer omits a unit quaternion's largest component, whose magnitude is at
+    // least one half. Quantization leaves the stored squares near at most three quarters;
+    // a sum reaching one cannot come from that encoding and has no valid omitted component.
+    if sum >= 1.0 {
+        return Err(WireDecodeError::InvalidRotation.into());
+    }
+    let magnitude = (1.0 - sum).sqrt();
     c[largest] = if (packed >> shift) & 1 == 1 {
         -magnitude
     } else {
@@ -294,6 +300,7 @@ fn i16_code(value: f32, steps: f32) -> [u8; 2] {
 enum WireDecodeError {
     Truncated { expected: usize, remaining: usize },
     NonFinitePosition,
+    InvalidRotation,
 }
 
 impl std::fmt::Display for WireDecodeError {
@@ -304,6 +311,9 @@ impl std::fmt::Display for WireDecodeError {
                 remaining,
             } => write!(f, "wire_quant: {expected} bytes expected, {remaining} left"),
             Self::NonFinitePosition => f.write_str("wire_quant: position must be finite"),
+            Self::InvalidRotation => {
+                f.write_str("wire_quant: smallest-three rotation has no valid omitted component")
+            }
         }
     }
 }
