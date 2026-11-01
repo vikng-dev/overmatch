@@ -168,7 +168,12 @@ pub(super) fn presentation(app: &mut App) {
 /// detail each view asks of the pictures ([`hud::detail`]), and then this; the game gates the
 /// corner's halves on its stage view, the x-ray draws beside them.
 pub(super) fn present() -> ScheduleConfigs<ScheduleSystem> {
-    (stage::rebuild, stage::animate, hud::animate)
+    (
+        stage::prepare_round,
+        stage::rebuild,
+        stage::animate,
+        hud::animate,
+    )
         .chain()
         .into_configs()
 }

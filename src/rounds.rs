@@ -596,6 +596,12 @@ impl RoundRegistry {
         self.entry(key).map(|(_, shown)| shown.as_str())
     }
 
+    /// The game's damage-model view: the authored body of the round keyed `key`, explicitly
+    /// absent for a round drawn without a body. Records already carry this key across the wire.
+    pub(crate) fn body_model(&self, key: &str) -> Result<Option<&'static BodyModel>, RoundError> {
+        self.entry(key).map(|(round, _)| round.effects.body)
+    }
+
     /// Every round's key, in key order.
     pub(crate) fn keys(&self) -> impl Iterator<Item = &str> {
         self.rounds.keys().map(String::as_str)

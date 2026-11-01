@@ -56,6 +56,9 @@ pub struct Plan {
     verdict_kind: CornerKind,
     /// Calibre (m): the shell's diameter and the scale of the trail, the rings and the framing.
     pub calibre: f32,
+    /// The game's damage-model view: the body's authored model, resolved by the record's round
+    /// key. An authored absence or an unregistered synthetic round draws no body.
+    pub(crate) body: Option<&'static crate::rounds::BodyModel>,
     pub line: Polyline,
     /// The drawn span of the line, arc length (m).
     pub start_arc: f32,
@@ -480,6 +483,11 @@ impl Plan {
     /// The plan of `report`, its components' shapes resolved in `shapes`.
     pub fn new(report: &PenetrationReport, shapes: &TankShapes) -> Self {
         let verdict = report.impact.verdict;
+        let body = match crate::rounds::RoundRegistry::shipped().body_model(&report.round) {
+            Ok(body) => body,
+            Err(crate::rounds::RoundError::Unknown { .. }) if report.synthetic => None,
+            Err(error) => panic!("the game's damage-model record names its spawned round: {error}"),
+        };
         let line = polyline(report);
         let contact = Vec3::from(report.impact.point);
         let contact_arc = line.arc_of(contact);
@@ -607,6 +615,7 @@ impl Plan {
             kind: CornerKind::of(verdict),
             verdict_kind: CornerKind::of(verdict),
             calibre,
+            body,
             start_arc: (contact_arc - reach(LEAD_M)).max(0.0),
             contact_arc,
             end_arc,
@@ -635,6 +644,7 @@ impl Plan {
             kind: CornerKind::Victim,
             verdict_kind: CornerKind::Victim,
             calibre: 0.0,
+            body: None,
             line: Polyline {
                 points: Vec::new(),
                 arc: Vec::new(),

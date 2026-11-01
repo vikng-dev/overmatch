@@ -64,8 +64,8 @@ use super::super::picture::{PictureDetail, PictureJobs, ViewPictures};
 use super::super::plan::{BoxPlan, Plan};
 use super::super::potency::Potency;
 use super::super::stage::{
-    self, BoxTint, FieldVolume, LineSeg, LookCtx, MarkItem, Piece, Playing, SHELL_SCENE,
-    component_meshes, mask_copy, round_copies, spawn_glass,
+    self, BoxTint, FieldVolume, LineSeg, LookCtx, MarkItem, Piece, Playing, component_meshes,
+    mask_copy, round_copies, spawn_glass,
 };
 use super::super::timeline::CornerKind;
 use super::super::view::{self, Tier};
@@ -284,11 +284,8 @@ pub(super) struct XRayState {
     shown: BTreeMap<ExplanationKey, f64>,
     /// Each tank file's asset, read once.
     tanks: HashMap<String, Arc<TankAsset>>,
-    /// The shell model, loaded once the x-ray first draws a record.
-    shell: Option<Handle<WorldAsset>>,
-    /// The shell model's material, which a burst's pieces wear: loaded once the x-ray first draws
-    /// a burst's pieces.
-    shell_material: Option<Handle<StandardMaterial>>,
+    /// The game's damage-model view: each authored body scene, cached by its identity.
+    shells: HashMap<&'static str, Handle<WorldAsset>>,
 }
 
 impl XRayState {
@@ -325,8 +322,8 @@ impl XRayState {
 
     /// Draw `shell` as the round's model, in place of the game's.
     #[cfg(test)]
-    pub(super) fn stand_in_shell(&mut self, shell: Handle<WorldAsset>) {
-        self.shell = Some(shell);
+    pub(super) fn stand_in_shell(&mut self, model: &'static str, shell: Handle<WorldAsset>) {
+        self.shells.insert(model, shell);
     }
 }
 
@@ -651,10 +648,10 @@ pub(super) fn build(
         .as_ref()
         .is_some_and(|burst| burst.cone.is_some())
     {
-        state
-            .shell_material
-            .get_or_insert_with(|| stage::shell_material(&asset_server))
-            .clone()
+        match plan.body {
+            Some(model) => stage::shell_material(&asset_server, model),
+            None => Handle::default(), // No authored body means no pieces to wear its material.
+        }
     } else {
         Handle::default()
     };
@@ -681,12 +678,13 @@ pub(super) fn build(
         &round_material,
         (XRayItem, VisualScope::WORLD_EFFECT),
     );
-    if plan.line.points.len() >= 2 {
+    if plan.line.points.len() >= 2
+        && let Some(model) = plan.body
+    {
         let shell = state
-            .shell
-            .get_or_insert_with(|| {
-                asset_server.load(GltfAssetLabel::Scene(0).from_asset(SHELL_SCENE))
-            })
+            .shells
+            .entry(model.scene)
+            .or_insert_with(|| asset_server.load(GltfAssetLabel::Scene(0).from_asset(model.scene)))
             .clone();
         commands.spawn((
             WorldAssetRoot(shell),

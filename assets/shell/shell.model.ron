@@ -3,7 +3,7 @@
 // (`rounds::effects::BodyModel`). Scene 0 places the model's tip at the origin and its body along
 // +Z for `length_m`, `diameter_m` across X and Y centred on the axis; a test reads the glb's
 // position bounds against these values. A round names this model by its scene path in its
-// `effects.body` block, and the pen cam scales it from `diameter_m` to a record's calibre.
+// `effects.body` block. Both world and pen-cam views draw those authored dimensions.
 (
     diameter_m: (0.088, Measured("scene 0's position bounds, ±0.044 m across X and Y")),
     length_m: (0.263, Measured("scene 0's position bounds, 0 to 0.263 m along +Z")),

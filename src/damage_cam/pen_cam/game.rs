@@ -329,12 +329,7 @@ impl Rig<'_, '_> {
     fn ready(&mut self, state: &mut Slot, vehicle: &str) -> bool {
         if !state.rigged {
             *self.stage = Stage::default();
-            stage::spawn_inset(
-                &mut self.commands,
-                &self.asset_server,
-                &mut self.images,
-                &mut self.stage,
-            );
+            stage::spawn_inset(&mut self.commands, &mut self.images, &mut self.stage);
             hud::spawn_corner(&mut self.commands, &mut self.images);
             state.rigged = true;
         }
@@ -2150,10 +2145,14 @@ mod tests {
         let model = world
             .resource_mut::<Assets<WorldAsset>>()
             .add(WorldAsset::new(model));
+        let (_, crossing, vocabulary, report) = incoming("s1_through_crew", 1200);
+        let body = crate::rounds::RoundRegistry::shipped()
+            .body_model(&report.round)
+            .unwrap()
+            .expect("this fixture record draws an authored body");
         world
             .resource_mut::<xray::XRayState>()
-            .stand_in_shell(model);
-        let (_, crossing, vocabulary, _) = incoming("s1_through_crew", 1200);
+            .stand_in_shell(body.scene, model);
         receive(&mut app, crossing, &vocabulary);
         press_x(&mut app);
         run(&mut app, 0.2);

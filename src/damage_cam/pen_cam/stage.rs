@@ -1,7 +1,7 @@
 //! The game's damage-model view, game state only.
 //!
 //! The corner's stage: the struck tank's stage view dressed for the frame, and the record drawn
-//! over it — the round as the game's shell model at the record's calibre, travelling the recorded
+//! over it — the round's authored body, resolved by the record's round key, travelling the recorded
 //! path nose first with a thin trail behind it, a ring where it crossed each plate or glanced off a
 //! face, the record's fields (each spall cone, and a burst's) as one translucent volume in the
 //! potency bands of their summed intensity, bounded where their directions stopped
@@ -64,16 +64,6 @@ const LINE: Color = Color::srgb_u8(0xFF, 0xF4, 0xE0);
 const LINE_GLOW: f32 = 1.8;
 /// The trail's width in calibres: a diagram choice, thin beside the shell it follows. TUNED.
 const TRAIL_CALIBRES: f32 = 0.3;
-/// The round model the corner draws every record's round as: origin at the tip, body along +Z, so
-/// `looking_to(travel)` puts the nose forward. Its diameter and length are its metadata
-/// ([`shell_model`]); the model is scaled by calibre over the diameter.
-pub(super) const SHELL_SCENE: &str = "shell/shell.glb";
-
-/// [`SHELL_SCENE`]'s frame and dimensions, as its `.model.ron` states them.
-fn shell_model() -> &'static BodyModel {
-    BodyModel::named(SHELL_SCENE)
-        .expect("the corner's shell is an embedded round model with its metadata (MODEL_FILES)")
-}
 /// A piece of a burst: a shard's length along its direction and its width, in calibres. TUNED: a
 /// diagram choice, small beside the shell.
 const PIECE_CALIBRES: (f32, f32) = (0.5, 0.2);
@@ -223,6 +213,10 @@ pub struct Stage {
     masks: MaskSet,
     /// The round's own material, which a burst's pieces wear ([`shell_material`]).
     round_material: Handle<StandardMaterial>,
+    /// The game's damage-model view: preloaded scenes/materials by authored model identity, and
+    /// the model currently instanced on the stage. A record without a body keeps it hidden.
+    round_models: HashMap<&'static str, (Handle<WorldAsset>, Handle<StandardMaterial>)>,
+    round_model: Option<&'static str>,
     /// The built record's depth pictures as the stage draws them ([`Plan::show`]), which its
     /// volume, its state fills and its painting read; held while the stage shows the record.
     pictures: ViewPictures,
@@ -277,12 +271,7 @@ pub fn plugin(app: &mut App) {
 
 /// The inset camera, inactive, into a placeholder image until the corner's layout sizes one; the
 /// stage's two key lights; the shell, hidden.
-pub fn spawn_inset(
-    commands: &mut Commands,
-    asset_server: &AssetServer,
-    images: &mut Assets<Image>,
-    stage: &mut Stage,
-) {
+pub fn spawn_inset(commands: &mut Commands, images: &mut Assets<Image>, stage: &mut Stage) {
     let placeholder = images.add(Image::new_target_texture(
         16,
         10,
@@ -326,12 +315,8 @@ pub fn spawn_inset(
             CornerRig,
         ));
     }
-    let shell: Handle<WorldAsset> =
-        asset_server.load(GltfAssetLabel::Scene(0).from_asset(SHELL_SCENE));
-    stage.round_material = shell_material(asset_server);
     commands
         .spawn((
-            WorldAssetRoot(shell),
             Transform::IDENTITY,
             Visibility::Hidden,
             VisualScope::PEN_CAM_STAGE,
@@ -341,15 +326,64 @@ pub fn spawn_inset(
         .observe(round_landed);
 }
 
+/// The game's damage-model view: instance the body's authored scene when the record changes.
+/// The record's round key is already on the wire; model dimensions are asset metadata, never
+/// reconstructed from calibre. Bevy's changed-root spawner replaces the previous world instance.
+/// Standalone stage fixtures mount rebuild/animation directly and supply their own model meshes.
+pub(super) fn prepare_round(
+    corner: Res<Corner>,
+    exhibits: Res<Exhibits>,
+    mut stage: ResMut<Stage>,
+    asset_server: Res<AssetServer>,
+    roots: Query<Entity, With<StageShell>>,
+    mut commands: Commands,
+) {
+    let Some(showing) = corner.showing else {
+        return;
+    }; // No record on show.
+    let Some(exhibit) = exhibits.0.get(showing.record) else {
+        return;
+    }; // Its library was withdrawn.
+    let Some(model) = exhibit.plan.body else {
+        return;
+    }; // This round authors no drawn body.
+    if stage.round_model == Some(model.scene) {
+        return;
+    }
+    if roots.is_empty() {
+        return;
+    } // The inset has not been constructed yet.
+    let root = roots
+        .single()
+        .expect("the game's damage-model inset has exactly one round root");
+    let (scene, material) = stage
+        .round_models
+        .entry(model.scene)
+        .or_insert_with(|| {
+            (
+                asset_server.load(GltfAssetLabel::Scene(0).from_asset(model.scene)),
+                shell_material(&asset_server, model),
+            )
+        })
+        .clone();
+    commands.entity(root).insert(WorldAssetRoot(scene));
+    stage.round_material = material;
+    stage.round_model = Some(model.scene);
+    stage.invalidate();
+}
+
 /// The material the shell model wears: bevy_pbr's glTF handler adds each glTF material's
 /// `StandardMaterial` under `<label>/std` and gives a mesh of that material that handle
 /// (`bevy_pbr-0.19.1/src/gltf.rs`, `on_material`); the model has one material, unscaled (MEASURED).
-pub(super) fn shell_material(asset_server: &AssetServer) -> Handle<StandardMaterial> {
+pub(super) fn shell_material(
+    asset_server: &AssetServer,
+    model: &BodyModel,
+) -> Handle<StandardMaterial> {
     let label = GltfAssetLabel::Material {
         index: 0,
         is_scale_inverted: false,
     };
-    asset_server.load(format!("{SHELL_SCENE}#{label}/std"))
+    asset_server.load(format!("{}#{label}/std", model.scene))
 }
 
 /// The round's meshes have landed: the stage is built again, so they get their mask copies.
@@ -791,6 +825,7 @@ pub fn spawn_glass(
     // A burst's pieces: one mesh and the round's material shared by all, no light, each on the
     // round's side of the draw order where the frame draws the body behind, as the round is.
     if let Some(index) = plan.burst.as_ref().and_then(|burst| burst.cone)
+        && plan.body.is_some()
         && kind != CornerKind::Ricochet
     {
         let shard = meshes.add(Tetrahedron::default());
@@ -1024,7 +1059,11 @@ fn burst_start(plan: &Plan, kind: CornerKind, burst: &BurstPlan, reduce: bool) -
 /// the shell with it). Under reduce motion a round that left is never drawn, since it would stand
 /// parked in the air at the span's end. A plan with no line ([`Plan::bare`]) draws no shell.
 fn shell_share(plan: &Plan, kind: CornerKind, c: f32, reduce: bool) -> Option<f32> {
-    if c < kind.travel_start() || plan.line.points.len() < 2 || (reduce && plan.left()) {
+    if plan.body.is_none()
+        || c < kind.travel_start()
+        || plan.line.points.len() < 2
+        || (reduce && plan.left())
+    {
         return None;
     }
     match &plan.burst {
@@ -1035,7 +1074,7 @@ fn shell_share(plan: &Plan, kind: CornerKind, c: f32, reduce: bool) -> Option<f3
 
 /// The shell model's transform with its nose at arc `head`, `share` of its length drawn: the tip
 /// on the line, the body along the chord to the line's point that much of a model length back,
-/// scaled from the model's calibre to the record's and along its body by `share`. A nose piece is
+/// at the authored model's dimensions and along its body by `share`. A nose piece is
 /// drawn as the model's front shortened to its share of the round's mass: a DERIVED visual proxy
 /// that treats the round's mass per length as even. On a straight leg the chord is the travel;
 /// within a model length past a bend the body pivots across it, so past a bounce it stays on the
@@ -1047,16 +1086,14 @@ fn shell_transform(plan: &Plan, head: f32, share: f32) -> Transform {
     let body = (nose - back)
         .try_normalize()
         .unwrap_or_else(|| plan.line.direction_at(head));
-    let scale = plan.calibre / shell_model().diameter_m;
     Transform::from_translation(nose)
         .looking_to(body, Vec3::Y)
-        .with_scale(Vec3::new(scale, scale, scale * share))
+        .with_scale(Vec3::new(1.0, 1.0, share))
 }
 
-/// The shell model's length (m) at the record's calibre.
+/// The game's damage-model view: the authored body's length (m), zero without a drawn body.
 fn shell_length(plan: &Plan) -> f32 {
-    let model = shell_model();
-    model.length_m * plan.calibre / model.diameter_m
+    plan.body.map_or(0.0, |model| model.length_m)
 }
 
 /// Where the trail ends: its arc along the line and its point. Behind a drawn shell (`share` of
@@ -1067,7 +1104,13 @@ fn trail_end(plan: &Plan, head: f32, share: Option<f32>) -> (f32, Vec3) {
     let Some(share) = share else {
         return (head, plan.line.at(head));
     };
-    let tail = shell_transform(plan, head, share).transform_point(Vec3::Z * shell_model().length_m);
+    let tail = shell_transform(plan, head, share).transform_point(
+        Vec3::Z
+            * plan
+                .body
+                .expect("a drawn shell has its authored model")
+                .length_m,
+    );
     (head - share * shell_length(plan), tail)
 }
 
@@ -2029,7 +2072,7 @@ mod tests {
     /// Every embedded round model, as scene 0 places it (every ancestor's transform included), is
     /// its metadata's diameter across, its tip at the origin and its body along +Z for its
     /// metadata's length: the frame both views place a model by. A mesh node of identity transform
-    /// under a scaled parent fails it (FIXTURE DATA: the shell model's bounds under a 2× parent).
+    /// under a scaled parent fails it (FIXTURE DATA: a synthetic body under a 2× parent).
     #[test]
     fn every_round_model_has_its_tip_at_the_origin() {
         for model in BodyModel::shipped() {
@@ -2038,17 +2081,171 @@ mod tests {
             let bounds = scene_bounds(&document);
             assert!(model_fits(model, bounds), "{}: {bounds:?}", model.scene);
         }
-        let model = shell_model();
+        // FIXTURE DATA: a synthetic body; parent scale must participate in the bounds.
+        let model = BodyModel {
+            scene: "fixture.glb",
+            diameter_m: 0.06,
+            length_m: 0.4,
+        };
+        for scale in [1.0, 2.0] {
+            let half = model.diameter_m * 0.5;
+            let text = serde_json::json!({
+                "asset": {"version": "2.0"}, "scene": 0, "scenes": [{"nodes": [0]}],
+                "nodes": [{"scale": [scale, scale, scale], "children": [1]}, {"mesh": 0}],
+                "meshes": [{"primitives": [{"attributes": {"POSITION": 0}}]}],
+                "buffers": [{"byteLength": 36}],
+                "bufferViews": [{"buffer": 0, "byteLength": 36}],
+                "accessors": [{"bufferView": 0, "componentType": 5126, "count": 3, "type": "VEC3",
+                    "min": [-half, -half, 0.0], "max": [half, half, model.length_m]}]
+            })
+            .to_string();
+            let document = gltf::Gltf::from_slice(text.as_bytes()).unwrap().document;
+            assert_eq!(model_fits(&model, scene_bounds(&document)), scale == 1.0);
+        }
+    }
 
-        // The same bounds under a parent scaled 2×: the mesh node itself stays identity.
-        let text = r#"{"asset":{"version":"2.0"},"scene":0,"scenes":[{"nodes":[0]}],
-            "nodes":[{"scale":[2,2,2],"children":[1]},{"mesh":0}],
-            "meshes":[{"primitives":[{"attributes":{"POSITION":0}}]}],
-            "buffers":[{"byteLength":36}],"bufferViews":[{"buffer":0,"byteLength":36}],
-            "accessors":[{"bufferView":0,"componentType":5126,"count":3,"type":"VEC3",
-                "min":[-0.044,-0.044,0.0],"max":[0.044,0.044,0.263]}]}"#;
-        let scaled = gltf::Gltf::from_slice(text.as_bytes()).unwrap();
-        assert!(!model_fits(model, scene_bounds(&scaled.document)));
+    /// The game's damage-model view: model identity selects both scene and material. A second
+    /// model must replace the first even when the record calibre is unchanged. FIXTURE DATA:
+    /// two body models and in-memory scene/material handles, with the same recorded path.
+    #[test]
+    fn the_stage_switches_scene_and_material_by_authored_body_identity() {
+        static FIRST: BodyModel = BodyModel {
+            scene: "first.glb",
+            diameter_m: 0.04,
+            length_m: 0.2,
+        };
+        static SECOND: BodyModel = BodyModel {
+            scene: "second.glb",
+            diameter_m: 0.08,
+            length_m: 0.5,
+        };
+        let library = Library::load();
+        let record = &library.records[0];
+        let shapes = super::super::plan::tests::shapes(&record.report);
+        let mut exhibits = Exhibits::default();
+        for model in [&FIRST, &SECOND] {
+            let mut plan = Plan::new(&record.report, &shapes);
+            plan.body = Some(model);
+            exhibits.0.push(super::super::Exhibit {
+                plan: Arc::new(plan),
+                servo_deg: Default::default(),
+            });
+        }
+        let mut app = App::new();
+        app.add_plugins((MinimalPlugins, AssetPlugin::default()))
+            .init_asset::<WorldAsset>()
+            .init_asset::<StandardMaterial>()
+            .init_resource::<Stage>()
+            .insert_resource(exhibits)
+            .insert_resource(Corner {
+                showing: Some(super::super::Showing {
+                    record: 0,
+                    turn: 0,
+                    kind: CornerKind::Glass,
+                    c: 1.0,
+                    opacity: 1.0,
+                    scale: 1.0,
+                    remaining: 1.0,
+                    surface: super::super::Surface::Corner,
+                }),
+                fading: None,
+            })
+            .add_systems(Update, prepare_round);
+        let root = app
+            .world_mut()
+            .spawn((Transform::IDENTITY, Visibility::Hidden, StageShell))
+            .id();
+        let mut expected = Vec::new();
+        for model in [&FIRST, &SECOND] {
+            let scene = app
+                .world_mut()
+                .resource_mut::<Assets<WorldAsset>>()
+                .add(WorldAsset::new(World::new()));
+            let material = app
+                .world_mut()
+                .resource_mut::<Assets<StandardMaterial>>()
+                .add(StandardMaterial::default());
+            expected.push((scene.id(), material.id()));
+            app.world_mut()
+                .resource_mut::<Stage>()
+                .round_models
+                .insert(model.scene, (scene, material));
+        }
+        for (index, (scene, material)) in expected.into_iter().enumerate() {
+            app.world_mut()
+                .resource_mut::<Corner>()
+                .showing
+                .as_mut()
+                .unwrap()
+                .record = index;
+            app.update();
+            assert_eq!(
+                app.world().get::<WorldAssetRoot>(root).unwrap().0.id(),
+                scene
+            );
+            assert_eq!(
+                app.world().resource::<Stage>().round_material.id(),
+                material
+            );
+        }
+    }
+
+    /// The game's damage-model view: diagram calibre cannot resize the authored body. Both body
+    /// models keep their own width and length, including the shortened nose proxy after a burst.
+    /// FIXTURE DATA: two distinct body dimensions, each under different diagram calibres.
+    #[test]
+    fn body_dimensions_are_independent_of_diagram_calibre() {
+        static FIRST: BodyModel = BodyModel {
+            scene: "first.glb",
+            diameter_m: 0.04,
+            length_m: 0.2,
+        };
+        static SECOND: BodyModel = BodyModel {
+            scene: "second.glb",
+            diameter_m: 0.08,
+            length_m: 0.5,
+        };
+        let library = Library::load();
+        let record = &library.records[0];
+        let mut plan = Plan::new(
+            &record.report,
+            &super::super::plan::tests::shapes(&record.report),
+        );
+        for model in [&FIRST, &SECOND] {
+            plan.body = Some(model);
+            for calibre in [model.diameter_m, 3.0 * model.diameter_m] {
+                plan.calibre = calibre;
+                let pose = shell_transform(&plan, plan.contact_arc, 0.4);
+                assert_eq!(pose.scale, Vec3::new(1.0, 1.0, 0.4));
+                assert_eq!(shell_length(&plan), model.length_m);
+                let tail = pose.transform_point(Vec3::Z * model.length_m);
+                assert!((tail.distance(pose.translation) - 0.4 * model.length_m).abs() < 1.0e-6);
+            }
+        }
+    }
+
+    /// The game's damage-model view: the registered round's authored presence is the stage's,
+    /// and an unregistered synthetic clip draws no invented body. The wire already carries the
+    /// registry identity, so this mapping needs no additional serialized model identity.
+    #[test]
+    fn a_record_draws_only_its_rounds_authored_body() {
+        let library = Library::load();
+        let mut report = library.records[0].report.clone();
+        let shapes = super::super::plan::tests::shapes(&report);
+        let rounds = crate::rounds::RoundRegistry::shipped();
+        for key in rounds.keys() {
+            report.round = key.to_owned();
+            let plan = Plan::new(&report, &shapes);
+            assert_eq!(plan.body, rounds.body_model(key).unwrap());
+            if plan.body.is_none() {
+                assert!(Playing::new(&plan, plan.kind, 2.0, false).shell().is_none());
+            }
+        }
+        report.synthetic = true;
+        report.round = "unregistered synthetic probe".into();
+        let plan = Plan::new(&report, &shapes);
+        assert!(plan.body.is_none());
+        assert!(Playing::new(&plan, plan.kind, 2.0, false).shell().is_none());
     }
 
     /// For every record: the shell sets off from the drawn span's start at its frame's travel
@@ -2099,8 +2296,19 @@ mod tests {
                     forward.dot(line.direction_at(head)) > lead,
                     "{name}: the nose does not lead"
                 );
-                let across = pose.scale.x * shell_model().diameter_m;
-                assert!((across - plan.calibre).abs() < 1e-6, "{name}: {across}");
+                let across = pose.scale.x
+                    * plan
+                        .body
+                        .expect("a drawn shell has its authored model")
+                        .diameter_m;
+                assert!(
+                    (across - plan.body.unwrap().diameter_m).abs() < 1e-6,
+                    "{name}: {across}"
+                );
+                assert_eq!(
+                    pose.scale.x, 1.0,
+                    "{name}: the authored body stays unscaled"
+                );
                 assert_eq!(pose.scale.y, pose.scale.x, "{name}");
                 assert!((pose.scale.z - pose.scale.x * share).abs() < 1e-6, "{name}");
             }
@@ -2111,10 +2319,10 @@ mod tests {
                 }
                 RoundEnd::Rest { .. } => {
                     // The whole shell, or what of it a burst left flying.
-                    let left = match &record.report.burst {
+                    let left = plan.body.and_then(|_| match &record.report.burst {
                         Some(_) => flies_on(&record.report),
                         None => Some(1.0),
-                    };
+                    });
                     for reduce in [false, true] {
                         let end = pace.duration;
                         let share = shell_share(plan, kind, end, reduce);
@@ -2174,9 +2382,14 @@ mod tests {
                     let reached = time_at_arc(plan, kind, line.length(), false);
                     for k in 1..=8 {
                         let c = reached + 0.25 * k as f32;
-                        let Some(share) = shell_share(plan, kind, c, false) else {
-                            panic!("{name} {played}: hidden at {c} s, past its last node");
-                        };
+                        let share = shell_share(plan, kind, c, false);
+                        if plan.body.is_none() {
+                            assert!(share.is_none(), "{name}: no authored body is drawn");
+                            continue;
+                        }
+                        let share = share.unwrap_or_else(|| panic!(
+                            "{name} {played}: an authored body is hidden at {c} s, past its last node"
+                        ));
                         let head = head_arc(plan, kind, c, false);
                         let run = (c - reached) / timeline::REPLAY_SLOWDOWN * speed;
                         assert!(
@@ -2289,12 +2502,21 @@ mod tests {
             let Some(bounce) = &plan.bounce else {
                 continue;
             };
+            if plan.body.is_none() {
+                continue;
+            } // No body is drawn for this round.
             let length = shell_length(plan);
             let samples = 32;
             for k in 0..=samples {
                 let head = bounce.arc + 2.0 * length * k as f32 / samples as f32;
                 let pose = shell_transform(plan, head, 1.0);
-                let tail = pose.transform_point(Vec3::Z * shell_model().length_m);
+                let tail = pose.transform_point(
+                    Vec3::Z
+                        * plan
+                            .body
+                            .expect("a drawn shell has its authored model")
+                            .length_m,
+                );
                 for (part, p) in [("nose", pose.translation), ("tail", tail)] {
                     let depth = (bounce.point - p).dot(bounce.normal);
                     assert!(
@@ -3734,10 +3956,9 @@ mod tests {
         .add_systems(
             Startup,
             |mut commands: Commands,
-             asset_server: Res<AssetServer>,
              mut images: ResMut<Assets<Image>>,
              mut stage: ResMut<Stage>| {
-                spawn_inset(&mut commands, &asset_server, &mut images, &mut stage);
+                spawn_inset(&mut commands, &mut images, &mut stage);
             },
         );
         app.update();

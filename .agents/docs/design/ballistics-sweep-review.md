@@ -102,3 +102,23 @@ bundles. The tests read the bound projectile body and velocity directly; view dr
 independent of simulation state. MEASURED: all 219 targeted march, public-path, pen-cam,
 field-cast and citation tests passed; three on-demand instruments stayed ignored. Format and
 workspace/all-target clippy passed; no field-cast pin moved.
+
+## Authored bodies in the pen cam (B11 follow-up)
+
+Fixed: the plan resolves its body from the record's existing round key. The inset replaces its
+scene and material by model identity; the x-ray caches by that identity too. Both use the body's
+native dimensions, and a trail ends at that body's tail. An authored body absence draws no body
+or model-material pieces; an unregistered synthetic clip also has no invented body. The diagram's
+calibre still sizes its trail, rings and framing. No record or wire layout changed, so no protocol
+revision bump is needed.
+
+The new synthetic controls switch scenes/materials between distinct models at unchanged record
+calibre and vary diagram calibre without resizing either model. The model-bound gate now has an
+independent synthetic control for parent scale rather than borrowing the first shipped model's
+numbers. The corpus still tests the recorded path of a round drawn without a body.
+
+Verified against the installed Bevy 0.19 source: `WorldAssetRoot` changes are handled by
+`world_instance_spawner`, which despawns the previous instance before instancing the new handle;
+`WorldInstanceReady` invalidates the stage's mask copies. MEASURED: 192 targeted pen-cam,
+round-effects, headless-composition and citation tests passed; six on-demand instruments stayed
+ignored. Format and workspace/all-target clippy passed. No captures.
