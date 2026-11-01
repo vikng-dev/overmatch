@@ -234,7 +234,7 @@ use crate::{CombatantId, CombatantLife, ShotId};
 ///
 /// [`WallPiece`]: crate::buildings::breakage::WallPiece
 /// [`WallEvent`]: crate::buildings::breakage::WallEvent
-pub const PROTOCOL_REV: u32 = 52;
+pub const PROTOCOL_REV: u32 = 53;
 
 /// Compatibility tag derived from the complete pinned wire manifest plus the crate version. This
 /// is the runtime handshake value: version-exact, so a version bump intentionally changes it.
@@ -267,10 +267,13 @@ pub const PROTOCOL_FINGERPRINT: u64 = protocol_fingerprint_for(
 /// does not (no type moves), so it enters here.
 ///
 /// The tank's construction is folded too ([`crate::bake::construction_digest`]): the embedded
-/// sheet and the sim artifact beside the binary decide every weapon slot, round list, fuze mode
-/// and health-bearing volume a fact or snapshot indexes. A peer that completed the handshake
-/// therefore indexes the same construction, so a receiver refuses a fact its rig cannot resolve
-/// as malformed outside input rather than waiting on skew.
+/// sheet and the sim artifact beside the binary decide every weapon slot, stowage list and
+/// health-bearing volume a fact or snapshot indexes.
+///
+/// The game's damage model also reads the embedded round-type, round and gun registries. The
+/// tank sheet names their keys; the registries supply fuze modes and the bound round's facts.
+/// All their keys and bytes enter the tag too, so a completed handshake indexes the same data.
+/// A receiver can refuse an unresolvable fact as malformed input rather than waiting on skew.
 ///
 /// Computed once per process. The map's files cannot change under a running peer, and the heightmap
 /// is tens of megabytes.
@@ -282,20 +285,49 @@ pub fn protocol_id() -> u64 {
             crate::map::content_digest(&root),
             crate::substances::MATERIALS_RON.as_bytes(),
             crate::bake::construction_digest(&root),
+            armaments_digest(
+                crate::rounds::ROUND_TYPES_RON,
+                crate::armaments_index::ROUND_FILES,
+                crate::armaments_index::GUN_FILES,
+            ),
         )
     })
 }
 
 /// [`PROTOCOL_FINGERPRINT`] folded with the world's content digest, the embedded registry and the
-/// tank's construction digest.
-fn handshake_tag(map_digest: u64, materials: &[u8], tank_digest: u64) -> u64 {
+/// tank's construction and armament digests.
+fn handshake_tag(
+    map_digest: u64,
+    materials: &[u8],
+    tank_digest: u64,
+    armaments_digest: u64,
+) -> u64 {
     let tag = fingerprint_field(
         PROTOCOL_FINGERPRINT,
         b"map_content",
         &map_digest.to_le_bytes(),
     );
     let tag = fingerprint_field(tag, b"materials_ron", materials);
-    fingerprint_field(tag, b"tank_construction", &tank_digest.to_le_bytes())
+    let tag = fingerprint_field(tag, b"tank_construction", &tank_digest.to_le_bytes());
+    fingerprint_field(tag, b"armaments", &armaments_digest.to_le_bytes())
+}
+
+/// The game's damage model: fingerprint every embedded armament key and source, in the index's
+/// byte-sorted order. These sources are what the shipped registries parse, not a second manifest.
+fn armaments_digest(round_types: &str, rounds: &[(&str, &str)], guns: &[(&str, &str)]) -> u64 {
+    let mut tag = fingerprint_field(
+        crate::fingerprint::FNV_OFFSET_BASIS,
+        b"round_types",
+        round_types.as_bytes(),
+    );
+    for (kind, files) in [(b"rounds".as_slice(), rounds), (b"guns".as_slice(), guns)] {
+        tag = fingerprint_field(tag, b"registry", kind);
+        for (key, text) in files {
+            tag = fingerprint_field(tag, b"key", key.as_bytes());
+            tag = fingerprint_field(tag, b"ron", text.as_bytes());
+        }
+    }
+    tag
 }
 
 /// Fold the VERSION-INDEPENDENT wire manifest: surface, own-type graph, wire dependencies, and
@@ -2360,7 +2392,12 @@ mod tests {
         let registry = crate::substances::MATERIALS_RON;
         let root = crate::assets::asset_root();
         let tank = crate::bake::construction_digest(&root);
-        let tag = |digest: u64| handshake_tag(digest, registry.as_bytes(), tank);
+        let armaments = armaments_digest(
+            crate::rounds::ROUND_TYPES_RON,
+            crate::armaments_index::ROUND_FILES,
+            crate::armaments_index::GUN_FILES,
+        );
+        let tag = |digest: u64| handshake_tag(digest, registry.as_bytes(), tank, armaments);
         assert_ne!(tag(1), tag(2), "a different map must be a different tag");
         assert_eq!(
             tag(crate::map::content_digest(&root)),
@@ -2368,7 +2405,7 @@ mod tests {
             "the tag must be the fold of THIS process's map, registry and tank",
         );
         assert_ne!(
-            handshake_tag(1, registry.as_bytes(), tank ^ 1),
+            handshake_tag(1, registry.as_bytes(), tank ^ 1, armaments),
             tag(1),
             "another tank construction over the same world: a different tag",
         );
@@ -2378,7 +2415,7 @@ mod tests {
             "the fixture edit must land on a registry value"
         );
         assert_ne!(
-            handshake_tag(1, edited.as_bytes(), tank),
+            handshake_tag(1, edited.as_bytes(), tank, armaments),
             tag(1),
             "a registry value moved under identical assets: a different tag",
         );
@@ -2390,6 +2427,26 @@ mod tests {
         let mut tl = LocalTimeline::default();
         tl.apply_delta(tick);
         tl
+    }
+
+    /// The game's damage model: a registry-only fuze or gun edit must refuse at connect even
+    /// when tank construction and wire types match. Receiver fire bindings rely on this guarantee.
+    #[test]
+    fn every_armament_registry_input_reaches_the_handshake() {
+        // Fixture bytes test the generic source fingerprint, not any asset's physical values.
+        let rounds = [("round", "round source")];
+        let guns = [("gun", "gun source")];
+        let base = armaments_digest("round types", &rounds, &guns);
+        let tag = |digest| handshake_tag(1, b"materials", 2, digest);
+        for changed in [
+            armaments_digest("changed types", &rounds, &guns),
+            armaments_digest("round types", &[("round", "changed source")], &guns),
+            armaments_digest("round types", &[("renamed round", "round source")], &guns),
+            armaments_digest("round types", &rounds, &[("gun", "changed source")]),
+            armaments_digest("round types", &rounds, &[("renamed gun", "gun source")]),
+        ] {
+            assert_ne!(tag(base), tag(changed));
+        }
     }
 
     /// The game's damage model: even an attested malformed command files idle input. A peer

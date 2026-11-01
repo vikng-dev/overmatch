@@ -82,7 +82,7 @@ pub(crate) use effects::{EmberEmission, FlightEffects, SmokeEmission};
 
 /// The shipped round-type table, embedded as the round files are, so a round is in hand
 /// synchronously wherever it is bound (ADR-0014: built from data, never from an asset).
-const ROUND_TYPES_RON: &str = include_str!("../assets/ballistics/round_types.ron");
+pub(crate) const ROUND_TYPES_RON: &str = include_str!("../assets/ballistics/round_types.ron");
 
 /// One round fired from one gun, resolved and validated: the record the laws read.
 #[derive(Clone, Copy, Debug, PartialEq)]

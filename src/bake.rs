@@ -445,9 +445,9 @@ pub(crate) fn selected_spec() -> &'static TankSpec {
 
 /// The selected tank's CONSTRUCTION digest: the embedded sheet and the sim artifact the bake reads
 /// (`tank::TANK_SIM_GLB_PATH` under `root`), each length-prefixed. Every peer builds each tank's
-/// body, weapons, rounds, volumes and crew stations from these two alone, so
-/// `net::protocol::protocol_id` folds the digest into the handshake: peers over different tank
-/// data refuse at connect instead of resolving each other's facts against another tank. A sim
+/// construction and registry keys from these two sources. Armament and substance registries supply
+/// the keyed facts. `net::protocol::protocol_id` folds all these inputs into the handshake: peers
+/// over different game data refuse at connect instead of resolving facts against another model. A sim
 /// artifact that cannot be read panics naming its path, as the bake would at startup.
 pub(crate) fn construction_digest(root: &Path) -> u64 {
     use crate::fingerprint::{FNV_OFFSET_BASIS, fnv1a_64};
