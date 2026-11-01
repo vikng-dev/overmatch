@@ -940,8 +940,8 @@ added alongside it. They compose (AND), they don't replace.
 
 **View on crewman knockout — auto-fallback:** losing the crewman whose view is active auto-switches
 the player to the other view if its crewman is still in action (CommanderView out of action → gunner
-optic; GunnerSight out of action → third-person). Both out of action → dark (pairs naturally with the
-imminent 0-active-crew knockout under the §1a model).
+optic; GunnerSight out of action → third-person). Both view stations out of action → dark;
+the game's damage model labels the tank knocked out when fewer than two crew remain in action (§1a).
 
 **Playtest fork — single-crewman juggling (slice 2, *not* v1):** when only one combat-crewman
 remains in action, what happens to the gun? **Default chosen 2026-06-29: hardcore** — the survivor
@@ -1069,8 +1069,9 @@ remaining work is deferred refinements (§9) and the eventual game-side (non-san
 
 - **Ammunition** — each shell is modelled **individually** as a ballistic volume + HP. Firing
   **depletes** the stowage, so an emptier rack is a smaller target and less catastrophic (the real
-  "empty your ready rack" play). A shell's HP → 0 = **cookoff** = all crew knocked out (knocks out every crew
-  position → 0 active crew → tank knocked out under the §1a-A model). Turret launch is triggered off
+  "empty your ready rack" play). In the game's damage model, an emptied ammunition HP pool cooks
+  off and empties every crew HP pool. Fewer than two crew remain in action, so the one rule in §1a
+  labels the tank knocked out. Turret launch is triggered off
   `CookedOff` directly, not via `TankKnockedOut` (see §1a — KO is retired as a gameplay gate).
 - **Fire** — an **engine hit by a direct penetrator** (not fragments) has an ignition chance. Fire
   does **not spread**; it does range-per-tick damage to nearby crew/components and can be **put out**

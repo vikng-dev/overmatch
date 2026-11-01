@@ -3,7 +3,9 @@
 use std::sync::Arc;
 use std::time::Instant;
 
-use avian3d::prelude::{Collider, ColliderAabb, Forces, Position, Rotation, SpatialQuery};
+use avian3d::prelude::{
+    Collider, ColliderAabb, Forces, Position, Rotation, SimpleCollider, SpatialQuery,
+};
 use bevy::ecs::system::SystemParam;
 use bevy::prelude::*;
 // `shot_trace::record` only evaluates its closure when tracing is armed.
@@ -775,23 +777,45 @@ fn bend_toward(dir: Dir3, target: Dir3, angle: f32) -> Dir3 {
         .expect("a unit direction turned by a unit quaternion keeps unit length")
 }
 
-/// The game's damage model: provisional transparency to the firing tank for the whole flight.
-/// Authored muzzle/bore clearance does not yet establish an outside start; the measurement and
-/// owner decision live in `.agents/docs/design/ballistics-sweep-review.md`. This also excludes
-/// later returns into the firing tank. Source identity filters geometry; the replica role alone
-/// controls authority to march and deposit dose.
-fn not_own_volume(
-    entity: Entity,
-    shooter: Option<Entity>,
-    owners: &Query<&VolumeOf>,
-    parents: &Query<&ChildOf>,
-) -> bool {
-    let Some(shooter) = shooter else {
-        return true;
-    };
-    // Ownership sits on the hit's ancestry (`hit_ancestor`, the shared hierarchy-resolution rule) —
-    // the same walk `aim_distance` makes for the aim ray.
-    hit_ancestor(entity, owners, parents).is_none_or(|(_, owner)| owner.tank() != shooter)
+/// The game's damage model: a source-body-local box enclosing its colliders at both ends of
+/// this physics interval. Using the body's frame keeps its translation from ending clearance.
+#[derive(Clone, Copy)]
+struct SourceBox {
+    min: Vec3,
+    max: Vec3,
+    body: motion::Poses,
+}
+
+impl SourceBox {
+    fn contains(self, point: Vec3, fraction: f32) -> bool {
+        let local = self.body.at(fraction).local(point);
+        local.cmpge(self.min).all() && local.cmple(self.max).all()
+    }
+
+    /// The game's damage model uses the same local endpoint chord as moving-collider discovery.
+    /// Return the seconds to its first box exit, nudged beyond the boundary for rediscovery.
+    fn exit_seconds(self, point: Vec3, velocity: Vec3, from: f32, remaining: f32) -> Option<f32> {
+        let start = self.body.at(from).local(point);
+        let end = self.body.to.local(point + velocity * remaining);
+        let chord = end - start;
+        let mut exit = f32::INFINITY;
+        for axis in 0..3 {
+            let along = chord[axis];
+            if along != 0.0 {
+                let face = if along > 0.0 {
+                    self.max[axis]
+                } else {
+                    self.min[axis]
+                };
+                exit = exit.min(((face - start[axis]) / along).max(0.0));
+            }
+        }
+        if exit < 1.0 {
+            Some((remaining * (exit + MARCH_EPS / chord.length())).min(remaining))
+        } else {
+            None // No exit on this remaining relative chord, including relative rest.
+        }
+    }
 }
 
 /// One first-surface contact along a march segment (see [`cast_disc_segment`]).
@@ -1288,6 +1312,8 @@ pub(crate) struct Projectile {
     replica: Option<path::Replica>,
     /// The game's damage model: tanks touched by this round, for first-contact statistics.
     contacted: Vec<Entity>,
+    /// The game's damage model: source clearance ends permanently at the first box exit.
+    source_cleared: bool,
 }
 
 impl Projectile {
@@ -1350,6 +1376,7 @@ impl Projectile {
             path_sequence: 0,
             replica: None,
             contacted: Vec::new(),
+            source_cleared: false,
         }
     }
 }
@@ -2028,6 +2055,7 @@ fn on_fire_shell(
             playback: Default::default(),
             path_sequence: 0,
             contacted: Vec::new(),
+            source_cleared: false,
             replica: replica.is_some().then(|| {
                 path::Replica::born(
                     fire.shot
@@ -2172,6 +2200,50 @@ struct ProjectileMarchWorld<'w, 's> {
 }
 
 impl ProjectileMarchWorld<'_, '_> {
+    fn source_box(&self, tank: Entity) -> Option<SourceBox> {
+        // Tank-less tool fire and a despawned shooter have no source body to clear.
+        let colliders = self.body_colliders.get(tank).ok()?;
+        let history = self
+            .motion
+            .as_ref()
+            .expect("the authority captures source-body motion before marching its rounds");
+        let body = *history
+            .bodies
+            .get(&tank)
+            .expect("a source rigid body has captured endpoint poses before projectile march");
+        let mut bounds: Option<SourceBox> = None;
+        for entity in colliders.iter() {
+            let (_, _, shape, _) = self.geometry.get(entity).expect(
+                "a source body's registered collider has prepared geometry before the march",
+            );
+            let poses = *history
+                .colliders
+                .get(&entity)
+                .expect("a source body's registered collider has captured endpoint poses");
+            for fraction in [0.0, 1.0] {
+                let root = body.at(fraction);
+                let part = poses.at(fraction);
+                let aabb = shape.aabb(
+                    root.local(part.position),
+                    root.rotation.inverse() * part.rotation,
+                );
+                bounds = Some(match bounds {
+                    None => SourceBox {
+                        min: aabb.min,
+                        max: aabb.max,
+                        body,
+                    },
+                    Some(bounds) => SourceBox {
+                        min: bounds.min.min(aabb.min),
+                        max: bounds.max.max(aabb.max),
+                        body,
+                    },
+                });
+            }
+        }
+        bounds
+    }
+
     fn pose(&self, entity: Entity) -> Option<motion::Pose> {
         let fraction = self.moment.get()?;
         let motion = self.motion.as_ref()?; // Static query fixtures carry no interval history.
@@ -2322,8 +2394,8 @@ fn integrate_projectiles(
         // A network identity is absent on tank-less sandbox fire.
         Option<&Shot>,
         // The tank that fired this shell, when it was fired BY one — `on_fire_shell` attaches it from
-        // `FireShell::shooter` on every attributed shot. The authority reads it for provisional own
-        // geometry exclusion ([`not_own_volume`]) and hit confirmation attribution; a replica marches
+        // `FireShell::shooter` on every attributed shot. The authority reads it for initial source
+        // clearance and hit confirmation attribution; a replica marches
         // nothing. `None` for the sandbox's tank-less camera fire, which excludes nothing.
         Option<&ShotSource>,
         // The pen cam recording of a recorded round (authority main-gun rounds only).
@@ -2610,13 +2682,21 @@ fn march_shell_step(
     // this step. The caller's per-shell latch turns the aggregate into at most one discrete confirm.
     let mut damage_dealt = 0;
     let mut lines = Vec::new();
-    // The game's damage model: the provisional rule in `not_own_volume` makes the firing tank
-    // transparent for every cast below. Only the authority walks geometry; replicas play its path.
+    // The game's damage model gives only the initial path inside the source's box clearance.
+    // The latch survives later tick boundaries and bounces; source identity still attributes dose.
     let shooter = shell.source.map(|source| source.tank);
+    let source_box = shooter.and_then(|source| world.source_box(source));
+    let ignored_source = std::cell::Cell::new(shooter.filter(|_| {
+        !shell.projectile.source_cleared
+            && source_box.is_some_and(|bounds| bounds.contains(shell.transform.translation, 0.0))
+    }));
     let resting = std::cell::RefCell::new(Vec::new());
     let not_own = |entity: Entity| {
         !resting.borrow().contains(&entity)
-            && not_own_volume(entity, shooter, &world.owners, &world.parents)
+            && ignored_source.get().is_none_or(|source| {
+                hit_ancestor(entity, &world.owners, &world.parents)
+                    .is_none_or(|(_, owner)| owner.tank() != source)
+            })
     };
     // Gravity and drag on the velocity through the free-flight kernel the FireEvent catch-up folds
     // ([`fast_forward_shell`]). An unbent open-air step flies exactly `stepped × dt`. The march may
@@ -2693,6 +2773,16 @@ fn march_shell_step(
     };
 
     loop {
+        if ignored_source.get().is_some()
+            && source_box.is_some_and(|bounds| {
+                !bounds.contains(
+                    flight.sweep_origin(),
+                    (1.0 - budget.remaining() as f32 / dt).clamp(0.0, 1.0),
+                )
+            })
+        {
+            ignored_source.set(None);
+        }
         if let Some(mut playing) = playback.pop_front() {
             let (spent, complete, removed) = playing.advance(
                 budget.remaining(),
@@ -2742,8 +2832,21 @@ fn march_shell_step(
             .unwrap_or_else(|error| error.panic());
         let origin = flight.sweep_origin();
         let dir = flight.direction;
-        let within = budget.remaining() as f32 * flight.speed;
-        world.sweep.set(Some(motion::Sweep { from, to: 1.0, dt }));
+        let remaining = budget.remaining() as f32;
+        let exit = ignored_source.get().and_then(|_| {
+            source_box
+                .expect("source clearance carries its box")
+                .exit_seconds(origin, dir * flight.speed, from, remaining)
+        });
+        let scan_seconds = exit.unwrap_or(remaining);
+        let leaving_source = scan_seconds < remaining;
+        let within = scan_seconds * flight.speed;
+        let to = if leaving_source {
+            from + scan_seconds / dt
+        } else {
+            1.0
+        };
+        world.sweep.set(Some(motion::Sweep { from, to, dt }));
         world.contact_motion.set(None);
         let reach = within;
         let ahead = match next_surface(world, &flight, radius, reach, &not_own) {
@@ -2757,9 +2860,7 @@ fn march_shell_step(
             let wait = world
                 .contact_motion
                 .get()
-                .map_or(budget.remaining() as f32, |moving| {
-                    (moving.fraction - from) * dt
-                });
+                .map_or(scan_seconds, |moving| (moving.fraction - from) * dt);
             if shell.projectile.fuze.wait_at_rest(wait) {
                 let after = shell.projectile.fuze.delay_left().expect(
                     "only an armed fuze expires while the game's damage model waits at rest",
@@ -2774,12 +2875,23 @@ fn march_shell_step(
         // The game's damage model spends only the remaining seconds in open air. A discovery
         // interval bounds the scan and physical displacement. An unbent segment
         // retains the catch-up kernel's exact displacement.
-        let displacement = if bent { dir * within } else { stepped * dt };
+        let displacement = if bent || leaving_source {
+            dir * within
+        } else {
+            stepped * dt
+        };
         // An armed round whose delay runs out short of what lies ahead bursts in the open.
         let open = ahead.open_metres(displacement.length());
         if let Some(at) = open.and_then(|open| shell.projectile.fuze.due_within(open)) {
-            let (ended, removed) =
-                burst_ahead(shell, &context, &mut flight, &mut budget, at, health);
+            let (ended, removed) = burst_ahead(
+                shell,
+                &context,
+                &not_own,
+                &mut flight,
+                &mut budget,
+                at,
+                health,
+            );
             damage_dealt += removed;
             publish_path_state(shell, tick, &budget, &flight, ended, None);
             if ended {
@@ -2802,6 +2914,18 @@ fn march_shell_step(
                     damage_dealt += wound_legs(shell, &context, &not_own, &[leg], speed, health);
                 }
                 flight.fly(displacement);
+                if leaving_source {
+                    budget.fly(f64::from(scan_seconds));
+                    let fraction = (1.0 - budget.remaining() as f32 / dt).clamp(0.0, 1.0);
+                    if source_box
+                        .is_some_and(|bounds| !bounds.contains(flight.sweep_origin(), fraction))
+                    {
+                        ignored_source.set(None);
+                    }
+                    flight.continuation = None;
+                    bent = true;
+                    continue;
+                }
                 budget.fly(budget.remaining());
                 break;
             }
@@ -2963,6 +3087,13 @@ fn march_shell_step(
     }
     // The game's damage model carries an immutable playback cursor across ticks, or a clear
     // axis start once its discovery chain has finished.
+    shell.projectile.source_cleared = ignored_source.get().is_none()
+        || source_box.is_none_or(|bounds| {
+            !bounds.contains(
+                flight.sweep_origin(),
+                (1.0 - budget.remaining() as f32 / dt).clamp(0.0, 1.0),
+            )
+        });
     shell.projectile.disc = flight.frame;
     shell.projectile.axis = flight.continuation.as_ref().map(resolve::Interior::axis);
     shell.projectile.playback = playback;
@@ -3200,7 +3331,9 @@ fn function_on_contact(
         .fuze
         .entered(force, flight.speed, owner, contact);
     shell.projectile.fuze.due_within(contact)?;
-    Some(burst_ahead(shell, context, flight, budget, contact, health))
+    Some(burst_ahead(
+        shell, context, not_own, flight, budget, contact, health,
+    ))
 }
 
 /// AUTHORITY: advance the fuze over a decided crossing (design doc §5a, "The trigger"). The count
@@ -3284,14 +3417,12 @@ fn follow_crossing(
 fn burst_ahead(
     shell: &mut MarchingShell,
     context: &resolve::ResolveContext<'_, '_, '_>,
+    admit: &dyn Fn(Entity) -> bool,
     flight: &mut resolve::Flight,
     budget: &mut resolve::Budget,
     metres: f32,
     health: &mut Query<&mut ComponentHealth>,
 ) -> (bool, u64) {
-    let (owners, parents) = (&context.world.owners, &context.world.parents);
-    let shooter = shell.source.map(|source| source.tank);
-    let not_own = |entity: Entity| not_own_volume(entity, shooter, owners, parents);
     let radius = resolve::disc_radius(shell.projectile.body().caliber);
     let leg = resolve::Leg::new(
         flight.sweep_origin(),
@@ -3299,7 +3430,7 @@ fn burst_ahead(
         metres,
         &flight.sample_offsets(radius),
     );
-    let wounded = wound_legs(shell, context, &not_own, &[leg], flight.speed, health);
+    let wounded = wound_legs(shell, context, admit, &[leg], flight.speed, health);
     flight.fly(flight.direction * metres);
     budget.fly(f64::from(metres / flight.speed));
     let (ended, removed) = burst_here(shell, context, flight, flight.speed, health);
@@ -4447,6 +4578,7 @@ mod march_tests {
             path_sequence: 0,
             replica: None,
             contacted: Vec::new(),
+            source_cleared: false,
         }
     }
 
@@ -4756,92 +4888,6 @@ mod march_tests {
                 assert_ne!(
                     after.1, before.1,
                     "the off-centre authority hit imparts angular velocity",
-                );
-            }
-        }
-    }
-
-    /// The game's damage model: the provisional whole-flight exclusion admits a round born
-    /// inside its firing tank's geometry. The same material still stops a foreign round. This
-    /// fixture pins the retained rule while authored bore/clearance facts remain an owner decision;
-    /// the measured construction counterexamples live in the ballistics sweep review.
-    #[test]
-    fn a_shell_ignores_the_tank_that_fired_it() {
-        use crate::damage::VolumeOf;
-
-        // A thick plate the shell starts INSIDE (origin at z = 0, the plate's centre) — the muzzle
-        // buried in its own mask.
-        for own in [true, false] {
-            let mut app = world_with_plate(Vec3::new(3.0, 3.0, 0.4), Vec3::new(0.0, 2.0, 0.0));
-            // The "tank" that owns the plate, and the shooter — the same entity or not, per the arm.
-            let tank = app.world_mut().spawn(Transform::default()).id();
-            let shooter = if own {
-                tank
-            } else {
-                app.world_mut().spawn(Transform::default()).id()
-            };
-            let mut plates = app
-                .world_mut()
-                .query_filtered::<Entity, With<BallisticVolume>>();
-            let plate = plates.single(app.world()).expect("one plate");
-            app.world_mut().entity_mut(plate).insert(VolumeOf(tank));
-
-            let origin = Vec3::new(0.0, 2.0, 0.0);
-            let dir = Vec3::NEG_Z;
-            let shell = app
-                .world_mut()
-                .spawn((
-                    fixture_round(FIXTURE_MG, dir * 755.0),
-                    DamageReport::default(),
-                    TerminalReport::default(),
-                    ShellPath {
-                        points: vec![origin],
-                        segment_starts: Vec::new(),
-                    },
-                    PenetrationMarks::default(),
-                    SpallMarks::default(),
-                    // The attribution the shell carries from `FireShell::shooter` — on the authority's
-                    // shell, the shooter's own predicted shell, AND (since the coax fix) an observer's
-                    // replica shell alike.
-                    ShotSource {
-                        tank: shooter,
-                        weapon: 0,
-                        round: 0,
-                    },
-                    Transform::from_translation(origin).looking_to(dir, Vec3::Y),
-                ))
-                .id();
-            app.update();
-
-            let hits = app.world().resource::<ImpactLog>().0.clone();
-            if own {
-                assert!(
-                    hits.is_empty(),
-                    "a round fired from inside its OWN tank's armour must pass straight through it — \
-                     the fixture starts inside its source volume; got {} impact(s)",
-                    hits.len(),
-                );
-                let flown = app
-                    .world()
-                    .get::<Transform>(shell)
-                    .expect("the shell survives its own tank")
-                    .translation
-                    .distance(origin);
-                assert!(
-                    flown > 10.0,
-                    "the round should fly a full step (~11.8 m at 755 m/s) out of its own tank; it \
-                     moved {flown:.2} m",
-                );
-            } else {
-                assert_eq!(
-                    hits.len(),
-                    1,
-                    "the SAME plate must still stop a round from any other source — self-exclusion is \
-                     an exclusion, not a hole in the armour",
-                );
-                assert_eq!(
-                    hits[0].surface,
-                    ImpactSurface::Material(crate::substances::SurfaceFeedback::fixture())
                 );
             }
         }

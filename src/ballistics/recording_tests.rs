@@ -2594,3 +2594,146 @@ fn the_presented_march_and_tracer_include_the_birth_to_muzzle_prefix() {
         "the round passes the muzzle inside its first tick"
     );
 }
+
+/// The game's damage model: leaving the source's box ends its launch clearance permanently.
+/// A real armour bounce can then bring the round into its source's rear volumes and deposit dose.
+/// All poses, sizes, pools, speed and the grazing angle below are fixture data.
+#[test]
+fn a_round_that_bounces_back_into_its_source_strikes_it() {
+    let mut app = recording_world(false);
+    app.insert_resource(RetainSpentShells(true));
+    let (source, volumes) = tank(
+        &mut app,
+        Vec3::ZERO,
+        0.0,
+        Vec3::ZERO,
+        &[
+            (
+                "source front",
+                Vec3::new(2.0, 2.0, 0.4),
+                Vec3::ZERO,
+                Kind::Crew(DEEP),
+            ),
+            (
+                "source rear",
+                Vec3::new(6.0, 2.0, 0.4),
+                Vec3::NEG_Z * 45.0,
+                Kind::Crew(DEEP),
+            ),
+            (
+                "source ammo",
+                Vec3::new(6.0, 2.0, 0.4),
+                Vec3::NEG_Z * 46.0,
+                Kind::Ammo(ONE),
+            ),
+        ],
+    );
+    app.world_mut()
+        .entity_mut(source)
+        .insert(avian3d::prelude::LockedAxes::ALL_LOCKED);
+    tank(
+        &mut app,
+        Vec3::new(6.15, 0.0, -28.0),
+        0.0,
+        Vec3::ZERO,
+        &[(
+            "reflector",
+            Vec3::new(0.3, 3.0, 40.0),
+            Vec3::ZERO,
+            Kind::Plate,
+        )],
+    );
+    settle(&mut app);
+    let angle = 15.0_f32.to_radians();
+    let direction = Dir3::new(Vec3::new(angle.sin(), 0.0, -angle.cos())).unwrap();
+    let round = crate::tank::WeaponRound::resolve("88mm_AP").unwrap().round;
+    let mut fire = FireShell::of_round(
+        &round,
+        Vec3::ZERO,
+        direction,
+        FireMechanism::Single,
+        false,
+        Some(ShotSource {
+            tank: source,
+            weapon: 0,
+            round: 0,
+        }),
+        None,
+    );
+    fire.speed = SPEED;
+    app.world_mut().trigger(fire);
+    run(&mut app, 16);
+    let mut logs = app.world_mut().query::<&PenetrationMarks>();
+    let marks: Vec<_> = logs
+        .iter(app.world())
+        .flat_map(|marks| &marks.log)
+        .collect();
+    assert!(
+        marks
+            .iter()
+            .any(|mark| matches!(mark, ArmourMark::Bounce { .. })),
+        "the fixture must bounce"
+    );
+    assert!(
+        marks.iter().any(
+            |mark| matches!(mark, ArmourMark::Wound { volumes: crossed, .. } | ArmourMark::Crossing { volumes: crossed, .. }
+        if crossed.iter().any(|v| v.volume == volumes[1]))
+        ),
+        "after box clearance the reflected round must strike its source's rear volume"
+    );
+    let mut doses = app.world_mut().query::<&ShotDose>();
+    assert!(
+        doses.iter(app.world()).any(|dose| dose
+            .shown_losses()
+            .find(|(volume, _)| *volume == volumes[1])
+            .map_or(0, |(_, loss)| loss)
+            > 0),
+        "the source receives the returning round's dose"
+    );
+}
+
+/// The game's damage model: translation of the source cannot clear a round that remains inside
+/// its body-local box. Fixture data deliberately moves the carrier farther than its whole box in
+/// one tick, so a box in the tick-end world frame would clear it early and resolve its own plate.
+#[test]
+fn source_clearance_travels_with_the_firing_body() {
+    let mut app = recording_world(false);
+    app.insert_resource(RetainSpentShells(true));
+    let (source, _) = tank(
+        &mut app,
+        Vec3::new(0.0, 20.0, 0.0),
+        0.0,
+        Vec3::X * 1000.0,
+        &[("source material", Vec3::splat(2.0), Vec3::ZERO, Kind::Plate)],
+    );
+    settle(&mut app);
+    let at = app.world().get::<Position>(source).unwrap().0;
+    let round = crate::tank::WeaponRound::resolve("88mm_AP").unwrap().round;
+    let mut fire = FireShell::of_round(
+        &round,
+        at,
+        Dir3::X,
+        FireMechanism::Single,
+        false,
+        Some(ShotSource {
+            tank: source,
+            weapon: 0,
+            round: 0,
+        }),
+        None,
+    );
+    fire.speed = 1000.0;
+    fire.drag_k = 0.0;
+    app.world_mut().trigger(fire);
+    run(&mut app, 1);
+    let mut shells = app.world_mut().query::<(&Projectile, &PenetrationMarks)>();
+    let (round, marks) = shells.single(app.world()).unwrap();
+    assert!(
+        !round.source_cleared,
+        "the round remains inside its moving source box"
+    );
+    assert!(
+        marks.log.is_empty(),
+        "initial source clearance cannot charge its own material"
+    );
+}

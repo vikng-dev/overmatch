@@ -391,19 +391,16 @@ record, codec, pen-cam, recorder-integration, explanation-transport, protocol an
 passed; four ignored. The existing deliberately unplaced burst-dose clip is now explicitly
 synthetic. All recorded corpus reports pass the new edge without changing their data.
 
-## Whole-flight source transparency: measured, retained for the owner
+## Collider-exit birth and bounded source clearance
 
-Subject: the game's damage model, game state only. The premise needed to delete `not_own_volume`
-is false: actual authored muzzle starts are not all outside their own solid volumes. The lane
-removed the predicate's filtering entirely, ran the shot suites and CI-scale fuzzer, and compared
-every mounted round at neutral servos under zero and full authored recoil. The temporary audit
-used the real spawned rig/muzzle pose, certified birth membership, `FireShell` and the real march;
-it was removed with the losing experimental arm. No geometry or physical law was changed.
+Subject: the game's damage model, game state only. Mounted rounds are born at the forward bore
+exit from their source's physics collision proxies. The flash, report and pen-cam muzzle anchor
+remain at the muzzle node. `FireShell` and the fire message carry both positions; authority flight,
+client catch-up and the presented march start at birth. This deliberately advances `PROTOCOL_REV`
+to 61 with its fire-type pin.
 
-MEASURED software results: baseline 451 tests passed; without filtering 450 passed and only
-`a_shell_ignores_the_tank_that_fired_it` failed (it explicitly pins the retained rule). The fuzzer,
-pen-cam corpus, field-cast pin, recorder, public-path/network and headless shot gates were unchanged.
-Of the ten mounted-round/recoil cases, exactly these three changed:
+The earlier MEASURED construction audit established why deleting all initial source clearance
+would stop mounted rounds in their own barrel or mount. Its fixture evidence remains:
 
 | Mounted fixture configuration | Own volumes at birth, MEASURED | Unfiltered outcome, MEASURED |
 |---|---|---|
@@ -411,28 +408,30 @@ Of the ten mounted-round/recoil cases, exactly these three changed:
 | Coax / 7.9mm_AP, full authored recoil | Coax_MG_Barrel | Stops after 0.0142822 m; barrel reduced by one shown HP point |
 | HullMG / 7.9mm_AP, full authored recoil | Hull_MG_Ball and Hull_MG_Mantlet | Stops after 0.0158691 m; no shown pool loss |
 
-With filtering each travels 93.2575836 m in the measured march window. The other seven cases
-(neutral HullMG, and both recoil endpoints of each mounted main-gun round) have clear starts and
-unchanged outcomes. These are fixture measurements of the current data, never a vehicle-specific
-pass condition. The earlier comment claiming a coax/mantlet start did not describe these measured
-neutral-servo configurations; it is replaced by the generic retained-rule invariant.
+The source is now ignored only until its first box exit. The box is the union of all source-body
+collider AABBs, including ballistic barrel volumes and physics proxies, transformed into the
+firing rigid body's local frame at both captured interval endpoints. It follows that body's pose;
+a tick-end world-space box could move away before the round's march begins. Clearance uses the
+same local endpoint-chord model as moving-collider discovery, splits open flight at the exit,
+and uses the shared boundary nudge before rediscovery. A spawn-time latch keeps the source solid
+thereafter, including later ticks and returns. The whole-flight predicate and its pinned test are
+gone; source identity remains for attribution.
 
-The missing facts are authored bore/launch clearance through solid barrel, ball and mantlet
-volumes over the recoil envelope, rather than ownership as a physical property. Moving the start
-past a guessed distance would hide those facts again. The fuzzer's rays carry no shooter and
-already admit all volumes, so it cannot establish own-muzzle clearance. MEASURED: the existing
-`a_round_that_strikes_a_tank_again_records_each_encounter` fixture still resolves a wall-reflected
-path back into the same compound tank. DERIVED: own-source identity supplies no geometric reason
-to exclude such a later encounter; the retained predicate would do so. Ground return is currently
-stopped by the unresolved B6 ground law. Decision: retain the rule pending the owner's bore and
-clearance contract, explicitly including its whole-flight self-intersection defect. The source
-comments now state authority-only walking and the current attribution readers. No experiment
-switch or second path remains.
+MEASURED software checks: the muzzle-birth mutant missed the intervening plate and failed the
+mounted-fire origin test. With collider-exit birth, foreign-hull and unowned-wall fixtures meet
+and pay their plates from outside; their deliberately thick fixture plates stop the rounds.
+The real reflected-source fixture failed under whole-flight filtering and strikes its source
+under bounded clearance. A source moving farther than its box width in one tick retains clearance
+while the round stays inside the body-local box. Geometry, speed and pools are labelled fixture
+data; these are class invariants, with no vehicle-specific pass condition.
 
-Restored-rule verification: format and workspace/all-target clippy passed. MEASURED: 108 march,
-recorder, pen-cam, fuzzer and citation tests passed; four ignored. The temporary audit and unfiltered
-arm are absent from the tree. The history regression's capture-history comment is also replaced
-by its current role and resync invariant (the review's P3 comment finding is fixed).
+The headless presentation check samples both sides of the muzzle within the first tick: the
+replayed path begins at birth, and its early tracer geometry includes the birth-to-muzzle prefix;
+the event's visual muzzle remains separate through cursor release. DERIVED: a five-metre prefix
+at 773 m/s lasts about 6.47 ms, less than the 15.625 ms fixed step. The trace therefore includes
+that short barrel-length segment; no capture or raster-occlusion claim was made.
+
+Deferred alternative in #247: colliding barrels, a hollow bore and a round born at the breech.
 
 ## Required staging facts (B62/B63, B68, B71)
 
@@ -797,3 +796,52 @@ recording, damage-cam, pen-cam, field-cast, headless, sandbox, score, stats and 
 passed with nine ignored instruments (two recording tests updated for the fixture seats
 re-passed), and 55 whole-tree guard tests passed. Format and workspace/all-target clippy passed.
 No capture or pricing was run.
+
+
+## Review of sweep-ball-7 and source-clearance follow-through
+
+| Reviewer | Finding | Disposition | Fixed in (commit subject) |
+|---|---|---|---|
+| Codex | P1: muzzle birth skips a wall or foreign hull | verified | shooting: start rounds at the source collider exit (#247) |
+| Codex | P1: whole-flight source transparency | verified | ballistics: make the source tank solid after box clearance (#247) |
+| Codex | P1: relative rest skips other collisions | verified | ballistics: discover other bodies during relative rest (#247) |
+| Codex | P2: husk counter depends on tick partitioning | verified | damage: count husk contacts once per round and tank (#227) |
+| Codex | P3: knockout module contract states the removed rule | verified | spec: refuse tanks with fewer than two crew stations (#227) |
+| Claude | P2: sheets below the two-crew floor load | verified | spec: refuse tanks with fewer than two crew stations (#227) |
+| Claude | P3: knockout module contract states the removed rule | verified | spec: refuse tanks with fewer than two crew stations (#227) |
+| Claude | P3: design sections 7 and 8 state the removed rule | verified | ballistics: make the source tank solid after box clearance (#247) |
+| Claude | P3: the knockout test cannot detect cause replacement | verified | spec: refuse tanks with fewer than two crew stations (#227) |
+| Claude | P3: knockout-shot continuation marks count as husk strikes | verified | damage: count husk contacts once per round and tank (#227) |
+
+Subject: the game's damage model, game state only. Every review finding is verified; the first
+two Codex findings describe work explicitly left unstarted by sweep-ball-7, rather than an
+unreported regression. The source-clearance section above owns the birth/return design narrative.
+
+- Relative rest: `relative_rest_still_discovers_a_separate_plate_in_the_same_tick` was red with
+  no separate-plate crossing. Exact fixture positions make the carrier velocity representable;
+  at relative rest the old branch spent the rest of the tick without discovery. The fix excludes
+  that collider only until another crossing changes velocity; the zero-speed regression also passes.
+- Husk statistics: the direct `MarchRecorder::note` regression was red at three strikes for one
+  round/tank across three steps. A projectile now remembers each tank's first contact, including
+  automatic fire. A living first contact cannot be reclassified by later marks after knockout.
+  The counter's deliberate unit is first contacts with husks, at most one per round and tank.
+- Crew floor: the one-station fixture passed `validate` before the gate. Both zero- and one-station
+  files now refuse at the asset door with the `.tank.ron` filename, `volumes.*.crew` and the repair.
+  The synthetic bake sheet and geometry obey the same rule; the scale test derives its expected
+  refusals from the declared volumes. No shipped geometry or asset data changed.
+- Knockout prose: the implemented input `(one in action, no cook-off)` gives the crew-loss label;
+  the module and design claims of an all-crew threshold were false. They now state the under-two
+  rule. Cook-off empties every crew pool and therefore satisfies that rule as a cause.
+- Cause-latching coverage: the original five rows could not distinguish an independent cook-off
+  label from the crew rule. The test now starts with a crew-loss label, then processes a later
+  cook-off through the real consequence chain and checks the scoring label stays crew loss.
+
+MEASURED gates: relative-rest/citation checks passed (five); recording/contact checks passed
+(35); spec, bake, consequence and citation checks passed (72); birth, replay, fire transport,
+protocol pins, pen cam, field casts, headless and citation checks passed (359, six ignored).
+The final source-clearance and whole-tree run passed 363 tests (seven ignored), including
+`doc_citations`, `ui_ascii`, `net_boundary`, `bake::`, pen cam, field casts and headless checks.
+Formatting and workspace/all-target CI clippy with `dev_ui,bitprobe` passed for each code commit.
+The fire-field plumbing required mechanical VFX fixture initialization and accurate tracer-anchor
+comments; VFX behavior was unchanged. No captures, pricing, pushes or issue comments were made.
+B1, B2, B3, B4, B6, B13 and `SPIKE_TRACE_SIM_FIELDS` remain owner calls.
