@@ -746,27 +746,28 @@ fn apply_track_forces(
         .as_ref()
         .expect("a dynamic tank is admitted only after its world publishes the terrain field");
     let dt = time.delta_secs();
-    let mut entities = Vec::new();
+    let mut sources = Vec::new();
     let mut near = Vec::new();
     for (entity, pos, _, _, body, ..) in &tanks {
         // Replicas have no authoritative driving pass and gather no support shapes.
         if *body == RigidBody::Dynamic {
-            entities.push(entity);
-            near.extend(
-                rubble
-                    .near(pos.0, gear.rubble_radius)
-                    .into_iter()
-                    .filter(|&collider| rubble.body_of(collider) != entity),
-            );
+            let local: Vec<_> = rubble
+                .near(pos.0, gear.rubble_radius)
+                .into_iter()
+                .filter(|&collider| rubble.body_of(collider) != entity)
+                .collect();
+            near.extend_from_slice(&local);
+            sources.push((entity, local));
         }
     }
-    entities.sort_unstable();
+    sources.sort_unstable_by_key(|(entity, _)| *entity);
+    let entities: Vec<_> = sources.iter().map(|(entity, _)| *entity).collect();
     near.sort_unstable();
     near.dedup();
     // A hull's shape is read only if another tank's footprint query reached it. All recipients
     // come from the same body query, before any source applies driving forces.
     let mut pieces = RubbleBodies::gather(&rubble, &near, &pieces_query);
-    for &entity in &entities {
+    for (entity, local) in sources {
         let (
             _,
             pos,
@@ -785,7 +786,7 @@ fn apply_track_forces(
         ) = tanks
             .get_mut(entity)
             .expect("a tank gathered for this synchronous tick remains alive");
-        pieces.exclude_source(entity);
+        pieces.select_source(entity, &local);
         let (mut forces, ..) = pieces_query
             .get_mut(entity)
             .expect("a dynamic driving hull carries Avian force state");

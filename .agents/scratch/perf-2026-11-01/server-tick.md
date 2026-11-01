@@ -196,3 +196,22 @@ after measurement for the changes below.
 The proxy-key write-back itself is sound: either observer order removes the proxy from its
 current tree. No second patch to that fix is warranted. The existing Avian removal guards
 remain the invariant tests.
+
+## server-perf-2: each tank reuses its tick-start support candidates
+
+"driving: reuse each tank's tick-start support candidates (#250)" retains the per-tank collider
+lists already returned by `RubbleQuery::near`. The union still constructs one immutable shape and
+body snapshot for the whole drive step. `RubbleBodies::select_source` selects only that source's
+list, excludes its own body once, and sorts snapshot indices to preserve the previous gather
+order. `in_slab` no longer scans surfaces gathered solely for another tank, and an empty local
+list returns before building a slab AABB. Contact-to-surface lookups use the snapshot's collider
+index rather than a linear search of the union. The reaction pass still has every recipient.
+
+Evidence: `each_source_reuses_only_its_own_nearby_surfaces_without_changing_support` compares the
+exact intersections before and after selection, verifies gather order and self exclusion, and
+reads an unselected recipient from the shared snapshot. Candidate checks per fixture slab are
+2 for the global list, 1 for the local list, and 0 for an empty local list (MEASURED, test). These
+are operation counts, not tick timings or a production speedup claim.
+
+Gates: formatting and CI clippy passed; 229 driving, headless and citation tests passed, with
+3 existing ignored tests (MEASURED test-harness counts). No driving golden or tolerance changed.

@@ -164,7 +164,7 @@ pub(super) fn apply_belt_support_field(
         .filter(|&collider| rubble.body_of(collider) != hull_entity)
         .collect();
     let mut pieces = RubbleBodies::gather(&rubble, &near, &bodies);
-    pieces.exclude_source(hull_entity);
+    pieces.select_source(hull_entity, &near);
     let oracle = &field.0;
 
     // Phase 1 — both sides' contact passes at their pre-tick belt speeds (transmission-design

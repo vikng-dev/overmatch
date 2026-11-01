@@ -9,7 +9,7 @@
 //!
 //! - **What the belt bears on** ([`RubbleQuery::supports`]): solid, layer-compatible colliders,
 //!   except [`super::terrain::FieldSurface`] geometry already represented by the field. Callers
-//!   exclude self-support by identity ([`RubbleBodies::exclude_source`]). Every admitted dynamic
+//!   exclude self-support by identity ([`RubbleBodies::select_source`]). Every admitted dynamic
 //!   body carries Avian force state; static construction transmits the full opposite belt
 //!   reaction to [`crate::contact_transfer::ContactTransfers`] when it has structural laws.
 //! - **The footprint check**: a link's slab ([`Slab`]) is the volume its field probes sweep, made
@@ -71,6 +71,7 @@ use avian3d::prelude::{
 };
 use bevy::ecs::query::QueryFilter;
 use bevy::ecs::system::SystemParam;
+use bevy::platform::collections::HashMap;
 use bevy::prelude::*;
 
 use super::terrain::FieldSurface;
@@ -390,8 +391,12 @@ pub(crate) struct SlabOverlap {
 /// pass that reads the field alone (the envelope calibration).
 #[derive(Clone, Default)]
 pub struct RubbleBodies {
-    source: Option<Entity>,
     surfaces: Vec<Surface>,
+    by_collider: HashMap<Entity, usize>,
+    /// Indices in gather order, restricted once per source using its tick-start AABB query.
+    active: Vec<usize>,
+    #[cfg(test)]
+    surface_checks: std::cell::Cell<usize>,
     pub(crate) bodies: Vec<PieceBody>,
 }
 
@@ -467,21 +472,37 @@ impl RubbleBodies {
                 structure: rubble.structures.contains(body).then_some(body),
                 motion,
             });
+            let index = out.surfaces.len() - 1;
+            out.by_collider.insert(collider, index);
+            out.active.push(index);
         }
         out
     }
 
-    /// The one self-support rule: a pass never reads its own source body's surfaces. A shared
-    /// tick-start snapshot serves every source, so the rule is identity, set per pass.
-    pub(crate) fn exclude_source(&mut self, source: Entity) {
-        self.source = Some(source);
+    /// Select the source's tick-start nearby colliders and exclude its own body. The shared
+    /// snapshot retains all recipients for reaction sizing, but each link tests only this tank's
+    /// candidates. Sorting indices preserves gather order, including for an unordered input list.
+    pub(crate) fn select_source(&mut self, source: Entity, near: &[Entity]) {
+        self.active.clear();
+        for collider in near {
+            let index = *self
+                .by_collider
+                .get(collider)
+                .expect("a source's nearby collider belongs to the shared tick-start snapshot");
+            if self.surfaces[index].owner != source {
+                self.active.push(index);
+            }
+        }
+        self.active.sort_unstable();
+        self.active.dedup();
     }
 
     fn surface(&self, collider: Entity) -> &Surface {
-        self.surfaces
-            .iter()
-            .find(|s| s.collider == collider)
-            .expect("a belt collider contact belongs to the gathered footprint surfaces")
+        let index = self
+            .by_collider
+            .get(&collider)
+            .expect("a belt collider contact belongs to the gathered footprint surfaces");
+        &self.surfaces[*index]
     }
 
     /// Whether `collider` belongs to a gathered dynamic piece.
@@ -552,15 +573,15 @@ impl RubbleBodies {
     /// Every gathered piece that reaches into `slab`, with its extent there, in gather order.
     pub(crate) fn in_slab(&self, slab: &Slab) -> Vec<SlabOverlap> {
         let mut overlaps = Vec::new();
-        if self.surfaces.is_empty() {
+        if self.active.is_empty() {
             return overlaps;
         }
         let (lo, hi) = slab.aabb();
         let radial = (slab.face - slab.reach, slab.face + slab.travel);
-        for (piece, s) in self.surfaces.iter().enumerate() {
-            if self.source == Some(s.owner) {
-                continue;
-            } // A hull cannot support its own belt.
+        for &piece in &self.active {
+            #[cfg(test)]
+            self.surface_checks.set(self.surface_checks.get() + 1);
+            let s = &self.surfaces[piece];
             if (s.aabb.min.cmpgt(hi) | s.aabb.max.cmplt(lo)).any() {
                 continue;
             }
@@ -941,7 +962,7 @@ mod tests {
                         "unmarked fixed geometry must carry the belt"
                     );
                     let mut pieces = RubbleBodies::gather(&rubble, &near, &bodies);
-                    pieces.exclude_source(source);
+                    pieces.select_source(source, &near);
                     let (mut forces, _, mass, ..) = bodies.get_mut(source).unwrap();
                     let before = forces.linear_velocity();
                     let report = pad_pass(
@@ -1854,6 +1875,58 @@ mod tests {
         }
         out.push(report.belt_reaction.to_bits());
         out
+    }
+
+    /// Each tank's links visit only its own tick-start candidates, in the original gather order.
+    /// The server relies on other tanks' nearby construction adding no work to this footprint;
+    /// support intersections and the whole snapshot used for reactions must stay identical.
+    /// Fixture boxes are separated horizontally, with a small slab inside the first footprint.
+    #[test]
+    fn each_source_reuses_only_its_own_nearby_surfaces_without_changing_support() {
+        let mut app = physics();
+        let local = piece(&mut app, 0.0, 0.0);
+        let remote = piece(&mut app, 50.0, 0.0);
+        app.update();
+        app.world_mut()
+            .run_system_once(move |rubble: RubbleQuery, bodies: Query<PieceData>| {
+                let mut pieces = RubbleBodies::gather(&rubble, &[local, remote], &bodies);
+                let slab = Slab {
+                    origin: Vec3::new(0.0, 0.3, -0.1),
+                    axis: Vec3::Z,
+                    lat: Vec3::X,
+                    out: Vec3::NEG_Y,
+                    len: 0.2,
+                    lateral: (-0.1, 0.1),
+                    face: 0.025,
+                    reach: 0.5,
+                    travel: 0.0,
+                };
+                let full = pieces.in_slab(&slab);
+                assert_eq!(full.len(), 1);
+                assert_eq!(pieces.surface_checks.replace(0), 2);
+                pieces.select_source(Entity::PLACEHOLDER, &[local]);
+                assert_eq!(pieces.in_slab(&slab), full);
+                assert_eq!(pieces.surface_checks.replace(0), 1);
+                assert!(
+                    pieces.is_dynamic(remote),
+                    "unselected recipients stay in the snapshot"
+                );
+                pieces.select_source(Entity::PLACEHOLDER, &[remote, local, local]);
+                assert_eq!(
+                    pieces.in_slab(&slab),
+                    full,
+                    "gather order and membership are unchanged"
+                );
+                assert_eq!(pieces.surface_checks.replace(0), 2);
+                pieces.select_source(local, &[local]);
+                assert!(
+                    pieces.in_slab(&slab).is_empty(),
+                    "a hull cannot support its own belt"
+                );
+                assert_eq!(pieces.surface_checks.get(), 0);
+                println!("MEASURED candidate checks per fixture slab: global=2 local=1 empty=0");
+            })
+            .unwrap();
     }
 
     /// OPEN GROUND WITH NO OVERLAPPING PIECES PRESERVES EVERY FORCE BIT. The field's original
