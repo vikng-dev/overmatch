@@ -260,20 +260,24 @@ struct DustPalettes(BTreeMap<[u32; 3], Handle<Image>>);
 
 impl DustPalettes {
     /// The palette of soil of albedo `colour_srgb`: the albedo where the sprite signal is strong
-    /// (the sunlit face), sinking to a sixth of it in the cloud's own shadow and to three quarters
-    /// of it as the cloud ages (Y). The gain lane is one: the light rides the material.
+    /// (the sunlit face), tinted by the key light's linear colour, as Bevy lights the terrain.
+    /// ASSUMED cloud shading: a shadow floor of 0.16 of lit soil, ageing to 0.76 (Y).
+    /// These are presentation contrast choices, not measured soil properties. The gain lane
+    /// is one: the light's brightness and exposure ride the material.
     fn palette(&mut self, images: &mut Assets<Image>, colour_srgb: [f32; 3]) -> Handle<Image> {
         self.0
             .entry(colour_srgb.map(f32::to_bits))
             .or_insert_with(|| {
                 let albedo = LinearRgba::from(Color::srgb_from_array(colour_srgb));
+                // The world key's colour is constant for the session; only its elevation varies.
+                let sun = crate::world::sun_light().color.to_linear();
                 gradient_lut(images, |x, y| {
                     let shade = (0.16 + 0.84 * x) * (0.76 + 0.24 * (1.0 - y));
                     (
                         LinearRgba::rgb(
-                            albedo.red * shade,
-                            albedo.green * shade,
-                            albedo.blue * shade,
+                            albedo.red * sun.red * shade,
+                            albedo.green * sun.green * shade,
+                            albedo.blue * sun.blue * shade,
                         ),
                         1.0,
                     )
@@ -1192,17 +1196,24 @@ mod tests {
         ([data[texel], data[texel + 1], data[texel + 2]], light)
     }
 
-    /// `colour_srgb` as the palette stores its sunlit texel: linear, 8-bit.
+    /// The lit soil texel: linear albedo times the world key light's linear colour, in 8-bit RGB.
     fn stored_linear(colour_srgb: [f32; 3]) -> [u8; 3] {
-        let linear = LinearRgba::from(Color::srgb_from_array(colour_srgb));
-        [linear.red, linear.green, linear.blue].map(|c| (c.clamp(0.0, 1.0) * 255.0).round() as u8)
+        let albedo = LinearRgba::from(Color::srgb_from_array(colour_srgb));
+        let sun = crate::world::sun_light().color.to_linear();
+        [
+            albedo.red * sun.red,
+            albedo.green * sun.green,
+            albedo.blue * sun.blue,
+        ]
+        .map(|c| (c.clamp(0.0, 1.0) * 255.0).round() as u8)
     }
 
     /// Lifted soil is the ground's own, lit by the key light like the ground it rose from: every
-    /// puff's sunlit texel is the lifting ground's albedo and its material carries the sun's
+    /// puff's sunlit texel is the lifting ground's albedo times the sun's linear colour;
+    /// its material carries the sun's
     /// radiance per unit albedo on level ground under the default exposure. Two grounds differing
     /// only in colour lift differently coloured clouds. A mutant that keeps one shared earth
-    /// palette, or draws the dust unlit, fails. FIXTURE DATA: the shipped table with the base
+    /// palette, drops the sun's colour, or draws the dust unlit, fails. FIXTURE DATA: the shipped table with the base
     /// ground's colour replaced.
     #[test]
     fn each_puff_is_its_grounds_soil_lit_by_the_key_light() {

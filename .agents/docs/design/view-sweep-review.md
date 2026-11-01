@@ -216,3 +216,21 @@ The 2026-11-01 capture session read items 6-7 and 3 by eye. Findings, game state
   flames give 0.36-0.48 m and 0.45-0.67 m, against the MG's authored 0.3-0.55 m and 0.45-0.8 m.
   Unchanged. The MG's light peak, 1.2 Mlm, is not on that law: by flash area it would be about
   0.09 Mlm.
+
+## Lane 4: blind-review verification and HUD layering
+
+Subject: the game's rendering and HUD, game state only. The lane starts at main's
+"docs: point the sweep record at the blast-hit keying (#236)".
+
+Both reviewers' sun-colour P2s are **verified**. The regression
+`each_puff_is_its_grounds_soil_lit_by_the_key_light` failed before the fix: MEASURED linear
+8-bit RGB `[81, 55, 19]` versus `[81, 47, 13]` for a synthetic soil under the world key.
+`DustPalettes::palette` now multiplies linear soil albedo by `sun_light`'s linear colour;
+the material still carries irradiance over pi and exposure. Bevy's directional-light
+extraction multiplies the same linear colour by illuminance. This remains a level-ground,
+key-only approximation: sky illumination, terrain shadowing and volumetric scattering are
+not represented. No camera-distance scale or game-state change was added.
+
+Claude's palette-provenance P3 is **verified**: the shadow and ageing ratios were unlabelled.
+They are now explicitly ASSUMED presentation contrast choices, with no claim of measurement.
+Fixed in "vfx: tint lifted soil by the sun's linear colour (#236)".
