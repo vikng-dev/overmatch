@@ -117,13 +117,39 @@ fn a_corridor_above_the_gate_floor_fails_the_gate() {
     for region in &report.regions {
         assert_eq!(
             region.measurements.len(),
-            PROBE_ROUNDS.len(),
+            probe_rounds().len(),
             "every opening is measured against every gun"
         );
     }
     assert!(
         !report.is_clean(),
         "a corridor to crew or ammunition must fail the gate, unconditionally"
+    );
+}
+
+/// The instrument measures what the game fires: every shipped round is a probe exactly as its gun
+/// fires it (the body that meets the plate, at the gun's muzzle speed), and the list is ascending
+/// by calibre, which the sweep's first-admitting rule relies on. A copied list that drifts from the
+/// registry, or an unsorted one, fails here.
+#[test]
+fn the_probes_are_the_shipped_rounds_as_fired_in_calibre_order() {
+    let guns = crate::guns::GunRegistry::shipped();
+    let probes = probe_rounds();
+    for key in crate::rounds::RoundRegistry::shipped().keys() {
+        let round = guns
+            .round_by_key(key)
+            .expect("every shipped round is chambered");
+        let probe = probes
+            .iter()
+            .find(|probe| probe.name == key)
+            .unwrap_or_else(|| panic!("{key} is not a probe"));
+        assert_eq!(probe.body(), round.penetrator, "{key}");
+        assert_eq!(probe.speed.to_bits(), round.muzzle_speed.to_bits(), "{key}");
+    }
+    assert!(
+        probes
+            .windows(2)
+            .all(|pair| pair[0].caliber <= pair[1].caliber)
     );
 }
 

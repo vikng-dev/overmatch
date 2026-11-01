@@ -94,64 +94,76 @@ impl ProbeRound {
     }
 }
 
-/// The guns every opening is measured against, ASCENDING by caliber (the sweep takes the first that
-/// admits, so order is load-bearing).
-///
-/// Masses and speeds are period AP loadings for each bore; the 7.92 and the 88 are the Tiger's own
-/// spec values (`assets/tiger_1/tiger_1.tank.ron`), so the two rounds the game actually fires are
-/// measured as they are actually fired, nose factors included (the spec's nose geometry, derived).
-/// The other rounds' nose factor 0.3 is a labelled fixture value.
-pub const PROBE_ROUNDS: &[ProbeRound] = &[
+/// HYPOTHETICAL probes: period AP loadings for bores the game ships no round of, so an opening's
+/// closing calibre is bracketed between the shipped ones. Separately authored, never a copy of a
+/// shipped round; their nose factor 0.3 is a labelled fixture value.
+const HYPOTHETICAL_PROBES: &[ProbeRound] = &[
     ProbeRound {
-        name: "7.92mm",
-        caliber: 0.0079,
-        mass: 0.0118,
-        nose_factor: 0.5,
-        speed: 755.0,
-    },
-    ProbeRound {
-        name: "20mm",
+        name: "20mm (hypothetical)",
         caliber: 0.020,
         mass: 0.148,
         nose_factor: 0.3,
         speed: 830.0,
     },
     ProbeRound {
-        name: "37mm",
+        name: "37mm (hypothetical)",
         caliber: 0.037,
         mass: 0.685,
         nose_factor: 0.3,
         speed: 762.0,
     },
     ProbeRound {
-        name: "57mm",
+        name: "57mm (hypothetical)",
         caliber: 0.057,
         mass: 2.87,
         nose_factor: 0.3,
         speed: 815.0,
     },
     ProbeRound {
-        name: "75mm",
+        name: "75mm (hypothetical)",
         caliber: 0.075,
         mass: 6.8,
         nose_factor: 0.3,
         speed: 790.0,
     },
     ProbeRound {
-        name: "88mm",
-        caliber: 0.088,
-        mass: 10.2,
-        nose_factor: 7.0 / 24.0,
-        speed: 773.0,
-    },
-    ProbeRound {
-        name: "122mm",
+        name: "122mm (hypothetical)",
         caliber: 0.122,
         mass: 25.0,
         nose_factor: 0.3,
         speed: 795.0,
     },
 ];
+
+/// The guns every opening is measured against, ASCENDING by caliber (the sweep takes the first that
+/// admits, so order is load-bearing; ties keep name order): every shipped round as its gun fires
+/// it — the body that meets the plate, at its gun's muzzle speed, named by its key, resolved
+/// through the gun registry so the instrument measures the configuration the game fires — and the
+/// [`HYPOTHETICAL_PROBES`].
+pub fn probe_rounds() -> &'static [ProbeRound] {
+    static PROBES: std::sync::LazyLock<Vec<ProbeRound>> = std::sync::LazyLock::new(|| {
+        let guns = crate::guns::GunRegistry::shipped();
+        let mut probes: Vec<ProbeRound> = crate::rounds::RoundRegistry::shipped()
+            .keys()
+            .map(|key| {
+                let round = guns
+                    .round_by_key(key)
+                    .expect("the gun registry's load proves every shipped round is chambered");
+                ProbeRound {
+                    name: key,
+                    caliber: round.penetrator.caliber,
+                    mass: round.penetrator.mass,
+                    nose_factor: round.penetrator.nose_factor,
+                    speed: round.muzzle_speed,
+                }
+            })
+            .chain(HYPOTHETICAL_PROBES.iter().copied())
+            .collect();
+        probes.sort_by(|a, b| a.caliber.total_cmp(&b.caliber).then(a.name.cmp(b.name)));
+        probes
+    });
+    &PROBES
+}
 
 // ---------------------------------------------------------------------------------------------
 // Configuration
@@ -257,9 +269,9 @@ pub struct Region {
     /// The cheapest straight-axis cost seen to a target here (reference-mm) — a survey number;
     /// infinite when the floor probe reached the target off the straight axis (after a bounce).
     pub min_axis_cost: f32,
-    /// One entry per [`PROBE_ROUNDS`] element, same order.
+    /// One entry per [`probe_rounds`] element, same order.
     pub measurements: Vec<RoundMeasurement>,
-    /// Index into [`PROBE_ROUNDS`] of the smallest round that gets through. `None` means the sweep
+    /// Index into [`probe_rounds`] of the smallest round that gets through. `None` means the sweep
     /// found the opening closed to every gun in the game (the axis ray got through, the disc did
     /// not — a sub-caliber crack that self-heals, §13.5).
     pub admitting: Option<usize>,
@@ -270,7 +282,7 @@ pub struct Region {
 impl Region {
     /// The caliber (metres) of the smallest round that gets through, if any.
     pub fn admitting_caliber(&self) -> Option<f32> {
-        self.admitting.map(|index| PROBE_ROUNDS[index].caliber)
+        self.admitting.map(|index| probe_rounds()[index].caliber)
     }
 }
 
@@ -794,7 +806,7 @@ pub(super) fn drive(
 /// The round the gate floor IS: the probe round of least capability, at the speed where its
 /// capability equals the configured floor, or at its own reference speed when none is configured.
 pub(super) fn floor_probe(config: &FuzzConfig) -> (RoundBody, f32) {
-    let round = PROBE_ROUNDS
+    let round = probe_rounds()
         .iter()
         .min_by(|a, b| a.capability().total_cmp(&b.capability()))
         .expect("the gun list is not empty");
@@ -995,7 +1007,7 @@ impl Pass<'_, '_, '_> {
     /// Measure one opening against every gun in the game (§13.5's caliber gate): each round driven
     /// along the witness ray through the shared mechanism, admitted iff it reaches the target.
     fn sweep(&self, ray: &FuzzRay, target: Entity) -> Result<Vec<RoundMeasurement>, DriveFailure> {
-        PROBE_ROUNDS
+        probe_rounds()
             .iter()
             .map(|round| {
                 let flown = drive(
@@ -1725,7 +1737,7 @@ pub fn render(report: &Report) -> String {
             region.entry_local,
             region
                 .admitting
-                .map_or("nothing".to_owned(), |i| PROBE_ROUNDS[i].name.to_owned()),
+                .map_or("nothing".to_owned(), |i| probe_rounds()[i].name.to_owned()),
         );
     }
     out
@@ -1760,13 +1772,13 @@ fn render_region(out: &mut String, region: &Region) {
         region.witness_ray,
         region
             .admitting
-            .map_or("(closed to every gun)".to_owned(), |i| PROBE_ROUNDS[i]
+            .map_or("(closed to every gun)".to_owned(), |i| probe_rounds()[i]
                 .name
                 .to_owned()),
     );
     let _ = writeln!(out, "\n| round | η | capability | admits |");
     let _ = writeln!(out, "|---|---|---|---|");
-    for (round, measurement) in PROBE_ROUNDS.iter().zip(&region.measurements) {
+    for (round, measurement) in probe_rounds().iter().zip(&region.measurements) {
         let _ = writeln!(
             out,
             "| {} | {:.3} | {:.0} | {} |",
