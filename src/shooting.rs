@@ -123,7 +123,8 @@ pub(crate) fn advance_weapon_clock(mut clock: ResMut<crate::WeaponClock>) {
 
 /// Why a weapon's [`TankRoot`] resolves: [`crate::tank`]'s assembly spawns every weapon under its
 /// root in the root's own construction batch, and the root carries `Tank` (which requires its
-/// `TankCommand`) and its body's `Position`/`Rotation` from that batch on.
+/// `TankCommand`). Authority poses are spawn-complete; an interpolated client's pose can be
+/// temporarily absent during a timeline resync.
 const WEAPON_ROOT_IS_A_TANK: &str =
     "a weapon's TankRoot names its live tank, assembled with it in one construction batch";
 /// Why a weapon's slot indexes its root's per-weapon state: `WeaponGate`, `WeaponLoads` and
@@ -223,8 +224,8 @@ fn fire(
         (
             &TankCommand,
             Option<&TankVolumes>,
-            &Position,
-            &Rotation,
+            Option<&Position>,
+            Option<&Rotation>,
             Option<&crate::CombatantId>,
         ),
         With<Tank>,
@@ -253,6 +254,15 @@ fn fire(
     for (muzzle_entity, weapon, slot, root) in &weapons {
         let (command, tank_volumes, position, rotation, combatant) =
             tanks.get(root.0).expect(WEAPON_ROOT_IS_A_TANK);
+        let (Some(position), Some(rotation)) = (position, rotation) else {
+            // The game's damage model: a replica has no firing pose while interpolation resyncs.
+            // The authority fires from its uninterrupted solver pose; no client pose is invented.
+            assert!(
+                replica.is_some(),
+                "an authority weapon root retains the physics pose built at spawn"
+            );
+            continue;
+        };
         // Input routing only — edge vs level is baked into the command fields themselves
         // (`fire_primary` is a one-tick click latch, `fire_secondary` a held level; see
         // `TankCommand`), so a `Single` on Primary consumes the edge and an `Automatic` on
@@ -740,6 +750,43 @@ mod tests {
         world.insert_resource(fixed);
         world.insert_resource(crate::WeaponClock(0));
         world
+    }
+
+    /// The game's damage model: interpolation may remove a replica's pose during resync.
+    /// Its local fire bookkeeping waits for the pose to return; the authority has no such gap.
+    /// A mutant requiring Position in the root query panics before it can classify that absence.
+    #[test]
+    fn client_fire_waits_for_its_resync_pose_and_resumes() {
+        let mut world = test_world();
+        world.insert_resource(crate::ClientReplica);
+        let root = spawn_main_gun_rig(&mut world);
+        for rotation_gap in [false, true] {
+            if rotation_gap {
+                world.entity_mut(root).remove::<Rotation>();
+            } else {
+                world.entity_mut(root).remove::<Position>();
+            }
+            world.run_system_once(fire).unwrap();
+            assert_eq!(weapon_state(&mut world, root).rounds_fired, 0);
+            assert!(gate_state(&world, root).is_ready());
+            world
+                .entity_mut(root)
+                .insert((Position::default(), Rotation::default()));
+        }
+        world.run_system_once(fire).unwrap();
+        assert_eq!(weapon_state(&mut world, root).rounds_fired, 1);
+        assert!(!gate_state(&world, root).is_ready());
+    }
+
+    /// The game's damage model: a missing authority pose is a broken spawn/solver invariant,
+    /// never a replica's legitimate interpolation gap.
+    #[test]
+    #[should_panic(expected = "an authority weapon root retains the physics pose built at spawn")]
+    fn authority_fire_requires_its_spawned_pose() {
+        let mut world = test_world();
+        let root = spawn_main_gun_rig(&mut world);
+        world.entity_mut(root).remove::<Position>();
+        world.run_system_once(fire).unwrap();
     }
 
     fn pause_test_app() -> App {

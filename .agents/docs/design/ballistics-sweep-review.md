@@ -302,3 +302,30 @@ remaining direction fallbacks (`resolve`, `walk`); `RecordedShot::tank`/`shooter
 the `ballistic_fuzzer` CLI's user; the `Cargo.toml` comment; `RoundFile`'s
 `#[serde(default)]` optional blocks (new); `SPIKE_TRACE_SIM_FIELDS`, whose only user is the
 ADR-0029/0030 capture (owner: keep, or delete with those ADR lines).
+
+## Review of sweep-ball-3
+
+Subject: the game's ballistics and damage model, game state only.
+Reviewed `f1647a4f^..0f4a7493` against the three lenses and the part-3 brief.
+
+- **R3, P1, fixed:** `shooting::fire` required a replica root's `Position`/`Rotation` through
+  its tank query before checking whether the weapon fires. Lightyear's `queue_history_presence`
+  can remove either interpolated component during resync. The tank identity remains required;
+  a replica's temporary pose gap now waits without consuming readiness or round bookkeeping.
+  An authority missing its spawn-complete pose still panics. Controls cover both missing pose
+  components, recovery, and the authority refusal.
+- **History fix verified:** `ProjectileMarchWorld` is the only production history reader, and
+  `integrate_projectiles` returns on replicas before calling any of its geometry/history methods.
+  The mounted history has one authority role condition and no alternate client walk. The existing
+  regression exercises normal authority intervals and a client resync; an authority does not have
+  an interpolation timeline to resync. It does not replay a real transport resync on both ends.
+- **Verified:** hit confirmation excludes only the shooter's own pools; field admission is unchanged.
+  Weapon slots and bound fuze modes follow their construction invariants. Remote private gates
+  and loads have named absence. Test-only readers and shader mirrors are gated to tests; the
+  remaining Band constructor is part 4's cleanup. The new invariant failures name their premise.
+- **P3:** the history regression comment tells capture/edit history instead of just its invariant;
+  the x-ray window parser reports invalid input visibly but represents its error as `Option`.
+  The previously recorded body-less material retention and field horizon pricing remain owner work.
+
+R3 verification: format and workspace/all-target clippy passed. MEASURED: all 23 targeted
+shooting and citation tests passed, including both resync-pose gaps and authority refusal.
