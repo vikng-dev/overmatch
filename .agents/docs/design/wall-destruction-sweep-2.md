@@ -273,13 +273,10 @@ any blow opened; an anchored row whose freed part never split; a spinning slab w
 held at any spin. The real Avian drop pair still discriminates with every section of the flat
 set-down now assessed.
 
-**Open, verified, not fixed here:** a belt's loads on a moving chunk group. The belt sizes and
-applies a dynamic recipient's clamped impulse (`track::rubble::piece_impulses`) but stages a
+**Verified here, fixed in part 6:** a belt's loads on a moving chunk group. The belt sized and
+applied a dynamic recipient's clamped impulse (`track::rubble::piece_impulses`) but staged a
 structure reaction (`record_static_contacts`) only for fixed construction, so a tank driving over
-a fallen slab moves it and its laws never see the load. The fix stages the impulse the group
-actually took, named with its source tank, as a contact on the group: it changes
-`piece_impulses`' contract inside `src/track/`, where sweep-drive-6 is working, and the implicit
-contact's budget in `src/contact_transfer.rs`. It is that lane's or the next one's.
+a fallen slab moved it and its laws never saw the load.
 
 **New, not fixed:** the section law takes a bending axis from any nonzero moment, so an axial pull
 whose line meets the section centre bends it by f32 rounding alone. MEASURED on the row fixture
@@ -288,3 +285,50 @@ whose line meets the section centre bends it by f32 rounding alone. MEASURED on 
 punch ring now reads the pull either way, but the section's reading depends on rounding. Also,
 `bears_on_contact` still reads "rising" as construction-frame `y` on a moving group, where the
 group's field gives the direction.
+
+## Part 6: what a tank delivers to what it pushes (#256)
+
+Subject: the game's driving and building destruction models, the loads a tank's hull and belt put
+on walls and fallen pieces; game state only. Each finding was decided against the code before any
+fix. The lane started at 01:22:27 +07; no captures, pricing runs, pushes or subagents.
+
+| Reviewer | Finding | Verdict | Fixed in (subject) |
+|---|---|---|---|
+| Codex (sweep-drive-7) | P2 `belt_held` is a per-body rule: two identical co-moving receivers take the full normal reaction or none by what they are | verified: `apply_track_forces` passed the driving tanks of its `With<Tank>` query as `belt_held`, and `piece_impulses` chose the whole reaction by membership alone | track: size every belt recipient by its mass and the belt's spring (#256) |
+| Claude (server-perf-2) | P3 `piece_impulses`' "the same lexicographic geometry key" comment describes the edit, not the code | verified | track: size every belt recipient by its mass and the belt's spring (#256) |
+| Claude (sweep-destr-5) | a belt's loads on a moving chunk group never reach the group's laws (part 5) | verified: `record_static_contacts` skipped every dynamic recipient, and nothing else staged one | track: stage the belt's impulse on a moving structure as its contact (#256) |
+
+**One reaction law for every belt recipient.** The belt's support is an explicit penalty spring
+read at the tick-start pose. A dynamic body takes the whole opposite reaction where the explicit
+step integrates the belt's springs against it stably, by its own construction: over all its patches
+from every source this tick, `dt² Σ kᵢ / mᵢ < 4`, `kᵢ` each patch's spring rate (DERIVED from the
+support law: the per-metre spring over the patch's contacting length), `mᵢ` the body's effective
+mass along the patch's normal. RESOLUTION: 4 is symplectic Euler's undamped limit (DERIVED), read
+against the trace bound, which is at least the stiffest rigid mode's `k dt² / m`. Any lighter body is a piece and keeps the
+clamped sequential impulse, so Avian's implicit solver holds it. Nothing names the body's kind: a
+hull under another tank's belt and a body of the same collider, mass and inertia without running
+gear take the same momentum, −9414.24 N·s under the parked fixture stack (MEASURED; fixture 30 t
+boxes, `dt² Σk/m` 0.146).
+
+**A moving structure under a belt.** The impulse a moving structure (a loose chunk group) took from
+a belt is staged as an implicit contact on it, named with its source, through the reading fixed
+construction's reaction joins (`RubbleBodies::record_moving_contacts`,
+`ContactTransfers::stage_on_moving`); breakage reads it as the group's `Origin::Contact`. Its blow
+is the pair's plastic exchange: the source's and the structure's inverse effective masses for the
+closing patches' distribution summed, as the solver's constraint mass is for a solver contact.
+MEASURED (fixture: a 14.4 kg source closing at 1 m/s on a free slab of the same mass): blow
+6.05 N·s against the reduced-mass bound 7.2 N·s, the structure's reading equal to the 15.34 N·s
+the slab took.
+
+**Open: the hull's work and the contact's duration (#256).** Not changed here. `Load::mean_force`
+still divides a body contact's blow by the solver step, and a section's energy limit still reads
+only the freed group's own energy, so a slow ram's verdict still depends on the physics rate and
+on the non-monotone gap in "Bodies in contact". The law to land: a body contact's force comes from
+the pushing body's mass and closing speed and the pair's contact duration, `τ = π √(m / k)` (DERIVED:
+a linear contact spring's half period) with `k`
+the pair's contact stiffness in the material data (labelled `Unknown` until a source settles it),
+and the pushing body's work enters the energy limit beside the freed group's own. It needs
+`breakage::contact_load` to state the duration in `Origin::{Body, Contact}` instead of
+`ContactTransfers::dt`, and the section, ring and rest laws to read the pair's work; both were
+reserved for lane sweep-destr-6 this round. The wall design's "Body contact duration" note stays
+until that law lands.

@@ -291,7 +291,8 @@ reaction; the shared plank's bits differed with the spawn order exchanged.
   saturating end the published tick equals the timeline's tick. After that, each fixed tick the
   timeline is held at the end adds one more. Lightyear's own transport tick still saturates, and
   its input and replication ordering past that end (776 days at 64 Hz, DERIVED) belong to lightyear.
-- **What holds the recipient decides its side.** A body whose own support is a belt law this
+- **What holds the recipient decides its side** (superseded: one law by mass, inertia and the belt's
+  springs, `wall-destruction-sweep-2.md` part 6). A body whose own support is a belt law this
   tick (any driving tank's hull) takes the whole opposite reaction, `−(normal × load + traction) ×
   dt`, as fixed construction does, with no closing-speed condition. Every other dynamic body is a
   piece and keeps the clamped sequential impulse. This is a fact about construction, not about a
