@@ -509,6 +509,23 @@ impl BlastFile {
                  author usable strengths in Pa and a dimensionless ratio with their sources"
             ));
         }
+        // The simulation stores these derived compaction inputs in f32. A finite f64 datum
+        // must not become a zero or infinite strength/front speed after that conversion.
+        let strength = facts.compressive_strength * facts.compressive_dif;
+        let lock_up = 1.0 - density / facts.solid_density;
+        let front_speed = (strength * lock_up / density).sqrt();
+        for (field, value) in [
+            ("compressive_strength * compressive_dif", strength),
+            ("solid_density (compaction front speed)", front_speed),
+        ] {
+            let stored = value as f32;
+            if !stored.is_finite() || stored <= 0.0 {
+                return Err(format!(
+                    "substance {name:?}: bulk.blast.{field} is not positive and finite in the \
+                     simulation's f32 units; author usable compaction inputs with their sources"
+                ));
+            }
+        }
         Ok(facts)
     }
 }
@@ -1220,7 +1237,8 @@ mod tests {
 
     /// BREAKABLE BLAST INPUTS ARE COMPLETE AND SOURCED BEFORE PLAY (the game's environment
     /// destruction model). The crush law and the scab law rely on no missing field becoming a
-    /// code default, on finite positive inputs and on nonzero pore volume. Each omission and
+    /// code default, on finite positive inputs in the simulation's f32 units, and on nonzero
+    /// pore volume. Each omission and
     /// invalid value must name its actual file, row, field and repair. ASSUMED fixture data.
     #[test]
     fn a_breakable_row_needs_complete_sourced_blast_inputs_at_load() {
@@ -1286,6 +1304,9 @@ mod tests {
             (3, "1800.0", "solid_density"),
             (3, "1700.0", "solid_density"),
             (0, "1e308", "compressive_strength"),
+            (0, "1e40", "compressive_strength"),
+            (0, "1e-100", "compressive_strength"),
+            (1, "1e40", "compressive_dif"),
         ] {
             let mut invalid = authored.clone();
             invalid[index] = authored[index].replace(fields[index].1, value);
