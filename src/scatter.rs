@@ -149,6 +149,14 @@ fn resolve<'a>(
                 "scatter: instance {} has a non-finite pose",
                 raw.id,
             );
+            // A zero or negative scale is no size: a graybox box would collapse or turn inside
+            // out, and no later gate sees a graybox placement.
+            assert!(
+                scale.cmpgt(Vec3::ZERO).all(),
+                "scatter: instance {} has scale {:?}; every axis of a scale is positive",
+                raw.id,
+                raw.scale,
+            );
             // A quaternion the exporter wrote as f32 TEXT is never exactly unit, so an off-unit one
             // is normalized below and welcome. One with no length is not off-unit, it is not a
             // rotation: `normalize` divides by zero and hands the solver a NaN collider, which is
@@ -556,6 +564,22 @@ mod tests {
         let mut raw = record("a", Vec2::ZERO, 0.0);
         raw.rotation = [0.0, 0.0, 0.0, 0.0];
         resolve(&[raw], &library());
+    }
+
+    /// A zero or negative scale is finite too, and a graybox placement meets no later gate: its
+    /// box collider would collapse or turn inside out. Refused at the file, on every axis.
+    #[test]
+    fn a_scale_that_is_not_positive_panics() {
+        for axis in 0..3 {
+            for bad in [0.0, -1.0] {
+                let mut raw = record("a", Vec2::ZERO, 0.0);
+                raw.scale[axis] = bad;
+                let refused = std::panic::catch_unwind(|| {
+                    resolve(&[raw], &library());
+                });
+                assert!(refused.is_err(), "scale {bad} on axis {axis} was accepted");
+            }
+        }
     }
 
     /// `manifest` spawned on the sloped grid into a fresh app with an asset server, the block list
