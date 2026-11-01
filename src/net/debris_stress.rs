@@ -200,8 +200,7 @@ fn fragment_collider() -> Collider {
 /// Every server: a carrier for each building piece and every moved piece's pose onto its carrier.
 /// Then the lever, when armed; a malformed value is refused.
 pub(super) fn install_server(app: &mut App) -> Result<(), LeverError> {
-    app.init_resource::<AuthorityWorld>()
-        .add_observer(carry_wall_piece)
+    app.add_observer(carry_wall_piece)
         .add_observer(retire_wall_piece)
         .add_observer(carry_tree_piece)
         .add_systems(
@@ -575,6 +574,11 @@ mod tests {
 
     use super::*;
 
+    /// FIXTURE DATA: the generation every carrier of these worlds is tagged with.
+    fn fixture_world() -> AuthorityWorld {
+        AuthorityWorld(crate::world::WorldGeneration(1))
+    }
+
     /// Every building piece gets exactly one replicated carrier at its spawn pose, and the carrier
     /// (which holds the group's `WallPiece` too) gets none. A mutant that skips a pose-less entity
     /// silently, or that carries the carrier, breaks one of the two counts; clients then draw no
@@ -582,7 +586,7 @@ mod tests {
     #[test]
     fn a_piece_gets_one_carrier_and_the_carrier_none() {
         let mut world = World::new();
-        world.init_resource::<AuthorityWorld>();
+        world.insert_resource(fixture_world());
         world.add_observer(carry_wall_piece);
         let at = Vec3::new(3.0, 1.5, -2.0);
         let piece = world
@@ -609,7 +613,7 @@ mod tests {
     #[test]
     fn a_retired_group_keeps_its_final_pose_and_wire_interval() {
         let mut world = World::new();
-        world.init_resource::<AuthorityWorld>();
+        world.insert_resource(fixture_world());
         world.add_observer(carry_wall_piece);
         world.add_observer(retire_wall_piece);
         let body = world
@@ -647,7 +651,7 @@ mod tests {
     #[test]
     fn a_trunk_gets_one_interpolated_carrier_and_the_carrier_none() {
         let mut world = World::new();
-        world.init_resource::<AuthorityWorld>();
+        world.insert_resource(fixture_world());
         world.add_observer(carry_tree_piece);
         let marker = crate::trees::TreePiece { tree: 4, cut: 1 };
         let at = Vec3::new(2.0, 3.0, -1.0);
@@ -669,7 +673,7 @@ mod tests {
     #[should_panic(expected = "spawns every piece with its Position and Rotation")]
     fn a_piece_without_its_pose_is_a_bug() {
         let mut world = World::new();
-        world.init_resource::<AuthorityWorld>();
+        world.insert_resource(fixture_world());
         world.add_observer(carry_wall_piece);
         world.spawn(WallPiece {
             building: 2,

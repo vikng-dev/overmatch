@@ -48,7 +48,7 @@ struct Applied {
 
 pub(super) fn install_server(app: &mut App) {
     super::world_reset::register_constructor(app, spawn_ledger);
-    app.init_resource::<AuthorityWorld>().add_systems(
+    app.add_systems(
         FixedPostUpdate,
         publish_falls
             .after(TreeFallSet)

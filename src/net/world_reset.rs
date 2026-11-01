@@ -14,15 +14,11 @@ use crate::world::{CurrentWorld, WorldGeneration};
 #[derive(Resource, Default)]
 struct BuiltWorld(Option<(Entity, u32)>);
 
-/// The authority always has a selected generation; only a replica can await one.
+/// The authority always has a selected generation; only a replica can await one. The Battle
+/// installation inserts it from the Battle it spawns, so a publisher mounted without a Battle has
+/// no generation to tag its records with and fails at its constructor (a bug outcome).
 #[derive(Resource)]
 pub(super) struct AuthorityWorld(pub(super) WorldGeneration);
-
-impl Default for AuthorityWorld {
-    fn default() -> Self {
-        Self(WorldGeneration(BattleState::default().number))
-    }
-}
 
 #[derive(Resource, Default)]
 struct WorldConstructors(Vec<fn(&mut World)>);
