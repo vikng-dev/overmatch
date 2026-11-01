@@ -233,7 +233,7 @@ impl FlightOutcome {
         (self.resume, self.velocity)
     }
 
-    fn impact(&self, caliber: f32, commands: &mut Commands) {
+    fn impact(&self, style: crate::rounds::ImpactStyle, commands: &mut Commands) {
         let Some(impact) = &self.impact else { return }; // A clear span changes no surface effect.
         let (position, normal, surface, outcome, ordinal) = match *impact {
             PathImpact::Bounce {
@@ -284,7 +284,7 @@ impl FlightOutcome {
         commands.trigger(Impact {
             position,
             normal,
-            caliber,
+            style,
             surface,
             outcome,
         });
@@ -447,7 +447,7 @@ pub(crate) fn present(
 ) {
     'shells: for (entity, mut projectile, mut transform, mut path, mut marks, shot) in &mut shells {
         let drag = projectile.drag_k;
-        let caliber = projectile.caliber();
+        let style = projectile.impact_style();
         let Some(replica) = &mut projectile.replica else {
             continue;
         }; // Authority shells use playback.
@@ -517,7 +517,7 @@ pub(crate) fn present(
                     outcome.shot,
                     || serde_json::json!({ "seq": outcome.sequence }),
                 );
-                outcome.impact(caliber, &mut commands);
+                outcome.impact(style, &mut commands);
             }
         }
         let (at, velocity, stopped) = match replica.sample(age, dt, drag) {

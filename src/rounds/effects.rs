@@ -12,10 +12,19 @@
 use crate::provenance::Sourced;
 use serde::Deserialize;
 
+/// Authored contact dressing, independent of flying diameter. These are provisional art recipes;
+/// material feedback still determines whether the surface emits sparks or powder.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize)]
+pub(crate) enum ImpactStyle {
+    Compact,
+    Layered,
+}
+
 /// The round's flight emissions, present on the shell from complete spawn on every role. View
 /// plugins alone consume them. An absent emission is an authored construction fact.
 #[derive(bevy::prelude::Component, Clone, Copy, Debug, PartialEq)]
 pub(crate) struct FlightEffects {
+    pub(crate) impact: ImpactStyle,
     pub(crate) ember: Option<EmberEmission>,
     pub(crate) smoke: Option<SmokeEmission>,
     /// The model the round's body is drawn as; `None` flies undrawn.
@@ -29,6 +38,7 @@ impl FlightEffects {
     /// Explicitly untraced, smokeless, undrawn fixture data; never a missing-data default.
     #[cfg(test)]
     pub(crate) const NONE: Self = Self {
+        impact: ImpactStyle::Compact,
         ember: None,
         smoke: None,
         body: None,
@@ -39,6 +49,7 @@ impl FlightEffects {
     #[cfg(test)]
     pub(crate) fn fixture_traced() -> Self {
         Self {
+            impact: ImpactStyle::Layered,
             ember: Some(EmberEmission {
                 radius_m: 0.09,
                 base_offset_m: 0.35,
@@ -172,6 +183,7 @@ pub(crate) struct SmokeEmission {
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(super) struct File {
+    impact: Sourced<ImpactStyle>,
     ember: Sourced<Option<EmberFile>>,
     smoke: Sourced<Option<SmokeFile>>,
     body: Sourced<Option<BodyFile>>,
@@ -312,6 +324,7 @@ impl File {
             })
             .transpose()?;
         Ok(FlightEffects {
+            impact: self.impact.0,
             ember,
             smoke,
             body,
@@ -328,7 +341,7 @@ mod tests {
     /// field, missing provenance or unusable value must refuse while the registry loads.
     #[test]
     fn emission_presence_and_numeric_domains_are_required() {
-        let none = r#"(ember: (None, Unknown("fixture absence")), smoke: (None, Unknown("fixture absence")),
+        let none = r#"(impact: (Compact, Unknown("fixture impact")), ember: (None, Unknown("fixture absence")), smoke: (None, Unknown("fixture absence")),
             body: (None, Unknown("fixture absence")), streak: (None, Unknown("fixture absence")))"#;
         assert_eq!(
             ron::from_str::<File>(none).unwrap().resolve(0.05).unwrap(),
@@ -336,8 +349,8 @@ mod tests {
         );
         for missing in [
             "()",
-            r#"(ember: (None, Unknown("fixture")))"#,
-            r#"(ember: None, smoke: (None, Unknown("fixture")))"#,
+            r#"(impact: (Compact, Unknown("fixture impact")), ember: (None, Unknown("fixture")))"#,
+            r#"(impact: (Compact, Unknown("fixture impact")), ember: None, smoke: (None, Unknown("fixture")))"#,
         ] {
             assert!(ron::from_str::<File>(missing).is_err());
         }
@@ -352,6 +365,39 @@ mod tests {
         }
     }
 
+    /// Contact dressing belongs to the authored round. Neither a smaller nor larger flying body
+    /// may silently choose another recipe; an omitted recipe must refuse at the registry edge.
+    #[test]
+    fn contact_recipe_is_required_and_independent_of_flying_diameter() {
+        for (name, expected) in [
+            ("Compact", ImpactStyle::Compact),
+            ("Layered", ImpactStyle::Layered),
+        ] {
+            let text = format!(
+                r#"(impact: ({name}, Tuned("fixture art")),
+                ember: (None, Unknown("fixture absence")), smoke: (None, Unknown("fixture absence")),
+                body: (None, Unknown("fixture absence")), streak: (None, Unknown("fixture absence")))"#
+            );
+            // FIXTURE DATA: distinct flying diameters, with no drawn body to constrain either.
+            for diameter in [0.008, 0.09] {
+                assert_eq!(
+                    ron::from_str::<File>(&text)
+                        .unwrap()
+                        .resolve(diameter)
+                        .unwrap()
+                        .impact,
+                    expected
+                );
+            }
+            let missing =
+                text.replacen(&format!("impact: ({name}, Tuned(\"fixture art\")),"), "", 1);
+            assert!(
+                ron::from_str::<File>(&missing).is_err(),
+                "an omitted impact recipe must refuse"
+            );
+        }
+    }
+
     /// A drawn body names an embedded model of the round's own flying diameter: the world view
     /// draws the model unscaled, so a mismatched or unknown model would draw a round at another
     /// round's size. FIXTURE DATA: the first embedded model, and rounds flying at its diameter
@@ -361,7 +407,7 @@ mod tests {
         let model = &BodyModel::shipped()[0];
         let effects = |name: &str| {
             format!(
-                r#"(ember: (None, Unknown("f")), smoke: (None, Unknown("f")),
+                r#"(impact: (Compact, Unknown("fixture impact")), ember: (None, Unknown("f")), smoke: (None, Unknown("f")),
                 body: (Some((model: ({name:?}, Unknown("f")))), Unknown("f")),
                 streak: (None, Unknown("f")))"#
             )

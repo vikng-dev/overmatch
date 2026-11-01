@@ -51,6 +51,7 @@
         filler_setback: (0.182, Derived("DERIVED cylinder-equivalent estimate rounded to 0.182 m: half the 0.070 m cavity plus the derived nose mass 6.971 kg divided by body-steel density 7800 kg/m3 and full-calibre area. ASSUMED axial geometry; no sourced axial drawing. This author datum locates the filler centre behind the tip, independently of the fuze delay")),
     )),
     effects: (
+        impact: (Layered, Tuned("ASSUMED: provisional authored contact-read recipe; no emission measurement")),
         ember: (Some((
             radius_m: (0.09, Tuned("ASSUMED: provisional presentation bead radius, preserved from the original effect")),
             base_offset_m: (0.35, Unknown("ASSUMED: base of the current shell view; replace from this round's certified visual geometry")),

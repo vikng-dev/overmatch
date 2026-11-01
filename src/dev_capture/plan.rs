@@ -191,7 +191,7 @@ pub(crate) struct Fell {
     pub(crate) dir: u8,
 }
 
-/// On the first frame at or after app second `at`, a round of calibre `calibre_m` strikes the
+/// On the first frame at or after app second `at`, the authored `style` dresses the
 /// terrain under world `x, z`: the view's impact read (dust, smoke, the ground mark) is raised
 /// there with no round flown and no shot recorded.
 #[derive(Deserialize, Debug, Clone, Copy, PartialEq)]
@@ -199,7 +199,7 @@ pub(crate) struct Fell {
 pub(crate) struct Impact {
     pub(crate) x: f32,
     pub(crate) z: f32,
-    pub(crate) calibre_m: f32,
+    pub(crate) style: crate::rounds::ImpactStyle,
     pub(crate) at: f32,
 }
 
@@ -334,10 +334,10 @@ impl CapturePlan {
             return Err(format!("fell.at: {} is not finite", fell.at));
         }
         for impact in &self.impacts {
-            let numbers = [impact.x, impact.z, impact.calibre_m, impact.at];
-            if !numbers.iter().all(|n| n.is_finite()) || impact.calibre_m <= 0.0 {
+            let numbers = [impact.x, impact.z, impact.at];
+            if !numbers.iter().all(|n| n.is_finite()) {
                 return Err(format!(
-                    "impacts: {impact:?} needs finite numbers and a positive calibre"
+                    "impacts: {impact:?} needs finite coordinates and time"
                 ));
             }
         }
@@ -446,7 +446,7 @@ mod tests {
                     camera: Pose(eye: (1.0, 2.0, 3.0), look: (0.0, 0.0, 0.0)),
                 ),
                 fell: (instance: "tree_0001", at: 4.0, cut: 1, dir: 3),
-                impacts: [(x: 1.0, z: -2.0, calibre_m: 0.088, at: 5.0)],
+                impacts: [(x: 1.0, z: -2.0, style: Layered, at: 5.0)],
                 shot: (round: "88mm_HE", mode: 1, target: Ground, at: 6.0),
                 wall: (
                     shots: [
@@ -490,7 +490,7 @@ mod tests {
             vec![Impact {
                 x: 1.0,
                 z: -2.0,
-                calibre_m: 0.088,
+                style: crate::rounds::ImpactStyle::Layered,
                 at: 5.0,
             }]
         );
@@ -612,7 +612,7 @@ mod tests {
                 "up",
             ),
             (
-                "(impacts: [(x: 0.0, z: 0.0, calibre_m: 0.0, at: 1.0)])".to_owned(),
+                "(impacts: [(x: inf, z: 0.0, style: Compact, at: 1.0)])".to_owned(),
                 "impacts",
             ),
             (

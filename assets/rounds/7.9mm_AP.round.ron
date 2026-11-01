@@ -17,6 +17,7 @@
         (3 / 0.30): one pass through a station leaves it reduced, two knock it out (crew-model
         decision 2026-10-17)")),
     effects: (
+        impact: (Compact, Tuned("ASSUMED: provisional authored contact-read recipe; no emission measurement")),
         ember: (None, Unknown("ASSUMED: no base-tracer emission authored for this round; belt-selected light streaks are a separate weapon read")),
         smoke: (None, Unknown("ASSUMED: no sustained flight smoke emission authored")),
         body: (None, Tuned("a rifle bullet flies undrawn; its belt's tracers draw the streak")),

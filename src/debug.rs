@@ -176,7 +176,7 @@ mod tests {
         app.world_mut().trigger(Impact {
             position: Vec3::ZERO,
             normal: Vec3::Y,
-            caliber: 0.088,
+            style: crate::rounds::ImpactStyle::Layered,
             surface: ImpactSurface::Terrain,
             outcome: ImpactOutcome::Struck,
         });
@@ -193,7 +193,7 @@ mod tests {
             app.world_mut().trigger(Impact {
                 position: Vec3::X * index as f32,
                 normal: Vec3::Y,
-                caliber: 0.088,
+                style: crate::rounds::ImpactStyle::Layered,
                 surface: ImpactSurface::Terrain,
                 outcome: ImpactOutcome::Struck,
             });

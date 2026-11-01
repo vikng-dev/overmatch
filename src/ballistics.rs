@@ -1211,17 +1211,18 @@ impl FireShell {
 #[derive(Component)]
 #[require(ShotDose)]
 pub(crate) struct Projectile {
+    impact_style: crate::rounds::ImpactStyle,
     velocity: Vec3,
     /// The mechanism of what meets the plate, the round's penetrator, bound at spawn from its fire
     /// data and the substance registry ([`mechanism::SolidShot::bind`]) — data, never an asset.
     /// The disc, overmatch, the force law and the cone's hole read its body.
     round: mechanism::SolidShot,
-    /// The flying body's calibre (m): what the shell's view and its impacts are sized by.
+    /// The flying body's calibre (m).
     caliber: f32,
     /// The flying body's mass (kg): a kept carrier stops at the plate with its penetrator;
     /// a discarded carrier contributes no momentum.
     mass: f32,
-    /// Reference-mm of dose per metre of chord the round's line cuts through a witness (ADR-0040).
+    /// Crew line rate (HP per metre of chord) through a witness (ADR-0040).
     /// Read only by the witness pass; the hard walk never sees it.
     wound: f32,
     /// Quadratic-drag coefficient (1/m), the fired round's ([`FireShell::drag_k`]) at spawn; a
@@ -1257,8 +1258,11 @@ pub(crate) struct Projectile {
 }
 
 impl Projectile {
-    /// The flying body's caliber (m) — the same value [`Impact::caliber`] carries, read by view
-    /// code that sizes an effect off a shell in flight rather than off a landed impact.
+    pub(crate) fn impact_style(&self) -> crate::rounds::ImpactStyle {
+        self.impact_style
+    }
+
+    /// The flying body's caliber (m), read by the geometric views.
     pub(crate) fn caliber(&self) -> f32 {
         self.caliber
     }
@@ -1280,7 +1284,7 @@ impl Projectile {
         self.velocity.length()
     }
 
-    /// Whether the round's fuze is armed by a body of `tank`, so its burst will walk that tank.
+    /// Whether this tank armed the fuze; its recorder keeps that attribution encounter open.
     pub(crate) fn armed_by(&self, tank: Entity) -> bool {
         self.fuze
             .armed()
@@ -1292,6 +1296,7 @@ impl Projectile {
     #[cfg(test)]
     pub(crate) fn view_test_round(caliber: f32) -> Self {
         Self {
+            impact_style: crate::rounds::ImpactStyle::Compact,
             velocity: Vec3::ZERO,
             round: bound(RoundBody {
                 mass: 1.0,
@@ -1685,10 +1690,6 @@ pub struct SpallMarks {
     pub gated: usize,
 }
 
-/// The calibre boundary the impact read chooses its effect by (`vfx::impact`). A round's flight
-/// dressing reads its authored visuals instead ([`crate::rounds::FlightEffects`]).
-pub(crate) const TRACER_MAX_CALIBER: f32 = 0.02;
-
 /// Catch-up age beyond which cosmetic muzzle/impact reads are suppressed. Shared with muzzle VFX;
 /// authority damage is unaffected.
 pub(crate) const STALE_FIRE_TICKS: u32 = 16;
@@ -1833,8 +1834,8 @@ pub(crate) struct Impact {
     pub(crate) position: Vec3,
     /// Finite nonzero outward surface normal from the certified geometry or checked server path.
     pub(crate) normal: Vec3,
-    /// Striking round caliber (m), used by impact visuals.
-    pub(crate) caliber: f32,
+    /// Authored contact dressing, bound with the round at spawn.
+    pub(crate) style: crate::rounds::ImpactStyle,
     /// Surface class resolved from volume ancestry.
     pub(crate) surface: ImpactSurface,
     /// What the round did at the struck surface; [`ImpactOutcome::Struck`] for terrain.
@@ -1977,6 +1978,7 @@ fn on_fire_shell(
     let shell_base = (
         fire.effects,
         Projectile {
+            impact_style: fire.effects.impact,
             velocity,
             round: bound(penetrator),
             caliber: fire.caliber,
@@ -3314,7 +3316,7 @@ fn strike_ground(shell: &MarchingShell, entry: Vec3, normal: Vec3, tick: &mut Ma
     commands.trigger(Impact {
         position: entry,
         normal,
-        caliber: shell.projectile.caliber(),
+        style: shell.projectile.impact_style(),
         surface: ImpactSurface::Terrain,
         outcome: ImpactOutcome::Struck,
     });
@@ -4258,6 +4260,7 @@ mod march_tests {
     /// One captured impact — the fields the armor read branches on.
     #[derive(Clone, Copy)]
     struct Captured {
+        style: crate::rounds::ImpactStyle,
         position: Vec3,
         normal: Vec3,
         surface: ImpactSurface,
@@ -4271,6 +4274,7 @@ mod march_tests {
 
     fn capture_impact(impact: On<Impact>, mut log: ResMut<ImpactLog>) {
         log.0.push(Captured {
+            style: impact.style,
             position: impact.position,
             normal: impact.normal,
             surface: impact.surface,
@@ -4319,6 +4323,7 @@ mod march_tests {
         velocity: Vec3,
     ) -> Projectile {
         Projectile {
+            impact_style: crate::rounds::ImpactStyle::Compact,
             velocity,
             round: bound(penetrator),
             caliber: body.caliber,
@@ -4879,10 +4884,17 @@ mod march_tests {
     }
 
     /// Raise an unkeyed catch-up shell and return its fallback impacts.
-    fn fire_shell_catch_up(app: &mut App, catch_up_ticks: u32) -> Vec<Captured> {
+    fn fire_shell_catch_up(
+        app: &mut App,
+        catch_up_ticks: u32,
+        style: crate::rounds::ImpactStyle,
+    ) -> Vec<Captured> {
         app.add_observer(on_fire_shell);
         app.world_mut().trigger(FireShell {
-            effects: crate::rounds::FlightEffects::fixture_traced(),
+            effects: crate::rounds::FlightEffects {
+                impact: style,
+                ..crate::rounds::FlightEffects::fixture_traced()
+            },
             muzzle: crate::guns::MuzzleEmission::fixture_cannon(),
             origin: Vec3::new(0.0, 2.0, 2.0),
             direction: Dir3::NEG_Z,
@@ -4905,6 +4917,26 @@ mod march_tests {
         });
         app.world_mut().flush();
         app.world().resource::<ImpactLog>().0.clone()
+    }
+
+    /// The game's damage-model view relies on contact dressing surviving complete spawn and
+    /// authority resolution. Equal projectile bodies may carry either authored art recipe.
+    #[test]
+    fn fired_round_preserves_its_authored_contact_recipe_at_impact() {
+        use crate::rounds::ImpactStyle;
+        for style in [ImpactStyle::Compact, ImpactStyle::Layered] {
+            let mut app = world_with_plate(Vec3::new(3.0, 3.0, 0.05), Vec3::new(0.0, 2.0, 0.0));
+            fire_shell_catch_up(&mut app, 0, style);
+            for _ in 0..8 {
+                app.update();
+            }
+            let hits = &app.world().resource::<ImpactLog>().0;
+            assert!(
+                !hits.is_empty(),
+                "the fixture shot must exercise contact dressing"
+            );
+            assert!(hits.iter().all(|hit| hit.style == style));
+        }
     }
 
     /// Regression: a keyed projectile has its shot identity at spawn.
@@ -5039,7 +5071,11 @@ mod march_tests {
     #[test]
     fn oversized_fire_shell_catch_up_fails_closed_before_spawning() {
         let mut app = world_with_plate(Vec3::new(3.0, 3.0, 0.05), Vec3::new(0.0, 2.0, 0.0));
-        let hits = fire_shell_catch_up(&mut app, MAX_COSMETIC_CATCH_UP_TICKS + 1);
+        let hits = fire_shell_catch_up(
+            &mut app,
+            MAX_COSMETIC_CATCH_UP_TICKS + 1,
+            crate::rounds::ImpactStyle::Layered,
+        );
 
         assert!(hits.is_empty(), "a rejected catch-up produces no impact");
         let mut projectiles = app.world_mut().query_filtered::<Entity, With<Projectile>>();

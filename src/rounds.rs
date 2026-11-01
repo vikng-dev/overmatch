@@ -80,7 +80,9 @@ use crate::substances::{MaterialFacts, SubstanceRegistry};
 
 mod effects;
 pub(crate) mod fuze;
-pub(crate) use effects::{BodyModel, EmberEmission, FlightEffects, SmokeEmission, StreakEmission};
+pub(crate) use effects::{
+    BodyModel, EmberEmission, FlightEffects, ImpactStyle, SmokeEmission, StreakEmission,
+};
 
 /// The shipped round-type table, embedded as the round files are, so a round is in hand
 /// synchronously wherever it is bound (ADR-0014: built from data, never from an asset).
@@ -651,7 +653,7 @@ pub(crate) mod tests {
     /// The fixture round file, its fields `fields` authored, then `extra` verbatim.
     pub(crate) fn file(fields: &[(&str, &str)], extra: &str) -> String {
         format!(
-            "({}, effects: (ember: (None, Unknown(\"fixture absence\")), smoke: (None, Unknown(\"fixture absence\")), body: (None, Unknown(\"fixture absence\")), streak: (None, Unknown(\"fixture absence\"))){extra})",
+            "({}, effects: (impact: (Compact, Unknown(\"fixture impact\")), ember: (None, Unknown(\"fixture absence\")), smoke: (None, Unknown(\"fixture absence\")), body: (None, Unknown(\"fixture absence\")), streak: (None, Unknown(\"fixture absence\"))){extra})",
             authored(fields)
         )
     }
@@ -1171,7 +1173,7 @@ pub(crate) mod tests {
     fn malformed_files_do_not_load() {
         let bare = r#"(name: ("Probe", Tuned("fixture")), round_type: ("Fixture", Tuned("fixture")),
             core: ("GunSteel", Tuned("fixture")), mass: 5.0, caliber: (0.05, Tuned("fixture")),
-            wound: (20.0, Tuned("fixture")), effects: (ember: (None, Unknown("fixture absence")), smoke: (None, Unknown("fixture absence")), body: (None, Unknown("fixture absence")), streak: (None, Unknown("fixture absence"))))"#;
+            wound: (20.0, Tuned("fixture")), effects: (impact: (Compact, Unknown("fixture impact")), ember: (None, Unknown("fixture absence")), smoke: (None, Unknown("fixture absence")), body: (None, Unknown("fixture absence")), streak: (None, Unknown("fixture absence"))))"#;
         let err = load(bare).unwrap_err();
         assert!(err.to_string().contains("provenance"), "{err}");
 

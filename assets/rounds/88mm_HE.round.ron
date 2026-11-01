@@ -43,6 +43,7 @@
         filler_setback: (0.178, Derived("DERIVED cylinder-equivalent estimate rounded to 0.178 m: half the 0.171 m cavity plus the derived nose mass 4.409 kg divided by body-steel density 7800 kg/m3 and full-calibre area. ASSUMED axial geometry; no sourced axial drawing. This author datum locates the filler centre behind the tip, independently of the fuze delay")),
     )),
     effects: (
+        impact: (Layered, Tuned("ASSUMED: provisional authored contact-read recipe; no emission measurement")),
         ember: (None, Unknown("ASSUMED: untraced shell; no base-tracer composition is authored")),
         smoke: (None, Unknown("ASSUMED: no sustained flight smoke emission authored")),
         body: (Some((model: ("shell/shell.glb", Unknown("ASSUMED: the one authored shell model, an

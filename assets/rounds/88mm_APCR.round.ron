@@ -30,6 +30,7 @@
             conversion to m is DERIVED")),
     )),
     effects: (
+        impact: (Layered, Tuned("ASSUMED: provisional authored contact-read recipe; no emission measurement")),
         ember: (Some((
             radius_m: (0.09, Tuned("ASSUMED: provisional presentation bead radius, preserved from the original effect")),
             base_offset_m: (0.35, Unknown("ASSUMED: base of the current shell view; replace from this round's certified visual geometry")),

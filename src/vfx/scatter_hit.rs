@@ -120,7 +120,7 @@ fn read_scatter_crossings(
             position,
             normal,
             to_camera,
-            projectile.caliber(),
+            projectile.impact_style(),
             crate::ballistics::ImpactOutcome::Struck,
             feedback,
             &mut kit,
@@ -147,7 +147,7 @@ mod tests {
     };
     use crate::vfx::impact::{GroundMarkRing, ImpactAssets};
 
-    /// An MG-belt round: below the big-caliber threshold, so the compact read.
+    /// FIXTURE DATA: an undrawn round whose authored contact recipe is compact.
     const MG_CALIBER: f32 = 0.0079;
 
     /// A one-proxy world: a 4 x 5 x 6 m house box centred at the origin, tagged and layered exactly

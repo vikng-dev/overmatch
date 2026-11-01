@@ -359,7 +359,7 @@ fn raise_impacts(
                 commands.trigger(crate::ballistics::Impact {
                     position,
                     normal: hit.normal,
-                    caliber: cue.calibre_m,
+                    style: cue.style,
                     surface: crate::ballistics::ImpactSurface::Terrain,
                     outcome: crate::ballistics::ImpactOutcome::Struck,
                 });

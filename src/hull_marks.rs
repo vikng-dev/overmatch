@@ -44,9 +44,7 @@ pub(crate) const MARK_CAP: usize = 50;
 /// The smallest calibre that leaves a mark, in whole millimetres. Machine-gun rounds, below it, leave none, because of [`MARK_CAP`]: one belt on a hull
 /// would turn the whole record over in about 4 s (DERIVED: the shipped machine gun's 750 rpm
 /// cyclic is 12.5 rounds a second, and 50 / 12.5 = 4), dropping every main-gun mark the vehicle
-/// holds. Issue 144 brings them back under a cap of their own. The value matches the impact
-/// read's cutoff (`ballistics::TRACER_MAX_CALIBER`), but the cap sets this one: neither moves with
-/// the other.
+/// holds. Issue 144 brings them back under a cap of their own. This cap sets the threshold independently of the authored impact recipe.
 pub(crate) const MIN_MARK_CALIBER_MM: u8 = 20;
 
 /// The longest a mark stretches along the shot, as a multiple of its round footprint. A cylinder

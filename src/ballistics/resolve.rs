@@ -2208,7 +2208,7 @@ fn apply_bounce(
     commands.trigger(Impact {
         position: bounce.position,
         normal: bounce.normal,
-        caliber: shell.projectile.caliber(),
+        style: shell.projectile.impact_style(),
         surface: ImpactSurface::Material(bounce.feedback),
         outcome: ImpactOutcome::Ricochet {
             direction: Vec3::from(bounce.direction),
@@ -2295,7 +2295,7 @@ fn finish_bite(
     commands.trigger(Impact {
         position,
         normal: bite.normal,
-        caliber: shell.projectile.caliber(),
+        style: shell.projectile.impact_style(),
         surface: ImpactSurface::Material(bite.feedback),
         outcome: verdict.into(),
     });

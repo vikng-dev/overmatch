@@ -1,16 +1,17 @@
-//! View-only impact dressing for [`Impact`].
+//! The game's damage-model view: impact dressing for [`Impact`], game state only.
 //!
 //! Invariant (ADR-0014): this module only reads simulation events and spawns transient render
 //! entities. Resolved substance responses choose powder and sparks; no visual entity affects game state.
-//! Product invariant (ADR-0023): visual scale and duration derive from physical event inputs, never
-//! viewer distance.
+//! All recipe dimensions, durations and emission counts below are ASSUMED art tuning, except
+//! gravity. The authored recipe sets world-space scale, independent of viewer distance.
 
 use crate::substances::SurfaceFeedback;
 use bevy::ecs::system::SystemParam;
 use bevy::prelude::*;
 use std::collections::BTreeMap;
 
-use crate::ballistics::{Impact, ImpactOutcome, ImpactSurface, TRACER_MAX_CALIBER};
+use crate::ballistics::{Impact, ImpactOutcome, ImpactSurface};
+use crate::rounds::ImpactStyle;
 use crate::view::PlayerView;
 
 use super::ViewRng;
@@ -74,12 +75,10 @@ const SPARK_GLOW: f32 = 10.0;
 /// along the normal, 1 ≈ 45°).
 const SPARK_SPREAD: (f32, f32) = (0.15, 0.9);
 
-// --- The 88 terrain SPLASH (caliber ≥ TRACER_MAX_CALIBER): a large-caliber AP round striking soil.
+// --- The layered terrain recipe.
 // Layered on the SAME billboard machinery (dirt-recolored LUTs, tall aspect for the plume, drift for
 // the rise) — no new systems, no new pipelines (every layer is the already-warmed Add flash or Blend
-// smoke pipeline). Physical scale from period gun-camera / range footage of big-AP soil strikes:
-// dirt fountains in the ~4–10 m band with ~1.5–2 s hang. Chosen here: a ~7.7 m plume (5.5 m size ×
-// 1.4 aspect) rising ~4.5 m/s over 1.5 s — mid-band, honest, NOT scaled to screen or range.
+// smoke pipeline). Dimensions are provisional art tuning, not a measured emission model.
 //
 // The layers' lifetimes are staggered so they end one at a time — flash first, the lingering haze
 // seconds after everything else.
@@ -129,17 +128,17 @@ const SPLASH_CLOUD_LIFETIME: f32 = 8.0;
 const SPLASH_CLOUD_ALPHA: f32 = 0.35;
 const SPLASH_CLOUD_RISE: f32 = 0.35;
 
-/// Ground scar: one flat, ground-oriented disturbed-earth mark an 88 AP strike gouges. Footprint
+/// Ground scar: one flat, ground-oriented disturbed-earth mark a layered strike gouges. Footprint
 /// (m, square), lifetime (s, the slowest-fading layer). Lives in its OWN ring ([`GroundMarkRing`],
 /// cap [`GROUND_MARK_CAP`]) so a multi-second scar isn't evicted within a frame by the sub-second
 /// billboard storm sharing [`BILLBOARD_CAP`].
 const GROUND_MARK_SIZE: f32 = 2.0;
 const GROUND_MARK_LIFETIME: f32 = 6.0;
-/// The scar ring cap: a handful of recent gouges. Small — scars are rare (88-only) and long-lived.
+/// The scar ring cap: a handful of recent gouges. Small — scars are rare (layered-only) and long-lived.
 /// Its slots follow the shared ring's in the billboard lane table (`BILLBOARD_SLOTS`).
 pub(super) const GROUND_MARK_CAP: usize = 16;
 
-// --- The 88 on ARMOR (caliber ≥ TRACER_MAX_CALIBER, surface Armor): steel is categorically NOT dirt
+// --- The layered sparking-material recipe: material feedback distinguishes it from dirt
 // (War Thunder Drone-Age dev material + GHPC reference). A white-hot contact flash, a dense fast hot
 // spark fan, and a small gray spall/smoke puff — NO plume, NO shock ring, NO ground scar, NO lingering
 // brown cloud. A brief flame lick is added ONLY when the round bit into the steel
@@ -152,7 +151,7 @@ const ARMOR_FLASH_SIZE: f32 = 2.7;
 const ARMOR_FLASH_LIFETIME: f32 = 0.045;
 const ARMOR_FLASH_GLOW: f32 = 13.0;
 
-/// Dense spark fan: many fast hot streaks off the steel (scaled up from the MG garnish's 2–4). Count
+/// Dense spark fan: many fast hot streaks off the steel (scaled up from the compact garnish's 2–4). Count
 /// range, speed (m/s — brisker than terrain), lifetime (s), stretch (seconds-of-travel → length),
 /// width fraction (needle-thin), emissive boost, and cone spread (tangent magnitude before
 /// renormalizing; 0 = straight along the fan axis, ~1 ≈ 45°).
@@ -184,7 +183,7 @@ const FLAME_LICK_GLOW: f32 = 8.0;
 const FLAME_LICK_RISE: f32 = 1.2;
 
 /// Independent eviction ring for the long-lived ground scars (see [`GROUND_MARK_CAP`]). Insulated
-/// from the shared [`BillboardRing`] so an MG storm filling that ring can't evict a fresh 88 scar.
+/// from the shared [`BillboardRing`] so an MG storm filling that ring can't evict a fresh layered scar.
 #[derive(Resource)]
 pub(super) struct GroundMarkRing(pub BillboardRing);
 
@@ -215,12 +214,12 @@ pub(super) struct ImpactAssets {
     ping_atlas: Handle<Image>,
     spark_atlas: Handle<Image>,
     spark_lut: Handle<Image>,
-    /// Earthy-brown palette for the 88 splash's dirt masses (plume/ring/cloud) and its dirt ejecta.
+    /// Earthy-brown palette for the layered splash's dirt masses (plume/ring/cloud) and its dirt ejecta.
     dirt_lut: Handle<Image>,
     /// Darker scorched-earth palette for the flat ground scar.
     scar_lut: Handle<Image>,
     /// Neutral gray palette for the armor read's spall/smoke (steel spall, never brown dirt) — the
-    /// MG armor billow swap and the 88 armor puff both use it.
+    /// compact material billow swap and the layered armor puff both use it.
     powder_luts: BTreeMap<[u8; 3], Handle<Image>>,
     /// White-hot palette for the armor read's contact flash + dense spark fan (and the flame lick's
     /// hot core) — whiter/hotter than the terrain `spark_lut`, which cools to ember orange.
@@ -304,7 +303,7 @@ impl ImpactAssets {
         }
     }
 
-    /// A dirt-mass material for the 88 splash's plume/ring/cloud: the dust atlas recolored through
+    /// A dirt-mass material for the layered splash's plume/ring/cloud: the dust atlas recolored through
     /// the earthy `dirt_lut`, alpha-blend occluding mass (glow.y = 0 — never additive), overall
     /// `alpha` per layer. Shares the already-warmed Blend billboard pipeline.
     fn dirt_material(&self, alpha: f32) -> BillboardLook {
@@ -457,7 +456,7 @@ pub(super) fn setup_impact_assets(
         let color = LinearRgba::rgb(x, x * (0.55 + 0.35 * cool), x * x * (0.12 + 0.5 * cool));
         (color, x * (0.35 + 0.65 * cool))
     });
-    // Dirt LUT for the 88 splash masses: an earthy brown, brighter/tanner where the sprite signal is
+    // Dirt LUT for the layered splash masses: an earthy brown, brighter/tanner where the sprite signal is
     // strong (sunlit dirt face) sinking to a dark damp brown in shadow; darkening slightly as the
     // cloud ages (Y). No heat — kicked soil is inert lit mass, never an emitter.
     let dirt_lut = gradient_lut(&mut images, |x, y| {
@@ -525,7 +524,7 @@ pub(super) struct ImpactKit<'w, 's> {
 
 /// Dress the resolved surface's response. Material facts select sparks and powder colour; terrain
 /// has its own ground recipe. Dimensions remain the provisional compact/large recipes below,
-/// selected by calibre rather than derived from deposited energy and emitted material.
+/// selected by authored presentation data, not derived from deposited energy and emitted material.
 fn spawn_impact_read(
     impact: On<Impact>,
     mut kit: ImpactKit,
@@ -544,13 +543,13 @@ fn spawn_impact_read(
     };
     match impact.surface {
         ImpactSurface::Terrain => {
-            spawn_terrain_read(impact.position, normal, to_camera, impact.caliber, &mut kit)
+            spawn_terrain_read(impact.position, normal, to_camera, impact.style, &mut kit)
         }
         ImpactSurface::Material(feedback) => spawn_material_read(
             impact.position,
             normal,
             to_camera,
-            impact.caliber,
+            impact.style,
             impact.outcome,
             feedback,
             &mut kit,
@@ -558,18 +557,15 @@ fn spawn_impact_read(
     }
 }
 
-/// The TERRAIN half of the read above, as a callable: the 88's big splash at/above
-/// [`TRACER_MAX_CALIBER`], the MG's compact dust-ping-spark read below it. `normal` must be unit;
-/// `to_camera` need not be. Shared with [`super::scatter_hit`], whose crossings are terrain-class
-/// surfaces and so take this exact dispatch rather than a read of their own.
+/// The authored terrain recipe. `normal` must be unit; `to_camera` need not be.
 pub(super) fn spawn_terrain_read(
     position: Vec3,
     normal: Vec3,
     to_camera: Vec3,
-    caliber: f32,
+    style: ImpactStyle,
     kit: &mut ImpactKit,
 ) {
-    if caliber >= TRACER_MAX_CALIBER {
+    if style == ImpactStyle::Layered {
         spawn_big_splash(position, normal, to_camera, kit);
     } else {
         spawn_small_impact(position, normal, to_camera, ImpactSurface::Terrain, kit);
@@ -577,18 +573,18 @@ pub(super) fn spawn_terrain_read(
 }
 
 /// The resolved substance chooses its emission response. Non-sparking matter produces its own
-/// powder read, never a metal flash or a spark fan. Size class only selects the existing detail
+/// powder read, never a metal flash or a spark fan. The authored style selects the existing detail
 /// recipe after the material's emission has admitted it.
 pub(super) fn spawn_material_read(
     position: Vec3,
     normal: Vec3,
     to_camera: Vec3,
-    caliber: f32,
+    style: ImpactStyle,
     outcome: ImpactOutcome,
     feedback: SurfaceFeedback,
     kit: &mut ImpactKit,
 ) {
-    if feedback.sparks && caliber >= TRACER_MAX_CALIBER {
+    if feedback.sparks && style == ImpactStyle::Layered {
         spawn_sparking_read(position, normal, to_camera, outcome, feedback, kit);
     } else {
         spawn_small_impact(
@@ -601,7 +597,7 @@ pub(super) fn spawn_material_read(
     }
 }
 
-/// The MG / small-caliber read (the original terrain body, plus a gray-spall LUT swap on armor):
+/// The compact read (the original terrain body, plus a gray-spall LUT swap on armor):
 /// dust billow (mass) + ping (contact flash) + a few sparks (crisp garnish), all on the shared
 /// billboard ring. This is what makes the four invisible non-tracer rounds of the belt cycle register
 /// at the target. On ARMOR the billow's LUT swaps from the earthy dust palette to the neutral gray
@@ -731,7 +727,7 @@ fn spawn_small_impact(
     }
 }
 
-/// The 88 terrain SPLASH (caliber ≥ TRACER_MAX_CALIBER): the layered large-caliber soil-strike read.
+/// The layered terrain recipe.
 /// Contact flash → dirt ejecta → tall dirt plume → ground shock ring → lingering cloud on the shared
 /// ring, plus one flat ground scar in its own ring. Physical scale (module doc), not screen-relative.
 fn spawn_big_splash(position: Vec3, normal: Vec3, to_camera: Vec3, kit: &mut ImpactKit) {
@@ -1125,10 +1121,10 @@ mod tests {
         BILLBOARD_SLOTS, Billboard, BillboardFamilies, VfxBillboardMaterial,
     };
 
-    /// An MG-belt round: below TRACER_MAX_CALIBER, so the small dust-ping-spark read.
-    const MG_CALIBER: f32 = 0.0079;
-    /// The 88's AP round: at/above TRACER_MAX_CALIBER, so the big terrain splash.
-    const BIG_CALIBER: f32 = 0.088;
+    /// FIXTURE DATA: the compact contact recipe.
+    const COMPACT: ImpactStyle = ImpactStyle::Compact;
+    /// FIXTURE DATA: the layered contact recipe.
+    const LAYERED: ImpactStyle = ImpactStyle::Layered;
 
     /// Minimal app carrying what the impact observer reads. Real `Assets` stores (initialized bare,
     /// no asset plugins) so the family materials and the lane table are made for real; fixed-seed
@@ -1150,11 +1146,11 @@ mod tests {
 
     /// Fire a terrain impact (the default surface) — keeps every existing terrain/MG test byte-for-
     /// byte, including the RNG draw order the small read pins.
-    fn trigger_impact(app: &mut App, normal: Vec3, caliber: f32) {
+    fn trigger_impact(app: &mut App, normal: Vec3, style: ImpactStyle) {
         trigger_surface(
             app,
             normal,
-            caliber,
+            style,
             ImpactSurface::Terrain,
             ImpactOutcome::Struck,
         );
@@ -1164,14 +1160,14 @@ mod tests {
     fn trigger_surface(
         app: &mut App,
         normal: Vec3,
-        caliber: f32,
+        style: ImpactStyle,
         surface: ImpactSurface,
         outcome: ImpactOutcome,
     ) {
         app.world_mut().trigger(Impact {
             position: Vec3::ZERO,
             normal,
-            caliber,
+            style,
             surface,
             outcome,
         });
@@ -1195,7 +1191,7 @@ mod tests {
             app.world_mut()
                 .spawn((PlayerView, GlobalTransform::IDENTITY));
         }
-        trigger_impact(&mut app, Vec3::Y, BIG_CALIBER);
+        trigger_impact(&mut app, Vec3::Y, LAYERED);
     }
 
     /// A non-sparking substance produces powder alone. A class-based metal recipe would add a
@@ -1210,7 +1206,7 @@ mod tests {
         trigger_surface(
             &mut app,
             Vec3::Y,
-            BIG_CALIBER,
+            LAYERED,
             ImpactSurface::Material(feedback),
             ImpactOutcome::Through,
         );
@@ -1228,7 +1224,7 @@ mod tests {
     fn ground_scars_are_ring_capped() {
         let mut app = harness();
         for _ in 0..GROUND_MARK_CAP + 8 {
-            trigger_impact(&mut app, Vec3::Y, BIG_CALIBER);
+            trigger_impact(&mut app, Vec3::Y, LAYERED);
         }
         let ring = &app.world().resource::<GroundMarkRing>().0;
         assert_eq!(
@@ -1256,7 +1252,7 @@ mod tests {
     #[should_panic(expected = "finite nonzero surface normal")]
     fn a_degenerate_impact_normal_is_a_bug() {
         let mut app = harness();
-        trigger_impact(&mut app, Vec3::ZERO, BIG_CALIBER);
+        trigger_impact(&mut app, Vec3::ZERO, LAYERED);
     }
 
     /// The whole read rides the shared billboard ring: an impact storm is bounded by its cap, not
@@ -1265,7 +1261,7 @@ mod tests {
     fn impact_storm_is_ring_capped() {
         let mut app = harness();
         for _ in 0..200 {
-            trigger_impact(&mut app, Vec3::Y, MG_CALIBER);
+            trigger_impact(&mut app, Vec3::Y, COMPACT);
         }
         let ring_len = app.world().resource::<BillboardRing>().live.len();
         assert_eq!(
@@ -1288,7 +1284,7 @@ mod tests {
         trigger_surface(
             &mut no_pen,
             Vec3::Y,
-            BIG_CALIBER,
+            LAYERED,
             ImpactSurface::Material(SurfaceFeedback::fixture()),
             ImpactOutcome::Struck,
         );
@@ -1298,7 +1294,7 @@ mod tests {
         trigger_surface(
             &mut pen,
             Vec3::Y,
-            BIG_CALIBER,
+            LAYERED,
             ImpactSurface::Material(SurfaceFeedback::fixture()),
             ImpactOutcome::Through,
         );

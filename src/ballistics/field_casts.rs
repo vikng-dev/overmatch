@@ -583,6 +583,7 @@ fn spawn_shot_round(
     app.world_mut()
         .spawn((
             Projectile {
+                impact_style: crate::rounds::ImpactStyle::Compact,
                 velocity: direction * speed,
                 round: bound(body),
                 caliber,

@@ -81,7 +81,7 @@ The cross-platform field-cast pin also passed without re-pinning.
   also panic instead of disappearing at the quantization gate or taking a default heading.
 - Fixed B37: every pool appended by `ShotDose::settle` has its emptying deposit's context. The
   consumer now requires it; the step endpoint no longer invents an entry or direction.
-- B36 remains for a separate change: a zero free-flight step currently skips the whole march.
+- Fixed B36: instantaneous rest advances time and preserves heading; see the rest gate below.
 
 MEASURED: all 98 targeted march, resolver, field-law and citation tests passed. Format and
 workspace/all-target clippy passed. The law's existing refusal tests exercise invalid field
@@ -168,3 +168,21 @@ tank or waits for particular calibre classes to survive a frame.
 ## Retired crew-sweep comparison
 
 The game's damage-model sweep now measures the current witness law only. Removed the reconstructed hard-substance crew law and its pen-cam convenience hook; the resolution survey and owner-held F2 knockout-rule comparison remain live. Station outcomes and reports use knocked out / reduced / untouched. No production damage behavior changed.
+
+
+## Authored contact dressing
+
+Fixed the impact follow-up: removed the calibre cutoff. Every round requires a sourced compact or
+layered presentation recipe, bound at complete projectile spawn and carried into authority and
+replica contact events. Scatter reads the same recipe. Surface feedback still controls powder and
+spark admission. The current recipes retain their output and RNG order; their dimensions and
+emissions are explicitly ASSUMED art tuning, not a measured physical emission model. Dev capture
+cues now require `style: Compact` or `style: Layered`, with no invented flying body.
+
+The contact event is local. Fire reconstruction still resolves the same gun/round identity from
+the registry; no record or wire layout changes and no protocol revision bump. The armaments
+fingerprint already includes all authored round data. Synthetic controls select either recipe at
+either flying diameter, refuse an omitted recipe and carry both recipes through a real fired
+round's contact. MEASURED: 106 targeted round, impact, scatter, march, replica-path, debug, capture
+plan, battle, headless-composition and citation tests passed; three on-demand instruments stayed
+ignored. Format and workspace/all-target clippy passed. No captures.
