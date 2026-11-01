@@ -289,10 +289,23 @@ fn record_arrival_order_cannot_mix_worlds_or_consume_a_snapshot_before_construct
             }
         }
         app.update();
+        assert_eq!(
+            app.world().resource::<WallRecord>().entries,
+            walls,
+            "the later Battle's wall consumer must apply its own records independently of trees"
+        );
+        assert_eq!(
+            app.world_mut()
+                .query::<&TreeState>()
+                .single(app.world())
+                .unwrap(),
+            &state,
+            "the later Battle's tree consumer must apply its own records independently of walls"
+        );
         assert_ne!(
-            census(app.world_mut()),
-            fresh,
-            "a later Battle's records apply to its own world"
+            census(app.world_mut()).elements,
+            fresh.elements,
+            "the later Battle's wall records must reach collision construction"
         );
         let previous_construction = roots(app.world_mut());
         app.world_mut().despawn(battle);
