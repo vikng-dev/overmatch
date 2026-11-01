@@ -25,7 +25,7 @@ DERIVED ratio 2.000000. Driving laws and their material values were unchanged by
 | V2 | Fixed | Required sourced round `effects.ember` states presence, radius, base offset, burn, fade and linear HDR colour. `FlightEffects` is present at shell spawn; `vfx::ember` consumes it independently of scene/calibre. |
 | V3 | Fixed | Required sourced `effects.smoke` states presence, width, growth, lifetime, drift and birth taper. `vfx::trail` carries each emission through the existing path/bounce renderer. |
 | V4 | Fixed (lane 2), replaced by the muzzle law | One view consumer, `vfx::muzzle`, reads the emission each shot carries (`Round::muzzle`, `FireShell::muzzle`); no calibre split or seed-calibre scale remains. The per-gun `muzzle` blocks are gone: the emission is the muzzle law's, from the shot's energy and the gun's muzzle shape (see "The muzzle law" below). |
-| V5 | Fixed (lanes 2, 3) | Ground types state a required `dust.erodibility` and `dust.colour_srgb`; the muzzle law sizes the gas `reach_m` from the shot's energy. Puffs = the gun's rolled count × the painted grounds' summed share (weight × erodibility, `terrain_blend::dust_sources`); each puff is one source's soil, drawn by share, lit by the key light (see "Lane 3"). Erodibilities ASSUMED, ordered by hand; colours DERIVED from the packs' albedo. |
+| V5 | Fixed (lanes 2, 3) | Ground types state a required `dust.erodibility` and `dust.colour_srgb`; the muzzle law sizes the gas `reach_m` from the shot's energy. Puffs = the shot's rolled count × the painted grounds' summed share (weight × erodibility, `terrain_blend::dust_sources`); each puff is one source's soil, drawn by share, lit by the key light (see "Lane 3"). Erodibilities ASSUMED, ordered by hand; colours DERIVED from the packs' albedo. |
 | V6 | Fixed for material selection | A volume's `SurfaceFeedback` travels through authority `Bounce`/`Bite`, public `PathImpact`, `Impact` and static-proxy response. Required sourced facts select spark presence and powder colour. Nonsparking materials produce powder without a metal flash/fan. Dimensions remain the separate new finding below. |
 | V7 | Fixed | `ShellStrike` carries the exact struck primitive's response into `HullMark`; late joiners receive it with the record. Shared neutral relief maps receive per-response exposed tint, metallic and roughness factors. No fresh-steel constant selects appearance. |
 
@@ -336,15 +336,141 @@ core and flame lengths and the fireball diameter):
 
 | Shot | E, J | Core, m | Flames, m | Fireball | Smoke | Light | Gas reach |
 | --- | --- | --- | --- | --- | --- | --- | --- |
-| KwK 36, 88mm_AP and 88mm_APHE_ring (10.2 kg, 773 m/s) | 3.047e6 | 3.08-4.17 | forward 2.03-2.75, two side jets 3.14-4.25 | 6.16-8.34 m, 0.205 s | 2.17→4.06 m, 1.45 s | 8.41 Mlm, range 36.3 m | 2.61 m |
+| KwK 36, 88mm_AP and 88mm_APHE_ring (10.2 kg, 773 m/s) | 3.047e6 | 3.08-4.17 | forward 2.03-2.75, two side jets 3.14-4.25 | 6.16-8.34 m, 0.205 s | 2.17→4.06 m, 1.45 s | 8.41 Mlm, range 36.2 m | 2.61 m |
 | KwK 36, 88mm_HE (9.30 kg, 820 m/s) | 3.127e6 | 3.11-4.20 | forward 2.05-2.77, side 3.17-4.29 | 6.21-8.41 m, 0.206 s | 2.19→4.09 m, 1.45 s | 8.55 Mlm, range 36.6 m | 2.63 m |
 | KwK 36, 88mm_APCR (7.3 kg, 930 m/s) | 3.157e6 | 3.12-4.22 | forward 2.06-2.78, side 3.18-4.30 | 6.23-8.44 m, 0.206 s | 2.20→4.11 m, 1.45 s | 8.61 Mlm, range 36.7 m | 2.64 m |
 | MG 34, 7.9mm_AP (11.8 g, 755 m/s) | 3.363e3 | 0.19-0.26 | three forward 0.31-0.41 | none (flash hider) | 0.22→0.42 m, 0.46 s, every 4th shot | 0.090 Mlm, range 3.75 m | 0.27 m |
 
-What follows from the law alone, for the owner's eye: the MG's gas reaches 0.27 m, so neither
-MG mount, standing well over that above the ground, lifts dust; the main gun's 2.6 m reach covers
-its shipped muzzle heights. The MG's light is 1/94 of the main gun's (the two-thirds power of the
+DERIVED from the law: the MG shot's gas reach is about 0.27 m, and the main-gun shots' reaches
+are about 2.61–2.64 m. These do not certify a mounted muzzle's height at an unspecified pose or
+gun elevation. Ground coupling reads the presented muzzle's height over known terrain: within
+the resolved reach it may lift soil, and higher or unknown ground lifts none.
+The MG's light is 1/94 of the main gun's (the two-thirds power of the
 energy ratio 906, DERIVED), and its 3.75 m range lights little beyond its own mount. Every shape
 share, every reference value and the duration exponent are taste for the owner to judge on the
 capture stills; the assets' digests change, so the new look reaches players with the next release.
 
+
+## Lane 5: blind-review verification, compact board and requested stills
+
+| reviewer | lane | finding | verified / not a defect | fixed in (subject) |
+| --- | --- | --- | --- | --- |
+| Codex, `review-sweep-view-4-codex.md` | sweep-view-4 | P2: narrow board clips score columns | verified | `hud: keep narrow board columns reachable (#236)` |
+| Claude, `review-sweep-view-4-claude.md` | sweep-view-4 | P3: HUD rungs outside the overlay ladder | verified | `hud: compact the Tab board and reserve the live inset (#236)` |
+| Claude, `review-sweep-view-4-claude.md` | sweep-view-4 | P3: layer documentation promises opaque backing | verified | `hud: compact the Tab board and reserve the live inset (#236)` |
+| Claude, `review-sweep-view-4-claude.md` | sweep-view-4 | P3: inset/card clearance gap | verified | `hud: compact the Tab board and reserve the live inset (#236)` |
+| Codex, `review-muzzle-law-codex.md` | muzzle-law | P2: scaled emission overflow | verified | `guns: refuse unrepresentable muzzle emissions at load (#245)` |
+| Codex, `review-muzzle-law-codex.md` | muzzle-law | P2: fireball opacity/boost remain in code | verified | `vfx: author shared muzzle sprite taste in one file (#245)` |
+| Codex, `review-muzzle-law-codex.md` | muzzle-law | P2: shape test misses duplicated flanks/angle | verified | `vfx: guard both muzzle jet flanks at the resolved angle (#245)` |
+| Claude, `review-muzzle-law-claude.md` | muzzle-law | P2: unacknowledged legacy reference-look anchor | verified (provenance; owner accepts the taste) | `docs: record the view-5 review and stills evidence (#236)` |
+| Claude, `review-muzzle-law-claude.md` | muzzle-law | P3: muzzle stills absent | not a defect | existing session `caps-muzzle/index.md` and PNGs; no new muzzle captures |
+| Claude, `review-muzzle-law-claude.md` | muzzle-law | P3: shape flag tests miss independent combinations | verified | `guns: refuse unrepresentable muzzle emissions at load (#245)` |
+| Claude, `review-muzzle-law-claude.md` | muzzle-law | P3: shape test pins shipped taste | verified | `guns: refuse unrepresentable muzzle emissions at load (#245)` |
+| Claude, `review-muzzle-law-claude.md` | muzzle-law | P3: jet test rejects a legal forward side angle | verified | `vfx: guard both muzzle jet flanks at the resolved angle (#245)` |
+| Claude, `review-muzzle-law-claude.md` | muzzle-law | P3: scalar sprite taste is misdescribed as playback/caps | verified | `vfx: author shared muzzle sprite taste in one file (#245)` |
+| Claude, `review-muzzle-law-claude.md` | muzzle-law | P3: finite-input energy/count assertions are false | verified | `guns: refuse unrepresentable muzzle emissions at load (#245)` |
+| Claude, `review-muzzle-law-claude.md` | muzzle-law | P3: dust survey deduplicates distinct ammunition rows | verified | `vfx: author shared muzzle sprite taste in one file (#245)` |
+| Claude, `review-muzzle-law-claude.md` | muzzle-law | P3: gun-authored reach/cloud wording is stale | verified | `vfx: author shared muzzle sprite taste in one file (#245)` |
+| Claude, `review-muzzle-law-claude.md` | muzzle-law | P3: energy ladder spans twelve decades, not six | verified | `guns: refuse unrepresentable muzzle emissions at load (#245)` |
+| Claude, `review-muzzle-law-claude.md` | muzzle-law | P3: AP/APHE light range rounds incorrectly | verified | `docs: record the view-5 review and stills evidence (#236)` |
+| Claude, `review-muzzle-law-claude.md` | muzzle-law | P3: unconditional muzzle-height claim lacks evidence | verified | `docs: record the view-5 review and stills evidence (#236)` |
+
+Subject: the game's rendering and HUD; every mention of rounds, hits, crew or knockouts is the
+game's damage model and game state only. Review files are the session's `scratchpad/codex/`
+artifacts named individually above. Verification starts from each supplied concrete input or
+mutant; these are correctness checks, not frame/tick pricing. No muzzle taste value is retuned.
+
+**Breaking inputs and regressions.**
+
+- The narrow-board fixture is FIXTURE DATA: target 960×1080, effective UI scale 2, diagnostics
+  visible. The old table could exceed its clipped root without any horizontal navigation. The
+  board now scrolls both axes, keeps columns on one line, pages rows with Page Up/Down and columns
+  with Left/Right. The real-font layout and input regressions cover content bounds and paging to
+  each end. MEASURED against the old handler: horizontal position stayed 0 instead of the
+  requested 400 logical pixels. This is independent of the compact board's typography.
+- The rung and backing findings are documentation/ownership defects: `HudLayer` stamps only z;
+  it cannot guarantee a background. Named world-label/fixed-HUD rungs now live and are pinned in
+  `Overlay`; the opaque card colour is the named `ui_font::MODAL_CARD_BG`. The existing real
+  draw-order/alpha regression remains the consumer guard.
+- The live hit inset plus held Tab is the clearance counterexample. Its existing public
+  `CornerRig` marker joins its UI root to the right dock from `hud`, preserving the inset's own
+  z rung; its world meshes/lights/cameras do not dock. The fixture mounts the integration marker
+  and actual corner dimensions and checks non-overlap. Temporary encounter/death cards are
+  deliberately exempt: the held board covers that overlay content under `Overlay::SCOREBOARD_Z`.
+  Reserving the full-screen death panel would eliminate the board's usable region. No file in
+  `src/damage_cam/` changes.
+- FIXTURE DATA `reference_energy_j = 1e-40` with an ordinary shot produced infinite emission
+  magnitudes. MEASURED: `scaling_outside_the_emissions_domain_is_refused` failed on the old
+  implementation. The law now returns a field-naming admission error for an unrepresentable
+  ratio, scaled field, derived end size or smoke count; the registry adds both file/row context
+  and the repair. FIXTURE DATA mass/speed pairs `(1e30, 1e5)` and `(1e-30, 1e-10)` expose the false
+  finite-input assertion; a huge cyclic rate exposes its count counterpart. Energy is computed
+  with wider intermediates and admitted only when representable as positive finite f32. The
+  registry regression checks the actual outside-input path and its source names.
+- The scalar-taste counterexample is an owner wanting a different fireball alpha/boost: the old
+  schema had no field, and the renderer forced constants. All named scalar boosts, opacities and
+  sharpness values now live in `muzzle.ron` and reach material uniforms; sheet playback/erosion
+  rules and population caps remain renderer contracts. Their shipped values are identical.
+- A duplicated `[across, across]` flank survived the old count/dot test. The revised rendered-axis
+  test checks the resolved angle and equal plane counts on both opposite flanks, and exercises
+  legal forward/backward angles (FIXTURE DATA: 45°, 100°, 135°). It no longer imposes a 60° taste
+  restriction. MEASURED: the duplicated-flank mutant fails with `(4, 0)` planes instead of
+  `(2, 2)`; the mutant is removed. Shape parsing/resolution and emission tests exercise every independent Boolean
+  flag combination with synthetic statements, comparing emitted layers with those statements;
+  legal edits to the shipped shape flags do not fail them.
+- The old dust survey's gun-key deduplication removed other ammunition rows. The survey retains
+  every `(gun, round)` and reports that pair, so the cloud assertions reach every shot's resolved
+  emission. Reach/cloud/fireball comments now describe resolved shot geometry. The energy
+  ladder is DERIVED: its speed spans six decades and its squared energy spans twelve.
+- The record's light range is DERIVED: `25 × (0.5 × 10.2 × 773² / 1e6)^(1/3) = 36.2451... m`, rounded to 36.2 m. The
+  blanket muzzle-height claim is removed in favour of the actual height/reach condition; no
+  unspecified elevation or rig pose is certified by an energy-derived reach.
+
+**Accepted taste and provenance.** The comparison with the deleted gun blocks is valid. DERIVED
+at the AP reference shot: dust birth about 1.81 m versus the old 1.8 m, smoke about 2.17→4.06 m
+versus 2.2→4.2 m, light about 8.41 Mlm versus 8.0 Mlm. The reference smoke/light/dust values
+numerically preserve much of that provisional legacy look, with rounding; they are not an
+independent physical calibration. The deleted blocks are visible in
+`guns: size every muzzle from the shot's energy and the gun's shape (#245)`. This provenance
+was missing from the record. The owner explicitly accepts the current taste as a start, so this
+lane corrects the attribution and keeps every accepted magnitude and exponent.
+
+The missing-muzzle-stills finding is not reproducible at verification; the session artifact
+directory differs from the two repository-relative locations the review searched. MEASURED here:
+the session's
+`caps-muzzle/` already contains its `index.md` and 92 PNGs. That evidence needs no new capture.
+
+**Board decision.** Held Tab may use more of the middle beside fixed panels, while staying clear
+of their actual boxes. A first small still exposed the current repair readout's extra rows: a
+full-width top-band reservation left no roster. `hud: place the board beside tall fixed panels
+(#236)` selects the largest clear rectangle from the measured panel boxes, and the real-font
+fixture now includes the full repair status. Panel growth is checked for non-overlap, rather than
+assuming that every growth must move the board downward. The inset's separate clearance fixture
+states its short-vitals state explicitly. A target completely occupied by fixed panels still has
+an explicitly empty modal region.
+
+ASSUMED typography: 14 px Barlow Condensed body on a 16 px line. MEASURED real-font capacities:
+six complete standings at 1280×720 / effective UI scale 2, and all thirty at 1920×1080 / scale 1.
+The tests also check real rendered line count/height and that the scroll content reaches the full
+roster. Thirty standings plus a header cannot fit a 360-logical-pixel-high target at that line
+height even without HUD/card furniture (DERIVED), so the small fixture intentionally scrolls.
+
+The only player-facing count string found was `Column::Knockouts`'s `KNOCKOUTS` header in
+`src/net/battle_hud.rs`; it now says `Kills` in combat and results. Code identifiers, diagnostics
+and domain prose retain knockout vocabulary.
+
+**Gates and stills.** Formatting and workspace CI clippy passed before each implementation
+commit. Focused green groups: MEASURED 40 gun/muzzle/citation tests for admission; 43 for scalar
+sprite taste and prewarming; 42 for the jet guard; 15 for board paging; 117 for the compact board,
+HUD/overlay/capture modules and whole-tree guards; 67 for the full-repair placement fix and guards.
+The final capture batch passed formatting, CI clippy and all 43 citation/font/network/bake
+guards. MEASURED: eight PNGs verify with the requested dimensions; clients completed and local
+servers stopped. Capture-server logs retain no-RenderApp and late-input diagnostics, documented
+in the stills index; excluded netcode was not investigated. GPU-less UI harnesses emit their existing no-RenderApp/logger warnings; their assertions
+pass. No frame/tick pricing, pushes or issue comments were made.
+
+The session's `scratchpad/caps-view5/index.md` owns the requested stills, recipes and logs: the
+original sand-dust sequence and the final board at both fixtures. The board stills were retaken
+after the full-repair placement fix. The owner must judge the dust's prominence, soil colour and
+persistence, and the compact board's readability and scrolling. The ground cloud is thin in this
+exact dust pose and reads most clearly in the early post-shot frame; no taste was retuned.
