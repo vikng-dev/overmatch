@@ -23,11 +23,14 @@ for a headless bed: the machine lock held, 0 `rustc` running at start, the bed f
 | 1 | Spall field: dot picture 128x8 | same | a field | cone p50 28 600–28 648 µs (39x); ring p50 32 483–32 614 (14.5x) | as above | passed, 2 runs | #204 |
 | 1 | Spall field: dot picture 256x8 | same | a field | cone p50 59 405–59 762 µs (82x); ring p50 70 698–70 937 (33x) | as above | passed, 2 runs | #204 |
 | 1 | Spall field: dot picture 256, centre-only | same | a field | cone p50 12 576–12 597 µs (19x); ring p50 33 519–34 086 (16x) | as above | passed, 2 runs | #204 |
+| 2 | Track prints skip still belts (client frame) | its parent, 2026-11-01 | 30 tanks at rest, visible window, `release` | ms a frame: p50 16.41–16.43, p95 29.62–29.67; not resolved: under the noise floor (the parent's own two runs differ 0.39 ms p50, 1.67 ms p95) | parent: p50 16.12–16.51, p95 29.62–31.29 | passed, A/B/B/A | #234 |
+| 2 | The other speed-ups since the last pricing | | | not priced (item 2 says why) | | | #186, #188, #191 |
 | 3 | Weight check, per change | main | one chunk to dust, 1 003 chunks | p50 1 193–1 201 µs, p95 2 080–2 096 µs | no change: 0 | passed, 3 runs | #189 |
 | 3 | Weight check, long-wall shot | main | 204 chunks to dust at once | p50 1 344–1 391 µs, p95 1 407–1 449 µs (71 965 steps) | as above | passed, 3 runs | #189 |
 | 3 | Weight check, then the gables | main | 118 more chunks | p50 12 314–12 534 µs, p95 12 727–12 791 µs | as above | passed, 3 runs | #189 |
 | 4 | Sleeping pieces | main | 200 / 1 000 asleep, tank parked | +92 / +393 µs p50 a tick (0.4 µs a piece) | parked, no pieces: p50 908–928 µs | passed, 3 runs | #106, #189 |
 | 4 | A pile held awake | main | tank parked on 120 pieces, 82 awake | +938 to +979 µs p50 a tick (drive phase +296) | parked, no pieces | passed, 3 runs | #106, #188 |
+| 5 | The hole cap's shader cost | | | not priced: no lever puts a cap's worth of holes on screen (item 5) | | | #189 |
 | 6 | Belt on a piece (R2) | main | driving over 120 pieces, 197 belt contacts p50 | +699 to +703 µs p50 a tick, of it the drive phase +167 to +171 | driving on flat ground: p50 972–985 µs | passed, 3 runs | #188 |
 | 7 | Envelope scan in `crossing_reach` | deleted | | not priced: not on main | | | #209 |
 
@@ -48,8 +51,10 @@ for a headless bed: the machine lock held, 0 `rustc` running at start, the bed f
   - `ballistics::analytic_field::the_field_models_priced_per_field`, on the measuring branch
     `lane/night-pricing-202-fields` only (the two #204 prototypes are test-only code on a tree
     from 2026-10-31; see item 1).
-- **Window mode.** The beds are headless (`OVERMATCH_WINDOW=headless`): no window, no GPU. No
-  client frame was measured (items 2 and 5 below say why).
+- **Window mode.** The beds are headless (`OVERMATCH_WINDOW=headless`): no window, no GPU. The
+  one client frame price (item 2) ran a visible, frontmost window on the built-in 120 Hz panel,
+  because a hidden window's frame loop free-runs (`scripts/perf/run-frame-sweep.sh`'s runbook);
+  its gates are that runner's.
 
 ## Item 1: the spall field models (#204)
 
@@ -110,6 +115,48 @@ ring and the picture fills four.
   466–472 µs (APHE rear, oblique and engine, HE right-rear; MEASURED); that their origins are
   blocked (a burst in or on a plate, decided by one walk) is ASSUMED from the prototype's rule.
 
+## Item 2: speed-ups landed since the last pricing
+
+**Priced:** "track_prints: skip belts none of whose inputs moved; keep the stamp scratch (#234)",
+the one client-frame speed-up, against its parent ("net: crew snapshot compared in place, applied
+on change, swap seats found through the tank (#234)"), both at their own tree of 2026-11-01.
+`scripts/serial-cargo build --locked --release --bin overmatch --features dev_ui,bitprobe` per
+arm (one feature set for every agent build; the shipped build has neither feature, so the
+absolute times are not the shipped build's, the difference between arms is). The scene is the
+frame sweep's `m350-30`: 30 tanks at rest (28 probes), shipped shadow distance, uncapped
+(`run-frame-sweep.sh`'s conditions and every gate of `frame-run.zsh`, run from the commit's tree
+by a scratch runner that swaps the binary per condition). One throwaway warm run per arm (15 s,
+the shader cache), then parent, commit, commit, parent (03:41–03:47; MEASURED).
+
+| Condition | Frames | ms p50 | ms p95 | ms p99 |
+|---|---|---|---|---|
+| parent-1 | 3 581 | 16.51 | 29.62 | 42.05 |
+| commit-1 | 3 594 | 16.43 | 29.67 | 41.87 |
+| commit-2 | 3 590 | 16.41 | 29.62 | 41.35 |
+| parent-2 | 3 615 | 16.12 | 31.29 | 43.57 |
+
+Gates passed in all four: `window: visible`, effective present mode Immediate with the frame cap
+off, one 120 000 mHz primary monitor and one 2560x1440 surface over the whole window, no
+occlusion in it, the 3D camera drew on at least 99 % of frames, 28 probe tanks spawned, no panic.
+
+- **Not resolved.** The commit's two runs read p50 16.41–16.43 ms and the parent's 16.12–16.51
+  ms: the parent's two runs differ by 0.39 ms p50 and 1.67 ms p95, more than any commit-to-parent
+  difference. The saving is under this A/B's noise floor, about 0.4 ms p50 (DERIVED from that
+  spread). A frame is as long as the slower of the main world and the render pipeline; whether
+  the main world bounds this one, where the saving would show, is not measured.
+- **Not priced, and why.** Each needs its own bed at its parent's tree of 2026-10-31 or 11-01,
+  none of which exists; none was built tonight:
+  - "ballistics: a field throw reads the broad phase once for all its directions (#186)": a
+    server-side throw; item 1's sampler is on a tree that already has it.
+  - "buildings: the push rule takes each source's crushed radius once per material (#188)" and
+    "buildings: the deposits skip a building whose ball a blast ray or a field stop misses
+    (#188)": the building deposit path, per shot.
+  - "ballistics: record live crossing evidence without cost sampling (#191)": the march, per shot.
+  - "tank: build a tank's armour trimeshes and hull colliders once, shared by every spawn
+    (#186)": a cost per spawn, not per frame or tick.
+  - Server-perf-2's four speed-ups were priced against their parent tree by "perf: price
+    server-perf-2 against server-perf-1's tree (#250)" (CLAIMED there, not re-measured).
+
 ## Item 3: the building weight check
 
 `fracture::weigh` on the shipped house (`house_1`, fixture data), three runs (02:17, 02:51 twice;
@@ -164,6 +211,19 @@ default task pools use every core; the dedicated server on Edgegap has one vCPU.
 - **A pile held awake by a parked tank costs about 0.95 ms a tick** for the 120-piece carpet:
   +938 to +979 µs p50 (DERIVED), of which the driving phase is +296 µs and the rest (+650 µs) lies
   outside it (ASSUMED: the solver with 82 pieces awake in the tank's island).
+
+## Item 5: the hole cap's shader cost
+
+Not priced. `HOLES_PER_CHUNK` is 16 on main (`src/buildings/breakage.rs`; ASSUMED by its own
+doc: "no measured cost or look sets it yet"). The hole path (`assets/shaders/building_holes.wgsl`'s
+`hole_at`, asked by `building_surface.wgsl` and its prepass) compiles only into the alpha-masked
+material a building with a hole wears, and runs on the faces of chunks that name a law chunk
+(a whole element's faces hold none), each fragment against up to 16 capsules and the chunk's hull
+planes (read from the shaders). Its cost is set by holed chunks on screen (ASSUMED). No lever puts holes there: a hole reaches the
+view's table only through the authority's deposits into a building's `Breakage`, and neither the
+frame sweep nor a capture plan can place a deposit, let alone the cap's 16 per chunk on every
+visible chunk. Pricing it needs a dev lever that writes holes into an on-screen building's
+breakage at spawn (fixture data), then the frame A/B of item 2 at 0, 4 and 16 holes a chunk.
 
 ## Item 6: the belt on a piece (tracks on rubble, step R2)
 
