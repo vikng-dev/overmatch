@@ -48,8 +48,9 @@ pub(crate) struct RecoilParams {
 
 /// THE single expression of how a fired weapon kicks its barrel: add `weapon`'s `recoil.kick` to
 /// slot `slot`'s recoil velocity in `sim`. Owns the WHOLE decision — a weapon with no `recoil` spec
-/// (a coax), no `barrel` node, or a slot absent from `sim.weapons` (a rig still spawning, a bad slot
-/// off the wire) kicks nothing. Both the local shooter ([`fire`], this module) and the remote-recoil
+/// (a coax) or no `barrel` node kicks nothing. `slot` is the firing weapon's own [`WeaponIndex`]
+/// on this machine's rig (the remote applier finds that muzzle first), so it indexes
+/// `sim.weapons`. Both the local shooter ([`fire`], this module) and the remote-recoil
 /// applier (`net::client::apply_pending_recoil_kicks`) pass `(sim, slot, weapon)` and are IDENTICAL
 /// by construction: "how a shot recoils the gun" is one implementation, not two that agree today
 /// (the derive-the-consequence doctrine, ADR-0016 — a derive that branches differently per end is
@@ -66,9 +67,10 @@ pub(crate) fn kick_recoil(sim: &mut TankSim, slot: usize, weapon: &Weapon) {
     let (Some(_), Some(recoil)) = (weapon.barrel, weapon.recoil.as_ref()) else {
         return;
     };
-    if let Some(state) = sim.weapons.get_mut(slot) {
-        state.recoil_velocity += recoil.kick;
-    }
+    sim.weapons
+        .get_mut(slot)
+        .expect(SLOT_IN_SIM)
+        .recoil_velocity += recoil.kick;
 }
 
 /// Whether the `rounds_fired`-th round down a belt with cadence `tracer_every` is a tracer. Pure
@@ -119,6 +121,19 @@ pub(crate) fn advance_weapon_clock(mut clock: ResMut<crate::WeaponClock>) {
     clock.0 = clock.0.saturating_add(1);
 }
 
+/// Why a weapon's [`TankRoot`] resolves: [`crate::tank`]'s assembly spawns every weapon under its
+/// root in the root's own construction batch, and the root carries `Tank` (which requires its
+/// `TankCommand`) and its body's `Position`/`Rotation` from that batch on.
+const WEAPON_ROOT_IS_A_TANK: &str =
+    "a weapon's TankRoot names its live tank, assembled with it in one construction batch";
+/// Why a weapon's slot indexes its root's per-weapon state: `WeaponGate`, `WeaponLoads` and
+/// `TankSim::weapons` are each built from the spec's name-sorted weapons, the order that assigns
+/// every `WeaponIndex`.
+const SLOT_IN_GATE: &str = "a weapon's WeaponIndex indexes its root's WeaponGate slots";
+const SLOT_IN_LOADS: &str = "a weapon's WeaponIndex indexes its root's WeaponLoads slots";
+const SLOT_IN_SIM: &str = "a weapon's WeaponIndex indexes its root's TankSim weapon slots";
+const ROOT_HAS_SIM: &str = "a weapon's root carries the TankSim built in its construction batch";
+
 /// Quantize one authored duration to the first fixed tick at or after it. Integer nanosecond
 /// ceiling keeps the runtime gate free of a changing float; `arm` separately enforces at least one
 /// tick so a slot cannot emit twice in one simulated tick.
@@ -151,15 +166,13 @@ fn tick_weapon_gate(
 ) {
     let now = clock.0;
     for (weapon, slot, root) in &weapons {
-        let Ok(tank_volumes) = tanks.get(root.0) else {
-            continue;
-        };
+        let tank_volumes = tanks.get(root.0).expect(WEAPON_ROOT_IS_A_TANK);
+        // A client holds no gate for another player's tank: `WeaponGate` is owner-private
+        // (`net::disclosure::CombatDisclosure`), so that tank's readiness is the server's alone.
         let Ok(mut gate) = gates.get_mut(root.0) else {
             continue;
         };
-        let Some(state) = gate.weapons.get_mut(slot.0) else {
-            continue;
-        };
+        let state = gate.weapons.get_mut(slot.0).expect(SLOT_IN_GATE);
         if state.ready_tick.is_none() {
             continue;
         }
@@ -238,9 +251,8 @@ fn fire(
     mut commands: Commands,
 ) {
     for (muzzle_entity, weapon, slot, root) in &weapons {
-        let Ok((command, tank_volumes, position, rotation, combatant)) = tanks.get(root.0) else {
-            continue;
-        };
+        let (command, tank_volumes, position, rotation, combatant) =
+            tanks.get(root.0).expect(WEAPON_ROOT_IS_A_TANK);
         // Input routing only — edge vs level is baked into the command fields themselves
         // (`fire_primary` is a one-tick click latch, `fire_secondary` a held level; see
         // `TankCommand`), so a `Single` on Primary consumes the edge and an `Automatic` on
@@ -249,57 +261,58 @@ fn fire(
             Trigger::Primary => command.fire_primary,
             Trigger::Secondary => command.fire_secondary,
         };
+        // A client fires no other player's tank: its `WeaponGate` and `WeaponLoads` are
+        // owner-private (`net::disclosure::CombatDisclosure`) and never reach this client.
+        let (Ok(tank_gate), Ok(tank_loads)) = (gates.get(root.0), loads.get(root.0)) else {
+            continue;
+        };
         // Ready = no active absolute deadline, plus rounds for an `Automatic`. A dry belt remains
         // firm even if malformed state ever carries no deadline.
-        let ready = gates
-            .get(root.0)
-            .ok()
-            .and_then(|gate| gate.weapons.get(slot.0))
-            .is_some_and(|w| {
-                w.is_ready()
-                    && match weapon.fire_cycle {
-                        FireCycle::Single { .. } => true,
-                        FireCycle::Automatic { .. } => w.belt_remaining > 0,
-                    }
-            });
+        let state = tank_gate.weapons.get(slot.0).expect(SLOT_IN_GATE);
+        let ready = state.is_ready()
+            && match weapon.fire_cycle {
+                FireCycle::Single { .. } => true,
+                FireCycle::Automatic { .. } => state.belt_remaining > 0,
+            };
         if !triggered || !ready || !requirement_met(tank_volumes, &weapon.fire, &volumes) {
             continue;
         }
-        // The chambered round ([`crate::tank::WeaponLoad::loaded`]). A slot with no load state or
-        // an index past the weapon's list holds the shot, as a missing gate does.
-        let Some((loaded, fired)) = loads
-            .get(root.0)
-            .ok()
-            .and_then(|loads| loads.weapons.get(slot.0))
-            .and_then(|load| {
-                let fired = weapon.rounds.get(usize::from(load.loaded))?;
-                // The fuze mode is read now, at fire time, so a toggle after loading still applies
-                // to the chambered round; whether it may is a gameplay question still open. A mode
-                // the round's fuze does not list holds the shot.
-                let mode = load.fuze_mode(&weapon.rounds, load.loaded)?;
-                Some((load.loaded, fired.in_mode(mode)?))
-            })
-        else {
-            continue;
-        };
+        // The chambered round ([`crate::tank::WeaponLoad::loaded`]). The fuze mode is read now, at
+        // fire time, so a toggle after loading still applies to the chambered round; whether it
+        // may is a gameplay question still open.
+        let load = tank_loads.weapons.get(slot.0).expect(SLOT_IN_LOADS);
+        let fired = weapon.rounds.get(usize::from(load.loaded)).expect(
+            "a loaded index names one of the weapon's rounds: apply_round_selection steps it \
+             within the list",
+        );
+        let mode = load.fuze_mode(&weapon.rounds, load.loaded).expect(
+            "a loaded round's fuze mode is one its fuze lists: WeaponLoad::toggle_fuze steps \
+             within that list",
+        );
+        let (loaded, fired) = (
+            load.loaded,
+            fired
+                .in_mode(mode)
+                .expect("a round fires in a mode its own fuze lists"),
+        );
 
         // Tick-truth muzzle pose (`rig_world_pose`, never `GlobalTransform` — see its doc): the
         // muzzle decides where the shell goes, so it must be the pose the server's tick also
         // computes, not the render picture. The chain composes the servo angles (tick-truth in
         // the fixed loop) and the barrel's recoil offset (stepped in `FixedUpdate`).
-        let Some((muzzle_position, muzzle_rotation)) = rig_world_pose(
+        let (muzzle_position, muzzle_rotation) = rig_world_pose(
             muzzle_entity,
             root.0,
             position.0,
             rotation.0,
             &parents,
             &locals,
-        ) else {
-            continue;
-        };
-        let Ok(bore) = Dir3::new(muzzle_rotation * Vec3::NEG_Z) else {
-            continue; // corrupt pose frame — hold the shot rather than fire NaN
-        };
+        )
+        .expect("a muzzle's hierarchy reaches its root through nodes that each carry a Transform");
+        let bore = Dir3::new(muzzle_rotation * Vec3::NEG_Z).expect(
+            "a muzzle's tick pose composes finite unit rotations: the root's from the solver, the \
+             rig's from validated servo and recoil state",
+        );
 
         // Round bookkeeping: is THIS round a tracer, then advance the counter. A `Single`'s round
         // always traces (its visual is the shell scene, not a streak — `tracer_round` is belt
@@ -307,22 +320,17 @@ fn fire(
         // state so the server and the client — which both run this `fire` and count their own
         // belts from 0 — agree on each round's tracer-ness. The flag rides FireShell → FireEvent
         // so remote clients match too (see `WeaponState::rounds_fired`).
-        let tracer = if let Ok(mut sim) = sims.get_mut(root.0) {
-            match sim.weapons.get_mut(slot.0) {
-                Some(state) => {
-                    let is_tracer = match weapon.fire_cycle {
-                        FireCycle::Single { .. } => true,
-                        FireCycle::Automatic { tracer_every, .. } => {
-                            tracer_round(state.rounds_fired, tracer_every)
-                        }
-                    };
-                    state.rounds_fired = state.rounds_fired.wrapping_add(1);
-                    is_tracer
+        let tracer = {
+            let mut sim = sims.get_mut(root.0).expect(ROOT_HAS_SIM);
+            let state = sim.weapons.get_mut(slot.0).expect(SLOT_IN_SIM);
+            let is_tracer = match weapon.fire_cycle {
+                FireCycle::Single { .. } => true,
+                FireCycle::Automatic { tracer_every, .. } => {
+                    tracer_round(state.rounds_fired, tracer_every)
                 }
-                None => false,
-            }
-        } else {
-            false
+            };
+            state.rounds_fired = state.rounds_fired.wrapping_add(1);
+            is_tracer
         };
 
         // The identity belongs to the event, not a later post-spawn repair: `on_fire_shell`
@@ -368,22 +376,29 @@ fn fire(
         // shared `kick_recoil` owns the whole decision (barrel + recoil spec present, slot valid), so
         // this path and the opponent-view path (`net::client`) can't diverge on how a shot recoils.
         // Under fused own fire the kick arrives with the echo, through that same opponent-view path.
-        if !fused_echo && let Ok(mut sim) = sims.get_mut(root.0) {
-            kick_recoil(&mut sim, slot.0, weapon);
+        if !fused_echo {
+            kick_recoil(
+                &mut sims.get_mut(root.0).expect(ROOT_HAS_SIM),
+                slot.0,
+                weapon,
+            );
         }
         // Recoil reaction on the hull: the shell's momentum, opposite the bore, applied on the bore
         // axis. The line of action passes above the centre of mass, so the impulse-at-point also
         // pitches the nose up (gun climb), not just shoves the hull back. Each weapon kicks by its
-        // own momentum, so the MGs barely register.
+        // own momentum, so the MGs barely register. A client's replica body is `Static`
+        // (`net::rig`), with no solver state to take an impulse: the server's hull takes it.
         if let Ok(forces) = bodies.get_mut(root.0) {
             let impulse = recoil_impulse(bore, fired.body.mass, fired.muzzle_speed);
             apply_explicit_impulse(forces, impulse, muzzle_position);
         }
         // Arm an absolute deadline per mechanism. `Single`: crew-gated reload. `Automatic`: consume
         // one belt round, then arm either the crew-gated swap or the ungated cyclic interval.
-        if let Ok(mut gate) = gates.get_mut(root.0)
-            && let Some(state) = gate.weapons.get_mut(slot.0)
         {
+            let mut gate = gates
+                .get_mut(root.0)
+                .expect("the gate read above for this weapon is still present");
+            let state = gate.weapons.get_mut(slot.0).expect(SLOT_IN_GATE);
             let delay_secs = match weapon.fire_cycle {
                 FireCycle::Single { reload_secs } => reload_secs,
                 FireCycle::Automatic {
@@ -420,13 +435,11 @@ fn apply_round_selection(
     weapons: Query<(&Weapon, &WeaponIndex, &TankRoot), With<Muzzle>>,
 ) {
     for (weapon, slot, root) in &weapons {
-        let Ok((command, gate, mut loads)) = tanks.get_mut(root.0) else {
-            continue;
-        };
-        let (Some(&state), Some(load)) = (gate.weapons.get(slot.0), loads.weapons.get(slot.0))
-        else {
-            continue;
-        };
+        let (command, gate, mut loads) = tanks.get_mut(root.0).expect(
+            "an authority tank carries the WeaponGate and WeaponLoads its construction batch built",
+        );
+        let state = *gate.weapons.get(slot.0).expect(SLOT_IN_GATE);
+        let load = loads.weapons.get(slot.0).expect(SLOT_IN_LOADS);
         let mut next = load.clone();
         if let Some(select) = command.select_round
             && usize::from(select.weapon) == slot.0
@@ -456,12 +469,8 @@ fn apply_recoil(
 ) {
     let dt = time.delta_secs();
     for (mut transform, params, slot, root) in &mut barrels {
-        let Ok(mut sim) = sims.get_mut(root.0) else {
-            continue;
-        };
-        let Some(state) = sim.weapons.get_mut(slot.0) else {
-            continue;
-        };
+        let mut sim = sims.get_mut(root.0).expect(ROOT_HAS_SIM);
+        let state = sim.weapons.get_mut(slot.0).expect(SLOT_IN_SIM);
         // Damped spring back to battery: offset'' = -k·offset - c·offset'.
         let accel =
             -params.stiffness * state.recoil_offset - params.damping * state.recoil_velocity;
@@ -811,8 +820,8 @@ mod tests {
     /// The game's damage model, on the authority's systems: the fuze toggle steps the SELECTED
     /// round type's mode and no other, a one-mode type has nothing to toggle, and the shot fires
     /// the chambered type in the mode picked for it, read at fire time, with that mode's delay in
-    /// its burst. A mode the round's fuze does not list holds the shot and spends no readiness:
-    /// the server's bound check, which the fire event's mode index relies on.
+    /// its burst. A mode the round's fuze does not list is a broken load, never a held shot
+    /// ([`a_load_naming_an_unlisted_fuze_mode_is_a_bug`]): the fire event's mode index relies on it.
     #[test]
     fn the_fuze_toggle_picks_the_mode_a_shot_fires_with() {
         let mut world = test_world();
@@ -853,27 +862,32 @@ mod tests {
         );
         world.get_mut::<TankCommand>(root).unwrap().toggle_fuze = None;
 
-        {
-            let mut loads = world.get_mut::<WeaponLoads>(root).unwrap();
-            loads.weapons[0].loaded = 1;
-            loads.weapons[0].fuze_modes[1] = u8::MAX;
-        }
-        world.run_system_once(fire).unwrap();
-        assert!(
-            world.resource::<FiredFuzes>().0.is_empty(),
-            "an unlisted mode holds the shot"
-        );
-        assert!(
-            gate_state(&world, root).is_ready(),
-            "a held shot spends no readiness"
-        );
-        world.get_mut::<WeaponLoads>(root).unwrap().weapons[0].fuze_modes[1] = picked;
+        world.get_mut::<WeaponLoads>(root).unwrap().weapons[0].loaded = 1;
         world.run_system_once(fire).unwrap();
         assert_eq!(
             world.resource::<FiredFuzes>().0,
             [(picked, Some(picked_delay))],
             "the shot carries the picked mode and its delay"
         );
+    }
+
+    /// The game's damage model: a chambered round whose stored mode its fuze does not list cannot
+    /// fire as a held shot that silently spends nothing; `WeaponLoad::toggle_fuze` steps only
+    /// within the list, so such a load is a bug and panics. FIXTURE DATA: the shipped HE round, its
+    /// stored mode set past every list.
+    #[test]
+    #[should_panic(expected = "a round fires in a mode its own fuze lists")]
+    fn a_load_naming_an_unlisted_fuze_mode_is_a_bug() {
+        let mut world = test_world();
+        let root = spawn_main_gun_rig(&mut world);
+        let muzzle = world
+            .query_filtered::<Entity, With<Muzzle>>()
+            .single(&world)
+            .unwrap();
+        world.get_mut::<Weapon>(muzzle).unwrap().rounds =
+            vec![WeaponRound::resolve("88mm_HE").unwrap()];
+        world.get_mut::<WeaponLoads>(root).unwrap().weapons[0].fuze_modes = vec![u8::MAX];
+        world.run_system_once(fire).unwrap();
     }
 
     /// The determinism-relevant belt lifecycle, on the real systems: firing walks the belt down,

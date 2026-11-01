@@ -2991,11 +2991,12 @@ mod tests {
         );
     }
 
-    /// `kick_recoil` kicks only a weapon with BOTH a barrel node and a recoil spec, on a slot the
-    /// sim holds. A barrel-less kick would accumulate in `recoil_velocity` and never decay
-    /// (`apply_recoil` steps `RecoilParams`, built on the barrel node); a recoil-less weapon (a
-    /// coax) has nothing to kick; a malformed slot off the wire is a silent no-op, never an
-    /// out-of-bounds index. The gate is shared, so it holds on the server's `fire` path too.
+    /// `kick_recoil` kicks only a weapon with BOTH a barrel node and a recoil spec. A barrel-less
+    /// kick would accumulate in `recoil_velocity` and never decay (`apply_recoil` steps
+    /// `RecoilParams`, built on the barrel node); a recoil-less weapon (a coax) has nothing to
+    /// kick. A slot off the wire reaches it only through the local muzzle that holds it
+    /// (`apply_pending_recoil_kicks`). The gate is shared, so it holds on the server's `fire` path
+    /// too.
     #[test]
     fn barrel_less_weapon_is_noop() {
         let barrel = Some(Entity::PLACEHOLDER);
@@ -3005,7 +3006,6 @@ mod tests {
         for (slot, weapon, case) in [
             (0, weapon(Some(recoil(3.5)), None), "a barrel-less weapon"),
             (0, weapon(None, barrel), "a recoil-less weapon"),
-            (9, weapon(Some(recoil(3.5)), barrel), "an out-of-range slot"),
         ] {
             crate::shooting::kick_recoil(&mut sim, slot, &weapon);
             assert_eq!(sim.weapons[0].recoil_velocity, 0.0, "{case} kicks nothing");
