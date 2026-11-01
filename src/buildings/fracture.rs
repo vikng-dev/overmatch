@@ -3090,10 +3090,11 @@ impl Blast {
     /// reflects off the face (factor 2, ASSUMED, the #237 study's); the reflected pulse keeps
     /// the fit's duration `2i/P` (ASSUMED), so its peak rises with its impulse. Both branches
     /// are continuous, so their maximum meets the fit continuously where `i = fit`; the
-    /// crossing's scaled distance is one number per core, as the fit's own scaling is. DERIVED
-    /// from the shipped cores' data: bare, 1.63–1.82 times the fit at the charge's surface and
-    /// meeting it at Z ≈ 0.59–0.72 m/kg^⅓ (the study's ≈ 1.7 and ≈ 0.6); the cased 8.8 cm HE
-    /// round, its products slowed by the casing, 1.44 times, meeting it at Z ≈ 0.44.
+    /// crossing's scaled distance is one number per charge design (core and casing ratio), as
+    /// the fit's own scaling is. DERIVED from the shipped cores' data: bare, 1.63–1.82 times the
+    /// fit at the charge's surface and meeting it at Z ≈ 0.59–0.72 m/kg^⅓ (the study's ≈ 1.7
+    /// and ≈ 0.6); the cased 8.8 cm HE round, its products slowed by the casing, 1.44 times,
+    /// meeting it at Z ≈ 0.44.
     pub(crate) fn products_floor(&self, distance: f32, fit: f32) -> Option<(f32, f32)> {
         let products = self.products / (2.0 * PI * distance * distance);
         (products > fit).then(|| (products, products / fit))
