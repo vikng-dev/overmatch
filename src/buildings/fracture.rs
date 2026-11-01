@@ -1845,15 +1845,21 @@ fn section_failure(
     pulse: Reading,
 ) -> Option<Failure> {
     let joints: Vec<&Joint> = section.iter().map(|&j| &structure.joints[j]).collect();
+    // All levers and centroids share a section-local origin. Translating construction
+    // coordinates cannot multiply the load-summation allowance by an absolute position.
+    let origin = joints[0].centroid;
     let area: f32 = joints.iter().map(|joint| joint.area).sum();
     let centre = joints
         .iter()
-        .map(|joint| joint.centroid * joint.area)
+        .map(|joint| (joint.centroid - origin) * joint.area)
         .sum::<Vec3>()
         / area;
     let (mass, weighted) = group.iter().fold((0.0, Vec3::ZERO), |(mass, at), &i| {
         let chunk = &structure.chunks[i];
-        (mass + chunk.mass, at + chunk.centroid * chunk.mass)
+        (
+            mass + chunk.mass,
+            at + (chunk.centroid - origin) * chunk.mass,
+        )
     });
     let com = weighted / mass;
     // The plane's normal toward the group, a group point moving along it leaving the section: the
@@ -1863,7 +1869,7 @@ fn section_failure(
         .map(|joint| {
             let n = joint.normal;
             joint.area
-                * if n.dot(com - joint.centroid) >= 0.0 {
+                * if n.dot(com - (joint.centroid - origin)) >= 0.0 {
                     n
                 } else {
                     -n
@@ -1876,14 +1882,17 @@ fn section_failure(
             .iter()
             .filter(|load| group.binary_search(&load.chunk).is_ok())
     };
-    let (moment, magnitude_sum, impulse_sum, count) = on_group().fold(
-        (Vec3::ZERO, 0.0_f64, 0.0_f64, 0_usize),
-        |(moment, scale, impulses, count), load| {
+    let (moment, magnitude_sum, point_sum, impulse_sum, count) = on_group().fold(
+        (Vec3::ZERO, 0.0_f64, 0.0_f64, 0.0_f64, 0_usize),
+        |(moment, scale, points, impulses, count), load| {
             let blow = load.blow * load.felt(pulse);
             let magnitude = blow.as_dvec3().length();
+            let point = load.at - origin;
+            let lever = point - centre;
             (
-                moment + (load.at - centre).cross(blow),
-                scale + (load.at.as_dvec3().length() + centre.as_dvec3().length()) * magnitude,
+                moment + lever.cross(blow),
+                scale + lever.as_dvec3().length() * magnitude,
+                points + point.as_dvec3().length() * magnitude,
                 impulses + magnitude,
                 count + 1,
             )
@@ -1891,14 +1900,16 @@ fn section_failure(
     );
     let bending = moment - n * moment.dot(n);
     // Resolution, DERIVED: gamma(k) = k*u/(1-k*u), u = EPSILON/2, bounds k rounded
-    // operations. The centroid ratio takes at most 2*N+4 steps; normal summation and
+    // operations. The local centroid ratio takes at most 2*N+6 steps; normal summation and
     // normalization take N+8, amplified by the ratio of absolute operands to their sum.
-    // The point/cross/projection chain is bounded by 32 steps plus load summation.
-    // Sum magnitudes before cancellation: rounding in an axial pull cannot choose a hinge.
-    let centre_error = roundoff_gamma(2 * joints.len() + 4)
+    // Cross/projection and load summation use 32+count steps on the actual lever magnitudes.
+    // Point subtraction gets its own two-step allowance, independent of load count; the local
+    // centroid's uncertainty is applied once per impulse. Sum magnitudes before cancellation:
+    // rounding in an axial pull cannot choose a hinge.
+    let centre_error = roundoff_gamma(2 * joints.len() + 6)
         * joints
             .iter()
-            .map(|j| f64::from(j.area) * j.centroid.as_dvec3().length())
+            .map(|j| f64::from(j.area) * (j.centroid - origin).as_dvec3().length())
             .sum::<f64>()
         / f64::from(area);
     let normal_error = 2.0
@@ -1910,6 +1921,7 @@ fn section_failure(
         / normal_sum.as_dvec3().length();
     let resolution = centre_error * impulse_sum
         + roundoff_gamma(count + 32) * magnitude_sum
+        + roundoff_gamma(2) * point_sum
         + (2.0 * normal_error + normal_error * normal_error) * moment.as_dvec3().length();
     if bending.as_dvec3().length() <= resolution {
         return None;
@@ -1919,21 +1931,21 @@ fn section_failure(
     let across = n.cross(axis);
     let back = joints
         .iter()
-        .map(|joint| across.dot(joint.centroid - centre) - (joint.area / PI).sqrt())
+        .map(|joint| across.dot((joint.centroid - origin) - centre) - (joint.area / PI).sqrt())
         .fold(f32::INFINITY, f32::min);
     let hinge = centre + across * back;
     let inertia: f32 = group
         .iter()
         .map(|&i| {
             let chunk = &structure.chunks[i];
-            let r = chunk.centroid - hinge;
+            let r = (chunk.centroid - origin) - hinge;
             let own = (3.0 * chunk.volume / (4.0 * PI)).cbrt();
             chunk.mass * (r.length_squared() - r.dot(axis).powi(2) + 0.4 * own * own)
         })
         .sum();
     let demand: f32 = on_group()
         .map(|load| {
-            let moment = (load.at - hinge).cross(load.blow).dot(axis);
+            let moment = ((load.at - origin) - hinge).cross(load.blow).dot(axis);
             // A blow with no moment about the hinge's axis (none at all, or one whose line meets
             // the axis) turns nothing whatever its source's mass, so an immovable source (a
             // locked body's contact, infinite mass) adds nothing rather than 0 × ∞.
@@ -4054,6 +4066,39 @@ mod tests {
             assert!(reading.is_none(), "scale {scale}: {reading:?}");
             load.at += Vec3::Y * (0.01 * scale);
             assert!(section_failure(&slab, &[0], &[0], &[load], Reading::UNRESISTED).is_some());
+        }
+    }
+
+    /// Translating the construction origin must not erase a resolved bending axis. The
+    /// section law's load-count allowance must scale with local levers, not world positions.
+    /// Fixture: binary-exact coordinates, 4096 axial loads offset by 1/1024 m, translated 8 m.
+    #[test]
+    fn translating_a_section_keeps_its_resolved_bending_axis() {
+        let mut expected = None;
+        for offset in [Vec3::ZERO, Vec3::X * 8.0] {
+            let mut slab = unsupported_slab(2);
+            for (c, chunk) in slab.chunks.iter_mut().enumerate() {
+                chunk.centroid = Vec3::new(c as f32 * 0.25, 0.5, 0.0) + offset;
+            }
+            slab.joints[0].centroid = Vec3::new(0.125, 0.5, 0.0) + offset;
+            slab.joints[0].area = 0.0625;
+            let load = Load {
+                at: slab.joints[0].centroid + Vec3::new(-0.125, 1.0 / 1024.0, 0.0),
+                blow: Vec3::NEG_X * (1000.0 / 4096.0),
+                ..slab_contact(&slab, 0.0)
+            };
+            let reading =
+                section_failure(&slab, &[0], &[0], &vec![load; 4096], Reading::UNRESISTED)
+                    .unwrap_or_else(|| {
+                        panic!("the eccentric load resolves at origin offset {offset}")
+                    });
+            if let Some(demand) = expected {
+                assert_eq!(
+                    reading.demand, demand,
+                    "the same local hinge carries the same demand"
+                );
+            }
+            expected = Some(reading.demand);
         }
     }
 
