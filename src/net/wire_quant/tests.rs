@@ -173,7 +173,7 @@ const POSITION_HALF_STEP_M: f32 = 1.0 / 2048.0;
 
 /// The position's range edges in both directions on every axis (the last packed code, the first
 /// value past it, a value that rounds onto the range's end, far outside), the origin and negative
-/// zero, a non-finite axis, then a dense sample over ±1100 m — both forms.
+/// zero, then a dense sample over ±1100 m — both forms.
 fn position_samples() -> Vec<Vec3> {
     let last = 1024.0 - 1.0 / 1024.0;
     let mut out = vec![Vec3::ZERO, Vec3::splat(-0.0)];
@@ -186,8 +186,6 @@ fn position_samples() -> Vec<Vec3> {
             }
         }
     }
-    out.push(Vec3::new(f32::NAN, 0.0, 0.0));
-    out.push(Vec3::new(0.0, f32::INFINITY, 0.0));
     let mut samples = Samples(0xD1B5_4A32_D192_ED03);
     for _ in 0..200_000 {
         out.push(Vec3::new(samples.next(), samples.next(), samples.next()) * 1100.0);
@@ -196,7 +194,7 @@ fn position_samples() -> Vec<Vec3> {
 }
 
 /// Inside ±1024 m on every axis a position rides 8 bytes within half a step per axis; outside it,
-/// or not finite, it rides 13 bytes bit-exact. The interpolator lerps decoded samples and a
+/// it rides 13 bytes bit-exact. The interpolator lerps decoded samples and a
 /// starved cursor holds the newest, so this half step is the whole of the codec's share of a
 /// presented hull's position error.
 #[test]
@@ -231,11 +229,12 @@ fn a_position_round_trips_within_half_a_step_or_exactly() {
 }
 
 /// Each velocity codec at its steps: inside its i16 range, half a step per axis; past either end,
-/// the end itself (clamped, sign kept); NaN, zero. No client projects a pose from a velocity
+/// the end itself (clamped, sign kept). No client projects a pose from a velocity
 /// (`net-motion-contract.md`), so the half step is the codec's whole error on a replicated one.
 #[test]
 fn a_velocity_round_trips_within_half_a_step_or_clamps() {
-    for steps in [LINEAR_VELOCITY_STEPS, ANGULAR_VELOCITY_STEPS] {
+    let steps = LINEAR_VELOCITY_STEPS;
+    {
         let top = f32::from(i16::MAX) / steps;
         let bottom = f32::from(i16::MIN) / steps;
         let write = |v: Vec3, message: &mut Vec<u8>| write_i16x3(v, steps, message);
@@ -247,7 +246,6 @@ fn a_velocity_round_trips_within_half_a_step_or_clamps() {
                 Vec3::new(-top * 1.5, top * 1.5, 0.0),
                 Vec3::new(bottom, top, 0.0),
             ),
-            (Vec3::new(f32::NAN, 0.0, -0.0), Vec3::ZERO),
         ] {
             let (len, back) = round_trip(v, write, read);
             assert_eq!(len, 6);
@@ -280,8 +278,8 @@ fn belt(left: (f32, f64), right: (f32, f64)) -> TrackDrive {
 }
 
 /// The belt state at its range edges and inside: each speed within half a step inside ±32 m/s and
-/// clamped to the bound past it (NaN 0); each phase, unbounded and of either sign, decoded into
-/// `[0, BELT_PHASE_WRAP_M)` within half a step of it modulo the wrap (non-finite 0); 10 bytes. The
+/// clamped to the bound past it; each phase, unbounded and of either sign, decoded into
+/// `[0, BELT_PHASE_WRAP_M)` within half a step of it modulo the wrap; 10 bytes. The
 /// track view draws a phase carried at this speed and eased onto this phase, both modulo the wrap.
 #[test]
 fn a_belt_round_trips_within_half_a_step_modulo_its_wrap() {
@@ -293,7 +291,6 @@ fn a_belt_round_trips_within_half_a_step_modulo_its_wrap() {
             belt((1.0e4, BELT_PHASE_WRAP_M), (-1.0e4, -BELT_PHASE_WRAP_M)),
             [top, bottom],
         ),
-        (belt((f32::NAN, f64::NAN), (0.0, f64::INFINITY)), [0.0, 0.0]),
     ] {
         let (len, back) = round_trip(drive, |d, m| write_track_drive(&d, m), read_track_drive);
         assert_eq!(len, 10);
@@ -339,11 +336,6 @@ fn the_rule_fns_send_the_quantised_bytes() {
     assert_eq!(len, 6);
     assert!(back.0.abs_diff_eq(linear.0, 0.5 / LINEAR_VELOCITY_STEPS));
 
-    let angular = AngularVelocity(Vec3::new(0.02, -1.1, 0.3));
-    let (len, back) = through_rule_fns(angular_velocity_fns(), angular);
-    assert_eq!(len, 6);
-    assert!(back.0.abs_diff_eq(angular.0, 0.5 / ANGULAR_VELOCITY_STEPS));
-
     // The belt state: 10 bytes, not postcard's 32 for two f32 speeds and two f64 phases.
     let drive = belt((4.25, 1500.5), (-3.0, -20.125));
     let (len, back) = through_rule_fns(track_drive_fns(), drive);
@@ -373,4 +365,68 @@ fn a_truncated_message_is_refused() {
     assert!(read_i16x3(&mut short(&|m| write_i16x3(Vec3::ONE, 256.0, m)), 256.0).is_err());
     let drive = belt((1.0, 2.0), (3.0, 4.0));
     assert!(read_track_drive(&mut short(&|m| write_track_drive(&drive, m))).is_err());
+}
+
+/// A corrupt authority value must never become an identity pose or zero speed on every client.
+/// Finite out-of-range speeds still saturate; non-finite values are internal bugs in every build.
+#[test]
+fn corrupt_authority_values_are_never_encoded_as_plausible_state() {
+    for poison in [f32::NAN, f32::INFINITY, f32::NEG_INFINITY] {
+        assert!(
+            std::panic::catch_unwind(|| write_position(Vec3::splat(poison), &mut Vec::new()))
+                .is_err()
+        );
+        assert!(
+            std::panic::catch_unwind(|| write_rotation(
+                Quat::from_xyzw(poison, 0.0, 0.0, 1.0),
+                &mut Vec::new()
+            ))
+            .is_err()
+        );
+        assert!(
+            std::panic::catch_unwind(|| write_i16x3(
+                Vec3::splat(poison),
+                LINEAR_VELOCITY_STEPS,
+                &mut Vec::new()
+            ))
+            .is_err()
+        );
+        assert!(
+            std::panic::catch_unwind(|| write_track_drive(
+                &belt((poison, 0.0), (0.0, 0.0)),
+                &mut Vec::new()
+            ))
+            .is_err()
+        );
+    }
+    for poison in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+        assert!(
+            std::panic::catch_unwind(|| write_track_drive(
+                &belt((0.0, poison), (0.0, 0.0)),
+                &mut Vec::new()
+            ))
+            .is_err()
+        );
+    }
+    assert!(
+        std::panic::catch_unwind(|| write_rotation(
+            Quat::from_xyzw(0.0, 0.0, 0.0, 0.0),
+            &mut Vec::new()
+        ))
+        .is_err()
+    );
+}
+
+/// A peer's non-finite full-precision position is outside input, so the decoder refuses it
+/// instead of allowing it to reach the client's physics/view tripwires.
+#[test]
+fn a_non_finite_position_is_refused_at_the_wire_edge() {
+    for poison in [f32::NAN, f32::INFINITY, f32::NEG_INFINITY] {
+        let mut bytes = vec![POSITION_FULL];
+        for axis in [poison, 0.0, 0.0] {
+            bytes.extend_from_slice(&axis.to_le_bytes());
+        }
+        let error = read_position(&mut Bytes::from(bytes)).unwrap_err();
+        assert!(error.to_string().contains("position must be finite"));
+    }
 }

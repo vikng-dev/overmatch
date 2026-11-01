@@ -3,7 +3,7 @@
 //! prediction/rollback registration) — mismatch here desyncs or fails the connection. If a component
 //! or input rides the wire, its registration lives here and nowhere else.
 
-use avian3d::prelude::{AngularVelocity, LinearVelocity, Position, RigidBody, Rotation};
+use avian3d::prelude::{LinearVelocity, Position, RigidBody, Rotation};
 use bevy::ecs::entity::{EntityMapper, MapEntities};
 use bevy::ecs::query::QueryData;
 use bevy::prelude::*;
@@ -234,7 +234,7 @@ use crate::{CombatantId, CombatantLife, ShotId};
 ///
 /// [`WallPiece`]: crate::buildings::breakage::WallPiece
 /// [`WallEvent`]: crate::buildings::breakage::WallEvent
-pub const PROTOCOL_REV: u32 = 49;
+pub const PROTOCOL_REV: u32 = 50;
 
 /// Compatibility tag derived from the complete pinned wire manifest plus the crate version. This
 /// is the runtime handshake value: version-exact, so a version bump intentionally changes it.
@@ -982,7 +982,6 @@ const WIRE_SURFACE: &[&str] = &[
     "Position",
     "Rotation",
     "LinearVelocity",
-    "AngularVelocity",
     "TrackDrive",
     "DriveSignal",
     "TankTransmission",
@@ -992,7 +991,7 @@ const WIRE_SURFACE: &[&str] = &[
 ];
 
 /// Pinned hash for the ordered wire surface and a direct handshake-fingerprint input.
-const WIRE_SURFACE_HASH: u64 = 0x96fc_6e23_e239_5c55;
+const WIRE_SURFACE_HASH: u64 = 0x4fa8a9525007f08a;
 
 // ---------------------------------------------------------------------------
 // Deep wire-surface coverage (field-level + external-dep skew)
@@ -1021,7 +1020,7 @@ const WIRE_SURFACE_HASH: u64 = 0x96fc_6e23_e239_5c55;
 //     functions) is covered by that codec's whole source, comments and whitespace stripped, folded
 //     into the same hash (the test module's `WIRE_CODEC_SOURCES`): a step, range or layout change
 //     there moves it.
-//   * EXTERNAL types (avian `Position`/`Rotation`/`LinearVelocity`/`AngularVelocity`, whose bytes the
+//   * EXTERNAL types (avian `Position`/`Rotation`/`LinearVelocity`, whose bytes the
 //     `wire_quant` codecs write from their fields, plus lightyear's own wire framing) — their source
 //     is not in this tree to scan, so they are covered by DEP VERSION:
 //     [`WIRE_DEP_AVIAN3D`]/[`WIRE_DEP_LIGHTYEAR`] pin the resolved `Cargo.lock` versions, so a bump of
@@ -1034,7 +1033,7 @@ const WIRE_SURFACE_HASH: u64 = 0x96fc_6e23_e239_5c55;
 /// The pinned hash of the OWN wire-facing type DEFINITIONS (field layout, not just names). Re-pin it
 /// whenever a wire-facing struct/enum definition changes; house process also bumps
 /// [`PROTOCOL_REV`]. The tripwire prints the new value. See the block above for the coverage model.
-const WIRE_TYPES_HASH: u64 = 0xf91132896fdcf7dd;
+const WIRE_TYPES_HASH: u64 = 0xd552ce1737eb39af;
 
 /// The pinned `Cargo.lock` versions of the external crates whose types ride the wire (avian's
 /// replicated physics components; lightyear's wire framing / input protocol). A bump of either can
@@ -1178,7 +1177,7 @@ pub(crate) fn plugin(app: &mut App) {
         .transform_to_position = true;
     // The hull pose interpolates on the cursor; everything else applies the confirmed value on
     // arrival (per-tick keyframes, so the discrete components step at most one tick apart from
-    // the pose they ride beside). All four ride `wire_quant`'s codecs, whose module doc states each
+    // the pose they ride beside). Pose and velocity ride `wire_quant`'s codecs, whose module doc states each
     // step, range and error bound.
     app.component::<Position>()
         .replicate_with(super::wire_quant::position_fns())
@@ -1188,8 +1187,6 @@ pub(crate) fn plugin(app: &mut App) {
         .add_linear_interpolation();
     app.component::<LinearVelocity>()
         .replicate_with(super::wire_quant::linear_velocity_fns());
-    app.component::<AngularVelocity>()
-        .replicate_with(super::wire_quant::angular_velocity_fns());
     // The tracked drivetrain (phase B): velocity-like continuous sim state, replicated for the
     // remote track view through `wire_quant`'s belt codec. Interpolated like Position/Rotation so
     // a cursor-rendered hull's track view reads cursor-time belt speed/phase, never the

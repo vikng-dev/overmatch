@@ -8,11 +8,10 @@
 //! | Component | Wire | Step | Range | Out of range | Error bound (DERIVED) |
 //! |---|---|---|---|---|---|
 //! | `Position` | 8 B: 3 × 21-bit fixed point | 2⁻¹⁰ m ≈ 0.98 mm | ±1024 m per axis | 13 B: a marker byte and the three f32s, exact | ≤ 0.49 mm per axis, ≤ 0.85 mm |
-//! | `Rotation` | 6 B smallest-three | √2/(2¹⁵−1) per component | every unit quaternion | — (non-finite or zero: the identity) | ≤ 1.50·10⁻⁴ rad, so ≤ 0.15 mm per metre from the root |
-//! | `LinearVelocity` | 6 B: 3 × i16 | 2⁻⁸ m/s ≈ 3.9 mm/s | ±128 m/s per axis | clamped to the range; NaN reads 0 | ≤ 1.95 mm/s per axis, ≤ 3.4 mm/s |
-//! | `AngularVelocity` | 6 B: 3 × i16 | 2⁻¹⁰ rad/s ≈ 0.98 mrad/s | ±32 rad/s per axis | clamped to the range; NaN reads 0 | ≤ 0.49 mrad/s per axis, ≤ 0.85 mrad/s |
-//! | `TrackDrive` belt speed, per side | 2 B: i16 | 2⁻¹⁰ m/s ≈ 0.98 mm/s | ±32 m/s | clamped to the range; NaN reads 0 | ≤ 0.49 mm/s |
-//! | `TrackDrive` belt phase, per side | 3 B: u24, wrapped | 2⁻¹⁴ m ≈ 0.061 mm | modulo `BELT_PHASE_WRAP_M` = 1024 m | — (wrapped by design; non-finite sends 0) | ≤ 0.031 mm, modulo the wrap |
+//! | `Rotation` | 6 B smallest-three | √2/(2¹⁵−1) per component | every unit quaternion | non-finite or zero: bug, panic | ≤ 1.50·10⁻⁴ rad, so ≤ 0.15 mm per metre from the root |
+//! | `LinearVelocity` | 6 B: 3 × i16 | 2⁻⁸ m/s ≈ 3.9 mm/s | ±128 m/s per axis | finite values clamp; non-finite: bug, panic | ≤ 1.95 mm/s per axis, ≤ 3.4 mm/s |
+//! | `TrackDrive` belt speed, per side | 2 B: i16 | 2⁻¹⁰ m/s ≈ 0.98 mm/s | ±32 m/s | finite values clamp; non-finite: bug, panic | ≤ 0.49 mm/s |
+//! | `TrackDrive` belt phase, per side | 3 B: u24, wrapped | 2⁻¹⁴ m ≈ 0.061 mm | modulo `BELT_PHASE_WRAP_M` = 1024 m | wrapped by design; non-finite: bug, panic | ≤ 0.031 mm, modulo the wrap |
 //!
 //! Every step is a power of two, so every code decodes to an exact f32. Kalinovo spans ±750 m
 //! (`assets/maps/kalinovo/level.json`), inside the packed position range; a larger map's far
@@ -26,7 +25,7 @@
 //! this file's code, comments stripped, folds into it whole.
 
 use crate::track::sim::{BELT_PHASE_WRAP_M, TrackDrive, TrackDriveSide};
-use avian3d::prelude::{AngularVelocity, LinearVelocity, Position, Rotation};
+use avian3d::prelude::{LinearVelocity, Position, Rotation};
 use bevy::prelude::*;
 use bevy_replicon::bytes::Bytes;
 use bevy_replicon::prelude::RuleFns;
@@ -50,11 +49,13 @@ const ROTATION_CODES: f64 = ((1u32 << ROTATION_BITS) - 1) as f64;
 /// by `|Σc·δc|/|w| ≤ δ·√3·√(3/4)/½ = 3δ`, so the decoded quaternion is within `√(3δ² + 9δ²) =
 /// √12·δ` of the true one and the rotation between them is at most `2·√12·δ ≈ 1.50·10⁻⁴ rad`.
 pub(super) fn write_rotation(rotation: Quat, message: &mut Vec<u8>) {
-    let q = if rotation.is_finite() && rotation.length_squared() > 0.0 {
-        rotation.normalize()
-    } else {
-        Quat::IDENTITY
-    };
+    assert!(
+        rotation.is_finite()
+            && rotation.length_squared().is_finite()
+            && rotation.length_squared() > 0.0,
+        "authority rotations are finite and normalizable before serialization: {rotation:?}"
+    );
+    let q = rotation.normalize();
     let c = q.to_array().map(f64::from);
     let largest = (0..4)
         .max_by(|&a, &b| c[a].abs().total_cmp(&c[b].abs()))
@@ -127,14 +128,17 @@ const POSITION_FULL: u8 = 1;
 
 /// A position in 8 bytes when every axis is inside ±1024 m: a clear flag bit, then x, y and z as
 /// 21-bit two's-complement counts of 2⁻¹⁰ m, little-endian. Error: half a step per axis, ≤ 2⁻¹¹ m
-/// ≈ 0.49 mm, ≤ √3·2⁻¹¹ m ≈ 0.85 mm in space. Any axis outside, or not finite: [`POSITION_FULL`]
-/// and the three f32s, 13 bytes and exact.
+/// ≈ 0.49 mm, ≤ √3·2⁻¹¹ m ≈ 0.85 mm in space (DERIVED). Any finite axis outside:
+/// [`POSITION_FULL`] and the three f32s, 13 bytes and exact. Non-finite authority state is a bug.
 pub(super) fn write_position(position: Vec3, message: &mut Vec<u8>) {
+    assert!(
+        position.is_finite(),
+        "authority positions are finite before serialization: {position:?}"
+    );
     let half = 1i64 << (POSITION_BITS - 1);
     let mut packed = 0u64;
     for (axis, value) in position.to_array().into_iter().enumerate() {
         let steps = (value * POSITION_STEPS_PER_M).round();
-        // Fails for NaN too.
         if !(steps >= -(half as f32) && steps < half as f32) {
             message.push(POSITION_FULL);
             for value in position.to_array() {
@@ -155,7 +159,12 @@ pub(super) fn read_position(message: &mut Bytes) -> Result<Vec3> {
         let bytes: [u8; 12] = take(message)?;
         let axis =
             |index: usize| f32::from_le_bytes(std::array::from_fn(|byte| bytes[4 * index + byte]));
-        return Ok(Vec3::new(axis(0), axis(1), axis(2)));
+        let position = Vec3::new(axis(0), axis(1), axis(2));
+        return if position.is_finite() {
+            Ok(position)
+        } else {
+            Err(WireDecodeError::NonFinitePosition.into())
+        };
     }
     let rest: [u8; 7] = take(message)?;
     let packed = u64::from_le_bytes(std::array::from_fn(|byte| {
@@ -183,12 +192,9 @@ pub(super) fn position_fns() -> RuleFns<Position> {
 /// Linear velocity steps per m/s: a step of 2⁻⁸ m/s, so an i16 holds ±128 m/s.
 pub(super) const LINEAR_VELOCITY_STEPS: f32 = 256.0;
 
-/// Angular velocity steps per rad/s: a step of 2⁻¹⁰ rad/s, so an i16 holds ±32 rad/s.
-pub(super) const ANGULAR_VELOCITY_STEPS: f32 = 1024.0;
-
 /// A vector in 6 bytes: each axis an i16 count of `1/steps`, little-endian. Error: half a step per
 /// axis, `√3/(2·steps)` in space. An axis outside the i16 range saturates at its bound (Rust's
-/// float-to-int cast), and NaN reads 0. Postcard would write each i16 as a zigzag varint of up to
+/// float-to-int cast). Non-finite authority state is a bug. Postcard would write each i16 as a zigzag varint of up to
 /// 3 bytes; the fixed layout is 2.
 pub(super) fn write_i16x3(value: Vec3, steps: f32, message: &mut Vec<u8>) {
     for axis in value.to_array() {
@@ -218,19 +224,6 @@ pub(super) fn linear_velocity_fns() -> RuleFns<LinearVelocity> {
     )
 }
 
-/// [`AngularVelocity`] on the wire as [`write_i16x3`] at [`ANGULAR_VELOCITY_STEPS`].
-pub(super) fn angular_velocity_fns() -> RuleFns<AngularVelocity> {
-    RuleFns::new(
-        |_: &mut SerializeCtx, velocity: &AngularVelocity, message: &mut Vec<u8>| {
-            write_i16x3(velocity.0, ANGULAR_VELOCITY_STEPS, message);
-            Ok(())
-        },
-        |_: &mut WriteCtx, message: &mut Bytes| {
-            read_i16x3(message, ANGULAR_VELOCITY_STEPS).map(AngularVelocity)
-        },
-    )
-}
-
 /// Belt speed steps per m/s: a step of 2⁻¹⁰ m/s, so an i16 holds ±32 m/s.
 pub(super) const BELT_SPEED_STEPS: f32 = 1024.0;
 
@@ -243,19 +236,22 @@ const BELT_PHASE_CODES: f64 = BELT_PHASE_WRAP_M * BELT_PHASE_STEPS_PER_M;
 const _: () = assert!(BELT_PHASE_CODES == (1u32 << 24) as f64);
 
 /// The belt state in 10 bytes: per side, left then right, the speed as an i16 count of 2⁻¹⁰ m/s
-/// (±32 m/s, clamped beyond, NaN 0; error ≤ 2⁻¹¹ m/s ≈ 0.49 mm/s) and the phase as a u24 count of
-/// 2⁻¹⁴ m modulo [`BELT_PHASE_WRAP_M`] (error ≤ 2⁻¹⁵ m ≈ 0.031 mm modulo the wrap; non-finite
-/// sends 0), little-endian. A decoded phase lies in `[0, BELT_PHASE_WRAP_M)`.
+/// (±32 m/s, finite values clamped beyond; error ≤ 2⁻¹¹ m/s ≈ 0.49 mm/s) and the phase as a u24
+/// count of 2⁻¹⁴ m modulo [`BELT_PHASE_WRAP_M`] (error ≤ 2⁻¹⁵ m ≈ 0.031 mm modulo the wrap),
+/// little-endian. Bounds are DERIVED; non-finite authority state is a bug.
+/// A decoded phase lies in `[0, BELT_PHASE_WRAP_M)`.
 pub(super) fn write_track_drive(drive: &TrackDrive, message: &mut Vec<u8>) {
     for side in drive.sides {
         message.extend_from_slice(&i16_code(side.speed, BELT_SPEED_STEPS));
-        let code = if side.phase.is_finite() {
-            (side.phase * BELT_PHASE_STEPS_PER_M)
-                .round()
-                .rem_euclid(BELT_PHASE_CODES) as u32
-        } else {
-            0
-        };
+        assert!(
+            side.phase.is_finite(),
+            "authority belt phases are finite before serialization: {}",
+            side.phase
+        );
+        // Wrap before scaling so every finite phase stays finite, even beyond normal match travel.
+        let code = (side.phase.rem_euclid(BELT_PHASE_WRAP_M) * BELT_PHASE_STEPS_PER_M)
+            .round()
+            .rem_euclid(BELT_PHASE_CODES) as u32;
         message.extend_from_slice(&code.to_le_bytes()[..3]);
     }
 }
@@ -283,16 +279,45 @@ pub(super) fn track_drive_fns() -> RuleFns<TrackDrive> {
 }
 
 /// `value` as an i16 count of `1/steps`, little-endian: rounded, saturating at the i16 bounds
-/// (Rust's float-to-int cast), NaN 0.
+/// (Rust's float-to-int cast). Non-finite authority state is a bug.
 fn i16_code(value: f32, steps: f32) -> [u8; 2] {
+    assert!(
+        value.is_finite(),
+        "authority speeds are finite before serialization: {value}"
+    );
     ((value * steps).round() as i16).to_le_bytes()
 }
+
+/// Malformed peer bytes are refused at the decoding edge. RuleFns requires Bevy's error
+/// wrapper; the typed cause is converted only at that API boundary.
+#[derive(Debug)]
+enum WireDecodeError {
+    Truncated { expected: usize, remaining: usize },
+    NonFinitePosition,
+}
+
+impl std::fmt::Display for WireDecodeError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Truncated {
+                expected,
+                remaining,
+            } => write!(f, "wire_quant: {expected} bytes expected, {remaining} left"),
+            Self::NonFinitePosition => f.write_str("wire_quant: position must be finite"),
+        }
+    }
+}
+impl std::error::Error for WireDecodeError {}
 
 /// The next `N` raw bytes, or an error naming the shortfall: a truncated message is refused, never
 /// read past.
 fn take<const N: usize>(message: &mut Bytes) -> Result<[u8; N]> {
     if message.len() < N {
-        return Err(format!("wire_quant: {N} bytes expected, {} left", message.len()).into());
+        return Err(WireDecodeError::Truncated {
+            expected: N,
+            remaining: message.len(),
+        }
+        .into());
     }
     let head = message.split_to(N);
     Ok(std::array::from_fn(|index| head[index]))
