@@ -203,6 +203,7 @@ fn the_record_a_replica_derives_from_is_the_authoritys() {
         &mut authority,
         &Load::field(&hits, |c| structure.chunks[c].material.crush),
         Vec::new(),
+        Vec3::ZERO,
     );
     for kind_of in [
         |e: &WallEvent| matches!(e, WallEvent::Swap(_)),
@@ -524,10 +525,17 @@ fn the_clients_hold_the_authoritys_holes_a_late_joiner_too() {
         &mut authority,
         &loads,
         holes_of(&kind, 1.0, &lines, &[]),
+        Vec3::ZERO,
     );
     let blast = blast_on(&authority.structure, dish_chunk, 0.05);
     let holes = holes_of(&kind, 1.0, &[], &blast);
-    let second = run_laws(&kind.layout.element_of, &mut authority, &blast, holes);
+    let second = run_laws(
+        &kind.layout.element_of,
+        &mut authority,
+        &blast,
+        holes,
+        Vec3::ZERO,
+    );
     let [channel] = authority.holes[channel_chunk][..] else {
         panic!("one channel: {:?}", authority.holes[channel_chunk]);
     };
@@ -585,8 +593,20 @@ fn a_hole_changes_no_collider_mass_or_structural_result() {
     let holes = holes_of(&kind, 1.0, &[line], &[]);
     let mut record = Vec::new();
     for tick in [7, 9] {
-        let with = run_laws(&kind.layout.element_of, &mut cut, &loads, holes.clone());
-        let without = run_laws(&kind.layout.element_of, &mut whole, &loads, Vec::new());
+        let with = run_laws(
+            &kind.layout.element_of,
+            &mut cut,
+            &loads,
+            holes.clone(),
+            Vec3::ZERO,
+        );
+        let without = run_laws(
+            &kind.layout.element_of,
+            &mut whole,
+            &loads,
+            Vec::new(),
+            Vec3::ZERO,
+        );
         assert!(
             with.events.contains(&WallEvent::Hole(c as u16, holes[0].1)),
             "round {tick} holes the chunk: {:?}",
@@ -658,7 +678,13 @@ fn past_the_cap_a_chunk_crumbles() {
     assert_eq!(holes.len(), 1);
     let loads = line_loads(&live.structure, &[line]);
     for k in 1..=HOLES_PER_CHUNK + 1 {
-        let changes = run_laws(&kind.layout.element_of, &mut live, &loads, holes.clone());
+        let changes = run_laws(
+            &kind.layout.element_of,
+            &mut live,
+            &loads,
+            holes.clone(),
+            Vec3::ZERO,
+        );
         let holed = changes
             .events
             .iter()
@@ -875,7 +901,13 @@ fn a_nailed_roof_distinguishes_rests_from_local_fixing_failure() {
         .into_iter()
         .chain([push])
         .collect();
-    let changes = run_laws(&layout.element_of, &mut live, &loads, Vec::new());
+    let changes = run_laws(
+        &layout.element_of,
+        &mut live,
+        &loads,
+        Vec::new(),
+        Vec3::ZERO,
+    );
     println!(
         "MEASURED: a round through the plane's middle ({:.0} J, {:.0} N s): {} failures, {} groups",
         line.3,
@@ -886,7 +918,13 @@ fn a_nailed_roof_distinguishes_rests_from_local_fixing_failure() {
     assert!(changes.groups.is_empty() && changes.failures.is_empty());
     assert_eq!(standing(&live, &roof), roof.len(), "a round moves nothing");
     let blast = blast_on(&live.structure, middle, 1.0);
-    let changes = run_laws(&layout.element_of, &mut live, &blast, Vec::new());
+    let changes = run_laws(
+        &layout.element_of,
+        &mut live,
+        &blast,
+        Vec::new(),
+        Vec3::ZERO,
+    );
     assert!(!live.state.standing(middle), "the blast spent the chunk");
     assert!(changes.groups.is_empty(), "{:?}", changes.failures);
     assert_eq!(
@@ -1977,7 +2015,13 @@ fn only_departing_chunks_give_back_their_body_blows() {
             step: STEP,
         },
     };
-    let held = run_laws(&kind.layout.element_of, &mut live, &[load], Vec::new());
+    let held = run_laws(
+        &kind.layout.element_of,
+        &mut live,
+        &[load],
+        Vec::new(),
+        Vec3::ZERO,
+    );
     assert!(
         held.groups.is_empty() && held.returns.is_empty(),
         "a held wall keeps the solver's blow"
@@ -1994,6 +2038,7 @@ fn only_departing_chunks_give_back_their_body_blows() {
         &mut live,
         &[load, dust],
         Vec::new(),
+        Vec3::ZERO,
     );
     assert_eq!(
         changes.returns,
@@ -2012,6 +2057,7 @@ fn only_departing_chunks_give_back_their_body_blows() {
         &mut live,
         &[press, dust],
         Vec::new(),
+        Vec3::ZERO,
     );
     assert!(
         changes.returns.is_empty(),
@@ -2021,7 +2067,13 @@ fn only_departing_chunks_give_back_their_body_blows() {
     live.state.fate.fill(Fate::Dust);
     live.state.fate[c] = Fate::Standing;
     live.state.cracked.fill(true);
-    let changes = run_laws(&kind.layout.element_of, &mut live, &[load], Vec::new());
+    let changes = run_laws(
+        &kind.layout.element_of,
+        &mut live,
+        &[load],
+        Vec::new(),
+        Vec3::ZERO,
+    );
     assert_eq!(
         changes.groups,
         vec![(vec![c], vec![load])],
@@ -2031,7 +2083,13 @@ fn only_departing_chunks_give_back_their_body_blows() {
         changes.returns.is_empty(),
         "a fallen load returns only after launch chooses its share"
     );
-    let repeated = run_laws(&kind.layout.element_of, &mut live, &[load], Vec::new());
+    let repeated = run_laws(
+        &kind.layout.element_of,
+        &mut live,
+        &[load],
+        Vec::new(),
+        Vec3::ZERO,
+    );
     assert!(
         repeated.groups.is_empty(),
         "a chunk freed by an earlier deposit launches once"
@@ -2437,7 +2495,7 @@ fn held_presses_recheck_changed_force_points_and_topology() {
         origin: Origin::Field,
     };
     let run = |live: &mut Live, loads: &[Load]| {
-        run_laws(&kind.layout.element_of, live, loads, Vec::new())
+        run_laws(&kind.layout.element_of, live, loads, Vec::new(), Vec3::ZERO)
     };
     assert!(run(&mut live, &[press]).weight_steps > 0);
     assert_eq!(
@@ -2636,7 +2694,13 @@ fn no_elements_kind_or_name_enters_the_laws() {
             material: live.structure.chunks[c].material,
             contacts: &contacts,
         });
-        let changes = run_laws(&layout.element_of, &mut live, &loads, Vec::new());
+        let changes = run_laws(
+            &layout.element_of,
+            &mut live,
+            &loads,
+            Vec::new(),
+            Vec3::ZERO,
+        );
         (layout, live.structure, live.state, changes)
     };
     let (layout, structure, state, changes) = run(&kind.asset);

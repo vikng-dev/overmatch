@@ -68,8 +68,8 @@ use std::sync::Arc;
 use avian3d::collider_tree::{ColliderTrees, update_moved_collider_aabbs};
 use avian3d::prelude::{
     AngularVelocity, Collider, ColliderAabb, ColliderDensity, ColliderOf, CollisionLayers, Forces,
-    LinearVelocity, Position, RigidBody, Rotation, SpatialQuery, SpatialQueryFilter,
-    WriteRigidBodyForces,
+    LinearVelocity, Position, ReadRigidBodyForces, RigidBody, Rotation, SpatialQuery,
+    SpatialQueryFilter, WriteRigidBodyForces,
 };
 
 use bevy::math::DVec3;
@@ -1047,6 +1047,24 @@ fn moving_near(p: &DepositParam, origin: Vec3, reach: f32) -> Vec<Entity> {
     near
 }
 
+/// The spin `run_laws` reads for the body at `root`, in its construction `frame` (rad/s): a
+/// moving group's body's angular velocity; zero on a placed building, whose groups come loose at
+/// rest.
+fn construction_spin(
+    bodies: &Query<(Forces, &RigidBody)>,
+    root: Entity,
+    frame: Frame,
+    moving: bool,
+) -> Vec3 {
+    if !moving {
+        return Vec3::ZERO;
+    }
+    let (body, _) = bodies
+        .get(root)
+        .expect("a moving chunk group is a physics body");
+    frame.rotation.inverse() * body.angular_velocity()
+}
+
 /// The field loads whose blow moves a moving group's body once the laws have run on `state`: a
 /// field's blow on a chunk it turned to dust went into crushing it and moves nothing.
 fn field_blows<'a>(loads: &'a [Load], state: &'a WallState) -> impl Iterator<Item = &'a Load> {
@@ -1233,7 +1251,8 @@ fn apply_deposits(mut p: DepositParam) {
                 .chain(pressing.iter().copied())
                 .chain(resting.iter().copied())
                 .collect();
-            let mut changes = run_laws(&kind.layout.element_of, live, &loads, holes);
+            let spin = construction_spin(&p.bodies, root, frame, moving.is_some());
+            let mut changes = run_laws(&kind.layout.element_of, live, &loads, holes, spin);
             // A moving group is already a body: a field's blow moves it directly, at the point
             // it struck, except where it turned its chunk to dust and went into crushing it
             // (`run_laws`), as on a standing building.
@@ -1721,6 +1740,7 @@ pub(crate) fn run_laws(
     live: &mut Live,
     loads: &[Load],
     holes: Vec<(usize, Hole)>,
+    spin: Vec3,
 ) -> Changes {
     let mut cutting: BTreeMap<usize, usize> = BTreeMap::new();
     for &(c, _) in &holes {
@@ -1760,7 +1780,7 @@ pub(crate) fn run_laws(
     // nothing more. Each pass that fails cracks an intact joint and none closes, so they end.
     let mut failures = Vec::new();
     let framed = loop {
-        let framed = fracture::in_group_frames(&live.structure, &live.state, &loads);
+        let framed = fracture::in_group_frames(&live.structure, &live.state, &loads, spin);
         let found = fracture::structural(
             &live.structure,
             &mut live.state,
@@ -1789,7 +1809,12 @@ pub(crate) fn run_laws(
         .map(|&(chunk, ..)| chunk)
         .filter(|chunk| !presses.iter().any(|&(current, ..)| current == *chunk))
         .collect();
-    let recheck = !struck.dusted.is_empty() || !pushed.is_empty() || presses != live.held_presses;
+    // A framed group's frame is this run's own (its motion changes every run), so no held
+    // verdict carries over to it.
+    let recheck = !struck.dusted.is_empty()
+        || !pushed.is_empty()
+        || presses != live.held_presses
+        || framed.len() > loads.len();
     let weighed = fracture::weigh(
         &live.structure,
         &mut live.state,

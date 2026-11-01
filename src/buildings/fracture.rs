@@ -1270,11 +1270,19 @@ fn loaded_graph(structure: &Structure, state: &WallState, loads: &[Load]) -> Gra
 /// gravity. The inertia uses the section law's existing equal-volume sphere approximation for
 /// each chunk, plus the parallel-axis term. Equal/opposite point couples retain each chunk's
 /// own angular inertia, so the residual force AND moment vanish, independently of cut origin.
+/// `spin` is the body's angular velocity in the construction frame (rad/s): a moving group's
+/// body's, zero on a placed building, whose groups come loose at rest. A spinning group's
+/// chunks also carry the centripetal `−m ω × (ω × r)` and the gyroscopic share of the frame's
+/// angular acceleration, `α_g = −I⁻¹ (ω × I ω)` (Euler's equations), so the residual wrench
+/// still vanishes (DERIVED: each chunk's own sphere inertia is isotropic, so `ω × Σ I_own ω`
+/// is zero). A group no external load reaches this run is not framed: the laws run on a
+/// deposit, so a spinning group in flight is assessed at its next contact.
 /// No new load is applied to physics: these inertial loads exist only during assessment.
 pub(crate) fn in_group_frames(
     structure: &Structure,
     state: &WallState,
     loads: &[Load],
+    spin: Vec3,
 ) -> Vec<Load> {
     let mut framed = loads.to_vec();
     for group in loose_groups(structure, state) {
@@ -1306,18 +1314,34 @@ pub(crate) fn in_group_frames(
             inverse.is_finite(),
             "occupied chunks give a free group finite positive inertia"
         );
+        let gyroscopic = -(inverse * spin.cross(inertia * spin));
         for &c in &group {
             let chunk = &structure.chunks[c];
-            framed.push(Load {
+            let r = chunk.centroid - centre;
+            let base = Load {
                 chunk: c,
                 at: chunk.centroid,
                 energy: 0.0,
                 crushed: 0.0,
                 blow: Vec3::ZERO,
-                press: Vec3::Y * (GRAVITY * chunk.mass),
+                press: Vec3::Y * (GRAVITY * chunk.mass)
+                    - chunk.mass * (spin.cross(spin.cross(r)) + gyroscopic.cross(r)),
                 peak: None,
                 origin: Origin::Inertia { step: None },
-            });
+            };
+            framed.push(base);
+            if gyroscopic != Vec3::ZERO {
+                let (radius, own_inertia) = own(chunk);
+                for axis in [Vec3::X, Vec3::Y, Vec3::Z] {
+                    for sign in [-1.0, 1.0] {
+                        framed.push(Load {
+                            at: chunk.centroid + axis * (radius * sign),
+                            press: gyroscopic.cross(axis) * (-own_inertia * sign / (4.0 * radius)),
+                            ..base
+                        });
+                    }
+                }
+            }
         }
         for source in sources {
             let angular = |force: Vec3| inverse * (source.at - centre).cross(force);
@@ -3891,7 +3915,8 @@ mod tests {
     ) -> (WallState, super::super::breakage::Changes) {
         let n = slab.chunks.len();
         let mut live = super::super::breakage::Live::from_structure(slab, 1);
-        let changes = super::super::breakage::run_laws(&vec![0; n], &mut live, loads, Vec::new());
+        let changes =
+            super::super::breakage::run_laws(&vec![0; n], &mut live, loads, Vec::new(), Vec3::ZERO);
         (live.state, changes)
     }
 
@@ -4109,6 +4134,36 @@ mod tests {
         assert!(changes.groups.len() >= 2);
     }
 
+    /// A spinning group's seams carry its chunks' centripetal pull in its own frame: fast
+    /// enough, the weak seam opens under a contact far too light to open it alone. ASSUMED
+    /// fixture: the weak-seam slab spun about its middle chunk, which a light contact holds.
+    /// DERIVED: the end chunk pulls `m ω² r` = 3.6 ω² N on the 0.04 m² seam (1e5 Pa), so 60
+    /// rad/s opens it (about 3.2 times its strength) and 5 rad/s does not.
+    #[test]
+    fn a_spinning_group_pulls_its_weak_seam_open() {
+        for (omega, opens) in [(5.0, false), (60.0, true)] {
+            let slab = unsupported_slab(3);
+            let mut hold = slab_contact(&slab, 0.01);
+            hold.chunk = 1;
+            hold.at = slab.chunks[1].centroid;
+            hold.press = Vec3::Y * 0.01;
+            let n = slab.chunks.len();
+            let mut live = super::super::breakage::Live::from_structure(slab, 1);
+            super::super::breakage::run_laws(
+                &vec![0; n],
+                &mut live,
+                &[hold],
+                Vec::new(),
+                Vec3::Y * omega,
+            );
+            assert_eq!(
+                live.state.cracked[0] || live.state.cracked[1],
+                opens,
+                "{omega} rad/s"
+            );
+        }
+    }
+
     /// The choice of reference point must not add a resultant. Section tractions rely on
     /// both force and moment being balanced after subtracting the free group's rigid response.
     #[test]
@@ -4117,7 +4172,13 @@ mod tests {
         let mut load = slab_contact(&slab, 100.0);
         load.at += Vec3::Z * 0.3;
         load.press = Vec3::new(10.0, 20.0, -3.0);
-        let loads = in_group_frames(&slab, &WallState::new(&slab), &[load]);
+        // An off-axis spin: centripetal and gyroscopic presses must balance too.
+        let loads = in_group_frames(
+            &slab,
+            &WallState::new(&slab),
+            &[load],
+            Vec3::new(0.3, 2.0, -1.1),
+        );
         let force = loads.iter().map(|load| load.blow).sum::<Vec3>();
         let moment = loads
             .iter()

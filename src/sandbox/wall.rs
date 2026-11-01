@@ -1200,8 +1200,13 @@ fn apply_deposit(
         .len();
     applied.crushed = loads.iter().map(|load| load.crushed).sum();
     let pools = wall.live.state.pool.clone();
-    let changes =
-        crate::buildings::breakage::run_laws(&wall.cut.element_of, &mut wall.live, &loads, holes);
+    let changes = crate::buildings::breakage::run_laws(
+        &wall.cut.element_of,
+        &mut wall.live,
+        &loads,
+        holes,
+        Vec3::ZERO,
+    );
     applied.worn = pools
         .iter()
         .zip(&wall.live.state.pool)
