@@ -158,8 +158,9 @@ jobs:
           python3 scripts/lod/test_refusals.py
 
       # The same feature set as clippy and lane tests: includes bitprobe's seam-schema test and
-      # compiles the sandbox panels and their required-feature bin targets. The codegen cache
-      # family above holds these optional dependencies after its first cold fill.
+      # compiles the sandbox panels and their required-feature bin targets. Every codegen workflow
+      # (`assets.yml`, `mutants.yml`, `field-casts.yml`) builds this one feature set and shares the
+      # one `codegen-dev-tools` family above, so whichever job saves it saves the whole dep graph.
       # `--workspace` runs the asset tools' tests too: the bakes' determinism and invariants.
       - name: Tests
         if: matrix.task == 'tests'

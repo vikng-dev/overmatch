@@ -67,12 +67,12 @@ jobs:
             pkg-config libasound2-dev libudev-dev \
             libwayland-dev libxkbcommon-dev libx11-dev
 
-      # The `codegen` family `ci.yml`'s tests lane saves: its profile and targets, so a dispatch off a
-      # warm cache skips the dep graph. The vendored crates are cached with their mtimes pinned
+      # The `codegen-dev-tools` family `ci.yml`'s tests lane saves: its profile, targets and feature
+      # set, so a dispatch off a warm cache skips the dep graph. The vendored crates are cached with their mtimes pinned
       # (`scripts/ci/vendor-outside-root.sh`), so a change to their content must change the key.
       - uses: Swatinem/rust-cache@v2
         with:
-          shared-key: codegen-${{ hashFiles('vendor/**', '!vendor/**/*.md') }}
+          shared-key: codegen-dev-tools-${{ hashFiles('vendor/**', '!vendor/**/*.md') }}
 
       - uses: taiki-e/install-action@8cca0918f8471c33515202b73f56ab27f2bed283 # v2.87.29
         with:
@@ -95,7 +95,7 @@ jobs:
             echo "::error::No mutants under '${MUTANTS_PATH}' (glob '${glob}')"
             exit 1
           fi
-          cargo mutants --in-place -f "${glob}" --cargo-arg=--lib -- -- \
+          cargo mutants --in-place -f "${glob}" --features dev_ui,bitprobe --cargo-arg=--lib -- -- \
             --skip ballistics::field_casts::
 
       - name: Mutation report

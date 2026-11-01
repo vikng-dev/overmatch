@@ -105,13 +105,14 @@ jobs:
             libxi6 libxxf86vm1 libxfixes3 libxrender1 libgl1 libsm6 \
             cmake ninja-build
 
-      # The `codegen` family `ci.yml`'s tests lane saves: same dev profile, so one entry serves both.
+      # The `codegen-dev-tools` family `ci.yml`'s tests lane saves: same dev profile and feature set,
+      # so one entry serves both.
       # The vendored crates are cached with their mtimes pinned (`scripts/ci/vendor-outside-root.sh`),
       # so a change to their content must change the key.
       - uses: Swatinem/rust-cache@v2
         if: steps.scope.outputs.affected == 'true'
         with:
-          shared-key: codegen-${{ hashFiles('vendor/**', '!vendor/**/*.md') }}
+          shared-key: codegen-dev-tools-${{ hashFiles('vendor/**', '!vendor/**/*.md') }}
 
       # The pins are read OUT OF `scripts/toolchain.py`, never restated here: that file is the one
       # declaration, and a version written down in a workflow is a second one that drifts silently.
@@ -272,7 +273,7 @@ jobs:
 
       - name: The Rust consumer contract
         if: steps.scope.outputs.affected == 'true'
-        run: "cargo test --locked --lib bake::"
+        run: "cargo test --locked --lib --features dev_ui,bitprobe bake::"
 
       - name: Asset reports
         if: ${{ !cancelled() && steps.scope.outputs.affected == 'true' }}

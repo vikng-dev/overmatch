@@ -84,13 +84,13 @@ jobs:
             pkg-config libasound2-dev libudev-dev \
             libwayland-dev libxkbcommon-dev libx11-dev
 
-      # The `codegen` family `ci.yml`'s tests lane saves: same dev profile, so on Linux one entry
-      # serves both (rust-cache keys each OS apart). The vendored crates are cached with their mtimes
+      # The `codegen-dev-tools` family `ci.yml`'s tests lane saves: same dev profile and feature set,
+      # so on Linux one entry serves both (rust-cache keys each OS apart). The vendored crates are cached with their mtimes
       # pinned (`scripts/ci/vendor-outside-root.sh`), so a change to their content must change the key.
       - uses: Swatinem/rust-cache@v2
         with:
-          shared-key: codegen-${{ hashFiles('vendor/**', '!vendor/**/*.md') }}
+          shared-key: codegen-dev-tools-${{ hashFiles('vendor/**', '!vendor/**/*.md') }}
 
       - name: Field casts against the pin
         shell: bash
-        run: "cargo test --locked --lib -- ballistics::field_casts:: ballistics::spall_cone:: --nocapture"
+        run: "cargo test --locked --lib --features dev_ui,bitprobe -- ballistics::field_casts:: ballistics::spall_cone:: --nocapture"
