@@ -236,13 +236,9 @@ impl Surface {
             cuboid.to_trimesh()
         } else if let Some(hull) = shape.as_convex_polyhedron() {
             hull.to_trimesh()
-        } else if let Some(cylinder) = shape.as_cylinder() {
-            // ASSUMED boundary resolution. DERIVED maximum radial deficit:
-            // r * (1 - cos(pi / 64)) < 0.001205 * r; support-map rejection remains analytic.
-            cylinder.to_trimesh(64)
         } else {
             panic!(
-                "belt support shapes are boxes, convex polyhedra or cylinders; fix the collider constructor"
+                "belt support shapes are boxes or convex polyhedra; fix the collider constructor"
             );
         };
         let world: Vec<_> = vertices
@@ -980,9 +976,19 @@ mod tests {
         }
     }
 
+    /// FIXTURE DATA: a standing trunk segment as `trees::segment_collider` builds one, the convex
+    /// hull of two twelve-point rings, radius 0.4 m at its foot and 0.35 m at its top, 0.6 m tall.
     #[test]
-    fn a_cylindrical_trunk_carries_the_belt_and_is_loaded_by_it() {
-        fixed_surface_reaction(Collider::cylinder(0.4, 0.6), 0.0);
+    fn a_trunk_segment_carries_the_belt_and_is_loaded_by_it() {
+        let ring = |radius: f32, y: f32| {
+            (0..12).map(move |k| {
+                let angle = k as f32 * std::f32::consts::TAU / 12.0;
+                Vec3::new(radius * angle.cos(), y, radius * angle.sin())
+            })
+        };
+        let points: Vec<Vec3> = ring(0.4, -0.3).chain(ring(0.35, 0.3)).collect();
+        let trunk = Collider::convex_hull(points).expect("two rings at distinct heights");
+        fixed_surface_reaction(trunk, 0.0);
     }
 
     /// Field-backed geometry is supported once, regardless of its collider representation.
