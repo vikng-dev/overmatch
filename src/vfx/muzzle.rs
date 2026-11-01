@@ -1094,31 +1094,100 @@ mod tests {
         }
     }
 
-    /// The game's muzzle rendering: independent taste fields reach the material uniforms.
-    /// A hardcoded renderer boost or opacity would prevent the owner's file from controlling it.
-    /// FIXTURE DATA: distinct values for each covered layer, unrelated to shipped taste.
+    /// The game's muzzle rendering: every sprite taste field reaches the uniforms of the layer it
+    /// dresses, through the fired path. The owner's file controls each one; a literal standing in
+    /// for any of the twelve fails. FIXTURE DATA: distinct values unrelated to shipped taste, and
+    /// the two fixture dressings (one per core sprite) over known ground.
     #[test]
     fn sprite_materials_read_the_taste_file() {
-        let mut app = harness();
-        let mut assets = app.world_mut().resource_mut::<MuzzleVfxAssets>();
-        assets.renderer.flash_boost = 9.0;
-        assets.renderer.fireball_boost = 3.0;
-        assets.renderer.fireball_opacity = 0.42;
-        assets.renderer.fireball_sharpness = 0.7;
-        assets.renderer.smoke_boost = 1.7;
-        assets.renderer.smoke_sharpness = 0.8;
-        assets.renderer.dust_sharpness = 0.9;
-        let flash = assets.flash_material(Handle::default(), assets.renderer.core_sharpness);
-        assert_eq!(flash.params.glow.x, 9.0);
-        let blast = assets.blast_material(Handle::default());
-        assert_eq!(blast.params.glow.x, 3.0);
-        assert_eq!(blast.params.fade.w, 0.42);
-        assert_eq!(blast.params.fade.y, 0.7);
-        let smoke = assets.smoke_material();
-        assert_eq!(smoke.params.glow.x, 1.7);
-        assert_eq!(smoke.params.fade.y, 0.8);
-        let dust = assets.dust_material(0.5, Handle::default(), 2.0);
-        assert_eq!(dust.params.fade.y, 0.9);
+        let taste = crate::guns::MuzzleRenderer {
+            flash_boost: 9.0,
+            core_sharpness: 0.31,
+            flame_sharpness: 0.32,
+            fireball_opacity: 0.42,
+            fireball_boost: 3.0,
+            fireball_sharpness: 0.7,
+            glow_opacity: 0.23,
+            glow_boost: 1.9,
+            glow_sharpness: 0.33,
+            smoke_boost: 1.7,
+            smoke_sharpness: 0.8,
+            dust_sharpness: 0.9,
+        };
+        let mut seen = std::collections::BTreeSet::new();
+        for (emission, cycle) in [
+            (MuzzleEmission::fixture_cannon(), SLOW),
+            (MuzzleEmission::fixture_rifle(), BELT),
+        ] {
+            let mut app = harness_ground(0.0);
+            app.world_mut().resource_mut::<MuzzleVfxAssets>().renderer = taste;
+            fire_with(&mut app, emission, cycle, CANNON_CALIBER, 0, false);
+            let world = app.world_mut();
+            for (billboard, faces) in world
+                .query::<(&Billboard, Has<crate::vfx::billboard::FaceCamera>)>()
+                .iter(world)
+            {
+                let rate = match billboard.flipbook {
+                    Flipbook::Loop { rate, .. } => Some(rate),
+                    Flipbook::Once => None,
+                };
+                // The layer, and the sharpness, boost and opacity the taste file states for it.
+                let (layer, sharpness, boost, opacity) = if !faces {
+                    (
+                        "flame",
+                        taste.flame_sharpness,
+                        Some(taste.flash_boost),
+                        None,
+                    )
+                } else if billboard.frames == BLAST_FRAMES {
+                    let opacity = Some(taste.fireball_opacity);
+                    (
+                        "fireball",
+                        taste.fireball_sharpness,
+                        Some(taste.fireball_boost),
+                        opacity,
+                    )
+                } else if rate == Some(SMOKE_FRAME_RATE) {
+                    (
+                        "smoke",
+                        taste.smoke_sharpness,
+                        Some(taste.smoke_boost),
+                        None,
+                    )
+                } else if rate == Some(GROUND_DUST_FRAME_RATE) {
+                    ("dust", taste.dust_sharpness, None, None)
+                } else if billboard.erosion_end == 1.0 {
+                    let opacity = Some(taste.glow_opacity);
+                    (
+                        "glow",
+                        taste.glow_sharpness,
+                        Some(taste.glow_boost),
+                        opacity,
+                    )
+                } else {
+                    ("core", taste.core_sharpness, Some(taste.flash_boost), None)
+                };
+                let lanes = &billboard.lanes;
+                assert_eq!(lanes.fade.y, sharpness, "{layer} sharpness");
+                if let Some(boost) = boost {
+                    assert_eq!(lanes.glow.x, boost, "{layer} boost");
+                }
+                if let Some(opacity) = opacity {
+                    assert_eq!(lanes.fade.w, opacity, "{layer} opacity");
+                }
+                seen.insert((layer, billboard.frames));
+            }
+        }
+        let layers: std::collections::BTreeSet<_> = seen.iter().map(|(layer, _)| *layer).collect();
+        assert_eq!(
+            layers,
+            ["core", "dust", "fireball", "flame", "glow", "smoke"].into(),
+            "every sprite layer was dressed"
+        );
+        assert!(
+            seen.contains(&("core", 4)) && seen.contains(&("core", 1)),
+            "both core sprites read the core sharpness: {seen:?}"
+        );
     }
 
     /// The game's damage-model view: every shape's planes point along its requested jet axes,
