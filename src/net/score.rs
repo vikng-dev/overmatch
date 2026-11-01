@@ -15,6 +15,7 @@ use serde::{Deserialize, Serialize};
 
 use super::battle::{BattleOutcome, BattleState};
 use crate::damage::{KnockoutCause, KnockoutReason, LaunchedTurret, TankKnockedOut, TankKnockout};
+use crate::sim_tick::{SimTick, TickSpan};
 use crate::tank::TankRoot;
 use crate::{CombatantId, CombatantLife, ShotClock};
 
@@ -85,7 +86,7 @@ impl Scoreboard {
         &self,
         combatant: CombatantId,
         life: CombatantLife,
-        now: u32,
+        now: SimTick,
     ) -> Option<Opening> {
         let standing = self
             .0
@@ -96,14 +97,13 @@ impl Scoreboard {
                 life: knocked,
                 tick,
             } if knocked == life => {
-                // A wrapped signed difference: ticks wrap at `u32::MAX`, a wait is far below half.
-                let ahead = tick.wrapping_sub(now) as i32;
-                Some(if ahead > 0 {
-                    Opening::In {
-                        ticks: ahead as u32,
-                    }
-                } else {
+                let opens = SimTick::new(tick);
+                Some(if now.has_reached(opens) {
                     Opening::Open
+                } else {
+                    Opening::In {
+                        ticks: now.remaining_until(opens),
+                    }
                 })
             }
             Respawn::Opens { .. } | Respawn::NeverKnockedOut => None,
@@ -139,7 +139,7 @@ fn credit(victim: CombatantId, cause: KnockoutCause) -> Credit {
 /// The mode's respawn wait ([`super::battle_mode::BattleMode`]) in authority ticks.
 #[derive(Resource, Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct RespawnWait {
-    ticks: u32,
+    ticks: TickSpan,
 }
 
 impl RespawnWait {
@@ -150,7 +150,7 @@ impl RespawnWait {
         let ticks = wait.as_nanos().div_ceil(tick.as_nanos());
         let ticks = u32::try_from(ticks)
             .ok()
-            .filter(|&ticks| ticks <= i32::MAX as u32)
+            .and_then(|ticks| TickSpan::try_from(ticks).ok())
             .unwrap_or_else(|| {
                 panic!(
                     "assets/modes/battle.ron: respawn_wait_s is {ticks} ticks, more than an \
@@ -163,7 +163,7 @@ impl RespawnWait {
 
     #[cfg(test)]
     pub(crate) fn ticks(self) -> u32 {
-        self.ticks
+        self.ticks.raw()
     }
 }
 
@@ -180,7 +180,7 @@ impl RespawnGate<'_, '_> {
         self.boards
             .single()
             .expect("server startup spawns exactly one scoreboard before any combatant spawns")
-            .opening(combatant, life, self.clock.0)
+            .opening(combatant, life, SimTick::new(self.clock.0))
             .expect(
                 "the knockout transition (`TankKnockout`) scored this life's opening the tick it \
                  was knocked out",
@@ -320,7 +320,7 @@ fn score_knockout(
     standing.losses += 1;
     standing.respawn = Respawn::Opens {
         life,
-        tick: clock.0.wrapping_add(wait.ticks),
+        tick: SimTick::new(clock.0).after(wait.ticks).raw(),
     };
     match line.credit {
         Credit::Shooter(shooter) => {
@@ -545,19 +545,31 @@ mod tests {
         };
         let (who, life) = (CombatantId(5), CombatantLife(1));
         assert_eq!(
-            at(100).opening(who, life, 40),
+            at(100).opening(who, life, SimTick::new(40)),
             Some(Opening::In { ticks: 60 })
         );
-        assert_eq!(at(100).opening(who, life, 100), Some(Opening::Open));
-        assert_eq!(at(100).opening(who, life, 101), Some(Opening::Open));
         assert_eq!(
-            at(5).opening(who, life, u32::MAX - 4),
+            at(100).opening(who, life, SimTick::new(100)),
+            Some(Opening::Open)
+        );
+        assert_eq!(
+            at(100).opening(who, life, SimTick::new(101)),
+            Some(Opening::Open)
+        );
+        assert_eq!(
+            at(5).opening(who, life, SimTick::new(u32::MAX - 4)),
             Some(Opening::In { ticks: 10 })
         );
-        assert_eq!(at(100).opening(who, CombatantLife(0), 40), None);
-        assert_eq!(at(100).opening(CombatantId(6), life, 40), None);
         assert_eq!(
-            Scoreboard(vec![standing(5, 0, 0)]).opening(who, life, 40),
+            at(100).opening(who, CombatantLife(0), SimTick::new(40)),
+            None
+        );
+        assert_eq!(
+            at(100).opening(CombatantId(6), life, SimTick::new(40)),
+            None
+        );
+        assert_eq!(
+            Scoreboard(vec![standing(5, 0, 0)]).opening(who, life, SimTick::new(40)),
             None
         );
     }
@@ -567,8 +579,8 @@ mod tests {
     #[test]
     fn the_wait_rounds_up_to_whole_ticks() {
         let tick = Duration::from_nanos(15_625_000);
-        assert_eq!(RespawnWait::new(Duration::from_secs(10), tick).ticks, 640);
-        assert_eq!(RespawnWait::new(Duration::from_millis(10), tick).ticks, 1);
-        assert_eq!(RespawnWait::new(Duration::ZERO, tick).ticks, 0);
+        assert_eq!(RespawnWait::new(Duration::from_secs(10), tick).ticks(), 640);
+        assert_eq!(RespawnWait::new(Duration::from_millis(10), tick).ticks(), 1);
+        assert_eq!(RespawnWait::new(Duration::ZERO, tick).ticks(), 0);
     }
 }

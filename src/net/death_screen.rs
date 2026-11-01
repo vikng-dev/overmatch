@@ -91,7 +91,7 @@ impl OwnRespawn<'_, '_> {
             .clock
             .as_ref()
             .expect("a replicated scoreboard arrives only where the network clock is published");
-        match board.opening(combatant, life, clock.0)? {
+        match board.opening(combatant, life, crate::sim_tick::SimTick::new(clock.0))? {
             Opening::Open => None,
             Opening::In { ticks } => {
                 let seconds = f64::from(ticks) * self.time.timestep().as_secs_f64();

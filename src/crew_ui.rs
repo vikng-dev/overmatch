@@ -259,7 +259,8 @@ fn update_status_panel(
                 .copied()
                 .expect("weapon and gate slots are built together at spawn");
             let remaining_secs =
-                state.remaining_ticks(weapon_clock.0) as f32 * fixed_time.timestep().as_secs_f32();
+                state.remaining_ticks(crate::sim_tick::SimTick::new(weapon_clock.0)) as f32
+                    * fixed_time.timestep().as_secs_f32();
             let no_fire = evaluate(&weapon.fire, &quality) <= 0.0;
             let status = weapon_status(
                 weapon.fire_cycle,
@@ -461,12 +462,14 @@ mod tests {
     use super::*;
 
     const AUTO: FireCycle = FireCycle::Automatic {
-        cyclic_rpm: 750.0,
+        cyclic: crate::sim_tick::TickSpan::of(5),
         belt_size: 150,
-        belt_swap_secs: 3.5,
+        swap: crate::sim_tick::TickSpan::of(224),
         tracer_every: 5,
     };
-    const SINGLE: FireCycle = FireCycle::Single { reload_secs: 3.0 };
+    const SINGLE: FireCycle = FireCycle::Single {
+        reload: crate::sim_tick::TickSpan::of(192),
+    };
 
     /// The crew-gate/no-fire state wins over every timer readout, in BOTH fire modes: a weapon that
     /// can't fire reads `no-fire`, never a (frozen) reload or swap countdown. This is the regression

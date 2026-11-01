@@ -319,10 +319,13 @@ fn refire_interval(
         // or its queued teardown ran. This orphaned flash has no live cadence to repeat at.
         return None;
     };
-    Some(match weapon.fire_cycle {
-        FireCycle::Single { reload_secs } => reload_secs,
-        FireCycle::Automatic { cyclic_rpm, .. } => 60.0 / cyclic_rpm,
-    })
+    Some(
+        match weapon.fire_cycle {
+            FireCycle::Single { reload } => reload,
+            FireCycle::Automatic { cyclic, .. } => cyclic,
+        }
+        .secs(),
+    )
 }
 
 /// Spawn a transient light into the shared ring. Its life and minimum refire interval decide
@@ -916,12 +919,17 @@ mod tests {
     /// The muzzle every test shot leaves from.
     const FIRE_ORIGIN: Vec3 = Vec3::new(1.0, 2.0, 3.0);
 
+    use crate::sim_tick::TickSpan;
+
     /// FIXTURE DATA: a slow single-shot cycle and a rapid belt; no weapon identity is a rule.
-    const SLOW: FireCycle = FireCycle::Single { reload_secs: 1.0 };
+    /// At 64 Hz (DERIVED): a 1 s reload, a 0.078 s cyclic interval and a 1 s swap.
+    const SLOW: FireCycle = FireCycle::Single {
+        reload: TickSpan::of(64),
+    };
     const BELT: FireCycle = FireCycle::Automatic {
-        cyclic_rpm: 750.0,
+        cyclic: TickSpan::of(5),
         belt_size: 100,
-        belt_swap_secs: 1.0,
+        swap: TickSpan::of(64),
         tracer_every: 1,
     };
 

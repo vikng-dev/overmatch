@@ -19,7 +19,7 @@
 //! every arriving snapshot. Presentation readiness is therefore local at every tick after the seed:
 //! an arriving deadline cannot delay a flash, and an arriving `ready` cannot produce one. The
 //! cadence is not re-derived here — `tick_weapon_gate` and `fire` run on the restored gate, so the
-//! presented interval IS the sim's own `60/rpm → duration_ticks` arithmetic, not a copy of it.
+//! presented interval IS the sim's own parsed `FireCycle` span, not a copy of it.
 //!
 //! What the snapshot is used for is the ledger: its `belt_remaining` deltas count the rounds the
 //! server actually fired, against the rounds this client presented. Divergence is one-directional
@@ -950,6 +950,7 @@ mod tests {
 
     /// The Tiger's coax cadence: 750 rpm over the 64 Hz fixed tick is `ceil(0.08 / 0.015625)`.
     const PERIOD_TICKS: u32 = 6;
+    const PERIOD: crate::sim_tick::TickSpan = crate::sim_tick::TickSpan::of(PERIOD_TICKS);
     const BELT: u32 = 150;
 
     fn ready(belt: u32) -> WeaponGateState {
@@ -961,7 +962,7 @@ mod tests {
 
     fn armed(at: u32, belt: u32) -> WeaponGateState {
         let mut gate = ready(belt);
-        gate.arm(at, PERIOD_TICKS);
+        gate.arm(crate::sim_tick::SimTick::new(at), PERIOD);
         gate
     }
 
@@ -1064,7 +1065,8 @@ mod tests {
         );
         // And the cadence still retires the deadline on its own clock, with nothing arriving.
         assert!(
-            gate_of(&world, root).deadline_reached(FIRE_TICK + PERIOD_TICKS),
+            gate_of(&world, root)
+                .deadline_reached(crate::sim_tick::SimTick::new(FIRE_TICK + PERIOD_TICKS)),
             "the presented deadline matures locally, not on the snapshot",
         );
 
@@ -1770,7 +1772,9 @@ mod tests {
                 rounds: ["88mm_AP", "88mm_APCR"]
                     .map(|key| crate::tank::WeaponRound::resolve(key).expect("a shipped round"))
                     .to_vec(),
-                fire_cycle: crate::spec::FireCycle::Single { reload_secs: 6.0 },
+                fire_cycle: crate::spec::FireCycle::Single {
+                    reload: crate::sim_tick::TickSpan::from_secs(6.0).expect("fixture reload"),
+                },
                 recoil: None,
                 barrel: None,
                 fire: vec![],

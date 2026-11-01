@@ -2962,7 +2962,9 @@ mod tests {
         Weapon {
             name: "MainGun".into(),
             rounds: vec![crate::tank::WeaponRound::resolve("88mm_AP").expect("a shipped round")],
-            fire_cycle: FireCycle::Single { reload_secs: 8.0 },
+            fire_cycle: FireCycle::Single {
+                reload: crate::sim_tick::TickSpan::from_secs(8.0).expect("fixture reload"),
+            },
             recoil,
             barrel,
             fire: Vec::new(),

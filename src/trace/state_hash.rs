@@ -730,7 +730,10 @@ mod tests {
 
         // Readiness deadline: one tick off — must NOT touch recoil despite sharing a weapon slot.
         let mut gate = test_weapon_gate();
-        gate.weapons[0].arm(0, 1_251);
+        gate.weapons[0].arm(
+            crate::sim_tick::SimTick::new(0),
+            crate::sim_tick::TickSpan::of(1_251),
+        );
         let r = hash_sample_with_gate((p, q, lv, av), &drive, &grip, &transmission, &gate, &sim);
         assert_ne!(base.rld, r.rld);
         assert_ne!(base.sim, r.sim);
@@ -739,9 +742,20 @@ mod tests {
             (r.drv, r.srv, r.rec, r.blt, r.trn)
         );
 
-        // Crew-work pause tick: discrete phase within the same atomic gate stream.
-        let mut paused_gate = test_weapon_gate();
-        paused_gate.weapons[0].pause(1_200);
+        // Crew-work pause tick: discrete phase within the same atomic gate stream. Paused work
+        // is a dry belt's swap, so both sides of the comparison hold an empty belt.
+        let mut swapping = test_weapon_gate();
+        swapping.weapons[0].belt_remaining = 0;
+        let swap_hash = hash_sample_with_gate(
+            (p, q, lv, av),
+            &drive,
+            &grip,
+            &transmission,
+            &swapping,
+            &sim,
+        );
+        let mut paused_gate = swapping.clone();
+        paused_gate.weapons[0].pause(crate::sim_tick::SimTick::new(1_200));
         let pause_hash = hash_sample_with_gate(
             (p, q, lv, av),
             &drive,
@@ -750,9 +764,15 @@ mod tests {
             &paused_gate,
             &sim,
         );
-        assert_ne!(base.rld, pause_hash.rld);
+        assert_ne!(swap_hash.rld, pause_hash.rld);
         assert_eq!(
-            (base.drv, base.srv, base.rec, base.blt, base.trn),
+            (
+                swap_hash.drv,
+                swap_hash.srv,
+                swap_hash.rec,
+                swap_hash.blt,
+                swap_hash.trn,
+            ),
             (
                 pause_hash.drv,
                 pause_hash.srv,

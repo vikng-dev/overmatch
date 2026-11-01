@@ -5,14 +5,13 @@
 //! the *player's* gun. The armor sandbox drives the same `FireShell` from its free-fly camera
 //! instead.
 
-use core::time::Duration;
-
 use avian3d::prelude::{Forces, Position, Rotation};
 use bevy::prelude::*;
 
 use crate::ballistics::{FireShell, ShotSource};
 use crate::command::{ConsumeCommandEdges, TankCommand};
 use crate::damage::{TankVolumes, VolumeFacets, requirement_met};
+use crate::sim_tick::{SimTick, TickSpan};
 use crate::spec::{FireCycle, Trigger};
 use crate::state::{AppState, GameplaySet, SimPhase};
 use crate::tank::{
@@ -118,7 +117,7 @@ pub fn plugin(app: &mut App) {
 /// Advance the local-only fallback clock after a completed fixed tick. Network compositions
 /// overwrite it from `LocalTimeline` before the next gameplay pass.
 pub(crate) fn advance_weapon_clock(mut clock: ResMut<crate::WeaponClock>) {
-    clock.0 = crate::sim_tick::SimTick::new(clock.0).after(1).raw();
+    clock.0 = SimTick::new(clock.0).after(TickSpan::ONE).raw();
 }
 
 /// Why a weapon's [`TankRoot`] resolves: [`crate::tank`]'s assembly spawns every weapon under its
@@ -134,24 +133,6 @@ const SLOT_IN_GATE: &str = "a weapon's WeaponIndex indexes its root's WeaponGate
 const SLOT_IN_LOADS: &str = "a weapon's WeaponIndex indexes its root's WeaponLoads slots";
 const SLOT_IN_SIM: &str = "a weapon's WeaponIndex indexes its root's TankSim weapon slots";
 const ROOT_HAS_SIM: &str = "a weapon's root carries the TankSim built in its construction batch";
-
-/// Quantize one authored duration to the first fixed tick at or after it. Integer nanosecond
-/// ceiling keeps the runtime gate free of a changing float; `arm` separately enforces at least one
-/// tick so a slot cannot emit twice in one simulated tick.
-fn duration_ticks(seconds: f32, timestep: Duration) -> u32 {
-    let duration_ns = Duration::from_secs_f32(seconds).as_nanos();
-    let timestep_ns = timestep.as_nanos();
-    assert!(
-        timestep_ns > 0,
-        "weapon gate requires a non-zero fixed timestep"
-    );
-    let ticks = duration_ns.div_ceil(timestep_ns);
-    assert!(
-        ticks <= u128::from(crate::sim_tick::TickSpan::MAX),
-        "weapon durations were admitted at load with this fixed timestep, inside the signed deadline horizon"
-    );
-    ticks as u32
-}
 
 /// Mature every weapon's absolute readiness deadline, with the crew gate applied per [`FireCycle`]:
 ///
@@ -171,7 +152,7 @@ fn tick_weapon_gate(
     replica: Option<Res<crate::ClientReplica>>,
     controlled: Query<(), With<crate::tank::Controlled>>,
 ) {
-    let now = clock.0;
+    let now = SimTick::new(clock.0);
     for (weapon, slot, root) in &weapons {
         let tank_volumes = tanks.get(root.0).expect(WEAPON_ROOT_IS_A_TANK);
         // A client holds no gate for another player's tank: `WeaponGate` is owner-private
@@ -420,25 +401,19 @@ fn fire(
                 .get_mut(root.0)
                 .expect("the gate read above for this weapon is still present");
             let state = gate.weapons.get_mut(slot.0).expect(SLOT_IN_GATE);
-            let delay_secs = match weapon.fire_cycle {
-                FireCycle::Single { reload_secs } => reload_secs,
-                FireCycle::Automatic {
-                    cyclic_rpm,
-                    belt_swap_secs,
-                    ..
-                } => {
+            let delay = match weapon.fire_cycle {
+                FireCycle::Single { reload } => reload,
+                FireCycle::Automatic { cyclic, swap, .. } => {
                     state.belt_remaining = state.belt_remaining.saturating_sub(1);
                     if state.belt_remaining == 0 {
-                        belt_swap_secs
+                        swap
                     } else {
-                        60.0 / cyclic_rpm
+                        cyclic
                     }
                 }
             };
-            state.arm(
-                weapon_clock.0,
-                duration_ticks(delay_secs, fixed_time.timestep()),
-            );
+            crate::sim_tick::assert_sim_timestep(fixed_time.timestep());
+            state.arm(SimTick::new(weapon_clock.0), delay);
         }
     }
 }
@@ -527,6 +502,7 @@ mod tests {
     };
     use crate::command::{RoundSelect, RoundStep, TankCommand};
     use crate::damage::{CrewStation, Crewman, Dead, Group, Part, Requirement, VolumeOf};
+    use crate::sim_tick::{SimTick, TickSpan};
     use crate::spec::{FireCycle, Trigger};
     use crate::tank::{
         Muzzle, Tank, TankRoot, TankSim, Weapon, WeaponGate, WeaponGateState, WeaponIndex,
@@ -572,54 +548,63 @@ mod tests {
         )
     }
 
-    /// The belt-fed test cycle: 600 rpm = a 0.1 s cyclic interval, a 2-round belt, a 1 s swap.
+    /// The belt-fed test cycle at 64 Hz (DERIVED): 600 rpm's 0.1 s cyclic interval rounded up to
+    /// 7 ticks, a 2-round belt, a 1 s swap.
     const MG_CYCLE: FireCycle = FireCycle::Automatic {
-        cyclic_rpm: 600.0,
+        cyclic: TickSpan::of(7),
         belt_size: 2,
-        belt_swap_secs: 1.0,
+        swap: TickSpan::of(64),
         tracer_every: 5,
     };
-    const MAIN_GUN_CYCLE: FireCycle = FireCycle::Single { reload_secs: 0.5 };
+    /// A 0.5 s reload at 64 Hz (DERIVED).
+    const MAIN_GUN_CYCLE: FireCycle = FireCycle::Single {
+        reload: TickSpan::of(32),
+    };
 
-    /// The game's damage model: an admitted reload must cross clock wrap without panicking,
-    /// and the owning client must refuse an unarmed-but-paused peer snapshot at deserialization.
+    fn at(raw: u32) -> SimTick {
+        SimTick::new(raw)
+    }
+
+    /// The game's damage model: an admitted reload must cross clock wrap without panicking.
+    /// Fire eligibility relies on the deadline maturing on the far side of the counter's end.
     #[test]
-    fn weapon_deadlines_cross_wrap_and_peer_gates_have_one_valid_phase() {
+    fn weapon_deadlines_cross_wrap() {
         let mut gate = WeaponGateState::default();
-        gate.arm(u32::MAX - 1, 3);
-        assert!(!gate.deadline_reached(u32::MAX));
-        assert_eq!(gate.remaining_ticks(u32::MAX), 2);
-        assert!(gate.deadline_reached(1));
-        let invalid = br#"{"ready_tick":null,"paused_at_tick":5,"belt_remaining":0}"#;
-        assert!(
-            serde_json::from_slice::<WeaponGateState>(invalid).is_err(),
-            "an absent deadline cannot carry a pause"
-        );
+        gate.arm(at(u32::MAX - 1), TickSpan::of(3));
+        assert!(!gate.deadline_reached(at(u32::MAX)));
+        assert_eq!(gate.remaining_ticks(at(u32::MAX)), 2);
+        assert!(gate.deadline_reached(at(1)));
     }
 
-    /// The game's damage model: replication must parse the gate into one valid phase before
-    /// the owner's presentation ledger can seed it. No absent deadline can freeze crew work.
+    /// The game's damage model: the owning client parses a replicated gate into one valid phase
+    /// before its presentation ledger can seed it. Frozen work outside the deadline horizon, and
+    /// frozen work beside a belt with rounds left (which no branch of `tick_weapon_gate` resumes),
+    /// are refused at decoding, in JSON and on the wire; the same phases with valid fields decode.
     #[test]
-    fn a_peer_cannot_seed_an_unarmed_paused_weapon_gate() {
-        let invalid = br#"{"ready_tick":null,"paused_at_tick":5,"belt_remaining":0}"#;
-        assert!(serde_json::from_slice::<WeaponGateState>(invalid).is_err());
-    }
-
-    /// The game's damage model: the wire cannot create frozen work outside the one deadline
-    /// horizon. The decoder rejects it before an owner's presentation ledger can hold it.
-    #[test]
-    fn a_peer_cannot_seed_paused_work_outside_the_signed_horizon() {
-        let invalid = br#"{"timing":{"Paused":{"work":2147483648,"since":0}},"belt_remaining":0}"#;
-        let error = serde_json::from_slice::<WeaponGateState>(invalid)
-            .unwrap_err()
-            .to_string();
+    fn a_peer_cannot_seed_an_invalid_weapon_phase() {
+        let refused = |json: &str| {
+            serde_json::from_str::<WeaponGateState>(json)
+                .unwrap_err()
+                .to_string()
+        };
+        let error =
+            refused(r#"{"timing":{"Paused":{"work":2147483648,"since":0}},"belt_remaining":0}"#);
         assert!(error.contains("under 2^31"), "{error}");
-        // DERIVED wire fixture: Paused's variant index, then its work, start and belt count.
-        let invalid_wire = postcard::to_allocvec(&(2_u32, 1_u32 << 31, 0_u32, 0_u32)).unwrap();
-        assert!(postcard::from_bytes::<WeaponGateState>(&invalid_wire).is_err());
+        let error = refused(r#"{"timing":{"Paused":{"work":3,"since":0}},"belt_remaining":5}"#);
+        assert!(error.contains("empty belt"), "{error}");
+        let valid: WeaponGateState = serde_json::from_str(
+            r#"{"timing":{"Paused":{"work":3,"since":0}},"belt_remaining":0}"#,
+        )
+        .expect("a paused swap holds an empty belt");
+        assert_eq!(valid.remaining_ticks(at(0)), 4);
+        // DERIVED wire fixtures: Paused's variant index, then its work, start and belt count.
+        for (work, belt) in [(1_u32 << 31, 0_u32), (3, 5)] {
+            let wire = postcard::to_allocvec(&(2_u32, work, 0_u32, belt)).unwrap();
+            assert!(postcard::from_bytes::<WeaponGateState>(&wire).is_err());
+        }
         let mut valid = WeaponGateState::default();
-        valid.arm(u32::MAX, crate::sim_tick::TickSpan::MAX);
-        valid.pause(u32::MAX);
+        valid.arm(at(u32::MAX), TickSpan::of(TickSpan::MAX));
+        valid.pause(at(u32::MAX));
         let bytes = postcard::to_allocvec(&valid).unwrap();
         assert_eq!(
             postcard::from_bytes::<WeaponGateState>(&bytes).unwrap(),
@@ -632,11 +617,11 @@ mod tests {
     #[test]
     fn a_peer_gate_at_the_last_tick_can_pause() {
         let mut authority = WeaponGateState::default();
-        authority.arm(u32::MAX - 1, 1);
+        authority.arm(at(u32::MAX - 1), TickSpan::ONE);
         let wire = serde_json::to_vec(&authority).unwrap();
         let mut peer: WeaponGateState = serde_json::from_slice(&wire).unwrap();
-        peer.pause(u32::MAX - 1);
-        assert_eq!(peer.remaining_ticks(u32::MAX - 1), 2);
+        peer.pause(at(u32::MAX - 1));
+        assert_eq!(peer.remaining_ticks(at(u32::MAX - 1)), 2);
     }
 
     /// The game's damage model: deadline arming, crew-work pause/resume and the offline clock
@@ -644,13 +629,13 @@ mod tests {
     #[test]
     fn arming_pausing_resuming_and_the_local_clock_wrap() {
         let mut gate = WeaponGateState::default();
-        gate.arm(u32::MAX - 1, 3);
-        gate.pause(u32::MAX);
-        assert_eq!(gate.remaining_ticks(100), 3);
-        gate.resume(1);
-        assert_eq!(gate.remaining_ticks(1), 2);
-        assert!(!gate.deadline_reached(2));
-        assert!(gate.deadline_reached(3));
+        gate.arm(at(u32::MAX - 1), TickSpan::of(3));
+        gate.pause(at(u32::MAX));
+        assert_eq!(gate.remaining_ticks(at(100)), 3);
+        gate.resume(at(1));
+        assert_eq!(gate.remaining_ticks(at(1)), 2);
+        assert!(!gate.deadline_reached(at(2)));
+        assert!(gate.deadline_reached(at(3)));
         let mut world = World::new();
         world.insert_resource(crate::WeaponClock(u32::MAX));
         world.run_system_once(advance_weapon_clock).unwrap();
@@ -658,11 +643,11 @@ mod tests {
         // A peer's complete typed gate, including the last counter value, is safe to pause.
         let wire = serde_json::to_vec(&gate).unwrap();
         let mut peer: WeaponGateState = serde_json::from_slice(&wire).unwrap();
-        peer.arm(u32::MAX - 1, 1);
-        peer.pause(u32::MAX - 1);
-        peer.resume(0);
-        assert_eq!(peer.remaining_ticks(0), 1);
-        assert!(peer.deadline_reached(1));
+        peer.arm(at(u32::MAX - 1), TickSpan::ONE);
+        peer.pause(at(u32::MAX - 1));
+        peer.resume(at(0));
+        assert_eq!(peer.remaining_ticks(at(0)), 1);
+        assert!(peer.deadline_reached(at(1)));
     }
 
     /// The game's damage model: frozen work is a bounded interval, even when a peer's loading
@@ -672,20 +657,20 @@ mod tests {
     #[test]
     fn paused_work_keeps_the_signed_horizon_and_clamps_an_already_due_deadline() {
         let mut gate = WeaponGateState::default();
-        gate.arm(0, i32::MAX as u32);
-        gate.pause(0);
-        assert_eq!(gate.remaining_ticks(u32::MAX), 1 << 31);
-        gate.resume(1);
-        assert_eq!(gate.remaining_ticks(1), i32::MAX as u32);
-        gate.arm(10, 1);
-        gate.pause(20);
-        assert_eq!(gate.remaining_ticks(20), 1);
-        gate.resume(25);
-        assert!(gate.deadline_reached(25));
-        gate.arm(u32::MAX - 1, 3);
-        gate.pause(u32::MAX);
-        gate.resume(u32::MAX);
-        assert_eq!(gate.remaining_ticks(u32::MAX), 2);
+        gate.arm(at(0), TickSpan::of(TickSpan::MAX));
+        gate.pause(at(0));
+        assert_eq!(gate.remaining_ticks(at(u32::MAX)), 1 << 31);
+        gate.resume(at(1));
+        assert_eq!(gate.remaining_ticks(at(1)), i32::MAX as u32);
+        gate.arm(at(10), TickSpan::ONE);
+        gate.pause(at(20));
+        assert_eq!(gate.remaining_ticks(at(20)), 1);
+        gate.resume(at(25));
+        assert!(gate.deadline_reached(at(25)));
+        gate.arm(at(u32::MAX - 1), TickSpan::of(3));
+        gate.pause(at(u32::MAX));
+        gate.resume(at(u32::MAX));
+        assert_eq!(gate.remaining_ticks(at(u32::MAX)), 2);
     }
 
     /// A minimal `Automatic` rig the real `fire`/`tick_weapon_gate` systems run over: a tank root
@@ -1051,7 +1036,7 @@ mod tests {
         advance(&mut world, 32);
         let gate = gate_state(&world, root);
         assert_eq!(gate.belt_remaining, 0);
-        assert_eq!(gate.remaining_ticks(39), 32);
+        assert_eq!(gate.remaining_ticks(at(39)), 32);
         world.run_system_once(fire).unwrap();
         assert_eq!(weapon_state(&mut world, root).rounds_fired, 2);
 
@@ -1200,7 +1185,7 @@ mod tests {
             "the replicated gate stays byte-identical throughout a crew-work pause"
         );
         assert_eq!(
-            gate.remaining_ticks(263),
+            gate.remaining_ticks(at(263)),
             64,
             "dead crew freezes the swap deadline"
         );

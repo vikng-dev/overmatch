@@ -234,7 +234,9 @@ use crate::{CombatantId, CombatantLife, ShotId};
 /// carries only a state word; each freed trunk's TreePiece identifies its map tree and cut.
 /// REV 57: environment ledgers and pose carriers carry `WorldGeneration`; the Battle number
 /// selects a fresh construction and prevents records and streamed pieces crossing Battles.
-pub const PROTOCOL_REV: u32 = 60;
+/// REV 61 (#238): `WeaponGateState` decodes through its phase rule and refuses paused load work
+/// beside a belt with rounds left. Its encoding is unchanged; its definition moves.
+pub const PROTOCOL_REV: u32 = 61;
 
 /// Compatibility tag derived from the complete pinned wire manifest plus the crate version. This
 /// is the runtime handshake value: version-exact, so a version bump intentionally changes it.
@@ -1083,7 +1085,7 @@ const WIRE_SURFACE_HASH: u64 = 0xc0256acf39c3f9da;
 /// The pinned hash of the OWN wire-facing type DEFINITIONS (field layout, not just names). Re-pin it
 /// whenever a wire-facing struct/enum definition changes; house process also bumps
 /// [`PROTOCOL_REV`]. The tripwire prints the new value. See the block above for the coverage model.
-const WIRE_TYPES_HASH: u64 = 0x3676fde2b03039dc;
+const WIRE_TYPES_HASH: u64 = 0x839fdd94ab09aa88;
 
 /// The pinned `Cargo.lock` versions of the external crates whose types ride the wire (avian's
 /// replicated physics components; lightyear's wire framing / input protocol). A bump of either can

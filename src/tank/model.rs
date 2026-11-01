@@ -4,6 +4,7 @@ use serde::{Deserialize, Serialize};
 use super::servo::ServoState;
 use crate::command::TankCommand;
 use crate::damage::Requirement;
+use crate::sim_tick::{SimTick, TickSpan};
 use crate::spec::{FireCycle, RecoilSpec, Trigger, ViewKind};
 use crate::track::sim::{TrackContacts, TrackDrive, TrackGrip};
 
@@ -271,10 +272,55 @@ pub struct WeaponState {
 
 /// The game's damage model: one weapon's fire eligibility and belt supply. Its timing enum
 /// makes an unarmed-but-paused state unrepresentable, including at the peer deserialization edge.
+/// Paused work is load work, a `Single`'s reload or a dry belt's swap, so a pause holds an empty
+/// belt; decoding refuses a paused gate with rounds left ([`WeaponGateError`]).
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default, Serialize, Deserialize)]
+#[serde(try_from = "WeaponGateWire")]
 pub struct WeaponGateState {
     pub timing: WeaponTiming,
     pub belt_remaining: u32,
+}
+
+/// [`WeaponGateState`]'s decoded fields before its phase rule is checked: the same fields in the
+/// same order, so the encoding is the state's own.
+#[derive(Deserialize)]
+struct WeaponGateWire {
+    timing: WeaponTiming,
+    belt_remaining: u32,
+}
+
+/// A decoded gate no authority can produce.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum WeaponGateError {
+    /// Frozen load work beside a belt with rounds left: an `Automatic` cycling its belt has no
+    /// crew-gated work to freeze, and a `Single` holds no belt.
+    PausedWithRounds(u32),
+}
+
+impl std::fmt::Display for WeaponGateError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::PausedWithRounds(rounds) => write!(
+                f,
+                "a paused weapon gate holds {rounds} belt rounds; paused load work holds an empty belt"
+            ),
+        }
+    }
+}
+
+impl TryFrom<WeaponGateWire> for WeaponGateState {
+    type Error = WeaponGateError;
+    fn try_from(wire: WeaponGateWire) -> Result<Self, Self::Error> {
+        match wire.timing {
+            WeaponTiming::Paused { .. } if wire.belt_remaining > 0 => {
+                Err(WeaponGateError::PausedWithRounds(wire.belt_remaining))
+            }
+            timing => Ok(Self {
+                timing,
+                belt_remaining: wire.belt_remaining,
+            }),
+        }
+    }
 }
 
 /// The game's damage model: a weapon is ready, loading against a wrapping deadline, or frozen
@@ -284,11 +330,11 @@ pub enum WeaponTiming {
     #[default]
     Ready,
     Loading {
-        ready_tick: crate::sim_tick::SimTick,
+        ready_tick: SimTick,
     },
     Paused {
-        work: crate::sim_tick::TickSpan,
-        since: crate::sim_tick::SimTick,
+        work: TickSpan,
+        since: SimTick,
     },
 }
 
@@ -310,15 +356,15 @@ impl WeaponGateState {
 
     /// The active deadline, or a paused work clock for diagnostics. A pause has no active
     /// deadline ordering; its first unmet tick is retained in the displayed work count.
-    pub fn ready_tick(self) -> Option<crate::sim_tick::SimTick> {
+    pub fn ready_tick(self) -> Option<SimTick> {
         match self.timing {
             WeaponTiming::Ready => None,
             WeaponTiming::Loading { ready_tick } => Some(ready_tick),
-            WeaponTiming::Paused { work, since } => Some(since.after(work.raw() + 1)),
+            WeaponTiming::Paused { work, since } => Some(since.after(work).after(TickSpan::ONE)),
         }
     }
 
-    pub fn paused_at_tick(self) -> Option<crate::sim_tick::SimTick> {
+    pub fn paused_at_tick(self) -> Option<SimTick> {
         match self.timing {
             WeaponTiming::Paused { since, .. } => Some(since),
             WeaponTiming::Ready | WeaponTiming::Loading { .. } => None,
@@ -331,29 +377,30 @@ impl WeaponGateState {
 
     /// Every active comparison uses the shared signed wrapped relation, as the battle cycle
     /// does. Frozen work is not eligible until its load requirement allows resumption.
-    pub fn deadline_reached(self, now: u32) -> bool {
+    pub fn deadline_reached(self, now: SimTick) -> bool {
         match self.timing {
             WeaponTiming::Ready => true,
-            WeaponTiming::Loading { ready_tick } => {
-                crate::sim_tick::SimTick::new(now).has_reached(ready_tick)
-            }
+            WeaponTiming::Loading { ready_tick } => now.has_reached(ready_tick),
             WeaponTiming::Paused { .. } => false,
         }
     }
 
-    /// Data admission bounds the span; at least one tick prevents duplicate emission in a tick.
-    pub fn arm(&mut self, now: u32, delay_ticks: u32) {
+    /// At least one tick prevents duplicate emission in a tick.
+    pub fn arm(&mut self, now: SimTick, delay: TickSpan) {
         self.timing = WeaponTiming::Loading {
-            ready_tick: crate::sim_tick::SimTick::new(now).after(delay_ticks.max(1)),
+            ready_tick: now.after(delay.at_least_one()),
         };
     }
 
-    /// Freeze work on entry. Repeated unmet ticks leave the gate byte-identical, and a past
+    /// Freeze load work on entry. Repeated unmet ticks leave the gate byte-identical, and a past
     /// arriving deadline holds no remaining work rather than almost a full counter's interval.
-    pub fn pause(&mut self, now: u32) {
+    pub fn pause(&mut self, now: SimTick) {
         if let WeaponTiming::Loading { ready_tick } = self.timing {
-            let now = crate::sim_tick::SimTick::new(now);
-            let work = crate::sim_tick::TickSpan::try_from(now.remaining_until(ready_tick)).expect(
+            assert_eq!(
+                self.belt_remaining, 0,
+                "only load work pauses: a Single holds no belt and an Automatic pauses a dry belt's swap"
+            );
+            let work = TickSpan::try_from(now.remaining_until(ready_tick)).expect(
                 "remaining_until is a nonnegative signed difference, within TickSpan's horizon",
             );
             self.timing = WeaponTiming::Paused { work, since: now };
@@ -361,20 +408,18 @@ impl WeaponGateState {
     }
 
     /// A frozen interval survives any number of clock wraps; only the resume tick starts it.
-    pub fn resume(&mut self, now: u32) {
+    pub fn resume(&mut self, now: SimTick) {
         if let WeaponTiming::Paused { work, .. } = self.timing {
             self.timing = WeaponTiming::Loading {
-                ready_tick: crate::sim_tick::SimTick::new(now).after(work.raw()),
+                ready_tick: now.after(work),
             };
         }
     }
 
-    pub fn remaining_ticks(self, now: u32) -> u32 {
+    pub fn remaining_ticks(self, now: SimTick) -> u32 {
         match self.timing {
             WeaponTiming::Ready => 0,
-            WeaponTiming::Loading { ready_tick } => {
-                crate::sim_tick::SimTick::new(now).remaining_until(ready_tick)
-            }
+            WeaponTiming::Loading { ready_tick } => now.remaining_until(ready_tick),
             // The entry tick cannot consume work, including at the greatest admitted span.
             WeaponTiming::Paused { work, .. } => work.raw() + 1,
         }

@@ -18,6 +18,7 @@ use crate::damage::{
 };
 use crate::guns::{GunError, GunRegistry, Mechanism};
 use crate::provenance::Sourced;
+use crate::sim_tick::TickSpan;
 use crate::tank::{ServoSpec, Tank};
 use crate::track::transmission::{ShiftAddressing, TransmissionAuthoring, TransmissionParams};
 
@@ -311,19 +312,21 @@ pub enum FireMode {
 /// A mount's fire mechanism joined with its gun's ([`WeaponSpec::fire_cycle`]): what the fire
 /// system runs, built at spawn from data. The mount's fire mode and its gun's mechanism are of one
 /// family by construction.
+/// Its delays are fixed-tick spans, parsed once from the authored seconds
+/// ([`crate::sim_tick::TickSpan::from_secs`]).
 #[derive(Clone, Copy, PartialEq, Debug)]
 pub enum FireCycle {
     /// [`FireMode::Single`]: one round per trigger edge, then a crew-gated reload of
     /// `reload_secs`. Every round traces (its visual is the shell scene, not a streak).
-    Single { reload_secs: f32 },
+    Single { reload: TickSpan },
     /// [`FireMode::Automatic`] at the gun's `cyclic_rpm`: one round every `60 / cyclic_rpm` s (pure
     /// mechanism, NEVER crew-gated: a knocked-out loader does not slow a working action),
     /// `belt_size` rounds a belt, a crew-gated swap of `belt_swap_secs` when it runs dry, and every
     /// `tracer_every`-th round down the belt a tracer (`0` = a tracerless belt, never traces).
     Automatic {
-        cyclic_rpm: f32,
+        cyclic: TickSpan,
         belt_size: u32,
-        belt_swap_secs: f32,
+        swap: TickSpan,
         tracer_every: u32,
     },
 }
@@ -408,18 +411,6 @@ pub struct WeaponSpec {
     /// Load gate: what must hold for the reload timer to tick (e.g. `[Loader, Breech]`). Required,
     /// as [`Self::fire`] is: an authored `[]` always loads.
     pub load: Requirement,
-}
-
-/// Whether the game's damage model can count this weapon delay in its fixed-tick gate. The
-/// duration must be representable and its tick span strictly below half the wrapping counter
-/// range (DERIVED), so the shared signed deadline relation is unambiguous.
-fn duration(seconds: f32) -> bool {
-    std::time::Duration::try_from_secs_f32(seconds).is_ok_and(|delay| {
-        let ticks = delay
-            .as_nanos()
-            .div_ceil(Time::<Fixed>::default().timestep().as_nanos());
-        ticks <= u128::from(crate::sim_tick::TickSpan::MAX)
-    })
 }
 
 /// Every [`Part`] a requirement names, flattened through its graded groups.
@@ -548,43 +539,11 @@ impl WeaponSpec {
         }
         let cycle = self.fire_cycle()?;
         self.resolved_rounds().map_err(|err| err.to_string())?;
-        match cycle {
-            FireCycle::Single { reload_secs } => {
-                if !duration(reload_secs) {
-                    return Err(format!(
-                        "Single.reload_secs must be a duration >= 0 s under 2^31 fixed ticks; reduce the duration \
-                         (got {reload_secs})"
-                    ));
-                }
-            }
-            // A tracer_every of 0 is legal: a tracerless belt. The cyclic rate is the gun's,
-            // refused at the gun's load when it is not finite and positive.
-            FireCycle::Automatic {
-                belt_size,
-                belt_swap_secs,
-                cyclic_rpm,
-                ..
-            } => {
-                if !duration(60.0 / cyclic_rpm) {
-                    return Err(format!(
-                        "assets/guns/{}.gun.ron: Automatic.cyclic_rpm gives an interval outside 2^31 fixed ticks (got {cyclic_rpm}); increase cyclic_rpm",
-                        self.gun
-                    ));
-                }
-                if belt_size == 0 {
-                    return Err(
-                        "Automatic.belt_size must be > 0 (a 0-round belt can never fire or \
-                                swap)"
-                            .into(),
-                    );
-                }
-                if !duration(belt_swap_secs) {
-                    return Err(format!(
-                        "Automatic.belt_swap_secs must be a duration >= 0 s under 2^31 fixed ticks; reduce the duration (got \
-                         {belt_swap_secs})"
-                    ));
-                }
-            }
+        // A tracer_every of 0 is legal: a tracerless belt. Every delay was parsed by fire_cycle.
+        if let FireCycle::Automatic { belt_size: 0, .. } = cycle {
+            return Err(
+                "Automatic.belt_size must be > 0 (a 0-round belt can never fire or swap)".into(),
+            );
         }
         Ok(())
     }
@@ -598,9 +557,12 @@ impl WeaponSpec {
             .gun(&self.gun)
             .map_err(|err| err.to_string())?;
         match (self.fire_mode, gun.mechanism(), self.tracer_every) {
-            (FireMode::Single { reload_secs }, Mechanism::Single, None) => {
-                Ok(FireCycle::Single { reload_secs })
-            }
+            (FireMode::Single { reload_secs }, Mechanism::Single, None) => Ok(FireCycle::Single {
+                reload: TickSpan::from_secs(reload_secs)
+                    .map_err(|err| format!("Single.reload_secs: {err} (got {reload_secs})"))?,
+            }),
+            // The cyclic rate is the gun's, refused at the gun's load when it is not finite and
+            // positive; its interval must still fit the deadline horizon.
             (
                 FireMode::Automatic {
                     belt_size,
@@ -609,9 +571,17 @@ impl WeaponSpec {
                 Mechanism::Automatic { cyclic_rpm },
                 Some(tracer_every),
             ) => Ok(FireCycle::Automatic {
-                cyclic_rpm,
+                cyclic: TickSpan::from_secs(60.0 / cyclic_rpm).map_err(|err| {
+                    format!(
+                        "assets/guns/{}.gun.ron: Automatic.cyclic_rpm {cyclic_rpm} gives an interval \
+                         that {err}; increase cyclic_rpm",
+                        self.gun
+                    )
+                })?,
                 belt_size,
-                belt_swap_secs,
+                swap: TickSpan::from_secs(belt_swap_secs).map_err(|err| {
+                    format!("Automatic.belt_swap_secs: {err} (got {belt_swap_secs})")
+                })?,
                 tracer_every,
             }),
             (FireMode::Single { .. }, Mechanism::Single, Some(_)) => Err(
@@ -2413,8 +2383,8 @@ TankSpec(
             "{err}"
         );
 
-        // A single-shot reload or a belt swap that is no duration: `shooting::duration_ticks`
-        // panics in play on each, so the sheet refuses them by name.
+        // A single-shot reload or a belt swap that is no fixed-tick span: the sheet refuses each
+        // by name where `TickSpan::from_secs` parses it.
         for secs in [
             -0.5,
             f32::NAN,

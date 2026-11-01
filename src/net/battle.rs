@@ -12,7 +12,7 @@ use super::protocol::InputBridge;
 use super::score::Scoreboard;
 use crate::CombatantId;
 use crate::command::{ParsedTankCommand, TankCommand};
-use crate::sim_tick::SimTick;
+use crate::sim_tick::{SimTick, TickSpan};
 use crate::state::GameplaySet;
 
 /// One server-owned Battle, on the scoreboard's entity. Deadlines use `ShotClock`'s wrapping ticks.
@@ -62,21 +62,24 @@ impl Default for BattleState {
 /// Checked mode spans in authority ticks. Each span fits a wrapped signed deadline comparison.
 #[derive(Resource, Debug)]
 pub(super) struct CycleRules {
-    fill_up: u32,
-    combat: u32,
-    late_join: u32,
-    results: u32,
+    fill_up: TickSpan,
+    combat: TickSpan,
+    late_join: TickSpan,
+    results: TickSpan,
 }
 
 impl CycleRules {
     pub(super) fn new(mode: &BattleMode, tick: Duration) -> Self {
         let ticks = |field, span: Duration| {
             let count = span.as_nanos().div_ceil(tick.as_nanos());
-            assert!(
-                count <= u128::from(crate::sim_tick::TickSpan::MAX),
-                "assets/modes/battle.ron: {field} exceeds the authority deadline horizon — reduce the duration"
-            );
-            count as u32
+            u32::try_from(count)
+                .ok()
+                .and_then(|count| TickSpan::try_from(count).ok())
+                .unwrap_or_else(|| {
+                    panic!(
+                        "assets/modes/battle.ron: {field} exceeds the authority deadline horizon — reduce the duration"
+                    )
+                })
         };
         Self {
             fill_up: ticks("fill_up_s", mode.fill_up),
@@ -131,7 +134,7 @@ impl BattleState {
             BattlePhase::FillUp { ends_at: Some(end) } if now.has_reached(end) => {
                 self.phase = BattlePhase::Combat {
                     ends_at: now.after(rules.combat),
-                    late_join: if rules.late_join == 0 {
+                    late_join: if rules.late_join.raw() == 0 {
                         LateJoin::Closed
                     } else {
                         LateJoin::Open {
@@ -278,10 +281,10 @@ mod tests {
     fn the_cycle_runs_in_full_across_wrap_and_waits_when_empty() {
         // Fixture spans in ticks, unrelated to shipped tuning.
         let rules = CycleRules {
-            fill_up: 2,
-            combat: 4,
-            late_join: 1,
-            results: 2,
+            fill_up: TickSpan::of(2),
+            combat: TickSpan::of(4),
+            late_join: TickSpan::ONE,
+            results: TickSpan::of(2),
         };
         let mut battle = BattleState::default();
         let score = Scoreboard::default();
