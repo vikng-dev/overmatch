@@ -3090,10 +3090,10 @@ impl Blast {
         -normal * (self.peak_pressure(distance, cos) * Self::patch(share, distance, cos))
     }
 
-    /// The volume (m³) of `material` the same ray crushes on the same patch as its
-    /// [`Self::push`]: Law 1 at the patch's peak overpressure ([`Self::peak_pressure`]) and the
-    /// push's impulse ([`Masonry::crushed_by`]). A face smaller than the cone takes its
-    /// intercepted share of this, as of the push: the volume is linear in the impulse.
+    /// Law 1's crushed volume and local front depth on the same patch as [`Self::push`]. The
+    /// volume takes the intercepted share of the cone; depth is intensive and keeps its value.
+    /// A cone expanding behind the face holds that volume between its entry and its front
+    /// ([`Crushing`]); the wall design owns the model and its oblique-projection approximation.
     pub(crate) fn crushed(
         &self,
         material: &Masonry,
@@ -3101,13 +3101,19 @@ impl Blast {
         distance: f32,
         dir: Vec3,
         normal: Vec3,
-    ) -> f32 {
+    ) -> Crushing {
         let distance = self.distance(distance);
         let cos = -dir.dot(normal);
-        material.crushed_by(
-            self.peak_pressure(distance, cos),
-            self.specific_impulse(distance, cos) * Self::patch(share, distance, cos),
-        )
+        let pressure = self.peak_pressure(distance, cos);
+        let impulse = self.specific_impulse(distance, cos);
+        let volume = material.crushed_by(pressure, impulse * Self::patch(share, distance, cos));
+        let planar = f64::from(material.crushed_by(pressure, impulse));
+        let projected = f64::from(distance) * f64::from(cos.max(GRAZING_COS));
+        let q = (1.0 + 3.0 * planar / projected).cbrt();
+        // DERIVED: projected * (q - 1), rationalized so a shallow front never loses its depth
+        // to subtraction of nearly equal cube roots. The zero-crush case has planar = 0.
+        let depth = (3.0 * planar / (q * q + q + 1.0)) as f32;
+        Crushing { volume, depth }
     }
 }
 
@@ -3156,6 +3162,19 @@ pub(crate) fn crush_factor(r: f32) -> f32 {
     }
 }
 
+/// The game's environment Law 1 result on one field patch: its removed volume and the front's
+/// local depth normal to the face, both before limiting to the available chunk material.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct Crushing {
+    /// m³, extensive: interception scales it with the patch's share.
+    pub volume: f32,
+    /// m, intensive: cone-volume depth, independent of the patch's share. At normal incidence
+    /// `depth = (R³ + 3 R² V/A)^(1/3) - R` (DERIVED), `R` the floored field distance. Oblique
+    /// depth projects the expanded cone along the face normal; the same incidence floor as the
+    /// field's patch bounds that projection (ASSUMED).
+    pub depth: f32,
+}
+
 /// What Law 2 reads of the chunk a blast face loads ([`Load::blast`]): its hull, the hits' frame's
 /// scale over the hull's (a building instance's), and its material.
 pub(crate) struct Backing<'a> {
@@ -3190,10 +3209,11 @@ impl Scab {
 
 /// Law 2, the rear scab, on one loaded face (its `rays`, aggregated as `load`) of the chunk
 /// `backing` names; the wall design ("Standoff blast", Law 2) owns the model. The ligament `L` is
-/// the chunk's depth behind the face's centroid along its inward normal, to the hull's actual
-/// exit, and the back point `b` lies `L` behind the face's load. The face's compression
+/// remaining depth behind the crater to the hull's actual exit. The back point `b` lies the
+/// full hull depth `H` behind the face's load; the patch nearest that load supplies its crater
+/// depth (ASSUMED: nearest-sample reading at the same one back point). The face's compression
 /// reaches `b` as `σ_b`: the solid-angle mean of the face's transmitted stress, the sum over its
-/// patches of `L / (2π R³)` (each patch's solid angle seen from `b`, over `2π`, per area) times
+/// patches of `H / (2π R³)` (each patch's solid angle seen from `b`, over `2π`, per area) times
 /// each patch's transmitted force `min(P, σ_c,d) A`; a uniform load over a plane gives back the
 /// load (the #237 study's mean; the wall design names the rejected alternative). The pulse lasts `τ
 /// = 2J / F` (`2i / P` of the face's blow and peak force) and is `λ = c τ` long. Reflected at the
@@ -3204,8 +3224,8 @@ impl Scab {
 /// F_t / F` of the face's momentum, never more than its blow). ASSUMED: that equivalent area is the
 /// footprint and the gate reads one back point. Intact contacts take their projected area off
 /// the free rear area; propagation through that contact to a farther free surface is unresolved.
-/// ASSUMED: the crater's depth is not taken off the ligament. `None` where the gate
-/// fails. Every input is the face's and its row's; no body type enters.
+/// A front that crushes through leaves no ligament and throws no rear scab. `None` where no
+/// ligament remains or the gate fails. Every input is the face's and its row's; no body type enters.
 pub(crate) fn scab(rays: &[&RayHit], load: &Load, backing: &Backing) -> Option<Scab> {
     let normal = rays
         .first()
@@ -3218,12 +3238,21 @@ pub(crate) fn scab(rays: &[&RayHit], load: &Load, backing: &Backing) -> Option<S
     let (_, depth) = backing.block.span(local, -normal).expect(
         "a face's impulse centroid lies on its convex chunk and its inward normal enters it",
     );
-    let ligament = depth * backing.scale;
-    if ligament == 0.0 {
-        // A tangent boundary point has no material behind it to reflect the pulse.
+    let depth = depth * backing.scale;
+    let back = load.at - normal * depth;
+    let crater = rays
+        .iter()
+        .min_by(|a, b| {
+            a.at.distance_squared(load.at)
+                .total_cmp(&b.at.distance_squared(load.at))
+        })
+        .expect("a loaded face has at least one ray")
+        .depth;
+    let ligament = depth - crater;
+    if ligament <= 0.0 {
+        // Through-crush, or a tangent boundary point, leaves no intact rear layer to reflect.
         return None;
     }
-    let back = load.at - normal * ligament;
     let (mut stress, mut transmitted) = (0.0_f32, 0.0_f32);
     for ray in rays {
         let force = ray.peak.length();
@@ -3233,7 +3262,7 @@ pub(crate) fn scab(rays: &[&RayHit], load: &Load, backing: &Backing) -> Option<S
             force
         };
         let reach = (ray.at - back).length();
-        stress += ligament / (2.0 * PI * reach.powi(3)) * through;
+        stress += depth / (2.0 * PI * reach.powi(3)) * through;
         transmitted += through;
     }
     let peak = load
@@ -3294,6 +3323,8 @@ pub(crate) struct RayHit {
     /// The patch's peak overpressure, Pa: intensive, so a share of the cone keeps it whole.
     pub pressure: f32,
     pub crushed: f32,
+    /// The local crater's depth normal to the face, m; intensive under interception.
+    pub depth: f32,
 }
 
 /// A blast's rays from `origin`: each of `directions` (unit, with its share of the field; the
@@ -3329,6 +3360,7 @@ pub(crate) fn blast_rays(
                 Blast::section(share, blast.distance(t)),
                 silhouette(faces, dir),
             ));
+            let crushed = blast.crushed(&material(chunk), share, t, dir, normal);
             Some(RayHit {
                 chunk,
                 at: origin + dir * t,
@@ -3337,7 +3369,8 @@ pub(crate) fn blast_rays(
                 impulse: blast.push(share, t, dir, normal),
                 peak: blast.peak(share, t, dir, normal),
                 pressure: blast.peak_pressure(t, -dir.dot(normal)),
-                crushed: blast.crushed(&material(chunk), share, t, dir, normal),
+                crushed: crushed.volume,
+                depth: crushed.depth,
             })
         })
         .collect();
@@ -3967,6 +4000,7 @@ mod tests {
             peak,
             pressure: peak.length(),
             crushed: energy / 10.0,
+            depth: 0.0,
         };
         let slab = Block::cuboid(Vec3::new(-5.0, -5.0, -1.0), Vec3::new(5.0, 5.0, 0.0));
         let (a, b, c) = (Vec3::X, Vec3::Y, Vec3::new(0.0, 2.0, 0.0));
@@ -4023,6 +4057,7 @@ mod tests {
             peak: -normal * (100.0 * impulse),
             pressure: 100.0,
             crushed: impulse * 1e-5,
+            depth: 0.0,
         };
         // Two faces of one slab, loaded far too weakly to scab (fixture data).
         let slab = Block::cuboid(Vec3::new(-10.0, -10.0, -1.0), Vec3::new(10.0, 10.0, 3.0));
@@ -4225,7 +4260,7 @@ mod tests {
             let impulse = blast.push(share, distance, Vec3::Z, Vec3::NEG_Z);
             let peak = blast.peak(share, distance, Vec3::Z, Vec3::NEG_Z);
             let crushed = blast.crushed(&material, share, distance, Vec3::Z, Vec3::NEG_Z);
-            assert!(impulse.z > 0.0 && peak.z > 0.0 && crushed > 0.0);
+            assert!(impulse.z > 0.0 && peak.z > 0.0 && crushed.volume > 0.0 && crushed.depth > 0.0);
             assert_eq!(
                 impulse,
                 blast.push(share, blast.radius, Vec3::Z, Vec3::NEG_Z)
@@ -4329,6 +4364,7 @@ mod tests {
             peak: Vec3::NEG_Z,
             pressure: 1.0,
             crushed,
+            depth: 0.0,
         };
         // A hull about the fixture chunk; its one newton peak is far too weak to scab.
         let hull = Block::cuboid(chunk.centroid - 0.05, chunk.centroid + 0.05);
@@ -6124,6 +6160,7 @@ mod tests {
             peak: Vec3::Z * (0.1 * pressure),
             pressure,
             crushed: 0.0,
+            depth: 0.0,
         };
         let slab = Block::cuboid(Vec3::new(-1.0, -1.0, 0.0), Vec3::new(1.0, 1.0, 0.25));
         (hit, slab)
@@ -6134,6 +6171,70 @@ mod tests {
     fn scab_blow(material: &Masonry, lengths: f32) -> f32 {
         let force = 0.1 * material.compaction.strength;
         lengths * 0.25 * force / (2.0 * material.spall.bar_speed)
+    }
+
+    /// The game's environment Law 2 gate reads intact material behind Law 1's crater. A front
+    /// that reaches the back emits no scab, and a partial crater can leave too short a ligament
+    /// to pass the pulse gate. The wall's retained push and volume accounting rely on it; a
+    /// mutant reading the original full thickness fails. ASSUMED slab and pulse fixture.
+    #[test]
+    fn a_scab_needs_an_intact_ligament_behind_the_crater() {
+        let material = brick();
+        let (hit, slab) = scab_face(&material, scab_blow(&material, 0.1));
+        let thrown = |depth| {
+            Load::blast(&[RayHit { depth, ..hit }], |_| Backing {
+                block: &slab,
+                scale: 1.0,
+                material,
+                contacts: &[],
+            })
+        };
+        let (_, scabs) = thrown(0.0);
+        let [scab] = scabs[..] else {
+            panic!("a free intact fixture scabs: {scabs:?}")
+        };
+        let stress = hit.peak.length() / (2.0 * PI * 0.25_f32.powi(2));
+        let area = hit.peak.length() / stress;
+        let scab_thickness = scab.mass / (material.density * area);
+        let partial = 0.25 - 0.5 * scab_thickness;
+        assert!(
+            partial > 0.0 && partial < 0.25,
+            "the fixture leaves a partial ligament"
+        );
+        for depth in [partial, 0.25, 0.5] {
+            let (loads, scabs) = thrown(depth);
+            assert!(
+                scabs.is_empty(),
+                "crater depth {depth} leaves no scab: {scabs:?}"
+            );
+            assert_eq!(loads.len(), 1, "no phantom rear volume removal");
+            assert_eq!(loads[0].blow, hit.impulse, "no phantom momentum export");
+        }
+    }
+
+    /// A game's environment crater depth is intensive and holds Law 1's volume in its expanding
+    /// cone. The ligament gate relies on a depth independent of ray count or intercepted share;
+    /// a planar depth or an extensive depth fails. ASSUMED charge, distances and obliquities.
+    #[test]
+    fn a_craters_cone_depth_is_independent_of_its_patch_share() {
+        let blast = Blast::of(5.0 * TNT_ENERGY, 0.05);
+        for cos in [1.0_f32, 0.5] {
+            let dir = Vec3::new((1.0 - cos * cos).sqrt(), 0.0, cos);
+            let mut previous = None;
+            for share in [1e-3_f32, 1e-5, 1e-7] {
+                let crushed = blast.crushed(&brick(), share, 0.1, dir, Vec3::NEG_Z);
+                assert!(crushed.volume > 0.0 && crushed.depth > 0.0);
+                if let Some(depth) = previous {
+                    assert_eq!(crushed.depth, depth);
+                }
+                previous = Some(crushed.depth);
+                let r = 0.1_f64;
+                let end = r + f64::from(crushed.depth / cos);
+                let volume =
+                    4.0 * std::f64::consts::PI * f64::from(share) * (end.powi(3) - r.powi(3)) / 3.0;
+                assert!((volume / f64::from(crushed.volume) - 1.0).abs() < 1e-5);
+            }
+        }
     }
 
     /// A back scab in the game's environment model leaves the actual hull surface. On tapered

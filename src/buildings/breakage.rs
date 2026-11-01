@@ -1298,6 +1298,8 @@ fn cast_blast(
                 Blast::section(share, blast.distance(d)),
                 shown,
             ));
+            let crushed =
+                blast.crushed(&breakage.kind.layout.materials[c], share, d, turned, normal);
             chunk_hits.push((
                 root,
                 fracture::RayHit {
@@ -1308,13 +1310,8 @@ fn cast_blast(
                     impulse: blast.push(share, d, turned, normal),
                     peak: blast.peak(share, d, turned, normal),
                     pressure: blast.peak_pressure(d, -turned.dot(normal)),
-                    crushed: blast.crushed(
-                        &breakage.kind.layout.materials[c],
-                        share,
-                        d,
-                        turned,
-                        normal,
-                    ),
+                    crushed: crushed.volume,
+                    depth: crushed.depth,
                 },
             ));
         }

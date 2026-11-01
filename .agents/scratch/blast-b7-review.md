@@ -29,9 +29,10 @@ The wall design owns the model narrative; this file records findings and disposi
   opened joints and departed neighbours expose the surface. Both game and sandbox supply the
   current construction contacts. Propagation through contacts to a farther free surface remains
   unresolved; the local interface does not invent a reflection there.
-- **P1, pending:** the scab gate uses the original full chunk depth even when Law 1 has crushed
+- **P1, fixed:** the scab gate uses the original full chunk depth even when Law 1 has crushed
   the front. The study's executable calculation uses the remaining ligament and refuses scab
-  after through-crush. Supply that missing ligament term, naming the depth approximation.
+  after through-crush. The gate now subtracts the local cone-volume crater depth, read from the patch nearest the
+  face centroid (ASSUMED). Depth is intensive under interception; through-crush emits no scab.
 - **P2, fixed:** the farthest corner's projection need not be the convex hull's exit behind a
   loaded point. A tapered chunk can place its supposed back point outside its hull. The calculation now locates the
   actual convex-hull exit before reading the ligament and rear contacts.
@@ -68,3 +69,9 @@ at load even though its dynamic product fits in f32.
 Hull-exit fix: formatting and the required locked clippy pass. **MEASURED:** 131 targeted tests
 pass. A tapered hull at unit and doubled instance scale emits from its actual rear plane; an
 anchor on that plane suppresses reflection. No collider or spawned body was added.
+
+Remaining-ligament fix: formatting and the required locked clippy pass. **MEASURED:** 133
+targeted tests pass. The cone-volume test holds at normal and oblique incidence across patch
+shares; the gate test rejects both a partial crater with too short a ligament and through-crush,
+without exporting phantom momentum or removing phantom rear volume. Existing slab momentum and
+representation tests still pass; the crushed-volume calculation retains its original arithmetic.
