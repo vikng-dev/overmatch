@@ -27,8 +27,10 @@
 # A wedged client is bounded twice: the in-app watchdog (`harness::simulate_watchdog`,
 # startup slack + remaining replicated fill-up before release, then script length / 64 + 20 s
 # from release) and the wall-clock kill below. The outer default is DERIVED: the existing 120 s
-# load allowance + a full fill-up from the shipped server mode + ceil(script ticks / 64). The
-# smoke's idle script uses the same combat clock as every workload and must wait for release.
+# load allowance + a full fill-up + ceil(script ticks / 64). The fill-up is read from this
+# checkout's `assets/modes/battle.ron`, the file the server compiles in (`BattleMode::shipped`);
+# the server tarball does not ship it. The smoke's idle script uses the same combat clock as every
+# workload and must wait for release.
 #
 # Env:
 #   SMOKE_SERVER_ASSET_ROOT  `BEVY_ASSET_ROOT` for the server only (a server binary that is not
@@ -67,7 +69,7 @@ if [ -n "${SMOKE_EXPECT_API:-}" ] && ! grep -q -a -F -- "$SMOKE_EXPECT_API" "$cl
 fi
 
 if [ -z "$deadline" ]; then
-    mode="${SMOKE_SERVER_ASSET_ROOT:-$(dirname "$server_bin")}/assets/modes/battle.ron"
+    mode="$(cd "$(dirname "$0")/../.." && pwd)/assets/modes/battle.ron"
     fill_up_s=$(awk '
         /^[[:space:]]*fill_up_s:/ {
             span=$2; sub(/,$/, "", span)
