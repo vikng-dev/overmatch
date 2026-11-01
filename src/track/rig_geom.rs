@@ -258,6 +258,11 @@ impl RigGeom {
         for side in Side::ALL {
             let rest = self.rest.get(side);
             if !self.hull_rest_y.is_finite()
+                || self
+                    .road_wheels
+                    .get(side)
+                    .iter()
+                    .any(|centre| !centre.is_finite())
                 || rest.iter().any(|(centre, radius)| {
                     !centre.is_finite() || !radius.is_finite() || *radius <= 0.0
                 })
@@ -1046,6 +1051,18 @@ pub(crate) fn tiger_rig() -> RigGeom {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The 2D belt route cannot certify a station's lateral position. Wheel posing and footprint
+    /// projection rely on all three coordinates being finite before the rig is published.
+    #[test]
+    fn admission_refuses_nonfinite_lateral_station_positions() {
+        let mut rig = synthetic_rig(20, 97); // FIXTURE DATA: a feasible synthetic running gear.
+        rig.road_wheels.get_mut(Side::Left)[0].x = f32::NAN;
+        assert!(matches!(
+            rig.validate(&SuspensionParams::default()),
+            Err(RigFault::NonfiniteGeometry { side: Side::Left })
+        ));
+    }
 
     /// Scripted braking relies on declared contact geometry, including asymmetry and tread gaps.
     /// FIXTURE DATA: two synthetic stations with unequal radii and lateral intervals.
