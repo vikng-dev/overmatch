@@ -495,3 +495,77 @@ For Edgegap (DERIVED, rough): the shares transfer, not the times. A 28 % cut app
 against the 15.6 ms budget. That base predates server-perf-1's fixes, the trace inflates the
 systems it spans, and a 15-minute combat runs heavier than these two minutes, so only an Edgegap
 re-measure settles it.
+
+## What grows in the drive step: the footprint clip (diag-drive-growth)
+
+Subject: the game's dedicated server tick and its driving model, game state only.
+
+**Method.** As "server-perf-2 priced", with these differences. One traced run of main at
+"ballistics: end launch clearance when the whole disc leaves its source box (#247)" plus
+temporary counters in the drive step (removed before commit): the shipped Battle mode, stopped
+181 s into combat instead of a shortened mode (the mode file is compiled in, and stopping the
+run needs no edit). Windows: fill-up (40-5 s before combat, 30 held tanks), combat minute 1
+(5-60 s), minute 2 (60-120 s), minute 3 (120-180 s). The counters summed over 64 ticks; their
+own timers bracket the drive step's phases, and the trace's exclusive time of
+`apply_track_forces` matches them (3 426 against 3 385 us in minute 1, 10 316 against 10 310 us in
+minute 3, MEASURED). One run, so no A B B A: the counts, not the times, carry the attribution.
+
+**Per tick, traced (MEASURED):**
+
+| us per tick | Fill-up | Minute 1 | Minute 2 | Minute 3 |
+|---|---|---|---|---|
+| Fixed busy | 4 810 | 6 084 | 11 535 | 12 910 |
+| Drive step `apply_track_forces` | 2 868 | 3 426 | 8 827 | 10 316 |
+| of it: support shape checks `RubbleBodies::in_slab` | 0 | 250 | 5 415 | 6 806 |
+| of it: snapshot gather (`near` queries + `RubbleBodies::gather`) | 100 | 142 | 228 | 273 |
+| of it: reaction pass (`piece_impulses` + pushes) | 9 | 10 | 30 | 51 |
+| Physics step | 755 | 1 045 | 1 105 | 1 089 |
+| Stats-line tick p50 | 4 807 | 5 587 | 11 094 | 12 800 |
+| Entities | 18 233 | 18 261 | 18 753 | 18 749 |
+
+The drive step grows 6 890 us from minute 1 to 3, the fixed busy time 6 826 us (DERIVED): the
+drive step is the whole growth, and the shape checks are 6 556 us of it (95 %, DERIVED).
+
+**Per tank and tick (MEASURED counts; 30 tanks in every window):**
+
+| | Fill-up | Minute 1 | Minute 2 | Minute 3 |
+|---|---|---|---|---|
+| Support candidates (`near`, own hull excluded) | 0 | 1.2 | 4.0 | 6.1 |
+| Link slabs with no candidate | 194 of 194 | 148 | 94 | 69 |
+| Candidate checks (slab x candidate) | 0 | 228 | 778 | 1 177 |
+| ... meeting the slab's bounds (6 support-map calls each) | 0 | 3.0 | 52 | 59 |
+| ... clipped (`Surface::clipped_extent`) | 0 | 0.85 | 19 | 24 |
+| ... overlapping the footprint (support read) | 0 | 0.03 | 2.8 | 5.3 |
+| Terrain probes | 1 577 | 1 584 | 1 583 | 1 584 |
+| Contacts emitted / on a collider | 204 / 0 | 199 / 0.05 | 207 / 5.8 | 210 / 13 |
+| Dynamic belt reactions sorted, per tick (all tanks) | 0 | 1.4 | 174 | 392 |
+
+**The cause (MEASURED):** the support candidates near each tank grow 1.2 to 6.1 as the
+construction around the circling tanks breaks (entities +488 from minute 1 to 2, MEASURED; that
+they are building chunks, as in "what the entity count represents", is ASSUMED for this run),
+and every candidate that reaches a link's slab is clipped: its whole convex boundary, triangle by
+triangle, against the footprint's four side planes. 24 clips per tank and tick cost 6.8 ms in
+minute 3, about 9.3 us per clip with its support calls (DERIVED: 6 806 / (24.3 x 30)). The
+terrain probes, the field's share of the step, do not grow (1 584 per tank and tick, about 3 ms).
+The candidates themselves are real: 5 of the 24 clipped pieces per tank support a link, and the
+belts press 392 dynamic contacts per tick in minute 3, so most of the growth is the law reading
+more rubble under more belts. What is not the law is the clip's cost: each triangle's polygon was
+rebuilt on the heap five times (the slab transform, then one vector per side plane).
+
+**Fix.** "driving: clip support footprints in fixed buffers (#250)" keeps each triangle's polygon
+in two stack buffers of 48 points (DERIVED: a pass emits at most two points per input point, so
+four passes over a triangle stay within 3 x 2^4) and swaps them between passes. The arithmetic and
+its order are unchanged: `the_fixed_buffer_clip_matches_a_heap_clip_bit_for_bit` compares every
+extent bit with the heap clip it replaces over 3 000 seeded cases (vertices on the planes,
+zero-area slivers, a 12-gon frustum's whole hull, clipped-away triangles). No golden or tolerance
+changed.
+
+Rejected: a tighter support query (the footprint's own box instead of a cube about the hull
+origin). Every slab's bounds lie inside that box, so it can only drop candidates the slab bounds
+test already drops cheaply (35 000 bounds tests per tick, about 0.07 ms at an ASSUMED 2 ns each);
+it would trim the gather (0.27 ms) but not the clips.
+
+**Cost model (DERIVED).** Drive step = 30 tanks x (~100 us of terrain probes and contact law +
+c x clips per tank), where clips per tank follow the rubble reaching its slabs (0.85 in minute 1,
+24 in minute 3) and c was ~9.3 us before the fix. The fix lowers c; the clip count is the law.
+Still to price: the fixed-buffer clip, A B B A in minute 1 and minute 3 (not run in this lane).
