@@ -367,6 +367,8 @@ pub struct BeltContact {
     /// elastic load's rate in penetration past the engagement ramp). The recipient's reaction law
     /// reads it as the stiffness the explicit step integrates (`track::rubble::piece_impulses`).
     pub stiffness: f32,
+    /// Normal damping rate of this patch (N·s/m), including engagement and column weight.
+    pub damping: f32,
     /// Longitudinal slip (belt speed − ground-point speed, m/s).
     pub slip: f32,
     /// Lateral scrub speed at the contact (m/s).
@@ -533,6 +535,7 @@ struct ColumnContact {
     load_elastic: f32,
     /// [`BeltContact::stiffness`].
     stiffness: f32,
+    damping: f32,
     long_dir: Vec3,
     lat_dir: Vec3,
     has_plane: bool,
@@ -1021,6 +1024,7 @@ fn collect_column_contacts<O: TerrainOracle>(
                     load,
                     load_elastic,
                     stiffness,
+                    damping: weight * params.support_damping_per_m * contact_len * engage,
                     long_dir,
                     lat_dir,
                     has_plane,
@@ -1245,6 +1249,7 @@ fn emit_contact_forces(
             load: c.load,
             load_elastic: c.load_elastic,
             stiffness: c.stiffness,
+            damping: c.damping,
             slip: c.slip_long,
             slip_lat: c.slip_lat,
             f_long,

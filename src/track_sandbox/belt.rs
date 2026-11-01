@@ -752,6 +752,7 @@ mod tests {
                         load: 100_000.0,
                         load_elastic: 100_000.0,
                         stiffness: 1.0e7,
+                        damping: 0.0,
                         slip: 0.0,
                         slip_lat: 0.0,
                         f_long: 0.0,

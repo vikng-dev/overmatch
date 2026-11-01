@@ -332,3 +332,15 @@ and the pushing body's work enters the energy limit beside the freed group's own
 `ContactTransfers::dt`, and the section, ring and rest laws to read the pair's work; both were
 reserved for lane sweep-destr-6 this round. The wall design's "Body contact duration" note stays
 until that law lands.
+
+### Review verification: hull work continuation (#256)
+
+Subject: the game's driving and building destruction models; game state only. Both review files
+were present. Findings are checked against code and executable class fixtures.
+
+| Reviewer | Finding | Verified / not a defect | Fixed in (subject) |
+|---|---|---|---|
+| Codex P1; Claude P1 | Reaction stability ignores damping | verified: fixture 500 kg, 2 MN/m, 100 kN s/m, 1 cm press, closing 1 m/s at 64 Hz leaves at -2.7500002 m/s (MEASURED red test) | track: include damping in recipient stability (#256) |
+
+The spring/damper verdict includes `dt² k/m + 2 dt c/m` over all recipient patches; its
+RESOLUTION limit is 4 (DERIVED from the symplectic Euler amplification matrix).

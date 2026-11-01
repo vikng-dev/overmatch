@@ -726,13 +726,9 @@ fn source_force(contact: &BeltContact) -> Vec3 {
     contact.normal * contact.load + contact.traction
 }
 
-/// The explicit step's stability limit on a recipient's side of the belt's springs, read as
-/// `dt² Σ kᵢ / mᵢ` over its patches (`kᵢ` each patch's [`BeltContact::stiffness`], `mᵢ` the
-/// recipient's effective mass along its normal there). RESOLUTION: symplectic Euler integrates an
-/// undamped spring stably while `k dt² / m < 4` (DERIVED); the sum is the trace of the recipient's
-/// stiffness over its inertia, at least its stiffest rigid mode, so a recipient under it is
-/// integrated stably whatever mode the belt excites. The damping's term is not read (ASSUMED
-/// small beside the spring's at the belt's per-metre ratio).
+/// The explicit spring/damper stability limit. RESOLUTION: symplectic Euler with explicit
+/// damping is stable while `dt² k/m + 2 dt c/m < 4` (DERIVED from its amplification matrix).
+/// The sum over every patch is a trace bound on the stiffest recipient rigid mode.
 const EXPLICIT_LIMIT: f32 = 4.0;
 
 /// Every dynamic recipient's side of `contacts`, each with its source body (module doc), by one law for every body: the
@@ -759,15 +755,12 @@ pub(crate) fn piece_impulses<'c>(
     }
     // Effective masses read the tick-start pose and inertia only, so the impulses sized below
     // never change a recipient's verdict.
-    let mut stiffness = vec![0.0_f32; bodies.bodies.len()];
+    let mut rates = vec![0.0_f32; bodies.bodies.len()];
     for &(contact, slot, ..) in &dynamic {
-        stiffness[slot] +=
-            contact.stiffness / bodies.bodies[slot].effective_mass(contact.point, contact.normal);
+        rates[slot] += (contact.stiffness * dt * dt + 2.0 * contact.damping * dt)
+            / bodies.bodies[slot].effective_mass(contact.point, contact.normal);
     }
-    let explicit: Vec<bool> = stiffness
-        .iter()
-        .map(|&rate| rate * dt * dt < EXPLICIT_LIMIT)
-        .collect();
+    let explicit: Vec<bool> = rates.iter().map(|&rate| rate < EXPLICIT_LIMIT).collect();
     dynamic.sort_by_cached_key(|(contact, ..)| {
         #[cfg(test)]
         bodies
@@ -1555,6 +1548,7 @@ mod tests {
             load,
             load_elastic: load,
             stiffness: load / 0.01,
+            damping: 0.0,
             slip: 0.0,
             slip_lat: 0.0,
             f_long: 0.0,
@@ -1565,6 +1559,35 @@ mod tests {
             collider: Some(collider),
             mu: 0.9,
         }
+    }
+
+    /// A damped support must not add separation speed to a closing recipient. Driving and
+    /// moving-structure loads rely on the stability verdict including the damper.
+    /// FIXTURE: k=2 MN/m, c=100 kN s/m, penetration=1 cm, closing=1 m/s at 64 Hz.
+    /// DERIVED: the old undamped gate passes both 500 kg and 200 kg and returns 2.75 and
+    /// 8.375 m/s separation; the implicit clamp stops at the stationary belt instead.
+    #[test]
+    fn damped_reactions_do_not_fling_closing_recipients() {
+        let mut app = physics();
+        let collider = piece(&mut app, 0.0, 0.0);
+        app.update();
+        app.world_mut()
+            .run_system_once(move |rubble: RubbleQuery, bodies: Query<PieceData>| {
+                for mass in [500.0, 200.0] {
+                    let mut pieces = RubbleBodies::gather(&rubble, &[collider], &bodies);
+                    let body = &mut pieces.bodies[0];
+                    body.inv_mass = Vec3::splat(1.0 / mass);
+                    body.linear = Vec3::Y;
+                    body.angular = Vec3::ZERO;
+                    let mut contact = press(body.com, collider, 120_000.0);
+                    contact.stiffness = 2.0e6;
+                    contact.damping = 1.0e5;
+                    piece_impulses(&mut pieces, sourced(&[contact]), DT);
+                    let speed = pieces.bodies[0].linear.y;
+                    assert!(speed.abs() < 1e-5, "mass {mass}: left at {speed} m/s");
+                }
+            })
+            .unwrap();
     }
 
     /// A PIECE TAKES THE SUPPORT REACTION ONLY UP TO WHAT STOPS IT CLOSING ON THE BELT, AND A
@@ -1789,6 +1812,7 @@ mod tests {
                 load: rng.range(0.0, 20_000.0),
                 load_elastic: 0.0,
                 stiffness: 0.0,
+                damping: 0.0,
                 slip: 0.0,
                 slip_lat: 0.0,
                 f_long: 0.0,
