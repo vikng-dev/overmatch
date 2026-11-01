@@ -887,6 +887,30 @@ mod tests {
         }
     }
 
+    /// A level face takes its image from its own element's construction axes on the mesh
+    /// path (`Faces::face`), never from a world axis: a mutant passing `[X, Z]` there draws a
+    /// yawed element's floorboards along world X. ASSUMED fixture: a shipped element's frame
+    /// yawed off every world axis, its surface frame Upright.
+    #[test]
+    fn a_level_face_on_the_mesh_path_runs_along_its_element() {
+        let mut element = shipped_house().asset.elements[0].clone();
+        let run = Quat::from_rotation_y(0.7) * Vec3::X;
+        element.frame.u = run.to_array();
+        element.frame.v = Vec3::Y.to_array();
+        element.surface_frame = SurfaceFrame::Upright;
+        let mut faces = Faces::default();
+        faces.face(
+            Vec3::Y,
+            &[Vec3::ZERO, Vec3::Z, Vec3::X],
+            &element,
+            false,
+            Vec3::ZERO,
+            0.0,
+        );
+        let tangent = Vec4::from_array(faces.tangents[0]).truncate();
+        assert!(tangent.dot(run).abs() > 0.999, "{tangent} along {run}");
+    }
+
     /// An unsynchronized replica must hold actual ledger entries. Checking only the clock's
     /// accessor would let a presentation predicate that treats Waiting as due escape.
     #[test]
