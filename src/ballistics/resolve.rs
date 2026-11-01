@@ -662,14 +662,14 @@ impl FieldReach {
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct FieldRay {
     /// Where the direction ended: where it entered the hard volume that stopped it, or, entering
-    /// none, at the struck tank's horizon ([`horizon`]). Witness-independent.
+    /// none, at the reached material horizon ([`horizon`]). Witness-independent.
     pub end: Vec3,
     /// The doses it addressed, in entry order.
     pub doses: Vec<Dose>,
 }
 
 /// The ordered presence along one direction of a field thrown from the world point `at`: the
-/// volumes the throw admits (the struck tank's, its [`FieldReach`]), walked from outside all of
+/// spatially reached volumes (its [`FieldReach`]), walked from outside all of
 /// their bounds through `at` to the far side of them, with nothing declared. Returns the walk and
 /// the progress of `at` along it.
 ///
@@ -861,7 +861,7 @@ pub(crate) fn field_direction(
     })
 }
 
-/// The struck tank's horizon along a field direction thrown from `at`: where the line leaves the
+/// The reached material horizon along a field direction thrown from `at`: where the line leaves the
 /// union of the bounds of every hard collider the throw admits within [`FIELD_REACH`] of `at`
 /// (its [`FieldReach`], built for `at`); `at` itself where there is none or the union lies behind
 /// it. Witnesses take no part. The union does not depend on the direction, so a throw reads it

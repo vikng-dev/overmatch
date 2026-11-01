@@ -299,9 +299,7 @@ impl Playback {
             }
             for source in &bite.spall {
                 let (mut spall, mut dose) = (SpallMarks::default(), ShotDose::default());
-                super::super::throw_spall_cone(
-                    &mut spall, &mut dose, source, bite.owner, context, is_box,
-                );
+                super::super::throw_spall_cone(&mut spall, &mut dose, source, context, is_box);
                 let doses = dose
                     .tallies
                     .into_iter()

@@ -47,3 +47,19 @@ model declarations are authored stand-ins, not a claim of measured round-specifi
 R1: `cargo fmt --all --check`, workspace/all-target clippy with `dev_ui,bitprobe`, and the targeted
 `guns::`, `ballistics::fuzz::`, `doc_citations` tests passed. MEASURED: 17 passed, one ignored
 on-demand instrument, no failures. No captures or pricing runs.
+
+## Field admission (B5)
+
+Fixed: a throw's candidates are every spatially reached ballistic or witness volume, independent
+of `VolumeOf`. The throw carries no owning-tank filter. Source-volume exclusion still prevents
+counting its own line dose twice; other tanks and unowned matter can both receive and occlude the
+field. Attribution retains ownership. The existing recorder contract explicitly opens records
+for encounters of the round's path with a tank; a field-only recipient opens no new encounter
+(`damage_cam::recorder` module invariant). This change preserves that presentation contract.
+
+Replaced the old ownership-exclusion assertion with owned/unowned source plates, three recipients
+(owning tank, neighboring tank, unowned matter), and a foreign-owned occluder. The runtime/gate
+agreement tests now compare recorded line energy directly, independently of field dose, rather
+than relying on ownership to silence fields. MEASURED: all 41 resolver/citation tests passed;
+format and workspace/all-target clippy passed.
+The cross-platform field-cast pin also passed without re-pinning.

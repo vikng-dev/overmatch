@@ -1571,7 +1571,7 @@ pub enum ArmourMark {
         /// The burst's greatest sideways speed `v_s` (m/s), its round's ([`burst::Burst`]).
         sideways: f32,
         nose: f32,
-        /// The tank whose body armed or last restarted the fuze: the tank the field walks.
+        /// The tank whose body armed or last restarted the fuze, for attribution only.
         tank: Option<Entity>,
     },
     /// The round's line through witness volumes (ADR-0040) along the legs it flew since the last
@@ -2227,7 +2227,7 @@ impl ProjectileMarchWorld<'_, '_> {
     }
 
     /// The volume node a collider belongs to, of either kind: a witness's own node for a witness
-    /// collider, the armour volume otherwise. What a "the struck tank's" admission reads.
+    /// collider, the armour volume otherwise. A field admits matter independently of ownership.
     fn volume_of(&self, collider: Entity) -> Option<Entity> {
         if self.witness_surfaces.contains(collider) {
             hit_ancestor(collider, &self.witnesses, &self.parents).map(|(node, _)| node)
@@ -3274,7 +3274,7 @@ fn burst_here(
         tank,
     });
     shell.path.points.push(flight.position);
-    throw_burst(shell, context, &burst, tank, flight, speed, &|volume| {
+    throw_burst(shell, context, &burst, flight, speed, &|volume| {
         health.contains(volume)
     });
     let removed = shell
@@ -3384,15 +3384,13 @@ fn next_surface(
 /// its own driven energy, what its explosive gives the wall ([`burst::Burst::energy`]), times the
 /// burst fields' factor ([`spall_cone::BurstFields::strength`]): nothing the round lost reaching
 /// `flight` enters it. Its field is the ring at ratio `speed / v_s`
-/// ([`spall_cone::BurstFields::field`]), walked through
-/// the volumes of `tank`, the fuze's, leaving none. A field whose emission converts to no pool unit
+/// ([`spall_cone::BurstFields::field`]), walked through every spatially reached volume, leaving none. A field whose emission converts to no pool unit
 /// is not thrown, as a cone's is not ([`throw_spall_cone`]); one outside its law's domain throws
 /// nothing and logs why.
 fn throw_burst(
     shell: &mut MarchingShell,
     context: &resolve::ResolveContext<'_, '_, '_>,
     burst: &burst::Burst,
-    tank: Option<Entity>,
     flight: &resolve::Flight,
     speed: f32,
     is_box: &dyn Fn(Entity) -> bool,
@@ -3406,7 +3404,6 @@ fn throw_burst(
         origin: flight.position,
         axis: flight.direction,
         strength: fields.strength(burst.energy),
-        tank,
         exited: &[],
     };
     if pool_units_of(energy_units(throw.strength * spall_cone::EMITTED_SHARE)) == 0 {
@@ -3434,21 +3431,22 @@ fn throw_burst(
     });
 }
 
-/// One field's throw: where from, about what axis, at what strength (J), through the
-/// volumes of which tank, and leaving which volumes (a body exit's), which a direction starting
+/// The game's damage model: one field's origin, axis, strength (J), and the volumes it leaves
+/// (a body exit's), which a direction starting
 /// inside one does not enter there and which no direction doses anywhere
 /// ([`resolve::field_direction`]).
 struct FieldThrow<'a> {
     origin: Vec3,
     axis: Dir3,
     strength: f32,
-    tank: Option<Entity>,
     exited: &'a [Entity],
 }
 
 /// Walk every direction of `spread` about `throw`'s axis from its origin, direction `k` at
-/// strength `S·f_k`, standing for `1/N` of the field, through the volumes of `throw`'s tank alone
+/// strength `S·f_k`, standing for `1/N` of the field, through every spatially reached volume
 /// ([`resolve::field_direction`]), adding its doses to `dose`; returns the rays in stratum order.
+/// Ownership is attribution only: neighboring tanks and unowned environment matter resist and
+/// receive the same field. Material presence and occlusion decide where each direction stops.
 /// The game's damage model requires every direction and witness pass to pair; a contradiction
 /// panics in every build.
 fn walk_field(
@@ -3460,11 +3458,7 @@ fn walk_field(
 ) -> Vec<SpallRay> {
     let world = context.world;
     let weight = 1.0 / spread.directions_count() as f32;
-    let within = |collider: Entity| {
-        world
-            .volume_of(collider)
-            .is_some_and(|node| world.owners.get(node).ok().map(VolumeOf::tank) == throw.tank)
-    };
+    let within = |collider: Entity| world.volume_of(collider).is_some();
     let reach = resolve::FieldReach::of_throw(context, &within, throw.origin);
     let mut rays = Vec::with_capacity(spread.directions_count());
     for (ray_dir, profile) in spread.directions(throw.axis) {
@@ -3508,7 +3502,7 @@ fn walk_field(
 /// field's weights emit `S/2` in all ([`spall_cone::EMITTED_SHARE`]). Otherwise the cone is spread
 /// by the ball law at the source's ratio ([`walk::SpallSource::debris_ratio`]): direction `k` of
 /// the spread ([`spall_cone::Spread`]) carries `S·f_k` and stands for `1/N` of the cone, walked
-/// through the volumes of `tank`, the struck tank, alone ([`walk_field`]). It never doses the body
+/// through every spatially reached volume ([`walk_field`]). It never doses the body
 /// that threw it, the volumes the exit leaves ([`walk::SpallSource::exited`]): the energy the
 /// round lost there is their line dose, counted once. A ratio outside the
 /// law's domain throws nothing and logs why; substances refuse one at load, so only a fixture
@@ -3517,7 +3511,6 @@ fn throw_spall_cone(
     spall: &mut SpallMarks,
     dose: &mut ShotDose,
     source: &walk::SpallSource,
-    tank: Option<Entity>,
     context: &resolve::ResolveContext<'_, '_, '_>,
     is_box: &dyn Fn(Entity) -> bool,
 ) -> bool {
@@ -3546,7 +3539,6 @@ fn throw_spall_cone(
         origin: source.position,
         axis: shape.axis(source.face, direction),
         strength,
-        tank,
         exited: &source.exited,
     };
     let rays = walk_field(&throw, &spread, dose, context, is_box);

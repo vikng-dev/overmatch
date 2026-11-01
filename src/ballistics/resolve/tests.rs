@@ -315,7 +315,7 @@ fn try_driven(app: &mut App, body: RoundBody, speed: f32) -> Result<Drive, fuzz:
 
 /// The runtime's side: one tick of the real march, read back as impacts, and whether any direction
 /// of a spall cone the round threw dosed a box.
-fn marched(app: &mut App, body: RoundBody, speed: f32) -> (Vec<(Verdict, Vec3)>, bool) {
+fn marched(app: &mut App, body: RoundBody, speed: f32) -> (Vec<(Verdict, Vec3)>, bool, Entity) {
     let shell = spawn_round(app, body, DROP_FROM, Vec3::NEG_Y * speed);
     app.update();
     let field = app.world().get::<SpallMarks>(shell).is_some_and(|marks| {
@@ -325,7 +325,7 @@ fn marched(app: &mut App, body: RoundBody, speed: f32) -> (Vec<(Verdict, Vec3)>,
             .flat_map(|cone| &cone.rays)
             .any(|ray| !ray.doses.is_empty())
     });
-    (app.world().resource::<Read>().0.clone(), field)
+    (app.world().resource::<Read>().0.clone(), field, shell)
 }
 
 /// What the runtime turns each decision into: one impact per bounce or bite, none for a clear.
@@ -384,7 +384,21 @@ fn agree(name: &str, body: RoundBody, speed: f32, build: impl Fn(&mut App) -> En
         runtime.update();
     }
     runtime.world_mut().resource_mut::<Read>().0.clear();
-    let (read, field) = marched(&mut runtime, body, speed);
+    let (read, field, shell) = marched(&mut runtime, body, speed);
+    let runtime_transit: f32 = runtime
+        .world()
+        .get::<crate::ballistics::PenetrationMarks>(shell)
+        .unwrap()
+        .log
+        .iter()
+        .filter_map(|mark| match mark {
+            ArmourMark::Crossing { volumes, .. } => Some(volumes),
+            _ => None,
+        })
+        .flatten()
+        .filter(|volume| volume.volume == target)
+        .map(|volume| volume.energy)
+        .sum();
     let hp = runtime
         .world()
         .get::<ComponentHealth>(target)
@@ -416,6 +430,11 @@ fn agree(name: &str, body: RoundBody, speed: f32, build: impl Fn(&mut App) -> En
         .fold(0.0, |total, dose| total + dose.amount);
     let admitted =
         pool > 0 && crate::ballistics::pool_units_of(crate::ballistics::energy_units(transit)) > 0;
+    assert_eq!(
+        crate::ballistics::pool_units_of(crate::ballistics::energy_units(runtime_transit)) > 0,
+        admitted,
+        "{name}: the runtime and gate must agree on transit independently of field dose",
+    );
     let shock = flown.decisions.iter().any(|decision| {
         matches!(decision, Decision::Bounce(bounce)
             if gate.world().get::<ComponentHealth>(bounce.struck).is_some())
@@ -457,9 +476,8 @@ fn agree(name: &str, body: RoundBody, speed: f32, build: impl Fn(&mut App) -> En
 /// A soft HP-bearing box `width` across, centred under the drop line with its top at `top`: the
 /// target every arrangement aims at. Fixture data.
 ///
-/// It belongs to a tank of its own, so no spall cone thrown from the plates above it — volumes of no
-/// tank — reaches it: a cone doses only the struck tank's boxes. Each arrangement also asserts that
-/// no field dose landed ([`Agreement::transit_only`]).
+/// Ownership is attribution only; plate-exit fields may also reach this target. Transit parity is
+/// checked from the recorded line doses, independently of those fields.
 fn target_below(app: &mut App, top: f32, width: f32) -> Entity {
     let target = volume(
         app,
@@ -499,9 +517,9 @@ fn tilted_plate(app: &mut App, thickness: f32, tilt: f32, at: f32, factor: f32) 
 /// runtime's own first-tick speed and budget.
 ///
 /// THE PARITY IS TRANSIT PARITY. The admission observes transit deposits; the runtime also removes
-/// HP by a bounce's shock and by spall cones. The crossing arrangements are transit-only, asserted,
-/// with every target in a tank of its own, outside the plates' cones ([`target_below`]). The last
-/// two are the routes outside it, each with the round's own path kept clear of the HP-bearing box:
+/// HP by a bounce's shock and by spall cones. Compare line doses independently of those fields;
+/// ownership supplies no isolation. The last two arrangements keep the round's own path clear of
+/// the HP-bearing box:
 /// a round that bounces off the box itself jars it ([`Bounce::shock`]), and a perforation's spall
 /// cone reaches a box beside the round's path. Both sides still agree on every impact; the box is
 /// damaged and not admitted. Fixture data.
@@ -551,7 +569,6 @@ fn the_runtime_and_the_gate_decide_the_same_crossings() {
         );
         target_below(app, FAR_BELOW, 6.0)
     });
-    assert!(partial.transit_only());
     assert!(
         partial.impacts.first().is_some_and(|i| i.0.entered()),
         "the ring bit into the plate edge: {:?}",
@@ -592,7 +609,6 @@ fn the_runtime_and_the_gate_decide_the_same_crossings() {
         "the plate is perforated: {:?}",
         continued.impacts,
     );
-    assert!(continued.transit_only());
 
     // Target reach: a skin too thin to stop the round, the target behind it.
     let reached = agree("target reach", FIXTURE_88, 800.0, |app| {
@@ -603,7 +619,6 @@ fn the_runtime_and_the_gate_decide_the_same_crossings() {
         reached.admitted,
         "the round reaches the target behind the skin"
     );
-    assert!(reached.transit_only());
 
     // Shock: a machine-gun round grazes an HP-bearing soft slab at 75°, too thick for it to
     // overmatch.
@@ -629,8 +644,7 @@ fn the_runtime_and_the_gate_decide_the_same_crossings() {
         "the bounce jars the box it bounced off, and that is not a transit route",
     );
 
-    // Field: an 88 perforates 60 mm of steel square on; an HP-bearing box of the same (absent) tank
-    // sits 0.3 m below the plate, beside the disc's path but inside the spall cone.
+    // Field: the fixture round perforates the plate; an HP-bearing box sits 0.3 m below the plate, beside the disc's path but inside the spall cone.
     let thrown = agree("field", FIXTURE_88, 800.0, |app| {
         volume(
             app,
@@ -747,12 +761,10 @@ fn an_exact_budget_crossing_terminates_before_the_target() {
         "a positive residual does not grant instantaneous travel to the target"
     );
     assert!(
-        !exact.admitted && !exact.damaged,
-        "whose dose the target's HP pool cannot resolve: admitted {}, damaged {}",
-        exact.admitted,
-        exact.damaged,
+        !exact.admitted,
+        "the target takes no transit dose; a field may still reach it: admitted {}, damaged {}",
+        exact.admitted, exact.damaged,
     );
-    assert!(exact.transit_only());
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -1879,65 +1891,93 @@ fn adding_a_volume_never_raises_a_dose() {
     }
 }
 
-/// A cone doses the struck tank's boxes alone: a box of another tank inside the cone takes
-/// nothing, a box of the struck tank beside it does. And square on, the cone's axis is the plate's
-/// rear normal, which is the round's direction. Fixture: an 88 perforates 60 mm of steel square on;
-/// two soft boxes sit below the plate either side of the path.
+/// The game's damage model: a field reaches neighboring tanks and unowned environment matter.
+/// Ownership never admits a dose or removes an occluder. Both owned and unowned source plates
+/// must reach all three boxes; adding a foreign-owned blocker must shadow the box behind it.
+/// FIXTURE DATA: a round perforates a thin plate above three off-axis boxes.
 #[test]
-fn a_cone_doses_the_struck_tank_alone() {
-    let mut app = world_with_trimesh_plates(&[]);
-    volume(
-        &mut app,
-        Vec3::new(2.0, 0.06, 2.0),
-        Transform::from_translation(Vec3::new(DROP_FROM.x, 0.97, DROP_FROM.z)),
-        STEEL,
-        None,
-    );
-    let own = volume(
-        &mut app,
-        Vec3::new(0.5, 0.2, 0.6),
-        Transform::from_translation(Vec3::new(DROP_FROM.x + 0.31, 0.54, DROP_FROM.z)),
-        STEEL * 0.1,
-        Some(1000),
-    );
-    let foreign = volume(
-        &mut app,
-        Vec3::new(0.5, 0.2, 0.6),
-        Transform::from_translation(Vec3::new(DROP_FROM.x - 0.31, 0.54, DROP_FROM.z)),
-        STEEL * 0.1,
-        Some(1000),
-    );
-    let other = app.world_mut().spawn_empty().id();
-    app.world_mut()
-        .entity_mut(foreign)
-        .insert(crate::damage::VolumeOf(other));
-    app.insert_resource(RetainSpentShells(true));
-    for _ in 0..8 {
-        app.update();
+fn a_cone_reaches_matter_independently_of_tank_ownership() {
+    for owned_source in [false, true] {
+        for blocked in [false, true] {
+            let mut app = world_with_trimesh_plates(&[]);
+            let tank = app.world_mut().spawn_empty().id();
+            let other = app.world_mut().spawn_empty().id();
+            let plate = volume(
+                &mut app,
+                Vec3::new(2.0, 0.06, 2.0),
+                Transform::from_translation(Vec3::new(DROP_FROM.x, 0.97, DROP_FROM.z)),
+                STEEL,
+                None,
+            );
+            if owned_source {
+                app.world_mut()
+                    .entity_mut(plate)
+                    .insert(crate::damage::VolumeOf(tank));
+            }
+            let mut boxes = Vec::new();
+            for (dx, dz, owner) in [
+                (0.7, 0.0, Some(tank)),
+                (-0.7, 0.0, Some(other)),
+                (0.0, 0.7, None),
+            ] {
+                let entity = volume(
+                    &mut app,
+                    Vec3::new(0.5, 0.2, 0.5),
+                    Transform::from_translation(Vec3::new(
+                        DROP_FROM.x + dx,
+                        -0.5,
+                        DROP_FROM.z + dz,
+                    )),
+                    STEEL * 0.1,
+                    Some(1000),
+                );
+                if let Some(owner) = owner {
+                    app.world_mut()
+                        .entity_mut(entity)
+                        .insert(crate::damage::VolumeOf(owner));
+                }
+                boxes.push(entity);
+            }
+            if blocked {
+                let blocker = volume(
+                    &mut app,
+                    Vec3::new(0.8, 0.02, 0.8),
+                    Transform::from_translation(Vec3::new(DROP_FROM.x - 0.5, 0.3, DROP_FROM.z)),
+                    STEEL,
+                    None,
+                );
+                app.world_mut()
+                    .entity_mut(blocker)
+                    .insert(crate::damage::VolumeOf(other));
+            }
+            app.insert_resource(RetainSpentShells(true));
+            for _ in 0..8 {
+                app.update();
+            }
+            let shell = spawn_round(&mut app, FIXTURE_88, DROP_FROM, Vec3::NEG_Y * 800.0);
+            app.update();
+            for (index, entity) in boxes.iter().enumerate() {
+                let hp = app.world().get::<ComponentHealth>(*entity).unwrap();
+                assert_eq!(
+                    hp.held() < hp.capacity(),
+                    !(blocked && index == 1),
+                    "source owned={owned_source}, blocker={blocked}, box={index}"
+                );
+            }
+            let first = app
+                .world()
+                .get::<SpallMarks>(shell)
+                .unwrap()
+                .cones
+                .first()
+                .unwrap();
+            assert!(
+                Vec3::from(first.axis).distance(Vec3::NEG_Y) < 1.0e-4,
+                "square on, the axis is the rear normal and the direction: {:?}",
+                first.axis
+            );
+        }
     }
-    let shell = spawn_round(&mut app, FIXTURE_88, DROP_FROM, Vec3::NEG_Y * 800.0);
-    app.update();
-
-    let hp = |entity: Entity| *app.world().get::<ComponentHealth>(entity).unwrap();
-    assert!(
-        hp(own).held() < hp(own).capacity(),
-        "the struck tank's box is dosed"
-    );
-    assert_eq!(
-        hp(foreign).held(),
-        hp(foreign).capacity(),
-        "another tank's box is not"
-    );
-    let marks = app
-        .world()
-        .get::<SpallMarks>(shell)
-        .expect("the shell keeps its marks");
-    let first = marks.cones.first().expect("the plate's exit throws");
-    assert!(
-        Vec3::from(first.axis).distance(Vec3::NEG_Y) < 1.0e-4,
-        "square on, the axis is the rear normal and the direction: {:?}",
-        first.axis
-    );
 }
 
 /// THE POOL QUANTUM GATE: a body exit whose cone's whole emission `S/2` converts to no pool unit

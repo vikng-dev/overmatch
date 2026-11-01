@@ -256,8 +256,8 @@ pub(crate) enum Fuze {
     /// Armed: the round bursts after `remaining` more metres of path. At or below zero the delay
     /// has run out and the burst is due where the round stands: nothing restarts it. `speed` is
     /// the speed the count is kept at, which turns those metres into the delay's seconds left.
-    /// `tank` owns the body that armed the fuze or last restarted it, and is the tank the burst's
-    /// field walks.
+    /// `tank` owns the body that armed the fuze or last restarted it, for attribution only. The
+    /// game's damage-model fields reach matter independently of tank ownership.
     ///
     /// The two triggers keep the count differently. `SpendExit` counts metres from the speed it
     /// armed at, and a body met before the burst restarts it. `Impact` counts seconds: a change of
