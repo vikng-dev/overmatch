@@ -247,6 +247,10 @@ struct RigWheel {
     kind: WheelKind,
 }
 
+/// The physical tread belongs to the declared station from its construction flush onward.
+#[derive(Component)]
+struct RoadTread(crate::spec::WheelTread);
+
 /// The spec node whose baked station this carrier represents; names address, never classify.
 #[derive(Component)]
 struct StationAddress(String);
@@ -1294,6 +1298,16 @@ fn build_rig(
                     let centre = node.root_position;
                     parent.spawn((
                         StationAddress(node.name.clone()),
+                        RoadTread(
+                            spec.roadwheels
+                                .iter()
+                                .find(|wheel| wheel.node == node.name)
+                                .expect(
+                                    "the bake's roadwheel table comes from the spec declaration",
+                                )
+                                .tread
+                                .clone(),
+                        ),
                         RigWheel {
                             side,
                             kind: WheelKind::Road,
@@ -1316,7 +1330,7 @@ fn build_rig(
                     parent.spawn((
                         RigWheel { side, kind },
                         // Side-plane `(z, y)` back to 3-D on this side's track plane.
-                        Transform::from_xyz(side.plane_x(geom.plane_x), centre.y, centre.x)
+                        Transform::from_xyz(geom.side_plane_x(side), centre.y, centre.x)
                             .with_rotation(axle),
                     ));
                 }
@@ -1748,7 +1762,7 @@ fn draw_rig_gizmos(
             .single()
             .expect("RigGeom is published with exactly one sandbox hull in the same command flush")
             .affine();
-        let track_x = side.plane_x(geom.plane_x);
+        let track_x = geom.side_plane_x(side);
         let outer: Vec<Vec3> = (0..n)
             .map(|i| {
                 let tan2 = (samples[(i + 1) % n].local - samples[(i + n - 1) % n].local)

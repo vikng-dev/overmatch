@@ -54,7 +54,7 @@
 use bevy::math::Affine3A;
 use bevy::prelude::*;
 
-use crate::track::gear_phase::{fold, gear_transform, spin_angle, sprocket_tooth_tip, tooth_angle};
+use crate::track::gear_phase::{gear_transform, spin_angle, tooth_angle};
 
 use super::belt::BeltPhase;
 use super::rig_geom::RigGeom;
@@ -114,10 +114,10 @@ pub(super) struct GearNode {
     /// Road wheels only: the suspension station whose `dy` this node rides.
     station: Option<Entity>,
     /// Sprockets only: the side-plane angle at which this mesh carries a tooth TIP in its authored
-    /// rest pose, reduced to one tooth pitch ([`crate::track::gear_phase::measure_tooth_tip_angle`]). Zero and unused for the
-    /// rolling roles. Measured once, because a mesh cannot change under a running sandbox — the
-    /// calibration built from it is redone every frame, since the rig's tooth count and pitch can.
+    /// rest pose, from the tank sheet. Unused by the rolling roles.
     tooth_tip: f32,
+    /// A roadwheel's authored rolling radius; unused for hull-fixed roles.
+    rolling_radius: f32,
 }
 
 /// The running-gear role explicitly addressed by the spec, shared with mesh layering.
@@ -155,14 +155,10 @@ fn bind_gear_nodes(
     mut commands: Commands,
     unbound: Query<(Entity, &Name, &Transform), Without<GearNode>>,
     parents: Query<&ChildOf>,
-    children: Query<&Children>,
     transforms: Query<&Transform>,
-    primitives: Query<&Mesh3d>,
-    meshes: Res<Assets<Mesh>>,
     stations: Query<(Entity, &StationAddress, &Suspension)>,
     blueprint: Res<crate::bake::TankBlueprint>,
     hull: Query<Entity, With<Hull>>,
-    geom: Res<RigGeom>,
     viz: Res<VizLayers>,
 ) {
     let hull = hull
@@ -202,49 +198,19 @@ fn bind_gear_nodes(
         } else {
             None // Hull-fixed sprockets and idlers have no suspension travel.
         };
-        // The sprocket's phase lock stands on its own mesh, so it cannot bind before that mesh is
-        // readable. Skipping is the whole recovery: this system re-scans unbound nodes every frame
-        // (see above), so a sprocket whose primitive or mesh asset lands a frame late binds a frame
-        // late — where a `unwrap_or(0.0)` fallback would bind it permanently mis-meshed instead.
-        let tooth_tip = if role == GearRole::Sprocket {
-            let Some(measured) = sprocket_tooth_tip(
-                entity,
-                // The node's full hull-from-node affine: the sandbox composes the whole parent
-                // chain (the export has re-parented these nodes before), the game hands its
-                // captured rest transform straight in.
-                hull_from_parent * local.compute_affine(),
-                &children,
-                &transforms,
-                &primitives,
-                &meshes,
-                geom.teeth,
-            ) else {
-                continue;
-            };
-            let tooth = std::f32::consts::TAU / geom.teeth as f32;
-            info!(
-                "running gear: {name} tooth tips measured at {:.3}° + k·{:.2}° in the hull side \
-                 plane — the tip nearest vertical is {:+.3}° off straight up; seating the pins \
-                 costs a {:+.3}° phase correction",
-                measured.to_degrees(),
-                tooth.to_degrees(),
-                fold(measured - std::f32::consts::FRAC_PI_2, tooth).to_degrees(),
-                fold(
-                    tooth_angle(
-                        0.0,
-                        geom.pitch,
-                        geom.teeth,
-                        geom.belt_origin_angle(side),
-                        measured,
-                    ),
-                    tooth,
-                )
-                .to_degrees(),
-            );
-            measured
+        let tooth_tip = blueprint.spec.track.sprocket.tooth_tip_rad.get(side);
+        let rolling_radius = if role == GearRole::Road {
+            blueprint
+                .spec
+                .roadwheels
+                .iter()
+                .find(|wheel| wheel.node == name.as_str())
+                .expect("authored_gear resolved this declared roadwheel")
+                .tread
+                .radius
         } else {
             0.0
-        };
+        }; // Hull-fixed roles use their own pin/tooth law.
         commands.entity(entity).insert((
             GearNode {
                 side,
@@ -256,6 +222,7 @@ fn bind_gear_nodes(
                     .try_normalize().expect("the baked scene hierarchy has nonsingular transforms, so its lateral axis is nonzero"),
                 station,
                 tooth_tip,
+                rolling_radius,
             },
             // EXPLICIT, never `Inherited`: the `2` layer is the running gear's own switch, and it
             // is seeded here as well as in `apply_mesh_visibility` so a freshly-bound node is correct
@@ -333,7 +300,7 @@ fn drive_running_gear(
                     )
                     .expect("the sandbox's bound suspension carrier lives with its hull")
                     .dy,
-                spin_angle(travel, geom.model.wheel_tread),
+                spin_angle(travel, node.rolling_radius),
             ),
             GearRole::Sprocket => (
                 0.0,

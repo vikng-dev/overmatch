@@ -1,42 +1,15 @@
-//! The marker-driven track model: reads the sharp sources of truth out of the glb (the `Pin_*`
-//! marker empties, the `Link_Box` shoe volume, the `Sprocket_*` / `Idler_*` rig meshes, and the
-//! road-wheel mesh radii) and derives the geometry its consumers render and simulate
-//! ([`super::rig_geom`] assembles it into the running gear the game's startup extraction, the
-//! track sandbox and the development measurement tool all build from).
-//! This is the "new model" — nothing here reads the RON's geometry fields (pitch, thickness,
-//! plane_x, width, sprocket/idler centre, wheel_radius); those all come from the model now. Only
-//! `mass` still comes from the spec, and it is passed IN as a scalar so this module cannot reach
-//! the RON at all; `link_count` and `teeth` are caller knobs (see [`super::rig_geom::RigGeom`]).
+//! The common shoe template's pin and face datums, extracted synchronously from the sim artifact.
 //!
-//! **No fallback.** [`DerivedModel::build`] either measures the glb or aborts — see [`refuse`].
-//! A substitute path (rebuilding RON geometry when a lookup fails) means a re-export that deletes
-//! marker nodes leaves the tool quietly measuring a DIFFERENT tank, with the only trace a substring
-//! in one log line. A missing marker is fatal by policy: declared correctly, or fail loud.
-//!
-//! It reads the glb DIRECTLY via the `gltf` crate, composing the FULL `T·R·S` world transform down
-//! the node tree. The bake's `root_position` is not usable here: it omits scale, and the markers sit
-//! under scaled ancestors (`Link` carries 0.808, the wheels 4.34), so a position taken without the
-//! scale chain is simply the wrong place. What that composed transform yields is both datums this
-//! module needs — a node's authored ORIGIN (the axle of every body of revolution: sprocket, idler,
-//! road wheel) and its vertices in world space (which answer sizes: radii, the shoe's faces).
-//!
-//! **The width rule.** The geometric model is purely 2-D in the SIDE PLANE `(z, y)` — circles,
-//! routes, droop, perimeter, the link window all ignore the lateral axis. Width enters in exactly
-//! two places: the grip columns ([`super::rig_geom::RigGeom::grip_columns`]) and rendering. That is
-//! why the lateral datums below are carried as raw `x` values rather than folded into the side-plane
-//! geometry, and why [`DerivedModel::pitch`] is measured with the lateral component projected out.
-//!
-//! **Robustness.** Every SIZE here is computed on a vertex cloud an artist owns, so it is written to
-//! survive loose greebles: the rim radius is a quantile-anchored maximum rather than a raw `max`,
-//! which one stray vertex destroys. Every CENTRE, by contrast, is not computed at all — it is the
-//! node's authored origin, a fact no stray vertex can move. See [`measure_mesh`].
+//! `Pin_Start` and `Pin_End` define pitch; `Link_Box` defines the shoe's radial and lateral faces.
+//! Running-gear membership and contact geometry come from the tank sheet and its declared axle
+//! nodes, through `rig_geom`. No loaded view geometry supplies simulation construction.
 
 use std::collections::HashMap;
 use std::fmt;
 use std::path::Path;
 
-use bevy::math::{Mat4, Quat, Vec2, Vec3};
-use bevy::prelude::{Resource, warn};
+use bevy::math::{Mat4, Quat, Vec3};
+use bevy::prelude::Resource;
 
 /// The pin markers: the two ends of ONE link, the loop's immutable pitch.
 const PIN_START: &str = "Pin_Start";
@@ -45,36 +18,15 @@ const PIN_END: &str = "Pin_End";
 /// every lateral/radial datum (it replaced the deleted `Inner_Surface`/`Outer_Surface` empties).
 /// Authored so its COMPOSED world scale is exactly 1: its extents read directly in metres.
 const LINK_BOX: &str = "Link_Box";
-/// The hull-fixed running gear, right side (the sides are mirror images in the side plane).
-const SPROCKET: &str = "Sprocket_R";
-const IDLER: &str = "Idler_R";
-/// The road-wheel station the tread radius is read from. Since the re-export the wheels are single
-/// unsuffixed nodes (the `_Ballistic`/`_Visual` split is gone) carrying a non-unit local scale and a
-/// 180° Y rotation, and each node is a full TWO-DISC station — all of which [`GlbNodes::read`]'s
-/// full `T·R·S` composition and [`measure_mesh`]'s origin-centred radius handle.
-const WHEEL: &str = "Wheel_R_0";
-
-/// THE CONTRACT with the export, in the two flavours [`GlbNodes::read`] resolves. Kept as lists
-/// (rather than spelled out at the call) so the read and the failure message can never drift: what
-/// [`DerivedModel::from_markers`] asks for is literally what [`refuse`] tells the artist to restore.
+/// The common shoe template's marker contract.
 const REQUIRED_EMPTIES: [&str; 2] = [PIN_START, PIN_END];
-const REQUIRED_MESHES: [&str; 4] = [LINK_BOX, SPROCKET, IDLER, WHEEL];
-
-/// Plausibility band for a road-wheel/idler contact radius (m). Not a tuning knob — a tripwire for
-/// the failure mode this file is most exposed to: a re-export that changes a node's scale or its
-/// mesh content still resolves every lookup, so it cannot be caught by a missing-node check.
-const PLAUSIBLE_RADIUS: (f32, f32) = (0.10, 1.00);
-/// Plausibility band for the link pitch (m) — a tank shoe, not a bicycle chain or a bridge span.
-const PLAUSIBLE_PITCH: (f32, f32) = (0.03, 0.60);
-/// Plausibility band for the shoe width (m).
-const PLAUSIBLE_WIDTH: (f32, f32) = (0.10, 1.50);
+const REQUIRED_MESHES: [&str; 1] = [LINK_BOX];
 
 /// Everything the derived geometry needs, read out of the model (all lengths in metres, side-plane
 /// centres as `(z, y)` in the glTF frame the blueprint's wheel positions also use).
 ///
-/// Lateral (`x`) fields are stored for the RIGHT side, i.e. positive; the left side is the exact
-/// mirror (`−x`). Consumers that need a side apply [`crate::track::side::Side::sign`] — see
-/// [`super::rig_geom::RigGeom::grip_columns`].
+/// Lateral (`x`) fields describe the common right-facing shoe template. `RigGeom` places that
+/// template on the sheet's independent pin planes and mirrors it on the left.
 #[derive(Resource, Clone, Copy)]
 pub struct DerivedModel {
     /// Link pitch = the pin-to-pin span measured IN THE SIDE PLANE (see [`Self::plane_x`] for why
@@ -104,14 +56,6 @@ pub struct DerivedModel {
     /// for anything lateral — use [`Self::lateral_min`]/[`Self::lateral_max`], which carry the real
     /// asymmetry, and this for the centre.
     pub link_center_x: f32,
-    /// Sprocket centre, side-plane `(z, y)`, from the `Sprocket_R` mesh.
-    pub sprocket_center: Vec2,
-    /// Idler centre, side-plane `(z, y)`, from the `Idler_R` mesh.
-    pub idler_center: Vec2,
-    /// Idler rim (track-contact) radius, from the `Idler_R` mesh.
-    pub idler_radius: f32,
-    /// Road-wheel tread radius, from the [`WHEEL`] station.
-    pub wheel_tread: f32,
     /// Hull mass (RON) — for the spring-rate readout.
     pub mass: f32,
 }
@@ -123,9 +67,7 @@ impl DerivedModel {
     /// There is deliberately no `Result` and no substitute geometry: see [`refuse`] for why a dev
     /// tool answers a broken export with a panic.
     pub fn build(mass: f32, glb_path: &Path) -> Self {
-        let model = Self::from_markers(mass, glb_path).unwrap_or_else(|gap| refuse(&gap, glb_path));
-        model.warn_if_implausible();
-        model
+        Self::from_markers(mass, glb_path).unwrap_or_else(|gap| refuse(&gap, glb_path))
     }
 
     /// The marker read proper — fallible, so the tests can drive it and inspect the gap without
@@ -139,9 +81,6 @@ impl DerivedModel {
         let p0 = miss.empty(&g, PIN_START);
         let p1 = miss.empty(&g, PIN_END);
         let link_box = miss.mesh(&g, LINK_BOX);
-        let sprocket = miss.mesh(&g, SPROCKET);
-        let idler = miss.mesh(&g, IDLER);
-        let wheel = miss.mesh(&g, WHEEL);
         miss.into_result()?;
 
         // PITCH, in the side plane only. A pin is a CYLINDER spanning the shoe's width: every point
@@ -160,15 +99,7 @@ impl DerivedModel {
         let pin_to_outer = pin_mid.y - link_box.lo.y;
         let pin_to_inner = link_box.hi.y - pin_mid.y;
 
-        // The running gear's centres are AUTHORED, not inferred — but the assumption that makes
-        // that legal (the origin sits on the axle) is the artist's, so it is checked, per node,
-        // every read. Not for `Link_Box`: a shoe is not a body of revolution and its origin is
-        // free, which is why its lateral centre alone still comes off the bounds.
-        for (name, m) in [(SPROCKET, &sprocket), (IDLER, &idler), (WHEEL, &wheel)] {
-            m.warn_if_origin_off_axle(name);
-        }
-
-        Ok(Self {
+        let model = Self {
             pitch,
             pin_to_inner,
             pin_to_outer,
@@ -180,75 +111,42 @@ impl DerivedModel {
             lateral_min: link_box.lo.x,
             lateral_max: link_box.hi.x,
             link_center_x: link_box.center.x,
-            // side-plane (z, y): glTF x is lateral, y is height, z is longitudinal. Centres are the
-            // AUTHORED node origins — see [`MeshMeasure::origin`].
-            sprocket_center: Vec2::new(sprocket.origin.z, sprocket.origin.y),
-            idler_center: Vec2::new(idler.origin.z, idler.origin.y),
-            idler_radius: idler.disc_radius,
-            wheel_tread: wheel.disc_radius,
             mass,
-        })
-    }
-
-    /// Second tripwire, for the failure a missing-node check CANNOT catch: a re-export that keeps
-    /// every name but changes what a node MEANS (a rescaled parent, a mesh that swallowed a loose
-    /// part, a marker moved onto the wrong feature). Every lookup resolves, the numbers are simply
-    /// wrong — so the derived values are range-checked against what a tank can physically be.
-    ///
-    /// **Warn, never abort — and that is not inconsistent with [`refuse`].** The two guards are
-    /// different KINDS of statement. A node name is a CONTRACT: either the export honours it or the
-    /// measurement is of something else entirely, and there is no such thing as a partially-correct
-    /// answer — fatal. A plausibility band is a HEURISTIC: it encodes what a tank has looked like so
-    /// far, and the day someone rigs a genuinely unusual vehicle (or measures a test asset) the
-    /// right outcome is a tool that still starts and shows the number, not one that refuses. So
-    /// missing contract = fatal, implausible value = warning.
-    fn warn_if_implausible(&self) {
-        let checks = [
-            ("pitch", self.pitch, PLAUSIBLE_PITCH),
-            ("width", self.width, PLAUSIBLE_WIDTH),
-            ("wheel_tread", self.wheel_tread, PLAUSIBLE_RADIUS),
-            ("idler_radius", self.idler_radius, PLAUSIBLE_RADIUS),
-        ];
-        let bad: Vec<String> = checks
-            .iter()
-            .filter(|(_, v, (lo, hi))| !(*lo..=*hi).contains(v))
-            .map(|(name, v, (lo, hi))| format!("{name} = {v:.4} (expected {lo}..={hi})"))
-            .collect();
-        if !bad.is_empty() {
-            warn!(
-                "track model: marker read succeeded but returned implausible geometry — {}. The \
-                 usual cause is a node whose scale or mesh content changed in the re-export (the \
-                 wheels carry a 4.34 local scale and a 180° Y rotation; the link sits under a \
-                 0.808 scale).",
-                bad.join(", "),
-            );
+        };
+        for (field, value) in [
+            ("pin pitch", model.pitch),
+            ("Link_Box inner-face offset", model.pin_to_inner),
+            ("Link_Box outer-face offset", model.pin_to_outer),
+            ("Link_Box width", model.width),
+        ] {
+            if !value.is_finite() || value <= 0.0 {
+                return Err(ModelGap::Invalid(format!(
+                    "{field} must be finite and positive (got {value}); restore the pin and shoe-face datums"
+                )));
+            }
         }
+        if ![
+            model.plane_x,
+            model.lateral_min,
+            model.lateral_max,
+            model.link_center_x,
+        ]
+        .into_iter()
+        .all(f32::is_finite)
+        {
+            return Err(ModelGap::Invalid("pin plane and Link_Box lateral faces must be finite; restore the template transform".into()));
+        }
+        Ok(model)
     }
 }
 
-/// Refuse the glb because it cannot answer the marker read.
-///
-/// **Why a panic, in a file that otherwise only warns.** The running gear is shipped data read
-/// during startup extraction of the sim artifact (the bake's track colliders and the game's track
-/// gear), by the track sandbox and by the measurement tool: a gap is refused before play in every
-/// one of them. The alternative (run on substituted geometry) failed in the worst possible way: the
-/// tool kept working, drew a rig, printed numbers, and they were a different tank's. Refusing costs
-/// a re-export; running on a substitute costs a day of chasing a suspension model that was never
-/// wrong. So the failure is loud, it is at rig-build time — before a single frame is drawn — and it
-/// is unconditional, as [`crate::bake`] answers an unreadable glb.
-///
-/// **One message, everything in it.** The panic string is the whole diagnosis: every missing node at
-/// once (never the first one per rebuild cycle — that is what [`MissingNodes`] accumulates for), the
-/// exact file that was read, the full contract so the artist can see what else must survive, and the
-/// two actions that fix it. It is a `panic!` payload rather than an `error!` so no log filter can
-/// swallow it, and the default hook prints it BEFORE any backtrace — it is the first thing on the
-/// terminal, not a line buried in frames.
+/// Refuse malformed shipped shoe geometry before any body or running gear is published.
+/// The diagnosis names the sim artifact, every missing datum and the authoring fix.
 fn refuse(gap: &ModelGap, glb_path: &Path) -> ! {
     panic!(
         "track model: {} could not answer the marker read — {gap}.\n\
          \n\
-         The running gear's geometry (pitch, shoe faces, lateral plane, sprocket/idler centres, \
-         wheel tread) is measured ONLY from these glb nodes: empties [{}], meshes [{}]. \
+         The shoe template's geometry (pitch, radial and lateral faces) is measured ONLY from these glb nodes: empties [{}], meshes [{}]. \
          There is NO fallback to the RON's authored geometry: substituting it once let the sandbox \
          measure a different tank while it looked like it was working, so a gap is fatal by policy.\n\
          \n\
@@ -266,6 +164,7 @@ fn refuse(gap: &ModelGap, glb_path: &Path) -> ! {
 enum ModelGap {
     /// The glb itself could not be opened, parsed, or walked.
     Unreadable(&'static str),
+    Invalid(String),
     /// The glb read fine, but these named nodes were absent (or carried no usable mesh).
     Missing(Vec<&'static str>),
 }
@@ -274,6 +173,7 @@ impl fmt::Display for ModelGap {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Unreadable(why) => write!(f, "glb unreadable: {why}"),
+            Self::Invalid(why) => write!(f, "invalid shoe geometry: {why}"),
             Self::Missing(names) => write!(f, "missing nodes: {}", names.join(", ")),
         }
     }
@@ -310,67 +210,12 @@ impl MissingNodes {
 }
 
 /// One mesh node's world-space measurements (see [`measure_mesh`]).
+/// Bounds of the declared shoe template, composed into the model frame.
 #[derive(Clone, Copy, Default)]
 struct MeshMeasure {
-    /// The node's own composed world ORIGIN — the artist's authored datum, and for every body of
-    /// revolution in the running gear THE axle. This is the centre the circles are built on.
-    ///
-    /// It is a stated fact, not an estimate, and that is the whole reason to prefer it: a rotation
-    /// centre is something the rig DECLARES (Blender spins the wheel about this point), whereas any
-    /// vertex statistic only ever approximates it and does so worst exactly where the mesh is least
-    /// regular. Every rotating node carries a real axle origin — the declared roadwheel stations
-    /// are pinned by `bake::tests::every_shipped_asset_passes_the_consumer_contract`, and the
-    /// `Sprocket_*` / `Idler_*` hubs are authored the same way — so no vertex-statistic estimator
-    /// is needed. Only the lateral `x` is not on the axle mid-plane (the origin sits on the outer disc
-    /// row) — irrelevant, because every circle in this module is a side-plane `(z, y)` construction.
-    origin: Vec3,
-    /// Axis-aligned bounds of the mesh's vertices.
     lo: Vec3,
     hi: Vec3,
-    /// Centre of those bounds. Used for the shoe's lateral centre (`Link_Box` is a box, not a body
-    /// of revolution, so its origin is free and its bounds ARE the statement), and as the
-    /// cross-check on the authored origin ([`Self::warn_if_origin_off_axle`]). NOT the vertex
-    /// centroid, which is a mesh DENSITY statistic — on the two-disc wheel stations the centroid
-    /// sits ~7 mm off the axle and inflated the tread radius by the same amount.
     center: Vec3,
-    /// Rim radius about [`Self::origin`], measured in the side plane `(z, y)`.
-    disc_radius: f32,
-}
-
-/// How far the authored origin may sit from the mesh's own side-plane bounds centre (m) before the
-/// read says so.
-///
-/// Sized off the 2026-07-23 audit of the shipped Tiger, which is also the evidence that the origin
-/// IS the axle: `Wheel_R_0` agrees to 0.00000 m (exactly — the origin's y/z and its bounds centre
-/// print identically; only lateral x differs, by 164 mm, because the origin sits on the outer disc
-/// row), `Sprocket_R` to 0.00106 m (its rim is TEETH, so its bounds are not a circle and never will
-/// be), `Idler_R` to 0.00395 m. The band clears all three by ~8× while still catching the failures
-/// worth catching — an origin left at the model root (metres out) or dropped onto a hub face. It is
-/// deliberately NOT tightened to fire on today's idler: a warning that prints on every launch of a
-/// known-open issue is a warning nobody reads.
-const AXLE_ORIGIN_TOLERANCE: f32 = 0.03;
-
-impl MeshMeasure {
-    /// Guard on the ONE assumption the authored-origin datum rests on: that the origin is on the
-    /// axle. A future export that moves it (or a new node whose origin was never placed) would
-    /// otherwise shift a whole circle silently.
-    ///
-    /// Warn, don't abort — same rule as [`DerivedModel::warn_if_implausible`]: the node contract is
-    /// binary and therefore fatal, but "how close is close enough" is a tolerance someone chose, and
-    /// a tolerance must never be the thing that stops a dev tool from starting.
-    fn warn_if_origin_off_axle(&self, name: &str) {
-        let off = Vec2::new(self.center.z - self.origin.z, self.center.y - self.origin.y).length();
-        if off > AXLE_ORIGIN_TOLERANCE {
-            warn!(
-                "track model: {name}'s authored origin sits {off:.4} m off its own side-plane \
-                 bounds centre (origin z,y = {:.4},{:.4}; bounds centre = {:.4},{:.4}). The circle \
-                 is built on the ORIGIN, so if that origin is no longer on the axle every route \
-                 around this wheel is displaced by that much. Re-place the object origin on the \
-                 axle in Blender and re-export.",
-                self.origin.z, self.origin.y, self.center.z, self.center.y,
-            );
-        }
-    }
 }
 
 /// World positions of named empties + [`MeshMeasure`] of named meshes, read from the glb with the
@@ -428,9 +273,7 @@ impl GlbNodes {
                             verts.extend(positions.map(|p| world.transform_point3(Vec3::from(p))));
                         }
                     }
-                    // The node's own origin, composed the same way the vertices were — the authored
-                    // axle for every body of revolution here (see [`MeshMeasure::origin`]).
-                    if let Some(m) = measure_mesh(&verts, world.transform_point3(Vec3::ZERO)) {
+                    if let Some(m) = measure_mesh(&verts) {
                         meshes.insert(name, m);
                     }
                 }
@@ -481,42 +324,15 @@ pub(super) fn node_matrix(node: &gltf::Node) -> Mat4 {
 // every axle in a tank's running gear is lateral, so the radius is measured in `(z, y)` by
 // definition rather than by picking the mesh's thinnest axis — one less thing a re-export can flip.
 
-/// Quantile of the in-plane radii that anchors "this is the rim".
-const RIM_QUANTILE: f32 = 0.95;
-/// How far past the rim quantile a vertex may still sit and count as rim (relative). Wide enough to
-/// swallow the faceting of a coarse ring, far too narrow for a detached part.
-const RIM_BAND: f32 = 0.01;
-
-/// Bounds + bounds centre + side-plane rim radius about the node's authored `origin`.
-fn measure_mesh(verts: &[Vec3], origin: Vec3) -> Option<MeshMeasure> {
-    if verts.len() < 3 {
+fn measure_mesh(verts: &[Vec3]) -> Option<MeshMeasure> {
+    if verts.len() < 3 || verts.iter().any(|vertex| !vertex.is_finite()) {
         return None;
     }
     let (lo, hi) = bounds(verts);
-
-    // Radii in the side plane, about the AUTHORED axle — not about anything measured, so a lopsided
-    // or leaky mesh cannot bias the whole ring outward the way an inferred centre did.
-    let mut radii: Vec<f32> = verts
-        .iter()
-        .map(|v| Vec2::new(v.z - origin.z, v.y - origin.y).length())
-        .collect();
-    radii.sort_by(f32::total_cmp);
-    let rim = quantile(&radii, RIM_QUANTILE) * (1.0 + RIM_BAND);
-    // Sorted, so the last radius inside the band is the largest one — the rim, without whatever
-    // sits beyond it.
-    let disc_radius = radii
-        .iter()
-        .rev()
-        .find(|r| **r <= rim)
-        .copied()
-        .unwrap_or_default();
-
     Some(MeshMeasure {
-        origin,
         lo,
         hi,
         center: (lo + hi) * 0.5,
-        disc_radius,
     })
 }
 
@@ -530,95 +346,23 @@ fn bounds(verts: &[Vec3]) -> (Vec3, Vec3) {
 
 /// Linearly-interpolated quantile of an ASCENDING slice (numpy's default convention). `q` is
 /// clamped to `0..=1`; an empty slice is 0.
-fn quantile(sorted: &[f32], q: f32) -> f32 {
-    if sorted.is_empty() {
-        return 0.0;
-    }
-    let pos = q.clamp(0.0, 1.0) * (sorted.len() - 1) as f32;
-    let lo = pos.floor() as usize;
-    let hi = (lo + 1).min(sorted.len() - 1);
-    sorted[lo] + (sorted[hi] - sorted[lo]) * (pos - lo as f32)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    /// A clean ring of `n` vertices at `r` about `center`, in the plane perpendicular to x (the
-    /// axle) — the idealisation of a road wheel's tread.
-    fn ring(center: Vec3, r: f32, n: usize, half_width: f32) -> Vec<Vec3> {
-        (0..n)
-            .map(|i| {
-                let a = std::f32::consts::TAU * i as f32 / n as f32;
-                // Alternate sides so the ring has thickness along the axle, like a real station.
-                let x = if i % 2 == 0 { half_width } else { -half_width };
-                center + Vec3::new(x, r * a.sin(), r * a.cos())
-            })
-            .collect()
-    }
-
-    /// The user's stated hazard: a mesh that carries loose parts. The rim radius must be the SAME
-    /// number with the strays present as without — a naive `max` reads the stray instead of the
-    /// tread. The CENTRE needs no such defence (it is the authored origin), and this test pins WHY:
-    /// a derived bounds centre is visibly wrecked by the same strays.
-    #[test]
-    fn rim_radius_ignores_loose_greebles() {
-        let axle = Vec3::new(1.5, 0.5, -1.9);
-        let clean = ring(axle, 0.387, 256, 0.1);
-        let m = measure_mesh(&clean, axle).expect("a ring measures");
-        assert!(
-            (m.disc_radius - 0.387).abs() < 1e-5,
-            "got {}",
-            m.disc_radius
-        );
-
-        // Same wheel, plus a handful of detached scraps flung well clear of it.
-        let mut greebled = clean;
-        greebled.extend([
-            axle + Vec3::new(0.0, 1.4, 0.0),
-            axle + Vec3::new(0.0, -1.1, 0.9),
-            axle + Vec3::new(0.3, 0.0, -1.6),
-            axle + Vec3::new(-0.2, 2.2, 2.2),
-        ]);
-        let g = measure_mesh(&greebled, axle).expect("a greebled ring still measures");
-        assert!(
-            (g.disc_radius - m.disc_radius).abs() < 1e-5,
-            "greebles moved the rim: {} vs {}",
-            g.disc_radius,
-            m.disc_radius
-        );
-        assert_eq!(g.origin, axle, "the authored centre cannot be moved at all");
-        // And the two naive statistics really would have been destroyed — not a vacuous test.
-        let naive = greebled
-            .iter()
-            .map(|v| Vec2::new(v.y - axle.y, v.z - axle.z).length())
-            .fold(0.0_f32, f32::max);
-        assert!(naive > 1.0, "the strays must be far enough out to matter");
-        assert!(
-            (g.center - m.center).length() > 0.1,
-            "the DERIVED centre is what the strays wreck — that is why it is not the datum"
-        );
-    }
-
-    // No test pins this module's outputs (pitch, plane_x, width, pin offsets, wheel tread, idler
-    // radius) to the shipped glb's literal dimensions: those are facts about one asset, and a
-    // correct re-export is guaranteed to break such a pin (ADR-0034). What covers the module is the
-    // derivation's own behaviour: the read either measures the glb or aborts ([`refuse`]), and the
-    // rim radius ignores loose greebles.
-
     /// A missing node must be REPORTED, by name — the whole point of killing the silent fallback.
     #[test]
     fn a_missing_lookup_names_itself() {
-        let g = GlbNodes::read(
-            Path::new(TIGER_GLB),
-            &[PIN_START, "Outer_Surface"],
-            &[LINK_BOX],
-        )
-        .unwrap_or_else(|gap| panic!("the shipped glb must read: {gap}"));
+        let g = GlbNodes {
+            empties: HashMap::from([(PIN_START, Vec3::ZERO)]),
+            meshes: HashMap::new(),
+        };
         let mut miss = MissingNodes::default();
         let _ = miss.empty(&g, PIN_START);
         let _ = miss.empty(&g, "Outer_Surface");
-        let gap = miss.into_result().expect_err("the deleted marker is gone");
+        let gap = miss
+            .into_result()
+            .expect_err("the fixture deliberately omits the requested marker");
         let text = gap.to_string();
         assert!(text.contains("Outer_Surface"), "{text}");
         assert!(!text.contains(PIN_START), "{text}");
@@ -642,10 +386,10 @@ mod tests {
     /// test the fixture rather than the policy.
     #[test]
     fn a_missing_marker_aborts_and_names_the_whole_gap() {
-        let gap = ModelGap::Missing(vec![PIN_END, LINK_BOX, WHEEL]);
+        let gap = ModelGap::Missing(vec![PIN_END, LINK_BOX]);
         let text = panic_text(|| refuse(&gap, Path::new("assets/tiger_1/tiger_1.glb")));
 
-        for name in [PIN_END, LINK_BOX, WHEEL] {
+        for name in [PIN_END, LINK_BOX] {
             assert!(text.contains(name), "gap must name {name}: {text}");
         }
         // The whole contract, so the artist can see what else has to survive the next export.
@@ -671,7 +415,4 @@ mod tests {
         assert!(text.contains("glb unreadable"), "{text}");
         assert!(text.contains("no/such/tank.glb"), "{text}");
     }
-
-    /// Path is relative to the crate root, matching the other asset-reading tests (`spec.rs`).
-    const TIGER_GLB: &str = "assets/tiger_1/tiger_1.glb";
 }

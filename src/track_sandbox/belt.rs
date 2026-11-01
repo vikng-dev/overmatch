@@ -177,7 +177,7 @@ pub(super) fn apply_belt_support_field(
         let side_input = SideInput {
             loop_pts: &loop_pts,
             count: pin_belt.count,
-            plane_x: side.plane_x(geom.plane_x),
+            plane_x: geom.side_plane_x(side),
             columns: geom.grip_column_offsets(side),
             // The envelope's per-position reach profile: full droop over the road-wheel span,
             // tapering to zero at the unsprung sprocket/idler centres.
@@ -331,11 +331,15 @@ pub(super) fn calibrate_envelope(
             pts.push(first);
         }
     }
-    let knots =
-        Side::ALL.map(|side| envelope::wheel_travel_knots(geom.rest.get(side), travel.effective));
+    let knots = Side::ALL.map(|side| {
+        envelope::wheel_travel_knots(
+            geom.rest.get(side),
+            geom.side_droop_travel(side, sus).effective,
+        )
+    });
     let sides = Side::ALL.map(|side| EnvelopeSide {
         loop_pts: &loops[side.index()][..],
-        plane_x: side.plane_x(geom.plane_x),
+        plane_x: geom.side_plane_x(side),
         knots: &knots[side.index()][..],
         columns: geom.grip_column_offsets(side),
     });
@@ -387,7 +391,12 @@ pub(super) fn articulate_wheels_field(
     time: Res<Time>,
     geom: Res<RigGeom>,
     suspension: Res<RigSuspension>,
-    mut wheels: Query<(&RigWheel, &mut Suspension, &mut Transform)>,
+    mut wheels: Query<(
+        &RigWheel,
+        &super::RoadTread,
+        &mut Suspension,
+        &mut Transform,
+    )>,
 ) {
     let affine = hull
         .single()
@@ -400,26 +409,16 @@ pub(super) fn articulate_wheels_field(
         .expect(
             "the sandbox hull pose has a finite nonsingular transform, so its down axis is nonzero",
         );
-    // Per side: the lateral stations are the measured shoe columns, signed per-side.
-    let params = Side::ALL.map(|side| WheelParams {
-        // Hub to the plate's GROUND face: the measured tread the wheel rolls on, plus the whole
-        // plate riding between it and the ground (pin→inner + pin→outer, both measured — no
-        // mid-plate assumption).
-        reach: geom.wheel_pin_radius() + geom.model.pin_to_outer,
-        ease_omega: WHEEL_LIFT_RISE_OMEGA,
-        // The physical contact envelope: up to the bump stop, down to the CHAIN-CLAMPED droop —
-        // so a fully-drooped view wheel's drawn belt wrap stays feasible at chain-limited link
-        // counts (the same `effective` the envelope law and hard-stop are built on).
-        max_lift: suspension.0.bump_stop,
-        max_droop: geom.droop_travel(&suspension.0).effective,
-        lateral_stations: geom.grip_stations(side),
-        probe_reach: CONTACT_PROBE,
-    });
-    for (wheel, mut susp, mut transform) in &mut wheels {
-        if wheel.kind != WheelKind::Road {
-            continue;
-        }
-        let params = &params[wheel.side.index()];
+    for (wheel, tread, mut susp, mut transform) in &mut wheels {
+        let params = WheelParams {
+            reach: tread.0.radius + geom.thickness,
+            ease_omega: WHEEL_LIFT_RISE_OMEGA,
+            max_lift: suspension.0.bump_stop,
+            max_droop: geom.side_droop_travel(wheel.side, &suspension.0).effective,
+            lateral_spans: &tread.0.spans,
+            probe_reach: CONTACT_PROBE,
+        };
+        let params = &params;
         let target = wheel_lift_target(oracle, &affine, down, susp.pivot_local, params);
         let (mut dy, mut dvel) = (susp.dy, susp.dvel);
         wheel_lift_step(&mut dy, &mut dvel, target, time.delta_secs(), params);
@@ -495,7 +494,7 @@ pub(super) struct ViewPerf {
 )]
 pub(super) fn conform_belts_field(
     hull: Query<&GlobalTransform, With<Hull>>,
-    wheels: Query<(&RigWheel, &Suspension)>,
+    wheels: Query<(&RigWheel, &Suspension, &super::RoadTread)>,
     field: Res<TerrainField>,
     pin_belt: Res<PinBelt>,
     phase: Res<BeltPhase>,
@@ -513,15 +512,19 @@ pub(super) fn conform_belts_field(
         .single()
         .expect("RigGeom is published with exactly one sandbox hull in the same command flush")
         .affine();
-    let wheel_r = geom.wheel_pin_radius();
     // Articulated pin-line circles per side, front→rear: the hull-fixed sprocket + idler from the
     // rig's `rest` list, the road wheels at their pin radius lifted by the cosmetic suspension travel.
     let circles: [Vec<(Vec2, f32)>; 2] = Side::ALL.map(|side| {
         let rest = geom.rest.get(side);
         let mut roads: Vec<(Vec2, f32)> = wheels
             .iter()
-            .filter(|(w, _)| w.side == side && w.kind == WheelKind::Road)
-            .map(|(_, s)| (Vec2::new(s.pivot_local.z, s.pivot_local.y + s.dy), wheel_r))
+            .filter(|(w, _, _)| w.side == side)
+            .map(|(_, s, tread)| {
+                (
+                    Vec2::new(s.pivot_local.z, s.pivot_local.y + s.dy),
+                    tread.0.radius + geom.model.pin_to_inner,
+                )
+            })
             .collect();
         roads.sort_by(|a, b| a.0.x.total_cmp(&b.0.x));
         let mut c = vec![rest[0]];
@@ -541,7 +544,7 @@ pub(super) fn conform_belts_field(
         reference: true,
         sides: Side::ALL.map(|side| wrap::WrapSideInput {
             circles: &circles[side.index()],
-            plane_x: side.plane_x(geom.plane_x),
+            plane_x: geom.side_plane_x(side),
             lateral_stations: geom.grip_stations(side),
             phase: phase.get(side),
         }),
@@ -550,7 +553,7 @@ pub(super) fn conform_belts_field(
     let out = wrap::step(&input, oracle, &mut memory.states);
 
     for side in Side::ALL {
-        let track_x = side.plane_x(geom.plane_x);
+        let track_x = geom.side_plane_x(side);
         let si = side.index();
         let to_world = |p: &Vec2| affine.transform_point3(Vec3::new(track_x, p.y, p.x));
         let ref_world: Vec<Vec3> = out[si].reference.iter().map(&to_world).collect();
@@ -615,7 +618,7 @@ pub(super) fn draw_sample_points(
     let lat_axis = affine.transform_vector3(Vec3::X);
     for side in Side::ALL {
         let cols = geom.grip_column_offsets(side);
-        let track_x = side.plane_x(geom.plane_x);
+        let track_x = geom.side_plane_x(side);
         let mut loop_pts = belt_loop(geom.rest.get(side));
         if let Some(&first) = loop_pts.first() {
             loop_pts.push(first);
@@ -742,7 +745,7 @@ mod tests {
             let input = SideInput {
                 loop_pts: &loop_pts,
                 count: geom.link_count,
-                plane_x: side.plane_x(geom.plane_x),
+                plane_x: geom.side_plane_x(side),
                 columns: geom.grip_column_offsets(side),
                 travel: crate::track::forces::TravelField {
                     knots: law.knots.get(side),

@@ -1,29 +1,12 @@
-//! The sandbox's rig GEOMETRY CONTRACT — one derived description of a real tank's running gear,
-//! replacing `mod.rs`'s hard-coded T-34 constants.
+//! Synchronous running-gear construction shared by the game and track sandbox.
 //!
-//! Everything here comes from the sharp sources: the glb markers/rig meshes via [`super::marker_model`],
-//! the universal laws via [`super::derive`], and the blueprint's own road-wheel nodes. Nothing is
-//! authored twice. The sandbox spawns from it, the belt model wraps it, and the view draws it — so
-//! "where the running gear is" has exactly one answer, in exactly one place.
+//! `build` resolves the sheet's axle nodes and contact dimensions, reads the common shoe template
+//! from the sim artifact, and refuses an infeasible rig before publication. `rebuild` reuses those
+//! datums for sandbox count tuning. Every side keeps its own stations, pin plane and droop bound.
 //!
-//! Frames (the thing to get right):
-//!   * glTF/model space is `x = lateral, y = height, z = longitudinal`; side-plane points are
-//!     `Vec2::new(z, y)` — the convention `track::route` already speaks.
-//!   * the sandbox's HULL-LOCAL frame IS the glb model root frame (hull origin = model origin), so
-//!     blueprint `root_position`s and [`DerivedModel`] centres are already hull-local. They are
-//!     never re-offset here; the only vertical datum this module derives is [`RigGeom::hull_rest_y`],
-//!     which says how high that origin floats above flat ground at rest.
-//!   * the model is purely 2-D IN THAT SIDE PLANE. Circles, routes, poses, droop, perimeter and the
-//!     link window are all functions of `(z, y)` alone — width never enters them, because a wider
-//!     shoe does not change where the belt goes. Everything LATERAL goes through the measured shoe
-//!     faces in exactly two places: the GRIP COLUMNS ([`RigGeom::grip_columns`]) and rendering
-//!     ([`RigGeom::link_center_x`]; [`DerivedModel::width`] is the drawn link's SIZE). Keeping
-//!     that seam sharp is what lets the whole rig be derived from a handful of side-plane numbers.
-//!
-//! The three CAST POSES ([`Pose`]) are the design's trapezoid: sprocket and idler are bolted to the
-//! hull and never move, only the sprung road wheels swing, so the belt envelope pins at its ends and
-//! breathes at the belly. That asymmetry is also why the link-count window ([`LinkWindow`]) exists —
-//! see [`link_window`].
+//! Circles use the hull-local side plane `(z, y)` in front-to-rear order, with the sprocket first
+//! and idler last. Their radii reach the pin line; tread radii and pin-to-face offsets are separate
+//! physical facts. `hard_stop_polyline` encloses the compressed inner surface for rigid bottoming.
 
 use std::path::Path;
 
@@ -99,6 +82,10 @@ pub(crate) struct RigGeom {
     /// [`Self::rest`]), full 3-D so wheel entities can be spawned straight off them. These keep the
     /// node's own lateral `x` — the wheel sits where the model says, not on the track's median plane.
     pub road_wheels: PerSide<Vec<Vec3>>,
+    /// Each declared station's tread, in the same front-to-rear order as `road_wheels`.
+    pub wheel_treads: PerSide<Vec<crate::spec::WheelTread>>,
+    /// Actual hull-local pin planes; the shared template may be placed asymmetrically.
+    pub pin_planes: PerSide<f32>,
     /// Height of the hull/model origin above flat ground at rest (m) = −(min y of the rest
     /// envelope). Spawn the body at this y and the rest track just kisses the ground.
     pub hull_rest_y: f32,
@@ -110,8 +97,8 @@ pub(crate) struct RigGeom {
     pub pitch: f32,
     /// Plate thickness (m) = `pin_to_inner + pin_to_outer`, measured, no mid-plate assumption.
     pub thickness: f32,
-    /// The track's lateral median plane |x| (m); left sits at −`plane_x`, right at +`plane_x`.
-    /// This is the PIN plane — where the 2-D route lives — not the shoe's centre.
+    /// Half the separation of the two authored pin planes (m), the drivetrain's steering lever.
+    /// Actual contact and draw placements use `side_plane_x`.
     pub plane_x: f32,
     /// Where the authored `link_count` falls in the feasible window at build-time params — the
     /// answer to "can this loop even wrap this hull, and what stops the droop". Recomputed by
@@ -181,7 +168,39 @@ impl RigGeom {
             side_wheel_centres(blueprint, Side::Left),
             side_wheel_centres(blueprint, Side::Right),
         );
-        let geom = Self::assemble(model, road_wheels, teeth, link_count, params);
+        let wheel_treads = PerSide::new(
+            side_wheel_treads(blueprint, Side::Left),
+            side_wheel_treads(blueprint, Side::Right),
+        );
+        let fixed = Side::ALL.map(|side| {
+            let spec = &blueprint.spec.track;
+            let names = |nodes: &crate::spec::SideNodes| match side {
+                Side::Left => nodes.left.clone(),
+                Side::Right => nodes.right.clone(),
+            };
+            let centre = |name: String, field: &str| {
+                let node = blueprint.geometry.nodes.iter().find(|node| node.name == name)
+                    .unwrap_or_else(|| panic!("{}: {field} names missing node {name}; restore the axle node or update its construction reference", blueprint.file));
+                let at = node.root_position;
+                assert!(at.is_finite(), "{}: {field} axle must be finite; repair the node transform", blueprint.file);
+                Vec2::new(at.z, at.y)
+            };
+            [
+                (centre(names(&spec.sprocket.nodes), "track.sprocket.nodes"), derive::sprocket_pitch_radius(model.pitch, teeth)),
+                (centre(names(&spec.idler.nodes), "track.idler.nodes"), derive::pin_line_radius(spec.idler.radius.get(side), model.pin_to_inner)),
+            ]
+        });
+        let planes = blueprint.spec.track.pin_plane_x;
+        let geom = Self::assemble(
+            model,
+            road_wheels,
+            wheel_treads,
+            PerSide(fixed),
+            PerSide::new(planes.left, planes.right),
+            teeth,
+            link_count,
+            params,
+        );
         geom.validate(params)
             .unwrap_or_else(|error| panic!("{}: {error}", blueprint.file));
         geom
@@ -196,13 +215,7 @@ impl RigGeom {
         }
         for side in Side::ALL {
             let rest = self.rest.get(side);
-            let window = window_of(
-                rest,
-                self.wheel_pin_radius(),
-                self.pitch,
-                self.link_count,
-                params,
-            );
+            let window = window_of(rest, self.pitch, self.link_count, params);
             if window.limiter == DroopLimiter::Impossible {
                 return Err(RigFault::ShortLoop {
                     side,
@@ -210,13 +223,7 @@ impl RigGeom {
                     minimum: window.n_min,
                 });
             }
-            let travel = droop_travel(
-                rest,
-                self.wheel_pin_radius(),
-                self.pitch,
-                self.link_count,
-                params,
-            );
+            let travel = droop_travel(rest, self.pitch, self.link_count, params);
             if travel.effective < super::envelope::MIN_ENVELOPE_TRAVEL {
                 return Err(RigFault::InsufficientTravel {
                     side,
@@ -245,6 +252,14 @@ impl RigGeom {
         Self::assemble(
             self.model,
             self.road_wheels.clone(),
+            self.wheel_treads.clone(),
+            PerSide(Side::ALL.map(|side| {
+                let rest = self.rest.get(side);
+                let mut fixed = [rest[0], *rest.last().expect("a side has an idler")];
+                fixed[0].1 = derive::sprocket_pitch_radius(self.pitch, teeth);
+                fixed
+            })),
+            self.pin_planes,
             teeth,
             link_count,
             params,
@@ -253,26 +268,51 @@ impl RigGeom {
 
     /// The assembly step both constructors share: measurements + the two authored counts in, whole
     /// geometry contract out. Pure — no file, no ECS.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "the measured shoe and authored per-side station construction are independent inputs"
+    )]
     fn assemble(
         model: DerivedModel,
         road_wheels: PerSide<Vec<Vec3>>,
+        wheel_treads: PerSide<Vec<crate::spec::WheelTread>>,
+        fixed: PerSide<[(Vec2, f32); 2]>,
+        pin_planes: PerSide<f32>,
         teeth: u32,
         link_count: usize,
         params: &SuspensionParams,
     ) -> Self {
-        let wheel_pin_r = derive::pin_line_radius(model.wheel_tread, model.pin_to_inner);
-        let rest = PerSide::new(
-            rest_circles(&model, road_wheels.get(Side::Left), wheel_pin_r, teeth),
-            rest_circles(&model, road_wheels.get(Side::Right), wheel_pin_r, teeth),
-        );
+        let rest = PerSide(Side::ALL.map(|side| {
+            let [sprocket, idler] = *fixed.get(side);
+            let mut circles = vec![sprocket];
+            assert_eq!(
+                road_wheels.get(side).len(),
+                wheel_treads.get(side).len(),
+                "every declared roadwheel has one tread"
+            );
+            circles.extend(
+                road_wheels
+                    .get(side)
+                    .iter()
+                    .zip(wheel_treads.get(side))
+                    .map(|(pivot, tread)| {
+                        (
+                            Vec2::new(pivot.z, pivot.y),
+                            derive::pin_line_radius(tread.radius, model.pin_to_inner),
+                        )
+                    }),
+            );
+            circles.push(idler);
+            circles
+        }));
 
         // Ride height: what touches flat ground is the OUTER FACE of the rest belt — the pin
         // route's lowest point plus the measured `pin_to_outer` (never thickness/2: the pin does
         // not run mid-plate). Built taut (`belt_len = 0`) — slack only ever sags the TOP run,
         // never the belly, so the datum stays independent of the link count.
-        let belly_y = build_route(rest.get(Side::Right), 0.0)
-            .pts
-            .iter()
+        let belly_y = rest
+            .values()
+            .flat_map(|circles| build_route(circles, 0.0).pts)
             .map(|p| p.y)
             .fold(f32::INFINITY, f32::min);
 
@@ -282,14 +322,10 @@ impl RigGeom {
             link_count,
             pitch: model.pitch,
             thickness: model.pin_to_inner + model.pin_to_outer,
-            plane_x: model.plane_x,
-            window: window_of(
-                rest.get(Side::Right),
-                wheel_pin_r,
-                model.pitch,
-                link_count,
-                params,
-            ),
+            plane_x: (pin_planes.0[1] - pin_planes.0[0]) * 0.5,
+            pin_planes,
+            wheel_treads,
+            window: window_of(rest.get(Side::Right), model.pitch, link_count, params),
             model,
             rest,
             road_wheels,
@@ -311,10 +347,10 @@ impl RigGeom {
         // drawn (and downstream-consumed) pose is one the track can physically reach. Rest and
         // compression are hull-limited, not chain-limited, so they wrap straight through.
         if pose == Pose::Droop {
-            let droop = self.droop_travel(params).effective;
-            return droop_circles(self.rest.get(side), self.wheel_pin_radius(), droop);
+            let droop = self.side_droop_travel(side, params).effective;
+            return droop_circles(self.rest.get(side), droop);
         }
-        pose_circles(self.rest.get(side), self.wheel_pin_radius(), pose, params)
+        pose_circles(self.rest.get(side), pose, params)
     }
 
     /// How far the belly can actually droop at the given knobs: the spring static deflection, and the
@@ -323,16 +359,23 @@ impl RigGeom {
     /// The clamp is exact and threshold-free: the taut droop-pose wrap grows monotonically with the
     /// droop `d` (more belly drop → longer belt path), so the largest reachable `d` is found by
     /// bisecting `d ∈ [0, spring]` for the point where the wrap fills the material loop `link_count ·
-    /// pitch`. Measured on the right side — the sides are mirror images in the side plane and one loop
-    /// length serves both, the same convention [`Self::link_window`] uses.
+    /// pitch`. Each side uses its own authored stations and contact radii.
+    pub(crate) fn side_droop_travel(&self, side: Side, params: &SuspensionParams) -> DroopTravel {
+        droop_travel(self.rest.get(side), self.pitch, self.link_count, params)
+    }
+
+    /// Maximum reachable droop across both sides, the common calibration/readout scale.
+    /// Each side's actual motion uses `side_droop_travel`.
     pub(crate) fn droop_travel(&self, params: &SuspensionParams) -> DroopTravel {
-        droop_travel(
-            self.rest.get(Side::Right),
-            self.wheel_pin_radius(),
-            self.pitch,
-            self.link_count,
-            params,
-        )
+        Side::ALL
+            .into_iter()
+            .map(|side| self.side_droop_travel(side, params))
+            .max_by(|a, b| a.effective.total_cmp(&b.effective))
+            .expect("a rig has two sides")
+    }
+
+    pub(crate) fn side_plane_x(&self, side: Side) -> f32 {
+        *self.pin_planes.get(side)
     }
 
     /// The material loop length (m) = `pitch × link_count`, exact. The loop is INEXTENSIBLE: this
@@ -369,9 +412,14 @@ impl RigGeom {
         (sprocket_up - sprocket_c).to_angle()
     }
 
-    /// Road-wheel PIN-LINE radius (m) = measured tread + the pin→inner offset.
+    /// Maximum roadwheel pin-line radius (m), for conservative probe bounds and diagnostics.
+    #[cfg(test)]
     pub(crate) fn wheel_pin_radius(&self) -> f32 {
-        derive::pin_line_radius(self.model.wheel_tread, self.model.pin_to_inner)
+        self.rest
+            .values()
+            .flat_map(|rest| &rest[1..rest.len() - 1])
+            .map(|(_, radius)| *radius)
+            .fold(0.0, f32::max)
     }
 
     /// Road wheels on a side.
@@ -444,13 +492,13 @@ impl RigGeom {
     /// strip's SHAPE, not about where it sits. Moving the whole strip outboard moves all three
     /// columns together and leaves the shares alone.
     pub(crate) fn grip_columns(&self, side: Side) -> [(f32, f32); 3] {
-        // The sides are mirror images, so one lateral datum set (stored positive = right side)
-        // serves both; the sign flip preserves the inboard→outboard ORDER on the left as well.
-        let s = side.sign();
+        // The sheet places the common shoe template independently on each pin plane. Its
+        // left-side mirror preserves inboard-to-outboard column order.
+        let at = |x: f32| self.side_plane_x(side) + side.sign() * (x - self.model.plane_x);
         [
-            (s * self.model.lateral_min, EDGE_COLUMN_SHARE),
-            (s * self.model.link_center_x, CENTER_COLUMN_SHARE),
-            (s * self.model.lateral_max, EDGE_COLUMN_SHARE),
+            (at(self.model.lateral_min), EDGE_COLUMN_SHARE),
+            (at(self.model.link_center_x), CENTER_COLUMN_SHARE),
+            (at(self.model.lateral_max), EDGE_COLUMN_SHARE),
         ]
     }
 
@@ -459,7 +507,7 @@ impl RigGeom {
     /// single hull-frame lateral axis. Note the offsets are NOT `−w/2, 0, +w/2`: the middle one is
     /// the shoe's own outboard bias, which is exactly the fact the symmetric form threw away.
     pub(crate) fn grip_column_offsets(&self, side: Side) -> [(f32, f32); 3] {
-        let median_x = side.plane_x(self.plane_x);
+        let median_x = self.side_plane_x(side);
         self.grip_columns(side).map(|(x, w)| (x - median_x, w))
     }
 
@@ -475,16 +523,14 @@ impl RigGeom {
     /// link rides — lives. Rendering the shoe on the pin plane is the ~17 mm error this exists to
     /// prevent.
     pub(crate) fn link_center_x(&self, side: Side) -> f32 {
-        side.sign() * self.model.link_center_x
+        self.side_plane_x(side) + side.sign() * (self.model.link_center_x - self.model.plane_x)
     }
 
     /// Where this rig's `link_count` sits in the feasible window at the given suspension knobs.
-    /// Measured on the right side — the sides are mirror images in the side plane, and one loop
-    /// length has to serve both.
+    /// Right-side diagnostic for the sandbox panel. Admission validates both sides independently.
     pub(crate) fn link_window(&self, params: &SuspensionParams) -> LinkWindow {
         window_of(
             self.rest.get(Side::Right),
-            self.wheel_pin_radius(),
             self.pitch,
             self.link_count,
             params,
@@ -568,30 +614,33 @@ pub(crate) struct WrapDemand {
 /// One side's cast-pose circles from its stored REST list: split off the hull-fixed sprocket (first)
 /// and idler (last), move what's between them, reassemble. Free-standing so [`RigGeom::build`] can
 /// classify the link window before the resource exists.
-fn pose_circles(
-    rest: &[(Vec2, f32)],
-    wheel_pin_r: f32,
-    pose: Pose,
-    params: &SuspensionParams,
-) -> Vec<(Vec2, f32)> {
-    let sprocket = rest[0];
-    let idler = *rest
-        .last()
-        .expect("a side always has a sprocket and an idler");
-    let wheels: Vec<Vec2> = rest[1..rest.len() - 1].iter().map(|&(c, _)| c).collect();
-    assemble_circles(sprocket, idler, &wheels, wheel_pin_r, pose, params)
+fn pose_circles(rest: &[(Vec2, f32)], pose: Pose, params: &SuspensionParams) -> Vec<(Vec2, f32)> {
+    let dy = match pose {
+        Pose::Rest => 0.0,
+        Pose::Droop => -derive::static_deflection(params.ride_frequency),
+        Pose::Compression => params.bump_stop,
+    };
+    let last = rest.len() - 1;
+    rest.iter()
+        .enumerate()
+        .map(|(index, &(mut centre, radius))| {
+            if index > 0 && index < last {
+                centre.y += dy;
+            }
+            (centre, radius)
+        })
+        .collect()
 }
 
 /// Classify a link count against one side's three cast perimeters. Built taut (`belt_len = 0`) so
 /// the return run stays a straight chord: this measures the HULL, not the belt.
 fn window_of(
     rest: &[(Vec2, f32)],
-    wheel_pin_r: f32,
     pitch: f32,
     link_count: usize,
     params: &SuspensionParams,
 ) -> LinkWindow {
-    let wrap = |pose| build_route(&pose_circles(rest, wheel_pin_r, pose, params), 0.0).total();
+    let wrap = |pose| build_route(&pose_circles(rest, pose, params), 0.0).total();
     link_window(
         pitch,
         link_count,
@@ -616,9 +665,27 @@ fn side_wheel_centres(blueprint: &TankBlueprint, side: Side) -> Vec<Vec3> {
     centres
 }
 
-/// The rig's [`Side`] as the tank bake's [`TrackSide`]. Two encodings of one fact — the tank rig
-/// owns `TrackSide`, the track core owns `Side`; the track core's is the one to prefer, so the
-/// conversion is confined to this seam.
+/// Tread declarations sorted by the same axle Z order as `side_wheel_centres`.
+fn side_wheel_treads(blueprint: &TankBlueprint, side: Side) -> Vec<crate::spec::WheelTread> {
+    let mut stations: Vec<_> = blueprint
+        .spec
+        .roadwheels
+        .iter()
+        .filter(|wheel| wheel.side == track_side(side))
+        .map(|wheel| {
+            let node = blueprint
+                .geometry
+                .nodes
+                .iter()
+                .find(|node| node.name == wheel.node)
+                .expect("the bake resolves every declared roadwheel node");
+            (node.root_position.z, wheel.tread.clone())
+        })
+        .collect();
+    stations.sort_by(|a, b| a.0.total_cmp(&b.0));
+    stations.into_iter().map(|(_, tread)| tread).collect()
+}
+
 fn track_side(side: Side) -> TrackSide {
     match side {
         Side::Left => TrackSide::Left,
@@ -626,39 +693,11 @@ fn track_side(side: Side) -> TrackSide {
     }
 }
 
-/// Rest-pose pin-line circles for a side from the derived model + that side's wheel centres.
-/// Sprocket radius is chord-exact from pitch × teeth; the idler and wheel radii are their measured
-/// contact surfaces pushed out to the pin line.
-fn rest_circles(
-    model: &DerivedModel,
-    wheels: &[Vec3],
-    wheel_pin_r: f32,
-    teeth: u32,
-) -> Vec<(Vec2, f32)> {
-    let sprocket = (
-        model.sprocket_center,
-        derive::sprocket_pitch_radius(model.pitch, teeth),
-    );
-    let idler = (
-        model.idler_center,
-        derive::pin_line_radius(model.idler_radius, model.pin_to_inner),
-    );
-    // Side plane (z, y): the wheel's lateral x is carried by `road_wheels`, not by the envelope.
-    let side_plane: Vec<Vec2> = wheels.iter().map(|w| Vec2::new(w.z, w.y)).collect();
-    assemble_circles(
-        sprocket,
-        idler,
-        &side_plane,
-        wheel_pin_r,
-        Pose::Rest,
-        &SuspensionParams::default(),
-    )
-}
-
 /// Assemble the front→rear circle list, applying the cast-pose vertical offset to the SPRUNG road
 /// wheels only. Pure: the ECS-facing builders feed it blueprint data, the tests feed it synthetic
 /// gear. Wheels are re-sorted by z so the route builder's front→rear precondition holds no matter
 /// what order they arrived in, with the sprocket pinned first and the idler last.
+#[cfg(test)]
 fn assemble_circles(
     sprocket: (Vec2, f32),
     idler: (Vec2, f32),
@@ -681,6 +720,7 @@ fn assemble_circles(
 /// the hull-fixed sprocket pinned first and the idler last. `assemble_circles` (pose → dy) and
 /// [`droop_circles`] (droop magnitude → dy) both route through here so there is one belt-envelope
 /// construction, not three.
+#[cfg(test)]
 fn assemble_circles_at(
     sprocket: (Vec2, f32),
     idler: (Vec2, f32),
@@ -699,13 +739,17 @@ fn assemble_circles_at(
 /// One side's droop-pose circles with the sprung wheels lowered by an arbitrary droop magnitude
 /// `droop` (m, ≥ 0) — the same split as [`pose_circles`], but at a caller-chosen droop rather than the
 /// fixed spring deflection. This is the parametric hook the chain clamp bisects over.
-fn droop_circles(rest: &[(Vec2, f32)], wheel_pin_r: f32, droop: f32) -> Vec<(Vec2, f32)> {
-    let sprocket = rest[0];
-    let idler = *rest
-        .last()
-        .expect("a side always has a sprocket and an idler");
-    let wheels: Vec<Vec2> = rest[1..rest.len() - 1].iter().map(|&(c, _)| c).collect();
-    assemble_circles_at(sprocket, idler, &wheels, wheel_pin_r, -droop)
+fn droop_circles(rest: &[(Vec2, f32)], droop: f32) -> Vec<(Vec2, f32)> {
+    let last = rest.len() - 1;
+    rest.iter()
+        .enumerate()
+        .map(|(index, &(mut centre, radius))| {
+            if index > 0 && index < last {
+                centre.y -= droop;
+            }
+            (centre, radius)
+        })
+        .collect()
 }
 
 /// The reachable droop for a side: the spring static deflection, CLAMPED so the taut droop-pose wrap
@@ -722,14 +766,13 @@ fn droop_circles(rest: &[(Vec2, f32)], wheel_pin_r: f32, droop: f32) -> Vec<(Vec
 /// stays a straight chord, so this measures the HULL at that droop, not the belt's own slack.
 fn droop_travel(
     rest: &[(Vec2, f32)],
-    wheel_pin_r: f32,
     pitch: f32,
     link_count: usize,
     params: &SuspensionParams,
 ) -> DroopTravel {
     let spring = derive::static_deflection(params.ride_frequency);
     let belt_len = link_count as f32 * pitch;
-    let wrap = |d: f32| build_route(&droop_circles(rest, wheel_pin_r, d), 0.0).total();
+    let wrap = |d: f32| build_route(&droop_circles(rest, d), 0.0).total();
 
     if wrap(spring) <= belt_len {
         return DroopTravel {
@@ -972,18 +1015,45 @@ mod tests {
                 .fold(f32::INFINITY, f32::min)
         };
         let clamped = rig.circles(Side::Right, Pose::Droop, &p);
-        let spring_pose = pose_circles(
-            rig.rest.get(Side::Right),
-            rig.wheel_pin_radius(),
-            Pose::Droop,
-            &p,
-        );
+        let spring_pose = pose_circles(rig.rest.get(Side::Right), Pose::Droop, &p);
         assert!(
             belly(&clamped) > belly(&spring_pose),
             "clamped droop belly {} must sit above the spring-droop belly {}",
             belly(&clamped),
             belly(&spring_pose),
         );
+    }
+
+    /// The sim and view both rely on each station keeping its own radius through every pose.
+    /// Fixture data deliberately uses unequal left/right geometry and nonmirrored track planes;
+    /// copying one radius, one side, or a mirrored placement breaks a different assertion.
+    #[test]
+    fn station_contacts_and_placements_survive_all_poses() {
+        let mut base = synthetic_rig(20, 110);
+        base.wheel_treads.get_mut(Side::Left)[0].radius = 0.32;
+        base.wheel_treads.get_mut(Side::Right)[0].radius = 0.47;
+        base.pin_planes = PerSide::new(-1.8, 1.1);
+        let params = SuspensionParams::default();
+        let rig = base.rebuild(base.teeth, base.link_count, &params);
+        assert_eq!(rig.side_plane_x(Side::Left), -1.8);
+        assert_eq!(rig.side_plane_x(Side::Right), 1.1);
+        for pose in [Pose::Rest, Pose::Droop, Pose::Compression] {
+            assert_eq!(
+                rig.circles(Side::Left, pose, &params)[1].1,
+                0.32 + rig.model.pin_to_inner
+            );
+            assert_eq!(
+                rig.circles(Side::Right, pose, &params)[1].1,
+                0.47 + rig.model.pin_to_inner
+            );
+        }
+        for side in Side::ALL {
+            let shift = rig.side_plane_x(side) - side.sign() * rig.model.plane_x;
+            assert_eq!(
+                rig.link_center_x(side),
+                side.sign() * rig.model.link_center_x + shift
+            );
+        }
     }
 
     /// The clamp is bounded on BOTH ends across every regime: never negative (a taut loop stops the
@@ -1061,10 +1131,6 @@ mod tests {
             lateral_min: 0.96,
             lateral_max: 1.68,
             link_center_x: 1.32,
-            sprocket_center: Vec2::new(-2.0, 0.6),
-            idler_center: Vec2::new(2.0, 0.6),
-            idler_radius: 0.40,
-            wheel_tread: 0.40,
             mass: 57_000.0,
         };
         // Side-plane `(z, y)` comes from the 3-D centres' z and y, so the wheels vary in z.
@@ -1075,6 +1141,32 @@ mod tests {
         RigGeom::assemble(
             model,
             PerSide::new(wheels.clone(), wheels),
+            PerSide::new(
+                vec![
+                    crate::spec::WheelTread {
+                        radius: 0.4,
+                        spans: vec![(-0.1, 0.1)]
+                    };
+                    3
+                ],
+                vec![
+                    crate::spec::WheelTread {
+                        radius: 0.4,
+                        spans: vec![(-0.1, 0.1)]
+                    };
+                    3
+                ],
+            ),
+            PerSide(
+                [[
+                    (
+                        Vec2::new(-2.0, 0.6),
+                        derive::sprocket_pitch_radius(model.pitch, teeth),
+                    ),
+                    (Vec2::new(2.0, 0.6), 0.4 + model.pin_to_inner),
+                ]; 2],
+            ),
+            PerSide::new(-1.3, 1.3),
             teeth,
             link_count,
             &SuspensionParams::default(),

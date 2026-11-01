@@ -1,76 +1,9 @@
-//! The running gear's PHASE LAW: belt travel → the angle every rotating node must carry, and the
-//! one measurement that seats it — shared verbatim by the game's [`super::view`] and the sandbox's
-//! `track_sandbox::wheel_view`.
+//! Running-gear phase from belt travel and authored contact/tooth datums.
 //!
-//! It used to be a ~240-line verbatim copy in each. That is exactly the kind of duplication a phase
-//! lock cannot survive: the whole point of the derivation below is that ONE constant seats twenty
-//! teeth, and two copies of it are two constants.
-//!
-//! # Three rolling radii, because there are three contacts
-//!
-//!   * **road wheels** roll on the FLAT INNER FACE of the shoes along the belly, so their no-slip
-//!     radius is the measured tread — hub to that face. On flat ground the belly shoes are
-//!     stationary against the ground, so a road wheel that spins at anything but `belt / tread`
-//!     visibly scrubs.
-//!   * **the idler** is toothless but WRAPPED, the opposite kinematic case: the belt segment around
-//!     it rotates about the hub and the inextensible PIN LINE sets that wrap's angular rate, so it
-//!     turns at `travel / R_pin` — the sprocket case minus teeth. Rolling it at the inner-face
-//!     radius over-rotates it by pin→inner/R ≈ 7 %.
-//!   * **the sprocket is not a radius at all** — see below.
-//!
-//! [`spin_angle`] answers the first two; [`tooth_angle`] answers the third.
-//!
-//! # The sprocket is TOOTH-LOCKED, not speed-derived
-//!
-//! A sprocket does not roll: its teeth sit between consecutive pins, so one link of belt travel is
-//! *exactly* one tooth of rotation — `Δθ = τ / teeth` per `pitch` of travel, by definition, with no
-//! radius in the statement at all. The teeth therefore stay seated in the same pin gaps forever, so
-//! a meshing error you SEE is a real geometry error rather than two clocks running apart.
-//!
-//! It is worth being precise about why the obvious `phase / pitch_radius` is wrong, because the
-//! radius is right there in [`super::rig_geom::RigGeom::rest`] and it is off by only 0.4 %. That
-//! stored radius is the CHORD-exact pitch radius `pitch / (2 sin(π/teeth))` — the circle the pins
-//! actually sit on, which is what the route must wrap. But the pins are joined by straight CHORDS of
-//! length `pitch`, and a chord is shorter than the arc it subtends: belt travel per tooth is
-//! `pitch`, while arc per tooth is `2π·R_chord/teeth`. Dividing travel by `R_chord` under-rotates by
-//! `2·teeth·sin(π/teeth) / τ` — 0.41 % at 20 teeth, one whole tooth of drift every ~244 links
-//! (~32 m of driving). The tooth statement has no such error term because it never divides a length
-//! by a radius.
-//!
-//! # ...and it is PHASE-locked as well, which the rate alone does not give you
-//!
-//! A rate lock says the teeth never drift. It says nothing about WHERE they sit, and for a long time
-//! nothing did: the sprocket's absolute angle was whatever fell out of the mesh's authored
-//! orientation plus wherever the belt phase happened to be zero, which on the shipped Tiger left
-//! every tooth a CONSTANT 5.99° — a third of a tooth, 44 mm of arc at the tip — off its pin gap.
-//! Perfectly stable, permanently wrong, and invisible to a rate test.
-//!
-//! The rule (Yan, 2026-07-23) is the one a real sprocket obeys: **a tooth TIP bisects each adjacent
-//! pin pair**, so pins sit at ±½ tooth from every tip and seat in the gullets. That is the same
-//! geometry the chord-exact pitch radius already states — it is BY DEFINITION the circle on which
-//! the chord between adjacent pins is one pitch, i.e. pins τ/teeth apart — so the phase lock adds no
-//! new assumption, only the missing constant. [`tooth_angle`] is built from three facts, none of
-//! them typed in:
-//!
-//!   1. where zero phase puts the first pin — [`super::rig_geom::RigGeom::belt_origin_angle`];
-//!   2. the rule — half a tooth further round is where a tip must be;
-//!   3. where this sprocket's teeth actually ARE — measured off its own mesh at bind
-//!      ([`measure_tooth_tip_angle`]), never asserted. The shipped Tiger authors tooth 0 pointing
-//!      straight up to within 0.094°, and both sides agree, but a re-export that turns the sprocket
-//!      by half a tooth must move the calibration with it rather than silently un-mesh the track.
-//!
-//! # The residual, and the drift that used to sit beside it
-//!
-//! Measured end to end on the shipped Tiger, the nearest tip sits within a fraction of a degree of
-//! the exact half tooth, on BOTH sides, in both drive directions, and it STAYS there: the wrap
-//! spaces its pins at the MATERIAL pitch, not the drawn one ([`super::wrap::station_params`]), so
-//! the drawn loop is read as a uniform-strain image of `pitch × link_count` and sampled in material
-//! arc length. Resampling at the naive `polyline_len / link_count` instead spaces the pins at the
-//! DRAWN pitch — ~0.07 % off on this rig — and the belt walked out from under the teeth at exactly
-//! that rate: one tooth per ~160–195 m.
+//! Road wheels roll at their declared tread radius; wrapped idlers follow their pin circle.
+//! Sprockets turn one tooth per material link and seat the reference tooth declared in the tank
+//! sheet at half a tooth beyond the route origin. No view mesh can change those datums.
 
-use bevy::math::Affine3A;
-use bevy::mesh::VertexAttributeValues;
 use bevy::prelude::*;
 
 // ---------------------------------------------------------------------------------------------
@@ -83,12 +16,12 @@ use bevy::prelude::*;
 /// The sign is the one place the rotation convention lives, and it is forced: positive phase scrolls
 /// the belly toward `+z` (the loop is ordered sprocket → belly → idler), so a wheel's contact point
 /// must travel `+z`, and a positive rotation about `+x` moves the bottom of a wheel toward `−z`.
-/// Hence negative. A degenerate radius parks the wheel rather than emitting a NaN transform that
-/// would propagate into every child of the hull.
+/// Hence negative. The load gate certifies the finite positive radius.
 pub(crate) fn spin_angle(travel: f64, radius: f32) -> f32 {
-    if radius <= 1e-6 {
-        return 0.0;
-    }
+    assert!(
+        radius.is_finite() && radius > 0.0,
+        "the load gate certifies a finite positive rolling radius"
+    );
     let circumference = f64::from(radius) * std::f64::consts::TAU;
     -(travel.rem_euclid(circumference) / f64::from(radius)) as f32
 }
@@ -111,24 +44,25 @@ pub(crate) fn tooth_tip_angle(travel: f64, pitch: f32, teeth: u32, origin: f32) 
 /// Belt travel → sprocket node spin about the hull's lateral axis (rad): **put this mesh's own tooth
 /// tip where the rule wants a tip**.
 ///
-/// `mesh_tip` is where the mesh carries a tip at zero spin ([`measure_tooth_tip_angle`]); the target
+/// `mesh_tip` is where the mesh carries a tip at zero spin (the tank sheet); the target
 /// is [`tooth_tip_angle`]. A positive spin about the hull's `+x` DECREASES a side-plane angle, so
 /// the difference is taken tip-minus-target — the same flip [`spin_angle`] carries.
 ///
 /// The tooth-per-pitch RATE is untouched by the calibration: only the target moves with travel, and
 /// it moves by exactly one tooth per pitch, so the spin does too. Any representative of `mesh_tip`
 /// modulo one tooth is as good as any other — which is precisely what makes a single measured
-/// constant enough to seat all of them. A degenerate rig parks the sprocket rather than producing a
-/// NaN transform.
+/// constant enough to seat all of them. The load gate certifies pitch and tooth count.
 pub(crate) fn tooth_angle(travel: f64, pitch: f32, teeth: u32, origin: f32, mesh_tip: f32) -> f32 {
-    if f64::from(pitch) * f64::from(teeth) <= 1e-6 {
-        return 0.0;
-    }
+    assert!(
+        pitch.is_finite() && pitch > 0.0 && teeth >= 3,
+        "the load gate certifies positive pitch and a sprocket pin polygon"
+    );
     mesh_tip - tooth_tip_angle(travel, pitch, teeth, origin)
 }
 
 /// Reduce an angle to the signed representative nearest zero within one `period` — "how far off is
 /// it, and which way", for readouts and for assertions about a periodic quantity.
+#[cfg(test)]
 pub(crate) fn fold(angle: f32, period: f32) -> f32 {
     (angle + period / 2.0).rem_euclid(period) - period / 2.0
 }
@@ -165,126 +99,6 @@ pub(crate) fn gear_transform(
 /// nodes are exactly that case.
 pub(crate) fn gear_spin_transform(rest: &Transform, angle: f32) -> Transform {
     gear_transform(rest, Vec3::ZERO, Vec3::X, 0.0, angle)
-}
-
-// ---------------------------------------------------------------------------------------------
-// Reading the teeth off the sprocket mesh
-// ---------------------------------------------------------------------------------------------
-
-/// Fraction of the rim radius a vertex must reach to count as tooth-TIP land. Two per cent of the
-/// Tiger's 0.4328 m rim is 8.7 mm, which takes the whole tip land (its four corners span 0.4323 to
-/// 0.4328 m) and nothing else: the next feature inboard is the gullet floor, 39 mm down.
-const TIP_BAND: f32 = 0.98;
-/// Quantile of the in-plane radii that anchors "this is the rim", and how far past it a vertex may
-/// still sit and count. Same construction (and same reason) as [`super::marker_model`]'s disc
-/// radius: a rim is a RING of hundreds of vertices so it always clears the quantile, while a stray
-/// from a boolean or a loose greeble never does — and a raw `max` is the one statistic a single
-/// stray destroys.
-const RIM_QUANTILE: f32 = 0.95;
-const RIM_BAND: f32 = 1.01;
-/// How sharply the tip band must actually cluster on a `teeth`-fold grid before the measurement is
-/// believed (the mean resultant length of the fitted harmonic, 0 = no structure, 1 = a delta). The
-/// Tiger scores 0.587 — the tip is a LAND, not a point, so its own angular width caps the score well
-/// below 1; anything that fails this is not a sprocket with this many teeth.
-const TOOTH_CONCENTRATION: f32 = 0.25;
-
-/// The `teeth`-fold phase of the tip land in a sprocket's `(radius, side-plane angle)` cloud — i.e.
-/// one angle at which the mesh carries a tooth tip, reduced to `[0, τ/teeth)`.
-///
-/// The estimator is the `teeth`-th circular harmonic of the tip band: sum `e^{i·teeth·α}` over the
-/// band and take the argument. That is not a heuristic — it IS the definition of the phase of a
-/// `teeth`-fold rotational symmetry, so it uses every vertex of every tooth rather than picking a
-/// feature, it is exact for a symmetric tip land whatever the land's width, and it needs no
-/// clustering, no bin size and no ordering. Its magnitude comes out for free as the confidence that
-/// the thing measured really has that symmetry ([`TOOTH_CONCENTRATION`]). `None` if the cloud does
-/// not read as a tooth ring — the caller leaves the node unbound and retries.
-pub(crate) fn measure_tooth_tip_angle(polar: &[(f32, f32)], teeth: u32) -> Option<f32> {
-    if teeth == 0 || polar.len() < teeth as usize {
-        return None;
-    }
-    let mut radii: Vec<f32> = polar.iter().map(|&(r, _)| r).collect();
-    radii.sort_by(f32::total_cmp);
-    let rim = radii[((RIM_QUANTILE * (radii.len() - 1) as f32) as usize).min(radii.len() - 1)];
-    let tip = radii.iter().rev().find(|r| **r <= rim * RIM_BAND)?;
-    let band = tip * TIP_BAND;
-
-    // `f64` for the accumulation only: the sum runs over thousands of terms and its ARGUMENT is the
-    // whole answer, so cancellation in the tail is not something to hand to an f32 accumulator.
-    let (mut sx, mut sy, mut n) = (0.0_f64, 0.0_f64, 0_u32);
-    for (_, angle) in polar.iter().filter(|&&(r, _)| r >= band) {
-        let harmonic = f64::from(teeth) * f64::from(*angle);
-        sx += harmonic.cos();
-        sy += harmonic.sin();
-        n += 1;
-    }
-    if n == 0 {
-        return None;
-    }
-    let concentration = sx.hypot(sy) / f64::from(n);
-    if concentration < f64::from(TOOTH_CONCENTRATION) {
-        warn!(
-            "running gear: a sprocket's rim does not read as a {teeth}-fold tooth ring \
-             (concentration {concentration:.3} over {n} rim vertices, need \
-             {TOOTH_CONCENTRATION}). Either the mesh's tooth count is not the authored one or the \
-             node's origin is off its axle - the track cannot be phase-locked to teeth that are \
-             not there; retrying.",
-        );
-        return None;
-    }
-    let tooth = std::f32::consts::TAU / teeth as f32;
-    Some(((sy.atan2(sx) / f64::from(teeth)) as f32).rem_euclid(tooth))
-}
-
-/// Measure the tooth-tip phase of a bound sprocket node from its own mesh, in the HULL's side plane.
-///
-/// `hull_from_node` is the node's full hull-from-node affine — the game composes it from the node's
-/// captured REST transform (its gear nodes are hull-framed), the sandbox from the whole parent chain
-/// it walks. Doing the measurement in HULL space rather than mesh space is what makes it survive the
-/// export: a baked 180° Y flip, a non-unit scale or a re-parenting all change where the teeth are in
-/// the node's own frame, and none of them change where they are on the tank — which is the only
-/// frame the answer is used in ([`gear_transform`] spins about the hull's lateral axis).
-///
-/// The mesh hangs on PRIMITIVE children of the node (`bevy_gltf` spawns one child per primitive), so
-/// the walk composes hull ← node ← primitive and takes every position through it. `None` if the mesh
-/// cannot be read yet or does not look like a `teeth`-fold star; the caller retries next frame.
-pub(crate) fn sprocket_tooth_tip(
-    node: Entity,
-    hull_from_node: Affine3A,
-    children: &Query<&Children>,
-    transforms: &Query<&Transform>,
-    primitives: &Query<&Mesh3d>,
-    meshes: &Assets<Mesh>,
-    teeth: u32,
-) -> Option<f32> {
-    // The node ORIGIN is the axle (hand-corrected onto it, and `super::marker_model` guards that),
-    // so it is the centre every tooth angle is measured about — never a vertex statistic, which on a
-    // toothed rim is not a circle in the first place.
-    let axle = hull_from_node.transform_point3(Vec3::ZERO);
-    let mut polar: Vec<(f32, f32)> = Vec::new();
-    for child in children.get(node).ok()?.iter() {
-        let Ok(primitive) = primitives.get(child) else {
-            continue;
-        };
-        let mesh = meshes.get(&primitive.0)?;
-        let Some(VertexAttributeValues::Float32x3(positions)) =
-            mesh.attribute(Mesh::ATTRIBUTE_POSITION)
-        else {
-            continue;
-        };
-        let hull_from_mesh = hull_from_node
-            * transforms
-                .get(child)
-                .map_or(Affine3A::IDENTITY, Transform::compute_affine);
-        polar.extend(positions.iter().map(|p| {
-            let v = hull_from_mesh.transform_point3(Vec3::from(*p)) - axle;
-            // The side plane, by definition and not by inference: every axle in a tank's running
-            // gear is lateral, so the tooth ring lives in `(z, y)` — the same plane the route,
-            // `belt_origin_angle` and the spin axis are all expressed in, and `atan2(y, z)` is the
-            // angle all three of them mean.
-            (Vec2::new(v.z, v.y).length(), v.y.atan2(v.z))
-        }));
-    }
-    measure_tooth_tip_angle(&polar, teeth)
 }
 
 #[cfg(test)]
@@ -371,75 +185,6 @@ mod tests {
         );
     }
 
-    /// A degenerate rig (a radius or a count the derivation could not fill in) parks the wheel
-    /// instead of producing a NaN transform that would propagate into every child of the hull.
-    #[test]
-    fn a_degenerate_radius_parks_the_wheel() {
-        assert_eq!(spin_angle(1.0, 0.0), 0.0);
-        assert_eq!(tooth_angle(1.0, PITCH, 0, ORIGIN, MESH_TIP), 0.0);
-        assert_eq!(tooth_angle(1.0, 0.0, TEETH, ORIGIN, MESH_TIP), 0.0);
-        // ...and a mesh that is not a tooth ring is refused rather than averaged into a phase.
-        assert_eq!(measure_tooth_tip_angle(&[], TEETH), None);
-        let smooth_disc: Vec<(f32, f32)> = (0..720)
-            .map(|i| (0.43, std::f32::consts::TAU * i as f32 / 720.0))
-            .collect();
-        assert_eq!(measure_tooth_tip_angle(&smooth_disc, TEETH), None);
-    }
-
-    // -----------------------------------------------------------------------------------------
-    // The phase lock
-    // -----------------------------------------------------------------------------------------
-
-    /// A synthetic sprocket rim: `teeth` tip lands of `land` radians each, centred on
-    /// `phase + k·τ/teeth`, plus a hub ring well inside them. Returned in the `(radius, angle)` form
-    /// the measurement consumes, so the estimator is driven by a shape whose answer is KNOWN.
-    fn synthetic_rim(teeth: u32, phase: f32, land: f32) -> Vec<(f32, f32)> {
-        let tooth = std::f32::consts::TAU / teeth as f32;
-        let mut polar = Vec::new();
-        for k in 0..teeth {
-            let centre = phase + tooth * k as f32;
-            for j in 0..9 {
-                let t = j as f32 / 8.0 - 0.5;
-                polar.push((0.4328, centre + land * t));
-            }
-        }
-        // The hub: a smooth ring at a radius the tip band must exclude, and four times as many
-        // vertices as the teeth have, so anything that failed to band-limit would be swamped by it.
-        for i in 0..(teeth * 4) {
-            polar.push((0.3465, tooth * i as f32 / 4.0 + 0.37));
-        }
-        polar
-    }
-
-    /// The estimator recovers the phase of a known tooth ring — at any phase, any land width, and
-    /// with a hub ring outvoting the teeth four to one.
-    #[test]
-    fn the_tooth_phase_estimator_recovers_a_known_ring() {
-        let tooth = std::f32::consts::TAU / f32::from(20_u8);
-        for phase in [0.0_f32, 0.0016, 0.1, tooth - 0.01] {
-            for land in [0.001_f32, 0.05, 0.096] {
-                let got = measure_tooth_tip_angle(&synthetic_rim(20, phase, land), 20)
-                    .expect("a 20-fold ring measures");
-                assert!(
-                    fold(got - phase, tooth).abs() < 1e-4,
-                    "phase {phase} land {land} measured as {got}",
-                );
-            }
-        }
-        // The answer is a REPRESENTATIVE modulo one tooth, so a ring authored a whole tooth round
-        // reads identically — which is exactly why one measured constant seats all twenty teeth.
-        let a = measure_tooth_tip_angle(&synthetic_rim(20, 0.1, 0.05), 20).unwrap();
-        let b = measure_tooth_tip_angle(&synthetic_rim(20, 0.1 + tooth, 0.05), 20).unwrap();
-        assert!((a - b).abs() < 1e-4);
-    }
-
-    /// **THE RULE**, on pure math: a tooth tip bisects every adjacent pin pair, so a pin lands in a
-    /// gullet — at any phase, in either direction, forever.
-    ///
-    /// Pins are derived, not pinned: pin `k` sits at `origin + k·τ/teeth` when the belt has not
-    /// moved (the chord-exact pitch circle is BY DEFINITION the one where consecutive pins are one
-    /// tooth apart), and the whole set walks forward by `τ/teeth` per pitch of travel. The tooth the
-    /// mesh carries is then rotated by [`tooth_angle`], and the assertion is that the two interleave
     /// at exactly half a tooth.
     #[test]
     fn a_pin_lands_in_a_gullet_at_every_phase() {

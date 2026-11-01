@@ -177,6 +177,33 @@ pub struct ComponentSpec {
 pub struct RoadwheelSpec {
     pub node: String,
     pub side: crate::tank::TrackSide,
+    /// The station's physical tread, independent of decorative view vertices.
+    pub tread: WheelTread,
+}
+
+/// A wheel's contact circle and the lateral spans of its tread, relative to its authored axle.
+#[derive(Deserialize, Clone, Debug, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct WheelTread {
+    pub radius: f32,
+    pub spans: Vec<(f32, f32)>,
+}
+
+/// A scalar construction fact for each track side.
+#[derive(Deserialize, Clone, Copy, Debug, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct SideValues {
+    pub left: f32,
+    pub right: f32,
+}
+
+impl SideValues {
+    pub(crate) fn get(self, side: crate::track::side::Side) -> f32 {
+        match side {
+            crate::track::side::Side::Left => self.left,
+            crate::track::side::Side::Right => self.right,
+        }
+    }
 }
 
 /// One collision-proxy node and the substance (`assets/materials/materials.ron`) it is of: the row
@@ -700,6 +727,8 @@ pub struct ViewSpec {
 #[derive(Deserialize, Clone)]
 #[serde(deny_unknown_fields)]
 pub struct TrackSpec {
+    /// Hull-local X placement of the common shoe template's pin line on each side (m).
+    pub pin_plane_x: SideValues,
     /// The `assets/materials/materials.ron` row the links are of. Its friction is the track's side
     /// of every contact pair ([`Self::friction`]): the belt on the ground or a piece, and the bump
     /// stops and side plates. The bake refuses a row that states none (`L2.SPEC`).
@@ -946,6 +975,8 @@ impl SuspensionSpec {
 #[serde(deny_unknown_fields)]
 pub struct SprocketSpec {
     pub teeth: u32,
+    /// Hull side-plane angle of a reference tooth tip at the authored rest pose (rad).
+    pub tooth_tip_rad: SideValues,
     /// The model nodes of the two sprocket meshes, one per side: the view nodes the belt's tooth
     /// lock turns.
     pub nodes: SideNodes,
@@ -956,6 +987,8 @@ pub struct SprocketSpec {
 #[serde(deny_unknown_fields)]
 pub struct IdlerSpec {
     pub nodes: SideNodes,
+    /// Physical rolling radius of each idler (m).
+    pub radius: SideValues,
 }
 
 /// The turret's rigid-body data for the free flight after a cook-off launch (the damage model's
@@ -1123,6 +1156,38 @@ impl NodeRole {
 }
 
 impl TankSpec {
+    /// Every contact consumer receives authored finite dimensions and a finite tooth frame.
+    fn check_running_gear_contacts(&self) -> Result<(), BevyError> {
+        for (index, wheel) in self.roadwheels.iter().enumerate() {
+            let tread = &wheel.tread;
+            if !tread.radius.is_finite() || tread.radius <= 0.0 {
+                return Err(format!("roadwheels[{index}].tread.radius must be finite and positive; author the contact radius in metres").into());
+            }
+            if tread.spans.is_empty()
+                || tread
+                    .spans
+                    .iter()
+                    .any(|&(lo, hi)| !lo.is_finite() || !hi.is_finite() || lo >= hi)
+            {
+                return Err(format!("roadwheels[{index}].tread.spans must contain finite increasing lateral intervals; author each tread's axle-relative bounds in metres").into());
+            }
+        }
+        let planes = self.track.pin_plane_x;
+        if !planes.left.is_finite() || !planes.right.is_finite() || planes.left >= planes.right {
+            return Err("track.pin_plane_x must be finite with left < right; author the two hull-local pin planes in metres".into());
+        }
+        for side in crate::track::side::Side::ALL {
+            let radius = self.track.idler.radius.get(side);
+            if !radius.is_finite() || radius <= 0.0 {
+                return Err(format!("track.idler.radius.{side:?} must be finite and positive; author the contact radius in metres").into());
+            }
+            if !self.track.sprocket.tooth_tip_rad.get(side).is_finite() {
+                return Err(format!("track.sprocket.tooth_tip_rad.{side:?} must be finite; author the rest tooth datum in hull-side-plane radians").into());
+            }
+        }
+        Ok(())
+    }
+
     /// Why the sheet's weapons cannot be mounted, if they cannot: a weapon its own rules refuse
     /// ([`WeaponSpec::checked`]), or more than one `Primary`. Every consumer that resolves the main
     /// bore (`tank::spawn`'s rig, `command`, `crew_sweep`) takes the first `Primary` it finds, so a
@@ -1381,6 +1446,7 @@ impl TankSpec {
                 return Err(format!("roadwheels declares no station on the {side:?} track").into());
             }
         }
+        self.check_running_gear_contacts()?;
         // Track: values that parse but can never wrap a running gear. (The one check that needs
         // GEOMETRY — the material loop closing around the rest wheel circles — lives at rig
         // bind, where the baked wheel rests exist; these are the spec-local invariants.)
@@ -1778,6 +1844,60 @@ mod tests {
         // The seat, provider and recoil rules are `validate`'s, checked above for every sheet.
     }
 
+    /// Each declared contact datum is refused at the sheet edge; the running gear and view
+    /// rely on finite radii, nonempty tread surfaces and a finite reference-tooth frame.
+    #[test]
+    fn running_gear_contact_data_has_a_complete_domain() {
+        let mut spec = fixture();
+        spec.roadwheels[0].tread.radius = f32::NAN;
+        assert!(
+            spec.validate()
+                .unwrap_err()
+                .to_string()
+                .contains("tread.radius")
+        );
+        let mut spec = fixture();
+        spec.roadwheels[0].tread.spans.clear();
+        assert!(
+            spec.validate()
+                .unwrap_err()
+                .to_string()
+                .contains("tread.spans")
+        );
+        let mut spec = fixture();
+        spec.roadwheels[0].tread.spans[0] = (1.0, -1.0);
+        assert!(
+            spec.validate()
+                .unwrap_err()
+                .to_string()
+                .contains("tread.spans")
+        );
+        let mut spec = fixture();
+        spec.track.pin_plane_x.left = spec.track.pin_plane_x.right;
+        assert!(
+            spec.validate()
+                .unwrap_err()
+                .to_string()
+                .contains("pin_plane_x")
+        );
+        let mut spec = fixture();
+        spec.track.idler.radius.left = 0.0;
+        assert!(
+            spec.validate()
+                .unwrap_err()
+                .to_string()
+                .contains("idler.radius")
+        );
+        let mut spec = fixture();
+        spec.track.sprocket.tooth_tip_rad.right = f32::INFINITY;
+        assert!(
+            spec.validate()
+                .unwrap_err()
+                .to_string()
+                .contains("tooth_tip_rad")
+        );
+    }
+
     /// The MUTATION BATTERY's subject: a fictional vehicle that authors every block a rejection
     /// case flips, and nothing else. The shipped sheet is deliberately NOT the subject — a
     /// mutation battery riding on it turns every deliberate tuning or content edit (a pulled
@@ -1792,13 +1912,14 @@ TankSpec(
     inertia_extents: (3.0, 2.0, 6.0),
     turret: (mass: 5_000.0, inertia_extents: (2.0, 1.0, 2.0)),
     track: (
+        pin_plane_x: (left: -1.3, right: 1.3),
         substance: "TrackSteel",
         link_count: 80,
         link_mass: 20.0,
         hinge_torque: 30.0,
         link_angle: (inward_deg: 40.0, outward_deg: 18.0),
-        sprocket: (teeth: 16, nodes: (left: "Sprocket_L", right: "Sprocket_R")),
-        idler: (nodes: (left: "Idler_L", right: "Idler_R")),
+        sprocket: (teeth: 16, tooth_tip_rad: (left: 0.0, right: 0.0), nodes: (left: "Sprocket_L", right: "Sprocket_R")),
+        idler: (radius: (left: 0.4, right: 0.4), nodes: (left: "Idler_L", right: "Idler_R")),
         powertrain: (
             inertia: 10_000.0,
             transmission: (
@@ -1850,8 +1971,8 @@ TankSpec(
     colliders: [(node: "Hull_Collider", substance: "RHA")],
     shadow_proxies: [],
     roadwheels: [
-        (node: "Wheel_L_0", side: Left),
-        (node: "Wheel_R_0", side: Right),
+        (node: "Wheel_L_0", side: Left, tread: (radius: 0.4, spans: [(-0.1, 0.1)])),
+        (node: "Wheel_R_0", side: Right, tread: (radius: 0.4, spans: [(-0.1, 0.1)])),
     ],
     weapons: {
         "Cannon": (

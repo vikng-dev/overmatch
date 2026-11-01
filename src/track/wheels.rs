@@ -61,7 +61,7 @@ pub const WHEEL_LIFT_RISE_OMEGA: f32 = 45.0;
 /// collocation columns. `max_lift`/`max_droop` are the two ends of the contact envelope, both
 /// POSITIVE magnitudes (project convention: never signed limits) — how far above rest an obstacle
 /// may raise the wheel, and how far below rest it may drop.
-pub struct WheelParams {
+pub struct WheelParams<'a> {
     pub reach: f32,
     /// Rise ease rate (rad/s) — [`WHEEL_LIFT_RISE_OMEGA`] for every production consumer.
     pub ease_omega: f32,
@@ -70,7 +70,7 @@ pub struct WheelParams {
     /// chain-clamped droop (`TrackGear::max_droop` / `RigGeom::droop_travel(..).effective`) —
     /// there is no lift-only compatibility mode.
     pub max_droop: f32,
-    pub lateral_stations: [f32; 3],
+    pub lateral_spans: &'a [(f32, f32)],
     pub probe_reach: f32,
 }
 
@@ -90,7 +90,11 @@ pub fn wheel_lift_target<O: TerrainOracle>(
 ) -> f32 {
     let mut target = f32::NEG_INFINITY;
     for (s, c) in WHEEL_ARC {
-        for offset in params.lateral_stations {
+        for offset in params
+            .lateral_spans
+            .iter()
+            .flat_map(|&(lo, hi)| [lo, (lo + hi) * 0.5, hi])
+        {
             let local = pivot_local + Vec3::new(offset, -params.reach * c, params.reach * s);
             target = target.max(oracle.depth_along(
                 affine.transform_point3(local),
@@ -152,13 +156,43 @@ mod tests {
         }
     }
 
-    fn params(max_droop: f32, max_lift: f32) -> WheelParams {
+    /// A wheel must not lift onto an obstacle between its two declared tread spans. The view
+    /// relies on the contact surfaces rather than the union of their lateral bounds.
+    #[test]
+    fn probes_preserve_the_gap_between_tread_surfaces() {
+        use std::cell::RefCell;
+        struct Probes(RefCell<Vec<f32>>);
+        impl TerrainOracle for Probes {
+            fn depth_along(&self, station: Vec3, _: Vec3, _: f32) -> f32 {
+                self.0.borrow_mut().push(station.x);
+                if station.x.abs() < 0.1 { 1.0 } else { -1.0 }
+            }
+        }
+        let oracle = Probes(RefCell::new(Vec::new()));
+        let params = WheelParams {
+            lateral_spans: &[(-0.4, -0.2), (0.2, 0.4)],
+            ..params(0.2, 0.2)
+        };
+        assert_eq!(
+            wheel_lift_target(
+                &oracle,
+                &Affine3A::IDENTITY,
+                Vec3::NEG_Y,
+                Vec3::ZERO,
+                &params
+            ),
+            -0.2
+        );
+        assert!(oracle.0.borrow().iter().all(|x| x.abs() >= 0.2));
+    }
+
+    fn params(max_droop: f32, max_lift: f32) -> WheelParams<'static> {
         WheelParams {
             reach: 0.4,
             ease_omega: WHEEL_LIFT_RISE_OMEGA,
             max_lift,
             max_droop,
-            lateral_stations: [-0.08, 0.0, 0.08],
+            lateral_spans: &[(-0.08, 0.08)],
             probe_reach: 0.5,
         }
     }

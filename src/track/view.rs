@@ -27,7 +27,7 @@ use crate::render_policy::VisualScope;
 use crate::tank::{Roadwheel, Tank, TrackSide, ViewNode};
 
 use super::belt_draw::BeltAssets;
-use super::gear_phase::{gear_spin_transform, spin_angle, sprocket_tooth_tip, tooth_angle};
+use super::gear_phase::{gear_spin_transform, spin_angle, tooth_angle};
 use super::link_view::{self, BeltFrames, LinkTemplate, Stragglers};
 use super::oracle::{BlockField, TerrainOracle};
 use super::rig_geom::RigGeom;
@@ -140,13 +140,6 @@ pub(crate) const SNAP_TRANSLATION: f32 = 1.2;
 /// Axis chord per frame (~30°), checked on BOTH the forward and up axes — a pure roll leaves
 /// forward unchanged.
 pub(crate) const SNAP_AXIS: f32 = 0.5;
-/// Wheel-lift probe stations across the DISC (m from the wheel's real x) — the Tiger's
-/// interleaved discs are 0.158 m wide, far narrower than the shoe: probing shoe-wide at an
-/// outboard wheel column would read geometry entirely beside the track.
-/// Interim until the bake carries disc bounds. (The wrap's conform keeps shoe-wide lateral stations
-/// at `plane_x` — [`RigSide::lateral_stations`] — because that IS the physics footprint.)
-const WHEEL_DISC_STATIONS: [f32; 3] = [-0.08, 0.0, 0.08];
-
 /// One tank's track-view state, on the root. Pure view: despawns with the root, resets its filter
 /// memory on any presented-pose discontinuity.
 #[derive(Component)]
@@ -347,6 +340,8 @@ struct RigWheel {
     /// This station's PIN-LINE radius (m), from the measured [`RigGeom::rest`] circle — per station,
     /// not one shared wheel radius (the Tiger's interleaved discs alternate ~1.5 mm).
     radius: f32,
+    /// Declared axle-relative tread surfaces; the gap between discs is not a contact surface.
+    tread: crate::spec::WheelTread,
     /// Cosmetic lift state.
     dy: f32,
     dvel: f32,
@@ -404,7 +399,6 @@ fn bind_track_rigs(
     // transforms for the rest capture and the mesh-space→hull composition, mesh primitives for the
     // sprocket tooth ring.
     node_transforms: Query<&Transform>,
-    primitives: Query<&Mesh3d>,
     // The belt's draw: its repeated meshes (and the sprocket's, read for the tooth ring), the
     // shoe's material, and each belt's block of the shared table.
     mut belt_assets: BeltAssets,
@@ -457,31 +451,22 @@ fn bind_track_rigs(
         // come from here.
         let rest = [Side::Left, Side::Right].map(|s| geom.rest.get(s).clone());
 
-        // Feasibility gate (the schema check can't do this — it needs the running-gear circles): the
-        // material loop must close around the rest gear, or every frame silently draws a belt that
-        // cannot exist rather than failing once, loudly. Measured on the right side — the sides are
-        // mirror images in the side plane and one loop length serves both.
-        let closed = super::route::build_route(&rest[1], belt_len).total();
-        if !closed.is_finite() || (closed - belt_len).abs() > 0.005 * belt_len {
-            error_once!(
-                "track rig infeasible: pitch × link_count = {belt_len:.3} m cannot close the rest \
-                 running gear (route closed at {closed:.3} m) — no track rig bound"
+        for circles in &rest {
+            let closed = super::route::build_route(circles, belt_len).total();
+            assert!(
+                closed.is_finite() && (closed - belt_len).abs() <= 0.005 * belt_len,
+                "{}: track.link_count cannot close the rest gear; author a feasible loop",
+                blueprint.file
             );
-            continue;
         }
-
-        // A view wheel count that disagrees with the measured rig would zip a station against a
-        // neighbour's radius — refuse rather than paint the wrong circle.
-        if side_wheels
-            .iter()
-            .zip(&rest)
-            .any(|(w, r)| w.len() != r.len().saturating_sub(2))
-        {
-            error_once!(
-                "track rig: view wheel count disagrees with the measured rig — no track rig bound"
-            );
-            continue;
-        }
+        assert!(
+            side_wheels
+                .iter()
+                .zip(&rest)
+                .all(|(w, r)| w.len() == r.len() - 2),
+            "{}: each declared roadwheel must have one view node; repair the scene/spec correspondence",
+            blueprint.file
+        );
 
         // Capture the sprocket/idler REST transforms (the pose the belt spin rides on) and measure
         // each sprocket's tooth-tip phase off its own mesh — the phase-lock calibration. Both must
@@ -496,31 +481,11 @@ fn bind_track_rigs(
         ) else {
             continue;
         };
-        // The game's gear nodes are hull-framed (their parent chain to the root is identity — the
-        // same premise the road-wheel poses rely on), so a node's REST transform IS its
-        // hull-from-node affine.
-        let (Some(sl_tip), Some(sr_tip)) = (
-            sprocket_tooth_tip(
-                sl,
-                sl_rest.compute_affine(),
-                &children,
-                &node_transforms,
-                &primitives,
-                &belt_assets.meshes,
-                geom.teeth,
-            ),
-            sprocket_tooth_tip(
-                sr,
-                sr_rest.compute_affine(),
-                &children,
-                &node_transforms,
-                &primitives,
-                &belt_assets.meshes,
-                geom.teeth,
-            ),
-        ) else {
-            continue;
-        };
+        // The tooth datum is construction data, not a statistic of decorative view vertices.
+        let (sl_tip, sr_tip) = (
+            spec.sprocket.tooth_tip_rad.left,
+            spec.sprocket.tooth_tip_rad.right,
+        );
 
         // The belts: one entity per side drawing the glb's OWN link mesh once per material link, the
         // left side wearing the template's genuine mirror. Every rung's shoe must be checked
@@ -549,27 +514,34 @@ fn bind_track_rigs(
         // Zip each view wheel (sorted front→rear) with its measured pin-line radius from the rest
         // circles' MIDDLE (`rest[0]` is the sprocket, `rest.last()` the idler). Counts were checked
         // equal above.
-        let rig_wheels = |list: Vec<(Vec3, Quat, Entity)>, rest: &[(Vec2, f32)]| -> Vec<RigWheel> {
+        let rig_wheels = |list: Vec<(Vec3, Quat, Entity)>,
+                          rest: &[(Vec2, f32)],
+                          treads: &[crate::spec::WheelTread]|
+         -> Vec<RigWheel> {
             list.into_iter()
                 .zip(rest[1..rest.len() - 1].iter())
-                .map(|((pivot, rest_rotation, view), &(_, radius))| RigWheel {
-                    pivot,
-                    rest_rotation,
-                    radius,
-                    dy: 0.0,
-                    dvel: 0.0,
-                    target: Default::default(),
-                    view,
-                })
+                .zip(treads)
+                .map(
+                    |(((pivot, rest_rotation, view), &(_, radius)), tread)| RigWheel {
+                        pivot,
+                        rest_rotation,
+                        radius,
+                        tread: tread.clone(),
+                        dy: 0.0,
+                        dvel: 0.0,
+                        target: Default::default(),
+                        view,
+                    },
+                )
                 .collect()
         };
         let sides = [
             RigSide {
-                plane_x: -geom.plane_x,
+                plane_x: geom.side_plane_x(Side::Left),
                 lateral_stations: geom.grip_stations(Side::Left),
                 sprocket: rest[0][0],
                 idler: *rest[0].last().expect("a side always has an idler"),
-                wheels: rig_wheels(wl, &rest[0]),
+                wheels: rig_wheels(wl, &rest[0], geom.wheel_treads.get(Side::Left)),
                 sprocket_view: sl,
                 sprocket_rest: sl_rest,
                 sprocket_origin: geom.belt_origin_angle(Side::Left),
@@ -581,11 +553,11 @@ fn bind_track_rigs(
                 proxy: None,
             },
             RigSide {
-                plane_x: geom.plane_x,
+                plane_x: geom.side_plane_x(Side::Right),
                 lateral_stations: geom.grip_stations(Side::Right),
                 sprocket: rest[1][0],
                 idler: *rest[1].last().expect("a side always has an idler"),
-                wheels: rig_wheels(wr, &rest[1]),
+                wheels: rig_wheels(wr, &rest[1], geom.wheel_treads.get(Side::Right)),
                 sprocket_view: sr,
                 sprocket_rest: sr_rest,
                 sprocket_origin: geom.belt_origin_angle(Side::Right),
@@ -784,7 +756,10 @@ fn drive_track_views(
                 (Some(depths), Some(kpa)) => depths.full_press_m(xz, kpa),
                 _ => 0.0,
             },
-            max_sink_m: gear.max_droop(),
+            max_sink_m: Side::ALL
+                .into_iter()
+                .map(|side| gear.max_droop(side))
+                .fold(0.0, f32::max),
         };
 
         // Belt phase from the SIM (phase B): a simulated hull's `TrackDrive` written by the
@@ -808,21 +783,20 @@ fn drive_track_views(
         // View wheel lift: probe the field at each wheel's REAL position across its DISC (not
         // the shoe), ease the lift (implicit rise / ballistic fall), then the wrap fits the belt
         // around the lifted circles. On a snap the lift re-bases to the fresh target instantly.
-        let mut wparams = WheelParams {
-            // `reach` is set PER WHEEL below: this station's pin-line radius (the circle the wrap
-            // fits) + the measured plate face offset to its ground face — the sandbox's form, no
-            // mid-plate `thickness/2` assumption and no single shared wheel radius.
-            reach: 0.0,
-            ease_omega: WHEEL_LIFT_RISE_OMEGA,
-            max_lift: blueprint.spec.track.suspension.bump_stop,
-            max_droop: gear.max_droop(),
-            lateral_stations: WHEEL_DISC_STATIONS,
-            probe_reach: PROBE_REACH,
-        };
-        let down = affine.transform_vector3(Vec3::NEG_Y).normalize_or_zero();
-        for side in &mut rig.sides {
+        let down = affine
+            .transform_vector3(Vec3::NEG_Y)
+            .try_normalize()
+            .expect("a presented hull has a finite nonsingular transform");
+        for (si, side) in rig.sides.iter_mut().enumerate() {
             for wheel in &mut side.wheels {
-                wparams.reach = wheel.radius + gear.face_offset();
+                let wparams = WheelParams {
+                    reach: wheel.radius + gear.face_offset(),
+                    ease_omega: WHEEL_LIFT_RISE_OMEGA,
+                    max_lift: blueprint.spec.track.suspension.bump_stop,
+                    max_droop: gear.max_droop(Side::ALL[si]),
+                    lateral_spans: &wheel.tread.spans,
+                    probe_reach: PROBE_REACH,
+                };
                 let target = wheel.target.sample(refresh, wheel_changed, alpha, || {
                     wheel_lift_target(field, &affine, down, wheel.pivot, &wparams)
                 });
@@ -1104,7 +1078,7 @@ mod tests {
     fn fixture_rig(world: &mut World, geom: &RigGeom) -> TrackRig {
         let sides = [Side::Left, Side::Right].map(|side| {
             let circles = geom.rest.get(side);
-            let plane_x = geom.plane_x * if side == Side::Left { -1.0 } else { 1.0 };
+            let plane_x = geom.side_plane_x(side);
             let spawn_pose = |world: &mut World| world.spawn(Transform::IDENTITY).id();
             RigSide {
                 plane_x,
@@ -1113,10 +1087,12 @@ mod tests {
                 idler: *circles.last().unwrap(),
                 wheels: circles[1..circles.len() - 1]
                     .iter()
-                    .map(|&(center, radius)| RigWheel {
+                    .zip(geom.wheel_treads.get(side))
+                    .map(|(&(center, radius), tread)| RigWheel {
                         pivot: Vec3::new(plane_x, center.y, center.x),
                         rest_rotation: Quat::IDENTITY,
                         radius,
+                        tread: tread.clone(),
                         dy: 0.0,
                         dvel: 0.0,
                         target: Default::default(),
@@ -1389,7 +1365,7 @@ mod tests {
             ease_omega: WHEEL_LIFT_RISE_OMEGA,
             max_lift: 0.2,
             max_droop: 0.15,
-            lateral_stations: WHEEL_DISC_STATIONS,
+            lateral_spans: &[(-0.08, 0.08)],
             probe_reach: PROBE_REACH,
         };
         let mut target = ContactTarget::default();

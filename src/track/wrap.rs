@@ -1131,10 +1131,18 @@ mod tests {
                 // a wrong radius base at all (both sides would move together).
                 let mut targets: Vec<(String, (Vec2, f32), f32)> = vec![
                     ("the sprocket".into(), circles[0], circles[0].1 - pti),
-                    ("the idler".into(), circles[last], rig.model.idler_radius),
+                    (
+                        "the idler".into(),
+                        circles[last],
+                        tiger_spec().track.idler.radius.right,
+                    ),
                 ];
                 for (i, &circle) in circles.iter().enumerate().take(last).skip(1) {
-                    targets.push((format!("wheel {}", i - 1), circle, rig.model.wheel_tread));
+                    targets.push((
+                        format!("wheel {}", i - 1),
+                        circle,
+                        rig.wheel_treads.get(Side::Right)[i - 1].radius,
+                    ));
                 }
 
                 // Settle window: the slack spring's own, at the drape this pose implies.
@@ -1342,13 +1350,13 @@ mod tests {
     fn crest_wheel_params(
         rig: &crate::track::rig_geom::RigGeom,
         params: &SuspensionParams,
-    ) -> WheelParams {
+    ) -> WheelParams<'static> {
         WheelParams {
             reach: rig.wheel_pin_radius() + rig.model.pin_to_outer,
             ease_omega: WHEEL_LIFT_RISE_OMEGA,
             max_lift: tiger_spec().track.suspension.bump_stop,
             max_droop: rig.droop_travel(params).effective,
-            lateral_stations: [-0.08, 0.0, 0.08],
+            lateral_spans: &[(-0.08, 0.08)],
             probe_reach: 0.5,
         }
     }

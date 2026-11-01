@@ -261,7 +261,7 @@ fn draw_sprocket(
     travel: f64,
     plane_x: f32,
 ) {
-    let center = geom.model.sprocket_center;
+    let center = geom.rest.get(side)[0].0;
     let r = derive::sprocket_pitch_radius(geom.pitch, geom.teeth);
     gizmos.circle(
         Isometry3d::new(

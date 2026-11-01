@@ -201,14 +201,6 @@ impl TrackGripElements {
             ],
         }
     }
-
-    /// Whether both fixed slabs match the spec-authored material-link count.
-    pub fn is_sized_for(&self, link_count: usize) -> bool {
-        let expected = link_count * 3;
-        self.sides
-            .iter()
-            .all(|side| side.strain.len() == expected && side.dwell.len() == expected)
-    }
 }
 
 /// Coarse field digest used by [`TrackGripEffect`] and the replicated anchor. Strain axes are
@@ -243,13 +235,13 @@ pub(crate) fn coarse_grip_digest(elements: &TrackGripElements) -> u32 {
 /// station count, the side planes, and the assembled [`ForceParams`].
 #[derive(Resource)]
 pub struct TrackGear {
-    loop_pts: Vec<Vec2>,
+    loop_pts: [Vec<Vec2>; 2],
     count: usize,
-    plane_x: f32,
+    plane_x: [f32; 2],
     /// The contact envelope's per-position reach profile ((z, travel) knots — 0 at the
     /// unsprung sprocket/idler, full droop at the road wheels), ridden via
     /// [`super::forces::TravelField`] every tick.
-    travel_knots: Vec<(f32, f32)>,
+    travel_knots: [Vec<(f32, f32)>; 2],
     /// Per-side collocation columns ([`SideInput::columns`], indexed by `Side::index()`):
     /// the MEASURED shoe faces + centre from
     /// [`RigGeom::grip_column_offsets`](super::rig_geom::RigGeom::grip_column_offsets) — signed
@@ -273,8 +265,8 @@ impl TrackGear {
     /// road wheel may drop. `0.0` when the profile is empty. The track view spans its cosmetic
     /// wheels this far below rest so a fully-drooped wheel's drawn belt wrap stays feasible at the
     /// chain-limited link count (the knots' peak IS `RigGeom::droop_travel(..).effective`, floored).
-    pub(crate) fn max_droop(&self) -> f32 {
-        self.travel_knots
+    pub(crate) fn max_droop(&self, side: Side) -> f32 {
+        self.travel_knots[side.index()]
             .iter()
             .map(|&(_, travel)| travel)
             .fold(0.0_f32, f32::max)
@@ -289,16 +281,25 @@ impl TrackGear {
     #[cfg(feature = "bitprobe")]
     pub(crate) fn bitprobe_startup(&self, out: &mut crate::bitprobe::StartupBuilder) {
         out.u32("track_gear.count", self.count as u32);
-        out.f32("track_gear.plane_x", self.plane_x);
-        for (index, point) in self.loop_pts.iter().enumerate() {
-            out.vec2(&format!("track_gear.route[{index}]"), *point);
+        for side in Side::ALL {
+            let si = side.index();
+            out.f32(&format!("track_gear.{side:?}.plane_x"), self.plane_x[si]);
+            for (index, point) in self.loop_pts[si].iter().enumerate() {
+                out.vec2(&format!("track_gear.{side:?}.route[{index}]"), *point);
+            }
         }
         let p = &self.params;
         out.f32("force.face_offset", p.face_offset);
         out.f32("force.free_travel", p.free_travel);
-        for (index, (z, travel)) in self.travel_knots.iter().copied().enumerate() {
-            out.f32(&format!("force.travel_knots[{index}].z"), z);
-            out.f32(&format!("force.travel_knots[{index}].travel"), travel);
+        for side in Side::ALL {
+            for (index, (z, travel)) in self.travel_knots[side.index()].iter().copied().enumerate()
+            {
+                out.f32(&format!("force.{side:?}.travel_knots[{index}].z"), z);
+                out.f32(
+                    &format!("force.{side:?}.travel_knots[{index}].travel"),
+                    travel,
+                );
+            }
         }
         for (si, side) in ["left", "right"].into_iter().enumerate() {
             for (index, (offset, weight)) in self.columns[si].iter().copied().enumerate() {
@@ -428,32 +429,30 @@ fn init_track_gear(blueprint: Res<TankBlueprint>, mut commands: Commands) {
         spec.link_count,
         &sus,
     );
-    // ONE shared loop for both sides (the shipped asset's sides measure within ~60 µm; the
-    // Right side is the `hull_rest_y` datum side). Per-side loops land with per-side gear.
-    let circles = geom.rest.get(Side::Right).clone();
     let belt_len = geom.belt_len();
-    let route = build_route(&circles, belt_len);
-    let mut loop_pts = route.pts;
-    if loop_pts.first() != loop_pts.last()
-        && let Some(&first) = loop_pts.first()
-    {
-        loop_pts.push(first);
-    }
-
-    // The envelope law, calibrated against the exact loop/columns/engage the live law rides.
-    // Columns are the MEASURED shoe faces + centre per side (`grip_column_offsets`), not a
-    // symmetric ±width/2 about the pin plane — the shoe rides ~17 mm outboard of its pins.
+    let loop_pts = Side::ALL.map(|side| {
+        let mut points = build_route(geom.rest.get(side), belt_len).pts;
+        let first = *points
+            .first()
+            .expect("a certified running gear has a closed route");
+        if points.last() != Some(&first) {
+            points.push(first);
+        }
+        points
+    });
     let droop = geom.droop_travel(&sus);
-    let columns = [Side::Left, Side::Right].map(|s| geom.grip_column_offsets(s));
-    let travel_knots = super::envelope::wheel_travel_knots(
-        &circles,
-        droop.effective.max(super::envelope::MIN_ENVELOPE_TRAVEL),
-    );
+    let columns = Side::ALL.map(|side| geom.grip_column_offsets(side));
+    let travel_knots = Side::ALL.map(|side| {
+        super::envelope::wheel_travel_knots(
+            geom.rest.get(side),
+            geom.side_droop_travel(side, &sus).effective,
+        )
+    });
     let cal = super::envelope::calibrate(
         &[Side::Left, Side::Right].map(|s| super::envelope::EnvelopeSide {
-            loop_pts: &loop_pts,
-            plane_x: s.plane_x(geom.plane_x),
-            knots: &travel_knots,
+            loop_pts: &loop_pts[s.index()],
+            plane_x: geom.side_plane_x(s),
+            knots: &travel_knots[s.index()],
             columns: columns[s.index()],
         }),
         spec.link_count,
@@ -493,24 +492,31 @@ fn init_track_gear(blueprint: Res<TankBlueprint>, mut commands: Commands) {
     // circle (chord-exact `derive::sprocket_pitch_radius(geom.pitch, teeth)` by construction), and
     // the half-tread is `geom.plane_x` — the same measured values the belt/envelope ride.
     let trans = spec
-        .transmission_params(circles[0].1, geom.plane_x)
+        .transmission_params(geom.rest.get(Side::Right)[0].1, geom.plane_x)
         .expect("TankSpec transmission was validated before TrackGear construction");
 
-    let pin_radius = loop_pts
-        .iter()
-        .map(|p| Vec3::new(geom.plane_x, p.y, p.x).length())
-        .fold(0.0_f32, f32::max);
+    let mut pin_radius = 0.0_f32;
+    for side in Side::ALL {
+        for point in &loop_pts[side.index()] {
+            pin_radius =
+                pin_radius.max(Vec3::new(geom.side_plane_x(side), point.y, point.x).length());
+        }
+    }
     let column = columns
         .iter()
         .flatten()
         .map(|(x, _)| x.abs())
         .fold(0.0_f32, f32::max);
-    let travel = travel_knots.iter().map(|(_, t)| *t).fold(0.0_f32, f32::max);
+    let travel = travel_knots
+        .iter()
+        .flatten()
+        .map(|(_, t)| *t)
+        .fold(0.0_f32, f32::max);
     let rubble_radius = footprint_radius(pin_radius, column, geom.model.pin_to_outer, travel, 0.5);
     commands.insert_resource(TrackGear {
         loop_pts,
         count: spec.link_count,
-        plane_x: geom.plane_x,
+        plane_x: Side::ALL.map(|side| geom.side_plane_x(side)),
         travel_knots,
         columns,
         trans,
@@ -593,12 +599,12 @@ pub(crate) fn belt_tick<O: TerrainOracle>(
     for side in Side::ALL {
         let si = side.index();
         let input = SideInput {
-            loop_pts: &gear.loop_pts,
+            loop_pts: &gear.loop_pts[si],
             count: gear.count,
-            plane_x: side.plane_x(gear.plane_x),
+            plane_x: gear.plane_x[si],
             columns: gear.columns[si],
             travel: super::forces::TravelField {
-                knots: &gear.travel_knots,
+                knots: &gear.travel_knots[si],
             },
         };
         let ds = rig.drive.sides[si];
@@ -692,15 +698,20 @@ fn apply_track_forces(
     if let Some(capture) = bitprobe.as_deref_mut() {
         capture.clear_tick();
     }
-    // Startup extraction has not built running gear yet; no tank can drive before it exists.
-    let Some(gear) = gear else {
+    // Before spawn, and on a replica-only client, no dynamic tank needs driving construction.
+    if !tanks
+        .iter()
+        .any(|(_, _, _, _, body, ..)| *body == RigidBody::Dynamic)
+    {
         return;
-    };
-    let gear: &TrackGear = &gear;
-    // The map has not published its terrain field during startup.
-    let Some(oracle) = field.field.as_ref() else {
-        return;
-    };
+    }
+    let gear = gear
+        .as_deref()
+        .expect("a dynamic tank is admitted only after startup constructs TrackGear");
+    let oracle = field
+        .field
+        .as_ref()
+        .expect("a dynamic tank is admitted only after its world publishes the terrain field");
     let dt = time.delta_secs();
     let mut entities = Vec::new();
     let mut near = Vec::new();
@@ -810,5 +821,34 @@ fn apply_track_forces(
         }
         effect.field_digest = coarse_grip_digest(&grip_elements);
         *grip_effect = effect;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Both force routes must retain their authored side's geometry. A mutant that copies the
+    /// right loop, placement or travel profile would make the asymmetric fixture indistinguishable.
+    #[test]
+    fn asymmetric_construction_reaches_both_force_routes() {
+        let mut app = App::new();
+        app.add_plugins((crate::bake::plugin, sim_plugin));
+        app.world_mut().run_schedule(Startup);
+        {
+            let mut blueprint = app.world_mut().resource_mut::<TankBlueprint>();
+            let mut spec = super::super::rig_geom::tiger_spec();
+            spec.track.pin_plane_x.left -= 0.2;
+            spec.track.idler.radius.left *= 0.9;
+            blueprint.spec = std::sync::Arc::new(spec);
+        }
+        app.world_mut().run_schedule(PreUpdate);
+        let gear = app.world().resource::<TrackGear>();
+        let geom = app.world().resource::<super::super::rig_geom::RigGeom>();
+        assert_eq!(gear.plane_x[0], geom.side_plane_x(Side::Left));
+        assert_eq!(gear.plane_x[1], geom.side_plane_x(Side::Right));
+        assert_ne!(gear.plane_x[0], -gear.plane_x[1]);
+        assert_ne!(gear.loop_pts[0], gear.loop_pts[1]);
+        assert_ne!(gear.travel_knots[0], gear.travel_knots[1]);
     }
 }
