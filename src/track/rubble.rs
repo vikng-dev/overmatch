@@ -1,7 +1,7 @@
 //! Buildings and rubble under the running gear, in the game's tank driving physics (game state
 //! only). The terrain field ([`super::oracle::BlockField`]) is the heightmap and the authored
 //! blocks; a building's elements and standing chunks and every loose piece are Avian colliders the
-//! field never holds. [`RubbleBodies`] snapshots those colliders near one tank, the belt's support
+//! field never holds. [`RubbleBodies`] snapshots the nearby colliders shared by every driving source, the belt's support
 //! reads each through a convex shape check over every link's footprint ([`RubbleBodies::in_slab`])
 //! at the ground's own per-metre spring. In the same tick [`piece_impulses`] sizes what a loose
 //! piece takes back, and [`RubbleBodies::record_static_contacts`] stages the whole opposite
@@ -28,18 +28,20 @@
 //!   (`update_solver_body_aabbs`) and writes each collider's `Position`/`Rotation`, so a snapshot
 //!   in `FixedUpdate` reads the poses the last step wrote.
 //!
-//! **What holds the recipient decides its side of a belt contact.** A body whose own support is
-//! a belt law this tick (another driving tank's hull) carries a load through that law, which
-//! responds to force: it takes the whole opposite reaction, `−(normal × load + traction) × dt`,
-//! as fixed construction does, resting or not. Every other dynamic body is a *piece*: one resting
-//! on something passes the tank's load on to what holds it, and only avian's solver sees that, so
-//! the two sides of a belt-piece contact are sized differently.
+//! **The recipient's integration law decides its side of a belt contact.** A body stepped by
+//! the belt-force adapter takes the whole opposite reaction, `−(normal × load + traction) × dt`,
+//! whether its own belt currently touches a surface or not. Its force integration is the same
+//! while resting, airborne or overturned; changing contact does not change that construction.
+//! Every other dynamic body is a *piece*. Avian alone resolves what holds a piece, so the
+//! piece-side clamp is deliberately asymmetric with the belt's support force: a resting piece
+//! takes no normal impulse. This approximation avoids an explicit stiff spring accelerating a
+//! light recipient past the belt; it does not conserve the belt-piece pair's momentum.
 //! - *The tank's side* is the track law: a piece supports and grips the tank as ground does, with
 //!   the slip and the support damping measured against the piece's own velocity at the contact
 //!   ([`RubbleBodies::velocity_at`]).
 //! - *The piece's side* is the clamped contact impulse of sequential-impulse solvers (Catto, the
-//!   family avian's own solver belongs to), one pass over the tick's contacts in emission order,
-//!   each sized after the impulses before it. The push, along the normal: the support reaction's
+//!   family avian's own solver belongs to), one pass over all sources' contacts in canonical
+//!   geometry order, each sized after the impulses before it. The push, along the normal: the support reaction's
 //!   impulse `load × dt`, at most what stops the piece closing on the belt. Then the drag, along
 //!   the traction reaction's direction: its impulse, at most Coulomb's `μ × load × dt` (the
 //!   normal force the belt presses with over the tick, whether or not the piece is closing, so a
@@ -653,11 +655,11 @@ fn source_force(contact: &BeltContact) -> Vec3 {
 }
 
 /// Every dynamic recipient's side of `contacts` (module doc): the whole opposite reaction on a
-/// body in `belt_held` (one whose support is a belt law this tick), the clamped impulse on any
+/// body in `belt_held` (one stepped by the belt-force adapter this tick), the clamped impulse on any
 /// other. Pieces are sized in one canonical order of the contacts' geometry, each impulse taken
 /// into `bodies` before the next is sized, so the order the contacts were gathered in, and which
-/// tank produced them, decide nothing. One push per contact on a dynamic body, zero where a
-/// piece is not closing on the belt.
+/// tank produced them, decide nothing. One push per contact on a dynamic body; its normal
+/// part is zero where a piece is not closing on the belt.
 pub(crate) fn piece_impulses<'c>(
     bodies: &mut RubbleBodies,
     contacts: impl IntoIterator<Item = &'c BeltContact>,

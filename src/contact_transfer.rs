@@ -209,8 +209,9 @@ impl ContactTransfers {
     /// four corners, each corner's closing momentum 88.6 N·s).
     ///
     /// The fourth item is the contact's source mass (kg), the same on each of its points: the
-    /// body's effective mass along the normal at the blow's centroid, its rotation and locked
-    /// axes included. A plastic share is linear in the blow, so points that each take their share
+    /// body's effective mass for the weighted distribution of normal impulses, `(Σw)²/(wᵀKw)`
+    /// ([`Self::contact_mass`]), rotation and locked axes included. Co-normal points reduce to
+    /// the effective mass along that normal at their weighted centroid. A plastic share is linear in the blow, so points that each take their share
     /// of one contact's blow against this mass take the contact's share once; against each
     /// point's own effective mass (a cube's corner holds a quarter of the cube's along its face's
     /// normal, DERIVED) the points of one contact would each spend the receiver's whole mass and
