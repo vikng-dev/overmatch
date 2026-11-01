@@ -277,6 +277,25 @@ fn concave_corner(profile: &[[f32; 2]]) -> Option<usize> {
     })
 }
 
+/// A proper crossing of nonadjacent edges makes faces overlap even when the half-plane
+/// tolerance admits every vertex. Use f64 orientation of the authored f32 coordinates;
+/// simplicity is topological and has no plane-distance tolerance.
+fn crossing_edge(profile: &[[f32; 2]]) -> Option<usize> {
+    let orient = |a: [f32; 2], b: [f32; 2], c: [f32; 2]| {
+        (f64::from(b[0]) - f64::from(a[0])) * (f64::from(c[1]) - f64::from(a[1]))
+            - (f64::from(b[1]) - f64::from(a[1])) * (f64::from(c[0]) - f64::from(a[0]))
+    };
+    let opposite = |a: f64, b: f64| (a < 0.0 && b > 0.0) || (a > 0.0 && b < 0.0);
+    let n = profile.len();
+    (0..n).find(|&i| {
+        let (a, b) = (profile[i], profile[(i + 1) % n]);
+        (i + 2..n).filter(|&j| (j + 1) % n != i).any(|j| {
+            let (c, d) = (profile[j], profile[(j + 1) % n]);
+            opposite(orient(a, b, c), orient(a, b, d)) && opposite(orient(c, d, a), orient(c, d, b))
+        })
+    })
+}
+
 /// The signed area of a polygon, positive when counter-clockwise.
 pub fn polygon_area(points: &[[f32; 2]]) -> f32 {
     let n = points.len();
@@ -383,7 +402,9 @@ impl BuildingAsset {
                     "element {name}'s profile repeats vertex {corner}; remove repeated vertices and rebake the building"
                 ));
             }
-            if let Some(corner) = concave_corner(&element.profile) {
+            if let Some(corner) =
+                crossing_edge(&element.profile).or_else(|| concave_corner(&element.profile))
+            {
                 return Err(format!(
                     "element {name}'s profile is not convex at corner {corner}: its collider is \
                      the profile's hull and its faces are the profile's edges; split the element"

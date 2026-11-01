@@ -577,4 +577,23 @@ pub(crate) mod tests {
             "{error}"
         );
     }
+    /// Collider and face readers require a simple boundary even when crossings fit inside
+    /// the plane tolerance. ASSUMED fixture: a unit-radius 501-gon visited in steps of two.
+    #[test]
+    fn a_dense_star_profile_is_refused_before_play() {
+        let mut asset = shipped_house().asset.clone();
+        asset.elements[0].profile = (0..501)
+            .map(|k| {
+                let angle = (k * 2) as f32 * std::f32::consts::TAU / 501.0;
+                [angle.cos(), angle.sin()]
+            })
+            .collect();
+        let error = asset
+            .check()
+            .expect_err("crossing edges cannot bound a prism");
+        assert!(
+            error.contains("profile") && error.contains("split"),
+            "{error}"
+        );
+    }
 }
