@@ -1,0 +1,106 @@
+// The game's damage-model view: the muzzle law's taste, every muzzle magnitude of every gun, once.
+// The law is `src/guns/muzzle.rs`'s module doc and the design record's "The muzzle law"
+// (.agents/docs/design/view-sweep-review.md). A shot's muzzle energy E (J, half its round's mass
+// times its speed squared) sizes every layer: each value below is what a shot of
+// `reference_energy_j` draws, and a value of unit
+//   m   (a length)            scales as (E / reference)^(1/3),
+//   lm  (a light)             scales as (E / reference)^(2/3),
+//   s   (a gas life)          scales as (E / reference)^duration_exponent,
+//   m/s (a gas speed)         scales as (E / reference)^(1/3 - duration_exponent),
+// and a flash life (`core`, `flames`, `glow`, `light` lifetimes), a share, a ratio, a count or a
+// colour does not scale. The gun's `muzzle_shape` picks one of `shapes`: where the gas goes.
+// Every value is TASTE (`Tuned`): no flash, smoke or light of any gun has been measured.
+(
+    reference_energy_j: (1.0e6, Tuned("TASTE: a round 1 MJ, between the shipped guns' shots")),
+    duration_exponent: (0.1667, Tuned("TASTE: a gas life grows with the sixth root of energy, half
+        the cube root's rate, so a rifle's smoke lingers long enough to read")),
+    core: (
+        diameter_m: (2.5, Tuned("TASTE: the hot core's birth diameter")),
+        jitter: (0.15, Tuned("TASTE: each shot's core and flames vary by this share either way")),
+        standoff_m: (0.6, Tuned("TASTE: the core's centre down the bore")),
+        lifetime_s: (0.03, Tuned("TASTE: two frames at 60 Hz, every gun")),
+        end_scale: (0.85, Tuned("TASTE: born at its largest, collapsing")),
+    ),
+    flames: (
+        length_m: (3.0, Tuned("TASTE: one jet's whole flame length, before its shape's share")),
+        width_ratio: (0.5, Tuned("TASTE: a flame plane's width over its length")),
+        lifetime_s: (0.045, Tuned("TASTE: three frames at 60 Hz, outliving the core")),
+        end_scale: (0.9, Tuned("TASTE: flame collapse")),
+    ),
+    fireball: (
+        diameter_m: (5.0, Tuned("TASTE: the burning gas cloud's birth diameter")),
+        growth: (1.15, Tuned("TASTE: its diameter at death over its birth")),
+        standoff_m: (1.2, Tuned("TASTE: its centre down the bore")),
+        lifetime_s: (0.17, Tuned("TASTE: the sheet's playback window")),
+    ),
+    glow: (
+        scale: (1.6, Tuned("TASTE: the fill glow's diameter over the core's")),
+        lifetime_s: (0.07, Tuned("TASTE: the fill glow bridging the flash and the smoke")),
+        end_scale: (0.9, Tuned("TASTE: fill glow collapse")),
+    ),
+    smoke: (
+        puff_interval_s: (0.3, Tuned("TASTE: at most one puff per this many seconds of a mount's
+            cyclic fire; per-shot puffs at a belt's rate overdraw")),
+        lifetime_s: (1.2, Tuned("TASTE: the propellant puff's life")),
+        birth_diameter_m: (1.5, Tuned("TASTE: the puff's birth diameter")),
+        end_diameter_m: (2.8, Tuned("TASTE: the puff's diameter at death")),
+        standoff_m: (1.1, Tuned("TASTE: the puff's birth down the bore")),
+        rise_mps: (0.45, Tuned("TASTE: the puff's rise")),
+        push_mps: (1.0, Tuned("TASTE: the gas's push down the bore")),
+        opacity: (0.85, Tuned("TASTE: the puff's overall opacity")),
+    ),
+    light: (
+        peak_lm: (4.0e6, Tuned("TASTE: the transient light's first-frame peak")),
+        range_m: (25.0, Tuned("TASTE: the light's reach")),
+        lifetime_s: (0.055, Tuned("TASTE: flash and out, every gun")),
+        radius_m: (0.25, Tuned("TASTE: the emitter's own radius")),
+        standoff_m: (0.8, Tuned("TASTE: the light's centre down the bore")),
+        colour_srgb: ((1.0, 0.72, 0.42), Tuned("TASTE: a warm flash, every gun")),
+    ),
+    ground_blast: (
+        reach_m: (1.8, Tuned("TASTE: the muzzle height over the ground at and below which the gas
+            lifts loose ground")),
+        puffs: ((5, 8), Tuned("TASTE: puffs on fully erodible ground; each grows with the shot, so
+            the count does not")),
+        birth_diameter_m: (1.25, Tuned("TASTE: a dust puff's birth diameter")),
+        end_diameter_m: ((2.6, 3.5), Tuned("TASTE: a dust puff's diameter at death")),
+        spread_m: ((0.3, 2.1), Tuned("TASTE: a puff's birth offset from the ground under the muzzle")),
+        push_mps: ((1.5, 3.3), Tuned("TASTE: the dust's outward drift")),
+        rise_mps: (0.3, Tuned("TASTE: the dust's lift, hugging the ground")),
+        bore_bias: (0.65, Tuned("TASTE: the pull of each puff onto the bore's azimuth")),
+        lifetime_s: ((1.7, 2.1), Tuned("TASTE: the dust cloud's life")),
+        opacity: (0.5, Tuned("TASTE: the dust's overall opacity")),
+    ),
+    shapes: (
+        // Baffles at the muzzle turn most of the gas out sideways: a starburst core, a short
+        // forward flame, a jet each side swept a little back, the fireball and the fill glow.
+        muzzle_brake: (
+            core: (sprite: (Starburst, Tuned("TASTE: the brake's ports throw a spiked star")),
+                share: (1.0, Tuned("TASTE: the full core"))),
+            forward: (planes: (2, Tuned("TASTE: two crossed planes down the bore")),
+                share: (0.55, Tuned("TASTE: the brake leaves the bore a short flame"))),
+            side_jets: (Some((
+                angle_deg: (100.0, Tuned("TASTE: each jet's angle from the bore, swept back")),
+                planes: (2, Tuned("TASTE: two crossed planes round each jet")),
+                share: (0.85, Tuned("TASTE: most of the flame leaves through the baffles")),
+            )), Tuned("TASTE: a jet out of each side of the brake")),
+            fireball: (true, Tuned("TASTE: the gas left in front of the brake burns as a fireball")),
+            glow: (true, Tuned("TASTE: a fill glow bridges the flash and the smoke")),
+            smoke: (true, Tuned("TASTE: the propellant leaves a puff")),
+            ground_blast: (true, Tuned("TASTE: the gas lifts loose ground under a low muzzle")),
+        ),
+        // A cone at the muzzle cools and spreads the gas before it can flare: a small round core,
+        // a spread of short forward flames, no secondary fireball and no fill glow.
+        flash_hider: (
+            core: (sprite: (Glow, Tuned("TASTE: the cone leaves a small round glow")),
+                share: (0.6, Tuned("TASTE: the hider suppresses the flash"))),
+            forward: (planes: (3, Tuned("TASTE: the cone spreads the flame into a star")),
+                share: (0.8, Tuned("TASTE: a spread of short flames"))),
+            side_jets: (None, Tuned("TASTE: the cone turns no gas sideways")),
+            fireball: (false, Tuned("TASTE: suppressing the secondary flash is the hider's purpose")),
+            glow: (false, Tuned("TASTE: no flare to bridge")),
+            smoke: (true, Tuned("TASTE: the propellant leaves a puff")),
+            ground_blast: (true, Tuned("TASTE: the gas lifts loose ground under a low muzzle")),
+        ),
+    ),
+)

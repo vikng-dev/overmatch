@@ -1,14 +1,16 @@
 //! The game's damage-model view, game state only.
 //!
 //! View-only muzzle dressing for [`FireShell`] events: one consumer for every gun, reading the
-//! firing gun's authored emission ([`crate::guns::MuzzleEmission`], carried on the shot). No
-//! calibre, weapon kind or viewer distance selects a layer's size, life or light; the constants
-//! below are the shipped sprite sheets' playback and the renderer's caps, shared by every gun.
+//! shot's resolved emission ([`crate::guns::MuzzleEmission`], carried on the shot): the muzzle
+//! law's sizes for its muzzle energy and its gun's muzzle shape (`guns::muzzle`; the law is the
+//! design record's "The muzzle law", `.agents/docs/design/view-sweep-review.md`). No calibre,
+//! weapon kind or viewer distance selects a layer's size, life or light; the constants below are
+//! the shipped sprite sheets' playback and the renderer's caps, shared by every gun.
 //!
-//! Layers: the flash core, the fireball, the fill glow, the flame planes, the gas smoke, the ground
-//! blast's dust cloud and the transient light. The core, the fireball and the light draw at any
-//! range; beyond [`FAR_FULL_DRESSING`] the other layers are skipped, a cost bound on overdraw that
-//! never resizes what is drawn.
+//! Layers: the flash core, the fireball, the fill glow, the flame planes (a forward jet and any
+//! side jets), the gas smoke, the ground blast's dust cloud and the transient light. The core, the
+//! fireball and the light draw at any range; beyond [`FAR_FULL_DRESSING`] the other layers are
+//! skipped, a cost bound on overdraw that never resizes what is drawn.
 //!
 //! Invariant (ADR-0014): spawned entities are render-only. Light and billboard rings bound replay
 //! duplicates; stale remote shots do not replay an already-expired flash.
@@ -342,11 +344,11 @@ fn spawn_muzzle_light(
     commands: &mut Commands,
     ring: &mut MuzzleLightRing,
     position: Vec3,
-    peak: f32,
     light: &crate::guns::FlashLight,
     refire_interval: Option<f32>,
 ) {
     let lifetime = light.lifetime_s;
+    let peak = light.peak_lm;
     let [red, green, blue] = light.colour_srgb;
     let light = commands
         .spawn((
@@ -377,7 +379,7 @@ fn spawn_muzzle_light(
     crate::push_capped_entity(commands, &mut ring.0, light, LIGHT_CAP);
 }
 
-/// Every presented shot's counter for a gun's smoke ration
+/// Every presented shot's counter for a mount's smoke ration
 /// ([`crate::guns::MuzzleEmission::smoke`]'s `every_rounds`); it ticks once per non-stale shot.
 #[derive(Resource, Default)]
 struct SmokeCadence(std::collections::HashMap<Option<(Entity, usize)>, u32>);
@@ -434,7 +436,7 @@ impl MuzzleKit<'_, '_> {
     }
 }
 
-/// Dress one shot from its gun's authored emission, hung off the `FireShell` geometry (origin and
+/// Dress one shot from its resolved emission, hung off the `FireShell` geometry (origin and
 /// bore direction).
 fn dress_fire(fire: On<FireShell>, mut kit: MuzzleKit) {
     // Stale remote shot: the flash moment is long past — skip, don't play late.
@@ -443,7 +445,7 @@ fn dress_fire(fire: On<FireShell>, mut kit: MuzzleKit) {
     }
     let emission = fire.muzzle;
     // The game's damage-model view counts this mount's non-stale shots, near or far. Other
-    // mounts and smokeless guns cannot change its authored ration.
+    // mounts and smokeless shots cannot change its ration.
     let smoke_due = emission
         .smoke
         .is_some_and(|smoke| kit.cadence.puff(fire.shooter, smoke.every_rounds));
@@ -562,40 +564,27 @@ fn dress_fire(fire: On<FireShell>, mut kit: MuzzleKit) {
         });
     }
 
-    // --- Directional flame planes: bore-aligned quads evenly crossed around the bore, on
-    // consecutive frames of the 4-flame atlas from a random start.
+    // --- Flame planes: each jet's quads evenly crossed around its axis, on consecutive frames of
+    // the 4-flame atlas from a random start. The forward jet runs down the bore; side jets leave
+    // in the plane of the bore and the side axis, at the shape's angle from the bore.
     let flames = emission.flames;
-    if near && flames.count > 0 {
-        let base_roll = kit.rng.range(0.0, std::f32::consts::TAU);
+    if near {
+        let mut jets = vec![(dir, flames.forward)];
+        if let Some(side) = flames.side_jets {
+            // The side axis is level across the bore; a vertical bore has no level side, and
+            // any axis across it serves.
+            let across = dir
+                .cross(Vec3::Y)
+                .try_normalize()
+                .unwrap_or_else(|| dir.any_orthonormal_vector());
+            let (sin, cos) = side.angle_rad.sin_cos();
+            for flank in [across, -across] {
+                jets.push((dir * cos + flank * sin, side.jet));
+            }
+        }
         let plane_frame = kit.rng.range(0.0, 4.0).floor();
-        let step = std::f32::consts::PI / f32::from(flames.count);
-        for i in 0..flames.count {
-            let length = kit.rng.range(flames.length_m.0, flames.length_m.1);
-            // Sprite +Y (flame up) onto the bore, then rolled around it; the quad's centre sits
-            // ~45% down the flame so the base hugs the muzzle.
-            let rotation = Quat::from_axis_angle(dir, base_roll + f32::from(i) * step)
-                * Quat::from_rotation_arc(Vec3::Y, dir);
-            let material = kit
-                .assets
-                .flash_material(kit.assets.flame_atlas.clone(), 2.0);
-            kit.billboard(BillboardSpec {
-                material,
-                lifetime: flames.lifetime_s,
-                origin: origin + dir * (length * 0.45),
-                drift: Vec3::ZERO,
-                frames: 4,
-                flipbook: Flipbook::Loop {
-                    start: (plane_frame + f32::from(i)) % 4.0,
-                    rate: 0.0,
-                },
-                start_size: length,
-                end_size: length * flames.end_scale,
-                aspect: Vec3::new(flames.width_ratio, 1.0, 1.0),
-                roll: 0.0,
-                spin: 0.0,
-                erosion_end: 0.0,
-                rotation: Some(rotation),
-            });
+        for (axis, jet) in jets {
+            spawn_flame_jet(&mut kit, origin, axis, jet, &flames, plane_frame);
         }
     }
 
@@ -649,20 +638,59 @@ fn dress_fire(fire: On<FireShell>, mut kit: MuzzleKit) {
     // --- Muzzle light: transient, first frame hottest. Its lifetime and refire cadence decide
     // casting.
     let light = emission.light;
-    let peak = if fire.tracer {
-        light.peak_lm * light.tracer_gain
-    } else {
-        light.peak_lm
-    };
     let refire = refire_interval(&fire, &kit.weapons);
     spawn_muzzle_light(
         &mut kit.commands,
         &mut kit.light_ring,
         origin + dir * light.standoff_m,
-        peak,
         &light,
         refire,
     );
+}
+
+/// One flame jet along unit `axis` from the muzzle at `origin`: `jet.planes` bore-style quads
+/// crossed around the axis, each its own rolled length, the quad's centre ~45% along the flame so
+/// its base hugs the muzzle.
+fn spawn_flame_jet(
+    kit: &mut MuzzleKit,
+    origin: Vec3,
+    axis: Vec3,
+    jet: crate::guns::FlameJet,
+    flames: &crate::guns::Flames,
+    plane_frame: f32,
+) {
+    if jet.planes == 0 {
+        return;
+    }
+    let base_roll = kit.rng.range(0.0, std::f32::consts::TAU);
+    let step = std::f32::consts::PI / f32::from(jet.planes);
+    for i in 0..jet.planes {
+        let length = kit.rng.range(jet.length_m.0, jet.length_m.1);
+        // Sprite +Y (flame up) onto the axis, then rolled around it.
+        let rotation = Quat::from_axis_angle(axis, base_roll + f32::from(i) * step)
+            * Quat::from_rotation_arc(Vec3::Y, axis);
+        let material = kit
+            .assets
+            .flash_material(kit.assets.flame_atlas.clone(), 2.0);
+        kit.billboard(BillboardSpec {
+            material,
+            lifetime: flames.lifetime_s,
+            origin: origin + axis * (length * 0.45),
+            drift: Vec3::ZERO,
+            frames: 4,
+            flipbook: Flipbook::Loop {
+                start: (plane_frame + f32::from(i)) % 4.0,
+                rate: 0.0,
+            },
+            start_size: length,
+            end_size: length * flames.end_scale,
+            aspect: Vec3::new(flames.width_ratio, 1.0, 1.0),
+            roll: 0.0,
+            spin: 0.0,
+            erosion_end: 0.0,
+            rotation: Some(rotation),
+        });
+    }
 }
 
 /// Which of the two blast sheets this shot plays. A sheet's own sequence is fixed — it opens on
@@ -994,8 +1022,9 @@ mod tests {
     const CANNON_CALIBER: f32 = 0.088;
     const RIFLE_CALIBER: f32 = 0.0079;
 
-    /// The full fixture's airborne layers: core + fireball + glow + 2 planes + smoke.
-    const CANNON_AIRBORNE: usize = 6;
+    /// The full fixture's airborne layers: core + fireball + glow + 2 forward planes + 2 planes
+    /// on each of 2 side jets + smoke.
+    const CANNON_AIRBORNE: usize = 10;
 
     fn billboards(app: &mut App) -> usize {
         app.world_mut()
@@ -1048,7 +1077,7 @@ mod tests {
         );
         assert_eq!(billboards(&mut rationed), 2, "core + 1 flame plane");
         assert_eq!(lights(&mut rationed), 1);
-        let largest = MuzzleEmission::fixture_rifle().flames.length_m.1;
+        let largest = MuzzleEmission::fixture_rifle().flames.forward.length_m.1;
         let world = rationed.world_mut();
         for billboard in world.query::<&Billboard>().iter(world) {
             assert!(
@@ -1057,6 +1086,60 @@ mod tests {
                 billboard.start_size
             );
         }
+    }
+
+    /// The game's damage-model view draws each muzzle shape's statement and only it: at one
+    /// energy, a shape's forward planes lie along the bore, its side jets' planes (two jets, if
+    /// it states them) leave across it, and only a shape stating a fireball plays one. A mutant
+    /// that draws side jets for every shape, drops a shape's jets or a fireball, or lets a
+    /// fireball through for a shape that states none fails. FIXTURE DATA: a 10 kg round at
+    /// 780 m/s, no gun's.
+    #[test]
+    fn each_muzzle_shape_draws_its_shape_and_only_its_shape() {
+        use crate::guns::{Mechanism, MuzzleEnergy, MuzzleLook, MuzzleShape};
+        let look = MuzzleLook::shipped();
+        let energy = MuzzleEnergy::of(10.0, 780.0).expect("a positive fixture");
+        let mut seen_side = false;
+        for shape in [MuzzleShape::MuzzleBrake, MuzzleShape::FlashHider] {
+            let statement = look.shape(shape);
+            let mut app = harness();
+            let emission = look.emission(shape, energy, Mechanism::Single);
+            fire_with(&mut app, emission, SLOW, CANNON_CALIBER, 0, false);
+            let (mut forward, mut side) = (0u8, 0u8);
+            let world = app.world_mut();
+            for transform in world
+                .query_filtered::<&Transform, (
+                    With<Billboard>,
+                    Without<crate::vfx::billboard::FaceCamera>,
+                )>()
+                .iter(world)
+            {
+                // The fire direction is +X; a plane's flame runs along its rotated +Y.
+                let along = (transform.rotation * Vec3::Y).dot(Vec3::X);
+                if along > 0.999 {
+                    forward += 1;
+                } else {
+                    assert!(along < 0.5, "{shape:?}: a plane {along} off the bore and its sides");
+                    side += 1;
+                }
+            }
+            assert_eq!(forward, statement.forward_planes, "{shape:?}");
+            assert_eq!(
+                side,
+                statement.side_jets.map_or(0, |jets| 2 * jets.planes),
+                "{shape:?}"
+            );
+            seen_side |= side > 0;
+            assert_eq!(
+                blast_cores(&mut app).len(),
+                usize::from(statement.fireball),
+                "{shape:?}"
+            );
+        }
+        assert!(
+            seen_side,
+            "some shipped shape states side jets: the survey is not vacuous"
+        );
     }
 
     /// Distance LOD contract: beyond `FAR_FULL_DRESSING` only the core, the fireball and the light
@@ -1301,7 +1384,9 @@ mod tests {
                 for shot in 0..SHOTS {
                     // One shot per app, each under its own view seed: the rolls differ, and no
                     // ring eviction can recycle a puff's id between shots.
-                    let mut app = harness_ground(0.0);
+                    // The muzzle stands half its gun's reach over the ground: inside it whatever
+                    // the shot's energy.
+                    let mut app = harness_ground(FIRE_ORIGIN.y - 0.5 * blast.reach_m);
                     app.insert_resource(ViewRng::seeded(shot as u64));
                     app.world_mut()
                         .resource_mut::<crate::ground_types::GroundTypes>()
@@ -1489,15 +1574,13 @@ mod tests {
         assert!(!q.single(world).expect("one light").shadow_maps_enabled);
     }
 
-    /// A tracer multiplies the light's peak by the emission's `tracer_gain`; a plain shot glows at
-    /// the authored peak.
+    /// The game's damage-model view: the muzzle light glows at the emission's peak whether or
+    /// not the shot carries a tracer, so the muzzle energy stays its one scalar. A mutant that
+    /// brightens a tracer's flash fails.
     #[test]
-    fn a_tracer_scales_the_light_by_its_authored_gain() {
+    fn a_tracer_leaves_the_muzzle_light_at_its_emission_peak() {
         let light = MuzzleEmission::fixture_rifle().light;
-        for (tracer, peak) in [
-            (false, light.peak_lm),
-            (true, light.peak_lm * light.tracer_gain),
-        ] {
+        for tracer in [false, true] {
             let mut app = harness();
             rifle(&mut app, 0, tracer);
             let world = app.world_mut();
@@ -1505,7 +1588,7 @@ mod tests {
                 .query::<&PointLight>()
                 .single(world)
                 .expect("one light");
-            assert_eq!(point.intensity, peak, "tracer {tracer}");
+            assert_eq!(point.intensity, light.peak_lm, "tracer {tracer}");
         }
     }
 
@@ -1568,7 +1651,6 @@ mod tests {
                 &mut commands,
                 &mut MuzzleLightRing::default(),
                 Vec3::ZERO,
-                1.0,
                 &light,
                 interval,
             );

@@ -35,7 +35,7 @@ const CAMERA_UP_M: f32 = 0.6;
 
 #[derive(Clone, Debug)]
 enum What {
-    /// Boxed: a fired round carries its gun's whole muzzle emission.
+    /// Boxed: a fired round carries its whole muzzle emission.
     Round(Box<crate::rounds::Round>),
     Charge {
         mass: f32,

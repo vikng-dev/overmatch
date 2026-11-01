@@ -122,7 +122,8 @@ pub(crate) struct Round {
     pub(crate) fuze_mode: u8,
     /// Authored view-only emissions, carried through both fire paths from round data.
     pub(crate) effects: FlightEffects,
-    /// The firing gun's authored muzzle emission ([`crate::guns::MuzzleEmission`]), view only.
+    /// This round's muzzle emission from the firing gun ([`crate::guns::MuzzleEmission`]), view
+    /// only: the muzzle law at its muzzle energy and the gun's muzzle shape.
     pub(crate) muzzle: crate::guns::MuzzleEmission,
 }
 
@@ -145,6 +146,12 @@ pub(crate) struct RoundFacts {
 }
 
 impl RoundFacts {
+    /// The launched assembly's mass (kg), any carrier included: what leaves the muzzle, so what
+    /// the shot's muzzle energy reads ([`crate::guns::MuzzleEnergy`]).
+    pub(crate) fn launched_mass(&self) -> f32 {
+        self.body.mass
+    }
+
     /// The round fired at `muzzle_speed` (m/s), or why the capability law cannot state it there:
     /// the body, the penetrator and a burst's nose piece each inside the law's domain at that speed
     /// ([`round_in_domain`]), so a round outside it never reaches the march.

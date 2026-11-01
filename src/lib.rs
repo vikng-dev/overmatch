@@ -269,7 +269,7 @@ mod ui_font;
 /// [`windowed_runtime`], so every windowed root honours it. See the module doc.
 mod unattended;
 /// Ship-facing view-layer combat VFX: render-only subscribers to the sim's `Impact` and
-/// `FireShell` seams (impact puffs, the 88's muzzle flash/light/smoke + shell smoke trail) plus
+/// `FireShell` seams (impact puffs, every gun's muzzle flash/light/smoke + shell smoke trail) plus
 /// the shared billboard/erosion/gradient-LUT machinery they are built from. Mounted by both
 /// windowed clients (ADR-0014 — never the server).
 mod vfx;

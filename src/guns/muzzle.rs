@@ -1,13 +1,77 @@
-//! The game's damage-model view: a gun's authored muzzle emission, resolved with the gun registry.
+//! The game's damage-model view: the muzzle law, resolved with the gun registry.
 //!
-//! Every gun file states its flash, fireball, glow, smoke, light and ground blast with provenance;
-//! an absent layer is an authored `None`. The renderer (`vfx::muzzle`) consumes one record for every
-//! gun: no calibre, weapon kind or viewer distance selects a recipe or a size. Values are finite and
-//! in their rendering domains before a shot exists. Units are SI; diameters and lengths in metres
-//! along or across the bore, times in seconds, light in lumens.
+//! Two facts decide every shot's muzzle emission: its muzzle energy ([`MuzzleEnergy`], half the
+//! fired round's launched mass times its speed squared, both data) and its gun's
+//! [`MuzzleShape`] (the gun file's `muzzle_shape`). The shape picks the layers and where the gas
+//! goes; the energy sets every size, life and light through one curve per property, whose value at
+//! a reference energy lives once in the taste file `assets/vfx/muzzle.ron` ([`MuzzleLook`]). A
+//! length scales with the cube root of energy, a light with its two-thirds power, a gas life with
+//! the file's `duration_exponent`, a gas speed with their quotient; flash lives, shares, ratios,
+//! counts and colours do not scale. The law, its choices and its derived numbers are the design
+//! record's "The muzzle law" (`.agents/docs/design/view-sweep-review.md`).
+//!
+//! The registry resolves each (gun, round) once at load into a [`MuzzleEmission`], which every
+//! round carries ([`crate::rounds::Round::muzzle`]) to the one renderer (`vfx::muzzle`). Units are
+//! SI: metres along or across the bore, seconds, lumens, joules.
+
+use std::sync::LazyLock;
 
 use crate::provenance::Sourced;
 use serde::Deserialize;
+
+use super::Mechanism;
+
+/// The shipped taste file, embedded: the gun registry resolves synchronously (ADR-0014).
+const LOOK_RON: &str = include_str!("../../assets/vfx/muzzle.ron");
+
+/// A length's exponent on energy: similarity, DERIVED (energy is a volume's worth of gas work).
+const LENGTH_EXPONENT: f32 = 1.0 / 3.0;
+/// A light's exponent on energy: the flash's area, DERIVED from the same similarity.
+const AREA_EXPONENT: f32 = 2.0 / 3.0;
+
+/// A gun's muzzle construction, the one per-gun fact of its muzzle emission: where its propellant
+/// gas goes. The set the shipped guns need; a gun with another muzzle adds its variant here and
+/// its row to the taste file's `shapes`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize)]
+pub(crate) enum MuzzleShape {
+    /// Baffles turn most of the gas out sideways.
+    MuzzleBrake,
+    /// A cone cools and spreads the gas before it flares.
+    FlashHider,
+}
+
+/// A shot's muzzle energy, J: finite and positive by its one constructor.
+#[derive(Clone, Copy, Debug, PartialEq, PartialOrd)]
+pub(crate) struct MuzzleEnergy(f32);
+
+/// Which input left a shot without a muzzle energy.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) enum MuzzleEnergyError {
+    Mass(f32),
+    Speed(f32),
+}
+
+impl MuzzleEnergy {
+    /// Half of `mass_kg` times `speed_mps` squared, or the input that is not finite and positive.
+    pub(crate) fn of(mass_kg: f32, speed_mps: f32) -> Result<Self, MuzzleEnergyError> {
+        if !(mass_kg.is_finite() && mass_kg > 0.0) {
+            return Err(MuzzleEnergyError::Mass(mass_kg));
+        }
+        if !(speed_mps.is_finite() && speed_mps > 0.0) {
+            return Err(MuzzleEnergyError::Speed(speed_mps));
+        }
+        let joules = 0.5 * mass_kg * speed_mps * speed_mps;
+        assert!(
+            joules.is_finite() && joules > 0.0,
+            "a finite positive mass and speed give a finite positive energy (got {joules} J)"
+        );
+        Ok(Self(joules))
+    }
+
+    pub(crate) fn joules(self) -> f32 {
+        self.0
+    }
+}
 
 /// The flash core's sprite: the radial starburst atlas (four frames, one picked per shot) or the
 /// single round glow.
@@ -17,8 +81,8 @@ pub(crate) enum CoreSprite {
     Glow,
 }
 
-/// The gun's muzzle emission, carried by every round it fires ([`crate::rounds::Round::muzzle`])
-/// and every shot ([`crate::ballistics::FireShell`]) to the one view consumer.
+/// One shot's muzzle emission, every layer sized: what the renderer draws. Carried by every round
+/// ([`crate::rounds::Round::muzzle`]) and every shot ([`crate::ballistics::FireShell`]).
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) struct MuzzleEmission {
     pub(crate) core: FlashCore,
@@ -43,16 +107,32 @@ pub(crate) struct FlashCore {
     pub(crate) end_scale: f32,
 }
 
-/// Bore-aligned flame planes, evenly crossed around the bore.
+/// The flame planes: a forward jet down the bore and, for a shape that turns gas sideways, a jet
+/// out of each side.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) struct Flames {
-    /// How many planes; zero states none.
-    pub(crate) count: u8,
-    pub(crate) length_m: (f32, f32),
+    pub(crate) forward: FlameJet,
+    pub(crate) side_jets: Option<SideJets>,
     /// Plane width over its length.
     pub(crate) width_ratio: f32,
     pub(crate) lifetime_s: f32,
     pub(crate) end_scale: f32,
+}
+
+/// One jet's planes, evenly crossed around its axis.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct FlameJet {
+    /// How many planes; zero states none.
+    pub(crate) planes: u8,
+    pub(crate) length_m: (f32, f32),
+}
+
+/// A jet out of each side of the bore, in the plane of the bore and the side axis.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct SideJets {
+    /// Each jet's axis's angle from the bore, rad, in (0, π): above π/2 the jets sweep back.
+    pub(crate) angle_rad: f32,
+    pub(crate) jet: FlameJet,
 }
 
 /// The expanding fireball flipbook, played once.
@@ -76,7 +156,8 @@ pub(crate) struct GlowCard {
 /// The lingering propellant-gas puff.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) struct MuzzleSmoke {
-    /// One puff every this many shots, counted over every shot presented.
+    /// One puff every this many shots, counted over every shot presented: at least one, and for a
+    /// belt the shots its cyclic rate fires in the taste file's `puff_interval_s`.
     pub(crate) every_rounds: u32,
     pub(crate) lifetime_s: f32,
     /// Birth and end diameters, m.
@@ -100,8 +181,6 @@ pub(crate) struct FlashLight {
     pub(crate) standoff_m: f32,
     /// sRGB colour, each channel 0..=1.
     pub(crate) colour_srgb: [f32; 3],
-    /// Peak multiplier when the shot carries a tracer.
-    pub(crate) tracer_gain: f32,
 }
 
 /// The muzzle gas's coupling to the ground under the barrel: within `reach_m` of the muzzle the
@@ -126,23 +205,28 @@ pub(crate) struct GroundBlast {
     pub(crate) opacity: f32,
 }
 
+// --- The taste file as authored.
+
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
-pub(super) struct File {
+struct LookFile {
+    reference_energy_j: Sourced<f32>,
+    duration_exponent: Sourced<f32>,
     core: CoreFile,
     flames: FlamesFile,
-    fireball: Sourced<Option<FireballFile>>,
-    glow: Sourced<Option<GlowFile>>,
-    smoke: Sourced<Option<SmokeFile>>,
+    fireball: FireballFile,
+    glow: GlowFile,
+    smoke: SmokeFile,
     light: LightFile,
-    ground_blast: Sourced<Option<GroundBlastFile>>,
+    ground_blast: GroundBlastFile,
+    shapes: ShapesFile,
 }
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct CoreFile {
-    sprite: Sourced<CoreSprite>,
-    diameter_m: Sourced<(f32, f32)>,
+    diameter_m: Sourced<f32>,
+    jitter: Sourced<f32>,
     standoff_m: Sourced<f32>,
     lifetime_s: Sourced<f32>,
     end_scale: Sourced<f32>,
@@ -151,8 +235,7 @@ struct CoreFile {
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct FlamesFile {
-    count: Sourced<u8>,
-    length_m: Sourced<(f32, f32)>,
+    length_m: Sourced<f32>,
     width_ratio: Sourced<f32>,
     lifetime_s: Sourced<f32>,
     end_scale: Sourced<f32>,
@@ -161,7 +244,7 @@ struct FlamesFile {
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct FireballFile {
-    diameter_m: Sourced<(f32, f32)>,
+    diameter_m: Sourced<f32>,
     growth: Sourced<f32>,
     standoff_m: Sourced<f32>,
     lifetime_s: Sourced<f32>,
@@ -178,9 +261,10 @@ struct GlowFile {
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct SmokeFile {
-    every_rounds: Sourced<u32>,
+    puff_interval_s: Sourced<f32>,
     lifetime_s: Sourced<f32>,
-    diameter_m: Sourced<(f32, f32)>,
+    birth_diameter_m: Sourced<f32>,
+    end_diameter_m: Sourced<f32>,
     standoff_m: Sourced<f32>,
     rise_mps: Sourced<f32>,
     push_mps: Sourced<f32>,
@@ -196,7 +280,6 @@ struct LightFile {
     radius_m: Sourced<f32>,
     standoff_m: Sourced<f32>,
     colour_srgb: Sourced<(f32, f32, f32)>,
-    tracer_gain: Sourced<f32>,
 }
 
 #[derive(Deserialize)]
@@ -214,22 +297,145 @@ struct GroundBlastFile {
     opacity: Sourced<f32>,
 }
 
+/// One row per [`MuzzleShape`]: a field per variant, so a shape without its row does not parse.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ShapesFile {
+    muzzle_brake: ShapeFile,
+    flash_hider: ShapeFile,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ShapeFile {
+    core: ShapeCoreFile,
+    forward: JetFile,
+    side_jets: Sourced<Option<SideJetsFile>>,
+    fireball: Sourced<bool>,
+    glow: Sourced<bool>,
+    smoke: Sourced<bool>,
+    ground_blast: Sourced<bool>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ShapeCoreFile {
+    sprite: Sourced<CoreSprite>,
+    share: Sourced<f32>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct JetFile {
+    planes: Sourced<u8>,
+    share: Sourced<f32>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SideJetsFile {
+    angle_deg: Sourced<f32>,
+    planes: Sourced<u8>,
+    share: Sourced<f32>,
+}
+
+// --- The validated taste.
+
+/// The taste file, validated: every magnitude at the reference energy, and each shape's statement.
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct MuzzleLook {
+    reference_j: f32,
+    duration_exponent: f32,
+    jitter: f32,
+    core: ReferenceCore,
+    flames: ReferenceFlames,
+    fireball: ReferenceFireball,
+    glow: GlowCard,
+    smoke: ReferenceSmoke,
+    light: FlashLight,
+    ground_blast: GroundBlast,
+    brake: Shape,
+    hider: Shape,
+}
+
+/// The core at the reference energy, before its shape's sprite and share.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct ReferenceCore {
+    diameter_m: f32,
+    standoff_m: f32,
+    lifetime_s: f32,
+    end_scale: f32,
+}
+
+/// The flames at the reference energy: one jet's whole length before its shape's share.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct ReferenceFlames {
+    length_m: f32,
+    width_ratio: f32,
+    lifetime_s: f32,
+    end_scale: f32,
+}
+
+/// The fireball at the reference energy, before the jitter.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct ReferenceFireball {
+    diameter_m: f32,
+    growth: f32,
+    standoff_m: f32,
+    lifetime_s: f32,
+}
+
+/// The smoke at the reference energy, before its mechanism's ration.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct ReferenceSmoke {
+    puff_interval_s: f32,
+    lifetime_s: f32,
+    diameter_m: (f32, f32),
+    standoff_m: f32,
+    rise_mps: f32,
+    push_mps: f32,
+    opacity: f32,
+}
+
+/// One shape's statement: its core, its jets and which gas layers it draws.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct Shape {
+    pub(crate) sprite: CoreSprite,
+    pub(crate) core_share: f32,
+    pub(crate) forward_planes: u8,
+    pub(crate) forward_share: f32,
+    pub(crate) side_jets: Option<ShapeSideJets>,
+    pub(crate) fireball: bool,
+    pub(crate) glow: bool,
+    pub(crate) smoke: bool,
+    pub(crate) ground_blast: bool,
+}
+
+/// A shape's side jets: their angle from the bore (rad), planes and share of the flame length.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct ShapeSideJets {
+    pub(crate) angle_rad: f32,
+    pub(crate) planes: u8,
+    pub(crate) share: f32,
+}
+
 /// A finite value, nonnegative or (with `positive`) above zero.
 fn number(field: &str, Sourced(value): Sourced<f32>, positive: bool) -> Result<f32, String> {
     if !value.is_finite() || value < 0.0 || (positive && value == 0.0) {
         return Err(format!(
-            "muzzle.{field} must be finite and {} (got {value}) — author a valid emission value",
+            "{field} must be finite and {} (got {value})",
             if positive { "positive" } else { "nonnegative" }
         ));
     }
     Ok(value)
 }
 
-/// A share in 0..=1.
-fn share(field: &str, Sourced(value): Sourced<f32>) -> Result<f32, String> {
-    if !(0.0..=1.0).contains(&value) {
+/// A share in 0..=1, or (with `positive`) in (0, 1].
+fn share(field: &str, Sourced(value): Sourced<f32>, positive: bool) -> Result<f32, String> {
+    if !(0.0..=1.0).contains(&value) || (positive && value == 0.0) {
         return Err(format!(
-            "muzzle.{field} must be a share in 0..=1 (got {value}) — author a valid emission value"
+            "{field} must be a share in {} (got {value})",
+            if positive { "(0, 1]" } else { "0..=1" }
         ));
     }
     Ok(value)
@@ -241,133 +447,274 @@ fn span(field: &str, Sourced((lo, hi)): Sourced<(f32, f32)>) -> Result<(f32, f32
     let hi = number(field, Sourced(hi), true)?;
     if lo > hi {
         return Err(format!(
-            "muzzle.{field} is ({lo}, {hi}): state the range low end first"
+            "{field} is ({lo}, {hi}): state the range low end first"
         ));
     }
     Ok((lo, hi))
 }
 
-impl File {
-    pub(super) fn resolve(self) -> Result<MuzzleEmission, String> {
-        let core = FlashCore {
+impl ShapeFile {
+    fn resolve(self, name: &str) -> Result<Shape, String> {
+        let field = |rest: &str| format!("shapes.{name}.{rest}");
+        let side_jets = self
+            .side_jets
+            .0
+            .map(|jets| -> Result<ShapeSideJets, String> {
+                let angle = jets.angle_deg.0;
+                if !(angle > 0.0 && angle < 180.0) {
+                    return Err(format!(
+                        "{} must lie strictly between 0 and 180 degrees from the bore (got \
+                         {angle})",
+                        field("side_jets.angle_deg")
+                    ));
+                }
+                if jets.planes.0 == 0 {
+                    return Err(format!(
+                        "{} is 0 — a side jet draws at least one plane; state `None` for a shape \
+                         that turns no gas sideways",
+                        field("side_jets.planes")
+                    ));
+                }
+                Ok(ShapeSideJets {
+                    angle_rad: angle.to_radians(),
+                    planes: jets.planes.0,
+                    share: share(&field("side_jets.share"), jets.share, true)?,
+                })
+            })
+            .transpose()?;
+        Ok(Shape {
             sprite: self.core.sprite.0,
-            diameter_m: span("core.diameter_m", self.core.diameter_m)?,
-            standoff_m: number("core.standoff_m", self.core.standoff_m, false)?,
-            lifetime_s: number("core.lifetime_s", self.core.lifetime_s, true)?,
-            end_scale: number("core.end_scale", self.core.end_scale, true)?,
-        };
-        let flames = Flames {
-            count: self.flames.count.0,
-            length_m: span("flames.length_m", self.flames.length_m)?,
-            width_ratio: number("flames.width_ratio", self.flames.width_ratio, true)?,
-            lifetime_s: number("flames.lifetime_s", self.flames.lifetime_s, true)?,
-            end_scale: number("flames.end_scale", self.flames.end_scale, true)?,
-        };
-        let fireball = self
-            .fireball
-            .0
-            .map(|file| -> Result<Fireball, String> {
-                Ok(Fireball {
-                    diameter_m: span("fireball.diameter_m", file.diameter_m)?,
-                    growth: number("fireball.growth", file.growth, true)?,
-                    standoff_m: number("fireball.standoff_m", file.standoff_m, false)?,
-                    lifetime_s: number("fireball.lifetime_s", file.lifetime_s, true)?,
-                })
-            })
-            .transpose()?;
-        let glow = self
-            .glow
-            .0
-            .map(|file| -> Result<GlowCard, String> {
-                Ok(GlowCard {
-                    scale: number("glow.scale", file.scale, true)?,
-                    lifetime_s: number("glow.lifetime_s", file.lifetime_s, true)?,
-                    end_scale: number("glow.end_scale", file.end_scale, true)?,
-                })
-            })
-            .transpose()?;
-        let smoke = self
-            .smoke
-            .0
-            .map(|file| -> Result<MuzzleSmoke, String> {
-                let every_rounds = file.every_rounds.0;
-                if every_rounds == 0 {
-                    return Err(
-                        "muzzle.smoke.every_rounds is 0 — a puff comes every 1 or more \
-                                shots; author `None` for a smokeless gun"
-                            .into(),
-                    );
-                }
-                Ok(MuzzleSmoke {
-                    every_rounds,
-                    lifetime_s: number("smoke.lifetime_s", file.lifetime_s, true)?,
-                    diameter_m: span("smoke.diameter_m", file.diameter_m)?,
-                    standoff_m: number("smoke.standoff_m", file.standoff_m, false)?,
-                    rise_mps: number("smoke.rise_mps", file.rise_mps, false)?,
-                    push_mps: number("smoke.push_mps", file.push_mps, false)?,
-                    opacity: share("smoke.opacity", file.opacity)?,
-                })
-            })
-            .transpose()?;
-        let (r, g, b) = self.light.colour_srgb.0;
-        let light = FlashLight {
-            peak_lm: number("light.peak_lm", self.light.peak_lm, true)?,
-            range_m: number("light.range_m", self.light.range_m, true)?,
-            lifetime_s: number("light.lifetime_s", self.light.lifetime_s, true)?,
-            radius_m: number("light.radius_m", self.light.radius_m, false)?,
-            standoff_m: number("light.standoff_m", self.light.standoff_m, false)?,
-            colour_srgb: [
-                share("light.colour_srgb", Sourced(r))?,
-                share("light.colour_srgb", Sourced(g))?,
-                share("light.colour_srgb", Sourced(b))?,
-            ],
-            tracer_gain: number("light.tracer_gain", self.light.tracer_gain, true)?,
-        };
-        let ground_blast = self
-            .ground_blast
-            .0
-            .map(|file| -> Result<GroundBlast, String> {
-                let (lo, hi) = file.puffs.0;
-                if lo == 0 || lo > hi {
-                    return Err(format!(
-                        "muzzle.ground_blast.puffs is ({lo}, {hi}): state at least one puff, low \
-                         end first; author `None` for a gun whose gas lifts no ground"
-                    ));
-                }
-                let bore_bias = file.bore_bias.0;
-                if !(bore_bias > 0.5 && bore_bias <= 1.0) {
-                    return Err(format!(
-                        "muzzle.ground_blast.bore_bias is {bore_bias}: state it in (0.5, 1], where \
-                         a puff's radial and bore terms cannot cancel"
-                    ));
-                }
-                Ok(GroundBlast {
-                    reach_m: number("ground_blast.reach_m", file.reach_m, true)?,
-                    puffs: (lo, hi),
-                    birth_diameter_m: number(
-                        "ground_blast.birth_diameter_m",
-                        file.birth_diameter_m,
-                        true,
-                    )?,
-                    end_diameter_m: span("ground_blast.end_diameter_m", file.end_diameter_m)?,
-                    spread_m: span("ground_blast.spread_m", file.spread_m)?,
-                    push_mps: span("ground_blast.push_mps", file.push_mps)?,
-                    rise_mps: number("ground_blast.rise_mps", file.rise_mps, false)?,
-                    bore_bias,
-                    lifetime_s: span("ground_blast.lifetime_s", file.lifetime_s)?,
-                    opacity: share("ground_blast.opacity", file.opacity)?,
-                })
-            })
-            .transpose()?;
-        Ok(MuzzleEmission {
-            core,
-            flames,
-            fireball,
-            glow,
-            smoke,
-            light,
-            ground_blast,
+            core_share: share(&field("core.share"), self.core.share, true)?,
+            forward_planes: self.forward.planes.0,
+            forward_share: share(&field("forward.share"), self.forward.share, true)?,
+            side_jets,
+            fireball: self.fireball.0,
+            glow: self.glow.0,
+            smoke: self.smoke.0,
+            ground_blast: self.ground_blast.0,
         })
+    }
+}
+
+impl MuzzleLook {
+    /// The shipped taste file, parsed once. Panics on a malformed file: a broken shipped contract is
+    /// a build defect, as for the gun registry that reads it.
+    pub(crate) fn shipped() -> &'static Self {
+        static LOOK: LazyLock<MuzzleLook> = LazyLock::new(|| {
+            MuzzleLook::parse(LOOK_RON)
+                .unwrap_or_else(|err| panic!("assets/vfx/muzzle.ron is unusable: {err}"))
+        });
+        &LOOK
+    }
+
+    /// The taste file `text`, validated; the error names the field.
+    pub(crate) fn parse(text: &str) -> Result<Self, String> {
+        let file: LookFile = ron::de::from_str(text).map_err(|err| err.to_string())?;
+        let reference_j = number("reference_energy_j", file.reference_energy_j, true)?;
+        let duration_exponent = file.duration_exponent.0;
+        // A gas life never shortens with energy, and a gas speed (a length over a life) never
+        // slows: the exponent lies between zero and a length's.
+        if !(0.0..=LENGTH_EXPONENT).contains(&duration_exponent) {
+            return Err(format!(
+                "duration_exponent must lie in 0..=1/3, so neither a gas life nor a gas speed \
+                 falls as energy grows (got {duration_exponent})"
+            ));
+        }
+        let core = file.core;
+        let jitter = number("core.jitter", core.jitter, false)?;
+        if jitter >= 1.0 {
+            return Err(format!(
+                "core.jitter must be below 1, so the smallest jittered size stays positive (got \
+                 {jitter})"
+            ));
+        }
+        let flames = file.flames;
+        let smoke = file.smoke;
+        let light = file.light;
+        let (r, g, b) = light.colour_srgb.0;
+        let blast = file.ground_blast;
+        let (lo, hi) = blast.puffs.0;
+        if lo == 0 || lo > hi {
+            return Err(format!(
+                "ground_blast.puffs is ({lo}, {hi}): state at least one puff, low end first"
+            ));
+        }
+        let bore_bias = blast.bore_bias.0;
+        if !(bore_bias > 0.5 && bore_bias <= 1.0) {
+            return Err(format!(
+                "ground_blast.bore_bias is {bore_bias}: state it in (0.5, 1], where a puff's \
+                 radial and bore terms cannot cancel"
+            ));
+        }
+        let birth = number("smoke.birth_diameter_m", smoke.birth_diameter_m, true)?;
+        let end = number("smoke.end_diameter_m", smoke.end_diameter_m, true)?;
+        Ok(Self {
+            reference_j,
+            duration_exponent,
+            jitter,
+            core: ReferenceCore {
+                diameter_m: number("core.diameter_m", core.diameter_m, true)?,
+                standoff_m: number("core.standoff_m", core.standoff_m, false)?,
+                lifetime_s: number("core.lifetime_s", core.lifetime_s, true)?,
+                end_scale: number("core.end_scale", core.end_scale, true)?,
+            },
+            flames: ReferenceFlames {
+                length_m: number("flames.length_m", flames.length_m, true)?,
+                width_ratio: number("flames.width_ratio", flames.width_ratio, true)?,
+                lifetime_s: number("flames.lifetime_s", flames.lifetime_s, true)?,
+                end_scale: number("flames.end_scale", flames.end_scale, true)?,
+            },
+            fireball: ReferenceFireball {
+                diameter_m: number("fireball.diameter_m", file.fireball.diameter_m, true)?,
+                growth: number("fireball.growth", file.fireball.growth, true)?,
+                standoff_m: number("fireball.standoff_m", file.fireball.standoff_m, false)?,
+                lifetime_s: number("fireball.lifetime_s", file.fireball.lifetime_s, true)?,
+            },
+            glow: GlowCard {
+                scale: number("glow.scale", file.glow.scale, true)?,
+                lifetime_s: number("glow.lifetime_s", file.glow.lifetime_s, true)?,
+                end_scale: number("glow.end_scale", file.glow.end_scale, true)?,
+            },
+            smoke: ReferenceSmoke {
+                puff_interval_s: number("smoke.puff_interval_s", smoke.puff_interval_s, true)?,
+                lifetime_s: number("smoke.lifetime_s", smoke.lifetime_s, true)?,
+                diameter_m: span("smoke.end_diameter_m", Sourced((birth, end)))?,
+                standoff_m: number("smoke.standoff_m", smoke.standoff_m, false)?,
+                rise_mps: number("smoke.rise_mps", smoke.rise_mps, false)?,
+                push_mps: number("smoke.push_mps", smoke.push_mps, false)?,
+                opacity: share("smoke.opacity", smoke.opacity, false)?,
+            },
+            light: FlashLight {
+                peak_lm: number("light.peak_lm", light.peak_lm, true)?,
+                range_m: number("light.range_m", light.range_m, true)?,
+                lifetime_s: number("light.lifetime_s", light.lifetime_s, true)?,
+                radius_m: number("light.radius_m", light.radius_m, false)?,
+                standoff_m: number("light.standoff_m", light.standoff_m, false)?,
+                colour_srgb: [
+                    share("light.colour_srgb", Sourced(r), false)?,
+                    share("light.colour_srgb", Sourced(g), false)?,
+                    share("light.colour_srgb", Sourced(b), false)?,
+                ],
+            },
+            ground_blast: GroundBlast {
+                reach_m: number("ground_blast.reach_m", blast.reach_m, true)?,
+                puffs: (lo, hi),
+                birth_diameter_m: number(
+                    "ground_blast.birth_diameter_m",
+                    blast.birth_diameter_m,
+                    true,
+                )?,
+                end_diameter_m: span("ground_blast.end_diameter_m", blast.end_diameter_m)?,
+                spread_m: span("ground_blast.spread_m", blast.spread_m)?,
+                push_mps: span("ground_blast.push_mps", blast.push_mps)?,
+                rise_mps: number("ground_blast.rise_mps", blast.rise_mps, false)?,
+                bore_bias,
+                lifetime_s: span("ground_blast.lifetime_s", blast.lifetime_s)?,
+                opacity: share("ground_blast.opacity", blast.opacity, false)?,
+            },
+            brake: file.shapes.muzzle_brake.resolve("muzzle_brake")?,
+            hider: file.shapes.flash_hider.resolve("flash_hider")?,
+        })
+    }
+
+    /// Shape `shape`'s statement.
+    pub(crate) fn shape(&self, shape: MuzzleShape) -> Shape {
+        match shape {
+            MuzzleShape::MuzzleBrake => self.brake,
+            MuzzleShape::FlashHider => self.hider,
+        }
+    }
+
+    /// The emission of a shot of `energy` from a gun of muzzle `shape` and `mechanism`: every
+    /// magnitude its reference value times its law's power of `energy` over the reference, the
+    /// layers the shape states, the smoke rationed to the mechanism's cyclic rate.
+    pub(crate) fn emission(
+        &self,
+        shape: MuzzleShape,
+        energy: MuzzleEnergy,
+        mechanism: Mechanism,
+    ) -> MuzzleEmission {
+        let ratio = energy.joules() / self.reference_j;
+        let length = ratio.powf(LENGTH_EXPONENT);
+        let area = ratio.powf(AREA_EXPONENT);
+        let gas_life = ratio.powf(self.duration_exponent);
+        let gas_speed = ratio.powf(LENGTH_EXPONENT - self.duration_exponent);
+        let jittered = |size: f32| (size * (1.0 - self.jitter), size * (1.0 + self.jitter));
+        let scaled = |(lo, hi): (f32, f32), by: f32| (lo * by, hi * by);
+        let shape = self.shape(shape);
+        let flame = self.flames.length_m * length;
+        let every_rounds = match mechanism {
+            Mechanism::Single => 1,
+            Mechanism::Automatic { cyclic_rpm } => {
+                let shots = (self.smoke.puff_interval_s * cyclic_rpm / 60.0).ceil();
+                assert!(
+                    shots.is_finite() && shots >= 0.0 && shots < u32::MAX as f32,
+                    "a load-validated cyclic rate and puff interval give a finite shot count (got \
+                     {shots})"
+                );
+                (shots as u32).max(1)
+            }
+        };
+        let (core, fireball, smoke, blast) =
+            (self.core, self.fireball, self.smoke, self.ground_blast);
+        MuzzleEmission {
+            core: FlashCore {
+                sprite: shape.sprite,
+                diameter_m: jittered(core.diameter_m * length * shape.core_share),
+                standoff_m: core.standoff_m * length,
+                lifetime_s: core.lifetime_s,
+                end_scale: core.end_scale,
+            },
+            flames: Flames {
+                forward: FlameJet {
+                    planes: shape.forward_planes,
+                    length_m: jittered(flame * shape.forward_share),
+                },
+                side_jets: shape.side_jets.map(|jets| SideJets {
+                    angle_rad: jets.angle_rad,
+                    jet: FlameJet {
+                        planes: jets.planes,
+                        length_m: jittered(flame * jets.share),
+                    },
+                }),
+                width_ratio: self.flames.width_ratio,
+                lifetime_s: self.flames.lifetime_s,
+                end_scale: self.flames.end_scale,
+            },
+            fireball: shape.fireball.then(|| Fireball {
+                diameter_m: jittered(fireball.diameter_m * length),
+                growth: fireball.growth,
+                standoff_m: fireball.standoff_m * length,
+                lifetime_s: fireball.lifetime_s * gas_life,
+            }),
+            glow: shape.glow.then_some(self.glow),
+            smoke: shape.smoke.then(|| MuzzleSmoke {
+                every_rounds,
+                lifetime_s: smoke.lifetime_s * gas_life,
+                diameter_m: scaled(smoke.diameter_m, length),
+                standoff_m: smoke.standoff_m * length,
+                rise_mps: smoke.rise_mps * gas_speed,
+                push_mps: smoke.push_mps * gas_speed,
+                opacity: smoke.opacity,
+            }),
+            light: FlashLight {
+                peak_lm: self.light.peak_lm * area,
+                range_m: self.light.range_m * length,
+                radius_m: self.light.radius_m * length,
+                standoff_m: self.light.standoff_m * length,
+                ..self.light
+            },
+            ground_blast: shape.ground_blast.then(|| GroundBlast {
+                reach_m: blast.reach_m * length,
+                birth_diameter_m: blast.birth_diameter_m * length,
+                end_diameter_m: scaled(blast.end_diameter_m, length),
+                spread_m: scaled(blast.spread_m, length),
+                push_mps: scaled(blast.push_mps, gas_speed),
+                rise_mps: blast.rise_mps * gas_speed,
+                lifetime_s: scaled(blast.lifetime_s, gas_life),
+                ..blast
+            }),
+        }
     }
 }
 
@@ -384,8 +731,17 @@ impl MuzzleEmission {
                 end_scale: 0.85,
             },
             flames: Flames {
-                count: 2,
-                length_m: (4.3, 6.4),
+                forward: FlameJet {
+                    planes: 2,
+                    length_m: (2.3, 3.4),
+                },
+                side_jets: Some(SideJets {
+                    angle_rad: 1.75,
+                    jet: FlameJet {
+                        planes: 2,
+                        length_m: (3.6, 4.9),
+                    },
+                }),
                 width_ratio: 0.55,
                 lifetime_s: 0.045,
                 end_scale: 0.9,
@@ -417,7 +773,6 @@ impl MuzzleEmission {
                 radius_m: 0.4,
                 standoff_m: 1.2,
                 colour_srgb: [1.0, 0.72, 0.42],
-                tracer_gain: 1.0,
             },
             ground_blast: Some(GroundBlast {
                 reach_m: 2.5,
@@ -434,7 +789,8 @@ impl MuzzleEmission {
         }
     }
 
-    /// FIXTURE DATA: a small gun's rationed dressing: no fireball, glow or ground blast.
+    /// FIXTURE DATA: a small gun's rationed dressing: one forward plane and no side jet, fireball,
+    /// glow or ground blast.
     pub(crate) const fn fixture_rifle() -> Self {
         Self {
             core: FlashCore {
@@ -445,8 +801,11 @@ impl MuzzleEmission {
                 end_scale: 1.2,
             },
             flames: Flames {
-                count: 1,
-                length_m: (0.45, 0.8),
+                forward: FlameJet {
+                    planes: 1,
+                    length_m: (0.45, 0.8),
+                },
+                side_jets: None,
                 width_ratio: 0.55,
                 lifetime_s: 0.03,
                 end_scale: 1.1,
@@ -469,7 +828,6 @@ impl MuzzleEmission {
                 radius_m: 0.1,
                 standoff_m: 0.3,
                 colour_srgb: [1.0, 0.72, 0.42],
-                tracer_gain: 1.5,
             },
             ground_blast: None,
         }
@@ -480,61 +838,216 @@ impl MuzzleEmission {
 mod tests {
     use super::*;
 
-    /// The renderer divides by lifetimes, draws ranges low end first and normalises the dust
-    /// azimuth only because its bias exceeds one half. A file breaking any of those, or omitting a
-    /// layer's presence or provenance, must refuse while the gun registry loads.
+    const SHAPES: [MuzzleShape; 2] = [MuzzleShape::MuzzleBrake, MuzzleShape::FlashHider];
+
+    /// Every magnitude of `emission` that the law lets grow with energy, by name: what a mutant
+    /// that inverts, drops or caps a curve changes.
+    fn magnitudes(emission: &MuzzleEmission) -> Vec<(&'static str, f32)> {
+        let mut out = vec![
+            ("core.diameter_m", emission.core.diameter_m.1),
+            ("core.standoff_m", emission.core.standoff_m),
+            ("core.lifetime_s", emission.core.lifetime_s),
+            (
+                "flames.forward.length_m",
+                emission.flames.forward.length_m.1,
+            ),
+            ("flames.lifetime_s", emission.flames.lifetime_s),
+            ("light.peak_lm", emission.light.peak_lm),
+            ("light.range_m", emission.light.range_m),
+            ("light.radius_m", emission.light.radius_m),
+            ("light.lifetime_s", emission.light.lifetime_s),
+        ];
+        if let Some(jets) = emission.flames.side_jets {
+            out.push(("flames.side_jets.length_m", jets.jet.length_m.1));
+        }
+        if let Some(fireball) = emission.fireball {
+            out.extend([
+                ("fireball.diameter_m", fireball.diameter_m.1),
+                ("fireball.lifetime_s", fireball.lifetime_s),
+            ]);
+        }
+        if let Some(glow) = emission.glow {
+            out.push(("glow.lifetime_s", glow.lifetime_s));
+        }
+        if let Some(smoke) = emission.smoke {
+            out.extend([
+                ("smoke.lifetime_s", smoke.lifetime_s),
+                ("smoke.end_diameter_m", smoke.diameter_m.1),
+                ("smoke.rise_mps", smoke.rise_mps),
+                ("smoke.push_mps", smoke.push_mps),
+            ]);
+        }
+        if let Some(blast) = emission.ground_blast {
+            out.extend([
+                ("ground_blast.reach_m", blast.reach_m),
+                ("ground_blast.end_diameter_m", blast.end_diameter_m.1),
+                ("ground_blast.lifetime_s", blast.lifetime_s.1),
+                ("ground_blast.push_mps", blast.push_mps.1),
+            ]);
+        }
+        out
+    }
+
+    /// The game's damage-model view, a class invariant over the shipped curves: for every shape
+    /// and mechanism, a larger muzzle energy never draws a smaller flash, a shorter flame, a
+    /// dimmer or shorter-reaching light or a shorter-lived or smaller smoke, and the largest
+    /// sizes and the light strictly grow. The consistency the owner asked of the muzzle relies on
+    /// it; a mutant that inverts a law's exponent, reads a fixed size or saturates a curve fails.
+    /// FIXTURE DATA: an energy ladder over six decades, no gun's.
     #[test]
-    fn muzzle_layers_and_their_domains_are_required() {
-        let text = |ground: &str, smoke_every: &str| {
-            format!(
-                r#"(
-                core: (sprite: (Glow, Unknown("f")), diameter_m: ((0.3, 0.5), Unknown("f")),
-                    standoff_m: (0.1, Unknown("f")), lifetime_s: (0.03, Unknown("f")),
-                    end_scale: (1.0, Unknown("f"))),
-                flames: (count: (1, Unknown("f")), length_m: ((0.4, 0.8), Unknown("f")),
-                    width_ratio: (0.5, Unknown("f")), lifetime_s: (0.03, Unknown("f")),
-                    end_scale: (1.0, Unknown("f"))),
-                fireball: (None, Unknown("f")),
-                glow: (None, Unknown("f")),
-                smoke: (Some((every_rounds: ({smoke_every}, Unknown("f")),
-                    lifetime_s: (0.7, Unknown("f")), diameter_m: ((0.3, 1.0), Unknown("f")),
-                    standoff_m: (0.4, Unknown("f")), rise_mps: (0.4, Unknown("f")),
-                    push_mps: (0.7, Unknown("f")), opacity: (0.45, Unknown("f")))), Unknown("f")),
-                light: (peak_lm: (1.0e6, Unknown("f")), range_m: (16.0, Unknown("f")),
-                    lifetime_s: (0.05, Unknown("f")), radius_m: (0.1, Unknown("f")),
-                    standoff_m: (0.3, Unknown("f")), colour_srgb: ((1.0, 0.7, 0.4), Unknown("f")),
-                    tracer_gain: (1.0, Unknown("f"))),
-                {ground}
-            )"#
-            )
+    fn a_larger_muzzle_energy_never_draws_a_smaller_flash_dimmer_light_or_shorter_smoke() {
+        let look = MuzzleLook::shipped();
+        let ladder: Vec<MuzzleEnergy> = (0..=12)
+            .map(|step| {
+                MuzzleEnergy::of(2.0, 10f32.powf(0.5 * step as f32)).expect("a positive fixture")
+            })
+            .collect();
+        for shape in SHAPES {
+            for mechanism in [
+                Mechanism::Single,
+                Mechanism::Automatic { cyclic_rpm: 750.0 },
+            ] {
+                for pair in ladder.windows(2) {
+                    let small = magnitudes(&look.emission(shape, pair[0], mechanism));
+                    let large = magnitudes(&look.emission(shape, pair[1], mechanism));
+                    assert_eq!(
+                        small.len(),
+                        large.len(),
+                        "{shape:?}: one shape, one set of layers"
+                    );
+                    for ((name, lo), (_, hi)) in small.iter().zip(&large) {
+                        assert!(
+                            hi >= lo,
+                            "{shape:?} {name}: {hi} at {} J is below {lo} at {} J",
+                            pair[1].joules(),
+                            pair[0].joules()
+                        );
+                    }
+                    for name in [
+                        "core.diameter_m",
+                        "flames.forward.length_m",
+                        "light.peak_lm",
+                    ] {
+                        let value = |set: &[(&str, f32)]| {
+                            set.iter()
+                                .find(|(n, _)| *n == name)
+                                .expect("always present")
+                                .1
+                        };
+                        assert!(value(&large) > value(&small), "{shape:?} {name} must grow");
+                    }
+                }
+            }
+        }
+    }
+
+    /// The game's damage-model view: the shape alone picks the layers. At one energy the muzzle
+    /// brake states side jets, a fireball and a glow, and the flash hider none of them; both
+    /// state smoke and the ground blast, and each core wears its shape's sprite. Energy changes
+    /// no layer's presence. A mutant that lets the energy or a shared default pick a layer fails.
+    #[test]
+    fn each_shape_states_its_layers_and_energy_never_adds_one() {
+        let look = MuzzleLook::shipped();
+        for joules in [3.0e3_f32, 3.0e6] {
+            let energy = MuzzleEnergy::of(2.0, (joules).sqrt()).expect("a positive fixture");
+            let brake = look.emission(MuzzleShape::MuzzleBrake, energy, Mechanism::Single);
+            assert!(brake.flames.side_jets.is_some() && brake.fireball.is_some());
+            assert!(brake.glow.is_some());
+            assert_eq!(brake.core.sprite, CoreSprite::Starburst);
+            let hider = look.emission(MuzzleShape::FlashHider, energy, Mechanism::Single);
+            assert!(hider.flames.side_jets.is_none() && hider.fireball.is_none());
+            assert!(hider.glow.is_none());
+            assert_eq!(hider.core.sprite, CoreSprite::Glow);
+            for emission in [brake, hider] {
+                assert!(emission.smoke.is_some() && emission.ground_blast.is_some());
+            }
+        }
+    }
+
+    /// A belt's smoke is rationed to the shots its cyclic rate fires in the puff interval, and a
+    /// single-shot gun puffs every round: the renderer's overdraw bound at a belt's rate. A
+    /// mutant that rations by energy or puffs every belt round fails.
+    #[test]
+    fn a_belt_rations_its_smoke_to_the_puff_interval() {
+        let look = MuzzleLook::shipped();
+        let energy = MuzzleEnergy::of(0.01, 800.0).expect("a positive fixture");
+        let every = |mechanism| {
+            look.emission(MuzzleShape::FlashHider, energy, mechanism)
+                .smoke
+                .expect("the hider states smoke")
+                .every_rounds
         };
-        let blast = |bias: &str| {
-            format!(
-                r#"ground_blast: (Some((reach_m: (2.5, Unknown("f")), puffs: ((5, 8), Unknown("f")),
-                    birth_diameter_m: (1.8, Unknown("f")), end_diameter_m: ((3.7, 5.0), Unknown("f")),
-                    spread_m: ((0.4, 3.0), Unknown("f")), push_mps: ((1.8, 4.0), Unknown("f")),
-                    rise_mps: (0.35, Unknown("f")), bore_bias: ({bias}, Unknown("f")),
-                    lifetime_s: ((2.0, 2.5), Unknown("f")), opacity: (0.5, Unknown("f")))), Unknown("f")),"#
-            )
-        };
-        let resolve = |text: &str| ron::from_str::<File>(text).map(File::resolve);
+        assert_eq!(every(Mechanism::Single), 1);
+        let rpm = 750.0;
+        let expected = (look.smoke.puff_interval_s * rpm / 60.0).ceil() as u32;
+        assert!(expected > 1, "the fixture belt outruns the interval");
+        assert_eq!(every(Mechanism::Automatic { cyclic_rpm: rpm }), expected);
+    }
+
+    /// The energy's inputs are refused, naming which, rather than drawing a zero or NaN flash: the
+    /// gun registry turns each into a load error naming the round's or the gun's file.
+    #[test]
+    fn a_shot_without_a_mass_or_a_speed_has_no_energy() {
+        assert_eq!(
+            MuzzleEnergy::of(0.0, 700.0),
+            Err(MuzzleEnergyError::Mass(0.0))
+        );
         assert!(matches!(
-            resolve(&text(r#"ground_blast: (None, Unknown("f")),"#, "4")),
-            Ok(Ok(_))
+            MuzzleEnergy::of(f32::NAN, 700.0),
+            Err(MuzzleEnergyError::Mass(_))
         ));
-        assert!(matches!(resolve(&text(&blast("0.65"), "4")), Ok(Ok(_))));
-        // An omitted presence does not parse.
-        assert!(resolve(&text("", "4")).is_err());
-        // A bias at one half lets the two unit terms cancel; zero cadence emits never.
-        for bad in [text(&blast("0.5"), "4"), text(&blast("0.65"), "0")] {
-            assert!(matches!(resolve(&bad), Ok(Err(_))), "{bad}");
-        }
-        for (field, value) in [
-            ((0.5_f32, 0.3_f32), "low end first"),
-            ((0.0, 1.0), "positive"),
+        assert_eq!(
+            MuzzleEnergy::of(1.0, -1.0),
+            Err(MuzzleEnergyError::Speed(-1.0))
+        );
+        assert_eq!(
+            MuzzleEnergy::of(2.0, 10.0).map(MuzzleEnergy::joules),
+            Ok(100.0)
+        );
+    }
+
+    /// The taste file refuses, naming the field, a value the law cannot draw: a duration exponent
+    /// that would shorten a gas life or slow a gas speed as energy grows, a jitter that would
+    /// take a size to zero, and a side jet along the bore. The shipped file loads.
+    #[test]
+    fn the_taste_file_refuses_what_the_law_cannot_draw() {
+        assert!(MuzzleLook::parse(LOOK_RON).is_ok());
+        for (from, to, field) in [
+            (
+                "duration_exponent: (0.1667,",
+                "duration_exponent: (-0.1,",
+                "duration_exponent",
+            ),
+            (
+                "duration_exponent: (0.1667,",
+                "duration_exponent: (0.5,",
+                "duration_exponent",
+            ),
+            ("jitter: (0.15,", "jitter: (1.0,", "core.jitter"),
+            (
+                "angle_deg: (100.0,",
+                "angle_deg: (0.0,",
+                "side_jets.angle_deg",
+            ),
+            (
+                "reference_energy_j: (1.0e6,",
+                "reference_energy_j: (0.0,",
+                "reference_energy_j",
+            ),
         ] {
-            let err = span("x.range", Sourced(field)).unwrap_err();
-            assert!(err.contains(value), "{err}");
+            assert!(LOOK_RON.contains(from), "the shipped file states {from}");
+            let err = MuzzleLook::parse(&LOOK_RON.replacen(from, to, 1)).unwrap_err();
+            assert!(err.contains(field), "{field}: {err}");
         }
+        // A shape without its row, and a value without provenance, do not parse.
+        let without_hider = LOOK_RON.replacen("flash_hider:", "flash_hider_gone:", 1);
+        assert!(MuzzleLook::parse(&without_hider).is_err());
+        let unsourced = LOOK_RON.replacen(
+            r#"lifetime_s: (0.03, Tuned("TASTE: two frames at 60 Hz, every gun")),"#,
+            "lifetime_s: 0.03,",
+            1,
+        );
+        assert_ne!(unsourced, LOOK_RON);
+        assert!(MuzzleLook::parse(&unsourced).is_err());
     }
 }

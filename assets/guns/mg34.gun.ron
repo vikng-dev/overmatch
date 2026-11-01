@@ -16,44 +16,8 @@
         cited rate of fire"))),
     // No MG recording in the library yet: silent until one is cut and listed here.
     report_clips: [],
-    // The muzzle emission, view only (`src/guns/muzzle.rs`). No measured flash, smoke or light of
-    // this gun has been read: every value is ASSUMED, the provisional presentation this gun's shots
-    // already drew, kept for the owner's eye review and calibration.
-    muzzle: (
-        core: (
-            sprite: (Glow, Tuned("ASSUMED: provisional small round glow")),
-            diameter_m: ((0.3, 0.55), Tuned("ASSUMED: provisional rifle-scale core diameter")),
-            standoff_m: (0.15, Tuned("ASSUMED: provisional core centre down the bore")),
-            lifetime_s: (0.03, Tuned("ASSUMED: provisional one-to-two-frame flash")),
-            end_scale: (1.2, Tuned("ASSUMED: provisional small flash pop")),
-        ),
-        flames: (
-            count: (1, Tuned("ASSUMED: provisional single flame plane")),
-            length_m: ((0.45, 0.8), Tuned("ASSUMED: provisional flame length")),
-            width_ratio: (0.55, Tuned("ASSUMED: provisional flame width over length")),
-            lifetime_s: (0.03, Tuned("ASSUMED: provisional flame life")),
-            end_scale: (1.1, Tuned("ASSUMED: provisional flame growth")),
-        ),
-        fireball: (None, Tuned("ASSUMED: the cartridge's gas shows no visible fireball")),
-        glow: (None, Tuned("ASSUMED: no fill glow at rifle scale")),
-        smoke: (Some((
-            every_rounds: (4, Tuned("ASSUMED: a faint puff every fourth shot; per-shot puffs at the cyclic rate overdraw")),
-            lifetime_s: (0.7, Tuned("ASSUMED: provisional muzzle smoke life")),
-            diameter_m: ((0.3, 1.0), Tuned("ASSUMED: provisional smoke birth and end diameters")),
-            standoff_m: (0.4, Tuned("ASSUMED: provisional smoke birth down the bore")),
-            rise_mps: (0.4, Tuned("ASSUMED: provisional smoke rise")),
-            push_mps: (0.7, Tuned("ASSUMED: provisional muzzle-gas push down the bore")),
-            opacity: (0.45, Tuned("ASSUMED: provisional faint smoke opacity")),
-        )), Tuned("ASSUMED: the cartridge leaves faint visible smoke")),
-        light: (
-            peak_lm: (1.2e6, Tuned("ASSUMED: provisional muzzle glimmer peak")),
-            range_m: (16.0, Tuned("ASSUMED: provisional muzzle light range")),
-            lifetime_s: (0.05, Tuned("ASSUMED: provisional light envelope")),
-            radius_m: (0.1, Tuned("ASSUMED: provisional emitter radius")),
-            standoff_m: (0.3, Tuned("ASSUMED: provisional light centre down the bore")),
-            colour_srgb: ((1.0, 0.72, 0.42), Tuned("ASSUMED: provisional warm flash colour")),
-            tracer_gain: (1.5, Tuned("ASSUMED: a tracer round's ignition brightens the glimmer")),
-        ),
-        ground_blast: (None, Tuned("ASSUMED: the cartridge's gas lifts no visible ground")),
-    ),
+    // The muzzle's construction, the one per-gun fact of its view-only muzzle emission
+    // (`src/guns/muzzle.rs`): each round's muzzle energy sizes the rest (`assets/vfx/muzzle.ron`).
+    muzzle_shape: (FlashHider, Unknown("CLAIMED: the MG 34's muzzle ends in a conical cap on its
+        recoil booster, read as a flash hider; no armament table in the repo records it")),
 )

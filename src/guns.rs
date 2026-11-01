@@ -14,9 +14,11 @@
 //! `caliber`: its nominal calibre (m); `ammunition`: `{ "<round key>": (muzzle_speed: (m/s, Kind)) }`;
 //! `mechanism`: `Single` (one round per trigger edge) or `Automatic(cyclic_rpm: (rpm, Kind))` (a
 //! belt fired on a held trigger, one round every 60/rpm s); `report_clips`: the gun's report takes
-//! (asset-relative paths, one rolled per round fired; `[]` is a silent gun, a decision); `muzzle`:
-//! the gun's view-only muzzle emission, every layer's presence and value sourced
-//! ([`MuzzleEmission`], `guns::muzzle`), which every round it fires carries. The names
+//! (asset-relative paths, one rolled per round fired; `[]` is a silent gun, a decision);
+//! `muzzle_shape`: `(MuzzleBrake|FlashHider, Kind)`, the gun's muzzle construction
+//! ([`MuzzleShape`]), the one per-gun fact of its view-only muzzle emission: the muzzle law
+//! (`guns::muzzle`) sizes each round's emission from that round's muzzle energy, and every round
+//! carries its own ([`MuzzleEmission`]). The names
 //! and nominal calibre form its instrument label ([`Gun::display_name`]); nominal calibre is a
 //! designation, not an inferred chamber-fit rule. Every number is authored
 //! `(value, Kind("source or reason"))` ([`crate::provenance`]); a value without one does not load.
@@ -28,7 +30,9 @@
 //! Each a load error naming the gun: no name, or one the shipped font does not draw whole; a calibre
 //! not finite and positive; a cyclic rate not finite and positive; an empty ammunition table, or one
 //! naming a round twice; a row naming no round; a row whose round the force law cannot state at its
-//! speed ([`RoundFacts::fired_at`]). And for the registry as a whole: a round no gun's table lists,
+//! speed ([`RoundFacts::fired_at`]); a row whose round has no positive finite launched mass, or whose
+//! speed is not positive and finite, which leaves its shot no muzzle energy, naming the round's file
+//! or the row. And for the registry as a whole: a round no gun's table lists,
 //! which no shot could ever fire.
 //!
 //! [`RoundFacts::fired_at`]: crate::rounds::RoundFacts::fired_at
@@ -43,7 +47,10 @@ use crate::provenance::Sourced;
 use crate::rounds::{Round, RoundError, RoundRegistry};
 use crate::spec::FireMechanism;
 
-pub(crate) use muzzle::{CoreSprite, FlashLight, GroundBlast, MuzzleEmission};
+pub(crate) use muzzle::{
+    CoreSprite, FlameJet, Flames, FlashLight, GroundBlast, MuzzleEmission, MuzzleEnergy,
+    MuzzleEnergyError, MuzzleLook, MuzzleShape,
+};
 
 /// One gun as authored.
 #[derive(Deserialize)]
@@ -54,7 +61,7 @@ struct GunFile {
     ammunition: KeyedMap<AmmunitionFile>,
     mechanism: MechanismFile,
     report_clips: Vec<String>,
-    muzzle: muzzle::File,
+    muzzle_shape: Sourced<MuzzleShape>,
 }
 
 /// A gun's mechanism as authored.
@@ -182,8 +189,8 @@ impl std::fmt::Display for GunError {
     }
 }
 
-/// Resolve one authored gun against `rounds`, or say why it cannot fire or be shown.
-fn resolved(file: GunFile, rounds: &RoundRegistry) -> Result<Gun, String> {
+/// Resolve authored gun `key` against `rounds`, or say why it cannot fire or be shown.
+fn resolved(key: &str, file: GunFile, rounds: &RoundRegistry) -> Result<Gun, String> {
     if file.names.is_empty() {
         return Err("names is empty — a gun is shown by at least one designation".into());
     }
@@ -223,7 +230,8 @@ fn resolved(file: GunFile, rounds: &RoundRegistry) -> Result<Gun, String> {
             Mechanism::Automatic { cyclic_rpm }
         }
     };
-    let muzzle = file.muzzle.resolve()?;
+    let Sourced(shape) = file.muzzle_shape;
+    let look = MuzzleLook::shipped();
     if file.ammunition.0.is_empty() {
         return Err("the ammunition table is empty — a gun chambers at least one round".into());
     }
@@ -231,15 +239,28 @@ fn resolved(file: GunFile, rounds: &RoundRegistry) -> Result<Gun, String> {
         .ammunition
         .0
         .into_iter()
-        .map(|(key, row)| {
+        .map(|(round_key, row)| {
             let facts = rounds
-                .get(&key)
+                .get(&round_key)
                 .map_err(|err| format!("ammunition: {err}"))?;
             let speed = row.muzzle_speed.0;
+            let energy =
+                MuzzleEnergy::of(facts.launched_mass(), speed).map_err(|err| match err {
+                    MuzzleEnergyError::Mass(mass) => format!(
+                        "ammunition {round_key:?}: assets/rounds/{round_key}.round.ron's `mass` is \
+                     {mass}, so the shot has no muzzle energy — author the round's finite \
+                     positive launched mass"
+                    ),
+                    MuzzleEnergyError::Speed(speed) => format!(
+                        "assets/guns/{key}.gun.ron's ammunition[{round_key:?}].muzzle_speed is \
+                     {speed}, so the shot has no muzzle energy — author a finite positive speed"
+                    ),
+                })?;
+            let muzzle = look.emission(shape, energy, mechanism);
             let round = facts
                 .fired_at(speed, muzzle)
-                .map_err(|reason| format!("ammunition {key:?} at {speed} m/s: {reason}"))?;
-            Ok((key, round))
+                .map_err(|reason| format!("ammunition {round_key:?} at {speed} m/s: {reason}"))?;
+            Ok((round_key, round))
         })
         .collect::<Result<_, String>>()?;
     Ok(Gun {
@@ -283,7 +304,10 @@ impl GunRegistry {
                 gun: key.to_owned(),
                 err: err.to_string(),
             })?;
-            guns.insert(key.to_owned(), resolved(file, rounds).map_err(invalid)?);
+            guns.insert(
+                key.to_owned(),
+                resolved(key, file, rounds).map_err(invalid)?,
+            );
         }
         let registry = Self {
             guns,
@@ -410,40 +434,27 @@ mod tests {
         format!(
             r#"(names: [({name:?}, Tuned("fixture"))], caliber: ({caliber}, Tuned("fixture")),
                 ammunition: {{ {rows} }}, mechanism: {mechanism}, report_clips: [],
-                muzzle: {FIXTURE_MUZZLE})"#
+                muzzle_shape: {FIXTURE_MUZZLE})"#
         )
     }
 
-    /// FIXTURE DATA: a rifle-scale muzzle emission, each value with a fixture provenance.
-    const FIXTURE_MUZZLE: &str = r#"(
-        core: (sprite: (Glow, Tuned("fixture")), diameter_m: ((0.3, 0.5), Tuned("fixture")),
-            standoff_m: (0.1, Tuned("fixture")), lifetime_s: (0.03, Tuned("fixture")),
-            end_scale: (1.0, Tuned("fixture"))),
-        flames: (count: (1, Tuned("fixture")), length_m: ((0.4, 0.8), Tuned("fixture")),
-            width_ratio: (0.5, Tuned("fixture")), lifetime_s: (0.03, Tuned("fixture")),
-            end_scale: (1.0, Tuned("fixture"))),
-        fireball: (None, Tuned("fixture")),
-        glow: (None, Tuned("fixture")),
-        smoke: (None, Tuned("fixture")),
-        light: (peak_lm: (1.0e6, Tuned("fixture")), range_m: (16.0, Tuned("fixture")),
-            lifetime_s: (0.05, Tuned("fixture")), radius_m: (0.1, Tuned("fixture")),
-            standoff_m: (0.3, Tuned("fixture")), colour_srgb: ((1.0, 0.7, 0.4), Tuned("fixture")),
-            tracer_gain: (1.0, Tuned("fixture"))),
-        ground_blast: (None, Tuned("fixture")),
-    )"#;
+    /// FIXTURE DATA: a gun's muzzle shape, with a fixture provenance.
+    const FIXTURE_MUZZLE: &str = r#"(FlashHider, Tuned("fixture"))"#;
 
     /// An inline fixture gun file closed with [`FIXTURE_MUZZLE`].
     fn with_muzzle(text: &str) -> String {
         text.replace(
             "report_clips: [])",
-            &format!("report_clips: [], muzzle: {FIXTURE_MUZZLE})"),
+            &format!("report_clips: [], muzzle_shape: {FIXTURE_MUZZLE})"),
         )
     }
 
     /// The game's damage model: a gun fires each round of its table as the round registry states
-    /// it, at the table's speed and with the gun's muzzle emission, whether looked up by gun or by
-    /// round alone. Spawn and the shot read this record. FIXTURE DATA: one fixture round under two
-    /// keys at two speeds; a mutant that drops a row's speed or reads another row's fails here.
+    /// it, at the table's speed and with the muzzle emission the muzzle law gives that row's
+    /// energy and the gun's shape, whether looked up by gun or by round alone. Spawn and the shot
+    /// read this record. FIXTURE DATA: one fixture round (5 kg) under two keys at two speeds; a
+    /// mutant that drops a row's speed, reads another row's, or sizes the emission per gun rather
+    /// than per row fails here.
     #[test]
     fn a_gun_fires_each_tabled_round_at_its_speed_with_the_registry_facts() {
         let rounds = fixture_rounds(&["Probe", "Other"]);
@@ -454,11 +465,10 @@ mod tests {
         );
         let guns =
             GunRegistry::from_files(&[("Gun", &text)], &rounds).expect("the fixture gun loads");
-        let muzzle = guns
-            .round("Gun", "Probe")
-            .expect("the fixture gun chambers Probe")
-            .muzzle;
         for (key, speed) in [("Probe", 700.0), ("Other", 650.0)] {
+            let energy = MuzzleEnergy::of(5.0, speed).expect("a positive fixture");
+            let muzzle =
+                MuzzleLook::shipped().emission(MuzzleShape::FlashHider, energy, Mechanism::Single);
             let expected = rounds
                 .get(key)
                 .expect("the fixture registry carries every key it was built with")
@@ -467,6 +477,65 @@ mod tests {
             assert_eq!(guns.round("Gun", key).as_ref(), Ok(&expected), "{key}");
             assert_eq!(guns.round_by_key(key).as_ref(), Ok(&expected), "{key}");
         }
+        assert_ne!(
+            guns.round("Gun", "Probe").unwrap().muzzle,
+            guns.round("Gun", "Other").unwrap().muzzle,
+            "two speeds are two energies"
+        );
+    }
+
+    /// The game's damage-model view keeps nothing per gun but the muzzle shape: a gun file that
+    /// still states a `muzzle` emission block, or states no shape, is refused while the registry
+    /// loads, naming the field, before any shot exists.
+    #[test]
+    fn a_gun_file_with_a_muzzle_block_or_no_shape_is_refused() {
+        let rounds = fixture_rounds(&["Probe"]);
+        let base = gun_file("Gun Mk. 1", "0.05", &[("Probe", "700.0")]);
+        let with_block = base.replace(
+            "muzzle_shape:",
+            r#"muzzle: (core: (diameter_m: ((0.3, 0.5), Tuned("x")))), muzzle_shape:"#,
+        );
+        let without_shape = base.replace(&format!("muzzle_shape: {FIXTURE_MUZZLE}"), "");
+        assert_ne!(without_shape, base);
+        for (text, word) in [(with_block, "muzzle"), (without_shape, "muzzle_shape")] {
+            let err = GunRegistry::from_files(&[("Gun", &text)], &rounds).unwrap_err();
+            assert!(
+                matches!(&err, GunError::Parse { gun, err } if gun == "Gun" && err.contains(word)),
+                "{word}: {err}"
+            );
+        }
+    }
+
+    /// A round a gun chambers with no launched mass leaves its shot no muzzle energy, so the
+    /// registry refuses it before play, naming the round's file and its `mass` field. FIXTURE
+    /// DATA: the fixture round at zero mass.
+    #[test]
+    fn a_chambered_round_with_no_mass_is_refused_naming_its_file() {
+        let fields: Vec<(&str, &str)> = crate::rounds::tests::FIXTURE
+            .iter()
+            .map(|&(name, value)| (name, if name == "mass" { "0.0" } else { value }))
+            .collect();
+        let text = file(&fields, "");
+        let rounds = RoundRegistry::from_files(
+            &[("Probe", text.as_str())],
+            FIXTURE_TYPES,
+            SubstanceRegistry::shipped_static(),
+        )
+        .expect("the round registry loads a zero mass: the energy is the gun's to check");
+        let err = GunRegistry::from_files(
+            &[("Gun", &gun_file("Gun Mk. 1", "0.05", &[("Probe", "700.0")]))],
+            &rounds,
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(
+            err.contains("Probe") && err.contains("mass"),
+            "the refusal names the round and its mass: {err}"
+        );
+        assert!(
+            err.contains("assets/rounds/Probe.round.ron"),
+            "the refusal names the round's file: {err}"
+        );
     }
 
     /// Every round the selected sheet stows reads, as spawn resolves it, exactly as its mount's gun
@@ -622,7 +691,7 @@ mod tests {
         let mut file: GunFile =
             ron::from_str(&gun_file("First", "0.05", &[("Probe", "700.0")])).unwrap();
         file.names.push(Sourced("Alternate".into()));
-        let gun = resolved(file, &rounds).unwrap();
+        let gun = resolved("First", file, &rounds).unwrap();
         assert_eq!(gun.display_name(), "First / Alternate (50.00 mm nominal)");
     }
 

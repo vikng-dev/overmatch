@@ -1180,7 +1180,7 @@ pub struct FireShell {
     pub fuze_mode: u8,
     /// The game's damage-model view: emissions authored by the round, never inferred from calibre.
     pub(crate) effects: crate::rounds::FlightEffects,
-    /// The firing gun's authored muzzle emission ([`crate::rounds::Round::muzzle`]), view only.
+    /// The shot's muzzle emission ([`crate::rounds::Round::muzzle`]), view only.
     pub(crate) muzzle: crate::guns::MuzzleEmission,
     /// Fire mechanism at the source.
     pub mechanism: crate::spec::FireMechanism,
