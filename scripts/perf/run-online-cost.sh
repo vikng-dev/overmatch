@@ -99,7 +99,7 @@ BASE_FIELDS="${BASE_FIELDS:-pen_cam_corner: Off, kill_cam: Off,}"
 STATS_PERIOD_S="${STATS_PERIOD_S:-1}"
 # A stand-in with session.sh's subcommands, for testing the chain by day (run-online-night.sh).
 SESSION="${EDGEGAP_SESSION:-$REPO/scripts/edgegap/session.sh}"
-# The scripted client exits after its ticks (64 Hz, counted from its input slot); the runner ends it
+# The scripted client exits after its ticks (64 Hz, counted from combat release); the runner ends it
 # first, at the window's close, so the script must outlast the deadline.
 SIM_TICKS=$(((WARMUP_S + DURATION_S + STARTUP_GRACE_S + 60) * 64))
 INPUT_SLOT='— input slot'

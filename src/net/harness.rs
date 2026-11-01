@@ -1,4 +1,5 @@
 //! The scripted session and the shared `SPIKE_*` environment parser.
+//! Subject: the game's scripted inputs and damage-model instruments, game state only.
 //!
 //! A scripted session has one input: the RON file `OVERMATCH_HARNESS=<script>.ron` names, one
 //! [`Script`], whose struct docs are the grammar's one home. On a client it selects the scripted
@@ -50,11 +51,13 @@ use std::sync::OnceLock;
 use bevy::prelude::*;
 use lightyear::core::time::Instant;
 use lightyear::link::RecvPayload;
-use lightyear::prelude::Link;
 use lightyear::prelude::input::native::{ActionState, InputMarker};
+use lightyear::prelude::{Link, LocalTimeline};
 use serde::Deserialize;
 
+use super::battle::{BattlePhase, BattleState};
 use crate::command::{AimIntent, TankCommand};
+use crate::sim_tick::SimTick;
 
 /// The variable that names the script file.
 const VARIABLE: &str = "OVERMATCH_HARNESS";
@@ -67,7 +70,8 @@ const VARIABLE: &str = "OVERMATCH_HARNESS";
 #[derive(Deserialize, Debug, Clone, PartialEq)]
 #[serde(deny_unknown_fields, default)]
 pub(crate) struct Script {
-    /// Run length in fixed ticks from the input slot; the client exits once it has played them.
+    /// Run length in released combat ticks; tick zero is the input slot's first released tick.
+    /// The client exits once it has played them.
     /// Default 600, or 1280 on the [`Drive::Straight`] course.
     pub(crate) ticks: Option<u32>,
     /// What the tank does ([`Drive`]). Default [`Drive::Arc`].
@@ -303,7 +307,31 @@ pub(crate) struct SimulateInput {
     range: f32,
     fire_tick: u32,
     fire_interval: u32,
+    clock: ScriptClock,
+    input_slot_seen: bool,
 }
+
+/// Waiting is bounded from launch; execution is bounded from its first released input.
+#[derive(Debug)]
+enum ScriptClock {
+    AwaitingRelease {
+        deadline: Duration,
+        fill_up_accounted: bool,
+    },
+    Released {
+        at: Duration,
+        first_fire_logged: bool,
+    },
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum ScriptTimeout {
+    Release,
+    Completion,
+}
+
+// ASSUMED startup and scheduling slack, shared by both wall-clock bounds.
+const WATCHDOG_SLACK: Duration = Duration::from_secs(20);
 
 impl SimulateInput {
     /// Called after `LogPlugin` has built, so the script it logs reaches the run's log.
@@ -318,14 +346,52 @@ impl SimulateInput {
             range: script.range_m,
             fire_tick: script.fire_tick,
             fire_interval: script.fire_interval,
+            clock: ScriptClock::AwaitingRelease {
+                deadline: WATCHDOG_SLACK,
+                fill_up_accounted: false,
+            },
+            input_slot_seen: false,
+        }
+    }
+
+    /// DERIVED launch bound: startup slack plus the remaining replicated fill-up, added once
+    /// after this client has its input slot. No connection or no tank retains the startup bound;
+    /// a stale/moving deadline cannot continually renew it. Wrapped ticks use `SimTick`'s relation.
+    fn account_fill_up(&mut self, phase: BattlePhase, now: SimTick, tick: Duration) {
+        if !self.input_slot_seen {
+            return;
+        }
+        if let ScriptClock::AwaitingRelease {
+            deadline,
+            fill_up_accounted,
+        } = &mut self.clock
+            && !*fill_up_accounted
+            && let BattlePhase::FillUp { ends_at: Some(end) } = phase
+        {
+            *deadline += tick * now.remaining_until(end);
+            *fill_up_accounted = true;
+        }
+    }
+
+    fn timeout(&self, now: Duration, tick: Duration) -> Option<ScriptTimeout> {
+        match self.clock {
+            ScriptClock::AwaitingRelease { deadline, .. } if now > deadline => {
+                Some(ScriptTimeout::Release)
+            }
+            // DERIVED release bound: script length × fixed timestep + scheduling slack. It keeps
+            // running if a later hold or a lost input slot prevents the script from completing.
+            ScriptClock::Released { at, .. } if now > at + tick * self.total + WATCHDOG_SLACK => {
+                Some(ScriptTimeout::Completion)
+            }
+            _ => None,
         }
     }
 
     /// The scripted secondary trigger's held window: from the warmup boundary to the end of the
     /// run.
     fn holding_secondary(t: u32) -> bool {
-        // ~3 s: let the connect handshake, tank spawn, and asset load settle before the burst
-        // starts, and comfortably inside the cost recorder's own 6 s warmup.
+        // DERIVED: 192 combat ticks / 64 Hz = 3 s for settling and aim before the held trigger.
+        // The first secondary input is the following combat tick.
         const FIRE_WARMUP: u32 = 192;
         t > FIRE_WARMUP
     }
@@ -354,13 +420,71 @@ impl SimulateInput {
 /// each tick. Whole-state snapshot per tick, no devices.
 pub(crate) fn buffer_input(
     mut sim: ResMut<SimulateInput>,
+    time: Res<Time<Real>>,
+    timeline: Res<LocalTimeline>,
+    battles: Query<&BattleState>,
     mut slots: Query<&mut ActionState<TankCommand>, With<InputMarker<TankCommand>>>,
 ) {
-    let Ok(mut state) = slots.single_mut() else {
-        return;
+    use bevy::ecs::query::QuerySingleError;
+    let mut state = match slots.single_mut() {
+        Ok(state) => state,
+        // Before tank replication (or between lives), there is no local input slot.
+        Err(QuerySingleError::NoEntities(_)) => return,
+        Err(QuerySingleError::MultipleEntities(_)) => {
+            panic!("a scripted client controls at most one input slot")
+        }
     };
+    let now = time.startup().elapsed();
+    if !sim.input_slot_seen {
+        sim.input_slot_seen = true;
+        info!("harness: input slot app_s={:.3}", now.as_secs_f64());
+    }
+    let battle = match battles.single() {
+        Ok(battle) => battle,
+        // The tank and Battle snapshots may arrive separately. Wait for the release fact.
+        Err(QuerySingleError::NoEntities(_)) => {
+            state.0 = TankCommand::default();
+            return;
+        }
+        Err(QuerySingleError::MultipleEntities(_)) => {
+            panic!("a peer holds at most one replicated Battle")
+        }
+    };
+    // The same predicate as `battle::hold_commands`; no local countdown releases a command.
+    if !battle.is_combat() {
+        state.0 = TankCommand::default();
+        return;
+    }
+    if matches!(sim.clock, ScriptClock::AwaitingRelease { .. }) {
+        sim.clock = ScriptClock::Released {
+            at: now,
+            first_fire_logged: false,
+        };
+        info!(
+            "harness: released script_tick=0 client_tick={} app_s={:.3}",
+            timeline.tick().0,
+            now.as_secs_f64()
+        );
+    }
+    if sim.ticks >= sim.total {
+        return;
+    }
+    let t = sim.ticks;
+    sim.write(t, &mut state.0);
+    if (state.0.fire_primary || state.0.fire_secondary)
+        && let ScriptClock::Released {
+            first_fire_logged, ..
+        } = &mut sim.clock
+        && !*first_fire_logged
+    {
+        *first_fire_logged = true;
+        info!(
+            "harness: first fire input script_tick={t} client_tick={} app_s={:.3}",
+            timeline.tick().0,
+            now.as_secs_f64()
+        );
+    }
     sim.ticks += 1;
-    sim.write(sim.ticks, &mut state.0);
 }
 
 impl SimulateInput {
@@ -390,22 +514,44 @@ impl SimulateInput {
     }
 }
 
-/// Simulate mode: exit cleanly once the script has played out, or bail on a wall-clock timeout if
-/// the connection never came up.
+/// Exit once the released script has played out; separately bound startup and execution.
 pub(crate) fn simulate_watchdog(
-    simulate: Res<SimulateInput>,
+    mut simulate: ResMut<SimulateInput>,
     time: Res<Time<Real>>,
+    fixed: Res<Time<Fixed>>,
+    timeline: Res<LocalTimeline>,
+    battles: Query<&BattleState>,
     mut exit: MessageWriter<AppExit>,
 ) {
-    if simulate.ticks >= simulate.total {
-        info!("client: simulation script complete, exiting");
+    match battles.single() {
+        Ok(battle) => simulate.account_fill_up(
+            battle.phase,
+            SimTick::new(timeline.tick().0),
+            fixed.timestep(),
+        ),
+        // The Battle has not replicated yet; the launch bound still runs.
+        Err(bevy::ecs::query::QuerySingleError::NoEntities(_)) => {}
+        Err(bevy::ecs::query::QuerySingleError::MultipleEntities(_)) => {
+            panic!("a peer holds at most one replicated Battle")
+        }
+    }
+    let now = time.startup().elapsed();
+    if simulate.ticks >= simulate.total && matches!(simulate.clock, ScriptClock::Released { .. }) {
+        info!(
+            "client: simulation script complete, exiting ticks={} app_s={:.3}",
+            simulate.ticks,
+            now.as_secs_f64()
+        );
         exit.write(AppExit::Success);
-    } else if time.elapsed_secs() > simulate.total as f32 / 64.0 + 20.0 {
-        // The script advances at the 64 Hz tick rate, so a run that never reaches `total` in its own
-        // wall-clock budget + 20 s slack is wedged (never got an input slot / stalled). Scaling the
-        // bound with `total` lets the long MG-cost workloads (~40 s) finish while still fast-failing a
-        // never-connected short run.
-        error!("client: watchdog timeout — never got an input slot");
+    } else if let Some(timeout) = simulate.timeout(now, fixed.timestep()) {
+        match timeout {
+            ScriptTimeout::Release => error!(
+                "client: watchdog timeout — connection, input slot or combat release stalled"
+            ),
+            ScriptTimeout::Completion => {
+                error!("client: watchdog timeout — simulation script stalled after combat release")
+            }
+        }
         exit.write(AppExit::error());
     }
 }
@@ -726,8 +872,8 @@ mod tests {
     use bevy::math::Vec3;
 
     use super::{
-        Aim, BurstSpec, Drive, Script, SeededRecvConditioner, SimulateInput, SpawnPose,
-        parse_env_flag,
+        Aim, BurstSpec, Drive, Script, ScriptClock, ScriptTimeout, SeededRecvConditioner,
+        SimulateInput, SpawnPose, parse_env_flag,
     };
     use crate::command::{AimIntent, TankCommand};
 
@@ -825,6 +971,109 @@ mod tests {
             assert!(pose.rot.is_normalized());
             assert!((pose.rot * Vec3::NEG_Z).distance(Vec3::NEG_X) < 1e-5);
         }
+    }
+
+    /// Measurement scripts rely on combat tick zero reaching the wire: a held input slot must
+    /// consume neither the script nor its first click. Fixture ticks are arbitrary.
+    #[test]
+    fn held_ticks_advance_nothing_and_release_writes_tick_zero() {
+        use super::super::battle::{BattlePhase, BattleState, LateJoin};
+        use crate::sim_tick::SimTick;
+        use bevy::prelude::*;
+        use lightyear::prelude::input::native::{ActionState, InputMarker};
+
+        let mut app = App::new();
+        app.insert_resource(SimulateInput::new(
+            &Script::parse("(drive: Fire(primary: true), fire_tick: 0, ticks: 2)").unwrap(),
+        ))
+        .insert_resource(Time::<Real>::default())
+        .insert_resource(Time::<Fixed>::from_hz(64.0))
+        .insert_resource(lightyear::prelude::LocalTimeline::default())
+        .add_systems(FixedPreUpdate, super::buffer_input);
+        let slot = app
+            .world_mut()
+            .spawn((
+                ActionState::<TankCommand>::default(),
+                InputMarker::<TankCommand>::default(),
+            ))
+            .id();
+        app.world_mut().run_schedule(FixedPreUpdate);
+        assert_eq!(app.world().resource::<SimulateInput>().ticks, 0);
+        let battle = app.world_mut().spawn(BattleState::default()).id();
+        for _ in 0..3 {
+            app.world_mut().run_schedule(FixedPreUpdate);
+            assert_eq!(app.world().resource::<SimulateInput>().ticks, 0);
+            assert!(
+                !app.world()
+                    .get::<ActionState<TankCommand>>(slot)
+                    .unwrap()
+                    .0
+                    .fire_primary
+            );
+        }
+        app.world_mut()
+            .get_mut::<BattleState>(battle)
+            .unwrap()
+            .phase = BattlePhase::Combat {
+            ends_at: SimTick::new(100),
+            late_join: LateJoin::Closed,
+        };
+        app.world_mut().run_schedule(FixedPreUpdate);
+        assert_eq!(app.world().resource::<SimulateInput>().ticks, 1);
+        assert!(
+            app.world()
+                .get::<ActionState<TankCommand>>(slot)
+                .unwrap()
+                .0
+                .fire_primary
+        );
+        app.world_mut().run_schedule(FixedPreUpdate);
+        assert_eq!(app.world().resource::<SimulateInput>().ticks, 2);
+        assert!(
+            !app.world()
+                .get::<ActionState<TankCommand>>(slot)
+                .unwrap()
+                .0
+                .fire_primary
+        );
+    }
+
+    /// The smoke and workload runners need two finite bounds. Repeated countdown snapshots must
+    /// not renew startup, and a released script's deadline must scale with its own run length.
+    /// Fixture spans cross tick wrap and use arbitrary wall times.
+    #[test]
+    fn watchdog_bounds_launch_once_and_execution_from_release() {
+        use super::super::battle::BattlePhase;
+        use crate::sim_tick::SimTick;
+        let tick = Duration::from_secs_f64(1.0 / 64.0);
+        let mut sim = SimulateInput::new(&Script::parse("(ticks: 6400)").unwrap());
+        let now = SimTick::new(u32::MAX - 3);
+        let fill_up = BattlePhase::FillUp {
+            ends_at: Some(now.after(640)),
+        };
+        // A replicated phase without a tank does not excuse a missing input slot.
+        sim.account_fill_up(fill_up, now, tick);
+        assert_eq!(
+            sim.timeout(Duration::from_secs(21), tick),
+            Some(ScriptTimeout::Release)
+        );
+        sim.input_slot_seen = true;
+        sim.account_fill_up(fill_up, now, tick);
+        assert_eq!(sim.timeout(Duration::from_secs(29), tick), None);
+        sim.account_fill_up(fill_up, now, tick);
+        assert_eq!(
+            sim.timeout(Duration::from_secs(31), tick),
+            Some(ScriptTimeout::Release)
+        );
+        sim.clock = ScriptClock::Released {
+            at: Duration::from_secs(60),
+            first_fire_logged: false,
+        };
+        assert_eq!(sim.timeout(Duration::from_secs(179), tick), None);
+        assert_eq!(
+            sim.timeout(Duration::from_secs(181), tick),
+            Some(ScriptTimeout::Completion)
+        );
     }
 
     /// EACH DRIVE PLAYS THE WORKLOAD ITS RUNNERS MEASURE: the arc drives and steers inside its

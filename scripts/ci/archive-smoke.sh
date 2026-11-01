@@ -24,8 +24,11 @@
 #   1. `client: connected` — the netcode handshake completed (a poisoned digest never reaches it)
 #   2. `— input slot`      — the server replicated a tank this client controls
 #   3. `simulation script complete` + exit status 0 — it played its script out and left cleanly
-# A wedged client is bounded twice: the in-app watchdog (`harness::simulate_watchdog`, script
-# length / 64 + 20 s) and the wall-clock kill below.
+# A wedged client is bounded twice: the in-app watchdog (`harness::simulate_watchdog`,
+# startup slack + remaining replicated fill-up before release, then script length / 64 + 20 s
+# from release) and the wall-clock kill below. The outer default is DERIVED: the existing 120 s
+# load allowance + a full fill-up from the shipped server mode + ceil(script ticks / 64). The
+# smoke's idle script uses the same combat clock as every workload and must wait for release.
 #
 # Env:
 #   SMOKE_SERVER_ASSET_ROOT  `BEVY_ASSET_ROOT` for the server only (a server binary that is not
@@ -33,7 +36,7 @@
 #                            release.yml). Unset: the server resolves them next to itself, which is
 #                            the shipped tarball's layout.
 #   SMOKE_TICKS              scripted client run length in 64 Hz ticks (default 256 ≈ 4 s).
-#   SMOKE_DEADLINE           wall-clock seconds the client gets before it is killed (default 120).
+#   SMOKE_DEADLINE           wall-clock seconds before kill (default derived as above).
 #   SMOKE_LOGS               directory for `server.log` / `client.log` (default a temp dir).
 #   SMOKE_EXPECT_API         the Worker URL the client must have baked in (`OVERMATCH_DEFAULT_API`
 #                            in release.yml). Unset: not checked, for a locally built client.
@@ -47,7 +50,7 @@ fi
 server_bin=$1
 client_bin=$2
 ticks=${SMOKE_TICKS:-256}
-deadline=${SMOKE_DEADLINE:-120}
+deadline=${SMOKE_DEADLINE:-}
 logs=${SMOKE_LOGS:-$(mktemp -d)}
 mkdir -p "$logs"
 server_log="$logs/server.log"
@@ -61,6 +64,18 @@ client_log="$logs/client.log"
 if [ -n "${SMOKE_EXPECT_API:-}" ] && ! grep -q -a -F -- "$SMOKE_EXPECT_API" "$client_bin"; then
     echo "smoke: $client_bin does not carry the Worker URL $SMOKE_EXPECT_API" >&2
     exit 1
+fi
+
+if [ -z "$deadline" ]; then
+    mode="${SMOKE_SERVER_ASSET_ROOT:-$(dirname "$server_bin")}/assets/modes/battle.ron"
+    fill_up_s=$(awk '
+        /^[[:space:]]*fill_up_s:/ {
+            span=$2; sub(/,$/, "", span)
+            print int(span) + (span > int(span)); found=1; exit
+        }
+        END { if (!found) exit 1 }
+    ' "$mode") || { echo "smoke: cannot read fill_up_s from $mode" >&2; exit 1; }
+    deadline=$((120 + fill_up_s + (ticks + 63) / 64))
 fi
 
 # From here on, both logs on every failure — the runner is gone the moment this job ends, and a
@@ -85,7 +100,15 @@ echo "smoke: starting $server_bin"
     exec "./$(basename "$server_bin")"
 ) > "$server_log" 2>&1 &
 server_pid=$!
-trap 'kill "$server_pid" 2>/dev/null' EXIT
+client_pid=
+cleanup() {
+    for pid in "$client_pid" "$server_pid"; do
+        [ -z "$pid" ] || { kill -9 "$pid" 2>/dev/null; wait "$pid" 2>/dev/null; }
+    done
+}
+trap cleanup EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
 
 # The server prints this once the netcode listener is up (`net::server::run`). Waiting on the line
 # rather than on a sleep keeps a slow runner from being read as a failed boot.
@@ -129,6 +152,7 @@ if kill -0 "$client_pid" 2>/dev/null; then
 fi
 wait "$client_pid"
 client_status=$?
+client_pid=
 
 failed=0
 # `client: connected` is the netcode handshake; a protocol-id mismatch (the CRLF class) dies here.
