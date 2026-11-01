@@ -1516,8 +1516,8 @@ impl SeenShots {
     }
 }
 
-/// A fire announcement parsed at the message edge: its bore is a unit direction. Every queue after
-/// receipt holds this type, so presentation never re-checks the wire's raw vector.
+/// The game's damage model: a fire parsed at receipt has a finite origin and a unit bore.
+/// Every later queue holds this type, so presentation never re-checks the wire's raw vectors.
 #[derive(Clone)]
 pub(super) struct ReceivedFire {
     event: FireEvent,
@@ -1526,6 +1526,9 @@ pub(super) struct ReceivedFire {
 
 impl ReceivedFire {
     fn parse(event: &FireEvent) -> Result<Self, FireRefusal> {
+        if !event.origin.is_finite() {
+            return Err(FireRefusal::Origin);
+        }
         let direction = Dir3::new(event.direction).map_err(|_| FireRefusal::Bore)?;
         Ok(Self {
             event: event.clone(),
@@ -1543,7 +1546,9 @@ impl ReceivedFire {
 /// modes: each refusal is a malformed outside fact, logged and dropped, never deferred.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum FireRefusal {
-    /// The bore is not a unit direction.
+    /// The origin is not finite.
+    Origin,
+    /// The bore has no finite nonzero direction.
     Bore,
     /// The shooter's assembled rig has no weapon in this slot.
     WeaponSlot { weapon: u8 },
@@ -3606,6 +3611,33 @@ mod tests {
             world.resource::<PendingFireEvents>().len(),
             0,
             "an index past the assembled list is refused, never deferred",
+        );
+    }
+
+    /// The game's damage model: a non-finite network origin must be refused before any
+    /// presentation queue or shell is created; otherwise a peer can poison the client's pose.
+    #[test]
+    fn a_non_finite_fire_origin_is_refused_at_receipt() {
+        let mut app = fire_receive_app();
+        let world = app.world_mut();
+        let root = spawn_shooter(world, 7);
+        for (index, poison) in [f32::NAN, f32::INFINITY, f32::NEG_INFINITY]
+            .into_iter()
+            .enumerate()
+        {
+            let mut event = fire_event(root, 7, 42 + index as u32);
+            event.origin.x = poison;
+            assert_eq!(ReceivedFire::parse(&event).err(), Some(FireRefusal::Origin));
+            consume_and_release(world, event, Tick(42 + index as u32), None);
+        }
+        assert!(world.resource::<ReconstructedFireShells>().0.is_empty());
+        assert_eq!(world.resource::<PendingFireEvents>().len(), 0);
+        assert!(
+            world
+                .resource_mut::<HeldFireEvents>()
+                .0
+                .release_all()
+                .is_empty()
         );
     }
 
