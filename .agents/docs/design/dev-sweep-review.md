@@ -82,3 +82,18 @@ The sandbox wall and its subtree belong to part 2 and are excluded from this lan
   was checked instead. No release packaging, disk sweep or bay operation ran on real state.
   MEASURED gates: shell syntax, formatting, workspace clippy, 3 citations and 51 script tests pass
   (4 fake cost-runner, 1 fake disk-sweep, 26 shot join, 9 latency, 11 network-window parser).
+
+- **D-CI fixed:** CI tests now use `--features dev_ui,bitprobe`, matching clippy and agents.
+  DERIVED from the cfg/module and test inventory: the old featureless step omitted
+  `bitprobe::tests::every_seam_payload_is_as_wide_as_its_header_schema` (one test), the optional
+  UI compilation paths, and the three required-feature bin test targets (which declare no tests).
+  Sandbox core tests were already compiled by the old library and are retained.
+  Cache decision: change only the codegen family from `codegen` to `codegen-dev-tools`; check-only
+  stays unchanged. Its first fill is cold; subsequent test jobs can restore codegen artifacts for
+  the actual feature set. CI duration is UNMEASURED: the cold fill adds optional UI/flate2 codegen,
+  and warm runs include the schema test and instrumented paths. No timing claim is made.
+- **D-FEATURE-P3 fixed:** sandbox modules now require `dev_ui`, like their bins. Their featureless
+  panel-width alternative, dead-code allowances and inner panel gates are deleted, with their
+  outdated comments. No workflow was triggered or pushed.
+  MEASURED gates: formatting, workspace clippy and 24 sandbox/bitprobe/citation tests passed;
+  one opt-in wall survey stayed ignored.

@@ -454,10 +454,7 @@ impl WrapMemory {
 ///
 /// The field is read only by the `dev_ui` panel, so it reads as dead on the default-feature lane.
 #[derive(Resource, Default)]
-#[cfg_attr(
-    not(feature = "dev_ui"),
-    allow(dead_code, reason = "its field is read only by the dev_ui panel")
-)]
+
 pub(super) struct ViewPerf {
     /// Kinematic wrap ([`conform_belts_field`]).
     pub(super) wrap_us: f32,

@@ -84,7 +84,7 @@ pub(crate) mod suspension_viz;
 // The clickable egui control panel — the sandbox's entire control surface (Tune / Model / Layers /
 // Telemetry / Scene). Behind `dev_ui` so `bevy_egui` is compiled ONLY into the sandbox build, never
 // the shipping client (`bin/overmatch`). Mounted below under the same gate.
-#[cfg(feature = "dev_ui")]
+
 mod panel;
 
 use belt::{
@@ -457,7 +457,7 @@ pub fn plugin(app: &mut App) {
     // The egui control panel — the sandbox's whole control surface. Behind `dev_ui` so `bevy_egui`
     // is compiled ONLY here (the `track_sandbox` bin declares `required-features = ["dev_ui"]`), and
     // never into `bin/overmatch`. It brings its own `EguiPlugin` and runs in `EguiPrimaryContextPass`.
-    #[cfg(feature = "dev_ui")]
+
     app.add_plugins(panel::plugin);
 
     // The scripted capture harness (`SANDBOX_HARNESS` env var): scenario in, JSONL out, exit.
@@ -1669,8 +1669,7 @@ fn apply_rig_counts(
 /// vs the tank's actual forward speed (the gap is the slip / wheelspin), plus the model self-check
 /// the old readout used to print: the taut-wrap-implied link count vs the authored one, and the
 /// derived vehicle mass. It is the always-on "read the model as exact numbers, not eyeballed"
-/// diagnostic — and the one non-`dev_ui` reader of [`derive::link_count`] and the derived model mass
-/// now that the text HUD that printed them is the egui panel.
+/// diagnostic beside the panel; [`derive::link_count`] and the derived model mass feed both.
 fn log_state(
     keys: Res<ButtonInput<KeyCode>>,
     hull: Single<(&Transform, &LinearVelocity), With<Hull>>,
@@ -1874,8 +1873,7 @@ const FORCE_VIZ_SCALE: f32 = 1.0 / 20_000.0;
 
 /// Whether the egui [`panel`] currently holds keyboard or pointer focus — written each frame by the
 /// panel (under `dev_ui`), read by [`panel_capturing`] to gate the driving/camera input off so a
-/// slider drag or a text field never leaks into the sim. Always present (default false) so those
-/// gates behave identically when the panel is not compiled in.
+/// slider drag or a text field never leaks into the sim.
 #[derive(Resource, Default)]
 struct PanelWantsInput {
     keyboard: bool,

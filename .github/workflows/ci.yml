@@ -122,7 +122,7 @@ jobs:
       # must change the key.
       - uses: Swatinem/rust-cache@v2
         with:
-          shared-key: ${{ matrix.task == 'clippy' && 'check-only' || 'codegen' }}-${{ hashFiles('vendor/**', '!vendor/**/*.md') }}
+          shared-key: ${{ matrix.task == 'clippy' && 'check-only' || 'codegen-dev-tools' }}-${{ hashFiles('vendor/**', '!vendor/**/*.md') }}
 
       # The default dev profile: opt-3 deps run the lib suite ~6.7× faster than the
       # retired opt-0 `ci` profile paid for once at cache-cold. `--locked` builds
@@ -132,7 +132,7 @@ jobs:
       # `--all-targets` covers every bin whose required features are on. `dev_ui` (both sandbox
       # bins, bevy_egui) and `bitprobe` are named here because cargo SKIPS a bin whose
       # `required-features` are off — without them those bins were never linted. Additive features
-      # only: the lib this lints is the featureless one plus two optional deps.
+      # only: the game library plus the developer tools and their optional dependencies.
       # The retired `--no-default-features` pair proved the sim didn't depend on netcode; that guard
       # now lives in `src/net/tests/net_boundary.rs` (a source scan) + `src/headless_test.rs`
       # (boots the sim with no netcode mounted) — no second full build required.
@@ -157,11 +157,14 @@ jobs:
           python3 -m pip install --quiet --disable-pip-version-check numpy
           python3 scripts/lod/test_refusals.py
 
+      # The same feature set as clippy and lane tests: includes bitprobe's seam-schema test and
+      # compiles the sandbox panels and their required-feature bin targets. The codegen cache
+      # family above holds these optional dependencies after its first cold fill.
       # `--workspace` runs the asset tools' tests too: the bakes' determinism and invariants.
       - name: Tests
         if: matrix.task == 'tests'
         run: |
-          cargo test --locked --workspace -- --skip ballistics::field_casts::
+          cargo test --locked --workspace --features dev_ui,bitprobe -- --skip ballistics::field_casts::
 
   # One context that is green iff EVERY lane a push or a PR runs here is green — `fmt` included,
   # because a summary that omits a lane is a summary that can go green over its failure, whatever

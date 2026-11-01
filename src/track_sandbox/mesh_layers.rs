@@ -69,18 +69,9 @@ pub(crate) enum MeshState {
 }
 
 impl MeshState {
-    /// The three states in tap order, for the panel's segmented control. Only the `dev_ui` panel
-    /// references it, and the module compiles without that feature — hence the gated `allow`.
-    #[cfg_attr(
-        not(feature = "dev_ui"),
-        allow(dead_code, reason = "read only by the dev_ui panel and tests")
-    )]
+    /// The three states in tap order, for the panel's segmented control.
     pub(crate) const ALL: [MeshState; 3] = [MeshState::Solid, MeshState::Xray, MeshState::Hidden];
 
-    #[cfg_attr(
-        not(feature = "dev_ui"),
-        allow(dead_code, reason = "read only by the dev_ui panel and tests")
-    )]
     pub(crate) fn label(self) -> &'static str {
         match self {
             MeshState::Solid => "solid",
@@ -102,12 +93,7 @@ pub(crate) enum VolumeState {
 }
 
 impl VolumeState {
-    /// The four states in tap order, for the panel's segmented control. See [`MeshState::ALL`] for
-    /// the gated `allow`.
-    #[cfg_attr(
-        not(feature = "dev_ui"),
-        allow(dead_code, reason = "read only by the dev_ui panel and tests")
-    )]
+    /// The four states in tap order, for the panel's segmented control.
     pub(crate) const ALL: [VolumeState; 4] = [
         VolumeState::Hidden,
         VolumeState::OnTop,
@@ -115,10 +101,6 @@ impl VolumeState {
         VolumeState::Xray,
     ];
 
-    #[cfg_attr(
-        not(feature = "dev_ui"),
-        allow(dead_code, reason = "read only by the dev_ui panel and tests")
-    )]
     pub(crate) fn label(self) -> &'static str {
         match self {
             VolumeState::Hidden => "off",

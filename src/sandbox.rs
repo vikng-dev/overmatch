@@ -62,7 +62,7 @@ use crate::{CombatantId, CombatantLife, FreeShooter, Layer, ShotClock, ShotId, b
 // The clickable egui control panel — the sandbox's View / Shot / Time / Telemetry / Scene surface.
 // Behind `dev_ui` so `bevy_egui` compiles ONLY into the sandbox build, never the shipping client
 // (`bin/overmatch`); mounted below under the same gate. (`cargo armor` = `--features dev_ui`.)
-#[cfg(feature = "dev_ui")]
+
 mod panel;
 
 #[cfg(test)]
@@ -83,11 +83,8 @@ const RANGE_SHOOTER: CombatantId = CombatantId(1);
 const RANGE_TARGET: CombatantId = CombatantId(2);
 
 /// The egui control panel's width, logical pixels (egui points at bevy_egui's default zoom): the
-/// panel is fixed-width on the window's left edge. No panel is compiled without `dev_ui`.
-#[cfg(feature = "dev_ui")]
+/// panel is fixed-width on the window's left edge; this module requires `dev_ui`.
 const PANEL_WIDTH: f32 = 300.0;
-#[cfg(not(feature = "dev_ui"))]
-const PANEL_WIDTH: f32 = 0.0;
 
 /// Where the key legend starts, logical pixels: clear of the panel.
 const UI_LEFT: f32 = PANEL_WIDTH + 10.0;
@@ -128,8 +125,7 @@ struct TargetLife(u32);
 
 /// Whether the egui panel currently holds keyboard or pointer focus — written each frame by the
 /// `dev_ui` panel, read by [`panel_capturing`] to gate the firing/fly/time input off so a slider
-/// drag or an arrow-key nudge on a focused widget never leaks into the sim. Always present (default
-/// false) so those gates behave identically when the panel is not compiled in.
+/// drag or an arrow-key nudge on a focused widget never leaks into the sim.
 #[derive(Resource, Default)]
 struct PanelWantsInput {
     keyboard: bool,
@@ -177,10 +173,6 @@ enum ArmourOverlay {
 
 impl ArmourOverlay {
     /// The states in tap order, for the panel's segmented control.
-    #[cfg_attr(
-        not(feature = "dev_ui"),
-        allow(dead_code, reason = "read only by the dev_ui panel")
-    )]
     const ALL: [Self; 3] = [Self::Off, Self::Opaque, Self::Translucent];
 
     fn next(self) -> Self {
@@ -191,10 +183,6 @@ impl ArmourOverlay {
         }
     }
 
-    #[cfg_attr(
-        not(feature = "dev_ui"),
-        allow(dead_code, reason = "read only by the dev_ui panel")
-    )]
     fn label(self) -> &'static str {
         match self {
             Self::Off => "off",
@@ -322,9 +310,7 @@ pub fn plugin(app: &mut App) {
     .init_resource::<ArmourOverlay>()
     .init_resource::<SpeedIndex>()
     .init_resource::<ShotParams>()
-    // Panel↔keyboard shared seams + the egui input-capture flags. Always present (default) so the
-    // firing/fly/time run-conditions compile and behave without `dev_ui`; the panel writes them only
-    // when it is compiled in.
+    // Panel/keyboard intents and the panel’s input-capture flags share one commit path.
     .init_resource::<PanelWantsInput>()
     .init_resource::<ClearRequested>()
     .init_resource::<ResetRequested>()
@@ -382,7 +368,7 @@ pub fn plugin(app: &mut App) {
     // Telemetry / Scene). Behind `dev_ui` so `bevy_egui` is compiled ONLY here (the `armor_sandbox`
     // bin declares `required-features = ["dev_ui"]`), never into `bin/overmatch`. It brings its own
     // `EguiPlugin` and runs in `EguiPrimaryContextPass`. Launch it with the `cargo armor` alias.
-    #[cfg(feature = "dev_ui")]
+
     app.add_plugins(panel::plugin);
     wall::plugin(app);
     // The per-frame wall-clock recorder (idle unless `SPIKE_FRAME_COST` is set): the frame cost of

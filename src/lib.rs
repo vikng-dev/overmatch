@@ -178,6 +178,7 @@ mod rounds;
 mod run_window;
 /// The armor ballistics sandbox (`bin/armor_sandbox`). Public so the binary can mount it; not part
 /// of `GamePlugin`.
+#[cfg(feature = "dev_ui")]
 pub mod sandbox;
 /// The map's object scatter (the map's own `level.json`, resolved through its `prototypes.ron`
 /// library): authored building and tree placement, each instance carrying its map identity,
@@ -253,6 +254,7 @@ mod track_prints;
 /// of `GamePlugin`. Tiger-only: it loads the real blueprint (geometry + spec), derives the running
 /// gear from the glb markers, and overlays the derived suspension/track geometry (cast shapes,
 /// route, contact) as live-tweakable gizmo layers on a hull that actually drives.
+#[cfg(feature = "dev_ui")]
 pub mod track_sandbox;
 /// Trees in the game's damage model: a hard body of segments, each with its own HP pool, and a
 /// state, built at spawn from `assets/trees/` data (the glb is the view), dosed by the union walk
