@@ -1755,13 +1755,23 @@ pub(crate) fn run_laws(
         .filter(|load| live.state.standing(load.chunk))
         .copied()
         .collect();
-    let framed = fracture::in_group_frames(&live.structure, &live.state, &loads);
-    let mut failures = fracture::structural(
-        &live.structure,
-        &mut live.state,
-        &framed,
-        &mut live.sections,
-    );
+    // A failure can free a group in this same run, and the blow that freed it loads that
+    // group's seams in its own frame too: the frames are taken again until a pass frees
+    // nothing more. Each pass that fails cracks an intact joint and none closes, so they end.
+    let mut failures = Vec::new();
+    let framed = loop {
+        let framed = fracture::in_group_frames(&live.structure, &live.state, &loads);
+        let found = fracture::structural(
+            &live.structure,
+            &mut live.state,
+            &framed,
+            &mut live.sections,
+        );
+        if found.is_empty() {
+            break framed;
+        }
+        failures.extend(found);
+    };
     let pushed: Vec<usize> = struck
         .cracked
         .iter()

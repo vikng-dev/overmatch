@@ -4067,6 +4067,48 @@ mod tests {
         }
     }
 
+    /// The blow that frees a group through one section loads the freed group's own seams in
+    /// its frame in the same run: the far chunks' inertia bends the seams behind the struck one.
+    /// Framing only the groups loose before the run let the freed part leave whole. ASSUMED
+    /// fixture: an anchored row of four struck sideways at its second chunk, every chunk seam
+    /// weak and opening-only (so no punch ring forms and only sections read them), the anchor
+    /// strong. Three chunks, not two: a freed pair struck at one end carries pure shear at its
+    /// middle seam (DERIVED), which no section reads.
+    #[test]
+    fn a_group_a_blow_frees_is_assessed_in_its_own_frame() {
+        let mut wall = row(4);
+        for (j, joint) in wall.joints.iter_mut().enumerate() {
+            let mut seam = joint.seam().expect("the fixture row has bonded seams");
+            let weak = matches!(joint.b, Side::Chunk(_));
+            seam.tensile = if weak { 1.0e5 } else { 1.0e9 };
+            seam.fracture_energy = if weak { 1.0 } else { 1.0e6 };
+            if weak {
+                seam.shear = Shear::OpeningOnly;
+            }
+            assert_eq!(weak, j < 3);
+            joint.bond = Bond::Bonded(seam);
+        }
+        let blow = Load {
+            chunk: 1,
+            at: wall.chunks[1].centroid,
+            energy: 0.0,
+            crushed: 0.0,
+            blow: Vec3::Z * 50.0,
+            press: Vec3::ZERO,
+            peak: None,
+            origin: Origin::Field,
+        };
+        let (state, changes) = assess_slab(wall, &[blow]);
+        assert!(state.cracked[0], "the blow frees the struck part");
+        assert!(!state.cracked[3], "the anchor holds");
+        assert!(
+            state.cracked[1] || state.cracked[2],
+            "the freed part splits in its own frame: {:?}",
+            changes.failures
+        );
+        assert!(changes.groups.len() >= 2);
+    }
+
     /// The choice of reference point must not add a resultant. Section tractions rely on
     /// both force and moment being balanced after subtracting the free group's rigid response.
     #[test]
