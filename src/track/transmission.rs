@@ -1146,6 +1146,9 @@ pub struct TransmissionInput {
     pub speeds: [f32; 2],
     pub reactions: [f32; 2],
     pub dt: f32,
+    /// The driver holds the service brakes: no drive at any throttle, the full service brakes while
+    /// the tank moves, and the parking latch once it is at rest (`driver_intent`).
+    pub brake: bool,
 }
 
 /// What the joint solve produced: the integrated next belt speeds, the per-side sprocket
@@ -1592,8 +1595,20 @@ struct DriverIntent {
 /// flows into motion once the belt crosses zero and the back-driven arm drops). Thresholded at
 /// the existing −[`PARK_ENGAGE_SPEED`] policy scale so the at-rest numerical residual and a
 /// from-rest launch never read as back-driven.
-fn driver_intent(inp: &TransmissionInput, reverse: bool, m: f32) -> DriverIntent {
+///
+/// THE BRAKE HOLD ([`TransmissionInput::brake`]): no drive, and the full service brakes until the
+/// tick starts parked; from then on the parking latch alone holds the tank, with its static
+/// breakaway capacity, exactly as a released stick at rest does. The axes are released with the
+/// brake held, so the latch engages once they have slewed to zero at standstill.
+fn driver_intent(inp: &TransmissionInput, reverse: bool, parked: bool, m: f32) -> DriverIntent {
     let dir = if reverse { -1.0 } else { 1.0 };
+    if inp.brake {
+        return DriverIntent {
+            dir,
+            propulsive: 0.0,
+            service: if parked { 0.0 } else { 1.0 },
+        };
+    }
     let opposing = inp.throttle * dir < -DEAD;
     let propulsive = if opposing {
         0.0
@@ -2491,9 +2506,10 @@ fn apply_brake_stop_forces(
         // Engagement envelope: the parking LATCH holds full capacity (post-breach it keeps
         // rubbing at B_max instead of fading with speed); unlatched, the smooth entry blend h
         // (zero command + near-zero belt speed) eases the brake in during settle; the service
-        // pedal is the driver-intent brake command. The paths are mutually exclusive by
-        // construction (service ⇒ a drive command ⇒ unlatched, h≈0). A support-only rig (no
-        // grip) keeps the brake disengaged.
+        // pedal is the driver-intent brake command. The paths overlap only on the tick the latch
+        // engages, where both are full: service comes from a drive command (which releases the
+        // latch) or a brake hold that started the tick unlatched. A support-only rig (no grip)
+        // keeps the brake disengaged.
         let h = if fp.grip.is_some() {
             if st.park {
                 1.0
@@ -2638,7 +2654,7 @@ pub fn step(
         dir,
         propulsive,
         service,
-    } = driver_intent(inp, st.reverse, m);
+    } = driver_intent(inp, st.reverse, st.park, m);
 
     update_demand_filter(
         st,

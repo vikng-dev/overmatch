@@ -217,6 +217,7 @@ pub(super) fn apply_belt_support_field(
             speeds: [belt.get(Side::Left), belt.get(Side::Right)],
             reactions: [reports[0].belt_reaction, reports[1].belt_reaction],
             dt,
+            brake: false,
         },
     );
     telemetry.0 = Some(tr);

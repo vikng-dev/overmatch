@@ -199,7 +199,7 @@ fn update_status_panel(
             &crate::ballistics::ComponentHealth,
             &crate::damage::repair::ModuleRepair,
         ),
-        With<crate::damage::FunctionRole>,
+        crate::damage::repair::Modules,
     >,
     facets: Query<VolumeFacets>,
     mut panel: Query<(&mut Text, &mut Visibility), With<StatusPanelText>>,
@@ -233,7 +233,13 @@ fn update_status_panel(
     // Capabilities: Drive (whole-tank, composed from its requirement groups) + the Gunner sight's
     // live gate. Part qualities resolved once for the sight + weapon gates below.
     let quality = part_qualities(volumes, &facets);
-    let drive = capability_effectiveness(Some(volumes), Some(caps), Capability::Drive, &facets);
+    // The game's damage model: a repairing crew holds the tank on its brakes, so Drive reads zero
+    // until the repair ends or is cancelled.
+    let drive = if crate::damage::repair::underway(volumes, &facets) {
+        0.0
+    } else {
+        capability_effectiveness(Some(volumes), Some(caps), Capability::Drive, &facets)
+    };
     let gunner = evaluate(&views.gunner.requires, &quality);
 
     // Weapons: name + per-fire-mode state, flagged `no-fire` when the fire gate is unmet (knocked-out

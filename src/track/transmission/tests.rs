@@ -125,6 +125,7 @@ fn input(throttle: f32, steer: f32, speeds: [f32; 2], reactions: [f32; 2]) -> Tr
         speeds,
         reactions,
         dt: 1.0 / 64.0,
+        brake: false,
     }
 }
 
@@ -2318,6 +2319,57 @@ fn coast_to_rest_completes_downshift_chain() {
         st.gear, 1,
         "coasting to rest must complete the downshift chain, not strand the cruise \
              gear behind the backslide guard"
+    );
+}
+
+/// The brake hold: a rolling tank brakes to a stop and stays parked, never through zero into
+/// reverse, on a FIXTURE downhill pull well inside both brake capacities. The repair and the
+/// Battle's fill-up rely on it (`track::sim::apply_track_forces`); the same input with the brakes
+/// released keeps rolling, so a hold that only zeroes the command fails.
+#[test]
+fn brake_hold_stops_a_rolling_tank_and_parks_it() {
+    let (fp, tp) = (lab_fp(), lab_tp());
+    // FIXTURE: 6 m/s in gear 4, a 5 kN-per-side downhill pull.
+    let run = |brake: bool| {
+        let mut st = TransmissionState {
+            gear: 4,
+            ..fresh(&tp)
+        };
+        let mut speeds = [6.0f32, 6.0];
+        let mut trace = Vec::new();
+        for _ in 0..320 {
+            let inp = TransmissionInput {
+                brake,
+                ..input(0.0, 0.0, speeds, [-5_000.0, -5_000.0])
+            };
+            speeds = step(&fp, &tp, &mut st, &inp).next_speeds;
+            trace.push((speeds, st.park));
+        }
+        trace
+    };
+    let held = run(true);
+    let stopped = held
+        .iter()
+        .position(|(speeds, park)| *park && speeds.iter().all(|v| v.abs() < PARK_ENGAGE_SPEED))
+        .expect("the brake hold must bring the tank to a parked rest");
+    // DERIVED bound: (2 × 120 kN − 10 kN) over 16 t arrests 6 m/s in about 27 ticks.
+    assert!(stopped < 64, "the brake hold took {stopped} ticks to park");
+    for (tick, (speeds, park)) in held.iter().enumerate().skip(stopped) {
+        assert!(
+            *park && speeds.iter().all(|v| v.abs() < PARK_ENGAGE_SPEED),
+            "tick {tick}: a held tank stays parked, got {speeds:?}"
+        );
+    }
+    assert!(
+        held.iter()
+            .all(|(speeds, _)| speeds.iter().all(|v| *v > -PARK_ENGAGE_SPEED)),
+        "the brake hold never drives the belt through zero"
+    );
+    let coasting = run(false);
+    let (speeds, _) = coasting[stopped];
+    assert!(
+        speeds.iter().all(|v| *v > 1.0),
+        "a released command coasts: the hold must be the brakes, got {speeds:?}"
     );
 }
 

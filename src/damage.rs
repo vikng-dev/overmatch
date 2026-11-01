@@ -500,19 +500,6 @@ pub fn capability_effectiveness(
     let (Some(tank_volumes), Some(tank_caps)) = (tank_volumes, tank_caps) else {
         return 0.0;
     };
-    // The game's damage model: repair is a tank activity, not a quality supplied by a part.
-    // Close the single Drive capability gate; fire/load/slew still use their authored requirements.
-    if capability == Capability::Drive
-        && tank_volumes.iter().any(|volume| {
-            volumes
-                .get(volume)
-                .expect(LIVE_VOLUME)
-                .repair
-                .is_some_and(|repair| repair.elapsed.is_some())
-        })
-    {
-        return 0.0;
-    }
     let requirement = tank_caps.0.get(&capability).unwrap_or_else(|| {
         panic!(
             "{capability:?}: TankSpec::validate refuses a sheet that does not state every capability"

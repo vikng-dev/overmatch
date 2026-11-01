@@ -27,7 +27,7 @@ use bevy::prelude::*;
 use serde::{Deserialize, Serialize};
 
 use crate::bake::TankBlueprint;
-use crate::command::TankCommand;
+use crate::command::ParsedTankCommand;
 use crate::damage::{
     Capability, TankCapabilities, TankVolumes, VolumeFacets, capability_available,
 };
@@ -37,7 +37,7 @@ use crate::tank::Tank;
 #[cfg(feature = "bitprobe")]
 use crate::bitprobe::BitprobeCapture;
 
-use super::drive::{DriveAxes, shape_drive};
+use super::drive::{DriveAxes, DriveTarget, shape_drive};
 use super::forces::{
     BeltContact, ForceParams, GripElements, GripParams, SideInput, SideReport, SideState,
     contact_side,
@@ -584,12 +584,13 @@ pub(crate) fn belt_tick<O: TerrainOracle>(
     gear: &TrackGear,
     oracle: &O,
     pieces: &RubbleBodies,
-    target: DriveAxes,
+    target: DriveTarget,
     affine: Affine3A,
     dt: f32,
     vel_at: impl Fn(Vec3) -> Vec3,
     rig: BeltRig<'_>,
 ) -> ([SideReport; 2], TransmissionReport) {
+    let (target, brake) = target.split();
     let shaped = shape_drive(
         DriveAxes {
             throttle: rig.signal.throttle,
@@ -650,6 +651,7 @@ pub(crate) fn belt_tick<O: TerrainOracle>(
             speeds: [rig.drive.sides[0].speed, rig.drive.sides[1].speed],
             reactions: [reports[0].belt_reaction, reports[1].belt_reaction],
             dt,
+            brake,
         },
     );
     for (si, report) in reports.iter().enumerate() {
@@ -692,7 +694,7 @@ fn apply_track_forces(
             &Rotation,
             &ComputedCenterOfMass,
             &RigidBody,
-            &TankCommand,
+            &ParsedTankCommand,
             &mut TrackDrive,
             &mut DriveSignal,
             &mut TrackGrip,
@@ -774,18 +776,22 @@ fn apply_track_forces(
             capture.tanks_seen += 1;
             capture.command = [command.throttle, command.steer];
         }
-        // The game's damage model: Drive gates thrust; an out-of-action driver, engine or
-        // transmission retargets the
-        // command slew to zero (a fade over ~1/DRIVE_SLEW_PER_SECOND, see the module doc)
+        // A held tank brakes to a stop and stays parked: a command held by its Battle phase, or,
+        // in the game's damage model, a crew at work on a module repair. Otherwise Drive gates
+        // thrust: an out-of-action driver, engine or transmission retargets the command slew to
+        // zero (a fade over ~1/DRIVE_SLEW_PER_SECOND, see the module doc) and the tank coasts,
         // while the full contact model keeps running, so the tracks keep their kinetic grip.
-        let drive_ok = capability_available(tank_volumes, tank_caps, Capability::Drive, &volumes);
-        let target = if drive_ok {
-            DriveAxes {
+        let target = if command.held()
+            || tank_volumes.is_some_and(|tank| crate::damage::repair::underway(tank, &volumes))
+        {
+            DriveTarget::Brake
+        } else if capability_available(tank_volumes, tank_caps, Capability::Drive, &volumes) {
+            DriveTarget::Axes(DriveAxes {
                 throttle: command.throttle,
                 steer: command.steer,
-            }
+            })
         } else {
-            DriveAxes::default()
+            DriveTarget::Axes(DriveAxes::default())
         };
 
         let affine = Affine3A::from_rotation_translation(rot.0, pos.0);

@@ -119,6 +119,8 @@ impl std::error::Error for CommandError {}
 pub(crate) struct ParsedTankCommand {
     command: TankCommand,
     aim: Option<ParsedAimIntent>,
+    /// The tank's player commands nothing ([`Self::hold`]).
+    held: bool,
 }
 
 impl TryFrom<TankCommand> for ParsedTankCommand {
@@ -136,7 +138,11 @@ impl TryFrom<TankCommand> for ParsedTankCommand {
             return Err(CommandError::Range);
         }
         let aim = command.aim.map(ParsedAimIntent::try_from).transpose()?;
-        Ok(Self { command, aim })
+        Ok(Self {
+            command,
+            aim,
+            held: false,
+        })
     }
 }
 
@@ -148,6 +154,18 @@ impl std::ops::Deref for ParsedTankCommand {
 }
 
 impl ParsedTankCommand {
+    /// The command of a tank whose player commands nothing: every level and edge idle, no aim, so
+    /// its servos keep their targets, and the brakes held, so it brakes to a stop and stays parked
+    /// (`track::drive::DriveTarget::Brake`).
+    pub(crate) fn hold() -> Self {
+        Self {
+            held: true,
+            ..default()
+        }
+    }
+    pub(crate) fn held(self) -> bool {
+        self.held
+    }
     pub(crate) fn command(self) -> TankCommand {
         self.command
     }

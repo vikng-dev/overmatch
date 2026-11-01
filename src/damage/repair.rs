@@ -3,7 +3,9 @@
 use bevy::prelude::*;
 use serde::Deserialize;
 
-use super::{Ammo, CrewStation, DamageConsequences, FunctionRole, TankKnockedOut, TankVolumes};
+use super::{
+    Ammo, CrewStation, DamageConsequences, FunctionRole, TankKnockedOut, TankVolumes, VolumeFacets,
+};
 use crate::ballistics::ComponentHealth;
 use crate::command::{ConsumeCommandEdges, ParsedTankCommand};
 use crate::provenance::Sourced;
@@ -45,6 +47,19 @@ impl ModuleRepair {
     }
 }
 
+/// The game's damage model: whether any of this tank's modules is under repair. Repair is a tank
+/// activity, not a quality a part supplies: a repairing crew holds the tank on its brakes
+/// (`track::sim::apply_track_forces`), and every capability keeps its authored requirement.
+pub(crate) fn underway(tank: &TankVolumes, volumes: &Query<VolumeFacets>) -> bool {
+    tank.iter().any(|volume| {
+        volumes
+            .get(volume)
+            .expect(super::LIVE_VOLUME)
+            .repair
+            .is_some_and(|repair| repair.elapsed.is_some())
+    })
+}
+
 fn duration(health: &ComponentHealth) -> f64 {
     f64::from(health.points()) / work_rate()
 }
@@ -69,8 +84,9 @@ pub(super) fn install(app: &mut App) {
     );
 }
 
-/// Only function-bearing, non-ammunition, non-crew pools are repairable modules.
-type Modules = (With<FunctionRole>, Without<Ammo>, Without<CrewStation>);
+/// Only function-bearing, non-ammunition, non-crew pools are repairable modules: the one
+/// definition the repair systems and the status panel (`crew_ui`) share.
+pub(crate) type Modules = (With<FunctionRole>, Without<Ammo>, Without<CrewStation>);
 
 fn toggle_repairs(
     tanks: Query<(&TankVolumes, &ParsedTankCommand, Has<TankKnockedOut>)>,
@@ -217,13 +233,16 @@ mod tests {
         assert!(!world.get::<ComponentHealth>(modules[1]).unwrap().is_empty());
     }
 
-    /// The game's damage model: the existing Drive gate brakes repairers; independent weapon
-    /// requirements still admit fire. Gating every capability or bypassing Drive fails here.
+    /// The game's damage model: a running repair holds the tank on its brakes
+    /// (`track::sim::apply_track_forces` reads [`underway`]) while every capability keeps its
+    /// authored requirement, so a fire gate still admits fire. A repair that closed a capability
+    /// instead, or a hold that missed the running timer, fails here.
     #[test]
-    fn repairing_closes_drive_but_keeps_independent_fire_requirement() {
+    fn repairing_holds_the_tank_but_keeps_every_capability_requirement() {
         fn gates(tanks: Query<(&TankVolumes, &TankCapabilities)>, facets: Query<VolumeFacets>) {
             let (volumes, caps) = tanks.single().unwrap();
-            assert!(!capability_available(
+            assert!(underway(volumes, &facets));
+            assert!(capability_available(
                 Some(volumes),
                 Some(caps),
                 Capability::Drive,
@@ -246,6 +265,13 @@ mod tests {
         ));
         press(&mut world, tank, 1, 1);
         world.run_system_once(gates).unwrap();
+        advance(&mut world, 128);
+        let idle = world
+            .run_system_once(|tanks: Query<&TankVolumes>, facets: Query<VolumeFacets>| {
+                underway(tanks.single().unwrap(), &facets)
+            })
+            .unwrap();
+        assert!(!idle, "a finished repair releases the hold");
     }
 
     /// The game's damage model: knocked-out lives cannot start or complete repairs, so terminal
@@ -274,7 +300,8 @@ mod tests {
     }
 
     /// The game's damage model: only module functions return; ammunition, crew and functionless
-    /// pools stay empty. Even an invalid function-plus-ammo combination must never refill ammo.
+    /// pools stay empty, even when the ammunition or crew pool also names a function, as a tank
+    /// sheet may. Dropping either exclusion from [`Modules`] refills a pool here.
     #[test]
     fn ammunition_crew_and_functionless_pools_never_return() {
         let (mut world, tank, _) = fixture();
@@ -282,7 +309,9 @@ mod tests {
             world
                 .spawn((Ammo, FunctionRole::Engine, VolumeOf(tank)))
                 .id(),
-            world.spawn((CrewStation::Driver, VolumeOf(tank))).id(),
+            world
+                .spawn((CrewStation::Driver, FunctionRole::Engine, VolumeOf(tank)))
+                .id(),
             world.spawn(VolumeOf(tank)).id(),
         ];
         for pool in pools {

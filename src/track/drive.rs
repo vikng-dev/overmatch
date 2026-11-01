@@ -15,6 +15,26 @@ pub struct DriveAxes {
     pub steer: f32,
 }
 
+/// What the driver does with the controls this tick.
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub enum DriveTarget {
+    /// Chase these axes. Zero is a released throttle: the tank coasts under engine drag.
+    Axes(DriveAxes),
+    /// Release both axes and hold the service brakes: the tank brakes to a stop, then the parking
+    /// latch holds it (`transmission::TransmissionInput::brake`).
+    Brake,
+}
+
+impl DriveTarget {
+    /// The slew target of the two axes and whether the brakes are held.
+    pub fn split(self) -> (DriveAxes, bool) {
+        match self {
+            Self::Axes(axes) => (axes, false),
+            Self::Brake => (DriveAxes::default(), true),
+        }
+    }
+}
+
 /// Command slew (per second): the vehicle's input shaping, separate from the transmission's belt dynamics —
 /// folding them changes keyboard feel and damage-recovery semantics.
 /// Provenance: adopted into the sandbox reference untuned; a playtest feel dial, not a physics
