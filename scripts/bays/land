@@ -20,9 +20,11 @@ branch=$(git -C "$bay" symbolic-ref --quiet --short HEAD) || die "land: $(basena
 [[ $branch == lane/* ]] || die "land: $(basename "$bay") is on '$branch', not a lane branch"
 [[ $(git -C "$main" symbolic-ref --short HEAD) == main ]] || die "land: the main checkout is not on main"
 
-# Commit ids hold no whitespace, so word splitting is exact; avoids bash-4 `mapfile`.
+# Commit ids hold no whitespace, so word splitting is exact; avoids bash-4 `mapfile`. A lane commit
+# whose patch main already holds (the lane cherry-picked a fix from main) is left out: picking it
+# again would stop on an empty commit.
 # shellcheck disable=SC2207
-commits=($(git -C "$main" rev-list --reverse "main..$branch"))
+commits=($(git -C "$main" rev-list --reverse --right-only --cherry-pick --no-merges "main...$branch"))
 ((${#commits[@]} > 0)) || die "land: $branch has no commits beyond main"
 
 git -C "$main" cherry-pick "${commits[@]}" >/dev/null ||
