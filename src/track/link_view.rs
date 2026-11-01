@@ -852,7 +852,7 @@ fn bind_link_template(
     // centre is authored. `RigGeom` measures both (off `Link_Box` and off the pin markers), so this
     // stays a difference of two measurements rather than a number typed in here — and with the
     // template at unit scale it is already in the mesh's own units.
-    let shoe_offset = geom.link_center_x(Side::Right) - geom.plane_x;
+    let shoe_offset = geom.shoe_center_offset();
     let frame = frames(pin_start, pin_end, shoe_offset);
 
     info!(

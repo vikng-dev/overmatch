@@ -591,12 +591,15 @@ impl RigGeom {
         self.grip_column_offsets(side).map(|(x, _)| x)
     }
 
-    /// Where to DRAW the link on a side: the shoe's own lateral centre, hull-local. Distinct from
-    /// `side.plane_x(self.plane_x)`, which is where the pin line — and therefore the 2-D route the
-    /// link rides — lives. Rendering the shoe on the pin plane is the ~17 mm error this exists to
-    /// prevent.
+    /// Native shoe centre offset from its own pin plane, independent of track placement.
+    /// The template binder and hull-local placements share this construction datum.
+    pub(crate) fn shoe_center_offset(&self) -> f32 {
+        self.model.link_center_x - self.model.plane_x
+    }
+
+    /// Hull-local shoe centre; `side_plane_x` places the pin line carrying its two-dimensional route.
     pub(crate) fn link_center_x(&self, side: Side) -> f32 {
-        self.side_plane_x(side) + side.sign() * (self.model.link_center_x - self.model.plane_x)
+        self.side_plane_x(side) + side.sign() * self.shoe_center_offset()
     }
 
     /// Where this rig's `link_count` sits in the feasible window at the given suspension knobs.
@@ -1133,6 +1136,11 @@ mod tests {
         let rig = base.rebuild(base.teeth, base.link_count, &params);
         assert_eq!(rig.side_plane_x(Side::Left), -1.8);
         assert_eq!(rig.side_plane_x(Side::Right), 1.1);
+        assert_eq!(
+            rig.shoe_center_offset(),
+            base.shoe_center_offset(),
+            "the same template keeps its local pin-to-centre datum when track planes move"
+        );
         for pose in [Pose::Rest, Pose::Droop, Pose::Compression] {
             assert_eq!(
                 rig.circles(Side::Left, pose, &params)[1].1,

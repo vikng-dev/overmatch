@@ -773,7 +773,7 @@ fn count_armour_strike(
     mut tally: ResMut<Tally>,
     mut logged: Local<u32>,
 ) {
-    // Environment volumes have no battle owner; neither do volumes whose owning life is gone.
+    // Environment volumes and tanks outside this scripted scene have no battle slot.
     let owner = owners
         .get(strike.struck)
         .expect("a resolved face's volume lives through its synchronous ShellStrike observers");

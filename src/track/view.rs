@@ -331,13 +331,10 @@ struct RigSide {
 }
 
 struct RigWheel {
-    /// Rest pivot (hull-local — the REAL authored x, which for the Tiger's interleaved columns
-    /// differs from `plane_x`) and rest rotation (preserved under spin: a future model's wheels
-    /// may author non-identity rests).
+    /// Hull-local authored axle position, independent of the belt pin plane.
     pivot: Vec3,
     frame: GearFrame,
-    /// This station's PIN-LINE radius (m), from the measured [`RigGeom::rest`] circle — per station,
-    /// not one shared wheel radius (the Tiger's interleaved discs alternate ~1.5 mm).
+    /// This station's pin-line radius (m): its declared tread radius plus the pin-to-inner offset.
     radius: f32,
     /// Declared axle-relative tread surfaces; the gap between discs is not a contact surface.
     tread: crate::spec::WheelTread,
@@ -395,12 +392,9 @@ fn bind_track_rigs(
     parents: Query<&ChildOf>,
     names: Query<&Name>,
     wheels: Query<(&Roadwheel, Option<&ViewNode>)>,
-    // Sprocket/idler REST poses and their tooth-tip mesh calibration are read here at bind: node
-    // transforms for the rest capture and the mesh-space→hull composition, mesh primitives for the
-    // sprocket tooth ring.
+    // Authored local poses and ancestor frames are captured before transform propagation.
     node_transforms: Query<&Transform>,
-    // The belt's draw: its repeated meshes (and the sprocket's, read for the tooth ring), the
-    // shoe's material, and each belt's block of the shared table.
+    // The belt's repeated meshes, shoe material and block of the shared frame table.
     mut belt_assets: BeltAssets,
     mut commands: Commands,
 ) {
@@ -415,7 +409,7 @@ fn bind_track_rigs(
     let spec = &blueprint.spec.track;
     let belt_len = geom.belt_len();
     'tank: for root in &tanks {
-        let mut side_wheels: [Vec<(Vec3, GearFrame, Entity)>; 2] = [Vec::new(), Vec::new()];
+        let mut side_wheels: [Vec<(Vec3, GearFrame, Entity, usize)>; 2] = [Vec::new(), Vec::new()];
         let mut sprocket_view = [None, None];
         let mut idler_view = [None, None];
         for entity in children.iter_descendants(root) {
@@ -431,7 +425,21 @@ fn bind_track_rigs(
                 let frame = GearFrame::new(rest, parent).unwrap_or_else(|fault| {
                     panic!("{}: roadwheel view {:?}: {fault}", blueprint.file, view.0)
                 });
-                side_wheels[si].push((parent.transform_point3(rest.translation), frame, view.0));
+                let address = names
+                    .get(entity)
+                    .expect("a spawn-built wheel station retains its declared node name");
+                let station = blueprint
+                    .spec
+                    .roadwheels
+                    .iter()
+                    .position(|declared| declared.node == address.as_str())
+                    .expect("a Roadwheel station is declared in this tank's construction data");
+                side_wheels[si].push((
+                    parent.transform_point3(rest.translation),
+                    frame,
+                    view.0,
+                    station,
+                ));
             } else if let Ok(name) = names.get(entity) {
                 if let Some(side) = spec.sprocket.nodes.side_of(name) {
                     sprocket_view[side] = Some(entity);
@@ -450,7 +458,9 @@ fn bind_track_rigs(
             continue;
         }
         for side in &mut side_wheels {
-            side.sort_by(|a, b| a.0.z.total_cmp(&b.0.z));
+            // Coincident axle Z coordinates keep declaration order, matching RigGeom's stable
+            // sort of the authored station list; ECS descendant order is not station identity.
+            side.sort_by(|a, b| a.0.z.total_cmp(&b.0.z).then(a.3.cmp(&b.3)));
         }
 
         // Per-side REST running gear from the measured rig: `[sprocket, road wheels…, idler]`, each
@@ -521,23 +531,25 @@ fn bind_track_rigs(
         // Zip each view wheel (sorted front→rear) with its measured pin-line radius from the rest
         // circles' MIDDLE (`rest[0]` is the sprocket, `rest.last()` the idler). Counts were checked
         // equal above.
-        let rig_wheels = |list: Vec<(Vec3, GearFrame, Entity)>,
+        let rig_wheels = |list: Vec<(Vec3, GearFrame, Entity, usize)>,
                           rest: &[(Vec2, f32)],
                           treads: &[crate::spec::WheelTread]|
          -> Vec<RigWheel> {
             list.into_iter()
                 .zip(rest[1..rest.len() - 1].iter())
                 .zip(treads)
-                .map(|(((pivot, frame, view), &(_, radius)), tread)| RigWheel {
-                    pivot,
-                    frame,
-                    radius,
-                    tread: tread.clone(),
-                    dy: 0.0,
-                    dvel: 0.0,
-                    target: Default::default(),
-                    view,
-                })
+                .map(
+                    |(((pivot, frame, view, _station), &(_, radius)), tread)| RigWheel {
+                        pivot,
+                        frame,
+                        radius,
+                        tread: tread.clone(),
+                        dy: 0.0,
+                        dvel: 0.0,
+                        target: Default::default(),
+                        view,
+                    },
+                )
                 .collect()
         };
         let sides = [
