@@ -151,14 +151,10 @@ pub fn solid_angle(half_angle: f32) -> f32 {
 }
 
 /// The intensity `e / r²` (HP points per m²) at distance `r` (m) along a direction of emission
-/// `emission` (HP points per steradian), inside the direction's reach.
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "the look's shader takes the intensity at runtime (`pen_cam_look.wgsl`, `field_at`); this is the law the sim's dose is checked against (`the_pen_cam_intensity_times_a_face_is_its_dose`)"
-    )
-)]
+/// `emission` (HP points per steradian), inside the direction's reach. Test oracle: the look's
+/// shader takes the intensity at runtime (`pen_cam_look.wgsl`, `field_at`); the sim's dose is
+/// checked against this (`the_pen_cam_intensity_times_a_face_is_its_dose`).
+#[cfg(test)]
 pub fn intensity(emission: f32, r: f32) -> f32 {
     emission / (r * r)
 }
@@ -166,14 +162,8 @@ pub fn intensity(emission: f32, r: f32) -> f32 {
 /// A band's edge as the painting draws it: how far value `x` is past `edge`, `smoothstep` over
 /// `width` centred on it (`width` the value's change across a pixel, so the edge is one pixel wide
 /// at every zoom), a hard step where the value does not change. `pen_cam_look.wgsl` (`soft_step`)
-/// evaluates the same; this is the curve it mirrors, held by the tests.
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "the look's shader takes the edge at runtime (`pen_cam_look.wgsl`, `soft_step`); this is the curve it mirrors, held by the tests"
-    )
-)]
+/// evaluates the same at runtime; this test oracle is the curve it mirrors.
+#[cfg(test)]
 pub fn soft_step(edge: f32, width: f32, x: f32) -> f32 {
     let half = 0.5 * width.max(1e-6);
     let t = ((x - (edge - half)) / (2.0 * half)).clamp(0.0, 1.0);

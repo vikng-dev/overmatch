@@ -33,6 +33,7 @@ use std::f32::consts::{PI, SQRT_2};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, Weak};
 
+#[cfg(test)]
 use avian3d::parry::query::RayCullingMode;
 use bevy::asset::{RenderAssetUsages, StrongHandle};
 use bevy::mesh::VertexBufferLayout;
@@ -62,7 +63,8 @@ pub const PICTURE_FIELDS: usize = 4;
 /// A field's face lanes in the look's uniform: two for each face of the cube (`look::pack`).
 pub const FACE_LANES: usize = 12;
 /// The near plane (m along a face's forward): a caster face nearer the origin is not drawn.
-/// `pen_cam_picture.wgsl` declares it.
+/// `pen_cam_picture.wgsl` declares it; the tests' CPU mirror of the pictures reads this copy.
+#[cfg(test)]
 pub const NEAR_M: f32 = 1.0e-4;
 /// The caster faces the picture keeps: those a line from the origin meets head-on, every caster
 /// wound outward (the manifold gate's certificate) and the horizon inward, as a line enters a hard
@@ -385,14 +387,9 @@ impl Picture {
 }
 
 /// A field's picture and the reach its texels hold, as the CPU mirrors read it: `reach` along a
-/// unit direction (record frame) is what a texel whose centre lies along it holds.
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "the look's shader reads the pictures at runtime; the CPU mirrors read them so, held by the tests"
-    )
-)]
+/// unit direction (record frame) is what a texel whose centre lies along it holds. Test oracle:
+/// the look's shader reads the pictures at runtime.
+#[cfg(test)]
 #[derive(Clone, Copy)]
 pub struct Seen<'a> {
     pub picture: &'a Picture,
@@ -465,14 +462,9 @@ impl Casters {
     /// the direction, as the GPU clips each face (`pen_cam_picture.wgsl`; a crop's one-texel
     /// overhang past its face's edge is clipped along its own face's forward, which moves the near
     /// plane there by at most `NEAR_M √3` pitch, DERIVED). The pictures' CPU mirror, held by the
-    /// tests against the record; no test reads the GPU's pictures back.
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "the GPU renders the pictures at runtime; this is the reach it mirrors, held by the tests"
-        )
-    )]
+    /// tests against the record; no test reads the GPU's pictures back. Test oracle: the GPU
+    /// renders the pictures at runtime.
+    #[cfg(test)]
     pub fn reach(&self, origin: Vec3, axis: Vec3, direction: Vec3) -> f32 {
         let [u, v, axis] = frame(axis);
         let local = Vec3::new(direction.dot(u), direction.dot(v), direction.dot(axis));
