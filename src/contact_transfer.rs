@@ -38,8 +38,9 @@
 //! IMPLICIT CONTACTS. The belt applies support and traction before physics without collider
 //! constraints. Its equal-and-opposite structure reaction is staged by [`ContactTransfers::stage`]
 //! and published with that physics step. Every patch one source body presses on one collider
-//! shares one closing-momentum budget per co-normal manifold at its load centroid: neither
-//! splitting a shoe footprint nor each link's own rounding of its normal can multiply a blow.
+//! shares one closing-momentum budget, sized against the source's mass as that distribution of
+//! impulses meets it ([`ContactTransfers::split`]): neither splitting a shoe footprint, nor a
+//! link's rounding of its normal, nor a curved run's turning normals can multiply a blow.
 //! These contacts are refreshed by the belt each tick and never enter the solver's sleeping-pair
 //! cache.
 //!
@@ -140,8 +141,8 @@ pub(crate) struct BodyInertia {
 pub(crate) struct ContactTransfers {
     points: Vec<ContactTransfer>,
     pending: Vec<AppliedContact>,
-    /// Implicit manifolds by `(structure collider, source body)`, each with one normal.
-    applied: BTreeMap<(Entity, Entity), Vec<Vec<ContactTransfer>>>,
+    /// Implicit contacts by `(structure collider, source body)`, whatever their normals.
+    applied: BTreeMap<(Entity, Entity), Vec<ContactTransfer>>,
     inertias: BTreeMap<Entity, BodyInertia>,
     resting: Vec<Resting>,
     /// The last step's length, s.
@@ -227,16 +228,20 @@ impl ContactTransfers {
             .iter()
             .zip(ends)
             .flat_map(move |(kept, end)| self.split_points(&self.points[kept.first..end]))
-            .chain(self.applied.values().flat_map(|manifolds| {
-                manifolds
-                    .iter()
-                    .flat_map(|points| self.split_points(points))
-            }))
+            .chain(
+                self.applied
+                    .values()
+                    .flat_map(|points| self.split_points(points)),
+            )
     }
 
-    /// Solver points carry the constraint's effective masses. Implicit patches on one collider
-    /// share the source mass at their centroid, so neither subdividing a footprint nor a link's
-    /// rounded normal spends that mass repeatedly.
+    /// Solver points carry the constraint's effective masses. A source's implicit patches on one
+    /// collider share one budget whatever their normals: the blow is the impulse that stops the
+    /// source's closing along the distribution of what its closing patches moved, `m_w v_w`,
+    /// where `v_w` is their moved-weighted closing speed and `m_w` the source's effective mass
+    /// for that distribution ([`Self::contact_mass`]). Co-normal copies of one patch, a straight
+    /// run's rounded normals and a curved run's turning ones all meet the source's mass once; a
+    /// resting patch takes no share, so its press is never another face's blow.
     fn split_points<'a>(
         &'a self,
         points: &'a [ContactTransfer],
@@ -246,31 +251,45 @@ impl ContactTransfers {
             .expect("every retained contact has at least one point");
         let along = |point: &ContactTransfer| point.impulse.dot(point.normal);
         let moved: f32 = points.iter().map(along).sum();
-        let mass = self.contact_mass(points, moved);
-        let closing = if first.body_collider.is_some() {
-            points
-                .iter()
-                .filter(|point| point.closing_speed > point.rest_speed)
-                .map(|point| point.effective_mass * point.closing_speed)
-                .sum()
-        } else if moved > 0.0 {
-            let speed = points
-                .iter()
-                .map(|p| p.closing_speed * along(p))
-                .sum::<f32>()
-                / moved;
-            if speed > first.rest_speed {
-                mass * speed
+        let solver = first.body_collider.is_some();
+        // What shares the blow: every solver point by what it moved, an implicit patch only
+        // while it closes faster than its body's rest speed.
+        let share = move |point: &ContactTransfer| {
+            if solver {
+                along(point)
+            } else if point.closing_speed > point.rest_speed {
+                along(point).max(0.0)
             } else {
                 0.0
             }
-        } else {
-            0.0 // No normal momentum was moved, so there is no blow.
         };
-        let blow = closing.min(moved);
+        let shared: f32 = points.iter().map(share).sum();
+        let (mass, blow) = if solver {
+            let mass = if moved > 0.0 {
+                self.contact_mass(points, along)
+            } else {
+                self.contact_mass(points, |_| 1.0) // No blow: its points' mean stands for it.
+            };
+            let closing: f32 = points
+                .iter()
+                .filter(|point| point.closing_speed > point.rest_speed)
+                .map(|point| point.effective_mass * point.closing_speed)
+                .sum();
+            (mass, closing.min(moved))
+        } else if shared > 0.0 {
+            let mass = self.contact_mass(points, share);
+            let speed = points
+                .iter()
+                .map(|point| point.closing_speed * share(point))
+                .sum::<f32>()
+                / shared;
+            (mass, (mass * speed).min(shared))
+        } else {
+            (self.contact_mass(points, |_| 1.0), 0.0) // Nothing closes: no blow.
+        };
         points.iter().map(move |point| {
-            let blow = if moved > 0.0 {
-                point.normal * (blow * along(point) / moved)
+            let blow = if shared > 0.0 {
+                point.normal * (blow * share(point) / shared)
             } else {
                 Vec3::ZERO
             };
@@ -278,53 +297,41 @@ impl ContactTransfers {
         })
     }
 
-    /// One contact's source mass ([`Self::split`]), kg: its body's effective mass along the
-    /// contact's normal at the centroid of what the solver moved through its points along it
-    /// (`moved`, N·s), their mean where it moved nothing.
-    fn contact_mass(&self, points: &[ContactTransfer], moved: f32) -> f32 {
+    /// One contact's source mass ([`Self::split`]), kg: the source body's effective mass for the
+    /// distribution of unit impulses along its points' normals weighted by `weight`,
+    /// `(Σw)² / (wᵀ K w)` with `K` the source's inverse mass matrix between its points. Where the
+    /// points share one normal it is the body's effective mass along it at their weighted
+    /// centroid. Rotation and locked axes are included.
+    fn contact_mass(
+        &self,
+        points: &[ContactTransfer],
+        weight: impl Fn(&ContactTransfer) -> f32,
+    ) -> f32 {
         let first = points
             .first()
-            .expect("Avian builds a contact constraint only for a manifold with points");
-        let at = if moved > 0.0 {
-            points
-                .iter()
-                .map(|point| point.point * point.impulse.dot(point.normal))
-                .sum::<Vec3>()
-                / moved
-        } else {
-            points.iter().map(|point| point.point).sum::<Vec3>() / points.len() as f32
-        };
+            .expect("every retained contact has at least one point");
         let inertia = self.inertia(first.body);
-        let normal = points
-            .iter()
-            .map(|point| {
-                point.normal
-                    * if moved > 0.0 {
-                        point.impulse.dot(point.normal)
-                    } else {
-                        1.0
-                    }
-            })
-            .sum::<Vec3>()
-            .normalize();
-        let arm = (at - inertia.centre).cross(normal);
-        let inverse =
-            normal.dot(inertia.inverse_mass * normal) + arm.dot(inertia.inverse_inertia * arm);
-        assert!(
-            inverse.is_finite() && inverse >= 0.0,
-            "a contact's solver inverse effective mass is finite and nonnegative"
+        let (total, linear, angular) = points.iter().fold(
+            (0.0, Vec3::ZERO, Vec3::ZERO),
+            |(total, linear, angular), point| {
+                let w = weight(point);
+                (
+                    total + w,
+                    linear + point.normal * w,
+                    angular + (point.point - inertia.centre).cross(point.normal) * w,
+                )
+            },
         );
-        // Locked axes can prevent all motion along this normal even on a dynamic body.
+        let inverse = linear.dot(inertia.inverse_mass * linear)
+            + angular.dot(inertia.inverse_inertia * angular);
+        assert!(
+            inverse.is_finite() && inverse >= 0.0 && total > 0.0,
+            "a contact's weights are positive and its solver inverse effective mass is finite and nonnegative"
+        );
+        // Locked axes can prevent all motion along this distribution even on a dynamic body.
         // Its effective mass is infinite, and Avian's zero effective mass moves no blow.
-        inverse.recip()
+        total * total / inverse
     }
-}
-
-/// ASSUMED numerical envelope: pose composition may round a shared direction by up to
-/// 32 float epsilons. This merges roundoff alone; distinct footprint directions retain their
-/// own closing momentum and cannot turn a resting face's press into another face's blow.
-fn same_normal(a: Vec3, b: Vec3) -> bool {
-    a.dot(b) > 0.0 && a.cross(b).length_squared() <= (32.0 * f32::EPSILON).powi(2)
 }
 
 /// A point's accumulated friction impulse, in its constraint's tangent basis (N·s); none without
@@ -479,7 +486,7 @@ fn keep(
         }
     }
     applied.clear();
-    // Canonical staging order fixes both the clustering representative and floating sums.
+    // Canonical staging order fixes the floating sums.
     pending.sort_by(|a, b| {
         let key = |c: &AppliedContact| {
             (
@@ -507,28 +514,21 @@ fn keep(
         let arm = (contact.point - inertia.centre).cross(contact.normal);
         let inverse = contact.normal.dot(inertia.inverse_mass * contact.normal)
             + arm.dot(inertia.inverse_inertia * arm);
-        let manifolds = applied
+        applied
             .entry((contact.structure_collider, contact.body))
-            .or_default();
-        let slot = manifolds
-            .iter()
-            .position(|points| same_normal(points[0].normal, contact.normal));
-        let slot = slot.unwrap_or_else(|| {
-            manifolds.push(Vec::new());
-            manifolds.len() - 1
-        });
-        manifolds[slot].push(ContactTransfer {
-            structure: contact.structure,
-            structure_collider: contact.structure_collider,
-            body: contact.body,
-            body_collider: None,
-            point: contact.point,
-            normal: contact.normal,
-            impulse: contact.force * *dt,
-            effective_mass: if inverse > 0.0 { inverse.recip() } else { 0.0 },
-            closing_speed: contact.closing_speed,
-            rest_speed: rest.linear * length_unit.0,
-        });
+            .or_default()
+            .push(ContactTransfer {
+                structure: contact.structure,
+                structure_collider: contact.structure_collider,
+                body: contact.body,
+                body_collider: None,
+                point: contact.point,
+                normal: contact.normal,
+                impulse: contact.force * *dt,
+                effective_mass: if inverse > 0.0 { inverse.recip() } else { 0.0 },
+                closing_speed: contact.closing_speed,
+                rest_speed: rest.linear * length_unit.0,
+            });
     }
 }
 
@@ -646,7 +646,7 @@ mod tests {
                     rest_speed: 0.15,
                 })
                 .collect();
-            transfers.applied.insert((collider, body), vec![points]);
+            transfers.applied.insert((collider, body), points);
             let (mut blow, mut press) = (Vec3::ZERO, Vec3::ZERO);
             for (_, struck, held, mass) in transfers.split() {
                 assert_eq!(mass, 10.0);
@@ -714,9 +714,58 @@ mod tests {
         );
     }
 
-    /// Distinct contact directions have distinct closing budgets. Environment construction
-    /// relies on a resting top-face press staying a press while another face is approached;
-    /// staging order must not choose the source mass. FIXTURE DATA: a cube and two orthogonal
+    /// A curved run's links press one collider along turning normals, and each moves far more
+    /// than the source's closing momentum: the blow is still the source's, met once. Wall and
+    /// trunk laws rely on that for any running gear's arc links, at any spread. FIXTURE DATA: the
+    /// 1000 kg cube closing at 1 m/s, four 128 kN patches through its centre along normals 1°
+    /// apart. DERIVED bound: stopping a source along normals spread 3° takes at most 0.1% more
+    /// than its closing momentum.
+    #[test]
+    fn implicit_patches_along_a_curved_run_share_the_source_momentum() {
+        let mut app = world(1.0);
+        let structure = wall(&mut app);
+        let collider = app
+            .world_mut()
+            .query_filtered::<(Entity, &ChildOf), With<Collider>>()
+            .iter(app.world())
+            .find(|(_, parent)| parent.parent() == structure)
+            .map(|(collider, _)| collider)
+            .expect("the wall has its collider");
+        let centre = Vec3::new(3.0, 0.0, 0.0);
+        let body = cube(&mut app, centre, Vec3::ZERO);
+        app.update();
+        for degrees in 0..4 {
+            let normal =
+                Quat::from_rotation_z((degrees as f32).to_radians()) * Vec3::new(0.6, 0.8, 0.0);
+            app.world_mut()
+                .resource_mut::<ContactTransfers>()
+                .stage(AppliedContact {
+                    structure,
+                    structure_collider: collider,
+                    body,
+                    point: centre,
+                    normal,
+                    force: normal * 128_000.0,
+                    closing_speed: 1.0,
+                });
+        }
+        app.update();
+        let transfers = app.world().resource::<ContactTransfers>();
+        let delivered: f32 = transfers
+            .split()
+            .filter(|(point, ..)| point.body == body)
+            .map(|(_, struck, ..)| struck.length())
+            .sum();
+        println!("MEASURED curved-run blow {delivered} N s against 1000 N s");
+        assert!(
+            delivered > 0.0 && delivered <= 1000.0 * 1.001,
+            "the blow {delivered} N·s exceeds the source's closing momentum 1000 N·s"
+        );
+    }
+
+    /// A resting patch takes no share of the blow. Environment construction relies on a resting
+    /// top-face press staying a press while another face is approached; staging order must not
+    /// choose the source mass. FIXTURE DATA: a cube and two orthogonal
     /// patches at the same off-centre point, one resting and one closing.
     #[test]
     fn implicit_unequal_normals_preserve_resting_press_and_staging_order() {
