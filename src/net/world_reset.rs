@@ -24,6 +24,33 @@ impl Default for AuthorityWorld {
     }
 }
 
+#[derive(Resource, Default)]
+struct WorldConstructors(Vec<fn(&mut World)>);
+
+/// Register each environment subsystem once for both startup and subsequent construction.
+/// Constructors spawn separate generation-tagged wire roots; the boundary retires those roots.
+pub(super) fn register_constructor(app: &mut App, construct: fn(&mut World)) {
+    if !app.world().contains_resource::<WorldConstructors>() {
+        app.init_resource::<WorldConstructors>()
+            .add_systems(Startup, construct_records);
+    }
+    app.world_mut()
+        .resource_mut::<WorldConstructors>()
+        .0
+        .push(construct);
+}
+
+fn construct_records(world: &mut World) {
+    let Some(constructors) = world.get_resource::<WorldConstructors>() else {
+        // A composition without replicated environment subsystems has no record constructors.
+        return;
+    };
+    let constructors = constructors.0.clone();
+    for construct in constructors {
+        construct(world);
+    }
+}
+
 pub(super) fn install_client(app: &mut App) {
     app.insert_resource(CurrentWorld(None))
         .init_resource::<BuiltWorld>()
@@ -61,27 +88,19 @@ fn follow_battle(world: &mut World) {
 /// new diff histories, so no acknowledged append cursor can span two worlds.
 pub(super) fn start_next(world: &mut World, number: u32) {
     let old: Vec<_> = world
-        .query_filtered::<Entity, Or<(
-            With<super::walls::WallLedger>,
-            With<super::destruction::DestructionLedger>,
-            With<super::debris_stress::DebrisPose>,
-        )>>()
+        // Generation-tagged wire roots share the world's boundary lifetime.
+        .query_filtered::<Entity, With<WorldGeneration>>()
         .iter(world)
         .collect();
     for entity in old {
         assert!(
             world.despawn(entity),
-            "authority carriers and ledgers are separate roots"
+            "authority generation-tagged wire entities are separate roots"
         );
     }
     world.insert_resource(AuthorityWorld(WorldGeneration(number)));
     crate::world::reconstruct(world);
-    world
-        .run_system_cached(super::walls::spawn_ledger)
-        .expect("a fresh world can construct its wall ledger");
-    world
-        .run_system_cached(super::destruction::spawn_ledger)
-        .expect("a fresh world can construct its tree ledger");
+    construct_records(world);
 }
 
 /// Retired carriers can outlive the phase packet in flight. They keep their replication identity

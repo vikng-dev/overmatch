@@ -333,6 +333,72 @@ fn record_arrival_order_cannot_mix_worlds_or_consume_a_snapshot_before_construct
     }
 }
 
+/// Startup and rebuild must select environment records from the same installed subsystems.
+/// A composition with no wall or tree publisher must not gain that publisher's ledger later.
+#[test]
+fn rebuilding_constructs_only_the_environment_records_installed_at_startup() {
+    let _udp = lock_real_udp_test();
+    for (walls, trees) in [(false, false), (true, false), (false, true), (true, true)] {
+        let mut server = crate::net::link_drop::build_server(free_port());
+        environment(&mut server);
+        if walls {
+            crate::net::walls::install_server(&mut server);
+        }
+        if trees {
+            crate::net::destruction::install_server(&mut server);
+        }
+        crate::net::server::install_battle(
+            &mut server,
+            crate::net::battle_mode::BattleMode::parse(include_str!(
+                "../fixtures/battle-short.ron"
+            )),
+            TICK,
+        );
+        finish(&mut server);
+        server.update();
+        let records = |world: &mut World| {
+            (
+                world
+                    .query_filtered::<Entity, With<WallLedger>>()
+                    .iter(world)
+                    .collect::<Vec<_>>(),
+                world
+                    .query_filtered::<Entity, With<DestructionLedger>>()
+                    .iter(world)
+                    .collect::<Vec<_>>(),
+            )
+        };
+        let initial = records(server.world_mut());
+        assert_eq!(
+            (initial.0.len(), initial.1.len()),
+            (usize::from(walls), usize::from(trees))
+        );
+        start_next(server.world_mut(), 2);
+        let rebuilt = records(server.world_mut());
+        assert_eq!(
+            (rebuilt.0.len(), rebuilt.1.len()),
+            (usize::from(walls), usize::from(trees)),
+            "rebuilding must not install an absent subsystem"
+        );
+        assert!(
+            initial
+                .0
+                .iter()
+                .chain(&initial.1)
+                .all(|&entity| server.world().get_entity(entity).is_err()),
+            "a ledger identity cannot span generations"
+        );
+        assert!(
+            rebuilt
+                .0
+                .iter()
+                .chain(&rebuilt.1)
+                .all(|&entity| server.world().get::<WorldGeneration>(entity)
+                    == Some(&WorldGeneration(2)))
+        );
+    }
+}
+
 fn network_client(port: u16, id: u64) -> App {
     let mut app = base_app();
     app.add_plugins(ClientPlugins {

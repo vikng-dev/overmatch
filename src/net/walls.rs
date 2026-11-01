@@ -41,14 +41,13 @@ impl Diffable for WallLedger {
 }
 
 pub(super) fn install_server(app: &mut App) {
-    app.init_resource::<AuthorityWorld>()
-        .add_systems(Startup, spawn_ledger)
-        .add_systems(
-            FixedPostUpdate,
-            publish_record
-                .after(WallLawSet)
-                .in_set(crate::state::SimPhase::Publish),
-        );
+    super::world_reset::register_constructor(app, spawn_ledger);
+    app.init_resource::<AuthorityWorld>().add_systems(
+        FixedPostUpdate,
+        publish_record
+            .after(WallLawSet)
+            .in_set(crate::state::SimPhase::Publish),
+    );
 }
 
 pub(super) fn install_client(app: &mut App) {
@@ -56,11 +55,12 @@ pub(super) fn install_client(app: &mut App) {
         .add_systems(Update, receive_ledger.before(WallReplicaSet));
 }
 
-pub(super) fn spawn_ledger(mut commands: Commands, generation: Res<AuthorityWorld>) {
-    commands.spawn((
+fn spawn_ledger(world: &mut World) {
+    let generation = world.resource::<AuthorityWorld>().0;
+    world.spawn((
         Name::new("WallLedger"),
         WallLedger::default(),
-        generation.0,
+        generation,
         Replicate::to_clients(NetworkTarget::All),
     ));
 }

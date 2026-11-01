@@ -47,14 +47,13 @@ struct Applied {
 }
 
 pub(super) fn install_server(app: &mut App) {
-    app.init_resource::<AuthorityWorld>()
-        .add_systems(Startup, spawn_ledger)
-        .add_systems(
-            FixedPostUpdate,
-            publish_falls
-                .after(TreeFallSet)
-                .in_set(crate::state::SimPhase::Publish),
-        );
+    super::world_reset::register_constructor(app, spawn_ledger);
+    app.init_resource::<AuthorityWorld>().add_systems(
+        FixedPostUpdate,
+        publish_falls
+            .after(TreeFallSet)
+            .in_set(crate::state::SimPhase::Publish),
+    );
 }
 pub(super) fn install_client(app: &mut App) {
     install_apply(app);
@@ -81,11 +80,12 @@ pub(crate) fn install_apply(app: &mut App) {
                 .chain(),
         );
 }
-pub(super) fn spawn_ledger(mut commands: Commands, generation: Res<AuthorityWorld>) {
-    commands.spawn((
+fn spawn_ledger(world: &mut World) {
+    let generation = world.resource::<AuthorityWorld>().0;
+    world.spawn((
         Name::new("DestructionLedger"),
         DestructionLedger::default(),
-        generation.0,
+        generation,
         Replicate::to_clients(NetworkTarget::All),
     ));
 }
