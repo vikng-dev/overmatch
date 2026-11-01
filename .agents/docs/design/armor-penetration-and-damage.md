@@ -856,8 +856,10 @@ among samples by their maximum factor, with each sample's share divided equally 
 strongest volumes, so the doses sum to the energy the round lost and a volume a stronger one overlaps takes none of it (§13.2). A seam
 between touching volumes of one substance does not change the force-law advance; each volume
 still takes the energy lost at its own depths, never a length share of the whole crossing.
-**One rate** turns energy into HP for every hard pool, a tank's modules and a tree's trunk alike:
-`joules_per_hp` in `assets/ballistics/energy_dose.ron`, TUNED 3000 J per point. It keeps the scale
+**One line/bounce unit** turns lost physical energy into HP for a hard pool's line dose or
+bounce shock, a tank's modules and a tree's trunk alike: `joules_per_hp` in
+`assets/ballistics/energy_dose.ron`, Unit 3000 J per point. Cone and ring deposits use their own
+emitted-HP units below; this line/bounce scale does not define their game potency. It keeps the scale
 the pools were authored at for the main gun: the reference-mm law charged 10 HP per reference-mm,
 and the reference 88 mm APCBC round at its 773 m/s muzzle speed loses about 3090 J per 0.1 mm of
 reference steel (DERIVED from the force law, §3). Each pool's authored HP alone says how sturdy it
