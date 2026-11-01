@@ -733,7 +733,14 @@ fn axle_position(blueprint: &TankBlueprint, index: usize) -> Vec3 {
         .iter()
         .rev()
         .fold(Affine3A::IDENTITY, |frame, &index| {
-            frame * blueprint.geometry.nodes[index].transform.compute_affine()
+            let ancestor = &blueprint.geometry.nodes[index];
+            assert_eq!(
+                ancestor.transform.scale.to_array().map(f32::to_bits),
+                [1.0f32.to_bits(); 3],
+                "{}: running-gear parent `{}` carries scale {:?}; apply ancestor scale before export so the rigid sim pose and wheel pose share one frame",
+                blueprint.file, ancestor.name, ancestor.transform.scale,
+            );
+            frame * ancestor.transform.compute_affine()
         });
     super::gear_phase::GearFrame::new(node.transform, parent).unwrap_or_else(|fault| {
         panic!(
@@ -741,11 +748,13 @@ fn axle_position(blueprint: &TankBlueprint, index: usize) -> Vec3 {
             blueprint.file, node.name
         )
     });
-    parent.transform_point3(node.transform.translation)
+    // The bake's rigid composition is the one axle position. The parent gate above establishes
+    // its unit-scale invariant before the view's full affine frame can be used for posing.
+    node.root_position
 }
 
 /// Hull-local centres of one side's road wheels, front→rear, composed through the full authored
-/// parent chain so rotated or scaled construction groups cannot change the axle frame.
+/// parent chain; scaled construction groups refuse before running gear is published.
 fn side_wheel_centres(blueprint: &TankBlueprint, side: Side) -> Vec<Vec3> {
     let want = track_side(side);
     let mut centres: Vec<Vec3> = blueprint
@@ -1009,6 +1018,40 @@ pub(crate) fn tiger_rig() -> RigGeom {
 mod tests {
     use super::*;
 
+    /// Axles and collider/armour placement rely on the same baked rigid frame. A scaled parent
+    /// must refuse instead of letting the affine wheel pose disagree with that position.
+    #[test]
+    fn axle_placement_uses_the_baked_position_and_refuses_scaled_parents() {
+        let path = crate::assets::asset_root().join(crate::tank::TANK_SIM_GLB_PATH);
+        let spec = tiger_spec();
+        let geometry = crate::bake::extract_tank_geometry(
+            &path,
+            &spec,
+            &crate::substances::SubstanceRegistry::shipped(),
+        )
+        .unwrap();
+        let axle = geometry.roadwheels[0].0; // Fixture: any declared station, no asset-specific bound.
+        let parent = geometry.nodes[axle]
+            .parent
+            .expect("a station belongs to its authored hierarchy");
+        let mut blueprint = TankBlueprint::new("fixture.tank.ron".into(), geometry, spec);
+        assert_eq!(
+            axle_position(&blueprint, axle),
+            blueprint.geometry.nodes[axle].root_position
+        );
+        std::sync::Arc::get_mut(&mut blueprint.geometry)
+            .unwrap()
+            .nodes[parent]
+            .transform
+            .scale = Vec3::splat(2.0);
+        assert!(
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| axle_position(
+                &blueprint, axle
+            )))
+            .is_err()
+        );
+    }
+
     /// Inside the CHAIN regime the inextensible loop goes taut before the springs bottom, so the
     /// reachable droop is strictly short of the spring deflection — and the defining fact of the
     /// clamp is that the taut wrap of the clamped droop pose exactly fills the material loop
@@ -1167,8 +1210,6 @@ mod tests {
         assert_eq!(short.droop_travel(&p).effective, 0.0);
     }
 
-    /// Synthetic running gear with the road wheels clearly the lowest circles, so the belly (and
-    /// with it the taut perimeter) tracks the sprung wheels.
     /// A rest circle list from synthetic gear, in the production order `pose_circles` reads:
     /// sprocket first, the wheels front to rear at one pin-line radius, idler last.
     fn rest_list(
@@ -1183,6 +1224,8 @@ mod tests {
         rest
     }
 
+    /// Synthetic running gear with the road wheels clearly the lowest circles, so the belly
+    /// and taut perimeter track the sprung wheels.
     fn gear() -> ((Vec2, f32), (Vec2, f32), Vec<Vec2>) {
         let sprocket = (Vec2::new(-2.0, 0.6), 0.39);
         let idler = (Vec2::new(2.0, 0.6), 0.40);
