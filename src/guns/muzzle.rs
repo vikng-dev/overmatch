@@ -837,6 +837,12 @@ impl MuzzleEmission {
                 jet.length_m.1 * self.flames.end_scale,
                 true,
             )?;
+            // A plane's end width: the renderer scales its width by both factors at once.
+            check(
+                "flames.width_ratio × flames.end_scale",
+                jet.length_m.1 * self.flames.end_scale * self.flames.width_ratio,
+                true,
+            )?;
         }
         if let Some(fireball) = self.fireball {
             range("fireball.diameter_m", fireball.diameter_m, true)?;
@@ -1229,6 +1235,17 @@ mod tests {
             )
             .unwrap_err()
             .contains("cyclic_rpm")
+        );
+        // FIXTURE DATA: each factor of a flame plane's end width is representable on its own at
+        // the reference energy; their product is not.
+        let mut wide = look.clone();
+        wide.flames.width_ratio = 1e20;
+        wide.flames.end_scale = 1e20;
+        let reference = MuzzleEnergy::of(2.0, wide.reference_j.sqrt()).unwrap();
+        assert!(
+            wide.emission(MuzzleShape::MuzzleBrake, reference, Mechanism::Single)
+                .unwrap_err()
+                .contains("flames.width_ratio × flames.end_scale")
         );
         let mut look = look.clone();
         look.fireball.growth = f32::MAX;
