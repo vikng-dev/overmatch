@@ -181,9 +181,10 @@ When the path reaches a volume's face:
    punch through (the cost along the normal still applies). The game's namesake, but **one
    modifier among many — not the centerpiece.** Don't over-build it.
 3. **Ricochet** — if not overmatched and `θ` exceeds the round's **critical angle** (§4a):
-   **deflect** — spawn a new path segment off the face, do *not* enter. The shell keeps its speed
-   along the face, `v sin θ`, and loses the motion pointed into it (restitution 0; the bounce's
-   dose, §6). **No spall on ricochet** for now (spall is an exit/perforation event only — §5).
+   **deflect** — spawn a new path segment off the face, do *not* enter. At full coverage the
+   implementation reflects its direction specularly and retains speed magnitude `v sin θ`
+   (the bounce's dose, §6). The direction's disposition is an owner decision (§4a).
+   **No spall on ricochet** for now (spall is an exit/perforation event only — §5).
 4. **Otherwise** — **normalize** (bend the path toward the normal through the round's share of `θ`,
    §4a), enter, and march the geometric LOS cost; perforate→exit (spall) or embed.
 
@@ -205,6 +206,18 @@ type plugs in through its nose and carrier row (`assets/ballistics/round_types.r
   a thinner plate each raise it; a face of no steel-equivalent deflects nothing.
 - **Normalization:** a round that bites in turns toward the normal through
   `η × normalization_turn × N × θ × (entrance factor / reference factor)`, `η` the disc's coverage.
+
+**Verified scope and open decisions.** The implemented normalization share reads the nose and
+substance, without a potency, thickness or calibre term. That is narrower than #255's requested
+inputs; no derivation for the omitted dependence has been settled. The law is retained pending the
+owner's choice. At full coverage ricochet currently uses a mirror direction at speed `v sin θ`:
+its along-face velocity is therefore `v sin² θ`, with an outward normal part
+`v sin θ cos θ` (DERIVED). That differs from the restitution-zero slide described in the glossary.
+The owner must settle that direction as well as the thickness read: the entire crossing contributes
+`t`, including material past the round's reach. With `N = 7/24`, `P = 32.6 mm` and the provisional
+grip, increasing `t` from 456 to 912 mm lowers the critical angle from 11.1° to 5.6° (DERIVED).
+The preserved choices are a critical-angle floor, bounding `t` by the round's reach, or retaining
+the current form. No choice is implemented by this review.
 
 The coefficients are `Unknown` in the data file, each with what would settle it; no note in the repo
 gives a critical ricochet angle or an entry bend for any nose. Their provisional values keep the
@@ -247,22 +260,22 @@ assumption alone.
   show a main-gun bounce, so it now meets the side at 80.0° from the same point and bounces.
 - *s5_oblique_through* keeps its verdict and its cone. Past the side the round, 3.5 reference-mm
   left, meets an ammunition rack at 44.0° on 33 mm of steel-equivalent (`θ_c` 15.9°) and glances
-  off it, turning 88°, into the hull side 46 mm behind, where it rests; the rack's line dose falls
-  from 26.1 to 13.5, the bounce's shock, and its field dose is unchanged. Its record stays the
-  pre-law one: the pen cam stage poses its drawn shell, full length, on the chord across a bend,
-  and past a turn this steep its tail dips into the face it glanced off and its nose trails the
-  line (`damage_cam::pen_cam::stage` tests `the_shell_ends_where_the_record_ends` and
-  `the_shell_never_sinks_into_the_face_it_glances_off` fail on the re-recording). Under the single
-  cliff no bounce turned a round more than 40°.
+  off it, turning 92°, into the hull side 46 mm behind, where it rests; the rack's line dose falls
+  from 26.1 to 13.5, the bounce's shock, and its field dose is unchanged. The current record
+  contains that reflection. Its turn is 92.0° (DERIVED from the recorded incoming and outgoing
+  vectors), correcting the earlier 88° claim. The stage constrains the drawn body to lead its
+  path with its tail outside the struck plane, checked on every recorded reflection.
 - *s9_breech_and_loader* keeps its verdict and its knockouts (the breech and the gunner station,
   the loader station reduced). The round, 32.6 reference-mm left, meets the breech at 28.1° on
   456 mm of steel-equivalent (`θ_c` 11.1°) and glances off it, bounces twice off the turret side
   and once off the turret bottom (45–47° against `θ_c` 5–15°), and rests in the turret bottom. On
-  the way it reduces the commander station (a line dose of 21.1), and a second, weak cone (5.2 kJ)
+  the way it reduces the commander station (a line dose of 21.1), and a second, weak cone (2.0 kJ)
   adds small field doses to an ammunition rack and the loader, gunner and breech; the first cone is
-  unchanged, and the breech's line dose falls from 256.1 to 199.1. Its record also stays the
-  pre-law one: the breech bounce turns the round 124°, and the stage's drawn shell then sinks 8 mm
-  into the breech's face (`the_shell_never_sinks_into_the_face_it_glances_off`).
+  unchanged, and the breech's line dose falls from 256.1 to 199.1. The refreshed record contains
+  all four reflections, the first turning 123.7° (DERIVED from the recorded vectors), and the
+  second cone's strength is 2000.6 J (MEASURED). Its additional gunner-station line dose is 83.3 HP
+  (MEASURED); that station's pool is already emptied by the first cone. Both records now follow
+  the current march, with a default guard against stale interaction sequences.
 - *s8b, s11* (the machine-gun round, `N = 1/2`): the entry bend's share rises from 0.2 to
   0.343 of `θ`, moving their rest points 0.7 mm and 0.2 mm. Every other recorded scenario is
   unchanged to the bit: the main-gun rounds' 1-crh nose keeps the 0.2 bend exactly.
@@ -844,10 +857,11 @@ the 88.
 
 **A bounce deals only the energy pointed into the face** (issue 145, decided 2026-10-28,
 provisional). The striking velocity splits into its part along the struck face's normal and its
-part along the face. The shell keeps the sliding part: it leaves at `v sin θ`, `θ` the incidence
-from the normal, along the existing exit direction (the reflection, blended by η, §13.5). It loses
-the rest, restitution 0, so the energy it loses there, the shock, is `½ m (v cos θ)²`, and a
-struck box with a pool takes it at the one rate; armour takes none. Under partial coverage the
+part along the face. At full coverage the shell retains speed magnitude `v sin θ`, `θ` the
+incidence from the normal, along the existing exit direction (the reflection, blended by η,
+§13.5). The energy it loses there, the shock, is therefore `½ m (v cos θ)²`, and a struck box
+with a pool takes it at the one rate; armour takes none. This energy budget does not settle the
+outgoing direction: the mirror and restitution-zero slide differ as recorded in §4a. Under partial coverage the
 speed retained blends from all of it toward `sin θ` by η, as the direction does (§13.5), and the
 shock is still the energy lost. This retired the fixed ricochet bleed, 0.6 of the speed kept
 whatever the angle, under which the fixture 88 fired at 773 m/s struck a 0.4 m steel slab with a
@@ -863,14 +877,15 @@ shot:
 | 80° | 759.53 | 91 475 | 30.5 | 31 |
 | 85° | 768.32 | 23 044 | 7.7 | 8 |
 
-The most a bounce can deal off a part is just past the round's critical angle against it (§4a),
-`cos² θ_c` of the striking energy (0.118 of it at the reference case's 70°, about 119 HP for the
-88 at 771 m/s, DERIVED), and it is below what perforating the thinnest steel part the round cannot
-overmatch deals
-(`resolve::tests::a_bounce_at_the_ricochet_angle_doses_less_than_perforating_the_part`). Under the
-angle laws two scenarios bounce a spent round off a component inside the tank (s5 off an
-ammunition rack, s9 off the breech, MEASURED; their records stay pre-law, §4a); the recorded
-bounces (s3, s8a) strike armour, which takes none.
+The most a bounce can deal off a given part is just past the round's critical angle against that
+part (§4a), `cos² θ_c` of the striking energy. Writing `k = ricochet_grip × N × P` gives
+`cos² θ_c = t² / (t² + k²)` (DERIVED). It rises with the struck part's thickness, tending to the
+whole striking energy; a thin part's dose cannot bound a thicker one's. The fixture comparison
+`resolve::tests::bounce_dose_bounds_read_the_plate_that_was_struck` covers both cases: a thin,
+unovermatched slab takes less from a bounce than its own square perforation, while a thick slab's
+bounce takes more than that thin slab's perforation. The angle laws' recorded internal bounces
+(s5 off an ammunition rack, s9 off the breech, MEASURED) therefore read those parts' own plate
+terms and pools. Armour bounces still take no HP.
 
 A witness's chord alone keeps its own unit, one HP point per 0.1 reference-mm
 (`ballistics::HP_PER_REFERENCE_MM`, a unit with Resolution provenance, not a balance value), the
@@ -1647,8 +1662,10 @@ uses the round's velocity minus this velocity. Its immutable relative path is ca
 by the struck point's constant contact velocity, including each timed effect and sampled recording
 frame. No second world clock advances while that crossing is decided. The crossing completes the
 struck physical body's actual material along its sample rays,
-including gaps between its parts, in that scene. Completion reads real exit faces; a finite
-support bound only sizes that collection. Other bodies return to relative discovery at the
+including gaps between its parts, in that scene. A reflection ends that immutable contact:
+playback spends its approach and outgoing flight time before discovering another face, so an
+unbounded future of slowing reflections is never planned in one tick. Completion reads real exit
+faces; a finite support bound only sizes that collection. Other bodies return to relative discovery at the
 elapsed tick fraction. This preserves the static body's immutable path without a baked envelope.
 Ground
 is only the declared height grid; geometry-only fixtures have no ground. An Armor collider without

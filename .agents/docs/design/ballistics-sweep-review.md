@@ -411,7 +411,9 @@ would stop mounted rounds in their own barrel or mount. Its fixture evidence rem
 | HullMG / 7.9mm_AP, full authored recoil | Hull_MG_Ball and Hull_MG_Mantlet | Stops after 0.0158691 m; no shown pool loss |
 
 The source is now ignored only until the round's whole disc first leaves its box: it stays
-transparent while any sample start is inside the box. A decided chain ends at the decision after
+transparent while any sample start is inside the box. An incomplete playback cursor is not a
+discovery disc: its captured admission survives tick boundaries until certified starts resume.
+A decided chain ends at every reflection to spend its real flight time, or at the decision after
 which the source is solid: a straight one that hands on every start outside the box with none held,
 or a bounce whose way in took every sample out, so a return meets the source solid wherever the
 bounce resumes. Starts handed on outside the box keep the membership their sweep read, since no
@@ -978,7 +980,7 @@ formatting, workspace/all-target CI clippy with `dev_ui,bitprobe`, and citation 
 whole-tree guards passed 44 tests (MEASURED): `doc_citations`, `ui_ascii`, `net_boundary` and
 `bake::`; formatting and workspace/all-target CI clippy passed again.
 
-Wire definitions are unchanged, so PROTOCOL_REV deliberately remains 62. No `src/track/`,
+Wire definitions are unchanged, so PROTOCOL_REV deliberately remains 63. No `src/track/`,
 `ShotClock`, `WeaponClock` or `Respawn::Opens::tick` definition changed. The shared seams are
 `Weapon` in `src/tank/model.rs` and mechanical weapon-fixture initialization in `src/net` and
 VFX; no tick-type overlap was edited. No captures, pricing, pushes or issue comments were made.
@@ -1018,4 +1020,72 @@ MEASURED regressions and dispositions:
 - The transit request carries its bent axis as a `Dir3`, the checked bend `begin` computes; no
   `new_unchecked` remains on it.
 
-Wire definitions are unchanged, so PROTOCOL_REV deliberately remains 62.
+Wire definitions are unchanged, so PROTOCOL_REV deliberately remains 63.
+
+
+## Review of law-walk-angles and playback boundaries (sweep-ball-11)
+
+Subject: the game's damage model, game state only. Both blind reviews were present at the start
+and read again before this table was written; neither was missing. Each claim was checked against
+the current code and records. The angle law's form is retained for the owner.
+
+| reviewer | finding | verified / not a defect | fixed in (subject) |
+|---|---|---|---|
+| Codex | P1: an endless reflected chain overflows the playback clock | verified | ballistics: keep discovery on the playback clock (#247, #255) |
+| Codex | P1: partial playback clears the source on an invented planar disc | verified | ballistics: keep discovery on the playback clock (#247, #255) |
+| Claude | P2: source clearance is lost across a mid-crossing tick boundary | verified; same cause as the preceding P1 | ballistics: keep discovery on the playback clock (#247, #255) |
+| Codex | P2: sharp internal reflections break the stage's drawn body | verified | damage_cam: present every reflected leg in the pen cam (#255) |
+| Claude | P2: stale s5 and s9 records conceal that stage failure | verified | damage_cam: present every reflected leg in the pen cam (#255) |
+| Claude | P2: mirror reflection differs from the documented restitution-zero slide | verified; owner decision, form retained | not changed; canonical angle-law section records the DERIVED consequences |
+| Claude | P2: the whole crossing contributes thickness beyond the round's reach | verified; owner decision, form retained | not changed; canonical angle-law section preserves the choices |
+| Claude | P3: this record states revision 62 while the tree is at 63 | verified | ballistics: correct the angle-law review bounds (#255) |
+| Claude | P3: encoded sizes and the sub-1-KB claim use stale records | verified | damage_cam: present every reflected leg in the pen cam (#255) |
+| Claude | P3: the thin-slab bounce test is cited as a universal dose bound | verified | ballistics: correct the angle-law review bounds (#255) |
+| Claude | P3: normalization omits the requested potency and thickness/calibre dependence | verified; scope gap documented, owner decision | law form retained; no unchosen dependence introduced |
+| Lane follow-through | P2: spatial proximity assigns a folded path's second cone the wrong exit speed | verified by the refreshed s9 front-speed test | damage_cam: present every reflected leg in the pen cam (#255) |
+
+MEASURED regressions and dispositions:
+
+- `a_closed_box_of_reflectors_returns_to_the_flight_clock` reproduced the finite-positive-clock
+  panic with a fuze-less, axis-only fixture round reflecting between steel faces at 45°. Discovery
+  now ends at a reflection; playback spends its real flight time before the next contact, with no
+  bounce-count cap. Existing potency loss is unchanged.
+- `partial_playback_keeps_launch_clearance_until_its_samples_resume` failed because the source
+  latch became solid while an oblique perforation was still playing. It now retains that admission
+  across ticks, then resumes from the crossing's certified sample starts. The source-clearance
+  section above owns the rule; both reviewers' clearance findings share this fix.
+- Re-recording changed only s5 and s9. The original stage checks then failed: s5's tail stood
+  5.1 mm behind its struck plane and its nose trailed travel. The refreshed stage checks every
+  reflection, keeps the body leading, and clears its latest struck plane. Event arcs and cone
+  exit-speed selection use record time, so a folded path cannot select a later moment by spatial
+  proximity. A default scenario test compares the live march's interaction sequence with the
+  stored records, including reflected faces, crossed volumes and field counts.
+- s5 now shows one rack reflection and rest in the hull side; its rack line dose is 13.5 HP
+  (MEASURED). Its turn is 92.0°, correcting the review's 88° claim (DERIVED from recorded vectors).
+  s9 now shows four reflections, rest in the turret bottom, a commander-station line dose of
+  21.1 HP, and a second cone of 2000.6 J (MEASURED). Its first turn is 123.7° (DERIVED). The
+  canonical angle-law section owns the full scenario account and the current law's consequences.
+- The complete serializer table was measured again: s5 is 858 B for the victim and 786 B for the
+  shooter; s9 is 1728 B and 1680 B, with two cones totalling 1223 B (MEASURED). Every other row
+  is unchanged. The false universal message-size claim is removed.
+- The bounce-dose bound is per struck plate: `cos² θ_c = t² / (t² + k²)` rises toward one as
+  thickness grows (DERIVED). The class fixture now checks both a thin slab's mild bounce and a
+  thick slab's bounce exceeding that thin slab's perforation. No physical law or dose changed.
+
+Owner decisions remain the reflected direction versus the restitution-zero slide; a floor on
+critical incidence, a thickness read bounded by the round's reach, or the current form; and the
+normalization input gap. For the 28.1° reference incidence the mirror turns 123.8° and retains
+along-face velocity 0.222 v, while a slide turns 61.9° and retains 0.471 v (DERIVED). With
+`N = 7/24`, potency 32.6 mm and grip 9.42, thicknesses 456 and 912 mm give critical incidences
+11.1° and 5.6° (DERIVED). These are consequences to decide, not new rules in this lane.
+
+MEASURED gates: the P1 step passed 285 selected tests; the stage and refreshed-record step
+passed 286, then 226 final stage/record/wire/citation checks. The serializer-size instrument passed.
+The final run passed 83 tests, including the strengthened plate-bound comparison, all resolve
+checks and the whole-tree `doc_citations`, `ui_ascii`, `net_boundary` and `bake::` guards.
+Formatting and locked workspace/all-target CI clippy with `dev_ui,bitprobe` passed for every code
+commit. Ignored pricing and capture instruments were left ignored.
+
+Wire definitions are unchanged: PROTOCOL_REV deliberately remains 63. The protected track,
+building, contact-transfer and net modules were not edited. No captures, pricing, pushes or issue
+comments were made.

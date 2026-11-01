@@ -2291,19 +2291,14 @@ fn a_bounce_keeps_the_speed_along_the_face() {
     }
 }
 
-/// A BOUNCE AT THE RICOCHET ANGLE DOSES LESS THAN PERFORATING THE PART: the most a bounce can jar
-/// into a part is just past its critical angle, where `cos² θ` is largest, and for the fixture 88 at
-/// 773 m/s there it is below the line dose the same round deals perforating the same part square
-/// on. The part is the thinnest steel slab the round cannot overmatch, `1.1 × caliber ÷
-/// overmatch_ratio` along its normal, the cheapest of them to perforate. A thicker part takes more
-/// from the line and, its critical angle lower, more from a bounce: `cos² θ_c = t² / (t² + k²)` of
-/// the striking energy, `k = ricochet_grip × N × P`, which stays under a fifth of what perforating
-/// `t` takes at any thickness for this round (DERIVED: the ratio peaks at `t = k`, the line's loss
-/// taken as the force law's rate at the face). Fixture data. A bounce that charged a fixed share of
-/// the striking energy fails here; a part's pool, sized against what perforating it deals, relies
-/// on a glance dealing less.
+/// The game's damage model bounds a bounce by the struck plate's critical angle, not another
+/// plate's. Pool authors cannot use a thin plate's mild bounce as a global ceiling: a thick
+/// plate lowers the critical angle and can take more bounce energy than perforating the thin
+/// one takes. A fixed critical angle or a global thin-plate dose cap fails this comparison.
+/// The 773 m/s speed, 1.1 calibre/overmatch-ratio thin slab, 456 mm thick slab and angular offset
+/// are fixture data for the provisional angle law.
 #[test]
-fn a_bounce_at_the_ricochet_angle_doses_less_than_perforating_the_part() {
+fn bounce_dose_bounds_read_the_plate_that_was_struck() {
     let laws = WalkLaws::default();
     let thickness = 1.1 * FIXTURE_88.caliber / laws.angles.overmatch_ratio;
     let critical = laws.angles.critical_incidence(
@@ -2332,6 +2327,20 @@ fn a_bounce_at_the_ricochet_angle_doses_less_than_perforating_the_part() {
     assert!(
         bounce.shock > 0.0 && bounce.shock < perforation,
         "a bounce at the ricochet angle jars {} J against {perforation} J perforating the part",
+        bounce.shock
+    );
+    let thick = 0.456;
+    let critical = laws.angles.critical_incidence(
+        FIXTURE_88.nose_factor,
+        capability(FIXTURE_88, 773.0) / laws.rha_reference,
+        thick,
+    );
+    let (graze, part) = shot_onto_slab(FIXTURE_88, 773.0, critical + 0.01, thick, STEEL);
+    let bounce = first_bounce(&graze);
+    assert_eq!(bounce.struck, part);
+    assert!(
+        bounce.shock > perforation,
+        "a thick plate's bounce can exceed the thin plate's {perforation} J perforation: {} J",
         bounce.shock
     );
 }
