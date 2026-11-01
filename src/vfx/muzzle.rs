@@ -1297,6 +1297,7 @@ mod tests {
                 );
                 let (mut least, mut most) = (usize::MAX, 0);
                 let mut ends = (f32::MAX, 0.0_f32);
+                let mut lives = (f32::MAX, 0.0_f32);
                 for shot in 0..SHOTS {
                     // One shot per app, each under its own view seed: the rolls differ, and no
                     // ring eviction can recycle a puff's id between shots.
@@ -1321,23 +1322,33 @@ mod tests {
                             "{gun} on {name}"
                         );
                         assert!((size - blast.birth_diameter_m).abs() < 1e-4);
-                        let end = app
-                            .world()
-                            .get::<Billboard>(puff)
-                            .expect("a billboard")
-                            .end_size;
+                        let billboard = app.world().get::<Billboard>(puff).expect("a billboard");
+                        let end = billboard.end_size;
+                        let lifetime = billboard.lifetime;
+                        assert!(
+                            (blast.end_diameter_m.0..=blast.end_diameter_m.1).contains(&end),
+                            "{gun} on {name}: spawned diameter {end} outside {:?}",
+                            blast.end_diameter_m
+                        );
+                        assert!(
+                            (blast.lifetime_s.0..=blast.lifetime_s.1).contains(&lifetime),
+                            "{gun} on {name}: spawned lifetime {lifetime} outside {:?}",
+                            blast.lifetime_s
+                        );
                         ends = (ends.0.min(end), ends.1.max(end));
+                        lives = (lives.0.min(lifetime), lives.1.max(lifetime));
                     }
                     (least, most) = (least.min(count), most.max(count));
                 }
                 eprintln!(
                     "MEASURED {gun} on {name} (erodibility {erodibility}, soil {:?}): {least}-{most} \
-                     puffs over {SHOTS} shots, {:.2} m at birth to {:.2}-{:.2} m, {:?} s",
+                     puffs over {SHOTS} shots, {:.2} m at birth to {:.2}-{:.2} m, {:.3}-{:.3} s",
                     ground.dust.colour_srgb,
                     blast.birth_diameter_m,
                     ends.0,
                     ends.1,
-                    blast.lifetime_s
+                    lives.0,
+                    lives.1
                 );
             }
         }

@@ -234,3 +234,12 @@ not represented. No camera-distance scale or game-state change was added.
 Claude's palette-provenance P3 is **verified**: the shadow and ageing ratios were unlabelled.
 They are now explicitly ASSUMED presentation contrast choices, with no claim of measurement.
 Fixed in "vfx: tint lifted soil by the sun's linear colour (#236)".
+
+Codex's survey-lifetime P2 is **verified** as an evidence defect, not a runtime lifetime bug:
+`spawn_ground_dust` already used the authored range, but the survey printed that input without
+reading the spawned lifetime. A temporary mutant spawning a 0.1 s puff now fails the survey's
+range assertion (MEASURED); the mutant is removed. The survey reads every puff's lifetime and
+end diameter, asserts both against its emission, and reports the observed lifetime extrema.
+MEASURED over the survey: spawned lives 2.003-2.499 s across the shipped grounds,
+inside the authored 2.0-2.5 s range. All 22 muzzle/citation tests, formatting and CI clippy pass.
+Fixed in "vfx: measure spawned dust lifetimes in the survey (#236)".
