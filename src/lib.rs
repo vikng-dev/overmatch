@@ -966,11 +966,9 @@ impl Plugin for NetClientPlugin {
         // is the link's, `net::shot_explanation`).
         app.add_plugins(damage_cam::pen_cam::game::plugin);
 
-        // Physics visualization + debug toggles, same pair `ClientPlugin` mounts for SP
-        // (`G` = force arrows + collider wireframes, `F` = camera detach). View-only:
-        // it reads `TrackContacts`/`GlobalTransform` and draws gizmos — nothing sim-visible — so it is
-        // safe on a predicting client and is never mounted by the headless server (which composes
-        // `SimPlugin` only, never this plugin).
+        // The game's damage-model debug view, the same pair ClientPlugin mounts offline:
+        // G shows force arrows and collider wireframes. It reads TrackContacts/GlobalTransform
+        // and writes only render-side gizmos; the headless server mounts SimPlugin alone.
         app.add_plugins((avian3d::prelude::PhysicsDebugPlugin, debug::plugin));
     }
 }

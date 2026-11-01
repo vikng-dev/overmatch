@@ -2,35 +2,27 @@
 
 Status: needs-triage
 
-## Thought
+Subject: the game’s damage-model debug view, game state only.
 
-The debug visualisations are accumulating as hardcoded, always-on toggles. We want a **proper in-game debug menu** to control them individually rather than baking each on/off into code.
+## Current surface
 
-## Current debug surface (what the menu should govern)
+The debug helpers ship in both client compositions. They have no build-feature switch:
 
-All dev-only (`#[cfg(debug_assertions)]`):
-
-- **X-ray** — gone (2026-10-20): `X` is the pen cam's own glass now (`src/damage_cam/pen_cam/game/glass.rs`), which shows the tank's interior as the record and the live state draw it; a debug translucency would be a second, weaker view of the same thing.
-- **Suspension force arrows** — cyan per-wheel load arrows, currently always drawn (`src/debug.rs`, `draw_suspension_forces`).
-- **Avian physics gizmos** — collider wireframes + raycast rays/hit-points/normals, currently always on via `PhysicsDebugPlugin` (`src/lib.rs`). Configurable per-category via `PhysicsGizmos` in `GizmoConfigStore` (colliders, AABBs, contacts, raycasts each have their own colour/toggle).
-- **(coming)** drive thrust vectors, lateral-friction vectors, COM marker, per-wheel numeric load readout.
+- `G`, off by default, toggles belt-contact support/traction arrows and Avian collider gizmos
+  (`debug::ShowGizmos`, `debug::draw_wheel_forces`). A capped impact-marker ring follows the
+  same switch. Avian raycast gizmos are disabled; the arrows read the current contact telemetry.
+- `X` belongs to the pen cam’s x-ray, outside this debug master switch.
+- The orbit camera follows the controlled tank; there is no detach key.
+- The sandboxes have their own `dev_ui` panels and independent layer controls.
 
 ## Goal
 
-One menu to toggle each visualisation independently (and ideally tweak a few live values — e.g. force-arrow scale). Likely `bevy_egui` or a small Bevy-UI panel. Replaces the scattered key toggles / always-on draws.
+Provide one menu with per-visualisation toggles and controls such as force-arrow scale.
+Possible future entries include thrust/lateral-friction vectors, a centre-of-mass marker and
+station load readouts. Bevy UI and the optional egui dependency are implementation candidates.
 
 ## Notes
 
-- Keep it dev-only (stripped from release, like the current debug module).
-- Don't block current driving work — this is a quality-of-life consolidation for when the debug surface is larger.
-
-## Comments
-
-**2026-09-26 — surface drift since filing.** The "current debug surface" above predates the
-`dev_tools` feature. As of `src/debug.rs` today: the debug helpers are gated on `dev_tools`
-(default-on, release builds included), not `debug_assertions`; the always-on draws are gone —
-one master switch `ShowGizmos` (key `G`, off by default) drives both our belt-contact arrows
-(`draw_wheel_forces`, which replaced `draw_suspension_forces`) and Avian's collider gizmos; `X`
-(x-ray) and `F` (detach camera) remain separate keys; a ring-buffered impact marker rides the same
-switch. `bevy_egui` is now a dependency behind `dev_ui` (the sandbox bins). The goal — one menu
-with per-visualisation toggles instead of one master key — still stands.
+This is a proposed consolidation, not a second live control path. Availability of the proposed
+menu in packaged builds belongs to triage; the current debug helpers are included there.
+Do not block driving work on this proposal.

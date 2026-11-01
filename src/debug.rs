@@ -1,13 +1,15 @@
+//! The game's damage-model debug view, game state only.
+//!
 //! Debug helpers, compiled into every build, the packaged network client included. Press `G` to
 //! toggle the debug gizmos: belt-contact force arrows (cyan = support load along the contact
-//! normal, orange = traction) plus Avian's collider wireframes. `F` detaches the camera. A
+//! normal, orange = traction) plus Avian's collider wireframes. A
 //! see-through tank is the pen cam's x-ray (`X`, `damage_cam::pen_cam::game`), not a debug key.
 //!
 //! Mounted by BOTH client compositions — `ClientPlugin` (single-player) and `NetClientPlugin`
 //! (the networked client bin) — always paired with Avian's `PhysicsDebugPlugin` (which registers
 //! the `PhysicsGizmos` group this module configures). Strictly view-only: every system reads sim
-//! state (`&TrackContacts`, `&GlobalTransform`) immutably and writes only render-side things (gizmos,
-//! camera follow), so it is safe on a predicting net client; the headless server never mounts it.
+//! state (`&TrackContacts`, `&GlobalTransform`) immutably and writes only render-side gizmos;
+//! the headless server never mounts it.
 
 use std::collections::VecDeque;
 
@@ -15,7 +17,6 @@ use avian3d::prelude::PhysicsGizmos;
 use bevy::prelude::*;
 
 use crate::ballistics::{Impact, ImpactMarker};
-use crate::camera::CameraFollow;
 use crate::track::sim::TrackContacts;
 
 /// Metres of arrow per newton of contact force (so ~35 kN reads as a ~1.75 m arrow).
@@ -33,7 +34,7 @@ pub fn plugin(app: &mut App) {
         // The debug impact marker: a view-side subscriber to `ballistics`' sim `Impact` event
         // (ADR-0014), gated on `ShowGizmos` and ring-buffered to `IMPACT_MARKER_CAP`.
         .add_observer(spawn_impact_marker)
-        .add_systems(Update, (toggle_camera_follow, toggle_gizmos))
+        .add_systems(Update, toggle_gizmos)
         // Mirror the on/off state onto Avian's own gizmos (collider wireframes).
         .add_systems(
             Update,
@@ -72,14 +73,6 @@ fn configure_physics_gizmos(mut store: ResMut<GizmoConfigStore>) {
     gizmos.raycast_color = None;
     gizmos.raycast_point_color = None;
     gizmos.raycast_normal_color = None;
-}
-
-/// `F` detaches/re-attaches the camera from the tank (holds it static) — lets you drive past a
-/// fixed view to tell camera-follow jitter from physics jitter.
-fn toggle_camera_follow(keys: Res<ButtonInput<KeyCode>>, mut follow: ResMut<CameraFollow>) {
-    if keys.just_pressed(KeyCode::KeyF) {
-        follow.0 = !follow.0;
-    }
 }
 
 /// Draw each belt contact's forces: cyan = the ACTUAL applied support load (damped; what
@@ -126,9 +119,9 @@ fn setup_impact_marker(
     });
 }
 
-/// Drop a red sphere at each shell impact — but only while the `G` gizmo toggle is up, and keeping
+/// The game's damage-model view drops a red sphere at each shell impact — but only while the `G` gizmo toggle is up, and keeping
 /// at most `IMPACT_MARKER_CAP` on screen (the oldest is despawned when a new one pushes past the
-/// cap). View-only, so it is safe on a predicting net client.
+/// cap). The observer changes only the view.
 fn spawn_impact_marker(
     impact: On<Impact>,
     show: Res<ShowGizmos>,

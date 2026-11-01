@@ -2,7 +2,7 @@
 
 Subject: the game’s dev tooling; rounds, crew and impacts mentioned here are the game’s damage
 model and game state only. Lane `lane/sweep-dev-1`, starting at `48f9df93`.
-MEASURED clock start: 2026-11-01 07:58:39 +07; deadline: 09:28:39 +07.
+MEASURED clock start: 2026-11-01 07:58:39 +07; DERIVED deadline: 09:28:39 +07.
 No agents, captures, pricing runs, deployments or pushes.
 
 ## Review of sweep-view-2
@@ -142,3 +142,34 @@ The sandbox wall and its subtree belong to part 2 and are excluded from this lan
   standalone locked cursor. The existing headless range-explanation test reproduced this alone
   and passed after reverting only that filter. The one-cursor invariant remains; no gate test
   was edited. Duplicate cameras and invalid selection have synthetic regression tests.
+
+- **D-CONTROLS-P3 fixed:** delete the F follow-freeze key, CameraFollow resource, reader branches
+  and obsolete argument-count allowance. Orbit placement always follows its controlled rig, with
+  the existing captive and tankless states intact. G retains its gizmo/capture inspection user.
+  Delete the retired harness model input arm and its unused numeric model tag; unknown model
+  keys now take the same refusal as every unknown key. No tracked producer used that input.
+  The client-composition comment and local debug-menu draft now describe the current surface.
+  The quality standard’s CI commands name the selected workspace feature set.
+- **D-MARCH already fixed:** at the starting commit the armour range has no MarchMode, Demo arm,
+  T key or panel toggle. Its march uses the game’s physics tick. No extra cadence was introduced.
+
+## Handoff
+
+All inventory groups in this lane’s share have a disposition above. No disagreement with a
+remaining in-scope finding was needed. Older claims marked already fixed were checked against
+source rather than counted as new changes. The base-truths reread found and removed the
+asset-specific tooth-count ceiling and the unscoped world-name classification; the I/O and vector
+findings are recorded with their fixes above.
+
+The wall implementation and its subtree remain part 2’s explicit share, including its run_laws
+migration and wall-only failure sites. The ballistics-owned scene/tracer calibre split and impact
+emission-geometry P2s remain assigned to that sweep. ASSUMED view data still needs the owner’s
+batched eye review; this lane takes no captures or pricing measurements. No deployment, remote
+mutation, push, main merge or bay release was performed.
+
+MEASURED final control/doc gates: formatting, workspace CI clippy and 22 focused camera, debug,
+harness, font and citation tests passed. The preceding invariant batch passed 59 tests and the
+script batch passed 51 tests; these are separate focused groups, not a unique-test total.
+MEASURED final gate clock check: 2026-11-01 08:56:35 +07. DERIVED elapsed since dispatch:
+57 minutes 56 seconds, within the 90-minute lane budget. Work ends because this share is handled,
+not because the clock expired. The full suite remains CI’s once-after-push gate.

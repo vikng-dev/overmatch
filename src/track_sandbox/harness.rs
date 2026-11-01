@@ -9,8 +9,7 @@
 //! - `x`, `z` spawn lane position (`x` defaults to 0; the rubble yard's spot is `x=-13,z=1`),
 //!   `warmup` settle ticks at zero input, `ticks` recorded ticks after warmup, `throttle`/`steer` constant drive during the recorded window (`t2` +
 //!   `throttle2`/`steer2` switch both at one tick: reversal slam, pivot entry, slalom flip),
-//!   `out` JSONL path. Unknown keys and values are errors. The retired `model` key alone is
-//!   accepted and ignored so historical `model=4` scenario strings keep working.
+//!   `out` JSONL path. Unknown keys and values are errors.
 //!
 //! Record types (one JSON object per line):
 //! - `meta` — the scenario + vehicle constants.
@@ -160,8 +159,6 @@ pub(super) fn parse_spec(spec: &str) -> Result<Harness, String> {
             "steer2" => h.steer2 = parse_float(key, value)?,
             "out" if !value.is_empty() => h.out = value.to_string(),
             "out" => return Err("`out` must not be empty".into()),
-            // Retired: an explicit no-op so historical captures stay runnable.
-            "model" => {}
             "" => {
                 return Err(format!(
                     "SANDBOX_HARNESS entry {} has an empty key",
@@ -232,11 +229,8 @@ pub(super) fn harness_setup(
     let mu = rig.grip.on_ground();
     writeln!(
         writer,
-        // `"model":4` and `"view":"wrap"` are both pinned: the sandbox hosts only the promoted
-        // field-belt model and only the kinematic-wrap view, and the fields stay for schema
-        // stability with existing analyzers. `schema:2` = raw/shaped commands, quaternion + full
-        // angular velocity, per-side contact arrays + aggregates.
-        "{{\"t\":\"meta\",\"model\":4,\"schema\":2,\"view\":\"wrap\",\"pose\":\"{}\",\"slope_deg\":{},\"z\":{:.3},\"warmup\":{},\"ticks\":{},\"throttle\":{:.3},\"steer\":{:.3},\"t2\":{},\"throttle2\":{:.3},\"steer2\":{:.3},\"slew\":{},\"fixed_dt\":{},\"half_tread\":{half_tread},\"mu\":{mu},\"slip_saturation\":{SLIP_SATURATION},\"weight\":{:.0},\"hull_rest_y\":{hull_rest_y},\"thickness\":{thickness}}}",
+        // Schema identifies the telemetry fields; view names the one current renderer.
+        "{{\"t\":\"meta\",\"schema\":2,\"view\":\"wrap\",\"pose\":\"{}\",\"slope_deg\":{},\"z\":{:.3},\"warmup\":{},\"ticks\":{},\"throttle\":{:.3},\"steer\":{:.3},\"t2\":{},\"throttle2\":{:.3},\"steer2\":{:.3},\"slew\":{},\"fixed_dt\":{},\"half_tread\":{half_tread},\"mu\":{mu},\"slip_saturation\":{SLIP_SATURATION},\"weight\":{:.0},\"hull_rest_y\":{hull_rest_y},\"thickness\":{thickness}}}",
         match harness.pose {
             None if harness.runway => "runway".into(),
             None => "lane".into(),
@@ -489,12 +483,15 @@ mod tests {
 
     #[test]
     fn unknown_key_is_rejected() {
-        let err = parse_spec("throtle=0.5").unwrap_err();
-        assert!(err.contains("unknown") && err.contains("throtle"), "{err}");
+        // FIXTURE DATA: values are arbitrary; only rejection of an unrecognised key matters.
+        for (key, value) in [("throtle", "0.5"), ("model", "4")] {
+            let err = parse_spec(&format!("{key}={value}")).unwrap_err();
+            assert!(err.contains("unknown") && err.contains(key), "{err}");
+        }
     }
 
     #[test]
-    fn valid_scenario_keeps_the_previous_parse_semantics() {
+    fn valid_scenario_keeps_its_authored_fields() {
         let parsed = parse_spec(
             "pose=slope_left,z=-5.5,warmup=12,ticks=34,throttle=0.25,steer=-0.4,\
              t2=20,throttle2=-1,steer2=0.75,\

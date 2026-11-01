@@ -133,10 +133,6 @@ fn camera_free(captive: Option<Res<CameraCaptive>>) -> bool {
 #[derive(SystemSet, Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct CaptiveCameraPlaced;
 
-/// Debug switch that freezes the orbit camera's follow transform.
-#[derive(Resource)]
-pub struct CameraFollow(pub bool);
-
 /// Marks the gunner camera placement, which runs *after* transform propagation (it bolts the camera
 /// to the gun's live pose and writes its `GlobalTransform` directly). HUD reprojection orders after
 /// this set so markers and the rendered view share one consistent, current camera pose.
@@ -199,8 +195,7 @@ pub(crate) fn orbit_pivot(tank_transform: &Transform, turret_local: Vec3) -> Vec
 pub fn plugin(app: &mut App) {
     // The owner of the camera's `MainPassDepth`, mounted by the module that spawns it.
     app.add_plugins(crate::scene_depth::plugin);
-    app.insert_resource(CameraFollow(true))
-        .init_resource::<TurretPivot>()
+    app.init_resource::<TurretPivot>()
         .init_resource::<CameraCaptive>()
         .configure_sets(
             PostUpdate,
@@ -360,14 +355,9 @@ fn spawn_camera(mut commands: Commands) {
 fn orbit_look(
     camera: Single<&mut Transform, With<PlayerView>>,
     mouse_motion: Res<AccumulatedMouseMotion>,
-    follow: Res<CameraFollow>,
     pivot: Res<TurretPivot>,
     tank: Query<(), (With<Tank>, With<Controlled>)>,
 ) {
-    // Detached (debug): leave the camera where it is so motion can be judged against a fixed view.
-    if !follow.0 {
-        return;
-    }
     // Before spawn or between possessions there is no rig to anchor the view. Only mouse-look
     // freezes; placement continues following a controlled tank behind an open menu.
     if pivot.offset().is_none() || crate::tank::controlled_one(tank.single()).is_none() {
@@ -403,10 +393,6 @@ pub(crate) fn orbit_body(
     back_ray.get_point(ground(back_ray, distance))
 }
 
-#[expect(
-    clippy::too_many_arguments,
-    reason = "a system spanning the player camera, the controlled tank and its views, the pivot, scroll input, follow settings and time"
-)]
 fn orbit_camera(
     camera: Single<(&mut Transform, &mut OrbitCamera, &mut Projection), With<PlayerView>>,
     spatial: SpatialQuery,
@@ -414,14 +400,8 @@ fn orbit_camera(
     views: Query<&TankViews, With<Controlled>>,
     pivot: Res<TurretPivot>,
     mouse_scroll: Res<AccumulatedMouseScroll>,
-    follow: Res<CameraFollow>,
     time: Res<Time>,
 ) {
-    // Detached (debug): leave the camera where it is so motion can be judged against a fixed view.
-    if !follow.0 {
-        return;
-    }
-
     let (mut transform, mut orbit, mut projection) = camera.into_inner();
 
     // Restore the wide commander-view FOV when returning from the gunner optic (which narrows it).
