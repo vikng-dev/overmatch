@@ -204,7 +204,10 @@ fn client_ui_app() -> App {
     .init_resource::<crate::WeaponClock>()
     .init_resource::<crate::firecontrol::Ranging>()
     .init_resource::<avian3d::collider_tree::ColliderTrees>()
-    .init_resource::<bevy::winit::WinitMonitors>();
+    .init_resource::<bevy::winit::WinitMonitors>()
+    .init_asset::<crate::spec::TankSpec>();
+    // The one player view `camera::spawn_camera` declares at startup, which the HUD reprojects through.
+    app.world_mut().spawn(crate::view::PlayerView);
     app.add_plugins((crate::ui_font::plugin, crate::flow::plugin))
         .add_plugins((
             crate::overlay::plugin,
