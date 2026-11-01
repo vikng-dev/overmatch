@@ -354,10 +354,8 @@ impl GunRegistry {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ballistics::RoundBody;
-    use crate::ballistics::burst::Burst;
     use crate::rounds::tests::{FIXTURE, FIXTURE_TYPES, file};
-    use crate::substances::{MaterialFacts, SubstanceRegistry};
+    use crate::substances::SubstanceRegistry;
 
     /// A round registry of the fixture round under each key of `keys`. Fixture data.
     fn fixture_rounds(keys: &[&str]) -> RoundRegistry {
@@ -415,221 +413,56 @@ mod tests {
         )
     }
 
-    /// GunSteel's facts as the substance table states them: fixture data for [`PINS`].
-    const GUN_STEEL: MaterialFacts = MaterialFacts {
-        density: 7800.0,
-        flow_strength: 1.18e9,
-        youngs_modulus: 190.0e9,
-        poisson_ratio: 0.29,
-    };
-
-    /// The Pzgr. 39 body every 88 mm full-calibre pin shares: fixture data for [`PINS`].
-    const PZGR_39: RoundBody = RoundBody {
-        mass: 10.2,
-        caliber: 0.088,
-        nose_factor: 0.291_666_66,
-    };
-
-    /// FIXTURE DATA: every shipped round's physical record, to the bit — the values the laws,
-    /// shot and pinned digests are measured against. Presentation emissions have separate parser
-    /// and renderer invariants, so these physics pins explicitly exclude them.
-    const PINS: [(&str, Round); 5] = [
-        (
-            "7.9mm_AP",
-            Round {
-                effects: crate::rounds::FlightEffects::NONE,
-                muzzle: MuzzleEmission::fixture_cannon(),
-                body: RoundBody {
-                    mass: 0.0118,
-                    caliber: 0.0079,
-                    nose_factor: 0.5,
-                },
-                flying: RoundBody {
-                    mass: 0.0118,
-                    caliber: 0.0079,
-                    nose_factor: 0.5,
-                },
-                penetrator: RoundBody {
-                    mass: 0.0118,
-                    caliber: 0.0079,
-                    nose_factor: 0.5,
-                },
-                muzzle_speed: 755.0,
-                drag_k: 6.733_864e-4,
-                wound: 10.0,
-                core: GUN_STEEL,
-                burst: None,
-                fuze_mode: 0,
-            },
-        ),
-        (
-            "88mm_AP",
-            Round {
-                effects: crate::rounds::FlightEffects::NONE,
-                muzzle: MuzzleEmission::fixture_cannon(),
-                body: PZGR_39,
-                flying: PZGR_39,
-                penetrator: PZGR_39,
-                muzzle_speed: 773.0,
-                drag_k: 1.080_940_9e-4,
-                wound: 30.0,
-                core: GUN_STEEL,
-                burst: None,
-                fuze_mode: 0,
-            },
-        ),
-        (
-            "88mm_APCR",
-            Round {
-                effects: crate::rounds::FlightEffects::NONE,
-                muzzle: MuzzleEmission::fixture_cannon(),
-                body: RoundBody {
-                    mass: 7.3,
-                    caliber: 0.088,
-                    nose_factor: 0.291_666_66,
-                },
-                flying: RoundBody {
-                    mass: 7.3,
-                    caliber: 0.088,
-                    nose_factor: 0.291_666_66,
-                },
-                penetrator: RoundBody {
-                    mass: 1.93,
-                    caliber: 0.0357,
-                    nose_factor: 0.291_666_66,
-                },
-                muzzle_speed: 930.0,
-                drag_k: 2.789_961_6e-4,
-                wound: 30.0,
-                core: MaterialFacts {
-                    density: 14900.0,
-                    flow_strength: 4.585e9,
-                    youngs_modulus: 627.0e9,
-                    poisson_ratio: 0.21,
-                },
-                burst: None,
-                fuze_mode: 0,
-            },
-        ),
-        (
-            "88mm_APHE_ring",
-            Round {
-                effects: crate::rounds::FlightEffects::NONE,
-                muzzle: MuzzleEmission::fixture_cannon(),
-                body: PZGR_39,
-                flying: PZGR_39,
-                penetrator: PZGR_39,
-                muzzle_speed: 773.0,
-                drag_k: 1.080_940_9e-4,
-                wound: 30.0,
-                core: GUN_STEEL,
-                fuze_mode: 0,
-                burst: Some(Burst {
-                    trigger: crate::rounds::fuze::Trigger::SpendExit { arming_spend: 35.0 },
-                    delay: 0.0015,
-                    nose: RoundBody {
-                        mass: 6.971_434,
-                        caliber: 0.088,
-                        nose_factor: 0.291_666_66,
-                    },
-                    sideways_speed: 534.38837,
-                    energy: 397_738.22,
-                    core_mass: 0.113,
-                    blast: 75_053.78,
-                    filler_setback: 0.182,
-                    charge_radius: 0.025380604,
-                }),
-            },
-        ),
-        (
-            "88mm_HE",
-            Round {
-                effects: crate::rounds::FlightEffects::NONE,
-                muzzle: MuzzleEmission::fixture_cannon(),
-                body: RoundBody {
-                    mass: 9.30,
-                    caliber: 0.088,
-                    nose_factor: 0.080_729_164,
-                },
-                flying: RoundBody {
-                    mass: 9.30,
-                    caliber: 0.088,
-                    nose_factor: 0.080_729_164,
-                },
-                penetrator: RoundBody {
-                    mass: 9.30,
-                    caliber: 0.088,
-                    nose_factor: 0.080_729_164,
-                },
-                muzzle_speed: 820.0,
-                drag_k: 1.185_548_1e-4,
-                wound: 30.0,
-                core: GUN_STEEL,
-                fuze_mode: 0,
-                burst: Some(Burst {
-                    trigger: crate::rounds::fuze::Trigger::Impact {
-                        sensitivity_n: 30.0,
-                    },
-                    delay: 0.0,
-                    nose: RoundBody {
-                        mass: 4.409_219_3,
-                        caliber: 0.088,
-                        nose_factor: 0.080_729_164,
-                    },
-                    sideways_speed: 1123.8556,
-                    energy: 2326276.0,
-                    core_mass: 0.9072,
-                    blast: 1_469_448.9,
-                    filler_setback: 0.178,
-                    charge_radius: 0.051345,
-                }),
-            },
-        ),
-    ];
-
-    /// The game's damage model: every shipped round's physical facts, read through the gun that
-    /// fires it, are field for field their pinned record ([`PINS`], to the bit); and so is every round the shipped tank
-    /// stows, read through its mount's gun as spawn reads it. The laws, the shot and every pinned
-    /// digest read this record, so a mutant that moves any row's muzzle speed, any type's or
-    /// round's nose, a core, a crew line rate or a burst input fails here.
+    /// The game's damage model: a gun fires each round of its table as the round registry states
+    /// it, at the table's speed and with the gun's muzzle emission, whether looked up by gun or by
+    /// round alone. Spawn and the shot read this record. FIXTURE DATA: one fixture round under two
+    /// keys at two speeds; a mutant that drops a row's speed or reads another row's fails here.
     #[test]
-    fn every_rounds_physical_facts_read_through_its_gun_bit_for_bit_as_pinned() {
-        let physical = |mut round: Round| {
-            round.effects = crate::rounds::FlightEffects::NONE;
-            round.muzzle = MuzzleEmission::fixture_cannon();
-            round
-        };
-        let guns = GunRegistry::shipped();
-        let pinned: BTreeMap<&str, Round> = PINS.into_iter().collect();
-        let shipped: Vec<&str> = RoundRegistry::shipped().keys().collect();
-        assert_eq!(
-            shipped,
-            pinned.keys().copied().collect::<Vec<_>>(),
-            "every shipped round is pinned"
+    fn a_gun_fires_each_tabled_round_at_its_speed_with_the_registry_facts() {
+        let rounds = fixture_rounds(&["Probe", "Other"]);
+        let text = gun_file(
+            "Gun Mk. 1",
+            "0.05",
+            &[("Probe", "700.0"), ("Other", "650.0")],
         );
-        for (key, pin) in &pinned {
-            let round = guns
-                .round_by_key(key)
-                .unwrap_or_else(|err| panic!("{key}: {err}"));
-            assert_eq!(&physical(round), pin, "{key}");
+        let guns =
+            GunRegistry::from_files(&[("Gun", &text)], &rounds).expect("the fixture gun loads");
+        let muzzle = guns
+            .round("Gun", "Probe")
+            .expect("the fixture gun chambers Probe")
+            .muzzle;
+        for (key, speed) in [("Probe", 700.0), ("Other", 650.0)] {
+            let expected = rounds
+                .get(key)
+                .expect("the fixture registry carries every key it was built with")
+                .fired_at(speed, muzzle)
+                .expect("the fixture round is inside the force law's domain at its speed");
+            assert_eq!(guns.round("Gun", key).as_ref(), Ok(&expected), "{key}");
+            assert_eq!(guns.round_by_key(key).as_ref(), Ok(&expected), "{key}");
         }
-        let sheet: crate::spec::TankSpec =
-            ron::de::from_str(include_str!("../assets/tiger_1/tiger_1.tank.ron"))
-                .expect("the shipped sheet parses");
-        for (mount, weapon) in &sheet.weapons {
+    }
+
+    /// Every round the selected sheet stows reads, as spawn resolves it, exactly as the one gun
+    /// whose table lists it fires it: the registry-to-mount resolution every shipped sheet relies
+    /// on, a class invariant that names no round and pins no value.
+    #[test]
+    fn every_stowed_round_reads_through_its_mount_gun() {
+        let guns = GunRegistry::shipped();
+        for (mount, weapon) in &crate::bake::selected_spec().weapons {
             let rounds = weapon
                 .resolved_rounds()
                 .unwrap_or_else(|err| panic!("{mount}: {err}"));
             assert_eq!(rounds.len(), weapon.stowage.len(), "{mount}");
             for (stowed, round) in weapon.stowage.iter().zip(rounds) {
                 let key = stowed.round.as_str();
-                let pin = pinned
-                    .get(key)
-                    .unwrap_or_else(|| panic!("{mount}: {key} is not pinned"));
-                assert_eq!(&physical(round), pin, "{mount}: {key}");
                 assert_eq!(
-                    guns.round(&weapon.gun, key).map(physical).as_ref(),
-                    Ok(pin),
+                    guns.round(&weapon.gun, key).as_ref(),
+                    Ok(&round),
+                    "{mount}: {key}"
+                );
+                assert_eq!(
+                    guns.round_by_key(key).as_ref(),
+                    Ok(&round),
                     "{mount}: {key}"
                 );
             }

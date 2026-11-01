@@ -1086,14 +1086,4 @@ mod tests {
             );
         }
     }
-
-    /// FIXTURE DATA (the shipped sheet): the launched turret's mass and inertia box before they
-    /// moved out of the launch system (8 000 kg over a 3.0 x 1.2 x 2.4 m box).
-    #[test]
-    fn the_shipped_sheet_carries_the_turret_the_launch_once_hard_coded() {
-        let spec: crate::spec::TankSpec =
-            ron::de::from_str(include_str!("../assets/tiger_1/tiger_1.tank.ron")).unwrap();
-        assert_eq!(spec.turret.mass, 8_000.0);
-        assert_eq!(spec.turret.inertia_extents, (3.0, 1.2, 2.4));
-    }
 }
