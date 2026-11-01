@@ -108,14 +108,27 @@ pub(crate) const BLEND_LAYERS: [BlendLayer; 3] = [
     },
 ];
 
+/// Every pack's ground type in the shader's slot order: the base, then [`BLEND_LAYERS`].
+fn slot_grounds(table: &GroundTypes) -> [&crate::ground_types::GroundType; 4] {
+    [
+        table.get(BASE_GROUND),
+        table.get(BLEND_LAYERS[0].ground),
+        table.get(BLEND_LAYERS[1].ground),
+        table.get(BLEND_LAYERS[2].ground),
+    ]
+}
+
 /// Every pack's print response in the shader's slot order: the base, then [`BLEND_LAYERS`].
 pub(crate) fn print_responses(table: &GroundTypes) -> [PrintResponse; 4] {
-    [
-        table.get(BASE_GROUND).print,
-        table.get(BLEND_LAYERS[0].ground).print,
-        table.get(BLEND_LAYERS[1].ground).print,
-        table.get(BLEND_LAYERS[2].ground).print,
-    ]
+    slot_grounds(table).map(|ground| ground.print)
+}
+
+/// The erodibility of ground of print weights `weights` ([`print_weights`]): each slot's
+/// [`crate::ground_types::DustResponse::erodibility`], blended by the painted weights, in 0..=1.
+pub(crate) fn dust_erodibility(table: &GroundTypes, weights: Vec4) -> f32 {
+    weights.dot(Vec4::from_array(
+        slot_grounds(table).map(|ground| ground.dust.erodibility),
+    ))
 }
 
 /// The material's print lanes for `table`, per slot (`x` the base pack, `yzw` the layers):

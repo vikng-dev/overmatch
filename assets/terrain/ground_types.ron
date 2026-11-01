@@ -6,12 +6,15 @@
 //   darkening            the share of albedo a print takes away, 0..1
 //   roughness_gain       roughness multiplier under a sole; below 1 reads wet
 //   friction             the friction coefficient the ground brings to a contact, one side's
+//   dust.erodibility     the share of a gun's muzzle dust cloud this ground lifts, 0..1
 //
 // Every print value is ASSUMED: ordered by the Bekker fits in the ground-stamping note's §2, dirt
 // and gravel raised so a print reads at 10-30 m, then tuned by eye in play (`track_prints::tuning`).
 // The module doc of `src/ground_types.rs` carries the provenance. Every friction is ASSUMED, no
 // source read: gravel, the terrain collider's ground, at Avian's own default 0.5; the others
-// ordered by hand, paving gripping best and mud least.
+// ordered by hand, paving gripping best and mud least. Every erodibility is ASSUMED, no source
+// read: ordered by hand, loose dry dirt and sand giving the whole cloud, gravel most of it, wet
+// mud and intact paving little.
 (
     types: {
         "concrete": (
@@ -22,6 +25,9 @@
                 roughness_gain: 1.0,
             ),
             friction: 0.6,
+            dust: (
+                erodibility: 0.1,
+            ),
         ),
         "dirt": (
             print: (
@@ -31,6 +37,9 @@
                 roughness_gain: 0.9,
             ),
             friction: 0.5,
+            dust: (
+                erodibility: 1.0,
+            ),
         ),
         "gravel": (
             print: (
@@ -40,6 +49,9 @@
                 roughness_gain: 1.0,
             ),
             friction: 0.5,
+            dust: (
+                erodibility: 0.8,
+            ),
         ),
         "mud": (
             print: (
@@ -49,6 +61,9 @@
                 roughness_gain: 0.6,
             ),
             friction: 0.3,
+            dust: (
+                erodibility: 0.3,
+            ),
         ),
         "sand": (
             print: (
@@ -58,6 +73,9 @@
                 roughness_gain: 0.9,
             ),
             friction: 0.4,
+            dust: (
+                erodibility: 1.0,
+            ),
         ),
     },
 )

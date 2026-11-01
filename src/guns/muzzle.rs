@@ -105,7 +105,8 @@ pub(crate) struct FlashLight {
 }
 
 /// The muzzle gas's coupling to the ground under the barrel: within `reach_m` of the muzzle the
-/// blast lifts this cloud.
+/// blast lifts this cloud on fully erodible ground, and the ground's own erodibility
+/// ([`crate::ground_types::DustResponse`]) is the share of its puffs any ground gives up.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) struct GroundBlast {
     /// Muzzle height over the ground at and below which the gas lifts loose ground, m.

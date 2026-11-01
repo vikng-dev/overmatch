@@ -159,6 +159,22 @@ impl PrintDepths {
         top.lerp(bottom, t.y)
     }
 
+    /// The painted ground weights at world XZ `xz` in the shader's slot order
+    /// ([`crate::terrain_blend::print_weights`]); the base pack alone before the mask loads.
+    pub(crate) fn ground_weights(&self, xz: Vec2) -> Vec4 {
+        crate::terrain_blend::print_weights(self.mask_at(xz))
+    }
+
+    /// FIXTURE: a painted ground whose mask has not loaded, so the base pack is the whole ground.
+    #[cfg(test)]
+    pub(crate) fn unpainted() -> Self {
+        Self {
+            masks: Handle::default(),
+            mask: None,
+            params: TerrainBlendParams::default(),
+        }
+    }
+
     /// The depth (m) the shader draws at world XZ `xz` under a full press by a tank of ground
     /// pressure `kpa`: the deepest point of its print there. The pressure is read as the near store
     /// stores it, in whole [`KPA_PER_UNIT`], so this is the shader's own number.

@@ -361,6 +361,13 @@ struct MuzzleKit<'w, 's> {
     weapons: Query<'w, 's, (&'static Weapon, &'static TankRoot, &'static WeaponIndex)>,
     /// The decoded terrain surface, when the world has one: the ground blast's only height query.
     grid: Option<Res<'w, crate::terrain_grid::HeightGrid>>,
+    /// The ground-type table and its painted mask, which `track_prints::install` inserts together
+    /// in the drawn heightmap world. A composition with no drawn ground (no window) has neither,
+    /// states no erodibility and lifts no dust.
+    painted: Option<(
+        Res<'w, crate::ground_types::GroundTypes>,
+        Res<'w, crate::track_prints::PrintDepths>,
+    )>,
     commands: Commands<'w, 's>,
 }
 
@@ -564,12 +571,16 @@ fn dress_fire(fire: On<FireShell>, mut kit: MuzzleKit) {
         });
     }
 
-    // --- Ground blast: the gas lifting the ground under a low barrel.
+    // --- Ground blast: the gas lifting the ground under a low barrel, as much as that ground
+    // gives up.
     if near
         && let Some(blast) = emission.ground_blast
         && let Some(ground_y) = dust_ground_y(kit.grid.as_deref(), origin, blast.reach_m)
+        && let Some((table, painted)) = kit.painted.as_ref()
     {
-        spawn_ground_dust(origin, dir, ground_y, &blast, &mut kit);
+        let weights = painted.ground_weights(Vec2::new(origin.x, origin.z));
+        let erodibility = crate::terrain_blend::dust_erodibility(table, weights);
+        spawn_ground_dust(origin, dir, ground_y, erodibility, &blast, &mut kit);
     }
 
     // --- Muzzle light: transient, first frame hottest. Its lifetime and refire cadence decide
@@ -617,10 +628,12 @@ fn dust_ground_y(
 
 /// The ground blast's dust cloud: wide alpha-blend puffs born on the ground under the muzzle and
 /// pushed outward, each along an azimuth pulled toward the bore's by the emission's `bore_bias`.
+/// The ground's `erodibility` (0..=1) is the share of the gun's rolled puff count it lifts.
 fn spawn_ground_dust(
     muzzle: Vec3,
     dir: Vec3,
     ground_y: f32,
+    erodibility: f32,
     blast: &GroundBlast,
     kit: &mut MuzzleKit,
 ) {
@@ -628,8 +641,9 @@ fn spawn_ground_dust(
     // The bore's ground-plane azimuth; a vertical barrel has none, and the cloud stays a plain ring.
     let bore_xz = Vec3::new(dir.x, 0.0, dir.z).try_normalize();
     let (lo, hi) = blast.puffs;
-    let count = lo + (kit.rng.next_f32() * (hi - lo + 1) as f32) as u32;
-    for _ in 0..count.min(hi) {
+    let rolled = (lo + (kit.rng.next_f32() * (hi - lo + 1) as f32) as u32).min(hi);
+    let count = (rolled as f32 * erodibility).round() as u32;
+    for _ in 0..count {
         let theta = kit.rng.range(0.0, std::f32::consts::TAU);
         let radial = Vec3::new(theta.cos(), 0.0, theta.sin());
         let away = match bore_xz {
@@ -756,6 +770,12 @@ mod tests {
     /// The harness with a FLAT terrain surface at `height` under it — what the ground blast
     /// measures the muzzle against (the shots below fire from y = 2.0).
     fn harness_ground(height: f32) -> App {
+        harness_ground_of(height, 1.0)
+    }
+
+    /// [`harness_ground`] painted all base ground of erodibility `erodibility`. FIXTURE DATA: the
+    /// shipped table with every ground's erodibility replaced.
+    fn harness_ground_of(height: f32, erodibility: f32) -> App {
         let mut app = harness();
         let size = 33usize;
         app.insert_resource(crate::terrain_grid::HeightGrid::new(
@@ -763,6 +783,12 @@ mod tests {
             size as u32,
             crate::terrain_grid::FIXTURE_EXTENT,
         ));
+        let mut table = crate::ground_types::GroundTypes::load_shipped();
+        for ground in table.types.values_mut() {
+            ground.dust.erodibility = erodibility;
+        }
+        app.insert_resource(table)
+            .insert_resource(crate::track_prints::PrintDepths::unpainted());
         app
     }
 
@@ -1001,6 +1027,33 @@ mod tests {
             dust_puffs(&mut none).is_empty(),
             "no authored blast, no dust"
         );
+    }
+
+    /// The ground's own response decides how much of the gun's cloud it gives up: fully erodible
+    /// ground lifts the rolled count, half-erodible ground half of it (rounded), and a nonerodible
+    /// ground under the same muzzle lifts nothing. A world without a drawn ground states no
+    /// erodibility and lifts nothing either. A mutant that ignores the ground fails.
+    #[test]
+    fn ground_dust_follows_the_grounds_erodibility() {
+        let count = |erodibility: f32| {
+            let mut app = harness_ground_of(0.0, erodibility);
+            cannon(&mut app, 0);
+            dust_puffs(&mut app).len()
+        };
+        let full = count(1.0);
+        assert!(full > 0);
+        assert_eq!(count(0.5), (full as f32 * 0.5).round() as usize);
+        assert_eq!(count(0.0), 0);
+
+        let mut undrawn = harness();
+        let size = 33usize;
+        undrawn.insert_resource(crate::terrain_grid::HeightGrid::new(
+            vec![0.0; size * size].into(),
+            size as u32,
+            crate::terrain_grid::FIXTURE_EXTENT,
+        ));
+        cannon(&mut undrawn, 0);
+        assert!(dust_puffs(&mut undrawn).is_empty());
     }
 
     /// The cloud's metres are the emission's (ADR-0023: physical inputs only, never the viewer): a
