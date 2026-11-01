@@ -327,25 +327,30 @@ pub(crate) fn tank_ground_pressure_kpa(geom: &RigGeom) -> f32 {
     ground_pressure_kpa(geom.model.mass, geom.model.width, length)
 }
 
-/// Bake the shoe once the template has bound and its mesh is loaded.
+/// Bake the shoe once the template has bound. Binding certifies the shoe before it publishes the
+/// template (`track::belt_draw::certify_template`): loaded, finite `Float32x3` positions, complete
+/// triangles indexing only them. A shoe whose underside covers no print cell is refused here, the
+/// first system that reads it, in every build.
 fn bake_shoes(
     mut prints: ResMut<TrackPrints>,
     template: Option<Res<LinkTemplate>>,
     geom: Option<Res<RigGeom>>,
     meshes: Res<Assets<Mesh>>,
 ) {
+    // The template has not bound yet: no shoe to bake.
     let Some(template) = template else {
         return;
     };
-    let Some(mesh) = meshes.get(template.shoe_mesh(Side::Right)) else {
-        return;
-    };
+    let mesh = meshes
+        .get(template.shoe_mesh(Side::Right))
+        .expect("a published template's shoe was certified loaded, and the template holds it");
     let frame = template.frame(Side::Right);
     let Some(VertexAttributeValues::Float32x3(positions)) =
         mesh.attribute(Mesh::ATTRIBUTE_POSITION)
     else {
-        error_once!("track prints: the shoe mesh has no Float32x3 positions — no prints");
-        return;
+        panic!(
+            "a certified shoe carries Float32x3 positions (`track::belt_draw::certify_template`)"
+        );
     };
     let canonical: Vec<Vec3> = positions
         .iter()
@@ -364,8 +369,12 @@ fn bake_shoes(
         .collect();
     let started = Instant::now();
     let Some(baked) = stamp::bake(&triangles) else {
-        error_once!("track prints: the shoe's underside covers no cell — no prints");
-        return;
+        panic!(
+            "{}: track shoe `{}`: its underside covers no print cell; export the shoe with its \
+             ground face toward the canonical outside",
+            crate::tank::TANK_GLB_PATH,
+            crate::track::link_view::LINK_NODE,
+        );
     };
     let pooled = ClearanceStamp::pooled(&baked, NEAR_TEXEL_M);
     let elapsed = started.elapsed();
@@ -594,11 +603,13 @@ fn sync_material(
     *synced = true;
 }
 
-/// Copy the painted mask to the CPU for [`PrintDepths`], once its image has loaded.
+/// Copy the painted mask to the CPU for [`PrintDepths`], once its image has loaded. A mask whose
+/// texels the CPU cannot read is refused: the belt's sink depth is read from it.
 fn read_mask(mut depths: ResMut<PrintDepths>, images: Res<Assets<Image>>) {
     if depths.mask.is_some() {
         return;
     }
+    // The mask is still loading; a failed load is `world::report_failed_terrain_map`'s refusal.
     let Some(image) = images.get(&depths.masks) else {
         return;
     };
@@ -606,15 +617,17 @@ fn read_mask(mut depths: ResMut<PrintDepths>, images: Res<Assets<Image>>) {
     let mut weights = Vec::with_capacity((size.x * size.y) as usize);
     for j in 0..size.y {
         for i in 0..size.x {
-            let Ok(color) = image.get_color_at(i, j) else {
-                error_once!(
-                    "track prints: the mask's {:?} texels are unreadable — the belt sinks into \
-                     the base ground's depth",
-                    image.texture_descriptor.format
-                );
-                depths.mask = Some((UVec2::ONE, vec![Vec3::ZERO]));
-                return;
-            };
+            let color = image.get_color_at(i, j).unwrap_or_else(|err| {
+                panic!(
+                    "{}: terrain masks: {:?} texels are unreadable on the CPU ({err}); export the \
+                     masks as the 8-bit RGB PNG the map's level.json declares",
+                    depths
+                        .masks
+                        .path()
+                        .map_or_else(|| "unnamed image".to_owned(), ToString::to_string),
+                    image.texture_descriptor.format,
+                )
+            });
             let linear = color.to_linear();
             weights.push(Vec3::new(linear.red, linear.green, linear.blue));
         }
