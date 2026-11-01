@@ -327,18 +327,18 @@ fn fire(
 
         // The identity belongs to the event, not a later post-spawn repair: `on_fire_shell`
         // includes it in the shell's initial bundle, so lifecycle observers and the first march
-        // see the same keyed state. A slot that cannot fit the wire's u8 has no network shot
-        // (the server likewise declines to broadcast it).
-        let shot = shot_clock.as_ref().and_then(|clock| {
+        // see the same keyed state. The load gate bounds every weapon slot to the wire's u8.
+        let shot = shot_clock.as_ref().map(|clock| {
             let combatant = combatant.expect(
                 "network tank fired without spawn-complete CombatantId; immutable sim state \
                  must arrive with the predicted root",
             );
-            u8::try_from(slot.0).ok().map(|weapon| crate::ShotId {
+            crate::ShotId {
                 combatant: *combatant,
-                weapon,
+                weapon: u8::try_from(slot.0)
+                    .expect("the tank load gate limits weapon slots to the wire's u8"),
                 fire_tick: clock.0,
-            })
+            }
         });
         // Fused own fire suppresses exactly the rounds the server will echo: a keyed shot's shell,
         // flash, and barrel kick present from that echo at the cursor; an unkeyed shot has no echo

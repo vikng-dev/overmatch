@@ -1,4 +1,4 @@
-//! Server-side transport policy for public shot presentation and private consequences.
+//! The game's damage model: server transport for public shot presentation and private consequences.
 
 use std::collections::VecDeque;
 
@@ -82,8 +82,6 @@ pub(crate) struct ShotTransportMetrics {
     pub oldest_reliable_damage_sent_unacked_ticks: u32,
     pub public_no_recipient_facts: u64,
     pub private_damage_no_recipient_facts: u64,
-    pub send_call_errors: u64,
-    pub send_call_error_facts: u64,
 }
 
 #[derive(Clone, Copy)]
@@ -301,10 +299,16 @@ impl VisualQueue {
                     .facts
                     .pop()
                     .expect("the just-added visual fact exists");
-                debug_assert!(!current.facts.is_empty());
+                assert!(
+                    !current.facts.is_empty(),
+                    "each visual fact fits one batch by itself"
+                );
                 batches.push(current);
                 current = FireVisualBatch { facts: vec![fact] };
-                debug_assert!(batch_wire_upper_bound(&current) <= VISUAL_BATCH_WIRE_LIMIT);
+                assert!(
+                    batch_wire_upper_bound(&current) <= VISUAL_BATCH_WIRE_LIMIT,
+                    "each visual fact fits the unfragmented batch budget"
+                );
             }
         }
         if !current.facts.is_empty() {
@@ -423,35 +427,32 @@ fn queue_fire(
     mut metrics: ResMut<ShotTransportMetrics>,
     mut shot_trace: Option<ResMut<crate::shot_trace::ShotTrace>>,
 ) {
+    // Unattributed tool/environment emissions have no player presentation route.
     let Some(source) = fire.shooter else { return };
-    let Some(shot) = fire.shot else {
-        warn!("server: attributed FireShell has no spawn-time ShotId");
-        return;
-    };
-    let Ok(&combatant) = combatants.get(source.tank) else {
-        warn!("server: firing tank {} has no CombatantId", source.tank);
-        return;
-    };
-    let Ok(weapon) = u8::try_from(source.weapon) else {
-        warn!("server: weapon slot {} exceeds the wire u8", source.weapon);
-        return;
-    };
-    if shot.combatant != combatant || shot.weapon != weapon || shot.fire_tick != timeline.tick().0 {
-        warn!(
-            "server: FireShell ShotId disagrees with its spawn facts: {shot:?}, combatant={combatant:?}, weapon={weapon}, tick={}",
-            timeline.tick().0
-        );
-        return;
-    }
+    let shot = fire
+        .shot
+        .expect("an attributed authority fire has its ShotId stamped at spawn");
+    let &combatant = combatants
+        .get(source.tank)
+        .expect("an authority firing tank has its CombatantId from spawn");
+    let weapon = u8::try_from(source.weapon)
+        .expect("the tank load gate limits weapon slots to the wire's u8");
+    assert_eq!(
+        (shot.combatant, shot.weapon, shot.fire_tick),
+        (combatant, weapon, timeline.tick().0),
+        "the authority's spawn-time ShotId agrees with its firing source and tick"
+    );
 
     let class = DeliveryClass::from(fire.mechanism);
+    // Bots are ownerless: public facts still broadcast, but no private confirmation is owed.
     let owner = controlled
         .get(source.tank)
         .ok()
         .map(|control| control.owner);
-    if transport.routes.insert(shot, ShotRoute { owner }).is_some() {
-        warn!("server: duplicate ShotId route replaced: {shot:?}");
-    }
+    assert!(
+        transport.routes.insert(shot, ShotRoute { owner }).is_none(),
+        "an authority ShotId has exactly one spawn-time route: {shot:?}"
+    );
 
     let event = FireEvent {
         origin: fire.origin,
@@ -486,9 +487,11 @@ fn queue_ricochet(
     transport: Res<ShotTransport>,
     mut shot_trace: Option<ResMut<crate::shot_trace::ShotTrace>>,
 ) {
-    if !transport.routes.contains_key(&ricochet.shot) {
-        return;
-    };
+    assert!(
+        transport.routes.contains_key(&ricochet.shot),
+        "an authority ricochet is emitted before its projectile's route is removed: {:?}",
+        ricochet.shot
+    );
     crate::shot_trace::record(
         &mut shot_trace,
         "kf",
@@ -507,9 +510,11 @@ fn queue_terminal(
     transport: Res<ShotTransport>,
     mut shot_trace: Option<ResMut<crate::shot_trace::ShotTrace>>,
 ) {
-    if !transport.routes.contains_key(&terminal.shot) {
-        return;
-    };
+    assert!(
+        transport.routes.contains_key(&terminal.shot),
+        "an authority terminal is emitted before its projectile's route is removed: {:?}",
+        terminal.shot
+    );
     crate::shot_trace::record(
         &mut shot_trace,
         "cf",
@@ -573,11 +578,12 @@ fn queue_damage(
         damage.shot,
         || json!({ "hp": damage.amount }),
     );
-    let Some(owner) = transport
+    let route = transport
         .routes
         .get_mut(&damage.shot)
-        .and_then(|route| route.owner.take())
-    else {
+        .expect("authority dose is reported before its projectile's route is removed");
+    // A bot has no recipient; an already-confirmed shot has spent its one private receipt.
+    let Some(owner) = route.owner.take() else {
         return;
     };
     transport.private_damage.push_back(PrivateDamage {
@@ -676,7 +682,9 @@ fn flush_shot_transport(
     mut shot_trace: Option<ResMut<crate::shot_trace::ShotTrace>>,
     mut sender: ServerMultiMessageSender,
 ) {
-    let Ok(server) = servers.single() else { return };
+    let server = servers
+        .single()
+        .expect("shot transport is installed with exactly one authority server");
     let now = timeline.tick();
     let visual_queue_before = transport.visual.len();
     let reliable_queued = transport.reliable_public.len();
@@ -693,14 +701,13 @@ fn flush_shot_transport(
     let deferred_before = metrics.visual_budget_deferred_producers;
     let public_no_recipient_before = metrics.public_no_recipient_facts;
     let private_no_recipient_before = metrics.private_damage_no_recipient_facts;
-    let errors_before = metrics.send_call_errors;
-    let error_facts_before = metrics.send_call_error_facts;
     let mut visual_facts_send_accepted = 0_u64;
     let mut visual_batches_send_accepted = 0_u64;
     let mut visual_wire_bytes_send_accepted = 0_u64;
 
     let reliable = core::mem::take(&mut transport.reliable_public);
     for fact in reliable {
+        // An empty server (or bots alone) has no observer to receive public facts.
         if public_recipient_count == 0 {
             metrics.public_no_recipient_facts += 1;
             continue;
@@ -713,12 +720,9 @@ fn flush_shot_transport(
                 sender.send::<FlightOutcome, OutcomeChannel>(outcome, server, &NetworkTarget::All)
             }
         };
-        if let Err(err) = result {
-            metrics.send_call_errors += 1;
-            metrics.send_call_error_facts += 1;
-            error!("server: reliable shot fact could not enter transport: {err}");
-            continue;
-        }
+        result.expect(
+            "registered authority facts serialize into each live link's unbounded transport queue",
+        );
         metrics.reliable_public_send_accepted_facts += 1;
         record_send(
             &mut shot_trace,
@@ -735,18 +739,13 @@ fn flush_shot_transport(
 
     let private = core::mem::take(&mut transport.private_damage);
     for damage in private {
+        // The owner may disconnect after the receipt was queued in the sim tick.
         if !server.collection().contains(&damage.owner) {
             metrics.private_damage_no_recipient_facts += 1;
             continue;
         }
-        if let Err(err) =
-            sender.send_to_entities::<DamageConfirm, DamageChannel>(&damage.confirm, [damage.owner])
-        {
-            metrics.send_call_errors += 1;
-            metrics.send_call_error_facts += 1;
-            error!("server: private damage fact could not enter transport: {err}");
-            continue;
-        }
+        sender.send_to_entities::<DamageConfirm, DamageChannel>(&damage.confirm, [damage.owner])
+            .expect("a registered private receipt serializes into its live link's unbounded transport queue");
         record_send(
             &mut shot_trace,
             now,
@@ -763,18 +762,13 @@ fn flush_shot_transport(
     for batch in transport.visual.drain_batches(now, &mut metrics) {
         let bytes = batch_wire_upper_bound(&batch);
         let fact_count = batch.facts.len() as u64;
+        // An empty server (or bots alone) has no observer to receive public facts.
         if public_recipient_count == 0 {
             metrics.public_no_recipient_facts += fact_count;
             continue;
         }
-        if let Err(err) =
-            sender.send::<FireVisualBatch, FireChannel>(&batch, server, &NetworkTarget::All)
-        {
-            metrics.send_call_errors += 1;
-            metrics.send_call_error_facts += fact_count;
-            error!("server: visual shot batch could not enter transport: {err}");
-            continue;
-        }
+        sender.send::<FireVisualBatch, FireChannel>(&batch, server, &NetworkTarget::All)
+            .expect("registered visual batches serialize into each live link's unbounded transport queue");
         visual_facts_send_accepted += fact_count;
         visual_batches_send_accepted += 1;
         visual_wire_bytes_send_accepted += bytes as u64;
@@ -811,8 +805,6 @@ fn flush_shot_transport(
     let public_no_recipient = metrics.public_no_recipient_facts - public_no_recipient_before;
     let private_no_recipient =
         metrics.private_damage_no_recipient_facts - private_no_recipient_before;
-    let send_call_errors = metrics.send_call_errors - errors_before;
-    let send_call_error_facts = metrics.send_call_error_facts - error_facts_before;
     if visual_queue_before > 0
         || reliable_queued > 0
         || private_queued > 0
@@ -823,7 +815,6 @@ fn flush_shot_transport(
         || visual_deferred > 0
         || public_no_recipient > 0
         || private_no_recipient > 0
-        || send_call_errors > 0
     {
         crate::shot_trace::record_global(&mut shot_trace, "transport", now.0, || {
             json!({
@@ -844,8 +835,6 @@ fn flush_shot_transport(
                 "public_recipient_count": public_recipient_count,
                 "public_no_recipient_facts": public_no_recipient,
                 "private_damage_no_recipient_facts": private_no_recipient,
-                "send_call_errors": send_call_errors,
-                "send_call_error_facts": send_call_error_facts,
                 "visual_copy_opportunities": VISUAL_COPIES,
                 "visual_ttl_ticks": VISUAL_TTL_TICKS,
                 "visual_batch_wire_limit": VISUAL_BATCH_WIRE_LIMIT,
@@ -925,6 +914,64 @@ mod tests {
     /// round. A replica relies on this to fly the shot the authority fired: a mutant that wrote
     /// the default mode, or bound a refused index to the default, gives the two ends different
     /// bursts.
+    fn authority_fire_fixture() -> (World, FireShell) {
+        let mut world = World::new();
+        world.init_resource::<LocalTimeline>();
+        world.init_resource::<ShotTransport>();
+        world.init_resource::<ShotTransportMetrics>();
+        world.add_observer(queue_fire);
+        let combatant = crate::CombatantId(7);
+        let tank = world.spawn(combatant).id();
+        // Fixture data: any validated weapon's first round exercises the route invariant.
+        let round = crate::bake::selected_spec()
+            .weapons
+            .values()
+            .next()
+            .unwrap()
+            .resolved_round()
+            .unwrap();
+        let fire = FireShell::of_round(
+            &round,
+            Vec3::ZERO,
+            Dir3::NEG_Z,
+            FireMechanism::Single,
+            true,
+            Some(crate::ballistics::ShotSource {
+                tank,
+                weapon: 0,
+                round: 0,
+            }),
+            Some(crate::ShotId {
+                combatant,
+                weapon: 0,
+                fire_tick: 0,
+            }),
+        );
+        (world, fire)
+    }
+
+    /// The game's damage model: replicas depend on an identity on every attributed authority
+    /// fire. Silently dropping the event would leave them missing a real authority shot.
+    #[test]
+    #[should_panic(expected = "an attributed authority fire has its ShotId stamped at spawn")]
+    fn an_attributed_fire_without_its_spawn_identity_is_a_bug() {
+        let (mut world, mut fire) = authority_fire_fixture();
+        fire.shot = None;
+        world.trigger(fire);
+    }
+
+    /// The game's damage model: one ShotId owns one route and one announcement. Replacing a
+    /// live route would announce a duplicate and could send its private receipt to another owner.
+    #[test]
+    #[should_panic(expected = "an authority ShotId has exactly one spawn-time route")]
+    fn a_duplicate_spawn_identity_is_a_bug() {
+        let (mut world, fire) = authority_fire_fixture();
+        world.trigger(fire);
+        let (_, fire) = authority_fire_fixture();
+        // Match the original source entity: each independent fixture uses the same first entity.
+        world.trigger(fire);
+    }
+
     #[test]
     fn a_fire_event_carries_the_fired_fuze_mode() {
         const TICK: u16 = 40;

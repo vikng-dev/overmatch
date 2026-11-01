@@ -1303,6 +1303,12 @@ impl TankSpec {
     /// - `belt_swap_secs == 0.0` / `reload_secs == 0.0` — a degenerate instant reload, not bricked
     ///   (the belt refills / the gun readies immediately); left legal.
     pub fn validate(&self) -> Result<(), BevyError> {
+        // DERIVED: the wire addresses weapon slots with a u8, including slot zero.
+        if self.weapons.len() > u8::MAX as usize + 1 {
+            return Err(
+                "weapons: at most 256 slots fit the wire; remove excess weapon entries".into(),
+            );
+        }
         // Components: an HP pool of zero is a component that is dead on arrival, and one past
         // `MAX_POOL_POINTS` is one no pool holds in pool units.
         for (node, volume) in &self.volumes {
@@ -2344,6 +2350,22 @@ TankSpec(
     /// The main bore is resolved by finding THE `Primary` weapon (`tank::spawn`'s rig, `command`,
     /// `crew_sweep`); a sheet with two would bind whichever the map yields first. A mutant that
     /// drops the count lets the second one load and be ignored.
+    /// The game's damage model: every authored weapon must have a wire address. The authority
+    /// and receivers rely on this gate instead of dropping fire from an unencodable slot.
+    #[test]
+    fn validate_refuses_more_weapons_than_the_wire_can_address() {
+        let mut spec = fixture();
+        let weapon = spec.weapons.values().next().unwrap().clone();
+        spec.weapons = (0..=u8::MAX as usize + 1)
+            .map(|slot| (format!("fixture_weapon_{slot}"), weapon.clone()))
+            .collect();
+        let error = spec.validate().unwrap_err().to_string();
+        assert!(
+            error.contains("weapons") && error.contains("256"),
+            "{error}"
+        );
+    }
+
     #[test]
     fn validate_refuses_a_sheet_with_two_primary_weapons() {
         let mut spec = fixture();
