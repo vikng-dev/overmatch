@@ -980,6 +980,63 @@ fn a_nailed_roof_distinguishes_rests_from_local_fixing_failure() {
         "every touched chunk is assessed: {:?}",
         weighed.unassessed
     );
+    probe_remaining_roof(&mut live, &roof);
+}
+
+/// Inspect every surviving chunk, not just the neighbours of the last removal.
+fn probe_remaining_roof(live: &mut Live, roof: &[usize]) {
+    let remaining: Vec<_> = roof
+        .iter()
+        .copied()
+        .filter(|&c| live.state.standing(c))
+        .collect();
+    let boundary: Vec<_> = live
+        .structure
+        .joints
+        .iter()
+        .enumerate()
+        .filter(|(j, joint)| {
+            !live.state.cracked[*j]
+                && live.state.live(joint)
+                && match joint.b {
+                    Side::Chunk(b) => remaining.contains(&joint.a) != remaining.contains(&b),
+                    Side::Ground => remaining.contains(&joint.a),
+                }
+        })
+        .collect();
+    println!(
+        "MEASURED: remaining plane {} chunks; boundary {:?}",
+        remaining.len(),
+        boundary
+            .iter()
+            .map(|(j, joint)| (*j, joint.area, joint.bond))
+            .collect::<Vec<_>>()
+    );
+    assert!(!boundary.is_empty());
+    assert!(
+        boundary
+            .iter()
+            .all(|(_, joint)| matches!(joint.bond, Bond::Bonded(_))),
+        "the gable rests have no live other side"
+    );
+    let rechecked = fracture::weigh(
+        &live.structure,
+        &mut live.state,
+        &[],
+        &[],
+        &[],
+        &remaining,
+        &mut live.sections,
+    );
+    println!(
+        "MEASURED: every remaining roof chunk rechecked: failures {:?}, unassessed {:?}",
+        rechecked.failures, rechecked.unassessed
+    );
+    let groups = fracture::fall(&live.structure, &mut live.state);
+    println!(
+        "MEASURED: recheck groups {:?}",
+        groups.iter().map(Vec::len).collect::<Vec<_>>()
+    );
 }
 
 /// A ROUND'S CHANNEL IS THE CYLINDER IT CROSSED, OPEN ACROSS EACH FACE: a line through a house
