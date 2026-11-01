@@ -121,10 +121,8 @@ pub(crate) struct RigSuspension(pub(crate) SuspensionParams);
 /// fixed-tick force systems never re-read the spec. Geometry lives in [`RigGeom`]; this is
 /// everything else the force law needs.
 ///
-/// It is all AUTHORED for the 57 t Tiger, which is exactly why it can't stay as constants: the
-/// belt inertia here and the one the declared transmission is built with are the same
-/// `powertrain.inertia`, so the transmission and belt share one inertia, and the
-/// weight the envelope law calibrates against is the spec's combat mass.
+/// The belt and transmission share the inertia DERIVED from declared links and wheel moments.
+/// The envelope calibrates against the spec's combat weight; geometry remains in `RigGeom`.
 #[derive(Resource)]
 struct RigSpec {
     /// Combat weight (N) = `spec.mass · g` — the scale of the static-grip bristle stiffness, the
@@ -1138,7 +1136,9 @@ fn build_rig(
     commands.insert_resource(RigSpec {
         weight_n: spec.mass * derive::G,
         engage_depth: track.suspension.engage,
-        belt_inertia: track.powertrain.inertia,
+        belt_inertia: track
+            .reflected_inertia(&spec.roadwheels, geom.rest.get(Side::Right)[0].1)
+            .expect("running-gear admission certified its construction inertia"),
         grip: crate::track::forces::GripParams::of(spec),
     });
 
@@ -1160,7 +1160,11 @@ fn build_rig(
     // The gap was feel-neutral anyway — reductions derive against the same radius, so it cancels.)
     let transmission = RigTransmission(
         track
-            .transmission_params(geom.rest.get(Side::Right)[0].1, geom.plane_x)
+            .transmission_params(
+                &spec.roadwheels,
+                geom.rest.get(Side::Right)[0].1,
+                geom.plane_x,
+            )
             .expect("the Tiger's transmission block is validated at bake"),
     );
     commands.insert_resource(TransState(
@@ -1623,19 +1627,27 @@ fn tune_rig_counts(
 ///   1. [`RigGeom`] — rebuilt (never re-read from the glb; see [`RigGeom::rebuild`]) so `belt_len`,
 ///      the sprocket circle, the ride height and the stored `window` verdict all track the counts.
 ///   2. [`PinBelt`] — the physics loop IS `pitch × link_count` / `link_count`.
-///   3. every belt-indexed piece of state, via [`BeltState::reseat`] — above all the grip-element
+///   3. derived belt inertia and transmission tables, from the retuned construction.
+///   4. every belt-indexed piece of state, via [`BeltState::reseat`] — above all the grip-element
 ///      slabs, which are sized once and never re-sized by the force law.
 ///
 /// Change-gated: skips the initial `RigCounts` insert (`is_added` — `build_rig` already built the
 /// matching geometry) and any frame the counts already equal the geometry's, so no per-frame
 /// rebuild can occur. `refresh_envelope` / `refresh_track_colliders` then react to the `RigGeom` change
 /// as they do for a knob tweak.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "one atomic retune of geometry, drive construction and belt state"
+)]
 fn apply_rig_counts(
     mut counts: ResMut<RigCounts>,
     suspension: Res<RigSuspension>,
     mut geom: ResMut<RigGeom>,
     mut pin_belt: ResMut<PinBelt>,
     mut belt_state: BeltState,
+    blueprint: Res<TankBlueprint>,
+    mut rig: ResMut<RigSpec>,
+    mut transmission: ResMut<RigTransmission>,
 ) {
     if counts.is_added() || !counts.is_changed() {
         return;
@@ -1654,6 +1666,26 @@ fn apply_rig_counts(
         };
         return;
     }
+    let mut track = blueprint.spec.track.clone();
+    track.link_count = counts.link_count;
+    track.sprocket.teeth = counts.teeth;
+    let radius = next.rest.get(Side::Right)[0].1;
+    let derived = track.transmission_params(&blueprint.spec.roadwheels, radius, next.plane_x);
+    let derived = match derived {
+        Ok(derived) => derived,
+        Err(error) => {
+            warn!("track sandbox: refused construction tuning: {error}");
+            *counts = RigCounts {
+                teeth: geom.teeth,
+                link_count: geom.link_count,
+            };
+            return;
+        }
+    };
+    rig.belt_inertia = track
+        .reflected_inertia(&blueprint.spec.roadwheels, radius)
+        .expect("the retuned transmission admitted the same construction inertia");
+    transmission.0 = derived;
     *geom = next;
     *pin_belt = PinBelt::for_rig(&geom);
     belt_state.reseat(pin_belt.count);

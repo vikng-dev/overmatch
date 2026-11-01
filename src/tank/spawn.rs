@@ -229,7 +229,7 @@ fn tank_transmission(spec: &TankSpec) -> TankTransmission {
     // asset load.
     let params = spec
         .track
-        .transmission_params(1.0, 1.0)
+        .nominal_transmission_params(&spec.roadwheels)
         .expect("TankSpec transmission was validated before tank construction");
     TankTransmission::from_spec(&params)
 }

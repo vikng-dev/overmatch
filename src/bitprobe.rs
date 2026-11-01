@@ -537,7 +537,7 @@ fn startup_dump(app: &App, tank: Entity) -> StartupBuilder {
     out.f32("spec.inertia_extents.z", spec.inertia_extents.2);
     let track = &spec.track;
     out.u32("spec.track.link_count", track.link_count as u32);
-    out.f32("spec.track.link_mass", track.link_mass);
+    out.f32("spec.track.link_mass", track.link_mass.0);
     out.f32("spec.track.hinge_torque", track.hinge_torque);
     // The hinge stops as the sim sees them — RADIANS, past the spec's degrees seam.
     out.f32(
@@ -557,7 +557,15 @@ fn startup_dump(app: &App, tank: Entity) -> StartupBuilder {
     out.f32("derived.pitch", geom.pitch);
     out.f32("derived.thickness", geom.thickness);
     out.f32("derived.width", geom.model.width);
-    out.f32("spec.track.powertrain.inertia", track.powertrain.inertia);
+    out.f32(
+        "derived.reflected_inertia",
+        track
+            .reflected_inertia(
+                &spec.roadwheels,
+                geom.rest.get(crate::track::side::Side::Right)[0].1,
+            )
+            .expect("the running gear admitted its construction inertia"),
+    );
     out.f32("spec.track.suspension.engage", track.suspension.engage);
 
     let position = world.get::<Position>(tank).expect("tank has Position").0;

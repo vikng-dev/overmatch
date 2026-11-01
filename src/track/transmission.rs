@@ -631,7 +631,7 @@ pub struct TransmissionAuthoring<'a> {
     pub engine_inertia_kgm2: f32,
     /// See [`TransmissionParams::clutch_capacity`] (N·m).
     pub clutch_capacity_nm: f32,
-    /// Per-side belt + reflected-drivetrain inertia (kg); the coupling uses twice this value.
+    /// DERIVED per-side belt translation + reflected wheel inertia (kg); the coupling uses twice this value.
     pub belt_inertia: f32,
     /// Gear-shift torque-interruption time (s) — see [`TransmissionParams::shift_ticks`].
     pub shift_secs: f32,
@@ -771,7 +771,7 @@ impl TransmissionParams {
                 // The coupling lock denominator includes `k^2 / (2 * belt_inertia)`; tiny
                 // positive values overflow that term even though the generic belt law accepts
                 // every finite positive inertia.
-                "powertrain.inertia floor (coupling divisor)",
+                "derived belt inertia floor (coupling divisor)",
                 a.belt_inertia.is_finite() && a.belt_inertia >= 1.0,
             ),
             (

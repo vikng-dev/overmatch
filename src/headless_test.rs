@@ -1491,11 +1491,28 @@ fn scripted_determinism_run() -> ScriptedDeterminismRun {
         .shift_addressing = crate::track::transmission::ShiftAddressing::Sequential;
     let rot = Quat::from_rotation_x(20.0_f32.to_radians());
     let approach_speed = 4.0;
+    // DERIVED fixture placement: put the rest envelope on the actual terrain face along its
+    // normal, rather than dropping the rig from an unrelated world height.
+    use crate::track::oracle::TerrainOracle as _;
+    let normal = rot * Vec3::Y;
+    let rest_height = app
+        .world()
+        .resource::<crate::track::rig_geom::RigGeom>()
+        .hull_rest_y;
+    let mut approach = Vec3::new(0.0, 1.50, -37.0); // FIXTURE: query seed over the ramp.
+    let clearance = app
+        .world()
+        .resource::<crate::track::terrain::TrackField>()
+        .field
+        .as_ref()
+        .expect("the booted fixture has its terrain field")
+        .depth_along(approach - normal * rest_height, -normal, 8.0); // FIXTURE: cast reach above the course.
+    approach += normal * clearance;
     let mut transmission = fresh_tank_transmission(&app);
     transmission.0.gear = 6;
     {
         let mut e = app.world_mut().entity_mut(tank);
-        e.get_mut::<avian3d::prelude::Position>().unwrap().0 = Vec3::new(0.0, 1.50, -37.0);
+        e.get_mut::<avian3d::prelude::Position>().unwrap().0 = approach;
         e.get_mut::<avian3d::prelude::Rotation>().unwrap().0 = rot;
         e.get_mut::<avian3d::prelude::LinearVelocity>().unwrap().0 =
             rot * Vec3::NEG_Z * approach_speed;
@@ -1510,13 +1527,25 @@ fn scripted_determinism_run() -> ScriptedDeterminismRun {
         *e.get_mut::<crate::track::sim::TankTransmission>().unwrap() = transmission;
     }
     let (mut demand, mut confirm, mut target, mut hold) = (false, false, false, false);
-    for _ in 0..SLOPE_TICKS {
+    for slope_tick in 0..SLOPE_TICKS {
         drive_tick(&mut app, tank, 1.0, 0.0);
         let state = app
             .world()
             .get::<crate::track::sim::TankTransmission>(tank)
             .expect("the controlled tank carries transmission state")
             .0;
+        if slope_tick == 0 {
+            assert!(
+                app.world()
+                    .get::<crate::track::sim::TrackContacts>(tank)
+                    .unwrap()
+                    .0
+                    .iter()
+                    .flatten()
+                    .any(|contact| contact.load > 0.0),
+                "the rolling grade-memory fixture must start supported on the ramp, not in free fall"
+            );
+        }
         demand |= state.demand_n > 0.0;
         confirm |= state.grade_confirm_ticks > 0;
         target |= state.grade_target > 0;

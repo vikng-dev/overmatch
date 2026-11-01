@@ -429,8 +429,8 @@ fn publish_engine_rpm(
 /// ([`RigGeom`](super::rig_geom::RigGeom) — the SAME derivation the track sandbox proved),
 /// closed via `build_route` with the material length, and the contact-envelope support law
 /// calibrated on that loop so the authored rest pose is the flat-ground equilibrium
-/// ([`super::envelope`]). The RON's sprocket/idler/wheel-radius circle fields are no longer
-/// read here — geometry is measured, the spec keeps counts and the ride model.
+/// ([`super::envelope`]). Pin pitch and axle positions come from the sim artifact; the sheet's
+/// contact radii and teeth complete the circles and the reflected-inertia derivation.
 fn init_track_gear(blueprint: Res<TankBlueprint>, mut commands: Commands) {
     let spec = &blueprint.spec.track;
     let sus = spec.suspension.params();
@@ -506,7 +506,11 @@ fn init_track_gear(blueprint: Res<TankBlueprint>, mut commands: Commands) {
     // circle (chord-exact `derive::sprocket_pitch_radius(geom.pitch, teeth)` by construction), and
     // the half-tread is `geom.plane_x` — the same measured values the belt/envelope ride.
     let trans = spec
-        .transmission_params(geom.rest.get(Side::Right)[0].1, geom.plane_x)
+        .transmission_params(
+            &blueprint.spec.roadwheels,
+            geom.rest.get(Side::Right)[0].1,
+            geom.plane_x,
+        )
         .expect("TankSpec transmission was validated before TrackGear construction");
 
     let mut pin_radius = 0.0_f32;
@@ -547,7 +551,9 @@ fn init_track_gear(blueprint: Res<TankBlueprint>, mut commands: Commands) {
             engage_depth: spec.suspension.engage,
             probe_reach: 0.5,
             slip_saturation: SLIP_SATURATION,
-            inertia: spec.powertrain.inertia,
+            inertia: spec
+                .reflected_inertia(&blueprint.spec.roadwheels, geom.rest.get(Side::Right)[0].1)
+                .expect("running-gear admission certified the construction inertia"),
             grip: Some(GripParams::of(&blueprint.spec)),
         },
     });
@@ -1305,6 +1311,43 @@ mod tests {
         assert!(gear.braking_deceleration(0.1, 1.0) > gear.braking_deceleration(0.1, -1.0));
     }
 
+    /// The drive controller relies on construction reaching the actual brake predictor.
+    /// FIXTURE DATA: the declared vehicle and doubled complete-link mass at fixed total mass.
+    /// A mutant retaining a fixed inertia, omitting a side, or dropping hull mass fails.
+    #[test]
+    fn doubled_link_mass_brakes_slower_by_its_derived_inertia() {
+        let measure = |scale: f32| {
+            let mut app = App::new();
+            app.add_plugins((crate::bake::plugin, sim_plugin));
+            app.world_mut().run_schedule(Startup);
+            let mut spec = super::super::rig_geom::tiger_spec();
+            let link_inertia = spec.track.link_count as f32 * spec.track.link_mass.0;
+            spec.track.link_mass.0 *= scale;
+            app.world_mut().resource_mut::<TankBlueprint>().spec = std::sync::Arc::new(spec);
+            app.world_mut().run_schedule(PreUpdate);
+            let gear = app.world().resource::<TrackGear>();
+            let mass = gear.params.grip.unwrap().side_weight * 2.0 / super::super::derive::G;
+            let inertia = gear.params.inertia;
+            let decel = gear.braking_deceleration(0.0, 1.0);
+            // DERIVED full-throttle, no-slip flat acceleration at the peak-torque operating
+            // point in the highest gear: crank inertia is reflected separately through k^2.
+            let k = gear.trans.gears_fwd.last().unwrap() / gear.trans.sprocket_radius;
+            let crank_mass = gear.trans.engine_inertia * k * k;
+            let drive_force = gear.trans.torque_at(gear.trans.peak_torque_rpm) * k;
+            println!(
+                "DERIVED construction: scale={scale}, links={link_inertia} kg/side, inertia={inertia} kg/side, mass={mass} kg, brake={decel} m/s^2, flat peak-torque top-gear acceleration={} m/s^2, drive_force={drive_force} N, reflected_crank={crank_mass} kg",
+                drive_force / (mass + 2.0 * inertia + crank_mass)
+            );
+            (inertia, decel, mass, link_inertia)
+        };
+        let (before, decel, mass, link_inertia) = measure(1.0);
+        let (after, slower, _, _) = measure(2.0);
+        assert!((after - before - link_inertia).abs() < 1e-3);
+        let expected = decel * (mass + 2.0 * before) / (mass + 2.0 * after);
+        assert!(slower < decel);
+        assert!((slower - expected).abs() < 1e-5);
+    }
+
     /// Both force routes must retain their authored side's geometry. A mutant that copies the
     /// right loop, placement or travel profile would make the asymmetric fixture indistinguishable.
     #[test]
@@ -1317,6 +1360,8 @@ mod tests {
             let mut spec = super::super::rig_geom::tiger_spec();
             spec.track.pin_plane_x.left -= 0.2;
             spec.track.idler.radius.left *= 0.9;
+            // FIXTURE: preserve the idler's reflected inertia while changing its contact geometry.
+            spec.track.idler.spin_inertia_kgm2.0.left *= 0.9 * 0.9;
             blueprint.spec = std::sync::Arc::new(spec);
         }
         app.world_mut().run_schedule(PreUpdate);

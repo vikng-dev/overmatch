@@ -180,6 +180,9 @@ pub struct RoadwheelSpec {
     pub side: crate::tank::TrackSide,
     /// The station's physical tread, independent of decorative view vertices.
     pub tread: WheelTread,
+    /// Axial moment of the complete rotating station assembly (kg m^2), including every
+    /// disc at this axle. DERIVED belt contribution: this moment / tread.radius^2.
+    pub(crate) spin_inertia_kgm2: Sourced<f32>,
 }
 
 /// A wheel's contact circle and the lateral spans of its tread, relative to its authored axle.
@@ -753,13 +756,10 @@ pub struct ViewSpec {
     pub requires: Requirement,
 }
 
-/// The continuous-track material loop + drivetrain (track architecture §7). Every field here is
-/// authored vehicle DATA — link counts, link physicals, articulation limits, tooth count, and the
-/// ride/powertrain models. It carries NO geometry: pitch, plate thickness, shoe width, the track
-/// plane, and every running-gear circle (sprocket/idler/wheel) are MEASURED off the glb markers
-/// (see [`crate::track::rig_geom`] / [`crate::track::marker_model`]) — one source of truth, in the
-/// model. Solver-quality policy lives as constants in `track::view`; a new tracked vehicle is
-/// authored here, never tuned there.
+/// The track's declared construction: links, wheel moments, contact radii, pin planes,
+/// articulation and tooth datums, plus ride and powertrain models. The sim artifact supplies
+/// pin pitch, shoe dimensions and declared axle positions (see [`crate::track::rig_geom`]).
+/// Solver resolution belongs to the implementation; physical facts belong to this sheet.
 #[derive(Deserialize, Clone)]
 #[serde(deny_unknown_fields)]
 pub struct TrackSpec {
@@ -772,18 +772,17 @@ pub struct TrackSpec {
     /// Links per side. With the MEASURED pitch this is the immutable material loop
     /// (`pitch × link_count`, exact — tooth lock); the pitch itself is read off the glb markers.
     pub link_count: usize,
-    /// One link assembly's mass (kg) — real inverse masses in the chain constraints.
-    pub link_mass: f32,
+    /// One complete link assembly's mass (kg). DERIVED translating belt inertia per side:
+    /// link_count * link_mass; the hull mass already includes the links' carried mass.
+    pub(crate) link_mass: Sourced<f32>,
     /// Pin dry-friction torque (N·m) — the rope-vs-track differentiator, scaled to link mass.
     pub hinge_torque: f32,
     /// Hard articulation stops between consecutive links (rad) — see [`LinkAngleSpec`].
     pub link_angle: LinkAngleSpec,
-    /// Drive sprocket: tooth count ONLY. The pitch radius is DERIVED from the MEASURED pitch —
-    /// `pitch × teeth / τ` — never authored: one link advance ≡ one tooth advance by
-    /// construction, and two numbers that must agree are one number. Its centre (and every other
-    /// running-gear circle) is measured off the glb markers (see [`crate::track::rig_geom`]).
+    /// Drive sprocket construction. DERIVED pitch radius: pitch / (2 sin(pi / teeth)),
+    /// from the common pin pitch; its centre is the declared axle node's position.
     pub sprocket: SprocketSpec,
-    /// Idler: the model nodes of its two meshes. Its circle is measured off the glb markers.
+    /// Idler: declared axle nodes, contact radii and complete rotating assembly moments.
     pub idler: IdlerSpec,
     /// The drivetrain spinning this track (phase B — the locomotion sim IS the track model).
     pub powertrain: PowertrainSpec,
@@ -802,32 +801,116 @@ impl TrackSpec {
             .unwrap_or_else(|err| panic!("the track's substance: {err}, yet the bake certified it"))
     }
 
-    /// Build the declared joint transmission through the same validated authoring seam used by
-    /// spawn-time state construction and the runtime track gear. Geometry is no longer authored,
-    /// so the CALLER supplies the measured sprocket pin-line radius and the half-tread (`plane_x`):
-    /// [`crate::track::sim`]'s `init_track_gear` passes the
-    /// [`RigGeom`](crate::track::rig_geom::RigGeom) values; the geometry-independent validators
-    /// (asset-load `validate`, spawn-time state) pass nominal placeholders, because only
-    /// `engine.idle_rpm` reaches replicated state — the geometry only SCALES the derived ladder,
-    /// which is finite for any finite positive radius, so the validation verdict is identical.
+    /// DERIVED per-side extra inertia at belt speed (kg): translating links plus each wheel's
+    /// axial moment divided by its belt contact radius squared. The hull mass already carries
+    /// these parts, so only their motion relative to the hull belongs here. The sprocket uses
+    /// the chord-exact pitch radius; idler and road wheels use tread radii, never pin-line radii.
+    ///
+    /// The joint drive currently has one inertia for both sides. Unequal construction is refused
+    /// before play until the drive can integrate distinct side inertias; it is never averaged
+    /// into an unlabelled approximation. See the design record `reflected-track-inertia.md`.
+    pub(crate) fn reflected_inertia(
+        &self,
+        roadwheels: &[RoadwheelSpec],
+        sprocket_radius: f32,
+    ) -> Result<f32, BevyError> {
+        let sides = self.inertia_terms(roadwheels, sprocket_radius)?;
+        // Resolution: allow accumulated f32 construction-rounding, including equivalent radius
+        // and moment rescalings; this tolerance changes no physical term in the force law.
+        let tolerance = 16.0 * f64::from(f32::EPSILON) * sides[0].max(sides[1]);
+        if (sides[0] - sides[1]).abs() > tolerance {
+            return Err(format!("track derived reflected inertia differs by side (left {}, right {} kg); correct the wheel moments/contact radii, or extend the joint drive to distinct side inertias", sides[0], sides[1]).into());
+        }
+        // DERIVED: average only the admitted sides' floating-point roundoff.
+        let inertia = ((sides[0] + sides[1]) / 2.0) as f32;
+        if !inertia.is_finite() || inertia <= 0.0 || !(2.0 * inertia).is_finite() {
+            return Err("track derived reflected inertia and its pair must be finite and positive; reduce link mass/count or wheel moments, or correct contact radii".into());
+        }
+        Ok(inertia)
+    }
+
+    /// Admit each fact independently of the joint drive's symmetry and divisor constraints.
+    /// Those constraints need the actual sprocket radius, available at running-gear admission.
+    fn inertia_terms(
+        &self,
+        roadwheels: &[RoadwheelSpec],
+        sprocket_radius: f32,
+    ) -> Result<[f64; 2], BevyError> {
+        fn reflected(moment: f32, radius: f32, field: &str) -> Result<f64, BevyError> {
+            if !moment.is_finite() || moment <= 0.0 {
+                return Err(format!("{field} must be finite and positive; author the complete assembly's axial moment in kg m^2").into());
+            }
+            if !radius.is_finite() || radius <= 0.0 {
+                return Err(format!("{field}: contact radius must be finite and positive; correct the declared tread or sprocket pin pitch").into());
+            }
+            Ok(f64::from(moment) / f64::from(radius).powi(2))
+        }
+        if !self.link_mass.0.is_finite() || self.link_mass.0 <= 0.0 {
+            return Err("track.link_mass must be finite and positive; author the complete link assembly mass in kg".into());
+        }
+        let links = self.link_count as f64 * f64::from(self.link_mass.0);
+        if !(2.0 * links as f32).is_finite() {
+            return Err("track derived reflected inertia of the links must be finite; correct link_count and link_mass".into());
+        }
+        let mut sides = [links; 2];
+        for side in crate::track::side::Side::ALL {
+            sides[side.index()] += reflected(
+                self.sprocket.spin_inertia_kgm2.0.get(side),
+                sprocket_radius,
+                &format!("track.sprocket.spin_inertia_kgm2.{side:?}"),
+            )? + reflected(
+                self.idler.spin_inertia_kgm2.0.get(side),
+                self.idler.radius.get(side),
+                &format!("track.idler.spin_inertia_kgm2.{side:?}"),
+            )?;
+        }
+        for wheel in roadwheels {
+            let side = match wheel.side {
+                crate::tank::TrackSide::Left => 0,
+                crate::tank::TrackSide::Right => 1,
+            };
+            sides[side] += reflected(
+                wheel.spin_inertia_kgm2.0,
+                wheel.tread.radius,
+                &format!("roadwheels.{}.spin_inertia_kgm2", wheel.node),
+            )?;
+        }
+        Ok(sides)
+    }
+
+    /// Structural admission and the spawn crank seed need no physical geometry. Unit placeholders
+    /// exercise the transmission's non-geometric rules; no force step consumes these tables.
+    /// Running-gear admission checks the side equality and divisor using the real pitch radius.
+    pub(crate) fn nominal_transmission_params(
+        &self,
+        roadwheels: &[RoadwheelSpec],
+    ) -> Result<TransmissionParams, BevyError> {
+        self.inertia_terms(roadwheels, 1.0)?;
+        self.powertrain.transmission.params(1.0, 1.0, 1.0)
+    }
+
+    /// Build the joint drive from construction and the measured sprocket pitch radius and
+    /// half-tread. Only admitted running gear consumes these physical tables; structural
+    /// validation and the crank seed use [`Self::nominal_transmission_params`].
     pub(crate) fn transmission_params(
         &self,
+        roadwheels: &[RoadwheelSpec],
         sprocket_radius: f32,
         half_tread: f32,
     ) -> Result<TransmissionParams, BevyError> {
-        self.powertrain
-            .transmission
-            .params(sprocket_radius, half_tread, self.powertrain.inertia)
+        self.powertrain.transmission.params(
+            sprocket_radius,
+            half_tread,
+            self.reflected_inertia(roadwheels, sprocket_radius)?,
+        )
     }
 }
 
-/// Per-track powertrain: reflected belt inertia and the declared drivetrain that drives it.
+/// Per-track powertrain: the declared drivetrain that drives the constructed running gear.
 /// Powered speed and force derive from its gear ladder, engine and clutch; contact grip bounds traction.
 #[derive(Deserialize, Clone)]
 #[serde(deny_unknown_fields)]
 pub struct PowertrainSpec {
-    /// Reflected belt + drivetrain inertia (kg).
-    pub inertia: f32,
     /// The DECLARED transmission (transmission-design.md): engine torque curve, gear ladders,
     /// steering table, brakes.
     pub transmission: TransmissionSpec,
@@ -1005,11 +1088,14 @@ impl SuspensionSpec {
     }
 }
 
-/// See [`TrackSpec::sprocket`]. Tooth count and the two view nodes — the sprocket's centre and
-/// pitch radius are measured/derived off the glb markers, never authored.
+/// See [`TrackSpec::sprocket`]. Tooth construction, axial moments and declared axle nodes;
+/// the chord-exact pitch radius derives from pin markers and the tooth count.
 #[derive(Deserialize, Clone)]
 #[serde(deny_unknown_fields)]
 pub struct SprocketSpec {
+    /// Complete rotating assembly's axial moment per side (kg m^2). DERIVED belt contribution:
+    /// I / pitch_radius^2, with the chord-exact pitch radius from the declared teeth and pin pitch.
+    pub(crate) spin_inertia_kgm2: Sourced<SideValues>,
     pub teeth: u32,
     /// Hull side-plane angle of a reference tooth tip at the authored rest pose (rad).
     pub tooth_tip_rad: SideValues,
@@ -1022,6 +1108,9 @@ pub struct SprocketSpec {
 #[derive(Deserialize, Clone)]
 #[serde(deny_unknown_fields)]
 pub struct IdlerSpec {
+    /// Complete rotating assembly's axial moment per side (kg m^2). DERIVED belt contribution:
+    /// I / radius^2, using the contact radius below, without the shoe's pin offset.
+    pub(crate) spin_inertia_kgm2: Sourced<SideValues>,
     pub nodes: SideNodes,
     /// Physical rolling radius of each idler (m).
     pub radius: SideValues,
@@ -1501,13 +1590,6 @@ impl TankSpec {
         // GEOMETRY — the material loop closing around the rest wheel circles — lives at rig
         // bind, where the baked wheel rests exist; these are the spec-local invariants.)
         let t = &self.track;
-        if !t.link_mass.is_finite() || t.link_mass <= 0.0 {
-            return Err(format!(
-                "track.link_mass must be finite and > 0 (got {})",
-                t.link_mass
-            )
-            .into());
-        }
         if !(3..=crate::track::belt_draw::MAX_BELT_LINKS).contains(&t.link_count) {
             return Err(format!("track.link_count must be in 3..={} (got {}); reduce the count or widen the belt table's record address",
                 crate::track::belt_draw::MAX_BELT_LINKS, t.link_count).into());
@@ -1578,10 +1660,8 @@ impl TankSpec {
             )
             .into());
         }
-        // The force-law scalars reach integrator divisions: inertia sets belt acceleration,
-        // and suspension data sets support. A NaN dissolves the belt state in one tick.
+        // Suspension divisions require finite positive authored support parameters.
         for (field, value) in [
-            ("powertrain.inertia", t.powertrain.inertia),
             ("suspension.ride_frequency", t.suspension.ride_frequency),
             ("suspension.damping_ratio", t.suspension.damping_ratio),
             ("suspension.bump_stop", t.suspension.bump_stop),
@@ -1591,14 +1671,10 @@ impl TankSpec {
                 return Err(format!("track.{field} must be finite and > 0 (got {value})").into());
             }
         }
-        // The declared transmission is validated through the same fallible constructor used by
-        // synchronous sim construction, the sandbox, and its arithmetic tests. Geometry is measured
-        // off the glb at RigGeom build, not authored here, so this domain-only pass feeds nominal
-        // positive placeholders: every `from_authoring` rejection is independent of the sprocket
-        // radius / half-tread (they only scale the derived ladder, finite for any finite positive
-        // radius), and the geometry-coupled construction is re-run with the real measured values at
-        // TrackGear build.
-        t.transmission_params(1.0, 1.0).map(|_| ())?;
+        // Structural rules need no geometry. Running-gear admission checks the physical
+        // tables, side inertia equality and coupling divisor against the actual pitch radius.
+        t.nominal_transmission_params(&self.roadwheels)
+            .map(|_| ())?;
         // Engine audio data: the firing rate divides by neither, but both are DIVISORS in the
         // playback law (`sfx`) — a 0-cylinder engine pops at 0 Hz and a 0 Hz recording makes the
         // anchor infinite.
@@ -1958,13 +2034,12 @@ TankSpec(
         pin_plane_x: (left: -1.3, right: 1.3),
         substance: "TrackSteel",
         link_count: 80,
-        link_mass: 20.0,
+        link_mass: (20.0, Fixture("fixture link assembly")),
         hinge_torque: 30.0,
         link_angle: (inward_deg: 40.0, outward_deg: 18.0),
-        sprocket: (teeth: 16, tooth_tip_rad: (left: 0.0, right: 0.0), nodes: (left: "Sprocket_L", right: "Sprocket_R")),
-        idler: (radius: (left: 0.4, right: 0.4), nodes: (left: "Idler_L", right: "Idler_R")),
+        sprocket: (spin_inertia_kgm2: ((left: 4.0, right: 4.0), Fixture("fixture sprockets")), teeth: 16, tooth_tip_rad: (left: 0.0, right: 0.0), nodes: (left: "Sprocket_L", right: "Sprocket_R")),
+        idler: (spin_inertia_kgm2: ((left: 4.0, right: 4.0), Fixture("fixture idlers")), radius: (left: 0.4, right: 0.4), nodes: (left: "Idler_L", right: "Idler_R")),
         powertrain: (
-            inertia: 10_000.0,
             transmission: (
                 engine: (
                     idle_rpm: 600.0,
@@ -2015,8 +2090,8 @@ TankSpec(
     colliders: [(node: "Hull_Collider", substance: "RHA")],
     shadow_proxies: [],
     roadwheels: [
-        (node: "Wheel_L_0", side: Left, tread: (radius: 0.4, spans: [(-0.1, 0.1)])),
-        (node: "Wheel_R_0", side: Right, tread: (radius: 0.4, spans: [(-0.1, 0.1)])),
+        (node: "Wheel_L_0", side: Left, spin_inertia_kgm2: (8.0, Fixture("fixture station")), tread: (radius: 0.4, spans: [(-0.1, 0.1)])),
+        (node: "Wheel_R_0", side: Right, spin_inertia_kgm2: (8.0, Fixture("fixture station")), tread: (radius: 0.4, spans: [(-0.1, 0.1)])),
     ],
     weapons: {
         "Cannon": (
@@ -2567,20 +2642,16 @@ TankSpec(
             }
         }
 
-        // Track: a non-positive link_mass parses but yields zero-inverse-mass chain constraints —
-        // validate() rejects it and names the field (the one surviving track dimension check now
-        // that all geometry is measured off the glb, not authored).
+        // The drive relies on a positive mass for every declared link assembly.
         let mut spec = fixture();
-        spec.track.link_mass = 0.0;
+        spec.track.link_mass.0 = 0.0;
         let err = spec.validate().unwrap_err().to_string();
         assert!(err.contains("track.link_mass"), "{err}");
 
         // Force-law scalars: each mutation must be rejected BY NAME — a NaN or zero here
         // reaches a division in `track::forces` and dissolves the belt state in one tick.
-        let cases: [(&str, fn(&mut TankSpec)); 2] = [
-            ("powertrain.inertia", |s| s.track.powertrain.inertia = 0.0),
-            ("suspension.engage", |s| s.track.suspension.engage = 0.0),
-        ];
+        let cases: [(&str, fn(&mut TankSpec)); 1] =
+            [("suspension.engage", |s| s.track.suspension.engage = 0.0)];
         for (field, mutate) in cases {
             let mut spec = fixture();
             mutate(&mut spec);
@@ -2878,15 +2949,139 @@ TankSpec(
             err.contains("brake_static_factor"),
             "missing brake_static_factor should be named: {err}"
         );
-        // Belt-inertia floor: with a transmission declared the coupling divides by
-        // 2 × powertrain.inertia — a tiny-but-positive value passes the generic finite/> 0
-        // check and must be caught by the transmission-block floor.
+        // FIXTURE: tiny positive construction facts must still meet the coupling divisor's
+        // numerical domain. No independently authored belt inertia can bypass the derivation.
         let mut spec = fixture();
-        spec.track.powertrain.inertia = 0.5;
-        let err = spec.validate().unwrap_err().to_string();
+        spec.track.link_mass.0 = 1e-6;
+        spec.track.sprocket.spin_inertia_kgm2.0 = SideValues {
+            left: 1e-6,
+            right: 1e-6,
+        };
+        spec.track.idler.spin_inertia_kgm2.0 = SideValues {
+            left: 1e-6,
+            right: 1e-6,
+        };
+        for wheel in &mut spec.roadwheels {
+            wheel.spin_inertia_kgm2.0 = 1e-6;
+        }
+        let err = spec
+            .track
+            .transmission_params(&spec.roadwheels, 0.5, 1.0)
+            .unwrap_err()
+            .to_string();
         assert!(
-            err.contains("powertrain.inertia floor"),
-            "expected the belt-inertia floor in: {err}"
+            err.contains("derived belt inertia floor"),
+            "expected the derived inertia floor in: {err}"
+        );
+    }
+
+    /// The belt integrator and brake predictor rely on every construction term. FIXTURE DATA:
+    /// a link loop, one roadwheel per side, and distinct sprocket/idler moments and radii.
+    /// A mutant omitting any wheel family, or dividing by pin radius, breaks the exact sum.
+    #[test]
+    fn reflected_inertia_is_the_sum_of_links_and_each_wheels_contact_term() {
+        let mut spec = fixture();
+        let inertia = |s: &TankSpec| s.track.reflected_inertia(&s.roadwheels, 0.5).unwrap();
+        // DERIVED from FIXTURE DATA: 80 * 20 + 4 / 0.5^2 + 4 / 0.4^2 + 8 / 0.4^2.
+        let base = inertia(&spec);
+        assert!((base - 1691.0).abs() < 1e-3);
+        spec.track.link_mass.0 *= 2.0;
+        assert!((inertia(&spec) - base - 1600.0).abs() < 1e-3);
+        spec.track.sprocket.spin_inertia_kgm2.0 = SideValues {
+            left: 8.0,
+            right: 8.0,
+        };
+        assert!((inertia(&spec) - base - 1616.0).abs() < 1e-3);
+        spec.track.idler.spin_inertia_kgm2.0 = SideValues {
+            left: 8.0,
+            right: 8.0,
+        };
+        assert!((inertia(&spec) - base - 1641.0).abs() < 1e-3);
+        for wheel in &mut spec.roadwheels {
+            wheel.spin_inertia_kgm2.0 *= 2.0;
+        }
+        assert!((inertia(&spec) - base - 1691.0).abs() < 1e-3);
+    }
+
+    /// Load admission protects both drive divisions and the shared-side inertia premise.
+    /// FIXTURE DATA: each invalid moment and an intentionally asymmetric station assembly.
+    #[test]
+    fn malformed_or_unrepresentable_rotating_construction_is_refused_before_play() {
+        for value in [0.0, -1.0, f32::NAN, f32::INFINITY] {
+            for family in 0..3 {
+                let mut spec = fixture();
+                let field = match family {
+                    0 => {
+                        spec.track.sprocket.spin_inertia_kgm2.0.left = value;
+                        "track.sprocket.spin_inertia_kgm2"
+                    }
+                    1 => {
+                        spec.track.idler.spin_inertia_kgm2.0.right = value;
+                        "track.idler.spin_inertia_kgm2"
+                    }
+                    _ => {
+                        spec.roadwheels[0].spin_inertia_kgm2.0 = value;
+                        "roadwheels.Wheel_L_0.spin_inertia_kgm2"
+                    }
+                };
+                let err = spec.validate().unwrap_err().to_string();
+                assert!(err.contains(field), "{field}: {err}");
+            }
+        }
+        let mut spec = fixture();
+        spec.roadwheels[0].spin_inertia_kgm2.0 *= 2.0;
+        assert!(
+            spec.validate().is_ok(),
+            "the spec gate has no physical sprocket radius"
+        );
+        let err = spec
+            .track
+            .reflected_inertia(&spec.roadwheels, 0.5)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("differs by side"), "{err}");
+        let mut spec = fixture();
+        spec.track.link_mass.0 = f32::MAX;
+        let err = spec.validate().unwrap_err().to_string();
+        assert!(err.contains("derived reflected inertia"), "{err}");
+        for declaration in [
+            "spin_inertia_kgm2: ((left: 4.0, right: 4.0), Fixture(\"fixture sprockets\")), ",
+            "spin_inertia_kgm2: ((left: 4.0, right: 4.0), Fixture(\"fixture idlers\")), ",
+            "spin_inertia_kgm2: (8.0, Fixture(\"fixture station\")), ",
+        ] {
+            let missing = FIXTURE_RON.replace(declaration, "");
+            assert_ne!(missing, FIXTURE_RON);
+            let err = ron::from_str::<TankSpec>(&missing)
+                .err()
+                .expect("required wheel fact")
+                .to_string();
+            assert!(err.contains("spin_inertia_kgm2"), "{err}");
+        }
+    }
+
+    /// Spawn's crank seed and structural admission must not reject construction whose side
+    /// totals balance at the real pitch radius. FIXTURE DATA: unequal sprocket moments balanced
+    /// by a roadwheel term at the declared lab radius, but not at nominal unit geometry.
+    #[test]
+    fn side_inertia_balance_is_checked_at_the_actual_sprocket_radius() {
+        let mut spec = fixture();
+        spec.track.sprocket.spin_inertia_kgm2.0.left = 8.0;
+        spec.roadwheels[0].spin_inertia_kgm2.0 = 5.44;
+        assert!(spec.validate().is_ok());
+        assert!(
+            spec.track
+                .nominal_transmission_params(&spec.roadwheels)
+                .is_ok()
+        );
+        assert!(
+            spec.track
+                .transmission_params(&spec.roadwheels, 0.5, 1.0)
+                .is_ok()
+        );
+        assert!(
+            spec.track
+                .transmission_params(&spec.roadwheels, 1.0, 1.0)
+                .is_err()
         );
     }
 

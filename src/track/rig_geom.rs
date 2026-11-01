@@ -251,6 +251,20 @@ impl RigGeom {
         );
         geom.validate(params)
             .unwrap_or_else(|error| panic!("{}: {error}", blueprint.file));
+        blueprint
+            .spec
+            .track
+            .transmission_params(
+                &blueprint.spec.roadwheels,
+                geom.rest.get(Side::Right)[0].1,
+                geom.plane_x,
+            )
+            .unwrap_or_else(|error| {
+                panic!(
+                    "{}: {error}; correct the running-gear construction facts",
+                    blueprint.file
+                )
+            });
         geom
     }
 

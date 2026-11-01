@@ -25,7 +25,7 @@ TankSpec(
         // contact pair, the belt on the ground or a piece, and its bump stops and side plates.
         substance: "TrackSteel",
         link_count: 97,
-        link_mass: 30.0,
+        link_mass: (30.0, Unknown("Complete shoe, pin and connector assembly mass is unverified; weigh an assembly or obtain a parts-manual mass to replace this provisional 30 kg")),
         hinge_torque: 45.0,
         // Hard articulation stops, in DEGREES (the `_deg` suffix is the unit contract; `spec.rs`
         // converts to radians once, at the deserialisation seam — nothing downstream sees
@@ -50,14 +50,13 @@ TankSpec(
         // for the transmission.
         //
         // MEASURED from each sim sprocket's reference tooth in the hull side plane (rad).
-        sprocket: ( teeth: 20, tooth_tip_rad: (left: 0.001790004, right: 0.002023177), nodes: ( left: "Sprocket_L", right: "Sprocket_R" ) ),
+        sprocket: ( spin_inertia_kgm2: ((left: 26.0, right: 26.0), Unknown("No assembly axial moment measured; provisional rounded uniform-disc estimate from assumed 300 kg and 0.416 m radius. Settle with the complete sprocket mass distribution or a spin test")), teeth: 20, tooth_tip_rad: (left: 0.001790004, right: 0.002023177), nodes: ( left: "Sprocket_L", right: "Sprocket_R" ) ),
         // The idler meshes' view nodes, one per side.
         // MEASURED contact radii from the sim artifact's two idlers (m).
-        idler: ( radius: (left: 0.34000003, right: 0.34000003), nodes: ( left: "Idler_L", right: "Idler_R" ) ),
-        // Reflected belt/drivetrain inertia. The gear ladder, engine, clutch and contact grip
-        // determine powered speed and traction without a separate speed or force cap.
+        idler: ( spin_inertia_kgm2: ((left: 12.0, right: 12.0), Unknown("No assembly axial moment measured; provisional rounded uniform-disc estimate from assumed 200 kg and 0.34 m radius. Settle with complete idler mass distribution or a spin test")), radius: (left: 0.34000003, right: 0.34000003), nodes: ( left: "Idler_L", right: "Idler_R" ) ),
+        // Belt inertia is DERIVED from the links and every declared rotating wheel assembly.
+        // The crank/flywheel inertia remains engine-side in the transmission below.
         powertrain: (
-            inertia: 16_000.0,
             // The DECLARED drivetrain (phase 2.5) — authored from the anchored tables in
             // .agents/docs/design/track-model/tiger-transmission-data.md. It SHIPS everywhere, MP
             // included (REV 14 replicates the full TransmissionState atomically).
@@ -333,22 +332,22 @@ TankSpec(
     // MEASURED per-station tread radius and the two Rubber-shell lateral spans in the sim artifact.
     // Spans are hull-X offsets from the station's authored axle, in metres.
     roadwheels: [
-        (node: "Wheel_L_0", side: Left, tread: (radius: 0.4, spans: [(-0.17056572, -0.07175010), (0.18154858, 0.28036344)])),
-        (node: "Wheel_L_1", side: Left, tread: (radius: 0.4, spans: [(-0.17056572, -0.07175010), (0.18154858, 0.28036344)])),
-        (node: "Wheel_L_2", side: Left, tread: (radius: 0.4, spans: [(-0.17056572, -0.07175010), (0.18154858, 0.28036344)])),
-        (node: "Wheel_L_3", side: Left, tread: (radius: 0.4, spans: [(-0.17056572, -0.07175010), (0.18154858, 0.28036344)])),
-        (node: "Wheel_L_4", side: Left, tread: (radius: 0.4, spans: [(-0.17056572, -0.07175010), (0.18154858, 0.28036344)])),
-        (node: "Wheel_L_5", side: Left, tread: (radius: 0.4, spans: [(-0.17056572, -0.07175010), (0.18154858, 0.28036344)])),
-        (node: "Wheel_L_6", side: Left, tread: (radius: 0.4, spans: [(-0.17056572, -0.07175010), (0.18154858, 0.28036344)])),
-        (node: "Wheel_L_7", side: Left, tread: (radius: 0.4, spans: [(-0.17056572, -0.07175010), (0.18154858, 0.28036344)])),
-        (node: "Wheel_R_0", side: Right, tread: (radius: 0.4, spans: [(-0.28036344, -0.18154858), (0.07175010, 0.17056572)])),
-        (node: "Wheel_R_1", side: Right, tread: (radius: 0.4, spans: [(-0.28036344, -0.18154858), (0.07175010, 0.17056572)])),
-        (node: "Wheel_R_2", side: Right, tread: (radius: 0.4, spans: [(-0.28036344, -0.18154858), (0.07175010, 0.17056572)])),
-        (node: "Wheel_R_3", side: Right, tread: (radius: 0.4, spans: [(-0.28036344, -0.18154858), (0.07175010, 0.17056572)])),
-        (node: "Wheel_R_4", side: Right, tread: (radius: 0.4, spans: [(-0.28036344, -0.18154858), (0.07175010, 0.17056572)])),
-        (node: "Wheel_R_5", side: Right, tread: (radius: 0.4, spans: [(-0.28036344, -0.18154858), (0.07175010, 0.17056572)])),
-        (node: "Wheel_R_6", side: Right, tread: (radius: 0.4, spans: [(-0.28036344, -0.18154858), (0.07175010, 0.17056572)])),
-        (node: "Wheel_R_7", side: Right, tread: (radius: 0.4, spans: [(-0.28036344, -0.18154858), (0.07175010, 0.17056572)])),
+        (node: "Wheel_L_0", side: Left, spin_inertia_kgm2: (32.0, Unknown("Complete station assembly axial moment is unmeasured; provisional uniform-disc estimate from assumed 400 kg at the declared 0.4 m tread radius. Settle with all rotating discs at this axle, their masses and radial distributions, or a spin test")), tread: (radius: 0.4, spans: [(-0.17056572, -0.07175010), (0.18154858, 0.28036344)])),
+        (node: "Wheel_L_1", side: Left, spin_inertia_kgm2: (32.0, Unknown("Complete station assembly axial moment is unmeasured; provisional uniform-disc estimate from assumed 400 kg at the declared 0.4 m tread radius. Settle with all rotating discs at this axle, their masses and radial distributions, or a spin test")), tread: (radius: 0.4, spans: [(-0.17056572, -0.07175010), (0.18154858, 0.28036344)])),
+        (node: "Wheel_L_2", side: Left, spin_inertia_kgm2: (32.0, Unknown("Complete station assembly axial moment is unmeasured; provisional uniform-disc estimate from assumed 400 kg at the declared 0.4 m tread radius. Settle with all rotating discs at this axle, their masses and radial distributions, or a spin test")), tread: (radius: 0.4, spans: [(-0.17056572, -0.07175010), (0.18154858, 0.28036344)])),
+        (node: "Wheel_L_3", side: Left, spin_inertia_kgm2: (32.0, Unknown("Complete station assembly axial moment is unmeasured; provisional uniform-disc estimate from assumed 400 kg at the declared 0.4 m tread radius. Settle with all rotating discs at this axle, their masses and radial distributions, or a spin test")), tread: (radius: 0.4, spans: [(-0.17056572, -0.07175010), (0.18154858, 0.28036344)])),
+        (node: "Wheel_L_4", side: Left, spin_inertia_kgm2: (32.0, Unknown("Complete station assembly axial moment is unmeasured; provisional uniform-disc estimate from assumed 400 kg at the declared 0.4 m tread radius. Settle with all rotating discs at this axle, their masses and radial distributions, or a spin test")), tread: (radius: 0.4, spans: [(-0.17056572, -0.07175010), (0.18154858, 0.28036344)])),
+        (node: "Wheel_L_5", side: Left, spin_inertia_kgm2: (32.0, Unknown("Complete station assembly axial moment is unmeasured; provisional uniform-disc estimate from assumed 400 kg at the declared 0.4 m tread radius. Settle with all rotating discs at this axle, their masses and radial distributions, or a spin test")), tread: (radius: 0.4, spans: [(-0.17056572, -0.07175010), (0.18154858, 0.28036344)])),
+        (node: "Wheel_L_6", side: Left, spin_inertia_kgm2: (32.0, Unknown("Complete station assembly axial moment is unmeasured; provisional uniform-disc estimate from assumed 400 kg at the declared 0.4 m tread radius. Settle with all rotating discs at this axle, their masses and radial distributions, or a spin test")), tread: (radius: 0.4, spans: [(-0.17056572, -0.07175010), (0.18154858, 0.28036344)])),
+        (node: "Wheel_L_7", side: Left, spin_inertia_kgm2: (32.0, Unknown("Complete station assembly axial moment is unmeasured; provisional uniform-disc estimate from assumed 400 kg at the declared 0.4 m tread radius. Settle with all rotating discs at this axle, their masses and radial distributions, or a spin test")), tread: (radius: 0.4, spans: [(-0.17056572, -0.07175010), (0.18154858, 0.28036344)])),
+        (node: "Wheel_R_0", side: Right, spin_inertia_kgm2: (32.0, Unknown("Complete station assembly axial moment is unmeasured; provisional uniform-disc estimate from assumed 400 kg at the declared 0.4 m tread radius. Settle with all rotating discs at this axle, their masses and radial distributions, or a spin test")), tread: (radius: 0.4, spans: [(-0.28036344, -0.18154858), (0.07175010, 0.17056572)])),
+        (node: "Wheel_R_1", side: Right, spin_inertia_kgm2: (32.0, Unknown("Complete station assembly axial moment is unmeasured; provisional uniform-disc estimate from assumed 400 kg at the declared 0.4 m tread radius. Settle with all rotating discs at this axle, their masses and radial distributions, or a spin test")), tread: (radius: 0.4, spans: [(-0.28036344, -0.18154858), (0.07175010, 0.17056572)])),
+        (node: "Wheel_R_2", side: Right, spin_inertia_kgm2: (32.0, Unknown("Complete station assembly axial moment is unmeasured; provisional uniform-disc estimate from assumed 400 kg at the declared 0.4 m tread radius. Settle with all rotating discs at this axle, their masses and radial distributions, or a spin test")), tread: (radius: 0.4, spans: [(-0.28036344, -0.18154858), (0.07175010, 0.17056572)])),
+        (node: "Wheel_R_3", side: Right, spin_inertia_kgm2: (32.0, Unknown("Complete station assembly axial moment is unmeasured; provisional uniform-disc estimate from assumed 400 kg at the declared 0.4 m tread radius. Settle with all rotating discs at this axle, their masses and radial distributions, or a spin test")), tread: (radius: 0.4, spans: [(-0.28036344, -0.18154858), (0.07175010, 0.17056572)])),
+        (node: "Wheel_R_4", side: Right, spin_inertia_kgm2: (32.0, Unknown("Complete station assembly axial moment is unmeasured; provisional uniform-disc estimate from assumed 400 kg at the declared 0.4 m tread radius. Settle with all rotating discs at this axle, their masses and radial distributions, or a spin test")), tread: (radius: 0.4, spans: [(-0.28036344, -0.18154858), (0.07175010, 0.17056572)])),
+        (node: "Wheel_R_5", side: Right, spin_inertia_kgm2: (32.0, Unknown("Complete station assembly axial moment is unmeasured; provisional uniform-disc estimate from assumed 400 kg at the declared 0.4 m tread radius. Settle with all rotating discs at this axle, their masses and radial distributions, or a spin test")), tread: (radius: 0.4, spans: [(-0.28036344, -0.18154858), (0.07175010, 0.17056572)])),
+        (node: "Wheel_R_6", side: Right, spin_inertia_kgm2: (32.0, Unknown("Complete station assembly axial moment is unmeasured; provisional uniform-disc estimate from assumed 400 kg at the declared 0.4 m tread radius. Settle with all rotating discs at this axle, their masses and radial distributions, or a spin test")), tread: (radius: 0.4, spans: [(-0.28036344, -0.18154858), (0.07175010, 0.17056572)])),
+        (node: "Wheel_R_7", side: Right, spin_inertia_kgm2: (32.0, Unknown("Complete station assembly axial moment is unmeasured; provisional uniform-disc estimate from assumed 400 kg at the declared 0.4 m tread radius. Settle with all rotating discs at this axle, their masses and radial distributions, or a spin test")), tread: (radius: 0.4, spans: [(-0.28036344, -0.18154858), (0.07175010, 0.17056572)])),
     ],
     weapons: {
         // Each mount names its gun (assets/guns/), whose ammunition table gives every stowed round

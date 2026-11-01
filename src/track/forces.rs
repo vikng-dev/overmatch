@@ -217,7 +217,7 @@ pub struct ForceParams {
     /// Slip speed (m/s) normalizing the transmission's brake-engagement blend — the scale on
     /// which a belt counts as "moving".
     pub slip_saturation: f32,
-    /// Reflected belt + drivetrain inertia (kg).
+    /// DERIVED per-side belt translation and wheel rotation reflected at belt speed (kg).
     pub inertia: f32,
     /// The traction law's inputs. Each contact's Coulomb coefficient is the pair its track makes
     /// with the surface under it ([`GripParams::pair`]): the element law is isotropic, so that
