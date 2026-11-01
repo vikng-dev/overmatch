@@ -1895,30 +1895,21 @@ fn section_failure(
     // normalization take N+8, amplified by the ratio of absolute operands to their sum.
     // The point/cross/projection chain is bounded by 32 steps plus load summation.
     // Sum magnitudes before cancellation: rounding in an axial pull cannot choose a hinge.
-    let gamma = |steps: usize| {
-        let rounded = steps as f64 * f64::from(f32::EPSILON) / 2.0;
-        // At k*u >= 1 no finite roundoff bound is certified, so no axis is resolved.
-        if rounded < 1.0 {
-            Some(rounded / (1.0 - rounded))
-        } else {
-            None
-        }
-    };
-    let centre_error = gamma(2 * joints.len() + 4)?
+    let centre_error = roundoff_gamma(2 * joints.len() + 4)
         * joints
             .iter()
             .map(|j| f64::from(j.area) * j.centroid.as_dvec3().length())
             .sum::<f64>()
         / f64::from(area);
     let normal_error = 2.0
-        * gamma(joints.len() + 8)?
+        * roundoff_gamma(joints.len() + 8)
         * joints
             .iter()
             .map(|j| f64::from(j.area) * j.normal.as_dvec3().length())
             .sum::<f64>()
         / normal_sum.as_dvec3().length();
     let resolution = centre_error * impulse_sum
-        + gamma(count + 32)? * magnitude_sum
+        + roundoff_gamma(count + 32) * magnitude_sum
         + (2.0 * normal_error + normal_error * normal_error) * moment.as_dvec3().length();
     if bending.as_dvec3().length() <= resolution {
         return None;
@@ -1981,6 +1972,16 @@ fn section_failure(
         demand,
         capacity: (2.0 * inertia * (cohesion + lift)).sqrt(),
     })
+}
+
+/// DERIVED resolution bound for `steps` rounded f32 operations: k*u/(1-k*u), u = EPSILON/2.
+fn roundoff_gamma(steps: usize) -> f64 {
+    let rounded = steps as f64 * f64::from(f32::EPSILON) / 2.0;
+    assert!(
+        rounded < 1.0,
+        "section arithmetic has a finite roundoff bound: its operation count times f32 unit roundoff is below one"
+    );
+    rounded / (1.0 - rounded)
 }
 
 /// Per joint, the starts whose path to the ground (`paths`, one per start, [`ground_path`]) crosses
@@ -4054,6 +4055,14 @@ mod tests {
             load.at += Vec3::Y * (0.01 * scale);
             assert!(section_failure(&slab, &[0], &[0], &[load], Reading::UNRESISTED).is_some());
         }
+    }
+
+    /// Section assessment must refuse an uncertifiable bound rather than silently hold a seam.
+    /// Fixture: the first arithmetic count at k*u = 1; no large load allocation is needed.
+    #[test]
+    #[should_panic(expected = "section arithmetic has a finite roundoff bound")]
+    fn an_uncertifiable_section_roundoff_bound_is_a_bug() {
+        let _bound = roundoff_gamma(1 << 24);
     }
 
     /// A detached end stops loading its former neighbours before the next seam is assessed.
