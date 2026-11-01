@@ -62,6 +62,7 @@ mod wound;
 /// them, with each face's true (winding) orientation. Avian's own all-hits query cannot express it —
 /// see the module doc.
 mod collect;
+pub(crate) use collect::convex_interval;
 
 mod motion;
 

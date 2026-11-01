@@ -1,6 +1,6 @@
 //! The game's damage model: where a mounted round is born, the first open point of its bore.
 
-use avian3d::prelude::{Collider, SimpleCollider};
+use avian3d::prelude::Collider;
 use bevy::prelude::*;
 
 /// The game's damage model: the first point of the bore, walked forward from its mount, that lies
@@ -28,45 +28,29 @@ pub(crate) fn outside_source(
         mount <= 0.0,
         "a weapon's mount lies on or behind its muzzle along the bore: {mount}"
     );
-    let reach = shapes
-        .iter()
-        .map(|&(at, turn, shape)| {
-            let bounds = shape.aabb(at, turn);
-            (bounds.min - muzzle)
-                .abs()
-                .max((bounds.max - muzzle).abs())
-                .length()
-        })
-        .fold(-mount, f32::max);
-    let reach = (reach + crate::ballistics::MARCH_EPS).next_up();
-    let spans: Vec<(f32, f32)> = shapes
+    let spans: Vec<_> = shapes
         .iter()
         .filter_map(|&(at, turn, shape)| {
-            assert!(
-                shape.shape_scaled().is_convex(),
-                "a source's physics envelope is built from convex shapes"
-            );
-            let enter =
-                shape.cast_ray(at, turn, muzzle - bore * reach, *bore, reach * 2.0, false)?;
-            let exit = shape
-                .cast_ray(at, turn, muzzle + bore * reach, -*bore, reach * 2.0, false)
-                .expect("a convex shape the bore line enters it also leaves");
-            Some((enter.0 - reach, reach - exit.0))
+            // The game's damage model reads both ends on one local ray. World-space rays formed
+            // independently ahead and behind the muzzle can straddle a grazing face by rounding.
+            let inverse = turn.inverse();
+            crate::ballistics::convex_interval(shape, inverse * (muzzle - at), inverse * *bore)
+                .expect("source physics proxies are cuboids or closed polyhedral convex hulls")
         })
         .collect();
-    let mut open = mount;
+    let mut open = f64::from(mount);
     while let Some(exit) = spans
         .iter()
         .filter(|&&(enter, exit)| enter <= open && open < exit)
         .map(|&(_, exit)| exit)
-        .max_by(f32::total_cmp)
+        .max_by(f64::total_cmp)
     {
         open = exit;
     }
-    if open == mount {
+    if open == f64::from(mount) {
         muzzle + bore * mount
     } else {
-        muzzle + bore * (open + crate::ballistics::MARCH_EPS)
+        muzzle + bore * (open as f32 + crate::ballistics::MARCH_EPS)
     }
 }
 
@@ -120,6 +104,34 @@ mod tests {
         assert!(near(joined, Vec3::NEG_Z * (2.5 + EPS)), "{joined:?}");
         let gapped = born(muzzle, -0.5, &[(0.0, 1.0), (-4.0, 1.0)]);
         assert!(near(gapped, Vec3::NEG_Z * (1.0 + EPS)), "{gapped:?}");
+    }
+
+    /// The game's damage model: finite bores grazing a convex proxy cannot panic while finding
+    /// their birth. Fixture geometry sweeps hull edges within world-coordinate rounding.
+    #[test]
+    fn grazing_a_source_proxy_never_loses_one_end_of_its_interval() {
+        let points = [-1.0, 1.0]
+            .into_iter()
+            .flat_map(|x| {
+                [-1.0, 1.0]
+                    .into_iter()
+                    .flat_map(move |y| [-1.0, 1.0].into_iter().map(move |z| Vec3::new(x, y, z)))
+            })
+            .collect();
+        let hull = Collider::convex_hull(points).expect("fixture cube has volume");
+        for at in [Vec3::ZERO, Vec3::new(1600.0, 20.0, -1200.0)] {
+            for step in 0..64 {
+                let angle = step as f32 * 0.097;
+                let turn = Quat::from_euler(EulerRot::YXZ, angle, angle * 0.37, angle * 0.73);
+                let bore = Dir3::new(turn * Vec3::NEG_Z).unwrap();
+                for ulp in -32..=32 {
+                    let edge = f32::from_bits(1.0_f32.to_bits().wrapping_add_signed(ulp));
+                    for local in [Vec3::new(edge, 0.0, -3.0), Vec3::new(edge, 1.0, -3.0)] {
+                        outside_source(at + turn * local, bore, -6.0, &[(at, turn, &hull)]);
+                    }
+                }
+            }
+        }
     }
 
     /// A mount outside every shape is born at the mount: a bore line that meets no shape, one that

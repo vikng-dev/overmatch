@@ -749,6 +749,17 @@ fn clip_convex(
     clip.finish()
 }
 
+/// The game's damage model: the interval of a polyhedral convex collider on one shape-local
+/// line. The shell collector and source-envelope birth use the same face clip.
+pub(crate) fn convex_interval(
+    collider: &Collider,
+    origin: Vec3,
+    axis: Vec3,
+) -> Result<Option<(f64, f64)>, &'static str> {
+    clip_convex(collider.shape_scaled().as_typed_shape(), origin, axis)
+        .map(|crossing| crossing.map(|crossing| (crossing.entry.t, crossing.exit.t)))
+}
+
 /// `(a + b) + c` in that order, and the band within which that sum cannot be told from zero:
 /// [`CLIP_SLACK`] of the terms' magnitudes.
 fn clip_sum(a: f64, b: f64, c: f64) -> (f64, f64) {
