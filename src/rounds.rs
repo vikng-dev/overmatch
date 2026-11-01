@@ -637,20 +637,20 @@ pub(crate) mod tests {
     use super::*;
 
     /// The fixture round-type table: a full-calibre type and a sub-calibre one. Fixture data.
-    pub(crate) const FIXTURE_TYPES: &str = r#"(drag: (base_drag_coefficient: (0.20, Tuned("fixture")),
-        anchor_nose: (Ogive(crh: 1.0), Tuned("fixture")), anchor_form: (0.263, Tuned("fixture"))),
+    pub(crate) const FIXTURE_TYPES: &str = r#"(drag: (base_drag_coefficient: (0.20, Fixture("fixture")),
+        anchor_nose: (Ogive(crh: 1.0), Fixture("fixture")), anchor_form: (0.263, Fixture("fixture"))),
     round_types: {
-        "Fixture": (flight_nose: (Ogive(crh: 1.0), Tuned("fixture")),
-            hit_nose: (Ogive(crh: 1.0), Tuned("fixture")), carrier: (None, Tuned("fixture"))),
-        "Fixture sub-calibre": (flight_nose: (Ogive(crh: 1.0), Tuned("fixture")),
-            hit_nose: (Ogive(crh: 1.0), Tuned("fixture")), carrier: (Kept, Tuned("fixture"))),
+        "Fixture": (flight_nose: (Ogive(crh: 1.0), Fixture("fixture")),
+            hit_nose: (Ogive(crh: 1.0), Fixture("fixture")), carrier: (None, Fixture("fixture"))),
+        "Fixture sub-calibre": (flight_nose: (Ogive(crh: 1.0), Fixture("fixture")),
+            hit_nose: (Ogive(crh: 1.0), Fixture("fixture")), carrier: (Kept, Fixture("fixture"))),
     })"#;
 
     /// `fields` as authored round fields, each with a fixture provenance.
     fn authored(fields: &[(&str, &str)]) -> String {
         fields
             .iter()
-            .map(|(field, value)| format!(r#"{field}: ({value}, Tuned("fixture"))"#))
+            .map(|(field, value)| format!(r#"{field}: ({value}, Fixture("fixture"))"#))
             .collect::<Vec<_>>()
             .join(", ")
     }
@@ -725,8 +725,8 @@ pub(crate) mod tests {
     /// `caliber` (m).
     fn with_penetrator(mass: &str, caliber: &str) -> Result<RoundRegistry, RoundError> {
         sub_calibre(&format!(
-            r#", penetrator: Some((mass: ({mass}, Tuned("fixture")),
-                caliber: ({caliber}, Tuned("fixture"))))"#
+            r#", penetrator: Some((mass: ({mass}, Fixture("fixture")),
+                caliber: ({caliber}, Fixture("fixture"))))"#
         ))
     }
 
@@ -880,25 +880,25 @@ pub(crate) mod tests {
         let flush = fired(with_penetrator("5.0", "0.05")).unwrap();
         assert_eq!(flush.penetrator, flush.body);
 
-        let stray = r#", penetrator: Some((mass: (1.0, Tuned("x")),
-            caliber: (0.02, Tuned("x")), nose: (Flat, Tuned("x"))))"#;
+        let stray = r#", penetrator: Some((mass: (1.0, Fixture("x")),
+            caliber: (0.02, Fixture("x")), nose: (Flat, Fixture("x"))))"#;
         let err = sub_calibre(stray).expect_err("a penetrator states no nose of its own");
         assert!(matches!(err, RoundError::Parse { .. }), "{err}");
     }
 
     /// The drag tests' round types: one flying on its blunt hit nose, one capped (a pointed flight
     /// nose over the same blunt hit nose), and a sub-calibre type of each carrier. Fixture data.
-    const DRAG_TYPES: &str = r#"(drag: (base_drag_coefficient: (0.20, Tuned("fixture")),
-        anchor_nose: (Ogive(crh: 1.0), Tuned("fixture")), anchor_form: (0.263, Tuned("fixture"))),
+    const DRAG_TYPES: &str = r#"(drag: (base_drag_coefficient: (0.20, Fixture("fixture")),
+        anchor_nose: (Ogive(crh: 1.0), Fixture("fixture")), anchor_form: (0.263, Fixture("fixture"))),
     round_types: {
-        "Blunt": (flight_nose: (Ogive(crh: 1.0), Tuned("fixture")),
-            hit_nose: (Ogive(crh: 1.0), Tuned("fixture")), carrier: (None, Tuned("fixture"))),
-        "Capped": (flight_nose: (Ogive(crh: 4.0), Tuned("fixture")),
-            hit_nose: (Ogive(crh: 1.0), Tuned("fixture")), carrier: (None, Tuned("fixture"))),
-        "Kept": (flight_nose: (Ogive(crh: 1.0), Tuned("fixture")),
-            hit_nose: (Ogive(crh: 1.0), Tuned("fixture")), carrier: (Kept, Tuned("fixture"))),
-        "Discarded": (flight_nose: (Ogive(crh: 1.0), Tuned("fixture")),
-            hit_nose: (Ogive(crh: 1.0), Tuned("fixture")), carrier: (Discarded, Tuned("fixture"))),
+        "Blunt": (flight_nose: (Ogive(crh: 1.0), Fixture("fixture")),
+            hit_nose: (Ogive(crh: 1.0), Fixture("fixture")), carrier: (None, Fixture("fixture"))),
+        "Capped": (flight_nose: (Ogive(crh: 4.0), Fixture("fixture")),
+            hit_nose: (Ogive(crh: 1.0), Fixture("fixture")), carrier: (None, Fixture("fixture"))),
+        "Kept": (flight_nose: (Ogive(crh: 1.0), Fixture("fixture")),
+            hit_nose: (Ogive(crh: 1.0), Fixture("fixture")), carrier: (Kept, Fixture("fixture"))),
+        "Discarded": (flight_nose: (Ogive(crh: 1.0), Fixture("fixture")),
+            hit_nose: (Ogive(crh: 1.0), Fixture("fixture")), carrier: (Discarded, Fixture("fixture"))),
     })"#;
 
     /// The fixture round of type `round_type` over [`DRAG_TYPES`], of `mass` (kg) and `caliber`
@@ -963,8 +963,8 @@ pub(crate) mod tests {
     /// also read the flying body: a discarded carrier contributes neither mass nor calibre.
     #[test]
     fn a_discarded_carrier_leaves_the_penetrator_flying() {
-        let core = r#", penetrator: Some((mass: (1.25, Tuned("fixture")),
-            caliber: (0.02, Tuned("fixture"))))"#;
+        let core = r#", penetrator: Some((mass: (1.25, Fixture("fixture")),
+            caliber: (0.02, Fixture("fixture"))))"#;
         let kept = of_type("Kept", "5.0", "0.05", core);
         let discarded = of_type("Discarded", "5.0", "0.05", core);
         assert_eq!(kept.drag_k, of_type("Blunt", "5.0", "0.05", "").drag_k);
@@ -1006,7 +1006,7 @@ pub(crate) mod tests {
     #[test]
     fn a_penetrator_block_is_authored_exactly_when_the_type_has_a_carrier() {
         let err = with_extra(
-            r#", penetrator: Some((mass: (1.0, Tuned("x")), caliber: (0.02, Tuned("x"))))"#,
+            r#", penetrator: Some((mass: (1.0, Fixture("x")), caliber: (0.02, Fixture("x"))))"#,
         )
         .unwrap_err();
         assert!(
@@ -1035,10 +1035,10 @@ pub(crate) mod tests {
         );
         let types = |flight: &str, hit: &str, carrier: &str| {
             format!(
-                r#"(drag: (base_drag_coefficient: (0.20, Tuned("x")),
-                    anchor_nose: (Ogive(crh: 1.0), Tuned("x")), anchor_form: (0.263, Tuned("x"))),
-                    round_types: {{ "Odd": (flight_nose: ({flight}, Tuned("x")),
-                    hit_nose: ({hit}, Tuned("x")), carrier: ({carrier}, Tuned("x"))) }})"#
+                r#"(drag: (base_drag_coefficient: (0.20, Fixture("x")),
+                    anchor_nose: (Ogive(crh: 1.0), Fixture("x")), anchor_form: (0.263, Fixture("x"))),
+                    round_types: {{ "Odd": (flight_nose: ({flight}, Fixture("x")),
+                    hit_nose: ({hit}, Fixture("x")), carrier: ({carrier}, Fixture("x"))) }})"#
             )
         };
         for (flight, hit, field) in [
@@ -1073,7 +1073,7 @@ pub(crate) mod tests {
         let (round_type, block) = if penetrator {
             (
                 r#""Fixture sub-calibre""#,
-                r#", penetrator: Some((mass: (1.0, Tuned("x")), caliber: (0.02, Tuned("x"))))"#,
+                r#", penetrator: Some((mass: (1.0, Fixture("x")), caliber: (0.02, Fixture("x"))))"#,
             )
         } else {
             (r#""Fixture""#, "")
@@ -1093,13 +1093,13 @@ pub(crate) mod tests {
             .collect::<Vec<_>>();
         let extra = format!(
             r#"{block}, fuze: Some((
-                trigger: (SpendExit(arming_spend: 35.0), Tuned("x")),
-                modes: [(name: ("delay", Tuned("x")), delay_s: (0.012, Tuned("x")))],
-                default_mode: ("delay", Tuned("x")))), burst: Some((
-                core_substance: ({core:?}, Tuned("x")),
+                trigger: (SpendExit(arming_spend: 35.0), Fixture("x")),
+                modes: [(name: ("delay", Fixture("x")), delay_s: (0.012, Fixture("x")))],
+                default_mode: ("delay", Fixture("x")))), burst: Some((
+                core_substance: ({core:?}, Fixture("x")),
 
-                core_mass: (0.02, Tuned("x")), base_mass: (0.1, Tuned("x")),
-                cavity_diameter: (0.02, Tuned("x")), filler_setback: (0.15, Tuned("x"))))"#
+                core_mass: (0.02, Fixture("x")), base_mass: (0.1, Fixture("x")),
+                cavity_diameter: (0.02, Fixture("x")), filler_setback: (0.15, Fixture("x"))))"#
         );
         RoundRegistry::from_files(
             &[("Probe", &file(&fields, &extra))],
@@ -1111,18 +1111,18 @@ pub(crate) mod tests {
     /// A reference steel, one burst core worn by no volume, `"Fixture core"`, and one hard
     /// substance that is a burst core too, `"Fixture hard core"`: fixture data.
     const FIXTURE_SUBSTANCES: &str = r#"(substances: {
-        "GunSteel": Hard(resistance: Reference, visual: "fixture", feedback: (exposed_linear_rgb: ((0.5, 0.51, 0.53), Tuned("fixture")), powder_linear_rgb: ((0.47, 0.47, 0.47), Tuned("fixture")), metallic: (1.0, Tuned("fixture")), roughness_gain: (1.0, Tuned("fixture")), sparks: (true, Tuned("fixture"))),
-            debris_half_angle_deg: (26.2, Tuned("x")), facts: Some((
-                density: (7800.0, Tuned("x")), flow_strength: (1.18e9, Tuned("x")),
-                youngs_modulus: (190.0e9, Tuned("x")), poisson_ratio: (0.29, Tuned("x"))))),
-        "Fixture core": Unworn(burst: Some((density: (1650.0, Tuned("x")),
-            speed_constant_mps: (2680.0, Tuned("x")),
-            chemical_energy_j_per_kg: (4.184e6, Tuned("x"))))),
-        "Fixture hard core": Hard(resistance: Effective((200.0, Tuned("x"))), visual: "fixture", feedback: (exposed_linear_rgb: ((0.5, 0.51, 0.53), Tuned("fixture")), powder_linear_rgb: ((0.47, 0.47, 0.47), Tuned("fixture")), metallic: (1.0, Tuned("fixture")), roughness_gain: (1.0, Tuned("fixture")), sparks: (true, Tuned("fixture"))),
-            debris_half_angle_deg: (26.2, Tuned("x")), facts: None,
-            burst: Some((density: (1650.0, Tuned("x")),
-                speed_constant_mps: (2680.0, Tuned("x")),
-                chemical_energy_j_per_kg: (4.184e6, Tuned("x"))))),
+        "GunSteel": Hard(resistance: Reference, visual: "fixture", feedback: (exposed_linear_rgb: ((0.5, 0.51, 0.53), Fixture("fixture")), powder_linear_rgb: ((0.47, 0.47, 0.47), Fixture("fixture")), metallic: (1.0, Fixture("fixture")), roughness_gain: (1.0, Fixture("fixture")), sparks: (true, Fixture("fixture"))),
+            debris_half_angle_deg: (26.2, Fixture("x")), facts: Some((
+                density: (7800.0, Fixture("x")), flow_strength: (1.18e9, Fixture("x")),
+                youngs_modulus: (190.0e9, Fixture("x")), poisson_ratio: (0.29, Fixture("x"))))),
+        "Fixture core": Unworn(burst: Some((density: (1650.0, Fixture("x")),
+            speed_constant_mps: (2680.0, Fixture("x")),
+            chemical_energy_j_per_kg: (4.184e6, Fixture("x"))))),
+        "Fixture hard core": Hard(resistance: Effective((200.0, Fixture("x"))), visual: "fixture", feedback: (exposed_linear_rgb: ((0.5, 0.51, 0.53), Fixture("fixture")), powder_linear_rgb: ((0.47, 0.47, 0.47), Fixture("fixture")), metallic: (1.0, Fixture("fixture")), roughness_gain: (1.0, Fixture("fixture")), sparks: (true, Fixture("fixture"))),
+            debris_half_angle_deg: (26.2, Fixture("x")), facts: None,
+            burst: Some((density: (1650.0, Fixture("x")),
+                speed_constant_mps: (2680.0, Fixture("x")),
+                chemical_energy_j_per_kg: (4.184e6, Fixture("x"))))),
     })"#;
 
     /// A burst block rides its round as the burst derived from the round's body, its body steel's
@@ -1156,10 +1156,10 @@ pub(crate) mod tests {
         }
         let shaped = file(
             &FIXTURE,
-            r#", burst: Some((core_substance: ("Fixture core", Tuned("x")),
-                option: (Ring, Tuned("x")), arming_spend: (35.0, Tuned("x")),
-                delay: (0.012, Tuned("x")), core_mass: (0.02, Tuned("x")),
-                base_mass: (0.1, Tuned("x")), cavity_diameter: (0.02, Tuned("x")))))"#,
+            r#", burst: Some((core_substance: ("Fixture core", Fixture("x")),
+                option: (Ring, Fixture("x")), arming_spend: (35.0, Fixture("x")),
+                delay: (0.012, Fixture("x")), core_mass: (0.02, Fixture("x")),
+                base_mass: (0.1, Fixture("x")), cavity_diameter: (0.02, Fixture("x")))))"#,
         );
         let err = RoundRegistry::from_files(
             &[("Probe", &shaped)],
@@ -1206,9 +1206,9 @@ pub(crate) mod tests {
     /// does a muzzle speed: a round's speed is its gun's.
     #[test]
     fn malformed_files_do_not_load() {
-        let bare = r#"(name: ("Probe", Tuned("fixture")), round_type: ("Fixture", Tuned("fixture")),
-            core: ("GunSteel", Tuned("fixture")), mass: 5.0, caliber: (0.05, Tuned("fixture")),
-            wound: (20.0, Tuned("fixture")), effects: (impact: (Compact, Unknown("fixture impact")), ember: (None, Unknown("fixture absence")), smoke: (None, Unknown("fixture absence")), body: (None, Unknown("fixture absence")), streak: (None, Unknown("fixture absence"))))"#;
+        let bare = r#"(name: ("Probe", Fixture("fixture")), round_type: ("Fixture", Fixture("fixture")),
+            core: ("GunSteel", Fixture("fixture")), mass: 5.0, caliber: (0.05, Fixture("fixture")),
+            wound: (20.0, Fixture("fixture")), effects: (impact: (Compact, Unknown("fixture impact")), ember: (None, Unknown("fixture absence")), smoke: (None, Unknown("fixture absence")), body: (None, Unknown("fixture absence")), streak: (None, Unknown("fixture absence"))))"#;
         let err = load(bare).unwrap_err();
         assert!(err.to_string().contains("provenance"), "{err}");
 
@@ -1222,8 +1222,8 @@ pub(crate) mod tests {
         assert!(err.to_string().contains("twice"), "{err}");
 
         for stray in [
-            r#", hardness: (3.0, Tuned("x"))"#,
-            r#", muzzle_speed: (700.0, Tuned("x"))"#,
+            r#", hardness: (3.0, Fixture("x"))"#,
+            r#", muzzle_speed: (700.0, Fixture("x"))"#,
         ] {
             assert!(with_extra(stray).is_err(), "{stray}");
         }
@@ -1240,7 +1240,7 @@ pub(crate) mod tests {
             loaded.body.nose_factor,
             NoseShape::Ogive { crh: 1.0 }.factor()
         );
-        let own = with_extra(r#", nose: Some((Flat, Tuned("x")))"#)
+        let own = with_extra(r#", nose: Some((Flat, Fixture("x")))"#)
             .unwrap()
             .get("Probe")
             .unwrap();
@@ -1270,7 +1270,7 @@ pub(crate) mod tests {
             "Cap(radius_calibres: 0.4)",
             "Ogive(crh: NaN)",
         ] {
-            let err = with_extra(&format!(r#", nose: Some(({nose}, Tuned("x")))"#))
+            let err = with_extra(&format!(r#", nose: Some(({nose}, Fixture("x")))"#))
                 .unwrap_err()
                 .to_string();
             assert!(
@@ -1286,7 +1286,7 @@ pub(crate) mod tests {
     #[test]
     fn extreme_nose_parameters_are_accepted_only_inside_the_law_s_domain() {
         let accepted = |nose: &str| match fired(with_extra(&format!(
-            r#", nose: Some(({nose}, Tuned("x")))"#
+            r#", nose: Some(({nose}, Fixture("x")))"#
         ))) {
             Ok(_) => true,
             Err(err) => {

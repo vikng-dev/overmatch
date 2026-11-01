@@ -432,19 +432,19 @@ mod tests {
         let rows = rows
             .iter()
             .map(|(round, speed)| {
-                format!(r#""{round}": (muzzle_speed: ({speed}, Tuned("fixture")))"#)
+                format!(r#""{round}": (muzzle_speed: ({speed}, Fixture("fixture")))"#)
             })
             .collect::<Vec<_>>()
             .join(", ");
         format!(
-            r#"(names: [({name:?}, Tuned("fixture"))], caliber: ({caliber}, Tuned("fixture")),
+            r#"(names: [({name:?}, Fixture("fixture"))], caliber: ({caliber}, Fixture("fixture")),
                 ammunition: {{ {rows} }}, mechanism: {mechanism}, report_clips: [],
                 muzzle_shape: {FIXTURE_MUZZLE})"#
         )
     }
 
     /// FIXTURE DATA: a gun's muzzle shape, with a fixture provenance.
-    const FIXTURE_MUZZLE: &str = r#"(FlashHider, Tuned("fixture"))"#;
+    const FIXTURE_MUZZLE: &str = r#"(FlashHider, Fixture("fixture"))"#;
 
     /// An inline fixture gun file closed with [`FIXTURE_MUZZLE`].
     fn with_muzzle(text: &str) -> String {
@@ -518,7 +518,7 @@ mod tests {
         let base = gun_file("Gun Mk. 1", "0.05", &[("Probe", "700.0")]);
         let with_block = base.replace(
             "muzzle_shape:",
-            r#"muzzle: (core: (diameter_m: ((0.3, 0.5), Tuned("x")))), muzzle_shape:"#,
+            r#"muzzle: (core: (diameter_m: ((0.3, 0.5), Fixture("x")))), muzzle_shape:"#,
         );
         let without_shape = base.replace(&format!("muzzle_shape: {FIXTURE_MUZZLE}"), "");
         assert_ne!(without_shape, base);
@@ -637,13 +637,13 @@ mod tests {
         load(gun_file("Gun Mk. 1", "0.05", &[("Probe", "700.0")])).expect("the fixture gun loads");
         let belt =
             |mechanism: &str| gun_file_with("Gun Mk. 1", "0.05", &[("Probe", "700.0")], mechanism);
-        load(belt(r#"Automatic(cyclic_rpm: (600.0, Tuned("x")))"#))
+        load(belt(r#"Automatic(cyclic_rpm: (600.0, Fixture("x")))"#))
             .expect("the fixture belt gun loads");
         for (text, word) in [
             (
                 with_muzzle(
-                    r#"(names: [], caliber: (0.05, Tuned("x")),
-                    ammunition: { "Probe": (muzzle_speed: (700.0, Tuned("x"))) },
+                    r#"(names: [], caliber: (0.05, Fixture("x")),
+                    ammunition: { "Probe": (muzzle_speed: (700.0, Fixture("x"))) },
                     mechanism: Single, report_clips: [])"#,
                 ),
                 "names",
@@ -665,11 +665,11 @@ mod tests {
             (gun_file("Gun Mk. 1", "0.05", &[("Probe", "0.0")]), "speed"),
             (gun_file("Gun Mk. 1", "0.05", &[("Probe", "NaN")]), "speed"),
             (
-                belt(r#"Automatic(cyclic_rpm: (0.0, Tuned("x")))"#),
+                belt(r#"Automatic(cyclic_rpm: (0.0, Fixture("x")))"#),
                 "cyclic_rpm",
             ),
             (
-                belt(r#"Automatic(cyclic_rpm: (NaN, Tuned("x")))"#),
+                belt(r#"Automatic(cyclic_rpm: (NaN, Fixture("x")))"#),
                 "cyclic_rpm",
             ),
         ] {
@@ -683,7 +683,7 @@ mod tests {
         for (text, word) in [
             (
                 with_muzzle(
-                    r#"(names: [("Gun Mk. 1", Tuned("x"))], caliber: (0.05, Tuned("x")),
+                    r#"(names: [("Gun Mk. 1", Fixture("x"))], caliber: (0.05, Fixture("x")),
                     ammunition: { "Probe": (muzzle_speed: 700.0) }, mechanism: Single,
                     report_clips: [])"#,
                 ),
@@ -692,9 +692,9 @@ mod tests {
             (belt("Automatic(cyclic_rpm: 600.0)"), "provenance"),
             (
                 with_muzzle(
-                    r#"(names: [("Gun Mk. 1", Tuned("x"))], caliber: (0.05, Tuned("x")),
-                    ammunition: { "Probe": (muzzle_speed: (700.0, Tuned("x"))),
-                                  "Probe": (muzzle_speed: (710.0, Tuned("x"))) },
+                    r#"(names: [("Gun Mk. 1", Fixture("x"))], caliber: (0.05, Fixture("x")),
+                    ammunition: { "Probe": (muzzle_speed: (700.0, Fixture("x"))),
+                                  "Probe": (muzzle_speed: (710.0, Fixture("x"))) },
                     mechanism: Single, report_clips: [])"#,
                 ),
                 "twice",

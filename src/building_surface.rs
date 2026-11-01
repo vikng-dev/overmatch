@@ -502,7 +502,7 @@ mod tests {
     fn palette_assignments_are_complete_and_unique() {
         let visual = |key: &str, lane: &str| {
             format!(
-                "{key:?}: Maps(maps: {key:?}, metres_per_repeat: (1.0, Tuned(\"ASSUMED fixture\")), building_lane: Some({lane}), takes_paint: false),"
+                "{key:?}: Maps(maps: {key:?}, metres_per_repeat: (1.0, Fixture(\"ASSUMED fixture\")), building_lane: Some({lane}), takes_paint: false),"
             )
         };
         let primary = visual("first", "Primary");

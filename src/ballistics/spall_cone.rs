@@ -770,19 +770,19 @@ mod tests {
     fn file(fields: &str) -> String {
         format!(
             r#"({fields}, directions: (24, Resolution("fixture")),
-            energy_share: (0.5, Tuned("fixture")), {BURST})"#
+            energy_share: (0.5, Fixture("fixture")), {BURST})"#
         )
     }
 
     /// A fixture burst block, its driven-energy factor 1.0.
-    const BURST: &str = r#"burst: (driven_energy_factor: (1.0, Tuned("fixture")),
-        ring_half_width_deg: (10.0, Tuned("fixture")), ring_directions: (24, Tuned("fixture")))"#;
+    const BURST: &str = r#"burst: (driven_energy_factor: (1.0, Fixture("fixture")),
+        ring_half_width_deg: (10.0, Fixture("fixture")), ring_directions: (24, Fixture("fixture")))"#;
 
     /// A fixture shape file whose burst block's fields are `fields`, its cone's energy share 0.5.
     fn burst_file(fields: &str) -> String {
         format!(
-            r#"(axis: (ExitDirection, Tuned("fixture")), directions: (24, Resolution("fixture")),
-            energy_share: (0.5, Tuned("fixture")), burst: ({fields}))"#
+            r#"(axis: (ExitDirection, Fixture("fixture")), directions: (24, Resolution("fixture")),
+            energy_share: (0.5, Fixture("fixture")), burst: ({fields}))"#
         )
     }
 
@@ -794,12 +794,12 @@ mod tests {
     fn a_shape_outside_the_domain_is_refused() {
         assert!(ConeShape::new(AxisRule::ExitDirection, 0).is_err());
         assert!(ConeShape::new(AxisRule::ExitDirection, MAX_DIRECTIONS + 1).is_err());
-        assert!(ConeShape::from_ron(&file(r#"axis: (ExitDirection, Tuned("fixture"))"#)).is_ok());
+        assert!(ConeShape::from_ron(&file(r#"axis: (ExitDirection, Fixture("fixture"))"#)).is_ok());
         for undeclared in [
-            r#"axis: (ExitDirection, Tuned("fixture")), half_angle_deg: (25.0, Tuned("fixture"))"#,
-            r#"axis: (ExitDirection, Tuned("fixture")), profile: (Flat, Tuned("fixture"))"#,
-            r#"axis: (ExitDirection, Tuned("fixture")), range: (6.0, Tuned("fixture"))"#,
-            r#"axis: (ExitDirection, Tuned("fixture")), passage: (Partial, Tuned("fixture"))"#,
+            r#"axis: (ExitDirection, Fixture("fixture")), half_angle_deg: (25.0, Fixture("fixture"))"#,
+            r#"axis: (ExitDirection, Fixture("fixture")), profile: (Flat, Fixture("fixture"))"#,
+            r#"axis: (ExitDirection, Fixture("fixture")), range: (6.0, Fixture("fixture"))"#,
+            r#"axis: (ExitDirection, Fixture("fixture")), passage: (Partial, Fixture("fixture"))"#,
         ] {
             assert!(
                 ConeShape::from_ron(&file(undeclared)).is_err(),
@@ -812,13 +812,13 @@ mod tests {
     /// and the burst block's values too.
     #[test]
     fn a_shape_value_without_provenance_is_refused() {
-        let sourced = file(r#"axis: (ExitDirection, Tuned("fixture"))"#);
+        let sourced = file(r#"axis: (ExitDirection, Fixture("fixture"))"#);
         assert!(ConeShape::from_ron(&sourced).is_ok());
         assert!(BurstFields::from_ron(&sourced).is_ok());
         assert_eq!(energy_share_from_ron(&sourced), Ok(0.5));
         for (value, bare) in [
             (
-                r#"axis: (ExitDirection, Tuned("fixture"))"#,
+                r#"axis: (ExitDirection, Fixture("fixture"))"#,
                 "axis: ExitDirection",
             ),
             (
@@ -826,19 +826,19 @@ mod tests {
                 "directions: 24",
             ),
             (
-                r#"energy_share: (0.5, Tuned("fixture"))"#,
+                r#"energy_share: (0.5, Fixture("fixture"))"#,
                 "energy_share: 0.5",
             ),
             (
-                r#"driven_energy_factor: (1.0, Tuned("fixture"))"#,
+                r#"driven_energy_factor: (1.0, Fixture("fixture"))"#,
                 "driven_energy_factor: 1.0",
             ),
             (
-                r#"ring_half_width_deg: (10.0, Tuned("fixture"))"#,
+                r#"ring_half_width_deg: (10.0, Fixture("fixture"))"#,
                 "ring_half_width_deg: 10.0",
             ),
             (
-                r#"ring_directions: (24, Tuned("fixture"))"#,
+                r#"ring_directions: (24, Fixture("fixture"))"#,
                 "ring_directions: 24",
             ),
         ] {
@@ -861,7 +861,7 @@ mod tests {
     #[test]
     fn the_cone_energy_share_is_read_from_the_file_and_must_be_positive() {
         let with = |share: &str| {
-            file(r#"axis: (ExitDirection, Tuned("fixture"))"#).replacen(
+            file(r#"axis: (ExitDirection, Fixture("fixture"))"#).replacen(
                 "energy_share: (0.5",
                 &format!("energy_share: ({share}"),
                 1,
@@ -888,8 +888,8 @@ mod tests {
     #[test]
     fn a_burst_block_is_read_and_its_domain_is_refused() {
         let read = BurstFields::from_ron(&burst_file(
-            r#"driven_energy_factor: (2.0, Tuned("fixture")),
-            ring_half_width_deg: (30.0, Tuned("fixture")), ring_directions: (24, Tuned("fixture"))"#,
+            r#"driven_energy_factor: (2.0, Fixture("fixture")),
+            ring_half_width_deg: (30.0, Fixture("fixture")), ring_directions: (24, Fixture("fixture"))"#,
         ))
         .unwrap();
         assert_eq!(read.strength(150_000.0), 300_000.0);
@@ -905,12 +905,12 @@ mod tests {
             &BurstFields::from_ron(SPALL_CONE_RON).unwrap()
         );
         let sourced = burst_file(
-            r#"driven_energy_factor: (1.0, Tuned("fixture")),
-            ring_half_width_deg: (10.0, Tuned("fixture")), ring_directions: (24, Tuned("fixture"))"#,
+            r#"driven_energy_factor: (1.0, Fixture("fixture")),
+            ring_half_width_deg: (10.0, Fixture("fixture")), ring_directions: (24, Fixture("fixture"))"#,
         );
         let ball = sourced.replacen(
-            r#"ring_directions: (24, Tuned("fixture"))"#,
-            r#"ring_directions: (24, Tuned("fixture")), ball_directions: (32, Tuned("fixture"))"#,
+            r#"ring_directions: (24, Fixture("fixture"))"#,
+            r#"ring_directions: (24, Fixture("fixture")), ball_directions: (32, Fixture("fixture"))"#,
             1,
         );
         assert_ne!(ball, sourced);

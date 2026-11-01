@@ -374,7 +374,7 @@ mod tests {
             ("Layered", ImpactStyle::Layered),
         ] {
             let text = format!(
-                r#"(impact: ({name}, Tuned("fixture art")),
+                r#"(impact: ({name}, Fixture("fixture art")),
                 ember: (None, Unknown("fixture absence")), smoke: (None, Unknown("fixture absence")),
                 body: (None, Unknown("fixture absence")), streak: (None, Unknown("fixture absence")))"#
             );
@@ -389,8 +389,11 @@ mod tests {
                     expected
                 );
             }
-            let missing =
-                text.replacen(&format!("impact: ({name}, Tuned(\"fixture art\")),"), "", 1);
+            let missing = text.replacen(
+                &format!("impact: ({name}, Fixture(\"fixture art\")),"),
+                "",
+                1,
+            );
             assert!(
                 ron::from_str::<File>(&missing).is_err(),
                 "an omitted impact recipe must refuse"

@@ -1224,7 +1224,7 @@ mod tests {
     fn the_library_refuses_an_entry_it_cannot_draw() {
         let pack = |name: &str, repeat: &str| {
             format!(
-                r#""{name}": Maps(maps: "x/y", metres_per_repeat: ({repeat}, Tuned("fixture")), takes_paint: true),"#
+                r#""{name}": Maps(maps: "x/y", metres_per_repeat: ({repeat}, Fixture("fixture")), takes_paint: true),"#
             )
         };
         let library = |entries: &str| VisualLibrary::parse(&format!("(visuals: {{ {entries} }})"));
@@ -1234,9 +1234,9 @@ mod tests {
             pack("steel", "-1.0"),
             pack("steel", "inf"),
             pack("steel", "1.0") + &pack("steel", "2.0"),
-            r#""steel": Maps(maps: " ", metres_per_repeat: (1.0, Tuned("fixture")), takes_paint: true),"#.into(),
+            r#""steel": Maps(maps: " ", metres_per_repeat: (1.0, Fixture("fixture")), takes_paint: true),"#.into(),
             r#""steel": Maps(maps: "x/y", metres_per_repeat: 1.0, takes_paint: true),"#.into(),
-            r##""glass": Flat(colour: ("#000000", Tuned("fixture")), roughness: (1.5, Tuned("fixture")), metallic: (0.0, Tuned("fixture")), takes_paint: false),"##.into(),
+            r##""glass": Flat(colour: ("#000000", Fixture("fixture")), roughness: (1.5, Fixture("fixture")), metallic: (0.0, Fixture("fixture")), takes_paint: false),"##.into(),
         ] {
             assert!(library(&refused).is_err(), "{refused}");
         }
@@ -1246,12 +1246,12 @@ mod tests {
     /// `0..=1` and a positive repeat; anything else is refused at load rather than drawn wrong.
     #[test]
     fn a_livery_refuses_what_its_pattern_cannot_carry() {
-        let colour = r##"("#808080", Tuned("fixture"))"##;
+        let colour = r##"("#808080", Fixture("fixture"))"##;
         let livery = |sheen: &str, repeat: &str, count: usize| {
             let colours = vec![colour; count].join(", ");
             Livery::parse(&format!(
-                r##"(paint: (colour: ("#9A8952", Tuned("fixture")), sheen: ({sheen}, Tuned("fixture"))),
-                    camouflage: Some((pattern: "p", metres_per_repeat: ({repeat}, Tuned("fixture")),
+                r##"(paint: (colour: ("#9A8952", Fixture("fixture")), sheen: ({sheen}, Fixture("fixture"))),
+                    camouflage: Some((pattern: "p", metres_per_repeat: ({repeat}, Fixture("fixture")),
                     colours: [{colours}])))"##
             ))
         };
@@ -1269,7 +1269,7 @@ mod tests {
             );
         }
         let plain = Livery::parse(
-            r##"(paint: (colour: ("#9A8952", Tuned("fixture")), sheen: (0.1, Tuned("fixture"))), camouflage: None)"##,
+            r##"(paint: (colour: ("#9A8952", Fixture("fixture")), sheen: (0.1, Fixture("fixture"))), camouflage: None)"##,
         )
         .expect("a livery without camouflage parses");
         assert!(plain.camouflage.is_none());
@@ -1340,10 +1340,10 @@ mod tests {
         let mut app = dress_app();
         let pack = |key: &str, takes_paint: bool| {
             format!(
-                r#""{key}": Maps(maps: "fixture/pack", metres_per_repeat: (0.5, Tuned("fixture")), takes_paint: {takes_paint}),"#
+                r#""{key}": Maps(maps: "fixture/pack", metres_per_repeat: (0.5, Fixture("fixture")), takes_paint: {takes_paint}),"#
             )
         };
-        let flat = r##""flat": Flat(colour: ("#202020", Tuned("fixture")), roughness: (0.5, Tuned("fixture")), metallic: (0.0, Tuned("fixture")), takes_paint: true),"##;
+        let flat = r##""flat": Flat(colour: ("#202020", Fixture("fixture")), roughness: (0.5, Fixture("fixture")), metallic: (0.0, Fixture("fixture")), takes_paint: true),"##;
         app.world_mut().resource_mut::<SurfaceData>().library = VisualLibrary::parse(&format!(
             "(visuals: {{ {} {} {flat} }})",
             pack("painted", true),

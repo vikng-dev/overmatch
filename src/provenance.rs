@@ -1,10 +1,15 @@
-//! Provenance of an authored data value: where the number comes from, so a validation report can
-//! show how far the data sits from truth.
+//! One number, one job. A sourced value is authored as `(value, Kind("note"))`.
 //!
-//! A sourced value is authored as `(value, Provenance("source or reason"))`, one of
-//! `Measured`, `Derived`, `Tuned`, `Resolution` or `Unknown`. A value authored without one, or with
-//! an empty source or reason, does not load. The loader checks the provenance and keeps the value;
-//! the data file is where the provenance is read.
+//! `Measured`, `Derived` and `Unknown` label a fact about the world: the note names the source,
+//! the inputs and derivation, or what is missing and what would settle it. `Unit` declares a game
+//! unit, a scale that balance lives in, and says why this scale. `Taste` is a magnitude chosen for
+//! look or feel, multiplying a physical scalar, never replacing it; its note names the effect
+//! family. `Resolution` says how finely or stably a law is evaluated, never what it states, and
+//! gives the stability or cost reason. `StandIn` names the law or fact the game does not have yet.
+//!
+//! `Fixture` labels test data and loads only under `cfg(test)`. Missing provenance, a blank note
+//! or a fixture in shipped data is refused at load; the caller supplies the file and the parser
+//! locates the field. The loader keeps only the value; the data file holds its job and note.
 
 use serde::de::{self, Deserialize, Deserializer, SeqAccess, Visitor};
 
@@ -15,9 +20,16 @@ enum Provenance {
     Measured(String),
     /// Computed from other values; names the inputs and the derivation.
     Derived(String),
-    /// Chosen; gives the reason (a balance or modelling choice, not a fact).
-    Tuned(String),
-    /// A sampling or resolution choice: how finely a law is evaluated, never what it states.
+    /// A game unit: a declared scale that balance lives in; says why this scale.
+    Unit(String),
+    /// A magnitude chosen for look or feel, multiplying a physical scalar, never replacing it;
+    /// names the effect family it belongs to.
+    Taste(String),
+    /// A value standing in for a law or fact the game does not have yet; names that law or fact.
+    StandIn(String),
+    /// Test fixture data; accepted only under `cfg(test)`.
+    Fixture(String),
+    /// How finely or stably a law is evaluated, never what it states; gives the stability or cost reason.
     Resolution(String),
     /// Not known; says what is missing and what would settle it.
     Unknown(String),
@@ -28,7 +40,10 @@ impl Provenance {
         match self {
             Self::Measured(note)
             | Self::Derived(note)
-            | Self::Tuned(note)
+            | Self::Unit(note)
+            | Self::Taste(note)
+            | Self::StandIn(note)
+            | Self::Fixture(note)
             | Self::Resolution(note)
             | Self::Unknown(note) => note,
         }
@@ -41,43 +56,54 @@ pub(crate) struct Sourced<T>(pub(crate) T);
 
 impl<'de, T: Deserialize<'de>> Deserialize<'de> for Sourced<T> {
     fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-        struct SourcedVisitor<T>(std::marker::PhantomData<T>);
+        deserialize_sourced::<T, D, { cfg!(test) }>(deserializer)
+    }
+}
 
-        impl<'de, T: Deserialize<'de>> Visitor<'de> for SourcedVisitor<T> {
-            type Value = Sourced<T>;
+// The test instantiates the shipped policy too, so it exercises the same visitor and refusal.
+fn deserialize_sourced<'de, T: Deserialize<'de>, D: Deserializer<'de>, const FIXTURES: bool>(
+    deserializer: D,
+) -> Result<Sourced<T>, D::Error> {
+    struct SourcedVisitor<T, const FIXTURES: bool>(std::marker::PhantomData<T>);
 
-            fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-                f.write_str(
-                    "a value and its provenance, `(value, Measured|Derived|Tuned|Resolution|\
-                     Unknown(\"source or reason\"))` — a value without provenance does not load",
-                )
-            }
+    impl<'de, T: Deserialize<'de>, const FIXTURES: bool> Visitor<'de> for SourcedVisitor<T, FIXTURES> {
+        type Value = Sourced<T>;
 
-            fn visit_seq<A: SeqAccess<'de>>(self, mut seq: A) -> Result<Self::Value, A::Error> {
-                let value: T = seq
-                    .next_element()?
-                    .ok_or_else(|| de::Error::invalid_length(0, &self))?;
-                let provenance: Provenance = seq.next_element()?.ok_or_else(|| {
-                    de::Error::custom(
-                        "the value has no provenance — a value without one does not load",
-                    )
-                })?;
-                if provenance.note().trim().is_empty() {
-                    return Err(de::Error::custom(
-                        "the provenance names no source or reason — a blank one does not load",
-                    ));
-                }
-                if seq.next_element::<de::IgnoredAny>()?.is_some() {
-                    return Err(de::Error::invalid_length(3, &self));
-                }
-                Ok(Sourced(value))
-            }
+        fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            f.write_str(
+                "a value and its provenance, `(value, Measured|Derived|Unknown|Unit|Taste|\
+                 Resolution|StandIn(\"source or reason\"))` — a value without provenance does not load",
+            )
         }
 
-        // `deserialize_any`, not `deserialize_tuple`: a bare value then reaches the visitor and is
-        // refused with `expecting`'s message, which names the missing provenance.
-        deserializer.deserialize_any(SourcedVisitor(std::marker::PhantomData))
+        fn visit_seq<A: SeqAccess<'de>>(self, mut seq: A) -> Result<Self::Value, A::Error> {
+            let value: T = seq
+                .next_element()?
+                .ok_or_else(|| de::Error::invalid_length(0, &self))?;
+            let provenance: Provenance = seq.next_element()?.ok_or_else(|| {
+                de::Error::custom("the value has no provenance — a value without one does not load")
+            })?;
+            if matches!(provenance, Provenance::Fixture(_)) && !FIXTURES {
+                return Err(de::Error::custom(
+                    "Fixture provenance is test-only — replace this field's label with its \
+                     fact, Unit, Taste, Resolution or StandIn job and a non-blank note",
+                ));
+            }
+            if provenance.note().trim().is_empty() {
+                return Err(de::Error::custom(
+                    "the provenance names no source or reason — a blank one does not load",
+                ));
+            }
+            if seq.next_element::<de::IgnoredAny>()?.is_some() {
+                return Err(de::Error::invalid_length(3, &self));
+            }
+            Ok(Sourced(value))
+        }
     }
+
+    // `deserialize_any`, not `deserialize_tuple`: a bare value then reaches the visitor and is
+    // refused with `expecting`'s message, which names the missing provenance.
+    deserializer.deserialize_any(SourcedVisitor::<T, FIXTURES>(std::marker::PhantomData))
 }
 
 #[cfg(test)]
@@ -96,11 +122,47 @@ mod tests {
 
     #[test]
     fn every_kind_of_provenance_loads_its_value() {
-        for kind in ["Measured", "Derived", "Tuned", "Resolution", "Unknown"] {
+        for kind in [
+            "Measured",
+            "Derived",
+            "Unknown",
+            "Unit",
+            "Taste",
+            "Resolution",
+            "StandIn",
+            "Fixture",
+        ] {
             let probe = parse(&format!("(value: (2.5, {kind}(\"a reason\")))"))
                 .unwrap_or_else(|err| panic!("{kind}: {err}"));
             assert_eq!(probe.value, Sourced(2.5));
         }
+    }
+
+    /// Shipped asset admission must refuse test data before play; tests alone accept it.
+    #[test]
+    fn fixtures_load_only_with_the_test_policy() {
+        #[derive(serde::Deserialize, Debug)]
+        struct ShippedProbe {
+            #[serde(deserialize_with = "deserialize_sourced::<f32, _, false>")]
+            value: Sourced<f32>,
+        }
+
+        let text = "(\n    value: (2.5, Fixture(\"fixture\")),\n)";
+        assert_eq!(parse(text).unwrap().value, Sourced(2.5));
+        let err = ron::de::from_str::<ShippedProbe>(text).unwrap_err();
+        assert_eq!(
+            err.span.start.line, 2,
+            "the parser locates the refused field"
+        );
+        let report = format!("fixture.ron: {err}");
+        assert!(
+            report.contains("fixture.ron") && report.contains("Fixture provenance is test-only")
+        );
+        assert!(report.contains("replace this field's label"));
+        let real =
+            ron::de::from_str::<ShippedProbe>("(value: (2.5, Unit(\"declared pool scale\")))")
+                .unwrap();
+        assert_eq!(real.value, Sourced(2.5));
     }
 
     #[test]
@@ -113,9 +175,23 @@ mod tests {
 
     #[test]
     fn a_blank_or_unknown_provenance_does_not_load() {
+        for kind in [
+            "Measured",
+            "Derived",
+            "Unknown",
+            "Unit",
+            "Taste",
+            "Resolution",
+            "StandIn",
+            "Fixture",
+        ] {
+            for blank in ["", "   "] {
+                let text = format!("(value: (2.5, {kind}(\"{blank}\")))");
+                assert!(parse(&text).unwrap_err().contains("blank"), "{text}");
+            }
+        }
         for text in [
-            "(value: (2.5, Measured(\"\")))",
-            "(value: (2.5, Tuned(\"   \")))",
+            "(value: (2.5, Tuned(\"a reason\")))",
             "(value: (2.5, Guessed(\"a reason\")))",
             "(value: (2.5, Measured(\"a\"), Derived(\"b\")))",
         ] {

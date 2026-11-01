@@ -53,18 +53,20 @@ mod tests {
     #[test]
     fn a_malformed_rate_is_refused() {
         assert_eq!(
-            from_ron(r#"(joules_per_hp: (2500.0, Tuned("fixture")))"#),
+            from_ron(r#"(joules_per_hp: (2500.0, Fixture("fixture")))"#),
             Ok(2500.0)
         );
         let bare = from_ron("(joules_per_hp: 2500.0)").expect_err("a bare value is refused");
         assert!(bare.contains("provenance"), "{bare}");
         assert!(
-            from_ron(r#"(joules_per_hp: (2500.0, Tuned("fixture")), hp: (1, Tuned("fixture")))"#)
-                .is_err(),
+            from_ron(
+                r#"(joules_per_hp: (2500.0, Fixture("fixture")), hp: (1, Fixture("fixture")))"#
+            )
+            .is_err(),
             "an unknown entry"
         );
         for value in ["0.0", "-2500.0", "1e-310"] {
-            let text = format!(r#"(joules_per_hp: ({value}, Tuned("fixture")))"#);
+            let text = format!(r#"(joules_per_hp: ({value}, Fixture("fixture")))"#);
             let error = from_ron(&text).expect_err(value);
             assert!(error.contains("joules_per_hp"), "{value}: {error}");
         }

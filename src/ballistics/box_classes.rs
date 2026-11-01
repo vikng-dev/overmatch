@@ -95,7 +95,7 @@ mod tests {
 
     /// A fixture file: a crew pool of 30 HP, then `rest`.
     fn file(rest: &str) -> String {
-        format!(r#"(crew_hp: (30, Tuned("fixture")){rest})"#)
+        format!(r#"(crew_hp: (30, Fixture("fixture")){rest})"#)
     }
 
     /// A value authored without its provenance, an unknown entry (a retired per-m² class or crew
@@ -109,9 +109,9 @@ mod tests {
         let error = BoxClasses::from_ron("(crew_hp: 30)").expect_err("a bare value is refused");
         assert!(error.contains("provenance"), "{error}");
         for retired in [
-            r#", crew_face_m2: (0.2, Tuned("fixture"))"#,
-            r#", ammo: (150, Tuned("fixture"))"#,
-            r#", hard: (300, Tuned("fixture"))"#,
+            r#", crew_face_m2: (0.2, Fixture("fixture"))"#,
+            r#", ammo: (150, Fixture("fixture"))"#,
+            r#", hard: (300, Fixture("fixture"))"#,
         ] {
             assert!(BoxClasses::from_ron(&file(retired)).is_err(), "{retired}");
         }

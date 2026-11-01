@@ -124,16 +124,17 @@ mod tests {
 
     fn parse(modes: &str, default: &str, trigger: &str) -> Result<Spec, String> {
         ron::from_str::<File>(&format!(
-            r#"(trigger: ({trigger}, Tuned("fixture")), modes: [{modes}],
-            default_mode: ({default:?}, Tuned("fixture")))"#
+            r#"(trigger: ({trigger}, Fixture("fixture")), modes: [{modes}],
+            default_mode: ({default:?}, Fixture("fixture")))"#
         ))
         .map_err(|e| e.to_string())?
         .resolve()
     }
 
     const INSTANT: &str =
-        r#"(name: ("instant", Tuned("fixture")), delay_s: (0.0, Tuned("fixture")))"#;
-    const DELAY: &str = r#"(name: ("delay", Tuned("fixture")), delay_s: (0.1, Tuned("fixture")))"#;
+        r#"(name: ("instant", Fixture("fixture")), delay_s: (0.0, Fixture("fixture")))"#;
+    const DELAY: &str =
+        r#"(name: ("delay", Fixture("fixture")), delay_s: (0.1, Fixture("fixture")))"#;
 
     /// The game's damage model: a fuze block that resolves names its default by index into its
     /// ordered modes, and one that would let the crew pick a mode the server or the HUD cannot

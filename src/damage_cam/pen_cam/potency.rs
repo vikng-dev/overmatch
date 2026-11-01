@@ -168,7 +168,7 @@ mod tests {
     /// A fixture potency: a 30 HP crew pool, apart from the shipped one, over a 0.25 m² crew face,
     /// so 120 and 3.998 HP points per m² (DERIVED).
     fn fixture() -> Potency {
-        let classes = BoxClasses::from_ron(r#"(crew_hp: (30, Tuned("fixture")))"#).unwrap();
+        let classes = BoxClasses::from_ron(r#"(crew_hp: (30, Fixture("fixture")))"#).unwrap();
         Potency::of(&classes, 0.25, 70.0)
     }
 

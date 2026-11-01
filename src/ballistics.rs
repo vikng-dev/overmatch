@@ -4807,8 +4807,8 @@ mod march_tests {
     fn a_hit_delivers_only_the_flying_body_s_momentum() {
         const SPEED: f32 = 900.0;
         const BODY_MASS: f32 = 100.0;
-        let core = r#", penetrator: Some((mass: (1.25, Tuned("fixture")),
-            caliber: (0.02, Tuned("fixture"))))"#;
+        let core = r#", penetrator: Some((mass: (1.25, Fixture("fixture")),
+            caliber: (0.02, Fixture("fixture"))))"#;
         for (carrier, flying_mass) in [("Kept", 5.0), ("Discarded", 1.25)] {
             let mut round = crate::rounds::tests::of_type(carrier, "5.0", "0.05", core);
             round.muzzle_speed = SPEED;

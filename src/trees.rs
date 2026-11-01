@@ -1094,16 +1094,16 @@ pub(crate) mod tests {
     }
 
     // ASSUMED material fixture data, distinct fields so each omission/mutation is observable.
-    const GRAIN_RUPTURE: &str = "along_grain_rupture_pa: (4.0e7, Tuned(\"fixture\")),";
-    const GRAIN_FRACTURE: &str = "along_grain_fracture_j_per_m2: (2.0e4, Tuned(\"fixture\")),";
-    const FRESH_DENSITY: &str = "fresh_density_kg_per_m3: (850.0, Tuned(\"fixture\")),";
+    const GRAIN_RUPTURE: &str = "along_grain_rupture_pa: (4.0e7, Fixture(\"fixture\")),";
+    const GRAIN_FRACTURE: &str = "along_grain_fracture_j_per_m2: (2.0e4, Fixture(\"fixture\")),";
+    const FRESH_DENSITY: &str = "fresh_density_kg_per_m3: (850.0, Fixture(\"fixture\")),";
 
     // A shipped root plate: an anchor resolves against the shipped attachment list.
     const ROOT_PLATE: &str = "anchor: \"scots_pine_root_plate\",";
 
     fn structural_wood_text(rows: &str) -> String {
         format!(
-            r#"Wood(substance: "Wood", hp_per_m2: (1000.0, Tuned("fixture")),
+            r#"Wood(substance: "Wood", hp_per_m2: (1000.0, Fixture("fixture")),
                 structure: {{ {rows} }})"#
         )
     }
@@ -1181,7 +1181,7 @@ pub(crate) mod tests {
         for datum in [GRAIN_RUPTURE, GRAIN_FRACTURE, FRESH_DENSITY] {
             let field = datum.split(':').next().unwrap();
             for value in ["0.0", "-1.0", "NaN", "inf"] {
-                let replacement = format!("{field}: ({value}, Tuned(\"fixture\")),");
+                let replacement = format!("{field}: ({value}, Fixture(\"fixture\")),");
                 let fields = structural_fields().replace(datum, &replacement);
                 let error = parse_fixture_wood(&structural_row("fixture", &fields))
                     .expect_err("unusable material fact is refused");

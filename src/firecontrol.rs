@@ -269,8 +269,8 @@ mod tests {
     /// tolerance at the live march's fixture timestep, not just the table's finer sweep step.
     #[test]
     fn dialed_range_agrees_with_each_flight_nose_and_carrier() {
-        let core = r#", penetrator: Some((mass: (1.25, Tuned("fixture")),
-            caliber: (0.02, Tuned("fixture"))))"#;
+        let core = r#", penetrator: Some((mass: (1.25, Fixture("fixture")),
+            caliber: (0.02, Fixture("fixture"))))"#;
         for (kind, extra) in [("Blunt", ""), ("Capped", ""), ("Discarded", core)] {
             let round = crate::rounds::tests::of_type(kind, "5.0", "0.05", extra);
             let table = RangeTable::for_weapon(round.muzzle_speed, round.drag_k);

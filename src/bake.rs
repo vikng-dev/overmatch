@@ -1989,12 +1989,12 @@ mod tests {
         // substance is no row of it, and neither is the collider's.
         std::fs::write(
             &elsewhere,
-            r#"SubstanceRegistry(substances: {"Cheese": Hard(resistance: Reference, visual: "fixture", feedback: (exposed_linear_rgb: ((0.5, 0.51, 0.53), Tuned("fixture")), powder_linear_rgb: ((0.47, 0.47, 0.47), Tuned("fixture")), metallic: (1.0, Tuned("fixture")), roughness_gain: (1.0, Tuned("fixture")), sparks: (true, Tuned("fixture"))),
-                debris_half_angle_deg: (26.2, Tuned("fixture")),
-                facts: Some((density: (1000.0, Tuned("fixture")),
-                    flow_strength: (1.0e6, Tuned("fixture")),
-                    youngs_modulus: (1.0e9, Tuned("fixture")),
-                    poisson_ratio: (0.4, Tuned("fixture")))))})"#,
+            r#"SubstanceRegistry(substances: {"Cheese": Hard(resistance: Reference, visual: "fixture", feedback: (exposed_linear_rgb: ((0.5, 0.51, 0.53), Fixture("fixture")), powder_linear_rgb: ((0.47, 0.47, 0.47), Fixture("fixture")), metallic: (1.0, Fixture("fixture")), roughness_gain: (1.0, Fixture("fixture")), sparks: (true, Fixture("fixture"))),
+                debris_half_angle_deg: (26.2, Fixture("fixture")),
+                facts: Some((density: (1000.0, Fixture("fixture")),
+                    flow_strength: (1.0e6, Fixture("fixture")),
+                    youngs_modulus: (1.0e9, Fixture("fixture")),
+                    poisson_ratio: (0.4, Fixture("fixture")))))})"#,
         )
         .expect("the fixture registry is writable");
         let findings = verify_asset(&asset.glb, Some(&elsewhere));
@@ -2384,9 +2384,9 @@ mod tests {
         bore_length: (1.0, Tuned("fixture construction")),
         barrel: "Recoil",
         gun: "kwk36_l56",
-        stowage: [(round: "88mm_AP", count: (1, Tuned("fixture")))],
+        stowage: [(round: "88mm_AP", count: (1, Fixture("fixture")))],
         fire_mode: Single(reload_secs: 1.0),
-        recoil: (kick: 1.0, stiffness: 1.0, damping: 1.0, max_length: (1.0, Tuned("fixture"))),
+        recoil: (kick: 1.0, stiffness: 1.0, damping: 1.0, max_length: (1.0, Fixture("fixture"))),
         fire: [],
         load: [],
     )},
