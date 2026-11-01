@@ -1368,24 +1368,28 @@ fn select_belt_rungs(
         let wanted = match belt.pin {
             Some(rung) => rung,
             None => {
+                // An empty table has no nearest shoe or selection to write.
+                if frames.count() == 0 {
+                    continue;
+                }
                 // Squared throughout, one square root per belt: the comparison is monotone in it.
                 let mut nearest_sq = f32::INFINITY;
                 for link in 0..frames.count() {
                     let origin = at.transform_point(frames.pose(link).translation.into());
-                    nearest_sq = nearest_sq.min(eye.distance_squared(origin));
-                }
-                // A belt with no link has no nearest shoe and nothing to write.
-                if !nearest_sq.is_finite() {
-                    continue;
+                    let distance = eye.distance_squared(origin);
+                    assert!(
+                        distance.is_finite(),
+                        "admitted shoe frames and the declared eye fit finite belt-selection distances"
+                    );
+                    nearest_sq = nearest_sq.min(distance);
                 }
                 rung_at(&template.switches, nearest_sq.sqrt())
             }
         };
-        if let Some(handle) =
-            cache.rung_or_build(frames.count(), wanted, belt.side, &template, &mut assets)
-        {
-            mesh.set_if_neq(Mesh3d(handle));
-        }
+        let handle = cache
+            .rung_or_build(frames.count(), wanted, belt.side, &template, &mut assets)
+            .expect("a live belt was spawned with a certified retained mesh count");
+        mesh.set_if_neq(Mesh3d(handle));
     }
     Ok(())
 }
@@ -1396,7 +1400,7 @@ fn select_belt_rungs(
 fn adapt_shoe_switches(mut template: ResMut<LinkTemplate>, view: Res<ViewProfile>) {
     let template = &mut *template;
     let Some(chain) = &template.chain else {
-        return;
+        return; // A source-detail-only template has no reduced ladder to recompute.
     };
     template.switches = chain.switches(*view);
 }
