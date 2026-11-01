@@ -1226,27 +1226,40 @@ fn graph(structure: &Structure, state: &WallState) -> Graph {
     (neighbours, anchors, buried)
 }
 
-/// The assessment graph roots an accelerating group at its actual external load points.
-/// These are reference points for a balanced internal wrench, not tensile anchors: the
-/// support/fall graph never reads them. Multiple references preserve the counted multi-section
-/// limit; a freely moving group with no external load has no root and no internal demand.
+/// The assessment graph roots each accelerating group at one reference chunk: the one its
+/// external loads hold hardest (the most impulse, `|J| + |F| Δt`, the lowest chunk on a tie).
+/// A moving group's contacts are known loads, never unknown supports: in its frame
+/// ([`in_group_frames`]) every section carries the balanced wrench of either side, so one
+/// reference fixes which side a section holds, the side the group swings about it, and every
+/// section is assessed. Rooting every loaded chunk instead would leave a group touching along
+/// its whole length with no section to assess. The reference is no tensile anchor: the
+/// support/fall graph never reads it. A group with no external load has no root and no demand.
 fn loaded_graph(structure: &Structure, state: &WallState, loads: &[Load]) -> Graph {
     let mut graph = graph(structure, state);
     let mut accelerating = vec![false; structure.chunks.len()];
+    let mut held = vec![0.0_f32; structure.chunks.len()];
     for load in loads {
-        if matches!(load.origin, Origin::Inertia { .. }) {
-            accelerating[load.chunk] = true;
-        }
+        let step = match load.origin {
+            Origin::Inertia { .. } => {
+                accelerating[load.chunk] = true;
+                continue;
+            }
+            Origin::Body { step, .. } | Origin::Contact { step, .. } => step,
+            Origin::Field => 0.0,
+        };
+        held[load.chunk] += load.blow.length() + load.press.length() * step;
     }
-    for load in loads {
-        if accelerating[load.chunk]
-            && state.standing(load.chunk)
-            && !matches!(load.origin, Origin::Inertia { .. })
-            && (load.blow != Vec3::ZERO
-                || load.press != Vec3::ZERO
-                || load.peak.is_some_and(|peak| peak != Vec3::ZERO))
-        {
-            graph.2[load.chunk] = true;
+    for group in loose_groups(structure, state) {
+        if !group.iter().any(|&c| accelerating[c]) {
+            continue;
+        }
+        let reference = group
+            .iter()
+            .copied()
+            .filter(|&c| held[c] > 0.0)
+            .max_by(|&a, &b| held[a].total_cmp(&held[b]).then(b.cmp(&a)));
+        if let Some(reference) = reference {
+            graph.2[reference] = true;
         }
     }
     graph
@@ -3949,6 +3962,43 @@ mod tests {
         let (state, changes) = assess_slab(slab, &[load]);
         assert_eq!(state.cracked, vec![true]);
         assert_eq!(changes.groups.len(), 2);
+    }
+
+    /// A group touching along its whole length still has sections: its contacts are known
+    /// loads, and one reference fixes the side each section holds. Rooting every loaded chunk
+    /// left this slab with no section to assess, however hard its end was struck. ASSUMED
+    /// fixture: the weak-seam slab, a hard end contact and two light ones.
+    #[test]
+    fn a_contact_on_every_chunk_still_loads_its_sections() {
+        let slab = unsupported_slab(3);
+        let impact = slab_contact(&slab, 1000.0);
+        let mut light = slab_contact(&slab, 0.01);
+        light.chunk = 1;
+        light.at = slab.chunks[1].centroid;
+        let mut another = light;
+        another.chunk = 2;
+        another.at = slab.chunks[2].centroid;
+        let (state, _) = assess_slab(slab, &[impact, light, another]);
+        assert_eq!(state.cracked, vec![true, false]);
+    }
+
+    /// A slab set down evenly along its length takes each chunk's share of the blow where that
+    /// chunk's inertia meets it: no section carries any of it, whatever its size. The single
+    /// reference must not turn an even landing into a bending one. ASSUMED fixture loads.
+    #[test]
+    fn an_evenly_landing_slab_stays_whole() {
+        let slab = unsupported_slab(3);
+        let loads: Vec<Load> = (0..3)
+            .map(|c| {
+                let mut load = slab_contact(&slab, 1000.0);
+                load.chunk = c;
+                load.at = slab.chunks[c].centroid;
+                load
+            })
+            .collect();
+        let (state, changes) = assess_slab(slab, &loads);
+        assert_eq!(state.cracked, vec![false, false]);
+        assert_eq!(changes.groups.len(), 1);
     }
 
     /// The choice of reference point must not add a resultant. Section tractions rely on
