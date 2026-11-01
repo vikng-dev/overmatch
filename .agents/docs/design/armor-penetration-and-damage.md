@@ -351,6 +351,15 @@ factors, not additional potency knobs. The cone coefficient rounds to f32 before
 lost energy and material ratio; the shipped coefficient and all field-cast results retain the
 same bits. The three mechanisms' units and their replacement law are stated in §6.
 
+**Preserved scenario record and open exit-material call** (#116, #182). Subject: the game's
+damage model, HP pools at stations. The earlier energy-law record reported these as MEASURED:
+s1's transport strength was 2.40 MJ, emitting 400 HP against the retired law's 362 HP; s12's
+cone was 0.19 of s1's, against 0.62 under the retired hole-calibre term. These are retained
+scenario observations, not newly measured results or a current asset gate. The softer-exit
+ratios were DERIVED from the then-authored material factors: cast armour 0.9, mild steel 0.8,
+ammunition 0.2, engine block 0.15 and rubber 0.05. Applying those ratios to their exits remains
+an open owner call under #182; declaring the emission unit did not settle it.
+
 **Profile — the ball law** (owner, 2026-10-23, night; decision record
 `.agents/scratch/damage-cam-2026-10-08/research/ap-aphe-2026-10-23/decision-2026-10-23.md`, the law
 in `shape-law.md` §1.2 beside it). The debris leaves the exit with sideways speeds spread evenly
@@ -768,6 +777,12 @@ uniform sphere. DERIVED from the shipped construction above, with the 30 HP crew
 |---|---|---|---|
 | ring at rest | in the band, 80–100° | 5.76 | 6.52 m |
 | ring at 244.6 m/s | `λ` 0.458, band 55.4–75.4° | 6.33 | 6.84 m |
+
+The retained s13 measurement from the earlier field-unit conversion compared the ring alone:
+346.2932 versus 346.29324 HP deposited into `Ammo_R_0` (MEASURED in that scenario record,
+within f32 rounding). It is historical evidence for that conversion, not an asset-specific
+pass condition for the current law. The energy-law provenance is #116; the exit-material
+weighting provenance is #182.
 
 The carried speed in the second row is the recorded s1 fixture speed (MEASURED); the ratio,
 band and radius are DERIVED. The seed crew box's 0.2033 m² mean face (MEASURED from geometry)
