@@ -626,14 +626,22 @@ impl WallState {
         self.fate[chunk] == Fate::Standing
     }
 
-    /// The intact contacts between standing matter. Each occupies area where a blast's rear
-    /// boundary would otherwise be free; an opened joint or departed neighbour occupies none.
+    /// The contacts between standing matter: every seam, cracked or not (a crack opens a seam's
+    /// tension, never its contact, so the chunks either side still touch), and every rest not
+    /// yet opened. Each occupies area where a blast's rear boundary would otherwise be free; an
+    /// opened rest or a departed neighbour occupies none.
     pub fn contacts<'a>(&'a self, structure: &'a Structure) -> impl Iterator<Item = Joint> + 'a {
         structure
             .joints
             .iter()
             .enumerate()
-            .filter_map(|(j, joint)| (!self.cracked[j] && self.live(joint)).then_some(*joint))
+            .filter_map(|(j, joint)| {
+                let touching = match joint.bond {
+                    Bond::Bonded(_) => true,
+                    Bond::Resting => !self.cracked[j],
+                };
+                (touching && self.live(joint)).then_some(*joint)
+            })
     }
 
     /// Whether `joint` still joins standing matter: its chunk and, unless it is an anchor, the
@@ -3195,8 +3203,8 @@ pub(crate) struct Backing<'a> {
     pub block: &'a Block,
     pub scale: f32,
     pub material: Masonry,
-    /// Intact contacts between standing matter, in the hits' frame. Their rear-face area is
-    /// not a free surface, whether bonded or bearing-only.
+    /// Contacts between standing matter ([`WallState::contacts`]), in the hits' frame. Their
+    /// rear-face area is not a free surface, whether bonded or bearing-only.
     pub contacts: &'a [Joint],
 }
 
@@ -3236,7 +3244,7 @@ impl Scab {
 /// (2σ_b − σ_t,d) / (ρ c)`, over `F_t / σ_b`, the area its transmitted force covers at `σ_b`,
 /// bounded by the chunk's exposed rear area projected along the normal (DERIVED: the scab then
 /// carries at most `J F_t / F` of the face's momentum, never more than its blow). ASSUMED: that equivalent area is the
-/// footprint and the gate reads one back point. Intact contacts take their projected area off
+/// footprint and the gate reads one back point. Contacts take their projected area off
 /// the free rear area; propagation through that contact to a farther free surface is unresolved.
 /// A front that crushes through leaves no ligament and throws no rear scab. `None` where no
 /// ligament remains or the gate fails. Every input is the face's and its row's; no body type enters.
@@ -6342,9 +6350,11 @@ mod tests {
     }
 
     /// Only exposed rear area reflects the game's environment blast as tensile stress. A full
-    /// contact, bonded or resting, throws no scab; a lateral joint covers no rear area. Structure
-    /// loads rely on retaining the blow at internal interfaces. ASSUMED fixture geometry/loading;
-    /// a mutant that treats each baked chunk boundary as air fails on either contact kind.
+    /// contact, bonded or resting, throws no scab, nor does a cracked seam whose chunks still
+    /// touch; an opened rest, a departed neighbour or a lateral joint covers no rear area.
+    /// Structure loads rely on retaining the blow at internal interfaces, a second burst on a
+    /// cracked wall included. ASSUMED fixture geometry/loading; a mutant that treats each baked
+    /// chunk boundary, or each cracked seam, as air fails here.
     #[test]
     fn a_scab_needs_exposed_rear_area() {
         let material = brick();
@@ -6381,13 +6391,22 @@ mod tests {
                 .is_empty()
         );
         state.cracked[0] = true;
+        assert!(
+            thrown(&state.contacts(&structure).collect::<Vec<_>>())
+                .1
+                .is_empty(),
+            "a cracked seam's chunks still touch"
+        );
+        structure.joints[0].bond = Bond::Resting;
         assert_eq!(
             thrown(&state.contacts(&structure).collect::<Vec<_>>())
                 .1
                 .len(),
-            1
+            1,
+            "an opened rest exposes the back"
         );
         state.cracked[0] = false;
+        structure.joints[0].bond = contact.bond;
         for fate in [Fate::Dust, Fate::Fallen] {
             state.fate[1] = fate;
             assert_eq!(
