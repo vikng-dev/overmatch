@@ -562,4 +562,19 @@ pub(crate) mod tests {
             "{error}"
         );
     }
+    /// A boundary traced twice has only left turns and passes every edge half-plane test,
+    /// but doubles the face list and profile area. Collider and face readers need one boundary.
+    #[test]
+    fn a_profile_traced_twice_is_refused_before_play() {
+        let mut asset = shipped_house().asset.clone();
+        let boundary = asset.elements[0].profile.clone();
+        asset.elements[0].profile.extend(boundary);
+        let error = asset
+            .check()
+            .expect_err("a repeated boundary is no simple polygon");
+        assert!(
+            error.contains("profile") && error.contains("remove repeated vertices"),
+            "{error}"
+        );
+    }
 }

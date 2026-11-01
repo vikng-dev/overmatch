@@ -252,6 +252,15 @@ pub struct Anchor {
     pub centroid: [f32; 3],
 }
 
+/// A repeated vertex makes a boundary non-simple even when every edge half-plane holds.
+fn repeated_corner(profile: &[[f32; 2]]) -> Option<usize> {
+    (0..profile.len()).find(|&k| {
+        profile[..k].iter().any(|&other| {
+            Vec2::from_array(profile[k]).distance(Vec2::from_array(other)) <= PLANE_TOLERANCE_M
+        })
+    })
+}
+
 /// The first edge shorter than [`PLANE_TOLERANCE_M`] or with another vertex on its
 /// exterior side. A convex counter-clockwise boundary puts every vertex in every edge's
 /// interior half-plane; local turns alone also admit self-intersecting stars.
@@ -367,6 +376,11 @@ impl BuildingAsset {
             {
                 return Err(format!(
                     "element {name}'s profile is no finite counter-clockwise polygon; rebake the building"
+                ));
+            }
+            if let Some(corner) = repeated_corner(&element.profile) {
+                return Err(format!(
+                    "element {name}'s profile repeats vertex {corner}; remove repeated vertices and rebake the building"
                 ));
             }
             if let Some(corner) = concave_corner(&element.profile) {
