@@ -2042,7 +2042,7 @@ pub(crate) fn weigh(
                     continue;
                 };
                 let other_contact =
-                    bears_on_contact(structure, state, &incident, &grounded, &group);
+                    bears_on_contact(structure, state, &incident, &grounded, &group, loads);
                 if other_contact {
                     for (k, &chunk) in touched.iter().enumerate() {
                         deferred[k] |= group.binary_search(&chunk).is_ok();
@@ -2143,7 +2143,7 @@ pub(crate) fn weigh(
 /// Whether `group` (ascending) bears on a contact besides the section that holds it: a live joint
 /// from one of its chunks (`incident`, each chunk's joints) to a standing chunk outside it, or to
 /// the ground, that carries no tension but still carries compression, its normal toward the group
-/// rising past [`BEARS`]. Such a contact is a rest not yet opened, or a seam a crack opened: a
+/// rising against the group's field ([`field`]) past [`BEARS`]. Such a contact is a rest not yet opened, or a seam a crack opened: a
 /// crack opens a seam's tension, never its contact, and the chunks either side still touch.
 /// The outside chunk must remain grounded: a disconnected group about to fall is no static prop.
 /// A group that bears on one is held through it and its section at once, a static solve's to read
@@ -2154,6 +2154,7 @@ fn bears_on_contact(
     incident: &[Vec<usize>],
     grounded: &[bool],
     group: &[usize],
+    loads: &[Load],
 ) -> bool {
     let inside = |c: usize| group.binary_search(&c).is_ok();
     group.iter().any(|&chunk| {
@@ -2179,12 +2180,12 @@ fn bears_on_contact(
             } else {
                 -joint.normal
             };
-            n.y > BEARS
+            n.dot(field(structure, group, loads).0) > BEARS
         })
     })
 }
 
-/// How far a rest's normal, turned toward the part it carries, must rise to bear that part: above
+/// Resolution: how far a rest's normal, turned toward the part it carries, must rise to bear it: above
 /// the bake's rounding of a vertical face's normal (a millionth), far below any slope a part sits
 /// on. A rest at or under it (a part's end butted against a wall, a part hanging under another)
 /// bears nothing.
@@ -3909,7 +3910,36 @@ mod tests {
             &incident(&slab),
             &[false, false],
             &[0],
+            &[],
         ));
+    }
+
+    /// Bearing is measured against the group's field, so rotating the accelerating frame
+    /// cannot turn a carrying face into a side face. Fixture: an X-directed field and one rest.
+    #[test]
+    fn a_contact_bears_along_its_groups_field() {
+        for (normal, bears) in [(Vec3::Y, false), (Vec3::X, true)] {
+            let mut slab = unsupported_slab(2);
+            slab.joints[0].bond = Bond::Resting;
+            slab.joints[0].normal = normal;
+            let frame = Load {
+                press: (Vec3::Y + Vec3::X) * (GRAVITY * slab.chunks[0].mass),
+                origin: Origin::Inertia { step: None },
+                ..slab_contact(&slab, 0.0)
+            };
+            assert_eq!(
+                bears_on_contact(
+                    &slab,
+                    &WallState::new(&slab),
+                    &incident(&slab),
+                    &[false, true],
+                    &[0],
+                    &[frame],
+                ),
+                bears,
+                "normal {normal}"
+            );
+        }
     }
 
     /// A fixture physics step, s: the game's 64 Hz tick (fixture data).
