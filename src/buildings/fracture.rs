@@ -2737,28 +2737,31 @@ fn force_wrench(
     about: Vec3,
     force: impl Fn(&Load) -> Option<Vec3>,
 ) -> (Vec3, Vec3) {
-    let result = group
+    // Aggregate gravity and applied loads separately. Matching gravity/frame point terms
+    // then follow identical arithmetic with opposite signs, cancelling even on long groups.
+    let accumulate = |(force, moment): (DVec3, DVec3), (at, push): (Vec3, Vec3)| {
+        let push = push.as_dvec3();
+        (
+            force + push,
+            moment + (at.as_dvec3() - about.as_dvec3()).cross(push),
+        )
+    };
+    let gravity_wrench = group
         .iter()
         .map(|&c| {
             let chunk = &structure.chunks[c];
             (chunk.centroid, gravity * chunk.mass)
         })
-        .chain(
-            loads
-                .iter()
-                .filter(|load| group.binary_search(&load.chunk).is_ok())
-                .filter_map(|load| Some((load.at, force(load)?))),
-        )
-        // Matching gravity and frame forces must cancel before a rest reads their sign.
-        // f64 accumulation retains the supplied f32 products and their point couples.
-        .fold((DVec3::ZERO, DVec3::ZERO), |(force, moment), (at, push)| {
-            let push = push.as_dvec3();
-            (
-                force + push,
-                moment + (at.as_dvec3() - about.as_dvec3()).cross(push),
-            )
-        });
-    let result = (result.0.as_vec3(), result.1.as_vec3());
+        .fold((DVec3::ZERO, DVec3::ZERO), accumulate);
+    let applied_wrench = loads
+        .iter()
+        .filter(|load| group.binary_search(&load.chunk).is_ok())
+        .filter_map(|load| Some((load.at, force(load)?)))
+        .fold((DVec3::ZERO, DVec3::ZERO), accumulate);
+    let result = (
+        (gravity_wrench.0 + applied_wrench.0).as_vec3(),
+        (gravity_wrench.1 + applied_wrench.1).as_vec3(),
+    );
     assert!(
         result.0.is_finite() && result.1.is_finite(),
         "finite chunk weights and load forces have a finite resultant force and moment"
@@ -4270,6 +4273,33 @@ mod tests {
         );
         assert_eq!(changes.groups.len(), 1);
         assert_eq!(changes.groups[0].0, vec![0, 1]);
+    }
+
+    /// A long free-falling group has no residual torque either: adding all gravity terms
+    /// and then cancelling them one by one can invent a tipping moment even in f64.
+    /// Fixture: one hundred row chunks; rest-bearing decisions rely on exact paired cancellation.
+    #[test]
+    fn a_long_free_falling_group_has_no_rigid_wrench() {
+        let slab = unsupported_slab(100);
+        let group: Vec<usize> = (0..slab.chunks.len()).collect();
+        let loads = in_group_frames(
+            &slab,
+            &WallState::new(&slab),
+            &[slab_contact(&slab, 0.0)],
+            Vec3::ZERO,
+        );
+        assert_eq!(field(&slab, &group, &loads), (Vec3::ZERO, 0.0));
+        assert_eq!(
+            force_wrench(
+                &slab,
+                &group,
+                &loads,
+                Vec3::NEG_Y * GRAVITY,
+                Vec3::new(0.125, 0.25, -0.5),
+                |load| Some(load.press)
+            ),
+            (Vec3::ZERO, Vec3::ZERO)
+        );
     }
 
     /// A single occupied chunk has no seam to fail. Its contact may change its rigid motion
