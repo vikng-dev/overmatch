@@ -52,7 +52,7 @@ use bevy::prelude::*;
 use lightyear::core::time::Instant;
 use lightyear::link::RecvPayload;
 use lightyear::prelude::input::native::{ActionState, InputMarker};
-use lightyear::prelude::{Link, LocalTimeline};
+use lightyear::prelude::{Link, LocalTimeline, LocalTimelineSync};
 use serde::Deserialize;
 
 use super::battle::{BattlePhase, BattleState};
@@ -308,16 +308,19 @@ pub(crate) struct SimulateInput {
     fire_tick: u32,
     fire_interval: u32,
     clock: ScriptClock,
-    input_slot_seen: bool,
 }
 
-/// Waiting is bounded from launch; execution is bounded from its first released input.
+/// The launch phases in order, each a state the script really passes through. Waiting is bounded
+/// from launch; execution is bounded from its first released input.
 #[derive(Debug)]
 enum ScriptClock {
-    AwaitingRelease {
-        deadline: Duration,
-        fill_up_accounted: bool,
-    },
+    /// No input slot yet: not connected, or the own tank not replicated.
+    AwaitingSlot { deadline: Duration },
+    /// The slot is held; the replicated fill-up is not yet in the bound (no Battle snapshot, a
+    /// fill-up without a deadline, or a timeline still synchronizing).
+    AwaitingFillUp { deadline: Duration },
+    /// The bound holds the remaining fill-up, once; a later snapshot cannot renew it.
+    AwaitingRelease { deadline: Duration },
     Released {
         at: Duration,
         first_fire_logged: bool,
@@ -346,36 +349,66 @@ impl SimulateInput {
             range: script.range_m,
             fire_tick: script.fire_tick,
             fire_interval: script.fire_interval,
-            clock: ScriptClock::AwaitingRelease {
+            clock: ScriptClock::AwaitingSlot {
                 deadline: WATCHDOG_SLACK,
-                fill_up_accounted: false,
             },
-            input_slot_seen: false,
+        }
+    }
+
+    /// The input slot is held: the launch bound now waits on the fill-up. Logged once.
+    fn hold_slot(&mut self, now: Duration) {
+        if let ScriptClock::AwaitingSlot { deadline } = self.clock {
+            self.clock = ScriptClock::AwaitingFillUp { deadline };
+            info!("harness: input slot app_s={:.3}", now.as_secs_f64());
         }
     }
 
     /// DERIVED launch bound: startup slack plus the remaining replicated fill-up, added once
-    /// after this client has its input slot. No connection or no tank retains the startup bound;
-    /// a stale/moving deadline cannot continually renew it. Wrapped ticks use `SimTick`'s relation.
+    /// after this client has its input slot. `now` is the synchronized local tick, the deadline's
+    /// own domain: before sync it counts from this process's launch, and the remainder would read
+    /// the server's uptime. No connection or no tank retains the startup bound; a stale/moving
+    /// deadline cannot renew it. Wrapped ticks use `SimTick`'s relation. Combat seen before any
+    /// fill-up deadline (a late join) has no fill-up left to add.
     fn account_fill_up(&mut self, phase: BattlePhase, now: SimTick, tick: Duration) {
-        if !self.input_slot_seen {
+        let ScriptClock::AwaitingFillUp { deadline } = self.clock else {
             return;
-        }
-        if let ScriptClock::AwaitingRelease {
-            deadline,
-            fill_up_accounted,
-        } = &mut self.clock
-            && !*fill_up_accounted
-            && let BattlePhase::FillUp { ends_at: Some(end) } = phase
-        {
-            *deadline += tick * now.remaining_until(end);
-            *fill_up_accounted = true;
+        };
+        let remaining = match phase {
+            BattlePhase::FillUp { ends_at: Some(end) } => tick * now.remaining_until(end),
+            BattlePhase::Combat { .. } => Duration::ZERO,
+            // The fill-up has no deadline before the first player, and results hold no tank: the
+            // startup bound stands until a snapshot names one.
+            BattlePhase::FillUp { ends_at: None } | BattlePhase::Results { .. } => return,
+        };
+        self.clock = ScriptClock::AwaitingRelease {
+            deadline: deadline + remaining,
+        };
+    }
+
+    /// Combat tick zero: the first input the synchronized timeline files.
+    fn release(&mut self, now: Duration) -> bool {
+        match self.clock {
+            ScriptClock::AwaitingSlot { .. } => {
+                unreachable!("the input slot is held before its script is released")
+            }
+            ScriptClock::AwaitingFillUp { .. } | ScriptClock::AwaitingRelease { .. } => {
+                self.clock = ScriptClock::Released {
+                    at: now,
+                    first_fire_logged: false,
+                };
+                true
+            }
+            ScriptClock::Released { .. } => false,
         }
     }
 
     fn timeout(&self, now: Duration, tick: Duration) -> Option<ScriptTimeout> {
         match self.clock {
-            ScriptClock::AwaitingRelease { deadline, .. } if now > deadline => {
+            ScriptClock::AwaitingSlot { deadline }
+            | ScriptClock::AwaitingFillUp { deadline }
+            | ScriptClock::AwaitingRelease { deadline }
+                if now > deadline =>
+            {
                 Some(ScriptTimeout::Release)
             }
             // DERIVED release bound: script length × fixed timestep + scheduling slack. It keeps
@@ -422,6 +455,7 @@ pub(crate) fn buffer_input(
     mut sim: ResMut<SimulateInput>,
     time: Res<Time<Real>>,
     timeline: Res<LocalTimeline>,
+    sync: Res<LocalTimelineSync>,
     battles: Query<&BattleState>,
     mut slots: Query<&mut ActionState<TankCommand>, With<InputMarker<TankCommand>>>,
 ) {
@@ -435,10 +469,7 @@ pub(crate) fn buffer_input(
         }
     };
     let now = time.startup().elapsed();
-    if !sim.input_slot_seen {
-        sim.input_slot_seen = true;
-        info!("harness: input slot app_s={:.3}", now.as_secs_f64());
-    }
+    sim.hold_slot(now);
     let battle = match battles.single() {
         Ok(battle) => battle,
         // The tank and Battle snapshots may arrive separately. Wait for the release fact.
@@ -451,15 +482,14 @@ pub(crate) fn buffer_input(
         }
     };
     // The same predicate as `battle::hold_commands`; no local countdown releases a command.
-    if !battle.is_combat() {
+    // Lightyear files a slot's command only from a synchronized timeline (`buffer_action_state`
+    // reads `SyncedLocalTimeline`), so a tick spent before sync would never reach the wire:
+    // combat tick zero waits for both.
+    if !battle.is_combat() || !sync.is_synced() {
         state.0 = TankCommand::default();
         return;
     }
-    if matches!(sim.clock, ScriptClock::AwaitingRelease { .. }) {
-        sim.clock = ScriptClock::Released {
-            at: now,
-            first_fire_logged: false,
-        };
+    if sim.release(now) {
         info!(
             "harness: released script_tick=0 client_tick={} app_s={:.3}",
             timeline.tick().0,
@@ -520,17 +550,20 @@ pub(crate) fn simulate_watchdog(
     time: Res<Time<Real>>,
     fixed: Res<Time<Fixed>>,
     timeline: Res<LocalTimeline>,
+    sync: Res<LocalTimelineSync>,
     battles: Query<&BattleState>,
     mut exit: MessageWriter<AppExit>,
 ) {
     match battles.single() {
-        Ok(battle) => simulate.account_fill_up(
+        // Only a synchronized local tick shares the replicated deadline's domain; until then the
+        // launch bound still runs.
+        Ok(battle) if sync.is_synced() => simulate.account_fill_up(
             battle.phase,
             SimTick::new(timeline.tick().0),
             fixed.timestep(),
         ),
         // The Battle has not replicated yet; the launch bound still runs.
-        Err(bevy::ecs::query::QuerySingleError::NoEntities(_)) => {}
+        Ok(_) | Err(bevy::ecs::query::QuerySingleError::NoEntities(_)) => {}
         Err(bevy::ecs::query::QuerySingleError::MultipleEntities(_)) => {
             panic!("a peer holds at most one replicated Battle")
         }
@@ -974,12 +1007,15 @@ mod tests {
     }
 
     /// Measurement scripts rely on combat tick zero reaching the wire: a held input slot must
-    /// consume neither the script nor its first click. Fixture ticks are arbitrary.
+    /// consume neither the script nor its first click, and neither may an unsynchronized
+    /// timeline, whose ticks lightyear never files (a late joiner's first snapshot is already
+    /// combat). Fixture ticks are arbitrary.
     #[test]
     fn held_ticks_advance_nothing_and_release_writes_tick_zero() {
         use super::super::battle::{BattlePhase, BattleState, LateJoin};
         use crate::sim_tick::SimTick;
         use bevy::prelude::*;
+        use lightyear::prelude::LocalTimelineSync;
         use lightyear::prelude::input::native::{ActionState, InputMarker};
 
         let mut app = App::new();
@@ -989,6 +1025,7 @@ mod tests {
         .insert_resource(Time::<Real>::default())
         .insert_resource(Time::<Fixed>::from_hz(64.0))
         .insert_resource(lightyear::prelude::LocalTimeline::default())
+        .init_resource::<LocalTimelineSync>()
         .add_systems(FixedPreUpdate, super::buffer_input);
         let slot = app
             .world_mut()
@@ -1019,6 +1056,15 @@ mod tests {
             late_join: LateJoin::Closed,
         };
         app.world_mut().run_schedule(FixedPreUpdate);
+        assert_eq!(
+            app.world().resource::<SimulateInput>().ticks,
+            0,
+            "combat on an unsynchronized timeline files nothing"
+        );
+        app.world_mut()
+            .resource_mut::<LocalTimelineSync>()
+            .set_synced(true);
+        app.world_mut().run_schedule(FixedPreUpdate);
         assert_eq!(app.world().resource::<SimulateInput>().ticks, 1);
         assert!(
             app.world()
@@ -1039,11 +1085,11 @@ mod tests {
     }
 
     /// The smoke and workload runners need two finite bounds. Repeated countdown snapshots must
-    /// not renew startup, and a released script's deadline must scale with its own run length.
-    /// Fixture spans cross tick wrap and use arbitrary wall times.
+    /// not renew startup, a late join adds no fill-up, and a released script's deadline must
+    /// scale with its own run length. Fixture spans cross tick wrap and use arbitrary wall times.
     #[test]
     fn watchdog_bounds_launch_once_and_execution_from_release() {
-        use super::super::battle::BattlePhase;
+        use super::super::battle::{BattlePhase, LateJoin};
         use crate::sim_tick::{SimTick, TickSpan};
         let tick = Duration::from_secs_f64(1.0 / 64.0);
         let mut sim = SimulateInput::new(&Script::parse("(ticks: 6400)").unwrap());
@@ -1057,7 +1103,13 @@ mod tests {
             sim.timeout(Duration::from_secs(21), tick),
             Some(ScriptTimeout::Release)
         );
-        sim.input_slot_seen = true;
+        sim.hold_slot(Duration::from_secs(1));
+        // A fill-up that has not started yet names no deadline to add.
+        sim.account_fill_up(BattlePhase::FillUp { ends_at: None }, now, tick);
+        assert_eq!(
+            sim.timeout(Duration::from_secs(21), tick),
+            Some(ScriptTimeout::Release)
+        );
         sim.account_fill_up(fill_up, now, tick);
         assert_eq!(sim.timeout(Duration::from_secs(29), tick), None);
         sim.account_fill_up(fill_up, now, tick);
@@ -1065,10 +1117,31 @@ mod tests {
             sim.timeout(Duration::from_secs(31), tick),
             Some(ScriptTimeout::Release)
         );
-        sim.clock = ScriptClock::Released {
-            at: Duration::from_secs(60),
-            first_fire_logged: false,
-        };
+        let mut late = SimulateInput::new(&Script::parse("(ticks: 6400)").unwrap());
+        late.hold_slot(Duration::from_secs(1));
+        late.account_fill_up(
+            BattlePhase::Combat {
+                ends_at: now.after(TickSpan::try_from(640).expect("fixture span")),
+                late_join: LateJoin::Closed,
+            },
+            now,
+            tick,
+        );
+        assert!(matches!(late.clock, ScriptClock::AwaitingRelease { .. }));
+        assert_eq!(
+            late.timeout(Duration::from_secs(21), tick),
+            Some(ScriptTimeout::Release),
+            "a late join adds no fill-up to the launch bound"
+        );
+        assert!(sim.release(Duration::from_secs(60)));
+        assert!(!sim.release(Duration::from_secs(61)), "released once");
+        assert!(matches!(
+            sim.clock,
+            ScriptClock::Released {
+                at,
+                first_fire_logged: false
+            } if at == Duration::from_secs(60)
+        ));
         assert_eq!(sim.timeout(Duration::from_secs(179), tick), None);
         assert_eq!(
             sim.timeout(Duration::from_secs(181), tick),
