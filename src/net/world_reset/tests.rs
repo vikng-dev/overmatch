@@ -309,9 +309,12 @@ fn record_arrival_order_cannot_mix_worlds_or_consume_a_snapshot_before_construct
         );
         let previous_construction = roots(app.world_mut());
         app.world_mut().despawn(battle);
-        let old_wire_entities: Vec<_> = app.world_mut()
-            .query_filtered::<Entity, Or<(With<WallLedger>, With<DestructionLedger>, With<DebrisPose>)>>()
-            .iter(app.world()).collect();
+        type OldWire = Or<(With<WallLedger>, With<DestructionLedger>, With<DebrisPose>)>;
+        let old_wire_entities: Vec<_> = app
+            .world_mut()
+            .query_filtered::<Entity, OldWire>()
+            .iter(app.world())
+            .collect();
         for entity in old_wire_entities {
             app.world_mut().despawn(entity);
         }
@@ -442,6 +445,23 @@ fn battle(world: &mut World) -> Option<BattleState> {
     world.query::<&BattleState>().iter(world).next().copied()
 }
 
+/// The authority's selected generation and every ledger it publishes name the current Battle.
+fn assert_authority_generation(server: &mut App, number: u32) {
+    assert_eq!(
+        server.world().resource::<AuthorityWorld>().0,
+        WorldGeneration(number)
+    );
+    type Ledgers = Or<(With<WallLedger>, With<DestructionLedger>)>;
+    assert!(
+        server
+            .world_mut()
+            .query_filtered::<&WorldGeneration, Ledgers>()
+            .iter(server.world())
+            .all(|generation| *generation == WorldGeneration(number)),
+        "authority publication carries the current Battle's nonempty generation"
+    );
+}
+
 /// FRESH BATTLE EQUALS STARTUP BY COUNT AND IDENTITY, on authority, connected client and late
 /// joiners. The game's damage model: a wall chunk and trunk leave their map roots during combat;
 /// the next fill-up replaces them and every segment pool. Keeping a ledger, a loose body, or
@@ -477,11 +497,7 @@ fn a_destroyed_world_is_startup_again_at_next_fill_up_over_real_udp() {
         }
         std::thread::sleep(std::time::Duration::from_micros(300));
         let state = battle(server.world_mut()).unwrap();
-        assert_eq!(
-            server.world().resource::<AuthorityWorld>().0,
-            WorldGeneration(state.number)
-        );
-        assert!(server.world_mut().query_filtered::<&WorldGeneration, Or<(With<WallLedger>, With<DestructionLedger>)>>().iter(server.world()).all(|generation| *generation == WorldGeneration(state.number)), "authority publication carries the current Battle's nonempty generation");
+        assert_authority_generation(&mut server, state.number);
         if fresh.is_none() {
             fresh = Some(census(server.world_mut()));
         }
@@ -637,7 +653,8 @@ fn a_destroyed_world_is_startup_again_at_next_fill_up_over_real_udp() {
                     assert!(client.world().resource::<WallRecord>().entries.is_empty());
                 }
                 eprintln!(
-                    "MEASURED: world cycle rebuilt {} map identities and {} colliders on authority and {} clients; combat and fill-up joins isolated at fixture step {step}",
+                    "MEASURED: world cycle rebuilt {} map identities and {} colliders on authority \
+                     and {} clients; combat and fill-up joins isolated at fixture step {step}",
                     fresh.as_ref().unwrap().identities.len(),
                     fresh.as_ref().unwrap().colliders,
                     clients.len()

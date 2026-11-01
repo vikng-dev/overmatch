@@ -1,10 +1,10 @@
 //! The game's damage model: the match score, game state only — per combatant, knockouts, losses
-//! and when its
-//! knocked-out life may respawn. The server holds it on one replicated entity ([`Scoreboard`]),
-//! opens a combatant's standing when it first enters combat, and changes it only at the authority's knockout
-//! transition ([`TankKnockout`]): one loss to the knocked-out tank's combatant, one knockout to the
-//! combatant whose round decided it ([`Credit`]), and the respawn's opening the mode's wait
-//! ([`RespawnWait`]) later. Clients read the board and derive nothing; [`rank`] orders it.
+//! and when its knocked-out life may respawn. The server holds it on one replicated entity
+//! ([`Scoreboard`]), opens a combatant's standing when it first enters combat, and changes it
+//! only at the authority's knockout transition ([`TankKnockout`]): one loss to the knocked-out
+//! tank's combatant, one knockout to the combatant whose round decided it ([`Credit`]), and the
+//! respawn's opening the mode's wait ([`RespawnWait`]) later. Clients read the board and derive
+//! nothing; [`rank`] orders it.
 
 use std::cmp::Ordering;
 use std::time::Duration;
@@ -311,7 +311,8 @@ fn score_knockout(
         "server startup spawns exactly one scoreboard and Battle before any combatant spawns",
     );
     if !battle.is_combat() {
-        // The phase boundary owns scoring; fixtures and pending consequences cannot score outside combat.
+        // The phase boundary owns scoring; fixtures and pending consequences cannot score outside
+        // combat.
         return;
     }
     let standing = board
@@ -326,7 +327,10 @@ fn score_knockout(
         Credit::Shooter(shooter) => {
             board
                 .standing_mut(shooter)
-                .expect("a round's combatant entered combat before it fired, and a standing outlives its tanks")
+                .expect(
+                    "a round's combatant entered combat before it fired, and a standing outlives \
+                     its tanks",
+                )
                 .knockouts += 1;
         }
         Credit::NoShooter | Credit::OwnRound => {}
