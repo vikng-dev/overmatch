@@ -168,11 +168,20 @@ const STEER_FULL_DEG: f32 = 20.0;
 const LOOKAHEAD_M: f32 = 10.0;
 /// A leg that has not reached its end in this long reverses anyway, s (ASSUMED).
 const LEG_TIMEOUT_S: f32 = 25.0;
-/// The deceleration a full reverse throttle is assumed to give, m/s²: a leg ends early by the
-/// distance the tank needs to stop at it. Reversing only at the lane's end overran it by up to
-/// 12.0 m (MEASURED), about 1 m/s² from the speeds the HUD showed (DERIVED); the bound sits under
-/// that, and the worst overrun with it is 0.1 m (MEASURED, the summary lines).
-const BRAKE_MPS2: f32 = 0.8;
+/// DERIVED stopping advance (m, signed along the lane): full-brake stopping distance plus
+/// travel during the command slew. The estimate holds speed during that transition; it is a
+/// controller lookahead, and the evidence still checks actual lane overruns.
+fn stopping_advance(speed: f32, deceleration: f32) -> f32 {
+    if speed == 0.0 {
+        return 0.0;
+    }
+    if deceleration <= 0.0 {
+        // These brakes cannot arrest the downslope load: reverse intent immediately.
+        return f32::INFINITY.copysign(speed);
+    }
+    let reversal_secs = 2.0 / crate::track::drive::DRIVE_SLEW_PER_SECOND;
+    speed * speed.abs() / (2.0 * deceleration) + speed * reversal_secs
+}
 
 // ---- The evidence ----
 
@@ -542,6 +551,8 @@ fn drive(
     time: Res<Time<Virtual>>,
     plan: Option<Res<Plan>>,
     grid: Option<Res<HeightGrid>>,
+    blueprint: Res<crate::bake::TankBlueprint>,
+    gear: Res<crate::track::sim::TrackGear>,
     mut runs: ResMut<Runs>,
     mut tanks: Query<(
         &BattleSlot,
@@ -622,10 +633,16 @@ fn drive(
 
         let here = Vec2::new(position.0.x, position.0.z);
         let along = script.lane.progress(here) * script.lane.length();
-        // Reverse where the tank, braking at the assumed rate from its own speed, stops at the
-        // lane's end.
+        // Reverse using the vehicle's braking capability and the grade across its hull footprint.
         let speed = Vec2::new(velocity.0.x, velocity.0.z).dot(script.lane.axis());
-        let stop = speed * speed.abs() / (2.0 * BRAKE_MPS2);
+        let probe = blueprint.spec.inertia_extents.2 * 0.5;
+        let grade = grid.as_deref().map_or(0.0, |grid| {
+            let front = here + script.lane.axis() * probe;
+            let rear = here - script.lane.axis() * probe;
+            (grid.height_at(front.x, front.y) - grid.height_at(rear.x, rear.y)) / (2.0 * probe)
+        }); // A slab world has zero grade.
+        let grade_sine = grade / (1.0 + grade * grade).sqrt();
+        let stop = stopping_advance(speed, gear.braking_deceleration(grade_sine, speed.signum()));
         let timed_out = t - run.leg_since > LEG_TIMEOUT_S;
         let next = match run.leg {
             Leg::Forward if along + stop >= script.lane.length() || timed_out => Leg::Reverse,
@@ -1135,6 +1152,18 @@ mod tests {
 #[cfg(test)]
 mod ownership_tests {
     use super::*;
+
+    /// The script must anticipate less travel with stronger brakes, preserve reverse symmetry,
+    /// and request reversal immediately on a grade with no finite stopping distance.
+    #[test]
+    fn stopping_lookahead_uses_current_speed_and_braking_capability() {
+        let weak = stopping_advance(4.0, 1.0);
+        let strong = stopping_advance(4.0, 2.0);
+        assert!(strong < weak);
+        assert_eq!(stopping_advance(-4.0, 1.0), -weak);
+        assert_eq!(stopping_advance(0.0, 0.0), 0.0);
+        assert_eq!(stopping_advance(1.0, -0.1), f32::INFINITY);
+    }
 
     /// In the game's damage model, evidence follows the struck volume's owner even when the
     /// face is far from that owner's origin; a nearby environment face stays environment.

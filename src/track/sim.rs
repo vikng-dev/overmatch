@@ -261,6 +261,21 @@ impl TrackGear {
         &self.trans
     }
 
+    /// DERIVED full service-brake deceleration along the direction of motion (m/s^2).
+    /// The brakes and material pair bound force; hull mass plus both reflected belt inertias
+    /// must be arrested. A nonpositive result names a grade these brakes cannot hold.
+    pub(crate) fn braking_deceleration(&self, grade_sine: f32, direction: f32) -> f32 {
+        let grip = self
+            .params
+            .grip
+            .expect("admitted running gear has a material-pair contact law");
+        let weight = 2.0 * grip.side_weight;
+        let mass = weight / super::derive::G;
+        let normal = weight * (1.0 - grade_sine * grade_sine).sqrt();
+        let available = (2.0 * self.trans.brake_capacity_n).min(grip.on_ground() * normal);
+        (available + direction * weight * grade_sine) / (mass + 2.0 * self.params.inertia)
+    }
+
     /// The chain-clamped droop (m): the maximum wheel-travel knot — how far below its rest line a
     /// road wheel may drop. `0.0` when the profile is empty. The track view spans its cosmetic
     /// wheels this far below rest so a fully-drooped wheel's drawn belt wrap stays feasible at the
@@ -827,6 +842,24 @@ fn apply_track_forces(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The controller's deceleration estimate must scale with the whole vehicle rather than
+    /// retaining a force or mass from its fixture. A brake-only or mass-only scale mutant fails.
+    #[test]
+    fn braking_capability_is_invariant_under_uniform_vehicle_scaling() {
+        let mut app = App::new();
+        app.add_plugins((crate::bake::plugin, sim_plugin));
+        app.world_mut().run_schedule(Startup);
+        app.world_mut().run_schedule(PreUpdate);
+        let mut gear = app.world_mut().resource_mut::<TrackGear>();
+        let before = gear.braking_deceleration(0.1, -1.0);
+        let scale = 3.0; // Fixture scale, dimensionless.
+        gear.params.inertia *= scale;
+        gear.params.grip.as_mut().unwrap().side_weight *= scale;
+        gear.trans.brake_capacity_n *= scale;
+        assert!((gear.braking_deceleration(0.1, -1.0) - before).abs() < 1e-5);
+        assert!(gear.braking_deceleration(0.1, 1.0) > gear.braking_deceleration(0.1, -1.0));
+    }
 
     /// Both force routes must retain their authored side's geometry. A mutant that copies the
     /// right loop, placement or travel profile would make the asymmetric fixture indistinguishable.
