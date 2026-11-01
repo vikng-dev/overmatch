@@ -380,7 +380,10 @@ impl MarkBuilder<'_, '_> {
             seed(strike),
             strike.feedback,
         )
-        .expect("the bake bounds mark coordinates and resolved directions are finite and nonzero");
+        .expect(
+            "the bake bounds mark coordinates, resolved directions are finite and nonzero, and \
+             the round registry refuses a calibre that is not finite and positive",
+        );
         Some((root, mark))
     }
 }
@@ -405,10 +408,11 @@ pub(crate) fn offline_plugin(app: &mut App) {
 }
 
 fn record_local(strike: On<ShellStrike>, builder: MarkBuilder, mut records: Query<&mut HullMarks>) {
-    if let Some((root, mark)) = builder.mark(&strike)
-        && let Ok(mut record) = records.get_mut(root)
-    {
-        record.record(mark);
+    if let Some((root, mark)) = builder.mark(&strike) {
+        records
+            .get_mut(root)
+            .expect("MarkBuilder::mark returns only a root that keeps HullMarks")
+            .record(mark);
     }
 }
 

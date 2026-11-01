@@ -128,8 +128,9 @@ Read against the three lenses and for correctness. No P1 or P2 found. Weighed:
 
 P3s:
 - Fixed: the drive HUD read the first of several controlled tanks; it now uses `controlled_one`.
-- Listed: `HullMark::pack` drops an invalid calibre through `.ok()`. `MarkBuilder::mark` then
-  panics on it, but its `expect` names only coordinates and directions.
+- Fixed: `HullMark::pack` turns an invalid calibre into `None` with `.ok()`, and the `expect` in
+  `MarkBuilder::mark` named only coordinates and directions. It now names the load-validated
+  calibre too. The local recorder's root lookup, which could fail silently, is an `expect`.
 - Listed: `vfx::verify_vfx_paths` reads every texture whole just to refuse an empty file or an LFS
   pointer.
 - Listed: `rounds::effects` `resolve` is left unformatted. rustfmt gives up on it, and
