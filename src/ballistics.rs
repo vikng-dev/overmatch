@@ -725,12 +725,18 @@ impl ShotDose {
 }
 
 /// The shown points ([`ShotDose::shown_losses`]) this shot has taken so far from pools that belong
-/// to a tank (a [`VolumeOf`] node): what a hit confirmation counts, so the shooter's marker follows
-/// the struck tank's display. A pool nothing owns — a tree's — is dosed the same way and counts for
-/// nothing here.
-fn owned_losses(dose: &ShotDose, owners: &Query<&VolumeOf>) -> u32 {
+/// to a tank other than `shooter` (a [`VolumeOf`] node): what a hit confirmation counts, so the
+/// shooter's marker follows the struck tank's display. A pool nothing owns — a tree's — is dosed the
+/// same way and counts for nothing here. Neither does the shooter's own: the game's damage-model
+/// fields reach every volume regardless of owner ([`walk_field`]), so a burst near the firing tank
+/// can dose its pools, and that dose is no hit on anyone.
+fn owned_losses(dose: &ShotDose, owners: &Query<&VolumeOf>, shooter: Option<Entity>) -> u32 {
     dose.shown_losses()
-        .filter(|(volume, _)| owners.contains(*volume))
+        .filter(|(volume, _)| {
+            owners
+                .get(*volume)
+                .is_ok_and(|owner| Some(owner.tank()) != shooter)
+        })
         .map(|(_, lost)| lost)
         .sum()
 }
@@ -2375,7 +2381,8 @@ fn integrate_projectiles(
         };
         let (marks_from, emptied_from) = (shell.marks.log.len(), shell.dose.emptied().len());
         let (cones_from, burst_before) = (shell.spall.cones.len(), shell.projectile.fuze.burst());
-        let owned_before = owned_losses(shell.dose, &world.owners);
+        let shooter = shell.source.map(|source| source.tank);
+        let owned_before = owned_losses(shell.dose, &world.owners, shooter);
         let step = march_shell_step(
             &mut shell,
             &world,
@@ -2445,7 +2452,7 @@ fn integrate_projectiles(
             && !damage_report.0
             && let Some(shot) = shot
         {
-            let amount = owned_losses(shell.dose, &world.owners) - owned_before;
+            let amount = owned_losses(shell.dose, &world.owners, shooter) - owned_before;
             if amount > 0 {
                 commands.trigger(ShellDamage {
                     shot: shot.0,
@@ -3659,6 +3666,54 @@ mod tests {
             "the pool stops at zero"
         );
         assert!(world.get::<ComponentHealth>(target).unwrap().is_empty());
+    }
+
+    /// The game's damage model: a hit confirmation counts the shown points a shot took from another
+    /// tank's pools only. Fields reach the firing tank's own pools as they reach any other, so a
+    /// mutant that counts every owned pool would confirm a hit on a self-dose; the shooter's marker
+    /// relies on it (`ShellDamage`). FIXTURE DATA: three 30-point pools, 1 reference-mm each.
+    #[test]
+    fn a_hit_confirmation_never_counts_the_shooters_own_pools() {
+        let mut world = World::new();
+        let (shooter, struck) = (world.spawn_empty().id(), world.spawn_empty().id());
+        let own = world
+            .spawn((ComponentHealth::full(30), VolumeOf(shooter)))
+            .id();
+        let theirs = world
+            .spawn((ComponentHealth::full(30), VolumeOf(struck)))
+            .id();
+        let unowned = world.spawn(ComponentHealth::full(30)).id();
+        world.spawn(ShotDose::default());
+        let confirmed = |world: &mut World, boxes: Vec<Entity>| -> (u32, u32) {
+            world
+                .run_system_once(
+                    move |mut shot: Query<&mut ShotDose>,
+                          mut health: Query<&mut ComponentHealth>,
+                          owners: Query<&VolumeOf>| {
+                        let mut shot = shot.single_mut().unwrap();
+                        for &address in &boxes {
+                            shot.add(address, 1.0, FIXTURE_CONTEXT);
+                        }
+                        shot.settle(&mut health, true, 0);
+                        (
+                            owned_losses(&shot, &owners, Some(shooter)),
+                            owned_losses(&shot, &owners, None),
+                        )
+                    },
+                )
+                .unwrap()
+        };
+        let lost = shown_lost(30 * POOL_UNITS_PER_HP, pool_units(1.0));
+        assert_eq!(
+            confirmed(&mut world, vec![own, unowned]),
+            (0, lost),
+            "a self-dose and an unowned pool's dose confirm no hit for the shooter"
+        );
+        assert_eq!(
+            confirmed(&mut world, vec![theirs]).0,
+            lost,
+            "another tank's lost points confirm the hit"
+        );
     }
 
     /// In the game's damage model a settle returns the pool units it removed from every box it
