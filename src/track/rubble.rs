@@ -30,14 +30,15 @@
 //!   in `FixedUpdate` reads the poses the last step wrote.
 //!
 //! **One reaction law for every recipient, from its construction and motion.** The belt's
-//! support is an explicit penalty spring read at the tick-start pose. A dynamic body the explicit
-//! step integrates that spring against stably, by its own mass and inertia at the patches and
-//! their stiffness from every source this tick ([`EXPLICIT_LIMIT`]), takes the whole opposite
-//! reaction, `−(normal × load + traction) × dt`, whatever it is and whether or not it closes: a
-//! hull under another tank's belt, a heavy slab. A lighter one is a *piece*: the explicit spring
-//! would drive it past the belt within the step, so Avian alone resolves what holds it and its
-//! side is clamped, deliberately asymmetric with the belt's support force: a resting piece
-//! takes no normal impulse. That clamp does not conserve the belt-piece pair's momentum.
+//! support is an explicit penalty spring and damper read at the tick-start pose. A dynamic body
+//! the explicit step integrates them against stably ([`explicit_recipients`]: the connected
+//! system of its source and the source's other recipients, by every patch's stiffness, damping
+//! and both bodies' inertia) takes the whole opposite reaction, `−(normal × load + traction) ×
+//! dt`, whatever it is and whether or not it closes: a hull under another tank's belt, a heavy
+//! slab. Any other is a *piece*: the explicit spring would drive it past the belt within the
+//! step, so Avian alone resolves what holds it and its side is clamped, deliberately asymmetric
+//! with the belt's support force: a resting piece takes no normal impulse. That clamp does not
+//! conserve the belt-piece pair's momentum.
 //! - *The tank's side* is the track law: a piece supports and grips the tank as ground does, with
 //!   the slip and the support damping measured against the piece's own velocity at the contact
 //!   ([`RubbleBodies::velocity_at`]).
@@ -780,9 +781,36 @@ fn reaction_root(parents: &[usize], mut index: usize) -> usize {
     index
 }
 
-/// A conservative trace bound for each connected system: every patch contributes both bodies'
-/// inverse response. Summing the component keeps a shared source's springs from being judged
-/// independently; the trace bounds its stiffest coupled rigid mode.
+/// The explicit step's two rates on a spring/damper system (module doc, [`EXPLICIT_LIMIT`]):
+/// `dt² k / m` and `dt c / m`, each summed over its patches' inverse responses.
+#[derive(Clone, Copy, Default)]
+struct Rates {
+    spring: f32,
+    damper: f32,
+}
+
+impl Rates {
+    fn add(&mut self, contact: &BeltContact, inverse: f32, dt: f32) {
+        self.spring += contact.stiffness * dt * dt * inverse;
+        self.damper += contact.damping * dt * inverse;
+    }
+
+    /// Stable: DERIVED from the amplification matrix, `spring + 2 damper < 4`. A damper rate
+    /// between 1 and 2 still turns a closing velocity back within the step, `v' = v (1 −
+    /// damper)`, at a smaller speed: no energy is created, but an overdamped pair can part.
+    fn explicit(self) -> bool {
+        self.spring + 2.0 * self.damper < EXPLICIT_LIMIT
+    }
+}
+
+/// Which dynamic recipients take the whole opposite reaction: those of each connected
+/// spring/damper system whose trace bound passes [`Rates::explicit`]. A system is a dynamic
+/// source with every recipient it presses; a clamped recipient's spring, which the source
+/// still takes whole, counts on the source's side alone. A recipient that fails on its own
+/// patches is clamped first, so one light piece leaves its source's other recipients to be
+/// judged without it; a system still failing clamps all of them. The trace bounds the stiffest
+/// rigid mode. The source's field and fixed-construction springs are not counted: with them,
+/// two parked hulls read over the limit and the clamp would give the lower one no reaction.
 fn explicit_recipients(
     bodies: &RubbleBodies,
     dynamic: &[(&BeltContact, usize, Entity, BeltSource, f32)],
@@ -801,34 +829,67 @@ fn explicit_recipients(
             .binary_search(&entity)
             .expect("every reaction endpoint is indexed")
     };
-    let mut parents: Vec<_> = (0..entities.len()).collect();
-    let mut rates = vec![0.0; entities.len()];
+    let receiver_inverse = |contact: &BeltContact, slot: usize| {
+        bodies.bodies[slot]
+            .effective_mass(contact.point, contact.normal)
+            .recip()
+    };
+    let mut own = vec![Rates::default(); bodies.bodies.len()];
     for &(contact, slot, _, source, _) in dynamic {
-        let receiver = &bodies.bodies[slot];
-        let r = index(receiver.entity);
-        let source_inverse = source.inverse_at(contact.point, contact.normal);
-        // A fully fixed source imposes its motion; it couples no recipients to one another.
-        if source.inertia.inverse_mass != Vec3::ZERO || source.inertia.inverse_inertia != Mat3::ZERO
-        {
-            let a = reaction_root(&parents, r);
-            let b = reaction_root(&parents, index(source.entity));
-            parents[b] = a;
+        let inverse =
+            source.inverse_at(contact.point, contact.normal) + receiver_inverse(contact, slot);
+        own[slot].add(contact, inverse, dt);
+    }
+    let mut explicit: Vec<bool> = own.iter().map(|rates| rates.explicit()).collect();
+    loop {
+        let mut parents: Vec<_> = (0..entities.len()).collect();
+        let mut rates = vec![Rates::default(); entities.len()];
+        for &(contact, slot, _, source, _) in dynamic {
+            let source_inverse = source.inverse_at(contact.point, contact.normal);
+            if !explicit[slot] {
+                rates[index(source.entity)].add(contact, source_inverse, dt);
+                continue;
+            }
+            let r = index(bodies.bodies[slot].entity);
+            // A fully fixed source imposes its motion; it couples no recipients to one another.
+            if source.inertia.inverse_mass != Vec3::ZERO
+                || source.inertia.inverse_inertia != Mat3::ZERO
+            {
+                let a = reaction_root(&parents, r);
+                let b = reaction_root(&parents, index(source.entity));
+                parents[b] = a;
+            }
+            rates[r].add(
+                contact,
+                source_inverse + receiver_inverse(contact, slot),
+                dt,
+            );
         }
-        rates[r] += (contact.stiffness * dt * dt + 2.0 * contact.damping * dt)
-            * (source_inverse
-                + receiver
-                    .effective_mass(contact.point, contact.normal)
-                    .recip());
+        let mut totals = vec![Rates::default(); entities.len()];
+        for (i, rate) in rates.into_iter().enumerate() {
+            let total = &mut totals[reaction_root(&parents, i)];
+            total.spring += rate.spring;
+            total.damper += rate.damper;
+        }
+        let failing = |slot: usize| {
+            explicit[slot]
+                && !totals[reaction_root(&parents, index(bodies.bodies[slot].entity))].explicit()
+        };
+        let roots: Vec<usize> = (0..bodies.bodies.len())
+            .filter(|&slot| failing(slot))
+            .map(|slot| reaction_root(&parents, index(bodies.bodies[slot].entity)))
+            .collect();
+        if roots.is_empty() {
+            return explicit;
+        }
+        // Every recipient already failing alone was clamped before the first pass, so a failing
+        // system clamps all its explicit recipients.
+        for (whole, body) in explicit.iter_mut().zip(&bodies.bodies) {
+            if roots.contains(&reaction_root(&parents, index(body.entity))) {
+                *whole = false;
+            }
+        }
     }
-    let mut totals = vec![0.0; entities.len()];
-    for (i, rate) in rates.into_iter().enumerate() {
-        totals[reaction_root(&parents, i)] += rate;
-    }
-    bodies
-        .bodies
-        .iter()
-        .map(|b| totals[reaction_root(&parents, index(b.entity))] < EXPLICIT_LIMIT)
-        .collect()
 }
 
 /// One impulse a dynamic piece took: `impulse` (N·s, world) at `point`, through `collider`, from
@@ -855,7 +916,8 @@ fn source_force(contact: &BeltContact) -> Vec3 {
 
 /// The explicit spring/damper stability limit. RESOLUTION: symplectic Euler with explicit
 /// damping is stable while `dt² k/m + 2 dt c/m < 4` (DERIVED from its amplification matrix).
-/// The sum over every patch is a trace bound on the stiffest recipient rigid mode.
+/// The sum over a system's patches is a trace bound on its stiffest rigid mode
+/// ([`Rates::explicit`]).
 const EXPLICIT_LIMIT: f32 = 4.0;
 
 /// Every dynamic recipient's side of `contacts`, each with its source body (module doc), by one law for every body: the
@@ -1685,8 +1747,10 @@ mod tests {
         }
     }
 
-    /// A damped support must not add separation speed to a closing recipient. Driving and
-    /// moving-structure loads rely on the stability verdict including the damper.
+    /// A damped support must not return more speed than came in to a closing recipient the
+    /// unstable band clamps. Driving and moving-structure loads rely on the stability verdict
+    /// including the damper; a stable band with a damper rate over 1 still parts the pair at a
+    /// lower speed ([`Rates::explicit`]).
     /// FIXTURE: k=2 MN/m, c=100 kN s/m, penetration=1 cm, closing=1 m/s at 64 Hz.
     /// DERIVED: the old undamped gate passes both 500 kg and 200 kg and returns 2.75 and
     /// 8.375 m/s separation; the implicit clamp stops at the stationary belt instead.
@@ -1815,6 +1879,80 @@ mod tests {
                     speed.abs() < 1e-5,
                     "pair must take the implicit clamp: {speed}"
                 );
+            })
+            .unwrap();
+    }
+
+    /// One light piece under a belt is clamped on its own patches; it must not move its source's
+    /// other recipients out of the whole reaction. Driving relies on a slab under a tank carrying
+    /// that tank's load whatever else lies under the belt. FIXTURE (the Claude review's): a 57 t
+    /// source; a 2 t slab at rest under a 2 MN/m, 100 kN s/m patch pressing 120 kN; a 16 kg
+    /// brick under a 0.2 MN/m, 10 kN s/m patch. DERIVED rates: slab 1.87, brick 22.6.
+    #[test]
+    fn a_light_piece_leaves_a_co_sourced_slab_its_whole_reaction() {
+        let mut app = physics();
+        let slab = piece(&mut app, 0.0, 0.0);
+        let brick = piece_box(
+            &mut app,
+            Vec3::new(5.0, 0.05, 0.0),
+            Vec3::new(0.3, 0.1, 0.3),
+        );
+        app.update();
+        app.world_mut()
+            .run_system_once(move |rubble: RubbleQuery, bodies: Query<PieceData>| {
+                for with_brick in [false, true] {
+                    let mut pieces = RubbleBodies::gather(&rubble, &[slab, brick], &bodies);
+                    let mut points = [Vec3::ZERO; 2];
+                    for (body, point) in pieces.bodies.iter_mut().zip(&mut points) {
+                        let mass = if body.entity == slab { 2000.0 } else { 16.0 };
+                        body.inv_mass = Vec3::splat(1.0 / mass);
+                        body.inv_inertia = Mat3::ZERO;
+                        body.linear = Vec3::ZERO;
+                        body.angular = Vec3::ZERO;
+                        *point = body.com;
+                    }
+                    let slab_at = if pieces.bodies[0].entity == slab {
+                        points[0]
+                    } else {
+                        points[1]
+                    };
+                    let brick_at = if pieces.bodies[0].entity == slab {
+                        points[1]
+                    } else {
+                        points[0]
+                    };
+                    let mut on_slab = press(slab_at, slab, 120_000.0);
+                    on_slab.stiffness = 2.0e6;
+                    on_slab.damping = 1.0e5;
+                    let mut on_brick = press(brick_at, brick, 2_000.0);
+                    on_brick.stiffness = 2.0e5;
+                    on_brick.damping = 1.0e4;
+                    let source = BeltSource {
+                        entity: Entity::PLACEHOLDER,
+                        inertia: BodyInertia {
+                            centre: slab_at,
+                            inverse_mass: Vec3::splat(1.0 / 57_000.0),
+                            inverse_inertia: Mat3::ZERO,
+                        },
+                    };
+                    let contacts: Vec<_> = if with_brick {
+                        vec![(source, &on_slab), (source, &on_brick)]
+                    } else {
+                        vec![(source, &on_slab)]
+                    };
+                    let pushes = piece_impulses(&mut pieces, contacts, DT);
+                    let taken = pushes
+                        .iter()
+                        .find(|push| push.body == slab)
+                        .expect("the slab takes a push")
+                        .impulse
+                        .y;
+                    println!("MEASURED slab reaction, brick {with_brick}: {taken} N s");
+                    assert!(
+                        (taken + 120_000.0 * DT).abs() < 1e-2,
+                        "brick {with_brick}: the slab took {taken} N s"
+                    );
+                }
             })
             .unwrap();
     }
