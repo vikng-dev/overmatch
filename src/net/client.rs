@@ -647,68 +647,7 @@ pub fn run() {
             );
     }
 
-    app.add_observer(diagnostics::log_connected)
-        .add_observer(reset_shot_receive_state)
-        .add_observer(reset_link_state)
-        .add_observer(retire_link_shells)
-        .add_observer(claim_input_slot)
-        .add_systems(
-            Update,
-            (
-                rig::attach_replicated_rig,
-                receive_fire_events,
-                receive_damage_confirms,
-                diagnostics::nan_tripwire,
-                open_gameplay_gate,
-                diagnostics::log_sim_evidence,
-            ),
-        );
-    // Remote-barrel recoil (the "derive the consequence" half of the opponent-fire seam). Split
-    // across two clocks ON PURPOSE — see the verification finding in `receive_fire_events`:
-    //   - `receive_fire_events` (Update, above) DRAINS the receiver at render rate and captures each
-    //     shot's CAUSE (shooter + weapon slot) into `PendingRecoilKicks`. It must stay render-rate:
-    //     lightyear clears an undrained `MessageReceiver` in `Last` EVERY frame, so a drain on the
-    //     fixed clock would silently lose every `FireEvent` that arrives on a 0-fixed-tick frame
-    //     (the majority of frames whenever render rate exceeds the 64 Hz tick, and ~all of them in
-    //     the headless harness) — a systematic client-side drop, not the network loss the channel is
-    //     built to tolerate.
-    //   - `apply_pending_recoil_kicks` (here, FixedUpdate) DERIVES the spring kick from this client's
-    //     OWN local spec and writes it into `TankSim` on the sim clock, `.before(GameplaySet)` so
-    //     `shooting::apply_recoil` (in `GameplaySet`) springs it the same tick. `TankSim` is
-    //     fixed-clock sim truth; writing it from Update would be a render→sim leak (non-deterministic
-    //     across 0/1/2-tick frames).
-    app.init_resource::<PendingRecoilKicks>();
-    // Client-only shot dedup, deferred fire resolution, private-receipt dedup, and sanctioned
-    // outcomes. The ballistics march reads `SanctionedShots` optionally everywhere else.
-    app.init_resource::<SeenShots>();
-    app.init_resource::<HeldFireEvents>();
-    app.init_resource::<PendingFireEvents>();
-    app.init_resource::<SeenDamage>();
-    app.init_resource::<SanctionedShots>();
-    // Expiry is sim-time coarse, so a real tick is the right cadence.
-    app.add_systems(FixedUpdate, age_sanctioned_shots);
-    // The pen cam's explanations addressed to this player, and whether each impact is drawn.
-    super::shot_explanation::install_client(&mut app);
-    // The destruction ledger's apply and the fall presentation's cursor clock.
-    super::destruction::install_client(&mut app);
-    // The debris stress lever's fragments and the buildings' fallen pieces, drawn where the
-    // server's carriers say they are.
-    super::debris_stress::install_client(&mut app);
-    // The wall ledger into the record the buildings derive from.
-    super::walls::install_client(&mut app);
-    app.add_systems(
-        FixedUpdate,
-        apply_pending_recoil_kicks
-            .before(GameplaySet)
-            // Gate on `Playing` to match its consumer: `shooting::apply_recoil` lives in
-            // `GameplaySet` (Playing-only), so the applier that WRITES the kick and the system that
-            // SPRINGS it must agree on when they may run — otherwise a `FireEvent` draining outside
-            // `Playing` writes a kick into `TankSim` that `apply_recoil` never releases.
-            .run_if(in_state(AppState::Playing)),
-    );
-    // The server's spawn decision, read off the markers that actually arrived. Unconditional: which
-    // clock the own hull moves on is the first thing any capture of this session must state.
-    app.add_systems(Update, log_local_tank_role);
+    install_replica_consumers(&mut app);
     if simulate {
         app.add_systems(Update, harness::simulate_watchdog)
             .add_systems(
@@ -741,6 +680,75 @@ pub fn run() {
     // authority's command-idling never fights the script.
 
     app.run();
+}
+
+/// The game's netcode and damage-model presentation: the common replica consumer schedule,
+/// shared by the client and socket-free resync replay. Requires the protocol, physics, sim,
+/// own-fire presentation and frontier resources; link setup and input authorship stay with the
+/// composition root. Keeping the mount shared makes a new consumer part of the replay too.
+pub(super) fn install_replica_consumers(app: &mut App) {
+    app.add_observer(diagnostics::log_connected)
+        .add_observer(reset_shot_receive_state)
+        .add_observer(reset_link_state)
+        .add_observer(retire_link_shells)
+        .add_observer(claim_input_slot)
+        .add_systems(
+            Update,
+            (
+                rig::attach_replicated_rig(),
+                receive_fire_events,
+                receive_damage_confirms,
+                diagnostics::nan_tripwire,
+                open_gameplay_gate,
+                diagnostics::log_sim_evidence,
+            ),
+        );
+    // Remote-barrel recoil (the "derive the consequence" half of the opponent-fire seam). Split
+    // across two clocks ON PURPOSE — see the verification finding in `receive_fire_events`:
+    //   - `receive_fire_events` (Update, above) DRAINS the receiver at render rate and captures each
+    //     shot's CAUSE (shooter + weapon slot) into `PendingRecoilKicks`. It must stay render-rate:
+    //     lightyear clears an undrained `MessageReceiver` in `Last` EVERY frame, so a drain on the
+    //     fixed clock would silently lose every `FireEvent` that arrives on a 0-fixed-tick frame
+    //     (the majority of frames whenever render rate exceeds the 64 Hz tick, and ~all of them in
+    //     the headless harness) — a systematic client-side drop, not the network loss the channel is
+    //     built to tolerate.
+    //   - `apply_pending_recoil_kicks` (here, FixedUpdate) DERIVES the spring kick from this client's
+    //     OWN local spec and writes it into `TankSim` on the sim clock, `.before(GameplaySet)` so
+    //     `shooting::apply_recoil` (in `GameplaySet`) springs it the same tick. `TankSim` is
+    //     fixed-clock sim truth; writing it from Update would be a render→sim leak (non-deterministic
+    //     across 0/1/2-tick frames).
+    app.init_resource::<PendingRecoilKicks>();
+    // Client-only shot dedup, deferred fire resolution, private-receipt dedup, and sanctioned
+    // outcomes. The ballistics march reads `SanctionedShots` optionally everywhere else.
+    app.init_resource::<SeenShots>();
+    app.init_resource::<HeldFireEvents>();
+    app.init_resource::<PendingFireEvents>();
+    app.init_resource::<SeenDamage>();
+    app.init_resource::<SanctionedShots>();
+    // Expiry is sim-time coarse, so a real tick is the right cadence.
+    app.add_systems(FixedUpdate, age_sanctioned_shots);
+    // The pen cam's explanations addressed to this player, and whether each impact is drawn.
+    super::shot_explanation::install_client(app);
+    // The destruction ledger's apply and the fall presentation's cursor clock.
+    super::destruction::install_client(app);
+    // The debris stress lever's fragments and the buildings' fallen pieces, drawn where the
+    // server's carriers say they are.
+    super::debris_stress::install_client(app);
+    // The wall ledger into the record the buildings derive from.
+    super::walls::install_client(app);
+    app.add_systems(
+        FixedUpdate,
+        apply_pending_recoil_kicks
+            .before(GameplaySet)
+            // Gate on `Playing` to match its consumer: `shooting::apply_recoil` lives in
+            // `GameplaySet` (Playing-only), so the applier that WRITES the kick and the system that
+            // SPRINGS it must agree on when they may run — otherwise a `FireEvent` draining outside
+            // `Playing` writes a kick into `TankSim` that `apply_recoil` never releases.
+            .run_if(in_state(AppState::Playing)),
+    );
+    // The server's spawn decision, read off the markers that actually arrived. Unconditional: which
+    // clock the own hull moves on is the first thing any capture of this session must state.
+    app.add_systems(Update, log_local_tank_role);
 }
 
 /// State for the connect/reconnect driver ([`drive_connection`]). Lives across every mode (the

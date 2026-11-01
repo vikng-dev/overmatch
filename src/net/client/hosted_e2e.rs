@@ -142,7 +142,7 @@ fn client_app(api: &str, log: bool) -> App {
         .add_systems(
             Update,
             (
-                rig::attach_replicated_rig,
+                rig::attach_replicated_rig(),
                 receive_fire_events,
                 receive_damage_confirms,
                 diagnostics::nan_tripwire,

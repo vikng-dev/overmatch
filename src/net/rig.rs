@@ -5,7 +5,10 @@
 //! interpolated server stream on a `Static` body.
 
 use avian3d::prelude::{Position, RigidBody, Rotation};
+use bevy::ecs::schedule::ScheduleConfigs;
+use bevy::ecs::system::ScheduleSystem;
 use bevy::prelude::*;
+use lightyear::interpolation::plugin::InterpolationSystems;
 use lightyear::prelude::client::Remote;
 use lightyear::prelude::*;
 
@@ -13,8 +16,16 @@ use super::protocol::NetTank;
 use crate::tank::{PendingTankAssets, TankSimSource, attach_replicated_tank_body};
 use crate::track::sim::EngineRpm;
 
-/// Attach simulation from `TankSimSource` only after a replicated root has a valid pose.
-pub(crate) fn attach_replicated_rig(
+/// Attach simulation only after interpolation has established this frame's visible component
+/// set. An init snapshot may contain a pose whose first sample is still ahead of the cursor;
+/// attaching before presence preparation would give that not-yet-visible root live consumers.
+pub(crate) fn attach_replicated_rig() -> ScheduleConfigs<ScheduleSystem> {
+    attach_visible_rigs
+        .after(InterpolationSystems::All)
+        .into_configs()
+}
+
+fn attach_visible_rigs(
     tanks: Query<
         Entity,
         (

@@ -53,6 +53,7 @@ mod link_drop;
 mod matchmaking;
 mod physics;
 mod protocol;
+mod resync;
 mod rig;
 /// The match score: knockouts and losses per combatant, and each knocked-out life's respawn
 /// opening, held by the server and replicated. `pub(crate)` for the ballistics fixture that fires

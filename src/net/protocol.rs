@@ -896,12 +896,11 @@ fn publish_launched_turret_pose(
 /// `Static`, never `Kinematic` or `Dynamic`: every body in the client's physics world is static
 /// (the replica hulls are, [`super::rig::attach_replicated_rig`]), avian's broad phase never pairs
 /// two static bodies, so no contact constraint exists on the client. The client's physics step
-/// relies on that. A resync of lightyear's interpolation timeline removes `Position` from every
-/// replica hull for a frame (`queue_history_presence` in `lightyear_interpolation` 0.30.1), and
-/// avian 0.7 keeps the constraints of a pair whose body leaves its body query, then adds them again
-/// when the body returns, so its solver indexes past the pair's manifolds and panics
-/// (`upstream/avian-body-query-gap-stale-constraints.md`, pinned by
-/// `src/tests/avian_body_query_gap.rs`). A kinematic turret resting on a hull is such a pair.
+/// relies on that: the authority owns motion and contacts, and the client owns no constraint
+/// state. The presentation boundary (`super::resync`) retains already-presented poses through
+/// unknown interpolation history. Avian's bookkeeping defect for a raw body-query gap remains
+/// pinned independently by `src/tests/avian_body_query_gap.rs`; its mechanism is recorded in
+/// `upstream/avian-body-query-gap-stale-constraints.md`.
 ///
 /// Borrow structure: `tanks` reads the tank ROOT (`Rig`/`LaunchedTurretPose`), `launched` is the
 /// read-only detach guard, and `poses` mutates the TURRET's `Position`/`Rotation` — three disjoint
@@ -1115,6 +1114,7 @@ pub(crate) fn plugin(app: &mut App) {
     app.component::<super::debris_stress::DebrisPose>()
         .replicate()
         .add_interpolation_with(super::debris_stress::debris_pose_lerp);
+    super::resync::retain_stream::<super::debris_stress::DebrisPose>(app);
     // The wall ledger (one world entity): appended entries ride as diffs, a late joiner takes the
     // list once.
     app.component::<super::walls::WallLedger>().replicate_diff();
@@ -1215,9 +1215,11 @@ pub(crate) fn plugin(app: &mut App) {
     app.component::<Position>()
         .replicate_with(super::wire_quant::position_fns())
         .add_linear_interpolation();
+    super::resync::retain_stream::<Position>(app);
     app.component::<Rotation>()
         .replicate_with(super::wire_quant::rotation_fns())
         .add_linear_interpolation();
+    super::resync::retain_stream::<Rotation>(app);
     app.component::<LinearVelocity>()
         .replicate_with(super::wire_quant::linear_velocity_fns());
     // The tracked drivetrain (phase B): velocity-like continuous sim state, replicated for the
@@ -1227,11 +1229,13 @@ pub(crate) fn plugin(app: &mut App) {
     app.component::<TrackDrive>()
         .replicate_with(super::wire_quant::track_drive_fns())
         .add_interpolation_with(track_drive_lerp);
+    super::resync::retain_stream::<TrackDrive>(app);
     // The shaped drive signal: owner-only (`disclosure::CombatDisclosure`), read by the owner's
     // drive HUD on the belt state's clock.
     app.component::<DriveSignal>()
         .replicate()
         .add_interpolation_with(drive_signal_lerp);
+    super::resync::retain_stream::<DriveSignal>(app);
     // The declared transmission's correlated state: one atomic snapshot, owner-only
     // (`disclosure::CombatDisclosure`). Every other client hears the crank through `EngineRpm`,
     // applied on arrival like the transmission it is read off.
@@ -1374,12 +1378,10 @@ mod tests {
         );
     }
 
-    /// The client's physics world holds no contact constraint, and a launched turret is the body
-    /// that would bring one: it lands on or beside a hull. A resync of lightyear's interpolation
-    /// timeline takes `Position` off every replica hull for a frame, and avian 0.7 re-adds a
-    /// constraint it kept through that gap, so its solver panics
-    /// (`src/tests/avian_body_query_gap.rs`). A turret launched as any non-static body reds the
-    /// zero-constraint assertion; the gap below replays a resync.
+    /// The client's physics world holds no contact constraint, including a launched turret
+    /// resting on a hull. This test stages a raw body-query gap independently of the stream
+    /// retention boundary, so the no-contact invariant cannot depend on resync handling.
+    /// A non-static turret creates a constraint and fails before Avian's body-query-gap defect.
     #[test]
     fn a_launched_turret_on_a_replica_hull_holds_no_contact_constraint() {
         use avian3d::dynamics::solver::constraint_graph::ConstraintGraph;
@@ -1455,7 +1457,7 @@ mod tests {
             "the launched turret rests at the authoritative pose"
         );
 
-        // The resync: `Position` off the hull for one step, then back.
+        // Raw body-query gap: bypass stream retention to test the independent no-contact rule.
         let pose = *app.world().get::<Position>(root).expect("the hull's pose");
         app.world_mut().entity_mut(root).remove::<Position>();
         app.update();

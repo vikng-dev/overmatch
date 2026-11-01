@@ -1902,10 +1902,8 @@ pub fn sim_plugin(app: &mut App) {
 
 /// The game's damage model: the collider history the walk reads ([`motion`]), kept only where the
 /// walk runs. A client marches no round (ADR-0037: [`integrate_projectiles`] returns on a
-/// [`ClientReplica`], which replays the server's paths), so it keeps no history. Its replica
-/// hulls also lose `Position` for one frame at each interpolation-timeline resync (lightyear 0.30's
-/// `queue_history_presence`; `net::protocol`'s `apply_launched_turret_pose`), a gap the history's
-/// every-collider-is-posed invariant does not admit; on the authority that invariant holds.
+/// [`ClientReplica`], which replays the server's paths), so it keeps no history. Only the
+/// authority needs successive collider poses for its walk; presentation consumes the public path.
 fn mount_collider_motion(app: &mut App) {
     app.init_resource::<motion::ColliderMotion>()
         .add_systems(
@@ -4487,12 +4485,11 @@ mod march_tests {
         app
     }
 
-    /// The game's damage model: only the authority's walk consumes collider history. A replica
-    /// has an interpolation timeline whose resync can remove its hull pose temporarily; it must
-    /// survive that gap and retain no walk history. The authority keeps normal interval history.
+    /// The game's damage model: only the authority's walk consumes collider history. Replicas
+    /// present the public path and retain no walk history; the authority keeps interval history.
     /// FIXTURE DATA: a static hull with one child collider.
     #[test]
-    fn a_client_keeps_no_collider_history_and_survives_a_resync_gap() {
+    fn only_the_authority_keeps_collider_history() {
         for replica in [false, true] {
             let mut app = App::new();
             app.add_plugins((
@@ -4536,16 +4533,6 @@ mod march_tests {
                 !replica,
                 "only the role that walks keeps collider history (replica: {replica})"
             );
-            if replica {
-                // The resync: `Position` off the hull for one step, then back.
-                let pose = *app.world().get::<Position>(hull).expect("the hull's pose");
-                app.world_mut().entity_mut(hull).remove::<Position>();
-                app.update();
-                app.world_mut().entity_mut(hull).insert(pose);
-                for _ in 0..4 {
-                    app.update();
-                }
-            }
         }
     }
 
