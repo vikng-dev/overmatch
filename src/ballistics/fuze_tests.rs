@@ -266,3 +266,77 @@ fn the_spend_exit_fuze_keeps_todays_bursts_and_doses() {
         assert_eq!(fire(shipped), pin, "a {thickness} m slab");
     }
 }
+
+/// The game's damage model: the exact free-flight apex is a transient state, never a skipped
+/// step that repeats the old upward velocity forever. An armed count spends the stationary
+/// tick too. FIXTURE DATA: the upward velocity cancelled by one manual gravity step.
+#[test]
+fn an_exact_apex_advances_the_clock_and_falls_on_the_next_step() {
+    for armed in [false, true] {
+        let mut app = world_with_plate(Vec3::ONE, Vec3::splat(-500.0));
+        let dt = app.world().resource::<Time>().delta_secs();
+        let origin = Vec3::Y * 10.0;
+        let shell = shot(&mut app, origin, -GRAVITY * dt, impact(0.1));
+        let mut round = app.world_mut().get_mut::<Projectile>(shell).unwrap();
+        if armed {
+            round
+                .fuze
+                .entered(f64::from(SENSITIVITY_N), 1000.0, None, 0.0);
+        } else {
+            round.fuze = burst::Fuze::Inert;
+        }
+        app.update();
+        let round = app
+            .world()
+            .get::<Projectile>(shell)
+            .expect("the apex round survives");
+        assert_eq!(round.velocity, Vec3::ZERO);
+        assert_eq!(
+            app.world().get::<Transform>(shell).unwrap().translation,
+            origin
+        );
+        if armed {
+            assert!((round.fuze.delay_left().unwrap() - (0.1 - dt)).abs() < 1.0e-6);
+        }
+        app.update();
+        assert!(app.world().get::<Projectile>(shell).unwrap().velocity.y < 0.0);
+        assert!(app.world().get::<Transform>(shell).unwrap().translation.y < origin.y);
+    }
+}
+
+/// The game's damage model: an armed delay that expires during the zero-displacement step
+/// bursts at rest at its actual remaining wait. FIXTURE DATA: a delay shorter than one tick.
+#[test]
+fn a_delay_expiring_at_the_apex_bursts_without_freezing() {
+    let mut app = world_with_plate(Vec3::ONE, Vec3::splat(-500.0));
+    let dt = app.world().resource::<Time>().delta_secs();
+    let origin = Vec3::Y * 10.0;
+    let delay = dt * 0.5;
+    let shell = shot(&mut app, origin, -GRAVITY * dt, impact(delay));
+    app.world_mut()
+        .get_mut::<Projectile>(shell)
+        .unwrap()
+        .fuze
+        .entered(f64::from(SENSITIVITY_N), 1000.0, None, 0.0);
+    app.update();
+    assert!(app.world().get::<Projectile>(shell).is_none());
+    let (at, speed, after) = burst_mark(&app, shell);
+    assert_eq!(at, origin);
+    assert_eq!(speed, 0.0);
+    assert!((after - delay).abs() < 1.0e-6);
+}
+
+/// The game's damage model: invalid internal velocity must fail in every build, never leave a
+/// round silently stuck. The fixture mutates a valid spawned round to a non-finite state.
+#[test]
+#[should_panic(expected = "carries finite flight velocity")]
+fn nonfinite_flight_velocity_is_an_invariant_failure() {
+    let mut app = world_with_plate(Vec3::ONE, Vec3::splat(-500.0));
+    let shell = shot(&mut app, ORIGIN, Vec3::NEG_Z * SPEED, impact(DELAY_S));
+    app.world_mut()
+        .get_mut::<Projectile>(shell)
+        .unwrap()
+        .velocity
+        .x = f32::NAN;
+    app.update();
+}

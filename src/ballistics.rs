@@ -2395,16 +2395,14 @@ fn integrate_projectiles(
         let (marks_from, emptied_from) = (shell.marks.log.len(), shell.dose.emptied().len());
         let (cones_from, burst_before) = (shell.spall.cones.len(), shell.projectile.fuze.burst());
         let owned_before = owned_losses(shell.dose, &world.owners);
-        let Some(step) = march_shell_step(
+        let step = march_shell_step(
             &mut shell,
             &world,
             &colliders,
             &mut health,
             &mut bodies,
             &mut tick,
-        ) else {
-            continue;
-        };
+        );
         if deposit {
             recorder.note(
                 entity,
@@ -2569,8 +2567,9 @@ fn wound_legs(
 ///
 /// Free flight until a surface, then resolve it — terrain stops the shell; a ballistic volume
 /// ricochets (too oblique) or is crossed (normalize → spend cost → perforate or embed) — and keep
-/// marching the leftover budget along the new direction. Returns `None` for a degenerate zero
-/// velocity, which leaves the shell untouched this tick.
+/// marching the leftover budget along the new direction. The game's damage model treats an
+/// instant at rest as a state: preserve its heading, advance its fuze clock and let the next
+/// gravity step move it. A non-finite flight state is a bug.
 #[expect(
     clippy::too_many_lines,
     reason = "one ordered loop: open air, ground, an impact fuze, the crossing and its continuation \
@@ -2588,7 +2587,7 @@ fn march_shell_step(
     health: &mut Query<&mut ComponentHealth>,
     bodies: &mut Query<Forces>,
     tick: &mut MarchTick,
-) -> Option<MarchStep> {
+) -> MarchStep {
     let MarchTick { dt, deposit, .. } = *tick;
     world.moment.set(Some(0.0));
     world.sweep.set(None);
@@ -2607,22 +2606,34 @@ fn march_shell_step(
     // ([`fast_forward_shell`]). An unbent open-air step flies exactly `stepped × dt`. The march may
     // *bend* the direction (normalization / ricochet), so we carry direction + speed and rebuild the
     // velocity at the end rather than assuming a straight step.
+    assert!(
+        shell.projectile.velocity.is_finite(),
+        "the game's damage model carries finite flight velocity between steps"
+    );
+    let previous = if shell.projectile.velocity == Vec3::ZERO {
+        Dir3::new(shell.projectile.disc.u.cross(shell.projectile.disc.v))
+            .expect("the game's damage model retains a nondegenerate sampling frame at world rest")
+    } else {
+        Dir3::new(shell.projectile.velocity)
+            .expect("the game's damage model carries a representable flight direction")
+    };
     let mut playback = std::mem::take(&mut shell.projectile.playback);
     let stepped = if playback.is_empty() {
         freeflight_step(shell.projectile.velocity, shell.projectile.drag_k, dt)
     } else {
         shell.projectile.velocity
     };
-    let dir = match playback.front() {
-        Some(playing) => playing.flight().direction,
-        None => {
-            let Ok(dir) = Dir3::new(stepped) else {
-                return None;
-            };
-            dir
-        }
-    };
     let speed = stepped.length();
+    assert!(
+        speed.is_finite(),
+        "the game's damage model integrates a finite flight speed from validated state"
+    );
+    // At the apex the integrator can return exactly zero: no displacement this step, with the
+    // incoming heading retained until gravity supplies a new direction.
+    let dir = playback.front().map_or_else(
+        || Dir3::new(stepped).unwrap_or(previous),
+        |playing| playing.flight().direction,
+    );
     if playback.is_empty() {
         shell.projectile.fuze.at_speed(speed);
     }
@@ -2649,7 +2660,6 @@ fn march_shell_step(
     // also the direction the last step's sweep ran along — not from the shell's visual forward:
     // `looking_to` is degenerate for a round travelling straight down, and the sampling basis is sim
     // state that must not read a view detail.
-    let previous = Dir3::new(shell.projectile.velocity).unwrap_or(dir);
     // A burst in flight swaps the round for its nose piece mid-step ([`burst_here`]); the disc keeps
     // its radius, the nose being the round's calibre.
     let radius = resolve::disc_radius(shell.projectile.body().caliber);
@@ -2724,6 +2734,26 @@ fn march_shell_step(
             Ahead::Terrain { distance, .. } if distance > within => Ahead::Open,
             ahead => ahead,
         };
+        // A stationary round can wait until a moving body's contact or the tick boundary. Its
+        // fuze still consumes those seconds; distance alone would freeze an armed count here.
+        if flight.speed == 0.0 {
+            let wait = world
+                .contact_motion
+                .get()
+                .map_or(budget.remaining() as f32, |moving| {
+                    (moving.fraction - from) * dt
+                });
+            if shell.projectile.fuze.wait_at_rest(wait) {
+                let after = shell.projectile.fuze.delay_left().expect(
+                    "only an armed fuze expires while the game's damage model waits at rest",
+                );
+                budget.fly(f64::from(after));
+                damage_dealt += burst_here(shell, &context, &flight, 0.0, health).1;
+                publish_path_state(shell, tick, &budget, &flight, true, None);
+                stopped = true;
+                break;
+            }
+        }
         // The game's damage model spends only the remaining seconds in open air. A discovery
         // interval bounds the scan and physical displacement. An unbent segment
         // retains the catch-up kernel's exact displacement.
@@ -2908,14 +2938,14 @@ fn march_shell_step(
 
     world.moment.set(None);
     world.sweep.set(None);
-    Some(MarchStep {
+    MarchStep {
         position: flight.position,
         direction: flight.direction,
         speed: flight.speed,
         stopped,
         damage_dealt,
         lines,
-    })
+    }
 }
 
 /// The game's damage model: publish a discrete state change at the seconds budget's cursor.

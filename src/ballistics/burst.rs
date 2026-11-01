@@ -382,6 +382,24 @@ impl Fuze {
         }
     }
 
+    /// The game's damage model: wait at world rest for up to `seconds`, using the armed count's
+    /// retained clock speed. If the delay expires, leave it in place and return true so the
+    /// burst record can read the remaining wait; otherwise consume those seconds. An inert or
+    /// unarmed round has no delay to advance.
+    pub(crate) fn wait_at_rest(&mut self, seconds: f32) -> bool {
+        if let Self::Armed {
+            remaining, speed, ..
+        } = self
+        {
+            let elapsed = *speed * seconds;
+            if *remaining <= elapsed {
+                return true;
+            }
+            *remaining -= elapsed;
+        }
+        false
+    }
+
     /// Metres along the next `metres` of path where the round bursts, when an armed fuze runs out
     /// within them.
     pub(crate) fn due_within(&self, metres: f32) -> Option<f32> {

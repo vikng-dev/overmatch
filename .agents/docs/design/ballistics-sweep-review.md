@@ -80,3 +80,15 @@ The cross-platform field-cast pin also passed without re-pinning.
 MEASURED: all 98 targeted march, resolver, field-law and citation tests passed. Format and
 workspace/all-target clippy passed. The law's existing refusal tests exercise invalid field
 ratios; march tests cover both line and field emptying contexts.
+
+## Instantaneous rest (B36)
+
+Fixed: a zero free-flight step preserves the incoming sampling heading, advances an armed delay
+for the stationary interval and publishes its resulting state. The next gravity step can move the
+round instead of repeating the old upward velocity forever. A delay expiring there bursts at its
+remaining wait. Non-finite velocity/speed is an invariant failure in every build. The march no
+longer returns an optional step that the caller can silently discard.
+
+MEASURED: all 53 targeted fuze, march and citation tests passed, including exact-apex cases with
+an inert count, a continuing armed count, an expiring count and deliberately invalid velocity.
+Format and workspace/all-target clippy passed.
