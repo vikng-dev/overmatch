@@ -23,8 +23,11 @@ pub(crate) fn drop_stale_pairs(
     mut commands: Commands,
 ) {
     let collider = rehomed.entity;
-    let (Ok(&ColliderOf { body }), Some(graph)) = (colliders.get(collider), graph) else {
-        return;
+    let &ColliderOf { body } = colliders
+        .get(collider)
+        .expect("an Insert observer of ColliderOf runs with the component in place");
+    let Some(graph) = graph else {
+        return; // No physics mounted yet: no contact graph, so no pair can be stale.
     };
     let stale = graph.contact_edges_with(collider).any(|edge| {
         let named = if edge.collider1 == collider {

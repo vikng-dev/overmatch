@@ -17,6 +17,7 @@
 use std::collections::{BTreeSet, HashMap};
 
 use bevy::app::SceneSpawnerSystems;
+use bevy::asset::LoadState;
 use bevy::camera::visibility::VisibilityRange;
 use bevy::gltf::GltfExtras;
 use bevy::prelude::*;
@@ -89,6 +90,19 @@ fn request_template(world: &mut World, id: String, assets: &AssetServer) {
             TreeViewSource(id),
         ))
         .observe(read_template);
+}
+
+/// A kind's glb is a required, shipped asset: one that fails to load would leave its template
+/// pending and every tree of the kind undrawn while its colliders stand. Refused by name.
+fn refuse_failed_templates(
+    sources: Query<(&TreeViewSource, &WorldAssetRoot)>,
+    server: Res<AssetServer>,
+) {
+    for (TreeViewSource(id), root) in &sources {
+        if let LoadState::Failed(err) = server.load_state(&root.0) {
+            panic!("trees: the view of kind {id} (trees/{id}/{id}.glb) failed to load: {err}");
+        }
+    }
 }
 
 /// Which part of the trunk a glb node presents, by the generator's `tree_part`.
@@ -526,6 +540,11 @@ fn present_fall(
 /// The view half: each tree's representation and the streamed pose on its segmented hierarchy.
 pub(crate) fn plugin(app: &mut App) {
     app.init_resource::<TreeTemplates>()
+        // A composition with no asset server requests no glb, so it has none to refuse.
+        .add_systems(
+            Update,
+            refuse_failed_templates.run_if(resource_exists::<AssetServer>),
+        )
         .add_systems(
             SpawnScene,
             draw_trees.after(SceneSpawnerSystems::WorldInstanceSpawn),

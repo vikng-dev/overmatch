@@ -472,11 +472,11 @@ fn redraw(
 ) {
     for (breakage, shown, holes, children) in &buildings {
         let Some(view) = children.iter().find(|child| views.contains(*child)) else {
-            continue;
+            continue; // A building spawned with no view attached has nothing to redraw.
         };
-        let Ok((view, drawn, worn, own)) = views.get_mut(view) else {
-            continue;
-        };
+        let (view, drawn, worn, own) = views
+            .get_mut(view)
+            .expect("the view child was found in this same query");
         let kind = &breakage.kind;
         let table =
             holes.and_then(|holes| hole_table(&kind.asset, &kind.layout, &shown.0, &holes.0));

@@ -219,16 +219,16 @@ pub(super) fn read_shell(
 ) {
     for line in &marched.lines {
         let Ok((&TreeSegment(k), parent)) = segments.get(line.crossing.volume) else {
-            continue;
+            continue; // A crossing of anything but a trunk segment is another law's.
         };
         let Ok((state, body, root, mut loads)) = trees.get_mut(parent.parent()) else {
-            continue;
+            continue; // A segment already on a freed body, or a detached tree's stump.
         };
         let TreeState::Down { cut, .. } = *state else {
-            continue;
+            continue; // A standing trunk meets the march through its pools and structure.
         };
         if k < cut {
-            continue;
+            continue; // The stump stays on the ground and launches nothing.
         }
         let into = root.rotation.inverse();
         loads.0.extend(Load::line(
@@ -261,13 +261,13 @@ pub(super) fn read_shell(
                 continue; // This ray's hard stop is not a trunk segment.
             };
             let Ok((state, _, root, mut loads)) = trees.get_mut(parent.parent()) else {
-                continue;
+                continue; // A segment already on a freed body, or a detached tree's stump.
             };
             let TreeState::Down { cut, .. } = *state else {
-                continue;
+                continue; // A standing trunk meets the burst through its pools and structure.
             };
             if k < cut {
-                continue;
+                continue; // The stump stays on the ground and launches nothing.
             }
             let energy = f64::from(burst.energy) * f64::from(ray.strength) / total;
             let blow = ray.direction * (2.0 * energy / f64::from(burst.sideways_speed)) as f32;
