@@ -90,8 +90,9 @@ pub(crate) struct ShotRecorder {
     open: usize,
     /// An encounter has a frame this tick's [`pose_struck`] has not filled.
     unposed: bool,
-    /// Rounds that struck a knocked-out tank (a husk) since the authority started: one per round,
-    /// march step and husk its new marks touch, recorded or not (an automatic weapon's too).
+    /// The game's damage model: first contacts with husks since the authority started, at most
+    /// one per round and tank, including automatic fire. Later marks cannot reclassify a strike
+    /// that began while the tank was alive.
     husk_strikes: u64,
 }
 
@@ -209,6 +210,7 @@ impl MarchRecorder<'_, '_> {
     pub(crate) fn note(
         &mut self,
         shell: Entity,
+        contacted: &mut Vec<Entity>,
         shot: Option<ShotId>,
         recording: Option<Mut<ShotRecording>>,
         marks: &PenetrationMarks,
@@ -251,14 +253,12 @@ impl MarchRecorder<'_, '_> {
             events.extend(touched(mark).into_iter().map(|tank| (index, tank)));
         }
         events.sort_by_key(|&(index, _)| index);
-        let mut husks: Vec<Entity> = events
-            .iter()
-            .map(|&(_, tank)| tank)
-            .filter(|&tank| self.knocked_out.contains(tank))
-            .collect();
-        husks.sort();
-        husks.dedup();
-        recorder.husk_strikes += husks.len() as u64;
+        for &(_, tank) in &events {
+            if !contacted.contains(&tank) {
+                contacted.push(tank);
+                recorder.husk_strikes += u64::from(self.knocked_out.contains(tank));
+            }
+        }
         let Some(mut recording) = recording else {
             return;
         };
@@ -679,6 +679,54 @@ fn clear_of(world: &World, tank: Entity, point: Vec3) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The game's damage model: the server reports rounds, not march ticks. A first contact
+    /// while alive is never reclassified by later witness/reach marks after knockout.
+    #[test]
+    fn husk_statistics_count_first_contact_once_per_round_and_tank() {
+        for husk_at_contact in [true, false] {
+            let mut world = World::new();
+            world.init_resource::<ShotRecorder>();
+            let tank = world.spawn_empty().id();
+            let shell = world.spawn_empty().id();
+            if husk_at_contact {
+                world.entity_mut(tank).insert(TankKnockedOut {
+                    reason: KnockoutReason::CrewLoss,
+                });
+            }
+            let mut marks = PenetrationMarks::default();
+            let dose = ShotDose::default();
+            let mut contacted = Vec::new();
+            let mut state =
+                SystemState::<(MarchRecorder, Query<&VolumeOf>, Query<&mut ComponentHealth>)>::new(
+                    &mut world,
+                );
+            for step in 0..3 {
+                marks.reached.push((step, tank));
+                let (mut recorder, owners, health) = state.get_mut(&mut world).unwrap();
+                recorder.note(
+                    shell,
+                    &mut contacted,
+                    None,
+                    None,
+                    &marks,
+                    (0, step),
+                    &dose,
+                    0,
+                    &owners,
+                    &health,
+                );
+                world.entity_mut(tank).insert(TankKnockedOut {
+                    reason: KnockoutReason::CrewLoss,
+                });
+            }
+            assert_eq!(
+                world.resource::<ShotRecorder>().husk_strikes(),
+                u64::from(husk_at_contact),
+                "one round's later marks neither recount a husk nor turn its living strike into one"
+            );
+        }
+    }
 
     /// The game's damage model: an encounter opened while the target lived keeps its strike
     /// angles when later static-frame placement runs after knockout. The record still needs a

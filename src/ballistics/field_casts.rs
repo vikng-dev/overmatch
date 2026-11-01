@@ -596,6 +596,7 @@ fn spawn_shot_round(
                 playback: Default::default(),
                 path_sequence: 0,
                 replica: None,
+                contacted: Vec::new(),
             },
             DamageReport::default(),
             TerminalReport::default(),

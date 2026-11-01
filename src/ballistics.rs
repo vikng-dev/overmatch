@@ -1282,6 +1282,8 @@ pub(crate) struct Projectile {
     playback: std::collections::VecDeque<resolve::Playback>,
     path_sequence: u32,
     replica: Option<path::Replica>,
+    /// The game's damage model: tanks touched by this round, for first-contact statistics.
+    contacted: Vec<Entity>,
 }
 
 impl Projectile {
@@ -1343,6 +1345,7 @@ impl Projectile {
             playback: Default::default(),
             path_sequence: 0,
             replica: None,
+            contacted: Vec::new(),
         }
     }
 }
@@ -2020,6 +2023,7 @@ fn on_fire_shell(
             axis: None,
             playback: Default::default(),
             path_sequence: 0,
+            contacted: Vec::new(),
             replica: replica.is_some().then(|| {
                 path::Replica::born(
                     fire.shot
@@ -2415,6 +2419,7 @@ fn integrate_projectiles(
         if deposit {
             recorder.note(
                 entity,
+                &mut shell.projectile.contacted,
                 shot.map(|shot| shot.0),
                 recording,
                 shell.marks,
@@ -4437,6 +4442,7 @@ mod march_tests {
             playback: Default::default(),
             path_sequence: 0,
             replica: None,
+            contacted: Vec::new(),
         }
     }
 
