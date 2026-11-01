@@ -144,6 +144,10 @@ pub(crate) struct ContactTransfers {
     /// Implicit contacts by `(structure collider, source body)`, whatever their normals.
     applied: BTreeMap<(Entity, Entity), Vec<ContactTransfer>>,
     inertias: BTreeMap<Entity, BodyInertia>,
+    /// Moving structures under implicit contacts, by entity, with their inertia at staging: those
+    /// staged for the next step, and this step's.
+    staged_receivers: BTreeMap<Entity, BodyInertia>,
+    receivers: BTreeMap<Entity, BodyInertia>,
     resting: Vec<Resting>,
     /// The last step's length, s.
     dt: f32,
@@ -169,6 +173,13 @@ struct Kept {
 impl ContactTransfers {
     /// Stage a force the source actually applies this tick, before physics integrates it.
     pub(crate) fn stage(&mut self, contact: AppliedContact) {
+        self.pending.push(contact);
+    }
+
+    /// Stage the impulse a moving structure actually took, `receiver` its inertia then: its
+    /// closing meets the pair's reduced mass ([`Self::split`]).
+    pub(crate) fn stage_on_moving(&mut self, contact: AppliedContact, receiver: BodyInertia) {
+        self.staged_receivers.insert(contact.structure, receiver);
         self.pending.push(contact);
     }
 
@@ -240,9 +251,11 @@ impl ContactTransfers {
     /// collider share one budget whatever their normals: the blow is the impulse that stops the
     /// source's closing along the distribution of what its closing patches moved, `m_w v_w`,
     /// where `v_w` is their moved-weighted closing speed and `m_w` the source's effective mass
-    /// for that distribution ([`Self::contact_mass`]). Co-normal copies of one patch, a straight
-    /// run's rounded normals and a curved run's turning ones all meet the source's mass once; a
-    /// resting patch takes no share, so its press is never another face's blow.
+    /// for that distribution ([`Self::contact_mass`]); on a moving structure the pair's, its
+    /// inverse the two bodies' inverses summed, as the solver's constraint mass is. Co-normal
+    /// copies of one patch, a straight run's rounded normals and a curved run's turning ones all
+    /// meet the source's mass once; a resting patch takes no share, so its press is never another
+    /// face's blow.
     fn split_points<'a>(
         &'a self,
         points: &'a [ContactTransfer],
@@ -279,12 +292,19 @@ impl ContactTransfers {
             (mass, closing.min(moved))
         } else if shared > 0.0 {
             let mass = self.contact_mass(points, share);
+            let pair = match self.receivers.get(&first.structure) {
+                Some(receiver) => {
+                    let (total, inverse) = distribution(receiver, points, share);
+                    (mass.recip() + inverse / (total * total)).recip()
+                }
+                None => mass,
+            };
             let speed = points
                 .iter()
                 .map(|point| point.closing_speed * share(point))
                 .sum::<f32>()
                 / shared;
-            (mass, (mass * speed).min(shared))
+            (mass, (pair * speed).min(shared))
         } else {
             (self.contact_mass(points, |_| 1.0), 0.0) // Nothing closes: no blow.
         };
@@ -311,28 +331,39 @@ impl ContactTransfers {
         let first = points
             .first()
             .expect("every retained contact has at least one point");
-        let inertia = self.inertia(first.body);
-        let (total, linear, angular) = points.iter().fold(
-            (0.0, Vec3::ZERO, Vec3::ZERO),
-            |(total, linear, angular), point| {
-                let w = weight(point);
-                (
-                    total + w,
-                    linear + point.normal * w,
-                    angular + (point.point - inertia.centre).cross(point.normal) * w,
-                )
-            },
-        );
-        let inverse = linear.dot(inertia.inverse_mass * linear)
-            + angular.dot(inertia.inverse_inertia * angular);
-        assert!(
-            inverse.is_finite() && inverse >= 0.0 && total > 0.0,
-            "a contact's weights are positive and its solver inverse effective mass is finite and nonnegative"
-        );
+        let (total, inverse) = distribution(&self.inertia(first.body), points, weight);
         // Locked axes can prevent all motion along this distribution even on a dynamic body.
         // Its effective mass is infinite, and Avian's zero effective mass moves no blow.
         total * total / inverse
     }
+}
+
+/// A distribution of unit impulses along `points`' normals weighted by `weight`, against a body of
+/// `inertia`: the weights' sum `Σw` and `wᵀ K w`, `K` the body's inverse mass matrix between the
+/// points, rotation and locked axes included.
+fn distribution(
+    inertia: &BodyInertia,
+    points: &[ContactTransfer],
+    weight: impl Fn(&ContactTransfer) -> f32,
+) -> (f32, f32) {
+    let (total, linear, angular) = points.iter().fold(
+        (0.0, Vec3::ZERO, Vec3::ZERO),
+        |(total, linear, angular), point| {
+            let w = weight(point);
+            (
+                total + w,
+                linear + point.normal * w,
+                angular + (point.point - inertia.centre).cross(point.normal) * w,
+            )
+        },
+    );
+    let inverse =
+        linear.dot(inertia.inverse_mass * linear) + angular.dot(inertia.inverse_inertia * angular);
+    assert!(
+        inverse.is_finite() && inverse >= 0.0 && total > 0.0,
+        "a contact's weights are positive and its solver inverse effective mass is finite and nonnegative"
+    );
+    (total, inverse)
 }
 
 /// A point's accumulated friction impulse, in its constraint's tangent basis (N·s); none without
@@ -373,6 +404,8 @@ fn keep(
         last,
         pending,
         applied,
+        staged_receivers,
+        receivers,
     } = &mut *transfers;
     let asleep = |transfer: &ContactTransfer| {
         contacts
@@ -487,6 +520,7 @@ fn keep(
         }
     }
     applied.clear();
+    *receivers = std::mem::take(staged_receivers);
     // Canonical staging order fixes the floating sums.
     pending.sort_by(|a, b| {
         let key = |c: &AppliedContact| {

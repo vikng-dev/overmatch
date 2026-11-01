@@ -234,7 +234,7 @@ pub(super) fn apply_belt_support_field(
     touches.0.clear();
     // No other belt source shares the sandbox. Size both tracks together, in the production
     // law's canonical contact order, before either side changes a recipient's velocity.
-    let pushes = belt_piece_reactions(&mut pieces, &reports, dt);
+    let pushes = belt_piece_reactions(&mut pieces, hull_entity, &reports, dt);
     apply_pushes(&pushes, &mut bodies);
     for push in &pushes {
         touches.0.push(super::rubble::Touch {
@@ -289,12 +289,16 @@ pub(super) fn apply_belt_support_field(
 /// One recipient pass over the complete sandbox footprint, through the production law.
 fn belt_piece_reactions(
     pieces: &mut RubbleBodies,
+    hull: Entity,
     reports: &[SideReport; 2],
     dt: f32,
 ) -> Vec<crate::track::rubble::Push> {
     piece_impulses(
         pieces,
-        reports.iter().flat_map(|report| &report.contacts),
+        reports
+            .iter()
+            .flat_map(|report| &report.contacts)
+            .map(|contact| (hull, contact)),
         dt,
     )
 }
@@ -761,10 +765,13 @@ mod tests {
                 let mut sandbox = RubbleBodies::gather(&rubble, &[plank], &bodies);
                 let mut production = RubbleBodies::gather(&rubble, &[plank], &bodies);
                 let dt = 1.0 / 64.0;
-                let actual = belt_piece_reactions(&mut sandbox, &reports, dt);
+                let actual = belt_piece_reactions(&mut sandbox, Entity::PLACEHOLDER, &reports, dt);
                 let expected = piece_impulses(
                     &mut production,
-                    reports.iter().flat_map(|r| &r.contacts),
+                    reports
+                        .iter()
+                        .flat_map(|r| &r.contacts)
+                        .map(|contact| (Entity::PLACEHOLDER, contact)),
                     dt,
                 );
                 let bits = |pushes: &[crate::track::rubble::Push]| {

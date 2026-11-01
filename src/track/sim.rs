@@ -861,9 +861,14 @@ fn apply_track_forces(
         let (.., contacts, _) = tanks
             .get(entity)
             .expect("a tank gathered for this synchronous tick remains alive");
-        contacts.0.iter().flatten()
+        contacts
+            .0
+            .iter()
+            .flatten()
+            .map(move |contact| (entity, contact))
     });
     let pushes = piece_impulses(&mut pieces, contacts, dt);
+    pieces.record_moving_contacts(&pushes, &mut transfers, dt);
     apply_pushes(&pushes, &mut pieces_query);
 }
 

@@ -4,8 +4,9 @@
 //! field never holds. [`RubbleBodies`] snapshots the nearby colliders shared by every driving source, the belt's support
 //! reads each through a convex shape check over every link's footprint ([`RubbleBodies::in_slab`])
 //! at the ground's own per-metre spring. In the same tick [`piece_impulses`] sizes what a loose
-//! piece takes back, and [`RubbleBodies::record_static_contacts`] stages the whole opposite
-//! reaction on fixed structural construction.
+//! piece takes back, [`RubbleBodies::record_static_contacts`] stages the whole opposite
+//! reaction on fixed structural construction, and [`RubbleBodies::record_moving_contacts`] the
+//! impulse a moving structure took.
 //!
 //! - **What the belt bears on** ([`RubbleQuery::supports`]): solid, layer-compatible colliders,
 //!   except [`super::terrain::FieldSurface`] geometry already represented by the field. Callers
@@ -79,7 +80,7 @@ use bevy::prelude::*;
 
 use super::terrain::FieldSurface;
 use crate::Layer;
-use crate::contact_transfer::{AppliedContact, ContactTransfers, StructureBody};
+use crate::contact_transfer::{AppliedContact, BodyInertia, ContactTransfers, StructureBody};
 
 use super::forces::BeltContact;
 
@@ -575,6 +576,44 @@ impl RubbleBodies {
         }
     }
 
+    /// Stage the impulse each moving structure took (a loose chunk group) as an implicit contact
+    /// named with its source, through the reading fixed construction's reaction joins
+    /// ([`Self::record_static_contacts`]): its laws judge the load the group actually took, and
+    /// the reading sizes its blow against the pair's masses, the group's from this tick-start
+    /// snapshot. `dt` is the tick the pushes were sized over.
+    pub(crate) fn record_moving_contacts(
+        &self,
+        pushes: &[Push],
+        transfers: &mut ContactTransfers,
+        dt: f32,
+    ) {
+        for push in pushes {
+            let surface = self.surface(push.collider);
+            let Some(structure) = surface.structure else {
+                continue;
+            }; // No structural law.
+            let piece = &self.bodies[surface
+                .body
+                .expect("a push lands on a gathered dynamic body")];
+            transfers.stage_on_moving(
+                AppliedContact {
+                    structure,
+                    structure_collider: push.collider,
+                    body: push.source,
+                    point: push.point,
+                    normal: push.normal,
+                    force: -push.impulse / dt,
+                    closing_speed: push.closing_speed,
+                },
+                BodyInertia {
+                    centre: piece.com,
+                    inverse_mass: piece.inv_mass,
+                    inverse_inertia: piece.inv_inertia,
+                },
+            );
+        }
+    }
+
     /// Every gathered piece that reaches into `slab`, with its extent there, in gather order.
     pub(crate) fn in_slab(&self, slab: &Slab) -> Vec<SlabOverlap> {
         let mut overlaps = Vec::new();
@@ -640,13 +679,20 @@ pub(crate) fn footprint_radius(
     pin_radius + column + (face + max_travel).abs().max((face - reach).abs())
 }
 
-/// One impulse a dynamic piece took: `impulse` (N·s, world) at `point`, through `collider`.
+/// One impulse a dynamic piece took: `impulse` (N·s, world) at `point`, through `collider`, from
+/// the belt of `source`.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) struct Push {
     pub(crate) body: Entity,
     pub(crate) collider: Entity,
+    pub(crate) source: Entity,
     pub(crate) impulse: Vec3,
     pub(crate) point: Vec3,
+    /// The contact's normal, unit, from the piece into the source.
+    pub(crate) normal: Vec3,
+    /// How fast the piece closed on the belt along `normal` as this impulse was sized (m/s);
+    /// negative when parting.
+    pub(crate) closing_speed: f32,
 }
 
 /// The force the belt law applied to its source through `contact` (N): the support along the
@@ -664,7 +710,7 @@ fn source_force(contact: &BeltContact) -> Vec3 {
 /// small beside the spring's at the belt's per-metre ratio).
 const EXPLICIT_LIMIT: f32 = 4.0;
 
-/// Every dynamic recipient's side of `contacts` (module doc), by one law for every body: the
+/// Every dynamic recipient's side of `contacts`, each with its source body (module doc), by one law for every body: the
 /// whole opposite reaction on a recipient the explicit step integrates the belt's springs against
 /// stably ([`EXPLICIT_LIMIT`], over all its patches from every source this tick), the clamped
 /// impulse on any other. Pieces are sized in one canonical order of the contacts' geometry, each
@@ -673,23 +719,23 @@ const EXPLICIT_LIMIT: f32 = 4.0;
 /// clamped push's normal part is zero where the piece is not closing on the belt.
 pub(crate) fn piece_impulses<'c>(
     bodies: &mut RubbleBodies,
-    contacts: impl IntoIterator<Item = &'c BeltContact>,
+    contacts: impl IntoIterator<Item = (Entity, &'c BeltContact)>,
     dt: f32,
 ) -> Vec<Push> {
     let mut dynamic = Vec::new();
-    for contact in contacts {
+    for (source, contact) in contacts {
         // Field support has no recipient, and static or kinematic recipients take no impulses.
         let Some(collider) = contact.collider else {
             continue;
         };
         let surface = bodies.surface(collider);
         let Some(slot) = surface.body else { continue };
-        dynamic.push((contact, slot, collider));
+        dynamic.push((contact, slot, collider, source));
     }
     // Effective masses read the tick-start pose and inertia only, so the impulses sized below
     // never change a recipient's verdict.
     let mut stiffness = vec![0.0_f32; bodies.bodies.len()];
-    for &(contact, slot, _) in &dynamic {
+    for &(contact, slot, ..) in &dynamic {
         stiffness[slot] +=
             contact.stiffness / bodies.bodies[slot].effective_mass(contact.point, contact.normal);
     }
@@ -697,7 +743,7 @@ pub(crate) fn piece_impulses<'c>(
         .iter()
         .map(|&rate| rate * dt * dt < EXPLICIT_LIMIT)
         .collect();
-    dynamic.sort_by_cached_key(|(contact, _, _)| {
+    dynamic.sort_by_cached_key(|(contact, ..)| {
         #[cfg(test)]
         bodies
             .reaction_sort_keys
@@ -721,8 +767,10 @@ pub(crate) fn piece_impulses<'c>(
         ]
     });
     let mut pushes = Vec::new();
-    for (contact, slot, collider) in dynamic {
+    for (contact, slot, collider, source) in dynamic {
         let body = &mut bodies.bodies[slot];
+        let closing_speed =
+            (body.velocity_at(contact.point) - contact.belt_velocity).dot(contact.normal);
         let impulse = if explicit[slot] {
             -source_force(contact) * dt
         } else {
@@ -732,8 +780,11 @@ pub(crate) fn piece_impulses<'c>(
         pushes.push(Push {
             body: body.entity,
             collider,
+            source,
             impulse,
             point: contact.point,
+            normal: contact.normal,
+            closing_speed,
         });
     }
     pushes
@@ -1066,6 +1117,97 @@ mod tests {
         }
     }
 
+    /// A belt driving over a moving structure (a fallen chunk group) loads that structure's laws
+    /// with the impulse the structure actually took, named with its source: the reading holds a
+    /// contact on the moving body whose blow and press sum to the pushes, and whose blow is the
+    /// pair's plastic exchange, never more than the closing momentum of their reduced mass. Moving
+    /// groups rely on it to judge what drives over them; staging only fixed construction, or
+    /// sizing the blow against the source's mass alone (twice the bound for equal masses), fails
+    /// here. FIXTURE DATA: a 14.4 kg source box closing at 1 m/s on a free 2 × 0.6 × 2 m slab
+    /// of the same mass, topped at 0.6 m.
+    #[test]
+    fn a_belt_on_a_moving_structure_loads_its_reading_by_the_impulse_it_took() {
+        let mut app = physics();
+        let slab = app
+            .world_mut()
+            .spawn((
+                Position(Vec3::Y * 0.3),
+                Rotation::default(),
+                RigidBody::Dynamic,
+                StructureBody,
+                Collider::cuboid(2.0, 0.6, 2.0),
+                ColliderDensity(6.0),
+            ))
+            .id();
+        let source = piece_box(&mut app, Vec3::Y * 1.5, Vec3::splat(0.2));
+        let closing = 1.0;
+        app.world_mut()
+            .entity_mut(source)
+            .insert(LinearVelocity(Vec3::NEG_Y * closing));
+        app.update();
+        app.update();
+        let (pushes, masses) = app
+            .world_mut()
+            .run_system_once(
+                move |rubble: RubbleQuery,
+                      mut bodies: Query<PieceData>,
+                      mut transfers: ResMut<ContactTransfers>| {
+                    let near = rubble.near(Vec3::ZERO, 4.0);
+                    let mut pieces = RubbleBodies::gather(&rubble, &near, &bodies);
+                    pieces.select_source(source, &near);
+                    let before = bodies.get(source).unwrap().0.linear_velocity();
+                    let report = pad_pass(
+                        &ground(),
+                        &pieces,
+                        Affine3A::from_translation(Vec3::Y * 0.6),
+                        SideState::default(),
+                        before,
+                        &mut GripElements::for_links(30),
+                    );
+                    pieces.record_static_contacts(source, &report.contacts, &mut transfers);
+                    let pushes = piece_impulses(
+                        &mut pieces,
+                        report.contacts.iter().map(|contact| (source, contact)),
+                        DT,
+                    );
+                    pieces.record_moving_contacts(&pushes, &mut transfers, DT);
+                    apply_pushes(&pushes, &mut bodies);
+                    let mass = |body| bodies.get(body).unwrap().2.value();
+                    (pushes, (mass(source), mass(slab)))
+                },
+            )
+            .unwrap();
+        assert!(
+            pushes.iter().any(|push| push.body == slab),
+            "the belt must bear on the slab"
+        );
+        app.update();
+        let transfers = app.world().resource::<ContactTransfers>();
+        let (mut load, mut blow) = (Vec3::ZERO, Vec3::ZERO);
+        for (point, struck, press, _) in transfers.split().filter(|(p, ..)| p.structure == slab) {
+            assert_eq!(point.body, source, "the contact is named with its source");
+            assert_eq!(point.body_collider, None);
+            load += struck + press * transfers.dt();
+            blow += struck;
+        }
+        let took: Vec3 = pushes.iter().map(|push| push.impulse).sum();
+        assert!(
+            (load - took).length() <= 1e-4 * took.length(),
+            "the slab's reading {load} must be the impulse it took, {took}"
+        );
+        // DERIVED: effective masses never exceed the bodies' masses.
+        let reduced = masses.0 * masses.1 / (masses.0 + masses.1);
+        println!(
+            "MEASURED moving-structure blow {blow} N s, took {took} N s, reduced-mass bound {} N s",
+            reduced * closing
+        );
+        assert!(
+            blow.y < 0.0 && -blow.y <= reduced * closing * (1.0 + 1e-4),
+            "the blow {blow} exceeds the pair's closing momentum {}",
+            reduced * closing
+        );
+    }
+
     /// FIXTURE DATA: a standing trunk segment as `trees::segment_collider` builds one, the convex
     /// hull of two twelve-point rings, radius 0.4 m at its foot and 0.35 m at its top, 0.6 m tall.
     #[test]
@@ -1146,7 +1288,7 @@ mod tests {
                 {
                     assert!((contact.slip - 0.4).abs() < 1e-5);
                 }
-                assert!(piece_impulses(&mut pieces, &report.contacts, DT).is_empty());
+                assert!(piece_impulses(&mut pieces, sourced(&report.contacts), DT).is_empty());
             })
             .unwrap();
     }
@@ -1242,6 +1384,13 @@ mod tests {
             .unwrap();
     }
 
+    /// `contacts` from one source body no reading names.
+    fn sourced(contacts: &[BeltContact]) -> impl Iterator<Item = (Entity, &BeltContact)> {
+        contacts
+            .iter()
+            .map(|contact| (Entity::PLACEHOLDER, contact))
+    }
+
     /// A contact pressing `load` (N) along +Y on `collider` at `point`, belt at rest, no traction.
     /// FIXTURE DATA: its spring holds that load at a 1 cm press.
     fn press(point: Vec3, collider: Entity, load: f32) -> BeltContact {
@@ -1291,7 +1440,7 @@ mod tests {
             .run_system_once(move |rubble: RubbleQuery, mut bodies: Query<PieceData>| {
                 let near = rubble.near(Vec3::new(10.0, 0.0, 0.0), 15.0);
                 let mut pieces = RubbleBodies::gather(&rubble, &near, &bodies);
-                let pushes = piece_impulses(&mut pieces, &contacts, DT);
+                let pushes = piece_impulses(&mut pieces, sourced(&contacts), DT);
                 apply_pushes(&pushes, &mut bodies);
                 pushes
             })
@@ -1397,7 +1546,7 @@ mod tests {
                     slide,
                     &mut GripElements::for_links(30),
                 );
-                let pushes = piece_impulses(&mut pieces, &report.contacts, DT);
+                let pushes = piece_impulses(&mut pieces, sourced(&report.contacts), DT);
                 let mus = report.contacts.iter().map(|c| c.mu).collect::<Vec<_>>();
                 (sliding_grip(&report), mus, pushes)
             })
@@ -1677,7 +1826,7 @@ mod tests {
                         Vec3::new(0.0, vy, 0.0),
                         &mut elements,
                     );
-                    let pushes = piece_impulses(&mut pieces, &report.contacts, DT);
+                    let pushes = piece_impulses(&mut pieces, sourced(&report.contacts), DT);
                     apply_pushes(&pushes, &mut bodies);
                     let lift: f32 = report.apps.iter().map(|app| app.force.y).sum();
                     (lift, elements)
@@ -1938,7 +2087,7 @@ mod tests {
                         contact
                     })
                     .collect();
-                let pushes = piece_impulses(&mut pieces, &contacts, DT);
+                let pushes = piece_impulses(&mut pieces, sourced(&contacts), DT);
                 assert!(pushes.is_empty());
                 assert_eq!(
                     pieces.reaction_sort_keys.get(),
