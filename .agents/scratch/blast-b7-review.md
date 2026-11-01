@@ -15,8 +15,8 @@ The wall design owns the model narrative; this file records findings and disposi
   different dynamic strength from the one the simulation constructs, including underflow of its
   static operand. The simulation now constructs the validated product from the original datum; the load gate
   refuses a static tensile strength that cannot be stored as positive finite f32.
-- **P3:** the fracture module introduction says hulls never serve a law, but Law 2 reads its
-  hull. Correct the module interface documentation with the energy-path deletion.
+- **P3, fixed:** the fracture module introduction says hulls never serve a law, but Law 2 reads its
+  hull. Its interface documentation now states the hull's Law 2 role.
 - Required chemical energy removes the omitted-data sentinel. Required tensile DIFs are
   positive and finite, at least unity, with their derived dynamic strength and bar speed checked
   at load. No per-object law or alternative switch was introduced.
@@ -75,3 +75,47 @@ targeted tests pass. The cone-volume test holds at normal and oblique incidence 
 shares; the gate test rejects both a partial crater with too short a ligament and through-crush,
 without exporting phantom momentum or removing phantom rear volume. Existing slab momentum and
 representation tests still pass; the crushed-volume calculation retains its original arithmetic.
+
+## Dead-path deletion audit
+
+- **Energy-gated pushes:** the literal `pushes.retain` disappeared with the unified `Load` in
+  `c1208bc9`; its equivalent energy gate and energy-weighted mean were removed by `1a51f8b2`.
+  Main already groups by chunk/face and retains loads by positive impulse, with an
+  impulse-weighted centroid and independent opposite faces. No duplicate path is retained.
+- **Energy-sized blast dishes:** `43146942` already replaced them with `Load::crushed` in m³,
+  from Law 1; `holes_of` uses that volume for blast/scab dishes. Kinetic channels alone retain
+  energy divided by cavity resistance. No blast-energy dish remains to delete.
+- **Blast-to-Lamé:** removed the remaining addition of `RayHit::energy` to `Load::energy`.
+  Blast face and rear-removal loads carry zero kinetic cavity energy. Pressure/impulse drive
+  crush, scab and structural loading; only kinetic lines/fragments source the cavity crack law.
+  Removed the obsolete blast-energy carry assertions and the synthetic blast helper's cavity
+  energy. The low-pressure test now also requires no cavity-driven cracks.
+- **Current energy user:** `RayHit::energy` survives solely for the wall sandbox's intercepted
+  chemical-energy geometry audit. Its displayed value is explicitly an audit; the last-shot
+  blast readout shows impulse. It reaches no load, pool, hole, centroid or joint stress.
+- **Non-vacuous material fixture:** after the legacy route was removed, the old distant fixture
+  produced no state change. Its charge is now the existing ASSUMED crushing fixture, and the
+  test checks that its peak exceeds each material's crush threshold. Relabelled kinds/names
+  must preserve the whole state; swapping material rows must change pool wear. No particular
+  house breach, crack count or vehicle outcome is a pass condition.
+- Corrected the static-tensile load diagnostic to name `bulk.tensile`, and the stale module/test
+  prose that attributed blast cracking to kinetic cavity energy. Non-blast deposits avoid
+  collecting rear contacts when they have no blast stops.
+
+## Final gates and evidence
+
+Formatting and locked workspace/all-target clippy with `dev_ui,bitprobe` and warnings denied
+pass. **MEASURED:** 189 targeted tests pass, covering buildings, blast, ballistics burst/fuze/
+recording, materials, sandbox-wall, headless, UI string coverage and doc citations. Four existing
+measurement-only tests remain ignored (burst-law cost, forest cost, heightfield drive and reverse
+throw); no pricing, capture or still was run. All test binaries ran unattended and headless under
+the serial build/run lock.
+
+**MEASURED**, final test run: chemistry split maximum relative residual **3.501061e-8**;
+maximum crush-work/blast-energy fraction **2.760225e-2**; sampler maximum relative spread
+**3.160834e-4** on the two existing near-face fixtures. The isolated fixture slabs retain the
+recorded scab results: thicknesses **0.12 / 0.25 / 0.5 m**, masses **5.755 / 27.939 / 202.209 kg**,
+speeds **14.29 / 6.19 / 1.96 m/s**, momentum **82.2 / 173.0 / 397.1 N s** out of **589.7 N s**.
+These are fixture measurements, not a verified breach gate. The final diff was read again against
+all three lenses: no remaining P1/P2 from the lane-5 review; the named footprint/point-sampling
+approximations, transmission gap and casing-emission P3s remain as stated above.

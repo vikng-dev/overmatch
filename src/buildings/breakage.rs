@@ -1106,6 +1106,9 @@ fn blast_loads(
     hits: &[fracture::RayHit],
     live: &Live,
 ) -> Vec<Load> {
+    if hits.is_empty() {
+        return Vec::new(); // This deposit has no blast surface stops.
+    }
     let contacts: Vec<Joint> = live.state.contacts(&live.structure).collect();
     let (loads, scabs) = Load::blast(hits, |c| fracture::Backing {
         block: &kind.layout.blocks[c],

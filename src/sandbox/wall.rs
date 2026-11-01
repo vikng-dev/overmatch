@@ -1075,8 +1075,8 @@ struct Applied {
     /// Each loose group, its centroid, linear and angular velocity, and whether a structural crack
     /// bounds it.
     groups: Vec<(Vec<usize>, Vec3, Vec3, Vec3, bool)>,
-    /// A blast's charge, origin, coupled energy, the impulse its rays pushed with (N·s, summed
-    /// unsigned), and its drawn ray ends.
+    /// A blast's charge, origin, intercepted energy (audit only), its rays' summed unsigned
+    /// impulse (N·s), and its drawn ray ends.
     blast: Option<(Blast, Vec3, f32, f32, Vec<Vec3>)>,
 }
 
@@ -1385,10 +1385,10 @@ fn apply_deposits(mut p: ApplyParam) {
         });
         if let Some(last) = &p.log.last {
             info!(
-                "wall prototype: {}: {:.0} J into {} chunks, {} dust, {} local cracks, \
+                "wall prototype: {}: {:.0} kinetic J into {} chunks, {} dust, {} local cracks, \
                  {} structural cracks in {} sections (first push {:?} N s m and first weight {:?} \
                  Pa demand, capacity), weight check {} steps with {} touched chunks unassessed, \
-                 {} groups fell ({} chunks), exit cones {:.0} J, blast {:?} (coupled J, N s)",
+                 {} groups fell ({} chunks), exit cones {:.0} J, blast {:?} (audit J, N s)",
                 last.what,
                 last.deposited,
                 last.chunks,
@@ -1572,7 +1572,7 @@ fn detail(
             charge.charge,
         ),
         format!(
-            "last: {}: {} into {} chunks -> {} dust, {} local cracks, {} structural cracks in {} sections, {} groups fell ({} chunks)",
+            "last: {}: {} kinetic into {} chunks -> {} dust, {} local cracks, {} structural cracks in {} sections, {} groups fell ({} chunks)",
             last.what,
             joules(last.deposited),
             last.chunks,
@@ -1586,7 +1586,7 @@ fn detail(
     ];
     if let Some((blast, coupled, pushed)) = last.blast {
         lines.push(format!(
-            "      blast coupled {} of {} ({:.0} %), pushed {:.0} N s",
+            "      blast intercepted {} of {} ({:.0} %, audit), pushed {:.0} N s",
             joules(coupled),
             joules(blast.energy),
             100.0 * coupled / blast.energy.max(f32::EPSILON),
@@ -1619,9 +1619,13 @@ fn detail(
     lines
 }
 
-/// The last shot in a few words: what it was and the energy it put into the wall.
+/// The last shot in a few words: its blast impulse or its kinetic cavity energy.
 fn last_shot(last: &Outcome) -> String {
-    format!("{}, {}", last.what, joules(last.deposited))
+    if let Some((_, _, pushed)) = last.blast {
+        format!("{}, {pushed:.0} N s", last.what)
+    } else {
+        format!("{}, {} kinetic", last.what, joules(last.deposited))
+    }
 }
 
 #[derive(SystemParam)]

@@ -538,29 +538,35 @@ impl BlastFile {
                  author usable strengths in Pa and a dimensionless ratio with their sources"
             ));
         }
-        // The simulation stores these derived compaction inputs in f32. A finite f64 datum
-        // must not become a zero or infinite strength/front speed after that conversion.
+        // The simulation stores the static seam strength and these derived blast inputs in f32.
+        // A finite f64 datum must not become zero or infinity after that conversion.
         let strength = facts.compressive_strength * facts.compressive_dif;
         let lock_up = 1.0 - density / facts.solid_density;
         let front_speed = (strength * lock_up / density).sqrt();
         for (field, value) in [
-            ("tensile (static tensile strength)", tensile),
-            ("compressive_strength * compressive_dif", strength),
-            ("solid_density (compaction front speed)", front_speed),
+            ("bulk.tensile (static tensile strength)", tensile),
             (
-                "tensile_dif (dynamic tensile strength)",
+                "bulk.blast.compressive_strength * compressive_dif",
+                strength,
+            ),
+            (
+                "bulk.blast.solid_density (compaction front speed)",
+                front_speed,
+            ),
+            (
+                "bulk.blast.tensile_dif (dynamic tensile strength)",
                 tensile * facts.tensile_dif,
             ),
             (
-                "youngs_modulus (bar wave speed)",
+                "bulk.blast.youngs_modulus (bar wave speed)",
                 (facts.youngs_modulus / density).sqrt(),
             ),
         ] {
             let stored = value as f32;
             if !stored.is_finite() || stored <= 0.0 {
                 return Err(format!(
-                    "substance {name:?}: bulk.blast.{field} is not positive and finite in the \
-                     simulation's f32 units; author usable compaction inputs with their sources"
+                    "substance {name:?}: {field} is not positive and finite in the \
+                     simulation's f32 units; author usable blast and seam inputs with their sources"
                 ));
             }
         }

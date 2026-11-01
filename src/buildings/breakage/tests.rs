@@ -457,15 +457,15 @@ fn line_loads(structure: &Structure, lines: &[(usize, Vec3, Vec3, f32)]) -> Vec<
 }
 
 /// A fixture crushed-volume load on law chunk `c` at its centroid, taking `share` of its pool, with
-/// the energy a line crushing as much would spend (the push rule's source) and no impulse or peak
-/// force, as the laws read it.
+/// no cavity energy, impulse or peak force: the removal half of a blast, independent of its
+/// pressure-driven section loading. ASSUMED fixture volume, not an energy-to-crush adapter.
 fn blast_on(structure: &Structure, c: usize, share: f32) -> Vec<Load> {
     let chunk = &structure.chunks[c];
     let crushed = share * fracture::full_pool(chunk);
     vec![Load {
         chunk: c,
         at: chunk.centroid,
-        energy: crushed * chunk.material.crush,
+        energy: 0.0,
         blow: Vec3::ZERO,
         press: Vec3::ZERO,
         peak: None,
@@ -2393,8 +2393,8 @@ fn awake_and_sleeping_presses_join_every_deposit_once() {
 /// study's test 8; ADR-0034). A wall chunk and a roof board take one law, from their material rows
 /// and their construction: the law's view of the shipped house (its layout and structure) is the
 /// same whatever its elements are called and whichever kind each is labelled, so one blast's loads
-/// change it identically, while the same loads on the house with its elements' materials swapped
-/// change it otherwise. A mutant that reads an element's kind or name into the law's view, or
+/// change it identically, while the same field on the house with its elements' materials
+/// swapped wears the volume pools differently. A mutant that reads an element's kind or name into the law's view, or
 /// branches the laws on either, fails here. The charge and its point are ASSUMED fixture data.
 #[test]
 fn no_elements_kind_or_name_enters_the_laws() {
@@ -2427,8 +2427,16 @@ fn no_elements_kind_or_name_enters_the_laws() {
         element.material = (element.material + 1) % materials;
     }
     let (lo, hi) = kind.bounds();
-    let blast = Blast::of(5.0 * 4.184e6, 1e-3);
-    let origin = Vec3::new(hi.x + 6.0, lo.y + 1.0, 0.5 * (lo.z + hi.z));
+    // ASSUMED fixture charge: the peak exceeds the materials' dynamic crush strengths at the
+    // nearest face, so material-dependent wear is exercised without a chemical-energy cavity.
+    let blast = Blast::of(CRUSHING_BLAST_J, 0.05);
+    assert!(
+        masonry
+            .iter()
+            .flatten()
+            .all(|material| blast.peak_pressure(1.0, 1.0) > material.compaction.strength)
+    );
+    let origin = Vec3::new(hi.x + 1.0, lo.y + 1.0, 0.5 * (lo.z + hi.z));
     let run = |asset: &BuildingAsset| {
         let layout = Layout::of(asset, &masonry, attachments).unwrap();
         let structure = layout.structure(asset, 1.0);
@@ -2456,25 +2464,26 @@ fn no_elements_kind_or_name_enters_the_laws() {
             contacts: &contacts,
         });
         let changes = run_laws(&layout, &mut live, &loads, Vec::new());
-        (layout, live.structure, changes)
+        (layout, live.structure, live.state, changes)
     };
-    let (layout, structure, changes) = run(&kind.asset);
+    let (layout, structure, state, changes) = run(&kind.asset);
     assert!(
         !changes.events.is_empty(),
         "the fixture charge changes the house"
     );
-    let (other_layout, other_structure, other_changes) = run(&relabelled);
+    let (other_layout, other_structure, other_state, other_changes) = run(&relabelled);
     assert_eq!(other_layout, layout);
     assert_eq!(
         (other_structure.chunks, other_structure.joints),
         (structure.chunks.clone(), structure.joints.clone())
     );
+    assert_eq!(other_state, state, "kinds and names change no pool wear");
     assert_eq!(other_changes, changes, "kinds and names change no law");
-    let (_, other_structure, other_changes) = run(&swapped);
+    let (_, other_structure, other_state, _) = run(&swapped);
     assert_ne!(other_structure.chunks, structure.chunks);
     assert_ne!(
-        other_changes, changes,
-        "a material changes the law's outcome"
+        other_state.pool, state.pool,
+        "a material changes the field's crushed volume"
     );
 }
 

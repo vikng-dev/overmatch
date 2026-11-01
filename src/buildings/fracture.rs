@@ -1,15 +1,15 @@
 //! The buildings' fracture laws, about the game's environment destruction (game state only): a
-//! structure, what a deposit of energy does to it, the structural check, support and the blast
+//! structure, what a source loads it with, the structural check, support and the blast
 //! field. One home for the laws the armour sandbox's wall prototype adopted (`sandbox::wall` calls
 //! these).
 //!
 //! A structure is a chunk table ([`Chunk`]: volume, centroid, mass, material) and a joint graph
 //! ([`Joint`]: the pair, contact area, centroid and normal; a [`Side::Ground`] joint is a ground
-//! anchor). The laws read only those two; a chunk's convex hull ([`Block`]) serves the colliders,
-//! the views and the geometry probes that say which chunk a deposit landed in, never a law.
+//! anchor). A chunk's convex hull ([`Block`]) also locates Law 2's actual rear surface; it serves
+//! the colliders, views and geometry probes that say which chunk a deposit landed in.
 //!
 //! Every source enters the laws as loads ([`Load`]): the volume (m³) it crushes at one point of one
-//! chunk and the energy (J) the push rule reads there, the momentum (N·s), its blow, it delivers
+//! chunk and the kinetic cavity energy (J) the crack rule reads there, the momentum (N·s), its blow, it delivers
 //! there, the force (N), its press, it holds there through the tick, and its origin ([`Origin`]): a
 //! field, or a body in contact.
 //!
@@ -18,10 +18,11 @@
 //!   energy over the material's crush energy; a blast crushes by Law 1, its rays' impulse through
 //!   a compaction front wherever their peak pressure beats the material's dynamic compressive
 //!   strength ([`Masonry::crushed_by`]), its energy never entering.
-//! * **Cracks: the push rule** ([`crack`]). Each live joint's stress from the loads' energies is
+//! * **Kinetic cavity cracks** ([`crack`]). Each live joint's stress from kinetic loads' energies is
 //!   compared with the seam's tensile strength; a joint at or over it is cracked loose. The stress
 //!   is the elastic one about the cavity a load's energy crushed. Loads superpose; a joint does
-//!   not remember a stress below its threshold.
+//!   not remember a stress below its threshold. A blast supplies no cavity energy: its pressure
+//!   and impulse act through the three blast laws alone.
 //! * **Structure** ([`structural`]). The loads' blows on a group that one section alone holds to
 //!   the ground crack the section when their angular impulse about the section's hinge would spend
 //!   the section's fracture energy and, where the section bears the group, topple the group over
@@ -659,7 +660,7 @@ pub(crate) fn wear(
 
 /// One load on a structure, about the game's environment destruction (game state only): what one
 /// source puts through one point of one chunk in one deposit. Its crushed volume is what it takes
-/// from the chunk's pool ([`strike`]); its energy stresses the joints about the cavity it opens
+/// from the chunk's pool ([`strike`]); its kinetic cavity energy stresses the joints about it
 /// ([`crack`]); its blow is the momentum it delivers there, which bends the
 /// sections that hold the chunk and leaves with a group it frees ([`structural`]); its press is
 /// the force it holds there through the tick, read with gravity by [`weigh`]. A field's blow is
@@ -674,7 +675,8 @@ pub(crate) struct Load {
     pub chunk: usize,
     /// Where, in the structure's frame, m.
     pub at: Vec3,
-    /// J.
+    /// Kinetic cavity energy, J: a line's or fragment's source for [`crack`]. Zero for a blast,
+    /// whose pressure and impulse act through the blast laws, and for a body contact.
     pub energy: f32,
     /// The volume it crushes, m³: a line's or a fragment's energy over its chunk's crush energy
     /// ([`Masonry::crush`]); a blast's, its rays' Law 1 volumes ([`Masonry::crushed_by`]), which
@@ -688,7 +690,7 @@ pub(crate) struct Load {
     /// overpressure over the patches its rays load, into the faces ([`Blast::peak`]), its rays
     /// summed as if they arrive together (ASSUMED: one chunk's rays do). `None` where the source
     /// states none: a round's line (its blow is over before a section moves, ASSUMED), a fragment's
-    /// stop (no blow) and a body's contact (its force is its press). The section and rest laws
+    /// stop (an impulsive blow) and a body's contact (its force is its press). The section and rest laws
     /// read it against their strength ([`Load::felt`]).
     pub peak: Option<Vec3>,
     pub origin: Origin,
@@ -820,7 +822,7 @@ impl Load {
             if weight == 0.0 {
                 // A cone whose intercepted share is zero delivers nothing.
                 assert!(
-                    hit.energy == 0.0 && hit.crushed == 0.0 && hit.peak == Vec3::ZERO,
+                    hit.crushed == 0.0 && hit.peak == Vec3::ZERO,
                     "a nonempty blast patch carries a positive impulse"
                 );
                 continue;
@@ -844,7 +846,6 @@ impl Load {
             });
             rays.push(hit);
             load.at += hit.at * weight;
-            load.energy += hit.energy;
             load.crushed += hit.crushed;
             load.blow += hit.impulse;
             *load
@@ -974,7 +975,7 @@ fn joint_load(joint: &Joint, seam: &Seam, sources: &[Load], crushed: &[f32]) -> 
 
 /// Crack every live, intact bonded joint whose stress from the energies of `loads` reaches its
 /// seam's threshold ([`joint_load`]); returns the joints cracked now, ascending. A load that spends
-/// no energy crushes no cavity and stresses nothing. A joint's material, whose crush energy clamps
+/// no kinetic cavity energy sources no stress. A joint's material, whose crush energy clamps
 /// the loads, is its chunk `a`'s; a rest is never cracked here ([`Bond::Resting`]). The loads'
 /// crushed radii are taken once per crush energy the joints meet, keyed on its bits, not at each
 /// disc point of each joint: the same expression of the same values.
@@ -3220,8 +3221,8 @@ impl Scab {
 /// free back face as tension, it lifts a scab where `σ_b min(1, 2L / λ) ≥ σ_t,d`, of thickness `δ =
 /// λ σ_t,d / (2 σ_b)` (where the net tension first reaches the strength; at most `L`), at `v =
 /// (2σ_b − σ_t,d) / (ρ c)`, over `F_t / σ_b`, the area its transmitted force covers at `σ_b`,
-/// bounded by the chunk's exposed rear area projected along the normal (DERIVED: the scab then carries at most `J
-/// F_t / F` of the face's momentum, never more than its blow). ASSUMED: that equivalent area is the
+/// bounded by the chunk's exposed rear area projected along the normal (DERIVED: the scab then
+/// carries at most `J F_t / F` of the face's momentum, never more than its blow). ASSUMED: that equivalent area is the
 /// footprint and the gate reads one back point. Intact contacts take their projected area off
 /// the free rear area; propagation through that contact to a farther free surface is unresolved.
 /// A front that crushes through leaves no ligament and throws no rear scab. `None` where no
@@ -3317,6 +3318,8 @@ pub(crate) struct RayHit {
     pub at: Vec3,
     /// Outward normal of the struck face; all rays on that face carry the same normal.
     pub normal: Vec3,
+    /// Intercepted chemical-energy share, J, for the sandbox's geometry audit alone. It never
+    /// enters a [`Load`], wears a pool, sizes a hole or sources a Lamé field.
     pub energy: f32,
     pub impulse: Vec3,
     pub peak: Vec3,
@@ -3931,17 +3934,17 @@ mod tests {
         assert!(told_apart, "the sweep tells the materials' radii apart");
     }
 
-    /// A SOURCE'S LOADS CARRY ITS ENERGY AND ITS MOMENTUM WHOLE: a fixture line's loads lie at
+    /// LOADS PRESERVE THEIR SOURCE'S VOLUME AND MOMENTUM: a fixture line's loads lie at
     /// most [`LINE_STEP`] apart along its chord, sum to its energy and its blow, and their blows'
     /// moment about any point is the whole blow's at the chord's midpoint; a blast's ray hits give
-    /// one load per chunk face, each the sum of that face's energy, impulse and peak force at its
+    /// one load per chunk face, each the sum of that face's volume, impulse and peak force at its
     /// impulse-weighted centroid; a line and a field state no peak force.
     /// The structural check and a freed group's launch read a line's momentum through its loads,
-    /// and a blast's dish and push the one point of each chunk, as the section law will its peak
-    /// force: a line that multiplied or shifted its blow, or a blast that parted a chunk's energy
-    /// from its push or its peak force, fails here.
+    /// and a blast's dish, push and peak force read the same face point. A line that multiplies
+    /// or shifts its blow, or a blast that loses volume, momentum or peak force, fails here.
+    /// Blast loads carry no kinetic cavity energy; only the pressure and impulse laws load it.
     #[test]
-    fn a_sources_loads_carry_its_energy_and_momentum_whole() {
+    fn loads_preserve_their_sources_volume_and_momentum() {
         let close = |got: Vec3, want: Vec3| (got - want).length() <= 1e-5 * want.length();
         let (entry, end) = (Vec3::new(0.0, 0.1, 0.0), Vec3::new(0.23, 0.05, 0.02));
         let (energy, blow) = (3.0e4, Vec3::new(40.0, -10.0, 5.0));
@@ -3989,28 +3992,28 @@ mod tests {
             "nonparallel fragment pushes preserve their moment"
         );
 
-        // Each hit crushes its energy's tenth, m³, over a square metre of patch, on the top face
-        // of a slab far too weak a load to scab (fixture data).
-        let hit = |chunk: usize, at: Vec3, energy: f32, (impulse, peak): (Vec3, Vec3)| RayHit {
+        // ASSUMED fixture volumes over patches on the slab's top face. Every blow and peak is
+        // along its inward normal, far too weak to scab; no energy-to-volume path enters.
+        let hit = |chunk: usize, at: Vec3, crushed: f32, (impulse, peak): (Vec3, Vec3)| RayHit {
             chunk,
             at,
             normal: Vec3::Z,
-            energy,
+            energy: 0.0,
             impulse,
             peak,
             pressure: peak.length(),
-            crushed: energy / 10.0,
+            crushed,
             depth: 0.0,
         };
         let slab = Block::cuboid(Vec3::new(-5.0, -5.0, -1.0), Vec3::new(5.0, 5.0, 0.0));
         let (a, b, c) = (Vec3::X, Vec3::Y, Vec3::new(0.0, 2.0, 0.0));
-        let (i, j) = (Vec3::new(3.0, 0.0, -1.0), Vec3::new(-1.0, 2.0, 0.0));
-        let (f, g) = (Vec3::new(2.0e5, 0.0, 0.0), Vec3::new(0.0, -3.0e5, 1.0e5));
+        let (i, j) = (Vec3::NEG_Z * 3.0, Vec3::NEG_Z * 7.0);
+        let (f, g) = (Vec3::NEG_Z * 2.0e5, Vec3::NEG_Z * 3.0e5);
         let (loads, scabs) = Load::blast(
             &[
-                hit(3, a, 1.0, (i, f)),
-                hit(1, b, 2.0, (Vec3::Z, Vec3::Y)),
-                hit(3, c, 3.0, (j, g)),
+                hit(3, a, 0.1, (i, f)),
+                hit(1, b, 0.2, (Vec3::NEG_Z, Vec3::NEG_Z)),
+                hit(3, c, 0.3, (j, g)),
             ],
             |_| Backing {
                 block: &slab,
@@ -4024,9 +4027,9 @@ mod tests {
         assert_eq!(chunks, vec![1, 3]);
         assert_eq!(
             (loads[0].at, loads[0].energy, loads[0].blow, loads[0].peak),
-            (b, 2.0, Vec3::Z, Some(Vec3::Y))
+            (b, 0.0, Vec3::NEG_Z, Some(Vec3::NEG_Z))
         );
-        assert_eq!(loads[1].energy, 4.0);
+        assert_eq!(loads[1].energy, 0.0, "a blast supplies no cavity source");
         assert!(
             (loads[1].crushed - 0.4).abs() < 1e-6,
             "a chunk's rays' volumes add"
@@ -4326,7 +4329,7 @@ mod tests {
     /// MOMENTUM SETS THE CRUSHED MASS (the game's environment destruction model, the #237 study's
     /// test 1). At a fixed peak pressure a face patch of each shipped breakable material crushes
     /// `Δm = J f(σ_c,d / P) / u_c`, so doubling its impulse doubles the mass; and the pool takes
-    /// a blast load's crushed volume, whatever energy the load carries. Law 1 and the crater
+    /// a blast load's crushed volume, whatever diagnostic energy the ray carries. Law 1 and the crater
     /// footprint rely on it: a law reading the energy, squaring the impulse, or a pool worn by
     /// the blast's energy fails here. Fixture pressures, impulses and energies.
     #[test]
@@ -4394,7 +4397,8 @@ mod tests {
     /// A LONG LOW PULSE CRUSHES NOTHING (the game's environment destruction model, the #237
     /// study's test 2). Where the peak pressure does not beat a material's dynamic compressive
     /// strength nothing crushes, however large the impulse; a far burst's ray carrying many
-    /// times a chunk's crushing work leaves its pool full. Standoff bursts leaving no crater
+    /// times a chunk's crushing work as diagnostic energy leaves its pool full and cracks no
+    /// cavity-driven joint. Standoff bursts leaving no crater
     /// rely on it: a crush law that drops its pressure gate, or a pool the blast's energy wears,
     /// fails here. Fixture pressures, impulses and burst.
     #[test]
@@ -4441,7 +4445,7 @@ mod tests {
         assert!(scabs.is_empty(), "a far pulse throws no scab: {scabs:?}");
         let struck = strike(&structure, &mut state, &loads);
         assert!(
-            struck.worn.is_empty() && struck.dusted.is_empty(),
+            struck.worn.is_empty() && struck.dusted.is_empty() && struck.cracked.is_empty(),
             "{struck:?}"
         );
         assert_eq!(state.pool[0], full_pool(chunk), "the pool stays full");
