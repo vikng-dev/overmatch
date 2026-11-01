@@ -325,7 +325,9 @@ fn side_plate_contacts_reach_the_structure_contact_reader() {
             .filter(|(point, ..)| {
                 point.body == tank
                     && point.structure == wall
-                    && world.get::<SidePlate>(point.body_collider).is_some()
+                    && point
+                        .body_collider
+                        .is_some_and(|collider| world.get::<SidePlate>(collider).is_some())
             })
             .map(|(point, ..)| point.impulse.length())
             .sum::<f32>();

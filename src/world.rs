@@ -31,7 +31,7 @@ pub struct TerrainMap {
 
 /// What stands on the map without being terrain: each building's bounds in the [`TerrainMap`]
 /// block encoding (a unit cube posed and scaled; `crate::buildings::footprint`). Never part of the
-/// track field, so no belt senses it; spawn avoidance refuses a spawn inside one exactly as inside
+/// track field: belts read its colliders. Spawn avoidance refuses a spawn inside one exactly as inside
 /// a standing block (`net::server`).
 #[derive(Resource, Default)]
 pub struct SpawnObstacles(pub Vec<Transform>);
@@ -582,6 +582,7 @@ fn spawn_environment(
             Transform::IDENTITY,
             RigidBody::Static,
             crate::terrain_grid::heightfield_collider(&grid),
+            crate::track::terrain::FieldSurface,
             CollisionLayers::new([Layer::Terrain], LayerMask::ALL),
             crate::ground_types::GroundTypes::load_shipped().terrain_friction(),
         ));
@@ -812,6 +813,7 @@ fn spawn_block(
         transform,
         RigidBody::Static,
         Collider::cuboid(1.0, 1.0, 1.0),
+        crate::track::terrain::FieldSurface,
         CollisionLayers::new([Layer::Terrain], LayerMask::ALL),
         crate::ground_types::GroundTypes::load_shipped().terrain_friction(),
     ));

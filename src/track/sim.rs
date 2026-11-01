@@ -686,7 +686,11 @@ fn apply_track_forces(
     gear: Option<Res<TrackGear>>,
     #[cfg(feature = "bitprobe")] mut bitprobe: Option<ResMut<BitprobeCapture>>,
     volumes: Query<VolumeFacets>,
-    (rubble, tank_bodies): (RubbleQuery, Query<Entity, With<Tank>>),
+    (rubble, tank_bodies, mut transfers): (
+        RubbleQuery,
+        Query<Entity, With<Tank>>,
+        ResMut<crate::contact_transfer::ContactTransfers>,
+    ),
     mut pieces_query: Query<PieceData, Without<Tank>>,
     mut tanks: Query<
         (
@@ -823,6 +827,7 @@ fn apply_track_forces(
             capture.transmission = tr.bitprobe;
         }
         for (si, report) in reports.into_iter().enumerate() {
+            pieces.record_static_contacts(entity, &report.contacts, &mut transfers);
             let pushes = piece_impulses(&mut pieces, &report.contacts, dt);
             apply_pushes(&pushes, &mut pieces_query);
             effect.belt_reaction[si] = report.belt_reaction;

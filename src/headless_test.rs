@@ -919,6 +919,7 @@ fn a_tank_too_soft_for_its_springs_rests_on_its_bump_stops() {
         ChildOf(slab),
         Transform::IDENTITY,
         Collider::cuboid(30.0, 1.0, 30.0),
+        crate::track::terrain::FieldSurface,
         avian3d::prelude::CollisionLayers::new(
             [crate::Layer::Terrain],
             avian3d::prelude::LayerMask::ALL,
@@ -959,7 +960,10 @@ fn a_tank_too_soft_for_its_springs_rests_on_its_bump_stops() {
             .resource::<ContactTransfers>()
             .split()
             .filter(|(point, _, _, _)| {
-                point.body == tank && world.get::<BumpStop>(point.body_collider).is_some()
+                point.body == tank
+                    && point
+                        .body_collider
+                        .is_some_and(|collider| world.get::<BumpStop>(collider).is_some())
             })
             .map(|(_, _, press, _)| -press.y)
             .sum();

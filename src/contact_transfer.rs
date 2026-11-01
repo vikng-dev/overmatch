@@ -1,6 +1,6 @@
-//! What the physics solver moved through each contact between a standing structure and a dynamic
-//! body, one physics step at a time: the reading a body's contact load is taken from in the game's
-//! environment destruction model (game state only; a contact never doses a tank). The model it
+//! What solver contacts and implicit belt contacts moved between a standing structure and a
+//! dynamic body, one physics step at a time: the reading a body's contact load is taken from in
+//! the game's environment destruction model (game state only; a contact never doses a tank). The model it
 //! serves is `.agents/docs/design/wall-destruction.md`, "Bodies in contact".
 //!
 //! THE READING. Avian's contact solver runs sequential impulses over substeps. Each substep warm
@@ -34,6 +34,13 @@
 //! ([`ContactTransfers::resting`]): its press stands on the structure ([`Resting::press`]) and is no
 //! new transfer.
 //!
+//! IMPLICIT CONTACTS. The belt applies support and traction before physics without collider
+//! constraints. Its equal-and-opposite structure reaction is staged by [`ContactTransfers::stage`]
+//! and published with that physics step. Coplanar patches on one collider and source body share
+//! one closing-momentum budget at their load centroid; splitting a shoe footprint cannot multiply
+//! a blow. These contacts are refreshed by the belt each tick and never enter the solver's
+//! sleeping-pair cache.
+//!
 //! Filled on the authority only, where the destruction laws run; a replica's stays empty.
 
 use std::collections::BTreeMap;
@@ -66,8 +73,8 @@ pub(crate) struct ContactTransfer {
     pub(crate) structure_collider: Entity,
     /// The dynamic body.
     pub(crate) body: Entity,
-    /// The dynamic body's collider the point lies on.
-    pub(crate) body_collider: Entity,
+    /// The source collider, or `None` for an implicit belt contact with no solver collider.
+    pub(crate) body_collider: Option<Entity>,
     /// The contact point in world space, as the narrow phase found it at the step's start (m).
     pub(crate) point: Vec3,
     /// The contact normal, unit, from the structure into the body.
@@ -84,6 +91,19 @@ pub(crate) struct ContactTransfer {
     /// The body's rest speed (m/s): Avian's own, under which the library lets the body sleep
     /// (its `SleepThreshold::linear`, in `PhysicsLengthUnit`s).
     pub(crate) rest_speed: f32,
+}
+
+/// An implicit contact force applied before physics. Its momentum is the force integrated over
+/// that physics step, and the structure takes its opposite. The normal points into the source.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct AppliedContact {
+    pub(crate) structure: Entity,
+    pub(crate) structure_collider: Entity,
+    pub(crate) body: Entity,
+    pub(crate) point: Vec3,
+    pub(crate) normal: Vec3,
+    pub(crate) force: Vec3,
+    pub(crate) closing_speed: f32,
 }
 
 /// A point of a pair whose body sleeps against a structure (module doc): its transfer over the
@@ -116,6 +136,8 @@ pub(crate) struct BodyInertia {
 #[derive(Resource, Debug, Default)]
 pub(crate) struct ContactTransfers {
     points: Vec<ContactTransfer>,
+    pending: Vec<AppliedContact>,
+    applied: BTreeMap<(Entity, Entity, [u32; 3]), Vec<ContactTransfer>>,
     inertias: BTreeMap<Entity, BodyInertia>,
     resting: Vec<Resting>,
     /// The last step's length, s.
@@ -140,6 +162,11 @@ struct Kept {
 }
 
 impl ContactTransfers {
+    /// Stage a force the source actually applies this tick, before physics integrates it.
+    pub(crate) fn stage(&mut self, contact: AppliedContact) {
+        self.pending.push(contact);
+    }
+
     /// The source inertia recorded with this step's contacts, shared across all its points.
     pub(crate) fn inertia(&self, body: Entity) -> BodyInertia {
         *self
@@ -192,25 +219,57 @@ impl ContactTransfers {
             .skip(1)
             .map(|kept| kept.first)
             .chain([self.points.len()]);
-        self.kept.iter().zip(ends).flat_map(move |(kept, end)| {
-            let points = &self.points[kept.first..end];
-            let along = |point: &ContactTransfer| point.impulse.dot(point.normal);
-            let moved: f32 = points.iter().map(along).sum();
-            let closing: f32 = points
+        self.kept
+            .iter()
+            .zip(ends)
+            .flat_map(move |(kept, end)| self.split_points(&self.points[kept.first..end]))
+            .chain(
+                self.applied
+                    .values()
+                    .flat_map(|points| self.split_points(points)),
+            )
+    }
+
+    /// Solver points carry the constraint's effective masses. Implicit patches share the source
+    /// mass at their centroid, so subdividing a footprint does not spend that mass repeatedly.
+    fn split_points<'a>(
+        &'a self,
+        points: &'a [ContactTransfer],
+    ) -> impl Iterator<Item = (&'a ContactTransfer, Vec3, Vec3, f32)> + 'a {
+        let first = points
+            .first()
+            .expect("every retained contact has at least one point");
+        let along = |point: &ContactTransfer| point.impulse.dot(point.normal);
+        let moved: f32 = points.iter().map(along).sum();
+        let mass = self.contact_mass(points, moved);
+        let closing = if first.body_collider.is_some() {
+            points
                 .iter()
                 .filter(|point| point.closing_speed > point.rest_speed)
                 .map(|point| point.effective_mass * point.closing_speed)
-                .sum();
-            let blow = closing.min(moved);
-            let mass = self.contact_mass(points, moved);
-            points.iter().map(move |point| {
-                let blow = if moved > 0.0 {
-                    point.normal * (blow * along(point) / moved)
-                } else {
-                    Vec3::ZERO
-                };
-                (point, -blow, (blow - point.impulse) / self.dt, mass)
-            })
+                .sum()
+        } else if moved > 0.0 {
+            let speed = points
+                .iter()
+                .map(|p| p.closing_speed * along(p))
+                .sum::<f32>()
+                / moved;
+            if speed > first.rest_speed {
+                mass * speed
+            } else {
+                0.0
+            }
+        } else {
+            0.0 // No normal momentum was moved, so there is no blow.
+        };
+        let blow = closing.min(moved);
+        points.iter().map(move |point| {
+            let blow = if moved > 0.0 {
+                point.normal * (blow * along(point) / moved)
+            } else {
+                Vec3::ZERO
+            };
+            (point, -blow, (blow - point.impulse) / self.dt, mass)
         })
     }
 
@@ -280,10 +339,17 @@ fn keep(
         steps,
         kept,
         last,
+        pending,
+        applied,
     } = &mut *transfers;
     let asleep = |transfer: &ContactTransfer| {
         contacts
-            .get(transfer.structure_collider, transfer.body_collider)
+            .get(
+                transfer.structure_collider,
+                transfer
+                    .body_collider
+                    .expect("only solver contacts enter the sleeping-pair cache"),
+            )
             .is_some_and(|(edge, pair)| edge.is_sleeping() && pair.is_touching())
     };
     // A pair that woke or ended drops its rest; one whose body slept after the last step rests
@@ -362,7 +428,7 @@ fn keep(
                     structure,
                     structure_collider,
                     body,
-                    body_collider,
+                    body_collider: Some(body_collider),
                     point: contact.point,
                     normal: sign * constraint.normal,
                     impulse: Vec3::ZERO,
@@ -373,6 +439,39 @@ fn keep(
                 last.push((point.normal_part.impulse, friction(point)));
             }
         }
+    }
+    applied.clear();
+    for contact in pending.drain(..) {
+        let (rest, solver, position, rotation, com) = bodies.get(contact.body).expect(
+            "a source that applied an implicit contact remains a dynamic body through this physics step",
+        );
+        let inertia = *inertias.entry(contact.body).or_insert_with(|| BodyInertia {
+            centre: position.0 + rotation.0 * com.0,
+            inverse_mass: solver.effective_inv_mass(),
+            inverse_inertia: solver.effective_inv_angular_inertia().to_mat3(),
+        });
+        let arm = (contact.point - inertia.centre).cross(contact.normal);
+        let inverse = contact.normal.dot(inertia.inverse_mass * contact.normal)
+            + arm.dot(inertia.inverse_inertia * arm);
+        let normal_key = contact
+            .normal
+            .to_array()
+            .map(|v| if v == 0.0 { 0 } else { v.to_bits() });
+        applied
+            .entry((contact.structure_collider, contact.body, normal_key))
+            .or_default()
+            .push(ContactTransfer {
+                structure: contact.structure,
+                structure_collider: contact.structure_collider,
+                body: contact.body,
+                body_collider: None,
+                point: contact.point,
+                normal: contact.normal,
+                impulse: contact.force * *dt,
+                effective_mass: if inverse > 0.0 { inverse.recip() } else { 0.0 },
+                closing_speed: contact.closing_speed,
+                rest_speed: rest.linear * length_unit.0,
+            });
     }
 }
 
@@ -453,6 +552,57 @@ mod tests {
     use bevy::time::TimeUpdateStrategy;
 
     use super::*;
+
+    /// Coplanar implicit patches share one closing-momentum budget at their centroid. Structural
+    /// laws rely on a subdivided footprint producing the same blow and press as one patch.
+    /// FIXTURE DATA: source mass 10 kg, closing speed 1 m/s, impulse 20 N·s over 0.1 s.
+    #[test]
+    fn implicit_patch_subdivision_cannot_multiply_the_source_momentum() {
+        let mut world = World::new();
+        let body = world.spawn_empty().id();
+        let structure = world.spawn_empty().id();
+        let collider = world.spawn_empty().id();
+        for copies in [1, 4] {
+            let mut transfers = ContactTransfers {
+                dt: 0.1,
+                ..default()
+            };
+            transfers.inertias.insert(
+                body,
+                BodyInertia {
+                    centre: Vec3::ZERO,
+                    inverse_mass: Vec3::splat(0.1),
+                    inverse_inertia: Mat3::IDENTITY,
+                },
+            );
+            let points = (0..copies)
+                .map(|_| ContactTransfer {
+                    structure,
+                    structure_collider: collider,
+                    body,
+                    body_collider: None,
+                    point: Vec3::ZERO,
+                    normal: Vec3::Y,
+                    impulse: Vec3::Y * (20.0 / copies as f32),
+                    effective_mass: 10.0,
+                    closing_speed: 1.0,
+                    rest_speed: 0.15,
+                })
+                .collect();
+            transfers.applied.insert(
+                (collider, body, Vec3::Y.to_array().map(f32::to_bits)),
+                points,
+            );
+            let (mut blow, mut press) = (Vec3::ZERO, Vec3::ZERO);
+            for (_, struck, held, mass) in transfers.split() {
+                assert_eq!(mass, 10.0);
+                blow += struck;
+                press += held;
+            }
+            assert_eq!(blow, Vec3::NEG_Y * 10.0);
+            assert_eq!(press, Vec3::NEG_Y * 100.0);
+        }
+    }
 
     /// Avian at the game's fixed 64 Hz tick, one tick per update, no gravity, with the reading
     /// mounted and the solver's warm start scaled by `warm_start` (fixture data).

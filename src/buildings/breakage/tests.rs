@@ -1371,6 +1371,53 @@ fn composed_keeping_contacts() -> (App, Entity) {
     (app, root)
 }
 
+/// An implicit belt contact enters the wall's actual queued reading without a source collider.
+/// The wall laws rely on the same load path as solver contacts, with no body-kind exception.
+/// FIXTURE DATA: a 20 N press on a breakable outer wall; the source is clear of solver contacts.
+#[test]
+fn an_implicit_belt_press_reaches_the_wall_laws_reading() {
+    let (mut app, root) = composed_keeping_contacts();
+    let kind = shipped_house();
+    let (element, face, into) = wall_face(&kind);
+    let source = contact_cube(&mut app, Vec3::splat(50.0), Vec3::ZERO);
+    app.update();
+    let collider = app
+        .world_mut()
+        .query::<(Entity, &BuildingElement, &ChildOf)>()
+        .iter(app.world())
+        .find(|(_, index, parent)| usize::from(index.0) == element && parent.parent() == root)
+        .map(|(entity, ..)| entity)
+        .expect("the intact fixture wall has its element collider");
+    let force = into * -20.0;
+    app.world_mut().resource_mut::<ContactTransfers>().stage(
+        crate::contact_transfer::AppliedContact {
+            structure: root,
+            structure_collider: collider,
+            body: source,
+            point: face,
+            normal: -into,
+            force,
+            closing_speed: 0.0,
+        },
+    );
+    app.world_mut().resource_mut::<QueuedContacts>().0.clear();
+    app.update();
+    let queued = &app.world().resource::<QueuedContacts>().0;
+    let loads: Vec<_> = queued
+        .iter()
+        .flatten()
+        .filter(|(_, load)| matches!(load.origin, Origin::Body { body, .. } if body == source))
+        .collect();
+    assert_eq!(
+        loads.len(),
+        1,
+        "the belt press must reach the wall reader exactly once"
+    );
+    assert_eq!(loads[0].0, root);
+    assert_eq!(loads[0].1.blow, Vec3::ZERO);
+    assert!((loads[0].1.press + force).length() < 1e-5);
+}
+
 /// The side of the fixture's cubes, m, and their mass at brick density, kg (fixture data).
 const CUBE_SIDE: f32 = 0.4;
 const CUBE_KG: f32 = 1845.0 * CUBE_SIDE * CUBE_SIDE * CUBE_SIDE;

@@ -961,6 +961,7 @@ fn spawn_environment(
             transform,
             RigidBody::Static,
             Collider::cuboid(1.0, 1.0, 1.0),
+            crate::track::terrain::FieldSurface,
             CollisionLayers::new([Layer::Terrain], LayerMask::ALL),
             ground_friction,
         ));

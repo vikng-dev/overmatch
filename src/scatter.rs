@@ -404,6 +404,7 @@ pub(crate) fn spawn(
                     block,
                     RigidBody::Static,
                     Collider::cuboid(1.0, 1.0, 1.0),
+                    crate::track::terrain::FieldSurface,
                     statics,
                     graybox_friction(substance),
                     crate::substances::SubstanceRegistry::shipped_static()

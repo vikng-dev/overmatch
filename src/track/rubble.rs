@@ -2,20 +2,16 @@
 //! only). The terrain field ([`super::oracle::BlockField`]) is the heightmap and the authored
 //! blocks; a building's elements and standing chunks and every loose piece are Avian colliders the
 //! field never holds. [`RubbleBodies`] snapshots those colliders near one tank, the belt's support
-//! reads each through an exact shape check over every link's footprint ([`RubbleBodies::in_slab`])
+//! reads each through a convex shape check over every link's footprint ([`RubbleBodies::in_slab`])
 //! at the ground's own per-metre spring, and [`piece_impulses`] sizes what a loose piece takes
 //! back in the same tick.
 //!
-//! - **What the belt bears on** ([`RubbleQuery::supports`]): a solid collider (no [`Sensor`])
-//!   whose collision layers meet the hull's own contact class ([`belt_layers`]). A dynamic body
-//!   qualifies by that physics alone, and [`RubbleBodies::gather`] keeps it only where the caller's
-//!   piece query can write its reaction: the caller explicitly excludes its own hull and every
-//!   tank in the game, whose reaction needs a tick-start snapshot and staged writes this adapter
-//!   does not have. A static or kinematic collider still qualifies only as a building's
-//!   [`BuildingElement`] or [`BuildingChunk`]: a static body takes none of the belt's reaction, and
-//!   a structure law reads its load from the solver's transfers alone, so an admitted standing
-//!   trunk would become a climbable obstacle no tank fells. The terrain field holds the ground and
-//!   the authored blocks, which are no building.
+//! - **What the belt bears on** ([`RubbleQuery::supports`]): solid, layer-compatible colliders,
+//!   except [`super::terrain::FieldSurface`] geometry already represented by the field. Callers
+//!   explicitly exclude self-support and reaction recipients they cannot write. Every admitted
+//!   dynamic body carries Avian force state; static construction transmits the full opposite
+//!   belt reaction to [`crate::contact_transfer::ContactTransfers`] when it has structural laws.
+//!   Other tanks remain excluded until the adapter stages their reactions against one snapshot.
 //! - **The footprint check**: a link's slab ([`Slab`]) is the volume its field probes sweep, made
 //!   solid across the true shoe width: along the link, between its measured faces, and from the
 //!   probes' origin out to the contact envelope. A piece's extent in it is six support points of
@@ -71,9 +67,9 @@ use bevy::ecs::query::QueryFilter;
 use bevy::ecs::system::SystemParam;
 use bevy::prelude::*;
 
+use super::terrain::FieldSurface;
 use crate::Layer;
-use crate::buildings::BuildingElement;
-use crate::buildings::breakage::BuildingChunk;
+use crate::contact_transfer::{AppliedContact, ContactTransfers, StructureBody};
 
 use super::forces::BeltContact;
 
@@ -87,7 +83,8 @@ pub(crate) fn belt_layers() -> CollisionLayers {
 #[derive(SystemParam)]
 pub(crate) struct RubbleQuery<'w, 's> {
     spatial: SpatialQuery<'w, 's>,
-    built: Query<'w, 's, (), Or<(With<BuildingElement>, With<BuildingChunk>)>>,
+    field_surfaces: Query<'w, 's, (), With<FieldSurface>>,
+    structures: Query<'w, 's, (), With<StructureBody>>,
     collider_of: Query<'w, 's, &'static ColliderOf>,
     sensors: Query<'w, 's, (), With<Sensor>>,
     layers: Query<'w, 's, &'static CollisionLayers>,
@@ -114,14 +111,9 @@ impl RubbleQuery<'_, '_> {
             .layers
             .get(collider)
             .expect("avian requires CollisionLayers on every Collider");
-        if self.sensors.contains(collider) || !layers.interacts_with(belt_layers()) {
-            return false;
-        }
-        let dynamic = self
-            .rigid_bodies
-            .get(self.body_of(collider))
-            .is_ok_and(RigidBody::is_dynamic);
-        dynamic || self.built.contains(collider)
+        !self.sensors.contains(collider)
+            && !self.field_surfaces.contains(collider)
+            && layers.interacts_with(belt_layers())
     }
 
     /// The support colliders meeting the AABB of half-extent `radius` about `center`, ascending
@@ -224,6 +216,16 @@ struct Surface {
     triangles: Vec<[Vec3; 3]>,
     body: Option<usize>,
     friction: Friction,
+    structure: Option<Entity>,
+    /// A kinematic surface moves without taking impulses; static surfaces have no motion.
+    motion: Option<SurfaceMotion>,
+}
+
+#[derive(Clone, Debug)]
+struct SurfaceMotion {
+    com: Vec3,
+    linear: Vec3,
+    angular: Vec3,
 }
 
 impl Surface {
@@ -233,9 +235,13 @@ impl Surface {
             cuboid.to_trimesh()
         } else if let Some(hull) = shape.as_convex_polyhedron() {
             hull.to_trimesh()
+        } else if let Some(cylinder) = shape.as_cylinder() {
+            // ASSUMED boundary resolution. DERIVED maximum radial deficit:
+            // r * (1 - cos(pi / 64)) < 0.001205 * r; support-map rejection remains analytic.
+            cylinder.to_trimesh(64)
         } else {
             panic!(
-                "building and loose-piece support shapes are convex polyhedra or boxes; fix the collider constructor"
+                "belt support shapes are boxes, convex polyhedra or cylinders; fix the collider constructor"
             );
         };
         let world: Vec<_> = vertices
@@ -250,13 +256,17 @@ impl Surface {
 
     /// The shape's farthest world point along unit `dir`.
     fn support(&self, dir: Vec3) -> Vec3 {
-        let map = self.shape.shape_scaled().as_support_map().unwrap_or_else(|| {
-            panic!(
-                "rubble collider {:?} is not convex: building elements, chunks and loose pieces \
-                 are convex hulls or boxes, the shapes the belt's footprint check reads",
-                self.collider
-            )
-        });
+        let map = self
+            .shape
+            .shape_scaled()
+            .as_support_map()
+            .unwrap_or_else(|| {
+                panic!(
+                    "rubble collider {:?} is not convex: support surfaces \
+                 are convex, the shapes the belt's footprint check reads",
+                    self.collider
+                )
+            });
         self.position + self.rotation * map.local_support_point(self.rotation.inverse() * dir)
     }
 
@@ -397,10 +407,13 @@ impl RubbleBodies {
             if excluded.contains(&body) {
                 continue; // Self-support and explicitly unsupported reaction recipients.
             }
-            let dynamic = rubble
+            // A collider without a rigid body is fixed construction in Avian.
+            let kind = rubble
                 .rigid_bodies
                 .get(body)
-                .is_ok_and(RigidBody::is_dynamic);
+                .copied()
+                .unwrap_or(RigidBody::Static);
+            let dynamic = kind.is_dynamic();
             let mut slot = out.bodies.iter().position(|b| b.entity == body);
             if slot.is_none() && dynamic {
                 let (forces, _, mass, inertia, com, locked) = bodies.get(body).expect(
@@ -426,6 +439,18 @@ impl RubbleBodies {
                 });
                 slot = Some(out.bodies.len() - 1);
             }
+            let motion = if kind.is_kinematic() {
+                let (forces, _, _, _, com, _) = bodies.get(body).expect(
+                    "an admitted kinematic support body carries Avian pose and velocity state",
+                );
+                Some(SurfaceMotion {
+                    com: forces.position().0 + forces.rotation().0 * com.0,
+                    linear: forces.linear_velocity(),
+                    angular: forces.angular_velocity(),
+                })
+            } else {
+                None
+            };
             let (shape, position, rotation, aabb) = rubble
                 .shapes
                 .get(collider)
@@ -439,6 +464,8 @@ impl RubbleBodies {
                 triangles: Surface::triangles(shape, position.0, rotation.0),
                 body: slot,
                 friction: rubble.friction(collider),
+                structure: rubble.structures.contains(body).then_some(body),
+                motion,
             });
         }
         out
@@ -467,12 +494,53 @@ impl RubbleBodies {
         self.surfaces[piece].collider
     }
 
-    /// The world velocity of `collider`'s surface at `point`: its dynamic body's, zero for a
-    /// static or kinematic one. Only a collider from this snapshot may be read.
+    /// The surface's world velocity at `point`: dynamic or kinematic motion, zero on fixed
+    /// construction. Only a collider from this snapshot may be read.
     pub(crate) fn velocity_at(&self, collider: Entity, point: Vec3) -> Vec3 {
-        self.surface(collider)
-            .body
-            .map_or(Vec3::ZERO, |slot| self.bodies[slot].velocity_at(point))
+        let surface = self.surface(collider);
+        if let Some(slot) = surface.body {
+            self.bodies[slot].velocity_at(point)
+        } else {
+            surface.motion.as_ref().map_or(Vec3::ZERO, |motion| {
+                motion.linear + motion.angular.cross(point - motion.com)
+            })
+        }
+    }
+
+    /// Stage the equal-and-opposite reaction on fixed structural construction. The field has no
+    /// collider contact, loose bodies take clamped impulses, and permanent surfaces have no
+    /// structural law. Every remaining contact joins the physics step's shared load reading.
+    pub(crate) fn record_static_contacts(
+        &self,
+        body: Entity,
+        contacts: &[BeltContact],
+        transfers: &mut ContactTransfers,
+    ) {
+        for contact in contacts {
+            let Some(collider) = contact.collider else {
+                continue;
+            }; // Field-only support.
+            let surface = self.surface(collider);
+            if surface.body.is_some() {
+                continue;
+            } // Dynamic recipients take piece_impulses.
+            let Some(structure) = surface.structure else {
+                continue;
+            }; // No structural law.
+            assert!(
+                surface.motion.is_none(),
+                "standing structural construction is fixed, never kinematic"
+            );
+            transfers.stage(AppliedContact {
+                structure,
+                structure_collider: collider,
+                body,
+                point: contact.point,
+                normal: contact.normal,
+                force: contact.normal * contact.load + contact.traction,
+                closing_speed: -contact.belt_velocity.dot(contact.normal),
+            });
+        }
     }
 
     /// Every gathered piece that reaches into `slab`, with its extent there, in gather order.
@@ -635,6 +703,7 @@ mod tests {
     use bevy::time::TimeUpdateStrategy;
 
     use super::*;
+    use crate::buildings::breakage::BuildingChunk;
     use crate::substances::contact_friction;
     use crate::track::forces::{
         ForceParams, GripElements, GripParams, SideInput, SideReport, SideState, TravelField,
@@ -653,6 +722,7 @@ mod tests {
             bevy::transform::TransformPlugin,
             AssetPlugin::default(),
             PhysicsPlugins::default(),
+            crate::contact_transfer::sim_plugin,
         ))
         .init_asset::<Mesh>()
         .insert_resource(Gravity(gravity))
@@ -804,6 +874,182 @@ mod tests {
                 contact.traction = Vec3::ZERO;
                 contact.belt_velocity = Vec3::ZERO;
                 assert_eq!(contact_impulse(state, &contact, DT), Vec3::ZERO);
+            })
+            .unwrap();
+    }
+
+    /// Fixed support delivers exactly the opposite of the applied belt force into the shared
+    /// structure reading, with no solver contact standing in for the belt. Walls and trunks rely
+    /// on this reading to judge the load; subdividing the contact must not multiply its blow.
+    /// FIXTURE DATA: a surface topped at 0.6 m and a small source body clear above it.
+    fn fixed_surface_reaction(shape: Collider, closing: f32) {
+        let mut app = physics();
+        let root = app
+            .world_mut()
+            .spawn((
+                Transform::from_xyz(0.0, 0.3, 0.0),
+                RigidBody::Static,
+                StructureBody,
+            ))
+            .id();
+        let collider = app
+            .world_mut()
+            .spawn((ChildOf(root), Transform::IDENTITY, shape))
+            .id();
+        let source = piece_box(&mut app, Vec3::Y * 1.5, Vec3::splat(0.2));
+        app.world_mut()
+            .entity_mut(source)
+            .insert(LinearVelocity(Vec3::NEG_Y * closing));
+        app.update();
+        app.update();
+        let (expected, before, mass) = app
+            .world_mut()
+            .run_system_once(
+                move |rubble: RubbleQuery,
+                      mut bodies: Query<PieceData>,
+                      mut transfers: ResMut<ContactTransfers>| {
+                    let near = rubble.near(Vec3::ZERO, 4.0);
+                    assert!(
+                        near.contains(&collider),
+                        "unmarked fixed geometry must carry the belt"
+                    );
+                    let pieces = RubbleBodies::gather(&rubble, &near, &[source], &bodies);
+                    let (mut forces, _, mass, ..) = bodies.get_mut(source).unwrap();
+                    let before = forces.linear_velocity();
+                    let report = pad_pass(
+                        &ground(),
+                        &pieces,
+                        Affine3A::from_translation(Vec3::Y * 0.6),
+                        SideState::default(),
+                        before,
+                        &mut GripElements::for_links(30),
+                    );
+                    let expected: Vec3 = report.apps.iter().map(|app| app.force).sum();
+                    assert!(expected.y > 0.0, "the surface must support the belt");
+                    pieces.record_static_contacts(source, &report.contacts, &mut transfers);
+                    for app in report.apps {
+                        forces.apply_force_at_point(app.force, app.point);
+                    }
+                    (expected, before, mass.value())
+                },
+            )
+            .unwrap();
+        app.update();
+        let transfers = app.world().resource::<ContactTransfers>();
+        let mut reaction = Vec3::ZERO;
+        let mut blow = Vec3::ZERO;
+        let mut seen = 0;
+        for (point, struck, press, _) in
+            transfers.split().filter(|(point, ..)| point.body == source)
+        {
+            assert_eq!(point.structure, root);
+            assert_eq!(point.structure_collider, collider);
+            assert_eq!(point.body_collider, None);
+            reaction += struck + press * transfers.dt();
+            blow += struck;
+            seen += 1;
+        }
+        assert!(seen > 1, "the reading must include the footprint's patches");
+        let impulse = expected * transfers.dt();
+        assert!((reaction + impulse).length() < 1e-4 * impulse.length());
+        let after = app.world().get::<LinearVelocity>(source).unwrap().0;
+        assert!(((after - before) * mass + reaction).length() < 1e-4 * impulse.length());
+        if closing > 0.0 {
+            assert!(
+                blow.y < 0.0 && -blow.y <= mass * closing * (1.0 + 1e-4),
+                "the horizontal surface cannot take more than the source's closing momentum: {blow}"
+            );
+        } else {
+            assert_eq!(blow, Vec3::ZERO, "a resting press must not invent a blow");
+        }
+        app.update();
+        assert!(
+            !app.world()
+                .resource::<ContactTransfers>()
+                .split()
+                .any(|(point, ..)| point.body == source),
+            "an implicit contact must be refreshed each tick, never retained as a sleeping pair"
+        );
+    }
+
+    #[test]
+    fn a_belt_pressing_a_wall_delivers_its_reaction_to_the_walls_reading() {
+        for closing in [0.0, 1.0] {
+            fixed_surface_reaction(Collider::cuboid(2.0, 0.6, 2.0), closing);
+        }
+    }
+
+    #[test]
+    fn a_cylindrical_trunk_carries_the_belt_and_is_loaded_by_it() {
+        fixed_surface_reaction(Collider::cylinder(0.4, 0.6), 0.0);
+    }
+
+    /// Field-backed geometry is supported once, regardless of its collider representation.
+    /// Restoring collider admission for field blocks would add contacts and change the grip pair.
+    #[test]
+    fn field_geometry_is_never_counted_again_as_a_collider() {
+        let reference = bits(&flat_pass(&RubbleBodies::default()));
+        let mut app = physics();
+        let field = app
+            .world_mut()
+            .spawn((
+                Transform::from_xyz(0.0, -0.5, 0.0),
+                RigidBody::Static,
+                Collider::cuboid(200.0, 1.0, 200.0),
+                FieldSurface,
+            ))
+            .id();
+        app.update();
+        app.world_mut()
+            .run_system_once(move |rubble: RubbleQuery, bodies: Query<PieceData>| {
+                let near = rubble.near(Vec3::ZERO, 4.0);
+                assert!(
+                    !near.contains(&field),
+                    "the analytic field owns this surface"
+                );
+                let pieces = RubbleBodies::gather(&rubble, &near, &[], &bodies);
+                assert_eq!(bits(&flat_pass(&pieces)), reference);
+            })
+            .unwrap();
+    }
+
+    /// Kinematic motion supplies relative slip, while its imposed velocity takes no impulse.
+    /// Treating every non-dynamic surface as motionless would make conveyors grip incorrectly.
+    #[test]
+    fn a_kinematic_surface_carries_its_motion_without_taking_a_dynamic_reaction() {
+        let mut app = physics();
+        let body = piece_box(&mut app, Vec3::Y * 0.2, Vec3::new(0.4, 0.4, 4.0));
+        app.world_mut()
+            .entity_mut(body)
+            .insert(RigidBody::Kinematic);
+        app.update();
+        let velocity = Vec3::new(0.0, 0.0, -0.3);
+        app.world_mut().get_mut::<LinearVelocity>(body).unwrap().0 = velocity;
+        app.world_mut()
+            .run_system_once(move |rubble: RubbleQuery, bodies: Query<PieceData>| {
+                let mut pieces = RubbleBodies::gather(&rubble, &[body], &[], &bodies);
+                assert_eq!(pieces.velocity_at(body, Vec3::ZERO), velocity);
+                assert!(!pieces.is_dynamic(body));
+                let report = pad_pass(
+                    &ground(),
+                    &pieces,
+                    Affine3A::from_translation(Vec3::Y * 0.4),
+                    SideState {
+                        speed: 0.4,
+                        ..default()
+                    },
+                    velocity,
+                    &mut GripElements::for_links(30),
+                );
+                assert!(report.contacts.iter().any(|c| c.collider == Some(body)));
+                for contact in report
+                    .contacts
+                    .iter()
+                    .filter(|c| c.collider == Some(body) && c.normal.y > 0.99)
+                {
+                    assert!((contact.slip - 0.4).abs() < 1e-5);
+                }
+                assert!(piece_impulses(&mut pieces, &report.contacts, DT).is_empty());
             })
             .unwrap();
     }
@@ -1362,6 +1608,7 @@ mod tests {
             Position(Vec3::new(0.0, -0.5, 0.0)),
             RigidBody::Static,
             Collider::cuboid(20.0, 1.0, 20.0),
+            FieldSurface,
         ));
         let brick = piece_box(
             &mut app,

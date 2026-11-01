@@ -14,6 +14,11 @@ use crate::world::TerrainMap;
 
 use super::oracle::{BlockField, TerrainBlock};
 
+/// This collider is already represented in the belt's terrain field (heightfield or authored
+/// block). Solver contacts still use it; the belt must not count the collider a second time.
+#[derive(Component)]
+pub(crate) struct FieldSurface;
+
 /// The built field + the [`TerrainMap`] revision it was built from. `field` is `None` only
 /// before the first build (or with no `TerrainMap` at all — e.g. bare test worlds); consumers
 /// guard on it. A revision change (map load; future streaming/destruction) rebuilds, and
@@ -37,6 +42,7 @@ fn build_track_field(
     mut track: ResMut<TrackField>,
 ) {
     let Some(map) = map else {
+        // Bare test worlds may carry no terrain map and therefore publish no field.
         return;
     };
     if track.revision == Some(map.revision) {
