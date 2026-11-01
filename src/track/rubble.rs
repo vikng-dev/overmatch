@@ -12,7 +12,7 @@
 //!   explicitly exclude self-support and reaction recipients they cannot write. Every admitted
 //!   dynamic body carries Avian force state; static construction transmits the full opposite
 //!   belt reaction to [`crate::contact_transfer::ContactTransfers`] when it has structural laws.
-//!   Other tanks remain excluded until the adapter stages their reactions against one snapshot.
+//!   A tank's hull follows the same law; each pass excludes only its source body by identity.
 //! - **The footprint check**: a link's slab ([`Slab`]) is the volume its field probes sweep, made
 //!   solid across the true shoe width: along the link, between its measured faces, and from the
 //!   probes' origin out to the contact envelope. A piece's extent in it is six support points of
@@ -203,12 +203,13 @@ impl PieceBody {
 }
 
 /// One rubble collider near the tank, as the footprint check reads it: its convex shape at its
-/// tick-start world pose and bounds, its dynamic body's slot in [`RubbleBodies::bodies`] (`None`
+/// tick-start world pose and bounds, its owning rigid body and its dynamic body's slot in [`RubbleBodies::bodies`] (`None`
 /// for a static or kinematic one, which takes no impulse), the structure whose load reading takes
 /// a fixed one's reaction, and the friction its surface brings to a pair.
 #[derive(Clone, Debug)]
 struct Surface {
     collider: Entity,
+    owner: Entity,
     shape: Collider,
     position: Vec3,
     rotation: Quat,
@@ -382,15 +383,16 @@ pub(crate) struct SlabOverlap {
 /// The rubble near one tank this tick: each collider's surface and its dynamic bodies' states.
 /// Empty where a tank has none near it, and for every pass that reads the field alone (the
 /// envelope calibration).
-#[derive(Default)]
+#[derive(Clone, Default)]
 pub struct RubbleBodies {
+    source: Option<Entity>,
     surfaces: Vec<Surface>,
     pub(crate) bodies: Vec<PieceBody>,
 }
 
 impl RubbleBodies {
     /// Read the `near` colliders' shapes, frictions and bodies. `excluded` names bodies this
-    /// adapter cannot react against (its own hull, and tanks awaiting staged reaction writes).
+    /// adapter explicitly excludes (for example its own hull in a single-source instrument).
     /// Every other dynamic body must carry the force state Avian constructs for it.
     pub(crate) fn gather<F: QueryFilter>(
         rubble: &RubbleQuery,
@@ -454,6 +456,7 @@ impl RubbleBodies {
                 .expect("a collider the spatial query returned carries its shape and pose");
             out.surfaces.push(Surface {
                 collider,
+                owner: body,
                 shape: shape.clone(),
                 position: position.0,
                 rotation: rotation.0,
@@ -466,6 +469,11 @@ impl RubbleBodies {
             });
         }
         out
+    }
+
+    /// A shared tick-start snapshot serves all sources; self-support is excluded by identity.
+    pub(crate) fn exclude_source(&mut self, source: Entity) {
+        self.source = Some(source);
     }
 
     fn surface(&self, collider: Entity) -> &Surface {
@@ -549,6 +557,9 @@ impl RubbleBodies {
         let (lo, hi) = slab.aabb();
         let radial = (slab.face - slab.reach, slab.face + slab.travel);
         for (piece, s) in self.surfaces.iter().enumerate() {
+            if self.source == Some(s.owner) {
+                continue;
+            } // A hull cannot support its own belt.
             if (s.aabb.min.cmpgt(hi) | s.aabb.max.cmplt(lo)).any() {
                 continue;
             }
