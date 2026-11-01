@@ -1447,7 +1447,8 @@ pub(crate) fn structural(
     }
     let mut steps = 0;
     let incident = incident(structure);
-    // Every pass cracks a section or a ring and none closes again, so the passes end.
+    // Every pass cracks an intact joint (asserted where it cracks) and none closes again, so
+    // the passes end.
     loop {
         let graph = graph(structure, state);
         let paths: Vec<Option<Vec<usize>>> = pushed
@@ -1507,6 +1508,11 @@ pub(crate) fn structural(
         let Some((_, failure)) = worst else {
             break;
         };
+        assert!(
+            failure.joints.iter().any(|&j| !state.cracked[j]),
+            "a failing section or ring holds an intact joint on a ground path, so each pass \
+             opens one and the passes end"
+        );
         for &j in &failure.joints {
             state.cracked[j] = true;
         }
@@ -1763,7 +1769,8 @@ pub(crate) fn weigh(
         .filter(|load| load.press != Vec3::ZERO)
         .map(|load| load.chunk)
         .collect();
-    // Every pass cracks at least one joint and none closes again, so the passes end.
+    // Every pass cracks an intact joint (asserted where it cracks) and none closes again, so
+    // the passes end.
     loop {
         touched.retain(|&c| state.standing(c));
         if touched.is_empty() {
@@ -1866,6 +1873,11 @@ pub(crate) fn weigh(
                 }
             },
         };
+        assert!(
+            failure.joints.iter().any(|&j| !state.cracked[j]),
+            "a failing section, ring or rest holds an intact joint, so each pass opens one and \
+             the passes end"
+        );
         for &j in &failure.joints {
             state.cracked[j] = true;
             let joint = &structure.joints[j];
