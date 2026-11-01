@@ -411,6 +411,11 @@ fn a_destroyed_world_is_startup_again_at_next_fill_up_over_real_udp() {
         }
         std::thread::sleep(std::time::Duration::from_micros(300));
         let state = battle(server.world_mut()).unwrap();
+        assert_eq!(
+            server.world().resource::<AuthorityWorld>().0,
+            WorldGeneration(state.number)
+        );
+        assert!(server.world_mut().query_filtered::<&WorldGeneration, Or<(With<WallLedger>, With<DestructionLedger>)>>().iter(server.world()).all(|generation| *generation == WorldGeneration(state.number)), "authority publication carries the current Battle's nonempty generation");
         if fresh.is_none() {
             fresh = Some(census(server.world_mut()));
         }

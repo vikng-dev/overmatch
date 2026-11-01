@@ -167,15 +167,13 @@ pub fn run() {
 /// composition, with the same netcode gate, rather than reproducing the phase machine in a test.
 pub(super) fn install_battle(app: &mut App, mode: BattleMode, tick: Duration) {
     // The startup world is the first Battle's: `score::install_server` spawns that same Battle.
-    app.insert_resource(crate::world::CurrentWorld(Some(
-        crate::world::WorldGeneration(BattleState::default().number),
-    )))
-    .init_resource::<PendingClients>()
-    .init_resource::<SpawnLane>()
-    .init_resource::<SpawnOverrides>()
-    .init_resource::<CombatantIds>()
-    .init_resource::<JoinAdmission>()
-    .insert_resource(CycleRules::new(&mode, tick));
+    app.insert_resource(super::world_reset::AuthorityWorld::default())
+        .init_resource::<PendingClients>()
+        .init_resource::<SpawnLane>()
+        .init_resource::<SpawnOverrides>()
+        .init_resource::<CombatantIds>()
+        .init_resource::<JoinAdmission>()
+        .insert_resource(CycleRules::new(&mode, tick));
     super::score::install_server(app, RespawnWait::new(mode.respawn_wait, tick));
     app.insert_resource(SpawnPlacement::new(mode.spawn));
     app.add_systems(

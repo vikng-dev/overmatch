@@ -3,6 +3,7 @@
 //! replicas construct static collision copies and never integrate their motion (ADR-0037).
 
 use super::debris_stress::DebrisPose;
+use super::world_reset::AuthorityWorld;
 use crate::debris::PresentationClock;
 use crate::scatter::MapInstance;
 use crate::trees::{LooseTrunk, TreeBody, TreeFallSet, TreePiece, TreeSegment, TreeState};
@@ -46,7 +47,7 @@ struct Applied {
 }
 
 pub(super) fn install_server(app: &mut App) {
-    app.init_resource::<CurrentWorld>()
+    app.init_resource::<AuthorityWorld>()
         .add_systems(Startup, spawn_ledger)
         .add_systems(
             FixedPostUpdate,
@@ -80,13 +81,11 @@ pub(crate) fn install_apply(app: &mut App) {
                 .chain(),
         );
 }
-pub(super) fn spawn_ledger(mut commands: Commands, generation: Res<CurrentWorld>) {
+pub(super) fn spawn_ledger(mut commands: Commands, generation: Res<AuthorityWorld>) {
     commands.spawn((
         Name::new("DestructionLedger"),
         DestructionLedger::default(),
-        generation
-            .0
-            .expect("an authority constructs its initial world before publishing"),
+        generation.0,
         Replicate::to_clients(NetworkTarget::All),
     ));
 }

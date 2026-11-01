@@ -25,7 +25,8 @@ use crate::render_policy::CameraProfile;
 pub(crate) struct WorldGeneration(pub(crate) u32);
 
 /// The generation selected for local construction. `None` before a client receives its authority
-/// Battle or between links; an authority and offline construction start at the initial generation.
+/// Battle or between links. Offline presentation starts at the initial generation; authority
+/// publication carries its generation separately in a nonempty type.
 #[derive(Resource)]
 pub(crate) struct CurrentWorld(pub(crate) Option<WorldGeneration>);
 

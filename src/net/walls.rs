@@ -18,6 +18,7 @@ use bevy_replicon::prelude::{Diffable, EntityCommandsDiffExt};
 use lightyear::prelude::*;
 use serde::{Deserialize, Serialize};
 
+use super::world_reset::AuthorityWorld;
 use crate::buildings::breakage::{
     Breakage, Layout, WallEntry, WallLawSet, WallRecord, WallReplicaSet,
 };
@@ -40,7 +41,7 @@ impl Diffable for WallLedger {
 }
 
 pub(super) fn install_server(app: &mut App) {
-    app.init_resource::<CurrentWorld>()
+    app.init_resource::<AuthorityWorld>()
         .add_systems(Startup, spawn_ledger)
         .add_systems(
             FixedPostUpdate,
@@ -55,13 +56,11 @@ pub(super) fn install_client(app: &mut App) {
         .add_systems(Update, receive_ledger.before(WallReplicaSet));
 }
 
-pub(super) fn spawn_ledger(mut commands: Commands, generation: Res<CurrentWorld>) {
+pub(super) fn spawn_ledger(mut commands: Commands, generation: Res<AuthorityWorld>) {
     commands.spawn((
         Name::new("WallLedger"),
         WallLedger::default(),
-        generation
-            .0
-            .expect("an authority constructs its initial world before publishing"),
+        generation.0,
         Replicate::to_clients(NetworkTarget::All),
     ));
 }

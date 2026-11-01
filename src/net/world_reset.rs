@@ -14,6 +14,16 @@ use crate::world::{CurrentWorld, WorldGeneration};
 #[derive(Resource, Default)]
 struct BuiltWorld(Option<(Entity, u32)>);
 
+/// The authority always has a selected generation; only a replica can await one.
+#[derive(Resource)]
+pub(super) struct AuthorityWorld(pub(super) WorldGeneration);
+
+impl Default for AuthorityWorld {
+    fn default() -> Self {
+        Self(WorldGeneration(BattleState::default().number))
+    }
+}
+
 pub(super) fn install_client(app: &mut App) {
     app.insert_resource(CurrentWorld(None))
         .init_resource::<BuiltWorld>()
@@ -64,7 +74,7 @@ pub(super) fn start_next(world: &mut World, number: u32) {
             "authority carriers and ledgers are separate roots"
         );
     }
-    world.insert_resource(CurrentWorld(Some(WorldGeneration(number))));
+    world.insert_resource(AuthorityWorld(WorldGeneration(number)));
     crate::world::reconstruct(world);
     world
         .run_system_cached(super::walls::spawn_ledger)
