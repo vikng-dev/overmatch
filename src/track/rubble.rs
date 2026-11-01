@@ -3,8 +3,9 @@
 //! blocks; a building's elements and standing chunks and every loose piece are Avian colliders the
 //! field never holds. [`RubbleBodies`] snapshots those colliders near one tank, the belt's support
 //! reads each through a convex shape check over every link's footprint ([`RubbleBodies::in_slab`])
-//! at the ground's own per-metre spring, and [`piece_impulses`] sizes what a loose piece takes
-//! back in the same tick.
+//! at the ground's own per-metre spring. In the same tick [`piece_impulses`] sizes what a loose
+//! piece takes back, and [`RubbleBodies::record_static_contacts`] stages the whole opposite
+//! reaction on fixed structural construction.
 //!
 //! - **What the belt bears on** ([`RubbleQuery::supports`]): solid, layer-compatible colliders,
 //!   except [`super::terrain::FieldSurface`] geometry already represented by the field. Callers
@@ -203,8 +204,8 @@ impl PieceBody {
 
 /// One rubble collider near the tank, as the footprint check reads it: its convex shape at its
 /// tick-start world pose and bounds, its dynamic body's slot in [`RubbleBodies::bodies`] (`None`
-/// for a static or kinematic one, which takes nothing), and the friction its surface brings to a
-/// pair.
+/// for a static or kinematic one, which takes no impulse), the structure whose load reading takes
+/// a fixed one's reaction, and the friction its surface brings to a pair.
 #[derive(Clone, Debug)]
 struct Surface {
     collider: Entity,
