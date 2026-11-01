@@ -363,11 +363,8 @@ fn certified_at(
 /// The game's damage model: the starts of the transit corridor `request` asks for, each sample's
 /// membership read on the bent ray that corridor sweeps from the sample's hand-off.
 ///
-/// The request's own seeds were read on the incoming rays. A sample that hands off on a face sits
-/// off it by its rounding, and a ray that grazes the face turns that offset into a distance along
-/// the ray of the rounding over the graze's sine. The incoming and the bent ray can then place the
-/// face on opposite sides of the start, past the band the seed declines and the corridor's clamp
-/// reaches: the face is owned by neither, and the shell's exit arrives with nothing open.
+/// Incoming-ray membership cannot cross the bend: a grazing face may fall on the other side of
+/// the same rounded start on the new ray. The request therefore supplies only start offsets.
 pub(crate) fn transit_starts(
     context: &ResolveContext<'_, '_, '_>,
     not_own: &dyn Fn(Entity) -> bool,
@@ -380,12 +377,10 @@ pub(crate) fn transit_starts(
             anchor: request.anchor,
             origin: request.origin,
         },
-        Dir3::new(request.axis).expect(
-            "the game's damage model constructs a normalized transit axis at the checked entrance",
-        ),
+        Dir3::new_unchecked(request.axis),
         request.frame,
         request.radius,
-        request.seeds.iter().map(|seed| seed.offset).collect(),
+        request.offsets.clone(),
     )
 }
 
@@ -1609,9 +1604,8 @@ pub(crate) fn decide(
             // --- TRANSIT: re-collected along the BENT axis from the hand-off, its membership read
             // on those bent rays. The entrance hits describe the incoming rays and cannot describe
             // this.
-            let bent = Dir3::new(request.axis).expect(
-                "the game's damage model constructs a normalized transit axis at the checked entrance"
-            );
+            // `begin` supplies the checked bend's unit vector. Preserve its bits on every ray.
+            let bent = Dir3::new_unchecked(request.axis);
             let starts = transit_starts(context, not_own, &request)?;
             let transit = closing_walk(
                 context,

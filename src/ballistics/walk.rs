@@ -3038,28 +3038,16 @@ pub enum Begin {
     Transit(TransitRequest),
 }
 
-/// One transit sample's starting state — where its ray resumes, and what it is already inside.
+/// The game's damage model: one ray's certified start and membership.
 ///
-/// Each sample resumes on its OWN entrance ray, at its hand-off ([`DiscWalk::hand_off`]): on the
-/// face of the piece it crossed, or in air at the crossing's depth when it crossed none by then.
-/// Never on a disc re-projected around the bent axis. Two things fall out of that, and neither is
-/// available any other way:
-///
-/// - The seed is EXACT. The resume point lies on a ray this module already walked, so "which
-///   primitives is it inside" is a lookup ([`RayWalk::inside_at`]), not an inference — and
-///   inference is the one thing the walk never does, because "it must have started inside" is how a
-///   dropped entry face becomes free armour.
-/// - It is what physically happens. The rays bend where they strike; a sample that met the plate
-///   40 mm further along resumes 40 mm further along.
+/// Membership is certified on the ray that consumes it. A change of direction needs a fresh
+/// certification; the incoming crossing supplies hand-off geometry only.
 #[derive(Clone, Debug, PartialEq)]
 pub struct SampleSeed {
     pub sample: usize,
-    /// Displacement of this sample's transit ray origin from [`TransitRequest::origin`]. Not purely
-    /// lateral — it carries the longitudinal spread of an oblique contact. `seeds[0].offset` is
-    /// `ZERO`: the axis sample defines the origin.
+    /// Displacement of this sample's ray start from the axis start, including longitudinal spread.
     pub offset: Vec3,
-    /// Progress along that sample's ENTRANCE ray at which the seed was read: its hand-off, in
-    /// `[0, DiscWalk::length]`.
+    /// Progress on the ray that certified this membership, for its boundary-ownership band.
     pub t: f64,
     pub inside: Vec<ShellKey>,
 }
@@ -3097,7 +3085,8 @@ pub struct TransitRequest {
     /// entrance also named" is satisfied by a crossing of a completely different part of the same
     /// hull.
     pub entrance_primitives: Vec<PrimitiveKey>,
-    pub seeds: Vec<SampleSeed>,
+    /// Each sample's hand-off relative to `origin`; no incoming-ray membership survives the bend.
+    pub offsets: Vec<Vec3>,
 }
 
 /// Read the entrance disc and decide whether the round enters (§4's decision tree, §13.3's inputs).
@@ -3185,22 +3174,13 @@ pub fn begin(entrance: &DiscWalk, shot: &Shot, laws: &WalkLaws) -> Result<Begin,
 
     // Each sample resumes where [`DiscWalk::hand_off`] put it, and the transit ray is the AXIS
     // sample's: the request's origin is its hand-off, every other sample's offset carries its own.
-    // The seed is a lookup on the ray each sample walked, at the point it resumes from.
     let axis_t = at[0];
     let origin = entrance.origin + entrance.axis * axis_t as f32;
-    let seeds = entrance
-        .walks
+    let offsets = entrance
+        .offsets
         .iter()
         .enumerate()
-        .map(|(index, walk)| {
-            let t = at[index];
-            SampleSeed {
-                sample: index,
-                offset: entrance.offsets[index] + entrance.axis * (t - axis_t) as f32,
-                t,
-                inside: walk.inside_at(t, laws),
-            }
-        })
+        .map(|(index, offset)| *offset + entrance.axis * (at[index] - axis_t) as f32)
         .collect();
 
     Ok(Begin::Transit(TransitRequest {
@@ -3212,7 +3192,7 @@ pub fn begin(entrance: &DiscWalk, shot: &Shot, laws: &WalkLaws) -> Result<Begin,
         radius: entrance.radius,
         samples: entrance.samples(),
         entrance_primitives: event.primitives.clone(),
-        seeds,
+        offsets,
     }))
 }
 
@@ -3309,8 +3289,8 @@ fn validate_transit<'t>(
     // caller that laid its ring out freshly — or nudged one origin — produces a corridor whose
     // aggregate axis, origin, frame and radius all still match while the rays themselves sample
     // somewhere else entirely. The seeds are only sound for the rays they were read on.
-    for (index, seed) in request.seeds.iter().enumerate() {
-        if (transit.offsets[index] - seed.offset).length() > SEED_OFFSET_TOLERANCE {
+    for (index, offset) in request.offsets.iter().enumerate() {
+        if (transit.offsets[index] - *offset).length() > SEED_OFFSET_TOLERANCE {
             return mismatch(Mismatch::SampleOffset);
         }
     }

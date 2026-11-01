@@ -1484,8 +1484,10 @@ per 240 s at 30 bots, MEASURED 2026-10-31 on the build after the turret-scale fi
   (PROVISIONAL): the read's mean entry point, measured square to the incoming axis, clamped to the
   span between the sample's start and the crossing's end. The uncovered part of the disc stays
   where the disc is; a hand-off lies on ground the sample's walk covered and never depends on how
-  far the corridor reached. No sample hands off past the first face on its own ray, so nothing is
-  seeded except presence carried in from the crossing before.
+  far the corridor reached. No sample hands off past the first face on its incoming ray. The
+  game's damage model certifies transit membership on the bent rays at those hand-off points:
+  a face behind the start's boundary band is owned by the seed, and a face within that band by
+  the corridor. Incoming-ray membership cannot cross the bend.
 - **The entrance read is the crossing's faces** (PROVISIONAL). `n̄`, η, the steel-equivalent
   thickness and the bend are read over the first run of every sample that hands off on a face, so
   a disc meeting two pieces that overlap in depth reads both surfaces, whichever it meets first. A

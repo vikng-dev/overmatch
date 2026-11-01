@@ -223,11 +223,47 @@ fn entrance_disc(slabs: &[Slab], length: f32) -> DiscCorridor {
     disc_along(Vec3::ZERO, AXIS, frame, 0.044, length, slabs, |_| true)
 }
 
-/// The TRANSIT disc the caller owes [`begin`] — each sample resuming where the request says it
-/// resumes, along the bent axis, with the TRANSPORTED frame, seeded from the request. This is the
-/// slice-2 driver contract written out; `finish` rejects a corridor that departs from it.
+/// The game's damage model: analytic transit fixtures certify membership on each bent ray.
+/// The production driver performs the same reading through its collider probe.
 fn transit_disc(request: &TransitRequest, slabs: &[Slab], length: f32) -> DiscCorridor {
-    resumed_disc(request, 0.0, &request.seeds, length, |_| slabs.to_vec())
+    transit_disc_by(request, length, |_| slabs.to_vec())
+}
+
+fn transit_disc_by(
+    request: &TransitRequest,
+    length: f32,
+    slabs_of: impl Fn(usize) -> Vec<Slab>,
+) -> DiscCorridor {
+    let laws = WalkLaws::default();
+    let seeds: Vec<_> = request
+        .offsets
+        .iter()
+        .enumerate()
+        .map(|(sample, &offset)| {
+            let origin = request.origin + offset;
+            let inside = slabs_of(sample)
+                .iter()
+                .filter(|slab| {
+                    let rate = request.axis.dot(slab.normal);
+                    let a = (slab.front - origin).dot(slab.normal) / rate;
+                    let b = (slab.front - slab.normal * slab.thickness - origin).dot(slab.normal)
+                        / rate;
+                    let (enter, exit) = (f64::from(a.min(b)), f64::from(a.max(b)));
+                    enter < 0.0
+                        && !coincident(enter, 0.0, &laws)
+                        && (exit >= 0.0 || coincident(exit, 0.0, &laws))
+                })
+                .map(Slab::key)
+                .collect();
+            SampleSeed {
+                sample,
+                offset,
+                t: 0.0,
+                inside,
+            }
+        })
+        .collect();
+    resumed_disc(request, 0.0, &seeds, length, slabs_of)
 }
 
 /// The disc resumed `from` metres along `request`'s axis past its hand-off, each sample from its
@@ -1512,8 +1548,7 @@ fn the_transit_ray_is_anchored_on_the_axis_not_the_coverage_centroid() {
     assert!((request.origin.z - 0.5).abs() < 1.0e-5);
 }
 
-/// Every sample hands off on the face it crossed, at its own crossing point, with nothing seeded
-/// but presence it carried in. The transit relies on each sample starting ON its face, so the entry
+/// Every sample hands off on the face it crossed, at its own crossing point. The transit relies on each sample starting ON its face, so the entry
 /// is the corridor's and the exit pairs with it; a shared plane puts some samples inside material
 /// and others short of it.
 ///
@@ -1548,21 +1583,20 @@ fn every_sample_hands_off_on_the_face_it_crossed() {
     assert_eq!(walked.events.len(), 1, "1 mm of stagger is one crossing");
     let request = transit_request(&walked, &AP_88, &laws);
 
-    assert_eq!(request.seeds[0].offset, Vec3::ZERO, "sample 0 IS the axis");
-    for seed in &request.seeds {
-        assert_eq!(
-            seed.t, walked.walks[seed.sample].runs[0].start,
-            "sample {} hands off where its own ray crossed",
-            seed.sample
+    assert_eq!(request.offsets[0], Vec3::ZERO, "sample 0 IS the axis");
+    for (sample, offset) in request.offsets.iter().enumerate() {
+        let crossed = walked.origin
+            + walked.offsets[sample]
+            + walked.axis * walked.walks[sample].runs[0].start as f32;
+        assert!(
+            (request.origin + *offset).distance(crossed) < 1.0e-6,
+            "sample {sample} hands off on its own face"
         );
-        assert!(seed.inside.is_empty(), "sample {} is seeded", seed.sample);
     }
 
     // Each sample from its own hand-off, along the bend: the transit pairs and both plates are
     // charged.
-    let transit = resumed_disc(&request, 0.0, &request.seeds, 3.0, |sample| {
-        vec![slab_of(sample)]
-    });
+    let transit = transit_disc_by(&request, 3.0, |sample| vec![slab_of(sample)]);
     let transit = walk_disc(&transit, &volumes, &laws).unwrap();
     let plan = finish_at(&transit, &request, AP_88_CAPABILITY).unwrap();
     for plate in [1, 2] {
@@ -1608,9 +1642,9 @@ fn finish_rejects_a_corridor_that_is_not_the_one_it_asked_for() {
     // A corridor collected around a different contact entirely: right axis and origin, other volume.
     let elsewhere = Slab::at(9, 0, 1.5, normal, 0.05);
     let mut unrelated = transit_disc(&request, &[elsewhere], 3.0);
-    for (sample, seed) in unrelated.samples.iter_mut().zip(&request.seeds) {
+    for (sample, offset) in unrelated.samples.iter_mut().zip(&request.offsets) {
         sample.initial_presence.clear();
-        sample.hits = elsewhere.hits(request.origin + seed.offset, request.axis, 3.0, false);
+        sample.hits = elsewhere.hits(request.origin + *offset, request.axis, 3.0, false);
     }
     let other = walk_disc(&unrelated, &table(&[(9, 1000.0)]), &laws).unwrap();
     assert!(matches!(
@@ -1658,9 +1692,9 @@ fn finish_rejects_a_far_crossing_of_the_same_entity() {
     // Same VOLUME, a different primitive of it, two metres downrange.
     let elsewhere = Slab::at(1, 7, 2.5, -AXIS, 0.05);
     let mut corridor = transit_disc(&request, &[front], 3.0);
-    for (sample, seed) in corridor.samples.iter_mut().zip(&request.seeds) {
+    for (sample, offset) in corridor.samples.iter_mut().zip(&request.offsets) {
         sample.initial_presence.clear();
-        sample.hits = elsewhere.hits(request.origin + seed.offset, request.axis, 3.0, false);
+        sample.hits = elsewhere.hits(request.origin + *offset, request.axis, 3.0, false);
     }
     let far = walk_disc(&corridor, &volumes, &laws).unwrap();
     assert_eq!(
@@ -3944,12 +3978,13 @@ fn every_hand_off_lies_on_the_span_its_sample_walked() {
         let Begin::Transit(request) = begin(&walked, &AP_88, &laws).unwrap() else {
             panic!("front {front}: the plate is entered")
         };
-        for seed in &request.seeds {
+        for (sample, offset) in request.offsets.iter().enumerate() {
+            let t = (request.origin + *offset - walked.origin - walked.offsets[sample])
+                .dot(walked.axis);
+            // DERIVED fixture bound: a few f32 operations over the two-metre corridor.
             assert!(
-                (0.0..=f64::from(length)).contains(&seed.t),
-                "front {front}: sample {} hands off at t = {} on a walk of [0, {length}]",
-                seed.sample,
-                seed.t
+                (-1.0e-6..=length + 1.0e-6).contains(&t),
+                "front {front}: sample {sample} hands off at {t} on [0, {length}]"
             );
         }
     }
@@ -4039,9 +4074,7 @@ impl Straddle {
     }
 
     fn transit(&self, offsets: &[Vec3], request: &TransitRequest) -> DiscCorridor {
-        resumed_disc(request, 0.0, &request.seeds, 2.0, |sample| {
-            self.pieces(offsets, sample)
-        })
+        transit_disc_by(request, 2.0, |sample| self.pieces(offsets, sample))
     }
 }
 
@@ -4075,16 +4108,13 @@ fn a_disc_meeting_two_pieces_at_overlapping_depths_resolves() {
             request.entrance.coverage, 1.0,
             "block {block}: the entrance reads both pieces"
         );
-        for seed in &request.seeds {
-            assert_eq!(
-                seed.t, walked.walks[seed.sample].runs[0].start,
-                "block {block}: sample {} hands off on its own face",
-                seed.sample
-            );
+        for (sample, offset) in request.offsets.iter().enumerate() {
+            let crossed = walked.origin
+                + walked.offsets[sample]
+                + walked.axis * walked.walks[sample].runs[0].start as f32;
             assert!(
-                seed.inside.is_empty(),
-                "block {block}: sample {}",
-                seed.sample
+                (request.origin + *offset).distance(crossed) < 1.0e-6,
+                "block {block}: sample {sample} hands off on its own face"
             );
         }
 
@@ -4246,9 +4276,7 @@ fn a_crossing_resolves_the_same_however_far_its_entrance_was_walked() {
         let request = transit_request(&walked, &AP_88, &laws);
         let slabs = [fixture.edge, fixture.behind];
         let transit = walk_disc(
-            &resumed_disc(&request, 0.0, &request.seeds, 2.0, |sample| {
-                fixture.met(sample, &slabs)
-            }),
+            &transit_disc_by(&request, 2.0, |sample| fixture.met(sample, &slabs)),
             &volumes,
             &laws,
         )

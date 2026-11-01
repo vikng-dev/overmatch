@@ -236,6 +236,24 @@ fn handed_off(
                     deposit: false,
                     laws: WalkLaws::default(),
                 };
+                // The game's damage model: exercise the production driver and inspect ownership.
+                // Replacing its bent-ray certification with incoming seeds must fail this sweep.
+                let mut flight = Flight {
+                    position: origin,
+                    direction: Dir3::new(direction).expect("a real direction"),
+                    speed: SPEED,
+                    frame: DiscFrame::anchored(direction).expect("a real direction"),
+                    continuation: None,
+                };
+                flight.settle(&context, &|_| true, disc_radius(ROUND.caliber))?;
+                decide(
+                    &context,
+                    &|_| true,
+                    &bound(ROUND),
+                    ROUND.mass,
+                    &flight,
+                    STANDOFF,
+                )?;
                 let frame = DiscFrame::anchored(direction).expect("a real direction");
                 let radius = ROUND.caliber * 0.5;
                 let entrance = closing_walk(
