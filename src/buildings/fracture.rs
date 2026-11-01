@@ -1587,6 +1587,10 @@ pub(crate) fn structural(
     }
     let mut steps = 0;
     let incident = incident(structure);
+    // A punch ring grows from where an external blow lands. A group frame's inertial blows
+    // reach every chunk of its group; seeded there, the first ring would be the whole group,
+    // which has no boundary, and no local punch would be read.
+    let struck_at = pushed_by(structure, loads, external);
     // Every pass cracks an intact joint (asserted where it cracks) and none closes again, so
     // the passes end.
     loop {
@@ -1637,7 +1641,7 @@ pub(crate) fn structural(
                 }
             }
         }
-        for group in ring_groups(state, &graph, &pushed, &mut steps) {
+        for group in ring_groups(state, &graph, &struck_at, &mut steps) {
             if let Some(failure) = ring_failure(structure, state, &incident, &group, loads) {
                 let ratio = failure.demand / failure.capacity;
                 if ratio >= 1.0 && worst.as_ref().is_none_or(|(w, _)| ratio > *w) {
@@ -1687,15 +1691,27 @@ pub(crate) fn structural(
 
 /// The chunks a blow of `loads` reaches, each once, in the order of its first such load.
 fn pushed(structure: &Structure, loads: &[Load]) -> Vec<usize> {
+    pushed_by(structure, loads, |_| true)
+}
+
+/// The chunks a blow of the `loads` that `counts` reaches, each once, in the order of its first
+/// such load.
+fn pushed_by(structure: &Structure, loads: &[Load], counts: impl Fn(&Load) -> bool) -> Vec<usize> {
     let mut seen = vec![false; structure.chunks.len()];
     let mut pushed = Vec::new();
     for load in loads {
-        if load.blow != Vec3::ZERO && !seen[load.chunk] {
+        if load.blow != Vec3::ZERO && !seen[load.chunk] && counts(load) {
             seen[load.chunk] = true;
             pushed.push(load.chunk);
         }
     }
     pushed
+}
+
+/// Whether `load` comes from outside its group: a field or a body, not a group frame's inertial
+/// response ([`in_group_frames`]).
+fn external(load: &Load) -> bool {
+    !matches!(load.origin, Origin::Inertia { .. })
 }
 
 /// The chunks joined to `start` through `graph`'s intact bonded joints, ascending, each marked in
@@ -1906,9 +1922,10 @@ pub(crate) fn weigh(
     // Each chunk's joints, the anchors too: what a held group may bear on besides its section.
     let incident = incident(structure);
     weighed.steps += structure.joints.len();
+    // Rings grow from external presses, as the push check's grow from external blows.
     let pressed: Vec<usize> = loads
         .iter()
-        .filter(|load| load.press != Vec3::ZERO)
+        .filter(|load| load.press != Vec3::ZERO && external(load))
         .map(|load| load.chunk)
         .collect();
     // Every pass cracks an intact joint (asserted where it cracks) and none closes again, so
@@ -3909,6 +3926,29 @@ mod tests {
                 "{chunk}, {direction}"
             );
         }
+    }
+
+    /// An external blow that pulls one chunk straight off its group meets the seam between them
+    /// in tension with no bending: only that chunk's own punch ring reads it. Seeding rings from
+    /// the frame's inertial blows (on every chunk) leaves the whole group as the only ring, with
+    /// no boundary, and the seam holds whatever the blow. ASSUMED fixture: the weak-seam slab.
+    #[test]
+    fn an_outward_contact_pulls_its_chunk_off_the_group() {
+        // Binary-exact coordinates: the pull's line meets the seam's centre exactly, so no
+        // rounding lends the section law a bending axis to read it by.
+        let mut slab = unsupported_slab(2);
+        for (i, chunk) in slab.chunks.iter_mut().enumerate() {
+            chunk.centroid = Vec3::new(0.25 * i as f32, 0.5, 0.0);
+            chunk.volume = 0.015625;
+            chunk.mass = chunk.material.density * chunk.volume;
+        }
+        slab.joints[0].centroid = Vec3::new(0.125, 0.5, 0.0);
+        slab.joints[0].area = 0.0625;
+        let mut load = slab_contact(&slab, 0.0);
+        load.blow = Vec3::NEG_X * 1000.0;
+        let (state, changes) = assess_slab(slab, &[load]);
+        assert_eq!(state.cracked, vec![true]);
+        assert_eq!(changes.groups.len(), 2);
     }
 
     /// The choice of reference point must not add a resultant. Section tractions rely on
