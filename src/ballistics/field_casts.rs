@@ -836,3 +836,132 @@ fn the_field_casts_digest_to_the_pinned_value() {
          without the constant"
     );
 }
+
+/// Repeats of each priced cone; a cone's price is the median of its repeats.
+const PRICED_REPEATS: usize = 25;
+
+/// A PRICING BED, NOT A GATE (#202): the wall time of one spall cone thrown by the shipped sampler
+/// on this tree, in the game's damage model (game state only), over this module's `cone` family
+/// ([`rays`]) at both poses: the throw's reach ([`resolve::FieldReach::of_throw`]) once, then
+/// [`resolve::field_direction`] along every direction, as the march's `walk_field` throws it. The
+/// repeats run in rounds over every cone, so drift spreads over all of them; a cone's price is
+/// its median. One thread; asserts nothing about time.
+#[test]
+#[ignore = "a pricing bed, run on demand"]
+fn the_shipped_cone_sampler_priced_per_cone() {
+    use std::time::Instant;
+    let mut app = probe_world().expect("the bound tank builds");
+    app.insert_resource(TimeUpdateStrategy::ManualDuration(Duration::from_millis(
+        16,
+    )));
+    let (layout, _) = layout(&mut app);
+    let tank = app.world().resource::<ProbeTank>().0;
+    let poses = [
+        Pose {
+            label: "A",
+            translation: PROBE_TANK_AT,
+            rotation: Quat::IDENTITY,
+        },
+        Pose {
+            label: "B",
+            translation: PROBE_TANK_AT + Vec3::new(-3.25, 0.5, 2.75),
+            rotation: Quat::from_xyzw(0.02, 0.31, -0.015, 0.95).normalize(),
+        },
+    ];
+    let mut prices: Vec<(String, usize, f64)> = Vec::new();
+    for pose in poses {
+        app.world_mut().entity_mut(tank).insert((
+            Position(pose.translation),
+            Rotation(pose.rotation),
+            Transform::from_translation(pose.translation).with_rotation(pose.rotation),
+        ));
+        for _ in 0..4 {
+            app.update();
+        }
+        let mut cones: Vec<(String, Vec<WorldRay>)> = Vec::new();
+        for ray in rays(&layout, pose) {
+            if !ray.label.contains("/cone/") {
+                continue;
+            }
+            let key = ray.label[..ray.label.rfind('/').expect("a cone ray's label")].to_owned();
+            match cones.last_mut() {
+                Some((last, directions)) if *last == key => directions.push(ray),
+                _ => cones.push((key, vec![ray])),
+            }
+        }
+        let priced = app
+            .world_mut()
+            .run_system_once(
+                move |world: ProjectileMarchWorld,
+                      colliders: Query<(
+                    &'static Position,
+                    &'static Rotation,
+                    &'static Collider,
+                    Option<&'static BallisticSurfaces>,
+                )>,
+                      health: Query<&ComponentHealth>| {
+                    let context = resolve::ResolveContext {
+                        world: &world,
+                        colliders: &colliders,
+                        deposit: true,
+                        laws: walk::WalkLaws::default(),
+                    };
+                    let within = |collider: Entity| {
+                        world.volume_of(collider).is_some_and(|node| {
+                            world.owners.get(node).ok().map(VolumeOf::tank) == Some(tank)
+                        })
+                    };
+                    let is_box = |volume: Entity| health.contains(volume);
+                    let mut micros = vec![Vec::with_capacity(PRICED_REPEATS); cones.len()];
+                    for _ in 0..PRICED_REPEATS {
+                        for ((_, directions), times) in cones.iter().zip(&mut micros) {
+                            let origin = directions[0].origin;
+                            let start = Instant::now();
+                            let reach = resolve::FieldReach::of_throw(&context, &within, origin);
+                            for ray in directions {
+                                let cast = resolve::field_direction(
+                                    &context,
+                                    &reach,
+                                    &is_box,
+                                    &[],
+                                    origin,
+                                    ray.dir,
+                                    ray.strength,
+                                    ray.weight,
+                                )
+                                .unwrap_or_else(|error| {
+                                    panic!("{}: the walk failed: {error:?}", ray.label)
+                                });
+                                std::hint::black_box(cast);
+                            }
+                            times.push(start.elapsed().as_secs_f64() * 1e6);
+                        }
+                    }
+                    cones
+                        .iter()
+                        .zip(micros)
+                        .map(|((key, directions), mut times)| {
+                            times.sort_by(f64::total_cmp);
+                            (key.clone(), directions.len(), times[times.len() / 2])
+                        })
+                        .collect::<Vec<_>>()
+                },
+            )
+            .expect("the pricing system runs");
+        prices.extend(priced);
+    }
+    for (key, directions, micros) in &prices {
+        println!("   {key:<12} {directions:>3} directions {micros:>8.0} µs");
+    }
+    let mut column: Vec<f64> = prices.iter().map(|(.., micros)| *micros).collect();
+    column.sort_by(f64::total_cmp);
+    let at = |q: f64| column[((column.len() - 1) as f64 * q).round() as usize];
+    println!(
+        "MEASURED shipped cone sampler, {} cones, µs a cone: p50 {:.0} p95 {:.0} mean {:.0} max {:.0}",
+        column.len(),
+        at(0.5),
+        at(0.95),
+        column.iter().sum::<f64>() / column.len() as f64,
+        column[column.len() - 1]
+    );
+}
