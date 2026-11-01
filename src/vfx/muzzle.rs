@@ -346,7 +346,22 @@ fn spawn_muzzle_light(
 /// Every presented shot's counter for a gun's smoke ration
 /// ([`crate::guns::MuzzleEmission::smoke`]'s `every_rounds`); it ticks once per non-stale shot.
 #[derive(Resource, Default)]
-struct SmokeCadence(u32);
+struct SmokeCadence(std::collections::HashMap<Option<(Entity, usize)>, u32>);
+
+impl SmokeCadence {
+    fn puff(&mut self, source: Option<crate::ballistics::ShotSource>, every: u32) -> bool {
+        // Unattributed developer shots form one stream; game shots name their tank and mount.
+        let key = source.map(|source| (source.tank, source.weapon));
+        let count = self.0.entry(key).or_default();
+        if *count == every - 1 {
+            *count = 0;
+            true
+        } else {
+            *count += 1;
+            false
+        }
+    }
+}
 
 /// What the one muzzle consumer writes into and reads beside the shot.
 #[derive(SystemParam)]
@@ -391,9 +406,11 @@ fn dress_fire(fire: On<FireShell>, mut kit: MuzzleKit) {
         return;
     }
     let emission = fire.muzzle;
-    // The ration counts every non-stale shot, near or far, so the cadence is a property of the
-    // firing, not of the camera.
-    kit.cadence.0 = kit.cadence.0.wrapping_add(1);
+    // The game's damage-model view counts this mount's non-stale shots, near or far. Other
+    // mounts and smokeless guns cannot change its authored ration.
+    let smoke_due = emission
+        .smoke
+        .is_some_and(|smoke| kit.cadence.puff(fire.shooter, smoke.every_rounds));
     let origin = fire.origin;
     let dir = Vec3::from(fire.direction);
     let near = if kit.camera.is_empty() {
@@ -544,7 +561,7 @@ fn dress_fire(fire: On<FireShell>, mut kit: MuzzleKit) {
     // the bore.
     if near
         && let Some(smoke) = emission.smoke
-        && kit.cadence.0.is_multiple_of(smoke.every_rounds)
+        && smoke_due
     {
         let mut material = kit.assets.smoke_material();
         material.params.fade.w = smoke.opacity;
@@ -694,8 +711,14 @@ fn spawn_ground_dust(
 fn decay_muzzle_lights(
     time: Res<Time>,
     mut lights: Query<(Entity, &mut MuzzleLight, &mut PointLight)>,
+    roots: Query<Entity>,
+    mut cadence: ResMut<SmokeCadence>,
     mut commands: Commands,
 ) {
+    // A despawned source has no future cadence; bound the table to current sources.
+    cadence
+        .0
+        .retain(|source, _| source.is_none_or(|(tank, _)| roots.contains(tank)));
     for (entity, mut light, mut point) in &mut lights {
         if !light.armed {
             light.armed = true;
@@ -813,22 +836,34 @@ mod tests {
         catch_up_ticks: u32,
         tracer: bool,
     ) {
-        let root = app.world_mut().spawn_empty().id();
-        app.world_mut().spawn((
-            Weapon {
-                name: "fixture".to_owned(),
-                rounds: Vec::new(),
-                fire_cycle: cycle,
-                recoil: None,
-                barrel: None,
-                fire: Vec::new(),
-                load: Vec::new(),
-                trigger: crate::spec::Trigger::Primary,
-                report_clips: Vec::new(),
-            },
-            TankRoot(root),
-            WeaponIndex(0),
-        ));
+        let root = app
+            .world_mut()
+            .query::<(&Weapon, &TankRoot)>()
+            .iter(app.world())
+            .find_map(|(weapon, root)| (weapon.fire_cycle == cycle).then_some(root.0));
+        let root = root.unwrap_or_else(|| app.world_mut().spawn_empty().id());
+        if app
+            .world_mut()
+            .query::<(&Weapon, &TankRoot)>()
+            .iter(app.world())
+            .all(|(_, tank)| tank.0 != root)
+        {
+            app.world_mut().spawn((
+                Weapon {
+                    name: "fixture".to_owned(),
+                    rounds: Vec::new(),
+                    fire_cycle: cycle,
+                    recoil: None,
+                    barrel: None,
+                    fire: Vec::new(),
+                    load: Vec::new(),
+                    trigger: crate::spec::Trigger::Primary,
+                    report_clips: Vec::new(),
+                },
+                TankRoot(root),
+                WeaponIndex(0),
+            ));
+        }
         app.world_mut().trigger(FireShell {
             effects: crate::rounds::FlightEffects::fixture_traced(),
             muzzle,
@@ -1303,6 +1338,41 @@ mod tests {
             expected,
             "2/round + 1 puff per {every}"
         );
+    }
+
+    /// The game's damage-model view rations smoke per mount. Interleaved fire from another
+    /// mount or tank must not advance it, and changing ammunition in the same mount must not
+    /// restart it. The renderer relies on exactly the authored share per source.
+    #[test]
+    fn smoke_rations_are_independent_of_other_sources_and_round_selection() {
+        use crate::ballistics::ShotSource;
+        let mut world = World::new();
+        let tank = world.spawn_empty().id();
+        let other = world.spawn_empty().id();
+        let source = ShotSource {
+            tank,
+            weapon: 0,
+            round: 0,
+        };
+        let mut cadence = SmokeCadence::default();
+        assert!(!cadence.puff(Some(source), 3));
+        for other in [
+            ShotSource {
+                weapon: 1,
+                ..source
+            },
+            ShotSource {
+                tank: other,
+                ..source
+            },
+        ] {
+            assert!(!cadence.puff(Some(other), 3));
+            assert!(!cadence.puff(Some(other), 3));
+            assert!(cadence.puff(Some(other), 3));
+        }
+        assert!(!cadence.puff(Some(ShotSource { round: 1, ..source }), 3));
+        assert!(cadence.puff(Some(source), 3));
+        assert!(!cadence.puff(Some(source), 3));
     }
 
     /// A stale remote shot (catch-up beyond ~250 ms) skips the dressing rather than playing late.
