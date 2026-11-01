@@ -12,7 +12,8 @@
 //!   tick-start shape snapshot ([`RubbleBodies`]), checked across the complete shoe footprint.
 //! - Runs every tick unconditionally (this is sim state); stays inside
 //!   `SimPhase::DrivingForces` so drive samples velocity before the weapon-fire impulse.
-//! - `Drive` capability gates the COMMAND, not the contact model: an out-of-action engine still has
+//! - `Drive` effectiveness scales the command target; the contact model keeps its grip. An
+//!   out-of-action engine still has
 //!   kinetic grip (the slip law keeps resisting motion — though it creeps on slopes, ADR-0025);
 //!   it just cannot thrust. The cut is not instant: the lost capability retargets the command
 //!   slew, so thrust fades over ~1/[`super::drive::DRIVE_SLEW_PER_SECOND`] s — deliberate, the
@@ -29,7 +30,7 @@ use serde::{Deserialize, Serialize};
 use crate::bake::TankBlueprint;
 use crate::command::ParsedTankCommand;
 use crate::damage::{
-    Capability, TankCapabilities, TankVolumes, VolumeFacets, capability_available,
+    Capability, TankCapabilities, TankVolumes, VolumeFacets, capability_effectiveness,
 };
 use crate::state::{GameplaySet, SimPhase};
 use crate::tank::Tank;
@@ -670,7 +671,7 @@ pub(crate) fn belt_tick<O: TerrainOracle>(
 }
 
 /// The game's damage model: a running repair and a phase-held command both select service
-/// brakes. Other commands retain the authored drive capability gate.
+/// brakes. Otherwise the authored Drive effectiveness scales both thrust and steering targets.
 pub(crate) fn drive_target(
     command: &ParsedTankCommand,
     tank: Option<&TankVolumes>,
@@ -679,13 +680,12 @@ pub(crate) fn drive_target(
 ) -> DriveTarget {
     if command.held() || tank.is_some_and(|tank| crate::damage::repair::underway(tank, volumes)) {
         DriveTarget::Brake
-    } else if capability_available(tank, caps, Capability::Drive, volumes) {
-        DriveTarget::Axes(DriveAxes {
-            throttle: command.throttle,
-            steer: command.steer,
-        })
     } else {
-        DriveTarget::Axes(DriveAxes::default())
+        let effectiveness = capability_effectiveness(tank, caps, Capability::Drive, volumes);
+        DriveTarget::Axes(DriveAxes {
+            throttle: command.throttle * effectiveness,
+            steer: command.steer * effectiveness,
+        })
     }
 }
 
@@ -1289,6 +1289,57 @@ mod tests {
         let (reference, a) = support_fixture(false, false, true, 0.0);
         let (solid, b) = support_fixture(false, false, false, 0.0);
         assert_eq!(support_bits(&reference, &a), support_bits(&solid, &b));
+    }
+
+    /// The game's damage model: the production adapter's thrust target uses Drive's rate.
+    /// A boolean gate mutant fails both backfill and reduced-module rows. Grip and brakes do
+    /// not enter this selector's rate. Fixture: a ten-point engine and normalized input axes.
+    #[test]
+    fn backfill_and_module_condition_scale_the_drivers_thrust_target() {
+        use crate::ballistics::ComponentHealth;
+        use crate::command::TankCommand;
+        use crate::damage::{CrewStation, Crewman, FunctionRole, Group, Part, VolumeOf};
+        use bevy::ecs::system::RunSystemOnce;
+        let foreign = crate::damage::competence(CrewStation::Loader, CrewStation::Driver);
+        for (home, share, expected) in [
+            (CrewStation::Driver, 1.0, 1.0),
+            (CrewStation::Loader, 1.0, foreign),
+            (CrewStation::Driver, 0.5, 0.5),
+            (CrewStation::Driver, 0.0, 0.0),
+        ] {
+            let mut world = World::new();
+            let tank = world
+                .spawn(TankCapabilities(std::collections::HashMap::from([(
+                    Capability::Drive,
+                    vec![Group::Single(Part::Driver), Group::Single(Part::Engine)],
+                )])))
+                .id();
+            world.spawn((CrewStation::Driver, Crewman { home }, VolumeOf(tank)));
+            let mut health = ComponentHealth::full(10);
+            health.set_held((health.capacity() as f32 * share) as u32);
+            world.spawn((FunctionRole::Engine, health, VolumeOf(tank)));
+            let command = ParsedTankCommand::try_from(TankCommand {
+                throttle: 0.8,
+                steer: -0.4,
+                ..default()
+            })
+            .unwrap();
+            world
+                .run_system_once(
+                    move |tanks: Query<(&TankVolumes, &TankCapabilities)>,
+                          facets: Query<VolumeFacets>| {
+                        let (volumes, caps) = tanks.get(tank).unwrap();
+                        assert_eq!(
+                            drive_target(&command, Some(volumes), Some(caps), &facets),
+                            DriveTarget::Axes(DriveAxes {
+                                throttle: 0.8 * expected,
+                                steer: -0.4 * expected
+                            })
+                        );
+                    },
+                )
+                .unwrap();
+        }
     }
 
     /// The controller's deceleration estimate must scale with the whole vehicle rather than

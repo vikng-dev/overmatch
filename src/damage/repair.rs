@@ -145,8 +145,8 @@ mod tests {
     use super::*;
     use crate::command::TankCommand;
     use crate::damage::{
-        Capability, Group, Part, TankCapabilities, VolumeFacets, VolumeOf, capability_available,
-        requirement_met,
+        Capability, Group, Part, TankCapabilities, VolumeFacets, VolumeOf,
+        capability_effectiveness, requirement_met,
     };
 
     // ASSUMED fixture pools and fixed step: synthetic module data, independent of any tank asset.
@@ -253,12 +253,10 @@ mod tests {
                 DriveTarget::Brake,
                 "the gameplay adapter must turn a running repair into service braking"
             );
-            assert!(capability_available(
-                Some(volumes),
-                Some(caps),
-                Capability::Drive,
-                &facets
-            ));
+            assert!(
+                capability_effectiveness(Some(volumes), Some(caps), Capability::Drive, &facets)
+                    > 0.0
+            );
             assert!(requirement_met(
                 Some(volumes),
                 &vec![Group::Single(Part::Breech)],

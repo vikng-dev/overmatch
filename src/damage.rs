@@ -561,17 +561,6 @@ pub fn evaluate(requirement: &Requirement, quality: &std::collections::HashMap<P
     })
 }
 
-/// Is this capability usable at all (effectiveness > 0)? The boolean gate consuming systems use when
-/// they only care about on/off; reach for [`capability_effectiveness`] when the *degree* matters.
-pub fn capability_available(
-    tank_volumes: Option<&TankVolumes>,
-    tank_caps: Option<&TankCapabilities>,
-    capability: Capability,
-    volumes: &Query<VolumeFacets>,
-) -> bool {
-    capability_effectiveness(tank_volumes, tank_caps, capability, volumes) > 0.0
-}
-
 /// Whether an arbitrary tank *meets* a requirement (effectiveness > 0) — the per-tank analog of
 /// [`ControlledTank::meets`], for sim systems that iterate every tank (a weapon's `fire`/`load`
 /// gates in `shooting`). No volumes yet (spec still binding) → not met.
@@ -600,7 +589,7 @@ pub fn requirement_effectiveness(
 /// folds together the three things those systems always reach for as a unit — *which* tank is
 /// controlled, *where its parts are* ([`Rig`]), and *what it can still do* (capabilities) — so a
 /// system takes one `ControlledTank` param instead of repeating a controlled-tank query, a
-/// [`VolumeFacets`] query, and a `capability_available(..)` call. Scoped to the single [`Controlled`]
+/// [`VolumeFacets`] query, and a `capability_effectiveness(..)` call. Scoped to the single [`Controlled`]
 /// tank; per-tank consumers (`track::sim::apply_track_forces`, the HUD) keep using [`VolumeFacets`]
 /// directly since they iterate every tank.
 #[derive(SystemParam)]
