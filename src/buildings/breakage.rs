@@ -545,6 +545,7 @@ type BuildingColliders<'w, 's> = Query<
         Option<&'static BuildingChunk>,
         &'static ChildOf,
     ),
+    Or<(With<BuildingElement>, With<BuildingChunk>)>,
 >;
 
 /// AUTHORITY: each physics step's body contacts on the buildings as loads, read once a step
@@ -638,10 +639,7 @@ fn contact_load(
                     .total_cmp(&layout.blocks[b].outside(local))
             })?
         }
-        (None, None) => panic!(
-            "buildings: collider {:?} of building {:?} is neither an element nor a chunk",
-            transfer.structure_collider, transfer.structure
-        ),
+        (None, None) => unreachable!("BuildingColliders admits elements and chunks only"),
     };
     Some((
         transfer.structure,
@@ -695,7 +693,11 @@ fn read_shell(
         "ShellMarched is observed before its shell despawns, with its penetration marks intact",
     );
     let mut deposit = RawDeposit::default();
-    for mark in marks.log.get(marched.marks_from..).unwrap_or_default() {
+    let marks = marks
+        .log
+        .get(marched.marks_from..)
+        .expect("ShellMarched's mark cursor is its log's length before the step; logs only grow");
+    for mark in marks {
         if let ArmourMark::Burst { field_origin, .. } = mark
             && let Some(burst) = marched.burst
         {
@@ -716,7 +718,9 @@ fn read_shell(
         ));
     }
     if let Some(spall) = spall {
-        let cones = spall.cones.get(marched.cones_from..).unwrap_or_default();
+        let cones = spall.cones.get(marched.cones_from..).expect(
+            "ShellMarched's cone cursor is its cone list's length before the step; lists only grow",
+        );
         for cone in cones {
             let share = 1.0 / cone.rays.len().max(1) as f32;
             deposit.rays.extend(cone.rays.iter().map(|ray| RayDeposit {
@@ -941,14 +945,14 @@ fn apply_deposits(mut p: DepositParam) {
             let total: f32 = lines.iter().map(|line| line.3).sum();
             for &(volume, entry, end, energy) in lines {
                 let Ok((element, chunk, parent)) = p.volumes.get(volume) else {
-                    continue;
+                    continue; // Another body's volume (a hull's armour, a trunk) is another law's.
                 };
                 let root = parent.parent();
-                let (Some(frame), Ok((_, _, _, breakage))) =
-                    (frames.get(&root), p.buildings.get(root))
-                else {
-                    continue;
-                };
+                let frame = &frames[&root];
+                let (_, _, _, breakage) = p
+                    .buildings
+                    .get(root)
+                    .expect("a building element or chunk is a child of its building's root");
                 let layout = &breakage.kind.layout;
                 let (a, b) = (frame.unscaled(entry), frame.unscaled(end));
                 let length = a.distance(b);
@@ -963,7 +967,9 @@ fn apply_deposits(mut p: DepositParam) {
                             (t1 > t0).then_some((c, t0, t1))
                         })
                         .collect(),
-                    (None, None) => continue,
+                    (None, None) => {
+                        unreachable!("BuildingColliders admits elements and chunks only")
+                    }
                 };
                 let chord: f32 = shares.iter().map(|(_, t0, t1)| t1 - t0).sum();
                 if chord <= 0.0 {
@@ -1003,9 +1009,10 @@ fn apply_deposits(mut p: DepositParam) {
                 if !frame.may_hold(end, STOP_TOLERANCE_M) {
                     continue;
                 }
-                let Ok((_, _, _, breakage)) = p.buildings.get(*root) else {
-                    continue;
-                };
+                let (_, _, _, breakage) = p
+                    .buildings
+                    .get(*root)
+                    .expect("frames enumerates this same building query");
                 let kind = &breakage.kind;
                 let local = frame.unscaled(end);
                 let (lo, hi) = kind.bounds();
@@ -1037,9 +1044,9 @@ fn apply_deposits(mut p: DepositParam) {
         }
         let mut departures = Vec::new();
         for (root, taken) in taken {
-            let Ok((_, identity, transform, mut breakage)) = p.buildings.get_mut(root) else {
-                continue;
-            };
+            let (_, identity, transform, mut breakage) = p.buildings.get_mut(root).expect(
+                "a deposit's take is keyed by building roots, which a match never despawns",
+            );
             let frame = frames[&root];
             let kind = breakage.kind.clone();
             let live = breakage.bypass_change_detection().live();
@@ -1238,9 +1245,10 @@ fn cast_blast(
             if !frame.may_meet(origin, dir) {
                 continue;
             }
-            let Ok((_, _, _, breakage)) = p.buildings.get(*root) else {
-                continue;
-            };
+            let (_, _, _, breakage) = p
+                .buildings
+                .get(*root)
+                .expect("frames enumerates this same building query");
             let kind = &breakage.kind;
             let (local, bounds) = views.entry(*root).or_insert_with(|| {
                 let (lo, hi) = kind.bounds();
@@ -1258,16 +1266,14 @@ fn cast_blast(
                 stop = Some((*root, chunk, t, t * frame.scale));
             }
         }
-        let surface = Dir3::new(dir).ok().and_then(|ray| {
-            p.spatial.cast_ray_predicate(
-                origin,
-                ray,
-                stop.map_or(reach, |(.., d)| d),
-                true,
-                &surfaces,
-                &meets,
-            )
-        });
+        let surface = p.spatial.cast_ray_predicate(
+            origin,
+            Dir3::new(dir).expect("the blast field's directions are unit"),
+            stop.map_or(reach, |(.., d)| d),
+            true,
+            &surfaces,
+            &meets,
+        );
         if let Some(hit) = surface {
             if near.binary_search(&hit.entity).is_err() {
                 // Terrain and other nonstructural surfaces shade the field. A trunk segment
@@ -1665,14 +1671,16 @@ pub(crate) fn run_laws(
 }
 
 /// A law chunk's collider shape for an instance at `scale`, about `origin` (building frame,
-/// scaled), its faces moved in by `gap` m.
+/// scaled), its faces moved in by `gap` m. The layout certified every law chunk's hull as a
+/// solid convex collider at load; a positive uniform scale and a shrink toward its mean of at
+/// most 80 % keep it one.
 pub(crate) fn chunk_collider(
     kind: &BuildingKind,
     c: usize,
     scale: f32,
     origin: Vec3,
     gap: f32,
-) -> Option<Collider> {
+) -> Collider {
     let block = &kind.layout.blocks[c];
     let middle = block.points.iter().sum::<Vec3>() / block.points.len().max(1) as f32;
     let shrink = (1.0 - gap / (block.inradius() * scale).max(1e-6)).max(0.2);
@@ -1683,6 +1691,7 @@ pub(crate) fn chunk_collider(
             .map(|p| (middle + (*p - middle) * shrink) * scale - origin)
             .collect(),
     )
+    .expect("a load-certified hull, scaled and shrunk toward its mean, stays a solid convex hull")
 }
 
 /// The ballistic volume of law chunk `c`: its element's substance.
@@ -1725,11 +1734,7 @@ pub(crate) fn launch(
         / mass;
     let colliders: Vec<(usize, Collider)> = group
         .iter()
-        .map(|&c| {
-            let collider = chunk_collider(kind, c, scale, centroid, LOOSE_GAP_M)
-                .expect("a freed chunk's baked hull is a nondegenerate convex collider");
-            (c, collider)
-        })
+        .map(|&c| (c, chunk_collider(kind, c, scale, centroid, LOOSE_GAP_M)))
         .collect();
     launch_colliders(centroid, colliders, |c| chunks[c].material.density, loads)
 }
@@ -1918,14 +1923,10 @@ fn reconcile(
             match (shape.chunk_present(&kind.layout, c), have_chunks.get(&c)) {
                 (false, Some(entity)) => commands.entity(*entity).despawn(),
                 (true, None) => {
-                    let Some(collider) = chunk_collider(kind, c, breakage.scale, Vec3::ZERO, 0.0)
-                    else {
-                        continue;
-                    };
                     commands.spawn((
                         ChildOf(root),
                         Transform::IDENTITY,
-                        collider,
+                        chunk_collider(kind, c, breakage.scale, Vec3::ZERO, 0.0),
                         super::element_layers(),
                         kind.chunk_friction(c),
                         chunk_volume(kind, c),
