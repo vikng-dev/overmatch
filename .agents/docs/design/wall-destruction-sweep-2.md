@@ -315,8 +315,8 @@ construction's reaction joins (`RubbleBodies::record_moving_contacts`,
 is the pair's plastic exchange: the source's and the structure's inverse effective masses for the
 closing patches' distribution summed, as the solver's constraint mass is for a solver contact.
 MEASURED (fixture: a 14.4 kg source closing at 1 m/s on a free slab of the same mass): blow
-6.05 N·s against the reduced-mass bound 7.2 N·s, the structure's reading equal to the 15.34 N·s
-the slab took.
+6.91 N·s against the reduced-mass bound 7.2 N·s, the slab taking 15.34 N·s (the tick-start
+closing reading below; 6.05 N·s before it).
 
 **Open: physical contact duration (#256).** The pushing-work term is implemented below.
 The contact force still uses the numerical solver interval: `Load::mean_force` divides the blow
@@ -337,7 +337,6 @@ were present. Findings are checked against code and executable class fixtures.
 | Codex P1; Claude P3 | Later patches record velocities changed by earlier impulses | verified: two 1000 kg bodies, 800 N s reaction at their COM normal, closing 1 m/s; one patch reads 499.99997 N s, two read 399.99997 N s (MEASURED red test) | track: retain tick-start closing speeds for every reaction (#256) |
 | Codex P2; Claude P2 | Reported elastic stiffness omits engagement derivative | verified: uniform 1 cm press in a 2 cm ramp reports 1,999,999.9 N/m against a finite-difference force derivative of 3,999,707.3 N/m (MEASURED red test) | track: include the engagement slope in patch stiffness (#256) |
 | Claude P2 | The explicit trace omits the source's inverse response | verified: DERIVED fixture, two 1000 kg bodies and a 10 MN/m spring at 64 Hz, recipient-only rate 2.4414 versus pair rate 4.8828; the omitted-source reaction leaves -2.125 m/s, corrected test leaves 0 m/s (MEASURED) | track: bound coupled belt reactions with both bodies inertia (#256) |
-
 | Claude P3 | A missing receiver-map entry can silently stand for a moving recipient | verified: staging a dynamic recipient through the fixed entry point did not fail (MEASURED red contract test); the reader now checks the actual rigid-body state before publishing | contact: enforce the implicit receiver inertia contract (#256) |
 | Claude P3 | Module documentation describes only fixed source-mass budgeting | verified: moving contacts use their actual received impulse and the pair mass | contact: enforce the implicit receiver inertia contract (#256) |
 
@@ -523,3 +522,52 @@ ignored measurements. The final record passed formatting, CI clippy, the whole-t
 MEASURED final guard/headless selection: 61 passed, four existing ignored measurements.
 All scoped work is complete. The track, contact-transfer and ballistics fences are unchanged.
 No push, capture, pricing run or subagent was used.
+
+## Part 9: law-hull-work-2 double verification (#256)
+
+Subject: the game's driving and building destruction models, the loads a tank's hull and belt
+put on walls and fallen pieces; game state only. Both review files were present at the start.
+The lane started at 05:58:06 +07; no captures, pricing runs, pushes or subagents.
+
+| Reviewer | Finding | Verified / not a defect | Fixed in (subject) |
+|---|---|---|---|
+| Codex P1; Claude P2 | `Origin::work_share` spends pair energy the launch and give-back keep | verified: the slow-ram plug (50 t at 0.2 m/s, 28.8 kg, 7.1 J of seams) kept 999.42426 J of 1000 J (MEASURED red test) | fracture: debit an opening's seam work from the pushing pair (#256) |
+| Codex P1 | The unstable branch clamps only the recipient; the source keeps the full belt force | verified as stated (DERIVED: two 1000 kg bodies, 200 kN at 64 Hz, the source gains 3.125 m/s while the recipient stops); this is the module's documented asymmetry, which carries a resting piece's support. Not fixed: see below | open |
+| Codex P2 | The component bound leaves out the source's field and fixed-surface springs | verified (DERIVED: 3.906 reported, coupled eigenvalue 5.113). Not fixed: with them two parked hulls read 5.42 (MEASURED, `identical_receivers_take_the_same_reaction_whatever_they_are`) and the lower hull would take the clamp's zero normal reaction | open |
+| Claude P2 | A stable band with damper rate `c dt/μ` in (1, 2) turns a closing recipient back | verified (MEASURED: a pure 100 kN s/m damper on 1000 kg closing at 1 m/s leaves at −0.5625 m/s); no energy is created (`|v'| < |v|`). A `c dt/μ < 1` bound was tried and dropped: the parked-hull pair's own damper rate is 1.73 (MEASURED), so it clamped a resting hull to zero reaction. The fling test's doc now states what it holds | open |
+| Claude P2 | One light piece under a belt moves every co-sourced recipient to the clamp | verified: the slab took −1875 N s alone and 0 N s beside the brick (MEASURED red test) | track: judge a light piece on its own patches before its source's other recipients (#256) |
+| Claude P3 | `BeltContact::stiffness` omits the damper's engagement slope inside the ramp | verified: the review's ramp fixture closing at 1 m/s reported 3,999,997.8 N/m against a 13,999,610 N/m force derivative (MEASURED red test); a parting damper's slope stays out, keeping the bound conservative | track: include a closing damper's ramp slope in patch stiffness (#256) |
+| Claude P3 | Stale prose naming the plastic share as the energy reading | verified | docs: record the law-hull-work-2 double verification (#256) |
+| Claude P3 | The Part 6 table splits on a blank line; the moving-slab blow still read 6.05 N s; the wall design's pointer named "the destruction record above" | verified | docs: record the law-hull-work-2 double verification (#256) |
+
+**Pushing work leaves the pair.** The energy gate reads `E = D²/2M` from a body's pair work and
+an energy opening spends `W = C²/2M` of it. Before the launch, `fracture::debit_work` scales
+each body blow on the freed group by `√(1 − (C/D)²)` for every energy opening (push, lift,
+shove, punch) whose joints bound the group; strength openings spend nothing. The pair then
+leaves with `J²/2(m+M) − W`, and the momentum the blow gave up stays with the structure the
+seams held to. A field's blow keeps its whole launch: its energy is its own source's. In a
+mixed opening the bodies pay `W` in proportion to their share of `D²`. MEASURED on the fixture:
+the plug keeps 0.5712 J and the source 991.753 J (1000 J less 7.1 J of seams and 0.576 J of
+plastic loss).
+
+**The reaction remainder (open).** Codex's P1 and P2 and Claude's damper P2 meet at one
+missing truth: the clamp gives a recipient it judges unstable no normal impulse at rest,
+because Avian holds it, while its source keeps the full spring. Counting more springs in the
+bound, or bounding the damper, moves a resting hull into that clamp and drops its load. Closing
+them needs the unstable band's pair reaction to read what holds the recipient (Avian's touching
+contacts), so a free recipient takes a symmetric plastic pair impulse and a held one keeps
+today's support. That read and the source-side correction it implies are not built here.
+
+**Duration law (open).** Item 1 of the brief, `τ = π√(m/k)` with the pair's contact stiffness
+in material data, its rate-invariance test and the retirement of the wall design's "Body
+contact duration" note, did not start: the review findings took the lane's hour. The note stays
+because `Load::mean_force` still divides by the solver step.
+
+**Gates.** Each fix commit passed formatting, CI clippy and its targeted tests (MEASURED:
+buildings:: 149 passed; track::, contact_transfer, track_sandbox, headless_test and
+doc_citations 257 passed, 5 existing ignored). On the final tree the destruction, driving,
+headless and whole-tree selection (`headless_test`, `buildings::`, `debris::`, `trees::`,
+`sandbox::`, `track::`, `contact_transfer`, `ui_ascii`, `net_boundary`, `bake::`,
+`doc_citations`, protocol pins) passed 528 with 7 existing ignored measurements. Shifted readings: the slow-ram pair now leaves with 992.32 J instead of
+999.42 J (−7.1 J, the seams' work); a slab beside a light piece under one belt takes its
+whole −1875 N s instead of 0. PROTOCOL_REV is unchanged: no serialized type changed.

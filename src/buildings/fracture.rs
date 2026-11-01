@@ -748,8 +748,8 @@ pub(crate) enum Origin {
 /// What a section's or ring's strength leaves the blows on it ([`Load::felt`]): the plastic
 /// demand factor a falling pulse's blows meet ([`plastic_demand`]), and whether the strength
 /// yields to gravity, the presses and every body blow's least mean force together. The second
-/// is the two-asymptote rule's force limit for a body's blow: its share pays the energy only
-/// where its force beats the strength too.
+/// is the two-asymptote rule's force limit for a body's blow: its pair work pays the energy
+/// only where its force beats the strength too.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) struct Reading {
     pub falling: f32,
@@ -1693,7 +1693,7 @@ fn plane_bucket(offset: f32) -> i64 {
 /// Beside the sections, the pushed chunks' punch rings compete on the same ratio
 /// ([`ring_groups`], [`ring_failure`]): a group translated out through every joint around it.
 /// A body's blow meets both limits on each: its least mean force must beat the strength there,
-/// and its share must pay the energy ([`Reading`]).
+/// and its pair work must pay the energy ([`Reading`], [`Origin::work_share`]).
 ///
 /// The group a section holds is the part of the pushed chunks' component that loses its last path
 /// to its reference with the section's joints removed ([`held`]): ground on placed construction,

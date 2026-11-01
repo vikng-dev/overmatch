@@ -56,8 +56,9 @@
 //!   presentation clock ([`super::view`]).
 //! * **Loose groups** fall on the authority as one dynamic body each ([`WallPiece`]): its chunks
 //!   brick in ballistics on [`Layer::Armor`], colliding as [`Layer::Debris`], settled by the shared
-//!   rule ([`crate::debris`]). It leaves with the fields' blows and each body's plastic share,
-//!   returning the rest at the contact point ([`give_back`]); its spin is the exchanged angular
+//!   rule ([`crate::debris`]). It leaves with the fields' blows and each body's plastic share of
+//!   its blow less the work its opening spent ([`fracture::debit_work`]), returning the rest at
+//!   the contact point ([`give_back`]); its spin is the exchanged angular
 //!   momentum over its own inertia tensor; gravity, contact and friction decide whether a group
 //!   a cracked section freed rocks back or topples. A later blast's impulse on it is a write to
 //!   its velocity and sleep timer, which wakes it asleep (avian's `wake_on_changed`).
@@ -1741,8 +1742,9 @@ pub(crate) struct Changes {
 /// has no carrier. A queued contact on a chunk an earlier deposit freed is returned whole too:
 /// that chunk launched as its own body, which the next physics step's solver meets as a dynamic
 /// body, so the momentum the static stop took from the source is neither kept nor spent twice.
-/// A held section reads the body's plastic share against its hinge effective mass; a freed group
-/// launches against its free effective mass. Gravity plus presses reach the strength and rest
+/// A held section's energy check reads a body's pair work against its hinge effective mass; a
+/// freed group launches against its free effective mass, each body's blow first reduced by the
+/// work the openings about the group spent ([`fracture::debit_work`]). Gravity plus presses reach the strength and rest
 /// laws from changed supports and pressed chunks. An identical press set on unchanged topology
 /// reuses its held verdict; every changed force or point, including a decrease, rechecks.
 pub(crate) fn run_laws(

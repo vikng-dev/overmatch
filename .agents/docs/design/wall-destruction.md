@@ -382,7 +382,7 @@ Their press stands on the structure: every run of the laws on it carries the pre
 
 Contacts reach the laws with their blow and press at each point and one source mass per contact: the body's effective mass along the normal at the blow's centroid, the same on each of its points.
 A plastic share is linear in the blow, so the points of one contact then take its share once; read against each point's own effective mass they would each spend the receiver's whole mass (**DERIVED**: a cube's corner holds a quarter of the cube's mass along its face's normal, so a cube striking square on would hand a held group up to four times its exchange).
-The structural energy check reads the body's plastic share against the held hinge mass; rest lift and slide read the share against the translating group's mass.
+The structural energy check reads the pushing pair's work (`Origin::work_share`) against the held hinge mass; rest lift and slide read it against the translating group's mass.
 A freed group launches against its free collider mass and inertia, and the source receives the rest at the world contact in the same post-physics law pass, before the next solver step.
 A body blow on dust returns whole: dust has no dynamic carrier. A held chunk returns nothing; the failing tick's press stays with the standing structure. A queued contact whose chunk an earlier deposit already freed also returns whole: that chunk launched as its own body, the next physics step's solver meets it as a dynamic body, and keeping the static stop would take the source's momentum into no body.
 The strength check reads each press alongside each chunk's gravity force, at their respective points, from pressed chunks and changed supports. Navier tension uses the resultant force and moment; rests require compression, a pressure centre inside the bearing hull, and tangent force within friction. For non-coplanar bearing discs, the pressure-centre calculation uses their area-centroid height (**ASSUMED**, the existing horizontal bearing-hull approximation).
@@ -401,7 +401,7 @@ An unchanged set of presses (chunk, point and force) on unchanged topology reuse
 
 **Two limits on every section.**
 A force must beat the section's strength: the weight check generalised, gravity one force beside each press and each blow's least mean force `blow / dt`.
-A blow must also pay the section's energy, its share reaching the section through the reduced mass below.
+A blow must also pay the section's energy, its pair work reaching the section through the modal mass below.
 A steady push meets the strength limit alone, so its verdict does not depend on the tick rate.
 The structure is rigid-plastic: a press below strength moves nothing and is read again each tick it persists; sub-threshold blows on a resting part are each read alone and never add (accepted).
 A blast's blow meets both at once through `g(F_R / F_peak)` ("Standoff blast", Law 3): a far burst whose peak force the section's strength holds fails it by no impulse, however large (**DERIVED** by rerunning the #237 study's disc-wall arithmetic on the sourced rows: an 88 mm HE burst's peak force on house_1's east wall stays over its base section's strength out to the burst's 23.2 m reach, so `g(r)` trims the impulse limit only from 15.0 to 13.8 m; the #237 study's ~11 m cut-off came from the misrecalled far row). A round's line keeps the energy limit alone (**ASSUMED**: its blow is over before a section moves).
@@ -426,10 +426,10 @@ contact-time constant. The rate-sweep evidence is in
 
 **Structures stay solid to the physics engine (option B).**
 Avian stops a body against a standing structure as against any static body, and the laws judge every joint from the contact's real transfer.
-A section's energy check includes the pushing work described in the destruction record above, using the group's effective mass about its hinge; a field's blow reaches it whole.
+A section's energy check includes the pushing work (`wall-destruction-sweep-2.md`, "Pushing work in the energy limit"), using the group's effective mass about its hinge; a field's blow reaches it whole.
 A group that breaks free leaves with the plastic share against its free effective mass, `J_launch = blow × m_f / (m_b + m_f)`.
 The body gets back `blow − J_launch` at the contact point, so a body that breaks through slows by the momentum the freed group took, no more.
-Momentum is conserved by construction, and no energy is created (**DERIVED**: with `m_red = m_b m_f / (m_b + m_f)`, the body's loss exceeds the group's gain by `½ m_red v_n²`, the plastic loss the fracture work is drawn from).
+No energy is created (**DERIVED**): the pair would keep `J²/2(m_b + m_f)`, and before the launch each body blow on the freed group is scaled by `√(1 − W/E)` for every energy opening about it (`fracture::debit_work`; the opening read `E = D²/2M` and spent `W = C²/2M`), so the pair leaves with what the work left, the plastic loss `½ m_red v_n²` beside it; the momentum the blow gives up stays with the structure the seams held to.
 The launch reads the free mass, never the hinge mass, which grows without bound near the hinge and would create energy.
 **DERIVED limit check:** at fixed blow, a source mass tending to zero gives the field's whole blow in both demand and launch; an infinite source mass gives a vanishing share.
 
