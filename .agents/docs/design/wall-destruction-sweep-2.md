@@ -225,3 +225,10 @@ pass. The split motion test verifies mass, linear/angular momentum and rigid kin
 Implementation commit: "buildings: assess and split every chunk group in its own frame (#249)".
 The eave's visible mixed-support error remains the held stiffness idea; no modulus, thickness,
 material strength, attachment area or construction bond was tuned for it. Pricing is separate.
+
+**Capture handoff:** the production binary built and two hidden, silent, locked house-breach
+attempts completed. Neither supplied the requested collapse with landing splits. The final
+normal-driving scenario remained queued behind another lane's machine lock at the measured
+90-minute cutoff (start 18:56:06 +07; cutoff 20:26:06) and was cancelled. Item 3 remains open;
+`caps-destr4/index.md` in the lane scratchpad labels the retained attempt images and the unrun
+plan honestly. No pricing or visible-window run was performed.
