@@ -568,4 +568,74 @@ it would trim the gather (0.27 ms) but not the clips.
 **Cost model (DERIVED).** Drive step = 30 tanks x (~100 us of terrain probes and contact law +
 c x clips per tank), where clips per tank follow the rubble reaching its slabs (0.85 in minute 1,
 24 in minute 3) and c was ~9.3 us before the fix. The fix lowers c; the clip count is the law.
-Still to price: the fixed-buffer clip, A B B A in minute 1 and minute 3 (not run in this lane).
+The fixed-buffer clip is priced in "diag-drive-growth priced" below.
+
+## diag-drive-growth priced
+
+Subject: the game's dedicated server tick and its driving model, game state only.
+
+**Trees.** A: main at "buildings: resolve bending axes above input roundoff (#249)". B: main at
+"driving: clip support footprints in fixed buffers (#250)", the next commit. They differ only in
+`src/track/rubble.rs` (MEASURED, `git diff --stat`) and share one `assets/`.
+
+**Method.** As "diag-drive-growth", with these differences. No counters: each tree's server and
+client are the `perf` + `bevy/trace_chrome` build of "Method" (`--bin overmatch --bin
+overmatch-server`, `CARGO_PROFILE_PERF_STRIP=false`), kept aside per tree. Order A1 B1 B2 A2, one
+run per machine-lock hold, each trace profiled and deleted inside its hold, so no run overlapped a
+profile or a compile. Before them each binary was launched once and discarded: untraced, stopped
+20 s into the fill-up. Every window held 63.9-64.0 Hz and 30 tanks with 0 unpaired spans, the
+entity count matched across the four runs (18 233 in the fill-up, 18 260-18 261 in minute 1,
+18 754-18 767 in minute 3), and no run panicked.
+
+`RubbleBodies::in_slab` has no trace span. macOS `sample` (5 ms interval) ran over each window
+(the fill-up's from 39 to 8 s before combat), and the in_slab row is in_slab's share of the drive
+step's samples times the traced drive step (DERIVED). Read on the sampler's own clock (samples
+over the samples per thread, times the 15 625 us period), the drive step and in_slab both come out
+2-13 % lower (DERIVED). The sampler costs the tick 3.3-4.9 %: the fill-up's tick p50 before it
+started against while it ran, in each run (MEASURED). It ran over the same windows in every run, so
+both trees carry it alike.
+
+**Per tick (MEASURED; changes of the means and spreads DERIVED; spread = |run 1 - run 2| over the
+tree's mean):**
+
+| us per tick | A1 | B1 | B2 | A2 | Change of the means | Spread A / B |
+|---|---|---|---|---|---|---|
+| **Fill-up** (40-5 s before combat, 30 held tanks) | | | | | | |
+| Drive step `track::sim::apply_track_forces` | 2 943 | 2 912 | 2 913 | 2 951 | -35 us (-1.2 %) | 0.3 % / 0.0 % |
+| of it: `RubbleBodies::in_slab` (6-9 samples a run) | 32 | 32 | 29 | 22 | +4 us (counting noise) | 35 % / 9 % |
+| Stats-line tick p50 | 5 010 | 5 005 | 4 956 | 4 992 | -20 us (-0.4 %) | 0.4 % / 1.0 % |
+| **Minute 1** (combat 5-60 s) | | | | | | |
+| Drive step | 3 596 | 3 356 | 3 382 | 3 515 | -187 us (-5.2 %) | 2.3 % / 0.8 % |
+| of it: `RubbleBodies::in_slab` | 426 | 187 | 194 | 352 | -198 us (-51 %) | 19 % / 3.7 % |
+| Stats-line tick p50 | 5 895 | 5 893 | 5 851 | 5 915 | -33 us (-0.6 %) | 0.3 % / 0.7 % |
+| **Minute 3** (combat 120-180 s) | | | | | | |
+| Drive step | 9 004 | 5 925 | 5 634 | 9 370 | -3 408 us (-37 %) | 4.0 % / 5.0 % |
+| of it: `RubbleBodies::in_slab` | 5 509 | 2 239 | 2 120 | 5 811 | -3 480 us (-61 %) | 5.3 % / 5.5 % |
+| Stats-line tick p50 | 11 310 | 8 523 | 8 105 | 12 239 | -3 460 us (-29 %) | 7.9 % / 5.0 % |
+
+The saving is in_slab's and nothing else's: the drive step less in_slab is 3 164-3 170 us (A)
+against 3 169-3 188 us (B) in minute 1, and 3 496-3 559 against 3 514-3 685 us in minute 3
+(DERIVED). The fixed busy time follows the drive step, -3 385 us (-28 %) in minute 3 and -150 us
+(-2.4 %) in minute 1 (MEASURED, means). In the fill-up no candidate reaches a slab (the counts of
+"diag-drive-growth") and no row moved beyond its spread. In minute 1 the mean drive step fell 5 %
+and the tick p50 0.6 %, within its spread; that the saving sits in the minority of ticks with
+rubble under a belt, which a median does not see, is ASSUMED.
+
+Spread: the fill-up and minute 1 hold about the machine's 1-2 % (0.0-2.3 %), except minute 1's
+in_slab in A, 19 % (212 against 174 samples, a counting error of about 7 %, DERIVED as 1/sqrt(n)),
+so how much rubble reaches the belts in the first minute differs between runs. Minute 3 spreads
+4-8 %, the combat itself diverging at an equal entity count. No minute-3 row and no minute-1 drive
+or in_slab row of A overlaps B's.
+
+**Edgegap, 1 vCPU (DERIVED, rough).** #250's alpha.9 re-measure (the remeasure-alpha9 lane's two
+server logs, read over this section's windows, MEASURED) ticked minute 1 at 12.15 ms (Tokyo) and
+11.96 ms (Singapore) p50, and minute 3 at 22.3 and 25.5 ms. Against tree A's local minute 1,
+5.90 ms (A is alpha.9 plus 42 commits, the nearest tree priced here), that is a ratio of 2.06 and
+2.03. Scaled by it, A's minute 3 gives 24.2 and 23.8 ms, inside the re-measure's 22.3-25.5 ms; B's
+minute 3 gives 17.1 and 16.8 ms, its minute 1 12.1 and 11.9 ms, its fill-up 10.3 and 10.1 ms. The
+fix should bring Edgegap's minute-3 tick p50 from about 24 to about 17 ms, still above the
+15.625 ms budget. Rough: the local times carry the trace and the sampler (the untraced warm-ups'
+early fill-up ticked 4 339-4 401 us against 4 778-4 840 us traced, MEASURED), and the ratio holds
+only where those costs scale with the tick; Edgegap's minute 3 ran at 38-43 Hz, so its wall-clock
+minute holds fewer ticks of combat than the local one; and a 15-minute combat runs heavier than
+three minutes. Only an Edgegap measure of B settles it.
