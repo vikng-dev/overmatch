@@ -3,8 +3,9 @@
 //! stdout (a container's logs). `println!` rather than the log macros, so the line reaches stdout
 //! whatever `RUST_LOG` filters.
 //!
-//! The lever's value is a positive finite period in seconds. Empty or `on` selects
-//! [`DEFAULT_PERIOD`]; unset, `0`, `off` or `false` is off. Other values refuse startup.
+//! The lever's value is a positive finite period in seconds; unset is off, the one off form (every
+//! tracked runner leaves it unset for off: `scripts/edgegap/session.sh`, `scripts/perf/`). Any
+//! other value refuses startup.
 //!
 //! JSON fields:
 //! - `period_s`: the wall time the line covers, which can exceed the period by one frame;
@@ -57,9 +58,6 @@ use crate::tank::Tank;
 /// The lever: the period in seconds.
 const LEVER: &str = "OVERMATCH_SERVER_STATS_S";
 
-/// The period when the lever is present without a number.
-const DEFAULT_PERIOD: Duration = Duration::from_secs(10);
-
 /// The line's grep anchor.
 const PREFIX: &str = "server_stats";
 
@@ -107,20 +105,11 @@ fn period_from(value: Option<&str>) -> Result<Option<Duration>, LeverError> {
     let Some(value) = value.map(str::trim) else {
         return Ok(None);
     };
-    if ["0", "false", "off"]
-        .iter()
-        .any(|off| value.eq_ignore_ascii_case(off))
-    {
-        return Ok(None);
-    }
-    if value.is_empty() || value.eq_ignore_ascii_case("on") {
-        return Ok(Some(DEFAULT_PERIOD));
-    }
     let malformed = || {
         LeverError::invalid(
             LEVER,
             value,
-            "positive finite seconds representable as a nonzero Duration, on/empty, or 0/false/off",
+            "positive finite seconds representable as a nonzero Duration (unset is off)",
         )
     };
     let secs = value.parse::<f64>().map_err(|_| malformed())?;
@@ -421,21 +410,30 @@ fn resident_bytes() -> Option<u64> {
 mod tests {
     use super::*;
 
-    /// The lever's three readings. A mutant that turns an unset lever on prints a line from every
-    /// server; one that ignores the number pins every host to the default.
+    /// The lever's two readings: unset is off, a positive period is that period. A mutant that
+    /// turns an unset lever on prints a line from every server; one that reads a word or a zero as
+    /// off or as a default runs a host its operator configured otherwise, unseen.
     #[test]
-    fn the_lever_is_a_period_in_seconds_present_means_on() {
+    fn the_lever_is_a_period_in_seconds_and_unset_is_off() {
         assert_eq!(period_from(None).unwrap(), None);
-        assert_eq!(period_from(Some("0")).unwrap(), None);
-        assert_eq!(period_from(Some("false")).unwrap(), None);
         assert_eq!(
             period_from(Some("2.5")).unwrap(),
             Some(Duration::from_millis(2500))
         );
-        assert_eq!(period_from(Some("")).unwrap(), Some(DEFAULT_PERIOD));
-        assert_eq!(period_from(Some("on")).unwrap(), Some(DEFAULT_PERIOD));
-        for bad in ["5s", "-1", "NaN", "inf", "1e100", "0.000000000001"] {
-            assert!(period_from(Some(bad)).is_err(), "{bad}");
+        for bad in [
+            "",
+            "on",
+            "off",
+            "0",
+            "false",
+            "5s",
+            "-1",
+            "NaN",
+            "inf",
+            "1e100",
+            "0.000000000001",
+        ] {
+            assert!(period_from(Some(bad)).is_err(), "{bad:?}");
         }
     }
 

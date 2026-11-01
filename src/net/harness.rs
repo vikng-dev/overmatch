@@ -16,7 +16,7 @@
 //! | `OVERMATCH_BOT` | count; off, bare = `1` | Server: that many ownerless circling, firing bot tanks. |
 //! | `OVERMATCH_HARNESS` | path; off | The scripted session ([`Script`]). |
 //! | `OVERMATCH_SERVER_BIND` | IPv4; every interface | Server: bind the UDP socket to this address only. |
-//! | `OVERMATCH_SERVER_STATS_S` | seconds; off, bare = `10` | Server: one `server_stats {json}` line on stdout per period (`net::server_stats`). |
+//! | `OVERMATCH_SERVER_STATS_S` | positive seconds; unset is off | Server: one `server_stats {json}` line on stdout per period (`net::server_stats`). |
 //! | `SPIKE_BURST_MS` | milliseconds; `0` | Periodic receive stall: every burst-window packet delivers at the window's end. |
 //! | `SPIKE_BURST_PERIOD_TICKS` | ticks; `0` | Burst recurrence period; both burst values set activates the seeded conditioner. |
 //! | `SPIKE_COST_TRACE` | path; off | Role-qualified fixed-tick cost JSONL. |
