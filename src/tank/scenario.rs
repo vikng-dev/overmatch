@@ -1,3 +1,5 @@
+//! Offline driving scenarios and scripted inputs to the game's damage model, game state only.
+
 use std::f32::consts::FRAC_PI_2;
 
 use bevy::prelude::*;
@@ -21,6 +23,114 @@ pub fn sp_spawn_plugin(app: &mut App) {
     }
 }
 
+/// Refusals of the operator's offline scenario, reported before any scenario body is spawned.
+#[derive(Debug)]
+enum ScenarioFault {
+    Start(String),
+    Target(String),
+    ConflictingDemo,
+    MissingVolume(&'static str),
+}
+
+impl std::fmt::Display for ScenarioFault {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Start(value) => write!(f, "OVERMATCH_START={value:?}: want finite <x>,<z>[,<heading degrees>] or one of {:?}", START_SPOTS.map(|(name, ..)| name)),
+            Self::Target(value) => write!(f, "OVERMATCH_TARGET={value:?}: want ahead, fires or kills"),
+            Self::ConflictingDemo => f.write_str("OVERMATCH_TARGET conflicts with the capture plan's HullMarks demo; select ahead or unset the lever"),
+            Self::MissingVolume(role) => write!(f, "OVERMATCH_TARGET requires a declared {role} volume; select a compatible tank or another scenario"),
+        }
+    }
+}
+
+/// The game's damage model supplies the functional membership; node names only address it.
+#[derive(Clone, Copy)]
+enum AimRole {
+    Engine,
+    Ammunition,
+}
+
+impl AimRole {
+    fn matches(self, component: &crate::spec::ComponentSpec) -> bool {
+        match self {
+            Self::Engine => component.function == Some(crate::damage::FunctionRole::Engine),
+            Self::Ammunition => component.ammo,
+        }
+    }
+
+    fn name(self) -> &'static str {
+        match self {
+            Self::Engine => "Engine",
+            Self::Ammunition => "ammunition",
+        }
+    }
+}
+
+/// In the game's damage model, aim at each selected module's construction bounds in its current
+/// sim-part pose. The bake certifies the primitive buffers; the spawn builds the complete part map.
+fn aim_centres(
+    blueprint: &crate::bake::TankBlueprint,
+    parts: &super::SimParts,
+    poses: &Query<&GlobalTransform>,
+    role: AimRole,
+) -> Vec<Vec3> {
+    let mut volumes: Vec<_> = blueprint
+        .spec
+        .volumes
+        .iter()
+        .filter(|(_, volume)| {
+            volume
+                .component()
+                .is_some_and(|component| role.matches(component))
+        })
+        .collect();
+    volumes.sort_by(|a, b| a.0.cmp(b.0));
+    volumes
+        .into_iter()
+        .map(|(name, _)| {
+            let index = blueprint
+                .geometry
+                .by_name
+                .get(name)
+                .expect("the bake resolves every declared component volume");
+            let node = &blueprint.geometry.nodes[*index];
+            let (lo, hi) = node
+                .primitives
+                .iter()
+                .flat_map(|primitive| &primitive.positions)
+                .map(|position| Vec3::from(*position))
+                .fold(
+                    (Vec3::INFINITY, Vec3::NEG_INFINITY),
+                    |(lo, hi), position| (lo.min(position), hi.max(position)),
+                );
+            assert!(
+                lo.is_finite() && hi.is_finite(),
+                "the bake certifies finite nonempty component primitive buffers"
+            );
+            let entity = *parts
+                .0
+                .get(name)
+                .expect("spawn builds every declared volume into SimParts");
+            poses
+                .get(entity)
+                .expect("a spawned sim part keeps its GlobalTransform with its tank")
+                .transform_point((lo + hi) * 0.5)
+        })
+        .collect()
+}
+
+fn require_aim_role(spec: &crate::spec::TankSpec, role: AimRole) -> Result<(), ScenarioFault> {
+    if spec.volumes.values().any(|volume| {
+        volume
+            .component()
+            .is_some_and(|component| role.matches(component))
+    }) {
+        Ok(())
+    } else {
+        Err(ScenarioFault::MissingVolume(role.name()))
+    }
+}
+
 /// Named start spots on the shipped map, fixture data for the owner's hand-driving of the track
 /// prints (cosmetic terrain marks): `(name, x, z, heading°)`, each a stretch where one ground type's
 /// pack dominates the painted mask for 20–30 m along the heading (read off `terrain_masks.png`).
@@ -35,18 +145,14 @@ const START_SPOTS: [(&str, f32, f32, f32); 3] = [
 /// `heading°` from `+Z` toward `+X`, rather than at the duel. World XZ and radians out. Unset is
 /// every normal run; a dev lever on the offline path only, like [`target_scenario`].
 ///
-/// # Panics
-///
-/// When the variable is set to anything [`parse_start`] refuses: a capture or a measurement that
+/// `scripts/perf/run-forest-cost.sh` sets this lever.
+/// Refuses startup when the variable is set to anything [`parse_start`] refuses: a capture or a measurement that
 /// asked for a spot must never frame the duel as if it were that spot.
 pub(crate) fn start_spot() -> Option<(Vec2, f32)> {
     let spec = crate::env_value("OVERMATCH_START").unwrap_or_else(crate::refuse_start)?;
-    let (at, heading) = parse_start(&spec).unwrap_or_else(|| {
-        panic!(
-            "OVERMATCH_START={spec:?}: want <x>,<z>[,<heading°>] (finite numbers) or one of {:?}",
-            START_SPOTS.map(|(name, ..)| name)
-        )
-    });
+    let (at, heading) = parse_start(&spec)
+        .ok_or_else(|| ScenarioFault::Start(spec.clone()))
+        .unwrap_or_else(crate::refuse_start);
     info!("OVERMATCH_START: the player's tank spawns at {at} heading {heading}°");
     Some((at, heading.to_radians()))
 }
@@ -99,25 +205,23 @@ pub(crate) enum TargetScenario {
 /// hull-marks demo, whose strikes need the target parked ahead (`hull_marks::demo`), so the plan
 /// is that capture's one input; `None` when neither asks.
 ///
-/// # Panics
-///
-/// When the variable names no scenario, or names one other than `ahead` under the demo.
+/// `scripts/perf/run-pencam-cost.sh` sets this lever. Unknown or conflicting selections refuse startup.
 pub(crate) fn target_scenario() -> Option<TargetScenario> {
     let named = crate::env_value("OVERMATCH_TARGET")
         .unwrap_or_else(crate::refuse_start)
         .map(|spec| {
             TargetScenario::named(&spec)
-                .unwrap_or_else(|| panic!("OVERMATCH_TARGET={spec:?}: want ahead, fires or kills"))
+                .ok_or_else(|| ScenarioFault::Target(spec.clone()))
+                .unwrap_or_else(crate::refuse_start)
         });
     let demo = crate::dev_capture::plan().and_then(|plan| plan.scene.demo)
         == Some(crate::dev_capture::plan::Demo::HullMarks);
     if !demo {
         return named;
     }
-    assert!(
-        named.is_none_or(|scenario| scenario == TargetScenario::Ahead),
-        "OVERMATCH_TARGET={named:?}: the capture plan's HullMarks demo parks the target ahead"
-    );
+    if named.is_some_and(|scenario| scenario != TargetScenario::Ahead) {
+        return crate::refuse_start(ScenarioFault::ConflictingDemo);
+    }
     Some(TargetScenario::Ahead)
 }
 
@@ -147,12 +251,20 @@ fn aim_camera_at_target(
     player: Query<(), (With<Tank>, With<Controlled>)>,
     target: Query<&GlobalTransform, (With<Tank>, Without<Controlled>)>,
 ) {
-    let (Ok(mut transform), Some(target)) = (camera.single_mut(), target.iter().next()) else {
-        return;
-    };
-    if player.is_empty() {
+    // Before spawn there is no possession or target, and the camera may not be declared yet.
+    if super::controlled_one(player.single()).is_none() {
         return;
     }
+    let Some(target) = target.iter().next() else {
+        return;
+    };
+    let mut transform = match camera.single_mut() {
+        Ok(camera) => camera,
+        Err(bevy::ecs::query::QuerySingleError::NoEntities(_)) => return,
+        Err(error @ bevy::ecs::query::QuerySingleError::MultipleEntities(_)) => {
+            panic!("the offline root declares one PlayerView: {error}")
+        }
+    };
     let since = *since.get_or_insert(time.elapsed_secs());
     if time.elapsed_secs() - since > TARGET_AIM_S {
         return;
@@ -168,7 +280,7 @@ const TARGET_AIM_RISE_M: f32 = 1.2;
 /// Dev-only, offline: [`TargetScenario::Fires`] turns the player's tank broadside to the parked
 /// target and has the target fire its main gun into the player's flank on [`TARGET_FIRE_AT_S`],
 /// for captures of the player's own tank struck (the pen cam's victim glass). From spawn the target
-/// lays its gun on the player's hull at [`TARGET_FIRE_AIM_LOCAL_M`]; at each scheduled time it
+/// lays its gun on the player's declared Engine volume; at each scheduled time it
 /// pulls the trigger once.
 ///
 /// [`TargetScenario::Kills`] sets the same broadside, but the target lays its gun on the player's
@@ -208,12 +320,6 @@ pub fn offline_target_fires_plugin(app: &mut App) {
 /// reload apart and more).
 const TARGET_FIRE_AT_S: [f32; 3] = [25.0, 40.0, 55.0];
 
-/// Where on the player's hull the target lays its gun, in the hull's frame, m: fixture data,
-/// [`TARGET_AIM_RISE_M`] up and toward the rear (+Z, the hull faces −Z), over the engine bay
-/// rather than the fighting compartment, so a round costs the tank a component without
-/// knocking it out at once.
-const TARGET_FIRE_AIM_LOCAL_M: Vec3 = Vec3::new(0.0, TARGET_AIM_RISE_M, 2.2);
-
 /// How long each scheduled trigger pull stays latched, s: shorter than any reload, so it fires one
 /// round.
 const TARGET_FIRE_LATCH_S: f32 = 0.5;
@@ -229,24 +335,20 @@ const TARGET_KILL_EVERY_S: f32 = 10.0;
 /// player's tank is knocked out.
 fn target_kills(
     time: Res<Time<Real>>,
+    blueprint: Res<crate::bake::TankBlueprint>,
     player: Query<
-        (
-            &GlobalTransform,
-            Option<&crate::damage::TankVolumes>,
-            Has<crate::damage::TankKnockedOut>,
-        ),
+        (&super::SimParts, Has<crate::damage::TankKnockedOut>),
         (With<Tank>, With<Controlled>),
     >,
-    ammo: Query<(), With<crate::damage::Ammo>>,
-    children: Query<&Children>,
-    bounds: Query<&avian3d::prelude::ColliderAabb>,
+    poses: Query<&GlobalTransform>,
     mut targets: Query<
         (&GlobalTransform, &mut crate::command::TankCommand),
         (With<Tank>, Without<Controlled>),
     >,
     mut logged: Local<bool>,
 ) {
-    let Ok((player, volumes, knocked_out)) = player.single() else {
+    // No controlled tank before spawn or between possessions; two controlled tanks are a bug.
+    let Some((parts, knocked_out)) = super::controlled_one(player.single()) else {
         return;
     };
     let t = time.elapsed_secs();
@@ -257,22 +359,7 @@ fn target_kills(
         }
         return;
     }
-    let centres: Vec<Vec3> = volumes
-        .into_iter()
-        .flat_map(|volumes| volumes.iter())
-        .filter(|&volume| ammo.contains(volume))
-        .filter_map(|volume| {
-            let (min, max) = std::iter::once(volume)
-                .chain(children.iter_descendants(volume))
-                .filter_map(|entity| bounds.get(entity).ok())
-                .filter(|aabb| aabb.min.cmple(aabb.max).all())
-                .fold(None, |union: Option<(Vec3, Vec3)>, aabb| {
-                    let (min, max) = (aabb.min, aabb.max);
-                    Some(union.map_or((min, max), |(a, b)| (a.min(min), b.max(max))))
-                })?;
-            Some((min + max) * 0.5)
-        })
-        .collect();
+    let centres = aim_centres(&blueprint, parts, &poses, AimRole::Ammunition);
     let since = t - TARGET_KILL_FROM_S;
     let pull = since >= 0.0 && since % TARGET_KILL_EVERY_S < TARGET_FIRE_LATCH_S;
     for (target, mut command) in &mut targets {
@@ -284,7 +371,7 @@ fn target_kills(
                 a.distance_squared(from)
                     .total_cmp(&b.distance_squared(from))
             })
-            .unwrap_or_else(|| player.transform_point(TARGET_FIRE_AIM_LOCAL_M));
+            .expect("scenario admission requires an ammunition volume");
         command.aim = Some(crate::command::AimIntent::World(at));
         command.fire_primary |= pull;
     }
@@ -292,19 +379,34 @@ fn target_kills(
 
 fn target_fires(
     time: Res<Time<Real>>,
-    player: Query<&GlobalTransform, (With<Tank>, With<Controlled>)>,
-    mut targets: Query<&mut crate::command::TankCommand, (With<Tank>, Without<Controlled>)>,
+    blueprint: Res<crate::bake::TankBlueprint>,
+    player: Query<&super::SimParts, (With<Tank>, With<Controlled>)>,
+    poses: Query<&GlobalTransform>,
+    mut targets: Query<
+        (&GlobalTransform, &mut crate::command::TankCommand),
+        (With<Tank>, Without<Controlled>),
+    >,
 ) {
-    let Ok(player) = player.single() else {
+    // The controlled sim body is absent before spawn; possession remains unique.
+    let Some(parts) = super::controlled_one(player.single()) else {
         return;
     };
+    let centres = aim_centres(&blueprint, parts, &poses, AimRole::Engine);
     let t = time.elapsed_secs();
     let pull = TARGET_FIRE_AT_S
         .iter()
         .any(|&at| (at..at + TARGET_FIRE_LATCH_S).contains(&t));
-    let aim = crate::command::AimIntent::World(player.transform_point(TARGET_FIRE_AIM_LOCAL_M));
-    for mut command in &mut targets {
-        command.aim = Some(aim);
+    for (target, mut command) in &mut targets {
+        let from = target.translation();
+        let at = centres
+            .iter()
+            .copied()
+            .min_by(|a, b| {
+                a.distance_squared(from)
+                    .total_cmp(&b.distance_squared(from))
+            })
+            .expect("scenario admission requires an Engine volume");
+        command.aim = Some(crate::command::AimIntent::World(at));
         command.fire_primary |= pull;
     }
 }
@@ -365,6 +467,7 @@ const PROBE_FAR_NEAR_Z: f32 = 160.0;
 ///
 /// A dev/profiling lever on the offline path only, like [`spawn_probe_tanks`]'s own count: unset is
 /// every normal run, and nothing outside the probe grid consults it.
+// `scripts/perf/run-frame-sweep.sh` selects this placement.
 pub(crate) fn probe_far() -> bool {
     crate::env_flag("OVERMATCH_PROBE_FAR", false).unwrap_or_else(crate::refuse_start)
 }
@@ -408,7 +511,7 @@ pub(crate) fn probe_spawn_xz(far: bool, index: usize) -> Vec2 {
 fn spawn_tank_when_loaded(
     mut commands: Commands,
     asset_server: Res<AssetServer>,
-    pending: Option<Res<PendingTankAssets>>,
+    pending: Res<PendingTankAssets>,
     source: TankSimSource,
     height: Option<Res<crate::terrain_grid::HeightGrid>>,
     certificate: Res<crate::geometry_lod::TankCertificate>,
@@ -416,9 +519,6 @@ fn spawn_tank_when_loaded(
     manifest: Option<Res<crate::map::MapManifest>>,
     mut next: ResMut<NextState<AppState>>,
 ) {
-    let Some(pending) = pending else {
-        return;
-    };
     // `loaded` is where a FAILED load aborts, for every composition at once — see it.
     if !pending.loaded(&asset_server) {
         return;
@@ -462,6 +562,12 @@ fn spawn_tank_when_loaded(
         return;
     }
     let target = target_scenario();
+    match target {
+        Some(TargetScenario::Fires) => require_aim_role(content.spec(), AimRole::Engine),
+        Some(TargetScenario::Kills) => require_aim_role(content.spec(), AimRole::Ammunition),
+        Some(TargetScenario::Ahead) | None => Ok(()),
+    }
+    .unwrap_or_else(crate::refuse_start);
     let far = probe_far() || target.is_some();
     let duel = duel_spawn_xz(far);
     let (a_turn, b_turn) = match target {
@@ -573,6 +679,7 @@ fn spawn_probe_tanks(
     else {
         return;
     };
+    // The frame sweep, ablation, night battery, shadow and terrain pricing scripts set this lever.
     let extra = total.saturating_sub(DUEL_SPAWN_XZ.len());
     if extra == 0 {
         return;
@@ -715,14 +822,18 @@ fn swap_controlled_tank(
     if !keys.just_pressed(KeyCode::Tab) {
         return;
     }
-    let Ok(current) = controlled.single() else {
+    // No possession before spawn; multiple controlled tanks violate the possession contract.
+    let Some(current) = super::controlled_one(controlled.single()) else {
         return;
     };
     let all: Vec<Entity> = tanks.iter().collect();
     if all.len() < 2 {
         return;
     }
-    let idx = all.iter().position(|&e| e == current).unwrap_or(0);
+    let idx = all
+        .iter()
+        .position(|&e| e == current)
+        .expect("the controlled tank belongs to this same live Tank query");
     let next = all[(idx + 1) % all.len()];
     if next == current {
         return;
@@ -738,6 +849,78 @@ mod target_scenario_tests {
     use bevy::math::Vec2;
 
     use super::{START_SPOTS, TargetScenario, parse_start};
+
+    /// In the game's damage model, a scenario aim follows the selected functional volume's
+    /// pose, independently of the hull origin. A hull-offset mutant would leave the second aim
+    /// behind when the component and observing opponent move together.
+    #[test]
+    fn the_scripted_aim_follows_functional_volume_pose() {
+        use super::super::*;
+        use super::{AimRole, target_fires};
+        use bevy::ecs::system::RunSystemOnce;
+        let mut app = App::new();
+        app.add_plugins(crate::bake::plugin);
+        app.world_mut().run_schedule(Startup);
+        app.insert_resource(Time::<Real>::default());
+        let names: Vec<_> = app
+            .world()
+            .resource::<crate::bake::TankBlueprint>()
+            .spec
+            .volumes
+            .iter()
+            .filter(|(_, volume)| {
+                volume
+                    .component()
+                    .is_some_and(|component| AimRole::Engine.matches(component))
+            })
+            .map(|(name, _)| name.clone())
+            .collect();
+        let mut parts = std::collections::HashMap::new();
+        let mut engines = Vec::new();
+        for name in names {
+            let entity = app.world_mut().spawn(GlobalTransform::IDENTITY).id();
+            parts.insert(name, entity);
+            engines.push(entity);
+        }
+        assert!(!engines.is_empty(), "the fixture declares an Engine volume");
+        app.world_mut().spawn((
+            Tank,
+            Controlled,
+            crate::tank::SimParts(parts),
+            GlobalTransform::IDENTITY,
+        ));
+        let observer = app
+            .world_mut()
+            .spawn((
+                Tank,
+                GlobalTransform::from(Transform::from_xyz(20.0, 0.0, 0.0)),
+            ))
+            .id();
+        let aim = |world: &World| match world
+            .get::<crate::command::TankCommand>(observer)
+            .unwrap()
+            .aim
+            .unwrap()
+        {
+            crate::command::AimIntent::World(at) => at,
+            _ => panic!("the scripted aim is in world space"),
+        };
+        app.world_mut().run_system_once(target_fires).unwrap();
+        let first = aim(app.world());
+        let delta = Vec3::new(3.0, 1.0, -2.0); // Fixture displacement (m).
+        for entity in engines {
+            app.world_mut()
+                .entity_mut(entity)
+                .insert(GlobalTransform::from(Transform::from_translation(delta)));
+        }
+        app.world_mut()
+            .entity_mut(observer)
+            .insert(GlobalTransform::from(Transform::from_translation(
+                Vec3::new(20.0, 0.0, 0.0) + delta,
+            )));
+        app.world_mut().run_system_once(target_fires).unwrap();
+        assert!((aim(app.world()) - first - delta).length() < 1e-5);
+    }
 
     /// `OVERMATCH_START` READS A NAMED SPOT OR TWO OR THREE FINITE NUMBERS, AND NOTHING ELSE: the
     /// forest cost runs and the house captures set it, and a typo that fell back to the duel would
