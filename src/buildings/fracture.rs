@@ -4311,6 +4311,145 @@ mod tests {
         }
     }
 
+    /// A bare fixture charge of `mass` kg (ASSUMED fixture core: 1650 kg/m³, `K` = 2400 m/s, the
+    /// TNT convention's energy), its radius the equal-volume sphere's and its products at the
+    /// burst law's bare speed `K √2`.
+    fn bare_charge(mass: f32) -> Blast {
+        let radius = (3.0 * mass / (4.0 * PI * 1650.0)).cbrt();
+        let speed = 2400.0 * std::f32::consts::SQRT_2;
+        Blast::of(
+            mass * TNT_ENERGY,
+            radius,
+            crate::ballistics::burst::products_momentum(mass, speed),
+        )
+    }
+
+    /// The free-air fit's normally reflected impulse (Pa·s) `distance` m from `blast`.
+    fn fit_reflected(blast: &Blast, distance: f32) -> f32 {
+        let scale = (blast.charge / SURFACE_BURST_FACTOR).cbrt();
+        scale * REFLECTED_IMPULSE.at(blast.distance(distance) / scale)
+    }
+
+    /// Where `blast`'s products floor meets the fit at normal incidence, m: the least distance
+    /// at which the floor no longer lies above it, bisected between the charge and the reach.
+    fn products_crossing(blast: &Blast) -> f32 {
+        let floored = |r: f32| blast.products_floor(r, fit_reflected(blast, r)).is_some();
+        let (mut lo, mut hi) = (blast.radius, blast.reach());
+        assert!(
+            floored(lo) && !floored(hi),
+            "the fixture's floor crosses the fit"
+        );
+        for _ in 0..64 {
+            let mid = 0.5 * (lo + hi);
+            if floored(mid) { lo = mid } else { hi = mid }
+        }
+        hi
+    }
+
+    /// THE PRODUCTS FLOOR MEETS THE FIT CONTINUOUSLY AND SCALES AS IT DOES (the game's
+    /// environment blast field, near contact). Across the crossing the normally reflected
+    /// impulse and peak move by no more than the distance does, and the crossing's scaled
+    /// distance is one number for every charge of a core (Hopkinson-Cranz: the products'
+    /// momentum and the fit both scale with the charge). Law 1's crater and Law 3's blow read
+    /// this field: a floor that steps on at a fixed `Z` (a clamp at a constant product
+    /// pressure), or a products term that falls faster than `R⁻²`, fails here. ASSUMED
+    /// fixture charges; the crossing printed is the fixture core's, DERIVED by the code.
+    #[test]
+    fn the_products_floor_meets_the_fit_continuously_at_one_scaled_distance() {
+        let mut scaled = Vec::new();
+        for mass in [0.5_f32, 5.0, 50.0] {
+            let blast = bare_charge(mass);
+            let crossing = products_crossing(&blast);
+            let (inside, outside) = (crossing * (1.0 - 1e-3), crossing * (1.0 + 1e-3));
+            for (near, far) in [
+                (
+                    blast.specific_impulse(inside, 1.0),
+                    blast.specific_impulse(outside, 1.0),
+                ),
+                (
+                    blast.peak_pressure(inside, 1.0),
+                    blast.peak_pressure(outside, 1.0),
+                ),
+            ] {
+                assert!(
+                    near >= far && (near / far - 1.0) < 1e-2,
+                    "{mass} kg: the field jumps at the crossing, {near} against {far}"
+                );
+            }
+            let at_surface =
+                blast.specific_impulse(blast.radius, 1.0) / fit_reflected(&blast, blast.radius);
+            let z = crossing / (blast.charge / SURFACE_BURST_FACTOR).cbrt();
+            println!(
+                "{mass} kg bare: crossing Z {z:.3} m/kg^(1/3), {at_surface:.2} x the fit at its surface"
+            );
+            scaled.push(z);
+        }
+        for z in &scaled {
+            assert!((z / scaled[0] - 1.0).abs() < 1e-3, "{scaled:?}");
+        }
+    }
+
+    /// THE PRODUCTS FLOOR NEVER LOWERS THE FIT (the game's environment blast field). At every
+    /// distance from the charge to the reach and every incidence, the impulse and the peak lie
+    /// at or above the free-air fit's. The near-contact crater and push rely on the floor
+    /// only ever adding what the fit under-reads; a branch taken as a minimum, or a peak
+    /// scaled down where the products win, fails here. ASSUMED fixture charges.
+    #[test]
+    fn the_products_floor_never_lowers_the_fit() {
+        for mass in [0.5_f32, 5.0, 50.0] {
+            let blast = bare_charge(mass);
+            let fit = Blast {
+                products: FIT_ONLY_PRODUCTS,
+                ..blast
+            };
+            let steps = 400;
+            for k in 0..=steps {
+                let r = blast.radius * (blast.reach() / blast.radius).powf(k as f32 / steps as f32);
+                for cos in [1.0_f32, 0.7, 0.3, 0.0] {
+                    assert!(blast.specific_impulse(r, cos) >= fit.specific_impulse(r, cos));
+                    assert!(blast.peak_pressure(r, cos) >= fit.peak_pressure(r, cos));
+                }
+            }
+            assert!(
+                blast.specific_impulse(blast.radius, 1.0) > fit.specific_impulse(blast.radius, 1.0),
+                "{mass} kg: the fixture's floor acts at the charge"
+            );
+        }
+    }
+
+    /// OUTSIDE ITS CROSSING THE FIELD IS THE FIT, BIT FOR BIT (the game's environment blast
+    /// field). Past the crossing the impulse and peak at every incidence are the ConWep blend
+    /// of Swisdak's fits exactly, the expression the far field was before the floor existed.
+    /// Every standoff outcome (the far topple range, the scab fixture numbers, the reach)
+    /// relies on it; a floor added to the fit rather than taken over it, or one reaching past
+    /// its crossing, fails here. ASSUMED fixture charges.
+    #[test]
+    fn outside_its_crossing_the_field_is_the_fit_bit_for_bit() {
+        for mass in [0.5_f32, 5.0, 50.0] {
+            let blast = bare_charge(mass);
+            let scale = (blast.charge / SURFACE_BURST_FACTOR).cbrt();
+            let crossing = products_crossing(&blast);
+            let steps = 200;
+            for k in 1..=steps {
+                let r = crossing * (blast.reach() / crossing).powf(k as f32 / steps as f32);
+                let z = blast.distance(r) / scale;
+                for cos in [1.0_f32, 0.7, 0.3, 0.0] {
+                    let impulse = scale
+                        * (REFLECTED_IMPULSE.at(z) * cos * cos
+                            + INCIDENT_IMPULSE.at(z) * (1.0 - cos) * (1.0 - cos));
+                    let peak = Blast::reflected_pressure(z) * cos * cos
+                        + INCIDENT_PRESSURE.at(z) * 1e3 * (1.0 - cos) * (1.0 - cos);
+                    assert_eq!(
+                        blast.specific_impulse(r, cos).to_bits(),
+                        impulse.to_bits(),
+                        "{mass} kg at {r} m"
+                    );
+                    assert_eq!(blast.peak_pressure(r, cos).to_bits(), peak.to_bits());
+                }
+            }
+        }
+    }
+
     /// A CHARGE'S RADIUS FLOORS EVERY POINT-SOURCE FIELD TERM (the game's environment
     /// destruction model). The contact adapter relies on a finite loaded patch even when the
     /// geometric stop lies at the source. A floor on pressure alone leaves zero impulse and
