@@ -282,62 +282,87 @@ impl Surface {
     /// intervals alone can overlap at an empty corner, or pick the remote end of a long piece
     /// outside an angled link. Clipping the actual boundary supplies the missing constraints.
     fn clipped_extent(&self, slab: &Slab) -> Option<(Vec3, Vec3)> {
-        let mut lo = Vec3::INFINITY;
-        let mut hi = Vec3::NEG_INFINITY;
-        let mut area = false;
-        for triangle in &self.triangles {
-            let mut polygon: Vec<_> = triangle
-                .iter()
-                .map(|p| {
-                    let r = *p - slab.origin;
-                    Vec3::new(r.dot(slab.axis), r.dot(slab.lat), r.dot(slab.out))
-                })
-                .collect();
-            for (axis, sign, bound) in [
-                (0, 1.0, 0.0),
-                (0, -1.0, -slab.len),
-                (1, 1.0, slab.lateral.0),
-                (1, -1.0, -slab.lateral.1),
-            ] {
-                polygon = clip_polygon(&polygon, axis, sign, bound);
-            }
-            if !polygon.is_empty() {
-                let mut projected_area = 0.0;
-                for i in 0..polygon.len() {
-                    let a = polygon[i];
-                    let b = polygon[(i + 1) % polygon.len()];
-                    projected_area += a.x * b.y - a.y * b.x;
-                    lo = lo.min(a);
-                    hi = hi.max(a);
-                }
-                area |= projected_area.abs() > 0.0;
-            }
-        }
-        area.then_some((lo, hi))
+        footprint_extent(&self.triangles, slab)
     }
 }
 
-/// Sutherland-Hodgman clipping to one footprint half-plane, in slab coordinates. Boundary
-/// points stay in the polygon; a mere touching edge has no projected support area.
-fn clip_polygon(points: &[Vec3], axis: usize, sign: f32, bound: f32) -> Vec<Vec3> {
-    let mut out = Vec::new();
-    if points.is_empty() {
-        return out;
+/// The extrema, in `slab`'s coordinates, of the convex boundary `triangles` clipped to the
+/// footprint's four side planes; `None` when no clipped triangle keeps a projected support area.
+fn footprint_extent(triangles: &[[Vec3; 3]], slab: &Slab) -> Option<(Vec3, Vec3)> {
+    let mut lo = Vec3::INFINITY;
+    let mut hi = Vec3::NEG_INFINITY;
+    let mut area = false;
+    let mut buffers = [[Vec3::ZERO; CLIP_CAPACITY]; 2];
+    for triangle in triangles {
+        let [mut front, mut back] = buffers.each_mut();
+        for (slot, p) in front.iter_mut().zip(triangle) {
+            let r = *p - slab.origin;
+            *slot = Vec3::new(r.dot(slab.axis), r.dot(slab.lat), r.dot(slab.out));
+        }
+        let mut len = triangle.len();
+        for (axis, sign, bound) in [
+            (0, 1.0, 0.0),
+            (0, -1.0, -slab.len),
+            (1, 1.0, slab.lateral.0),
+            (1, -1.0, -slab.lateral.1),
+        ] {
+            len = clip_polygon(&front[..len], axis, sign, bound, back);
+            std::mem::swap(&mut front, &mut back);
+        }
+        let polygon = &front[..len];
+        if !polygon.is_empty() {
+            let mut projected_area = 0.0;
+            for i in 0..polygon.len() {
+                let a = polygon[i];
+                let b = polygon[(i + 1) % polygon.len()];
+                projected_area += a.x * b.y - a.y * b.x;
+                lo = lo.min(a);
+                hi = hi.max(a);
+            }
+            area |= projected_area.abs() > 0.0;
+        }
     }
+    area.then_some((lo, hi))
+}
+
+/// How many points a triangle's clipped polygon can hold. A [`clip_polygon`] pass emits at most
+/// two points per input point, so the four footprint passes over a triangle stay within
+/// `3 * 2^4` (DERIVED). The convex case gains at most one point per pass; the bound also holds
+/// for a polygon f32 rounding has made non-convex.
+const CLIP_CAPACITY: usize = 48;
+
+/// Sutherland-Hodgman clipping to one footprint half-plane, in slab coordinates, into `out`;
+/// returns the clipped polygon's length. Boundary points stay in the polygon; a mere touching
+/// edge has no projected support area. The drive step clips every boundary triangle of every
+/// piece reaching each link's slab, so the polygons live in fixed buffers, never on the heap.
+fn clip_polygon(
+    points: &[Vec3],
+    axis: usize,
+    sign: f32,
+    bound: f32,
+    out: &mut [Vec3; CLIP_CAPACITY],
+) -> usize {
+    // An earlier pass may have clipped the whole triangle away.
+    if points.is_empty() {
+        return 0;
+    }
+    let mut len = 0;
     let mut a = points[points.len() - 1];
     let mut da = sign * a[axis] - bound;
     for &b in points {
         let db = sign * b[axis] - bound;
         if (da < 0.0 && db >= 0.0) || (da >= 0.0 && db < 0.0) {
-            out.push(a + (b - a) * (da / (da - db)));
+            out[len] = a + (b - a) * (da / (da - db));
+            len += 1;
         }
         if db >= 0.0 {
-            out.push(b);
+            out[len] = b;
+            len += 1;
         }
         a = b;
         da = db;
     }
-    out
+    len
 }
 
 /// One link's slab: the volume its field probes sweep, solid across the shoe (module doc). World
@@ -1335,6 +1360,137 @@ mod tests {
                 );
             })
             .unwrap();
+    }
+
+    /// THE FIXED-BUFFER CLIP READS EVERY FOOTPRINT EXTENT BIT FOR BIT AS A HEAP CLIP DOES. The
+    /// drive step clips each boundary triangle of every piece reaching a link's slab, and the
+    /// support depth, the contact patches and the determinism trace read the extent it returns.
+    /// The reference is the allocating Sutherland-Hodgman pass the buffers replace: a buffer
+    /// pass that read the wrong buffer, kept a stale length or dropped a crossing point differs.
+    /// FIXTURE DATA: seeded triangles about yawed, tilted slabs, including vertices exactly on
+    /// the footprint planes, zero-area slivers, and a 12-gon frustum hull's whole boundary.
+    #[test]
+    fn the_fixed_buffer_clip_matches_a_heap_clip_bit_for_bit() {
+        fn heap_clip(points: &[Vec3], axis: usize, sign: f32, bound: f32) -> Vec<Vec3> {
+            let mut out = Vec::new();
+            if points.is_empty() {
+                return out;
+            }
+            let mut a = points[points.len() - 1];
+            let mut da = sign * a[axis] - bound;
+            for &b in points {
+                let db = sign * b[axis] - bound;
+                if (da < 0.0 && db >= 0.0) || (da >= 0.0 && db < 0.0) {
+                    out.push(a + (b - a) * (da / (da - db)));
+                }
+                if db >= 0.0 {
+                    out.push(b);
+                }
+                a = b;
+                da = db;
+            }
+            out
+        }
+        fn heap_extent(triangles: &[[Vec3; 3]], slab: &Slab) -> Option<(Vec3, Vec3)> {
+            let mut lo = Vec3::INFINITY;
+            let mut hi = Vec3::NEG_INFINITY;
+            let mut area = false;
+            for triangle in triangles {
+                let mut polygon: Vec<_> = triangle
+                    .iter()
+                    .map(|p| {
+                        let r = *p - slab.origin;
+                        Vec3::new(r.dot(slab.axis), r.dot(slab.lat), r.dot(slab.out))
+                    })
+                    .collect();
+                for (axis, sign, bound) in [
+                    (0, 1.0, 0.0),
+                    (0, -1.0, -slab.len),
+                    (1, 1.0, slab.lateral.0),
+                    (1, -1.0, -slab.lateral.1),
+                ] {
+                    polygon = heap_clip(&polygon, axis, sign, bound);
+                }
+                if !polygon.is_empty() {
+                    let mut projected_area = 0.0;
+                    for i in 0..polygon.len() {
+                        let a = polygon[i];
+                        let b = polygon[(i + 1) % polygon.len()];
+                        projected_area += a.x * b.y - a.y * b.x;
+                        lo = lo.min(a);
+                        hi = hi.max(a);
+                    }
+                    area |= projected_area.abs() > 0.0;
+                }
+            }
+            area.then_some((lo, hi))
+        }
+        let bits = |extent: Option<(Vec3, Vec3)>| {
+            extent.map(|(lo, hi)| [lo.to_array(), hi.to_array()].map(|v| v.map(f32::to_bits)))
+        };
+        let ring = (0..12).flat_map(|k| {
+            let (z, x) = (k as f32 * std::f32::consts::TAU / 12.0).sin_cos();
+            [
+                Vec3::new(0.3 * x, 0.0, 0.3 * z),
+                Vec3::new(0.25 * x, 1.5, 0.25 * z),
+            ]
+        });
+        let frustum = Surface::triangles(
+            &Collider::convex_hull(ring.collect()).expect("two rings at distinct heights"),
+            Vec3::new(0.05, -0.2, 0.0),
+            Quat::from_rotation_z(1.4),
+        );
+        let mut rng = Lcg(0xc11b);
+        let (mut some, mut none) = (0, 0);
+        for case in 0..3000 {
+            let frame = Quat::from_euler(
+                EulerRot::YXZ,
+                rng.range(-3.0, 3.0),
+                rng.range(-1.0, 1.0),
+                rng.range(-1.0, 1.0),
+            );
+            let slab = Slab {
+                origin: rng.vec(0.2),
+                axis: frame * Vec3::Z,
+                lat: frame * Vec3::X,
+                out: frame * Vec3::NEG_Y,
+                len: rng.range(0.05, 0.3),
+                lateral: (rng.range(-0.4, -0.1), rng.range(0.1, 0.4)),
+                face: 0.025,
+                reach: 0.5,
+                travel: 0.1,
+            };
+            let on_plane = slab.origin + slab.axis * slab.len + slab.lat * slab.lateral.1;
+            let mut triangles: Vec<[Vec3; 3]> = (0..8)
+                .map(|_| [rng.vec(0.5), rng.vec(0.5), rng.vec(0.5)])
+                .collect();
+            triangles.push([on_plane, slab.origin, rng.vec(0.5)]);
+            triangles.push([slab.origin, on_plane, (slab.origin + on_plane) / 2.0]);
+            if case % 10 == 0 {
+                triangles.extend_from_slice(&frustum);
+            }
+            if case % 2 == 1 {
+                // Beside the shoe: every triangle clips away.
+                for p in triangles.iter_mut().flatten() {
+                    *p += slab.lat * 3.0;
+                }
+            }
+            let fixed = footprint_extent(&triangles, &slab);
+            assert_eq!(
+                bits(fixed),
+                bits(heap_extent(&triangles, &slab)),
+                "case {case}"
+            );
+            if fixed.is_some() {
+                some += 1;
+            } else {
+                none += 1;
+            }
+        }
+        assert!(
+            some > 100 && none > 100,
+            "both outcomes exercised: {some} / {none}"
+        );
     }
 
     /// A LONG PIECE'S REMOTE VERTEX CANNOT COMPRESS AN ANGLED LINK. The hull relies on depth
