@@ -1225,11 +1225,16 @@ pub struct FireShell {
 }
 
 impl FireShell {
-    /// `round` fired from `origin` down `direction` at its own muzzle speed, with the bodies and the
-    /// crew line rate its data states, locally authored with no catch-up: the one mapping from a
-    /// round's data to a shell. A reconstructed shell overrides the origin kind and the catch-up.
+    /// The game's damage model: physical `birth` and visual muzzle `origin` are shot facts.
+    /// Maps `round` data to a locally authored shell at its own muzzle speed, with no catch-up.
+    /// A reconstructed shell overrides the origin kind and catch-up after supplying both facts.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "the shot states both physical birth and visual muzzle"
+    )]
     pub(crate) fn of_round(
         round: &crate::rounds::Round,
+        birth: Vec3,
         origin: Vec3,
         direction: Dir3,
         mechanism: crate::spec::FireMechanism,
@@ -1238,7 +1243,7 @@ impl FireShell {
         shot: Option<ShotId>,
     ) -> Self {
         Self {
-            birth: origin,
+            birth,
             origin,
             direction,
             speed: round.muzzle_speed,
@@ -4830,6 +4835,7 @@ mod march_tests {
             app.update();
             app.world_mut().trigger(FireShell::of_round(
                 &round,
+                Vec3::new(0.0, 2.0, 2.0),
                 Vec3::new(0.0, 2.0, 2.0),
                 Dir3::NEG_Z,
                 crate::spec::FireMechanism::Single,

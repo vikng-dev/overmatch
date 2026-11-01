@@ -277,6 +277,7 @@ mod tests {
             let fire = crate::ballistics::FireShell::of_round(
                 &round,
                 Vec3::ZERO,
+                Vec3::ZERO,
                 Dir3::X,
                 crate::spec::FireMechanism::Single,
                 false,

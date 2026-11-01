@@ -956,6 +956,7 @@ fn fire_burst(
         commands.trigger(FireShell::of_round(
             &entry.round,
             camera.translation,
+            camera.translation,
             Dir3::new(direction).unwrap_or(Dir3::NEG_Z),
             entry.mechanism,
             true,

@@ -367,8 +367,18 @@ fn fire(
         let fused_echo = replica.is_some() && shot.is_some();
         // Hand off to ballistics: fire the chambered round down the bore at its muzzle speed.
         if !fused_echo {
-            let mut event = FireShell::of_round(
+            let shapes: Vec<_> = proxies
+                .iter()
+                .filter(|(_, _, layers)| layers.memberships.has_all(crate::Layer::Vehicle))
+                .filter_map(|(entity, shape, _)| {
+                    rig_world_pose(entity, root.0, position.0, rotation.0, &parents, &locals)
+                        .map(|(at, turn)| (at, turn, shape))
+                })
+                .collect();
+            let birth = outside_source(muzzle_position, bore, -weapon.bore_length, &shapes);
+            let event = FireShell::of_round(
                 &fired,
+                birth,
                 muzzle_position,
                 bore,
                 weapon.fire_cycle.mechanism(),
@@ -384,15 +394,6 @@ fn fire(
                 }),
                 shot,
             );
-            let shapes: Vec<_> = proxies
-                .iter()
-                .filter(|(_, _, layers)| layers.memberships.has_all(crate::Layer::Vehicle))
-                .filter_map(|(entity, shape, _)| {
-                    rig_world_pose(entity, root.0, position.0, rotation.0, &parents, &locals)
-                        .map(|(at, turn)| (at, turn, shape))
-                })
-                .collect();
-            event.birth = outside_source(muzzle_position, bore, -weapon.bore_length, &shapes);
             commands.trigger(event);
         }
         // Kick the barrel back (root-resident recoil state); apply_recoil springs it home. The

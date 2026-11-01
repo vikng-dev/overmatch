@@ -2964,6 +2964,7 @@ fn the_replayed_first_contact_stops_resolve() {
         let mut fire = crate::ballistics::FireShell::of_round(
             &round,
             fuzz::PROBE_TANK_AT + local,
+            fuzz::PROBE_TANK_AT + local,
             Dir3::new(velocity).expect("a replay has a direction"),
             crate::spec::FireMechanism::Single,
             false,

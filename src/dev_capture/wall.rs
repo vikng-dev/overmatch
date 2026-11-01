@@ -240,6 +240,7 @@ fn shoot(what: &What, (outward, aim, foot): (Vec3, Vec3, Vec3), commands: &mut C
             commands.trigger(FireShell::of_round(
                 round,
                 origin,
+                origin,
                 Dir3::new(along).expect("the game’s damage-model capture aims along a finite nonzero authored wall normal"),
                 crate::spec::FireMechanism::Single,
                 true,

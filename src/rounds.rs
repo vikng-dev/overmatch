@@ -981,6 +981,7 @@ pub(crate) mod tests {
             let fire = crate::ballistics::FireShell::of_round(
                 &round,
                 bevy::math::Vec3::ZERO,
+                bevy::math::Vec3::ZERO,
                 bevy::math::Dir3::X,
                 crate::spec::FireMechanism::Single,
                 false,

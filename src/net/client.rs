@@ -2225,7 +2225,6 @@ fn spawn_reconstructed_fire(
     }
     let facts = super::fire_presentation::ReleasedShot {
         birth: event.birth,
-
         origin: event.origin,
         direction: fire.direction,
         round,
@@ -3297,7 +3296,6 @@ mod tests {
     fn fire_event(shooter: Entity, combatant: u64, tick: u32) -> FireEvent {
         FireEvent {
             birth: Vec3::ZERO,
-
             origin: Vec3::ZERO,
             direction: Vec3::NEG_Z,
             mechanism: crate::spec::FireMechanism::Automatic,

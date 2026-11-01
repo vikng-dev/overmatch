@@ -2492,8 +2492,16 @@ fn barrel_through_plate(owned: bool) {
     settle(&mut app);
     let muzzle = source_at + Vec3::NEG_Z * 6.0;
     let round = crate::tank::WeaponRound::resolve("88mm_AP").unwrap().round;
-    let mut fire = FireShell::of_round(
+    // The weapon pivots at the source's centre, six metres back along the bore.
+    let birth = crate::shooting::outside_source(
+        muzzle,
+        Dir3::NEG_Z,
+        -6.0,
+        &[(source_at, Quat::IDENTITY, &shape)],
+    );
+    let fire = FireShell::of_round(
         &round,
+        birth,
         muzzle,
         Dir3::NEG_Z,
         FireMechanism::Single,
@@ -2504,13 +2512,6 @@ fn barrel_through_plate(owned: bool) {
             round: 0,
         }),
         None,
-    );
-    // The weapon pivots at the source's centre, six metres back along the bore.
-    fire.birth = crate::shooting::outside_source(
-        muzzle,
-        Dir3::NEG_Z,
-        -6.0,
-        &[(source_at, Quat::IDENTITY, &shape)],
     );
     app.world_mut().trigger(fire);
     run(&mut app, 4);
@@ -2559,6 +2560,7 @@ fn the_presented_march_includes_the_birth_to_muzzle_prefix() {
     let round = crate::tank::WeaponRound::resolve("88mm_AP").unwrap().round;
     let mut fire = FireShell::of_round(
         &round,
+        birth,
         muzzle,
         Dir3::NEG_Z,
         FireMechanism::Single,
@@ -2566,7 +2568,6 @@ fn the_presented_march_includes_the_birth_to_muzzle_prefix() {
         None,
         None,
     );
-    fire.birth = birth;
     fire.shot_origin = FireShellOrigin::Reconstructed;
     app.world_mut().trigger(fire);
     app.world_mut().resource_mut::<PathClock>().fraction = 0.25;
@@ -2672,6 +2673,7 @@ fn returning_source_round(queued: bool) {
     let mut fire = FireShell::of_round(
         &round,
         Vec3::ZERO,
+        Vec3::ZERO,
         direction,
         FireMechanism::Single,
         false,
@@ -2739,6 +2741,7 @@ fn source_clearance_travels_with_the_firing_body() {
     let round = crate::tank::WeaponRound::resolve("88mm_AP").unwrap().round;
     let mut fire = FireShell::of_round(
         &round,
+        at,
         at,
         Dir3::X,
         FireMechanism::Single,

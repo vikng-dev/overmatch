@@ -112,6 +112,7 @@ fn fire_on_cue(
     commands.trigger(FireShell::of_round(
         &cue.round,
         origin,
+        origin,
         direction,
         crate::spec::FireMechanism::Single,
         true,

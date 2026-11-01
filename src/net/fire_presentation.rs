@@ -373,11 +373,11 @@ pub(super) fn present_shot_at_age(
     commands: &mut Commands,
 ) {
     commands.trigger(FireShell {
-        birth: shot.birth,
         shot_origin: FireShellOrigin::Reconstructed,
         catch_up_ticks,
         ..FireShell::of_round(
             &shot.round,
+            shot.birth,
             shot.origin,
             shot.direction,
             shot.mechanism,
@@ -693,7 +693,6 @@ fn recover_unannounced_rounds(
                 .expect("the tank load gate refuses an empty stowage: every weapon has round 0");
             let facts = ReleasedShot {
                 birth: muzzle.translation(),
-
                 origin: muzzle.translation(),
                 direction,
                 round: fired.round,
@@ -1896,7 +1895,6 @@ mod tests {
         });
         let facts = ReleasedShot {
             birth: Vec3::new(1.0, 2.0, 8.0),
-
             origin: Vec3::new(1.0, 2.0, 3.0),
             direction: Dir3::NEG_Z,
             round: crate::tank::WeaponRound::resolve("88mm_AP")

@@ -764,6 +764,7 @@ fn fire_round(
     let round = FireShell::of_round(
         &loaded.round,
         transform.translation,
+        transform.translation,
         transform.forward(),
         gun.fire_cycle.mechanism(),
         true,

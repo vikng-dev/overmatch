@@ -1732,6 +1732,7 @@ mod tests {
         let fire = FireShell::of_round(
             &round,
             FIRE_ORIGIN,
+            FIRE_ORIGIN,
             Dir3::X,
             crate::spec::FireMechanism::Single,
             true,
