@@ -153,11 +153,18 @@ pub(super) fn apply_belt_support_field(
     let side_commands = shaped.0.side_commands();
 
     let params = force_params(&geom, &rig_spec, &envelope);
-    let near = rubble.near(
-        hull_pos.0,
-        super::rubble::footprint_sphere(&geom, &envelope),
-    );
-    let mut pieces = RubbleBodies::gather(&rubble, &near, &[hull_entity], &bodies);
+    // The piece query cannot read the hull (the hull query holds its `Forces`), so the hull's own
+    // colliders never enter the gather; the identity rule is the self-support exclusion.
+    let near: Vec<Entity> = rubble
+        .near(
+            hull_pos.0,
+            super::rubble::footprint_sphere(&geom, &envelope),
+        )
+        .into_iter()
+        .filter(|&collider| rubble.body_of(collider) != hull_entity)
+        .collect();
+    let mut pieces = RubbleBodies::gather(&rubble, &near, &bodies);
+    pieces.exclude_source(hull_entity);
     let oracle = &field.0;
 
     // Phase 1 — both sides' contact passes at their pre-tick belt speeds (transmission-design
@@ -231,7 +238,8 @@ pub(super) fn apply_belt_support_field(
         for app in &report.apps {
             forces.apply_force_at_point(app.force, app.point);
         }
-        let pushes = piece_impulses(&mut pieces, &report.contacts, dt);
+        // No other belt source shares the sandbox, so no recipient is belt-held.
+        let pushes = piece_impulses(&mut pieces, &report.contacts, &[], dt);
         apply_pushes(&pushes, &mut bodies);
         for push in &pushes {
             touches.0.push(super::rubble::Touch {

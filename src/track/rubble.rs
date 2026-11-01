@@ -9,10 +9,9 @@
 //!
 //! - **What the belt bears on** ([`RubbleQuery::supports`]): solid, layer-compatible colliders,
 //!   except [`super::terrain::FieldSurface`] geometry already represented by the field. Callers
-//!   explicitly exclude self-support and reaction recipients they cannot write. Every admitted
-//!   dynamic body carries Avian force state; static construction transmits the full opposite
-//!   belt reaction to [`crate::contact_transfer::ContactTransfers`] when it has structural laws.
-//!   A tank's hull follows the same law; each pass excludes only its source body by identity.
+//!   exclude self-support by identity ([`RubbleBodies::exclude_source`]). Every admitted dynamic
+//!   body carries Avian force state; static construction transmits the full opposite belt
+//!   reaction to [`crate::contact_transfer::ContactTransfers`] when it has structural laws.
 //! - **The footprint check**: a link's slab ([`Slab`]) is the volume its field probes sweep, made
 //!   solid across the true shoe width: along the link, between its measured faces, and from the
 //!   probes' origin out to the contact envelope. A piece's extent in it is six support points of
@@ -29,8 +28,12 @@
 //!   (`update_solver_body_aabbs`) and writes each collider's `Position`/`Rotation`, so a snapshot
 //!   in `FixedUpdate` reads the poses the last step wrote.
 //!
-//! **The two sides of a belt-piece contact are sized differently**, because a piece resting on
-//! something passes the tank's load on to what holds it, and only avian's solver sees that.
+//! **What holds the recipient decides its side of a belt contact.** A body whose own support is
+//! a belt law this tick (another driving tank's hull) carries a load through that law, which
+//! responds to force: it takes the whole opposite reaction, `−(normal × load + traction) × dt`,
+//! as fixed construction does, resting or not. Every other dynamic body is a *piece*: one resting
+//! on something passes the tank's load on to what holds it, and only avian's solver sees that, so
+//! the two sides of a belt-piece contact are sized differently.
 //! - *The tank's side* is the track law: a piece supports and grips the tank as ground does, with
 //!   the slip and the support damping measured against the piece's own velocity at the contact
 //!   ([`RubbleBodies::velocity_at`]).
@@ -51,7 +54,9 @@
 //! - **Accepted error**: a piece resting on nothing (a brick falling off a pile edge) still
 //!   supports the tank for the ticks it is read. Avian alone sees what holds the piece; that
 //!   support is not limited by its previous contacts. Dynamic-piece velocities are advanced by
-//!   each clamped impulse, in tank-entity and report order, before the next impulse is sized.
+//!   each clamped impulse before the next is sized, over every tank's contacts at once in one
+//!   canonical order of their geometry ([`piece_impulses`]), so no tank's entity order sizes
+//!   another's reaction.
 //! - **Rejected alternatives**: probe rays folded onto the colliders (each probe also a ray
 //!   against the rubble, the deepest hit wins) see only the three column lines, so a brick between
 //!   them sits under the belt unseen. Kinematic belt colliders with avian's conveyor contacts
@@ -380,9 +385,9 @@ pub(crate) struct SlabOverlap {
     pub(crate) depth: f32,
 }
 
-/// The rubble near one tank this tick: each collider's surface and its dynamic bodies' states.
-/// Empty where a tank has none near it, and for every pass that reads the field alone (the
-/// envelope calibration).
+/// The colliders near every driving tank this tick, read once at tick start: each collider's
+/// surface and its dynamic bodies' states. Empty where no tank has any near it, and for every
+/// pass that reads the field alone (the envelope calibration).
 #[derive(Clone, Default)]
 pub struct RubbleBodies {
     source: Option<Entity>,
@@ -391,21 +396,16 @@ pub struct RubbleBodies {
 }
 
 impl RubbleBodies {
-    /// Read the `near` colliders' shapes, frictions and bodies. `excluded` names bodies this
-    /// adapter explicitly excludes (for example its own hull in a single-source instrument).
-    /// Every other dynamic body must carry the force state Avian constructs for it.
+    /// Read the `near` colliders' shapes, frictions and bodies. Every dynamic body must carry the
+    /// force state Avian constructs for it, readable through `bodies`.
     pub(crate) fn gather<F: QueryFilter>(
         rubble: &RubbleQuery,
         near: &[Entity],
-        excluded: &[Entity],
         bodies: &Query<PieceData, F>,
     ) -> Self {
         let mut out = Self::default();
         for &collider in near {
             let body = rubble.body_of(collider);
-            if excluded.contains(&body) {
-                continue; // Self-support and explicitly unsupported reaction recipients.
-            }
             // A collider without a rigid body is fixed construction in Avian.
             let kind = rubble
                 .rigid_bodies
@@ -416,7 +416,7 @@ impl RubbleBodies {
             let mut slot = out.bodies.iter().position(|b| b.entity == body);
             if slot.is_none() && dynamic {
                 let (forces, _, mass, inertia, com, locked) = bodies.get(body).expect(
-                    "an admitted dynamic support body carries Avian force state; excluded bodies must be named",
+                    "an admitted dynamic support body carries Avian force state its caller can read",
                 );
                 let rotation = forces.rotation().0;
                 // Avian uses this constructor to prepare solver inertia; it applies the same
@@ -471,7 +471,8 @@ impl RubbleBodies {
         out
     }
 
-    /// A shared tick-start snapshot serves all sources; self-support is excluded by identity.
+    /// The one self-support rule: a pass never reads its own source body's surfaces. A shared
+    /// tick-start snapshot serves every source, so the rule is identity, set per pass.
     pub(crate) fn exclude_source(&mut self, source: Entity) {
         self.source = Some(source);
     }
@@ -542,7 +543,7 @@ impl RubbleBodies {
                 body,
                 point: contact.point,
                 normal: contact.normal,
-                force: contact.normal * contact.load + contact.traction,
+                force: source_force(contact),
                 closing_speed: -contact.belt_velocity.dot(contact.normal),
             });
         }
@@ -622,14 +623,34 @@ pub(crate) struct Push {
     pub(crate) point: Vec3,
 }
 
-/// The piece's side of every contact in `contacts` on a dynamic piece, in order, each taken
-/// into `bodies` before the next is sized (module doc). One push per such contact, zero where
-/// the piece is not closing on the belt.
-pub(crate) fn piece_impulses(
+/// The force the belt law applied to its source through `contact` (N): the support along the
+/// normal and the traction. A recipient held by its own laws takes its opposite.
+fn source_force(contact: &BeltContact) -> Vec3 {
+    contact.normal * contact.load + contact.traction
+}
+
+/// Every dynamic recipient's side of `contacts` (module doc): the whole opposite reaction on a
+/// body in `belt_held` (one whose support is a belt law this tick), the clamped impulse on any
+/// other. Pieces are sized in one canonical order of the contacts' geometry, each impulse taken
+/// into `bodies` before the next is sized, so the order the contacts were gathered in, and which
+/// tank produced them, decide nothing. One push per contact on a dynamic body, zero where a
+/// piece is not closing on the belt.
+pub(crate) fn piece_impulses<'c>(
     bodies: &mut RubbleBodies,
-    contacts: &[BeltContact],
+    contacts: impl IntoIterator<Item = &'c BeltContact>,
+    belt_held: &[Entity],
     dt: f32,
 ) -> Vec<Push> {
+    let mut contacts: Vec<&BeltContact> = contacts.into_iter().collect();
+    let key = |c: &BeltContact| {
+        [c.point, c.normal, c.traction, c.belt_velocity]
+            .map(|v| v.to_array().map(f32::to_bits))
+            .concat()
+            .into_iter()
+            .chain([c.load.to_bits(), c.mu.to_bits()])
+            .collect::<Vec<u32>>()
+    };
+    contacts.sort_by_cached_key(|c| key(c));
     let mut pushes = Vec::new();
     for contact in contacts {
         // The field has no body to push; every collider contact came from this snapshot.
@@ -643,7 +664,11 @@ pub(crate) fn piece_impulses(
         };
         let collider = surface.collider;
         let body = &mut bodies.bodies[slot];
-        let impulse = contact_impulse(body, contact, dt);
+        let impulse = if belt_held.contains(&body.entity) {
+            -source_force(contact) * dt
+        } else {
+            contact_impulse(body, contact, dt)
+        };
         body.apply(impulse, contact.point);
         pushes.push(Push {
             body: body.entity,
@@ -801,14 +826,12 @@ mod tests {
     }
 
     /// A DYNAMIC BODY SUPPORTS THE BELT BY ITS PHYSICS, NEVER BY WHAT IT IS. An unmarked loose
-    /// body is a surface; a sensor, a collider whose filters exclude the hull (an armour volume's)
-    /// and a body outside the caller's writable piece query (its own hull) are not. A mutant that
-    /// restores a marker gate, drops the layer or sensor test, or lets the querying hull bear on
-    /// itself fails here. FIXTURE DATA: four 1 m boxes about the origin.
+    /// body is a surface; a sensor and a collider whose filters exclude the hull (an armour
+    /// volume's) are not. A mutant that restores a marker gate or drops the layer or sensor test
+    /// fails here; self-support is the pass-time identity rule, which the driving adapter's
+    /// stacked-hull and lone-hull tests pin. FIXTURE DATA: three 1 m boxes about the origin.
     #[test]
-    fn a_dynamic_body_supports_by_its_physics_and_the_querying_hull_never_does() {
-        #[derive(Component)]
-        struct Own;
+    fn a_dynamic_body_supports_by_its_physics() {
         let mut app = physics();
         let size = Vec3::ONE;
         let plain = piece_box(&mut app, Vec3::new(-1.5, 0.5, 0.0), size);
@@ -818,21 +841,17 @@ mod tests {
         app.world_mut()
             .entity_mut(volume)
             .insert(CollisionLayers::new([Layer::Armor], LayerMask::NONE));
-        let own = piece_box(&mut app, Vec3::new(0.0, 0.5, -1.5), size);
-        app.world_mut().entity_mut(own).insert(Own);
         app.update();
         app.world_mut()
-            .run_system_once(
-                move |rubble: RubbleQuery, bodies: Query<PieceData, Without<Own>>| {
-                    let near = rubble.near(Vec3::ZERO, 4.0);
-                    assert!(near.contains(&plain) && near.contains(&own));
-                    assert!(!near.contains(&sensor) && !near.contains(&volume));
-                    let pieces = RubbleBodies::gather(&rubble, &near, &[own], &bodies);
-                    let gathered: Vec<_> = pieces.surfaces.iter().map(|s| s.collider).collect();
-                    assert_eq!(gathered, vec![plain]);
-                    assert!(pieces.is_dynamic(plain));
-                },
-            )
+            .run_system_once(move |rubble: RubbleQuery, bodies: Query<PieceData>| {
+                let near = rubble.near(Vec3::ZERO, 4.0);
+                assert!(near.contains(&plain));
+                assert!(!near.contains(&sensor) && !near.contains(&volume));
+                let pieces = RubbleBodies::gather(&rubble, &near, &bodies);
+                let gathered: Vec<_> = pieces.surfaces.iter().map(|s| s.collider).collect();
+                assert_eq!(gathered, vec![plain]);
+                assert!(pieces.is_dynamic(plain));
+            })
             .unwrap();
     }
 
@@ -847,7 +866,7 @@ mod tests {
         app.world_mut().entity_mut(body).remove::<ComputedMass>();
         app.world_mut()
             .run_system_once(move |rubble: RubbleQuery, bodies: Query<PieceData>| {
-                RubbleBodies::gather(&rubble, &[body], &[], &bodies);
+                RubbleBodies::gather(&rubble, &[body], &bodies);
             })
             .unwrap();
     }
@@ -864,7 +883,7 @@ mod tests {
         app.update();
         app.world_mut()
             .run_system_once(move |rubble: RubbleQuery, mut bodies: Query<PieceData>| {
-                let mut snapshot = RubbleBodies::gather(&rubble, &[body], &[], &bodies);
+                let mut snapshot = RubbleBodies::gather(&rubble, &[body], &bodies);
                 let state = &mut snapshot.bodies[0];
                 // FIXTURE DATA: off-centre impulse exercises both translation and rotation.
                 let at = state.com + Vec3::new(0.2, 0.1, 0.3);
@@ -921,7 +940,8 @@ mod tests {
                         near.contains(&collider),
                         "unmarked fixed geometry must carry the belt"
                     );
-                    let pieces = RubbleBodies::gather(&rubble, &near, &[source], &bodies);
+                    let mut pieces = RubbleBodies::gather(&rubble, &near, &bodies);
+                    pieces.exclude_source(source);
                     let (mut forces, _, mass, ..) = bodies.get_mut(source).unwrap();
                     let before = forces.linear_velocity();
                     let report = pad_pass(
@@ -1025,7 +1045,7 @@ mod tests {
                     !near.contains(&field),
                     "the analytic field owns this surface"
                 );
-                let pieces = RubbleBodies::gather(&rubble, &near, &[], &bodies);
+                let pieces = RubbleBodies::gather(&rubble, &near, &bodies);
                 assert_eq!(bits(&flat_pass(&pieces)), reference);
             })
             .unwrap();
@@ -1045,7 +1065,7 @@ mod tests {
         app.world_mut().get_mut::<LinearVelocity>(body).unwrap().0 = velocity;
         app.world_mut()
             .run_system_once(move |rubble: RubbleQuery, bodies: Query<PieceData>| {
-                let mut pieces = RubbleBodies::gather(&rubble, &[body], &[], &bodies);
+                let mut pieces = RubbleBodies::gather(&rubble, &[body], &bodies);
                 assert_eq!(pieces.velocity_at(body, Vec3::ZERO), velocity);
                 assert!(!pieces.is_dynamic(body));
                 let report = pad_pass(
@@ -1067,7 +1087,7 @@ mod tests {
                 {
                     assert!((contact.slip - 0.4).abs() < 1e-5);
                 }
-                assert!(piece_impulses(&mut pieces, &report.contacts, DT).is_empty());
+                assert!(piece_impulses(&mut pieces, &report.contacts, &[], DT).is_empty());
             })
             .unwrap();
     }
@@ -1086,7 +1106,7 @@ mod tests {
         app.world_mut()
             .run_system_once(move |rubble: RubbleQuery, bodies: Query<PieceData>| {
                 let near = rubble.near(Vec3::ZERO, 5.0);
-                let pieces = RubbleBodies::gather(&rubble, &near, &[], &bodies);
+                let pieces = RubbleBodies::gather(&rubble, &near, &bodies);
                 let mut slab = Slab {
                     origin: Vec3::new(0.0, 0.1, -0.1),
                     axis: Vec3::Z,
@@ -1136,7 +1156,7 @@ mod tests {
         app.update();
         app.world_mut()
             .run_system_once(move |rubble: RubbleQuery, bodies: Query<PieceData>| {
-                let pieces = RubbleBodies::gather(&rubble, &[short, long], &[], &bodies);
+                let pieces = RubbleBodies::gather(&rubble, &[short, long], &bodies);
                 let mut slab = Slab {
                     origin: Vec3::Y * 0.1,
                     axis: Vec3::new(0.0, 0.6, 0.8),
@@ -1209,8 +1229,8 @@ mod tests {
             .world_mut()
             .run_system_once(move |rubble: RubbleQuery, mut bodies: Query<PieceData>| {
                 let near = rubble.near(Vec3::new(10.0, 0.0, 0.0), 15.0);
-                let mut pieces = RubbleBodies::gather(&rubble, &near, &[], &bodies);
-                let pushes = piece_impulses(&mut pieces, &contacts, DT);
+                let mut pieces = RubbleBodies::gather(&rubble, &near, &bodies);
+                let pushes = piece_impulses(&mut pieces, &contacts, &[], DT);
                 apply_pushes(&pushes, &mut bodies);
                 pushes
             })
@@ -1306,7 +1326,7 @@ mod tests {
             .world_mut()
             .run_system_once(move |rubble: RubbleQuery, bodies: Query<PieceData>| {
                 let near = rubble.near(Vec3::new(0.0, 0.1, 0.0), 3.0);
-                let mut pieces = RubbleBodies::gather(&rubble, &near, &[], &bodies);
+                let mut pieces = RubbleBodies::gather(&rubble, &near, &bodies);
                 let report = pad_pass_gripping(
                     grip,
                     &ground(),
@@ -1316,7 +1336,7 @@ mod tests {
                     slide,
                     &mut GripElements::for_links(30),
                 );
-                let pushes = piece_impulses(&mut pieces, &report.contacts, DT);
+                let pushes = piece_impulses(&mut pieces, &report.contacts, &[], DT);
                 let mus = report.contacts.iter().map(|c| c.mu).collect::<Vec<_>>();
                 (sliding_grip(&report), mus, pushes)
             })
@@ -1586,7 +1606,7 @@ mod tests {
                 .run_system_once(move |rubble: RubbleQuery, mut bodies: Query<PieceData>| {
                     let mut elements = std::mem::take(&mut elements);
                     let near = rubble.near(Vec3::new(0.0, h, 0.0), 3.0);
-                    let mut pieces = RubbleBodies::gather(&rubble, &near, &[], &bodies);
+                    let mut pieces = RubbleBodies::gather(&rubble, &near, &bodies);
                     let report = pad_pass(
                         &ground(),
                         &pieces,
@@ -1595,7 +1615,7 @@ mod tests {
                         Vec3::new(0.0, vy, 0.0),
                         &mut elements,
                     );
-                    let pushes = piece_impulses(&mut pieces, &report.contacts, DT);
+                    let pushes = piece_impulses(&mut pieces, &report.contacts, &[], DT);
                     apply_pushes(&pushes, &mut bodies);
                     let lift: f32 = report.apps.iter().map(|app| app.force.y).sum();
                     (lift, elements)
@@ -1668,7 +1688,7 @@ mod tests {
             app.world_mut()
                 .run_system_once(move |rubble: RubbleQuery, bodies: Query<PieceData>| {
                     let near = rubble.near(Vec3::ZERO, 4.0);
-                    let pieces = RubbleBodies::gather(&rubble, &near, &[], &bodies);
+                    let pieces = RubbleBodies::gather(&rubble, &near, &bodies);
                     let mut elements = GripElements::for_links(30);
                     let report = pad_pass(
                         &ground(),
@@ -1729,7 +1749,7 @@ mod tests {
             app.world_mut()
                 .run_system_once(move |rubble: RubbleQuery, bodies: Query<PieceData>| {
                     let near = rubble.near(Vec3::ZERO, 4.0);
-                    let pieces = RubbleBodies::gather(&rubble, &near, &[], &bodies);
+                    let pieces = RubbleBodies::gather(&rubble, &near, &bodies);
                     let mut elements = GripElements::for_links(30);
                     let report = pad_pass(
                         &ground(),
@@ -1785,7 +1805,7 @@ mod tests {
             .world_mut()
             .run_system_once(move |rubble: RubbleQuery, bodies: Query<PieceData>| {
                 let near = rubble.near(Vec3::ZERO, 4.0);
-                let pieces = RubbleBodies::gather(&rubble, &near, &[], &bodies);
+                let pieces = RubbleBodies::gather(&rubble, &near, &bodies);
                 let report = pad_pass(
                     &ground(),
                     &pieces,
@@ -1852,7 +1872,7 @@ mod tests {
             let actual = app
                 .world_mut()
                 .run_system_once(move |rubble: RubbleQuery, bodies: Query<PieceData>| {
-                    let pieces = RubbleBodies::gather(&rubble, &[piece], &[], &bodies);
+                    let pieces = RubbleBodies::gather(&rubble, &[piece], &bodies);
                     bits(&flat_pass(&pieces))
                 })
                 .unwrap();

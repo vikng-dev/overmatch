@@ -745,10 +745,8 @@ fn apply_track_forces(
     near.dedup();
     // A hull's shape is read only if another tank's footprint query reached it. All recipients
     // come from the same body query, before any source applies driving forces.
-    let mut pieces = RubbleBodies::gather(&rubble, &near, &[], &pieces_query);
-    let mut reactions = pieces.clone();
-    let mut staged = Vec::new();
-    for entity in entities {
+    let mut pieces = RubbleBodies::gather(&rubble, &near, &pieces_query);
+    for &entity in &entities {
         let (
             _,
             pos,
@@ -837,7 +835,6 @@ fn apply_track_forces(
         }
         for (si, report) in reports.into_iter().enumerate() {
             pieces.record_static_contacts(entity, &report.contacts, &mut transfers);
-            staged.extend(piece_impulses(&mut reactions, &report.contacts, dt));
             effect.belt_reaction[si] = report.belt_reaction;
             for contact in &report.contacts {
                 effect.traction_force += contact.traction;
@@ -852,20 +849,28 @@ fn apply_track_forces(
         effect.field_digest = coarse_grip_digest(&grip_elements);
         *grip_effect = effect;
     }
-    // No recipient impulse can change what another tank's pass reads this tick. These writes
-    // stay in DrivingForces, before recoil and Avian integration.
-    apply_pushes(&staged, &mut pieces_query);
+    // Every pass has read the tick-start snapshot, so the recipients' sides are sized after
+    // them all, over every tank's contacts at once: the driving tanks' hulls are belt-held.
+    // These writes stay in DrivingForces, before recoil and Avian integration.
+    let contacts = entities.iter().flat_map(|&entity| {
+        let (.., contacts, _) = tanks
+            .get(entity)
+            .expect("a tank gathered for this synchronous tick remains alive");
+        contacts.0.iter().flatten()
+    });
+    let pushes = piece_impulses(&mut pieces, contacts, &entities, dt);
+    apply_pushes(&pushes, &mut pieces_query);
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    /// Fixture bodies run the production adapter with real data-derived running gear. The box
-    /// hulls, mass and inertias are fixture data; no vehicle-specific geometry is a pass condition.
-    fn support_fixture(reverse: bool, stacked: bool, sensor: bool) -> (App, Vec<Entity>) {
+    /// The production adapter's app with real data-derived running gear on a flat field (top
+    /// face y = 0), no gravity, one 64 Hz tick per update. Returns it with the fixture hull
+    /// height at which a belt face presses a surface at y = 0.25 by 1 cm.
+    fn adapter_app() -> (App, f32) {
         use avian3d::prelude::*;
-        use bevy::ecs::system::RunSystemOnce;
         use bevy::time::TimeUpdateStrategy;
         use std::time::Duration;
         let mut app = App::new();
@@ -910,8 +915,60 @@ mod tests {
             .map(|p| p.y)
             .fold(f32::INFINITY, f32::min);
         let upper_y = 0.25 - low + gear.params.face_offset - 0.01;
+        (app, upper_y)
+    }
+
+    /// A fixture tank root: a 30 t box hull with the gear's carried driving state.
+    fn fixture_tank(app: &mut App, at: Vec3) -> Entity {
+        use avian3d::prelude::*;
+        let gear = app.world().resource::<TrackGear>();
         let trans = TankTransmission::from_spec(gear.trans());
         let count = gear.count;
+        app.world_mut()
+            .spawn((
+                Tank,
+                Position(at),
+                Rotation::default(),
+                RigidBody::Dynamic,
+                Collider::cuboid(12.0, 0.5, 12.0),
+                Mass(30_000.0),
+                AngularInertia::new(Vec3::splat(30_000.0)),
+                NoAutoMass,
+                NoAutoAngularInertia,
+                NoAutoCenterOfMass,
+                CenterOfMass(Vec3::ZERO),
+                TrackGripElements::for_links(count),
+                DriveSignal::default(),
+                trans,
+            ))
+            .id()
+    }
+
+    /// Avian's tick-start velocity state on `body`, then the production adapter once.
+    fn run_adapter(app: &mut App, bodies: &[(Entity, Vec3)]) {
+        use avian3d::prelude::*;
+        use bevy::ecs::system::RunSystemOnce;
+        for &(body, velocity) in bodies {
+            app.world_mut().entity_mut(body).insert((
+                LinearVelocity(velocity),
+                AngularVelocity::ZERO,
+                avian3d::dynamics::integrator::VelocityIntegrationData::default(),
+            ));
+        }
+        app.world_mut().run_system_once(apply_track_forces).unwrap();
+    }
+
+    /// Fixture bodies run the production adapter with real data-derived running gear. The box
+    /// hulls, mass and inertias are fixture data; no vehicle-specific geometry is a pass condition.
+    /// A stacked upper hull approaches the lower at `upper_closing` (m/s).
+    fn support_fixture(
+        reverse: bool,
+        stacked: bool,
+        sensor: bool,
+        upper_closing: f32,
+    ) -> (App, Vec<Entity>) {
+        use avian3d::prelude::*;
+        let (mut app, upper_y) = adapter_app();
         let mut order = if stacked { vec![0, 1] } else { vec![0] };
         if reverse {
             order.reverse();
@@ -919,25 +976,7 @@ mod tests {
         let mut roots = vec![Entity::PLACEHOLDER; order.len()];
         for index in order {
             let y = if stacked && index == 1 { upper_y } else { 0.0 };
-            let root = app
-                .world_mut()
-                .spawn((
-                    Tank,
-                    Position(Vec3::Y * y),
-                    Rotation::default(),
-                    RigidBody::Dynamic,
-                    Collider::cuboid(12.0, 0.5, 12.0),
-                    Mass(30_000.0),
-                    AngularInertia::new(Vec3::splat(30_000.0)),
-                    NoAutoMass,
-                    NoAutoAngularInertia,
-                    NoAutoCenterOfMass,
-                    CenterOfMass(Vec3::ZERO),
-                    TrackGripElements::for_links(count),
-                    DriveSignal::default(),
-                    trans,
-                ))
-                .id();
+            let root = fixture_tank(&mut app, Vec3::Y * y);
             if (stacked && index == 1) || (!stacked && sensor) {
                 app.world_mut().entity_mut(root).insert(Sensor);
             }
@@ -946,18 +985,19 @@ mod tests {
         // Let Avian publish body state and spatial bounds; the driving adapter is not scheduled.
         app.update();
         app.update();
-        for (index, &root) in roots.iter().enumerate() {
-            app.world_mut().entity_mut(root).insert((
-                LinearVelocity(if stacked && index == 1 {
-                    Vec3::NEG_Y * 0.1
+        let velocities: Vec<_> = roots
+            .iter()
+            .enumerate()
+            .map(|(index, &root)| {
+                let closing = if stacked && index == 1 {
+                    upper_closing
                 } else {
-                    Vec3::ZERO
-                }),
-                AngularVelocity::ZERO,
-                avian3d::dynamics::integrator::VelocityIntegrationData::default(),
-            ));
-        }
-        app.world_mut().run_system_once(apply_track_forces).unwrap();
+                    0.0
+                };
+                (root, Vec3::NEG_Y * closing)
+            })
+            .collect();
+        run_adapter(&mut app, &velocities);
         (app, roots)
     }
 
@@ -1007,7 +1047,7 @@ mod tests {
     #[test]
     fn another_tank_carries_the_belt_and_receives_its_reaction() {
         use avian3d::prelude::LinearVelocity;
-        let (app, roots) = support_fixture(false, true, false);
+        let (app, roots) = support_fixture(false, true, false, 0.1);
         let lower_contacts = app.world().get::<TrackContacts>(roots[0]).unwrap();
         assert!(
             lower_contacts
@@ -1043,21 +1083,114 @@ mod tests {
         );
     }
 
+    /// A hull is held by its own belt law, which responds to force, so a load resting on it
+    /// reaches that law whole: the lower hull of a parked stack takes the exact opposite of every
+    /// force the upper belt applied through it, though nothing closes. Stacked hulls rely on the
+    /// lower carrying the upper's load; a loose piece's closing-speed clamp gives a resting
+    /// lower hull nothing and fails here.
+    #[test]
+    fn a_load_resting_on_a_hull_reaches_it_whole() {
+        use avian3d::prelude::LinearVelocity;
+        let (app, roots) = support_fixture(false, true, false, 0.0);
+        let applied: Vec3 = app
+            .world()
+            .get::<TrackContacts>(roots[1])
+            .unwrap()
+            .0
+            .iter()
+            .flatten()
+            .filter(|c| c.collider == Some(roots[0]))
+            .map(|c| c.normal * c.load + c.traction)
+            .sum();
+        assert!(applied.y > 0.0, "the upper belt bears on the lower hull");
+        let impulse = applied * app.world().resource::<Time>().delta_secs();
+        // FIXTURE DATA: the lower hull's 30 t.
+        let momentum = app.world().get::<LinearVelocity>(roots[0]).unwrap().0 * 30_000.0;
+        println!("MEASURED resting reaction {impulse} N s; lower hull momentum {momentum} N s");
+        assert!(
+            (momentum + impulse).length() <= 1e-4 * impulse.length(),
+            "the lower hull's momentum {momentum} must be the opposite of {impulse}"
+        );
+    }
+
     /// Both passes read one tick-start snapshot: exchanging entity order cannot change any
     /// body's driving or reaction bits. Each hull relies on other tanks' reactions being staged.
     #[test]
     fn exchanging_tank_entity_order_preserves_every_driving_and_reaction_bit() {
-        let (first, a) = support_fixture(false, true, false);
-        let (second, b) = support_fixture(true, true, false);
+        let (first, a) = support_fixture(false, true, false, 0.1);
+        let (second, b) = support_fixture(true, true, false, 0.1);
         assert_eq!(support_bits(&first, &a), support_bits(&second, &b));
+    }
+
+    /// Two tanks' belts closing on one light loose plank, so each contact's clamp binds and
+    /// every impulse changes what the next is sized against. Exchanging the tanks' entity order
+    /// cannot change either tank's bits or the plank's: piece reactions are sized in one
+    /// canonical order of the contacts' geometry, never in tank-entity order. FIXTURE DATA: two
+    /// 30 t box hulls 4 m apart across, a 200 kg plank under their inner tracks, closing 0.1 m/s.
+    #[test]
+    fn exchanging_tank_entity_order_preserves_a_shared_pieces_reaction() {
+        use avian3d::prelude::*;
+        let run = |reverse: bool| {
+            let (mut app, upper_y) = adapter_app();
+            let mut sides = [-2.0_f32, 2.0];
+            if reverse {
+                sides.reverse();
+            }
+            let mut tanks: Vec<(f32, Entity)> = sides
+                .iter()
+                .map(|&x| {
+                    let tank = fixture_tank(&mut app, Vec3::new(x, upper_y, 0.0));
+                    app.world_mut().entity_mut(tank).insert(Sensor);
+                    (x, tank)
+                })
+                .collect();
+            tanks.sort_by(|a, b| a.0.total_cmp(&b.0));
+            let plank = app
+                .world_mut()
+                .spawn((
+                    Position(Vec3::Y * 0.15),
+                    Rotation::default(),
+                    RigidBody::Dynamic,
+                    Collider::cuboid(4.0, 0.2, 1.0),
+                    Mass(200.0),
+                ))
+                .id();
+            app.update();
+            app.update();
+            let tanks: Vec<Entity> = tanks.into_iter().map(|(_, tank)| tank).collect();
+            let mut velocities: Vec<_> = tanks.iter().map(|&t| (t, Vec3::NEG_Y * 0.1)).collect();
+            velocities.push((plank, Vec3::ZERO));
+            run_adapter(&mut app, &velocities);
+            for &tank in &tanks {
+                assert!(
+                    app.world()
+                        .get::<TrackContacts>(tank)
+                        .unwrap()
+                        .0
+                        .iter()
+                        .flatten()
+                        .any(|c| c.collider.is_some() && c.load > 0.0),
+                    "both belts bear on the plank"
+                );
+            }
+            let mut bits = support_bits(&app, &tanks);
+            for v in [
+                app.world().get::<LinearVelocity>(plank).unwrap().0,
+                app.world().get::<AngularVelocity>(plank).unwrap().0,
+            ] {
+                bits.extend(v.to_array().map(|x| u64::from(x.to_bits())));
+            }
+            bits
+        };
+        assert_eq!(run(false), run(true));
     }
 
     /// On open ground, a lone hull is never its own support. A sensor reference removes the
     /// hull from spatial admission entirely; making it solid must retain every driving bit.
     #[test]
     fn a_lone_tank_on_open_ground_retains_every_field_only_bit() {
-        let (reference, a) = support_fixture(false, false, true);
-        let (solid, b) = support_fixture(false, false, false);
+        let (reference, a) = support_fixture(false, false, true, 0.0);
+        let (solid, b) = support_fixture(false, false, false, 0.0);
         assert_eq!(support_bits(&reference, &a), support_bits(&solid, &b));
     }
 
