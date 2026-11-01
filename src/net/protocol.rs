@@ -842,6 +842,19 @@ fn network_gameplay_tick(tick: Tick) -> Result<crate::sim_tick::SimTick, Network
     }
 }
 
+/// The network composition's one clock publication. `LocalTimeline` is incremented by lightyear
+/// in `FixedFirst` (lightyear_core's `increment_local_tick`); it is published before every
+/// `GameplaySet` reader of the same fixed tick, so `shooting::fire` stamps its `ShotId` and
+/// `shot_transport::queue_fire` ships that tick as the one the clients catch up from. The
+/// ordering is the whole guarantee: a reader ordered before the publication would read the
+/// previous tick, and nothing downstream compares against the timeline again.
+pub(super) fn install_shot_clock(app: &mut App) {
+    app.insert_resource(crate::PublishedWeaponClock);
+    app.init_resource::<crate::ShotClock>();
+    app.init_resource::<crate::WeaponClock>();
+    app.add_systems(FixedUpdate, publish_shot_clock.before(GameplaySet));
+}
+
 /// Republish the same network tick for every gameplay consumer before the gameplay pass.
 /// Offline compositions advance their own wrapping tick; network compositions require an
 /// advancing transport timeline and refuse its exhaustion visibly at this boundary.
@@ -1123,14 +1136,8 @@ const WIRE_DEP_LIGHTYEAR: &str = "0.30.1";
 
 /// Register the exact shared wire surface represented by [`WIRE_SURFACE`].
 pub(crate) fn plugin(app: &mut App) {
-    // `LocalTimeline` is incremented by lightyear in `FixedFirst` (lightyear_core's
-    // `increment_local_tick`); publish it before every `GameplaySet` consumer, especially
-    // `shooting::fire`, which must put the id on its initial FireShell event.
-    app.insert_resource(crate::PublishedWeaponClock);
-    app.init_resource::<crate::ShotClock>();
+    install_shot_clock(app);
     app.init_resource::<crate::ballistics::PathClock>();
-    app.init_resource::<crate::WeaponClock>();
-    app.add_systems(FixedUpdate, publish_shot_clock.before(GameplaySet));
     app.component::<NetTank>().replicate();
     app.component::<NetBot>().replicate();
     // Immutable spawn identity.
@@ -2485,6 +2492,42 @@ mod tests {
         let mut tl = LocalTimeline::default();
         tl.apply_delta(tick);
         tl
+    }
+
+    /// The game's damage model: a shot's identity and the tick its fire ships under are the
+    /// published clock, which `shot_transport::queue_fire` trusts without a cross-check against
+    /// the timeline. So the publication precedes every gameplay reader of the same fixed tick.
+    /// The mutant that drops the ordering leaves the probe ambiguous with the publisher, which
+    /// this schedule refuses to build. FIXTURE DATA: the timeline is stepped from tick 41.
+    #[test]
+    fn the_clock_is_published_before_every_gameplay_reader() {
+        use bevy::ecs::schedule::{LogLevel, ScheduleBuildSettings};
+
+        fn probe(clock: Res<crate::ShotClock>, timeline: Res<LocalTimeline>) {
+            assert_eq!(
+                clock.0.raw(),
+                timeline.tick().0,
+                "a gameplay reader sees this tick's publication"
+            );
+        }
+
+        let mut app = App::new();
+        install_shot_clock(&mut app);
+        app.insert_resource(timeline_at(41));
+        app.add_systems(FixedUpdate, probe.in_set(GameplaySet));
+        app.edit_schedule(FixedUpdate, |schedule| {
+            schedule.set_build_settings(ScheduleBuildSettings {
+                ambiguity_detection: LogLevel::Error,
+                ..ScheduleBuildSettings::new()
+            });
+        });
+        for _ in 0..3 {
+            app.world_mut()
+                .resource_mut::<LocalTimeline>()
+                .apply_delta(1);
+            app.world_mut().run_schedule(FixedUpdate);
+        }
+        assert_eq!(app.world().resource::<crate::ShotClock>().0.raw(), 44);
     }
 
     /// The game's damage model: shot identity, deadline gates and replica catch-up all read

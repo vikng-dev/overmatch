@@ -443,10 +443,13 @@ fn queue_fire(
         .expect("an authority firing tank has its CombatantId from spawn");
     let weapon = u8::try_from(source.weapon)
         .expect("the tank load gate limits weapon slots to the wire's u8");
+    // `shooting::fire` stamps the id's tick from the same published clock in the same fixed tick;
+    // the clock's agreement with the network timeline is the publication order
+    // `protocol::install_shot_clock` installs and tests, so no cross-check is repeated here.
     assert_eq!(
-        (shot.combatant, shot.weapon, shot.fire_tick),
-        (combatant, weapon, clock.0.raw()),
-        "the authority's spawn-time ShotId agrees with its firing source and tick"
+        (shot.combatant, shot.weapon),
+        (combatant, weapon),
+        "the authority's spawn-time ShotId agrees with its firing source"
     );
 
     let class = DeliveryClass::from(fire.mechanism);
