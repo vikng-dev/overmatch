@@ -1,5 +1,7 @@
 # Lens: base-truths
 
+Subject: the game's physical laws and damage model, game state only.
+
 Principle: `AGENTS.md`, "Tanks are data" (ADR-0034) and "Behaviour emerges from base truths". A
 behaviour comes from material properties, base laws and how a thing is built (its construction, in
 data). Systems, laws, gates and tests are generic; per-object truth lives only in declarative data.
@@ -16,6 +18,10 @@ Review test: would this line survive tank #2, house #2 and a new material unchan
   data, or a code default that only one asset's data happens to override.
 - **Tuned past its truth**: a law parameter far from its handbook or measured value, set to make one
   case look right. The missing factor is the finding.
+- **Two jobs in one number**: a fact, law coefficient, unit, taste or resolution value also doing
+  a second job. Split it into values with separate jobs and labels.
+- **Bare number in code**: a numeric constant in `src/` that is not `Resolution` with its reason.
+  Move it to data under its job.
 - **Asset-specific gate**: a test or gate whose pass condition holds only for one asset (fixture
   numbers are fine when labelled fixture data and the assertion is a class invariant).
 - **Inferred construction**: geometry, joints or membership guessed from names, mesh shape or a
@@ -24,6 +30,7 @@ Review test: would this line survive tank #2, house #2 and a new material unchan
 ## Not a finding
 
 - Data selecting among generic laws, or supplying their parameters.
+- A `Resolution` constant in code with its stability or cost reason.
 - Labelled fixture data in tests asserting class invariants.
 - A generic law with a parameter the data sets for every asset of its class.
 
