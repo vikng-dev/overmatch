@@ -1,7 +1,7 @@
 //! The map's object scatter: the authored placement of buildings and trees, out of the map's own
 //! manifest ([`crate::map`]), spawned with static colliders on every composition, the dedicated
-//! server included — a graybox building or fir as a GRAYBOX proxy (a box per building, a trunk
-//! cylinder plus a canopy cone per fir), a tree or a building of the damage model as its own body
+//! server included — a graybox building as a box proxy, or a tree or building of the game's
+//! destruction model as its own body
 //! (below). A graybox building's box is drawn in brick under a timber roof
 //! ([`crate::building_surface`]), its shape still the collider's.
 //!
@@ -21,15 +21,9 @@
 //! THE FILE'S Y IS STALE (authored against an older sculpt): every instance is re-projected onto
 //! the live [`HeightGrid`] at its own XZ. Yaw and scale are taken as authored.
 //!
-//! Two contact laws, because a belt and a hull meet these differently: a graybox building is a
-//! cuboid collider AND a [`crate::world::TerrainMap`] block, so the track field senses it exactly
-//! like the authored course's boxes; a fir is a trunk cylinder collider only, never a block — the
-//! belts must not climb a trunk, and the hull collision is the honest interaction. A tree of the
-//! damage model ([`crate::trees`]) is the fir's successor: a body the walk doses and a hull can
-//! fell, spawned there from its own data, never a block either. A building of the destruction
-//! model ([`crate::buildings`]) is the graybox building's successor: its walls are hull colliders
-//! and matter the walk crosses, never a block (playtest fork F9), and its bounds join the spawn
-//! obstacles instead.
+//! A graybox building is a cuboid collider and a terrain-field block. Trees and buildings of
+//! the destruction model are colliders outside that immutable field; building bounds also
+//! supply spawn obstacles.
 
 use std::collections::BTreeMap;
 
@@ -52,18 +46,11 @@ pub(crate) struct MapInstance {
     pub(crate) ordinal: u16,
 }
 
-/// Marks a scatter proxy's static collider — every house cuboid and fir trunk, and nothing else
-/// (the canopy cone is view-only geometry and carries no collider). Spawned in every composition,
+/// Marks a graybox building's static collider. Spawned in every composition,
 /// server included, so the tag rides with the shape rather than with a window; the client's
 /// scatter-hit read ([`crate::vfx`]) filters its casts to entities carrying it.
 #[derive(Component)]
 pub(crate) struct ScatterProxy;
-
-/// Fir trunk radius (m) at instance scale 1 — the cylinder collider's radius and the trunk mesh's.
-const TRUNK_RADIUS_M: f32 = 0.4;
-
-/// Height fraction of a fir at which the canopy cone's base sits; bare trunk below it.
-const CANOPY_BASE_FRACTION: f32 = 0.2;
 
 /// Smallest squared quaternion length [`resolve`] will normalize. Far below any rounding an f32
 /// text export produces (those land within ~1e-7 of unit) and far above the point where the
@@ -106,7 +93,7 @@ fn graybox_friction(substance: &str) -> avian3d::prelude::Friction {
 impl Placement<'_> {
     /// A building's [`crate::world::TerrainMap`] block form: a unit cube posed and scaled (the
     /// Avian idiom `world::spawn_block` uses), its centre lifted off the ground pose by the
-    /// prototype's own bounds. `None` for a fir or a tree — a trunk is not a block.
+    /// prototype's own bounds. `None` for a tree or a structure — a trunk is not a block.
     fn block(&self) -> Option<Transform> {
         match self.shape {
             Prototype::Building { min, max, .. } => {
@@ -118,7 +105,7 @@ impl Placement<'_> {
                     scale: (max - min) * self.pose.scale,
                 })
             }
-            Prototype::Fir { .. } | Prototype::Tree { .. } | Prototype::Structure { .. } => None,
+            Prototype::Tree { .. } | Prototype::Structure { .. } => None,
         }
     }
 }
@@ -231,8 +218,6 @@ struct ScatterView {
     /// the same encoding the block list uses, its faces framed for the building surface
     /// ([`crate::building_surface::unit_box`]).
     building: BTreeMap<String, Handle<Mesh>>,
-    /// `(trunk, canopy)` per fir prototype, keyed by its id.
-    fir: BTreeMap<String, (Handle<Mesh>, Handle<Mesh>)>,
     /// One merged mesh per building asset of the destruction model, keyed by the asset id: its
     /// elements' faces in the building frame ([`crate::buildings::view::mesh`]), shared by every
     /// instance.
@@ -240,15 +225,12 @@ struct ScatterView {
     /// The ONE material every building wears, graybox or not: no instance gets its own, so the
     /// buildings batch.
     surface: Handle<BuildingMaterial>,
-    bark: Handle<StandardMaterial>,
-    needle: Handle<StandardMaterial>,
 }
 
 impl ScatterView {
     fn new(
         commands: &mut Commands,
         meshes: &mut Assets<Mesh>,
-        materials: &mut Assets<StandardMaterial>,
         assets: &mut ViewAssets<'_>,
         manifest: &MapManifest,
     ) -> Self {
@@ -263,40 +245,14 @@ impl ScatterView {
                             crate::building_surface::ridge_axis(min, max),
                         )),
                     )),
-                    Prototype::Fir { .. }
-                    | Prototype::Tree { .. }
-                    | Prototype::Structure { .. } => None,
-                })
-                .collect(),
-            fir: library
-                .iter()
-                .filter_map(|(id, shape)| match *shape {
-                    Prototype::Fir {
-                        height_m,
-                        canopy_diameter_m,
-                        ..
-                    } => Some((
-                        id.clone(),
-                        (
-                            meshes.add(Cylinder::new(TRUNK_RADIUS_M, height_m)),
-                            meshes.add(Cone {
-                                radius: canopy_diameter_m / 2.0,
-                                height: height_m * (1.0 - CANOPY_BASE_FRACTION),
-                            }),
-                        ),
-                    )),
-                    Prototype::Building { .. }
-                    | Prototype::Tree { .. }
-                    | Prototype::Structure { .. } => None,
+                    Prototype::Tree { .. } | Prototype::Structure { .. } => None,
                 })
                 .collect(),
             structure: library
                 .values()
                 .filter_map(|shape| match shape {
                     Prototype::Structure { asset } => Some(asset),
-                    Prototype::Building { .. } | Prototype::Fir { .. } | Prototype::Tree { .. } => {
-                        None
-                    }
+                    Prototype::Building { .. } | Prototype::Tree { .. } => None,
                 })
                 .map(|asset| {
                     let kind = manifest
@@ -315,8 +271,6 @@ impl ScatterView {
                 assets.building_materials,
                 assets.buffers,
             ),
-            bark: materials.add(Color::srgb(0.26, 0.19, 0.13)),
-            needle: materials.add(Color::srgb(0.11, 0.21, 0.13)),
         }
     }
 }
@@ -330,7 +284,6 @@ impl ScatterView {
 pub(crate) fn spawn(
     commands: &mut Commands,
     meshes: &mut Assets<Mesh>,
-    materials: &mut Assets<StandardMaterial>,
     manifest: &MapManifest,
     grid: &HeightGrid,
     blocks: &mut Vec<Transform>,
@@ -339,7 +292,7 @@ pub(crate) fn spawn(
     let placements = place(&resolve(&manifest.instances, &manifest.prototypes), grid);
     let view = view_assets
         .as_mut()
-        .map(|assets| ScatterView::new(commands, meshes, materials, assets, manifest));
+        .map(|assets| ScatterView::new(commands, meshes, assets, manifest));
     if let Some(view) = &view {
         // The breaks' view draws a building's new meshes in the same one material.
         commands.insert_resource(crate::buildings::view::BuildingLook {
@@ -348,7 +301,7 @@ pub(crate) fn spawn(
     }
     let assets = view_assets.map(|assets| assets.server);
     let statics = CollisionLayers::new([Layer::Terrain], LayerMask::ALL);
-    let (mut buildings, mut firs, mut trees, mut structures) = (0usize, 0usize, 0usize, 0usize);
+    let (mut buildings, mut trees, mut structures) = (0usize, 0usize, 0usize);
     let mut obstacles = Vec::new();
     for placement in &placements {
         match placement.shape {
@@ -423,57 +376,11 @@ pub(crate) fn spawn(
                 }
                 buildings += 1;
             }
-            Prototype::Fir {
-                height_m,
-                canopy_diameter_m: _,
-                substance,
-            } => {
-                let (pose, height_m) = (placement.pose, *height_m);
-                // Both primitives are centred on their own origin, so each rides at its own centre
-                // height above the ground pose, scaled with the instance.
-                let at = |centre_m: f32| Transform {
-                    translation: pose.translation + Vec3::Y * (centre_m * pose.scale.y),
-                    rotation: pose.rotation,
-                    scale: pose.scale,
-                };
-                let trunk = at(height_m / 2.0);
-                let mut entity = commands.spawn((
-                    trunk,
-                    RigidBody::Static,
-                    Collider::cylinder(TRUNK_RADIUS_M, height_m),
-                    statics,
-                    graybox_friction(substance),
-                    crate::substances::SubstanceRegistry::shipped_static()
-                        .hard(substance)
-                        .expect("map::parse certifies every graybox substance")
-                        .feedback,
-                    ScatterProxy,
-                    placement.identity.clone(),
-                ));
-                if let Some(view) = &view {
-                    let (trunk_mesh, canopy_mesh) = &view.fir[placement.prototype];
-                    entity.insert((
-                        Mesh3d(trunk_mesh.clone()),
-                        crate::render_cost::CasterClass::Tree,
-                        MeshMaterial3d(view.bark.clone()),
-                    ));
-                    // The canopy is view-only and spawns FLAT rather than as a child: nothing
-                    // reads it, so it needs no hierarchy to propagate.
-                    commands.spawn((
-                        at(height_m * (1.0 + CANOPY_BASE_FRACTION) / 2.0),
-                        Mesh3d(canopy_mesh.clone()),
-                        crate::render_cost::CasterClass::Tree,
-                        MeshMaterial3d(view.needle.clone()),
-                    ));
-                }
-                firs += 1;
-            }
         }
     }
     info!(
         "scatter: {} instances placed on the live surface — {buildings} graybox buildings (also \
-         TerrainMap blocks), {structures} buildings (a collider per element), {firs} graybox firs \
-         (trunk colliders only), {trees} trees",
+         TerrainMap blocks), {structures} buildings (a collider per element), {trees} trees",
         placements.len(),
     );
     obstacles
@@ -604,7 +511,7 @@ mod tests {
         let server = draw.then(|| app.world().resource::<AssetServer>().clone());
         let world = app.world_mut();
         world.resource_scope(|world, mut meshes: Mut<Assets<Mesh>>| {
-            world.resource_scope(|world, mut materials: Mut<Assets<StandardMaterial>>| {
+            world.resource_scope(|world, _materials: Mut<Assets<StandardMaterial>>| {
                 world.resource_scope(|world, mut buildings: Mut<Assets<BuildingMaterial>>| {
                     world.resource_scope(
                         |world, mut buffers: Mut<Assets<bevy::render::storage::ShaderBuffer>>| {
@@ -613,7 +520,6 @@ mod tests {
                             obstacles = spawn(
                                 &mut commands,
                                 &mut meshes,
-                                &mut materials,
                                 manifest,
                                 &grid,
                                 &mut blocks,
@@ -690,7 +596,6 @@ mod tests {
                     buildings += 1;
                     proxies += 1;
                 }
-                Prototype::Fir { .. } => proxies += 1,
                 Prototype::Tree { asset } => {
                     trees += 1;
                     segments += manifest.trees.get(asset).unwrap().segments.len();
@@ -705,8 +610,8 @@ mod tests {
         assert_eq!(obstacles.len(), structures, "one obstacle per building");
         assert_eq!(
             (buildings, proxies, trees),
-            (1, 2, 1),
-            "the fixture places a house, a graybox fir and a tree"
+            (1, 1, 1),
+            "the fixture places a graybox house and a data-built tree"
         );
         assert_eq!(blocks.len(), buildings, "one block per building, no trunk");
         let bodies = world

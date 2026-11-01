@@ -156,9 +156,7 @@ impl MapManifest {
             .values()
             .filter_map(|prototype| match prototype {
                 Prototype::Tree { asset } => Some(asset.as_str()),
-                Prototype::Building { .. }
-                | Prototype::Fir { .. }
-                | Prototype::Structure { .. } => None,
+                Prototype::Building { .. } | Prototype::Structure { .. } => None,
             })
     }
 
@@ -168,7 +166,7 @@ impl MapManifest {
             .values()
             .filter_map(|prototype| match prototype {
                 Prototype::Structure { asset } => Some(asset.as_str()),
-                Prototype::Building { .. } | Prototype::Fir { .. } | Prototype::Tree { .. } => None,
+                Prototype::Building { .. } | Prototype::Tree { .. } => None,
             })
     }
 
@@ -201,14 +199,6 @@ pub(crate) enum Prototype {
     Building {
         min: [f32; 3],
         max: [f32; 3],
-        substance: String,
-    },
-    /// A graybox fir: a trunk cylinder over the full `height_m` and a canopy cone
-    /// `canopy_diameter_m` wide ([`crate::scatter`] owns the trunk radius and the canopy's base),
-    /// its trunk of `substance` as a building's box is.
-    Fir {
-        height_m: f32,
-        canopy_diameter_m: f32,
         substance: String,
     },
     /// A tree of the damage model ([`crate::trees`]): the asset `assets/trees/<asset>/`.
@@ -501,9 +491,8 @@ fn digest_of(files: &[&[u8]]) -> u64 {
 }
 
 /// Refuse a graybox prototype that describes no collider, naming the library file, the id, the
-/// field and the fix: a building box whose corners are not finite and ordered on every axis, a fir
-/// whose height or canopy is not finite and positive, and either one of a substance that states no
-/// friction (its collider carries the substance's, `scatter`). A tree or a structure is its own
+/// field and the fix: a box whose corners are not finite and ordered on every axis, or whose
+/// substance states no friction (its collider carries the substance's, `scatter`). A tree or a structure is its own
 /// asset's to check (`TreeLibrary::load`, `BuildingLibrary::load`).
 fn check_prototype(id: &str, prototype: &Prototype, library: &Path) {
     let substance = match prototype {
@@ -517,24 +506,6 @@ fn check_prototype(id: &str, prototype: &Prototype, library: &Path) {
                     min[axis].is_finite() && max[axis].is_finite() && min[axis] < max[axis],
                     "map: {} prototype {id:?}: `min` {min:?} / `max` {max:?} is no box on axis \
                      {axis} — state finite corners with min < max on every axis",
-                    library.display(),
-                );
-            }
-            substance
-        }
-        Prototype::Fir {
-            height_m,
-            canopy_diameter_m,
-            substance,
-        } => {
-            for (field, value) in [
-                ("height_m", height_m),
-                ("canopy_diameter_m", canopy_diameter_m),
-            ] {
-                assert!(
-                    value.is_finite() && *value > 0.0,
-                    "map: {} prototype {id:?}: `{field}` is {value} — state a finite length \
-                     above 0 m",
                     library.display(),
                 );
             }
@@ -699,21 +670,18 @@ pub(crate) mod tests {
     const HOUSE_INSTANCE: &str = r#"{"prototype":"house","translation":[0,0,0],
         "rotation":[0,0,0,1],"scale":[1,1,1],"id":"house_0001"}"#;
 
-    /// One instance of every prototype kind — a graybox house, a graybox fir, a tree of the damage
+    /// One instance of every prototype kind — a graybox house, a tree of the damage
     /// model and a building of the destruction model, the last two read from the shipped assets —
     /// on the fixture extent: what a layer that spawns a map asserts against, whatever the shipped
     /// map happens to place.
     pub(crate) fn mixed_fixture_manifest() -> MapManifest {
         const LIBRARY: &str = r#"{
             "house": Building(min: (-1.0, -0.5, -1.0), max: (1.0, 2.0, 1.0), substance: "Brick"),
-            "fir_box": Fir(height_m: 14.0, canopy_diameter_m: 6.0, substance: "Wood"),
             "fir": Tree(asset: "fir_1"),
             "brick": Structure(asset: "house_1"),
         }"#;
         const INSTANCES: &str = r#"{"prototype":"house","translation":[0,0,0],
             "rotation":[0,0,0,1],"scale":[1,1,1],"id":"house_0001"},
-            {"prototype":"fir_box","translation":[20,0,0],
-            "rotation":[0,0,0,1],"scale":[1,1,1],"id":"fir_box_0001"},
             {"prototype":"fir","translation":[0,0,20],
             "rotation":[0,0,0,1],"scale":[1,1,1],"id":"fir_0001"},
             {"prototype":"brick","translation":[0,0,-20],
@@ -914,7 +882,7 @@ pub(crate) mod tests {
     }
 
     /// A graybox prototype that describes no collider is refused when the library is read, naming
-    /// the library file, the id and the field: `scatter` builds the box, the trunk and their
+    /// the library file, the id and the field: `scatter` builds the box and its
     /// friction from these with no check of its own. Mutant: dropping any arm of `check_prototype`
     /// loads its case. FIXTURE DATA: the dimensions are round and stand for no building.
     #[test]
@@ -928,14 +896,6 @@ pub(crate) mod tests {
             (
                 r#"{"p": Building(min: (0.0, 0.0, 0.0), max: (1.0, NaN, 1.0), substance: "Brick")}"#,
                 "`min`",
-            ),
-            (
-                r#"{"p": Fir(height_m: 0.0, canopy_diameter_m: 6.0, substance: "Wood")}"#,
-                "`height_m`",
-            ),
-            (
-                r#"{"p": Fir(height_m: 14.0, canopy_diameter_m: inf, substance: "Wood")}"#,
-                "`canopy_diameter_m`",
             ),
             (
                 r#"{"p": Building(min: (0.0, 0.0, 0.0), max: (1.0, 1.0, 1.0), substance: "Nope")}"#,

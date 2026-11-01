@@ -473,7 +473,7 @@ fn trunks_near(manifest: &MapManifest, eye: Vec2, look: Vec2) -> (usize, usize) 
         .filter(|instance| {
             matches!(
                 manifest.prototypes.get(&instance.prototype),
-                Some(Prototype::Tree { .. } | Prototype::Fir { .. })
+                Some(Prototype::Tree { .. })
             )
         })
         .map(|instance| Vec2::new(instance.translation[0], instance.translation[2]) - eye)
@@ -1040,7 +1040,7 @@ mod tests {
         for instance in &manifest.instances {
             let xz = Vec2::new(instance.translation[0], instance.translation[2]);
             match manifest.prototypes.get(&instance.prototype) {
-                Some(Prototype::Tree { .. } | Prototype::Fir { .. }) => trees.push(xz),
+                Some(Prototype::Tree { .. }) => trees.push(xz),
                 Some(Prototype::Building { min, max, .. }) => {
                     let reach = Vec2::new(
                         min[0].abs().max(max[0].abs()),

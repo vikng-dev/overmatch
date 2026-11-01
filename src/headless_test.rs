@@ -2110,83 +2110,6 @@ fn a_main_gun_round_damages_a_tank_on_the_shipped_map() {
     );
 }
 
-/// THE FOREST'S TICK COST — a measurement bed, never a gate (`-- --ignored forest_tick_cost_bed
-/// --nocapture`): the shipped map's trees as one static body with a convex hull per segment,
-/// against the graybox cones they replaced and against no trees, on the shipped terrain with the
-/// duel's two tanks idle and no tree touched. Prints per-tick wall-clock percentiles of whole
-/// fixed ticks under the test profile, so only the differences between the rows carry meaning.
-#[test]
-#[ignore = "a measurement bed, run on demand"]
-fn forest_tick_cost_bed() {
-    use crate::map::Prototype;
-    const SETTLE: usize = 300;
-    const TICKS: usize = 600;
-    let shipped = crate::map::tests::shipped_manifest();
-    let cones = {
-        let mut manifest = shipped.clone();
-        // The graybox the trees replaced, in the library's id order (prototypes.ron records them).
-        let sizes = [(18.96, 6.5), (14.08, 5.8), (14.55, 6.2)];
-        let mut k = 0;
-        for prototype in manifest.prototypes.values_mut() {
-            if matches!(prototype, Prototype::Tree { .. }) {
-                let (height_m, canopy_diameter_m) = sizes[k % sizes.len()];
-                *prototype = Prototype::Fir {
-                    height_m,
-                    canopy_diameter_m,
-                    substance: "Wood".to_owned(),
-                };
-                k += 1;
-            }
-        }
-        manifest
-    };
-    let bare = {
-        let mut manifest = shipped.clone();
-        let prototypes = manifest.prototypes.clone();
-        manifest
-            .instances
-            .retain(|instance| !matches!(prototypes[&instance.prototype], Prototype::Tree { .. }));
-        manifest
-    };
-    let mut rows = Vec::new();
-    for (label, manifest) in [
-        ("trees, a hull per segment", shipped),
-        ("cones, the graybox", cones),
-        ("no trees", bare),
-    ] {
-        let grid = crate::terrain_grid::tests::shipped_grid();
-        let mut app = booted_sim_on_map(Some(grid), Some(manifest));
-        start_fixed_clock(&mut app);
-        for _ in 0..SETTLE {
-            app.update();
-        }
-        let mut ticks_us: Vec<u128> = (0..TICKS)
-            .map(|_| {
-                let started = Instant::now();
-                app.update();
-                started.elapsed().as_micros()
-            })
-            .collect();
-        ticks_us.sort_unstable();
-        let world = app.world_mut();
-        let colliders = world
-            .query::<&avian3d::prelude::Collider>()
-            .iter(world)
-            .count();
-        let trees = world.query::<&crate::trees::TreeBody>().iter(world).count();
-        rows.push(format!(
-            "{label}: {trees} tree bodies, {colliders} colliders; per tick p50 {} us, p95 {} us, \
-             max {} us",
-            ticks_us[TICKS / 2],
-            ticks_us[TICKS * 95 / 100],
-            ticks_us[TICKS - 1],
-        ));
-    }
-    for row in &rows {
-        eprintln!("forest tick cost: {row}");
-    }
-}
-
 /// THE REVERSE THROW (#188) — a measurement bed, never a gate (`-- --ignored reverse_throw_bed
 /// --nocapture`): the controlled tank reverses at full throttle down a slope onto flat ground and
 /// over one raised line of grid samples, on a synthetic grid at the shipped map's 1.465 m spacing.
@@ -2774,7 +2697,7 @@ fn every_collider_carries_its_materials_friction_under_the_one_rule() {
             let id = instance.expect("a scatter proxy carries its instance");
             let record = manifest.instances.iter().find(|i| i.id == id).unwrap();
             match &manifest.prototypes[&record.prototype] {
-                Prototype::Building { substance, .. } | Prototype::Fir { substance, .. } => {
+                Prototype::Building { substance, .. } => {
                     registry.contact_friction(substance).unwrap()
                 }
                 other => panic!("a scatter proxy of {other:?}"),

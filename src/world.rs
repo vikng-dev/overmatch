@@ -742,7 +742,6 @@ fn spawn_environment(
             obstacles = crate::scatter::spawn(
                 &mut commands,
                 &mut meshes,
-                &mut materials,
                 &manifest,
                 &grid,
                 &mut blocks,

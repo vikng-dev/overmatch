@@ -1,6 +1,6 @@
 //! The game's damage-model view: crossings of static graybox scatter proxies.
 //!
-//! Only the map's `Building` and `Fir` prototypes carry [`ScatterProxy`]. They have no ballistic
+//! Only the map's `Building` prototypes carry [`ScatterProxy`]. They have no ballistic
 //! volume, so this view-only cast marks their actual entry geometry without changing shell state.
 //! `Structure` and `Tree` prototypes carry ballistic volumes instead: the authority resolves their
 //! impacts and this cast does not see them. The proxy's authored substance supplies its surface

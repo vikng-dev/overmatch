@@ -8,10 +8,6 @@
 // instance origin; a `min.y` below zero is a skirt that sinks into the surface. A building is also
 // a `TerrainMap` block (the belts sense it). `substance` is the `materials.ron` row whose friction
 // its collider carries.
-// `Fir(height_m, canopy_diameter_m, substance)`: a graybox fir, a trunk cylinder over the full
-// height and a canopy cone; a trunk collider only, never a block, of `substance` as a building's
-// box is. The graybox the trees replaced, kept for the frame-cost comparison: fir_tree_01_a/b/c
-// were Fir(18.96, 6.5), Fir(14.08, 5.8), Fir(14.55, 6.2), all Wood.
 // `Tree(asset)`: a tree of the damage model, `assets/trees/<asset>/`; one static body with a
 // collider per segment, never a block.
 // `Structure(asset)`: a building of the destruction model, `assets/buildings/<asset>/`, baked by
