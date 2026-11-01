@@ -123,12 +123,19 @@ pub(crate) fn print_responses(table: &GroundTypes) -> [PrintResponse; 4] {
     slot_grounds(table).map(|ground| ground.print)
 }
 
-/// The erodibility of ground of print weights `weights` ([`print_weights`]): each slot's
-/// [`crate::ground_types::DustResponse::erodibility`], blended by the painted weights, in 0..=1.
-pub(crate) fn dust_erodibility(table: &GroundTypes, weights: Vec4) -> f32 {
-    weights.dot(Vec4::from_array(
-        slot_grounds(table).map(|ground| ground.dust.erodibility),
-    ))
+/// What ground of print weights `weights` ([`print_weights`]) gives a muzzle blast, per slot: its
+/// share of a fully erodible ground's cloud (the slot's painted weight times its
+/// [`crate::ground_types::DustResponse::erodibility`]) and that ground's dust response. The
+/// shares sum to the blended erodibility, in 0..=1.
+pub(crate) fn dust_sources(
+    table: &GroundTypes,
+    weights: Vec4,
+) -> [(f32, crate::ground_types::DustResponse); 4] {
+    let grounds = slot_grounds(table);
+    std::array::from_fn(|slot| {
+        let dust = grounds[slot].dust;
+        (weights[slot] * dust.erodibility, dust)
+    })
 }
 
 /// The material's print lanes for `table`, per slot (`x` the base pack, `yzw` the layers):

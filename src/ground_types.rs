@@ -74,14 +74,17 @@ impl PrintResponse {
     }
 }
 
-/// How readily one ground type gives up dust to a muzzle blast (view only, `vfx::muzzle`). The
-/// domain is [`GroundTypes::parse`]'s.
+/// How readily one ground type gives up dust to a muzzle blast, and what that dust looks like
+/// (view only, `vfx::muzzle`). The domain is [`GroundTypes::parse`]'s.
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct DustResponse {
     /// The share of a gun's authored dust cloud this ground lifts, 0..=1: loose dry fines give
     /// it all, paving or wet cohesive ground little.
     pub(crate) erodibility: f32,
+    /// The lifted soil's albedo, sRGB, each channel 0..=1: the colour of the ground's own fines,
+    /// which the key light lights like the ground they came from.
+    pub(crate) colour_srgb: [f32; 3],
 }
 
 /// One ground type: one block per thing the ground drives.
@@ -114,6 +117,7 @@ const FILE_HEADER: &str = "\
 //   roughness_gain       roughness multiplier under a sole; below 1 reads wet
 //   friction             the friction coefficient the ground brings to a contact, one side's
 //   dust.erodibility     the share of a gun's muzzle dust cloud this ground lifts, 0..1
+//   dust.colour_srgb     the lifted soil's albedo, sRGB, each channel 0..1
 //
 // Every print value is ASSUMED: ordered by the Bekker fits in the ground-stamping note's §2, dirt
 // and gravel raised so a print reads at 10-30 m, then tuned by eye in play (`track_prints::tuning`).
@@ -121,7 +125,9 @@ const FILE_HEADER: &str = "\
 // source read: gravel, the terrain collider's ground, at Avian's own default 0.5; the others
 // ordered by hand, paving gripping best and mud least. Every erodibility is ASSUMED, no source
 // read: ordered by hand, loose dry dirt and sand giving the whole cloud, gravel most of it, wet
-// mud and intact paving little.
+// mud and intact paving little. Each pack's dust colour is DERIVED: the mean of the pack's
+// shipped full-resolution albedo slice (`coast_sand_rocks_02_diff.ktx2`, `blend_diff.ktx2`),
+// MEASURED; concrete names no pack, and its light grey is ASSUMED.
 ";
 
 /// Why the table could not be read or written: the file's I/O, its RON, a value [`GroundTypes::parse`]
@@ -186,6 +192,24 @@ impl GroundTypes {
                     ground.dust.erodibility,
                     (0.0..=1.0).contains(&ground.dust.erodibility),
                     "a share in 0..=1",
+                ),
+                (
+                    "dust.colour_srgb",
+                    ground.dust.colour_srgb[0],
+                    (0.0..=1.0).contains(&ground.dust.colour_srgb[0]),
+                    "an sRGB channel in 0..=1",
+                ),
+                (
+                    "dust.colour_srgb",
+                    ground.dust.colour_srgb[1],
+                    (0.0..=1.0).contains(&ground.dust.colour_srgb[1]),
+                    "an sRGB channel in 0..=1",
+                ),
+                (
+                    "dust.colour_srgb",
+                    ground.dust.colour_srgb[2],
+                    (0.0..=1.0).contains(&ground.dust.colour_srgb[2]),
+                    "an sRGB channel in 0..=1",
                 ),
                 (
                     "print.softness_mm_per_kpa",
@@ -300,7 +324,8 @@ mod tests {
     /// FIXTURE DATA: the numbers are round and stand for no ground.
     fn table_text(gravel: &str) -> String {
         let block = "print: (softness_mm_per_kpa: 0.5, depth_cap_mm: 50.0, darkening: 0.2, \
-                     roughness_gain: 1.0), friction: 0.5, dust: (erodibility: 0.5)";
+                     roughness_gain: 1.0), friction: 0.5, dust: (erodibility: 0.5, \
+                     colour_srgb: (0.5, 0.4, 0.3))";
         format!(
             "(types: {{\"gravel\": ({gravel}), \"dirt\": ({block}), \"sand\": ({block}), \
              \"mud\": ({block})}})"
@@ -366,7 +391,7 @@ mod tests {
     fn a_ground_that_states_too_little_is_refused_at_load() {
         let block = "print: (softness_mm_per_kpa: 0.5, depth_cap_mm: 50.0, darkening: 0.2, \
                      roughness_gain: 1.0)";
-        let dust = "dust: (erodibility: 0.5)";
+        let dust = "dust: (erodibility: 0.5, colour_srgb: (0.5, 0.4, 0.3))";
         for (missing, gravel) in [
             ("print", format!("friction: 0.5, {dust}")),
             ("friction", format!("{block}, {dust}")),
@@ -401,14 +426,22 @@ mod tests {
     /// read as a ground that states none.
     #[test]
     fn a_value_out_of_domain_is_refused_at_load_naming_the_ground() {
-        let gravel = |[softness, cap, darkening, roughness, friction, erodibility]: [&str; 6]| {
+        let gravel = |[
+            softness,
+            cap,
+            darkening,
+            roughness,
+            friction,
+            erodibility,
+            red,
+        ]: [&str; 7]| {
             format!(
                 "print: (softness_mm_per_kpa: {softness}, depth_cap_mm: {cap}, darkening: \
                  {darkening}, roughness_gain: {roughness}), friction: {friction}, \
-                 dust: (erodibility: {erodibility})"
+                 dust: (erodibility: {erodibility}, colour_srgb: ({red}, 0.4, 0.3))"
             )
         };
-        let ok = ["0.5", "50.0", "0.2", "1.0", "0.5", "0.5"];
+        let ok = ["0.5", "50.0", "0.2", "1.0", "0.5", "0.5", "0.5"];
         let fields = [
             "print.softness_mm_per_kpa",
             "print.depth_cap_mm",
@@ -416,13 +449,15 @@ mod tests {
             "print.roughness_gain",
             "friction",
             "dust.erodibility",
+            "dust.colour_srgb",
         ];
-        let bad: [&[&str]; 6] = [
+        let bad: [&[&str]; 7] = [
             &["-0.1", "inf", "NaN"],
             &["-1.0", "inf", "NaN"],
             &["-0.1", "1.1", "NaN"],
             &["0.0", "-1.0", "inf", "NaN"],
             &["-0.1", "inf", "-inf", "NaN"],
+            &["-0.1", "1.1", "NaN"],
             &["-0.1", "1.1", "NaN"],
         ];
         for (index, field) in fields.iter().enumerate() {

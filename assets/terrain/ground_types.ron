@@ -7,6 +7,7 @@
 //   roughness_gain       roughness multiplier under a sole; below 1 reads wet
 //   friction             the friction coefficient the ground brings to a contact, one side's
 //   dust.erodibility     the share of a gun's muzzle dust cloud this ground lifts, 0..1
+//   dust.colour_srgb     the lifted soil's albedo, sRGB, each channel 0..1
 //
 // Every print value is ASSUMED: ordered by the Bekker fits in the ground-stamping note's §2, dirt
 // and gravel raised so a print reads at 10-30 m, then tuned by eye in play (`track_prints::tuning`).
@@ -14,7 +15,9 @@
 // source read: gravel, the terrain collider's ground, at Avian's own default 0.5; the others
 // ordered by hand, paving gripping best and mud least. Every erodibility is ASSUMED, no source
 // read: ordered by hand, loose dry dirt and sand giving the whole cloud, gravel most of it, wet
-// mud and intact paving little.
+// mud and intact paving little. Each pack's dust colour is DERIVED: the mean of the pack's
+// shipped full-resolution albedo slice (`coast_sand_rocks_02_diff.ktx2`, `blend_diff.ktx2`),
+// MEASURED; concrete names no pack, and its light grey is ASSUMED.
 (
     types: {
         "concrete": (
@@ -27,6 +30,7 @@
             friction: 0.6,
             dust: (
                 erodibility: 0.1,
+                colour_srgb: (0.62, 0.61, 0.58),
             ),
         ),
         "dirt": (
@@ -39,6 +43,7 @@
             friction: 0.5,
             dust: (
                 erodibility: 1.0,
+                colour_srgb: (0.48, 0.39, 0.31),
             ),
         ),
         "gravel": (
@@ -51,6 +56,7 @@
             friction: 0.5,
             dust: (
                 erodibility: 0.8,
+                colour_srgb: (0.3, 0.28, 0.19),
             ),
         ),
         "mud": (
@@ -63,6 +69,7 @@
             friction: 0.3,
             dust: (
                 erodibility: 0.3,
+                colour_srgb: (0.25, 0.23, 0.22),
             ),
         ),
         "sand": (
@@ -75,6 +82,7 @@
             friction: 0.4,
             dust: (
                 erodibility: 1.0,
+                colour_srgb: (0.27, 0.24, 0.19),
             ),
         ),
     },

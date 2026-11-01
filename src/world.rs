@@ -88,6 +88,13 @@ pub(crate) fn sun_light() -> DirectionalLight {
     }
 }
 
+/// The sun's irradiance on level ground, lux: [`SUN_ILLUMINANCE_LUX`] times the sine of the sun's
+/// elevation ([`sun_elevation_deg`]). The key light a lit view-only mass shares with the ground it
+/// rose from; the sky's share is not in it.
+pub(crate) fn level_ground_irradiance_lux() -> f32 {
+    SUN_ILLUMINANCE_LUX * sun_elevation_deg().to_radians().sin()
+}
+
 /// The sun's elevation, degrees: [`SUN_ELEVATION_DEG`], or a capture plan's
 /// `scene.sun_elevation_deg` (`dev_capture::plan`, validated there). It moves the key light, its
 /// sky and the baked terrain shadow (`terrain_shadow`) together, so a capture can judge terrain

@@ -13,6 +13,9 @@
 //! Invariant (ADR-0014): spawned entities are render-only. Light and billboard rings bound replay
 //! duplicates; stale remote shots do not replay an already-expired flash.
 
+use std::collections::BTreeMap;
+
+use bevy::camera::Exposure;
 use bevy::ecs::system::SystemParam;
 use bevy::prelude::*;
 
@@ -73,6 +76,13 @@ const LIGHT_CAP: usize = 12;
 const GROUND_DUST_FRAME_RATE: f32 = 3.0;
 const GROUND_DUST_SPIN_MAX: f32 = 0.35;
 
+/// The erosion threshold a dust puff reaches at the end of its life: the dust sheet's own signal
+/// ceiling, so a puff dissolves over its whole authored lifetime. MEASURED on `impact_dust.png`'s
+/// signal (red × alpha) histogram under the shader's erosion at this layer's sharpness: a ramp to
+/// 1.0 halves a puff's coverage at 17 % of its life and quarters it at 28 %; a ramp to 0.5
+/// quarters it at 55 % and leaves 5 % at 90 %.
+const GROUND_DUST_EROSION_END: f32 = 0.5;
+
 /// Beyond this camera distance (m) only the core, the fireball and the light spawn: a cost bound on
 /// near-field overdraw. It skips layers and never changes the size of a drawn one.
 const FAR_FULL_DRESSING: f32 = 400.0;
@@ -80,6 +90,7 @@ const FAR_FULL_DRESSING: f32 = 400.0;
 pub(super) fn plugin(app: &mut App) {
     app.init_resource::<MuzzleLightRing>()
         .init_resource::<SmokeCadence>()
+        .init_resource::<DustPalettes>()
         .add_systems(Startup, setup_muzzle_assets)
         .add_observer(dress_fire)
         .add_systems(Update, decay_muzzle_lights);
@@ -104,7 +115,8 @@ pub(super) struct MuzzleVfxAssets {
     flame_atlas: Handle<Image>,
     smoke_atlas: Handle<Image>,
     /// The billow atlas the impact read also loads (the asset server dedupes the load and shares
-    /// the GPU texture) — the mass sprite the ground-dust cloud is drawn from.
+    /// the GPU texture) — the mass sprite the ground-dust cloud is drawn from, through the lifting
+    /// ground's own palette ([`DustPalettes`]).
     dust_atlas: Handle<Image>,
     flash_lut: Handle<Image>,
     /// The blast core's own palette — the flash LUT drives nearly the whole signal band to
@@ -112,8 +124,6 @@ pub(super) struct MuzzleVfxAssets {
     /// sheet whose MID-tones are the fire.
     blast_lut: Handle<Image>,
     smoke_lut: Handle<Image>,
-    /// Earth palette for the ground-dust cloud — brown lifted soil, never the smoke gray.
-    dust_lut: Handle<Image>,
 }
 
 impl MuzzleVfxAssets {
@@ -161,18 +171,20 @@ impl MuzzleVfxAssets {
         }
     }
 
-    /// The ground-dust material template at overall `opacity`: the billow atlas through the earth
-    /// LUT, alpha-blend occluding mass with no heat (lifted soil is lit mass, never an emitter).
-    /// Rides the smoke's already-warmed Blend pipeline.
-    fn dust_material(&self, opacity: f32) -> BillboardLook {
+    /// The ground-dust material template at overall `opacity`: the billow atlas through the lifting
+    /// ground's `palette` ([`DustPalettes`]), alpha-blend occluding mass. Lifted soil is lit mass,
+    /// never an emitter: the palette's gain lane is one everywhere, so the shader's
+    /// `1 + gain · glow.x` is `light`, the key light's radiance per unit albedo. Rides the smoke's
+    /// already-warmed Blend pipeline.
+    fn dust_material(&self, opacity: f32, palette: Handle<Image>, light: f32) -> BillboardLook {
         BillboardLook {
             params: VfxParams {
                 frame: Vec4::new(0.0, 2.0, 2.0, 0.0),
                 fade: Vec4::new(0.0, 2.2, 0.0, opacity),
-                glow: Vec4::new(0.0, 0.0, SOFT_PARTICLE_DEPTH, 0.0),
+                glow: Vec4::new(light - 1.0, 0.0, SOFT_PARTICLE_DEPTH, 0.0),
             },
             atlas: self.dust_atlas.clone(),
-            lut: self.dust_lut.clone(),
+            lut: palette,
             alpha_mode: AlphaMode::Blend,
         }
     }
@@ -223,18 +235,6 @@ pub(super) fn setup_muzzle_assets(
         let heat = x * (-y * 9.0).exp();
         (color, heat)
     });
-    // Dust LUT: sunlit tan where the sprite signal is strong, sinking to a dark damp brown in the
-    // cloud's shadow and darkening as it ages (Y). No heat lane — lifted soil never emits.
-    let dust_lut = gradient_lut(&mut images, |x, y| {
-        let lum = 0.07 + 0.36 * x;
-        let age = 1.0 - y;
-        let color = LinearRgba::rgb(
-            lum * (0.80 + 0.28 * age),
-            lum * (0.61 + 0.19 * age),
-            lum * (0.43 + 0.11 * age),
-        );
-        (color, 0.0)
-    });
     commands.insert_resource(MuzzleVfxAssets {
         quad: unit_quad(&mut meshes),
         core_atlas: asset_server.load(super::Texture::FlashCore.path()),
@@ -249,8 +249,38 @@ pub(super) fn setup_muzzle_assets(
         flash_lut,
         blast_lut,
         smoke_lut,
-        dust_lut,
     });
+}
+
+/// One palette per lifted-soil colour ([`crate::ground_types::DustResponse::colour_srgb`]), made
+/// the first time that colour's ground lifts dust and kept for the session: the ground table is
+/// the colours' one home, and a tuned table makes its new colour's palette on its next shot.
+#[derive(Resource, Default)]
+struct DustPalettes(BTreeMap<[u32; 3], Handle<Image>>);
+
+impl DustPalettes {
+    /// The palette of soil of albedo `colour_srgb`: the albedo where the sprite signal is strong
+    /// (the sunlit face), sinking to a sixth of it in the cloud's own shadow and to three quarters
+    /// of it as the cloud ages (Y). The gain lane is one: the light rides the material.
+    fn palette(&mut self, images: &mut Assets<Image>, colour_srgb: [f32; 3]) -> Handle<Image> {
+        self.0
+            .entry(colour_srgb.map(f32::to_bits))
+            .or_insert_with(|| {
+                let albedo = LinearRgba::from(Color::srgb_from_array(colour_srgb));
+                gradient_lut(images, |x, y| {
+                    let shade = (0.16 + 0.84 * x) * (0.76 + 0.24 * (1.0 - y));
+                    (
+                        LinearRgba::rgb(
+                            albedo.red * shade,
+                            albedo.green * shade,
+                            albedo.blue * shade,
+                        ),
+                        1.0,
+                    )
+                })
+            })
+            .clone()
+    }
 }
 
 /// A live muzzle light's age plus the scale it was born with; [`decay_muzzle_lights`] drives the
@@ -372,7 +402,7 @@ struct MuzzleKit<'w, 's> {
     light_ring: ResMut<'w, MuzzleLightRing>,
     cadence: ResMut<'w, SmokeCadence>,
     rng: ResMut<'w, ViewRng>,
-    camera: Query<'w, 's, &'static GlobalTransform, With<PlayerView>>,
+    camera: Query<'w, 's, (&'static GlobalTransform, Option<&'static Exposure>), With<PlayerView>>,
     weapons: Query<'w, 's, (&'static Weapon, &'static TankRoot, &'static WeaponIndex)>,
     /// The decoded terrain surface, when the world has one: the ground blast's only height query.
     grid: Option<Res<'w, crate::terrain_grid::HeightGrid>>,
@@ -383,6 +413,8 @@ struct MuzzleKit<'w, 's> {
         Res<'w, crate::ground_types::GroundTypes>,
         Res<'w, crate::track_prints::PrintDepths>,
     )>,
+    palettes: ResMut<'w, DustPalettes>,
+    images: ResMut<'w, Assets<Image>>,
     commands: Commands<'w, 's>,
 }
 
@@ -413,15 +445,21 @@ fn dress_fire(fire: On<FireShell>, mut kit: MuzzleKit) {
         .is_some_and(|smoke| kit.cadence.puff(fire.shooter, smoke.every_rounds));
     let origin = fire.origin;
     let dir = Vec3::from(fire.direction);
-    let near = if kit.camera.is_empty() {
-        true // The headless effect harness exercises the complete recipe without a viewer.
+    // The headless effect harness has no viewer: it exercises the complete recipe, under the
+    // exposure Bevy renders a camera without an `Exposure` at.
+    let (near, exposure) = if kit.camera.is_empty() {
+        (true, Exposure::default())
     } else {
-        kit.camera
+        let (eye, exposure) = kit
+            .camera
             .single()
-            .expect("exactly one camera declares PlayerView")
-            .translation()
-            .distance_squared(origin)
-            < FAR_FULL_DRESSING * FAR_FULL_DRESSING
+            .expect("exactly one camera declares PlayerView");
+        (
+            eye.translation().distance_squared(origin) < FAR_FULL_DRESSING * FAR_FULL_DRESSING,
+            // Bevy's own rule (`bevy_render::camera::extract_cameras`): a camera with no
+            // `Exposure` renders at the default one.
+            exposure.copied().unwrap_or_default(),
+        )
     };
 
     // --- Flash core: one camera-facing additive billboard, born at its largest. The starburst
@@ -596,8 +634,12 @@ fn dress_fire(fire: On<FireShell>, mut kit: MuzzleKit) {
         && let Some((table, painted)) = kit.painted.as_ref()
     {
         let weights = painted.ground_weights(Vec2::new(origin.x, origin.z));
-        let erodibility = crate::terrain_blend::dust_erodibility(table, weights);
-        spawn_ground_dust(origin, dir, ground_y, erodibility, &blast, &mut kit);
+        let sources = crate::terrain_blend::dust_sources(table, weights);
+        // The key light's radiance per unit albedo on level ground: what lit soil of albedo one
+        // draws at under this camera.
+        let light = crate::world::level_ground_irradiance_lux() / std::f32::consts::PI
+            * exposure.exposure();
+        spawn_ground_dust(origin, dir, ground_y, sources, light, &blast, &mut kit);
     }
 
     // --- Muzzle light: transient, first frame hottest. Its lifetime and refire cadence decide
@@ -645,12 +687,15 @@ fn dust_ground_y(
 
 /// The ground blast's dust cloud: wide alpha-blend puffs born on the ground under the muzzle and
 /// pushed outward, each along an azimuth pulled toward the bore's by the emission's `bore_bias`.
-/// The ground's `erodibility` (0..=1) is the share of the gun's rolled puff count it lifts.
+/// The painted grounds under the muzzle are the cloud's `sources` (`terrain_blend::dust_sources`):
+/// their shares sum to the share of the gun's rolled puff count the ground lifts, and each puff
+/// is one source's soil, drawn by share, in that ground's albedo lit by `light`.
 fn spawn_ground_dust(
     muzzle: Vec3,
     dir: Vec3,
     ground_y: f32,
-    erodibility: f32,
+    sources: [(f32, crate::ground_types::DustResponse); 4],
+    light: f32,
     blast: &GroundBlast,
     kit: &mut MuzzleKit,
 ) {
@@ -659,8 +704,10 @@ fn spawn_ground_dust(
     let bore_xz = Vec3::new(dir.x, 0.0, dir.z).try_normalize();
     let (lo, hi) = blast.puffs;
     let rolled = (lo + (kit.rng.next_f32() * (hi - lo + 1) as f32) as u32).min(hi);
-    let count = (rolled as f32 * erodibility).round() as u32;
+    let lifted: f32 = sources.iter().map(|(share, _)| share).sum();
+    let count = (rolled as f32 * lifted).round() as u32;
     for _ in 0..count {
+        let soil = soil_of(&sources, kit.rng.next_f32() * lifted);
         let theta = kit.rng.range(0.0, std::f32::consts::TAU);
         let radial = Vec3::new(theta.cos(), 0.0, theta.sin());
         let away = match bore_xz {
@@ -681,7 +728,8 @@ fn spawn_ground_dust(
         let start = kit.rng.range(0.0, 4.0);
         let roll = kit.rng.range(0.0, std::f32::consts::TAU);
         let spin = kit.rng.range(-GROUND_DUST_SPIN_MAX, GROUND_DUST_SPIN_MAX);
-        let material = kit.assets.dust_material(blast.opacity);
+        let palette = kit.palettes.palette(&mut kit.images, soil.colour_srgb);
+        let material = kit.assets.dust_material(blast.opacity, palette, light);
         kit.billboard(BillboardSpec {
             material,
             lifetime,
@@ -698,10 +746,31 @@ fn spawn_ground_dust(
             aspect: Vec3::ONE,
             roll,
             spin,
-            erosion_end: 1.0,
+            erosion_end: GROUND_DUST_EROSION_END,
             rotation: None,
         });
     }
+}
+
+/// The source whose share interval holds `draw`, a point in `[0, Σ share)`: the sources laid end
+/// to end in slot order. A draw at or past the total (float rounding at the top end) is the last
+/// source with a positive share.
+fn soil_of(
+    sources: &[(f32, crate::ground_types::DustResponse); 4],
+    mut draw: f32,
+) -> crate::ground_types::DustResponse {
+    for (share, soil) in sources {
+        if *share > 0.0 && draw < *share {
+            return *soil;
+        }
+        draw -= share;
+    }
+    sources
+        .iter()
+        .rev()
+        .find(|(share, _)| *share > 0.0)
+        .expect("a ground that lifts a puff has a source with a positive share")
+        .1
 }
 
 /// Decay each muzzle light hard (cubic — most of the drop in the first frames) and despawn at its
@@ -756,6 +825,7 @@ mod tests {
         app.init_resource::<BillboardRing>()
             .init_resource::<MuzzleLightRing>()
             .init_resource::<SmokeCadence>()
+            .init_resource::<DustPalettes>()
             .init_resource::<Assets<Mesh>>()
             .init_resource::<Assets<Image>>()
             .init_resource::<Assets<VfxBillboardMaterial>>()
@@ -785,7 +855,6 @@ mod tests {
             flash_lut: Handle::default(),
             blast_lut: Handle::default(),
             smoke_lut: Handle::default(),
-            dust_lut: Handle::default(),
         });
         app
     }
@@ -1089,6 +1158,178 @@ mod tests {
         ));
         cannon(&mut undrawn, 0);
         assert!(dust_puffs(&mut undrawn).is_empty());
+    }
+
+    /// The sunlit (young, full-signal) texel of a dust puff's palette, linear 8-bit RGB, and the
+    /// light its material carries (`1 + glow.x`, the palette's gain lane being one).
+    fn puff_soil(app: &mut App, puff: Entity) -> ([u8; 3], f32) {
+        let world = app.world();
+        let material = world
+            .get::<MeshMaterial3d<VfxBillboardMaterial>>(puff)
+            .expect("a puff draws a billboard material");
+        let lut = world
+            .resource::<Assets<VfxBillboardMaterial>>()
+            .get(&material.0)
+            .expect("the family material is stored")
+            .lut
+            .clone();
+        let data = world
+            .resource::<Assets<Image>>()
+            .get(&lut)
+            .expect("the palette is stored")
+            .data
+            .as_ref()
+            .expect("the palette carries its texels");
+        // The palette is 64 × 16 RGBA8: x = 63 is full signal, row 0 the newborn cloud.
+        let texel = 63 * 4;
+        let light = world
+            .get::<Billboard>(puff)
+            .expect("a billboard")
+            .lanes
+            .glow
+            .x
+            + 1.0;
+        ([data[texel], data[texel + 1], data[texel + 2]], light)
+    }
+
+    /// `colour_srgb` as the palette stores its sunlit texel: linear, 8-bit.
+    fn stored_linear(colour_srgb: [f32; 3]) -> [u8; 3] {
+        let linear = LinearRgba::from(Color::srgb_from_array(colour_srgb));
+        [linear.red, linear.green, linear.blue].map(|c| (c.clamp(0.0, 1.0) * 255.0).round() as u8)
+    }
+
+    /// Lifted soil is the ground's own, lit by the key light like the ground it rose from: every
+    /// puff's sunlit texel is the lifting ground's albedo and its material carries the sun's
+    /// radiance per unit albedo on level ground under the default exposure. Two grounds differing
+    /// only in colour lift differently coloured clouds. A mutant that keeps one shared earth
+    /// palette, or draws the dust unlit, fails. FIXTURE DATA: the shipped table with the base
+    /// ground's colour replaced.
+    #[test]
+    fn each_puff_is_its_grounds_soil_lit_by_the_key_light() {
+        let light = crate::world::level_ground_irradiance_lux() / std::f32::consts::PI
+            * Exposure::default().exposure();
+        for colour in [[0.6, 0.5, 0.3], [0.2, 0.25, 0.3]] {
+            let mut app = harness_ground(0.0);
+            app.world_mut()
+                .resource_mut::<crate::ground_types::GroundTypes>()
+                .types
+                .get_mut(crate::terrain_blend::BASE_GROUND)
+                .expect("the base pack's ground")
+                .dust
+                .colour_srgb = colour;
+            cannon(&mut app, 0);
+            let puffs = dust_puffs(&mut app);
+            assert!(!puffs.is_empty());
+            for (puff, _, _) in puffs {
+                let (texel, lit) = puff_soil(&mut app, puff);
+                assert_eq!(
+                    texel,
+                    stored_linear(colour),
+                    "the puff is the ground's soil"
+                );
+                assert!(
+                    (lit - light).abs() < 1e-4,
+                    "lit at {lit}, the key light is {light}"
+                );
+            }
+        }
+    }
+
+    /// A puff's soil is drawn by share from the grounds under the muzzle: the sources lie end to
+    /// end in slot order, a zero share is never drawn, and a draw rounding onto the total lands
+    /// on the last lifting source. A mutant that ignores the shares draws the wrong soil.
+    #[test]
+    fn a_puffs_soil_is_drawn_by_its_grounds_share() {
+        let soil = |red: f32| crate::ground_types::DustResponse {
+            erodibility: 1.0,
+            colour_srgb: [red, 0.0, 0.0],
+        };
+        // FIXTURE DATA: four distinguishable soils, the first and third lifting nothing.
+        let sources = [
+            (0.0, soil(0.1)),
+            (0.25, soil(0.2)),
+            (0.0, soil(0.3)),
+            (0.5, soil(0.4)),
+        ];
+        let red = |draw: f32| soil_of(&sources, draw).colour_srgb[0];
+        assert_eq!(red(0.0), 0.2);
+        assert_eq!(red(0.249), 0.2);
+        assert_eq!(red(0.25), 0.4);
+        assert_eq!(red(0.749), 0.4);
+        assert_eq!(red(0.75), 0.4);
+    }
+
+    /// MEASURED, `--nocapture`: each shipped gun's ground blast on each shipped ground, the base
+    /// slot standing in for that ground. Class invariants only: a ground lifts the gun's rolled
+    /// range scaled by its erodibility, every puff of its own soil, at the gun's metres and life.
+    #[test]
+    fn every_shipped_blast_lifts_each_grounds_own_soil() {
+        const SHOTS: usize = 24;
+        let shipped = crate::ground_types::GroundTypes::load_shipped();
+        let mut blasts: Vec<(&str, MuzzleEmission)> = crate::guns::GunRegistry::shipped()
+            .fired_rounds()
+            .filter(|(_, _, round)| round.muzzle.ground_blast.is_some())
+            .map(|(gun, _, round)| (gun, round.muzzle))
+            .collect();
+        blasts.dedup_by_key(|(gun, _)| *gun);
+        assert!(
+            !blasts.is_empty(),
+            "no shipped gun lifts dust: the survey would be vacuous"
+        );
+        for (gun, muzzle) in blasts {
+            let blast = muzzle.ground_blast.expect("filtered on a blast");
+            for (name, ground) in &shipped.types {
+                let erodibility = ground.dust.erodibility;
+                let range = (
+                    (blast.puffs.0 as f32 * erodibility).round() as usize,
+                    (blast.puffs.1 as f32 * erodibility).round() as usize,
+                );
+                let (mut least, mut most) = (usize::MAX, 0);
+                let mut ends = (f32::MAX, 0.0_f32);
+                for shot in 0..SHOTS {
+                    // One shot per app, each under its own view seed: the rolls differ, and no
+                    // ring eviction can recycle a puff's id between shots.
+                    let mut app = harness_ground(0.0);
+                    app.insert_resource(ViewRng::seeded(shot as u64));
+                    app.world_mut()
+                        .resource_mut::<crate::ground_types::GroundTypes>()
+                        .types
+                        .insert(crate::terrain_blend::BASE_GROUND.to_owned(), *ground);
+                    fire_with(&mut app, muzzle, SLOW, CANNON_CALIBER, 0, true);
+                    let puffs = dust_puffs(&mut app);
+                    let count = puffs.len();
+                    assert!(
+                        (range.0..=range.1).contains(&count),
+                        "{gun} on {name}: {count} puffs outside {range:?}"
+                    );
+                    for &(puff, size, _) in &puffs {
+                        let soil = puff_soil(&mut app, puff).0;
+                        assert_eq!(
+                            soil,
+                            stored_linear(ground.dust.colour_srgb),
+                            "{gun} on {name}"
+                        );
+                        assert!((size - blast.birth_diameter_m).abs() < 1e-4);
+                        let end = app
+                            .world()
+                            .get::<Billboard>(puff)
+                            .expect("a billboard")
+                            .end_size;
+                        ends = (ends.0.min(end), ends.1.max(end));
+                    }
+                    (least, most) = (least.min(count), most.max(count));
+                }
+                eprintln!(
+                    "MEASURED {gun} on {name} (erodibility {erodibility}, soil {:?}): {least}-{most} \
+                     puffs over {SHOTS} shots, {:.2} m at birth to {:.2}-{:.2} m, {:?} s",
+                    ground.dust.colour_srgb,
+                    blast.birth_diameter_m,
+                    ends.0,
+                    ends.1,
+                    blast.lifetime_s
+                );
+            }
+        }
     }
 
     /// The cloud's metres are the emission's (ADR-0023: physical inputs only, never the viewer): a
