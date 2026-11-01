@@ -1320,6 +1320,41 @@ fn a_shared_crossing_carries_its_entrance_face_to_every_tank() {
     }
 }
 
+/// `report` through the record admission local files and received explanations share
+/// ([`PenetrationReport::from_ron`]). A fixture round is no shipped round, so only its key is
+/// replaced by a shipped one; every path, plate and pool fact is the march's.
+fn admitted(report: &PenetrationReport) -> Result<PenetrationReport, String> {
+    let mut report = report.clone();
+    report.round = "88mm_AP".to_owned();
+    let text = ron::ser::to_string(&report).expect("a record serializes");
+    PenetrationReport::from_ron(&text).map_err(|error| error.to_string())
+}
+
+/// In the game's damage model a round can come to rest inside two overlapping armour volumes of
+/// one tank: neither was left, so each is a plate without an exit, and the record of that state is
+/// admitted (the authority's delivery encodes every record it builds and panics on a refusal). Two
+/// equal steel plates, the inner one's face 1 mm behind the outer's, fixture data: any stop inside
+/// the 500 mm the fixture 88 cannot cross lies inside both.
+#[test]
+fn a_round_resting_inside_overlapping_plates_is_admitted() {
+    let report = fixture_shot(
+        &[
+            plate("outer", THICK, 0.0, Kind::Main),
+            plate("inner", THICK, -0.001, Kind::Main),
+        ],
+        LINE_FROM,
+    );
+    let held: Vec<&str> = report
+        .plates
+        .iter()
+        .filter(|plate| plate.exit.is_none())
+        .map(|plate| plate.name.as_str())
+        .collect();
+    assert_eq!(held, ["outer", "inner"], "both plates hold the round");
+    assert!(report.rested(), "{:?}", report.end);
+    admitted(&report).expect("a round at rest in overlapping plates is a record");
+}
+
 /// A round that glances off one plate and then stops in another rests in the second: the recorder's
 /// end is the last mark's, not the bounce's. The 75° graze and the far plate's place are fixture
 /// data.

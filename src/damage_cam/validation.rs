@@ -186,13 +186,15 @@ fn check_path(report: &PenetrationReport) -> Result<(), ValidationError> {
     for node in &report.path {
         point(node.point, "path.point")?;
     }
-    for (index, plate) in report.plates.iter().enumerate() {
+    for plate in &report.plates {
         point(plate.entry, "plate.entry")?;
         if let Some(exit) = plate.exit {
             point(exit, "plate.exit")?;
-        } else if index + 1 != report.plates.len() {
+        } else if !matches!(report.end, RoundEnd::Rest { .. }) {
+            // Overlapping armour volumes can each hold the round, and a perforated plate inside
+            // one can follow it in path order, so a retaining plate need not be the last.
             return Err(ValidationError::Path(
-                "only the last plate can retain the round",
+                "a plate can hold the round only where the round rests",
             ));
         }
         for (value, field) in [
@@ -212,11 +214,14 @@ fn check_path(report: &PenetrationReport) -> Result<(), ValidationError> {
     }
     // DERIVED: two independently mm-quantized copies differ by at most sqrt(3) mm,
     // plus the f32 coordinates' rounding. Geometry checks admit that wire bound.
+    let within = |a: Vec3, b: Vec3| {
+        a.distance(b) <= 0.002 + 8.0 * f32::EPSILON * a.abs().max(b.abs()).max_element()
+    };
     let on_path = |point: [f32; 3]| {
-        report.path.iter().any(|p| {
-            let (a, b) = (Vec3::from(p.point), Vec3::from(point));
-            a.distance(b) <= 0.002 + 8.0 * f32::EPSILON * a.abs().max(b.abs()).max_element()
-        })
+        report
+            .path
+            .iter()
+            .any(|p| within(Vec3::from(p.point), Vec3::from(point)))
     };
     let first = report.path[0].t;
     let last = report.path[report.path.len() - 1].t;
@@ -340,6 +345,12 @@ mod tests {
             |r| r.impact.incoming = [0.0; 3],
             |r| r.spall[0].field.ratio = -1.0,
             |r| r.end = RoundEnd::Left { at: [1000.0; 3] },
+            |r| {
+                r.plates[0].exit = None;
+                r.end = RoundEnd::Left {
+                    at: r.path[1].point,
+                };
+            },
         ];
         for spoil in spoilers {
             let mut report = base.clone();
