@@ -777,7 +777,6 @@ fn contact_load(
             origin: if moving.is_some() {
                 Origin::Contact {
                     other: transfer.body,
-                    normal: frame.turn(transfer.normal),
                     step,
                 }
             } else {

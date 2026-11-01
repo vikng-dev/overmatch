@@ -723,13 +723,10 @@ pub(crate) enum Origin {
     /// A field (a round's line, a fragment, a blast): its blow is its own law's, and it has no
     /// mass to share with what it frees.
     Field,
-    /// A resting joint with another physics body at this tick. Its actual solver impulse
-    /// already changed both bodies' motion; it must never undergo another plastic exchange.
-    Contact {
-        other: Entity,
-        normal: Vec3,
-        step: f32,
-    },
+    /// A contact of a moving group with another physics body at this tick. Its actual solver
+    /// impulse already changed both bodies' motion; it must never undergo another plastic
+    /// exchange. The laws take a rest's direction from the load, never from the contact's normal.
+    Contact { other: Entity, step: f32 },
     /// The rigid response removed in an accelerating group frame. A contact retains its
     /// solver-step force bound; an impulsive field has none. This is no external support.
     Inertia { step: Option<f32> },
@@ -1266,14 +1263,6 @@ pub(crate) fn in_group_frames(
     state: &WallState,
     loads: &[Load],
 ) -> Vec<Load> {
-    for load in loads {
-        if let Origin::Contact { normal, .. } = load.origin {
-            assert!(
-                normal.is_finite() && (normal.length_squared() - 1.0).abs() < 1e-3,
-                "physics supplies a finite unit normal for every resting joint"
-            );
-        }
-    }
     let mut framed = loads.to_vec();
     for group in loose_groups(structure, state) {
         let sources: Vec<_> = loads
@@ -3831,7 +3820,6 @@ mod tests {
             peak: None,
             origin: Origin::Contact {
                 other: Entity::PLACEHOLDER,
-                normal: Vec3::NEG_Y,
                 step: STEP,
             },
         }
@@ -3914,11 +3902,6 @@ mod tests {
             load.chunk = chunk;
             load.at = slab.chunks[chunk].centroid;
             load.blow = direction * 100.0;
-            load.origin = Origin::Contact {
-                other: Entity::PLACEHOLDER,
-                normal: -direction,
-                step: STEP,
-            };
             let (_, changes) = assess_slab(slab, &[load]);
             assert_eq!(
                 changes.groups.len(),
