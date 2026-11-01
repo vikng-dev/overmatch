@@ -496,12 +496,23 @@ mod tests {
         tracer_round,
     };
     use crate::command::{RoundSelect, RoundStep, TankCommand};
-    use crate::damage::{CrewStation, Dead, Group, Part, Requirement, VolumeOf};
+    use crate::damage::{CrewStation, Crewman, Dead, Group, Part, Requirement, VolumeOf};
     use crate::spec::{FireCycle, Trigger};
     use crate::tank::{
         Muzzle, Tank, TankRoot, TankSim, Weapon, WeaponGate, WeaponGateState, WeaponIndex,
         WeaponLoad, WeaponLoads, WeaponRound, WeaponState,
     };
+
+    /// A loader's seat with its own occupant, as a tank spawns it.
+    fn native_loader(root: Entity) -> (CrewStation, Crewman, VolumeOf) {
+        (
+            CrewStation::Loader,
+            Crewman {
+                home: CrewStation::Loader,
+            },
+            VolumeOf(root),
+        )
+    }
 
     /// The belt-fed test cycle: 600 rpm = a 0.1 s cyclic interval, a 2-round belt, a 1 s swap.
     const MG_CYCLE: FireCycle = FireCycle::Automatic {
@@ -609,7 +620,7 @@ mod tests {
                 crate::CombatantId(1),
             ))
             .id();
-        let loader = world.spawn((CrewStation::Loader, VolumeOf(root))).id();
+        let loader = world.spawn(native_loader(root)).id();
         world.spawn((
             Muzzle,
             WeaponIndex(0),
@@ -653,7 +664,7 @@ mod tests {
                 crate::CombatantId(1),
             ))
             .id();
-        world.spawn((CrewStation::Loader, VolumeOf(root)));
+        world.spawn(native_loader(root));
         world.spawn((
             Muzzle,
             WeaponIndex(0),

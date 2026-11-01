@@ -653,7 +653,11 @@ fn device(app: &mut App, player: Entity, camera: Entity) {
             (4000.0, 0.04),
         ]));
     for seat in [CrewStation::Commander, CrewStation::Gunner] {
-        world.spawn((seat, crate::damage::VolumeOf(player)));
+        world.spawn((
+            seat,
+            crate::damage::Crewman { home: seat },
+            crate::damage::VolumeOf(player),
+        ));
     }
     let open = || crate::tank::ViewConfig {
         fov: 0.8,

@@ -517,9 +517,12 @@ pub fn part_qualities(
     for volume in tank_volumes.iter() {
         let facets = volumes.get(volume).expect(LIVE_VOLUME);
         // A living crew seat supplies its role at the occupant's competence (native 1.0 / foreign
-        // degraded). `home` defaults to the seat when no occupant facet is present.
+        // degraded).
         if let (Some(role), None) = (facets.crew, facets.dead) {
-            let home = facets.crewman.map(|c| c.home).unwrap_or(*role);
+            let home = facets
+                .crewman
+                .expect("a crew station is spawned with its occupant (tank::spawn)")
+                .home;
             let q = quality.entry(Part::from(*role)).or_insert(0.0);
             *q = q.max(competence(home, *role));
         }
