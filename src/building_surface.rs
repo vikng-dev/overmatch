@@ -23,8 +23,8 @@ use bevy::shader::ShaderRef;
 
 use crate::world::{MapEncoding, MapTiling, surface_map};
 
-/// The buildings' material: bevy's `StandardMaterial` carrying the the primary palette lane pack and every lighting
-/// parameter, extended with [`BuildingSurface`] (the the secondary palette lane pack).
+/// The buildings' material: bevy's `StandardMaterial` carrying the primary palette lane pack and every lighting
+/// parameter, extended with [`BuildingSurface`] (the secondary palette lane pack).
 pub(crate) type BuildingMaterial = ExtendedMaterial<StandardMaterial, BuildingSurface>;
 
 /// The vertex stage (face units to metres) and the fragment (the roof swap, a hole), one file.
@@ -129,7 +129,7 @@ pub(crate) struct BuildingSurfaceParams {
     pub roof: Vec4,
 }
 
-/// The roof's half of [`BuildingMaterial`]: the the secondary palette lane pack's three maps and their scale. Bindings
+/// The roof's half of [`BuildingMaterial`]: the secondary palette lane pack's three maps and their scale. Bindings
 /// start at 100, bevy's convention for a material extension, clear of the `StandardMaterial` slots.
 #[derive(Asset, AsBindGroup, Reflect, Debug, Clone)]
 pub(crate) struct BuildingSurface {
@@ -253,6 +253,21 @@ pub(crate) fn material(
     })
 }
 
+/// The horizontal cube edge a graybox top's tangent runs along (prototype data, `map::BoxSurface`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Deserialize)]
+pub(crate) enum BoxAxis {
+    X,
+    Z,
+}
+impl BoxAxis {
+    pub(crate) fn direction(self) -> Vec3 {
+        match self {
+            Self::X => Vec3::X,
+            Self::Z => Vec3::Z,
+        }
+    }
+}
+
 /// A building's view mesh: the unit cube its block transform scales, the collider's own shape, so
 /// the drawn silhouette is the block's. Each face carries its own frame: outward normal `n`, tangent
 /// `t` (the image's right, `u` increasing) and image-up `b = n × t` (tangent `w = +1`), with
@@ -260,15 +275,17 @@ pub(crate) fn material(
 /// That is the frame bevy's normal mapping reads (`B = w · N × T`, a `nor_gl` map's green toward
 /// image-up), and the one the vertex stage rescales to metres (module doc).
 ///
-/// Walls use the upright image convention; the top tangent and every face's lane are authored.
-pub(crate) fn unit_box(top_tangent: Vec3, lanes: &[SurfaceLane; 6]) -> Mesh {
+/// Walls use the upright image convention; the top tangent's cube edge and every face's lane are
+/// authored. The corners are `n ± t ± b` halved, so a face is the cube's own only while its frame
+/// runs along the cube's edges: [`BoxAxis`] admits no other top tangent.
+pub(crate) fn unit_box(top_tangent: BoxAxis, lanes: &[SurfaceLane; 6]) -> Mesh {
     // (outward normal, tangent). A wall's tangent is `Y × n`, which makes its image-up `+Y`.
     let faces = [
         (Vec3::X, Vec3::Y.cross(Vec3::X)),
         (Vec3::NEG_X, Vec3::Y.cross(Vec3::NEG_X)),
         (Vec3::Z, Vec3::Y.cross(Vec3::Z)),
         (Vec3::NEG_Z, Vec3::Y.cross(Vec3::NEG_Z)),
-        (Vec3::Y, top_tangent),
+        (Vec3::Y, top_tangent.direction()),
         // The bottom sits in the ground skirt and is never seen; any frame in its plane serves.
         (Vec3::NEG_Y, Vec3::X),
     ];
@@ -341,7 +358,7 @@ mod tests {
     }
 
     /// Every vertex of `unit_box(ridge, &[SurfaceLane::Primary; 6])`: position, normal, tangent (xyz, w) and uv.
-    fn corners(ridge: Vec3) -> Vec<(Vec3, Vec3, Vec4, Vec2)> {
+    fn corners(ridge: BoxAxis) -> Vec<(Vec3, Vec3, Vec4, Vec2)> {
         let mesh = unit_box(ridge, &[SurfaceLane::Primary; 6]);
         let positions = vec3s(&mesh, Mesh::ATTRIBUTE_POSITION);
         let normals = vec3s(&mesh, Mesh::ATTRIBUTE_NORMAL);
@@ -374,13 +391,17 @@ mod tests {
     /// aspect.
     #[test]
     fn every_corner_uv_is_its_position_on_the_face_frame() {
-        for ridge in [Vec3::X, Vec3::Z] {
+        for ridge in [BoxAxis::X, BoxAxis::Z] {
             for (p, n, t, uv) in corners(ridge) {
                 let b = t.w * n.cross(t.truncate());
                 assert_eq!(uv, Vec2::new(p.dot(t.truncate()), -p.dot(b)), "corner {p}");
                 assert_eq!(t.w, 1.0);
                 if n == Vec3::Y {
-                    assert_eq!(t.truncate(), ridge, "the authored top tangent is preserved");
+                    assert_eq!(
+                        t.truncate(),
+                        ridge.direction(),
+                        "the authored top tangent is preserved"
+                    );
                 }
                 assert_eq!(t.truncate().dot(n), 0.0, "the tangent lies in the face");
             }
@@ -393,33 +414,35 @@ mod tests {
     /// building the simulation does not have.
     #[test]
     fn the_box_is_the_unit_cube_wound_outward() {
-        let mesh = unit_box(Vec3::Z, &[SurfaceLane::Primary; 6]);
-        let positions = vec3s(&mesh, Mesh::ATTRIBUTE_POSITION);
-        let normals = vec3s(&mesh, Mesh::ATTRIBUTE_NORMAL);
-        assert!(
-            positions.iter().all(|p| p.abs() == Vec3::splat(0.5)),
-            "every corner is a corner of the unit cube",
-        );
-        let Some(Indices::U16(indices)) = mesh.indices() else {
-            panic!("the box is indexed u16");
-        };
-        let mut faces = std::collections::BTreeSet::new();
-        for triangle in indices.chunks(3) {
-            let [a, b, c] = [0, 1, 2].map(|k| usize::from(triangle[k]));
-            let n = normals[a];
-            let winding = (positions[b] - positions[a]).cross(positions[c] - positions[a]);
-            assert!(winding.dot(n) > 0.0, "triangle {triangle:?} faces inward");
+        for top in [BoxAxis::X, BoxAxis::Z] {
+            let mesh = unit_box(top, &[SurfaceLane::Primary; 6]);
+            let positions = vec3s(&mesh, Mesh::ATTRIBUTE_POSITION);
+            let normals = vec3s(&mesh, Mesh::ATTRIBUTE_NORMAL);
             assert!(
-                [a, b, c].iter().all(|&k| positions[k].dot(n) == 0.5),
-                "triangle {triangle:?} lies on its face",
+                positions.iter().all(|p| p.abs() == Vec3::splat(0.5)),
+                "every corner is a corner of the unit cube",
             );
-            faces.insert(n.to_array().map(|c| c as i32));
+            let Some(Indices::U16(indices)) = mesh.indices() else {
+                panic!("the box is indexed u16");
+            };
+            let mut faces = std::collections::BTreeSet::new();
+            for triangle in indices.chunks(3) {
+                let [a, b, c] = [0, 1, 2].map(|k| usize::from(triangle[k]));
+                let n = normals[a];
+                let winding = (positions[b] - positions[a]).cross(positions[c] - positions[a]);
+                assert!(winding.dot(n) > 0.0, "triangle {triangle:?} faces inward");
+                assert!(
+                    [a, b, c].iter().all(|&k| positions[k].dot(n) == 0.5),
+                    "triangle {triangle:?} lies on its face",
+                );
+                faces.insert(n.to_array().map(|c| c as i32));
+            }
+            assert_eq!(
+                (faces.len(), indices.len()),
+                (6, 36),
+                "six faces, two triangles each"
+            );
         }
-        assert_eq!(
-            (faces.len(), indices.len()),
-            (6, 36),
-            "six faces, two triangles each"
-        );
     }
 
     /// WALLS STAND, THE ROOF RUNS ALONG THE RIDGE. Bricks lie in horizontal courses only if every
@@ -427,13 +450,17 @@ mod tests {
     /// of the box's proportions.
     #[test]
     fn walls_stand_upright_and_the_roof_runs_along_the_ridge() {
-        for ridge in [Vec3::X, Vec3::Z] {
+        for ridge in [BoxAxis::X, BoxAxis::Z] {
             for (_, n, t, _) in corners(ridge) {
                 let b = t.w * n.cross(t.truncate());
                 if n.y == 0.0 {
                     assert_eq!(b, Vec3::Y, "the wall facing {n} stands its image upright");
                 } else if n.y > 0.0 {
-                    assert_eq!(t.truncate(), ridge, "the roof's boards run along the ridge");
+                    assert_eq!(
+                        t.truncate(),
+                        ridge.direction(),
+                        "the roof's boards run along the ridge"
+                    );
                 }
             }
         }

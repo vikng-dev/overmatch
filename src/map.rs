@@ -188,12 +188,13 @@ impl MapManifest {
     }
 }
 
-/// The unit cube's face lanes in +X, -X, +Z, -Z, +Y, -Y order, and its top's tangent.
+/// The unit cube's face lanes in +X, -X, +Z, -Z, +Y, -Y order, and the cube edge its top's
+/// tangent runs along.
 #[derive(Debug, Clone, PartialEq, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct BoxSurface {
     pub(crate) faces: [crate::building_surface::SurfaceLane; 6],
-    pub(crate) top_tangent: [f32; 3],
+    pub(crate) top_tangent: crate::building_surface::BoxAxis,
 }
 
 /// What one prototype id resolves to (`prototypes.ron`, module doc). Metres at instance scale 1;
@@ -509,16 +510,8 @@ fn check_prototype(id: &str, prototype: &Prototype, library: &Path) {
             min,
             max,
             substance,
-            surface,
+            surface: _,
         } => {
-            let tangent = bevy::math::Vec3::from_array(surface.top_tangent);
-            assert!(
-                tangent.is_finite()
-                    && (tangent.length() - 1.0).abs() <= 1e-4
-                    && tangent.y.abs() <= 1e-4,
-                "map: {} prototype {id:?} field surface.top_tangent: author a finite horizontal unit direction",
-                library.display()
-            );
             for axis in 0..3 {
                 assert!(
                     min[axis].is_finite() && max[axis].is_finite() && min[axis] < max[axis],
@@ -686,12 +679,12 @@ pub(crate) mod tests {
         use crate::building_surface::SurfaceLane::{Primary, Secondary};
         BoxSurface {
             faces: [Primary, Primary, Primary, Primary, Secondary, Primary],
-            top_tangent: [0.0, 0.0, 1.0],
+            top_tangent: crate::building_surface::BoxAxis::Z,
         }
     }
 
     /// A single-building library and a placement that uses it, for the resolution law.
-    const HOUSE_LIBRARY: &str = r#"{"house": Building(min: (-1.0, -0.5, -1.0), max: (1.0, 2.0, 1.0), substance: "Brick", surface: (faces: (Primary, Primary, Primary, Primary, Secondary, Primary), top_tangent: (0.0, 0.0, 1.0)))}"#;
+    const HOUSE_LIBRARY: &str = r#"{"house": Building(min: (-1.0, -0.5, -1.0), max: (1.0, 2.0, 1.0), substance: "Brick", surface: (faces: (Primary, Primary, Primary, Primary, Secondary, Primary), top_tangent: Z))}"#;
     const HOUSE_INSTANCE: &str = r#"{"prototype":"house","translation":[0,0,0],
         "rotation":[0,0,0,1],"scale":[1,1,1],"id":"house_0001"}"#;
 
@@ -701,7 +694,7 @@ pub(crate) mod tests {
     /// map happens to place.
     pub(crate) fn mixed_fixture_manifest() -> MapManifest {
         const LIBRARY: &str = r#"{
-            "house": Building(min: (-1.0, -0.5, -1.0), max: (1.0, 2.0, 1.0), substance: "Brick", surface: (faces: (Primary, Primary, Primary, Primary, Secondary, Primary), top_tangent: (0.0, 0.0, 1.0))),
+            "house": Building(min: (-1.0, -0.5, -1.0), max: (1.0, 2.0, 1.0), substance: "Brick", surface: (faces: (Primary, Primary, Primary, Primary, Secondary, Primary), top_tangent: Z)),
             "fir": Tree(asset: "fir_1"),
             "brick": Structure(asset: "house_1"),
         }"#;
@@ -915,15 +908,15 @@ pub(crate) mod tests {
         let text = manifest_text(750.0, 0.0, 50.0, "+Z");
         for (library, field) in [
             (
-                r#"{"p": Building(min: (1.0, 0.0, 0.0), max: (1.0, 1.0, 1.0), substance: "Brick", surface: (faces: (Primary, Primary, Primary, Primary, Secondary, Primary), top_tangent: (0.0, 0.0, 1.0)))}"#,
+                r#"{"p": Building(min: (1.0, 0.0, 0.0), max: (1.0, 1.0, 1.0), substance: "Brick", surface: (faces: (Primary, Primary, Primary, Primary, Secondary, Primary), top_tangent: Z))}"#,
                 "`min`",
             ),
             (
-                r#"{"p": Building(min: (0.0, 0.0, 0.0), max: (1.0, NaN, 1.0), substance: "Brick", surface: (faces: (Primary, Primary, Primary, Primary, Secondary, Primary), top_tangent: (0.0, 0.0, 1.0)))}"#,
+                r#"{"p": Building(min: (0.0, 0.0, 0.0), max: (1.0, NaN, 1.0), substance: "Brick", surface: (faces: (Primary, Primary, Primary, Primary, Secondary, Primary), top_tangent: Z))}"#,
                 "`min`",
             ),
             (
-                r#"{"p": Building(min: (0.0, 0.0, 0.0), max: (1.0, 1.0, 1.0), substance: "Nope", surface: (faces: (Primary, Primary, Primary, Primary, Secondary, Primary), top_tangent: (0.0, 0.0, 1.0)))}"#,
+                r#"{"p": Building(min: (0.0, 0.0, 0.0), max: (1.0, 1.0, 1.0), substance: "Nope", surface: (faces: (Primary, Primary, Primary, Primary, Secondary, Primary), top_tangent: Z))}"#,
                 "`substance`",
             ),
         ] {

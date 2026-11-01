@@ -252,7 +252,7 @@ impl ScatterView {
                     Prototype::Building { ref surface, .. } => Some((
                         id.clone(),
                         meshes.add(crate::building_surface::unit_box(
-                            Vec3::from_array(surface.top_tangent),
+                            surface.top_tangent,
                             &surface.faces,
                         )),
                     )),
