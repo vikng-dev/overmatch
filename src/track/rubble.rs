@@ -61,10 +61,11 @@
 //!   (`ContactManifold::tangent_velocity`, set in `CollisionHooks::modify_contacts`) model the
 //!   belt twice (the field holds the tank, colliders push pieces) and push without limit.
 
+use avian3d::dynamics::solver::solver_body::SolverBodyInertia;
 use avian3d::prelude::{
     Collider, ColliderAabb, ColliderOf, CollisionLayers, ComputedAngularInertia,
-    ComputedCenterOfMass, ComputedMass, DefaultFriction, Forces, Friction, LayerMask, Position,
-    ReadRigidBodyForces, RigidBody, Rotation, Sensor, SpatialQuery, WriteRigidBodyForces,
+    ComputedCenterOfMass, ComputedMass, DefaultFriction, Forces, Friction, LayerMask, LockedAxes,
+    Position, ReadRigidBodyForces, RigidBody, Rotation, Sensor, SpatialQuery, WriteRigidBodyForces,
 };
 use bevy::ecs::query::QueryFilter;
 use bevy::ecs::system::SystemParam;
@@ -159,14 +160,14 @@ impl RubbleQuery<'_, '_> {
     }
 }
 
-/// What a dynamic piece's impulses read and write. Pieces lock no axes, so the effective mass
-/// [`PieceBody`] computes is the one avian's impulse applies against.
+/// What a dynamic support's impulses read and write, including any locked motion axes.
 pub(crate) type PieceData = (
     Forces,
     &'static RigidBody,
     &'static ComputedMass,
     &'static ComputedAngularInertia,
     &'static ComputedCenterOfMass,
+    Option<&'static LockedAxes>,
 );
 
 /// A dynamic piece's rigid state at the tick's start, advanced by each impulse it takes.
@@ -175,8 +176,8 @@ pub(crate) struct PieceBody {
     pub(crate) entity: Entity,
     /// World centre of mass (m).
     pub(crate) com: Vec3,
-    /// 1/m (1/kg).
-    pub(crate) inv_mass: f32,
+    /// World inverse mass per permitted translation axis (1/kg).
+    pub(crate) inv_mass: Vec3,
     /// World inverse angular inertia.
     pub(crate) inv_inertia: Mat3,
     pub(crate) linear: Vec3,
@@ -192,7 +193,7 @@ impl PieceBody {
     /// The effective mass along unit `dir` at `point`: `1 / (1/m + (r×d)·I⁻¹(r×d))`.
     fn effective_mass(&self, point: Vec3, dir: Vec3) -> f32 {
         let rd = (point - self.com).cross(dir);
-        1.0 / (self.inv_mass + rd.dot(self.inv_inertia * rd))
+        1.0 / (dir.dot(self.inv_mass * dir) + rd.dot(self.inv_inertia * rd))
     }
 
     /// The velocity change at `point` that `impulse` there makes.
@@ -402,15 +403,24 @@ impl RubbleBodies {
                 .is_ok_and(RigidBody::is_dynamic);
             let mut slot = out.bodies.iter().position(|b| b.entity == body);
             if slot.is_none() && dynamic {
-                let (forces, _, mass, inertia, com) = bodies.get(body).expect(
+                let (forces, _, mass, inertia, com, locked) = bodies.get(body).expect(
                     "an admitted dynamic support body carries Avian force state; excluded bodies must be named",
                 );
                 let rotation = forces.rotation().0;
+                // Avian uses this constructor to prepare solver inertia; it applies the same
+                // axis locks as Forces::apply_linear_impulse_at_point.
+                let inertia = SolverBodyInertia::new(
+                    mass.inverse(),
+                    inertia.rotated(rotation).inverse(),
+                    locked.copied().unwrap_or_default(),
+                    0,
+                    true,
+                );
                 out.bodies.push(PieceBody {
                     entity: body,
                     com: forces.position().0 + rotation * com.0,
-                    inv_mass: mass.inverse(),
-                    inv_inertia: inertia.rotated(rotation).inverse().to_mat3(),
+                    inv_mass: inertia.effective_inv_mass(),
+                    inv_inertia: inertia.effective_inv_angular_inertia().to_mat3(),
                     linear: forces.linear_velocity(),
                     angular: forces.angular_velocity(),
                 });
@@ -579,15 +589,27 @@ fn contact_impulse(body: &PieceBody, contact: &BeltContact, dt: f32) -> Vec3 {
     // The piece's velocity against the belt surface at the contact.
     let rel = body.velocity_at(point) - contact.belt_velocity;
     let closing = rel.dot(normal);
-    let push = -normal * load_j.min(body.effective_mass(point, normal) * closing.max(0.0));
+    // An entirely locked direction has infinite effective mass. Test the speed before
+    // multiplying so a non-closing contact still takes zero rather than infinity * zero.
+    let stop = if closing > 0.0 {
+        body.effective_mass(point, normal) * closing
+    } else {
+        0.0
+    };
+    let push = -normal * load_j.min(stop);
     let Ok(dir) = Dir3::new(-contact.traction) else {
         return push;
     };
     // How far the pushed piece lags the belt surface along the drag.
     let lag = -(rel + body.response(push, point)).dot(*dir);
+    let catch_up = if lag > 0.0 {
+        body.effective_mass(point, *dir) * lag
+    } else {
+        0.0
+    };
     let drag = (contact.traction.length() * dt)
         .min(contact.mu * load_j)
-        .min(body.effective_mass(point, *dir) * lag.max(0.0));
+        .min(catch_up);
     push + *dir * drag
 }
 
@@ -748,6 +770,40 @@ mod tests {
         app.world_mut()
             .run_system_once(move |rubble: RubbleQuery, bodies: Query<PieceData>| {
                 RubbleBodies::gather(&rubble, &[body], &[], &bodies);
+            })
+            .unwrap();
+    }
+
+    /// A support's staged response must equal Avian's actual impulse response with axis locks.
+    /// Subsequent belt contacts rely on that snapshot when clamping their own reactions.
+    #[test]
+    fn a_locked_support_advances_exactly_as_its_avian_impulse_does() {
+        let mut app = physics();
+        let body = piece(&mut app, 0.0, 0.0);
+        app.world_mut()
+            .entity_mut(body)
+            .insert(LockedAxes::new().lock_translation_y().lock_rotation_z());
+        app.update();
+        app.world_mut()
+            .run_system_once(move |rubble: RubbleQuery, mut bodies: Query<PieceData>| {
+                let mut snapshot = RubbleBodies::gather(&rubble, &[body], &[], &bodies);
+                let state = &mut snapshot.bodies[0];
+                // FIXTURE DATA: off-centre impulse exercises both translation and rotation.
+                let at = state.com + Vec3::new(0.2, 0.1, 0.3);
+                let impulse = Vec3::new(10.0, -30.0, 20.0);
+                state.apply(impulse, at);
+                let (mut forces, ..) = bodies.get_mut(body).unwrap();
+                forces.apply_linear_impulse_at_point(impulse, at);
+                assert_eq!(state.linear, forces.linear_velocity());
+                assert_eq!(state.angular, forces.angular_velocity());
+                assert_eq!(state.linear.y, 0.0);
+                assert_eq!(state.angular.z, 0.0);
+                let mut contact = press(state.com, body, 100.0);
+                contact.point = state.com;
+                contact.normal = Vec3::Y;
+                contact.traction = Vec3::ZERO;
+                contact.belt_velocity = Vec3::ZERO;
+                assert_eq!(contact_impulse(state, &contact, DT), Vec3::ZERO);
             })
             .unwrap();
     }
@@ -1071,7 +1127,7 @@ mod tests {
             let body = PieceBody {
                 entity: Entity::PLACEHOLDER,
                 com: rng.vec(1.0),
-                inv_mass: 1.0 / mass,
+                inv_mass: Vec3::splat(1.0 / mass),
                 inv_inertia: frame * Mat3::from_diagonal(principal.recip()) * frame.transpose(),
                 linear: rng.vec(3.0),
                 angular: rng.vec(5.0),
