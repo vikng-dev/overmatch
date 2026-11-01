@@ -1,7 +1,8 @@
 # View sweep review
 
 Subject: the game's rendering, effects and camera. All impacts, rounds, crew and HP mentioned here
-are the game's damage model and game state only. Starting tree: `7ca401d3`; lane `lane/sweep-view`.
+are the game's damage model and game state only. Starting tree: "materials: label the steel range in the track row's provenance (#238)";
+lane `lane/sweep-view`.
 
 ## Track-t4 first
 
@@ -194,12 +195,15 @@ The 2026-11-01 capture session read items 6-7 and 3 by eye. Findings, game state
   gone in ~0.5 s. And the palette was a fixed unlit colour. Now each ground states its soil's
   albedo (DERIVED: the mean of its pack's shipped albedo slice), the ground blast erodes to the
   sheet's ceiling 0.5 (quarter coverage at 55 % of the life), and the soil is lit by the sun's
-  irradiance on level ground over π times the camera's exposure (2.33 under the shipped sun and
-  Bevy's default exposure, DERIVED); the sky's share is left out. MEASURED per ground, shipped gun:
+  linear colour times irradiance on level ground over π times the camera's exposure (brightness
+  multiplier 2.33 under the shipped sun and Bevy's default exposure, DERIVED). The linear colour
+  is included by lane 4; the sky's share is left out. MEASURED per ground, shipped gun:
   concrete 1, dirt 5-8, gravel 4-6, mud 2, sand 5-8 puffs, 1.8 m growing to 3.8-5.0 m over
   2.0-2.5 s. Still open: a puff's mean coverage at birth is 0.09 (the sheet's 0.19 × the gun's 0.5
-  opacity), so the cloud stays thin; the impact read's dust and the muzzle smoke erode to 1.0 on
-  the same kind of sheet and still show about a quarter of their authored lives.
+  opacity), so the cloud stays thin; the impact read's dust and the muzzle smoke still erode to 1.0. The muzzle smoke uses
+  `smoke_atlas.png`, not the measured dust sheet. MEASURED separately in lane 4 at the smoke's
+  sharpness: its mean coverage reaches one quarter of birth coverage at 0.196 of authored life
+  and 5 % at 0.358. These are coverage thresholds, not despawn times.
 - **No spark fan on steel.** Not a selection fault. This lane aimed the MGs square at the
   target's upper hull side from beside the player's gun; the strikes landed on the rear running
   gear (idler and the last road wheel's disc), several metres behind and below the aim point, and
@@ -212,10 +216,14 @@ The 2026-11-01 capture session read items 6-7 and 3 by eye. Findings, game state
   nodes: 54° and 50° off the axis of a 36° half field). Framed from the right at 10 m, the coax
   flash and its light read. The data is consistent with the main gun's under one law: flash size
   scales with the cube root of the charge, and 2.5 kg against about 2.9 g (CLAIMED, 8.8 cm KwK 36
-  Pzgr. 39 and 7.92 mm cartridges) is a ratio of 9.6; the main gun's 3.5-4.6 m core and 4.3-6.4 m
-  flames give 0.36-0.48 m and 0.45-0.67 m, against the MG's authored 0.3-0.55 m and 0.45-0.8 m.
-  Unchanged. The MG's light peak, 1.2 Mlm, is not on that law: by flash area it would be about
-  0.09 Mlm.
+  Pzgr. 39 and 7.92 mm cartridges) gives a length ratio of 9.52 (DERIVED: cube root of 2.5 / 0.0029).
+  The main gun's ASSUMED authored 3.5-4.6 m core and 4.3-6.4 m flames imply 0.37-0.48 m and
+  0.45-0.67 m (DERIVED), against the MG's ASSUMED authored 0.3-0.55 m and 0.45-0.8 m.
+  Unchanged. The MG's ASSUMED authored light peak is 1.2 Mlm; applying the same comparison to
+  flash area gives 0.0883 Mlm and an excess factor of 13.59 (DERIVED from the main gun's ASSUMED
+  8.0 Mlm divided by 9.5173 squared). **Lane disposition: leave the authored peak unchanged for the owner's call.** This
+  comparison supplies no measurement of either gun's emitted light; it supports flagging the
+  provisional tune, not a factual replacement. The owner must judge and calibrate the light.
 
 ## Lane 4: blind-review verification and HUD layering
 
@@ -250,3 +258,13 @@ red, green and blue independently. MEASURED: a temporary default-colour mutant a
 green/blue domain checks make both strengthened load tests fail. Both mutants are removed;
 no load rule or authored ground value changes.
 Fixed in "assets: guard every required soil colour channel (#236)".
+
+Claude's capture-record arithmetic/provenance P3 is **verified**. The charge ratio recomputes
+to 9.5173 (DERIVED); the affected size and light comparisons are now labelled DERIVED, the
+loaded emission values ASSUMED. The old smoke statement was unsupported by its cited dust
+histogram. MEASURED independently from `smoke_atlas.png` (red times alpha, mean of
+`clamp((signal - threshold) * 2.6, 0, 1)`): birth coverage 0.13675, quarter coverage at threshold
+0.196, and 5 % at 0.358. With erosion ending at 1.0 those thresholds equal fractions of life.
+Claude's MG-light disposition P3 is **verified** as an omitted decision, not proof of the right
+replacement tune. The owner-directed choice and its limits are now explicit above; no emission
+asset changed. Both fixed in "docs: qualify the flash and smoke capture evidence (#236)".
