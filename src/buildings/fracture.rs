@@ -439,6 +439,19 @@ impl Block {
         self.cut(origin, dir).map(|(near, far, _)| (near, far))
     }
 
+    /// How far a point on this shape's boundary travels along unit `dir` before it leaves, through
+    /// the nearest plane `dir` points out of. Only those planes bound it: a boundary point one
+    /// rounding outside a side plane parallel to `dir` (a face centroid at the face's edge) still
+    /// exits through the back, and one past a plane `dir` leaves through has left (zero).
+    pub fn exit(&self, from: Vec3, dir: Vec3) -> f32 {
+        self.planes
+            .iter()
+            .filter(|(n, _)| n.dot(dir) > 0.0)
+            .map(|&(n, o)| (o - n.dot(from)).max(0.0) / n.dot(dir))
+            .min_by(f32::total_cmp)
+            .expect("a bounded hull has a plane facing every direction")
+    }
+
     /// [`Self::span`], with the outward normal of the plane the ray enters through (`-dir` when it
     /// starts inside).
     fn cut(&self, origin: Vec3, dir: Vec3) -> Option<(f32, f32, Vec3)> {
@@ -3236,10 +3249,7 @@ pub(crate) fn scab(rays: &[&RayHit], load: &Load, backing: &Backing) -> Option<S
     let Spall { bar_speed, tensile } = material.spall;
     let crush = material.compaction.strength;
     let local = load.at / backing.scale;
-    let (_, depth) = backing.block.span(local, -normal).expect(
-        "a face's impulse centroid lies on its convex chunk and its inward normal enters it",
-    );
-    let depth = depth * backing.scale;
+    let depth = backing.block.exit(local, -normal) * backing.scale;
     let back = load.at - normal * depth;
     let crater = rays
         .iter()
@@ -3251,7 +3261,8 @@ pub(crate) fn scab(rays: &[&RayHit], load: &Load, backing: &Backing) -> Option<S
         .depth;
     let ligament = depth - crater;
     if ligament <= 0.0 {
-        // Through-crush, or a tangent boundary point, leaves no intact rear layer to reflect.
+        // Through-crush, or a boundary point already past a plane it leaves through, leaves no
+        // intact rear layer to reflect.
         return None;
     }
     let (mut stress, mut transmitted) = (0.0_f32, 0.0_f32);
@@ -6296,6 +6307,36 @@ mod tests {
                     .1
                     .is_empty(),
                 "a contact on the actual rear plane covers it"
+            );
+        }
+    }
+
+    /// A game's environment face load at its face's edge has a rear exit wherever rounding puts
+    /// it. A single ray stopping at an edge sets its face's centroid there, and that centroid,
+    /// one rounding past the side plane, must still read the slab's thickness behind it; the
+    /// server's per-deposit path relies on it, and a law that walks the hull's full span from the
+    /// centroid (refusing a point outside any plane) panics here. ASSUMED slab and pulse fixture.
+    #[test]
+    fn an_edge_load_one_rounding_outside_its_face_exits_through_the_back() {
+        let material = brick();
+        let (hit, slab) = scab_face(&material, scab_blow(&material, 0.1));
+        let edge = 1.0_f32;
+        for x in [f32::from_bits(edge.to_bits() - 1), edge, edge.next_up()] {
+            let at = Vec3::new(x, 0.0, 0.0);
+            assert_eq!(slab.exit(at, Vec3::Z), 0.25, "{x}: the slab's thickness");
+            let (_, scabs) = Load::blast(&[RayHit { at, ..hit }], |_| Backing {
+                block: &slab,
+                scale: 1.0,
+                material,
+                contacts: &[],
+            });
+            let [scab] = scabs[..] else {
+                panic!("{x}: the fixture pulse scabs: {scabs:?}")
+            };
+            assert_eq!(
+                scab.at,
+                Vec3::new(x, 0.0, 0.25),
+                "{x}: it leaves the back face"
             );
         }
     }
