@@ -121,6 +121,20 @@ pub struct Knobs {
 #[derive(Component, Default, Clone, Copy)]
 pub struct CornerRig;
 
+/// Spawn the corner's real UI root, hidden as the game spawns it, for shared HUD layout tests;
+/// returns the root. Its world rig is not spawned.
+#[cfg(test)]
+pub(crate) fn spawn_corner_for_layout_test(world: &mut World) -> Entity {
+    world.resource_scope(|world, mut images: Mut<Assets<Image>>| {
+        hud::spawn_corner(&mut world.commands(), &mut images);
+    });
+    world.flush();
+    world
+        .query_filtered::<Entity, (With<CornerRig>, With<Node>)>()
+        .single(world)
+        .expect("the corner spawns one UI root")
+}
+
 /// The camera that draws the battlefield a [`Surface::World`] record is drawn on.
 #[derive(Component, Default, Clone, Copy)]
 pub struct WorldViewer;

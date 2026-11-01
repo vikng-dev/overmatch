@@ -18,13 +18,14 @@ use std::time::Duration;
 
 use bevy::ecs::query::QuerySingleError;
 use bevy::ecs::schedule::ScheduleConfigs;
-use bevy::ecs::system::ScheduleSystem;
+use bevy::ecs::system::{ScheduleSystem, SystemParam};
 use bevy::prelude::*;
 
 use super::battle::{BattleOutcome, BattlePhase, BattleState};
 use super::score::{Scoreboard, Standing, rank};
 use crate::CombatantId;
 use crate::flow::{Flow, FlowScoped, InMatchSystems};
+use crate::hud::ModalExtent;
 use crate::overlay::{self, Overlays};
 use crate::ui_font::{MODAL_CARD_BG, TEXT, UiFonts, set_text};
 use lightyear::interpolation::timeline::InterpolationTimeline;
@@ -32,6 +33,10 @@ use lightyear::prelude::NetworkTimeline;
 
 /// Held to show the scoreboard during combat.
 const BOARD_KEY: KeyCode = KeyCode::Tab;
+
+/// One table line, logical px: the columns' line height, the unit pages count whole standings
+/// in. ASSUMED typography: 14 px Barlow Condensed body on a 16 px line.
+const ROW_PX: f32 = 16.0;
 
 /// What the match UI shows, from the replicated phase alone.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -234,9 +239,48 @@ enum Part {
     Column(Column),
 }
 
-/// The table scrolls as one unit so every standing's columns stay aligned.
+/// The board's card: its title, table and hint, sized to its content within the placed region.
 #[derive(Component)]
-struct BoardViewport;
+struct BoardCard;
+
+/// The table: its columns scroll sideways as one unit, so every standing stays aligned, and list
+/// whole standings from `first` under their headers, so no page cuts a row or loses a label.
+#[derive(Component, Default)]
+struct BoardViewport {
+    first: usize,
+}
+
+/// The board's laid-out nodes: its placed region, its card and its table.
+#[derive(SystemParam)]
+struct BoardNodes<'w, 's> {
+    region: Query<'w, 's, (&'static ComputedNode, &'static mut ModalExtent), With<MatchUi>>,
+    card: Query<'w, 's, &'static ComputedNode, With<BoardCard>>,
+    table: Query<
+        'w,
+        's,
+        (
+            &'static ComputedNode,
+            &'static mut ScrollPosition,
+            &'static mut BoardViewport,
+        ),
+    >,
+}
+
+/// Whole standings that fit under the header line in `height` logical px of table.
+fn standings_that_fit(height: f32) -> usize {
+    ((height / ROW_PX).floor().max(0.0) as usize).saturating_sub(1)
+}
+
+/// The first standing listed after `step` pages (Page Down positive) through `total` standings,
+/// `capacity` to a page: whole pages, and a last page as full as the roster allows.
+fn page(first: usize, capacity: usize, total: usize, step: i8) -> usize {
+    let moved = match step.signum() {
+        1 => first.saturating_add(capacity),
+        -1 => first.saturating_sub(capacity),
+        _ => first,
+    };
+    moved.min(total.saturating_sub(capacity))
+}
 
 pub fn plugin(app: &mut App) {
     crate::flow::require(app, "net::battle_hud");
@@ -263,7 +307,7 @@ fn spawn_battle_hud(mut commands: Commands, fonts: Res<UiFonts>) {
         .spawn((
             FlowScoped(Flow::InMatch),
             MatchUi::Clock,
-            crate::hud::HudDock::Top,
+            crate::hud::HudDock::Fixed,
             Visibility::Hidden,
             Node {
                 position_type: PositionType::Absolute,
@@ -291,7 +335,7 @@ fn spawn_battle_hud(mut commands: Commands, fonts: Res<UiFonts>) {
             FlowScoped(Flow::InMatch),
             MatchUi::Scoreboard,
             Visibility::Hidden,
-            crate::hud::HudLayer::Modal,
+            ModalExtent::default(),
             Node {
                 position_type: PositionType::Absolute,
                 // The shared HUD layout fills the region left clear by visible docked panels.
@@ -305,6 +349,7 @@ fn spawn_battle_hud(mut commands: Commands, fonts: Res<UiFonts>) {
         ))
         .with_children(|root| {
             root.spawn((
+                BoardCard,
                 Node {
                     flex_direction: FlexDirection::Column,
                     max_height: Val::Percent(100.0),
@@ -332,7 +377,7 @@ fn spawn_battle_hud(mut commands: Commands, fonts: Res<UiFonts>) {
                     TextColor(TEXT),
                 ));
                 card.spawn((
-                    BoardViewport,
+                    BoardViewport::default(),
                     ScrollPosition::default(),
                     Node {
                         column_gap: Val::Px(12.0),
@@ -341,7 +386,11 @@ fn spawn_battle_hud(mut commands: Commands, fonts: Res<UiFonts>) {
                         min_height: Val::Px(0.0),
                         width: Val::Percent(100.0),
                         min_width: Val::Px(0.0),
-                        overflow: Overflow::scroll(),
+                        // Rows page as whole lines into the height the region leaves.
+                        overflow: Overflow {
+                            x: OverflowAxis::Scroll,
+                            y: OverflowAxis::Clip,
+                        },
                         ..default()
                     },
                 ))
@@ -356,7 +405,7 @@ fn spawn_battle_hud(mut commands: Commands, fonts: Res<UiFonts>) {
                                 font_size: FontSize::Px(14.0),
                                 ..default()
                             },
-                            bevy::text::LineHeight::Px(16.0),
+                            bevy::text::LineHeight::Px(ROW_PX),
                             TextLayout::justify(column.justify()).with_no_wrap(),
                             Node {
                                 flex_shrink: 0.0,
@@ -381,26 +430,33 @@ fn spawn_battle_hud(mut commands: Commands, fonts: Res<UiFonts>) {
 }
 
 /// No usable Battle view also clears its table position, so a replacement link cannot inherit
-/// the previous link's scrolled roster.
-fn hide_views(
-    roots: &mut Query<(&MatchUi, &mut Visibility)>,
-    viewports: &mut Query<(&ComputedNode, &mut ScrollPosition), With<BoardViewport>>,
-) {
+/// the previous link's paged roster.
+fn hide_views(roots: &mut Query<(&MatchUi, &mut Visibility)>, nodes: &mut BoardNodes) {
     for (_, mut visibility) in roots.iter_mut() {
         visibility.set_if_neq(Visibility::Hidden);
     }
-    for (_, mut scroll) in viewports.iter_mut() {
-        if scroll.0 != Vec2::ZERO {
-            scroll.0 = Vec2::ZERO;
-        }
+    for (_, mut scroll, mut table) in &mut nodes.table {
+        rewind(&mut scroll, &mut table);
+    }
+}
+
+/// Rewinds through `Mut`, so an already rewound table is not marked changed.
+fn rewind(scroll: &mut Mut<ScrollPosition>, table: &mut Mut<BoardViewport>) {
+    if scroll.0 != Vec2::ZERO {
+        scroll.0 = Vec2::ZERO;
+    }
+    if table.first != 0 {
+        table.first = 0;
     }
 }
 
 /// Rewrite and show the clock line and the board from the replicated Battle and score. The board
-/// shows only while nothing captures input ([`overlay::input_blocked`]).
+/// shows only while nothing captures input ([`overlay::input_blocked`]). It lists the whole
+/// standings that fit the region its placement left on the last layout, and states its least and
+/// natural sizes ([`ModalExtent`]) for the next placement.
 #[expect(
     clippy::too_many_arguments,
-    reason = "the replicated view also owns its table's scroll position"
+    reason = "the replicated view also owns its table's paging and its natural extent"
 )]
 fn update_battle_hud(
     battles: Query<(&BattleState, &Scoreboard)>,
@@ -410,13 +466,13 @@ fn update_battle_hud(
     overlays: Res<Overlays>,
     mut roots: Query<(&MatchUi, &mut Visibility)>,
     mut parts: Query<(&Part, &mut Text)>,
-    mut viewports: Query<(&ComputedNode, &mut ScrollPosition), With<BoardViewport>>,
+    mut nodes: BoardNodes,
 ) {
     let (battle, board) = match battles.single() {
         Ok(replicated) => replicated,
         // Before the first snapshot, or between links: no Battle to show.
         Err(QuerySingleError::NoEntities(_)) => {
-            hide_views(&mut roots, &mut viewports);
+            hide_views(&mut roots, &mut nodes);
             return;
         }
         Err(QuerySingleError::MultipleEntities(_)) => panic!(
@@ -430,36 +486,61 @@ fn update_battle_hud(
     if !clock.is_synced() {
         // The first snapshot, or a reconnect, can precede a usable presentation-time estimate.
         // Do not invent a deadline offset while its timeline is still synchronizing.
-        hide_views(&mut roots, &mut viewports);
+        hide_views(&mut roots, &mut nodes);
         return;
     }
     let now = clock.tick().0;
     let view = View::of(battle.phase, now, time.timestep());
     let board_shown =
         view.shows_board(keys.pressed(BOARD_KEY)) && !overlay::input_blocked(&overlays, true);
-    for (node, mut scroll) in &mut viewports {
-        if !board_shown {
-            if scroll.0 != Vec2::ZERO {
-                scroll.0 = Vec2::ZERO;
-            }
-            continue;
+    let (table_node, mut scroll, mut table) = nodes
+        .table
+        .single_mut()
+        .expect("the match UI spawns one board table");
+    let board_rows = if board_shown {
+        let (region, mut extent) = nodes
+            .region
+            .single_mut()
+            .expect("the match UI spawns one board root");
+        let card = nodes
+            .card
+            .single()
+            .expect("the match UI spawns one board card");
+        let logical = |node: &ComputedNode| node.size * node.inverse_scale_factor;
+        // The card's title, hint, padding and gaps: everything but the table.
+        let furniture = logical(card) - logical(table_node);
+        let capacity = standings_that_fit(logical(region).y - furniture.y);
+        let rows = rows(board);
+        let step = i8::from(keys.just_pressed(KeyCode::PageDown))
+            - i8::from(keys.just_pressed(KeyCode::PageUp));
+        let first = page(table.first, capacity, rows.len(), step);
+        if table.first != first {
+            table.first = first;
         }
-        let direction = Vec2::new(
-            u8::from(keys.just_pressed(KeyCode::ArrowRight)) as f32
-                - u8::from(keys.just_pressed(KeyCode::ArrowLeft)) as f32,
-            u8::from(keys.just_pressed(KeyCode::PageDown)) as f32
-                - u8::from(keys.just_pressed(KeyCode::PageUp)) as f32,
-        );
-        if direction != Vec2::ZERO {
-            let page = node.size * node.inverse_scale_factor;
+        let across = f32::from(u8::from(keys.just_pressed(KeyCode::ArrowRight)))
+            - f32::from(u8::from(keys.just_pressed(KeyCode::ArrowLeft)));
+        if across != 0.0 {
+            let view = logical(table_node).x;
             let limit =
-                ((node.content_size - node.size) * node.inverse_scale_factor).max(Vec2::ZERO);
-            let next = (scroll.0 + direction * page).clamp(Vec2::ZERO, limit);
-            if scroll.0 != next {
-                scroll.0 = next;
+                (table_node.content_size.x * table_node.inverse_scale_factor - view).max(0.0);
+            let next = (scroll.0.x + across * view).clamp(0.0, limit);
+            if scroll.0.x != next {
+                scroll.0.x = next;
             }
         }
-    }
+        let table_width = table_node.content_size.x * table_node.inverse_scale_factor;
+        let width = logical(card).x.max(furniture.x + table_width);
+        let lines = |standings: usize| furniture.y + ROW_PX * (standings + 1) as f32;
+        extent.set_if_neq(ModalExtent {
+            // Every column, its header and a standing: a region narrower cuts the table's columns.
+            least: Vec2::new(width, lines(rows.len().min(1))),
+            natural: Vec2::new(width, lines(rows.len())),
+        });
+        Some(rows[first..first.saturating_add(capacity).min(rows.len())].to_vec())
+    } else {
+        rewind(&mut scroll, &mut table);
+        None
+    };
     for (root, mut visibility) in &mut roots {
         let shown = match root {
             MatchUi::Clock => true,
@@ -471,7 +552,6 @@ fn update_battle_hud(
             Visibility::Hidden
         });
     }
-    let board_rows = board_shown.then(|| rows(board));
     for (&part, mut text) in &mut parts {
         let value = match (part, &board_rows) {
             (Part::ClockLine, _) => view.clock_line(),
@@ -493,8 +573,11 @@ mod tests {
     use crate::overlay::Overlay;
     use lightyear::prelude::TimelineSync;
 
-    /// FIXTURE DATA: viewport sizes/scales and a synthetic populated status panel/roster.
-    /// Uses the shipped spawners, fonts and Bevy layout; no simulated tank or link is needed.
+    /// FIXTURE DATA: viewport sizes/scales, thirty tied standings in combat with Tab held, and the
+    /// fixed readouts' text as the shipped seed tank renders them in the view-5 stills (its vitals
+    /// card with the repair hint and six module rows, its seat row and its drive row). Uses the
+    /// shipped spawners, fonts, Bevy layout and this module's own system; no simulated tank or link
+    /// is needed.
     fn hud_layout_app(width: u32, height: u32, scale: f32) -> App {
         let mut app = App::new();
         app.add_plugins(crate::gpu_less_default_plugins(Some(Window {
@@ -504,6 +587,9 @@ mod tests {
         })))
         .add_plugins(crate::ui_font::plugin)
         .insert_resource(UiScale(scale))
+        .init_resource::<InterpolationTimeline>()
+        .init_resource::<Overlays>()
+        .add_systems(Update, systems())
         .add_systems(
             Startup,
             (
@@ -525,31 +611,50 @@ mod tests {
         app.finish();
         app.cleanup();
         app.update();
-        let roster: Vec<Row> = (1..=30)
-            .map(|i| Row {
-                place: i as usize,
-                standing: standing(i, 0, 0),
-            })
-            .collect();
         let world = app.world_mut();
-        for (part, mut text) in world.query::<(&Part, &mut Text)>().iter_mut(world) {
-            text.0 = match part {
-                Part::ClockLine => "14:55".to_owned(),
-                Part::Title => "BATTLE 1".to_owned(),
-                Part::Column(column) => column.text(&roster, None),
-                Part::ScrollHint => "PAGE UP/DOWN: ROWS  LEFT/RIGHT: COLUMNS".to_owned(),
-            };
-        }
+        world
+            .resource_mut::<InterpolationTimeline>()
+            .set_synced(true);
+        world.resource_mut::<Overlays>().declare_in_match(true);
+        world.spawn((
+            BattleState::combat_fixture(),
+            Scoreboard((1..=30).map(|i| standing(i, 0, 0)).collect()),
+        ));
+        world
+            .resource_mut::<ButtonInput<KeyCode>>()
+            .press(BOARD_KEY);
         let status = world
             .query_filtered::<Entity, With<crate::crew_ui::StatusPanelText>>()
             .single(world)
             .unwrap();
-        world.get_mut::<Text>(status).unwrap().0 =
-            "ALIVE\nCrew 5/5\nDrive 100%   Gunner 100%\nWeapons: Primary READY Secondary READY\nPrimary ammunition: fixture\nF - repair modules\nModule A READY\nModule B READY\nModule C READY\nModule D READY\nModule E READY\nModule F READY".to_owned();
-        for (_, mut text) in world.query_filtered::<
-            (&crate::hud::HudDock, &mut Text), Without<crate::crew_ui::StatusPanelText>
-        >().iter_mut(world) {
-            text.0 = "FIXTURE FIXED HUD".to_owned();
+        world.get_mut::<Text>(status).unwrap().0 = [
+            "ALIVE",
+            "Crew 5/5",
+            "Drive 100%   Gunner 100%",
+            "Weapons: Coax 150 rds   HullMG 150 rds   MainGun READY",
+            "MainGun round: 8.8 cm Pzgr. 39 ring",
+            "F — repair modules",
+            "Breech: READY",
+            "Coax_MG_Barrel: READY",
+            "Engine: READY",
+            "Hull_MG_Barrel: READY",
+            "Main_Gun_Barrel: READY",
+            "Transmission: READY",
+        ]
+        .join("\n");
+        for (seats, mut text) in world
+            .query_filtered::<(Has<crate::crew_ui::CrewBarText>, &mut Text), (
+                With<crate::hud::HudDock>,
+                Without<crate::crew_ui::StatusPanelText>,
+            )>()
+            .iter_mut(world)
+        {
+            text.0 = if seats {
+                "1: Commander   2: Gunner   3: Loader   4: Driver   5: Bow gunner"
+            } else {
+                "Gear F1P   RPM 0.6k   Speed   0 km/h"
+            }
+            .to_owned();
         }
         for label in crate::hud::labels_for_test(world) {
             world.get_mut::<Text>(label).unwrap().0 = "FIXTURE WORLD LABEL".to_owned();
@@ -613,6 +718,23 @@ mod tests {
         )
     }
 
+    /// The standings the board lists: the rank column's lines under its header.
+    fn listed(world: &mut World) -> usize {
+        let place = world
+            .query::<(&Part, &Text)>()
+            .iter(world)
+            .find(|(part, _)| **part == Part::Column(Column::Place))
+            .expect("the rank column")
+            .1
+            .0
+            .clone();
+        assert!(
+            place.starts_with("RANK"),
+            "every page keeps its header: {place:?}"
+        );
+        place.lines().count() - 1
+    }
+
     fn overlaps(a: Rect, b: Rect) -> bool {
         a.min.x < b.max.x && a.max.x > b.min.x && a.min.y < b.max.y && a.max.y > b.min.y
     }
@@ -643,24 +765,14 @@ mod tests {
             let after = hud_rect(app.world(), card);
             assert_modal_clear(app.world_mut(), card);
             let reserved = app.world().get::<ComputedNode>(root).unwrap().size();
-            {
-                let world = app.world_mut();
-                for (dock, mut visibility) in world
-                    .query::<(&crate::hud::HudDock, &mut Visibility)>()
-                    .iter_mut(world)
-                {
-                    if matches!(dock, crate::hud::HudDock::Right) {
-                        *visibility = Visibility::Hidden;
-                    }
-                }
-            }
+            *app.world_mut().get_mut::<Visibility>(status).unwrap() = Visibility::Hidden;
             settle_hud(&mut app);
             assert!(
                 {
                     let size = app.world().get::<ComputedNode>(root).unwrap().size();
                     size.x * size.y > reserved.x * reserved.y
                 },
-                "hiding diagnostics increases the clear region"
+                "hiding a panel increases the clear region"
             );
             assert_modal_clear(app.world_mut(), card);
             eprintln!(
@@ -674,25 +786,23 @@ mod tests {
 
     /// The narrow-window roster must keep every score column reachable without wrapping any
     /// standing onto extra lines. Players on tall windows rely on horizontal paging rather than
-    /// clipped columns. FIXTURE DATA: a narrow window, diagnostics shown.
+    /// clipped columns. FIXTURE DATA: a window narrower than every column, diagnostics shown.
     #[test]
     fn a_narrow_board_keeps_every_column_in_its_scroll_content() {
-        let mut app = hud_layout_app(960, 1080, 2.0);
+        let mut app = hud_layout_app(640, 1080, 2.0);
         // FIXTURE DATA: full-width ids and a results winner keep every rendered column wide,
         // independently of compact typography. An empty combat winner column has no ink.
         {
-            let roster: Vec<Row> = (0..30)
-                .map(|i| Row {
-                    place: 1,
-                    standing: standing(u64::MAX - i, 0, 0),
-                })
-                .collect();
             let world = app.world_mut();
-            for (part, mut text) in world.query::<(&Part, &mut Text)>().iter_mut(world) {
-                if let Part::Column(column) = part {
-                    text.0 = column.text(&roster, Some(CombatantId(u64::MAX)));
-                }
-            }
+            let (mut battle, mut board) = world
+                .query::<(&mut BattleState, &mut Scoreboard)>()
+                .single_mut(world)
+                .unwrap();
+            board.0 = (0..30).map(|i| standing(u64::MAX - i, 0, 0)).collect();
+            battle.phase = BattlePhase::Results {
+                ends_at: crate::sim_tick::SimTick::new(100_000),
+                outcome: BattleOutcome::Winner(CombatantId(u64::MAX)),
+            };
         }
         settle_hud(&mut app);
         let world = app.world_mut();
@@ -718,109 +828,119 @@ mod tests {
         }
     }
 
-    /// The compact board preserves one logical row per standing. The shipped-size fixtures pin
-    /// the capacity: a large window fits the full Battle; the small high-scale target retains
-    /// scrolling. FIXTURE DATA: thirty standings and the two viewport/scale combinations below.
+    /// The compact board lists one line per standing, whole lines only, under headers every page
+    /// keeps. The shipped-size fixtures pin the capacity: a large window lists the full Battle; the
+    /// small high-scale target pages, its last page ending on the last standing. There the board
+    /// takes the region that holds every column over a narrower one beside the vitals card that
+    /// would list more standings with their columns cut. Players rely on reading every listed row
+    /// with its column's label. FIXTURE DATA: thirty standings and the two viewport/scale
+    /// combinations below.
     #[test]
     fn compact_board_names_the_rows_that_fit_at_both_owner_fixtures() {
         for (width, height, scale, expected_rows) in [(1280, 720, 2.0, 6), (1920, 1080, 1.0, 30)] {
             let mut app = hud_layout_app(width, height, scale);
-            let world = app.world_mut();
-            let viewport = world
-                .query_filtered::<&ComputedNode, With<BoardViewport>>()
-                .single(world)
-                .unwrap();
-            let viewport_height = viewport.size.y * viewport.inverse_scale_factor;
-            let rows = ((viewport_height / 16.0).floor() as usize)
-                .saturating_sub(1)
-                .min(30);
+            let rows = listed(app.world_mut());
             eprintln!(
-                "MEASURED compact board {width}x{height} scale {scale}: {rows} standings fit, viewport {viewport_height} logical px"
+                "MEASURED compact board {width}x{height} scale {scale}: {rows} standings fit"
             );
             assert_eq!(
                 rows, expected_rows,
                 "MEASURED fixture capacity must remain readable"
             );
-            assert!(
-                viewport.content_size.y * viewport.inverse_scale_factor >= 31.0 * 16.0,
-                "paging must reach every line of the real laid-out roster"
-            );
-            // The combat board's unused winner column is all blank lines and has no ink box.
+            let world = app.world_mut();
             for (part, text, layout) in world
                 .query::<(&Part, &Text, &bevy::text::TextLayoutInfo)>()
                 .iter(world)
             {
                 if matches!(part, Part::Column(_)) && !text.0.trim().is_empty() {
                     assert!(
-                        (layout.size.y - 31.0 * 16.0).abs() < 1.0,
-                        "{part:?}: one header and thirty rendered lines, got {} logical px",
+                        (layout.size.y - (rows + 1) as f32 * ROW_PX).abs() < 1.0,
+                        "{part:?}: one header and {rows} rendered lines, got {} logical px",
                         layout.size.y
                     );
                     assert_eq!(
                         layout.glyphs.last().unwrap().line_index,
-                        30,
+                        rows,
                         "soft wrapping must not add standing lines"
                     );
                 }
             }
+            let viewport = world
+                .query_filtered::<&ComputedNode, With<BoardViewport>>()
+                .single(world)
+                .unwrap();
+            assert!(
+                viewport.content_size.y <= viewport.size.y + 1.0,
+                "the table clips no listed line: content {} px in {} px",
+                viewport.content_size.y,
+                viewport.size.y
+            );
+            // The last page: the rank header, then whole rows ending on the last standing.
+            world
+                .query::<&mut BoardViewport>()
+                .single_mut(world)
+                .unwrap()
+                .first = usize::MAX;
+            settle_hud(&mut app);
+            assert_eq!(listed(app.world_mut()), rows);
+            let names = text(&mut app, Part::Column(Column::Name));
+            assert_eq!(names.lines().last(), Some("PLAYER 30"), "{names:?}");
         }
     }
 
-    /// The game's damage-model view: the live inset is a fixed right panel, so Tab leaves it
-    /// readable. Its public rig marker is the integration seam; world rig entities never dock.
-    /// FIXTURE DATA: the corner's initial dimensions in the small high-scale target.
+    /// The game's damage-model view: the live inset is a passing panel. Held Tab keeps clear of it
+    /// while the board fits beside it, and covers it only to list more: at the small high-scale
+    /// target the real vitals card, clock and diagnostics leave no room beside it, so the board
+    /// lists as many standings with the inset up as without; at 1280x720 / scale 1 it lists all
+    /// thirty beside it. Its public rig marker is the integration seam; world rig entities never
+    /// dock. FIXTURE DATA: the corner's real spawn, which at both targets is its laid-out width
+    /// (DERIVED: 30 % of 640 or 1280 logical px clamps to its 384 px floor).
     #[test]
-    fn the_live_corner_reserves_its_laid_out_panel_for_the_board() {
-        let mut app = hud_layout_app(1280, 720, 2.0);
-        // FIXTURE DATA: the inset coexists with the short vitals state in this clearance case.
-        {
-            let world = app.world_mut();
-            for mut text in world
-                .query_filtered::<&mut Text, With<crate::crew_ui::StatusPanelText>>()
-                .iter_mut(world)
-            {
-                text.0 =
-                    "ALIVE\nCrew 5/5\nDrive 100%\nWeapons READY\nAmmunition fixture".to_owned();
+    fn the_live_corner_yields_to_the_board_only_when_it_must() {
+        for (scale, beside) in [(2.0, false), (1.0, true)] {
+            let mut app = hud_layout_app(1280, 720, scale);
+            let alone = listed(app.world_mut());
+            let corner = crate::damage_cam::pen_cam::spawn_corner_for_layout_test(app.world_mut());
+            *app.world_mut().get_mut::<Visibility>(corner).unwrap() = Visibility::Visible;
+            settle_hud(&mut app);
+            let (_, card) = board_entities(app.world_mut());
+            assert_eq!(
+                app.world().get::<crate::hud::HudDock>(corner),
+                Some(&crate::hud::HudDock::Transient)
+            );
+            assert_eq!(
+                app.world().get::<GlobalZIndex>(corner).unwrap().0,
+                Overlay::PEN_CAM_CORNER_Z
+            );
+            assert_modal_clear(app.world_mut(), card);
+            let with_inset = listed(app.world_mut());
+            let covers = overlaps(hud_rect(app.world(), card), hud_rect(app.world(), corner));
+            eprintln!(
+                "MEASURED inset at scale {scale}: {alone} standings alone, {with_inset} with the inset, covers {covers}"
+            );
+            assert_eq!(
+                with_inset, alone,
+                "the passing inset costs the board no standing"
+            );
+            assert_eq!(covers, !beside, "scale {scale}");
+            if beside {
+                assert_eq!(with_inset, 30);
             }
         }
-        settle_hud(&mut app);
-        let corner = app
-            .world_mut()
-            .spawn((
-                crate::damage_cam::pen_cam::CornerRig,
-                Node {
-                    position_type: PositionType::Absolute,
-                    top: Val::Px(16.0),
-                    right: Val::Px(16.0),
-                    width: Val::Px(384.0),
-                    height: Val::Px(240.0),
-                    ..default()
-                },
-                GlobalZIndex(Overlay::PEN_CAM_CORNER_Z),
-                Visibility::Visible,
-            ))
-            .id();
-        settle_hud(&mut app);
-        let (_, card) = board_entities(app.world_mut());
-        assert!(matches!(
-            app.world().get::<crate::hud::HudDock>(corner),
-            Some(crate::hud::HudDock::Right)
-        ));
-        assert_eq!(
-            app.world().get::<GlobalZIndex>(corner).unwrap().0,
-            Overlay::PEN_CAM_CORNER_Z
-        );
-        assert_modal_clear(app.world_mut(), card);
     }
 
+    /// The board overlaps no visible fixed readout and lists at least one standing.
     fn assert_modal_clear(world: &mut World, card: Entity) {
         let board = hud_rect(world, card);
         assert!(board.width() > 0.0 && board.height() > 0.0);
-        for (entity, _, node, visibility) in world
+        for (entity, dock, node, visibility) in world
             .query::<(Entity, &crate::hud::HudDock, &ComputedNode, &Visibility)>()
             .iter(world)
         {
-            if *visibility != Visibility::Hidden && node.size().min_element() > 0.0 {
+            if *dock == crate::hud::HudDock::Fixed
+                && *visibility != Visibility::Hidden
+                && node.size().min_element() > 0.0
+            {
                 assert!(
                     !overlaps(board, hud_rect(world, entity)),
                     "MEASURED board {board:?} overlaps fixed panel {:?}",
@@ -828,14 +948,7 @@ mod tests {
                 );
             }
         }
-        let viewport = world
-            .query_filtered::<&ComputedNode, With<BoardViewport>>()
-            .single(world)
-            .unwrap();
-        assert!(
-            viewport.size().y > 0.0 && viewport.content_size.y > 0.0,
-            "the populated roster retains a nonempty viewport"
-        );
+        assert!(listed(world) > 0, "the populated roster lists a standing");
     }
 
     /// Players must read modal text without world labels bleeding through it. Ordering is a
@@ -938,18 +1051,82 @@ mod tests {
         assert_eq!(clock(0), "0:00");
     }
 
-    /// Players can reach standings beyond the viewport while the board is shown. Fixture layout
-    /// is in physical pixels with a scaled UI; paging uses logical pixels and stops at the end.
-    /// A menu suppresses paging and resets the viewport rather than scrolling an obscured board.
+    /// Lay out the board by hand for the layout-free harness: a placed region `region_h` logical px
+    /// tall, a card whose title, hint, padding and gaps take 40 logical px of height and 20 of
+    /// width, and a table viewport `table` wide over `content` of columns. FIXTURE DATA, physical
+    /// px at a scale of 2.
+    fn lay_out_board(app: &mut App, region_h: f32, table: f32, content: f32) {
+        let world = app.world_mut();
+        let sized = |size: Vec2, content_size: Vec2| ComputedNode {
+            size: size * 2.0,
+            content_size: content_size * 2.0,
+            inverse_scale_factor: 0.5,
+            ..default()
+        };
+        let (root, card) = board_entities(world);
+        world
+            .entity_mut(root)
+            .insert(sized(Vec2::new(table + 40.0, region_h), Vec2::ZERO));
+        world
+            .entity_mut(card)
+            .insert(sized(Vec2::new(table + 20.0, 100.0), Vec2::ZERO));
+        let viewport = world
+            .query_filtered::<Entity, With<BoardViewport>>()
+            .single(world)
+            .unwrap();
+        world
+            .entity_mut(viewport)
+            .insert(sized(Vec2::new(table, 60.0), Vec2::new(content, 60.0)));
+    }
+
+    /// Players reach every standing and column while the board is shown, a page of whole rows at
+    /// a time under headers every page keeps; the last page is full and ends on the last
+    /// standing. Columns move sideways one view at a time to the end. A menu suppresses paging
+    /// and rewinds the table rather than paging an obscured board. FIXTURE DATA: twelve tied
+    /// standings and a region with room for five under the header.
     #[test]
     fn the_board_pages_all_columns_together_only_while_shown() {
         let mut app = app(Duration::from_millis(500));
-        app.world_mut()
-            .spawn((BattleState::combat_fixture(), Scoreboard::default()));
+        app.world_mut().spawn((
+            BattleState::combat_fixture(),
+            Scoreboard((1..=12).map(|i| standing(i, 0, 0)).collect()),
+        ));
         app.world_mut()
             .resource_mut::<ButtonInput<KeyCode>>()
             .press(BOARD_KEY);
         app.update();
+        // 40 px of card furniture, a header line and five rows (DERIVED: 40 + 6 × 16).
+        lay_out_board(&mut app, 136.0, 400.0, 1000.0);
+        let tap = |app: &mut App, key| {
+            let mut keys = app.world_mut().resource_mut::<ButtonInput<KeyCode>>();
+            keys.release(key);
+            keys.clear();
+            keys.press(key);
+            app.update();
+            app.world_mut()
+                .resource_mut::<ButtonInput<KeyCode>>()
+                .release(key);
+        };
+        let names = |app: &mut App| text(app, Part::Column(Column::Name));
+        app.update();
+        assert_eq!(
+            names(&mut app),
+            "PLAYER\nPLAYER 1\nPLAYER 2\nPLAYER 3\nPLAYER 4\nPLAYER 5"
+        );
+        for expected in [
+            "PLAYER\nPLAYER 6\nPLAYER 7\nPLAYER 8\nPLAYER 9\nPLAYER 10",
+            "PLAYER\nPLAYER 8\nPLAYER 9\nPLAYER 10\nPLAYER 11\nPLAYER 12",
+            "PLAYER\nPLAYER 8\nPLAYER 9\nPLAYER 10\nPLAYER 11\nPLAYER 12",
+        ] {
+            tap(&mut app, KeyCode::PageDown);
+            assert_eq!(names(&mut app), expected);
+            assert!(text(&mut app, Part::Column(Column::Place)).starts_with("RANK\n"));
+        }
+        tap(&mut app, KeyCode::PageUp);
+        assert_eq!(
+            names(&mut app),
+            "PLAYER\nPLAYER 3\nPLAYER 4\nPLAYER 5\nPLAYER 6\nPLAYER 7"
+        );
         let viewport = {
             let world = app.world_mut();
             world
@@ -957,71 +1134,19 @@ mod tests {
                 .single(world)
                 .unwrap()
         };
-        app.world_mut().entity_mut(viewport).insert(ComputedNode {
-            size: Vec2::new(800.0, 600.0),
-            content_size: Vec2::new(2000.0, 2000.0),
-            inverse_scale_factor: 0.5,
-            ..default()
-        });
+        let across = |app: &mut App| app.world().get::<ScrollPosition>(viewport).unwrap().0;
         for expected in [400.0, 600.0, 600.0] {
-            let mut keys = app.world_mut().resource_mut::<ButtonInput<KeyCode>>();
-            keys.release(KeyCode::ArrowRight);
-            keys.press(KeyCode::ArrowRight);
-            app.update();
-            assert_eq!(
-                app.world().get::<ScrollPosition>(viewport).unwrap().0.x,
-                expected
-            );
+            tap(&mut app, KeyCode::ArrowRight);
+            assert_eq!(across(&mut app), Vec2::new(expected, 0.0));
         }
-        app.world_mut()
-            .resource_mut::<ButtonInput<KeyCode>>()
-            .clear();
-        app.world_mut()
-            .resource_mut::<ButtonInput<KeyCode>>()
-            .release(KeyCode::ArrowRight);
-        app.world_mut()
-            .resource_mut::<ButtonInput<KeyCode>>()
-            .press(KeyCode::ArrowLeft);
-        app.update();
-        assert_eq!(
-            app.world().get::<ScrollPosition>(viewport).unwrap().0.x,
-            200.0
-        );
-        app.world_mut()
-            .resource_mut::<ButtonInput<KeyCode>>()
-            .clear();
-        app.world_mut()
-            .resource_mut::<ButtonInput<KeyCode>>()
-            .release(KeyCode::ArrowLeft);
-        for expected in [300.0, 600.0, 700.0, 700.0] {
-            let mut keys = app.world_mut().resource_mut::<ButtonInput<KeyCode>>();
-            keys.release(KeyCode::PageDown);
-            keys.press(KeyCode::PageDown);
-            app.update();
-            assert_eq!(
-                app.world().get::<ScrollPosition>(viewport).unwrap().0.y,
-                expected
-            );
-        }
-        app.world_mut()
-            .resource_mut::<ButtonInput<KeyCode>>()
-            .clear();
-        app.world_mut()
-            .resource_mut::<ButtonInput<KeyCode>>()
-            .press(KeyCode::PageUp);
-        app.update();
-        assert_eq!(
-            app.world().get::<ScrollPosition>(viewport).unwrap().0.y,
-            400.0
-        );
+        tap(&mut app, KeyCode::ArrowLeft);
+        assert_eq!(across(&mut app), Vec2::new(200.0, 0.0));
         app.world_mut()
             .resource_mut::<Overlays>()
             .declare(Overlay::Menu, true);
         app.update();
-        assert_eq!(
-            app.world().get::<ScrollPosition>(viewport).unwrap().0.y,
-            0.0
-        );
+        assert_eq!(across(&mut app), Vec2::ZERO);
+        assert_eq!(app.world().get::<BoardViewport>(viewport).unwrap().first, 0);
     }
 
     /// A replicated deadline is not meaningful against an unsynchronized cursor. Players must
@@ -1061,33 +1186,34 @@ mod tests {
                 .single(world)
                 .unwrap()
         };
-        app.world_mut()
-            .get_mut::<ScrollPosition>(viewport)
-            .unwrap()
-            .0
-            .y = 250.0;
+        let page_on = |app: &mut App| {
+            app.world_mut()
+                .get_mut::<ScrollPosition>(viewport)
+                .unwrap()
+                .0
+                .x = 250.0;
+            app.world_mut()
+                .get_mut::<BoardViewport>(viewport)
+                .unwrap()
+                .first = 3;
+        };
+        let rewound = |app: &mut App| {
+            app.world().get::<ScrollPosition>(viewport).unwrap().0 == Vec2::ZERO
+                && app.world().get::<BoardViewport>(viewport).unwrap().first == 0
+        };
+        page_on(&mut app);
         app.world_mut()
             .resource_mut::<InterpolationTimeline>()
             .set_synced(false);
         app.update();
-        assert_eq!(
-            app.world().get::<ScrollPosition>(viewport).unwrap().0.y,
-            0.0
-        );
+        assert!(rewound(&mut app));
         app.world_mut()
             .resource_mut::<InterpolationTimeline>()
             .set_synced(true);
-        app.world_mut()
-            .get_mut::<ScrollPosition>(viewport)
-            .unwrap()
-            .0
-            .y = 250.0;
+        page_on(&mut app);
         app.world_mut().entity_mut(replica).despawn();
         app.update();
-        assert_eq!(
-            app.world().get::<ScrollPosition>(viewport).unwrap().0.y,
-            0.0
-        );
+        assert!(rewound(&mut app));
     }
 
     fn app(fixed: Duration) -> App {
@@ -1108,6 +1234,8 @@ mod tests {
             .resource_mut::<InterpolationTimeline>()
             .set_synced(true);
         mount_bare(&mut app);
+        app.update();
+        lay_out_board(&mut app, 400.0, 400.0, 400.0);
         app
     }
 

@@ -1,7 +1,8 @@
 //! Shared HUD layers and placement for game and armor sandbox, plus pooled world nameplates.
 //!
-//! [`HudLayer`] owns semantic draw order. [`HudDock`] panels reserve their measured edge bounds
-//! for modal content before UI layout. The design/evidence record is
+//! [`HudLayer`] owns semantic draw order. [`HudDock`] panels reserve their laid-out boxes from
+//! a [`ModalExtent`] modal's placement before UI layout: a fixed readout always, a passing
+//! presentation unless covering it shows more of the modal. The design/evidence record is
 //! `.agents/docs/design/view-sweep-review.md`.
 //!
 //! Invariant: labels read simulation state but never write it; the camera it reprojects through is
@@ -57,23 +58,36 @@ fn stamp_hud_layer(mut world: DeferredWorld, HookContext { entity, .. }: HookCon
         .insert(GlobalZIndex(layer.zindex()));
 }
 
-/// A fixed panel reserves its actual laid-out box for modal placement.
-/// These are root nodes on the player's UI target, with axis-aligned UI transforms. Top is used
-/// by status/clock, bottom by crew/drive, and right by diagnostics. Hidden panels reserve nothing.
-#[derive(Component, Clone, Copy)]
+/// A panel whose actual laid-out box modal placement keeps clear. These are root nodes on the
+/// player's UI target, with axis-aligned UI transforms. Hidden panels reserve nothing.
+#[derive(Component, Clone, Copy, Debug, PartialEq, Eq)]
 #[require(HudLayer = HudLayer::Fixed)]
 pub(crate) enum HudDock {
-    Top,
-    Bottom,
-    Right,
+    /// An always-on readout (vitals, clock, crew, drive, diagnostics): a modal never covers it.
+    Fixed,
+    /// A passing presentation: reserved unless covering it shows more of the modal.
+    Transient,
 }
 
-/// The game's damage-model view: the inset's root UI occupies the right dock. This adapter
-/// joins the presentation rig to the shared HUD placement without changing its stage entities.
-/// DERIVED from `damage_cam::pen_cam::timeline::presence`: the inset scales at most to its layout
-/// box, so reserving that box clears the whole entrance/exit animation.
-/// Temporary encounter/death cards remain overlay content: the held board deliberately covers
-/// them, as specified by `Overlay::SCOREBOARD_Z`; they do not reserve permanent HUD space.
+/// A modal's sizes in logical UI pixels, which placement ranks candidate regions by ([`serves`]).
+/// The modal measures them from its own last layout; both are zero before the first, when every
+/// region serves it alike and the larger region wins.
+#[derive(Component, Clone, Copy, Debug, Default, PartialEq)]
+#[require(HudLayer = HudLayer::Modal)]
+pub(crate) struct ModalExtent {
+    /// The least region that serves the modal at all.
+    pub(crate) least: Vec2,
+    /// What showing all of its content at once takes.
+    pub(crate) natural: Vec2,
+}
+
+/// The game's damage-model view: the inset's root UI is a transient dock, a passing hit record a
+/// held board covers only when that shows more of the board. This adapter joins the presentation
+/// rig to the shared HUD placement without changing its stage entities. DERIVED from
+/// `damage_cam::pen_cam::timeline::presence`: the inset scales at most to its layout box, so
+/// reserving that box clears the whole entrance/exit animation. Temporary encounter/death cards
+/// remain overlay content: the held board covers them under `Overlay::SCOREBOARD_Z`; they reserve
+/// no HUD space.
 fn dock_corner_ui(
     add: On<Add, crate::damage_cam::pen_cam::CornerRig>,
     nodes: Query<(), With<Node>>,
@@ -83,7 +97,7 @@ fn dock_corner_ui(
     if nodes.contains(add.entity) {
         commands
             .entity(add.entity)
-            .insert((HudDock::Right, HudLayer::Inset));
+            .insert((HudDock::Transient, HudLayer::Inset));
     }
 }
 
@@ -94,6 +108,10 @@ const MODAL_GAP_PX: f32 = 8.0;
 /// font size nor a viewport percentage stands in for measured panel geometry. Target propagation
 /// has run; the modal's new Node is consumed by this frame's layout. Resizing/text changes settle
 /// on the next layout, just as the UI's scroll geometry does.
+///
+/// The modal takes the region clear of every visible dock that best [`serves`] it; a
+/// [`HudDock::Transient`] panel yields only when the region clear of the fixed panels alone serves
+/// it strictly better.
 fn place_modal_hud(
     panels: Query<(
         &HudDock,
@@ -104,7 +122,7 @@ fn place_modal_hud(
     )>,
     mut modals: Query<
         (
-            &HudLayer,
+            &ModalExtent,
             &ComputedUiRenderTargetInfo,
             &ComputedUiTargetCamera,
             &mut Node,
@@ -112,10 +130,7 @@ fn place_modal_hud(
         Without<HudDock>,
     >,
 ) {
-    for (layer, target, camera, mut node) in &mut modals {
-        if *layer != HudLayer::Modal {
-            continue;
-        }
+    for (&extent, target, camera, mut node) in &mut modals {
         let size = target.logical_size();
         // The window can be unsized/minimized before its camera publishes a usable viewport.
         if size.x <= 0.0 || size.y <= 0.0 {
@@ -124,21 +139,31 @@ fn place_modal_hud(
         let scale = target.scale_factor();
         let gap = MODAL_GAP_PX.min(size.min_element() * 0.5);
         let screen = Rect::from_corners(Vec2::splat(gap), (size - gap).max(Vec2::splat(gap)));
-        let occupied =
-            panels
+        let occupied: Vec<(HudDock, Rect)> = panels
+            .iter()
+            .filter_map(|(dock, panel, transform, visibility, panel_camera)| {
+                if *visibility == Visibility::Hidden || panel_camera != camera {
+                    return None; // Hidden panels and other UI targets occupy no space here.
+                }
+                let bounds =
+                    Rect::from_center_size(transform.translation / scale, panel.size() / scale);
+                Some((*dock, bounds.inflate(gap)))
+            })
+            .collect();
+        let beside_all = best_clear_region(screen, occupied.iter().map(|(_, area)| *area), extent);
+        let over_transient = best_clear_region(
+            screen,
+            occupied
                 .iter()
-                .filter_map(|(_, panel, transform, visibility, panel_camera)| {
-                    if *visibility == Visibility::Hidden || panel_camera != camera {
-                        return None; // Hidden panels and other UI targets occupy no space here.
-                    }
-                    let bounds =
-                        Rect::from_center_size(transform.translation / scale, panel.size() / scale);
-                    Some(Rect::from_corners(
-                        bounds.min - Vec2::splat(gap),
-                        bounds.max + Vec2::splat(gap),
-                    ))
-                });
-        let area = largest_clear_region(screen, occupied);
+                .filter(|(dock, _)| *dock == HudDock::Fixed)
+                .map(|(_, area)| *area),
+            extent,
+        );
+        let area = if serves(over_transient, extent).gt(&serves(beside_all, extent)) {
+            over_transient
+        } else {
+            beside_all
+        };
         let placement = Node {
             left: Val::Px(area.min.x),
             top: Val::Px(area.min.y),
@@ -150,9 +175,32 @@ fn place_modal_hud(
     }
 }
 
-/// Maximal clear rectangles retain space beside a tall panel instead of reserving its entire
-/// edge band. Every candidate is contained in the target and outside all occupied panel boxes.
-fn largest_clear_region(screen: Rect, occupied: impl Iterator<Item = Rect>) -> Rect {
+/// How well `region` serves a modal, best last: first whether it holds the modal's least size,
+/// then how much of its natural size it shows at once (square logical px; beyond the natural size,
+/// more room shows nothing more).
+fn serves(region: Rect, extent: ModalExtent) -> Serves {
+    let size = region.size();
+    Serves {
+        holds_least: size.cmpge(extent.least).all(),
+        shown: size.min(extent.natural).element_product(),
+    }
+}
+
+/// [`serves`]'s rank of a region, ordered by its fields in turn.
+#[derive(Clone, Copy, Debug, PartialEq, PartialOrd)]
+struct Serves {
+    holds_least: bool,
+    shown: f32,
+}
+
+/// The maximal clear rectangle that best [`serves`] a modal of `extent`, the larger on a tie.
+/// Maximal rectangles retain space beside a tall panel instead of reserving its entire edge band.
+/// Every candidate is contained in the target and outside all occupied boxes.
+fn best_clear_region(
+    screen: Rect,
+    occupied: impl Iterator<Item = Rect>,
+    extent: ModalExtent,
+) -> Rect {
     let mut free = vec![screen];
     for panel in occupied {
         let mut next = Vec::new();
@@ -205,10 +253,13 @@ fn largest_clear_region(screen: Rect, occupied: impl Iterator<Item = Rect>) -> R
             .map(|(_, area)| *area)
             .collect();
     }
-    match free
-        .into_iter()
-        .max_by(|a, b| (a.width() * a.height()).total_cmp(&(b.width() * b.height())))
-    {
+    match free.into_iter().max_by(|a, b| {
+        let (sa, sb) = (serves(*a, extent), serves(*b, extent));
+        sa.holds_least
+            .cmp(&sb.holds_least)
+            .then(sa.shown.total_cmp(&sb.shown))
+            .then((a.width() * a.height()).total_cmp(&(b.width() * b.height())))
+    }) {
         Some(area) => area,
         // A minimized target or panels covering it completely has no readable modal region.
         None => Rect::from_corners(screen.min, screen.min),

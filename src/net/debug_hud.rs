@@ -111,7 +111,7 @@ fn spawn_debug_hud(mut commands: Commands, fonts: Res<UiFonts>) {
         .spawn((
             FlowScoped(Flow::InMatch),
             DebugCard,
-            crate::hud::HudDock::Right,
+            crate::hud::HudDock::Fixed,
             Visibility::Hidden,
             Node {
                 position_type: PositionType::Absolute,

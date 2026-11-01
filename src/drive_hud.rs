@@ -50,7 +50,7 @@ fn spawn_drive_hud(mut commands: Commands, fonts: Res<UiFonts>) {
     commands.spawn((
         FlowScoped(Flow::InMatch),
         StandardDriveHudText,
-        crate::hud::HudDock::Bottom,
+        crate::hud::HudDock::Fixed,
         Text::new(""),
         TextFont {
             font: fonts.body.clone().into(),
@@ -71,7 +71,7 @@ fn spawn_drive_hud(mut commands: Commands, fonts: Res<UiFonts>) {
     commands.spawn((
         FlowScoped(Flow::InMatch),
         DriveDebugHudText,
-        crate::hud::HudDock::Right,
+        crate::hud::HudDock::Fixed,
         Text::new(""),
         TextFont {
             font: fonts.body.clone().into(),
