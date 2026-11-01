@@ -153,6 +153,18 @@ fn the_probes_are_the_shipped_rounds_as_fired_in_calibre_order() {
     );
 }
 
+/// A run of zero rays exercises no gate, so it is refused rather than reported clean: the operator
+/// who typed `--rays 0` and the caller who relies on a clean report both see the cause.
+#[test]
+fn a_run_of_no_rays_is_refused() {
+    let error = fuzz(&FuzzConfig {
+        rays: 0,
+        ..default()
+    })
+    .expect_err("a run of no rays exercises no gate");
+    assert!(error.contains("rays"), "{error}");
+}
+
 /// Determinism: the same seed replays exactly, and a different seed does not.
 #[test]
 fn a_run_is_a_pure_function_of_its_seed() {

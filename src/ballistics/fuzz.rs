@@ -911,24 +911,25 @@ impl Pass<'_, '_, '_> {
     /// One primitive's crossings are copied onto a spare entity pair and the same ray re-walked. At
     /// the SAME factor the union `max` is idempotent, so the cost must come back bit-identical; at a
     /// HIGHER factor adding the volume must never lower it.
+    ///
+    /// Run only on a ray whose axis walk ([`Self::probe`] at radius 0) crossed material: the same
+    /// corridor, so collecting, seeding and walking it again cannot fail, and a failure is a bug
+    /// the run's per-ray panic capture reports.
     fn duplication_gate(&self, ray_index: u64, ray: &FuzzRay, out: &mut Report) {
-        let Ok((corridor, volumes)) = self.probe_parts(ray) else {
-            return;
-        };
-        let Some(seed) = corridor.hits.first().copied() else {
-            return;
-        };
-        let Ok(base) = walk::walk_ray(0, &corridor, &volumes, &self.context.laws) else {
-            return;
-        };
-        let Ok(material) = volumes
+        let (corridor, volumes) = self
+            .probe_parts(ray)
+            .expect("the crossed ray's axis corridor was collected by its axis walk");
+        let seed = *corridor
+            .hits
+            .first()
+            .expect("a ray that crossed material has a face hit");
+        let base = walk::walk_ray(0, &corridor, &volumes, &self.context.laws)
+            .expect("the crossed ray's axis corridor walked without error");
+        let material = volumes
             .entries()
             .find(|(volume, _)| *volume == seed.volume)
             .map(|(_, material)| material)
-            .ok_or(())
-        else {
-            return;
-        };
+            .expect("the volume table is built from the corridor's own hits");
 
         let copies: Vec<FaceHit> = corridor
             .hits
@@ -1459,6 +1460,9 @@ fn cluster_findings(
 
 /// Build the world, fire `config.rays` rays at the bound Tiger, and report.
 pub fn fuzz(config: &FuzzConfig) -> Result<Report, String> {
+    if config.rays == 0 {
+        return Err("rays: 0 rays exercise no gate and report clean; give --rays 1 or more".into());
+    }
     let mut app = probe_world()?;
     app.init_resource::<FuzzOutput>()
         .insert_resource(FuzzJob(config.clone()))
