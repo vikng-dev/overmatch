@@ -373,8 +373,10 @@ pub struct RayCorridor {
 // Laws / knobs
 // ---------------------------------------------------------------------------------------------
 
-/// Every tunable the walk consumes. Sandbox knobs (§4: "the structure is the design; the magnitudes
-/// are live knobs"), gathered so no law reads a hidden constant.
+/// Every number the walk consumes, gathered so no law reads a hidden constant. The solver's
+/// resolution constants are code; the angle laws [`begin`] applies are data
+/// ([`AngleLaws`](super::angle_laws::AngleLaws), `assets/ballistics/angle_laws.ron`), whose law and
+/// inputs are design doc §4a.
 #[derive(Clone, Copy, Debug)]
 pub struct WalkLaws {
     /// SEED domain — absolute floor (m) under which two `t` name the same boundary at a restart.
@@ -442,16 +444,9 @@ pub struct WalkLaws {
     /// which a round both declines to ricochet and still presents a resolvable chord. The reach it
     /// implies is never the operative bound — the residual is.
     pub event_secant_cap: f32,
-    /// Past this incidence (rad, from the surface normal) an un-overmatched round ricochets. The
-    /// speed a bounce keeps is no knob: it is the striking speed's share along the surface
-    /// ([`Begin::Ricochet`]).
-    pub ricochet_angle: f32,
-    /// Share of the incidence angle the round straightens toward the normal as it bites into the
-    /// reference substance; [`begin`] scales it by the entrance substance's share of
-    /// [`rha_reference`](Self::rha_reference).
-    pub normalization: f32,
-    /// Overmatch when caliber ≥ this × the crossing's factor-weighted perpendicular thickness.
-    pub overmatch_ratio: f32,
+    /// Overmatch, ricochet and the entry bend, the shipped data's. The speed a bounce keeps is no
+    /// coefficient: it is the striking speed's share along the surface ([`Begin::Ricochet`]).
+    pub angles: super::angle_laws::AngleLaws,
     /// Reference-mm per metre of the reference substance (RHA), the divisor turning a cost back
     /// into steel-equivalent METRES so it can be compared against a caliber, and a factor into the
     /// entry bend's resistance share.
@@ -486,11 +481,7 @@ impl Default for WalkLaws {
             event_plane_tolerance: 2.0e-3,
             event_residual_tolerance: 1.0e-2,
             event_secant_cap: 100.0,
-            // Carried verbatim from the serial resolver so slice 2 is a resolution change, not a
-            // retune.
-            ricochet_angle: 1.221,
-            normalization: 0.2,
-            overmatch_ratio: 3.0,
+            angles: *super::angle_laws::AngleLaws::shipped(),
             rha_reference: 1000.0,
         }
     }
@@ -2977,10 +2968,17 @@ fn encounters(
 // Stage 3 — the staged resolution (§13.3 surface laws, §5 spall, §3 capability)
 // ---------------------------------------------------------------------------------------------
 
-/// The striking round, reduced to what the entrance rules read.
+/// The striking round, reduced to what the entrance rules read: what meets the plate (a sub-calibre
+/// round's core), at its speed at the face.
 #[derive(Clone, Copy, Debug)]
 pub struct Shot {
+    /// Calibre (m).
     pub caliber: f32,
+    /// The hit nose's factor `N` in `(0, 1]`, DERIVED at load from its `NoseShape`: the force law's.
+    pub nose_factor: f32,
+    /// Metres of reference steel the round can still defeat at the face: the force law's readout at
+    /// its speed there.
+    pub potency: f32,
 }
 
 /// What the entrance disc decided, and what the surface laws read to decide it.
@@ -2997,7 +2995,7 @@ pub struct EntranceRead {
     /// Steel-equivalent thickness ALONG THE NORMAL (m) of the material actually engaged.
     ///
     /// §13.3's amendment: overmatch and ricochet consult `thickness × factor`, not geometry, or an
-    /// exposed forearm reads 80 mm "thick" and past 70° an arm ricochets an 88.
+    /// exposed forearm reads 80 mm "thick" and at a graze an arm ricochets an 88.
     ///
     /// Measured over the COVERED samples (`cost ÷ η`), not the whole disc: a partial engagement must
     /// not fake a thin plate and suppress the ricochet that makes a graze a graze (§13.5). Whether a
@@ -3090,7 +3088,8 @@ pub struct TransitRequest {
     pub offsets: Vec<Vec3>,
 }
 
-/// Read the entrance disc and decide whether the round enters (§4's decision tree, §13.3's inputs).
+/// Read the entrance disc and decide whether the round enters: §4's decision tree and its angle laws
+/// (§4a, [`AngleLaws`](super::angle_laws::AngleLaws)), on §13.3's factor-weighted thickness.
 ///
 /// The read is the first crossing's ([`DiscWalk::hand_off`]), so a disc meeting two pieces that
 /// overlap in depth reads both surfaces, whichever it meets first.
@@ -3109,7 +3108,7 @@ pub fn begin(entrance: &DiscWalk, shot: &Shot, laws: &WalkLaws) -> Result<Begin,
     let steel_equivalent =
         (event.cost / event.coverage.max(f32::MIN_POSITIVE)) / laws.rha_reference * along_normal;
     let overmatched =
-        steel_equivalent > 0.0 && shot.caliber >= laws.overmatch_ratio * steel_equivalent;
+        steel_equivalent > 0.0 && shot.caliber >= laws.angles.overmatch_ratio * steel_equivalent;
     let read = EntranceRead {
         position: event.entry_position,
         volume: event.entrance_volume,
@@ -3138,7 +3137,10 @@ pub fn begin(entrance: &DiscWalk, shot: &Shot, laws: &WalkLaws) -> Result<Begin,
         )
     };
 
-    if !overmatched && incidence > laws.ricochet_angle {
+    let critical = laws
+        .angles
+        .critical_incidence(shot.nose_factor, shot.potency, steel_equivalent);
+    if !overmatched && incidence > critical {
         let specular = super::reflect(axis, surface);
         // At full coverage the blend IS the classic bounce, so it is returned VERBATIM: rotating a
         // direction onto its own reflection by quaternion would perturb the low bits, and the
@@ -3160,17 +3162,20 @@ pub fn begin(entrance: &DiscWalk, shot: &Shot, laws: &WalkLaws) -> Result<Begin,
         });
     }
 
-    // Normalize: a modest bend toward the inward normal as it bites in, scaled by η on the same
-    // ruling — a barely-engaged entry is barely bent — and by the entrance substance's resistance
-    // over the reference's, so a substance that resists a round less turns it less. The reference
-    // substance's share is exactly 1, so its bend is `η × normalization × incidence` to the bit. The
-    // share is unclamped: a substance declared above the reference would bend a round further.
-    // Overmatch adds no bend; it cancels the SLOPE COST instead (charged in `finish`).
+    // Normalize: a bend toward the inward normal as it bites in, through `turn × N` of the
+    // incidence, so a blunter nose turns further into the plate. The product is formed first: the
+    // reference APCBC nose's share is then the f32 0.2 the data file derives, to the bit. Scaled by
+    // η on the same ruling (a barely-engaged entry is barely bent) and by the entrance substance's
+    // resistance over the reference's, so a substance that resists a round less turns it less. The
+    // share is unclamped: a substance declared above the reference would bend a round further,
+    // never past the normal (`bend_toward`). Overmatch adds no bend; it cancels the SLOPE COST
+    // instead (charged in `finish`).
     let resistance_share = event.entrance_factor / laws.rha_reference;
+    let turn = laws.angles.normalization_turn * shot.nose_factor;
     let bent = super::bend_toward(
         axis,
         -surface,
-        event.coverage * laws.normalization * incidence * resistance_share,
+        event.coverage * turn * incidence * resistance_share,
     );
 
     // Each sample resumes where [`DiscWalk::hand_off`] put it, and the transit ray is the AXIS

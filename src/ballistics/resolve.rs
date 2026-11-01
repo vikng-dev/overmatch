@@ -1532,6 +1532,8 @@ pub(crate) fn decide(
     let state_in = round.at(speed);
     let shot = Shot {
         caliber: body.caliber,
+        nose_factor: body.nose_factor,
+        potency: (round.reference_mm(state_in) / f64::from(context.laws.rha_reference)) as f32,
     };
     let owner = |struck: Entity| {
         context

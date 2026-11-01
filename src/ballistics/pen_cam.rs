@@ -1936,14 +1936,15 @@ fn a_ground_stop_counts_its_approach_whatever_the_step() {
 
 /// A round that rests in a body it entered obliquely throws its burst about the direction it
 /// travelled in that body, the entrance's bend and not the way in: the band spins about it. The
-/// 500 mm back plate is turned 40° about `Y` (fixture data), so the entrance bends the
-/// round off its way in before it stops; the bend must exceed 10 mrad for the check to tell the two
-/// apart, and 1 mrad is the tolerance. A mutant that keeps the way in as the stopped round's
-/// direction fails here.
+/// 500 mm back plate is turned 15° about `Y` (fixture data), under the 21° critical angle it gives
+/// the round slowed to 590 m/s by the front plate (DERIVED from the angle laws), so the entrance
+/// bends the round off its way in before it stops; the bend must exceed 10 mrad for the check to
+/// tell the two apart, and 1 mrad is the tolerance. A mutant that keeps the way in as the stopped
+/// round's direction fails here.
 #[test]
 fn a_round_at_rest_bursts_about_the_direction_it_stopped_along() {
     let burst = fixture_burst();
-    let turn = Quat::from_rotation_y(40.0_f32.to_radians());
+    let turn = Quat::from_rotation_y(15.0_f32.to_radians());
     let fired = fixture_fire(
         &[
             (plate("front", THIN, 0.0, Kind::Main), 0, Quat::IDENTITY),

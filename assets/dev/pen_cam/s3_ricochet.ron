@@ -1,4 +1,4 @@
-// s3_ricochet: an 88 meeting the hull side at 75 degrees from its normal bounces away
+// s3_ricochet: an 88 meeting the hull side at 80 degrees from its normal bounces away
 // Recorded by the real march from `scenarios.ron` (`ballistics::pen_cam`); do not edit.
 // Re-record with `OVERMATCH_BLESS=1 cargo test --lib pen_cam::bless -- --ignored`.
 (
@@ -15,49 +15,49 @@
         name: "Fixture Gunner",
         vehicle: "tiger_1/tiger_1.tank.ron",
     )),
-    origin: (-3.0, 1.5, -6.0),
+    origin: (-3.0, 1.5, -8.69),
     muzzle: None,
     projectile: (
         name: "MainGun",
         caliber_mm: 88.0,
         mass_kg: 10.2,
-        speed_mps: 771.96796,
+        speed_mps: 771.968,
     ),
     impact: (
-        point: (-1.6257133, 1.4989262, -0.8939967),
+        point: (-1.6257133, 1.498393, -0.89620924),
         normal: (-1.0, 0.000000018725688, -0.000000097271936),
-        incoming: (0.25990176, -0.00020305306, 0.96563506),
-        incidence_deg: 74.93576,
+        incoming: (0.17365198, -0.00020305303, 0.9848071),
+        incidence_deg: 79.99977,
         verdict: Ricochet,
     ),
     plates: [],
     ricochets: [
         (
             t: 0.0,
-            point: (-1.6257133, 1.4989262, -0.8939967),
+            point: (-1.6257133, 1.498393, -0.89620924),
             normal: (-1.0, 0.000000018725688, -0.000000097271936),
-            incoming: (0.25990176, -0.00020305306, 0.96563506),
-            outgoing: (-0.25990194, -0.00020304332, 0.965635),
+            incoming: (0.17365198, -0.00020305303, 0.9848071),
+            outgoing: (-0.17365216, -0.00020304653, 0.984807),
             volume: "Hull_Side_Upper_L",
         ),
     ],
     path: [
         (
-            t: -0.006849657,
-            point: (-3.0, 1.5, -6.0),
+            t: -0.010251756,
+            point: (-3.0, 1.5, -8.69),
         ),
         (
             t: 0.0,
-            point: (-1.6257133, 1.4989262, -0.8939967),
+            point: (-1.6257133, 1.498393, -0.89620924),
         ),
         (
-            t: 0.009165862,
-            point: (-3.4425116, 1.4975414, 5.6926246),
+            t: 0.005758577,
+            point: (-2.4285803, 1.4975061, 3.4074402),
         ),
     ],
     spall: [],
     end: Left(
-        at: (-1.6257133, 1.4989262, -0.8939967),
+        at: (-1.6257133, 1.498393, -0.89620924),
     ),
     doses: [],
     consequences: [],

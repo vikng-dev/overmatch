@@ -355,7 +355,7 @@ _Avoid_: penetration value, pen (it changes shot-to-shot as velocity bleeds)
 The penetrator's path bending toward the surface normal as it enters a volume, shortening its line-of-sight path.
 
 **Ricochet**:
-Deflection off a too-steep face without entering — spawns a new path segment, no penetration. In the game's damage model the shell keeps its speed along the face (`v sin θ`, θ from the normal) and loses the motion pointed into it, restitution 0: a struck box with an HP pool takes that energy, `½ m (v cos θ)²`, as its dose; armour takes none. Suppressed by overmatch.
+Deflection off a face met past the round's critical angle, which reads its hit nose, its potency at the face and the plate's steel-equivalent thickness (design doc §4a), without entering — spawns a new path segment, no penetration. In the game's damage model the shell keeps its speed along the face (`v sin θ`, θ from the normal) and loses the motion pointed into it, restitution 0: a struck box with an HP pool takes that energy, `½ m (v cos θ)²`, as its dose; armour takes none. Suppressed by overmatch.
 
 **Overmatch**:
 When a shell's caliber greatly exceeds a volume's thickness along its normal, suppressing ricochet and slope. The game's namesake, but one modifier among many — not the centre of the model.

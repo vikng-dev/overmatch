@@ -799,8 +799,7 @@ fn welded_overmatch_reads_the_summed_factor_weighted_thickness() {
     hits.extend(plate(2, 0, 0.5305, 0.5605));
     let disc = point_disc(2.0, sample(Vec3::ZERO, hits));
     let walked = walk_disc(&disc, &volumes, &WalkLaws::default()).unwrap();
-    let shot = Shot { caliber: 0.088 };
-    match begin(&walked, &shot, &WalkLaws::default()).unwrap() {
+    match begin(&walked, &AP_88, &WalkLaws::default()).unwrap() {
         Begin::Transit(request) => {
             assert!(!request.entrance.overmatched);
             // 30 mm × 1000 + 30 mm × 900 = 57 reference-mm, so 57 mm steel-equivalent — the
@@ -1254,7 +1253,14 @@ fn the_aggregate_entry_normal_cannot_degenerate() {
 // §13.3 / §13.5 / §3 — the staged resolution
 // ---------------------------------------------------------------------------------------------
 
-const AP_88: Shot = Shot { caliber: 0.088 };
+/// The striking 88 the entrance fixtures read: the reference APCBC hit nose (`N = 7/24`) with
+/// 50 mm of potency at the face (fixture data), so the 76° grazes of 48–97 mm plates below skid
+/// under the shipped angle laws and the 45° entries bite.
+const AP_88: Shot = Shot {
+    caliber: 0.088,
+    nose_factor: 7.0 / 24.0,
+    potency: 0.05,
+};
 
 /// The capability (reference-mm) the staged-resolution fixtures fire with: fixture data.
 const AP_88_CAPABILITY: f32 = 250.0;
@@ -1294,14 +1300,13 @@ fn transit_request(walked: &DiscWalk, shot: &Shot, laws: &WalkLaws) -> TransitRe
 #[test]
 fn an_arm_does_not_ricochet_an_88() {
     let laws = WalkLaws::default();
-    // ~76° incidence, well past the ricochet threshold.
+    // ~76° incidence, past the critical angle the steel plate below gives the fixture 88.
     let normal = Vec3::new(0.0, 0.97, -0.242).normalize();
     let arm = entrance_disc(&[Slab::at(1, 0, 0.5, normal, 0.08)], 2.0);
 
     let walked = walk_disc(&arm, &table(&[(1, 10.0)]), &laws).unwrap();
     let request = transit_request(&walked, &AP_88, &laws);
     assert!(request.entrance.overmatched);
-    assert!(request.entrance.incidence > laws.ricochet_angle);
 
     // Real armour at the same obliquity DOES deflect it — the law still works where it should.
     let plate = entrance_disc(&[Slab::at(1, 0, 0.5, normal, 0.4)], 2.0);
@@ -1349,7 +1354,8 @@ fn a_lightly_covered_plate_is_not_thin_enough_to_overmatch() {
                 entrance.steel_equivalent
             );
             assert!(
-                entrance.steel_equivalent * event.coverage * laws.overmatch_ratio < AP_88.caliber,
+                entrance.steel_equivalent * event.coverage * laws.angles.overmatch_ratio
+                    < AP_88.caliber,
                 "the fixture must actually straddle the threshold"
             );
         }
@@ -1443,9 +1449,10 @@ fn partial_coverage_scales_the_normalization_bend() {
     .unwrap();
     let full_request = transit_request(&full, &AP_88, &laws);
     let full_bend = AXIS.angle_between(*full_request.axis);
-    // At η = 1 the bend is the classic `normalization × incidence`, unscaled.
+    // At η = 1 the bend is the nose's `turn × N × incidence`, unscaled.
+    let share = laws.angles.normalization_turn * AP_88.nose_factor;
     assert!(
-        (full_bend - laws.normalization * full_request.entrance.incidence).abs() < 1.0e-4,
+        (full_bend - share * full_request.entrance.incidence).abs() < 1.0e-4,
         "{full_bend}"
     );
 
@@ -1468,7 +1475,7 @@ fn partial_coverage_scales_the_normalization_bend() {
 
 /// The entry bend scales with the entrance substance's resistance over the reference's: the same
 /// round at the same incidence turns `factor / rha_reference` as far, and off the reference
-/// substance exactly `η × normalization × incidence`, bit for bit. The bend reads the substance the
+/// substance exactly `η × turn × N × incidence`, bit for bit. The bend reads the substance the
 /// round bites into, not the hardest one behind it. A mutant that drops the share bends a trunk as
 /// hard as armour; one that reads the crossing's hardest factor bends a soft facing as the plate
 /// behind it. Every trunk crossing and every non-reference armour entry relies on it.
@@ -1492,7 +1499,9 @@ fn the_entry_bend_scales_with_the_entrance_resistance() {
     let unscaled = super::super::bend_toward(
         Dir3::new(walked.axis).unwrap(),
         -Dir3::new(event.entry_normal).unwrap(),
-        event.coverage * laws.normalization * reference.entrance.incidence,
+        event.coverage
+            * (laws.angles.normalization_turn * AP_88.nose_factor)
+            * reference.entrance.incidence,
     );
     assert_eq!(reference.axis.to_array(), Vec3::from(unscaled).to_array());
     let reference_turn = turn(*reference.axis);
@@ -4334,4 +4343,100 @@ fn invalid_sampling_frames_are_refused_without_reanchoring() {
         v: Vec3::X,
     };
     assert!(std::panic::catch_unwind(|| collapsed.transport(Vec3::Z, Vec3::Z)).is_err());
+}
+
+// ---------------------------------------------------------------------------------------------
+// §4 — the angle laws read the hit nose, the potency at the face and the plate
+// ---------------------------------------------------------------------------------------------
+
+/// Steel (fixture factor 1000) `thickness` m thick along its normal, its front face met at
+/// `incidence` rad from the normal: the entrance [`begin`] reads, walked with the shipped laws.
+fn steel_face_at(incidence: f32, thickness: f32) -> DiscWalk {
+    let normal = Vec3::new(0.0, incidence.sin(), -incidence.cos());
+    let disc = entrance_disc(
+        &[Slab::at(1, 0, 0.5, normal, thickness / incidence.cos())],
+        2.0,
+    );
+    walk_disc(&disc, &table(&[(1, 1000.0)]), &WalkLaws::default()).unwrap()
+}
+
+/// The game's damage model: at one obliquity a blunt hit nose bites where a pointed one skids. The
+/// critical angle reads the nose through its factor, the force law's, so a capped round can be aimed
+/// at a slope a pointed one glances off. Fixture: 100 mm of steel along the normal met at 60°, both
+/// rounds an 88 with 120 mm of potency; a hemispherical cap (N = 1/2) against a 6-crh ogive
+/// (N = 47/864). A law that ignored the nose, or read it backwards, fails one of the two.
+#[test]
+fn at_one_obliquity_a_blunt_nose_bites_where_a_pointed_one_skids() {
+    let laws = WalkLaws::default();
+    let walked = steel_face_at(60f32.to_radians(), 0.1);
+    let shot = |nose: crate::spec::NoseShape| Shot {
+        caliber: 0.088,
+        nose_factor: nose.factor(),
+        potency: 0.12,
+    };
+    let blunt = shot(crate::spec::NoseShape::Cap {
+        radius_calibres: 0.5,
+    });
+    let pointed = shot(crate::spec::NoseShape::Ogive { crh: 6.0 });
+    assert!(matches!(
+        begin(&walked, &blunt, &laws).unwrap(),
+        Begin::Transit(_)
+    ));
+    assert!(matches!(
+        begin(&walked, &pointed, &laws).unwrap(),
+        Begin::Ricochet { .. }
+    ));
+}
+
+/// The game's damage model: a slower round skids where a faster one bites. The critical angle reads
+/// the round's potency at the face, the force law's readout at its speed there, so a round that has
+/// flown far or slowed in a first plate glances off a slope it would have bitten at the muzzle.
+/// Fixture: the reference 88 body (10.2 kg, N = 7/24) at 900 and 400 m/s against 100 mm of steel
+/// along the normal at 65°.
+#[test]
+fn a_slower_round_skids_where_a_faster_one_bites() {
+    let laws = WalkLaws::default();
+    let walked = steel_face_at(65f32.to_radians(), 0.1);
+    let body = super::super::RoundBody {
+        mass: 10.2,
+        caliber: 0.088,
+        nose_factor: 7.0 / 24.0,
+    };
+    let shot = |speed: f32| Shot {
+        caliber: body.caliber,
+        nose_factor: body.nose_factor,
+        potency: super::super::capability(body, speed) / laws.rha_reference,
+    };
+    assert!(matches!(
+        begin(&walked, &shot(900.0), &laws).unwrap(),
+        Begin::Transit(_)
+    ));
+    assert!(matches!(
+        begin(&walked, &shot(400.0), &laws).unwrap(),
+        Begin::Ricochet { .. }
+    ));
+}
+
+/// The game's damage model: a thin plate under a large calibre is overmatched. The same plate at the
+/// same obliquity skids a small round off and takes a large one in, and only calibre differs:
+/// overmatch reads the steel-equivalent thickness over the calibre of what meets the plate.
+/// Fixture: 20 mm of steel along the normal at 80°; an 88 (3 × 20 mm < 88 mm) against a 7.9 mm
+/// round, both N = 1/2 with 14.5 mm of potency.
+#[test]
+fn a_thin_plate_under_a_large_calibre_is_overmatched() {
+    let laws = WalkLaws::default();
+    let walked = steel_face_at(80f32.to_radians(), 0.02);
+    let shot = |caliber: f32| Shot {
+        caliber,
+        nose_factor: 0.5,
+        potency: 0.0145,
+    };
+    match begin(&walked, &shot(0.088), &laws).unwrap() {
+        Begin::Transit(request) => assert!(request.entrance.overmatched),
+        other => panic!("the 88 overmatches the thin plate: {other:?}"),
+    }
+    assert!(matches!(
+        begin(&walked, &shot(0.0079), &laws).unwrap(),
+        Begin::Ricochet { .. }
+    ));
 }

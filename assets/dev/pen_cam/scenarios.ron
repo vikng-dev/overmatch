@@ -28,11 +28,13 @@
     ),
     (
         name: "s3_ricochet",
-        shows: "an 88 meeting the hull side at 75 degrees from its normal bounces away",
+        shows: "an 88 meeting the hull side at 80 degrees from its normal bounces away",
         weapon: "MainGun",
         round: "88mm_AP",
-        from: (-3.0, 1.5, -6.0),
-        toward: (-1.44, 1.5, -0.204),
+        // 80 degrees: past the 75.8 degrees the 80 mm side gives this round under the angle laws
+        // (MEASURED; design doc §4a), where at 75 degrees it bites and stops in the plate.
+        from: (-3.0, 1.5, -8.69),
+        toward: (-1.44, 1.5, 0.157),
         verdict: Ricochet,
     ),
     (

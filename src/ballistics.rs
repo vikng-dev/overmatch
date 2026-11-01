@@ -33,6 +33,10 @@ pub(crate) use path::{FlightOutcome, PathClock};
 mod walk;
 pub(crate) use walk::VolumeMaterial;
 
+/// The shell walk's angle laws (ricochet, normalization, overmatch): their coefficients, parsed once
+/// from `assets/ballistics/angle_laws.ron`.
+mod angle_laws;
+
 /// Round mechanisms: how a round's state advances through the ordered encounters of a crossing.
 /// Solid shot is the only one built.
 mod mechanism;
@@ -1938,9 +1942,11 @@ pub fn sim_plugin(app: &mut App) {
     spall_cone::ConeShape::shipped();
     spall_cone::energy_share();
     spall_cone::BurstFields::shipped();
-    // The game's damage model validates the shared crew HP pool and hard-pool energy rate at startup.
+    // The game's damage model validates the shared crew HP pool, the hard-pool energy rate and the
+    // walk's angle laws at startup.
     box_classes::BoxClasses::shipped();
     energy_dose::joules_per_hp();
+    angle_laws::AngleLaws::shipped();
     app.configure_sets(
         FixedPostUpdate,
         (

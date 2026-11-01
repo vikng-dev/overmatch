@@ -269,6 +269,8 @@ fn handed_off(
                 )?;
                 let shot = Shot {
                     caliber: ROUND.caliber,
+                    nose_factor: ROUND.nose_factor,
+                    potency: capability(ROUND, SPEED) / context.laws.rha_reference,
                 };
                 let Begin::Transit(request) = walk::begin(&entrance, &shot, &context.laws)? else {
                     return Ok(None);
@@ -627,13 +629,20 @@ fn the_runtime_and_the_gate_decide_the_same_crossings() {
 
     // Bounce: a thin plate struck at 75° by a round it cannot overmatch, over a target narrow
     // enough that the bounced path (30° off the drop line) passes beside it. The straight line
-    // through the plate costs less than the round can spend, so only the bounce keeps it out.
-    let (speed, _) = first_tick(FIXTURE_MG, 755.0);
+    // through the plate costs less than the round can spend, so only the bounce keeps it out. The
+    // round has a pointed hit nose (a 6-crh ogive): under the angle laws a round skids off a plate
+    // whose line it could defeat only when `ricochet_grip × N < sin θ`, so a blunter nose bites
+    // here; this one skids past 72° (DERIVED).
+    let pointed = RoundBody {
+        nose_factor: crate::spec::NoseShape::Ogive { crh: 6.0 }.factor(),
+        ..FIXTURE_MG
+    };
+    let (speed, _) = first_tick(pointed, 755.0);
     assert!(
-        0.003 / 75.0_f32.to_radians().cos() * STEEL < capability(FIXTURE_MG, speed),
+        0.003 / 75.0_f32.to_radians().cos() * STEEL < capability(pointed, speed),
         "the straight chord alone would admit the target"
     );
-    let bounced = agree("bounce", FIXTURE_MG, 755.0, |app| {
+    let bounced = agree("bounce", pointed, 755.0, |app| {
         tilted_plate(app, 0.003, 75.0_f32.to_radians(), 1.0, STEEL);
         target_below(app, 0.0, 0.6)
     });
@@ -2176,9 +2185,10 @@ fn first_bounce(flown: &Drive) -> &Bounce {
 /// struck is `½ m (v_in² − v_out²)` joules, `m` the mass that meets the plate, as a line dose is
 /// the energy lost crossing a box, so it converts at the one energy rate; a round that loses more
 /// at the bounce jars the face harder. Fixture rounds of different mass and speed graze one
-/// HP-bearing slab at 75°, past the ricochet angle and too thick for any of them to overmatch. A
-/// shock read from the readout, the incidence or a constant fails here; the record's line dose for
-/// a bounce and every dose of energy converting at one rate rely on it.
+/// HP-bearing slab of 0.4 m of steel at 75°, past each one's critical angle against it (under 41°,
+/// DERIVED from the angle laws) and too thick for any of them to overmatch. A shock read from the
+/// readout, the incidence or a constant fails here; the record's line dose for a bounce and every
+/// dose of energy converting at one rate rely on it.
 #[test]
 fn a_bounces_shock_is_the_energy_the_round_lost_there() {
     let mut shocks: Vec<(f64, f32)> = [
@@ -2188,7 +2198,7 @@ fn a_bounces_shock_is_the_energy_the_round_lost_there() {
     ]
     .into_iter()
     .map(|(body, speed)| {
-        let (flown, _) = shot_onto_slab(body, speed, 75.0_f32.to_radians(), 0.4, STEEL * 0.1);
+        let (flown, _) = shot_onto_slab(body, speed, 75.0_f32.to_radians(), 0.4, STEEL);
         let bounce = first_bounce(&flown);
         let (v_in, v_out) = (bounce.speed_in as f64, bounce.speed as f64);
         let lost = 0.5 * body.mass as f64 * (v_in * v_in - v_out * v_out);
@@ -2213,15 +2223,16 @@ fn a_bounces_shock_is_the_energy_the_round_lost_there() {
 /// A BOUNCE DOSES THE ENERGY POINTED INTO THE FACE: the round keeps its speed along the face it
 /// struck and loses the rest, restitution 0, so a full-coverage bounce jars `½ m (v_in cos θ)²`
 /// joules into that face, `θ` the incidence from its normal — the dose falls as `cos² θ`, and a
-/// shallower graze deals less. The fixture 88 grazes one HP-bearing slab at 72°, 75°, 80° and 85°
-/// (fixture data), past the ricochet angle and too thick to overmatch. A bounce that charged a
-/// fixed share of the striking energy (a speed bleed), or the energy along the face, fails here; a
-/// struck module's bounce dose in play, and its scale against a perforation's, rely on it.
+/// shallower graze deals less. The fixture 88 grazes one HP-bearing slab of 0.4 m of steel at
+/// 72°, 75°, 80° and 85° (fixture data), past its critical angle against it (39°, DERIVED from the
+/// angle laws) and too thick to overmatch. A bounce that charged a fixed share of the striking
+/// energy (a speed bleed), or the energy along the face, fails here; a struck module's bounce dose
+/// in play, and its scale against a perforation's, rely on it.
 #[test]
 fn a_bounce_doses_the_energy_pointed_into_the_face() {
     let mut doses: Vec<(f32, f32)> = Vec::new();
     for degrees in [72.0_f32, 75.0, 80.0, 85.0] {
-        let (flown, _) = shot_onto_slab(FIXTURE_88, 773.0, degrees.to_radians(), 0.4, STEEL * 0.1);
+        let (flown, _) = shot_onto_slab(FIXTURE_88, 773.0, degrees.to_radians(), 0.4, STEEL);
         let bounce = first_bounce(&flown);
         assert_eq!(
             bounce.coverage, 1.0,
@@ -2254,15 +2265,15 @@ fn a_bounce_doses_the_energy_pointed_into_the_face() {
 
 /// A BOUNCE KEEPS THE SPEED ALONG THE FACE: a full-coverage bounce leaves at the striking
 /// velocity's part along the face it struck, `|v_in − (v_in · n̄) n̄| = v_in sin θ`, whatever the
-/// round's mass, its speed or the incidence. Two fixture rounds graze one slab at three incidences
-/// past the ricochet angle (fixture data). A speed retained by a constant share (a bleed), by the
-/// round, or kept whole fails here; the flight after a bounce, its fuze and the next surface it
-/// meets rely on it.
+/// round's mass, its speed or the incidence. Two fixture rounds graze one slab of 0.4 m of steel
+/// at three incidences past each one's critical angle against it (under 40°, DERIVED from the
+/// angle laws; fixture data). A speed retained by a constant share (a bleed), by the round, or kept
+/// whole fails here; the flight after a bounce, its fuze and the next surface it meets rely on it.
 #[test]
 fn a_bounce_keeps_the_speed_along_the_face() {
     for (body, speed) in [(FIXTURE_88, 773.0), (FIXTURE_MG, 755.0)] {
         for degrees in [72.0_f32, 78.0, 85.0] {
-            let (flown, _) = shot_onto_slab(body, speed, degrees.to_radians(), 0.4, STEEL * 0.1);
+            let (flown, _) = shot_onto_slab(body, speed, degrees.to_radians(), 0.4, STEEL);
             let bounce = first_bounce(&flown);
             assert_eq!(
                 bounce.coverage, 1.0,
@@ -2281,18 +2292,25 @@ fn a_bounce_keeps_the_speed_along_the_face() {
 }
 
 /// A BOUNCE AT THE RICOCHET ANGLE DOSES LESS THAN PERFORATING THE PART: the most a bounce can jar
-/// into a part is just past the ricochet angle, where `cos² θ` is largest, and for the fixture 88 at
+/// into a part is just past its critical angle, where `cos² θ` is largest, and for the fixture 88 at
 /// 773 m/s there it is below the line dose the same round deals perforating the same part square
 /// on. The part is the thinnest steel slab the round cannot overmatch, `1.1 × caliber ÷
-/// overmatch_ratio` along its normal: of every steel part that can bounce the round at all, it
-/// is the cheapest to perforate, and a thicker one only takes more energy from the line (DERIVED
-/// from the force law). Fixture data. A bounce that charged a fixed share of the striking energy
-/// fails here; a part's pool, sized against what perforating it deals, relies on a glance dealing
-/// less.
+/// overmatch_ratio` along its normal, the cheapest of them to perforate. A thicker part takes more
+/// from the line and, its critical angle lower, more from a bounce: `cos² θ_c = t² / (t² + k²)` of
+/// the striking energy, `k = ricochet_grip × N × P`, which stays under a fifth of what perforating
+/// `t` takes at any thickness for this round (DERIVED: the ratio peaks at `t = k`, the line's loss
+/// taken as the force law's rate at the face). Fixture data. A bounce that charged a fixed share of
+/// the striking energy fails here; a part's pool, sized against what perforating it deals, relies
+/// on a glance dealing less.
 #[test]
 fn a_bounce_at_the_ricochet_angle_doses_less_than_perforating_the_part() {
     let laws = WalkLaws::default();
-    let thickness = 1.1 * FIXTURE_88.caliber / laws.overmatch_ratio;
+    let thickness = 1.1 * FIXTURE_88.caliber / laws.angles.overmatch_ratio;
+    let critical = laws.angles.critical_incidence(
+        FIXTURE_88.nose_factor,
+        capability(FIXTURE_88, 773.0) / laws.rha_reference,
+        thickness,
+    );
     let (square, part) = shot_onto_slab(FIXTURE_88, 773.0, 0.0, thickness, STEEL);
     let Some(Decision::Bite(bite)) = square.decisions.first() else {
         panic!("square on, the round bites: {:?}", impacts_of(&square));
@@ -2308,13 +2326,7 @@ fn a_bounce_at_the_ricochet_angle_doses_less_than_perforating_the_part() {
         .map(|dose| dose.amount)
         .sum();
 
-    let (graze, part) = shot_onto_slab(
-        FIXTURE_88,
-        773.0,
-        laws.ricochet_angle + 0.01,
-        thickness,
-        STEEL,
-    );
+    let (graze, part) = shot_onto_slab(FIXTURE_88, 773.0, critical + 0.01, thickness, STEEL);
     let bounce = first_bounce(&graze);
     assert_eq!(bounce.struck, part);
     assert!(
@@ -2771,6 +2783,8 @@ fn a_convex_trunk_is_crossed_with_a_chord_at_any_offset_and_incidence() {
                         )?;
                         let shot = Shot {
                             caliber: ROUND.caliber,
+                            nose_factor: ROUND.nose_factor,
+                            potency: capability(ROUND, SPEED) / context.laws.rha_reference,
                         };
                         let Begin::Transit(request) = walk::begin(&entrance, &shot, &context.laws)?
                         else {
