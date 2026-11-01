@@ -146,9 +146,15 @@ pub(crate) fn steering_hud_line(
     if st.steer_step == 0 {
         return String::new();
     }
-    let Some(radii) = authored_radii.filter(|radii| !radii.is_empty()) else {
-        return String::new();
+    let Some(radii) = authored_radii else {
+        return String::new(); // No running gear is built yet: no steering table to read.
     };
+    assert!(
+        !radii.is_empty(),
+        "TransmissionParams::from_authoring refuses a steering table without a pair per forward gear"
+    );
+    // A reverse ladder may be longer than the forward table; the steering law clamps its index
+    // to the last forward pair the same way (`track::transmission`).
     let gear = usize::from(st.gear).clamp(1, radii.len()) - 1;
     let (tight, wide) = radii[gear];
     let (detent, radius) = if st.steer_step == 1 {
@@ -190,7 +196,9 @@ fn update_drive_hud(
     let Ok((mut debug_text, mut debug_visibility)) = debug_label.single_mut() else {
         return;
     };
-    let Some((drive, signal, transmission, velocity, rotation)) = controlled.iter().next() else {
+    let Some((drive, signal, transmission, velocity, rotation)) =
+        crate::tank::controlled_one(controlled.single())
+    else {
         set_text(standard_text.reborrow(), "");
         set_text(debug_text.reborrow(), "");
         standard_visibility.set_if_neq(Visibility::Hidden);

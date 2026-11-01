@@ -88,8 +88,9 @@ batching)` or `OVERMATCH PATCH (removal skip)`, and either can be carried or dro
   that only if the entity happened to move while invisible. Neither guarantees it.
 
 Guards: `src/tests/bevy_mesh_removal_lifecycle.rs`, render-world lifecycle tests on a real adapter
-(`#[ignore]`d, since CI has none; the module doc has the command). Counter: `SPIKE_MESH_REMOVALS=1`
-(`src/render_cost.rs`), which logs the removals queued per frame and how many had an instance.
+(`#[ignore]`d, since CI has none; the module doc has the command). The runtime counter that once
+logged queued removals per frame is retired; the queue iterator it read survives only under
+`cfg(test)` for that tripwire.
 
 ## Retired: shadow views inherit the light's `RenderLayers`
 
