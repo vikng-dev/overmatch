@@ -2361,7 +2361,7 @@ TankSpec(
             .collect();
         let error = spec.validate().unwrap_err().to_string();
         assert!(
-            error.contains("weapons") && error.contains("256"),
+            error.contains("weapons: at most 256 slots fit the wire"),
             "{error}"
         );
     }

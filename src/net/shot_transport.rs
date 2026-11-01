@@ -914,7 +914,7 @@ mod tests {
     /// round. A replica relies on this to fly the shot the authority fired: a mutant that wrote
     /// the default mode, or bound a refused index to the default, gives the two ends different
     /// bursts.
-    fn authority_fire_fixture() -> (World, FireShell) {
+    fn authority_fire_fixture() -> (World, impl Fn() -> FireShell) {
         let mut world = World::new();
         world.init_resource::<LocalTimeline>();
         world.init_resource::<ShotTransport>();
@@ -930,23 +930,25 @@ mod tests {
             .unwrap()
             .resolved_round()
             .unwrap();
-        let fire = FireShell::of_round(
-            &round,
-            Vec3::ZERO,
-            Dir3::NEG_Z,
-            FireMechanism::Single,
-            true,
-            Some(crate::ballistics::ShotSource {
-                tank,
-                weapon: 0,
-                round: 0,
-            }),
-            Some(crate::ShotId {
-                combatant,
-                weapon: 0,
-                fire_tick: 0,
-            }),
-        );
+        let fire = move || {
+            FireShell::of_round(
+                &round,
+                Vec3::ZERO,
+                Dir3::NEG_Z,
+                FireMechanism::Single,
+                true,
+                Some(crate::ballistics::ShotSource {
+                    tank,
+                    weapon: 0,
+                    round: 0,
+                }),
+                Some(crate::ShotId {
+                    combatant,
+                    weapon: 0,
+                    fire_tick: 0,
+                }),
+            )
+        };
         (world, fire)
     }
 
@@ -955,7 +957,8 @@ mod tests {
     #[test]
     #[should_panic(expected = "an attributed authority fire has its ShotId stamped at spawn")]
     fn an_attributed_fire_without_its_spawn_identity_is_a_bug() {
-        let (mut world, mut fire) = authority_fire_fixture();
+        let (mut world, fire) = authority_fire_fixture();
+        let mut fire = fire();
         fire.shot = None;
         world.trigger(fire);
     }
@@ -966,10 +969,8 @@ mod tests {
     #[should_panic(expected = "an authority ShotId has exactly one spawn-time route")]
     fn a_duplicate_spawn_identity_is_a_bug() {
         let (mut world, fire) = authority_fire_fixture();
-        world.trigger(fire);
-        let (_, fire) = authority_fire_fixture();
-        // Match the original source entity: each independent fixture uses the same first entity.
-        world.trigger(fire);
+        world.trigger(fire());
+        world.trigger(fire());
     }
 
     #[test]
