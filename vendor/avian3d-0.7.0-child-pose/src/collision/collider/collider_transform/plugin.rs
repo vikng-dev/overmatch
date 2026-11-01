@@ -63,28 +63,128 @@ impl Plugin for ColliderTransformPlugin {
     }
 }
 
-#[allow(clippy::type_complexity)]
-pub(crate) fn update_child_collider_position(
-    mut collider_query: Query<
-        (
-            &ColliderTransform,
-            &mut Position,
-            &mut Rotation,
-            &ColliderOf,
-        ),
-        Without<RigidBody>,
-    >,
-    rb_query: Query<(&Position, &Rotation), (With<RigidBody>, With<Children>)>,
-) {
-    for (collider_transform, mut position, mut rotation, collider_of) in &mut collider_query {
-        let Ok((rb_pos, rb_rot)) = rb_query.get(collider_of.body) else {
-            continue;
-        };
+// OVERMATCH PATCH: one placement law serves the physics, post-physics and replication
+// boundaries. Change filters still scan ticks, but only changed inputs compose child poses.
+type ChildPose = (
+    &'static ColliderTransform,
+    &'static mut Position,
+    &'static mut Rotation,
+    &'static ColliderOf,
+);
 
-        // OVERMATCH PATCH: write a pose only where its bits change. An unconditional write marks
-        // every child collider's `Position`/`Rotation` changed every step, static bodies' included,
-        // so `update_moved_collider_aabbs` recomputes every one of their AABBs every step. The
-        // stored bits are those the unconditional write leaves; only the change ticks differ.
+/// The child placement inputs shared by physics and external post-step consumers. An unchanged
+/// child is already at its composed pose; a body move visits its attached collider list directly.
+#[derive(bevy::ecs::system::SystemParam)]
+pub struct ChildColliderPoses<'w, 's> {
+    colliders: ParamSet<
+        'w,
+        's,
+        (
+            Query<
+                'w,
+                's,
+                ChildPose,
+                (
+                    Without<RigidBody>,
+                    Or<(
+                        Changed<ColliderTransform>,
+                        Changed<Position>,
+                        Changed<Rotation>,
+                        Changed<ColliderOf>,
+                    )>,
+                ),
+            >,
+            Query<'w, 's, ChildPose, Without<RigidBody>>,
+        ),
+    >,
+    bodies: Query<'w, 's, (&'static Position, &'static Rotation), With<RigidBody>>,
+    moved_bodies: Query<
+        'w,
+        's,
+        (
+            &'static Position,
+            &'static Rotation,
+            &'static RigidBodyColliders,
+        ),
+        (
+            With<RigidBody>,
+            Or<(
+                Changed<Position>,
+                Changed<Rotation>,
+                Changed<RigidBody>,
+                Changed<RigidBodyColliders>,
+            )>,
+        ),
+    >,
+    removals: &'w bevy::ecs::lifecycle::RemovedComponentMessages,
+    query_filters: Option<Res<'w, bevy::ecs::entity_disabling::DefaultQueryFilters>>,
+    enabled_cursors: Local<'s, child_pose::EnabledCursors>,
+}
+
+impl ChildColliderPoses<'_, '_> {
+    /// Place changed child poses, writing only changed bits. Re-enabling a default-filtered
+    /// entity can change membership without a pose write, so that boundary visits every child.
+    pub fn update(&mut self) {
+        let visit_all = self
+            .query_filters
+            .as_ref()
+            .is_some_and(|filters| self.enabled_cursors.any_enabled(filters, self.removals));
+        if visit_all {
+            for (local, mut position, mut rotation, owner) in &mut self.colliders.p1() {
+                // A disabled parent has no active physics pose to propagate.
+                let Ok((at, turn)) = self.bodies.get(owner.body) else {
+                    continue;
+                };
+                child_pose::write(local, at, turn, &mut position, &mut rotation);
+            }
+            return;
+        }
+        for (local, mut position, mut rotation, owner) in &mut self.colliders.p0() {
+            // A disabled parent has no active physics pose to propagate.
+            let Ok((at, turn)) = self.bodies.get(owner.body) else {
+                continue;
+            };
+            child_pose::write(local, at, turn, &mut position, &mut rotation);
+        }
+        let mut children = self.colliders.p1();
+        for (at, turn, colliders) in &self.moved_bodies {
+            for collider in colliders {
+                // The body's own collider and disabled colliders are not active child colliders.
+                if let Ok((local, mut position, mut rotation, _)) = children.get_mut(collider) {
+                    child_pose::write(local, at, turn, &mut position, &mut rotation);
+                }
+            }
+        }
+    }
+}
+
+/// Update child collider poses before narrow phase. Post-step consumers use the same parameter
+/// to refresh the completed physics pose at their own boundary.
+pub fn update_child_collider_position(mut poses: ChildColliderPoses) {
+    poses.update();
+}
+
+// OVERMATCH PATCH: the child pose and its bitwise write, shared by every visiting path of
+// `update_child_collider_position`.
+mod child_pose {
+    use super::*;
+    use alloc::vec::Vec;
+    use bevy::ecs::component::ComponentId;
+    use bevy::ecs::entity_disabling::DefaultQueryFilters;
+    use bevy::ecs::lifecycle::{RemovedComponentEntity, RemovedComponentMessages};
+    use bevy::ecs::message::MessageCursor;
+
+    /// Writes the pose the child takes from its body, each component only where its bits change.
+    /// The stored bits are those an unconditional write leaves; only the change ticks of an
+    /// unchanged pose differ, and Avian's `update_moved_collider_aabbs` skips a collider whose
+    /// ticks did not move.
+    pub(super) fn write(
+        collider_transform: &ColliderTransform,
+        rb_pos: &Position,
+        rb_rot: &Rotation,
+        position: &mut Mut<Position>,
+        rotation: &mut Mut<Rotation>,
+    ) {
         let new_position = rb_pos.0 + rb_rot * collider_transform.translation;
         #[cfg(feature = "2d")]
         let new_rotation = *rb_rot * collider_transform.rotation;
@@ -95,26 +195,58 @@ pub(crate) fn update_child_collider_position(
         if !same_bits_position(position.0, new_position) {
             position.0 = new_position;
         }
-        if !same_bits_rotation(*rotation, new_rotation) {
-            *rotation = new_rotation;
+        if !same_bits_rotation(**rotation, new_rotation) {
+            **rotation = new_rotation;
         }
     }
-}
 
-// OVERMATCH PATCH: bitwise equality, so a `-0.0` never stands in for a `0.0` (or one NaN payload
-// for another) that the unconditional write would have stored.
-fn same_bits_position(a: Vector, b: Vector) -> bool {
-    a.to_array().map(Scalar::to_bits) == b.to_array().map(Scalar::to_bits)
-}
+    /// One removal cursor per disabling component, so a removal (an entity re-enabled) is seen
+    /// once.
+    #[derive(Default)]
+    pub struct EnabledCursors(Vec<(ComponentId, MessageCursor<RemovedComponentEntity>)>);
 
-#[cfg(feature = "2d")]
-fn same_bits_rotation(a: Rotation, b: Rotation) -> bool {
-    [a.cos, a.sin].map(Scalar::to_bits) == [b.cos, b.sin].map(Scalar::to_bits)
-}
+    impl EnabledCursors {
+        /// Whether a disabling component was removed from any entity since the last call.
+        pub(super) fn any_enabled(
+            &mut self,
+            query_filters: &DefaultQueryFilters,
+            removals: &RemovedComponentMessages,
+        ) -> bool {
+            let mut any = false;
+            for id in query_filters.disabling_ids() {
+                let Some(messages) = removals.get(id) else {
+                    continue;
+                };
+                let index = match self.0.iter().position(|(known, _)| *known == id) {
+                    Some(index) => index,
+                    None => {
+                        self.0.push((id, MessageCursor::default()));
+                        self.0.len() - 1
+                    }
+                };
+                let cursor = &mut self.0[index].1;
+                any |= !cursor.is_empty(messages);
+                cursor.clear(messages);
+            }
+            any
+        }
+    }
 
-#[cfg(feature = "3d")]
-fn same_bits_rotation(a: Rotation, b: Rotation) -> bool {
-    a.0.to_array().map(Scalar::to_bits) == b.0.to_array().map(Scalar::to_bits)
+    // Bitwise equality, so a `-0.0` never stands in for a `0.0` (or one NaN payload for another)
+    // that the unconditional write would have stored.
+    pub(super) fn same_bits_position(a: Vector, b: Vector) -> bool {
+        a.to_array().map(Scalar::to_bits) == b.to_array().map(Scalar::to_bits)
+    }
+
+    #[cfg(feature = "2d")]
+    pub(super) fn same_bits_rotation(a: Rotation, b: Rotation) -> bool {
+        [a.cos, a.sin].map(Scalar::to_bits) == [b.cos, b.sin].map(Scalar::to_bits)
+    }
+
+    #[cfg(feature = "3d")]
+    pub(super) fn same_bits_rotation(a: Rotation, b: Rotation) -> bool {
+        a.0.to_array().map(Scalar::to_bits) == b.0.to_array().map(Scalar::to_bits)
+    }
 }
 
 // `ColliderTransform` propagation should only be continued if the child

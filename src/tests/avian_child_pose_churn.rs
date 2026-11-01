@@ -319,3 +319,67 @@ fn lightyears_child_pass_carries_a_child_re_enabled_after_its_body_moved() {
         "lightyear_avian's child pass left a re-enabled child where its body stood"
     );
 }
+
+/// Every placement boundary skips unchanged inputs. The server relies on standing map colliders
+/// costing no pose compositions in physics or replication; a pose planted without a tick is the
+/// witness that a pass did not visit it. The standing compound is fixture construction.
+#[test]
+fn physics_and_replication_share_the_changed_input_placement_law() {
+    let mut app = physics_app();
+    let (body, child) = standing_compound(&mut app);
+    let physics = app.world_mut().register_system(
+        avian3d::collision::collider::collider_transform::update_child_collider_position,
+    );
+    let replication = registered_child_pass(&mut app);
+    run(&mut app, physics);
+    for pass in [physics, replication] {
+        run(&mut app, pass);
+        let stale = plant_stale_pose(app.world_mut(), child);
+        run(&mut app, pass);
+        assert_eq!(
+            pose(app.world(), child),
+            stale,
+            "unchanged inputs must not be recomposed"
+        );
+        app.world_mut().get_mut::<Position>(body).unwrap().0 += Vec3::X;
+        run(&mut app, pass);
+        assert_eq!(pose(app.world(), child), carried_pose(app.world(), child));
+    }
+}
+
+/// ColliderOf is the actual physics attachment, including manually attached colliders without a
+/// Transform child relationship. A moved body's collider list must carry that child too.
+#[test]
+fn a_manually_attached_child_follows_its_body_without_transform_children() {
+    let mut app = App::new();
+    let body = app
+        .world_mut()
+        .spawn((
+            RigidBody::Static,
+            Position(Vec3::ZERO),
+            Rotation::IDENTITY,
+            GlobalTransform::IDENTITY,
+        ))
+        .id();
+    let child = app
+        .world_mut()
+        .spawn((
+            Collider::sphere(0.5),
+            Position(Vec3::ZERO),
+            Rotation::IDENTITY,
+            GlobalTransform::from_translation(Vec3::X),
+            ColliderOf { body },
+            ColliderTransform {
+                translation: Vec3::X,
+                ..default()
+            },
+        ))
+        .id();
+    let pass = app.world_mut().register_system(
+        avian3d::collision::collider::collider_transform::update_child_collider_position,
+    );
+    run(&mut app, pass);
+    app.world_mut().get_mut::<Position>(body).unwrap().0 += Vec3::Z;
+    run(&mut app, pass);
+    assert_eq!(pose(app.world(), child).0, Vec3::X + Vec3::Z);
+}

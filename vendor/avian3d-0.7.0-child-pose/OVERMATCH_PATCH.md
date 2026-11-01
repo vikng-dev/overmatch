@@ -23,10 +23,21 @@ system's; only the change ticks of unchanged values differ.
 Who reads those change ticks: in this crate, `update_moved_collider_aabbs` (above, a pure function
 of pose and shape: skipping it for an unchanged pose leaves the same AABB), `wake_on_changed`
 (rigid bodies only; the query excludes `RigidBody`) and `position_to_transform` (rigid bodies and
-`ApplyPosToTransform` only). `lightyear_avian3d` has the same system, patched the same way
-(`vendor/lightyear_avian3d-0.30.1-child-pose`); without both patches the change ticks still fire.
+`ApplyPosToTransform` only). `lightyear_avian3d` delegates its corresponding pass to this parameter
+(`vendor/lightyear_avian3d-0.30.1-child-pose`), so both boundaries keep the same write semantics.
 
-The defect and the proposed upstream fix are recorded in `upstream/avian-child-collider-pose-churn.md`.
+`ChildColliderPoses` is the exported system parameter for the same placement law at all of the
+application's boundaries: Avian before narrow phase, the game's walk after physics, and
+lightyear's frame replication. It reads changed local poses, attachments and own poses, plus the
+collider lists of bodies whose pose, kind or collider membership changed. Unchanged inputs cost
+change-tick scans but no pose composition. Removing a default disabling component refreshes
+membership even without a pose write. A manually attached collider follows `ColliderOf` through
+`RigidBodyColliders`, without requiring a Transform `Children` component on its body.
+
+Guard: `src/tests/avian_child_pose_churn.rs`; the production walk boundary is also exercised by
+`src/ballistics/motion.rs` tests. The current inspection is
+`.agents/scratch/perf-2026-11-01/server-tick.md`; the earlier defect and local upstream draft are
+`upstream/avian-child-collider-pose-churn.md`.
 
 ## Moved-collider bounds prune (`src/collider_tree/update.rs`, `src/collider_tree/diagnostics.rs`)
 

@@ -238,3 +238,37 @@ No after time was taken under this lane's binding rules; the orchestrator must p
 the candidate-list fix together on the landed tree. Formatting, CI clippy and the same 229
 passing driving/headless/citation tests cover this change. No result shift was observed and no
 golden, physical parameter, command hold or grip shear modulus was changed.
+
+## server-perf-2: one child placement law, changed inputs only
+
+"physics: share changed-input child placement across tick boundaries (#250)" exports Avian's
+`ChildColliderPoses` parameter and uses it in the pre-physics pass, the game's post-physics
+`motion::place_children`, and lightyear's frame pass. The boundaries remain distinct because a
+body can move during the solver and a replica can receive a new pose between physics steps.
+Each boundary now composes only changed child inputs and the attached colliders of changed
+bodies. An unchanged map collider costs change-tick scans, with no pose composition or write.
+The local transform, attachment, own pose, body kind and collider membership all participate;
+re-enabling a default-filtered entity refreshes membership. Every float-bit write uses the same
+routine and pose expressions.
+
+`physics_and_replication_share_the_changed_input_placement_law` plants a stale child pose
+without advancing a change tick and observes that both passes leave it untouched; moving the
+body then carries the child. The production-mount history test covers the post-physics pass.
+The manual-attachment guard exercises `ColliderOf` without Transform children; its body must
+have the `GlobalTransform` Avian's insertion hook reads to construct `RigidBodyColliders`.
+The synthetic history fixtures now satisfy that same attachment contract.
+
+The manual-attachment fixture follows its body's 1 m Z move (fixture data, MEASURED test);
+the previous Avian/lightyear `With<Children>` filter skipped that valid attachment. Ordinary
+hierarchies retain the same pose arithmetic. No gameplay golden or tolerance changed.
+
+Gates: formatting, CI clippy and 44 collider/history/headless/citation tests passed, with
+3 existing ignored tests (MEASURED test-harness counts). The existing proxy-removal tests pass.
+
+| System | Before (MEASURED local, previous lane) | After |
+|---|---|---|
+| `motion::place_children` | 125–278 us/tick | Deferred to batched pricing |
+| Avian `update_child_collider_position` | 134–274 us/tick | Deferred to batched pricing |
+| All child placement passes, combined | 611–1 077 us/tick | Deferred to batched pricing |
+
+These rows overlap: the combined row includes the individual rows. No new tick timing was taken.

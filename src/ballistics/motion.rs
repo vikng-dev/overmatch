@@ -190,24 +190,9 @@ pub(super) fn forget_body(removed: On<Remove, RigidBody>, mut history: ResMut<Co
 /// The game's damage model: refresh child physics poses after the solver moved their body.
 /// Avian's own child placement runs before its solver; the walk reads the completed interval.
 pub(super) fn place_children(
-    mut children: Query<
-        (
-            &ColliderOf,
-            &ColliderTransform,
-            &mut Position,
-            &mut Rotation,
-        ),
-        Without<RigidBody>,
-    >,
-    bodies: Query<(&Position, &Rotation), With<RigidBody>>,
+    mut poses: avian3d::collision::collider::collider_transform::ChildColliderPoses,
 ) {
-    for (owner, local, mut position, mut rotation) in &mut children {
-        let (at, turn) = bodies
-            .get(owner.body)
-            .expect("game's damage model: every child collider is attached to a posed rigid body");
-        position.set_if_neq(Position(at.0 + turn.0 * local.translation));
-        rotation.set_if_neq(Rotation((turn.0 * local.rotation.0).normalize()));
-    }
+    poses.update();
 }
 
 /// The game's damage model: close the last interval and record this one.
@@ -690,6 +675,7 @@ mod tests {
                 RigidBody::Kinematic,
                 Position(Vec3::ZERO),
                 Rotation::IDENTITY,
+                GlobalTransform::IDENTITY,
             ))
             .id();
         let child = app
@@ -698,6 +684,7 @@ mod tests {
                 Position(Vec3::ZERO),
                 Rotation::IDENTITY,
                 Collider::cuboid(1.0, 1.0, 1.0),
+                GlobalTransform::from_translation(Vec3::X),
                 ColliderOf { body },
                 ColliderTransform {
                     translation: Vec3::X,
@@ -862,6 +849,7 @@ mod tests {
                 RigidBody::Kinematic,
                 Position(Vec3::ZERO),
                 Rotation::IDENTITY,
+                GlobalTransform::IDENTITY,
             ))
             .id();
         let child = |app: &mut App, x: f32| {
@@ -870,6 +858,7 @@ mod tests {
                     Position(Vec3::ZERO),
                     Rotation::IDENTITY,
                     Collider::cuboid(0.5, 0.5, 0.5),
+                    GlobalTransform::from_translation(Vec3::X * x),
                     ColliderOf { body },
                     ColliderTransform {
                         translation: Vec3::X * x,
@@ -1126,6 +1115,7 @@ mod tests {
                 RigidBody::Kinematic,
                 Position(Vec3::ZERO),
                 Rotation::IDENTITY,
+                GlobalTransform::IDENTITY,
             ))
             .id();
         let child = app
@@ -1134,6 +1124,7 @@ mod tests {
                 Collider::sphere(0.5),
                 Position(Vec3::ZERO),
                 Rotation::IDENTITY,
+                GlobalTransform::from_translation(Vec3::X),
                 ColliderOf { body },
                 ColliderTransform {
                     translation: Vec3::X,

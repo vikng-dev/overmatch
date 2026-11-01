@@ -2,7 +2,7 @@
 
 mod plugin;
 
-pub use plugin::ColliderTransformPlugin;
+pub use plugin::{ChildColliderPoses, ColliderTransformPlugin, update_child_collider_position};
 
 use crate::prelude::*;
 use bevy::prelude::*;
