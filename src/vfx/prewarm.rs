@@ -38,7 +38,7 @@ impl PrewarmRig {
     }
 }
 
-/// Spawn the warm-up set: the shell scene + one billboard per blend mode + one trail ribbon + one
+/// Spawn the warm-up set: every round model's scene + one billboard per blend mode + one trail ribbon + one
 /// impact puff + one hull-mark decal per kind. Ordered after the other vfx Startup setups (see
 /// `vfx::plugin`) so their preloaded assets exist.
 #[expect(
@@ -58,15 +58,17 @@ pub(super) fn spawn_prewarm_rig(
     mut rng: ResMut<ViewRng>,
     mut ring: ResMut<BillboardRing>,
 ) {
-    // The shell scene — the same asset path `ballistics::view`'s setup preloads, so this rides
-    // the identical (already started) load and only ADDS the instantiate + first-draw that used to
-    // happen on the first shot. Its glTF meshes get `NoFrustumCulling` as they appear
-    // (`tag_prewarm_meshes`); the root can't carry it for them.
-    commands.spawn((
-        PrewarmRig::new(),
-        WorldAssetRoot(asset_server.load(GltfAssetLabel::Scene(0).from_asset("shell/shell.glb"))),
-        Transform::from_translation(PREWARM_POSITION),
-    ));
+    // Every round model's scene — the same asset paths `ballistics::view`'s setup preloads, so
+    // this rides the identical (already started) loads and only ADDS the instantiate + first-draw
+    // that used to happen on the first shot. Their glTF meshes get `NoFrustumCulling` as they appear
+    // (`tag_prewarm_meshes`); a root can't carry it for them.
+    for model in crate::rounds::BodyModel::shipped() {
+        commands.spawn((
+            PrewarmRig::new(),
+            WorldAssetRoot(asset_server.load(GltfAssetLabel::Scene(0).from_asset(model.scene))),
+            Transform::from_translation(PREWARM_POSITION),
+        ));
+    }
 
     // One billboard per pipeline permutation the muzzle dressing draws: additive flash (the real
     // core atlas — a default handle would never finish preparing and the pipeline would never

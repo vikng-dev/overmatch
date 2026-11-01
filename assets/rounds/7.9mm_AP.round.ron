@@ -19,6 +19,13 @@
     effects: (
         ember: (None, Unknown("ASSUMED: no base-tracer emission authored for this round; belt-selected light streaks are a separate weapon read")),
         smoke: (None, Unknown("ASSUMED: no sustained flight smoke emission authored")),
+        body: (None, Tuned("a rifle bullet flies undrawn; its belt's tracers draw the streak")),
+        streak: (Some((
+            radius_m: (0.018, Tuned("ASSUMED: provisional streak radius, preserved from the original effect")),
+            length_per_speed_s: (0.018, Tuned("ASSUMED: provisional drawn length per m/s of speed, preserved from the original effect")),
+            min_length_m: (2.0, Tuned("ASSUMED: provisional floor for slow rounds, preserved from the original effect")),
+            emissive: ((30.0, 12.0, 3.0), Tuned("ASSUMED: provisional warm-orange linear HDR output, preserved from the original effect")),
+        )), Unknown("ASSUMED: retained provisional tracer streak; no measured tracer emission data has been read for this round")),
     ),
 
 )

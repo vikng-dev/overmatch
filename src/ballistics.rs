@@ -1693,7 +1693,8 @@ pub struct ShellReadout {
     pub capability: f32,
 }
 
-/// Visual calibre boundary shared by shell spawning and view dressing.
+/// The calibre boundary the impact read chooses its effect by (`vfx::impact`). A round's flight
+/// dressing reads its authored visuals instead ([`crate::rounds::FlightEffects`]).
 pub(crate) const TRACER_MAX_CALIBER: f32 = 0.02;
 
 /// Catch-up age beyond which cosmetic muzzle/impact reads are suppressed. Shared with muzzle VFX;

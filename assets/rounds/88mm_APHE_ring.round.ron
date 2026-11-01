@@ -67,6 +67,10 @@
             start_m: (10.0, Tuned("ASSUMED: muzzle cloud occupies the first travelled arc")),
             fade_m: (20.0, Tuned("ASSUMED: smoke ribbon's birth taper beyond the muzzle cloud")),
         )), Unknown("ASSUMED: provisional smoke signature retained with this round's tracer")),
+        body: (Some((model: ("shell/shell.glb", Unknown("ASSUMED: the one authored shell model, an
+            88 mm full-calibre body; this round's own body is not modelled")))),
+            Tuned("a main-gun round is drawn as its body in flight")),
+        streak: (None, Tuned("a main-gun round's tracer is its ember; no belt streak")),
     ),
 
 )

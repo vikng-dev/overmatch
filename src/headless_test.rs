@@ -366,20 +366,20 @@ fn booted_sp_app() -> BootedSim {
 }
 
 /// The round-dressing law of `ballistics::view_plugin`'s `Add` observer, on rounds spawned bare into
-/// a host that mounts the view half alone:
-///   * a round at or above `TRACER_MAX_CALIBER` is dressed with `ShellVisual` + its `shell.glb`
-///     scene root (`WorldAssetRoot`);
-///   * a sub-calibre tracer round streams a `TracerStreak` child and gets NO scene root;
-///   * a sub-calibre round without a tracer gets no scene root either.
+/// a host that mounts the view half alone, each dressed from its authored visuals and never from
+/// its calibre (FIXTURE DATA: every round flies at one calibre):
+///   * a round authoring a body is dressed with `ShellVisual` + its model's scene root
+///     (`WorldAssetRoot`), whether or not its belt marks it a tracer;
+///   * a tracer round authoring a streak streams a `TracerStreak` child and gets NO scene root;
+///   * the same streak-authoring round without a tracer gets neither.
 ///
-/// The main-gun arm is load-bearing: without it the "no scene root" assertions could be satisfied
-/// by a view plugin that dresses nothing. [`a_server_composition_dresses_no_round_at_all`] is the
-/// gate for the server side, which mounts no view at all.
+/// The body arm is load-bearing: without it the "no scene root" assertions could be satisfied by a
+/// view plugin that dresses nothing. [`a_server_composition_dresses_no_round_at_all`] is the gate
+/// for the server side, which mounts no view at all.
 #[test]
-fn mg_rounds_stream_tracers_and_spawn_no_shell_scene() {
-    use crate::ballistics::{
-        Projectile, ShellPath, ShellVisual, TRACER_MAX_CALIBER, TracerRound, TracerStreak,
-    };
+fn a_round_is_dressed_from_its_authored_body_and_streak() {
+    use crate::ballistics::{Projectile, ShellPath, ShellVisual, TracerRound, TracerStreak};
+    use crate::rounds::{BodyModel, FlightEffects, StreakEmission};
     use bevy::world_serialization::WorldAssetRoot;
 
     let mut app = headless_shell();
@@ -388,19 +388,31 @@ fn mg_rounds_stream_tracers_and_spawn_no_shell_scene() {
     // `Startup` builds the shell scene handle and the streak mesh/material the observer clones.
     app.update();
 
-    let round = |caliber: f32| {
+    let streaked_round = FlightEffects {
+        streak: Some(StreakEmission {
+            radius_m: 0.02,
+            length_per_speed_s: 0.02,
+            min_length_m: 2.0,
+            emissive: [1.0, 1.0, 1.0],
+        }),
+        ..FlightEffects::NONE
+    };
+    let bodied_round = FlightEffects {
+        body: Some(&BodyModel::shipped()[0]),
+        ..FlightEffects::NONE
+    };
+    let round = |effects: FlightEffects| {
         (
-            Projectile::view_test_round(caliber),
+            Projectile::view_test_round(0.05),
+            effects,
             Transform::default(),
             ShellPath::default(),
         )
     };
     let world = app.world_mut();
-    let main_gun = world.spawn(round(2.0 * TRACER_MAX_CALIBER)).id();
-    let tracer = world
-        .spawn((round(0.5 * TRACER_MAX_CALIBER), TracerRound))
-        .id();
-    let plain = world.spawn(round(0.5 * TRACER_MAX_CALIBER)).id();
+    let main_gun = world.spawn((round(bodied_round), TracerRound)).id();
+    let tracer = world.spawn((round(streaked_round), TracerRound)).id();
+    let plain = world.spawn(round(streaked_round)).id();
     app.update();
 
     let world = app.world_mut();
@@ -414,17 +426,16 @@ fn mg_rounds_stream_tracers_and_spawn_no_shell_scene() {
     assert_eq!(
         streaked,
         vec![tracer],
-        "the sub-calibre tracer round, and only it, must stream a TracerStreak",
+        "the streak-authoring tracer round, and only it, must stream a TracerStreak",
     );
     assert!(
         !scene(tracer) && !scene(plain),
-        "a sub-calibre round spawned a shell.glb scene root (WorldAssetRoot) — MG bullets must NOT \
-         render as main-gun shell scenes",
+        "a round authoring no body spawned a scene root (WorldAssetRoot)",
     );
     assert!(
         world.get::<ShellVisual>(main_gun).is_some() && scene(main_gun),
-        "a main-gun round was never dressed — it must get ShellVisual + its shell.glb scene root \
-         from ballistics::view_plugin",
+        "a body-authoring round was never dressed — it must get ShellVisual + its model's scene \
+         root from ballistics::view_plugin",
     );
 }
 

@@ -45,6 +45,10 @@
     effects: (
         ember: (None, Unknown("ASSUMED: untraced shell; no base-tracer composition is authored")),
         smoke: (None, Unknown("ASSUMED: no sustained flight smoke emission authored")),
+        body: (Some((model: ("shell/shell.glb", Unknown("ASSUMED: the one authored shell model, an
+            88 mm full-calibre body; this round's own body is not modelled")))),
+            Tuned("a main-gun round is drawn as its body in flight")),
+        streak: (None, Tuned("an untraced main-gun round; no belt streak")),
     ),
 
 )

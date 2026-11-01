@@ -38,9 +38,11 @@
 //!   design doc §5a, "The burst". A round without the block is inert. A burst and a fuze are
 //!   authored together.
 //!
-//! `effects` states both flight-emission presences with provenance (`ember` and `smoke`). A present
+//! `effects` states, with provenance, both flight-emission presences (`ember` and `smoke`), the
+//! model the round's body is drawn as (`body: Some((model))`, a round model's scene path, of the
+//! round's flying diameter) and the tracer streak its belt's tracers draw (`streak`). A present
 //! emitter supplies its size, colour, placement, burn and expansion facts; explicit absence emits
-//! nothing. The view reads these facts independently of calibre and the shell-scene marker.
+//! or draws nothing. The view reads these facts, never the round's calibre.
 //!
 //! # How a round flies
 //!
@@ -78,7 +80,7 @@ use crate::substances::{MaterialFacts, SubstanceRegistry};
 
 mod effects;
 pub(crate) mod fuze;
-pub(crate) use effects::{EmberEmission, FlightEffects, SmokeEmission};
+pub(crate) use effects::{BodyModel, EmberEmission, FlightEffects, SmokeEmission, StreakEmission};
 
 /// The shipped round-type table, embedded as the round files are, so a round is in hand
 /// synchronously wherever it is bound (ADR-0014: built from data, never from an asset).
@@ -454,7 +456,7 @@ fn resolved(
         flying.caliber,
         flying.mass,
     );
-    let effects = file.effects.resolve()?;
+    let effects = file.effects.resolve(flying.caliber)?;
     let wound = file.wound.0;
     if !wound.is_finite() || wound <= 0.0 {
         return Err(format!(
@@ -643,7 +645,7 @@ pub(crate) mod tests {
     /// The fixture round file, its fields `fields` authored, then `extra` verbatim.
     pub(crate) fn file(fields: &[(&str, &str)], extra: &str) -> String {
         format!(
-            "({}, effects: (ember: (None, Unknown(\"fixture absence\")), smoke: (None, Unknown(\"fixture absence\"))){extra})",
+            "({}, effects: (ember: (None, Unknown(\"fixture absence\")), smoke: (None, Unknown(\"fixture absence\")), body: (None, Unknown(\"fixture absence\")), streak: (None, Unknown(\"fixture absence\"))){extra})",
             authored(fields)
         )
     }
@@ -1163,7 +1165,7 @@ pub(crate) mod tests {
     fn malformed_files_do_not_load() {
         let bare = r#"(name: ("Probe", Tuned("fixture")), round_type: ("Fixture", Tuned("fixture")),
             core: ("GunSteel", Tuned("fixture")), mass: 5.0, caliber: (0.05, Tuned("fixture")),
-            wound: (20.0, Tuned("fixture")), effects: (ember: (None, Unknown("fixture absence")), smoke: (None, Unknown("fixture absence"))))"#;
+            wound: (20.0, Tuned("fixture")), effects: (ember: (None, Unknown("fixture absence")), smoke: (None, Unknown("fixture absence")), body: (None, Unknown("fixture absence")), streak: (None, Unknown("fixture absence"))))"#;
         let err = load(bare).unwrap_err();
         assert!(err.to_string().contains("provenance"), "{err}");
 

@@ -54,6 +54,7 @@ use super::view::{Proxy, StageView, ViewMesh};
 use super::{Corner, CornerRig, Exhibits, Knobs, WorldViewer};
 use crate::damage_cam::Role;
 use crate::render_policy::{CameraProfile, LightProfile, VisualScope};
+use crate::rounds::BodyModel;
 
 /// The corner's clear colour.
 const BACKGROUND: Color = Color::srgb_u8(0x0F, 0x13, 0x18);
@@ -63,13 +64,16 @@ const LINE: Color = Color::srgb_u8(0xFF, 0xF4, 0xE0);
 const LINE_GLOW: f32 = 1.8;
 /// The trail's width in calibres: a diagram choice, thin beside the shell it follows. TUNED.
 const TRAIL_CALIBRES: f32 = 0.3;
-/// The game's shell model, the one `ballistics::view` dresses the main-gun round with: origin at
-/// the tip, body along +Z, so `looking_to(travel)` puts the nose forward.
+/// The round model the corner draws every record's round as: origin at the tip, body along +Z, so
+/// `looking_to(travel)` puts the nose forward. Its diameter and length are its metadata
+/// ([`shell_model`]); the model is scaled by calibre over the diameter.
 pub(super) const SHELL_SCENE: &str = "shell/shell.glb";
-/// The model's authored diameter and length (m), MEASURED from its position bounds
-/// (±0.044 × ±0.044 × 0..0.263); the model is scaled by calibre over the diameter.
-const SHELL_MODEL_CALIBRE_M: f32 = 0.088;
-const SHELL_MODEL_LENGTH_M: f32 = 0.263;
+
+/// [`SHELL_SCENE`]'s frame and dimensions, as its `.model.ron` states them.
+fn shell_model() -> &'static BodyModel {
+    BodyModel::named(SHELL_SCENE)
+        .expect("the corner's shell is an embedded round model with its metadata (MODEL_FILES)")
+}
 /// A piece of a burst: a shard's length along its direction and its width, in calibres. TUNED: a
 /// diagram choice, small beside the shell.
 const PIECE_CALIBRES: (f32, f32) = (0.5, 0.2);
@@ -1043,7 +1047,7 @@ fn shell_transform(plan: &Plan, head: f32, share: f32) -> Transform {
     let body = (nose - back)
         .try_normalize()
         .unwrap_or_else(|| plan.line.direction_at(head));
-    let scale = plan.calibre / SHELL_MODEL_CALIBRE_M;
+    let scale = plan.calibre / shell_model().diameter_m;
     Transform::from_translation(nose)
         .looking_to(body, Vec3::Y)
         .with_scale(Vec3::new(scale, scale, scale * share))
@@ -1051,7 +1055,8 @@ fn shell_transform(plan: &Plan, head: f32, share: f32) -> Transform {
 
 /// The shell model's length (m) at the record's calibre.
 fn shell_length(plan: &Plan) -> f32 {
-    SHELL_MODEL_LENGTH_M * plan.calibre / SHELL_MODEL_CALIBRE_M
+    let model = shell_model();
+    model.length_m * plan.calibre / model.diameter_m
 }
 
 /// Where the trail ends: its arc along the line and its point. Behind a drawn shell (`share` of
@@ -1062,7 +1067,7 @@ fn trail_end(plan: &Plan, head: f32, share: Option<f32>) -> (f32, Vec3) {
     let Some(share) = share else {
         return (head, plan.line.at(head));
     };
-    let tail = shell_transform(plan, head, share).transform_point(Vec3::Z * SHELL_MODEL_LENGTH_M);
+    let tail = shell_transform(plan, head, share).transform_point(Vec3::Z * shell_model().length_m);
     (head - share * shell_length(plan), tail)
 }
 
@@ -2009,27 +2014,31 @@ mod tests {
         bounds
     }
 
-    /// Whether the scene's bounds are one model calibre across, its tip at the origin and its body
-    /// along +Z for the model length: what the scale law and the nose placement assume.
-    fn model_fits((lo, hi): (Vec3, Vec3)) -> bool {
+    /// Whether the scene's bounds are `model`'s diameter across, its tip at the origin and its body
+    /// along +Z for its length: what the scale law and the nose placement assume.
+    fn model_fits(model: &BodyModel, (lo, hi): (Vec3, Vec3)) -> bool {
         let size = hi - lo;
-        (size.x - SHELL_MODEL_CALIBRE_M).abs() < 1e-3
-            && (size.y - SHELL_MODEL_CALIBRE_M).abs() < 1e-3
+        (size.x - model.diameter_m).abs() < 1e-3
+            && (size.y - model.diameter_m).abs() < 1e-3
             && lo.z.abs() < 1e-4
-            && (hi.z - SHELL_MODEL_LENGTH_M).abs() < 1e-3
+            && (hi.z - model.length_m).abs() < 1e-3
             && (lo.x + hi.x).abs() < 1e-4
             && (lo.y + hi.y).abs() < 1e-4
     }
 
-    /// The shell model, as scene 0 places it (every ancestor's transform included), is one
-    /// calibre of [`SHELL_MODEL_CALIBRE_M`] across, its tip at the origin and its body along +Z for
-    /// [`SHELL_MODEL_LENGTH_M`]. A mesh node of identity transform under a scaled parent fails it.
+    /// Every embedded round model, as scene 0 places it (every ancestor's transform included), is
+    /// its metadata's diameter across, its tip at the origin and its body along +Z for its
+    /// metadata's length: the frame both views place a model by. A mesh node of identity transform
+    /// under a scaled parent fails it (FIXTURE DATA: the shell model's bounds under a 2× parent).
     #[test]
-    fn the_shell_model_has_its_tip_at_the_origin() {
-        let path = crate::assets::asset_root().join(SHELL_SCENE);
-        let model = gltf::Gltf::open(&path).unwrap();
-        let bounds = scene_bounds(&model.document);
-        assert!(model_fits(bounds), "{bounds:?}");
+    fn every_round_model_has_its_tip_at_the_origin() {
+        for model in BodyModel::shipped() {
+            let path = crate::assets::asset_root().join(model.scene);
+            let document = gltf::Gltf::open(&path).unwrap().document;
+            let bounds = scene_bounds(&document);
+            assert!(model_fits(model, bounds), "{}: {bounds:?}", model.scene);
+        }
+        let model = shell_model();
 
         // The same bounds under a parent scaled 2×: the mesh node itself stays identity.
         let text = r#"{"asset":{"version":"2.0"},"scene":0,"scenes":[{"nodes":[0]}],
@@ -2039,7 +2048,7 @@ mod tests {
             "accessors":[{"bufferView":0,"componentType":5126,"count":3,"type":"VEC3",
                 "min":[-0.044,-0.044,0.0],"max":[0.044,0.044,0.263]}]}"#;
         let scaled = gltf::Gltf::from_slice(text.as_bytes()).unwrap();
-        assert!(!model_fits(scene_bounds(&scaled.document)));
+        assert!(!model_fits(model, scene_bounds(&scaled.document)));
     }
 
     /// For every record: the shell sets off from the drawn span's start at its frame's travel
@@ -2090,7 +2099,7 @@ mod tests {
                     forward.dot(line.direction_at(head)) > lead,
                     "{name}: the nose does not lead"
                 );
-                let across = pose.scale.x * SHELL_MODEL_CALIBRE_M;
+                let across = pose.scale.x * shell_model().diameter_m;
                 assert!((across - plan.calibre).abs() < 1e-6, "{name}: {across}");
                 assert_eq!(pose.scale.y, pose.scale.x, "{name}");
                 assert!((pose.scale.z - pose.scale.x * share).abs() < 1e-6, "{name}");
@@ -2285,7 +2294,7 @@ mod tests {
             for k in 0..=samples {
                 let head = bounce.arc + 2.0 * length * k as f32 / samples as f32;
                 let pose = shell_transform(plan, head, 1.0);
-                let tail = pose.transform_point(Vec3::Z * SHELL_MODEL_LENGTH_M);
+                let tail = pose.transform_point(Vec3::Z * shell_model().length_m);
                 for (part, p) in [("nose", pose.translation), ("tail", tail)] {
                     let depth = (bounce.point - p).dot(bounce.normal);
                     assert!(
