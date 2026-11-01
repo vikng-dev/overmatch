@@ -93,10 +93,13 @@ The acceleration and brake comparisons above remain derivations, not trajectory 
 The first batch exposed a false premise in the replay fixture: its hard-coded world height
 placed the nominal rolling slope approach in free fall. MEASURED trace: **36 airborne ticks**,
 then an airborne belt upshift before landing and immediate hill hold; grade confirmation was
-never exercised. The lighter belt exposed that fixture error. Placement now derives from the
-actual terrain oracle and the running gear's rest envelope along the slope normal. A first-tick
-loaded-contact assertion pins the stated starting condition. Every prior grade-memory and
-bit-exact replay assertion remains; the isolated reproduction and final broad batch pass.
+never exercised. The lighter belt exposed that fixture error. Placement derives from the
+actual terrain oracle and the running gear's rest envelope along the slope normal, from a seed
+whose cast foot lands on the 20° face itself. The seed first chosen cast onto the flat slab short
+of the face, so the hull started with its rear stations buried in the slab (law-inertia review,
+`sweep-drive-3-review.md` part 9). The fixture now asserts, at the first slope tick and at the tick
+hill hold latches, that every loaded contact lies on the face's plane through the foot. Every prior
+grade-memory and bit-exact replay assertion remains.
 Temporary trace instrumentation is removed. No drive, ground or grip law was tuned to repair it.
 
 Structural spec validation and the spawn crank seed use nominal transmission geometry only;

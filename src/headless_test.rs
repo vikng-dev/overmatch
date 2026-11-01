@@ -1483,14 +1483,16 @@ fn scripted_determinism_run() -> ScriptedDeterminismRun {
 
     // The slope segment, on the declared transmission: the tank is placed rolling uphill on the
     // course's 20° face in F6 under Sequential addressing, belts and hull matched at a fixture
-    // 4.0 m/s, W held. Paying adjacent shift windows accumulates the demand EMA and
+    // 3.0 m/s, W held. Paying adjacent shift windows accumulates the demand EMA and
     // grade-confirmation evidence, retains a grade target, and latches hill hold before it crests.
     app.world_mut()
         .resource_mut::<crate::track::sim::TrackGear>()
         .trans_mut()
         .shift_addressing = crate::track::transmission::ShiftAddressing::Sequential;
     let rot = Quat::from_rotation_x(20.0_f32.to_radians());
-    let approach_speed = 4.0;
+    // FIXTURE: slow enough that hill hold latches with face still ahead of the front contact
+    // (MEASURED at 4.0 m/s: the front contact reaches the crest's rounding as hold latches).
+    let approach_speed = 3.0;
     // DERIVED fixture placement: put the rest envelope on the actual terrain face along its
     // normal, rather than dropping the rig from an unrelated world height.
     use crate::track::oracle::TerrainOracle as _;
@@ -1499,7 +1501,10 @@ fn scripted_determinism_run() -> ScriptedDeterminismRun {
         .world()
         .resource::<crate::track::rig_geom::RigGeom>()
         .hull_rest_y;
-    let mut approach = Vec3::new(0.0, 1.50, -37.0); // FIXTURE: query seed over the ramp.
+    // FIXTURE: query seed over the face. Its cast foot lands DERIVED 2.15 m up the face from
+    // where the face leaves the slab (`world::spawn_test_course`), and the rest envelope's rear-
+    // most loaded contact sits MEASURED 1.88 m behind the foot, so no station starts on the slab.
+    let mut approach = Vec3::new(0.0, 1.50, -39.45);
     let clearance = app
         .world()
         .resource::<crate::track::terrain::TrackField>()
@@ -1508,6 +1513,28 @@ fn scripted_determinism_run() -> ScriptedDeterminismRun {
         .expect("the booted fixture has its terrain field")
         .depth_along(approach - normal * rest_height, -normal, 8.0); // FIXTURE: cast reach above the course.
     approach += normal * clearance;
+    let foot = approach - normal * rest_height;
+    // The largest distance of a loaded contact from the face's plane through the foot. A contact
+    // on the slab, or a station buried in it, lies off that plane by up to the envelope's length
+    // times sin 20°; zero says every station presses the face.
+    let off_face = |app: &BootedSim| {
+        let contacts = &app
+            .world()
+            .get::<crate::track::sim::TrackContacts>(tank)
+            .expect("the controlled tank carries contact telemetry")
+            .0;
+        let loaded = contacts
+            .iter()
+            .flatten()
+            .filter(|contact| contact.load > 0.0);
+        let off = loaded
+            .clone()
+            .map(|contact| normal.dot(contact.point - foot).abs())
+            .fold(0.0_f32, f32::max);
+        (loaded.count(), off)
+    };
+    // FIXTURE: a contact point lies on the terrain surface, so only roundoff separates it.
+    const ON_FACE_M: f32 = 0.01;
     let mut transmission = fresh_tank_transmission(&app);
     transmission.0.gear = 6;
     {
@@ -1534,16 +1561,13 @@ fn scripted_determinism_run() -> ScriptedDeterminismRun {
             .get::<crate::track::sim::TankTransmission>(tank)
             .expect("the controlled tank carries transmission state")
             .0;
-        if slope_tick == 0 {
+        if slope_tick == 0 || (state.hill_hold && !hold) {
+            let (loaded, off) = off_face(&app);
             assert!(
-                app.world()
-                    .get::<crate::track::sim::TrackContacts>(tank)
-                    .unwrap()
-                    .0
-                    .iter()
-                    .flatten()
-                    .any(|contact| contact.load > 0.0),
-                "the rolling grade-memory fixture must start supported on the ramp, not in free fall"
+                loaded > 0 && off <= ON_FACE_M,
+                "slope tick {slope_tick}: the grade-memory fixture must be supported on the 20° \
+                 face alone (rolling at the start, held before it crests); {loaded} loaded \
+                 contacts lie up to {off} m off the face",
             );
         }
         demand |= state.demand_n > 0.0;
