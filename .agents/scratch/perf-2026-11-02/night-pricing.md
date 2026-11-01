@@ -23,6 +23,7 @@ for a headless bed: the machine lock held, 0 `rustc` running at start, the bed f
 | 1 | Spall field: dot picture 128x8 | same | a field | cone p50 28 600–28 648 µs (39x); ring p50 32 483–32 614 (14.5x) | as above | passed, 2 runs | #204 |
 | 1 | Spall field: dot picture 256x8 | same | a field | cone p50 59 405–59 762 µs (82x); ring p50 70 698–70 937 (33x) | as above | passed, 2 runs | #204 |
 | 1 | Spall field: dot picture 256, centre-only | same | a field | cone p50 12 576–12 597 µs (19x); ring p50 33 519–34 086 (16x) | as above | passed, 2 runs | #204 |
+| 1 | Spall field: shipped sampler on main | main | the field casts' 24 cones, 64 walks each | p50 578–589 µs, p95 1 348–1 367 (1.07x the fields tree's, per-cone median) | the same bed on the fields tree: p50 547–552, p95 1 158–1 168 | passed, 3 runs each | #204 |
 | 2 | Track prints skip still belts (client frame) | its parent, 2026-11-01 | 30 tanks at rest, visible window, `release` | ms a frame: p50 16.41–16.43, p95 29.62–29.67; not resolved: under the noise floor (the parent's own two runs differ 0.39 ms p50, 1.67 ms p95) | parent: p50 16.12–16.51, p95 29.62–31.29 | passed, A/B/B/A | #234 |
 | 2 | The other speed-ups since the last pricing | | | not priced (item 2 says why) | | | #186, #188, #191 |
 | 3 | Weight check, per change | main | one chunk to dust, 1 003 chunks | p50 1 193–1 201 µs, p95 2 080–2 096 µs | no change: 0 | passed, 3 runs | #189 |
@@ -51,6 +52,8 @@ for a headless bed: the machine lock held, 0 `rustc` running at start, the bed f
   - `ballistics::analytic_field::the_field_models_priced_per_field`, on the measuring branch
     `lane/night-pricing-202-fields` only (the two #204 prototypes are test-only code on a tree
     from 2026-10-31; see item 1).
+  - `ballistics::field_casts::the_shipped_cone_sampler_priced_per_cone`, on main and on the
+    measuring branch alike.
 - **Window mode.** The beds are headless (`OVERMATCH_WINDOW=headless`): no window, no GPU. The
   one client frame price (item 2) ran a visible, frontmost window on the built-in 120 Hz panel,
   because a hidden window's frame loop free-runs (`scripts/perf/run-frame-sweep.sh`'s runbook);
@@ -64,8 +67,8 @@ tank's modules and crew boxes. **Where:** both prototypes are test-only code on 
 They are merged on `lane/night-pricing-202-fields`: the dot-picture prototype's tree, with the
 exact prototype's `exact.rs`, its volume gather and `Env::exact` added beside it (the two files
 were identical outside those). The shipped sampler priced is that tree's
-(`resolve::field_direction` over the shipped directions, as `Env::sampled` walks it); main's has
-not been re-priced.
+(`resolve::field_direction` over the shipped directions, as `Env::sampled` walks it); main's is
+priced against it at the end of this item.
 
 **Bed:** `the_field_models_priced_per_field`, on the 49 fields of the prototypes' comparison (33
 cones: the field-casts family at poses A and B and 9 fired plate cones; 16 burst rings fired by
@@ -114,6 +117,25 @@ ring and the picture fills four.
   driver, turret-left, oblique: picture 256x8 82–105 ms). Four rings cost the exact field
   466–472 µs (APHE rear, oblique and engine, HE right-rear; MEASURED); that their origins are
   blocked (a burst in or on a plate, decided by one walk) is ASSUMED from the prototype's rule.
+
+**The sampler on main against the sampler above.** `ballistics::field_casts::
+the_shipped_cone_sampler_priced_per_cone`, the same bed on both trees (committed on each branch):
+the field casts' 24 cones (64 directions each, poses A and B), a cone's reach then every
+direction's walk, as the march's `walk_field` throws it, its median of 25 repeats run in rounds.
+Each binary ran against a copy of its own tree's `assets/`; three runs each, interleaved main,
+fields, main, fields, main, fields (04:04; MEASURED, `perf`).
+
+| µs a cone | p50 | p95 | mean | max |
+|---|---|---|---|---|
+| main | 578–589 | 1 348–1 367 | 653–655 | 1 441–1 465 |
+| the fields tree (2026-10-31) | 547–552 | 1 158–1 168 | 597–602 | 1 213–1 229 |
+
+- **Main's sampler costs about 1.07x the one item 1 priced against**: the per-cone ratio of
+  medians is 1.065 at its median, 0.98 to 1.18 over the 24 cones (DERIVED). Each model's ratio
+  above would read about 7 % lower against main's sampler if the model's own cost had not moved
+  with it (DERIVED, ASSUMED unmoved). Between the two trees both the walk code
+  (`resolve.rs`, `walk.rs`) and the probe tank's data (`tiger_1.tank.ron`, `tiger_1.sim.glb`)
+  changed, so the ratio prices main against that tree, not one commit.
 
 ## Item 2: speed-ups landed since the last pricing
 
