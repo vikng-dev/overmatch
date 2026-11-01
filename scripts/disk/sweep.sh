@@ -54,8 +54,9 @@ while read -r dir; do
       continue
       ;;
   esac
-  before=$(du -sh "$dir/target") || { failed=1; continue; }
-  before=$(printf '%s' "$before" | cut -f1)
+  # The sizes are the log's readout, never a gate on the reap: du exits nonzero when a build
+  # running beside the sweep removes a file it listed, and prints that cause on stderr.
+  before=$(du -sh "$dir/target" | cut -f1)
   if ! find "$dir/target" -path '*/deps/*.rcgu.o' -mmin +720 -delete; then
     echo "  FAILED rcgu reaper: $dir" >&2
     failed=1
@@ -66,9 +67,8 @@ while read -r dir; do
     failed=1
   fi
   if cargo sweep --maxsize 40GB "$dir"; then
-    after=$(du -sh "$dir/target") || { failed=1; continue; }
-    after=$(printf '%s' "$after" | cut -f1)
-    echo "  swept $dir  ${before} -> ${after}"
+    after=$(du -sh "$dir/target" | cut -f1)
+    echo "  swept $dir  ${before:-?} -> ${after:-?}"
   else
     echo "  FAILED cargo sweep: $dir (diagnostic above)" >&2
     failed=1

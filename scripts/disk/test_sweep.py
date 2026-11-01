@@ -27,6 +27,25 @@ class SweepTests(unittest.TestCase):
             self.assertIn("FAILED cargo sweep", run.stderr)
             self.assertNotIn("  swept ", run.stdout)
 
+    def test_a_failed_size_readout_still_reaps(self):
+        # du racing a concurrent build fails; the disk ceiling's owner still needs the reap.
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "fixture" / "target").mkdir(parents=True)
+            binary = root / "bin"
+            binary.mkdir()
+            (binary / "git").write_text('#!/bin/sh\nprintf "worktree %s/fixture\\n" "$TEST_ROOT"\n')
+            (binary / "du").write_text('#!/bin/sh\necho "du: fixture file vanished" >&2\nexit 1\n')
+            (binary / "cargo").write_text('#!/bin/sh\ntouch "$TEST_ROOT/swept"\n')
+            for executable in binary.iterdir():
+                executable.chmod(0o755)
+            env = dict(os.environ, FORCE="1", TEST_ROOT=str(root), PATH=f"{binary}:{os.environ['PATH']}")
+            run = subprocess.run([str(RUNNER)], env=env, capture_output=True, text=True, timeout=10)
+            self.assertEqual(run.returncode, 0, run.stderr)
+            self.assertTrue((root / "swept").exists(), "the size readout skipped the reap")
+            self.assertIn("du: fixture file vanished", run.stderr)
+            self.assertIn("  swept ", run.stdout)
+
 
 if __name__ == "__main__":
     unittest.main()
