@@ -284,17 +284,21 @@ fail loudly (B61); the trace hasher feeds the one FNV-1a; test-only record reade
 mirrors and their constants compile into tests alone; each trace lever names its user.
 
 Already fixed at this base: B01 (a burst core's facts are required), B19, B24–B26, B41,
-B43–B46 (the walk redesign), B51–B54.
+B43–B46 (the walk redesign), B51–B54, B70 (the pen-cam demo binary is gone).
+
+Also fixed: the ricochet's `reflect` and `bend_toward`'s turn keep unit length by construction
+and say so (opposed directions, which name no turning plane, stay a named case), and the slice
+frame's plane is required rather than defaulted.
 
 **Client resync (P1, fixed):** the collider history ran on clients, whose replica hulls lose
 `Position` for a frame at an interpolation resync; `place_children` panicked. A client marches
 no round (ADR-0037), so the history now runs only where the walk runs.
 
 Left for part 4: B02/B03 (asserting a dose's sign first needs the line energy proven
-non-negative); record/codec validation B56–B60; staging B62–B63, B68, B70, B71 and the slice
-plane's `unwrap_or`; B72/B73 (the recorder may pose a despawned tank, an absence to name
-first); the P3 singleton and direction-fallback groups; `RecordedShot::tank`/`shooter`;
+non-negative); record/codec validation B56–B60; staging B62–B63, B68, B71; B72/B73 (the
+recorder may pose a despawned tank, an absence to name first); the P3 singleton groups and the
+remaining direction fallbacks (`resolve`, `walk`); `RecordedShot::tank`/`shooter`;
 `SpallCone`'s pin-only fields; `potency::band` (its `Band::Nothing` has no other constructor);
-the `pen_cam_demo` and `ballistic_fuzzer` CLI users; the `Cargo.toml` comment; `RoundFile`'s
+the `ballistic_fuzzer` CLI's user; the `Cargo.toml` comment; `RoundFile`'s
 `#[serde(default)]` optional blocks (new); `SPIKE_TRACE_SIM_FIELDS`, whose only user is the
 ADR-0029/0030 capture (owner: keep, or delete with those ADR lines).
