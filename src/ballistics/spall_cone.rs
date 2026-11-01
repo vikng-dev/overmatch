@@ -1,10 +1,10 @@
-//! The spall cone's shape — its axis rule and the directions it is sampled by —, the field law
+//! The game's damage model: the spall cone's shape — its axis rule and the directions it is sampled by —, the field law
 //! that weights those directions and sets the cone's half-angle ([`FieldDescriptor`]), the cone's
 //! strength per joule of the energy its round lost across the body it left ([`energy_share`]), and
 //! a burst's field data ([`BurstFields`]), read from `assets/ballistics/spall_cone.ron`.
 //! The law the shape serves — strength, profile, shadowing, dose — is design doc §5
 //! (`.agents/docs/design/armor-penetration-and-damage.md`); the throw that applies it is
-//! `throw_spall_cone` in the parent module, and a world may throw another shape ([`SpallLaw`]).
+//! `throw_spall_cone` in the parent module, and test instruments may override the loaded shape.
 //!
 //! # Units
 //!
@@ -268,17 +268,11 @@ impl FieldDescriptor {
         self.terms().map(|_| ())
     }
 
-    /// The law's weight along a direction at `mu = cos θ` from the axis: the continuous form of a
+    /// Test oracle: the continuous law's weight along a direction at `mu = cos θ` from the axis: the continuous form of a
     /// spread's `f_k`, `(t_hi − t_lo)/2 · (−dF/dμ)` — under the ball's cap
     /// `½·w·(D^m + m·λ²μ²·D^(m−2))`, zero at and past the rim; over its sphere `(λμ + D)³/2`; across
     /// the ring's band ½, zero off it. Zero for a descriptor outside the law's domain.
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "the law's density, which the spread's tests read; the pen cam draws its mean over a stratum (`pen_cam::look::law`)"
-        )
-    )]
+    #[cfg(test)]
     pub(crate) fn weight_at(&self, mu: f64) -> f64 {
         let Ok(terms) = self.terms() else {
             return 0.0;
@@ -317,6 +311,7 @@ impl FieldDescriptor {
 
 /// The cone shape a world's march throws, in place of the shipped one: inserted by a world that
 /// measures another shape (the throw-cost probe, `pen_cam::spall_law_cost`).
+#[cfg(test)]
 #[derive(Resource, Clone, Debug)]
 pub(crate) struct SpallLaw(pub ConeShape);
 
@@ -363,6 +358,7 @@ pub(crate) struct BurstFields {
 
 /// The burst fields a world's march throws, in place of the shipped ones: inserted by a world that
 /// measures another direction count (the throw-cost probe, `pen_cam::burst_law_cost`).
+#[cfg(test)]
 #[derive(Resource, Clone, Debug)]
 pub(crate) struct BurstLaw(pub BurstFields);
 

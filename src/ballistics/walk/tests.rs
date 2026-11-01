@@ -1234,10 +1234,9 @@ fn finish_at(
     transit: &DiscWalk,
     request: &TransitRequest,
     capability: f32,
-    laws: &WalkLaws,
 ) -> Result<ResolutionPlan<SolidShotState>, WalkError> {
     let (round, state) = solid(capability);
-    finish(transit, request, &round, state, &Limits { rest: 0.0 }, laws)
+    finish(transit, request, &round, state, &Limits { rest: 0.0 })
 }
 
 fn transit_request(walked: &DiscWalk, shot: &Shot, laws: &WalkLaws) -> TransitRequest {
@@ -1559,7 +1558,7 @@ fn every_sample_hands_off_on_the_face_it_crossed() {
         vec![slab_of(sample)]
     });
     let transit = walk_disc(&transit, &volumes, &laws).unwrap();
-    let plan = finish_at(&transit, &request, AP_88_CAPABILITY, &laws).unwrap();
+    let plan = finish_at(&transit, &request, AP_88_CAPABILITY).unwrap();
     for plate in [1, 2] {
         assert!(
             plan.deposits
@@ -1584,11 +1583,11 @@ fn finish_rejects_a_corridor_that_is_not_the_one_it_asked_for() {
     let walked = walk_disc(&entrance_disc(&slabs, 3.0), &volumes, &laws).unwrap();
     let request = transit_request(&walked, &AP_88, &laws);
     let honest = walk_disc(&transit_disc(&request, &slabs, 3.0), &volumes, &laws).unwrap();
-    assert!(finish_at(&honest, &request, AP_88_CAPABILITY, &laws).is_ok());
+    assert!(finish_at(&honest, &request, AP_88_CAPABILITY).is_ok());
 
     // The entrance walk itself: right geometry, wrong axis and origin.
     assert!(matches!(
-        finish_at(&walked, &request, AP_88_CAPABILITY, &laws),
+        finish_at(&walked, &request, AP_88_CAPABILITY),
         Err(WalkError::CorridorMismatch { .. })
     ));
 
@@ -1596,7 +1595,7 @@ fn finish_rejects_a_corridor_that_is_not_the_one_it_asked_for() {
     let mut rolled = honest;
     rolled.frame = DiscFrame::from_axis_and_reference(request.axis, Vec3::X).unwrap();
     assert!(matches!(
-        finish_at(&rolled, &request, AP_88_CAPABILITY, &laws),
+        finish_at(&rolled, &request, AP_88_CAPABILITY),
         Err(WalkError::CorridorMismatch { .. })
     ));
 
@@ -1609,7 +1608,7 @@ fn finish_rejects_a_corridor_that_is_not_the_one_it_asked_for() {
     }
     let other = walk_disc(&unrelated, &table(&[(9, 1000.0)]), &laws).unwrap();
     assert!(matches!(
-        finish_at(&other, &request, AP_88_CAPABILITY, &laws),
+        finish_at(&other, &request, AP_88_CAPABILITY),
         Err(WalkError::CorridorMismatch { .. })
     ));
 }
@@ -1634,7 +1633,7 @@ fn finish_rejects_a_corridor_whose_samples_moved() {
     assert_eq!(moved.origin, request.origin);
     assert_eq!(moved.samples(), request.samples);
     assert!(matches!(
-        finish_at(&moved, &request, AP_88_CAPABILITY, &laws),
+        finish_at(&moved, &request, AP_88_CAPABILITY),
         Err(WalkError::CorridorMismatch { .. })
     ));
 }
@@ -1664,7 +1663,7 @@ fn finish_rejects_a_far_crossing_of_the_same_entity() {
         "the fixture must keep the entity identical — that is the point"
     );
     assert!(matches!(
-        finish_at(&far, &request, AP_88_CAPABILITY, &laws),
+        finish_at(&far, &request, AP_88_CAPABILITY),
         Err(WalkError::CorridorMismatch { .. })
     ));
 }
@@ -1684,7 +1683,7 @@ fn capability_exhausted_midway_stops_the_round_and_clips_damage() {
     let walked = walk_disc(&entrance_disc(&slabs, 3.0), &volumes, &laws).unwrap();
     let request = transit_request(&walked, &AP_88, &laws);
     let transit = walk_disc(&transit_disc(&request, &slabs, 3.0), &volumes, &laws).unwrap();
-    let plan = finish_at(&transit, &request, 60.0, &laws).unwrap();
+    let plan = finish_at(&transit, &request, 60.0).unwrap();
 
     // Head-on, so the handoff is the plate's own face: 60 reference-mm dies 60 mm in.
     match plan.outcome {
@@ -1726,7 +1725,7 @@ fn exits_before_a_stop_throw_and_the_stopped_body_throws_nothing() {
     let walked = walk_disc(&entrance_disc(&slabs, 4.0), &volumes, &laws).unwrap();
     let request = transit_request(&walked, &AP_88, &laws);
     let transit = walk_disc(&transit_disc(&request, &slabs, 4.0), &volumes, &laws).unwrap();
-    let plan = finish_at(&transit, &request, AP_88_CAPABILITY, &laws).unwrap();
+    let plan = finish_at(&transit, &request, AP_88_CAPABILITY).unwrap();
 
     assert!(matches!(plan.outcome, Outcome::Embedded { .. }));
     assert_eq!(plan.spall.len(), 1, "{:?}", plan.spall);
@@ -1759,7 +1758,7 @@ fn each_source_uses_the_speeds_across_its_own_body() {
     let walked = walk_disc(&entrance_disc(&slabs, 3.0), &volumes, &laws).unwrap();
     let request = transit_request(&walked, &AP_88, &laws);
     let transit = walk_disc(&transit_disc(&request, &slabs, 3.0), &volumes, &laws).unwrap();
-    let plan = finish_at(&transit, &request, AP_88_CAPABILITY, &laws).unwrap();
+    let plan = finish_at(&transit, &request, AP_88_CAPABILITY).unwrap();
 
     assert!(matches!(plan.outcome, Outcome::Perforated { .. }));
     let [plate, crew] = plan.spall.as_slice() else {
@@ -1811,7 +1810,7 @@ fn spall_through(volumes: &VolumeTable, slabs: &[Slab]) -> Vec<SpallSource> {
     let walked = walk_disc(&entrance_disc(slabs, 3.0), volumes, &laws).unwrap();
     let request = transit_request(&walked, &AP_88, &laws);
     let transit = walk_disc(&transit_disc(&request, slabs, 3.0), volumes, &laws).unwrap();
-    finish_at(&transit, &request, AP_88_CAPABILITY, &laws)
+    finish_at(&transit, &request, AP_88_CAPABILITY)
         .unwrap()
         .spall
 }
@@ -1941,7 +1940,6 @@ fn a_round_that_loses_more_energy_at_a_plate_throws_a_stronger_cone() {
                 &round,
                 round.at(speed),
                 &Limits { rest: 0.0 },
-                &laws,
             )
             .unwrap();
             assert!(
@@ -2107,7 +2105,7 @@ fn a_perforation_charges_every_entity_for_its_own_material() {
     let walked = walk_disc(&entrance_disc(&slabs, 3.0), &volumes, &laws).unwrap();
     let request = transit_request(&walked, &AP_88, &laws);
     let transit = walk_disc(&transit_disc(&request, &slabs, 3.0), &volumes, &laws).unwrap();
-    let plan = finish_at(&transit, &request, AP_88_CAPABILITY, &laws).unwrap();
+    let plan = finish_at(&transit, &request, AP_88_CAPABILITY).unwrap();
 
     assert!(matches!(plan.outcome, Outcome::Perforated { .. }));
     assert!((plan.cost_spent - 103.0).abs() < 0.5, "{}", plan.cost_spent);
@@ -2161,7 +2159,7 @@ fn overmatch_charges_the_perpendicular_projection_everywhere() {
     assert!(request.entrance.overmatched);
 
     let transit = walk_disc(&transit_disc(&request, &slabs, 3.0), &volumes, &laws).unwrap();
-    let plan = finish_at(&transit, &request, AP_88_CAPABILITY, &laws).unwrap();
+    let plan = finish_at(&transit, &request, AP_88_CAPABILITY).unwrap();
 
     // Whatever the normalization bend did to the chord, the CHARGE is the 15 mm perpendicular
     // thickness — which is the point of the projection.
@@ -3490,15 +3488,7 @@ fn the_mechanism_matches_the_scalar_law_on_reference_steel() {
             knife_edges += 1;
             continue;
         }
-        let new = finish(
-            &transit,
-            &request,
-            &round,
-            state,
-            &Limits { rest: 0.0 },
-            &laws,
-        )
-        .unwrap();
+        let new = finish(&transit, &request, &round, state, &Limits { rest: 0.0 }).unwrap();
         compared += 1;
         embeds += old.embed.is_some() as u32;
         overmatches += request.entrance.overmatched as u32;
@@ -4104,7 +4094,7 @@ fn a_disc_meeting_two_pieces_at_overlapping_depths_resolves() {
         }
 
         let transit = walk_disc(&straddle.transit(&offsets, &request), &volumes, &laws).unwrap();
-        let plan = finish_at(&transit, &request, AP_88_CAPABILITY, &laws)
+        let plan = finish_at(&transit, &request, AP_88_CAPABILITY)
             .unwrap_or_else(|error| panic!("block {block}: {error:?}"));
         for piece in [1, 2] {
             assert!(
@@ -4154,7 +4144,7 @@ fn the_entrance_reads_no_material_behind_a_face() {
             let request = transit_request(&walked, &AP_88, &laws);
             let transit =
                 walk_disc(&straddle.transit(&offsets, &request), &volumes, &laws).unwrap();
-            let plan = finish_at(&transit, &request, AP_88_CAPABILITY, &laws)
+            let plan = finish_at(&transit, &request, AP_88_CAPABILITY)
                 .unwrap_or_else(|error| panic!("block {block}: {error:?}"));
             (request.entrance, plan)
         };
@@ -4268,7 +4258,7 @@ fn a_crossing_resolves_the_same_however_far_its_entrance_was_walked() {
             &laws,
         )
         .unwrap();
-        let first = finish_at(&transit, &request, AP_88_CAPABILITY, &laws).unwrap();
+        let first = finish_at(&transit, &request, AP_88_CAPABILITY).unwrap();
         let Outcome::Perforated { t, .. } = first.outcome else {
             panic!("the {length} m walk: the edged plate is perforated")
         };
@@ -4289,7 +4279,7 @@ fn a_crossing_resolves_the_same_however_far_its_entrance_was_walked() {
             &laws,
         )
         .unwrap();
-        let behind = finish_at(&next_transit, &next_request, AP_88_CAPABILITY, &laws).unwrap();
+        let behind = finish_at(&next_transit, &next_request, AP_88_CAPABILITY).unwrap();
         (request, first, behind)
     };
 

@@ -186,3 +186,11 @@ either flying diameter, refuse an omitted recipe and carry both recipes through 
 round's contact. MEASURED: 106 targeted round, impact, scatter, march, replica-path, debug, capture
 plan, battle, headless-composition and citation tests passed; three on-demand instruments stayed
 ignored. Format and workspace/all-target clippy passed. No captures.
+
+## Test-only march seams
+
+Fixed the code-branching follow-ups in the march: the alternate cone, burst and discovery-ceiling
+resources and their reads are compiled only into tests. Shipped marches take the loaded law and
+work bound directly. The continuous field-density oracle is test-only too. Removed `finish`'s
+unread law argument and the fixture wrapper's corresponding argument: all law decisions this
+stage consumes are already bound in its certified transit request and mechanism.

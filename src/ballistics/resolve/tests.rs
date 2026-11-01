@@ -186,14 +186,7 @@ fn every_entry_is_owned_once_across_the_hand_off() {
                                 ENTRANCE_SPAN,
                             )?;
                             let round = bound(ROUND);
-                            walk::finish(
-                                &transit,
-                                &request,
-                                &round,
-                                round.at(SPEED),
-                                &LIMITS,
-                                &context.laws,
-                            )?;
+                            walk::finish(&transit, &request, &round, round.at(SPEED), &LIMITS)?;
                             Ok::<_, WalkError>(Some(corridor))
                         },
                     )
@@ -2699,14 +2692,8 @@ fn a_convex_trunk_is_crossed_with_a_chord_at_any_offset_and_incidence() {
                             ENTRANCE_SPAN,
                         )?;
                         let round = bound(ROUND);
-                        let plan = walk::finish(
-                            &transit,
-                            &request,
-                            &round,
-                            round.at(SPEED),
-                            &LIMITS,
-                            &context.laws,
-                        )?;
+                        let plan =
+                            walk::finish(&transit, &request, &round, round.at(SPEED), &LIMITS)?;
                         Ok::<_, WalkError>(plan.deposits.iter().find_map(
                             |dose| match dose.source {
                                 DoseSource::Line { chord, .. } if dose.address == segment => {

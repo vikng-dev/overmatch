@@ -78,6 +78,7 @@ pub(crate) const MAX_STEP_CROSSINGS: usize = 4096;
 
 /// The crossing ceiling a world's steps run under in place of [`MAX_STEP_CROSSINGS`], when it names
 /// one: a fixture reaches the limit in a few crossings instead of thousands.
+#[cfg(test)]
 #[derive(Resource, Clone, Copy)]
 pub(crate) struct StepCrossings(pub(crate) usize);
 
@@ -1591,7 +1592,7 @@ pub(crate) fn decide(
                 &request.seeds,
                 ENTRANCE_SPAN,
             )?;
-            let plan = walk::finish(&transit, &request, round, state_in, &LIMITS, &context.laws)?;
+            let plan = walk::finish(&transit, &request, round, state_in, &LIMITS)?;
             let feedback = context
                 .world
                 .volumes

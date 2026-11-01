@@ -2127,14 +2127,12 @@ struct ProjectileMarchWorld<'w, 's> {
     // the exact deterministic caster (see [`cast_disc_segment`]). Geometry-only fixtures may
     // omit the ground.
     grid: Option<Res<'w, HeightGrid>>,
-    // The cone shape the march throws when a world names one (the cost probe); the shipped shape
-    // otherwise.
+    // Instrument-only alternatives; shipped marches read their one loaded law and work bound.
+    #[cfg(test)]
     spall_law: Option<Res<'w, spall_cone::SpallLaw>>,
-    // The burst fields the march throws when a world names them (the cost probe); the shipped ones
-    // otherwise.
+    #[cfg(test)]
     burst_law: Option<Res<'w, spall_cone::BurstLaw>>,
-    // The crossing ceiling a step runs under when a world names one; the shipped
-    // [`resolve::MAX_STEP_CROSSINGS`] otherwise.
+    #[cfg(test)]
     step_crossings: Option<Res<'w, resolve::StepCrossings>>,
     // Witness volumes (ADR-0040) and their colliders: read by the witness pass, excluded from every
     // armour classification.
@@ -2227,10 +2225,12 @@ impl ProjectileMarchWorld<'_, '_> {
 
     /// The game's damage model: one step's seconds under this world's crossing ceiling.
     fn step_budget(&self, seconds: f64) -> resolve::Budget {
+        let ceiling = resolve::MAX_STEP_CROSSINGS;
+        #[cfg(test)]
         let ceiling = self
             .step_crossings
             .as_ref()
-            .map_or(resolve::MAX_STEP_CROSSINGS, |ceiling| ceiling.0);
+            .map_or(ceiling, |chosen| chosen.0);
         resolve::Budget::new(seconds, ceiling)
     }
 }
@@ -3409,11 +3409,13 @@ fn throw_burst(
     speed: f32,
     is_box: &dyn Fn(Entity) -> bool,
 ) {
+    let fields = spall_cone::BurstFields::shipped();
+    #[cfg(test)]
     let fields = context
         .world
         .burst_law
         .as_deref()
-        .map_or(spall_cone::BurstFields::shipped(), |law| &law.0);
+        .map_or(fields, |law| &law.0);
     let throw = FieldThrow {
         origin: flight.position,
         axis: flight.direction,
@@ -3526,11 +3528,13 @@ fn throw_spall_cone(
     context: &resolve::ResolveContext<'_, '_, '_>,
     is_box: &dyn Fn(Entity) -> bool,
 ) -> bool {
-    let world = context.world;
-    let shape = world
+    let shape = spall_cone::ConeShape::shipped();
+    #[cfg(test)]
+    let shape = context
+        .world
         .spall_law
         .as_deref()
-        .map_or(spall_cone::ConeShape::shipped(), |law| &law.0);
+        .map_or(shape, |law| &law.0);
     let strength = source.strength();
     assert!(
         strength.is_finite() && strength >= 0.0,

@@ -3348,7 +3348,6 @@ pub(crate) fn finish<M: Mechanism>(
     mechanism: &M,
     state: M::State,
     limits: &Limits,
-    _laws: &WalkLaws,
 ) -> Result<ResolutionPlan<M::State>, WalkError> {
     let crossing = validate_transit(transit, request)?;
     let event = &*crossing;
