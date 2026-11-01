@@ -932,10 +932,13 @@ impl Frame {
 
 /// The present blockers along a ray in the asset frame (unscaled): the first standing chunk of a
 /// breakable element it enters, or an unbreakable element entered first, which stops it with no
-/// deposit. Returns the law chunk and the distance.
+/// deposit. Returns the law chunk and the distance. `placed` says whether the body is the placed
+/// building, which holds the unbreakable elements; a moving group ([`WallPiece`]) holds only its
+/// own chunks, and an unbreakable element stays with the placed building.
 fn first_chunk(
     layout: &Layout,
     shape: &Shape,
+    placed: bool,
     origin: Vec3,
     dir: Vec3,
 ) -> Option<(Option<usize>, f32)> {
@@ -945,6 +948,7 @@ fn first_chunk(
             continue;
         }
         let hit = match layout.elements[e] {
+            None if !placed => None,
             None => block.entry(origin, dir).map(|t| (None, t)),
             Some(_) => layout
                 .chunks_of(e)
@@ -1149,10 +1153,11 @@ fn apply_deposits(mut p: DepositParam) {
                 if !frame.may_hold(end, STOP_TOLERANCE_M) {
                     continue;
                 }
-                let (_, _, _, breakage, _) = p
+                let (_, _, _, breakage, piece) = p
                     .buildings
                     .get(*root)
                     .expect("frames enumerates this same building query");
+                let placed = piece.is_none();
                 let kind = &breakage.kind;
                 let local = frame.unscaled(end);
                 let (lo, hi) = kind.bounds();
@@ -1164,7 +1169,7 @@ fn apply_deposits(mut p: DepositParam) {
                 let back = 2.0 * STOP_TOLERANCE_M / frame.scale;
                 let shape = shapes.entry(*root).or_insert_with(|| breakage.shape());
                 if let Some((Some(c), t)) =
-                    first_chunk(&kind.layout, shape, local - turned * back, turned)
+                    first_chunk(&kind.layout, shape, placed, local - turned * back, turned)
                     && (t - back).abs() * frame.scale <= STOP_TOLERANCE_M
                 {
                     taken.entry(*root).or_default().field.push((
@@ -1431,10 +1436,11 @@ fn cast_blast(
             if !frame.may_meet(origin, dir) {
                 continue;
             }
-            let (_, _, _, breakage, _) = p
+            let (_, _, _, breakage, piece) = p
                 .buildings
                 .get(*root)
                 .expect("frames enumerates this same building query");
+            let placed = piece.is_none();
             let kind = &breakage.kind;
             let (local, bounds) = views.entry(*root).or_insert_with(|| {
                 let (lo, hi) = kind.bounds();
@@ -1445,7 +1451,7 @@ fn cast_blast(
                 continue;
             }
             let shape = shapes.entry(*root).or_insert_with(|| breakage.shape());
-            if let Some((chunk, t)) = first_chunk(&kind.layout, shape, *local, turned)
+            if let Some((chunk, t)) = first_chunk(&kind.layout, shape, placed, *local, turned)
                 && t * frame.scale <= reach
                 && stop.is_none_or(|(.., d)| t * frame.scale < d)
             {

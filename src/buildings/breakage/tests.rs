@@ -1270,7 +1270,7 @@ fn a_ray_that_stops_on_a_moving_body_pushes_it_by_its_share_and_deposits_nothing
             rays_on(&mut app, body, origin)
                 .into_iter()
                 .filter(|&(dir, _, d, _)| {
-                    first_chunk(&kind.layout, &intact, origin, dir).is_none_or(|(_, t)| t > d)
+                    first_chunk(&kind.layout, &intact, true, origin, dir).is_none_or(|(_, t)| t > d)
                 })
                 .collect()
         });
@@ -3167,4 +3167,29 @@ fn split_children_inherit_the_parents_rigid_momentum() {
     assert!((sum_l - angular).length() <= 1e-4 * angular.length());
     assert!((sum_e - energy).abs() <= 1e-4 * energy);
     assert!((sum_mass - total_mass).abs() < 1e-5 * total_mass);
+}
+
+/// A moving group holds only its own chunks: an unbreakable element stays with the placed
+/// building, so a ray through where it stood, in a group's construction frame, meets nothing
+/// there. A blast or field ray stopped by it would shade the group's real neighbours. ASSUMED
+/// fixture: one shipped element relabelled unbreakable, a group that owns no chunk on the ray.
+#[test]
+fn an_unbreakable_element_blocks_only_its_placed_building() {
+    let kind = shipped_house();
+    let (e, _) = fixture_chunks(&kind);
+    let mut layout = kind.layout.clone();
+    layout.elements[e] = None;
+    let block = &layout.element_blocks[e];
+    let centre = block.points.iter().copied().sum::<Vec3>() / block.points.len() as f32;
+    let origin = centre + Vec3::Y * 100.0;
+    let mut shape = Shape::intact(&layout);
+    shape.fate.fill(Fate::Dust);
+    assert!(matches!(
+        first_chunk(&layout, &shape, true, origin, Vec3::NEG_Y),
+        Some((None, _))
+    ));
+    assert_eq!(
+        first_chunk(&layout, &shape, false, origin, Vec3::NEG_Y),
+        None
+    );
 }
