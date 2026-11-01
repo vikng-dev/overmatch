@@ -2146,6 +2146,110 @@ fn a_body_born_around_an_in_flight_round_resolves_its_material() {
     );
 }
 
+/// The game's damage model: a moving body born around an in-flight round is crossed in its own
+/// frame. The contained contact takes the body's point velocity as the carrier, so the crossing's
+/// entry speed and heading are the round's relative ones. Mutant: a contained contact with zero
+/// velocity resolves the world heading (`incoming.x` zero). Dimensions and speeds are fixture data.
+#[test]
+fn a_moving_body_born_around_an_in_flight_round_crosses_it_in_its_frame() {
+    const BODY: Vec3 = Vec3::new(256.0, 0.0, 0.0);
+    let mut app = recording_world(false);
+    app.insert_resource(RetainSpentShells(true));
+    settle(&mut app);
+    fire(&mut app, Vec3::new(0.0, 20.0, 30.0), FireMechanism::Single);
+    app.update();
+    let mut shells = app
+        .world_mut()
+        .query_filtered::<(&Transform, &Projectile), With<Projectile>>();
+    let (pose, projectile) = shells.single(app.world()).unwrap();
+    let (at, velocity) = (pose.translation, projectile.velocity);
+    let (_, plates) = tank(
+        &mut app,
+        at,
+        0.0,
+        BODY,
+        &[("moving", Vec3::new(4.0, 2.0, 0.1), Vec3::ZERO, Kind::Plate)],
+    );
+    run(&mut app, 3);
+    let mut logs = app.world_mut().query::<&PenetrationMarks>();
+    let (incoming, speed_in) = logs
+        .iter(app.world())
+        .flat_map(|marks| &marks.log)
+        .find_map(|mark| match mark {
+            ArmourMark::Crossing {
+                volumes,
+                incoming,
+                speed_in,
+                ..
+            } if volumes.iter().any(|v| v.volume == plates[0]) => Some((*incoming, *speed_in)),
+            _ => None,
+        })
+        .expect("the moving body's material is crossed");
+    let relative = velocity - BODY;
+    assert!(
+        incoming.x < -0.1,
+        "the crossing heading is relative to the body: {incoming:?}"
+    );
+    assert!(
+        (speed_in - relative.length()).abs() < 0.05 * relative.length(),
+        "the crossing enters at the relative speed: {speed_in} vs {}",
+        relative.length()
+    );
+}
+
+/// The game's damage model: material born around a round at relative rest holds it with no
+/// relative motion, so no crossing clock can be built from it (travel over zero speed). The
+/// authority must neither panic nor skip the material: the round rests in the material's frame
+/// to the tick boundary and its next step reads that membership again. Both a resisting and a
+/// load-admitted zero-resistance plate; the zeroed velocity and plates are fixture data.
+#[test]
+fn a_round_at_relative_rest_inside_new_material_builds_no_zero_clock() {
+    for factor in [0.0, STEEL] {
+        let mut app = recording_world(false);
+        app.insert_resource(RetainSpentShells(true));
+        settle(&mut app);
+        fire(&mut app, Vec3::new(0.0, 20.0, 30.0), FireMechanism::Single);
+        app.update();
+        let mut shells = app
+            .world_mut()
+            .query_filtered::<(&Transform, &mut Projectile), With<Projectile>>();
+        let (pose, mut projectile) = shells.single_mut(app.world_mut()).unwrap();
+        let at = pose.translation;
+        // Fixture: the next free-flight step integrates exactly zero world velocity.
+        projectile.velocity = -GRAVITY * TICK.as_secs_f32();
+        let root = app
+            .world_mut()
+            .spawn((Transform::from_translation(at), RigidBody::Static))
+            .id();
+        let plate = app
+            .world_mut()
+            .spawn((
+                Transform::IDENTITY,
+                ChildOf(root),
+                Collider::cuboid(2.0, 2.0, 0.1),
+                CollisionLayers::new([Layer::Armor], LayerMask::ALL),
+                BallisticVolume {
+                    material: walk::VolumeMaterial::fixture(factor),
+                    substance: "fixture".to_owned(),
+                },
+                VolumeOf(root),
+            ))
+            .id();
+        run(&mut app, 4);
+        if factor == 0.0 {
+            continue; // Unresisting material admits the round's flight; the authority ran on.
+        }
+        let mut logs = app.world_mut().query::<&PenetrationMarks>();
+        assert!(
+            logs.iter(app.world())
+                .flat_map(|marks| &marks.log)
+                .any(|mark| matches!(mark,
+                ArmourMark::Crossing { volumes, .. } if volumes.iter().any(|v| v.volume == plate))),
+            "the held material is crossed once relative motion resumes"
+        );
+    }
+}
+
 /// The game's damage model: two overlapping bodies moving together share one crossing, whose
 /// world path curves as resistance slows the relative round. The authority's record admission
 /// must accept each body's departure. Dimensions and transverse velocity are fixture data.

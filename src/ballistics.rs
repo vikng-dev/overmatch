@@ -2831,15 +2831,34 @@ fn march_shell_step(
                 carrier = moving.velocity;
                 let offsets = flight.sample_offsets(radius);
                 let relative = flight.direction * flight.speed - carrier;
-                // The game's damage model retains heading at relative rest: material may be
-                // born around a round sharing its carrier velocity, with no new entering face.
-                let direction = if relative == Vec3::ZERO {
-                    flight.direction
-                } else {
-                    Dir3::new(relative).expect(
-                        "game's damage model: posed collider motion and flight give finite relative velocity",
-                    )
-                };
+                if relative == Vec3::ZERO {
+                    // The game's damage model: material born around a round sharing its velocity
+                    // gives the crossing no motion and no clock (travel over zero speed). The
+                    // round keeps that world velocity to the tick boundary or an armed delay's
+                    // end; its next step reads the membership again where it then stands.
+                    flight.position = moving.point;
+                    flight.continuation = None;
+                    let wait = budget.remaining() as f32;
+                    let due = shell.projectile.fuze.wait_at_rest(wait);
+                    let rested = if due {
+                        shell.projectile.fuze.delay_left().expect(
+                            "only an armed fuze expires while the game's damage model waits at rest",
+                        )
+                    } else {
+                        wait
+                    };
+                    flight.fly(carrier * rested);
+                    budget.fly(f64::from(rested));
+                    if due {
+                        damage_dealt += burst_here(shell, &context, &flight, 0.0, health).1;
+                        publish_path_state(shell, tick, &budget, &flight, true, None);
+                        stopped = true;
+                    }
+                    break;
+                }
+                let direction = Dir3::new(relative).expect(
+                    "game's damage model: posed collider motion and flight give finite relative velocity",
+                );
                 flight.frame = flight.frame.transport(*flight.direction, *direction);
                 flight.direction = direction;
                 flight.speed = relative.length();
