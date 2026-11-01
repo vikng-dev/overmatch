@@ -204,17 +204,22 @@ impl Masonry {
         let Some(bulk) = hard.bulk else {
             return Ok(None);
         };
-        let seam = bulk
+        let (seam, static_tensile) = bulk
             .tensile
             .zip(bulk.fracture_energy)
             .zip(bulk.shear_cohesion.zip(bulk.shear_fracture_energy))
-            .map(|((tensile, energy), (cohesion, shear))| Seam {
-                tensile: tensile as f32,
-                fracture_energy: energy as f32,
-                shear: Shear::Cohesive {
-                    cohesion: cohesion as f32,
-                    energy: shear as f32,
-                },
+            .map(|((tensile, energy), (cohesion, shear))| {
+                (
+                    Seam {
+                        tensile: tensile as f32,
+                        fracture_energy: energy as f32,
+                        shear: Shear::Cohesive {
+                            cohesion: cohesion as f32,
+                            energy: shear as f32,
+                        },
+                    },
+                    tensile,
+                )
             })
             .ok_or_else(|| {
                 format!("substance {name:?} states bulk facts but no seam to part its chunks by")
@@ -230,7 +235,7 @@ impl Masonry {
             density: bulk.density as f32,
             crush: (share * registry.reference_facts().cavity_strength()) as f32,
             compaction: Compaction::of(&blast, bulk.density),
-            spall: Spall::of(&blast, bulk.density, f64::from(seam.tensile)),
+            spall: Spall::of(&blast, bulk.density, static_tensile),
             seam,
             friction,
         }))
@@ -6072,6 +6077,36 @@ mod tests {
         );
         assert!(weighed.failures.is_empty());
         assert!(fall(&structure, &mut state).is_empty());
+    }
+
+    /// The game's environment scab reads the same dynamic strength the material load gate
+    /// validated, with one final f32 rounding. Asset authors rely on this agreement; rounding
+    /// the static strength first breaks it on this ASSUMED fractional fixture datum.
+    #[test]
+    fn dynamic_tension_uses_the_validated_material_product() {
+        let text = include_str!("../../assets/materials/materials.ron");
+        let fixture = text.replace("tensile: Some((0.69e6,", "tensile: Some((690000.04,");
+        assert_ne!(fixture, text, "the fixture changes the static strength");
+        let registry = SubstanceRegistry::from_ron(&fixture).unwrap();
+        for name in registry.keys() {
+            let Some(bulk) = registry
+                .get(name)
+                .unwrap()
+                .hard()
+                .and_then(|hard| hard.bulk)
+            else {
+                continue; // Non-bulk matter supplies no environment fracture law.
+            };
+            let Some(facts) = bulk.blast else {
+                continue; // Unbreakable bulk matter supplies no scab law.
+            };
+            let material = Masonry::of(&registry, name).unwrap().unwrap();
+            assert_eq!(
+                material.spall.tensile,
+                (bulk.tensile.unwrap() * facts.tensile_dif) as f32,
+                "{name}: the load gate and simulation must use the same product"
+            );
+        }
     }
 
     /// One fixture patch at the centre of a 0.25 m slab's lower face, at `material`'s dynamic

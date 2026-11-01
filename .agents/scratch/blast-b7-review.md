@@ -10,11 +10,11 @@ The wall design owns the model narrative; this file records findings and disposi
 
 ## Standards
 
-- **P2, pending:** `Masonry::of` supplies `Spall::of` a static tensile strength already rounded to
+- **P2, fixed:** `Masonry::of` supplies `Spall::of` a static tensile strength already rounded to
   f32, although `BlastFile::facts` validates the f64 product. A new row can pass a load gate for a
   different dynamic strength from the one the simulation constructs, including underflow of its
-  static operand. Construct the validated product from the original datum and refuse unusable
-  static simulation strengths at load.
+  static operand. The simulation now constructs the validated product from the original datum; the load gate
+  refuses a static tensile strength that cannot be stored as positive finite f32.
 - **P3:** the fracture module introduction says hulls never serve a law, but Law 2 reads its
   hull. Correct the module interface documentation with the energy-path deletion.
 - Required chemical energy removes the omitted-data sentinel. Required tensile DIFs are
@@ -59,3 +59,8 @@ Contact fix: formatting and locked workspace/all-target clippy with `dev_ui,bitp
 warnings denied pass. **MEASURED:** 96 building tests, 7 sandbox-wall tests and 3 doc-citation tests pass. The new
 contact test covers bonded/resting interfaces, opened joints, dust/fallen neighbours, side
 contacts and unrelated contacts. All test runs are unattended and headless.
+
+Tensile precision fix: formatting and the required locked clippy pass. **MEASURED:** 130
+building/material/sandbox-wall/doc-citation tests pass. The fractional static-strength fixture
+breaks a mutant that rounds before multiplying; the extreme static-strength fixture is refused
+at load even though its dynamic product fits in f32.

@@ -544,6 +544,7 @@ impl BlastFile {
         let lock_up = 1.0 - density / facts.solid_density;
         let front_speed = (strength * lock_up / density).sqrt();
         for (field, value) in [
+            ("tensile (static tensile strength)", tensile),
             ("compressive_strength * compressive_dif", strength),
             ("solid_density (compaction front speed)", front_speed),
             (
@@ -1348,6 +1349,23 @@ mod tests {
             let mut invalid = authored.clone();
             invalid[index] = authored[index].replace(fields[index].1, value);
             refusal(&block(&invalid), field);
+        }
+        // ASSUMED fixture data: a finite dynamic product cannot rescue a static seam strength
+        // that rounds to zero. The simulation stores that static strength independently.
+        let mut extreme = authored.clone();
+        extreme[5] = authored[5].replace("3.0", "1e100");
+        let text = row(&block(&extreme)).replace("tensile: Some((1e6,", "tensile: Some((1e-100,");
+        let error = SubstanceRegistry::from_ron_at(path, &text)
+            .unwrap_err()
+            .to_string();
+        for required in [
+            "fixture/materials.ron",
+            "Fixture",
+            "tensile",
+            "author",
+            "source",
+        ] {
+            assert!(error.contains(required), "{required}: {error}");
         }
     }
 
