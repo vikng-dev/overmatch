@@ -43,7 +43,8 @@
 //! - A RUNG WEARS ITS SOURCE'S MATERIAL AND TAG: `geometry_lod` copies both, so a LOD switch changes
 //!   the silhouette and nothing else.
 //! - Rows are rigid up to a uniform scale: the shader takes their 3×3 as the normal's rotation and
-//!   renormalises. A node whose scale strays past [`UNIFORM_SCALE_TOLERANCE`] is warned about once.
+//!   renormalises. A worn node whose scale strays past [`UNIFORM_SCALE_TOLERANCE`] is refused at
+//!   its dress, naming the node.
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 
@@ -92,8 +93,8 @@ const FLAG_PAINT: u32 = 2;
 const FLAG_CAMO: u32 = 4;
 /// The most camouflage colours a pattern carries: its R, G and B coverage.
 const CAMO_COLOURS: usize = 3;
-/// How far a rest row's axis lengths may differ, relative to the first, before its node is warned
-/// about as non-uniformly scaled. The shader turns normals by the row's 3×3 where the inverse
+/// How far a rest row's axis lengths may differ, relative to the first, before its node is refused
+/// as non-uniformly scaled. The shader turns normals by the row's 3×3 where the inverse
 /// transpose is due, so a stretch of `1 + s` along one axis leans a normal by at most about `s` rad
 /// (DERIVED: the angle between `M n` and `M⁻ᵀ n` for `M = diag(1 + s, 1, 1)`, at its worst 45° off
 /// the axis): under 0.06° here, below anything a pixel shows (ASSUMED).
@@ -749,14 +750,14 @@ impl Dress<'_, '_> {
                     rest.matrix3.z_axis,
                 ]
                 .map(|axis| axis.length());
-                if lengths.iter().any(|length| {
-                    (length - lengths[0]).abs() > UNIFORM_SCALE_TOLERANCE * lengths[0]
-                }) {
-                    warn_once!(
-                        "tank surface: node {path:?} carries a non-uniform scale; its surface's \
-                         normals lean"
-                    );
-                }
+                assert!(
+                    lengths.iter().all(|length| {
+                        (length - lengths[0]).abs() <= UNIFORM_SCALE_TOLERANCE * lengths[0]
+                    }),
+                    "tank surface: worn node {path:?} carries a non-uniform scale {lengths:?}, \
+                     which its surface frame cannot pack; apply the scale in the source scene and \
+                     re-export the view glb"
+                );
                 rows.insert(path, table.len() as u32);
                 table.push(RestRow::of(rest));
             }
@@ -775,7 +776,10 @@ impl Dress<'_, '_> {
             let handle = self.material(scene, &original, visual);
             let path = node_path(entity, root, &self.tree.parents, &self.tree.names);
             let vehicle = &self.vehicles.vehicles[&scene];
-            let row = vehicle.rows.get(&path).copied().unwrap_or(0);
+            let row = *vehicle.rows.get(&path).expect(
+                "every worn node path was rowed when its scene's vehicle was built: instances of \
+                 one scene share their node paths",
+            );
             self.commands
                 .entity(entity)
                 .remove::<MeshMaterial3d<StandardMaterial>>()
@@ -796,7 +800,10 @@ impl Dress<'_, '_> {
         }
         let look = self.look(visual);
         let coat = self.coat();
-        let base = self.standard.get(original).cloned().unwrap_or_default();
+        let base = self.standard.get(original).cloned().expect(
+            "a glb's materials are labelled assets of its load, in place before its scene \
+             instantiates, and the worn primitive's handle holds its own",
+        );
         let rest_frames = self.vehicles.vehicles[&scene].rest_frames.clone();
         let made = surface_material(&base, &look, &coat, &self.vehicles.stand_in, rest_frames);
         let handle = self.surfaces.add(waiting_material(&base, &made));
