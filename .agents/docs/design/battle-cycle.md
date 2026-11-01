@@ -8,9 +8,17 @@ The owner chose the provisional mode in #220; #240 supplies its authority clock.
 - The first fill-up is idle until the first authenticated player connects. Once
   started, it runs to its deadline even if that player leaves. Later fill-ups
   start immediately when players remain connected; otherwise they wait too.
-- Tanks exist only during combat. At its start, every connected player is queued
-  through the automatic map spawn rule, with a fresh life. Late joins use the
-  same rule. The operator's harness instruments retain their declared placement.
+- Tanks exist from fill-up through combat. A connected player gets a tank as soon
+  as the Battle can place one: on joining during a fill-up, and at the start of every
+  fill-up for players already connected, into the world that boundary rebuilds. Each
+  is a fresh life through the automatic map spawn rule, held until combat starts
+  (see The hold); combat starts in the fill-up's tanks. Late joins during open combat
+  use the same rule. Bots follow it too. The operator's harness instruments retain
+  their declared placement.
+- A connection after late join closes is refused at the handshake
+  (`JoinRefusal::BattleClosed`) until the next fill-up reopens admission. A direct
+  client's loading screen shows that cause and stops retrying; a matchmaking client
+  returns to its lobby with it.
 - Only combat scores. A combatant's standing remains after disconnect, so leaving
   cannot erase its result. Combat runs its full duration regardless of occupancy,
   losses or score. The hosting empty timeout cannot interrupt combat; an expired
@@ -19,8 +27,9 @@ The owner chose the provisional mode in #220; #240 supplies its authority clock.
   or no contest for an empty board. It removes tanks and flying rounds, including
   detached turrets through the existing root-removal observer. The score freezes.
 - The next fill-up increments the Battle number, empties the score and clears
-  spawn-map picks. Connected links stay; their combatant identities remain unique
-  for the server lifetime and their life counters continue across Battles.
+  spawn-map picks; its spawns then open each combatant's zero standing. Connected
+  links stay; their combatant identities remain unique for the server lifetime and
+  their life counters continue across Battles.
 - Every Battle starts with a fresh battlefield. The next fill-up reconstructs the
   map, so connected players see intact scenery while the next Battle fills.
 
@@ -82,6 +91,25 @@ record generation. Shared view templates, player settings, transport clocks and
 deduplication, combatant identities and operator instrument counters keep their
 session lifetime.
 
+## The hold
+
+Until combat starts a player controls only the camera. `net::battle::hold_commands`
+replaces every tank's command with `ParsedTankCommand::hold` while the replicated phase
+is not combat. It runs where commands are applied: after the input bridge and a bot's
+command writer, before every gameplay consumer. So drive, turret, gun, fire and every
+edge are held by one rule. A held command has no aim, so the servos keep their spawn
+targets, and holds the brakes (`track::drive::DriveTarget::Brake`): no drive, full
+service brakes while the tank moves, then the parking latch at rest. A repairing crew
+uses the same brake hold. The tank stays a dynamic body resting on its suspension.
+
+The authority advances the phase (`cycle_battles`) before the hold in the same tick,
+so combat's first tick releases every command. A client runs the same rule from its
+replicated phase, which holds its own turret and fire presentation. Its phase arrives
+with replication, about one one-way trip after the authority's tick (DERIVED), so the
+own turret's local lead is released that much later; the authority's turret follows
+the player's aim from combat's first tick. A composition with no Battle
+(offline, fixtures) holds nothing.
+
 ## Admission and reporting
 
 | Phase | Heartbeat | Handshake |
@@ -132,8 +160,14 @@ Countdowns run from the replicated deadline on the shared presentation timeline
 leads the server and must not advance the match display. The replicated phase alone changes
 the view; a countdown reaching zero cannot start or end combat. Both views wait while the
 presentation clock is synchronizing. No player name rides
-the wire, so a row reads `PLAYER <combatant id>`. The own row is unmarked: outside combat the
-client holds no tank, and so no replicated fact naming its own combatant.
+the wire, so a row reads `PLAYER <combatant id>`. The own row is unmarked, so the board reads the
+same through results, when the client holds no tank and so no replicated fact naming its own
+combatant.
+
+Until this link's match has replicated the client's own tank once, an opaque loading screen
+covers the view (`Flow::Joining`): LOADING… through the asset load and the wait for the tank,
+CONNECTING… through connect attempts, and a refusal's cause once refused. A tank that later
+leaves (results, a respawn) keeps the match on screen.
 
 ## Verification
 
@@ -143,7 +177,12 @@ probe reads the replicated deadlines and score, checks the matching heartbeat
 states, observes a rendered typed refusal, and keeps the first player connected
 into the next fill-up. A separate challenge-crossing probe closes admission
 between the request and response. Score and deadline-wrap tests pin the boundary
-invariants. The server spawn tests exercise complete tanks and replacement lives.
+invariants. The server spawn tests exercise complete tanks and replacement lives: a player
+present at a fill-up holds a tank, combat starts in it, results sweep it and the next fill-up
+hands every connected player a fresh one. The hold test drives the production cycle and hold:
+every command is idle with the brakes held through the fill-up, and live on combat's first tick.
+The transmission's brake-hold test brings a rolling tank to a parked rest where a released
+command coasts.
 
 The world-cycle regression uses a mixed map fixture through the startup scatter
 construction. During combat a wall chunk is freed and a tree falls; the authority,
@@ -155,3 +194,25 @@ checks both empty CPU history and new GPU image identities; extraction retires
 pending writes whose old image never reached the GPU. Arrival-order coverage also
 reconstructs without a fixed update and reconnects to a new authority whose Battle
 number coincides with the previous authority's.
+
+The release smoke (`scripts/ci/archive-smoke.sh`) runs against the shipped mode with its 60 s
+fill-up, and the scripted client's watchdog keeps its one rule: the client takes its input slot
+on joining the fill-up. MEASURED 2026-11-01, this lane's dev server and headless client on
+loopback: input slot 2.95 s after the client's first log line and 16 ms after `client:
+connected`, while the server's Battle 1 fill-up ran; script complete 4.02 s later; exit status 0.
+
+## World-reset review
+
+Two blind reviews of the fresh-world lane, each finding checked against the code:
+
+| reviewer | finding | verified / not a defect | fixed in (subject) |
+|---|---|---|---|
+| Codex | No P1–P3 findings | — | — |
+| Claude | No test consumed a record from Battle 2 or later on a client: every later snapshot was empty, so a filter selecting only the first generation passed | verified | `net: settle the world-reset review findings (#253)`: the arrival-order test grows the second Battle's ledgers and sees them apply |
+| Claude | The census counts no pose carriers, so nothing guarded the boundary's carrier despawn | verified | same commit: the UDP cycle asserts every authority carrier belongs to the new Battle |
+| Claude | `vfx::reconstruct_world` retired ring ids with `World::despawn`, which warns for every id already gone | verified: `World::despawn` logs a warning for a missing entity in bevy_ecs 0.19, and a ring keeps ids past their own end-of-life despawn | same commit: `try_despawn` |
+| Claude | The authority's first generation came from a code default that matched `BattleState::default().number` by coincidence; replica compositions init the same default | verified for the authority; not a defect on a production replica, where `world_reset::install_client` inserts `None` over every init | same commit: `server::install_battle` derives it from the first Battle |
+| Claude | The authority holds an `Option` it can never empty, checked by five `expect`s | verified | open: an authority-side generation type would carry it |
+| Claude | `world_reset::follow_battle` had an unreachable branch whose comment promised more than it kept | verified | same commit: a frame with no Battle forgets the construction, so the next Battle constructs its own |
+| Claude | `world_reset::start_next` decides from its own list which environment records exist, while startup decides through each `install_server` | verified: the short-mode probe server gains both ledgers at its first fill-up | open: each `install_server` would register its own boundary constructor |
+| Claude | Stale docs: `WallRecord` said its generation moves on a replica's next link; the wall ledger's module doc said one entity holds every change | verified | same commit |
