@@ -343,5 +343,21 @@ were present. Findings are checked against code and executable class fixtures.
 | Codex P2; Claude P2 | Reported elastic stiffness omits engagement derivative | verified: uniform 1 cm press in a 2 cm ramp reports 1,999,999.9 N/m against a finite-difference force derivative of 3,999,707.3 N/m (MEASURED red test) | track: include the engagement slope in patch stiffness (#256) |
 | Claude P2 | The explicit trace omits the source's inverse response | verified: DERIVED fixture, two 1000 kg bodies and a 10 MN/m spring at 64 Hz, recipient-only rate 2.4414 versus pair rate 4.8828; the omitted-source reaction leaves -2.125 m/s, corrected test leaves 0 m/s (MEASURED) | track: bound coupled belt reactions with both bodies inertia (#256) |
 
+| Claude P3 | A missing receiver-map entry can silently stand for a moving recipient | verified: staging a dynamic recipient through the fixed entry point did not fail (MEASURED red contract test); the reader now checks the actual rigid-body state before publishing | contact: enforce the implicit receiver inertia contract (#256) |
+| Claude P3 | Module documentation describes only fixed source-mass budgeting | verified: moving contacts use their actual received impulse and the pair mass | contact: enforce the implicit receiver inertia contract (#256) |
+
 The reaction law and its current bound are stated above; regression fixtures exercise the
 damper, the ramp derivative, tick-start closing readings and the coupled source response.
+
+**Continuation verification gates (before the hull-law remainder).** Formatting and CI clippy
+passed. Contact-reader/driving/citation selection: 230 passed. Destruction, headless scenarios,
+whole-tree guards and wire pins: 205 passed, 4 existing ignored measurement tests. The focused
+review evidence selection passed all 5 tests. PROTOCOL_REV remains 63: no serialized type changed,
+and both wire pin tests pass. No captures, pricing runs, pushes or subagents were started here.
+
+**Shifted readings (MEASURED software-state fixtures).** The moving slab's blow changes from the
+baseline 6.05 N s to 6.9103637 N s (about +0.86 N s, +14.2%); its received impulse remains
+15.339572 N s and its reduced-mass bound remains 7.2000003 N s. The change is the corrected
+pre-reaction closing reading, not an extra reaction. The parked equal receivers retain their
+9414.24 N s normal momentum. The ramp reports 3999997.8 N/m against the finite-difference
+3999707.3 N/m; the one- and two-patch blows both read 499.99997 N s.

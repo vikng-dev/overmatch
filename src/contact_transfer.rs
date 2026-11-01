@@ -36,10 +36,11 @@
 //! new transfer.
 //!
 //! IMPLICIT CONTACTS. The belt applies support and traction before physics without collider
-//! constraints. Its equal-and-opposite structure reaction is staged by [`ContactTransfers::stage`]
-//! and published with that physics step. Every patch one source body presses on one collider
-//! shares one closing-momentum budget, sized against the source's mass as that distribution of
-//! impulses meets it ([`ContactTransfers::split`]): neither splitting a shoe footprint, nor a
+//! constraints. Fixed construction receives its opposite reaction through [`ContactTransfers::stage`];
+//! a moving structure receives the impulse it actually took through [`ContactTransfers::stage_on_moving`],
+//! with its tick-start inertia. Both publish with that physics step. Every source's patches on
+//! one collider share a closing budget: the source mass for fixed construction, the pair's reduced
+//! mass for a moving receiver, under that impulse distribution ([`ContactTransfers::split`]): neither splitting a shoe footprint, nor a
 //! link's rounding of its normal, nor a curved run's turning normals can multiply a blow.
 //! These contacts are refreshed by the belt each tick and never enter the solver's sleeping-pair
 //! cache.
@@ -171,7 +172,8 @@ struct Kept {
 }
 
 impl ContactTransfers {
-    /// Stage a force the source actually applies this tick, before physics integrates it.
+    /// Stage a fixed structure's opposite force this tick, before physics integrates it.
+    /// Dynamic receivers must use Self::stage_on_moving with their tick-start inertia.
     pub(crate) fn stage(&mut self, contact: AppliedContact) {
         self.pending.push(contact);
     }
@@ -297,7 +299,7 @@ impl ContactTransfers {
                     let (total, inverse) = distribution(receiver, points, share);
                     (mass.recip() + inverse / (total * total)).recip()
                 }
-                None => mass,
+                None => mass, // Fixed construction: keep checks every implicit receiver before reading it.
             };
             let speed = points
                 .iter()
@@ -407,6 +409,16 @@ fn keep(
         staged_receivers,
         receivers,
     } = &mut *transfers;
+    for contact in pending.iter() {
+        let (_, _, kind, ..) = bodies
+            .get(contact.structure)
+            .expect("an implicit structural recipient survives until the contact reading");
+        assert_eq!(
+            kind.is_dynamic(),
+            staged_receivers.contains_key(&contact.structure),
+            "a dynamic implicit receiver requires its staged inertia; fixed construction has none"
+        );
+    }
     let asleep = |transfer: &ContactTransfer| {
         contacts
             .get(
@@ -644,6 +656,31 @@ mod tests {
     use bevy::time::TimeUpdateStrategy;
 
     use super::*;
+
+    /// A dynamic implicit recipient must carry the inertia used to size its pair budget.
+    /// Structural readers rely on missing receiver state being a bug rather than a fixed-body
+    /// budget. FIXTURE: two separated cubes, an explicitly staged force on the moving one.
+    #[test]
+    #[should_panic(expected = "a dynamic implicit receiver requires its staged inertia")]
+    fn a_moving_implicit_receiver_cannot_silently_use_a_fixed_budget() {
+        let mut app = world(1.0);
+        let receiver = cube(&mut app, Vec3::ZERO, Vec3::ZERO);
+        app.world_mut().entity_mut(receiver).insert(StructureBody);
+        let source = cube(&mut app, Vec3::Y * 5.0, Vec3::ZERO);
+        app.update();
+        app.world_mut()
+            .resource_mut::<ContactTransfers>()
+            .stage(AppliedContact {
+                structure: receiver,
+                structure_collider: receiver,
+                body: source,
+                point: Vec3::ZERO,
+                normal: Vec3::Y,
+                force: Vec3::Y * 1000.0,
+                closing_speed: 1.0,
+            });
+        app.update();
+    }
 
     /// Coplanar implicit patches share one closing-momentum budget at their centroid. Structural
     /// laws rely on a subdivided footprint producing the same blow and press as one patch.
