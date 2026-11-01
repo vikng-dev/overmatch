@@ -2383,9 +2383,7 @@ pub(super) fn install_device_feed(app: &mut App) {
 /// instead of holding the last input, and clicks in the menu don't fire.
 fn feed_action_state(
     overlays: Res<crate::overlay::Overlays>,
-    // `None` only once the primary window has closed with the app's exit (`PrimaryWindow` is
-    // unique by Bevy's construction): nothing has focus, so every slot files the idle command.
-    window: Option<Single<&Window, With<PrimaryWindow>>>,
+    windows: Query<&Window, With<PrimaryWindow>>,
     mut device: ResMut<DeviceCommand>,
     mut slots: Query<
         (&mut ActionState<TankCommand>, Has<GameControlled>),
@@ -2399,7 +2397,14 @@ fn feed_action_state(
     // derivation also releases the cursor, every system that could latch anything into the command
     // (drive gather, aim commit, respawn request) is already frozen whenever this zeroing is active —
     // no second inference to keep in sync.
-    let focused = window.is_some_and(|window| window.focused);
+    let focused = match windows.single() {
+        Ok(window) => window.focused,
+        // The primary window has closed at exit: no device has focus, so file idle commands.
+        Err(QuerySingleError::NoEntities(_)) => false,
+        Err(error @ QuerySingleError::MultipleEntities(_)) => {
+            panic!("the device feed has exactly one primary window until exit: {error}")
+        }
+    };
     let idle = crate::overlay::input_blocked(&overlays, focused);
     for (mut state, controlled) in &mut slots {
         state.0 = if idle || !controlled {
@@ -2459,6 +2464,51 @@ mod match_exit;
 /// externally nameable), so the honest test lives here in-crate, over real ECS state.
 #[cfg(test)]
 mod tests {
+    /// The device feed must expose duplicate primary windows as a construction bug: treating
+    /// them as an absent window silently makes a live player's controls inert.
+    #[test]
+    #[should_panic(expected = "the device feed has exactly one primary window")]
+    fn device_feed_refuses_duplicate_primary_windows() {
+        use bevy::ecs::system::RunSystemOnce;
+        let mut world = World::new();
+        world.init_resource::<crate::overlay::Overlays>();
+        world.init_resource::<DeviceCommand>();
+        for _ in 0..2 {
+            world.spawn((PrimaryWindow, Window::default()));
+        }
+        world.run_system_once(feed_action_state).unwrap();
+    }
+
+    /// A closed window files neutral input and consumes the frame's edges, so a closing client
+    /// cannot keep its last drive level or replay a click when no window owns the device.
+    #[test]
+    fn device_feed_files_idle_when_the_window_has_closed() {
+        use bevy::ecs::system::RunSystemOnce;
+        let mut world = World::new();
+        world.init_resource::<crate::overlay::Overlays>();
+        world.insert_resource(DeviceCommand(TankCommand {
+            throttle: 1.0,
+            fire_primary: true,
+            ..default()
+        }));
+        let slot = world
+            .spawn((
+                ActionState(TankCommand {
+                    throttle: 1.0,
+                    ..default()
+                }),
+                InputMarker::<TankCommand>::default(),
+                GameControlled,
+            ))
+            .id();
+        world.run_system_once(feed_action_state).unwrap();
+        assert_eq!(
+            world.get::<ActionState<TankCommand>>(slot).unwrap().0,
+            TankCommand::default()
+        );
+        assert!(!world.resource::<DeviceCommand>().0.has_edge());
+    }
+
     use bevy::ecs::system::RunSystemOnce;
     use std::time::{SystemTime, UNIX_EPOCH};
 
