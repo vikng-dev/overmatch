@@ -551,7 +551,7 @@ fn drive(
     time: Res<Time<Virtual>>,
     plan: Option<Res<Plan>>,
     grid: Option<Res<HeightGrid>>,
-    blueprint: Res<crate::bake::TankBlueprint>,
+    geometry: Res<crate::track::rig_geom::RigGeom>,
     gear: Res<crate::track::sim::TrackGear>,
     mut runs: ResMut<Runs>,
     mut tanks: Query<(
@@ -633,13 +633,18 @@ fn drive(
 
         let here = Vec2::new(position.0.x, position.0.z);
         let along = script.lane.progress(here) * script.lane.length();
-        // Reverse using the vehicle's braking capability and the grade across its hull footprint.
+        // Reverse using braking capability and the declared contact cylinders' lane projection.
         let speed = Vec2::new(velocity.0.x, velocity.0.z).dot(script.lane.axis());
-        let probe = blueprint.spec.inertia_extents.2 * 0.5;
+        let lane_axis = script.lane.axis();
+        let hull_axis = rotation.0.inverse() * Vec3::new(lane_axis.x, 0.0, lane_axis.y);
+        let (low, high) = geometry.contact_extent(
+            Dir3::new(hull_axis)
+                .expect("a unit lane direction rotated into the hull remains a finite direction"),
+        );
         let grade = grid.as_deref().map_or(0.0, |grid| {
-            let front = here + script.lane.axis() * probe;
-            let rear = here - script.lane.axis() * probe;
-            (grid.height_at(front.x, front.y) - grid.height_at(rear.x, rear.y)) / (2.0 * probe)
+            let front = here + lane_axis * high;
+            let rear = here + lane_axis * low;
+            (grid.height_at(front.x, front.y) - grid.height_at(rear.x, rear.y)) / (high - low)
         }); // A slab world has zero grade.
         let grade_sine = grade / (1.0 + grade * grade).sqrt();
         let stop = stopping_advance(speed, gear.braking_deceleration(grade_sine, speed.signum()));

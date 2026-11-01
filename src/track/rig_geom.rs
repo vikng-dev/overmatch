@@ -10,7 +10,7 @@
 
 use std::path::Path;
 
-use bevy::math::{Affine3A, Vec2, Vec3};
+use bevy::math::{Affine3A, Dir3, Vec2, Vec3};
 use bevy::prelude::Resource;
 
 use crate::bake::TankBlueprint;
@@ -302,6 +302,35 @@ impl RigGeom {
             }
         }
         Ok(())
+    }
+
+    /// DERIVED projection of the declared road-contact cylinders onto a hull-local direction.
+    /// Station positions, tread radii and lateral intervals define this footprint; the inertia
+    /// box describes mass distribution and supplies no contact extent.
+    pub(crate) fn contact_extent(&self, axis: Dir3) -> (f32, f32) {
+        let axis = *axis;
+        let mut low = f32::INFINITY;
+        let mut high = f32::NEG_INFINITY;
+        for side in Side::ALL {
+            for (centre, tread) in self
+                .road_wheels
+                .get(side)
+                .iter()
+                .zip(self.wheel_treads.get(side))
+            {
+                let radial = tread.radius * axis.y.hypot(axis.z);
+                for &(start, end) in &tread.spans {
+                    let (a, b) = (axis.x * start, axis.x * end);
+                    low = low.min(centre.dot(axis) + a.min(b) - radial);
+                    high = high.max(centre.dot(axis) + a.max(b) + radial);
+                }
+            }
+        }
+        assert!(
+            low.is_finite() && high.is_finite() && low < high,
+            "admitted contact cylinders have a finite positive footprint in every direction"
+        );
+        (low, high)
     }
 
     /// Re-assemble this rig at DIFFERENT authored counts, reusing the cached measurements.
@@ -1017,6 +1046,30 @@ pub(crate) fn tiger_rig() -> RigGeom {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Scripted braking relies on declared contact geometry, including asymmetry and tread gaps.
+    /// FIXTURE DATA: two synthetic stations with unequal radii and lateral intervals.
+    #[test]
+    fn the_contact_footprint_projects_declared_cylinders() {
+        let mut rig = tiger_rig();
+        rig.road_wheels = PerSide::new(
+            vec![Vec3::new(-1.0, 0.5, -2.0)],
+            vec![Vec3::new(2.0, 0.6, 3.0)],
+        );
+        rig.wheel_treads = PerSide::new(
+            vec![crate::spec::WheelTread {
+                radius: 0.5,
+                spans: vec![(-0.1, 0.2)],
+            }],
+            vec![crate::spec::WheelTread {
+                radius: 1.0,
+                spans: vec![(-0.2, -0.1), (0.3, 0.4)],
+            }],
+        );
+        assert_eq!(rig.contact_extent(Dir3::Z), (-2.5, 4.0));
+        assert_eq!(rig.contact_extent(Dir3::X), (-1.1, 2.4));
+        assert_eq!(rig.contact_extent(Dir3::NEG_Z), (-4.0, 2.5));
+    }
 
     /// Axles and collider/armour placement rely on the same baked rigid frame. A scaled parent
     /// must refuse instead of letting the affine wheel pose disagree with that position.
