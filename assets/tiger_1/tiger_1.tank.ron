@@ -13,11 +13,11 @@ TankSpec(
     // travel with the minimum slack that permits it — playtest-confirmed 2026-07-24. The real
     // Tiger ran 96/side (chain-limited, as a tensioned track is); revisit if belt-tension
     // forces ever land. Window recomputes when ride_frequency moves — recheck after retuning.
-    // This block is authored VEHICLE DATA only — link count, link physicals, articulation limits,
-    // the sprocket tooth count, and the suspension ride / powertrain models. All running-gear
-    // GEOMETRY (pitch, plate thickness, shoe width, the track plane, and every sprocket/idler/wheel
-    // circle) is MEASURED off the glb markers now — one source of truth, in the model — so nothing
-    // geometric is authored here (see track::rig_geom / track::marker_model).
+    // This block is authored VEHICLE DATA: link count, link physicals, articulation limits, the
+    // sprocket teeth and tooth datums, the pin planes, the idler radii and the ride / powertrain
+    // models; each station's tread is in `roadwheels`. The common shoe template (pitch, plate
+    // thickness, shoe faces) is MEASURED off the glb's link markers, and the axle centres are the
+    // declared nodes' positions (see track::rig_geom / track::marker_model).
     track: (
         // MEASURED from the sim artifact's pin markers; the shared shoe template is mirrored on the left.
         pin_plane_x: (left: -1.5283124446868896, right: 1.5283124446868896),
@@ -44,11 +44,11 @@ TankSpec(
         // And the mesh is only ever an UPPER BOUND anyway: real articulation is also limited by
         // pin/bushing clearance and the end connectors, none of which the shoe mesh models.
         link_angle: ( inward_deg: 40.0, outward_deg: 18.0 ),
-        // 20 teeth (model-verified count) — the ONLY sprocket datum still authored. The pitch
-        // radius is chord-exact from the MEASURED pitch × teeth (marker-derived, ~0.4155 m); the
-        // sprocket centre and every other running-gear circle are measured off the glb too.
+        // 20 teeth (model-verified count). The pitch radius is chord-exact from the MEASURED
+        // pitch × teeth (marker-derived, ~0.4155 m); the sprocket centre is its declared node's.
         // Reductions absorb the radius (speeds are anchored), so the tooth count is feel-neutral
         // for the transmission.
+        //
         // MEASURED from each sim sprocket's reference tooth in the hull side plane (rad).
         sprocket: ( teeth: 20, tooth_tip_rad: (left: 0.001790004, right: 0.002023177), nodes: ( left: "Sprocket_L", right: "Sprocket_R" ) ),
         // The idler meshes' view nodes, one per side.
