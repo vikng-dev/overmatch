@@ -51,7 +51,8 @@
 // breakable row is refused at load. The punch ring reads the shear facts. A breakable row also
 // states `bulk.blast`: compressive strength (Pa), its dynamic/static ratio and reference strain
 // rate (1/s), fully dense grain/cell-wall density (kg/m³) and Young's modulus (Pa). These inputs
-// are stored only: no blast law reads them yet. Missing or unusable inputs are refused at load.
+// are read by the blast's crush law (Law 1: the compression, its ratio and the fully dense density;
+// the modulus awaits the scab law). Missing or unusable inputs are refused at load.
 // Sources and analogue limits: .agents/scratch/blast-b3-material-sources.md. A non-metal's
 // effective factor is its compressive (crushing) strength over the reference flow strength
 // (~1 GPa), × 1000: a strength ratio, the reading the steels' DERIVED rows note, not a measured
@@ -330,7 +331,7 @@
                     0.42 MPa·√m, over red spruce's tangential modulus, E_T ≈ 0.043 × E_L with E_L ≈
                     11.1 GPa at 12 % moisture (CLAIMED, not read: Wood Handbook Tables 5-1 and
                     5-3a, recalled), 0.48 GPa: 370 J/m²"))),
-                // Blast inputs only; no current law reads this block. ASSUMED European-spruce
+                // Blast inputs: the crush law reads this block. ASSUMED European-spruce
                 // analogue for the scalar forest timber; the existing density and seam data
                 // retain their own sources. Grain and moisture are not resolved by this row.
                 blast: Some((
@@ -413,7 +414,7 @@
                     mode-I fracture energy from van der Pluijm's couplet tests as Lourenco (1996)
                     restates them, 5-20 J/m²; the geometric mean taken (the wall prototype's
                     value)"))),
-                // Blast inputs only; no current law reads this block. Unit compression and
+                // Blast inputs: the crush law reads this block. Unit compression and
                 // grain density describe local compaction; E is the effective assemblage's.
                 blast: Some((
                     compressive_strength: Some((36.5e6, Measured("molded solid clay brick mean

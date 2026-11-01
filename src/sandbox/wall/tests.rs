@@ -99,6 +99,7 @@ fn renumbering_the_chunks_changes_no_outcome() {
                 .expect("the centre is a chunk's centroid"),
             at: centre,
             energy: 1.0e6,
+            crushed: 1.0e6 / brick().crush,
             blow: Vec3::ZERO,
             press: Vec3::ZERO,
             peak: None,
@@ -112,6 +113,7 @@ fn renumbering_the_chunks_changes_no_outcome() {
                 chunk: i,
                 at: structure.chunks[i].centroid,
                 energy: 0.0,
+                crushed: 0.0,
                 blow: Vec3::NEG_Z * 400.0,
                 press: Vec3::ZERO,
                 peak: None,
@@ -216,6 +218,7 @@ fn a_push_fails_the_section_at_its_fracture_impulse() {
             chunk: 1,
             at,
             energy: 0.0,
+            crushed: 0.0,
             blow: Vec3::NEG_Z * (scale * capacity / lever),
             press: Vec3::ZERO,
             peak: None,
@@ -242,10 +245,17 @@ fn blast_coupling_falls_with_standoff() {
         Vec3::new(50.0, 50.0, 0.0),
     )];
     let coupled = |standoff: f32| -> f32 {
-        blast_rays(&slab, |_| true, Vec3::Z * standoff, FIXTURE_BLAST, &field)
-            .iter()
-            .map(|hit| hit.energy)
-            .sum::<f32>()
+        blast_rays(
+            &slab,
+            |_| true,
+            |_| brick(),
+            Vec3::Z * standoff,
+            FIXTURE_BLAST,
+            &field,
+        )
+        .iter()
+        .map(|hit| hit.energy)
+        .sum::<f32>()
             / FIXTURE_BLAST.energy
     };
     let contact = coupled(1.0e-4);
@@ -255,10 +265,17 @@ fn blast_coupling_falls_with_standoff() {
         Vec3::new(2.0, 1.0, 0.0),
     )];
     let on_wall = |standoff: f32| -> f32 {
-        blast_rays(&wall, |_| true, Vec3::Z * standoff, FIXTURE_BLAST, &field)
-            .iter()
-            .map(|hit| hit.energy)
-            .sum::<f32>()
+        blast_rays(
+            &wall,
+            |_| true,
+            |_| brick(),
+            Vec3::Z * standoff,
+            FIXTURE_BLAST,
+            &field,
+        )
+        .iter()
+        .map(|hit| hit.energy)
+        .sum::<f32>()
             / FIXTURE_BLAST.energy
     };
     let (near, mid, far) = (on_wall(0.1), on_wall(1.0), on_wall(3.0));
@@ -308,6 +325,7 @@ fn wall_face_pushes(energy: f32, distance: f32) -> Vec<Load> {
                 chunk,
                 at,
                 energy: 0.0,
+                crushed: 0.0,
                 blow: Vec3::NEG_Z * (area * blast.specific_impulse(d, cos)),
                 press: Vec3::ZERO,
                 peak: Some(Vec3::NEG_Z * (area * blast.peak_pressure(d, cos))),

@@ -8,12 +8,16 @@
 //! anchor). The laws read only those two; a chunk's convex hull ([`Block`]) serves the colliders,
 //! the views and the geometry probes that say which chunk a deposit landed in, never a law.
 //!
-//! Every source enters the laws as loads ([`Load`]): the energy (J) it spends crushing matter at one
-//! point of one chunk, the momentum (N·s), its blow, it delivers there, the force (N), its press,
-//! it holds there through the tick, and its origin ([`Origin`]): a field, or a body in contact.
+//! Every source enters the laws as loads ([`Load`]): the volume (m³) it crushes at one point of one
+//! chunk and the energy (J) the push rule reads there, the momentum (N·s), its blow, it delivers
+//! there, the force (N), its press, it holds there through the tick, and its origin ([`Origin`]): a
+//! field, or a body in contact.
 //!
-//! * **Removal** ([`wear`]). A chunk's pool is its crush energy, `crush × volume` (J); a load's
-//!   energy wears it, and a chunk whose pool is spent is turned to dust.
+//! * **Removal** ([`wear`]). A chunk's pool is its volume (m³); a load's crushed volume wears it,
+//!   and a chunk whose pool is spent is turned to dust. A round's line and a fragment crush their
+//!   energy over the material's crush energy; a blast crushes by Law 1, its rays' impulse through
+//!   a compaction front wherever their peak pressure beats the material's dynamic compressive
+//!   strength ([`Masonry::crushed_by`]), its energy never entering.
 //! * **Cracks: the push rule** ([`crack`]). Each live joint's stress from the loads' energies is
 //!   compared with the seam's tensile strength; a joint at or over it is cracked loose. The stress
 //!   is the elastic one about the cavity a load's energy crushed. Loads superpose; a joint does
@@ -62,7 +66,7 @@ use std::f32::consts::PI;
 use bevy::ecs::entity::Entity;
 use bevy::math::Vec3;
 
-use crate::substances::{REFERENCE_FACTOR, SubstanceRegistry};
+use crate::substances::{BlastFacts, REFERENCE_FACTOR, SubstanceRegistry};
 
 /// Spacing of the point sources a line deposit is split into along its chord, m: a quarter of a
 /// 20 cm chunk (Resolution).
@@ -74,8 +78,12 @@ pub(crate) const LINE_STEP: f32 = 0.05;
 pub(crate) struct Masonry {
     /// kg/m³.
     pub density: f32,
-    /// The energy that turns one cubic metre to dust, J/m³.
+    /// The energy a round's line or a fragment spends turning one cubic metre to dust, J/m³: what
+    /// converts their crushing work into the volume their loads take from a pool
+    /// ([`Load::crushed`]). A blast's pulse crushes by [`Self::compaction`] instead.
     pub crush: f32,
+    /// How a blast's pulse crushes it (Law 1, [`Compaction`]).
+    pub compaction: Compaction,
     /// The seam between its chunks.
     pub seam: Seam,
     /// The friction coefficient its surface brings to a contact, dimensionless: one side of a
@@ -107,16 +115,60 @@ pub(crate) enum Shear {
     OpeningOnly,
 }
 
+/// How a material crushes under a blast's pulse, about the game's environment destruction (game
+/// state only): Law 1, a rigid–plastic–locking (snowplow) compaction front. A face patch taking
+/// impulse `J` at peak pressure `P` crushes `Δm = J f(σ_c,d / P) / u_c` ([`crush_factor`]);
+/// nothing where `P` does not beat `σ_c,d`, however long the pulse. The wall design ("Standoff
+/// blast", Law 1) owns the model.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct Compaction {
+    /// The dynamic compressive strength `σ_c,d`, Pa: the row's quasi-static compressive strength
+    /// times its stated dynamic increase factor.
+    pub strength: f32,
+    /// The slowest compaction front's speed `u_c = √(σ_c,d ε_v / ρ)`, m/s, `ε_v = 1 − ρ / ρ_s` the
+    /// volumetric strain to lock-up at the row's fully dense density `ρ_s` (DERIVED: the locking
+    /// idealization compacts the pores shut and no further).
+    pub front_speed: f32,
+}
+
+impl Compaction {
+    /// The compaction of a row of bulk density `density` (kg/m³) stating `facts`. The registry
+    /// refuses a row whose fully dense density does not exceed its bulk density, so `ε_v > 0`.
+    fn of(facts: &BlastFacts, density: f64) -> Self {
+        let strength = facts.compressive_strength * facts.compressive_dif;
+        let lock_up = 1.0 - density / facts.solid_density;
+        Self {
+            strength: strength as f32,
+            front_speed: (strength * lock_up / density).sqrt() as f32,
+        }
+    }
+}
+
 impl Masonry {
+    /// The volume (m³) a face patch of this material taking impulse `impulse` (N·s, its
+    /// magnitude) at peak pressure `pressure` (Pa) crushes: `Δm / ρ`, `Δm = J f(σ_c,d / P) / u_c`
+    /// ([`Compaction`]). Linear in the impulse at a fixed pressure, so the volume a face takes is
+    /// its patches' sum however the face is cut into patches; zero where the pressure does not
+    /// beat the dynamic strength (a zero pressure's ratio is infinite).
+    pub(crate) fn crushed_by(&self, pressure: f32, impulse: f32) -> f32 {
+        let Compaction {
+            strength,
+            front_speed,
+        } = self.compaction;
+        impulse * crush_factor(strength / pressure) / (front_speed * self.density)
+    }
+
     /// Substance `name`'s values, or `None` where its row states no bulk facts (an element of it
     /// never breaks). The density and the seam's strengths and fracture energies, opening and
     /// shear, are the row's bulk facts (the registry refuses a row stating some of the seam's
     /// four without the others); the
     /// crush energy is the static term of the walk's own force law at the row's factor
     /// (`factor / 1000 × a`, `a` the reference's cavity strength): the energy per volume the walk
-    /// spends opening a cavity in it; the friction is the row's. Refuses a name the registry does
-    /// not hold as hard matter, and a row stating bulk facts but no seam (its chunks would have no
-    /// law to part by) or no friction (a part of it laid on another would have none to stand by).
+    /// spends opening a cavity in it; the compaction is the row's blast facts' ([`Compaction`]);
+    /// the friction is the row's. Refuses a name the registry does not hold as hard matter, and a
+    /// row stating bulk facts but no seam (its chunks would have no law to part by), no friction
+    /// (a part of it laid on another would have none to stand by) or no blast facts (a blast
+    /// would have no law to crush it by; the registry refuses such a breakable row first).
     pub(crate) fn of(registry: &SubstanceRegistry, name: &str) -> Result<Option<Self>, String> {
         let hard = registry.hard(name).map_err(|err| err.to_string())?;
         let Some(bulk) = hard.bulk else {
@@ -140,10 +192,14 @@ impl Masonry {
         let friction = hard.friction.ok_or_else(|| {
             format!("substance {name:?} states bulk facts but no friction for a rest on it")
         })?;
+        let blast = bulk.blast.ok_or_else(|| {
+            format!("substance {name:?} states a seam but no blast facts to crush it by")
+        })?;
         let share = f64::from(hard.factor() / REFERENCE_FACTOR);
         Ok(Some(Self {
             density: bulk.density as f32,
             crush: (share * registry.reference_facts().cavity_strength()) as f32,
+            compaction: Compaction::of(&blast, bulk.density),
             seam,
             friction,
         }))
@@ -497,7 +553,8 @@ pub(crate) enum Fate {
     Fallen,
 }
 
-/// A structure's live state: each chunk's pool (J) and fate, and each joint's crack.
+/// A structure's live state: each chunk's pool (m³, the volume left to crush) and fate, and each
+/// joint's crack.
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct WallState {
     pub pool: Vec<f32>,
@@ -530,23 +587,23 @@ impl WallState {
     }
 }
 
-/// A chunk's full pool, J: its crush energy over its volume.
+/// A chunk's full pool, m³: its volume.
 pub(crate) fn full_pool(chunk: &Chunk) -> f32 {
-    chunk.material.crush * chunk.volume
+    chunk.volume
 }
 
-/// Wear `chunk`'s pool by `energy` J; a pool spent to a millionth of full turns it to dust.
-/// Returns whether it did now.
+/// Wear `chunk`'s pool by `volume` m³ crushed; a pool spent to a millionth of full turns it to
+/// dust. Returns whether it did now.
 pub(crate) fn wear(
     structure: &Structure,
     state: &mut WallState,
     chunk: usize,
-    energy: f32,
+    volume: f32,
 ) -> bool {
     if !state.standing(chunk) {
         return false;
     }
-    state.pool[chunk] = (state.pool[chunk] - energy).max(0.0);
+    state.pool[chunk] = (state.pool[chunk] - volume).max(0.0);
     let dust = state.pool[chunk] <= 1e-6 * full_pool(&structure.chunks[chunk]);
     if dust {
         state.fate[chunk] = Fate::Dust;
@@ -555,15 +612,15 @@ pub(crate) fn wear(
 }
 
 /// One load on a structure, about the game's environment destruction (game state only): what one
-/// source puts through one point of one chunk in one deposit. Its energy is what it spends
-/// crushing matter at its point, which wears the chunk's pool and stresses the joints about the
-/// cavity it opens ([`strike`]); its blow is the momentum it delivers there, which bends the
+/// source puts through one point of one chunk in one deposit. Its crushed volume is what it takes
+/// from the chunk's pool ([`strike`]); its energy stresses the joints about the cavity it opens
+/// ([`crack`]); its blow is the momentum it delivers there, which bends the
 /// sections that hold the chunk and leaves with a group it frees ([`structural`]); its press is
 /// the force it holds there through the tick, read with gravity by [`weigh`]. A field's blow is
 /// its own law's: a round's line
 /// ([`Load::line`]), a fragment's or spall ray's stop ([`Load::field`]), a blast ray's
-/// ([`Load::blast`]), none of which presses. A body's contact (`super::breakage`) spends no energy
-/// and its blow and press are what the solver moved through the point. The wall design owns the
+/// ([`Load::blast`]), none of which presses. A body's contact (`super::breakage`) spends no energy,
+/// crushes nothing, and its blow and press are what the solver moved through the point. The wall design owns the
 /// model (`.agents/docs/design/wall-destruction.md`, "Bodies in contact").
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) struct Load {
@@ -573,6 +630,10 @@ pub(crate) struct Load {
     pub at: Vec3,
     /// J.
     pub energy: f32,
+    /// The volume it crushes, m³: a line's or a fragment's energy over its chunk's crush energy
+    /// ([`Masonry::crush`]); a blast's, its rays' Law 1 volumes ([`Masonry::crushed_by`]), which
+    /// its energy never enters.
+    pub crushed: f32,
     /// N·s.
     pub blow: Vec3,
     /// N.
@@ -647,11 +708,12 @@ impl Origin {
 }
 
 impl Load {
-    /// A round's line through `chunk` from `entry` to `end`, spending `energy` J and delivering
-    /// `blow` N·s: one load at the middle of each of the chord's steps of at most [`LINE_STEP`],
-    /// the steps sharing both evenly.
+    /// A round's line through `chunk`, of `material`, from `entry` to `end`, spending `energy` J
+    /// and delivering `blow` N·s: one load at the middle of each of the chord's steps of at most
+    /// [`LINE_STEP`], the steps sharing both evenly, each crushing its energy's volume.
     pub(crate) fn line(
         chunk: usize,
+        material: &Masonry,
         entry: Vec3,
         end: Vec3,
         energy: f32,
@@ -659,10 +721,12 @@ impl Load {
     ) -> impl Iterator<Item = Self> {
         let chord = end - entry;
         let n = (chord.length() / LINE_STEP).ceil().max(1.0) as usize;
+        let crush = material.crush;
         (0..n).map(move |k| Self {
             chunk,
             at: entry + chord * ((k as f32 + 0.5) / n as f32),
             energy: energy / n as f32,
+            crushed: energy / n as f32 / crush,
             blow: blow / n as f32,
             press: Vec3::ZERO,
             peak: None,
@@ -671,46 +735,62 @@ impl Load {
     }
 
     /// A field's rays, each `(chunk, where it stopped, energy J)`, as loads ([`Load::per_chunk`])
-    /// with no blow and so no peak force: a fragment's momentum is not carried.
-    pub(crate) fn field(hits: &[(usize, Vec3, f32)]) -> Vec<Self> {
-        Self::per_chunk(
-            hits.iter()
-                .map(|&(chunk, at, energy)| (chunk, at, energy, Vec3::ZERO, Vec3::ZERO)),
-        )
+    /// with no blow and so no peak force: a fragment's momentum is not carried. Each chunk's
+    /// energy crushes its volume at the chunk's crush energy, `crush(chunk)` J/m³
+    /// ([`Masonry::crush`]).
+    pub(crate) fn field(hits: &[(usize, Vec3, f32)], crush: impl Fn(usize) -> f32) -> Vec<Self> {
+        Self::per_chunk(hits.iter().map(|&(chunk, at, energy)| {
+            (
+                chunk,
+                at,
+                energy,
+                energy / crush(chunk),
+                Vec3::ZERO,
+                Vec3::ZERO,
+            )
+        }))
         .into_iter()
         .map(|load| Self { peak: None, ..load })
         .collect()
     }
 
     /// A blast's ray hits as loads ([`Load::per_chunk`]), each chunk's blow the impulse its rays
-    /// pushed its faces with and its peak force theirs.
+    /// pushed its faces with, its peak force theirs and its crushed volume theirs.
     pub(crate) fn blast(hits: &[RayHit]) -> Vec<Self> {
-        Self::per_chunk(
-            hits.iter()
-                .map(|hit| (hit.chunk, hit.at, hit.energy, hit.impulse, hit.peak)),
-        )
+        Self::per_chunk(hits.iter().map(|hit| {
+            (
+                hit.chunk,
+                hit.at,
+                hit.energy,
+                hit.crushed,
+                hit.impulse,
+                hit.peak,
+            )
+        }))
     }
 
-    /// Ray stops `(chunk, where, energy J, impulse N·s, peak force N)` summed per chunk: one load
-    /// each, at the energy-weighted mean of its stops, in chunk order. A chunk its stops gave no
-    /// energy has no such mean and takes no load: the impulse and peak force its stops carried
-    /// are dropped with it.
-    fn per_chunk(stops: impl Iterator<Item = (usize, Vec3, f32, Vec3, Vec3)>) -> Vec<Self> {
-        let mut per: std::collections::BTreeMap<usize, (f32, Vec3, Vec3, Vec3)> =
+    /// Ray stops `(chunk, where, energy J, crushed m³, impulse N·s, peak force N)` summed per
+    /// chunk: one load each, at the energy-weighted mean of its stops, in chunk order. A chunk its
+    /// stops gave no energy has no such mean and takes no load: the volume, impulse and peak
+    /// force its stops carried are dropped with it.
+    fn per_chunk(stops: impl Iterator<Item = (usize, Vec3, f32, f32, Vec3, Vec3)>) -> Vec<Self> {
+        let mut per: std::collections::BTreeMap<usize, (f32, Vec3, f32, Vec3, Vec3)> =
             Default::default();
-        for (chunk, at, energy, impulse, peak) in stops {
+        for (chunk, at, energy, crushed, impulse, peak) in stops {
             let entry = per.entry(chunk).or_default();
             entry.0 += energy;
             entry.1 += at * energy;
-            entry.2 += impulse;
-            entry.3 += peak;
+            entry.2 += crushed;
+            entry.3 += impulse;
+            entry.4 += peak;
         }
         per.into_iter()
             .filter(|(_, (energy, ..))| *energy > 0.0)
-            .map(|(chunk, (energy, weighted, blow, peak))| Self {
+            .map(|(chunk, (energy, weighted, crushed, blow, peak))| Self {
                 chunk,
                 at: weighted / energy,
                 energy,
+                crushed,
                 blow,
                 press: Vec3::ZERO,
                 peak: Some(peak),
@@ -931,15 +1011,15 @@ pub(crate) struct Struck {
     pub cracked: Vec<usize>,
 }
 
-/// Run `loads` through the removal and the push rule, in that order: every load's energy wears
-/// its chunk's pool, then every load's energy stresses the joints still live ([`crack`]). A load
-/// that spends no energy wears nothing. Support is the caller's next step ([`loose_groups`],
+/// Run `loads` through the removal and the push rule, in that order: every load's crushed volume
+/// wears its chunk's pool, then every load's energy stresses the joints still live ([`crack`]). A
+/// load that crushes nothing wears nothing. Support is the caller's next step ([`loose_groups`],
 /// [`fall`]), so a check that must see the cracks before support (the structural one) runs
 /// between.
 pub(crate) fn strike(structure: &Structure, state: &mut WallState, loads: &[Load]) -> Struck {
     let mut struck = Struck::default();
-    for load in loads.iter().filter(|load| load.energy > 0.0) {
-        if wear(structure, state, load.chunk, load.energy) {
+    for load in loads.iter().filter(|load| load.crushed > 0.0) {
+        if wear(structure, state, load.chunk, load.crushed) {
             struck.dusted.push(load.chunk);
         } else if state.standing(load.chunk) {
             struck.worn.push(load.chunk);
@@ -2681,27 +2761,32 @@ fn strength_ratio(fails: impl Fn(f32) -> bool) -> f32 {
 /// A blast field's directions with their shares (summing to 1): the field machinery's ball at
 /// ratio 0, uniform over the sphere ([`crate::ballistics::spall_cone`]), [`BLAST_RAYS`] of them.
 pub(crate) fn blast_directions() -> &'static [(Vec3, f32)] {
-    use crate::ballistics::spall_cone::{AxisRule, ConeShape, FieldDescriptor, FieldLaw};
-    static DIRECTIONS: std::sync::LazyLock<Vec<(Vec3, f32)>> = std::sync::LazyLock::new(|| {
-        let spread = ConeShape::new(AxisRule::ExitDirection, BLAST_RAYS)
-            .and_then(|shape| {
-                shape.spread(FieldDescriptor {
-                    law: FieldLaw::Ball,
-                    ratio: 0.0,
-                })
-            })
-            .expect("the uniform ball is inside the field law at the blast's ray count");
-        let directions: Vec<(Vec3, f32)> = spread
-            .directions(bevy::math::Dir3::Y)
-            .map(|(dir, weight)| (Vec3::from(dir), weight))
-            .collect();
-        let total: f32 = directions.iter().map(|(_, w)| w).sum();
-        directions
-            .into_iter()
-            .map(|(dir, w)| (dir, w / total))
-            .collect()
-    });
+    static DIRECTIONS: std::sync::LazyLock<Vec<(Vec3, f32)>> =
+        std::sync::LazyLock::new(|| ball_directions(BLAST_RAYS));
     &DIRECTIONS
+}
+
+/// `count` directions uniform over the sphere with their shares (summing to 1), as
+/// [`blast_directions`] draws the field at its own count.
+fn ball_directions(count: usize) -> Vec<(Vec3, f32)> {
+    use crate::ballistics::spall_cone::{AxisRule, ConeShape, FieldDescriptor, FieldLaw};
+    let spread = ConeShape::new(AxisRule::ExitDirection, count)
+        .and_then(|shape| {
+            shape.spread(FieldDescriptor {
+                law: FieldLaw::Ball,
+                ratio: 0.0,
+            })
+        })
+        .expect("the uniform ball is inside the field law at the blast's ray count");
+    let directions: Vec<(Vec3, f32)> = spread
+        .directions(bevy::math::Dir3::Y)
+        .map(|(dir, weight)| (Vec3::from(dir), weight))
+        .collect();
+    let total: f32 = directions.iter().map(|(_, w)| w).sum();
+    directions
+        .into_iter()
+        .map(|(dir, w)| (dir, w / total))
+        .collect()
 }
 
 /// The blast field's ray count (Resolution): 0.0031 sr a ray, so a 25 cm chunk face 3 m away holds
@@ -2901,6 +2986,25 @@ impl Blast {
         let cos = -dir.dot(normal);
         -normal * (self.peak_pressure(distance, cos) * Self::patch(share, distance, cos))
     }
+
+    /// The volume (m³) of `material` the same ray crushes on the same patch as its
+    /// [`Self::push`]: Law 1 at the patch's peak overpressure ([`Self::peak_pressure`]) and the
+    /// push's impulse ([`Masonry::crushed_by`]). A face smaller than the cone takes its
+    /// intercepted share of this, as of the push: the volume is linear in the impulse.
+    pub(crate) fn crushed(
+        &self,
+        material: &Masonry,
+        share: f32,
+        distance: f32,
+        dir: Vec3,
+        normal: Vec3,
+    ) -> f32 {
+        let cos = -dir.dot(normal);
+        material.crushed_by(
+            self.peak_pressure(distance, cos),
+            self.specific_impulse(distance, cos) * Self::patch(share, distance, cos),
+        )
+    }
 }
 
 /// The plastic demand factor `g(r)` of a rigid-plastic section under a blast's positive phase,
@@ -2934,10 +3038,6 @@ pub(crate) fn plastic_demand(r: f32) -> f32 {
 /// `√(1 − 4r/3)` for `r < ½`, `√((16/3) r (1 − r)³)` for `½ ≤ r < 1`, nothing where the peak
 /// cannot beat the strength (`r ≥ 1`); the whole blow's worth as the strength vanishes. A
 /// negative or undefined ratio is a bug, as for [`plastic_demand`].
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "the crush law reads it from #237's fourth lane")
-)]
 pub(crate) fn crush_factor(r: f32) -> f32 {
     assert!(
         r >= 0.0,
@@ -2952,8 +3052,8 @@ pub(crate) fn crush_factor(r: f32) -> f32 {
     }
 }
 
-/// One blast ray's arrival: the chunk it stopped on, where, its energy (J), impulse (N·s) and
-/// peak force (N, [`Blast::peak`]).
+/// One blast ray's arrival: the chunk it stopped on, where, its energy (J), impulse (N·s), peak
+/// force (N, [`Blast::peak`]) and the volume it crushes (m³, [`Blast::crushed`]).
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) struct RayHit {
     pub chunk: usize,
@@ -2961,18 +3061,20 @@ pub(crate) struct RayHit {
     pub energy: f32,
     pub impulse: Vec3,
     pub peak: Vec3,
+    pub crushed: f32,
 }
 
 /// A blast's rays from `origin`: each of `directions` (unit, with its share of the field; the
 /// shares sum to 1) carries that share of the blast's energy, stops on the first standing block it
 /// meets within the blast's reach ([`Blast::reach`]), which shadows everything behind it, and
-/// pushes the face it meets ([`Blast::push`]) with a peak force ([`Blast::peak`]); the block takes
-/// the share of the ray's energy, push and peak force its silhouette intercepts
-/// ([`intercepted`]). A ray that meets none leaves. Coupling is the
+/// pushes the face it meets ([`Blast::push`]) with a peak force ([`Blast::peak`]), crushing the
+/// block's `material` there ([`Blast::crushed`]); the block takes the share of the ray's energy,
+/// push, peak force and crushed volume its silhouette intercepts ([`intercepted`]). A ray that meets none leaves. Coupling is the
 /// geometry's: the share of directions the blocks intercept, and of each cone the block it meets.
 pub(crate) fn blast_rays(
     blocks: &[Block],
     standing: impl Fn(usize) -> bool,
+    material: impl Fn(usize) -> Masonry,
     origin: Vec3,
     blast: Blast,
     directions: &[(Vec3, f32)],
@@ -2997,6 +3099,7 @@ pub(crate) fn blast_rays(
                 energy: blast.energy * share,
                 impulse: blast.push(share, t, dir, normal),
                 peak: blast.peak(share, t, dir, normal),
+                crushed: blast.crushed(&material(chunk), share, t, dir, normal),
             })
         })
         .collect();
@@ -3006,6 +3109,7 @@ pub(crate) fn blast_rays(
             energy: hit.energy * kept,
             impulse: hit.impulse * kept,
             peak: hit.peak * kept,
+            crushed: hit.crushed * kept,
             ..hit
         })
         .collect()
@@ -3256,6 +3360,7 @@ mod tests {
             chunk,
             at: structure.chunks[chunk].centroid + Vec3::Z * 0.125,
             energy: 0.0,
+            crushed: 0.0,
             blow,
             press: Vec3::ZERO,
             peak: None,
@@ -3471,6 +3576,7 @@ mod tests {
             chunk: 0,
             at: joint.centroid + Vec3::Y * d,
             energy: 1.0e5,
+            crushed: 1.0e5 / material.crush,
             blow: Vec3::ZERO,
             press: Vec3::ZERO,
             peak: None,
@@ -3523,6 +3629,7 @@ mod tests {
                 chunk,
                 at: structure.chunks[chunk].centroid,
                 energy,
+                crushed: energy / structure.chunks[chunk].material.crush,
                 blow: Vec3::ZERO,
                 press: Vec3::ZERO,
                 peak: None,
@@ -3567,7 +3674,8 @@ mod tests {
         let close = |got: Vec3, want: Vec3| (got - want).length() <= 1e-5 * want.length();
         let (entry, end) = (Vec3::new(0.0, 0.1, 0.0), Vec3::new(0.23, 0.05, 0.02));
         let (energy, blow) = (3.0e4, Vec3::new(40.0, -10.0, 5.0));
-        let loads: Vec<Load> = Load::line(2, entry, end, energy, blow).collect();
+        let material = brick();
+        let loads: Vec<Load> = Load::line(2, &material, entry, end, energy, blow).collect();
         assert_eq!(loads.len(), 5, "a 0.236 m chord in steps of at most 5 cm");
         assert!(loads.iter().all(|load| load.chunk == 2));
         assert!(
@@ -3577,6 +3685,11 @@ mod tests {
         );
         let spent: f32 = loads.iter().map(|load| load.energy).sum();
         assert!((spent / energy - 1.0).abs() < 1e-6, "{spent} J");
+        let crushed: f32 = loads.iter().map(|load| load.crushed).sum();
+        assert!(
+            (crushed * material.crush / energy - 1.0).abs() < 1e-5,
+            "{crushed} m³"
+        );
         assert!(close(loads.iter().map(|load| load.blow).sum(), blow));
         let pivot = Vec3::new(1.0, -2.0, 0.5);
         let moment: Vec3 = loads
@@ -3585,15 +3698,21 @@ mod tests {
             .sum();
         assert!(close(moment, ((entry + end) / 2.0 - pivot).cross(blow)));
         assert!(loads.iter().all(|load| load.peak.is_none()));
-        let field = Load::field(&[(4, entry, 2.0), (4, end, 1.0)]);
+        let field = Load::field(&[(4, entry, 2.0), (4, end, 1.0)], |_| 2.0);
         assert!(field.len() == 1 && field[0].peak.is_none(), "{field:?}");
+        assert_eq!(
+            field[0].crushed, 1.5,
+            "a fragment crushes its energy's volume"
+        );
 
+        // Each hit crushes its energy's tenth, m³ (fixture data).
         let hit = |chunk: usize, at: Vec3, energy: f32, (impulse, peak): (Vec3, Vec3)| RayHit {
             chunk,
             at,
             energy,
             impulse,
             peak,
+            crushed: energy / 10.0,
         };
         let (a, b, c) = (Vec3::X, Vec3::Y, Vec3::new(0.0, 0.0, 2.0));
         let (i, j) = (Vec3::new(3.0, 0.0, -1.0), Vec3::new(-1.0, 2.0, 0.0));
@@ -3610,6 +3729,10 @@ mod tests {
             (b, 2.0, Vec3::Z, Some(Vec3::Y))
         );
         assert_eq!(loads[1].energy, 4.0);
+        assert!(
+            (loads[1].crushed - 0.4).abs() < 1e-6,
+            "a chunk's rays' volumes add"
+        );
         assert!(close(loads[1].at, (a + c * 3.0) / 4.0));
         assert!(close(loads[1].blow, i + j));
         assert!(close(
@@ -3761,6 +3884,194 @@ mod tests {
         }
     }
 
+    /// MOMENTUM SETS THE CRUSHED MASS (the game's environment destruction model, the #237 study's
+    /// test 1). At a fixed peak pressure a face patch of each shipped breakable material crushes
+    /// `Δm = J f(σ_c,d / P) / u_c`, so doubling its impulse doubles the mass; and the pool takes
+    /// a blast load's crushed volume, whatever energy the load carries. Law 1 and the crater
+    /// footprint rely on it: a law reading the energy, squaring the impulse, or a pool worn by
+    /// the blast's energy fails here. Fixture pressures, impulses and energies.
+    #[test]
+    fn momentum_sets_the_crushed_mass() {
+        for material in [brick(), wood()] {
+            let Compaction {
+                strength,
+                front_speed,
+            } = material.compaction;
+            for over in [1.5_f32, 4.0, 50.0] {
+                let pressure = strength * over;
+                let once = material.crushed_by(pressure, 100.0);
+                let mass = once * material.density * front_speed / 100.0;
+                assert!(
+                    (mass / crush_factor(1.0 / over) - 1.0).abs() < 1e-5,
+                    "{material:?} at {over} σ"
+                );
+                let twice = material.crushed_by(pressure, 200.0);
+                assert!(
+                    (twice / once - 2.0).abs() < 1e-5,
+                    "{over} σ: {once} {twice}"
+                );
+            }
+        }
+
+        let structure = row(2);
+        let chunk = &structure.chunks[0];
+        let crushed = 0.25 * full_pool(chunk);
+        let hit = |energy: f32| RayHit {
+            chunk: 0,
+            at: chunk.centroid,
+            energy,
+            impulse: Vec3::NEG_Z,
+            peak: Vec3::NEG_Z,
+            crushed,
+        };
+        let pools: Vec<f32> = [1.0, 1.0e3 * chunk.material.crush * chunk.volume]
+            .into_iter()
+            .map(|energy| {
+                let mut state = WallState::new(&structure);
+                strike(&structure, &mut state, &Load::blast(&[hit(energy)]));
+                assert_eq!(state.fate[0], Fate::Standing, "{energy} J");
+                state.pool[0]
+            })
+            .collect();
+        assert_eq!(pools[0], pools[1], "the blast's energy wears nothing");
+        assert!((pools[0] - (full_pool(chunk) - crushed)).abs() <= 1e-6 * full_pool(chunk));
+    }
+
+    /// A LONG LOW PULSE CRUSHES NOTHING (the game's environment destruction model, the #237
+    /// study's test 2). Where the peak pressure does not beat a material's dynamic compressive
+    /// strength nothing crushes, however large the impulse; a far burst's ray carrying many
+    /// times a chunk's crushing work leaves its pool full. Standoff bursts leaving no crater
+    /// rely on it: a crush law that drops its pressure gate, or a pool the blast's energy wears,
+    /// fails here. Fixture pressures, impulses and burst.
+    #[test]
+    fn a_long_low_pulse_crushes_nothing() {
+        for material in [brick(), wood()] {
+            let strength = material.compaction.strength;
+            for pressure in [strength, 0.99 * strength, 0.1 * strength, 0.0] {
+                for impulse in [1.0_f32, 1.0e3, 1.0e6] {
+                    assert_eq!(material.crushed_by(pressure, impulse), 0.0, "{pressure} Pa");
+                }
+            }
+        }
+        // W / 1.8 = 1000 kg at 20 m: Z = 2 m/kg^⅓, a peak far under brick's dynamic strength
+        // with a long, heavy pulse (fixture burst).
+        let blast = Blast::of(1000.0 * TNT_ENERGY * SURFACE_BURST_FACTOR);
+        let cube = [Block::cuboid(Vec3::splat(-0.125), Vec3::splat(0.125))];
+        let origin = Vec3::new(0.0, 0.0, -20.125);
+        let hits = blast_rays(
+            &cube,
+            |_| true,
+            |_| brick(),
+            origin,
+            blast,
+            &[(Vec3::Z, 1e-6)],
+        );
+        let [hit] = hits[..] else {
+            panic!("one ray meets the cube: {hits:?}");
+        };
+        assert!(blast.peak_pressure(20.0, 1.0) < 0.1 * brick().compaction.strength);
+        assert!(hit.impulse.length() > 0.0 && hit.crushed == 0.0, "{hit:?}");
+        let structure = row(1);
+        let chunk = &structure.chunks[0];
+        let heavy = RayHit {
+            energy: 10.0 * chunk.material.crush * chunk.volume,
+            ..hit
+        };
+        let mut state = WallState::new(&structure);
+        let struck = strike(&structure, &mut state, &Load::blast(&[heavy]));
+        assert!(
+            struck.worn.is_empty() && struck.dusted.is_empty(),
+            "{struck:?}"
+        );
+        assert_eq!(state.pool[0], full_pool(chunk), "the pool stays full");
+    }
+
+    /// How far the ray sampler's crushed volume may stray from its finest cast, relative: MEASURED
+    /// at most 3e-4 over the fixtures of [`crushed_mass_is_representation_independent`] (1024 to
+    /// 65536 rays, one block or 8 × 8 chunks), a margin of about three over it (ASSUMED). A near
+    /// burst's crush lies where its rays are densest; the far field, where the sampler's coverage
+    /// varies with distance (#204), crushes nothing.
+    const SAMPLED_CRUSH_SPREAD: f32 = 1e-3;
+
+    /// CRUSHED MASS IS REPRESENTATION-INDEPENDENT (the game's environment destruction model, the
+    /// #237 study's test 4). Law 1 is linear in the impulse at a fixed pressure, so a face cut
+    /// into any number of patches under one field crushes the mass it does as one patch, exactly
+    /// (to f32 rounding). #204's freedom to change how the field finds surfaces relies on it: a
+    /// crush law with a per-patch term or a power of the impulse other than one fails here.
+    ///
+    /// The ray sampler is today's representation. A near burst on a fixture brick face 2 m
+    /// square (fixture geometry and charges), one block or 8 × 8 chunks, is cast at several ray
+    /// counts; the crushed volumes are printed MEASURED for #204 and must agree within
+    /// [`SAMPLED_CRUSH_SPREAD`] of the finest cast.
+    #[test]
+    fn crushed_mass_is_representation_independent() {
+        for material in [brick(), wood()] {
+            let pressure = 3.0 * material.compaction.strength;
+            let whole = material.crushed_by(pressure, 1000.0);
+            for parts in [2_u16, 3, 7, 16, 100] {
+                let cut: f32 = (0..parts)
+                    .map(|_| material.crushed_by(pressure, 1000.0 / f32::from(parts)))
+                    .sum();
+                assert!(
+                    (cut / whole - 1.0).abs() < 1e-5,
+                    "{parts} parts: {cut} {whole}"
+                );
+            }
+        }
+
+        let slab = [Block::cuboid(
+            Vec3::new(-1.0, -1.0, 0.0),
+            Vec3::new(1.0, 1.0, 0.25),
+        )];
+        let chunks: Vec<Block> = (0..64)
+            .map(|k| {
+                let low = Vec3::new(
+                    -1.0 + 0.25 * (k % 8) as f32,
+                    -1.0 + 0.25 * (k / 8) as f32,
+                    0.0,
+                );
+                Block::cuboid(low, low + Vec3::new(0.25, 0.25, 0.25))
+            })
+            .collect();
+        for (name, energy, standoff) in [
+            ("88 mm HE burst", 1.47e6_f32, 0.1_f32),
+            ("bare 5 kg", 5.0 * TNT_ENERGY, 0.3),
+        ] {
+            let blast = Blast::of(energy);
+            let origin = Vec3::new(0.1, -0.05, -standoff);
+            let crushed = |blocks: &[Block], rays: usize| -> f32 {
+                blast_rays(
+                    blocks,
+                    |_| true,
+                    |_| brick(),
+                    origin,
+                    blast,
+                    &ball_directions(rays),
+                )
+                .iter()
+                .map(|hit| hit.crushed)
+                .sum()
+            };
+            let finest = crushed(&slab, 65_536);
+            assert!(finest > 0.0, "{name}: the fixture burst crushes the face");
+            for rays in [1024, 4096, 16_384, 65_536] {
+                for (form, blocks) in [("one block", &slab[..]), ("8 x 8 chunks", &chunks[..])] {
+                    let volume = crushed(blocks, rays);
+                    let spread = volume / finest - 1.0;
+                    println!(
+                        "MEASURED {name}, {form}, {rays} rays: crushed {:.4e} m³, {:+.4} of \
+                         one block at 65536",
+                        volume, spread
+                    );
+                    assert!(
+                        spread.abs() <= SAMPLED_CRUSH_SPREAD,
+                        "{name}, {form}, {rays} rays: {volume} against {finest}"
+                    );
+                }
+            }
+        }
+    }
+
     /// A BLAST RAY'S PEAK FORCE IS ITS PEAK PRESSURE OVER THE PATCH ITS PUSH LOADS: square on, at
     /// 60° and grazing, the peak force lies along the push, into the face, and stands to it as the
     /// peak pressure to the specific impulse; a cube's face that intercepts a share of a far
@@ -3788,7 +4099,14 @@ mod tests {
         }
         let cube = [Block::cuboid(Vec3::ZERO, Vec3::splat(CUBE))];
         let origin = Vec3::new(CUBE / 2.0, CUBE / 2.0, -10.0);
-        let hits = blast_rays(&cube, |_| true, origin, blast, &[(Vec3::Z, share)]);
+        let hits = blast_rays(
+            &cube,
+            |_| true,
+            |_| brick(),
+            origin,
+            blast,
+            &[(Vec3::Z, share)],
+        );
         let kept = CUBE * CUBE / Blast::section(share, 10.0);
         assert!(kept < 1.0, "the far ray's cone outgrows the face");
         let want = Blast::reflected_pressure(10.0) * Blast::section(share, 10.0) * kept;
@@ -3852,7 +4170,14 @@ mod tests {
         let cube = [Block::cuboid(Vec3::ZERO, Vec3::splat(CUBE))];
         let hit = |d: f32| {
             let origin = Vec3::new(CUBE / 2.0, CUBE / 2.0, -d);
-            blast_rays(&cube, |_| true, origin, blast, &[(Vec3::Z, share)])
+            blast_rays(
+                &cube,
+                |_| true,
+                |_| brick(),
+                origin,
+                blast,
+                &[(Vec3::Z, share)],
+            )
         };
         for d in [0.5_f32, 10.0, 39.0] {
             let section = Blast::section(share, d);
@@ -4215,6 +4540,7 @@ mod tests {
                 chunk: 1,
                 at,
                 energy: 0.0,
+                crushed: 0.0,
                 blow: Vec3::NEG_Z * (scale * capacity / lever),
                 press: Vec3::ZERO,
                 peak: None,
@@ -4353,6 +4679,7 @@ mod tests {
                 chunk: 1,
                 at: top,
                 energy: 0.0,
+                crushed: 0.0,
                 blow: Vec3::Y * (scale * capacity),
                 press: Vec3::ZERO,
                 peak: None,
@@ -4408,6 +4735,7 @@ mod tests {
                 chunk: 1,
                 at: joint.centroid,
                 energy: 0.0,
+                crushed: 0.0,
                 blow: Vec3::NEG_Z * (along * capacity)
                     + Vec3::NEG_Y * (press * capacity / friction),
                 press: Vec3::ZERO,
@@ -4476,6 +4804,7 @@ mod tests {
                 chunk: 1,
                 at,
                 energy: 0.0,
+                crushed: 0.0,
                 blow: Vec3::NEG_Z * 100.0,
                 press: Vec3::ZERO,
                 peak: None,
@@ -4590,6 +4919,7 @@ mod tests {
                 chunk: group[0],
                 at: centroid,
                 energy: 0.0,
+                crushed: 0.0,
                 blow: Vec3::ZERO,
                 press: Vec3::NEG_Y * (GRAVITY * mass),
                 peak: None,
@@ -4623,6 +4953,7 @@ mod tests {
                 chunk: 1,
                 at: top.centroid,
                 energy: 0.0,
+                crushed: 0.0,
                 blow: Vec3::ZERO,
                 press: Vec3::NEG_Y * (top.mass * GRAVITY),
                 peak: None,
@@ -4671,6 +5002,7 @@ mod tests {
                     chunk: 1,
                     at: Vec3::Y,
                     energy: 0.0,
+                    crushed: 0.0,
                     blow: Vec3::ZERO,
                     press: Vec3::Z * ((force * dt) / dt),
                     peak: None,
@@ -4720,6 +5052,7 @@ mod tests {
             chunk: 1,
             at: structure.joints[rest].centroid,
             energy: 0.0,
+            crushed: 0.0,
             blow: Vec3::ZERO,
             press: Vec3::ZERO,
             peak: None,
@@ -4770,6 +5103,7 @@ mod tests {
             chunk: 1,
             at: seat + Vec3::X,
             energy: 0.0,
+            crushed: 0.0,
             blow: Vec3::ZERO,
             press: Vec3::Z,
             peak: None,
@@ -4820,6 +5154,7 @@ mod tests {
             chunk: 1,
             at: structure.chunks[1].centroid + Vec3::Y * (CUBE / 2.0),
             energy: 0.0,
+            crushed: 0.0,
             blow: Vec3::NEG_Z * 100.0,
             press: Vec3::ZERO,
             peak: None,
@@ -4882,6 +5217,7 @@ mod tests {
             chunk: 1,
             at,
             energy: 0.0,
+            crushed: 0.0,
             blow: Vec3::NEG_Z,
             press: Vec3::ZERO,
             peak: None,
@@ -4933,6 +5269,7 @@ mod tests {
             chunk: 1,
             at: centre,
             energy: 0.0,
+            crushed: 0.0,
             blow: Vec3::Y * blow,
             press: Vec3::ZERO,
             peak: peak.map(|peak| Vec3::Y * peak),
@@ -5004,6 +5341,7 @@ mod tests {
                 chunk: plug,
                 at: structure.chunks[plug].centroid + Vec3::Z * (CUBE / 2.0),
                 energy: 0.0,
+                crushed: 0.0,
                 blow: Vec3::NEG_Z * (demand * capacity / share),
                 press: Vec3::ZERO,
                 peak: None,
@@ -5144,6 +5482,7 @@ mod tests {
                 chunk: 4,
                 at: structure.chunks[4].centroid,
                 energy: 0.0,
+                crushed: 0.0,
                 blow: Vec3::NEG_Z * impulse,
                 press: Vec3::ZERO,
                 peak: None,
@@ -5226,6 +5565,7 @@ mod tests {
                         chunk,
                         at: structure.chunks[chunk].centroid + Vec3::Z * (CUBE / 2.0),
                         energy: 0.0,
+                        crushed: 0.0,
                         blow: Vec3::ZERO,
                         press: Vec3::NEG_Z * (scale * needed / 4.0),
                         peak: None,
@@ -5284,6 +5624,7 @@ mod tests {
             chunk: 4,
             at,
             energy: 0.0,
+            crushed: 0.0,
             blow: Vec3::NEG_Z * 1e4,
             press: Vec3::NEG_Z * (100.0 * CUBE * CUBE * cohesion),
             peak: None,

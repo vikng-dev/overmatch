@@ -193,13 +193,14 @@ fn the_record_a_replica_derives_from_is_the_authoritys() {
         .iter()
         .map(|&c| {
             let chunk = &structure.chunks[c];
-            (c, chunk.centroid, 2.0 * fracture::full_pool(chunk))
+            let energy = 2.0 * fracture::full_pool(chunk) * chunk.material.crush;
+            (c, chunk.centroid, energy)
         })
         .collect();
     let changes = run_laws(
         &kind.layout,
         &mut authority,
-        &Load::field(&hits),
+        &Load::field(&hits, |c| structure.chunks[c].material.crush),
         Vec::new(),
     );
     for kind_of in [
@@ -434,28 +435,40 @@ fn line_through_chunk(
         c,
         chunk.centroid - w * 0.05,
         chunk.centroid + w * 0.05,
-        share * fracture::full_pool(chunk),
+        share * fracture::full_pool(chunk) * chunk.material.crush,
     )
 }
 
-/// Rounds' lines as the laws read them with no blow ([`Load::line`]).
-fn line_loads(lines: &[(usize, Vec3, Vec3, f32)]) -> Vec<Load> {
+/// Rounds' lines through `structure` as the laws read them with no blow ([`Load::line`]).
+fn line_loads(structure: &Structure, lines: &[(usize, Vec3, Vec3, f32)]) -> Vec<Load> {
     lines
         .iter()
-        .flat_map(|&(c, entry, end, energy)| Load::line(c, entry, end, energy, Vec3::ZERO))
+        .flat_map(|&(c, entry, end, energy)| {
+            Load::line(
+                c,
+                &structure.chunks[c].material,
+                entry,
+                end,
+                energy,
+                Vec3::ZERO,
+            )
+        })
         .collect()
 }
 
-/// A blast's single ray on law chunk `c` at its centroid, carrying `share` of its full pool and
-/// no impulse or peak force, as the laws read it.
+/// A blast's single ray on law chunk `c` at its centroid, crushing `share` of its full pool, with
+/// the energy a line crushing as much would spend (the push rule's source) and no impulse or peak
+/// force, as the laws read it.
 fn blast_on(structure: &Structure, c: usize, share: f32) -> Vec<Load> {
     let chunk = &structure.chunks[c];
+    let crushed = share * fracture::full_pool(chunk);
     Load::blast(&[fracture::RayHit {
         chunk: c,
         at: chunk.centroid,
-        energy: share * fracture::full_pool(chunk),
+        energy: crushed * chunk.material.crush,
         impulse: Vec3::ZERO,
         peak: Vec3::ZERO,
+        crushed,
     }])
 }
 
@@ -502,10 +515,11 @@ fn the_clients_hold_the_authoritys_holes_a_late_joiner_too() {
         channel_chunk,
         0.05,
     )];
+    let loads = line_loads(&authority.structure, &lines);
     let first = run_laws(
         &kind.layout,
         &mut authority,
-        &line_loads(&lines),
+        &loads,
         holes_of(&kind, 1.0, &lines, &[]),
     );
     let blast = blast_on(&authority.structure, dish_chunk, 0.05);
@@ -555,12 +569,16 @@ fn a_hole_changes_no_collider_mass_or_structural_result() {
         chunk: c,
         at: cut.structure.chunks[c].centroid,
         energy: 0.0,
+        crushed: 0.0,
         blow: (line.2 - line.1).normalize() * 10.0,
         press: Vec3::ZERO,
         peak: None,
         origin: Origin::Field,
     };
-    let loads: Vec<Load> = line_loads(&[line]).into_iter().chain([push]).collect();
+    let loads: Vec<Load> = line_loads(&cut.structure, &[line])
+        .into_iter()
+        .chain([push])
+        .collect();
     let holes = holes_of(&kind, 1.0, &[line], &[]);
     let mut record = Vec::new();
     for tick in [7, 9] {
@@ -635,8 +653,9 @@ fn past_the_cap_a_chunk_crumbles() {
     let line = line_through_chunk(&kind, &live.structure, e, c, 1e-3);
     let holes = holes_of(&kind, 1.0, &[line], &[]);
     assert_eq!(holes.len(), 1);
+    let loads = line_loads(&live.structure, &[line]);
     for k in 1..=HOLES_PER_CHUNK + 1 {
-        let changes = run_laws(&kind.layout, &mut live, &line_loads(&[line]), holes.clone());
+        let changes = run_laws(&kind.layout, &mut live, &loads, holes.clone());
         let holed = changes
             .events
             .iter()
@@ -669,13 +688,14 @@ impl Volume {
     }
 }
 
-/// A HOLE HOLDS THE VOLUME ITS ENERGY CRUSHED: a line's channel (its cylinder about the chord,
-/// narrower here than the ball) and a blast's dish (its half ball) each hold `energy / crush`, to
-/// the millimetre rounding of their radius and ends. The size rule rests on it: a hole is never
+/// A HOLE HOLDS THE VOLUME ITS LOAD CRUSHED: a line's channel (its cylinder about the chord,
+/// narrower here than the ball) holds `energy / crush` and a blast's dish (its half ball) its
+/// load's crushed volume, the volume each takes from the chunk's pool, to the millimetre rounding
+/// of their radius and ends. The size rule rests on it: a hole is never
 /// the size of a chunk still standing, since that volume is a spent pool and recorded as dust. A
 /// radius off by a constant factor fails here.
 #[test]
-fn a_hole_holds_the_volume_its_energy_crushed() {
+fn a_hole_holds_the_volume_its_load_crushed() {
     use std::f32::consts::PI;
     let kind = shipped_house();
     let (e, [c, ..]) = fixture_chunks(&kind);
@@ -710,7 +730,7 @@ fn a_hole_holds_the_volume_its_energy_crushed() {
     let r = f32::from(dish.radius) / 1000.0;
     Volume {
         held: 2.0 / 3.0 * PI * r.powi(3),
-        crushed: blast[0].energy / crush,
+        crushed: blast[0].crushed,
         bound: 3.0 * 0.0005 / r,
     }
     .check();
@@ -838,12 +858,16 @@ fn a_nailed_roof_stays_when_struck_and_breaks_its_nails_when_its_walls_go() {
         chunk: middle,
         at: line.1,
         energy: 0.0,
+        crushed: 0.0,
         blow: (line.2 - line.1).normalize() * (line.3 / 773.0),
         press: Vec3::ZERO,
         peak: None,
         origin: Origin::Field,
     };
-    let loads: Vec<Load> = line_loads(&[line]).into_iter().chain([push]).collect();
+    let loads: Vec<Load> = line_loads(&live.structure, &[line])
+        .into_iter()
+        .chain([push])
+        .collect();
     let changes = run_laws(layout, &mut live, &loads, Vec::new());
     println!(
         "MEASURED: a round through the plane's middle ({:.0} J, {:.0} N s): {} failures, {} groups",
@@ -1092,12 +1116,20 @@ fn rays_on(app: &mut App, body: Entity, origin: Vec3) -> Vec<(Vec3, f32, f32, Ve
         .expect("the cast runs")
 }
 
+/// A charge whose peak overpressure a metre out, square on, beats the shipped brick's dynamic
+/// compressive strength, J (fixture data: 200 kg TNT-equivalent; DERIVED about 175 MPa there
+/// against 86 MPa), so a chunk its rays reach is crushed (Law 1): the witness that they reached
+/// it. The 88 mm fixture burst's peak falls under that strength within 0.2 m.
+const CRUSHING_BLAST_J: f32 = 200.0 * 4.184e6;
+
 /// Set off the fixture charge at `at`, and run the tick that applies it and the one after.
 fn charge(app: &mut App, at: Vec3) {
-    app.world_mut().trigger(WallCharge {
-        at,
-        blast: Blast::of(FIXTURE_BLAST_J),
-    });
+    set_off(app, at, Blast::of(FIXTURE_BLAST_J));
+}
+
+/// Set off `blast` at `at`, and run the tick that applies it and the one after.
+fn set_off(app: &mut App, at: Vec3, blast: Blast) {
+    app.world_mut().trigger(WallCharge { at, blast });
     app.update();
     app.update();
 }
@@ -1106,7 +1138,8 @@ fn charge(app: &mut App, at: Vec3) {
 /// piece, or a dynamic body that is no piece (a launched turret's stand-in), between a fixture burst
 /// and a standing chunk of the house leaves with the momentum of the rays that meet it, each its
 /// share's reflected impulse at the distance and on the face avian's cast gives ([`Blast::push`]),
-/// and the chunk it shades keeps its full pool, though the same burst wears it with nothing there.
+/// and the chunk it shades keeps its full pool, though the same burst crushes it with nothing
+/// there ([`CRUSHING_BLAST_J`]).
 /// A body's armour volume is no surface: the rays pass it and wear the chunk. A ray that pushed a
 /// body and went on into the wall, a push of the wrong share, distance or face, a moving body the
 /// rays pass through, or one they meet by kind rather than by being a moving body, fails here;
@@ -1118,7 +1151,7 @@ fn a_ray_that_stops_on_a_moving_body_pushes_it_by_its_share_and_deposits_nothing
     let (near, w, _) = through(&kind, e, c, 0.0);
     // The burst a metre before the chunk's near face, the body half-way (fixture data).
     let origin = near - *w * 0.5;
-    let blast = Blast::of(FIXTURE_BLAST_J);
+    let blast = Blast::of(CRUSHING_BLAST_J);
     let after = |spawn: Option<&dyn Fn(&mut App) -> Entity>| {
         let (mut app, root) = composed(false);
         let body = spawn.map(|spawn| spawn(&mut app));
@@ -1139,7 +1172,7 @@ fn a_ray_that_stops_on_a_moving_body_pushes_it_by_its_share_and_deposits_nothing
             .iter()
             .map(|&(dir, share, d, normal)| blast.push(share, d, dir, normal))
             .sum();
-        charge(&mut app, origin);
+        set_off(&mut app, origin, blast);
         let momentum = body.map_or(Vec3::ZERO, |body| {
             let world = app.world();
             world.get::<ComputedMass>(body).unwrap().value()
@@ -1151,7 +1184,7 @@ fn a_ray_that_stops_on_a_moving_body_pushes_it_by_its_share_and_deposits_nothing
         (rays.len(), momentum, expected, wears)
     };
     let (.., bare) = after(None);
-    assert!(bare, "with nothing there the burst wears the chunk");
+    assert!(bare, "with nothing there the burst crushes the chunk");
     let piece = |app: &mut App| loose_cube(app, near, 0.4);
     let other = |app: &mut App| moving_cube(app, near, 0.4, Layer::Vehicle);
     for spawn in [&piece as &dyn Fn(&mut App) -> Entity, &other] {
@@ -1200,8 +1233,9 @@ fn a_loose_piece_shadowed_by_a_standing_chunk_takes_nothing() {
 /// THE GROUND STOPS A BLAST'S RAYS, AND A BODY HOLDING THE BURST SHADES NOTHING: a loose cube on a
 /// fixture burst's side of a house wall, pushed with nothing between, takes nothing behind a static
 /// slab on the ground's layer (the layer of the ground and of a standing tree); and a burst inside
-/// a dynamic body's proxy still wears the chunk it faces. Rays that pass the ground (a house below
-/// the horizon taking a push), or a field blanked at 0 m by the body it bursts in, fail here.
+/// a dynamic body's proxy still crushes the chunk it faces ([`CRUSHING_BLAST_J`]). Rays that pass
+/// the ground (a house below the horizon taking a push), or a field blanked at 0 m by the body it
+/// bursts in, fail here.
 #[test]
 fn the_ground_stops_a_blast_and_a_body_holding_the_burst_shades_nothing() {
     let kind = shipped_house();
@@ -1237,7 +1271,7 @@ fn the_ground_stops_a_blast_and_a_body_holding_the_burst_shades_nothing() {
     moving_cube(&mut app, origin, 0.4, Layer::Vehicle);
     app.update();
     app.update();
-    charge(&mut app, origin);
+    set_off(&mut app, origin, Blast::of(CRUSHING_BLAST_J));
     let breakage = app.world().get::<Breakage>(root).unwrap();
     let live = breakage.live.as_ref().expect("the burst reached the house");
     assert!(
@@ -1596,6 +1630,7 @@ fn a_break_keeps_linear_and_angular_momentum() {
                 chunk: c,
                 at: com + Vec3::Y * height,
                 energy: 0.0,
+                crushed: 0.0,
                 blow: Vec3::Z * (mass * 3.0),
                 press: Vec3::ZERO,
                 peak: None,
@@ -1653,6 +1688,7 @@ fn a_break_launches_with_free_mass_and_creates_no_energy() {
                 chunk: c,
                 at: com + Vec3::Y * height,
                 energy: 0.0,
+                crushed: 0.0,
                 blow: Vec3::Z * (mass * 3.0),
                 press: Vec3::ZERO,
                 peak: None,
@@ -1771,6 +1807,7 @@ fn only_departing_chunks_give_back_their_body_blows() {
         chunk: c,
         at: live.structure.chunks[c].centroid,
         energy: 0.0,
+        crushed: 0.0,
         blow: Vec3::Z * 0.001,
         press: Vec3::X * 1000.0,
         peak: None,
@@ -1787,7 +1824,8 @@ fn only_departing_chunks_give_back_their_body_blows() {
         "a held wall keeps the solver's blow"
     );
     let dust = Load {
-        energy: live.state.pool[c],
+        energy: live.state.pool[c] * live.structure.chunks[c].material.crush,
+        crushed: live.state.pool[c],
         origin: Origin::Field,
         blow: Vec3::ZERO,
         ..load
@@ -1863,6 +1901,7 @@ fn simultaneous_exchanges_keep_momentum_and_spend_one_kinetic_budget() {
             chunk: c,
             at: com,
             energy: 0.0,
+            crushed: 0.0,
             blow: Vec3::Z * (source_mass * 3.0),
             press: Vec3::ZERO,
             peak: None,
@@ -2159,6 +2198,7 @@ fn tiny_exchanges_keep_their_plastic_share_without_underflow() {
             chunk: c,
             at: com,
             energy: 0.0,
+            crushed: 0.0,
             blow: Vec3::Z * speed,
             press: Vec3::ZERO,
             peak: None,
@@ -2217,6 +2257,7 @@ fn held_presses_recheck_changed_force_points_and_topology() {
         chunk: c,
         at: live.structure.chunks[c].centroid,
         energy: 0.0,
+        crushed: 0.0,
         blow: Vec3::ZERO,
         press: Vec3::X,
         peak: None,
@@ -2257,7 +2298,8 @@ fn held_presses_recheck_changed_force_points_and_topology() {
     let dust = Load {
         chunk: other,
         at: live.structure.chunks[other].centroid,
-        energy: live.state.pool[other],
+        energy: live.state.pool[other] * live.structure.chunks[other].material.crush,
+        crushed: live.state.pool[other],
         press: Vec3::ZERO,
         ..press
     };
@@ -2303,6 +2345,7 @@ fn awake_and_sleeping_presses_join_every_deposit_once() {
             chunk: c,
             at,
             energy: 0.0,
+            crushed: 0.0,
             blow: Vec3::ZERO,
             press: Vec3::X,
             peak: None,
@@ -2398,6 +2441,7 @@ fn no_elements_kind_or_name_enters_the_laws() {
         let hits = fracture::blast_rays(
             &layout.blocks,
             |c| live.state.standing(c),
+            |c| live.structure.chunks[c].material,
             origin,
             blast,
             fracture::blast_directions(),

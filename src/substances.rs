@@ -171,13 +171,14 @@ pub struct BulkFacts {
     /// Cohesive mode-II fracture energy `G_II`, J/m², excluding continuing friction work.
     /// Required with [`Self::shear_cohesion`]; the punch-ring law reads it.
     pub shear_fracture_energy: Option<f64>,
-    /// Sourced inputs for the blast crush and scab laws, required on every breakable row.
-    /// No law reads these yet; the blast material laws will consume them.
+    /// Sourced inputs for the blast crush and scab laws, required on every breakable row. The
+    /// crush law reads them (`buildings::fracture::Compaction`).
     pub blast: Option<BlastFacts>,
 }
 
-/// Material inputs reserved for the game's environment blast laws. SI units. This is data only:
-/// the current wear pool and push laws do not consume it. Sources and the scope of each analogue
+/// Material inputs of the game's environment blast laws. SI units. The crush law (Law 1,
+/// `buildings::fracture::Compaction`) reads the compression, its ratio and the fully dense
+/// density; the modulus awaits the scab law. Sources and the scope of each analogue
 /// live in `assets/materials/materials.ron` and `.agents/scratch/blast-b3-material-sources.md`.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct BlastFacts {
@@ -425,7 +426,7 @@ impl BulkFile {
                     "substance {name:?}: bulk.blast is missing from a breakable material: author \
                      compressive_strength (Pa), compressive_dif and its compressive_dif_strain_rate \
                      (1/s), solid_density (kg/m³) and youngs_modulus (Pa), each with its \
-                     material-property source; no blast law reads these inputs yet"
+                     material-property source"
                 ));
             }
             // Bulk-only matter is unbreakable, so the blast material laws never read it.
@@ -1203,7 +1204,7 @@ mod tests {
     }
 
     /// BREAKABLE BLAST INPUTS ARE COMPLETE AND SOURCED BEFORE PLAY (the game's environment
-    /// destruction model). The future crush/scab consumers rely on no missing field becoming a
+    /// destruction model). The crush law and the scab law rely on no missing field becoming a
     /// code default, on finite positive inputs and on nonzero pore volume. Each omission and
     /// invalid value must name its actual file, row, field and repair. ASSUMED fixture data.
     #[test]

@@ -1079,9 +1079,14 @@ struct Applied {
     blast: Option<(Blast, Vec3, f32, f32, Vec<Vec3>)>,
 }
 
-/// A round's crossing as the laws read it: its lines ([`Load::line`]), each blowing with the
-/// round's lost momentum shared among the chunks by the energy each took.
-fn line_loads(lines: &[(usize, Vec3, Vec3, f32)], along: Vec3, momentum: f32) -> Vec<Load> {
+/// A round's crossing of `structure` as the laws read it: its lines ([`Load::line`]), each blowing
+/// with the round's lost momentum shared among the chunks by the energy each took.
+fn line_loads(
+    structure: &model::Structure,
+    lines: &[(usize, Vec3, Vec3, f32)],
+    along: Vec3,
+    momentum: f32,
+) -> Vec<Load> {
     let total: f32 = lines.iter().map(|line| line.3).sum();
     lines
         .iter()
@@ -1091,7 +1096,8 @@ fn line_loads(lines: &[(usize, Vec3, Vec3, f32)], along: Vec3, momentum: f32) ->
             } else {
                 Vec3::ZERO
             };
-            Load::line(chunk, entry, end, energy, blow)
+            let material = &structure.chunks[chunk].material;
+            Load::line(chunk, material, entry, end, energy, blow)
         })
         .collect()
 }
@@ -1112,7 +1118,7 @@ fn apply_deposit(
             along,
             momentum,
             ..
-        } => line_loads(lines, *along, *momentum),
+        } => line_loads(&wall.cut.structure, lines, *along, *momentum),
         &Deposit::Blast {
             mass,
             standoff,
@@ -1122,9 +1128,11 @@ fn apply_deposit(
             let blast = charge.blast(mass, controls.cased);
             let origin = at - into * (standoff + blast.radius);
             let state = &wall.state;
+            let structure = &wall.cut.structure;
             let hits = model::blast_rays(
                 &wall.cut.blocks,
                 |i| state.standing(i),
+                |i| structure.chunks[i].material,
                 origin,
                 model::Blast::of(blast.energy),
                 field,

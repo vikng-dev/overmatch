@@ -19,7 +19,9 @@
 //!   chemical energy less the casing's share. A line pushes with all the momentum the round lost
 //!   in it (the resolved line's share; how much the crushed brick carries away is open); a
 //!   blast pushes each face its rays stop on with its reflected impulse ([`Blast::push`]), over the
-//!   share of the ray's cone the struck chunk or body intercepts. A blast ray stops, within its
+//!   share of the ray's cone the struck chunk or body intercepts, and crushes a chunk there where
+//!   its peak pressure beats the chunk's dynamic compressive strength ([`Blast::crushed`]). A
+//!   blast ray stops, within its
 //!   reach ([`Blast::reach`]), on the nearest of every building's standing chunks and unbreakable
 //!   elements, the moving bodies (a loose piece, a hull, a launched turret) and every other surface
 //!   (the ground, a standing tree); one that stops on a moving body pushes it the same way, through
@@ -41,9 +43,9 @@
 //!   chunk its rays stop on ([`holes_of`]); a chunk still standing after the deposit
 //!   keeps its hole in a per-chunk list ([`Live::holes`]), for the view to draw. No law, collider
 //!   or mass reads a hole: they see the whole chunk, and [`Shape`] holds none. A hole holds no more
-//!   than the volume its energy crushed (`energy / crush`), so one the size of its chunk is a spent
-//!   pool, recorded as dust. A deposit that would leave a chunk holding more than
-//!   [`HOLES_PER_CHUNK`] crumbles it to dust first, before the laws run.
+//!   than the volume its load crushed, the volume it took from the chunk's pool, so one the size
+//!   of its chunk is a spent pool, recorded as dust. A deposit that would leave a chunk holding
+//!   more than [`HOLES_PER_CHUNK`] crumbles it to dust first, before the laws run.
 //! * **The record** ([`WallRecord`]): every swap, dust, hole, crack and fall, in authority order,
 //!   with its tick. The authority appends; the network carries it ([`crate::net`]'s ledger); a
 //!   replica rebuilds the same state from it ([`derive_from_record`]); the view presents it at the
@@ -603,6 +605,7 @@ fn contact_load(
             chunk,
             at: local * frame.scale,
             energy: 0.0,
+            crushed: 0.0,
             blow: frame.turn(blow),
             press: frame.turn(press),
             peak: None,
@@ -922,7 +925,14 @@ fn apply_deposits(mut p: DepositParam) {
                     } else {
                         Vec3::ZERO
                     };
-                    into.line_loads.extend(Load::line(c, from, to, part, blow));
+                    into.line_loads.extend(Load::line(
+                        c,
+                        &layout.materials[c],
+                        from,
+                        to,
+                        part,
+                        blow,
+                    ));
                 }
             }
         }
@@ -985,7 +995,9 @@ fn apply_deposits(mut p: DepositParam) {
             let loads: Vec<Load> = taken
                 .line_loads
                 .into_iter()
-                .chain(Load::field(&taken.field))
+                .chain(Load::field(&taken.field, |c| {
+                    kind.layout.materials[c].crush
+                }))
                 .chain(blast)
                 .chain(taken.contacts.iter().map(|load| Load {
                     press: Vec3::ZERO,
@@ -1218,6 +1230,13 @@ fn cast_blast(
                     energy: blast.energy * share,
                     impulse: blast.push(share, d, turned, normal),
                     peak: blast.peak(share, d, turned, normal),
+                    crushed: blast.crushed(
+                        &breakage.kind.layout.materials[c],
+                        share,
+                        d,
+                        turned,
+                        normal,
+                    ),
                 },
             ));
         }
@@ -1236,6 +1255,7 @@ fn cast_blast(
             energy: hit.energy * k,
             impulse: hit.impulse * k,
             peak: hit.peak * k,
+            crushed: hit.crushed * k,
             ..hit
         });
     }
@@ -1266,13 +1286,14 @@ enum Stop {
 
 /// The holes one deposit cuts (module doc), each with its law chunk, in the baked chunk's frame
 /// ([`Hole`]); `lines` and the blast's loads `blast` ([`Load::blast`]) in the building frame at
-/// the instance's `scale`. Each is sized by the volume its energy crushes, `energy / crush`
-/// ([`Masonry::crush`]): a line's channel runs along its chord, its radius the narrower of the
-/// cylinder about the chord and the ball that hold that volume (so a chord grazing a corner never
-/// cuts a disc wider than the ball); the blast's dish in a chunk is a ball about the chunk's load
-/// (its rays' energy-weighted mean stop) whose half holds it. ASSUMED: a channel's section is a
-/// circle and its width the energy's alone, not the round's diameter; a dish's centre lies on the
-/// chunk's face, so half its ball is in the chunk.
+/// the instance's `scale`. Each is sized by the volume it crushes, the volume its load takes from
+/// the chunk's pool: a line's, its energy over the crush energy ([`Masonry::crush`]); a blast's,
+/// its load's Law 1 volume ([`Load::crushed`]). A line's channel runs along its chord, its radius
+/// the narrower of the cylinder about the chord and the ball that hold that volume (so a chord
+/// grazing a corner never cuts a disc wider than the ball); the blast's dish in a chunk is a ball
+/// about the chunk's load (its rays' energy-weighted mean stop) whose half holds it. ASSUMED: a
+/// channel's section is a circle and its width the energy's alone, not the round's diameter; a
+/// dish's centre lies on the chunk's face, so half its ball is in the chunk.
 fn holes_of(
     kind: &BuildingKind,
     scale: f32,
@@ -1292,7 +1313,7 @@ fn holes_of(
         Hole::cut(centroid(c), from, to, radius / scale).map(|hole| (c, hole))
     });
     let dishes = blast.iter().filter_map(|load| {
-        let radius = (1.5 * crushed(load.chunk, load.energy) / PI).cbrt();
+        let radius = (1.5 * load.crushed / PI).cbrt();
         let at = load.at / scale;
         Hole::cut(centroid(load.chunk), at, at, radius / scale).map(|hole| (load.chunk, hole))
     });
