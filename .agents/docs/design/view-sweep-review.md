@@ -268,3 +268,24 @@ histogram. MEASURED independently from `smoke_atlas.png` (red times alpha, mean 
 Claude's MG-light disposition P3 is **verified** as an omitted decision, not proof of the right
 replacement tune. The owner-directed choice and its limits are now explicit above; no emission
 asset changed. Both fixed in "docs: qualify the flash and smoke capture evidence (#236)".
+
+The Tab-board capture finding is **verified**. In the red Bevy layout regression at
+1280x720 / UI scale 2 (FIXTURE DATA), MEASURED board bounds were (256, 101)-(1025, 662) px,
+status bounds (20, 20)-(492, 232) px. The board already had global layer 210 above labels at
+0 (DERIVED from the spawn code); its ASSUMED 0.62-alpha backing let the lower labels show
+through. Labels and fixed HUD shared the default layer, so their mutual order was incidental.
+
+`hud::HudLayer` now stamps world labels below fixed HUD below modal boards; the board keeps
+its existing place in the full-screen overlay ladder. `HudDock` roots reserve their actual
+laid-out bounds on their UI camera: status/clock at the top, crew/drive at the bottom,
+diagnostics at the right. Hidden panels release their space. Modal placement reads the last
+completed layout before the next, so text/viewport changes settle on the following layout.
+The board has opaque modal backing and clips to its reserved region; the roster scrolls in
+the card's remaining height. There is no vehicle name, viewer-distance scale or pair-specific
+nameplate/scoreboard exception. Fixed HUD placement itself is unchanged.
+
+The two regression tests mount the real spawners and bundled fonts without a GPU. They pin
+the semantic layers, Bevy's computed draw order, opaque backing, non-overlap with every visible
+dock, a nonempty scrollable roster, status-text growth and released diagnostic space. Their
+viewport/scale cases are FIXTURE DATA, not a claim of universal viewport coverage.
+Fixed in "hud: order layers and reserve fixed-panel space (#236)".

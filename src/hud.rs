@@ -1,10 +1,16 @@
-//! Shared world-anchored HUD for game and armor sandbox: nameplates floated over tanks, as many as
-//! the pool holds.
+//! Shared HUD layers and placement for game and armor sandbox, plus pooled world nameplates.
+//!
+//! [`HudLayer`] owns semantic draw order. [`HudDock`] panels reserve their measured edge bounds
+//! for modal content before UI layout. The design/evidence record is
+//! `.agents/docs/design/view-sweep-review.md`.
 //!
 //! Invariant: labels read simulation state but never write it; the camera it reprojects through is
 //! the composition's declared [`PlayerView`], never a camera implementation of its own.
 
+use bevy::ecs::lifecycle::HookContext;
+use bevy::ecs::world::DeferredWorld;
 use bevy::prelude::*;
+use bevy::ui::{ComputedUiRenderTargetInfo, ComputedUiTargetCamera, UiSystems};
 
 use crate::net::NetBot;
 
@@ -15,6 +21,116 @@ use crate::tank::Tank;
 use crate::ui_font::{UiFonts, set_text};
 use crate::view::PlayerView;
 
+/// The HUD's semantic draw order, independent of plugin/spawn order. World labels sit above
+/// sight furniture, fixed panels above labels, and modal boards above both. Full-screen overlay
+/// precedence remains owned by [`crate::overlay::Overlay`]. Modal cards use opaque backing so
+/// lower layers cannot bleed through their text.
+#[derive(Component, Clone, Copy, Debug, PartialEq, Eq)]
+#[component(on_add = stamp_hud_layer)]
+pub(crate) enum HudLayer {
+    WorldLabel,
+    Fixed,
+    Modal,
+}
+
+impl HudLayer {
+    fn zindex(self) -> i32 {
+        use crate::overlay::Overlay;
+        match self {
+            Self::WorldLabel => Overlay::SIGHT_FURNITURE_Z + 1,
+            Self::Fixed => 0,
+            Self::Modal => Overlay::SCOREBOARD_Z,
+        }
+    }
+}
+
+fn stamp_hud_layer(mut world: DeferredWorld, HookContext { entity, .. }: HookContext) {
+    let layer = *world
+        .entity(entity)
+        .get::<HudLayer>()
+        .expect("HudLayer is present in its own on_add hook");
+    world
+        .commands()
+        .entity(entity)
+        .insert(GlobalZIndex(layer.zindex()));
+}
+
+/// A fixed panel reserves its dock edge for modal placement, using its actual laid-out bounds.
+/// These are root nodes on the player's UI target, with axis-aligned UI transforms. Top is used
+/// by status/clock, bottom by crew/drive, and right by diagnostics. Hidden panels reserve nothing.
+#[derive(Component, Clone, Copy)]
+#[require(HudLayer = HudLayer::Fixed)]
+pub(crate) enum HudDock {
+    Top,
+    Bottom,
+    Right,
+}
+
+/// ASSUMED spacing between fixed panels and modal cards, in logical UI pixels.
+const MODAL_GAP_PX: f32 = 8.0;
+
+/// The previous completed layout supplies panel extents for this layout. Neither text length,
+/// font size nor a viewport percentage stands in for measured panel geometry. Target propagation
+/// has run; the modal's new Node is consumed by this frame's layout. Resizing/text changes settle
+/// on the next layout, just as the UI's scroll geometry does.
+fn place_modal_hud(
+    panels: Query<(
+        &HudDock,
+        &ComputedNode,
+        &UiGlobalTransform,
+        &Visibility,
+        &ComputedUiTargetCamera,
+    )>,
+    mut modals: Query<
+        (
+            &HudLayer,
+            &ComputedUiRenderTargetInfo,
+            &ComputedUiTargetCamera,
+            &mut Node,
+        ),
+        Without<HudDock>,
+    >,
+) {
+    for (layer, target, camera, mut node) in &mut modals {
+        if *layer != HudLayer::Modal {
+            continue;
+        }
+        let size = target.logical_size();
+        // The window can be unsized/minimized before its camera publishes a usable viewport.
+        if size.x <= 0.0 || size.y <= 0.0 {
+            continue;
+        }
+        let scale = target.scale_factor();
+        let gap = MODAL_GAP_PX.min(size.min_element() * 0.5);
+        let mut area = Rect::from_corners(Vec2::splat(gap), (size - gap).max(Vec2::splat(gap)));
+        for (dock, panel, transform, visibility, panel_camera) in &panels {
+            // Panels on a different camera do not occupy this modal's UI target.
+            if *visibility == Visibility::Hidden || panel_camera != camera {
+                continue;
+            }
+            let bounds =
+                Rect::from_center_size(transform.translation / scale, panel.size() / scale);
+            match dock {
+                HudDock::Top => area.min.y = area.min.y.max(bounds.max.y + gap),
+                HudDock::Bottom => area.max.y = area.max.y.min(bounds.min.y - gap),
+                HudDock::Right => area.max.x = area.max.x.min(bounds.min.x - gap),
+            }
+        }
+        // A small/minimized viewport may leave no room between fixed panels. Represent that as
+        // an empty layout region, rather than a negative CSS size.
+        area.min = area.min.min(size);
+        area.max = area.max.max(area.min);
+        let placement = Node {
+            left: Val::Px(area.min.x),
+            top: Val::Px(area.min.y),
+            width: Val::Px(area.width()),
+            height: Val::Px(area.height()),
+            ..node.clone()
+        };
+        node.set_if_neq(placement);
+    }
+}
+
 /// A pooled tank nameplate: reprojected each frame, its text rewritten only when the name changes.
 #[derive(Component)]
 struct TankNameplate;
@@ -22,6 +138,13 @@ struct TankNameplate;
 pub fn plugin(app: &mut App) {
     crate::flow::require(app, "hud");
     app.add_systems(OnEnter(Flow::InMatch), spawn_labels)
+        .add_systems(
+            PostUpdate,
+            place_modal_hud
+                .after(UiSystems::Content)
+                .before(UiSystems::Layout)
+                .in_set(InMatchSystems),
+        )
         .add_systems(
             PostUpdate,
             // Reprojection runs after propagation and gunner-camera placement (`GunnerCameraPlaced`,
@@ -46,6 +169,7 @@ fn spawn_labels(mut commands: Commands, fonts: Res<UiFonts>) {
         commands.spawn((
             FlowScoped(Flow::InMatch),
             TankNameplate,
+            HudLayer::WorldLabel,
             Text::new(""),
             TextFont {
                 // SemiBold: a tank identity chip floated over the world — reads as a label.
@@ -64,6 +188,25 @@ fn spawn_labels(mut commands: Commands, fonts: Res<UiFonts>) {
             Visibility::Hidden,
         ));
     }
+}
+
+/// Mount the real label pool without its game-state readers for HUD layout tests.
+#[cfg(test)]
+pub(crate) fn mount_layout_test(app: &mut App) {
+    app.add_systems(Startup, spawn_labels).add_systems(
+        PostUpdate,
+        place_modal_hud
+            .after(UiSystems::Content)
+            .before(UiSystems::Layout),
+    );
+}
+
+#[cfg(test)]
+pub(crate) fn labels_for_test(world: &mut World) -> Vec<Entity> {
+    world
+        .query_filtered::<Entity, With<TankNameplate>>()
+        .iter(world)
+        .collect()
 }
 
 /// Float a nameplate over each tank the pool reaches, in query order, reprojected to screen; hide

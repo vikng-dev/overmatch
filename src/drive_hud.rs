@@ -37,13 +37,20 @@ pub(crate) fn plugin(app: &mut App) {
         );
 }
 
+/// Mount the real fixed panels without their game-state readers for HUD layout tests.
+#[cfg(test)]
+pub(crate) fn mount_layout_test(app: &mut App) {
+    app.add_systems(Startup, spawn_drive_hud);
+}
+
 fn spawn_drive_hud(mut commands: Commands, fonts: Res<UiFonts>) {
     // Bottom-left, one line above `crew_ui`'s crew row (bottom 10 px). This is ordinary HUD, not an
-    // overlay: it owns no scrim and carries no explicit z-index, so the overlay authority's explicit
-    // positive `GlobalZIndex` layers still cover it.
+    // overlay: its fixed-HUD layer sits below the overlay authority's layers, and its dock
+    // reserves space for modal HUD content.
     commands.spawn((
         FlowScoped(Flow::InMatch),
         StandardDriveHudText,
+        crate::hud::HudDock::Bottom,
         Text::new(""),
         TextFont {
             font: fonts.body.clone().into(),
@@ -64,6 +71,7 @@ fn spawn_drive_hud(mut commands: Commands, fonts: Res<UiFonts>) {
     commands.spawn((
         FlowScoped(Flow::InMatch),
         DriveDebugHudText,
+        crate::hud::HudDock::Right,
         Text::new(""),
         TextFont {
             font: fonts.body.clone().into(),

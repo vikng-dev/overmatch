@@ -25,8 +25,8 @@ use super::battle::{BattleOutcome, BattlePhase, BattleState};
 use super::score::{Scoreboard, Standing, rank};
 use crate::CombatantId;
 use crate::flow::{Flow, FlowScoped, InMatchSystems};
-use crate::overlay::{self, Overlay, Overlays};
-use crate::ui_font::{PANEL_BG, TEXT, UiFonts, set_text};
+use crate::overlay::{self, Overlays};
+use crate::ui_font::{MODAL_BG, TEXT, UiFonts, set_text};
 use lightyear::interpolation::timeline::InterpolationTimeline;
 use lightyear::prelude::NetworkTimeline;
 
@@ -263,6 +263,7 @@ fn spawn_battle_hud(mut commands: Commands, fonts: Res<UiFonts>) {
         .spawn((
             FlowScoped(Flow::InMatch),
             MatchUi::Clock,
+            crate::hud::HudDock::Top,
             Visibility::Hidden,
             Node {
                 position_type: PositionType::Absolute,
@@ -290,12 +291,13 @@ fn spawn_battle_hud(mut commands: Commands, fonts: Res<UiFonts>) {
             FlowScoped(Flow::InMatch),
             MatchUi::Scoreboard,
             Visibility::Hidden,
-            GlobalZIndex(Overlay::SCOREBOARD_Z),
+            crate::hud::HudLayer::Modal,
             Node {
                 position_type: PositionType::Absolute,
-                top: Val::Percent(14.0),
+                // The shared HUD layout fills the region left clear by visible docked panels.
+                overflow: Overflow::clip(),
                 width: Val::Percent(100.0),
-                height: Val::Percent(78.0),
+                height: Val::Percent(100.0),
                 align_items: AlignItems::Start,
                 justify_content: JustifyContent::Center,
                 ..default()
@@ -306,13 +308,16 @@ fn spawn_battle_hud(mut commands: Commands, fonts: Res<UiFonts>) {
                 Node {
                     flex_direction: FlexDirection::Column,
                     max_height: Val::Percent(100.0),
+                    max_width: Val::Percent(100.0),
                     min_height: Val::Px(0.0),
+                    min_width: Val::Px(0.0),
                     padding: UiRect::all(Val::Px(16.0)),
                     row_gap: Val::Px(10.0),
                     border_radius: BorderRadius::all(Val::Px(4.0)),
                     ..default()
                 },
-                BackgroundColor(PANEL_BG),
+                // Modal HUD text needs opaque backing above world-anchored labels.
+                BackgroundColor(MODAL_BG.with_alpha(1.0)),
             ))
             .with_children(|card| {
                 card.spawn((
@@ -331,7 +336,7 @@ fn spawn_battle_hud(mut commands: Commands, fonts: Res<UiFonts>) {
                     ScrollPosition::default(),
                     Node {
                         column_gap: Val::Px(28.0),
-                        max_height: Val::Vh(55.0),
+                        max_height: Val::Percent(100.0),
                         min_height: Val::Px(0.0),
                         overflow: Overflow::scroll_y(),
                         ..default()
@@ -472,7 +477,242 @@ mod tests {
     use super::*;
     use crate::net::battle::LateJoin;
     use crate::net::score::Respawn;
+    use crate::overlay::Overlay;
     use lightyear::prelude::TimelineSync;
+
+    /// FIXTURE DATA: viewport sizes/scales and a synthetic populated status panel/roster.
+    /// Uses the shipped spawners, fonts and Bevy layout; no simulated tank or link is needed.
+    fn hud_layout_app(width: u32, height: u32, scale: f32) -> App {
+        let mut app = App::new();
+        app.add_plugins(crate::gpu_less_default_plugins(Some(Window {
+            resolution: bevy::window::WindowResolution::new(width, height),
+            visible: false,
+            ..default()
+        })))
+        .add_plugins(crate::ui_font::plugin)
+        .insert_resource(UiScale(scale))
+        .add_systems(
+            Startup,
+            (
+                spawn_battle_hud,
+                crate::crew_ui::spawn_status_panel,
+                crate::crew_ui::spawn_crew_bar,
+                |mut commands: Commands| {
+                    commands.spawn(Camera2d);
+                },
+            ),
+        );
+        app.set_error_handler(bevy::ecs::error::panic);
+        crate::hud::mount_layout_test(&mut app);
+        crate::drive_hud::mount_layout_test(&mut app);
+        super::super::debug_hud::mount_layout_test(&mut app);
+        while app.plugins_state() == bevy::app::PluginsState::Adding {
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        app.finish();
+        app.cleanup();
+        app.update();
+        let roster: Vec<Row> = (1..=30)
+            .map(|i| Row {
+                place: i as usize,
+                standing: standing(i, 0, 0),
+            })
+            .collect();
+        let world = app.world_mut();
+        for (part, mut text) in world.query::<(&Part, &mut Text)>().iter_mut(world) {
+            text.0 = match part {
+                Part::ClockLine => "14:55".to_owned(),
+                Part::Title => "BATTLE 1".to_owned(),
+                Part::Column(column) => column.text(&roster, None),
+                Part::ScrollHint => "PAGE UP / PAGE DOWN TO SCROLL".to_owned(),
+            };
+        }
+        let status = world
+            .query_filtered::<Entity, With<crate::crew_ui::StatusPanelText>>()
+            .single(world)
+            .unwrap();
+        world.get_mut::<Text>(status).unwrap().0 =
+            "ALIVE\nCrew 5/5\nDrive 100%   Gunner 100%\nWeapons: Primary READY Secondary READY\nPrimary ammunition: fixture".to_owned();
+        for (_, mut text) in world.query_filtered::<
+            (&crate::hud::HudDock, &mut Text), Without<crate::crew_ui::StatusPanelText>
+        >().iter_mut(world) {
+            text.0 = "FIXTURE FIXED HUD".to_owned();
+        }
+        for label in crate::hud::labels_for_test(world) {
+            world.get_mut::<Text>(label).unwrap().0 = "FIXTURE WORLD LABEL".to_owned();
+        }
+        for mut visibility in world.query::<&mut Visibility>().iter_mut(world) {
+            *visibility = Visibility::Visible;
+        }
+        settle_hud(&mut app);
+        app
+    }
+
+    /// Wait for both real fonts and stable geometry; font IO can finish on different frames.
+    fn settle_hud(app: &mut App) {
+        let start = std::time::Instant::now();
+        let mut previous = Vec::new();
+        let mut stable = 0;
+        loop {
+            app.update();
+            let world = app.world_mut();
+            let fonts = world.resource::<UiFonts>();
+            let server = world.resource::<AssetServer>();
+            let loaded = server.load_state(&fonts.hud).is_loaded()
+                && server.load_state(&fonts.body).is_loaded();
+            let geometry: Vec<_> = world
+                .query::<(Entity, &ComputedNode, &UiGlobalTransform)>()
+                .iter(world)
+                .map(|(entity, node, transform)| (entity, node.size(), transform.translation))
+                .collect();
+            if loaded && geometry == previous {
+                stable += 1;
+            } else {
+                stable = 0;
+            }
+            if stable >= 4 {
+                return;
+            }
+            assert!(
+                start.elapsed() < Duration::from_secs(30),
+                "HUD fonts/layout did not settle"
+            );
+            previous = geometry;
+            std::thread::sleep(Duration::from_millis(1));
+        }
+    }
+
+    fn board_entities(world: &mut World) -> (Entity, Entity) {
+        let (root, children) = world
+            .query::<(Entity, &MatchUi, &Children)>()
+            .iter(world)
+            .find_map(|(entity, kind, children)| {
+                (*kind == MatchUi::Scoreboard).then_some((entity, children))
+            })
+            .unwrap();
+        (root, children[0])
+    }
+
+    fn hud_rect(world: &World, entity: Entity) -> Rect {
+        Rect::from_center_size(
+            world.get::<UiGlobalTransform>(entity).unwrap().translation,
+            world.get::<ComputedNode>(entity).unwrap().size(),
+        )
+    }
+
+    fn overlaps(a: Rect, b: Rect) -> bool {
+        a.min.x < b.max.x && a.max.x > b.min.x && a.min.y < b.max.y && a.max.y > b.min.y
+    }
+
+    /// The Tab board leaves every visible dock readable at different UI scales and after text
+    /// growth. Hiding a dock releases its space. Players rely on layout, not a fixed-panel size
+    /// guessed from one rig's readout; the table must retain a nonempty scrollable viewport.
+    #[test]
+    fn modal_board_is_placed_clear_of_the_fixed_status_panel() {
+        for (width, height, scale) in [(1280, 720, 2.0), (1280, 720, 1.0), (1920, 1080, 1.5)] {
+            let mut app = hud_layout_app(width, height, scale);
+            let (root, card) = board_entities(app.world_mut());
+            let status = {
+                let world = app.world_mut();
+                world
+                    .query_filtered::<Entity, With<crate::crew_ui::StatusPanelText>>()
+                    .single(world)
+                    .unwrap()
+            };
+            let before = hud_rect(app.world(), card);
+            assert_modal_clear(app.world_mut(), card);
+            app.world_mut()
+                .get_mut::<Text>(status)
+                .unwrap()
+                .0
+                .push_str("\nFixture reserve A\nFixture reserve B");
+            settle_hud(&mut app);
+            let after = hud_rect(app.world(), card);
+            assert!(
+                after.min.y > before.min.y,
+                "growing the status text must move the board"
+            );
+            assert_modal_clear(app.world_mut(), card);
+            let reserved_width = app.world().get::<ComputedNode>(root).unwrap().size().x;
+            {
+                let world = app.world_mut();
+                for (dock, mut visibility) in world
+                    .query::<(&crate::hud::HudDock, &mut Visibility)>()
+                    .iter_mut(world)
+                {
+                    if matches!(dock, crate::hud::HudDock::Right) {
+                        *visibility = Visibility::Hidden;
+                    }
+                }
+            }
+            settle_hud(&mut app);
+            assert!(
+                app.world().get::<ComputedNode>(root).unwrap().size().x > reserved_width,
+                "hiding diagnostics releases their dock"
+            );
+            assert_modal_clear(app.world_mut(), card);
+            eprintln!(
+                "MEASURED {width}x{height} scale {scale}: status growth moves board top {} -> {} px; final board {:?}",
+                before.min.y,
+                after.min.y,
+                hud_rect(app.world(), card)
+            );
+        }
+    }
+
+    fn assert_modal_clear(world: &mut World, card: Entity) {
+        let board = hud_rect(world, card);
+        assert!(board.width() > 0.0 && board.height() > 0.0);
+        for (entity, _, node, visibility) in world
+            .query::<(Entity, &crate::hud::HudDock, &ComputedNode, &Visibility)>()
+            .iter(world)
+        {
+            if *visibility != Visibility::Hidden && node.size().min_element() > 0.0 {
+                assert!(
+                    !overlaps(board, hud_rect(world, entity)),
+                    "MEASURED board {board:?} overlaps fixed panel {:?}",
+                    hud_rect(world, entity)
+                );
+            }
+        }
+        let viewport = world
+            .query_filtered::<&ComputedNode, With<BoardViewport>>()
+            .single(world)
+            .unwrap();
+        assert!(
+            viewport.size().y > 0.0 && viewport.content_size.y > viewport.size().y,
+            "the populated roster retains a scrollable, nonempty viewport"
+        );
+    }
+
+    /// Players must read modal text without world labels bleeding through it. Ordering is a
+    /// semantic HUD rule, independent of which plugin happened to spawn its roots first.
+    #[test]
+    fn world_labels_draw_below_fixed_hud_below_modal_boards() {
+        let mut app = hud_layout_app(1280, 720, 2.0);
+        let world = app.world_mut();
+        let (board, card) = board_entities(world);
+        let status = world
+            .query_filtered::<Entity, With<crate::crew_ui::StatusPanelText>>()
+            .single(world)
+            .unwrap();
+        let label = crate::hud::labels_for_test(world)[0];
+        let z = |entity| world.get::<GlobalZIndex>(entity).map_or(0, |z| z.0);
+        assert!(
+            z(label) < z(status) && z(status) < z(board),
+            "world label {}, fixed HUD {}, modal {}",
+            z(label),
+            z(status),
+            z(board)
+        );
+        let stack = |entity| world.get::<bevy::ui::ComputedStackIndex>(entity).unwrap().0;
+        assert!(stack(label) < stack(status) && stack(status) < stack(card));
+        assert_eq!(
+            world.get::<BackgroundColor>(card).unwrap().0.alpha(),
+            1.0,
+            "a modal backing must obscure lower HUD layers"
+        );
+    }
 
     fn standing(combatant: u64, knockouts: u32, losses: u32) -> Standing {
         Standing {

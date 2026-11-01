@@ -58,6 +58,7 @@ pub(crate) fn spawn_crew_bar(mut commands: Commands, fonts: Res<UiFonts>) {
     commands.spawn((
         FlowScoped(Flow::InMatch),
         CrewBarText,
+        crate::hud::HudDock::Bottom,
         Text::new(""),
         TextFont {
             // Regular: a dense multi-cell seat readout.
@@ -81,6 +82,7 @@ pub(crate) fn spawn_status_panel(mut commands: Commands, fonts: Res<UiFonts>) {
     commands.spawn((
         FlowScoped(Flow::InMatch),
         StatusPanelText,
+        crate::hud::HudDock::Top,
         Text::new(""),
         TextFont {
             // Regular: a dense multi-line stat block.

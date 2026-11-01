@@ -96,6 +96,12 @@ fn show_debug_card(
     }
 }
 
+/// Mount the real fixed panels without their game-state readers for HUD layout tests.
+#[cfg(test)]
+pub(crate) fn mount_layout_test(app: &mut App) {
+    app.add_systems(Startup, spawn_debug_hud);
+}
+
 fn spawn_debug_hud(mut commands: Commands, fonts: Res<UiFonts>) {
     // Bottom-right — a subtle dark card mirroring `crew_ui`'s status panel (top-left), so the
     // corners read as one UI family. Fixed width sized to the widest realistic row
@@ -105,6 +111,7 @@ fn spawn_debug_hud(mut commands: Commands, fonts: Res<UiFonts>) {
         .spawn((
             FlowScoped(Flow::InMatch),
             DebugCard,
+            crate::hud::HudDock::Right,
             Visibility::Hidden,
             Node {
                 position_type: PositionType::Absolute,
