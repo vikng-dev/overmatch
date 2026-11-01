@@ -544,4 +544,22 @@ pub(crate) mod tests {
             "not convex",
         );
     }
+
+    /// Collider and face readers require a simple convex boundary. Local left turns alone
+    /// admit a self-intersecting star (ASSUMED fixture geometry), whose faces cross its hull.
+    #[test]
+    fn a_self_intersecting_profile_is_refused_before_play() {
+        let mut asset = shipped_house().asset.clone();
+        asset.elements[0].profile = (0..5)
+            .map(|k| {
+                let angle = (k * 2) as f32 * std::f32::consts::TAU / 5.0;
+                [angle.cos(), angle.sin()]
+            })
+            .collect();
+        let error = asset.check().expect_err("a star is no convex boundary");
+        assert!(
+            error.contains("profile") && error.contains("split"),
+            "{error}"
+        );
+    }
 }

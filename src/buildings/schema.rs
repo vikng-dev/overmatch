@@ -232,18 +232,19 @@ pub struct Anchor {
     pub centroid: [f32; 3],
 }
 
-/// The first corner of a counter-clockwise `profile` that turns clockwise or sits on an edge
-/// shorter than [`PLANE_TOLERANCE_M`], or `None` for a convex polygon. A straight corner is
-/// convex: the sine of its turn may fall short of zero by the tolerance's rounding.
+/// The first edge shorter than [`PLANE_TOLERANCE_M`] or with another vertex on its
+/// exterior side. A convex counter-clockwise boundary puts every vertex in every edge's
+/// interior half-plane; local turns alone also admit self-intersecting stars.
 fn concave_corner(profile: &[[f32; 2]]) -> Option<usize> {
     let n = profile.len();
-    let edge = |k: usize| Vec2::from_array(profile[(k + 1) % n]) - Vec2::from_array(profile[k]);
     (0..n).find(|&k| {
-        let (incoming, outgoing) = (edge((k + n - 1) % n), edge(k));
-        let lengths = incoming.length() * outgoing.length();
-        incoming.length() <= PLANE_TOLERANCE_M
-            || outgoing.length() <= PLANE_TOLERANCE_M
-            || incoming.perp_dot(outgoing) < -PLANE_TOLERANCE_M * lengths
+        let start = Vec2::from_array(profile[k]);
+        let edge = Vec2::from_array(profile[(k + 1) % n]) - start;
+        let length = edge.length();
+        length <= PLANE_TOLERANCE_M
+            || profile.iter().any(|&point| {
+                edge.perp_dot(Vec2::from_array(point) - start) < -PLANE_TOLERANCE_M * length
+            })
     })
 }
 
@@ -340,7 +341,7 @@ impl BuildingAsset {
                     && polygon_area(&element.profile) > 0.0)
             {
                 return Err(format!(
-                    "element {name}'s profile is no finite counter-clockwise polygon"
+                    "element {name}'s profile is no finite counter-clockwise polygon; rebake the building"
                 ));
             }
             if let Some(corner) = concave_corner(&element.profile) {
@@ -353,7 +354,7 @@ impl BuildingAsset {
                 || element.depth[0].partial_cmp(&element.depth[1]) != Some(std::cmp::Ordering::Less)
             {
                 return Err(format!(
-                    "element {name}'s depth {:?} is empty",
+                    "element {name}'s depth {:?} is not finite and ordered; rebake the building",
                     element.depth
                 ));
             }
@@ -401,10 +402,14 @@ impl BuildingAsset {
                 return Err(format!("joint {pair:?} has area {}", joint.area_m2));
             }
             if !finite(&joint.normal) || !unit(Vec3::from_array(joint.normal)) {
-                return Err(format!("joint {pair:?}'s normal is not unit"));
+                return Err(format!(
+                    "joint {pair:?}'s normal is not unit; rebake the building"
+                ));
             }
             if !finite(&joint.centroid) {
-                return Err(format!("joint {pair:?}'s centroid is not finite"));
+                return Err(format!(
+                    "joint {pair:?}'s centroid is not finite; rebake the building"
+                ));
             }
             let component = |c: u32| {
                 let element = self.chunks[c as usize].element;
@@ -440,7 +445,7 @@ impl BuildingAsset {
             }
             if !finite(&anchor.centroid) {
                 return Err(format!(
-                    "anchor on chunk {}'s centroid is not finite",
+                    "anchor on chunk {}'s centroid is not finite; rebake the building",
                     anchor.chunk
                 ));
             }
