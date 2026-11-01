@@ -15,10 +15,12 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent))
 
-from analyze import analyze, verification_failures  # noqa: E402
+from analyze import analyze, load, verification_failures  # noqa: E402
 
 
 def row(kind: str, tick: int, combatant: int, fire_tick: int, **extra) -> dict:
+    if kind == "send":
+        extra.setdefault("rcpt", 1)  # FIXTURE DATA: one recipient unless a case states another.
     if kind == "path_tx":
         extra.setdefault("impact", "bounce")
         extra.setdefault("ordinal", extra.get("seq", 0))
@@ -618,6 +620,27 @@ class TransportCopyTests(unittest.TestCase):
         self.assertEqual(run.returncode, 1)
         self.assertEqual(json.loads(run.stdout)["lost"], 1)
         self.assertIn("lost_shots=1", run.stderr)
+
+
+class TraceInputTests(unittest.TestCase):
+    def test_only_the_final_row_may_be_torn(self):
+        # The game's damage-model report must not certify a stream with missing middle evidence.
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "trace.jsonl"
+            path.write_text('{"k":"meta"}\n{torn\n')
+            self.assertEqual(load(path), ({"k": "meta"}, []))
+            path.write_text('{torn\n{"k":"fire"}\n')
+            with self.assertRaisesRegex(ValueError, "malformed row before the tail"):
+                load(path)
+
+    def test_missing_recipient_evidence_is_refused(self):
+        # The game's damage-model delivery report cannot invent a recipient for a send.
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "trace.jsonl"
+            for kind, field in [("send", "rcpt"), ("transport", "public_recipient_count")]:
+                path.write_text(json.dumps({"k": kind}) + "\n")
+                with self.assertRaisesRegex(ValueError, field):
+                    load(path)
 
 
 if __name__ == "__main__":

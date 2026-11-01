@@ -46,6 +46,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import re
 import statistics
 import sys
@@ -178,24 +179,40 @@ def cmd_bots(args: argparse.Namespace) -> int:
 
 
 def read_window(path: Path) -> dict[str, dict[str, str]]:
-    """The window file's edges, keyed `start` / `end`."""
+    """Parse both complete sampling edges, refusing a malformed measurement file."""
     rows = [line.split("\t") for line in path.read_text().splitlines() if line.strip()]
+    required = {"edge", "span_s", "bytes_in", "bytes_out"}
+    if not rows or not required.issubset(rows[0]):
+        raise ValueError(f"{path}: window header needs {sorted(required)}")
     header, body = rows[0], rows[1:]
-    return {row[0]: dict(zip(header, row)) for row in body}
+    edges = {}
+    for row in body:
+        if len(row) != len(header):
+            raise ValueError(f"{path}: incomplete window edge {row!r}")
+        edge = dict(zip(header, row))
+        key = edge["edge"]
+        if key not in ("start", "end") or key in edges:
+            raise ValueError(f"{path}: expected one start and one end edge, got {key!r}")
+        edges[key] = edge
+    if set(edges) != {"start", "end"}:
+        raise ValueError(f"{path}: missing start or end window edge")
+    return edges
 
 
-def net_row(path: Path) -> list[str] | None:
-    """`window_s down_B up_B down_KB/s up_KB/s` from a window file, rates on the stream clock."""
+def net_row(path: Path) -> list[str]:
+    """Rates on the stream clock; a present but unusable window is an error, not absent data."""
     edges = read_window(path)
     try:
         start, end = edges["start"], edges["end"]
-        span = float(end["span_s"]) - float(start["span_s"])
-        down = int(end["bytes_in"]) - int(start["bytes_in"])
-        up = int(end["bytes_out"]) - int(start["bytes_out"])
-    except (KeyError, ValueError):
-        return None
-    if span <= 0:
-        return None
+        times = [float(edge["span_s"]) for edge in (start, end)]
+        counts = [[int(edge[field]) for field in ("bytes_in", "bytes_out")]
+                  for edge in (start, end)]
+    except (KeyError, ValueError) as error:
+        raise ValueError(f"{path}: invalid span_s/bytes_in/bytes_out: {error}") from error
+    span = times[1] - times[0]
+    down, up = [end - start for start, end in zip(*counts)]
+    if not all(map(math.isfinite, [*times, span])) or min(times) < 0 or span <= 0 or min(*counts[0], *counts[1], down, up) < 0:
+        raise ValueError(f"{path}: window time must advance finitely and byte counts must be nonnegative and monotone")
     return [f"{span:.1f}", str(down), str(up), f"{down / span / 1000:.1f}", f"{up / span / 1000:.1f}"]
 
 
@@ -216,7 +233,7 @@ def cmd_tables(args: argparse.Namespace) -> int:
     rows = []
     for path in windows:
         row = net_row(path)
-        rows.append([path.name.removesuffix(".window.tsv"), *(row or ["-"] * 5)])
+        rows.append([path.name.removesuffix(".window.tsv"), *row])
     print_table(["condition", "window_s", "down_B", "up_B", "down_KB/s", "up_KB/s"], rows)
 
     print("\n== server: its server_stats lines inside the window (median and max across periods)")
@@ -354,7 +371,11 @@ def main() -> int:
     stress.add_argument("tsv")
     args = parser.parse_args()
     commands = {"server-window": cmd_server_window, "bots": cmd_bots, "tables": cmd_tables, "stress": cmd_stress}
-    return commands[args.cmd](args)
+    try:
+        return commands[args.cmd](args)
+    except (OSError, ValueError) as error:
+        print(f"online_cost: {error}", file=sys.stderr)
+        return 2
 
 
 if __name__ == "__main__":

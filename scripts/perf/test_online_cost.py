@@ -148,11 +148,12 @@ class NetRow(unittest.TestCase):
             )
             self.assertEqual(net_row(path), ["60.0", "60000", "120000", "1.0", "2.0"])
 
-    def test_a_missing_sample_is_no_row(self):
+    def test_a_missing_sample_refuses_a_present_window(self):
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "c.window.tsv"
             path.write_text("edge\tepoch_s\tspan_s\tbytes_in\tbytes_out\nstart\t1\t20\t-\t-\nend\t2\t80\t-\t-\n")
-            self.assertIsNone(net_row(path))
+            with self.assertRaisesRegex(ValueError, "invalid span_s/bytes_in/bytes_out"):
+                net_row(path)
 
 
 if __name__ == "__main__":

@@ -38,7 +38,13 @@ if [ "${FORCE:-0}" != 1 ] && ! pgrep -f '/\.local/bin/claude' >/dev/null 2>&1; t
 fi
 
 echo "target-sweep $(date '+%Y-%m-%d %H:%M:%S') — rcgu.o > 12 h, incremental > 24 h, maxsize 40GB per checkout"
-git -C "$MAIN" worktree list --porcelain | sed -n 's/^worktree //p' | while read -r dir; do
+worktrees=$(git -C "$MAIN" worktree list --porcelain) || {
+  echo "target-sweep FAILED: cannot list worktrees" >&2
+  exit 1
+}
+printf '%s\n' "$worktrees" | sed -n 's/^worktree //p' | (
+failed=0
+while read -r dir; do
   if [ ! -d "$dir/target" ]; then
     continue
   fi
@@ -48,12 +54,29 @@ git -C "$MAIN" worktree list --porcelain | sed -n 's/^worktree //p' | while read
       continue
       ;;
   esac
-  before=$(du -sh "$dir/target" 2>/dev/null | cut -f1)
-  find "$dir/target" -path '*/deps/*.rcgu.o' -mmin +720 -delete 2>/dev/null
-  find "$dir/target" -mindepth 3 -maxdepth 3 -type d -path '*/incremental/*' -mmin +1440 2>/dev/null \
-    | while read -r stale; do rm -rf "${stale:?}"; done
-  cargo sweep --maxsize 40GB "$dir" >/dev/null 2>&1
-  after=$(du -sh "$dir/target" 2>/dev/null | cut -f1)
-  echo "  swept $dir  ${before} -> ${after}"
+  before=$(du -sh "$dir/target") || { failed=1; continue; }
+  before=$(printf '%s' "$before" | cut -f1)
+  if ! find "$dir/target" -path '*/deps/*.rcgu.o' -mmin +720 -delete; then
+    echo "  FAILED rcgu reaper: $dir" >&2
+    failed=1
+  fi
+  if ! find "$dir/target" -mindepth 3 -maxdepth 3 -type d -path '*/incremental/*' -mmin +1440 \
+      -exec rm -rf {} +; then
+    echo "  FAILED incremental reaper: $dir" >&2
+    failed=1
+  fi
+  if cargo sweep --maxsize 40GB "$dir"; then
+    after=$(du -sh "$dir/target") || { failed=1; continue; }
+    after=$(printf '%s' "$after" | cut -f1)
+    echo "  swept $dir  ${before} -> ${after}"
+  else
+    echo "  FAILED cargo sweep: $dir (diagnostic above)" >&2
+    failed=1
+  fi
 done
-echo "target-sweep done"
+exit "$failed"
+)
+result=$?
+if [ "$result" -eq 0 ]; then echo "target-sweep done"
+else echo "target-sweep FAILED" >&2; fi
+exit "$result"

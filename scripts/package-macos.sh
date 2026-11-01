@@ -161,7 +161,7 @@ else
 fi
 xcrun stapler staple "$DMG"
 xcrun stapler validate "$DMG"
-spctl -a -vvv -t open --context context:primary-signature "$DMG" || true
+spctl -a -vvv -t open --context context:primary-signature "$DMG"
 
 shasum -a 256 "$DMG" > "$DMG.sha256"
 echo ">> Done:"

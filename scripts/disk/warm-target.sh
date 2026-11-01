@@ -50,13 +50,12 @@ cp -c -R "$src/target" "$dest/target"
 # A worktree is checked out without the LFS smudge, so every LFS asset is a pointer file until
 # the content is written from the shared object store (offline; `git lfs pull` only if an object
 # is missing). Before the mtime mirror, so the materialized assets mirror too.
-if git -C "$dest" lfs checkout >/dev/null 2>&1; then
-  pointers=$(git -C "$dest" lfs ls-files 2>/dev/null | grep -c '^[0-9a-f]* - ' || true)
-  if [[ "${pointers:-0}" -gt 0 ]]; then
-    echo "warm-target: $pointers LFS objects missing locally; run 'git lfs pull' in $dest" >&2
-  fi
-else
-  echo "warm-target: git-lfs not available; LFS assets stay pointer files" >&2
+git -C "$dest" lfs checkout || { echo "warm-target: LFS checkout failed; refusing a target with unresolved assets" >&2; exit 1; }
+lfs_files=$(git -C "$dest" lfs ls-files) || { echo "warm-target: cannot inventory LFS assets" >&2; exit 1; }
+pointers=$(printf '%s\n' "$lfs_files" | grep -c '^[0-9a-f]* - ' || true)
+if [[ "$pointers" -gt 0 ]]; then
+  echo "warm-target: $pointers LFS objects missing locally; run 'git lfs pull' in $dest" >&2
+  exit 1
 fi
 
 mirrored=0

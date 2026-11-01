@@ -65,14 +65,17 @@ def load(path: Path) -> tuple[dict, list[dict]]:
     meta: dict = {}
     rows: list[dict] = []
     with path.open() as f:
-        for line in f:
-            line = line.strip()
-            if not line:
+        for number, line in enumerate(f, 1):
+            if not line.strip():
                 continue
             try:
                 row = json.loads(line)
-            except json.JSONDecodeError:
-                continue
+            except json.JSONDecodeError as error:
+                if any(rest.strip() for rest in f):
+                    raise ValueError(f"{path}:{number}: malformed row before the tail") from error
+                break  # A killed producer may leave only its final row torn.
+            if not isinstance(row, dict):
+                raise ValueError(f"{path}:{number}: a trace row must be an object")
             if row.get("k") == "meta":
                 meta = row
             else:

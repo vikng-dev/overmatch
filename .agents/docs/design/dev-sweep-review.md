@@ -66,3 +66,19 @@ The sandbox wall and its subtree belong to part 2 and are excluded from this lan
   offscreen target information is named and bounded by an ASSUMED 30-wall-second readiness
   allowance; a target that never resolves fails instead of recording forever without a surface.
   MEASURED gates: formatting, workspace clippy and 18 focused recorder/citation tests passed.
+
+- **D-COST-SCRIPT fixed:** readiness has a bounded wait and liveness check; both client statuses
+  and a server that exits during the workload fail their scenario and the battery. Direct child
+  PIDs are cleaned on exit/signals. The tracked runner holds one machine lock and forces silent,
+  headless mode. Fake-process regressions cover readiness, primary and second client failures.
+- **D-DISK fixed:** listing, reapers and cargo-sweep failures are visible and produce a failing
+  status; a failed cargo sweep never prints `swept`. A fake inventory/cargo regression touches
+  only a temporary fixture, never an actual checkout or bay target.
+- **D-SCRIPT-P3 fixed:** both shot readers forgive only a torn final row, and refuse malformed
+  middle rows. Delivery counts require recipient evidence. A malformed or missing sampling edge
+  in a present network window now fails with its path/cause. Gatekeeper rejection gates packaging.
+  LFS inventory and checkout failures refuse warming or leasing; unresolved pointer files refuse
+  too. Bay-pool runtime tests were not run because they create temporary worktrees; shell syntax
+  was checked instead. No release packaging, disk sweep or bay operation ran on real state.
+  MEASURED gates: shell syntax, formatting, workspace clippy, 3 citations and 51 script tests pass
+  (4 fake cost-runner, 1 fake disk-sweep, 26 shot join, 9 latency, 11 network-window parser).

@@ -36,14 +36,21 @@ def load(path: Path) -> tuple[dict, list[dict]]:
     meta: dict = {}
     rows: list[dict] = []
     with path.open() as f:
-        for line in f:
-            line = line.strip()
-            if not line:
+        for number, line in enumerate(f, 1):
+            if not line.strip():
                 continue
             try:
                 row = json.loads(line)
-            except json.JSONDecodeError:
-                continue  # torn tail
+            except json.JSONDecodeError as error:
+                if any(rest.strip() for rest in f):
+                    raise ValueError(f"{path}:{number}: malformed row before the tail") from error
+                break  # A killed producer may leave only its final row torn.
+            if not isinstance(row, dict):
+                raise ValueError(f"{path}:{number}: a trace row must be an object")
+            if row.get("k") in ("send", "transport"):
+                field = "rcpt" if row["k"] == "send" else "public_recipient_count"
+                if type(row.get(field)) is not int or row[field] < 0:
+                    raise ValueError(f"{path}:{number}: {field} must be a nonnegative integer")
             if row.get("k") == "meta":
                 meta = row
             else:
@@ -241,7 +248,7 @@ def analyze(cmeta: dict, crows: list[dict], smeta: dict, srows: list[dict]) -> d
     unaddressed_ticks = {
         r["t"]
         for r in srows
-        if r.get("k") == "transport" and int(r.get("public_recipient_count", 1)) == 0
+        if r.get("k") == "transport" and r["public_recipient_count"] == 0
     }
     unaddressed = {
         k
@@ -304,7 +311,7 @@ def analyze(cmeta: dict, crows: list[dict], smeta: dict, srows: list[dict]) -> d
                 for policy, reliable in (("reliable", True), ("visual", False)):
                     copies[policy][stream].append(
                         sum(
-                            r.get("rel") is reliable and int(r.get("rcpt", 1)) > 0
+                            r.get("rel") is reliable and r["rcpt"] > 0
                             for r in matching
                         )
                     )
@@ -315,7 +322,7 @@ def analyze(cmeta: dict, crows: list[dict], smeta: dict, srows: list[dict]) -> d
                 missing_path_send_sequence += 1
             for policy, reliable in (("reliable", True), ("visual", False)):
                 copies[policy]["path"].append(
-                    sum(r.get("rel") is reliable and int(r.get("rcpt", 1)) > 0 for r in matching)
+                    sum(r.get("rel") is reliable and r["rcpt"] > 0 for r in matching)
                 )
 
     # A path may arrive before fire or after its cursor crossing. Sequence joins are exact.
@@ -513,8 +520,8 @@ def reconstruct(key: tuple[int, int, int], s: dict, c: dict) -> list[str]:
                 if r.get("s") == stream and (stream != "path" or r.get("seq") == seq)
             ]
             if sent:
-                visual = sum(r.get("rel") is False and int(r.get("rcpt", 1)) > 0 for r in sent)
-                reliable = sum(r.get("rel") is True and int(r.get("rcpt", 1)) > 0 for r in sent)
+                visual = sum(r.get("rel") is False and r["rcpt"] > 0 for r in sent)
+                reliable = sum(r.get("rel") is True and r["rcpt"] > 0 for r in sent)
                 detail = f" seq={seq}" if stream == "path" else ""
                 out.append(
                     f"      [S] accepted {stream:<4}{detail} visual×{visual} reliable×{reliable}"

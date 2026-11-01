@@ -35,12 +35,17 @@ create() {
 # Put a clean bay on `lane/<lane>` at main's tip. Every step is checked: under `if !` bash does not
 # stop a function at a failed command, and a clean after a failed switch would act on the old lane.
 recycle() {
-  local bay=$1 built wanted
+  local bay=$1 built wanted lfs_files
   built=$(git -C "$bay" rev-parse -q --verify HEAD:Cargo.lock) || built=
   wanted=$(git -C "$bays_here" rev-parse -q --verify main:Cargo.lock) || wanted=
   GIT_LFS_SKIP_SMUDGE=1 git -C "$bay" switch -q -C "lane/$lane" main >&2 || return 1
   git -C "$bay" clean -q -ffdx -e /target >&2 || return 1
-  git -C "$bay" lfs checkout >/dev/null 2>&1 || echo "lease: git lfs checkout failed in $bay; LFS assets may be pointer files" >&2
+  git -C "$bay" lfs checkout >&2 || { echo "lease: LFS checkout failed in $bay; refusing the lease" >&2; return 1; }
+  lfs_files=$(git -C "$bay" lfs ls-files) || { echo "lease: cannot inventory LFS assets in $bay" >&2; return 1; }
+  if printf '%s\n' "$lfs_files" | grep -q '^[0-9a-f]* - '; then
+    echo "lease: LFS objects are missing in $bay; run git lfs pull before leasing" >&2
+    return 1
+  fi
   if [[ $built != "$wanted" && -e $bay/target ]]; then
     echo "lease: Cargo.lock moved since $(basename "$bay") last built; deleting its target/ so serial-cargo re-warms it from main" >&2
     rm -rf "$bay/target" || return 1

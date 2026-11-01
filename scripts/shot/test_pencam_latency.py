@@ -16,7 +16,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent))
 
-from pencam_latency import analyze, connect_failures  # noqa: E402
+from pencam_latency import analyze, connect_failures, load  # noqa: E402
 
 SHOT = {"c": 1, "w": 0, "ft": 100}
 WHO = {"sc": 2, "sl": 0, "en": 0, "o": 0, "aud": "victim"}
@@ -110,6 +110,18 @@ class ConnectTests(unittest.TestCase):
         connected = "server: client connected: Netcode(1) (link 1v0)\n"
         self.assertEqual(self.failures(log=connected * 2), [])
         self.assertEqual(self.failures(log=connected * 3), ["3 client connects for 2 clients"])
+
+
+class TraceInputTests(unittest.TestCase):
+    def test_only_the_final_row_may_be_torn(self):
+        # The game's damage-model latency report must not discard missing middle evidence.
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "trace.jsonl"
+            path.write_text('{"k":"meta"}\n{torn\n')
+            self.assertEqual(load(path), ({"k": "meta"}, []))
+            path.write_text('{torn\n{"k":"xrx"}\n')
+            with self.assertRaisesRegex(ValueError, "malformed row before the tail"):
+                load(path)
 
 
 if __name__ == "__main__":

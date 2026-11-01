@@ -1,104 +1,127 @@
 #!/bin/zsh
-# Machine-gun-march cost harness — drives the headless server + scripted-fire client(s) through the
-# MG-cost scenarios and records per-fixed-tick cost traces (SPIKE_COST_TRACE, src/cost.rs) for
-# scripts/cost/analyze.py. The sim-cost question: what does sustained 7.9 mm fire cost the server's
-# authoritative FixedUpdate tick, and the client's cosmetic march?
-#
-#   usage: scripts/cost/run.sh [scenario ...]        (no args = all scenarios)
-#   env:   OUT   output dir (default /tmp/mg-cost)
-#          BIN   target dir (default target/debug — deps are opt-3 even in dev, see the report)
-#          SERVER_BIN / CLIENT_BIN  per-binary overrides of BIN, so the server can run the release
-#                profile (matching the hosted server) while clients stay dev (matching local playtest
-#                reality):  SERVER_BIN=target/release scripts/cost/run.sh idle1 fire1 fire2
-#          TICKS long-run script length (default 2560 ≈ 40 s); WARMUP recorder skip (default 384)
-#
-# Scenarios (each: fresh server, so server/client cost files pair 1:1):
-#   idle1   1 tank, stationary, no fire      — the baseline tick
-#   fire1   1 tank, stationary, dual-MG held — 1 tank firing (rounds strike terrain ~40 m out)
-#   fire2   2 tanks firing                   — 2 tanks firing (server cost only; client files split)
-#   armor1  A fires into a stationary target B at ~8 m — rounds strike ARMOR (full penetration march)
-#   loft1   short run, lofted aim, no landing — a 0→~150 projectile-population SWEEP for the per-shell
-#           march slope (rounds never impact, so keep it SHORT; a long loft run leaks shells)
+# The game's damage-model cost harness, game state only: headless server and scripted clients.
+# Usage: scripts/cost/run.sh [idle1|fire1|fire2|armor1|loft1 ...]
+# OUT selects the output directory; BIN the binary directory (default target/debug).
+# SERVER_BIN / CLIENT_BIN override BIN per role. TICKS defaults to 2560; WARMUP to 384.
+# These are ASSUMED workload lengths. scripts/cost/analyze.py consumes the resulting streams.
 set -u
+
+# Hold one machine lock across the workload, including both concurrent clients. The re-entry
+# argument is this script's private lock contract; child binaries never acquire a nested lock.
+if [[ "${1:-}" != --holding-lock ]]; then
+  exec /usr/bin/lockf -k -t 10800 /tmp/overmatch-cargo.lock "$0" --holding-lock "$@"
+fi
+shift
+export OVERMATCH_UNATTENDED=1 OVERMATCH_WINDOW=headless
 REPO="$(cd "$(dirname "$0")/../.." && pwd)"
 OUT="${OUT:-/tmp/mg-cost}"
+[[ "$OUT" == /* ]] || OUT="$PWD/$OUT"
 BIN="${BIN:-target/debug}"
 TICKS="${TICKS:-2560}"
 WARMUP="${WARMUP:-384}"
-SERVER="$REPO/${SERVER_BIN:-$BIN}/overmatch-server"
-CLIENT="$REPO/${CLIENT_BIN:-$BIN}/overmatch"
-mkdir -p "$OUT"
+SERVER="${SERVER_BIN:-$BIN}/overmatch-server"
+CLIENT="${CLIENT_BIN:-$BIN}/overmatch"
+[[ "$SERVER" == /* ]] || SERVER="$REPO/$SERVER"
+[[ "$CLIENT" == /* ]] || CLIENT="$REPO/$CLIENT"
+mkdir -p "$OUT" || exit 1
 cd "$REPO" || exit 1
-[ -x "$SERVER" ] && [ -x "$CLIENT" ] || { echo "build first: cargo build --bin overmatch --bin overmatch-server" >&2; exit 1; }
-
-# Which scenarios to run: the positional args, or all of them.
-SCENARIOS=("$@")
-[ ${#SCENARIOS[@]} -eq 0 ] && SCENARIOS=(idle1 fire1 fire2 armor1 loft1)
-want() { [[ " ${SCENARIOS[*]} " == *" $1 "* ]]; }
-
-# Boot a fresh server. $1=base(SPIKE_COST_TRACE) ; extra env as further args.
-start_server() {
-  local base="$1"; shift
-  rm -f "$OUT/$base.server.jsonl" "$OUT/$base.server.log"
-  env "$@" SPIKE_COST_TRACE="$OUT/$base.jsonl" SPIKE_COST_WARMUP="$WARMUP" \
-    BEVY_ASSET_ROOT="$REPO" "$SERVER" > "$OUT/$base.server.log" 2>&1 &
-  SERVER_PID=$!
-  local t
-  for t in $(seq 1 150); do grep -q "listening" "$OUT/$base.server.log" 2>/dev/null && break; sleep 0.2; done
+[[ -x "$SERVER" && -x "$CLIENT" ]] || {
+  echo "build first: scripts/serial-cargo build --features dev_ui,bitprobe --bin overmatch --bin overmatch-server" >&2
+  exit 1
 }
-stop_server() { kill "$SERVER_PID" 2>/dev/null; wait "$SERVER_PID" 2>/dev/null; }
+SCENARIOS=("$@")
+[[ ${#SCENARIOS[@]} -gt 0 ]] || SCENARIOS=(idle1 fire1 fire2 armor1 loft1)
+for scenario in "${SCENARIOS[@]}"; do
+  case "$scenario" in
+    idle1|fire1|fire2|armor1|loft1) ;;
+    *) echo "unknown cost scenario: $scenario" >&2; exit 2 ;;
+  esac
+done
+SERVER_PID= CA= CB=
+cleanup() {
+  local pid
+  for pid in "$CA" "$CB" "$SERVER_PID"; do
+    [[ -z "$pid" ]] || { kill "$pid" 2>/dev/null || true; wait "$pid" 2>/dev/null || true; }
+  done
+  SERVER_PID= CA= CB=
+}
+trap cleanup EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
 
-# Run one client to completion (foreground). $1=costbase $2=ticks $3=harness script fields
-# (src/net/harness.rs), written to $OUT/<costbase>.harness.ron.
-run_client() {
-  local base="$1" ticks="$2" fields="${3:-}"
-  printf '(ticks: %s, %s)\n' "$ticks" "$fields" >"$OUT/$base.harness.ron"
+start_server() {
+  local base="$1" t
+  rm -f "$OUT/$base.server.jsonl" "$OUT/$base.server.log" || return 1
+  env SPIKE_COST_TRACE="$OUT/$base.jsonl" SPIKE_COST_WARMUP="$WARMUP" \
+    BEVY_ASSET_ROOT="$REPO" "$SERVER" >"$OUT/$base.server.log" 2>&1 &
+  SERVER_PID=$!
+  # ASSUMED readiness allowance: 150 polls at 0.2 s = 30 s.
+  for t in {1..150}; do
+    grep -q 'listening' "$OUT/$base.server.log" && return 0
+    kill -0 "$SERVER_PID" 2>/dev/null || return 1
+    sleep 0.2
+  done
+  return 1
+}
+
+# Start a direct child so cleanup owns the actual client PID, including the second client.
+start_client() {
+  local base="$1" ticks="$2" fields="$3"
+  printf '(ticks: %s, %s)\n' "$ticks" "$fields" >"$OUT/$base.harness.ron" || return 1
   env OVERMATCH_HARNESS="$OUT/$base.harness.ron" SPIKE_LATENCY_MS=80 SPIKE_JITTER_MS=10 \
     SPIKE_COST_TRACE="$OUT/$base.jsonl" SPIKE_COST_WARMUP="$WARMUP" BEVY_ASSET_ROOT="$REPO" \
-    "$CLIENT" > "$OUT/$base.client.log" 2>&1
+    "$CLIENT" >"$OUT/$base.client.log" 2>&1 &
+  CLIENT_PID=$!
 }
 
-if want idle1; then
-  echo "== idle1 =="
-  start_server idle1
-  run_client idle1 "$TICKS" "drive: Idle"
-  stop_server
-fi
-
-if want fire1; then
-  echo "== fire1 =="
-  start_server fire1
-  run_client fire1 "$TICKS" "drive: Fire(secondary: true)"
-  stop_server
-fi
-
-if want fire2; then
-  echo "== fire2 (2 tanks firing; server cost is the target) =="
-  start_server fire2
-  # Client B (the second tank) writes its own cost base so the two clients never clobber one .client file.
-  run_client fire2b "$TICKS" "drive: Fire(secondary: true)" &
-  CB=$!
-  run_client fire2 "$TICKS" "drive: Fire(secondary: true)"
-  wait "$CB" 2>/dev/null
-  stop_server
-fi
-
-if want armor1; then
-  echo "== armor1 (A fires into stationary target B at ~8 m — full penetration march) =="
-  start_server armor1
-  run_client armor1b "$TICKS" "drive: Idle" &                # B: stationary target, no fire
-  CB=$!
-  sleep 1                                                    # let B spawn on lane 0 first
-  run_client armor1 "$TICKS" "drive: Fire(secondary: true), aim: Point((-8, 0, 0)), range_m: 12"
-  wait "$CB" 2>/dev/null
-  stop_server
-fi
-
-if want loft1; then
-  echo "== loft1 (short projectile-population sweep, 640 ticks) =="
-  start_server loft1
-  run_client loft1 640 "drive: Fire(secondary: true), aim: Point((30, 50, -800)), range_m: 800"
-  stop_server
-fi
-
-echo "ALL DONE -> $OUT"
+failed=0
+for scenario in "${SCENARIOS[@]}"; do
+  echo "== $scenario =="
+  if ! start_server "$scenario"; then
+    echo "$scenario FAILED: server did not become ready; see $OUT/$scenario.server.log" >&2
+    failed=1
+    cleanup
+    continue
+  fi
+  ticks="$TICKS"
+  fields='drive: Fire(secondary: true)'
+  second=
+  case "$scenario" in
+    idle1) fields='drive: Idle' ;;
+    fire2) second='drive: Fire(secondary: true)' ;;
+    armor1) second='drive: Idle'; fields='drive: Fire(secondary: true), aim: Point((-8, 0, 0)), range_m: 12' ;;
+    loft1) ticks=640; fields='drive: Fire(secondary: true), aim: Point((30, 50, -800)), range_m: 800' ;;
+  esac
+  scenario_failed=0
+  if [[ -n "$second" ]]; then
+    if start_client "${scenario}b" "$ticks" "$second"; then CB=$CLIENT_PID
+    else scenario_failed=1; fi
+    [[ "$scenario" != armor1 ]] || sleep 1 # ASSUMED target admission lead.
+  fi
+  if start_client "$scenario" "$ticks" "$fields"; then CA=$CLIENT_PID
+  else scenario_failed=1; fi
+  if [[ -n "$CA" ]]; then
+    if ! wait "$CA"; then
+      echo "$scenario FAILED: primary client; see $OUT/$scenario.client.log" >&2
+      scenario_failed=1
+    fi
+    CA=
+  fi
+  if [[ -n "$CB" ]]; then
+    if ! wait "$CB"; then
+      echo "$scenario FAILED: second client; see $OUT/${scenario}b.client.log" >&2
+      scenario_failed=1
+    fi
+    CB=
+  fi
+  if ! kill -0 "$SERVER_PID" 2>/dev/null; then
+    echo "$scenario FAILED: server exited during the workload" >&2
+    scenario_failed=1
+  fi
+  cleanup
+  if [[ "$scenario_failed" -eq 0 ]]; then echo "$scenario OK"
+  else failed=1; fi
+done
+if [[ "$failed" -eq 0 ]]; then echo "ALL DONE -> $OUT"
+else echo "cost battery FAILED -> $OUT" >&2; fi
+exit "$failed"
