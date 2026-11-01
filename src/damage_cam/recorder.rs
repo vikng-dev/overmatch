@@ -90,6 +90,17 @@ pub(crate) struct ShotRecorder {
     open: usize,
     /// An encounter has a frame this tick's [`pose_struck`] has not filled.
     unposed: bool,
+    /// Rounds that struck a knocked-out tank (a husk) since the authority started: one per round,
+    /// march step and husk its new marks touch, recorded or not (an automatic weapon's too).
+    husk_strikes: u64,
+}
+
+impl ShotRecorder {
+    /// The husk strikes counted since the authority started; the server's stats line reports its
+    /// rise per period.
+    pub(crate) fn husk_strikes(&self) -> u64 {
+        self.husk_strikes
+    }
 }
 
 #[cfg(test)]
@@ -188,8 +199,9 @@ pub(crate) struct MarchRecorder<'w, 's> {
 
 impl MarchRecorder<'_, '_> {
     /// After `shell`'s march step: log the pools its tally `dose` emptied from `emptied_from` on,
-    /// and note each tank its marks from `marks_from` on touch in its `recording`, in the tank's
-    /// open encounter or a new one.
+    /// and note each tank its marks touch from the `(marks, reached)` cursors on in its
+    /// `recording`, in the tank's open encounter or a new one. A crossing touches a tank when it
+    /// reaches it ([`PenetrationMarks::reached`]); every other mark when it is logged.
     #[expect(
         clippy::too_many_arguments,
         reason = "one march step's evidence: the shell and its shot identity, its recording, the mark and dose cursors, and the ownership and health reads"
@@ -200,7 +212,7 @@ impl MarchRecorder<'_, '_> {
         shot: Option<ShotId>,
         recording: Option<Mut<ShotRecording>>,
         marks: &PenetrationMarks,
-        marks_from: usize,
+        (marks_from, reached_from): (usize, usize),
         dose: &ShotDose,
         emptied_from: usize,
         owners: &Query<&VolumeOf>,
@@ -218,15 +230,13 @@ impl MarchRecorder<'_, '_> {
                     volume,
                 }),
         );
-        let Some(mut recording) = recording else {
-            return;
-        };
         let owner = |volume: Entity| owners.get(volume).ok().map(VolumeOf::tank);
-        let tick = self.clock.as_ref().map_or(0, |clock| clock.0);
-        for (index, mark) in marks.log.iter().enumerate().skip(marks_from) {
+        let touched = |mark: &ArmourMark| -> Vec<Entity> {
             let mut touched: Vec<Entity> = match mark {
                 ArmourMark::Bounce { struck, .. } => owner(*struck).into_iter().collect(),
-                ArmourMark::Crossing { volumes, .. } | ArmourMark::Wound { volumes, .. } => volumes
+                // A crossing touches each tank when it reaches it (`PenetrationMarks::reached`).
+                ArmourMark::Crossing { .. } => Vec::new(),
+                ArmourMark::Wound { volumes, .. } => volumes
                     .iter()
                     .filter_map(|crossed| owner(crossed.volume))
                     .collect(),
@@ -234,50 +244,68 @@ impl MarchRecorder<'_, '_> {
             };
             touched.sort();
             touched.dedup();
-            for tank in touched {
-                let latest = recording
-                    .struck
-                    .iter()
-                    .rposition(|struck| struck.tank == tank);
-                let at = match latest {
-                    Some(at) if !recording.struck[at].done => at,
-                    _ => {
-                        // The game's damage model: a husk has no new encounter. This read is
-                        // before this tick's knockout consequences, so the knockout shot records.
-                        if self.knocked_out.contains(tank) {
-                            continue;
-                        }
-                        let encounter = latest.map_or(0, |at| recording.struck[at].encounter + 1);
-                        let boxes = self
-                            .tanks
-                            .get(tank)
-                            .into_iter()
-                            .flat_map(|volumes| volumes.iter())
-                            .filter_map(|volume| Some((volume, health.get(volume).ok()?.held())))
-                            .collect();
-                        recording.struck.push(Struck {
-                            tank,
-                            encounter,
-                            contact_tick: tick,
-                            from: index,
-                            boxes,
-                            frames: Vec::new(),
-                            servo_deg: None,
-                            killed: None,
-                            done: false,
-                        });
-                        recorder.open += 1;
-                        recording.struck.len() - 1
+            touched
+        };
+        let mut events: Vec<(usize, Entity)> = marks.reached[reached_from..].to_vec();
+        for (index, mark) in marks.log.iter().enumerate().skip(marks_from) {
+            events.extend(touched(mark).into_iter().map(|tank| (index, tank)));
+        }
+        events.sort_by_key(|&(index, _)| index);
+        let mut husks: Vec<Entity> = events
+            .iter()
+            .map(|&(_, tank)| tank)
+            .filter(|&tank| self.knocked_out.contains(tank))
+            .collect();
+        husks.sort();
+        husks.dedup();
+        recorder.husk_strikes += husks.len() as u64;
+        let Some(mut recording) = recording else {
+            return;
+        };
+        let tick = self.clock.as_ref().map_or(0, |clock| clock.0);
+        for (index, tank) in events {
+            let latest = recording
+                .struck
+                .iter()
+                .rposition(|struck| struck.tank == tank);
+            let at = match latest {
+                Some(at) if !recording.struck[at].done => at,
+                _ => {
+                    // The game's damage model: a husk has no new encounter. This read is
+                    // before this tick's knockout consequences, so the knockout shot records.
+                    if self.knocked_out.contains(tank) {
+                        continue;
                     }
-                };
-                let struck = &mut recording.struck[at];
-                if let Some(frame) = marks.frames.get(&(index, tank)) {
-                    struck.frames.push((index, Some(*frame)));
-                    recorder.unposed |= struck.servo_deg.is_none();
-                } else if !matches!(struck.frames.last(), Some((_, None))) {
-                    struck.frames.push((index, None));
-                    recorder.unposed = true;
+                    let encounter = latest.map_or(0, |at| recording.struck[at].encounter + 1);
+                    let boxes = self
+                        .tanks
+                        .get(tank)
+                        .into_iter()
+                        .flat_map(|volumes| volumes.iter())
+                        .filter_map(|volume| Some((volume, health.get(volume).ok()?.held())))
+                        .collect();
+                    recording.struck.push(Struck {
+                        tank,
+                        encounter,
+                        contact_tick: tick,
+                        from: index,
+                        boxes,
+                        frames: Vec::new(),
+                        servo_deg: None,
+                        killed: None,
+                        done: false,
+                    });
+                    recorder.open += 1;
+                    recording.struck.len() - 1
                 }
+            };
+            let struck = &mut recording.struck[at];
+            if let Some(frame) = marks.frames.get(&(index, tank)) {
+                struck.frames.push((index, Some(*frame)));
+                recorder.unposed |= struck.servo_deg.is_none();
+            } else if !matches!(struck.frames.last(), Some((_, None))) {
+                struck.frames.push((index, None));
+                recorder.unposed = true;
             }
         }
     }

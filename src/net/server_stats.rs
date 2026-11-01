@@ -53,6 +53,7 @@ use super::harness::{LeverError, env_text};
 use super::server_host::{Throttle, read_throttle};
 use crate::ballistics::Projectile;
 use crate::cost::{TickClock, TickClosed, arm_tick_clock};
+use crate::damage_cam::recorder::ShotRecorder;
 use crate::tank::Tank;
 
 /// The lever: the period in seconds.
@@ -78,6 +79,7 @@ pub(super) fn install(app: &mut App) -> Result<(), LeverError> {
         send: TickWindow::default(),
         cpu_at_start: process_cpu(),
         throttle_at_start: read_throttle(),
+        husk_strikes_at_start: 0,
     });
     app.init_resource::<PhaseStarts>();
     app.add_systems(FixedLast, record_tick.after(TickClosed));
@@ -132,6 +134,8 @@ struct ServerStats {
     cpu_at_start: Option<Duration>,
     /// The cgroup's throttle counters when the current period opened.
     throttle_at_start: Option<Throttle>,
+    /// The recorder's husk-strike count when the current period opened.
+    husk_strikes_at_start: u64,
 }
 
 /// The open phase brackets' starts.
@@ -228,6 +232,9 @@ struct Snapshot {
     rss_bytes: Option<u64>,
     /// The period's throttling, when the cgroup reports it.
     throttled: Option<Throttle>,
+    /// The period's rounds that struck a knocked-out tank (`ShotRecorder::husk_strikes`): a
+    /// counter, never a line per strike, so automatic fire into husks cannot flood the log.
+    husk_strikes: u64,
 }
 
 /// One decimal: the line is read by eye as well as parsed.
@@ -267,6 +274,7 @@ fn stats_line(snapshot: &Snapshot) -> String {
         "send_us": percentiles(snapshot.send.as_ref()),
         "throttled_usec": snapshot.throttled.map(|t| t.throttled_usec),
         "nr_throttled": snapshot.throttled.map(|t| t.nr_throttled),
+        "husk_strikes": snapshot.husk_strikes,
     });
     body["debris"] = snapshot.debris.clone();
     format!("{PREFIX} {body}")
@@ -299,15 +307,22 @@ fn close_send(mut starts: ResMut<PhaseStarts>, mut stats: ResMut<ServerStats>) {
     }
 }
 
+/// The counts the stats line reads off the world when it prints.
+#[derive(bevy::ecs::system::SystemParam)]
+struct Census<'w, 's> {
+    clients: Query<'w, 's, (), (With<ClientOf>, With<Connected>)>,
+    tanks: Query<'w, 's, (), With<Tank>>,
+    projectiles: Query<'w, 's, (), With<Projectile>>,
+    all: Query<'w, 's, Entity>,
+}
+
 /// `Last`: once the period has passed, print its line and open the next one.
 fn emit_line(
     mut stats: ResMut<ServerStats>,
     fixed: Res<Time<Fixed>>,
-    clients: Query<(), (With<ClientOf>, With<Connected>)>,
-    tanks: Query<(), With<Tank>>,
-    projectiles: Query<(), With<Projectile>>,
-    all: Query<Entity>,
+    census: Census,
     debris: DebrisCensus,
+    recorder: Res<ShotRecorder>,
 ) {
     let Some(elapsed) = stats.period.close(Instant::now()) else {
         return;
@@ -323,6 +338,8 @@ fn emit_line(
         .zip(stats.throttle_at_start)
         .map(|(now, then)| now.since(then));
     stats.throttle_at_start = throttle;
+    let husk_strikes = recorder.husk_strikes() - stats.husk_strikes_at_start;
+    stats.husk_strikes_at_start = recorder.husk_strikes();
     let snapshot = Snapshot {
         elapsed,
         budget_us,
@@ -330,13 +347,14 @@ fn emit_line(
         physics: stats.physics.drain(budget_us),
         send: stats.send.drain(budget_us),
         debris: debris.json(),
-        clients: clients.iter().count(),
-        tanks: tanks.iter().count(),
-        projectiles: projectiles.iter().count(),
-        entities: all.iter().count(),
+        clients: census.clients.iter().count(),
+        tanks: census.tanks.iter().count(),
+        projectiles: census.projectiles.iter().count(),
+        entities: census.all.iter().count(),
         cpu_pct,
         rss_bytes: resident_bytes(),
         throttled,
+        husk_strikes,
     };
     println!("{}", stats_line(&snapshot));
 }
@@ -526,6 +544,7 @@ mod tests {
                 nr_throttled: 3,
                 throttled_usec: 45_000,
             }),
+            husk_strikes: 4,
         };
         let line = stats_line(&full);
         let json = line
@@ -552,6 +571,7 @@ mod tests {
                 "send_us": {"p50": 120.0, "p95": 180.1, "max": 250.0},
                 "throttled_usec": 45000,
                 "nr_throttled": 3,
+                "husk_strikes": 4,
                 "debris": {"live": 35, "sleeping": 140},
             })
         );

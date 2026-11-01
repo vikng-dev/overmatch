@@ -1555,6 +1555,10 @@ pub struct PenetrationMarks {
     /// The game's damage model: immutable sampled hull frames, addressed by mark and owner.
     pub(crate) frames:
         std::collections::BTreeMap<(usize, Entity), crate::damage_cam::record::HullFrame>,
+    /// The game's damage model: each tank a crossing reached, as `(crossing mark, tank)`, in the
+    /// order the round reached them. A crossing shared by overlapping tanks reaches a later tank
+    /// after its entrance, possibly in a later tick; the recorder opens that tank's encounter then.
+    pub(crate) reached: Vec<(usize, Entity)>,
 }
 
 /// One armour event of a shell's flight, as the authority's march resolved it. Positions WORLD,
@@ -2394,6 +2398,7 @@ fn integrate_projectiles(
             commands: &mut commands,
         };
         let (marks_from, emptied_from) = (shell.marks.log.len(), shell.dose.emptied().len());
+        let reached_from = shell.marks.reached.len();
         let (cones_from, burst_before) = (shell.spall.cones.len(), shell.projectile.fuze.burst());
         let shooter = shell.source.map(|source| source.tank);
         let owned_before = owned_losses(shell.dose, &world.owners, shooter);
@@ -2411,7 +2416,7 @@ fn integrate_projectiles(
                 shot.map(|shot| shot.0),
                 recording,
                 shell.marks,
-                marks_from,
+                (marks_from, reached_from),
                 shell.dose,
                 emptied_from,
                 &world.owners,

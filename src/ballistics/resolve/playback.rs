@@ -21,6 +21,8 @@ struct Crossing {
 /// point effects, so playback never re-rounds a fraction of a dose on a tick boundary.
 enum Effect {
     Mark,
+    /// The round reaches a tank's first volume of the crossing ([`PenetrationMarks::reached`]).
+    Reach(Entity),
     FuzeEntry {
         force: f64,
         owner: Option<Entity>,
@@ -259,9 +261,27 @@ impl Playback {
     ) -> Self {
         let mut crossing = Crossing::of(decision, flight, round);
         if let Decision::Bite(bite) = crossing.decision.clone() {
-            crossing
-                .effects
-                .push((f64::from(bite.approach / bite.speed_in), Effect::Mark));
+            let entrance = f64::from(bite.approach / bite.speed_in);
+            crossing.effects.push((entrance, Effect::Mark));
+            // The game's damage model: a crossing shared by overlapping tanks reaches each at
+            // its first volume's entry, so a tank's encounter opens on the state it was in then.
+            // Never before the mark: the stable sort keeps the mark first at equal moments.
+            let mut reaches: Vec<(Entity, f64)> = Vec::new();
+            for volume in &bite.volumes {
+                let Ok(owner) = context.world.owners.get(volume.volume) else {
+                    continue; // Unowned matter belongs to no tank's encounter.
+                };
+                let at = crossing
+                    .seconds_to(crossing.point_distance(volume.entry))
+                    .max(entrance);
+                match reaches.iter_mut().find(|(tank, _)| *tank == owner.tank()) {
+                    Some((_, first)) => *first = first.min(at),
+                    None => reaches.push((owner.tank(), at)),
+                }
+            }
+            for (tank, at) in reaches {
+                crossing.effects.push((at, Effect::Reach(tank)));
+            }
             for dose in &bite.deposits {
                 let volume = bite
                     .volumes
@@ -616,6 +636,11 @@ impl Playback {
                         cones: 0,
                     });
                 }
+                Effect::Reach(tank) => shell.marks.reached.push((
+                    self.mark
+                        .expect("a crossing reaches a tank after its entrance mark"),
+                    *tank,
+                )),
                 Effect::Line {
                     crossing,
                     units,

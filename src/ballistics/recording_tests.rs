@@ -403,6 +403,78 @@ fn a_path_through_two_tanks_records_each() {
     assert_eq!(outcome(far), None, "past it, no replica draws an impact");
 }
 
+/// The game's damage model: a crossing shared by overlapping tanks opens each tank's encounter
+/// when the round reaches that tank, not at the crossing's entrance. The crossing enters A late in
+/// a tick and reaches B in the next; B is knocked out between, so the round strikes a husk and B
+/// opens no record, while A's encounter, opened on a living target, still records. Mutant: opening
+/// every tank of a crossing at its entrance records B. Dimensions, the firing distance (the
+/// entrance about 1 m before a tick boundary, B 2.5 m into the crossing) and pools are fixture data.
+#[test]
+fn a_shared_crossing_opens_each_tank_when_the_round_reaches_it() {
+    let mut app = recording_world(false);
+    let (a, _) = tank(
+        &mut app,
+        Vec3::ZERO,
+        0.0,
+        Vec3::ZERO,
+        &[("a", Vec3::new(2.0, 2.0, 3.0), Vec3::ZERO, Kind::Crew(DEEP))],
+    );
+    let (b, _) = tank(
+        &mut app,
+        Vec3::ZERO,
+        0.0,
+        Vec3::ZERO,
+        &[(
+            "b",
+            Vec3::new(2.0, 2.0, 0.6),
+            Vec3::new(0.0, 0.0, -1.3),
+            Kind::Crew(DEEP),
+        )],
+    );
+    for (root, id) in [(a, 92), (b, 93)] {
+        app.world_mut()
+            .entity_mut(root)
+            .insert((crate::CombatantId(id), crate::CombatantLife(0)));
+    }
+    settle(&mut app);
+    fire(&mut app, Vec3::new(0.0, 0.0, 25.5), FireMechanism::Single);
+    let mut recorded = run(&mut app, 2);
+    let mut marks = app.world_mut().query::<&PenetrationMarks>();
+    let reached_a = |marks: &PenetrationMarks| {
+        marks
+            .log
+            .iter()
+            .any(|mark| matches!(mark, ArmourMark::Crossing { .. }))
+    };
+    assert!(
+        marks.iter(app.world()).any(reached_a),
+        "fixture: the crossing entered A in the second tick"
+    );
+    let mut shells = app
+        .world_mut()
+        .query_filtered::<&Transform, With<Projectile>>();
+    let z = shells.single(app.world()).unwrap().translation.z;
+    assert!(z > -1.0, "fixture: the round has not reached B ({z})");
+    app.world_mut().entity_mut(b).insert(TankKnockedOut {
+        reason: KnockoutReason::CrewLoss,
+    });
+    recorded.extend(run(&mut app, 8));
+    let life = |id| {
+        Some(crate::damage_cam::wire::TankLife {
+            combatant: crate::CombatantId(id),
+            life: crate::CombatantLife(0),
+        })
+    };
+    assert!(
+        recorded.iter().any(|shot| shot.life == life(92)),
+        "A was living when the round reached it"
+    );
+    assert!(
+        !recorded.iter().any(|shot| shot.life == life(93)),
+        "B was a husk when the round reached it"
+    );
+}
+
 /// Despawn every recorded shell that has struck armour, in the tick it struck.
 fn despawn_struck(
     shells: Query<(Entity, &PenetrationMarks), With<ShotRecording>>,
@@ -477,7 +549,9 @@ fn a_shell_despawned_after_the_shot_keeps_its_record() {
 /// The game's damage model: only a target alive at the strike opens an encounter. A husk
 /// records nothing with its turret present or absent, while the knockout shot keeps its record.
 /// The remaining ammunition HP pool still takes dose in every case; the record gate must not
-/// change simulation. The servo slots, geometry and HP capacities are fixture data.
+/// change simulation. The same gate counts the husk strike for the server's stats line
+/// (`ShotRecorder::husk_strikes`); a strike on a living target is not one. The servo slots,
+/// geometry and HP capacities are fixture data.
 #[test]
 fn a_round_into_a_husk_records_nothing_with_or_without_its_turret() {
     use crate::tank::{ServoIndex, TankRoot, TankServos};
@@ -512,6 +586,12 @@ fn a_round_into_a_husk_records_nothing_with_or_without_its_turret() {
         assert!(
             hp(&app, volumes[2]) < DEEP_UNITS,
             "the husk's remaining pool still takes dose"
+        );
+        let husk_strikes = app.world().resource::<ShotRecorder>().husk_strikes();
+        assert_eq!(
+            husk_strikes > 0,
+            husk,
+            "a husk strike is counted, a living target's is not ({husk_strikes})"
         );
         recorded
     };
