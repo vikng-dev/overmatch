@@ -74,6 +74,7 @@ use core::time::Duration;
 use std::collections::VecDeque;
 
 use bevy::ecs::change_detection::Tick as ChangeTick;
+use bevy::ecs::query::QuerySingleError;
 use bevy::prelude::*;
 use lightyear::core::tick::{Tick, TickDuration};
 use lightyear::interpolation::timeline::SyncedInterpolationTimeline;
@@ -610,25 +611,34 @@ fn recover_unannounced_rounds(
             if (cursor.0 - Tick(revealed_tick)) < wait as i32 {
                 continue;
             }
+            // The ledger arms on the replicated gate; the rig and its muzzles attach from the wire
+            // pose (`net::rig`), possibly frames later. Until then the reveal waits.
             let Some((weapon, muzzle)) = muzzles.iter().find_map(|(weapon, index, tank, pose)| {
                 (index.0 == slot && tank.0 == root).then_some((weapon, pose))
             }) else {
                 continue;
             };
-            let Ok(direction) = Dir3::new(muzzle.rotation() * Vec3::NEG_Z) else {
-                continue;
-            };
+            let direction = Dir3::new(muzzle.rotation() * Vec3::NEG_Z)
+                .expect("a muzzle's world pose is a finite unit rotation of its rig");
             // The fired round's index died with its announcement; the reveal's `loaded` is the
-            // round the consumption fired. An index past the list presents the default round
-            // rather than jam the slot. The shell is a cosmetic repair either way.
+            // round the consumption fired, as the server's `WeaponLoads` named it. The handshake
+            // binds both peers to one construction, so an index past this weapon's list is a
+            // malformed peer fact: logged, and the cosmetic repair presents the default round
+            // rather than jam the slot.
             let round = if usize::from(loaded) < weapon.rounds.len() {
                 loaded
             } else {
+                warn!(
+                    "net: {root} weapon {slot} revealed loaded round {loaded}, past its {} \
+                     rounds; refused, presenting the default round",
+                    weapon.rounds.len()
+                );
                 0
             };
-            let Some(fired) = weapon.rounds.get(usize::from(round)) else {
-                continue;
-            };
+            let fired = weapon
+                .rounds
+                .get(usize::from(round))
+                .expect("the tank load gate refuses an empty stowage: every weapon has round 0");
             let facts = ReleasedShot {
                 origin: muzzle.translation(),
                 direction,
@@ -699,8 +709,15 @@ fn heal_refused_presentations(
     let Some(newest_remote) = arrival.newest_remote() else {
         return;
     };
-    let Ok(pings) = pings.single() else {
-        return;
+    let pings = match pings.single() {
+        Ok(pings) => pings,
+        // No link measures a round trip: before a ticket, or after the one link is gone.
+        Err(QuerySingleError::NoEntities(_)) => return,
+        Err(error @ QuerySingleError::MultipleEntities(_)) => {
+            panic!(
+                "at most one client link exists (`spawn_matched_link` refuses a second): {error}"
+            )
+        }
     };
     let wait = refusal_wait_ticks(pings.rtt(), arrival.stats.spread(), tick.0);
     for (entity, mut gate, mut ledger) in &mut roots {
@@ -842,7 +859,9 @@ pub(super) fn record_own_intent(
     if !sync.is_some_and(|sync| sync.is_synced()) {
         return;
     }
-    let Ok(state) = slots.single() else {
+    // The input slot is the controlled tank's (`net::client::claim_input_slot`): none before it
+    // arrives, never two.
+    let Some(state) = crate::tank::controlled_one(slots.single()) else {
         return;
     };
     intent.record(
@@ -860,8 +879,9 @@ fn present_own_intent(
     mut intent: ResMut<AuthoredIntent>,
     mut tanks: Query<&mut TankCommand, With<OwnFirePresentation>>,
 ) {
-    // No armed root: nothing consumes the ledger, so nothing is spent either.
-    let Ok(mut command) = tanks.single_mut() else {
+    // No armed root: nothing consumes the ledger, so nothing is spent either. The ledger arms only
+    // the controlled tank, so never two.
+    let Some(mut command) = crate::tank::controlled_one(tanks.single_mut()) else {
         return;
     };
     let authored = intent.take(timeline.tick().0);
