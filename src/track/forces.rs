@@ -714,6 +714,41 @@ fn contact_frame(
     )
 }
 
+/// Exact identity of a terrain probe: signed zeros and every direction/reach bit are part of
+/// the oracle input. Only an identical query may reuse a neighbouring link's endpoint result.
+type ProbeKey = ([u32; 3], [u32; 3], u32);
+
+fn probe_key(station: Vec3, out: Vec3, reach: f32) -> ProbeKey {
+    (
+        station.to_array().map(f32::to_bits),
+        out.to_array().map(f32::to_bits),
+        reach.to_bits(),
+    )
+}
+
+/// Adjacent straight links share a pin probe. The oracle is pure, so exactly equal endpoint,
+/// direction and reach inputs keep the preceding result, including all of its float bits.
+fn probe_depths<O: TerrainOracle>(
+    previous: &mut Option<(ProbeKey, f32)>,
+    oracle: &O,
+    points: [Vec3; 3],
+    out: Vec3,
+    reach: [f32; 3],
+) -> [f32; 3] {
+    let key = probe_key(points[0], out, reach[0]);
+    let first = match *previous {
+        Some((last_key, depth)) if last_key == key => depth,
+        _ => oracle.depth_along(points[0], out, reach[0]),
+    };
+    let depths = [
+        first,
+        oracle.depth_along(points[1], out, reach[1]),
+        oracle.depth_along(points[2], out, reach[2]),
+    ];
+    *previous = Some((probe_key(points[2], out, reach[2]), depths[2]));
+    depths
+}
+
 /// PASS 1 — geometry, support, and slip per contact column. Forces are NOT emitted yet: the
 /// elastic grip resultant needs this tick's total budget and load-weighted slip BEFORE
 /// per-contact traction can include it. Pass 2 emits apps in the exact support-then-traction
@@ -765,6 +800,7 @@ fn collect_column_contacts<O: TerrainOracle>(
     // relative to the pin plane), so they shift along the hull's lateral axis — never along
     // a per-segment cross product, whose sign would depend on the loop's winding.
     let lat_axis = affine.transform_vector3(Vec3::X);
+    let mut previous_end: [Option<(ProbeKey, f32)>; 3] = [None; 3];
 
     for i in 0..n {
         let a = stations[i];
@@ -835,15 +871,13 @@ fn collect_column_contacts<O: TerrainOracle>(
             // reach of phantom penetration whose load points DOWN (−out), a self-burying
             // feedback (measured: the headless Tiger tail-sunk at 1.46 m of 4 s full
             // throttle).
-            let probes = [
-                oracle.depth_along(ca + face_a, out, params.probe_reach + travel[0]),
-                oracle.depth_along(
-                    (ca + cb) / 2.0 + face_m,
-                    out,
-                    params.probe_reach + travel[1],
-                ),
-                oracle.depth_along(cb + face_b, out, params.probe_reach + travel[2]),
-            ];
+            let probes = probe_depths(
+                &mut previous_end[ci],
+                oracle,
+                [ca + face_a, (ca + cb) / 2.0 + face_m, cb + face_b],
+                out,
+                travel.map(|travel| params.probe_reach + travel),
+            );
             let pen = probes;
             #[cfg(feature = "bitprobe")]
             let probe_index = {
@@ -1359,6 +1393,72 @@ mod tests {
         );
         *state = report.state;
         report
+    }
+
+    /// Every collocation depth keeps the uncached oracle's exact bits, while neighbouring
+    /// straight links cast their shared pin once. Driving relies on unchanged support arithmetic;
+    /// direction or travel changes must prevent reuse. The closed pad is fixture geometry.
+    #[cfg(feature = "bitprobe")]
+    #[test]
+    fn shared_pin_probes_are_cast_once_without_changing_any_depth_bits() {
+        struct CountedGround {
+            calls: std::cell::Cell<usize>,
+        }
+        impl TerrainOracle for CountedGround {
+            fn depth_along(&self, station: Vec3, out: Vec3, reach: f32) -> f32 {
+                self.calls.set(self.calls.get() + 1);
+                FlatGround { surface_y: 0.0 }.depth_along(station, out, reach)
+            }
+        }
+        let loop_pts = rect_loop(0.02);
+        let input = SideInput {
+            loop_pts: &loop_pts,
+            count: 25,
+            plane_x: 0.0,
+            columns: TEST_COLUMNS,
+            travel: TravelField { knots: &[] },
+        };
+        for phase in [0.0, 0.13] {
+            let oracle = CountedGround {
+                calls: std::cell::Cell::new(0),
+            };
+            let report = contact_side(
+                &input,
+                SideState {
+                    phase,
+                    ..SideState::default()
+                },
+                Affine3A::IDENTITY,
+                1.0 / 64.0,
+                &rig_params(),
+                &oracle,
+                &RubbleBodies::default(),
+                |_| Vec3::ZERO,
+                &mut GripElements::for_links(input.count),
+            );
+            let raw = report.bitprobe_contacts.len() * 3;
+            assert!(
+                oracle.calls.get() < raw,
+                "straight neighbours must share their pin casts"
+            );
+            for contact in &report.bitprobe_contacts {
+                for (point, depth) in [contact.query_a, contact.query_m, contact.query_b]
+                    .into_iter()
+                    .zip(contact.depths)
+                {
+                    let expected = FlatGround { surface_y: 0.0 }.depth_along(
+                        point,
+                        contact.out,
+                        contact.reach,
+                    );
+                    assert_eq!(depth.to_bits(), expected.to_bits());
+                }
+            }
+            println!(
+                "MEASURED fixture terrain casts at phase {phase}: before={raw} after={}",
+                oracle.calls.get()
+            );
+        }
     }
 
     fn strain_sum(elems: &GripElements) -> f32 {

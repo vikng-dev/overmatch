@@ -215,3 +215,26 @@ are operation counts, not tick timings or a production speedup claim.
 
 Gates: formatting and CI clippy passed; 229 driving, headless and citation tests passed, with
 3 existing ignored tests (MEASURED test-harness counts). No driving golden or tolerance changed.
+
+## server-perf-2: share identical neighbouring terrain pin probes
+
+"driving: reuse bit-identical terrain probes at shared belt pins (#250)" remembers the previous
+link's ending probe for each lateral column during one contact-side pass. A start probe reuses
+that result only when point, outward direction and reach match in every float bit, including
+signed zero. The oracle is pure and immutable through the pass, so this preserves the depth
+bits; midpoint and end casts, force order, material identity, grip and the transmission law stay
+the same. Nothing is reused across ticks or across different probe inputs.
+
+`shared_pin_probes_are_cast_once_without_changing_any_depth_bits` runs the actual contact pass,
+checks every recorded collocation depth against a fresh oracle evaluation, and counts its casts:
+
+| Fixture phase (fixture data) | Uncached requests (DERIVED from recorded collocations) | Actual casts (MEASURED, test) | Reduction (DERIVED) |
+|---|---|---|---|
+| 0 m | 225 | 171 | 24.0 % |
+| 0.13 m | 225 | 174 | 22.7 % |
+
+The baseline drive cost remains 3 601 us per combat tick (MEASURED local, previous lane's trace).
+No after time was taken under this lane's binding rules; the orchestrator must price this fix and
+the candidate-list fix together on the landed tree. Formatting, CI clippy and the same 229
+passing driving/headless/citation tests cover this change. No result shift was observed and no
+golden, physical parameter, command hold or grip shear modulus was changed.
