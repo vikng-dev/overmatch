@@ -470,22 +470,21 @@ fn drive_aim_servos(
             },
         );
     }
-    // One pass over the servos, each reading its root's entry: a servo of a held tank (no entry)
-    // keeps its target, as before.
+    // One pass over the servos, each reading its root's entry: a servo of a held tank (no entry,
+    // no aim committed yet) keeps its target.
     for (servo, mut servo_command, role, root) in &mut servos {
         let Some(tank) = laid.get(&root.0) else {
             continue;
         };
-        let Some((servo_position, _)) = rig_world_pose(
+        let (servo_position, _) = rig_world_pose(
             servo,
             root.0,
             tank.position,
             tank.rotation,
             &parents,
             &locals,
-        ) else {
-            continue;
-        };
+        )
+        .expect("a registered servo's hierarchy reaches its root through nodes with a Transform");
         let dir = tank.to_local.transform_vector3(tank.point - servo_position);
         servo_command.target = match role {
             ServoRole::Yaw => (-dir.x).atan2(-dir.z),

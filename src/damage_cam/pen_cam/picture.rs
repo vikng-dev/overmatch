@@ -99,6 +99,10 @@ pub const FRAMES: [[Vec3; 3]; 6] = [
 ];
 /// The cells a face's tangent square is cut into to find the support on it ([`Crop`]).
 const CROP_GRID: usize = 128;
+/// Why an atlas lock is never poisoned: no code holding one panics short of a bug that has
+/// already failed the frame, so a poisoned lock is that bug, never an absent picture.
+const ATLAS_LOCK: &str = "the game's damage-model view: an atlas lock is poisoned only by a \
+                          panic while held";
 /// The step (physical px) a view's target size is rounded up to before a pitch is derived at it
 /// ([`detail_of`]). The rounded size is never less than the live one, so a texel spans at most a
 /// pixel of the live target at the sightings ([`pitch_of`]). A target that changes within its step
@@ -686,7 +690,7 @@ impl Pictures {
         if self.casters.is_none() || self.size.x == 0 || self.size.y == 0 {
             return None;
         }
-        let mut held = self.image.lock().ok()?;
+        let mut held = self.image.lock().expect(ATLAS_LOCK);
         if let Some(strong) = held.upgrade() {
             return Some(Handle::Strong(strong));
         }
@@ -753,9 +757,7 @@ impl RecordAtlas {
         images: &mut Assets<Image>,
         jobs: &mut PictureJobs,
     ) {
-        let Ok(mut laying) = self.0.lock() else {
-            return;
-        };
+        let mut laying = self.0.lock().expect(ATLAS_LOCK);
         let token = Arc::downgrade(&view.token);
         laying
             .asks
@@ -796,9 +798,7 @@ impl RecordAtlas {
     /// the next pictures, their atlas made and queued ([`Pictures::image`]), its job holding it
     /// until the views take it the next frame. A next laid out at other details goes.
     fn realize(&self, images: &mut Assets<Image>, jobs: &mut PictureJobs) {
-        let Ok(mut laying) = self.0.lock() else {
-            return;
-        };
+        let mut laying = self.0.lock().expect(ATLAS_LOCK);
         let mut details: Vec<UVec2> = laying
             .asks
             .iter()
@@ -1129,10 +1129,10 @@ fn encode(
         .iter()
         .flat_map(|picture| (0..6).map(move |face| (picture, face)))
         .filter(|(picture, face)| picture.crops[*face].size.min_element() >= 2)
-        .filter_map(|(picture, face)| {
+        .map(|(picture, face)| {
             let uniform =
                 UniformBuffer::<Vec<u8>>::content_of::<_, Vec<u8>>(&FaceUniform::of(picture, face))
-                    .ok()?;
+                    .expect("FaceUniform's fixed five-Vec4 layout always encodes into a Vec");
             let buffer = device.create_buffer_with_data(&BufferInitDescriptor {
                 label: Some("pen_cam_picture_face"),
                 contents: &uniform,
@@ -1143,7 +1143,7 @@ fn encode(
                 layout,
                 &BindGroupEntries::single(buffer.as_entire_binding()),
             );
-            Some((picture.crops[face], group))
+            (picture.crops[face], group)
         })
         .collect();
     let mut encoder = device.create_command_encoder(&CommandEncoderDescriptor {

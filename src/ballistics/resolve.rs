@@ -607,9 +607,10 @@ impl FieldReach {
                 region.max + Vec3::splat(world.motion_padding()),
             ),
             |entity| {
-                let Ok(&broad) = world.aabbs.get(entity) else {
-                    return true;
-                };
+                let &broad = world.aabbs.get(entity).expect(
+                    "a collider the broad phase names carries the ColliderAabb its Collider \
+                     requires (avian3d 0.7)",
+                );
                 let broad = ColliderAabb::from_min_max(
                     broad.min - Vec3::splat(world.motion_padding()),
                     broad.max + Vec3::splat(world.motion_padding()),

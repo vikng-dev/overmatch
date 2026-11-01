@@ -67,16 +67,20 @@ fn wall_us() -> u64 {
         })
 }
 
+/// Merge a call site's fields into a row. Every call site passes a `json!({…})` object of its own
+/// field names, none of them the row's reserved ones: a caller breaking either is a bug, which
+/// panics rather than recording a row with evidence silently dropped.
 fn merge_extra(row: &mut Value, extra: Value) {
     let object = row.as_object_mut().expect("trace row is an object");
-    if let Value::Object(fields) = extra {
-        for (key, value) in fields {
-            if object.contains_key(&key) {
-                error!("shot_trace: refusing to overwrite reserved row field `{key}`");
-                continue;
-            }
-            object.insert(key, value);
-        }
+    let Value::Object(fields) = extra else {
+        panic!("shot_trace: a call site's extra fields are a JSON object, got {extra}");
+    };
+    for (key, value) in fields {
+        assert!(
+            !object.contains_key(&key),
+            "shot_trace: a call site's field `{key}` overwrites a reserved row field"
+        );
+        object.insert(key, value);
     }
 }
 
@@ -244,12 +248,21 @@ fn record_walk_world(
 mod tests {
     use super::*;
 
+    /// A call site's own fields join the row; one naming the row's shot identity is a bug that
+    /// panics, so no recorded row carries a substituted identity or a dropped field.
     #[test]
-    fn extra_fields_cannot_overwrite_shot_identity() {
+    fn extra_fields_join_the_row() {
         let mut row = json!({ "k": "send", "t": 10, "c": 7, "w": 1, "ft": 9 });
-        merge_extra(&mut row, json!({ "c": 99, "age": 3 }));
+        merge_extra(&mut row, json!({ "age": 3 }));
 
         assert_eq!(row["c"], 7);
         assert_eq!(row["age"], 3);
+    }
+
+    #[test]
+    #[should_panic(expected = "overwrites a reserved row field")]
+    fn extra_fields_cannot_overwrite_shot_identity() {
+        let mut row = json!({ "k": "send", "t": 10, "c": 7, "w": 1, "ft": 9 });
+        merge_extra(&mut row, json!({ "c": 99, "age": 3 }));
     }
 }

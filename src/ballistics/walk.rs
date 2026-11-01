@@ -2061,7 +2061,11 @@ impl Encounter {
     /// substance set is the same over both, so to a mechanism they are one stretch of one
     /// material. A volume met on both sides of the seam is one contact.
     pub(crate) fn absorb(&mut self, next: &Encounter) {
-        debug_assert!(!next.interface && next.start == self.end);
+        assert!(
+            !next.interface && next.start == self.end,
+            "the game's damage model absorbs only the encounter that follows this one across no \
+             interface: the driver merges adjacent same-substance stretches alone"
+        );
         self.end = next.end;
         for layer in &next.samples {
             let index = match self
