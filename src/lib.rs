@@ -291,10 +291,17 @@ mod world;
 /// Invariant: `file_path` is absolute. Bevy's `FileAssetReader::new` joins `file_path` onto its own
 /// base path (`BEVY_ASSET_ROOT`, else `CARGO_MANIFEST_DIR`, else the executable's directory), and
 /// joining an absolute path yields that path, so Bevy's chain never picks the tree. The root is
-/// made absolute against the working directory, where the direct readers resolve a relative one.
+/// made absolute against the working directory, where the direct readers resolve a relative one;
+/// an unreadable working directory refuses the start (exit 2) rather than hand Bevy a relative root.
 pub(crate) fn default_plugins() -> bevy::app::PluginGroupBuilder {
     let root = assets::asset_root();
-    let root = std::path::absolute(&root).unwrap_or(root);
+    let root = std::path::absolute(&root).unwrap_or_else(|error| {
+        refuse_start(format!(
+            "cannot make the asset root {} absolute against the working directory: {error}; \
+             set BEVY_ASSET_ROOT to an absolute path",
+            root.display()
+        ))
+    });
     DefaultPlugins
         .set(bevy::asset::AssetPlugin {
             file_path: root.to_string_lossy().into_owned(),
