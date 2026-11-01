@@ -24,7 +24,8 @@ tree and id.
 Overmatch's dedicated server despawns and respawns its map (static bodies with child colliders)
 between rounds. After one rebuild the contact graph held 46 087 active pairs on a map of static
 bodies alone, against 0 before it, and physics p50 rose 348 to 594 us per step (MEASURED,
-2026-11-01, M4).
+2026-11-01, M4). With the change below, the same run holds 0 pairs after the rebuild and physics
+p50 is 232 us (MEASURED).
 
 ## Proposed upstream change
 

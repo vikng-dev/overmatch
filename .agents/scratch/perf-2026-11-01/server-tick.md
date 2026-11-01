@@ -11,8 +11,8 @@ differs from alpha.3"), which is itself DERIVED.
 
 ## TLDR
 
-1. **Top costs per phase** (MEASURED, bevy `trace_chrome`, per fixed tick, M4; share of the
-   fixed schedules' busy time, `FixedFirst` through `FixedLast`):
+1. **Top costs per phase**, before this lane's fixes (MEASURED, bevy `trace_chrome`, per fixed
+   tick, M4; share of the fixed schedules' busy time, `FixedFirst` through `FixedLast`):
 
    | Phase | Fixed busy | 1st | 2nd | 3rd | 4th |
    |---|---|---|---|---|---|
@@ -38,7 +38,8 @@ differs from alpha.3"), which is itself DERIVED.
    its broad-phase proxy behind in Avian's standalone tree, and that proxy pairs with every collider
    its bounds overlap, for the rest of the process. The rebuild orphans the whole map's proxies
    (46 087 contact pairs where a fresh map holds none); a combat orphans every despawned part's.
-   Fixed in the vendored Avian (fix 3).
+   Fixed in the vendored Avian (fix 3): 0 pairs after the rebuild, fill-up physics 594 to 232 us
+   (MEASURED).
 
 ## Method
 
@@ -116,7 +117,22 @@ Which observer runs first depends on component registration order, so a despawn 
 that order; the game's order leaks (the numbers above).
 
 Fix 3: "physics: write the standalone proxy key back when a collider leaves its body (#250)",
-an `OVERMATCH PATCH` in `vendor/avian3d-0.7.0-child-pose` (`OVERMATCH_PATCH.md`).
+an `OVERMATCH PATCH` in `vendor/avian3d-0.7.0-child-pose` (`OVERMATCH_PATCH.md`). The same cycle
+run before and after it (MEASURED, M4, census each 10 s, physics p50 per tick):
+
+| | Before fix 3 | After fix 3 |
+|---|---|---|
+| Fill-up 1 physics | 348 us | 298 us |
+| Fill-up 2 physics (after the rebuild) | 594 us | 232 us |
+| Fill-up 2 contact pairs | 46 087 | 0 |
+| Combat 1 peak pairs | 2 442 | 425 |
+| Results 1 pairs (one dynamic body) | 333 | 1 |
+| Combat 2 first pairs | 46 885 | 150 |
+| Combat 2 physics | 949 us | 661 us |
+| Combat 2 tick p50 | 5 247 us | 4 821 us |
+
+Guard: `src/tests/avian_collider_of_removal.rs`; both of its tests fail with the write-back removed
+(run).
 
 RSS on macOS is not comparable across the rebuild (memory compression: 438 MB then 260 MB,
 MEASURED), so the +80 MB on Edgegap is not reproduced here; 46 087 leaked pairs and their
@@ -124,13 +140,12 @@ manifolds are the likely share of it (ASSUMED, not measured).
 
 ## What grows through a combat
 
-Same cycle run (MEASURED): contact pairs climb from 150 at combat start (30 tanks on the ground)
-to 2 442 after 145 s with 30-31 dynamic bodies throughout; 333 remain at Results with one dynamic
+Before fix 3 (MEASURED): contact pairs climb from 150 at combat start (30 tanks on the ground) to
+2 442 after 145 s with 30-31 dynamic bodies throughout; 333 remain at Results with one dynamic
 body; Battle 2's combat starts at 46 885 and climbs to 48 787 in 60 s. Physics p50 goes 358 to
 821 us over Combat 1. Entities grow 18 229 to 18 272 (+43), so the pairs, not the entities, track
-the physics growth. Every despawned part with a collider on a body leaks a standalone proxy the
-same way (fix 3). The combat tick's own growth is not separated here: the `sample` run inflated
-the cycle run's combat ticks, so its tick column is not used.
+the physics growth: every part with a collider despawned off a body leaked a standalone proxy.
+After fix 3 the pairs stay between 145 and 425 and fall to 1 at Results (table above).
 
 ## Not fixed, and owner calls
 
@@ -147,5 +162,7 @@ the cycle run's combat ticks, so its tick column is not used.
 - **Frames outside the tick** (1.1-1.5 ms per tick, `mark_dirty_trees`, transform propagation,
   visibility) are the dedicated server running Bevy's transform and visibility plugins over a map
   that does not move. Not investigated further.
-- **Unexplained:** the Edgegap +840 entities through a combat. Locally the entities grow +43 in
-  150 s; a full 16.5 min Battle was not run.
+- **Unexplained:** the Edgegap +840 entities through a combat (locally +43 in 150 s; a full
+  16.5 min Battle was not run). Also the short-mode cycle runs' Combat 1 tick p50 of 8.6 ms
+  against 4.8-5.2 ms in their Combat 2 and 5.2 ms in the shipped-mode combat run (MEASURED, with
+  and without `sample` alike), with the same tanks and entities.
