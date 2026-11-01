@@ -12,7 +12,7 @@ use crate::damage::{
 use crate::flow::{Flow, FlowScoped, InMatchSystems, MatchResourceExt};
 use crate::spec::FireCycle;
 use crate::tank::{
-    Controlled, TankRoot, TankViews, Weapon, WeaponIndex, WeaponLoad, WeaponLoads, WeaponRound,
+    Controlled, TankRoot, Weapon, WeaponIndex, WeaponLoad, WeaponLoads, WeaponRound,
 };
 use crate::ui_font::{PANEL_BG, TEXT, UiFonts, set_text};
 
@@ -106,36 +106,29 @@ pub(crate) fn spawn_status_panel(mut commands: Commands, fonts: Res<UiFonts>) {
 /// One weapon's status readout, split out so the precedence is unit-testable without standing up the
 /// whole ECS panel. `no_fire` is the per-weapon fire gate (gunner/breech/barrel out of action) — an *unusable*
 /// weapon. The crew-gate/no-fire state wins over any timer readout: a weapon that can't fire must not
-/// tease a reload or swap countdown (an out-of-action gun's ready deadline advances to preserve its remaining
-/// work, so the derived countdown would otherwise stick forever).
+/// tease a reload or swap countdown. A load pause is explicit even when its remaining work is zero:
+/// the weapon is not ready until a worker resumes it.
 fn weapon_status(
     fire_cycle: FireCycle,
     no_fire: bool,
     remaining_secs: f32,
     belt_remaining: u32,
+    paused: bool,
 ) -> String {
+    if no_fire {
+        return "no-fire".to_string();
+    }
+    if paused {
+        return match fire_cycle {
+            FireCycle::Single { .. } => "LOAD PAUSED".to_string(),
+            FireCycle::Automatic { .. } => "SWAP PAUSED".to_string(),
+        };
+    }
     match fire_cycle {
-        FireCycle::Single { .. } => {
-            if no_fire {
-                "no-fire".to_string()
-            } else if remaining_secs > 0.0 {
-                format!("{remaining_secs:.1}s")
-            } else {
-                "READY".to_string()
-            }
-        }
-        FireCycle::Automatic { .. } => {
-            if no_fire {
-                "no-fire".to_string()
-            } else if belt_remaining == 0 {
-                // Dry belt = swap in flight; the timer freezes (and this readout with it) while the
-                // gun crew can't work the swap. Only reached when the gun CAN fire (no_fire is
-                // false) — a knocked-out MG crew reads `no-fire`, not a stuck `SWAP` countdown.
-                format!("SWAP {remaining_secs:.1}s")
-            } else {
-                format!("{belt_remaining} rds")
-            }
-        }
+        FireCycle::Single { .. } if remaining_secs > 0.0 => format!("{remaining_secs:.1}s"),
+        FireCycle::Single { .. } => "READY".to_string(),
+        FireCycle::Automatic { .. } if belt_remaining == 0 => format!("SWAP {remaining_secs:.1}s"),
+        FireCycle::Automatic { .. } => format!("{belt_remaining} rds"),
     }
 }
 
@@ -167,7 +160,7 @@ fn round_line(weapon_name: &str, rounds: &[WeaponRound], load: &WeaponLoad) -> O
     Some(line)
 }
 
-/// Render the controlled tank's vitals card: crew available/total, Drive + Gunner-sight effectiveness,
+/// Render the controlled tank's vitals card: crew available/total, the applied Drive rate,
 /// each weapon's reload/fire state (`READY` / `x.xs` / `no-fire`), and the round choice of each
 /// weapon that has one ([`round_line`]), plus module repair progress and readiness.
 /// A pure view over the controlled tank's local components.
@@ -181,7 +174,6 @@ fn update_status_panel(
             Entity,
             &TankVolumes,
             &TankCapabilities,
-            &TankViews,
             Option<&TankKnockedOut>,
         ),
         With<Controlled>,
@@ -208,8 +200,7 @@ fn update_status_panel(
         return;
     };
     // No local rig before spawn or between possessions: hide the card and its background.
-    let Some((tank, volumes, caps, views, knocked_out)) =
-        crate::tank::controlled_one(tank.single())
+    let Some((tank, volumes, caps, knocked_out)) = crate::tank::controlled_one(tank.single())
     else {
         set_text(text.reborrow(), "");
         visibility.set_if_neq(Visibility::Hidden);
@@ -230,8 +221,8 @@ fn update_status_panel(
         }
     }
 
-    // Capabilities: Drive (whole-tank, composed from its requirement groups) + the Gunner sight's
-    // live gate. Part qualities resolved once for the sight + weapon gates below.
+    // The game's damage model: Drive's rate is the target scale the sim applies. Sight access is
+    // a boolean gate, so it has no rate readout. Resolve qualities for the weapon gates below.
     let quality = part_qualities(volumes, &facets);
     // The game's damage model: a repairing crew holds the tank on its brakes, so Drive reads zero
     // until the repair ends or is cancelled.
@@ -240,7 +231,6 @@ fn update_status_panel(
     } else {
         capability_effectiveness(Some(volumes), Some(caps), Capability::Drive, &facets)
     };
-    let gunner = evaluate(&views.gunner.requires, &quality);
 
     // Weapons: name + per-fire-mode state, flagged `no-fire` when the fire gate is unmet (knocked-out
     // gunner/loader/breech). A `Single` reads as the classic READY / reload countdown; an
@@ -266,6 +256,7 @@ fn update_status_panel(
                 no_fire,
                 remaining_secs,
                 state.belt_remaining,
+                state.paused_at_tick().is_some(),
             );
             let load = loads
                 .get(root.0)
@@ -333,10 +324,9 @@ fn update_status_panel(
     };
     let module_lines: String = module_rows.into_iter().map(|(_, row)| row).collect();
     let card = format!(
-        "{state}\nCrew {alive}/{total}\n{} {}%   Gunner {}%\nWeapons: {}{round_lines}\n{repair_hint}{module_lines}",
+        "{state}\nCrew {alive}/{total}\n{} {}%\nWeapons: {}{round_lines}\n{repair_hint}{module_lines}",
         Capability::Drive.label(),
         (drive * 100.0).round() as i32,
-        (gunner * 100.0).round() as i32,
         weapon_line,
     );
     set_text(text.reborrow(), &card);
@@ -477,9 +467,18 @@ mod tests {
     #[test]
     fn no_fire_wins_over_frozen_timers() {
         // Automatic, dry belt, gun crew out of action: the swap timer is frozen — must read `no-fire`.
-        assert_eq!(weapon_status(AUTO, true, 2.7, 0), "no-fire");
+        assert_eq!(weapon_status(AUTO, true, 2.7, 0, true), "no-fire");
         // Single, mid-reload, fire crew out of action: the reload is frozen — must read `no-fire`.
-        assert_eq!(weapon_status(SINGLE, true, 1.4, 0), "no-fire");
+        assert_eq!(weapon_status(SINGLE, true, 1.4, 0, true), "no-fire");
+    }
+
+    /// The game's damage model: a paused gate is unavailable even at zero remaining work.
+    /// The player must never read READY or a running countdown for it. Fixture: a pause on
+    /// the completion boundary, in each mechanism's load phase.
+    #[test]
+    fn a_paused_load_is_explicit_even_at_its_completion_boundary() {
+        assert_eq!(weapon_status(SINGLE, false, 0.0, 0, true), "LOAD PAUSED");
+        assert_eq!(weapon_status(AUTO, false, 0.0, 0, true), "SWAP PAUSED");
     }
 
     /// The game's damage model: the readout names the fuze mode the next shot fires with, the

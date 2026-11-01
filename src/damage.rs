@@ -263,11 +263,11 @@ pub type Requirement = Vec<Group>;
 #[derive(Component, Clone, Debug)]
 pub struct TankCapabilities(pub std::collections::HashMap<Capability, Requirement>);
 
-/// An ammunition volume. Depletion triggers a cookoff: all crew die immediately.
+/// An ammunition volume. Depletion triggers a cookoff: every crew HP pool is emptied.
 #[derive(Component)]
 pub struct Ammo;
 
-/// Latched crew state: this crewman is dead. Inserted once when HP ≤ 0; never removed in normal
+/// Latched crew state: this crewman is knocked out. Inserted once when HP ≤ 0; never removed in normal
 /// play. The staffing query filters `Without<Dead>`. Slice-2 backfill/respawn may clear it.
 #[derive(Component)]
 pub struct Dead;
@@ -351,7 +351,7 @@ pub fn plugin(app: &mut App) {
     // lives and what works — so it steps on the fixed clock with the rest of the simulation.
     //
     // **AUTHORITY-ONLY on a net client.** Both this seam and the whole [`DamageConsequences`] chain
-    // are the *deciding* systems (start/time/apply a swap; latch death; cook off; launch the turret)
+    // are the *deciding* systems (start/time/apply a swap; latch crew knockout; cook off; launch the turret)
     // — server-owned under authoritative multiplayer. On the net client, `NetCrew` realizes private
     // crew detail and `NetTankStatus` realizes public knockout state. Running these systems there
     // would re-decide authority outcomes from re-assertable local state. The gate is
@@ -454,7 +454,7 @@ fn tick_swaps(
     }
 }
 
-/// Write an occupant (its `home`, HP, and alive/dead state) onto a seat-volume, overwriting whoever
+/// Write an occupant (its `home`, HP, and knocked-out state) onto a seat-volume, overwriting whoever
 /// was there. Helper for [`tick_swaps`].
 fn place_occupant(
     commands: &mut Commands,
@@ -519,7 +519,7 @@ pub fn part_qualities(
     let mut quality: std::collections::HashMap<Part, f32> = std::collections::HashMap::new();
     for volume in tank_volumes.iter() {
         let facets = volumes.get(volume).expect(LIVE_VOLUME);
-        // A living crew seat supplies its role at the occupant's competence (native 1.0 / foreign
+        // A crew station in action supplies its role at the occupant's competence (native 1.0 / foreign
         // degraded).
         if let (Some(role), None) = (facets.crew, facets.dead) {
             let home = facets

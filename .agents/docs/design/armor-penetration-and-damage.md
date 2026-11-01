@@ -31,7 +31,7 @@ capability and can be repaired. Ammunition is the one exception.
 `knockout_from_counts` (`src/damage.rs`) is the one rule: a tank is knocked out when fewer than two
 of its crew members are in action, whatever emptied their HP pools. A cook-off is a cause the rule
 decides, not a second rule: it empties every crew pool of its tank at once, and the label names it.
-Capability stays per position (§7): `capability_available = staffed AND module HP > 0`, and
+Capability stays per requirement (§7b), composed from station competence and module condition;
 `TankKnockedOut` is a label (HUD, scoring, the Battle), never a capability gate. A tank with every
 module out of action stays in the Battle while two crew members are in action.
 
@@ -834,7 +834,7 @@ wire round-trip a burst.
 ## 6. Component damage — HP per component, never per tank
 
 Every component has its own **HP pool** in whole **HP points**. A crew station's is the one shared
-crew pool (30 HP, TUNED, provisional, `assets/ballistics/box_classes.ron`), which a tank file
+crew pool (30 HP, Unit, provisional, `assets/ballistics/box_classes.ron`), which a tank file
 cannot author: a crewman is one entity across tanks, and the pool has no relation to the size of
 the crew box. Every other pool is a plain integer authored by hand in the tank data (`hp` in
 `<tank>.tank.ron`), tuned in play; no class rate or size rule derives it (owner, 2026-10-28, #104;
@@ -1019,8 +1019,9 @@ crew members are in action (`knockout_from_counts`, `src/damage.rs`; §1a).
   DERIVED). (HP, not binary, so fire-over-time and near-misses have somewhere to accumulate.)
 - **Modules are tougher and repairable** — one stray fragment scratches an engine; a faceful or a
   direct transit wrecks it.
-- **Degraded performance (later):** checkpoints preferred (e.g. ≤50% HP → −x% power) over continuous
-  `hp% = perf%`, for legibility. Tuning, not slice.
+- **Reduced module performance:** current quality is the continuous held share of the pool;
+  empty is out of action. There is no per-function checkpoint table. The owner chose this
+  simplest pre-playtest law under #228; the checkpoint alternative is preserved in F18 and §7b.
 
 ## 7. Crew — positions with capabilities, served by crewmen
 
@@ -1155,8 +1156,10 @@ referenceable thing (crew stations + module functions, one vocabulary — no `Cr
 wrapper). Crew-vs-module is intrinsic to the resolved entity, not the reference.
 
 **Quality** ∈ [0,1], resolved live per `Part`:
-- **Module** → condition: 1.0 if HP > 0 (graded damage curve later, §9).
-- **Crew** → `competence(crewman, station)` = 1.0 native / flat 0.6 foreign for now; later × skill.
+- **Module** → condition: `held / capacity`, continuously; an emptied pool supplies zero.
+- **Crew** → `competence(crewman, station)` while in action: native full, foreign reduced.
+  The current foreign competence is 0.6 (ASSUMED provisional choice); later × skill.
+  A partly emptied crew pool does not change competence.
   Competence is **relational** (crewman × station), *not* an attribute of either — the seam the
   skill/training system plugs into.
 
@@ -1166,10 +1169,30 @@ member  = coeff × Π(quality of each Part it needs)
 group   = Part/Pool: min(1, Σ members)   |   Backup: max(members)
 effectiveness = min over groups          // 0 = unavailable, 1 = full
 ```
-Effectiveness is a **rate** (`time = base / effectiveness`; reload at 0.3 → ~3.3× as long — or a
-speed/power scale). The RON declares only the static *recipe* (structure + coefficients); HP, who's
-active, and backfill assignment are live inputs — knockout/damage/swap change the inputs, never the
-recipe.
+Effectiveness is a **rate**. Reload and belt swap arm with `base / effectiveness`, ceiling to a
+fixed tick. Zero freezes the remaining work immediately, including at arming. At a positive rate
+change, the absolute deadline is re-derived once from
+`ceil(remaining ticks × old rate / new rate)`; a pause preserves those remaining ticks and the
+old rate, then resumes at the next eligible tick. Unchanged rates keep one stable deadline.
+The frozen readout is exactly the work resumption arms. This is the absolute-deadline rule of
+ADR-0029, extended to changing rates. The data gate refuses a base duration and requirement whose
+smallest positive rate could exceed the signed deadline horizon.
+
+Drive scales both normalized throttle and steering targets before the existing command slew;
+this is a control-target rate, not a promise of linear realized power through the transmission.
+It also scales the ordinary opposite-throttle braking command; explicit repair and phase brake
+holds still select the full service-brake hold. Servo slew keeps its existing requirement-rate
+scale. Automatic cyclic cadence, fire eligibility and sight access remain their mechanism or
+on/off gates. The panel shows Drive's applied target rate, actual weapon deadlines and explicit
+load pauses; the old sight-derived Gunner percentage is gone because no rate consumes it.
+
+The RON declares only the static *recipe* (structure + coefficients); HP, who's in action, and
+backfill assignment are live inputs — knockout, a changed pool or a swap changes the inputs,
+never the recipe. The **preserved checkpoint alternative** would author per-function quality
+steps (for example, ≤50% held share selects lower power), with admission rules for the tables.
+Its revert cost is medium: replace the module resolver, author and validate those tables, and
+change the class-invariant tests and readout assumptions. The rate consumers and wire shape can
+stay; no checkpoint arm or switch remains in code. Playtest fork F18 owns the feel question.
 
 **RON shape (flat):**
 ```ron
@@ -1208,7 +1231,7 @@ sacrifice) and the **timer duration** are tuned at the controller, not chosen at
 **Slice-2 build scope:** the occupant-data split (topology B: `Crewman { home }` + `competence`); the
 `Capability`/`Group`/`Part` evaluator (general `min`/sum/max — Tiger exercises only `Part`; Pool/Backup
 get pure-function unit tests); effectiveness as `f32`; the swap mechanic. Deferred (§9): topology C
-(entity separation), graded module damage, the skill/training system, `min`-vs-`product` at the AND
+(entity separation), the skill/training system, `min`-vs-`product` at the AND
 level, min-count floors, per-gun keying (multi-turret), `OneOrMany` serde sugar.
 
 **Build status:** steps 1–3 landed and green — capability model + evaluator (behaviour-preserving),
@@ -1997,3 +2020,42 @@ The eight-file, 284-label value-token comparison passed again on the final autho
 All eleven review findings are verified: L1-L10 are fixed, L11 is not fixable and noted. N1's five
 additional fixture labels are fixed. No owner decision remains; the named law-lane overlaps above
 are intentionally reserved.
+
+
+### Energy-unit review (#258)
+
+Subject: the game's damage model, game state only; crew are HP pools at stations.
+Both supplied reports were read before this table. The Codex report was present initially and
+reported no findings; the Claude report arrived during this lane. E1–E8 follow Claude's order.
+The Codex conversion check agrees with the code: field encoding includes the line unit and
+HP decoding cancels it. That does not establish independence of physical environment loads.
+
+The dispatch also reserves `src/ballistics/` for other lanes. That explicit path boundary is
+kept: verified fixes needing those files remain open, rather than being called fixed by prose.
+
+| reviewer | finding | verified / not a defect | fixed in (subject) |
+|---|---|---|---|
+| Claude | E1: transport strength is consumed as physical crushing energy | verified: with `joules_per_hp = 6000` instead of 3000, the cone coefficient and `read_shell` ray energy double, so `Load::field` doubles crushed volume while emitted HP stays fixed; the cone record has no separate physical-energy carrier | open: needs the reserved ballistics path and a deliberate physical-energy law/carrier; do not treat transport joules as physical joules |
+| Claude | E2: emission tests pin shipped balance and construction | verified: editing either emission unit or the named round's construction breaks `the_reference_emission_totals_are_unchanged`; the 1,800,000,000 fixture also depends on the shipped line unit | open: the tests are in reserved `src/ballistics/spall_cone.rs`; replace them with inline-fixture class invariants |
+| Claude | E3: deleted scenario evidence and open material call | verified against the predecessor of `ballistics: declare per-mechanism energy-to-HP units (#258)`: s1/s12, s13, #116/#182 and the sub-reference exit call were removed | `docs: preserve the game field-law scenario record (#258)` |
+| Claude | E4: the sphere target does not explain the ring's emitted total | verified: DERIVED 7,540 HP target versus 13,920.84 HP ring emission; the missing bridge is the retired ball's 214.8 kJ calibration | `docs: explain the ring unit's sphere-target calibration (#258)` |
+| Claude | E5: share terminology survives the unit conversion | verified: `energy_share` now derives an encoding coefficient from HP/J and J/HP; the walk API and test prose still call it a kinetic-energy share | open: API and prose are in reserved `src/ballistics/` |
+| Claude | E6: sampling notes present old transport factors without the emitted-HP derivation | verified: notes use the reference line conversion and coefficient 210 although emitted HP is the authored quantity | `docs: express field sampling notes in emitted HP (#258)` |
+| Claude | E7: one-rate paragraph overstates the line unit's scope | verified: `energy_units` handles hard line/bounce deposits, while fields encode their separate units through `field_strength_per_joule` | `docs: limit the hard-pool energy unit to line and bounce (#258)` |
+| Claude | E8: the encoder test does not itself sum live deposits | not a defect: that test checks the encoder seam; `a_thrown_cone_is_its_rear_layers_field` separately asserts every live ray equals cone strength times its exact weight, so the proposed extra 1.1 factor fails that runtime test; the face/intensity test checks deposition | none |
+
+### Reduced modules and capability rates (#228)
+
+Subject: the game's damage model, game state only. Module quality is its pool's held share;
+crew quality remains occupant competence while in action. The production rate consumers are
+reload, belt swap, servo slew and the drive control targets described in §7b. F18 preserves the
+checkpoint alternative in prose. Declared protocol revision is 64 because the atomic weapon gate
+now carries a checked positive load rate; its state hash includes that rate.
+
+MEASURED in generic production-system fixtures: the half-full engine serves 0.5, an empty engine
+zero; a foreign loader takes 54 ticks for 32 base reload ticks and 107 ticks for 64 base swap
+ticks at the current 0.6 competence. The pause/rate-change fixture keeps its frozen gate stable
+and reaches its re-derived deadline. Drive's 0.8 throttle target becomes 0.48 under that
+competence and 0.4 under half engine condition. These are fixture observations, never shipped
+asset pass conditions. The panel removes the unused sight percentage and labels paused work
+even when the frozen interval is zero.

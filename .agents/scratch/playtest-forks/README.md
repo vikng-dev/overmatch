@@ -621,3 +621,33 @@ change the owner's rule and are not alternatives in this fork.
 | Claude | The key map lives in both the README and the spawn-map key doc | verified | open: one home for the key map |
 | Claude | All six items landed as one commit | verified, a process finding | not a code defect |
 
+
+
+## F18 — Continuous module condition and capability rates
+
+**Status:** open · owner default approved for the pre-playtest set in #228 / #245
+
+Subject: the game's damage model, game state only. Crew are HP pools at stations.
+
+**Default.** A module contributes its held HP share, continuously; empty is out of action.
+A crew station contributes its occupant's competence while in action. Reload and belt swap use
+the composed rate with stable absolute deadlines, drive scales normalized control targets, and
+servo slew keeps its rate scale. The complete timing rule and consumer contract live in design
+§7b (`.agents/docs/design/armor-penetration-and-damage.md`).
+
+**Preserved alternative.** Authored per-function checkpoints, such as lower power at or below
+half the pool, instead of the continuous share. Design §7b records the table/admission change;
+there is no checkpoint table, feature flag or second implementation in code.
+
+**Why it's a playtest call.** Watch whether partial module loss and foreign-station competence
+are legible through reload, driving and slew, or whether discrete checkpoints communicate them
+better. Drive currently scales opposite-throttle braking with the same control targets; test
+that feel in forward and reverse as well as acceleration and steering. Explicit brake holds
+remain full service brakes. No timing or capture measurement was taken in this lane.
+
+**Revert cost.** Medium, as specified in design §7b: module resolver, authored checkpoint data,
+admission and invariant tests. The generic rate consumers and existing load-rate wire carrier
+can stay. Keep the discarded continuous path in git when choosing checkpoints.
+
+**Lives in.** `src/damage.rs`, `src/shooting.rs`, `src/tank/model.rs`, `src/spec.rs`,
+`src/track/sim.rs`, `src/tank/servo.rs`, `src/crew_ui.rs`; tracker #228.
