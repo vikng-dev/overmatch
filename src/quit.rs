@@ -85,7 +85,10 @@ use bevy::tasks::ComputeTaskPool;
 pub(crate) fn plugin(app: &mut App) {
     recall_render_app_on_exit(app);
     #[cfg(target_os = "macos")]
-    app.add_plugins(terminate::plugin);
+    if app.is_plugin_added::<bevy::winit::WinitPlugin>() {
+        app.add_plugins(terminate::plugin);
+    }
+    // A windowless composition has no winit runner, delegate or application menu to intercept.
 }
 
 /// Wrap `RenderExtractApp`'s extract so that the frame which decides to exit also pulls the render
@@ -402,6 +405,15 @@ mod tests {
     use bevy::app::SubApp;
 
     use super::*;
+
+    /// Headless sandbox roots mount the shared quit helper too. Without winit there is no
+    /// application delegate; requiring one would refuse a valid windowless composition.
+    #[test]
+    fn a_windowless_root_needs_no_application_delegate() {
+        let mut app = App::new();
+        app.add_plugins(MinimalPlugins).add_plugins(plugin);
+        app.update();
+    }
 
     /// The exact version string cargo resolved for a crate, read out of the lockfile. Pulled in at
     /// COMPILE time, so the tripwire below is re-evaluated the moment `Cargo.lock` moves rather
