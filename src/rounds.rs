@@ -675,7 +675,7 @@ pub(crate) mod tests {
             .map(|field| format!(", {field}: None"))
             .collect::<String>();
         format!(
-            "({}{absent}, effects: (impact: (Compact, Unknown(\"fixture impact\")), ember: (None, Unknown(\"fixture absence\")), smoke: (None, Unknown(\"fixture absence\")), body: (None, Unknown(\"fixture absence\")), streak: (None, Unknown(\"fixture absence\"))){extra})",
+            "({}{absent}, effects: (impact: (Compact, Fixture(\"fixture impact\")), ember: (None, Fixture(\"fixture absence\")), smoke: (None, Fixture(\"fixture absence\")), body: (None, Fixture(\"fixture absence\")), streak: (None, Fixture(\"fixture absence\"))){extra})",
             authored(fields)
         )
     }
@@ -1210,7 +1210,7 @@ pub(crate) mod tests {
     fn malformed_files_do_not_load() {
         let bare = r#"(name: ("Probe", Fixture("fixture")), round_type: ("Fixture", Fixture("fixture")),
             core: ("GunSteel", Fixture("fixture")), mass: 5.0, caliber: (0.05, Fixture("fixture")),
-            wound: (20.0, Fixture("fixture")), effects: (impact: (Compact, Unknown("fixture impact")), ember: (None, Unknown("fixture absence")), smoke: (None, Unknown("fixture absence")), body: (None, Unknown("fixture absence")), streak: (None, Unknown("fixture absence"))))"#;
+            wound: (20.0, Fixture("fixture")), effects: (impact: (Compact, Fixture("fixture impact")), ember: (None, Fixture("fixture absence")), smoke: (None, Fixture("fixture absence")), body: (None, Fixture("fixture absence")), streak: (None, Fixture("fixture absence"))))"#;
         let err = load(bare).unwrap_err();
         assert!(err.to_string().contains("provenance"), "{err}");
 

@@ -1869,6 +1869,8 @@ order. Decisions are checked against the code, rather than inherited from the au
 |---|---|---|---|
 | Claude | L1: shipped files admit Fixture under cfg(test) | verified: replacing the embedded crew_hp Unit label with Fixture returned a 30-HP pool in the red regression | provenance: refuse fixtures at every shipped load boundary (#245) |
 | Claude | L2: filename assertion adds its own prefix | verified: the old test constructed `fixture.ron: {err}` itself; the regression now reads BoxClasses' real admission error, including crew_hp and repair | provenance: refuse fixtures at every shipped load boundary (#245) |
+| Claude | L3: 37 test values carry fact/resolution labels | verified: five Measured fixtures in substances, five Derived fixtures in attachments, three Resolution fixtures in spall_cone, and 24 Unknown fixture values in rounds/effects | tests: label inline authored data as fixtures (#245) |
+| labels-2 | N1: five more Unknown("f") test values | verified: the drawn-body fixture helper labels five absence/model values Unknown; these have no external fact source | tests: label inline authored data as fixtures (#245) |
 | Claude | L11: four non-bisectable main commits | verified by historical source: the new enum lacks Tuned while assets still use it; muzzle retains Tuned through the next two subjects, and bore_length fixtures retain Tuned through the fourth | not fixable; noted: provenance: name each authored value job (#245); data: label authored values by their job (#245); agents: enforce one number one job (#245); data: label the muzzle magnitudes as taste (#245) |
 
 The refusing policy surrounds shipped file readers, including nested registry parses and the raw
@@ -1882,3 +1884,12 @@ including the requested provenance/spec/rounds/materials/substances/ballistics/b
 headless, pen-cam and field-cast checks, and whole-tree guards. The final tree admission/unwind
 assertions, provenance tests and whole-tree guards passed another 82 tests. Formatting and CI
 clippy (`--locked --workspace --all-targets --features dev_ui,bitprobe -- -D warnings`) passed.
+
+**Fixture-label proof (MEASURED):** 42 metadata labels changed across five source files: the
+review's 37 plus five same-class `Unknown("f")` values. Canonicalising provenance-kind tokens,
+formatting both texts with rustfmt and removing whitespace makes every file identical to its
+parent. Formatting also removes one optional trailing tuple comma. Values and assertions are
+unchanged.
+
+**Fixture-label gates (MEASURED):** 83 targeted tests passed, including all five changed test
+modules, provenance and doc-citation guards. Formatting and CI clippy passed.

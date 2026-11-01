@@ -780,7 +780,7 @@ mod tests {
     /// A fixture shape file whose first fields are `fields`, its cone's energy share 0.5.
     fn file(fields: &str) -> String {
         format!(
-            r#"({fields}, directions: (24, Resolution("fixture")),
+            r#"({fields}, directions: (24, Fixture("fixture")),
             energy_share: (0.5, Fixture("fixture")), {BURST})"#
         )
     }
@@ -792,7 +792,7 @@ mod tests {
     /// A fixture shape file whose burst block's fields are `fields`, its cone's energy share 0.5.
     fn burst_file(fields: &str) -> String {
         format!(
-            r#"(axis: (ExitDirection, Fixture("fixture")), directions: (24, Resolution("fixture")),
+            r#"(axis: (ExitDirection, Fixture("fixture")), directions: (24, Fixture("fixture")),
             energy_share: (0.5, Fixture("fixture")), burst: ({fields}))"#
         )
     }
@@ -832,10 +832,7 @@ mod tests {
                 r#"axis: (ExitDirection, Fixture("fixture"))"#,
                 "axis: ExitDirection",
             ),
-            (
-                r#"directions: (24, Resolution("fixture"))"#,
-                "directions: 24",
-            ),
+            (r#"directions: (24, Fixture("fixture"))"#, "directions: 24"),
             (
                 r#"energy_share: (0.5, Fixture("fixture"))"#,
                 "energy_share: 0.5",

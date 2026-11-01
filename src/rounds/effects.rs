@@ -345,16 +345,16 @@ mod tests {
     /// field, missing provenance or unusable value must refuse while the registry loads.
     #[test]
     fn emission_presence_and_numeric_domains_are_required() {
-        let none = r#"(impact: (Compact, Unknown("fixture impact")), ember: (None, Unknown("fixture absence")), smoke: (None, Unknown("fixture absence")),
-            body: (None, Unknown("fixture absence")), streak: (None, Unknown("fixture absence")))"#;
+        let none = r#"(impact: (Compact, Fixture("fixture impact")), ember: (None, Fixture("fixture absence")), smoke: (None, Fixture("fixture absence")),
+            body: (None, Fixture("fixture absence")), streak: (None, Fixture("fixture absence")))"#;
         assert_eq!(
             ron::from_str::<File>(none).unwrap().resolve(0.05).unwrap(),
             FlightEffects::NONE
         );
         for missing in [
             "()",
-            r#"(impact: (Compact, Unknown("fixture impact")), ember: (None, Unknown("fixture")))"#,
-            r#"(impact: (Compact, Unknown("fixture impact")), ember: None, smoke: (None, Unknown("fixture")))"#,
+            r#"(impact: (Compact, Fixture("fixture impact")), ember: (None, Fixture("fixture")))"#,
+            r#"(impact: (Compact, Fixture("fixture impact")), ember: None, smoke: (None, Fixture("fixture")))"#,
         ] {
             assert!(ron::from_str::<File>(missing).is_err());
         }
@@ -379,8 +379,8 @@ mod tests {
         ] {
             let text = format!(
                 r#"(impact: ({name}, Fixture("fixture art")),
-                ember: (None, Unknown("fixture absence")), smoke: (None, Unknown("fixture absence")),
-                body: (None, Unknown("fixture absence")), streak: (None, Unknown("fixture absence")))"#
+                ember: (None, Fixture("fixture absence")), smoke: (None, Fixture("fixture absence")),
+                body: (None, Fixture("fixture absence")), streak: (None, Fixture("fixture absence")))"#
             );
             // FIXTURE DATA: distinct flying diameters, with no drawn body to constrain either.
             for diameter in [0.008, 0.09] {
@@ -414,9 +414,9 @@ mod tests {
         let model = &BodyModel::shipped()[0];
         let effects = |name: &str| {
             format!(
-                r#"(impact: (Compact, Unknown("fixture impact")), ember: (None, Unknown("f")), smoke: (None, Unknown("f")),
-                body: (Some((model: ({name:?}, Unknown("f")))), Unknown("f")),
-                streak: (None, Unknown("f")))"#
+                r#"(impact: (Compact, Fixture("fixture impact")), ember: (None, Fixture("f")), smoke: (None, Fixture("f")),
+                body: (Some((model: ({name:?}, Fixture("f")))), Fixture("f")),
+                streak: (None, Fixture("f")))"#
             )
         };
         let drawn = ron::from_str::<File>(&effects(model.scene))

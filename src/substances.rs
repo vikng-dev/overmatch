@@ -1216,8 +1216,8 @@ mod tests {
     /// ASSUMED fixture values isolate the contract from changes in shipped material numbers.
     #[test]
     fn a_breakable_row_missing_either_shear_fact_is_refused_at_load() {
-        let cohesion = r#"shear_cohesion: Some((200000.0, Measured("fixture")))"#;
-        let energy = r#"shear_fracture_energy: Some((30.0, Measured("fixture")))"#;
+        let cohesion = r#"shear_cohesion: Some((200000.0, Fixture("fixture")))"#;
+        let energy = r#"shear_fracture_energy: Some((30.0, Fixture("fixture")))"#;
         let row = |shear: &str| {
             with(&format!(
                 r#""Fixture": Hard(resistance: Effective((20.0, Fixture("fixture"))),
@@ -1259,7 +1259,7 @@ mod tests {
             ("shear_fracture_energy", energy, cohesion),
         ] {
             for value in ["0.0", "-1.0", "NaN", "inf"] {
-                let fields = format!(r#"{field}: Some(({value}, Measured("fixture"))), {other}"#);
+                let fields = format!(r#"{field}: Some(({value}, Fixture("fixture"))), {other}"#);
                 let err = SubstanceRegistry::from_ron_at(path, &row(&fields))
                     .unwrap_err()
                     .to_string();
@@ -1270,7 +1270,7 @@ mod tests {
             } else {
                 "30.0"
             };
-            let fields = valid.replace(&format!(r#"({bare}, Measured("fixture"))"#), bare);
+            let fields = valid.replace(&format!(r#"({bare}, Fixture("fixture"))"#), bare);
             let err = SubstanceRegistry::from_ron_at(path, &row(&format!("{fields}, {other}")))
                 .unwrap_err()
                 .to_string();
@@ -1295,7 +1295,7 @@ mod tests {
         ];
         let authored: Vec<String> = fields
             .iter()
-            .map(|(field, value)| format!(r#"{field}: Some(({value}, Measured("fixture")))"#))
+            .map(|(field, value)| format!(r#"{field}: Some(({value}, Fixture("fixture")))"#))
             .collect();
         let row = |blast: &str| {
             with(&format!(

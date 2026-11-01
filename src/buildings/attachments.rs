@@ -279,8 +279,8 @@ mod tests {
     #[test]
     fn a_kind_missing_a_number_or_its_source_is_refused() {
         let nailed = |fields: &str| format!("{{\"nailed\": Stated({fields})}}");
-        let tensile = "tensile_pa: (3240.0, Derived(\"fixture\"))";
-        let energy = "fracture_energy_j_per_m2: (65.0, Derived(\"fixture\"))";
+        let tensile = "tensile_pa: (3240.0, Fixture(\"fixture\"))";
+        let energy = "fracture_energy_j_per_m2: (65.0, Fixture(\"fixture\"))";
         Attachments::from_ron(&nailed(&format!("{tensile}, {energy}")), registry())
             .expect("both numbers, each sourced");
         for (text, names) in [
@@ -292,7 +292,7 @@ mod tests {
             ),
             (
                 nailed(&format!(
-                    "tensile_pa: (0.0, Derived(\"fixture\")), {energy}"
+                    "tensile_pa: (0.0, Fixture(\"fixture\")), {energy}"
                 )),
                 "tensile_pa 0",
             ),
@@ -315,7 +315,7 @@ mod tests {
                 "provenance",
             ),
             (
-                "{\"plate\": RootPlate(overturning_nm_per_kg: (0.0, Derived(\"fixture\")))}"
+                "{\"plate\": RootPlate(overturning_nm_per_kg: (0.0, Fixture(\"fixture\")))}"
                     .to_owned(),
                 "overturning_nm_per_kg 0",
             ),
@@ -333,7 +333,7 @@ mod tests {
         for value in ["1.0e100", "1.0e-100"] {
             let text = format!(
                 "{{\"fixture_plate\": RootPlate(overturning_nm_per_kg: \
-                 ({value}, Derived(\"fixture\")))}}"
+                 ({value}, Fixture(\"fixture\")))}}"
             );
             let error = Attachments::from_ron(&text, registry()).unwrap_err();
             for part in ["fixture_plate", "overturning_nm_per_kg", "author"] {
