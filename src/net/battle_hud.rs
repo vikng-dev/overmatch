@@ -167,7 +167,7 @@ impl Column {
         let mut text = String::from(match self {
             Self::Place => "RANK",
             Self::Name => "PLAYER",
-            Self::Knockouts => "Kills",
+            Self::Knockouts => "KILLS",
             Self::Losses => "LOSSES",
             Self::Mark => "",
         });
@@ -1210,7 +1210,7 @@ mod tests {
         let column = |app: &mut App, which| text(app, Part::Column(which));
         assert_eq!(column(&mut app, Column::Place), "RANK\n1\n2");
         assert_eq!(column(&mut app, Column::Name), "PLAYER\nPLAYER 9\nPLAYER 7");
-        assert_eq!(column(&mut app, Column::Knockouts), "Kills\n3\n1");
+        assert_eq!(column(&mut app, Column::Knockouts), "KILLS\n3\n1");
         assert_eq!(column(&mut app, Column::Losses), "LOSSES\n2\n0");
         assert_eq!(column(&mut app, Column::Mark), "\n\n");
         app.world_mut()
