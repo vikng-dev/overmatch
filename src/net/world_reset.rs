@@ -29,8 +29,10 @@ fn follow_battle(world: &mut World) {
     let identity = match world.query::<(Entity, &BattleState)>().single(world) {
         Ok((entity, battle)) => (entity, battle.number),
         Err(QuerySingleError::NoEntities(_)) => {
-            // A ledger may arrive before the first Battle, including on reconnect.
+            // A ledger may arrive before the first Battle, including on reconnect. No construction
+            // is selected, so whichever Battle arrives next constructs its world.
             world.resource_mut::<CurrentWorld>().0 = None;
+            world.resource_mut::<BuiltWorld>().0 = None;
             return;
         }
         Err(QuerySingleError::MultipleEntities(_)) => {
@@ -38,10 +40,6 @@ fn follow_battle(world: &mut World) {
         }
     };
     if world.resource::<BuiltWorld>().0 == Some(identity) {
-        // A temporarily absent authority component does not unload its local construction.
-        if world.resource::<CurrentWorld>().0.is_none() {
-            world.resource_mut::<CurrentWorld>().0 = Some(WorldGeneration(identity.1));
-        }
         return;
     }
     world.insert_resource(CurrentWorld(Some(WorldGeneration(identity.1))));

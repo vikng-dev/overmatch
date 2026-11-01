@@ -395,8 +395,9 @@ impl WallEntry {
     }
 }
 
-/// Every change to every building so far, in authority order (module doc). `generation` moves
-/// when the record is replaced (a replica's next link): whoever derives from it starts over.
+/// Every change to every building in the current world, in authority order (module doc).
+/// `generation` moves whenever the record is replaced (a new world, on either peer, or a replica's
+/// next ledger): whoever derives from it starts over.
 #[derive(Resource, Debug, Default, Clone, PartialEq)]
 pub(crate) struct WallRecord {
     pub(crate) entries: Vec<WallEntry>,

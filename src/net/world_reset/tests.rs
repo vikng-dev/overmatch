@@ -186,7 +186,7 @@ fn record_arrival_order_cannot_mix_worlds_or_consume_a_snapshot_before_construct
         app.update();
         let fresh = census(app.world_mut());
         let (walls, state, tree) = topology(app.world_mut());
-        snapshots(app.world_mut(), 1, walls, state, tree);
+        snapshots(app.world_mut(), 1, walls.clone(), state, tree);
         app.update();
         assert_eq!(
             census(app.world_mut()),
@@ -265,6 +265,34 @@ fn record_arrival_order_cannot_mix_worlds_or_consume_a_snapshot_before_construct
             census(app.world_mut()),
             fresh,
             "retired records never replay, including equal-length ledgers"
+        );
+        // The current Battle's own records apply, not only the first Battle's: its ledgers grow.
+        for (belongs, mut ledger) in app
+            .world_mut()
+            .query::<(&WorldGeneration, &mut WallLedger)>()
+            .iter_mut(app.world_mut())
+        {
+            if *belongs == WorldGeneration(2) {
+                ledger.0.clone_from(&walls);
+            }
+        }
+        for (belongs, mut ledger) in app
+            .world_mut()
+            .query::<(&WorldGeneration, &mut DestructionLedger)>()
+            .iter_mut(app.world_mut())
+        {
+            if *belongs == WorldGeneration(2) {
+                ledger.0.push(LedgerEntry::State {
+                    index: tree,
+                    word: state.encode(),
+                });
+            }
+        }
+        app.update();
+        assert_ne!(
+            census(app.world_mut()),
+            fresh,
+            "a later Battle's records apply to its own world"
         );
         let previous_construction = roots(app.world_mut());
         app.world_mut().despawn(battle);
@@ -500,6 +528,14 @@ fn a_destroyed_world_is_startup_again_at_next_fill_up_over_real_udp() {
                     .all(|root| server.world().get_entity(*root).is_err())
             );
             assert!(server.world().resource::<WallRecord>().entries.is_empty());
+            assert!(
+                server
+                    .world_mut()
+                    .query_filtered::<&WorldGeneration, With<DebrisPose>>()
+                    .iter(server.world())
+                    .all(|generation| *generation == WorldGeneration(2)),
+                "the boundary retires every previous Battle's carrier on the authority"
+            );
             if !fill_joined {
                 clients.push(network_client(port, 3));
                 fill_joined = true;

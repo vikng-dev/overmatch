@@ -30,7 +30,8 @@ pub(crate) fn reconstruct_world(world: &mut World) {
         occupants.extend(std::mem::take(&mut *ring).0.live);
     }
     for entity in occupants {
-        world.despawn(entity);
+        // A ring keeps an occupant's id past its own end-of-life despawn; that one is already gone.
+        let _ = world.try_despawn(entity);
     }
 }
 
