@@ -5,7 +5,7 @@
 //!
 //! Every received transport packet is tick-stamped by its sender (`PacketReceived { remote_tick }`,
 //! `lightyear_transport` plugin.rs). The estimator samples the FIRST packet to bring each new remote
-//! tick — 64 samples/s of the actual replication stream, where the ping path samples 10/s, assumes
+//! tick — nominally 64 samples/s of the actual replication stream, where the ping path samples 10/s, assumes
 //! a symmetric Gaussian, and CLAMPS outliers (`lightyear` ping estimator.rs) — the exact samples a
 //! dejitter sizer must not discard. One sample per TICK, not per packet: every constant below
 //! ([`quantile_p`], [`ring_cap`], the warmup floor) is derived per tick, and the transport's packets
@@ -31,12 +31,12 @@
 //! # Contract constants (SLOs, not tunings)
 //!
 //! ```text
-//! B         = 60 freezes/hour            certified freeze budget: one perceptible starvation
+//! B         = 60 freezes/hour            product freeze budget: one perceptible starvation
 //!                                        event per minute, ceiling (initial product contract)
 //! p         = 1 − B/(64 × 3600)          the covered fraction of per-tick arrivals = 1 − 1/3840
 //! ring_cap  = 1/(1 − p) = 3840           the minimum sample count that resolves tail mass 1 − p;
-//!                                        forgetting is by eviction (60 s at 64 Hz), so Q_p at
-//!                                        capacity is the window maximum by construction
+//!                                        forgetting is by sample eviction (nominally 60 s at
+//!                                        64 samples/s); Q_p excludes one sample at capacity
 //! T         = 2 s                        min-anchor spike window (NetEQ precedent)
 //! ```
 //!
@@ -102,8 +102,8 @@ fn quantile_p() -> f64 {
 }
 
 /// Ring capacity `1/(1 − p)` = 3840: the minimum sample count that resolves tail mass `1 − p`.
-/// Retention at 64 Hz is 60 s; forgetting is by eviction, so a one-off spike ages out in exactly
-/// the budget's per-minute granularity.
+/// DERIVED nominal retention is 60 s at 64 samples/s. Eviction counts samples, not elapsed time:
+/// skipped remote ticks lengthen wall-clock retention.
 fn ring_cap() -> usize {
     // `1/(1−p)` written from the budget directly: the subtraction form re-rounds an exact ratio.
     (TICK_RATE_HZ * 3600.0 / FREEZE_BUDGET_PER_HOUR).ceil() as usize
@@ -142,9 +142,8 @@ pub(super) struct ArrivalStats {
 }
 
 impl ArrivalStats {
-    /// `Q_p{l} − min{d}`: the whole measured spread — the downlink headroom term. Bounded by the
-    /// ring's worst presentation lateness over its 60 s against the window's fastest packet; a
-    /// client stall adds nothing to it (see [`record_packet_arrival`]).
+    /// `max(Q_p{l} − min{d}, 0)`: the empirical downlink spread. Both stamps include sender pacing
+    /// and the receiver's frame schedule; this is not an independent bound on link delay.
     pub(super) fn spread(&self) -> Duration {
         Duration::from_secs_f64((self.qp_s - self.anchor_s).max(0.0))
     }
@@ -243,8 +242,8 @@ impl ArrivalDelay {
     }
 
     /// Recompute the digest if a sample arrived since the last one. `Q_p` is the smallest sample
-    /// with cumulative mass ≥ p (at ring capacity `1/(1−p)` that is the window maximum by
-    /// construction); `min` anchors on the spike window.
+    /// with cumulative mass ≥ p. DERIVED: at capacity `N = 1/(1−p)`, its rank is `N−1`, so one
+    /// sample is outside coverage; `min` anchors on the spike window.
     fn refresh(&mut self, scratch: &mut Vec<f64>) {
         if self.digested == Some(self.samples) {
             return;
@@ -336,11 +335,10 @@ impl ArrivalDelay {
 /// cursor reads once per frame, after the drain, so the packet was missing only from the reads
 /// before this frame, the last of them one frame earlier: the lateness presentation can starve on
 /// is `d_i − frame`, which the quantile ring takes. The drain stamp `d_i` anchors the min (a packet
-/// drained the moment it lands carries no error). A client stall therefore reads as no lateness:
-/// the ticks queued during it were not yet due at the read before it, while a link burst drained
-/// by ordinary frames keeps its depth less one frame. The ring taking `d_i` alone was MEASURED on
-/// clean loopback to hold `min_delay` at 113.8 ms (headless) and 1170.0 ms (hidden) after the own
-/// tank's arrival stall; the before/after table is in `.agents/docs/design/net-motion-contract.md`.
+/// drained the moment it lands carries no error). In the synthetic unchanged-path model, a client
+/// stall adds no upper-tail lateness, while a link burst drained by ordinary frames keeps its
+/// depth less one frame. Sender pacing, frame phase and timeline resyncs remain observable; the
+/// prior measurements and their limits are in `.agents/docs/design/net-motion-contract.md`.
 /// A stall's own samples pull the window's `min{l_i}` down for its 2 s, widening only the uplink's
 /// deadband (`bulk`) meanwhile (MEASURED hidden: 1128.8 ms for ~2 s).
 fn record_packet_arrival(
@@ -639,6 +637,17 @@ mod tests {
             spread_ms >= 60.0 - frame,
             "the burst's depth less one frame is covered (got {spread_ms} ms)"
         );
+    }
+
+    /// DERIVED: at ring capacity the product quantile excludes one sample, not zero. Input and
+    /// delay controllers rely on that freeze budget; calling the quantile a maximum overstates it.
+    #[test]
+    fn the_full_ring_quantile_excludes_exactly_one_sample() {
+        let n = super::ring_cap();
+        let one = fed(std::iter::repeat_n(0.0, n - 1).chain([80.0]));
+        assert_eq!(one.stats.spread(), Duration::ZERO);
+        let two = fed(std::iter::repeat_n(0.0, n - 2).chain([80.0, 80.0]));
+        assert!((two.stats.spread().as_secs_f64() - 0.080).abs() < 1e-6);
     }
 
     /// THE MEASURED BURST SIGNATURE (60 ms every 33 ticks) IS COVERED WITHIN ONE SEND INTERVAL:

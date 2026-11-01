@@ -14,14 +14,15 @@
 //! `min_delay` is the only writable slot, so it carries the whole law:
 //!
 //! ```text
-//! headroom  = Q_p{d_i} - min{d_i} + one send interval
+//! headroom  = max(Q_p{l_i} - min{d_i}, 0) + one send interval
 //! min_delay = rtt/2 + headroom
 //! ```
 //!
 //! The buffer covers the full measured spread: `Q_p` of the lateness each packet had at the last
-//! read that lacked it, over the 60 s ring, less the drain-stamped 2 s min (`net::sync_margin`).
-//! It is bounded by the link's own worst lateness in that ring; a client frame stall adds nothing
-//! to it. No positive extrapolation horizon has an error bound in the presence of unknown
+//! read that lacked it, over the sample ring, less the drain-stamped 2 s min (`net::sync_margin`).
+//! Retention is nominally 60 s at full per-tick reception; the percentile excludes one sample at
+//! capacity. These frame-stamped observations include sender pacing and receiver scheduling,
+//! rather than measuring link delay independently. No positive extrapolation horizon has an error bound in the presence of unknown
 //! impulses; the contract and rejected traction bound live in
 //! `.agents/docs/design/net-motion-contract.md`.
 //!

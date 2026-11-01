@@ -1515,6 +1515,26 @@ mod tests {
         );
     }
 
+    /// The live registry must match the explicit protocol even after the Avian integration is
+    /// mounted. Its automatic defaults would silently reintroduce unused angular-velocity bytes.
+    #[test]
+    fn the_live_wire_has_no_unused_angular_velocity() {
+        use lightyear::prelude::client::ClientPlugins;
+        let mut app = crate::net::test_harness::base_app();
+        app.add_plugins(ClientPlugins {
+            tick_duration: crate::net::test_harness::TICK,
+        });
+        plugin(&mut app);
+        let registry = app
+            .world()
+            .resource::<lightyear::prelude::ComponentRegistry>();
+        assert!(
+            registry.is_registered::<Position>(),
+            "the probe sees the installed physics protocol"
+        );
+        assert!(!registry.is_registered::<avian3d::prelude::AngularVelocity>());
+    }
+
     /// A building's fallen piece draws at the cursor the hulls and the wall record draw at
     /// (ADR-0037): its carrier's pose is registered for interpolation, and the law between two
     /// samples moves the position along the line and turns along the shorter arc. Unregistered,
