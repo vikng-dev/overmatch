@@ -96,6 +96,7 @@ pub fn plugin(app: &mut App) {
     // `SimPhase` owns the cross-feature order: driving samples tick-start velocity before this
     // impulse changes it, then recoil integrates the new kick in the same tick.
     app.init_resource::<crate::WeaponClock>()
+        .add_systems(Startup, check_weapon_timestep)
         .add_systems(
             FixedLast,
             advance_weapon_clock.run_if(in_state(AppState::Playing)),
@@ -115,6 +116,11 @@ pub fn plugin(app: &mut App) {
             )
                 .in_set(GameplaySet),
         );
+}
+
+/// The composition must run at the timestep used by the asset duration parser, before play.
+fn check_weapon_timestep(time: Res<Time<Fixed>>) {
+    crate::sim_tick::assert_sim_timestep(time.timestep());
 }
 
 /// Advance the local-only fallback clock after a completed fixed tick. Network compositions
@@ -265,7 +271,6 @@ fn fire(
     // (`damage_cam::delivery::offline_plugin`) keys the rounds its pen cam records explain.
     shot_clock: Option<Res<crate::ShotClock>>,
     weapon_clock: Res<crate::WeaponClock>,
-    fixed_time: Res<Time<Fixed>>,
     mut commands: Commands,
 ) {
     for (muzzle_entity, weapon, slot, root) in &weapons {
@@ -462,7 +467,6 @@ fn fire(
                     }
                 }
             };
-            crate::sim_tick::assert_sim_timestep(fixed_time.timestep());
             state.arm(SimTick::new(weapon_clock.0), delay);
         }
     }
@@ -672,6 +676,19 @@ mod tests {
         let mut peer: WeaponGateState = serde_json::from_slice(&wire).unwrap();
         peer.pause(at(u32::MAX - 1));
         assert_eq!(peer.remaining_ticks(at(u32::MAX - 1)), 2);
+    }
+
+    /// The game's damage model: weapon eligibility assumes the asset parser's timestep.
+    /// Even an unarmed composition must refuse a mismatch at startup, before play.
+    #[test]
+    #[should_panic(expected = "every composition runs the fixed loop at the default timestep")]
+    fn a_nonstandard_weapon_timestep_is_refused_before_play() {
+        let mut app = App::new();
+        // FIXTURE DATA: a nondefault fixed rate, with a startup schedule even without the gate.
+        app.insert_resource(Time::<Fixed>::from_hz(60.0))
+            .init_schedule(Startup);
+        plugin(&mut app);
+        app.world_mut().run_schedule(Startup);
     }
 
     /// The game's damage model: deadline arming, crew-work pause/resume and the offline clock
