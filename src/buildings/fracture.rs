@@ -3950,14 +3950,25 @@ mod tests {
         assert_eq!(changes.groups[0].0, vec![0, 1, 2]);
     }
 
-    /// Uniform free fall has no relative gravitational demand (DERIVED). Every section law
-    /// must leave the seams untouched before the physics engine supplies a world contact.
+    /// Uniform free fall has no relative gravitational demand (DERIVED): in a group's frame its
+    /// weight is cancelled by the frame's acceleration, so a seam its own weight would open were
+    /// it held at one end stays shut while it falls under a negligible contact. A frame that
+    /// kept gravity (no cancel) opens it. ASSUMED fixture: the slab, its weak seam at 1e4 Pa,
+    /// which a standing cantilever's weight overloads (DERIVED, about 53 kPa at the seam).
     #[test]
     fn a_free_falling_group_splits_nothing() {
-        let (state, changes) = assess_slab(unsupported_slab(3), &[]);
+        let mut slab = unsupported_slab(3);
+        let mut seam = slab.joints[0]
+            .seam()
+            .expect("the fixture row has bonded seams");
+        seam.tensile = 1.0e4;
+        slab.joints[0].bond = Bond::Bonded(seam);
+        let mut touch = slab_contact(&slab, 1.0e-6);
+        touch.press = Vec3::Y * 1.0e-6;
+        let (state, changes) = assess_slab(slab, &[touch]);
         assert!(state.cracked.iter().all(|cracked| !cracked));
         assert_eq!(changes.groups.len(), 1);
-        assert!(changes.failures.is_empty());
+        assert!(changes.failures.is_empty(), "{:?}", changes.failures);
     }
 
     /// A single occupied chunk has no seam to fail. Its contact may change its rigid motion
