@@ -7,14 +7,16 @@
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 
+use bevy::input::keyboard::KeyCode;
 use bevy::math::{UVec2, Vec3};
 use serde::Deserialize;
 
 /// The variable that names the plan file.
 pub(crate) const VARIABLE: &str = "OVERMATCH_CAPTURE";
 
-/// A capture run: the frames it takes, and the scripted events it raises. Every field but
-/// `frames` is a cue a root mounts only where its event has an authority to raise it.
+/// A capture run: the frames it takes, the keys it holds, and the scripted events it raises.
+/// Every windowed root takes `frames` and `keys`; every other field is a cue a root mounts only
+/// where its event has an authority to raise it.
 #[derive(Deserialize, Debug, Clone, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct CapturePlan {
@@ -22,6 +24,10 @@ pub(crate) struct CapturePlan {
     /// the plan's cues run on a normal window and no frame is taken.
     #[serde(default)]
     pub(crate) frames: Option<Frames>,
+    /// Keys held down as a player holds them ([`KeyHold`]), for a view that shows only while its
+    /// key is held. Default none.
+    #[serde(default)]
+    pub(crate) keys: Vec<KeyHold>,
     /// One standing tree falls ([`Fell`]); the offline root alone mounts it.
     #[serde(default)]
     pub(crate) fell: Option<Fell>,
@@ -180,6 +186,18 @@ pub(crate) enum Camera {
     Follow { offset: (f32, f32, f32) },
 }
 
+/// One key read as pressed from app second `from` until app second `to` (`Time` as `Update`
+/// sees it), `0 <= from < to`: pressed on the first frame inside the window and released on the
+/// first frame past it, so a reader sees one press edge and one release edge.
+#[derive(Deserialize, Debug, Clone, Copy, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct KeyHold {
+    /// Bevy's physical key code by its variant name (`Tab`, `KeyR`).
+    pub(crate) key: KeyCode,
+    pub(crate) from: f32,
+    pub(crate) to: f32,
+}
+
 /// On the first fixed tick at or after app second `at`, the standing tree of map instance
 /// `instance` falls broken at segment `cut` toward azimuth bin `dir`, exactly as a law sets it.
 #[derive(Deserialize, Debug, Clone, PartialEq)]
@@ -328,6 +346,16 @@ impl CapturePlan {
                 }
             }
         }
+        for hold in &self.keys {
+            finite_at("keys", hold.from)?;
+            finite_at("keys", hold.to)?;
+            if hold.from >= hold.to {
+                return Err(format!(
+                    "keys: {:?} held from {} s to {} s is an empty window",
+                    hold.key, hold.from, hold.to
+                ));
+            }
+        }
         if let Some(fell) = &self.fell
             && !fell.at.is_finite()
         {
@@ -445,6 +473,7 @@ mod tests {
                     step_s: 0.0078125,
                     camera: Pose(eye: (1.0, 2.0, 3.0), look: (0.0, 0.0, 0.0)),
                 ),
+                keys: [(key: Tab, from: 2.0, to: 3.5)],
                 fell: (instance: "tree_0001", at: 4.0, cut: 1, dir: 3),
                 impacts: [(x: 1.0, z: -2.0, style: Layered, at: 5.0)],
                 shot: (round: "88mm_HE", mode: 1, target: Ground, at: 6.0),
@@ -475,6 +504,14 @@ mod tests {
                 eye: (1.0, 2.0, 3.0),
                 look: (0.0, 0.0, 0.0),
             }
+        );
+        assert_eq!(
+            plan.keys,
+            vec![KeyHold {
+                key: KeyCode::Tab,
+                from: 2.0,
+                to: 3.5,
+            }]
         );
         assert_eq!(
             plan.fell,
@@ -557,6 +594,7 @@ mod tests {
             (&plan.fell, plan.impacts.is_empty(), &plan.shot, &plan.wall),
             (&None, true, &None, &None)
         );
+        assert!(plan.keys.is_empty());
         let scene = &plan.scene;
         assert!(scene.xray);
         assert_eq!(
@@ -571,8 +609,8 @@ mod tests {
 
     /// A PLAN THAT CANNOT MEAN WHAT IT SAYS FAILS THE BOOT, NAMING ITS FIELD (ADR-0011): a typo, a
     /// missing path, an empty or negative time, a zero side, a non-positive step, a degenerate
-    /// pose, a non-positive calibre or charge, a sun at or past
-    /// the zenith, an unknown demo. Each was a silent default or a skipped cue under the variables
+    /// pose, an empty or negative key window, an unknown key, a non-positive calibre or charge, a
+    /// sun at or past the zenith, an unknown demo. Each was a silent default or a skipped cue under the variables
     /// the plan replaced.
     #[test]
     fn a_plan_outside_its_domain_is_refused_naming_the_field() {
@@ -614,6 +652,18 @@ mod tests {
             (
                 "(impacts: [(x: inf, z: 0.0, style: Compact, at: 1.0)])".to_owned(),
                 "impacts",
+            ),
+            (
+                "(keys: [(key: Tab, from: 3.0, to: 3.0)])".to_owned(),
+                "keys",
+            ),
+            (
+                "(keys: [(key: Tab, from: -1.0, to: 3.0)])".to_owned(),
+                "keys",
+            ),
+            (
+                "(keys: [(key: Tabb, from: 1.0, to: 3.0)])".to_owned(),
+                "Tabb",
             ),
             (
                 r#"(shot: (round: "88mm_AP", target: Tree, at: -2.0))"#.to_owned(),

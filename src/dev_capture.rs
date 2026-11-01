@@ -5,9 +5,9 @@
 //! (`OVERMATCH_START`, `OVERMATCH_TARGET`, `OVERMATCH_PROBE_FAR`, `OVERMATCH_PROBE_TANKS`,
 //! `OVERMATCH_BATTLE`, `OVERMATCH_XRAY`) also select the scene; a capture inherits their values.
 //!
-//! [`plugin`] takes the plan's `frames`. It is mounted after `crate::windowed_runtime` by every
-//! windowed root: the offline route, both sandboxes, and the windowed network client. A plan
-//! without `frames` runs its cues on a normal window and takes no frame (the scene of a frame
+//! [`plugin`] takes the plan's `frames` and `keys`. It is mounted after `crate::windowed_runtime`
+//! by every windowed root: the offline route, both sandboxes, and the windowed network client. A
+//! plan without `frames` runs its cues on a normal window and takes no frame (the scene of a frame
 //! cost measurement). The cue plugins take the plan's other fields where an authority
 //! can raise their events: [`offline_fell_plugin`], [`offline_impact_plugin`],
 //! [`offline_shot_plugin`] and [`offline_wall_plugin`] on the offline root alone, and
@@ -85,11 +85,50 @@ struct Capture {
     saved: usize,
 }
 
-/// The capture of the plan's `frames` (module doc); inert without a plan or without frames.
+/// The capture of the plan's `frames` (module doc) and its `keys`; each is inert where the plan
+/// lacks it.
 pub fn plugin(app: &mut App) {
     if let Some(frames) = plan().and_then(|plan| plan.frames.as_ref()) {
         mount(app, frames);
     }
+    if let Some(holds) = plan()
+        .map(|plan| plan.keys.clone())
+        .filter(|holds| !holds.is_empty())
+    {
+        info!("capture: keys {holds:?}");
+        app.insert_resource(KeyHolds {
+            holds,
+            held: Vec::new(),
+        })
+        .add_systems(PreUpdate, hold_keys.after(bevy::input::InputSystems));
+    }
+}
+
+/// The plan's key holds ([`plan::KeyHold`]), and the keys they hold down this frame.
+#[derive(Resource, Debug)]
+struct KeyHolds {
+    holds: Vec<plan::KeyHold>,
+    held: Vec<KeyCode>,
+}
+
+/// Press every key whose window holds the frame's second and release each one whose last window
+/// has passed. After the input systems, which clear the edges and apply the devices' events, and
+/// before `Update`'s readers.
+fn hold_keys(time: Res<Time>, mut holds: ResMut<KeyHolds>, mut keys: ResMut<ButtonInput<KeyCode>>) {
+    let now = time.elapsed_secs();
+    let active: Vec<KeyCode> = holds
+        .holds
+        .iter()
+        .filter(|hold| hold.from <= now && now < hold.to)
+        .map(|hold| hold.key)
+        .collect();
+    for key in holds.held.iter().filter(|key| !active.contains(key)) {
+        keys.release(*key);
+    }
+    for key in &active {
+        keys.press(*key);
+    }
+    holds.held = active;
 }
 
 fn mount(app: &mut App, frames: &plan::Frames) {
@@ -651,6 +690,50 @@ mod tests {
                 .drain()
                 .any(|exit| exit == AppExit::error())
         );
+    }
+
+    /// A KEY HOLD READS AS ONE HELD PRESS: pressed with one press edge on the first frame of its
+    /// window, still pressed with no new edge inside it, and released with one release edge on the
+    /// first frame past it. A view gated on `pressed` (the Battle board on Tab) shows for exactly
+    /// the window; a mutant that only taps the key, or never releases it, fails here.
+    #[test]
+    fn a_key_hold_presses_once_and_releases_after_its_window() {
+        let mut app = App::new();
+        app.init_resource::<Time>()
+            .init_resource::<ButtonInput<KeyCode>>()
+            .insert_resource(KeyHolds {
+                holds: vec![plan::KeyHold {
+                    key: KeyCode::Tab,
+                    from: 1.0,
+                    to: 2.0,
+                }],
+                held: Vec::new(),
+            })
+            .add_systems(Update, hold_keys);
+        let at = |app: &mut App, seconds: f32| {
+            app.world_mut()
+                .resource_mut::<ButtonInput<KeyCode>>()
+                .clear();
+            let mut time = app.world_mut().resource_mut::<Time>();
+            let step = seconds - time.elapsed_secs();
+            time.advance_by(std::time::Duration::from_secs_f32(step));
+            app.update();
+            let keys = app.world().resource::<ButtonInput<KeyCode>>();
+            (
+                keys.pressed(KeyCode::Tab),
+                keys.just_pressed(KeyCode::Tab),
+                keys.just_released(KeyCode::Tab),
+            )
+        };
+        assert_eq!(
+            at(&mut app, 0.5),
+            (false, false, false),
+            "before the window"
+        );
+        assert_eq!(at(&mut app, 1.0), (true, true, false), "the window opens");
+        assert_eq!(at(&mut app, 1.5), (true, false, false), "held, no new edge");
+        assert_eq!(at(&mut app, 2.0), (false, false, true), "the window closes");
+        assert_eq!(at(&mut app, 3.0), (false, false, false), "after the window");
     }
 
     /// The capture times sort and fold times sharing a frame name into one frame, so two captures
