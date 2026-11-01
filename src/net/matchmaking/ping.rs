@@ -55,23 +55,54 @@ pub(super) fn summarize(samples_ms: &[f64]) -> Option<PingSummary> {
     })
 }
 
+/// A beacon address can fail to resolve, or resolve successfully without any address. The
+/// worker reports the typed cause in its log and shows this location as unavailable.
+#[derive(Debug)]
+pub(super) enum BeaconError {
+    Resolve {
+        endpoint: String,
+        cause: std::io::Error,
+    },
+    NoAddresses {
+        endpoint: String,
+    },
+}
+
+impl std::fmt::Display for BeaconError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Resolve { endpoint, cause } => {
+                write!(f, "cannot resolve the beacon {endpoint}: {cause}")
+            }
+            Self::NoAddresses { endpoint } => {
+                write!(f, "the beacon {endpoint} resolved to no address")
+            }
+        }
+    }
+}
+
 /// The beacon's TCP endpoint: `host` is an IP in Edgegap's list; a hostname is resolved, IPv4
 /// first. Blocking (DNS), so it runs on the probe's own thread. The error names why the host
 /// gave no address.
-pub(super) fn beacon_addr(host: &str, port: u16) -> Result<SocketAddr, String> {
+pub(super) fn beacon_addr(host: &str, port: u16) -> Result<SocketAddr, BeaconError> {
     if let Ok(ip) = host.parse::<IpAddr>() {
         return Ok(SocketAddr::new(ip, port));
     }
     let resolved: Vec<SocketAddr> = (host, port)
         .to_socket_addrs()
-        .map_err(|error| format!("cannot resolve the beacon {host}:{port}: {error}"))?
+        .map_err(|cause| BeaconError::Resolve {
+            endpoint: format!("{host}:{port}"),
+            cause,
+        })?
         .collect();
     resolved
         .iter()
         .find(|addr| addr.is_ipv4())
         .or_else(|| resolved.first())
         .copied()
-        .ok_or_else(|| format!("the beacon {host}:{port} resolved to no address"))
+        .ok_or_else(|| BeaconError::NoAddresses {
+            endpoint: format!("{host}:{port}"),
+        })
 }
 
 /// Time `samples` TCP connects to `addr`, `gap` apart; each failed or timed-out connect is
