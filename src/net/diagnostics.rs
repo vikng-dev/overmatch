@@ -13,7 +13,8 @@ use crate::track::sim::TrackContacts;
 ///
 /// A part is checked when its pose was written since the probe's last run (its first run checks
 /// every part): a value checked finite and not written since is the same finite value, so the
-/// per-tick cost is the parts that moved, not every collider on the map.
+/// expensive checks read only written parts. Bevy's change filter still scans every matching
+/// part's change ticks.
 pub(crate) fn fixed_nan_probe(
     bodies: Query<
         (

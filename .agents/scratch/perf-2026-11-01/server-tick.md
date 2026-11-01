@@ -16,8 +16,8 @@ differs from alpha.3"), which is itself DERIVED.
 
    | Phase | Fixed busy | 1st | 2nd | 3rd | 4th |
    |---|---|---|---|---|---|
-   | Empty map (server alone, 13 066 entities, no tank) | 1 619 us | `ballistics::motion` collider history, 718 us (44 %) | avian step (`PhysicsSchedule`), 364 us (22 %) | avian collider-transform propagation, 265 us (16 %) | `net::diagnostics::fixed_nan_probe`, 71 us (4 %) |
-   | Combat (29 bots + 1 parked client, 18 250 entities) | 6 819 us | `track::sim::apply_track_forces`, 3 601 us (53 %) | avian step, 1 307 us (19 %) | `ballistics::motion` collider history, 780 us (11 %) | avian collider-transform propagation, 384 us (6 %) |
+   | Empty map (server alone, 13 066 entities, no tank) | 1 619 us | `ballistics::motion` history + child placement, 718 us (44 %) | avian step (`PhysicsSchedule`), 364 us (22 %) | avian collider-transform propagation, 265 us (16 %) | `net::diagnostics::fixed_nan_probe`, 71 us (4 %) |
+   | Combat (29 bots + 1 parked client, 18 250 entities) | 6 819 us | `track::sim::apply_track_forces`, 3 601 us (53 %) | avian step, 1 307 us (19 %) | `ballistics::motion` history + child placement, 780 us (11 %) | avian collider-transform propagation, 384 us (6 %) |
 
    Outside the tick, every 4 ms frame (3.33 per tick) adds 1 149 us (empty) and 1 469 us (combat)
    per tick of transform propagation, visibility, receive and send (MEASURED, same traces). On one
@@ -28,18 +28,23 @@ differs from alpha.3"), which is itself DERIVED.
    tick p50 5.2 ms (MEASURED). `apply_track_forces` ran its tanks with `par_iter_mut` in
    `v0.7.0-alpha.5`; "driving: carry tanks over pieces through the belt footprint (#238)"
    replaced that with one serial loop over the tanks and a shared reaction ledger. It is 53 % of
-   the combat tick's work and was the share alpha.5's second core ran. Not fixed here (see "Not
-   fixed").
+   the combat tick's work. That alpha.5's second core ran this share is ASSUMED: no alpha.5
+   profile or measured bisect was taken. The owner directs optimization on one vCPU first.
 3. **The empty map's tick goes mostly to the collider history** that "ballistics: retain composed
    collider poses between walks (#191)" added after alpha.5: two hash maps over every collider and
    every body rebuilt each tick, plus the per-collider pass of `seed_births`. Fixed: the tables
    are kept and only what moved is rewritten (fix 1). The NaN probe's full collider pass is fix 2.
-4. **The rebuild and the combat growth have one cause:** a collider despawned off a body leaves
+4. **The rebuild's leaked pairs and the combat's pair growth have one cause:** a collider despawned off a body leaves
    its broad-phase proxy behind in Avian's standalone tree, and that proxy pairs with every collider
    its bounds overlap, for the rest of the process. The rebuild orphans the whole map's proxies
    (46 087 contact pairs where a fresh map holds none); a combat orphans every despawned part's.
    Fixed in the vendored Avian (fix 3): 0 pairs after the rebuild, fill-up physics 594 to 232 us
-   (MEASURED).
+   (MEASURED). This attributes pair growth, not every tick-cost increase or entity growth;
+   the unattributed costs remain listed below.
+
+The TLDR's `ballistics::motion` aggregate includes child placement. The history-only sum is
+585 us before (DERIVED: 432 + 153), 36 % of the empty tick, and 68 us after (DERIVED: 46 + 22).
+The child-placement rows below are separate costs, never added to that aggregate a second time.
 
 ## Method
 
@@ -83,8 +88,8 @@ Empty map, traced, per tick (MEASURED, M4; mean of a system's runs times its run
 The after run's machine was slower: systems this lane did not touch cost 1.5-2.2x more in it
 (rows 4-5, MEASURED), so the three reductions are lower bounds. The untraced A B B A runs (tick
 p50 1 861 / 1 821 / 1 326 / 3 849 us, main / fixed / fixed / main, MEASURED) are too noisy to
-read as a tick delta; the traced per-system table is the evidence. The motion history was 586 us
-of a 1 619 us fixed tick (36 %) and is 67 us after (DERIVED: the rows above), so on Edgegap the
+read as a tick delta; the traced per-system table is the evidence. The history-only sum was 585 us
+of a 1 619 us fixed tick (36 %) and is 68 us after (DERIVED: the rows above), so on Edgegap the
 empty map's tick should fall by about 1.9 ms (DERIVED with the 3.7x ratio, so a rough figure).
 
 Tests: `motion::tests::the_kept_history_equals_a_full_recompute_at_every_boundary` (the kept
@@ -166,3 +171,28 @@ After fix 3 the pairs stay between 145 and 425 and fall to 1 at Results (table a
   16.5 min Battle was not run). Also the short-mode cycle runs' Combat 1 tick p50 of 8.6 ms
   against 4.8-5.2 ms in their Combat 2 and 5.2 ms in the shipped-mode combat run (MEASURED, with
   and without `sample` alike), with the same tanks and entities.
+
+## server-perf-2: verification of the previous lane's doubles
+
+Subject: the game's damage model and dedicated server tick, game state only. Each review was
+checked against the current source. The binding lane rules prohibit pricing runs even when the
+brief requests them; this lane defers new tick and per-system timings to the orchestrator's
+batched pricing lane. Existing MEASURED local timings above remain the baseline, not a claimed
+after measurement for the changes below.
+
+| reviewer | finding | verified / not a defect | fixed in (subject) |
+|---|---|---|---|
+| Codex | Enabling a stationary collider can leave its history absent | Verified: removing a disabling marker does not advance any watched pose tick; read disabling-component removals at birth and snapshot boundaries | ballistics: retain history when colliders are re-enabled (#250) |
+| Codex | `Changed` filters still scan the world's matching entities | Verified; retained tables reduce composition and writes, not the change-tick scan | ballistics: retain history when colliders are re-enabled (#250) |
+| Claude | Production placement-before-snapshot edge lacks a regression guard | Verified test gap; exercise `mount_collider_motion` itself across solver moves | ballistics: retain history when colliders are re-enabled (#250) |
+| Claude | Composition test no longer rejects stale child Position | Verified test gap; invoke snapshot without a preceding placement pass | ballistics: retain history when colliders are re-enabled (#250) |
+| Claude | No body-removal coverage of the retained body table | Verified test gap; remove the body in the full-recompute comparison | ballistics: retain history when colliders are re-enabled (#250) |
+| Claude | Missing drained entries are legitimate but unnamed | Verified; removal observers can already have erased a last-interval mover | ballistics: retain history when colliders are re-enabled (#250) |
+| Claude | Cost claims and frozen-membership claim overstate the invariant | Verified; clarify scans and immediate removal observers in module docs | ballistics: retain history when colliders are re-enabled (#250) |
+| Claude | TLDR aggregate and history-only sums use one name | Verified; distinguish history + placement from history-only, correct rounded-row arithmetic | ballistics: retain history when colliders are re-enabled (#250) |
+| Claude | Alpha.5 second-core attribution lacks a measurement | Verified; mark the attribution ASSUMED rather than measured | ballistics: retain history when colliders are re-enabled (#250) |
+| Claude | Pair-leak attribution does not explain all tick/entity growth | Verified; limit the claim to pair growth and retain the open questions | ballistics: retain history when colliders are re-enabled (#250) |
+
+The proxy-key write-back itself is sound: either observer order removes the proxy from its
+current tree. No second patch to that fix is warranted. The existing Avian removal guards
+remain the invariant tests.

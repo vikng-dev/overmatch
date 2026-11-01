@@ -8,7 +8,13 @@
 use avian3d::prelude::{
     Collider, ColliderOf, ColliderTransform, Position, RigidBody, Rotation, SimpleCollider,
 };
-use bevy::platform::collections::HashMap;
+use bevy::ecs::{
+    component::ComponentId,
+    entity_disabling::DefaultQueryFilters,
+    lifecycle::{RemovedComponentEntity, RemovedComponentMessages},
+    message::MessageCursor,
+};
+use bevy::platform::collections::{HashMap, HashSet};
 use bevy::prelude::*;
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -23,14 +29,15 @@ pub(super) struct Poses {
     pub to: Pose,
 }
 
-/// The game's damage model: membership is frozen at a walk boundary. A new collider has no
-/// earlier trajectory and is born with identical endpoints; a removed collider leaves the table
+/// The game's damage model: a new or re-enabled collider has no earlier visible trajectory and
+/// is born with identical endpoints; a removed collider leaves the table
 /// (the `Remove` observers [`forget_collider`] and [`forget_body`]).
 ///
 /// The tables are kept, not rebuilt: a boundary rewrites only the entries whose pose inputs were
 /// written since the last one, and closes the entries that moved in the last interval. An entry
 /// nothing wrote keeps the endpoints it had, which are the endpoints a full recompute would give
-/// it. The cost per boundary is the moved entries, not the world's colliders.
+/// it. Bevy's change filters still scan the matching entities; pose composition and hash-table
+/// writes are limited to the changed entries.
 #[derive(Resource, Default)]
 pub(super) struct ColliderMotion {
     pub colliders: HashMap<Entity, Poses>,
@@ -40,6 +47,8 @@ pub(super) struct ColliderMotion {
     /// The entries whose endpoints differ, so the next boundary can close them.
     moving_colliders: Vec<Entity>,
     moving_bodies: Vec<Entity>,
+    /// Re-enabled entities already given a pre-physics birth pose at this boundary.
+    seeded_enabled: HashSet<Entity>,
 }
 
 type Colliders<'w, 's> = Query<
@@ -80,35 +89,83 @@ fn composed_pose(
     }
 }
 
+/// The game's damage model: disabling-marker removals can admit stationary physics entities
+/// without changing any pose tick. Each boundary reads its own cursor over these removals.
+#[derive(Default)]
+pub(super) struct EnabledEntities(Vec<(ComponentId, MessageCursor<RemovedComponentEntity>)>);
+
+impl EnabledEntities {
+    fn read(
+        &mut self,
+        filters: &DefaultQueryFilters,
+        removals: &RemovedComponentMessages,
+    ) -> HashSet<Entity> {
+        let mut enabled = HashSet::new();
+        for id in filters.disabling_ids() {
+            // No removal messages means no entity lost this disabling component.
+            let Some(messages) = removals.get(id) else {
+                continue;
+            };
+            let index = self
+                .0
+                .iter()
+                .position(|(known, _)| *known == id)
+                .unwrap_or_else(|| {
+                    self.0.push((id, MessageCursor::default()));
+                    self.0.len() - 1
+                });
+            enabled.extend(self.0[index].1.read(messages).cloned().map(Entity::from));
+        }
+        enabled
+    }
+}
+
 /// The game's damage model: a collider born at a boundary starts at its birth pose, before
 /// physics can move it. A replaced shape is new geometry at that same boundary. A body or
 /// collider born since the last run is `Added`; a replaced shape is `Changed`.
 pub(super) fn seed_births(
     mut history: ResMut<ColliderMotion>,
-    colliders: Query<
-        (
-            Entity,
-            &'static Position,
-            &'static Rotation,
-            Option<&'static ColliderOf>,
-            Option<&'static ColliderTransform>,
-        ),
-        Changed<Collider>,
-    >,
+    colliders: Colliders,
+    changed: Query<Entity, Changed<Collider>>,
     bodies: Query<(&Position, &Rotation)>,
-    roots: Query<(Entity, &Position, &Rotation), Added<RigidBody>>,
+    roots: Query<(Entity, &Position, &Rotation), With<RigidBody>>,
+    added: Query<Entity, Added<RigidBody>>,
+    (filters, removals, mut enabled): (
+        Res<DefaultQueryFilters>,
+        &RemovedComponentMessages,
+        Local<EnabledEntities>,
+    ),
 ) {
-    for (entity, position, rotation) in &roots {
+    let enabled = enabled.read(&filters, removals);
+    history.seeded_enabled.clone_from(&enabled);
+    for entity in added
+        .iter()
+        .chain(enabled.iter().copied().filter(|&e| !added.contains(e)))
+    {
+        // Re-enabling any entity emits a removal; only live rigid bodies seed body history.
+        let Ok((_, position, rotation)) = roots.get(entity) else {
+            continue;
+        };
         let pose = Pose {
             position: position.0,
             rotation: rotation.0,
         };
-        history.bodies.entry(entity).or_insert(Poses {
-            from: pose,
-            to: pose,
-        });
+        history.bodies.insert(
+            entity,
+            Poses {
+                from: pose,
+                to: pose,
+            },
+        );
     }
-    for (entity, position, rotation, owner, local) in &colliders {
+    for entity in changed
+        .iter()
+        .chain(enabled.iter().copied().filter(|&e| !changed.contains(e)))
+    {
+        // An entity may be unrelated to physics, despawned, or still disabled by another marker.
+        let Ok((_, position, rotation, _, owner, local)) = colliders.get(entity) else {
+            continue;
+        };
         let pose = composed_pose(entity, position, rotation, owner, local, &bodies);
         history.colliders.insert(
             entity,
@@ -179,16 +236,24 @@ pub(super) fn snapshot(
         ),
     >,
     bodies: Query<(&Position, &Rotation)>,
-    roots: Query<
-        (Entity, &Position, &Rotation),
+    roots: Query<(Entity, &Position, &Rotation), With<RigidBody>>,
+    written_roots: Query<
+        Entity,
         (
             With<RigidBody>,
             Or<(Changed<Position>, Changed<Rotation>, Added<RigidBody>)>,
         ),
     >,
+    (filters, removals, mut enabled): (
+        Res<DefaultQueryFilters>,
+        &RemovedComponentMessages,
+        Local<EnabledEntities>,
+    ),
 ) {
+    let enabled = enabled.read(&filters, removals);
     let history = &mut *history;
-    // The last interval's movers come to rest unless written again below.
+    // The last interval's movers come to rest unless written again below. A removed collider or
+    // body has already left its table through the removal observers, so it has nothing to close.
     for entity in history.moving_colliders.drain(..) {
         if let Some(poses) = history.colliders.get_mut(&entity) {
             poses.from = poses.to;
@@ -200,13 +265,22 @@ pub(super) fn snapshot(
         }
     }
     let mut largest_motion = 0.0f32;
-    for entity in &written {
+    for entity in written.iter().chain(
+        enabled
+            .iter()
+            .copied()
+            .filter(|&e| !written.contains(e) && colliders.contains(e)),
+    ) {
         let (_, position, rotation, collider, owner, local) = colliders
             .get(entity)
-            .expect("game's damage model: a written collider matches the collider query");
+            .expect("game's damage model: a written or re-enabled collider has its required pose");
         let to = composed_pose(entity, position, rotation, owner, local, &bodies);
         // Absence means birth at this boundary, not an invented earlier pose.
-        let from = history.colliders.get(&entity).map_or(to, |poses| poses.to);
+        let from = if enabled.contains(&entity) && !history.seeded_enabled.contains(&entity) {
+            to
+        } else {
+            history.colliders.get(&entity).map_or(to, |poses| poses.to)
+        };
         let poses = Poses { from, to };
         if from != to {
             largest_motion = largest_motion.max(point_motion_bound(poses, &collider));
@@ -214,18 +288,31 @@ pub(super) fn snapshot(
         }
         history.colliders.insert(entity, poses);
     }
-    for (entity, position, rotation) in &roots {
+    for entity in written_roots.iter().chain(
+        enabled
+            .iter()
+            .copied()
+            .filter(|&e| !written_roots.contains(e) && roots.contains(e)),
+    ) {
+        let (_, position, rotation) = roots
+            .get(entity)
+            .expect("game's damage model: a written or re-enabled body has its required pose");
         let to = Pose {
             position: position.0,
             rotation: rotation.0,
         };
-        let from = history.bodies.get(&entity).map_or(to, |poses| poses.to);
+        let from = if enabled.contains(&entity) && !history.seeded_enabled.contains(&entity) {
+            to
+        } else {
+            history.bodies.get(&entity).map_or(to, |poses| poses.to)
+        };
         if from != to {
             history.moving_bodies.push(entity);
         }
         history.bodies.insert(entity, Poses { from, to });
     }
     history.largest_motion = largest_motion;
+    history.seeded_enabled.clear();
 }
 
 /// The game's damage model: a conservative geometric displacement for any collider point.
@@ -592,8 +679,8 @@ mod tests {
         app
     }
 
-    /// The game's damage model: the walk needs successive physics poses even when rendering
-    /// never runs. Mutant: reading the child's stale Position loses body, servo and recoil motion.
+    /// The game's damage model: the walk composes body, servo and recoil motion even before a
+    /// child-placement pass. Reading the child's stale Position instead loses that motion.
     #[test]
     fn history_composes_body_and_child_motion_and_expires_removed_colliders() {
         let mut app = app();
@@ -618,7 +705,8 @@ mod tests {
                 },
             ))
             .id();
-        app.update();
+        use bevy::ecs::system::RunSystemOnce;
+        app.world_mut().run_system_once(snapshot).unwrap();
         let birth = app.world().resource::<ColliderMotion>().colliders[&child];
         assert_eq!(birth.from, birth.to);
         assert_eq!(birth.to.position, Vec3::X);
@@ -632,7 +720,7 @@ mod tests {
             rotation: Rotation(local_turn),
             ..default()
         });
-        app.update();
+        app.world_mut().run_system_once(snapshot).unwrap();
         let history = app.world().resource::<ColliderMotion>();
         let moved = history.colliders[&child];
         assert_eq!(moved.from, birth.to);
@@ -799,7 +887,7 @@ mod tests {
                 Collider::cuboid(1.0, 1.0, 1.0),
             ))
             .id();
-        let steps: [(&str, Box<dyn Fn(&mut World)>); 7] = [
+        let steps: [(&str, Box<dyn Fn(&mut World)>); 8] = [
             ("births", Box::new(|_| {})),
             (
                 "the body moves its children",
@@ -841,6 +929,13 @@ mod tests {
                 }),
             ),
             ("nothing written again", Box::new(|_| {})),
+            (
+                "the body and its last child leave",
+                Box::new(move |world| {
+                    world.despawn(left);
+                    world.despawn(body);
+                }),
+            ),
         ];
         let (mut colliders, mut bodies) = (HashMap::new(), HashMap::new());
         for (label, write) in steps {
@@ -901,6 +996,164 @@ mod tests {
                 pair[0],
                 pair[1]
             );
+        }
+    }
+
+    /// The game's damage model: a stationary collider enabled without any pose write must have
+    /// a birth chord before the walk can encounter it. Default filters hide disabled births.
+    #[test]
+    fn enabling_a_stationary_collider_seeds_its_history() {
+        use bevy::ecs::entity_disabling::Disabled;
+        let mut app = app();
+        app.add_systems(PreUpdate, seed_births);
+        let entity = app
+            .world_mut()
+            .spawn((
+                Disabled,
+                Position(Vec3::X),
+                Rotation::IDENTITY,
+                Collider::sphere(0.5),
+            ))
+            .id();
+        app.update();
+        app.update();
+        assert!(
+            !app.world()
+                .resource::<ColliderMotion>()
+                .colliders
+                .contains_key(&entity)
+        );
+        app.world_mut().entity_mut(entity).remove::<Disabled>();
+        app.update();
+        let poses = app.world().resource::<ColliderMotion>().colliders[&entity];
+        assert_eq!(poses.from, poses.to);
+        assert_eq!(poses.to.position, Vec3::X);
+    }
+
+    /// The game's damage model: invisible motion is not a visible interval. An entity enabled
+    /// after birth seeding starts fresh, while unrelated enable messages cannot enter the table.
+    #[test]
+    fn enabling_after_the_birth_boundary_does_not_replay_invisible_motion() {
+        use bevy::ecs::entity_disabling::Disabled;
+        let mut app = app();
+        let body = app
+            .world_mut()
+            .spawn((
+                RigidBody::Static,
+                Position(Vec3::ZERO),
+                Rotation::IDENTITY,
+                Collider::sphere(0.5),
+            ))
+            .id();
+        let unrelated = app.world_mut().spawn(Disabled).id();
+        app.update();
+        app.world_mut()
+            .entity_mut(body)
+            .insert((Disabled, Position(Vec3::Z)));
+        app.update();
+        app.update();
+        app.world_mut().entity_mut(body).remove::<Disabled>();
+        app.world_mut().entity_mut(unrelated).remove::<Disabled>();
+        app.world_mut().run_schedule(Update);
+        let history = app.world().resource::<ColliderMotion>();
+        for table in [&history.colliders, &history.bodies] {
+            let poses = table[&body];
+            assert_eq!(poses.from, poses.to);
+            assert_eq!(poses.to.position, Vec3::Z);
+            assert!(!table.contains_key(&unrelated));
+        }
+    }
+
+    /// The game's damage model: custom default filters have the same admission semantics as
+    /// Disabled. The walk must see re-enabled bodies and colliders even between its boundaries.
+    #[test]
+    fn custom_disabling_markers_admit_bodies_and_colliders_at_either_boundary() {
+        #[derive(Component)]
+        struct Hidden;
+        for seed_first in [true, false] {
+            let mut app = App::new();
+            app.world_mut().register_disabling_component::<Hidden>();
+            app.init_resource::<ColliderMotion>()
+                .add_systems(PreUpdate, seed_births)
+                .add_systems(Update, snapshot);
+            let entity = app
+                .world_mut()
+                .spawn((
+                    Hidden,
+                    RigidBody::Static,
+                    Position(Vec3::Z),
+                    Rotation::IDENTITY,
+                    Collider::sphere(0.5),
+                ))
+                .id();
+            app.update();
+            app.update();
+            app.world_mut().entity_mut(entity).remove::<Hidden>();
+            if seed_first {
+                app.world_mut().run_schedule(PreUpdate);
+            }
+            app.world_mut().run_schedule(Update);
+            let history = app.world().resource::<ColliderMotion>();
+            for table in [&history.colliders, &history.bodies] {
+                let poses = table[&entity];
+                assert_eq!(poses.from, poses.to);
+                assert_eq!(poses.to.position, Vec3::Z);
+            }
+        }
+    }
+
+    /// The game's damage model: the production mount must place children before recording the
+    /// completed interval. The walk relies on a body moving in the solver being seen this tick.
+    #[test]
+    fn the_production_mount_records_children_after_their_body_moves() {
+        use crate::state::SimPhase;
+        use avian3d::prelude::PhysicsSystems;
+        let mut app = App::new();
+        super::super::mount_collider_motion(&mut app);
+        app.configure_sets(
+            FixedPostUpdate,
+            (
+                PhysicsSystems::Prepare,
+                PhysicsSystems::StepSimulation,
+                PhysicsSystems::Writeback,
+                SimPhase::ColliderPoses,
+            )
+                .chain(),
+        );
+        let body = app
+            .world_mut()
+            .spawn((
+                RigidBody::Kinematic,
+                Position(Vec3::ZERO),
+                Rotation::IDENTITY,
+            ))
+            .id();
+        let child = app
+            .world_mut()
+            .spawn((
+                Collider::sphere(0.5),
+                Position(Vec3::ZERO),
+                Rotation::IDENTITY,
+                ColliderOf { body },
+                ColliderTransform {
+                    translation: Vec3::X,
+                    ..default()
+                },
+            ))
+            .id();
+        app.world_mut().run_schedule(FixedPostUpdate);
+        app.add_systems(
+            FixedPostUpdate,
+            (move |mut poses: Query<&mut Position, With<RigidBody>>| {
+                poses.get_mut(body).unwrap().0 += Vec3::Z;
+            })
+            .in_set(PhysicsSystems::StepSimulation),
+        );
+        for step in 1..=2 {
+            app.world_mut().run_schedule(FixedPostUpdate);
+            let poses = app.world().resource::<ColliderMotion>().colliders[&child];
+            assert_eq!(poses.from.position, Vec3::X + Vec3::Z * (step - 1) as f32);
+            assert_eq!(poses.to.position, Vec3::X + Vec3::Z * step as f32);
         }
     }
 
