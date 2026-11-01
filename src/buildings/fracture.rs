@@ -65,7 +65,7 @@
 use std::f32::consts::PI;
 
 use bevy::ecs::entity::Entity;
-use bevy::math::{Mat3, Vec3};
+use bevy::math::{DVec3, Mat3, Vec3};
 
 use crate::substances::{BlastFacts, REFERENCE_FACTOR, SubstanceRegistry};
 
@@ -1782,12 +1782,22 @@ fn field(structure: &Structure, group: &[usize], loads: &[Load]) -> (Vec3, f32) 
     let inertial = loads.iter().filter(|load| {
         matches!(load.origin, Origin::Inertia { .. }) && group.binary_search(&load.chunk).is_ok()
     });
-    let press: Vec3 = inertial.clone().map(|load| load.press).sum();
+    let press: DVec3 = inertial.clone().map(|load| load.press.as_dvec3()).sum();
     if inertial.count() == 0 {
         return (Vec3::Y, GRAVITY);
     }
-    let mass: f32 = group.iter().map(|&c| structure.chunks[c].mass).sum();
-    let body_force = Vec3::NEG_Y * GRAVITY + press / mass;
+    // Cancel the same rounded gravity products the frame supplies, before division.
+    // Accumulating in f64 preserves equal/opposite f32 forces instead of inventing an up
+    // direction from a rounded average in uniform free fall.
+    let gravity: DVec3 = group
+        .iter()
+        .map(|&c| (Vec3::NEG_Y * (GRAVITY * structure.chunks[c].mass)).as_dvec3())
+        .sum();
+    let mass: f64 = group
+        .iter()
+        .map(|&c| f64::from(structure.chunks[c].mass))
+        .sum();
+    let body_force = ((gravity + press) / mass).as_vec3();
     let g = body_force.length();
     if g > 0.0 {
         (-body_force / g, g)
@@ -2655,9 +2665,16 @@ fn force_wrench(
                 .filter(|load| group.binary_search(&load.chunk).is_ok())
                 .filter_map(|load| Some((load.at, force(load)?))),
         )
-        .fold((Vec3::ZERO, Vec3::ZERO), |(force, moment), (at, push)| {
-            (force + push, moment + (at - about).cross(push))
+        // Matching gravity and frame forces must cancel before a rest reads their sign.
+        // f64 accumulation retains the supplied f32 products and their point couples.
+        .fold((DVec3::ZERO, DVec3::ZERO), |(force, moment), (at, push)| {
+            let push = push.as_dvec3();
+            (
+                force + push,
+                moment + (at.as_dvec3() - about.as_dvec3()).cross(push),
+            )
         });
+    let result = (result.0.as_vec3(), result.1.as_vec3());
     assert!(
         result.0.is_finite() && result.1.is_finite(),
         "finite chunk weights and load forces have a finite resultant force and moment"
@@ -4005,6 +4022,37 @@ mod tests {
         assert!(state.cracked.iter().all(|cracked| !cracked));
         assert_eq!(changes.groups.len(), 1);
         assert!(changes.failures.is_empty(), "{:?}", changes.failures);
+    }
+
+    /// Uniform free fall cannot invent an up direction or a rigid wrench. Rest-bearing
+    /// decisions rely on exact cancellation of the frame's matching gravity products.
+    /// Fixture masses exercise both signs of the f32 averaged-gravity residual.
+    #[test]
+    fn a_free_fall_field_and_wrench_are_zero() {
+        for masses in [[0.1, 0.1, 0.3], [1.1, 2.3, 3.7]] {
+            let mut slab = unsupported_slab(3);
+            for (chunk, mass) in slab.chunks.iter_mut().zip(masses) {
+                chunk.mass = mass;
+            }
+            let loads = in_group_frames(
+                &slab,
+                &WallState::new(&slab),
+                &[slab_contact(&slab, 0.0)],
+                Vec3::ZERO,
+            );
+            assert_eq!(field(&slab, &[0, 1, 2], &loads), (Vec3::ZERO, 0.0));
+            assert_eq!(
+                force_wrench(
+                    &slab,
+                    &[0, 1, 2],
+                    &loads,
+                    Vec3::NEG_Y * GRAVITY,
+                    Vec3::new(0.125, 0.25, -0.5),
+                    |load| Some(load.press),
+                ),
+                (Vec3::ZERO, Vec3::ZERO)
+            );
+        }
     }
 
     /// A single occupied chunk has no seam to fail. Its contact may change its rigid motion
