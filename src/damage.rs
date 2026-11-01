@@ -226,8 +226,9 @@ impl From<FunctionRole> for Part {
 }
 
 /// One contributor within a [`GradedGroup`]: `(coefficient, parts)`. `coefficient` is the member's
-/// share (`Pool`) or ceiling (`Backup`); the qualities of the `parts` it depends on multiply into
-/// it. An empty `parts` list = a pure ceiling with no dependency (e.g. a hand-crank backup path).
+/// share (`Pool`) or ceiling (`Backup`), in (0, 1] (the sheet's `validate` refuses any other); the
+/// qualities of the `parts` it depends on multiply into it. An empty `parts` list = a pure ceiling
+/// with no dependency (e.g. a hand-crank backup path).
 pub type Member = (f32, Vec<Part>);
 
 /// A requirement group within a [`Capability`] (design §7b). Groups AND together (`min` across

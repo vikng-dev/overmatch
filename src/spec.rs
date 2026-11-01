@@ -13,7 +13,9 @@ use bevy::prelude::*;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
-use crate::damage::{Capability, CrewStation, FunctionRole, GradedGroup, Group, Part, Requirement};
+use crate::damage::{
+    Capability, CrewStation, FunctionRole, GradedGroup, Group, Member, Part, Requirement,
+};
 use crate::guns::{GunError, GunRegistry, Mechanism};
 use crate::provenance::Sourced;
 use crate::tank::{ServoSpec, Tank};
@@ -404,6 +406,16 @@ fn requirement_parts(requirement: &Requirement) -> Vec<Part> {
                 .collect(),
         })
         .collect()
+}
+
+/// Every graded member of a requirement, through its `Pool` and `Backup` groups.
+fn requirement_members(requirement: &Requirement) -> impl Iterator<Item = &Member> {
+    requirement.iter().flat_map(|group| match group {
+        Group::Single(_) => [].as_slice(),
+        Group::Graded(GradedGroup::Pool(members) | GradedGroup::Backup(members)) => {
+            members.as_slice()
+        }
+    })
 }
 
 /// The most rounds one weapon can list: its round index travels as a `u8`.
@@ -1139,7 +1151,8 @@ impl TankSpec {
     }
 
     /// Why the sheet's volumes cannot serve its crew swaps and gates, if they cannot: two volumes
-    /// seating one crew station, or a requirement naming a part no volume provides.
+    /// seating one crew station, a requirement naming a part no volume provides, or a member
+    /// coefficient outside (0, 1].
     fn check_seats_and_gates(&self) -> Result<(), String> {
         // A crew swap addresses a seat BY STATION on the wire (`command::CrewSwap::Start`), and both
         // the authority (`damage::apply_crew_swap_commands`) and the replica mirror
@@ -1196,6 +1209,17 @@ impl TankSpec {
                 return Err(format!(
                     "{field} requires {part:?}, which no volume provides — declare the volume \
                  with that crew or function facet, or drop it from the requirement"
+                ));
+            }
+            // A member's coefficient is its share (`Pool`) or ceiling (`Backup`) of full capability,
+            // and every consumer reads a gate's effectiveness as a fraction of full.
+            let is_share = |coefficient: f32| coefficient > 0.0 && coefficient <= 1.0;
+            if let Some((coefficient, _)) =
+                requirement_members(requirement).find(|(coefficient, _)| !is_share(*coefficient))
+            {
+                return Err(format!(
+                    "{field} has a member coefficient of {coefficient}, but a member's share or \
+                     ceiling is a fraction of full capability, in (0, 1] — author it there"
                 ));
             }
         }
@@ -2641,6 +2665,34 @@ TankSpec(
             .barrel = None;
         let err = unsprung.validate().unwrap_err().to_string();
         assert!(err.contains("Cannon") && err.contains("recoil"), "{err}");
+    }
+
+    /// A member's coefficient is its share (`Pool`) or ceiling (`Backup`) of full capability, so
+    /// `validate()` refuses one outside (0, 1], NaN included, naming the field: a ceiling above 1
+    /// would serve a gate past full, and a zero or NaN one is a member that serves nothing. Mutant:
+    /// a check that drops either bound, or lets NaN through, loads its case; the 1.0 control
+    /// proves the refusal is the coefficient's.
+    #[test]
+    fn validate_refuses_a_member_coefficient_outside_a_share() {
+        let with_load_coefficient = |coefficient: f32| {
+            let mut spec = fixture();
+            spec.weapons
+                .get_mut("Cannon")
+                .expect("the fixture's cannon")
+                .load = vec![Group::Graded(GradedGroup::Backup(vec![(
+                coefficient,
+                vec![Part::Gunner],
+            )]))];
+            spec.validate()
+        };
+        for coefficient in [0.0, 1.5, f32::NAN] {
+            let err = with_load_coefficient(coefficient).unwrap_err().to_string();
+            assert!(
+                err.contains("weapons[\"Cannon\"].load") && err.contains("(0, 1]"),
+                "{coefficient}: {err}"
+            );
+        }
+        with_load_coefficient(1.0).expect("a full ceiling is a share");
     }
 
     /// A capability the sheet does not key would read as unavailable to every consumer, so
