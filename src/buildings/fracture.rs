@@ -3190,8 +3190,8 @@ impl Scab {
 
 /// Law 2, the rear scab, on one loaded face (its `rays`, aggregated as `load`) of the chunk
 /// `backing` names; the wall design ("Standoff blast", Law 2) owns the model. The ligament `L` is
-/// the chunk's depth behind the face along its inward normal, to its farthest corner (a box's
-/// thickness), and the back point `b` lies `L` behind the face's load. The face's compression
+/// the chunk's depth behind the face's centroid along its inward normal, to the hull's actual
+/// exit, and the back point `b` lies `L` behind the face's load. The face's compression
 /// reaches `b` as `σ_b`: the solid-angle mean of the face's transmitted stress, the sum over its
 /// patches of `L / (2π R³)` (each patch's solid angle seen from `b`, over `2π`, per area) times
 /// each patch's transmitted force `min(P, σ_c,d) A`; a uniform load over a plane gives back the
@@ -3215,13 +3215,14 @@ pub(crate) fn scab(rays: &[&RayHit], load: &Load, backing: &Backing) -> Option<S
     let Spall { bar_speed, tensile } = material.spall;
     let crush = material.compaction.strength;
     let local = load.at / backing.scale;
-    let ligament = backing
-        .block
-        .points
-        .iter()
-        .map(|corner| normal.dot(local - *corner))
-        .fold(0.0_f32, f32::max)
-        * backing.scale;
+    let (_, depth) = backing.block.span(local, -normal).expect(
+        "a face's impulse centroid lies on its convex chunk and its inward normal enters it",
+    );
+    let ligament = depth * backing.scale;
+    if ligament == 0.0 {
+        // A tangent boundary point has no material behind it to reflect the pulse.
+        return None;
+    }
     let back = load.at - normal * ligament;
     let (mut stress, mut transmitted) = (0.0_f32, 0.0_f32);
     for ray in rays {
@@ -6133,6 +6134,65 @@ mod tests {
     fn scab_blow(material: &Masonry, lengths: f32) -> f32 {
         let force = 0.1 * material.compaction.strength;
         lengths * 0.25 * force / (2.0 * material.spall.bar_speed)
+    }
+
+    /// A back scab in the game's environment model leaves the actual hull surface. On tapered
+    /// geometry the farthest corner's projection lies beyond that surface. Rear contacts and the
+    /// ligament gate rely on the true exit; a corner-projection mutant fails this ASSUMED wedge
+    /// fixture at both instance scales.
+    #[test]
+    fn a_scab_leaves_the_hulls_actual_back_face() {
+        let material = brick();
+        let (hit, _) = scab_face(&material, scab_blow(&material, 0.1));
+        let wedge = Block::hull(vec![
+            Vec3::new(-1.0, -1.0, 0.0),
+            Vec3::new(1.0, -1.0, 0.0),
+            Vec3::new(-1.0, 1.0, 0.0),
+            Vec3::new(1.0, 1.0, 0.0),
+            Vec3::new(-1.0, -1.0, 0.25),
+            Vec3::new(1.0, -1.0, 0.5),
+            Vec3::new(-1.0, 1.0, 0.25),
+            Vec3::new(1.0, 1.0, 0.5),
+        ]);
+        for scale in [1.0_f32, 2.0] {
+            let hit = RayHit {
+                impulse: hit.impulse * scale.powi(2),
+                peak: hit.peak * scale.powi(2),
+                ..hit
+            };
+            let backing = |contacts| Backing {
+                block: &wedge,
+                scale,
+                material,
+                contacts,
+            };
+            let (_, scabs) = Load::blast(&[hit], |_| backing(&[]));
+            let [scab] = scabs[..] else {
+                panic!("the fixture pulse scabs: {scabs:?}")
+            };
+            assert!((scab.at - Vec3::Z * (0.375 * scale)).length() < 1e-5);
+            assert!(
+                wedge
+                    .planes
+                    .iter()
+                    .all(|(n, o)| n.dot(scab.at / scale) <= o + 1e-5)
+            );
+            let (normal, _) = wedge.planes.iter().find(|(n, _)| n.z > 0.0).unwrap();
+            let contact = Joint {
+                a: hit.chunk,
+                b: Side::Ground,
+                area: 4.0 * scale.powi(2) / normal.z,
+                centroid: scab.at,
+                normal: *normal,
+                bond: Bond::Bonded(material.seam),
+            };
+            assert!(
+                Load::blast(&[hit], |_| backing(std::slice::from_ref(&contact)))
+                    .1
+                    .is_empty(),
+                "a contact on the actual rear plane covers it"
+            );
+        }
     }
 
     /// Only exposed rear area reflects the game's environment blast as tensile stress. A full

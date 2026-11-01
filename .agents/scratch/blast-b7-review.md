@@ -32,9 +32,9 @@ The wall design owns the model narrative; this file records findings and disposi
 - **P1, pending:** the scab gate uses the original full chunk depth even when Law 1 has crushed
   the front. The study's executable calculation uses the remaining ligament and refuses scab
   after through-crush. Supply that missing ligament term, naming the depth approximation.
-- **P2, pending:** the farthest corner's projection need not be the convex hull's exit behind a
-  loaded point. A tapered chunk can place its supposed back point outside its hull. Locate the
-  actual exit before reading the remaining ligament and rear contacts.
+- **P2, fixed:** the farthest corner's projection need not be the convex hull's exit behind a
+  loaded point. A tapered chunk can place its supposed back point outside its hull. The calculation now locates the
+  actual convex-hull exit before reading the ligament and rear contacts.
 - The correction to the solid-angle mean is complete: the kernel is `L/(2 pi R^3)`, with no
   elastic Boussinesq kernel left in Law 2. The pulse gate and speed match the study. A scab's
   momentum is subtracted once; its volume is a separate zero-blow removal load.
@@ -64,3 +64,7 @@ Tensile precision fix: formatting and the required locked clippy pass. **MEASURE
 building/material/sandbox-wall/doc-citation tests pass. The fractional static-strength fixture
 breaks a mutant that rounds before multiplying; the extreme static-strength fixture is refused
 at load even though its dynamic product fits in f32.
+
+Hull-exit fix: formatting and the required locked clippy pass. **MEASURED:** 131 targeted tests
+pass. A tapered hull at unit and doubled instance scale emits from its actual rear plane; an
+anchor on that plane suppresses reflection. No collider or spawned body was added.
