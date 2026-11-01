@@ -12,6 +12,7 @@
 //! A fallen group rides its own carrier (`debris_stress::Carrier`), its chunks on it once.
 
 use bevy::ecs::error::Result;
+use bevy::ecs::query::QuerySingleError;
 use bevy::prelude::*;
 use bevy_replicon::prelude::{Diffable, EntityCommandsDiffExt};
 use lightyear::prelude::*;
@@ -57,14 +58,18 @@ fn spawn_ledger(mut commands: Commands) {
 /// Authority: every record entry not yet on the ledger becomes a diff.
 fn publish_record(
     record: Res<WallRecord>,
-    ledgers: Query<(Entity, &WallLedger)>,
+    ledgers: Query<Entity, With<WallLedger>>,
     mut published: Local<usize>,
     mut commands: Commands,
 ) {
-    let Ok((ledger, _)) = ledgers.single() else {
-        return;
-    };
-    for entry in record.entries.get(*published..).unwrap_or_default() {
+    let ledger = ledgers.single().expect(
+        "authority startup spawns exactly one wall ledger before publishing building changes",
+    );
+    let fresh = record.entries.get(*published..).expect(
+        "the authority's wall record only grows: the laws extend it and nothing on the authority \
+         removes an entry",
+    );
+    for entry in fresh {
         commands.entity(ledger).apply_diff::<WallLedger>(*entry);
     }
     *published = record.entries.len();
@@ -72,21 +77,31 @@ fn publish_record(
 
 /// Replica: the ledger's new entries into the record. A ledger is one replicated entity per link —
 /// lightyear despawns every replicated entity when a link ends and the next server's arrives as a
-/// new one — so another entity, or a ledger shorter than what was copied, is another authority's
-/// record: the record is replaced and its generation moves, and every building stands whole again
-/// before the new record is applied.
+/// new one — so another entity is another authority's record: the record is replaced and its
+/// generation moves, and every building stands whole again before the new record is applied.
+///
+/// A ledger shorter than what was copied from the same entity is a malformed peer record: the
+/// authority only appends, and a replicon snapshot carries its whole list. It is logged, and the
+/// record is replaced by the list as it now stands, as for another link's.
 fn receive_ledger(
     ledgers: Query<(Entity, &WallLedger)>,
     mut copied: Local<(Option<Entity>, usize)>,
     mut record: ResMut<WallRecord>,
 ) {
-    let Ok((ledger, entries)) = ledgers.single() else {
-        return;
+    let (ledger, entries) = match ledgers.single() {
+        Ok(ledger) => ledger,
+        // Before the first snapshot, or between links, no authority ledger has arrived yet.
+        Err(QuerySingleError::NoEntities(_)) => return,
+        Err(QuerySingleError::MultipleEntities(_)) => panic!(
+            "a replica has one active wall ledger; disconnect cleanup removes the old link's \
+             replicated entities before a replacement arrives"
+        ),
     };
     if copied.0 != Some(ledger) || entries.0.len() < copied.1 {
         if copied.0 == Some(ledger) {
             error!(
-                "wall ledger: {} entries after {} copied; the record shrank",
+                "wall ledger: malformed peer record: {} entries after {} copied from the same \
+                 ledger; replacing the record with it",
                 entries.0.len(),
                 copied.1
             );
@@ -148,6 +163,31 @@ mod tests {
         let record = app.world().resource::<WallRecord>();
         assert_eq!(record.entries, vec![entry(WallEvent::Crack(2), 9)]);
         assert_ne!(record.generation, generation);
+    }
+
+    /// Authority publication cannot silently stop without its startup singleton. A mutant that
+    /// returns on a missing ledger would leave every client's buildings standing unseen.
+    #[test]
+    #[should_panic(expected = "authority startup spawns exactly one wall ledger")]
+    fn publishing_without_the_startup_ledger_is_a_bug() {
+        let mut app = App::new();
+        app.init_resource::<WallRecord>()
+            .add_systems(Update, publish_record);
+        app.update();
+    }
+
+    /// Two active ledgers would mix authorities' records. A single-query skip mutant would hide
+    /// the composition bug and freeze every replica building on its previous record.
+    #[test]
+    #[should_panic(expected = "a replica has one active wall ledger")]
+    fn a_replica_with_two_wall_ledgers_is_a_bug() {
+        let mut app = App::new();
+        app.init_resource::<WallRecord>()
+            .add_systems(Update, receive_ledger);
+        for _ in 0..2 {
+            app.world_mut().spawn(WallLedger::default());
+        }
+        app.update();
     }
 
     /// A HOLE CROSSES THE WIRE WHOLE, IN A LATE JOINER'S SNAPSHOT TOO: a ledger holding hole

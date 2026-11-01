@@ -160,9 +160,13 @@ fn apply_ledger(
         ),
     };
     if applied.ledger != Some(ledger) || entries.0.len() < applied.entries {
+        // The authority only appends and a replicon snapshot carries its whole list, so a shorter
+        // list on the same entity is a malformed peer record: logged, then consumed from its first
+        // entry as another link's would be.
         if applied.ledger == Some(ledger) {
             error!(
-                "destruction ledger: {} entries after {} applied; the record shrank",
+                "destruction ledger: malformed peer record: {} entries after {} applied from the \
+                 same ledger; standing every tree and applying it from its first entry",
                 entries.0.len(),
                 applied.entries
             );
