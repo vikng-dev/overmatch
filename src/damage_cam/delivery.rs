@@ -286,14 +286,8 @@ impl ShotExplanations {
         }
     }
 
-    /// The explanation at `key`.
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "its readers, the pen cam's views, are not yet built"
-        )
-    )]
+    /// The explanation at `key`: a test reader; the views read [`Self::iter`] and [`Self::live`].
+    #[cfg(test)]
     pub(crate) fn get(&self, key: &ExplanationKey) -> Option<&StoredExplanation> {
         self.stored.get(key)
     }
@@ -312,14 +306,9 @@ impl ShotExplanations {
             .filter(move |stored| stored.explanation.struck == life)
     }
 
-    /// How many explanations were refused.
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "its readers, the pen cam's views, are not yet built"
-        )
-    )]
+    /// How many explanations were refused: a test reader; the game reads the count only to log
+    /// the first refusal.
+    #[cfg(test)]
     pub(crate) fn refused(&self) -> u64 {
         self.refused
     }

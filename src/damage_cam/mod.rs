@@ -148,8 +148,8 @@ pub struct PenetrationReport {
     pub shooter: Option<Shooter>,
     /// Where the round started: the path's first point.
     pub origin: [f32; 3],
-    /// Where the shooter's gun fired it from: the muzzle at fire time, read off the shooter's rig
-    /// ([`record::muzzle_of`]). `None` where no shooter's rig fired it.
+    /// Where the shooter's gun fired it from: the muzzle at fire time, the fire event's origin
+    /// (`recorder`). `None` where no shooter's rig fired it.
     #[serde(default)]
     pub muzzle: Option<[f32; 3]>,
     pub projectile: Projectile,

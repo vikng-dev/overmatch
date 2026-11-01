@@ -48,10 +48,12 @@ use crate::ballistics::{
     energy_units, hp_before_rounding, pool_units_of,
 };
 use crate::damage::{Ammo, CrewStation, FunctionRole, VolumeOf};
-use crate::tank::{
-    Muzzle, RemoteServos, Rig, ServoIndex, TankRoot, TankServos, Weapon, rig_world_pose,
-};
+#[cfg(test)]
+use crate::tank::{Muzzle, Weapon, rig_world_pose};
+use crate::tank::{RemoteServos, Rig, ServoIndex, TankRoot, TankServos};
+#[cfg(test)]
 use avian3d::prelude::{Position, Rotation};
+#[cfg(test)]
 use bevy::ecs::system::SystemState;
 
 /// What a volume is to the record.
@@ -221,7 +223,9 @@ pub struct ShotFacts {
 
 /// Where `shooter`'s weapon `weapon` fires from now (WORLD): its muzzle node's tick-truth pose,
 /// composed from the shooter's root through its rig's local transforms, the pose `shooting::fire`
-/// launches a round from. `None` where the shooter has no such weapon.
+/// launches a round from. `None` where the shooter has no such weapon. A test oracle: the game's
+/// record takes the muzzle from the fire event's origin (`recorder`).
+#[cfg(test)]
 pub fn muzzle_of(world: &mut World, shooter: Entity, weapon: &str) -> Option<Vec3> {
     let position = world.get::<Position>(shooter)?.0;
     let rotation = world.get::<Rotation>(shooter)?.0;
@@ -264,7 +268,8 @@ pub(crate) fn servo_angles(world: &mut World, tank: Entity) -> BTreeMap<String, 
 /// The path `shell` took through `tank` (every tank, for `None`), as the verdict reads it: its
 /// bounces off and crossings of the tank's volumes and every walk that failed closed, in march
 /// order, then one [`PathStep::Dosed`] when one of the tank's components shows a lost HP point to
-/// the shot ([`shown_lost_from`]).
+/// the shot ([`shown_lost_from`]). A test reader; the game's record reads `steps_of` directly.
+#[cfg(test)]
 pub fn path_steps(world: &World, shell: Entity, tank: Option<Entity>) -> Vec<PathStep> {
     let Some(marks) = world.get::<PenetrationMarks>(shell) else {
         return Vec::new();
@@ -272,7 +277,7 @@ pub fn path_steps(world: &World, shell: Entity, tank: Option<Entity>) -> Vec<Pat
     steps_of(world, &marks.log, world.get::<ShotDose>(shell), tank, 0)
 }
 
-/// [`path_steps`] over a shell's logs from mark `from` on.
+/// The path a shell's logs record from mark `from` on, as the verdict reads it.
 fn steps_of(
     world: &World,
     marks: &[ArmourMark],
