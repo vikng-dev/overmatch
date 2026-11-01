@@ -21,8 +21,9 @@ and base-truths lenses and the sweep brief. No earlier ballistics sweep record w
   instrument, and the stowage class-invariant test would reject that valid registry. Enumerate
   every `(gun, round)` configuration at its own muzzle speed; reports retain both identities.
   The synthetic shared-ammunition test exercises distinct speeds through the same round key.
-- **P3:** `ShellVisual` still describes a calibre classification the renderer no longer uses.
-  `ShellReadout` still duplicates projectile state for test-only readers. The fuzzer still names
+- **P3:** `ShellReadout` duplicates projectile state for test-only readers. The `ShellVisual`
+  comment is already generic at this base; the inventory's stale-calibre-comment claim is no
+  longer current. The fuzzer still names
   one tank in its target/report. The gun parser validates then discards `names` and `caliber`.
 - **P3 / B11 follow-up:** the pen cam still loads one scene and scales it by record calibre. Its
   record already carries a round key on the wire; the presentation can use that identity to read
@@ -92,3 +93,12 @@ longer returns an optional step that the caller can silently discard.
 MEASURED: all 53 targeted fuze, march and citation tests passed, including exact-apex cases with
 an inert count, a continuing armed count, an expiring count and deliberately invalid velocity.
 Format and workspace/all-target clippy passed.
+
+
+## One projectile state (readout follow-up)
+
+Fixed: removed the unused readout component, its authority and replica writes, and its fixture
+bundles. The tests read the bound projectile body and velocity directly; view dressing remains
+independent of simulation state. MEASURED: all 219 targeted march, public-path, pen-cam,
+field-cast and citation tests passed; three on-demand instruments stayed ignored. Format and
+workspace/all-target clippy passed; no field-cast pin moved.

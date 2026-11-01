@@ -1685,14 +1685,6 @@ pub struct SpallMarks {
     pub gated: usize,
 }
 
-/// Live per-shell readout for the sandbox's info layer — current speed (m/s) and remaining
-/// penetration capability (reference-mm). Public; refreshed each step.
-#[derive(Component, Default)]
-pub struct ShellReadout {
-    pub speed: f32,
-    pub capability: f32,
-}
-
 /// The calibre boundary the impact read chooses its effect by (`vfx::impact`). A round's flight
 /// dressing reads its authored visuals instead ([`crate::rounds::FlightEffects`]).
 pub(crate) const TRACER_MAX_CALIBER: f32 = 0.02;
@@ -1973,7 +1965,6 @@ fn on_fire_shell(
     // Travel direction after any catch-up (gravity/drag bend it); fall back to the bore for a
     // degenerate zero velocity so a spent-to-rest catch-up never trips `Dir3`.
     let travel = Dir3::new(velocity).unwrap_or(fire.direction);
-    let speed = velocity.length();
     // The sim shell is IDENTICAL for every round — it flies and raycasts the same whether or not it is
     // drawn (a non-tracer MG round still bounces, ricochets, and lands; dead-reckoned streaks were
     // rejected). What the round IS rides along as [`TracerRound`]; whether anything is DRAWN for it is
@@ -2021,10 +2012,6 @@ fn on_fire_shell(
         },
         PenetrationMarks::default(),
         SpallMarks::default(),
-        ShellReadout {
-            speed,
-            capability: capability(penetrator, speed),
-        },
         Transform::from_translation(position).looking_to(travel, Vec3::Y),
     );
 
@@ -2257,7 +2244,6 @@ struct MarchingShell<'a, 'w> {
     terminal_report: &'a mut Mut<'w, TerminalReport>,
     path: &'a mut Mut<'w, ShellPath>,
     marks: &'a mut Mut<'w, PenetrationMarks>,
-    readout: &'a mut Mut<'w, ShellReadout>,
     spall: &'a mut Mut<'w, SpallMarks>,
     dose: &'a mut Mut<'w, ShotDose>,
     /// The shell's network identity, when it has one: `None` where no shot clock runs (the
@@ -2298,7 +2284,6 @@ fn integrate_projectiles(
         &mut TerminalReport,
         &mut ShellPath,
         &mut PenetrationMarks,
-        &mut ShellReadout,
         &mut SpallMarks,
         &mut ShotDose,
         // A network identity is absent on tank-less sandbox fire.
@@ -2364,7 +2349,6 @@ fn integrate_projectiles(
         mut terminal_report,
         mut path,
         mut marks,
-        mut readout,
         mut spall,
         mut dose,
         shot,
@@ -2378,7 +2362,6 @@ fn integrate_projectiles(
             terminal_report: &mut terminal_report,
             path: &mut path,
             marks: &mut marks,
-            readout: &mut readout,
             spall: &mut spall,
             dose: &mut dose,
             shot,
@@ -2479,9 +2462,7 @@ fn integrate_projectiles(
                 // Sandbox: freeze where it stopped — drop the live components so it is no longer
                 // integrated or labelled, but keep the stuck shell, its path, and its penetration
                 // marks on screen for study (the sandbox's `c` command clears them).
-                commands
-                    .entity(entity)
-                    .remove::<(Projectile, ShellReadout)>();
+                commands.entity(entity).remove::<Projectile>();
             } else {
                 // Game: the spent shell is done.
                 commands.entity(entity).despawn();
@@ -2509,8 +2490,6 @@ fn integrate_projectiles(
             commands.entity(entity).despawn();
         } else {
             shell.projectile.velocity = Vec3::from(step.direction) * step.speed;
-            shell.readout.speed = step.speed;
-            shell.readout.capability = capability(shell.projectile.body(), step.speed);
         }
     }
 
@@ -4326,44 +4305,34 @@ mod march_tests {
     /// main-gun value the round files (`assets/rounds/`) tune, a labelled fixture number.
     pub(super) const FIXTURE_WOUND: f32 = 30.0;
 
-    /// A full-calibre fixture round's flight state and its initial readout: [`fixture_round_with`]
-    /// of a round that meets the plate as itself.
-    pub(super) fn fixture_round(body: RoundBody, velocity: Vec3) -> (Projectile, ShellReadout) {
+    /// The game's damage model: full-calibre fixture flight state, bound as the real spawn binds
+    /// it. [`fixture_round_with`] also supports a distinct penetrator.
+    pub(super) fn fixture_round(body: RoundBody, velocity: Vec3) -> Projectile {
         fixture_round_with(body, body, velocity)
     }
 
-    /// The flight state and initial readout of a fixture round that flies as `body` and meets the
-    /// plate as `penetrator`, built as `on_fire_shell` builds them: the body's drag on the fixture
-    /// form ([`fixture_drag_k`]; a caller firing a shipped round sets the round's own), the
-    /// mechanism and the readout from the penetrator, so the readout the march starts from is the
-    /// capability of what it marches.
+    /// The game's damage model: fixture state flying as `body`, meeting matter as `penetrator`.
+    /// Its drag is fixture data ([`fixture_drag_k`]); the mechanism binds only the penetrator.
     pub(super) fn fixture_round_with(
         body: RoundBody,
         penetrator: RoundBody,
         velocity: Vec3,
-    ) -> (Projectile, ShellReadout) {
-        let speed = velocity.length();
-        (
-            Projectile {
-                velocity,
-                round: bound(penetrator),
-                caliber: body.caliber,
-                mass: body.mass,
-                wound: FIXTURE_WOUND,
-                drag_k: fixture_drag_k(body.caliber, body.mass),
-                fuze: burst::Fuze::Inert,
-                // Anchored on THIS round's fire direction, exactly as `on_fire_shell` would.
-                disc: test_disc(velocity.normalize()),
-                axis: None,
-                playback: Default::default(),
-                path_sequence: 0,
-                replica: None,
-            },
-            ShellReadout {
-                speed,
-                capability: capability(penetrator, speed),
-            },
-        )
+    ) -> Projectile {
+        Projectile {
+            velocity,
+            round: bound(penetrator),
+            caliber: body.caliber,
+            mass: body.mass,
+            wound: FIXTURE_WOUND,
+            drag_k: fixture_drag_k(body.caliber, body.mass),
+            fuze: burst::Fuze::Inert,
+            // Anchored on this round's fire direction, as on_fire_shell does.
+            disc: test_disc(velocity.normalize()),
+            axis: None,
+            playback: Default::default(),
+            path_sequence: 0,
+            replica: None,
+        }
     }
 
     /// Build an Avian world with one static steel plate (full extents `size`, centred at `at`, facing
@@ -4997,7 +4966,7 @@ mod march_tests {
     /// A sub-calibre round flies on its fire's drag and meets the plate as its penetrator: the
     /// shell [`on_fire_shell`] spawns from a fire whose penetrator differs from its body binds the
     /// penetrator's mechanism (the disc, overmatch and the cone's hole read its calibre), starts
-    /// its readout at the penetrator's capability at the muzzle, steps the drag coefficient the
+    /// the penetrator's capability at the muzzle, steps the drag coefficient the
     /// fire carries (which body flies is the round registry's to decide, `rounds`), and is sized
     /// for the view as the whole body. Every role's shell of a sub-calibre round is spawned here.
     /// The core and the drag are fixture data. A mutant that binds the body, or re-derives the
@@ -5039,15 +5008,22 @@ mod march_tests {
         app.world_mut().flush();
 
         let world = app.world_mut();
-        let mut shells = world.query::<(&Projectile, &ShellReadout)>();
-        let (projectile, readout) = shells.single(world).expect("one shell is born");
+        let mut shells = world.query::<&Projectile>();
+        let projectile = shells.single(world).expect("one shell is born");
         assert_eq!(
             projectile.body(),
             CORE,
             "the mechanism binds the penetrator"
         );
-        assert_eq!(readout.capability, capability(CORE, SPEED));
-        assert_ne!(readout.capability, capability(FIXTURE_88, SPEED));
+        assert_eq!(projectile.speed(), SPEED);
+        assert_eq!(
+            capability(projectile.body(), projectile.speed()),
+            capability(CORE, SPEED)
+        );
+        assert_ne!(
+            capability(projectile.body(), projectile.speed()),
+            capability(FIXTURE_88, SPEED)
+        );
         assert_eq!(
             projectile.drag_k, DRAG,
             "the shell flies on its fire's drag"
@@ -6917,13 +6893,7 @@ mod march_tests {
     }
 
     /// Fire `round` from `origin` along `dir` and march it `ticks` ticks, whatever it meets.
-    fn march_round(
-        app: &mut App,
-        round: (Projectile, ShellReadout),
-        origin: Vec3,
-        dir: Vec3,
-        ticks: usize,
-    ) {
+    fn march_round(app: &mut App, round: Projectile, origin: Vec3, dir: Vec3, ticks: usize) {
         app.world_mut().spawn((
             round,
             DamageReport::default(),
@@ -7338,7 +7308,7 @@ mod march_tests {
         let base = Vec3::new(0.6, 0.0, centre.z - 2.0);
         let beside = spawn_tree(&mut app, &fixture_kind_of("Wood", 25), base, 1);
         settle(&mut app);
-        let (mut projectile, readout) = fixture_round(FIXTURE_88, Vec3::NEG_Z * 800.0);
+        let mut projectile = fixture_round(FIXTURE_88, Vec3::NEG_Z * 800.0);
         projectile.fuze = burst::Fuze::of(Some(burst::Burst {
             trigger: crate::rounds::fuze::Trigger::SpendExit { arming_spend: 1.0 },
             delay: 0.004,
@@ -7355,7 +7325,7 @@ mod march_tests {
         }));
         march_round(
             &mut app,
-            (projectile, readout),
+            projectile,
             Vec3::new(0.0, 2.5, 2.0),
             Vec3::NEG_Z,
             8,

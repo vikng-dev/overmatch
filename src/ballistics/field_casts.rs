@@ -604,10 +604,6 @@ fn spawn_shot_round(
             },
             PenetrationMarks::default(),
             SpallMarks::default(),
-            ShellReadout {
-                speed,
-                capability: capability(body, speed),
-            },
             Shot(ShotId {
                 combatant: crate::CombatantId(1),
                 weapon: 0,

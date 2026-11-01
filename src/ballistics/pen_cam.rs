@@ -181,7 +181,7 @@ fn record_edited(
     let origin = PROBE_TANK_AT + scenario.from;
     let direction = (scenario.toward - scenario.from).normalize();
     let struck = StruckTank::capture(app.world_mut(), tank).expect("the tank has a rig");
-    let (mut projectile, readout) = fixture_round_with(body, round.penetrator, direction * speed);
+    let mut projectile = fixture_round_with(body, round.penetrator, direction * speed);
     projectile.drag_k = round.drag_k;
     projectile.wound = round.wound;
     projectile.fuze = super::burst::Fuze::of(round.burst);
@@ -189,7 +189,6 @@ fn record_edited(
         .world_mut()
         .spawn((
             projectile,
-            readout,
             DamageReport::default(),
             TerminalReport::default(),
             ShellPath {
@@ -752,13 +751,12 @@ pub(super) fn fixture_fire_with(
     let direction = velocity.normalize();
     let tank = tanks[struck];
     let struck = StruckTank::capture(app.world_mut(), tank).expect("the fixture has a rig");
-    let (mut projectile, readout) = fixture_round(body, velocity);
+    let mut projectile = fixture_round(body, velocity);
     round(&mut projectile);
     let shell = app
         .world_mut()
         .spawn((
             projectile,
-            readout,
             DamageReport::default(),
             TerminalReport::default(),
             ShellPath {

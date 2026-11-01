@@ -359,7 +359,7 @@ fn restore(app: &mut App) {
 /// Fire `round` from `origin` along `direction` in `app` and read the tank as it is after.
 fn fire_one(app: &mut App, round: &crate::rounds::Round, origin: Vec3, direction: Vec3) -> Hit {
     let tank = app.world().resource::<super::fuzz::ProbeTank>().0;
-    let (mut projectile, readout) = march_tests::fixture_round_with(
+    let mut projectile = march_tests::fixture_round_with(
         round.flying,
         round.penetrator,
         direction * round.muzzle_speed,
@@ -370,7 +370,6 @@ fn fire_one(app: &mut App, round: &crate::rounds::Round, origin: Vec3, direction
         .world_mut()
         .spawn((
             projectile,
-            readout,
             DamageReport::default(),
             TerminalReport::default(),
             ShellPath {

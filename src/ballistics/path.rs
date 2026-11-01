@@ -5,7 +5,7 @@ use bevy::prelude::*;
 use serde::{Deserialize, Serialize};
 
 use super::mechanism::{Mechanism, SolidShot, SolidShotState};
-use super::{Impact, ImpactOutcome, ImpactSurface, Projectile, ShellPath, ShellReadout, Shot};
+use super::{Impact, ImpactOutcome, ImpactSurface, Projectile, ShellPath, Shot};
 use crate::ShotId;
 
 /// The game's damage model: a constant-resistance stretch and its resolved clock (metres, m/s, s).
@@ -436,7 +436,6 @@ pub(crate) fn present(
         &mut Projectile,
         &mut Transform,
         &mut ShellPath,
-        &mut ShellReadout,
         &mut super::PenetrationMarks,
         Option<&Shot>,
     )>,
@@ -446,10 +445,7 @@ pub(crate) fn present(
     mut trace: Option<ResMut<crate::shot_trace::ShotTrace>>,
     mut commands: Commands,
 ) {
-    'shells: for (entity, mut projectile, mut transform, mut path, mut readout, mut marks, shot) in
-        &mut shells
-    {
-        let round = projectile.round;
+    'shells: for (entity, mut projectile, mut transform, mut path, mut marks, shot) in &mut shells {
         let drag = projectile.drag_k;
         let caliber = projectile.caliber();
         let Some(replica) = &mut projectile.replica else {
@@ -543,8 +539,6 @@ pub(crate) fn present(
             path.points.push(at);
         }
         projectile.velocity = velocity;
-        readout.speed = velocity.length();
-        readout.capability = super::capability(round.body(), readout.speed);
         if stopped {
             commands.entity(entity).despawn();
         }
@@ -672,14 +666,12 @@ mod tests {
             .init_resource::<Drawn>()
             .add_observer(drawn)
             .add_systems(Update, present);
-        let (mut projectile, readout) =
-            super::super::march_tests::fixture_round(FIXTURE_88, Vec3::Z * 800.0);
+        let mut projectile = super::super::march_tests::fixture_round(FIXTURE_88, Vec3::Z * 800.0);
         projectile.replica = Some(Replica::born(100, Vec3::ZERO, Vec3::Z * 800.0));
         let entity = app
             .world_mut()
             .spawn((
                 projectile,
-                readout,
                 Shot(shot()),
                 Transform::default(),
                 ShellPath::default(),
