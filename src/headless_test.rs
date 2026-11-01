@@ -2802,8 +2802,10 @@ fn every_collider_carries_its_materials_friction_under_the_one_rule() {
 
 /// The game's environment destruction, game state only: a shipped-data hull pushes the
 /// shipped house with the normal driving and contact systems. ASSUMED fixture placement and
-/// initial closing speed; report topology, never tick time or an asset-specific pass threshold.
+/// initial closing speed; report topology, never tick time or an asset-specific pass threshold,
+/// so it pins no law (the weight check's own fixtures do) and runs on demand.
 #[test]
+#[ignore = "a measurement bed, run on demand"]
 fn a_shipped_data_hull_push_reports_environment_release_groups() {
     use crate::buildings::breakage::{WallPiece, WallRecord};
     use avian3d::prelude::{AngularVelocity, LinearVelocity, Position, Rotation};

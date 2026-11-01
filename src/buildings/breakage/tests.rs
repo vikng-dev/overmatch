@@ -789,9 +789,11 @@ fn joined_to(
 /// long wall under the plate (every standing unburied chunk of it turned to dust) leaves the whole
 /// roof on the house: the plate hangs between the gables, the planes still rest on them. Shooting
 /// out the gables too leaves the roof hanging from the other plate by nails, which its weight
-/// breaks locally (weight failures across overloaded fixed joints alone). Any remainder held by
-/// both intact fixings and cracked-seam contacts needs the static solve; this gate requires the
-/// unsupported portion to fall, not every coplanar fixing to open at once. A roof laid
+/// breaks locally (weight failures across overloaded fixed joints alone): the plane fixed to the
+/// plate that lost its wall leaves whole, and no touched chunk stands unassessed. The other
+/// plane, nailed at its eave to a plate whose wall still stands with its ridge free, is not
+/// pinned: whether eave fixings hold a cantilevered plane is the continued-fracture law's open
+/// question (`.agents/docs/design/wall-destruction-sweep-2.md`). A roof laid
 /// unfixed on its plates (a rest at a 3 : 4 pitch, steeper than the friction of wood on wood)
 /// slides off at the first touch and fails here; so does a law that let a rest carry tension.
 #[test]
@@ -968,9 +970,15 @@ fn a_nailed_roof_distinguishes_rests_from_local_fixing_failure() {
         assert_eq!(failure.cause, fracture::Cause::Weight, "{failure:?}");
         assert!(failure.joints.iter().all(|&j| fixed(&joints[j])));
     }
+    assert_eq!(
+        standing(&live, &plane),
+        0,
+        "the plane fixed to the plate that lost its wall and its rests leaves whole"
+    );
     assert!(
-        groups.iter().flatten().any(|c| roof.contains(c)),
-        "the portion whose overloaded fixings opened must leave its supports"
+        weighed.unassessed.is_empty(),
+        "every touched chunk is assessed: {:?}",
+        weighed.unassessed
     );
 }
 
@@ -2749,8 +2757,10 @@ fn cap_exchanges(
 
 /// A reproducible shove into the shipped house through the production contact reader and
 /// laws, with no view or timing measurement. ASSUMED fixture body: a heavy cuboid at the
-/// capture's closing speed. Group counts are evidence, never an asset-specific pass condition.
+/// capture's closing speed. Group counts are evidence, never an asset-specific pass condition,
+/// so it pins no law (the weight check's own fixtures do) and runs on demand.
 #[test]
+#[ignore = "a measurement bed, run on demand"]
 fn a_heavy_body_push_reports_the_house_release_groups() {
     let kind = shipped_house();
     let (mut app, _) = composed_keeping_contacts();

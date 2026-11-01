@@ -1720,10 +1720,11 @@ pub(crate) struct Weighed {
 /// statics fixes the force and moment through it exactly, and [`weight_failure`] reads them as a
 /// stress. The pressed chunks' punch rings compete on the same ratio, force over strength
 /// ([`ring_groups`], [`ring_force_failure`]). The worst section or ring at or over its strength
-/// cracks, the chunks on either side of it are
-/// touched in turn, and the check repeats until none fails (each pass cracks at least one joint
-/// and none closes, so the passes end), so a failure can expose the next. A freed group falls by support ([`fall`]) and the
-/// physics.
+/// fails: a section opens only its joints whose own traction reaches their seam's strength
+/// (compression elsewhere on its plane does no work to part them), a ring the joints its punch
+/// opens. The chunks either side of each opened joint are touched in turn, and the check repeats
+/// until none fails (each pass cracks at least one joint and none closes, so the passes end), so
+/// a failure can expose the next. A freed group falls by support ([`fall`]) and the physics.
 ///
 /// A touched chunk that no section alone holds with a group (its loads reaching the ground through
 /// several sections at once, as a span between two piers, or through a cut set no single plane
@@ -2398,7 +2399,7 @@ fn weight_failure(
     let (force, moment) = force_wrench(structure, group, loads, gravity, navier.centre, |load| {
         Some(load.press)
     });
-    let (_, demand, capacity) = navier.peak(&structure.joints, force, moment);
+    let (demand, capacity) = navier.peak(&structure.joints, force, moment);
     // Only joints whose own traction reaches their strength open. Compression elsewhere
     // does not supply work to separate that part of the section.
     let opened = navier
@@ -2492,11 +2493,13 @@ impl Navier {
 
     /// Under resultant force `force` (N) and moment `moment` (N m) about the centre: the peak
     /// tension of the bordering joint whose ratio to its seam's tensile strength is highest, and
-    /// that strength, Pa, together with that joint's index.
-    fn peak(&self, joints: &[Joint], force: Vec3, moment: Vec3) -> (usize, f32, f32) {
-        self.stresses(joints, force, moment)
+    /// that strength, Pa.
+    fn peak(&self, joints: &[Joint], force: Vec3, moment: Vec3) -> (f32, f32) {
+        let (_, demand, capacity) = self
+            .stresses(joints, force, moment)
             .max_by(|a, b| (a.1 / a.2).total_cmp(&(b.1 / b.2)))
-            .expect("a Navier reading borders its group with at least one joint")
+            .expect("a Navier reading borders its group with at least one joint");
+        (demand, capacity)
     }
 
     /// Each bordering joint's own tensile demand and capacity, Pa.
@@ -2566,11 +2569,11 @@ fn section_pulse(
         navier.centre,
         Load::mean_force,
     );
-    let (_, demand, capacity) =
+    let (demand, capacity) =
         navier.peak(&structure.joints, force + mean_force, moment + mean_moment);
     Reading {
         falling: plastic_demand(strength_ratio(|s| {
-            let (_, demand, capacity) = navier.peak(
+            let (demand, capacity) = navier.peak(
                 &structure.joints,
                 force + peak_force * s,
                 moment + peak_moment * s,
@@ -5256,6 +5259,50 @@ mod tests {
                 weighed.unassessed
             );
         }
+    }
+
+    /// A LOOSE GROUP IS NO PROP: the propped arm above at 2 % over its cantilever limit, its tip
+    /// on a cracked seam to a prop whose own ground anchors are cracked as well. That prop is
+    /// falling, so the arm hangs from its root alone: the root opens and the whole arm falls. A
+    /// check that credited a loose group's contact as a static prop (`grounded` all true in
+    /// [`bears_on_contact`]) leaves the arm standing unassessed here.
+    #[test]
+    fn a_loose_group_is_no_static_prop() {
+        let n = 4;
+        let cells = propped_arm(n);
+        let props: Vec<usize> = (n as usize + 1..=2 * n as usize).collect();
+        let (tip, tip_prop) = (n as usize, 2 * n as usize);
+        let structure = cubes(&cells, 1, &props, cantilever_limit(n) * 1.02);
+        let mut state = WallState::new(&structure);
+        state.cracked[joint_between(&structure, tip, tip_prop)] = true;
+        let anchors: Vec<usize> = (0..structure.joints.len())
+            .filter(|&j| structure.joints[j].a == tip_prop && structure.joints[j].b == Side::Ground)
+            .collect();
+        assert!(!anchors.is_empty(), "the tip's prop stands on the ground");
+        for &j in &anchors {
+            state.cracked[j] = true;
+        }
+        let dusted = spend(&structure, &mut state, &props[..props.len() - 1]);
+        let weighed = weigh(
+            &structure,
+            &mut state,
+            &dusted,
+            &anchors,
+            &[],
+            &[],
+            &mut SectionCache::default(),
+        );
+        assert!(
+            weighed
+                .failures
+                .iter()
+                .any(|failure| failure.cause == Cause::Weight),
+            "the arm's root opens under its weight: {:?} unassessed {:?}",
+            cracks(&weighed),
+            weighed.unassessed
+        );
+        let fell: Vec<usize> = fall(&structure, &mut state).into_iter().flatten().collect();
+        assert!((1..=tip).all(|c| fell.contains(&c)), "{fell:?}");
     }
 
     /// A REST NEVER CARRIES TENSION: a fixture cube run out from a support no section cuts, on a
