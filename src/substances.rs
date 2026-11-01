@@ -207,9 +207,9 @@ pub struct BurstFacts {
     /// The speed constant `K` (m/s): the sideways speed scale of the burst's `v_s`.
     pub speed_constant: f64,
     /// The chemical energy one kilogram of it releases, J/kg: what a burst's blast field carries
-    /// once the casing has taken its share (`buildings::fracture`). `None` where none is sourced:
-    /// such a core drives a casing and no blast.
-    pub chemical_energy: Option<f64>,
+    /// once the casing has taken its share (`buildings::fracture`). Required: a core whose speed
+    /// constant drives a casing releases chemical energy, so a burst core states it.
+    pub chemical_energy: f64,
 }
 
 /// How a substance resists a round's force law.
@@ -383,14 +383,14 @@ enum SubstanceFile {
     },
 }
 
-/// A burst core's facts as authored: density (kg/m³) and the speed constant `K` (m/s).
+/// A burst core's facts as authored: density (kg/m³), the speed constant `K` (m/s) and the
+/// chemical energy (J/kg).
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct BurstFile {
     density: Sourced<f64>,
     speed_constant_mps: Sourced<f64>,
-    #[serde(default)]
-    chemical_energy_j_per_kg: Option<Sourced<f64>>,
+    chemical_energy_j_per_kg: Sourced<f64>,
 }
 
 impl BurstFile {
@@ -398,7 +398,7 @@ impl BurstFile {
         BurstFacts {
             density: self.density.0,
             speed_constant: self.speed_constant_mps.0,
-            chemical_energy: self.chemical_energy_j_per_kg.map(|energy| energy.0),
+            chemical_energy: self.chemical_energy_j_per_kg.0,
         }
     }
 }
@@ -705,17 +705,13 @@ fn checked(name: &str, substance: Substance) -> Result<Substance, String> {
     }
 }
 
-/// A burst core's two facts, each finite and positive.
+/// A burst core's three facts, each finite and positive.
 fn checked_burst(name: &str, facts: BurstFacts) -> Result<(), String> {
-    let stated = [
-        ("density", Some(facts.density)),
-        ("speed_constant_mps", Some(facts.speed_constant)),
+    for (field, value) in [
+        ("density", facts.density),
+        ("speed_constant_mps", facts.speed_constant),
         ("chemical_energy_j_per_kg", facts.chemical_energy),
-    ];
-    for (field, value) in stated
-        .into_iter()
-        .filter_map(|(field, value)| value.map(|value| (field, value)))
-    {
+    ] {
         if !value.is_finite() || value <= 0.0 {
             return Err(format!(
                 "substance {name:?}: burst {field} must be finite and positive (got {value})"
@@ -1374,7 +1370,7 @@ mod tests {
     fn an_unworn_burst_core_is_refused_by_the_walk_and_states_only_its_facts() {
         let entry = |density: &str| {
             with(&format!(
-                r#""Core": Unworn(burst: Some((density: ({density}, Tuned("fixture")), speed_constant_mps: (2680.0, Tuned("fixture"))))),"#
+                r#""Core": Unworn(burst: Some((density: ({density}, Tuned("fixture")), speed_constant_mps: (2680.0, Tuned("fixture")), chemical_energy_j_per_kg: (4.184e6, Tuned("fixture"))))),"#
             ))
         };
         let registry = SubstanceRegistry::from_ron(&entry("1650.0")).expect("a burst core parses");
@@ -1384,7 +1380,7 @@ mod tests {
             Some(BurstFacts {
                 density: 1650.0,
                 speed_constant: 2680.0,
-                chemical_energy: None,
+                chemical_energy: 4.184e6,
             })
         );
         assert_eq!(core.matter(), None);
@@ -1417,8 +1413,9 @@ mod tests {
             "{empty}: {err}"
         );
         for refused in [
-            r#""Core": Unworn(burst: Some((density: 1650.0, speed_constant_mps: (2680.0, Tuned("fixture"))))),"#,
-            r#""Core": Unworn(burst: Some((density: (1650.0, Tuned("fixture")), speed_constant_mps: (2680.0, Tuned("fixture")))), resistance: Reference),"#,
+            r#""Core": Unworn(burst: Some((density: 1650.0, speed_constant_mps: (2680.0, Tuned("fixture")), chemical_energy_j_per_kg: (4.184e6, Tuned("fixture"))))),"#,
+            r#""Core": Unworn(burst: Some((density: (1650.0, Tuned("fixture")), speed_constant_mps: (2680.0, Tuned("fixture")), chemical_energy_j_per_kg: (4.184e6, Tuned("fixture")))), resistance: Reference),"#,
+            r#""Core": Unworn(burst: Some((density: (1650.0, Tuned("fixture")), speed_constant_mps: (2680.0, Tuned("fixture"))))),"#,
         ] {
             let err = SubstanceRegistry::from_ron(&with(refused)).expect_err(refused);
             assert!(matches!(err, SubstanceError::Parse(_)), "{err}");
@@ -1439,7 +1436,7 @@ mod tests {
         };
         let plain = SubstanceRegistry::from_ron(&hard("")).expect("a hard row without burst facts");
         let both = SubstanceRegistry::from_ron(&hard(
-            r#", burst: Some((density: (1650.0, Tuned("fixture")), speed_constant_mps: (2680.0, Tuned("fixture"))))"#,
+            r#", burst: Some((density: (1650.0, Tuned("fixture")), speed_constant_mps: (2680.0, Tuned("fixture")), chemical_energy_j_per_kg: (4.184e6, Tuned("fixture"))))"#,
         ))
         .expect("a hard row with burst facts");
         assert_eq!(plain.get("Filler").unwrap().burst(), None);
@@ -1448,7 +1445,7 @@ mod tests {
             Some(BurstFacts {
                 density: 1650.0,
                 speed_constant: 2680.0,
-                chemical_energy: None,
+                chemical_energy: 4.184e6,
             })
         );
         assert_eq!(
@@ -1463,7 +1460,7 @@ mod tests {
             })
         );
         let err = SubstanceRegistry::from_ron(&hard(
-            r#", burst: Some((density: (1650.0, Tuned("fixture")), speed_constant_mps: (0.0, Tuned("fixture"))))"#,
+            r#", burst: Some((density: (1650.0, Tuned("fixture")), speed_constant_mps: (0.0, Tuned("fixture")), chemical_energy_j_per_kg: (4.184e6, Tuned("fixture"))))"#,
         ))
         .expect_err("a speed constant of zero");
         assert!(

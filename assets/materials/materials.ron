@@ -548,10 +548,10 @@
             burst: Some((
                 density: (1650.0, Derived("1.65 g/cm³: shape-law.md §4")),
                 speed_constant_mps: (2680.0, Derived("shape-law.md §4")),
-                chemical_energy_j_per_kg: Some((4.184e6, Tuned("ASSUMED: the TNT-equivalent convention,
+                chemical_energy_j_per_kg: (4.184e6, Tuned("ASSUMED: the TNT-equivalent convention,
                     1 kg = 4.184 MJ (CLAIMED, NIST SP 811: the ton of TNT as 4.184e9 J), standing
                     for this core, whose own heat of detonation no file states (the wall
-                    prototype's value)"))),
+                    prototype's value)")),
             )),
         ),
         // The 8.8 cm Sprgr. L/4.5's filler, poured amatol 60/40 (TM53 p.445), named by its burst
@@ -562,10 +562,10 @@
                     .agents/scratch/rounds-research/kwk36-rounds-2026-10-30.md gives it")),
                 speed_constant_mps: (2400.0, Tuned("ASSUMED, below the Pzgr. 39 core's 2680 m/s:
                     amatol is the weaker filler; no source in the research note gives it")),
-                chemical_energy_j_per_kg: Some((4.184e6, Tuned("ASSUMED: the TNT-equivalent convention,
+                chemical_energy_j_per_kg: (4.184e6, Tuned("ASSUMED: the TNT-equivalent convention,
                     1 kg = 4.184 MJ (CLAIMED, NIST SP 811: the ton of TNT as 4.184e9 J), standing
                     for amatol 60/40, whose own heat of detonation the research note does not
-                    give"))),
+                    give")),
             )),
         ),
     },

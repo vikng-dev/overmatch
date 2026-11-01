@@ -470,7 +470,7 @@ fn resolved(
                 core_mass: block.core_mass.0,
                 core_density: facts.density,
                 speed_constant: facts.speed_constant,
-                chemical_energy: facts.chemical_energy.unwrap_or(0.0),
+                chemical_energy: facts.chemical_energy,
                 base_mass: block.base_mass.0,
                 cavity_diameter: block.cavity_diameter.0,
                 filler_setback: block.filler_setback.0,
@@ -1034,11 +1034,13 @@ pub(crate) mod tests {
                 density: (7800.0, Tuned("x")), flow_strength: (1.18e9, Tuned("x")),
                 youngs_modulus: (190.0e9, Tuned("x")), poisson_ratio: (0.29, Tuned("x"))))),
         "Fixture core": Unworn(burst: Some((density: (1650.0, Tuned("x")),
-            speed_constant_mps: (2680.0, Tuned("x"))))),
+            speed_constant_mps: (2680.0, Tuned("x")),
+            chemical_energy_j_per_kg: (4.184e6, Tuned("x"))))),
         "Fixture hard core": Hard(resistance: Effective((200.0, Tuned("x"))), visual: "fixture", feedback: (exposed_linear_rgb: ((0.5, 0.51, 0.53), Tuned("fixture")), powder_linear_rgb: ((0.47, 0.47, 0.47), Tuned("fixture")), metallic: (1.0, Tuned("fixture")), roughness_gain: (1.0, Tuned("fixture")), sparks: (true, Tuned("fixture"))),
             debris_half_angle_deg: (26.2, Tuned("x")), facts: None,
             burst: Some((density: (1650.0, Tuned("x")),
-                speed_constant_mps: (2680.0, Tuned("x"))))),
+                speed_constant_mps: (2680.0, Tuned("x")),
+                chemical_energy_j_per_kg: (4.184e6, Tuned("x"))))),
     })"#;
 
     /// A burst block rides its round as the burst derived from the round's body, its body steel's
@@ -1057,7 +1059,7 @@ pub(crate) mod tests {
             core_mass: 0.02,
             core_density: 1650.0,
             speed_constant: 2680.0,
-            chemical_energy: 0.0,
+            chemical_energy: 4.184e6,
             base_mass: 0.1,
             cavity_diameter: 0.02,
             filler_setback: 0.15,

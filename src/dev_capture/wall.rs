@@ -253,14 +253,13 @@ fn shoot(what: &What, (outward, aim, foot): (Vec3, Vec3, Vec3), commands: &mut C
             let core = registry
                 .keys()
                 .into_iter()
-                .find_map(|name| registry.get(name).ok().and_then(|s| s.burst()))
-                .filter(|core| core.chemical_energy.is_some());
+                .find_map(|name| registry.get(name).ok().and_then(|s| s.burst()));
             let (Some(core), at) = (core, foot + Vec3::Y * 0.3) else {
-                error!("capture: no shipped burst core states a chemical energy");
+                error!("capture: no shipped burst core");
                 return;
             };
             let radius = (3.0 * mass / (4.0 * std::f32::consts::PI * core.density as f32)).cbrt();
-            let energy = mass * core.chemical_energy.unwrap_or(0.0) as f32;
+            let energy = mass * core.chemical_energy as f32;
             let at = at + outward * radius;
             commands.trigger(WallCharge {
                 at,

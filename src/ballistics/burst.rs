@@ -27,8 +27,7 @@ pub(crate) struct BurstInputs {
     pub(crate) core_density: f64,
     /// The core substance's speed constant `K`.
     pub(crate) speed_constant: f64,
-    /// The chemical energy one kilogram of the core releases (J/kg); zero where its row states
-    /// none.
+    /// The chemical energy one kilogram of the core releases (J/kg), its row's required datum.
     pub(crate) chemical_energy: f64,
     /// The parts at the base, behind the cavity.
     pub(crate) base_mass: f64,
@@ -104,7 +103,8 @@ pub(crate) struct Burst {
     /// The burst core's mass `C` (kg).
     pub(crate) core_mass: f32,
     /// The blast's energy (J): the core's chemical energy less what the casing took,
-    /// `C · e − ½ M v_s²`, at least zero. What the buildings' blast field carries.
+    /// `C · e − ½ M v_s²`; a core whose chemistry cannot pay its casing is refused at load. What
+    /// the buildings' blast field carries.
     pub(crate) blast: f32,
     /// Authored distance behind the tip (m), used by the environment airblast.
     pub(crate) filler_setback: f32,
@@ -134,6 +134,7 @@ impl Burst {
             ("base mass", inputs.base_mass),
             ("cavity diameter", inputs.cavity_diameter),
             ("filler setback", inputs.filler_setback),
+            ("chemical energy", inputs.chemical_energy),
             ("body steel density", steel_density),
         ] {
             if !value.is_finite() || value <= 0.0 {
@@ -147,7 +148,6 @@ impl Burst {
         for (field, value) in [
             ("fuze threshold", f64::from(threshold)),
             ("delay", f64::from(inputs.delay)),
-            ("chemical energy", inputs.chemical_energy),
         ] {
             if !value.is_finite() || value < 0.0 {
                 return Err(format!(
@@ -175,20 +175,14 @@ impl Burst {
         let sideways_speed = inputs.speed_constant / (driven / inputs.core_mass + 0.5).sqrt();
         let casing_energy = 0.5 * driven * sideways_speed * sideways_speed;
         let chemical = inputs.core_mass * inputs.chemical_energy;
-        // Zero chemical energy names unsourced chemistry in BurstInputs; the sourced Gurney
-        // speed still drives a casing, but no airblast energy is claimed for that core.
-        let blast = if inputs.chemical_energy == 0.0 {
-            0.0
-        } else {
-            if !chemical.is_finite() || chemical < casing_energy {
-                return Err(
-                    "chemical energy must cover the casing kinetic energy; author consistent \
-                    core chemistry and speed_constant from their sources"
-                        .into(),
-                );
-            }
-            chemical - casing_energy
-        };
+        if !chemical.is_finite() || chemical < casing_energy {
+            return Err(
+                "chemical energy must cover the casing kinetic energy; author consistent \
+                core chemistry and speed_constant from their sources"
+                    .into(),
+            );
+        }
+        let blast = chemical - casing_energy;
         for (field, value) in [
             ("sideways_speed", sideways_speed),
             ("casing kinetic energy", casing_energy),
@@ -410,7 +404,7 @@ pub(super) fn fixture_inputs() -> BurstInputs {
         core_mass: 0.06,
         core_density: 1650.0,
         speed_constant: 2680.0,
-        chemical_energy: 0.0,
+        chemical_energy: 4.184e6,
         base_mass: 0.33,
         cavity_diameter: 0.0357,
         filler_setback: 0.18,
@@ -516,17 +510,11 @@ mod tests {
             );
         }
         println!("MEASURED chemistry split: maximum relative residual {worst:.6e}");
-        for invalid in [f64::NAN, f64::INFINITY, -1.0, 1.0, f64::MAX] {
+        for invalid in [f64::NAN, f64::INFINITY, -1.0, 0.0, 1.0, f64::MAX] {
             inputs.chemical_energy = invalid;
             let error = Burst::derived(round, STEEL, &inputs).unwrap_err();
             assert!(error.contains("chemical energy"), "{error}");
         }
-        inputs.chemical_energy = 0.0;
-        assert_eq!(
-            Burst::derived(round, STEEL, &inputs).unwrap().blast,
-            0.0,
-            "unsourced chemistry claims no airblast energy"
-        );
     }
 
     /// `v_s = K (M/C + ½)^−½` with `M` the wall, and the energy `½ M v_s²`: the burst's field ratio

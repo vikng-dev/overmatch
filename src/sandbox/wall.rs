@@ -302,14 +302,14 @@ impl Charge {
                 let speed = f64::from(burst.sideways_speed);
                 Self {
                     density: core.density as f32,
-                    chemical: core.chemical_energy.unwrap_or(0.0) as f32,
+                    chemical: core.chemical_energy as f32,
                     casing_ratio: ((core.speed_constant / speed).powi(2) - 0.5) as f32,
                     casing_speed: burst.sideways_speed,
                 }
             }
             (Some(core), None) => Self {
                 density: core.density as f32,
-                chemical: core.chemical_energy.unwrap_or(0.0) as f32,
+                chemical: core.chemical_energy as f32,
                 casing_ratio: 0.0,
                 casing_speed: 0.0,
             },
