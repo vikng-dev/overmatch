@@ -1239,7 +1239,8 @@ mod tests {
             with(&format!(
                 r#"
             "Fixture": Hard(resistance: Effective((20.0, Tuned("fixture"))),
-                visual: "fixture", debris_half_angle_deg: (26.2, Tuned("fixture")),
+                visual: "fixture", feedback: (exposed_linear_rgb: ((0.5, 0.51, 0.53), Tuned("fixture")), powder_linear_rgb: ((0.47, 0.47, 0.47), Tuned("fixture")), metallic: (1.0, Tuned("fixture")), roughness_gain: (1.0, Tuned("fixture")), sparks: (true, Tuned("fixture"))),
+                debris_half_angle_deg: (26.2, Tuned("fixture")),
                 bulk: Some((density: (1800.0, Tuned("fixture")),
                     toughness: (5e5, Tuned("fixture")),
                     tensile: Some((1e6, Tuned("fixture"))),
