@@ -45,6 +45,12 @@ impl VolumeOf {
 #[relationship_target(relationship = VolumeOf)]
 pub struct TankVolumes(Vec<Entity>);
 
+/// Why a [`TankVolumes`] entry always resolves in a query whose terms are all optional: the
+/// relationship's despawn hook removes a volume from its tank's list as the volume goes, so every
+/// listed entity is live.
+const LIVE_VOLUME: &str = "a TankVolumes entry is a live entity: the VolumeOf relationship drops it \
+                           on despawn";
+
 /// Resolve a spatial-query hit to the nearest ancestor carrying `T`. Colliders (armor trimeshes,
 /// collision proxies) are spawned as bare children of their named node, so a raycast hit lands on
 /// the mesh-primitive entity while the semantic components (`BallisticVolume`, [`VolumeOf`]) live
@@ -509,9 +515,7 @@ pub fn part_qualities(
 ) -> std::collections::HashMap<Part, f32> {
     let mut quality: std::collections::HashMap<Part, f32> = std::collections::HashMap::new();
     for volume in tank_volumes.iter() {
-        let Ok(facets) = volumes.get(volume) else {
-            continue;
-        };
+        let facets = volumes.get(volume).expect(LIVE_VOLUME);
         // A living crew seat supplies its role at the occupant's competence (native 1.0 / foreign
         // degraded). `home` defaults to the seat when no occupant facet is present.
         if let (Some(role), None) = (facets.crew, facets.dead) {
@@ -743,9 +747,7 @@ fn mark_dead_tanks(
         let mut crew_total = 0;
         let mut crew_living = 0;
         for volume in tank_volumes.iter() {
-            let Ok((station, dead)) = volumes.get(volume) else {
-                continue;
-            };
+            let (station, dead) = volumes.get(volume).expect(LIVE_VOLUME);
             if station.is_some() {
                 crew_total += 1;
                 if dead.is_none() {
