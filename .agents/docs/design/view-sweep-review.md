@@ -24,8 +24,8 @@ DERIVED ratio 2.000000. Driving laws and their material values were unchanged by
 | V1 | Fixed | `camera::TurretPivot` caches the controlled entity with its offset and clears in the tankless gap. A different possessed rig recomputes from its complete skeleton. An ordered PostUpdate chain runs after every Update handoff and before orbit/captive readers. |
 | V2 | Fixed | Required sourced round `effects.ember` states presence, radius, base offset, burn, fade and linear HDR colour. `FlightEffects` is present at shell spawn; `vfx::ember` consumes it independently of scene/calibre. |
 | V3 | Fixed | Required sourced `effects.smoke` states presence, width, growth, lifetime, drift and birth taper. `vfx::trail` carries each emission through the existing path/bounce renderer. |
-| V4 | Fixed (lane 2) | Each gun file states a required sourced `muzzle` block (`guns::MuzzleEmission`): core, flames, fireball, glow, smoke ration, light, ground blast. It rides `Round::muzzle` and `FireShell::muzzle` to one `vfx::muzzle` observer; no calibre split or seed-calibre scale remains. Shipped values are the previous provisional look, ASSUMED. |
-| V5 | Fixed (lanes 2, 3) | Ground types state a required `dust.erodibility` and `dust.colour_srgb`; the gun states its gas `reach_m`. Puffs = the gun's rolled count × the painted grounds' summed share (weight × erodibility, `terrain_blend::dust_sources`); each puff is one source's soil, drawn by share, lit by the key light (see "Lane 3"). Erodibilities ASSUMED, ordered by hand; colours DERIVED from the packs' albedo. |
+| V4 | Fixed (lane 2), replaced by the muzzle law | One view consumer, `vfx::muzzle`, reads the emission each shot carries (`Round::muzzle`, `FireShell::muzzle`); no calibre split or seed-calibre scale remains. The per-gun `muzzle` blocks are gone: the emission is the muzzle law's, from the shot's energy and the gun's muzzle shape (see "The muzzle law" below). |
+| V5 | Fixed (lanes 2, 3) | Ground types state a required `dust.erodibility` and `dust.colour_srgb`; the muzzle law sizes the gas `reach_m` from the shot's energy. Puffs = the gun's rolled count × the painted grounds' summed share (weight × erodibility, `terrain_blend::dust_sources`); each puff is one source's soil, drawn by share, lit by the key light (see "Lane 3"). Erodibilities ASSUMED, ordered by hand; colours DERIVED from the packs' albedo. |
 | V6 | Fixed for material selection | A volume's `SurfaceFeedback` travels through authority `Bounce`/`Bite`, public `PathImpact`, `Impact` and static-proxy response. Required sourced facts select spark presence and powder colour. Nonsparking materials produce powder without a metal flash/fan. Dimensions remain the separate new finding below. |
 | V7 | Fixed | `ShellStrike` carries the exact struck primitive's response into `HullMark`; late joiners receive it with the record. Shared neutral relief maps receive per-response exposed tint, metallic and roughness factors. No fresh-steel constant selects appearance. |
 
@@ -289,3 +289,62 @@ the semantic layers, Bevy's computed draw order, opaque backing, non-overlap wit
 dock, a nonempty scrollable roster, status-text growth and released diagnostic space. Their
 viewport/scale cases are FIXTURE DATA, not a claim of universal viewport coverage.
 Fixed in "hud: order layers and reserve fixed-panel space (#236)".
+
+## The muzzle law (#245)
+
+Subject: the game's muzzle effects, view only (ADR-0014): no sim state, no wire change. The
+owner's decision (2026-11-01, #245): muzzle visuals are taste, not realism, and what matters is
+consistency. This section is the law's one home; `guns::muzzle` and `vfx::muzzle` point here.
+
+**The law.** Two facts size every shot's muzzle emission, resolved once per (gun, round) as the gun
+registry loads:
+
+- **The shot's muzzle energy** E = ½·m·v², from the round's launched mass (`mass`, carrier
+  included: what leaves the muzzle) and the gun's `muzzle_speed` for that round. It is per round,
+  never per gun: an APCR shot and an AP shot from one gun draw different sizes. A chambered round
+  without a positive finite mass, or a row without a positive finite speed, is refused at load,
+  naming the round's file and `mass`, or the gun's file and the row's `muzzle_speed`.
+- **The gun's muzzle shape** (`muzzle_shape` in its gun file, `guns::MuzzleShape`), a closed enum
+  holding the set the shipped guns need: `MuzzleBrake` (the KwK 36) and `FlashHider` (the MG 34).
+  The shape says where the gas goes: its core sprite and share, its forward jet's planes and share,
+  its side jets (angle from the bore, planes, share) or their absence, and which of the fireball,
+  fill glow, smoke and ground blast it draws. Bare was left out: no shipped gun has a bare muzzle,
+  and a variant no data selects is a switch with no user. The first bare-muzzled gun adds the
+  variant and its row in `shapes`.
+
+Every magnitude lives once, in the taste file `assets/vfx/muzzle.ron`: its value for a shot of the
+reference energy (1 MJ, a round number between the shipped guns' shots), each labelled TASTE. One
+curve per property, a power law on E / reference whose exponent is fixed by what the property is:
+
+| Property | Exponent | Why |
+| --- | --- | --- |
+| a length or diameter (core, flames, fireball, smoke, light range and radius, standoffs, dust reach, sizes and spread) | 1/3 | similarity: a gas volume's worth of work |
+| a light's peak | 2/3 | similarity: the flash's area |
+| a gas life (fireball, smoke, dust) | `duration_exponent`, TASTE 0.1667 | a gas life grows with energy, at half the cube root's rate, so a rifle's smoke lingers long enough to read; the file refuses it outside 0..=1/3 |
+| a gas speed (smoke rise and push, dust push and rise) | 1/3 − `duration_exponent` | a length over a gas life |
+| a flash life (core, flames, glow, light) | 0 | every real flash lasts milliseconds, below one frame for every gun: each is drawn for the same two to three 60 Hz frames |
+| shares, ratios, counts, opacity, colour, bore bias | 0 | shape facts, not sizes |
+
+Two derived consequences: the smoke ration is the shots a mount's cyclic rate fires in the file's
+`puff_interval_s` (TASTE 0.3 s; a single-shot gun puffs every round), and a tracer no longer
+brightens the muzzle light (the energy is the one scalar; the old per-gun `tracer_gain` is gone).
+The per-gun `muzzle` blocks (about 25 values per gun), their parse path and their tests were
+deleted; a gun file that still states one is refused at load.
+
+**Derived numbers** (DERIVED from the shipped data and the taste file; the jitter is ±15 % on the
+core and flame lengths and the fireball diameter):
+
+| Shot | E, J | Core, m | Flames, m | Fireball | Smoke | Light | Gas reach |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| KwK 36, 88mm_AP and 88mm_APHE_ring (10.2 kg, 773 m/s) | 3.047e6 | 3.08-4.17 | forward 2.03-2.75, two side jets 3.14-4.25 | 6.16-8.34 m, 0.205 s | 2.17→4.06 m, 1.45 s | 8.41 Mlm, range 36.3 m | 2.61 m |
+| KwK 36, 88mm_HE (9.30 kg, 820 m/s) | 3.127e6 | 3.11-4.20 | forward 2.05-2.77, side 3.17-4.29 | 6.21-8.41 m, 0.206 s | 2.19→4.09 m, 1.45 s | 8.55 Mlm, range 36.6 m | 2.63 m |
+| KwK 36, 88mm_APCR (7.3 kg, 930 m/s) | 3.157e6 | 3.12-4.22 | forward 2.06-2.78, side 3.18-4.30 | 6.23-8.44 m, 0.206 s | 2.20→4.11 m, 1.45 s | 8.61 Mlm, range 36.7 m | 2.64 m |
+| MG 34, 7.9mm_AP (11.8 g, 755 m/s) | 3.363e3 | 0.19-0.26 | three forward 0.31-0.41 | none (flash hider) | 0.22→0.42 m, 0.46 s, every 4th shot | 0.090 Mlm, range 3.75 m | 0.27 m |
+
+What follows from the law alone, for the owner's eye: the MG's gas reaches 0.27 m, so neither
+MG mount, standing well over that above the ground, lifts dust; the main gun's 2.6 m reach covers
+its shipped muzzle heights. The MG's light is 1/94 of the main gun's (the two-thirds power of the
+energy ratio 906, DERIVED), and its 3.75 m range lights little beyond its own mount. Every shape
+share, every reference value and the duration exponent are taste for the owner to judge on the
+capture stills; the assets' digests change, so the new look reaches players with the next release.
+
