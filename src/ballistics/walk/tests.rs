@@ -1159,7 +1159,13 @@ fn different_stacks_on_different_samples_carry_per_boundary_coverage() {
     let step = event
         .exits
         .iter()
-        .find(|exit| exit.substances == [SubstanceId::fixture(1000.0)] && !exit.genuine)
+        .find(|exit| {
+            exit.members.iter().all(|member| member.face.is_none())
+                && exit
+                    .members
+                    .iter()
+                    .any(|member| member.exited.contains(&volume(1)))
+        })
         .expect("the interior step must be its own body exit");
     assert_eq!(step.members.len(), 1);
     assert_eq!(step.members[0].sample, 1);
@@ -1730,13 +1736,11 @@ fn exits_before_a_stop_throw_and_the_stopped_body_throws_nothing() {
     assert!(matches!(plan.outcome, Outcome::Embedded { .. }));
     assert_eq!(plan.spall.len(), 1, "{:?}", plan.spall);
     let source = &plan.spall[0];
-    assert_eq!(source.substances, [SubstanceId::fixture(1000.0)]);
     assert!(source.face.is_none(), "an internal step has no face");
     // DERIVED: 20 mm head-on at 1000 per metre.
     assert!((source.spend - 20.0).abs() < 0.05, "{}", source.spend);
     let (round, state) = solid(AP_88_CAPABILITY);
-    assert_eq!(source.entry_speed, state.speed as f32);
-    assert!(source.exit_speed < source.entry_speed && source.exit_speed > 0.0);
+    assert!(source.exit_speed < state.speed as f32 && source.exit_speed > 0.0);
     let left = super::super::speed_for(round.body(), AP_88_CAPABILITY - source.spend);
     assert!(
         (source.exit_speed / left - 1.0).abs() < 1.0e-3,
@@ -1745,10 +1749,10 @@ fn exits_before_a_stop_throw_and_the_stopped_body_throws_nothing() {
     );
 }
 
-/// Each source carries the round's own speeds across its own body: the speed the round left one
-/// body with is the speed it entered the next with, and the last exit's is the residual.
+/// The game's damage model: each reached body's exit speed decreases as its positive resistance
+/// spends energy; the last exit is the residual. Fuze continuation relies on these exit states.
 #[test]
-fn each_source_uses_the_speeds_across_its_own_body() {
+fn each_source_carries_its_exit_speed_and_the_last_is_the_residual() {
     let laws = WalkLaws::default();
     let volumes = table(&[(1, 1000.0), (2, 10.0)]);
     let slabs = [
@@ -1765,8 +1769,7 @@ fn each_source_uses_the_speeds_across_its_own_body() {
         panic!("two exits: {:?}", plan.spall);
     };
     let (_, state) = solid(AP_88_CAPABILITY);
-    assert_eq!(plate.entry_speed, state.speed as f32);
-    assert_eq!(plate.exit_speed, crew.entry_speed);
+    assert!(plate.exit_speed > crew.exit_speed && plate.exit_speed < state.speed as f32);
     assert_eq!(crew.exit_speed, plan.state.speed as f32);
     assert!(plate.face.is_none() && crew.face.is_some());
     // DERIVED: 100 mm at 1000 per metre, then 300 mm at 10 per metre.
@@ -1883,7 +1886,6 @@ fn equal_factor_plates_in_contact_throw_one_cone_with_the_summed_spend() {
     let [cone] = split.as_slice() else {
         panic!("one cone: {split:?}");
     };
-    assert_eq!(cone.substances, [rha, probe]);
     assert!(cone.face.is_some(), "the far face is a genuine exit");
 
     for (vol, substance) in [(1, rha), (2, probe)] {
@@ -1895,7 +1897,6 @@ fn equal_factor_plates_in_contact_throw_one_cone_with_the_summed_spend() {
         assert_eq!(cone.strength(), plate.strength());
         assert_eq!(cone.spend, plate.spend);
         assert_eq!(cone.energy, plate.energy);
-        assert_eq!(cone.entry_speed, plate.entry_speed);
         assert_eq!(cone.exit_speed, plate.exit_speed);
     }
 }
@@ -1949,7 +1950,7 @@ fn a_round_that_loses_more_energy_at_a_plate_throws_a_stronger_cone() {
             let [cone] = plan.spall.as_slice() else {
                 panic!("one cone: {:?}", plan.spall);
             };
-            let (v_in, v_out) = (cone.entry_speed as f64, cone.exit_speed as f64);
+            let (v_in, v_out) = (speed as f64, cone.exit_speed as f64);
             let lost = 0.5 * mass as f64 * (v_in * v_in - v_out * v_out);
             let strength = cone.strength_at(SHARE);
             assert!(
@@ -2045,10 +2046,8 @@ fn only_a_softer_step_throws() {
     let [steel, crew] = hard_equal.as_slice() else {
         panic!("two cones: {hard_equal:?}");
     };
-    assert_eq!(steel.substances, [rha, probe]);
     assert!(steel.face.is_none() && crew.face.is_some());
-    assert_eq!(steel.entry_speed, entry);
-    assert_eq!(steel.exit_speed, crew.entry_speed);
+    assert!(steel.exit_speed > crew.exit_speed && steel.exit_speed < entry);
     // DERIVED: 100 mm at 1000 per metre, then 300 mm at 10 per metre.
     assert!((steel.spend - 100.0).abs() < 0.1, "{}", steel.spend);
     assert!((crew.spend - 3.0).abs() < 0.01, "{}", crew.spend);
@@ -2064,9 +2063,7 @@ fn only_a_softer_step_throws() {
     let [cone] = soft_hard.as_slice() else {
         panic!("one cone: {soft_hard:?}");
     };
-    assert_eq!(cone.substances, [cast, rha]);
     assert!(cone.face.is_some());
-    assert_eq!(cone.entry_speed, entry);
     // DERIVED: 50 mm at 900 per metre plus 50 mm at 1000 per metre.
     assert!((cone.spend - 95.0).abs() < 0.1, "{}", cone.spend);
 
@@ -2082,10 +2079,8 @@ fn only_a_softer_step_throws() {
     let [first, last] = dip.as_slice() else {
         panic!("two cones: {dip:?}");
     };
-    assert_eq!(first.substances, [rha]);
-    assert_eq!(last.substances, [cast, rha]);
     assert!(first.face.is_none() && last.face.is_some());
-    assert_eq!(first.exit_speed, last.entry_speed);
+    assert!(first.exit_speed > last.exit_speed && first.exit_speed < entry);
     // DERIVED: 50 mm at 1000 per metre; then 50 mm at 900 plus 50 mm at 1000.
     assert!((first.spend - 50.0).abs() < 0.1, "{}", first.spend);
     assert!((last.spend - 95.0).abs() < 0.1, "{}", last.spend);

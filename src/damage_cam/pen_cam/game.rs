@@ -392,7 +392,7 @@ impl Player<'_, '_> {
     }
 
     /// The combatant whose shots the corner shows: the [`FreeShooter`] the player fires as, where
-    /// there is exactly one, else the tank's [`Self::life`].
+    /// there is one, or the tank's [`Self::life`] when free-shooter possession is absent.
     fn shooter(&self) -> Option<TankLife> {
         if self.free.is_empty() {
             return self.life(); // No free-shooter possession: use the controlled tank's life.

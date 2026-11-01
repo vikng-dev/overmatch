@@ -521,3 +521,35 @@ presentation, recorder, protocol, pen-cam, field-cast, headless and citation tes
 ignored. The teardown controls establish the named unmounted state: both stage roots are absent
 and the corner is clear; partial roots or an open record without them fail. MEASURED: all 43
 whole-tree citation, font, net-boundary and bake guards passed. The field-cast pin is unchanged.
+
+## Cone-source producer closure and final disposition
+
+Subject: the game's damage model, game state only. The emitted-cone diagnostic deletion also
+removes its now-unread source entry speed, coverage and copied substance list, their producers,
+and the redundant post-grouping body labels. The grouping keys still distinguish material sets,
+exit kind and ordinal; the resulting members carry the actual geometry. The remaining source
+exit speed feeds fuze continuation, energy and strength feed fields, and exited volumes protect
+against dosing the same body twice. Tests compare retained energy, residual speed and geometry
+rather than requiring diagnostic storage. A reached exit must belong to an advanced stretch;
+that construction invariant cannot silently discard a cone.
+
+Disposition: B02/B03, B56–B60, B62/B63, B68, B71, B72/B73, remaining resolver/walk directions,
+record and cone diagnostics, the potency oracle, fuzzer CLI user, dependency comment and explicit
+round construction blocks are fixed. The removed demo singleton groups were already fixed at
+the base. The surviving presentation groups now name unmounted states and reject duplicates.
+The shader oracle stays test-only; the fuzzer stays behind its tracked author runner. Synthetic
+unknown-round clips deliberately omit a body. Body-less records retain a material handle which
+no active piece reads; no fallback appearance is drawn. No alternate runtime path or experiment
+switch remains from this lane.
+
+Owner decisions held unchanged: B1 aerodynamic facts, B2 sampling, B3 recoil, B4 release/construction,
+B6 ground law, B13 the protection-floor contract, the whole-flight source exclusion pending authored
+bore/clearance, and `SPIKE_TRACE_SIM_FIELDS` with ADR-0029/0030. Field-horizon pricing is still for
+the orchestrator; this lane ran no capture or pricing. The predecessor review's R3 and R4 and the
+new generic-fuzzer R5 are fixed; no other P1/P2 was found in that predecessor diff.
+
+Producer-closure verification: format and workspace/all-target clippy passed. MEASURED: 386 walk,
+resolver, march, fuzzer, recorder, pen-cam, field-cast, headless and citation tests passed; seven
+ignored instruments. MEASURED: all 43 whole-tree citation, font, net-boundary and bake guards
+passed again. The field-cast pin is unchanged by producer cleanup. All lane changes are committed
+on the lane branch; no push, capture, pricing or deployment was performed.

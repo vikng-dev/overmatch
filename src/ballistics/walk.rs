@@ -1936,10 +1936,6 @@ pub struct ExitMember {
 /// `r·tan(incidence)` yet are one face.
 #[derive(Clone, Debug, PartialEq)]
 pub struct BodyExit {
-    /// The substances of the body exited, in id order.
-    pub substances: Vec<SubstanceId>,
-    /// Whether the exit is genuine (into air through a rear face) rather than an internal step.
-    pub genuine: bool,
     /// The contributing samples, in sample order.
     pub members: Vec<ExitMember>,
 }
@@ -1956,8 +1952,6 @@ pub struct SpallSource {
     pub face: Option<Vec3>,
     /// The round's unit direction of travel through the crossing.
     pub direction: Vec3,
-    /// The substances of the body exited, in id order.
-    pub substances: Vec<SubstanceId>,
     /// The volumes the reached members' exits leave ([`ExitMember::exited`]), in entity order: the
     /// body that throws the cone. The surface the cone is thrown from is theirs, so a direction
     /// that starts inside one of them has not entered it there, and the cone never doses one of
@@ -1985,12 +1979,8 @@ pub struct SpallSource {
     /// reached members, the layer [`Self::debris_ratio`] is read from. Exactly 1 at or above the
     /// reference.
     pub strength_ratio: f32,
-    /// The round's speed (m/s) where the earliest member entered the body.
-    pub entry_speed: f32,
     /// The round's speed (m/s) where the latest reached member left it.
     pub exit_speed: f32,
-    /// Fraction of the disc whose ray reached this exit.
-    pub coverage: f32,
 }
 
 impl SpallSource {
@@ -2864,12 +2854,8 @@ fn body_exits(
         }
     }
     let mut exits: Vec<BodyExit> = exit_groups
-        .into_iter()
-        .map(|((substances, genuine, _), members)| BodyExit {
-            substances,
-            genuine,
-            members,
-        })
+        .into_values()
+        .map(|members| BodyExit { members })
         .collect();
     let mean_end = |exit: &BodyExit| {
         exit.members.iter().map(|m| m.end).sum::<f64>() / exit.members.len() as f64
@@ -3414,7 +3400,6 @@ pub(crate) fn finish<M: Mechanism>(
         &advanced.stretches,
         advanced.stop,
         transit.axis,
-        transit.samples(),
     );
 
     Ok(ResolutionPlan {
@@ -3572,8 +3557,6 @@ fn spall_sources<M: Mechanism>(
     stretches: &[Stretch<M::State>],
     stop: Option<f64>,
     direction: Vec3,
-    // k: the disc's sample count.
-    disc: usize,
 ) -> Vec<SpallSource> {
     // Each stretch's `(readout drop, energy drop)` over the whole disc.
     let disc_drops: Vec<(f64, f64)> = stretches
@@ -3614,26 +3597,16 @@ fn spall_sources<M: Mechanism>(
                 }
             }
         }
-        let first = reached
-            .iter()
-            .map(|m| m.start)
-            .fold(f64::INFINITY, f64::min);
         let last = reached
             .iter()
             .map(|m| m.end)
             .fold(f64::NEG_INFINITY, f64::max);
-        let entry = stretches
-            .iter()
-            .find(|stretch| 0.5 * (stretch.start + stretch.end) >= first)
-            .map(|stretch| stretch.before);
         let exit_state = stretches
             .iter()
             .rev()
             .find(|stretch| 0.5 * (stretch.start + stretch.end) < last)
-            .map(|stretch| stretch.after);
-        let (Some(entry), Some(exit_state)) = (entry, exit_state) else {
-            continue;
-        };
+            .map(|stretch| stretch.after)
+            .expect("the game's damage-model reached body exit belongs to an advanced stretch");
         let count = reached.len();
         let faces: Vec<Vec3> = reached.iter().filter_map(|m| m.face).collect();
         let face = match faces.as_slice() {
@@ -3651,7 +3624,6 @@ fn spall_sources<M: Mechanism>(
             position: reached.iter().map(|m| m.position).sum::<Vec3>() / count as f32,
             face,
             direction,
-            substances: exit.substances.clone(),
             exited: exited.into_iter().collect(),
             spend: spend as f32,
             energy: energy as f32,
@@ -3666,9 +3638,7 @@ fn spall_sources<M: Mechanism>(
                     .map(|member| member.rear_factor)
                     .fold(0.0, f32::max),
             ),
-            entry_speed: mechanism.speed(entry) as f32,
             exit_speed: mechanism.speed(exit_state) as f32,
-            coverage: (count as f64 / disc as f64) as f32,
         });
     }
     out.sort_by(|a, b| a.t.total_cmp(&b.t));
