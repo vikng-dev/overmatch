@@ -43,9 +43,6 @@ pub struct Potency {
 /// Where an intensity falls, for a crew station presenting its face wholly at it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Band {
-    /// Below the floor: a full pool keeps the dose its face takes and shows no lost point.
-    #[cfg(test)]
-    Nothing,
     /// From the floor up to mid: a full pool shows a lost point and is not emptied, short of the
     /// last half pool unit below mid, which converts to the whole pool
     /// (`ballistics::pool_units_of`).
@@ -56,11 +53,9 @@ pub enum Band {
 
 impl Band {
     /// The band's colour, in the field's teal family: the field teal for knockout, the deep teal
-    /// for reduced, none for nothing.
+    /// for reduced.
     pub fn colour(self) -> Color {
         match self {
-            #[cfg(test)]
-            Band::Nothing => Color::NONE,
             Band::Reduced => timeline::FIELD_DIM,
             Band::Knockout => timeline::FIELD,
         }
@@ -113,15 +108,15 @@ impl Potency {
         self.rate * strength / (solid_angle(half_angle) - solid_angle(inner))
     }
 
-    /// The band intensity `intensity` (HP points per m²) falls in.
+    /// The drawn band intensity `intensity` (HP points per m²) falls in; below the floor none is drawn.
     #[cfg(test)]
-    pub fn band(&self, intensity: f32) -> Band {
+    pub fn band(&self, intensity: f32) -> Option<Band> {
         if intensity >= self.mid {
-            Band::Knockout
+            Some(Band::Knockout)
         } else if intensity >= self.floor {
-            Band::Reduced
+            Some(Band::Reduced)
         } else {
-            Band::Nothing
+            None
         }
     }
 
@@ -206,22 +201,22 @@ mod tests {
         assert_eq!(Potency::of_tank(&TankShapes::default()), None);
     }
 
-    /// Three bands, each from its threshold up: nothing below the floor, reduced from the floor
-    /// to mid, knockout at mid and above, over the bound tank's thresholds and the fixture's.
-    /// Nothing takes no colour; the two bands take the field's two teals, apart in luminance so
-    /// they part in every colour vision type, and neither is on the state scale's red. A dropped
+    /// The game's damage model draws reduced from the floor to mid, knockout from mid up,
+    /// and no band below the floor, over the bound tank's thresholds and the fixture's. The
+    /// bands take the field's two teals, apart in luminance so they part in every colour vision
+    /// type, and neither is on the state scale's red. A dropped
     /// floor, a band boundary off its threshold, or one colour for both bands fails here.
     #[test]
-    fn three_bands_part_at_the_thresholds() {
+    fn bands_begin_at_the_floor_and_part_at_mid() {
         for potency in [Potency::bound(), fixture()] {
             let (floor, mid) = (potency.floor, potency.mid);
             for (intensity, want) in [
-                (0.0, Band::Nothing),
-                (floor * 0.999, Band::Nothing),
-                (floor, Band::Reduced),
-                (mid * 0.999, Band::Reduced),
-                (mid, Band::Knockout),
-                (mid * 1.0e3, Band::Knockout),
+                (0.0, None),
+                (floor * 0.999, None),
+                (floor, Some(Band::Reduced)),
+                (mid * 0.999, Some(Band::Reduced)),
+                (mid, Some(Band::Knockout)),
+                (mid * 1.0e3, Some(Band::Knockout)),
             ] {
                 assert_eq!(
                     potency.band(intensity),
@@ -230,7 +225,6 @@ mod tests {
                 );
             }
         }
-        assert_eq!(Band::Nothing.colour(), Color::NONE);
         let luminance = |c: Color| {
             LinearRgba::from(c)
                 .to_vec3()

@@ -706,3 +706,19 @@ focused capture/encounter/citation checks also passed. No capture or pricing was
 MEASURED: the shared final run passed 331 targeted damage-cam, recording, pen-cam, field-cast,
 headless, round-data, citation, font, net-boundary and bake tests; six ignored instruments.
 Format and workspace/all-target clippy passed. No capture or pricing was run.
+
+### Potency colour cleanup
+
+Subject: the game's damage model and pen cam potency bands, game state only.
+
+- **R15, P3 (Claude's ball-4 review), verified, fixed** in "remove the unused pen cam colour
+  arm". The `Band::Nothing` colour arm and its colour assertion existed only in tests and
+  guarded no shipped colour. The variant, arm and assertion are removed. The shader oracle
+  represents below-floor intensity as no drawn band (`None`); its callers still check the
+  reduced and knockout boundaries and their actual colours. The floor contract, colour values
+  and shader equations are unchanged.
+
+MEASURED: the shared 331-test final run included pen-cam, field-cast and headless checks with
+no failures. After the final test-comment correction, format and workspace/all-target clippy
+passed again, and all 43 dedicated whole-tree citation, font, net-boundary and bake guards
+passed. No capture or pricing was run.

@@ -1839,7 +1839,11 @@ mod tests {
             };
             for d in [0.999, 0.9995, 0.9999] {
                 let (top, _) = search(d);
-                assert_eq!(potency.band(top), Band::Knockout, "scale {scale}, d {d}");
+                assert_eq!(
+                    potency.band(top),
+                    Some(Band::Knockout),
+                    "scale {scale}, d {d}"
+                );
             }
             let row: Vec<(f32, f32, usize)> = (0..400)
                 .map(|i| {
@@ -1912,7 +1916,7 @@ mod tests {
                     });
                     assert_eq!(
                         potency.band(top),
-                        want,
+                        Some(want),
                         "d {d}, scale {scale}, front {front}"
                     );
                     let width = Vec2::splat(2.0 * BAND_WINDOW_OCTAVES);
@@ -2087,7 +2091,7 @@ mod tests {
                 });
                 assert_eq!(
                     potency.band(top),
-                    Band::Knockout,
+                    Some(Band::Knockout),
                     "front {front}, at {at}: the ray peaks at {top}"
                 );
                 checked += 1;
@@ -2145,7 +2149,7 @@ mod tests {
                 intensity(&prints, &seen, &potency, eye + dir * t)
             });
             assert!(
-                potency.band(top) == Band::Reduced && top >= whole,
+                potency.band(top) == Some(Band::Reduced) && top >= whole,
                 "shift {shift}: the ray peaks at {top}, the reduced band whole from {whole}"
             );
         }
@@ -2183,9 +2187,9 @@ mod tests {
         potency.mid = 1.6 * one;
         let both = intensity(&prints, &seen, &potency, point);
         assert!((both - (one + other)).abs() <= 1e-5 * both);
-        assert_eq!(potency.band(one), Band::Reduced);
-        assert_eq!(potency.band(other), Band::Reduced);
-        assert_eq!(potency.band(both), Band::Knockout);
+        assert_eq!(potency.band(one), Some(Band::Reduced));
+        assert_eq!(potency.band(other), Some(Band::Reduced));
+        assert_eq!(potency.band(both), Some(Band::Knockout));
     }
 
     /// A struck component of role `role`: half its pool taken by the line. Fixture data.
@@ -2913,14 +2917,14 @@ mod tests {
             let whole = peak(prints, &potency, eye, forward, 0.0, f32::MAX, sum);
             assert_eq!(
                 potency.band(whole),
-                Band::Knockout,
+                Some(Band::Knockout),
                 "{orthographic}: {whole}"
             );
             let (from, to) = visible(clip_from_world, eye, forward, None, None);
             let shown = peak(prints, &potency, eye, forward, from, to, sum);
             assert_eq!(
                 potency.band(shown),
-                Band::Reduced,
+                Some(Band::Reduced),
                 "{orthographic}: {shown}"
             );
         }
@@ -2959,7 +2963,7 @@ mod tests {
         let prints = std::slice::from_ref(&print);
         let sum = |t: f32| intensity(prints, &seen, &potency, eye + forward * t);
         let shown = peak(prints, &potency, eye, forward, from, to, sum);
-        assert_eq!(potency.band(shown), Band::Knockout, "{shown}");
+        assert_eq!(potency.band(shown), Some(Band::Knockout), "{shown}");
     }
 
     /// The visible stretch ends at the pixel's nearest scene surface and at the cut, as the
