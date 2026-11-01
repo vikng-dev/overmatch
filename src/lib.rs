@@ -96,6 +96,9 @@ mod frame_cost;
 /// single seam between what the build measured and what the renderer selects — no measurement is
 /// transcribed into Rust.
 mod geometry_lod;
+/// Which ground type is under each point of the map, sim side: the map's painted blend weights,
+/// decoded once at startup, and each pack's ground. See the module doc.
+pub(crate) mod ground_field;
 /// The ground-type table (`assets/terrain/ground_types.ron`): each kind of ground the terrain packs
 /// name, and how it takes a track print. Data; see the module doc.
 mod ground_types;

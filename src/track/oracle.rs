@@ -22,6 +22,7 @@
 
 use bevy::math::{Mat3, Quat, Vec2, Vec3};
 
+use crate::ground_field::{ContactGround, GroundField};
 use crate::terrain_grid::HeightGrid;
 
 /// A terrain query surface for track consumers. Implementations must be pose-continuous and
@@ -32,6 +33,15 @@ pub trait TerrainOracle {
     /// (buried origin saturates to `reach`, like a contact cast). Positive = past the surface,
     /// negative = clearance.
     fn depth_along(&self, station: Vec3, out: Vec3, reach: f32) -> f32;
+
+    /// The ground under world point `point` (its XZ): what the track law's grip and rolling
+    /// resistance read per terrain contact (`track::forces::contact_side`). `None` is an oracle
+    /// that states no ground (the view's and the calibration's geometry-only oracles, a bare
+    /// fixture field): its contacts grip at the grip's own ground pair
+    /// (`track::forces::GripParams::ground`) and take no rolling resistance.
+    fn ground_at(&self, _point: Vec3) -> Option<ContactGround> {
+        None
+    }
 }
 
 /// Edge rounding radius (m) of the block field: every authored box is evaluated as a rounded
@@ -230,6 +240,9 @@ pub struct BlockField {
     /// invariant, `terrain_grid` module doc) — instead of the flat-slab block the old world
     /// authored. Blocks still union on top.
     height: Option<HeightGrid>,
+    /// Which ground is under each point ([`TerrainOracle::ground_at`]): the world's ground field,
+    /// absent only from a bare fixture field, which states no ground.
+    ground: Option<GroundField>,
 }
 
 impl BlockField {
@@ -263,7 +276,15 @@ impl BlockField {
             z0,
             cell: FIELD_CELL,
             height: None,
+            ground: None,
         }
+    }
+
+    /// Attach (or clear) the ground field the track law reads each contact's ground from.
+    /// Builder-style, as [`Self::with_height`] is.
+    pub fn with_ground(mut self, ground: Option<GroundField>) -> Self {
+        self.ground = ground;
+        self
     }
 
     /// Attach (or clear) the heightmap ground term. Builder-style so the sandbox's existing
@@ -401,6 +422,12 @@ impl BlockField {
 impl TerrainOracle for BlockField {
     fn depth_along(&self, station: Vec3, out: Vec3, reach: f32) -> f32 {
         self.depth_along_lowered_ground(station, out, reach, 0.0)
+    }
+
+    fn ground_at(&self, point: Vec3) -> Option<ContactGround> {
+        self.ground
+            .as_ref()
+            .map(|ground| ground.ground_at(Vec2::new(point.x, point.z)))
     }
 }
 

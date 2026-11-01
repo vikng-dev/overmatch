@@ -1,0 +1,333 @@
+//! The GROUND FIELD: which ground type is under each point of the map, sim side. The map's painted
+//! blend weights (`terrain.masks` in its `level.json`, R recesses, G slopes, B lowlands) are
+//! decoded once at the data edge, synchronously at startup beside the height grid
+//! ([`crate::terrain_grid::decode_height_grid`], ADR-0014: never the view's loaded texture), and
+//! held with the ground-type table's row for each of the four packs ([`crate::terrain_blend`]'s
+//! slot order: the base pack, then [`crate::terrain_blend::BLEND_LAYERS`]).
+//!
+//! A point's ground ([`GroundField::ground_at`]) is the four packs' rows blended by the print's
+//! painted weights there ([`crate::terrain_blend::print_weights`] of the mask read bilinearly and
+//! clamped, as the material's sampler reads it), so the sim reads the same weights the prints and
+//! the muzzle dust are drawn with. A world no map paints (the flat slab and its authored course, a
+//! synthetic grid) is the base pack's ground everywhere, as the blend is where the mask is silent.
+//!
+//! The field's resolution is the mask's own, 1024² over the shipped 1 500 m square: 1.46 m a
+//! texel (DERIVED, 1500 / 1024). `Resolution`: the mask is the finest statement of the ground the
+//! map has, and the patch a player can see is the blend's edge at that texel scale (the material
+//! sharpens the transition inside one texel, `terrain_blend::BLEND_WINDOW`); a coarser field would
+//! let a player see ground the tracks do not feel, and a finer one would interpolate data the map
+//! does not state. Cost: three bytes a texel, 3 MiB on the shipped map (DERIVED, 1024² × 3), and
+//! one decode at startup, logged MEASURED.
+
+use std::path::Path;
+use std::sync::Arc;
+
+use bevy::math::{UVec2, Vec2, Vec3, Vec4};
+use bevy::prelude::Resource;
+
+use crate::ground_types::GroundTypes;
+use crate::terrain_blend::{BASE_GROUND, BLEND_LAYERS};
+use crate::terrain_grid::RowOrder;
+
+/// What the ground under a track contact brings to the track law, blended over the packs at the
+/// contact's point.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ContactGround {
+    /// The friction coefficient the ground brings to the contact, one side's
+    /// ([`crate::ground_types::GroundType::friction`]).
+    pub friction: f32,
+    /// The ground's motion resistance coefficient on a moving track
+    /// ([`crate::ground_types::GroundType::rolling_resistance`]).
+    pub rolling_resistance: f32,
+}
+
+/// Which ground is under each point of the world, sim side: the four packs' grounds and, on a
+/// painted map, the weights that blend them. Immutable after startup and shared by `Arc`, so the
+/// track field's copy ([`crate::track::oracle::BlockField::with_ground`]) is free.
+#[derive(Resource, Clone)]
+pub struct GroundField {
+    /// Each pack's ground, in the shader's slot order: the base pack, then the layers.
+    slots: [ContactGround; 4],
+    paint: Paint,
+}
+
+/// Whether a map paints this world's ground.
+#[derive(Clone)]
+enum Paint {
+    /// No map paints this world: the base pack's ground is the whole of it.
+    Unpainted,
+    /// The map's mask: row-major RGB weights, row 0 at `z = -half` (the map's declared row order
+    /// folded in at decode), stretched once over the world square of side `world_size_m`.
+    Painted {
+        size: UVec2,
+        world_size_m: f32,
+        texels: Arc<[[u8; 3]]>,
+    },
+}
+
+impl GroundField {
+    /// The four packs' grounds from `table` ([`GroundTypes::parse`] requires every pack's).
+    fn slots(table: &GroundTypes) -> [ContactGround; 4] {
+        [
+            table.get(BASE_GROUND).contact(),
+            table.get(BLEND_LAYERS[0].ground).contact(),
+            table.get(BLEND_LAYERS[1].ground).contact(),
+            table.get(BLEND_LAYERS[2].ground).contact(),
+        ]
+    }
+
+    /// A world no map paints: the base pack's ground everywhere.
+    pub(crate) fn unpainted(table: &GroundTypes) -> Self {
+        Self {
+            slots: Self::slots(table),
+            paint: Paint::Unpainted,
+        }
+    }
+
+    /// FIXTURE: a world that is `ground` everywhere.
+    #[cfg(test)]
+    pub(crate) fn uniform(ground: ContactGround) -> Self {
+        Self {
+            slots: [ground; 4],
+            paint: Paint::Unpainted,
+        }
+    }
+
+    /// The map's painted ground from its mask's PNG `bytes`: 8-bit RGB at `resolution`, its rows
+    /// running toward `rows`, stretched over the square of side `world_size_m`. Pure, so the
+    /// tests decode the shipped mask through it.
+    pub(crate) fn painted(
+        bytes: &[u8],
+        resolution: [u32; 2],
+        rows: RowOrder,
+        world_size_m: f32,
+        table: &GroundTypes,
+    ) -> Result<Self, String> {
+        let image = image::load_from_memory(bytes).map_err(|err| err.to_string())?;
+        let color = image.color();
+        let image::DynamicImage::ImageRgb8(mask) = image else {
+            return Err(format!(
+                "the masks must be the 8-bit RGB the map declares, not {color:?}"
+            ));
+        };
+        let (width, height) = mask.dimensions();
+        if [width, height] != resolution {
+            return Err(format!(
+                "the masks are {width}x{height}, not the {}x{} the map declares",
+                resolution[0], resolution[1]
+            ));
+        }
+        let rows_in_file: Vec<[u8; 3]> = mask.pixels().map(|pixel| pixel.0).collect();
+        let texels: Vec<[u8; 3]> = match rows {
+            RowOrder::TowardPositiveZ => rows_in_file,
+            RowOrder::TowardNegativeZ => rows_in_file
+                .chunks_exact(width as usize)
+                .rev()
+                .flatten()
+                .copied()
+                .collect(),
+        };
+        Ok(Self {
+            slots: Self::slots(table),
+            paint: Paint::Painted {
+                size: UVec2::new(width, height),
+                world_size_m,
+                texels: texels.into(),
+            },
+        })
+    }
+
+    /// The shipped map's painted ground, read from the masks `manifest` declares. The masks are a
+    /// required in-repo asset, so one that is missing or does not decode as declared aborts naming
+    /// the file (ADR-0011).
+    pub(crate) fn load_painted(
+        manifest: &crate::map::MapManifest,
+        root: &Path,
+        table: &GroundTypes,
+    ) -> Self {
+        let started = std::time::Instant::now();
+        let path = root.join(manifest.masks_asset());
+        let bytes = std::fs::read(&path).unwrap_or_else(|err| {
+            panic!(
+                "ground field: {} declares terrain masks {}: {err}",
+                crate::map::level_path(root).display(),
+                path.display(),
+            )
+        });
+        let field = Self::painted(
+            &bytes,
+            manifest.masks_resolution,
+            manifest.rows,
+            manifest.extent.world_size_m,
+            table,
+        )
+        .unwrap_or_else(|err| panic!("ground field: {}: {err}", path.display()));
+        bevy::log::info!(
+            "ground field: masks {}x{} decoded for the sim in {:.1} ms ({} KiB)",
+            manifest.masks_resolution[0],
+            manifest.masks_resolution[1],
+            started.elapsed().as_secs_f64() * 1000.0,
+            manifest.masks_resolution[0] as usize * manifest.masks_resolution[1] as usize * 3
+                / 1024,
+        );
+        field
+    }
+
+    /// The pack weights at world XZ `xz`, in slot order: the print's painted weights
+    /// ([`crate::terrain_blend::print_weights`]) of the mask read bilinearly and clamped at the
+    /// texel centres, as the material's sampler reads it. All base pack on an unpainted world.
+    pub(crate) fn weights_at(&self, xz: Vec2) -> Vec4 {
+        let (size, world_size_m, texels) = match &self.paint {
+            Paint::Unpainted => return Vec4::X,
+            Paint::Painted {
+                size,
+                world_size_m,
+                texels,
+            } => (size, world_size_m, texels),
+        };
+        let texel = (xz / *world_size_m + 0.5) * size.as_vec2() - 0.5;
+        let low = texel.floor();
+        let t = texel - low;
+        let at = |i: f32, j: f32| {
+            let i = (i as i32).clamp(0, size.x as i32 - 1) as usize;
+            let j = (j as i32).clamp(0, size.y as i32 - 1) as usize;
+            Vec3::from_array(texels[j * size.x as usize + i].map(f32::from)) / 255.0
+        };
+        let top = at(low.x, low.y).lerp(at(low.x + 1.0, low.y), t.x);
+        let bottom = at(low.x, low.y + 1.0).lerp(at(low.x + 1.0, low.y + 1.0), t.x);
+        crate::terrain_blend::print_weights(top.lerp(bottom, t.y))
+    }
+
+    /// The ground under world XZ `xz`: each pack's ground weighted by [`Self::weights_at`].
+    pub fn ground_at(&self, xz: Vec2) -> ContactGround {
+        let weights = self.weights_at(xz);
+        let blend = |of: fn(&ContactGround) -> f32| {
+            weights.dot(Vec4::from_array(self.slots.each_ref().map(of)))
+        };
+        ContactGround {
+            friction: blend(|ground| ground.friction),
+            rolling_resistance: blend(|ground| ground.rolling_resistance),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A painted fixture mask of `side`² texels over a `world` m square, each texel `paint(i, j)`
+    /// (row `j` toward +Z). FIXTURE DATA.
+    fn fixture(side: u32, world: f32, paint: impl Fn(u32, u32) -> [u8; 3]) -> GroundField {
+        let mut image = image::RgbImage::new(side, side);
+        for (i, j, pixel) in image.enumerate_pixels_mut() {
+            pixel.0 = paint(i, j);
+        }
+        let mut png = Vec::new();
+        image::DynamicImage::ImageRgb8(image)
+            .write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png)
+            .expect("encodes");
+        let table = GroundTypes::load(&GroundTypes::shipped_path()).expect("the shipped table");
+        GroundField::painted(&png, [side, side], RowOrder::TowardPositiveZ, world, &table)
+            .expect("decodes")
+    }
+
+    /// A CONTACT OVER A PACK'S PATCH READS THAT PACK'S GROUND, and the unpainted ground reads the
+    /// base pack's: the track law's grip and rolling resistance are those of the ground the map
+    /// paints under the contact. Every channel is checked on its own patch, so a channel read from
+    /// the wrong slot fails, and a field that ignored its paint reads the base pack everywhere.
+    /// FIXTURE DATA: a 4² mask over 40 m, one 2×2 quadrant per channel, one quadrant silent; the
+    /// grounds are the shipped table's rows, compared with themselves (no shipped value is a pass
+    /// condition).
+    #[test]
+    fn a_contact_over_a_packs_patch_reads_that_packs_ground() {
+        let field = fixture(4, 40.0, |i, j| match (i < 2, j < 2) {
+            (true, true) => [0, 0, 0],
+            (false, true) => [255, 0, 0],
+            (true, false) => [0, 255, 0],
+            (false, false) => [0, 0, 255],
+        });
+        let table = GroundTypes::load(&GroundTypes::shipped_path()).expect("the shipped table");
+        let row = |name: &str| table.get(name).contact();
+        for (xz, ground) in [
+            (Vec2::new(-15.0, -15.0), row(BASE_GROUND)),
+            (Vec2::new(15.0, -15.0), row(BLEND_LAYERS[0].ground)),
+            (Vec2::new(-15.0, 15.0), row(BLEND_LAYERS[1].ground)),
+            (Vec2::new(15.0, 15.0), row(BLEND_LAYERS[2].ground)),
+        ] {
+            let read = field.ground_at(xz);
+            assert!(
+                (read.friction - ground.friction).abs() < 1e-6
+                    && (read.rolling_resistance - ground.rolling_resistance).abs() < 1e-6,
+                "at {xz}: read {read:?}, the pack's ground is {ground:?}"
+            );
+        }
+        let flat = GroundField::unpainted(&table);
+        assert_eq!(flat.ground_at(Vec2::new(15.0, 15.0)), row(BASE_GROUND));
+    }
+
+    /// THE SIM READS THE MASK WHERE THE VIEW DRAWS IT: the field's rows run the way the map
+    /// declares, so a `-Z` export lands its first row at `+Z` as the material's mask mapping
+    /// (`terrain_blend::mask_map`) puts it. A field that skipped the row fold reads the mirrored
+    /// patch; a mask at another resolution than the map declares is refused, naming the size.
+    /// FIXTURE DATA: a 4² mask over 40 m, its first row fully recesses-painted.
+    #[test]
+    fn the_field_folds_the_declared_row_order() {
+        let side = 4;
+        let mut image = image::RgbImage::new(side, side);
+        for (_, j, pixel) in image.enumerate_pixels_mut() {
+            pixel.0 = if j == 0 { [255, 0, 0] } else { [0, 0, 0] };
+        }
+        let mut png = Vec::new();
+        image::DynamicImage::ImageRgb8(image)
+            .write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png)
+            .expect("encodes");
+        let table = GroundTypes::load(&GroundTypes::shipped_path()).expect("the shipped table");
+        for (rows, painted_z) in [
+            (RowOrder::TowardPositiveZ, -15.0),
+            (RowOrder::TowardNegativeZ, 15.0),
+        ] {
+            let field = GroundField::painted(&png, [side, side], rows, 40.0, &table).unwrap();
+            assert_eq!(
+                field.weights_at(Vec2::new(0.0, painted_z)),
+                Vec4::Y,
+                "{rows:?}"
+            );
+            assert_eq!(
+                field.weights_at(Vec2::new(0.0, -painted_z)),
+                Vec4::X,
+                "{rows:?}"
+            );
+        }
+        let refused = GroundField::painted(&png, [8, 8], RowOrder::TowardPositiveZ, 40.0, &table);
+        assert!(refused.is_err_and(|why| why.contains("4x4")));
+    }
+
+    /// The shipped map's mask decodes into the field at the resolution its manifest declares, and
+    /// every point's weights are a partition (the blend's law): the server's tracks read a real
+    /// ground everywhere on the map.
+    #[test]
+    fn the_shipped_mask_decodes_into_the_field() {
+        let manifest = crate::map::tests::shipped_manifest();
+        let table = GroundTypes::load(&GroundTypes::shipped_path()).expect("the shipped table");
+        let started = std::time::Instant::now();
+        let field =
+            GroundField::load_painted(&manifest, &crate::map::tests::shipped_assets(), &table);
+        println!(
+            "ground field: the shipped masks read and decoded in {:.1} ms",
+            started.elapsed().as_secs_f64() * 1000.0
+        );
+        let half = manifest.extent.half_extent();
+        for xz in [
+            Vec2::splat(-half),
+            Vec2::new(half, -half),
+            Vec2::ZERO,
+            Vec2::splat(half),
+        ] {
+            let weights = field.weights_at(xz);
+            assert!(
+                (weights.element_sum() - 1.0).abs() < 1e-5,
+                "{xz}: {weights}"
+            );
+        }
+    }
+}

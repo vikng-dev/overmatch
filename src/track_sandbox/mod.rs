@@ -1059,7 +1059,13 @@ fn spawn_environment(
         }
     }
 
-    commands.insert_resource(TerrainField(BlockField::new(field)));
+    // The sandbox course paints no ground: the base pack's, as the game's flat world.
+    let ground = crate::ground_field::GroundField::unpainted(
+        &crate::ground_types::GroundTypes::load_shipped(),
+    );
+    commands.insert_resource(TerrainField(
+        BlockField::new(field).with_ground(Some(ground)),
+    ));
 }
 
 /// Run condition for the one-shot [`build_rig`]: the blueprint has landed and the rig is not up yet.

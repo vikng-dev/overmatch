@@ -632,6 +632,10 @@ impl HeightGrid {
 ///
 /// THE ONE PARSE. The manifest is read here and published as a resource, so `scatter` places the
 /// author's objects out of the same struct this decode took its extent from.
+///
+/// THE GROUND FIELD rides the same decision ([`crate::ground_field::GroundField`]): the map's
+/// painted masks are decoded beside the heightmap they paint, and every world this decode does not
+/// build from the map (the flat slab, a preset or flattened grid) is the base pack's ground alone.
 pub(crate) fn decode_height_grid(
     mut commands: Commands,
     flat: Option<Res<ForceFlatWorld>>,
@@ -643,8 +647,10 @@ pub(crate) fn decode_height_grid(
     // cost bed's variants of the shipped placement), read in place of the shipped file.
     preset_manifest: Option<Res<crate::map::MapManifest>>,
 ) {
+    let table = crate::ground_types::GroundTypes::load_shipped();
     if flat.is_some() {
         info!("terrain: ForceFlatWorld set — keeping the flat slab + authored course");
+        commands.insert_resource(crate::ground_field::GroundField::unpainted(&table));
         return;
     }
     let root = crate::assets::asset_root();
@@ -656,6 +662,14 @@ pub(crate) fn decode_height_grid(
     let rows = manifest.rows;
     let path = manifest.heightmap_path();
     let heightmap = manifest.heightmap().to_owned();
+    // The map paints the ground only where its own heightmap is the surface: a preset or
+    // flattened grid stands on the base pack's ground.
+    let ground = if preset.is_some() || crate::lod_showcase::enabled() {
+        crate::ground_field::GroundField::unpainted(&table)
+    } else {
+        crate::ground_field::GroundField::load_painted(&manifest, &root, &table)
+    };
+    commands.insert_resource(ground);
     // Published before every early return below: a preset or flattened grid still stands on the
     // map's objects, which read their placement out of this resource.
     commands.insert_resource(manifest);

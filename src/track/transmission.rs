@@ -1,7 +1,9 @@
 //! The declared transmission — the JOINT two-output drivetrain between contact-force
 //! calculation and belt integration. One call computes BOTH sprocket forces `Q_L, Q_R` from
 //! the pair of belt speeds, the drive command, and this tick's ground reactions `R_L, R_R`,
-//! then integrates `I·v̇ᵢ = Qᵢ − Rᵢ` for both sides simultaneously. Internally it works in the
+//! then integrates `I·v̇ᵢ = Qᵢ − Rᵢ` for both sides simultaneously; each `Rᵢ` carries the
+//! ground's rolling resistance beside the grip's reaction (`forces::rolling_resistance`), so every
+//! reader of a reaction here sees it as load. Internally it works in the
 //! superimposed coordinates `m = (v_L+v_R)/2` (propulsion) and `d = (v_L−v_R)/2` (steering
 //! difference); the per-side belt speeds stay the authoritative external state (design §2 —
 //! reparameterizing saves nothing and every contact call is per-side).

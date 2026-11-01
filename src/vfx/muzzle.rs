@@ -1515,7 +1515,7 @@ mod tests {
                     app.world_mut()
                         .resource_mut::<crate::ground_types::GroundTypes>()
                         .types
-                        .insert(crate::terrain_blend::BASE_GROUND.to_owned(), *ground);
+                        .insert(crate::terrain_blend::BASE_GROUND.to_owned(), ground.clone());
                     fire_with(&mut app, muzzle, SLOW, CANNON_CALIBER, 0, true);
                     let puffs = dust_puffs(&mut app);
                     let count = puffs.len();

@@ -6,6 +6,7 @@
 //   darkening            the share of albedo a print takes away, 0..1
 //   roughness_gain       roughness multiplier under a sole; below 1 reads wet
 //   friction             the friction coefficient the ground brings to a contact, one side's
+//   rolling_resistance   the ground's motion resistance coefficient on a moving track, labelled
 //   dust.erodibility     the share of a gun's muzzle dust cloud this ground lifts, 0..1
 //   dust.colour_srgb     the lifted soil's albedo, sRGB, each channel 0..1
 //
@@ -13,11 +14,12 @@
 // and gravel raised so a print reads at 10-30 m, then tuned by eye in play (`track_prints::tuning`).
 // The module doc of `src/ground_types.rs` carries the provenance. Every friction is ASSUMED, no
 // source read: gravel, the terrain collider's ground, at Avian's own default 0.5; the others
-// ordered by hand, paving gripping best and mud least. Every erodibility is ASSUMED, no source
-// read: ordered by hand, loose dry dirt and sand giving the whole cloud, gravel most of it, wet
-// mud and intact paving little. Each pack's dust colour is DERIVED: the mean of the pack's
-// shipped full-resolution albedo slice (`coast_sand_rocks_02_diff.ktx2`, `blend_diff.ktx2`),
-// MEASURED; concrete names no pack, and its light grey is ASSUMED.
+// ordered by hand, paving gripping best and mud least. Each rolling resistance carries its own
+// label and note. Every erodibility is ASSUMED, no source read: ordered by hand, loose dry dirt
+// and sand giving the whole cloud, gravel most of it, wet mud and intact paving little. Each
+// pack's dust colour is DERIVED: the mean of the pack's shipped full-resolution albedo slice
+// (`coast_sand_rocks_02_diff.ktx2`, `blend_diff.ktx2`), MEASURED; concrete names no pack, and its
+// light grey is ASSUMED.
 (
     types: {
         "concrete": (
@@ -28,6 +30,7 @@
                 roughness_gain: 1.0,
             ),
             friction: 0.6,
+            rolling_resistance: (0.04, Unknown("the ground-stamping note gives soil fits but no motion resistance; a tracked vehicle on intact paving is CLAIMED at 0.03-0.05 (recalled from Wong, Theory of Ground Vehicles, the tracked-vehicle motion resistance table, not read for this value); settle by reading that table or by a coast-down of a tracked vehicle on this ground")),
             dust: (
                 erodibility: 0.1,
                 colour_srgb: (0.62, 0.61, 0.58),
@@ -41,6 +44,7 @@
                 roughness_gain: 0.9,
             ),
             friction: 0.5,
+            rolling_resistance: (0.06, Unknown("the ground-stamping note gives soil fits but no motion resistance; a tracked vehicle on firm dry soil is CLAIMED at 0.05-0.08 (recalled from Wong, Theory of Ground Vehicles, the tracked-vehicle motion resistance table, not read for this value); settle by reading that table or by a coast-down of a tracked vehicle on this ground")),
             dust: (
                 erodibility: 1.0,
                 colour_srgb: (0.48, 0.39, 0.31),
@@ -54,6 +58,7 @@
                 roughness_gain: 1.0,
             ),
             friction: 0.5,
+            rolling_resistance: (0.05, Unknown("the ground-stamping note gives soil fits but no motion resistance; a tracked vehicle on a compacted gravel or dirt road is CLAIMED at 0.04-0.07 (recalled from Wong, Theory of Ground Vehicles, the tracked-vehicle motion resistance table, not read for this value); settle by reading that table or by a coast-down of a tracked vehicle on this ground")),
             dust: (
                 erodibility: 0.8,
                 colour_srgb: (0.3, 0.28, 0.19),
@@ -67,6 +72,7 @@
                 roughness_gain: 0.6,
             ),
             friction: 0.3,
+            rolling_resistance: (0.15, Unknown("the ground-stamping note gives soil fits but no motion resistance; a tracked vehicle on wet cohesive soil is CLAIMED at 0.12-0.20 and more (recalled from Wong, Theory of Ground Vehicles, the tracked-vehicle motion resistance table, not read for this value); settle by reading that table or by a coast-down of a tracked vehicle on this ground")),
             dust: (
                 erodibility: 0.3,
                 colour_srgb: (0.25, 0.23, 0.22),
@@ -80,6 +86,7 @@
                 roughness_gain: 0.9,
             ),
             friction: 0.4,
+            rolling_resistance: (0.12, Unknown("the ground-stamping note gives soil fits but no motion resistance; a tracked vehicle on loose dry sand is CLAIMED at 0.10-0.15 (recalled from Wong, Theory of Ground Vehicles, the tracked-vehicle motion resistance table, not read for this value); settle by reading that table or by a coast-down of a tracked vehicle on this ground")),
             dust: (
                 erodibility: 1.0,
                 colour_srgb: (0.27, 0.24, 0.19),

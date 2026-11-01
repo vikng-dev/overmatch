@@ -50,14 +50,34 @@ use crate::bitprobe::{ContactInputProbe, ElementOutputProbe};
 /// ratio ≈ 0.07 of the limit).
 pub const GRIP_SHEAR_MODULUS_M: f32 = 0.075;
 
+/// The belt speed (m/s) below which rolling resistance fades linearly to zero, so a tank at rest
+/// takes none. `Resolution`: a Coulomb resistance flips sign at zero speed, a step the 64 Hz
+/// explicit belt integration rings on. Spread over this band it is a damper of slope
+/// `rolling load / band` on the belt, and explicit integration of a damper `c` on the belt's
+/// inertia `I` is monotone while `c·dt/I < 1` and stable while it is below 2. On the fixture tank on
+/// the shipped mud row: 0.15 × 279.6 kN / 0.25 m/s = 168 kN·s/m against `I/dt` = 4 750 kg × 64 Hz
+/// = 304 kN·s/m, 0.55 of it; with the grip damper's 143.5 kN·s/m the sum is 1.02 of it, inside 2
+/// (DERIVED, fixture data). A tank crawling inside the band is below anything a player reads as
+/// motion.
+pub const ROLLING_FADE_SPEED: f32 = 0.25;
+
+/// A side's rolling resistance (N, along the belt's travel, the sign of `speed`): the rolling load
+/// `Σ c_rr · N` over its terrain contacts, faded over [`ROLLING_FADE_SPEED`] to zero at rest.
+pub fn rolling_resistance(rolling_load: f32, speed: f32) -> f32 {
+    rolling_load * (speed / ROLLING_FADE_SPEED).clamp(-1.0, 1.0)
+}
+
 /// What the belt grips with: the friction its track and the terrain field bring to a contact, and
 /// the side's weight share. Absent from [`ForceParams::grip`], the law runs support only.
 #[derive(Clone, Copy, Debug)]
 pub struct GripParams {
     /// The track's side of every pair ([`crate::spec::TrackSpec::friction`]).
     pub track: Friction,
-    /// The terrain field's side: the ground type its collider carries
-    /// ([`crate::ground_types::GroundTypes::terrain_friction`]).
+    /// The base pack's ground, the side of a pair the terrain field brings where it states no
+    /// ground of its own ([`TerrainOracle::ground_at`] is `None`: a bare fixture field), and the
+    /// ground the transmission's whole-vehicle estimates read (the brake's grip bound, the
+    /// reserve floor; a stand-in for the ground under the tank). A field that states its ground
+    /// grips each contact on that ground ([`crate::ground_field::GroundField`]).
     pub ground: Friction,
     /// Nominal weight on one side (N), half the vehicle's: the scale of the element membership
     /// bounds and the vehicle share of the transmission's shift-landing inertia.
@@ -65,7 +85,7 @@ pub struct GripParams {
 }
 
 impl GripParams {
-    /// A tank's grip from its data: its track's substance on the terrain's base ground, at half
+    /// A tank's grip from its data: its track's substance, the terrain's base ground, at half
     /// its weight.
     pub(crate) fn of(spec: &crate::spec::TankSpec) -> Self {
         Self {
@@ -397,8 +417,11 @@ pub struct SideReport {
     pub state: SideState,
     pub apps: Vec<ForceApp>,
     pub contacts: Vec<BeltContact>,
-    /// Ground reaction summed into belt dynamics (Σ f_long, N).
+    /// Ground reaction summed into belt dynamics (N): Σ f_long plus [`Self::rolling_resistance`].
     pub belt_reaction: f32,
+    /// The side's rolling resistance this tick (N, [`rolling_resistance`]), inside
+    /// [`Self::belt_reaction`]: telemetry of the term.
+    pub rolling_resistance: f32,
     /// Full oracle-call inputs/results, in execution order. Measurement builds only.
     #[cfg(feature = "bitprobe")]
     pub(crate) bitprobe_contacts: Vec<ContactInputProbe>,
@@ -514,15 +537,18 @@ pub fn contact_side<O: TerrainOracle>(
         ),
         None => Vec::new(),
     };
-    let (elem_sum, belt_reaction) = emit_contact_forces(&mut report, &cols, &elem_g, elements_mode);
+    let (elem_sum, belt_reaction, rolling_load) =
+        emit_contact_forces(&mut report, &cols, &elem_g, elements_mode);
 
     // The grip slot carries the summed element force (long, lat) — telemetry only (the
     // element state is authoritative and lives with the caller). Belt dynamics (the joint
     // transmission) integrate AFTER this pass — `state.speed`/
     // `state.phase` are returned untouched, the pre-tick truth the phase advection and the
-    // transmission both key on.
+    // transmission both key on. The ground's rolling resistance reacts on the belt beside the
+    // grip's, at the pre-tick belt speed, so the transmission's `I·v̇ = Q − R` carries it.
     report.state.grip = elem_sum;
-    report.belt_reaction = belt_reaction;
+    report.rolling_resistance = rolling_resistance(rolling_load, state.speed);
+    report.belt_reaction = belt_reaction + report.rolling_resistance;
     report
 }
 
@@ -550,6 +576,9 @@ struct ColumnContact {
     collider: Option<Entity>,
     /// [`BeltContact::mu`].
     mu: f32,
+    /// The rolling resistance coefficient of the ground under this patch: zero over a piece, which
+    /// is no ground, and on a field that states none.
+    rolling: f32,
     #[cfg(feature = "bitprobe")]
     probe_index: usize,
 }
@@ -1034,12 +1063,7 @@ fn collect_column_contacts<O: TerrainOracle>(
                 let (long_dir, lat_dir, has_plane, slip_long, slip_lat) =
                     contact_frame(affine, tan2, normal, vel, belt_speed);
                 let belt_velocity = hull_vel - long_dir * belt_speed;
-                // One rule for ground and pieces: the track's friction paired with the surface's.
-                // A support-only rig grips nothing.
-                let mu = params.grip.map_or(0.0, |grip| match collider {
-                    Some(collider) => grip.pair(pieces.friction(collider)),
-                    None => grip.on_ground(),
-                });
+                let (mu, rolling) = surface_under(params.grip, collider, p, oracle, pieces);
 
                 cols.push(ColumnContact {
                     p,
@@ -1057,6 +1081,7 @@ fn collect_column_contacts<O: TerrainOracle>(
                     belt_velocity,
                     collider,
                     mu,
+                    rolling,
                     #[cfg(feature = "bitprobe")]
                     probe_index,
                 });
@@ -1064,6 +1089,31 @@ fn collect_column_contacts<O: TerrainOracle>(
         }
     }
     (cols, held)
+}
+
+/// What the surface under a patch at `p` brings to the traction law: the Coulomb coefficient of
+/// the track's pair with it and its rolling resistance coefficient. One rule for ground and
+/// pieces, the track's friction paired with the surface's: a piece's row (no rolling resistance,
+/// a piece is no ground), or the ground the field states at the contact. A support-only rig grips
+/// nothing and reads no ground.
+fn surface_under<O: TerrainOracle>(
+    grip: Option<GripParams>,
+    collider: Option<Entity>,
+    p: Vec3,
+    oracle: &O,
+    pieces: &RubbleBodies,
+) -> (f32, f32) {
+    match (grip, collider) {
+        (None, _) => (0.0, 0.0),
+        (Some(grip), Some(collider)) => (grip.pair(pieces.friction(collider)), 0.0),
+        (Some(grip), None) => match oracle.ground_at(p) {
+            Some(ground) => (
+                grip.pair(crate::substances::contact_friction(ground.friction)),
+                ground.rolling_resistance,
+            ),
+            None => (grip.on_ground(), 0.0),
+        },
+    }
 }
 
 /// One element's shear state after this tick: the Dupont elasto-plastic update — pure spring
@@ -1231,15 +1281,17 @@ fn emit_contact_forces(
     cols: &[ColumnContact],
     elem_g: &[Vec2],
     elements_mode: bool,
-) -> (Vec2, f32) {
+) -> (Vec2, f32, f32) {
     let mut elem_sum = Vec2::ZERO;
     let mut belt_reaction = 0.0;
+    let mut rolling_load = 0.0;
     for (idx, c) in cols.iter().enumerate() {
         report.apps.push(ForceApp {
             force: c.normal * c.load,
             point: c.p,
             collider: c.collider,
         });
+        rolling_load += c.rolling * c.load;
 
         let mut f_long = 0.0;
         let mut f_lat = 0.0;
@@ -1293,7 +1345,7 @@ fn emit_contact_forces(
             output.f_lat += f_lat;
         }
     }
-    (elem_sum, belt_reaction)
+    (elem_sum, belt_reaction, rolling_load)
 }
 
 #[cfg(test)]
@@ -1902,5 +1954,194 @@ mod tests {
                 }
             }
         }
+    }
+
+    /// Flat horizontal ground that states its ground: [`FlatGround`] whose every point is
+    /// `ground`.
+    struct GroundedFlat {
+        surface_y: f32,
+        ground: crate::ground_field::ContactGround,
+    }
+    impl TerrainOracle for GroundedFlat {
+        fn depth_along(&self, station: Vec3, _out: Vec3, reach: f32) -> f32 {
+            (self.surface_y - station.y).min(reach)
+        }
+        fn ground_at(&self, _point: Vec3) -> Option<crate::ground_field::ContactGround> {
+            Some(self.ground)
+        }
+    }
+
+    /// One contact pass of the rig's pad, held 5 mm into `oracle`'s flat ground, its hull moving
+    /// along −z at `hull_speed`, the way a positive belt speed drives it (the bottom run
+    /// runs +z, so its drive direction is −z, `contact_frame`).
+    fn grounded_tick(
+        oracle: &GroundedFlat,
+        state: &mut SideState,
+        elems: &mut GripElements,
+        hull_speed: f32,
+    ) -> SideReport {
+        let loop_pts = rect_loop(0.02);
+        let input = SideInput {
+            loop_pts: &loop_pts,
+            count: 25,
+            plane_x: 0.0,
+            columns: TEST_COLUMNS,
+            travel: TravelField { knots: &[] },
+        };
+        let report = contact_side(
+            &input,
+            *state,
+            Affine3A::IDENTITY,
+            1.0 / 64.0,
+            &rig_params(),
+            oracle,
+            &RubbleBodies::default(),
+            |_| Vec3::new(0.0, 0.0, -hull_speed),
+            elems,
+        );
+        *state = report.state;
+        report
+    }
+
+    /// THE SAME VEHICLE ON TWO GROUNDS COASTS TO REST OVER THE DISTANCES ITS TWO ROLLING
+    /// RESISTANCES DERIVE, and takes none at rest. A declutched side (no sprocket force) rolling
+    /// with its hull decelerates as one body at `a = c_rr·N/(M + I)` down to the fade band and
+    /// decays inside it, so it coasts `d = (v₀² + V²)/(2a)`. The driving feel of every ground and
+    /// the coast-down distances the design doc derives rely on it. A law that ignored the
+    /// contact's ground, read one ground everywhere, pushed a resting belt, or entered the belt's
+    /// balance with the wrong sign or at the wrong load fails here.
+    ///
+    /// FIXTURE DATA: the rig's 2 m pad 5 mm into flat ground, its 500 kg belt, a hull whose weight
+    /// is the pad's support load, from 3 m/s, on two grounds of rolling resistance 0.05 and 0.15
+    /// (grip 0.9). 2 % covers the grip's slip transient.
+    #[test]
+    fn the_same_vehicle_coasts_to_rest_over_the_distances_its_ground_derives() {
+        let coast = |c_rr: f32| {
+            let oracle = GroundedFlat {
+                surface_y: 0.0,
+                ground: crate::ground_field::ContactGround {
+                    friction: 0.9,
+                    rolling_resistance: c_rr,
+                },
+            };
+            let dt = 1.0 / 64.0;
+            let inertia = rig_params().inertia;
+            let v0 = 3.0;
+            let mut state = SideState {
+                speed: v0,
+                ..Default::default()
+            };
+            let mut elems = GripElements::for_links(25);
+            let mut hull = v0;
+            let mut distance = 0.0;
+            let mut mass = 0.0;
+            // The pad's support load varies from tick to tick as its stations advect (MEASURED:
+            // the coast's mean is 8.7 % below the first tick's on this pad), so the derivation
+            // reads the mean the rolling resistance acted on.
+            let (mut load_sum, mut ticks) = (0.0, 0.0);
+            for tick in 0..20_000 {
+                let report = grounded_tick(&oracle, &mut state, &mut elems, hull);
+                let load: f32 = report.contacts.iter().map(|c| c.load).sum();
+                if tick == 0 {
+                    mass = load / crate::track::derive::G;
+                }
+                load_sum += load;
+                ticks += 1.0;
+                let push: f32 = report.contacts.iter().map(|c| -c.traction.z).sum();
+                hull += push / mass * dt;
+                state.speed -= report.belt_reaction / inertia * dt;
+                state.phase += f64::from(state.speed * dt);
+                distance += hull * dt;
+                if hull.abs() < 1e-4 && state.speed.abs() < 1e-4 {
+                    state.speed = 0.0;
+                    let at_rest = grounded_tick(&oracle, &mut state, &mut elems, 0.0);
+                    assert_eq!(
+                        at_rest.rolling_resistance, 0.0,
+                        "a vehicle at rest takes no rolling resistance"
+                    );
+                    let a = c_rr * (load_sum / ticks) / (mass + inertia);
+                    let derived = (v0 * v0 + ROLLING_FADE_SPEED * ROLLING_FADE_SPEED) / (2.0 * a);
+                    return (distance, derived);
+                }
+            }
+            panic!("the vehicle on rolling resistance {c_rr} never came to rest");
+        };
+        let (firm, firm_derived) = coast(0.05);
+        let (soft, soft_derived) = coast(0.15);
+        println!(
+            "coast-down: firm {firm:.3} m (derived {firm_derived:.3}), soft {soft:.3} m \
+             (derived {soft_derived:.3})"
+        );
+        for (measured, derived) in [(firm, firm_derived), (soft, soft_derived)] {
+            assert!(
+                (measured - derived).abs() < 0.02 * derived,
+                "coasted {measured:.3} m, derived {derived:.3} m"
+            );
+        }
+    }
+
+    /// THE GRIP ON TWO GROUNDS DIFFERS BY THEIR TABLE FRICTIONS: a pad sliding sideways over the
+    /// shipped table's concrete and mud rows saturates at the track's pair with each row's friction
+    /// (`√(μ_track·μ_ground)`), each contact on the ground the field states under it. The terrain
+    /// choice the feel session judges relies on it; a law that gripped every ground at the base
+    /// pack's pair fails. FIXTURE DATA: the rig's pad and 0.9 track, a 2 m/s sideways slide, 64
+    /// ticks; the two rows are compared with their own pairs, so no shipped value is a pass
+    /// condition.
+    #[test]
+    fn the_grip_on_concrete_and_mud_differs_by_their_table_frictions() {
+        let table = crate::ground_types::GroundTypes::load(
+            &crate::ground_types::GroundTypes::shipped_path(),
+        )
+        .expect("the shipped table");
+        let grip = rig_params().grip.expect("the rig grips");
+        let slide = |name: &str| {
+            let oracle = GroundedFlat {
+                surface_y: 0.0,
+                ground: table.get(name).contact(),
+            };
+            let loop_pts = rect_loop(0.02);
+            let input = SideInput {
+                loop_pts: &loop_pts,
+                count: 25,
+                plane_x: 0.0,
+                columns: TEST_COLUMNS,
+                travel: TravelField { knots: &[] },
+            };
+            let mut elems = GripElements::for_links(25);
+            let mut report = SideReport::default();
+            for _ in 0..64 {
+                report = contact_side(
+                    &input,
+                    SideState::default(),
+                    Affine3A::IDENTITY,
+                    1.0 / 64.0,
+                    &rig_params(),
+                    &oracle,
+                    &RubbleBodies::default(),
+                    |_| Vec3::new(2.0, 0.0, 0.0),
+                    &mut elems,
+                );
+            }
+            let pair = grip.pair(crate::substances::contact_friction(
+                table.get(name).friction,
+            ));
+            for contact in &report.contacts {
+                assert!((contact.mu - pair).abs() < 1e-6, "{name}: {}", contact.mu);
+            }
+            let lateral: f32 = report.contacts.iter().map(|c| c.f_lat.abs()).sum();
+            let elastic: f32 = report.contacts.iter().map(|c| c.load_elastic).sum();
+            (lateral / elastic, pair)
+        };
+        let (concrete, concrete_pair) = slide("concrete");
+        let (mud, mud_pair) = slide("mud");
+        println!(
+            "saturated grip: concrete {concrete:.4} (pair {concrete_pair:.4}), mud {mud:.4} (pair {mud_pair:.4})"
+        );
+        assert!(
+            (concrete / mud - concrete_pair / mud_pair).abs() < 1e-3 * concrete_pair / mud_pair,
+            "grip ratio {} against the pairs' {}",
+            concrete / mud,
+            concrete_pair / mud_pair
+        );
     }
 }

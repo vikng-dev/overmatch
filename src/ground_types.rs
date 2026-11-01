@@ -3,17 +3,34 @@
 //! (`terrain_blend::BlendLayer::ground`, `terrain_blend::BASE_GROUND`).
 //!
 //! A type carries how it takes a track print (cosmetic terrain marks, view only,
-//! [`crate::track_prints`]): [`PrintResponse`]; and the friction coefficient it brings to a
-//! contact ([`GroundType::friction`], `crate::substances` module doc, "Friction"); and how readily
-//! a muzzle blast lifts it as dust ([`DustResponse`], view only, `vfx::muzzle`). The terrain is
-//! one collider, so it carries the base pack's ground ([`GroundTypes::terrain_friction`]); the
-//! track law's own ground grip does not read it. A type is a record with one block per consumer,
-//! so the handling a type will drive later (rolling resistance, sinking) joins as a sibling of
+//! [`crate::track_prints`]): [`PrintResponse`]; the friction coefficient it brings to a contact
+//! ([`GroundType::friction`], `crate::substances` module doc, "Friction"); the rolling resistance
+//! it puts on a moving track ([`GroundType::rolling_resistance`]); and how readily a muzzle blast
+//! lifts it as dust ([`DustResponse`], view only, `vfx::muzzle`). A type is a record with one block
+//! per consumer, so the handling a type will drive later (sinking) joins as a sibling of
 //! [`GroundType::print`] without touching the print's fields. Every field is required: the table
 //! states each value with its provenance (below), and nothing in code stands in for one. A missing
 //! field, a field the table does not know, a value outside its domain, and a table lacking a
 //! ground a terrain pack names are all refused at load, naming the ground and the field
 //! ([`GroundTypes::parse`]).
+//!
+//! # What the simulation reads
+//!
+//! The track law reads each terrain contact's own ground: the map's painted blend weights, decoded
+//! once at the data edge into the sim's [`crate::ground_field::GroundField`], blend the four packs'
+//! frictions and rolling resistances at the contact's point (`track::forces::contact_side`). The
+//! terrain's one Avian collider carries the base pack's ground alone
+//! ([`GroundTypes::terrain_friction`]): the hull's and the pieces' solver contacts with the ground
+//! read that, not the paint. The law's narrative is the track design doc's
+//! (`.agents/docs/design/track-model/architecture.md`, "Ground under a contact").
+//!
+//! # Rolling resistance
+//!
+//! `rolling_resistance` is a ground's coefficient of motion resistance for a tracked vehicle, as the
+//! published tables state it per ground (soil compaction and the running gear's own losses
+//! lumped): the force a moving track loses is that coefficient times its normal load. The table
+//! labels each value with its job ([`crate::provenance::Labelled`]), and the tuning panel's save
+//! writes the label back, so a saved table keeps every value's source.
 //!
 //! # A print's depth
 //!
@@ -40,6 +57,8 @@ use std::path::{Path, PathBuf};
 
 use bevy::prelude::*;
 use serde::{Deserialize, Serialize};
+
+use crate::provenance::Labelled;
 
 /// The table's path under the asset root.
 pub(crate) const GROUND_TYPES_PATH: &str = "terrain/ground_types.ron";
@@ -88,7 +107,7 @@ pub(crate) struct DustResponse {
 }
 
 /// One ground type: one block per thing the ground drives.
-#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct GroundType {
     pub(crate) print: PrintResponse,
@@ -96,7 +115,20 @@ pub(crate) struct GroundType {
     /// ([`crate::substances::PAIR_RULE`] combines it with the other side's), finite and not
     /// negative ([`GroundTypes::parse`]).
     pub(crate) friction: f32,
+    /// The coefficient of motion resistance this ground puts on a moving track, dimensionless
+    /// (module doc, "Rolling resistance"): finite and not negative ([`GroundTypes::parse`]).
+    pub(crate) rolling_resistance: Labelled<f32>,
     pub(crate) dust: DustResponse,
+}
+
+impl GroundType {
+    /// What this ground brings to a track contact standing wholly on it.
+    pub(crate) fn contact(&self) -> crate::ground_field::ContactGround {
+        crate::ground_field::ContactGround {
+            friction: self.friction,
+            rolling_resistance: self.rolling_resistance.value,
+        }
+    }
 }
 
 /// The table, keyed by the name a pack's contract uses.
@@ -116,6 +148,7 @@ const FILE_HEADER: &str = "\
 //   darkening            the share of albedo a print takes away, 0..1
 //   roughness_gain       roughness multiplier under a sole; below 1 reads wet
 //   friction             the friction coefficient the ground brings to a contact, one side's
+//   rolling_resistance   the ground's motion resistance coefficient on a moving track, labelled
 //   dust.erodibility     the share of a gun's muzzle dust cloud this ground lifts, 0..1
 //   dust.colour_srgb     the lifted soil's albedo, sRGB, each channel 0..1
 //
@@ -123,11 +156,12 @@ const FILE_HEADER: &str = "\
 // and gravel raised so a print reads at 10-30 m, then tuned by eye in play (`track_prints::tuning`).
 // The module doc of `src/ground_types.rs` carries the provenance. Every friction is ASSUMED, no
 // source read: gravel, the terrain collider's ground, at Avian's own default 0.5; the others
-// ordered by hand, paving gripping best and mud least. Every erodibility is ASSUMED, no source
-// read: ordered by hand, loose dry dirt and sand giving the whole cloud, gravel most of it, wet
-// mud and intact paving little. Each pack's dust colour is DERIVED: the mean of the pack's
-// shipped full-resolution albedo slice (`coast_sand_rocks_02_diff.ktx2`, `blend_diff.ktx2`),
-// MEASURED; concrete names no pack, and its light grey is ASSUMED.
+// ordered by hand, paving gripping best and mud least. Each rolling resistance carries its own
+// label and note. Every erodibility is ASSUMED, no source read: ordered by hand, loose dry dirt
+// and sand giving the whole cloud, gravel most of it, wet mud and intact paving little. Each
+// pack's dust colour is DERIVED: the mean of the pack's shipped full-resolution albedo slice
+// (`coast_sand_rocks_02_diff.ktx2`, `blend_diff.ktx2`), MEASURED; concrete names no pack, and its
+// light grey is ASSUMED.
 ";
 
 /// Why the table could not be read or written: the file's I/O, its RON, a value [`GroundTypes::parse`]
@@ -167,7 +201,7 @@ impl GroundTypes {
             path: path.to_owned(),
             source,
         })?;
-        Self::parse(&text)
+        crate::provenance::with_shipped_policy(|| Self::parse(&text))
     }
 
     /// The table `text` holds, or why it is refused: a malformed file, a missing field or one the
@@ -185,6 +219,13 @@ impl GroundTypes {
                     "friction",
                     ground.friction,
                     ground.friction.is_finite() && ground.friction >= 0.0,
+                    "a finite coefficient of 0 or more",
+                ),
+                (
+                    "rolling_resistance",
+                    ground.rolling_resistance.value,
+                    ground.rolling_resistance.value.is_finite()
+                        && ground.rolling_resistance.value >= 0.0,
                     "a finite coefficient of 0 or more",
                 ),
                 (
@@ -319,13 +360,13 @@ impl GroundTypes {
 mod tests {
     use super::*;
 
-    /// A minimal table text: every ground a terrain pack names, each with `print` and `friction`
+    /// A minimal table text: every ground a terrain pack names, each with every field
     /// authored, the first one (`gravel`, the base pack's) carrying `gravel` in place of its block.
     /// FIXTURE DATA: the numbers are round and stand for no ground.
     fn table_text(gravel: &str) -> String {
         let block = "print: (softness_mm_per_kpa: 0.5, depth_cap_mm: 50.0, darkening: 0.2, \
-                     roughness_gain: 1.0), friction: 0.5, dust: (erodibility: 0.5, \
-                     colour_srgb: (0.5, 0.4, 0.3))";
+                     roughness_gain: 1.0), friction: 0.5, rolling_resistance: (0.05, \
+                     Fixture(\"fixture\")), dust: (erodibility: 0.5, colour_srgb: (0.5, 0.4, 0.3))";
         format!(
             "(types: {{\"gravel\": ({gravel}), \"dirt\": ({block}), \"sand\": ({block}), \
              \"mud\": ({block})}})"
@@ -383,27 +424,37 @@ mod tests {
 
     /// A GROUND THAT STATES TOO LITTLE IS REFUSED AT LOAD: a ground with no `print` block would
     /// take no print, a ground with no `friction` would hand the terrain collider Avian's
-    /// default, a ground with no `dust` would lift a cloud nobody stated, and a table lacking a pack's ground would leave that pack nothing to read. Each is
-    /// refused at parse, naming what is missing, so no consumer meets one. Mutant: a
-    /// `#[serde(default)]` on a required field (including each soil fact), or a parse that skips
-    /// the pack check, loads one of
-    /// these. The terrain collider reads the base ground's friction under the pair rule.
+    /// default, a ground with no `rolling_resistance` (or one with no label) would roll on a
+    /// coefficient nobody stated, a ground with no `dust` would lift a cloud nobody stated, and a
+    /// table lacking a pack's ground would leave that pack nothing to read. Each is refused at
+    /// parse, naming what is missing, so no consumer meets one. Mutant: a `#[serde(default)]` on a
+    /// required field (including each soil fact), or a parse that skips the pack check, loads one
+    /// of these. The terrain collider reads the base ground's friction under the pair rule.
     #[test]
     fn a_ground_that_states_too_little_is_refused_at_load() {
         let block = "print: (softness_mm_per_kpa: 0.5, depth_cap_mm: 50.0, darkening: 0.2, \
                      roughness_gain: 1.0)";
         let dust = "dust: (erodibility: 0.5, colour_srgb: (0.5, 0.4, 0.3))";
+        let rolling = "rolling_resistance: (0.05, Fixture(\"fixture\"))";
         for (missing, gravel) in [
-            ("print", format!("friction: 0.5, {dust}")),
-            ("friction", format!("{block}, {dust}")),
-            ("dust", format!("{block}, friction: 0.5")),
+            ("print", format!("friction: 0.5, {rolling}, {dust}")),
+            ("friction", format!("{block}, {rolling}, {dust}")),
+            (
+                "rolling_resistance",
+                format!("{block}, friction: 0.5, {dust}"),
+            ),
+            (
+                "provenance",
+                format!("{block}, friction: 0.5, rolling_resistance: 0.05, {dust}"),
+            ),
+            ("dust", format!("{block}, friction: 0.5, {rolling}")),
             (
                 "colour_srgb",
-                format!("{block}, friction: 0.5, dust: (erodibility: 0.5)"),
+                format!("{block}, friction: 0.5, {rolling}, dust: (erodibility: 0.5)"),
             ),
             (
                 "erodibility",
-                format!("{block}, friction: 0.5, dust: (colour_srgb: (0.5, 0.4, 0.3))"),
+                format!("{block}, friction: 0.5, {rolling}, dust: (colour_srgb: (0.5, 0.4, 0.3))"),
             ),
         ] {
             let error = GroundTypes::parse(&table_text(&gravel))
@@ -411,14 +462,14 @@ mod tests {
                 .to_string();
             assert!(error.contains(missing), "{missing}: {error}");
         }
-        let without_mud = table_text(&format!("{block}, friction: 0.5, {dust}"))
+        let without_mud = table_text(&format!("{block}, friction: 0.5, {rolling}, {dust}"))
             .replace(", \"mud\": (", ", \"marsh\": (");
         let error = GroundTypes::parse(&without_mud)
             .expect_err("a pack's ground is missing")
             .to_string();
         assert!(error.contains("\"mud\""), "{error}");
-        let table = GroundTypes::parse(&table_text(&format!("{block}, friction: 0.5, {dust}")))
-            .expect("the full fixture table loads");
+        let full = table_text(&format!("{block}, friction: 0.5, {rolling}, {dust}"));
+        let table = GroundTypes::parse(&full).expect("the full fixture table loads");
         assert_eq!(
             table.terrain_friction().combine_rule,
             crate::substances::PAIR_RULE
@@ -442,19 +493,21 @@ mod tests {
             darkening,
             roughness,
             friction,
+            rolling,
             erodibility,
             red,
             green,
             blue,
-        ]: [&str; 9]| {
+        ]: [&str; 10]| {
             format!(
                 "print: (softness_mm_per_kpa: {softness}, depth_cap_mm: {cap}, darkening: \
                  {darkening}, roughness_gain: {roughness}), friction: {friction}, \
+                 rolling_resistance: ({rolling}, Fixture(\"fixture\")), \
                  dust: (erodibility: {erodibility}, colour_srgb: ({red}, {green}, {blue}))"
             )
         };
         let ok = [
-            "0.5", "50.0", "0.2", "1.0", "0.5", "0.5", "0.5", "0.4", "0.3",
+            "0.5", "50.0", "0.2", "1.0", "0.5", "0.05", "0.5", "0.5", "0.4", "0.3",
         ];
         let fields = [
             "print.softness_mm_per_kpa",
@@ -462,17 +515,19 @@ mod tests {
             "print.darkening",
             "print.roughness_gain",
             "friction",
+            "rolling_resistance",
             "dust.erodibility",
             "dust.colour_srgb",
             "dust.colour_srgb",
             "dust.colour_srgb",
         ];
-        let bad: [&[&str]; 9] = [
+        let bad: [&[&str]; 10] = [
             &["-0.1", "inf", "NaN"],
             &["-1.0", "inf", "NaN"],
             &["-0.1", "1.1", "NaN"],
             &["0.0", "-1.0", "inf", "NaN"],
             &["-0.1", "inf", "-inf", "NaN"],
+            &["-0.01", "inf", "NaN"],
             &["-0.1", "1.1", "NaN"],
             &["-0.1", "1.1", "NaN"],
             &["-0.1", "1.1", "NaN"],
@@ -500,7 +555,9 @@ mod tests {
     }
 
     /// A saved table reads back as the table: the owner's tuned values survive the round trip
-    /// through the file, header comment and all.
+    /// through the file, header comment and all, and every labelled value keeps its job and note
+    /// (the tuning panel saves the whole table; an unlabelled value does not load back, so a save
+    /// that dropped a label fails here).
     #[test]
     fn a_saved_table_reads_back_unchanged() {
         let table = GroundTypes::load(&GroundTypes::shipped_path()).expect("the shipped table");

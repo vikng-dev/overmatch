@@ -778,9 +778,31 @@ fn gear_climb_monotone_tiger() {
 /// band for rolling losses) of its DERIVED governed speed, and hold there: steady over the last
 /// second, and never past the rpm where the governor has cut the engine's torque to zero. A
 /// governor or ladder mutant that lets the hull run away, or stalls it short of top gear, fails.
+/// The ground takes no rolling resistance, so the governor and the ladder are what this measures:
+/// on a ground that does, the ground's resistance may hold the tank below its governed speed
+/// (design doc, `track-model/architecture.md` §5a). FIXTURE DATA: the base pack's friction, no
+/// rolling resistance.
 #[test]
 fn full_throttle_reaches_and_holds_the_governed_top_speed() {
     let (mut app, tank) = booted_offline_sim();
+    let base = crate::ground_types::GroundTypes::load_shipped()
+        .get(crate::terrain_blend::BASE_GROUND)
+        .contact();
+    let road = crate::ground_field::ContactGround {
+        rolling_resistance: 0.0,
+        ..base
+    };
+    {
+        let mut track = app
+            .world_mut()
+            .resource_mut::<crate::track::terrain::TrackField>();
+        let field = track
+            .field
+            .take()
+            .expect("the booted world built its track field");
+        track.field =
+            Some(field.with_ground(Some(crate::ground_field::GroundField::uniform(road))));
+    }
     face_positive_z(&mut app, tank);
     let trans = app
         .world()

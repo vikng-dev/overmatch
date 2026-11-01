@@ -11,13 +11,15 @@
 //! `Fixture` labels inline test data and loads only under `cfg(test)`. Shipped-file boundaries
 //! use [`shipped`] in every build, including tests. Missing provenance, a blank note
 //! or a fixture in shipped data is refused at load; the caller supplies the file and the parser
-//! locates the field. The loader keeps only the value; the data file holds its job and note.
+//! locates the field. [`Sourced`] keeps only the value, and the data file holds its job and note;
+//! [`Labelled`] keeps the label too, for a table a tool writes back to its file (the ground-type
+//! table's tuning panel), so a save keeps every value's job and note.
 
 use serde::de::{self, Deserialize, Deserializer, SeqAccess, Visitor};
 
 /// Where a value comes from. Each variant carries its source or reason, which may not be blank.
-#[derive(serde::Deserialize)]
-enum Provenance {
+#[derive(Clone, Debug, PartialEq, serde::Deserialize, serde::Serialize)]
+pub(crate) enum Provenance {
     /// Read off a measurement or a published datum; names the source.
     Measured(String),
     /// Computed from other values; names the inputs and the derivation.
@@ -58,22 +60,42 @@ pub(crate) struct Sourced<T>(pub(crate) T);
 
 impl<'de, T: Deserialize<'de>> Deserialize<'de> for Sourced<T> {
     fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        Labelled::deserialize(deserializer).map(|labelled| Sourced(labelled.value))
+    }
+}
+
+/// A value and the label it was admitted with, written back as it was authored,
+/// `(value, Kind("note"))`. Admitted by the same rules as [`Sourced`].
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct Labelled<T> {
+    pub(crate) value: T,
+    pub(crate) label: Provenance,
+}
+
+impl<'de, T: Deserialize<'de>> Deserialize<'de> for Labelled<T> {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
         #[cfg(test)]
         if !FIXTURES_ALLOWED.get() {
-            return deserialize_sourced::<T, D, false>(deserializer);
+            return deserialize_labelled::<T, D, false>(deserializer);
         }
-        deserialize_sourced::<T, D, { cfg!(test) }>(deserializer)
+        deserialize_labelled::<T, D, { cfg!(test) }>(deserializer)
+    }
+}
+
+impl<T: serde::Serialize> serde::Serialize for Labelled<T> {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        (&self.value, &self.label).serialize(serializer)
     }
 }
 
 // Both admission policies use the same visitor and refusal.
-fn deserialize_sourced<'de, T: Deserialize<'de>, D: Deserializer<'de>, const FIXTURES: bool>(
+fn deserialize_labelled<'de, T: Deserialize<'de>, D: Deserializer<'de>, const FIXTURES: bool>(
     deserializer: D,
-) -> Result<Sourced<T>, D::Error> {
+) -> Result<Labelled<T>, D::Error> {
     struct SourcedVisitor<T, const FIXTURES: bool>(std::marker::PhantomData<T>);
 
     impl<'de, T: Deserialize<'de>, const FIXTURES: bool> Visitor<'de> for SourcedVisitor<T, FIXTURES> {
-        type Value = Sourced<T>;
+        type Value = Labelled<T>;
 
         fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
             f.write_str(
@@ -103,7 +125,10 @@ fn deserialize_sourced<'de, T: Deserialize<'de>, D: Deserializer<'de>, const FIX
             if seq.next_element::<de::IgnoredAny>()?.is_some() {
                 return Err(de::Error::invalid_length(3, &self));
             }
-            Ok(Sourced(value))
+            Ok(Labelled {
+                value,
+                label: provenance,
+            })
         }
     }
 
