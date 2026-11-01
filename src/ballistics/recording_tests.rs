@@ -474,52 +474,67 @@ fn a_shell_despawned_after_the_shot_keeps_its_record() {
     );
 }
 
-/// The game's damage model: a husk whose turret launched on cook-off stays on the field, and a
-/// later main-gun round can strike it. The launch takes the turret's node out of the servo
-/// mechanism (no `ServoIndex`) while the tank's servo state keeps every slot, so no angle places
-/// that node on the hull: the recorder names that rig as unposable and finishes the encounter
-/// without a record, and the authority keeps simulating. The control, the same rig with the node
-/// still mounted, records every slot's angle. Two servo slots are fixture data.
+/// The game's damage model: only a target alive at the strike opens an encounter. A husk
+/// records nothing with its turret present or absent, while the knockout shot keeps its record.
+/// The remaining ammunition HP pool still takes dose in every case; the record gate must not
+/// change simulation. The servo slots, geometry and HP capacities are fixture data.
 #[test]
-fn a_round_into_a_husk_whose_turret_launched_records_nothing_and_keeps_simulating() {
+fn a_round_into_a_husk_records_nothing_with_or_without_its_turret() {
     use crate::tank::{ServoIndex, TankRoot, TankServos};
-    let record = |launched: bool| {
+    let record = |husk: bool, turret_present: bool| {
         let mut app = recording_world(false);
-        let (root, _) = tank(
+        let (root, volumes) = tank(
             &mut app,
             Vec3::ZERO,
             0.0,
             Vec3::ZERO,
-            &plated(DEEP, Kind::Crew(DEEP)),
+            &plated(ONE, Kind::Ammo(DEEP)),
         );
         let world = app.world_mut();
         world.entity_mut(root).insert(TankServos::for_count(2));
         world.spawn((Name::new("gun"), ServoIndex(0), TankRoot(root)));
-        let turret = world
-            .spawn((Name::new("turret"), ServoIndex(1), TankRoot(root)))
-            .id();
-        if launched {
+        if turret_present {
+            world.spawn((Name::new("turret"), ServoIndex(1), TankRoot(root)));
+        }
+        if husk {
             world
-                .entity_mut(turret)
-                .remove::<ServoIndex>()
-                .insert(crate::damage::LaunchedTurret);
+                .get_mut::<ComponentHealth>(volumes[1])
+                .unwrap()
+                .drain();
+            world.entity_mut(root).insert(TankKnockedOut {
+                reason: KnockoutReason::CrewLoss,
+            });
         }
         settle(&mut app);
         fire(&mut app, Vec3::new(0.0, 0.0, 30.0), FireMechanism::Single);
         let recorded = run(&mut app, 8);
         assert!(app.world().resource::<ShotRecorder>().is_idle());
+        assert!(
+            hp(&app, volumes[2]) < DEEP_UNITS,
+            "the husk's remaining pool still takes dose"
+        );
         recorded
     };
-    let mounted = record(false);
-    assert_eq!(mounted.len(), 1, "a mounted rig records");
-    let posed: Vec<&str> = mounted[0]
+    let knockout = record(false, true);
+    assert_eq!(knockout.len(), 1, "the knockout shot records");
+    assert_eq!(knockout[0].report.killed, Some(KnockoutReason::CrewLoss));
+    let posed: Vec<&str> = knockout[0]
         .report
         .servo_deg
         .keys()
         .map(String::as_str)
         .collect();
-    assert_eq!(posed, ["gun", "turret"], "every slot's angle");
-    assert!(record(true).is_empty(), "a launched rig records nothing");
+    assert_eq!(
+        posed,
+        ["gun", "turret"],
+        "the knockout shot keeps its strike pose"
+    );
+    for turret_present in [true, false] {
+        assert!(
+            record(true, turret_present).is_empty(),
+            "a husk opens no record"
+        );
+    }
 }
 
 /// An armed round's record stays open while the fuze the struck tank armed runs, though the round

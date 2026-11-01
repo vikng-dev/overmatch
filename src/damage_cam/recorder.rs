@@ -1,6 +1,7 @@
-//! The game's pen cam recorder: on the authority (the server and offline play, never a net
-//! client), one [`PenetrationReport`] per main-gun round ([`FireMechanism::Single`]) and encounter
-//! of its path with a tank, emitted as a [`RecordedShot`]. Automatic fire records nothing.
+//! The game's damage model: pen cam recordings on the authority (the server and offline play,
+//! never a net client), one [`PenetrationReport`] per main-gun round ([`FireMechanism::Single`]) and encounter
+//! of its path with a tank alive at the strike, emitted as a [`RecordedShot`]. Automatic fire
+//! records nothing. A husk opens no new encounter; the knockout shot keeps its strike pose.
 //!
 //! An encounter runs from the round's first mark on a tank until its record is finished; a round
 //! that strikes the tank again after that, say off another tank's armour, opens the next encounter,
@@ -19,17 +20,19 @@
 //! lives.
 //!
 //! The record's pool figures are the shot's own ([`crate::ballistics::ShotDose`], see
-//! [`super::record`]). A tank's death is the shot's when its own deposition emptied the box that
+//! [`super::record`]). A tank's knockout is the shot's when its own deposition emptied the box that
 //! decided it, in the same tick ([`attribute_kills`]): for a cookoff the first ammunition box
 //! emptied that tick, for crew loss the last crew station, in deposition order across every shell
-//! (automatic fire included, which can kill though it is not recorded). The same decision, for
+//! (automatic fire included, which can empty pools though it is not recorded). The same decision, for
 //! every knocked-out tank, is the authority's [`TankKnockout`] fact, which the match score credits.
 //!
 //! An encounter's record is finished ([`finish_records`]) once the shell ended, or is clear of the
 //! tank's colliders with no fuze that tank armed still running: a burst wherever the delay ends is
-//! the encounter's. A tank gone by then (despawned, or respawned as a new entity) gets no record,
-//! nor does one whose servo node launched before its encounter was posed
-//! ([`ServoPose::Detached`]): no angle places that node on the hull.
+//! the encounter's. A tank gone by then (despawned, or respawned as a new entity) gets no record.
+//! Every new encounter is posed before damage consequences can detach a turret; an encounter
+//! already open keeps that pose after the knockout.
+
+use std::collections::BTreeMap;
 
 use avian3d::prelude::{
     ColliderAabb, ColliderTransform, Position, RigidBody, RigidBodyColliders, Rotation,
@@ -38,7 +41,7 @@ use bevy::ecs::system::{SystemParam, SystemState};
 use bevy::prelude::*;
 
 use super::PenetrationReport;
-use super::record::{self, HullFrame, ServoPose, ShotFacts, ShotLog, StruckTank};
+use super::record::{self, HullFrame, ShotFacts, ShotLog, StruckTank};
 use super::wire::TankLife;
 use crate::ballistics::{
     ArmourMark, BurstField, ComponentHealth, FireShell, PenetrationMarks, Projectile as Flying,
@@ -141,7 +144,7 @@ struct Struck {
     /// until the post-march recorder reads their frame.
     frames: Vec<(usize, Option<HullFrame>)>,
     /// `None` until [`pose_struck`] reads the live tank's servos.
-    servo_deg: Option<ServoPose>,
+    servo_deg: Option<BTreeMap<String, f32>>,
     killed: Option<KnockoutReason>,
     done: bool,
 }
@@ -180,6 +183,7 @@ pub(crate) struct MarchRecorder<'w, 's> {
     recorder: Option<ResMut<'w, ShotRecorder>>,
     clock: Option<Res<'w, ShotClock>>,
     tanks: Query<'w, 's, &'static TankVolumes>,
+    knocked_out: Query<'w, 's, (), With<TankKnockedOut>>,
 }
 
 impl MarchRecorder<'_, '_> {
@@ -238,6 +242,11 @@ impl MarchRecorder<'_, '_> {
                 let at = match latest {
                     Some(at) if !recording.struck[at].done => at,
                     _ => {
+                        // The game's damage model: a husk has no new encounter. This read is
+                        // before this tick's knockout consequences, so the knockout shot records.
+                        if self.knocked_out.contains(tank) {
+                            continue;
+                        }
                         let encounter = latest.map_or(0, |at| recording.struck[at].encounter + 1);
                         let boxes = self
                             .tanks
@@ -334,7 +343,8 @@ fn keep_spent(
 fn pose_struck(world: &mut World) {
     world.resource_mut::<ShotRecorder>().unposed = false;
     let mut live = world.query::<&ShotRecording>();
-    let mut tanks: Vec<Entity> = live
+    let mut tanks = BTreeMap::<Entity, bool>::new();
+    for struck in live
         .iter(world)
         .chain(
             world
@@ -344,21 +354,23 @@ fn pose_struck(world: &mut World) {
                 .map(|spent| &spent.recording),
         )
         .flat_map(|recording| &recording.struck)
-        .filter(|struck| {
-            struck.servo_deg.is_none() || matches!(struck.frames.last(), Some((_, None)))
-        })
-        .map(|struck| struck.tank)
-        .collect();
-    tanks.sort();
-    tanks.dedup();
-    let posed: Vec<(Entity, Option<HullFrame>, Option<ServoPose>)> = tanks
+    {
+        if struck.servo_deg.is_none() || matches!(struck.frames.last(), Some((_, None))) {
+            *tanks.entry(struck.tank).or_default() |= struck.servo_deg.is_none();
+        }
+    }
+    let posed: Vec<(Entity, Option<HullFrame>, Option<BTreeMap<String, f32>>)> = tanks
         .into_iter()
-        .map(|tank| {
-            (
-                tank,
-                hull_frame(world, tank),
-                record::servo_angles(world, tank),
-            )
+        .map(|(tank, needs_angles)| {
+            let frame = hull_frame(world, tank);
+            // The game's damage model captures angles once at the living strike. A later frame
+            // placement must not read a mechanism that may have detached after that strike.
+            let angles = if needs_angles {
+                record::servo_angles(world, tank)
+            } else {
+                None
+            };
+            (tank, frame, angles)
         })
         .collect();
     let pose = |struck: &mut Struck| {
@@ -371,7 +383,7 @@ fn pose_struck(world: &mut World) {
         }
         if let Some(servo_deg) = servo_deg {
             struck.servo_deg.get_or_insert_with(|| servo_deg.clone());
-        } // A despawned tank has no pose and receives no finished record.
+        } // Captured angles stay in place; a despawned tank supplies no new pose.
     };
     let mut live = world.query::<&mut ShotRecording>();
     for mut recording in live.iter_mut(world) {
@@ -417,7 +429,7 @@ fn hull_frame(world: &mut World, tank: Entity) -> Option<HullFrame> {
 }
 
 /// Decide each tank knocked out this tick: the shell whose deposition emptied the box that decided
-/// it. Raise [`TankKnockout`] for every one, with that shell's round or none, and attribute the kill
+/// it. Raise [`TankKnockout`] for every one, with that shell's round or none, and attribute the knockout
 /// to the shell's open encounter with the tank (the one this tick's marks are in); then clear the
 /// tick's emptied log.
 fn attribute_kills(
@@ -515,8 +527,7 @@ fn finish_records(world: &mut World) {
 }
 
 /// The record of `recording`'s round in encounter `struck`, its logs `log`; `None` where the tank
-/// is gone, a frame was never posed, a servo node had left the rig when it was posed, or the
-/// encounter opens no pen cam.
+/// is gone, a frame was never posed, or the encounter opens no pen cam.
 fn recorded(
     world: &World,
     recording: &ShotRecording,
@@ -530,13 +541,11 @@ fn recorded(
         .map(|&(mark, frame)| Some((mark, frame?)))
         .collect::<Option<Vec<_>>>()?;
     let hull = frames.first().map(|(_, frame)| frame.pose());
-    let servo_deg =
-        match struck.servo_deg.as_ref().expect(
-            "the game's damage model poses every live struck tank before finishing its record",
-        ) {
-            ServoPose::Posed(angles) => angles.clone(),
-            ServoPose::Detached => return None,
-        };
+    let servo_deg = struck
+        .servo_deg
+        .as_ref()
+        .expect("the game's damage model poses every live struck tank before finishing its record")
+        .clone();
     let tank = StruckTank::recorded(
         struck.tank,
         struck.from,
@@ -622,4 +631,68 @@ fn clear_of(world: &World, tank: Entity, point: Vec3) -> bool {
     bounds.is_none_or(|(min, max)| {
         point.cmplt(min - CLEAR_MARGIN).any() || point.cmpgt(max + CLEAR_MARGIN).any()
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The game's damage model: an encounter opened while the target lived keeps its strike
+    /// angles when later static-frame placement runs after knockout. The record still needs a
+    /// hull frame, but the detached mechanism cannot supply new angles. Fixture pose data.
+    #[test]
+    fn an_open_encounter_keeps_its_pose_after_knockout() {
+        let mut world = World::new();
+        world.init_resource::<ShotRecorder>();
+        let tank = world
+            .spawn((
+                Transform::default(),
+                GlobalTransform::default(),
+                Position(Vec3::ZERO),
+                Rotation::IDENTITY,
+                crate::tank::TankServos::for_count(1),
+                TankKnockedOut {
+                    reason: KnockoutReason::Cookoff,
+                },
+            ))
+            .id();
+        world.entity_mut(tank).insert(Rig {
+            hull: tank,
+            turret: tank,
+            gun: tank,
+            muzzle: tank,
+        });
+        let angles = BTreeMap::from([("fixture servo".to_owned(), 42.0)]);
+        let shell = world
+            .spawn(ShotRecording {
+                facts: ShotFacts::default(),
+                shot: None,
+                struck: vec![Struck {
+                    tank,
+                    encounter: 0,
+                    contact_tick: 0,
+                    from: 0,
+                    boxes: Vec::new(),
+                    frames: vec![
+                        (0, Some(HullFrame::posed(Vec3::ZERO, Quat::IDENTITY))),
+                        (1, None),
+                    ],
+                    servo_deg: Some(angles.clone()),
+                    killed: Some(KnockoutReason::Cookoff),
+                    done: false,
+                }],
+            })
+            .id();
+        assert!(
+            StruckTank::capture(&mut world, tank).is_none(),
+            "a husk opens no new capture"
+        );
+        pose_struck(&mut world);
+        let struck = &world.get::<ShotRecording>(shell).unwrap().struck[0];
+        assert_eq!(struck.servo_deg.as_ref(), Some(&angles));
+        assert!(
+            struck.frames[1].1.is_some(),
+            "the later hull frame is filled"
+        );
+    }
 }

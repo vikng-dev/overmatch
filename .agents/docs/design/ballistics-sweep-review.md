@@ -5,7 +5,8 @@ fields deposit dose, and a pool emptied leaves its component knocked out.
 
 ## Review of sweep-ball-1
 
-Reviewed the commits after `ff571fe0` through `2cff0cf5` against the error-handling, code-branching
+Reviewed the commits after "trees: require sourced root-plate overturning coefficients (#236)"
+through "spec: refuse a requirement member coefficient outside (0, 1] at load (#219)" against the error-handling, code-branching
 and base-truths lenses and the sweep brief. No earlier ballistics sweep record was present in
 `.agents/docs/design/` at this base.
 
@@ -253,7 +254,9 @@ also passed the protocol checks, pen-cam records and unchanged cross-platform fi
 
 ## Review of sweep-ball-2
 
-Reviewed `8f63e9c3^..4381e25c` against the three lenses and for correctness.
+Reviewed from "ballistics: probe every gun and round configuration (#219)" through
+"ballistics: sample surviving server rounds after deferred dressing (#219)" against the three
+lenses and for correctness.
 
 - **P1, fixed (`owned_losses`):** once fields reach every volume, a burst or cone near the firing
   tank can dose its own pools, and hit confirmation counted every tank-owned pool: a self-dose
@@ -306,7 +309,9 @@ ADR-0029/0030 capture (owner: keep, or delete with those ADR lines).
 ## Review of sweep-ball-3
 
 Subject: the game's ballistics and damage model, game state only.
-Reviewed `f1647a4f^..0f4a7493` against the three lenses and the part-3 brief.
+Reviewed from "ballistics: confirm no hit on the shooter's own pools (#219)" through
+"ballistics: correct the part-4 list in the sweep record (#219)" against the three lenses and
+the part-3 brief.
 
 - **R3, P1, fixed:** `shooting::fire` required a replica root's `Position`/`Rotation` through
   its tank query before checking whether the weapon fires. Lightyear's `queue_history_presence`
@@ -661,3 +666,29 @@ MEASURED: the moving-state regression failed on main before the fix and passes w
 change. Format and workspace/all-target clippy passed. MEASURED: 269 damage-cam, recording,
 pen-cam, field-cast, headless and citation tests passed; six ignored instruments. No capture or
 pricing was run.
+
+
+### Living-target encounter admission
+
+Subject: the game's damage model and shot records, game state only. The owner decision is fixed
+in "open shot encounters only for living targets": `MarchRecorder::note` refuses a new encounter
+when the struck tank already has `TankKnockedOut`. This runs before the current tick's knockout
+consequences, so the knockout shot records. An existing encounter keeps its captured strike
+angles and can finish after knockout. Direct `StruckTank::capture` follows the same living-target
+rule. The round's simulation and deposits are unchanged.
+
+- **R13, P3 (Claude), verified, removed by the same subject.** The old launch-outcome test did
+  not exercise the real launch's retention of `TankRoot`. That was a gap while husk records
+  depended on it. New husk encounters no longer query servo angles, so no record depends on
+  that launch detail. `ServoPose`, its detached arm, the launch detector and their test arms
+  are deleted; there is no remaining consumer. The physical launched-turret component remains
+  the simulation's, independent of recording.
+
+MEASURED: before the gate, the living-target test failed because a mounted husk produced a
+record. After it, strikes on husks with and without a turret produce no record, the knockout
+shot records its strike angles and knockout cause, and the remaining ammunition pool takes dose
+in every case. A later-frame test also caught an unnecessary servo reread after knockout; it now
+requires the saved angles and a filled later hull frame, and refuses a fresh capture of that
+husk. Format and workspace/all-target clippy passed. MEASURED: 270 targeted damage-cam,
+recording, pen-cam, field-cast, headless and citation tests passed, six ignored; the final five
+focused capture/encounter/citation checks also passed. No capture or pricing was run.
