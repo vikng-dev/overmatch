@@ -363,8 +363,8 @@ pub struct BeltContact {
     pub load: f32,
     pub load_elastic: f32,
     /// The support spring's rate along the normal at this patch (N/m): the per-metre spring over
-    /// the patch's contacting length, at its column's weight and engagement (DERIVED: the
-    /// elastic load's rate in penetration past the engagement ramp). The recipient's reaction law
+    /// the patch's contacting length, at its column's weight, including the engagement ramp
+    /// derivative (DERIVED: the elastic load's rate under a uniform normal displacement). The recipient's reaction law
     /// reads it as the stiffness the explicit step integrates (`track::rubble::piece_impulses`).
     pub stiffness: f32,
     /// Normal damping rate of this patch (N·s/m), including engagement and column weight.
@@ -759,6 +759,18 @@ fn probe_depths<O: TerrainOracle>(
     depths
 }
 
+/// Elastic force derivative under a uniform normal displacement. The profile area's derivative
+/// is its contacting length; inside soft engagement the ramp contributes its own slope.
+fn elastic_stiffness(params: &ForceParams, weight: f32, area: f32, length: f32, depth: f32) -> f32 {
+    let engage = (depth / params.engage_depth).clamp(0.0, 1.0);
+    let slope = if depth < params.engage_depth {
+        params.engage_depth.recip()
+    } else {
+        0.0 // Full engagement has no remaining ramp slope.
+    };
+    weight * params.support_stiffness_per_m * (length * engage + area * slope)
+}
+
 /// PASS 1 — geometry, support, and slip per contact column. Forces are NOT emitted yet: the
 /// elastic grip resultant needs this tick's total budget and load-weighted slip BEFORE
 /// per-contact traction can include it. Pass 2 emits apps in the exact support-then-traction
@@ -983,7 +995,7 @@ fn collect_column_contacts<O: TerrainOracle>(
                 };
                 let engage = (pen_max / params.engage_depth).clamp(0.0, 1.0);
                 let load_elastic = weight * params.support_stiffness_per_m * area * engage;
-                let stiffness = weight * params.support_stiffness_per_m * contact_len * engage;
+                let stiffness = elastic_stiffness(params, weight, area, contact_len, pen_max);
                 let load = weight
                     * (params.support_stiffness_per_m * area
                         - params.support_damping_per_m * contact_len * vel.dot(normal))
@@ -1553,6 +1565,45 @@ mod tests {
             !report.contacts.is_empty(),
             "a ceiling below the top face must still contact through the gated law"
         );
+    }
+
+    /// Recipient stability needs the derivative of the support force, including soft engagement.
+    /// FIXTURE: uniform 1 cm penetration in a 2 cm ramp, spring 2 MN/m per m, 2 m bottom run.
+    /// DERIVED: F=k L p²/e and dF/dp=2 k L p/e=4 MN/m; omitting the ramp slope halves it.
+    #[test]
+    fn engagement_reports_the_elastic_force_derivative() {
+        let mut params = rig_params();
+        params.engage_depth = 0.02;
+        let loop_pts = rect_loop(params.face_offset);
+        let input = SideInput {
+            loop_pts: &loop_pts,
+            count: 25,
+            plane_x: 0.0,
+            columns: TEST_COLUMNS,
+            travel: TravelField { knots: &[] },
+        };
+        let read = |depth: f32| {
+            let report = contact_side(
+                &input,
+                SideState::default(),
+                Affine3A::IDENTITY,
+                1.0 / 64.0,
+                &params,
+                &FlatGround { surface_y: depth },
+                &RubbleBodies::default(),
+                |_| Vec3::ZERO,
+                &mut GripElements::for_links(25),
+            );
+            (
+                report.contacts.iter().map(|c| c.load_elastic).sum::<f32>(),
+                report.contacts.iter().map(|c| c.stiffness).sum::<f32>(),
+            )
+        };
+        let delta = 1e-5; // FIXTURE finite-difference spacing within the ramp.
+        let derivative = (read(0.01 + delta).0 - read(0.01 - delta).0) / (2.0 * delta);
+        let reported = read(0.01).1;
+        println!("MEASURED ramp stiffness {reported} N/m, force derivative {derivative} N/m");
+        assert!((reported / derivative - 1.0).abs() < 0.002);
     }
 
     /// The envelope reframing: with the rest face exactly kissing flat ground, a zero-travel

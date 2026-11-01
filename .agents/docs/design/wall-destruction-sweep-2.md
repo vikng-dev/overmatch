@@ -342,6 +342,7 @@ were present. Findings are checked against code and executable class fixtures.
 |---|---|---|---|
 | Codex P1; Claude P1 | Reaction stability ignores damping | verified: fixture 500 kg, 2 MN/m, 100 kN s/m, 1 cm press, closing 1 m/s at 64 Hz leaves at -2.7500002 m/s (MEASURED red test) | track: include damping in recipient stability (#256) |
 | Codex P1; Claude P3 | Later patches record velocities changed by earlier impulses | verified: two 1000 kg bodies, 800 N s reaction at their COM normal, closing 1 m/s; one patch reads 499.99997 N s, two read 399.99997 N s (MEASURED red test) | track: retain tick-start closing speeds for every reaction (#256) |
+| Codex P2; Claude P2 | Reported elastic stiffness omits engagement derivative | verified: uniform 1 cm press in a 2 cm ramp reports 1,999,999.9 N/m against a finite-difference force derivative of 3,999,707.3 N/m (MEASURED red test) | track: include the engagement slope in patch stiffness (#256) |
 
 The spring/damper verdict includes `dt² k/m + 2 dt c/m` over all recipient patches; its
 RESOLUTION limit is 4 (DERIVED from the symplectic Euler amplification matrix).
