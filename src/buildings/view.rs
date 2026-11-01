@@ -37,6 +37,8 @@
 //! in the piece + 1, and a piece whose chunks hold a hole wears its own copy with its
 //! [`piece_hole_table`] bound.
 
+use std::collections::{BTreeMap, BTreeSet};
+
 use bevy::mesh::{Indices, PrimitiveTopology};
 use bevy::prelude::*;
 
@@ -652,6 +654,13 @@ struct PieceHoled(usize);
 /// A piece shows once its building's shown shape has its chunks fallen, and from then on wears its
 /// chunks' holes (module doc). New deposits can cut a moving group too, so each changed hole
 /// count refreshes its material at the same shared cursor as the ledger.
+///
+/// A split hands its chunks over at its tick on the shared cursor, all at once: the retired group
+/// stays shown until every chunk it held that still stands has a replacement born at its
+/// retirement tick. Until then (and while the retirement itself has not arrived) a replacement
+/// waits hidden behind the older piece still drawing its chunks, so each chunk is drawn by exactly
+/// one piece. The arrivals are indexed once per frame by building, birth tick and chunk, and every
+/// handover check is a lookup there.
 fn show_pieces(
     clock: Res<PresentationClock>,
     arrived: Query<(&WallPiece, &PieceDressed)>,
@@ -667,25 +676,48 @@ fn show_pieces(
     mut surfaces: SurfaceStores,
     mut commands: Commands,
 ) {
+    let due = |tick: u32| clock.since(tick).is_some_and(|elapsed| elapsed >= 0.0);
+    let born_with: BTreeSet<(Entity, u32, u16)> = arrived
+        .iter()
+        .flat_map(|(piece, dressed)| {
+            piece
+                .chunks
+                .iter()
+                .map(|&c| (dressed.building, piece.born, c))
+        })
+        .collect();
+    let handed_over = |piece: &WallPiece, dressed: &PieceDressed| {
+        piece.retired.is_some_and(|tick| {
+            due(tick)
+                && buildings.get(dressed.building).is_ok_and(|(_, shown, _)| {
+                    piece.chunks.iter().all(|&c| {
+                        shown.0.fate[usize::from(c)] == Fate::Dust
+                            || born_with.contains(&(dressed.building, tick, c))
+                    })
+                })
+        })
+    };
+    // Per building and chunk, the oldest birth tick among the pieces not yet handed over that
+    // hold it: the piece drawing that chunk.
+    let mut drawing: BTreeMap<(Entity, u16), u32> = BTreeMap::new();
+    for (piece, dressed) in &arrived {
+        if !handed_over(piece, dressed) {
+            for &c in &piece.chunks {
+                let oldest = drawing.entry((dressed.building, c)).or_insert(piece.born);
+                *oldest = (*oldest).min(piece.born);
+            }
+        }
+    }
     for (entity, piece, dressed, mut visibility, holed) in &mut pieces {
         // A piece whose building has despawned is hidden.
         let building = buildings.get(dressed.building).ok();
-        let born = clock
-            .since(piece.born)
-            .is_some_and(|elapsed| elapsed >= 0.0);
-        let retired = piece.retired.is_some_and(|tick| {
-            clock.since(tick).is_some_and(|elapsed| elapsed >= 0.0)
-                && building.is_some_and(|(_, shown, _)| {
-                    piece.chunks.iter().all(|&c| {
-                        shown.0.fate[usize::from(c)] == Fate::Dust
-                            || arrived.iter().any(|(child, child_view)| {
-                                child_view.building == dressed.building
-                                    && child.born == tick
-                                    && child.chunks.binary_search(&c).is_ok()
-                            })
-                    })
-                })
-        });
+        let born = due(piece.born)
+            && piece.chunks.iter().all(|&c| {
+                drawing
+                    .get(&(dressed.building, c))
+                    .is_none_or(|&oldest| oldest >= piece.born)
+            });
+        let retired = handed_over(piece, dressed);
         let fallen = born
             && !retired
             && building.is_some_and(|(_, shown, _)| {
@@ -1501,6 +1533,11 @@ mod tests {
             world.get::<Visibility>(parent),
             Some(&Visibility::Inherited),
             "the late replacement keeps the parent available"
+        );
+        assert_eq!(
+            world.get::<Visibility>(a),
+            Some(&Visibility::Hidden),
+            "an arrived replacement waits while its parent still draws its chunks"
         );
         let b = world
             .spawn((
