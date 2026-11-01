@@ -234,14 +234,22 @@ mod tests {
     }
 
     /// The game's damage model: a running repair holds the tank on its brakes
-    /// (`track::sim::apply_track_forces` reads [`underway`]) while every capability keeps its
+    /// through the production drive-target selector while every capability keeps its
     /// authored requirement, so a fire gate still admits fire. A repair that closed a capability
     /// instead, or a hold that missed the running timer, fails here.
     #[test]
     fn repairing_holds_the_tank_but_keeps_every_capability_requirement() {
+        use crate::track::drive::{DriveAxes, DriveTarget};
+        use crate::track::sim::drive_target;
+
         fn gates(tanks: Query<(&TankVolumes, &TankCapabilities)>, facets: Query<VolumeFacets>) {
             let (volumes, caps) = tanks.single().unwrap();
             assert!(underway(volumes, &facets));
+            assert_eq!(
+                drive_target(&drive_command(), Some(volumes), Some(caps), &facets),
+                DriveTarget::Brake,
+                "the gameplay adapter must turn a running repair into service braking"
+            );
             assert!(capability_available(
                 Some(volumes),
                 Some(caps),
@@ -253,6 +261,13 @@ mod tests {
                 &vec![Group::Single(Part::Breech)],
                 &facets
             ));
+        }
+        fn drive_command() -> ParsedTankCommand {
+            ParsedTankCommand::try_from(TankCommand {
+                throttle: 1.0,
+                ..default()
+            })
+            .unwrap()
         }
         let (mut world, tank, _) = fixture();
         world
@@ -266,12 +281,30 @@ mod tests {
         press(&mut world, tank, 1, 1);
         world.run_system_once(gates).unwrap();
         advance(&mut world, 128);
-        let idle = world
-            .run_system_once(|tanks: Query<&TankVolumes>, facets: Query<VolumeFacets>| {
-                underway(tanks.single().unwrap(), &facets)
-            })
+        let (released, held) = world
+            .run_system_once(
+                |tanks: Query<(&TankVolumes, &TankCapabilities)>, facets: Query<VolumeFacets>| {
+                    let (tank, caps) = tanks.single().unwrap();
+                    (
+                        drive_target(&drive_command(), Some(tank), Some(caps), &facets),
+                        drive_target(&ParsedTankCommand::hold(), Some(tank), Some(caps), &facets),
+                    )
+                },
+            )
             .unwrap();
-        assert!(!idle, "a finished repair releases the hold");
+        assert_eq!(
+            released,
+            DriveTarget::Axes(DriveAxes {
+                throttle: 1.0,
+                steer: 0.0
+            }),
+            "a finished repair releases the hold"
+        );
+        assert_eq!(
+            held,
+            DriveTarget::Brake,
+            "a phase hold still selects service braking with no repair"
+        );
     }
 
     /// The game's damage model: knocked-out lives cannot start or complete repairs, so terminal

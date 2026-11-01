@@ -666,6 +666,26 @@ pub(crate) fn belt_tick<O: TerrainOracle>(
     (reports, tr)
 }
 
+/// The game's damage model: a running repair and a phase-held command both select service
+/// brakes. Other commands retain the authored drive capability gate.
+pub(crate) fn drive_target(
+    command: &ParsedTankCommand,
+    tank: Option<&TankVolumes>,
+    caps: Option<&TankCapabilities>,
+    volumes: &Query<VolumeFacets>,
+) -> DriveTarget {
+    if command.held() || tank.is_some_and(|tank| crate::damage::repair::underway(tank, volumes)) {
+        DriveTarget::Brake
+    } else if capability_available(tank, caps, Capability::Drive, volumes) {
+        DriveTarget::Axes(DriveAxes {
+            throttle: command.throttle,
+            steer: command.steer,
+        })
+    } else {
+        DriveTarget::Axes(DriveAxes::default())
+    }
+}
+
 /// The drive step: shape the command, run each side's belt force model at the tick-truth
 /// pose, apply the returned forces in report order, commit the new belt state.
 ///
@@ -774,23 +794,7 @@ fn apply_track_forces(
             capture.tanks_seen += 1;
             capture.command = [command.throttle, command.steer];
         }
-        // A held tank brakes to a stop and stays parked: a command held by its Battle phase, or,
-        // in the game's damage model, a crew at work on a module repair. Otherwise Drive gates
-        // thrust: an out-of-action driver, engine or transmission retargets the command slew to
-        // zero (a fade over ~1/DRIVE_SLEW_PER_SECOND, see the module doc) and the tank coasts,
-        // while the full contact model keeps running, so the tracks keep their kinetic grip.
-        let target = if command.held()
-            || tank_volumes.is_some_and(|tank| crate::damage::repair::underway(tank, &volumes))
-        {
-            DriveTarget::Brake
-        } else if capability_available(tank_volumes, tank_caps, Capability::Drive, &volumes) {
-            DriveTarget::Axes(DriveAxes {
-                throttle: command.throttle,
-                steer: command.steer,
-            })
-        } else {
-            DriveTarget::Axes(DriveAxes::default())
-        };
+        let target = drive_target(command, tank_volumes, tank_caps, &volumes);
 
         let affine = Affine3A::from_rotation_translation(rot.0, pos.0);
         // avian3d 0.7 `ForcesItem` keeps this helper private; this is its version-pinned
