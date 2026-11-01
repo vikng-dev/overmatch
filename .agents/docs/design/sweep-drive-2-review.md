@@ -18,7 +18,7 @@ leave the shipped tank driving as before on flat ground.
 | `check_quit_latency`'s `None` arm unreachable once the route mounts only beside `WinitPlugin` | P3 | Fixed with the P2: `Res<WinitSettings>`. |
 | The three `quit` refusals | none | Agree: the delegate class is the linked winit's contract and the update mode is the root's own composition, both code, so a panic (bug outcome) is the right class. Neither is an operator lever. |
 | Sheet prose said nothing geometric is authored and the tooth count is the only sprocket datum | P3 | Fixed (comments only, line count kept). |
-| `assemble_circles`, `assemble_circles_at` and `wheel_pin_radius` are `#[cfg(test)]` twins of `pose_circles`/`droop_circles`: tests build circles by a path the product no longer takes | P3 | Open. |
+| Two `#[cfg(test)]` circle builders twinned `pose_circles`: tests built circles by a path the product no longer takes | P3 | Fixed: the tests build a rest list and call `pose_circles`; the twins are deleted. `RigGeom::wheel_pin_radius` stays a test-only reading for one wrap test's probe bound. |
 | `axle_position` composes the full parent affine (scale included) while the bake's `root_position` composes `pos += rot·t` without scale: under a uniformly scaled parent group the axles and the armour/collider placement disagree | P3 | Open, load area: one composition should serve both. |
 | `braking_deceleration`'s grade probe uses the inertia box length, a mass-distribution fact, as the contact footprint | P3 | Open (scripted battle only). |
 

@@ -786,49 +786,6 @@ fn track_side(side: Side) -> TrackSide {
     }
 }
 
-/// Assemble the front→rear circle list, applying the cast-pose vertical offset to the SPRUNG road
-/// wheels only. Pure: the ECS-facing builders feed it blueprint data, the tests feed it synthetic
-/// gear. Wheels are re-sorted by z so the route builder's front→rear precondition holds no matter
-/// what order they arrived in, with the sprocket pinned first and the idler last.
-#[cfg(test)]
-fn assemble_circles(
-    sprocket: (Vec2, f32),
-    idler: (Vec2, f32),
-    wheels: &[Vec2],
-    pin_r: f32,
-    pose: Pose,
-    params: &SuspensionParams,
-) -> Vec<(Vec2, f32)> {
-    let dy = match pose {
-        Pose::Rest => 0.0,
-        // The UNCLAMPED spring droop. This is the pose the link WINDOW is measured against (via
-        // `window_of`); the chain clamp lives in `RigGeom::circles`, downstream of the window.
-        Pose::Droop => -derive::static_deflection(params.ride_frequency),
-        Pose::Compression => params.bump_stop,
-    };
-    assemble_circles_at(sprocket, idler, wheels, pin_r, dy)
-}
-
-/// The raw assembly: apply a vertical offset `dy` to the sprung wheels and re-sort front→rear, with
-/// the hull-fixed sprocket pinned first and the idler last. `assemble_circles` (pose → dy) and
-/// [`droop_circles`] (droop magnitude → dy) both route through here so there is one belt-envelope
-/// construction, not three.
-#[cfg(test)]
-fn assemble_circles_at(
-    sprocket: (Vec2, f32),
-    idler: (Vec2, f32),
-    wheels: &[Vec2],
-    pin_r: f32,
-    dy: f32,
-) -> Vec<(Vec2, f32)> {
-    let mut circles = vec![sprocket];
-    let mut moved: Vec<Vec2> = wheels.iter().map(|w| Vec2::new(w.x, w.y + dy)).collect();
-    moved.sort_by(|a, b| a.x.total_cmp(&b.x));
-    circles.extend(moved.into_iter().map(|c| (c, pin_r)));
-    circles.push(idler);
-    circles
-}
-
 /// One side's droop-pose circles with the sprung wheels lowered by an arbitrary droop magnitude
 /// `droop` (m, ≥ 0) — the same split as [`pose_circles`], but at a caller-chosen droop rather than the
 /// fixed spring deflection. This is the parametric hook the chain clamp bisects over.
@@ -1212,6 +1169,20 @@ mod tests {
 
     /// Synthetic running gear with the road wheels clearly the lowest circles, so the belly (and
     /// with it the taut perimeter) tracks the sprung wheels.
+    /// A rest circle list from synthetic gear, in the production order `pose_circles` reads:
+    /// sprocket first, the wheels front to rear at one pin-line radius, idler last.
+    fn rest_list(
+        sprocket: (Vec2, f32),
+        idler: (Vec2, f32),
+        wheels: &[Vec2],
+        pin_r: f32,
+    ) -> Vec<(Vec2, f32)> {
+        let mut rest = vec![sprocket];
+        rest.extend(wheels.iter().map(|&wheel| (wheel, pin_r)));
+        rest.push(idler);
+        rest
+    }
+
     fn gear() -> ((Vec2, f32), (Vec2, f32), Vec<Vec2>) {
         let sprocket = (Vec2::new(-2.0, 0.6), 0.39);
         let idler = (Vec2::new(2.0, 0.6), 0.40);
@@ -1622,7 +1593,7 @@ mod tests {
 
     fn perimeter(pose: Pose, params: &SuspensionParams) -> f32 {
         let (sprocket, idler, wheels) = gear();
-        let circles = assemble_circles(sprocket, idler, &wheels, 0.5, pose, params);
+        let circles = pose_circles(&rest_list(sprocket, idler, &wheels, 0.5), pose, params);
         let route = build_route(&circles, 0.0);
         assert!(
             route.pts.iter().all(|p| p.x.is_finite() && p.y.is_finite()),
@@ -1636,7 +1607,7 @@ mod tests {
         let p = SuspensionParams::default();
         let belly = |pose| {
             let (sprocket, idler, wheels) = gear();
-            let circles = assemble_circles(sprocket, idler, &wheels, 0.5, pose, &p);
+            let circles = pose_circles(&rest_list(sprocket, idler, &wheels, 0.5), pose, &p);
             build_route(&circles, 0.0)
                 .pts
                 .iter()
