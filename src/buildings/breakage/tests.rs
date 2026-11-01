@@ -3298,3 +3298,151 @@ fn a_field_blow_on_a_dusted_chunk_moves_no_moving_group() {
     let moved: Vec<usize> = field_blows(&loads, &state).map(|load| load.chunk).collect();
     assert_eq!(moved, vec![b]);
 }
+
+/// Median, 95th percentile, mean and maximum of `values` (µs).
+fn priced(mut values: Vec<f64>) -> (f64, f64, f64, f64) {
+    values.sort_by(f64::total_cmp);
+    let at = |q: f64| values[((values.len() - 1) as f64 * q).round() as usize];
+    let mean = values.iter().sum::<f64>() / values.len() as f64;
+    (at(0.5), at(0.95), mean, values[values.len() - 1])
+}
+
+/// A PRICING BED, NOT A GATE (#202): the wall time of the game's environment-destruction weight
+/// check on the shipped house (fixture data), game state only. Per change: every standing unburied
+/// chunk turned to dust alone, from the intact house, then [`fracture::weigh`] on it. After a
+/// long-wall shot: the long wall under the roof's fixed plate turned to dust at once, then the
+/// gables, as `a_nailed_roof_distinguishes_rests_from_local_fixing_failure` removes them. Each
+/// weigh runs on a clone of the prepared house, so only the check itself is timed. It asserts
+/// nothing about time; run it under the `perf` profile with the machine quiet.
+#[test]
+#[ignore = "a pricing bed, run on demand"]
+fn the_weight_check_priced_per_change_and_after_a_long_wall_shot() {
+    use std::time::Instant;
+    let kind = shipped_house();
+    let elements = &kind.asset.elements;
+    let of_kind = |kind_of: ElementKind| {
+        (0..elements.len())
+            .filter(|&e| elements[e].kind == kind_of)
+            .collect::<Vec<_>>()
+    };
+    let base = Live::new(&kind, 1.0);
+    let fixed = |joint: &Joint| matches!(joint.bond, Bond::Bonded(_));
+    let resting = |joint: &Joint| joint.bond == Bond::Resting;
+    let mut roof: Vec<usize> = of_kind(ElementKind::Roof)
+        .into_iter()
+        .flat_map(|e| kind.layout.chunks_of(e))
+        .collect();
+    roof.sort_unstable();
+    let plane = component_chunks(&kind, elements[of_kind(ElementKind::Roof)[0]].component);
+    let plate = of_kind(ElementKind::WallPlate)
+        .into_iter()
+        .map(|e| elements[e].component)
+        .find(|c| joined_to(&kind, &base.structure, &plane, false, fixed).contains(c))
+        .expect("the plane is fixed to a wall plate");
+    let wall_chunks: Vec<usize> = joined_to(
+        &kind,
+        &base.structure,
+        &component_chunks(&kind, plate),
+        true,
+        fixed,
+    )
+    .iter()
+    .flat_map(|&c| component_chunks(&kind, c))
+    .collect();
+    let rests = joined_to(&kind, &base.structure, &roof, true, resting);
+    let gables: Vec<usize> = of_kind(ElementKind::Gable)
+        .into_iter()
+        .filter(|&e| rests.contains(&elements[e].component))
+        .flat_map(|e| kind.layout.chunks_of(e))
+        .collect();
+    let dust = |live: &mut Live, chunks: &[usize]| {
+        let mut dusted = Vec::new();
+        for &c in chunks {
+            let chunk = &live.structure.chunks[c];
+            if live.state.standing(c)
+                && !chunk.buried
+                && fracture::wear(
+                    &live.structure,
+                    &mut live.state,
+                    c,
+                    fracture::full_pool(chunk),
+                )
+            {
+                dusted.push(c);
+            }
+        }
+        dusted.sort_unstable();
+        dusted
+    };
+    let weigh_times = |prepared: &Live, dusted: &[usize], repeats: usize| {
+        let mut micros = Vec::with_capacity(repeats);
+        let mut steps = 0;
+        let mut failures = 0;
+        for _ in 0..repeats {
+            let mut live = prepared.clone();
+            let start = Instant::now();
+            let weighed = fracture::weigh(
+                &live.structure,
+                &mut live.state,
+                dusted,
+                &[],
+                &[],
+                &[],
+                &mut live.sections,
+            );
+            micros.push(start.elapsed().as_secs_f64() * 1e6);
+            steps = weighed.steps;
+            failures = weighed.failures.len();
+            std::hint::black_box(&weighed);
+        }
+        (micros, steps, failures)
+    };
+
+    let candidates: Vec<usize> = (0..base.structure.chunks.len())
+        .filter(|&c| base.state.standing(c) && !base.structure.chunks[c].buried)
+        .collect();
+    let mut medians = Vec::with_capacity(candidates.len());
+    let mut steps = Vec::with_capacity(candidates.len());
+    for &c in &candidates {
+        let mut prepared = base.clone();
+        let dusted = dust(&mut prepared, &[c]);
+        let (micros, n, _) = weigh_times(&prepared, &dusted, 5);
+        medians.push(priced(micros).0);
+        steps.push(n as f64);
+    }
+    let (p50, p95, mean, max) = priced(medians);
+    let (s50, s95, smean, smax) = priced(steps);
+    println!(
+        "MEASURED per change: {} single-chunk removals, weigh µs p50 {p50:.1} p95 {p95:.1} mean \
+         {mean:.1} max {max:.1}; steps p50 {s50:.0} p95 {s95:.0} mean {smean:.0} max {smax:.0}",
+        candidates.len()
+    );
+
+    let mut long = base;
+    let dusted = dust(&mut long, &wall_chunks);
+    let (micros, n, failures) = weigh_times(&long, &dusted, 25);
+    let (p50, p95, mean, max) = priced(micros);
+    println!(
+        "MEASURED long-wall shot: {} chunks to dust, weigh µs p50 {p50:.1} p95 {p95:.1} mean \
+         {mean:.1} max {max:.1}; {n} steps, {failures} failures",
+        dusted.len()
+    );
+    fracture::weigh(
+        &long.structure,
+        &mut long.state,
+        &dusted,
+        &[],
+        &[],
+        &[],
+        &mut long.sections,
+    );
+    fracture::fall(&long.structure, &mut long.state);
+    let dusted = dust(&mut long, &gables);
+    let (micros, n, failures) = weigh_times(&long, &dusted, 25);
+    let (p50, p95, mean, max) = priced(micros);
+    println!(
+        "MEASURED gables after it: {} chunks to dust, weigh µs p50 {p50:.1} p95 {p95:.1} mean \
+         {mean:.1} max {max:.1}; {n} steps, {failures} failures",
+        dusted.len()
+    );
+}

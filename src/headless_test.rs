@@ -2889,3 +2889,262 @@ fn a_shipped_data_hull_push_reports_environment_release_groups() {
         groups
     );
 }
+
+/// Median, 95th percentile and mean of `values` (µs), with their count.
+fn tick_price(values: &[f64]) -> String {
+    if values.is_empty() {
+        return "no ticks".to_owned();
+    }
+    let mut sorted = values.to_vec();
+    sorted.sort_by(f64::total_cmp);
+    let at = |q: f64| sorted[((sorted.len() - 1) as f64 * q).round() as usize];
+    format!(
+        "{} ticks, p50 {:.0} p95 {:.0} mean {:.0}",
+        sorted.len(),
+        at(0.5),
+        at(0.95),
+        sorted.iter().sum::<f64>() / sorted.len() as f64
+    )
+}
+
+/// The wall time of the last tick's driving phase, from a stamp ordered before
+/// `SimPhase::DrivingForces` to one ordered after it (µs). An upper bound on the phase: the first
+/// stamp may run before systems the phase waits on.
+#[derive(Resource, Default)]
+struct DrivePhaseClock {
+    start: Option<Instant>,
+    last: f64,
+}
+
+fn stamp_drive_phase_start(mut clock: ResMut<DrivePhaseClock>) {
+    clock.start = Some(Instant::now());
+}
+
+fn stamp_drive_phase_end(mut clock: ResMut<DrivePhaseClock>) {
+    let start = clock
+        .start
+        .take()
+        .expect("the start stamp is ordered before the driving phase");
+    clock.last = start.elapsed().as_secs_f64() * 1e6;
+}
+
+/// A PRICING BED, NOT A GATE (#202): the offline sim's wall time per fixed tick with loose pieces,
+/// in the game's driving model and environment destruction (game state only), each window beside
+/// the same sim without them. Windows, in order: the controlled tank parked on flat ground; parked
+/// beside a settled, sleeping pile 40 m ahead (200 pieces, then 1000); parked again after each pile
+/// is despawned; then driving at a fixed throttle over a one-layer carpet of pieces, every tick
+/// classed by whether a belt bore on a piece; then parked on that carpet. FIXTURE DATA: each piece
+/// a 0.5 × 0.25 × 0.5 m box at 1800 kg/m³, the rubble yard's brick density. Tick times (µs) are
+/// the whole `App::update`, with the driving phase's share ([`DrivePhaseClock`]); a window's price
+/// is its difference from the parked baseline. It asserts nothing about time; run it under the
+/// `perf` profile with the machine quiet.
+#[test]
+#[ignore = "a pricing bed, run on demand"]
+fn loose_pieces_priced_per_tick() {
+    use crate::state::SimPhase;
+    use crate::track::sim::TrackContacts;
+    use avian3d::prelude::{
+        AngularInertia, CenterOfMass, Collider, Mass, NoAutoAngularInertia, NoAutoCenterOfMass,
+        NoAutoMass, Position, RigidBody, Rotation, Sleeping,
+    };
+
+    const WINDOW: usize = 640;
+    let size = Vec3::new(0.5, 0.25, 0.5);
+    let mass = 1800.0 * size.x * size.y * size.z;
+    let (mut app, tank) = booted_offline_sim();
+    app.init_resource::<DrivePhaseClock>().add_systems(
+        FixedUpdate,
+        (
+            stamp_drive_phase_start.before(SimPhase::DrivingForces),
+            stamp_drive_phase_end.after(SimPhase::DrivingForces),
+        ),
+    );
+    face_positive_z(&mut app, tank);
+    let phase = |app: &App| app.world().resource::<DrivePhaseClock>().last;
+    let at = app.world().get::<Position>(tank).unwrap().0;
+
+    let spawn = |app: &mut App, centres: &[Vec3]| -> Vec<Entity> {
+        centres
+            .iter()
+            .map(|&centre| {
+                app.world_mut()
+                    .spawn((
+                        crate::debris::DebrisPiece,
+                        Transform::from_translation(centre),
+                        Position(centre),
+                        Rotation::default(),
+                        RigidBody::Dynamic,
+                        Collider::cuboid(size.x, size.y, size.z),
+                        Mass(mass),
+                        NoAutoMass,
+                        AngularInertia::from_shape(&Cuboid::new(size.x, size.y, size.z), mass),
+                        NoAutoAngularInertia,
+                        CenterOfMass(Vec3::ZERO),
+                        NoAutoCenterOfMass,
+                        crate::substances::contact_friction(0.6),
+                        crate::buildings::breakage::piece_layers(),
+                    ))
+                    .id()
+            })
+            .collect()
+    };
+    // A stacked pile on the ground under `centre`: `count` pieces on a square grid 0.55 m apart,
+    // five layers.
+    let pile = |count: usize, centre: Vec3| -> Vec<Vec3> {
+        let per_layer = count.div_ceil(5);
+        let side = (per_layer as f32).sqrt().ceil() as usize;
+        (0..count)
+            .map(|i| {
+                let (layer, k) = (i / per_layer, i % per_layer);
+                let (ix, iz) = (k % side, k / side);
+                Vec3::new(
+                    centre.x + (ix as f32 - side as f32 / 2.0) * 0.55,
+                    0.13 + layer as f32 * 0.26,
+                    centre.z + (iz as f32 - side as f32 / 2.0) * 0.55,
+                )
+            })
+            .collect()
+    };
+    let asleep = |app: &App, pieces: &[Entity]| {
+        pieces
+            .iter()
+            .filter(|&&p| app.world().get::<Sleeping>(p).is_some())
+            .count()
+    };
+    let settle = |app: &mut App, pieces: &[Entity]| {
+        for tick in 0..(30 * FIXED_TICKS_PER_SECOND) {
+            drive_tick(app, tank, 0.0, 0.0);
+            if asleep(app, pieces) == pieces.len() {
+                return tick;
+            }
+        }
+        30 * FIXED_TICKS_PER_SECOND
+    };
+    let parked = |app: &mut App, label: &str, pieces: &[Entity]| {
+        let mut micros = Vec::with_capacity(WINDOW);
+        let mut driving = Vec::with_capacity(WINDOW);
+        let mut awake = 0;
+        for _ in 0..WINDOW {
+            let start = Instant::now();
+            drive_tick(app, tank, 0.0, 0.0);
+            micros.push(start.elapsed().as_secs_f64() * 1e6);
+            driving.push(phase(app));
+            awake = awake.max(pieces.len() - asleep(app, pieces));
+        }
+        println!(
+            "MEASURED {label}: tick {}; driving phase {}; {} pieces, at most {awake} awake",
+            tick_price(&micros),
+            tick_price(&driving),
+            pieces.len()
+        );
+    };
+    let clear = |app: &mut App, pieces: &[Entity]| {
+        for &piece in pieces {
+            app.world_mut().despawn(piece);
+        }
+        for _ in 0..FIXED_TICKS_PER_SECOND {
+            drive_tick(app, tank, 0.0, 0.0);
+        }
+    };
+
+    parked(&mut app, "parked, no pieces", &[]);
+    for count in [200, 1000] {
+        let pieces = spawn(&mut app, &pile(count, at + Vec3::Z * 40.0));
+        let ticks = settle(&mut app, &pieces);
+        println!(
+            "MEASURED {count}-piece pile settled: {} of {count} asleep after {ticks} ticks",
+            asleep(&app, &pieces)
+        );
+        parked(
+            &mut app,
+            &format!("parked beside a {count}-piece pile"),
+            &pieces,
+        );
+        clear(&mut app, &pieces);
+        parked(&mut app, "parked, no pieces", &[]);
+    }
+
+    // One layer under both belts: 8 columns across 4.4 m, 15 rows over 8.25 m, from 10 m ahead.
+    let carpet: Vec<Vec3> = (0..15)
+        .flat_map(|row| {
+            (0..8).map(move |column| {
+                Vec3::new(
+                    at.x + (column as f32 - 3.5) * 0.55,
+                    0.13,
+                    at.z + 10.0 + row as f32 * 0.55,
+                )
+            })
+        })
+        .collect();
+    let pieces = spawn(&mut app, &carpet);
+    let ticks = settle(&mut app, &pieces);
+    println!(
+        "MEASURED carpet settled: {} of {} asleep after {ticks} ticks",
+        asleep(&app, &pieces),
+        pieces.len()
+    );
+    // Per class (flat before, a belt on a piece, flat after): tick and driving-phase times.
+    let mut classes: [(Vec<f64>, Vec<f64>); 3] = Default::default();
+    let mut contacts = Vec::new();
+    let end = at.z + 10.0 + 15.0 * 0.55 + 12.0;
+    for _ in 0..(40 * FIXED_TICKS_PER_SECOND) {
+        let start = Instant::now();
+        drive_tick(&mut app, tank, 0.35, 0.0);
+        let micros = start.elapsed().as_secs_f64() * 1e6;
+        let bearing = app
+            .world()
+            .get::<TrackContacts>(tank)
+            .unwrap()
+            .0
+            .iter()
+            .flatten()
+            .filter(|c| c.collider.is_some_and(|e| pieces.contains(&e)) && c.load > 0.0)
+            .count();
+        let class = if bearing > 0 {
+            contacts.push(bearing as f64);
+            1
+        } else if contacts.is_empty() {
+            0
+        } else {
+            2
+        };
+        classes[class].0.push(micros);
+        classes[class].1.push(phase(&app));
+        if app.world().get::<Position>(tank).unwrap().0.z > end {
+            break;
+        }
+    }
+    for (label, (ticks, driving)) in [
+        "driving on flat ground before the carpet",
+        "driving with a belt on a piece",
+        "driving on flat ground after the carpet",
+    ]
+    .iter()
+    .zip(&classes)
+    {
+        println!(
+            "MEASURED {label}: tick {}; driving phase {}",
+            tick_price(ticks),
+            tick_price(driving)
+        );
+    }
+    println!(
+        "MEASURED belt contacts on pieces per tick on the carpet: {}",
+        tick_price(&contacts)
+    );
+
+    // Back onto the carpet's middle, then parked on it.
+    let middle = at.z + 10.0 + 7.0 * 0.55;
+    for _ in 0..(40 * FIXED_TICKS_PER_SECOND) {
+        drive_tick(&mut app, tank, -0.35, 0.0);
+        if app.world().get::<Position>(tank).unwrap().0.z < middle {
+            break;
+        }
+    }
+    for _ in 0..(3 * FIXED_TICKS_PER_SECOND) {
+        drive_tick(&mut app, tank, 0.0, 0.0);
+    }
+    parked(&mut app, "parked on the carpet", &pieces);
+    clear(&mut app, &pieces);
+    parked(&mut app, "parked, no pieces", &[]);
+}
