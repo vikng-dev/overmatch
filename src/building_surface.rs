@@ -466,6 +466,36 @@ mod tests {
         }
     }
 
+    /// EVERY SHIPPED BUILDING MATERIAL HAS A PALETTE LANE. A client resolves a material's lane
+    /// when it builds the view mesh, and the dedicated server never reads visuals.ron, so the
+    /// shipped data is gated here: a material whose visual has no building_lane would load on the
+    /// server and refuse every client at map spawn.
+    #[test]
+    fn every_shipped_building_material_has_a_lane() {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("assets/buildings");
+        let mut checked = 0;
+        for entry in std::fs::read_dir(&root).expect("assets/buildings is shipped") {
+            let dir = entry.expect("a readable directory entry").path();
+            let id = dir
+                .file_name()
+                .expect("a named entry")
+                .to_string_lossy()
+                .into_owned();
+            let file = dir.join(format!("{id}.building.ron"));
+            if !file.exists() {
+                continue; // A texture pack shares the directory and names no material.
+            }
+            let text = std::fs::read_to_string(&file).expect("a readable building asset");
+            let asset = crate::buildings::schema::BuildingAsset::from_ron(&text)
+                .unwrap_or_else(|err| panic!("{}: {err}", file.display()));
+            for material in &asset.materials {
+                lane_for_substance(material);
+                checked += 1;
+            }
+        }
+        assert!(checked > 0, "a building asset is shipped");
+    }
+
     /// The shared shader requires exactly one declared maps visual per lane. A missing or
     /// duplicate assignment is a load refusal, never a material-name or orientation default.
     #[test]
