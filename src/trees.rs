@@ -2277,6 +2277,109 @@ pub(crate) mod tests {
         );
     }
 
+    /// A TRUNK BREAKS WHERE BENDING STRESS PEAKS (the collision study's test 10): a point press on
+    /// a tapered fixture trunk opens the joint where the press's moment over the section's
+    /// strength peaks, the analytical argmax of `M(z) / S(z)` against the wood's rupture strength
+    /// (the sections' own weight read too), or the root plate when its moment `C m` is the weaker;
+    /// just under that least failing press nothing opens. A fixed cut (always the base) fails the
+    /// strong-plate case; a cut at the pressed segment fails both; a section strength that is not
+    /// `32 M / π d³` against the rupture strength fails the threshold. Who relies on it: every
+    /// contact and blast that fells a tree, which all meet the trunk through [`load_trunk`].
+    /// FIXTURE DATA: ten 1 m segments tapering 0.3 → 0.05 m, the press at 7.5 m.
+    #[test]
+    fn a_trunk_breaks_where_bending_stress_peaks() {
+        let segments = 10;
+        let radius = |z: f32| 0.3 - 0.025 * z;
+        let asset = TreeAsset {
+            species: "fixture".to_owned(),
+            segments: (0..segments)
+                .map(|k| Segment {
+                    height_m: 1.0,
+                    r_bottom_m: radius(k as f32),
+                })
+                .collect(),
+            r_tip_m: radius(segments as f32),
+        };
+        let (h, rupture) = (7.5_f32, 4.0e7_f32);
+        for (plate, expected_anchor) in [(1.0e5_f32, false), (150.0, true)] {
+            let wood = Wood {
+                structure: StructureRows(BTreeMap::from([(
+                    "fixture".to_owned(),
+                    fixture_structure(plate),
+                )])),
+                ..fixture_wood()
+            };
+            let kind = Arc::new(resolve(asset.clone(), &fixture_table(), &wood).unwrap());
+            let body = TreeBody::new(kind, 1.0);
+            // Analytically: the least press that fails each joint. A seam at height z holds
+            // `M = (σ + W/A) S`, `S = π r³ / 4`, `W` the weight above it; the plate `C m`.
+            let frustum = |r0: f32, r1: f32| PI * (r0 * r0 + r0 * r1 + r1 * r1) / 3.0;
+            let mass_above = |j: usize| -> f32 {
+                (j..segments)
+                    .map(|k| frustum(radius(k as f32), radius(k as f32 + 1.0)) * 850.0)
+                    .sum()
+            };
+            let failing: Vec<f32> = (0..segments)
+                .map(|j| {
+                    let (z, r) = (j as f32, radius(j as f32));
+                    if j == 0 {
+                        plate * mass_above(0) / h
+                    } else {
+                        let weight = mass_above(j) * GRAVITY / (PI * r * r);
+                        (rupture + weight) * PI * r * r * r / 4.0 / (h - z)
+                    }
+                })
+                .collect();
+            let (weakest, least) = failing
+                .iter()
+                .copied()
+                .enumerate()
+                .take(8)
+                .min_by(|a, b| a.1.total_cmp(&b.1))
+                .unwrap();
+            assert_eq!(
+                weakest == 0,
+                expected_anchor,
+                "fixture: the plate {plate} N·m/kg decides which law is weaker: {failing:?}"
+            );
+            if !expected_anchor {
+                assert_eq!(
+                    weakest, 5,
+                    "the tapered fixture's argmax of M/S: {failing:?}"
+                );
+            }
+            let press = |force: f32| {
+                let mut trunk = TrunkState::new(&body.structure);
+                let load = Load {
+                    chunk: 7,
+                    at: Vec3::new(-0.1, h, 0.0),
+                    energy: 0.0,
+                    crushed: 0.0,
+                    blow: Vec3::ZERO,
+                    press: Vec3::X * force,
+                    peak: None,
+                    origin: Origin::Body {
+                        body: Entity::PLACEHOLDER,
+                        mass: 2.0e4,
+                        speed: 0.0,
+                        step: 1.0 / 64.0,
+                    },
+                };
+                load_trunk(&body, &mut trunk, &[load])
+            };
+            assert_eq!(
+                press(0.99 * least),
+                None,
+                "under its weakest section's strength the trunk holds"
+            );
+            assert_eq!(
+                press(1.01 * least),
+                Some(weakest as u8),
+                "just past it, the trunk breaks there (plate {plate} N·m/kg)"
+            );
+        }
+    }
+
     /// A BODY ASLEEP ON A TRUNK WAKES WHEN THE TREE FALLS: a cube asleep on the standing fixture
     /// trunk's tip wakes in the step after the fall first moves the trunk, and falls. Avian wakes
     /// nothing when a static collider moves, so a world without the game's wake for a moved
