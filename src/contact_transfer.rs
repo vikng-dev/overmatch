@@ -36,10 +36,11 @@
 //!
 //! IMPLICIT CONTACTS. The belt applies support and traction before physics without collider
 //! constraints. Its equal-and-opposite structure reaction is staged by [`ContactTransfers::stage`]
-//! and published with that physics step. Coplanar patches on one collider and source body share
-//! one closing-momentum budget at their load centroid; splitting a shoe footprint cannot multiply
-//! a blow. These contacts are refreshed by the belt each tick and never enter the solver's
-//! sleeping-pair cache.
+//! and published with that physics step. Every patch one source body presses on one collider
+//! shares one closing-momentum budget at their load centroid, as one solver manifold does: neither
+//! splitting a shoe footprint nor each link's own rounding of its normal can multiply a blow.
+//! These contacts are refreshed by the belt each tick and never enter the solver's sleeping-pair
+//! cache.
 //!
 //! Filled on the authority only, where the destruction laws run; a replica's stays empty.
 
@@ -137,7 +138,8 @@ pub(crate) struct BodyInertia {
 pub(crate) struct ContactTransfers {
     points: Vec<ContactTransfer>,
     pending: Vec<AppliedContact>,
-    applied: BTreeMap<(Entity, Entity, [u32; 3]), Vec<ContactTransfer>>,
+    /// Implicit points by `(structure collider, source body)`: one closing-momentum budget each.
+    applied: BTreeMap<(Entity, Entity), Vec<ContactTransfer>>,
     inertias: BTreeMap<Entity, BodyInertia>,
     resting: Vec<Resting>,
     /// The last step's length, s.
@@ -230,8 +232,9 @@ impl ContactTransfers {
             )
     }
 
-    /// Solver points carry the constraint's effective masses. Implicit patches share the source
-    /// mass at their centroid, so subdividing a footprint does not spend that mass repeatedly.
+    /// Solver points carry the constraint's effective masses. Implicit patches on one collider
+    /// share the source mass at their centroid, so neither subdividing a footprint nor a link's
+    /// rounded normal spends that mass repeatedly.
     fn split_points<'a>(
         &'a self,
         points: &'a [ContactTransfer],
@@ -453,12 +456,8 @@ fn keep(
         let arm = (contact.point - inertia.centre).cross(contact.normal);
         let inverse = contact.normal.dot(inertia.inverse_mass * contact.normal)
             + arm.dot(inertia.inverse_inertia * arm);
-        let normal_key = contact
-            .normal
-            .to_array()
-            .map(|v| if v == 0.0 { 0 } else { v.to_bits() });
         applied
-            .entry((contact.structure_collider, contact.body, normal_key))
+            .entry((contact.structure_collider, contact.body))
             .or_default()
             .push(ContactTransfer {
                 structure: contact.structure,
@@ -589,10 +588,7 @@ mod tests {
                     rest_speed: 0.15,
                 })
                 .collect();
-            transfers.applied.insert(
-                (collider, body, Vec3::Y.to_array().map(f32::to_bits)),
-                points,
-            );
+            transfers.applied.insert((collider, body), points);
             let (mut blow, mut press) = (Vec3::ZERO, Vec3::ZERO);
             for (_, struck, held, mass) in transfers.split() {
                 assert_eq!(mass, 10.0);
@@ -602,6 +598,62 @@ mod tests {
             assert_eq!(blow, Vec3::NEG_Y * 10.0);
             assert_eq!(press, Vec3::NEG_Y * 100.0);
         }
+    }
+
+    /// A source pressing one collider through several links delivers at most its own closing
+    /// momentum as a blow, however each link's normal rounds: a straight belt run's links meet a
+    /// wall along normals equal in law but posed link by link. Wall and trunk laws rely on the
+    /// blow being the source's, never one budget per link. FIXTURE DATA: the 1000 kg cube clear
+    /// of the wall, closing at 1 m/s, four 128 kN patches through its centre along normals one
+    /// ulp apart.
+    #[test]
+    fn implicit_patches_with_rounded_normals_share_the_source_momentum() {
+        let mut app = world(1.0);
+        let structure = wall(&mut app);
+        let collider = app
+            .world_mut()
+            .query_filtered::<(Entity, &ChildOf), With<Collider>>()
+            .iter(app.world())
+            .find(|(_, parent)| parent.parent() == structure)
+            .map(|(collider, _)| collider)
+            .expect("the wall has its collider");
+        let centre = Vec3::new(3.0, 0.0, 0.0);
+        let body = cube(&mut app, centre, Vec3::ZERO);
+        app.update();
+        let normals: Vec<Vec3> = (0..4)
+            .map(|ulp| Vec3::new(0.6, f32::from_bits(0.8f32.to_bits() + ulp), 0.0))
+            .collect();
+        for &normal in &normals {
+            app.world_mut()
+                .resource_mut::<ContactTransfers>()
+                .stage(AppliedContact {
+                    structure,
+                    structure_collider: collider,
+                    body,
+                    point: centre,
+                    normal,
+                    force: normal * 128_000.0,
+                    closing_speed: 1.0,
+                });
+        }
+        app.update();
+        let transfers = app.world().resource::<ContactTransfers>();
+        let (mut blow, mut seen) = (Vec3::ZERO, 0);
+        for (point, struck, _, mass) in transfers.split().filter(|(point, ..)| point.body == body) {
+            assert_eq!(point.body_collider, None);
+            assert!(
+                (mass - 1000.0).abs() < 0.1,
+                "the cube's mass at its centre: {mass}"
+            );
+            blow += struck;
+            seen += 1;
+        }
+        assert_eq!(seen, normals.len(), "every staged patch is read");
+        let delivered = -blow.dot(normals[0]);
+        assert!(
+            delivered > 0.0 && delivered <= 1000.0 * (1.0 + 1e-4),
+            "the blow {delivered} N·s exceeds the source's closing momentum 1000 N·s"
+        );
     }
 
     /// Avian at the game's fixed 64 Hz tick, one tick per update, no gravity, with the reading
