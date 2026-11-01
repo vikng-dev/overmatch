@@ -466,3 +466,60 @@ The final record passed formatting, CI clippy and the whole-tree `doc_citations`
 No captures, pricing runs, pushes or subagents. Fenced paths and `Load::mean_force` are unchanged.
 All findings from the sweep-destr-5 reviews above are verified and fixed. The sweep-destr-6
 review double is the next continuation; this checkpoint makes no disposition of its new findings.
+
+## Part 8: sweep-destr-6 double verification (#249)
+
+Subject: the game's building destruction and damage model, game state only. Both review files
+were present at the start and were read again before this table. C1–C3 and L1–L8 follow the
+Codex and Claude reports' order. Every listed finding is verified and fixed.
+
+| reviewer | finding | verified / not a defect | fixed in (subject) |
+|---|---|---|---|
+| Codex C1, P2 | Later cuts retain the former parent's inertia | verified: the saved split regression fails on the old code; the current impulse and sustained-force cases detach the hard end while keeping the gently loaded far seam | buildings: reframe each group before the next seam failure (#249) |
+| Codex C2, P2 | Co-directional unequal loads merge away local axial separation | verified: the new pair regression remains whole on the old code; local candidates separate the unequal pair while equal-load controls stay joined | buildings: assess each loaded chunk before merging punch patches (#249) |
+| Codex C3, P3 | Verification dispositions and measured test-time comparison are missing | verified: the base record ended at Part 6; Part 7 and this continuation supply the missing tables, subjects and measurements | docs: record the sweep-destr-5 verification and section-law gates (#249); docs: record the sweep-destr-6 double verification (#249) |
+| Claude L1, P2 | Sequential free-fall cancellation leaves a rigid moment | verified: Part 7's long-row red test has zero force but a nonzero moment; paired accumulation gives exact zero for both | buildings: cancel paired free-fall wrenches before reading their moment (#249) |
+| Claude L2, P2 | Structural and sustained-force loops read a split-off in its former frame | verified: C1's counterexample; both assessment loops now derive inertia from the current partition before another failure | buildings: reframe each group before the next seam failure (#249) |
+| Claude L3, P3 | The outer frame pass repeats after a crack that frees nothing | verified by its failure-empty stopping condition; the redundant outer pass is removed, with reframing inside the assessment loops | buildings: reframe each group before the next seam failure (#249) |
+| Claude L4, P3 | Absolute coordinates enlarge the bending-axis resolution band | verified: translating the construction origin erases an otherwise resolved axis on the old code; local coordinates retain exactly the same hinge demand | buildings: resolve section bending in local coordinates (#249) |
+| Claude L5, P3 | An uncertifiable arithmetic bound silently becomes no axis | verified: the boundary regression does not panic on the old helper; the finite-bound invariant now fails in every build | buildings: refuse uncertifiable section roundoff bounds (#249) |
+| Claude L6, P3 | The pushed-chunk helper keeps an unused predicate alternative | verified: its sole caller always passes true; the predicate and wrapper are removed, preserving membership and first-load order | buildings: remove the unused push-filter alternative (#249) |
+| Claude L7, P3 | Complete shading lacks an open-ray witness | verified: the new partial-shadow control rejects the blanket-suppression mutant after proving some fixture rays are intercepted and others remain open | buildings: pin partial blast shading with a local blocker (#249) |
+| Claude L8, P3 | The record leaves verified findings and test timing unreported | verified: C3's missing record; the checkpoint and final-tree measurements are distinguished below | docs: record the sweep-destr-5 verification and section-law gates (#249); docs: record the sweep-destr-6 double verification (#249) |
+
+The unequal pair uses ASSUMED fixture contacts of -1000 and -1 N s through equal-mass chunks'
+centres, with binary-exact geometry. Its relative impulses are -499.5 and +499.5 N s (DERIVED).
+Both the impulse and sustained-force paths now read local punch patches; equal contacts retain
+uniform translation. Coherent patches and their union remain candidates for cooperating loads.
+The existing chunk-renumbering assertion passes unchanged.
+
+The axis counterexample uses ASSUMED fixture data: 4096 repeated axial loads totalling 1000 N s,
+a 1/1024 m eccentricity, and an 8 m origin translation. MEASURED before the fix: the translated
+case returns no axis. After the fix both origins resolve and their demands are exactly equal.
+Centroids, levers, the hinge and the demand now share a section-local origin. The count-dependent
+summation allowance multiplies lever magnitudes; point subtraction has its own fixed-depth
+allowance. This supersedes Part 7's absolute-position bound. An uncertifiable bound is now a
+bug, never a reason for a section to hold: the direct boundary test reaches k*u = 1 at 2^24
+rounded operations (DERIVED from f32 unit roundoff), without allocating that many loads.
+
+Codex's checked-sound wrench claim covered the shorter fixtures. The longer row discriminates
+the Claude finding, as Part 7's measured red result shows. The partial-shading test also checks
+its geometry explicitly: the smaller blocker intercepts some fixture rays and leaves others
+open. A temporary mutant discarded every chunk deposit whenever any ray stopped on a moving
+body. It failed at the open-ray wear assertion; restoring the production function byte-for-byte
+recovered the green result. No mutant or extra production branch remains.
+
+MEASURED final-tree `buildings::`, one test thread under the shared machine lock:
+31.69 s (148 passed, 2 existing ignored). The saved baseline is 245.26 s (136 passed, one ignored); Part 7's
+checkpoint is 5.02 s (145 passed, two ignored), before the additional local punch candidates.
+The final tree performs that additional candidate work and includes the new regressions.
+All durations are the test harness's suite time, excluding compilation and queue waits.
+
+Every implementation commit passed formatting, CI clippy and its targeted tests with
+`dev_ui,bitprobe`. The law changes also ran `buildings::`, `trees::`, `debris::`, `sandbox::`,
+`headless_test` and `doc_citations`; the final such selection passed 233 tests, with seven existing
+ignored measurements. The final record passed formatting, CI clippy, the whole-tree
+`doc_citations`, `ui_ascii`, `net_boundary` and `bake::` guards, and headless checks.
+MEASURED final guard/headless selection: 61 passed, four existing ignored measurements.
+All scoped work is complete. The track, contact-transfer and ballistics fences are unchanged.
+No push, capture, pricing run or subagent was used.
