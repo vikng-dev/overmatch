@@ -1179,7 +1179,7 @@ pub(crate) fn plugin(app: &mut App) {
     // The hull pose interpolates on the cursor; everything else applies the confirmed value on
     // arrival (per-tick keyframes, so the discrete components step at most one tick apart from
     // the pose they ride beside). All four ride `wire_quant`'s codecs, whose module doc states each
-    // step, range and error bound against the extrapolator's budget.
+    // step, range and error bound.
     app.component::<Position>()
         .replicate_with(super::wire_quant::position_fns())
         .add_linear_interpolation();

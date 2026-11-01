@@ -849,8 +849,7 @@ mod tests {
     /// One pad sliding sideways on two ground types takes saturated grip in the ratio of the pairs
     /// the data gives, each `√(μ_track · μ_ground)` (`substances::PAIR_RULE`); over a piece it
     /// takes the track's pair with the piece's row, and the piece's reaction is clamped by that
-    /// same coefficient. Driving feel, the extrapolation's traction bound and every piece reaction
-    /// rely on it. A law gripping at one coefficient everywhere, reading one side's row alone, or
+    /// same coefficient. Driving feel and every piece reaction rely on it. A law gripping at one coefficient everywhere, reading one side's row alone, or
     /// leaving a piece's patch on the ground's pair fails here.
     ///
     /// FIXTURE DATA: a 0.7 track on 0.2 and 0.8 fields, the pad, a 0.3 piece, a 5 m/s sideways

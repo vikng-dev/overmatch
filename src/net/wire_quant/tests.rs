@@ -196,9 +196,9 @@ fn position_samples() -> Vec<Vec3> {
 }
 
 /// Inside ±1024 m on every axis a position rides 8 bytes within half a step per axis; outside it,
-/// or not finite, it rides 13 bytes bit-exact. The interpolator lerps decoded samples and the
-/// extrapolator projects from the newest, so this half step is the whole of the codec's share of
-/// a presented hull's position error.
+/// or not finite, it rides 13 bytes bit-exact. The interpolator lerps decoded samples and a
+/// starved cursor holds the newest, so this half step is the whole of the codec's share of a
+/// presented hull's position error.
 #[test]
 fn a_position_round_trips_within_half_a_step_or_exactly() {
     let half = (1i32 << 20) as f32;
@@ -231,8 +231,8 @@ fn a_position_round_trips_within_half_a_step_or_exactly() {
 }
 
 /// Each velocity codec at its steps: inside its i16 range, half a step per axis; past either end,
-/// the end itself (clamped, sign kept); NaN, zero. The extrapolator projects at these velocities
-/// through a gap, so the half step times its horizon is the codec's share of a projected pose.
+/// the end itself (clamped, sign kept); NaN, zero. No client projects a pose from a velocity
+/// (`net-motion-contract.md`), so the half step is the codec's whole error on a replicated one.
 #[test]
 fn a_velocity_round_trips_within_half_a_step_or_clamps() {
     for steps in [LINEAR_VELOCITY_STEPS, ANGULAR_VELOCITY_STEPS] {
