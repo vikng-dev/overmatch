@@ -97,6 +97,8 @@ material/capacity scaling, articulation and suspension regimes exercise class in
 
 ## Remaining implementation work
 
+Part 2 took these rows; their current status is in [`sweep-drive-2-review.md`](sweep-drive-2-review.md).
+
 G1 needs a sourced pad/ground shear-compliance input and a coupled integration that remains stable
 at that compliance. Merely moving the tuned value into data would preserve the missing truth.
 The current force law uses the universal length for strain saturation and damping as well as its
