@@ -698,13 +698,16 @@ fn show_pieces(
         })
     };
     // Per building and chunk, the oldest birth tick among the pieces not yet handed over that
-    // hold it: the piece drawing that chunk.
+    // hold it: the piece drawing that chunk. Births share the presentation clock's signed
+    // half-range ordering, so ancestry survives tick wrap.
     let mut drawing: BTreeMap<(Entity, u16), u32> = BTreeMap::new();
     for (piece, dressed) in &arrived {
         if !handed_over(piece, dressed) {
             for &c in &piece.chunks {
                 let oldest = drawing.entry((dressed.building, c)).or_insert(piece.born);
-                *oldest = (*oldest).min(piece.born);
+                if (piece.born.wrapping_sub(*oldest) as i32) < 0 {
+                    *oldest = piece.born;
+                }
             }
         }
     }
@@ -715,7 +718,7 @@ fn show_pieces(
             && piece.chunks.iter().all(|&c| {
                 drawing
                     .get(&(dressed.building, c))
-                    .is_none_or(|&oldest| oldest >= piece.born)
+                    .is_none_or(|&oldest| oldest == piece.born)
             });
         let retired = handed_over(piece, dressed);
         let fallen = born
@@ -1496,6 +1499,12 @@ mod tests {
     /// have arrived. A late child must not make occupied geometry disappear early.
     #[test]
     fn a_split_waits_for_its_tick_and_every_replacement() {
+        for offset in [0, u32::MAX - 10] {
+            split_handover(offset);
+        }
+    }
+
+    fn split_handover(offset: u32) {
         let kind = shipped_house();
         let (_, range) = chunked_element(&kind.layout);
         let chunks: Vec<_> = range.take(2).map(|c| c as u16).collect();
@@ -1503,7 +1512,7 @@ mod tests {
         let mut world = World::new();
         shared_look(&mut world);
         *world.resource_mut::<PresentationClock>() = PresentationClock::At {
-            tick: 19,
+            tick: offset.wrapping_add(19),
             overstep: 0.0,
         };
         let mut shape = Shape::intact(&kind.layout);
@@ -1523,8 +1532,8 @@ mod tests {
                 WallPiece {
                     building: 3,
                     chunks: chunks.clone(),
-                    born: 0,
-                    retired: Some(20),
+                    born: offset,
+                    retired: Some(offset.wrapping_add(20)),
                 },
                 Transform::IDENTITY,
             ))
@@ -1534,7 +1543,7 @@ mod tests {
                 WallPiece {
                     building: 3,
                     chunks: vec![chunks[0]],
-                    born: 20,
+                    born: offset.wrapping_add(20),
                     retired: None,
                 },
                 Transform::IDENTITY,
@@ -1549,7 +1558,7 @@ mod tests {
         );
         assert_eq!(world.get::<Visibility>(a), Some(&Visibility::Hidden));
         *world.resource_mut::<PresentationClock>() = PresentationClock::At {
-            tick: 20,
+            tick: offset.wrapping_add(20),
             overstep: 0.0,
         };
         schedule.run(&mut world);
@@ -1568,7 +1577,7 @@ mod tests {
                 WallPiece {
                     building: 3,
                     chunks: vec![chunks[1]],
-                    born: 20,
+                    born: offset.wrapping_add(20),
                     retired: None,
                 },
                 Transform::IDENTITY,
