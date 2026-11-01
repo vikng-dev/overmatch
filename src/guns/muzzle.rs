@@ -549,7 +549,11 @@ impl MuzzleLook {
 
     /// The taste file `text`, validated; the error names the field.
     pub(crate) fn parse(text: &str) -> Result<Self, String> {
-        let file: LookFile = ron::de::from_str(text).map_err(|err| err.to_string())?;
+        Self::from_file(ron::de::from_str(text).map_err(|err| err.to_string())?)
+    }
+
+    /// The parsed taste `file`, validated; the error names the field.
+    fn from_file(file: LookFile) -> Result<Self, String> {
         let reference_j = number("reference_energy_j", file.reference_energy_j, true)?;
         let duration_exponent = file.duration_exponent.0;
         // A gas life never shortens with energy, and a gas speed (a length over a life) never
@@ -1157,6 +1161,79 @@ mod tests {
                 }
             }
         }
+    }
+
+    /// The game's damage-model view: each muzzle shape draws its own row of the taste file. A gun's
+    /// `muzzle_shape` relies on it; a mutant that answers one shape with the other's row, or
+    /// resolves both from one row, fails. FIXTURE DATA: two rows that differ in every statement.
+    #[test]
+    fn each_shape_resolves_its_own_row() {
+        let mut file: LookFile = ron::de::from_str(LOOK_RON).unwrap();
+        let brake = &mut file.shapes.muzzle_brake;
+        brake.core.sprite = Sourced(CoreSprite::Starburst);
+        brake.core.share = Sourced(1.0);
+        brake.forward.planes = Sourced(2);
+        brake.forward.share = Sourced(0.4);
+        brake.side_jets = Sourced(Some(SideJetsFile {
+            angle_deg: Sourced(120.0),
+            planes: Sourced(2),
+            share: Sourced(0.7),
+        }));
+        for flag in [
+            &mut brake.fireball,
+            &mut brake.glow,
+            &mut brake.smoke,
+            &mut brake.ground_blast,
+        ] {
+            *flag = Sourced(true);
+        }
+        let hider = &mut file.shapes.flash_hider;
+        hider.core.sprite = Sourced(CoreSprite::Glow);
+        hider.core.share = Sourced(0.5);
+        hider.forward.planes = Sourced(3);
+        hider.forward.share = Sourced(0.9);
+        hider.side_jets = Sourced(None);
+        for flag in [
+            &mut hider.fireball,
+            &mut hider.glow,
+            &mut hider.smoke,
+            &mut hider.ground_blast,
+        ] {
+            *flag = Sourced(false);
+        }
+        let look = MuzzleLook::from_file(file).unwrap();
+        assert_eq!(
+            look.shape(MuzzleShape::MuzzleBrake),
+            Shape {
+                sprite: CoreSprite::Starburst,
+                core_share: 1.0,
+                forward_planes: 2,
+                forward_share: 0.4,
+                side_jets: Some(ShapeSideJets {
+                    angle_rad: 120f32.to_radians(),
+                    planes: 2,
+                    share: 0.7,
+                }),
+                fireball: true,
+                glow: true,
+                smoke: true,
+                ground_blast: true,
+            }
+        );
+        assert_eq!(
+            look.shape(MuzzleShape::FlashHider),
+            Shape {
+                sprite: CoreSprite::Glow,
+                core_share: 0.5,
+                forward_planes: 3,
+                forward_share: 0.9,
+                side_jets: None,
+                fireball: false,
+                glow: false,
+                smoke: false,
+                ground_blast: false,
+            }
+        );
     }
 
     /// A belt's smoke is rationed to the shots its cyclic rate fires in the puff interval, and a
