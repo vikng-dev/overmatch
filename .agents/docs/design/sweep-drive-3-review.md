@@ -420,3 +420,22 @@ The law-inertia lane checked both review reports against the implementation.
 
 MEASURED verification for the review leftovers: formatting and locked workspace/all-target CI
 clippy passed; the targeted `spec sim_tick track::forces doc_citations` batch passed **58 tests**.
+
+
+## Part 9: verification of the law-inertia doubles
+
+Subject: the game's driving model, game state only.
+The law-ground-1 lane checked both review reports against the implementation.
+
+| Reviewer | Finding | Verified / not a defect | Fixed in (subject) |
+|---|---|---|---|
+| Claude | P2: the replay fixture's slope seed rests the hull on the flat slab, rear stations inside it | Verified: the seed's cast foot lands on the slab at z ≈ −37.55, short of where the 20° face leaves it (z ≈ −37.71). MEASURED at slope tick 0: 330 loaded contacts up to 0.653 m off the face's plane, the slab carrying more load than the face, the hull pitching from 19.0° to 11.4° within 16 ticks. The new on-face assertion fails on that seed. | "driving: seat the replay's slope start on the 20 degree face (#259)" |
+| Claude | P3: the idler is reflected at its contact radius, not the pin-line radius it turns at | Verified: the belt wraps the idler, which turns with the pin line, the circle the route wraps and the view spins it on. Shifts, DERIVED: 4,763.42 → 4,749.86 kg/side (idler term 103.81 → 90.25 kg); brake 2.88605 → 2.88723 m/s²; flat top-gear acceleration 0.66782 → 0.66809 m/s². The review's 25.56 mm pin offset gives 89.80 kg; the rig's measured offset gives the 90.25 kg above. | "driving: reflect the wrapped idler at its pin-line radius (#259)" |
+| Claude | P3: the transmission's Tiger fixture still uses the deleted 16,000 kg and claims to mirror the sheet | Verified. At the derived 4,750 kg, 67 of 68 transmission tests hold. The hill-hold release test does not: the forward hold walks F3 → F2 → F1 and releases in F1 (MEASURED), because the release gate reads the one-tick clutch-lock force, which scales with belt inertia, while target selection reads modeled capability. That test keeps a labelled 16,000 kg fixture; the gate disagreement is routed to the owner. | "driving: run the transmission's Tiger fixture at the derived belt inertia (#259)" |
+| Claude | P3: two docs still say "belt + drivetrain" inertia | Verified at `RigSpec::belt_inertia` and `predict_shift_landing_m`. | "driving: name the belt inertia the sandbox and landing predictor read (#259)" |
+| Claude | P3: nothing tests the unequal-sides admission in `RigGeom::build` | Verified: with the admission call disabled no test failed before; the new rig test fails under that mutant and passes restored. | "driving: test that running-gear admission names the sheet it refuses (#259)" |
+| Codex | No findings | Nothing to verify. | none |
+
+The same hold walk shows in the booted sim on the course's 20° face (MEASURED, slope trace): the
+hold re-targets down the ladder to F1 and releases in F1. The owner decides whether the release gate should
+read the gear's modeled capability, as target selection does.
