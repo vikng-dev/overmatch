@@ -105,7 +105,7 @@
 # =======================================================================
 #
 # The gates and SMOKE mode above are code in scripts/perf/frame-run.zsh, which this runner shares
-# with run-track-prints-cost.sh and run-forest-cost.sh; their story stays here.
+# with run-track-prints-cost.sh; their story stays here.
 #
 # Usage: run-frame-sweep.sh <out-dir>
 # Knobs (env): BIN (directory holding `overmatch`, absolute or relative to the repo; default

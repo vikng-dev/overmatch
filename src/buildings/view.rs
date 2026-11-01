@@ -804,34 +804,68 @@ mod tests {
         );
     }
 
-    /// A LEVEL FACE RUNS ALONG ITS ELEMENT: every top and bottom of the shipped house's Upright
-    /// elements takes its tangent along the element's own run `u`, so a wall's courses run along
-    /// it on its top as on its faces. A hard-coded world axis lays the tops of the walls that run
-    /// along Z across them and fails here.
+    /// A level face projects a construction axis into its plane. The surface reader relies
+    /// on a unit tangent perpendicular to the normal, including sloping and vertical runs.
+    /// ASSUMED fixture rotations cover both axis choices without naming an asset.
     #[test]
     fn a_level_face_runs_along_its_element() {
-        let asset = &shipped_house().asset;
-        let mut checked = 0;
-        for (e, element) in asset.elements.iter().enumerate() {
-            if element.surface_frame != SurfaceFrame::Upright {
-                continue;
-            }
-            let mut faces = Faces::default();
-            faces.element(asset, e);
-            let u = Vec3::from_array(element.frame.u);
-            for (n, t) in faces.normals.iter().zip(&faces.tangents) {
-                if Vec3::from_array(*n).y.abs() > 0.999 {
-                    let t = Vec4::from_array(*t).truncate();
-                    assert!(
-                        t.dot(u).abs() > 0.999,
-                        "{}: level tangent {t} across its run {u}",
-                        element.name
-                    );
-                    checked += 1;
+        for yaw in [0.0_f32, 0.7, 1.57] {
+            let heading = Quat::from_rotation_y(yaw);
+            let horizontal = heading * Vec3::X;
+            for degrees in [0.0_f32, 5.0, 44.0, 46.0, 85.0, 90.0] {
+                let rotation = heading * Quat::from_rotation_z(degrees.to_radians());
+                let axes = [rotation * Vec3::X, rotation * Vec3::Y];
+                for n in [Vec3::Y, Vec3::NEG_Y] {
+                    let actual = tangent(n, SurfaceFrame::Upright, axes);
+                    assert!((actual.length() - 1.0).abs() < 1e-6);
+                    assert!(actual.dot(n).abs() < 1e-6);
+                    assert!(actual.dot(horizontal).abs() > 0.999);
                 }
             }
         }
-        assert!(checked > 0, "the house has level faces");
+    }
+
+    /// An unsynchronized replica must hold actual ledger entries. Checking only the clock's
+    /// accessor would let a presentation predicate that treats Waiting as due escape.
+    #[test]
+    fn a_waiting_replica_presents_no_record_entry() {
+        use crate::buildings::breakage::WallEntry;
+        let kind = shipped_house();
+        let mut world = World::new();
+        world.insert_resource(PresentationClock::Waiting);
+        world.insert_resource(WallRecord {
+            entries: vec![WallEntry {
+                building: 3,
+                event: WallEvent::Swap(0),
+                tick: 0,
+            }],
+            ..default()
+        });
+        let root = world
+            .spawn((
+                MapInstance {
+                    id: "fixture".to_owned(),
+                    ordinal: 3,
+                },
+                Breakage::new(kind, 1.0),
+            ))
+            .id();
+        let mut schedule = Schedule::default();
+        schedule.add_systems(present_record);
+        schedule.run(&mut world);
+        assert!(world.get::<ShownShape>(root).is_none());
+        *world.resource_mut::<PresentationClock>() = PresentationClock::At {
+            tick: 0,
+            overstep: 0.0,
+        };
+        schedule.run(&mut world);
+        assert!(
+            world
+                .get::<ShownShape>(root)
+                .expect("the synchronized cursor releases the entry")
+                .0
+                .swapped[0]
+        );
     }
 
     /// AN OPENING IS A HOLE THE CAMERA SEES THROUGH, A PIER IS NOT: across the shipped house's

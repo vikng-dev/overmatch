@@ -83,7 +83,6 @@ scout §1.4). Each folder's `cc.txt` names the source.
 | `machined_steel` | ambientCG Metal009 | CC0 | 0.5 m ASSUMED | yes |
 | `track_steel` | ambientCG Metal046B (the track link's own source) | CC0 | 0.5 m ASSUMED | no |
 | `rubber` | ambientCG Rubber004 | CC0 | 0.5 m ASSUMED | no |
-| `wood` | Poly Haven rough_wood | CC0 | 0.5 m MEASURED (Poly Haven dimensions) | no |
 | `brick` | Poly Haven brick_wall_006 (the buildings' wall pack, shared) | CC0 | 3.0 m MEASURED | no |
 | `glass` | flat colour and factors: neither source carries a glass pack (APIs queried 2026-10-31) | — | — | no |
 

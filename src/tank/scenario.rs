@@ -145,7 +145,7 @@ const START_SPOTS: [(&str, f32, f32, f32); 3] = [
 /// `heading°` from `+Z` toward `+X`, rather than at the duel. World XZ and radians out. Unset is
 /// every normal run; a dev lever on the offline path only, like [`target_scenario`].
 ///
-/// `scripts/perf/run-forest-cost.sh` sets this lever.
+/// The owner sets this operator lever for hand-driving terrain-print checks at named spots.
 /// Refuses startup when the variable is set to anything [`parse_start`] refuses: a capture or a measurement that
 /// asked for a spot must never frame the duel as if it were that spot.
 pub(crate) fn start_spot() -> Option<(Vec2, f32)> {

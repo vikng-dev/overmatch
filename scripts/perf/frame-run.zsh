@@ -1,5 +1,5 @@
 # Sourced, never run: the frame-cost runners' one launch-and-gate loop, shared by
-# run-frame-sweep.sh, run-track-prints-cost.sh and run-forest-cost.sh. Each runner states its own
+# run-frame-sweep.sh and run-track-prints-cost.sh. Each runner states its own
 # question, scene and conditions; what makes ANY condition evidence is this code, and its story —
 # the preconditions (visible frontmost window, primary 120 Hz display, 2560x1440 surface, warm
 # shader cache, quiet machine, hands off), every gate below and SMOKE mode — is told once, in

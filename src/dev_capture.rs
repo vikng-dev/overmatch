@@ -1,8 +1,9 @@
 //! In-engine frames to disk, for documentation. The plan file that
 //! `OVERMATCH_CAPTURE=<plan>.ron` names holds one [`plan::CapturePlan`], whose struct docs are the
 //! grammar's one home. `scripts/capture/example.ron` is a worked plan, checked by a test. Without
-//! the variable every plugin here is inert. Scenario levers with tracked performance-script users
-//! (`OVERMATCH_START`, `OVERMATCH_TARGET`, `OVERMATCH_PROBE_FAR`, `OVERMATCH_PROBE_TANKS`,
+//! the variable every plugin here is inert. The operator's hand-driving lever `OVERMATCH_START`
+//! and scenario levers with tracked performance-script users
+//! (`OVERMATCH_TARGET`, `OVERMATCH_PROBE_FAR`, `OVERMATCH_PROBE_TANKS`,
 //! `OVERMATCH_BATTLE`, `OVERMATCH_XRAY`) also select the scene; a capture inherits their values.
 //!
 //! [`plugin`] takes the plan's `frames` and `keys`. It is mounted after `crate::windowed_runtime`
