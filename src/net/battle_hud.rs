@@ -338,7 +338,9 @@ fn spawn_battle_hud(mut commands: Commands, fonts: Res<UiFonts>) {
                         column_gap: Val::Px(28.0),
                         max_height: Val::Percent(100.0),
                         min_height: Val::Px(0.0),
-                        overflow: Overflow::scroll_y(),
+                        width: Val::Percent(100.0),
+                        min_width: Val::Px(0.0),
+                        overflow: Overflow::scroll(),
                         ..default()
                     },
                 ))
@@ -353,14 +355,18 @@ fn spawn_battle_hud(mut commands: Commands, fonts: Res<UiFonts>) {
                                 font_size: FontSize::Px(20.0),
                                 ..default()
                             },
-                            TextLayout::justify(column.justify()),
+                            TextLayout::justify(column.justify()).with_no_wrap(),
+                            Node {
+                                flex_shrink: 0.0,
+                                ..default()
+                            },
                             TextColor(TEXT),
                         ));
                     }
                 });
                 card.spawn((
                     Part::ScrollHint,
-                    Text::new("PAGE UP / PAGE DOWN TO SCROLL"),
+                    Text::new("PAGE UP/DOWN: ROWS  LEFT/RIGHT: COLUMNS"),
                     TextFont {
                         font: fonts.body.clone().into(),
                         font_size: FontSize::Px(16.0),
@@ -436,14 +442,19 @@ fn update_battle_hud(
             }
             continue;
         }
-        let direction = i32::from(keys.just_pressed(KeyCode::PageDown))
-            - i32::from(keys.just_pressed(KeyCode::PageUp));
-        if direction != 0 {
-            let page = node.size.y * node.inverse_scale_factor;
-            let limit = ((node.content_size.y - node.size.y) * node.inverse_scale_factor).max(0.0);
-            let next = (scroll.0.y + direction as f32 * page).clamp(0.0, limit);
-            if scroll.0.y != next {
-                scroll.0.y = next;
+        let direction = Vec2::new(
+            u8::from(keys.just_pressed(KeyCode::ArrowRight)) as f32
+                - u8::from(keys.just_pressed(KeyCode::ArrowLeft)) as f32,
+            u8::from(keys.just_pressed(KeyCode::PageDown)) as f32
+                - u8::from(keys.just_pressed(KeyCode::PageUp)) as f32,
+        );
+        if direction != Vec2::ZERO {
+            let page = node.size * node.inverse_scale_factor;
+            let limit =
+                ((node.content_size - node.size) * node.inverse_scale_factor).max(Vec2::ZERO);
+            let next = (scroll.0 + direction * page).clamp(Vec2::ZERO, limit);
+            if scroll.0 != next {
+                scroll.0 = next;
             }
         }
     }
@@ -524,7 +535,7 @@ mod tests {
                 Part::ClockLine => "14:55".to_owned(),
                 Part::Title => "BATTLE 1".to_owned(),
                 Part::Column(column) => column.text(&roster, None),
-                Part::ScrollHint => "PAGE UP / PAGE DOWN TO SCROLL".to_owned(),
+                Part::ScrollHint => "PAGE UP/DOWN: ROWS  LEFT/RIGHT: COLUMNS".to_owned(),
             };
         }
         let status = world
@@ -657,6 +668,52 @@ mod tests {
                 after.min.y,
                 hud_rect(app.world(), card)
             );
+        }
+    }
+
+    /// The narrow-window roster must keep every score column reachable without wrapping any
+    /// standing onto extra lines. Players on tall windows rely on horizontal paging rather than
+    /// clipped columns. FIXTURE DATA: the review's narrow window, diagnostics shown.
+    #[test]
+    fn a_narrow_board_keeps_every_column_in_its_scroll_content() {
+        let mut app = hud_layout_app(960, 1080, 2.0);
+        // FIXTURE DATA: full-width ids and a results winner keep every rendered column wide,
+        // independently of compact typography. An empty combat winner column has no ink.
+        {
+            let roster: Vec<Row> = (0..30)
+                .map(|i| Row {
+                    place: 1,
+                    standing: standing(u64::MAX - i, 0, 0),
+                })
+                .collect();
+            let world = app.world_mut();
+            for (part, mut text) in world.query::<(&Part, &mut Text)>().iter_mut(world) {
+                if let Part::Column(column) = part {
+                    text.0 = column.text(&roster, Some(CombatantId(u64::MAX)));
+                }
+            }
+        }
+        settle_hud(&mut app);
+        let world = app.world_mut();
+        let (entity, viewport) = world
+            .query_filtered::<(Entity, &ComputedNode), With<BoardViewport>>()
+            .single(world)
+            .unwrap();
+        let bounds = hud_rect(world, entity);
+        assert!(
+            viewport.content_size.x > viewport.size.x,
+            "fixture must need horizontal scrolling"
+        );
+        let right = bounds.min.x + viewport.content_size.x;
+        for (entity, part, layout) in world.query::<(Entity, &Part, &TextLayout)>().iter(world) {
+            if matches!(part, Part::Column(_)) {
+                assert_eq!(layout.linebreak, bevy::text::LineBreak::NoWrap);
+                let column = hud_rect(world, entity);
+                assert!(
+                    column.max.x <= right + 1.0,
+                    "column {part:?} {column:?} lies outside reachable right edge {right} (viewport {bounds:?})"
+                );
+            }
         }
     }
 
@@ -806,10 +863,40 @@ mod tests {
         };
         app.world_mut().entity_mut(viewport).insert(ComputedNode {
             size: Vec2::new(800.0, 600.0),
-            content_size: Vec2::new(800.0, 2000.0),
+            content_size: Vec2::new(2000.0, 2000.0),
             inverse_scale_factor: 0.5,
             ..default()
         });
+        for expected in [400.0, 600.0, 600.0] {
+            let mut keys = app.world_mut().resource_mut::<ButtonInput<KeyCode>>();
+            keys.release(KeyCode::ArrowRight);
+            keys.press(KeyCode::ArrowRight);
+            app.update();
+            assert_eq!(
+                app.world().get::<ScrollPosition>(viewport).unwrap().0.x,
+                expected
+            );
+        }
+        app.world_mut()
+            .resource_mut::<ButtonInput<KeyCode>>()
+            .clear();
+        app.world_mut()
+            .resource_mut::<ButtonInput<KeyCode>>()
+            .release(KeyCode::ArrowRight);
+        app.world_mut()
+            .resource_mut::<ButtonInput<KeyCode>>()
+            .press(KeyCode::ArrowLeft);
+        app.update();
+        assert_eq!(
+            app.world().get::<ScrollPosition>(viewport).unwrap().0.x,
+            200.0
+        );
+        app.world_mut()
+            .resource_mut::<ButtonInput<KeyCode>>()
+            .clear();
+        app.world_mut()
+            .resource_mut::<ButtonInput<KeyCode>>()
+            .release(KeyCode::ArrowLeft);
         for expected in [300.0, 600.0, 700.0, 700.0] {
             let mut keys = app.world_mut().resource_mut::<ButtonInput<KeyCode>>();
             keys.release(KeyCode::PageDown);
