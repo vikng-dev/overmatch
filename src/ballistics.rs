@@ -1880,24 +1880,6 @@ pub fn sim_plugin(app: &mut App) {
         )
             .chain(),
     )
-    .init_resource::<motion::ColliderMotion>()
-    .add_systems(
-        FixedPostUpdate,
-        motion::seed_births
-            .after(avian3d::prelude::PhysicsSystems::Prepare)
-            .before(avian3d::prelude::PhysicsSystems::StepSimulation),
-    )
-    .add_systems(
-        FixedPostUpdate,
-        (
-            motion::place_children,
-            avian3d::collider_tree::update_moved_collider_aabbs::<Collider>
-                .run_if(resource_exists::<avian3d::collider_tree::ColliderTrees>),
-            motion::snapshot,
-        )
-            .chain()
-            .in_set(SimPhase::ColliderPoses),
-    )
     .init_resource::<PathClock>()
     .add_systems(
         PostUpdate,
@@ -1917,6 +1899,36 @@ pub fn sim_plugin(app: &mut App) {
             .in_set(SimPhase::ProjectileMarch)
             .before(DamageConsequences),
     );
+    mount_collider_motion(app);
+}
+
+/// The game's damage model: the collider history the walk reads ([`motion`]), kept only where the
+/// walk runs. A client marches no round (ADR-0037: [`integrate_projectiles`] returns on a
+/// [`ClientReplica`], which replays the server's paths), so it keeps no history. Its replica
+/// hulls also lose `Position` for one frame at each interpolation-timeline resync (lightyear 0.30's
+/// `queue_history_presence`; `net::protocol`'s `apply_launched_turret_pose`), a gap the history's
+/// every-collider-is-posed invariant does not admit; on the authority that invariant holds.
+fn mount_collider_motion(app: &mut App) {
+    app.init_resource::<motion::ColliderMotion>()
+        .add_systems(
+            FixedPostUpdate,
+            motion::seed_births
+                .run_if(not(resource_exists::<ClientReplica>))
+                .after(avian3d::prelude::PhysicsSystems::Prepare)
+                .before(avian3d::prelude::PhysicsSystems::StepSimulation),
+        )
+        .add_systems(
+            FixedPostUpdate,
+            (
+                motion::place_children,
+                avian3d::collider_tree::update_moved_collider_aabbs::<Collider>
+                    .run_if(resource_exists::<avian3d::collider_tree::ColliderTrees>),
+                motion::snapshot,
+            )
+                .chain()
+                .run_if(not(resource_exists::<ClientReplica>))
+                .in_set(SimPhase::ColliderPoses),
+        );
 }
 
 /// The game's damage model: construct a complete flight from fire data. Replicas never query geometry.
@@ -4472,6 +4484,71 @@ mod march_tests {
         app.finish();
         app.cleanup();
         app
+    }
+
+    /// The game's damage model: the collider history the walk reads is kept only where the walk
+    /// runs. A client's replica hull loses `Position` for one frame at an interpolation-timeline
+    /// resync (lightyear 0.30's `queue_history_presence`); a client keeping the history panicked
+    /// in `motion::place_children` on that gap within a second of combat in the 2026-11-01 local
+    /// Battle runs. The authority keeps its history (the walk's sweeps read it); a replica keeps
+    /// none and survives the gap. A mutant mounting the history on every role fails both.
+    /// FIXTURE DATA: a static hull with one child collider.
+    #[test]
+    fn a_client_keeps_no_collider_history_and_survives_a_resync_gap() {
+        for replica in [false, true] {
+            let mut app = App::new();
+            app.add_plugins((
+                MinimalPlugins,
+                bevy::transform::TransformPlugin,
+                AssetPlugin::default(),
+                PhysicsPlugins::default(),
+            ))
+            .init_asset::<Mesh>()
+            .insert_resource(TimeUpdateStrategy::ManualDuration(Duration::from_millis(
+                16,
+            )));
+            if replica {
+                app.insert_resource(ClientReplica);
+            }
+            mount_collider_motion(&mut app);
+            while app.plugins_state() == bevy::app::PluginsState::Adding {
+                std::thread::sleep(Duration::from_millis(1));
+            }
+            app.finish();
+            app.cleanup();
+            let hull = app
+                .world_mut()
+                .spawn((Transform::from_xyz(0.0, 1.0, 0.0), RigidBody::Static))
+                .id();
+            app.world_mut().spawn((
+                ChildOf(hull),
+                Transform::from_xyz(0.0, 0.5, 0.0),
+                Collider::cuboid(1.0, 1.0, 1.0),
+            ));
+            for _ in 0..4 {
+                app.update();
+            }
+            let kept = app
+                .world()
+                .resource::<motion::ColliderMotion>()
+                .colliders
+                .len();
+            assert_eq!(
+                kept > 0,
+                !replica,
+                "only the role that walks keeps collider history (replica: {replica})"
+            );
+            if replica {
+                // The resync: `Position` off the hull for one step, then back.
+                let pose = *app.world().get::<Position>(hull).expect("the hull's pose");
+                app.world_mut().entity_mut(hull).remove::<Position>();
+                app.update();
+                app.world_mut().entity_mut(hull).insert(pose);
+                for _ in 0..4 {
+                    app.update();
+                }
+            }
+        }
     }
 
     /// Spawn an 88 round at `origin` travelling `dir` (unit) at `speed`, then march until an impact is
