@@ -800,9 +800,7 @@ pub fn spawn_glass(
     // The Ricochet frame's eye turns about the struck face's normal, square to the plane of both
     // legs ([`framing`]); a bounce leaves in its plane of incidence, which holds that normal, so
     // the eye lies in the face's plane and a gouge on the face would read as a flat bar at the apex.
-    if let Some(bounce) = &plan.bounce
-        && kind != CornerKind::Ricochet
-    {
+    for bounce in plan.bounces.iter().filter(|_| kind != CornerKind::Ricochet) {
         mark(
             commands,
             ring_on_face(bounce.point, bounce.normal, bounce.incoming, radius),
@@ -1076,20 +1074,43 @@ fn shell_share(plan: &Plan, kind: CornerKind, c: f32, reduce: bool) -> Option<f3
     }
 }
 
-/// The shell model's transform with its nose at arc `head`, `share` of its length drawn: the tip
-/// on the line, the body along the chord to the line's point that much of a model length back,
-/// at the authored model's dimensions and along its body by `share`. A nose piece is
-/// drawn as the model's front shortened to its share of the round's mass: a DERIVED visual proxy
-/// that treats the round's mass per length as even. On a straight leg the chord is the travel;
-/// within a model length past a bend the body pivots across it, so past a bounce it stays on the
-/// face's outer side as the path does, where the travel's own direction would stand it inside the
-/// face.
+/// The game's damage-model view: the model's nose stays on the recorded path, its length scaled
+/// by the drawn mass share. The body follows the chord behind the nose, constrained to lead the
+/// current leg and to keep its tail outside the most recently struck plane. A sharp reflection
+/// can turn further than a right angle: its incoming chord then points against travel. The
+/// outgoing direction projected onto the struck plane gives that pose a leading, face-safe body.
 fn shell_transform(plan: &Plan, head: f32, share: f32) -> Transform {
     let nose = plan.line.at(head);
-    let back = plan.line.at(head - share * shell_length(plan));
-    let body = (nose - back)
-        .try_normalize()
-        .unwrap_or_else(|| plan.line.direction_at(head));
+    let length = share * shell_length(plan);
+    let back = plan.line.at(head - length);
+    let travel = plan.line.direction_at(head);
+    let mut body = (nose - back).try_normalize().unwrap_or(travel);
+    if let Some(bounce) = plan.bounces.iter().rev().find(|bounce| bounce.arc < head)
+        && length > 0.0
+    {
+        // DERIVED: tail = nose - length * body, so its outward distance is nonnegative
+        // exactly when body.dot(normal) <= nose_height / length.
+        let limit = ((nose - bounce.point).dot(bounce.normal) / length).clamp(0.0, 1.0);
+        let outside = |axis: Vec3| {
+            let normal = axis.dot(bounce.normal);
+            if normal <= limit {
+                return axis;
+            }
+            let tangent = (axis - bounce.normal * normal)
+                .try_normalize()
+                .unwrap_or_else(|| {
+                    // A chord along the normal has no along-face heading; use the recorded exit's.
+                    (bounce.outgoing - bounce.normal * bounce.outgoing.dot(bounce.normal))
+                        .try_normalize()
+                        .expect("a reflection has a nonzero along-face direction")
+                });
+            tangent * (1.0 - limit * limit).max(0.0).sqrt() + bounce.normal * limit
+        };
+        body = outside(body);
+        if body.dot(travel) <= 0.0 {
+            body = outside(travel);
+        }
+    }
     Transform::from_translation(nose)
         .looking_to(body, Vec3::Y)
         .with_scale(Vec3::new(1.0, 1.0, share))
@@ -1102,7 +1123,7 @@ fn shell_length(plan: &Plan) -> f32 {
 
 /// Where the trail ends: its arc along the line and its point. Behind a drawn shell (`share` of
 /// the model, [`shell_share`]) it ends at the model's tail, which within a model length past a
-/// bend stands just off the line, the body's chord across the bend being shorter than the model;
+/// bend can stand off the line as its pose leads travel while clearing the struck face;
 /// otherwise at the nose.
 fn trail_end(plan: &Plan, head: f32, share: Option<f32>) -> (f32, Vec3) {
     let Some(share) = share else {
@@ -1761,7 +1782,7 @@ fn framing(
             )
         }
         CornerKind::Ricochet => {
-            let Some(bounce) = plan.bounce.as_ref() else {
+            let Some(bounce) = plan.bounces.first() else {
                 return along_shot(plan, motion(timeline::DRIFT_DEG_S, 0.0), far());
             };
             // The eye on the normal of the plane through both legs, so the angle shows at its
@@ -2504,42 +2525,46 @@ mod tests {
     /// Past a bounce the shell stays on the struck face's outer side, as the record's path does:
     /// for every record that bounces, the model's nose and tail stand no deeper than
     /// [`POSITION_TOL_M`] behind the face's plane at every sample across the first two model
-    /// lengths past the apex.
+    /// lengths past each apex, up to the next reflection. The nose leads its leg at every pose.
     #[test]
     fn the_shell_never_sinks_into_the_face_it_glances_off() {
         let library = Library::load();
         let mut bounces = 0;
         for record in &library.records {
             let plan = &record.plan;
-            let Some(bounce) = &plan.bounce else {
-                continue;
-            };
             if plan.body.is_none() {
                 continue;
             } // No body is drawn for this round.
             let length = shell_length(plan);
             let samples = 32;
-            for k in 0..=samples {
-                let head = bounce.arc + 2.0 * length * k as f32 / samples as f32;
-                let pose = shell_transform(plan, head, 1.0);
-                let tail = pose.transform_point(
-                    Vec3::Z
-                        * plan
-                            .body
-                            .expect("a drawn shell has its authored model")
-                            .length_m,
-                );
-                for (part, p) in [("nose", pose.translation), ("tail", tail)] {
-                    let depth = (bounce.point - p).dot(bounce.normal);
+            for (index, bounce) in plan.bounces.iter().enumerate() {
+                let end = plan
+                    .bounces
+                    .get(index + 1)
+                    .map_or(bounce.arc + 2.0 * length, |next| {
+                        next.arc.min(bounce.arc + 2.0 * length)
+                    });
+                for k in 0..=samples {
+                    let head = bounce.arc + (end - bounce.arc) * k as f32 / samples as f32;
+                    let pose = shell_transform(plan, head, 1.0);
+                    let tail = pose.transform_point(Vec3::Z * length);
                     assert!(
-                        depth < POSITION_TOL_M,
-                        "{}: the {part} stands {depth} m inside the face {} m past the apex",
-                        record.stem,
-                        head - bounce.arc
+                        (pose.rotation * Vec3::NEG_Z).dot(plan.line.direction_at(head)) > 0.0,
+                        "{}: bounce {index} puts the nose behind travel",
+                        record.stem
                     );
+                    for (part, p) in [("nose", pose.translation), ("tail", tail)] {
+                        let depth = (bounce.point - p).dot(bounce.normal);
+                        assert!(
+                            depth < POSITION_TOL_M,
+                            "{}: bounce {index}, the {part} stands {depth} m inside the face {} m past the apex",
+                            record.stem,
+                            head - bounce.arc
+                        );
+                    }
                 }
+                bounces += 1;
             }
-            bounces += 1;
         }
         assert!(bounces > 0, "a record bounces");
     }

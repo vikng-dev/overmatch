@@ -1,5 +1,5 @@
 //! What the corner draws for one record, read off it and the tank asset's component shapes: the
-//! line as an arc-length polyline, the crossings, the bounce, the stop or the point the round left
+//! line as an arc-length polyline, the crossings, the bounces, the stop or the point the round left
 //! the tank, each field's directions and reach (a spall cone's or a burst's), and each component's
 //! dose and the moment the picture reaches it. Positions are in the record's frame (hull-local,
 //! metres).
@@ -72,7 +72,7 @@ pub struct Plan {
     pub impact_point: Vec3,
     pub impact_normal: Vec3,
     pub incidence: f32,
-    pub bounce: Option<Bounce>,
+    pub bounces: Vec<Bounce>,
     /// Where the round came to rest, inside armour or a component, if the record has it rest.
     pub stop: Option<Vec3>,
     /// Every field the record threw, in [`PenetrationReport::fields`]' order: its spall cones,
@@ -233,14 +233,16 @@ impl Polyline {
         }
     }
 
-    /// The index of the line's point nearest `p`; 0 on a line with no point.
-    pub fn nearest_node(&self, p: Vec3) -> usize {
-        (0..self.points.len())
+    /// The game's damage-model view: the path node nearest the recorded event time. A folded
+    /// path can put a later node nearer the field's origin in space; it belongs to another moment.
+    pub fn nearest_node_at(&self, t: f32) -> usize {
+        (0..self.times.len())
             .min_by(|&a, &b| {
-                let d = |i: usize| self.points[i].distance_squared(p);
-                d(a).total_cmp(&d(b))
+                (self.times[a] - t)
+                    .abs()
+                    .total_cmp(&(self.times[b] - t).abs())
             })
-            .unwrap_or(0)
+            .expect("a field is thrown on a recorded path with timed nodes")
     }
 
     /// The arc length of the point on the line nearest `p`.
@@ -514,21 +516,22 @@ impl Plan {
                 entry_arc: line.arc_of(Vec3::from(plate.entry)),
             })
             .collect();
-        let bounce = report.ricochets.first().map(|bounce| Bounce {
-            point: Vec3::from(bounce.point),
-            normal: Vec3::from(bounce.normal).normalize_or(Vec3::Y),
-            incoming: Vec3::from(bounce.incoming).normalize_or(Vec3::NEG_Z),
-            outgoing: Vec3::from(bounce.outgoing).normalize_or(Vec3::NEG_Z),
-            arc: line.arc_of(Vec3::from(bounce.point)),
-        });
-        // A spall cone is thrown where its crossing ends, a node of the path, and its front runs at
-        // the speed of the leg leaving that node. Its origin, the mean of the exits the round's
-        // disc reached, stands off the node across the path and may project inside the crossing
-        // (0.6 mm short of it in s4, MEASURED), so the node is the one nearest the origin, never
-        // the leg its projection falls on. Invariant: an origin lies nearer its own node than any
-        // other, so within half the crossing's chord of it and half the leg leaving it.
+        let bounces = report
+            .ricochets
+            .iter()
+            .map(|bounce| Bounce {
+                point: Vec3::from(bounce.point),
+                normal: Vec3::from(bounce.normal).normalize_or(Vec3::Y),
+                incoming: Vec3::from(bounce.incoming).normalize_or(Vec3::NEG_Z),
+                outgoing: Vec3::from(bounce.outgoing).normalize_or(Vec3::NEG_Z),
+                arc: line.arc_at_time(bounce.t),
+            })
+            .collect();
+        // The game's damage-model field uses the leg leaving its event's node in time.
+        // Its disc-mean origin can stand off that node; on a reflected path a later node can
+        // be closer in space without belonging to this exit.
         let spall = report.spall.iter().map(|c| {
-            let node = line.nearest_node(Vec3::from(c.origin));
+            let node = line.nearest_node_at(c.t);
             let exit = line.leg_speed(node + 1).unwrap_or(0.0);
             cone(c, &line, exit)
         });
@@ -624,7 +627,7 @@ impl Plan {
             impact_point: contact,
             impact_normal: normal,
             incidence: report.impact.incidence_deg.to_radians(),
-            bounce,
+            bounces,
             stop: report.rested().then(|| line.at(line.length())),
             cones,
             burst,
@@ -659,7 +662,7 @@ impl Plan {
             impact_point: Vec3::ZERO,
             impact_normal: Vec3::NEG_Z,
             incidence: 0.0,
-            bounce: None,
+            bounces: Vec::new(),
             stop: None,
             cones: Vec::new(),
             burst: None,
@@ -750,7 +753,7 @@ impl Plan {
             points.push(crossing.entry);
             points.extend(crossing.exit);
         }
-        points.extend(self.bounce.as_ref().map(|b| b.point));
+        points.extend(self.bounces.iter().map(|b| b.point));
         points.extend(
             self.boxes
                 .iter()

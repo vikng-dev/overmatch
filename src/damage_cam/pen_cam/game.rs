@@ -1182,7 +1182,11 @@ mod tests {
         let plan = |app: &App| {
             let xray = app.world().resource::<xray::XRayState>();
             let plan = xray.plan().expect("the x-ray is built");
-            (plan.kind, !plan.crossings.is_empty(), plan.bounce.is_some())
+            (
+                plan.kind,
+                !plan.crossings.is_empty(),
+                !plan.bounces.is_empty(),
+            )
         };
         assert_eq!(
             plan(&app),

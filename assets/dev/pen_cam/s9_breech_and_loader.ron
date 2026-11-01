@@ -43,8 +43,53 @@
             class: Main,
             factor: 1000.0,
         ),
+        (
+            name: "Turret_Bottom",
+            t: 0.03670827,
+            entry: (1.0706959, 1.9475408, -0.16916132),
+            exit: None,
+            chord_mm: 1.0506487,
+            steel_equiv_mm: 1.0506488,
+            cost_mm: 1.0506488,
+            overmatched: false,
+            class: Main,
+            factor: 1000.00006,
+        ),
     ],
-    ricochets: [],
+    ricochets: [
+        (
+            t: 0.0018477174,
+            point: (-0.5659027, 2.0155344, -0.5244746),
+            normal: (-0.8660239, 0.0018586565, 0.49999917),
+            incoming: (0.9992258, 0.021604205, -0.0328808),
+            outgoing: (-0.52801365, 0.024881959, 0.84887135),
+            volume: "Breech",
+        ),
+        (
+            t: 0.0070470036,
+            point: (-1.0860357, 2.0383315, 0.27246666),
+            normal: (0.98193127, -0.038792852, -0.18521918),
+            incoming: (-0.52801365, 0.024881959, 0.84887135),
+            outgoing: (0.8008645, -0.027617615, 0.59820837),
+            volume: "Turret_Side",
+        ),
+        (
+            t: 0.01824831,
+            point: (0.14234066, 1.9949226, 1.1495848),
+            normal: (-0.13777123, 0.0000029079758, -0.9904641),
+            incoming: (0.80083823, -0.028781006, 0.59818876),
+            outgoing: (0.60718226, -0.02877692, -0.7940413),
+            volume: "Turret_Side",
+        ),
+        (
+            t: 0.03538852,
+            point: (1.1151323, 1.9475713, -0.174088),
+            normal: (-0.9920308, -0.0000000056366884, 0.12599528),
+            incoming: (0.6071528, -0.03041252, -0.79400283),
+            outgoing: (-0.78636277, -0.030412527, -0.617016),
+            volume: "Turret_Bottom",
+        ),
+    ],
     path: [
         (
             t: -0.0034850338,
@@ -63,8 +108,24 @@
             point: (-0.5659027, 2.0155344, -0.5244746),
         ),
         (
-            t: 0.0020154337,
-            point: (-0.533638, 2.0160928, -0.52872753),
+            t: 0.0070470036,
+            point: (-1.0860357, 2.0383315, 0.27246666),
+        ),
+        (
+            t: 0.01824831,
+            point: (0.14234066, 1.9949226, 1.1495848),
+        ),
+        (
+            t: 0.03538852,
+            point: (1.1151323, 1.9475713, -0.174088),
+        ),
+        (
+            t: 0.03609684,
+            point: (1.0719347, 1.9263334, -0.16969442),
+        ),
+        (
+            t: 0.03673122,
+            point: (1.0674582, 1.9474154, -0.17170191),
         ),
     ],
     spall: [
@@ -670,11 +731,830 @@
                 ),
             ],
         ),
+        (
+            t: 0.034641653,
+            origin: (1.0441942, 1.9337692, -0.13682413),
+            axis: (-0.96440715, -0.01649788, -0.26390645),
+            field: (
+                law: Ball,
+                ratio: 2.2649755,
+            ),
+            half_angle_deg: 26.2,
+            strength: 2000.6128,
+            fragments: [
+                (
+                    end: (-0.89439106, 1.9002385, -0.7517886),
+                    strength: 1674.1698,
+                    hits: [
+                        (
+                            volume: "Loader",
+                            damage: 26.158903,
+                        ),
+                    ],
+                ),
+                (
+                    end: (-0.9480572, 1.8044028, -0.5736389),
+                    strength: 1653.5554,
+                    hits: [
+                        (
+                            volume: "Loader",
+                            damage: 25.836803,
+                        ),
+                    ],
+                ),
+                (
+                    end: (0.016993523, 2.0115838, -0.4265952),
+                    strength: 1632.9694,
+                    hits: [
+                        (
+                            volume: "Loader",
+                            damage: 25.515146,
+                        ),
+                        (
+                            volume: "Breech",
+                            damage: 25.515146,
+                        ),
+                    ],
+                ),
+                (
+                    end: (-0.9455404, 1.7213907, -0.8225565),
+                    strength: 1612.4098,
+                    hits: [
+                        (
+                            volume: "Loader",
+                            damage: 25.193903,
+                        ),
+                        (
+                            volume: "Ammo_L_1",
+                            damage: 25.193903,
+                        ),
+                    ],
+                ),
+                (
+                    end: (-0.89416695, 1.9426231, -0.4271636),
+                    strength: 1591.8755,
+                    hits: [
+                        (
+                            volume: "Loader",
+                            damage: 24.873055,
+                        ),
+                        (
+                            volume: "Gunner",
+                            damage: 24.873055,
+                        ),
+                    ],
+                ),
+                (
+                    end: (-0.07287121, 1.9997749, -0.5822005),
+                    strength: 1571.3644,
+                    hits: [
+                        (
+                            volume: "Loader",
+                            damage: 24.552568,
+                        ),
+                        (
+                            volume: "Breech",
+                            damage: 24.552568,
+                        ),
+                    ],
+                ),
+                (
+                    end: (-0.9455404, 1.6122437, -0.6010976),
+                    strength: 1550.8749,
+                    hits: [
+                        (
+                            volume: "Loader",
+                            damage: 24.23242,
+                        ),
+                        (
+                            volume: "Ammo_L_1",
+                            damage: 24.23242,
+                        ),
+                    ],
+                ),
+                (
+                    end: (0.07357979, 2.0543523, -0.3287425),
+                    strength: 1530.405,
+                    hits: [
+                        (
+                            volume: "Loader",
+                            damage: 23.912579,
+                        ),
+                        (
+                            volume: "Breech",
+                            damage: 23.912579,
+                        ),
+                    ],
+                ),
+                (
+                    end: (-0.5733652, 1.8044024, -0.86460304),
+                    strength: 1509.9531,
+                    hits: [
+                        (
+                            volume: "Loader",
+                            damage: 23.593018,
+                        ),
+                    ],
+                ),
+                (
+                    end: (-1.0191364, 1.7617636, -0.35433578),
+                    strength: 1489.5168,
+                    hits: [
+                        (
+                            volume: "Loader",
+                            damage: 23.2737,
+                        ),
+                        (
+                            volume: "Gunner",
+                            damage: 23.2737,
+                        ),
+                        (
+                            volume: "Ammo_L_1",
+                            damage: 23.2737,
+                        ),
+                    ],
+                ),
+                (
+                    end: (-0.04107189, 2.1079984, -0.5275254),
+                    strength: 1469.0942,
+                    hits: [
+                        (
+                            volume: "Loader",
+                            damage: 22.954597,
+                        ),
+                        (
+                            volume: "Breech",
+                            damage: 22.954597,
+                        ),
+                    ],
+                ),
+                (
+                    end: (-0.9455414, 1.5080786, -0.8084731),
+                    strength: 1448.6832,
+                    hits: [
+                        (
+                            volume: "Loader",
+                            damage: 22.635675,
+                        ),
+                        (
+                            volume: "Ammo_L_1",
+                            damage: 22.635675,
+                        ),
+                    ],
+                ),
+                (
+                    end: (0.13525772, 2.0105057, -0.22175026),
+                    strength: 1428.2813,
+                    hits: [
+                        (
+                            volume: "Loader",
+                            damage: 22.316895,
+                        ),
+                        (
+                            volume: "Breech",
+                            damage: 22.316895,
+                        ),
+                    ],
+                ),
+                (
+                    end: (-0.17369938, 1.9724779, -0.7567396),
+                    strength: 1407.886,
+                    hits: [
+                        (
+                            volume: "Loader",
+                            damage: 21.998219,
+                        ),
+                        (
+                            volume: "Breech",
+                            damage: 21.998219,
+                        ),
+                    ],
+                ),
+                (
+                    end: (-0.9455404, 1.5415068, -0.4194069),
+                    strength: 1387.4949,
+                    hits: [
+                        (
+                            volume: "Loader",
+                            damage: 21.679607,
+                        ),
+                        (
+                            volume: "Gunner",
+                            damage: 21.679607,
+                        ),
+                        (
+                            volume: "Ammo_L_1",
+                            damage: 21.679607,
+                        ),
+                    ],
+                ),
+                (
+                    end: (0.044571877, 2.1478233, -0.37933397),
+                    strength: 1367.105,
+                    hits: [
+                        (
+                            volume: "Loader",
+                            damage: 21.361015,
+                        ),
+                        (
+                            volume: "Breech",
+                            damage: 21.361015,
+                        ),
+                    ],
+                ),
+                (
+                    end: (-0.9455404, 1.5686498, -1.08636),
+                    strength: 1346.7137,
+                    hits: [
+                        (
+                            volume: "Loader",
+                            damage: 21.042402,
+                        ),
+                        (
+                            volume: "Ammo_L_1",
+                            damage: 21.042402,
+                        ),
+                    ],
+                ),
+                (
+                    end: (-1.1482391, 1.877253, -0.2018218),
+                    strength: 1326.318,
+                    hits: [
+                        (
+                            volume: "Loader",
+                            damage: 20.723719,
+                        ),
+                        (
+                            volume: "Gunner",
+                            damage: 20.723719,
+                        ),
+                    ],
+                ),
+                (
+                    end: (-0.13806725, 2.1383963, -0.6956401),
+                    strength: 1305.9147,
+                    hits: [
+                        (
+                            volume: "Loader",
+                            damage: 20.404917,
+                        ),
+                        (
+                            volume: "Breech",
+                            damage: 20.404917,
+                        ),
+                    ],
+                ),
+                (
+                    end: (-0.9455404, 1.3710799, -0.655962),
+                    strength: 1285.5002,
+                    hits: [
+                        (
+                            volume: "Loader",
+                            damage: 20.085941,
+                        ),
+                        (
+                            volume: "Ammo_L_1",
+                            damage: 20.085941,
+                        ),
+                    ],
+                ),
+                (
+                    end: (0.13126183, 2.1010656, -0.2290082),
+                    strength: 1265.0713,
+                    hits: [
+                        (
+                            volume: "Loader",
+                            damage: 19.766739,
+                        ),
+                        (
+                            volume: "Breech",
+                            damage: 19.766739,
+                        ),
+                    ],
+                ),
+                (
+                    end: (-0.51833344, 1.8419948, -1.0492706),
+                    strength: 1244.624,
+                    hits: [
+                        (
+                            volume: "Loader",
+                            damage: 19.44725,
+                        ),
+                    ],
+                ),
+                (
+                    end: (-0.9455404, 1.5943642, -0.22337389),
+                    strength: 1224.1543,
+                    hits: [
+                        (
+                            volume: "Loader",
+                            damage: 19.12741,
+                        ),
+                        (
+                            volume: "Gunner",
+                            damage: 19.12741,
+                        ),
+                        (
+                            volume: "Ammo_L_1",
+                            damage: 19.12741,
+                        ),
+                    ],
+                ),
+                (
+                    end: (-0.026085854, 2.2251773, -0.50200367),
+                    strength: 1203.658,
+                    hits: [
+                        (
+                            volume: "Loader",
+                            damage: 18.807156,
+                        ),
+                        (
+                            volume: "Breech",
+                            damage: 18.807156,
+                        ),
+                    ],
+                ),
+                (
+                    end: (-0.9455404, 1.3572865, -1.0026932),
+                    strength: 1183.1304,
+                    hits: [
+                        (
+                            volume: "Loader",
+                            damage: 18.486412,
+                        ),
+                        (
+                            volume: "Ammo_L_1",
+                            damage: 18.486412,
+                        ),
+                    ],
+                ),
+                (
+                    end: (0.18760014, 1.9940844, -0.1310296),
+                    strength: 1162.5668,
+                    hits: [
+                        (
+                            volume: "Loader",
+                            damage: 18.165106,
+                        ),
+                        (
+                            volume: "Breech",
+                            damage: 18.165106,
+                        ),
+                    ],
+                ),
+                (
+                    end: (-0.2606678, 2.0941339, -0.907825),
+                    strength: 1141.9619,
+                    hits: [
+                        (
+                            volume: "Loader",
+                            damage: 17.843155,
+                        ),
+                        (
+                            volume: "Breech",
+                            damage: 17.843155,
+                        ),
+                    ],
+                ),
+                (
+                    end: (-0.9455404, 1.3314762, -0.43431282),
+                    strength: 1121.3103,
+                    hits: [
+                        (
+                            volume: "Loader",
+                            damage: 17.520473,
+                        ),
+                        (
+                            volume: "Ammo_L_1",
+                            damage: 17.520473,
+                        ),
+                    ],
+                ),
+                (
+                    end: (0.09518051, 2.1986713, -0.29186583),
+                    strength: 1100.606,
+                    hits: [
+                        (
+                            volume: "Loader",
+                            damage: 17.196968,
+                        ),
+                        (
+                            volume: "Breech",
+                            damage: 17.196968,
+                        ),
+                    ],
+                ),
+                (
+                    end: (-1.5457134, 1.4522934, -1.7004633),
+                    strength: 1079.8424,
+                    hits: [
+                        (
+                            volume: "Loader",
+                            damage: 16.872538,
+                        ),
+                    ],
+                ),
+                (
+                    end: (-1.5457134, 1.6878524, -0.038864613),
+                    strength: 1059.0131,
+                    hits: [
+                        (
+                            volume: "Loader",
+                            damage: 16.54708,
+                        ),
+                        (
+                            volume: "Gunner",
+                            damage: 16.54708,
+                        ),
+                    ],
+                ),
+                (
+                    end: (-0.13972569, 2.2698479, -0.69900036),
+                    strength: 1038.1101,
+                    hits: [
+                        (
+                            volume: "Loader",
+                            damage: 16.22047,
+                        ),
+                        (
+                            volume: "Breech",
+                            damage: 16.22047,
+                        ),
+                    ],
+                ),
+                (
+                    end: (-0.97500515, 1.1896343, -0.8156891),
+                    strength: 1017.1257,
+                    hits: [
+                        (
+                            volume: "Loader",
+                            damage: 15.892589,
+                        ),
+                    ],
+                ),
+                (
+                    end: (0.18251324, 2.0936723, -0.14021063),
+                    strength: 996.051,
+                    hits: [
+                        (
+                            volume: "Loader",
+                            damage: 15.563297,
+                        ),
+                        (
+                            volume: "Breech",
+                            damage: 15.563297,
+                        ),
+                    ],
+                ),
+                (
+                    end: (-0.35947132, 1.9533472, -1.0977802),
+                    strength: 974.8769,
+                    hits: [
+                        (
+                            volume: "Loader",
+                            damage: 15.232451,
+                        ),
+                    ],
+                ),
+                (
+                    end: (-0.9455404, 1.398212, -0.19834614),
+                    strength: 953.5928,
+                    hits: [
+                        (
+                            volume: "Loader",
+                            damage: 14.899887,
+                        ),
+                        (
+                            volume: "Ammo_L_1",
+                            damage: 14.899887,
+                        ),
+                    ],
+                ),
+                (
+                    end: (0.022356033, 2.293882, -0.41835594),
+                    strength: 932.1875,
+                    hits: [
+                        (
+                            volume: "Loader",
+                            damage: 14.56543,
+                        ),
+                        (
+                            volume: "Breech",
+                            damage: 14.56543,
+                        ),
+                    ],
+                ),
+                (
+                    end: (-1.0118122, 1.2777514, -1.2808886),
+                    strength: 910.64874,
+                    hits: [
+                        (
+                            volume: "Loader",
+                            damage: 14.228887,
+                        ),
+                    ],
+                ),
+                (
+                    end: (-1.1329002, 1.9697337, 0.04821253),
+                    strength: 888.9629,
+                    hits: [
+                        (
+                            volume: "Loader",
+                            damage: 13.890045,
+                        ),
+                        (
+                            volume: "Gunner",
+                            damage: 13.890045,
+                        ),
+                    ],
+                ),
+                (
+                    end: (-0.43386555, 2.2822351, -1.0548286),
+                    strength: 867.115,
+                    hits: [
+                        (
+                            volume: "Loader",
+                            damage: 13.548672,
+                        ),
+                    ],
+                ),
+                (
+                    end: (-0.97500515, 1.1279087, -0.5437927),
+                    strength: 845.0885,
+                    hits: [
+                        (
+                            volume: "Loader",
+                            damage: 13.204508,
+                        ),
+                    ],
+                ),
+                (
+                    end: (0.15053368, 2.2034402, -0.19600964),
+                    strength: 822.8649,
+                    hits: [
+                        (
+                            volume: "Loader",
+                            damage: 12.8572645,
+                        ),
+                        (
+                            volume: "Breech",
+                            damage: 12.8572645,
+                        ),
+                    ],
+                ),
+                (
+                    end: (-1.5457134, 1.5754886, -2.0139065),
+                    strength: 800.4237,
+                    hits: [
+                        (
+                            volume: "Loader",
+                            damage: 12.50662,
+                        ),
+                    ],
+                ),
+                (
+                    end: (-1.5457134, 1.4505835, 0.04885912),
+                    strength: 777.74176,
+                    hits: [
+                        (
+                            volume: "Loader",
+                            damage: 12.152215,
+                        ),
+                        (
+                            volume: "Gunner",
+                            damage: 12.152215,
+                        ),
+                    ],
+                ),
+                (
+                    end: (-0.09685421, 2.371584, -0.625123),
+                    strength: 754.79297,
+                    hits: [
+                        (
+                            volume: "Loader",
+                            damage: 11.79364,
+                        ),
+                        (
+                            volume: "Breech",
+                            damage: 11.79364,
+                        ),
+                    ],
+                ),
+                (
+                    end: (-0.97500515, 1.0732207, -1.037303),
+                    strength: 731.5478,
+                    hits: [
+                        (
+                            volume: "Loader",
+                            damage: 11.430434,
+                        ),
+                    ],
+                ),
+                (
+                    end: (0.22541428, 2.0559673, -0.06576395),
+                    strength: 707.97235,
+                    hits: [
+                        (
+                            volume: "Loader",
+                            damage: 11.062068,
+                        ),
+                        (
+                            volume: "Breech",
+                            damage: 11.062068,
+                        ),
+                    ],
+                ),
+                (
+                    end: (-0.2899952, 2.0973253, -1.1378927),
+                    strength: 684.0278,
+                    hits: [
+                        (
+                            volume: "Loader",
+                            damage: 10.687934,
+                        ),
+                    ],
+                ),
+                (
+                    end: (-0.97500515, 1.180747, -0.25172186),
+                    strength: 659.66895,
+                    hits: [
+                        (
+                            volume: "Loader",
+                            damage: 10.307327,
+                        ),
+                    ],
+                ),
+                (
+                    end: (0.08482742, 2.3180537, -0.31024122),
+                    strength: 634.84314,
+                    hits: [
+                        (
+                            volume: "Loader",
+                            damage: 9.919424,
+                        ),
+                        (
+                            volume: "Breech",
+                            damage: 9.919424,
+                        ),
+                    ],
+                ),
+                (
+                    end: (-1.0674648, 1.2890806, -1.597147),
+                    strength: 609.48816,
+                    hits: [
+                        (
+                            volume: "Loader",
+                            damage: 9.5232525,
+                        ),
+                    ],
+                ),
+                (
+                    end: (-0.9418974, 1.8044028, 0.14294672),
+                    strength: 583.52936,
+                    hits: [],
+                ),
+                (
+                    end: (-0.45310593, 2.4653082, -1.0400562),
+                    strength: 556.8767,
+                    hits: [
+                        (
+                            volume: "Loader",
+                            damage: 8.701199,
+                        ),
+                    ],
+                ),
+                (
+                    end: (-0.97500515, 0.95986724, -0.72487545),
+                    strength: 529.4194,
+                    hits: [
+                        (
+                            volume: "Loader",
+                            damage: 8.272178,
+                        ),
+                    ],
+                ),
+                (
+                    end: (0.20228481, 2.1759338, -0.10627127),
+                    strength: 501.01886,
+                    hits: [
+                        (
+                            volume: "Loader",
+                            damage: 7.8284197,
+                        ),
+                        (
+                            volume: "Breech",
+                            damage: 7.8284197,
+                        ),
+                    ],
+                ),
+                (
+                    end: (-0.18208027, 1.8762393, -1.1533289),
+                    strength: 471.49774,
+                    hits: [
+                        (
+                            volume: "Loader",
+                            damage: 7.367152,
+                        ),
+                    ],
+                ),
+                (
+                    end: (-1.3604765, 1.2304163, 0.040537357),
+                    strength: 440.62347,
+                    hits: [
+                        (
+                            volume: "Loader",
+                            damage: 6.884742,
+                        ),
+                    ],
+                ),
+                (
+                    end: (-0.23660183, 2.5257406, -0.57614994),
+                    strength: 408.0807,
+                    hits: [
+                        (
+                            volume: "Loader",
+                            damage: 6.3762608,
+                        ),
+                    ],
+                ),
+                (
+                    end: (-0.97500515, 1.0222697, -1.3133821),
+                    strength: 373.42368,
+                    hits: [
+                        (
+                            volume: "Loader",
+                            damage: 5.834745,
+                        ),
+                    ],
+                ),
+                (
+                    end: (0.2588539, 1.9982123, -0.007630825),
+                    strength: 335.98615,
+                    hits: [
+                        (
+                            volume: "Breech",
+                            damage: 5.2497835,
+                        ),
+                    ],
+                ),
+                (
+                    end: (-0.26683807, 2.2668428, -1.1512623),
+                    strength: 294.6911,
+                    hits: [
+                        (
+                            volume: "Loader",
+                            damage: 4.6045485,
+                        ),
+                    ],
+                ),
+                (
+                    end: (-0.97500515, 0.9737258, -0.37767553),
+                    strength: 247.57535,
+                    hits: [
+                        (
+                            volume: "Loader",
+                            damage: 3.8683648,
+                        ),
+                    ],
+                ),
+                (
+                    end: (0.1488018, 2.3051362, -0.19938707),
+                    strength: 190.20673,
+                    hits: [
+                        (
+                            volume: "Loader",
+                            damage: 2.97198,
+                        ),
+                        (
+                            volume: "Breech",
+                            damage: 2.97198,
+                        ),
+                    ],
+                ),
+                (
+                    end: (-1.4071226, 1.3291497, -2.1680193),
+                    strength: 103.52636,
+                    hits: [
+                        (
+                            volume: "Loader",
+                            damage: 1.6175994,
+                        ),
+                    ],
+                ),
+            ],
+        ),
     ],
     end: Rest(
-        volume: "Breech",
+        volume: "Turret_Bottom",
     ),
     doses: [
+        (
+            volume: "Ammo_L_1",
+            line: 0.0,
+            field: 0.07605928,
+            taken: 76,
+            entered: None,
+        ),
         (
             volume: "Ammo_R_0",
             line: 0.0,
@@ -691,23 +1571,30 @@
         ),
         (
             volume: "Breech",
-            line: 256.1074,
-            field: 226.88196,
+            line: 199.12079,
+            field: 227.00957,
             taken: 142000,
             entered: Some((-0.5659027, 2.0155344, -0.5244746)),
         ),
         (
+            volume: "Commander",
+            line: 21.144457,
+            field: 0.0,
+            taken: 21144,
+            entered: Some((-0.4453392, 2.0160203, 0.71061516)),
+        ),
+        (
             volume: "Gunner",
-            line: 0.0,
-            field: 42.76301,
+            line: 83.312195,
+            field: 42.813763,
             taken: 30000,
-            entered: None,
+            entered: Some((-0.6703129, 2.0187407, -0.39587927)),
         ),
         (
             volume: "Loader",
             line: 0.0,
-            field: 12.624527,
-            taken: 12625,
+            field: 12.953174,
+            taken: 12953,
             entered: None,
         ),
     ],

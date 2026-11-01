@@ -359,6 +359,58 @@ fn scenarios() -> Vec<Scenario> {
     ron::de::from_str(&text).unwrap_or_else(|error| panic!("{}: {error}", path.display()))
 }
 
+/// The game's damage-model stage and live views rely on the march's interaction sequence.
+/// A stale record must not hide new reflections, crossings or fields behind an unchanged verdict.
+/// This checks interaction topology; the stage tests check the resulting poses and speeds.
+/// All fixture choices come from scenarios.
+#[test]
+fn recorded_scenarios_keep_the_current_interaction_sequence() {
+    let dir = crate::assets::asset_root().join(SCENARIO_DIR);
+    for scenario in &scenarios() {
+        let path = dir.join(format!("{}.ron", scenario.name));
+        let stored = PenetrationReport::load(&path).unwrap();
+        let actual = record_scenario(scenario);
+        assert_eq!(
+            stored.steps(),
+            actual.steps(),
+            "{}: review and re-record its interaction sequence",
+            scenario.name
+        );
+        let bounces = |report: &PenetrationReport| {
+            report
+                .ricochets
+                .iter()
+                .map(|bounce| bounce.volume.clone())
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            bounces(&stored),
+            bounces(&actual),
+            "{}: reflected faces",
+            scenario.name
+        );
+        let plates = |report: &PenetrationReport| {
+            report
+                .plates
+                .iter()
+                .map(|plate| (plate.name.clone(), plate.exit.is_some(), plate.overmatched))
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            plates(&stored),
+            plates(&actual),
+            "{}: crossed volumes",
+            scenario.name
+        );
+        assert_eq!(
+            stored.spall.len(),
+            actual.spall.len(),
+            "{}: field count",
+            scenario.name
+        );
+    }
+}
+
 /// Re-records every scenario file from today's march (ignored; a tool, run on demand):
 /// `OVERMATCH_BLESS=1 cargo test --lib pen_cam::bless -- --ignored` writes them
 /// ([`crate::tests::bless`]), and the diff is the review; without it the test records and checks
