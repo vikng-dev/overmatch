@@ -1834,8 +1834,11 @@ mod tests {
     /// invariant `validate()` already enforces is asserted here exactly once — by calling it.
     #[test]
     fn the_shipped_sheet_parses_validates_and_is_self_consistent() {
-        let spec: TankSpec = ron::de::from_str(include_str!("../assets/tiger_1/tiger_1.tank.ron"))
-            .expect("tiger_1.tank.ron must deserialize into TankSpec");
+        let spec: TankSpec = crate::provenance::from_shipped_str(
+            crate::tank::TANK_SPEC_PATH,
+            include_str!("../assets/tiger_1/tiger_1.tank.ron"),
+        )
+        .expect("tiger_1.tank.ron must deserialize into TankSpec");
         spec.validate()
             .expect("the shipped sheet must be semantically valid");
 

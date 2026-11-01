@@ -66,8 +66,10 @@ impl Attachments {
     /// ([`SubstanceRegistry::shipped`]).
     pub fn shipped_static() -> &'static Self {
         static LIST: LazyLock<Attachments> = LazyLock::new(|| {
-            Attachments::from_ron(ATTACHMENTS_RON, SubstanceRegistry::shipped_static())
-                .unwrap_or_else(|err| panic!("attachments: {ATTACHMENTS_PATH}: {err}"))
+            crate::provenance::shipped(ATTACHMENTS_PATH, || {
+                Attachments::from_ron(ATTACHMENTS_RON, SubstanceRegistry::shipped_static())
+            })
+            .unwrap_or_else(|err| panic!("attachments: {ATTACHMENTS_PATH}: {err}"))
         });
         &LIST
     }
@@ -208,7 +210,9 @@ mod tests {
     #[test]
     fn every_declared_kind_resolves_to_its_source() {
         let list = Attachments::shipped_static();
-        let KeyedMap(rows) = ron::from_str::<KeyedMap<Row>>(ATTACHMENTS_RON).unwrap();
+        let KeyedMap(rows) =
+            crate::provenance::from_shipped_str::<KeyedMap<Row>>(ATTACHMENTS_PATH, ATTACHMENTS_RON)
+                .unwrap();
         assert_eq!(list.kinds.len(), rows.len());
         for (name, row) in rows {
             let expected = match row {

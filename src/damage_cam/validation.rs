@@ -199,7 +199,8 @@ pub(super) fn check_vehicle_servos(report: &PenetrationReport) -> Result<(), Val
         ValidationError::Vehicle(format!("{}: {error}", path.display()))
     };
     let text = std::fs::read_to_string(&path).map_err(|error| unread(&error))?;
-    let spec: crate::spec::TankSpec = ron::de::from_str(&text).map_err(|error| unread(&error))?;
+    let spec: crate::spec::TankSpec =
+        crate::provenance::from_shipped_str(vehicle, &text).map_err(|error| unread(&error))?;
     let declared = spec.servos.keys();
     let unnamed = declared
         .into_iter()

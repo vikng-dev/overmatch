@@ -399,7 +399,9 @@ impl BurstFields {
     /// a probe of how the throw's cost scales with `N`.
     #[cfg(test)]
     pub(crate) fn shipped_at(ring: usize) -> Self {
-        let file: ShapeFile = ron::de::from_str(SPALL_CONE_RON).expect("the shipped shape parses");
+        let file: ShapeFile =
+            crate::provenance::from_shipped_str("assets/ballistics/spall_cone.ron", SPALL_CONE_RON)
+                .expect("the shipped shape parses");
         Self::from_file(&file, ring)
             .expect("the shipped burst fields validate at any direction count")
     }
@@ -408,7 +410,10 @@ impl BurstFields {
     /// [`ConeShape::shipped`] does; [`super::sim_plugin`] reads them while the app is built.
     pub(crate) fn shipped() -> &'static Self {
         static FIELDS: std::sync::LazyLock<BurstFields> = std::sync::LazyLock::new(|| {
-            BurstFields::from_ron(SPALL_CONE_RON).unwrap_or_else(|err| {
+            crate::provenance::shipped("assets/ballistics/spall_cone.ron", || {
+                BurstFields::from_ron(SPALL_CONE_RON)
+            })
+            .unwrap_or_else(|err| {
                 panic!("spall cone: embedded spall_cone.ron's burst block is unusable: {err}")
             })
         });
@@ -449,7 +454,10 @@ impl BurstFields {
 /// and nothing else: the shape and the field law both conserve a cone's emitted total.
 pub(crate) fn energy_share() -> f32 {
     static SHARE: std::sync::LazyLock<f32> = std::sync::LazyLock::new(|| {
-        energy_share_from_ron(SPALL_CONE_RON).unwrap_or_else(|err| {
+        crate::provenance::shipped("assets/ballistics/spall_cone.ron", || {
+            energy_share_from_ron(SPALL_CONE_RON)
+        })
+        .unwrap_or_else(|err| {
             panic!("spall cone: embedded spall_cone.ron's energy share is unusable: {err}")
         })
     });
@@ -537,7 +545,9 @@ impl ConeShape {
     /// the throw's cost scales with `N`.
     #[cfg(test)]
     pub(crate) fn shipped_at(directions: usize) -> Self {
-        let file = ron::de::from_str(SPALL_CONE_RON).expect("the shipped shape parses");
+        let file =
+            crate::provenance::from_shipped_str("assets/ballistics/spall_cone.ron", SPALL_CONE_RON)
+                .expect("the shipped shape parses");
         Self::from_file(file, directions)
             .expect("the shipped shape validates at any direction count")
     }
@@ -547,9 +557,10 @@ impl ConeShape {
     /// is built, so the file is parsed and validated at startup, never at the first throw.
     pub(crate) fn shipped() -> &'static Self {
         static SHAPE: std::sync::LazyLock<ConeShape> = std::sync::LazyLock::new(|| {
-            ConeShape::from_ron(SPALL_CONE_RON).unwrap_or_else(|err| {
-                panic!("spall cone: embedded spall_cone.ron is unusable: {err}")
+            crate::provenance::shipped("assets/ballistics/spall_cone.ron", || {
+                ConeShape::from_ron(SPALL_CONE_RON)
             })
+            .unwrap_or_else(|err| panic!("spall cone: embedded spall_cone.ron is unusable: {err}"))
         });
         &SHAPE
     }
@@ -870,7 +881,10 @@ mod tests {
         assert_eq!(energy_share_from_ron(&with("2.5")), Ok(2.5));
         assert_eq!(
             energy_share(),
-            energy_share_from_ron(SPALL_CONE_RON).unwrap()
+            crate::provenance::shipped("assets/ballistics/spall_cone.ron", || {
+                energy_share_from_ron(SPALL_CONE_RON)
+            })
+            .unwrap()
         );
         for share in ["0.0", "-0.5", "1.0e-40", "NaN", "inf"] {
             let error = energy_share_from_ron(&with(share)).expect_err(share);
@@ -902,7 +916,10 @@ mod tests {
         assert_eq!(read.shape(), shape);
         assert_eq!(
             BurstFields::shipped(),
-            &BurstFields::from_ron(SPALL_CONE_RON).unwrap()
+            &crate::provenance::shipped("assets/ballistics/spall_cone.ron", || {
+                BurstFields::from_ron(SPALL_CONE_RON)
+            })
+            .unwrap()
         );
         let sourced = burst_file(
             r#"driven_energy_factor: (1.0, Fixture("fixture")),

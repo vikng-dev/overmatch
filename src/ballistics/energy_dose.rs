@@ -36,9 +36,10 @@ fn from_ron(text: &str) -> Result<f64, String> {
 /// contract is a build defect. [`super::sim_plugin`] reads it while the app is built.
 pub(crate) fn joules_per_hp() -> f64 {
     static RATE: std::sync::LazyLock<f64> = std::sync::LazyLock::new(|| {
-        from_ron(ENERGY_DOSE_RON).unwrap_or_else(|err| {
-            panic!("energy dose: embedded energy_dose.ron is unusable: {err}")
+        crate::provenance::shipped("assets/ballistics/energy_dose.ron", || {
+            from_ron(ENERGY_DOSE_RON)
         })
+        .unwrap_or_else(|err| panic!("energy dose: embedded energy_dose.ron is unusable: {err}"))
     });
     *RATE
 }

@@ -438,7 +438,8 @@ const TANK_SPEC_RON: &str = include_str!(concat!(
 /// parse here is a broken build.
 pub(crate) fn selected_spec() -> &'static TankSpec {
     static SPEC: std::sync::LazyLock<TankSpec> = std::sync::LazyLock::new(|| {
-        ron::de::from_str(TANK_SPEC_RON).expect("the selected tank's embedded sheet parses")
+        crate::provenance::from_shipped_str(crate::assets::tank_file!(".tank.ron"), TANK_SPEC_RON)
+            .expect("the selected tank's embedded sheet parses")
     });
     &SPEC
 }
@@ -938,7 +939,9 @@ fn extract_at_startup(mut commands: Commands) {
     // sides walk identical accessor bytes by construction. `geometry_lod` has already fingerprinted
     // it against the certificate by the time this runs.
     let path = root.join(crate::tank::TANK_SIM_GLB_PATH);
-    let asset = certify_asset(&path, TANK_SPEC_RON, &SubstanceRegistry::shipped())
+    let asset = crate::provenance::with_shipped_policy(|| {
+        certify_asset(&path, TANK_SPEC_RON, &SubstanceRegistry::shipped())
+    })
         .unwrap_or_else(|findings| {
         panic!(
             "bake: {} did not pass the consumer contract:\n{}\n\
@@ -2074,7 +2077,11 @@ mod tests {
     fn the_sim_artifact_walks_the_bytes_the_view_glb_carried() {
         let root = crate::assets::asset_root();
         let registry = SubstanceRegistry::shipped();
-        let spec: TankSpec = ron::de::from_str(TANK_SPEC_RON).expect("the shipped sheet parses");
+        let spec: TankSpec = crate::provenance::from_shipped_str(
+            crate::assets::tank_file!(".tank.ron"),
+            TANK_SPEC_RON,
+        )
+        .expect("the shipped sheet parses");
         let extract = |path: &Path| {
             extract_tank_geometry(path, &spec, &registry)
                 .unwrap_or_else(|f| panic!("{} extracts: {}", path.display(), render(&f)))

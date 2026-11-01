@@ -7,7 +7,8 @@
 //! family. `Resolution` says how finely or stably a law is evaluated, never what it states, and
 //! gives the stability or cost reason. `StandIn` names the law or fact the game does not have yet.
 //!
-//! `Fixture` labels test data and loads only under `cfg(test)`. Missing provenance, a blank note
+//! `Fixture` labels inline test data and loads only under `cfg(test)`. Shipped-file boundaries
+//! use [`shipped`] in every build, including tests. Missing provenance, a blank note
 //! or a fixture in shipped data is refused at load; the caller supplies the file and the parser
 //! locates the field. The loader keeps only the value; the data file holds its job and note.
 
@@ -56,11 +57,15 @@ pub(crate) struct Sourced<T>(pub(crate) T);
 
 impl<'de, T: Deserialize<'de>> Deserialize<'de> for Sourced<T> {
     fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        #[cfg(test)]
+        if !FIXTURES_ALLOWED.get() {
+            return deserialize_sourced::<T, D, false>(deserializer);
+        }
         deserialize_sourced::<T, D, { cfg!(test) }>(deserializer)
     }
 }
 
-// The test instantiates the shipped policy too, so it exercises the same visitor and refusal.
+// Both admission policies use the same visitor and refusal.
 fn deserialize_sourced<'de, T: Deserialize<'de>, D: Deserializer<'de>, const FIXTURES: bool>(
     deserializer: D,
 ) -> Result<Sourced<T>, D::Error> {
@@ -106,6 +111,47 @@ fn deserialize_sourced<'de, T: Deserialize<'de>, D: Deserializer<'de>, const FIX
     deserializer.deserialize_any(SourcedVisitor::<T, FIXTURES>(std::marker::PhantomData))
 }
 
+// Only inline tests admit fixtures. A shipped-file boundary temporarily refuses them on this
+// test thread, including nested deserializers, and restores the caller's policy on return or panic.
+#[cfg(test)]
+thread_local! {
+    static FIXTURES_ALLOWED: std::cell::Cell<bool> = const { std::cell::Cell::new(true) };
+}
+
+#[cfg(test)]
+struct ShippedPolicy(bool);
+
+#[cfg(test)]
+impl Drop for ShippedPolicy {
+    fn drop(&mut self) {
+        FIXTURES_ALLOWED.set(self.0);
+    }
+}
+
+/// Load a shipped file under the refusing policy, naming its file in the actual admission error.
+/// Ordinary builds already refuse fixtures; the scoped policy makes CI's test build refuse too.
+pub(crate) fn shipped<T, E: std::fmt::Display>(
+    file: &str,
+    load: impl FnOnce() -> Result<T, E>,
+) -> Result<T, String> {
+    with_shipped_policy(|| load().map_err(|err| format!("{file}: {err}")))
+}
+
+/// Scope a synchronous shipped reader whose refusal already names its file, including panic gates.
+pub(crate) fn with_shipped_policy<T>(load: impl FnOnce() -> T) -> T {
+    #[cfg(test)]
+    let _policy = ShippedPolicy(FIXTURES_ALLOWED.replace(false));
+    load()
+}
+
+/// Deserialize a shipped text with the same policy and filename handling as other file loaders.
+pub(crate) fn from_shipped_str<'de, T: Deserialize<'de>>(
+    file: &str,
+    text: &'de str,
+) -> Result<T, String> {
+    shipped(file, || ron::de::from_str(text))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -141,28 +187,23 @@ mod tests {
     /// Shipped asset admission must refuse test data before play; tests alone accept it.
     #[test]
     fn fixtures_load_only_with_the_test_policy() {
-        #[derive(serde::Deserialize, Debug)]
-        struct ShippedProbe {
-            #[serde(deserialize_with = "deserialize_sourced::<f32, _, false>")]
-            value: Sourced<f32>,
-        }
-
         let text = "(\n    value: (2.5, Fixture(\"fixture\")),\n)";
         assert_eq!(parse(text).unwrap().value, Sourced(2.5));
-        let err = ron::de::from_str::<ShippedProbe>(text).unwrap_err();
-        assert_eq!(
-            err.span.start.line, 2,
-            "the parser locates the refused field"
-        );
-        let report = format!("fixture.ron: {err}");
+        let report = from_shipped_str::<Probe>("fixture.ron", text).unwrap_err();
+        assert!(report.contains("fixture.ron: 2:"), "{report}");
         assert!(
-            report.contains("fixture.ron") && report.contains("Fixture provenance is test-only")
+            report.contains("Fixture provenance is test-only"),
+            "{report}"
         );
-        assert!(report.contains("replace this field's label"));
-        let real =
-            ron::de::from_str::<ShippedProbe>("(value: (2.5, Unit(\"declared pool scale\")))")
-                .unwrap();
+        assert!(report.contains("replace this field's label"), "{report}");
+        let real: Probe = from_shipped_str(
+            "fixture.ron",
+            "(value: (2.5, Unit(\"declared pool scale\")))",
+        )
+        .unwrap();
         assert_eq!(real.value, Sourced(2.5));
+        // A shipped refusal must not change the inline fixture policy on this test thread.
+        assert_eq!(parse(text).unwrap().value, Sourced(2.5));
     }
 
     #[test]

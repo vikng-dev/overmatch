@@ -336,8 +336,10 @@ impl GunRegistry {
     /// authored contract is a build defect, as for the round registry.
     pub(crate) fn shipped() -> &'static Self {
         static REGISTRY: std::sync::LazyLock<GunRegistry> = std::sync::LazyLock::new(|| {
-            GunRegistry::from_files(crate::armaments_index::GUN_FILES, RoundRegistry::shipped())
-                .unwrap_or_else(|err| panic!("guns: the embedded gun files are unusable: {err}"))
+            crate::provenance::shipped("assets/guns", || {
+                GunRegistry::from_files(crate::armaments_index::GUN_FILES, RoundRegistry::shipped())
+            })
+            .unwrap_or_else(|err| panic!("guns: the embedded gun files are unusable: {err}"))
         });
         &REGISTRY
     }

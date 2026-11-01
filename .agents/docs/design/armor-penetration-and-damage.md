@@ -1855,3 +1855,30 @@ unresisted — a known, deliberate gap, not an oversight.
   auto-fallback on a view crewman's knockout. `TankKnockedOut` retired as a gameplay gate (§1a-A); the
   cookoff turret-launch hook moves from `TankKnockedOut`-triggered to `CookedOff`-triggered. Slice
   2 (§7b — backfill/position swapping) is the next design interview.
+
+
+## Review record
+
+### Labels (#245)
+
+Subject: provenance on the game's authored data and damage model, game state only. Crew are HP
+pools at stations. Reviewer: Claude, `review-labels-1-claude.md`; finding IDs below follow its row
+order. Decisions are checked against the code, rather than inherited from the audit's prose.
+
+| reviewer | finding | verified / not a defect | fixed in (subject) |
+|---|---|---|---|
+| Claude | L1: shipped files admit Fixture under cfg(test) | verified: replacing the embedded crew_hp Unit label with Fixture returned a 30-HP pool in the red regression | provenance: refuse fixtures at every shipped load boundary (#245) |
+| Claude | L2: filename assertion adds its own prefix | verified: the old test constructed `fixture.ron: {err}` itself; the regression now reads BoxClasses' real admission error, including crew_hp and repair | provenance: refuse fixtures at every shipped load boundary (#245) |
+| Claude | L11: four non-bisectable main commits | verified by historical source: the new enum lacks Tuned while assets still use it; muzzle retains Tuned through the next two subjects, and bore_length fixtures retain Tuned through the fourth | not fixable; noted: provenance: name each authored value job (#245); data: label authored values by their job (#245); agents: enforce one number one job (#245); data: label the muzzle magnitudes as taste (#245) |
+
+The refusing policy surrounds shipped file readers, including nested registry parses and the raw
+embedded-sheet readers used by CI. Tests authoring inline fixture text (including temporary-file I/O fixtures) use the test policy; a scoped policy on
+each test thread restores its caller on return or unwind. Ordinary builds always refuse Fixture.
+No historical commit is rewritten.
+
+**Admission gates (MEASURED):** the initial embedded-value regression failed by accepting Fixture.
+After the fix, the broader targeted run passed 915 tests (12 existing ignored measurement tests),
+including the requested provenance/spec/rounds/materials/substances/ballistics/buildings filters,
+headless, pen-cam and field-cast checks, and whole-tree guards. The final tree admission/unwind
+assertions, provenance tests and whole-tree guards passed another 82 tests. Formatting and CI
+clippy (`--locked --workspace --all-targets --features dev_ui,bitprobe -- -D warnings`) passed.

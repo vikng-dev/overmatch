@@ -1039,8 +1039,11 @@ pub(crate) fn link_window(
 /// hinge limits a test compares against are the ones the game loads, not a copy.
 #[cfg(test)]
 pub(crate) fn tiger_spec() -> crate::spec::TankSpec {
-    ron::de::from_str(include_str!("../../assets/tiger_1/tiger_1.tank.ron"))
-        .expect("tiger_1.tank.ron parses")
+    crate::provenance::from_shipped_str(
+        crate::tank::TANK_SPEC_PATH,
+        include_str!("../../assets/tiger_1/tiger_1.tank.ron"),
+    )
+    .expect("tiger_1.tank.ron parses")
 }
 
 /// The REAL rig, built the way the sandbox builds it: the shipped glb + the shipped RON's two

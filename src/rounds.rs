@@ -592,11 +592,13 @@ impl RoundRegistry {
     /// broken authored contract is a build defect, as for the substance registry.
     pub(crate) fn shipped() -> &'static Self {
         static REGISTRY: std::sync::LazyLock<RoundRegistry> = std::sync::LazyLock::new(|| {
-            RoundRegistry::from_files(
-                crate::armaments_index::ROUND_FILES,
-                ROUND_TYPES_RON,
-                SubstanceRegistry::shipped_static(),
-            )
+            crate::provenance::shipped("assets/rounds", || {
+                RoundRegistry::from_files(
+                    crate::armaments_index::ROUND_FILES,
+                    ROUND_TYPES_RON,
+                    SubstanceRegistry::shipped_static(),
+                )
+            })
             .unwrap_or_else(|err| panic!("rounds: the embedded round files are unusable: {err}"))
         });
         &REGISTRY

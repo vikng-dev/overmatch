@@ -25,8 +25,11 @@ struct RepairData {
 
 fn work_rate() -> f64 {
     static DATA: std::sync::LazyLock<RepairData> = std::sync::LazyLock::new(|| {
-        let data: RepairData = ron::from_str(include_str!("../../assets/damage/repair.ron"))
-            .expect("assets/damage/repair.ron: hp_per_second needs a value and provenance");
+        let data: RepairData = crate::provenance::from_shipped_str(
+            "assets/damage/repair.ron",
+            include_str!("../../assets/damage/repair.ron"),
+        )
+        .expect("assets/damage/repair.ron: hp_per_second needs a value and provenance");
         assert!(
             data.hp_per_second.0.is_finite() && data.hp_per_second.0 > 0.0,
             "assets/damage/repair.ron: hp_per_second must be finite and positive; author a repair work rate"

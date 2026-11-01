@@ -484,7 +484,8 @@ struct WallAssets {
 /// an automatic gun's fire a [`BURST`] at its cyclic interval.
 fn wall_rounds() -> Vec<WallRound> {
     let sheet: spec::TankSpec =
-        ron::de::from_str(SEED_SPEC).expect("the shipped spec sheet parses");
+        crate::provenance::from_shipped_str(crate::tank::TANK_SPEC_PATH, SEED_SPEC)
+            .expect("the shipped spec sheet parses");
     let mut guns: Vec<(bool, &str)> = sheet
         .weapons
         .values()

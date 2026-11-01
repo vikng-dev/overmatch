@@ -108,7 +108,8 @@ struct RangeGun;
 /// The seed tank's primary weapon, every round it stows fired from its gun.
 fn seed_gun() -> Weapon {
     let sheet: spec::TankSpec =
-        ron::de::from_str(SEED_SPEC).expect("the shipped spec sheet parses");
+        crate::provenance::from_shipped_str(crate::tank::TANK_SPEC_PATH, SEED_SPEC)
+            .expect("the shipped spec sheet parses");
     let (name, weapon) = sheet
         .weapons
         .iter()

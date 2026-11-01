@@ -541,7 +541,7 @@ impl MuzzleLook {
     /// a build defect, as for the gun registry that reads it.
     pub(crate) fn shipped() -> &'static Self {
         static LOOK: LazyLock<MuzzleLook> = LazyLock::new(|| {
-            MuzzleLook::parse(LOOK_RON)
+            crate::provenance::shipped("assets/vfx/muzzle.ron", || MuzzleLook::parse(LOOK_RON))
                 .unwrap_or_else(|err| panic!("assets/vfx/muzzle.ron is unusable: {err}"))
         });
         &LOOK
@@ -1121,7 +1121,8 @@ mod tests {
     fn each_shape_states_its_layers_and_energy_never_adds_one() {
         for mask in 0..16 {
             let flags = std::array::from_fn::<_, 4, _>(|bit| mask & (1 << bit) != 0);
-            let mut file: LookFile = ron::de::from_str(LOOK_RON).unwrap();
+            let mut file: LookFile =
+                crate::provenance::from_shipped_str("assets/vfx/muzzle.ron", LOOK_RON).unwrap();
             let row = &mut file.shapes.muzzle_brake;
             row.fireball = Sourced(flags[0]);
             row.glow = Sourced(flags[1]);
@@ -1168,7 +1169,8 @@ mod tests {
     /// resolves both from one row, fails. FIXTURE DATA: two rows that differ in every statement.
     #[test]
     fn each_shape_resolves_its_own_row() {
-        let mut file: LookFile = ron::de::from_str(LOOK_RON).unwrap();
+        let mut file: LookFile =
+            crate::provenance::from_shipped_str("assets/vfx/muzzle.ron", LOOK_RON).unwrap();
         let brake = &mut file.shapes.muzzle_brake;
         brake.core.sprite = Sourced(CoreSprite::Starburst);
         brake.core.share = Sourced(1.0);
@@ -1375,7 +1377,10 @@ mod tests {
     /// take a size to zero, and a side jet along the bore. The shipped file loads.
     #[test]
     fn the_taste_file_refuses_what_the_law_cannot_draw() {
-        assert!(MuzzleLook::parse(LOOK_RON).is_ok());
+        assert!(
+            crate::provenance::shipped("assets/vfx/muzzle.ron", || MuzzleLook::parse(LOOK_RON))
+                .is_ok()
+        );
         for (from, to, field) in [
             (
                 "duration_exponent: (0.1667,",

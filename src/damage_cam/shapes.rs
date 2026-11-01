@@ -91,8 +91,8 @@ impl TankAsset {
         let path = root.join(vehicle);
         let text =
             std::fs::read_to_string(&path).map_err(|e| format!("{}: {e}", path.display()))?;
-        let spec: TankSpec =
-            ron::de::from_str(&text).map_err(|e| format!("{}: {e}", path.display()))?;
+        let spec: TankSpec = crate::provenance::from_shipped_str(vehicle, &text)
+            .map_err(|e| format!("{}: {e}", path.display()))?;
         let stem = vehicle.strip_suffix(".tank.ron").unwrap_or(vehicle);
         let glb = root.join(format!("{stem}.sim.glb"));
         let geometry = extract_tank_geometry(&glb, &spec, &SubstanceRegistry::shipped())

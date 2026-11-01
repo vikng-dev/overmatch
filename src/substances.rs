@@ -961,10 +961,12 @@ impl SubstanceRegistry {
     /// embedded tank spec: a broken authored contract is a build defect, not a runtime condition to
     /// degrade through.
     pub fn shipped() -> Self {
-        Self::from_ron_at(
-            std::path::Path::new("assets/materials/materials.ron"),
-            MATERIALS_RON,
-        )
+        crate::provenance::shipped("assets/materials/materials.ron", || {
+            Self::from_ron_at(
+                std::path::Path::new("assets/materials/materials.ron"),
+                MATERIALS_RON,
+            )
+        })
         .unwrap_or_else(|err| panic!("substances: embedded materials.ron is unusable: {err}"))
     }
 

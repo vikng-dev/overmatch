@@ -389,6 +389,12 @@ impl TreeLibrary {
     /// otherwise every file must exist and hold (ADR-0011): a map that places a tree this build
     /// cannot read is present-but-broken.
     pub(crate) fn load<'a>(root: &Path, ids: impl IntoIterator<Item = &'a str>) -> Self {
+        crate::provenance::with_shipped_policy(|| Self::load_files(root, ids))
+    }
+
+    // Shared I/O and validation. Tests writing their own inline fixtures to a temporary directory
+    // enter here under test admission; shipped callers enter through `load`'s refusing policy.
+    fn load_files<'a>(root: &Path, ids: impl IntoIterator<Item = &'a str>) -> Self {
         let ids: BTreeSet<&str> = ids.into_iter().collect();
         if ids.is_empty() {
             return Self::default();
@@ -1220,11 +1226,13 @@ pub(crate) mod tests {
         }
         let species: SpeciesTable =
             ron::from_str(include_str!("../assets/trees/species.ron")).unwrap();
-        let wood = Wood::parse(
-            Path::new("assets/trees/wood.ron"),
-            include_str!("../assets/trees/wood.ron"),
-            &species,
-        )
+        let wood = crate::provenance::shipped("assets/trees/wood.ron", || {
+            Wood::parse(
+                Path::new("assets/trees/wood.ron"),
+                include_str!("../assets/trees/wood.ron"),
+                &species,
+            )
+        })
         .expect("all shipped species have sourced structural wood facts");
         assert!(wood.structure.0.keys().eq(species.keys()));
     }
@@ -1254,7 +1262,18 @@ pub(crate) mod tests {
                 structural_wood_text(&structural_row("fixture", &fields)),
             )
             .expect("write incomplete fixture wood");
-            let outcome = std::panic::catch_unwind(|| TreeLibrary::load(&root, ["fixture"]));
+            // The shipped entry refuses test provenance first. After its unwind, the inline
+            // fixture uses the same file-loading implementation to exercise the structural gate.
+            let shipped = std::panic::catch_unwind(|| TreeLibrary::load(&root, ["fixture"]))
+                .expect_err("a shipped wood file must refuse Fixture in the test build too");
+            let report = shipped
+                .downcast_ref::<String>()
+                .expect("a formatted load refusal");
+            assert!(
+                report.contains("wood.ron") && report.contains("Fixture provenance"),
+                "{report}"
+            );
+            let outcome = std::panic::catch_unwind(|| TreeLibrary::load_files(&root, ["fixture"]));
             std::fs::remove_dir_all(&root).expect("remove fixture files");
             let failure = outcome.expect_err("the wood gate refuses before any tree asset is read");
             let error = failure

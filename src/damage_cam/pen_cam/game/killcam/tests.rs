@@ -174,7 +174,11 @@ fn the_killer_card_reads_the_live_shooters_loaded_spec() {
     let (mut app, player, camera) = app(Settings::default());
     let record = report(RECORD);
     let path = crate::assets::asset_root().join(record.vehicle.as_deref().unwrap());
-    let mut spec: TankSpec = ron::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
+    let mut spec: TankSpec = crate::provenance::from_shipped_str(
+        crate::tank::TANK_SPEC_PATH,
+        &std::fs::read_to_string(path).unwrap(),
+    )
+    .unwrap();
     spec.display_name = "Loaded fixture vehicle".to_owned();
     let handle = app.world_mut().resource_mut::<Assets<TankSpec>>().add(spec);
     assert!(

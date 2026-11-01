@@ -110,7 +110,11 @@ impl BodyModel {
             MODEL_FILES
                 .iter()
                 .map(|&(scene, text)| {
-                    BodyModel::parse(scene, text).unwrap_or_else(|reason| {
+                    crate::provenance::shipped(
+                        &format!("assets/{}.model.ron", scene.trim_end_matches(".glb")),
+                        || BodyModel::parse(scene, text),
+                    )
+                    .unwrap_or_else(|reason| {
                         panic!(
                             "assets/{}.model.ron: {reason}",
                             scene.trim_end_matches(".glb")

@@ -397,7 +397,8 @@ mod tests {
         let text =
             std::fs::read_to_string(crate::assets::asset_root().join(crate::tank::TANK_SPEC_PATH))
                 .unwrap();
-        let mut spec: TankSpec = ron::from_str(&text).unwrap();
+        let mut spec: TankSpec =
+            crate::provenance::from_shipped_str(crate::tank::TANK_SPEC_PATH, &text).unwrap();
         let servo = ron::from_str(
             "(role: Yaw, max_speed: 1.0, accel: 1.0, travel: Continuous, requires: [])",
         )

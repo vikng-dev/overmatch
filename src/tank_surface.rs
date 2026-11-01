@@ -365,9 +365,10 @@ impl SurfaceData {
                 panic!("tank surface: {} is unreadable: {err}", full.display())
             })
         };
-        let library = VisualLibrary::parse(&read(VISUALS_PATH))
-            .unwrap_or_else(|err| panic!("tank surface: {VISUALS_PATH} is unusable: {err}"));
-        let livery = Livery::parse(&read(LIVERY_PATH))
+        let library =
+            crate::provenance::shipped(VISUALS_PATH, || VisualLibrary::parse(&read(VISUALS_PATH)))
+                .unwrap_or_else(|err| panic!("tank surface: {VISUALS_PATH} is unusable: {err}"));
+        let livery = crate::provenance::shipped(LIVERY_PATH, || Livery::parse(&read(LIVERY_PATH)))
             .unwrap_or_else(|err| panic!("tank surface: {LIVERY_PATH} is unusable: {err}"));
         Self { library, livery }
     }

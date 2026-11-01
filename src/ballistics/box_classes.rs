@@ -62,11 +62,17 @@ impl BoxClasses {
         Ok(classes)
     }
 
+    fn from_shipped_ron(text: &str) -> Result<Self, String> {
+        crate::provenance::shipped("assets/ballistics/box_classes.ron", || {
+            Self::from_ron(text).map_err(|err| format!("crew_hp: {err}"))
+        })
+    }
+
     /// The shipped file, parsed once. Panics on a malformed file: a broken authored contract is a
     /// build defect. [`super::sim_plugin`] calls this while the app is built.
     pub(crate) fn shipped() -> &'static Self {
         static CLASSES: std::sync::LazyLock<BoxClasses> = std::sync::LazyLock::new(|| {
-            BoxClasses::from_ron(BOX_CLASSES_RON).unwrap_or_else(|err| {
+            BoxClasses::from_shipped_ron(BOX_CLASSES_RON).unwrap_or_else(|err| {
                 panic!("box classes: embedded box_classes.ron is unusable: {err}")
             })
         });
@@ -92,6 +98,22 @@ impl BoxClasses {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The game's damage model: CI must refuse Fixture in the embedded crew pool just as the
+    /// app does. The real loader error must locate the field and name the file and repair.
+    #[test]
+    fn shipped_fixture_is_refused_in_the_test_build() {
+        let text = BOX_CLASSES_RON.replacen("Unit(", "Fixture(", 1);
+        let error = BoxClasses::from_shipped_ron(&text)
+            .expect_err("shipped data must refuse Fixture even under cfg(test)");
+        assert!(
+            error.contains("assets/ballistics/box_classes.ron"),
+            "{error}"
+        );
+        assert!(error.contains("Fixture provenance is test-only"), "{error}");
+        assert!(error.contains("replace this field's label"), "{error}");
+        assert!(error.contains("crew_hp"), "{error}");
+    }
 
     /// A fixture file: a crew pool of 30 HP, then `rest`.
     fn file(rest: &str) -> String {

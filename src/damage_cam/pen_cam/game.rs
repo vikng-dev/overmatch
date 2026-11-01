@@ -674,9 +674,11 @@ mod tests {
     pub(super) fn stage_of(app: &mut App, vehicle: &str) {
         let vehicle = vehicle.to_owned();
         let path = crate::assets::asset_root().join(&vehicle);
-        let spec: TankSpec =
-            ron::de::from_str(&std::fs::read_to_string(path).expect("the tank file"))
-                .expect("the tank file parses");
+        let spec: TankSpec = crate::provenance::from_shipped_str(
+            crate::tank::TANK_SPEC_PATH,
+            &std::fs::read_to_string(path).expect("the tank file"),
+        )
+        .expect("the tank file parses");
         let world = app.world_mut();
         let root = world
             .spawn((Transform::IDENTITY, Visibility::Hidden, CornerRig))

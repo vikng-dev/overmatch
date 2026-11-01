@@ -556,9 +556,11 @@ mod tests {
             PlayerView,
             GlobalTransform::default(),
         ));
-        let mut spec: TankSpec =
-            ron::de::from_str(include_str!("../assets/tiger_1/tiger_1.tank.ron"))
-                .expect("the shipped sheet parses");
+        let mut spec: TankSpec = crate::provenance::from_shipped_str(
+            crate::tank::TANK_SPEC_PATH,
+            include_str!("../assets/tiger_1/tiger_1.tank.ron"),
+        )
+        .expect("the shipped sheet parses");
         spec.display_name = "Fixture Display".to_string();
         let handle = world.resource_mut::<Assets<TankSpec>>().add(spec);
         world.spawn((

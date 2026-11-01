@@ -979,9 +979,11 @@ mod spawn_contract_tests {
 
     #[test]
     fn sim_source_does_not_require_a_resolved_asset_handle() {
-        let spec: TankSpec =
-            ron::de::from_str(include_str!("../../assets/tiger_1/tiger_1.tank.ron"))
-                .expect("the shipped Tiger spec must parse");
+        let spec: TankSpec = crate::provenance::from_shipped_str(
+            crate::tank::TANK_SPEC_PATH,
+            include_str!("../../assets/tiger_1/tiger_1.tank.ron"),
+        )
+        .expect("the shipped Tiger spec must parse");
         let geometry = TankGeometry {
             nodes: Vec::new(),
             by_name: HashMap::new(),
