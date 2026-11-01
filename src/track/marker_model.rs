@@ -287,7 +287,7 @@ impl GlbNodes {
 }
 
 /// glTF node local transform → matrix (Matrix form, or composed from the decomposed TRS).
-pub(super) fn node_matrix(node: &gltf::Node) -> Mat4 {
+pub(crate) fn node_matrix(node: &gltf::Node) -> Mat4 {
     match node.transform() {
         gltf::scene::Transform::Matrix { matrix } => Mat4::from_cols_array_2d(&matrix),
         gltf::scene::Transform::Decomposed {

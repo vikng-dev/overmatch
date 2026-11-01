@@ -649,7 +649,9 @@ impl ShoeBelt {
 /// contains running gear: even an export missing every axle must still supply its template.
 fn require_shoe_template() {
     let path = crate::tank::TANK_GLB_PATH;
-    verify_template_document(&view_document(path), path);
+    let document = view_document(path);
+    verify_template_document(&document, path);
+    crate::tank_surface::verify_rest_document(&document, path, crate::bake::selected_spec());
 }
 
 /// The scene document of the view glb at asset path `path`, read from its JSON chunk alone: a
@@ -2895,6 +2897,11 @@ mod tests {
         // The startup gate's own reader: the JSON chunk alone.
         let document = view_document(crate::tank::TANK_GLB_PATH);
         verify_template_document(&document, crate::tank::TANK_GLB_PATH);
+        crate::tank_surface::verify_rest_document(
+            &document,
+            crate::tank::TANK_GLB_PATH,
+            crate::bake::selected_spec(),
+        );
         let scene = document.scenes().next().expect("the glb carries a scene");
         let mut stack: Vec<(gltf::Node, Mat4)> =
             scene.nodes().map(|n| (n, Mat4::IDENTITY)).collect();

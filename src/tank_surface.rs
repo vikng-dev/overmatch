@@ -43,8 +43,8 @@
 //! - A RUNG WEARS ITS SOURCE'S MATERIAL AND TAG: `geometry_lod` copies both, so a LOD switch changes
 //!   the silhouette and nothing else.
 //! - Rows are rigid up to a uniform scale: the shader takes their 3×3 as the normal's rotation and
-//!   renormalises. A worn node whose scale strays past [`UNIFORM_SCALE_TOLERANCE`] is refused at
-//!   its dress, naming the node.
+//!   renormalises. Startup refuses a worn rest frame with unequal or nonorthogonal axes beyond
+//!   [`UNIFORM_SCALE_TOLERANCE`], naming the view file, node and export fix.
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 
@@ -99,6 +99,68 @@ const CAMO_COLOURS: usize = 3;
 /// (DERIVED: the angle between `M n` and `M⁻ᵀ n` for `M = diag(1 + s, 1, 1)`, at its worst 45° off
 /// the axis): under 0.06° here, below anything a pixel shows (ASSUMED).
 const UNIFORM_SCALE_TOLERANCE: f32 = 1e-3;
+
+/// Certify the selected scene before play, using the authored rigid-part boundary the dress
+/// uses. An articulated node's own transform is animated and excluded from its part's rest row.
+pub(crate) fn verify_rest_document(
+    document: &gltf::Document,
+    file: &str,
+    spec: &crate::spec::TankSpec,
+) {
+    let articulated: HashSet<_> = spec.articulated_nodes().collect();
+    let registry = SubstanceRegistry::shipped_static();
+    let scene = document
+        .scenes()
+        .next()
+        .unwrap_or_else(|| panic!("{file}: surface scene is missing; export scene 0"));
+    let mut stack: Vec<_> = scene
+        .nodes()
+        .map(|node| (node, Mat4::IDENTITY, String::new()))
+        .collect();
+    while let Some((node, parent, path)) = stack.pop() {
+        let name = node.name().unwrap_or("<unnamed>");
+        let path = format!("{path}/{name}");
+        let rest = if articulated.contains(name) {
+            Mat4::IDENTITY
+        } else {
+            parent * crate::track::marker_model::node_matrix(&node)
+        };
+        let worn = node.mesh().is_some_and(|mesh| {
+            mesh.primitives().any(|primitive| {
+                primitive
+                    .material()
+                    .name()
+                    .is_some_and(|name| registry.visual(name).is_some())
+            })
+        });
+        if worn {
+            require_uniform_frame(rest, file, &path);
+        }
+        stack.extend(node.children().map(|child| (child, rest, path.clone())));
+    }
+}
+
+/// Refuse a worn frame the shader cannot transform normals through. File admission and the
+/// dress use the same invariant; the latter also protects programmatically constructed views.
+fn require_uniform_frame(rest: Mat4, file: &str, node: &str) {
+    let axes = [
+        rest.x_axis.truncate(),
+        rest.y_axis.truncate(),
+        rest.z_axis.truncate(),
+    ];
+    let lengths = axes.map(|axis| axis.length());
+    assert!(
+        rest.is_finite()
+            && lengths[0] > 0.0
+            && lengths.iter().all(|length| {
+                (length - lengths[0]).abs() <= UNIFORM_SCALE_TOLERANCE * lengths[0]
+            })
+            && [(0, 1), (0, 2), (1, 2)].iter().all(|&(a, b)| {
+                axes[a].dot(axes[b]).abs() <= UNIFORM_SCALE_TOLERANCE * lengths[a] * lengths[b]
+            }),
+        "{file}: worn node {node:?} has a non-rigid surface rest frame; apply the scale and shear in the source scene and re-export the view glb"
+    );
+}
 
 // ---------------------------------------------------------------------------------------------
 // The data
@@ -744,20 +806,7 @@ impl Dress<'_, '_> {
                     &self.tree.names,
                     &self.tree.transforms,
                 );
-                let lengths = [
-                    rest.matrix3.x_axis,
-                    rest.matrix3.y_axis,
-                    rest.matrix3.z_axis,
-                ]
-                .map(|axis| axis.length());
-                assert!(
-                    lengths.iter().all(|length| {
-                        (length - lengths[0]).abs() <= UNIFORM_SCALE_TOLERANCE * lengths[0]
-                    }),
-                    "tank surface: worn node {path:?} carries a non-uniform scale {lengths:?}, \
-                     which its surface frame cannot pack; apply the scale in the source scene and \
-                     re-export the view glb"
-                );
+                require_uniform_frame(Mat4::from(rest), crate::tank::TANK_GLB_PATH, &path);
                 rows.insert(path, table.len() as u32);
                 table.push(RestRow::of(rest));
             }
@@ -1016,6 +1065,75 @@ mod tests {
     use bevy::ecs::system::RunSystemOnce;
 
     use super::*;
+
+    /// Equal axis lengths do not imply orthogonal axes. The surface shader relies on a rigid
+    /// frame up to uniform scale, or multiplying its normal by the row changes the lighting.
+    /// DERIVED fixture: the composed stretches have equal column lengths and nonzero shear.
+    #[test]
+    fn a_surface_frame_refuses_equal_length_sheared_axes() {
+        let shear = Mat4::from_scale(Vec3::new(2.0, 1.0, 1.0))
+            * Mat4::from_rotation_z(std::f32::consts::FRAC_PI_4)
+            * Mat4::from_scale(Vec3::new(1.0, 1.0, 2.5_f32.sqrt()));
+        let failure =
+            std::panic::catch_unwind(|| require_uniform_frame(shear, "fixture.glb", "Worn"))
+                .expect_err("equal-length sheared axes must be refused");
+        let message = failure.downcast_ref::<String>().unwrap();
+        for word in ["fixture.glb", "Worn", "apply", "re-export"] {
+            assert!(message.contains(word), "{message}");
+        }
+        for scale in [0.5, 1.0, 2.0] {
+            require_uniform_frame(
+                Mat4::from_scale(Vec3::splat(scale)) * Mat4::from_rotation_z(0.7),
+                "fixture.glb",
+                "Worn",
+            );
+        }
+    }
+
+    /// Startup must refuse the authored rest frame before any view is instantiated. Surface
+    /// users rely on the same boundary as the dress: transforms above an articulated frame are
+    /// excluded, while a worn descendant's composed stretch and shear are checked.
+    #[test]
+    fn the_view_document_refuses_bad_worn_frames_before_play() {
+        let material = SubstanceRegistry::shipped_static()
+            .keys()
+            .into_iter()
+            .find(|name| SubstanceRegistry::shipped_static().visual(name).is_some())
+            .unwrap();
+        let spec = crate::bake::selected_spec();
+        let articulated = spec.articulated_nodes().next().unwrap();
+        let document = |parent: &str, scale: [f32; 3]| {
+            let json = serde_json::json!({
+                "asset": {"version": "2.0"}, "scenes": [{"nodes": [0]}],
+                "nodes": [{"name": parent, "scale": scale, "children": [1]}, {"name": "Worn", "mesh": 0}],
+                "meshes": [{"primitives": [{"attributes": {"POSITION": 0}, "material": 0}]}],
+                "materials": [{"name": material}],
+                "buffers": [{"byteLength": 36, "uri": "fixture.bin"}],
+                "bufferViews": [{"buffer": 0, "byteLength": 36}],
+                "accessors": [{"bufferView": 0, "componentType": 5126, "count": 3, "type": "VEC3", "min": [0,0,0], "max": [1,1,1]}]
+            });
+            gltf::Gltf::from_slice(&serde_json::to_vec(&json).unwrap())
+                .unwrap()
+                .document
+        };
+        let bad = document("RigidParent", [1.01, 1.0, 1.0]);
+        let failure = std::panic::catch_unwind(|| verify_rest_document(&bad, "fixture.glb", spec))
+            .expect_err("startup must refuse the worn frame");
+        let message = failure.downcast_ref::<String>().unwrap();
+        for word in ["fixture.glb", "RigidParent/Worn", "apply", "re-export"] {
+            assert!(message.contains(word), "{message}");
+        }
+        verify_rest_document(
+            &document(articulated, [1.01, 1.0, 1.0]),
+            "fixture.glb",
+            spec,
+        );
+        verify_rest_document(
+            &document("RigidParent", [2.0, 2.0, 2.0]),
+            "fixture.glb",
+            spec,
+        );
+    }
 
     fn shipped() -> SurfaceData {
         SurfaceData::shipped()
