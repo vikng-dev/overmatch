@@ -271,10 +271,10 @@ fn retire_wall_piece(
     bodies: Query<(&Carrier, &Position, &Rotation)>,
     mut carriers: Query<(&mut WallPiece, &mut DebrisPose)>,
 ) {
-    // Offline bodies own their view directly and have no replicated carrier.
-    let Ok((carrier, position, rotation)) = bodies.get(retired.entity) else {
-        return;
-    };
+    let (carrier, position, rotation) = bodies.get(retired.entity).expect(
+        "only the server installs this observer, and `carry_wall_piece` gives every server chunk \
+         group its carrier in the flush that spawns it, before a deposit can stage its split",
+    );
     let (mut piece, mut pose) = carriers
         .get_mut(carrier.0)
         .expect("a server chunk group retains its carrier through its split tick");
