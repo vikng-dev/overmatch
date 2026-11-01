@@ -63,6 +63,7 @@ use bevy::prelude::*;
 
 use crate::Layer;
 use crate::ballistics::{BallisticVolume, ComponentHealth, PoolEmptied, VolumeMaterial};
+use crate::buildings::attachments::{ATTACHMENTS_PATH, Attachments, RootPlate};
 use crate::buildings::fracture::GRAVITY;
 use crate::provenance::Sourced;
 use crate::scatter::MapInstance;
@@ -136,34 +137,41 @@ struct Wood {
     structure: StructureRows,
 }
 
+/// A species' row as `wood.ron` authors it ([`StructuralWood`] once resolved).
+#[derive(serde::Deserialize)]
+#[serde(rename = "StructuralWood", deny_unknown_fields)]
+struct StructuralRow {
+    along_grain_rupture_pa: Sourced<f32>,
+    along_grain_fracture_j_per_m2: Sourced<f32>,
+    anchor: String,
+}
+
 /// A species' grain and root-plate facts. The structural strength, opening work and anchor
 /// laws will read these; the current HP and ram laws do not. The wall design owns the model.
-#[derive(Debug, Clone, PartialEq, serde::Deserialize)]
-#[serde(deny_unknown_fields)]
+#[derive(Debug, Clone, PartialEq)]
 struct StructuralWood {
     /// Modulus of rupture under bending, longitudinal extreme-fibre stress, Pa.
-    along_grain_rupture_pa: Sourced<f32>,
+    along_grain_rupture_pa: f32,
     /// Mode-I opening work per section area, J/m²: tension along the grain, breaking across
     /// fibres (LR/LT), not the RL/TL splitting energy of a building's timber seam.
-    along_grain_fracture_j_per_m2: Sourced<f32>,
-    /// Ultimate root-plate overturning moment per fresh stem mass, N·m/kg (not per weight in N).
-    /// The authored provenance binds its species, soil and rooting-depth domain. Strength only:
-    /// this coefficient supplies no root-plate separation work or fresh-stem mass conversion.
-    root_plate_overturning_nm_per_kg: Sourced<f32>,
+    along_grain_fracture_j_per_m2: f32,
+    /// The root plate the trunk holds to the ground by: the `RootPlate` kind of the shared
+    /// attachment list the row's `anchor` names, which binds its species, soil and rooting depth.
+    root_plate: RootPlate,
 }
 
 impl StructuralWood {
-    fn validate(&self, row: &str) -> Result<(), String> {
+    /// Resolve row `row` against the shipped attachment list: its two grain facts positive and
+    /// finite, its anchor a root plate the list holds.
+    fn resolve(row: &str, authored: StructuralRow) -> Result<Self, String> {
+        let StructuralRow {
+            along_grain_rupture_pa: Sourced(rupture),
+            along_grain_fracture_j_per_m2: Sourced(fracture),
+            anchor,
+        } = authored;
         for (field, value) in [
-            ("along_grain_rupture_pa", self.along_grain_rupture_pa.0),
-            (
-                "along_grain_fracture_j_per_m2",
-                self.along_grain_fracture_j_per_m2.0,
-            ),
-            (
-                "root_plate_overturning_nm_per_kg",
-                self.root_plate_overturning_nm_per_kg.0,
-            ),
+            ("along_grain_rupture_pa", rupture),
+            ("along_grain_fracture_j_per_m2", fracture),
         ] {
             if !value.is_finite() || value <= 0.0 {
                 return Err(format!(
@@ -172,7 +180,14 @@ impl StructuralWood {
                 ));
             }
         }
-        Ok(())
+        let root_plate = Attachments::shipped_static()
+            .root_plate(&anchor)
+            .map_err(|err| format!("structure row {row:?}: anchor: {err}"))?;
+        Ok(Self {
+            along_grain_rupture_pa: rupture,
+            along_grain_fracture_j_per_m2: fracture,
+            root_plate,
+        })
     }
 }
 
@@ -197,14 +212,14 @@ impl<'de> serde::Deserialize<'de> for StructureRows {
                 use serde::de::Error;
                 let mut rows = BTreeMap::new();
                 while let Some(name) = access.next_key::<String>()? {
-                    let row: StructuralWood = access.next_value().map_err(|err| {
+                    let row: StructuralRow = access.next_value().map_err(|err| {
                         A::Error::custom(format!(
                             "structure row {name:?}: {err}; author along_grain_rupture_pa (Pa) \
-                             along_grain_fracture_j_per_m2 (J/m²) and root_plate_overturning_nm_per_kg \
-                             (N·m/kg fresh stem mass), each with provenance"
+                             and along_grain_fracture_j_per_m2 (J/m²), each with provenance, and \
+                             the anchor, a root plate of {ATTACHMENTS_PATH}"
                         ))
                     })?;
-                    row.validate(&name).map_err(A::Error::custom)?;
+                    let row = StructuralWood::resolve(&name, row).map_err(A::Error::custom)?;
                     if rows.insert(name.clone(), row).is_some() {
                         return Err(A::Error::custom(format!(
                             "structure row {name:?} is declared twice; keep one sourced row per species"
@@ -230,8 +245,7 @@ impl Wood {
                 if !wood.structure.0.contains_key(name) {
                     return Err(format!(
                         "structure row {name:?} is missing; author its along_grain_rupture_pa \
-                         along_grain_fracture_j_per_m2 and root_plate_overturning_nm_per_kg \
-                         with their sources"
+                         and along_grain_fracture_j_per_m2 with their sources, and its anchor"
                     ));
                 }
             }
@@ -1590,9 +1604,11 @@ pub(crate) mod tests {
             structure: StructureRows(BTreeMap::from([(
                 "fixture".to_owned(),
                 StructuralWood {
-                    along_grain_rupture_pa: Sourced(4.0e7),
-                    along_grain_fracture_j_per_m2: Sourced(2.0e4),
-                    root_plate_overturning_nm_per_kg: Sourced(150.0),
+                    along_grain_rupture_pa: 4.0e7,
+                    along_grain_fracture_j_per_m2: 2.0e4,
+                    root_plate: RootPlate {
+                        overturning_nm_per_kg: 150.0,
+                    },
                 },
             )])),
         }
@@ -1602,7 +1618,8 @@ pub(crate) mod tests {
     const GRAIN_RUPTURE: &str = "along_grain_rupture_pa: (4.0e7, Tuned(\"fixture\")),";
     const GRAIN_FRACTURE: &str = "along_grain_fracture_j_per_m2: (2.0e4, Tuned(\"fixture\")),";
 
-    const ROOT_PLATE: &str = "root_plate_overturning_nm_per_kg: (150.0, Tuned(\"fixture\")),";
+    // A shipped root plate: an anchor resolves against the shipped attachment list.
+    const ROOT_PLATE: &str = "anchor: \"scots_pine_root_plate\",";
 
     fn structural_wood_text(rows: &str) -> String {
         format!(
@@ -1637,7 +1654,7 @@ pub(crate) mod tests {
         for (missing, field) in [
             (GRAIN_RUPTURE, "along_grain_rupture_pa"),
             (GRAIN_FRACTURE, "along_grain_fracture_j_per_m2"),
-            (ROOT_PLATE, "root_plate_overturning_nm_per_kg"),
+            (ROOT_PLATE, "anchor"),
         ] {
             let fields = structural_fields().replace(missing, "");
             let error = parse_fixture_wood(&structural_row("fixture", &fields))
@@ -1648,11 +1665,39 @@ pub(crate) mod tests {
         }
     }
 
+    /// A trunk's anchor is a root plate of the shared attachment list, resolved at load: an
+    /// anchor naming no kind, or a kind that joins two parts (a mortar bed), is refused naming
+    /// the row, the list and the fix. A loader that took any name would hold a trunk to the
+    /// ground by a code default, or by a building's seam.
+    #[test]
+    fn a_trunks_anchor_is_a_root_plate_of_the_shared_list() {
+        let wood = parse_fixture_wood(&structural_row("fixture", &structural_fields()))
+            .expect("a shipped root plate resolves");
+        assert_eq!(
+            wood.structure.0["fixture"].root_plate,
+            Attachments::shipped_static()
+                .root_plate("scots_pine_root_plate")
+                .unwrap()
+        );
+        for (anchor, names) in [
+            ("unlisted_fixture_plate", "is not in"),
+            ("mortared", "joins two parts"),
+        ] {
+            let fields = structural_fields().replace(ROOT_PLATE, &format!("anchor: {anchor:?},"));
+            let error = parse_fixture_wood(&structural_row("fixture", &fields))
+                .expect_err("an anchor that is no listed root plate is refused");
+            for required in ["wood.ron", "fixture", anchor, ATTACHMENTS_PATH, names] {
+                assert!(error.contains(required), "missing {required:?}: {error}");
+            }
+        }
+    }
+
     /// A structural row is usable in simulation units at load, even before its first instance
-    /// exists. A zero, negative or non-finite grain fact or root coefficient cannot disable failure.
+    /// exists. A zero, negative or non-finite grain fact cannot disable failure (a root plate's
+    /// coefficient is refused so by the attachment list's own loader).
     #[test]
     fn structural_wood_refuses_nonpositive_nonfinite_or_unsourced_facts() {
-        for datum in [GRAIN_RUPTURE, GRAIN_FRACTURE, ROOT_PLATE] {
+        for datum in [GRAIN_RUPTURE, GRAIN_FRACTURE] {
             let field = datum.split(':').next().unwrap();
             for value in ["0.0", "-1.0", "NaN", "inf"] {
                 let replacement = format!("{field}: ({value}, Tuned(\"fixture\")),");

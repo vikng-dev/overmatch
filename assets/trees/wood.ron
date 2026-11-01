@@ -1,7 +1,8 @@
 // The wood data of the game's environment destruction and damage model, game state only.
 // Read by `src/trees.rs` with species.ron before play. Current HP and ram parameters are shared;
-// `structure` holds required per-species material facts for the structural laws. No structural
-// consumer reads these facts yet. The wall design owns the model narrative.
+// `structure` holds required per-species material facts for the structural laws: the grain, and
+// the root plate the trunk holds to the ground by. No structural consumer reads these facts yet.
+// The wall design owns the model narrative.
 //
 // `structure.<species>.along_grain_rupture_pa` (Pa): green-wood bending modulus of rupture,
 // longitudinal extreme-fibre stress. The section strength law will compare it with bending
@@ -9,19 +10,14 @@
 // materials.ron, which building joints read.
 // `along_grain_fracture_j_per_m2` (J/m²): mode-I opening work for tension ALONG the fibres,
 // across a trunk section (LR/LT fracture systems). The blow law will spend it per separated
-// section area. It is NOT splitting along the fibres (RL/TL), whose stress is across the grain.
-// The saturated softwood analogue is explicitly ASSUMED for every shipped species; no matched
-// green longitudinal-fracture measurements were found. It must not be called a measured tree
-// material property. The cited FHWA table itself models its parallel values from correlations.
-//
-// `root_plate_overturning_nm_per_kg` (N m/kg): the root anchor strength law will read the
-// critical overturning moment as this coefficient times FRESH STEM MASS (kg), with no extra g.
-// This is an ultimate moment, not root separation work. The root rows describe unrotted trees
-// on freely draining mineral soil, rooting depth 40-80 cm (MEASURED domain of Nicoll's A2 class).
-// Applying that site profile to the game's trees is ASSUMED; it is not a coefficient for every
-// soil. Rooting-depth classes and soil groups must be honoured by a future consumer. Nor may
-// the current dry-timber substance density silently stand in for fresh stem mass: the root
-// coefficient supplies no moisture or mass conversion. These facts still have no sim consumer.
+// section area. It is NOT splitting along the fibres (RL/TL), whose stress
+// is across the grain. The saturated softwood analogue is explicitly ASSUMED for every shipped
+// species; no matched green longitudinal-fracture measurements were found. It must not be called
+// a measured tree material property. The cited FHWA table itself models its parallel values from
+// correlations.
+// `anchor`: the root plate the trunk holds to the ground by, a `RootPlate` kind of
+// `assets/materials/attachments.ron`, whose row carries its numbers, sources and soil. Its
+// coefficient multiplies FRESH STEM MASS; the dry-timber substance density never stands in for it.
 //
 // `substance` is the trunk's substance, a hard key of `assets/materials/materials.ron`.
 // `hp_per_m2` is a trunk segment's HP pool per square metre of its cross-section at mid-height
@@ -61,15 +57,7 @@ Wood(
                 conversion). Source uses correlated model values for southern yellow pine and
                 Douglas fir, no measured parallel-mode data. Species and living-trunk transfer
                 are unverified. https://www.fhwa.dot.gov/publications/research/safety/04097/04097.pdf")),
-            root_plate_overturning_nm_per_kg: (154.6, Measured("MEASURED transcription of
-                a field-data regression: Nicoll (2006), The effects of soil, terrain and wind
-                climate on tree root system development and anchorage, Table 2-6 (printed p. 38),
-                row NS, soil A, root class 2: Creg 154.6 N m/kg fresh stem mass; 22 trees at 2 sites,
-                s.e. 19.2 N m/kg. Species codes in Table 2-3, soil/depth in Table 2-1: Norway spruce,
-                freely draining mineral soil, medium rooting depth 40-80 cm. Rot and snapped trees
-                excluded. Moment includes applied pull and overhanging self-weight; multiply by
-                fresh stem mass in kg, not weight in N. Transferred site profile ASSUMED for the
-                game, not universal soil anchorage. https://era.ed.ac.uk/server/api/core/bitstreams/bf65a702-ade0-4a94-8a60-e1eaf7e8b79c/content")),
+            anchor: "norway_spruce_root_plate",
         ),
         "scots_pine": StructuralWood(
             along_grain_rupture_pa: (46.0e6, Measured("MEASURED transcription: Merlin et al.
@@ -80,13 +68,7 @@ Wood(
                 Table 10, saturated parallel mode I 2.234 MPa cm = 22340 J/m2 (DERIVED conversion).
                 Correlated model values for southern yellow pine and Douglas fir; species and
                 living-trunk transfer unverified. Same FHWA source as norway_spruce above.")),
-            root_plate_overturning_nm_per_kg: (146.4, Measured("MEASURED transcription of
-                a field-data regression: Nicoll (2006), Table 2-6 (printed p. 38), row SP, soil A,
-                root class 2: Creg 146.4 N m/kg fresh stem mass; 71 trees at 5 sites, s.e. 9.6 N m/kg.
-                Tables 2-3 and 2-1 bind Scots pine, freely draining mineral soil and rooting depth
-                40-80 cm. Rot and snapped trees excluded. Total applied-plus-self-weight moment;
-                mass in kg, no extra g. Transferred site profile ASSUMED for the game. Same Nicoll
-                thesis URL as norway_spruce above.")),
+            anchor: "scots_pine_root_plate",
         ),
         "silver_birch": StructuralWood(
             along_grain_rupture_pa: (63.0e6, Tuned("ASSUMED species transfer of the MEASURED
@@ -100,13 +82,7 @@ Wood(
                 (DERIVED conversion). Correlated southern yellow pine/Douglas fir model value;
                 neither species nor living-trunk transfer is verified. No suitable birch
                 longitudinal-opening measurement found. Same FHWA source as norway_spruce above.")),
-            root_plate_overturning_nm_per_kg: (146.4, Tuned("ASSUMED Scots-pine analogue
-                for silver birch: Nicoll (2006), Table 2-6 SP/A2 coefficient 146.4 N m/kg fresh stem
-                mass, on freely draining mineral soil with rooting depth 40-80 cm. The table has
-                no birch row; no matched silver-birch fresh-stem-mass regression was read. This
-                transfer is not a measured birch anchorage or a bound on it. Site profile also
-                ASSUMED for the game; kg fresh stem mass, no extra g. Same Nicoll thesis URL as
-                norway_spruce above.")),
+            anchor: "silver_birch_root_plate",
         ),
     },
 )
