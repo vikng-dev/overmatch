@@ -1,5 +1,5 @@
-//! The game's damage model: the pen cam's explanations on the wire. The authority builds each [`RecordedShot`] once and sends
-//! each projection over [`ShotExplanationChannel`] to its one recipient's link: the shooter's and
+//! The game's damage model: the pen cam's explanations on the wire. The authority builds each
+//! [`RecordedShot`] once and sends each projection over [`ShotExplanationChannel`] to its one recipient's link: the shooter's and
 //! the struck tank's player's, nobody else's. A client stores what arrives in [`ShotExplanations`]
 //! and marks an explanation's impact drawn as its own shells draw the shot's authority outcomes
 //! ([`AuthorityOutcomeDrawn`]).

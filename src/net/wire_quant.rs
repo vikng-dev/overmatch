@@ -295,7 +295,7 @@ fn i16_code(value: f32, steps: f32) -> [u8; 2] {
 }
 
 /// Malformed peer bytes are refused at the decoding edge. RuleFns requires Bevy's error
-/// wrapper; the typed cause is converted only at that API boundary.
+/// wrapper; codec errors retain their typed causes inside it.
 #[derive(Debug)]
 enum WireDecodeError {
     Truncated { expected: usize, remaining: usize },

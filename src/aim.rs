@@ -644,8 +644,8 @@ mod tests {
     use crate::sight::drive_gunner_aim;
     use crate::tank::{ServoIndex, ServoRest, ServoSpec, TankServos, drive_servos};
 
-    /// The per-tank scan `drive_aim_servos` replaced: every servo visited for every tank. Kept
-    /// verbatim as the oracle.
+    /// Reference per-tank scan: every servo is visited for every tank, against the same parsed
+    /// input and hull-pose invariants as the production pass.
     fn drive_aim_servos_scan(
         tanks: Query<(Entity, &ParsedTankCommand, &Rig, &Position, &Rotation), With<Tank>>,
         tables: Query<&RangeTable>,
@@ -1543,9 +1543,8 @@ mod tests {
         (world, nodes)
     }
 
-    /// The sim tick's determinism across server and clients rests on `drive_aim_servos` writing the
-    /// same servo targets, bit for bit, as the per-tank scan it replaced: each servo's float
-    /// operations are unchanged, only the visiting order is. Tanks with no commitment leave their
+    /// For the same parsed input and hull poses, the production pass writes the same servo
+    /// targets, bit for bit, as the reference scan: only the visiting order differs. Tanks with no commitment leave their
     /// servos' prior target; malformed aims cannot be constructed as parsed input.
     #[test]
     fn servo_pass_matches_the_per_tank_scan_bit_for_bit() {

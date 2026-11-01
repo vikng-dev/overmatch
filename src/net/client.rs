@@ -807,8 +807,9 @@ const RECONNECT_BACKOFF_CAP: f64 = 5.0;
 /// client observes as
 /// `ConnectionRequestTimedOut` — byte-for-byte the same terminal state as a down/unreachable server
 /// (verified against vendored `lightyear_netcode` client.rs `update_state`). The two are transport-
-/// indistinguishable, so the honest message names BOTH causes. Three attempts (~a few seconds of
-/// backoff) is enough to rule out a server still starting up before showing it.
+/// indistinguishable, so the honest message names BOTH causes. The attempt threshold is a
+/// presentation policy: repeated timeouts warrant showing the possibilities, not a diagnosis
+/// that startup has finished or that the build is definitely wrong.
 const MISMATCH_HINT_AFTER_ATTEMPTS: u32 = 3;
 
 /// The connection state machine, run every frame in every mode. It owns both the FIRST connect
