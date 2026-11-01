@@ -180,8 +180,10 @@ impl ParsedAimIntent {
 
 /// Every tank's raw command, parsed before gameplay. A tank whose input arrives over a link is
 /// parsed again by the net layer's input bridge, which orders after [`ParseCommands`], attests the
-/// snapshot and replaces this parse; its raw `TankCommand` only ever holds the bridge's previous
-/// parsed value, so this parse of it holds as for a local device or tool writer.
+/// snapshot and replaces this parse. Its raw `TankCommand` holds only values this parse accepts:
+/// on the server, the bridge's previous parsed value (edges cleared, or zeroed on release); on the
+/// network client's own tank, the frame's device writers over it, the same writers an offline run
+/// parses here.
 pub(crate) fn parse_commands(mut commands: Query<(&TankCommand, &mut ParsedTankCommand)>) {
     for (&command, mut parsed) in &mut commands {
         *parsed = ParsedTankCommand::try_from(command)
@@ -368,7 +370,10 @@ fn snapshot_device_command(
     mut device: ResMut<DeviceCommand>,
     own: Query<&TankCommand, With<Controlled>>,
 ) {
-    device.0 = own.single().copied().unwrap_or_default();
+    // No controlled tank (before spawn, between possessions) is the idle command.
+    device.0 = crate::tank::controlled_one(own.single())
+        .copied()
+        .unwrap_or_default();
 }
 
 /// Decide [`DeviceOwner`] from the controlled tank's knockout fact and, while the death flow owns
