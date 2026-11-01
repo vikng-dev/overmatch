@@ -16,8 +16,9 @@
 //! - after each substep's relax pass ([`SubstepSolverSystems::Relax`]): the substep's momentum;
 //! - after restitution ([`SolverSystems::Restitution`]): its increment.
 //!
-//! Avian builds a constraint only where one body is dynamic, and a structure is static, so the
-//! other body of every record is dynamic. `ContactPoint::normal_impulse` is not this reading:
+//! Avian builds a constraint only where at least one body is dynamic. Each structure side
+//! gets its own signed reading, including two structures touching each other; the other side
+//! may be fixed ground or another moving body. `ContactPoint::normal_impulse` is not this reading:
 //! Avian adds the whole accumulated impulse into it on every solve call, twice per substep, and
 //! keeps the friction impulse only as the last substep's, in a basis it does not store. The
 //! vendored crate is not patched for any of it.
@@ -52,14 +53,15 @@ use avian3d::dynamics::solver::contact::ContactConstraintPoint;
 use avian3d::dynamics::solver::schedule::{SolverSystems, SubstepSchedule, SubstepSolverSystems};
 use avian3d::dynamics::solver::solver_body::SolverBodyInertia;
 use avian3d::prelude::{
-    ComputedCenterOfMass, ContactGraph, PhysicsLengthUnit, PhysicsSchedule, Position, Rotation,
-    SleepThreshold,
+    ComputedCenterOfMass, ContactGraph, PhysicsLengthUnit, PhysicsSchedule, Position, RigidBody,
+    Rotation, SleepThreshold,
 };
 use bevy::prelude::*;
 
 use crate::ClientReplica;
 
-/// A body whose construction the destruction laws judge: a building's root, a tree's. Its
+/// A body whose construction the destruction laws judge: an anchored or moving chunk group,
+/// or a tree. Its
 /// contacts with dynamic bodies are read into [`ContactTransfers`]. Required by the components
 /// that make a body a structure, never inserted by hand.
 #[derive(Component, Debug, Default, Clone, Copy)]
@@ -342,8 +344,9 @@ fn keep(
     contacts: Res<ContactGraph>,
     structures: Query<(), With<StructureBody>>,
     bodies: Query<(
-        &SleepThreshold,
-        &SolverBodyInertia,
+        Option<&SleepThreshold>,
+        Option<&SolverBodyInertia>,
+        &RigidBody,
         &Position,
         &Rotation,
         &ComputedCenterOfMass,
@@ -390,74 +393,88 @@ fn keep(
     *steps += 1;
     for (color, colored) in graph.colors.iter().enumerate() {
         for (index, constraint) in colored.contact_constraints.iter().enumerate() {
-            let structure_first = match (
-                structures.contains(constraint.body1),
-                structures.contains(constraint.body2),
-            ) {
-                (true, false) => true,
-                (false, true) => false,
-                (false, false) => continue,
-                (true, true) => panic!(
-                    "contact_transfer: a constraint joins two structures ({:?}, {:?}); a structure \
-                     is static, and Avian builds no constraint between static bodies",
-                    constraint.body1, constraint.body2
-                ),
-            };
-            let (_, pair) = contacts
-                .get_by_id(constraint.contact_id)
-                .expect("a contact constraint is built from a pair in the contact graph");
-            let manifold = &pair.manifolds[constraint.manifold_index];
-            assert_eq!(
-                manifold.points.len(),
-                constraint.points.len(),
-                "a contact constraint holds its manifold's points one for one"
-            );
-            let (sign, structure, structure_collider, body, body_collider) = if structure_first {
-                (
-                    1.0,
-                    constraint.body1,
-                    pair.collider1,
-                    constraint.body2,
-                    pair.collider2,
-                )
-            } else {
-                (
-                    -1.0,
-                    constraint.body2,
-                    pair.collider2,
-                    constraint.body1,
-                    pair.collider1,
-                )
-            };
-            kept.push(Kept {
-                color,
-                index,
-                first: points.len(),
-                sign,
-            });
-            let (rest, inertia, position, rotation, com) = bodies.get(body).expect(
-                "Avian requires sleeping, pose and solver inertia on every dynamic contact body",
-            );
-            let rest_speed = rest.linear * length_unit.0;
-            inertias.entry(body).or_insert_with(|| BodyInertia {
-                centre: position.0 + rotation.0 * com.0,
-                inverse_mass: inertia.effective_inv_mass(),
-                inverse_inertia: inertia.effective_inv_angular_inertia().to_mat3(),
-            });
-            for (point, contact) in constraint.points.iter().zip(&manifold.points) {
-                points.push(ContactTransfer {
-                    structure,
-                    structure_collider,
-                    body,
-                    body_collider: Some(body_collider),
-                    point: contact.point,
-                    normal: sign * constraint.normal,
-                    impulse: Vec3::ZERO,
-                    effective_mass: point.normal_part.effective_mass,
-                    closing_speed: -point.normal_speed,
-                    rest_speed,
+            let sides: Vec<_> = [true, false]
+                .into_iter()
+                .filter(|&first| {
+                    structures.contains(if first {
+                        constraint.body1
+                    } else {
+                        constraint.body2
+                    })
+                })
+                .collect();
+            for structure_first in sides {
+                let (_, pair) = contacts
+                    .get_by_id(constraint.contact_id)
+                    .expect("a contact constraint is built from a pair in the contact graph");
+                let manifold = &pair.manifolds[constraint.manifold_index];
+                assert_eq!(
+                    manifold.points.len(),
+                    constraint.points.len(),
+                    "a contact constraint holds its manifold's points one for one"
+                );
+                let (sign, structure, structure_collider, body, body_collider) = if structure_first
+                {
+                    (
+                        1.0,
+                        constraint.body1,
+                        pair.collider1,
+                        constraint.body2,
+                        pair.collider2,
+                    )
+                } else {
+                    (
+                        -1.0,
+                        constraint.body2,
+                        pair.collider2,
+                        constraint.body1,
+                        pair.collider1,
+                    )
+                };
+                kept.push(Kept {
+                    color,
+                    index,
+                    first: points.len(),
+                    sign,
                 });
-                last.push((point.normal_part.impulse, friction(point)));
+                let (rest, solver, kind, position, rotation, com) = bodies.get(body).expect(
+                    "each contact side is a rigid body with its required pose and centre of mass",
+                );
+                let inertia = if kind.is_static() {
+                    &SolverBodyInertia::DUMMY
+                } else {
+                    solver.expect("Avian supplies solver inertia for an active moving contact body")
+                };
+                let rest_speed = rest
+                    .or_else(|| {
+                        bodies
+                            .get(structure)
+                            .expect("the other contact side is a rigid body")
+                            .0
+                    })
+                    .expect("a solver contact has at least one moving side with a sleep threshold")
+                    .linear
+                    * length_unit.0;
+                inertias.entry(body).or_insert_with(|| BodyInertia {
+                    centre: position.0 + rotation.0 * com.0,
+                    inverse_mass: inertia.effective_inv_mass(),
+                    inverse_inertia: inertia.effective_inv_angular_inertia().to_mat3(),
+                });
+                for (point, contact) in constraint.points.iter().zip(&manifold.points) {
+                    points.push(ContactTransfer {
+                        structure,
+                        structure_collider,
+                        body,
+                        body_collider: Some(body_collider),
+                        point: contact.point,
+                        normal: sign * constraint.normal,
+                        impulse: Vec3::ZERO,
+                        effective_mass: point.normal_part.effective_mass,
+                        closing_speed: -point.normal_speed,
+                        rest_speed,
+                    });
+                    last.push((point.normal_part.impulse, friction(point)));
+                }
             }
         }
     }
@@ -477,9 +494,11 @@ fn keep(
         key(a).cmp(&key(b))
     });
     for contact in pending.drain(..) {
-        let (rest, solver, position, rotation, com) = bodies.get(contact.body).expect(
+        let (rest, solver, _, position, rotation, com) = bodies.get(contact.body).expect(
             "a source that applied an implicit contact remains a dynamic body through this physics step",
         );
+        let solver = solver.expect("an implicit contact source is an active moving body");
+        let rest = rest.expect("a moving implicit contact source has its sleep threshold");
         let inertia = *inertias.entry(contact.body).or_insert_with(|| BodyInertia {
             centre: position.0 + rotation.0 * com.0,
             inverse_mass: solver.effective_inv_mass(),
@@ -860,6 +879,43 @@ mod tests {
             .find(|pair| pair.body1 == Some(body) || pair.body2 == Some(body))
             .map(|pair| pair.body1 == Some(structure));
         (momentum(app) - before, transfer, dt, structure_first)
+    }
+
+    /// Both sides of a resting joint receive the solver's one transfer with opposite signs.
+    /// Moving chunk groups rely on this against fixed ground and against another structure.
+    /// ASSUMED fixture: the existing cube hits the existing wall along its normal.
+    #[test]
+    fn both_structure_sides_receive_their_contact_transfer() {
+        let mut app = world(1.0);
+        let fixed = wall(&mut app);
+        let moving = cube(&mut app, Vec3::new(-0.76, 0.0, 0.0), Vec3::X * 3.0);
+        app.world_mut().entity_mut(moving).insert(StructureBody);
+        let mut observed = false;
+        for _ in 0..8 {
+            app.update();
+            let reading = app.world().resource::<ContactTransfers>();
+            let on = |structure| {
+                reading
+                    .points
+                    .iter()
+                    .filter(|p| p.structure == structure)
+                    .map(|p| -p.impulse)
+                    .sum::<Vec3>()
+            };
+            let a = on(fixed);
+            let b = on(moving);
+            if a.length() > 0.0 {
+                assert!(b.length() > 0.0);
+                assert!((a + b).length() < 1e-4 * a.length());
+                assert!(
+                    reading
+                        .split()
+                        .any(|(p, ..)| p.structure == moving && p.body == fixed)
+                );
+                observed = true;
+            }
+        }
+        assert!(observed, "the moving group met the fixed wall");
     }
 
     /// THE READING IS THE MOMENTUM THE SOLVER MOVED (the game's environment destruction model):

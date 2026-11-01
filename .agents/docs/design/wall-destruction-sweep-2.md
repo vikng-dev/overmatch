@@ -152,3 +152,76 @@ That is a lane of its own.
 D11 (the terrain packs' identities, repeat sizes and ground types in code) stays open: moving
 them into pack data changes the terrain mesh's UV scale source, the blend shader's uniforms and
 the print and dust readers of `terrain_blend`, which the driving lane's prints share.
+
+
+## Part 4: blind reviews and moving groups
+
+| Reviewer | Finding | Verdict | Fixed in (subject) |
+|---|---|---|---|
+| Codex | P2 dense distinct-vertex winding inside plane tolerance | verified | buildings: refuse crossing profiles inside the plane tolerance (#249) |
+| Codex | P3 retired forest runner still named | verified | buildings: test generic face frames and replica presentation (#249) |
+| Claude | P2 wrong missing stiffness truth | verified | docs: state the actual stiffness data gap (#249) |
+| Claude | P3 forest references and claimed tracked start-lever user | verified | buildings: test generic face frames and replica presentation (#249) |
+| Claude | P3 retired wood visual still listed as shipped | verified | buildings: test generic face frames and replica presentation (#249) |
+| Claude | P3 inventory says committed work remains uncommitted | verified | docs: state the actual stiffness data gap (#249) |
+| Claude | P3 waiting-clock accessor test misses actual presentation | verified | buildings: test generic face frames and replica presentation (#249) |
+| Claude | P3 surface-frame assertion assumes a horizontal run | verified | buildings: test generic face frames and replica presentation (#249) |
+
+There are eight findings, including the two overlapping forest reports; none was rejected.
+The Codex dense-star regression was run red: the load gate accepted the ASSUMED unit-radius,
+501-vertex step-two boundary. An independent topological crossing test now refuses it.
+Claude's stiffness claim was checked directly against the parsed material data and `Spall::of`:
+Young's modulus already exists; joint thickness and attachment stiffness are the missing data.
+The old presentation test cannot distinguish the review's `map_or(true, ...)` mutant. The new
+view test feeds an entry to `present_record` while Waiting, asserts it is held, then releases
+it at a synchronized cursor. The surface test now covers ASSUMED tilted/vertical runs and
+azimuths while asserting a unit, in-plane construction tangent. The start lever retains its
+existing operator, the owner's hand-driving of terrain-print spots; its deleted script is no
+longer presented as a current user.
+
+### The eave state
+
+The shipped-house fixture removes the wall beneath one plate and then both gables, exactly as
+part 3 did. **MEASURED:** the opposite plane and its plate leave as a group of 80 chunks; the
+other 74 roof chunks remain. Their only intact external boundary is **MEASURED eight nailed
+eave patches**, totalling **DERIVED 0.075 m2** from the baked joint areas. No gable rest or
+ridge joint has a live other side. **MEASURED seventeen already-open fixing patches** still
+have closed compression contact with the grounded plate. Those are legitimate contacts;
+the authored bond kinds and areas do not need a data change.
+
+A controlled counterfactual removes only those opened patches' compression credit, preserving
+all chunks and the eight intact nails. **MEASURED:** the same section then fails at
+**2,532,788.5 Pa demand versus 3,240 Pa tensile strength**. Eave nailing alone does not hold it.
+The visible survivor is the existing mixed bonded/contact limit, entirely at the eave, not a
+hidden gable rest. The stiffness solve stays held. The full-plane recheck previously reported
+zero unassessed chunks because a successful enclosing wall check overwrote the local deferral;
+the regression was run red and that count is corrected by retaining local deferrals.
+
+### Model and validation
+
+The model's narrative lives in `wall-destruction.md`, "One assessment path for fixed and moving
+chunk groups". The implementation uses shared construction data and the same law pipeline;
+actual physics contacts become transient resting joints, their already-transferred impulse is
+not exchanged twice. A split retains the parent's actual rigid velocity field and replicates
+birth/retirement ticks on the same presentation cursor (protocol revision 59).
+
+The baseline two-structure contact regression was run red: the reader panicked because it
+assumed every structural body was static. The existing pure slab fixtures already discriminated
+strong/gentle input, free fall and single chunks; the missing runtime path is tested with real
+Avian drops. New frame-wrench and rest-direction fixtures guard the accelerating-frame terms.
+
+**Validation:** formatting and CI clippy passed. The targeted run passed **MEASURED 209 tests**,
+with four existing measurement beds ignored, including all standing-wall fixtures, the real
+strong/gentle drop pair, exact collider momentum inheritance, two-sided contacts, delayed split
+presentation, the wire pin, world reset, headless collider checks, and the whole-tree
+`doc_citations`, `ui_ascii`, `net_boundary` and `bake` guards.
+
+The first real drop stayed whole. Its first nonzero reactions were on the end chunk, while
+zero-reaction speculative points were also being used as reference supports. Removing those
+zero load references fixed the unchanged drop fixture; the dedicated zero-reaction regression
+pins that distinction. Neither seam characterization nor drop geometry was changed to make it
+pass. The split motion test verifies mass, linear/angular momentum and rigid kinetic energy.
+
+Implementation commit: "buildings: assess and split every chunk group in its own frame (#249)".
+The eave's visible mixed-support error remains the held stiffness idea; no modulus, thickness,
+material strength, attachment area or construction bond was tuned for it. Pricing is separate.

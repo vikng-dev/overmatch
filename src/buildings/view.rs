@@ -370,13 +370,16 @@ fn present_record(
     record: Res<WallRecord>,
     clock: Res<PresentationClock>,
     mut presented: Local<(u32, usize)>,
-    mut buildings: Query<(
-        Entity,
-        &MapInstance,
-        &Breakage,
-        Option<&mut ShownShape>,
-        Option<&mut ShownHoles>,
-    )>,
+    mut buildings: Query<
+        (
+            Entity,
+            &MapInstance,
+            &Breakage,
+            Option<&mut ShownShape>,
+            Option<&mut ShownHoles>,
+        ),
+        Without<WallPiece>,
+    >,
     mut commands: Commands,
 ) {
     let reset = presented.0 != record.generation || record.entries.len() < presented.1;
@@ -582,7 +585,7 @@ fn dress_pieces(
         (With<Transform>, Without<PieceDressed>),
     >,
     generation: Option<Res<crate::world::CurrentWorld>>,
-    buildings: Query<(Entity, &MapInstance, &Breakage)>,
+    buildings: Query<(Entity, &MapInstance, &Breakage), Without<WallPiece>>,
     look: Option<Res<BuildingLook>>,
     mut meshes: ResMut<Assets<Mesh>>,
     mut commands: Commands,
@@ -644,18 +647,20 @@ struct PieceDressed {
 
 /// A shown piece whose mesh wears its chunks' holes.
 #[derive(Component)]
-struct PieceHoled;
+struct PieceHoled(usize);
 
 /// A piece shows once its building's shown shape has its chunks fallen, and from then on wears its
-/// chunks' holes (module doc). Every one of them is shown by then: a hole precedes its chunk's fall
-/// in the record, and a chunk no longer standing takes none ([`super::breakage::run_laws`]).
+/// chunks' holes (module doc). New deposits can cut a moving group too, so each changed hole
+/// count refreshes its material at the same shared cursor as the ledger.
 fn show_pieces(
+    clock: Res<PresentationClock>,
+    arrived: Query<(&WallPiece, &PieceDressed)>,
     mut pieces: Query<(
         Entity,
         &WallPiece,
         &PieceDressed,
         &mut Visibility,
-        Has<PieceHoled>,
+        Option<&PieceHoled>,
     )>,
     buildings: Query<(&Breakage, &ShownShape, Option<&ShownHoles>)>,
     mut worn: Query<&mut MeshMaterial3d<BuildingMaterial>>,
@@ -665,18 +670,43 @@ fn show_pieces(
     for (entity, piece, dressed, mut visibility, holed) in &mut pieces {
         // A piece whose building has despawned is hidden.
         let building = buildings.get(dressed.building).ok();
-        let fallen = building.is_some_and(|(_, shown, _)| {
-            piece
-                .chunks
-                .first()
-                .is_some_and(|&c| shown.0.fate.get(usize::from(c)) == Some(&Fate::Fallen))
+        let born = clock
+            .since(piece.born)
+            .is_some_and(|elapsed| elapsed >= 0.0);
+        let retired = piece.retired.is_some_and(|tick| {
+            clock.since(tick).is_some_and(|elapsed| elapsed >= 0.0)
+                && building.is_some_and(|(_, shown, _)| {
+                    piece.chunks.iter().all(|&c| {
+                        shown.0.fate[usize::from(c)] == Fate::Dust
+                            || arrived.iter().any(|(child, child_view)| {
+                                child_view.building == dressed.building
+                                    && child.born == tick
+                                    && child.chunks.binary_search(&c).is_ok()
+                            })
+                    })
+                })
         });
+        let fallen = born
+            && !retired
+            && building.is_some_and(|(_, shown, _)| {
+                piece
+                    .chunks
+                    .iter()
+                    .any(|&c| shown.0.fate.get(usize::from(c)) == Some(&Fate::Fallen))
+            });
         visibility.set_if_neq(if fallen {
             Visibility::Inherited
         } else {
             Visibility::Hidden
         });
-        if !fallen || holed {
+        let hole_count = building.and_then(|(_, _, holes)| holes).map_or(0, |holes| {
+            piece
+                .chunks
+                .iter()
+                .map(|&c| holes.0[usize::from(c)].len())
+                .sum()
+        });
+        if !fallen || holed.is_some_and(|shown| shown.0 == hole_count) {
             continue;
         }
         let table = building.and_then(|(breakage, _, holes)| {
@@ -698,7 +728,7 @@ fn show_pieces(
             };
             worn.0 = surface;
         }
-        commands.entity(entity).insert(PieceHoled);
+        commands.entity(entity).insert(PieceHoled(hole_count));
     }
 }
 
@@ -1103,6 +1133,7 @@ mod tests {
     /// A world holding the stores a view draws from and the shared material ([`BuildingLook`]),
     /// whose handle it returns.
     fn shared_look(world: &mut World) -> Handle<BuildingMaterial> {
+        world.init_resource::<PresentationClock>();
         world.init_resource::<Assets<Mesh>>();
         world.init_resource::<Assets<BuildingMaterial>>();
         world.init_resource::<Assets<ShaderBuffer>>();
@@ -1152,6 +1183,8 @@ mod tests {
                 WallPiece {
                     building: 3,
                     chunks: vec![chunks.start as u16],
+                    born: 0,
+                    retired: None,
                 },
                 WorldGeneration(2),
                 Transform::IDENTITY,
@@ -1293,6 +1326,8 @@ mod tests {
                     WallPiece {
                         building: 3,
                         chunks: vec![c as u16],
+                        born: 0,
+                        retired: None,
                     },
                     Transform::IDENTITY,
                 ))
@@ -1400,5 +1435,87 @@ mod tests {
             show(&mut world, &intact).is_some_and(|v| v > 0),
             "a reset stands the building again"
         );
+    }
+    /// A split replaces the old carrier at the shared cursor, after all replacement views
+    /// have arrived. A late child must not make occupied geometry disappear early.
+    #[test]
+    fn a_split_waits_for_its_tick_and_every_replacement() {
+        let kind = shipped_house();
+        let (_, range) = chunked_element(&kind.layout);
+        let chunks: Vec<_> = range.take(2).map(|c| c as u16).collect();
+        assert_eq!(chunks.len(), 2);
+        let mut world = World::new();
+        shared_look(&mut world);
+        *world.resource_mut::<PresentationClock>() = PresentationClock::At {
+            tick: 19,
+            overstep: 0.0,
+        };
+        let mut shape = Shape::intact(&kind.layout);
+        for &c in &chunks {
+            shape.fate[usize::from(c)] = Fate::Fallen;
+        }
+        world.spawn((
+            MapInstance {
+                id: "fixture".to_owned(),
+                ordinal: 3,
+            },
+            Breakage::new(kind, 1.0),
+            ShownShape(shape),
+        ));
+        let parent = world
+            .spawn((
+                WallPiece {
+                    building: 3,
+                    chunks: chunks.clone(),
+                    born: 0,
+                    retired: Some(20),
+                },
+                Transform::IDENTITY,
+            ))
+            .id();
+        let a = world
+            .spawn((
+                WallPiece {
+                    building: 3,
+                    chunks: vec![chunks[0]],
+                    born: 20,
+                    retired: None,
+                },
+                Transform::IDENTITY,
+            ))
+            .id();
+        let mut schedule = Schedule::default();
+        schedule.add_systems((dress_pieces, show_pieces).chain());
+        schedule.run(&mut world);
+        assert_eq!(
+            world.get::<Visibility>(parent),
+            Some(&Visibility::Inherited)
+        );
+        assert_eq!(world.get::<Visibility>(a), Some(&Visibility::Hidden));
+        *world.resource_mut::<PresentationClock>() = PresentationClock::At {
+            tick: 20,
+            overstep: 0.0,
+        };
+        schedule.run(&mut world);
+        assert_eq!(
+            world.get::<Visibility>(parent),
+            Some(&Visibility::Inherited),
+            "the late replacement keeps the parent available"
+        );
+        let b = world
+            .spawn((
+                WallPiece {
+                    building: 3,
+                    chunks: vec![chunks[1]],
+                    born: 20,
+                    retired: None,
+                },
+                Transform::IDENTITY,
+            ))
+            .id();
+        schedule.run(&mut world);
+        assert_eq!(world.get::<Visibility>(parent), Some(&Visibility::Hidden));
+        assert_eq!(world.get::<Visibility>(a), Some(&Visibility::Inherited));
+        assert_eq!(world.get::<Visibility>(b), Some(&Visibility::Inherited));
     }
 }

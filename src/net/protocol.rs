@@ -234,7 +234,7 @@ use crate::{CombatantId, CombatantLife, ShotId};
 /// carries only a state word; each freed trunk's TreePiece identifies its map tree and cut.
 /// REV 57: environment ledgers and pose carriers carry `WorldGeneration`; the Battle number
 /// selects a fresh construction and prevents records and streamed pieces crossing Battles.
-pub const PROTOCOL_REV: u32 = 59;
+pub const PROTOCOL_REV: u32 = 60;
 
 /// Compatibility tag derived from the complete pinned wire manifest plus the crate version. This
 /// is the runtime handshake value: version-exact, so a version bump intentionally changes it.

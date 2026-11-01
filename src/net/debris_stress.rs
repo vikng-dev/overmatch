@@ -38,7 +38,7 @@ use serde_json::{Value, json};
 
 use super::harness::{LeverError, env_text};
 use crate::Layer;
-use crate::buildings::breakage::WallPiece;
+use crate::buildings::breakage::{RetirePiece, WallPiece};
 use crate::debris::DebrisPiece;
 use crate::tank::Tank;
 use crate::terrain_grid::HeightGrid;
@@ -202,6 +202,7 @@ fn fragment_collider() -> Collider {
 pub(super) fn install_server(app: &mut App) -> Result<(), LeverError> {
     app.init_resource::<CurrentWorld>()
         .add_observer(carry_wall_piece)
+        .add_observer(retire_wall_piece)
         .add_observer(carry_tree_piece)
         .add_systems(
             FixedPostUpdate,
@@ -263,6 +264,27 @@ fn carry_wall_piece(
         ))
         .id();
     commands.entity(added.entity).insert(Carrier(carrier));
+}
+
+/// Keep the parent's final pose and retirement tick on the wire until the shared view
+/// cursor reaches the split. Its children carry their own birth tick and occupied chunks.
+fn retire_wall_piece(
+    retired: On<RetirePiece>,
+    bodies: Query<(&Carrier, &Position, &Rotation)>,
+    mut carriers: Query<(&mut WallPiece, &mut DebrisPose)>,
+) {
+    // Offline bodies own their view directly and have no replicated carrier.
+    let Ok((carrier, position, rotation)) = bodies.get(retired.entity) else {
+        return;
+    };
+    let (mut piece, mut pose) = carriers
+        .get_mut(carrier.0)
+        .expect("a server chunk group retains its carrier through its split tick");
+    piece.retired = Some(retired.tick);
+    pose.set_if_neq(DebrisPose {
+        position: position.0,
+        rotation: rotation.0,
+    });
 }
 
 /// A freed trunk uses the same one-pose interpolated carrier as a wall piece.
@@ -574,6 +596,8 @@ mod tests {
                 WallPiece {
                     building: 2,
                     chunks: vec![4, 5],
+                    born: 0,
+                    retired: None,
                 },
                 Position(at),
                 Rotation(Quat::IDENTITY),
@@ -584,6 +608,44 @@ mod tests {
         assert_eq!(world.get::<DebrisPose>(carrier).unwrap().position, at);
         assert!(world.get::<Carrier>(carrier).is_none());
         assert_eq!(world.query::<&DebrisPose>().iter(&world).count(), 1);
+    }
+
+    /// Birth and retirement are wire facts, including in a late joiner's full snapshot. A
+    /// split preserves the parent's final pose rather than despawning it ahead of the cursor.
+    #[test]
+    fn a_retired_group_keeps_its_final_pose_and_wire_interval() {
+        let mut world = World::new();
+        world.init_resource::<CurrentWorld>();
+        world.add_observer(carry_wall_piece);
+        world.add_observer(retire_wall_piece);
+        let body = world
+            .spawn((
+                WallPiece {
+                    building: 3,
+                    chunks: vec![1, 2],
+                    born: 4,
+                    retired: None,
+                },
+                Position(Vec3::ZERO),
+                Rotation(Quat::IDENTITY),
+            ))
+            .id();
+        world.flush();
+        let carrier = world.get::<Carrier>(body).unwrap().0;
+        world.get_mut::<Position>(body).unwrap().0 = Vec3::new(1.0, 2.0, 3.0);
+        world.trigger(RetirePiece {
+            entity: body,
+            tick: 12,
+        });
+        world.flush();
+        let piece = world.get::<WallPiece>(carrier).unwrap();
+        assert_eq!((piece.born, piece.retired), (4, Some(12)));
+        assert_eq!(
+            world.get::<DebrisPose>(carrier).unwrap().position,
+            Vec3::new(1.0, 2.0, 3.0)
+        );
+        let bytes = postcard::to_allocvec(piece).unwrap();
+        assert_eq!(&postcard::from_bytes::<WallPiece>(&bytes).unwrap(), piece);
     }
 
     /// A trunk and its carrier share one interpolated pose path, with no recursive carrier.
@@ -618,6 +680,8 @@ mod tests {
         world.spawn(WallPiece {
             building: 2,
             chunks: vec![4],
+            born: 0,
+            retired: None,
         });
         world.flush();
     }

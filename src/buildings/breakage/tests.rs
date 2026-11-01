@@ -976,8 +976,8 @@ fn a_nailed_roof_distinguishes_rests_from_local_fixing_failure() {
         "the plane fixed to the plate that lost its wall and its rests leaves whole"
     );
     assert!(
-        weighed.unassessed.is_empty(),
-        "every touched chunk is assessed: {:?}",
+        !weighed.unassessed.is_empty(),
+        "the locally deferred fixing/contact section remains counted: {:?}",
         weighed.unassessed
     );
     probe_remaining_roof(&mut live, &roof);
@@ -1036,6 +1036,42 @@ fn probe_remaining_roof(live: &mut Live, roof: &[usize]) {
     println!(
         "MEASURED: recheck groups {:?}",
         groups.iter().map(Vec::len).collect::<Vec<_>>()
+    );
+    let mut no_props = live.structure.as_ref().clone();
+    let mut contacts = 0;
+    for (j, joint) in no_props.joints.iter_mut().enumerate() {
+        let crossing = match joint.b {
+            Side::Chunk(b) => remaining.contains(&joint.a) != remaining.contains(&b),
+            Side::Ground => remaining.contains(&joint.a),
+        };
+        if crossing && live.state.cracked[j] && live.state.live(joint) && joint.seam().is_some() {
+            // ASSUMED counterfactual: remove only the closed compression contact of an
+            // already-open fixing; the surviving nails and all chunk data are unchanged.
+            joint.bond = Bond::Resting;
+            contacts += 1;
+        }
+    }
+    let mut state = live.state.clone();
+    let nails_alone = fracture::weigh(
+        &no_props,
+        &mut state,
+        &[],
+        &[],
+        &[],
+        &remaining,
+        &mut SectionCache::default(),
+    );
+    println!(
+        "MEASURED: {contacts} opened eave patches still touch; without their compression credit: failures {:?}",
+        nails_alone.failures
+    );
+    assert!(
+        contacts > 0 && !nails_alone.failures.is_empty(),
+        "the intact nails alone do not hold the plane"
+    );
+    assert!(
+        !rechecked.unassessed.is_empty(),
+        "a locally deferred eave must be counted even when a larger wall section was assessed"
     );
 }
 
@@ -1563,6 +1599,8 @@ fn no_bodys_kind_enters_a_contacts_loads() {
                 WallPiece {
                     building: 3,
                     chunks: vec![0],
+                    born: 0,
+                    retired: None,
                 },
                 crate::debris::DebrisPiece,
             ));
@@ -2045,6 +2083,9 @@ fn simultaneous_exchanges_keep_momentum_and_spend_one_kinetic_budget() {
         };
         let departure = |loads: &[Load]| Departure {
             kind: kind.clone(),
+            scale: 1.0,
+            tick: 0,
+            live: Live::new(&kind, 1.0).group(&[c]),
             building: 0,
             root: Transform::IDENTITY,
             group: vec![c],
@@ -2341,6 +2382,9 @@ fn tiny_exchanges_keep_their_plastic_share_without_underflow() {
         };
         let mut departures = [Departure {
             kind: kind.clone(),
+            scale: 1.0,
+            tick: 0,
+            live: Live::new(&kind, 1.0).group(&[c]),
             building: 0,
             root: Transform::IDENTITY,
             group: vec![c],
@@ -2575,7 +2619,7 @@ fn no_elements_kind_or_name_enters_the_laws() {
             sections: SectionCache::default(),
             held_presses: Vec::new(),
             holes: vec![Vec::new(); structure.chunks.len()],
-            structure,
+            structure: Arc::new(structure),
         };
         let hits = fracture::sample_blocks(
             &layout.blocks,
@@ -2603,8 +2647,8 @@ fn no_elements_kind_or_name_enters_the_laws() {
     let (other_layout, other_structure, other_state, other_changes) = run(&relabelled);
     assert_eq!(other_layout, layout);
     assert_eq!(
-        (other_structure.chunks, other_structure.joints),
-        (structure.chunks.clone(), structure.joints.clone())
+        (&other_structure.chunks, &other_structure.joints),
+        (&structure.chunks, &structure.joints)
     );
     assert_eq!(other_state, state, "kinds and names change no pool wear");
     assert_eq!(other_changes, changes, "kinds and names change no law");
@@ -2869,4 +2913,258 @@ fn a_heavy_body_push_reports_the_house_release_groups() {
         groups.len(),
         groups
     );
+}
+
+/// ASSUMED geometry fixture selected by class: three collinear neighbours in one element,
+/// sharing two seams and a common extrusion. The data supplies every hull and mass.
+fn landing_slab() -> (Arc<BuildingKind>, Vec<usize>) {
+    let mut kind = (*shipped_house()).clone();
+    let structure = kind.layout.structure(&kind.asset, 1.0);
+    let adjacent = |a: usize, b: usize| {
+        kind.layout.element_of[a] == kind.layout.element_of[b]
+            && (structure.chunks[a].centroid.y - structure.chunks[b].centroid.y).abs() < 0.001
+            && !structure.chunks[a].buried
+            && !structure.chunks[b].buried
+    };
+    let mut chosen = None;
+    for joint in &structure.joints {
+        let Side::Chunk(b) = joint.b else {
+            continue;
+        };
+        if !adjacent(joint.a, b) || joint.normal.z.abs() < 0.999 {
+            continue;
+        }
+        for other in &structure.joints {
+            let Side::Chunk(c) = other.b else {
+                continue;
+            };
+            if other.a != b || c == joint.a || !adjacent(b, c) || other.normal.z.abs() < 0.999 {
+                continue;
+            }
+            let mut group = vec![joint.a, b, c];
+            group.sort_unstable();
+            chosen = Some(group);
+            break;
+        }
+        if chosen.is_some() {
+            break;
+        }
+    }
+    let group = chosen.expect("the fixture asset contains a row of three chunks");
+    let mut internal = 0;
+    for joint in &mut kind.layout.joints {
+        if let Side::Chunk(b) = joint.b
+            && group.contains(&joint.a)
+            && group.contains(&b)
+        {
+            let mut seam = joint.seam().expect("the row has bonded seams");
+            // ASSUMED fixture characterization, fixed before either drop: enough strength for
+            // gentle support, lower work and strength on one seam than on its neighbour.
+            seam.tensile = if internal == 0 { 1e5 } else { 1e9 };
+            seam.fracture_energy = if internal == 0 { 1.0 } else { 1e6 };
+            joint.bond = Bond::Bonded(seam);
+            internal += 1;
+        }
+    }
+    assert_eq!(internal, 2, "the fixture is a chain, not a loop");
+    (Arc::new(kind), group)
+}
+
+fn drop_slab(gently: bool) -> (Vec<usize>, Vec<Vec<u16>>) {
+    let (mut app, building) = composed(false);
+    app.insert_resource(Gravity(Vec3::NEG_Y * 9.81));
+    let (kind, group) = landing_slab();
+    {
+        let mut fixed = app
+            .world_mut()
+            .get_mut::<Breakage>(building)
+            .expect("the fixture's placed root");
+        let live = fixed.live();
+        for &c in &group {
+            live.state.fate[c] = Fate::Fallen;
+            live.swapped[usize::from(kind.layout.element_of[c])] = true;
+        }
+    }
+    let rotation = if gently {
+        Quat::IDENTITY
+    } else {
+        Quat::from_rotation_x(0.25)
+    } * Quat::from_rotation_z(std::f32::consts::FRAC_PI_2);
+    let low = group
+        .iter()
+        .flat_map(|&c| kind.layout.blocks[c].points.iter())
+        .map(|p| (rotation * *p).y)
+        .fold(f32::INFINITY, f32::min);
+    let root = Transform::from_xyz(30.0, if gently { 0.005 } else { 3.0 } - low, 0.0)
+        .with_rotation(rotation);
+    let live = Live::new(&kind, 1.0).group(&group);
+    let launch = launch(&kind, &live.structure, 1.0, &group, &[]);
+    {
+        let world = app.world_mut();
+        world.spawn((
+            RigidBody::Static,
+            Position(Vec3::new(30.0, -0.5, 0.0)),
+            Collider::cuboid(40.0, 1.0, 40.0),
+            CollisionLayers::new([Layer::Terrain], LayerMask::ALL),
+        ));
+        let mut queue = bevy::ecs::world::CommandQueue::default();
+        let mut commands = Commands::new(&mut queue, world);
+        spawn_group(
+            &mut commands,
+            Departure {
+                kind,
+                group: group.clone(),
+                root,
+                live,
+                scale: 1.0,
+                tick: 0,
+                building: 3,
+                launch,
+            },
+            false,
+        );
+        queue.apply(world);
+    }
+    for _ in 0..192 {
+        app.update();
+    }
+    let pieces = app
+        .world_mut()
+        .query::<&WallPiece>()
+        .iter(app.world())
+        .map(|piece| piece.chunks.clone())
+        .collect();
+    (group, pieces)
+}
+
+/// Real Avian landing contacts, not an injected law load, must split a falling slab. The two
+/// child groups partition the original chunk data; a rigid-only loose path fails this test.
+#[test]
+fn physics_landing_splits_a_slab_and_gentle_support_does_not() {
+    for gently in [false, true] {
+        let (group, pieces) = drop_slab(gently);
+        let mut owned: Vec<_> = pieces.iter().flatten().map(|&c| usize::from(c)).collect();
+        owned.sort_unstable();
+        assert_eq!(
+            owned, group,
+            "split geometry partitions the parent without duplication"
+        );
+        assert_eq!(
+            pieces.len(),
+            if gently { 1 } else { 2 },
+            "gentle={gently}: {pieces:?}"
+        );
+    }
+}
+
+/// Splitting preserves the occupied collider mass, linear momentum, angular momentum and
+/// kinetic energy of the parent's rigid velocity field. No split may manufacture a launch.
+#[test]
+fn split_children_inherit_the_parents_rigid_momentum() {
+    use bevy::ecs::system::RunSystemOnce;
+    let (mut app, _) = composed(false);
+    let (kind, group) = landing_slab();
+    let root = Transform::from_xyz(30.0, 20.0, 0.0).with_rotation(Quat::from_rotation_y(0.7));
+    let live = Live::new(&kind, 1.0).group(&group);
+    let parent = launch(&kind, &live.structure, 1.0, &group, &[]);
+    let centre = root.translation + root.rotation * parent.centre;
+    let velocity = Vec3::new(2.0, -3.0, 1.0);
+    let spin = Vec3::new(0.3, 0.5, -0.2);
+    let inertia = Mat3::from_quat(root.rotation)
+        * parent.inertia
+        * Mat3::from_quat(root.rotation).transpose();
+    let energy = 0.5 * parent.mass * velocity.length_squared() + 0.5 * spin.dot(inertia * spin);
+    let total_mass = parent.mass;
+    let momentum = parent.mass * velocity;
+    let angular = inertia * spin;
+    let children = [group[..1].to_vec(), group[1..].to_vec()]
+        .into_iter()
+        .map(|part| {
+            let child = live.group(&part);
+            (part, child)
+        })
+        .collect();
+    {
+        let world = app.world_mut();
+        let mut queue = bevy::ecs::world::CommandQueue::default();
+        let mut commands = Commands::new(&mut queue, world);
+        spawn_group(
+            &mut commands,
+            Departure {
+                kind: kind.clone(),
+                root,
+                group,
+                live,
+                scale: 1.0,
+                tick: 0,
+                building: 3,
+                launch: parent,
+            },
+            false,
+        );
+        queue.apply(world);
+    }
+    let entity = app
+        .world_mut()
+        .query_filtered::<Entity, With<WallPiece>>()
+        .single(app.world())
+        .unwrap();
+    // The group's exact COM offset is obtained synchronously from its data-built colliders.
+    let breakage = app.world().get::<Breakage>(entity).unwrap();
+    let exact = launch(
+        &kind,
+        &breakage.live.as_ref().unwrap().structure,
+        1.0,
+        &app.world()
+            .get::<WallPiece>(entity)
+            .unwrap()
+            .chunks
+            .iter()
+            .map(|&c| usize::from(c))
+            .collect::<Vec<_>>(),
+        &[],
+    );
+    let offset = exact.centre - exact.centroid;
+    app.world_mut().entity_mut(entity).insert((
+        LinearVelocity(velocity),
+        AngularVelocity(spin),
+        ComputedCenterOfMass(offset),
+        PendingSplit { children, tick: 1 },
+    ));
+    app.world_mut().run_system_once(split_groups).unwrap();
+    let mut sum_mass = 0.0;
+    let (mut sum_p, mut sum_l, mut sum_e) = (Vec3::ZERO, Vec3::ZERO, 0.0);
+    let world = app.world_mut();
+    for (piece, pose, rotation, velocity, spin, breakage) in world
+        .query::<(
+            &WallPiece,
+            &Position,
+            &Rotation,
+            &LinearVelocity,
+            &AngularVelocity,
+            &Breakage,
+        )>()
+        .iter(world)
+    {
+        let group: Vec<_> = piece.chunks.iter().map(|&c| usize::from(c)).collect();
+        let geometry = launch(
+            &kind,
+            &breakage.live.as_ref().unwrap().structure,
+            1.0,
+            &group,
+            &[],
+        );
+        let r = Mat3::from_quat(rotation.0);
+        let inertia = r * geometry.inertia * r.transpose();
+        let at = pose.0 + rotation.0 * (geometry.centre - geometry.centroid);
+        sum_mass += geometry.mass;
+        sum_p += geometry.mass * velocity.0;
+        sum_l += inertia * spin.0 + (at - centre).cross(geometry.mass * velocity.0);
+        sum_e +=
+            0.5 * geometry.mass * velocity.0.length_squared() + 0.5 * spin.0.dot(inertia * spin.0);
+    }
+    assert!((sum_p - momentum).length() <= 1e-4 * momentum.length());
+    assert!((sum_l - angular).length() <= 1e-4 * angular.length());
+    assert!((sum_e - energy).abs() <= 1e-4 * energy);
+    assert!((sum_mass - total_mass).abs() < 1e-5 * total_mass);
 }

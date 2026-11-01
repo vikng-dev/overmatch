@@ -465,8 +465,9 @@ impl Shape {
 /// A building's live state: the structure the laws read at its instance scale, the laws' state,
 /// its shape, the structural check's sections of the structure, and each chunk's holes. The
 /// shape's fates and cracks are the state's, mirrored as the laws move them.
+#[derive(Clone)]
 pub(crate) struct Live {
-    pub(crate) structure: Structure,
+    pub(crate) structure: Arc<Structure>,
     pub(crate) state: WallState,
     pub(crate) swapped: Vec<bool>,
     pub(crate) sections: SectionCache,
@@ -493,8 +494,24 @@ impl Live {
             sections: SectionCache::default(),
             held_presses: Vec::new(),
             holes: vec![Vec::new(); structure.chunks.len()],
-            structure,
+            structure: Arc::new(structure),
         }
+    }
+
+    /// State for one owned group, retaining the data and wear it had before separation.
+    fn group(&self, group: &[usize]) -> Self {
+        let mut child = self.clone();
+        child.sections = SectionCache::default();
+        child.held_presses.clear();
+        child.swapped.fill(true);
+        for (c, fate) in child.state.fate.iter_mut().enumerate() {
+            *fate = if group.binary_search(&c).is_ok() {
+                Fate::Standing
+            } else {
+                Fate::Dust
+            };
+        }
+        child
     }
 
     /// Its fates, cracks and swaps as a [`Shape`].
@@ -511,10 +528,13 @@ impl Live {
 /// state once anything has touched it. Inserted at spawn; the live state is built from the kind's
 /// data, synchronously, on the first touch.
 #[derive(Component)]
+#[require(crate::contact_transfer::StructureBody)]
 pub(crate) struct Breakage {
     pub(crate) kind: Arc<BuildingKind>,
     pub(crate) scale: f32,
     pub(crate) live: Option<Box<Live>>,
+    /// The body's origin in the scaled construction frame; zero for a placed building.
+    origin: Vec3,
 }
 
 impl Breakage {
@@ -523,7 +543,19 @@ impl Breakage {
             kind,
             scale,
             live: None,
+            origin: Vec3::ZERO,
         }
+    }
+
+    /// The construction frame's world pose, from the body's pose and its data-space origin.
+    fn frame(&self, body: &Transform) -> Transform {
+        Transform::from_translation(body.translation - body.rotation * self.origin)
+            .with_rotation(body.rotation)
+    }
+
+    /// Laws use the solver pose, never the eased display transform of a moving body.
+    fn physics_frame(&self, (position, rotation): (&Position, &Rotation)) -> Transform {
+        self.frame(&Transform::from_translation(position.0).with_rotation(rotation.0))
     }
 
     /// The live state, built on first use.
@@ -547,11 +579,16 @@ pub(crate) struct BuildingChunk(pub(crate) u16);
 
 /// A loose group of a building's chunks: the building's ordinal and the group's law chunks,
 /// ascending. On the authority it rides the group's dynamic body; the network carries it to
-/// replicas on the body's pose carrier, which never changes it.
+/// replicas on the body's pose carrier, with its birth and optional retirement ticks.
 #[derive(Component, Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 pub(crate) struct WallPiece {
     pub(crate) building: u16,
     pub(crate) chunks: Vec<u16>,
+    /// This group replaces its parent at this authoritative tick (the shared view cursor).
+    pub(crate) born: u32,
+    /// A split retires its old carrier at this tick; the historical pose remains available
+    /// until the replica's shared cursor has presented the replacement.
+    pub(crate) retired: Option<u32>,
 }
 
 /// What one shell's march step deposited, in world terms, waiting for [`apply_deposits`].
@@ -637,7 +674,7 @@ fn read_contacts(
     transfers: Res<ContactTransfers>,
     mut read: Local<u64>,
     colliders: BuildingColliders,
-    buildings: Query<(&Transform, &Breakage)>,
+    buildings: Query<((&Position, &Rotation), &Breakage, Option<&WallPiece>)>,
     mut queue: ResMut<WallQueue>,
     mut resting: ResMut<RestingLoads>,
 ) {
@@ -692,14 +729,14 @@ fn read_contacts(
 /// do not read. Reads the body's entity only to name the load's origin.
 fn contact_load(
     colliders: &BuildingColliders,
-    buildings: &Query<(&Transform, &Breakage)>,
+    buildings: &Query<((&Position, &Rotation), &Breakage, Option<&WallPiece>)>,
     transfer: &ContactTransfer,
     blow: Vec3,
     press: Vec3,
     mass: f32,
     step: f32,
 ) -> Option<(Entity, Load)> {
-    let (transform, breakage) = buildings.get(transfer.structure).ok()?;
+    let (transform, breakage, moving) = buildings.get(transfer.structure).ok()?;
     let (element, chunk, parent) = colliders.get(transfer.structure_collider).expect(
         "a building collider the last physics step touched stands until the laws' next refit",
     );
@@ -709,7 +746,11 @@ fn contact_load(
         "a building's collider is its root's child"
     );
     let layout = &breakage.kind.layout;
-    let frame = Frame::new(transform, breakage.scale, breakage.kind.bounds());
+    let frame = Frame::new(
+        &breakage.physics_frame(transform),
+        breakage.scale,
+        breakage.kind.bounds(),
+    );
     let local = frame.unscaled(transfer.point);
     let chunk = match (element, chunk) {
         (_, Some(&BuildingChunk(c))) => usize::from(c),
@@ -732,11 +773,19 @@ fn contact_load(
             blow: frame.turn(blow),
             press: frame.turn(press),
             peak: None,
-            origin: Origin::Body {
-                body: transfer.body,
-                mass,
-                speed: transfer.closing_speed,
-                step,
+            origin: if moving.is_some() {
+                Origin::Contact {
+                    other: transfer.body,
+                    normal: frame.turn(transfer.normal),
+                    step,
+                }
+            } else {
+                Origin::Body {
+                    body: transfer.body,
+                    mass,
+                    speed: transfer.closing_speed,
+                    step,
+                }
             },
         },
     ))
@@ -945,9 +994,10 @@ struct DepositParam<'w, 's> {
         's,
         (
             Entity,
-            &'static MapInstance,
-            &'static Transform,
+            Option<&'static MapInstance>,
+            (&'static Position, &'static Rotation),
             &'static mut Breakage,
+            Option<&'static WallPiece>,
         ),
     >,
     clock: Option<Res<'w, ShotClock>>,
@@ -982,6 +1032,7 @@ fn moving_near(p: &DepositParam, origin: Vec3, reach: f32) -> Vec<Entity> {
                 p.bodies
                     .get(of.body)
                     .is_ok_and(|(_, body)| body.is_dynamic())
+                    && !p.buildings.contains(of.body)
             }) {
                 near.push(collider);
             }
@@ -990,6 +1041,65 @@ fn moving_near(p: &DepositParam, origin: Vec3, reach: f32) -> Vec<Entity> {
     );
     near.sort_unstable();
     near
+}
+
+/// Map resolved crossings to owned construction chunks, independent of the group's motion.
+fn take_lines(
+    p: &DepositParam,
+    frames: &BTreeMap<Entity, Frame>,
+    deposit: &RawDeposit,
+    taken: &mut BTreeMap<Entity, Taken>,
+) {
+    for (lines, along, impulse) in &deposit.crossings {
+        let total: f32 = lines.iter().map(|line| line.3).sum();
+        for &(volume, entry, end, energy) in lines {
+            let Ok((element, chunk, parent)) = p.volumes.get(volume) else {
+                continue; // Another body's volume (a hull's armour, a trunk) is another law's.
+            };
+            let root = parent.parent();
+            let frame = &frames[&root];
+            let (_, _, _, breakage, _) = p
+                .buildings
+                .get(root)
+                .expect("a building element or chunk is a child of its building's root");
+            let layout = &breakage.kind.layout;
+            let (a, b) = (frame.unscaled(entry), frame.unscaled(end));
+            let length = a.distance(b);
+            let dir = (b - a).normalize_or_zero();
+            let shares: Vec<(usize, f32, f32)> = match (element, chunk) {
+                (_, Some(&BuildingChunk(c))) => vec![(usize::from(c), 0.0, length)],
+                (Some(&BuildingElement(e)), None) => layout
+                    .chunks_of(usize::from(e))
+                    .filter_map(|c| {
+                        let (t0, t1) = layout.blocks[c].span(a, dir)?;
+                        let (t0, t1) = (t0.max(0.0), t1.min(length));
+                        (t1 > t0).then_some((c, t0, t1))
+                    })
+                    .collect(),
+                (None, None) => {
+                    unreachable!("BuildingColliders admits elements and chunks only")
+                }
+            };
+            let chord: f32 = shares.iter().map(|(_, t0, t1)| t1 - t0).sum();
+            if chord <= 0.0 {
+                continue;
+            }
+            let into = taken.entry(root).or_default();
+            let turned = frame.turn(*along);
+            for (c, t0, t1) in shares {
+                let part = energy * (t1 - t0) / chord;
+                let (from, to) = ((a + dir * t0) * frame.scale, (a + dir * t1) * frame.scale);
+                into.lines.push((c, from, to, part));
+                let blow = if total > 0.0 {
+                    turned * (impulse * part / total)
+                } else {
+                    Vec3::ZERO
+                };
+                into.line_loads
+                    .extend(Load::line(c, &layout.materials[c], from, to, part, blow));
+            }
+        }
+    }
 }
 
 /// AUTHORITY: run the tick's deposits through the laws (module doc), record every change and spawn
@@ -1013,71 +1123,20 @@ fn apply_deposits(mut p: DepositParam) {
     let frames: BTreeMap<Entity, Frame> = p
         .buildings
         .iter()
-        .map(|(root, _, transform, breakage)| {
+        .map(|(root, _, transform, breakage, _)| {
             (
                 root,
-                Frame::new(transform, breakage.scale, breakage.kind.bounds()),
+                Frame::new(
+                    &breakage.physics_frame(transform),
+                    breakage.scale,
+                    breakage.kind.bounds(),
+                ),
             )
         })
         .collect();
     for deposit in std::mem::take(&mut p.queue.0) {
         let mut taken: BTreeMap<Entity, Taken> = BTreeMap::new();
-        for (lines, along, impulse) in &deposit.crossings {
-            let total: f32 = lines.iter().map(|line| line.3).sum();
-            for &(volume, entry, end, energy) in lines {
-                let Ok((element, chunk, parent)) = p.volumes.get(volume) else {
-                    continue; // Another body's volume (a hull's armour, a trunk) is another law's.
-                };
-                let root = parent.parent();
-                let frame = &frames[&root];
-                let (_, _, _, breakage) = p
-                    .buildings
-                    .get(root)
-                    .expect("a building element or chunk is a child of its building's root");
-                let layout = &breakage.kind.layout;
-                let (a, b) = (frame.unscaled(entry), frame.unscaled(end));
-                let length = a.distance(b);
-                let dir = (b - a).normalize_or_zero();
-                let shares: Vec<(usize, f32, f32)> = match (element, chunk) {
-                    (_, Some(&BuildingChunk(c))) => vec![(usize::from(c), 0.0, length)],
-                    (Some(&BuildingElement(e)), None) => layout
-                        .chunks_of(usize::from(e))
-                        .filter_map(|c| {
-                            let (t0, t1) = layout.blocks[c].span(a, dir)?;
-                            let (t0, t1) = (t0.max(0.0), t1.min(length));
-                            (t1 > t0).then_some((c, t0, t1))
-                        })
-                        .collect(),
-                    (None, None) => {
-                        unreachable!("BuildingColliders admits elements and chunks only")
-                    }
-                };
-                let chord: f32 = shares.iter().map(|(_, t0, t1)| t1 - t0).sum();
-                if chord <= 0.0 {
-                    continue;
-                }
-                let into = taken.entry(root).or_default();
-                let turned = frame.turn(*along);
-                for (c, t0, t1) in shares {
-                    let part = energy * (t1 - t0) / chord;
-                    let (from, to) = ((a + dir * t0) * frame.scale, (a + dir * t1) * frame.scale);
-                    into.lines.push((c, from, to, part));
-                    let blow = if total > 0.0 {
-                        turned * (impulse * part / total)
-                    } else {
-                        Vec3::ZERO
-                    };
-                    into.line_loads.extend(Load::line(
-                        c,
-                        &layout.materials[c],
-                        from,
-                        to,
-                        part,
-                        blow,
-                    ));
-                }
-            }
-        }
+        take_lines(&p, &frames, &deposit, &mut taken);
         // Each building's shape as the deposit found it, read once per deposit.
         let mut shapes: BTreeMap<Entity, Shape> = BTreeMap::new();
         for ray in &deposit.rays {
@@ -1090,7 +1149,7 @@ fn apply_deposits(mut p: DepositParam) {
                 if !frame.may_hold(end, STOP_TOLERANCE_M) {
                     continue;
                 }
-                let (_, _, _, breakage) = p
+                let (_, _, _, breakage, _) = p
                     .buildings
                     .get(*root)
                     .expect("frames enumerates this same building query");
@@ -1125,13 +1184,21 @@ fn apply_deposits(mut p: DepositParam) {
         }
         let mut departures = Vec::new();
         for (root, taken) in taken {
-            let (_, identity, transform, mut breakage) = p.buildings.get_mut(root).expect(
+            let (_, identity, transform, mut breakage, piece) = p.buildings.get_mut(root).expect(
                 "a deposit's take is keyed by building roots, which a match never despawns",
             );
             let frame = frames[&root];
             let kind = breakage.kind.clone();
+            let (building, label) = match (identity, piece) {
+                (Some(identity), None) => (identity.ordinal, identity.id.as_str()),
+                (None, Some(piece)) => (piece.building, kind.asset.id.as_str()),
+                _ => panic!("a chunk group is either a placed map instance or one moving owner"),
+            };
+            let scale = breakage.scale;
+            let construction = breakage.physics_frame(transform);
+            let moving = piece.map(|piece| piece.chunks.clone());
             let live = breakage.bypass_change_detection().live();
-            let blast = blast_loads(&identity.id, &kind, frame.scale, &taken.blast, live);
+            let blast = blast_loads(label, &kind, frame.scale, &taken.blast, live);
             let holes = holes_of(&kind, frame.scale, &taken.lines, &blast);
             // A run that changes nothing leaves the colliders as they stand: only a recorded
             // change marks the building for the refit (`reconcile`).
@@ -1151,8 +1218,26 @@ fn apply_deposits(mut p: DepositParam) {
                 .chain(pressing.iter().copied())
                 .chain(resting.iter().copied())
                 .collect();
-            let changes = run_laws(&kind.layout.element_of, live, &loads, holes);
-            let building = identity.ordinal;
+            if moving.is_some() {
+                let (mut body, _) = p
+                    .bodies
+                    .get_mut(root)
+                    .expect("a moving chunk group is a physics body");
+                for load in &loads {
+                    if matches!(load.origin, Origin::Field) && load.blow != Vec3::ZERO {
+                        body.apply_linear_impulse_at_point(
+                            frame.rotation * load.blow,
+                            frame.translation + frame.rotation * load.at,
+                        );
+                    }
+                }
+            }
+            let mut changes = run_laws(&kind.layout.element_of, live, &loads, holes);
+            if moving.is_some() {
+                changes
+                    .events
+                    .retain(|event| !matches!(event, WallEvent::Fall(_)));
+            }
             let counts = [
                 taken.lines.len(),
                 taken.field.len(),
@@ -1160,7 +1245,7 @@ fn apply_deposits(mut p: DepositParam) {
                 taken.contacts.len().max(pressing.len()) + resting.len(),
             ];
             if !changes.events.is_empty() || loads.iter().any(|load| load.energy > 0.0) {
-                log_changes(&identity.id, &loads, counts, &changes);
+                log_changes(label, &loads, counts, &changes);
             }
             p.record
                 .entries
@@ -1170,28 +1255,55 @@ fn apply_deposits(mut p: DepositParam) {
                     tick,
                 }));
             give_back(&mut p.bodies, frame, &changes.returns);
-            for (group, loads) in changes.groups {
-                let launch = launch(&kind, &live.structure, frame.scale, &group, &loads);
-                departures.push(Departure {
-                    kind: kind.clone(),
-                    building,
-                    root: *transform,
-                    group,
-                    launch,
-                });
+            if let Some(owned) = moving {
+                let groups: Vec<_> = changes.groups.into_iter().map(|(group, _)| group).collect();
+                let unchanged = groups.len() == 1
+                    && groups[0]
+                        .iter()
+                        .copied()
+                        .eq(owned.iter().map(|&c| usize::from(c)));
+                if unchanged {
+                    for &c in &groups[0] {
+                        live.state.fate[c] = Fate::Standing;
+                    }
+                } else {
+                    let children: Vec<_> = groups
+                        .into_iter()
+                        .map(|group| {
+                            let state = live.group(&group);
+                            (group, state)
+                        })
+                        .collect();
+                    for (group, _) in &children {
+                        for &c in group {
+                            live.state.fate[c] = Fate::Standing;
+                        }
+                    }
+                    p.commands
+                        .entity(root)
+                        .insert(PendingSplit { children, tick });
+                }
+            } else {
+                for (group, loads) in changes.groups {
+                    let launch = launch(&kind, &live.structure, frame.scale, &group, &loads);
+                    departures.push(Departure {
+                        kind: kind.clone(),
+                        building,
+                        root: construction,
+                        scale,
+                        live: live.group(&group),
+                        group,
+                        launch,
+                        tick,
+                    });
+                }
             }
             if !changes.events.is_empty() {
                 breakage.set_changed();
             }
         }
         for departure in departures {
-            spawn_piece(
-                &mut p.commands,
-                &departure.kind,
-                (departure.building, departure.root),
-                &departure.group,
-                departure.launch,
-            );
+            spawn_group(&mut p.commands, departure, true);
         }
     }
 }
@@ -1254,7 +1366,8 @@ fn log_changes(id: &str, loads: &[Load], counts: [usize; 4], changes: &Changes) 
             .iter()
             .filter_map(|load| match load.origin {
                 Origin::Body { body, .. } => Some(body),
-                Origin::Field => None,
+                Origin::Contact { other, .. } => Some(other),
+                Origin::Field | Origin::Inertia { .. } => None,
             })
             .collect::<std::collections::BTreeSet<_>>()
             .len(),
@@ -1318,7 +1431,7 @@ fn cast_blast(
             if !frame.may_meet(origin, dir) {
                 continue;
             }
-            let (_, _, _, breakage) = p
+            let (_, _, _, breakage, _) = p
                 .buildings
                 .get(*root)
                 .expect("frames enumerates this same building query");
@@ -1395,7 +1508,7 @@ fn cast_blast(
         let (root, Some(c), t, d) = stop? else {
             return None;
         }; // Unbreakable matter shades it.
-        let (_, _, _, breakage) = p
+        let (_, _, _, breakage, _) = p
             .buildings
             .get(root)
             .expect("the stop names a queried building");
@@ -1625,8 +1738,13 @@ pub(crate) fn run_laws(
         .filter(|load| live.state.standing(load.chunk))
         .copied()
         .collect();
-    let mut failures =
-        fracture::structural(&live.structure, &mut live.state, &loads, &mut live.sections);
+    let framed = fracture::in_group_frames(&live.structure, &live.state, &loads);
+    let mut failures = fracture::structural(
+        &live.structure,
+        &mut live.state,
+        &framed,
+        &mut live.sections,
+    );
     let pushed: Vec<usize> = struck
         .cracked
         .iter()
@@ -1650,7 +1768,7 @@ pub(crate) fn run_laws(
         &mut live.state,
         &struck.dusted,
         &pushed,
-        if recheck { &loads } else { &[] },
+        if recheck { &framed } else { &[] },
         &unloaded,
         &mut live.sections,
     );
@@ -1761,6 +1879,9 @@ fn chunk_volume(kind: &BuildingKind, c: usize) -> BallisticVolume {
 /// A freed carrier staged until every building in the deposit has answered its contacts.
 /// One source can free groups in several buildings; their combined exchange is bounded once.
 struct Departure {
+    scale: f32,
+    live: Live,
+    tick: u32,
     kind: Arc<BuildingKind>,
     building: u16,
     root: Transform,
@@ -1810,13 +1931,44 @@ fn give_back(bodies: &mut Query<(Forces, &RigidBody)>, frame: Frame, returns: &[
 
 /// Spawn one loose group's body (module doc): at its chunks' centre of mass, turned as its
 /// building `(ordinal, root pose)`, moving as its bounded plastic exchange leaves it ([`launch`]).
+#[cfg(test)]
 fn spawn_piece(
     commands: &mut Commands,
     kind: &Arc<BuildingKind>,
     (building, root): (u16, Transform),
     group: &[usize],
-    mut launch: Launch,
+    launch: Launch,
 ) {
+    let scale = root.scale.x;
+    let live = Live::new(kind, scale).group(group);
+    spawn_group(
+        commands,
+        Departure {
+            kind: kind.clone(),
+            building,
+            root,
+            group: group.to_vec(),
+            launch,
+            live,
+            scale,
+            tick: 0,
+        },
+        true,
+    );
+}
+
+/// Spawn a group from its synchronous construction state, initial or split.
+fn spawn_group(commands: &mut Commands, departure: Departure, finalize: bool) {
+    let Departure {
+        kind,
+        building,
+        root,
+        group,
+        mut launch,
+        live,
+        scale,
+        tick,
+    } = departure;
     let colliders = std::mem::take(&mut launch.colliders);
     let Launch {
         centroid,
@@ -1849,6 +2001,14 @@ fn spawn_piece(
         WallPiece {
             building,
             chunks: group.iter().map(|&c| c as u16).collect(),
+            born: tick,
+            retired: None,
+        },
+        Breakage {
+            kind: kind.clone(),
+            scale,
+            live: Some(Box::new(live)),
+            origin: *centroid,
         },
         Transform::from_translation(at).with_rotation(root.rotation),
         Position(at),
@@ -1858,8 +2018,10 @@ fn spawn_piece(
         crate::eased_dynamic_body(),
         LinearVelocity(root.rotation * *velocity),
         AngularVelocity(root.rotation * *spin),
-        PendingLaunch::new(root, launch),
     ));
+    if finalize {
+        piece.insert(PendingLaunch::new(root, launch));
+    }
     piece.with_children(|parent| {
         for (c, collider) in colliders {
             parent.spawn((
@@ -1868,10 +2030,80 @@ fn spawn_piece(
                 ColliderDensity(kind.layout.materials[c].density),
                 piece_layers(),
                 kind.chunk_friction(c),
-                chunk_volume(kind, c),
+                chunk_volume(&kind, c),
+                BuildingChunk(c as u16),
             ));
         }
     });
+}
+
+/// A seam failure's new groups, staged until all same-tick plastic returns have reached the
+/// parent. No source can disappear before a simultaneous launch finishes exchanging with it.
+#[derive(Event)]
+pub(crate) struct RetirePiece {
+    pub(crate) entity: Entity,
+    pub(crate) tick: u32,
+}
+
+#[derive(Component)]
+struct PendingSplit {
+    children: Vec<(Vec<usize>, Live)>,
+    tick: u32,
+}
+
+fn split_groups(
+    parents: Query<(
+        Entity,
+        &WallPiece,
+        (&Position, &Rotation),
+        &Breakage,
+        &LinearVelocity,
+        &AngularVelocity,
+        &avian3d::prelude::ComputedCenterOfMass,
+        &PendingSplit,
+    )>,
+    mut commands: Commands,
+) {
+    for (entity, piece, body, breakage, velocity, spin, centre, split) in &parents {
+        let root = breakage.physics_frame(body);
+        let inverse = root.rotation.inverse();
+        for (group, live) in &split.children {
+            let mut launch = launch(&breakage.kind, &live.structure, breakage.scale, group, &[]);
+            // DERIVED rigid velocity field: every new COM gets v + omega cross r; every child
+            // retains omega. Exact child colliders partition the parent's occupied geometry.
+            launch.velocity = inverse * velocity.0
+                + (inverse * spin.0).cross(launch.centre - breakage.origin - centre.0);
+            launch.spin = inverse * spin.0;
+            spawn_group(
+                &mut commands,
+                Departure {
+                    kind: breakage.kind.clone(),
+                    building: piece.building,
+                    root,
+                    group: group.clone(),
+                    launch,
+                    scale: breakage.scale,
+                    live: live.clone(),
+                    tick: split.tick,
+                },
+                false,
+            );
+        }
+        debug!(
+            "buildings: group of {} chunks splits into {:?}",
+            piece.chunks.len(),
+            split
+                .children
+                .iter()
+                .map(|(group, _)| group.len())
+                .collect::<Vec<_>>()
+        );
+        commands.trigger(RetirePiece {
+            entity,
+            tick: split.tick,
+        });
+        commands.entity(entity).despawn();
+    }
 }
 
 /// A loose chunk's filter: brick in ballistics ([`Layer::Armor`]), colliding as debris with the
@@ -1893,7 +2125,7 @@ pub(crate) fn piece_layers() -> CollisionLayers {
 fn derive_from_record(
     record: Res<WallRecord>,
     mut applied: Local<(u32, usize)>,
-    mut buildings: Query<(&MapInstance, &mut Breakage)>,
+    mut buildings: Query<(&MapInstance, &mut Breakage), Without<WallPiece>>,
 ) {
     if applied.0 != record.generation || record.entries.len() < applied.1 {
         for (_, mut breakage) in &mut buildings {
@@ -1941,7 +2173,10 @@ fn derive_from_record(
 /// collider, a swapped element one static collider per standing chunk — spawning and despawning
 /// only what differs. A spawned collider carries its pose so the refit that follows places it.
 fn reconcile(
-    buildings: Query<(Entity, &Transform, &Breakage, Option<&Children>), Changed<Breakage>>,
+    buildings: Query<
+        (Entity, &Transform, &Breakage, Option<&Children>),
+        (Changed<Breakage>, Without<WallPiece>),
+    >,
     elements: Query<&BuildingElement>,
     chunks: Query<&BuildingChunk>,
     mut commands: Commands,
@@ -2020,7 +2255,6 @@ pub(crate) fn sim_plugin(app: &mut App) {
     if !app.is_plugin_added::<LaunchPlugin>() {
         app.add_plugins(LaunchPlugin);
     }
-    let authority = not(resource_exists::<ClientReplica>);
     app.init_resource::<WallQueue>()
         .init_resource::<RestingLoads>()
         .init_resource::<WallRecord>()
@@ -2035,7 +2269,14 @@ pub(crate) fn sim_plugin(app: &mut App) {
             (read_contacts, apply_deposits, refit_systems())
                 .chain()
                 .in_set(WallLawSet)
-                .run_if(authority),
+                .run_if(not(resource_exists::<ClientReplica>)),
+        )
+        .add_systems(
+            FixedPostUpdate,
+            split_groups
+                .after(crate::debris::launch::LaunchSet)
+                .before(crate::state::SimPhase::Publish)
+                .run_if(not(resource_exists::<ClientReplica>)),
         )
         .add_systems(
             Update,

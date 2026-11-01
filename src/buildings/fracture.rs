@@ -65,7 +65,7 @@
 use std::f32::consts::PI;
 
 use bevy::ecs::entity::Entity;
-use bevy::math::Vec3;
+use bevy::math::{Mat3, Vec3};
 
 use crate::substances::{BlastFacts, REFERENCE_FACTOR, SubstanceRegistry};
 
@@ -723,6 +723,16 @@ pub(crate) enum Origin {
     /// A field (a round's line, a fragment, a blast): its blow is its own law's, and it has no
     /// mass to share with what it frees.
     Field,
+    /// A resting joint with another physics body at this tick. Its actual solver impulse
+    /// already changed both bodies' motion; it must never undergo another plastic exchange.
+    Contact {
+        other: Entity,
+        normal: Vec3,
+        step: f32,
+    },
+    /// The rigid response removed in an accelerating group frame. A contact retains its
+    /// solver-step force bound; an impulsive field has none. This is no external support.
+    Inertia { step: Option<f32> },
     /// A body in contact, by its entity: it shares its blow's momentum with whatever the blow
     /// frees. `mass` is the body's effective mass along the contact normal at the combined
     /// blow's centroid, kg, shared by that contact's points ([`crate::contact_transfer`]).
@@ -764,7 +774,7 @@ impl Origin {
     /// a load acts on the hinge. A field is the zero-source-mass limit of this same exchange.
     pub(crate) fn share(self, inverse_mass: f32) -> f32 {
         let mass = match self {
-            Self::Field => 0.0,
+            Self::Field | Self::Contact { .. } | Self::Inertia { .. } => 0.0,
             Self::Body { mass, .. } => mass,
         };
         // A locked source has no response along the contact normal. Its plastic share is the
@@ -909,14 +919,17 @@ impl Load {
     fn felt(&self, reading: Reading) -> f32 {
         match (self.peak, self.origin) {
             (Some(_), _) => reading.falling.sqrt(),
-            (None, Origin::Body { .. }) => {
+            (
+                None,
+                Origin::Body { .. } | Origin::Contact { .. } | Origin::Inertia { step: Some(_) },
+            ) => {
                 if reading.yields {
                     1.0
                 } else {
                     0.0
                 }
             }
-            (None, Origin::Field) => 1.0,
+            (None, Origin::Field | Origin::Inertia { step: None }) => 1.0,
         }
     }
 
@@ -926,8 +939,10 @@ impl Load {
     /// states its pulse by its peak or not at all.
     fn mean_force(&self) -> Option<Vec3> {
         match self.origin {
-            Origin::Body { step, .. } => Some(self.blow / step),
-            Origin::Field => None,
+            Origin::Body { step, .. }
+            | Origin::Contact { step, .. }
+            | Origin::Inertia { step: Some(step) } => Some(self.blow / step),
+            Origin::Field | Origin::Inertia { step: None } => None,
         }
     }
 
@@ -1214,6 +1229,141 @@ fn graph(structure: &Structure, state: &WallState) -> Graph {
     (neighbours, anchors, buried)
 }
 
+/// The assessment graph roots an accelerating group at its actual external load points.
+/// These are reference points for a balanced internal wrench, not tensile anchors: the
+/// support/fall graph never reads them. Multiple references preserve the counted multi-section
+/// limit; a freely moving group with no external load has no root and no internal demand.
+fn loaded_graph(structure: &Structure, state: &WallState, loads: &[Load]) -> Graph {
+    let mut graph = graph(structure, state);
+    let mut accelerating = vec![false; structure.chunks.len()];
+    for load in loads {
+        if matches!(load.origin, Origin::Inertia { .. }) {
+            accelerating[load.chunk] = true;
+        }
+    }
+    for load in loads {
+        if accelerating[load.chunk]
+            && state.standing(load.chunk)
+            && !matches!(load.origin, Origin::Inertia { .. })
+            && (load.blow != Vec3::ZERO
+                || load.press != Vec3::ZERO
+                || load.peak.is_some_and(|peak| peak != Vec3::ZERO))
+        {
+            graph.2[load.chunk] = true;
+        }
+    }
+    graph
+}
+
+/// Express external loads in each unsupported group's accelerating frame. DERIVED: subtract
+/// the group's rigid translation and rotation from each source's wrench; cancel uniform
+/// gravity. The inertia uses the section law's existing equal-volume sphere approximation for
+/// each chunk, plus the parallel-axis term. Equal/opposite point couples retain each chunk's
+/// own angular inertia, so the residual force AND moment vanish, independently of cut origin.
+/// No new load is applied to physics: these inertial loads exist only during assessment.
+pub(crate) fn in_group_frames(
+    structure: &Structure,
+    state: &WallState,
+    loads: &[Load],
+) -> Vec<Load> {
+    for load in loads {
+        if let Origin::Contact { normal, .. } = load.origin {
+            assert!(
+                normal.is_finite() && (normal.length_squared() - 1.0).abs() < 1e-3,
+                "physics supplies a finite unit normal for every resting joint"
+            );
+        }
+    }
+    let mut framed = loads.to_vec();
+    for group in loose_groups(structure, state) {
+        let sources: Vec<_> = loads
+            .iter()
+            .filter(|load| group.binary_search(&load.chunk).is_ok())
+            .collect();
+        if sources.is_empty() {
+            continue;
+        } // Uniform free fall supplies no relative demand.
+        let mass: f32 = group.iter().map(|&c| structure.chunks[c].mass).sum();
+        let centre = group
+            .iter()
+            .map(|&c| structure.chunks[c].centroid * structure.chunks[c].mass)
+            .sum::<Vec3>()
+            / mass;
+        let own = |chunk: &Chunk| {
+            let radius = (3.0 * chunk.volume / (4.0 * PI)).cbrt();
+            (radius, 0.4 * chunk.mass * radius * radius)
+        };
+        let inertia = group.iter().fold(Mat3::ZERO, |sum, &c| {
+            let chunk = &structure.chunks[c];
+            let r = chunk.centroid - centre;
+            sum + Mat3::from_diagonal(Vec3::splat(own(chunk).1 + chunk.mass * r.length_squared()))
+                - Mat3::from_cols(r * r.x, r * r.y, r * r.z) * chunk.mass
+        });
+        let inverse = inertia.inverse();
+        assert!(
+            inverse.is_finite(),
+            "occupied chunks give a free group finite positive inertia"
+        );
+        for &c in &group {
+            let chunk = &structure.chunks[c];
+            framed.push(Load {
+                chunk: c,
+                at: chunk.centroid,
+                energy: 0.0,
+                crushed: 0.0,
+                blow: Vec3::ZERO,
+                press: Vec3::Y * (GRAVITY * chunk.mass),
+                peak: None,
+                origin: Origin::Inertia { step: None },
+            });
+        }
+        for source in sources {
+            let angular = |force: Vec3| inverse * (source.at - centre).cross(force);
+            let alpha_j = angular(source.blow);
+            let alpha_p = angular(source.press);
+            let alpha_peak = source.peak.map(angular);
+            let step = match source.origin {
+                Origin::Body { step, .. } | Origin::Contact { step, .. } => Some(step),
+                Origin::Field => None,
+                Origin::Inertia { .. } => unreachable!("only external loads enter a group frame"),
+            };
+            for &c in &group {
+                let chunk = &structure.chunks[c];
+                let r = chunk.centroid - centre;
+                let base = Load {
+                    chunk: c,
+                    at: chunk.centroid,
+                    energy: 0.0,
+                    crushed: 0.0,
+                    blow: -chunk.mass * (source.blow / mass + alpha_j.cross(r)),
+                    press: -chunk.mass * (source.press / mass + alpha_p.cross(r)),
+                    peak: source
+                        .peak
+                        .zip(alpha_peak)
+                        .map(|(force, alpha)| -chunk.mass * (force / mass + alpha.cross(r))),
+                    origin: Origin::Inertia { step },
+                };
+                framed.push(base);
+                let (radius, own_inertia) = own(chunk);
+                for axis in [Vec3::X, Vec3::Y, Vec3::Z] {
+                    for sign in [-1.0, 1.0] {
+                        let arm = axis * (radius * sign);
+                        let factor = -own_inertia * sign / (4.0 * radius);
+                        framed.push(Load {
+                            at: chunk.centroid + arm,
+                            blow: alpha_j.cross(axis) * factor,
+                            press: alpha_p.cross(axis) * factor,
+                            peak: alpha_peak.map(|alpha| alpha.cross(axis) * factor),
+                            ..base
+                        });
+                    }
+                }
+            }
+        }
+    }
+    framed
+}
+
 /// The chunks reachable from `start` through `graph` with the joints of `cut` (ascending) removed,
 /// when none of them is buried or holds an anchor outside `cut`: the group `cut` alone holds to
 /// the ground. `None` when a path to the ground remains. Breadth first, stopping at the first
@@ -1451,7 +1601,7 @@ pub(crate) fn structural(
     // Every pass cracks an intact joint (asserted where it cracks) and none closes again, so
     // the passes end.
     loop {
-        let graph = graph(structure, state);
+        let graph = loaded_graph(structure, state, loads);
         let paths: Vec<Option<Vec<usize>>> = pushed
             .iter()
             .map(|&chunk| {
@@ -1521,7 +1671,7 @@ pub(crate) fn structural(
     }
     // A pushed part that stands on rests alone (no bonded path to the ground) leaves with its
     // blows when the rest law opens every rest it stood on.
-    let graph = graph(structure, state);
+    let graph = loaded_graph(structure, state, loads);
     let mut seen = vec![false; structure.chunks.len()];
     for &chunk in &pushed {
         if !state.standing(chunk) || seen[chunk] || ground_path(chunk, &graph, &mut steps).is_some()
@@ -1668,7 +1818,8 @@ fn section_failure(
     // starts it upward. A group beside or under its section has nothing under it once it opens.
     let r = (com - hinge) - axis * (com - hinge).dot(axis);
     let up = axis.cross(r).y;
-    let lift = if n.y > 0.0 && up > 0.0 {
+    let accelerating = on_group().any(|load| matches!(load.origin, Origin::Inertia { .. }));
+    let lift = if !accelerating && n.y > 0.0 && up > 0.0 {
         mass * GRAVITY * (r.y.hypot(up) - r.y)
     } else {
         0.0
@@ -1732,8 +1883,8 @@ pub(crate) struct Weighed {
 /// holds, or a group that also bears on a rest or a cracked seam from below,
 /// [`bears_on_contact`]) stands unassessed and is counted ([`Weighed::unassessed`]): a static
 /// solve's to decide.
-/// A group inside a larger one a section holds (that span under the wall above it) is assessed
-/// only as part of the larger. A fall adds no touched chunk: a loose group has no intact joint to a
+/// Assessing a larger group's section does not certify a locally deferred section inside it;
+/// that local limit remains counted even when the enclosing wall's section holds. A fall adds no touched chunk: a loose group has no intact joint to a
 /// grounded one, so it neither held nor hung on anything that stands. Reads the chunk table and
 /// the joint graph only; `sections` is `structure`'s cache of them ([`SectionCache`]).
 pub(crate) fn weigh(
@@ -1778,7 +1929,7 @@ pub(crate) fn weigh(
         if touched.is_empty() {
             break;
         }
-        let graph = graph(structure, state);
+        let graph = loaded_graph(structure, state, loads);
         // A disconnected group is about to leave the standing structure. Its contacts cannot
         // be credited as static props while the remaining structure is assessed.
         let mut grounded = vec![true; structure.chunks.len()];
@@ -1792,6 +1943,7 @@ pub(crate) fn weigh(
             .collect();
         let crossing = crossing(structure.joints.len(), &paths);
         let mut assessed = vec![false; touched.len()];
+        let mut deferred = vec![false; touched.len()];
         let mut worst: Option<(f32, Failure)> = None;
         let (all, cutting) = sections.cutting(structure, state, &paths);
         for section in cutting.iter().map(|&s| &all[s]) {
@@ -1811,7 +1963,14 @@ pub(crate) fn weigh(
                 let Some(group) = held(touched[k], section, &graph, &mut weighed.steps) else {
                     continue;
                 };
-                let failure = (!bears_on_contact(structure, state, &incident, &grounded, &group))
+                let other_contact =
+                    bears_on_contact(structure, state, &incident, &grounded, &group);
+                if other_contact {
+                    for (k, &chunk) in touched.iter().enumerate() {
+                        deferred[k] |= group.binary_search(&chunk).is_ok();
+                    }
+                }
+                let failure = (!other_contact)
                     .then(|| {
                         weight_failure(
                             structure,
@@ -1872,9 +2031,10 @@ pub(crate) fn weigh(
                     weighed.unassessed = touched
                         .iter()
                         .zip(&paths)
-                        .zip(&assessed)
-                        .filter(|((_, path), assessed)| {
-                            path.as_ref().is_some_and(|path| !path.is_empty()) && !**assessed
+                        .zip(assessed.iter().zip(&deferred))
+                        .filter(|((_, path), (assessed, deferred))| {
+                            path.as_ref().is_some_and(|path| !path.is_empty())
+                                && (!**assessed || **deferred)
                         })
                         .map(|((&c, _), _)| c)
                         .collect();
@@ -2037,6 +2197,42 @@ fn unseated(
 /// no part of another's weight that reaches it through the part it carries; the law reads each
 /// part's own weight and external presses on its own rests. Adds the joints and chunks it reads
 /// to `steps`.
+struct BearingPlane<'a> {
+    normal: Vec3,
+    centre: Vec3,
+    friction: f32,
+    hull: &'a [(f32, f32)],
+    axes: (Vec3, Vec3),
+}
+
+impl BearingPlane<'_> {
+    fn compression(&self, force: Vec3) -> f32 {
+        -force.dot(self.normal)
+    }
+    fn lifts(&self, force: Vec3) -> bool {
+        self.compression(force) < 0.0
+    }
+    fn tangent(&self, force: Vec3) -> f32 {
+        (force + self.normal * self.compression(force)).length()
+    }
+    fn slides(&self, force: Vec3) -> bool {
+        self.tangent(force) > self.friction * self.compression(force)
+    }
+    fn tip(&self, force: Vec3, torque: Vec3) -> f32 {
+        if self.compression(force) > 0.0 {
+            let pressure = self.centre + self.normal.cross(torque) / force.dot(self.normal);
+            beyond(
+                self.hull,
+                (pressure.dot(self.axes.0), pressure.dot(self.axes.1)),
+            )
+        } else if (torque - self.normal * torque.dot(self.normal)).length_squared() > 0.0 {
+            f32::INFINITY
+        } else {
+            0.0
+        }
+    }
+}
+
 fn unseat(
     structure: &Structure,
     state: &WallState,
@@ -2046,8 +2242,26 @@ fn unseat(
     steps: &mut usize,
 ) -> Option<Failure> {
     let inside = |c: usize| group.binary_search(&c).is_ok();
+    let accelerating = loads
+        .iter()
+        .any(|load| inside(load.chunk) && matches!(load.origin, Origin::Inertia { .. }));
+    let acceleration = if accelerating { 0.0 } else { GRAVITY };
     let (mut rests, mut bearing) = (Vec::new(), Vec::new());
-    let mut rim: Vec<(f32, f32)> = Vec::new();
+    let mut rim_points: Vec<Vec3> = Vec::new();
+    let (resultant, torque_at_origin) =
+        force_wrench(structure, group, loads, gravity, Vec3::ZERO, |load| {
+            Some(load.press)
+        });
+    let impulse = loads
+        .iter()
+        .filter(|load| inside(load.chunk))
+        .map(|load| load.blow)
+        .sum::<Vec3>();
+    let demand = if resultant.length_squared() > 0.0 {
+        resultant
+    } else {
+        impulse
+    };
     // `Σ A n`, `Σ μ A` and `Σ A c` over the bearing rests.
     let (mut normal, mut grip, mut seat) = (Vec3::ZERO, 0.0, Vec3::ZERO);
     *steps += structure.joints.len() + group.len();
@@ -2070,7 +2284,12 @@ fn unseat(
         } else {
             -joint.normal
         };
-        if n.y <= BEARS {
+        let reference = if accelerating {
+            -demand.normalize_or_zero()
+        } else {
+            Vec3::Y
+        };
+        if n.dot(reference) <= BEARS {
             continue;
         }
         bearing.push(index);
@@ -2083,10 +2302,9 @@ fn unseat(
             );
         let (u, v) = plane_axes(n);
         let radius = (joint.area / PI).sqrt();
-        rim.extend((0..8).map(|k| {
+        rim_points.extend((0..8).map(|k| {
             let angle = k as f32 * PI / 4.0;
-            let p = joint.centroid + (u * angle.cos() + v * angle.sin()) * radius;
-            (p.x, p.z)
+            joint.centroid + (u * angle.cos() + v * angle.sin()) * radius
         }));
     }
     if rests.is_empty() {
@@ -2105,6 +2323,21 @@ fn unseat(
         (mass + chunk.mass, moment + chunk.centroid * chunk.mass)
     });
     let centre = moment / mass;
+    // An unloaded rest in a freely accelerating frame has no relative demand.
+    if demand == Vec3::ZERO
+        && torque_at_origin == Vec3::ZERO
+        && !loads
+            .iter()
+            .any(|load| inside(load.chunk) && load.blow != Vec3::ZERO)
+    {
+        return None;
+    }
+    let Some(support) = normal.try_normalize() else {
+        return open(Cause::Tip, f32::INFINITY, 0.0);
+    };
+    let (u, v) = plane_axes(support);
+    let project = |p: Vec3| (p.dot(u), p.dot(v));
+    let mut rim: Vec<_> = rim_points.into_iter().map(project).collect();
     let hull = convex_hull(&mut rim);
     if hull.len() < 3 {
         return open(Cause::Tip, f32::INFINITY, 0.0);
@@ -2116,37 +2349,29 @@ fn unseat(
     let (force, torque) = force_wrench(structure, group, loads, gravity, seat_centre, |load| {
         Some(load.press)
     });
-    let support = normal.normalize();
     let friction = grip / normal.length();
     // The sustained law on a resultant force `f` (N) and moment `t` (N m) about the seat: it
     // lifts the part when it pulls away from the rests; it tips it by how far its pressure
     // centre lies past the bearing hull, infinitely when a resultant with no vertical part
     // still overturns it about a horizontal axis; it slides it when its tangent beats friction
     // times its compression.
-    let compression = |f: Vec3| -f.dot(support);
-    let lifts = |f: Vec3| f.y > 0.0 || compression(f) < 0.0;
-    let tip = |f: Vec3, t: Vec3| {
-        if f.y < 0.0 {
-            let pressure = seat_centre + Vec3::new(t.z / f.y, 0.0, -t.x / f.y);
-            beyond(&hull, (pressure.x, pressure.z))
-        } else if t.x != 0.0 || t.z != 0.0 {
-            f32::INFINITY
-        } else {
-            0.0
-        }
+    let plane = BearingPlane {
+        normal: support,
+        centre: seat_centre,
+        friction,
+        hull: &hull,
+        axes: (u, v),
     };
-    let tangent = |f: Vec3| (f + support * compression(f)).length();
-    let slides = |f: Vec3| tangent(f) > friction * compression(f);
-    if lifts(force) {
-        return open(Cause::LiftForce, force.y.max(-compression(force)), 0.0);
+    if plane.lifts(force) {
+        return open(Cause::LiftForce, -plane.compression(force), 0.0);
     }
-    let reach = tip(force, torque);
+    let reach = plane.tip(force, torque);
     if reach > 0.0 {
         return open(Cause::Tip, reach, 0.0);
     }
-    if slides(force) {
-        let ratio = if compression(force) > 0.0 {
-            tangent(force) / compression(force)
+    if plane.slides(force) {
+        let ratio = if plane.compression(force) > 0.0 {
+            plane.tangent(force) / plane.compression(force)
         } else {
             f32::INFINITY
         };
@@ -2178,20 +2403,20 @@ fn unseat(
     let tip_pulse = Reading {
         falling: plastic_demand(strength_ratio(|s| {
             let (f, t) = at(s);
-            lifts(f) || tip(f, t) > 0.0
+            plane.lifts(f) || plane.tip(f, t) > 0.0
         })),
-        yields: lifts(mean) || tip(mean, mean_turn) > 0.0,
+        yields: plane.lifts(mean) || plane.tip(mean, mean_turn) > 0.0,
     };
     let lift_pulse = Reading {
-        falling: plastic_demand(strength_ratio(|s| lifts(at(s).0))),
-        yields: lifts(mean),
+        falling: plastic_demand(strength_ratio(|s| plane.lifts(at(s).0))),
+        yields: plane.lifts(mean),
     };
     let slide_pulse = Reading {
         falling: plastic_demand(strength_ratio(|s| {
             let f = at(s).0;
-            lifts(f) || slides(f)
+            plane.lifts(f) || plane.slides(f)
         })),
-        yields: lifts(mean) || slides(mean),
+        yields: plane.lifts(mean) || plane.slides(mean),
     };
     if let Some(turn) = section_failure(structure, &bearing, group, loads, tip_pulse)
         && turn.demand >= turn.capacity
@@ -2209,7 +2434,8 @@ fn unseat(
     let press = felt(lift_pulse).dot(support);
     if press > 0.0 {
         let height = (centre - seat_centre).dot(support).max(0.0);
-        let capacity = mass * (2.0 * GRAVITY * support.y * height).sqrt();
+
+        let capacity = mass * (2.0 * acceleration * support.y.max(0.0) * height).sqrt();
         if press >= capacity {
             return open(Cause::Lift, press, capacity);
         }
@@ -2224,9 +2450,9 @@ fn unseat(
     // `t` lies in the rests' plane, which the slope check held within `atan μ` of level, so its
     // horizontal part is at least `cos θ` long.
     let t = along.normalize();
-    let level = t.x.hypot(t.z);
-    let slide = exit(&hull, (centre.x, centre.z), (t.x / level, t.z / level)) / level;
-    let work = mass * GRAVITY * slide * (friction * support.y + t.y);
+
+    let slide = exit(&hull, project(centre), project(t));
+    let work = mass * acceleration * slide * (friction * support.y + t.y);
     let capacity = (2.0 * mass * work.max(0.0)).sqrt();
     if net >= capacity {
         return open(Cause::Shove, net, capacity);
@@ -3578,6 +3804,172 @@ mod tests {
             bond: Bond::Bonded(material.seam),
         });
         Structure { chunks, joints }
+    }
+
+    /// ASSUMED characterization: a three-chunk slab with one weaker opening seam. These
+    /// values discriminate contact response; they are not a material calibration or asset gate.
+    fn unsupported_slab(n: usize) -> Structure {
+        let mut slab = row(n);
+        slab.joints.retain(|joint| !matches!(joint.b, Side::Ground));
+        for (j, joint) in slab.joints.iter_mut().enumerate() {
+            let mut seam = joint.seam().expect("the fixture row has bonded seams");
+            seam.tensile = if j == 0 { 1.0e5 } else { 1.0e9 };
+            seam.fracture_energy = if j == 0 { 1.0 } else { 1.0e6 };
+            joint.bond = Bond::Bonded(seam);
+        }
+        slab
+    }
+
+    fn slab_contact(slab: &Structure, impulse: f32) -> Load {
+        Load {
+            chunk: 0,
+            at: slab.chunks[0].centroid,
+            energy: 0.0,
+            crushed: 0.0,
+            blow: Vec3::Y * impulse,
+            press: Vec3::ZERO,
+            peak: None,
+            origin: Origin::Contact {
+                other: Entity::PLACEHOLDER,
+                normal: Vec3::NEG_Y,
+                step: STEP,
+            },
+        }
+    }
+
+    fn assess_slab(
+        slab: Structure,
+        loads: &[Load],
+    ) -> (WallState, super::super::breakage::Changes) {
+        let n = slab.chunks.len();
+        let mut live = super::super::breakage::Live::from_structure(slab, 1);
+        let changes = super::super::breakage::run_laws(&vec![0; n], &mut live, loads, Vec::new());
+        (live.state, changes)
+    }
+
+    /// Landing contacts must reach internal seams before support emits the new bodies. A
+    /// permanently rigid loose-body mutant leaves this slab whole despite its resolved blow.
+    #[test]
+    fn a_landing_slab_splits_at_its_weakest_seam() {
+        let slab = unsupported_slab(3);
+        let load = slab_contact(&slab, 1000.0);
+        let (state, changes) = assess_slab(slab, &[load]);
+        assert_eq!(state.cracked, vec![true, false]);
+        assert_eq!(
+            changes
+                .groups
+                .iter()
+                .map(|(group, _)| group.clone())
+                .collect::<Vec<_>>(),
+            vec![vec![0], vec![1, 2]]
+        );
+    }
+
+    /// Contact alone is not failure: the same slab under a small resolved blow retains every
+    /// seam. Runtime splitting must be conditional on the common force/work limits.
+    #[test]
+    fn a_gently_set_down_slab_stays_whole() {
+        let slab = unsupported_slab(3);
+        let load = slab_contact(&slab, 0.001);
+        let (state, changes) = assess_slab(slab, &[load]);
+        assert_eq!(state.cracked, vec![false, false]);
+        assert_eq!(changes.groups.len(), 1);
+        assert_eq!(changes.groups[0].0, vec![0, 1, 2]);
+    }
+
+    /// Uniform free fall has no relative gravitational demand (DERIVED). Every section law
+    /// must leave the seams untouched before the physics engine supplies a world contact.
+    #[test]
+    fn a_free_falling_group_splits_nothing() {
+        let (state, changes) = assess_slab(unsupported_slab(3), &[]);
+        assert!(state.cracked.iter().all(|cracked| !cracked));
+        assert_eq!(changes.groups.len(), 1);
+        assert!(changes.failures.is_empty());
+    }
+
+    /// A single occupied chunk has no seam to fail. Its contact may change its rigid motion
+    /// but can never manufacture more chunk groups.
+    #[test]
+    fn a_single_chunk_never_splits() {
+        let slab = unsupported_slab(1);
+        let load = slab_contact(&slab, 1000.0);
+        let (state, changes) = assess_slab(slab, &[load]);
+        assert!(state.cracked.is_empty());
+        assert_eq!(changes.groups.len(), 1);
+        assert_eq!(changes.groups[0].0, vec![0]);
+    }
+
+    /// A resting joint transmits compression in its own normal and never tension, even in
+    /// an accelerating frame whose load crosses the construction's original horizontal axis.
+    #[test]
+    fn a_moving_rest_carries_compression_from_either_side() {
+        for (chunk, direction, stays) in [
+            (0, Vec3::X, true),
+            (1, Vec3::NEG_X, true),
+            (0, Vec3::NEG_X, false),
+        ] {
+            let mut slab = unsupported_slab(2);
+            slab.joints[0].bond = Bond::Resting;
+            let mut load = slab_contact(&slab, 0.0);
+            load.chunk = chunk;
+            load.at = slab.chunks[chunk].centroid;
+            load.blow = direction * 100.0;
+            load.origin = Origin::Contact {
+                other: Entity::PLACEHOLDER,
+                normal: -direction,
+                step: STEP,
+            };
+            let (_, changes) = assess_slab(slab, &[load]);
+            assert_eq!(
+                changes.groups.len(),
+                if stays { 1 } else { 2 },
+                "{chunk}, {direction}"
+            );
+        }
+    }
+
+    /// The choice of reference point must not add a resultant. Section tractions rely on
+    /// both force and moment being balanced after subtracting the free group's rigid response.
+    #[test]
+    fn an_accelerating_frame_has_no_residual_rigid_wrench() {
+        let slab = unsupported_slab(3);
+        let mut load = slab_contact(&slab, 100.0);
+        load.at += Vec3::Z * 0.3;
+        load.press = Vec3::new(10.0, 20.0, -3.0);
+        let loads = in_group_frames(&slab, &WallState::new(&slab), &[load]);
+        let force = loads.iter().map(|load| load.blow).sum::<Vec3>();
+        let moment = loads
+            .iter()
+            .map(|load| load.at.cross(load.blow))
+            .sum::<Vec3>();
+        assert!(force.length() < 0.001, "{force}");
+        assert!(moment.length() < 0.001, "{moment}");
+        let (force, moment) = force_wrench(
+            &slab,
+            &[0, 1, 2],
+            &loads,
+            Vec3::NEG_Y * GRAVITY,
+            Vec3::ZERO,
+            |load| Some(load.press),
+        );
+        assert!(force.length() < 0.001, "{force}");
+        assert!(moment.length() < 0.001, "{moment}");
+    }
+
+    /// A speculative contact carrying zero reaction is no load path. Pinning every zero
+    /// solver point would make a single-end impact appear supported across the whole slab.
+    #[test]
+    fn a_zero_reaction_does_not_anchor_a_free_section() {
+        let slab = unsupported_slab(3);
+        let impact = slab_contact(&slab, 1000.0);
+        let mut zero = slab_contact(&slab, 0.0);
+        zero.chunk = 1;
+        zero.at = slab.chunks[1].centroid;
+        let mut another = zero;
+        another.chunk = 2;
+        another.at = slab.chunks[2].centroid;
+        let (state, _) = assess_slab(slab, &[impact, zero, another]);
+        assert_eq!(state.cracked, vec![true, false]);
     }
 
     /// A fixture wall `w` chunks wide and `h` high of 0.25 m cubes in the xy plane, each joined to

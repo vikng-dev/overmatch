@@ -23,7 +23,7 @@ pub(crate) struct BodyReturn {
 impl BodyReturn {
     pub(crate) fn of(load: &Load, launched: Vec3) -> Option<Self> {
         match load.origin {
-            Origin::Field => None,
+            Origin::Field | Origin::Contact { .. } | Origin::Inertia { .. } => None,
             Origin::Body { body, .. } if load.blow != Vec3::ZERO => Some(Self {
                 body,
                 at: load.at,
@@ -39,6 +39,8 @@ impl BodyReturn {
 #[derive(Debug)]
 pub(crate) struct Launch {
     pub(crate) centroid: Vec3,
+    /// Actual occupied centre of mass in the construction frame, including collider rounding.
+    pub(crate) centre: Vec3,
     pub(crate) colliders: Vec<(usize, Collider)>,
     pub(crate) velocity: Vec3,
     pub(crate) spin: Vec3,
@@ -90,6 +92,7 @@ pub(crate) fn launch_colliders(
     }
     Launch {
         centroid,
+        centre: com,
         colliders,
         velocity: impulse / total.mass,
         spin: inverse_inertia * angular,
@@ -224,11 +227,16 @@ impl PendingLaunch {
 /// Every simultaneous departure shares one budget, including a source touching walls and trees.
 pub(crate) struct LaunchPlugin;
 
+/// Every plastic return has reached its same-tick source before a group can split it.
+#[derive(SystemSet, Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) struct LaunchSet;
+
 impl Plugin for LaunchPlugin {
     fn build(&self, app: &mut App) {
         app.add_systems(
             FixedPostUpdate,
             finish_launches
+                .in_set(LaunchSet)
                 .after(crate::buildings::breakage::WallLawSet)
                 .after(crate::trees::TreeDerived)
                 .before(crate::state::SimPhase::Publish),

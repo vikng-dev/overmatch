@@ -429,6 +429,8 @@ fn a_destroyed_world_is_startup_again_at_next_fill_up_over_real_udp() {
                 WallPiece {
                     building: walls[0].building,
                     chunks: vec![chunk],
+                    born: 0,
+                    retired: None,
                 },
                 RigidBody::Dynamic,
                 collider,

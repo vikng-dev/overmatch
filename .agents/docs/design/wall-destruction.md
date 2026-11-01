@@ -775,6 +775,55 @@ No separate landing-fragility multiplier is selected.
 Loose and resting pieces retain their material in ballistics.
 Landing and pushing may fracture masonry without creating contact HP dose to tanks.
 
+### One assessment path for fixed and moving chunk groups
+
+Subject: the game's environment destruction, game state only. A moving body keeps the same
+`Breakage` and `Live` construction state as a placed building: pools, internal bonds, opened
+joints and holes. The immutable structure table is shared; each group's state names exactly
+its owned chunks. Every deposit, including solver contacts, enters `run_laws`: wear, cavity
+cracks, section blows, weight, rests and connectivity have one implementation. The laws read
+the solver's `Position` and `Rotation`, never an eased display transform.
+
+A solver contact is a transient point resting joint to the other physics body. Its normal,
+point, signed impulse and press come from `contact_transfer`; each structural side receives
+its own opposite reading. A fixed side has zero inverse inertia; a moving side keeps its
+finite inertia. The contact's transferred impulse has already changed their motion, so it
+gets no second plastic exchange or launch. External fields still apply their own impulse.
+There is no landing-fragility factor or switch for a piece's kind.
+
+For an unsupported group, `in_group_frames` subtracts each source's rigid translation and
+rotation, cancels uniform gravity, and retains the resulting internal force and moment. DERIVED:
+uniform free fall has no relative demand. ASSUMED inertia for assessing demand remains the
+section law's equal-volume sphere per chunk with parallel-axis terms; point couples account
+for each sphere's own angular inertia. This is distinct from the exact occupied collider
+inertia used to spawn and split physics bodies. The frame's residual rigid force and moment
+are tested. External contact points root the balanced section search; they confer no tensile
+anchor. Zero-reaction speculative points do not root the balanced search. Multiple simultaneous
+support paths retain the existing unassessed limit. An enclosing
+wall's successful check no longer erases a locally deferred section from that count. Rest
+pressure centres are projected into the bearing plane, so reversing a contact does not change
+the compression-only law.
+
+A failed seam partitions ownership at the same authoritative tick. `PendingSplit` waits for
+that tick's plastic returns to reach their sources, then creates the children before publication.
+Children inherit `v + omega cross r` at their actual occupied centres of mass and the parent's
+angular velocity; their colliders partition the parent. This adds no kinetic energy. The existing
+fracture-work criterion is a threshold, not a resolved cohesive dissipation/strain model.
+The initial departure's plastic exchange remains the shared launch path.
+
+`WallPiece` carries birth and retirement ticks (protocol revision **59**, a deliberate wire
+change). A retired parent's final pose remains replicated. Replicas show it until the shared
+cursor reaches the split and the replacement groups have arrived; children wait for their birth
+tick. The replacement bodies are server-only, and the client keeps deriving the standing wall's
+shape from the ledger. Continued holes remain drawn data and do not change occupied geometry.
+
+The required tests use ASSUMED fixture geometry and seam characterization: a strong landing
+opens only the weaker seam, gentle support keeps the slab whole, free fall opens no seam, a
+single chunk has none to open, and a resting joint carries compression from either side but
+never tension. Real Avian contact and split tests complement the law fixtures. These are
+invariant tests, not empirical material or handbook validation. More live bodies and retained
+carriers remain for the separate pricing lane to measure.
+
 ## Rubble settlement and the cap
 
 Rest requires a supported equilibrium, not merely low velocity.
@@ -829,7 +878,7 @@ Rubble rests through Avian's island sleep and its wake on contact.
 No resting piece switches to a static body: a switch rebuilt the piece's contacts and woke its island, and the switching undid Avian's own sleep (`.agents/scratch/destruction-2026-10-30-buildings/debris-cost-survey.md`, §2).
 No cap applies until a sleeping piece's per-tick cost is measured.
 
-What limits the piece count (DERIVED from `src/buildings/breakage.rs`): a chunk leaves its building at most once and a loose piece never splits, so the pieces of a map never exceed its breakable chunks, and nothing else limits them. The shipped map's bound is 86,062 (MEASURED: 1,163 chunks in `assets/buildings/house_1/house_1.building.ron`, 1,005 brick and 158 wood, both materials stating a seam, times the 74 `house_proxy` placements in `assets/maps/kalinovo/level.json`). A bound, not a forecast. The risk this decision brings is an awake pile held by a tank's island (below), which no measurement prices yet; the pricing lane must price it.
+What limits the piece count (DERIVED from `src/buildings/breakage.rs`): every surviving chunk belongs to exactly one body; splitting partitions that ownership, so live building bodies never exceed the map's breakable chunks. Splits retain historical pose carriers for the delayed presentation cursor and late joiners; DERIVED carrier bound is `2N - 1` for `N > 0` breakable chunks, since every retirement either partitions a group or removes at least one chunk. Nothing else caps live bodies or carriers. The shipped map's bound is 86,062 (MEASURED: 1,163 chunks in `assets/buildings/house_1/house_1.building.ron`, 1,005 brick and 158 wood, both materials stating a seam, times the 74 `house_proxy` placements in `assets/maps/kalinovo/level.json`). A bound, not a forecast. The risk this decision brings is an awake pile held by a tank's island (below), which no measurement prices yet; the pricing lane must price it.
 
 Two costs of the library's sleep, MEASURED as counts over 10 s on a fixture lattice of 54 cubes, 0.4 m, 2 cm apart, beside a 3 × 2 × 6 m box with sleeping disabled standing in for a tank (not a hull). The harness that produced the counts is not committed; the numbers rest on it:
 
