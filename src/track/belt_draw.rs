@@ -116,6 +116,8 @@ const RECORD_BYTES: usize = 16;
 /// columns (`xyz`), then the canonical origin in mesh space (`xyz`) and the shoe's lateral centre
 /// in the belt's frame (`w`). `shaders/track_belt.wgsl`'s `belt_at` reads them in this order.
 const HEADER_RECORDS: u32 = 4;
+/// DERIVED from the table's u32 record addresses, reserving the placement header.
+pub(crate) const MAX_BELT_LINKS: usize = (u32::MAX - HEADER_RECORDS) as usize;
 
 /// Records in one table page: 128 KiB. A page never changes size (module doc).
 const PAGE_RECORDS: u32 = 8192;
@@ -164,9 +166,11 @@ pub(crate) fn bind_link_attribute(
     let link = layout
         .0
         .get_layout(&[ATTRIBUTE_BELT_LINK.at_shader_location(LINK_LOCATION)])?;
-    let Some(buffer) = descriptor.vertex.buffers.first_mut() else {
-        return Ok(());
-    };
+    let buffer = descriptor
+        .vertex
+        .buffers
+        .first_mut()
+        .expect("the base mesh pipeline supplies the certified shoe's vertex buffer");
     buffer.attributes.extend(link.attributes);
     Ok(())
 }
@@ -187,13 +191,14 @@ pub(crate) struct BeltDraw {
 
 impl BeltDraw {
     fn release(mut world: DeferredWorld, HookContext { entity, .. }: HookContext) {
-        let Some(draw) = world.entity(entity).get::<Self>() else {
-            return;
-        };
+        let draw = world
+            .entity(entity)
+            .get::<Self>()
+            .expect("on_discard runs before the immutable BeltDraw value is replaced or removed");
         let (page, block) = (draw.page, draw.block.clone());
         if let Some(mut table) = world.get_resource_mut::<BeltTable>() {
             table.release(page, block);
-        }
+        } // Resource teardown needs no allocator bookkeeping.
     }
 }
 
@@ -272,9 +277,10 @@ impl BeltTable {
     }
 
     fn release(&mut self, page: usize, block: Range<u32>) {
-        if let Some(page) = self.pages.get_mut(page) {
-            page.give(block);
-        }
+        self.pages
+            .get_mut(page)
+            .expect("table pages live until allocator teardown")
+            .give(block);
     }
 
     /// The material every belt of `look` on `page` wears, made on the first.
@@ -336,32 +342,18 @@ fn write_spans(bytes: &mut [u8], block: &Range<u32>, frames: &BeltFrames) {
     }
 }
 
-/// The repeated meshes, per link count: each count's verdict, and the rungs its belts have drawn.
-///
-/// A count's entry is made the first time a belt of that count asks ([`Self::ready`]) and holds
-/// one of two answers for as long as it lives. `Refused`: some rung's shoe cannot be repeated, the
-/// refusal was logged once, and the count is never examined again. `Ready`: every rung's shoe was
-/// checked before anything was built, so a rung built later cannot fail; a rung is built on the
-/// first frame a belt of that count draws it ([`Self::rung_or_build`]). While a shoe has not loaded
-/// there is no entry, and the next ask checks again.
-///
-/// A `Ready` count no live belt table uses is evicted ([`evict_unused_counts`]), which drops its
-/// meshes; a `Refused` count is kept, so a refusal is never re-examined.
+/// The repeated meshes per admitted link count. Every rung is certified before anything is
+/// built. Loading shoes leave no entry; malformed loaded data refuses. Unused counts are evicted.
 #[derive(Resource, Default)]
 pub(crate) struct BeltMeshes {
     by_count: HashMap<usize, CountMeshes>,
 }
 
-/// One link count's verdict ([`BeltMeshes`]).
-enum CountMeshes {
-    Refused,
-    Ready {
-        /// The farthest any vertex of any rung of each side's shoe stands from the canonical
-        /// origin, m: the bounds' growth ([`BeltFrames::bounds`]).
-        reach: PerSide<f32>,
-        /// Per rung, nearest first, each side's repeated mesh once built.
-        rungs: Vec<PerSide<Option<Handle<Mesh>>>>,
-    },
+/// A certified count and the repeated rungs its belts have drawn.
+struct CountMeshes {
+    /// Farthest source vertex from the canonical origin, m, for each side's bounds.
+    reach: PerSide<f32>,
+    rungs: Vec<PerSide<Option<Handle<Mesh>>>>,
 }
 
 impl BeltMeshes {
@@ -369,12 +361,15 @@ impl BeltMeshes {
     /// past the floor draws the floor ([`LinkTemplate::rung_mesh`]).
     #[cfg(test)]
     pub(crate) fn rung(&self, count: usize, rung: usize, side: Side) -> Option<&Handle<Mesh>> {
-        let Some(CountMeshes::Ready { rungs, .. }) = self.by_count.get(&count) else {
-            return None;
-        };
-        rungs[rung.min(rungs.len().checked_sub(1)?)]
-            .get(side)
-            .as_ref()
+        let CountMeshes { rungs, .. } = self.by_count.get(&count)?;
+        rungs[rung.min(
+            rungs
+                .len()
+                .checked_sub(1)
+                .expect("a certified template includes its base shoe"),
+        )]
+        .get(side)
+        .as_ref()
     }
 
     /// The mesh a belt of `count` links draws at `rung` on `side`, built now if no belt of that
@@ -387,22 +382,22 @@ impl BeltMeshes {
         template: &LinkTemplate,
         meshes: &mut Assets<Mesh>,
     ) -> Option<Handle<Mesh>> {
-        let Some(CountMeshes::Ready { rungs, .. }) = self.by_count.get_mut(&count) else {
-            return None;
-        };
-        let rung = rung.min(rungs.len().checked_sub(1)?);
+        let CountMeshes { rungs, .. } = self.by_count.get_mut(&count)?;
+        let rung = rung.min(
+            rungs
+                .len()
+                .checked_sub(1)
+                .expect("a certified template includes its base shoe"),
+        );
         let slot = rungs[rung].get_mut(side);
         if let Some(built) = slot {
             return Some(built.clone());
         }
-        let mesh = match repeated_shoe(meshes.get(&template.rung_mesh(rung, side))?, count) {
-            Ok(mesh) => mesh,
-            // Unreachable while the template's shoes are the ones [`Self::ready`] checked.
-            Err(why) => {
-                error_once!("track belt: rung {rung} cannot be repeated ({why}) — not drawn");
-                return None;
-            }
-        };
+        let source = meshes
+            .get(&template.rung_mesh(rung, side))
+            .expect("a ready count retains every loaded template shoe");
+        let mesh = repeated_shoe(source, count)
+            .expect("ready certified every rung's repeatability before any mesh was built");
         info!(
             "track belt: rung {rung} {side:?} of {count} links built — {} vertices of {} B, {} \
              indices, {:.1} MB DERIVED",
@@ -432,21 +427,18 @@ impl BeltMeshes {
             };
             self.by_count.insert(count, verdict);
         }
-        matches!(self.by_count.get(&count), Some(CountMeshes::Ready { .. }))
+        true
     }
 
     /// Each side's reach for belts of `count` links, once [`Self::ready`].
     fn reach(&self, count: usize, side: Side) -> Option<f32> {
-        let Some(CountMeshes::Ready { reach, .. }) = self.by_count.get(&count) else {
-            return None;
-        };
+        let CountMeshes { reach, .. } = self.by_count.get(&count)?;
         Some(*reach.get(side))
     }
 
-    /// Drop every built count `live` does not name, and its meshes with it. Refusals stay.
+    /// Drop every built count `live` does not name, and its meshes with it.
     fn evict(&mut self, live: impl Fn(usize) -> bool) {
-        self.by_count
-            .retain(|&count, meshes| matches!(meshes, CountMeshes::Refused) || live(count));
+        self.by_count.retain(|&count, _| live(count));
     }
 
     /// A fixture's meshes for belts of `count` links, one per rung, without building any.
@@ -454,7 +446,7 @@ impl BeltMeshes {
     pub(crate) fn insert_fixture(&mut self, count: usize, rungs: Vec<PerSide<Handle<Mesh>>>) {
         self.by_count.insert(
             count,
-            CountMeshes::Ready {
+            CountMeshes {
                 reach: PerSide::default(),
                 rungs: rungs.into_iter().map(|rung| rung.map(Some)).collect(),
             },
@@ -463,7 +455,7 @@ impl BeltMeshes {
 }
 
 /// Every rung's shoe on both sides checked for belts of `count` links, before anything is built.
-/// `None` while a shoe has not loaded; a refusal is logged here, once.
+/// `None` while a shoe has not loaded; malformed loaded data refuses before mesh publication.
 fn verdict(count: usize, template: &LinkTemplate, meshes: &Assets<Mesh>) -> Option<CountMeshes> {
     let mut reach = PerSide::new(0.0_f32, 0.0_f32);
     for rung in 0..template.levels() {
@@ -476,25 +468,34 @@ fn verdict(count: usize, template: &LinkTemplate, meshes: &Assets<Mesh>) -> Opti
                     *side_reach = side_reach.max(shoe_reach);
                 }
                 Err(why) => {
-                    error!(
-                        "track belt: rung {rung} {side:?} cannot be repeated {count} times ({why}) \
-                         — no belt of {count} links is drawn"
+                    panic!(
+                        "{}: track shoe rung {rung} {side:?} cannot be repeated {count} times ({why}); \
+                         export a CPU-readable triangle list with finite float attributes and an addressable link count",
+                        crate::tank::TANK_GLB_PATH,
                     );
-                    return Some(CountMeshes::Refused);
                 }
             }
         }
     }
-    Some(CountMeshes::Ready {
+    Some(CountMeshes {
         reach,
         rungs: vec![PerSide::new(None, None); template.levels()],
     })
+}
+
+/// Certify the complete decoded template before it is published to any draw consumer.
+pub(crate) fn certify_template(template: &LinkTemplate, count: usize, meshes: &Assets<Mesh>) {
+    verdict(count, template, meshes)
+        .expect("template binding waits until all base and reduced shoes have loaded");
 }
 
 /// Whether [`repeated_shoe`] can repeat `shoe` `count` times: a triangle list whose data the main
 /// world holds, every attribute a float format, and every repeated vertex addressable by a `u32`
 /// index.
 fn repeatable(shoe: &Mesh, count: usize) -> Result<(), String> {
+    if count > MAX_BELT_LINKS {
+        return Err("link count exceeds the table's u32 record range".into());
+    }
     if shoe.primitive_topology() != PrimitiveTopology::TriangleList {
         return Err("not a triangle list".into());
     }
@@ -502,20 +503,52 @@ fn repeatable(shoe: &Mesh, count: usize) -> Result<(), String> {
         return Err("its data lives in the render world only".into());
     };
     for (attribute, values) in attributes {
-        if !matches!(
-            values,
-            VertexAttributeValues::Float32(_)
-                | VertexAttributeValues::Float32x2(_)
-                | VertexAttributeValues::Float32x3(_)
-                | VertexAttributeValues::Float32x4(_)
-        ) {
+        let finite = match values {
+            VertexAttributeValues::Float32(values) => values.iter().all(|v| v.is_finite()),
+            VertexAttributeValues::Float32x2(values) => {
+                values.iter().flatten().all(|v| v.is_finite())
+            }
+            VertexAttributeValues::Float32x3(values) => {
+                values.iter().flatten().all(|v| v.is_finite())
+            }
+            VertexAttributeValues::Float32x4(values) => {
+                values.iter().flatten().all(|v| v.is_finite())
+            }
+            _ => {
+                return Err(format!(
+                    "attribute `{}` is {:?}",
+                    attribute.name,
+                    VertexFormat::from(values)
+                ));
+            }
+        };
+        if !finite {
             return Err(format!(
-                "attribute `{}` is {:?}",
-                attribute.name,
-                VertexFormat::from(values)
+                "attribute `{}` contains a non-finite value",
+                attribute.name
             ));
         }
     }
+    let vertices = shoe.count_vertices();
+    let indices = shoe.indices().map_or(vertices, Indices::len);
+    if vertices < 3 || indices < 3 || !indices.is_multiple_of(3) {
+        return Err("shoe must contain complete triangles".into());
+    }
+    let invalid_index = match shoe.indices() {
+        Some(Indices::U16(values)) => values.iter().any(|&index| usize::from(index) >= vertices),
+        Some(Indices::U32(values)) => values.iter().any(|&index| index as usize >= vertices),
+        None => false,
+    };
+    if invalid_index {
+        return Err("shoe triangle indexes past its vertex attributes".into());
+    }
+    if count
+        .checked_mul(indices)
+        .is_none_or(|n| n > u32::MAX as usize)
+    {
+        return Err("more indices than a GPU draw can address".into());
+    }
+
     if count
         .checked_mul(shoe.count_vertices())
         .is_none_or(|vertices| vertices > u32::MAX as usize)
@@ -533,10 +566,20 @@ fn canonical_reach(shoe: &Mesh, origin: Vec3) -> Result<f32, String> {
     else {
         return Err("no f32x3 positions".into());
     };
-    Ok(positions
+    if positions.is_empty() || positions.iter().any(|p| !Vec3::from(*p).is_finite()) {
+        return Err("shoe positions must be nonempty and finite".into());
+    }
+    let reach = positions
         .iter()
         .map(|&p| Vec3::from(p).distance(origin))
-        .fold(0.0, f32::max))
+        .fold(0.0, f32::max);
+    if !origin.is_finite() || !reach.is_finite() {
+        return Err(
+            "canonical shoe bounds must be finite; repair the template frame and coordinates"
+                .into(),
+        );
+    }
+    Ok(reach)
 }
 
 /// `shoe` repeated `count` times, copy `k` tagged as link `k` in [`ATTRIBUTE_BELT_LINK`]: every
@@ -625,24 +668,37 @@ impl BeltAssets<'_> {
         if !self.ready(template, frames.count()) {
             return None;
         }
-        let records = HEADER_RECORDS.checked_add(u32::try_from(frames.count()).ok()?)?;
+        let records = HEADER_RECORDS
+            .checked_add(
+                u32::try_from(frames.count()).expect("admitted link counts fit the table address"),
+            )
+            .expect("spec and live rig admission reserve the table header");
         let mesh = self
             .cache
-            .rung_or_build(frames.count(), 0, side, template, &mut self.meshes)?;
-        let reach = self.cache.reach(frames.count(), side)?;
-        let base = self.standard.get(template.material())?;
+            .rung_or_build(frames.count(), 0, side, template, &mut self.meshes)
+            .expect("ready installed this count before draw");
+        let reach = self
+            .cache
+            .reach(frames.count(), side)
+            .expect("ready installed the count bounds");
+        let base = self
+            .standard
+            .get(template.material())
+            .expect("ready checked the retained shoe material");
         let (page, block) = self.table.lend(records, &mut self.buffers);
         let material = self
             .table
             .material(page, template.material(), base, &mut self.materials);
-        if let Some(bytes) = self
+        let bytes = self
             .buffers
             .get_mut(&self.table.pages[page].buffer)
-            .and_then(|buffer| buffer.into_inner().data.as_mut())
-        {
-            write_header(bytes, &block, frames);
-            write_spans(bytes, &block, frames);
-        }
+            .expect("lend owns the page's storage buffer")
+            .into_inner()
+            .data
+            .as_mut()
+            .expect("belt pages retain MAIN_WORLD data for table writes");
+        write_header(bytes, &block, frames);
+        write_spans(bytes, &block, frames);
         let (low, high) = frames.bounds(reach);
         Some((
             Mesh3d(mesh),
@@ -675,22 +731,27 @@ fn upload_belt_frames(
     written.clear();
     written.resize(table.pages.len(), false);
     for (frames, draw, mut aabb) in &mut belts {
-        if let Some(bytes) = table
+        let page = table
             .pages
             .get(draw.page)
-            .and_then(|page| buffers.get_mut_untracked(&page.buffer))
-            .and_then(|buffer| buffer.data.as_mut())
-        {
-            write_spans(bytes, &draw.block, frames);
-            written[draw.page] = true;
-        }
+            .expect("a live draw owns a live table page");
+        let buffer = buffers
+            .get_mut_untracked(&page.buffer)
+            .expect("a page retains its storage buffer");
+        let bytes = buffer
+            .data
+            .as_mut()
+            .expect("belt pages retain MAIN_WORLD data for frame uploads");
+        write_spans(bytes, &draw.block, frames);
+        written[draw.page] = true;
         let (low, high) = frames.bounds(draw.reach);
         aabb.set_if_neq(Aabb::from_min_max(low, high));
     }
     for (page, _) in table.pages.iter().zip(written.iter()).filter(|(_, w)| **w) {
-        if let Some(buffer) = buffers.get_mut(&page.buffer) {
-            buffer.into_inner();
-        }
+        buffers
+            .get_mut(&page.buffer)
+            .expect("a written page retains its buffer")
+            .into_inner();
     }
 }
 
@@ -699,10 +760,7 @@ fn upload_belt_frames(
 /// frame, so a count drawn this frame is never dropped under its belt.
 fn evict_unused_counts(mut cache: ResMut<BeltMeshes>, tables: Query<&BeltFrames>) {
     let live = |count: usize| tables.iter().any(|table| table.count() == count);
-    let stale = cache
-        .by_count
-        .iter()
-        .any(|(&count, meshes)| matches!(meshes, CountMeshes::Ready { .. }) && !live(count));
+    let stale = cache.by_count.keys().any(|&count| !live(count));
     if stale {
         cache.evict(live);
     }
@@ -1068,54 +1126,50 @@ mod tests {
         );
     }
 
-    /// A REFUSAL IS FINAL AND BUILDS NOTHING. Every rung is checked before any is built, so a shoe
-    /// that cannot be repeated (here the floor rung, carrying an integer attribute) leaves no
-    /// half-built count behind; and the count is never examined again, so a consumer asking every
-    /// frame does not redo the work every frame. A shoe still loading is not a refusal: the count
-    /// is examined again once it lands.
+    /// Certification must reject malformed geometry before repetition allocates any output.
+    /// GPU draws rely on finite attributes, complete triangles and representable index counts.
     #[test]
-    fn a_refused_count_builds_nothing_and_is_never_examined_again() {
-        const COUNT: usize = 4;
-        const REFUSED: usize = COUNT + 1;
+    fn shoe_certification_checks_geometry_and_the_draw_index_count() {
+        let source = fixture_shoe();
+        let count = u32::MAX as usize / source.count_vertices();
+        assert!(repeatable(&source, count).unwrap_err().contains("indices"));
+        let bad =
+            fixture_shoe().with_inserted_attribute(Mesh::ATTRIBUTE_NORMAL, vec![[f32::NAN; 3]; 4]);
+        assert!(repeatable(&bad, 4).unwrap_err().contains("non-finite"));
+        assert!(canonical_reach(&source, Vec3::splat(f32::MAX)).is_err());
+        let bad = fixture_shoe().with_inserted_indices(Indices::U32(vec![0, 1, 99]));
+        assert!(repeatable(&bad, 4).unwrap_err().contains("indexes past"));
+    }
+
+    /// Loading is a temporary absence, while malformed loaded data must refuse before any
+    /// repeated geometry is built. A cached failure state would silently leave belts undrawn.
+    #[test]
+    fn loaded_shoes_refuse_instead_of_becoming_permanently_undrawn() {
+        const COUNT: usize = 4; // FIXTURE DATA: a small repeated mesh.
         let mut assets = Assets::<Mesh>::default();
         let template = fixture_template(&mut assets, 3);
         let floor = template.rung_mesh(2, Side::Right);
         let mut cache = BeltMeshes::default();
-
         let shoe = assets.remove(&floor).expect("the fixture shoe");
         assert!(!cache.ready(COUNT, &template, &assets), "a shoe is loading");
         assets.insert(&floor, shoe).expect("the fixture id");
-        assert!(
-            cache.ready(COUNT, &template, &assets),
-            "a count is examined again once its shoe lands",
-        );
-
+        assert!(cache.ready(COUNT, &template, &assets));
         let tagged = fixture_shoe().with_inserted_attribute(
             MeshVertexAttribute::new("FixtureTag", 0x0B31_7173, VertexFormat::Uint32),
             vec![0_u32; 4],
         );
         assets.insert(&floor, tagged).expect("the fixture id");
         let before = assets.len();
-        assert!(!cache.ready(REFUSED, &template, &assets));
         assert!(
-            cache
-                .rung_or_build(REFUSED, 0, Side::Left, &template, &mut assets)
-                .is_none()
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| cache.ready(
+                COUNT + 1,
+                &template,
+                &assets
+            )))
+            .is_err()
         );
-        assert_eq!(assets.len(), before, "a refusal builds nothing");
-
-        assets
-            .insert(&floor, fixture_shoe())
-            .expect("the fixture id");
-        assert!(
-            !cache.ready(REFUSED, &template, &assets),
-            "a refusal is never examined again"
-        );
-        cache.evict(|_| false);
-        assert!(
-            !cache.ready(REFUSED, &template, &assets),
-            "eviction keeps a refusal"
-        );
+        assert_eq!(assets.len(), before, "refusal builds no repeated meshes");
+        assert!(!cache.by_count.contains_key(&(COUNT + 1)));
     }
 
     /// The repeated mesh is the draw's geometry: copy `k` must be the source shoe exactly, tagged

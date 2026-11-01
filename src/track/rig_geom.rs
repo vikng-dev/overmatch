@@ -127,6 +127,7 @@ pub(crate) enum RigFault {
         side: Side,
     },
     TooFewTeeth(u32),
+    LinkAddress(usize),
     ShortLoop {
         side: Side,
         links: usize,
@@ -168,6 +169,11 @@ impl std::fmt::Display for RigFault {
             Self::TooFewTeeth(teeth) => write!(
                 f,
                 "track.sprocket.teeth: {teeth} cannot form a pin polygon; author at least three teeth"
+            ),
+            Self::LinkAddress(count) => write!(
+                f,
+                "track.link_count: {count} exceeds the belt table address; author at most {} links",
+                super::belt_draw::MAX_BELT_LINKS
             ),
             Self::ShortLoop {
                 side,
@@ -252,6 +258,9 @@ impl RigGeom {
     /// tuning uses the same typed refusal before replacing the accepted rig. Both sides must
     /// wrap and supply the contact law's minimum travel; a warning cannot make a fictitious rig.
     pub(crate) fn validate(&self, params: &SuspensionParams) -> Result<(), RigFault> {
+        if self.link_count > super::belt_draw::MAX_BELT_LINKS {
+            return Err(RigFault::LinkAddress(self.link_count));
+        }
         if self.teeth < 3 {
             return Err(RigFault::TooFewTeeth(self.teeth));
         }
@@ -1051,6 +1060,17 @@ pub(crate) fn tiger_rig() -> RigGeom {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Live count tuning uses the same address bound as file admission, before replacing a rig.
+    #[test]
+    fn live_rig_counts_cannot_exceed_the_table_address() {
+        let mut rig = synthetic_rig(20, 97); // FIXTURE DATA: feasible construction.
+        rig.link_count = super::super::belt_draw::MAX_BELT_LINKS + 1;
+        assert!(matches!(
+            rig.validate(&SuspensionParams::default()),
+            Err(RigFault::LinkAddress(_))
+        ));
+    }
 
     /// The 2D belt route cannot certify a station's lateral position. Wheel posing and footprint
     /// projection rely on all three coordinates being finite before the rig is published.

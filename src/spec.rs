@@ -1462,8 +1462,9 @@ impl TankSpec {
             )
             .into());
         }
-        if t.link_count < 3 {
-            return Err(format!("track.link_count must be >= 3 (got {})", t.link_count).into());
+        if !(3..=crate::track::belt_draw::MAX_BELT_LINKS).contains(&t.link_count) {
+            return Err(format!("track.link_count must be in 3..={} (got {}); reduce the count or widen the belt table's record address",
+                crate::track::belt_draw::MAX_BELT_LINKS, t.link_count).into());
         }
         if t.sprocket.teeth < 3 {
             return Err("track.sprocket.teeth must be >= 3 to form a pin polygon".into());
@@ -2086,6 +2087,20 @@ TankSpec(
             .err()
             .expect("a repeated key must not parse");
         assert!(err.to_string().contains("twice"), "{err}");
+    }
+
+    /// Link counts must fit the renderer's record format before any rig/table allocation.
+    /// The asset gate owns this bound; a conversion failure during draw must be unreachable.
+    #[test]
+    fn link_counts_beyond_the_table_address_refuse_at_admission() {
+        let mut spec = fixture();
+        spec.track.link_count = crate::track::belt_draw::MAX_BELT_LINKS + 1;
+        assert!(
+            spec.validate()
+                .unwrap_err()
+                .to_string()
+                .contains("track.link_count")
+        );
     }
 
     /// The mutation battery's one baseline: unmutated, the fixture passes. Without this, a

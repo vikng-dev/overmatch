@@ -703,6 +703,18 @@ fn verify_template_document(document: &gltf::Document, path: &str) {
             template[index]
         );
     }
+    let start =
+        super::marker_model::node_matrix(&found[1].as_ref().expect("start pin was required").0)
+            .w_axis
+            .truncate();
+    let end = super::marker_model::node_matrix(&found[2].as_ref().expect("end pin was required").0)
+        .w_axis
+        .truncate();
+    let delta = start - end;
+    assert!(
+        delta.length().is_finite() && delta.with_x(0.0).length() > 0.0,
+        "{path}: track shoe pin markers must define a finite positive pitch in the side plane; separate the pin datums before export"
+    );
     for index in [0, 3] {
         // Link_Box is a measurement marker in the sim artifact; the view may omit it.
         if let Some((node, world)) = &found[index] {
@@ -1006,14 +1018,16 @@ fn bind_link_template(
         );
     }
 
-    commands.insert_resource(LinkTemplate {
+    let template = LinkTemplate {
         mesh,
         lods,
         material: material.0.clone(),
         frame,
         chain: chain.map(|chain| chain.chain().clone()),
         switches,
-    });
+    };
+    super::belt_draw::certify_template(&template, geom.link_count, &meshes);
+    commands.insert_resource(template);
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -1113,10 +1127,14 @@ fn frames(pin_start: Vec3, pin_end: Vec3, shoe_offset: f32) -> PerSide<LinkFrame
 /// that the template node carries no rotation, so the authored pose is already a legal on-track pose
 /// (outer face `-y` down, guide horn `+y` up).
 fn canonical_frame(pin_start: Vec3, pin_end: Vec3, shoe_offset: f32) -> LinkFrame {
-    let long = (pin_start - pin_end).normalize_or(Vec3::Z);
+    let long = (pin_start - pin_end)
+        .try_normalize()
+        .expect("the template gate certifies a finite positive pin axis");
     // Model X, orthogonalised against the pin axis: the pins are never exactly perpendicular to it
     // (0.24 mm of lateral drift on the Tiger), and an un-orthogonalised basis is not a rotation.
-    let lat = (Vec3::X - long * Vec3::X.dot(long)).normalize_or(Vec3::X);
+    let lat = (Vec3::X - long * Vec3::X.dot(long)).try_normalize().expect(
+        "the template pin axis has a positive side-plane pitch and cannot be parallel to model X",
+    );
     let inner = long.cross(lat);
     let basis = Mat3::from_cols(lat, inner, long);
     let pin_mid = (pin_start + pin_end) * 0.5;
@@ -1177,9 +1195,8 @@ fn mirrored_mesh(source: &Mesh) -> Mesh {
             }
         }
     }
-    // Tangents, and this branch is LIVE for every level of the shoe (no glb ships them, but the
-    // shoe's material is normal-mapped, so the base gets them from `bevy_gltf`'s mikktspace pass at
-    // load and the reductions from [`lod_shoe_meshes`]). A tangent is `dP/du` with `w` recording the
+    // Every normal-mapped shoe needs tangents, authored in the export or supplied by the loader
+    // and [`lod_shoe_meshes`]. A tangent is `dP/du` with `w` recording the
     // bitangent's
     // handedness, so under the reflection `M = diag(-1, 1, 1)` — which leaves the UVs untouched —
     // `T` transforms exactly like a position, `T' = M T`. The `w` flip is what keeps the BITANGENT
@@ -1429,6 +1446,9 @@ mod tests {
             .as_object_mut()
             .unwrap()
             .remove("material");
+        assert!(std::panic::catch_unwind(|| verify(&broken)).is_err());
+        let mut broken = sound.clone();
+        broken["nodes"][1]["translation"] = serde_json::json!([0.0, 0.0, 0.0]);
         assert!(std::panic::catch_unwind(|| verify(&broken)).is_err());
         let mut broken = sound;
         broken["nodes"][0]["scale"] = serde_json::json!([1.0, 2.0, 1.0]);
