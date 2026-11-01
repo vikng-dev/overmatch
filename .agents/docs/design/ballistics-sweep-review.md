@@ -752,3 +752,48 @@ citation, font, net-boundary and bake guards passed. All verified review finding
 The full Battle cycle remains the orchestrator's release gate; the capture cannot establish the
 identity of its inside-start collider. No capture, pricing, deployment or push was run, and no
 new owner decision is needed.
+
+## Review of sweep-ball-6
+
+Subject: the game's damage model and shot records, game state only. Each finding of the blind
+Codex and Claude reviews is verified against the code, by a test that fails before its fix
+where one can be written.
+
+- **P2 (Codex), verified, fixed** in "rest a round born inside material that shares its
+  velocity". Material holding a round at relative rest (zero-resistance material newly around a
+  round that shares its carrier velocity) gave `Begin::Miss` a positive clear span over zero
+  speed, and `add_stretch` panicked on the zero clock. The round now keeps its world velocity to
+  the tick boundary or an armed delay's end, and its next step reads the membership again.
+  `a_round_at_relative_rest_inside_new_material_builds_no_zero_clock` failed before the fix
+  with that panic.
+- **P2 (Codex), verified, fixed** in "open a tank's encounter when the round reaches it". A
+  shared crossing's entrance mark opened encounters for every tank in it, so a tank knocked out
+  between the entrance and the round's arrival was still recorded. Playback now notes each tank
+  when the round reaches its volume's entry (`PenetrationMarks::reached`), and the living-target
+  gate reads it then. `a_shared_crossing_opens_each_tank_when_the_round_reaches_it` recorded the
+  husk before the fix.
+- **P2 (Claude), verified, fixed** in "keep a launched-turret target a husk on clearing the
+  range". `sandbox::clear_shots` relabelled a tank whose turret had launched as living, so the
+  next round posed n-1 servo nodes against n slots. Clearing now keeps such a tank a husk (R
+  rebuilds it). `clearing_the_range_keeps_a_launched_turret_tank_a_husk` failed before the fix.
+- **P3 (Claude) `on_line` comment, verified, fixed** in "restate the record contracts the
+  sweep-ball-6 review found stale", with the next two: the authority's departures are path nodes;
+  the between-node tolerance serves records read from the wire or a file.
+- **P3 (Claude) `assert_self_consistent`, verified, fixed**: the last perforated plate's exit
+  arm is back, within the DERIVED sqrt(3) mm of independently quantized points.
+- **P3 (Claude) moving contained branch, verified coverage gap, fixed** with the relative-rest
+  fix: a body moving over an in-flight round now has a test
+  (`a_moving_body_born_around_an_in_flight_round_crosses_it_in_its_frame`) that asserts the
+  crossing's heading and speed in the body's frame. It passes on the reviewed code; the review's
+  zero-velocity mutant was not run.
+- **P3 (Claude) the record's membership paragraph, verified, corrected** above, in "Release-gate
+  discovery membership".
+
+The crew sweep's F2 rule comparison is gone with F2's losing arm: the sweep measures the one
+knockout rule (`damage::knockout_from_counts`, #227).
+
+MEASURED: the three new P2 tests failed on main and pass with their fixes; 333 targeted
+recording, damage-cam, pen-cam, field-cast, headless, sandbox, score, stats and citation tests
+passed with nine ignored instruments (two recording tests updated for the fixture seats
+re-passed), and 55 whole-tree guard tests passed. Format and workspace/all-target clippy passed.
+No capture or pricing was run.
