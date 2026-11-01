@@ -1,4 +1,4 @@
-//! Passive network diagnostics. No system here mutates simulation state.
+//! Network diagnostics. Corrupt state stops in every build before it can propagate.
 
 use avian3d::prelude::{
     AngularVelocity, ColliderOf, ColliderTransform, LinearVelocity, Position, RigidBody, Rotation,
@@ -9,7 +9,7 @@ use lightyear::prelude::*;
 use crate::tank::{RemoteServos, ServoIndex, ServoState, Tank, TankRoot, TankServos, Turret};
 use crate::track::sim::TrackContacts;
 
-/// Log and latch corrupt physics state before Avian consumes it.
+/// Refuse corrupt or uninitialized physics state before Avian consumes it.
 pub(crate) fn fixed_nan_probe(
     bodies: Query<
         (
@@ -31,60 +31,48 @@ pub(crate) fn fixed_nan_probe(
         ),
         With<ColliderOf>,
     >,
-    mut latched: Local<bool>,
 ) {
-    if *latched {
-        return;
-    }
     // Avian placeholder positions are finite; reject them as well as non-finite values.
-    let poisoned = |v: Vec3| !v.is_finite() || v.abs().max_element() > 1.0e30;
-    let mut corrupt = false;
+    let poisoned = |v: Vec3| !v.is_finite() || v == Position::PLACEHOLDER.0;
+    let bad_rotation =
+        |q: Quat| !q.is_finite() || !q.length_squared().is_finite() || q.length_squared() == 0.0;
     for (entity, position, rotation, linear, angular) in &bodies {
         let bad_vel =
             linear.is_some_and(|v| poisoned(v.0)) || angular.is_some_and(|v| poisoned(v.0));
-        if poisoned(position.0) || !rotation.0.is_finite() || bad_vel {
-            error!(
+        if poisoned(position.0) || bad_rotation(rotation.0) || bad_vel {
+            panic!(
                 "net: FIXED-NAN root {entity}: pos={:?} rot={:?} linvel={:?} angvel={:?}",
                 position.0,
                 rotation.0,
                 linear.map(|v| v.0),
                 angular.map(|v| v.0)
             );
-            corrupt = true;
         }
     }
     for (entity, name, position, rotation, collider_transform) in &parts {
         let bad = position.is_some_and(|p| poisoned(p.0))
-            || rotation.is_some_and(|r| !r.0.is_finite())
+            || rotation.is_some_and(|r| bad_rotation(r.0))
             || collider_transform
-                .is_some_and(|t| poisoned(t.translation) || !t.rotation.0.is_finite());
+                .is_some_and(|t| poisoned(t.translation) || bad_rotation(t.rotation.0));
         if bad {
-            error!(
+            panic!(
                 "net: FIXED-NAN part {entity} ({:?}): pos={:?} rot={:?} collider_transform={:?}",
                 name.map(|n| n.as_str()),
                 position.map(|p| p.0),
                 rotation.map(|r| r.0),
                 collider_transform
             );
-            corrupt = true;
         }
-    }
-    if corrupt {
-        *latched = true;
     }
 }
 
-/// Log the first non-finite pose with its hierarchy, then latch.
+/// Refuse a non-finite pose, preserving its hierarchy in the panic.
 pub(crate) fn nan_tripwire(
     positions: Query<(Entity, &Position)>,
     transforms: Query<(Entity, &Transform)>,
     names: Query<&Name>,
     parents: Query<&ChildOf>,
-    mut tripped: Local<bool>,
 ) {
-    if *tripped {
-        return;
-    }
     let describe = |entity: Entity| {
         let mut chain = String::new();
         let mut e = entity;
@@ -103,22 +91,23 @@ pub(crate) fn nan_tripwire(
     };
     for (entity, position) in &positions {
         if !position.0.is_finite() {
-            error!(
+            panic!(
                 "client: NAN-TRIPWIRE Position on {} = {:?}",
                 describe(entity),
                 position.0
             );
-            *tripped = true;
         }
     }
     for (entity, transform) in &transforms {
-        if !(transform.translation.is_finite() && transform.rotation.is_finite()) {
-            error!(
+        if !(transform.translation.is_finite()
+            && transform.rotation.is_finite()
+            && transform.scale.is_finite())
+        {
+            panic!(
                 "client: NAN-TRIPWIRE Transform on {} = {:?}",
                 describe(entity),
                 transform
             );
-            *tripped = true;
         }
     }
 }
@@ -182,4 +171,49 @@ pub(crate) fn log_sim_evidence(
 /// Log the first replicated tank marker.
 pub(crate) fn log_connected(add: On<Add, Connected>) {
     info!("client: connected (entity {})", add.entity);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use bevy::ecs::system::RunSystemOnce;
+
+    /// Avian's finite placeholder is not a world pose. The fixed boundary must stop it before
+    /// physics, rather than let a latched diagnostic permit subsequent steps.
+    #[test]
+    #[should_panic(expected = "FIXED-NAN root")]
+    fn an_uninitialized_body_pose_stops_before_physics() {
+        let mut world = World::new();
+        world.spawn((Tank, Position::PLACEHOLDER, Rotation::IDENTITY));
+        world.run_system_once(fixed_nan_probe).unwrap();
+    }
+
+    /// A corrupt velocity must stop before its integration poisons an otherwise finite pose.
+    #[test]
+    #[should_panic(expected = "FIXED-NAN root")]
+    fn a_non_finite_velocity_stops_before_physics() {
+        let mut world = World::new();
+        world.spawn((
+            Tank,
+            Position(Vec3::ZERO),
+            Rotation::IDENTITY,
+            LinearVelocity(Vec3::splat(f32::NAN)),
+        ));
+        world.run_system_once(fixed_nan_probe).unwrap();
+    }
+
+    /// The presentation tripwire stops at the first bad pose and retains the named hierarchy so
+    /// the broken construction can be found; continuing after a diagnostic loses that boundary.
+    #[test]
+    #[should_panic(expected = "corrupt-child")]
+    fn a_corrupt_view_pose_stops_with_its_hierarchy() {
+        let mut world = World::new();
+        let parent = world.spawn((Name::new("parent"), Transform::IDENTITY)).id();
+        world.spawn((
+            Name::new("corrupt-child"),
+            ChildOf(parent),
+            Transform::from_translation(Vec3::splat(f32::NAN)),
+        ));
+        world.run_system_once(nan_tripwire).unwrap();
+    }
 }
