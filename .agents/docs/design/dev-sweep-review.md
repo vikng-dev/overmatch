@@ -38,3 +38,21 @@ emission geometry P2, remain assigned to the ballistics sweep.
 
 Disposition IDs below identify the inventory’s symbol groups (the inventory gave no numeric IDs).
 The sandbox wall and its subtree belong to part 2 and are excluded from this lane.
+
+- **D-CUE fixed / partly already fixed:** tree identity, segment count and standing state,
+  and wall existence, already fail on this starting tree. Terrain misses and missing shot
+  terrain/tree now fail at the cue. A wall charge without a core stating chemical energy refuses,
+  and wall direction uses the authored-normal invariant. The offline tree cue requires ShotClock.
+- **D-CAPTURE-P3 fixed:** Follow permits the named pre-spawn gap only until the frame target arms;
+  duplicate control owners fail. Frame paths require a UTF-8 stem and .png extension; no invented
+  frame name or format remains. Zero Follow offsets refuse at parse. The docs name the plan plus
+  live scenario levers rather than claiming one exclusive input.
+- **D-WINDOW partly already fixed, remainder fixed:** hide/pin already require the root’s single
+  primary window. Non-UTF-8 window mode now uses the shared typed environment refusal rather than
+  selecting the visible default.
+- **New P1 D-SAVE fixed:** Bevy’s save observer logs disk errors but emits no failure to its caller.
+  Counting its readback event as saved allowed a success exit with missing files. The capture now
+  owns the write, counts only successful PNG saves, and emits an error exit on image I/O failure.
+  A synthetic readback regression checks the saved count and error status without saving an image.
+  MEASURED gates: formatting, workspace clippy, 9 capture tests, 4 window tests and 3 citation tests
+  pass. No capture or still was taken.

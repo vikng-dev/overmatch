@@ -1,7 +1,9 @@
-//! In-engine frames to disk, for documentation. A capture run has one input: the plan file that
-//! `OVERMATCH_CAPTURE=<plan>.ron` names, one [`plan::CapturePlan`], whose struct docs are the
+//! In-engine frames to disk, for documentation. The plan file that
+//! `OVERMATCH_CAPTURE=<plan>.ron` names holds one [`plan::CapturePlan`], whose struct docs are the
 //! grammar's one home. `scripts/capture/example.ron` is a worked plan, checked by a test. Without
-//! the variable every plugin here is inert.
+//! the variable every plugin here is inert. Scenario levers with tracked performance-script users
+//! (`OVERMATCH_START`, `OVERMATCH_TARGET`, `OVERMATCH_PROBE_FAR`, `OVERMATCH_PROBE_TANKS`,
+//! `OVERMATCH_BATTLE`, `OVERMATCH_XRAY`) also select the scene; a capture inherits their values.
 //!
 //! [`plugin`] takes the plan's `frames`. It is mounted after `crate::windowed_runtime` by every
 //! windowed root: the offline route, both sandboxes, and the windowed network client. A plan
@@ -48,7 +50,7 @@ use bevy::camera::visibility::VisibilitySystems;
 use bevy::camera::{Camera, ImageRenderTarget, RenderTarget};
 use bevy::prelude::*;
 use bevy::render::render_resource::TextureFormat;
-use bevy::render::view::screenshot::{Screenshot, ScreenshotCaptured, save_to_disk};
+use bevy::render::view::screenshot::{Screenshot, ScreenshotCaptured};
 use bevy::ui::IsDefaultUiCamera;
 
 use crate::sight::SightMode;
@@ -147,6 +149,7 @@ fn mount(app: &mut App, frames: &plan::Frames) {
             app.add_systems(
                 PostUpdate,
                 (move |tanks: Query<&Transform, With<crate::tank::Controlled>>,
+                       cap: Res<Capture>,
                        mut cameras: Query<
                     &mut Transform,
                     (
@@ -154,11 +157,14 @@ fn mount(app: &mut App, frames: &plan::Frames) {
                         Without<crate::tank::Controlled>,
                     ),
                 >| {
-                    if let Ok(tank) = tanks.single() {
-                        for mut camera in &mut cameras {
-                            *camera = Transform::from_translation(tank.translation + offset)
-                                .looking_at(tank.translation, Vec3::Y);
-                        }
+                    let Some(tank) = crate::tank::controlled_one(tanks.single()) else {
+                        // No control owner while the scene loads, before the frame target arms.
+                        assert!(cap.target.is_none(), "capture: frames.camera Follow needs a controlled tank before the first frame; choose Pose for a tankless scene");
+                        return;
+                    };
+                    for mut camera in &mut cameras {
+                        *camera = Transform::from_translation(tank.translation + offset)
+                            .looking_at(tank.translation, Vec3::Y);
                     }
                 })
                 .after(crate::camera::OrbitCameraSet)
@@ -273,7 +279,7 @@ fn check_fell_target(
 /// would frame a fall that never happened.
 fn fell_on_cue(
     time: Res<Time>,
-    clock: Option<Res<crate::ShotClock>>,
+    clock: Res<crate::ShotClock>,
     mut cue: ResMut<FellCue>,
     mut trees: Query<(
         Entity,
@@ -302,9 +308,9 @@ fn fell_on_cue(
         cut: cue.cut,
         dir: cue.dir,
     };
-    commands.entity(root).insert(crate::trees::Fell {
-        tick: clock.map_or(0, |clock| clock.0),
-    });
+    commands
+        .entity(root)
+        .insert(crate::trees::Fell { tick: clock.0 });
     info!(
         "capture: {} falls at {:.4} s, cut {}, bin {}",
         cue.instance,
@@ -358,7 +364,7 @@ fn raise_impacts(
                     outcome: crate::ballistics::ImpactOutcome::Struck,
                 });
             }
-            None => warn!("capture: no terrain under {cue:?}"),
+            None => panic!("capture: impacts: no terrain under {cue:?}; place the cue inside the terrain collider"),
         }
         false
     });
@@ -412,8 +418,14 @@ fn frame_path(path: &Path, at: f32, frames: usize) -> PathBuf {
     if frames == 1 {
         return path.to_owned();
     }
-    let stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or("frame");
-    let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("png");
+    let stem = path
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .expect("CapturePlan validates frames.out has a UTF-8 file stem");
+    let ext = path
+        .extension()
+        .and_then(|e| e.to_str())
+        .expect("CapturePlan validates frames.out has a PNG extension");
     path.with_file_name(format!("{stem}-{}s.{ext}", stamp(at)))
 }
 
@@ -466,8 +478,7 @@ fn capture(
     {
         commands
             .spawn(Screenshot(RenderTarget::Image(target)))
-            .observe(save_to_disk(frame_path(&cap.path, due, cap.at.len())))
-            .observe(|_: On<ScreenshotCaptured>, mut cap: ResMut<Capture>| cap.saved += 1);
+            .observe(save_frame(frame_path(&cap.path, due, cap.at.len())));
         cap.requested += 1;
     }
     let last = cap.at[cap.at.len() - 1];
@@ -476,6 +487,28 @@ fn capture(
     } else if t >= last + GRACE {
         error!("capture: {} of {} frames saved", cap.saved, cap.at.len());
         exit.write(AppExit::error());
+    }
+}
+
+/// Count a frame only after its PNG reaches disk. The engine's save observer logs I/O failures
+/// without reporting them to the capture, so the run owns this visible failure outcome.
+fn save_frame(
+    path: PathBuf,
+) -> impl FnMut(On<ScreenshotCaptured>, ResMut<Capture>, MessageWriter<AppExit>) {
+    move |frame, mut cap, mut exit| {
+        let image = frame.image.clone().try_into_dynamic().expect(
+            "capture targets are initialized Rgba8UnormSrgb images, supported by image conversion",
+        );
+        match image
+            .to_rgb8()
+            .save_with_format(&path, image::ImageFormat::Png)
+        {
+            Ok(()) => cap.saved += 1,
+            Err(error) => {
+                error!("capture: frames.out {}: {error}", path.display());
+                exit.write(AppExit::error());
+            }
+        }
     }
 }
 
@@ -560,6 +593,50 @@ mod tests {
         })
         .add_systems(PostStartup, check_fell_target);
         app.update();
+    }
+
+    /// A frame read back into memory is not a saved frame. Capture automation relies on a
+    /// failing status when the output directory cannot be written; a mutant counting readback
+    /// alone reports success here. The synthetic image never reaches a file.
+    #[test]
+    fn a_failed_frame_write_does_not_count_as_a_saved_frame() {
+        use bevy::asset::RenderAssetUsages;
+        use bevy::render::render_resource::{Extent3d, TextureDimension};
+        let mut app = App::new();
+        app.add_message::<AppExit>().insert_resource(Capture {
+            path: PathBuf::from("unused.png"),
+            at: vec![0.0],
+            sight: false,
+            size: UVec2::ONE,
+            gizmos: false,
+            target: None,
+            switched: false,
+            requested: 1,
+            saved: 0,
+        });
+        // Writing a PNG to an existing directory fails on every supported OS.
+        let path = std::env::temp_dir();
+        let entity = app.world_mut().spawn_empty().observe(save_frame(path)).id();
+        let image = Image::new_fill(
+            Extent3d {
+                width: 1,
+                height: 1,
+                depth_or_array_layers: 1,
+            },
+            TextureDimension::D2,
+            &[0; 4],
+            TextureFormat::Rgba8UnormSrgb,
+            RenderAssetUsages::MAIN_WORLD,
+        );
+        app.world_mut()
+            .trigger(ScreenshotCaptured { entity, image });
+        assert_eq!(app.world().resource::<Capture>().saved, 0);
+        assert!(
+            app.world_mut()
+                .resource_mut::<Messages<AppExit>>()
+                .drain()
+                .any(|exit| exit == AppExit::error())
+        );
     }
 
     /// The capture times sort and fold times sharing a frame name into one frame, so two captures

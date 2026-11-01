@@ -1,4 +1,4 @@
-//! The capture plan: the one input of a capture run. `OVERMATCH_CAPTURE=<plan>.ron` names a RON
+//! The capture plan: frames and cues alongside the scenario levers documented by `dev_capture`. `OVERMATCH_CAPTURE=<plan>.ron` names a RON
 //! file holding one [`CapturePlan`], read once per process by [`plan`]; a missing file, a RON or
 //! serde error, an unknown field or a value outside its field's domain fails the boot naming the
 //! file and the field (ADR-0011). Paths in the plan resolve against the working directory.
@@ -287,6 +287,18 @@ impl CapturePlan {
             }
         };
         if let Some(frames) = &self.frames {
+            if frames
+                .out
+                .file_stem()
+                .and_then(|stem| stem.to_str())
+                .is_none_or(str::is_empty)
+                || frames.out.extension().and_then(|ext| ext.to_str()) != Some("png")
+            {
+                return Err(
+                    "frames.out: name a UTF-8 PNG file with a nonempty stem and .png extension"
+                        .into(),
+                );
+            }
             if frames.at.is_empty() {
                 return Err("frames.at: no frame time".into());
             }
@@ -310,8 +322,8 @@ impl CapturePlan {
                     }
                 }
                 Camera::Follow { offset } => {
-                    if !Vec3::from(offset).is_finite() {
-                        return Err("frames.camera: a follow offset is finite".into());
+                    if !Vec3::from(offset).is_finite() || Vec3::from(offset) == Vec3::ZERO {
+                        return Err("frames.camera: a follow offset is finite and nonzero".into());
                     }
                 }
             }
@@ -573,6 +585,8 @@ mod tests {
             ),
             (r#"(frame: (out: "f.png"))"#.to_owned(), "frame"),
             ("(frames: ())".to_owned(), "out"),
+            (r#"(frames: (out: "frame"))"#.to_owned(), "frames.out"),
+            (r#"(frames: (out: "frame.jpg"))"#.to_owned(), "frames.out"),
             (
                 r#"(frames: (out: "f.png", at: []))"#.to_owned(),
                 "frames.at",

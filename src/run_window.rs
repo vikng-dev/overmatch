@@ -60,10 +60,13 @@ impl RunWindow {
     ///
     /// When the variable holds anything but one of the four names (module doc).
     pub(crate) fn of_run(default: Self) -> Self {
-        match std::env::var(VARIABLE) {
-            Err(_) => default,
-            Ok(value) => Self::parse(&value).unwrap_or_else(|error| panic!("{VARIABLE}: {error}")),
-        }
+        crate::env_value(VARIABLE)
+            .unwrap_or_else(crate::refuse_start)
+            .map(|value| {
+                Self::parse(&value)
+                    .unwrap_or_else(|error| crate::refuse_start(format!("{VARIABLE}: {error}")))
+            })
+            .unwrap_or(default)
     }
 }
 

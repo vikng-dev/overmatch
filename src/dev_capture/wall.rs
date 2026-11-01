@@ -240,7 +240,7 @@ fn shoot(what: &What, (outward, aim, foot): (Vec3, Vec3, Vec3), commands: &mut C
             commands.trigger(FireShell::of_round(
                 round,
                 origin,
-                Dir3::new(along).unwrap_or(Dir3::NEG_Z),
+                Dir3::new(along).expect("the game’s damage-model capture aims along a finite nonzero authored wall normal"),
                 crate::spec::FireMechanism::Single,
                 true,
                 None,
@@ -253,11 +253,9 @@ fn shoot(what: &What, (outward, aim, foot): (Vec3, Vec3, Vec3), commands: &mut C
             let core = registry
                 .keys()
                 .into_iter()
-                .find_map(|name| registry.get(name).ok().and_then(|s| s.burst()));
-            let (Some(core), at) = (core, foot + Vec3::Y * 0.3) else {
-                error!("capture: no shipped burst core");
-                return;
-            };
+                .find_map(|name| registry.get(name).ok().and_then(|s| s.burst()))
+                .expect("capture: wall.shots Charge requires a shipped burst core; author one or choose a round cue");
+            let at = foot + Vec3::Y * 0.3;
             let radius = (3.0 * mass / (4.0 * std::f32::consts::PI * core.density as f32)).cbrt();
             let energy = mass * core.chemical_energy as f32;
             let at = at + outward * radius;

@@ -81,21 +81,20 @@ fn fire_on_cue(
     if cue.fired || time.elapsed_secs() < cue.at {
         return;
     }
-    let Some(grid) = grid else {
-        return;
-    };
+    let grid = grid.expect("capture: shot: the offline scene must supply HeightGrid before its cue; choose a terrain scene");
     // The standing tree nearest the map's centre, the lowest ordinal on a tie: a real tree the
     // same on every run, with the map on every side of it.
-    let Some((_, transform)) = trees.iter().min_by(|a, b| {
-        let reach = |transform: &Transform| {
-            Vec2::new(transform.translation.x, transform.translation.z).length_squared()
-        };
-        reach(a.1)
-            .total_cmp(&reach(b.1))
-            .then(a.0.ordinal.cmp(&b.0.ordinal))
-    }) else {
-        return;
-    };
+    let (_, transform) = trees
+        .iter()
+        .min_by(|a, b| {
+            let reach = |transform: &Transform| {
+                Vec2::new(transform.translation.x, transform.translation.z).length_squared()
+            };
+            reach(a.1)
+                .total_cmp(&reach(b.1))
+                .then(a.0.ordinal.cmp(&b.0.ordinal))
+        })
+        .expect("capture: shot: the scene has no tree to aim at; choose a map with a tree");
     // Fixture geometry: the trunk 2.5 m up from 10 m off, or the ground 10 m beside the tree from
     // 10 m above and 2 m back.
     let target = if cue.tree {
@@ -200,9 +199,9 @@ fn show_shot(
         }
         // Every fourth direction the field was thrown along, rebuilt from its descriptor as a
         // decoder does: a ray's recorded end is its origin when it met nothing.
-        if let Some(field) = &fields.burst
-            && let Ok(spread) = BurstFields::shipped().shape().spread(field.field)
-        {
+        if let Some(field) = &fields.burst {
+            let spread = BurstFields::shipped().shape().spread(field.field)
+                .expect("the game's damage-model capture reads a field created from the shipped field registry");
             for (direction, _) in spread.directions(field.axis).step_by(4) {
                 gizmos.line(
                     field.origin,
