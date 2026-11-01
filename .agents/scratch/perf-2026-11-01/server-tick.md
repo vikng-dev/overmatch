@@ -358,3 +358,140 @@ Remaining verification: resolve the walk invariant and complete a shipped Battle
 landed per-system changes in the orchestrator's batched one-vCPU lane. G1 and the fill-up
 command-path hold were left unchanged. All game source edits and temporary census instrumentation
 are confined to this bay; no remote deployment or issue comment was made.
+
+## server-perf-2 priced
+
+Subject: the game's dedicated server tick, game state only. Every time below is MEASURED locally
+(Apple M4, traced, us per fixed tick, the mean over the window) unless labelled; a "change of the
+means" is DERIVED from the two runs of each tree.
+
+**Trees.** Before: main at "docs: record the rebuild and combat pairs after the proxy key fix
+(#250)", server-perf-1's last commit. After: main at "docs: record the sweep-ball-8 review and the
+transit membership (#247, #254)", which carries server-perf-2's six commits, the #254 fix and 54
+other commits (#215, #227, #236, #238, #245, #247, #249, #253). A delta is the tree's, not
+server-perf-2's alone; where another commit causes one, the text names it.
+
+**Method.** As "Method" above, with these differences. Each tree's server and harness client were
+built from that tree (`--bin overmatch --bin overmatch-server`, the same `perf` +
+`bevy/trace_chrome` build), each with its own tree's `assets/` as `BEVY_ASSET_ROOT` (the handshake
+folds `PROTOCOL_REV`, 59 before and 62 after). One run: the server alone with `OVERMATCH_BOT=29`,
+an empty-map window from 5 s after "listening" for 30 s; then the parked occupant joins, and the
+combat window opens 15 s after "Battle 1 Combat" and runs 120 s, also read as minute 1 and minute 2.
+Four more runs priced the server alone with `OVERMATCH_BOT=0`. Order: before-1; then after-1,
+before-2, after-2 in one machine-lock hold; then after-3, before-3, after-4, before-4 (no bot) in
+another. Each trace (21-25 GB per bot run, 4.2 GB per no-bot run) was profiled and deleted before
+the next run started, so no run overlapped a profile or a compile. The profile is
+`trace_profile.py`'s attribution over several windows in one pass (a scratch copy with a
+byte-level line parse, equal to the tool's output on a synthetic trace; not committed). Tick total
+is the TLDR's "Fixed busy": leaf busy time in `FixedFirst` through `FixedLast` and the physics
+schedules. Every window held 63.9-64.0 Hz with 0 unpaired spans, and no run panicked. A `top`
+sample in after-1's combat showed only the server (85 %) and the client (73 %) above 7 % CPU.
+
+Rows overlap: the physics step includes Avian's `update_child_collider_position`; the tick total
+includes every row except lightyear's pass, which runs once per frame in `RunFixedMainLoop`.
+
+### Empty map: the server alone, no tank (`OVERMATCH_BOT=0`)
+
+| System, us per tick | before-3 | before-4 | after-3 | after-4 | Change of the means |
+|---|---|---|---|---|---|
+| Drive step `track::sim::apply_track_forces` | 5 | 3 | 5 | 5 | +1 us |
+| Child placement `motion::place_children` | 202 | 106 | 43 | 40 | -113 us (-73 %) |
+| Child placement, Avian `update_child_collider_position` | 204 | 111 | 42 | 39 | -117 us (-74 %) |
+| Child placement, lightyear_avian `update_child_collider_position` | 126 | 96 | 137 | 131 | +23 us (+21 %) |
+| Avian `propagate_collider_transforms` and its batches | 368 | 238 | 387 | 373 | +77 us (+25 %) |
+| Collider history `motion::snapshot` + `seed_births` | 55 | 46 | 82 | 78 | +29 us (+58 %) |
+| Physics step (`PhysicsSchedule` + `SubstepSchedule`) | 500 | 321 | 353 | 331 | -68 us (-17 %) |
+| **Tick total** | 1 438 | 913 | 1 189 | 1 138 | -12 us (-1 %) |
+| `FixedMain` wall time | 1 985 | 1 367 | 1 774 | 1 701 | +62 us (+4 %) |
+| Stats-line tick p50 (traced run) | 1 797 | 1 263 | 1 814 | 1 631 | +193 us (+13 %) |
+| Entities | 13 068 | 13 068 | 13 070 | 13 070 | |
+
+The two placement passes server-perf-2 rewrote fell 73-74 %, and their share of the tick from
+24-28 % to 7 %. The tick total did not move measurably: before's two runs span 913-1 438 us, the
+core-type noise of "Method", and lightyear's frame pass (+21 %), Avian's collider-transform
+propagation (+25 %) and the collider history (+58 %) rose by about what the placement saved. That
+the history rise is the disabling-component reads of "ballistics: retain history when colliders
+are re-enabled (#250)" is ASSUMED. The largest cost left on the map is Avian's
+collider-transform propagation, 373-387 us.
+
+### Empty map with `OVERMATCH_BOT=29`: now 29 held tanks
+
+The after tree's fill-up places the 29 bot tanks at startup and holds their commands ("net:
+players wait out the fill-up in their held tank (#253)"); before, bots spawned at combat. This
+window therefore prices 29 parked tanks after, not an empty map:
+
+| System, us per tick | before-1 | before-2 | after-1 | after-2 |
+|---|---|---|---|---|
+| Drive step `track::sim::apply_track_forces` | 3 | 2 | 2 866 | 2 819 |
+| Child placement, `place_children` + Avian's pass | 223 | 262 | 123 | 119 |
+| Child placement, lightyear_avian's pass | 99 | 112 | 123 | 121 |
+| Avian `propagate_collider_transforms` and its batches | 258 | 260 | 341 | 317 |
+| Collider history `motion::snapshot` + `seed_births` | 47 | 53 | 188 | 182 |
+| Physics step | 239 | 252 | 933 | 697 |
+| **Tick total** | 990 | 1 036 | 4 842 | 4 704 |
+| Stats-line tick p50 (traced run) | 1 411 | 1 518 | 4 682 | 4 618 |
+| Entities / tanks | 13 068 / 0 | 13 068 / 0 | 18 058 / 29 | 18 058 / 29 |
+
+Twenty-nine tanks standing still cost 2.8-2.9 ms of drive step, 59-60 % of this tick, against
+3.0-3.1 ms for thirty moving tanks in the same tree's combat minute 1 (below), so most of the
+drive step's cost does not depend on motion (DERIVED from those rows). A deployment with bots no longer idles at
+the map's cost; one without bots still does.
+
+### Combat, 30 tanks, 120 s
+
+| System, us per tick | before-1 | before-2 | after-1 | after-2 | Change of the means |
+|---|---|---|---|---|---|
+| Drive step `track::sim::apply_track_forces` | 7 478 | 7 364 | 5 036 | 4 500 | -2 653 us (-36 %) |
+| Child placement `motion::place_children` | 97 | 97 | 54 | 54 | -43 us (-44 %) |
+| Child placement, Avian `update_child_collider_position` | 97 | 96 | 67 | 68 | -29 us (-30 %) |
+| Child placement, lightyear_avian `update_child_collider_position` | 91 | 92 | 105 | 109 | +15 us (+17 %) |
+| Avian `propagate_collider_transforms` and its batches | 392 | 394 | 353 | 365 | -34 us (-9 %) |
+| Collider history `motion::snapshot` + `seed_births` | 187 | 184 | 187 | 188 | +3 us (+1 %) |
+| Physics step (`PhysicsSchedule` + `SubstepSchedule`) | 1 111 | 1 116 | 1 200 | 1 018 | -5 us (0 %) |
+| **Tick total** | 10 168 | 10 051 | 7 480 | 7 035 | -2 852 us (-28 %) |
+| `FixedMain` wall time | 10 169 | 10 048 | 7 501 | 7 040 | -2 838 us (-28 %) |
+| Stats-line tick p50 (traced run) | 9 154 | 8 761 | 6 957 | 6 627 | -2 166 us (-24 %) |
+| Drive share of the tick total | 74 % | 73 % | 67 % | 64 % | -8 points |
+| Entities | 18 252 | 18 252 | 18 330 | 18 332 | |
+
+The drive step fell 36 % and its share of the tick from 73-74 % to 64-67 %; the tick total fell
+28 %. Physics and the collider history did not move; the physics step's share rose from 11 % to
+14-16 % only because the tick shrank. Lightyear's pass costs more per tick only because a lighter
+tick leaves room for more frames per tick: 2.5-2.6 against 1.8, at 42 us per frame against 51.
+
+### Combat, minute by minute
+
+| us per tick | before-2 min 1 | after-1 min 1 | after-2 min 1 | before-2 min 2 | after-1 min 2 | after-2 min 2 |
+|---|---|---|---|---|---|---|
+| Drive step | 3 393 | 3 073 | 3 024 | 11 339 | 6 998 | 5 975 |
+| **Tick total** | 5 951 | 5 448 | 5 546 | 14 155 | 9 512 | 8 525 |
+| Stats-line tick p50 (traced run) | 5 512 | 5 212 | 5 296 | 14 438 | 9 537 | 8 379 |
+| Drive share | 57 % | 56 % | 55 % | 80 % | 74 % | 70 % |
+
+before-1 has no minute rows: its trace was profiled whole and deleted before the split was added.
+The drive step grows through a combat at a constant entity count (18 252-18 335): before 3.4 to
+11.3 ms from minute 1 to minute 2, after 3.0 to 6.0-7.0 ms. The saving grows with it, -10 % of
+the drive step in minute 1 and -43 % in minute 2 (DERIVED, means). What grows is not measured.
+That it is the support candidates near each tank, which before each tank scanned for every tank
+and after scans only for itself ("driving: reuse each tank's tick-start support candidates
+(#250)"), is ASSUMED. before-2's minute 2 ran at a traced tick p50 of 14.4 ms, one frame per
+1.2 ticks.
+
+### The fill-up after the rebuild: not reached
+
+The shipped Battle runs 900 s of combat and 15 s of results before the rebuild. At these runs'
+trace rate (about 100 MB/s, DERIVED from the trace sizes) a traced run to it would write about
+100 GB, and a short-mode build edits the mode data (as the cycle run above did). Not priced.
+
+### What remains on one core
+
+The drive step: 4.5-5.0 ms of a 7.0-7.5 ms combat tick (64-67 %), and 6.0-7.0 ms (70-74 %) in
+minute 2, still growing through the combat. The physics step follows at 1.0-1.2 ms (14-16 %),
+then Avian's collider-transform propagation at 0.35-0.37 ms and the collider history at 0.19 ms.
+Twenty-nine held tanks already cost 2.8 ms of drive step before combat.
+
+For Edgegap (DERIVED, rough): the shares transfer, not the times. A 28 % cut applied to the
+15.8-20.0 ms combat tick p50 Edgegap measured on alpha.7 (`perf-1101`) would give 11.4-14.4 ms
+against the 15.6 ms budget. That base predates server-perf-1's fixes, the trace inflates the
+systems it spans, and a 15-minute combat runs heavier than these two minutes, so only an Edgegap
+re-measure settles it.
