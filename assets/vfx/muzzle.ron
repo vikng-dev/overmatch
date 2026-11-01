@@ -16,7 +16,8 @@
         the cube root's rate, so a rifle's smoke lingers long enough to read")),
     core: (
         diameter_m: (2.5, Tuned("TASTE: the hot core's birth diameter")),
-        jitter: (0.15, Tuned("TASTE: each shot's core and flames vary by this share either way")),
+        jitter: (0.15, Tuned("TASTE: each shot's core, flames and fireball vary by this share either
+            way")),
         standoff_m: (0.6, Tuned("TASTE: the core's centre down the bore")),
         lifetime_s: (0.03, Tuned("TASTE: two frames at 60 Hz, every gun")),
         end_scale: (0.85, Tuned("TASTE: born at its largest, collapsing")),
