@@ -121,10 +121,10 @@ went to the orchestrator. Commits, by subject:
   the forest cost script compared trees against the deleted cones and failed every trees row once
   the scatter line lost its fir count; it and its battery parts are deleted. Stale prose that named
   deleted constants or the cones is rewritten.
+- "buildings: key blast hits by their stop instead of a chunk field" (Claude P3): a body stop's
+  placeholder `chunk: 0` is gone; `Load::blast` takes each hit keyed by the chunk it stopped on.
 
-Not fixed, P3: a body stop's `chunk: 0` placeholder in `BlastSurface`/`RayHit` (the stop key
-already carries the chunk); ruling it out moves the chunk into `Load::blast`'s input across about
-fifteen test fixtures. Tree bindings are still refused when a client reads the glb, not by a
+Not fixed, P3: tree bindings are still refused when a client reads the glb, not by a
 shipped-asset gate: reading a glb outside the asset server is a separate tool.
 
 ### Open: continued fracture and mixed load sharing
