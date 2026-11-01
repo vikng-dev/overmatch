@@ -126,71 +126,7 @@ fn every_entry_is_owned_once_across_the_hand_off() {
                 let origin = point - direction * STANDOFF;
                 let pose =
                     format!("plate {rotation} at {centre}, shot from {origin} along {direction}");
-                let result = app
-                    .world_mut()
-                    .run_system_once(
-                        move |world: ProjectileMarchWorld,
-                              colliders: Query<(
-                            &'static Position,
-                            &'static Rotation,
-                            &'static Collider,
-                            Option<&'static BallisticSurfaces>,
-                        )>| {
-                            let context = ResolveContext {
-                                world: &world,
-                                colliders: &colliders,
-                                deposit: false,
-                                laws: WalkLaws::default(),
-                            };
-                            let frame = DiscFrame::anchored(direction).expect("a real direction");
-                            let radius = ROUND.caliber * 0.5;
-                            let entrance = closing_walk(
-                                &context,
-                                &|_| true,
-                                origin,
-                                Vec3::ZERO,
-                                direction,
-                                frame,
-                                radius,
-                                &[],
-                                STANDOFF + ENTRANCE_SPAN,
-                            )?;
-                            let shot = Shot {
-                                caliber: ROUND.caliber,
-                            };
-                            let Begin::Transit(request) =
-                                walk::begin(&entrance, &shot, &context.laws)?
-                            else {
-                                return Ok(None);
-                            };
-                            let corridor = build_corridor(
-                                &context,
-                                &|_| true,
-                                request.anchor,
-                                request.origin,
-                                request.axis,
-                                ENTRANCE_SPAN,
-                                request.frame,
-                                request.radius,
-                                &request.seeds,
-                            )?;
-                            let transit = closing_walk(
-                                &context,
-                                &|_| true,
-                                request.anchor,
-                                request.origin,
-                                request.axis,
-                                request.frame,
-                                request.radius,
-                                &request.seeds,
-                                ENTRANCE_SPAN,
-                            )?;
-                            let round = bound(ROUND);
-                            walk::finish(&transit, &request, &round, round.at(SPEED), &LIMITS)?;
-                            Ok::<_, WalkError>(Some(corridor))
-                        },
-                    )
-                    .expect("the probe system runs");
+                let result = handed_off(&mut app, origin, direction);
                 match result {
                     Ok(Some(corridor)) => {
                         assert_single_ownership(&corridor, &pose);
@@ -206,6 +142,148 @@ fn every_entry_is_owned_once_across_the_hand_off() {
         transits >= 3 * PLATES * SHOTS / 2,
         "the sweep exercised the hand-off ({transits} transits)"
     );
+}
+
+/// A RING SAMPLE HANDING OFF ON A FACE THE BENT AXIS GRAZES.
+///
+/// The disc bites a block's top face and bends toward its inward normal; the disc's outer samples
+/// pass that face's edge and enter the overhanging side face deeper, handing off there. The
+/// incoming rays meet the side face at 1° to 16° and the bend carries the transit axis across its
+/// plane, so one ray or the other grazes it: a start's rounding off the face becomes a distance
+/// along that ray far past the topology band, and a membership read on the incoming ray disagrees
+/// with the bent corridor about the face. The first boundary of every sample's transit must still
+/// be owned exactly once ([`transit_starts`] reads membership on the bent rays), or the march's
+/// Bite meets the shell's exit with nothing open: `UnexpectedExit`, a panic (#254). MEASURED: with
+/// the seeds read on the incoming rays, the sweep's first pose fails that way. Fixture geometry,
+/// near the world origin and far from it.
+#[test]
+fn a_hand_off_face_the_bent_axis_grazes_is_owned_once() {
+    const HALF: f32 = 0.5;
+    const STEPS: usize = 76;
+    let incidence = 40.0_f32.to_radians();
+    let radius = ROUND.caliber * 0.5;
+    let mut transits = 0;
+    for (centre, rotation) in [
+        (
+            Vec3::new(0.3, 2.0, -0.2),
+            Quat::from_euler(EulerRot::YXZ, 0.7, 0.4, 1.9),
+        ),
+        (
+            Vec3::new(1234.5, 2.0, 987.6),
+            Quat::from_euler(EulerRot::YXZ, 2.3, -0.6, 0.5),
+        ),
+    ] {
+        for step in 0..STEPS {
+            // The incoming ray meets the side face at `graze`. The bend (DERIVED: about 8° at 40°
+            // under the default normalization, scaled by coverage) lies inside the sweep.
+            let graze = (1.0 + 0.2 * step as f32).to_radians();
+            let shear = HALF * (incidence - graze).tan();
+            let (mut app, _) = settled(|app| {
+                vec![mesh_volume(
+                    app,
+                    mapped_box_trimesh(|corner| {
+                        Vec3::new(
+                            HALF * corner.x + shear * corner.z,
+                            HALF * corner.y,
+                            HALF * corner.z,
+                        )
+                    }),
+                    Transform::from_translation(centre).with_rotation(rotation),
+                )]
+            });
+            let direction = rotation * Vec3::new(-incidence.sin(), 0.0, -incidence.cos());
+            // Half a projected radius short of the top face's edge: the outer samples pass it.
+            let point = centre
+                + rotation * Vec3::new(HALF + shear - 0.5 * radius / incidence.cos(), 0.0, HALF);
+            let origin = point - direction * STANDOFF;
+            let pose = format!("graze {graze} rad, block {rotation} at {centre}");
+            match handed_off(&mut app, origin, direction) {
+                Ok(Some(corridor)) => {
+                    assert_single_ownership(&corridor, &pose);
+                    transits += 1;
+                }
+                Ok(None) => {}
+                Err(error) => panic!("{pose}: the hand-off failed to pair: {error:?}"),
+            }
+        }
+    }
+    assert!(
+        transits >= STEPS,
+        "the sweep bit into the block ({transits} transits)"
+    );
+}
+
+/// The runtime's two-stage crossing from `origin` along `direction`, at the march's stand-off: the
+/// entrance corridor, the transit starts, the transit corridor (returned for the ownership check)
+/// and the transit's pairing. `None` when the entrance does not bite.
+fn handed_off(
+    app: &mut App,
+    origin: Vec3,
+    direction: Vec3,
+) -> Result<Option<DiscCorridor>, WalkError> {
+    app.world_mut()
+        .run_system_once(
+            move |world: ProjectileMarchWorld,
+                  colliders: Query<(
+                &'static Position,
+                &'static Rotation,
+                &'static Collider,
+                Option<&'static BallisticSurfaces>,
+            )>| {
+                let context = ResolveContext {
+                    world: &world,
+                    colliders: &colliders,
+                    deposit: false,
+                    laws: WalkLaws::default(),
+                };
+                let frame = DiscFrame::anchored(direction).expect("a real direction");
+                let radius = ROUND.caliber * 0.5;
+                let entrance = closing_walk(
+                    &context,
+                    &|_| true,
+                    origin,
+                    Vec3::ZERO,
+                    direction,
+                    frame,
+                    radius,
+                    &[],
+                    STANDOFF + ENTRANCE_SPAN,
+                )?;
+                let shot = Shot {
+                    caliber: ROUND.caliber,
+                };
+                let Begin::Transit(request) = walk::begin(&entrance, &shot, &context.laws)? else {
+                    return Ok(None);
+                };
+                let starts = transit_starts(&context, &|_| true, &request)?;
+                let corridor = build_corridor(
+                    &context,
+                    &|_| true,
+                    request.anchor,
+                    request.origin,
+                    request.axis,
+                    ENTRANCE_SPAN,
+                    request.frame,
+                    request.radius,
+                    &starts.seeds,
+                )?;
+                let transit = closing_walk(
+                    &context,
+                    &|_| true,
+                    request.anchor,
+                    request.origin,
+                    request.axis,
+                    request.frame,
+                    request.radius,
+                    &starts.seeds,
+                    ENTRANCE_SPAN,
+                )?;
+                let round = bound(ROUND);
+                walk::finish(&transit, &request, &round, round.at(SPEED), &LIMITS)?;
+                Ok::<_, WalkError>(Some(corridor))
+            },
+        )
+        .expect("the probe system runs")
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -2680,6 +2758,7 @@ fn a_convex_trunk_is_crossed_with_a_chord_at_any_offset_and_incidence() {
                         else {
                             return Ok(None);
                         };
+                        let starts = transit_starts(&context, &|_| true, &request)?;
                         let transit = closing_walk(
                             &context,
                             &|_| true,
@@ -2688,7 +2767,7 @@ fn a_convex_trunk_is_crossed_with_a_chord_at_any_offset_and_incidence() {
                             request.axis,
                             request.frame,
                             request.radius,
-                            &request.seeds,
+                            &starts.seeds,
                             ENTRANCE_SPAN,
                         )?;
                         let round = bound(ROUND);

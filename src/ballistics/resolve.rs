@@ -360,6 +360,35 @@ fn certified_at(
     )
 }
 
+/// The game's damage model: the starts of the transit corridor `request` asks for, each sample's
+/// membership read on the bent ray that corridor sweeps from the sample's hand-off.
+///
+/// The request's own seeds were read on the incoming rays. A sample that hands off on a face sits
+/// off it by its rounding, and a ray that grazes the face turns that offset into a distance along
+/// the ray of the rounding over the graze's sine. The incoming and the bent ray can then place the
+/// face on opposite sides of the start, past the band the seed declines and the corridor's clamp
+/// reaches: the face is owned by neither, and the shell's exit arrives with nothing open.
+pub(crate) fn transit_starts(
+    context: &ResolveContext<'_, '_, '_>,
+    not_own: &dyn Fn(Entity) -> bool,
+    request: &walk::TransitRequest,
+) -> Result<Interior, WalkError> {
+    certified_samples(
+        context,
+        not_own,
+        AxisStart {
+            anchor: request.anchor,
+            origin: request.origin,
+        },
+        Dir3::new(request.axis).expect(
+            "the game's damage model constructs a normalized transit axis at the checked entrance",
+        ),
+        request.frame,
+        request.radius,
+        request.seeds.iter().map(|seed| seed.offset).collect(),
+    )
+}
+
 /// The game's damage model: contact-time membership for the starts discovery actually swept.
 /// The next layout's transported basis must not move or flatten those staggered sample starts.
 pub(crate) fn certified_samples(
@@ -372,11 +401,14 @@ pub(crate) fn certified_samples(
     offsets: Vec<Vec3>,
 ) -> Result<Interior, WalkError> {
     let AxisStart { anchor: at, origin } = start;
-    let offsets: Vec<Vec3> = offsets.into_iter().map(|offset| origin + offset).collect();
+    // Each probe line is formed at `origin + offset`, the start a corridor seeded from the returned
+    // offsets forms: the seeds hand back the given offsets, so both read one line in one arithmetic.
+    let given = offsets;
+    let offsets: Vec<Vec3> = given.iter().map(|&offset| origin + offset).collect();
     let axis = Vec3::from(axis);
-    let reach = offsets
+    let reach = given
         .iter()
-        .map(|offset| (*offset - origin).length())
+        .map(|offset| offset.length())
         .fold(0.0, f32::max);
 
     // The candidates whose bounds contain a start, and the union of those bounds, relative to `at`.
@@ -415,14 +447,7 @@ pub(crate) fn certified_samples(
         return Ok(Interior {
             anchor: at,
             origin,
-            seeds: Interior::laid(at, offsets)
-                .seeds
-                .into_iter()
-                .map(|seed| SampleSeed {
-                    offset: seed.offset - origin,
-                    ..seed
-                })
-                .collect(),
+            seeds: Interior::laid(at, given).seeds,
         });
     }
     // How far along `direction` the point leaves the box: past the first slab it leaves, it is
@@ -509,7 +534,7 @@ pub(crate) fn certified_samples(
             )?;
             Ok(SampleSeed {
                 sample,
-                offset: corridor.offset - origin,
+                offset: given[sample],
                 t: handoff,
                 inside: walked.inside_at(handoff, &context.laws),
             })
@@ -1581,11 +1606,13 @@ pub(crate) fn decide(
             }))
         }
         Begin::Transit(request) => {
-            // --- TRANSIT: re-collected along the BENT axis, seeded from the handoff. The entrance
-            // hits describe the incoming rays and cannot describe this.
+            // --- TRANSIT: re-collected along the BENT axis from the hand-off, its membership read
+            // on those bent rays. The entrance hits describe the incoming rays and cannot describe
+            // this.
             let bent = Dir3::new(request.axis).expect(
                 "the game's damage model constructs a normalized transit axis at the checked entrance"
             );
+            let starts = transit_starts(context, not_own, &request)?;
             let transit = closing_walk(
                 context,
                 not_own,
@@ -1594,7 +1621,7 @@ pub(crate) fn decide(
                 request.axis,
                 request.frame,
                 request.radius,
-                &request.seeds,
+                &starts.seeds,
                 ENTRANCE_SPAN,
             )?;
             let plan = walk::finish(&transit, &request, round, state_in, &LIMITS)?;
