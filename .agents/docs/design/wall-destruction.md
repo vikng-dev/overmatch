@@ -792,17 +792,31 @@ gets no second plastic exchange or launch. External fields still apply their own
 There is no landing-fragility factor or switch for a piece's kind.
 
 For an unsupported group, `in_group_frames` subtracts each source's rigid translation and
-rotation, cancels uniform gravity, and retains the resulting internal force and moment. DERIVED:
-uniform free fall has no relative demand. ASSUMED inertia for assessing demand remains the
-section law's equal-volume sphere per chunk with parallel-axis terms; point couples account
-for each sphere's own angular inertia. This is distinct from the exact occupied collider
-inertia used to spawn and split physics bodies. The frame's residual rigid force and moment
-are tested. External contact points root the balanced section search; they confer no tensile
-anchor. Zero-reaction speculative points do not root the balanced search. Multiple simultaneous
-support paths retain the existing unassessed limit. An enclosing
-wall's successful check no longer erases a locally deferred section from that count. Rest
-pressure centres are projected into the bearing plane, so reversing a contact does not change
-the compression-only law.
+rotation, cancels uniform gravity, adds the body's spin terms (each chunk's centripetal
+`−m ω × (ω × r)` and Euler's gyroscopic `α_g = −I⁻¹ (ω × I ω)`, `ω` the body's angular velocity
+in its construction frame, zero for groups a placed building frees), and retains the resulting
+internal force and moment. DERIVED: uniform free fall has no relative demand, and the residual
+wrench vanishes with spin too. ASSUMED inertia for assessing demand remains the section law's
+equal-volume sphere per chunk with parallel-axis terms; point couples account for each sphere's
+own angular inertia. This is distinct from the exact occupied collider inertia used to spawn and
+split physics bodies. The frame's residual rigid force and moment are tested. The laws run on a
+deposit, so a group no external load reaches is not framed: a spinning group in flight is
+assessed at its next contact.
+
+A moving group's contacts are known loads (the solver's impulses), not unknown supports, so the
+group is determinate in its frame. One reference chunk per group, the one its external loads hold
+hardest (`|J| + |F| Δt`, lowest index on a tie), roots the section search and fixes which side
+each section holds; it confers no tensile anchor, and zero-reaction speculative points never
+become it. Every section is assessed, a group touching along its whole length included; an even
+landing loads none, since each chunk's share meets its own inertia. Punch rings grow from the
+chunks external loads reach, never from the frame's inertial loads, which reach every chunk.
+The energy terms (a section's `E_g`, a rest's lift capacity and shove work) read the group's
+field: gravity on a standing group, its frame's body force on a moving one, so a group lying on
+its support feels its weight and one in free fall feels none. A failure that frees a group in a
+run frames that group and reruns the push check in the same run, until a pass frees nothing
+more. An enclosing wall's successful check no longer erases a locally deferred section from
+the unassessed count. Rest pressure centres are projected into the bearing plane, so reversing a
+contact does not change the compression-only law.
 
 A failed seam partitions ownership at the same authoritative tick. `PendingSplit` waits for
 that tick's plastic returns to reach their sources, then creates the children before publication.
@@ -811,10 +825,13 @@ angular velocity; their colliders partition the parent. This adds no kinetic ene
 fracture-work criterion is a threshold, not a resolved cohesive dissipation/strain model.
 The initial departure's plastic exchange remains the shared launch path.
 
-`WallPiece` carries birth and retirement ticks (protocol revision **59**, a deliberate wire
-change). A retired parent's final pose remains replicated. Replicas show it until the shared
-cursor reaches the split and the replacement groups have arrived; children wait for their birth
-tick. The replacement bodies are server-only, and the client keeps deriving the standing wall's
+`WallPiece` carries birth and retirement ticks (protocol revision **60**, a deliberate wire
+change shared with the module repair snapshot). A retired parent's final pose remains
+replicated. Replicas show it until the shared cursor reaches the split and the replacement
+groups have arrived; children wait for their birth tick, and then behind any older piece still
+drawing one of their chunks, so each chunk draws once. A moving group owns its chunks alone:
+the building's unbreakable elements stay with the placed building, and a field's blow on a chunk
+it turns to dust moves no group, as on a standing building. The replacement bodies are server-only, and the client keeps deriving the standing wall's
 shape from the ledger. Continued holes remain drawn data and do not change occupied geometry.
 
 The required tests use ASSUMED fixture geometry and seam characterization: a strong landing

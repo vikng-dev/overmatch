@@ -232,3 +232,59 @@ normal-driving scenario remained queued behind another lane's machine lock at th
 90-minute cutoff (start 18:56:06 +07; cutoff 20:26:06) and was cancelled. Item 3 remains open;
 `caps-destr4/index.md` in the lane scratchpad labels the retained attempt images and the unrun
 plan honestly. No pricing or visible-window run was performed.
+
+## Part 5: blind reviews of part 4
+
+Subject: the game's building destruction (fracture, joints, chunk groups and their structure law),
+game state only. Two blind reviews of part 4 (one Codex, one Claude) were each decided against the
+code on main before any fix. The lane started at 22:28:23 +07; no captures, pricing runs, pushes or
+subagents.
+
+| Reviewer | Finding | Verdict | Fixed in (subject) |
+|---|---|---|---|
+| Codex | P1 `WallPiece` wire change without a repinned type hash | verified (part-4 snapshot) | net: pin the merged wire types at PROTOCOL_REV 60 (since re-pinned by "net: pin the merged wire types at PROTOCOL_REV 62") |
+| Codex | P2 contact roots skip assessment uncounted | verified | buildings: root a moving group's sections at one reference chunk (#249) |
+| Codex | P2 inertial blows seed the whole group as its only ring | verified | buildings: grow punch rings from external loads only (#249) |
+| Codex | P2 an arrived child shows beside its still-shown parent | verified | buildings: draw each split chunk by one piece and index the handover (#249) |
+| Codex | P2 moving groups meet phantom unbreakable elements | verified | buildings: keep unbreakable elements with the placed building (#249) |
+| Codex | P2 collinear overlapping profile edges pass | verified | buildings: refuse a profile edge that touches or retraces another (#249) |
+| Claude | P2 a loaded loose group's energy terms lose its weight | verified | buildings: read a moving group's own weight in its energy laws (#249) |
+| Claude | P2 belt loads on a moving chunk group never reach its laws | verified | open (below) |
+| Claude | P3 per-frame handover scan over every arrived piece | verified (DERIVED cost) | buildings: draw each split chunk by one piece and index the handover (#249) |
+| Claude | P3 field blows on chunks turned to dust move a moving group | verified | buildings: move a moving group only by field blows on chunks that stand (#249) |
+| Claude | P3 a group freed in the same run is never framed | verified | buildings: assess a group a blow frees in its own frame in the same run (#249) |
+| Claude | P3 no centripetal term in the group frame | verified | buildings: load a spinning group's seams by its centripetal pull (#249) |
+| Claude | P3 a child drawn twice with its parent | verified (Codex's P2) | buildings: draw each split chunk by one piece and index the handover (#249) |
+| Claude | P3 per-piece state clones and per-source frame loads | not a defect: a DERIVED cost with no wrong state; the pricing lane measures it | — |
+| Claude | P3 `retire_wall_piece` skips a missing carrier silently | verified | net: expect a chunk group's carrier when its split retires it (#249) |
+| Claude | P3 `Origin::Contact::normal` read by no law | verified | buildings: drop the contact normal no law reads (#249) |
+| Claude | P3 the free-fall test is vacuous | verified | buildings: make the free-fall test read the frame's gravity cancel (#249) |
+| Claude | P3 no test of a level face's element axes on the mesh path | verified | buildings: test a level face's element axes on the mesh path (#249) |
+| Claude | P3 house-specific assertions in the roof probe | verified | buildings: keep only class invariants in the roof recheck (#249) |
+| Claude | P3 the gentle drop passes by the multi-root limit | verified | buildings: root a moving group's sections at one reference chunk (#249) |
+| Claude | P3 stale rest-law docs | verified | buildings: read a moving group's own weight in its energy laws (#249) |
+| Claude | P3 stale breakage module doc; `RetirePiece` holds `PendingSplit`'s doc | verified | buildings: state moving groups and splits in the breakage docs (#249) |
+| Claude | P3 "protocol revision 59" in the records | verified | sweep-2: docs: name the merged protocol revision in the destruction record; `wall-destruction.md`: docs: record the sweep-destr-4 review verification (#249) |
+
+Each verified law finding has a law fixture that fails on the old code (ASSUMED geometry and
+seams, labelled in each test): an exact two-chunk pull the old ring seeding held; a hard end strike
+on a slab touched along its length the old multi-root graph left whole; a rest on a lying group
+any blow opened; an anchored row whose freed part never split; a spinning slab whose weak seam
+held at any spin. The real Avian drop pair still discriminates with every section of the flat
+set-down now assessed.
+
+**Open, verified, not fixed here:** a belt's loads on a moving chunk group. The belt sizes and
+applies a dynamic recipient's clamped impulse (`track::rubble::piece_impulses`) but stages a
+structure reaction (`record_static_contacts`) only for fixed construction, so a tank driving over
+a fallen slab moves it and its laws never see the load. The fix stages the impulse the group
+actually took, named with its source tank, as a contact on the group: it changes
+`piece_impulses`' contract inside `src/track/`, where sweep-drive-6 is working, and the implicit
+contact's budget in `src/contact_transfer.rs`. It is that lane's or the next one's.
+
+**New, not fixed:** the section law takes a bending axis from any nonzero moment, so an axial pull
+whose line meets the section centre bends it by f32 rounding alone. MEASURED on the row fixture
+(chunk spacing 0.2 m, a 1000 N·s axial contact): a rounding-only axis gave a section demand of
+56.4 N·s against a capacity of 0.21; on binary-exact coordinates the same pull bends nothing. The
+punch ring now reads the pull either way, but the section's reading depends on rounding. Also,
+`bears_on_contact` still reads "rising" as construction-frame `y` on a moving group, where the
+group's field gives the direction.
