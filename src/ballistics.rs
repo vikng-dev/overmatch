@@ -1917,6 +1917,8 @@ pub fn sim_plugin(app: &mut App) {
 /// authority needs successive collider poses for its walk; presentation consumes the public path.
 fn mount_collider_motion(app: &mut App) {
     app.init_resource::<motion::ColliderMotion>()
+        .add_observer(motion::forget_collider)
+        .add_observer(motion::forget_body)
         .add_systems(
             FixedPostUpdate,
             motion::seed_births

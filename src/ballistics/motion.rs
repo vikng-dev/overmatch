@@ -24,13 +24,22 @@ pub(super) struct Poses {
 }
 
 /// The game's damage model: membership is frozen at a walk boundary. A new collider has no
-/// earlier trajectory and is born with identical endpoints; a removed collider leaves the table.
+/// earlier trajectory and is born with identical endpoints; a removed collider leaves the table
+/// (the `Remove` observers [`forget_collider`] and [`forget_body`]).
+///
+/// The tables are kept, not rebuilt: a boundary rewrites only the entries whose pose inputs were
+/// written since the last one, and closes the entries that moved in the last interval. An entry
+/// nothing wrote keeps the endpoints it had, which are the endpoints a full recompute would give
+/// it. The cost per boundary is the moved entries, not the world's colliders.
 #[derive(Resource, Default)]
 pub(super) struct ColliderMotion {
     pub colliders: HashMap<Entity, Poses>,
     pub bodies: HashMap<Entity, Poses>,
     /// DERIVED conservative displacement of any collider point, used to grow a tree query.
     pub largest_motion: f32,
+    /// The entries whose endpoints differ, so the next boundary can close them.
+    moving_colliders: Vec<Entity>,
+    moving_bodies: Vec<Entity>,
 }
 
 type Colliders<'w, 's> = Query<
@@ -72,12 +81,22 @@ fn composed_pose(
 }
 
 /// The game's damage model: a collider born at a boundary starts at its birth pose, before
-/// physics can move it. A replaced shape is new geometry at that same boundary.
+/// physics can move it. A replaced shape is new geometry at that same boundary. A body or
+/// collider born since the last run is `Added`; a replaced shape is `Changed`.
 pub(super) fn seed_births(
     mut history: ResMut<ColliderMotion>,
-    colliders: Colliders,
+    colliders: Query<
+        (
+            Entity,
+            &'static Position,
+            &'static Rotation,
+            Option<&'static ColliderOf>,
+            Option<&'static ColliderTransform>,
+        ),
+        Changed<Collider>,
+    >,
     bodies: Query<(&Position, &Rotation)>,
-    roots: Query<(Entity, &Position, &Rotation), With<RigidBody>>,
+    roots: Query<(Entity, &Position, &Rotation), Added<RigidBody>>,
 ) {
     for (entity, position, rotation) in &roots {
         let pose = Pose {
@@ -89,18 +108,26 @@ pub(super) fn seed_births(
             to: pose,
         });
     }
-    for (entity, position, rotation, collider, owner, local) in &colliders {
-        if collider.is_changed() || !history.colliders.contains_key(&entity) {
-            let pose = composed_pose(entity, position, rotation, owner, local, &bodies);
-            history.colliders.insert(
-                entity,
-                Poses {
-                    from: pose,
-                    to: pose,
-                },
-            );
-        }
+    for (entity, position, rotation, owner, local) in &colliders {
+        let pose = composed_pose(entity, position, rotation, owner, local, &bodies);
+        history.colliders.insert(
+            entity,
+            Poses {
+                from: pose,
+                to: pose,
+            },
+        );
     }
+}
+
+/// The game's damage model: a despawned or shape-less collider leaves the table.
+pub(super) fn forget_collider(removed: On<Remove, Collider>, mut history: ResMut<ColliderMotion>) {
+    history.colliders.remove(&removed.entity);
+}
+
+/// The game's damage model: a despawned body, or one that stops being a body, leaves the table.
+pub(super) fn forget_body(removed: On<Remove, RigidBody>, mut history: ResMut<ColliderMotion>) {
+    history.bodies.remove(&removed.entity);
 }
 
 /// The game's damage model: refresh child physics poses after the solver moved their body.
@@ -126,35 +153,78 @@ pub(super) fn place_children(
     }
 }
 
+/// The game's damage model: close the last interval and record this one.
+///
+/// A collider's composed pose reads its own `Position`/`Rotation` (a root collider) or its body's
+/// pose and its `ColliderTransform` (a child). Invariant: [`place_children`] runs before this in
+/// the same chain and leaves every child's `Position`/`Rotation` equal to its composed pose, so a
+/// child whose body moved or whose local pose changed had its own `Position` or `Rotation`
+/// written. Change detection on a collider's own pose, shape, body link and local pose therefore
+/// finds every collider whose composed pose can have changed since this system's last run; every
+/// other entry keeps the endpoints a recompute would give it.
 pub(super) fn snapshot(
     mut history: ResMut<ColliderMotion>,
     colliders: Colliders,
+    written: Query<
+        Entity,
+        (
+            With<Collider>,
+            Or<(
+                Changed<Position>,
+                Changed<Rotation>,
+                Changed<Collider>,
+                Changed<ColliderOf>,
+                Changed<ColliderTransform>,
+            )>,
+        ),
+    >,
     bodies: Query<(&Position, &Rotation)>,
-    roots: Query<(Entity, &Position, &Rotation), With<RigidBody>>,
+    roots: Query<
+        (Entity, &Position, &Rotation),
+        (
+            With<RigidBody>,
+            Or<(Changed<Position>, Changed<Rotation>, Added<RigidBody>)>,
+        ),
+    >,
 ) {
-    let mut next = HashMap::with_capacity(colliders.iter().len());
+    let history = &mut *history;
+    // The last interval's movers come to rest unless written again below.
+    for entity in history.moving_colliders.drain(..) {
+        if let Some(poses) = history.colliders.get_mut(&entity) {
+            poses.from = poses.to;
+        }
+    }
+    for entity in history.moving_bodies.drain(..) {
+        if let Some(poses) = history.bodies.get_mut(&entity) {
+            poses.from = poses.to;
+        }
+    }
     let mut largest_motion = 0.0f32;
-    for (entity, position, rotation, collider, owner, local) in &colliders {
+    for entity in &written {
+        let (_, position, rotation, collider, owner, local) = colliders
+            .get(entity)
+            .expect("game's damage model: a written collider matches the collider query");
         let to = composed_pose(entity, position, rotation, owner, local, &bodies);
         // Absence means birth at this boundary, not an invented earlier pose.
         let from = history.colliders.get(&entity).map_or(to, |poses| poses.to);
         let poses = Poses { from, to };
-        let displacement = point_motion_bound(poses, &collider);
-        largest_motion = largest_motion.max(displacement);
-        next.insert(entity, poses);
+        if from != to {
+            largest_motion = largest_motion.max(point_motion_bound(poses, &collider));
+            history.moving_colliders.push(entity);
+        }
+        history.colliders.insert(entity, poses);
     }
-    history.bodies = roots
-        .iter()
-        .map(|(entity, position, rotation)| {
-            let to = Pose {
-                position: position.0,
-                rotation: rotation.0,
-            };
-            let from = history.bodies.get(&entity).map_or(to, |poses| poses.to);
-            (entity, Poses { from, to })
-        })
-        .collect();
-    history.colliders = next;
+    for (entity, position, rotation) in &roots {
+        let to = Pose {
+            position: position.0,
+            rotation: rotation.0,
+        };
+        let from = history.bodies.get(&entity).map_or(to, |poses| poses.to);
+        if from != to {
+            history.moving_bodies.push(entity);
+        }
+        history.bodies.insert(entity, Poses { from, to });
+    }
     history.largest_motion = largest_motion;
 }
 
@@ -512,10 +582,13 @@ mod tests {
         assert!(poses.velocity_at(0.5, Vec3::X, 1.0).distance(expected) < 1e-6);
     }
 
+    /// The production order: child placement, then the history (`mount_collider_motion`).
     fn app() -> App {
         let mut app = App::new();
         app.init_resource::<ColliderMotion>()
-            .add_systems(Update, snapshot);
+            .add_observer(forget_collider)
+            .add_observer(forget_body)
+            .add_systems(Update, (place_children, snapshot).chain());
         app
     }
 
@@ -526,7 +599,11 @@ mod tests {
         let mut app = app();
         let body = app
             .world_mut()
-            .spawn((Position(Vec3::ZERO), Rotation::IDENTITY))
+            .spawn((
+                RigidBody::Kinematic,
+                Position(Vec3::ZERO),
+                Rotation::IDENTITY,
+            ))
             .id();
         let child = app
             .world_mut()
@@ -612,6 +689,183 @@ mod tests {
         let poses = app.world().resource::<ColliderMotion>().colliders[&entity];
         assert_eq!(poses.from.position, Vec3::ZERO);
         assert_eq!(poses.to.position, Vec3::X);
+    }
+
+    /// The game's damage model: the kept tables equal a full recompute at every boundary: every
+    /// live collider and body, each with the previous boundary's pose and this one's, and the
+    /// motion bound over all of them. The walk reads any collider's entry, so an entry a boundary
+    /// failed to rewrite (a mover never closed, a missed local pose change, a despawned collider
+    /// kept) is a stale chord for every round that meets it. Fixture poses and shapes.
+    #[test]
+    fn the_kept_history_equals_a_full_recompute_at_every_boundary() {
+        fn composed(world: &World, entity: Entity) -> Pose {
+            let pose_of = |of: Entity| {
+                let position = world.get::<Position>(of).unwrap().0;
+                (position, world.get::<Rotation>(of).unwrap().0)
+            };
+            match world
+                .get::<ColliderOf>(entity)
+                .filter(|owner| owner.body != entity)
+            {
+                Some(owner) => {
+                    let local = world.get::<ColliderTransform>(entity).unwrap();
+                    let (at, turn) = pose_of(owner.body);
+                    Pose {
+                        position: at + turn * local.translation,
+                        rotation: (turn * local.rotation.0).normalize(),
+                    }
+                }
+                None => {
+                    let (position, rotation) = pose_of(entity);
+                    Pose { position, rotation }
+                }
+            }
+        }
+        fn now(world: &mut World) -> (HashMap<Entity, Pose>, HashMap<Entity, Pose>) {
+            let colliders: Vec<Entity> = world
+                .query_filtered::<Entity, With<Collider>>()
+                .iter(world)
+                .collect();
+            let bodies = world
+                .query_filtered::<(Entity, &Position, &Rotation), With<RigidBody>>()
+                .iter(world)
+                .map(|(entity, position, rotation)| {
+                    let pose = Pose {
+                        position: position.0,
+                        rotation: rotation.0,
+                    };
+                    (entity, pose)
+                })
+                .collect();
+            let colliders = colliders
+                .into_iter()
+                .map(|entity| (entity, composed(world, entity)))
+                .collect();
+            (colliders, bodies)
+        }
+        fn expected(
+            before: &HashMap<Entity, Pose>,
+            after: &HashMap<Entity, Pose>,
+        ) -> HashMap<Entity, Poses> {
+            after
+                .iter()
+                .map(|(&entity, &to)| {
+                    let from = before.get(&entity).copied().unwrap_or(to);
+                    (entity, Poses { from, to })
+                })
+                .collect()
+        }
+        fn same(kept: &HashMap<Entity, Poses>, want: &HashMap<Entity, Poses>, label: &str) {
+            assert_eq!(kept.len(), want.len(), "{label}: entries");
+            for (entity, want) in want {
+                let kept = kept[entity];
+                assert_eq!(
+                    (kept.from, kept.to),
+                    (want.from, want.to),
+                    "{label}: {entity}"
+                );
+            }
+        }
+
+        let mut app = app();
+        let body = app
+            .world_mut()
+            .spawn((
+                RigidBody::Kinematic,
+                Position(Vec3::ZERO),
+                Rotation::IDENTITY,
+            ))
+            .id();
+        let child = |app: &mut App, x: f32| {
+            app.world_mut()
+                .spawn((
+                    Position(Vec3::ZERO),
+                    Rotation::IDENTITY,
+                    Collider::cuboid(0.5, 0.5, 0.5),
+                    ColliderOf { body },
+                    ColliderTransform {
+                        translation: Vec3::X * x,
+                        ..default()
+                    },
+                ))
+                .id()
+        };
+        let (left, right) = (child(&mut app, -1.0), child(&mut app, 1.0));
+        let standalone = app
+            .world_mut()
+            .spawn((
+                Position(Vec3::new(5.0, 0.0, 0.0)),
+                Rotation::IDENTITY,
+                Collider::cuboid(1.0, 1.0, 1.0),
+            ))
+            .id();
+        let steps: [(&str, Box<dyn Fn(&mut World)>); 7] = [
+            ("births", Box::new(|_| {})),
+            (
+                "the body moves its children",
+                Box::new(move |world| {
+                    world
+                        .entity_mut(body)
+                        .insert((Position(Vec3::Z), Rotation(Quat::from_rotation_y(0.3))));
+                }),
+            ),
+            ("nothing written: every mover closes", Box::new(|_| {})),
+            (
+                "one child's local pose",
+                Box::new(move |world| {
+                    world.entity_mut(left).insert(ColliderTransform {
+                        translation: Vec3::new(-1.0, 0.5, 0.0),
+                        rotation: Rotation(Quat::from_rotation_x(0.2)),
+                        ..default()
+                    });
+                }),
+            ),
+            (
+                "a root collider moves, a child is despawned, a collider is born",
+                Box::new(move |world| {
+                    world
+                        .entity_mut(standalone)
+                        .insert(Position(Vec3::new(5.0, 1.0, 0.0)));
+                    world.despawn(right);
+                    world.spawn((
+                        Position(Vec3::new(-3.0, 0.0, 2.0)),
+                        Rotation::IDENTITY,
+                        Collider::sphere(0.4),
+                    ));
+                }),
+            ),
+            (
+                "a pose written with its own value",
+                Box::new(move |world| {
+                    world.entity_mut(body).insert(Position(Vec3::Z));
+                }),
+            ),
+            ("nothing written again", Box::new(|_| {})),
+        ];
+        let (mut colliders, mut bodies) = (HashMap::new(), HashMap::new());
+        for (label, write) in steps {
+            write(app.world_mut());
+            app.update();
+            let (now_colliders, now_bodies) = now(app.world_mut());
+            let want = expected(&colliders, &now_colliders);
+            let history = app.world().resource::<ColliderMotion>();
+            same(&history.colliders, &want, label);
+            same(&history.bodies, &expected(&bodies, &now_bodies), label);
+            let world = app.world_mut();
+            let bound = want
+                .iter()
+                .map(|(&entity, &poses)| {
+                    let shape = world.get::<Collider>(entity).unwrap();
+                    point_motion_bound(poses, shape)
+                })
+                .fold(0.0f32, f32::max);
+            assert_eq!(
+                world.resource::<ColliderMotion>().largest_motion.to_bits(),
+                bound.to_bits(),
+                "{label}: motion bound"
+            );
+            (colliders, bodies) = (now_colliders, now_bodies);
+        }
     }
 
     /// The game's damage model: the server's walk sees completed physics; topology and
