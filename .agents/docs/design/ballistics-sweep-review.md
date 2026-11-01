@@ -202,3 +202,42 @@ asset comments; no current law, UI or instrument consumed that field. The trigge
 modes remain required. Corrected the crew-line coefficient prose: HP dose is disc-mean chord times
 the stored coefficient times `HP_PER_REFERENCE_MM`. The legacy scale's identifier is retained;
 no coefficient, conversion or HP behavior changes.
+
+## Derived frame invariants
+
+The game's damage model now requires a checked fire bore to construct its sampling frame, and
+requires a validated field stratum in its orthonormal frame to construct a finite nonzero
+direction. Neither internal failure substitutes a world basis or an axial field ray. The broken
+field-frame control panics instead of depositing dose along an invented direction.
+
+## Unfinished physical contracts and owner calls
+
+- **B1, P1, unresolved:** moving the hand-set aerodynamic anchors into honestly labelled data
+  did not establish their aerodynamic basis. No damage-topic web research was authorized here.
+- **B4, P1, unresolved:** `launch_turrets_on_cookoff` still prescribes linear and angular launch
+  velocities. `Ammo` identifies only a volume with HP and ownership. Per-weapon stowage counts
+  exist but do not assign contents to ammunition volumes; the reserve is currently infinite.
+  Round filler energies exist, but neither propellant energy nor confinement, attachment failure
+  work, a release force path or per-volume energetic contents are supplied. `TurretSpec` supplies
+  mass and inertia extents only. A conserving release also needs the hull's inherited motion and
+  its mass/inertia after detachment. These facts must be supplied before deriving a release;
+  relabelling the current kick as an energy coefficient would leave the finding intact.
+- **B6, P1, unresolved:** the ground contact still functions the fuze with unbounded resistance
+  and stops the round immediately. The old `stops_unresolved` catch-all is already gone. The
+  height grid supplies a surface, while `GroundType` supplies print, friction and dust responses;
+  neither gives the material's ballistic constitutive response or solid intervals for the
+  generic march. Supply the ground response and its geometric adapter together. No arbitrary
+  soil strength was invented in this lane.
+- **B3:** measured above, unchanged; the owner decides the recoil response.
+- **B2 and B13:** sampling and the protection contract remain untouched, as instructed.
+
+Remaining code-branching P3 work outside the fixes above includes the other pen-cam CPU oracles,
+recorder/delivery dead readers, `SpallCone` pin-only source fields, dev-only runners and switches,
+trace-only state and its FNV copy, and record test helpers. The old `MarchMode::Demo`, fallback
+`Held::age` and perspective-slice switch are absent at this base; their inventory claims are stale.
+The open F2 and axis-rule experiments retain their users.
+
+Final frame-invariant validation: format and workspace/all-target clippy passed. MEASURED: 313
+targeted march, field-law, wire, field-cast, pen-cam, protocol, bake and source-guard tests passed;
+four on-demand instruments stayed ignored. This includes `doc_citations`, `ui_ascii`,
+`net_boundary` and `bake::`. No field-cast pin or wire definition changed.

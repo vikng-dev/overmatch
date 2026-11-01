@@ -680,7 +680,12 @@ impl Spread {
         let y = z.cross(x);
         self.strata.iter().map(move |stratum| {
             let local = z * stratum.mu + x * stratum.lateral.0 + y * stratum.lateral.1;
-            (Dir3::new(local).unwrap_or(axis), stratum.weight)
+            (
+                Dir3::new(local).expect(
+                    "validated strata and an orthonormal field frame produce a finite nonzero direction",
+                ),
+                stratum.weight,
+            )
         })
     }
 
@@ -746,6 +751,15 @@ mod tests {
         shape(directions)
             .spread(FieldDescriptor::ball(ratio))
             .unwrap()
+    }
+
+    /// The game's damage-model field may not replace a broken internal frame with an axial ray:
+    /// field reach and dose depend on every derived direction retaining its stratum.
+    #[test]
+    #[should_panic(expected = "validated strata and an orthonormal field frame")]
+    fn a_broken_field_frame_is_an_invariant_failure() {
+        let spread = spread(24, 0.5); // FIXTURE DATA: a valid shape and field descriptor.
+        let _ = spread.directions_about(Dir3::Z, Vec3::NAN).next();
     }
 
     fn weights(spread: &Spread) -> Vec<f64> {

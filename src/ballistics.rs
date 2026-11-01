@@ -1988,12 +1988,8 @@ fn on_fire_shell(
             fuze: burst::Fuze::of(fire.burst),
             // From the BORE, not from the post-catch-up travel direction: a shell reconstructed with
             // catch-up must anchor its ring exactly where the locally fired one did.
-            disc: walk::DiscFrame::anchored(Vec3::from(fire.direction)).unwrap_or(
-                walk::DiscFrame {
-                    u: Vec3::X,
-                    v: Vec3::Y,
-                },
-            ),
+            disc: walk::DiscFrame::anchored(Vec3::from(fire.direction))
+                .expect("a checked fire bore anchors a finite sampling frame"),
             axis: None,
             playback: Default::default(),
             path_sequence: 0,
