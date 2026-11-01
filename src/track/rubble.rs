@@ -6,9 +6,16 @@
 //! at the ground's own per-metre spring, and [`piece_impulses`] sizes what a loose piece takes
 //! back in the same tick.
 //!
-//! - **What counts as rubble**: a collider carrying [`BuildingElement`] or [`BuildingChunk`] (on a
-//!   static building root), or any collider of a [`DebrisPiece`] body. Terrain colliders, trees and
-//!   vehicle colliders are not: the field already holds the ground, and a hull is no ground.
+//! - **What the belt bears on** ([`RubbleQuery::supports`]): a solid collider (no [`Sensor`])
+//!   whose collision layers meet the hull's own contact class ([`belt_layers`]). A dynamic body
+//!   qualifies by that physics alone, and [`RubbleBodies::gather`] keeps it only where the caller's
+//!   piece query can write its reaction: the querying hull is outside that query, and so is every
+//!   tank in the game, whose reaction needs a tick-start snapshot and staged writes this adapter
+//!   does not have. A static or kinematic collider still qualifies only as a building's
+//!   [`BuildingElement`] or [`BuildingChunk`]: a static body takes none of the belt's reaction, and
+//!   a structure law reads its load from the solver's transfers alone, so an admitted standing
+//!   trunk would become a climbable obstacle no tank fells. The terrain field holds the ground and
+//!   the authored blocks, which are no building.
 //! - **The footprint check**: a link's slab ([`Slab`]) is the volume its field probes sweep, made
 //!   solid across the true shoe width: along the link, between its measured faces, and from the
 //!   probes' origin out to the contact envelope. A piece's extent in it is six support points of
@@ -55,27 +62,34 @@
 //!   belt twice (the field holds the tank, colliders push pieces) and push without limit.
 
 use avian3d::prelude::{
-    Collider, ColliderAabb, ColliderOf, ComputedAngularInertia, ComputedCenterOfMass, ComputedMass,
-    DefaultFriction, Forces, Friction, Position, ReadRigidBodyForces, RigidBody, Rotation,
-    SpatialQuery, WriteRigidBodyForces,
+    Collider, ColliderAabb, ColliderOf, CollisionLayers, ComputedAngularInertia,
+    ComputedCenterOfMass, ComputedMass, DefaultFriction, Forces, Friction, LayerMask, Position,
+    ReadRigidBodyForces, RigidBody, Rotation, Sensor, SpatialQuery, WriteRigidBodyForces,
 };
 use bevy::ecs::query::QueryFilter;
 use bevy::ecs::system::SystemParam;
 use bevy::prelude::*;
 
+use crate::Layer;
 use crate::buildings::BuildingElement;
 use crate::buildings::breakage::BuildingChunk;
-use crate::debris::DebrisPiece;
 
 use super::forces::BeltContact;
 
-/// The spatial query, the markers that say which colliders are rubble, their shapes and friction.
+/// The contact class the belt bears with: the hull's own collision proxies'. A collider whose
+/// filters exclude the hull (a tank's armour and crew volumes) is no surface for the belt either.
+pub(crate) fn belt_layers() -> CollisionLayers {
+    CollisionLayers::new([Layer::Vehicle], LayerMask::ALL)
+}
+
+/// The spatial query, what makes a collider a surface the belt bears on, its shape and friction.
 #[derive(SystemParam)]
 pub(crate) struct RubbleQuery<'w, 's> {
     spatial: SpatialQuery<'w, 's>,
     built: Query<'w, 's, (), Or<(With<BuildingElement>, With<BuildingChunk>)>>,
     collider_of: Query<'w, 's, &'static ColliderOf>,
-    pieces: Query<'w, 's, (), With<DebrisPiece>>,
+    sensors: Query<'w, 's, (), With<Sensor>>,
+    layers: Query<'w, 's, &'static CollisionLayers>,
     rigid_bodies: Query<'w, 's, &'static RigidBody>,
     shapes: Query<
         'w,
@@ -92,23 +106,31 @@ pub(crate) struct RubbleQuery<'w, 's> {
 }
 
 impl RubbleQuery<'_, '_> {
-    /// Whether `collider` is rubble (module doc).
-    fn is_rubble(&self, collider: Entity) -> bool {
-        self.built.contains(collider)
-            || self
-                .collider_of
-                .get(collider)
-                .is_ok_and(|of| self.pieces.contains(of.body))
+    /// Whether `collider` is a surface the belt bears on (module doc). A collider with no rigid
+    /// body is static to the solver, and is read as one here.
+    pub(crate) fn supports(&self, collider: Entity) -> bool {
+        let layers = self
+            .layers
+            .get(collider)
+            .expect("avian requires CollisionLayers on every Collider");
+        if self.sensors.contains(collider) || !layers.interacts_with(belt_layers()) {
+            return false;
+        }
+        let dynamic = self
+            .rigid_bodies
+            .get(self.body_of(collider))
+            .is_ok_and(RigidBody::is_dynamic);
+        dynamic || self.built.contains(collider)
     }
 
-    /// The rubble colliders meeting the AABB of half-extent `radius` about `center`, ascending
+    /// The support colliders meeting the AABB of half-extent `radius` about `center`, ascending
     /// by entity, so their contacts and the force sums over them keep one order.
     pub(crate) fn near(&self, center: Vec3, radius: f32) -> Vec<Entity> {
         let mut near = Vec::new();
         self.spatial.aabb_intersections_with_aabb_callback(
             ColliderAabb::new(center, Vec3::splat(radius)),
             |collider| {
-                if self.is_rubble(collider) {
+                if self.supports(collider) {
                     near.push(collider);
                 }
                 true
@@ -359,7 +381,9 @@ pub struct RubbleBodies {
 }
 
 impl RubbleBodies {
-    /// Read the `near` colliders' shapes, frictions and bodies.
+    /// Read the `near` colliders' shapes, frictions and bodies. `bodies` is the caller's set of
+    /// dynamic bodies whose reaction it writes; a dynamic body outside it (the querying hull, and
+    /// in the game every tank) supports nothing here.
     pub(crate) fn gather<F: QueryFilter>(
         rubble: &RubbleQuery,
         near: &[Entity],
@@ -368,15 +392,16 @@ impl RubbleBodies {
         let mut out = Self::default();
         for &collider in near {
             let body = rubble.body_of(collider);
-            let mut slot = out.bodies.iter().position(|b| b.entity == body);
-            let rigid_body = rubble
+            let dynamic = rubble
                 .rigid_bodies
                 .get(body)
-                .expect("a gathered building or loose-piece collider belongs to a rigid body");
-            if slot.is_none() && *rigid_body == RigidBody::Dynamic {
-                let (forces, _, mass, inertia, com) = bodies
-                    .get(body)
-                    .expect("a dynamic rubble body carries its computed mass and force state");
+                .is_ok_and(RigidBody::is_dynamic);
+            let mut slot = out.bodies.iter().position(|b| b.entity == body);
+            if slot.is_none() && dynamic {
+                let Ok((forces, _, mass, inertia, com)) = bodies.get(body) else {
+                    // A body whose reaction this caller cannot write: its own hull, another tank.
+                    continue;
+                };
                 let rotation = forces.rotation().0;
                 out.bodies.push(PieceBody {
                     entity: body,
@@ -626,7 +651,6 @@ mod tests {
     fn piece_box(app: &mut App, at: Vec3, size: Vec3) -> Entity {
         app.world_mut()
             .spawn((
-                DebrisPiece,
                 Position(at),
                 Rotation::default(),
                 RigidBody::Dynamic,
@@ -671,6 +695,42 @@ mod tests {
             Quat::IDENTITY,
             Vec3::new(200.0, 1.0, 200.0),
         )])
+    }
+
+    /// A DYNAMIC BODY SUPPORTS THE BELT BY ITS PHYSICS, NEVER BY WHAT IT IS. An unmarked loose
+    /// body is a surface; a sensor, a collider whose filters exclude the hull (an armour volume's)
+    /// and a body outside the caller's writable piece query (its own hull) are not. A mutant that
+    /// restores a marker gate, drops the layer or sensor test, or lets the querying hull bear on
+    /// itself fails here. FIXTURE DATA: four 1 m boxes about the origin.
+    #[test]
+    fn a_dynamic_body_supports_by_its_physics_and_the_querying_hull_never_does() {
+        #[derive(Component)]
+        struct Own;
+        let mut app = physics();
+        let size = Vec3::ONE;
+        let plain = piece_box(&mut app, Vec3::new(-1.5, 0.5, 0.0), size);
+        let sensor = piece_box(&mut app, Vec3::new(1.5, 0.5, 0.0), size);
+        app.world_mut().entity_mut(sensor).insert(Sensor);
+        let volume = piece_box(&mut app, Vec3::new(0.0, 0.5, 1.5), size);
+        app.world_mut()
+            .entity_mut(volume)
+            .insert(CollisionLayers::new([Layer::Armor], LayerMask::NONE));
+        let own = piece_box(&mut app, Vec3::new(0.0, 0.5, -1.5), size);
+        app.world_mut().entity_mut(own).insert(Own);
+        app.update();
+        app.world_mut()
+            .run_system_once(
+                move |rubble: RubbleQuery, bodies: Query<PieceData, Without<Own>>| {
+                    let near = rubble.near(Vec3::ZERO, 4.0);
+                    assert!(near.contains(&plain) && near.contains(&own));
+                    assert!(!near.contains(&sensor) && !near.contains(&volume));
+                    let pieces = RubbleBodies::gather(&rubble, &near, &bodies);
+                    let gathered: Vec<_> = pieces.surfaces.iter().map(|s| s.collider).collect();
+                    assert_eq!(gathered, vec![plain]);
+                    assert!(pieces.is_dynamic(plain));
+                },
+            )
+            .unwrap();
     }
 
     /// STATIC CONSTRUCTION IS A SUPPORT SURFACE TOO, AND EMPTY CONVEX CORNERS ARE NOT.
