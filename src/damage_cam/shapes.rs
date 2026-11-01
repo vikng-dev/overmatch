@@ -175,9 +175,17 @@ impl HardBodies {
         }
     }
 
+    /// The bodies' mesh; `None` only for a tank with no hard body, which stops no direction.
     fn mesh(&self) -> Option<&TriMesh> {
         self.mesh
-            .get_or_init(|| TriMesh::new(self.vertices.clone(), self.triangles.clone()).ok())
+            .get_or_init(|| {
+                (!self.triangles.is_empty()).then(|| {
+                    TriMesh::new(self.vertices.clone(), self.triangles.clone()).expect(
+                        "the game's damage-model view: certified hard bodies (closed outward \
+                         shells over in-range indices) build a triangle mesh",
+                    )
+                })
+            })
             .as_ref()
     }
 

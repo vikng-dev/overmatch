@@ -15,27 +15,21 @@ use crate::track::transmission::{TransmissionProjectionValue, transmission_state
 /// deliberately: its algorithm is fixed here (not a std-version-dependent SipHash seed), so a hash is
 /// reproducible across builds and trivially re-derivable by an offline tool, and it is fed only the
 /// f32 bits we hand it — the world-independence guarantee lives in WHAT we write, and this type keeps
-/// the HOW dependency-free and testable.
+/// the HOW dependency-free and testable. A streaming front on the crate's one FNV-1a
+/// ([`crate::fingerprint::fnv1a_64`]), fed little-endian bytes.
 struct Fnv64(u64);
 
 impl Fnv64 {
-    const OFFSET: u64 = 0xcbf2_9ce4_8422_2325;
-    const PRIME: u64 = 0x0000_0100_0000_01b3;
-
     fn new() -> Self {
-        Self(Self::OFFSET)
+        Self(crate::fingerprint::FNV_OFFSET_BASIS)
     }
 
     fn write_u32(&mut self, x: u32) {
-        for b in x.to_le_bytes() {
-            self.0 ^= u64::from(b);
-            self.0 = self.0.wrapping_mul(Self::PRIME);
-        }
+        self.0 = crate::fingerprint::fnv1a_64(self.0, &x.to_le_bytes());
     }
 
     fn write_u8(&mut self, x: u8) {
-        self.0 ^= u64::from(x);
-        self.0 = self.0.wrapping_mul(Self::PRIME);
+        self.0 = crate::fingerprint::fnv1a_64(self.0, &[x]);
     }
 
     fn write_i8(&mut self, x: i8) {
@@ -47,10 +41,7 @@ impl Fnv64 {
     }
 
     fn write_u64(&mut self, x: u64) {
-        for b in x.to_le_bytes() {
-            self.0 ^= u64::from(b);
-            self.0 = self.0.wrapping_mul(Self::PRIME);
-        }
+        self.0 = crate::fingerprint::fnv1a_64(self.0, &x.to_le_bytes());
     }
 
     /// Hash the f32's RAW BITS — bit-exactness is the divergence bar, so `1.0` and the next
@@ -505,6 +496,22 @@ mod tests {
     use super::*;
     use crate::tank::WeaponState;
     use crate::track::transmission::SchedulerState;
+
+    /// The streaming hasher is FNV-1a 64 over little-endian bytes, so an offline tool re-derives
+    /// every trace hash: the published vector for `"a"` (0xaf63dc4c8601ec8c) and a u32 fed as its
+    /// four bytes in order. A mutant byte order or seed breaks the offline join.
+    #[test]
+    fn the_trace_hasher_is_reference_fnv1a() {
+        let mut one = Fnv64::new();
+        one.write_u8(b'a');
+        assert_eq!(one.0, 0xaf63_dc4c_8601_ec8c);
+        let (mut word, mut bytes) = (Fnv64::new(), Fnv64::new());
+        word.write_u32(0x0403_0201);
+        for b in [1, 2, 3, 4] {
+            bytes.write_u8(b);
+        }
+        assert_eq!(word.0, bytes.0);
+    }
 
     /// A representative, non-trivial sim state (every `Vec` populated, one side anchored and
     /// one released, non-default drive) so the canonicalization is exercised over every
