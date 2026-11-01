@@ -32,14 +32,13 @@ pub(crate) fn attach_replicated_rig(
             Without<RigidBody>,
         ),
     >,
-    assets: Option<Res<PendingTankAssets>>,
+    assets: Res<PendingTankAssets>,
     source: TankSimSource,
     mut commands: Commands,
 ) {
     if tanks.is_empty() {
         return;
     }
-    let Some(assets) = assets else { return };
     let Some(content) = source.get() else {
         return;
     };

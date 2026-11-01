@@ -10,6 +10,7 @@ use std::io;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr, ToSocketAddrs};
 
 use bevy::app::ScheduleRunnerPlugin;
+use bevy::ecs::query::QuerySingleError;
 use bevy::ecs::system::SystemParam;
 use bevy::prelude::*;
 use bevy::window::PrimaryWindow;
@@ -830,7 +831,7 @@ const MISMATCH_HINT_AFTER_ATTEMPTS: u32 = 3;
 ///     reuses the source socket. The client_id stays the session-stable one.
 fn drive_connection(
     real: Res<Time<Real>>,
-    assets: Option<Res<PendingTankAssets>>,
+    assets: Res<PendingTankAssets>,
     asset_server: Res<AssetServer>,
     client: Query<
         (
@@ -845,8 +846,15 @@ fn drive_connection(
     mut retry: ResMut<ConnectRetry>,
     mut commands: Commands,
 ) {
-    let Ok((entity, connected, connecting, disconnected, netcode)) = client.single() else {
-        return;
+    let (entity, connected, connecting, disconnected, netcode) = match client.single() {
+        Ok(link) => link,
+        // No link to drive: the Join menu before a ticket, or the one link is being left.
+        Err(QuerySingleError::NoEntities(_)) => return,
+        Err(error @ QuerySingleError::MultipleEntities(_)) => {
+            panic!(
+                "at most one client link exists (`spawn_matched_link` refuses a second): {error}"
+            )
+        }
     };
 
     if let Some(reason) = netcode.inner.denied_reason() {
@@ -871,7 +879,6 @@ fn drive_connection(
     }
 
     if !retry.initiated {
-        let Some(assets) = assets else { return };
         if !assets.loaded(&asset_server) {
             return;
         }
@@ -928,6 +935,12 @@ fn drive_connection(
 /// A headless adapter for the real refusal reader and its rendered joining label.
 #[cfg(test)]
 pub(super) fn mount_refusal_probe(app: &mut App) {
+    // The probe starts initiated, so the asset gate is never read: an unloaded handle stands in.
+    app.insert_resource(PendingTankAssets {
+        spec: Handle::default(),
+        scene: None,
+        effects: Vec::new(),
+    });
     app.init_resource::<ConnectRetry>()
         .add_systems(Update, (drive_connection, update_joining_screen).chain());
     app.world_mut().resource_mut::<ConnectRetry>().initiated = true;
@@ -1099,7 +1112,16 @@ fn close_lost_match(
     let Some(verdict) = close_verdict(&retry, gone) else {
         return;
     };
-    let Ok(link) = links.single() else { return };
+    let link = match links.single() {
+        Ok(link) => link,
+        // Nothing left to close: the link is already being left (`Leaving`) or gone.
+        Err(QuerySingleError::NoEntities(_)) => return,
+        Err(error @ QuerySingleError::MultipleEntities(_)) => {
+            panic!(
+                "at most one client link exists (`spawn_matched_link` refuses a second): {error}"
+            )
+        }
+    };
     warn!(
         "client: closing the match link after {} attempts: {verdict:?}",
         retry.attempts
@@ -1350,7 +1372,7 @@ pub(super) struct InputBufferGuardMetrics {
 
 /// Mount the input-buffer safety boundary for every composition that installs `ClientPlugins` and
 /// can attach an [`InputMarker`]. It must precede `PrepareInputMessage` in the same `PostUpdate` and
-/// relies on the production invariant of exactly one client connection per [`App`].
+/// relies on the production invariant of at most one client connection per [`App`].
 pub(super) fn install_input_buffer_guard(app: &mut App) {
     app.init_resource::<InputBufferGuardMetrics>().add_systems(
         PostUpdate,
@@ -1383,38 +1405,30 @@ fn drop_stranded_input_buffer(
 ) {
     // There is no encoder work, and therefore no range-wrap risk, before an input buffer exists.
     // Checking this first also leaves startup/teardown alone when no locally controlled tank is
-    // present. Once a buffer exists, one client connection is the invariant that makes the global
-    // input timeline's delayed encoder tick meaningful.
+    // present.
     if buffers.is_empty() {
         return;
     }
     let client = match sender.single() {
         Ok(client) => client,
-        Err(error) => {
-            let mut cleared = 0_u64;
-            for mut buffer in &mut buffers {
-                if buffer.start_tick.is_some()
-                    || !buffer.is_empty()
-                    || buffer.last_remote_tick.is_some()
-                {
-                    cleared += 1;
-                }
-                *buffer = NativeBuffer::default();
+        // No link: an empty buffer holds no range for the encoder to invert. A buffer holding one
+        // has outlived its link, which cannot happen: the production buffer rides the own replica
+        // (`claim_input_slot`), and lightyear 0.30.1 despawns every non-persistent replica in the
+        // flush that removes the link's `Connected` (`on_replication_disconnect`).
+        Err(QuerySingleError::NoEntities(_)) => {
+            for buffer in &buffers {
+                assert!(
+                    buffer.start_tick.is_none()
+                        && buffer.is_empty()
+                        && buffer.last_remote_tick.is_none(),
+                    "an input buffer holding a range outlived its client link: lightyear despawns \
+                     the own replica with the link's `Connected`"
+                );
             }
-            if cleared == 0 {
-                return;
-            }
-            metrics.cleared += cleared;
-            error!(
-                ?error,
-                cleared,
-                "client: input-buffer guard cleared marked buffers because it requires exactly one Client"
-            );
-            debug_assert!(
-                false,
-                "input-buffer guard requires exactly one Client while a local input buffer exists: {error:?}"
-            );
             return;
+        }
+        Err(error @ QuerySingleError::MultipleEntities(_)) => {
+            panic!("one client connection per App (`spawn_matched_link` refuses a second): {error}")
         }
     };
     let delayed_tick = timeline.tick() + sync.input_delay() as i32;
@@ -1442,8 +1456,13 @@ fn log_local_tank_role(
     if *logged {
         return;
     }
-    let Ok(entity) = tank.single() else {
-        return;
+    let entity = match tank.single() {
+        Ok(entity) => entity,
+        // No own tank yet: before the first spawn.
+        Err(QuerySingleError::NoEntities(_)) => return,
+        Err(error @ QuerySingleError::MultipleEntities(_)) => {
+            panic!("a client controls at most one tank (the server grants one input slot): {error}")
+        }
     };
     *logged = true;
     info!("client: own tank {entity} drives INTERPOLATED (server stream)");
@@ -2313,9 +2332,10 @@ fn fire_catch_up_ticks(fire: Tick, now: Tick) -> Option<u32> {
 /// Public fire facts reach the shooter too: under fused own fire the echo carries the own barrel
 /// kick through this same queue (the local fire tick applied none).
 ///
-/// Skips silently on a missing tank, a slot with no matching muzzle, an out-of-range slot, or a
-/// recoil-less weapon (a coax) — a replica may not have finished spawning its rig, exactly as the
-/// `FireEvent` direction guard tolerates a bad bore.
+/// A kick is enqueued only for a shot bound against the shooter's assembled rig (or its own
+/// recovered round), so a missing muzzle or root here is the shooter despawned between the
+/// render-rate enqueue and this tick (knocked out and removed, or its link ended): skipped.
+/// `kick_recoil` owns the rest (a recoil-less weapon such as a coax).
 fn apply_pending_recoil_kicks(
     mut pending: ResMut<PendingRecoilKicks>,
     muzzles: Query<(&WeaponIndex, &Weapon, &TankRoot), With<Muzzle>>,
@@ -2324,7 +2344,7 @@ fn apply_pending_recoil_kicks(
     for (shooter, slot) in pending.0.drain(..) {
         // Find the firing weapon on THIS machine's local rig, keyed by the slot; `kick_recoil` owns
         // the rest of the decision (barrel + recoil present, slot valid) so it can't diverge from
-        // `shooting::fire`. A missing muzzle is a rig still spawning — skip.
+        // `shooting::fire`. A missing muzzle is a shooter despawned since the enqueue — skip.
         let Some((_, weapon, _)) = muzzles
             .iter()
             .find(|(index, _, root)| root.0 == shooter && index.0 == slot)
@@ -2363,7 +2383,9 @@ pub(super) fn install_device_feed(app: &mut App) {
 /// instead of holding the last input, and clicks in the menu don't fire.
 fn feed_action_state(
     overlays: Res<crate::overlay::Overlays>,
-    window: Single<&Window, With<PrimaryWindow>>,
+    // `None` only once the primary window has closed with the app's exit (`PrimaryWindow` is
+    // unique by Bevy's construction): nothing has focus, so every slot files the idle command.
+    window: Option<Single<&Window, With<PrimaryWindow>>>,
     mut device: ResMut<DeviceCommand>,
     mut slots: Query<
         (&mut ActionState<TankCommand>, Has<GameControlled>),
@@ -2377,7 +2399,8 @@ fn feed_action_state(
     // derivation also releases the cursor, every system that could latch anything into the command
     // (drive gather, aim commit, respawn request) is already frozen whenever this zeroing is active —
     // no second inference to keep in sync.
-    let idle = crate::overlay::input_blocked(&overlays, window.focused);
+    let focused = window.is_some_and(|window| window.focused);
+    let idle = crate::overlay::input_blocked(&overlays, focused);
     for (mut state, controlled) in &mut slots {
         state.0 = if idle || !controlled {
             TankCommand::default()

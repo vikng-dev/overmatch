@@ -120,7 +120,7 @@ fn plugin(app: &mut App) {
 
 /// Enter gameplay when the current tank view assets are ready.
 fn open_gameplay_gate(
-    assets: Option<Res<PendingTankAssets>>,
+    assets: Res<PendingTankAssets>,
     asset_server: Res<AssetServer>,
     state: Res<State<AppState>>,
     mut next: ResMut<NextState<AppState>>,
@@ -128,7 +128,6 @@ fn open_gameplay_gate(
     if *state.get() != AppState::Loading {
         return;
     }
-    let Some(assets) = assets else { return };
     if assets.loaded(&asset_server) {
         info!("net: tank assets loaded — entering AppState::Playing");
         next.set(AppState::Playing);

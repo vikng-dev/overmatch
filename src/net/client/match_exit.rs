@@ -67,6 +67,13 @@ fn client_app() -> App {
     app.init_asset::<Font>()
         .add_plugins((crate::ui_font::plugin, crate::flow::plugin))
         .insert_state(AppState::Playing);
+    // The tests mark the attempt initiated, so the asset gate is never read: an unloaded handle
+    // stands in for the resource `load_tank_assets` inserts at startup.
+    app.insert_resource(PendingTankAssets {
+        spec: Handle::default(),
+        scene: None,
+        effects: Vec::new(),
+    });
     app.init_resource::<ConnectRetry>()
         .add_systems(Update, drive_connection);
     // A closed local port: the lobby's location fetch fails at once, which no exit depends on.

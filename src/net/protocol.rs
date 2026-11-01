@@ -732,7 +732,8 @@ fn mirror_swap_from_net_crew(
     for (tank, net, volumes, pending) in &mut tanks {
         match net.swap {
             Some((a_station, b_station, remaining)) => {
-                // This tank's own seats, through its volumes; none before its rig is built.
+                // This tank's own seats, through its volumes; none before its rig is built, and
+                // the swap shows once it is.
                 let seat_of = |station: CrewStation| {
                     volumes?
                         .iter()
@@ -793,6 +794,8 @@ fn publish_servo_angles(
                 .and_then(|slot| servos.states.get(slot.0))
                 .map(crate::tank::ServoState::current)
         };
+        // A launched turret has left its servo slot (`launch_turrets_on_cookoff` removes its
+        // `ServoIndex`): no angle to publish, and `LaunchedTurretPose` carries its pose instead.
         let (Some(turret), Some(gun)) = (angle(rig.turret), angle(rig.gun)) else {
             continue;
         };
@@ -817,6 +820,8 @@ fn apply_servo_angles(
     mut servos: Query<&mut ServoCommand>,
 ) {
     for (angles, rig) in &tanks {
+        // A turret without its command is launched (`apply_launched_turret_pose` removed it):
+        // it follows `LaunchedTurretPose`, not these angles.
         if let Ok(mut turret) = servos.get_mut(rig.turret) {
             turret.target = angles.turret;
         }
