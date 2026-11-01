@@ -27,7 +27,7 @@
 //!   binds from the penetrator at spawn ([`crate::ballistics`]'s `Projectile`), synchronously and
 //!   from data alone. A round without the block meets the plate whole.
 //! - `fuze: Some((trigger, modes, default_mode))`: what sets the burst off
-//!   ([`fuze`]). `position` is `Nose` or `Base`. `trigger` is `SpendExit(arming_spend: …)`, the
+//!   ([`fuze`]). `trigger` is `SpendExit(arming_spend: …)`, the
 //!   reference-mm spent in one body and then left, or `Impact(sensitivity_n: …)`, the resisting
 //!   force (N) at contact. `modes` is the ordered list of `(name, delay_s)` the crew picks among,
 //!   `default_mode` the name of the one a round is loaded with. Every value is sourced.

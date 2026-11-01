@@ -588,12 +588,12 @@ builds the state and failed on main.
   shipped loader reads local records today (only the corpus tests), so it had no effect yet.
   `PenetrationReport::load`, the one local gate that resolves the vehicle, now refuses a simulated
   record whose servos differ from its tank file's, naming the servo; synthetic clips keep rest.
-- **Claude P3s, verified, not fixed** (files outside this lane's changes): `shooting::fire`'s
-  replica pose gap skips trigger, readiness and round bookkeeping that fused own fire could still do without
-  the pose (the netcode lane owns the client resync path); `potency`'s test-only `Band::Nothing`
-  colour arm and its assertion guard no shipped value; the `rounds` module doc still names a fuze
-  `position`. The `aim` cardinality P3 was a verification gap, already fixed forward on main by
-  "give the UI ownership app the player view and tank specs a live client has".
+- **Claude P3 dispositions:** the replica firing-pose gap was already fixed by "retain presented
+  samples through interpolation resyncs" before this review range; it is not open. The unused
+  potency colour arm is fixed in "remove the unused pen cam colour arm", and the stale fuze
+  field documentation is fixed in "state the current fuze and firing-pose contracts". The `aim`
+  cardinality P3 was a verification gap, already fixed forward on main by "give the UI ownership
+  app the player view and tank specs a live client has".
 
 The same class, swept: every `assert`/`expect` the reviewed range added on the record and delivery
 path holds by construction against husks, launched turrets, overlapping tanks, a despawned shooter
@@ -681,8 +681,8 @@ rule. The round's simulation and deposits are unchanged.
   not exercise the real launch's retention of `TankRoot`. That was a gap while husk records
   depended on it. New husk encounters no longer query servo angles, so no record depends on
   that launch detail. `ServoPose`, its detached arm, the launch detector and their test arms
-  are deleted; there is no remaining consumer. The physical launched-turret component remains
-  the simulation's, independent of recording.
+  are deleted; there is no remaining consumer. `LaunchedTurret` remains in the physical launch
+  and its presentation/replication, independent of recording.
 
 MEASURED: before the gate, the living-target test failed because a mounted husk produced a
 record. After it, strikes on husks with and without a turret produce no record, the knockout
@@ -722,3 +722,25 @@ MEASURED: the shared 331-test final run included pen-cam, field-cast and headles
 no failures. After the final test-comment correction, format and workspace/all-target clippy
 passed again, and all 43 dedicated whole-tree citation, font, net-boundary and bake guards
 passed. No capture or pricing was run.
+
+
+### Current fuze and firing-pose prose
+
+Subject: the game's damage model and shot records, game state only.
+
+- **R14, P3 (Claude), verified stale report, corrected** in "state the current fuze and
+  firing-pose contracts". `shooting::fire` already reads required `Position` and `Rotation`
+  directly from the weapon root's query, with no replica pose-gap skip. "retain presented samples
+  through interpolation resyncs" fixed the code before the reviewed range. The earlier review's
+  open-P3 line is corrected above; no firing-code change is required.
+- **R16, P3 (Claude's ball-4 review), verified, fixed in the same subject.** `rounds` now documents
+  only the fuze fields its authoring parser declares: trigger, modes and default mode. The
+  obsolete `position`/nose/base sentence is removed.
+
+MEASURED: the final shared run passed 331 targeted damage-cam, recording, pen-cam, field-cast,
+headless, round-data and whole-tree guard tests, with six ignored instruments. Format and
+workspace/all-target clippy passed again after the final source-comment edit; all 43 dedicated
+citation, font, net-boundary and bake guards passed. All verified review findings are closed.
+The full Battle cycle remains the orchestrator's release gate; the capture cannot establish the
+identity of its inside-start collider. No capture, pricing, deployment or push was run, and no
+new owner decision is needed.
