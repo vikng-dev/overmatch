@@ -613,3 +613,25 @@ departure point must be a path point" and the slot/node assert (left 1, right 2)
 MEASURED: 288 damage_cam, pen-cam, recording, shot-explanation, citation and whole-tree guard
 (font, net-boundary, bake) tests passed; four ignored. Every corpus record loads through the new
 servo edge. No capture or pricing.
+
+## Release-gate discovery membership
+
+Subject: the game's damage model and shot records, game state only. Fixed in "resolve material
+holding a discovery start". The release capture reports discovery inside one certified shell;
+it records neither that collider's name/owner nor the round's pose or pending playback. The last
+knockout and pictured detached turret do not identify the shell. Its exact identity and route
+into membership therefore remain unestablished by the retained evidence.
+
+The outside-start invariant is false by construction: a new body's birth geometry can contain
+an already flying round; another body can also move over a path while its previously frozen
+crossing plays. Discovery now reads initial membership from the same certified crossing stream
+as later entries, contacts held material immediately, and seeds the ordinary material walk in
+that contact scene. No body is excluded and no round is dropped. Relative rest retains its
+heading; an exhausted discovery interval still gives a finite immediate contact.
+
+MEASURED: `a_body_born_around_an_in_flight_round_resolves_its_material` failed before the fix
+with the capture's "discovery starts outside every collider" panic. It now requires the new
+body's actual material crossing. The shallow-start and exhausted-boundary checks also pass.
+Format and workspace/all-target clippy passed. MEASURED: the targeted motion, recording,
+pen-cam, field-cast, headless and citation run passed with 90 tests and five ignored instruments.
+No capture or pricing was run; the full Battle cycle remains for the orchestrator's release gate.

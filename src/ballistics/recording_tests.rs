@@ -1784,8 +1784,8 @@ fn a_third_body_arriving_at_contact_uses_the_same_sampled_scene() {
 /// read at the muzzle. A muzzle inside a foreign body (MEASURED in a 30-bot run: tanks pressed
 /// together, one gun's muzzle in the other's turret side) starts the round in that body's
 /// material, and the walk carries it out as a crossing of that body; the server relies on this not
-/// being read as a broken walk. A swept start inside a collider remains a bug (`motion`'s
-/// `discovery_refuses_a_shallow_inside_start`). Mutant: laying the birth disc as swept panics.
+/// being read as a broken walk. The same material law handles a body born around a round already
+/// in flight. Mutant: omitting birth membership loses the first material chord.
 #[test]
 fn a_round_born_inside_a_foreign_body_starts_in_its_material() {
     let mut app = recording_world(false);
@@ -2092,4 +2092,41 @@ fn production_discovery_exports_a_valid_clock_before_crossing_playback_finishes(
     assert_eq!(decoded.validate(), Ok(()));
     assert_eq!(decoded.seconds(), path.seconds());
     assert_eq!(decoded.resume, path.resume);
+}
+
+/// The game's damage model: a collider born around an in-flight round owns material at its
+/// birth boundary. Respawn geometry can create this state without any missed surface; the
+/// authority must resolve its remaining chord. All dimensions and speeds are fixture data.
+#[test]
+fn a_body_born_around_an_in_flight_round_resolves_its_material() {
+    let mut app = recording_world(false);
+    app.insert_resource(RetainSpentShells(true));
+    settle(&mut app);
+    fire(&mut app, Vec3::new(0.0, 20.0, 30.0), FireMechanism::Single);
+    app.update();
+    let mut shells = app
+        .world_mut()
+        .query_filtered::<&Transform, With<Projectile>>();
+    let at = shells.single(app.world()).unwrap().translation;
+    let (_, plates) = tank(
+        &mut app,
+        at,
+        0.0,
+        Vec3::ZERO,
+        &[(
+            "new solid",
+            Vec3::new(2.0, 2.0, 0.1),
+            Vec3::ZERO,
+            Kind::Plate,
+        )],
+    );
+    run(&mut app, 3);
+    let mut logs = app.world_mut().query::<&PenetrationMarks>();
+    assert!(
+        logs.iter(app.world())
+            .flat_map(|marks| &marks.log)
+            .any(|mark| matches!(mark,
+        ArmourMark::Crossing { volumes, .. } if volumes.iter().any(|v| v.volume == plates[0]))),
+        "the new body's material is crossed, never skipped"
+    );
 }

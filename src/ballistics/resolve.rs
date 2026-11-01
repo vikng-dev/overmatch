@@ -170,8 +170,8 @@ pub(crate) fn disc_radius(caliber: f32) -> f32 {
 /// `seeds[i].inside` is what that ray's walk says the sample is inside there. A fresh disc
 /// placed at birth, after a catch-up or after a bounce has no swept membership:
 /// [`Flight::born`] and [`Flight::settle`] read it with [`certified`]. A disc laid on an
-/// axis start a sweep reached uses [`Interior::laid`]; relative discovery panics if that
-/// swept start is inside a collider. Offsets are whatever the rays left
+/// axis start a sweep reached uses [`Interior::laid`]; relative discovery reads material newly
+/// holding that start at its next scene boundary. Offsets are whatever the rays left
 /// behind — staggered along an oblique plate after a perforation, tilted against the travel after a
 /// bend — and are never re-squared, rotated or flattened: any of those moves a start off the ray
 /// that certified it.
@@ -196,7 +196,7 @@ pub(crate) struct Interior {
 
 impl Interior {
     /// A layout at `position` with every sample outside everything — true only where no armour is
-    /// near the samples. Relative discovery verifies fresh starts; [`certified`] reads
+    /// near the samples. Relative discovery reads material newly holding a start; [`certified`] reads
     /// contact-time membership in the frozen scene.
     pub(crate) fn laid(position: Vec3, offsets: Vec<Vec3>) -> Self {
         Self {
@@ -964,8 +964,8 @@ pub(crate) struct Flight {
 
 impl Flight {
     /// The game's damage model: a new discovery disc on the axis start the last sweep reached,
-    /// outside material by the walk law. Its sweep verifies that invariant; no tick-start
-    /// containment probe supplies membership. A disc no sweep has reached is placed through
+    /// outside material in the previous scene. Discovery contacts any material newly holding
+    /// it in the current scene and seeds the ordinary walk. A disc no sweep has reached is placed through
     /// [`Self::born`] instead.
     pub(crate) fn launched(
         swept: Dir3,

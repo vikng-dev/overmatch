@@ -987,14 +987,22 @@ fn canonical_crossings(order: &[&FaceHit]) -> Vec<Crossing> {
         .collect()
 }
 
-/// The game's damage model: first entry from an outside discovery start. Every candidate is
-/// collected through its far bound, so an initial exit proves an invalid inside start even when
-/// that exit lies beyond this tick's movement. Tangent feature fans own no boundary.
+/// The game's damage model: the first material a discovery chord meets. Geometry can be born
+/// around the start, or move over it while an earlier frozen crossing plays. Such membership
+/// contacts immediately; it is resolved by the ordinary seeded material walk.
+pub(super) struct DiscoveryContact {
+    pub distance: f64,
+    pub normal: Vec3,
+    pub contained: bool,
+}
+
+/// The game's damage model: read both initial membership and later entries from the same
+/// certified crossing stream. Tangent feature fans own no boundary.
 pub(super) fn discovery_entry(
     hits: &[FaceHit],
     start: f64,
     boundary_band: f64,
-) -> Option<(f64, Vec3)> {
+) -> Option<DiscoveryContact> {
     let order: Vec<&FaceHit> = hits.iter().collect();
     let mut crossings = canonical_crossings(&order);
     crossings.sort_by(|a, b| {
@@ -1015,20 +1023,36 @@ pub(super) fn discovery_entry(
     }
     // The game's damage model uses the same topological boundary band as the crossing
     // handoff. A represented point on a face can round just behind it; that face is contact,
-    // not interior. Deeper membership remains a bug, including a shallow convex start.
+    // not interior. Deeper membership is material held at this discovery boundary.
     inside.retain(|key| {
         !crossings
             .iter()
             .any(|crossing| crossing.key == *key && (crossing.t - start).abs() <= boundary_band)
     });
-    assert!(
-        inside.is_empty(),
-        "game's damage model: discovery starts outside every collider; starts inside {inside:?}"
-    );
+    if !inside.is_empty() {
+        let entry = crossings
+            .iter()
+            .rev()
+            .find(|crossing| {
+                crossing.t < start && crossing.sign > 0 && inside.contains(&crossing.key)
+            })
+            .expect(
+                "game's damage model: initial membership has an entering boundary behind the start",
+            );
+        return Some(DiscoveryContact {
+            distance: 0.0,
+            normal: entry.normal,
+            contained: true,
+        });
+    }
     crossings
         .iter()
         .find(|crossing| crossing.t >= start - boundary_band && crossing.sign > 0)
-        .map(|crossing| ((crossing.t - start).max(0.0), crossing.normal))
+        .map(|crossing| DiscoveryContact {
+            distance: (crossing.t - start).max(0.0),
+            normal: crossing.normal,
+            contained: false,
+        })
 }
 
 /// The game's damage model: the last real exit of a body's sample ray, excluding tangent fans.

@@ -896,7 +896,9 @@ fn cast_disc_segment(
                         origin + offset,
                         origin + offset + dir * max,
                     );
-                    let (mut contact, hit) = if poses.from == poses.to {
+                    let (mut contact, hit) = if poses.from == poses.to
+                        && !swept.as_ref().is_some_and(|(motion, _)| motion.contained)
+                    {
                         if max == 0.0 {
                             continue;
                         } // A stationary point has no static entering face.
@@ -915,6 +917,7 @@ fn cast_disc_segment(
                                 fraction: sweep.from + (sweep.to - sweep.from) * distance / max,
                                 point: origin + offset + dir * distance,
                                 velocity: Vec3::ZERO,
+                                contained: false,
                             },
                             avian3d::prelude::RayHitData {
                                 entity,
@@ -926,7 +929,11 @@ fn cast_disc_segment(
                         let Some((contact, normal)) = swept else {
                             continue;
                         };
-                        let part = (contact.fraction - sweep.from) / (sweep.to - sweep.from);
+                        let part = if contact.contained {
+                            0.0
+                        } else {
+                            (contact.fraction - sweep.from) / (sweep.to - sweep.from)
+                        };
                         (
                             contact,
                             avian3d::prelude::RayHitData {
@@ -1265,7 +1272,7 @@ pub(crate) struct Projectile {
     /// Where the axis sample stands as the last step ended ([`resolve::AxisStart`]): a position
     /// held as anchor plus offset, so open flight never re-rounds it at world spacing. Discovery
     /// lays a fresh disc only when no immutable playback remains, outside resolved material,
-    /// and discovery verifies its outside start.
+    /// and discovery reads any material newly holding its start.
     ///
     /// `None` at spawn: authority discovery lays its birth disc at the shell's translation.
     /// Replicas carry no discovery axis.
@@ -2814,7 +2821,7 @@ fn march_shell_step(
         let mut carrier = Vec3::ZERO;
         if let Some(moving) = moving {
             world.moment.set(Some(moving.fraction));
-            if world.motion_padding() > 0.0 {
+            if world.motion_padding() > 0.0 || moving.contained {
                 let leg = resolve::Leg::new(origin, dir, contact, &flight.sample_offsets(radius));
                 damage_dealt += wound_legs(shell, &context, &not_own, &[leg], flight.speed, health);
                 // The game's damage model clocks contact by fraction even when world speed
@@ -2824,9 +2831,15 @@ fn march_shell_step(
                 carrier = moving.velocity;
                 let offsets = flight.sample_offsets(radius);
                 let relative = flight.direction * flight.speed - carrier;
-                let direction = Dir3::new(relative).expect(
-                    "game's damage model: an entering relative sweep has nonzero relative velocity",
-                );
+                // The game's damage model retains heading at relative rest: material may be
+                // born around a round sharing its carrier velocity, with no new entering face.
+                let direction = if relative == Vec3::ZERO {
+                    flight.direction
+                } else {
+                    Dir3::new(relative).expect(
+                        "game's damage model: posed collider motion and flight give finite relative velocity",
+                    )
+                };
                 flight.frame = flight.frame.transport(*flight.direction, *direction);
                 flight.direction = direction;
                 flight.speed = relative.length();
@@ -2835,7 +2848,7 @@ fn march_shell_step(
                 shell.projectile.fuze.at_speed(flight.speed);
                 flight.position = moving.point;
                 // The game's damage model admits simultaneous geometry in the one frozen
-                // contact scene. This is contact-time membership, never tick-start discovery.
+                // contact scene, including material already holding the discovery start.
                 flight.continuation = Some(
                     resolve::certified_samples(
                         &context,
@@ -2967,7 +2980,8 @@ fn publish_path_state(
 }
 
 /// The game's damage model: the step's discovery disc. One laid on an axis start a sweep reached is
-/// outside by the walk law, and discovery panics on an inside start. One no sweep has reached is
+/// certified in the previous scene. Geometry born or moved over it contacts immediately in the
+/// new scene and seeds the same material walk. One no sweep has reached is
 /// placed, not moved, into the scene: a round's birth at the muzzle, a catch-up's end, a bounce
 /// lift the last tick ended on. Its membership is read where it stands ([`resolve::Flight::born`]),
 /// so a muzzle inside a foreign body starts the round inside that body's material (MEASURED in a

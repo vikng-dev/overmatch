@@ -236,6 +236,8 @@ pub(super) struct ContactMotion {
     pub fraction: f32,
     pub point: Vec3,
     pub velocity: Vec3,
+    /// Material already holds the start; contact-time membership must seed its remaining chord.
+    pub contained: bool,
 }
 
 /// The game's damage model: one collider's local endpoint chord. The collector keeps a unit
@@ -259,8 +261,8 @@ pub(super) fn sweep_collider(
     let a = from.local(start);
     let b = to.local(end);
     let relative = b - a;
-    // With no relative movement there is no entry, but an inside start is still a bug. A probe
-    // along a fixed local axis reads its boundary without inventing relative motion.
+    // With no relative movement there is no new entry. A fixed local probe still reads material
+    // already holding the start, without inventing relative motion.
     let axis = Dir3::new(relative).map_or(Vec3::Z, |axis| *axis);
     let distance = relative.length();
     let bounds = collider.aabb(Vec3::ZERO, Quat::IDENTITY);
@@ -289,26 +291,35 @@ pub(super) fn sweep_collider(
         &mut hits,
     )
     .unwrap_or_else(|error| error.panic());
-    let (entry, normal) = super::walk::discovery_entry(
+    let contact = super::walk::discovery_entry(
         &hits,
         f64::from(behind),
         super::walk::topology_band(f64::from(a.length()), &laws)
             .min(f64::from(super::MARCH_EPS) * 0.25),
     )?;
-    if distance == 0.0 || entry > f64::from(distance) {
+    if !contact.contained && (distance == 0.0 || contact.distance > f64::from(distance)) {
         return None;
     }
-    let part = (entry / f64::from(distance)).clamp(0.0, 1.0) as f32;
+    let part = if contact.contained {
+        0.0
+    } else {
+        (contact.distance / f64::from(distance)).clamp(0.0, 1.0) as f32
+    };
     let fraction = sweep.from + (sweep.to - sweep.from) * part;
     let pose = poses.at(fraction);
     let local = a + relative * part;
     Some((
         ContactMotion {
             fraction,
-            point: pose.position + pose.rotation * local,
+            point: if contact.contained {
+                start
+            } else {
+                pose.position + pose.rotation * local
+            },
             velocity: poses.velocity_at(fraction, local, sweep.dt),
+            contained: contact.contained,
         },
-        pose.rotation * normal,
+        pose.rotation * contact.normal,
     ))
 }
 
@@ -351,16 +362,15 @@ mod tests {
         assert_eq!(normal, Vec3::Z);
     }
 
-    /// The game's damage model: even a shallow inside discovery start is a bug. The caller
-    /// relies on refusing it before the contact handoff's face tolerance could hide it.
+    /// The game's damage model: material holding a shallow start contacts immediately. The
+    /// caller seeds its remaining chord; the authority must neither skip it nor panic.
     #[test]
-    #[should_panic(expected = "discovery starts outside")]
-    fn discovery_refuses_a_shallow_inside_start() {
+    fn discovery_contacts_a_shallow_inside_start() {
         let pose = Pose {
             position: Vec3::ZERO,
             rotation: Quat::IDENTITY,
         };
-        sweep_collider(
+        let (contact, _) = sweep_collider(
             Poses {
                 from: pose,
                 to: pose,
@@ -376,7 +386,47 @@ mod tests {
             None,
             Vec3::new(0.0, 0.0, 0.4999),
             Vec3::NEG_Z,
-        );
+        )
+        .expect("material holds the start");
+        assert_eq!(contact.fraction, 0.0);
+        assert!(contact.contained);
+    }
+
+    /// The game's damage model: an occupied start at an exhausted tick boundary still contacts
+    /// at that boundary. Its zero-length sweep must not divide by an empty interval, and the
+    /// authority's seeded walk must still see the material. The cube is fixture geometry.
+    #[test]
+    fn contained_discovery_at_an_exhausted_boundary_has_a_finite_contact() {
+        use bevy::ecs::system::RunSystemOnce;
+        let mut app = super::super::march_tests::world_with_trimesh_plates(&[(
+            Vec3::new(4.0, 4.0, 0.05),
+            Vec3::new(0.0, 2.0, 0.0),
+        )]);
+        app.world_mut()
+            .run_system_once(|world: super::super::ProjectileMarchWorld| {
+                world.sweep.set(Some(Sweep {
+                    from: 1.0,
+                    to: 1.0,
+                    dt: 0.015625,
+                }));
+                let at = Vec3::new(0.0, 2.0, 0.0);
+                let Some(super::super::SegmentHit::Armor(hit)) = super::super::cast_disc_segment(
+                    &world,
+                    &[Vec3::ZERO],
+                    at,
+                    Dir3::Z,
+                    0.0,
+                    &|_| true,
+                ) else {
+                    panic!("material holds the start")
+                };
+                assert_eq!(hit.distance, 0.0);
+                let contact = world.contact_motion.get().unwrap();
+                assert_eq!(contact.fraction, 1.0);
+                assert_eq!(contact.point, at);
+                assert!(contact.contained);
+            })
+            .unwrap();
     }
 
     /// The game's damage model: static discovery retains the original Avian hit distance and
