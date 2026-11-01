@@ -40,8 +40,7 @@ use bevy::prelude::*;
 use crate::aim::CommittedAim;
 use crate::firecontrol::{RangeTable, Ranging};
 use crate::sight::{
-    GUNNER_BLEND, SightMode, SightToggled, hull_local_dir, in_gunner, in_third_person, sight_line,
-    yaw_pitch_of,
+    GUNNER_BLEND, SightMode, hull_local_dir, in_gunner, in_third_person, sight_line, yaw_pitch_of,
 };
 use crate::spec::ViewKind;
 use crate::state::{GameplaySet, PlayerInputSet};
@@ -211,7 +210,6 @@ pub fn plugin(app: &mut App) {
                 .before(CameraUpdateSystems),
         )
         .add_systems(Startup, spawn_camera)
-        .add_systems(Update, capture_turret_pivot)
         .add_systems(
             PostUpdate,
             // Ordering invariant: read the writeback pose, then let propagation derive camera and
@@ -251,17 +249,26 @@ pub fn plugin(app: &mut App) {
                 .after(TransformSystems::Propagate)
                 .before(CameraUpdateSystems)
                 .before(VisibilitySystems::UpdateFrusta),
-        )
-        .add_systems(
-            Update,
-            // React to leaving the optic by re-aiming the orbit camera at the committed point.
-            // `.after(SightToggled)` so the flip is consumed the SAME frame; the mode filter runs
-            // inside (a change to Gunner must not fire it a frame — or a session — later).
+        );
+    mount_pivot_tracking(app);
+}
+
+/// All Update handoffs are applied before this chain reads ownership. The exit re-aim consumes
+/// the new pivot, then orbit input/placement and any captive camera consume that same frame.
+fn mount_pivot_tracking(app: &mut App) {
+    app.add_systems(
+        PostUpdate,
+        (
+            capture_turret_pivot,
             reaim_orbit_on_optic_exit
                 .run_if(resource_changed::<SightMode>)
-                .after(SightToggled)
                 .in_set(GameplaySet),
-        );
+        )
+            .chain()
+            .before(orbit_look)
+            .before(orbit_camera)
+            .before(CaptiveCameraPlaced),
+    );
 }
 
 /// Compute the turret's position in the tank root's local frame, once, from the sim skeleton's
@@ -638,6 +645,52 @@ fn place_optic_camera(
 mod tests {
     use super::*;
     use crate::sight::BLEND_SAMPLES;
+
+    /// A possession write at the end of Update must reach every camera reader this frame. A
+    /// capture in Update could precede that write and retain the previous construction's pivot.
+    #[test]
+    fn a_late_update_handoff_reaches_the_post_update_pivot() {
+        let mut app = App::new();
+        app.init_resource::<TurretPivot>()
+            .init_resource::<SightMode>()
+            .init_resource::<CommittedAim>();
+        mount_pivot_tracking(&mut app);
+        let mut rig = |height| {
+            let root = app.world_mut().spawn(Transform::IDENTITY).id();
+            let turret = app
+                .world_mut()
+                .spawn((ChildOf(root), Transform::from_xyz(0.0, height, 0.0)))
+                .id();
+            app.world_mut().entity_mut(root).insert(Rig {
+                hull: root,
+                turret,
+                gun: turret,
+                muzzle: turret,
+            });
+            root
+        };
+        let old = rig(1.0); // FIXTURE DATA: different construction offsets, metres.
+        let new = rig(5.0);
+        app.world_mut().entity_mut(old).insert(Controlled);
+        app.update();
+        assert_eq!(
+            app.world().resource::<TurretPivot>().offset(),
+            Some(Vec3::Y)
+        );
+        app.add_systems(
+            Update,
+            (move |mut commands: Commands| {
+                commands.entity(old).remove::<Controlled>();
+                commands.entity(new).insert(Controlled);
+            })
+            .after(capture_turret_pivot),
+        );
+        app.update();
+        assert_eq!(
+            app.world().resource::<TurretPivot>().offset(),
+            Some(Vec3::Y * 5.0)
+        );
+    }
 
     /// Camera anchoring belongs to the currently possessed construction, and must be cleared in
     /// the tankless gap. Reusing the first tank's offset breaks respawn on a different rig.

@@ -20,7 +20,7 @@ DERIVED ratio 2.000000. Driving laws and their material values were unchanged by
 
 | ID | Disposition | Current seam and remaining work |
 | --- | --- | --- |
-| V1 | Fixed | `camera::TurretPivot` caches the controlled entity with its offset and clears in the tankless gap. A different possessed rig recomputes from its complete skeleton. |
+| V1 | Fixed | `camera::TurretPivot` caches the controlled entity with its offset and clears in the tankless gap. A different possessed rig recomputes from its complete skeleton. An ordered PostUpdate chain runs after every Update handoff and before orbit/captive readers. |
 | V2 | Fixed | Required sourced round `effects.ember` states presence, radius, base offset, burn, fade and linear HDR colour. `FlightEffects` is present at shell spawn; `vfx::ember` consumes it independently of scene/calibre. |
 | V3 | Fixed | Required sourced `effects.smoke` states presence, width, growth, lifetime, drift and birth taper. `vfx::trail` carries each emission through the existing path/bounce renderer. |
 | V4 | Open | `vfx::muzzle` still selects seed recipes by calibre. Weapon/shot gas output, radiant geometry, smoke and light need required authored emission facts and a generic consumer. Moving the existing constants into a universal scale would not close this finding. |
@@ -92,6 +92,9 @@ The P3s, identified by the inventory's symbol/location:
   reads `Projectile::body` (the penetrator). A subcalibre construction therefore needs resolved
   contact geometry carried to the mark, rather than treating the exact wire value as proof that
   its footprint is the penetration diameter.
+- **New P3, fixed: late ownership scheduling.** An Update capture could precede a possession
+  handoff later in that schedule. Pivot capture and optic-exit re-aim now run in one PostUpdate
+  chain before the orbit and captive readers; an adversarial late-handoff test covers that frame.
 - **New P3, fixed: replica servo fallback.** A malformed `RemoteServos` vector could fall through
   to authority state. `LiveServos::angle` now requires its selected role's complete vector.
 - **New P3, fixed: permanent upscale failure.** Bevy's pipeline lookup returns absence for pending
@@ -113,8 +116,11 @@ ignored. The view-invariant group passed **122 targeted tests**, including kill-
 bundled-font coverage. The final checked-wire group passed **63 targeted tests**, including
 mark/diff round trips, positive surface decoding, protocol pinning, LOD staging and citations.
 Protocol revision is **48**, with the type manifest re-pinned from the tripwire's computed value.
+The final scheduling group passed **55 targeted tests**, including the late-handoff regression,
+optic/camera invariants, kill-cam device flow, font coverage and citations.
 
-No visible clients, captures, frame/tick pricing, deployment, pushes or service API calls were run.
+No visible clients, captures, frame/tick pricing, deployment, pushes, Edgegap calls or Cloudflare
+calls were run. GitHub issue access was read-only.
 All test processes use the shared serial lock and unattended headless settings. Protocol compatibility
 moves with the new material/mark wire facts; both ends must land this lane together.
 
