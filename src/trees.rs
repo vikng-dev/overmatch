@@ -6,7 +6,8 @@
 //! then the tip's — so adjacent segments meet by construction and a segment's top radius is read
 //! through [`TreeKind::r_top_m`]. TREES ARE JUST WOOD: `assets/trees/wood.ron` ([`Wood`]) is what
 //! the sim reads of every tree — the wood substance, the HP per square metre of a segment's
-//! cross-section and the ram threshold — and `assets/trees/species.ron` only names the species an
+//! cross-section and the ram threshold, plus validated structural wood facts reserved for the
+//! structure laws — and `assets/trees/species.ron` only names the species an
 //! asset may claim (the generator's look and ranges; the sim reads no value of a row). All three
 //! are read once at startup into the map's [`TreeLibrary`] and validated there; every number the
 //! sim uses comes from them, the glb is the view (ADR-0014).
@@ -120,7 +121,7 @@ pub(crate) struct TreeAsset {
 /// generator's (look and ranges) and are not read here.
 type SpeciesTable = BTreeMap<String, serde::de::IgnoredAny>;
 
-/// `wood.ron`: what the sim reads of every tree, whatever its species.
+/// `wood.ron`: current shared tree parameters and the species rows reserved for structure laws.
 #[derive(Debug, Clone, PartialEq, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Wood {
@@ -131,6 +132,111 @@ struct Wood {
     /// The ram threshold's constant, N·s/m²: a tick's `Σ impulse × lever` fells the trunk at
     /// `fell_k × dbh³`.
     fell_k: Sourced<f32>,
+    /// Every declared species has explicit grain facts, checked before any instance spawns.
+    structure: StructureRows,
+}
+
+/// Wood facts for a section normal to the trunk's grain. The structural strength and opening
+/// work laws will read these; the current HP and ram laws do not. The wall design owns the model.
+#[derive(Debug, Clone, PartialEq, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct StructuralWood {
+    /// Modulus of rupture under bending, longitudinal extreme-fibre stress, Pa.
+    along_grain_rupture_pa: Sourced<f32>,
+    /// Mode-I opening work per section area, J/m²: tension along the grain, breaking across
+    /// fibres (LR/LT), not the RL/TL splitting energy of a building's timber seam.
+    along_grain_fracture_j_per_m2: Sourced<f32>,
+}
+
+impl StructuralWood {
+    fn validate(&self, row: &str) -> Result<(), String> {
+        for (field, value) in [
+            ("along_grain_rupture_pa", self.along_grain_rupture_pa.0),
+            (
+                "along_grain_fracture_j_per_m2",
+                self.along_grain_fracture_j_per_m2.0,
+            ),
+        ] {
+            if !value.is_finite() || value <= 0.0 {
+                return Err(format!(
+                    "structure row {row:?}: {field} is {value}; author a positive finite value \
+                     in its stated SI units with its material-property source"
+                ));
+            }
+        }
+        Ok(())
+    }
+}
+
+/// A wood table that preserves the row name in parser refusals and refuses duplicate rows.
+#[derive(Debug, Clone, PartialEq)]
+struct StructureRows(BTreeMap<String, StructuralWood>);
+
+impl<'de> serde::Deserialize<'de> for StructureRows {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        struct RowsVisitor;
+        impl<'de> serde::de::Visitor<'de> for RowsVisitor {
+            type Value = StructureRows;
+
+            fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                f.write_str("a structural wood row for each declared tree species")
+            }
+
+            fn visit_map<A: serde::de::MapAccess<'de>>(
+                self,
+                mut access: A,
+            ) -> Result<Self::Value, A::Error> {
+                use serde::de::Error;
+                let mut rows = BTreeMap::new();
+                while let Some(name) = access.next_key::<String>()? {
+                    let row: StructuralWood = access.next_value().map_err(|err| {
+                        A::Error::custom(format!(
+                            "structure row {name:?}: {err}; author along_grain_rupture_pa (Pa) \
+                             and along_grain_fracture_j_per_m2 (J/m²), each with provenance"
+                        ))
+                    })?;
+                    row.validate(&name).map_err(A::Error::custom)?;
+                    if rows.insert(name.clone(), row).is_some() {
+                        return Err(A::Error::custom(format!(
+                            "structure row {name:?} is declared twice; keep one sourced row per species"
+                        )));
+                    }
+                }
+                Ok(StructureRows(rows))
+            }
+        }
+        deserializer.deserialize_map(RowsVisitor)
+    }
+}
+
+impl Wood {
+    /// Parse once at the load edge. All declared species need structural facts, including ones
+    /// not placed by the selected map; no later instance may acquire an invented wood default.
+    fn parse(path: &Path, text: &str, species: &SpeciesTable) -> Result<Self, String> {
+        let load = || {
+            let wood: Self = ron::from_str(text).map_err(|err| {
+                format!("{err}; author the required sourced fields in the wood table")
+            })?;
+            for name in species.keys() {
+                if !wood.structure.0.contains_key(name) {
+                    return Err(format!(
+                        "structure row {name:?} is missing; author its along_grain_rupture_pa \
+                         and along_grain_fracture_j_per_m2 with their sources"
+                    ));
+                }
+            }
+            for name in wood.structure.0.keys() {
+                if !species.contains_key(name) {
+                    return Err(format!(
+                        "structure row {name:?} has no species in {SPECIES_FILE}; declare the \
+                         species there or remove its unused wood row"
+                    ));
+                }
+            }
+            Ok(wood)
+        };
+        load().map_err(|err| format!("trees: {}: {err}", path.display()))
+    }
 }
 
 /// One tree asset resolved against the species table, the wood row and the substance registry,
@@ -281,8 +387,8 @@ impl TreeLibrary {
         });
         let wood_path = root.join(TREES_DIR).join(WOOD_FILE);
         let wood_text = read(&wood_path);
-        let wood: Wood = ron::from_str(&wood_text)
-            .unwrap_or_else(|err| panic!("trees: {} failed to parse: {err}", wood_path.display()));
+        let wood =
+            Wood::parse(&wood_path, &wood_text, &table).unwrap_or_else(|err| panic!("{err}"));
         let registry = SubstanceRegistry::shipped_static();
         let mut texts = vec![species_text, wood_text];
         let mut kinds = BTreeMap::new();
@@ -1471,7 +1577,116 @@ pub(crate) mod tests {
             substance: "RHA".to_owned(),
             hp_per_m2: Sourced(1000.0),
             fell_k: Sourced(1.0e5),
+            structure: StructureRows(BTreeMap::from([(
+                "fixture".to_owned(),
+                StructuralWood {
+                    along_grain_rupture_pa: Sourced(4.0e7),
+                    along_grain_fracture_j_per_m2: Sourced(2.0e4),
+                },
+            )])),
         }
+    }
+
+    // ASSUMED material fixture data, distinct fields so each omission/mutation is observable.
+    const GRAIN_RUPTURE: &str = "along_grain_rupture_pa: (4.0e7, Tuned(\"fixture\")),";
+    const GRAIN_FRACTURE: &str = "along_grain_fracture_j_per_m2: (2.0e4, Tuned(\"fixture\")),";
+
+    fn structural_wood_text(rows: &str) -> String {
+        format!(
+            r#"Wood(substance: "Wood", hp_per_m2: (1000.0, Tuned("fixture")),
+                fell_k: (1.0e5, Tuned("fixture")), structure: {{ {rows} }})"#
+        )
+    }
+
+    fn grain_row(name: &str, fields: &str) -> String {
+        format!("{name:?}: StructuralWood({fields}),")
+    }
+
+    fn grain_fields() -> String {
+        format!("{GRAIN_RUPTURE} {GRAIN_FRACTURE}")
+    }
+
+    fn parse_fixture_wood(rows: &str) -> Result<Wood, String> {
+        Wood::parse(
+            Path::new("assets/trees/wood.ron"),
+            &structural_wood_text(rows),
+            &fixture_table(),
+        )
+    }
+
+    /// Structural laws must never inherit the across-grain building seam when a trunk's grain
+    /// datum is missing. Every missing field is refused before play with file, species, field
+    /// and repair; a defaulted strength or opening work breaks this load contract.
+    #[test]
+    fn every_missing_grain_fact_names_the_file_row_field_and_repair() {
+        parse_fixture_wood(&grain_row("fixture", &grain_fields()))
+            .expect("complete fixture material loads");
+        for (missing, field) in [
+            (GRAIN_RUPTURE, "along_grain_rupture_pa"),
+            (GRAIN_FRACTURE, "along_grain_fracture_j_per_m2"),
+        ] {
+            let fields = grain_fields().replace(missing, "");
+            let error = parse_fixture_wood(&grain_row("fixture", &fields))
+                .expect_err("missing material fact is refused");
+            for required in ["assets/trees/wood.ron", "fixture", field, "author"] {
+                assert!(error.contains(required), "missing {required:?}: {error}");
+            }
+        }
+    }
+
+    /// A structural row is usable in simulation units at load, even before its first instance
+    /// exists. A zero, negative or non-finite strength/work cannot silently disable fracture.
+    #[test]
+    fn structural_wood_refuses_nonpositive_nonfinite_or_unsourced_grain_facts() {
+        for datum in [GRAIN_RUPTURE, GRAIN_FRACTURE] {
+            let field = datum.split(':').next().unwrap();
+            for value in ["0.0", "-1.0", "NaN", "inf"] {
+                let replacement = format!("{field}: ({value}, Tuned(\"fixture\")),");
+                let fields = grain_fields().replace(datum, &replacement);
+                let error = parse_fixture_wood(&grain_row("fixture", &fields))
+                    .expect_err("unusable material fact is refused");
+                for required in ["assets/trees/wood.ron", "fixture", field, "author"] {
+                    assert!(error.contains(required), "missing {required:?}: {error}");
+                }
+            }
+            let fields = grain_fields().replace(datum, &format!("{field}: 42.0,"));
+            let error = parse_fixture_wood(&grain_row("fixture", &fields))
+                .expect_err("a material fact must name its provenance");
+            assert!(
+                error.contains("fixture") && error.contains("provenance"),
+                "{error}"
+            );
+        }
+    }
+
+    /// Every declared species has exactly one explicit row, including species not placed by the
+    /// current map. Duplicates and stale keys cannot conceal missing construction from a later
+    /// map or leave an ambiguous answer for the tree builder.
+    #[test]
+    fn structural_wood_refuses_missing_duplicate_and_unknown_species_rows() {
+        let row = grain_row("fixture", &grain_fields());
+        for (rows, name) in [
+            (String::new(), "fixture"),
+            (format!("{row} {row}"), "fixture"),
+            (
+                format!("{row} {}", grain_row("unknown", &grain_fields())),
+                "unknown",
+            ),
+        ] {
+            let error = parse_fixture_wood(&rows).expect_err("bad row set is refused");
+            for required in ["assets/trees/wood.ron", name, "row"] {
+                assert!(error.contains(required), "missing {required:?}: {error}");
+            }
+        }
+        let species: SpeciesTable =
+            ron::from_str(include_str!("../assets/trees/species.ron")).unwrap();
+        let wood = Wood::parse(
+            Path::new("assets/trees/wood.ron"),
+            include_str!("../assets/trees/wood.ron"),
+            &species,
+        )
+        .expect("all shipped species have sourced structural wood facts");
+        assert!(wood.structure.0.keys().eq(species.keys()));
     }
 
     fn resolve(asset: TreeAsset, table: &SpeciesTable, wood: &Wood) -> Result<TreeKind, String> {

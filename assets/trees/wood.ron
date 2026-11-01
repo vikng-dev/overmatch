@@ -1,7 +1,18 @@
-// The wood row of the game's damage model: what the sim reads of every tree, whatever its species.
-// Read by `src/trees.rs` once at startup with the species table, which holds only a species' look
-// and its generation ranges: a player cannot tell one species' wood from another's, and trunk
-// thickness is visible, so no damage value is keyed by species.
+// The wood data of the game's environment destruction and damage model, game state only.
+// Read by `src/trees.rs` with species.ron before play. Current HP and ram parameters are shared;
+// `structure` holds required per-species material facts for the structural laws. No structural
+// consumer reads these facts yet. The wall design owns the model narrative.
+//
+// `structure.<species>.along_grain_rupture_pa` (Pa): green-wood bending modulus of rupture,
+// longitudinal extreme-fibre stress. The section strength law will compare it with bending
+// stress at a trunk section. It is distinct from the perpendicular-to-grain timber seam in
+// materials.ron, which building joints read.
+// `along_grain_fracture_j_per_m2` (J/m²): mode-I opening work for tension ALONG the fibres,
+// across a trunk section (LR/LT fracture systems). The blow law will spend it per separated
+// section area. It is NOT splitting along the fibres (RL/TL), whose stress is across the grain.
+// The saturated softwood analogue is explicitly ASSUMED for every shipped species; no matched
+// green longitudinal-fracture measurements were found. It must not be called a measured tree
+// material property. The cited FHWA table itself models its parallel values from correlations.
 //
 // `substance` is the trunk's substance, a hard key of `assets/materials/materials.ron`.
 // `hp_per_m2` is a trunk segment's HP pool per square metre of its cross-section at mid-height
@@ -28,4 +39,42 @@ Wood(
         10 km/h 119–151, 20 km/h 248–303; at 9.0e5 N·s/m² a 0.50 m trunk (threshold 112 kN·s·m)
         holds a push and falls at 10 km/h, a 0.42 m one (67) falls at a 5 km/h bump. Measured on
         a spruce; one value for all wood")),
+    structure: {
+        "norway_spruce": StructuralWood(
+            along_grain_rupture_pa: (36.0e6, Measured("MEASURED transcription: Merlin et al.,
+                Large-scale modelling wind damage vulnerability (2025), Table 2, default Norway
+                spruce MOR 36 MPa (green-wood ForestGALES parameter, not a fresh tree measurement).
+                https://www.plantedforests.org/wp-content/uploads/2025/05/FECOS-D-25-00237_R1paper_only.pdf
+                The table misprints its MOR unit; MPa follows the model definition, not kN/mm2.")),
+            along_grain_fracture_j_per_m2: (22340.0, Tuned("ASSUMED saturated clear-softwood
+                analogue, not measured Norway spruce: Murray, FHWA-HRT-04-097 (2007), section
+                1.7.3, Table 10, saturated parallel mode I 2.234 MPa cm = 22340 J/m2 (DERIVED unit
+                conversion). Source uses correlated model values for southern yellow pine and
+                Douglas fir, no measured parallel-mode data. Species and living-trunk transfer
+                are unverified. https://www.fhwa.dot.gov/publications/research/safety/04097/04097.pdf")),
+        ),
+        "scots_pine": StructuralWood(
+            along_grain_rupture_pa: (46.0e6, Measured("MEASURED transcription: Merlin et al.
+                (2025), Table 2, default Scots pine MOR 46 MPa, the green-wood ForestGALES
+                parameter. Same source and MOR unit correction as norway_spruce above.")),
+            along_grain_fracture_j_per_m2: (22340.0, Tuned("ASSUMED saturated clear-softwood
+                analogue, not measured Scots pine: Murray, FHWA-HRT-04-097 (2007), section 1.7.3,
+                Table 10, saturated parallel mode I 2.234 MPa cm = 22340 J/m2 (DERIVED conversion).
+                Correlated model values for southern yellow pine and Douglas fir; species and
+                living-trunk transfer unverified. Same FHWA source as norway_spruce above.")),
+        ),
+        "silver_birch": StructuralWood(
+            along_grain_rupture_pa: (63.0e6, Tuned("ASSUMED species transfer of the MEASURED
+                transcription in Merlin et al. (2025), Table 2: default birch MOR 63 MPa, the
+                green-wood ForestGALES parameter. Table says birch, not specifically Betula
+                pendula; treating it as silver birch is an analogue. Same source and MOR unit
+                correction as norway_spruce above.")),
+            along_grain_fracture_j_per_m2: (22340.0, Tuned("ASSUMED saturated clear-softwood
+                analogue for hardwood, not measured silver birch: Murray, FHWA-HRT-04-097 (2007),
+                section 1.7.3, Table 10, saturated parallel mode I 2.234 MPa cm = 22340 J/m2
+                (DERIVED conversion). Correlated southern yellow pine/Douglas fir model value;
+                neither species nor living-trunk transfer is verified. No suitable birch
+                longitudinal-opening measurement found. Same FHWA source as norway_spruce above.")),
+        ),
+    },
 )

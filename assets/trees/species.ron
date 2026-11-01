@@ -1,8 +1,7 @@
 // The tree species table (slice contract §3). Every tree asset names one of these keys; the
 // generator draws a tree's height and breast-height diameter from the ranges and builds its look
-// from the view parameters. The sim reads no value of a row: every tree's substance, HP pool and
-// ram threshold are the wood row's (`assets/trees/wood.ron`), so no damage value is keyed by
-// species.
+// from the view parameters. The sim reads no value of a row here: shared HP and ram parameters
+// and required per-species structural material facts live in `assets/trees/wood.ron`.
 //
 // `height_m` and `dbh_m` are MATURE STAND ranges for the game's forest, metres. Sources are read
 // 2026-10-26. A range carried as the source's typical range is MEASURED from the source text; a
