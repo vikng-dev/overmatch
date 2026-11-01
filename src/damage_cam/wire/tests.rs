@@ -942,3 +942,16 @@ fn interleaved_shown_losses_survive_the_wire() {
         assert_eq!(decoded.steps(), report.steps());
     }
 }
+
+/// The game's damage model sends every declared servo pose; an omitted angle is never encoded as
+/// an invented rest pose. The pen cam relies on the source pose agreeing with its recorded path.
+#[test]
+fn an_incomplete_recorded_servo_pose_is_refused() {
+    let records = records();
+    let vocabulary = vocabulary(&records);
+    let mut report = records[0].1.clone();
+    let servo = report.servo_deg.keys().next().unwrap().clone();
+    report.servo_deg.remove(&servo);
+    let error = BuiltExplanation::build(&vocabulary, &recorded(&report)).unwrap_err();
+    assert!(error.to_string().contains(&servo), "{error}");
+}

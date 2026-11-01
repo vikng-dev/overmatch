@@ -352,22 +352,17 @@ pub(crate) fn deliver_offline(
     time: Res<Time<Virtual>>,
     mut store: ResMut<ShotExplanations>,
 ) {
-    let Some(vocabulary) = vocabulary else {
-        if !records.is_empty() {
-            warn_once!("pen cam: a shot was recorded before the shot vocabulary was built");
-        }
-        records.clear();
-        return;
-    };
+    if records.is_empty() {
+        return; // No explanation to deliver, including before the blueprint/vocabulary loads.
+    }
+    let vocabulary = vocabulary.expect(
+        "the game's damage model builds its vocabulary before a complete tank can record a shot",
+    );
     let now = time.elapsed_secs_f64();
     for recorded in records.read() {
-        let built = match BuiltExplanation::build(&vocabulary, recorded) {
-            Ok(built) => built,
-            Err(error) => {
-                warn!("pen cam: a recorded shot was not explained: {error}");
-                continue;
-            }
-        };
+        let built = BuiltExplanation::build(&vocabulary, recorded).expect(
+            "the game's damage model records the certified blueprint, complete pose and shot identity its vocabulary encodes"
+        );
         for (combatant, explanation) in built.projections() {
             if !player.iter().any(|&player| player == combatant) {
                 continue;

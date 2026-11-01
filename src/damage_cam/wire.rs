@@ -942,7 +942,12 @@ fn encode(vocabulary: &ShotVocabulary, report: &PenetrationReport) -> Result<Rec
     let servos = vehicle
         .servos
         .iter()
-        .map(|name| Turn::of_degrees(report.servo_deg.get(name).copied().unwrap_or(0.0)))
+        .map(|name| {
+            let angle = report.servo_deg.get(name).ok_or_else(|| CodecError(format!(
+                "servo {name:?} is missing: record every declared servo angle; synthetic rest poses are local only"
+            )))?;
+            Turn::of_degrees(*angle)
+        })
         .collect::<Result<_, _>>()?;
     let plates = report
         .plates

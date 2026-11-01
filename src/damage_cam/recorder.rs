@@ -368,7 +368,7 @@ fn pose_struck(world: &mut World) {
         .collect();
     tanks.sort();
     tanks.dedup();
-    let posed: Vec<(Entity, Option<HullFrame>, BTreeMap<String, f32>)> = tanks
+    let posed: Vec<(Entity, Option<HullFrame>, Option<BTreeMap<String, f32>>)> = tanks
         .into_iter()
         .map(|tank| {
             (
@@ -386,7 +386,9 @@ fn pose_struck(world: &mut World) {
         if let Some((_, slot @ None)) = struck.frames.last_mut() {
             *slot = *frame;
         }
-        struck.servo_deg.get_or_insert_with(|| servo_deg.clone());
+        if let Some(servo_deg) = servo_deg {
+            struck.servo_deg.get_or_insert_with(|| servo_deg.clone());
+        } // A despawned tank has no pose and receives no finished record.
     };
     let mut live = world.query::<&mut ShotRecording>();
     for mut recording in live.iter_mut(world) {
@@ -548,7 +550,9 @@ fn recorded(
         struck.tank,
         struck.from,
         frames,
-        struck.servo_deg.clone().unwrap_or_default(),
+        struck.servo_deg.clone().expect(
+            "the game's damage model poses every live struck tank before finishing its record",
+        ),
         struck.boxes.clone(),
     );
     let mut report = record::report_from(world, &tank, log, &recording.facts)?;

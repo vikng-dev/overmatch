@@ -415,3 +415,19 @@ fn a_free_shooter_holding_its_target_keeps_both_projections() {
     assert_eq!(audiences.len(), 2, "{audiences:?}");
     assert_eq!(to_shooter, 1, "{audiences:?}");
 }
+
+/// The game's damage model cannot lose an authority record before vocabulary readiness. An empty
+/// loading frame is legitimate, but the first record requires the blueprint-derived vocabulary.
+#[test]
+#[should_panic(expected = "builds its vocabulary before a complete tank can record a shot")]
+fn offline_recording_requires_vocabulary_readiness() {
+    let report = report("s1_through_crew");
+    let mut app = App::new();
+    app.add_plugins(MinimalPlugins)
+        .add_plugins(offline_plugin)
+        .insert_resource(WeaponClock(0));
+    app.world_mut().run_schedule(FixedUpdate);
+    app.world_mut()
+        .write_message(recorded(&report, SHOOTER, 1200, life(1)));
+    app.world_mut().run_schedule(FixedUpdate);
+}

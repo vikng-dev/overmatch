@@ -352,3 +352,19 @@ it caps an overlarge valid contribution, while pool settlement still caps at the
 
 B02/B03 verification: format and workspace/all-target clippy passed. MEASURED: 115 targeted
 quantization, mechanism, march, pen-cam, fuzzer and citation tests passed; four instruments ignored.
+
+## Complete record poses and delivery (B56–B58, B72/B73)
+
+Subject: the game's damage model, game state only. An empty offline loading frame needs no
+vocabulary; a finished authority record requires the blueprint-derived vocabulary and successful
+encoding. Neither missing readiness nor an internal codec failure is logged and dropped.
+Every simulated servo pose is now explicit: the recorder distinguishes a despawned tank from
+an existing servo-less rig, requires the registered slots' state, and preserves remote-state
+precedence. A despawned tank receives no finished record. The encoder refuses an omitted declared
+angle rather than inventing rest; synthetic rest-pose clips remain local. No serialized layout
+changed in this producer fix.
+
+Complete-record verification: format and workspace/all-target clippy passed. MEASURED: 90
+record, delivery, codec, recorder-integration, pen-cam and citation tests passed; four ignored.
+The first new readiness test lacked its fixture clock; after supplying it, the intended refusal
+and the legitimate empty loading frame both passed.

@@ -137,8 +137,8 @@ pub struct PenetrationReport {
     pub vehicle: Option<String>,
     /// Every servo of the struck tank at the shot, by its node name in the tank file: the sim's own
     /// servo angle (degrees), the turn about the servo's axis from its authored rest rotation,
-    /// composed as [`crate::tank::servo_pose`] composes it. A servo the record does not name is
-    /// at rest; a hand-authored clip names none.
+    /// composed as [`crate::tank::servo_pose`] composes it. A simulated report names every declared
+    /// servo. A synthetic local clip may omit angles to show authored rest poses.
     pub servo_deg: BTreeMap<String, f32>,
     /// The round fired: a key in the round registry (`assets/rounds/`). A synthetic clip may name a
     /// round the registry does not hold.
