@@ -148,11 +148,23 @@ fn systems() -> ScheduleConfigs<ScheduleSystem> {
 }
 
 /// The map's state and `Update` systems without the match flow, for a composed schedule under
-/// test.
+/// test. Its panel and markers stand as bare nodes (no image, no font): the systems rely on one of
+/// each ([`PANEL_SPAWNED`]) in every composition that mounts them.
 #[cfg(test)]
 pub(crate) fn mount_bare(app: &mut App) {
     app.init_resource::<SpawnMap>()
         .add_systems(Update, systems());
+    app.world_mut().spawn((
+        Node::default(),
+        SpawnMapPanel {
+            edge_px: 0.0,
+            origin_px: Vec2::ZERO,
+        },
+    ));
+    app.world_mut()
+        .spawn((Node::default(), Visibility::Hidden, ChosenMarker));
+    app.world_mut()
+        .spawn((Node::default(), Visibility::Hidden, SelfMarker));
 }
 
 /// `M` toggles the map; the declaration into [`Overlays`] is absolute and re-run every frame, so it
