@@ -2685,7 +2685,10 @@ fn march_shell_step(
     // The game's damage model gives only the initial path inside the source's box clearance.
     // The latch survives later tick boundaries and bounces; source identity still attributes dose.
     let shooter = shell.source.map(|source| source.tank);
-    let source_box = shooter.and_then(|source| world.source_box(source));
+    // A cleared round never reads its source's box again, so it builds none.
+    let source_box = shooter
+        .filter(|_| !shell.projectile.source_cleared)
+        .and_then(|source| world.source_box(source));
     let ignored_source = std::cell::Cell::new(shooter.filter(|_| {
         !shell.projectile.source_cleared
             && source_box.is_some_and(|bounds| bounds.contains(shell.transform.translation, 0.0))
