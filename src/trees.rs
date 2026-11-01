@@ -1642,7 +1642,12 @@ fn fell_on_contacts(
     });
     // Per standing tree: its loads (tree frame) and their push (world, N·s).
     let mut per_tree: BTreeMap<Entity, (Vec<Load>, Vec3)> = BTreeMap::new();
-    for (transfer, blow, press, mass, step) in awake.chain(resting) {
+    for (transfer, blow, press, mass, step, asleep) in awake
+        .map(|(point, blow, press, mass, step)| (point, blow, press, mass, step, false))
+        .chain(
+            resting.map(|(point, blow, press, mass, step)| (point, blow, press, mass, step, true)),
+        )
+    {
         // A structure that is no tree (a building) reads its own contacts.
         let Ok((&TreeSegment(segment), parent)) = segments.get(transfer.structure_collider) else {
             continue;
@@ -1655,7 +1660,16 @@ fn fell_on_contacts(
             continue;
         }
         let into = transform.rotation.inverse();
-        let (loads, push) = per_tree.entry(root).or_default();
+        // A sleeping contact keeps its last checked press, but starts no new law run.
+        // Any awake load on this trunk still reads that sleeping press alongside its own.
+        let entry = if asleep {
+            per_tree.get_mut(&root)
+        } else {
+            Some(per_tree.entry(root).or_default())
+        };
+        let Some((loads, push)) = entry else {
+            continue; // No awake load changed this standing trunk.
+        };
         loads.push(Load {
             chunk: usize::from(segment),
             at: into * (transfer.point - transform.translation),
@@ -2380,12 +2394,14 @@ pub(crate) mod tests {
         }
     }
 
-    /// A BODY ASLEEP ON A TRUNK WAKES WHEN THE TREE FALLS: a cube asleep on the standing fixture
+    /// A sleeping contact starts no structural run: the last awake step checked its press and
+    /// the standing trunk has no topology change until it falls. Server work relies on this;
+    /// re-running the laws would mark TrunkState changed. A cube asleep on the standing fixture
     /// trunk's tip wakes in the step after the fall first moves the trunk, and falls. Avian wakes
     /// nothing when a static collider moves, so a world without the game's wake for a moved
     /// support (`debris::wake_on_static_moved`) leaves the cube hanging where the tip stood.
     #[test]
-    fn a_body_asleep_on_a_trunk_wakes_when_the_tree_falls() {
+    fn a_sleeping_contact_starts_no_law_run_and_wakes_when_the_trunk_moves() {
         use avian3d::prelude::{ColliderDensity, Gravity, PhysicsPlugins, Sleeping};
         use bevy::time::TimeUpdateStrategy;
         use std::time::Duration;
@@ -2451,6 +2467,30 @@ pub(crate) mod tests {
             app.world().get::<Sleeping>(cube).is_some() && (rested - tip).abs() < 0.05,
             "the cube sleeps on the tip, at {rested} m"
         );
+        let checked = app
+            .world()
+            .entity(tree)
+            .get_ref::<TrunkState>()
+            .unwrap()
+            .last_changed();
+        for _ in 0..4 {
+            app.update();
+            assert!(
+                !app.world()
+                    .resource::<ContactTransfers>()
+                    .resting()
+                    .is_empty()
+            );
+            assert_eq!(
+                app.world()
+                    .entity(tree)
+                    .get_ref::<TrunkState>()
+                    .unwrap()
+                    .last_changed(),
+                checked,
+                "an unchanged sleeping press starts no structural law run"
+            );
+        }
         app.world_mut()
             .entity_mut(tree)
             .insert(TreeState::Down { cut: 0, dir: 0 });
