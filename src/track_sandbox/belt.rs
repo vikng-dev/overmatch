@@ -293,7 +293,7 @@ pub(super) struct RigTransmission(pub(super) TransmissionParams);
 #[derive(Resource, Clone, Debug)]
 pub(super) struct EnvelopeLaw {
     /// Rest outer face → green envelope (m): `RigGeom::droop_travel(..).effective`
-    /// (chain-clamped), floored at [`crate::track::envelope::MIN_ENVELOPE_TRAVEL`].
+    /// (chain-clamped), admitted only at or above [`crate::track::envelope::MIN_ENVELOPE_TRAVEL`].
     pub(super) free_travel: f32,
     /// Per-side free-travel profile knots ((z, travel): 0 at the unsprung sprocket/idler
     /// centres, full travel at every road wheel) — the [`TravelField`] the force step rides,
@@ -319,27 +319,20 @@ pub(super) fn calibrate_envelope(
     weight_n: f32,
     engage_depth: f32,
 ) -> EnvelopeLaw {
-    use crate::track::envelope::{self, EnvelopeSide, MIN_ENVELOPE_TRAVEL};
+    use crate::track::envelope::{self, EnvelopeSide};
 
     let travel = geom.droop_travel(sus);
-    if travel.effective < MIN_ENVELOPE_TRAVEL {
-        warn!(
-            "envelope: link_count {} leaves {:.1} mm of droop (floor {:.0} mm) — the law \
-             degenerates to a near-rigid pad; retune the link count",
-            geom.link_count,
-            travel.effective * 1e3,
-            MIN_ENVELOPE_TRAVEL * 1e3,
-        );
-    }
+    geom.validate(sus).expect(
+        "bake and accepted operator tuning validate the running gear before envelope calibration",
+    );
     let mut loops = Side::ALL.map(|side| belt_loop(geom.rest.get(side)));
     for pts in &mut loops {
         if let Some(&first) = pts.first() {
             pts.push(first);
         }
     }
-    // Floor BEFORE building the profile, so the knots and the calibrated travel agree.
-    let floored = travel.effective.max(MIN_ENVELOPE_TRAVEL);
-    let knots = Side::ALL.map(|side| envelope::wheel_travel_knots(geom.rest.get(side), floored));
+    let knots =
+        Side::ALL.map(|side| envelope::wheel_travel_knots(geom.rest.get(side), travel.effective));
     let sides = Side::ALL.map(|side| EnvelopeSide {
         loop_pts: &loops[side.index()][..],
         plane_x: side.plane_x(geom.plane_x),

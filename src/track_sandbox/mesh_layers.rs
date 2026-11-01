@@ -48,9 +48,9 @@
 use bevy::camera::visibility::RenderLayers;
 use bevy::prelude::*;
 
-use super::wheel_view::gear_slot;
+use super::wheel_view::authored_gear;
 use super::{Hull, VizLayers};
-use crate::bake::TankGeometry;
+use crate::bake::TankBlueprint;
 
 /// Render layer for volumes drawn "on top" — the [`OverlayCamera`] renders only this, with its own
 /// depth buffer and no clear, so it composites over the main scene regardless of containment. Layer 0
@@ -213,12 +213,19 @@ fn classify(
     hull: Entity,
     parents: &Query<&ChildOf>,
     names: &Query<&Name>,
-    geometry: Option<&TankGeometry>,
+    blueprint: &TankBlueprint,
 ) -> ViewClass {
+    if entity != hull
+        && !parents
+            .iter_ancestors(entity)
+            .any(|ancestor| ancestor == hull)
+    {
+        return ViewClass::World;
+    }
     let mut probe = entity;
     loop {
         if let Ok(name) = names.get(probe)
-            && let Some(class) = role_for_name(name.as_str(), geometry)
+            && let Some(class) = role_for_name(name.as_str(), blueprint)
         {
             return class;
         }
@@ -238,16 +245,17 @@ fn classify(
 /// structural node like `Hull` / `Turret_Yaw`). Never returns [`ViewClass::Hull`] — hull is the
 /// walk-exhausted fallback, not a name.
 ///
-/// The running-gear / link check comes FIRST and is the one thing still keyed off the name, because
-/// it is an addressing question (which slot of the wheel layer is this?) rather than a
-/// classification one — and it must win over the ballistic verdict, since the road wheels are BOTH
-/// their own armour volume and the wheel layer's meshes. Everything below it asks the bake.
-fn role_for_name(name: &str, geometry: Option<&TankGeometry>) -> Option<ViewClass> {
+/// Authored running-gear membership wins over ballistic membership: a roadwheel’s moving mesh
+/// belongs to its own layer even when it is also an armour volume. Link markers follow the shared
+/// shoe-template contract; every remaining role asks the bake.
+fn role_for_name(name: &str, blueprint: &TankBlueprint) -> Option<ViewClass> {
     // Running gear and the link template/markers are other layers' meshes — skip.
-    if gear_slot(name).is_some() || matches!(name, "Link" | "Link_Box" | "Pin_Start" | "Pin_End") {
+    if authored_gear(&blueprint.spec, name).is_some()
+        || matches!(name, "Link" | "Link_Box" | "Pin_Start" | "Pin_End")
+    {
         return Some(ViewClass::Skip);
     }
-    let geometry = geometry?;
+    let geometry = &blueprint.geometry;
     if geometry
         .collision_proxies
         .iter()
@@ -297,9 +305,9 @@ fn tag_view_meshes(
     mut commands: Commands,
 ) {
     let hull = *hull;
-    let geometry = blueprint.as_deref().map(|blueprint| &*blueprint.geometry);
+    let blueprint = blueprint.expect("the sandbox hull is built from its published TankBlueprint");
     for (entity, material) in &candidates {
-        let view = match classify(entity, hull, &parents, &names, geometry) {
+        let view = match classify(entity, hull, &parents, &names, &blueprint) {
             ViewClass::Hull => ViewMesh::Hull(material.0.clone()),
             ViewClass::Collider => ViewMesh::Collider,
             ViewClass::Ballistic => ViewMesh::Ballistic,

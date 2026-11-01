@@ -44,12 +44,8 @@
 //!
 //! # Binding, and why it composes the whole transform chain
 //!
-//! The nodes are `Wheel_L_0`..`Wheel_R_7`, `Sprocket_L/R`, `Idler_L/R`. Today they are TOP-LEVEL
-//! scene nodes with identity rotation and scale, and their origins have been hand-corrected onto the
-//! axles — so rotating about the node origin is rotating about the true axle. None of that is
-//! assumed: the export has already moved these nodes under `Hull` / `Track_L` / `Track_R` once and
-//! renamed them once, and a wheel that silently stops moving is the worst possible failure for a
-//! diagnostic tool. So [`bind_gear_nodes`] composes every transform between the hull body and the
+//! The spec's `roadwheels`, `track.sprocket.nodes` and `track.idler.nodes` address the nodes.
+//! [`bind_gear_nodes`] composes every transform between the hull body and the
 //! node's parent, expresses the hull's own up/lateral axes in that parent space, and keeps the
 //! node's authored local `T·R·S` verbatim as the pose everything is written ON TOP of. A baked 180°
 //! Y flip or a non-unit scale therefore changes nothing: travel is still hull-up, spin is still
@@ -62,7 +58,7 @@ use crate::track::gear_phase::{fold, gear_transform, spin_angle, sprocket_tooth_
 
 use super::belt::BeltPhase;
 use super::rig_geom::RigGeom;
-use super::{Hull, RigWheel, Side, Suspension, VizLayers};
+use super::{Hull, Side, StationAddress, Suspension, VizLayers};
 
 pub(crate) fn plugin(app: &mut App) {
     app.add_systems(
@@ -86,8 +82,7 @@ pub(crate) fn plugin(app: &mut App) {
 
 /// What a bound glb node is, which decides how its rotation is derived.
 ///
-/// `pub(super)` because [`gear_slot`] is (so [`super::mesh_layers`] can share the parser); the role
-/// itself is only meaningful inside this module.
+/// Shared with mesh layering so the authored running gear is excluded from static hull layers.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub(super) enum GearRole {
     /// A sprung road wheel: rises and falls with its suspension station, rolls on the shoe faces.
@@ -125,34 +120,24 @@ pub(super) struct GearNode {
     tooth_tip: f32,
 }
 
-/// Split a glb node name into the running-gear slot it names, or `None` for everything else.
-///
-/// Deliberately its own parser rather than a reuse of `bake`'s: this is the sandbox's read of the
-/// SCENE, and the day the export renames a node it must be one obvious place that goes quiet.
-///
-/// `pub(super)` so [`super::mesh_layers`] can ask "is this node running gear?" with the same parser —
-/// one source of truth for what the sandbox treats as a driven wheel/sprocket/idler.
-pub(super) fn gear_slot(name: &str) -> Option<(Side, GearRole)> {
-    // Only a purely numeric tail is a station: a `Wheel_L_0_*` sibling (a decor mesh, a proxy) names
-    // something parented to the wheel, never the wheel itself. The GAME no longer parses this at all
-    // — it reads the explicit `roadwheels` list in `<tank>.tank.ron` (see [`crate::spec::RoadwheelSpec`],
-    // §12's identity rule: names address, they never classify). This parser is the SANDBOX's own read
-    // of the scene, so it stays a pattern; it just no longer mirrors a bake-side scan that exists.
-    for (prefix, side) in [("Wheel_L_", Side::Left), ("Wheel_R_", Side::Right)] {
-        if let Some(tail) = name.strip_prefix(prefix)
-            && !tail.is_empty()
-            && tail.bytes().all(|b| b.is_ascii_digit())
-        {
-            return Some((side, GearRole::Road));
+/// The running-gear role explicitly addressed by the spec, shared with mesh layering.
+pub(super) fn authored_gear(spec: &crate::spec::TankSpec, name: &str) -> Option<(Side, GearRole)> {
+    if let Some(wheel) = spec.roadwheels.iter().find(|wheel| wheel.node == name) {
+        let side = match wheel.side {
+            crate::tank::TrackSide::Left => Side::Left,
+            crate::tank::TrackSide::Right => Side::Right,
+        };
+        return Some((side, GearRole::Road));
+    }
+    for (nodes, role) in [
+        (&spec.track.sprocket.nodes, GearRole::Sprocket),
+        (&spec.track.idler.nodes, GearRole::Idler),
+    ] {
+        if let Some(side) = nodes.side_of(name) {
+            return Some((Side::ALL[side], role));
         }
     }
-    match name {
-        "Sprocket_L" => Some((Side::Left, GearRole::Sprocket)),
-        "Sprocket_R" => Some((Side::Right, GearRole::Sprocket)),
-        "Idler_L" => Some((Side::Left, GearRole::Idler)),
-        "Idler_R" => Some((Side::Right, GearRole::Idler)),
-        _ => None,
-    }
+    None
 }
 
 /// Bind every unbound glb running-gear node.
@@ -174,16 +159,17 @@ fn bind_gear_nodes(
     transforms: Query<&Transform>,
     primitives: Query<&Mesh3d>,
     meshes: Res<Assets<Mesh>>,
-    stations: Query<(Entity, &RigWheel, &Suspension)>,
+    stations: Query<(Entity, &StationAddress, &Suspension)>,
+    blueprint: Res<crate::bake::TankBlueprint>,
     hull: Query<Entity, With<Hull>>,
     geom: Res<RigGeom>,
     viz: Res<VizLayers>,
 ) {
-    let Ok(hull) = hull.single() else {
-        return;
-    };
+    let hull = hull
+        .single()
+        .expect("RigGeom and exactly one sandbox hull are built in the same command flush");
     for (entity, name, local) in &unbound {
-        let Some((side, role)) = gear_slot(name.as_str()) else {
+        let Some((side, role)) = authored_gear(&blueprint.spec, name.as_str()) else {
             continue;
         };
         // The node must live under the hull body — the rig's own frame. A node found anywhere else
@@ -193,20 +179,29 @@ fn bind_gear_nodes(
             continue;
         };
         let parent_from_hull = hull_from_parent.inverse();
-        let station = (role == GearRole::Road)
-            .then(|| {
-                nearest_station(
-                    hull_from_parent.transform_point3(local.translation),
-                    side,
-                    &stations,
-                )
-            })
-            .flatten();
-        if role == GearRole::Road && station.is_none() {
-            warn!(
-                "running gear: {name} has no suspension station on {side:?} - it will not travel"
+        let station = if role == GearRole::Road {
+            let mut matches = stations
+                .iter()
+                .filter(|(_, address, _)| address.0 == name.as_str());
+            let (station, _, suspension) = matches.next().expect(
+                "every spec roadwheel spawns its addressed suspension carrier with the hull",
             );
-        }
+            assert!(
+                matches.next().is_none(),
+                "one suspension carrier is spawned per spec roadwheel address"
+            );
+            // ASSUMED numerical tolerance: a millimetre of slack for the scene/bake f32 transform round trip.
+            let residual = suspension
+                .pivot_local
+                .distance(hull_from_parent.transform_point3(local.translation));
+            assert!(
+                residual <= 1e-3,
+                "running gear: {name} scene/bake station residual {residual} m exceeds the transform round-trip tolerance"
+            );
+            Some(station)
+        } else {
+            None // Hull-fixed sprockets and idlers have no suspension travel.
+        };
         // The sprocket's phase lock stands on its own mesh, so it cannot bind before that mesh is
         // readable. Skipping is the whole recovery: this system re-scans unbound nodes every frame
         // (see above), so a sprocket whose primitive or mesh asset lands a frame late binds a frame
@@ -226,7 +221,7 @@ fn bind_gear_nodes(
             ) else {
                 continue;
             };
-            let tooth = std::f32::consts::TAU / geom.teeth.max(1) as f32;
+            let tooth = std::f32::consts::TAU / geom.teeth as f32;
             info!(
                 "running gear: {name} tooth tips measured at {:.3}° + k·{:.2}° in the hull side \
                  plane — the tip nearest vertical is {:+.3}° off straight up; seating the pins \
@@ -258,8 +253,8 @@ fn bind_gear_nodes(
                 up: parent_from_hull.transform_vector3(Vec3::Y),
                 axle: parent_from_hull
                     .transform_vector3(Vec3::X)
-                    .normalize_or(Vec3::X),
-                station: station.map(|(entity, _)| entity),
+                    .try_normalize().expect("the baked scene hierarchy has nonsingular transforms, so its lateral axis is nonzero"),
+                station,
                 tooth_tip,
             },
             // EXPLICIT, never `Inherited`: the `2` layer is the running gear's own switch, and it
@@ -277,38 +272,6 @@ fn bind_gear_nodes(
         ));
     }
 }
-
-/// The suspension station nearest `rest` on `side`, with its residual (m).
-///
-/// A POSITION match, not an index match, because both numbers come from the same glb node: the
-/// station's `pivot_local` is that node's own root-relative translation as `bake` read it, so the
-/// residual is a check that the sandbox and the scene are describing the same wheel — not a fit. The
-/// stations are ~0.53 m apart, so a residual anywhere near that means the two reads have diverged
-/// and the pairing is worth shouting about.
-fn nearest_station(
-    rest: Vec3,
-    side: Side,
-    stations: &Query<(Entity, &RigWheel, &Suspension)>,
-) -> Option<(Entity, f32)> {
-    let best = stations
-        .iter()
-        .filter(|(_, wheel, _)| wheel.side == side)
-        .map(|(entity, _, susp)| (entity, susp.pivot_local.distance(rest)))
-        .min_by(|a, b| a.1.total_cmp(&b.1))?;
-    if best.1 > STATION_MATCH_TOLERANCE {
-        warn!(
-            "running gear: nearest suspension station on {side:?} is {:.4} m from the glb node - \
-             the scene and the bake disagree about where this wheel is",
-            best.1,
-        );
-    }
-    Some(best)
-}
-
-/// How far a glb wheel node may sit from its suspension station before the pairing is suspect (m).
-/// Both are the SAME node read twice, so the honest expectation is zero; a millimetre is slack for
-/// the `f32` round trip through the bake, and is two orders of magnitude below the wheel spacing.
-const STATION_MATCH_TOLERANCE: f32 = 1e-3;
 
 /// Compose every transform strictly between `hull` and `node` — i.e. the space `node`'s own
 /// `Transform` is expressed in, as seen from the hull body.
@@ -333,7 +296,8 @@ fn hull_from_parent(
     Some(chain.iter().rev().fold(Affine3A::IDENTITY, |m, &entity| {
         m * transforms
             .get(entity)
-            .map_or(Affine3A::IDENTITY, Transform::compute_affine)
+            .expect("every glTF ancestor in the hull hierarchy carries its authored Transform")
+            .compute_affine()
     }))
 }
 
@@ -362,9 +326,13 @@ fn drive_running_gear(
         let travel = phase.get(node.side);
         let (dy, angle) = match node.role {
             GearRole::Road => (
-                node.station
-                    .and_then(|station| stations.get(station).ok())
-                    .map_or(0.0, |susp| susp.dy),
+                stations
+                    .get(
+                        node.station
+                            .expect("a roadwheel binds its authored suspension station"),
+                    )
+                    .expect("the sandbox's bound suspension carrier lives with its hull")
+                    .dy,
                 spin_angle(travel, geom.model.wheel_tread),
             ),
             GearRole::Sprocket => (
@@ -399,33 +367,38 @@ fn idler_pin_radius(geom: &RigGeom, side: Side) -> f32 {
     geom.rest
         .get(side)
         .last()
-        .map_or(0.0, |&(_, radius)| radius)
+        .map(|&(_, radius)| radius)
+        .expect("a rig side's measured rest list ends with its idler")
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    /// The names the export ships map to the slots this module binds — the ONE thing that is this
-    /// module's own (the phase law and the tooth-tip measurement it drives them with live in
-    /// [`crate::track::gear_phase`], and are pinned by that module's tests against the shipped
-    /// Tiger).
+    /// The sandbox and its mesh layers must follow arbitrary authored addresses, including side
+    /// membership. FIXTURE DATA: renamed seed-spec entries; none of the names encodes a role.
+    /// A mutant retaining the export's name patterns binds none of these stations.
     #[test]
-    fn the_names_the_export_ships_map_to_slots() {
-        assert_eq!(gear_slot("Wheel_L_0"), Some((Side::Left, GearRole::Road)));
-        assert_eq!(gear_slot("Wheel_R_7"), Some((Side::Right, GearRole::Road)));
+    fn running_gear_roles_follow_the_authored_addresses() {
+        let mut spec = crate::track::rig_geom::tiger_spec();
+        let old = spec.roadwheels[0].node.clone();
+        spec.roadwheels[0].node = "axle-a".into();
+        spec.roadwheels[0].side = crate::tank::TrackSide::Right;
+        spec.track.sprocket.nodes.left = "drive-a".into();
+        spec.track.idler.nodes.right = "tension-a".into();
         assert_eq!(
-            gear_slot("Sprocket_L"),
+            authored_gear(&spec, "axle-a"),
+            Some((Side::Right, GearRole::Road))
+        );
+        assert_eq!(
+            authored_gear(&spec, "drive-a"),
             Some((Side::Left, GearRole::Sprocket))
         );
-        assert_eq!(gear_slot("Idler_R"), Some((Side::Right, GearRole::Idler)));
-        // Sibling volumes are NOT stations — the numeric-tail rule, same as `bake`'s.
-        assert_eq!(gear_slot("Wheel_L_0_Visual"), None);
-        assert_eq!(gear_slot("Wheel_L_0_Ballistic"), None);
-        // The renamed forms the game's binder still looks for must not match either: this module
-        // binds what the CURRENT export ships, and a silent double-bind would be worse than a gap.
-        assert_eq!(gear_slot("Sprocket_L_Visual"), None);
-        assert_eq!(gear_slot("Hull_Visual"), None);
-        assert_eq!(gear_slot("Wheel_L_"), None);
+        assert_eq!(
+            authored_gear(&spec, "tension-a"),
+            Some((Side::Right, GearRole::Idler))
+        );
+        assert_eq!(authored_gear(&spec, &old), None);
+        assert_eq!(authored_gear(&spec, "decoration"), None);
     }
 }

@@ -1365,8 +1365,8 @@ impl TankSpec {
         if t.link_count < 3 {
             return Err(format!("track.link_count must be >= 3 (got {})", t.link_count).into());
         }
-        if t.sprocket.teeth == 0 {
-            return Err("track.sprocket.teeth must be > 0".into());
+        if t.sprocket.teeth < 3 {
+            return Err("track.sprocket.teeth must be >= 3 to form a pin polygon".into());
         }
         let turret = &self.turret;
         // The hull's and the turret's body data: `Mass` and the cuboid `AngularInertia` are built
@@ -1399,6 +1399,11 @@ impl TankSpec {
                     "track.sprocket/idler nodes must be four distinct non-empty names (got `{name}`)"
                 )
                 .into());
+            }
+        }
+        for wheel in &self.roadwheels {
+            if gear.iter().any(|node| **node == wheel.node) {
+                return Err(format!("roadwheels.node `{}` is also a sprocket/idler; author one running-gear role per node", wheel.node).into());
             }
         }
         // Both hinge stops are MAGNITUDES, so both must be positive; 90° is the ceiling because a
@@ -1960,6 +1965,15 @@ TankSpec(
         assert_eq!(spec.track.sprocket.nodes.side_of("Sprocket_R"), Some(1));
         assert_eq!(spec.track.sprocket.nodes.side_of("Idler_L"), None);
         assert_eq!(spec.track.idler.nodes.side_of("Idler_R"), Some(1));
+    }
+
+    /// The game and sandbox bind one running-gear role to each authored node. A node declared
+    /// both sprung and hull-fixed would take contradictory poses; the spec gate must refuse it.
+    #[test]
+    fn running_gear_roles_cannot_share_a_node() {
+        let mut spec = fixture();
+        spec.roadwheels[0].node = spec.track.sprocket.nodes.left.clone();
+        assert!(spec.validate().is_err());
     }
 
     /// **A view frames the field it authors, and the magnification is not a term in it.** Both

@@ -247,6 +247,10 @@ struct RigWheel {
     kind: WheelKind,
 }
 
+/// The spec node whose baked station this carrier represents; names address, never classify.
+#[derive(Component)]
+struct StationAddress(String);
+
 /// A road wheel's cosmetic placement state: the rest pivot in hull-local space and the current
 /// vertical lift. Rise is instant; `dvel` is the ballistic fall speed while the wheel drops
 /// toward a lower target (see the wheel-doctrine comment above [`RigWheel`], and the
@@ -1120,25 +1124,9 @@ fn build_rig(
         geom.hull_rest_y,
         geom.plane_x,
     );
-    // An authoring alarm, not a crash: the belt model happily resamples a too-short loop onto the
-    // taut wrap, so a bad link count shows up as slightly-wrong link density and a track the
-    // suspension could never actually reach — silent, and exactly the class of error the derived
-    // contract exists to make loud.
-    //
-    // ONLY the too-short case warns, and that asymmetry is deliberate: `Impossible` means the loop
-    // cannot wrap even the fully COMPRESSED hull, so no pose is reachable and the rig is a fiction.
-    // A count ABOVE `n_droop` is not a fault at all — the springs limit droop first and the belt
-    // carries slack, which is how a real tank runs (the tensioner takes it up). Warning on that
-    // would be crying wolf at the desirable regime; the readout reports it as a regime instead.
-    if window.limiter == rig_geom::DroopLimiter::Impossible {
-        warn!(
-            "rig: the authored link_count ({}) cannot wrap the derived running gear — the loop is \
-             {:.3} m short of the fully-compressed hull. `track.link_count` in tiger_1.tank.ron was \
-             sized against the RON's own (pre-marker) circles; the marker-derived geometry wants at \
-             least {} links.",
-            window.n, -window.slack_rest, window.n_min,
-        );
-    }
+    // The bake’s RigGeom construction refuses an unreachable authored loop before this spawn.
+    geom.validate(&suspension.0)
+        .expect("the bake validates the authored running gear before publishing its blueprint");
 
     // The non-geometry vehicle data the force law reads every tick, pulled out of the spec once.
     commands.insert_resource(RigSpec {
@@ -1291,8 +1279,20 @@ fn build_rig(
                 // cosmetic articulation, `RigWheel` so the view systems can find them. Each sits at
                 // the model's own node position, lateral `x` included (the Tiger's wheels are
                 // interleaved across two lateral rows — they are NOT all on the track plane).
-                for &centre in geom.road_wheels.get(side) {
+                let authored_side = match side {
+                    Side::Left => crate::tank::TrackSide::Left,
+                    Side::Right => crate::tank::TrackSide::Right,
+                };
+                for &(index, _) in blueprint
+                    .geometry
+                    .roadwheels
+                    .iter()
+                    .filter(|(_, side)| *side == authored_side)
+                {
+                    let node = &blueprint.geometry.nodes[index];
+                    let centre = node.root_position;
                     parent.spawn((
+                        StationAddress(node.name.clone()),
                         RigWheel {
                             side,
                             kind: WheelKind::Road,
@@ -1530,22 +1530,9 @@ fn reset_rig(
     info!("reset → {label} (x = {x:.1}, z = {z:.1})");
 }
 
-/// How far past `[n_min, n_droop]` the link-count knob may roam, in LINKS. Sized in loop metres,
-/// not taste: at the Tiger's 0.13 m pitch this is ±1.6 m of chain either side, which is enough to
-/// walk into the `Impossible` regime and see the verdict flip, and enough to hang a frankly-sloppy
-/// belt on the far side — while making "0 links" or "500 links" unreachable. The band is derived
-/// from the LIVE window, so softening the springs widens it with the rig.
-///
-/// Note the two ends mean different things. Below `n_min` the knob is walking into a genuinely
-/// invalid rig, on purpose, to show the fault. Above `n_droop` every count is VALID (springs limit
-/// droop, belt carries slack) and the fence is pure taste — it just stops the knob wandering off
-/// into belts no tensioner could take up. Widen it freely if a sloppier belt ever wants testing.
+/// ASSUMED inspection band above the spring-limited count, used by the panel and count keys.
+/// The shared rig gate still refuses any tuning outside the contact law's physical domain.
 const LINK_TUNE_SLOP: i32 = 12;
-
-/// Sprocket tooth-count clamp — the retired suspension editor's band, kept verbatim. Below ~6 the
-/// chord-exact pitch radius `pitch/(2·sin(π/teeth))` stops describing a wheel; above ~40 the sprocket
-/// is bigger than the hull.
-const TEETH_TUNE_RANGE: (i32, i32) = (6, 40);
 
 /// The authored geometry counts as a panel/keyboard INTENT seam. Both `;`/`'` `n`/`m`
 /// ([`tune_rig_counts`]) and the panel's Tune-section steppers write here; [`apply_rig_counts`] is
@@ -1564,22 +1551,17 @@ struct RigCounts {
     teeth: u32,
 }
 
-/// Clamp a desired link count into the live feasible band `[n_min − slop, n_droop + slop]`. The
-/// band comes from the window at the CURRENT suspension knobs (not the build-time snapshot):
-/// `n_min`/`n_droop` move with the springs, and a stale window would fence the user out of counts
-/// that are feasible for the springs actually loaded. Shared by the keyboard and the panel stepper
-/// so both offer the exact same reachable range (including the below-`n_min` slop that walks into
-/// the `Impossible` regime on purpose — see [`LINK_TUNE_SLOP`]).
+/// The panel and keyboard’s inspection band, derived from the current wheel geometry.
+/// Counts below the geometric minimum are unavailable; the shared rig validator also checks travel.
 fn clamp_link_count(geom: &RigGeom, params: &SuspensionParams, desired: i32) -> usize {
     let window = geom.link_window(params);
-    let lo = (window.n_min as i32 - LINK_TUNE_SLOP).max(1);
-    let hi = window.n_droop as i32 + LINK_TUNE_SLOP;
-    desired.clamp(lo, hi) as usize
+    desired.clamp(window.n_min as i32, window.n_droop as i32 + LINK_TUNE_SLOP) as usize
 }
 
-/// Clamp a desired sprocket tooth count into [`TEETH_TUNE_RANGE`].
+/// A closed pin polygon needs at least three vertices. The rig validator checks the resulting
+/// geometry; an asset-specific upper tooth count is not a physical limit.
 fn clamp_teeth(desired: i32) -> u32 {
-    desired.clamp(TEETH_TUNE_RANGE.0, TEETH_TUNE_RANGE.1) as u32
+    desired.max(3) as u32
 }
 
 /// `;` / `'` retune the LINK COUNT and `n` / `m` the sprocket TOOTH COUNT, live — the tuning loop the
@@ -1630,7 +1612,7 @@ fn tune_rig_counts(
 /// rebuild can occur. `refresh_envelope` / `refresh_track_colliders` then react to the `RigGeom` change
 /// as they do for a knob tweak.
 fn apply_rig_counts(
-    counts: Res<RigCounts>,
+    mut counts: ResMut<RigCounts>,
     suspension: Res<RigSuspension>,
     mut geom: ResMut<RigGeom>,
     mut pin_belt: ResMut<PinBelt>,
@@ -1645,6 +1627,14 @@ fn apply_rig_counts(
     let params = &suspension.0;
     // `rebuild` borrows the old geometry, so the new one is finished before it replaces it.
     let next = geom.rebuild(counts.teeth, counts.link_count, params);
+    if let Err(error) = next.validate(params) {
+        warn!("track sandbox: refused tuning: {error}");
+        *counts = RigCounts {
+            teeth: geom.teeth,
+            link_count: geom.link_count,
+        };
+        return;
+    }
     *geom = next;
     *pin_belt = PinBelt::for_rig(&geom);
     belt_state.reseat(pin_belt.count);

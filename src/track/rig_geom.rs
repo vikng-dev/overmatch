@@ -119,6 +119,46 @@ pub(crate) struct RigGeom {
     pub window: LinkWindow,
 }
 
+/// A measured running gear that the authored loop or suspension cannot support.
+#[derive(Debug)]
+pub(crate) enum RigFault {
+    TooFewTeeth(u32),
+    ShortLoop {
+        side: Side,
+        links: usize,
+        minimum: usize,
+    },
+    InsufficientTravel {
+        side: Side,
+        metres: f32,
+    },
+}
+
+impl std::fmt::Display for RigFault {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::TooFewTeeth(teeth) => write!(
+                f,
+                "track.sprocket.teeth: {teeth} cannot form a pin polygon; author at least three teeth"
+            ),
+            Self::ShortLoop {
+                side,
+                links,
+                minimum,
+            } => write!(
+                f,
+                "track.link_count: {links} cannot wrap the {side:?} compressed running gear; author at least {minimum} links"
+            ),
+            Self::InsufficientTravel { side, metres } => write!(
+                f,
+                "track.link_count/track.suspension.ride_frequency: the {side:?} belt has {metres} m of droop, below the contact law's {} m domain; author a longer loop or a lower ride frequency",
+                super::envelope::MIN_ENVELOPE_TRAVEL
+            ),
+        }
+    }
+}
+impl std::error::Error for RigFault {}
+
 impl RigGeom {
     /// Derive a side's whole running gear from the blueprint + its glb. `teeth` and `link_count` are
     /// the two authored counts the caller owns (the sandbox tunes `link_count` against
@@ -141,7 +181,50 @@ impl RigGeom {
             side_wheel_centres(blueprint, Side::Left),
             side_wheel_centres(blueprint, Side::Right),
         );
-        Self::assemble(model, road_wheels, teeth, link_count, params)
+        let geom = Self::assemble(model, road_wheels, teeth, link_count, params);
+        geom.validate(params)
+            .unwrap_or_else(|error| panic!("{}: {error}", blueprint.file));
+        geom
+    }
+
+    /// The bake builds this geometry before publishing a blueprint or any body. Live operator
+    /// tuning uses the same typed refusal before replacing the accepted rig. Both sides must
+    /// wrap and supply the contact law's minimum travel; a warning cannot make a fictitious rig.
+    pub(crate) fn validate(&self, params: &SuspensionParams) -> Result<(), RigFault> {
+        if self.teeth < 3 {
+            return Err(RigFault::TooFewTeeth(self.teeth));
+        }
+        for side in Side::ALL {
+            let rest = self.rest.get(side);
+            let window = window_of(
+                rest,
+                self.wheel_pin_radius(),
+                self.pitch,
+                self.link_count,
+                params,
+            );
+            if window.limiter == DroopLimiter::Impossible {
+                return Err(RigFault::ShortLoop {
+                    side,
+                    links: self.link_count,
+                    minimum: window.n_min,
+                });
+            }
+            let travel = droop_travel(
+                rest,
+                self.wheel_pin_radius(),
+                self.pitch,
+                self.link_count,
+                params,
+            );
+            if travel.effective < super::envelope::MIN_ENVELOPE_TRAVEL {
+                return Err(RigFault::InsufficientTravel {
+                    side,
+                    metres: travel.effective,
+                });
+            }
+        }
+        Ok(())
     }
 
     /// Re-assemble this rig at DIFFERENT authored counts, reusing the cached measurements.
@@ -996,6 +1079,29 @@ mod tests {
             link_count,
             &SuspensionParams::default(),
         )
+    }
+
+    /// The game and sandbox must refuse a loop outside the measured rig's domain before any
+    /// body uses it. FIXTURE DATA: synthetic geometry, with both a too-short loop and a spring
+    /// requesting less than the solver's minimum travel. Mutants accepting either reach play
+    /// with an invented rigid support pad.
+    #[test]
+    fn authored_loops_and_suspension_must_support_the_contact_law() {
+        let valid = synthetic_rig(20, 100);
+        assert!(valid.validate(&SuspensionParams::default()).is_ok());
+        let short = synthetic_rig(20, 3);
+        assert!(matches!(
+            short.validate(&SuspensionParams::default()),
+            Err(RigFault::ShortLoop { .. })
+        ));
+        let stiff = SuspensionParams {
+            ride_frequency: 100.0,
+            ..SuspensionParams::default()
+        };
+        assert!(matches!(
+            valid.validate(&stiff),
+            Err(RigFault::InsufficientTravel { .. })
+        ));
     }
 
     /// The live-tuning contract behind the sandbox's `;` `'` / `n` `m` knobs: a retune must move

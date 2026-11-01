@@ -97,3 +97,22 @@ The sandbox wall and its subtree belong to part 2 and are excluded from this lan
   outdated comments. No workflow was triggered or pushed.
   MEASURED gates: formatting, workspace clippy and 24 sandbox/bitprobe/citation tests passed;
   one opt-in wall survey stayed ignored.
+
+- **D-RIG fixed / partly already fixed:** `RigGeom::build`, called while the bake prepares
+  `TrackColliders` before publishing the blueprint, now refuses an unreachable authored loop or
+  insufficient envelope travel on either side, naming the spec file, fields and repair. The
+  sandbox’s warning-only path and rigid-pad substitution are deleted. Invalid live operator
+  tuning gets a typed refusal and leaves the accepted rig in place. No per-frame validation cost
+  is added to idle panels. The seed-specific upper tooth-count knob is removed; the generic pin
+  polygon requires at least three teeth. Duplicate sprung/fixed role addresses refuse at the spec.
+  Already fixed in the starting tree: zero teeth refuse in the spec, and the shared hard-stop
+  collider constructor panics on a degenerate hull while the bake prepares it.
+- **D-GEAR fixed:** delete `gear_slot` and its name-pattern tests. Binding and mesh layering read
+  the spec’s roadwheel/sprocket/idler lists. Each roadwheel carrier keeps its authored address;
+  the view binds that exact carrier, requiring its scene/bake rest pose to agree. There is no
+  nearest-station guess, warning-only missing carrier, zero-tooth clamp or zero-travel fallback.
+  Mesh role addresses are scoped to the actual hull subtree, so a world object with a matching
+  name cannot become running gear. Arbitrary renamed addresses and synthetic invalid rigs are
+  covered. No vehicle asset, physical parameter or collider geometry changed.
+  MEASURED gates: formatting, workspace clippy and 64 focused rig/spec/sandbox/headless/citation
+  tests passed; 4 opt-in measurement/survey beds stayed ignored. The headless sandbox boot passed.

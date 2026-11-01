@@ -151,11 +151,23 @@ fn panel(
         knobs = bp.spec.track.suspension.params();
     }
 
+    // Operator tuning is outside input. Refuse an invalid request before replacing accepted data.
+    let tuning_valid = (knobs == w.knobs.0 && counts == *w.counts)
+        || r.geom.as_deref().is_none_or(|geom| {
+            let candidate = geom.rebuild(counts.teeth, counts.link_count, &knobs);
+            match candidate.validate(&knobs) {
+                Ok(()) => true,
+                Err(error) => {
+                    warn!("track sandbox: refused tuning: {error}");
+                    false
+                }
+            }
+        });
     // Write-backs — resources are touched ONLY on a real change.
-    if knobs != w.knobs.0 {
+    if tuning_valid && knobs != w.knobs.0 {
         w.knobs.0 = knobs;
     }
-    if counts != *w.counts {
+    if tuning_valid && counts != *w.counts {
         *w.counts = counts;
     }
     if layers != *w.layers {
