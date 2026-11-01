@@ -35,7 +35,9 @@ use crate::track::forces::{
     ForceParams, SideInput, SideReport, SideState, contact_side, phase_decompose,
 };
 use crate::track::oracle::{BlockField, TerrainOracle};
-use crate::track::rubble::{PieceData, RubbleBodies, RubbleQuery, apply_pushes, piece_impulses};
+use crate::track::rubble::{
+    BeltSource, PieceData, RubbleBodies, RubbleQuery, apply_pushes, piece_impulses,
+};
 use crate::track::transmission::{self, TransmissionInput, TransmissionParams};
 use crate::track::wheels::{
     WHEEL_LIFT_RISE_OMEGA, WheelParams, wheel_lift_step, wheel_lift_target,
@@ -108,6 +110,12 @@ pub(super) fn apply_belt_support_field(
             &avian3d::prelude::Position,
             &avian3d::prelude::Rotation,
             Forces,
+            (
+                &avian3d::prelude::ComputedMass,
+                &avian3d::prelude::ComputedAngularInertia,
+                &avian3d::prelude::ComputedCenterOfMass,
+                Option<&avian3d::prelude::LockedAxes>,
+            ),
         ),
         With<Hull>,
     >,
@@ -138,7 +146,7 @@ pub(super) fn apply_belt_support_field(
 ) {
     let (transmission, mut trans_state, mut telemetry) = transmission_params;
     let (geom, rig_spec, envelope) = rig;
-    let (hull_entity, hull_pos, hull_rot, mut forces) = hull
+    let (hull_entity, hull_pos, hull_rot, mut forces, (mass, angular, com, locked)) = hull
         .single_mut()
         .expect("RigGeom is published with exactly one sandbox hull in the same command flush");
     let affine = bevy::math::Affine3A::from_rotation_translation(hull_rot.0, hull_pos.0);
@@ -234,7 +242,15 @@ pub(super) fn apply_belt_support_field(
     touches.0.clear();
     // No other belt source shares the sandbox. Size both tracks together, in the production
     // law's canonical contact order, before either side changes a recipient's velocity.
-    let pushes = belt_piece_reactions(&mut pieces, hull_entity, &reports, dt);
+    let source = BeltSource::new(
+        hull_entity,
+        hull_pos.0 + hull_rot.0 * com.0,
+        hull_rot.0,
+        mass,
+        angular,
+        locked,
+    );
+    let pushes = belt_piece_reactions(&mut pieces, source, &reports, dt);
     apply_pushes(&pushes, &mut bodies);
     for push in &pushes {
         touches.0.push(super::rubble::Touch {
@@ -289,7 +305,7 @@ pub(super) fn apply_belt_support_field(
 /// One recipient pass over the complete sandbox footprint, through the production law.
 fn belt_piece_reactions(
     pieces: &mut RubbleBodies,
-    hull: Entity,
+    hull: BeltSource,
     reports: &[SideReport; 2],
     dt: f32,
 ) -> Vec<crate::track::rubble::Push> {
@@ -766,13 +782,18 @@ mod tests {
                 let mut sandbox = RubbleBodies::gather(&rubble, &[plank], &bodies);
                 let mut production = RubbleBodies::gather(&rubble, &[plank], &bodies);
                 let dt = 1.0 / 64.0;
-                let actual = belt_piece_reactions(&mut sandbox, Entity::PLACEHOLDER, &reports, dt);
+                let actual = belt_piece_reactions(
+                    &mut sandbox,
+                    BeltSource::fixed(Entity::PLACEHOLDER),
+                    &reports,
+                    dt,
+                );
                 let expected = piece_impulses(
                     &mut production,
                     reports
                         .iter()
                         .flat_map(|r| &r.contacts)
-                        .map(|contact| (Entity::PLACEHOLDER, contact)),
+                        .map(|contact| (BeltSource::fixed(Entity::PLACEHOLDER), contact)),
                     dt,
                 );
                 let bits = |pushes: &[crate::track::rubble::Push]| {

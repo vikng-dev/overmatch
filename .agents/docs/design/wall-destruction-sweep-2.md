@@ -298,17 +298,15 @@ fix. The lane started at 01:22:27 +07; no captures, pricing runs, pushes or suba
 | Claude (server-perf-2) | P3 `piece_impulses`' "the same lexicographic geometry key" comment describes the edit, not the code | verified | track: size every belt recipient by its mass and the belt's spring (#256) |
 | Claude (sweep-destr-5) | a belt's loads on a moving chunk group never reach the group's laws (part 5) | verified: `record_static_contacts` skipped every dynamic recipient, and nothing else staged one | track: stage the belt's impulse on a moving structure as its contact (#256) |
 
-**One reaction law for every belt recipient.** The belt's support is an explicit penalty spring
-read at the tick-start pose. A dynamic body takes the whole opposite reaction where the explicit
-step integrates the belt's springs against it stably, by its own construction: over all its patches
-from every source this tick, `dt² Σ kᵢ / mᵢ < 4`, `kᵢ` each patch's spring rate (DERIVED from the
-support law: the per-metre spring over the patch's contacting length), `mᵢ` the body's effective
-mass along the patch's normal. RESOLUTION: 4 is symplectic Euler's undamped limit (DERIVED), read
-against the trace bound, which is at least the stiffest rigid mode's `k dt² / m`. Any lighter body is a piece and keeps the
-clamped sequential impulse, so Avian's implicit solver holds it. Nothing names the body's kind: a
-hull under another tank's belt and a body of the same collider, mass and inertia without running
-gear take the same momentum, −9414.24 N·s under the parked fixture stack (MEASURED; fixture 30 t
-boxes, `dt² Σk/m` 0.146).
+**One reaction law for every belt recipient.** The current stability verdict is
+`track::rubble::explicit_recipients`: the trace of each connected spring/damper component,
+including its source and recipient inverse responses. Each patch contributes
+`(dt² k + 2 dt c) (1/m_source + 1/m_receiver)` (DERIVED, effective rigid masses at the patch).
+The RESOLUTION limit is 4, from the symplectic Euler amplification matrix. A component below
+it takes the whole opposite reaction; other recipients keep the sequential clamp. Fixed
+sources prescribe their surface velocity and couple no recipients together. No body-kind
+membership selects a reaction. The equal-collider, equal-inertia driving fixture remains green;
+its baseline parked reaction was -9414.24 N s (MEASURED).
 
 **A moving structure under a belt.** The impulse a moving structure (a loose chunk group) took from
 a belt is staged as an implicit contact on it, named with its source, through the reading fixed
@@ -343,6 +341,7 @@ were present. Findings are checked against code and executable class fixtures.
 | Codex P1; Claude P1 | Reaction stability ignores damping | verified: fixture 500 kg, 2 MN/m, 100 kN s/m, 1 cm press, closing 1 m/s at 64 Hz leaves at -2.7500002 m/s (MEASURED red test) | track: include damping in recipient stability (#256) |
 | Codex P1; Claude P3 | Later patches record velocities changed by earlier impulses | verified: two 1000 kg bodies, 800 N s reaction at their COM normal, closing 1 m/s; one patch reads 499.99997 N s, two read 399.99997 N s (MEASURED red test) | track: retain tick-start closing speeds for every reaction (#256) |
 | Codex P2; Claude P2 | Reported elastic stiffness omits engagement derivative | verified: uniform 1 cm press in a 2 cm ramp reports 1,999,999.9 N/m against a finite-difference force derivative of 3,999,707.3 N/m (MEASURED red test) | track: include the engagement slope in patch stiffness (#256) |
+| Claude P2 | The explicit trace omits the source's inverse response | verified: DERIVED fixture, two 1000 kg bodies and a 10 MN/m spring at 64 Hz, recipient-only rate 2.4414 versus pair rate 4.8828; the omitted-source reaction leaves -2.125 m/s, corrected test leaves 0 m/s (MEASURED) | track: bound coupled belt reactions with both bodies inertia (#256) |
 
-The spring/damper verdict includes `dt² k/m + 2 dt c/m` over all recipient patches; its
-RESOLUTION limit is 4 (DERIVED from the symplectic Euler amplification matrix).
+The reaction law and its current bound are stated above; regression fixtures exercise the
+damper, the ramp derivative, tick-start closing readings and the coupled source response.

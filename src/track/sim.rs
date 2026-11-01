@@ -45,7 +45,8 @@ use super::forces::{
 use super::oracle::TerrainOracle;
 use super::route::build_route;
 use super::rubble::{
-    PieceData, RubbleBodies, RubbleQuery, apply_pushes, footprint_radius, piece_impulses,
+    BeltSource, PieceData, RubbleBodies, RubbleQuery, apply_pushes, footprint_radius,
+    piece_impulses,
 };
 use super::side::Side;
 use super::terrain::TrackField;
@@ -867,11 +868,12 @@ fn apply_track_forces(
         let (.., contacts, _) = tanks
             .get(entity)
             .expect("a tank gathered for this synchronous tick remains alive");
+        let source = BeltSource::read(entity, &pieces_query);
         contacts
             .0
             .iter()
             .flatten()
-            .map(move |contact| (entity, contact))
+            .map(move |contact| (source, contact))
     });
     let pushes = piece_impulses(&mut pieces, contacts, dt);
     pieces.record_moving_contacts(&pushes, &mut transfers, dt);

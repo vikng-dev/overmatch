@@ -704,6 +704,133 @@ pub(crate) fn footprint_radius(
     pin_radius + column + (face + max_travel).abs().max((face - reach).abs())
 }
 
+/// A belt source's inertia before driving forces. The reaction bound includes both sides;
+/// source identity alone cannot supply its mass or its permitted rigid modes.
+#[derive(Clone, Copy)]
+pub(crate) struct BeltSource {
+    pub(crate) entity: Entity,
+    inertia: BodyInertia,
+}
+
+impl BeltSource {
+    pub(crate) fn new(
+        entity: Entity,
+        centre: Vec3,
+        rotation: Quat,
+        mass: &ComputedMass,
+        angular: &ComputedAngularInertia,
+        locked: Option<&LockedAxes>,
+    ) -> Self {
+        let inertia = SolverBodyInertia::new(
+            mass.inverse(),
+            angular.rotated(rotation).inverse(),
+            locked.copied().unwrap_or_default(),
+            0,
+            true,
+        );
+        Self {
+            entity,
+            inertia: BodyInertia {
+                centre,
+                inverse_mass: inertia.effective_inv_mass(),
+                inverse_inertia: inertia.effective_inv_angular_inertia().to_mat3(),
+            },
+        }
+    }
+
+    pub(crate) fn read<F: QueryFilter>(entity: Entity, bodies: &Query<PieceData, F>) -> Self {
+        let (forces, _, mass, angular, com, locked) = bodies
+            .get(entity)
+            .expect("every driving source has Avian mass, pose and force state at tick start");
+        let rotation = forces.rotation().0;
+        Self::new(
+            entity,
+            forces.position().0 + rotation * com.0,
+            rotation,
+            mass,
+            angular,
+            locked,
+        )
+    }
+
+    fn inverse_at(self, point: Vec3, normal: Vec3) -> f32 {
+        let arm = (point - self.inertia.centre).cross(normal);
+        normal.dot(self.inertia.inverse_mass * normal) + arm.dot(self.inertia.inverse_inertia * arm)
+    }
+
+    /// FIXTURE: an imposed belt velocity has no finite source response.
+    #[cfg(test)]
+    pub(crate) fn fixed(entity: Entity) -> Self {
+        Self {
+            entity,
+            inertia: BodyInertia {
+                centre: Vec3::ZERO,
+                inverse_mass: Vec3::ZERO,
+                inverse_inertia: Mat3::ZERO,
+            },
+        }
+    }
+}
+
+/// The root of one connected spring/damper component, including dynamic belt sources.
+fn reaction_root(parents: &[usize], mut index: usize) -> usize {
+    while parents[index] != index {
+        index = parents[index];
+    }
+    index
+}
+
+/// A conservative trace bound for each connected system: every patch contributes both bodies'
+/// inverse response. Summing the component keeps a shared source's springs from being judged
+/// independently; the trace bounds its stiffest coupled rigid mode.
+fn explicit_recipients(
+    bodies: &RubbleBodies,
+    dynamic: &[(&BeltContact, usize, Entity, BeltSource, f32)],
+    dt: f32,
+) -> Vec<bool> {
+    let mut entities: Vec<_> = bodies
+        .bodies
+        .iter()
+        .map(|b| b.entity)
+        .chain(dynamic.iter().map(|c| c.3.entity))
+        .collect();
+    entities.sort_unstable();
+    entities.dedup();
+    let index = |entity| {
+        entities
+            .binary_search(&entity)
+            .expect("every reaction endpoint is indexed")
+    };
+    let mut parents: Vec<_> = (0..entities.len()).collect();
+    let mut rates = vec![0.0; entities.len()];
+    for &(contact, slot, _, source, _) in dynamic {
+        let receiver = &bodies.bodies[slot];
+        let r = index(receiver.entity);
+        let source_inverse = source.inverse_at(contact.point, contact.normal);
+        // A fully fixed source imposes its motion; it couples no recipients to one another.
+        if source.inertia.inverse_mass != Vec3::ZERO || source.inertia.inverse_inertia != Mat3::ZERO
+        {
+            let a = reaction_root(&parents, r);
+            let b = reaction_root(&parents, index(source.entity));
+            parents[b] = a;
+        }
+        rates[r] += (contact.stiffness * dt * dt + 2.0 * contact.damping * dt)
+            * (source_inverse
+                + receiver
+                    .effective_mass(contact.point, contact.normal)
+                    .recip());
+    }
+    let mut totals = vec![0.0; entities.len()];
+    for (i, rate) in rates.into_iter().enumerate() {
+        totals[reaction_root(&parents, i)] += rate;
+    }
+    bodies
+        .bodies
+        .iter()
+        .map(|b| totals[reaction_root(&parents, index(b.entity))] < EXPLICIT_LIMIT)
+        .collect()
+}
+
 /// One impulse a dynamic piece took: `impulse` (N·s, world) at `point`, through `collider`, from
 /// the belt of `source`.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -740,7 +867,7 @@ const EXPLICIT_LIMIT: f32 = 4.0;
 /// clamped push's normal part is zero where the piece is not closing on the belt.
 pub(crate) fn piece_impulses<'c>(
     bodies: &mut RubbleBodies,
-    contacts: impl IntoIterator<Item = (Entity, &'c BeltContact)>,
+    contacts: impl IntoIterator<Item = (BeltSource, &'c BeltContact)>,
     dt: f32,
 ) -> Vec<Push> {
     let mut dynamic = Vec::new();
@@ -756,14 +883,7 @@ pub(crate) fn piece_impulses<'c>(
             .dot(contact.normal);
         dynamic.push((contact, slot, collider, source, closing_speed));
     }
-    // Effective masses read the tick-start pose and inertia only, so the impulses sized below
-    // never change a recipient's verdict.
-    let mut rates = vec![0.0_f32; bodies.bodies.len()];
-    for &(contact, slot, ..) in &dynamic {
-        rates[slot] += (contact.stiffness * dt * dt + 2.0 * contact.damping * dt)
-            / bodies.bodies[slot].effective_mass(contact.point, contact.normal);
-    }
-    let explicit: Vec<bool> = rates.iter().map(|&rate| rate < EXPLICIT_LIMIT).collect();
+    let explicit = explicit_recipients(bodies, &dynamic, dt);
     dynamic.sort_by_cached_key(|(contact, ..)| {
         #[cfg(test)]
         bodies
@@ -799,7 +919,7 @@ pub(crate) fn piece_impulses<'c>(
         pushes.push(Push {
             body: body.entity,
             collider,
-            source,
+            source: source.entity,
             impulse,
             point: contact.point,
             normal: contact.normal,
@@ -1186,7 +1306,10 @@ mod tests {
                     pieces.record_static_contacts(source, &report.contacts, &mut transfers);
                     let pushes = piece_impulses(
                         &mut pieces,
-                        report.contacts.iter().map(|contact| (source, contact)),
+                        report
+                            .contacts
+                            .iter()
+                            .map(|contact| (BeltSource::read(source, &bodies), contact)),
                         DT,
                     );
                     pieces.record_moving_contacts(&pushes, &mut transfers, DT);
@@ -1535,10 +1658,10 @@ mod tests {
     }
 
     /// `contacts` from one source body no reading names.
-    fn sourced(contacts: &[BeltContact]) -> impl Iterator<Item = (Entity, &BeltContact)> {
+    fn sourced(contacts: &[BeltContact]) -> impl Iterator<Item = (BeltSource, &BeltContact)> {
         contacts
             .iter()
-            .map(|contact| (Entity::PLACEHOLDER, contact))
+            .map(|contact| (BeltSource::fixed(Entity::PLACEHOLDER), contact))
     }
 
     /// A contact pressing `load` (N) along +Y on `collider` at `point`, belt at rest, no traction.
@@ -1627,8 +1750,13 @@ mod tests {
                                 contact
                             })
                             .collect();
-                        let pushes =
-                            piece_impulses(&mut pieces, contacts.iter().map(|c| (source, c)), DT);
+                        let pushes = piece_impulses(
+                            &mut pieces,
+                            contacts
+                                .iter()
+                                .map(|c| (BeltSource::read(source, &bodies), c)),
+                            DT,
+                        );
                         pieces.record_moving_contacts(&pushes, &mut transfers, DT);
                         pushes
                     },
@@ -1652,6 +1780,43 @@ mod tests {
             );
             assert!(pushes.iter().all(|p| (p.closing_speed - 1.0).abs() < 1e-6));
         }
+    }
+
+    /// A shared contact spring acts on the pair's rigid mode. Driving relies on a light source
+    /// entering the implicit band even when the recipient alone would integrate stably.
+    /// FIXTURE: k=10 MN/m, no damper, source/recipient 1000 kg, 1 m/s closing, 64 Hz.
+    /// DERIVED: recipient-only k dt²/m=2.4414; pair=4.8828 exceeds the stability limit.
+    #[test]
+    fn coupled_reaction_bound_includes_the_source_response() {
+        let mut app = physics();
+        let collider = piece(&mut app, 0.0, 0.0);
+        app.update();
+        app.world_mut()
+            .run_system_once(move |rubble: RubbleQuery, bodies: Query<PieceData>| {
+                let mut pieces = RubbleBodies::gather(&rubble, &[collider], &bodies);
+                let body = &mut pieces.bodies[0];
+                body.inv_mass = Vec3::splat(0.001);
+                body.linear = Vec3::Y;
+                body.angular = Vec3::ZERO;
+                let mut contact = press(body.com, collider, 200_000.0);
+                contact.stiffness = 1.0e7;
+                let source = BeltSource {
+                    entity: Entity::PLACEHOLDER,
+                    inertia: BodyInertia {
+                        centre: body.com,
+                        inverse_mass: Vec3::splat(0.001),
+                        inverse_inertia: Mat3::ZERO,
+                    },
+                };
+                piece_impulses(&mut pieces, [(source, &contact)], DT);
+                let speed = pieces.bodies[0].linear.y;
+                println!("MEASURED coupled stability fixture: recipient speed {speed} m/s");
+                assert!(
+                    speed.abs() < 1e-5,
+                    "pair must take the implicit clamp: {speed}"
+                );
+            })
+            .unwrap();
     }
 
     /// A PIECE TAKES THE SUPPORT REACTION ONLY UP TO WHAT STOPS IT CLOSING ON THE BELT, AND A
