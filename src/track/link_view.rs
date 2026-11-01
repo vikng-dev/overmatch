@@ -184,6 +184,7 @@ use bevy::ecs::error::BevyError;
 use bevy::math::Affine3A;
 use bevy::mesh::{GenerateTangentsError, Indices, PrimitiveTopology, VertexAttributeValues};
 use bevy::prelude::*;
+use bevy::world_serialization::WorldInstanceReady;
 
 use crate::geometry_lod::certificate::Rung;
 use crate::geometry_lod::{Chain, ChainRef};
@@ -198,6 +199,7 @@ use super::side::{PerSide, Side};
 pub(crate) fn template_plugin(app: &mut App) {
     // The belt's GPU draw: its material, the repeated meshes and the table upload.
     app.add_plugins(super::belt_draw::plugin);
+    app.add_observer(require_shoe_template);
     app.add_systems(
         Update,
         (
@@ -647,6 +649,54 @@ impl ShoeBelt {
     }
 }
 
+/// Refuse a vehicle view that lands without the shoe template. An instance spawns whole, so the
+/// view whose subtree carries the sheet's sprocket view nodes carries the template's `Link` node
+/// and both pin markers too, or never will: without this the bind would wait for them forever and
+/// every belt would stay undrawn. Other glbs (trees, buildings) carry no sprocket node.
+fn require_shoe_template(
+    ready: On<WorldInstanceReady>,
+    blueprint: Option<Res<crate::bake::TankBlueprint>>,
+    children: Query<&Children>,
+    names: Query<&Name>,
+) {
+    // A composition without a blueprint declares no running gear whose view this could be.
+    let Some(blueprint) = blueprint else {
+        return;
+    };
+    // Every glTF node is named; an unnamed descendant (a sim collider under the hull) is none.
+    let instance = children
+        .iter_descendants(ready.entity)
+        .filter_map(|entity| names.get(entity).ok().map(Name::as_str));
+    if let Some(node) = missing_template_node(instance, &blueprint.spec.track.sprocket.nodes) {
+        panic!(
+            "{}: the vehicle's view glb instanced without the shoe template's `{node}` node; \
+             re-export the view with the `{LINK_NODE}` template and its `{PIN_START_NODE}` / \
+             `{PIN_END_NODE}` markers",
+            blueprint.file
+        );
+    }
+}
+
+/// The first shoe-template node an instance's node names lack, or `None` when the instance is no
+/// vehicle view (it carries neither declared sprocket) or carries the whole template.
+fn missing_template_node<'a>(
+    names: impl IntoIterator<Item = &'a str>,
+    sprockets: &crate::spec::SideNodes,
+) -> Option<&'static str> {
+    let (mut vehicle, mut found) = (false, [false; 3]);
+    let template = [LINK_NODE, PIN_START_NODE, PIN_END_NODE];
+    for name in names {
+        vehicle |= name == sprockets.left || name == sprockets.right;
+        for (node, seen) in template.iter().zip(&mut found) {
+            *seen |= name == *node;
+        }
+    }
+    vehicle
+        .then(|| template.into_iter().zip(found).find(|(_, seen)| !seen))
+        .flatten()
+        .map(|(node, _)| node)
+}
+
 /// Hide the glb's template link the moment it appears.
 ///
 /// `Added<Name>` rather than a one-shot latch: hiding is idempotent and costs a filtered scan of
@@ -666,7 +716,9 @@ fn hide_link_template(mut commands: Commands, fresh: Query<(Entity, &Name), Adde
 /// build the mirrored mesh, the shared material, and both sides' canonical frames.
 ///
 /// It retries every frame until the glb scene has landed (the scene load is async and the rig build
-/// does not wait for it), and latches on inserting [`LinkTemplate`]. The name scan is global rather
+/// does not wait for it), and latches on inserting [`LinkTemplate`]. Once a pin marker exists its
+/// whole instance does ([`require_shoe_template`] refuses a view without them), so every missing
+/// piece after that is a broken export and refuses; only assets still loading wait. The name scan is global rather
 /// than a walk from a root because `Link` is a SCENE ROOT — a sibling of the hull node, not a
 /// descendant of it — and both tools spawn exactly one template.
 #[expect(
@@ -699,8 +751,14 @@ fn bind_link_template(
             _ => {}
         }
     }
-    let (Some(pin_start), Some(pin_end)) = (pin_start, pin_end) else {
-        return;
+    let (pin_start, pin_end) = match (pin_start, pin_end) {
+        (Some(start), Some(end)) => (start, end),
+        // No vehicle view has instanced yet.
+        (None, None) => return,
+        _ => panic!(
+            "track links: the view carries one of `{PIN_START_NODE}` / `{PIN_END_NODE}` without \
+             the other; re-export the shoe template with both pin markers"
+        ),
     };
     // The `Link` NODE is resolved structurally — the pin markers' nearest ancestor wearing the
     // name — never by the name alone: bevy names a mesh PRIMITIVE child after its node too, so a
@@ -720,16 +778,19 @@ fn bind_link_template(
             break;
         }
     }
-    let Some(link_entity) = link else {
-        warn_once!(
-            "track links: pin markers present but no `{LINK_NODE}` ancestor — template not bound"
-        );
-        return;
+    let link_entity = link.unwrap_or_else(|| {
+        panic!(
+            "track links: the pin markers have no `{LINK_NODE}` ancestor; parent \
+             `{PIN_START_NODE}` and `{PIN_END_NODE}` under the shoe template node and re-export"
+        )
+    });
+    let marker = |entity| {
+        transforms
+            .get(entity)
+            .expect("a spawned glTF node carries its authored Transform")
+            .translation
     };
-    let (Ok(pin_start), Ok(pin_end)) = (transforms.get(pin_start), transforms.get(pin_end)) else {
-        return;
-    };
-    let (pin_start, pin_end) = (pin_start.translation, pin_end.translation);
+    let (pin_start, pin_end) = (marker(pin_start), marker(pin_end));
 
     // THE SCALE CONTRACT, checked before anything is built from these nodes: the template must be
     // authored at unit scale, so the placement math below is the geometry and nothing else.
@@ -749,7 +810,7 @@ fn bind_link_template(
     // resolution above). Direct children only, then the node itself: `Link_Box` is also a child of
     // `Link` and carries its own primitive one level further down, so a descendant search could
     // pick up the marker box instead.
-    let Some((shoe_entity, source)) = children
+    let (shoe_entity, source) = children
         .get(link_entity)
         .ok()
         .into_iter()
@@ -761,9 +822,13 @@ fn bind_link_template(
                 .ok()
                 .map(|mesh| (link_entity, mesh))
         })
-    else {
-        return;
-    };
+        .unwrap_or_else(|| {
+            panic!(
+                "track links: the `{LINK_NODE}` template node carries no mesh primitive; \
+                 re-export the view with the shoe mesh on `{LINK_NODE}`"
+            )
+        });
+    // The primitive's mesh asset is not in `Assets<Mesh>` yet: still loading.
     let Some(shoe) = meshes.get(&source.0) else {
         return;
     };
@@ -772,13 +837,12 @@ fn bind_link_template(
     // without a material would render default-white on all 194 instances, and a fallback built here
     // would silently re-introduce the code-side steel this module just stopped owning — so a broken
     // export refuses at bind time, the same policy as the scale contract above.
-    let Ok(material) = materials_of.get(shoe_entity) else {
-        error_once!(
-            "track links: the `{LINK_NODE}` shoe primitive carries no material - re-export the glb \
-             with `{LINK_MATERIAL}` assigned to it; refusing to bind"
-        );
-        return;
-    };
+    let material = materials_of.get(shoe_entity).unwrap_or_else(|_| {
+        panic!(
+            "track links: the `{LINK_NODE}` shoe primitive carries no material; re-export the glb \
+             with `{LINK_MATERIAL}` assigned to it"
+        )
+    });
     let triangles = shoe.indices().map_or(0, Indices::len) / 3;
     let mirrored = mirrored_mesh(shoe);
 
@@ -789,7 +853,7 @@ fn bind_link_template(
     // The CHAIN is resolved from the shoe primitive's own MESH ASSET, which is the identity a
     // certificate chain is per (shared meshes share a chain), and the key the lookup lands on is
     // checked against [`shoe_chain_key`] — a wrong join would mirror some other part's rungs onto
-    // the belt.
+    // the belt, so it refuses: the certificate and the view disagree about which part is the shoe.
     //
     // AN ABSENT CHAIN IS NOT A REFUSAL. A re-cut that earns the shoe no rung is legitimate (the
     // build's own coverage owns that question), and the law is source detail, silently — so the
@@ -798,26 +862,24 @@ fn bind_link_template(
     // taken WHOLE: a template holding fewer levels than the certificate names would leave a
     // distance band with no shoe drawn in it at all, so a rung record still loading starves the
     // bind exactly like the base shoe does.
+    // `geometry_lod` has not resolved the certificate's chains yet.
     let Some(chains) = chains else {
         return;
     };
-    let chain = chains.of_mesh(source.0.id()).filter(|chain| {
-        let matched = chain.key() == shoe_chain_key();
-        if !matched {
-            warn_once!(
-                "track links: the `{LINK_NODE}` shoe primitive resolves to chain `{}` and the \
-                 shoe's chain is `{}` — binding at source detail rather than wearing another \
-                 part's rungs",
-                chain.key(),
-                shoe_chain_key(),
-            );
-        }
-        matched
-    });
+    let chain = chains.of_mesh(source.0.id());
+    if let Some(chain) = &chain {
+        assert_eq!(
+            chain.key(),
+            shoe_chain_key(),
+            "track links: the `{LINK_NODE}` shoe primitive resolves to another part's certified \
+             chain; rebuild the LOD certificate so the shoe's mesh keys its own chain"
+        );
+    }
     let rungs: &[Handle<Mesh>] = chain.map_or(&[], ChainRef::rungs);
     let mut lods = Vec::with_capacity(rungs.len());
     let mut tris = vec![triangles];
     for (index, handle) in rungs.iter().enumerate() {
+        // A rung record still loading.
         let Some(shoe) = meshes.get(handle) else {
             return;
         };
@@ -828,19 +890,16 @@ fn bind_link_template(
             // loaded rung record any more. The rung handles live in `GeometryLodChains`, which is
             // what keeps the records from unloading.
             Ok(pair) => lods.push(pair.map(|shoe| meshes.add(shoe))),
-            Err(err) => {
-                // Same policy as the missing-material refusal above: a reduced shoe wears the base
-                // shoe's NORMAL-MAPPED material, and bevy's PBR shader silently skips normal
-                // mapping on a mesh with no tangents. Binding an untangented level would ship a
-                // band across the battlefield where every track flattens out.
-                error_once!(
-                    "track links: the shoe's rung {} cannot be given tangents ({err}) — it renders \
-                     under the normal-mapped `{LINK_MATERIAL}` and would light flat without them; \
-                     refusing to bind",
-                    index + 1,
-                );
-                return;
-            }
+            // Same policy as the missing-material refusal above: a reduced shoe wears the base
+            // shoe's NORMAL-MAPPED material, and bevy's PBR shader silently skips normal mapping
+            // on a mesh with no tangents. Binding an untangented level would ship a band across
+            // the battlefield where every track flattens out.
+            Err(err) => panic!(
+                "track links: the shoe's rung {} cannot be given tangents ({err}); it renders \
+                 under the normal-mapped `{LINK_MATERIAL}`, so rebuild the rung with UVs, normals \
+                 and an indexed triangle list",
+                index + 1,
+            ),
         }
     }
     // No switch at all when the shoe earned no rung: the base shoe owns every distance.
@@ -1058,6 +1117,12 @@ fn link_transform(frame: &LinkFrame, lateral_x: f32, a: Vec2, b: Vec2) -> Transf
 /// keeps every placement positive-determinant — a `Vec3::new(-1, 1, 1)` scale in a link's pose
 /// would push exactly this winding flip into the renderer, where it cannot be fixed.
 fn mirrored_mesh(source: &Mesh) -> Mesh {
+    assert_eq!(
+        source.primitive_topology(),
+        PrimitiveTopology::TriangleList,
+        "track links: the shoe mesh must be a triangle list to be mirrored; re-export it \
+         triangulated"
+    );
     let mut mesh = source.clone();
     for attribute in [Mesh::ATTRIBUTE_POSITION, Mesh::ATTRIBUTE_NORMAL] {
         if let Some(VertexAttributeValues::Float32x3(values)) = mesh.attribute_mut(attribute) {
@@ -1082,10 +1147,6 @@ fn mirrored_mesh(source: &Mesh) -> Mesh {
             v[0] = -v[0];
             v[3] = -v[3];
         }
-    }
-    if mesh.primitive_topology() != PrimitiveTopology::TriangleList {
-        warn!("track links: mirror skipped - the shoe mesh is not a triangle list");
-        return mesh;
     }
     match mesh.indices_mut() {
         Some(Indices::U16(indices)) => {
@@ -1282,6 +1343,30 @@ mod tests {
     use std::f32::consts::FRAC_PI_2;
 
     use super::*;
+
+    /// A VEHICLE VIEW LANDS WITH ITS WHOLE SHOE TEMPLATE OR IS REFUSED. The bind waits only for
+    /// a view that has not instanced; a mutant that drops a template node from the check, or
+    /// demands the template of a glb with no running gear (a tree's), fails here.
+    #[test]
+    fn a_vehicle_view_without_its_shoe_template_is_refused() {
+        let sprockets = crate::spec::SideNodes {
+            left: "Sprocket_L".into(),
+            right: "Sprocket_R".into(),
+        };
+        let whole = [
+            "Hull",
+            "Sprocket_R",
+            LINK_NODE,
+            PIN_START_NODE,
+            PIN_END_NODE,
+        ];
+        assert_eq!(missing_template_node(whole, &sprockets), None);
+        for node in [LINK_NODE, PIN_START_NODE, PIN_END_NODE] {
+            let lacking = whole.into_iter().filter(|name| *name != node);
+            assert_eq!(missing_template_node(lacking, &sprockets), Some(node));
+        }
+        assert_eq!(missing_template_node(["Trunk", "Crown"], &sprockets), None);
+    }
 
     /// A FIXTURE template, re-measured from `tiger_1.glb` on 2026-07-26 (the export that APPLIED the
     /// link scale): the two pin markers in `Link`-local space — which, the node now carrying unit
