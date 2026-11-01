@@ -385,7 +385,8 @@ mod tests {
     /// take no print, a ground with no `friction` would hand the terrain collider Avian's
     /// default, a ground with no `dust` would lift a cloud nobody stated, and a table lacking a pack's ground would leave that pack nothing to read. Each is
     /// refused at parse, naming what is missing, so no consumer meets one. Mutant: a
-    /// `#[serde(default)]` on either field, or a parse that skips the pack check, loads one of
+    /// `#[serde(default)]` on a required field (including each soil fact), or a parse that skips
+    /// the pack check, loads one of
     /// these. The terrain collider reads the base ground's friction under the pair rule.
     #[test]
     fn a_ground_that_states_too_little_is_refused_at_load() {
@@ -396,6 +397,14 @@ mod tests {
             ("print", format!("friction: 0.5, {dust}")),
             ("friction", format!("{block}, {dust}")),
             ("dust", format!("{block}, friction: 0.5")),
+            (
+                "colour_srgb",
+                format!("{block}, friction: 0.5, dust: (erodibility: 0.5)"),
+            ),
+            (
+                "erodibility",
+                format!("{block}, friction: 0.5, dust: (colour_srgb: (0.5, 0.4, 0.3))"),
+            ),
         ] {
             let error = GroundTypes::parse(&table_text(&gravel))
                 .expect_err(missing)
@@ -422,7 +431,8 @@ mod tests {
     /// softness or cap prints upward, and a roughness gain of 0 or less is no surface. Every
     /// terrain collider and the prints read the table through [`GroundTypes::parse`]. Mutant: a
     /// parse that skips a field's check, or checks only one of sign and finiteness, loads one of
-    /// these. A zero friction is in domain and loads, and a misspelt field is refused rather than
+    /// these. Every soil colour channel is checked independently: lifting dust relies on all of
+    /// them. A zero friction is in domain and loads, and a misspelt field is refused rather than
     /// read as a ground that states none.
     #[test]
     fn a_value_out_of_domain_is_refused_at_load_naming_the_ground() {
@@ -434,14 +444,18 @@ mod tests {
             friction,
             erodibility,
             red,
-        ]: [&str; 7]| {
+            green,
+            blue,
+        ]: [&str; 9]| {
             format!(
                 "print: (softness_mm_per_kpa: {softness}, depth_cap_mm: {cap}, darkening: \
                  {darkening}, roughness_gain: {roughness}), friction: {friction}, \
-                 dust: (erodibility: {erodibility}, colour_srgb: ({red}, 0.4, 0.3))"
+                 dust: (erodibility: {erodibility}, colour_srgb: ({red}, {green}, {blue}))"
             )
         };
-        let ok = ["0.5", "50.0", "0.2", "1.0", "0.5", "0.5", "0.5"];
+        let ok = [
+            "0.5", "50.0", "0.2", "1.0", "0.5", "0.5", "0.5", "0.4", "0.3",
+        ];
         let fields = [
             "print.softness_mm_per_kpa",
             "print.depth_cap_mm",
@@ -450,13 +464,17 @@ mod tests {
             "friction",
             "dust.erodibility",
             "dust.colour_srgb",
+            "dust.colour_srgb",
+            "dust.colour_srgb",
         ];
-        let bad: [&[&str]; 7] = [
+        let bad: [&[&str]; 9] = [
             &["-0.1", "inf", "NaN"],
             &["-1.0", "inf", "NaN"],
             &["-0.1", "1.1", "NaN"],
             &["0.0", "-1.0", "inf", "NaN"],
             &["-0.1", "inf", "-inf", "NaN"],
+            &["-0.1", "1.1", "NaN"],
+            &["-0.1", "1.1", "NaN"],
             &["-0.1", "1.1", "NaN"],
             &["-0.1", "1.1", "NaN"],
         ];

@@ -243,3 +243,10 @@ end diameter, asserts both against its emission, and reports the observed lifeti
 MEASURED over the survey: spawned lives 2.003-2.499 s across the shipped grounds,
 inside the authored 2.0-2.5 s range. All 22 muzzle/citation tests, formatting and CI clippy pass.
 Fixed in "vfx: measure spawned dust lifetimes in the survey (#236)".
+
+Claude's ground-colour test P3 is **verified** as a coverage gap. Production already refuses
+missing soil colour and out-of-domain channels. The tests now omit each soil field and vary
+red, green and blue independently. MEASURED: a temporary default-colour mutant and skipped
+green/blue domain checks make both strengthened load tests fail. Both mutants are removed;
+no load rule or authored ground value changes.
+Fixed in "assets: guard every required soil colour channel (#236)".
