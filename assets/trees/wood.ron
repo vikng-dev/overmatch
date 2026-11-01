@@ -1,33 +1,38 @@
 // The wood data of the game's environment destruction and damage model, game state only.
-// Read by `src/trees.rs` with species.ron before play. Current HP and ram parameters are shared;
-// `structure` holds required per-species material facts for the structural laws: the grain, and
-// the root plate the trunk holds to the ground by. No structural consumer reads these facts yet.
-// The wall design owns the model narrative.
+// Read by `src/trees.rs` with species.ron before play: the trunk's substance and HP pools, shared
+// by every species, and per species (`structure`) the facts a trunk is built from as a structure
+// (`crate::trees::TreeBody::structure`): its segments chunks of one wood, joined by the wood's
+// own along-grain seam, the trunk held to the ground by its species' root plate. The wall design
+// (`.agents/docs/design/wall-destruction.md`, "Trees are structures by the same laws") owns the
+// model narrative.
 //
 // `structure.<species>.along_grain_rupture_pa` (Pa): green-wood bending modulus of rupture,
-// longitudinal extreme-fibre stress. The section strength law will compare it with bending
-// stress at a trunk section. It is distinct from the perpendicular-to-grain timber seam in
-// materials.ron, which building joints read.
+// longitudinal extreme-fibre stress: the tensile strength of the trunk's seam between two
+// segments, which the section strength law compares with the bending stress there. It is
+// distinct from the perpendicular-to-grain timber seam in materials.ron, which building joints
+// read.
 // `along_grain_fracture_j_per_m2` (J/m²): mode-I opening work for tension ALONG the fibres,
-// across a trunk section (LR/LT fracture systems). The blow law will spend it per separated
-// section area. It is NOT splitting along the fibres (RL/TL), whose stress
+// across a trunk section (LR/LT fracture systems): the seam's fracture energy, which the blow law
+// spends per separated section area. It is NOT splitting along the fibres (RL/TL), whose stress
 // is across the grain. The saturated softwood analogue is explicitly ASSUMED for every shipped
 // species; no matched green longitudinal-fracture measurements were found. It must not be called
 // a measured tree material property. The cited FHWA table itself models its parallel values from
 // correlations.
+// `fresh_density_kg_per_m3` (kg/m³): the green wood's density, its water in it, the mass a
+// segment's volume holds (its weight in the strength law) and the FRESH STEM MASS a root plate's
+// coefficient multiplies. The substance's density in materials.ron is dry timber's and never
+// stands in for it.
 // `anchor`: the root plate the trunk holds to the ground by, a `RootPlate` kind of
-// `assets/materials/attachments.ron`, whose row carries its numbers, sources and soil. Its
-// coefficient multiplies FRESH STEM MASS; the dry-timber substance density never stands in for it.
+// `assets/materials/attachments.ron`, whose row carries its numbers, sources and soil.
 //
-// `substance` is the trunk's substance, a hard key of `assets/materials/materials.ron`.
+// `substance` is the trunk's substance, a hard key of `assets/materials/materials.ron` that
+// states bulk facts (its chunks' material in the structure laws).
 // `hp_per_m2` is a trunk segment's HP pool per square metre of its cross-section at mid-height
 // (the instance's, scale applied): a segment whose two end radii average r has
 // `round(hp_per_m2 × π r²)` HP points, at least one. Each segment's pool takes the energy a round
 // loses crossing that segment at the one energy-to-HP rate every hard pool shares
-// (`assets/ballistics/energy_dose.ron`), and the segment whose pool empties is where the trunk
-// breaks.
-// `fell_k` (N·s/m², per m³ of dbh³) is the ram threshold's constant: a tick's
-// `Σ impulse × lever ≥ fell_k × dbh³` fells the trunk.
+// (`assets/ballistics/energy_dose.ron`); a pool emptied opens the seam at its segment's base, so
+// the trunk breaks there by the same structural state a body's contact breaks it by.
 //
 // PROVENANCE: every number is authored `(value, Kind("source or reason"))`, Kind one of Measured,
 // Derived, Tuned, Resolution, Unknown (`src/provenance.rs`); a value without one does not load. The
@@ -39,11 +44,6 @@ Wood(
         so the 88 mm APCBC's centred hit there (156 HP, MEASURED) empties it at the second shot;
         shots to break every cell MEASURED in
         .agents/scratch/damage-model-2026-10-29/segment-pools-results.md")),
-    fell_k: (9.0e5, Derived("ram-impulses.md 2026-10-26: a tick's Σ impulse × lever MEASURED in
-        track_sandbox at 64 Hz, 6 substeps — sustained push 13.3 kN·s·m, 5 km/h ram 105–108,
-        10 km/h 119–151, 20 km/h 248–303; at 9.0e5 N·s/m² a 0.50 m trunk (threshold 112 kN·s·m)
-        holds a push and falls at 10 km/h, a 0.42 m one (67) falls at a 5 km/h bump. Measured on
-        a spruce; one value for all wood")),
     structure: {
         "norway_spruce": StructuralWood(
             along_grain_rupture_pa: (36.0e6, Measured("MEASURED transcription: Merlin et al.,
@@ -57,6 +57,13 @@ Wood(
                 conversion). Source uses correlated model values for southern yellow pine and
                 Douglas fir, no measured parallel-mode data. Species and living-trunk transfer
                 are unverified. https://www.fhwa.dot.gov/publications/research/safety/04097/04097.pdf")),
+            fresh_density_kg_per_m3: (850.0, Measured("MEASURED transcription: ForestGALES fgr
+                package species parameters (tom-locatelli/fgr, data/ud_species_parameters.rda,
+                read 2026-11-01), row NS,
+                stem_density 850 kg/m3: the green wood density the model multiplies stem
+                volume by for the fresh stem mass its overturning coefficients read (fgr
+                manual 16092020). The same table states NS mor 3.6e7 Pa, matching
+                along_grain_rupture_pa. A model parameter, not a measurement of these trees")),
             anchor: "norway_spruce_root_plate",
         ),
         "scots_pine": StructuralWood(
@@ -68,6 +75,10 @@ Wood(
                 Table 10, saturated parallel mode I 2.234 MPa cm = 22340 J/m2 (DERIVED conversion).
                 Correlated model values for southern yellow pine and Douglas fir; species and
                 living-trunk transfer unverified. Same FHWA source as norway_spruce above.")),
+            fresh_density_kg_per_m3: (850.0, Measured("MEASURED transcription: fgr species
+                parameters, row SP, stem_density 850 kg/m3, green wood density (same source as norway_spruce above; the same
+                table states SP mor 4.6e7 Pa). A model parameter, not a measurement of these
+                trees")),
             anchor: "scots_pine_root_plate",
         ),
         "silver_birch": StructuralWood(
@@ -82,6 +93,10 @@ Wood(
                 (DERIVED conversion). Correlated southern yellow pine/Douglas fir model value;
                 neither species nor living-trunk transfer is verified. No suitable birch
                 longitudinal-opening measurement found. Same FHWA source as norway_spruce above.")),
+            fresh_density_kg_per_m3: (900.0, Tuned("ASSUMED species transfer of the MEASURED
+                transcription in the fgr species parameters, row BI (birch, not specifically Betula pendula),
+                stem_density 900 kg/m3, green wood density (same source as norway_spruce
+                above; the same table states BI mor 6.3e7 Pa)")),
             anchor: "silver_birch_root_plate",
         ),
     },

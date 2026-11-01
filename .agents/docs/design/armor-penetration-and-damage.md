@@ -821,9 +821,11 @@ the diameter while a line's dose grows with its chord, so thin wood breaks in fe
 88 mm APCBC breaks the shipped fir's base (193 HP, 0.405 m) at the second centred shot, its
 0.29 m section 10 m up and its 0.13 m top 20 m up at the first, and a 0.2 m young tree or a
 0.1 m sapling at the first; the machine gun breaks the sapling in 34 centred hits and the fir's
-base in 187 (MEASURED, `.agents/scratch/damage-model-2026-10-29/segment-pools-results.md`). The
-ram threshold `fell_k` is the wood row's too, against the breast-height diameter. A species is
-the generator's look and ranges only: a player cannot tell that a round lost a little more speed
+base in 187 (MEASURED, `.agents/scratch/damage-model-2026-10-29/segment-pools-results.md`). An
+emptied pool opens the joint at its segment's base in the trunk's structural state, the one a
+body's contact breaks too (`wall-destruction.md`, "Trees are structures by the same laws"). A
+species' structural facts (grain, green density, root plate) are its own; its HP rate is not, and
+for the dose a species is the generator's look and ranges only: a player cannot tell that a round lost a little more speed
 in one species than another, while trunk thickness is simple and visible. A round entering a trunk turns by the wood's share of the
 reference resistance, 4 % of the reference steel's bend (§13.5). Out of scope, built only if play
 shows them missed: per-round-type ricochet and normalization, and the drag form under the energy

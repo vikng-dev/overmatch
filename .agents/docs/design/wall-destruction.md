@@ -444,15 +444,14 @@ Reopen it only for a structure whose bending is visible: a swaying timber barn, 
 
 **Trees are structures by the same laws.**
 A trunk's segments are chunks, its segment boundaries bonded joints of the wood along the grain, its root plate the anchor; the cut is wherever bending stress peaks, never a fixed segment.
-`assets/trees/wood.ron` holds required structural rows for every declared species, refused at
-load if grain rupture strength, longitudinal opening energy or the anchor is absent. Each row
-names its sources and any analogue assumptions; it is reserved data, with no structural tree
-consumer yet. The trunk's join to the ground is an attachment kind in the shared list (owner
-direction, 2026-11-01): a species' `anchor` names a `RootPlate` kind of `attachments.ron`, its
-critical overturning moment per kilogram of fresh stem mass, whose provenance binds the soil and
-rooting-depth domain. It supplies ultimate strength, not separation work or a conversion from
-the existing dry-timber substance density.
-`fell_k` and the ram law go.
+A trunk is one fracturing component, as a brick wall is (owner direction, 2026-11-01): its segments are chunks of one wood joined by the wood's own along-grain seam, so it breaks wherever the load beats a section and no segment boundary is a planted weak joint.
+`assets/trees/wood.ron` holds required structural rows for every declared species, refused at load if grain rupture strength, longitudinal opening energy, green density or the anchor is absent; each row names its sources and any analogue assumptions.
+The green density sets each segment's mass and the fresh stem mass; the dry-timber substance density never stands in for it.
+The trunk's join to the ground is an attachment kind in the shared list: a species' `anchor` names a `RootPlate` kind of `attachments.ron`, its critical overturning moment per kilogram of fresh stem mass, whose provenance binds the soil and rooting-depth domain.
+It states ultimate strength, no separation work: the anchor holds the moment `C m` as a seam across the base disc (`C m / S₀ − m g / A₀`, so the Navier law opens it exactly at `C m` under the trunk's own weight), and a blow that beats it pays only the lift of the tree over its hinge.
+`crate::trees` builds the structure at spawn; contacts reach it from the solver's transfers as they reach a wall, and a round's emptied segment pool opens the joint at that segment's base, so rounds and contacts share one structural state and one cut, its lowest open joint.
+The ram law (`fell_k`, a per-tick angular impulse read off `normal_impulse`) is deleted.
+DERIVED for the shipped fir_1 (a 0.40 m Norway spruce, 1,202 kg fresh): its root plate holds 186 kN·m and its base section 254 kN·m, so a press at a hull's 1.5 m, below its first seam at 1.8 m, uproots it at 124 kN where the old ram law held every sustained push on a trunk over 0.245 m.
 A freed trunk is a dynamic body, like a wall piece: it strikes with its own mass, leaves with the plastic share of the blow that freed it, is stopped by any body, and rests by Avian's sleep.
 
 **Walls fail locally by punch rings.**

@@ -1,16 +1,18 @@
-//! Trees in the game's damage model: a hard body of segments, each with its own HP pool, and a
-//! state. Game rounds dose it, bodies push it, and it falls at a segment.
+//! Trees in the game's damage model and environment destruction (game state only): a hard body of
+//! segments, each with its own HP pool, a structure the walls' laws read, and a state. Game rounds
+//! dose it, bodies load it, and it falls at a segment.
 //!
 //! A TREE IS DATA (ADR-0034). `assets/trees/<id>/<id>.tree.ron` ([`TreeAsset`]) is the trunk as a
 //! chain of tapered segments, each boundary's radius stored once — every segment's base radius,
 //! then the tip's — so adjacent segments meet by construction and a segment's top radius is read
 //! through [`TreeKind::r_top_m`]. TREES ARE JUST WOOD: `assets/trees/wood.ron` ([`Wood`]) is what
-//! the sim reads of every tree — the wood substance, the HP per square metre of a segment's
-//! cross-section and the ram threshold, plus validated structural wood facts reserved for the
-//! structure laws — and `assets/trees/species.ron` only names the species an
-//! asset may claim (the generator's look and ranges; the sim reads no value of a row). All three
-//! are read once at startup into the map's [`TreeLibrary`] and validated there; every number the
-//! sim uses comes from them, the glb is the view (ADR-0014).
+//! the sim reads of every tree — the wood substance and the HP per square metre of a segment's
+//! cross-section, and per species the grain, the green density and the root plate the trunk is
+//! built from as a structure, its root plate a kind of `assets/materials/attachments.ron` — and
+//! `assets/trees/species.ron` only names the species an asset may claim (the generator's look and
+//! ranges; the sim reads no value of a row). They are read once at startup into the map's
+//! [`TreeLibrary`] and validated there; every number the sim uses comes from them, the glb is the
+//! view (ADR-0014).
 //!
 //! THE BODY. One static root per tree, carrying the state, and one child per segment
 //! ([`TreeSegment`]): its own convex frustum collider (two 12-gon rings) on `[Terrain, Armor]`
@@ -22,11 +24,20 @@
 //! collector reads one solid per collider. The instance's uniform scale is applied to the
 //! dimensions at spawn and the root's own scale is one.
 //!
+//! THE TRUNK IS A STRUCTURE ([`TreeBody::structure`]), one fracturing component as a brick wall
+//! is: its segments chunks of one wood, joined by the wood's own along-grain seam, the trunk held
+//! to the ground by its species' root plate, an attachment kind of the shared list. Its
+//! structural state ([`TrunkState`]) is the one definition of where it breaks: any body's contact
+//! loads it through the walls' laws, read from the solver's transfers ([`fell_on_contacts`],
+//! [`load_trunk`]), so the cut emerges where bending stress beats a section, or at the root plate
+//! when that is weaker; a segment's emptied pool opens the joint at its base.
+//!
 //! THE STATE. [`TreeState`] is `Standing` or `Down { cut, dir }`: the segment the trunk broke at
-//! and the fall azimuth's bin. The authority sets it once — when a segment's pool empties
-//! ([`PoolEmptied`]: the cut is that segment, the direction the dose's own) or when the torque
-//! any body's contacts put on the trunk in one tick beats `fell_k × dbh³` — with the tick it fell
-//! at ([`Fell`]), and every peer derives the rest from the two: the body here, the glb and the
+//! and the fall azimuth's bin. The authority sets it once — when the trunk's structural state
+//! first opens a joint: a segment's pool a round's or a field's dose emptied ([`PoolEmptied`]:
+//! the cut is that segment, the direction the dose's own) or a body's contact that beats a
+//! section (the direction of the momentum it put through the trunk) — with the tick it fell at
+//! ([`Fell`]), and every peer derives the rest from the two: the body here, the glb and the
 //! fall's presentation in [`view`], which the sim never waits on. One break per tree: a tree that
 //! is down keeps every pool as the doses left it, its wood still taking a round's dose, and a pool
 //! emptied on it breaks nothing more ([`fell_on_pool_emptied`] reads standing trees only).
@@ -53,8 +64,8 @@ use std::sync::Arc;
 
 use avian3d::collider_tree::{ColliderTrees, update_moved_collider_aabbs};
 use avian3d::prelude::{
-    Collider, ColliderOf, ColliderTransform, CollisionLayers, ContactGraph, ContactPair, LayerMask,
-    Position, RigidBody, Rotation, SpatialQuery, SpatialQueryFilter,
+    Collider, ColliderOf, ColliderTransform, CollisionLayers, LayerMask, Position, RigidBody,
+    Rotation, SpatialQuery, SpatialQueryFilter,
 };
 use avian3d::schedule::PhysicsSystems;
 use bevy::ecs::schedule::ScheduleConfigs;
@@ -64,7 +75,11 @@ use bevy::prelude::*;
 use crate::Layer;
 use crate::ballistics::{BallisticVolume, ComponentHealth, PoolEmptied, VolumeMaterial};
 use crate::buildings::attachments::{ATTACHMENTS_PATH, Attachments, RootPlate};
-use crate::buildings::fracture::GRAVITY;
+use crate::buildings::fracture::{
+    self, Bond, Chunk, GRAVITY, Joint, Load, Masonry, Origin, Seam, SectionCache, Shear, Side,
+    Structure, WallState,
+};
+use crate::contact_transfer::ContactTransfers;
 use crate::provenance::Sourced;
 use crate::scatter::MapInstance;
 use crate::substances::SubstanceRegistry;
@@ -87,9 +102,6 @@ const WOOD_FILE: &str = "wood.ron";
 /// float rounding of a pure yaw (a few ulps), never a real lean — the resting pose reads the
 /// trunk's heights as upright prefix sums, so a leaning trunk would lie where it never stood.
 const UPRIGHT_EPSILON: f32 = 1e-6;
-
-/// The height above the base the breast-height diameter is read at, metres at asset scale 1.
-pub(crate) const BREAST_HEIGHT_M: f32 = 1.3;
 
 /// Most segments a trunk may have: `cut` travels as one byte, and the wire word reserves
 /// `cut + 1 == 0` for a standing tree.
@@ -122,18 +134,16 @@ pub(crate) struct TreeAsset {
 /// generator's (look and ranges) and are not read here.
 type SpeciesTable = BTreeMap<String, serde::de::IgnoredAny>;
 
-/// `wood.ron`: current shared tree parameters and the species rows reserved for structure laws.
+/// `wood.ron`: the trunk's substance and HP pools, shared, and every species' structure facts.
 #[derive(Debug, Clone, PartialEq, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Wood {
-    /// The trunk's substance, a hard key of the substance registry.
+    /// The trunk's substance, a hard key of the substance registry that states bulk facts.
     substance: String,
     /// A segment's HP pool per square metre of its mid-height cross-section.
     hp_per_m2: Sourced<f32>,
-    /// The ram threshold's constant, N·s/m²: a tick's `Σ impulse × lever` fells the trunk at
-    /// `fell_k × dbh³`.
-    fell_k: Sourced<f32>,
-    /// Every declared species has grain and root-plate facts, checked before any instance spawns.
+    /// Every declared species has grain, fresh-mass and root-plate facts, checked before any
+    /// instance spawns.
     structure: StructureRows,
 }
 
@@ -143,11 +153,12 @@ struct Wood {
 struct StructuralRow {
     along_grain_rupture_pa: Sourced<f32>,
     along_grain_fracture_j_per_m2: Sourced<f32>,
+    fresh_density_kg_per_m3: Sourced<f32>,
     anchor: String,
 }
 
-/// A species' grain and root-plate facts. The structural strength, opening work and anchor
-/// laws will read these; the current HP and ram laws do not. The wall design owns the model.
+/// A species' grain, fresh-mass and root-plate facts: what its trunk is built from as a
+/// structure ([`TreeBody::structure`]).
 #[derive(Debug, Clone, PartialEq)]
 struct StructuralWood {
     /// Modulus of rupture under bending, longitudinal extreme-fibre stress, Pa.
@@ -155,23 +166,28 @@ struct StructuralWood {
     /// Mode-I opening work per section area, J/m²: tension along the grain, breaking across
     /// fibres (LR/LT), not the RL/TL splitting energy of a building's timber seam.
     along_grain_fracture_j_per_m2: f32,
+    /// The green wood's density, kg/m³: a segment's mass per volume, and the fresh stem mass a
+    /// root plate's coefficient multiplies.
+    fresh_density_kg_per_m3: f32,
     /// The root plate the trunk holds to the ground by: the `RootPlate` kind of the shared
     /// attachment list the row's `anchor` names, which binds its species, soil and rooting depth.
     root_plate: RootPlate,
 }
 
 impl StructuralWood {
-    /// Resolve row `row` against the shipped attachment list: its two grain facts positive and
+    /// Resolve row `row` against the shipped attachment list: its three numbers positive and
     /// finite, its anchor a root plate the list holds.
     fn resolve(row: &str, authored: StructuralRow) -> Result<Self, String> {
         let StructuralRow {
             along_grain_rupture_pa: Sourced(rupture),
             along_grain_fracture_j_per_m2: Sourced(fracture),
+            fresh_density_kg_per_m3: Sourced(density),
             anchor,
         } = authored;
         for (field, value) in [
             ("along_grain_rupture_pa", rupture),
             ("along_grain_fracture_j_per_m2", fracture),
+            ("fresh_density_kg_per_m3", density),
         ] {
             if !value.is_finite() || value <= 0.0 {
                 return Err(format!(
@@ -186,6 +202,7 @@ impl StructuralWood {
         Ok(Self {
             along_grain_rupture_pa: rupture,
             along_grain_fracture_j_per_m2: fracture,
+            fresh_density_kg_per_m3: density,
             root_plate,
         })
     }
@@ -214,9 +231,10 @@ impl<'de> serde::Deserialize<'de> for StructureRows {
                 while let Some(name) = access.next_key::<String>()? {
                     let row: StructuralRow = access.next_value().map_err(|err| {
                         A::Error::custom(format!(
-                            "structure row {name:?}: {err}; author along_grain_rupture_pa (Pa) \
-                             and along_grain_fracture_j_per_m2 (J/m²), each with provenance, and \
-                             the anchor, a root plate of {ATTACHMENTS_PATH}"
+                            "structure row {name:?}: {err}; author along_grain_rupture_pa (Pa), \
+                             along_grain_fracture_j_per_m2 (J/m²) and fresh_density_kg_per_m3 \
+                             (kg/m³), each with provenance, and the anchor, a root plate of \
+                             {ATTACHMENTS_PATH}"
                         ))
                     })?;
                     let row = StructuralWood::resolve(&name, row).map_err(A::Error::custom)?;
@@ -244,8 +262,9 @@ impl Wood {
             for name in species.keys() {
                 if !wood.structure.0.contains_key(name) {
                     return Err(format!(
-                        "structure row {name:?} is missing; author its along_grain_rupture_pa \
-                         and along_grain_fracture_j_per_m2 with their sources, and its anchor"
+                        "structure row {name:?} is missing; author its along_grain_rupture_pa, \
+                         along_grain_fracture_j_per_m2 and fresh_density_kg_per_m3 with their \
+                         sources, and its anchor"
                     ));
                 }
             }
@@ -276,13 +295,19 @@ pub(crate) struct TreeKind {
     pub(crate) substance: String,
     /// The friction its segments carry: the substance's (`substances::HardSubstance::contact_friction`).
     pub(crate) friction: avian3d::prelude::Friction,
-    pub(crate) fell_k: f32,
     /// HP points per square metre of a segment's mid-height cross-section
     /// ([`TreeBody::segment_hp`]).
     pub(crate) hp_per_m2: f32,
-    /// Breast-height diameter at asset scale 1, metres: twice the taper's radius at
-    /// [`BREAST_HEIGHT_M`] (DERIVED at load).
-    pub(crate) dbh_m: f32,
+    /// The wood's values as the structure laws read a chunk of it: the substance's bulk facts.
+    pub(crate) masonry: Masonry,
+    /// The seam between two segments of the trunk: the wood along its grain, its modulus of
+    /// rupture and its opening work across the fibres. It answers by the opening law alone: no
+    /// sourced shear pair holds a section of a trunk, so no punch ring forms in one.
+    pub(crate) grain: Seam,
+    /// The green wood's density, kg/m³ (the species' `fresh_density_kg_per_m3`).
+    pub(crate) fresh_density: f32,
+    /// The root plate the trunk holds to the ground by (the species' `anchor`).
+    pub(crate) root_plate: RootPlate,
 }
 
 impl TreeKind {
@@ -325,36 +350,40 @@ impl TreeKind {
         let friction = registry
             .contact_friction(&wood.substance)
             .map_err(|err| format!("{WOOD_FILE} substance: {err}"))?;
-        let (fell_k, hp_per_m2) = (wood.fell_k.0, wood.hp_per_m2.0);
-        for (name, value) in [("fell_k", fell_k), ("hp_per_m2", hp_per_m2)] {
-            if !positive(value) {
-                return Err(format!("{WOOD_FILE} {name} {value} is not positive"));
-            }
+        let masonry = Masonry::of(registry, &wood.substance)
+            .map_err(|err| format!("{WOOD_FILE} substance: {err}"))?
+            .ok_or_else(|| {
+                format!(
+                    "{WOOD_FILE} substance {:?} states no bulk facts in materials.ron: a trunk's \
+                     segments are chunks of it, so name a substance that states them",
+                    wood.substance
+                )
+            })?;
+        let structure =
+            wood.structure.0.get(&species).ok_or_else(|| {
+                format!("species {species:?} has no structure row in {WOOD_FILE}")
+            })?;
+        let hp_per_m2 = wood.hp_per_m2.0;
+        if !positive(hp_per_m2) {
+            return Err(format!("{WOOD_FILE} hp_per_m2 {hp_per_m2} is not positive"));
         }
-        let mut kind = Self {
+        Ok(Self {
             id: id.to_owned(),
             segments,
             r_tip_m,
             material,
             substance: wood.substance.clone(),
             friction,
-            fell_k,
             hp_per_m2,
-            dbh_m: 0.0,
-        };
-        if kind.height_m() <= BREAST_HEIGHT_M {
-            return Err(format!(
-                "{} m tall, shorter than breast height ({BREAST_HEIGHT_M} m)",
-                kind.height_m()
-            ));
-        }
-        kind.dbh_m = 2.0 * kind.radius_at(BREAST_HEIGHT_M);
-        Ok(kind)
-    }
-
-    /// Base to tip, metres at asset scale 1.
-    pub(crate) fn height_m(&self) -> f32 {
-        self.segments.iter().map(|segment| segment.height_m).sum()
+            masonry,
+            grain: Seam {
+                tensile: structure.along_grain_rupture_pa,
+                fracture_energy: structure.along_grain_fracture_j_per_m2,
+                shear: Shear::OpeningOnly,
+            },
+            fresh_density: structure.fresh_density_kg_per_m3,
+            root_plate: structure.root_plate,
+        })
     }
 
     /// Segment `k`'s top radius at asset scale 1: the boundary it shares with segment `k + 1`,
@@ -503,10 +532,11 @@ pub(crate) struct TreeBody {
     /// Segment bottoms above the base, then the tip: `prefix[k]` is segment `k`'s bottom,
     /// `prefix[n]` the tip.
     pub(crate) prefix: Vec<f32>,
-    /// Breast-height diameter: the kind's at the instance's scale.
-    pub(crate) dbh_m: f32,
     /// The instance's uniform scale, asset metres to world metres.
     pub(crate) scale: f32,
+    /// The trunk as the structure laws read it ([`Self::structure_of`]), in the tree's frame:
+    /// its base at the origin, `+Y` up the trunk, world metres.
+    pub(crate) structure: Structure,
 }
 
 impl TreeBody {
@@ -518,23 +548,94 @@ impl TreeBody {
             bottom += segment.height_m * scale;
         }
         prefix.push(bottom);
-        let dbh_m = kind.dbh_m * scale;
+        let structure = Self::structure_of(&kind, &prefix, scale);
         Self {
             kind,
             prefix,
-            dbh_m,
             scale,
+            structure,
         }
+    }
+
+    /// THE TRUNK AS A STRUCTURE, one fracturing component as a wall is, built from data at spawn
+    /// (ADR-0014). Chunk `k` is segment `k`: its frustum's volume, centroid and mass at the wood's
+    /// fresh density, of the wood's material. Joint `k` holds segment `k` at its base: joint 0 is
+    /// the anchor, the root plate holding the trunk to the ground; joint `k ≥ 1` is the wood's own
+    /// along-grain seam between segments `k − 1` and `k` ([`TreeKind::grain`]). Each is a disc of
+    /// the trunk's cross-section there, `π r²`, so a section's Navier second moment is the disc's
+    /// `π r⁴ / 4` and its peak bending stress `32 M / π d³`, beam bending exactly (DERIVED,
+    /// `fracture::weigh`): a trunk breaks wherever `M(z) / S(z)` beats its seam, no segment
+    /// boundary a planted weak joint.
+    ///
+    /// The root plate states a critical overturning moment, `C × m` for `C` its coefficient
+    /// (N·m/kg) and `m` the trunk's fresh mass, and no separation work. The anchor holds it as a
+    /// seam of tensile strength `C m / S₀ − m g / A₀` across the base disc (area `A₀`, section
+    /// modulus `S₀ = π r₀³ / 4`): the Navier peak there under the trunk's own weight and a moment
+    /// `M` is `M / S₀ − m g / A₀`, so it opens exactly when `M` reaches `C m` (DERIVED). Its
+    /// fracture energy is none, so a blow that beats its strength pays only the lift of the tree
+    /// over its hinge (`fracture::structural`).
+    fn structure_of(kind: &TreeKind, prefix: &[f32], scale: f32) -> Structure {
+        let radius = |k: usize| {
+            kind.segments
+                .get(k)
+                .map_or(kind.r_tip_m, |segment| segment.r_bottom_m)
+                * scale
+        };
+        let chunks: Vec<Chunk> = (0..kind.segments.len())
+            .map(|k| {
+                let (r0, r1, h) = (radius(k), radius(k + 1), prefix[k + 1] - prefix[k]);
+                let squares = r0 * r0 + r0 * r1 + r1 * r1;
+                let volume = PI * h * squares / 3.0;
+                // A frustum's centroid above its base: h (r0² + 2 r0 r1 + 3 r1²) / 4 (r0² + r0 r1
+                // + r1²) (DERIVED by integrating π r(z)² z along the linear taper).
+                let rise = h * (r0 * r0 + 2.0 * r0 * r1 + 3.0 * r1 * r1) / (4.0 * squares);
+                Chunk {
+                    volume,
+                    centroid: Vec3::Y * (prefix[k] + rise),
+                    mass: volume * kind.fresh_density,
+                    material: kind.masonry,
+                    buried: false,
+                }
+            })
+            .collect();
+        let mass: f32 = chunks.iter().map(|chunk| chunk.mass).sum();
+        let r0 = radius(0);
+        let (area, modulus) = (PI * r0 * r0, PI * r0 * r0 * r0 / 4.0);
+        let anchor = kind.root_plate.overturning_nm_per_kg * mass / modulus - mass * GRAVITY / area;
+        // DERIVED: positive while the base radius is under 4 C / g, about 60 m at the shipped
+        // plates' 146 N·m/kg.
+        assert!(
+            anchor.is_finite() && anchor > 0.0,
+            "a root plate holds a moment beyond its trunk's own weight's pressure, {anchor} Pa"
+        );
+        let disc = |k: usize, b: Side, seam: Seam| Joint {
+            a: k,
+            b,
+            area: PI * radius(k) * radius(k),
+            centroid: Vec3::Y * prefix[k],
+            normal: Vec3::Y,
+            bond: Bond::Bonded(seam),
+        };
+        let joints = std::iter::once(disc(
+            0,
+            Side::Ground,
+            Seam {
+                tensile: anchor,
+                fracture_energy: 0.0,
+                shear: Shear::OpeningOnly,
+            },
+        ))
+        .chain((1..chunks.len()).map(|k| Joint {
+            a: k - 1,
+            ..disc(k, Side::Chunk(k), kind.grain)
+        }))
+        .collect();
+        Structure { chunks, joints }
     }
 
     /// The trunk's world radius `height` world metres above the base.
     pub(crate) fn radius_at(&self, height: f32) -> f32 {
         self.kind.radius_at(height / self.scale) * self.scale
-    }
-
-    /// The torque (N·s·m per tick) a ram must put on the trunk to fell it: `fell_k × dbh³`.
-    pub(crate) fn fell_torque(&self) -> f32 {
-        self.kind.fell_k * self.dbh_m * self.dbh_m * self.dbh_m
     }
 
     /// Segment `k`'s HP pool, in whole points: the wood's HP per square metre times the
@@ -1371,6 +1472,7 @@ pub(crate) fn spawn(
             },
             RigidBody::Static,
             TreeState::Standing,
+            TrunkState::new(&body.structure),
             identity,
             body,
         ))
@@ -1393,27 +1495,74 @@ pub(crate) fn spawn(
     root
 }
 
-/// A standing tree one of whose segments a dose emptied falls, broken at THAT segment — only the
-/// doses that segment took count toward its break — along the round's travel, or for a field (no
-/// direction) away from the field's centre. A tree already down ignores it.
-pub(crate) fn fell_on_pool_emptied(
-    emptied: On<PoolEmptied>,
-    segments: Query<(&TreeSegment, &ChildOf)>,
-    mut trees: Query<(&mut TreeState, &Transform)>,
-    clock: Option<Res<ShotClock>>,
-    mut commands: Commands,
-) {
-    let Ok((&TreeSegment(cut), parent)) = segments.get(emptied.entity) else {
-        return;
-    };
-    let root = parent.parent();
-    let Ok((mut state, transform)) = trees.get_mut(root) else {
-        return;
-    };
-    if *state != TreeState::Standing {
-        return;
+/// A tree's structural state, the authority's: its trunk's live state under the structure laws
+/// (each joint's crack; [`TreeBody::structure`] is what they read) and the sections they cache.
+/// Built whole at spawn from the body (ADR-0014). One definition of when a trunk breaks: a joint
+/// opened, whoever opened it (a round's dose, a blast's, a body's contact), and the cut is the
+/// lowest open joint ([`Self::cut`]).
+#[derive(Component, Debug, Clone)]
+pub(crate) struct TrunkState {
+    state: WallState,
+    sections: SectionCache,
+}
+
+impl TrunkState {
+    pub(crate) fn new(structure: &Structure) -> Self {
+        Self {
+            state: WallState::new(structure),
+            sections: SectionCache::default(),
+        }
     }
-    let along = emptied.along.unwrap_or(transform.translation - emptied.at);
+
+    /// Where the trunk broke: the lowest open joint, joint `k` holding segment `k` at its base
+    /// ([`TreeBody::structure_of`]), so the piece from segment `k` up is what falls. `None` while
+    /// every joint holds.
+    pub(crate) fn cut(&self) -> Option<u8> {
+        self.state
+            .cracked
+            .iter()
+            .position(|&open| open)
+            .map(|joint| {
+                u8::try_from(joint)
+                    .expect("resolve bounded the segment count, one joint per segment")
+            })
+    }
+}
+
+/// THE TRUNK MEETS ITS LOADS: `loads` (the tree's frame) through the structure laws a wall's
+/// chunks meet (`fracture`), on `trunk`'s state: the blows' structural check, then strength under
+/// gravity and the presses, from the joints the first opened. Returns the cut after them
+/// ([`TrunkState::cut`]). Nothing of the tree's kind or of the loads' sources enters: the trunk's
+/// construction and the loads alone decide where, and whether, it breaks.
+pub(crate) fn load_trunk(body: &TreeBody, trunk: &mut TrunkState, loads: &[Load]) -> Option<u8> {
+    let structure = &body.structure;
+    let opened: Vec<usize> =
+        fracture::structural(structure, &mut trunk.state, loads, &mut trunk.sections)
+            .into_iter()
+            .flat_map(|failure| failure.joints)
+            .collect();
+    fracture::weigh(
+        structure,
+        &mut trunk.state,
+        &[],
+        &opened,
+        loads,
+        &[],
+        &mut trunk.sections,
+    );
+    trunk.cut()
+}
+
+/// Down at the trunk's cut, toward the horizontal of `along` (world): the authority's transition
+/// for a standing tree whose trunk broke, carrying the tick it fell at.
+fn fell(
+    state: &mut TreeState,
+    cut: u8,
+    along: Vec3,
+    root: Entity,
+    clock: Option<&ShotClock>,
+    commands: &mut Commands,
+) {
     *state = TreeState::Down {
         cut,
         dir: azimuth_bin(along.x, along.z),
@@ -1423,124 +1572,123 @@ pub(crate) fn fell_on_pool_emptied(
     });
 }
 
-/// One hull–trunk contact as the ram law reads it: the solver's normal impulse (N·s), the
-/// contact's height above the tree's base (m), and the horizontal push into the tree.
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub(crate) struct RamContact {
-    pub(crate) impulse: f32,
-    pub(crate) lever_m: f32,
-    pub(crate) push: Vec2,
-}
-
-/// THE RAM LAW: one tick's contacts on one tree, summed — `Σ impulse × lever` (N·s·m) and the
-/// impulse-weighted push. Compared once against [`TreeBody::fell_torque`] and never carried into
-/// the next tick, so sub-threshold ticks do not add up.
-///
-/// `impulse` is avian's `ContactPoint::normal_impulse`: the clamped accumulated impulse summed
-/// over every solve call of the tick (each substep's bias and relax passes), so a sustained
-/// contact reads about twice the momentum it transfers and a one-call stop about once. `fell_k`
-/// is calibrated on this reading (`ram-impulses.md`, 2026-10-26: 64 Hz, 6 substeps, the game's
-/// own settings), so the law applies no correction.
-pub(crate) fn ram_torque(contacts: &[RamContact]) -> (f32, Vec2) {
-    contacts
-        .iter()
-        .fold((0.0, Vec2::ZERO), |(torque, push), contact| {
-            (
-                torque + contact.impulse * contact.lever_m,
-                push + contact.push * contact.impulse,
-            )
-        })
-}
-
-/// The ram law's reading of one tick's contacts: for every ACTIVE touching pair between a trunk
-/// segment and a collider of anything but a tree, the solver's normal impulse (N·s) at its lever
-/// above the tree's base and its horizontal push into the tree, grouped by standing tree. Sleeping
-/// pairs are never read — their retained impulse is not this tick's. What the other body is never
-/// enters: a tank's hull, a launched turret and a falling piece of debris push by the impulse the
-/// solver gave their contact, and the trunk's construction ([`TreeBody::fell_torque`]) decides
-/// whether that fells it. The manifold normal runs from the pair's first collider to its second,
-/// so it points into the tree exactly when the tree's segment is the second.
-fn ram_contacts<'a>(
-    pairs: impl Iterator<Item = &'a ContactPair>,
-    segment_root: impl Fn(Entity) -> Option<Entity>,
-    standing_base_y: impl Fn(Entity) -> Option<f32>,
-) -> BTreeMap<Entity, Vec<RamContact>> {
-    let mut per_tree: BTreeMap<Entity, Vec<RamContact>> = BTreeMap::new();
-    for pair in pairs {
-        let (tree_first, root) = match (segment_root(pair.collider1), segment_root(pair.collider2))
-        {
-            (Some(root), None) => (true, root),
-            (None, Some(root)) => (false, root),
-            _ => continue,
-        };
-        let Some(base_y) = standing_base_y(root) else {
-            continue;
-        };
-        let contacts = per_tree.entry(root).or_default();
-        for manifold in &pair.manifolds {
-            let into = if tree_first {
-                -manifold.normal
-            } else {
-                manifold.normal
-            };
-            for point in &manifold.points {
-                if point.normal_impulse <= 0.0 {
-                    continue;
-                }
-                contacts.push(RamContact {
-                    impulse: point.normal_impulse,
-                    lever_m: (point.point.y - base_y).max(0.0),
-                    push: into.xz(),
-                });
-            }
-        }
-    }
-    per_tree
-}
-
-/// The authority's ram rule, read after the solver stored this tick's impulses: a standing tree
-/// whose trunk took its [`TreeBody::fell_torque`] of torque in one tick falls whole, along the
-/// push ([`ram_contacts`] reads the contacts, [`ram_torque`] sums them).
-fn fell_on_ram(
-    graph: Res<ContactGraph>,
-    segments: Query<&ChildOf, With<TreeSegment>>,
-    mut trees: Query<(&mut TreeState, &TreeBody, &Transform)>,
+/// A standing tree one of whose segments a dose emptied opens the joint at THAT segment's base in
+/// its structural state, and falls by it ([`TrunkState::cut`]) — only the doses that segment took
+/// count toward its break — along the round's travel, or for a field (no direction) away from the
+/// field's centre. A tree already down ignores it.
+pub(crate) fn fell_on_pool_emptied(
+    emptied: On<PoolEmptied>,
+    segments: Query<(&TreeSegment, &ChildOf)>,
+    mut trees: Query<(&mut TreeState, &mut TrunkState, &Transform)>,
     clock: Option<Res<ShotClock>>,
     mut commands: Commands,
 ) {
-    let per_tree = ram_contacts(
-        graph.iter_active_touching(),
-        |collider| segments.get(collider).ok().map(ChildOf::parent),
-        |root| {
-            trees
-                .get(root)
-                .ok()
-                .filter(|(state, _, _)| **state == TreeState::Standing)
-                .map(|(_, _, transform)| transform.translation.y)
-        },
+    // An emptied pool on anything but a trunk segment (a module, a crew seat) is another law's.
+    let Ok((&TreeSegment(segment), parent)) = segments.get(emptied.entity) else {
+        return;
+    };
+    let root = parent.parent();
+    let (mut state, mut trunk, transform) = trees
+        .get_mut(root)
+        .expect("a trunk segment is a child of its tree's root");
+    if *state != TreeState::Standing {
+        return;
+    }
+    trunk.state.cracked[usize::from(segment)] = true;
+    let cut = trunk
+        .cut()
+        .expect("the emptied segment's base joint just opened");
+    let along = emptied.along.unwrap_or(transform.translation - emptied.at);
+    fell(
+        &mut state,
+        cut,
+        along,
+        root,
+        clock.as_deref(),
+        &mut commands,
     );
-    for (root, contacts) in per_tree {
-        let (torque, push) = ram_torque(&contacts);
-        let Ok((mut state, body, _)) = trees.get_mut(root) else {
+}
+
+/// AUTHORITY: each physics step's body contacts on the standing trees, read once a step from the
+/// solver's own transfers (`crate::contact_transfer`, the reading a wall's contacts come from),
+/// each contact split at its body's rest speed into a blow and a press
+/// ([`ContactTransfers::split`]), and every resting body's press; each point a load on the
+/// segment its collider is, in the tree's frame. A tree whose trunk those loads break
+/// ([`load_trunk`]) falls at its cut along their push. No body is read by its kind.
+fn fell_on_contacts(
+    transfers: Res<ContactTransfers>,
+    mut read: Local<u64>,
+    segments: Query<(&TreeSegment, &ChildOf)>,
+    mut trees: Query<(&mut TreeState, &TreeBody, &mut TrunkState, &Transform)>,
+    clock: Option<Res<ShotClock>>,
+    mut commands: Commands,
+) {
+    if transfers.steps() == *read {
+        return;
+    }
+    *read = transfers.steps();
+    let awake = transfers
+        .split()
+        .map(|(point, blow, press, mass)| (point, blow, press, mass, transfers.dt()));
+    // A resting press has no blow, so no law reads its source mass; the point's own stands.
+    let resting = transfers.resting().iter().map(|rest| {
+        (
+            &rest.transfer,
+            Vec3::ZERO,
+            rest.press(),
+            rest.transfer.effective_mass,
+            rest.dt,
+        )
+    });
+    // Per standing tree: its loads (tree frame) and their push (world, N·s).
+    let mut per_tree: BTreeMap<Entity, (Vec<Load>, Vec3)> = BTreeMap::new();
+    for (transfer, blow, press, mass, step) in awake.chain(resting) {
+        // A structure that is no tree (a building) reads its own contacts.
+        let Ok((&TreeSegment(segment), parent)) = segments.get(transfer.structure_collider) else {
             continue;
         };
-        if torque >= body.fell_torque() {
-            *state = TreeState::Down {
-                cut: 0,
-                dir: azimuth_bin(push.x, push.y),
-            };
-            commands.entity(root).insert(Fell {
-                tick: clock.as_ref().map_or(0, |clock| clock.0),
-            });
+        let root = parent.parent();
+        let (state, _, _, transform) = trees
+            .get(root)
+            .expect("a trunk segment is a child of its tree's root");
+        if *state != TreeState::Standing {
+            continue;
+        }
+        let into = transform.rotation.inverse();
+        let (loads, push) = per_tree.entry(root).or_default();
+        loads.push(Load {
+            chunk: usize::from(segment),
+            at: into * (transfer.point - transform.translation),
+            energy: 0.0,
+            crushed: 0.0,
+            blow: into * blow,
+            press: into * press,
+            peak: None,
+            origin: Origin::Body {
+                body: transfer.body,
+                mass,
+                speed: transfer.closing_speed,
+                step,
+            },
+        });
+        *push += blow + press * step;
+    }
+    for (root, (loads, push)) in per_tree {
+        let (mut state, body, mut trunk, _) = trees
+            .get_mut(root)
+            .expect("the tree whose segment the step touched");
+        if let Some(cut) = load_trunk(body, &mut trunk, &loads) {
+            fell(&mut state, cut, push, root, clock.as_deref(), &mut commands);
         }
     }
 }
 
 /// The sim half: the authority's state transitions and the body derived from them. The emptying
 /// observer is mounted in every composition (a replica's march empties no pool, so it never
-/// fires on a client); the ram rule, the stop rule and the derive after them run only where this
-/// process is the authority — a replica derives in the frame its ledger lands and in every frame
-/// its cursor moves a fall (`net::destruction`).
+/// fires on a client); the contact rule, the stop rule and the derive after them run only where
+/// this process is the authority — a replica derives in the frame its ledger lands and in every
+/// frame its cursor moves a fall (`net::destruction`). The contact rule reads the solver's
+/// transfers, so a composition mounting this mounts `crate::contact_transfer::sim_plugin` too.
 pub(crate) fn sim_plugin(app: &mut App) {
     app.add_observer(fell_on_pool_emptied)
         .configure_sets(
@@ -1550,7 +1698,7 @@ pub(crate) fn sim_plugin(app: &mut App) {
         .add_systems(
             FixedPostUpdate,
             (
-                (fell_on_ram, stop_falls)
+                (fell_on_contacts, stop_falls)
                     .in_set(TreeFallSet)
                     .run_if(not(resource_exists::<ClientReplica>)),
                 derive_systems()
@@ -1593,30 +1741,37 @@ pub(crate) mod tests {
         BTreeMap::from([("fixture".to_owned(), serde::de::IgnoredAny)])
     }
 
-    /// The fixture wood (fixture data): RHA, 1000 HP per square metre, so the fixture trunk's
-    /// segments hold 196, 71 and 18 points at scale 1 (DERIVED: `1000 π r²` at the mid-height
-    /// radii 0.25, 0.15 and 0.075 m, rounded).
+    /// The fixture wood (fixture data): the shipped Wood substance, 1000 HP per square metre, so
+    /// the fixture trunk's segments hold 196, 71 and 18 points at scale 1 (DERIVED: `1000 π r²` at
+    /// the mid-height radii 0.25, 0.15 and 0.075 m, rounded); a 40 MPa grain, 850 kg/m³ green and
+    /// a 150 N·m/kg root plate.
     fn fixture_wood() -> Wood {
         Wood {
-            substance: "RHA".to_owned(),
+            substance: "Wood".to_owned(),
             hp_per_m2: Sourced(1000.0),
-            fell_k: Sourced(1.0e5),
             structure: StructureRows(BTreeMap::from([(
                 "fixture".to_owned(),
-                StructuralWood {
-                    along_grain_rupture_pa: 4.0e7,
-                    along_grain_fracture_j_per_m2: 2.0e4,
-                    root_plate: RootPlate {
-                        overturning_nm_per_kg: 150.0,
-                    },
-                },
+                fixture_structure(150.0),
             )])),
+        }
+    }
+
+    /// The fixture species' structure facts (fixture data), its root plate `plate` N·m/kg.
+    fn fixture_structure(plate: f32) -> StructuralWood {
+        StructuralWood {
+            along_grain_rupture_pa: 4.0e7,
+            along_grain_fracture_j_per_m2: 2.0e4,
+            fresh_density_kg_per_m3: 850.0,
+            root_plate: RootPlate {
+                overturning_nm_per_kg: plate,
+            },
         }
     }
 
     // ASSUMED material fixture data, distinct fields so each omission/mutation is observable.
     const GRAIN_RUPTURE: &str = "along_grain_rupture_pa: (4.0e7, Tuned(\"fixture\")),";
     const GRAIN_FRACTURE: &str = "along_grain_fracture_j_per_m2: (2.0e4, Tuned(\"fixture\")),";
+    const FRESH_DENSITY: &str = "fresh_density_kg_per_m3: (850.0, Tuned(\"fixture\")),";
 
     // A shipped root plate: an anchor resolves against the shipped attachment list.
     const ROOT_PLATE: &str = "anchor: \"scots_pine_root_plate\",";
@@ -1624,7 +1779,7 @@ pub(crate) mod tests {
     fn structural_wood_text(rows: &str) -> String {
         format!(
             r#"Wood(substance: "Wood", hp_per_m2: (1000.0, Tuned("fixture")),
-                fell_k: (1.0e5, Tuned("fixture")), structure: {{ {rows} }})"#
+                structure: {{ {rows} }})"#
         )
     }
 
@@ -1633,7 +1788,7 @@ pub(crate) mod tests {
     }
 
     fn structural_fields() -> String {
-        format!("{GRAIN_RUPTURE} {GRAIN_FRACTURE} {ROOT_PLATE}")
+        format!("{GRAIN_RUPTURE} {GRAIN_FRACTURE} {FRESH_DENSITY} {ROOT_PLATE}")
     }
 
     fn parse_fixture_wood(rows: &str) -> Result<Wood, String> {
@@ -1654,6 +1809,7 @@ pub(crate) mod tests {
         for (missing, field) in [
             (GRAIN_RUPTURE, "along_grain_rupture_pa"),
             (GRAIN_FRACTURE, "along_grain_fracture_j_per_m2"),
+            (FRESH_DENSITY, "fresh_density_kg_per_m3"),
             (ROOT_PLATE, "anchor"),
         ] {
             let fields = structural_fields().replace(missing, "");
@@ -1697,7 +1853,7 @@ pub(crate) mod tests {
     /// coefficient is refused so by the attachment list's own loader).
     #[test]
     fn structural_wood_refuses_nonpositive_nonfinite_or_unsourced_facts() {
-        for datum in [GRAIN_RUPTURE, GRAIN_FRACTURE] {
+        for datum in [GRAIN_RUPTURE, GRAIN_FRACTURE, FRESH_DENSITY] {
             let field = datum.split(':').next().unwrap();
             for value in ["0.0", "-1.0", "NaN", "inf"] {
                 let replacement = format!("{field}: ({value}, Tuned(\"fixture\")),");
@@ -1753,7 +1909,7 @@ pub(crate) mod tests {
     /// alone would miss a loader that bypassed it. ASSUMED fixture wood, species and file layout.
     #[test]
     fn the_library_refuses_missing_structure_facts_before_reading_a_tree_asset() {
-        for datum in [GRAIN_RUPTURE, GRAIN_FRACTURE, ROOT_PLATE] {
+        for datum in [GRAIN_RUPTURE, GRAIN_FRACTURE, FRESH_DENSITY, ROOT_PLATE] {
             let field = datum.split(':').next().unwrap();
             let unique = std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
@@ -1825,21 +1981,22 @@ pub(crate) mod tests {
         )
     }
 
-    /// DBH IS READ OFF THE TAPER, not off the base: at 1.3 m into a 2 m segment going 0.3 → 0.2 the
-    /// radius is 0.235. A mutant reading the base radius would answer 0.6.
+    /// THE RADIUS IS READ OFF THE TAPER, not off the base: at 1.3 m into a 2 m segment going 0.3 →
+    /// 0.2 the radius is 0.235. A mutant reading the base radius would answer 0.3. The fall's
+    /// hinge and pivot read it.
     #[test]
-    fn dbh_is_twice_the_taper_radius_at_breast_height() {
+    fn the_radius_is_read_off_the_taper() {
         let kind = fixture_kind();
-        assert!((kind.dbh_m - 0.47).abs() < 1e-6, "dbh {}", kind.dbh_m);
+        assert!((kind.radius_at(1.3) - 0.235).abs() < 1e-6);
         assert_eq!(kind.radius_at(-1.0), 0.3, "below the base: the base radius");
         assert_eq!(kind.radius_at(9.0), 0.05, "past the tip: the tip radius");
     }
 
     /// EVERY A6 REFUSAL IS A REFUSAL, NOT A CLAMP: an empty trunk, a non-finite or non-positive
     /// segment dimension, a missing, non-positive or non-finite tip radius, an unknown species, a
-    /// wood row whose HP per square metre or ram threshold is not positive, a trunk too short to
-    /// read a breast height, and more segments than the wire word's cut byte can name are each
-    /// refused by name. Any one of these laxed to a default — a NaN height carried, a zero or
+    /// wood row whose HP per square metre is not positive or whose substance states no bulk facts
+    /// for the trunk's chunks to be of, and more segments than the wire word's cut byte can name
+    /// are each refused by name. Any one of these laxed to a default — a NaN height carried, a zero or
     /// infinite tip spawned, a pool of no HP per square metre spawned, a 256th segment accepted —
     /// reds its row.
     #[test]
@@ -1878,15 +2035,10 @@ pub(crate) mod tests {
             assert!(refusal(fixture_asset(), wood).contains("hp_per_m2"));
         }
         let wood = Wood {
-            fell_k: Sourced(-1.0),
+            substance: "RHA".to_owned(),
             ..fixture_wood()
         };
-        assert!(refusal(fixture_asset(), wood).contains("fell_k"));
-        let mut asset = fixture_asset();
-        for segment in &mut asset.segments {
-            segment.height_m = 0.4;
-        }
-        assert!(refusal(asset, fixture_wood()).contains("breast"));
+        assert!(refusal(fixture_asset(), wood).contains("bulk facts"));
         let mut asset = fixture_asset();
         let stub = asset.segments[2];
         asset.segments = vec![stub; MAX_SEGMENTS + 1];
@@ -1925,48 +2077,6 @@ pub(crate) mod tests {
         assert_eq!(pools(1.0), [196, 71, 18]);
         assert_eq!(pools(2.0), [785, 283, 71]);
         assert_eq!(pools(1.0e-4), [1, 1, 1], "never below one point");
-    }
-
-    /// THE TORQUE IS IMPULSE × LEVER, SUMMED ONCE: 50 N·s at 0.5 m and 50 N·s at 2.0 m read
-    /// 125 N·s·m (a mutant dropping the lever reads 100), and a contact at the base adds nothing
-    /// to the torque while still weighting the push by its impulse.
-    #[test]
-    fn ram_torque_sums_impulse_times_lever_and_weights_the_push() {
-        let contacts = [
-            RamContact {
-                impulse: 50.0,
-                lever_m: 0.5,
-                push: Vec2::X,
-            },
-            RamContact {
-                impulse: 50.0,
-                lever_m: 2.0,
-                push: Vec2::Y,
-            },
-            RamContact {
-                impulse: 100.0,
-                lever_m: 0.0,
-                push: Vec2::NEG_X,
-            },
-        ];
-        let (torque, push) = ram_torque(&contacts);
-        assert_eq!(torque, 125.0);
-        assert_eq!(push, Vec2::new(-50.0, 50.0));
-        assert_eq!(
-            ram_torque(&[]),
-            (0.0, Vec2::ZERO),
-            "an empty tick adds nothing"
-        );
-    }
-
-    /// The threshold is the wood's constant times the CUBE of the breast-height diameter at the
-    /// instance's scale: doubling the scale raises it eightfold (a mutant squaring it: fourfold).
-    #[test]
-    fn the_fell_torque_is_fell_k_times_dbh_cubed() {
-        let one = TreeBody::new(fixture_kind(), 1.0);
-        let two = TreeBody::new(fixture_kind(), 2.0);
-        assert!((one.fell_torque() - 1.0e5 * 0.47f32.powi(3)).abs() < 1.0);
-        assert!((two.fell_torque() / one.fell_torque() - 8.0).abs() < 1e-3);
     }
 
     /// The bins run from `+X` toward `+Z` and wrap once: the four axes land on 0, 64, 128, 192,
@@ -2038,74 +2148,21 @@ pub(crate) mod tests {
         let _ = TreeState::Down { cut: 255, dir: 0 }.encode();
     }
 
-    /// THE RAM LAW READS EVERY BODY'S PUSH ON A STANDING TREE AND NOTHING ELSE: a pair with no
-    /// trunk segment, a pair of two trunk segments and any pair on a tree no longer standing
-    /// contribute nothing; every other pair's point reads its impulse at its height above the base,
-    /// pushing along the manifold normal into the tree, whatever body it is. Gating on the other
-    /// body, dropping the standing check or the normal's flip for a tree-first pair reds this.
+    /// A BODY FELLS A TREE BY ITS CONTACT AND THE TRUNK'S CONSTRUCTION, NEVER BY WHAT THE BODY IS:
+    /// in a physics world with the real schedule and the solver's transfer reading, three dynamic
+    /// bodies each drive a cube into a standing fixture trunk at 4 m/s — a tank's shape (root body
+    /// → `Hull` node → proxy, as `tank::spawn` builds it), a launched turret's (a free body carrying
+    /// its collider) of the same 20 t, and a 200 kg body. The first two fell their trees at the
+    /// root plate along the push; the light one's blow reaches its tree and the tree stands. A law
+    /// gating on the body's identity spares the turret's tree; a law reading the blow without the
+    /// trunk's strength fells the light one's; either reds this. Who relies on it: every collision
+    /// that fells a tree in play. DERIVED (fixture data): the fixture trunk's fresh mass is 494 kg,
+    /// its root plate's moment 74 kN·m; 20 t stopped from 4 m/s is 80 kN·s, its least mean force
+    /// over a 64 Hz step 5.1 MN, about 5 MN·m on the anchor at the cube's metre of lever; 200 kg is
+    /// 0.8 kN·s and 51 kN, about 51 kN·m, under the plate's moment, so its blow meets the strength
+    /// asymptote and stops there.
     #[test]
-    fn ram_contacts_read_every_bodys_push_on_standing_trees_only() {
-        use avian3d::collision::contact_types::ContactId;
-        use avian3d::prelude::{ContactManifold, ContactPoint};
-        let mut world = World::new();
-        let mut entity = || world.spawn_empty().id();
-        let (tree, segment) = (entity(), entity());
-        let (neighbour, neighbour_segment) = (entity(), entity());
-        let (tank, tank_collider) = (entity(), entity());
-        let (turret, turret_collider) = (entity(), entity());
-        let (other, other_collider) = (entity(), entity());
-        let pair = |c1, c2, b1, b2| {
-            let mut point =
-                ContactPoint::new(Vec3::ZERO, Vec3::ZERO, Vec3::new(0.0, 3.0, 0.0), 0.0);
-            point.normal_impulse = 10.0;
-            let mut pair = ContactPair::new(c1, c2, ContactId(0));
-            pair.body1 = Some(b1);
-            pair.body2 = Some(b2);
-            pair.manifolds = vec![ContactManifold::new([point], Vec3::X)];
-            pair
-        };
-        let pairs = [
-            pair(segment, tank_collider, tree, tank),
-            pair(turret_collider, segment, turret, tree),
-            pair(tank_collider, other_collider, tank, other),
-            pair(segment, neighbour_segment, tree, neighbour),
-        ];
-        let segment_root = |collider| {
-            (collider == segment)
-                .then_some(tree)
-                .or((collider == neighbour_segment).then_some(neighbour))
-        };
-        let read = ram_contacts(pairs.iter(), segment_root, |root| {
-            (root == tree).then_some(1.0)
-        });
-        assert_eq!(read.len(), 1, "one tree pushed: {read:?}");
-        let point = |push| RamContact {
-            impulse: 10.0,
-            lever_m: 2.0,
-            push,
-        };
-        assert_eq!(
-            read[&tree],
-            vec![point(Vec2::new(-1.0, 0.0)), point(Vec2::new(1.0, 0.0))],
-            "both bodies' points, 2 m above the base, each pushing into the tree",
-        );
-        let down = ram_contacts(pairs.iter(), segment_root, |_| None);
-        assert!(down.is_empty(), "a tree not standing takes no push");
-    }
-
-    /// A RAM FELLS BY ITS PUSH AND THE TRUNK'S CONSTRUCTION, NEVER BY WHAT THE BODY IS: in a
-    /// physics world with the real schedule, three dynamic bodies each drive a cube into a
-    /// standing trunk — a tank's shape (root body → `Hull` node → proxy, as `tank::spawn` builds
-    /// it), a launched turret's (a free body carrying its collider) of the same momentum, and a
-    /// light body. The first two fell their trees along the push; the light one touches its tree
-    /// with a positive impulse whose torque stays under the trunk's [`TreeBody::fell_torque`], and
-    /// the tree stands. A law gating on the body's identity spares the turret's tree; a law
-    /// ignoring the threshold fells the light one's; either reds this. DERIVED: 20 t stopped from
-    /// 4 m/s is 80 kN·s, at the cube's half-metre of lever or more four times the fixture's
-    /// 10.4 kN·s·m threshold; 200 kg is 0.8 kN·s, under 2.4 kN·s·m at the cube's 1.5 m of lever
-    /// read twice (a sustained contact's reading, [`ram_torque`]).
-    #[test]
-    fn a_ram_fells_by_its_push_and_the_trunk_whatever_the_body_is() {
+    fn a_body_fells_a_tree_by_its_contact_whatever_the_body_is() {
         use crate::tank::Hull;
         use avian3d::prelude::{Gravity, LinearVelocity, Mass, PhysicsPlugins};
         use bevy::time::TimeUpdateStrategy;
@@ -2117,6 +2174,7 @@ pub(crate) mod tests {
             // Avian's collider cache reads `AssetEvent<Mesh>`.
             AssetPlugin::default(),
             PhysicsPlugins::default(),
+            crate::contact_transfer::sim_plugin,
             sim_plugin,
         ))
         .init_asset::<Mesh>()
@@ -2180,62 +2238,32 @@ pub(crate) mod tests {
         app.world_mut().entity_mut(turret).insert(proxy.clone());
         let light = body(&mut app, 40.0, 200.0);
         app.world_mut().entity_mut(light).insert(proxy);
-        let segments_of = |app: &App, tree: Entity| -> Vec<Entity> {
-            app.world()
-                .get::<Children>(tree)
-                .expect("segments")
-                .iter()
-                .collect()
-        };
-        let brushed_segments = segments_of(&app, brushed);
-        let base_y = app
-            .world()
-            .get::<Transform>(brushed)
-            .expect("the root")
-            .translation
-            .y;
-        // Each tick: whether the light body touches a segment of its tree with a positive normal
-        // impulse, and the torque those contacts carry as the ram law reads them.
-        let (mut touched, mut peak) = (false, 0.0_f32);
+        // Each tick: the greatest blow the reading split off the light body's contact with its tree.
+        let mut blow = 0.0_f32;
         for _ in 0..20 {
             app.update();
-            let graph = app.world().resource::<ContactGraph>();
-            let pairs: Vec<&ContactPair> = brushed_segments
-                .iter()
-                .filter_map(|segment| graph.get(light, *segment))
-                .map(|(_, pair)| pair)
-                .filter(|pair| pair.is_touching())
-                .collect();
-            touched |= pairs
-                .iter()
-                .any(|pair| pair.total_normal_impulse_magnitude() > 0.0);
-            let contacts = ram_contacts(
-                pairs.into_iter(),
-                |collider| brushed_segments.contains(&collider).then_some(brushed),
-                |_| Some(base_y),
-            );
-            if let Some(contacts) = contacts.get(&brushed) {
-                peak = peak.max(ram_torque(contacts).0);
+            let transfers = app.world().resource::<ContactTransfers>();
+            for (point, struck, ..) in transfers.split() {
+                if point.structure == brushed && point.body == light {
+                    blow = blow.max(struck.length());
+                }
             }
         }
-        let threshold = app
-            .world()
-            .get::<TreeBody>(brushed)
-            .expect("the body")
-            .fell_torque();
         assert!(
-            touched,
-            "the light body touches its tree with a positive normal impulse"
-        );
-        assert!(
-            peak > 0.0 && peak < threshold,
-            "the light body's push stays under the fell torque: {peak} N·s·m of {threshold}"
+            blow > 0.0,
+            "the light body's contact delivers a blow to its tree"
         );
         for (tree, what) in [(rammed, "the tank's proxy"), (nudged, "the turret")] {
-            assert_eq!(
-                app.world().get::<TreeState>(tree),
-                Some(&TreeState::Down { cut: 0, dir: 0 }),
-                "{what} fells the trunk along +x"
+            let state = app.world().get::<TreeState>(tree);
+            let Some(&TreeState::Down { cut: 0, dir }) = state else {
+                panic!("{what} fells the trunk at its root plate: {state:?}");
+            };
+            // The trunk falls along the momentum it took, through the faceted 12-gon's normals
+            // and the friction along them: within a facet's 15° of the +x push, 10.7 bins.
+            let off = i32::from(dir.wrapping_add(128)) - 128;
+            assert!(
+                off.abs() <= 11,
+                "{what} fells the trunk along +x: bin {dir}"
             );
             assert!(
                 app.world().get::<Fell>(tree).is_some(),
@@ -2245,7 +2273,7 @@ pub(crate) mod tests {
         assert_eq!(
             app.world().get::<TreeState>(brushed),
             Some(&TreeState::Standing),
-            "a push under the trunk's threshold leaves it standing"
+            "a blow whose force the trunk's strength holds leaves it standing ({blow} N·s)"
         );
     }
 
@@ -2264,6 +2292,7 @@ pub(crate) mod tests {
             bevy::transform::TransformPlugin,
             AssetPlugin::default(),
             PhysicsPlugins::default(),
+            crate::contact_transfer::sim_plugin,
             sim_plugin,
             crate::debris::sim_plugin,
         ))
@@ -2343,8 +2372,10 @@ pub(crate) mod tests {
     /// there too, away from the field's centre; a tree already down keeps its state whatever
     /// segment empties next. Each emptying names a point in ANOTHER segment's height range, so a
     /// mutant reading the cut off the dose's height (the base for the line, segment 2 for the
-    /// field), or one felling a field's tree whole at the base, reds this. The break rule — only
-    /// the doses a segment took count toward its break — relies on it.
+    /// field), or one felling a field's tree whole at the base, reds this. The emptying opens the
+    /// joint at the segment's base in the trunk's structural state, the one definition of a break
+    /// a body's contact shares ([`TrunkState`]); a rule setting the state beside it reds this. The
+    /// break rule — only the doses a segment took count toward its break — relies on it.
     #[test]
     fn the_fall_cuts_at_the_segment_that_emptied() {
         let mut world = World::new();
@@ -2352,10 +2383,12 @@ pub(crate) mod tests {
         world.insert_resource(ShotClock(7));
         let base = Vec3::new(10.0, 3.0, -4.0);
         let spawn = |world: &mut World| -> Vec<Entity> {
+            let body = TreeBody::new(fixture_kind(), 1.0);
             let root = world
                 .spawn((
                     TreeState::Standing,
-                    TreeBody::new(fixture_kind(), 1.0),
+                    TrunkState::new(&body.structure),
+                    body,
                     Transform::from_translation(base),
                 ))
                 .id();
@@ -2376,6 +2409,11 @@ pub(crate) mod tests {
             world.get::<TreeState>(shot_root),
             Some(&TreeState::Down { cut: 2, dir: 64 }),
             "the emptied segment, down the line"
+        );
+        assert_eq!(
+            world.get::<TrunkState>(shot_root).map(TrunkState::cut),
+            Some(Some(2)),
+            "the emptied segment's base joint is open in the structural state contacts break"
         );
         assert_eq!(
             world.get::<Fell>(shot_root),
@@ -2506,14 +2544,10 @@ pub(crate) mod tests {
             pose,
         );
         queue.apply(&mut world);
-        let (root, body, transform) = world
+        let (root, _, transform) = world
             .query::<(Entity, &TreeBody, &Transform)>()
             .single(&world)
             .expect("one root");
-        assert!(
-            (body.dbh_m - 0.705).abs() < 1e-6,
-            "the kind's dbh at scale 1.5"
-        );
         assert!(
             world.get::<ComponentHealth>(root).is_none()
                 && world.get::<BallisticVolume>(root).is_none(),
@@ -3611,6 +3645,7 @@ pub(crate) mod tests {
             bevy::transform::TransformPlugin,
             AssetPlugin::default(),
             PhysicsPlugins::default(),
+            crate::contact_transfer::sim_plugin,
             sim_plugin,
         ))
         .init_asset::<Mesh>()

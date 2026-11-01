@@ -313,6 +313,7 @@ mod tests {
             AssetPlugin::default(),
             super::super::physics::physics_plugins(),
             super::super::physics::plugin,
+            crate::contact_transfer::sim_plugin,
             crate::trees::sim_plugin,
             crate::ballistics::mount_march_probe,
         ))
