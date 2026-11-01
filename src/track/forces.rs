@@ -351,7 +351,7 @@ pub struct ForceApp {
     pub force: Vec3,
     pub point: Vec3,
     /// The collider the contact presses on, `None` for the terrain field. What the collider's
-    /// body takes back is the caller's (`track::rubble::piece_impulses`), never `-force`.
+    /// body takes back follows the recipient law (`track::rubble::piece_impulses`).
     pub collider: Option<Entity>,
 }
 
@@ -959,9 +959,10 @@ fn collect_column_contacts<O: TerrainOracle>(
 
                 // Support: penalty spring along the belt's own inward normal, at the column's
                 // share of the per-metre coefficients. Damping and slip read the hull's velocity
-                // relative to the surface it presses: a piece's own motion enters the slip, which
-                // is stable because the piece takes back only a clamped impulse
-                // (`track::rubble::piece_impulses`), never the explicit reaction.
+                // relative to the surface it presses; recipient motion enters both terms.
+                // The recipient's reaction law (`track::rubble::piece_impulses`) runs later: a
+                // belt-integrated body takes the whole opposite force, while a loose piece
+                // takes the sequentially clamped impulse. Both read tick-start velocities.
                 let normal = -out;
                 let hull_vel = vel_at(p);
                 let vel = match collider {
