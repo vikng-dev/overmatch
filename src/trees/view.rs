@@ -514,7 +514,12 @@ fn present_fall(
         &Transform,
         &Children,
     )>,
-    pieces: Query<(&TreePiece, &Transform)>,
+    pieces: Query<(
+        &TreePiece,
+        &Transform,
+        Option<&crate::world::WorldGeneration>,
+    )>,
+    generation: Option<Res<crate::world::CurrentWorld>>,
     views: Query<Ref<TreeViewNodes>>,
     mut nodes: Query<(&mut Transform, &mut Visibility), (Without<TreeBody>, Without<TreePiece>)>,
 ) {
@@ -526,8 +531,15 @@ fn present_fall(
             TreeState::Standing => None,
             TreeState::Down { cut, .. } => pieces
                 .iter()
-                .find(|(piece, _)| piece.tree == identity.ordinal && piece.cut == cut)
-                .map(|(_, pose)| {
+                .find(|(piece, _, belongs)| {
+                    // Offline pieces are local bodies, without a streamed generation tag.
+                    belongs.is_none_or(|belongs| {
+                        generation.as_deref().and_then(|current| current.0.as_ref())
+                            == Some(belongs)
+                    }) && piece.tree == identity.ordinal
+                        && piece.cut == cut
+                })
+                .map(|(_, pose, _)| {
                     let turn = root.rotation.inverse() * pose.rotation;
                     let pivot = root.rotation.inverse() * (pose.translation - root.translation)
                         + turn

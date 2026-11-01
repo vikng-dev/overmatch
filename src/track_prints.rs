@@ -114,6 +114,45 @@ pub(crate) struct TrackPrints {
     told: Option<Vec2>,
 }
 
+impl TrackPrints {
+    fn new(images: PrintImages, material: Handle<TerrainMaterial>, world_size_m: f32) -> Self {
+        Self {
+            near_image: images.near,
+            world_image: images.world,
+            material,
+            law: PrintLaw {
+                pattern_range_m: PATTERN_RANGE_M,
+                contact_m: CONTACT_M,
+            },
+            shoes: Vec::new(),
+            stores: PrintStores::new(world_size_m, WORLD_SIDE),
+            tanks: HashMap::new(),
+            told: None,
+        }
+    }
+}
+
+/// Construct empty print stores through the startup constructor. Fresh image identities also
+/// isolate pending render-world uploads: an old tile can only write an old, unbound image.
+pub(crate) fn reconstruct(world: &mut World) {
+    let Some(old) = world.remove_resource::<TrackPrints>() else {
+        return; // A composition without a drawn heightmap has no print stores.
+    };
+    let extent = world.resource::<HeightGrid>().world_size();
+    let fresh_images = images(&mut world.resource_mut::<Assets<Image>>());
+    {
+        let mut materials = world.resource_mut::<Assets<TerrainMaterial>>();
+        let mut terrain = materials
+            .get_mut(&old.material)
+            .expect("the terrain retains the material its print stores were built for");
+        terrain.extension.prints_near = fresh_images.near.clone();
+        terrain.extension.prints_world = fresh_images.world.clone();
+        terrain.extension.params.print_near = near_params(Vec2::ZERO);
+    }
+    world.insert_resource(TrackPrints::new(fresh_images, old.material, extent));
+    world.resource_mut::<PrintWrites>().0.clear();
+}
+
 /// One tank's stamping memory.
 #[derive(Default)]
 struct TankPrints {
@@ -238,17 +277,13 @@ pub(crate) fn install(
     world_size_m: f32,
     ground: GroundTypes,
 ) {
-    let stores = PrintStores::new(world_size_m, WORLD_SIDE);
-    let law = PrintLaw {
-        pattern_range_m: PATTERN_RANGE_M,
-        contact_m: CONTACT_M,
-    };
+    let prints = TrackPrints::new(images, material, world_size_m);
     info!(
         "track prints: near store {NEAR_SIDE}² Rg8 over {NEAR_SPAN_M} m ({:.2} cm texels), world \
          layer {WORLD_SIDE}² R8 over {world_size_m} m ({:.1} cm texels, {} levels), {} ground types",
         NEAR_TEXEL_M * 100.0,
         world_size_m / WORLD_SIDE as f32 * 100.0,
-        stores.world.levels(),
+        prints.stores.world.levels(),
         ground.types.len(),
     );
     commands.insert_resource(ground);
@@ -257,16 +292,7 @@ pub(crate) fn install(
         mask: None,
         params: TerrainBlendParams::default(),
     });
-    commands.insert_resource(TrackPrints {
-        near_image: images.near,
-        world_image: images.world,
-        material,
-        law,
-        shoes: Vec::new(),
-        stores,
-        tanks: HashMap::new(),
-        told: None,
-    });
+    commands.insert_resource(prints);
 }
 
 /// The material's `print_near` lane for a near window whose low corner is at world XZ
@@ -687,6 +713,90 @@ pub(crate) fn plugin(app: &mut App) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A new construction has no print history, shoe memory or pending upload from the previous
+    /// world. Distinct GPU image identities prevent an extracted old tile resurrecting a rut.
+    /// Terrain rendering and belt sink both rely on this boundary.
+    #[test]
+    fn a_fresh_world_constructs_empty_print_stores_and_new_gpu_images() {
+        // ASSUMED fixture dimensions, pressure and camera origin.
+        let mut world = World::new();
+        world.init_resource::<Assets<Image>>();
+        world.init_resource::<Assets<TerrainMaterial>>();
+        world.init_resource::<PrintWrites>();
+        world.insert_resource(HeightGrid::new(
+            vec![0.0; 9].into(),
+            3,
+            crate::terrain_grid::FIXTURE_EXTENT,
+        ));
+        let images = images(&mut world.resource_mut::<Assets<Image>>());
+        let material = world
+            .resource_mut::<Assets<TerrainMaterial>>()
+            .add(TerrainMaterial {
+                base: StandardMaterial::default(),
+                extension: crate::terrain_blend::TerrainBlend {
+                    ablate: default(),
+                    params: default(),
+                    layer_albedo: default(),
+                    layer_normal: default(),
+                    layer_arm: default(),
+                    masks: default(),
+                    prints_near: default(),
+                    prints_world: default(),
+                },
+            });
+        let mut prints = TrackPrints::new(
+            images,
+            material.clone(),
+            crate::terrain_grid::FIXTURE_EXTENT.world_size_m,
+        );
+        let old_images = (prints.near_image.id(), prints.world_image.id());
+        prints
+            .shoes
+            .push(ClearanceStamp::pooled(&stamp_fixture(), NEAR_TEXEL_M));
+        prints.stores.recentre(Vec2::ZERO);
+        prints.stores.stamp(
+            &StampEntry::new(
+                store::Placement {
+                    datum: Vec2::ZERO,
+                    yaw: 0.0,
+                    lift: 0.0,
+                    tilt: Vec2::ZERO,
+                    shoe: 0,
+                    mirrored: false,
+                },
+                1.0,
+                100.0,
+            ),
+            &prints.shoes,
+            &prints.law,
+        );
+        assert!(prints.stores.log.len() > 0);
+        let tank = world.spawn_empty().id();
+        prints.tanks.insert(tank, TankPrints::default());
+        prints.told = Some(Vec2::ONE);
+        world.insert_resource(prints);
+        world.resource_mut::<PrintWrites>().0.push(TileWrite {
+            image: old_images.0,
+            level: 0,
+            origin: UVec2::ZERO,
+            size: UVec2::ONE,
+            bytes_per_texel: 2,
+            data: Arc::from([255, 255]),
+        });
+        reconstruct(&mut world);
+        let fresh = world.resource::<TrackPrints>();
+        assert_eq!(fresh.stores.log.len(), 0);
+        assert!(fresh.shoes.is_empty() && fresh.tanks.is_empty() && fresh.told.is_none());
+        assert_ne!(old_images, (fresh.near_image.id(), fresh.world_image.id()));
+        let terrain = world
+            .resource::<Assets<TerrainMaterial>>()
+            .get(&material)
+            .unwrap();
+        assert_eq!(terrain.extension.prints_near, fresh.near_image);
+        assert_eq!(terrain.extension.prints_world, fresh.world_image);
+        assert!(world.resource::<PrintWrites>().0.is_empty());
+    }
 
     /// ADR-0034, TANKS ARE DATA: the prints' laws take every vehicle's geometry from its shoe
     /// template and its mass and footprint from its data, and nothing else, so no line of their

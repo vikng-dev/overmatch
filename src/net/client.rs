@@ -730,6 +730,7 @@ pub(super) fn install_replica_consumers(app: &mut App) {
     // The pen cam's explanations addressed to this player, and whether each impact is drawn.
     super::shot_explanation::install_client(app);
     // The destruction ledger's apply and the fall presentation's cursor clock.
+    super::world_reset::install_client(app);
     super::destruction::install_client(app);
     // The debris stress lever's fragments and the buildings' fallen pieces, drawn where the
     // server's carriers say they are.

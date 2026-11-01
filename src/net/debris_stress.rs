@@ -42,6 +42,7 @@ use crate::buildings::breakage::WallPiece;
 use crate::debris::DebrisPiece;
 use crate::tank::Tank;
 use crate::terrain_grid::HeightGrid;
+use crate::world::CurrentWorld;
 
 /// The lever.
 const LEVER: &str = "OVERMATCH_DEBRIS_STRESS";
@@ -199,7 +200,8 @@ fn fragment_collider() -> Collider {
 /// Every server: a carrier for each building piece and every moved piece's pose onto its carrier.
 /// Then the lever, when armed; a malformed value is refused.
 pub(super) fn install_server(app: &mut App) -> Result<(), LeverError> {
-    app.add_observer(carry_wall_piece)
+    app.init_resource::<CurrentWorld>()
+        .add_observer(carry_wall_piece)
         .add_observer(carry_tree_piece)
         .add_systems(
             FixedPostUpdate,
@@ -230,6 +232,7 @@ pub(super) fn install_client(app: &mut App) {
 fn carry_wall_piece(
     added: On<Add, WallPiece>,
     pieces: Query<(&WallPiece, Option<(&Position, &Rotation)>, Has<DebrisPose>)>,
+    generation: Res<CurrentWorld>,
     mut commands: Commands,
 ) {
     let (piece, pose, carrier) = pieces
@@ -250,6 +253,9 @@ fn carry_wall_piece(
                 rotation: rotation.0,
             },
             piece.clone(),
+            generation
+                .0
+                .expect("an authority constructs its initial world before publishing"),
             Replicate::to_clients(NetworkTarget::All),
             // ONE TIMELINE: a piece draws at the interpolation cursor, with the hulls and the
             // record's presentation (`buildings::view`), never at its pose's arrival.
@@ -267,6 +273,7 @@ fn carry_tree_piece(
         Option<(&Position, &Rotation)>,
         Has<DebrisPose>,
     )>,
+    generation: Res<CurrentWorld>,
     mut commands: Commands,
 ) {
     let (piece, pose, carrier) = pieces
@@ -285,6 +292,9 @@ fn carry_tree_piece(
                 rotation: rotation.0,
             },
             *piece,
+            generation
+                .0
+                .expect("an authority constructs its initial world before publishing"),
             Replicate::to_clients(NetworkTarget::All),
             InterpolationTarget::to_clients(NetworkTarget::All),
         ))
@@ -361,6 +371,7 @@ fn release_breaches(
     tanks: Query<(&Position, &Rotation), With<Tank>>,
     grid: Option<Res<HeightGrid>>,
     source: crate::tank::TankSimSource,
+    generation: Res<CurrentWorld>,
     mut commands: Commands,
 ) {
     let now = time.elapsed_secs_f64();
@@ -406,6 +417,9 @@ fn release_breaches(
         let carrier = commands
             .spawn((
                 Name::new("DebrisCarrier"),
+                generation
+                    .0
+                    .expect("an authority constructs its initial world before publishing"),
                 DebrisPose {
                     position: release.position,
                     rotation: release.rotation,
@@ -552,6 +566,7 @@ mod tests {
     #[test]
     fn a_piece_gets_one_carrier_and_the_carrier_none() {
         let mut world = World::new();
+        world.init_resource::<CurrentWorld>();
         world.add_observer(carry_wall_piece);
         let at = Vec3::new(3.0, 1.5, -2.0);
         let piece = world
@@ -576,6 +591,7 @@ mod tests {
     #[test]
     fn a_trunk_gets_one_interpolated_carrier_and_the_carrier_none() {
         let mut world = World::new();
+        world.init_resource::<CurrentWorld>();
         world.add_observer(carry_tree_piece);
         let marker = crate::trees::TreePiece { tree: 4, cut: 1 };
         let at = Vec3::new(2.0, 3.0, -1.0);
@@ -597,6 +613,7 @@ mod tests {
     #[should_panic(expected = "spawns every piece with its Position and Rotation")]
     fn a_piece_without_its_pose_is_a_bug() {
         let mut world = World::new();
+        world.init_resource::<CurrentWorld>();
         world.add_observer(carry_wall_piece);
         world.spawn(WallPiece {
             building: 2,

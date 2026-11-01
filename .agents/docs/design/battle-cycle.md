@@ -21,9 +21,8 @@ The owner chose the provisional mode in #220; #240 supplies its authority clock.
 - The next fill-up increments the Battle number, empties the score and clears
   spawn-map picks. Connected links stay; their combatant identities remain unique
   for the server lifetime and their life counters continue across Battles.
-- Battlefield destruction persists for this server's lifetime. This cycle resets
-  combatants and score; it does not rebuild terrain, buildings or tree ledgers.
-  A fresh battlefield would require its own world-reset contract.
+- Every Battle starts with a fresh battlefield. The next fill-up reconstructs the
+  map, so connected players see intact scenery while the next Battle fills.
 
 All phase durations are required mode data in `assets/modes/battle.ron`. The
 owner's chosen durations are CLAIMED from #220: fill-up 60 s, combat 900 s,
@@ -31,6 +30,57 @@ late join 600 s from combat start, results 15 s. Durations round up to authority
 whole ticks and fit a wrapped signed deadline comparison. Clients receive
 `BattleState` with the phase, exact deadline, Battle number and authoritative
 result. They never advance a phase or select the result locally.
+
+## Fresh-world construction
+
+The next fill-up is the world boundary. Results retain the completed battlefield;
+fill-up increments the replicated `BattleState.number` and reconstructs the mutable
+world in the same authority command flush. Clients derive the same construction
+from that replicated number before their fixed loop or record consumers run. No
+countdown or reset message advances a client world.
+
+`scatter::ScatterScene` retains parsed manifest/grid data and shared view handles.
+Its `construct` method builds both startup and subsequent worlds through
+`buildings::spawn` and `trees::spawn`, with complete state from data. Despawning
+map roots also removes their standing colliders and views. Loose bodies are
+separate lifetime owners: fallen building groups and freed trunks, including tree
+segments reparented under a trunk, are removed too. Rebuilding reuses stable
+`MapInstance` ids and ordinals; ECS entity identities are new.
+
+| Mutable state | Construction and boundary | Late join |
+|---|---|---|
+| Building roots, elements/chunks, structural state, cracks and holes | Fresh `Breakage` and intact element colliders from the building data; old roots/views and loose groups depart | Current-generation `WallLedger`, copied into `WallRecord`; collision and drawing derive from it |
+| Trees, segment HP pools, cuts, loose trunks and their collision copies | Fresh tree and full segment pools from tree data; old root and freed-body ownership both depart | Current-generation `DestructionLedger` plus interpolated trunk pose carriers |
+| Building debris and stress-fixture debris | Bodies and carriers depart; new Battle starts without loose pieces | Only current Battle carriers are spawned by authority |
+| Cosmetic track prints | Startup print-store constructor, new GPU images and empty shoe memory; old uploads address unbound images | View-local history begins at join |
+| Ground scars and other billboards | Occupants depart and their rings use the startup constructors | View-local effects begin at join |
+| Terrain samples/collider, immutable terrain field, ground material/masks, lighting and shared meshes | Immutable construction retained; terrain has no deformation state | Shared shipped data, checked by the content fingerprint |
+
+Each ledger and environment pose carrier carries `WorldGeneration`, selected by
+the Battle number. The authority replaces ledger entities rather than truncating
+append-only diff histories. Wall publication derives its cursor from the current
+ledger identity. Replica consumers select only the current generation, so a phase
+packet arriving ahead of the new records produces the intact world immediately;
+a record arriving first waits for its Battle. Before any Battle snapshot, and
+between links, no generation is selected. A reconnect also compares the authority
+entity identity, so equal Battle numbers on different servers cannot reuse a
+construction. Retired carriers remain owned by replication until their despawn
+arrives, but cannot draw or supply a trunk collision copy in the next world.
+
+The boundary does not change the shared presentation delay: motion within a Battle
+still comes from its authority stream. The phase transition itself selects the
+new construction immediately, consistently with the match UI's replicated phase.
+The wire surface deliberately moves to protocol revision 57.
+
+Contact readings and resting loads are keyed by complete ECS entity identities and
+are refreshed by the next authority physics step; the prior step has already
+drained the deposit queue before the boundary. They cannot address reconstructed
+roots. Collider insertion/removal hooks maintain the spatial-query trees as roots
+are replaced; client construction and record derivation do not wait for a fixed
+update. Record derivation cursors follow the replaced ledger identity and local
+record generation. Shared view templates, player settings, transport clocks and
+deduplication, combatant identities and operator instrument counters keep their
+session lifetime.
 
 ## Admission and reporting
 
@@ -94,3 +144,14 @@ states, observes a rendered typed refusal, and keeps the first player connected
 into the next fill-up. A separate challenge-crossing probe closes admission
 between the request and response. Score and deadline-wrap tests pin the boundary
 invariants. The server spawn tests exercise complete tanks and replacement lives.
+
+The world-cycle regression uses a mixed map fixture through the startup scatter
+construction. During combat a wall chunk is freed and a tree falls; the authority,
+connected client, combat late joiner and next-fill-up joiner must recover startup
+counts and map identities in the next Battle. A separate arrival-order regression
+holds old and future ledgers across the replicated transition and verifies that
+neither is consumed against the wrong construction. The print-store regression
+checks both empty CPU history and new GPU image identities; extraction retires
+pending writes whose old image never reached the GPU. Arrival-order coverage also
+reconstructs without a fixed update and reconnects to a new authority whose Battle
+number coincides with the previous authority's.

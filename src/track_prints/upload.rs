@@ -34,10 +34,23 @@ pub(crate) struct PrintWrites(pub(crate) Vec<TileWrite>);
 #[derive(Resource, Default)]
 struct PendingWrites(Vec<TileWrite>);
 
-fn extract_writes(mut pending: ResMut<PendingWrites>, writes: Extract<Option<Res<PrintWrites>>>) {
+fn extract_writes(
+    mut pending: ResMut<PendingWrites>,
+    writes: Extract<Option<Res<PrintWrites>>>,
+    prints: Extract<Option<Res<super::TrackPrints>>>,
+) {
+    let Some(prints) = prints.as_ref() else {
+        pending.0.clear(); // No drawn heightmap is bound to a print store.
+        return;
+    };
     if let Some(writes) = writes.as_ref() {
         pending.0.extend(writes.0.iter().cloned());
     }
+    // A replaced image may never have reached the GPU. Its queued writes must retire rather
+    // than wait forever for a texture whose last handle left with the previous world.
+    pending.0.retain(|tile| {
+        tile.image == prints.near_image.id() || tile.image == prints.world_image.id()
+    });
 }
 
 fn write_tiles(
@@ -85,4 +98,51 @@ pub(super) fn plugin(app: &mut App) {
         .init_resource::<PendingWrites>()
         .add_systems(ExtractSchedule, extract_writes)
         .add_systems(Render, write_tiles.in_set(RenderSystems::PrepareResources));
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use bevy::render::MainWorld;
+
+    /// Pending writes wait only for images still bound by the current construction. A reset
+    /// before GPU creation cannot leave an immortal queue, or discard the new world's writes.
+    #[test]
+    fn a_world_change_retires_pending_writes_to_images_that_never_reached_the_gpu() {
+        // ASSUMED fixture tiles: no renderer is needed to exercise extraction and queue ownership.
+        let mut world = World::new();
+        world.init_resource::<PendingWrites>();
+        world.init_resource::<MainWorld>();
+        let (old, current) = {
+            let mut main = world.resource_mut::<MainWorld>();
+            main.init_resource::<Assets<Image>>();
+            let old = super::super::images(&mut main.resource_mut::<Assets<Image>>());
+            let current = super::super::images(&mut main.resource_mut::<Assets<Image>>());
+            let current_id = current.world.id();
+            main.insert_resource(super::super::TrackPrints::new(
+                current,
+                Handle::default(),
+                64.0,
+            ));
+            (old.near.id(), current_id)
+        };
+        let tile = |image| TileWrite {
+            image,
+            level: 0,
+            origin: UVec2::ZERO,
+            size: UVec2::ONE,
+            bytes_per_texel: 1,
+            data: Arc::from([255]),
+        };
+        world.resource_mut::<PendingWrites>().0.push(tile(old));
+        world
+            .resource_mut::<MainWorld>()
+            .insert_resource(PrintWrites(vec![tile(old), tile(current)]));
+        let mut schedule = Schedule::default();
+        schedule.add_systems(extract_writes);
+        schedule.run(&mut world);
+        let pending = &world.resource::<PendingWrites>().0;
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending[0].image, current);
+    }
 }

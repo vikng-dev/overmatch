@@ -227,6 +227,16 @@ struct ScatterView {
     surface: Handle<BuildingMaterial>,
 }
 
+/// Parsed construction data and shared view handles for a fresh scatter. The initial world and
+/// every subsequent world use this same recipe; mutable bodies never supply construction data.
+#[derive(Resource)]
+pub(crate) struct ScatterScene {
+    manifest: MapManifest,
+    grid: HeightGrid,
+    view: Option<ScatterView>,
+    server: Option<AssetServer>,
+}
+
 impl ScatterView {
     fn new(
         commands: &mut Commands,
@@ -290,101 +300,131 @@ pub(crate) fn spawn(
     blocks: &mut Vec<Transform>,
     mut view_assets: Option<ViewAssets<'_>>,
 ) -> Vec<Transform> {
-    let placements = place(&resolve(&manifest.instances, &manifest.prototypes), grid);
     let view = view_assets
         .as_mut()
         .map(|assets| ScatterView::new(commands, meshes, assets, manifest));
-    if let Some(view) = &view {
-        // The breaks' view draws a building's new meshes in the same one material.
-        commands.insert_resource(crate::buildings::view::BuildingLook {
-            surface: view.surface.clone(),
-        });
+    let scene = ScatterScene {
+        manifest: manifest.clone(),
+        grid: grid.clone(),
+        view,
+        server: view_assets.map(|assets| assets.server.clone()),
+    };
+    let obstacles = scene.construct(commands, blocks);
+    commands.insert_resource(scene);
+    obstacles
+}
+
+/// Run the startup construction again. No scatter in the immutable test-course world.
+pub(crate) fn reconstruct(mut commands: Commands, scene: Option<Res<ScatterScene>>) {
+    if let Some(scene) = scene {
+        scene.construct(&mut commands, &mut Vec::new());
     }
-    let assets = view_assets.map(|assets| assets.server);
-    let statics = CollisionLayers::new([Layer::Terrain], LayerMask::ALL);
-    let (mut buildings, mut trees, mut structures) = (0usize, 0usize, 0usize);
-    let mut obstacles = Vec::new();
-    for placement in &placements {
-        match placement.shape {
-            Prototype::Structure { asset } => {
-                let kind = manifest
-                    .buildings
-                    .get(asset)
-                    .expect("map::load loaded every building asset the library names");
-                let root = crate::buildings::spawn(
-                    commands,
-                    kind,
-                    placement.identity.clone(),
-                    placement.pose,
-                );
-                obstacles.push(crate::buildings::footprint(kind, placement.pose));
-                if let Some(view) = &view {
-                    // The root stands at unit scale; the view, a child, carries the instance's.
-                    commands.spawn((
-                        ChildOf(root),
-                        Transform::from_scale(placement.pose.scale),
-                        Mesh3d(view.structure[asset].clone()),
-                        MeshMaterial3d(view.surface.clone()),
-                        crate::render_cost::CasterClass::House,
-                        crate::buildings::view::BuildingView,
-                    ));
-                }
-                structures += 1;
-            }
-            Prototype::Tree { asset } => {
-                let kind = manifest
-                    .trees
-                    .get(asset)
-                    .expect("map::load loaded every tree asset the library names");
-                let root =
-                    crate::trees::spawn(commands, kind, placement.identity.clone(), placement.pose);
-                if let Some(assets) = assets {
-                    crate::trees::view::attach(
+}
+
+impl ScatterScene {
+    fn construct(&self, commands: &mut Commands, blocks: &mut Vec<Transform>) -> Vec<Transform> {
+        let manifest = &self.manifest;
+        let placements = place(
+            &resolve(&manifest.instances, &manifest.prototypes),
+            &self.grid,
+        );
+        let view = &self.view;
+        if let Some(view) = view {
+            // The breaks' view draws a building's new meshes in the same one material.
+            commands.insert_resource(crate::buildings::view::BuildingLook {
+                surface: view.surface.clone(),
+            });
+        }
+        let assets = self.server.as_ref();
+        let statics = CollisionLayers::new([Layer::Terrain], LayerMask::ALL);
+        let (mut buildings, mut trees, mut structures) = (0usize, 0usize, 0usize);
+        let mut obstacles = Vec::new();
+        for placement in &placements {
+            match placement.shape {
+                Prototype::Structure { asset } => {
+                    let kind = manifest
+                        .buildings
+                        .get(asset)
+                        .expect("map::load loaded every building asset the library names");
+                    let root = crate::buildings::spawn(
                         commands,
-                        root,
                         kind,
-                        placement.pose.scale.x,
-                        assets,
+                        placement.identity.clone(),
+                        placement.pose,
                     );
+                    obstacles.push(crate::buildings::footprint(kind, placement.pose));
+                    if let Some(view) = view {
+                        // The root stands at unit scale; the view, a child, carries the instance's.
+                        commands.spawn((
+                            ChildOf(root),
+                            Transform::from_scale(placement.pose.scale),
+                            Mesh3d(view.structure[asset].clone()),
+                            MeshMaterial3d(view.surface.clone()),
+                            crate::render_cost::CasterClass::House,
+                            crate::buildings::view::BuildingView,
+                        ));
+                    }
+                    structures += 1;
                 }
-                trees += 1;
-            }
-            Prototype::Building { substance, .. } => {
-                let block = placement
-                    .block()
-                    .expect("a building placement carries a block transform");
-                blocks.push(block);
-                let mut entity = commands.spawn((
-                    block,
-                    RigidBody::Static,
-                    Collider::cuboid(1.0, 1.0, 1.0),
-                    crate::track::terrain::FieldSurface,
-                    statics,
-                    graybox_friction(substance),
-                    crate::substances::SubstanceRegistry::shipped_static()
-                        .hard(substance)
-                        .expect("map::parse certifies every graybox substance")
-                        .feedback,
-                    ScatterProxy,
-                    placement.identity.clone(),
-                ));
-                if let Some(view) = &view {
-                    entity.insert((
-                        Mesh3d(view.building[placement.prototype].clone()),
-                        MeshMaterial3d(view.surface.clone()),
-                        crate::render_cost::CasterClass::House,
+                Prototype::Tree { asset } => {
+                    let kind = manifest
+                        .trees
+                        .get(asset)
+                        .expect("map::load loaded every tree asset the library names");
+                    let root = crate::trees::spawn(
+                        commands,
+                        kind,
+                        placement.identity.clone(),
+                        placement.pose,
+                    );
+                    if let Some(assets) = assets {
+                        crate::trees::view::attach(
+                            commands,
+                            root,
+                            kind,
+                            placement.pose.scale.x,
+                            assets,
+                        );
+                    }
+                    trees += 1;
+                }
+                Prototype::Building { substance, .. } => {
+                    let block = placement
+                        .block()
+                        .expect("a building placement carries a block transform");
+                    blocks.push(block);
+                    let mut entity = commands.spawn((
+                        block,
+                        RigidBody::Static,
+                        Collider::cuboid(1.0, 1.0, 1.0),
+                        crate::track::terrain::FieldSurface,
+                        statics,
+                        graybox_friction(substance),
+                        crate::substances::SubstanceRegistry::shipped_static()
+                            .hard(substance)
+                            .expect("map::parse certifies every graybox substance")
+                            .feedback,
+                        ScatterProxy,
+                        placement.identity.clone(),
                     ));
+                    if let Some(view) = view {
+                        entity.insert((
+                            Mesh3d(view.building[placement.prototype].clone()),
+                            MeshMaterial3d(view.surface.clone()),
+                            crate::render_cost::CasterClass::House,
+                        ));
+                    }
+                    buildings += 1;
                 }
-                buildings += 1;
             }
         }
-    }
-    info!(
-        "scatter: {} instances placed on the live surface — {buildings} graybox buildings (also \
+        info!(
+            "scatter: {} instances placed on the live surface — {buildings} graybox buildings (also \
          TerrainMap blocks), {structures} buildings (a collider per element), {trees} trees",
-        placements.len(),
-    );
-    obstacles
+            placements.len(),
+        );
+        obstacles
+    }
 }
 
 #[cfg(test)]

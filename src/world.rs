@@ -11,12 +11,66 @@ use bevy::pbr::generate::{
     GeneratorBindGroups, GeneratorPipelines, RenderEnvironmentMap, filtering_system,
 };
 use bevy::prelude::*;
+
 use bevy::render::render_resource::PipelineCache;
 use bevy::render::sync_world::MainEntity;
 use bevy::render::{Render, RenderApp, RenderSystems};
 
 use crate::Layer;
 use crate::render_policy::CameraProfile;
+
+/// The world's construction generation. Streamed environment pieces belong to exactly this
+/// generation; consumers must not resolve an older piece against a newly constructed map.
+#[derive(Component, Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub(crate) struct WorldGeneration(pub(crate) u32);
+
+/// The generation selected for local construction. `None` before a client receives its authority
+/// Battle or between links; an authority and offline construction start at the initial generation.
+#[derive(Resource)]
+pub(crate) struct CurrentWorld(pub(crate) Option<WorldGeneration>);
+
+impl Default for CurrentWorld {
+    fn default() -> Self {
+        Self(Some(WorldGeneration::default()))
+    }
+}
+
+impl Default for WorldGeneration {
+    fn default() -> Self {
+        Self(1)
+    }
+}
+
+/// Replace mutable environment entities with the startup construction. Terrain, its immutable
+/// height samples and field, lighting and shared asset handles survive. A loose tree's reparented
+/// segments belong to its loose body, so both map roots and loose bodies are lifetime owners.
+pub(crate) fn reconstruct(world: &mut World) {
+    let roots: Vec<Entity> = world
+        .query_filtered::<Entity, Or<(
+            With<crate::scatter::MapInstance>,
+            With<crate::debris::DebrisPiece>,
+            With<crate::trees::LooseTrunk>,
+        )>>()
+        .iter(world)
+        .collect();
+    for root in roots {
+        assert!(
+            world.despawn(root),
+            "environment roots have disjoint ownership"
+        );
+    }
+    if let Some(mut record) = world.get_resource_mut::<crate::buildings::breakage::WallRecord>() {
+        *record = crate::buildings::breakage::WallRecord {
+            generation: record.generation.wrapping_add(1),
+            ..default()
+        };
+    }
+    world
+        .run_system_cached(crate::scatter::reconstruct)
+        .expect("the startup scatter recipe remains available for world construction");
+    crate::track_prints::reconstruct(world);
+    crate::vfx::reconstruct_world(world);
+}
 
 /// The world's static terrain as DATA (track architecture §5): every terrain block in authoring
 /// form — a unit cube posed/scaled by its Transform (the Avian collider idiom). Colliders are

@@ -19,6 +19,53 @@ mod trail;
 #[cfg(test)]
 pub(crate) use trail::{TrailHarnessSet, TrailStationMeshEvidence};
 
+/// A fresh battlefield has no ground scars or other billboards from its predecessor. Ring slots
+/// and shared materials survive; their occupants do not. Expired occupants can already be gone.
+pub(crate) fn reconstruct_world(world: &mut World) {
+    let mut occupants = Vec::new();
+    if let Some(mut ring) = world.get_resource_mut::<billboard::BillboardRing>() {
+        occupants.extend(std::mem::take(&mut *ring).live);
+    }
+    if let Some(mut ring) = world.get_resource_mut::<impact::GroundMarkRing>() {
+        occupants.extend(std::mem::take(&mut *ring).0.live);
+    }
+    for entity in occupants {
+        world.despawn(entity);
+    }
+}
+
+#[cfg(test)]
+mod world_cycle_tests {
+    use super::*;
+
+    /// Ground scars have their own eviction ring; a world change must retire that ring too,
+    /// even when the ordinary effects' occupants have already expired. The next map's players
+    /// rely on neither lifetime owner retaining a mark from the previous construction.
+    #[test]
+    fn a_fresh_world_retires_ground_scars_and_other_billboards() {
+        let mut world = World::new();
+        world.init_resource::<billboard::BillboardRing>();
+        world.init_resource::<impact::GroundMarkRing>();
+        let live = world.spawn_empty().id();
+        let scar = world.spawn_empty().id();
+        let expired = world.spawn_empty().id();
+        world.despawn(expired);
+        world
+            .resource_mut::<billboard::BillboardRing>()
+            .live
+            .extend([expired, live]);
+        world
+            .resource_mut::<impact::GroundMarkRing>()
+            .0
+            .live
+            .push_back(scar);
+        reconstruct_world(&mut world);
+        assert!(world.get_entity(live).is_err() && world.get_entity(scar).is_err());
+        assert!(world.resource::<billboard::BillboardRing>().live.is_empty());
+        assert!(world.resource::<impact::GroundMarkRing>().0.live.is_empty());
+    }
+}
+
 #[cfg(test)]
 pub(crate) fn mount_trail_loss_harness(app: &mut App) {
     trail::mount_loss_harness(app);

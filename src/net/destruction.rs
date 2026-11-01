@@ -6,9 +6,9 @@ use super::debris_stress::DebrisPose;
 use crate::debris::PresentationClock;
 use crate::scatter::MapInstance;
 use crate::trees::{LooseTrunk, TreeBody, TreeFallSet, TreePiece, TreeSegment, TreeState};
+use crate::world::{CurrentWorld, WorldGeneration};
 use avian3d::prelude::{Position, RigidBody, Rotation};
 use bevy::ecs::error::Result;
-use bevy::ecs::query::QuerySingleError;
 use bevy::prelude::*;
 use bevy_replicon::prelude::{Diffable, EntityCommandsDiffExt};
 use lightyear::interpolation::timeline::InterpolationTimeline;
@@ -28,7 +28,7 @@ impl LedgerEntry {
     }
 }
 
-/// Every topology transition so far, in authority order, replicated by append-only diff.
+/// This world's topology transitions, in authority order, replicated by append-only diff.
 #[derive(Component, Serialize, Deserialize, Debug, Default, Clone, PartialEq, Eq)]
 pub(crate) struct DestructionLedger(pub(crate) Vec<LedgerEntry>);
 impl Diffable for DestructionLedger {
@@ -46,12 +46,14 @@ struct Applied {
 }
 
 pub(super) fn install_server(app: &mut App) {
-    app.add_systems(Startup, spawn_ledger).add_systems(
-        FixedPostUpdate,
-        publish_falls
-            .after(TreeFallSet)
-            .in_set(crate::state::SimPhase::Publish),
-    );
+    app.init_resource::<CurrentWorld>()
+        .add_systems(Startup, spawn_ledger)
+        .add_systems(
+            FixedPostUpdate,
+            publish_falls
+                .after(TreeFallSet)
+                .in_set(crate::state::SimPhase::Publish),
+        );
 }
 pub(super) fn install_client(app: &mut App) {
     install_apply(app);
@@ -59,23 +61,28 @@ pub(super) fn install_client(app: &mut App) {
         .add_systems(Update, publish_presentation_clock.before(apply_ledger));
 }
 pub(crate) fn install_apply(app: &mut App) {
-    app.init_resource::<Applied>().add_systems(
-        Update,
-        (
-            apply_ledger,
-            crate::trees::derive_systems(),
-            attach_trunks,
-            follow_trunks,
-            crate::trees::place_colliders,
-            crate::trees::refit_colliders(),
-        )
-            .chain(),
-    );
+    app.init_resource::<CurrentWorld>()
+        .init_resource::<Applied>()
+        .add_systems(
+            Update,
+            (
+                apply_ledger,
+                crate::trees::derive_systems(),
+                attach_trunks,
+                follow_trunks,
+                crate::trees::place_colliders,
+                crate::trees::refit_colliders(),
+            )
+                .chain(),
+        );
 }
-fn spawn_ledger(mut commands: Commands) {
+pub(super) fn spawn_ledger(mut commands: Commands, generation: Res<CurrentWorld>) {
     commands.spawn((
         Name::new("DestructionLedger"),
         DestructionLedger::default(),
+        generation
+            .0
+            .expect("an authority constructs its initial world before publishing"),
         Replicate::to_clients(NetworkTarget::All),
     ));
 }
@@ -100,19 +107,24 @@ fn publish_falls(
 /// Apply topology from the active authority. Invalid peer words are refused visibly; replacing
 /// the ledger first resets every map tree so a reconnect cannot retain another world's cuts.
 fn apply_ledger(
-    ledgers: Query<(Entity, &DestructionLedger)>,
+    ledgers: Query<(Entity, &DestructionLedger, &WorldGeneration)>,
+    generation: Res<CurrentWorld>,
     mut applied: ResMut<Applied>,
     mut trees: Query<(Entity, &MapInstance, &TreeBody, &mut TreeState)>,
 ) {
-    let (ledger, entries) = match ledgers.single() {
-        Ok(ledger) => ledger,
+    let mut current = ledgers
+        .iter()
+        .filter(|(_, _, belongs)| Some(**belongs) == generation.0);
+    let (ledger, entries, _) = match current.next() {
+        Some(ledger) => ledger,
         // Before the first snapshot, or between links, no authority ledger has arrived yet.
-        Err(QuerySingleError::NoEntities(_)) => return,
-        Err(QuerySingleError::MultipleEntities(_)) => panic!(
-            "a replica has one active authority ledger; disconnect cleanup removes the old \
-             link's replicated entities before a replacement arrives"
-        ),
+        None => return,
     };
+    assert!(
+        current.next().is_none(),
+        "a replica has one active authority ledger; disconnect cleanup removes the old \
+             link's replicated entities before a replacement arrives"
+    );
     if applied.ledger != Some(ledger) || entries.0.len() < applied.entries {
         // The authority only appends and a replicon snapshot carries its whole list, so a shorter
         // list on the same entity is a malformed peer record: logged, then consumed from its first
@@ -226,11 +238,15 @@ fn resolve_carrier(
 }
 
 fn attach_trunks(
-    carriers: Query<(Entity, &TreePiece, &DebrisPose), Without<TrunkAttached>>,
+    carriers: Query<(Entity, &TreePiece, &DebrisPose, &WorldGeneration), Without<TrunkAttached>>,
+    generation: Res<CurrentWorld>,
     trees: Query<(Entity, &MapInstance, &TreeBody, &TreeState)>,
     mut commands: Commands,
 ) {
-    for (carrier, piece, pose) in &carriers {
+    for (carrier, piece, pose, belongs) in &carriers {
+        if Some(*belongs) != generation.0 {
+            continue; // Another world's carrier can arrive before its phase or after its retirement.
+        }
         let tree = trees
             .iter()
             .find(|(_, identity, _, _)| identity.ordinal == piece.tree);
@@ -284,7 +300,8 @@ fn attach_trunks(
 /// can already be known, but the standing colliders must remain present. The copy takes over in
 /// the same frame its pose becomes present, including frames with no physics tick.
 fn follow_trunks(
-    carriers: Query<&DebrisPose>,
+    carriers: Query<(&DebrisPose, &WorldGeneration)>,
+    generation: Res<CurrentWorld>,
     trees: Query<(&TreeState, &crate::trees::TreeParts)>,
     mut trunks: Query<(
         Entity,
@@ -297,10 +314,14 @@ fn follow_trunks(
     mut commands: Commands,
 ) {
     for (entity, trunk, children, mut transform, mut position, mut rotation) in &mut trunks {
-        let Ok(pose) = carriers.get(trunk.carrier) else {
+        let Ok((pose, belongs)) = carriers.get(trunk.carrier) else {
             commands.entity(entity).despawn(); // Disconnect removed the authority's carrier.
             continue;
         };
+        if Some(*belongs) != generation.0 {
+            commands.entity(entity).despawn();
+            continue;
+        }
         let Ok((state, parts)) = trees.get(trunk.tree) else {
             commands.entity(entity).despawn(); // The local map was unloaded with its tree roots.
             continue;
@@ -390,11 +411,14 @@ mod tests {
     #[should_panic(expected = "a replica has one active authority ledger")]
     fn two_authority_ledgers_are_a_bug() {
         let mut app = App::new();
-        app.init_resource::<Applied>()
+        app.init_resource::<CurrentWorld>()
+            .init_resource::<Applied>()
             .add_systems(Update, apply_ledger);
         app.update();
-        app.world_mut().spawn(DestructionLedger::default());
-        app.world_mut().spawn(DestructionLedger::default());
+        app.world_mut()
+            .spawn((DestructionLedger::default(), WorldGeneration::default()));
+        app.world_mut()
+            .spawn((DestructionLedger::default(), WorldGeneration::default()));
         app.update();
     }
 
@@ -411,10 +435,13 @@ mod tests {
         let state = TreeState::Down { cut: 1, dir: 64 };
         let ledger = app
             .world_mut()
-            .spawn(DestructionLedger(vec![LedgerEntry::State {
-                index: 3,
-                word: state.encode(),
-            }]))
+            .spawn((
+                DestructionLedger(vec![LedgerEntry::State {
+                    index: 3,
+                    word: state.encode(),
+                }]),
+                WorldGeneration::default(),
+            ))
             .id();
         app.update();
         assert_eq!(app.world().get::<TreeState>(root), Some(&state));
@@ -430,7 +457,8 @@ mod tests {
         assert_eq!(app.world().get::<TreeState>(root), Some(&state));
         assert_eq!(app.world().resource::<Applied>().entries, 2);
         app.world_mut().entity_mut(ledger).despawn();
-        app.world_mut().spawn(DestructionLedger::default());
+        app.world_mut()
+            .spawn((DestructionLedger::default(), WorldGeneration::default()));
         app.update();
         assert_eq!(
             app.world().get::<TreeState>(root),
@@ -487,12 +515,17 @@ mod tests {
         let (mut app, root) = replica();
         app.update();
         let marker = TreePiece { tree: 3, cut: 1 };
-        let carrier = app.world_mut().spawn(marker).id();
-        app.world_mut()
-            .spawn(DestructionLedger(vec![LedgerEntry::State {
+        let carrier = app
+            .world_mut()
+            .spawn((marker, WorldGeneration::default()))
+            .id();
+        app.world_mut().spawn((
+            DestructionLedger(vec![LedgerEntry::State {
                 index: 3,
                 word: TreeState::Down { cut: 1, dir: 0 }.encode(),
-            }]));
+            }]),
+            WorldGeneration::default(),
+        ));
         app.update();
         let parts = app
             .world()
@@ -548,7 +581,11 @@ mod tests {
         };
         let carrier = app
             .world_mut()
-            .spawn((TreePiece { tree: 3, cut: 1 }, first))
+            .spawn((
+                TreePiece { tree: 3, cut: 1 },
+                first,
+                WorldGeneration::default(),
+            ))
             .id();
         app.update();
         assert_eq!(
@@ -559,11 +596,13 @@ mod tests {
             0,
             "carrier waits for topology"
         );
-        app.world_mut()
-            .spawn(DestructionLedger(vec![LedgerEntry::State {
+        app.world_mut().spawn((
+            DestructionLedger(vec![LedgerEntry::State {
                 index: 3,
                 word: TreeState::Down { cut: 1, dir: 0 }.encode(),
-            }]));
+            }]),
+            WorldGeneration::default(),
+        ));
         app.update();
         let ghost = app
             .world_mut()

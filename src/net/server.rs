@@ -166,7 +166,8 @@ pub fn run() {
 /// Install the production Battle clock and score. The short-mode headless probe mounts this same
 /// composition, with the same netcode gate, rather than reproducing the phase machine in a test.
 pub(super) fn install_battle(app: &mut App, mode: BattleMode, tick: Duration) {
-    app.init_resource::<PendingClients>()
+    app.init_resource::<crate::world::CurrentWorld>()
+        .init_resource::<PendingClients>()
         .init_resource::<SpawnLane>()
         .init_resource::<SpawnOverrides>()
         .init_resource::<CombatantIds>()
@@ -222,6 +223,8 @@ fn cycle_battles(
             score.0.clear();
             overrides.0.clear();
             lane.0 = 0;
+            let number = next.number;
+            commands.queue(move |world: &mut World| super::world_reset::start_next(world, number));
         }
         Boundary::None => {}
     }

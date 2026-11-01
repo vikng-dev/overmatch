@@ -88,6 +88,7 @@ mod ui_ownership;
 mod walls;
 /// The quantised wire forms of the per-tick hull and belt state.
 mod wire_quant;
+mod world_reset;
 
 /// Run the network client.
 pub use client::run as run_client;

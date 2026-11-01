@@ -562,7 +562,11 @@ fn redraw(
 /// mesh at its building's scale, hidden until the record is presented to its fall. A carrier is
 /// dressed once it holds a pose: an interpolated one takes its first when the cursor reaches it.
 fn dress_pieces(
-    pieces: Query<(Entity, &WallPiece), (With<Transform>, Without<PieceDressed>)>,
+    pieces: Query<
+        (Entity, &WallPiece, Option<&crate::world::WorldGeneration>),
+        (With<Transform>, Without<PieceDressed>),
+    >,
+    generation: Option<Res<crate::world::CurrentWorld>>,
     buildings: Query<(Entity, &MapInstance, &Breakage)>,
     look: Option<Res<BuildingLook>>,
     mut meshes: ResMut<Assets<Mesh>>,
@@ -571,7 +575,14 @@ fn dress_pieces(
     let Some(look) = look else {
         return;
     };
-    for (entity, piece) in &pieces {
+    for (entity, piece, belongs) in &pieces {
+        // Offline pieces are local bodies. A streamed piece waits for its own map construction
+        // before resolving the building root it will retain for its entire presented lifetime.
+        if belongs.is_some_and(|belongs| {
+            generation.as_deref().and_then(|current| current.0.as_ref()) != Some(belongs)
+        }) {
+            continue;
+        }
         let Some((building, _, breakage)) = buildings
             .iter()
             .find(|(_, identity, _)| identity.ordinal == piece.building)
@@ -1032,6 +1043,64 @@ mod tests {
             surface: shared.clone(),
         });
         shared
+    }
+
+    /// A pose can precede its Battle snapshot. Dressing it against the old construction would
+    /// retain a departed building root forever, hiding valid current debris from the player.
+    #[test]
+    fn a_streamed_piece_resolves_its_building_only_in_its_own_world() {
+        use crate::world::{CurrentWorld, WorldGeneration};
+        // ASSUMED fixture identities and generation numbers; geometry comes from asset data.
+        let mut world = World::new();
+        shared_look(&mut world);
+        world.insert_resource(CurrentWorld(None));
+        let kind = shipped_house();
+        let (_, chunks) = chunked_element(&kind.layout);
+        let old = world
+            .spawn((
+                MapInstance {
+                    id: "fixture_building".to_owned(),
+                    ordinal: 3,
+                },
+                Breakage::new(kind.clone(), 1.0),
+            ))
+            .id();
+        let carrier = world
+            .spawn((
+                WallPiece {
+                    building: 3,
+                    chunks: vec![chunks.start as u16],
+                },
+                WorldGeneration(2),
+                Transform::IDENTITY,
+            ))
+            .id();
+        let mut schedule = Schedule::default();
+        schedule.add_systems(dress_pieces);
+        schedule.run(&mut world);
+        assert!(
+            world.get::<PieceDressed>(carrier).is_none(),
+            "no authority construction selected"
+        );
+        world.resource_mut::<CurrentWorld>().0 = Some(WorldGeneration(1));
+        schedule.run(&mut world);
+        assert!(
+            world.get::<PieceDressed>(carrier).is_none(),
+            "the future piece waits"
+        );
+        world.despawn(old);
+        let fresh = world
+            .spawn((
+                MapInstance {
+                    id: "fixture_building".to_owned(),
+                    ordinal: 3,
+                },
+                Breakage::new(kind, 1.0),
+            ))
+            .id();
+        world.resource_mut::<CurrentWorld>().0 = Some(WorldGeneration(2));
+        schedule.run(&mut world);
+        assert_eq!(world.get::<PieceDressed>(carrier).unwrap().building, fresh);
     }
 
     /// A HOLE IS DRAWN BY ITS BUILDING'S OWN MATERIAL, AND ONLY WHILE IT SHOWS: a building whose
