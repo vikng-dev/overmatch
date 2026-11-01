@@ -535,6 +535,8 @@ fn a_burst_ball_is_refused_by_the_record_parser() {
         "a local record cannot select the ball law for a burst"
     );
     report.burst.as_mut().unwrap().field = None;
+    // The game's damage model permits unplaced field dose only in an explicitly synthetic clip.
+    report.synthetic = true;
     let text = ron::ser::to_string(&report).unwrap();
     assert_eq!(PenetrationReport::from_ron(&text).unwrap(), report);
 }
@@ -954,4 +956,33 @@ fn an_incomplete_recorded_servo_pose_is_refused() {
     report.servo_deg.remove(&servo);
     let error = BuiltExplanation::build(&vocabulary, &recorded(&report)).unwrap_err();
     assert!(error.to_string().contains(&servo), "{error}");
+}
+
+/// The game's damage model refuses malformed network semantics independently of its encoder:
+/// the client must never pass unordered paths, invalid projectile quantities or excess pool
+/// values to presentation. These mutations preserve the vocabulary and wire structure.
+#[test]
+fn network_record_admission_refuses_invalid_semantics() {
+    let records = records();
+    let vocabulary = vocabulary(&records);
+    let base = BuiltExplanation::build(&vocabulary, &recorded(&records[0].1))
+        .unwrap()
+        .full;
+    let spoilers: &[fn(&mut Record)] = &[
+        |r| r.mass_kg = 0.0,
+        |r| r.caliber_mm = -1.0,
+        |r| r.speed_mps = -1.0,
+        |r| r.path[1].0 = r.path[0].0 - 1,
+        |r| r.components[0].held = u32::MAX,
+        |r| r.doses[0].taken = u32::MAX,
+        |r| r.doses[0].line = -1.0,
+    ];
+    for spoil in spoilers {
+        let mut explanation = base.clone();
+        spoil(&mut explanation.record);
+        assert!(matches!(
+            explanation.decode(&vocabulary),
+            Err(CodecError::Semantic(_))
+        ));
+    }
 }

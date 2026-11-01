@@ -27,7 +27,9 @@ pub mod pen_cam;
 pub mod record;
 pub(crate) mod recorder;
 pub mod shapes;
+mod validation;
 pub(crate) mod wire;
+pub use validation::{ReportLoadError, ValidationError};
 
 use std::collections::BTreeMap;
 use std::path::Path;
@@ -447,8 +449,10 @@ pub enum Role {
 }
 
 impl PenetrationReport {
-    pub fn from_ron(text: &str) -> Result<Self, ron::error::SpannedError> {
-        ron::from_str(text)
+    pub fn from_ron(text: &str) -> Result<Self, ReportLoadError> {
+        let report = ron::from_str(text).map_err(ReportLoadError::Parse)?;
+        validation::check(&report).map_err(ReportLoadError::Invalid)?;
+        Ok(report)
     }
 
     pub fn load(path: &Path) -> Result<Self, String> {

@@ -368,3 +368,20 @@ Complete-record verification: format and workspace/all-target clippy passed. MEA
 record, delivery, codec, recorder-integration, pen-cam and citation tests passed; four ignored.
 The first new readiness test lacked its fixture clock; after supplying it, the intended refusal
 and the legitimate empty loading frame both passed.
+
+## Semantic record admission (B59/B60)
+
+Subject: the game's damage model, game state only. Local record parsing, authority encoding and
+network decoding now share semantic admission before presentation: finite domain-correct values,
+unit directions, ordered paths and events, origin/departure/burst path consistency, valid field
+descriptors, component references and HP-pool bounds. Local synthetic clips retain explicit
+missing vehicle/servo/dose-placement allowances, while obeying numeric and path invariants.
+Network semantic refusals have a typed codec variant, and local parsing distinguishes syntax from
+semantic failures. Protocol revision deliberately advances from 55 to 56 for the stricter admission
+contract; serialized record fields and quanta are unchanged. Independent malformed local and
+network controls exercise their own edges rather than relying on encoder/decoder agreement.
+
+Semantic-admission verification: format and workspace/all-target clippy passed. MEASURED: 262
+record, codec, pen-cam, recorder-integration, explanation-transport, protocol and citation tests
+passed; four ignored. The existing deliberately unplaced burst-dose clip is now explicitly
+synthetic. All recorded corpus reports pass the new edge without changing their data.

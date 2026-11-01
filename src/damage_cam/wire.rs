@@ -156,16 +156,22 @@ const REACH_OVERFLOW: u16 = u16::MAX;
 
 /// Why a record could not be put on the wire, or a message could not be read back.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct CodecError(String);
+pub(crate) enum CodecError {
+    Malformed(String),
+    Semantic(super::ValidationError),
+}
 
 impl std::fmt::Display for CodecError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(&self.0)
+        match self {
+            Self::Malformed(why) => f.write_str(why),
+            Self::Semantic(error) => error.fmt(f),
+        }
     }
 }
 
 fn refuse<T>(why: impl Into<String>) -> Result<T, CodecError> {
-    Err(CodecError(why.into()))
+    Err(CodecError::Malformed(why.into()))
 }
 
 // --- Vocabulary -----------------------------------------------------------------------------------
@@ -928,6 +934,7 @@ impl ShotExplanation {
 // --- Encode ---------------------------------------------------------------------------------------
 
 fn encode(vocabulary: &ShotVocabulary, report: &PenetrationReport) -> Result<Record, CodecError> {
+    super::validation::check(report).map_err(CodecError::Semantic)?;
     if report.synthetic {
         return refuse("a synthetic report is never sent");
     }
@@ -943,7 +950,7 @@ fn encode(vocabulary: &ShotVocabulary, report: &PenetrationReport) -> Result<Rec
         .servos
         .iter()
         .map(|name| {
-            let angle = report.servo_deg.get(name).ok_or_else(|| CodecError(format!(
+            let angle = report.servo_deg.get(name).ok_or_else(|| CodecError::Malformed(format!(
                 "servo {name:?} is missing: record every declared servo angle; synthetic rest poses are local only"
             )))?;
             Turn::of_degrees(*angle)
@@ -1016,7 +1023,7 @@ fn encode(vocabulary: &ShotVocabulary, report: &PenetrationReport) -> Result<Rec
                     .as_ref()
                     .map(|field| {
                         super::check_burst_field(field.field)
-                            .map_err(|why| CodecError(why.into()))?;
+                            .map_err(|why| CodecError::Malformed(why.into()))?;
                         encode_cone(vocabulary.burst.shape(), vehicle, field)
                     })
                     .transpose()?,
@@ -1346,7 +1353,7 @@ fn decode(vocabulary: &ShotVocabulary, record: &Record) -> Result<PenetrationRep
                     .as_ref()
                     .map(|field| {
                         super::check_burst_field(field.field)
-                            .map_err(|why| CodecError(why.into()))?;
+                            .map_err(|why| CodecError::Malformed(why.into()))?;
                         decode_cone(vocabulary.burst.shape(), vehicle, field)
                     })
                     .transpose()?,
@@ -1397,7 +1404,7 @@ fn decode(vocabulary: &ShotVocabulary, record: &Record) -> Result<PenetrationRep
             })
         })
         .collect::<Result<_, CodecError>>()?;
-    Ok(PenetrationReport {
+    let report = PenetrationReport {
         synthetic: false,
         vehicle: Some(vehicle.file.clone()),
         servo_deg,
@@ -1435,7 +1442,9 @@ fn decode(vocabulary: &ShotVocabulary, record: &Record) -> Result<PenetrationRep
         consequences,
         components,
         killed: record.killed,
-    })
+    };
+    super::validation::check(&report).map_err(CodecError::Semantic)?;
+    Ok(report)
 }
 
 /// `cone` off the wire, its rays rebuilt from `shape` spread by its field.

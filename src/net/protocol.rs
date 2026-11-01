@@ -232,7 +232,7 @@ use crate::{CombatantId, CombatantLife, ShotId};
 /// [`WallEvent`]: crate::buildings::breakage::WallEvent
 /// REV 55 (#236): tree motion uses the interpolated debris pose stream. The topology ledger
 /// carries only a state word; each freed trunk's TreePiece identifies its map tree and cut.
-pub const PROTOCOL_REV: u32 = 55;
+pub const PROTOCOL_REV: u32 = 56;
 
 /// Compatibility tag derived from the complete pinned wire manifest plus the crate version. This
 /// is the runtime handshake value: version-exact, so a version bump intentionally changes it.
