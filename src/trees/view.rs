@@ -97,8 +97,8 @@ enum Part {
     Trunk,
     CapTop,
     CapBottom,
-    /// Any other part (the canopy): drawn standing and down, never indexed.
-    Other,
+    /// The canopy: drawn standing and down, never indexed.
+    Canopy,
 }
 
 /// One entity of the kind's scene instance, as the segmented view rebuilds it.
@@ -114,40 +114,33 @@ struct TemplateNode {
 }
 
 /// A kind's view: its scene's entities parent first, and its standing meshes with their
-/// materials — `None` where the primitives cannot merge, and the kind's trees draw segmented
-/// throughout.
+/// materials.
 pub(crate) struct TreeTemplate {
     nodes: Vec<TemplateNode>,
-    standing: Option<Vec<(Handle<Mesh>, Option<Handle<StandardMaterial>>)>>,
+    standing: Vec<(Handle<Mesh>, Option<Handle<StandardMaterial>>)>,
 }
 
 impl TreeTemplate {
     /// The template of `nodes`, its standing meshes merged ([`standing_meshes`]) and added to
-    /// `meshes`; a merge that fails is logged against kind `id`.
+    /// `meshes`. Primitives that cannot merge are a broken ship, refused against kind `id`.
     fn new(id: &str, nodes: Vec<TemplateNode>, meshes: &mut Assets<Mesh>) -> Self {
-        let standing = match standing_meshes(&nodes, meshes) {
-            Ok(merged) => {
-                info!(
-                    "trees: {id}'s view read — a standing tree draws {} merged meshes, a fallen one \
-                     {} entities of which {} draw",
-                    merged.len(),
-                    nodes.len(),
-                    nodes.iter().filter(|node| node.mesh.is_some()).count()
-                );
-                Some(
-                    merged
-                        .into_iter()
-                        .map(|(mesh, material)| (meshes.add(mesh), material))
-                        .collect(),
-                )
-            }
-            Err(why) => {
-                error!(
-                    "trees: {id}'s standing meshes do not merge ({why}); its trees draw segmented"
-                );
-                None
-            }
-        };
+        let merged = standing_meshes(&nodes, meshes).unwrap_or_else(|why| {
+            panic!(
+                "trees: {id}.glb's standing primitives do not merge ({why}); export every \
+                 primitive of one material with the same vertex attributes and indexing"
+            )
+        });
+        info!(
+            "trees: {id}'s view read — a standing tree draws {} merged meshes, a fallen one {} \
+             entities of which {} draw",
+            merged.len(),
+            nodes.len(),
+            nodes.iter().filter(|node| node.mesh.is_some()).count()
+        );
+        let standing = merged
+            .into_iter()
+            .map(|(mesh, material)| (meshes.add(mesh), material))
+            .collect();
         Self { nodes, standing }
     }
 }
@@ -157,6 +150,33 @@ impl TreeTemplate {
 struct PartExtras {
     tree_part: String,
     tree_segment: usize,
+}
+
+/// The part a node's glTF `extras` name, or `None` for extras that name none (the root's
+/// generator record: species, seed, height). Extras that carry a part key but no valid part are a
+/// broken ship: the prop pipeline's node contract (`scripts/prop/build.py`) certifies every
+/// part node's, so the kind's glb is refused by name.
+fn part_of(id: &str, extras: &str) -> Option<(Part, usize)> {
+    let value: serde_json::Value = serde_json::from_str(extras).unwrap_or_else(|err| {
+        panic!("trees: {id}.glb carries node extras that are no JSON ({err})")
+    });
+    if value.get("tree_part").is_none() && value.get("tree_segment").is_none() {
+        return None;
+    }
+    let extras: PartExtras = serde_json::from_value(value).unwrap_or_else(|err| {
+        panic!("trees: {id}.glb carries malformed tree part extras {extras} ({err}); re-export it")
+    });
+    let part = match extras.tree_part.as_str() {
+        "trunk" => Part::Trunk,
+        "cap_top" => Part::CapTop,
+        "cap_bottom" => Part::CapBottom,
+        "canopy" => Part::Canopy,
+        other => panic!(
+            "trees: {id}.glb names tree_part {other:?}; the parts are trunk, cap_top, cap_bottom \
+             and canopy"
+        ),
+    };
+    Some((part, extras.tree_segment))
 }
 
 /// Read a kind's template off its ready scene instance, parent first, and despawn the instance.
@@ -195,17 +215,7 @@ fn read_template(
         .map(|(entity, parent)| {
             let (transform, name, extras, mesh, material) =
                 entities.get(entity).unwrap_or_default();
-            let part = extras
-                .and_then(|extras| serde_json::from_str::<PartExtras>(&extras.value).ok())
-                .map(|extras| {
-                    let part = match extras.tree_part.as_str() {
-                        "trunk" => Part::Trunk,
-                        "cap_top" => Part::CapTop,
-                        "cap_bottom" => Part::CapBottom,
-                        _ => Part::Other,
-                    };
-                    (part, extras.tree_segment)
-                });
+            let part = extras.and_then(|extras| part_of(id, &extras.value));
             TemplateNode {
                 parent,
                 transform: transform.copied().unwrap_or_default(),
@@ -330,7 +340,7 @@ fn draw_trees(
         let Some(Some(template)) = templates.0.get(&body.kind.id) else {
             continue;
         };
-        let want = if *state == TreeState::Standing && template.standing.is_some() {
+        let want = if *state == TreeState::Standing {
             Drawn::Standing
         } else {
             Drawn::Segmented
@@ -362,7 +372,7 @@ fn draw(
         .insert(want);
     let range = VisibilityRange::abrupt(0.0, TREE_VIEW_RANGE_M);
     if want == Drawn::Standing {
-        for (mesh, material) in template.standing.iter().flatten() {
+        for (mesh, material) in &template.standing {
             let mut entity = commands.spawn((
                 ChildOf(view),
                 Transform::IDENTITY,
@@ -395,24 +405,44 @@ fn draw(
             }
         }
         let id = entity.id();
+        // The prop pipeline's node contract binds every (part, segment) once, segments numbered
+        // as the kind's asset numbers them.
+        if let Some((part, k)) = node.part
+            && part != Part::Canopy
+        {
+            assert!(
+                k < segments,
+                "a glb's part segment {k} lies within its asset's {segments}"
+            );
+        }
+        let bind = |slot: &mut Option<Entity>| {
+            assert!(slot.is_none(), "a glb binds each trunk part once");
+            *slot = Some(id);
+        };
         match node.part {
-            Some((Part::Trunk, k)) if k < segments => {
-                index.trunks[k] = Some(id);
+            Some((Part::Trunk, k)) => {
+                bind(&mut index.trunks[k]);
                 index.standing[k] = node.transform.translation;
             }
             // Every cap is hidden until a cut reveals it.
-            Some((Part::CapTop, k)) if k < segments => {
-                index.caps_top[k] = Some(id);
+            Some((Part::CapTop, k)) => {
+                bind(&mut index.caps_top[k]);
                 entity.insert(Visibility::Hidden);
             }
-            Some((Part::CapBottom, k)) if k < segments => {
-                index.caps_bottom[k] = Some(id);
+            Some((Part::CapBottom, k)) => {
+                bind(&mut index.caps_bottom[k]);
                 entity.insert(Visibility::Hidden);
             }
-            _ => {}
+            Some((Part::Canopy, _)) | None => {}
         }
         spawned.push(id);
     }
+    assert!(
+        [&index.trunks, &index.caps_top, &index.caps_bottom]
+            .iter()
+            .all(|bound| bound.iter().all(Option::is_some)),
+        "the glb binds a trunk node and two caps to every segment of its asset"
+    );
     commands.entity(view).insert(index);
 }
 
@@ -571,7 +601,7 @@ mod tests {
                 nodes.push(node(
                     Some(trunk),
                     Vec3::ZERO,
-                    Some((Part::Other, k)),
+                    Some((Part::Canopy, k)),
                     Some((mesh, &needles)),
                 ));
             }
@@ -596,6 +626,29 @@ mod tests {
 
     fn bits<const N: usize>(values: &[[f32; N]]) -> Vec<[u32; N]> {
         values.iter().map(|value| value.map(f32::to_bits)).collect()
+    }
+
+    /// A NODE'S EXTRAS NAME ITS PART OR NONE: the root's generator record (the shipped fir's
+    /// shape, fixture values) names no part and binds nothing, while extras that carry a part key
+    /// but a malformed or unknown part refuse the glb. Reading those as "no part" would leave a
+    /// trunk segment unbound and a felled tree's geometry standing.
+    #[test]
+    fn node_extras_name_their_part_or_none_and_malformed_parts_refuse() {
+        let record = r#"{"tree_species": "norway_spruce", "tree_seed": 1, "tree_height_m": 27.0}"#;
+        assert_eq!(part_of("fixture", record), None);
+        assert_eq!(
+            part_of("fixture", r#"{"tree_part": "cap_top", "tree_segment": 2}"#),
+            Some((Part::CapTop, 2))
+        );
+        for broken in [
+            r#"{"tree_part": "trunk"}"#,
+            r#"{"tree_part": "trunk", "tree_segment": -1}"#,
+            r#"{"tree_part": "bough", "tree_segment": 0}"#,
+            "not json",
+        ] {
+            let refused = std::panic::catch_unwind(|| part_of("fixture", broken));
+            assert!(refused.is_err(), "{broken} was read as a part or as none");
+        }
     }
 
     /// THE STANDING MESHES ARE THE STANDING PRIMITIVES, BIT FOR BIT: the template's standing view
@@ -664,7 +717,7 @@ mod tests {
         let (nodes, _, _) = fixture_nodes(&mut meshes, &mut materials);
         let drawn = nodes.iter().filter(|node| node.mesh.is_some()).count();
         let template = TreeTemplate::new("fixture", nodes, &mut meshes);
-        let standing = template.standing.clone().expect("the fixture merges");
+        let standing = template.standing.clone();
         let mut app = App::new();
         app.add_plugins(plugin)
             .insert_resource(TreeTemplates(HashMap::from([(
