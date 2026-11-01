@@ -58,9 +58,9 @@ fn sync_link_pool(
     mut assets: BeltAssets,
     mut pool: ResMut<LinkPool>,
 ) {
-    let Ok(hull) = hull.single() else {
-        return;
-    };
+    let hull = hull
+        .single()
+        .expect("RigGeom is published with exactly one sandbox hull in the same command flush");
     let want = geom.link_count;
     if !assets.ready(&template, want) {
         return;
@@ -70,22 +70,23 @@ fn sync_link_pool(
         match *slot {
             None => {
                 let frames = BeltFrames::new(template.frame(side), geom.link_center_x(side), want);
-                let Some(draw) = assets.draw(&template, side, &frames) else {
-                    continue;
-                };
+                let draw = assets.draw(&template, side, &frames).expect(
+                    "BeltAssets::ready verified this template and frame count before drawing",
+                );
                 *slot = Some(spawn_belt(&mut commands, side, hull, frames, draw));
             }
             Some(belt) => {
-                let Ok(mut frames) = belts.get_mut(belt) else {
-                    continue;
-                };
+                let mut frames = belts
+                    .get_mut(belt)
+                    .expect("the pool’s belt entities live with the sandbox hull");
                 if frames.count() == want {
                     continue;
                 }
                 frames.resize(want);
-                if let Some(draw) = assets.draw(&template, side, &frames) {
-                    commands.entity(belt).insert(draw);
-                }
+                let draw = assets
+                    .draw(&template, side, &frames)
+                    .expect("BeltAssets::ready verified this template and resized frame count");
+                commands.entity(belt).insert(draw);
             }
         }
     }
@@ -113,11 +114,11 @@ fn place_links(
 ) {
     for side in Side::ALL {
         let Some(belt) = *pool.0.get(side) else {
-            continue;
+            continue; // The glb template or GPU draw assets are still loading.
         };
-        let Ok((mut frames, mut visibility)) = tables.get_mut(belt) else {
-            continue;
-        };
+        let (mut frames, mut visibility) = tables
+            .get_mut(belt)
+            .expect("the pool’s belt entities live with the sandbox hull");
         // EXPLICIT, never `Inherited`: the hull layer can hide the model the belts are children
         // of, and the track is exactly what you want left on screen when you switch the tank's
         // body off (the same override the wheel layer uses).

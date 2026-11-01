@@ -116,3 +116,29 @@ The sandbox wall and its subtree belong to part 2 and are excluded from this lan
   covered. No vehicle asset, physical parameter or collider geometry changed.
   MEASURED gates: formatting, workspace clippy and 64 focused rig/spec/sandbox/headless/citation
   tests passed; 4 opt-in measurement/survey beds stayed ignored. The headless sandbox boot passed.
+
+- **D-SANDBOX-P3 fixed:** range camera/gun/label/legend cardinality and selected-round indices
+  are explicit construction invariants; panel rows cannot truncate an admitted weapon’s round
+  list. The spec already bounds stowed rounds to a u8 index. Duplicate primary windows/cursors
+  fail; no window/cursor is the named GPU-less harness state. Egui initialization and target
+  rebuild gaps are named, and duplicate contexts or hulls fail. The range’s fixture plates are
+  described as thickness fixtures rather than a model replacement still waiting to happen.
+- **D-TRACK-P3 fixed:** built-rig readers require the same-flush hull; pre-rig mesh tagging and
+  pending shoe assets remain named absences. Ready draw assets and retained belt entities cannot
+  silently disappear. Pristine rubble fixture chunks must be convex solids and the yard requires
+  a breakable element. Three zero-vector substitutions now require the valid pose/route invariant.
+- **D-HARNESS-P3 fixed:** all float keys refuse nonfinite values, commands must be normalized,
+  and the tick budget must be positive and representable. Its output opens at mount before rig
+  construction; creation/write/final-flush I/O failures retain typed path/operation errors and
+  end visibly. The writer transfers once into the recording state.
+- **D-BITPROBE-P3 fixed:** the seam payload and writer accept an array sized by the header’s
+  seam-name table. Wrong seam arity is unrepresentable in every build, rather than debug-only.
+- **Additional capture HUD P3 fixed:** absent possession and a weapon that does not chamber an
+  independent cue are named; admitted indices, weapon load slots and resolved fuze modes are
+  invariants, with no dropped conversion or missing-load case.
+  MEASURED final gates: formatting, workspace clippy and 59 targeted sandbox, capture, bitprobe,
+  window, font, headless and citation tests passed; 4 opt-in beds stayed ignored.
+  Diagnosis: adding PrimaryWindow to the range’s cursor query suppressed the GPU-less fixture’s
+  standalone locked cursor. The existing headless range-explanation test reproduced this alone
+  and passed after reverting only that filter. The one-cursor invariant remains; no gate test
+  was edited. Duplicate cameras and invalid selection have synthetic regression tests.

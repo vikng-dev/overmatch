@@ -70,6 +70,20 @@ impl RunWindow {
     }
 }
 
+/// Windowed roots have one primary window; GPU-less harness compositions have none.
+/// The latter is a named absence, while multiple primary windows are a construction bug.
+pub(crate) fn primary_or_headless<T>(
+    result: Result<T, bevy::ecs::query::QuerySingleError>,
+) -> Option<T> {
+    match result {
+        Ok(window) => Some(window),
+        Err(bevy::ecs::query::QuerySingleError::NoEntities(_)) => None,
+        Err(bevy::ecs::query::QuerySingleError::MultipleEntities(_)) => {
+            panic!("a root declares at most one primary window, including its cursor")
+        }
+    }
+}
+
 /// Apply `mode` on a windowed root (`crate::windowed_runtime`), after `crate::default_plugins` has
 /// spawned the primary window and before winit creates it.
 ///

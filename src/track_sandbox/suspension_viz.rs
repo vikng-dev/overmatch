@@ -175,9 +175,11 @@ fn draw_suspension(
     // The SAME accumulator the shoes and the running gear are placed from — the tooth ring is only
     // a check on the meshing if all three read one number (see [`draw_sprocket`]).
     phase: Res<BeltPhase>,
-    hull: Single<&GlobalTransform, With<Hull>>,
+    hull: Query<&GlobalTransform, With<Hull>>,
 ) {
-    let hull = hull.into_inner();
+    let hull = hull
+        .single()
+        .expect("RigGeom is published with exactly one sandbox hull in the same command flush");
     let p = &knobs.0;
     let plane_x = geom.plane_x;
     let belt_len = geom.belt_len();

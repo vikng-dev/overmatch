@@ -415,3 +415,30 @@ fn the_sandbox_layers_are_no_render_channel() {
         );
     }
 }
+
+/// The game's damage-model range owns one camera-gun. A second camera must fail visibly,
+/// since otherwise a trigger system could silently skip and a developer would inspect no shot.
+#[test]
+#[should_panic(expected = "exactly one free-fly camera")]
+fn duplicate_camera_guns_are_a_construction_bug() {
+    let (mut app, _) = range();
+    app.world_mut()
+        .spawn((FreeFlyCam, Transform::IDENTITY, RANGE_SHOOTER));
+    tap(&mut app, |bindings| bindings.fire_primary);
+}
+
+/// The game's damage-model range selection is written from the gun’s own list. A bad index is
+/// an internal bug, not an empty label or a trigger that does nothing.
+#[test]
+#[should_panic(expected = "selection is an index")]
+fn an_invalid_range_round_selection_is_a_construction_bug() {
+    let mut gun = seed_gun();
+    gun.rounds.truncate(1); // FIXTURE DATA: one allowed round; the next index is invalid.
+    round_line(
+        &gun,
+        ShotParams {
+            round: 1,
+            muzzle_speed: None,
+        },
+    );
+}

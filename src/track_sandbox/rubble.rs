@@ -95,10 +95,9 @@ pub(super) fn spawn_rubble_yard(
         .filter(|&e| !layout.chunks_of(e).is_empty())
         .collect();
     elements.sort_by_key(|&e| std::cmp::Reverse(layout.chunks_of(e).len()));
-    let Some((&wall, rest)) = elements.split_first() else {
-        warn!("rubble yard: {HOUSE} has no breakable element");
-        return;
-    };
+    let (&wall, rest) = elements
+        .split_first()
+        .expect("the rubble yard’s fixture must declare a breakable element with chunks");
 
     // The wall section: one static root, its element's chunks standing on it, turned so its long
     // axis runs along the lane (beside the rig, never across its path).
@@ -137,9 +136,9 @@ pub(super) fn spawn_rubble_yard(
         ))
         .id();
     for &c in &wall_chunks {
-        let Some(collider) = chunk_collider(&kind, c, 1.0, Vec3::ZERO, 0.0) else {
-            continue;
-        };
+        let collider = chunk_collider(&kind, c, 1.0, Vec3::ZERO, 0.0).expect(
+            "a pristine fixture chunk is a nondegenerate convex solid; fix its authored geometry",
+        );
         commands.spawn((
             ChildOf(wall_root),
             Transform::IDENTITY,
@@ -174,9 +173,9 @@ pub(super) fn spawn_rubble_yard(
     );
     for (i, &c) in pieces.iter().enumerate() {
         let centroid = structure.chunks[c].centroid;
-        let Some(collider) = chunk_collider(&kind, c, 1.0, centroid, 0.0) else {
-            continue;
-        };
+        let collider = chunk_collider(&kind, c, 1.0, centroid, 0.0).expect(
+            "a pristine fixture chunk is a nondegenerate convex solid; fix its authored geometry",
+        );
         let (row, col, layer) = (
             i % PILE_ROW,
             (i / PILE_ROW) % PILE_ROW,
@@ -226,6 +225,7 @@ pub(super) fn draw_rubble(
             Color::srgb(0.2, 0.9, 1.0)
         };
         gizmos.sphere(Isometry3d::from_translation(touch.point), 0.05, color);
+        // Last tick’s contact telemetry may outlive a piece removed before this render frame.
         if let Ok(body) = bodies.get(touch.body) {
             gizmos.line(touch.point, body.translation(), color.with_alpha(0.5));
         }

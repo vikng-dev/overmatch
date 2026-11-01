@@ -75,6 +75,17 @@ pub(super) struct HarnessLog {
     writer: BufWriter<File>,
 }
 
+/// An output file opened before the harness can build a rig. The writer is taken exactly once
+/// by setup; its temporary absence lasts only until the same command flush removes this resource.
+#[derive(Resource)]
+pub(super) struct PendingLog(Option<BufWriter<File>>);
+
+pub(super) fn open_log(harness: &Harness) -> Result<PendingLog, crate::trace::SinkError> {
+    let file = File::create(&harness.out)
+        .map_err(|error| crate::trace::SinkError::Create(harness.out.clone().into(), error))?;
+    Ok(PendingLog(Some(BufWriter::new(file))))
+}
+
 pub(super) fn parse_env() -> Result<Option<Harness>, String> {
     match std::env::var("SANDBOX_HARNESS") {
         Ok(spec) => parse_spec(&spec).map(Some),
@@ -93,6 +104,21 @@ where
     value
         .parse()
         .map_err(|err| format!("invalid value `{value}` for `{key}`: {err}"))
+}
+
+fn parse_float(key: &str, value: &str) -> Result<f32, String> {
+    let number: f32 = parse_number(key, value)?;
+    if !number.is_finite() {
+        return Err(format!(
+            "SANDBOX_HARNESS: {key} must be finite (got {value})"
+        ));
+    }
+    if matches!(key, "throttle" | "steer" | "throttle2" | "steer2") && number.abs() > 1.0 {
+        return Err(format!(
+            "SANDBOX_HARNESS: {key} must be in -1..=1 (got {value})"
+        ));
+    }
+    Ok(number)
 }
 
 pub(super) fn parse_spec(spec: &str) -> Result<Harness, String> {
@@ -123,15 +149,15 @@ pub(super) fn parse_spec(spec: &str) -> Result<Harness, String> {
                     }
                 };
             }
-            "x" => h.x = parse_number(key, value)?,
-            "z" => h.z = parse_number(key, value)?,
+            "x" => h.x = parse_float(key, value)?,
+            "z" => h.z = parse_float(key, value)?,
             "warmup" => h.warmup = parse_number(key, value)?,
             "ticks" => h.ticks = parse_number(key, value)?,
-            "throttle" => h.throttle = parse_number(key, value)?,
-            "steer" => h.steer = parse_number(key, value)?,
+            "throttle" => h.throttle = parse_float(key, value)?,
+            "steer" => h.steer = parse_float(key, value)?,
             "t2" => h.t2 = parse_number(key, value)?,
-            "throttle2" => h.throttle2 = parse_number(key, value)?,
-            "steer2" => h.steer2 = parse_number(key, value)?,
+            "throttle2" => h.throttle2 = parse_float(key, value)?,
+            "steer2" => h.steer2 = parse_float(key, value)?,
             "out" if !value.is_empty() => h.out = value.to_string(),
             "out" => return Err("`out` must not be empty".into()),
             // Retired: an explicit no-op so historical captures stay runnable.
@@ -144,6 +170,11 @@ pub(super) fn parse_spec(spec: &str) -> Result<Harness, String> {
             }
             _ => return Err(format!("unknown SANDBOX_HARNESS key `{key}`")),
         }
+    }
+    if h.ticks == 0 || h.warmup.checked_add(h.ticks).is_none() {
+        return Err(
+            "SANDBOX_HARNESS: ticks must be positive and warmup + ticks must fit u64".into(),
+        );
     }
     Ok(h)
 }
@@ -160,11 +191,14 @@ pub(super) fn harness_setup(
     mut commands: Commands,
     harness: Res<Harness>,
     fixed_time: Res<Time<Fixed>>,
+    mut pending: ResMut<PendingLog>,
     geom: Res<RigGeom>,
     rig: Res<RigSpec>,
-    hull: Single<(&mut Transform, &mut LinearVelocity, &mut AngularVelocity), With<Hull>>,
+    mut hull: Query<(&mut Transform, &mut LinearVelocity, &mut AngularVelocity), With<Hull>>,
 ) {
-    let (mut transform, mut lin, mut ang) = hull.into_inner();
+    let (mut transform, mut lin, mut ang) = hull
+        .single_mut()
+        .expect("RigGeom is published with exactly one sandbox hull in the same command flush");
     *transform = match harness.pose {
         // Slope pad: rest height along the pad NORMAL, hull tilted with the incline and
         // yawed about it (warmup settles the exact contact pose).
@@ -187,8 +221,10 @@ pub(super) fn harness_setup(
     lin.0 = Vec3::ZERO;
     ang.0 = Vec3::ZERO;
 
-    let file = File::create(&harness.out).expect("harness out path must be writable");
-    let mut writer = BufWriter::new(file);
+    let mut writer = pending
+        .0
+        .take()
+        .expect("harness setup takes its startup-opened writer exactly once");
     // Vehicle constants in the meta line come off the derived rig now, not from consts — an
     // analyzer reading a capture still gets the exact geometry that produced it.
     let (half_tread, hull_rest_y, thickness) = (geom.plane_x, geom.hull_rest_y, geom.thickness);
@@ -223,9 +259,10 @@ pub(super) fn harness_setup(
         fixed_time.timestep().as_secs_f64(),
         rig.weight_n,
     )
-    .unwrap();
+    .unwrap_or_else(|error| crate::refuse_start(crate::trace::SinkError::Write(harness.out.clone().into(), error)));
 
     commands.insert_resource(HarnessLog { tick: 0, writer });
+    commands.remove_resource::<PendingLog>();
 }
 
 /// Drive the scenario: zero input through warmup, then the scripted RAW command — the shared
@@ -256,7 +293,7 @@ pub(super) fn harness_drive(
 pub(super) fn harness_record(
     harness: Res<Harness>,
     mut log: ResMut<HarnessLog>,
-    hull: Single<(&Transform, &LinearVelocity, &AngularVelocity), With<Hull>>,
+    hull: Query<(&Transform, &LinearVelocity, &AngularVelocity), With<Hull>>,
     raw: Res<RawDriveInput>,
     shaped: Res<ShapedDrive>,
     dynamics: Res<SideDynamics>,
@@ -272,7 +309,9 @@ pub(super) fn harness_record(
     ),
     mut exit: MessageWriter<AppExit>,
 ) {
-    let (transform, lin, ang) = *hull;
+    let (transform, lin, ang) = hull
+        .single()
+        .expect("RigGeom is published with exactly one sandbox hull in the same command flush");
     let (yaw, pitch, _) = transform.rotation.to_euler(EulerRot::YXZ);
     // Body-frame yaw rate: world av.y lies on slopes.
     let yawrate_body = ang.0.dot(transform.rotation * Vec3::Y);
@@ -350,7 +389,7 @@ pub(super) fn harness_record(
         side_rows(Side::Left),
         side_rows(Side::Right),
     )
-    .unwrap();
+    .unwrap_or_else(|error| crate::refuse_start(crate::trace::SinkError::Write(harness.out.clone().into(), error)));
     // Rubble telemetry (`r` line), only on a tick whose contacts pressed on a body, so open-ground
     // captures stay byte-stable: contacts on bodies, those on dynamic ones, the sum and max
     // |reaction| (N), and the fastest piece's linear (m/s) and angular (rad/s) speed.
@@ -370,7 +409,7 @@ pub(super) fn harness_record(
             "{{\"t\":\"r\",\"k\":{k},\"touches\":{},\"dynamic\":{dynamic},\"reaction_sum\":{sum:.0},\"reaction_max\":{max:.0},\"piece_v\":{v:.4},\"piece_w\":{w:.4}}}",
             touches.0.len(),
         )
-        .unwrap();
+        .unwrap_or_else(|error| crate::refuse_start(crate::trace::SinkError::Write(harness.out.clone().into(), error)));
     }
     // Per-element strain telemetry (`e` line): per side, the count of elements holding strain and
     // Σ|j| / max|j| (m). A separate line from `k`, so the `k` lines stay byte-stable for the
@@ -389,7 +428,7 @@ pub(super) fn harness_record(
         log.writer,
         "{{\"t\":\"e\",\"k\":{k},\"n\":[{ln},{rn}],\"jsum\":[{ls:.6},{rs:.6}],\"jmax\":[{lm:.6},{rm:.6}]}}"
     )
-    .unwrap();
+    .unwrap_or_else(|error| crate::refuse_start(crate::trace::SinkError::Write(harness.out.clone().into(), error)));
     // Transmission telemetry follows each tick that has an operating point and joint solve.
     if let Some(t) = &trans_telemetry.0 {
         writeln!(
@@ -405,11 +444,16 @@ pub(super) fn harness_record(
             t.forces[0],
             t.forces[1],
         )
-        .unwrap();
+        .unwrap_or_else(|error| crate::refuse_start(crate::trace::SinkError::Write(harness.out.clone().into(), error)));
     }
     log.tick += 1;
     if log.tick >= harness.warmup + harness.ticks {
-        log.writer.flush().unwrap();
+        log.writer.flush().unwrap_or_else(|error| {
+            crate::refuse_start(crate::trace::SinkError::Flush(
+                harness.out.clone().into(),
+                error,
+            ))
+        });
         info!("harness: wrote {} ticks to {}", log.tick, harness.out);
         exit.write(AppExit::Success);
     }
@@ -418,6 +462,24 @@ pub(super) fn harness_record(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Harness telemetry must remain finite JSON and normalized input. A mutant accepting NaN,
+    /// infinity or an out-of-domain command would put invalid state into the fixed-tick run.
+    #[test]
+    fn float_fields_refuse_nonfinite_values_and_commands_outside_their_domain() {
+        for key in ["x", "z", "throttle", "steer", "throttle2", "steer2"] {
+            for value in ["NaN", "inf", "-inf"] {
+                assert!(
+                    parse_spec(&format!("{key}={value}"))
+                        .unwrap_err()
+                        .contains(key)
+                );
+            }
+        }
+        assert!(parse_spec("throttle=1.1").is_err());
+        assert!(parse_spec("ticks=0").is_err());
+        assert!(parse_spec(&format!("warmup={},ticks=1", u64::MAX)).is_err());
+    }
 
     #[test]
     fn malformed_number_is_rejected() {

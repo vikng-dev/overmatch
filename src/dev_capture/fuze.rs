@@ -82,7 +82,7 @@ fn fire_on_cue(
         return;
     }
     let grid = grid.expect("capture: shot: the offline scene must supply HeightGrid before its cue; choose a terrain scene");
-    // The standing tree nearest the map's centre, the lowest ordinal on a tie: a real tree the
+    // The tree nearest the map's centre, the lowest ordinal on a tie: a real tree the
     // same on every run, with the map on every side of it.
     let (_, transform) = trees
         .iter()
@@ -141,26 +141,33 @@ fn select_on_hud(
     tanks: &mut Query<(Entity, &mut WeaponLoads), With<Controlled>>,
     weapons: &Query<(&Weapon, &WeaponIndex, &TankRoot), With<Muzzle>>,
 ) {
-    for (tank, mut loads) in tanks {
-        for (weapon, slot, root) in weapons {
-            let index = weapon
-                .rounds
-                .iter()
-                .position(|round| round.key == cue.key)
-                .and_then(|index| u8::try_from(index).ok());
-            let (true, Some(index), Some(load)) =
-                (root.0 == tank, index, loads.weapons.get_mut(slot.0))
-            else {
-                continue;
-            };
-            load.selected = index;
-            for _ in weapon.rounds[usize::from(index)].fuze_modes() {
-                if load.fuze_mode(&weapon.rounds, index) == Some(cue.round.fuze_mode) {
-                    break;
-                }
-                load.toggle_fuze(&weapon.rounds, index);
-            }
+    let Some((tank, mut loads)) = crate::tank::controlled_one(tanks.single_mut()) else {
+        return; // A cue can run before possession; there is no local HUD selection to update.
+    };
+    for (weapon, slot, root) in weapons {
+        if root.0 != tank {
+            continue;
         }
+        let Some(index) = weapon.rounds.iter().position(|round| round.key == cue.key) else {
+            continue; // This weapon does not chamber the independently cued round.
+        };
+        let index = u8::try_from(index).expect("WeaponSpec admission bounds round indices to u8");
+        let load = loads
+            .weapons
+            .get_mut(slot.0)
+            .expect("complete tank spawn builds one load entry per weapon slot");
+        load.selected = index;
+        for _ in weapon.rounds[usize::from(index)].fuze_modes() {
+            if load.fuze_mode(&weapon.rounds, index) == Some(cue.round.fuze_mode) {
+                break;
+            }
+            load.toggle_fuze(&weapon.rounds, index);
+        }
+        assert_eq!(
+            load.fuze_mode(&weapon.rounds, index),
+            Some(cue.round.fuze_mode),
+            "the game's damage-model cue and its matching HUD round resolve the same registry modes"
+        );
     }
 }
 

@@ -289,12 +289,12 @@ enum ViewClass {
 /// carry none. Every tagged mesh gets an explicit `RenderLayers::layer(0)` so [`apply_view_layers`]
 /// can move a volume to the overlay layer and back with a uniform query.
 ///
-/// Gated on the [`Hull`] body existing ([`Single`]): the ancestry test [`classify`] runs needs the
+/// Deferred until the [`Hull`] body exists: the ancestry test [`classify`] runs needs the
 /// tank root, and until it is up the course meshes could not be told from a hull visual. The pre-rig
 /// frames simply defer — the glb meshes are not instantiated yet either, and the course meshes are
 /// tagged the frame the hull lands.
 fn tag_view_meshes(
-    hull: Single<Entity, With<Hull>>,
+    hull: Query<Entity, With<Hull>>,
     candidates: Query<
         (Entity, &MeshMaterial3d<StandardMaterial>),
         (With<Mesh3d>, Without<ViewMesh>),
@@ -304,7 +304,13 @@ fn tag_view_meshes(
     blueprint: Option<Res<crate::bake::TankBlueprint>>,
     mut commands: Commands,
 ) {
-    let hull = *hull;
+    let hull = match hull.single() {
+        Ok(hull) => hull,
+        Err(bevy::ecs::query::QuerySingleError::NoEntities(_)) => return, // The rig has not spawned yet.
+        Err(bevy::ecs::query::QuerySingleError::MultipleEntities(_)) => {
+            panic!("the sandbox builds exactly one hull")
+        }
+    };
     let blueprint = blueprint.expect("the sandbox hull is built from its published TankBlueprint");
     for (entity, material) in &candidates {
         let view = match classify(entity, hull, &parents, &names, &blueprint) {

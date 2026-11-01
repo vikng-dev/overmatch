@@ -137,9 +137,9 @@ pub(super) fn apply_belt_support_field(
 ) {
     let (transmission, mut trans_state, mut telemetry) = transmission_params;
     let (geom, rig_spec, envelope) = rig;
-    let Ok((hull_pos, hull_rot, mut forces)) = hull.single_mut() else {
-        return;
-    };
+    let (hull_pos, hull_rot, mut forces) = hull
+        .single_mut()
+        .expect("RigGeom is published with exactly one sandbox hull in the same command flush");
     let affine = bevy::math::Affine3A::from_rotation_translation(hull_rot.0, hull_pos.0);
     let to_local = affine.inverse();
     for cs in contacts.0.values_mut() {
@@ -382,16 +382,24 @@ fn force_params(geom: &RigGeom, rig: &RigSpec, envelope: &EnvelopeLaw) -> ForceP
 /// live in [`track::wheels`](crate::track::wheels): implicit critically-damped rise, ballistic
 /// fall, deepest of the physics' lateral columns along the lower arc.
 pub(super) fn articulate_wheels_field(
-    hull: Single<&GlobalTransform, With<Hull>>,
+    hull: Query<&GlobalTransform, With<Hull>>,
     field: Res<TerrainField>,
     time: Res<Time>,
     geom: Res<RigGeom>,
     suspension: Res<RigSuspension>,
     mut wheels: Query<(&RigWheel, &mut Suspension, &mut Transform)>,
 ) {
-    let affine = hull.affine();
+    let affine = hull
+        .single()
+        .expect("RigGeom is published with exactly one sandbox hull in the same command flush")
+        .affine();
     let oracle = &field.0;
-    let down = affine.transform_vector3(Vec3::NEG_Y).normalize_or_zero();
+    let down = affine
+        .transform_vector3(Vec3::NEG_Y)
+        .try_normalize()
+        .expect(
+            "the sandbox hull pose has a finite nonsingular transform, so its down axis is nonzero",
+        );
     // Per side: the lateral stations are the measured shoe columns, signed per-side.
     let params = Side::ALL.map(|side| WheelParams {
         // Hub to the plate's GROUND face: the measured tread the wheel rolls on, plus the whole
@@ -486,7 +494,7 @@ pub(super) struct ViewPerf {
     reason = "the sandbox's track view: hull, wheels, field, belt state, wrap memory, perf and the rig"
 )]
 pub(super) fn conform_belts_field(
-    hull: Single<&GlobalTransform, With<Hull>>,
+    hull: Query<&GlobalTransform, With<Hull>>,
     wheels: Query<(&RigWheel, &Suspension)>,
     field: Res<TerrainField>,
     pin_belt: Res<PinBelt>,
@@ -501,7 +509,10 @@ pub(super) fn conform_belts_field(
     mut perf: Local<(f64, u64)>,
 ) {
     let t_perf = std::time::Instant::now();
-    let affine = hull.affine();
+    let affine = hull
+        .single()
+        .expect("RigGeom is published with exactly one sandbox hull in the same command flush")
+        .affine();
     let wheel_r = geom.wheel_pin_radius();
     // Articulated pin-line circles per side, front→rear: the hull-fixed sprocket + idler from the
     // rig's `rest` list, the road wheels at their pin radius lifted by the cosmetic suspension travel.
@@ -585,7 +596,7 @@ pub(super) fn conform_belts_field(
 pub(super) fn draw_sample_points(
     mut gizmos: Gizmos,
     viz: Res<VizLayers>,
-    hull: Single<&GlobalTransform, With<Hull>>,
+    hull: Query<&GlobalTransform, With<Hull>>,
     pin_belt: Res<PinBelt>,
     phase: Res<BeltPhase>,
     field: Res<TerrainField>,
@@ -595,7 +606,10 @@ pub(super) fn draw_sample_points(
     if !viz.casts {
         return;
     }
-    let affine = hull.affine();
+    let affine = hull
+        .single()
+        .expect("RigGeom is published with exactly one sandbox hull in the same command flush")
+        .affine();
     let oracle = &field.0;
     // Hull lateral axis: column offsets are hull-x measurements (per-side signed shoe faces).
     let lat_axis = affine.transform_vector3(Vec3::X);
@@ -621,7 +635,7 @@ pub(super) fn draw_sample_points(
             let seg = b - a;
             let len = seg.length();
             if len < 1e-4 {
-                continue;
+                continue; // Route joins can repeat a point; there is no segment to sample there.
             }
             let tan2 = seg / len;
             let out2 = Vec2::new(tan2.y, -tan2.x);
@@ -629,7 +643,7 @@ pub(super) fn draw_sample_points(
             let wb = affine.transform_point3(Vec3::new(track_x, b.y, b.x));
             let out = affine
                 .transform_vector3(Vec3::new(0.0, out2.y, out2.x))
-                .normalize_or_zero();
+                .try_normalize().expect("a nonzero segment normal remains nonzero under the hull's nonsingular transform");
             // The live law's datum, exactly: measured pin→outer face plus the local travel,
             // gated to ground-facing segments like the law (the return run has no band).
             let grounded = out2.y < 0.0;

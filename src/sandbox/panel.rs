@@ -61,8 +61,12 @@ struct Write<'w> {
 }
 
 fn panel(mut contexts: EguiContexts, mut w: Write, gun: Query<&Weapon, With<RangeGun>>) {
-    let Ok(ctx) = contexts.ctx_mut() else {
-        return;
+    let ctx = match contexts.ctx_mut() {
+        Ok(ctx) => ctx,
+        Err(bevy::ecs::query::QuerySingleError::NoEntities(_)) => return, // Egui's primary context is not initialized yet (or this is a GPU-less harness).
+        Err(bevy::ecs::query::QuerySingleError::MultipleEntities(_)) => {
+            panic!("the sandbox declares exactly one primary egui context")
+        }
     };
 
     // Publish egui's focus so `crate::sandbox` suppresses firing/fly/slow-mo input while a widget is
@@ -113,7 +117,13 @@ fn panel(mut contexts: EguiContexts, mut w: Write, gun: Query<&Weapon, With<Rang
                 egui::CollapsingHeader::new("Shot")
                     .default_open(true)
                     .show(ui, |ui| {
-                        shot_section(ui, gun.single().ok(), &mut shot, &mut reset_shot)
+                        shot_section(
+                            ui,
+                            gun.single()
+                                .expect("the range spawns exactly one camera gun at Startup"),
+                            &mut shot,
+                            &mut reset_shot,
+                        )
                     });
 
                 egui::CollapsingHeader::new("Time")
@@ -194,19 +204,10 @@ fn view_section(ui: &mut egui::Ui, look: &mut bool, overlay: &mut ArmourOverlay)
 /// The range gun's rounds as a selectable list, each display name with its registry key, and a
 /// muzzle-speed override that stands in for range, over the panel's LOCAL [`ShotParams`]: off
 /// fires the round at its own speed, on starts at it. Selecting another round drops the override.
-fn shot_section(
-    ui: &mut egui::Ui,
-    gun: Option<&Weapon>,
-    shot: &mut ShotParams,
-    reset_shot: &mut bool,
-) {
-    let Some(gun) = gun else {
-        return;
-    };
+fn shot_section(ui: &mut egui::Ui, gun: &Weapon, shot: &mut ShotParams, reset_shot: &mut bool) {
     for (index, loaded) in gun.rounds.iter().enumerate() {
-        let Ok(index) = u8::try_from(index) else {
-            break;
-        };
+        let index =
+            u8::try_from(index).expect("WeaponSpec admission bounds every round index to u8");
         let label = format!("{}  [{}]", loaded.name, loaded.key);
         if ui.selectable_label(shot.round == index, label).clicked() && shot.round != index {
             *shot = ShotParams {
@@ -215,13 +216,12 @@ fn shot_section(
             };
         }
     }
-    let Some(own) = gun
+    let own = gun
         .rounds
         .get(usize::from(shot.round))
-        .map(|loaded| loaded.round.muzzle_speed)
-    else {
-        return;
-    };
+        .expect("the panel selection comes from its camera gun’s validated round list")
+        .round
+        .muzzle_speed;
     ui.separator();
     ui.monospace(format!("own speed  {own:.0} m/s"));
     let mut overriding = shot.muzzle_speed.is_some();

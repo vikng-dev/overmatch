@@ -470,8 +470,7 @@ pub fn plugin(app: &mut App) {
     // before the force systems — its phase boundaries land on exact ticks. Without both, frame
     // pacing leaked into recorded trajectories (~mm-level hull drift between identical runs) and
     // A/B gates could only ever be statistical.
-    let harness_scenario =
-        harness::parse_env().unwrap_or_else(|err| panic!("invalid SANDBOX_HARNESS: {err}"));
+    let harness_scenario = harness::parse_env().unwrap_or_else(crate::refuse_start);
     if let Some(scenario) = harness_scenario {
         mount_harness(app, scenario);
     }
@@ -479,8 +478,10 @@ pub fn plugin(app: &mut App) {
 
 /// Mount the scripted harness for `scenario` (module doc of `harness`).
 fn mount_harness(app: &mut App, scenario: harness::Harness) {
+    let output = harness::open_log(&scenario).unwrap_or_else(crate::refuse_start);
     {
-        app.insert_resource(scenario)
+        app.insert_resource(output)
+            .insert_resource(scenario)
             .insert_resource(bevy::time::TimeUpdateStrategy::ManualDuration(
                 std::time::Duration::from_micros(15_625), // exactly 1/64 s
             ))
@@ -1412,7 +1413,7 @@ fn refresh_track_colliders(
     geom: Res<RigGeom>,
     suspension: Res<RigSuspension>,
     rig: Res<RigSpec>,
-    hull: Single<Entity, With<Hull>>,
+    hull: Query<Entity, With<Hull>>,
     existing: Query<Entity, Or<(With<BumpStop>, With<SidePlate>)>>,
 ) {
     if !(geom.is_changed() || suspension.is_changed()) {
@@ -1423,7 +1424,8 @@ fn refresh_track_colliders(
     }
     spawn_track_colliders(
         &mut commands,
-        *hull,
+        hull.single()
+            .expect("RigGeom is published with exactly one sandbox hull in the same command flush"),
         &TrackColliders::new(&geom, &suspension.0, rig.grip.track),
     );
 }
@@ -1488,7 +1490,7 @@ struct ResetRequested(bool);
 fn reset_rig(
     keys: Res<ButtonInput<KeyCode>>,
     mut requested: ResMut<ResetRequested>,
-    hull: Single<(&mut Transform, &mut LinearVelocity, &mut AngularVelocity), With<Hull>>,
+    mut hull: Query<(&mut Transform, &mut LinearVelocity, &mut AngularVelocity), With<Hull>>,
     pin_belt: Res<PinBelt>,
     mut spot: ResMut<ResetSpot>,
     mut belt: ResMut<BeltSpeed>,
@@ -1508,7 +1510,9 @@ fn reset_rig(
     requested.0 = false;
     let (x, z, label) = RESET_SPOTS[spot.0];
     spot.0 = (spot.0 + 1) % RESET_SPOTS.len();
-    let (mut transform, mut lin, mut ang) = hull.into_inner();
+    let (mut transform, mut lin, mut ang) = hull
+        .single_mut()
+        .expect("RigGeom is published with exactly one sandbox hull in the same command flush");
     *transform = Transform::from_xyz(x, geom.hull_rest_y, z);
     lin.0 = Vec3::ZERO;
     ang.0 = Vec3::ZERO;
@@ -1662,7 +1666,7 @@ fn apply_rig_counts(
 /// diagnostic beside the panel; [`derive::link_count`] and the derived model mass feed both.
 fn log_state(
     keys: Res<ButtonInput<KeyCode>>,
-    hull: Single<(&Transform, &LinearVelocity), With<Hull>>,
+    hull: Query<(&Transform, &LinearVelocity), With<Hull>>,
     contacts: Res<BeltContacts>,
     belt: Res<BeltSpeed>,
     rig: Res<RigSpec>,
@@ -1672,7 +1676,9 @@ fn log_state(
     if !keys.just_pressed(KeyCode::KeyL) {
         return;
     }
-    let (transform, lin) = *hull;
+    let (transform, lin) = hull
+        .single()
+        .expect("RigGeom is published with exactly one sandbox hull in the same command flush");
     let count = contacts.all().count();
     let total: f32 = contacts.all().map(|c| c.load).sum();
     let weight = rig.weight_n;
@@ -1701,7 +1707,7 @@ fn draw_rig_gizmos(
     mut gizmos: Gizmos,
     wheels: Query<(&RigWheel, &GlobalTransform)>,
     belts: Res<ConformedBelts>,
-    hull: Single<&GlobalTransform, With<Hull>>,
+    hull: Query<&GlobalTransform, With<Hull>>,
     viz: Res<VizLayers>,
     geom: Res<RigGeom>,
 ) {
@@ -1738,12 +1744,15 @@ fn draw_rig_gizmos(
         if n < 3 {
             continue;
         }
-        let affine = hull.affine();
+        let affine = hull
+            .single()
+            .expect("RigGeom is published with exactly one sandbox hull in the same command flush")
+            .affine();
         let track_x = side.plane_x(geom.plane_x);
         let outer: Vec<Vec3> = (0..n)
             .map(|i| {
                 let tan2 = (samples[(i + 1) % n].local - samples[(i + n - 1) % n].local)
-                    .normalize_or_zero();
+                    .try_normalize().expect("ConformedBelts samples a positive-pitch closed route with distinct neighbouring stations");
                 let out2 = Vec2::new(tan2.y, -tan2.x);
                 let p = samples[i].local + out2 * (geom.thickness / 2.0);
                 affine.transform_point3(Vec3::new(track_x, p.y, p.x))
@@ -1762,7 +1771,7 @@ fn draw_rig_gizmos(
 /// applied forces as N-scaled arrows — support along the normal, traction in the contact plane.
 fn draw_contacts(
     mut gizmos: Gizmos,
-    hull: Single<&GlobalTransform, With<Hull>>,
+    hull: Query<&GlobalTransform, With<Hull>>,
     contacts: Res<BeltContacts>,
     viz: Res<VizLayers>,
     geom: Res<RigGeom>,
@@ -1771,7 +1780,9 @@ fn draw_contacts(
     if !(viz.dots || viz.normals || viz.forces) {
         return;
     }
-    let hull = *hull;
+    let hull = hull
+        .single()
+        .expect("RigGeom is published with exactly one sandbox hull in the same command flush");
     // The per-station spring constant of the envelope law: its calibrated per-metre stiffness ×
     // one station's arc length (the pitch).
     let k = law.stiffness_per_m * geom.pitch;
@@ -1879,13 +1890,11 @@ fn panel_capturing(want: Res<PanelWantsInput>) -> bool {
 /// (paused / unfocused) so a released window doesn't keep driving.
 fn read_drive_input(
     keys: Res<ButtonInput<KeyCode>>,
-    cursors: Query<&CursorOptions>,
+    cursors: Query<&CursorOptions, With<PrimaryWindow>>,
     mut input: ResMut<RawDriveInput>,
 ) {
-    let locked = cursors
-        .single()
-        .map(|c| c.grab_mode == CursorGrabMode::Locked)
-        .unwrap_or(false);
+    let locked = crate::run_window::primary_or_headless(cursors.single())
+        .is_some_and(|c| c.grab_mode == CursorGrabMode::Locked);
     let axis = |pos, neg| keys.pressed(pos) as i8 as f32 - keys.pressed(neg) as i8 as f32;
     (input.0.throttle, input.0.steer) = if locked {
         (
@@ -1900,19 +1909,19 @@ fn read_drive_input(
 /// Free-fly the inspection camera. Mouse look (yaw/pitch read from the current rotation), WASD on the
 /// heading plane, Shift/Ctrl for altitude — on real time so you can reposition freely.
 fn fly_camera(
-    camera: Single<&mut Transform, With<FreeFlyCam>>,
+    mut camera: Query<&mut Transform, With<FreeFlyCam>>,
     keys: Res<ButtonInput<KeyCode>>,
     motion: Res<AccumulatedMouseMotion>,
     time: Res<Time<Real>>,
 ) {
-    let mut transform = camera.into_inner();
+    let mut transform = camera
+        .single_mut()
+        .expect("the sandbox spawns exactly one free-fly camera at Startup");
     crate::camera::free_fly_transform(&mut transform, &keys, motion.delta, time.delta_secs());
 }
 
 /// Run condition: the cursor is captured (mouse-look active).
-fn cursor_locked(cursors: Query<&CursorOptions>) -> bool {
-    cursors
-        .single()
-        .map(|cursor| cursor.grab_mode == CursorGrabMode::Locked)
-        .unwrap_or(false)
+fn cursor_locked(cursors: Query<&CursorOptions, With<PrimaryWindow>>) -> bool {
+    crate::run_window::primary_or_headless(cursors.single())
+        .is_some_and(|cursor| cursor.grab_mode == CursorGrabMode::Locked)
 }

@@ -650,8 +650,7 @@ impl DumpWriter {
         Ok(Self { output })
     }
 
-    fn tick(&mut self, tick: u32, seams: &[Vec<u32>]) -> Result<(), String> {
-        debug_assert_eq!(seams.len(), SEAM_NAMES.len());
+    fn tick(&mut self, tick: u32, seams: &[Vec<u32>; SEAM_NAMES.len()]) -> Result<(), String> {
         self.output
             .write_all(&tick.to_le_bytes())
             .map_err(|error| format!("writing tick {tick} failed: {error}"))?;
@@ -908,7 +907,7 @@ fn pose_payload(world: &World, tank: Entity) -> Vec<u32> {
     output
 }
 
-fn tick_payloads(world: &World, tank: Entity) -> Result<Vec<Vec<u32>>, String> {
+fn tick_payloads(world: &World, tank: Entity) -> Result<[Vec<u32>; SEAM_NAMES.len()], String> {
     let capture = world.resource::<BitprobeCapture>();
     if capture.tanks_seen != 1 {
         return Err(format!(
@@ -919,7 +918,7 @@ fn tick_payloads(world: &World, tank: Entity) -> Result<Vec<Vec<u32>>, String> {
     let transmission = world
         .get::<TankTransmission>(tank)
         .ok_or_else(|| "fixture tank lost TankTransmission".to_string())?;
-    let seams = vec![
+    let seams = [
         contact_payload(capture),
         element_payload(capture),
         belt_payload(capture),
@@ -928,7 +927,6 @@ fn tick_payloads(world: &World, tank: Entity) -> Result<Vec<Vec<u32>>, String> {
         transmission_state_payload(transmission),
         pose_payload(world, tank),
     ];
-    debug_assert_eq!(seams.len(), SEAM_NAMES.len());
     Ok(seams)
 }
 

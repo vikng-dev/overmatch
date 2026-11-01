@@ -69,7 +69,7 @@ mod panel;
 mod tests;
 
 // The wall prototype: a brick wall the range's rounds, a point deposit and a blast break up under
-// candidate crack laws (the game's environment destruction design, 2026-10-30).
+// the game’s fracture laws (game state only).
 mod wall;
 
 /// The spec sheet of the tank the sandbox spawns; the range's gun is its primary weapon as
@@ -436,10 +436,11 @@ fn spawn_camera(mut commands: Commands) {
     ));
 }
 
-/// Lock + hide the cursor for mouse-look. A query (not `Single`) so a not-yet-present cursor at
-/// startup is a no-op rather than a panic.
+/// Lock and hide the primary cursor for mouse-look; GPU-less harnesses have none.
 fn grab_cursor(mut windows: Query<(&mut Window, &mut CursorOptions), With<PrimaryWindow>>) {
-    for (mut window, mut cursor) in &mut windows {
+    if let Some((mut window, mut cursor)) =
+        crate::run_window::primary_or_headless(windows.single_mut())
+    {
         let center = window.size() / 2.0;
         window.set_cursor_position(Some(center));
         cursor.grab_mode = CursorGrabMode::Locked;
@@ -447,18 +448,16 @@ fn grab_cursor(mut windows: Query<(&mut Window, &mut CursorOptions), With<Primar
     }
 }
 
-/// Placeholder ballistic volumes — translucent steel slabs on the `Armor` layer of increasing
-/// thickness, so the penetrator marches *through* them (recording entry/exit) and only the ground
-/// stops it. Same material (steel), so **thickness is the variable**: the thin plates are overmatched
-/// by the 88 (no ricochet even at steep angles); the thick ones ricochet and can defeat the round.
-/// Real model volumes replace these when they land (design doc §12 contract).
+/// The game's damage-model fixture plates, all one reference material with varied thickness.
+/// The range's separate tank target is built from the blueprint; these plates let the operator
+/// inspect a controlled thickness change without an asset's other construction facts.
 fn spawn_targets(
     mut commands: Commands,
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
 ) {
     // RHA, the reference steel: a plate's cost in reference-mm is its thickness in mm.
-    // (x, thickness_m, tint) — 15 mm (overmatched), 50 mm, 100 mm, 300 mm (defeats it head-on).
+    // FIXTURE DATA: (x, thickness_m, tint), a thickness ladder in the reference material.
     let plates = [
         (-6.0_f32, 0.015_f32, Color::srgba(0.72, 0.74, 0.82, 0.40)),
         (-2.0, 0.05, Color::srgba(0.60, 0.62, 0.72, 0.45)),
@@ -539,10 +538,10 @@ fn spawn_target_from_blueprint(
     source: TankSimSource,
 ) {
     let Some(pending) = pending else {
-        return;
+        return; // No initial target or rebuild is pending.
     };
     let Some(content) = source.get() else {
-        return;
+        return; // The synchronous spawn data has not reached the load gate yet.
     };
     spawn_complete_tank(
         &mut commands,
@@ -627,7 +626,7 @@ impl ArmourPrimitives<'_, '_> {
 /// frame it lands, so a copy is shown only once its layer reads the overlay's.
 fn draw_armour_overlay(
     overlay: Res<ArmourOverlay>,
-    materials: Option<Res<OverlayMaterials>>,
+    materials: Res<OverlayMaterials>,
     primitives: Query<
         (Entity, &Mesh3d, &GlobalTransform),
         (With<GltfMeshName>, Without<ArmourCopy>),
@@ -644,10 +643,10 @@ fn draw_armour_overlay(
     )>,
     mut commands: Commands,
 ) {
-    let material = match (*overlay, materials.as_deref()) {
-        (ArmourOverlay::Opaque, Some(materials)) => Some(&materials.opaque),
-        (ArmourOverlay::Translucent, Some(materials)) => Some(&materials.translucent),
-        (ArmourOverlay::Off, _) | (_, None) => None,
+    let material = match *overlay {
+        ArmourOverlay::Opaque => Some(&materials.opaque),
+        ArmourOverlay::Translucent => Some(&materials.translucent),
+        ArmourOverlay::Off => None,
     };
     let Some(material) = material else {
         for (copy, ..) in &copies {
@@ -659,6 +658,7 @@ fn draw_armour_overlay(
     let mut copied = HashSet::new();
     for (copy, of, mut mesh, mut worn, mut pose, mut layers, mut visibility) in &mut copies {
         let Ok((_, source, at)) = primitives.get(of.of) else {
+            // Rebuilding the target removes its source; the view copy leaves with it.
             commands.entity(copy).despawn();
             continue;
         };
@@ -698,12 +698,14 @@ fn draw_armour_overlay(
 /// no stored euler state, as in the orbit camera). Move on **real** time, so you can still reposition
 /// while the sim is paused. WASD = planar relative to look, Shift = up, Ctrl = down.
 fn fly_camera(
-    camera: Single<&mut Transform, With<FreeFlyCam>>,
+    mut camera: Query<&mut Transform, With<FreeFlyCam>>,
     keys: Res<ButtonInput<KeyCode>>,
     motion: Res<AccumulatedMouseMotion>,
     time: Res<Time<Real>>,
 ) {
-    let mut transform = camera.into_inner();
+    let mut transform = camera
+        .single_mut()
+        .expect("the range spawns exactly one free-fly camera at Startup");
     crate::camera::free_fly_transform(&mut transform, &keys, motion.delta, time.delta_secs());
 }
 
@@ -721,40 +723,46 @@ fn fire(
     bindings: Res<Bindings>,
     keys: Res<ButtonInput<KeyCode>>,
     mouse: Res<ButtonInput<MouseButton>>,
-    camera: Single<(Entity, &Transform, &CombatantId), With<FreeFlyCam>>,
-    gun: Single<&Weapon, With<RangeGun>>,
+    camera: Query<(Entity, &Transform, &CombatantId), With<FreeFlyCam>>,
+    gun: Query<&Weapon, With<RangeGun>>,
     shot: Res<ShotParams>,
     clock: Res<ShotClock>,
     mut last_tick: Local<Option<u32>>,
     mut commands: Commands,
 ) {
+    let gun = gun
+        .single()
+        .expect("the range spawns exactly one camera gun at Startup");
+    let camera = camera
+        .single()
+        .expect("the range spawns exactly one free-fly camera at Startup");
     if !bindings.fire_primary.just_pressed(&keys, &mouse) || *last_tick == Some(clock.0) {
         return;
     }
-    let (camera, transform, &combatant) = *camera;
-    if fire_round(
+    let (camera, transform, &combatant) = camera;
+    fire_round(
         &mut commands,
         (camera, transform, combatant),
-        &gun,
+        gun,
         *shot,
         clock.0,
-    ) {
-        *last_tick = Some(clock.0);
-    }
+    );
+    *last_tick = Some(clock.0);
 }
 
 /// Fire `gun`'s round `shot` from the camera-gun `shooter` down its view axis on shot-clock tick
-/// `tick`: whether the gun lists that round.
+/// `tick`. The selection comes only from the gun’s validated round list.
 fn fire_round(
     commands: &mut Commands,
     (camera, transform, combatant): (Entity, &Transform, CombatantId),
     gun: &Weapon,
     shot: ShotParams,
     tick: u32,
-) -> bool {
-    let Some(loaded) = gun.rounds.get(usize::from(shot.round)) else {
-        return false;
-    };
+) {
+    let loaded = gun
+        .rounds
+        .get(usize::from(shot.round))
+        .expect("the range selection is an index into its camera gun’s validated rounds");
     let round = FireShell::of_round(
         &loaded.round,
         transform.translation,
@@ -776,7 +784,6 @@ fn fire_round(
         speed: shot.muzzle_speed.unwrap_or(round.speed),
         ..round
     });
-    true
 }
 
 /// The round bindings step the [`RangeGun`]'s selection through its rounds, wrapping, and drop a
@@ -785,9 +792,12 @@ fn select_round(
     bindings: Res<Bindings>,
     keys: Res<ButtonInput<KeyCode>>,
     mouse: Res<ButtonInput<MouseButton>>,
-    gun: Single<&Weapon, With<RangeGun>>,
+    gun: Query<&Weapon, With<RangeGun>>,
     mut shot: ResMut<ShotParams>,
 ) {
+    let gun = gun
+        .single()
+        .expect("the range spawns exactly one camera gun at Startup");
     let step = if bindings.round_next.just_pressed(&keys, &mouse) {
         RoundStep::Next
     } else if bindings.round_previous.just_pressed(&keys, &mouse) {
@@ -806,10 +816,9 @@ fn select_round(
 /// Run condition: the cursor is captured (mouse-look active). Esc releases it, which disables flying
 /// and firing so a freed cursor doesn't spin the view.
 fn cursor_locked(cursors: Query<&CursorOptions>) -> bool {
-    cursors
-        .single()
-        .map(|cursor| cursor.grab_mode == CursorGrabMode::Locked)
-        .unwrap_or(false)
+    // The range owns one cursor; a GPU-less input fixture may supply that cursor alone.
+    crate::run_window::primary_or_headless(cursors.single())
+        .is_some_and(|cursor| cursor.grab_mode == CursorGrabMode::Locked)
 }
 
 /// Esc = a real pause: release the cursor (so you can leave the window) and stop time; press again to
@@ -823,8 +832,10 @@ fn toggle_full_pause(
     if !keys.just_pressed(KeyCode::Escape) {
         return;
     }
-    let Ok((mut window, mut cursor)) = windows.single_mut() else {
-        return;
+    let Some((mut window, mut cursor)) =
+        crate::run_window::primary_or_headless(windows.single_mut())
+    else {
+        return; // The GPU-less harness has no window or cursor to release.
     };
     if cursor.grab_mode == CursorGrabMode::Locked {
         cursor.grab_mode = CursorGrabMode::None;
@@ -1044,9 +1055,10 @@ struct Legend;
 
 /// The selected round's line: its display name, and the speed it fires at only when overridden.
 fn round_line(gun: &Weapon, shot: ShotParams) -> String {
-    let Some(loaded) = gun.rounds.get(usize::from(shot.round)) else {
-        return String::new();
-    };
+    let loaded = gun
+        .rounds
+        .get(usize::from(shot.round))
+        .expect("the range selection is an index into its camera gun’s validated rounds");
     match shot.muzzle_speed {
         Some(speed) => format!("{}  {speed:.0} m/s", loaded.name),
         None => loaded.name.clone(),
@@ -1056,10 +1068,16 @@ fn round_line(gun: &Weapon, shot: ShotParams) -> String {
 /// Keep the [`RoundLabel`] on the selected round, written only on a change.
 fn update_round_label(
     shot: Res<ShotParams>,
-    gun: Single<&Weapon, With<RangeGun>>,
-    mut label: Single<&mut Text, With<RoundLabel>>,
+    gun: Query<&Weapon, With<RangeGun>>,
+    mut label: Query<&mut Text, With<RoundLabel>>,
 ) {
-    let line = round_line(&gun, *shot);
+    let gun = gun
+        .single()
+        .expect("the range spawns exactly one camera gun at Startup");
+    let mut label = label
+        .single_mut()
+        .expect("the range spawns exactly one round label at Startup");
+    let line = round_line(gun, *shot);
     if label.0 != line {
         label.0 = line;
     }
@@ -1141,8 +1159,11 @@ fn spawn_hud(mut commands: Commands, fonts: Res<crate::ui_font::UiFonts>) {
 /// H shows or hides the [`Legend`].
 fn toggle_legend(
     keys: Res<ButtonInput<KeyCode>>,
-    mut legend: Single<&mut Visibility, With<Legend>>,
+    mut legend: Query<&mut Visibility, With<Legend>>,
 ) {
+    let mut legend = legend
+        .single_mut()
+        .expect("the range spawns exactly one legend at Startup");
     if keys.just_pressed(KeyCode::KeyH) {
         legend.toggle_inherited_hidden();
     }

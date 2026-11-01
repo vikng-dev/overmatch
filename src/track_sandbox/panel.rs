@@ -78,8 +78,12 @@ fn panel(
     r: Read,
     hull: Query<(&Transform, &LinearVelocity), With<Hull>>,
 ) {
-    let Ok(ctx) = contexts.ctx_mut() else {
-        return;
+    let ctx = match contexts.ctx_mut() {
+        Ok(ctx) => ctx,
+        Err(bevy::ecs::query::QuerySingleError::NoEntities(_)) => return, // Egui's primary context is not initialized yet (or this is a GPU-less harness).
+        Err(bevy::ecs::query::QuerySingleError::MultipleEntities(_)) => {
+            panic!("the sandbox declares exactly one primary egui context")
+        }
     };
 
     // Publish egui's focus so `mod.rs` suppresses driving/camera input while a widget is active.
@@ -347,7 +351,14 @@ fn telemetry_section(
     r: &Read,
     hull: &Query<(&Transform, &LinearVelocity), With<Hull>>,
 ) {
-    match hull.iter().next() {
+    let hull = match hull.single() {
+        Ok(hull) => Some(hull),
+        Err(bevy::ecs::query::QuerySingleError::NoEntities(_)) => None, // The rig has not spawned yet.
+        Err(bevy::ecs::query::QuerySingleError::MultipleEntities(_)) => {
+            panic!("the sandbox builds exactly one hull")
+        }
+    };
+    match hull {
         Some((tf, lv)) => {
             let fwd = lv.0.dot(tf.forward().into());
             ui.monospace(format!("speed  {fwd:>6.2} m/s  {:>6.1} km/h", fwd * 3.6));
