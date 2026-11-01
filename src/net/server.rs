@@ -868,8 +868,8 @@ fn bot_home_xz(index: u32, radius: f32) -> Vec2 {
     lane_spawn_xz(BOT_SPAWN_XZ, index, radius)
 }
 
-/// How many bots `OVERMATCH_BOT` asks for. Unset: none. A number: that many. Present without a
-/// number (`OVERMATCH_BOT=`, `OVERMATCH_BOT=on`): the one bot the bare lever has always meant.
+/// Operator bot count: unset means none; a u32 requests that many. The tracked load runners
+/// `scripts/perf/run-online-cost.sh` and `scripts/perf/run-debris-stress.sh` set numeric counts.
 #[derive(Resource, Clone, Copy, Debug, PartialEq)]
 struct BotCount(u32);
 
@@ -877,11 +877,10 @@ impl BotCount {
     fn from_value(value: Option<&str>) -> Result<Self, harness::LeverError> {
         match value.map(str::trim) {
             None => Ok(Self(0)),
-            Some("") => Ok(Self(1)),
-            Some(value) if value.eq_ignore_ascii_case("on") => Ok(Self(1)),
-            Some(value) => value.parse().map(Self).map_err(|_| {
-                harness::LeverError::invalid("OVERMATCH_BOT", value, "a u32 count, on, or empty")
-            }),
+            Some(value) => value
+                .parse()
+                .map(Self)
+                .map_err(|_| harness::LeverError::invalid("OVERMATCH_BOT", value, "a u32 count")),
         }
     }
 }
@@ -1306,17 +1305,25 @@ mod tests {
         assert!(bind_ip(Some("localhost")).is_err());
     }
 
-    /// `OVERMATCH_BOT`'s readings. A mutant that reads a bare lever as zero silently drops the one
-    /// bot every existing harness asks for; one that ignores the number caps the load at one tank.
+    /// Load runners ask for an explicit count. A malformed value must refuse startup instead
+    /// of silently choosing one bot or turning the requested load off.
     #[test]
-    fn the_bot_lever_is_a_count_and_bare_means_one() {
+    fn the_bot_lever_accepts_only_an_explicit_count() {
         assert_eq!(BotCount::from_value(None).unwrap(), BotCount(0));
-        assert_eq!(BotCount::from_value(Some("")).unwrap(), BotCount(1));
-        assert_eq!(BotCount::from_value(Some("on")).unwrap(), BotCount(1));
         assert_eq!(BotCount::from_value(Some("1")).unwrap(), BotCount(1));
         assert_eq!(BotCount::from_value(Some(" 4 ")).unwrap(), BotCount(4));
         assert_eq!(BotCount::from_value(Some("0")).unwrap(), BotCount(0));
-        for bad in ["ten", "-1", "1O", "4294967296"] {
+        for bad in [
+            "",
+            "on",
+            "ON",
+            "true",
+            "off",
+            "ten",
+            "-1",
+            "1O",
+            "4294967296",
+        ] {
             assert!(BotCount::from_value(Some(bad)).is_err(), "{bad}");
         }
     }
