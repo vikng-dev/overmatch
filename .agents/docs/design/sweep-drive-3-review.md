@@ -252,3 +252,80 @@ MEASURED completion clock check: 2026-11-01 17:32:45 +0700. DERIVED elapsed: 89 
 
 G1 (`GRIP_SHEAR_MODULUS_M`) is unchanged. No agents, captures, pricing, deployments, external API
 calls or pushes. The orchestrator retains G1 feel review, pricing, merge and push.
+
+## Part 6: blind reviews of part 5
+
+Subject: the game's driving and damage model, game state only. Crew are HP pools at stations;
+weapon changes concern fire eligibility and timing only. Base: main at "net: pin the merged wire
+types at PROTOCOL_REV 60", lane `sweep-drive-6`, bay-2. MEASURED start: 2026-11-01 20:34:11 +0700.
+No agents, captures, pricing, deployments, external APIs or pushes.
+
+### Every blind-review finding
+
+| Reviewer | Finding | Verified / not a defect | Fixed in |
+|---|---|---|---|
+| Codex | P2: the published weapon clock saturates, so a deadline armed at the counter's end never matures | Verified. Cause: lightyear_core 0.30.1's `Tick` saturates (its `AddAssign` is `saturating_add`), so `increment_local_tick` holds `LocalTimeline` at `u32::MAX` and `publish_shot_clock` copied that value every tick. A 2-tick deadline armed there wraps to tick 1 and the clock never reaches it. The new test requires the published sequence `MAX, 0, 1, 2` with the deadline maturing at 1; the old publication gives `MAX` four times. | "net: keep the published tick counting past the timeline's saturating end (#238)" |
+| Claude | P2: a tank resting on another tank's hull gives that hull no reaction | Verified. With the upper hull at rest, the old clamp's closing speed is 0, so `stop` is 0, the push is 0, `catch_up` is 0 and the drag is 0. The new test requires the lower hull's momentum to be the exact opposite of every force the upper belt applied through it. | "driving: give belt-held hulls the whole reaction, sized after every pass (#238)" |
+| Claude | P2: `same_normal`'s ASSUMED 32-epsilon envelope splits the budget of every curved run | Verified. Normals 1° apart (1.7e-2 rad) fall outside the envelope (3.8e-6 rad, DERIVED), so the review's four patches from one 1000 kg source closing at 1 m/s each spent the whole mass, giving 4000 N·s. The new curved-run test bounds the blow at the source's 1000 N·s, plus the DERIVED 0.1% that a 3° spread adds. | "contact: size one implicit blow budget against the source's whole distribution (#238)" |
+| Claude | P3: the respawn opening is a raw `u32` deadline with its own hand-written wrapped difference | Verified by reading: `tick.wrapping_sub(now) as i32` and `clock.0.wrapping_add(wait.ticks)`. Opening and arming now use `SimTick`, and `RespawnWait` holds a `TickSpan`. The replicated `Respawn::Opens::tick` field stays a raw `u32`: `src/ballistics/recording_tests.rs`, outside this lane, constructs it. | "driving: type every weapon and battle span and refuse paused rounds (#238)" |
+| Claude | P3: no type carries the span limit; `duration_ticks` re-derives each shot's span and expects what the spec admitted | Verified by reading: `gate.arm(now, u32::MAX)` compiled. `SimTick::after` and `arm` now take a `TickSpan`; battle spans are `TickSpan`s; `FireCycle` holds spans parsed once by `TickSpan::from_secs` at the spec gate; `duration_ticks` and the spec's separate `duration` check are deleted. The fire system asserts the fixed timestep the spans were parsed at. The clock resources stay raw counters because `src/damage_cam/delivery.rs` reads them. | same |
+| Claude | P3: Paused with `belt_remaining > 0` is representable and freezes silently | Verified: `{"timing":{"Paused":{"work":3,"since":0}},"belt_remaining":5}` has every field of the original type and decodes there; `tick_weapon_gate`'s belt-has-rounds branch reads only `deadline_reached`, which is false for Paused. Paused work is load work (a `Single` holds no belt; an `Automatic` pauses only a dry belt's swap), so decoding refuses it (`WeaponGateError::PausedWithRounds`) and `pause` panics on a belt with rounds as a bug outcome. REV 61. | same |
+| Claude | P3: the peer-gate tests parse the old schema and duplicate each other | Verified by reading: the JSON lacks `timing`, so it is refused before any phase logic runs. Both are replaced by one test of current-schema invalid phases (work past the horizon; paused with rounds), in JSON and postcard, plus a valid paused decode. | same |
+| Claude | P3: entity order sizes a recipient that two tanks touch | Verified by reading: the ledger advanced each clamp in tank-entity order. Recipients are now sized after every pass, over every tank's contacts at once, in one canonical order of the contacts' geometry. The new two-tank shared-plank test requires identical bits with the spawn order exchanged. | "driving: give belt-held hulls the whole reaction, sized after every pass (#238)" |
+| Claude | P3: two mechanisms for self-support exclusion | Verified by reading: the sandbox passed `&[hull_entity]` to `gather`; the game passed `&[]` and called `exclude_source`. `gather` no longer takes an exclusion list, and both adapters call `exclude_source`. Each adapter's `near` filter remains: in the game it is the cost gate, and in the sandbox it is required because the piece query cannot borrow the hull. | same |
+| Claude | P3: `pieces.clone()` deep-copied every gathered surface each tick; stale `RubbleBodies` doc | Verified by reading. With sizing after all passes, recipients are sized on the snapshot itself, and the copy is deleted. The doc now names the shared tick-start snapshot. | same |
+
+All ten findings are verified; none is dismissed. Neither reviewer's "checked and sound" list was
+re-verified item by item.
+
+MEASURED mutant run: each of the five new tests was run against its fix reverted in the working tree
+(the publication copying the timeline; the belt-held branch removed; the canonical sort removed; the
+blow budgeted per patch, as the envelope did for distinct normals; the paused-rounds refusal removed),
+and all five failed. The publication read `MAX` on all four ticks; the curved run read **3999.9995
+N·s** against 1000 N·s; the resting stack's lower hull read zero momentum against a **9414.239 N·s**
+reaction; the shared plank's bits differed with the spawn order exchanged.
+
+### Decisions and laws
+
+- **One wrapping tick.** The game's tick is the count of fixed ticks run. Below lightyear's
+  saturating end the published tick equals the timeline's tick. After that, each fixed tick the
+  timeline is held at the end adds one more. Lightyear's own transport tick still saturates, and
+  its input and replication ordering past that end (776 days at 64 Hz, DERIVED) belong to lightyear.
+- **What holds the recipient decides its side.** A body whose own support is a belt law this
+  tick (any driving tank's hull) takes the whole opposite reaction, `−(normal × load + traction) ×
+  dt`, as fixed construction does, with no closing-speed condition. Every other dynamic body is a
+  piece and keeps the clamped sequential impulse. This is a fact about construction, not about a
+  vehicle kind: it holds for any tank. Stability, DERIVED from the stack fixture's MEASURED
+  9414 N·s per 1/64 s at its nominal 1 cm press: `k ≈ 6e7 N/m`, so `k·dt²/m ≈ 0.5` for a 30 t
+  hull, and coupling two equal hulls doubles it to about 1, inside the explicit limit of 4.
+- **One implicit budget per (collider, source).** The blow is `m_w v_w`, capped at what the
+  closing patches moved. `v_w` is their moved-weighted closing speed. `m_w = (Σw)² / (wᵀ K w)` is
+  the source's effective mass for that weighted distribution of unit normal impulses, with `K` its
+  inverse mass matrix between the points, rotation and locked axes included. Co-located co-normal
+  copies reduce to the old centroid mass. Orthogonal faces, both closing, receive their summed
+  components. Resting patches take no share. No envelope or threshold remains, so the law holds
+  for any running gear.
+
+### Verification
+
+MEASURED with the fixes: the curved run's blow is **1000.38074 N·s** against the source's 1000
+N·s, which is the DERIVED `m_w` for normals spread 3°. The resting stack's lower hull momentum is
+**[0, −9414.24, −27.157345] N·s** against a **[0, 9414.239, 27.157337] N·s** reaction. The closing
+stack's lower hull now takes **−0.331169 m/s** from a **637,483.938 N** upper belt load (the whole
+reaction; part 5 clamped it).
+
+MEASURED green batches: shooting, sim_tick, spec, crew_ui, `vfx::muzzle`, state hash and all `net::`
+**384 passed, 1 ignored** (the wire-type pin then re-pinned at REV 61). The combined batch passed
+**1033 tests, 10 ignored**: contact transfer, track, trees, buildings, `headless_test`, `pen_cam`,
+`field_casts`, all `net::`, the weapon modules, and the whole-tree guards (`doc_citations ui_ascii
+net_boundary bake::`). The new tests, contact transfer, rubble and citations passed **35** after
+the mutants were restored. On the final tree, the whole-tree guards with `track::sim` passed **50**.
+Every commit passed `cargo fmt --all --check` and locked
+workspace/all-target CI clippy. No full-suite run was made.
+
+Not done in this lane, for the orchestrator: `Respawn::Opens::tick` stays a raw replicated `u32`
+(`src/ballistics/recording_tests.rs` constructs it), and `ShotClock`/`WeaponClock` stay raw
+counters (`src/damage_cam/delivery.rs` reads them); typing either means editing those files. G1
+(`GRIP_SHEAR_MODULUS_M`) is unchanged.
+
+MEASURED completion clock check: 2026-11-01 21:14:30 +0700. DERIVED elapsed: 40 minutes 19 seconds.

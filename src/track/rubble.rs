@@ -856,7 +856,7 @@ mod tests {
     }
 
     /// Support admission must not turn a malformed dynamic body into empty ground. The driving
-    /// adapter relies on every non-excluded recipient carrying its spawn-established force state.
+    /// adapter relies on every admitted recipient carrying its spawn-established force state.
     #[test]
     #[should_panic(expected = "an admitted dynamic support body carries Avian force state")]
     fn an_admitted_dynamic_body_with_missing_force_state_is_a_bug() {

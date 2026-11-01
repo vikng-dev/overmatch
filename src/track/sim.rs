@@ -670,8 +670,8 @@ pub(crate) fn belt_tick<O: TerrainOracle>(
 /// pose, apply the returned forces in report order, commit the new belt state.
 ///
 /// Every tank reads the same tick-start support snapshot and excludes its own hull by identity.
-/// A separate reaction ledger advances the clamp's recipient velocity as contacts are sized;
-/// its impulses are written only after every pass, before recoil and physics.
+/// The recipients' sides are sized after every pass, over all tanks' contacts at once
+/// ([`piece_impulses`]), and written before recoil and physics.
 #[expect(
     clippy::too_many_arguments,
     reason = "ECS adapter over terrain, tanks and piece reactions"
