@@ -1,4 +1,4 @@
-//! The own tank's fire presentation: intent edges present on the local tick, legality reconciles
+//! The game's damage-model presentation for the own tank: intent edges present on the local tick, legality reconciles
 //! forward.
 //!
 //! Under unpredicted drive the owner leaves the prediction set (`net::server`), so its `WeaponGate`
@@ -386,18 +386,52 @@ pub(super) fn present_shot_at_age(
     recoil.push(shot.shooter.tank, shot.shooter.weapon);
 }
 
-/// Slot `slot`'s replicated `loaded` index. The server builds `WeaponLoads` and `WeaponGate` from
-/// the same sorted spec weapons, so a slot past the loads list is a malformed peer record:
-/// [`arm_own_fire_presentation`] logs it, and the reveal names the default round 0.
-fn loaded_of(loads: &WeaponLoads, slot: usize) -> u8 {
-    loads.weapons.get(slot).map_or(0, |load| load.loaded)
+/// Malformed outside input: one disclosed weapon record must name every spawn-built slot.
+#[derive(Debug)]
+enum WeaponRecordFault {
+    SlotCount {
+        expected: usize,
+        gates: usize,
+        loads: usize,
+    },
+}
+
+impl std::fmt::Display for WeaponRecordFault {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::SlotCount {
+                expected,
+                gates,
+                loads,
+            } => write!(
+                f,
+                "expected {expected} weapon slots, received {gates} gates and {loads} loads"
+            ),
+        }
+    }
+}
+
+fn check_weapon_record(
+    gate: &WeaponGate,
+    loads: &WeaponLoads,
+    expected: usize,
+) -> Result<(), WeaponRecordFault> {
+    if gate.weapons.len() == expected && loads.weapons.len() == expected {
+        Ok(())
+    } else {
+        Err(WeaponRecordFault::SlotCount {
+            expected,
+            gates: gate.weapons.len(),
+            loads: loads.weapons.len(),
+        })
+    }
 }
 
 /// Arm the own tank once the server stream owns its gate, each slot's load as it arrived. Both
 /// arrive together: one spawn inserts them and one `CombatDisclosure` scope discloses them.
 fn arm_own_fire_presentation(
     tanks: Query<
-        (Entity, &WeaponGate, &WeaponLoads),
+        (Entity, Ref<WeaponGate>, Ref<WeaponLoads>),
         (
             With<NetTank>,
             With<Controlled>,
@@ -409,22 +443,20 @@ fn arm_own_fire_presentation(
     mut commands: Commands,
 ) {
     for (entity, gate, loads) in &tanks {
-        info!("net: {entity} own interpolated gate armed with the fire-presentation ledger");
-        if loads.weapons.len() != gate.weapons.len() {
-            warn!(
-                "net: {entity} arrived with {} weapon gates and {} loads (malformed peer record); \
-                 a slot without a load reveals round 0",
-                gate.weapons.len(),
-                loads.weapons.len(),
-            );
+        if let Err(fault) = check_weapon_record(&gate, &loads, gate.weapons.len()) {
+            if gate.is_changed() || loads.is_changed() {
+                warn!("net: {entity} refused malformed own-fire state: {fault}");
+            }
+            continue;
         }
+        info!("net: {entity} own interpolated gate armed with the fire-presentation ledger");
         let slots = gate
             .weapons
             .iter()
-            .enumerate()
-            .map(|(slot, arriving)| {
+            .zip(&loads.weapons)
+            .map(|(arriving, load)| {
                 let mut entry = SlotLedger::seeded(*arriving);
-                entry.arrived_loaded = loaded_of(loads, slot);
+                entry.arrived_loaded = load.loaded;
                 entry
             })
             .collect();
@@ -448,21 +480,31 @@ fn stamp_gate_write_mark(mut roots: Query<(Ref<WeaponGate>, &mut OwnFirePresenta
 /// the signal [`heal_refused_presentations`] measures — never a fold.
 fn fold_arrivals(
     arrival: Option<Res<ArrivalDelay>>,
-    mut roots: Query<(Ref<WeaponGate>, &WeaponLoads, &mut OwnFirePresentation)>,
+    mut roots: Query<(
+        Entity,
+        Ref<WeaponGate>,
+        Ref<WeaponLoads>,
+        &mut OwnFirePresentation,
+    )>,
 ) {
     let revealed_tick = arrival
         .as_ref()
         .and_then(|estimator| estimator.newest_remote())
         .map(|tick| tick.0);
-    for (gate, loads, mut ledger) in &mut roots {
+    for (entity, gate, loads, mut ledger) in &mut roots {
+        if let Err(fault) = check_weapon_record(&gate, &loads, ledger.slots.len()) {
+            if ledger.gate_write_mark != Some(gate.last_changed()) || loads.is_changed() {
+                warn!("net: {entity} refused malformed own-fire state: {fault}");
+            }
+            ledger.gate_write_mark = Some(gate.last_changed());
+            continue;
+        }
         if ledger.gate_write_mark != Some(gate.last_changed()) {
             // An unset mark (fresh arm) folds against the seed: zero rounds, unless a replication
             // write landed between the arm and this fold, which confirms as any other.
             ledger.gate_write_mark = Some(gate.last_changed());
-            for (slot, entry) in ledger.slots.iter_mut().enumerate() {
-                let Some(arriving) = gate.weapons.get(slot).copied() else {
-                    continue;
-                };
+            for (slot, (entry, &arriving)) in ledger.slots.iter_mut().zip(&gate.weapons).enumerate()
+            {
                 if arriving == entry.last_arrived {
                     continue;
                 }
@@ -487,8 +529,8 @@ fn fold_arrivals(
         // The load as of this frame's arrivals, refreshed AFTER the fold: a consumption and its
         // slot's next load can arrive in one snapshot, and the reveal must name the round fired,
         // not the one loaded behind it.
-        for (slot, entry) in ledger.slots.iter_mut().enumerate() {
-            entry.arrived_loaded = loaded_of(loads, slot);
+        for (entry, load) in ledger.slots.iter_mut().zip(&loads.weapons) {
+            entry.arrived_loaded = load.loaded;
         }
     }
 }
@@ -497,19 +539,21 @@ fn fold_arrivals(
 /// [`fold_arrivals`]; this is the presentation-side restore only.
 fn hold_presentation_gate(mut roots: Query<(&mut WeaponGate, &OwnFirePresentation)>) {
     for (mut gate, ledger) in &mut roots {
+        // Malformed arrivals are visibly refused by fold_arrivals; never restore a partial record.
+        if gate.weapons.len() != ledger.slots.len() {
+            continue;
+        }
         // Immutable deref first: a tick with no arriving snapshot must not flag the component.
-        let arrived = ledger.slots.iter().enumerate().any(|(slot, entry)| {
-            gate.weapons
-                .get(slot)
-                .is_some_and(|arriving| *arriving != entry.presented_gate)
-        });
+        let arrived = ledger
+            .slots
+            .iter()
+            .zip(&gate.weapons)
+            .any(|(entry, arriving)| *arriving != entry.presented_gate);
         if !arrived {
             continue;
         }
-        for (slot, entry) in ledger.slots.iter().enumerate() {
-            if gate.weapons.get(slot).is_some() {
-                gate.weapons[slot] = entry.presented_gate;
-            }
+        for (entry, arriving) in ledger.slots.iter().zip(&mut gate.weapons) {
+            *arriving = entry.presented_gate;
         }
     }
 }
@@ -524,31 +568,33 @@ fn record_presentation_gate(
 ) {
     let now = timeline.tick().0;
     for (gate, mut ledger) in &mut roots {
-        let moved = ledger.slots.iter().enumerate().any(|(slot, entry)| {
-            gate.weapons
-                .get(slot)
-                .is_some_and(|current| *current != entry.presented_gate)
-        });
+        // Malformed arrivals are visibly refused by fold_arrivals; never record partial cadence.
+        if gate.weapons.len() != ledger.slots.len() {
+            continue;
+        }
+        let moved = ledger
+            .slots
+            .iter()
+            .zip(&gate.weapons)
+            .any(|(entry, current)| *current != entry.presented_gate);
         if !moved {
             continue;
         }
-        for (slot, entry) in ledger.slots.iter_mut().enumerate() {
-            if let Some(current) = gate.weapons.get(slot) {
-                let consumed = entry
-                    .presented_gate
-                    .belt_remaining
-                    .saturating_sub(current.belt_remaining)
-                    .max(u32::from(
-                        entry.presented_gate.ready_tick.is_none() && current.ready_tick.is_some(),
-                    ));
-                for _ in 0..consumed {
-                    entry.pending_local.push_back(now);
-                    if entry.pending_local.len() > QUEUE_CAP {
-                        entry.pending_local.pop_front();
-                    }
+        for (entry, current) in ledger.slots.iter_mut().zip(&gate.weapons) {
+            let consumed = entry
+                .presented_gate
+                .belt_remaining
+                .saturating_sub(current.belt_remaining)
+                .max(u32::from(
+                    entry.presented_gate.ready_tick.is_none() && current.ready_tick.is_some(),
+                ));
+            for _ in 0..consumed {
+                entry.pending_local.push_back(now);
+                if entry.pending_local.len() > QUEUE_CAP {
+                    entry.pending_local.pop_front();
                 }
-                entry.presented_gate = *current;
             }
+            entry.presented_gate = *current;
         }
     }
 }
@@ -941,6 +987,34 @@ mod tests {
         (world, root)
     }
 
+    /// In the game's damage model, a malformed peer record cannot confirm a consumption or
+    /// rename its round. The next-load rule relies on retaining the last complete arrival.
+    #[test]
+    fn a_missing_load_refuses_the_whole_arrival_without_inventing_round_zero() {
+        let (mut world, root) = world_with_ledger(ready(BELT));
+        world.get_mut::<OwnFirePresentation>(root).unwrap().slots[0].arrived_loaded = 1; // Fixture round index.
+        let before = world
+            .get::<OwnFirePresentation>(root)
+            .unwrap()
+            .slots
+            .clone();
+        world.get_mut::<WeaponLoads>(root).unwrap().weapons.clear();
+        world.get_mut::<WeaponGate>(root).unwrap().weapons[0] = ready(BELT - 1);
+        world.run_system_once(fold_arrivals).expect("fold runs");
+        assert_eq!(
+            world.get::<OwnFirePresentation>(root).unwrap().slots,
+            before
+        );
+        assert!(
+            check_weapon_record(
+                world.get::<WeaponGate>(root).unwrap(),
+                world.get::<WeaponLoads>(root).unwrap(),
+                1
+            )
+            .is_err()
+        );
+    }
+
     fn gate_of(world: &World, root: Entity) -> WeaponGateState {
         world.get::<WeaponGate>(root).expect("gate").weapons[0]
     }
@@ -1255,6 +1329,30 @@ mod tests {
             1,
             "an unkeyed local round counts too",
         );
+    }
+
+    /// In the game's damage model, a partial disclosed load list has no valid seed for the
+    /// own presentation. Refusing it prevents an invented round choice on the first consumption.
+    #[test]
+    fn a_partial_weapon_record_cannot_arm_the_ledger() {
+        let mut world = World::new();
+        let root = world
+            .spawn((
+                NetTank,
+                Controlled,
+                Interpolated,
+                WeaponGate {
+                    weapons: vec![ready(BELT)],
+                },
+                WeaponLoads {
+                    weapons: Vec::new(),
+                },
+            ))
+            .id();
+        world
+            .run_system_once(arm_own_fire_presentation)
+            .expect("arming runs");
+        assert!(world.get::<OwnFirePresentation>(root).is_none());
     }
 
     /// The ledger arms only on the own interpolated gate — never an opponent's, whose gate the
