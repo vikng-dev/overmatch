@@ -6040,4 +6040,166 @@ mod tests {
         assert!(weighed.failures.is_empty());
         assert!(fall(&structure, &mut state).is_empty());
     }
+
+    /// One fixture patch at the centre of a 0.25 m slab's lower face, at `material`'s dynamic
+    /// compressive strength over 0.1 m², delivering `blow` N·s: a back stress far over every
+    /// shipped row's dynamic tensile strength (ASSUMED fixture loading). With the slab.
+    fn scab_face(material: &Masonry, blow: f32) -> (RayHit, Block) {
+        let pressure = material.compaction.strength;
+        let hit = RayHit {
+            chunk: 0,
+            at: Vec3::ZERO,
+            normal: Vec3::NEG_Z,
+            energy: 0.0,
+            impulse: Vec3::Z * blow,
+            peak: Vec3::Z * (0.1 * pressure),
+            pressure,
+            crushed: 0.0,
+        };
+        let slab = Block::cuboid(Vec3::new(-1.0, -1.0, 0.0), Vec3::new(1.0, 1.0, 0.25));
+        (hit, slab)
+    }
+
+    /// The blow at which `material`'s [`scab_face`] pulse is `lengths` ligaments long:
+    /// `λ = c τ`, `τ = 2J / F`.
+    fn scab_blow(material: &Masonry, lengths: f32) -> f32 {
+        let force = 0.1 * material.compaction.strength;
+        lengths * 0.25 * force / (2.0 * material.spall.bar_speed)
+    }
+
+    /// A LONG PULSE THROWS NO SCAB (the game's environment destruction model, the #237 study's
+    /// test 3, Law 2). At a fixed peak stress on a face, lengthening the pulse (a larger blow at
+    /// the same peak force, `τ = 2J / F`) thins the reflected tension by `min(1, 2L / λ)` until
+    /// it no longer beats the dynamic tensile strength: a short pulse scabs, a long one never
+    /// does, and once too long every longer pulse throws none. Thick walls and far, long pulses
+    /// that leave the back face whole rely on it; a mutant that ignores the pulse's length throws a
+    /// scab at every length and fails here. ASSUMED fixture loading; each shipped breakable row.
+    #[test]
+    fn a_long_pulse_throws_no_scab() {
+        for material in [brick(), wood()] {
+            let thrown: Vec<bool> = [0.01_f32, 0.1, 1.0, 10.0, 100.0, 1.0e3, 1.0e4]
+                .into_iter()
+                .map(|lengths| {
+                    let (hit, slab) = scab_face(&material, scab_blow(&material, lengths));
+                    let (_, scabs) = Load::blast(&[hit], |_| Backing {
+                        block: &slab,
+                        scale: 1.0,
+                        material,
+                    });
+                    !scabs.is_empty()
+                })
+                .collect();
+            assert!(thrown[0], "{material:?}: a short pulse scabs");
+            assert!(
+                !thrown[thrown.len() - 1],
+                "{material:?}: a long pulse throws none"
+            );
+            assert!(
+                thrown.windows(2).all(|pair| pair[0] || !pair[1]),
+                "{material:?}: once too long, a longer pulse throws none: {thrown:?}"
+            );
+        }
+    }
+
+    /// A SCAB'S MOMENTUM COMES OFF ITS FACE'S PUSH (the game's environment destruction model, Law
+    /// 2). A near burst's rays on one brick face: the pushed chunk keeps the face's blow less the
+    /// scab's momentum, so the two sum to the rays' delivered impulse, both along it; the scab's
+    /// volume leaves the pool as a load at the back point with no blow. The structural check and a
+    /// freed piece's launch read the kept blow; a mutant that throws a scab without taking it off
+    /// the push, or takes it off twice, fails here. ASSUMED fixture slabs; the charge is the
+    /// 88 mm HE fixture burst's energy and charge radius (DERIVED), its filler centre 0.178 m off
+    /// the face.
+    #[test]
+    fn a_scab_takes_its_momentum_off_its_faces_push() {
+        let blast = Blast::of(1.47e6, 0.0513);
+        let directions = ball_directions(4096);
+        let material = brick();
+        for thickness in [0.12_f32, 0.25, 0.5] {
+            let slab = [Block::cuboid(
+                Vec3::new(-1.0, -1.0, 0.0),
+                Vec3::new(1.0, 1.0, thickness),
+            )];
+            let hits = blast_rays(
+                &slab,
+                |_| true,
+                |_| material,
+                Vec3::new(0.0, 0.0, -0.178),
+                blast,
+                &directions,
+            );
+            let (loads, scabs) = Load::blast(&hits, |_| Backing {
+                block: &slab[0],
+                scale: 1.0,
+                material,
+            });
+            let [scab] = scabs[..] else {
+                panic!("the near burst scabs the {thickness} m slab's back: {scabs:?}");
+            };
+            let delivered: Vec3 = hits.iter().map(|hit| hit.impulse).sum();
+            let kept: Vec3 = loads.iter().map(|load| load.blow).sum();
+            assert!(
+                (kept + scab.momentum() - delivered).length() <= 1e-4 * delivered.length(),
+                "{thickness} m: kept {kept} + scab {} vs {delivered}",
+                scab.momentum()
+            );
+            assert!(kept.dot(delivered) > 0.0 && scab.momentum().dot(delivered) > 0.0);
+            let [_, removal] = loads[..] else {
+                panic!("one face load and one removal: {loads:?}");
+            };
+            assert_eq!((removal.at, removal.blow), (scab.at, Vec3::ZERO));
+            assert!((removal.crushed * material.density / scab.mass - 1.0).abs() < 1e-5);
+            assert!(
+                (scab.at.z - thickness).abs() < 1e-5,
+                "it leaves the back face"
+            );
+            println!(
+                "MEASURED brick {thickness} m slab, 88 mm HE fixture burst at 0.178 m: scab \
+                 {:.3} kg at {:.2} m/s, {:.1} of the face's {:.1} N s",
+                scab.mass,
+                scab.velocity.length(),
+                scab.momentum().length(),
+                delivered.length()
+            );
+        }
+    }
+
+    /// THE SCAB IS THE MATERIAL ROW'S, NEVER ITS NAME'S (the game's environment destruction model,
+    /// Law 2; ADR-0034). One face loading on two shipped breakable rows throws two different
+    /// scabs, and on the shipped brick row read under another name throws the identical one.
+    /// Every breakable body's scab relies on reading its row alone; a law branching on a name or
+    /// on a body kind, or reading a constant in place of the row, fails here. ASSUMED fixture
+    /// loading; the rows are the shipped data.
+    #[test]
+    fn a_scab_is_its_rows_and_not_its_names() {
+        let text = include_str!("../../assets/materials/materials.ron");
+        assert_eq!(text.matches("\"Brick\":").count(), 1);
+        let renamed = SubstanceRegistry::from_ron(&text.replacen("\"Brick\":", "\"Clinker\":", 1))
+            .expect("the shipped rows load under another name");
+        let clinker = Masonry::of(&renamed, "Clinker")
+            .unwrap()
+            .expect("the renamed row states bulk facts");
+        let scab = |material: Masonry, loaded: &Masonry| {
+            let (hit, slab) = scab_face(loaded, scab_blow(loaded, 0.1));
+            let (_, scabs) = Load::blast(&[hit], |_| Backing {
+                block: &slab,
+                scale: 1.0,
+                material,
+            });
+            let [scab] = scabs[..] else {
+                panic!("the short fixture pulse scabs {material:?}: {scabs:?}");
+            };
+            scab
+        };
+        let (brick, wood) = (brick(), wood());
+        assert_eq!(
+            scab(clinker, &brick),
+            scab(brick, &brick),
+            "a name changes nothing"
+        );
+        let (on_brick, on_wood) = (scab(brick, &wood), scab(wood, &wood));
+        assert!(
+            on_brick.mass != on_wood.mass && on_brick.velocity != on_wood.velocity,
+            "a row changes the scab: {on_brick:?} vs {on_wood:?}"
+        );
+    }
 }
