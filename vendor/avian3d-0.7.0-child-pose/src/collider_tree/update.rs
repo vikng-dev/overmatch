@@ -135,7 +135,8 @@ impl<C: AnyCollider> Plugin for ColliderTreeUpdatePlugin<C> {
             |trigger: On<Remove, ColliderOf>,
              mut collider_query: Query<
                 (
-                    &ColliderTreeProxyKey,
+                    // OVERMATCH PATCH: `&mut`, so the standalone key below is written back.
+                    &mut ColliderTreeProxyKey,
                     &EnlargedAabb,
                     Option<&CollisionLayers>,
                     Has<Sensor>,
@@ -149,7 +150,7 @@ impl<C: AnyCollider> Plugin for ColliderTreeUpdatePlugin<C> {
                 let entity = trigger.entity;
 
                 let Ok((
-                    proxy_key,
+                    mut proxy_key,
                     enlarged_aabb,
                     layers,
                     is_sensor,
@@ -165,7 +166,7 @@ impl<C: AnyCollider> Plugin for ColliderTreeUpdatePlugin<C> {
                 if tree.remove_proxy(proxy_key.id()).is_none() {
                     return;
                 }
-                moved_proxies.remove(proxy_key);
+                moved_proxies.remove(&proxy_key);
 
                 // If the collider still exists, move it to the standalone tree.
                 let proxy = ColliderTreeProxy {
@@ -184,6 +185,13 @@ impl<C: AnyCollider> Plugin for ColliderTreeUpdatePlugin<C> {
                 let proxy_id = standalone_tree.add_proxy(Aabb::from(enlarged_aabb.get()), proxy);
                 let new_proxy_key =
                     ColliderTreeProxyKey::new(proxy_id, ColliderTreeType::Standalone);
+
+                // OVERMATCH PATCH: the collider's key names its standalone proxy. Without it, the
+                // `Remove<C>` that follows a despawn (Case 2) removes the old key's id from the old
+                // tree and the standalone proxy outlives its collider, pairing with every collider
+                // its bounds overlap; a live collider's later removal frees an id another proxy
+                // may hold by then.
+                *proxy_key = new_proxy_key;
 
                 // Mark the proxy as moved.
                 moved_proxies.insert(new_proxy_key);

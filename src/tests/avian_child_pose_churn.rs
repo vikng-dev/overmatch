@@ -29,7 +29,11 @@ use lightyear::avian3d::plugin::LightyearAvianPlugin;
 /// Avian's default plugins, one 64 Hz step per `update`: the manual clock advances 15 625 µs per
 /// update, DERIVED as 1 s / 64.
 pub(super) fn physics_app() -> App {
-    let mut app = App::new();
+    physics_app_on(App::new())
+}
+
+/// [`physics_app`] built on `app`, for a test that registers something before Avian does.
+pub(super) fn physics_app_on(mut app: App) -> App {
     app.add_plugins((
         MinimalPlugins,
         bevy::transform::TransformPlugin,

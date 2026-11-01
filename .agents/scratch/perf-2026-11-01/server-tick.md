@@ -142,7 +142,7 @@ the cycle run's combat ticks, so its tick column is not used.
   only the per-tank cost matters) or moves to two (then the loop's parallel form is worth having).
 - **Three passes place every child collider each tick.** `motion::place_children`, Avian's
   `update_child_collider_position` and lightyear_avian's `update_child_collider_position` together
-  cost 260-1 080 us per tick on the empty map (MEASURED, the two runs above), each iterating every
+  cost 611-1 077 us per tick on the empty map (MEASURED, the before and after traces), each iterating every
   child collider, though no map collider moves. Not investigated further in this lane.
 - **Frames outside the tick** (1.1-1.5 ms per tick, `mark_dirty_trees`, transform propagation,
   visibility) are the dedicated server running Bevy's transform and visibility plugins over a map

@@ -53,3 +53,24 @@ is the one observable of the prune: everything else the pass writes is the same 
 Guard: `src/tests/avian_moved_aabb_prune.rs` (standing static colliders are not examined; a static
 collider moved, rescaled, added or removed reaches the collider trees). Record:
 `upstream/avian-moved-aabb-prune.md`.
+
+## Standalone key write-back (`src/collider_tree/update.rs`)
+
+The observer on `Remove<ColliderOf>` (Case 3 in that file's comments) moves a collider that keeps
+its `C` from its body's tree to the standalone tree, but read the collider's `ColliderTreeProxyKey`
+immutably and never wrote the new key back. The key kept naming the old tree and id, so the
+collider's later `Remove<C>` (Case 2) removed that id from the old tree, which no longer held it,
+and the standalone proxy outlived its collider. An orphan proxy's bounds stay where the collider
+was, and the broad phase pairs standalone proxies with everything, so every orphan pairs with
+every collider it overlaps, for the rest of the process. On a despawn, the two observers run in
+component registration order, and on Overmatch's server the despawned colliders leaked: its map
+rebuild between Battles left 46 087 contact pairs on a map of static bodies, which holds none
+without a standalone proxy (`.agents/scratch/perf-2026-11-01/server-tick.md`). With the stale key,
+a live collider's later removal also frees whatever proxy holds that id by then.
+
+The patch queries the key `&mut` and assigns the standalone key after adding the proxy. Nothing
+reads the key's change tick.
+
+Guard: `src/tests/avian_collider_of_removal.rs` (a collider that left its body takes its proxy
+when despawned; a static compound rebuilt in place holds no contact pair). Record:
+`upstream/avian-collider-of-removal-orphan-proxy.md`.
