@@ -2,6 +2,10 @@
 // The solid Pzgr. 39: the fixture round the pen cam scenarios and the field casts fire.
 // The file's fields are `src/rounds.rs`'s module doc.
 (
+    nose: None,
+    penetrator: None,
+    burst: None,
+    fuze: None,
     name: ("8.8 cm Pzgr. 39", Measured("the 8.8 cm KwK 36's APCBC round, whose 10.2 kg and 773 m/s
         this entry carries; Jentz & Doyle, Tiger I Heavy Tank 1942-45, Osprey New Vanguard 5
         (1993), p.17")),

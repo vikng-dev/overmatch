@@ -6,6 +6,8 @@
 // mass: DERIVED, provisional.
 // The file's fields are `src/rounds.rs`'s module doc.
 (
+    nose: None,
+    penetrator: None,
     name: ("8.8 cm Pzgr. 39 ring", Tuned("the 8.8 cm Pzgr. 39 bursting as the ring; the suffix sets
         it apart from the solid fixture round of the same designation, 88mm_AP")),
     round_type: ("APCBC", Measured("CITED TM 9-1985-3 pp.447-448: the Pzgr. 39 listed for the

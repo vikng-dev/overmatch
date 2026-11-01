@@ -1,6 +1,10 @@
 // Subject: the game's damage model and its view, game state only.
 // The file's fields are `src/rounds.rs`'s module doc.
 (
+    nose: None,
+    penetrator: None,
+    burst: None,
+    fuze: None,
     name: ("7.92 mm S.m.K.", Measured("Spitzgeschoss mit Kern, the German 7.92 mm steel-cored
         armour-piercing bullet (panzerworld.com/german-ammunition-nomenclature;
         en.wikipedia.org/wiki/7.92x94mm_Patronen). The best-attested match: this entry's mass and

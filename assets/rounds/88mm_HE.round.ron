@@ -8,6 +8,8 @@
 // a burst in flight as the ring law has every nose piece do.
 // The file's fields are `src/rounds.rs`'s module doc.
 (
+    nose: None,
+    penetrator: None,
     name: ("8.8 cm Sprgr. L/4.5", Measured("CITED TM53 pp.444-445")),
     round_type: ("HE", Measured("CITED TM53 pp.444-445: high-explosive shell")),
     core: ("GunSteel", Tuned("ASSUMED: the shell body as the fixture body steel; no source gives

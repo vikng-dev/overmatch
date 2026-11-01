@@ -9,6 +9,9 @@
 // round's, a labelled fixture, and the rigid rule reads no fact of the core.
 // The file's fields are `src/rounds.rs`'s module doc.
 (
+    nose: None,
+    burst: None,
+    fuze: None,
     name: ("8.8 cm Pzgr. 40", Measured("the 8.8 cm KwK 36's APCR round; Jentz & Doyle, Tiger I
         Heavy Tank 1942-45, Osprey New Vanguard 5 (1993), p.17")),
     round_type: ("APCR", Measured("the 8.8 cm KwK 36's APCR round; Jentz & Doyle, Tiger I Heavy

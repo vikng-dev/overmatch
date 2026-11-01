@@ -26,7 +26,7 @@
 //!   `penetrator` (the force law, the disc, overmatch and the cone's hole read it); the mechanism
 //!   binds from the penetrator at spawn ([`crate::ballistics`]'s `Projectile`), synchronously and
 //!   from data alone. A round without the block meets the plate whole.
-//! - `fuze: Some((position, trigger, modes, default_mode))`: what sets the burst off
+//! - `fuze: Some((trigger, modes, default_mode))`: what sets the burst off
 //!   ([`fuze`]). `position` is `Nose` or `Base`. `trigger` is `SpendExit(arming_spend: …)`, the
 //!   reference-mm spent in one body and then left, or `Impact(sensitivity_n: …)`, the resisting
 //!   force (N) at contact. `modes` is the ordered list of `(name, delay_s)` the crew picks among,
@@ -183,7 +183,9 @@ impl RoundFacts {
     }
 }
 
-/// One round as authored.
+/// The game's damage model: one round as authored. Optional construction blocks are required
+/// fields: authors choose `None` or `Some(..)` rather than omission. `deserialize_with` prevents
+/// serde's implicit missing-Option default as well as an explicit `serde(default)`.
 #[derive(Deserialize)]
 #[serde(rename = "Round", deny_unknown_fields)]
 struct RoundFile {
@@ -192,21 +194,21 @@ struct RoundFile {
     /// A key of the round-type table.
     round_type: Sourced<String>,
     core: Sourced<String>,
-    /// The round's own hit nose; absent, its type's.
-    #[serde(default)]
+    /// The round's own hit nose; explicit `None` selects its type's.
+    #[serde(deserialize_with = "Option::deserialize")]
     nose: Option<Sourced<NoseShape>>,
     mass: Sourced<f32>,
     caliber: Sourced<f32>,
     wound: Sourced<f32>,
     effects: effects::File,
-    /// The part of a sub-calibre round that meets the plate; absent, the whole round does.
-    #[serde(default)]
+    /// The part of a sub-calibre round that meets the plate; explicit `None` selects the whole body.
+    #[serde(deserialize_with = "Option::deserialize")]
     penetrator: Option<PenetratorFile>,
-    /// The round's burst core; absent, the round is inert.
-    #[serde(default)]
+    /// The round's burst core; explicit `None` declares an inert round.
+    #[serde(deserialize_with = "Option::deserialize")]
     burst: Option<BurstFile>,
     /// What sets the burst off; authored with the burst and only with it.
-    #[serde(default)]
+    #[serde(deserialize_with = "Option::deserialize")]
     fuze: Option<fuze::File>,
 }
 
@@ -563,7 +565,14 @@ impl RoundRegistry {
             }
             let file: RoundFile = ron::de::from_str(text).map_err(|err| RoundError::Parse {
                 file: format!("assets/rounds/{key}.round.ron"),
-                err: err.to_string(),
+                err: match &err.code {
+                    ron::error::Error::MissingStructField { field, .. }
+                        if ["nose", "penetrator", "burst", "fuze"].contains(field) =>
+                    {
+                        format!("{err}; author `{field}: None` or `{field}: Some(..)` explicitly")
+                    }
+                    _ => err.to_string(),
+                },
             })?;
             let round = resolved(file, (&drag, &types), substances).map_err(invalid)?;
             rounds.insert(key.to_owned(), round);
@@ -651,8 +660,13 @@ pub(crate) mod tests {
 
     /// The fixture round file, its fields `fields` authored, then `extra` verbatim.
     pub(crate) fn file(fields: &[(&str, &str)], extra: &str) -> String {
+        let absent = ["nose", "penetrator", "burst", "fuze"]
+            .into_iter()
+            .filter(|field| !extra.contains(&format!(", {field}:")))
+            .map(|field| format!(", {field}: None"))
+            .collect::<String>();
         format!(
-            "({}, effects: (impact: (Compact, Unknown(\"fixture impact\")), ember: (None, Unknown(\"fixture absence\")), smoke: (None, Unknown(\"fixture absence\")), body: (None, Unknown(\"fixture absence\")), streak: (None, Unknown(\"fixture absence\"))){extra})",
+            "({}{absent}, effects: (impact: (Compact, Unknown(\"fixture impact\")), ember: (None, Unknown(\"fixture absence\")), smoke: (None, Unknown(\"fixture absence\")), body: (None, Unknown(\"fixture absence\")), streak: (None, Unknown(\"fixture absence\"))){extra})",
             authored(fields)
         )
     }
@@ -716,6 +730,20 @@ pub(crate) mod tests {
             .get("Probe")
             .map_err(|err| err.to_string())?
             .fired_at(700.0, crate::guns::MuzzleEmission::fixture_cannon())
+    }
+
+    /// The game's damage model requires every round's optional construction fact to be authored.
+    /// `None` is an explicit selection, never a parser default; omitting any block refuses the file.
+    #[test]
+    fn optional_round_construction_blocks_require_explicit_presence_or_absence() {
+        let text = file(&FIXTURE, "");
+        assert!(load(&text).is_ok());
+        for field in ["nose", "penetrator", "burst", "fuze"] {
+            let missing = text.replace(&format!(", {field}: None"), "");
+            let error = load(&missing).unwrap_err().to_string();
+            assert!(error.contains("assets/rounds/Probe.round.ron"), "{error}");
+            assert!(error.contains(&format!("`{field}: None`")), "{error}");
+        }
     }
 
     /// Every shipped round loads, with a core that states its facts and a display name of its own

@@ -460,3 +460,18 @@ Direction verification: format and workspace/all-target clippy passed. MEASURED:
 resolver, march, fuzzer, pen-cam, field-cast, headless and citation tests passed; seven ignored.
 The existing field-cast pin stayed bit-identical. The endpoint-convention comment then received
 a fresh format, clippy and citation check (three passed); no behavior changed after the broader run.
+
+## Explicit round construction blocks
+
+Subject: the game's damage model, game state only. Every `RoundFile` now requires `nose`,
+`penetrator`, `burst` and `fuze` to be authored as `None` or `Some(..)`. Removing `serde(default)`
+alone would still let serde default an omitted `Option`; the explicit deserializer disables that
+implicit arm. Missing blocks refuse the named round file, name the field and tell the author to
+supply `None` or `Some(..)`. All shipped round files and the round/gun fixture builder now state
+their choices. `nose: None` explicitly selects the authored type nose, `penetrator: None` selects
+the whole body, and an inert round explicitly has no burst or fuze. No fired parameter changes.
+
+Explicit-block verification: format and workspace/all-target clippy passed. MEASURED: 259 round,
+gun, bake, pen-cam, field-cast, headless and citation tests passed; six ignored. Every omitted
+optional-block control refuses its named field and gives the explicit-authoring fix; the field-cast
+pin remains unchanged.
