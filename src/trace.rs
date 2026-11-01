@@ -39,28 +39,76 @@ use lightyear::prelude::{
     ReplicationCheckpointMap,
 };
 
-/// Shared JSONL sink. Values pass through `serde_json::Value` so non-finite floats serialize as
-/// `null`, preserving valid JSON. Writes are best-effort: diagnostics must not perturb simulation.
+/// A recorder's outside-input I/O failure, retaining the operation and output path.
+#[derive(Debug)]
+pub(crate) enum SinkError {
+    Create(PathBuf, std::io::Error),
+    Write(PathBuf, std::io::Error),
+    Flush(PathBuf, std::io::Error),
+}
+
+impl std::fmt::Display for SinkError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let (operation, path, error) = match self {
+            Self::Create(path, error) => ("create", path, error),
+            Self::Write(path, error) => ("write", path, error),
+            Self::Flush(path, error) => ("flush", path, error),
+        };
+        write!(
+            f,
+            "recorder: cannot {operation} {}: {error}",
+            path.display()
+        )
+    }
+}
+impl std::error::Error for SinkError {}
+
+/// Shared JSONL sink. Non-finite floats serialize as `null`, preserving valid JSON. An armed
+/// recorder must produce its stream: an I/O failure ends the run visibly, never a partial success.
 pub(crate) struct JsonlSink {
+    path: PathBuf,
     writer: BufWriter<File>,
     last_flush: Instant,
 }
 
 impl JsonlSink {
-    pub(crate) fn create(path: &Path) -> std::io::Result<Self> {
+    pub(crate) fn create(path: &Path) -> Result<Self, SinkError> {
         Ok(Self {
-            writer: BufWriter::new(File::create(path)?),
+            path: path.to_owned(),
+            writer: BufWriter::new(
+                File::create(path).map_err(|error| SinkError::Create(path.to_owned(), error))?,
+            ),
             last_flush: Instant::now(),
         })
     }
 
-    /// Append one row, best-effort. A passive observer never lets an I/O hiccup disturb the sim, so
-    /// write errors are dropped (the periodic flush + the parse check surface a broken file).
+    /// Append a row, refusing the run if its output can no longer be honoured.
     pub(crate) fn write(&mut self, row: &Value) {
-        let _ = writeln!(self.writer, "{row}");
+        writeln!(self.writer, "{row}")
+            .map_err(|error| SinkError::Write(self.path.clone(), error))
+            .unwrap_or_else(crate::refuse_start);
         if self.last_flush.elapsed() >= Duration::from_secs(1) {
-            let _ = self.writer.flush();
+            self.flush().unwrap_or_else(crate::refuse_start);
             self.last_flush = Instant::now();
+        }
+    }
+
+    fn flush(&mut self) -> Result<(), SinkError> {
+        self.writer
+            .flush()
+            .map_err(|error| SinkError::Flush(self.path.clone(), error))
+    }
+}
+
+impl Drop for JsonlSink {
+    fn drop(&mut self) {
+        if let Err(error) = self.flush() {
+            if std::thread::panicking() {
+                // The run is already failing; retain the I/O cause without masking its panic.
+                eprintln!("{error}");
+            } else {
+                crate::refuse_start::<()>(error);
+            }
         }
     }
 }
@@ -133,13 +181,7 @@ fn install(app: &mut App, role: &'static str) -> bool {
         return false;
     };
     let resolved = role_path(&path, role);
-    let sink = match JsonlSink::create(&resolved) {
-        Ok(sink) => sink,
-        Err(err) => {
-            error!("trace: cannot open {}: {err}", resolved.display());
-            return false;
-        }
-    };
+    let sink = JsonlSink::create(&resolved).unwrap_or_else(crate::refuse_start);
     info!("trace: recording {role} rows to {}", resolved.display());
     let sim_fields =
         crate::env_flag("SPIKE_TRACE_SIM_FIELDS", false).unwrap_or_else(crate::refuse_start);
@@ -582,4 +624,22 @@ fn next_local_tick(counter: &mut Local<u64>) -> u64 {
 struct NetFrameCtx<'w> {
     timeline: Option<Res<'w, LocalTimeline>>,
     checkpoints: Option<Res<'w, ReplicationCheckpointMap>>,
+}
+
+#[cfg(test)]
+mod sink_tests {
+    use super::*;
+
+    /// An armed recorder cannot silently become an unrecorded run. Its edge retains a typed
+    /// creation failure and its actual path, so every composition can refuse visibly.
+    #[test]
+    fn an_unwritable_sink_names_its_path_and_operation() {
+        let path = std::env::temp_dir();
+        let error = match JsonlSink::create(&path) {
+            Ok(_) => panic!("a directory cannot be a JSONL file"),
+            Err(error) => error,
+        };
+        assert!(matches!(error, SinkError::Create(_, _)));
+        assert!(error.to_string().contains(&path.display().to_string()));
+    }
 }

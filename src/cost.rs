@@ -104,13 +104,7 @@ fn install(app: &mut App, role: &'static str) -> bool {
         return false;
     };
     let resolved = role_path(&path, role);
-    let sink = match JsonlSink::create(&resolved) {
-        Ok(sink) => sink,
-        Err(err) => {
-            error!("cost: cannot open {}: {err}", resolved.display());
-            return false;
-        }
-    };
+    let sink = JsonlSink::create(&resolved).unwrap_or_else(crate::refuse_start);
     let warmup: u64 = crate::env_parse("SPIKE_COST_WARMUP")
         .unwrap_or_else(crate::refuse_start)
         .unwrap_or(384);

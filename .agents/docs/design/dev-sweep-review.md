@@ -56,3 +56,13 @@ The sandbox wall and its subtree belong to part 2 and are excluded from this lan
   A synthetic readback regression checks the saved count and error status without saving an image.
   MEASURED gates: formatting, workspace clippy, 9 capture tests, 4 window tests and 3 citation tests
   pass. No capture or still was taken.
+
+- **D-SINK fixed:** cost and frame-cost sink creation now refuses startup with status 2. New
+  same-pattern findings in `trace` and `shot_trace` are fixed too. Shared `SinkError` retains
+  create/write/flush operations, path and OS cause; armed streams no longer drop write/flush
+  failures, including the final buffered flush. A failure during an already-failing unwind is
+  reported without masking that panic.
+- **D-FRAME-P3 fixed:** primary-window readers require the windowed root’s singleton. Pending
+  offscreen target information is named and bounded by an ASSUMED 30-wall-second readiness
+  allowance; a target that never resolves fails instead of recording forever without a surface.
+  MEASURED gates: formatting, workspace clippy and 18 focused recorder/citation tests passed.

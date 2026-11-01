@@ -225,13 +225,7 @@ pub fn client_plugin(app: &mut App) {
         return;
     };
     let resolved = role_path(&path, "client");
-    let sink = match JsonlSink::create(&resolved) {
-        Ok(sink) => sink,
-        Err(err) => {
-            error!("frame_cost: cannot open {}: {err}", resolved.display());
-            return;
-        }
-    };
+    let sink = JsonlSink::create(&resolved).unwrap_or_else(crate::refuse_start);
     info!("frame_cost: recording rows to {}", resolved.display());
     app.insert_resource(FrameCost {
         sink,
@@ -320,13 +314,12 @@ fn hold_offscreen_target(
 /// Move the primary window onto the primary display and pin its logical size, once, at startup —
 /// the two anti-fiction moves of the module doc (presenting monitor, surface size).
 ///
-/// Best-effort by design and silent about failure: whether either landed is not this system's claim
-/// to make, it is [`record_monitor`]'s and [`record_surface`]'s, and an operator who drags or
-/// resizes the window afterwards is caught by the same rows rather than fought by a re-parking loop.
+/// The root must hold its one primary window. The OS placement is reported by
+/// [`record_monitor`] and [`record_surface`]; operator moves are recorded rather than fought.
 fn park_and_pin(mut windows: Query<&mut Window, With<PrimaryWindow>>) {
-    let Ok(mut window) = windows.single_mut() else {
-        return;
-    };
+    let mut window = windows.single_mut().expect(
+        "the frame-cost recorder is mounted on a windowed root with exactly one primary window",
+    );
     window.position = WindowPosition::At(PARK_AT);
     window.resolution.set(SURFACE_LOGICAL.x, SURFACE_LOGICAL.y);
 }
@@ -355,9 +348,9 @@ fn hold_surface_pin(
         return;
     }
     *next_poll_s = t + MONITOR_POLL_S;
-    let Ok(mut window) = windows.single_mut() else {
-        return;
-    };
+    let mut window = windows.single_mut().expect(
+        "the frame-cost recorder is mounted on a windowed root with exactly one primary window",
+    );
     let scale = window.resolution.scale_factor();
     if *pinned_at_scale == Some(scale) {
         return;
@@ -410,9 +403,9 @@ fn raise_when_occluded(
         return;
     }
     *next_poll_s = t + MONITOR_POLL_S;
-    let Ok(mut window) = windows.single_mut() else {
-        return;
-    };
+    let mut window = windows.single_mut().expect(
+        "the frame-cost recorder is mounted on a windowed root with exactly one primary window",
+    );
     // bevy turns this into `focus_window()` only on the false -> true EDGE (vendored
     // bevy_winit-0.19.0/src/system.rs, `changed_windows`), which is exactly the shape wanted: while
     // another app holds focus the field reads false, so each poll is one genuine request.
@@ -433,23 +426,32 @@ fn raise_when_occluded(
 ///
 /// In offscreen mode there is no presented surface, so the row is the size of the 3D camera's target
 /// instead ([`offscreen_surface`]), marked `offscreen: true`.
+#[derive(Default)]
+struct SurfaceRecord {
+    last: Option<UVec2>,
+    pending_since: Option<Instant>,
+    next_poll_s: f64,
+}
+
 fn record_surface(
     mut cost: ResMut<FrameCost>,
     time: Res<Time<Real>>,
-    mut last: Local<Option<UVec2>>,
-    mut next_poll_s: Local<f64>,
+    mut state: Local<SurfaceRecord>,
     windows: Query<&Window, With<PrimaryWindow>>,
     offscreen: Option<Res<Offscreen>>,
     cameras: Query<(&Camera, &RenderTarget), With<Camera3d>>,
 ) {
     let t = time.elapsed_secs_f64();
-    if t < *next_poll_s {
+    if t < state.next_poll_s {
         return;
     }
-    *next_poll_s = t + MONITOR_POLL_S;
+    state.next_poll_s = t + MONITOR_POLL_S;
     let resolved = match &offscreen {
         Some(offscreen) => offscreen_surface(offscreen, &cameras),
-        None => windows.single().ok().map(|window| {
+        None => {
+            let window = windows
+                .single()
+                .expect("the frame-cost recorder's windowed root has exactly one primary window");
             let size = window.resolution.physical_size();
             let message = format!(
                 "frame_cost: surface {}x{} physical ({}x{} logical at scale {})",
@@ -459,18 +461,26 @@ fn record_surface(
                 window.resolution.height(),
                 window.resolution.scale_factor(),
             );
-            (size, message)
-        }),
+            Some((size, message))
+        }
     };
     let Some((size, message)) = resolved else {
+        // The image and camera target info follow the retarget asynchronously. ASSUMED startup
+        // allowance: 30 wall seconds; a recorder with no eventual surface cannot produce evidence.
+        let since = state.pending_since.get_or_insert_with(Instant::now);
+        assert!(
+            since.elapsed() < std::time::Duration::from_secs(30),
+            "frame_cost: the offscreen image and full-frame Camera3d target never resolved; fix the root's camera/target setup"
+        );
         return;
     };
-    if *last == Some(size) {
+    state.pending_since = None;
+    if state.last == Some(size) {
         return;
     }
     // A resize AFTER the first observation is the operator-error case (a dragged edge, a monitor
     // move that re-scaled the surface) and is loud; the first observation is just provenance.
-    if last.is_some() {
+    if state.last.is_some() {
         warn!("{message} — CHANGED at t={t:.3}s");
     } else {
         info!("{message} at t={t:.3}s");
@@ -484,7 +494,7 @@ fn record_surface(
         row["offscreen"] = json!(true);
     }
     cost.sink.write(&row);
-    *last = Some(size);
+    state.last = Some(size);
 }
 
 /// Offscreen mode's surface: the physical target size of the lowest-order full-frame `Camera3d`
@@ -550,9 +560,9 @@ fn record_monitor(
         return;
     }
     *next_poll_s = t + MONITOR_POLL_S;
-    let Ok(entity) = windows.single() else {
-        return;
-    };
+    let entity = windows.single().expect(
+        "the frame-cost recorder is mounted on a windowed root with exactly one primary window",
+    );
     let resolved = bevy::winit::WINIT_WINDOWS.with_borrow(|winit_windows| {
         let winit_window = winit_windows.get_window(entity)?;
         let current = winit_window.current_monitor()?;
