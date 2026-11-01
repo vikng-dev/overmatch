@@ -564,7 +564,9 @@ pub fn rebuild(
             }
             CornerKind::Slice => {
                 let layer = Layer::of(mesh.tier);
-                let (normal, point) = stage.plane.unwrap_or((Vec3::Z, Vec3::ZERO));
+                let (normal, point) = stage
+                    .plane
+                    .expect("a slice frame set its plane from its plan above");
                 let params = SliceParams {
                     plane: normal.extend(normal.dot(point)),
                     cut_color: LinearRgba::from(CUT).to_vec4(),

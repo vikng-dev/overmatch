@@ -745,10 +745,12 @@ fn owned_losses(dose: &ShotDose, owners: &Query<&VolumeOf>, shooter: Option<Enti
 fn reflect(dir: Dir3, normal: Dir3) -> Dir3 {
     let d = Vec3::from(dir);
     let n = Vec3::from(normal);
-    Dir3::new(d - 2.0 * d.dot(n) * n).unwrap_or(dir)
+    Dir3::new(d - 2.0 * d.dot(n) * n)
+        .expect("a unit direction mirrored about a unit normal keeps unit length")
 }
 
-/// Rotate `dir` toward `target` by at most `angle` radians.
+/// Rotate `dir` toward `target` by at most `angle` radians. Exactly opposed directions name no
+/// plane to turn in, so `dir` stands, as it does for no angle or no gap.
 fn bend_toward(dir: Dir3, target: Dir3, angle: f32) -> Dir3 {
     let d = Vec3::from(dir);
     let t = Vec3::from(target);
@@ -757,9 +759,10 @@ fn bend_toward(dir: Dir3, target: Dir3, angle: f32) -> Dir3 {
         return dir;
     }
     let Ok(axis) = Dir3::new(d.cross(t)) else {
-        return dir;
+        return dir; // Opposed: no unique turning plane.
     };
-    Dir3::new(Quat::from_axis_angle(Vec3::from(axis), angle.min(between)) * d).unwrap_or(dir)
+    Dir3::new(Quat::from_axis_angle(Vec3::from(axis), angle.min(between)) * d)
+        .expect("a unit direction turned by a unit quaternion keeps unit length")
 }
 
 /// Ray-cast predicate that excludes the firing tank's ballistic volumes for the whole flight.
