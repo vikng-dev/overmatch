@@ -151,6 +151,11 @@ fn in_match() -> (App, App) {
         .trigger(Connect { entity: link });
     for _ in 0..CONNECT_STEPS {
         step(Some(&mut server), &mut client);
+        // The match shows once the client's own tank has replicated. This server spawns none, so
+        // the fixture states that fact, as it marks the attempt initiated.
+        if client.world().resource::<ConnectRetry>().connected_once {
+            client.world_mut().resource_mut::<ConnectRetry>().tank_seen = true;
+        }
         if flow(&client) == Flow::InMatch && server_clients(&mut server) == 1 {
             return (server, client);
         }

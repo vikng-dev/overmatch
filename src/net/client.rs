@@ -641,7 +641,8 @@ pub fn run() {
             // declares an overlay from it.
             .add_systems(
                 Update,
-                derive_flow
+                (latch_tank_seen, derive_flow)
+                    .chain()
                     .after(drive_connection)
                     .before(crate::overlay::OverlaySet::Declare),
             );
@@ -780,6 +781,9 @@ struct ConnectRetry {
     exhausted: bool,
     /// An authenticated refusal is terminal and supplies the visible cause.
     refusal: Option<JoinRefusal>,
+    /// This link's match has replicated the client's own tank at least once
+    /// ([`latch_tank_seen`]): the loading screen gives way to the match.
+    tank_seen: bool,
 }
 
 /// Seconds of real time a once-connected matchmaking link keeps reconnecting before the client
@@ -970,8 +974,20 @@ pub(super) fn refusal_probe(app: &mut App) -> (Option<JoinRefusal>, String) {
     (refusal, label)
 }
 
+/// Latch [`ConnectRetry::tank_seen`] once a connected link's own tank has replicated (its input
+/// slot is claimed).
+fn latch_tank_seen(
+    own: Query<(), (With<GameControlled>, With<NetTank>)>,
+    mut retry: ResMut<ConnectRetry>,
+) {
+    if retry.connected_once && !retry.tank_seen && !own.is_empty() {
+        retry.tank_seen = true;
+    }
+}
+
 /// The screen this client is on, from its link (`flow::flow_of`): no link is the Join menu, a link
-/// that has never connected is the connect screen, and one that has is the match.
+/// whose match has not yet shown this client's tank is the loading screen, and one that has is the
+/// match.
 fn derive_flow(
     links: Query<(), With<NetcodeClient>>,
     retry: Res<ConnectRetry>,
@@ -984,6 +1000,7 @@ fn derive_flow(
             link: !links.is_empty(),
             connected_once: retry.connected_once,
             playing: *state.get() != AppState::Loading,
+            tank_seen: retry.tank_seen,
         },
     );
 }
@@ -1184,16 +1201,28 @@ fn spawn_connect_status(mut commands: Commands, fonts: Res<UiFonts>) {
     );
 }
 
-/// Spawn the joining screen: the match world is not yet anyone's view, so its scrim is near opaque.
-fn spawn_joining_screen(mut commands: Commands, fonts: Res<UiFonts>) {
+/// Spawn the loading screen: the match world is not yet anyone's view, so its scrim is opaque.
+fn spawn_joining_screen(mut commands: Commands, fonts: Res<UiFonts>, retry: Res<ConnectRetry>) {
     crate::ui_font::spawn_overlay(
         &mut commands,
         &fonts.hud,
         crate::flow::FlowScoped(crate::flow::Flow::Joining),
-        joining_label(0),
+        screen_label(&retry),
         JoiningText,
-        Some(Color::srgba(0.01, 0.02, 0.03, 0.94)),
+        Some(Color::srgb(0.01, 0.02, 0.03)),
     );
+}
+
+/// The loading screen's label: a refusal's cause, the asset load and the wait for this client's
+/// tank, a dropped link, or the connect attempts.
+fn screen_label(retry: &ConnectRetry) -> String {
+    match retry.refusal {
+        Some(reason) => reason.message().to_owned(),
+        None if !retry.initiated => "LOADING…".to_owned(),
+        None if retry.connected_once && retry.down_since.is_some() => "RECONNECTING…".to_owned(),
+        None if retry.connected_once => "LOADING…".to_owned(),
+        None => joining_label(retry.attempts),
+    }
 }
 
 /// The joining screen's label after `attempts` failed connects. Past
@@ -1212,12 +1241,9 @@ fn joining_label(attempts: u32) -> String {
     }
 }
 
-/// Rewrite the joining label when the attempt count it renders changes.
+/// Rewrite the loading screen's label when the state it renders changes.
 fn update_joining_screen(retry: Res<ConnectRetry>, mut text: Query<&mut Text, With<JoiningText>>) {
-    let label = retry.refusal.map_or_else(
-        || joining_label(retry.attempts),
-        |reason| reason.message().to_owned(),
-    );
+    let label = screen_label(&retry);
     for mut text in &mut text {
         if text.0 != label {
             text.0.clone_from(&label);

@@ -29,7 +29,8 @@ pub(crate) enum Flow {
     Boot,
     /// Matchmaking mode with no link: the Join menu.
     Lobby,
-    /// A link exists that has never connected: the connect screen.
+    /// A link exists whose match has nothing to show yet: the loading screen, which covers the
+    /// view through the asset load and the connect until this client's tank has replicated.
     Joining,
     /// The match world is on screen, a dropped link (RECONNECTING…) included.
     InMatch,
@@ -40,12 +41,15 @@ pub(crate) enum Flow {
 pub(crate) enum FlowFacts {
     /// The offline root: `playing` is `AppState` past `Loading`.
     Offline { playing: bool },
-    /// The net client: whether a link entity exists, whether it has connected this session, and
-    /// whether `AppState` is past `Loading`.
+    /// The net client: whether a link entity exists, whether it has connected this session,
+    /// whether `AppState` is past `Loading`, and whether this link's match has replicated the
+    /// client's own tank once. A tank that later leaves (results, a respawn) keeps the match on
+    /// screen.
     Net {
         link: bool,
         connected_once: bool,
         playing: bool,
+        tank_seen: bool,
     },
 }
 
@@ -58,6 +62,7 @@ pub(crate) fn flow_of(facts: FlowFacts) -> Flow {
         FlowFacts::Net {
             connected_once: true,
             playing: true,
+            tank_seen: true,
             ..
         } => Flow::InMatch,
         FlowFacts::Net { .. } => Flow::Joining,
@@ -175,14 +180,37 @@ mod tests {
             link: true,
             connected_once: true,
             playing: true,
+            tank_seen: true,
         };
         assert_eq!(flow_of(reconnecting), Flow::InMatch);
         let left = FlowFacts::Net {
             link: false,
             connected_once: true,
             playing: true,
+            tank_seen: true,
         };
         assert_eq!(flow_of(left), Flow::Lobby);
+    }
+
+    /// The loading screen covers the empty view until the client has its tank: a connected link
+    /// whose own tank has not replicated is still loading. A match shown before it would show an
+    /// empty world; one hidden after it would hide the fill-up the player waits in.
+    #[test]
+    fn a_connected_client_loads_until_its_tank_has_replicated() {
+        let loading = FlowFacts::Net {
+            link: true,
+            connected_once: true,
+            playing: true,
+            tank_seen: false,
+        };
+        assert_eq!(flow_of(loading), Flow::Joining);
+        let shown = FlowFacts::Net {
+            link: true,
+            connected_once: true,
+            playing: true,
+            tank_seen: true,
+        };
+        assert_eq!(flow_of(shown), Flow::InMatch);
     }
 
     /// A scoped root despawns, children and all, when its screen exits — and only then.
