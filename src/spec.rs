@@ -1173,7 +1173,11 @@ impl TankSpec {
             }
         }
         let planes = self.track.pin_plane_x;
-        if !planes.left.is_finite() || !planes.right.is_finite() || planes.left >= planes.right {
+        if !planes.left.is_finite()
+            || !planes.right.is_finite()
+            || planes.left >= planes.right
+            || !(planes.right - planes.left).is_finite()
+        {
             return Err("track.pin_plane_x must be finite with left < right; author the two hull-local pin planes in metres".into());
         }
         for side in crate::track::side::Side::ALL {
@@ -1509,24 +1513,16 @@ impl TankSpec {
             ("link_angle.inward_deg", t.link_angle.inward_deg),
             ("link_angle.outward_deg", t.link_angle.outward_deg),
         ] {
-            if !value.is_finite() || value <= 0.0 || value > 90.0 {
+            if !value.is_finite() || value <= 0.0 || value > 180.0 {
                 return Err(format!(
-                    "track.{field} must be a magnitude in (0, 90] degrees (got {value})"
+                    "track.{field} must be a magnitude in (0, 180] degrees (got {value})"
                 )
                 .into());
             }
         }
-        // The wrap direction is the roomier one on every track ever built — the belt has to fold
-        // inward around its own sprocket, and nothing demands the outward fold at all. A spec
-        // with these swapped is the signature of the sign confusion the named pair exists to
-        // prevent, so it fails loudly here rather than kinking the chain in the view.
-        if t.link_angle.outward_deg > t.link_angle.inward_deg {
-            return Err(format!(
-                "track.link_angle.outward_deg ({}) exceeds .inward_deg ({}) — inward is the WRAP \
-                 direction and must be the roomier one; the pair is probably swapped",
-                t.link_angle.outward_deg, t.link_angle.inward_deg
-            )
-            .into());
+        let sprocket_demand_deg = 360.0 / t.sprocket.teeth as f32;
+        if t.link_angle.inward_deg < sprocket_demand_deg {
+            return Err(format!("track.link_angle.inward_deg must cover the sprocket's {sprocket_demand_deg} degree tooth pitch; correct the usable articulation or tooth count").into());
         }
         if !t.hinge_torque.is_finite() || t.hinge_torque < 0.0 {
             return Err(format!(

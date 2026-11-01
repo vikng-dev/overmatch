@@ -55,7 +55,7 @@ pub(super) fn footprint_sphere(geom: &RigGeom, envelope: &EnvelopeLaw) -> f32 {
     let mut column = 0.0_f32;
     let mut travel = 0.0_f32;
     for side in Side::ALL {
-        let x = side.plane_x(geom.plane_x);
+        let x = geom.side_plane_x(side);
         for p in belt_loop(geom.rest.get(side)) {
             pin_radius = pin_radius.max(Vec3::new(x, p.y, p.x).length());
         }

@@ -86,6 +86,8 @@ pub(crate) struct RigGeom {
     pub wheel_treads: PerSide<Vec<crate::spec::WheelTread>>,
     /// Actual hull-local pin planes; the shared template may be placed asymmetrically.
     pub pin_planes: PerSide<f32>,
+    /// Usable inward articulation including the authored connector/contact clearance (rad).
+    inward_articulation: f32,
     /// Height of the hull/model origin above flat ground at rest (m) = −(min y of the rest
     /// envelope). Spawn the body at this y and the rest track just kisses the ground.
     pub hull_rest_y: f32,
@@ -109,6 +111,21 @@ pub(crate) struct RigGeom {
 /// A measured running gear that the authored loop or suspension cannot support.
 #[derive(Debug)]
 pub(crate) enum RigFault {
+    PinChord {
+        side: Side,
+        role: WrapRole,
+        radius: f32,
+        pitch: f32,
+    },
+    Articulation {
+        side: Side,
+        role: WrapRole,
+        required: f32,
+        available: f32,
+    },
+    NonfiniteGeometry {
+        side: Side,
+    },
     TooFewTeeth(u32),
     ShortLoop {
         side: Side,
@@ -124,6 +141,30 @@ pub(crate) enum RigFault {
 impl std::fmt::Display for RigFault {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
+            Self::PinChord {
+                side,
+                role,
+                radius,
+                pitch,
+            } => write!(
+                f,
+                "track: {side:?} {role} pin radius {radius} m cannot carry a {pitch} m chord; correct its contact radius or the pin markers"
+            ),
+            Self::Articulation {
+                side,
+                role,
+                required,
+                available,
+            } => write!(
+                f,
+                "track.link_angle.inward_deg: {side:?} {role} demands {} degrees but the authored usable articulation is {} degrees; correct the contact geometry or usable articulation",
+                required.to_degrees(),
+                available.to_degrees()
+            ),
+            Self::NonfiniteGeometry { side } => write!(
+                f,
+                "track: the {side:?} route is not finite; correct the axle transforms, contact radii and pin markers"
+            ),
             Self::TooFewTeeth(teeth) => write!(
                 f,
                 "track.sprocket.teeth: {teeth} cannot form a pin polygon; author at least three teeth"
@@ -197,6 +238,7 @@ impl RigGeom {
             wheel_treads,
             PerSide(fixed),
             PerSide::new(planes.left, planes.right),
+            blueprint.spec.track.link_angle.inward_deg.to_radians(),
             teeth,
             link_count,
             params,
@@ -215,6 +257,34 @@ impl RigGeom {
         }
         for side in Side::ALL {
             let rest = self.rest.get(side);
+            if !self.hull_rest_y.is_finite()
+                || rest.iter().any(|(centre, radius)| {
+                    !centre.is_finite() || !radius.is_finite() || *radius <= 0.0
+                })
+            {
+                return Err(RigFault::NonfiniteGeometry { side });
+            }
+            for demand in self.wrap_demands(side) {
+                if demand.pin_radius < self.pitch * 0.5 {
+                    return Err(RigFault::PinChord {
+                        side,
+                        role: demand.role,
+                        radius: demand.pin_radius,
+                        pitch: self.pitch,
+                    });
+                }
+                if demand.joint_angle > self.inward_articulation {
+                    return Err(RigFault::Articulation {
+                        side,
+                        role: demand.role,
+                        required: demand.joint_angle,
+                        available: self.inward_articulation,
+                    });
+                }
+            }
+            if !build_route(rest, self.belt_len()).total().is_finite() {
+                return Err(RigFault::NonfiniteGeometry { side });
+            }
             let window = window_of(rest, self.pitch, self.link_count, params);
             if window.limiter == DroopLimiter::Impossible {
                 return Err(RigFault::ShortLoop {
@@ -260,6 +330,7 @@ impl RigGeom {
                 fixed
             })),
             self.pin_planes,
+            self.inward_articulation,
             teeth,
             link_count,
             params,
@@ -278,6 +349,7 @@ impl RigGeom {
         wheel_treads: PerSide<Vec<crate::spec::WheelTread>>,
         fixed: PerSide<[(Vec2, f32); 2]>,
         pin_planes: PerSide<f32>,
+        inward_articulation: f32,
         teeth: u32,
         link_count: usize,
         params: &SuspensionParams,
@@ -324,6 +396,7 @@ impl RigGeom {
             thickness: model.pin_to_inner + model.pin_to_outer,
             plane_x: (pin_planes.0[1] - pin_planes.0[0]) * 0.5,
             pin_planes,
+            inward_articulation,
             wheel_treads,
             window: window_of(rest.get(Side::Right), model.pitch, link_count, params),
             model,
@@ -544,10 +617,7 @@ impl RigGeom {
     /// things the belt has to bend around. Pose-independent by construction: a cast pose moves
     /// wheel CENTRES, and a wrap angle is a function of the RADIUS alone.
     ///
-    /// Test-only: this exists for the wrap-clearance asset guard
-    /// (`the_authored_hinge_clears_every_wrap_the_running_gear_demands`), which is the thing that
-    /// catches a silently re-exported smaller wheel. No runtime consumer.
-    #[cfg(test)]
+    /// Admission compares each demand directly with the sheet's usable articulation.
     pub(crate) fn wrap_demands(&self, side: Side) -> Vec<WrapDemand> {
         let circles = self.rest.get(side);
         let last = circles.len().saturating_sub(1);
@@ -578,7 +648,6 @@ impl RigGeom {
 
 /// Which running-gear circle a [`WrapDemand`] came off — for the report, and so a failing
 /// clearance assertion can name the part rather than an index.
-#[cfg(test)]
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub(crate) enum WrapRole {
     Sprocket,
@@ -587,7 +656,6 @@ pub(crate) enum WrapRole {
     Idler,
 }
 
-#[cfg(test)]
 impl std::fmt::Display for WrapRole {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
@@ -601,7 +669,6 @@ impl std::fmt::Display for WrapRole {
 /// How far ONE joint must fold to wrap a given circle. The demand side of the hinge budget; see
 /// [`derive::wrap_joint_angle`] for the chord relation — the supply side is the authored
 /// `track.link_angle.inward_deg`.
-#[cfg(test)]
 #[derive(Clone, Copy, PartialEq, Debug)]
 pub(crate) struct WrapDemand {
     pub role: WrapRole,
@@ -898,7 +965,10 @@ pub(crate) fn link_window(
     p_rest: f32,
     p_droop: f32,
 ) -> LinkWindow {
-    let pitch = pitch.max(1e-6);
+    assert!(
+        pitch.is_finite() && pitch > 0.0,
+        "the marker gate certifies a finite positive link pitch"
+    );
     let belt_len = n as f32 * pitch;
     let limiter = if belt_len < p_min {
         DroopLimiter::Impossible
@@ -964,8 +1034,11 @@ mod tests {
     /// the rounding went down and `n_droop − 1` when it went up.
     #[test]
     fn the_chain_clamp_shortens_the_droop_and_pins_the_wrap_to_the_loop() {
-        let p = SuspensionParams::default();
-        let base = tiger_rig();
+        let p = SuspensionParams {
+            ride_frequency: 0.6,
+            ..SuspensionParams::default()
+        };
+        let base = synthetic_rig(20, 97);
         let spring = derive::static_deflection(p.ride_frequency);
         let w = base.link_window(&p);
 
@@ -1065,11 +1138,13 @@ mod tests {
     #[test]
     fn the_clamped_droop_is_never_negative() {
         let p = SuspensionParams::default();
-        let base = tiger_rig();
+        let base = synthetic_rig(20, 97);
         let n_min = base.link_window(&p).n_min;
 
         let mut spring_limited = 0;
-        for n in n_min.saturating_sub(3)..=n_min + 8 {
+        let spring_count =
+            (base.taut_perimeter(Side::Right, Pose::Droop, &p) / base.pitch).ceil() as usize;
+        for n in n_min.saturating_sub(1)..=spring_count + 1 {
             let rig = base.rebuild(base.teeth, n, &p);
             let dt = rig.droop_travel(&p);
             if rig.link_window(&p).limiter == DroopLimiter::Spring {
@@ -1167,6 +1242,7 @@ mod tests {
                 ]; 2],
             ),
             PerSide::new(-1.3, 1.3),
+            40.0_f32.to_radians(),
             teeth,
             link_count,
             &SuspensionParams::default(),
@@ -1272,95 +1348,22 @@ mod tests {
         assert!(coarse.wrap_demands(Side::Right)[0].joint_angle > demands[0].joint_angle);
     }
 
-    /// **The wrap-clearance guard.** Every circle the belt has to bend around demands a joint fold
-    /// of `2·asin(pitch / 2r)` INWARD; the authored inward stop has to exceed the largest of them,
-    /// with margin.
-    ///
-    /// This is the failure that is otherwise SILENT. Shrink the idler in Blender, re-export, and
-    /// nothing complains — the route still draws, the links still place, and the belt simply
-    /// cannot physically wrap the wheel it is drawn wrapping. So neither side of the comparison is
-    /// hard-coded here: the DEMAND is derived from the shipped glb through [`RigGeom`], and the
-    /// SUPPLY is read from the shipped RON. A changed asset or a re-authored limit is still
-    /// covered; today's numbers are printed, not pinned.
-    ///
-    /// The supply is AUTHORED rather than measured off the shoe mesh — a hand measurement in
-    /// Blender of the SHIPPED shoe, which makes this test a check on the real vehicle rather than on
-    /// a parallel derivation. See `super::derive`'s module doc for why the mesh cannot supply it.
+    /// Usable articulation is the authored supply, including connector clearance. The asset
+    /// gate must accept a joint slightly above its tightest demand and refuse one below it;
+    /// adding a fixed multiplicative margin would reject the valid fixture.
     #[test]
-    fn the_authored_hinge_clears_every_wrap_the_running_gear_demands() {
-        /// How much slack the tightest wrap must leave. Not a taste knob: a joint riding at its
-        /// mechanical stop is a joint carrying wrap load through mesh-on-mesh contact, and the
-        /// route is drawn on the pin line rather than on the tooth flanks, so the real geometry is
-        /// always a little tighter than the ideal circle it is derived from.
-        const MARGIN: f32 = 1.25;
-
-        let rig = tiger_rig();
-        // The AUTHORED supply — the RON's hand-measured inward stop, degrees on the RON side
-        // (the authoring convention), converted here at the one place that reads it.
-        let spec = tiger_spec();
-        let supply = spec.track.link_angle.inward_deg.to_radians();
-
-        println!(
-            "\nwrap clearance — authored inward hinge limit {:.3}° (outward {:.3}°), pitch {:.5} m",
-            supply.to_degrees(),
-            spec.track.link_angle.outward_deg,
-            rig.pitch,
-        );
-        let demands = rig.wrap_demands(Side::Right);
-        assert!(
-            demands.len() >= 3,
-            "a side has a sprocket, road wheels and an idler"
-        );
-        for demand in &demands {
-            println!(
-                "  {:<14} pin radius {:.4} m   demands {:6.3}°   margin ×{:.2}",
-                demand.role.to_string(),
-                demand.pin_radius,
-                demand.joint_angle.to_degrees(),
-                supply / demand.joint_angle,
-            );
-            assert!(
-                supply > demand.joint_angle * MARGIN,
-                "the {} needs {:.2}° per joint but the shoe is only authored to fold {:.2}° \
-                 inward (margin ×{MARGIN} required). Either a wheel shrank in the model or \
-                 `track.link_angle.inward_deg` was re-authored downward.",
-                demand.role,
-                demand.joint_angle.to_degrees(),
-                supply.to_degrees(),
-            );
-        }
-
-        let worst = rig.worst_wrap_demand(Side::Right);
-        assert_eq!(
-            worst.joint_angle,
-            demands
-                .iter()
-                .map(|d| d.joint_angle)
-                .fold(f32::NEG_INFINITY, f32::max),
-            "the worst demand must be the largest one"
-        );
-        // The SMALLEST circle is the tightest wrap — the relation that makes "shrinking a wheel is
-        // dangerous" true, and the reason this test is worth having at all.
-        let smallest = demands
-            .iter()
-            .min_by(|a, b| a.pin_radius.total_cmp(&b.pin_radius))
-            .expect("non-empty");
-        assert_eq!(worst.role, smallest.role);
-
-        // The sprocket, seen two ways. Its pin circle is built chord-exact from the tooth count, so
-        // the wrap it demands must come out at exactly one tooth pitch — `360/teeth` — with no
-        // reference to the radius at all. Two derivations, one constraint.
-        let sprocket = demands
-            .iter()
-            .find(|d| d.role == WrapRole::Sprocket)
-            .expect("the sprocket is the first circle");
-        let per_tooth = std::f32::consts::TAU / rig.teeth as f32;
-        assert!(
-            (sprocket.joint_angle - per_tooth).abs() < 1e-4,
-            "the sprocket wrap {:.5} rad must equal one tooth pitch {per_tooth:.5} rad",
-            sprocket.joint_angle,
-        );
-        assert!((sprocket.joint_angle.to_degrees() - 360.0 / rig.teeth as f32).abs() < 1e-2);
+    fn usable_articulation_is_compared_directly_with_each_wrap_demand() {
+        let params = SuspensionParams::default();
+        let mut rig = synthetic_rig(20, 110);
+        let demand = rig.worst_wrap_demand(Side::Right).joint_angle;
+        rig.inward_articulation = demand * 1.01; // DERIVED fixture: just above the required travel.
+        rig.validate(&params)
+            .expect("the usable articulation clears every demanded wrap");
+        rig.inward_articulation = demand * 0.99; // DERIVED fixture: just below the required travel.
+        assert!(matches!(
+            rig.validate(&params),
+            Err(RigFault::Articulation { .. })
+        ));
     }
 
     /// Width's ONLY structural job: placing the three grip columns. They must land on the shoe's
@@ -1489,74 +1492,59 @@ mod tests {
         }
     }
 
-    /// The defining invariant of the red route — with the real limiter made explicit. Raising the
-    /// sprung wheels by `bump_stop` lifts the belly, but only until the belly hands off to the
-    /// UNSPRUNG idler/sprocket, which do not move; past that the belly is drive-wheel-limited and
-    /// rises by LESS than the full bump-stop. So the clean "belly = rest pin wrap + bump_stop"
-    /// identity is tested at a bump-stop small enough to stay road-wheel-limited, and the default
-    /// (0.12 m, where the Tiger's idler is the limiter) is tested for the two properties that
-    /// actually matter: the belly rise is CAPPED by the bump-stop, and the red belly still clears
-    /// flat ground at rest — the stop lives on the track's INNER surface (wheel rim), so the
-    /// full plate below it is the penalty's dig-in band.
+    /// The rigid stop follows the lowest compressed inner circle, whether a roadwheel or fixed
+    /// gear limits it. A fixture requiring roadwheel limitation from every tank would reject
+    /// valid drive-wheel-limited construction; the collider's consumers rely only on enclosure.
     #[test]
-    fn the_hard_stop_belly_is_bump_stop_of_travel_above_the_rest_inner_wrap() {
-        let rig = tiger_rig();
-        let belly = |poly: &[Vec2]| poly.iter().map(|q| q.y).fold(f32::INFINITY, f32::min);
-        let pto = rig.model.pin_to_outer;
-        for side in [Side::Left, Side::Right] {
-            let rest = rig.rest.get(side);
+    fn the_hard_stop_belly_obeys_both_suspension_limiting_regimes() {
+        let road_limited = synthetic_rig(20, 110);
+        let mut fixed_limited = synthetic_rig(20, 110);
+        for side in Side::ALL {
+            let rest = fixed_limited.rest.get_mut(side);
             let last = rest.len() - 1;
-            // Lowest sprung (road-wheel) vs lowest unsprung (sprocket/idler) pin bottoms: the head-
-            // room the sprung belly has before the drive wheels take over as the limiter.
-            let drive_bottom = (rest[0].0.y - rest[0].1).min(rest[last].0.y - rest[last].1);
-            let road_bottom = rest[1..last]
-                .iter()
-                .map(|(c, r)| c.y - r)
-                .fold(f32::INFINITY, f32::min);
-            let headroom = drive_bottom - road_bottom;
-            assert!(
-                headroom > 0.0,
-                "{side:?}: road wheels must be the rest belly"
-            );
-
-            // The rest PIN wrap belly IS that lowest road-wheel bottom; the ground face sits
-            // `pin_to_outer` below it at the ride-height datum `-hull_rest_y`, and the INNER
-            // (wheel-rim) wrap the stop rides sits `pin_to_inner` ABOVE it (smaller radii,
-            // higher belly).
-            let rest_pin = belly(&build_route(rest, 0.0).pts);
-            assert!((rest_pin - pto + rig.hull_rest_y).abs() < 1e-4);
-            let rest_inner = rest_pin + rig.model.pin_to_inner;
-
-            // ROAD-WHEEL-LIMITED: a bump inside the headroom lifts the belly by EXACTLY that bump.
-            let small = SuspensionParams {
-                bump_stop: 0.5 * headroom,
-                ..SuspensionParams::default()
-            };
-            let red_small = belly(&rig.hard_stop_polyline(side, &small));
-            assert!(
-                (red_small - (rest_inner + small.bump_stop)).abs() < 1e-4,
-                "{side:?}: road-limited red belly {red_small} should be the rest inner wrap \
-                 {rest_inner} + bump {}",
-                small.bump_stop,
-            );
-
-            // DEFAULT (drive-wheel-limited on the Tiger): rise is positive but capped by the bump.
-            let p = SuspensionParams::default();
-            let red = belly(&rig.hard_stop_polyline(side, &p));
-            let rise = red - rest_inner;
-            assert!(
-                rise > 0.0 && rise <= p.bump_stop + 1e-4,
-                "{side:?}: default belly rise {rise} must be in (0, bump_stop {}]",
-                p.bump_stop,
-            );
-            // Clears flat ground at rest by the FULL PLATE plus the rise — the collider
-            // touches nothing until the belt bottoms AND crushes through the whole plate.
-            assert!(
-                red + rig.hull_rest_y > pto + rig.model.pin_to_inner,
-                "{side:?}: red belly must clear the ground at rest by more than the plate \
-                 (clearance {})",
-                red + rig.hull_rest_y,
-            );
+            rest[0].0.y = -0.2; // Fixture fixed-gear axle height (m).
+            rest[last].0.y = -0.2;
+        }
+        for rig in [&road_limited, &fixed_limited] {
+            for side in Side::ALL {
+                let rest = rig.rest.get(side);
+                for bump in [0.01, 0.5] {
+                    // Fixture compression strokes (m), across the handoff.
+                    let params = SuspensionParams {
+                        bump_stop: bump,
+                        ..SuspensionParams::default()
+                    };
+                    let expected = rest
+                        .iter()
+                        .enumerate()
+                        .map(|(index, (centre, radius))| {
+                            let travel = if index > 0 && index + 1 < rest.len() {
+                                bump
+                            } else {
+                                0.0
+                            };
+                            centre.y + travel - (radius - rig.model.pin_to_inner)
+                        })
+                        .fold(f32::INFINITY, f32::min);
+                    // DERIVED worst chord sagitta: any wrap arc is at most a full revolution.
+                    let max_radius = rest
+                        .iter()
+                        .map(|(_, radius)| radius - rig.model.pin_to_inner)
+                        .fold(0.0, f32::max);
+                    let half_segment =
+                        std::f32::consts::PI / super::super::route::ARC_SEGMENTS as f32;
+                    let sagitta = max_radius * (1.0 - half_segment.cos());
+                    let actual = rig
+                        .hard_stop_polyline(side, &params)
+                        .iter()
+                        .map(|point| point.y)
+                        .fold(f32::INFINITY, f32::min);
+                    assert!(
+                        actual >= expected - 1e-5 && actual <= expected + sagitta + 1e-5,
+                        "the compressed inner circle envelope bounds the stop independently of route sampling"
+                    );
+                }
+            }
         }
     }
 

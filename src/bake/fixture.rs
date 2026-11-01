@@ -217,7 +217,7 @@ TankSpec(
         link_mass: 1.0,
         hinge_torque: 1.0,
         link_angle: (inward_deg: 40.0, outward_deg: 18.0),
-        sprocket: (teeth: 3, tooth_tip_rad: (left: 0.0, right: 0.0), nodes: (left: \"Sprocket_L\", right: \"Sprocket_R\")),
+        sprocket: (teeth: 16, tooth_tip_rad: (left: 0.0, right: 0.0), nodes: (left: \"Sprocket_L\", right: \"Sprocket_R\")),
         idler: (radius: (left: 0.4, right: 0.4), nodes: (left: \"Idler_L\", right: \"Idler_R\")),
         powertrain: (
             inertia: 1.0,

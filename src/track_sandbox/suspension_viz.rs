@@ -143,8 +143,8 @@ const WHITE: Color = Color::srgb(0.95, 0.96, 1.0);
 /// The editor's version stopped at hull-local because its tank never moved; this one composes the
 /// hull transform, and it is deliberately the ONLY path from side-plane to world in this module —
 /// if a layer ever detaches from the hull, there is exactly one function to look at.
-fn world(hull: &GlobalTransform, side: Side, p: Vec2, plane_x: f32) -> Vec3 {
-    hull.transform_point(Vec3::new(side.sign() * plane_x, p.y, p.x))
+fn world(hull: &GlobalTransform, _side: Side, p: Vec2, plane_x: f32) -> Vec3 {
+    hull.transform_point(Vec3::new(plane_x, p.y, p.x))
 }
 
 /// Lift a hull-local point into world space (the lateral-offset layers build their own `x`).
@@ -181,10 +181,10 @@ fn draw_suspension(
         .single()
         .expect("RigGeom is published with exactly one sandbox hull in the same command flush");
     let p = &knobs.0;
-    let plane_x = geom.plane_x;
     let belt_len = geom.belt_len();
 
     for side in Side::ALL {
+        let plane_x = geom.side_plane_x(side);
         // --- Rest-pose pin-line circles (the running gear the route wraps) ---
         if viz.wheels {
             let rot = side_plane_rotation(hull);
