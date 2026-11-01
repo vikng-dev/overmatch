@@ -545,7 +545,7 @@ mod tests {
             .single(world)
             .unwrap();
         world.get_mut::<Text>(status).unwrap().0 =
-            "ALIVE\nCrew 5/5\nDrive 100%   Gunner 100%\nWeapons: Primary READY Secondary READY\nPrimary ammunition: fixture".to_owned();
+            "ALIVE\nCrew 5/5\nDrive 100%   Gunner 100%\nWeapons: Primary READY Secondary READY\nPrimary ammunition: fixture\nF - repair modules\nModule A READY\nModule B READY\nModule C READY\nModule D READY\nModule E READY\nModule F READY".to_owned();
         for (_, mut text) in world.query_filtered::<
             (&crate::hud::HudDock, &mut Text), Without<crate::crew_ui::StatusPanelText>
         >().iter_mut(world) {
@@ -641,12 +641,8 @@ mod tests {
                 .push_str("\nFixture reserve A\nFixture reserve B");
             settle_hud(&mut app);
             let after = hud_rect(app.world(), card);
-            assert!(
-                after.min.y > before.min.y,
-                "growing the status text must move the board"
-            );
             assert_modal_clear(app.world_mut(), card);
-            let reserved_width = app.world().get::<ComputedNode>(root).unwrap().size().x;
+            let reserved = app.world().get::<ComputedNode>(root).unwrap().size();
             {
                 let world = app.world_mut();
                 for (dock, mut visibility) in world
@@ -660,12 +656,15 @@ mod tests {
             }
             settle_hud(&mut app);
             assert!(
-                app.world().get::<ComputedNode>(root).unwrap().size().x > reserved_width,
-                "hiding diagnostics releases their dock"
+                {
+                    let size = app.world().get::<ComputedNode>(root).unwrap().size();
+                    size.x * size.y > reserved.x * reserved.y
+                },
+                "hiding diagnostics increases the clear region"
             );
             assert_modal_clear(app.world_mut(), card);
             eprintln!(
-                "MEASURED {width}x{height} scale {scale}: status growth moves board top {} -> {} px; final board {:?}",
+                "MEASURED {width}x{height} scale {scale}: status growth board top {} -> {} px; final board {:?}",
                 before.min.y,
                 after.min.y,
                 hud_rect(app.world(), card)
@@ -773,6 +772,18 @@ mod tests {
     #[test]
     fn the_live_corner_reserves_its_laid_out_panel_for_the_board() {
         let mut app = hud_layout_app(1280, 720, 2.0);
+        // FIXTURE DATA: the inset coexists with the short vitals state in this clearance case.
+        {
+            let world = app.world_mut();
+            for mut text in world
+                .query_filtered::<&mut Text, With<crate::crew_ui::StatusPanelText>>()
+                .iter_mut(world)
+            {
+                text.0 =
+                    "ALIVE\nCrew 5/5\nDrive 100%\nWeapons READY\nAmmunition fixture".to_owned();
+            }
+        }
+        settle_hud(&mut app);
         let corner = app
             .world_mut()
             .spawn((

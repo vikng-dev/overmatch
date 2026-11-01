@@ -57,7 +57,7 @@ fn stamp_hud_layer(mut world: DeferredWorld, HookContext { entity, .. }: HookCon
         .insert(GlobalZIndex(layer.zindex()));
 }
 
-/// A fixed panel reserves its dock edge for modal placement, using its actual laid-out bounds.
+/// A fixed panel reserves its actual laid-out box for modal placement.
 /// These are root nodes on the player's UI target, with axis-aligned UI transforms. Top is used
 /// by status/clock, bottom by crew/drive, and right by diagnostics. Hidden panels reserve nothing.
 #[derive(Component, Clone, Copy)]
@@ -123,24 +123,22 @@ fn place_modal_hud(
         }
         let scale = target.scale_factor();
         let gap = MODAL_GAP_PX.min(size.min_element() * 0.5);
-        let mut area = Rect::from_corners(Vec2::splat(gap), (size - gap).max(Vec2::splat(gap)));
-        for (dock, panel, transform, visibility, panel_camera) in &panels {
-            // Panels on a different camera do not occupy this modal's UI target.
-            if *visibility == Visibility::Hidden || panel_camera != camera {
-                continue;
-            }
-            let bounds =
-                Rect::from_center_size(transform.translation / scale, panel.size() / scale);
-            match dock {
-                HudDock::Top => area.min.y = area.min.y.max(bounds.max.y + gap),
-                HudDock::Bottom => area.max.y = area.max.y.min(bounds.min.y - gap),
-                HudDock::Right => area.max.x = area.max.x.min(bounds.min.x - gap),
-            }
-        }
-        // A small/minimized viewport may leave no room between fixed panels. Represent that as
-        // an empty layout region, rather than a negative CSS size.
-        area.min = area.min.min(size);
-        area.max = area.max.max(area.min);
+        let screen = Rect::from_corners(Vec2::splat(gap), (size - gap).max(Vec2::splat(gap)));
+        let occupied =
+            panels
+                .iter()
+                .filter_map(|(_, panel, transform, visibility, panel_camera)| {
+                    if *visibility == Visibility::Hidden || panel_camera != camera {
+                        return None; // Hidden panels and other UI targets occupy no space here.
+                    }
+                    let bounds =
+                        Rect::from_center_size(transform.translation / scale, panel.size() / scale);
+                    Some(Rect::from_corners(
+                        bounds.min - Vec2::splat(gap),
+                        bounds.max + Vec2::splat(gap),
+                    ))
+                });
+        let area = largest_clear_region(screen, occupied);
         let placement = Node {
             left: Val::Px(area.min.x),
             top: Val::Px(area.min.y),
@@ -149,6 +147,71 @@ fn place_modal_hud(
             ..node.clone()
         };
         node.set_if_neq(placement);
+    }
+}
+
+/// Maximal clear rectangles retain space beside a tall panel instead of reserving its entire
+/// edge band. Every candidate is contained in the target and outside all occupied panel boxes.
+fn largest_clear_region(screen: Rect, occupied: impl Iterator<Item = Rect>) -> Rect {
+    let mut free = vec![screen];
+    for panel in occupied {
+        let mut next = Vec::new();
+        for area in free {
+            if area.max.x <= panel.min.x
+                || area.min.x >= panel.max.x
+                || area.max.y <= panel.min.y
+                || area.min.y >= panel.max.y
+            {
+                next.push(area);
+                continue;
+            }
+            for piece in [
+                Rect {
+                    min: area.min,
+                    max: Vec2::new(panel.min.x.min(area.max.x), area.max.y),
+                },
+                Rect {
+                    min: Vec2::new(panel.max.x.max(area.min.x), area.min.y),
+                    max: area.max,
+                },
+                Rect {
+                    min: area.min,
+                    max: Vec2::new(area.max.x, panel.min.y.min(area.max.y)),
+                },
+                Rect {
+                    min: Vec2::new(area.min.x, panel.max.y.max(area.min.y)),
+                    max: area.max,
+                },
+            ] {
+                if piece.min.x < piece.max.x && piece.min.y < piece.max.y {
+                    next.push(piece);
+                }
+            }
+        }
+        // Contained rectangles cannot beat their containing candidate, including equal duplicates.
+        free = next
+            .iter()
+            .enumerate()
+            .filter(|(i, area)| {
+                !next.iter().enumerate().any(|(j, other)| {
+                    j != *i
+                        && other.min.x <= area.min.x
+                        && other.min.y <= area.min.y
+                        && other.max.x >= area.max.x
+                        && other.max.y >= area.max.y
+                        && (other != *area || j < *i)
+                })
+            })
+            .map(|(_, area)| *area)
+            .collect();
+    }
+    match free
+        .into_iter()
+        .max_by(|a, b| (a.width() * a.height()).total_cmp(&(b.width() * b.height())))
+    {
+        Some(area) => area,
+        // A minimized target or panels covering it completely has no readable modal region.
+        None => Rect::from_corners(screen.min, screen.min),
     }
 }
 
