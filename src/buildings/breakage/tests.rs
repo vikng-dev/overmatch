@@ -1297,7 +1297,8 @@ fn shielding_cube() -> Arc<BuildingKind> {
 /// share's reflected impulse at the distance and on the face avian's cast gives ([`Blast::push`]),
 /// and the chunk it shades keeps its full pool, though the same burst crushes it with nothing
 /// there ([`CRUSHING_BLAST_J`]).
-/// A body's armour volume is no surface: the rays pass it and wear the chunk. A ray that pushed a
+/// A partial shadow leaves the other fixture rays free to wear the chunk. A body's armour
+/// volume is no surface: the rays pass it and wear the chunk. A ray that pushed a
 /// body and went on into the wall, a push of the wrong share, distance or face, a moving body the
 /// rays pass through, or one they meet by kind rather than by being a moving body, fails here;
 /// every rubble pile and hull a blast meets rests on it.
@@ -1325,6 +1326,14 @@ fn a_ray_that_stops_on_a_moving_body_pushes_it_by_its_share_and_deposits_nothing
                 })
                 .collect()
         });
+        let aimed = fracture::blast_directions()
+            .iter()
+            .filter(|sample| first_chunk(&kind.layout, &intact, true, origin, sample.0).is_some())
+            .count();
+        let shadowed = rays
+            .iter()
+            .filter(|ray| first_chunk(&kind.layout, &intact, true, origin, ray.0).is_some())
+            .count();
         let expected: Vec3 = rays
             .iter()
             .map(|&(dir, share, d, normal)| blast.push(share, d, dir, normal))
@@ -1341,14 +1350,15 @@ fn a_ray_that_stops_on_a_moving_body_pushes_it_by_its_share_and_deposits_nothing
             // Complete shading leaves the fixture untouched, with no live fracture state.
             None => false,
         };
-        (rays.len(), momentum, expected, wears)
+        (rays.len(), momentum, expected, shadowed, aimed, wears)
     };
     let (.., bare) = after(None);
     assert!(bare, "with nothing there the burst crushes the chunk");
     let piece = |app: &mut App| loose_cube(app, near, 0.4);
     let other = |app: &mut App| moving_cube(app, near, 0.4, Layer::Vehicle);
     for spawn in [&piece as &dyn Fn(&mut App) -> Entity, &other] {
-        let (rays, momentum, expected, wears) = after(Some(spawn));
+        let (rays, momentum, expected, shadowed, aimed, wears) = after(Some(spawn));
+        assert_eq!(shadowed, aimed, "the large body shades every fixture ray");
         assert!(rays > 100, "the body is in the field");
         assert!(
             (momentum - expected).length() <= 1e-3 * expected.length(),
@@ -1356,8 +1366,22 @@ fn a_ray_that_stops_on_a_moving_body_pushes_it_by_its_share_and_deposits_nothing
         );
         assert!(!wears, "the shaded chunk takes nothing");
     }
+    // Fixture: a smaller body covers only part of the cube's angular silhouette. Rays
+    // outside that shadow still wear the surface; one stopped ray cannot suppress the field.
+    let partial = |app: &mut App| loose_cube(app, near, 0.05);
+    let (rays, momentum, expected, shadowed, aimed, wears) = after(Some(&partial));
+    assert!(
+        shadowed > 0 && shadowed < aimed,
+        "the body shades some fixture rays and leaves others open"
+    );
+    assert!(rays > 0 && (momentum - expected).length() <= 1e-3 * expected.length());
+    assert!(
+        wears,
+        "rays outside the body's shadow still reach the chunk"
+    );
+
     let armour = |app: &mut App| moving_cube(app, near, 0.4, Layer::Armor);
-    let (rays, momentum, _, wears) = after(Some(&armour));
+    let (rays, momentum, _, _, _, wears) = after(Some(&armour));
     assert!(rays > 100, "the armour volume is in the field");
     assert_eq!(momentum, Vec3::ZERO, "an armour volume takes no push");
     assert!(wears, "and the rays pass it to the chunk");
