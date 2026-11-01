@@ -1,11 +1,11 @@
-//! The pen cam's explanations on the wire. The authority builds each [`RecordedShot`] once and sends
+//! The game's damage model: the pen cam's explanations on the wire. The authority builds each [`RecordedShot`] once and sends
 //! each projection over [`ShotExplanationChannel`] to its one recipient's link: the shooter's and
 //! the struck tank's player's, nobody else's. A client stores what arrives in [`ShotExplanations`]
 //! and marks an explanation's impact drawn as its own shells draw the shot's authority outcomes
 //! ([`AuthorityOutcomeDrawn`]).
 //!
 //! A recipient is resolved by combatant, not by tank life: the link that controls the combatant's
-//! tank now, so a record of a killed tank still reaches its player after the respawn.
+//! tank now, so a record of a knocked-out tank still reaches its player after the respawn.
 //!
 //! Under `SPIKE_SHOT_TRACE` both ends log the delivery to the shot-lifecycle trace: the server each
 //! projection it sends (`xsend`) and each client link that connects or ends (`link`), a client
@@ -67,7 +67,7 @@ pub(super) fn install_client(app: &mut App) {
 #[derive(SystemParam)]
 struct ExplanationSend<'w, 's> {
     records: MessageReader<'w, 's, RecordedShot>,
-    vocabulary: Option<Res<'w, ShotVocabulary>>,
+    vocabulary: Res<'w, ShotVocabulary>,
     servers: Query<'w, 's, &'static Server>,
     tanks: Query<'w, 's, (&'static CombatantId, &'static ControlledBy), With<NetTank>>,
     sender: ServerMultiMessageSender<'w, 's>,
@@ -83,44 +83,30 @@ impl ExplanationSend<'_, '_> {
         if self.records.is_empty() {
             return;
         }
-        let (Some(vocabulary), Ok(server)) = (self.vocabulary.as_deref(), self.servers.single())
-        else {
-            warn_once!(
-                "server: a shot was recorded with no shot vocabulary or no server to send it"
-            );
-            self.records.clear();
-            return;
-        };
+        let server = self
+            .servers
+            .single()
+            .expect("explanation transport is installed with exactly one authority server");
         let links: HashMap<CombatantId, Entity> = self
             .tanks
             .iter()
             .map(|(&combatant, controlled)| (combatant, controlled.owner))
             .collect();
         for recorded in self.records.read() {
-            let built = match BuiltExplanation::build(vocabulary, recorded) {
-                Ok(built) => built,
-                Err(error) => {
-                    warn!("server: a recorded shot was not explained: {error}");
-                    continue;
-                }
-            };
+            let built = BuiltExplanation::build(&self.vocabulary, recorded)
+                .expect("an authority record and its vocabulary share the certified blueprint and shot identity");
             for (combatant, explanation) in built.projections() {
+                // A bot or a player whose tank/link has left has no recipient in this world.
                 let Some(&link) = links.get(&combatant) else {
                     continue;
                 };
+                // The recipient may disconnect between recording and this delivery tick.
                 if !server.collection().contains(&link) {
                     continue;
                 }
-                if let Err(err) = self
-                    .sender
-                    .send_to_entities::<ShotExplanation, ShotExplanationChannel>(
-                        &explanation,
-                        [link],
-                    )
-                {
-                    error!("server: a shot explanation could not enter transport: {err}");
-                    continue;
-                }
+                self.sender
+                    .send_to_entities::<ShotExplanation, ShotExplanationChannel>(&explanation, [link])
+                    .expect("registered explanations serialize into their live link's unbounded transport queue");
                 on_sent(combatant, &explanation);
             }
         }
@@ -175,19 +161,14 @@ fn trace_link(trace: &mut ShotTrace, timeline: &LocalTimeline, link: Entity, eve
 /// receiver in `Last` every frame.
 fn receive_shot_explanations(
     mut receivers: Query<&mut MessageReceiver<ShotExplanation>>,
-    vocabulary: Option<Res<ShotVocabulary>>,
+    vocabulary: Res<ShotVocabulary>,
     time: Res<Time<Virtual>>,
     mut store: ResMut<ShotExplanations>,
 ) {
     let now = time.elapsed_secs_f64();
     for mut receiver in &mut receivers {
         for explanation in receiver.receive() {
-            match vocabulary.as_deref() {
-                Some(vocabulary) => {
-                    store.receive(explanation, vocabulary, now);
-                }
-                None => warn_once!("client: a shot explanation arrived before the vocabulary"),
-            }
+            store.receive(explanation, &vocabulary, now);
         }
     }
 }

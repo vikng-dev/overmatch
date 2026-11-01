@@ -266,7 +266,8 @@ fn an_armed_client_logs_each_draw_arrival_and_release_once() {
         let mut app = App::new();
         app.init_resource::<Time<Virtual>>()
             .init_resource::<LocalTimeline>()
-            .insert_resource(ShotTrace::for_test(&path));
+            .insert_resource(ShotTrace::for_test(&path))
+            .insert_resource(vocabulary.clone());
         install_client(&mut app);
         app.world_mut().trigger(draw(&already));
         let mut store = app.world_mut().resource_mut::<ShotExplanations>();
@@ -314,4 +315,31 @@ fn an_armed_client_logs_each_draw_arrival_and_release_once() {
             row("xpres", 1200, "timed_out"),
         ]
     );
+}
+
+/// The game's damage model: live authority records always carry the shot identity stamped at
+/// spawn. Losing one is an internal recording bug, never an unexplained event to silently drop.
+#[test]
+#[should_panic(expected = "an authority record and its vocabulary share the certified blueprint")]
+fn an_unkeyed_authority_record_is_a_bug() {
+    let _udp = lock_real_udp_test();
+    let report = report("s1_through_crew"); // Fixture data; only identity is under test.
+    let mut server = build_server(free_port(), vocabulary(&report));
+    finish(&mut server);
+    let mut record = recorded(
+        &report,
+        SHOOTER,
+        1200,
+        TankLife {
+            combatant: STRUCK,
+            life: CombatantLife(0),
+        },
+    );
+    record.shot = None;
+    server.world_mut().write_message(record);
+    use bevy::ecs::system::RunSystemOnce;
+    server
+        .world_mut()
+        .run_system_once(send_shot_explanations)
+        .unwrap();
 }
