@@ -12,7 +12,8 @@
 //! the building frame. The material's vertex stage multiplies them by the instance's own scale
 //! along `t` and `b`, so a scaled house keeps real-size bricks. A wall face stands its image
 //! upright (`t = Y × n`) when its surface frame declares Upright; a Grain frame projects its
-//! authored direction onto the face. The second UV channel selects the visual's declared
+//! authored direction onto the face; a level face runs along its element's construction
+//! ([`tangent`]). The second UV channel selects the visual's declared
 //! palette lane, resolved through its substance and the visual library.
 //!
 //! # A broken building ([`plugin`])
@@ -51,22 +52,39 @@ use crate::building_surface::{BuildingMaterial, holed};
 use crate::debris::PresentationClock;
 use crate::scatter::MapInstance;
 
-/// A face's authored grain projected into its plane. A grain-normal end face has no
-/// projected grain and uses the upright image convention, as an Upright frame does.
-fn tangent(n: Vec3, frame: SurfaceFrame) -> Vec3 {
+/// A face's tangent: its element's authored grain projected into its plane; on an end face the
+/// grain crosses, and on every face of an Upright element, the upright image (`Y × n`). A level
+/// face has no upright, so its image runs along the element's own construction: its profile's
+/// run `u` projected into the face, or its depth axis `w` on a face `u` crosses at over 45°.
+/// The frame's axes are orthonormal (the load gate), so `(u·n)² + (w·n)² ≤ 1` and the axis taken
+/// lies at least half in the face: no level face is left without a tangent.
+fn tangent(n: Vec3, frame: SurfaceFrame, [u, w]: [Vec3; 2]) -> Vec3 {
+    let in_face = |axis: Vec3| axis - n * axis.dot(n);
     if let SurfaceFrame::Grain(grain) = frame {
-        let grain = Vec3::from_array(grain);
-        let projected = grain - n * grain.dot(n);
+        let projected = in_face(Vec3::from_array(grain));
         if projected.length_squared() > 1e-6 {
             return projected.normalize();
         }
     }
     let upright = Vec3::Y.cross(n);
     if upright.length_squared() > 1e-6 {
-        upright.normalize()
-    } else {
-        Vec3::X
+        return upright.normalize();
     }
+    let run = in_face(u);
+    if run.length_squared() >= 0.5 {
+        run.normalize()
+    } else {
+        in_face(w).normalize()
+    }
+}
+
+/// An element's construction axes for [`tangent`]: its profile's run `u` and its depth `u × v`.
+fn axes(element: &super::schema::Element) -> [Vec3; 2] {
+    let (u, v) = (
+        Vec3::from_array(element.frame.u),
+        Vec3::from_array(element.frame.v),
+    );
+    [u, u.cross(v)]
 }
 
 /// A mesh's faces as they are added, each framed in metres (module doc).
@@ -82,14 +100,14 @@ struct Faces {
 
 impl Faces {
     /// One face of outward normal `n`, its corners counter-clockwise seen from outside, on an
-    /// element with authored surface frame `grain` and palette lane `secondary`; drawn `offset` from where it is (asset
-    /// frame) while framed where it is, so a piece keeps the wall's bricks. `tag` is the hole
-    /// lookup's (module doc).
+    /// `element` (its authored surface frame and construction axes, [`tangent`]) in palette lane
+    /// `secondary`; drawn `offset` from where it is (asset frame) while framed where it is, so a
+    /// piece keeps the wall's bricks. `tag` is the hole lookup's (module doc).
     fn face(
         &mut self,
         n: Vec3,
         corners: &[Vec3],
-        grain: SurfaceFrame,
+        element: &super::schema::Element,
         secondary: bool,
         offset: Vec3,
         tag: f32,
@@ -97,7 +115,7 @@ impl Faces {
         if corners.len() < 3 {
             return;
         }
-        let t = tangent(n, grain);
+        let t = tangent(n, element.surface_frame, axes(element));
         let b = n.cross(t);
         let first = u32::try_from(self.positions.len()).expect("a building's mesh fits u32");
         for p in corners {
@@ -120,14 +138,7 @@ impl Faces {
             &asset.materials[usize::from(element.material)],
         ) == crate::building_surface::SurfaceLane::Secondary;
         for (n, corners) in element.faces() {
-            self.face(
-                n,
-                &corners,
-                element.surface_frame,
-                secondary,
-                Vec3::ZERO,
-                0.0,
-            );
+            self.face(n, &corners, element, secondary, Vec3::ZERO, 0.0);
         }
     }
 
@@ -138,7 +149,7 @@ impl Faces {
             &asset.materials[usize::from(element.material)],
         ) == crate::building_surface::SurfaceLane::Secondary;
         for (n, corners) in layout.blocks[c].faces() {
-            self.face(n, &corners, element.surface_frame, secondary, offset, tag);
+            self.face(n, &corners, element, secondary, offset, tag);
         }
     }
 
@@ -766,11 +777,7 @@ mod tests {
         })
     }
 
-    /// AN OPENING IS A HOLE THE CAMERA SEES THROUGH, A PIER IS NOT: across the shipped house's
-    /// east wall (outer face x = 2 m, inner 1.75 m), a sight line through its first window's
-    /// middle (z 1.5 m, 1.5 m up; house_1's spec) meets no triangle, and one through the pier
-    /// beside it (z 2.5 m) does. A view that drew the wall as its graybox box, or filled the
-    /// openings, fails the first; one that dropped an element fails the second.    /// Appearance must follow the construction record without changing geometry. The view
+    /// Appearance must follow the construction record without changing geometry. The view
     /// reader relies on frame data even for a material drawn in the primary palette lane.
     #[test]
     fn authored_grain_changes_the_frame_and_never_the_silhouette() {
@@ -797,6 +804,41 @@ mod tests {
         );
     }
 
+    /// A LEVEL FACE RUNS ALONG ITS ELEMENT: every top and bottom of the shipped house's Upright
+    /// elements takes its tangent along the element's own run `u`, so a wall's courses run along
+    /// it on its top as on its faces. A hard-coded world axis lays the tops of the walls that run
+    /// along Z across them and fails here.
+    #[test]
+    fn a_level_face_runs_along_its_element() {
+        let asset = &shipped_house().asset;
+        let mut checked = 0;
+        for (e, element) in asset.elements.iter().enumerate() {
+            if element.surface_frame != SurfaceFrame::Upright {
+                continue;
+            }
+            let mut faces = Faces::default();
+            faces.element(asset, e);
+            let u = Vec3::from_array(element.frame.u);
+            for (n, t) in faces.normals.iter().zip(&faces.tangents) {
+                if Vec3::from_array(*n).y.abs() > 0.999 {
+                    let t = Vec4::from_array(*t).truncate();
+                    assert!(
+                        t.dot(u).abs() > 0.999,
+                        "{}: level tangent {t} across its run {u}",
+                        element.name
+                    );
+                    checked += 1;
+                }
+            }
+        }
+        assert!(checked > 0, "the house has level faces");
+    }
+
+    /// AN OPENING IS A HOLE THE CAMERA SEES THROUGH, A PIER IS NOT: across the shipped house's
+    /// east wall (outer face x = 2 m, inner 1.75 m), a sight line through its first window's
+    /// middle (z 1.5 m, 1.5 m up; house_1's spec) meets no triangle, and one through the pier
+    /// beside it (z 2.5 m) does. A view that drew the wall as its graybox box, or filled the
+    /// openings, fails the first; one that dropped an element fails the second.
     #[test]
     fn a_window_is_a_hole_and_a_pier_is_solid() {
         let triangles = triangles(&mesh(&shipped_house().asset));
