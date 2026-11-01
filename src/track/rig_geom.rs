@@ -254,11 +254,7 @@ impl RigGeom {
         blueprint
             .spec
             .track
-            .transmission_params(
-                &blueprint.spec.roadwheels,
-                geom.rest.get(Side::Right)[0].1,
-                geom.plane_x,
-            )
+            .transmission_params(&blueprint.spec.roadwheels, geom.wrap_radii(), geom.plane_x)
             .unwrap_or_else(|error| {
                 panic!(
                     "{}: {error}; correct the running-gear construction facts",
@@ -266,6 +262,26 @@ impl RigGeom {
                 )
             });
         geom
+    }
+
+    /// The radii the belt turns its wrapped wheels at: each side's rest sprocket and idler
+    /// pin-line circles, the first and last of [`Self::rest`]. One sprocket radius serves both
+    /// sides: the teeth and the measured pitch are common to both.
+    pub(crate) fn wrap_radii(&self) -> crate::spec::WrapRadii {
+        let idler = |side| {
+            self.rest
+                .get(side)
+                .last()
+                .expect("a side always has an idler")
+                .1
+        };
+        crate::spec::WrapRadii {
+            sprocket: self.rest.get(Side::Right)[0].1,
+            idler: crate::spec::SideValues {
+                left: idler(Side::Left),
+                right: idler(Side::Right),
+            },
+        }
     }
 
     /// The bake builds this geometry before publishing a blueprint or any body. Live operator
@@ -1077,6 +1093,28 @@ pub(crate) fn tiger_rig() -> RigGeom {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The belt's reflected inertia and the drawn idler spin read one circle per wrapped wheel:
+    /// the rest sprocket pitch circle and the idler's pin-line circle, its contact radius plus
+    /// the shoe's measured pin offset. A `wrap_radii` that read the idler's contact radius, or a
+    /// road wheel's circle, would reflect the idler at a radius the belt does not turn it at.
+    #[test]
+    fn wrap_radii_are_the_rest_sprocket_and_idler_pin_circles() {
+        let rig = tiger_rig();
+        let spec = tiger_spec();
+        let wrap = rig.wrap_radii();
+        for side in Side::ALL {
+            let rest = rig.rest.get(side);
+            assert_eq!(wrap.sprocket, rest[0].1);
+            let idler = wrap.idler.get(side);
+            assert_eq!(idler, rest.last().expect("a side always has an idler").1);
+            assert_eq!(
+                idler,
+                derive::pin_line_radius(spec.track.idler.radius.get(side), rig.model.pin_to_inner)
+            );
+            assert!(idler > spec.track.idler.radius.get(side), "{side:?}");
+        }
+    }
 
     /// Live count tuning uses the same address bound as file admission, before replacing a rig.
     #[test]

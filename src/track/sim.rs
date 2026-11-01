@@ -507,11 +507,7 @@ fn init_track_gear(blueprint: Res<TankBlueprint>, mut commands: Commands) {
     // circle (chord-exact `derive::sprocket_pitch_radius(geom.pitch, teeth)` by construction), and
     // the half-tread is `geom.plane_x` — the same measured values the belt/envelope ride.
     let trans = spec
-        .transmission_params(
-            &blueprint.spec.roadwheels,
-            geom.rest.get(Side::Right)[0].1,
-            geom.plane_x,
-        )
+        .transmission_params(&blueprint.spec.roadwheels, geom.wrap_radii(), geom.plane_x)
         .expect("TankSpec transmission was validated before TrackGear construction");
 
     let mut pin_radius = 0.0_f32;
@@ -553,7 +549,7 @@ fn init_track_gear(blueprint: Res<TankBlueprint>, mut commands: Commands) {
             probe_reach: 0.5,
             slip_saturation: SLIP_SATURATION,
             inertia: spec
-                .reflected_inertia(&blueprint.spec.roadwheels, geom.rest.get(Side::Right)[0].1)
+                .reflected_inertia(&blueprint.spec.roadwheels, geom.wrap_radii())
                 .expect("running-gear admission certified the construction inertia"),
             grip: Some(GripParams::of(&blueprint.spec)),
         },
@@ -1361,9 +1357,13 @@ mod tests {
             let mut blueprint = app.world_mut().resource_mut::<TankBlueprint>();
             let mut spec = super::super::rig_geom::tiger_spec();
             spec.track.pin_plane_x.left -= 0.2;
+            // FIXTURE: preserve the idler's reflected inertia while changing its contact geometry:
+            // the moment scales with the square of the pin-line radius the belt turns it at.
+            let pin_to_inner = super::super::rig_geom::tiger_rig().model.pin_to_inner;
+            let radius = spec.track.idler.radius.left;
+            let pin_ratio = (0.9 * radius + pin_to_inner) / (radius + pin_to_inner);
             spec.track.idler.radius.left *= 0.9;
-            // FIXTURE: preserve the idler's reflected inertia while changing its contact geometry.
-            spec.track.idler.spin_inertia_kgm2.0.left *= 0.9 * 0.9;
+            spec.track.idler.spin_inertia_kgm2.0.left *= pin_ratio * pin_ratio;
             blueprint.spec = std::sync::Arc::new(spec);
         }
         app.world_mut().run_schedule(PreUpdate);

@@ -560,10 +560,7 @@ fn startup_dump(app: &App, tank: Entity) -> StartupBuilder {
     out.f32(
         "derived.reflected_inertia",
         track
-            .reflected_inertia(
-                &spec.roadwheels,
-                geom.rest.get(crate::track::side::Side::Right)[0].1,
-            )
+            .reflected_inertia(&spec.roadwheels, geom.wrap_radii())
             .expect("the running gear admitted its construction inertia"),
     );
     out.f32("spec.track.suspension.engage", track.suspension.engage);

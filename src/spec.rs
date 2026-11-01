@@ -802,9 +802,12 @@ impl TrackSpec {
     }
 
     /// DERIVED per-side extra inertia at belt speed (kg): translating links plus each wheel's
-    /// axial moment divided by its belt contact radius squared. The hull mass already carries
-    /// these parts, so only their motion relative to the hull belongs here. The sprocket uses
-    /// the chord-exact pitch radius; idler and road wheels use tread radii, never pin-line radii.
+    /// axial moment divided by the square of the radius the belt turns it at. The hull mass
+    /// already carries these parts, so only their motion relative to the hull belongs here. The
+    /// belt wraps the sprocket and the idler, which therefore turn with the pin line: the
+    /// sprocket at its chord-exact pitch radius, the idler at its pin-line radius ([`WrapRadii`]).
+    /// A road wheel rolls on the straight belly run's inner face, which moves at belt speed, so
+    /// it uses its tread radius.
     ///
     /// The joint drive currently has one inertia for both sides. Unequal construction is refused
     /// before play until the drive can integrate distinct side inertias; it is never averaged
@@ -812,9 +815,9 @@ impl TrackSpec {
     pub(crate) fn reflected_inertia(
         &self,
         roadwheels: &[RoadwheelSpec],
-        sprocket_radius: f32,
+        wrap: WrapRadii,
     ) -> Result<f32, BevyError> {
-        let sides = self.inertia_terms(roadwheels, sprocket_radius)?;
+        let sides = self.inertia_terms(roadwheels, wrap)?;
         // Resolution: allow accumulated f32 construction-rounding, including equivalent radius
         // and moment rescalings; this tolerance changes no physical term in the force law.
         let tolerance = 16.0 * f64::from(f32::EPSILON) * sides[0].max(sides[1]);
@@ -830,11 +833,11 @@ impl TrackSpec {
     }
 
     /// Admit each fact independently of the joint drive's symmetry and divisor constraints.
-    /// Those constraints need the actual sprocket radius, available at running-gear admission.
+    /// Those constraints need the actual wrap radii, available at running-gear admission.
     fn inertia_terms(
         &self,
         roadwheels: &[RoadwheelSpec],
-        sprocket_radius: f32,
+        wrap: WrapRadii,
     ) -> Result<[f64; 2], BevyError> {
         fn reflected(moment: f32, radius: f32, field: &str) -> Result<f64, BevyError> {
             if !moment.is_finite() || moment <= 0.0 {
@@ -856,11 +859,11 @@ impl TrackSpec {
         for side in crate::track::side::Side::ALL {
             sides[side.index()] += reflected(
                 self.sprocket.spin_inertia_kgm2.0.get(side),
-                sprocket_radius,
+                wrap.sprocket,
                 &format!("track.sprocket.spin_inertia_kgm2.{side:?}"),
             )? + reflected(
                 self.idler.spin_inertia_kgm2.0.get(side),
-                self.idler.radius.get(side),
+                wrap.idler.get(side),
                 &format!("track.idler.spin_inertia_kgm2.{side:?}"),
             )?;
         }
@@ -879,31 +882,48 @@ impl TrackSpec {
     }
 
     /// Structural admission and the spawn crank seed need no physical geometry. Unit placeholders
-    /// exercise the transmission's non-geometric rules; no force step consumes these tables.
-    /// Running-gear admission checks the side equality and divisor using the real pitch radius.
+    /// exercise the transmission's non-geometric rules (the idler's declared contact radius
+    /// stands for its pin-line radius, whose pin offset only the glb measures); no force step
+    /// consumes these tables. Running-gear admission checks the side equality and divisor using
+    /// the real wrap radii.
     pub(crate) fn nominal_transmission_params(
         &self,
         roadwheels: &[RoadwheelSpec],
     ) -> Result<TransmissionParams, BevyError> {
-        self.inertia_terms(roadwheels, 1.0)?;
+        let nominal = WrapRadii {
+            sprocket: 1.0,
+            idler: self.idler.radius,
+        };
+        self.inertia_terms(roadwheels, nominal)?;
         self.powertrain.transmission.params(1.0, 1.0, 1.0)
     }
 
-    /// Build the joint drive from construction and the measured sprocket pitch radius and
+    /// Build the joint drive from construction, the measured wrap radii and the measured
     /// half-tread. Only admitted running gear consumes these physical tables; structural
     /// validation and the crank seed use [`Self::nominal_transmission_params`].
     pub(crate) fn transmission_params(
         &self,
         roadwheels: &[RoadwheelSpec],
-        sprocket_radius: f32,
+        wrap: WrapRadii,
         half_tread: f32,
     ) -> Result<TransmissionParams, BevyError> {
         self.powertrain.transmission.params(
-            sprocket_radius,
+            wrap.sprocket,
             half_tread,
-            self.reflected_inertia(roadwheels, sprocket_radius)?,
+            self.reflected_inertia(roadwheels, wrap)?,
         )
     }
+}
+
+/// The measured radii at which the belt turns the wheels it wraps (m). The sprocket turns at its
+/// chord-exact pitch radius. The idler turns with the pin line wrapped around it, so at its
+/// pin-line radius: its contact radius plus the shoe's measured `pin_to_inner`
+/// (`track::derive::pin_line_radius`). Running-gear admission reads both off the rig's rest
+/// circles (`track::rig_geom::RigGeom::wrap_radii`).
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct WrapRadii {
+    pub(crate) sprocket: f32,
+    pub(crate) idler: SideValues,
 }
 
 /// Per-track powertrain: the declared drivetrain that drives the constructed running gear.
@@ -1109,7 +1129,7 @@ pub struct SprocketSpec {
 #[serde(deny_unknown_fields)]
 pub struct IdlerSpec {
     /// Complete rotating assembly's axial moment per side (kg m^2). DERIVED belt contribution:
-    /// I / radius^2, using the contact radius below, without the shoe's pin offset.
+    /// I / r_pin^2, at the pin-line radius the wrapped belt turns it at ([`WrapRadii`]).
     pub(crate) spin_inertia_kgm2: Sourced<SideValues>,
     pub nodes: SideNodes,
     /// Physical rolling radius of each idler (m).
@@ -2969,7 +2989,7 @@ TankSpec(
         }
         let err = spec
             .track
-            .transmission_params(&spec.roadwheels, 0.5, 1.0)
+            .transmission_params(&spec.roadwheels, lab_wrap(0.5), 1.0)
             .unwrap_err()
             .to_string();
         assert!(
@@ -2978,16 +2998,34 @@ TankSpec(
         );
     }
 
-    /// The belt integrator and brake predictor rely on every construction term. FIXTURE DATA:
-    /// a link loop, one roadwheel per side, and distinct sprocket/idler moments and radii.
-    /// A mutant omitting any wheel family, or dividing by pin radius, breaks the exact sum.
+    /// FIXTURE: wrap radii for [`fixture`]'s running gear: a sprocket pitch radius and the
+    /// fixture idler's 0.4 m contact radius plus a 0.1 m pin offset.
+    fn lab_wrap(sprocket: f32) -> WrapRadii {
+        WrapRadii {
+            sprocket,
+            idler: SideValues {
+                left: 0.5,
+                right: 0.5,
+            },
+        }
+    }
+
+    /// The belt integrator and brake predictor rely on every construction term, each at the
+    /// radius the belt turns it at. FIXTURE DATA: a link loop, one roadwheel per side, and
+    /// distinct sprocket/idler moments and radii. A mutant omitting any wheel family, dividing
+    /// a road wheel by a pin-line radius or the wrapped idler by its contact radius, breaks the
+    /// exact sum.
     #[test]
     fn reflected_inertia_is_the_sum_of_links_and_each_wheels_contact_term() {
         let mut spec = fixture();
-        let inertia = |s: &TankSpec| s.track.reflected_inertia(&s.roadwheels, 0.5).unwrap();
-        // DERIVED from FIXTURE DATA: 80 * 20 + 4 / 0.5^2 + 4 / 0.4^2 + 8 / 0.4^2.
+        let inertia = |s: &TankSpec| {
+            s.track
+                .reflected_inertia(&s.roadwheels, lab_wrap(0.5))
+                .unwrap()
+        };
+        // DERIVED from FIXTURE DATA: 80 * 20 + 4 / 0.5^2 + 4 / 0.5^2 + 8 / 0.4^2.
         let base = inertia(&spec);
-        assert!((base - 1691.0).abs() < 1e-3);
+        assert!((base - 1682.0).abs() < 1e-3);
         spec.track.link_mass.0 *= 2.0;
         assert!((inertia(&spec) - base - 1600.0).abs() < 1e-3);
         spec.track.sprocket.spin_inertia_kgm2.0 = SideValues {
@@ -2999,11 +3037,11 @@ TankSpec(
             left: 8.0,
             right: 8.0,
         };
-        assert!((inertia(&spec) - base - 1641.0).abs() < 1e-3);
+        assert!((inertia(&spec) - base - 1632.0).abs() < 1e-3);
         for wheel in &mut spec.roadwheels {
             wheel.spin_inertia_kgm2.0 *= 2.0;
         }
-        assert!((inertia(&spec) - base - 1691.0).abs() < 1e-3);
+        assert!((inertia(&spec) - base - 1682.0).abs() < 1e-3);
     }
 
     /// Load admission protects both drive divisions and the shared-side inertia premise.
@@ -3039,7 +3077,7 @@ TankSpec(
         );
         let err = spec
             .track
-            .reflected_inertia(&spec.roadwheels, 0.5)
+            .reflected_inertia(&spec.roadwheels, lab_wrap(0.5))
             .unwrap_err()
             .to_string();
         assert!(err.contains("differs by side"), "{err}");
@@ -3078,12 +3116,12 @@ TankSpec(
         );
         assert!(
             spec.track
-                .transmission_params(&spec.roadwheels, 0.5, 1.0)
+                .transmission_params(&spec.roadwheels, lab_wrap(0.5), 1.0)
                 .is_ok()
         );
         assert!(
             spec.track
-                .transmission_params(&spec.roadwheels, 1.0, 1.0)
+                .transmission_params(&spec.roadwheels, lab_wrap(1.0), 1.0)
                 .is_err()
         );
     }

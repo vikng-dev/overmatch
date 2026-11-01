@@ -4,12 +4,16 @@ Subject: the game's driving model, game state only.
 
 The running-gear load gate derives the extra per-side inertia at belt speed:
 
-`I_belt = link_count * link_mass + I_sprocket / r_pitch^2 + I_idler / r_contact^2 + sum(I_station / r_tread^2)`.
+`I_belt = link_count * link_mass + I_sprocket / r_pitch^2 + I_idler / r_pin^2 + sum(I_station / r_tread^2)`.
 
-Each station moment covers every rotating disc at its declared axle. Contact radii are the
-physical belt contact circles; the shoe's pin offset does not enlarge the idler or roadwheel
-rolling radius in this calculation. The sprocket instead uses the chord-exact pitch radius
-from the declared tooth count and the sim artifact's pin pitch. The hull's total mass already
+Each moment divides by the square of the radius the belt turns its wheel at. Each station moment
+covers every rotating disc at its declared axle; a road wheel rolls on the straight belly run's
+inner face, which moves at belt speed, so its radius is its tread. The belt wraps the sprocket
+and the idler, whose wrapped links turn about the hub with the pin line: the sprocket uses the
+chord-exact pitch radius from the declared tooth count and the sim artifact's pin pitch, and the
+idler its pin-line radius, the declared contact radius plus the shoe's measured `pin_to_inner`
+(`track::derive::pin_line_radius`, the circle the route wraps and the view spins the idler on).
+Running-gear admission reads both wrap radii off the rig's rest circles. The hull's total mass already
 carries the running gear, so this sum adds only motion relative to the hull. Engine crank,
 flywheel and clutch inertia remains separate on the engine side of the coupling.
 
@@ -40,37 +44,37 @@ vehicle is the comparison fixture, never a pass condition for the generic law.
 |---|---:|
 | Complete links: declared count times assembly mass | 2,910.00 |
 | Declared roadwheel station assemblies | 1,600.00 |
-| Declared idler axial moment over contact radius squared | 103.81 |
+| Declared idler axial moment over pin-line radius squared | 90.25 |
 | Declared sprocket axial moment over pitch radius squared | 149.61 |
-| Total | 4,763.42 |
+| Total | 4,749.86 |
 | Replaced independent authoring | 16,000.00 |
-| Unexplained excess in the old authoring | 11,236.58 |
+| Unexplained excess in the old authoring | 11,250.14 |
 
-The new sum is DERIVED 70.23% below the old authoring. It contains every declared wheel family;
+The new sum is DERIVED 70.31% below the old authoring. It contains every declared wheel family;
 there is no omitted declared-wheel term to restore. The unknown complete-link mass and wheel
 moments, and undeclared gearbox/final-drive rotating moments, are the missing facts to settle.
 The old authoring provides no source for its excess. Keeping the present wheel terms would
-require a DERIVED link assembly mass of about 145.84 kg to recover it, against the provisional
+require a DERIVED link assembly mass of about 145.98 kg to recover it, against the provisional
 30 kg in the sheet. No fact supports that change, so no term is scaled to recover the old number.
 
 | Flat-ground consequence | Old inertia | Construction sum |
 |---|---:|---:|
-| Hull plus both belt inertias (kg) | 89,000.00 | 66,526.84 |
-| Full-service brake deceleration (m/s^2) | 2.15730 | 2.88605 |
-| Full-throttle no-slip acceleration in top gear at peak torque (m/s^2) | 0.50377 | 0.66782 |
+| Hull plus both belt inertias (kg) | 89,000.00 | 66,499.73 |
+| Full-service brake deceleration (m/s^2) | 2.15730 | 2.88723 |
+| Full-throttle no-slip acceleration in top gear at peak torque (m/s^2) | 0.50377 | 0.66809 |
 
 Braking follows `TrackGear::braking_deceleration`: the material-pair force cap exceeds the
-service-brake capacity here, so force is the sheet's two brakes. The DERIVED gain is 33.78%.
+service-brake capacity here, so force is the sheet's two brakes. The DERIVED gain is 33.84%.
 For the acceleration row the straight, flat, no-slip operating point has no rolling or external
 resistance. Full fuel releases compression drag. The crank remains locked to the belt, so
 `a = (torque_at_peak * k) / (hull_mass + 2 * I_belt + J_engine * k^2)`, where
 `k = top_gear_reduction / sprocket_pitch_radius`. The DERIVED engine reflection is 2,482.29 kg
-and drive force 46,085.92 N; the DERIVED gain is 32.57%. This defines an operating point,
+and drive force 46,085.92 N; the DERIVED gain is 32.62%. This defines an operating point,
 not a claim of constant acceleration throughout launch, clutch slip, shifting or wheelspin.
 
 Doubling complete-link mass at fixed total vehicle mass (a different internal mass allocation)
-adds DERIVED 2,910 kg per side. The actual brake predictor then reads DERIVED 2.65388 m/s^2,
-against 2.88605 m/s^2 before, exactly the change from the added denominator mass.
+adds DERIVED 2,910 kg per side. The actual brake predictor then reads DERIVED 2.65488 m/s^2,
+against 2.88723 m/s^2 before, exactly the change from the added denominator mass.
 
 ## Verification
 

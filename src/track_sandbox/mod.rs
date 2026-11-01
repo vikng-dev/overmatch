@@ -1137,7 +1137,7 @@ fn build_rig(
         weight_n: spec.mass * derive::G,
         engage_depth: track.suspension.engage,
         belt_inertia: track
-            .reflected_inertia(&spec.roadwheels, geom.rest.get(Side::Right)[0].1)
+            .reflected_inertia(&spec.roadwheels, geom.wrap_radii())
             .expect("running-gear admission certified its construction inertia"),
         grip: crate::track::forces::GripParams::of(spec),
     });
@@ -1160,11 +1160,7 @@ fn build_rig(
     // The gap was feel-neutral anyway — reductions derive against the same radius, so it cancels.)
     let transmission = RigTransmission(
         track
-            .transmission_params(
-                &spec.roadwheels,
-                geom.rest.get(Side::Right)[0].1,
-                geom.plane_x,
-            )
+            .transmission_params(&spec.roadwheels, geom.wrap_radii(), geom.plane_x)
             .expect("the Tiger's transmission block is validated at bake"),
     );
     commands.insert_resource(TransState(
@@ -1669,8 +1665,8 @@ fn apply_rig_counts(
     let mut track = blueprint.spec.track.clone();
     track.link_count = counts.link_count;
     track.sprocket.teeth = counts.teeth;
-    let radius = next.rest.get(Side::Right)[0].1;
-    let derived = track.transmission_params(&blueprint.spec.roadwheels, radius, next.plane_x);
+    let wrap = next.wrap_radii();
+    let derived = track.transmission_params(&blueprint.spec.roadwheels, wrap, next.plane_x);
     let derived = match derived {
         Ok(derived) => derived,
         Err(error) => {
@@ -1683,7 +1679,7 @@ fn apply_rig_counts(
         }
     };
     rig.belt_inertia = track
-        .reflected_inertia(&blueprint.spec.roadwheels, radius)
+        .reflected_inertia(&blueprint.spec.roadwheels, wrap)
         .expect("the retuned transmission admitted the same construction inertia");
     transmission.0 = derived;
     *geom = next;
