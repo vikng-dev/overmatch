@@ -164,7 +164,7 @@ the wire, so a row reads `PLAYER <combatant id>`. The own row is unmarked, so th
 same through results, when the client holds no tank and so no replicated fact naming its own
 combatant.
 
-Until this link's match has replicated the client's own tank once, an opaque loading screen
+Until this link's own tank has a presented pose, a complete local body and a bound view, an opaque loading screen
 covers the view (`Flow::Joining`): LOADING… through the asset load and the wait for the tank,
 CONNECTING… through connect attempts, and a refusal's cause once refused. A tank that later
 leaves (results, a respawn) keeps the match on screen.
@@ -216,3 +216,11 @@ Two blind reviews of the fresh-world lane, each finding checked against the code
 | Claude | `world_reset::follow_battle` had an unreachable branch whose comment promised more than it kept | verified | same commit: a frame with no Battle forgets the construction, so the next Battle constructs its own |
 | Claude | `world_reset::start_next` decides from its own list which environment records exist, while startup decides through each `install_server` | verified: the short-mode probe server gains both ledgers at its first fill-up | open: each `install_server` would register its own boundary constructor |
 | Claude | Stale docs: `WallRecord` said its generation moves on a replica's next link; the wall ledger's module doc said one entity holds every change | verified | same commit |
+
+## Fill-up review
+
+Both blind reviews concern the game's match flow and damage model, game state only.
+
+| reviewer | finding | verified / not a defect | fixed in (subject) |
+|---|---|---|---|
+| Codex | Loading clears on ownership before an interpolated pose and attached rig | verified: an owned `NetTank` without `Position`, `Rotation`, local `Tank` or bound view sets the old latch | `client: wait for the own tank presentation before leaving loading (#253)`; the gate now requires all of them, and remains latched through results and respawn |

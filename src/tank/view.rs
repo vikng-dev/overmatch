@@ -26,6 +26,10 @@ impl ViewNode {
     }
 }
 
+/// The view tree has resolved and its declared nodes have been bound to the sim skeleton.
+#[derive(Component)]
+pub struct TankViewReady;
+
 /// A view node written by servo interpolation; sim-node transforms remain fixed-step truth.
 #[derive(Component)]
 pub struct ViewServo;
@@ -128,6 +132,7 @@ pub fn bind_tank_view(
     let parent = |entity| parents.get(entity).ok().map(ChildOf::parent);
     super::shadow_proxy::plan(ready.entity, &proxy_nodes, &articulated_nodes, parent)
         .bind(&mut commands, ready.entity);
+    commands.entity(ready.entity).insert(TankViewReady);
 }
 
 /// Copy fixed-step barrel recoil into the corresponding view node.

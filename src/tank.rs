@@ -50,7 +50,7 @@ pub(crate) use spawn::{
     TankSimSource, attach_replicated_tank_body, load_tank_assets, load_tank_sim_assets,
     spawn_complete_tank,
 };
-pub use view::{SimParts, ViewNode, ViewOf, view_attach_plugin};
+pub use view::{SimParts, TankViewReady, ViewNode, ViewOf, view_attach_plugin};
 
 /// Shared simulation composition and schedule. This stays at the facade so module ownership
 /// cannot accidentally move an ordering edge: restoration before gameplay, servo stepping after.

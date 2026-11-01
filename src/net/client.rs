@@ -781,7 +781,7 @@ struct ConnectRetry {
     exhausted: bool,
     /// An authenticated refusal is terminal and supplies the visible cause.
     refusal: Option<JoinRefusal>,
-    /// This link's match has replicated the client's own tank at least once
+    /// This link's match has presented the client's own tank at least once
     /// ([`latch_tank_seen`]): the loading screen gives way to the match.
     tank_seen: bool,
 }
@@ -974,10 +974,20 @@ pub(super) fn refusal_probe(app: &mut App) -> (Option<JoinRefusal>, String) {
     (refusal, label)
 }
 
-/// Latch [`ConnectRetry::tank_seen`] once a connected link's own tank has replicated (its input
-/// slot is claimed).
+/// Latch [`ConnectRetry::tank_seen`] once the own tank can be presented: interpolation has
+/// supplied its pose, local body construction has finished, and the view has bound.
 fn latch_tank_seen(
-    own: Query<(), (With<GameControlled>, With<NetTank>)>,
+    own: Query<
+        (),
+        (
+            With<GameControlled>,
+            With<NetTank>,
+            With<avian3d::prelude::Position>,
+            With<avian3d::prelude::Rotation>,
+            With<crate::tank::Tank>,
+            With<crate::tank::TankViewReady>,
+        ),
+    >,
     mut retry: ResMut<ConnectRetry>,
 ) {
     if retry.connected_once && !retry.tank_seen && !own.is_empty() {
@@ -2512,6 +2522,48 @@ mod match_exit;
 /// externally nameable), so the honest test lives here in-crate, over real ECS state.
 #[cfg(test)]
 mod tests {
+    /// The loading screen's consumers need a presented pose, complete local body and bound view;
+    /// ownership alone can precede all three. Results and respawn must retain the once-ready latch.
+    #[test]
+    fn loading_waits_for_the_own_tanks_pose_body_and_view() {
+        use avian3d::prelude::{Position, Rotation};
+        use bevy::ecs::system::RunSystemOnce;
+        let mut world = World::new();
+        world.insert_resource(ConnectRetry {
+            connected_once: true,
+            ..default()
+        });
+        let own = world.spawn((GameControlled, NetTank)).id();
+        world.run_system_once(latch_tank_seen).unwrap();
+        assert!(
+            !world.resource::<ConnectRetry>().tank_seen,
+            "ownership is not presentation"
+        );
+        world
+            .entity_mut(own)
+            .insert((Position(Vec3::ZERO), Rotation::default()));
+        world.run_system_once(latch_tank_seen).unwrap();
+        assert!(
+            !world.resource::<ConnectRetry>().tank_seen,
+            "the body must attach"
+        );
+        world.entity_mut(own).insert(crate::tank::Tank);
+        world.run_system_once(latch_tank_seen).unwrap();
+        assert!(
+            !world.resource::<ConnectRetry>().tank_seen,
+            "the view must bind"
+        );
+        world.entity_mut(own).insert(crate::tank::TankViewReady);
+        world.run_system_once(latch_tank_seen).unwrap();
+        assert!(world.resource::<ConnectRetry>().tank_seen);
+        world.despawn(own);
+        world.run_system_once(latch_tank_seen).unwrap();
+        assert!(
+            world.resource::<ConnectRetry>().tank_seen,
+            "results remain in the match"
+        );
+    }
+
     /// The device feed must expose duplicate primary windows as a construction bug: treating
     /// them as an absent window silently makes a live player's controls inert.
     #[test]
