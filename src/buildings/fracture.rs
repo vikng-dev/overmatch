@@ -3171,21 +3171,22 @@ impl Scab {
 }
 
 /// Law 2, the rear scab, on one loaded face (its `rays`, aggregated as `load`) of the chunk
-/// `backing` names; the wall design ("Standoff blast", Law 2) owns the model. The ligament `L`
-/// is the chunk's depth behind the face along its inward normal, to its farthest corner (a box's
+/// `backing` names; the wall design ("Standoff blast", Law 2) owns the model. The ligament `L` is
+/// the chunk's depth behind the face along its inward normal, to its farthest corner (a box's
 /// thickness), and the back point `b` lies `L` behind the face's load. The face's compression
-/// reaches `b` as `σ_b`: the Boussinesq sum over the face's patches of `3 L³ / (2π R⁵)` times each
-/// patch's transmitted force `min(P, σ_c,d) A`, which for a uniform load over a plane is the
-/// load itself (the solid-angle mean the #237 study names). The pulse lasts `τ = 2J / F`
-/// (`2i / P` of the face's blow and peak force) and is `λ = c τ` long. Reflected at the free back
-/// face as tension, it lifts a scab where `σ_b min(1, 2L / λ) ≥ σ_t,d`, of thickness
-/// `δ = λ σ_t,d / (2 σ_b)` (where the net tension first reaches the strength; at most `L`), at
-/// `v = (2σ_b − σ_t,d) / (ρ c)`. Its footprint is the area its transmitted force covers at `σ_b`,
-/// `F_t / σ_b`, bounded by the chunk's silhouette along the normal (DERIVED: the scab then carries
-/// at most `J F_t / F` of the face's momentum, never more than its blow). ASSUMED: the back face
-/// is free (a bonded chunk behind reflects as open air), the crater's depth is not taken off the
-/// ligament, and the gate reads one back point. `None` where the gate fails. Every input is the
-/// face's and its row's; no body type enters.
+/// reaches `b` as `σ_b`: the solid-angle mean of the face's transmitted stress, the sum over its
+/// patches of `L / (2π R³)` (each patch's solid angle seen from `b`, over `2π`, per area) times
+/// each patch's transmitted force `min(P, σ_c,d) A`; a uniform load over a plane gives back the
+/// load (the #237 study's mean; the wall design names the rejected alternative). The pulse lasts `τ
+/// = 2J / F` (`2i / P` of the face's blow and peak force) and is `λ = c τ` long. Reflected at the
+/// free back face as tension, it lifts a scab where `σ_b min(1, 2L / λ) ≥ σ_t,d`, of thickness `δ =
+/// λ σ_t,d / (2 σ_b)` (where the net tension first reaches the strength; at most `L`), at `v =
+/// (2σ_b − σ_t,d) / (ρ c)`, over `F_t / σ_b`, the area its transmitted force covers at `σ_b`,
+/// bounded by the chunk's silhouette along the normal (DERIVED: the scab then carries at most `J
+/// F_t / F` of the face's momentum, never more than its blow). ASSUMED: that equivalent area is the
+/// footprint, the back face is free (a bonded chunk behind reflects as open air), the crater's
+/// depth is not taken off the ligament, and the gate reads one back point. `None` where the gate
+/// fails. Every input is the face's and its row's; no body type enters.
 pub(crate) fn scab(rays: &[&RayHit], load: &Load, backing: &Backing) -> Option<Scab> {
     let normal = rays
         .first()
@@ -3212,7 +3213,7 @@ pub(crate) fn scab(rays: &[&RayHit], load: &Load, backing: &Backing) -> Option<S
             force
         };
         let reach = (ray.at - back).length();
-        stress += 3.0 * ligament.powi(3) / (2.0 * PI * reach.powi(5)) * through;
+        stress += ligament / (2.0 * PI * reach.powi(3)) * through;
         transmitted += through;
     }
     let peak = load
