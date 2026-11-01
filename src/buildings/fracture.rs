@@ -1777,6 +1777,13 @@ pub(crate) fn weigh(
             break;
         }
         let graph = graph(structure, state);
+        // A disconnected group is about to leave the standing structure. Its contacts cannot
+        // be credited as static props while the remaining structure is assessed.
+        let mut grounded = vec![true; structure.chunks.len()];
+        for chunk in loose_groups(structure, state).into_iter().flatten() {
+            grounded[chunk] = false;
+        }
+        weighed.steps += structure.chunks.len() + structure.joints.len();
         let paths: Vec<Option<Vec<usize>>> = touched
             .iter()
             .map(|&c| ground_path(c, &graph, &mut weighed.steps))
@@ -1802,7 +1809,7 @@ pub(crate) fn weigh(
                 let Some(group) = held(touched[k], section, &graph, &mut weighed.steps) else {
                     continue;
                 };
-                let failure = (!bears_on_contact(structure, state, &incident, &group))
+                let failure = (!bears_on_contact(structure, state, &incident, &grounded, &group))
                     .then(|| {
                         weight_failure(
                             structure,
@@ -1897,13 +1904,15 @@ pub(crate) fn weigh(
 /// from one of its chunks (`incident`, each chunk's joints) to a standing chunk outside it, or to
 /// the ground, that carries no tension but still carries compression, its normal toward the group
 /// rising past [`BEARS`]. Such a contact is a rest not yet opened, or a seam a crack opened: a
-/// crack opens a seam's tension, never its contact, and the chunks either side still touch. A
-/// group that bears on one is held through it and its section at once, a static solve's to read
+/// crack opens a seam's tension, never its contact, and the chunks either side still touch.
+/// The outside chunk must remain grounded: a disconnected group about to fall is no static prop.
+/// A group that bears on one is held through it and its section at once, a static solve's to read
 /// ([`weigh`]), as a span between two piers is.
 fn bears_on_contact(
     structure: &Structure,
     state: &WallState,
     incident: &[Vec<usize>],
+    grounded: &[bool],
     group: &[usize],
 ) -> bool {
     let inside = |c: usize| group.binary_search(&c).is_ok();
@@ -1915,7 +1924,10 @@ fn bears_on_contact(
                 Bond::Bonded(_) => state.cracked[j],
             };
             let outside = match joint.b {
-                Side::Chunk(b) => inside(b) != inside(joint.a),
+                Side::Chunk(b) if inside(b) != inside(joint.a) => {
+                    grounded[if inside(b) { joint.a } else { b }]
+                }
+                Side::Chunk(_) => false,
                 Side::Ground => true,
             };
             if !contact || !outside || !state.live(joint) {
@@ -2386,9 +2398,16 @@ fn weight_failure(
     let (force, moment) = force_wrench(structure, group, loads, gravity, navier.centre, |load| {
         Some(load.press)
     });
-    let (demand, capacity) = navier.peak(&structure.joints, force, moment);
+    let (_, demand, capacity) = navier.peak(&structure.joints, force, moment);
+    // Only joints whose own traction reaches their strength open. Compression elsewhere
+    // does not supply work to separate that part of the section.
+    let opened = navier
+        .stresses(&structure.joints, force, moment)
+        .filter(|&(_, demand, capacity)| demand >= capacity)
+        .map(|(j, ..)| j)
+        .collect();
     Some(Failure {
-        joints: navier.border.into_iter().map(|(j, _)| j).collect(),
+        joints: opened,
         cause: Cause::Weight,
         demand,
         capacity,
@@ -2473,8 +2492,20 @@ impl Navier {
 
     /// Under resultant force `force` (N) and moment `moment` (N m) about the centre: the peak
     /// tension of the bordering joint whose ratio to its seam's tensile strength is highest, and
-    /// that strength, Pa.
-    fn peak(&self, joints: &[Joint], force: Vec3, moment: Vec3) -> (f32, f32) {
+    /// that strength, Pa, together with that joint's index.
+    fn peak(&self, joints: &[Joint], force: Vec3, moment: Vec3) -> (usize, f32, f32) {
+        self.stresses(joints, force, moment)
+            .max_by(|a, b| (a.1 / a.2).total_cmp(&(b.1 / b.2)))
+            .expect("a Navier reading borders its group with at least one joint")
+    }
+
+    /// Each bordering joint's own tensile demand and capacity, Pa.
+    fn stresses<'a>(
+        &'a self,
+        joints: &'a [Joint],
+        force: Vec3,
+        moment: Vec3,
+    ) -> impl Iterator<Item = (usize, f32, f32)> + 'a {
         let direct = force.dot(self.normal) / self.area;
         let bending = moment - self.normal * moment.dot(self.normal);
         let (u, v) = self.axes;
@@ -2484,22 +2515,19 @@ impl Navier {
         let det = juu * jvv - juv * juv;
         let (gu, gv) = ((jvv * lu - juv * lv) / det, (juu * lv - juv * lu) / det);
         let reach = gu.hypot(gv);
-        self.border
-            .iter()
-            .map(|&(j, _)| {
-                let d = joints[j].centroid - self.centre;
-                let (du, dv) = (d.dot(u), d.dot(v));
-                let rim = (joints[j].area / PI).sqrt();
-                (
-                    direct + gu * du + gv * dv + reach * rim,
-                    joints[j]
-                        .seam()
-                        .expect("a section holds bonded joints only")
-                        .tensile,
-                )
-            })
-            .max_by(|a, b| (a.0 / a.1).total_cmp(&(b.0 / b.1)))
-            .expect("a Navier reading borders its group with at least one joint")
+        self.border.iter().map(move |&(j, _)| {
+            let d = joints[j].centroid - self.centre;
+            let (du, dv) = (d.dot(u), d.dot(v));
+            let rim = (joints[j].area / PI).sqrt();
+            (
+                j,
+                direct + gu * du + gv * dv + reach * rim,
+                joints[j]
+                    .seam()
+                    .expect("a section holds bonded joints only")
+                    .tensile,
+            )
+        })
     }
 }
 
@@ -2538,11 +2566,11 @@ fn section_pulse(
         navier.centre,
         Load::mean_force,
     );
-    let (demand, capacity) =
+    let (_, demand, capacity) =
         navier.peak(&structure.joints, force + mean_force, moment + mean_moment);
     Reading {
         falling: plastic_demand(strength_ratio(|s| {
-            let (demand, capacity) = navier.peak(
+            let (_, demand, capacity) = navier.peak(
                 &structure.joints,
                 force + peak_force * s,
                 moment + peak_moment * s,
@@ -5055,7 +5083,16 @@ mod tests {
                     joint_between(&structure, 0, panel[panel.len() - 2]),
                     joint_between(&structure, 1, panel[panel.len() - 1]),
                 ];
-                assert_eq!(cracks(&weighed), vec![(Cause::Weight, top)]);
+                let mut opened: Vec<_> = weighed
+                    .failures
+                    .iter()
+                    .flat_map(|failure| {
+                        assert_eq!(failure.cause, Cause::Weight);
+                        failure.joints.iter().copied()
+                    })
+                    .collect();
+                opened.sort_unstable();
+                assert_eq!(opened, top);
                 assert_eq!(fell, vec![panel.clone()]);
             } else {
                 assert_eq!(cracks(&weighed), Vec::new(), "within the limit");
@@ -5584,6 +5621,45 @@ mod tests {
             "an infinite source mass is the opposite limit"
         );
     }
+    /// A section's peak tensile stress opens the joint that reaches its own strength,
+    /// not its still-compressed neighbours. Standing walls rely on this local onset: a
+    /// section-strength reading is not work sufficient to separate the entire section.
+    /// ASSUMED fixture: two coplanar support discs under one rigid chunk, with eccentric press.
+    #[test]
+    fn a_local_tensile_overload_does_not_open_the_compressed_section() {
+        let mut structure = row(1);
+        structure.chunks[0].centroid = Vec3::Y;
+        structure.joints.clear();
+        for x in [-1.0, 1.0] {
+            structure.joints.push(Joint {
+                a: 0,
+                b: Side::Ground,
+                area: 0.1,
+                centroid: Vec3::X * x,
+                normal: Vec3::Y,
+                bond: Bond::Bonded(brick().seam),
+            });
+        }
+        let load = Load {
+            chunk: 0,
+            at: Vec3::new(-3.0, 1.0, 0.0),
+            press: Vec3::NEG_Y * 1.0e5,
+            blow: Vec3::ZERO,
+            peak: None,
+            energy: 0.0,
+            crushed: 0.0,
+            origin: Origin::Field,
+        };
+        let failure =
+            weight_failure(&structure, &[0, 1], &[0], &[load], Vec3::ZERO, &mut 0).unwrap();
+        assert!(failure.demand > failure.capacity);
+        assert_eq!(
+            failure.joints,
+            vec![1],
+            "the opposite support remains in compression"
+        );
+    }
+
     /// GRAVITY IS ONE FORCE (the game's environment destruction model, study test 5).
     /// The authority's strength and rest verdicts must be identical when the group's weight is
     /// supplied instead as one press at its mass centroid with gravity off. Special-casing weight in

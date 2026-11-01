@@ -2807,3 +2807,61 @@ fn every_collider_carries_its_materials_friction_under_the_one_rule() {
     assert!(checked > 0, "the shipped map spawned no contact collider");
     println!("{checked} contact colliders carry their material's friction");
 }
+
+/// The game's environment destruction, game state only: a shipped-data hull pushes the
+/// shipped house with the normal driving and contact systems. ASSUMED fixture placement and
+/// initial closing speed; report topology, never tick time or an asset-specific pass threshold.
+#[test]
+fn a_shipped_data_hull_push_reports_environment_release_groups() {
+    use crate::buildings::breakage::{WallPiece, WallRecord};
+    use avian3d::prelude::{AngularVelocity, LinearVelocity, Position, Rotation};
+    let (mut app, tank) = booted_offline_sim();
+    for _ in 0..128 {
+        app.update();
+    }
+    let y = app.world().get::<Position>(tank).unwrap().y;
+    let house_at = Vec3::new(20.0, 0.0, 20.0);
+    let kind = crate::buildings::tests::shipped_house();
+    let mut queue = bevy::ecs::world::CommandQueue::default();
+    let mut commands = Commands::new(&mut queue, app.world());
+    crate::buildings::spawn(
+        &mut commands,
+        &kind,
+        crate::scatter::MapInstance {
+            id: "push_fixture".to_owned(),
+            ordinal: 60000,
+        },
+        Transform::from_translation(house_at),
+    );
+    queue.apply(app.world_mut());
+    app.world_mut().entity_mut(tank).insert((
+        Position(house_at + Vec3::new(-5.1, y, 0.0)),
+        Rotation(Quat::from_rotation_y(-std::f32::consts::FRAC_PI_2)),
+        LinearVelocity(Vec3::X * 1.2),
+        AngularVelocity::ZERO,
+    ));
+    for _ in 0..512 {
+        drive_tick(&mut app, tank, 1.0, 0.0);
+    }
+    let groups: Vec<usize> = app
+        .world_mut()
+        .query::<&WallPiece>()
+        .iter(app.world())
+        .filter(|piece| piece.building == 60000)
+        .map(|piece| piece.chunks.len())
+        .collect();
+    assert!(
+        app.world()
+            .resource::<WallRecord>()
+            .entries
+            .iter()
+            .any(|entry| entry.building == 60000),
+        "the driving fixture must reach the wall through production contacts"
+    );
+    println!(
+        "MEASURED shipped-data hull push: {} chunks freed in {} groups, sizes {:?}",
+        groups.iter().sum::<usize>(),
+        groups.len(),
+        groups
+    );
+}

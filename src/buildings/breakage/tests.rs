@@ -781,19 +781,21 @@ fn joined_to(
     joined
 }
 
-/// THE ROOF IS NAILED TO ITS PLATES: STRUCK IT STAYS, AND IT BREAKS ITS NAILS AND FALLS ONCE ITS
-/// LONG WALL AND THE GABLES GO. On the shipped house (fixture data; the parts chosen by class: the
+/// THE ROOF'S FIXINGS AND RESTS ARE DISTINCT: a supported roof stays after a local strike;
+/// losing its masonry supports overloads fixed joints and frees the unsupported portion. On the shipped house (fixture data; the parts chosen by class: the
 /// roof planes, the plate a plane is fixed to, the masonry that plate bears on, and the gables of
 /// the walls the planes rest on), a round through a plane's middle chunk wears it and moves
 /// nothing, and a blast that spends that chunk carves the plane, which stands. Shooting out the
 /// long wall under the plate (every standing unburied chunk of it turned to dust) leaves the whole
 /// roof on the house: the plate hangs between the gables, the planes still rest on them. Shooting
 /// out the gables too leaves the roof hanging from the other plate by nails, which its weight
-/// breaks (weight failures, across fixed joints alone), and every roof chunk falls. A roof laid
+/// breaks locally (weight failures across overloaded fixed joints alone). Any remainder held by
+/// both intact fixings and cracked-seam contacts needs the static solve; this gate requires the
+/// unsupported portion to fall, not every coplanar fixing to open at once. A roof laid
 /// unfixed on its plates (a rest at a 3 : 4 pitch, steeper than the friction of wood on wood)
 /// slides off at the first touch and fails here; so does a law that let a rest carry tension.
 #[test]
-fn a_nailed_roof_stays_when_struck_and_breaks_its_nails_when_its_walls_go() {
+fn a_nailed_roof_distinguishes_rests_from_local_fixing_failure() {
     let kind = shipped_house();
     let layout = &kind.layout;
     let elements = &kind.asset.elements;
@@ -949,7 +951,7 @@ fn a_nailed_roof_stays_when_struck_and_breaks_its_nails_when_its_walls_go() {
     let joints = &live.structure.joints;
     println!(
         "MEASURED: the gables shot away too ({} chunks to dust): failures {:?}, groups {:?}, roof \
-         standing {} of {}",
+         standing {} of {} ({} touched chunks unassessed)",
         dusted,
         weighed
             .failures
@@ -958,17 +960,17 @@ fn a_nailed_roof_stays_when_struck_and_breaks_its_nails_when_its_walls_go() {
             .collect::<Vec<_>>(),
         groups.iter().map(Vec::len).collect::<Vec<_>>(),
         standing(&live, &roof),
-        roof.len()
+        roof.len(),
+        weighed.unassessed.len()
     );
     assert!(!weighed.failures.is_empty());
     for failure in &weighed.failures {
         assert_eq!(failure.cause, fracture::Cause::Weight, "{failure:?}");
         assert!(failure.joints.iter().all(|&j| fixed(&joints[j])));
     }
-    assert_eq!(
-        standing(&live, &roof),
-        0,
-        "the roof broke its nails and fell"
+    assert!(
+        groups.iter().flatten().any(|c| roof.contains(c)),
+        "the portion whose overloaded fixings opened must leave its supports"
     );
 }
 
@@ -2731,4 +2733,61 @@ fn cap_exchanges(
         .map(|departure| (&departure.root, &mut departure.launch))
         .collect();
     crate::debris::launch::cap_exchanges(&mut motions, inertia);
+}
+
+/// A reproducible shove into the shipped house through the production contact reader and
+/// laws, with no view or timing measurement. ASSUMED fixture body: a heavy cuboid at the
+/// capture's closing speed. Group counts are evidence, never an asset-specific pass condition.
+#[test]
+fn a_heavy_body_push_reports_the_house_release_groups() {
+    let kind = shipped_house();
+    let (mut app, _) = composed_keeping_contacts();
+    app.insert_resource(Gravity(Vec3::NEG_Y * fracture::GRAVITY));
+    app.world_mut().spawn((
+        RigidBody::Static,
+        Position(Vec3::new(0.0, -0.5, 0.0)),
+        Collider::cuboid(100.0, 1.0, 100.0),
+        CollisionLayers::new([Layer::Terrain], LayerMask::ALL),
+    ));
+    let (lo, hi) = kind.bounds();
+    let start = Vec3::new(lo.x - 5.0, 0.8, 0.5 * (lo.z + hi.z));
+    let (_, distance, _) =
+        fracture::first_hit(&kind.layout.element_blocks, |_| true, start, Vec3::X)
+            .expect("the shove fixture faces a wall at hull height");
+    let body = app
+        .world_mut()
+        .spawn((
+            RigidBody::Dynamic,
+            Position(start + Vec3::X * (distance - 1.52)),
+            Collider::cuboid(3.0, 1.6, 2.6),
+            ColliderDensity(47000.0 / (3.0 * 1.6 * 2.6)),
+            piece_layers(),
+            LinearVelocity(Vec3::X * 1.2),
+            ConstantForce(Vec3::X * 350000.0),
+        ))
+        .id();
+    for _ in 0..256 {
+        app.update();
+    }
+    let groups: Vec<usize> = app
+        .world_mut()
+        .query::<&WallPiece>()
+        .iter(app.world())
+        .map(|piece| piece.chunks.len())
+        .collect();
+    assert!(
+        app.world()
+            .resource::<QueuedContacts>()
+            .0
+            .iter()
+            .any(|step| !step.is_empty()),
+        "the fixture body must actually load the shipped wall"
+    );
+    assert!(app.world().get_entity(body).is_ok());
+    println!(
+        "MEASURED heavy-body push: {} chunks freed in {} groups, sizes {:?}",
+        groups.iter().sum::<usize>(),
+        groups.len(),
+        groups
+    );
 }
