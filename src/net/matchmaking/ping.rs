@@ -56,17 +56,22 @@ pub(super) fn summarize(samples_ms: &[f64]) -> Option<PingSummary> {
 }
 
 /// The beacon's TCP endpoint: `host` is an IP in Edgegap's list; a hostname is resolved, IPv4
-/// first. Blocking (DNS), so it runs on the probe's own thread.
-pub(super) fn beacon_addr(host: &str, port: u16) -> Option<SocketAddr> {
+/// first. Blocking (DNS), so it runs on the probe's own thread. The error names why the host
+/// gave no address.
+pub(super) fn beacon_addr(host: &str, port: u16) -> Result<SocketAddr, String> {
     if let Ok(ip) = host.parse::<IpAddr>() {
-        return Some(SocketAddr::new(ip, port));
+        return Ok(SocketAddr::new(ip, port));
     }
-    let resolved: Vec<SocketAddr> = (host, port).to_socket_addrs().ok()?.collect();
+    let resolved: Vec<SocketAddr> = (host, port)
+        .to_socket_addrs()
+        .map_err(|error| format!("cannot resolve the beacon {host}:{port}: {error}"))?
+        .collect();
     resolved
         .iter()
         .find(|addr| addr.is_ipv4())
         .or_else(|| resolved.first())
         .copied()
+        .ok_or_else(|| format!("the beacon {host}:{port} resolved to no address"))
 }
 
 /// Time `samples` TCP connects to `addr`, `gap` apart; each failed or timed-out connect is

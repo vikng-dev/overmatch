@@ -21,7 +21,8 @@ use super::ping::PingSummary;
 pub(super) enum Estimate {
     /// A probe is still running.
     Measuring,
-    /// No same-city TCP beacon, or none of its samples succeeded.
+    /// No same-city TCP beacon, none of its samples succeeded, or the probe could not run (its host
+    /// does not resolve, or its thread did not start; the log names which).
     Unavailable,
     Measured(PingSummary),
 }

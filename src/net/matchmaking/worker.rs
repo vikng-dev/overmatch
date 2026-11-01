@@ -88,98 +88,151 @@ impl WorkerLink {
         replies.try_iter().collect()
     }
 
-    fn run(&self, name: &str, work: impl FnOnce(&ureq::Agent, &str) -> Reply + Send + 'static) {
+    /// Answer a request from this link's own thread. The link owns the receiver, so the channel is
+    /// open while `self` is.
+    fn answer(&self, reply: Reply) {
+        self.sender
+            .send(reply)
+            .expect("the link owns its reply receiver, so its channel is open");
+    }
+
+    /// Run `work` on its own thread. An OS refusal to start the thread answers the request with
+    /// `refused(cause)`, so the lobby shows why instead of waiting forever.
+    fn run(
+        &self,
+        name: &str,
+        work: impl FnOnce(&ureq::Agent, &str) -> Reply + Send + 'static,
+        refused: impl FnOnce(String) -> Reply,
+    ) {
         let agent = self.agent.clone();
         let api = self.api.clone();
         let sender = self.sender.clone();
         let spawned = std::thread::Builder::new()
             .name(format!("matchmaking-{name}"))
             .spawn(move || {
-                // The lobby may be gone (app exit); a closed channel needs no answer.
-                let _ = sender.send(work(&agent, &api));
+                // The lobby may be gone (app exit): its receiver dropped, no one waits on this.
+                if sender.send(work(&agent, &api)).is_err() {
+                    debug!("matchmaking: a reply arrived after the lobby closed");
+                }
             });
         if let Err(error) = spawned {
-            error!("matchmaking: cannot spawn the {name} thread: {error}");
+            let cause = format!("can't start the {name} request ({error})");
+            error!("matchmaking: {cause}");
+            self.answer(refused(cause));
         }
     }
 
     /// `GET /v1/locations?version=`.
     pub(super) fn fetch_locations(&self, version: &str) {
         let version = version.to_owned();
-        self.run("locations", move |agent, api| {
-            let response = agent
-                .get(format!("{api}/v1/locations"))
-                .query("version", &version)
-                .call();
-            Reply::Locations(read_json(response).map_err(HttpError::reason))
-        });
+        self.run(
+            "locations",
+            move |agent, api| {
+                let response = agent
+                    .get(format!("{api}/v1/locations"))
+                    .query("version", &version)
+                    .call();
+                Reply::Locations(read_json(response).map_err(HttpError::reason))
+            },
+            |cause| Reply::Locations(Err(cause)),
+        );
     }
 
     /// Probe one location's beacon; a location without a TCP beacon is answered at once.
     pub(super) fn probe(&self, id: &str, beacon: Option<&Beacon>) {
         let id = id.to_owned();
         let Some((host, port)) = beacon.and_then(|b| Some((b.host.clone(), b.tcp_port?))) else {
-            let _ = self.sender.send(Reply::Ping {
+            self.answer(Reply::Ping {
                 id,
                 estimate: Estimate::Unavailable,
             });
             return;
         };
-        self.run("ping", move |_, _| {
-            let samples = ping::beacon_addr(&host, port)
-                .map(|addr| {
-                    ping::probe_tcp(addr, ping::SAMPLES, ping::SAMPLE_GAP, ping::SAMPLE_TIMEOUT)
-                })
-                .unwrap_or_default();
-            let estimate =
-                ping::summarize(&samples).map_or(Estimate::Unavailable, Estimate::Measured);
-            Reply::Ping { id, estimate }
-        });
+        let refused_id = id.clone();
+        self.run(
+            "ping",
+            move |_, _| {
+                let estimate = match ping::beacon_addr(&host, port) {
+                    Ok(addr) => ping::summarize(&ping::probe_tcp(
+                        addr,
+                        ping::SAMPLES,
+                        ping::SAMPLE_GAP,
+                        ping::SAMPLE_TIMEOUT,
+                    ))
+                    .map_or(Estimate::Unavailable, Estimate::Measured),
+                    // The row reads unavailable; the log names why.
+                    Err(cause) => {
+                        warn!("matchmaking: {id}: {cause}");
+                        Estimate::Unavailable
+                    }
+                };
+                Reply::Ping { id, estimate }
+            },
+            |_| Reply::Ping {
+                id: refused_id,
+                estimate: Estimate::Unavailable,
+            },
+        );
     }
 
     /// `POST /v1/join`.
     pub(super) fn join(&self, generation: u64, request: JoinRequest) {
-        self.run("join", move |agent, api| {
-            let result = post_json::<_, JoinResponse>(agent, &format!("{api}/v1/join"), &request)
-                .map(|joined| joined.ticket)
-                .map_err(HttpError::reason);
-            Reply::Joined { generation, result }
-        });
+        self.run(
+            "join",
+            move |agent, api| {
+                let result =
+                    post_json::<_, JoinResponse>(agent, &format!("{api}/v1/join"), &request)
+                        .map(|joined| joined.ticket)
+                        .map_err(HttpError::reason);
+                Reply::Joined { generation, result }
+            },
+            move |cause| Reply::Joined {
+                generation,
+                result: Err(cause),
+            },
+        );
     }
 
     /// `POST /v1/join/status`; a ready answer's address is resolved here, off the frame loop.
     pub(super) fn poll(&self, generation: u64, ticket: String) {
-        self.run("status", move |agent, api| {
-            let response = post_json::<_, TicketResponse>(
-                agent,
-                &format!("{api}/v1/join/status"),
-                &TicketRequest { ticket },
-            );
-            let outcome = match response {
-                Ok(response) => match response.answer() {
-                    Ok(TicketAnswer::Starting) => StatusOutcome::Starting,
-                    Ok(TicketAnswer::Failed { reason }) => StatusOutcome::Failed(reason),
-                    Ok(TicketAnswer::Ready { address, port, key }) => {
-                        match match_addr(&address, port) {
-                            Ok(addr) => StatusOutcome::Ready(ReadyMatch { addr, key }),
-                            Err(error) => StatusOutcome::Rejected(error),
+        self.run(
+            "status",
+            move |agent, api| {
+                let response = post_json::<_, TicketResponse>(
+                    agent,
+                    &format!("{api}/v1/join/status"),
+                    &TicketRequest { ticket },
+                );
+                let outcome = match response {
+                    Ok(response) => match response.answer() {
+                        Ok(TicketAnswer::Starting) => StatusOutcome::Starting,
+                        Ok(TicketAnswer::Failed { reason }) => StatusOutcome::Failed(reason),
+                        Ok(TicketAnswer::Ready { address, port, key }) => {
+                            match match_addr(&address, port) {
+                                Ok(addr) => StatusOutcome::Ready(ReadyMatch { addr, key }),
+                                Err(error) => StatusOutcome::Rejected(error),
+                            }
                         }
+                        Err(error) => StatusOutcome::Rejected(error),
+                    },
+                    Err(HttpError::Status(status, error)) if status < 500 => {
+                        StatusOutcome::Rejected(error)
                     }
-                    Err(error) => StatusOutcome::Rejected(error),
-                },
-                Err(HttpError::Status(status, error)) if status < 500 => {
-                    StatusOutcome::Rejected(error)
+                    Err(error) => StatusOutcome::Transient(match error {
+                        HttpError::Status(status, _) => format!("HTTP {status}"),
+                        HttpError::Transport(error) => error,
+                    }),
+                };
+                Reply::Status {
+                    generation,
+                    outcome,
                 }
-                Err(error) => StatusOutcome::Transient(match error {
-                    HttpError::Status(status, _) => format!("HTTP {status}"),
-                    HttpError::Transport(error) => error,
-                }),
-            };
-            Reply::Status {
+            },
+            move |cause| Reply::Status {
                 generation,
-                outcome,
-            }
-        });
+                outcome: StatusOutcome::Transient(cause),
+            },
+        );
     }
 }
 
