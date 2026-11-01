@@ -222,15 +222,24 @@ pub(super) fn install_client(app: &mut App) {
         .add_systems(Update, (attach_view, follow_pose).chain());
 }
 
-/// A building piece's carrier: its pose and its group, replicated to every client.
+/// A building piece's carrier: its pose and its group, replicated to every client. The carrier
+/// holds the group's `WallPiece` too, so its own spawn reaches this observer: it is the carrier
+/// (it has a [`DebrisPose`]), not a piece, and gets none.
 fn carry_wall_piece(
     added: On<Add, WallPiece>,
-    pieces: Query<(&WallPiece, &Position, &Rotation)>,
+    pieces: Query<(&WallPiece, Option<(&Position, &Rotation)>, Has<DebrisPose>)>,
     mut commands: Commands,
 ) {
-    let Ok((piece, position, rotation)) = pieces.get(added.entity) else {
+    let (piece, pose, carrier) = pieces
+        .get(added.entity)
+        .expect("an added WallPiece is on its entity in its own Add observer");
+    if carrier {
         return;
-    };
+    }
+    let (position, rotation) = pose.expect(
+        "`buildings::breakage` spawns every piece with its Position and Rotation in the WallPiece \
+         bundle",
+    );
     let carrier = commands
         .spawn((
             Name::new("WallPieceCarrier"),
@@ -492,6 +501,46 @@ mod tests {
     use bevy::time::TimeUpdateStrategy;
 
     use super::*;
+
+    /// Every building piece gets exactly one replicated carrier at its spawn pose, and the carrier
+    /// (which holds the group's `WallPiece` too) gets none. A mutant that skips a pose-less entity
+    /// silently, or that carries the carrier, breaks one of the two counts; clients then draw no
+    /// fallen group, or a phantom at the origin.
+    #[test]
+    fn a_piece_gets_one_carrier_and_the_carrier_none() {
+        let mut world = World::new();
+        world.add_observer(carry_wall_piece);
+        let at = Vec3::new(3.0, 1.5, -2.0);
+        let piece = world
+            .spawn((
+                WallPiece {
+                    building: 2,
+                    chunks: vec![4, 5],
+                },
+                Position(at),
+                Rotation(Quat::IDENTITY),
+            ))
+            .id();
+        world.flush();
+        let carrier = world.get::<Carrier>(piece).expect("the piece is carried").0;
+        assert_eq!(world.get::<DebrisPose>(carrier).unwrap().position, at);
+        assert!(world.get::<Carrier>(carrier).is_none());
+        assert_eq!(world.query::<&DebrisPose>().iter(&world).count(), 1);
+    }
+
+    /// A piece spawned without its body pose is a construction bug, never a group that silently
+    /// draws nowhere.
+    #[test]
+    #[should_panic(expected = "spawns every piece with its Position and Rotation")]
+    fn a_piece_without_its_pose_is_a_bug() {
+        let mut world = World::new();
+        world.add_observer(carry_wall_piece);
+        world.spawn(WallPiece {
+            building: 2,
+            chunks: vec![4],
+        });
+        world.flush();
+    }
 
     /// The lever's readings. A mutant that arms an unset or `off` lever spawns fragments on every
     /// production server; one that drops a field silently measures the wrong condition tonight; one
