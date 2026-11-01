@@ -246,10 +246,15 @@ impl Script {
             });
         }
         match self.aim {
-            Aim::Point(point) if !Vec3::from(point).is_finite() => {
+            Aim::Point(point)
+                if crate::command::ParsedAimIntent::try_from(AimIntent::HullLocal(Vec3::from(
+                    point,
+                )))
+                .is_err() =>
+            {
                 return Err(ScriptError::Invalid {
                     field: "aim",
-                    problem: "use a finite point",
+                    problem: "use a finite point inside the derived AIM_LIMIT envelope",
                 });
             }
             Aim::Sweep if matches!(self.drive, Drive::Fire { .. }) => {
@@ -792,6 +797,7 @@ mod tests {
             ("(drive: Fire())", "drive"),
             ("(drive: Fire(secondary: true), aim: Sweep)", "aim"),
             ("(aim: Point((1.0, 1e39, 0.0)))", "aim"),
+            ("(aim: Point((1.0, 1e30, 0.0)))", "aim"),
             ("(range_m: 0.0)", "range_m"),
             (
                 "(spawn_pose: (pos: (0.0, 0.0, 0.0), rot: (0.0, 0.0, 0.0, 0.0)))",

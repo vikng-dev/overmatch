@@ -14,6 +14,7 @@ use crate::tank::{Controlled, Muzzle, TankRoot, Weapon, WeaponIndex};
 
 /// One tick's driver intent for a tank.
 #[derive(Component, Default, Clone, Copy, PartialEq, Debug, Serialize, Deserialize, Reflect)]
+#[require(ParsedTankCommand)]
 pub struct TankCommand {
     /// Target throttle in [-1, 1]: forward/reverse drive.
     pub throttle: f32,
@@ -85,6 +86,112 @@ impl TankCommand {
     }
 }
 
+/// Why a raw input snapshot cannot enter simulation. These are outside-input refusals at the
+/// network bridge; a locally authored invalid snapshot is a bug in its device/tool writer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum CommandError {
+    Throttle,
+    Steer,
+    Range,
+    Aim,
+}
+
+impl std::fmt::Display for CommandError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::Throttle => "throttle must be finite and within [-1, 1]",
+            Self::Steer => "steer must be finite and within [-1, 1]",
+            Self::Range => "range must be finite and nonnegative",
+            Self::Aim => "aim must be finite and inside the derived AIM_LIMIT envelope",
+        })
+    }
+}
+impl std::error::Error for CommandError {}
+
+/// One parsed input snapshot. Present with the raw command at spawn, initially idle; the input
+/// boundary fills it before gameplay. Its fields are private so consumers cannot bypass parsing.
+/// The servo bridge reads the checked aim; other sim readers receive its validated raw copy.
+#[derive(Component, Default, Debug, Clone, Copy)]
+pub(crate) struct ParsedTankCommand {
+    command: TankCommand,
+    aim: Option<ParsedAimIntent>,
+}
+
+impl TryFrom<TankCommand> for ParsedTankCommand {
+    type Error = CommandError;
+    fn try_from(command: TankCommand) -> Result<Self, Self::Error> {
+        for (level, error) in [
+            (command.throttle, CommandError::Throttle),
+            (command.steer, CommandError::Steer),
+        ] {
+            if !level.is_finite() || !(-1.0..=1.0).contains(&level) {
+                return Err(error);
+            }
+        }
+        if !command.range.is_finite() || command.range < 0.0 {
+            return Err(CommandError::Range);
+        }
+        let aim = command.aim.map(ParsedAimIntent::try_from).transpose()?;
+        Ok(Self { command, aim })
+    }
+}
+
+impl std::ops::Deref for ParsedTankCommand {
+    type Target = TankCommand;
+    fn deref(&self) -> &Self::Target {
+        &self.command
+    }
+}
+
+impl ParsedTankCommand {
+    pub(crate) fn command(self) -> TankCommand {
+        self.command
+    }
+    pub(crate) fn aim(self) -> Option<ParsedAimIntent> {
+        self.aim
+    }
+    pub(crate) fn attest(mut self, tick: u32) -> Self {
+        if self.command.for_tick != tick {
+            self.command.fail_consumables_closed();
+        }
+        self
+    }
+}
+
+/// An aim whose finite point is inside the derived authoring envelope, parsed once at input.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct ParsedAimIntent(AimIntent);
+
+impl TryFrom<AimIntent> for ParsedAimIntent {
+    type Error = CommandError;
+    fn try_from(intent: AimIntent) -> Result<Self, Self::Error> {
+        let point = intent.point();
+        if !point.is_finite() || point.abs().max_element() > crate::aim::AIM_LIMIT {
+            return Err(CommandError::Aim);
+        }
+        Ok(Self(intent))
+    }
+}
+impl ParsedAimIntent {
+    pub(crate) fn in_hull(self, to_local: &Affine3A) -> Vec3 {
+        self.0.in_hull(to_local)
+    }
+}
+
+/// Local device/tool authors have no Lightyear action slot. Network snapshots are parsed by the
+/// protocol bridge instead, with a typed refusal and the offending link in its log.
+pub(crate) fn parse_local_commands(
+    mut commands: Query<
+        (&TankCommand, &mut ParsedTankCommand),
+        Without<lightyear::prelude::input::native::ActionState<TankCommand>>,
+    >,
+) {
+    for (&command, mut parsed) in &mut commands {
+        *parsed = ParsedTankCommand::try_from(command)
+            .expect("local device/tool writers author finite bounded commands before gameplay");
+    }
+}
+
 /// An aim intention and the frame it is measured in (ADR-0038).
 ///
 /// **The intention travels in the frame its authoring view is anchored to**, and only the author
@@ -109,10 +216,8 @@ pub enum AimIntent {
 }
 
 impl AimIntent {
-    /// The point as authored, whichever frame it names — the subject of the finiteness and
-    /// magnitude checks every consumer owes the sim before a poisoned value can reach a servo
-    /// target (`aim::AIM_LIMIT`). The variants share one bound: this crosses a trust boundary, so
-    /// the tag is a claim about a frame, never a warrant.
+    /// The raw point as authored, whichever frame it names. The input boundary parses it into
+    /// [`ParsedAimIntent`] before any servo consumer; the frame tag is never a warrant.
     pub fn point(self) -> Vec3 {
         match self {
             Self::World(point) | Self::HullLocal(point) => point,
@@ -374,6 +479,7 @@ pub struct ConsumeCommandEdges;
 /// command. No devices — the game adds those via [`plugin`]; the sandbox writes commands from its
 /// own controls (the crew bar).
 pub fn core_plugin(app: &mut App) {
+    app.add_systems(FixedUpdate, parse_local_commands.before(GameplaySet));
     app.add_observer(clear_command_on_release).add_systems(
         FixedUpdate,
         consume_edges
@@ -555,7 +661,10 @@ fn select_round_input(
         let primary = weapons.iter().find_map(|(weapon, slot, root)| {
             (root.0 == tank && weapon.trigger == Trigger::Primary).then_some(slot.0)
         });
-        if let Some(weapon) = primary.and_then(|slot| u8::try_from(slot).ok()) {
+        // A vehicle without a primary trigger has no primary selection action.
+        if let Some(slot) = primary {
+            let weapon = u8::try_from(slot)
+                .expect("the tank load gate limits weapon slots to the wire's u8");
             if let Some(step) = step {
                 command.select_round = Some(RoundSelect { weapon, step });
             }
@@ -590,6 +699,90 @@ fn clear_command_on_release(remove: On<Remove, Controlled>, mut tanks: Query<&mu
 mod tests {
     use super::*;
     use crate::damage::CrewStation;
+
+    /// The game's damage model: the input boundary refuses malformed levels, range and either
+    /// aim frame before drive, servo or action consumers can observe them. The enum names the field.
+    #[test]
+    fn parsed_commands_refuse_each_malformed_input_field() {
+        for (command, error) in [
+            (
+                TankCommand {
+                    throttle: f32::NAN,
+                    ..default()
+                },
+                CommandError::Throttle,
+            ),
+            (
+                TankCommand {
+                    throttle: 1.01,
+                    ..default()
+                },
+                CommandError::Throttle,
+            ),
+            (
+                TankCommand {
+                    steer: f32::INFINITY,
+                    ..default()
+                },
+                CommandError::Steer,
+            ),
+            (
+                TankCommand {
+                    steer: -1.01,
+                    ..default()
+                },
+                CommandError::Steer,
+            ),
+            (
+                TankCommand {
+                    range: f32::NAN,
+                    ..default()
+                },
+                CommandError::Range,
+            ),
+            (
+                TankCommand {
+                    range: -1.0,
+                    ..default()
+                },
+                CommandError::Range,
+            ),
+        ] {
+            assert_eq!(ParsedTankCommand::try_from(command).unwrap_err(), error);
+        }
+        for poison in [
+            f32::NAN,
+            f32::INFINITY,
+            f32::NEG_INFINITY,
+            crate::aim::AIM_LIMIT * 1.01,
+            -crate::aim::AIM_LIMIT * 1.01,
+        ] {
+            for framed in [AimIntent::World, AimIntent::HullLocal] {
+                let command = TankCommand {
+                    aim: Some(framed(Vec3::splat(poison))),
+                    ..default()
+                };
+                assert_eq!(
+                    ParsedTankCommand::try_from(command).unwrap_err(),
+                    CommandError::Aim
+                );
+            }
+        }
+        for level in [-1.0, 0.0, 1.0] {
+            for framed in [AimIntent::World, AimIntent::HullLocal] {
+                let point = Vec3::splat(crate::aim::AIM_LIMIT);
+                let command = TankCommand {
+                    throttle: level,
+                    steer: level,
+                    aim: Some(framed(point)),
+                    ..default()
+                };
+                let parsed = ParsedTankCommand::try_from(command).unwrap();
+                assert_eq!(parsed.command(), command);
+                assert_eq!(parsed.aim().unwrap().in_hull(&Affine3A::IDENTITY), point);
+            }
+        }
+    }
 
     /// Every edge field is reported by [`TankCommand::has_edge`] and reset by
     /// [`TankCommand::clear_edges`] — the single-source-of-truth contract the edge set hangs off

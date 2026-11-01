@@ -115,7 +115,9 @@ fn bridge(fix: Fix, buf: &TankBuf, tick: Tick, action: &ActionState<TankCommand>
             }
             c
         }
-        Fix::ForTick => attest(action.0, tick),
+        Fix::ForTick => attest(action.0, tick)
+            .expect("fixture commands are valid")
+            .command(),
     }
 }
 

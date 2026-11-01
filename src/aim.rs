@@ -23,7 +23,7 @@ use bevy::prelude::*;
 
 use crate::Layer;
 use crate::camera::GunnerCameraPlaced;
-use crate::command::{AimIntent, TankCommand, TankDeviceSet};
+use crate::command::{AimIntent, ParsedTankCommand, TankCommand, TankDeviceSet};
 use crate::damage::{ControlledTank, VolumeOf, hit_ancestor};
 use crate::firecontrol::{RangeTable, lob};
 use crate::flow::{Flow, FlowScoped, InMatchSystems, MatchResourceExt};
@@ -39,8 +39,8 @@ use crate::view::PlayerView;
 /// (`sight::drive_gunner_aim`) — so "the sky" is one far point in all of them.
 pub(crate) const MAX_RANGE: f32 = 10_000.0;
 
-/// Per-axis magnitude a commanded aim point may not exceed, checked where the command meets the sim
-/// (`drive_aim_servos`). A legitimate pick is a point inside the world — [`crate::world::VIEW_CAST_MAX_M`]
+/// DERIVED per-axis magnitude a commanded aim point may not exceed, checked at the input boundary
+/// (`command::ParsedTankCommand`). A legitimate pick is a point inside the world — [`crate::world::VIEW_CAST_MAX_M`]
 /// covers its diagonal from any in-world origin — or the [`MAX_RANGE`] sky fallback out from one, so
 /// their sum bounds every author with headroom to spare while leaving a poisoned command nowhere near
 /// the magnitudes at which the hull composition overflows f32.
@@ -426,7 +426,7 @@ fn commit_aim(
 /// frame HERE, against the hull pose of the tick being laid: a servo angle is parent-local, so the
 /// conversion belongs to whoever drives the servo, at the tick it drives it.
 fn drive_aim_servos(
-    tanks: Query<(Entity, &TankCommand, &Rig, &Position, &Rotation), With<Tank>>,
+    tanks: Query<(Entity, &ParsedTankCommand, &Rig, &Position, &Rotation), With<Tank>>,
     tables: Query<&RangeTable>,
     mut servos: Query<(Entity, &mut ServoCommand, &ServoRole, &TankRoot)>,
     parents: Query<&ChildOf>,
@@ -435,36 +435,21 @@ fn drive_aim_servos(
 ) {
     laid.clear();
     for (tank, command, rig, position, rotation) in &tanks {
-        let Some(intent) = command.aim else {
+        let Some(intent) = command.aim() else {
             continue; // no commitment yet — servos hold
         };
-        // The command crosses a trust boundary unvalidated (`net::protocol` bridges the action
-        // state whole), so this gate is the sim's only guard against a poisoned aim. Finiteness
-        // alone does not cover it: a merely LARGE point survives every `is_finite` and then
-        // overflows to NaN inside the hull composition below, which reaches the servo targets and
-        // the physics state. Bound the magnitude at the same envelope the aim rays already resolve
-        // in ([`MAX_RANGE`]) — no legitimate author can name a point outside the one every pick
-        // falls back to — with the hull's own world position added, since the point is named in
-        // world coordinates and the tank is not at the origin. Hold, like no-commitment.
-        let commanded = intent.point();
-        if !commanded.is_finite() || commanded.abs().max_element() > AIM_LIMIT {
-            continue;
-        }
         // Tick-truth hull pose (`rig_world_pose`, never `GlobalTransform` — see its doc): the
         // hull-local aim frame must be the physics state or client and server lay their servos
         // from differently-stale hulls and diverge under maneuver.
-        let Some((hull_position, hull_rotation)) =
+        let (hull_position, hull_rotation) =
             rig_world_pose(rig.hull, tank, position.0, rotation.0, &parents, &locals)
-        else {
-            continue;
-        };
+                .expect("an assembled tank rig's hull pose composes from its spawn-time hierarchy");
         let hull_affine = Affine3A::from_rotation_translation(hull_rotation, hull_position);
         let to_local = hull_affine.inverse();
-        // Same NaN discipline as the aim check above, for the pose side (a NaN physics pose on a
-        // corrupt frame would poison every servo target below).
-        if !(to_local.matrix3.is_finite() && to_local.translation.is_finite()) {
-            continue;
-        }
+        assert!(
+            to_local.matrix3.is_finite() && to_local.translation.is_finite(),
+            "an authority hull pose is finite and invertible before laying servos"
+        );
 
         // Lob the raw intention up by the superelevation here (not at commit), so the commanded aim
         // — and its amber HUD dot — stay the intention, while the bore the servos reach is the
@@ -472,7 +457,8 @@ fn drive_aim_servos(
         // so the intention is named in that frame first.
         let theta = tables
             .get(rig.muzzle)
-            .map_or(0.0, |table| table.superelevation(command.range));
+            .expect("the assembled primary muzzle has its range table from spawn-time weapon data")
+            .superelevation(command.range);
         let point = hull_affine.transform_point3(lob(intent.in_hull(&to_local), theta));
         laid.insert(
             tank,
@@ -661,43 +647,29 @@ mod tests {
     /// The per-tank scan `drive_aim_servos` replaced: every servo visited for every tank. Kept
     /// verbatim as the oracle.
     fn drive_aim_servos_scan(
-        tanks: Query<(Entity, &TankCommand, &Rig, &Position, &Rotation), With<Tank>>,
+        tanks: Query<(Entity, &ParsedTankCommand, &Rig, &Position, &Rotation), With<Tank>>,
         tables: Query<&RangeTable>,
         mut servos: Query<(Entity, &mut ServoCommand, &ServoRole, &TankRoot)>,
         parents: Query<&ChildOf>,
         locals: Query<&Transform>,
     ) {
         for (tank, command, rig, position, rotation) in &tanks {
-            let Some(intent) = command.aim else {
+            let Some(intent) = command.aim() else {
                 continue; // no commitment yet — servos hold
             };
-            // The command crosses a trust boundary unvalidated (`net::protocol` bridges the action
-            // state whole), so this gate is the sim's only guard against a poisoned aim. Finiteness
-            // alone does not cover it: a merely LARGE point survives every `is_finite` and then
-            // overflows to NaN inside the hull composition below, which reaches the servo targets and
-            // the physics state. Bound the magnitude at the same envelope the aim rays already resolve
-            // in ([`MAX_RANGE`]) — no legitimate author can name a point outside the one every pick
-            // falls back to — with the hull's own world position added, since the point is named in
-            // world coordinates and the tank is not at the origin. Hold, like no-commitment.
-            let commanded = intent.point();
-            if !commanded.is_finite() || commanded.abs().max_element() > AIM_LIMIT {
-                continue;
-            }
             // Tick-truth hull pose (`rig_world_pose`, never `GlobalTransform` — see its doc): the
             // hull-local aim frame must be the physics state or client and server lay their servos
             // from differently-stale hulls and diverge under maneuver.
-            let Some((hull_position, hull_rotation)) =
-                rig_world_pose(rig.hull, tank, position.0, rotation.0, &parents, &locals)
-            else {
-                continue;
-            };
+            let (hull_position, hull_rotation) = rig_world_pose(
+                rig.hull, tank, position.0, rotation.0, &parents, &locals,
+            )
+            .expect("an assembled tank rig's hull pose composes from its spawn-time hierarchy");
             let hull_affine = Affine3A::from_rotation_translation(hull_rotation, hull_position);
             let to_local = hull_affine.inverse();
-            // Same NaN discipline as the aim check above, for the pose side (a NaN physics pose on a
-            // corrupt frame would poison every servo target below).
-            if !(to_local.matrix3.is_finite() && to_local.translation.is_finite()) {
-                continue;
-            }
+            assert!(
+                to_local.matrix3.is_finite() && to_local.translation.is_finite(),
+                "an authority hull pose is finite and invertible before laying servos"
+            );
 
             // Lob the raw intention up by the superelevation here (not at commit), so the commanded aim
             // — and its amber HUD dot — stay the intention, while the bore the servos reach is the
@@ -705,7 +677,10 @@ mod tests {
             // so the intention is named in that frame first.
             let theta = tables
                 .get(rig.muzzle)
-                .map_or(0.0, |table| table.superelevation(command.range));
+                .expect(
+                    "the assembled primary muzzle has its range table from spawn-time weapon data",
+                )
+                .superelevation(command.range);
             let point = hull_affine.transform_point3(lob(intent.in_hull(&to_local), theta));
             for (servo, mut servo_command, role, root) in &mut servos {
                 if root.0 != tank {
@@ -980,6 +955,9 @@ mod tests {
         }
 
         fn run<M, S: bevy::ecs::system::IntoSystem<(), (), M> + 'static>(&mut self, system: S) {
+            self.world
+                .run_system_once(crate::command::parse_local_commands)
+                .unwrap();
             self.world
                 .run_system_once(system)
                 .expect("the shipped system runs");
@@ -1449,44 +1427,6 @@ mod tests {
         );
     }
 
-    /// **A poisoned aim cannot reach a servo.** `net::protocol`'s bridge copies the action state
-    /// into the command whole, unvalidated, so an aim authored by a hostile or broken client arrives
-    /// at `drive_aim_servos` exactly as sent — and that gate is the sim's only guard.
-    ///
-    /// Finiteness is not the whole of it. A merely LARGE point passes every `is_finite` and then
-    /// overflows inside the hull composition, so the bound is on magnitude too, and it binds BOTH
-    /// frames: the tag is a claim about a frame, never a warrant. What must survive is the last good
-    /// lay — the servo target unmoved, and every pose still finite.
-    #[test]
-    fn a_poisoned_aim_moves_no_servo() {
-        let target = ROOT + Vec3::new(0.0, 0.0, -500.0);
-        let huge = AIM_LIMIT * 1.01;
-
-        for poison in [f32::NAN, f32::INFINITY, f32::NEG_INFINITY, huge, -huge] {
-            for framed in [AimIntent::World, AimIntent::HullLocal] {
-                let mut rig = AimRig::new();
-                for _ in 0..256 {
-                    rig.relay(AimIntent::World(target), 0.0);
-                }
-                let good = rig.hull_relative_bearing_deg();
-
-                rig.relay(framed(Vec3::splat(poison)), 0.0);
-                assert_eq!(
-                    rig.hull_relative_bearing_deg(),
-                    good,
-                    "a {poison} aim in {:?} moved the turret's target off its last good lay",
-                    framed(Vec3::ZERO),
-                );
-                let (_, rotation) = rig.pose_of(rig.gun, rig.tank);
-                assert!(
-                    rotation.is_finite(),
-                    "a {poison} aim in {:?} poisoned the gun's pose",
-                    framed(Vec3::ZERO),
-                );
-            }
-        }
-    }
-
     /// The possession invariant: [`CommittedAim`] is keyed by tank entity, so it hands back a
     /// commitment ONLY for the tank it was set on — a different entity (a possession change:
     /// respawn, Tab) reads as "no commitment", never a stale intention replayed onto the new tank.
@@ -1525,8 +1465,8 @@ mod tests {
         );
     }
 
-    /// Build `tanks` tanks (distinct poses, ranges and nested servo chains; one holding, one with a
-    /// poisoned aim), with their servos spawned interleaved so no tank's servos are contiguous.
+    /// Build `tanks` tanks with distinct poses, ranges and nested servo chains, two holding.
+    /// Their servos are interleaved so no tank's servos are contiguous.
     fn multi_tank_world(tanks: usize) -> (World, Vec<Entity>) {
         let mut world = World::new();
         let mut servos = Vec::new();
@@ -1549,8 +1489,7 @@ mod tests {
                 ))
                 .id();
             let aim = match i {
-                1 => None,
-                2 => Some(AimIntent::World(Vec3::splat(f32::NAN))),
+                1 | 2 => None,
                 _ => Some(AimIntent::World(Vec3::new(
                     40.0 + 13.0 * f,
                     2.0 * f,
@@ -1598,13 +1537,16 @@ mod tests {
                 .insert((TankRoot(*tank), ServoCommand { target: 9.0 }, *role));
         }
         let nodes = servos.iter().map(|(_, n, _)| *n).collect();
+        world
+            .run_system_once(crate::command::parse_local_commands)
+            .unwrap();
         (world, nodes)
     }
 
     /// The sim tick's determinism across server and clients rests on `drive_aim_servos` writing the
     /// same servo targets, bit for bit, as the per-tank scan it replaced: each servo's float
-    /// operations are unchanged, only the visiting order is. Held tanks and poisoned aims leave
-    /// their servos' prior target.
+    /// operations are unchanged, only the visiting order is. Tanks with no commitment leave their
+    /// servos' prior target; malformed aims cannot be constructed as parsed input.
     #[test]
     fn servo_pass_matches_the_per_tank_scan_bit_for_bit() {
         let (mut fast, nodes) = multi_tank_world(5);

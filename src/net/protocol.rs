@@ -17,7 +17,7 @@ use serde::{Deserialize, Serialize};
 
 use super::disclosure::{NetTankStatus, apply_net_tank_status};
 use crate::ballistics::ComponentHealth;
-use crate::command::{DeviceClaim, TankCommand};
+use crate::command::{CommandError, DeviceClaim, ParsedTankCommand, TankCommand};
 use crate::damage::{CrewStation, Crewman, Dead, LaunchedTurret, PendingSwap, TankVolumes};
 use crate::damage_cam::wire::ShotExplanation;
 use crate::fingerprint::{fingerprint_field, fnv1a_64};
@@ -234,7 +234,7 @@ use crate::{CombatantId, CombatantLife, ShotId};
 ///
 /// [`WallPiece`]: crate::buildings::breakage::WallPiece
 /// [`WallEvent`]: crate::buildings::breakage::WallEvent
-pub const PROTOCOL_REV: u32 = 50;
+pub const PROTOCOL_REV: u32 = 51;
 
 /// Compatibility tag derived from the complete pinned wire manifest plus the crate version. This
 /// is the runtime handshake value: version-exact, so a version bump intentionally changes it.
@@ -1033,7 +1033,7 @@ const WIRE_SURFACE_HASH: u64 = 0x4fa8a9525007f08a;
 /// The pinned hash of the OWN wire-facing type DEFINITIONS (field layout, not just names). Re-pin it
 /// whenever a wire-facing struct/enum definition changes; house process also bumps
 /// [`PROTOCOL_REV`]. The tripwire prints the new value. See the block above for the coverage model.
-const WIRE_TYPES_HASH: u64 = 0xd552ce1737eb39af;
+const WIRE_TYPES_HASH: u64 = 0x6fd1cce80fe0d694;
 
 /// The pinned `Cargo.lock` versions of the external crates whose types ride the wire (avian's
 /// replicated physics components; lightyear's wire framing / input protocol). A bump of either can
@@ -1259,12 +1259,34 @@ pub(super) struct InputBridge;
 /// all remaining input-buffer substitutions. See `src/net/tests/net_fire_release.rs`.
 fn bridge_action_state_to_tank_command(
     timeline: Res<LocalTimeline>,
-    mut tanks: Query<(&ActionState<TankCommand>, &mut TankCommand)>,
+    mut tanks: Query<(
+        Entity,
+        &ActionState<TankCommand>,
+        &mut TankCommand,
+        &mut ParsedTankCommand,
+        Option<&ControlledBy>,
+    )>,
+    mut refused: Local<bevy::platform::collections::HashMap<Entity, CommandError>>,
 ) {
     let tick = timeline.tick();
-    for (action, mut command) in &mut tanks {
-        *command = attest(action.0, tick);
+    for (entity, action, mut command, mut parsed, owner) in &mut tanks {
+        *parsed = match attest(action.0, tick) {
+            Ok(parsed) => {
+                refused.remove(&entity);
+                parsed
+            }
+            Err(cause) => {
+                if refused.insert(entity, cause) != Some(cause) {
+                    warn!(tank = ?entity, link = ?owner.map(|owner| owner.owner), %cause,
+                        "net: refused malformed input; filing idle command");
+                }
+                ParsedTankCommand::default()
+            }
+        };
+        *command = parsed.command();
     }
+    // Replicas/links can leave; refusal history belongs only to live input slots.
+    refused.retain(|entity, _| tanks.contains(*entity));
 }
 
 /// The bridge's per-tank rule: a whole-struct copy (matches `ActionState`'s "absolute snapshot per
@@ -1272,11 +1294,8 @@ fn bridge_action_state_to_tank_command(
 /// authored for. `for_tick` was stamped by `net::client`'s `stamp_input_tick` with the tick
 /// lightyear files the command under; anything lightyear inherited, repeated, fabricated or froze
 /// carries some OTHER tick's stamp. Fail closed — never a detector, always a proof.
-pub(super) fn attest(mut command: TankCommand, tick: Tick) -> TankCommand {
-    if command.for_tick != tick.0 {
-        command.fail_consumables_closed();
-    }
-    command
+pub(super) fn attest(command: TankCommand, tick: Tick) -> Result<ParsedTankCommand, CommandError> {
+    ParsedTankCommand::try_from(command).map(|command| command.attest(tick.0))
 }
 
 /// In-crate tests for the input-attestation seam.
@@ -2334,6 +2353,63 @@ mod tests {
         let mut tl = LocalTimeline::default();
         tl.apply_delta(tick);
         tl
+    }
+
+    /// The game's damage model: even an attested malformed command files idle input. A peer
+    /// cannot poison movement, a servo or an action by making another field appear valid.
+    #[test]
+    fn malformed_attested_commands_file_idle_at_the_link_boundary() {
+        let mut world = World::new();
+        world.init_resource::<LocalTimeline>();
+        let link = world.spawn_empty().id();
+        let slot = world
+            .spawn((
+                ActionState(TankCommand::default()),
+                TankCommand::default(),
+                ControlledBy {
+                    owner: link,
+                    lifetime: default(),
+                },
+            ))
+            .id();
+        for mut malformed in [
+            TankCommand {
+                throttle: f32::NAN,
+                ..default()
+            },
+            TankCommand {
+                steer: 2.0,
+                ..default()
+            },
+            TankCommand {
+                range: -1.0,
+                ..default()
+            },
+            TankCommand {
+                aim: Some(AimIntent::World(Vec3::splat(f32::NAN))),
+                ..default()
+            },
+            TankCommand {
+                aim: Some(AimIntent::HullLocal(Vec3::splat(
+                    crate::aim::AIM_LIMIT * 2.0,
+                ))),
+                ..default()
+            },
+        ] {
+            malformed.fire_primary = true;
+            malformed.fire_secondary = true;
+            world.get_mut::<ActionState<TankCommand>>(slot).unwrap().0 = malformed;
+            world
+                .run_system_once(bridge_action_state_to_tank_command)
+                .unwrap();
+            assert_eq!(
+                *world.get::<TankCommand>(slot).unwrap(),
+                TankCommand::default()
+            );
+            let parsed = world.get::<ParsedTankCommand>(slot).unwrap();
+            assert_eq!(parsed.command(), TankCommand::default());
+            assert!(parsed.aim().is_none());
+        }
     }
 
     /// A command the player authored FOR `tick` — the attested case.
