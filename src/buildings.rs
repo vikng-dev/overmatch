@@ -274,11 +274,17 @@ pub(crate) mod tests {
     use super::*;
     use crate::map::tests::shipped_assets;
 
-    /// The shipped house, read through the real loader.
+    /// The immutable shipped fixture, resolved through the real loader once per test process.
+    /// Loader refusal tests read their own inputs; sharing this fixture repeats no hull construction.
     pub(crate) fn shipped_house() -> Arc<BuildingKind> {
-        BuildingLibrary::load(&shipped_assets(), ["house_1"])
-            .get("house_1")
-            .expect("the shipped house")
+        static HOUSE: std::sync::OnceLock<Arc<BuildingKind>> = std::sync::OnceLock::new();
+        HOUSE
+            .get_or_init(|| {
+                BuildingLibrary::load(&shipped_assets(), ["house_1"])
+                    .get("house_1")
+                    .expect("the shipped house")
+                    .clone()
+            })
             .clone()
     }
 

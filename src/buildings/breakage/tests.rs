@@ -1,5 +1,5 @@
 //! The breakage invariants, about the game's environment destruction (game state only), on the
-//! shipped house as fixture data: which chunk a test reads is chosen by a class rule (a breakable
+//! shipped construction and minimal generic fixtures: which chunk a test reads is chosen by a class rule (a breakable
 //! element's chunk nearest its centre, a chunk with no anchor), never by its number.
 
 use std::time::Duration;
@@ -20,6 +20,10 @@ const STEP: f32 = 1.0 / 64.0;
 /// and the shipped house spawned at the origin (unit scale), one fixed tick per update. `replica`
 /// adds the replica marker.
 fn composed(replica: bool) -> (App, Entity) {
+    composed_kind(replica, &shipped_house())
+}
+
+fn composed_kind(replica: bool, kind: &Arc<BuildingKind>) -> (App, Entity) {
     let mut app = App::new();
     app.add_plugins((
         MinimalPlugins,
@@ -44,13 +48,12 @@ fn composed(replica: bool) -> (App, Entity) {
     }
     app.finish();
     app.cleanup();
-    let kind = shipped_house();
     let world = app.world_mut();
     let mut queue = bevy::ecs::world::CommandQueue::default();
     let mut commands = Commands::new(&mut queue, world);
     let root = crate::buildings::spawn(
         &mut commands,
-        &kind,
+        kind,
         MapInstance {
             id: "house_0001".to_owned(),
             ordinal: 3,
@@ -1230,9 +1233,67 @@ fn set_off(app: &mut App, at: Vec3, blast: Blast) {
     app.update();
 }
 
+/// Fixture data for ray shielding: one anchored cube, 0.2 m per side. The invariant needs
+/// a crushable surface and a blocker, not a house's structural failure search.
+fn shielding_cube() -> Arc<BuildingKind> {
+    let registry = crate::substances::SubstanceRegistry::shipped_static();
+    let element = schema::Element {
+        name: "fixture/cube".to_owned(),
+        kind: ElementKind::Pier,
+        component: 0,
+        material: 0,
+        frame: schema::Frame {
+            origin: [0.0; 3],
+            u: [1.0, 0.0, 0.0],
+            v: [0.0, 1.0, 0.0],
+        },
+        surface_frame: schema::SurfaceFrame::Upright,
+        profile: vec![[-0.1, 0.0], [0.1, 0.0], [0.1, 0.2], [-0.1, 0.2]],
+        depth: [-0.1, 0.1],
+        chunks: [0, 1],
+    };
+    let volume = element.volume();
+    let asset = BuildingAsset {
+        id: "shielding_fixture".to_owned(),
+        format: schema::FORMAT,
+        foundation_y_m: 0.0,
+        materials: vec!["Brick".to_owned()],
+        attachments: Vec::new(),
+        components: vec!["fixture".to_owned()],
+        chunks: vec![schema::Chunk {
+            element: 0,
+            material: 0,
+            hull: element
+                .points()
+                .into_iter()
+                .map(|point| point.to_array())
+                .collect(),
+            volume_m3: volume,
+            centroid: [0.0, 0.1, 0.0],
+            mass_kg: volume * Masonry::of(registry, "Brick").unwrap().unwrap().density,
+        }],
+        elements: vec![element],
+        joints: Vec::new(),
+        anchors: vec![schema::Anchor {
+            chunk: 0,
+            area_m2: 0.04,
+            centroid: [0.0; 3],
+        }],
+    };
+    Arc::new(
+        BuildingKind::resolve(
+            &asset.id,
+            &ron::ser::to_string(&asset).unwrap(),
+            registry,
+            Attachments::shipped_static(),
+        )
+        .unwrap(),
+    )
+}
+
 /// A BLAST RAY THAT STOPS ON A MOVING BODY PUSHES IT BY ITS SHARE AND DEPOSITS NOTHING: a loose
 /// piece, or a dynamic body that is no piece (a launched turret's stand-in), between a fixture burst
-/// and a standing chunk of the house leaves with the momentum of the rays that meet it, each its
+/// and a standing fixture chunk leaves with the momentum of the rays that meet it, each its
 /// share's reflected impulse at the distance and on the face avian's cast gives ([`Blast::push`]),
 /// and the chunk it shades keeps its full pool, though the same burst crushes it with nothing
 /// there ([`CRUSHING_BLAST_J`]).
@@ -1242,19 +1303,19 @@ fn set_off(app: &mut App, at: Vec3, blast: Blast) {
 /// every rubble pile and hull a blast meets rests on it.
 #[test]
 fn a_ray_that_stops_on_a_moving_body_pushes_it_by_its_share_and_deposits_nothing() {
-    let kind = shipped_house();
-    let (e, [c, ..]) = fixture_chunks(&kind);
+    let kind = shielding_cube();
+    let (e, c) = (0, 0);
     let (near, w, _) = through(&kind, e, c, 0.0);
     // The burst a metre before the chunk's near face, the body half-way (fixture data).
     let origin = near - *w * 0.5;
     let blast = Blast::of(CRUSHING_BLAST_J, 1e-3, FIT_ONLY_PRODUCTS);
     let after = |spawn: Option<&dyn Fn(&mut App) -> Entity>| {
-        let (mut app, root) = composed(false);
+        let (mut app, root) = composed_kind(false, &kind);
         let body = spawn.map(|spawn| spawn(&mut app));
         app.update();
         app.update();
-        // The rays that meet the body before any of the house's blockers (the house stands at the
-        // origin at unit scale, so its frame is the world).
+        // The fixture stands at the origin at unit scale, so its frame is the world.
+        // Keep rays that meet the body before the fixture surface.
         let intact = Shape::intact(&kind.layout);
         let rays: Vec<_> = body.map_or_else(Vec::new, |body| {
             rays_on(&mut app, body, origin)
@@ -1275,8 +1336,11 @@ fn a_ray_that_stops_on_a_moving_body_pushes_it_by_its_share_and_deposits_nothing
                 * world.get::<LinearVelocity>(body).unwrap().0
         });
         let breakage = app.world().get::<Breakage>(root).unwrap();
-        let live = breakage.live.as_ref().expect("the burst reached the house");
-        let wears = live.state.pool[c] < fracture::full_pool(&live.structure.chunks[c]);
+        let wears = match &breakage.live {
+            Some(live) => live.state.pool[c] < fracture::full_pool(&live.structure.chunks[c]),
+            // Complete shading leaves the fixture untouched, with no live fracture state.
+            None => false,
+        };
         (rays.len(), momentum, expected, wears)
     };
     let (.., bare) = after(None);
@@ -1327,20 +1391,20 @@ fn a_loose_piece_shadowed_by_a_standing_chunk_takes_nothing() {
 }
 
 /// THE GROUND STOPS A BLAST'S RAYS, AND A BODY HOLDING THE BURST SHADES NOTHING: a loose cube on a
-/// fixture burst's side of a house wall, pushed with nothing between, takes nothing behind a static
+/// fixture burst's side of a crushable surface, pushed with nothing between, takes nothing behind a static
 /// slab on the ground's layer (the layer of the ground and of a standing tree); and a burst inside
 /// a dynamic body's proxy still crushes the chunk it faces ([`CRUSHING_BLAST_J`]). Rays that pass
 /// the ground (a house below the horizon taking a push), or a field blanked at 0 m by the body it
 /// bursts in, fail here.
 #[test]
 fn the_ground_stops_a_blast_and_a_body_holding_the_burst_shades_nothing() {
-    let kind = shipped_house();
-    let (e, [c, ..]) = fixture_chunks(&kind);
+    let kind = shielding_cube();
+    let (e, c) = (0, 0);
     let element = &kind.asset.elements[e];
     let (origin, w, _) = through(&kind, e, c, 0.0);
     let out = 0.5 + element.depth[1] - element.depth[0] + 0.3;
     let speed_of_open = |slab: bool| {
-        let (mut app, _) = composed(false);
+        let (mut app, _) = composed_kind(false, &kind);
         let open = loose_cube(&mut app, origin - *w * out, 0.1);
         if slab {
             // A 5 cm slab 4 m square across `w`, half-way to the cube (fixture geometry).
@@ -1363,7 +1427,7 @@ fn the_ground_stops_a_blast_and_a_body_holding_the_burst_shades_nothing() {
     );
     assert_eq!(speed_of_open(true), 0.0, "the ground's layer shades it");
 
-    let (mut app, root) = composed(false);
+    let (mut app, root) = composed_kind(false, &kind);
     moving_cube(&mut app, origin, 0.4, Layer::Vehicle);
     app.update();
     app.update();
