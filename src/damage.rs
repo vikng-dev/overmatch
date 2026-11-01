@@ -437,12 +437,13 @@ fn tick_swaps(
         if swap.remaining > 0.0 {
             continue;
         }
-        // Read both occupants, then overwrite each with the other's state. If a seat vanished, drop
-        // the swap rather than half-apply it.
-        let (Ok((ca, ha, da)), Ok((cb, hb, db))) = (seats.get(swap.a), seats.get(swap.b)) else {
-            commands.entity(tank).remove::<PendingSwap>();
-            continue;
-        };
+        // Read both occupants, then overwrite each with the other's state.
+        let [(ca, ha, da), (cb, hb, db)] = [swap.a, swap.b].map(|seat| {
+            seats.get(seat).expect(
+                "a swap's seats are its tank's crew volumes, spawned with occupant and HP pool, \
+                 and no system despawns a volume apart from its tank",
+            )
+        });
         let occ_a = (*ca, *ha, da.is_some());
         let occ_b = (*cb, *hb, db.is_some());
         place_occupant(&mut commands, swap.a, occ_b);
