@@ -802,7 +802,7 @@ const RECONNECT_BACKOFF_CAP: f64 = 5.0;
 
 /// After this many failed connect attempts the status overlay stops saying only "CONNECTING…" and
 /// adds the version-mismatch hint. WHY a count and not a specific "PROTOCOL MISMATCH" line: a
-/// fingerprint-skewed peer — a different wire manifest OR a different map — is refused by netcode
+/// fingerprint-skewed peer — a different wire manifest, map OR tank construction — is refused by netcode
 /// dropping the undecryptable connect token silently (see `net::protocol::protocol_id`), which the
 /// client observes as
 /// `ConnectionRequestTimedOut` — byte-for-byte the same terminal state as a down/unreachable server
@@ -1192,7 +1192,7 @@ fn spawn_joining_screen(mut commands: Commands, fonts: Res<UiFonts>) {
 /// shown to one.
 fn joining_label(attempts: u32) -> String {
     if attempts >= MISMATCH_HINT_AFTER_ATTEMPTS {
-        "CAN'T CONNECT — server down or client/server build mismatch\n\
+        "CAN'T CONNECT — server down or client/server build or asset mismatch\n\
          (update the client or redeploy the server)"
             .to_string()
     } else if attempts == 0 {

@@ -234,7 +234,7 @@ use crate::{CombatantId, CombatantLife, ShotId};
 ///
 /// [`WallPiece`]: crate::buildings::breakage::WallPiece
 /// [`WallEvent`]: crate::buildings::breakage::WallEvent
-pub const PROTOCOL_REV: u32 = 48;
+pub const PROTOCOL_REV: u32 = 49;
 
 /// Compatibility tag derived from the complete pinned wire manifest plus the crate version. This
 /// is the runtime handshake value: version-exact, so a version bump intentionally changes it.
