@@ -277,22 +277,44 @@ fn concave_corner(profile: &[[f32; 2]]) -> Option<usize> {
     })
 }
 
-/// A proper crossing of nonadjacent edges makes faces overlap even when the half-plane
-/// tolerance admits every vertex. Use f64 orientation of the authored f32 coordinates;
-/// simplicity is topological and has no plane-distance tolerance.
+/// The first edge that meets a nonadjacent edge, crossing or touching it (collinear overlap
+/// included), or that its successor folds back along: a simple boundary's nonadjacent edges
+/// are disjoint closed segments and its adjacent edges share only their corner. Either breach
+/// makes faces overlap even when the half-plane tolerance admits every vertex. Uses f64
+/// orientation of the authored f32 coordinates; simplicity is topological and has no
+/// plane-distance tolerance.
 fn crossing_edge(profile: &[[f32; 2]]) -> Option<usize> {
     let orient = |a: [f32; 2], b: [f32; 2], c: [f32; 2]| {
         (f64::from(b[0]) - f64::from(a[0])) * (f64::from(c[1]) - f64::from(a[1]))
             - (f64::from(b[1]) - f64::from(a[1])) * (f64::from(c[0]) - f64::from(a[0]))
     };
     let opposite = |a: f64, b: f64| (a < 0.0 && b > 0.0) || (a > 0.0 && b < 0.0);
+    // `c`, collinear with `a`–`b`, lies on that closed segment.
+    let on = |a: [f32; 2], b: [f32; 2], c: [f32; 2]| {
+        (0..2).all(|k| a[k].min(b[k]) <= c[k] && c[k] <= a[k].max(b[k]))
+    };
+    let meet = |a: [f32; 2], b: [f32; 2], c: [f32; 2], d: [f32; 2]| {
+        let (abc, abd, cda, cdb) = (
+            orient(a, b, c),
+            orient(a, b, d),
+            orient(c, d, a),
+            orient(c, d, b),
+        );
+        (opposite(abc, abd) && opposite(cda, cdb))
+            || (abc == 0.0 && on(a, b, c))
+            || (abd == 0.0 && on(a, b, d))
+            || (cda == 0.0 && on(c, d, a))
+            || (cdb == 0.0 && on(c, d, b))
+    };
     let n = profile.len();
     (0..n).find(|&i| {
-        let (a, b) = (profile[i], profile[(i + 1) % n]);
-        (i + 2..n).filter(|&j| (j + 1) % n != i).any(|j| {
-            let (c, d) = (profile[j], profile[(j + 1) % n]);
-            opposite(orient(a, b, c), orient(a, b, d)) && opposite(orient(c, d, a), orient(c, d, b))
-        })
+        let (a, b, next) = (profile[i], profile[(i + 1) % n], profile[(i + 2) % n]);
+        let back = (f64::from(next[0]) - f64::from(b[0])) * (f64::from(a[0]) - f64::from(b[0]))
+            + (f64::from(next[1]) - f64::from(b[1])) * (f64::from(a[1]) - f64::from(b[1]));
+        (orient(a, b, next) == 0.0 && back > 0.0)
+            || (i + 2..n)
+                .filter(|&j| (j + 1) % n != i)
+                .any(|j| meet(a, b, profile[j], profile[(j + 1) % n]))
     })
 }
 

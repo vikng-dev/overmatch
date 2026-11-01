@@ -596,4 +596,26 @@ pub(crate) mod tests {
             "{error}"
         );
     }
+    /// Collinear edges that retrace one another have no proper crossing and no strict
+    /// orientation change, yet trace the boundary twice. ASSUMED fixture: distinct vertices,
+    /// positive area and every vertex within the plane tolerance of every edge half-plane.
+    #[test]
+    fn a_profile_retracing_a_collinear_edge_is_refused_before_play() {
+        let mut asset = shipped_house().asset.clone();
+        asset.elements[0].profile = vec![
+            [0.0, 0.0],
+            [4.0, 0.0],
+            [1.0, 0.0],
+            [3.0, 0.0],
+            [5.0, 0.00005],
+            [-1.0, 0.00005],
+        ];
+        let error = asset
+            .check()
+            .expect_err("a retraced edge cannot bound a prism");
+        assert!(
+            error.contains("profile") && error.contains("split"),
+            "{error}"
+        );
+    }
 }
