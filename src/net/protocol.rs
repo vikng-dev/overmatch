@@ -266,24 +266,36 @@ pub const PROTOCOL_FINGERPRINT: u64 = protocol_fingerprint_for(
 /// see it (the registry ships inside the binary, not beside it), and the pinned wire manifest
 /// does not (no type moves), so it enters here.
 ///
+/// The tank's construction is folded too ([`crate::bake::construction_digest`]): the embedded
+/// sheet and the sim artifact beside the binary decide every weapon slot, round list, fuze mode
+/// and health-bearing volume a fact or snapshot indexes. A peer that completed the handshake
+/// therefore indexes the same construction, so a receiver refuses a fact its rig cannot resolve
+/// as malformed outside input rather than waiting on skew.
+///
 /// Computed once per process. The map's files cannot change under a running peer, and the heightmap
 /// is tens of megabytes.
 pub fn protocol_id() -> u64 {
     static ID: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
     *ID.get_or_init(|| {
-        let digest = crate::map::content_digest(&crate::assets::asset_root());
-        handshake_tag(digest, crate::substances::MATERIALS_RON.as_bytes())
+        let root = crate::assets::asset_root();
+        handshake_tag(
+            crate::map::content_digest(&root),
+            crate::substances::MATERIALS_RON.as_bytes(),
+            crate::bake::construction_digest(&root),
+        )
     })
 }
 
-/// [`PROTOCOL_FINGERPRINT`] folded with the world's content digest and the embedded registry.
-fn handshake_tag(map_digest: u64, materials: &[u8]) -> u64 {
+/// [`PROTOCOL_FINGERPRINT`] folded with the world's content digest, the embedded registry and the
+/// tank's construction digest.
+fn handshake_tag(map_digest: u64, materials: &[u8], tank_digest: u64) -> u64 {
     let tag = fingerprint_field(
         PROTOCOL_FINGERPRINT,
         b"map_content",
         &map_digest.to_le_bytes(),
     );
-    fingerprint_field(tag, b"materials_ron", materials)
+    let tag = fingerprint_field(tag, b"materials_ron", materials);
+    fingerprint_field(tag, b"tank_construction", &tank_digest.to_le_bytes())
 }
 
 /// Fold the VERSION-INDEPENDENT wire manifest: surface, own-type graph, wire dependencies, and
@@ -642,7 +654,8 @@ struct VolumeSink {
 ///
 /// Applied when its inputs move: a new snapshot, or the tank's volume set changing as its rig is
 /// built. Nothing else writes a replica's HP, occupant or `Dead` (the damage chain is gated off on
-/// a net client), so between those the sinks already hold the snapshot.
+/// a net client), so between those the sinks already hold the snapshot. A replica whose rig has
+/// not attached has no `TankVolumes` yet and is not visited: the snapshot waits on it.
 fn apply_net_crew(
     tanks: Query<
         (&TankVolumes, &NetCrew),
@@ -655,17 +668,21 @@ fn apply_net_crew(
         // The health-bearing volumes in publish order (the SAME shared filter the server used).
         let bearers: Vec<Entity> =
             health_bearing_volumes(tank_volumes, |v| volumes.contains(v)).collect();
-        // A length mismatch is expected transiently while the client's rig is still spawning and
-        // heals on the volume that completes it; a persistent mismatch means client/server spec
-        // skew (a distribution concern — matched builds never skew). Skip rather than write
-        // misaligned.
+        // The rig assembles every health-bearing volume from data in one flush, and the handshake
+        // folds the tank's construction, so a snapshot of another length is malformed outside
+        // input: refused visibly, never written misaligned.
         if bearers.len() != net.volumes.len() {
+            warn!(
+                bearers = bearers.len(),
+                snapshot = net.volumes.len(),
+                "client: refused a crew snapshot that does not index this replica's volumes"
+            );
             continue;
         }
         for (volume, snap) in bearers.into_iter().zip(&net.volumes) {
-            let Ok(mut sink) = volumes.get_mut(volume) else {
-                continue;
-            };
+            let mut sink = volumes
+                .get_mut(volume)
+                .expect("a health bearer is a volume sink: `bearers` was filtered on the query");
             sink.health.set_held(snap.held);
             if let Some(crew) = snap.crew {
                 if let Some(mut crewman) = sink.crewman
@@ -2260,10 +2277,12 @@ mod tests {
         }
     }
 
-    /// THE WORLD IS PART OF THE HANDSHAKE. The tag both endpoints hand netcode is not the wire
-    /// manifest alone: the map's content digest is folded onto it, so a same-build peer that loaded
-    /// different terrain mints a token the other end cannot decrypt (ADR-0018) instead of
-    /// connecting and then integrating different ground.
+    /// THE WORLD AND THE TANK ARE PART OF THE HANDSHAKE. The tag both endpoints hand netcode is
+    /// not the wire manifest alone: the map's content digest and the tank's construction digest
+    /// are folded onto it, so a same-build peer that loaded different terrain or another tank's
+    /// data mints a token the other end cannot decrypt (ADR-0018) instead of connecting and then
+    /// integrating different ground or indexing weapons and volumes it does not hold. The fire and
+    /// crew receivers refuse an unresolvable index as malformed input on that guarantee.
     #[test]
     fn the_map_content_reaches_the_handshake_tag() {
         assert_ne!(
@@ -2281,12 +2300,19 @@ mod tests {
         // `materials.ron` differs by one value resolves every hard body differently with every
         // asset file identical, and must not connect.
         let registry = crate::substances::MATERIALS_RON;
-        let tag = |digest: u64| handshake_tag(digest, registry.as_bytes());
+        let root = crate::assets::asset_root();
+        let tank = crate::bake::construction_digest(&root);
+        let tag = |digest: u64| handshake_tag(digest, registry.as_bytes(), tank);
         assert_ne!(tag(1), tag(2), "a different map must be a different tag");
         assert_eq!(
-            tag(crate::map::content_digest(&crate::assets::asset_root())),
+            tag(crate::map::content_digest(&root)),
             protocol_id(),
-            "the tag must be the fold of THIS process's map and registry",
+            "the tag must be the fold of THIS process's map, registry and tank",
+        );
+        assert_ne!(
+            handshake_tag(1, registry.as_bytes(), tank ^ 1),
+            tag(1),
+            "another tank construction over the same world: a different tag",
         );
         let edited = registry.replacen("26.2", "26.3", 1);
         assert_ne!(
@@ -2294,7 +2320,7 @@ mod tests {
             "the fixture edit must land on a registry value"
         );
         assert_ne!(
-            handshake_tag(1, edited.as_bytes()),
+            handshake_tag(1, edited.as_bytes(), tank),
             tag(1),
             "a registry value moved under identical assets: a different tag",
         );

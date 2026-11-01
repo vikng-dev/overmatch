@@ -443,6 +443,23 @@ pub(crate) fn selected_spec() -> &'static TankSpec {
     &SPEC
 }
 
+/// The selected tank's CONSTRUCTION digest: the embedded sheet and the sim artifact the bake reads
+/// (`tank::TANK_SIM_GLB_PATH` under `root`), each length-prefixed. Every peer builds each tank's
+/// body, weapons, rounds, volumes and crew stations from these two alone, so
+/// `net::protocol::protocol_id` folds the digest into the handshake: peers over different tank
+/// data refuse at connect instead of resolving each other's facts against another tank. A sim
+/// artifact that cannot be read panics naming its path, as the bake would at startup.
+pub(crate) fn construction_digest(root: &Path) -> u64 {
+    use crate::fingerprint::{FNV_OFFSET_BASIS, fnv1a_64};
+    let path = root.join(crate::tank::TANK_SIM_GLB_PATH);
+    let sim = std::fs::read(&path)
+        .unwrap_or_else(|err| panic!("bake: {} cannot be read: {err}", path.display()));
+    [TANK_SPEC_RON.as_bytes(), sim.as_slice()].iter().fold(
+        fnv1a_64(FNV_OFFSET_BASIS, b"overmatch-tank-construction-v1"),
+        |hash, bytes| fnv1a_64(fnv1a_64(hash, &(bytes.len() as u64).to_le_bytes()), bytes),
+    )
+}
+
 /// Which primitives' mesh buffers the sim consumes, and why (§12):
 ///
 /// * **Ballistic volumes — DECLARED.** A node marches iff the sheet names it

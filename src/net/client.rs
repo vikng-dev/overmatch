@@ -1497,11 +1497,69 @@ impl SeenShots {
     }
 }
 
+/// A fire announcement parsed at the message edge: its bore is a unit direction. Every queue after
+/// receipt holds this type, so presentation never re-checks the wire's raw vector.
+#[derive(Clone)]
+pub(super) struct ReceivedFire {
+    event: FireEvent,
+    direction: Dir3,
+}
+
+impl ReceivedFire {
+    fn parse(event: &FireEvent) -> Result<Self, FireRefusal> {
+        let direction = Dir3::new(event.direction).map_err(|_| FireRefusal::Bore)?;
+        Ok(Self {
+            event: event.clone(),
+            direction,
+        })
+    }
+
+    fn shot_id(&self) -> ShotId {
+        self.event.shot_id()
+    }
+}
+
+/// Why this client refuses an authority fire fact. The tank data is in the handshake tag
+/// (`protocol::protocol_id`), so a peer that completed it holds the same weapons, rounds and fuze
+/// modes: each refusal is a malformed outside fact, logged and dropped, never deferred.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum FireRefusal {
+    /// The bore is not a unit direction.
+    Bore,
+    /// The shooter's assembled rig has no weapon in this slot.
+    WeaponSlot { weapon: u8 },
+    /// The slot's weapon lists no round at this index.
+    Round { weapon: u8, round: u8 },
+    /// The round's fuze lists no mode at this index.
+    FuzeMode {
+        weapon: u8,
+        round: u8,
+        fuze_mode: u8,
+    },
+}
+
+/// Log and trace one refused fire fact.
+fn refuse_fire(
+    shot: ShotId,
+    refusal: FireRefusal,
+    now: Tick,
+    shot_trace: &mut Option<ResMut<crate::shot_trace::ShotTrace>>,
+) {
+    warn!(?shot, ?refusal, "client: refused an authority fire fact");
+    crate::shot_trace::record(
+        shot_trace,
+        "drop",
+        now.0,
+        shot,
+        || json!({ "s": "fire", "res": "refused", "why": format!("{refusal:?}") }),
+    );
+}
+
 /// A fire visual that arrived before its replica root. Facts are keyed by stable [`ShotId`], never
 /// by the transient entity mapping which may be absent or stale during replication catch-up.
 #[derive(Clone)]
 struct PendingFire {
-    event: FireEvent,
+    fire: ReceivedFire,
     received_tick: Tick,
 }
 
@@ -1521,8 +1579,8 @@ impl PendingFireEvents {
     const TTL_TICKS: i32 = 16;
 
     /// Insert one unresolved fire. The return value is an older event evicted for bounded memory.
-    fn insert(&mut self, event: FireEvent, received_tick: Tick) -> Option<PendingFire> {
-        let shot = event.shot_id();
+    fn insert(&mut self, fire: ReceivedFire, received_tick: Tick) -> Option<PendingFire> {
+        let shot = fire.shot_id();
         if self.by_shot.contains_key(&shot) {
             return None;
         }
@@ -1530,7 +1588,7 @@ impl PendingFireEvents {
         self.by_shot.insert(
             shot,
             PendingFire {
-                event,
+                fire,
                 received_tick,
             },
         );
@@ -1547,7 +1605,7 @@ impl PendingFireEvents {
     }
 
     fn requeue(&mut self, pending: PendingFire) {
-        let shot = pending.event.shot_id();
+        let shot = pending.fire.shot_id();
         self.order.push_back(shot);
         self.by_shot.insert(shot, pending);
     }
@@ -1563,7 +1621,7 @@ impl PendingFireEvents {
 /// stay at arrival; shooter resolution happens at release, where [`PendingFireEvents`] already owns
 /// the missing-replica case.
 #[derive(Resource, Default)]
-pub(super) struct HeldFireEvents(CursorQueue<FireEvent>);
+pub(super) struct HeldFireEvents(CursorQueue<ReceivedFire>);
 
 /// Connection-lifetime dedup ledger for owner-private damage confirmations.
 ///
@@ -1811,17 +1869,23 @@ fn consume_fire_event(
     if !fresh {
         return;
     }
-    if Dir3::new(event.direction).is_err() || fire_catch_up_ticks(event.fire_tick, now).is_none() {
+    let fire = match ReceivedFire::parse(event) {
+        Ok(fire) => fire,
+        Err(refusal) => return refuse_fire(shot, refusal, now, shot_trace),
+    };
+    if fire_catch_up_ticks(event.fire_tick, now).is_none() {
+        // Older than the cosmetic catch-up bound (a late reliable resend, a stalled client): a
+        // legitimate absence, the shell's flight already over. Nothing presents.
         crate::shot_trace::record(
             shot_trace,
             "drop",
             now.0,
             shot,
-            || json!({ "s": "fire", "res": "invalid_fire" }),
+            || json!({ "s": "fire", "res": "stale_fire" }),
         );
         return;
     }
-    if let Some((_, evicted)) = held.0.hold(event.fire_tick, event.clone()) {
+    if let Some((_, evicted)) = held.0.hold(event.fire_tick, fire) {
         crate::shot_trace::record(
             shot_trace,
             "drop",
@@ -1898,22 +1962,48 @@ pub(super) struct FireShooters<'w, 's> {
         Query<'w, 's, (&'static Weapon, &'static WeaponIndex, &'static TankRoot), With<Muzzle>>,
 }
 
+/// A released fire against this replica's live roots and rigs.
+enum FireBinding {
+    /// The shooter root and the round its weapon slot fires, in the fact's fuze mode.
+    Bound(Entity, Box<crate::rounds::Round>),
+    /// Replication has not caught up: no live root carries the combatant, two do, or the root's
+    /// rig (every muzzle at once, `rig::attach_replicated_rig`) has not attached. Deferred to
+    /// [`PendingFireEvents`], which expires it after [`PendingFireEvents::TTL_TICKS`].
+    Deferred,
+    /// The assembled rig cannot fire this fact.
+    Refused(FireRefusal),
+}
+
 impl FireShooters<'_, '_> {
-    /// The fire's shooter root and the round that root's weapon slot lists at `event.round`, bound
-    /// from this replica's own tank data, in the event's fuze mode. `None` defers the fire: the root
-    /// is missing or ambiguous, or its weapon slot, round index or fuze mode is not on this replica
-    /// — an index the tank data lacks never resolves and expires with
-    /// [`PendingFireEvents::TTL_TICKS`].
-    fn resolve(&self, event: &FireEvent) -> Option<(Entity, crate::rounds::Round)> {
+    /// Bind the fire's shooter root and the round that root's weapon slot lists at `event.round`,
+    /// from this replica's own tank data, in the event's fuze mode.
+    fn resolve(&self, event: &FireEvent) -> FireBinding {
         let ShooterResolution::Resolved(shooter) = resolve_shooter(event, &self.tanks) else {
-            return None;
+            return FireBinding::Deferred;
         };
-        let (weapon, ..) = self
+        let mut weapons = self
             .weapons
             .iter()
-            .find(|(_, slot, root)| root.0 == shooter && slot.0 == usize::from(event.weapon))?;
-        let fired = weapon.rounds.get(usize::from(event.round))?;
-        Some((shooter, fired.in_mode(event.fuze_mode)?))
+            .filter(|(.., root)| root.0 == shooter)
+            .peekable();
+        if weapons.peek().is_none() {
+            return FireBinding::Deferred;
+        }
+        let (weapon, round, fuze_mode) = (event.weapon, event.round, event.fuze_mode);
+        let Some((fired, ..)) = weapons.find(|(_, slot, _)| slot.0 == usize::from(weapon)) else {
+            return FireBinding::Refused(FireRefusal::WeaponSlot { weapon });
+        };
+        let Some(fired) = fired.rounds.get(usize::from(round)) else {
+            return FireBinding::Refused(FireRefusal::Round { weapon, round });
+        };
+        match fired.in_mode(fuze_mode) {
+            Some(bound) => FireBinding::Bound(shooter, Box::new(bound)),
+            None => FireBinding::Refused(FireRefusal::FuzeMode {
+                weapon,
+                round,
+                fuze_mode,
+            }),
+        }
     }
 }
 
@@ -1941,12 +2031,12 @@ fn release_due_fire_events(
         Some((tick, overstep)) => held.0.release(tick, overstep),
         None => held.0.release_all(),
     };
-    for (_, event) in due {
-        match shooters.resolve(&event) {
-            Some((shooter, round)) => spawn_reconstructed_fire(
-                &event,
+    for (_, fire) in due {
+        match shooters.resolve(&fire.event) {
+            FireBinding::Bound(shooter, round) => spawn_reconstructed_fire(
+                &fire,
                 shooter,
-                round,
+                *round,
                 now,
                 cursor,
                 pending_recoil,
@@ -1955,17 +2045,18 @@ fn release_due_fire_events(
                 shot_trace,
                 commands,
             ),
-            None => {
-                if let Some(evicted) = pending_fires.insert(event, now) {
+            FireBinding::Deferred => {
+                if let Some(evicted) = pending_fires.insert(fire, now) {
                     crate::shot_trace::record(
                         shot_trace,
                         "drop",
                         now.0,
-                        evicted.event.shot_id(),
+                        evicted.fire.shot_id(),
                         || json!({ "s": "fire", "res": "pending_capacity" }),
                     );
                 }
             }
+            FireBinding::Refused(refusal) => refuse_fire(fire.shot_id(), refusal, now, shot_trace),
         }
     }
 }
@@ -1990,7 +2081,7 @@ fn resolve_pending_fire_events(
         let Some(pending) = pending_fires.pop_front() else {
             return;
         };
-        let shot = pending.event.shot_id();
+        let shot = pending.fire.shot_id();
         if pending_fire_expired(pending.received_tick, now) {
             crate::shot_trace::record(
                 shot_trace,
@@ -2001,11 +2092,11 @@ fn resolve_pending_fire_events(
             );
             continue;
         }
-        match shooters.resolve(&pending.event) {
-            Some((shooter, round)) => spawn_reconstructed_fire(
-                &pending.event,
+        match shooters.resolve(&pending.fire.event) {
+            FireBinding::Bound(shooter, round) => spawn_reconstructed_fire(
+                &pending.fire,
                 shooter,
-                round,
+                *round,
                 now,
                 cursor,
                 pending_recoil,
@@ -2014,7 +2105,8 @@ fn resolve_pending_fire_events(
                 shot_trace,
                 commands,
             ),
-            None => pending_fires.requeue(pending),
+            FireBinding::Deferred => pending_fires.requeue(pending),
+            FireBinding::Refused(refusal) => refuse_fire(shot, refusal, now, shot_trace),
         }
     }
 }
@@ -2028,7 +2120,7 @@ fn pending_fire_expired(received_tick: Tick, now: Tick) -> bool {
     reason = "one presentation boundary owns the owed swallow and the release record"
 )]
 fn spawn_reconstructed_fire(
-    event: &FireEvent,
+    fire: &ReceivedFire,
     shooter: Entity,
     round: crate::rounds::Round,
     now: Tick,
@@ -2039,6 +2131,7 @@ fn spawn_reconstructed_fire(
     shot_trace: &mut Option<ResMut<crate::shot_trace::ShotTrace>>,
     commands: &mut Commands,
 ) {
+    let event = &fire.event;
     // An own echo arriving so late the belt-delta fallback already presented its round: one
     // consumption, one bang — swallow the duplicate (matched by weapon slot and signed fire-tick
     // order against the recorded reveal, so a future round can never match).
@@ -2055,12 +2148,9 @@ fn spawn_reconstructed_fire(
         );
         return;
     }
-    let Ok(direction) = Dir3::new(event.direction) else {
-        return;
-    };
     let facts = super::fire_presentation::ReleasedShot {
         origin: event.origin,
-        direction,
+        direction: fire.direction,
         round,
         tracer: event.tracer,
         mechanism: event.mechanism,
@@ -3069,7 +3159,8 @@ mod tests {
         let unmapped = Entity::from_raw_u32(999).expect("non-placeholder entity");
         let event = fire_event(unmapped, 7, 42);
         let mut pending = PendingFireEvents::default();
-        assert!(pending.insert(event.clone(), Tick(42)).is_none());
+        let fire = ReceivedFire::parse(&event).expect("the fixture bore is a unit direction");
+        assert!(pending.insert(fire, Tick(42)).is_none());
         assert_eq!(pending.len(), 1, "unresolved fire is retained");
 
         let before = world
@@ -3080,7 +3171,11 @@ mod tests {
         assert_eq!(before, ShooterResolution::Missing);
 
         let root = world.spawn((NetTank, CombatantId(7))).id();
-        let pending_event = pending.pop_front().expect("queued event remains").event;
+        let pending_event = pending
+            .pop_front()
+            .expect("queued event remains")
+            .fire
+            .event;
         let ambiguous_event = pending_event.clone();
         let after = world
             .run_system_once(move |tanks: Query<(Entity, &CombatantId), With<NetTank>>| {
@@ -3365,9 +3460,11 @@ mod tests {
 
     /// A FIRE BINDS ITS ROUND FROM THE RECEIVER'S OWN TANK DATA: the event names the round by its
     /// index in the shooter's weapon list, and the reconstructed shell flies that round, body and
-    /// penetrator, with the index on its source. An index the receiver's list lacks presents
-    /// nothing and waits like a missing shooter. A mutant that bound the default round, or fell
-    /// back to it, or dropped the penetrator, would draw a shell the authority never fired.
+    /// penetrator, with the index on its source. An index the receiver's assembled list lacks is a
+    /// refused fact: it presents nothing and is not deferred, since the handshake-matched tank data
+    /// cannot grow the index later. A mutant that bound the default round, or fell back to it, or
+    /// dropped the penetrator, would draw a shell the authority never fired; one that deferred the
+    /// refusal would hold it as replication debt until the TTL.
     #[test]
     fn a_fire_binds_the_round_its_index_names_in_the_shooter_s_weapon() {
         #[derive(Resource, Default)]
@@ -3432,7 +3529,87 @@ mod tests {
             1,
             "an index past the list presents nothing",
         );
-        assert_eq!(world.resource::<PendingFireEvents>().len(), 1);
+        assert_eq!(
+            world.resource::<PendingFireEvents>().len(),
+            0,
+            "an index past the assembled list is refused, never deferred",
+        );
+    }
+
+    /// REPLICATION DEBT DEFERS, A MALFORMED FACT DOES NOT: a fire whose root has replicated but
+    /// whose rig has not attached (no muzzle yet) waits in [`PendingFireEvents`] and presents once
+    /// the rig arrives; a fire whose bore is not a unit direction is refused at the message edge
+    /// and never held. Mutants: refusing the rig-pending fire loses an opponent's shot on every
+    /// join; holding the malformed bore carries an unparsed fact into presentation.
+    #[test]
+    fn a_rig_pending_fire_defers_and_a_malformed_bore_is_refused_at_receipt() {
+        let mut app = fire_receive_app();
+        let world = app.world_mut();
+        let root = world.spawn((NetTank, CombatantId(7))).id();
+        let event = fire_event(root, 7, 42);
+        let shot = event.shot_id();
+        consume_and_release(world, event, Tick(42), None);
+        assert_eq!(
+            world.resource::<PendingFireEvents>().len(),
+            1,
+            "a root without its rig defers the fire"
+        );
+        world.despawn(root);
+        let root = spawn_shooter(world, 7);
+        world
+            .run_system_once(
+                |shooters: FireShooters,
+                 mut recoil: ResMut<PendingRecoilKicks>,
+                 mut pending: ResMut<PendingFireEvents>,
+                 mut own_ledgers: Query<
+                    &mut crate::net::fire_presentation::OwnFirePresentation,
+                >,
+                 mut own_diag: ResMut<crate::net::fire_presentation::OwnFireDiag>,
+                 mut commands: Commands| {
+                    let mut trace: Option<ResMut<crate::shot_trace::ShotTrace>> = None;
+                    resolve_pending_fire_events(
+                        Tick(43),
+                        None,
+                        &shooters,
+                        &mut recoil,
+                        &mut pending,
+                        &mut own_ledgers,
+                        &mut own_diag,
+                        &mut trace,
+                        &mut commands,
+                    );
+                },
+            )
+            .expect("the repair pass runs");
+        assert_eq!(
+            world.resource::<ReconstructedFireShells>().0,
+            vec![(shot, root)],
+            "the deferred fire presents once its rig attaches"
+        );
+
+        let mut malformed = fire_event(root, 7, 44);
+        malformed.direction = Vec3::ZERO;
+        consume_and_release(world, malformed, Tick(44), None);
+        assert_eq!(world.resource::<PendingFireEvents>().len(), 0);
+        assert_eq!(
+            world.resource::<ReconstructedFireShells>().0.len(),
+            1,
+            "a malformed bore presents nothing"
+        );
+        assert_eq!(
+            ReceivedFire::parse(&fire_event(root, 7, 45))
+                .map(|fire| fire.direction)
+                .ok(),
+            Some(Dir3::NEG_Z),
+            "a unit bore parses to its direction"
+        );
+        let mut far = fire_event(root, 7, 46);
+        far.direction = Vec3::new(f32::NAN, 0.0, 1.0);
+        assert_eq!(
+            ReceivedFire::parse(&far).err(),
+            Some(FireRefusal::Bore),
+            "a non-finite bore is refused"
+        );
     }
 
     /// FUSED OWN FIRE: the echo of a locally-fired round is the round's one presentation — the
