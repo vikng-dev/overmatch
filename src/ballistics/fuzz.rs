@@ -1,4 +1,5 @@
-//! The §13.6 ray fuzzer — the union-field contract enforced mechanically, not by eyeball.
+//! The game's damage model, game state only: the §13.6 ray fuzzer, enforcing the union-field
+//! contract mechanically.
 //!
 //! §13.6 lists six invariants and then names exactly one instrument for them: "10⁵–10⁶ random rays
 //! at the bound tank, asserting the invariants, and reporting every corridor/opening that reaches
@@ -8,7 +9,7 @@
 //!
 //! # It fires at the REAL tank
 //!
-//! The target is the bound Tiger: `bake`'s glb extraction, the material-keyed volumes, the
+//! The target is the bound tank: `bake`'s glb extraction, the material-keyed volumes, the
 //! per-primitive trimesh colliders, at spawn pose. Not synthetic plates. A gate built on slabs
 //! proves things about slabs, and every defect §13.1 catalogues lives at a JOINT of authored
 //! geometry.
@@ -25,8 +26,7 @@
 //!
 //! # What a FINDING is
 //!
-//! Not "a ray reached the crew" — a shot that pays for 100 mm of front plate and kills the driver is
-//! the game working. A finding is a ray along which the FLOOR PROBE — the probe round of least
+//! A shot that pays for the armour and empties a station's HP pool is the game working. A finding is a ray along which the FLOOR PROBE — the probe round of least
 //! capability, at the speed where its capability is the gate floor — puts a positive chord into a
 //! crew or ammunition volume before it stops: an effectively unarmoured route. Each one is measured
 //! against the whole gun list, each round driven through the same mechanism (§13.5's caliber gate: a
@@ -67,7 +67,7 @@ use crate::tank::{TankSimSource, spawn_headless_tank};
 pub struct ProbeRound {
     pub name: &'static str,
     /// The firing gun; absent for separately authored hypothetical probes.
-    pub gun: Option<&'static str>,
+    pub gun: Option<ProbeGun>,
     /// Metres.
     pub caliber: f32,
     /// Kilograms.
@@ -79,10 +79,17 @@ pub struct ProbeRound {
     pub speed: f32,
 }
 
+/// The game's damage-model instrument: a firing gun's identity and authored display label.
+#[derive(Clone, Copy, Debug)]
+pub struct ProbeGun {
+    pub key: &'static str,
+    pub label: &'static str,
+}
+
 impl ProbeRound {
     fn label(&self) -> String {
         match self.gun {
-            Some(gun) => format!("{gun}/{}", self.name),
+            Some(gun) => format!("{} [{}] / {}", gun.label, gun.key, self.name),
             None => self.name.to_owned(),
         }
     }
@@ -161,7 +168,13 @@ pub fn probe_rounds() -> &'static [ProbeRound] {
             .fired_rounds()
             .map(|(gun, key, round)| ProbeRound {
                 name: key,
-                gun: Some(gun),
+                gun: Some(ProbeGun {
+                    key: gun,
+                    label: guns
+                        .gun(gun)
+                        .expect("the fired configuration names its registry gun")
+                        .display_name(),
+                }),
                 caliber: round.penetrator.caliber,
                 mass: round.penetrator.mass,
                 nose_factor: round.penetrator.nose_factor,
@@ -172,7 +185,7 @@ pub fn probe_rounds() -> &'static [ProbeRound] {
         probes.sort_by(|a, b| {
             a.caliber
                 .total_cmp(&b.caliber)
-                .then(a.gun.cmp(&b.gun))
+                .then(a.gun.map(|gun| gun.key).cmp(&b.gun.map(|gun| gun.key)))
                 .then(a.name.cmp(b.name))
         });
         probes
@@ -375,6 +388,8 @@ fn blamed_shell(error: &WalkError) -> Option<walk::ShellKey> {
 /// Everything one run learned.
 #[derive(Clone, Debug, Default)]
 pub struct Report {
+    /// The selected tank's authored display name, copied from the spawned probe.
+    pub target: String,
     pub seed: u64,
     pub rays: u64,
     /// Rays that crossed material at all.
@@ -503,7 +518,7 @@ fn ray_for(index: u64, config: &FuzzConfig, center: Vec3, radius: f32) -> FuzzRa
 /// a frame-mixup, since world and tank-local coincide there.
 pub(super) const PROBE_TANK_AT: Vec3 = Vec3::new(12.0, 3.0, -7.0);
 
-/// The bound Tiger, once spawned.
+/// The bound tank, once spawned.
 #[derive(Resource, Clone, Copy)]
 pub(super) struct ProbeTank(pub Entity);
 
@@ -535,7 +550,7 @@ fn spawn_probe_tank(
         content,
         (
             pose.0,
-            Name::new("ballistic fuzzer Tiger I"),
+            Name::new(content.spec().display_name.clone()),
             RigidBody::Static,
         ),
     );
@@ -545,7 +560,7 @@ fn spawn_probe_tank(
     commands.insert_resource(Spares { volume, primitive });
 }
 
-/// An Avian world holding nothing but the bound Tiger — the target the fuzzer and the fixture
+/// An Avian world holding nothing but the bound tank — the target the fuzzer and the fixture
 /// shots fire at.
 ///
 /// Deliberately NOT `SimPlugin`: the fuzzer wants the tank's GEOMETRY at spawn pose, and every
@@ -1189,6 +1204,12 @@ fn run_fuzz(
     };
 
     let mut report = Report {
+        target: names
+            .get(tank.0)
+            .expect("the probe tank is spawned with its authored display name")
+            .1
+            .as_str()
+            .to_owned(),
         seed: config.seed,
         rays: config.rays,
         center,
@@ -1473,7 +1494,7 @@ fn cluster_findings(
 // Entry points
 // ---------------------------------------------------------------------------------------------
 
-/// Build the world, fire `config.rays` rays at the bound Tiger, and report.
+/// Build the world, fire `config.rays` rays at the bound tank, and report.
 pub fn fuzz(config: &FuzzConfig) -> Result<Report, String> {
     if config.rays == 0 {
         return Err("rays: 0 rays exercise no gate and report clean; give --rays 1 or more".into());
@@ -1659,7 +1680,7 @@ pub fn run_ballistic_fuzzer() -> Result<(), Box<dyn std::error::Error>> {
 pub fn render(report: &Report) -> String {
     use std::fmt::Write as _;
     let mut out = String::new();
-    let _ = writeln!(out, "# Ballistic ray fuzzer — Tiger I\n");
+    let _ = writeln!(out, "# Ballistic ray fuzzer — {}\n", report.target);
     let _ = writeln!(
         out,
         "seed `{}` · {} rays · {} crossed material · {} duplication gates · {:.1}s",

@@ -143,3 +143,14 @@ including `RECOIL_FEEL`, changed. No frame/tick timing was measured.
 The synthetic control tests opposition to the bore and linearity in mass and speed, without
 pinning the ratio the owner is deciding. Format, workspace/all-target clippy, the readout and
 citation gates passed. MEASURED: four tests passed, none failed.
+
+## Instrument names and dressing follow-up
+
+Fixed: the fuzzer's target entity and Markdown heading read the selected tank's authored display
+name. Gun labels read every authored designation and nominal calibre, while retaining canonical
+gun/round identities for reproduction. Nominal calibre is a designation; no chamber-fit rule is
+inferred from it. The world-body marker describes authored model dressing, and the unreachable
+reinsert-insurance branch is removed: projectiles are dressed once at complete birth.
+
+MEASURED: 19 targeted gun, fuzzer, dressing and citation tests passed; one on-demand instrument
+stayed ignored. Format and workspace/all-target clippy passed.

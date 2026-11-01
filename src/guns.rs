@@ -17,7 +17,8 @@
 //! (asset-relative paths, one rolled per round fired; `[]` is a silent gun, a decision); `muzzle`:
 //! the gun's view-only muzzle emission, every layer's presence and value sourced
 //! ([`MuzzleEmission`], `guns::muzzle`), which every round it fires carries. The names
-//! and the calibre are validated and read by nothing yet. Every number is authored
+//! and nominal calibre form its instrument label ([`Gun::display_name`]); nominal calibre is a
+//! designation, not an inferred chamber-fit rule. Every number is authored
 //! `(value, Kind("source or reason"))` ([`crate::provenance`]); a value without one does not load.
 //! A tank's mount names its gun ([`crate::spec::WeaponSpec::gun`]): the mount's reload or belt joins
 //! the gun's mechanism there.
@@ -100,12 +101,18 @@ struct AmmunitionFile {
 /// mechanism and its report.
 #[derive(Clone, Debug)]
 pub(crate) struct Gun {
+    display_name: String,
     ammunition: BTreeMap<String, Round>,
     mechanism: Mechanism,
     report_clips: Vec<String>,
 }
 
 impl Gun {
+    /// The game's damage-model instrument label: every authored designation and nominal calibre.
+    pub(crate) fn display_name(&self) -> &str {
+        &self.display_name
+    }
+
     pub(crate) fn mechanism(&self) -> Mechanism {
         self.mechanism
     }
@@ -193,6 +200,15 @@ fn resolved(file: GunFile, rounds: &RoundRegistry) -> Result<Gun, String> {
             "caliber must be finite and positive (got {caliber})"
         ));
     }
+    let display_name = format!(
+        "{} ({:.2} mm nominal)",
+        file.names
+            .iter()
+            .map(|name| name.0.as_str())
+            .collect::<Vec<_>>()
+            .join(" / "),
+        f64::from(caliber) * 1000.0,
+    );
     let mechanism = match file.mechanism {
         MechanismFile::Single => Mechanism::Single,
         MechanismFile::Automatic {
@@ -227,6 +243,7 @@ fn resolved(file: GunFile, rounds: &RoundRegistry) -> Result<Gun, String> {
         })
         .collect::<Result<_, String>>()?;
     Ok(Gun {
+        display_name,
         ammunition,
         mechanism,
         report_clips: file.report_clips,
@@ -595,6 +612,18 @@ mod tests {
                 "{word}: {err}"
             );
         }
+    }
+
+    /// The game's damage-model instruments show every authored designation and the nominal
+    /// calibre, rather than validating and discarding them. FIXTURE DATA: two aliases of one gun.
+    #[test]
+    fn a_guns_instrument_label_reads_its_designations_and_nominal_calibre() {
+        let rounds = fixture_rounds(&["Probe"]);
+        let mut file: GunFile =
+            ron::from_str(&gun_file("First", "0.05", &[("Probe", "700.0")])).unwrap();
+        file.names.push(Sourced("Alternate".into()));
+        let gun = resolved(file, &rounds).unwrap();
+        assert_eq!(gun.display_name(), "First / Alternate (50.00 mm nominal)");
     }
 
     /// A lookup names what is wrong and never defaults: an unknown gun, a round no registry

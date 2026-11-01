@@ -138,7 +138,7 @@ fn the_probes_are_the_shipped_rounds_as_fired_in_calibre_order() {
     for (gun, key, round) in guns.fired_rounds() {
         let probe = probes
             .iter()
-            .find(|probe| probe.gun == Some(gun) && probe.name == key)
+            .find(|probe| probe.gun.map(|gun| gun.key) == Some(gun) && probe.name == key)
             .unwrap_or_else(|| panic!("{key} is not a probe"));
         assert_eq!(probe.body(), round.penetrator, "{key}");
         assert_eq!(probe.speed.to_bits(), round.muzzle_speed.to_bits(), "{key}");
@@ -170,6 +170,8 @@ fn a_run_is_a_pure_function_of_its_seed() {
         ..default()
     })
     .expect("world");
+    assert_eq!(once.target, crate::bake::selected_spec().display_name);
+    assert!(render(&once).starts_with(&format!("# Ballistic ray fuzzer — {}", once.target)));
     let again = fuzz(&FuzzConfig {
         rays: 400,
         ..default()

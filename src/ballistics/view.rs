@@ -28,12 +28,12 @@ pub fn plugin(app: &mut App) {
         .add_observer(dress_projectile);
 }
 
-/// Marks a projectile dressed with the shell scene. Composition tests inspect this identity;
+/// Marks a projectile dressed with its authored body model. Composition tests inspect this identity;
 /// flight emitters read their authored emission component independently of scene dressing.
 #[derive(Component, Clone, Copy, Default)]
 pub(crate) struct ShellVisual;
 
-/// Tracer streak child of an MG round. The view clamps it to travel since the latest anchor.
+/// Authored streak child of a tracer round. The view clamps it to travel since the latest anchor.
 #[derive(Component)]
 pub struct TracerStreak {
     pub nominal_len: f32,
@@ -164,7 +164,6 @@ fn dress_projectile(
         &Transform,
         &ShellPath,
         Has<TracerRound>,
-        Has<WorldAssetRoot>,
     )>,
     assets: Res<ProjectileAssets>,
     mut tracer_assets: ResMut<TracerAssets>,
@@ -172,15 +171,9 @@ fn dress_projectile(
     mut materials: ResMut<Assets<StandardMaterial>>,
     mut commands: Commands,
 ) {
-    let (projectile, effects, transform, path, tracer, dressed) = shells
+    let (projectile, effects, transform, path, tracer) = shells
         .get(add.entity)
         .expect("a projectile spawns complete with its round's effects, pose and path");
-    // The idempotency guard. Nothing in the tree re-inserts `Projectile` today: `shooting::fire`
-    // suppresses `FireShell` on a replayed tick, and a projectile is not a rollback-restored
-    // entity, so a replay raises no second birth. Insurance, not a live branch.
-    if dressed {
-        return;
-    }
     if let Some(body) = effects.body {
         let scene = assets
             .scenes
