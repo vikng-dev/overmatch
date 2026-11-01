@@ -1,4 +1,4 @@
-//! A round's fuze as authored, in the game's damage model: where it sits, what functions it, and
+//! A round's fuze as authored, in the game's damage model: what functions it and
 //! the named modes the crew picks among, each with its delay. The march runs it
 //! ([`crate::ballistics::burst::Fuze`]); a fired round carries one mode's delay in its burst
 //! ([`crate::tank::WeaponRound::in_mode`]), and the fire event names that mode by its index here.
@@ -8,13 +8,6 @@
 
 use crate::provenance::Sourced;
 use serde::Deserialize;
-
-/// Where the fuze sits in the round. Data for now: no law reads it yet.
-#[derive(Clone, Copy, Debug, PartialEq, Deserialize)]
-pub(crate) enum Position {
-    Nose,
-    Base,
-}
 
 /// What functions the fuze.
 #[derive(Clone, Copy, Debug, PartialEq, Deserialize)]
@@ -39,7 +32,6 @@ pub(crate) struct Mode {
 /// threshold finite and not negative, `default_mode` an index into `modes`.
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct Spec {
-    pub position: Position,
     pub trigger: Trigger,
     pub modes: Vec<Mode>,
     pub default_mode: u8,
@@ -61,7 +53,6 @@ impl Spec {
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(super) struct File {
-    position: Sourced<Position>,
     trigger: Sourced<Trigger>,
     modes: Vec<ModeFile>,
     default_mode: Sourced<String>,
@@ -120,7 +111,6 @@ impl File {
                 )
             })?;
         Ok(Spec {
-            position: self.position.0,
             trigger: self.trigger.0,
             modes,
             default_mode: u8::try_from(default_mode).expect("at most 256 modes, checked above"),
@@ -134,8 +124,7 @@ mod tests {
 
     fn parse(modes: &str, default: &str, trigger: &str) -> Result<Spec, String> {
         ron::from_str::<File>(&format!(
-            r#"(position: (Nose, Tuned("fixture")),
-            trigger: ({trigger}, Tuned("fixture")), modes: [{modes}],
+            r#"(trigger: ({trigger}, Tuned("fixture")), modes: [{modes}],
             default_mode: ({default:?}, Tuned("fixture")))"#
         ))
         .map_err(|e| e.to_string())?

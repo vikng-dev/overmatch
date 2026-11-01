@@ -1222,7 +1222,7 @@ pub(crate) struct Projectile {
     /// The flying body's mass (kg): a kept carrier stops at the plate with its penetrator;
     /// a discarded carrier contributes no momentum.
     mass: f32,
-    /// Crew line rate (HP per metre of chord) through a witness (ADR-0040).
+    /// Crew-line coefficient: disc-mean chord times this times [`HP_PER_REFERENCE_MM`] gives HP dose.
     /// Read only by the witness pass; the hard walk never sees it.
     wound: f32,
     /// Quadratic-drag coefficient (1/m), the fired round's ([`FireShell::drag_k`]) at spawn; a

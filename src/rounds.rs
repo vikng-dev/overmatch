@@ -14,10 +14,10 @@
 //!
 //! `name` is the round's historical designation, what a player reads; `round_type` a key of the
 //! round-type table; `core` a substance with material facts; `mass` (kg) and `caliber` (m) the whole
-//! round's; `wound` its crew line rate (ADR-0040): reference-mm of dose per metre of disc-mean chord
-//! the shell cuts through a crew box, balance data the hard walk never reads, scaled from the 30 HP
-//! crew pool (3 reference-mm, `ballistics::HP_PER_REFERENCE_MM`) so that a rate of `3 / L` empties
-//! the pool at a chord of `L` metres. Optionally:
+//! round's; `wound` its positive crew-line coefficient (ADR-0040), balance data the hard walk
+//! never reads. The coefficient times disc-mean chord times `ballistics::HP_PER_REFERENCE_MM`
+//! gives HP dose; the legacy constant's name is a unit conversion, not a penetration readout.
+//! DERIVED: a pool of `H` HP empties at chord `H / (wound × HP_PER_REFERENCE_MM)` metres. Optionally:
 //!
 //! - `nose: Some((NoseShape, Kind))`: the round's own hit nose, for a round documented to differ
 //!   from its type's.
@@ -107,9 +107,8 @@ pub(crate) struct Round {
     /// The quadratic-drag coefficient (1/m) the round flies on, DERIVED at load from its type's
     /// flight nose and its flying body (module doc, "How a round flies").
     pub(crate) drag_k: f32,
-    /// What the round's line does to a witness (crew): reference-mm of dose per metre of disc-mean
-    /// chord through it (`ballistics::wound`). Finite and positive. Balance data, never read by the
-    /// hard walk.
+    /// Positive crew-line coefficient: disc-mean chord times this times
+    /// `ballistics::HP_PER_REFERENCE_MM` gives HP dose. Balance data, never read by the hard walk.
     pub(crate) wound: f32,
     /// The core's material facts. The rigid regime models every core as rigid and reads none of
     /// them; a regime that deforms or erodes the round reads them.
@@ -1057,7 +1056,7 @@ pub(crate) mod tests {
             })
             .collect::<Vec<_>>();
         let extra = format!(
-            r#"{block}, fuze: Some((position: (Base, Tuned("x")),
+            r#"{block}, fuze: Some((
                 trigger: (SpendExit(arming_spend: 35.0), Tuned("x")),
                 modes: [(name: ("delay", Tuned("x")), delay_s: (0.012, Tuned("x")))],
                 default_mode: ("delay", Tuned("x")))), burst: Some((

@@ -194,3 +194,11 @@ resources and their reads are compiled only into tests. Shipped marches take the
 work bound directly. The continuous field-density oracle is test-only too. Removed `finish`'s
 unread law argument and the fixture wrapper's corresponding argument: all law decisions this
 stage consumes are already bound in its certified transit request and mechanism.
+
+## Unread fuze position and coefficient units
+
+Removed the unread fuze-position enum and its parsed fields. Cited placement claims remain as
+asset comments; no current law, UI or instrument consumed that field. The trigger and selectable
+modes remain required. Corrected the crew-line coefficient prose: HP dose is disc-mean chord times
+the stored coefficient times `HP_PER_REFERENCE_MM`. The legacy scale's identifier is retained;
+no coefficient, conversion or HP behavior changes.

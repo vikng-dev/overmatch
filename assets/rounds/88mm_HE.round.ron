@@ -17,8 +17,9 @@
     caliber: (0.088, Measured("the gun's nominal 8.8 cm calibre designation")),
     wound: (30.0, Tuned("ASSUMED: the Pzgr. 39's main-gun crew line rate, for the shell's own line
         before it bursts and its nose piece's after")),
+    // CLAIMED construction: TM53 p.445: A.Z. 23/28, nose fuze.
+    // Placement is not an input to the current game fuze law.
     fuze: Some((
-        position: (Nose, Measured("CITED TM53 p.445: A.Z. 23/28, nose")),
         trigger: (Impact(sensitivity_n: 30.0), Derived("CITED HEA12 p.8: the A.Z. 23/28's graze
             spring fires at 99-106 oz, 2.8-3.0 kgf, 27-29 N DERIVED, rounded to 30 N and taken as
             the fuze's sensitivity (owner, interview 2026-10-30, Fuze modes). Any solid body's

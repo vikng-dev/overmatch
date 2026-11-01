@@ -16,8 +16,9 @@
     caliber: (0.088, Measured("the gun's nominal 8.8 cm calibre designation")),
     wound: (30.0, Tuned("the Pzgr. 39's main-gun rate, kept by the nose piece past the burst: the
         30 HP crew pool is emptied at ~10 cm of chord (3 / 0.10)")),
+    // CLAIMED construction: TM53 p.448: Bd.Z. 5103 or 5103/1, base fuze.
+    // Placement is not an input to the current game fuze law.
     fuze: Some((
-        position: (Base, Measured("CITED TM53 p.448: base fuze Bd.Z. 5103 or 5103/1")),
         trigger: (SpendExit(arming_spend: 35.0), Tuned("UNVERIFIED, CLAIMED: the reference-mm the
             round spends in one body to arm the fuze, read as the 35 mm of plate of about 115 kg
             per square mm the Bd.Z. 5127 arms on, perforated at normal impact, values for 1000 m
