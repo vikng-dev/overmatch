@@ -487,6 +487,10 @@ fn record_tick(
         } else {
             controlled
         };
+        // Every tank a client traces is a replica on a static body (`net::rig`). Angular velocity
+        // is not on the wire, so that body holds Avian's zero, not the authority's spin: null.
+        let replica = role == "client";
+        let angular = if replica { Value::Null } else { vec3(angvel.0) };
 
         // The world-independent authority-simulation hash. It feeds off tick-truth pose/velocity
         // and carried state already in hand, except the view-only tracer phase documented on
@@ -525,7 +529,7 @@ fn record_tick(
             "p": vec3(position.0),
             "q": quat(rotation.0),
             "lv": vec3(linvel.0),
-            "av": vec3(angvel.0),
+            "av": angular,
             "gnd": grounded,
             "loads": Value::Array(loads),
             "loads_act": Value::Array(loads_act),
@@ -547,7 +551,7 @@ fn record_tick(
             "hpos": hash.pos,
             "hrot": hash.rot,
             "hlv": hash.lv,
-            "hav": hash.av,
+            "hav": (!replica).then_some(hash.av),
             "hsim": hash.sim,
             // The carried-state decode: which field family a `hsim` mismatch lives in. These
             // streams are exactly what `hsim` folds.
