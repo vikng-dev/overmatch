@@ -439,112 +439,114 @@ fn a_round_is_dressed_from_its_authored_body_and_streak() {
     );
 }
 
-/// SERVER-COMPOSITION HONESTY — the structural invariant the ballistics sim/view split buys.
-///
-/// `SimPlugin` alone (what `net::server::run` composes) fires an 88 and an MG burst and marches them.
-/// Not one projectile may carry presentation state: no scene root, no streak child, no mesh, no
-/// `Visibility`, and no `ShellVisual` — the classification marker is the view's own interface to
-/// `vfx`, so a server that attached it would be deciding what a round IS to the renderer. The server
-/// does not decide what a round looks like, so it must not be able to.
+/// The game's damage-model composition gate samples every projectile at birth and removal.
+/// The removal read also catches dressing attached by another birth observer's deferred commands.
+#[derive(Resource, Default)]
+struct ServerRoundSamples {
+    seen: bool,
+    dressed: Vec<&'static str>,
+}
+
+impl ServerRoundSamples {
+    fn note(&mut self, facets: (bool, bool, bool, bool, bool)) {
+        self.seen = true;
+        let (scene, mesh, material, visibility, marker) = facets;
+        for (present, name) in [
+            (scene, "WorldAssetRoot"),
+            (mesh, "Mesh3d"),
+            (material, "MeshMaterial3d"),
+            (visibility, "Visibility"),
+            (marker, "ShellVisual"),
+        ] {
+            if present && !self.dressed.contains(&name) {
+                self.dressed.push(name);
+            }
+        }
+    }
+}
+
+type ServerRoundViews<'w, 's> = Query<
+    'w,
+    's,
+    (
+        Has<bevy::world_serialization::WorldAssetRoot>,
+        Has<Mesh3d>,
+        Has<MeshMaterial3d<StandardMaterial>>,
+        Has<Visibility>,
+        Has<crate::ballistics::ShellVisual>,
+    ),
+>;
+
+fn sample_server_round_birth(
+    born: On<Add, crate::ballistics::Projectile>,
+    views: ServerRoundViews,
+    mut samples: ResMut<ServerRoundSamples>,
+) {
+    samples.note(
+        views
+            .get(born.entity)
+            .expect("a projectile birth is sampled before it can despawn"),
+    );
+}
+
+fn sample_server_round_removal(
+    gone: On<Remove, crate::ballistics::Projectile>,
+    views: ServerRoundViews,
+    mut samples: ResMut<ServerRoundSamples>,
+) {
+    samples.note(
+        views
+            .get(gone.entity)
+            .expect("a projectile removal observer reads its live entity"),
+    );
+}
+
+/// The game's damage model: a server composition fires through the real spawn path and carries
+/// no render components. The invariant is independent of calibre, weapon count and how long a
+/// round survives: the birth/removal observers also see a round stopping in its first tick.
 #[test]
 fn a_server_composition_dresses_no_round_at_all() {
-    use crate::ballistics::{Projectile, ShellVisual, TracerStreak};
-    use bevy::world_serialization::WorldAssetRoot;
-
-    // The dedicated server's ballistics composition, on the real spawn path.
     let mut app = booted_sp_app();
-
-    let mut tank_q = app
-        .world_mut()
-        .query_filtered::<Entity, (With<Tank>, With<Controlled>)>();
-    let tank = tank_q.single(app.world()).expect("one controlled tank");
-
-    // Clear the bore: the map parks a second tank ~17 m down the barrel, and an 88 covers that
-    // inside ONE fixed tick — the round strikes armour and is gone before any sample below can see
-    // it fly. Park the other tank far off the firing line. What a server-composed round CARRIES is
-    // this test's subject; what it hits is not.
+    app.init_resource::<ServerRoundSamples>()
+        .add_observer(sample_server_round_birth)
+        .add_observer(sample_server_round_removal);
     let world = app.world_mut();
-    let mut others = world
-        .query_filtered::<&mut avian3d::prelude::Position, (With<Tank>, Without<Controlled>)>();
-    for mut position in others.iter_mut(world) {
-        position.0 += Vec3::X * 500.0;
-    }
-
-    // BOTH calibres have to actually fly, or the gate is vacuous on the branch that matters: the
-    // main gun is the only round that was ever dressed with a scene, the MG the only one with a
-    // streak.
-    let mut saw_main_gun = false;
-    let mut saw_mg = false;
-    let mut dressed = Vec::new();
-    // DERIVED: long enough for the crew to finish the main gun's opening load (the MG cycles from
-    // tick one, the 88 does not) — the loop breaks as soon as both calibres have flown.
+    let tank = world
+        .query_filtered::<Entity, (With<Tank>, With<Controlled>)>()
+        .single(world)
+        .expect("one controlled tank");
+    // FIXTURE DATA: a bounded wait for the manual clock to consume the command. Weapons spawn
+    // loaded (WeaponGateState::for_cycle); this is no per-weapon reload or calibre requirement.
     for _ in 0..200 {
-        if saw_main_gun && saw_mg {
+        if app.world().resource::<ServerRoundSamples>().seen {
             break;
         }
-        {
-            let mut entity = app.world_mut().entity_mut(tank);
-            let mut cmd = entity
-                .get_mut::<TankCommand>()
-                .expect("tank carries a command");
-            // Both triggers held: the 88 fires the moment its gate opens, under a continuous MG burst.
-            cmd.fire_primary = true;
-            cmd.fire_secondary = true;
-        }
+        let mut command = app
+            .world_mut()
+            .get_mut::<TankCommand>(tank)
+            .expect("tank carries its command");
+        command.fire_primary = true;
+        command.fire_secondary = true;
         app.update();
-
-        let world = app.world_mut();
-        for projectile in world.query::<&Projectile>().iter(world) {
-            if projectile.caliber() >= crate::ballistics::TRACER_MAX_CALIBER {
-                saw_main_gun = true;
-            } else {
-                saw_mg = true;
-            }
-        }
-        // Every render component the old shared spawn used to emit, plus the marker the view half
-        // classifies on — all checked on the projectile itself.
-        let world = app.world_mut();
-        for (root, mesh, material, visibility, classified) in world
-            .query_filtered::<(
-                Has<WorldAssetRoot>,
-                Has<Mesh3d>,
-                Has<MeshMaterial3d<StandardMaterial>>,
-                Has<Visibility>,
-                Has<ShellVisual>,
-            ), With<Projectile>>()
-            .iter(world)
-        {
-            for (present, name) in [
-                (root, "WorldAssetRoot"),
-                (mesh, "Mesh3d"),
-                (material, "MeshMaterial3d"),
-                (visibility, "Visibility"),
-                (classified, "ShellVisual"),
-            ] {
-                if present && !dressed.contains(&name) {
-                    dressed.push(name);
-                }
-            }
-        }
-        // The streak is a CHILD, so it is counted on its own rather than on the projectile.
-        let world = app.world_mut();
-        if world.query::<&TracerStreak>().iter(world).count() > 0
-            && !dressed.contains(&"TracerStreak")
-        {
-            dressed.push("TracerStreak");
-        }
     }
-
+    let samples = app.world().resource::<ServerRoundSamples>();
     assert!(
-        saw_main_gun && saw_mg,
-        "the burst never put both calibres in flight (main gun {saw_main_gun}, MG {saw_mg}) — the \
-         gate below would then be vacuously true for the branch that never fired",
+        samples.seen,
+        "the server composition emitted no round, so the gate would be vacuous"
     );
     assert!(
-        dressed.is_empty(),
-        "a server-composed projectile carried presentation state ({dressed:?}). SimPlugin must not \
-         name a render component: dressing belongs to ballistics::view_plugin, which no server root \
-         mounts",
+        samples.dressed.is_empty(),
+        "a server-composed round carried render state: {:?}",
+        samples.dressed
+    );
+    let world = app.world_mut();
+    assert_eq!(
+        world
+            .query_filtered::<Entity, With<crate::ballistics::TracerStreak>>()
+            .iter(world)
+            .count(),
+        0,
+        "a server composition spawned a tracer child"
     );
 }
 

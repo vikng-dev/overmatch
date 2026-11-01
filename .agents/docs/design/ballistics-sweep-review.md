@@ -29,6 +29,11 @@ and base-truths lenses and the sweep brief. No earlier ballistics sweep record w
   record already carries a round key on the wire; the presentation can use that identity to read
   authored body metadata without adding another protocol field.
 
+- **R2, P2, fixed:** the server-composition gate still required two calibre classes and a round
+  surviving to the end of a frame. A valid tank with one weapon class, or a round stopping in its
+  first tick, could fail the gate. Sample actual projectile births and removals instead; require
+  a shot to exercise the gate and reject render components independently of calibre or lifetime.
+
 The other reviewed changes introduce no further P1/P2 findings: authored body and streak presence
 reaches world rendering; model metadata is checked against glb bounds and flying diameter; the
 replacement registry/body tests express class invariants; the damage queries now assert their
@@ -154,3 +159,8 @@ reinsert-insurance branch is removed: projectiles are dressed once at complete b
 
 MEASURED: 19 targeted gun, fuzzer, dressing and citation tests passed; one on-demand instrument
 stayed ignored. Format and workspace/all-target clippy passed.
+
+
+R2 verification: format, workspace/all-target clippy, the real server-composition test and the
+citation gates passed. MEASURED: four tests passed. The gate no longer relocates a neighboring
+tank or waits for particular calibre classes to survive a frame.
