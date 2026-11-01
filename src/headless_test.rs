@@ -1006,6 +1006,75 @@ fn a_tank_too_soft_for_its_springs_rests_on_its_bump_stops() {
     );
 }
 
+/// THE GAME'S DRIVING ADAPTER LOADS FIXED STRUCTURE THROUGH THE BELT. A tank parked on standing
+/// structural construction bears on it through its belt alone, and the reaction staged by
+/// `track::sim::apply_track_forces` reaches the structure reading that wall and trunk laws judge.
+/// Dropping the adapter's staging, or a structure taking no share of the hull's weight, fails it.
+/// FIXTURE DATA: a 30 m slab of Terrain membership (which keeps the side plates off it, as on
+/// ordinary ground), its top 5 cm above the flat ground. ASSUMED acceptance: the slab reads 0.9
+/// to 1.1 of the weight, averaged over the last of three seconds parked.
+#[test]
+fn a_parked_tank_loads_fixed_structure_through_its_belt() {
+    use crate::contact_transfer::{ContactTransfers, StructureBody};
+    use avian3d::prelude::{Collider, CollisionLayers, LayerMask, Mass, Position, RigidBody};
+
+    let (mut app, tank) = booted_offline_sim();
+    let at = app
+        .world()
+        .get::<Position>(tank)
+        .expect("tank has a position")
+        .0;
+    let slab = app
+        .world_mut()
+        .spawn((
+            Transform::from_xyz(at.x, -0.45, at.z),
+            RigidBody::Static,
+            StructureBody,
+        ))
+        .id();
+    app.world_mut().spawn((
+        ChildOf(slab),
+        Transform::IDENTITY,
+        Collider::cuboid(30.0, 1.0, 30.0),
+        CollisionLayers::new([crate::Layer::Terrain], LayerMask::ALL),
+    ));
+    let ticks = 3 * FIXED_TICKS_PER_SECOND;
+    let (mut lift, mut read_ticks) = (0.0f32, 0);
+    for tick in 0..ticks {
+        drive_tick(&mut app, tank, 0.0, 0.0);
+        if tick < ticks - FIXED_TICKS_PER_SECOND {
+            continue;
+        }
+        let transfers = app.world().resource::<ContactTransfers>();
+        let dt = transfers.dt();
+        let mut tick_lift = 0.0;
+        for (point, struck, press, _) in transfers.split() {
+            if point.body == tank && point.body_collider.is_none() {
+                assert_eq!(point.structure, slab, "the belt bears on the slab alone");
+                tick_lift -= struck.y / dt + press.y;
+            }
+        }
+        if tick_lift > 0.0 {
+            read_ticks += 1;
+        }
+        lift += tick_lift;
+    }
+    let weight = app.world().get::<Mass>(tank).expect("tank has mass").0 * crate::track::derive::G;
+    let share = lift / FIXED_TICKS_PER_SECOND as f32 / weight;
+    println!(
+        "parked on structure: the slab read the belt's reaction in {read_ticks}/\
+         {FIXED_TICKS_PER_SECOND} ticks, mean {share:.4} of the weight"
+    );
+    assert_eq!(
+        read_ticks, FIXED_TICKS_PER_SECOND,
+        "the structure must read the belt's reaction every tick"
+    );
+    assert!(
+        (share - 1.0).abs() < 0.1,
+        "the slab must carry the parked tank's weight through its belt, read {share:.4}"
+    );
+}
+
 /// THE GAME'S BUOYANCY CARRIES A DRIVING TANK ONTO LOOSE PIECES. A sandbox-only adapter, sparse
 /// rubble probes or a missing game-side reaction fails this gate or the footprint/clamp gates in
 /// `track::rubble`. The pieces lie between the rigid side slices: neither the slices nor the
