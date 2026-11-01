@@ -1227,6 +1227,7 @@ fn cast_blast(
                 fracture::RayHit {
                     chunk: c,
                     at: (local + turned * t) * frame.scale,
+                    normal,
                     energy: blast.energy * share,
                     impulse: blast.push(share, d, turned, normal),
                     peak: blast.peak(share, d, turned, normal),
@@ -1291,7 +1292,7 @@ enum Stop {
 /// its load's Law 1 volume ([`Load::crushed`]). A line's channel runs along its chord, its radius
 /// the narrower of the cylinder about the chord and the ball that hold that volume (so a chord
 /// grazing a corner never cuts a disc wider than the ball); the blast's dish in a chunk is a ball
-/// about the chunk's load (its rays' energy-weighted mean stop) whose half holds it. ASSUMED: a
+/// about the chunk's load (its face's impulse-weighted centroid) whose half holds it. ASSUMED: a
 /// channel's section is a circle and its width the energy's alone, not the round's diameter; a
 /// dish's centre lies on the chunk's face, so half its ball is in the chunk.
 fn holes_of(

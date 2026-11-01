@@ -50,8 +50,8 @@
 //!   (`.agents/docs/design/wall-destruction.md`, "Standoff blast") owns the model.
 //!
 //! A round's line in each chunk becomes loads [`LINE_STEP`] apart along its chord ([`Load::line`]);
-//! a field's or a blast's rays give one load per chunk they stop on, at the energy-weighted mean of
-//! their stops ([`Load::field`], [`Load::blast`]). Gaps these laws leave open (the wall
+//! a field's rays give one energy-weighted load per chunk ([`Load::field`]); a blast gives one
+//! impulse-weighted load per chunk face ([`Load::blast`]), preserving the pushes' angular impulse. Gaps these laws leave open (the wall
 //! prototype's README and the 2026-10-30 design review): a chunk partly crushed stays whole, the
 //! share of a round's lost momentum the crushed brick carries away is unknown (the struck chunks
 //! keep all of it), and a blast's peak force acts only against the section and rest laws'
@@ -754,19 +754,56 @@ impl Load {
         .collect()
     }
 
-    /// A blast's ray hits as loads ([`Load::per_chunk`]), each chunk's blow the impulse its rays
-    /// pushed its faces with, its peak force theirs and its crushed volume theirs.
+    /// One load per (chunk, face), at its rays' impulse-weighted centroid. The face normal is
+    /// shared by its rays, so their pushes are parallel and this point preserves their angular
+    /// impulse about every pivot. Opposing faces stay separate even if their blows cancel.
+    /// Energy never gates the volume or the push: a pressure load needs neither chemical-energy
+    /// wear nor a Lamé source to exist.
     pub(crate) fn blast(hits: &[RayHit]) -> Vec<Self> {
-        Self::per_chunk(hits.iter().map(|hit| {
-            (
-                hit.chunk,
-                hit.at,
-                hit.energy,
-                hit.crushed,
-                hit.impulse,
-                hit.peak,
-            )
-        }))
+        let mut faces = std::collections::BTreeMap::new();
+        for hit in hits {
+            let weight = hit.impulse.length();
+            if weight == 0.0 {
+                // A cone whose intercepted share is zero delivers nothing.
+                assert!(
+                    hit.energy == 0.0 && hit.crushed == 0.0 && hit.peak == Vec3::ZERO,
+                    "a nonempty blast patch carries a positive impulse"
+                );
+                continue;
+            }
+            let key = (hit.chunk, hit.normal.to_array().map(f32::to_bits));
+            let (load, total) = faces.entry(key).or_insert_with(|| {
+                (
+                    Self {
+                        chunk: hit.chunk,
+                        at: Vec3::ZERO,
+                        energy: 0.0,
+                        crushed: 0.0,
+                        blow: Vec3::ZERO,
+                        press: Vec3::ZERO,
+                        peak: Some(Vec3::ZERO),
+                        origin: Origin::Field,
+                    },
+                    0.0,
+                )
+            });
+            load.at += hit.at * weight;
+            load.energy += hit.energy;
+            load.crushed += hit.crushed;
+            load.blow += hit.impulse;
+            *load
+                .peak
+                .as_mut()
+                .expect("a blast load states its peak force") += hit.peak;
+            *total += weight;
+        }
+        faces
+            .into_values()
+            .map(|(mut load, weight)| {
+                load.at /= weight;
+                load
+            })
+            .collect()
     }
 
     /// Ray stops `(chunk, where, energy J, crushed m³, impulse N·s, peak force N)` summed per
@@ -3058,6 +3095,8 @@ pub(crate) fn crush_factor(r: f32) -> f32 {
 pub(crate) struct RayHit {
     pub chunk: usize,
     pub at: Vec3,
+    /// Outward normal of the struck face; all rays on that face carry the same normal.
+    pub normal: Vec3,
     pub energy: f32,
     pub impulse: Vec3,
     pub peak: Vec3,
@@ -3096,6 +3135,7 @@ pub(crate) fn blast_rays(
             Some(RayHit {
                 chunk,
                 at: origin + dir * t,
+                normal,
                 energy: blast.energy * share,
                 impulse: blast.push(share, t, dir, normal),
                 peak: blast.peak(share, t, dir, normal),
@@ -3501,7 +3541,7 @@ mod tests {
         assert!(Masonry::of(registry, "Adobe").is_err());
     }
 
-    /// A POOL WEARS, THEN EMPTIES: energy under a chunk's pool leaves it standing and worn; the
+    /// A POOL WEARS, THEN EMPTIES: crushed volume under a chunk's pool leaves it standing and worn; the
     /// rest of its pool turns it to dust, and a dusted chunk takes no more and joins nothing, so a
     /// chunk beyond it with no other path to the ground falls. The removal alone ([`wear`]): a
     /// load's energy also stresses the joints about it ([`strike`]). A mutant that dusts on the
@@ -3663,8 +3703,8 @@ mod tests {
     /// A SOURCE'S LOADS CARRY ITS ENERGY AND ITS MOMENTUM WHOLE: a fixture line's loads lie at
     /// most [`LINE_STEP`] apart along its chord, sum to its energy and its blow, and their blows'
     /// moment about any point is the whole blow's at the chord's midpoint; a blast's ray hits give
-    /// one load per chunk, in chunk order, each the sum of the chunk's hits' energy, impulse and
-    /// peak force at the energy-weighted mean of its stops; a line and a field state no peak force.
+    /// one load per chunk face, each the sum of that face's energy, impulse and peak force at its
+    /// impulse-weighted centroid; a line and a field state no peak force.
     /// The structural check and a freed group's launch read a line's momentum through its loads,
     /// and a blast's dish and push the one point of each chunk, as the section law will its peak
     /// force: a line that multiplied or shifted its blow, or a blast that parted a chunk's energy
@@ -3709,6 +3749,7 @@ mod tests {
         let hit = |chunk: usize, at: Vec3, energy: f32, (impulse, peak): (Vec3, Vec3)| RayHit {
             chunk,
             at,
+            normal: Vec3::Z,
             energy,
             impulse,
             peak,
@@ -3733,12 +3774,65 @@ mod tests {
             (loads[1].crushed - 0.4).abs() < 1e-6,
             "a chunk's rays' volumes add"
         );
-        assert!(close(loads[1].at, (a + c * 3.0) / 4.0));
+        assert!(close(
+            loads[1].at,
+            (a * i.length() + c * j.length()) / (i.length() + j.length())
+        ));
         assert!(close(loads[1].blow, i + j));
         assert!(close(
             loads[1].peak.expect("a blast load states its peak"),
             f + g
         ));
+    }
+
+    /// IMPULSE-WEIGHTED CENTROIDS PRESERVE ANGULAR IMPULSE (the game's environment destruction
+    /// model; study test 9). The structural check and a freed piece's spin rely on the summed
+    /// moment about any pivot. An energy-weighted point, merging opposite faces, or dropping a
+    /// load with no energy breaks this invariant. ASSUMED fixture patches and impulses.
+    #[test]
+    fn impulse_weighted_centroids_preserve_angular_impulse_without_an_energy_gate() {
+        let hit = |at: Vec3, normal: Vec3, impulse: f32, energy: f32| RayHit {
+            chunk: 3,
+            at,
+            normal,
+            energy,
+            impulse: -normal * impulse,
+            peak: -normal * (100.0 * impulse),
+            crushed: impulse * 1e-5,
+        };
+        let hits = [
+            hit(Vec3::new(1.0, 2.0, 3.0), Vec3::Z, 2.0, 50.0),
+            hit(Vec3::new(4.0, -2.0, 3.0), Vec3::Z, 8.0, 1.0),
+            hit(Vec3::new(2.0, 4.0, 5.0), Vec3::NEG_Z, 10.0, 0.0),
+        ];
+        for no_energy in [false, true] {
+            let hits = hits.map(|hit| RayHit {
+                energy: if no_energy { 0.0 } else { hit.energy },
+                ..hit
+            });
+            let loads = Load::blast(&hits);
+            assert_eq!(loads.len(), 2, "opposing faces retain their own loads");
+            let expected: Vec3 = hits.iter().map(|hit| hit.impulse).sum();
+            let delivered: Vec3 = loads.iter().map(|load| load.blow).sum();
+            assert!((delivered - expected).length() < 1e-5);
+            for pivot in [Vec3::ZERO, Vec3::new(-3.0, 2.0, 7.0)] {
+                let expected: Vec3 = hits
+                    .iter()
+                    .map(|hit| (hit.at - pivot).cross(hit.impulse))
+                    .sum();
+                let delivered: Vec3 = loads
+                    .iter()
+                    .map(|load| (load.at - pivot).cross(load.blow))
+                    .sum();
+                assert!(
+                    (delivered - expected).length() <= 1e-5 * expected.length(),
+                    "{pivot}: {delivered} vs {expected}"
+                );
+            }
+            let expected: f32 = hits.iter().map(|hit| hit.crushed).sum();
+            let delivered: f32 = loads.iter().map(|load| load.crushed).sum();
+            assert!((delivered - expected).abs() < 1e-7);
+        }
     }
 
     /// THE BLAST'S IMPULSES ARE SWISDAK'S FITS: at Z = 1 and 10 m/kg^⅓ the reflected fit reads
@@ -3919,6 +4013,7 @@ mod tests {
         let hit = |energy: f32| RayHit {
             chunk: 0,
             at: chunk.centroid,
+            normal: Vec3::Z,
             energy,
             impulse: Vec3::NEG_Z,
             peak: Vec3::NEG_Z,

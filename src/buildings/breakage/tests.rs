@@ -462,14 +462,16 @@ fn line_loads(structure: &Structure, lines: &[(usize, Vec3, Vec3, f32)]) -> Vec<
 fn blast_on(structure: &Structure, c: usize, share: f32) -> Vec<Load> {
     let chunk = &structure.chunks[c];
     let crushed = share * fracture::full_pool(chunk);
-    Load::blast(&[fracture::RayHit {
+    vec![Load {
         chunk: c,
         at: chunk.centroid,
         energy: crushed * chunk.material.crush,
-        impulse: Vec3::ZERO,
-        peak: Vec3::ZERO,
+        blow: Vec3::ZERO,
+        press: Vec3::ZERO,
+        peak: None,
+        origin: Origin::Field,
         crushed,
-    }])
+    }]
 }
 
 /// The record entries of `changes` on the composed house (ordinal 3) at `tick`.
