@@ -427,8 +427,14 @@ fn queue_fire(
     mut metrics: ResMut<ShotTransportMetrics>,
     mut shot_trace: Option<ResMut<crate::shot_trace::ShotTrace>>,
 ) {
-    // Unattributed tool/environment emissions have no player presentation route.
-    let Some(source) = fire.shooter else { return };
+    // Unkeyed tool/environment emissions have no player presentation route.
+    let Some(source) = fire.shooter else {
+        assert!(
+            fire.shot.is_none(),
+            "a network-keyed authority fire has its source from spawn"
+        );
+        return;
+    };
     let shot = fire
         .shot
         .expect("an attributed authority fire has its ShotId stamped at spawn");
@@ -961,6 +967,32 @@ mod tests {
         let mut fire = fire();
         fire.shot = None;
         world.trigger(fire);
+    }
+
+    /// The game's damage model: a keyed event cannot skip routing as an unattributed tool
+    /// emission; a network identity always carries the source that owns its presentation facts.
+    #[test]
+    #[should_panic(expected = "a network-keyed authority fire has its source from spawn")]
+    fn a_keyed_fire_without_its_source_is_a_bug_at_emission() {
+        let (mut world, fire) = authority_fire_fixture();
+        let mut fire = fire();
+        fire.shooter = None;
+        world.trigger(fire);
+    }
+
+    /// The game's damage model: a genuinely unkeyed tool emission owes no network route or
+    /// announcement. Treating that absence as corruption would break those tool callers.
+    #[test]
+    fn an_unkeyed_tool_emission_owes_no_transport_fact() {
+        let (mut world, fire) = authority_fire_fixture();
+        let mut fire = fire();
+        fire.shooter = None;
+        fire.shot = None;
+        world.trigger(fire);
+        let transport = world.resource::<ShotTransport>();
+        assert!(transport.routes.is_empty());
+        assert!(transport.reliable_public.is_empty());
+        assert_eq!(transport.visual.len(), 0);
     }
 
     /// The game's damage model: one ShotId owns one route and one announcement. Replacing a
