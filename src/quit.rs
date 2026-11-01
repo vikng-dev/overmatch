@@ -85,10 +85,7 @@ use bevy::tasks::ComputeTaskPool;
 pub(crate) fn plugin(app: &mut App) {
     recall_render_app_on_exit(app);
     #[cfg(target_os = "macos")]
-    if app.is_plugin_added::<bevy::winit::WinitPlugin>() {
-        app.add_plugins(terminate::plugin);
-    }
-    // A windowless composition has no winit runner, delegate or application menu to intercept.
+    app.add_plugins(terminate::TerminateRoute);
 }
 
 /// Wrap `RenderExtractApp`'s extract so that the frame which decides to exit also pulls the render
@@ -222,9 +219,20 @@ mod terminate {
         sender: *mut objc_object,
     ) -> NSUInteger;
 
-    pub(super) fn plugin(app: &mut App) {
-        app.add_systems(Startup, (install_terminate_handler, check_quit_latency))
-            .add_systems(First, forward_quit_request);
+    /// Mounts the Cmd+Q route on a root that carries `WinitPlugin`, decided in `finish` so the
+    /// answer does not depend on whether this root added `DefaultPlugins` before or after the quit
+    /// plugin. A windowless composition has no winit runner, delegate or application menu.
+    pub(super) struct TerminateRoute;
+
+    impl Plugin for TerminateRoute {
+        fn build(&self, _app: &mut App) {}
+
+        fn finish(&self, app: &mut App) {
+            if app.is_plugin_added::<bevy::winit::WinitPlugin>() {
+                app.add_systems(Startup, (install_terminate_handler, check_quit_latency))
+                    .add_systems(First, forward_quit_request);
+            }
+        }
     }
 
     /// AppKit's `- (NSApplicationTerminateReply)applicationShouldTerminate:(NSApplication *)sender`.
@@ -336,11 +344,8 @@ mod terminate {
 
     /// Refuse a windowed root whose update cadence can strand a cancelled Cmd+Q. This is an
     /// application-composition invariant: cancelling termination produces no event to wake winit.
-    /// A root without winit has no window event loop to guard.
-    fn check_quit_latency(settings: Option<Res<WinitSettings>>) {
-        let Some(settings) = settings else {
-            return;
-        };
+    /// Mounted only beside `WinitPlugin`, which inserts the settings this reads.
+    fn check_quit_latency(settings: Res<WinitSettings>) {
         for (which, mode) in [
             ("focused", settings.focused_mode),
             ("unfocused", settings.unfocused_mode),
