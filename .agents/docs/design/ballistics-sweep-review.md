@@ -164,3 +164,7 @@ stayed ignored. Format and workspace/all-target clippy passed.
 R2 verification: format, workspace/all-target clippy, the real server-composition test and the
 citation gates passed. MEASURED: four tests passed. The gate no longer relocates a neighboring
 tank or waits for particular calibre classes to survive a frame.
+
+## Retired crew-sweep comparison
+
+The game's damage-model sweep now measures the current witness law only. Removed the reconstructed hard-substance crew law and its pen-cam convenience hook; the resolution survey and owner-held F2 knockout-rule comparison remain live. Station outcomes and reports use knocked out / reduced / untouched. No production damage behavior changed.

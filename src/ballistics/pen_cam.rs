@@ -141,17 +141,7 @@ fn record_timed(
     record_edited(scenario, law, |_| {})
 }
 
-/// The first scenario's record under `law`'s cones, with `edit` applied to the posed world before
-/// the shot: what an edited world makes of a recorded shot.
-pub(super) fn record_first_edited(
-    law: Option<&spall_cone::ConeShape>,
-    edit: impl FnOnce(&mut App),
-) -> PenetrationReport {
-    let scenario = scenarios().into_iter().next().expect("a scenario");
-    record_edited(&scenario, law, edit).0
-}
-
-/// [`record_timed`] with `edit` applied to the posed world before the shot.
+/// [`record_timed`] with the instrument's world setup applied before the shot.
 fn record_edited(
     scenario: &Scenario,
     law: Option<&spall_cone::ConeShape>,
