@@ -765,6 +765,12 @@ the field weights emit half, giving the current 0.035 emitted HP per source joul
 the former transport coefficient was 210, so `210 × ½ / 3000 = 0.035`. This is a game unit,
 not a claim that the wall emits more physical energy than it carries.
 
+That target calibrated the **retired ball**, which drove 214.8 kJ (DERIVED in the retained
+construction record). The unit then stayed fixed when the ring drove the current construction's
+397.7 kJ. DERIVED: its 13,920.84 emitted HP is 1.85 times the even-sphere target, an even-sphere
+crew knockout radius of `sqrt(13920.84 × 0.2 / (4π × 30)) = 2.72 m`. Keeping the unit preserves
+the chosen ring's game potency; it does not claim the ring was re-tuned to the old sphere target.
+
 MEASURED by `spall_cone::tests::the_reference_emission_totals_are_unchanged`, the shipped ring
 emits 13,920.837333 HP with exactly its previous transport strength. The previously quoted
 13,922 HP is an approximate derived figure, not the measured total; preserving behaviour takes

@@ -55,8 +55,9 @@
         // DERIVED: 210 × 1/2 / 3000, including the field weights' normalization.
         emitted_hp_per_joule: (0.035, Unit("provisional emitted HP per joule driven into the wall;
             balance lives here. Set against the retired even-sphere target: a 0.2 m² face at 2.0 m
-            has its 30 HP pool emptied; the shipped ring emits 13,920.84 HP (MEASURED by the reference
-            emission test). Replaced by the
+            has its 30 HP pool emptied. That target set the retired ball's scale (214.8 kJ driven,
+            DERIVED); preserving the unit when the ring drives 397.7 kJ gives 13,920.84 emitted HP,
+            DERIVED, rather than re-tuning the ring to that sphere target. Replaced by the
             missing fragment-hit law: fragments empty crew-station HP pools by hits rather than
             energy caught on a face. Design doc §§5–6,
             .agents/docs/design/armor-penetration-and-damage.md, owns the derivation")),
