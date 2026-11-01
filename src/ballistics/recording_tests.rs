@@ -2596,6 +2596,17 @@ fn the_presented_march_includes_the_birth_to_muzzle_prefix() {
 /// All poses, sizes, pools, speed and the grazing angle below are fixture data.
 #[test]
 fn a_round_that_bounces_back_into_its_source_strikes_it() {
+    returning_source_round(false);
+}
+
+/// The game's damage model: a foreign plate inside the source box opens a queued chain whose
+/// later reflector is outside it. The authority must charge source armour on the return.
+#[test]
+fn queued_decisions_meet_source_armour_after_leaving_its_box() {
+    returning_source_round(true);
+}
+
+fn returning_source_round(queued: bool) {
     let mut app = recording_world(false);
     app.insert_resource(RetainSpentShells(true));
     let (source, volumes) = tank(
@@ -2622,23 +2633,38 @@ fn a_round_that_bounces_back_into_its_source_strikes_it() {
                 Vec3::NEG_Z * 46.0,
                 Kind::Ammo(ONE),
             ),
+            (
+                "source armour",
+                Vec3::new(6.0, 2.0, 0.001),
+                Vec3::NEG_Z * 44.0,
+                Kind::Plate,
+            ),
         ],
     );
     app.world_mut()
         .entity_mut(source)
         .insert(avian3d::prelude::LockedAxes::ALL_LOCKED);
-    tank(
-        &mut app,
+    let mut foreign = vec![(
+        "reflector",
+        Vec3::new(0.3, 3.0, 40.0),
         Vec3::new(6.15, 0.0, -28.0),
-        0.0,
-        Vec3::ZERO,
-        &[(
-            "reflector",
-            Vec3::new(0.3, 3.0, 40.0),
-            Vec3::ZERO,
+        Kind::Plate,
+    )];
+    if queued {
+        foreign.push((
+            "first contact inside source box",
+            Vec3::new(2.0, 3.0, 0.01),
+            Vec3::new(2.0, 0.0, -7.5),
             Kind::Plate,
-        )],
-    );
+        ));
+        foreign.push((
+            "foreign plate beyond returning source contact",
+            Vec3::new(8.0, 3.0, 0.001),
+            Vec3::NEG_Z * 47.0,
+            Kind::Plate,
+        ));
+    }
+    tank(&mut app, Vec3::ZERO, 0.0, Vec3::ZERO, &foreign);
     settle(&mut app);
     let angle = 15.0_f32.to_radians();
     let direction = Dir3::new(Vec3::new(angle.sin(), 0.0, -angle.cos())).unwrap();
@@ -2676,6 +2702,12 @@ fn a_round_that_bounces_back_into_its_source_strikes_it() {
         if crossed.iter().any(|v| v.volume == volumes[1]))
         ),
         "after box clearance the reflected round must strike its source's rear volume"
+    );
+    assert!(
+        marks.iter().any(|mark| matches!(mark,
+            ArmourMark::Crossing { volumes: crossed, .. }
+            if crossed.iter().any(|v| v.volume == volumes[3] && v.cost > 0.0))),
+        "the returning path must resolve source armour: {marks:?}"
     );
     let mut doses = app.world_mut().query::<&ShotDose>();
     assert!(

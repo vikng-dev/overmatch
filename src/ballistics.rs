@@ -3057,6 +3057,7 @@ fn march_shell_step(
             &flight,
             contact,
             hit.map(|hit| hit.entity),
+            source_box.filter(|_| ignored_source.get().is_some()),
             health,
             &mut budget,
         );
@@ -3170,9 +3171,10 @@ fn launch(
     }
 }
 
-/// The game's damage model freezes the current discovery chain before playback starts. The
-/// body's actual surfaces and held samples finish in the frozen scene. Other bodies return to relative discovery;
-/// no tick re-collects a chain that is already being played back.
+/// The game's damage model freezes each discovered crossing before playback starts. Held
+/// samples finish in that scene. Discovery ends at source-box clearance before continuing with
+/// the source solid; other bodies return to relative discovery. No tick re-collects a crossing
+/// already being played back.
 #[expect(
     clippy::too_many_arguments,
     reason = "the immutable planner also closes the struck physical body's actual geometry"
@@ -3184,6 +3186,7 @@ fn decide_playback(
     flight: &resolve::Flight,
     contact: f32,
     struck: Option<Entity>,
+    clearance: Option<SourceBox>,
     health: &Query<&mut ComponentHealth>,
     budget: &mut resolve::Budget,
 ) -> std::collections::VecDeque<resolve::Playback> {
@@ -3197,6 +3200,22 @@ fn decide_playback(
     let mut fuze = shell.projectile.fuze;
     let radius = resolve::disc_radius(shell.projectile.body().caliber);
     let mut contact = Some(contact);
+    // The game's damage model freezes geometry at contact. Discovery using launch clearance
+    // ends at this box's exit; playback then returns to the live march with the source solid.
+    let clearance = clearance.map(|bounds| {
+        let pose = bounds.body.at(context
+            .world
+            .moment
+            .get()
+            .expect("the authority plans a crossing in its captured contact scene"));
+        SourceBox {
+            body: motion::Poses {
+                from: pose,
+                to: pose,
+            },
+            ..bounds
+        }
+    });
     loop {
         flight
             .settle(context, admit, radius)
@@ -3242,6 +3261,11 @@ fn decide_playback(
             if reach == 0.0 {
                 break;
             }
+            let reach = clearance
+                .and_then(|bounds| {
+                    bounds.exit_seconds(flight.sweep_origin(), *flight.direction, 0.0, reach)
+                })
+                .unwrap_or(reach);
             match next_surface(context.world, &flight, radius, reach, admit) {
                 Ahead::Armor(hit) => {
                     contact = Some(hit.distance);
@@ -3298,7 +3322,8 @@ fn decide_playback(
             resolve::Decision::Clear { travel, .. } if *travel >= distance)
         });
         let stopped = follow_fuzed(&mut fuze, &mut flight, decision);
-        if stopped || reached_barrier || fuze.due_within(0.0).is_some() {
+        let cleared = clearance.is_some_and(|bounds| !bounds.contains(flight.sweep_origin(), 0.0));
+        if stopped || reached_barrier || cleared || fuze.due_within(0.0).is_some() {
             break;
         }
     }
