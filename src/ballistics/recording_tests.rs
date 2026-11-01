@@ -2778,17 +2778,24 @@ fn source_clearance_travels_with_the_firing_body() {
 /// size, pool and speed below is fixture data.
 #[test]
 fn a_staggered_disc_clears_its_whole_source_box_before_the_source_turns_solid() {
-    lagging_samples_clear_the_barrel(Vec3::ZERO);
+    lagging_samples_clear_the_barrel(Vec3::ZERO, false);
 }
 
 /// [`a_staggered_disc_clears_its_whole_source_box_before_the_source_turns_solid`] with the foreign
 /// body moving (fixture velocity), so the hand-off re-certifies contact-time membership.
 #[test]
 fn a_staggered_disc_clears_its_source_box_in_a_moving_scene() {
-    lagging_samples_clear_the_barrel(Vec3::X * 0.5);
+    lagging_samples_clear_the_barrel(Vec3::X * 0.5, false);
 }
 
-fn lagging_samples_clear_the_barrel(foreign_velocity: Vec3) {
+/// The game's damage model: a tick ending during a perforation retains the admission of its
+/// certified sample paths. A planar disc at the playback cursor cannot clear lagging samples.
+#[test]
+fn partial_playback_keeps_launch_clearance_until_its_samples_resume() {
+    lagging_samples_clear_the_barrel(Vec3::ZERO, true);
+}
+
+fn lagging_samples_clear_the_barrel(foreign_velocity: Vec3, across_tick: bool) {
     let mut app = recording_world(false);
     app.insert_resource(RetainSpentShells(true));
     // The barrel alone spans the source box: its front face at z = -3 is the box's.
@@ -2799,8 +2806,8 @@ fn lagging_samples_clear_the_barrel(foreign_velocity: Vec3) {
         Vec3::ZERO,
         &[(
             "barrel",
-            Vec3::new(0.2, 0.2, 3.0),
-            Vec3::new(0.0, 0.0, -1.5),
+            Vec3::new(0.2, 0.2, if across_tick { 15.0 } else { 3.0 }),
+            Vec3::new(0.0, 0.0, if across_tick { 4.5 } else { -1.5 }),
             Kind::Crew(DEEP),
         )],
     );
@@ -2809,7 +2816,7 @@ fn lagging_samples_clear_the_barrel(foreign_velocity: Vec3) {
         .insert(avian3d::prelude::LockedAxes::ALL_LOCKED);
     tank(
         &mut app,
-        Vec3::new(0.0, 0.0, -2.9),
+        Vec3::new(0.0, 0.0, if across_tick { -3.0 } else { -2.9 }),
         30.0_f32.to_radians(),
         foreign_velocity,
         &[(
@@ -2821,7 +2828,7 @@ fn lagging_samples_clear_the_barrel(foreign_velocity: Vec3) {
     );
     settle(&mut app);
     let round = crate::tank::WeaponRound::resolve("88mm_AP").unwrap().round;
-    let birth = Vec3::new(0.0, 0.0, -0.5);
+    let birth = Vec3::new(0.0, 0.0, if across_tick { 9.493 } else { -0.5 });
     let mut fire = FireShell::of_round(
         &round,
         birth,
@@ -2837,7 +2844,26 @@ fn lagging_samples_clear_the_barrel(foreign_velocity: Vec3) {
         None,
     );
     fire.speed = SPEED;
+    fire.drag_k = 0.0;
     app.world_mut().trigger(fire);
+    if across_tick {
+        run(&mut app, 1);
+        let mut shells = app.world_mut().query::<(&Projectile, &Transform)>();
+        let (projectile, pose) = shells.single(app.world()).unwrap();
+        assert!(
+            !projectile.playback.is_empty(),
+            "the fixture tick ends in playback"
+        );
+        assert!(
+            pose.translation.z < -3.0,
+            "the fixture axis has passed the source face: {:?}",
+            pose.translation
+        );
+        assert!(
+            !projectile.source_cleared,
+            "partial playback cannot clear certified samples from a planar cursor"
+        );
+    }
     run(&mut app, 4);
     let mut logs = app.world_mut().query::<&PenetrationMarks>();
     let marks: Vec<_> = logs
@@ -2947,5 +2973,74 @@ fn a_bounce_just_past_the_source_box_returns_into_a_solid_source() {
             ArmourMark::Crossing { volumes: crossed, .. }
             if crossed.iter().any(|v| v.volume == volumes[1] && v.cost > 0.0))),
         "the return must resolve the source's armour: {marks:?}"
+    );
+}
+
+/// The game's damage model spends real flight time between reflections. The authority must
+/// return to the tick clock instead of planning the unbounded future of a trapped, fuze-less
+/// round. All dimensions, speeds and the 45-degree direction are fixture data.
+#[test]
+fn a_closed_box_of_reflectors_returns_to_the_flight_clock() {
+    let mut app = recording_world(false);
+    app.insert_resource(RetainSpentShells(true));
+    tank(
+        &mut app,
+        Vec3::Y * 20.0,
+        0.0,
+        Vec3::ZERO,
+        &[
+            (
+                "right",
+                Vec3::new(0.4, 4.0, 4.0),
+                Vec3::X * 1.2,
+                Kind::Plate,
+            ),
+            (
+                "left",
+                Vec3::new(0.4, 4.0, 4.0),
+                Vec3::NEG_X * 1.2,
+                Kind::Plate,
+            ),
+            (
+                "front",
+                Vec3::new(2.0, 4.0, 0.4),
+                Vec3::Z * 1.2,
+                Kind::Plate,
+            ),
+            (
+                "back",
+                Vec3::new(2.0, 4.0, 0.4),
+                Vec3::NEG_Z * 1.2,
+                Kind::Plate,
+            ),
+        ],
+    );
+    settle(&mut app);
+    let round = crate::tank::WeaponRound::resolve("7.9mm_AP").unwrap().round;
+    let birth = Vec3::new(0.2, 20.0, 0.0);
+    let mut fire = FireShell::of_round(
+        &round,
+        birth,
+        birth,
+        Dir3::new(Vec3::new(1.0, 0.0, 1.0)).unwrap(),
+        FireMechanism::Single,
+        false,
+        None,
+        None,
+    );
+    fire.speed = 100.0;
+    fire.drag_k = 0.0;
+    app.world_mut().trigger(fire);
+    run(&mut app, 4);
+    let mut shells = app.world_mut().query::<(&Projectile, &PenetrationMarks)>();
+    let (projectile, marks) = shells.single(app.world()).unwrap();
+    assert!(
+        projectile.velocity.is_finite(),
+        "the tick leaves finite flight state"
+    );
+    assert!(!marks.ricochets.is_empty(), "the fixture reflects");
+    assert!(
+        marks.ricochets.len() < 4,
+        "flight time limits reflections in four fixture ticks"
     );
 }

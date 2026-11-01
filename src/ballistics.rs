@@ -2739,7 +2739,11 @@ fn march_shell_step(
         .collect();
     let ignored_source = std::cell::Cell::new(shooter.filter(|_| {
         !shell.projectile.source_cleared
-            && source_box.is_some_and(|bounds| bounds.holds_any(&laid, 0.0))
+            && source_box.is_some_and(|bounds| {
+                // The game's damage model: playback has no discovery disc. Its captured
+                // admission remains in force until it returns certified sample starts.
+                !shell.projectile.playback.is_empty() || bounds.holds_any(&laid, 0.0)
+            })
     }));
     let resting = std::cell::RefCell::new(Vec::new());
     let not_own = |entity: Entity| {
@@ -2821,7 +2825,8 @@ fn march_shell_step(
     };
 
     loop {
-        if ignored_source.get().is_some()
+        if playback.is_empty()
+            && ignored_source.get().is_some()
             && source_box.is_some_and(|bounds| {
                 !bounds.holds_any(
                     &flight.sample_starts(radius),
@@ -3148,12 +3153,13 @@ fn march_shell_step(
     // The game's damage model carries an immutable playback cursor across ticks, or a clear
     // axis start once its discovery chain has finished.
     shell.projectile.source_cleared = ignored_source.get().is_none()
-        || source_box.is_none_or(|bounds| {
-            !bounds.holds_any(
-                &flight.sample_starts(radius),
-                (1.0 - budget.remaining() as f32 / dt).clamp(0.0, 1.0),
-            )
-        });
+        || (playback.is_empty()
+            && source_box.is_none_or(|bounds| {
+                !bounds.holds_any(
+                    &flight.sample_starts(radius),
+                    (1.0 - budget.remaining() as f32 / dt).clamp(0.0, 1.0),
+                )
+            }));
     shell.projectile.disc = flight.frame;
     shell.projectile.axis = flight.continuation.as_ref().map(resolve::Interior::axis);
     shell.projectile.playback = playback;
@@ -3231,8 +3237,8 @@ fn launch(
 /// samples finish in that scene. Discovery under launch clearance ends at the decision after which
 /// the source is solid, and says so: a straight decision that hands on every start outside the
 /// source box with none held, or a bounce whose way in took every sample out of it, so a return
-/// meets the source solid wherever the bounce resumes. Other bodies return to relative discovery.
-/// No tick re-collects a crossing already being played back.
+/// meets the source solid wherever the bounce resumes. Every bounce returns to relative discovery
+/// after playback spends its flight time. No tick re-collects a crossing already being played back.
 #[expect(
     clippy::too_many_arguments,
     reason = "the immutable planner also closes the struck physical body's actual geometry"
@@ -3397,12 +3403,16 @@ fn decide_playback(
             }
             _ => false,
         });
+        // The game's damage model: a reflection finishes this immutable contact. Playback
+        // spends its approach and outgoing flight time before discovery can reach another face.
+        // A trapped round therefore cannot plan arbitrarily slow future bounces in one tick.
+        let bounced = matches!(decision, resolve::Decision::Bounce(_));
         let stopped = follow_fuzed(&mut fuze, &mut flight, decision);
         cleared = bounced_out
             || clearance.is_some_and(|bounds| {
                 !flight.holds_material() && !bounds.holds_any(&flight.sample_starts(radius), 0.0)
             });
-        if stopped || reached_barrier || cleared || fuze.due_within(0.0).is_some() {
+        if bounced || stopped || reached_barrier || cleared || fuze.due_within(0.0).is_some() {
             break;
         }
     }
