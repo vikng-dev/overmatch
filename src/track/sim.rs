@@ -686,7 +686,7 @@ fn apply_track_forces(
     gear: Option<Res<TrackGear>>,
     #[cfg(feature = "bitprobe")] mut bitprobe: Option<ResMut<BitprobeCapture>>,
     volumes: Query<VolumeFacets>,
-    rubble: RubbleQuery,
+    (rubble, tank_bodies): (RubbleQuery, Query<Entity, With<Tank>>),
     mut pieces_query: Query<PieceData, Without<Tank>>,
     mut tanks: Query<
         (
@@ -740,7 +740,9 @@ fn apply_track_forces(
     entities.sort_unstable();
     near.sort_unstable();
     near.dedup();
-    let mut pieces = RubbleBodies::gather(&rubble, &near, &pieces_query);
+    // Tank reactions require staged writes; name that exclusion independently of force-state validity.
+    let excluded: Vec<_> = tank_bodies.iter().collect();
+    let mut pieces = RubbleBodies::gather(&rubble, &near, &excluded, &pieces_query);
     for entity in entities {
         let (
             _,

@@ -104,6 +104,7 @@ pub(super) fn apply_belt_support_field(
     // retired; the sim core and the game adapter always agreed on tick truth.
     mut hull: Query<
         (
+            Entity,
             &avian3d::prelude::Position,
             &avian3d::prelude::Rotation,
             Forces,
@@ -137,7 +138,7 @@ pub(super) fn apply_belt_support_field(
 ) {
     let (transmission, mut trans_state, mut telemetry) = transmission_params;
     let (geom, rig_spec, envelope) = rig;
-    let (hull_pos, hull_rot, mut forces) = hull
+    let (hull_entity, hull_pos, hull_rot, mut forces) = hull
         .single_mut()
         .expect("RigGeom is published with exactly one sandbox hull in the same command flush");
     let affine = bevy::math::Affine3A::from_rotation_translation(hull_rot.0, hull_pos.0);
@@ -156,7 +157,7 @@ pub(super) fn apply_belt_support_field(
         hull_pos.0,
         super::rubble::footprint_sphere(&geom, &envelope),
     );
-    let mut pieces = RubbleBodies::gather(&rubble, &near, &bodies);
+    let mut pieces = RubbleBodies::gather(&rubble, &near, &[hull_entity], &bodies);
     let oracle = &field.0;
 
     // Phase 1 — both sides' contact passes at their pre-tick belt speeds (transmission-design

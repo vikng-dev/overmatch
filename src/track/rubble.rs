@@ -9,7 +9,7 @@
 //! - **What the belt bears on** ([`RubbleQuery::supports`]): a solid collider (no [`Sensor`])
 //!   whose collision layers meet the hull's own contact class ([`belt_layers`]). A dynamic body
 //!   qualifies by that physics alone, and [`RubbleBodies::gather`] keeps it only where the caller's
-//!   piece query can write its reaction: the querying hull is outside that query, and so is every
+//!   piece query can write its reaction: the caller explicitly excludes its own hull and every
 //!   tank in the game, whose reaction needs a tick-start snapshot and staged writes this adapter
 //!   does not have. A static or kinematic collider still qualifies only as a building's
 //!   [`BuildingElement`] or [`BuildingChunk`]: a static body takes none of the belt's reaction, and
@@ -381,27 +381,30 @@ pub struct RubbleBodies {
 }
 
 impl RubbleBodies {
-    /// Read the `near` colliders' shapes, frictions and bodies. `bodies` is the caller's set of
-    /// dynamic bodies whose reaction it writes; a dynamic body outside it (the querying hull, and
-    /// in the game every tank) supports nothing here.
+    /// Read the `near` colliders' shapes, frictions and bodies. `excluded` names bodies this
+    /// adapter cannot react against (its own hull, and tanks awaiting staged reaction writes).
+    /// Every other dynamic body must carry the force state Avian constructs for it.
     pub(crate) fn gather<F: QueryFilter>(
         rubble: &RubbleQuery,
         near: &[Entity],
+        excluded: &[Entity],
         bodies: &Query<PieceData, F>,
     ) -> Self {
         let mut out = Self::default();
         for &collider in near {
             let body = rubble.body_of(collider);
+            if excluded.contains(&body) {
+                continue; // Self-support and explicitly unsupported reaction recipients.
+            }
             let dynamic = rubble
                 .rigid_bodies
                 .get(body)
                 .is_ok_and(RigidBody::is_dynamic);
             let mut slot = out.bodies.iter().position(|b| b.entity == body);
             if slot.is_none() && dynamic {
-                let Ok((forces, _, mass, inertia, com)) = bodies.get(body) else {
-                    // A body whose reaction this caller cannot write: its own hull, another tank.
-                    continue;
-                };
+                let (forces, _, mass, inertia, com) = bodies.get(body).expect(
+                    "an admitted dynamic support body carries Avian force state; excluded bodies must be named",
+                );
                 let rotation = forces.rotation().0;
                 out.bodies.push(PieceBody {
                     entity: body,
@@ -724,12 +727,28 @@ mod tests {
                     let near = rubble.near(Vec3::ZERO, 4.0);
                     assert!(near.contains(&plain) && near.contains(&own));
                     assert!(!near.contains(&sensor) && !near.contains(&volume));
-                    let pieces = RubbleBodies::gather(&rubble, &near, &bodies);
+                    let pieces = RubbleBodies::gather(&rubble, &near, &[own], &bodies);
                     let gathered: Vec<_> = pieces.surfaces.iter().map(|s| s.collider).collect();
                     assert_eq!(gathered, vec![plain]);
                     assert!(pieces.is_dynamic(plain));
                 },
             )
+            .unwrap();
+    }
+
+    /// Support admission must not turn a malformed dynamic body into empty ground. The driving
+    /// adapter relies on every non-excluded recipient carrying its spawn-established force state.
+    #[test]
+    #[should_panic(expected = "an admitted dynamic support body carries Avian force state")]
+    fn an_admitted_dynamic_body_with_missing_force_state_is_a_bug() {
+        let mut app = physics();
+        let body = piece(&mut app, 0.0, 0.0);
+        app.update();
+        app.world_mut().entity_mut(body).remove::<ComputedMass>();
+        app.world_mut()
+            .run_system_once(move |rubble: RubbleQuery, bodies: Query<PieceData>| {
+                RubbleBodies::gather(&rubble, &[body], &[], &bodies);
+            })
             .unwrap();
     }
 
@@ -747,7 +766,7 @@ mod tests {
         app.world_mut()
             .run_system_once(move |rubble: RubbleQuery, bodies: Query<PieceData>| {
                 let near = rubble.near(Vec3::ZERO, 5.0);
-                let pieces = RubbleBodies::gather(&rubble, &near, &bodies);
+                let pieces = RubbleBodies::gather(&rubble, &near, &[], &bodies);
                 let mut slab = Slab {
                     origin: Vec3::new(0.0, 0.1, -0.1),
                     axis: Vec3::Z,
@@ -797,7 +816,7 @@ mod tests {
         app.update();
         app.world_mut()
             .run_system_once(move |rubble: RubbleQuery, bodies: Query<PieceData>| {
-                let pieces = RubbleBodies::gather(&rubble, &[short, long], &bodies);
+                let pieces = RubbleBodies::gather(&rubble, &[short, long], &[], &bodies);
                 let mut slab = Slab {
                     origin: Vec3::Y * 0.1,
                     axis: Vec3::new(0.0, 0.6, 0.8),
@@ -870,7 +889,7 @@ mod tests {
             .world_mut()
             .run_system_once(move |rubble: RubbleQuery, mut bodies: Query<PieceData>| {
                 let near = rubble.near(Vec3::new(10.0, 0.0, 0.0), 15.0);
-                let mut pieces = RubbleBodies::gather(&rubble, &near, &bodies);
+                let mut pieces = RubbleBodies::gather(&rubble, &near, &[], &bodies);
                 let pushes = piece_impulses(&mut pieces, &contacts, DT);
                 apply_pushes(&pushes, &mut bodies);
                 pushes
@@ -967,7 +986,7 @@ mod tests {
             .world_mut()
             .run_system_once(move |rubble: RubbleQuery, bodies: Query<PieceData>| {
                 let near = rubble.near(Vec3::new(0.0, 0.1, 0.0), 3.0);
-                let mut pieces = RubbleBodies::gather(&rubble, &near, &bodies);
+                let mut pieces = RubbleBodies::gather(&rubble, &near, &[], &bodies);
                 let report = pad_pass_gripping(
                     grip,
                     &ground(),
@@ -1249,7 +1268,7 @@ mod tests {
                 .run_system_once(move |rubble: RubbleQuery, mut bodies: Query<PieceData>| {
                     let mut elements = std::mem::take(&mut elements);
                     let near = rubble.near(Vec3::new(0.0, h, 0.0), 3.0);
-                    let mut pieces = RubbleBodies::gather(&rubble, &near, &bodies);
+                    let mut pieces = RubbleBodies::gather(&rubble, &near, &[], &bodies);
                     let report = pad_pass(
                         &ground(),
                         &pieces,
@@ -1330,7 +1349,7 @@ mod tests {
             app.world_mut()
                 .run_system_once(move |rubble: RubbleQuery, bodies: Query<PieceData>| {
                     let near = rubble.near(Vec3::ZERO, 4.0);
-                    let pieces = RubbleBodies::gather(&rubble, &near, &bodies);
+                    let pieces = RubbleBodies::gather(&rubble, &near, &[], &bodies);
                     let mut elements = GripElements::for_links(30);
                     let report = pad_pass(
                         &ground(),
@@ -1391,7 +1410,7 @@ mod tests {
             app.world_mut()
                 .run_system_once(move |rubble: RubbleQuery, bodies: Query<PieceData>| {
                     let near = rubble.near(Vec3::ZERO, 4.0);
-                    let pieces = RubbleBodies::gather(&rubble, &near, &bodies);
+                    let pieces = RubbleBodies::gather(&rubble, &near, &[], &bodies);
                     let mut elements = GripElements::for_links(30);
                     let report = pad_pass(
                         &ground(),
@@ -1447,7 +1466,7 @@ mod tests {
             .world_mut()
             .run_system_once(move |rubble: RubbleQuery, bodies: Query<PieceData>| {
                 let near = rubble.near(Vec3::ZERO, 4.0);
-                let pieces = RubbleBodies::gather(&rubble, &near, &bodies);
+                let pieces = RubbleBodies::gather(&rubble, &near, &[], &bodies);
                 let report = pad_pass(
                     &ground(),
                     &pieces,
@@ -1514,7 +1533,7 @@ mod tests {
             let actual = app
                 .world_mut()
                 .run_system_once(move |rubble: RubbleQuery, bodies: Query<PieceData>| {
-                    let pieces = RubbleBodies::gather(&rubble, &[piece], &bodies);
+                    let pieces = RubbleBodies::gather(&rubble, &[piece], &[], &bodies);
                     bits(&flat_pass(&pieces))
                 })
                 .unwrap();
