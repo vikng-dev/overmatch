@@ -2023,7 +2023,7 @@ TankSpec(
         "Cannon": (
             trigger: Primary,
             muzzle: "Cannon_Muzzle",
-            bore_length: (1.0, Tuned("fixture construction")),
+            bore_length: (1.0, Fixture("fixture construction")),
             barrel: "Cannon_Recoil",
             gun: "kwk36_l56",
             stowage: [
@@ -2038,7 +2038,7 @@ TankSpec(
         "MG": (
             trigger: Secondary,
             muzzle: "MG_Muzzle",
-            bore_length: (1.0, Tuned("fixture construction")),
+            bore_length: (1.0, Fixture("fixture construction")),
             gun: "mg34",
             stowage: [(round: "7.9mm_AP", count: (1000, Fixture("fixture")))],
             fire_mode: Automatic(belt_size: 100, belt_swap_secs: 3.0),
@@ -2631,7 +2631,7 @@ TankSpec(
             );
         }
         let absent = FIXTURE_RON.replace(
-            "            bore_length: (1.0, Tuned(\"fixture construction\")),\n",
+            "            bore_length: (1.0, Fixture(\"fixture construction\")),\n",
             "",
         );
         assert!(
