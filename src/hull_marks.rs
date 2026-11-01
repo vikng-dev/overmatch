@@ -376,7 +376,7 @@ impl MarkBuilder<'_, '_> {
                 along: to_part * strike.incoming,
                 normal: to_part * strike.normal,
             },
-            strike.caliber,
+            strike.contact_caliber,
             seed(strike),
             strike.feedback,
         )
@@ -540,6 +540,7 @@ pub(crate) mod tests {
             normal: Vec3::new(0.2, 0.1, -1.0).normalize(),
             incoming: Vec3::new(0.5, -0.2, 0.84).normalize(),
             caliber: 0.088,
+            contact_caliber: 0.088,
             verdict,
         }
     }
@@ -651,6 +652,50 @@ pub(crate) mod tests {
         assert_eq!(mark.caliber(), 0.088);
     }
 
+    /// The game's damage-model view: a mark's footprint is what marked the face. A sub-calibre
+    /// perforation's hole is its penetrator's; its bounce or stop is the whole flying assembly's.
+    /// The record's machine-gun cutoff reads the flying body, so a large carrier's small core
+    /// still leaves its hole. FIXTURE DATA: an 88 mm kept carrier with a 35.7 mm core. A mutant that
+    /// sizes the mark off the flying body draws a full-calibre hole no penetrator cut.
+    #[test]
+    fn a_sub_calibre_marks_its_hole_with_the_penetrator() {
+        const FLYING: f32 = 0.088;
+        const CORE: f32 = 0.0357;
+        for (verdict, footprint) in [
+            (Verdict::Through, CORE),
+            (Verdict::Stopped, FLYING),
+            (Verdict::Ricochet, FLYING),
+        ] {
+            let mut world = World::new();
+            let fixture = fixture_in(&mut world);
+            let plate_world = plate_in_world(&world, &fixture);
+            let mut hit = strike(
+                fixture.collider,
+                plate_world.transform_point(Vec3::ZERO),
+                verdict,
+            );
+            hit.contact_caliber = crate::ballistics::face_contact_caliber(verdict, FLYING, CORE);
+            let (_, mark) = world
+                .run_system_once(move |builder: MarkBuilder| builder.mark(&hit))
+                .unwrap()
+                .expect("a main-gun strike on a part leaves a mark");
+            assert_eq!(mark.caliber(), footprint, "{verdict:?}");
+        }
+        let mut small_core = strike(Entity::PLACEHOLDER, Vec3::ZERO, Verdict::Through);
+        small_core.contact_caliber = 0.010;
+        let mut world = World::new();
+        let fixture = fixture_in(&mut world);
+        small_core.struck = fixture.collider;
+        small_core.at = plate_in_world(&world, &fixture).translation;
+        let built = world
+            .run_system_once(move |builder: MarkBuilder| builder.mark(&small_core))
+            .unwrap();
+        assert!(
+            built.is_some(),
+            "the cutoff reads the flying body, not the core"
+        );
+    }
+
     /// A round below [`MIN_MARK_CALIBER_MM`] leaves no mark whatever its verdict, and a 20 mm
     /// round leaves one. The cap relies on it: one machine-gun belt would otherwise turn the whole
     /// [`MARK_CAP`] over in about 4 s and drop every main-gun mark the vehicle holds. A mutant
@@ -667,6 +712,7 @@ pub(crate) mod tests {
             for verdict in [Verdict::Ricochet, Verdict::Stopped, Verdict::Through] {
                 let mut hit = strike(fixture.collider, at, verdict);
                 hit.caliber = caliber;
+                hit.contact_caliber = caliber;
                 app.world_mut().trigger(hit);
             }
         }

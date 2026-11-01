@@ -1041,6 +1041,9 @@ pub(crate) struct ShellStrike {
     pub incoming: Vec3,
     /// The flying body's calibre (m), the value [`Impact::caliber`] carries.
     pub caliber: f32,
+    /// The calibre (m) of what marked the face ([`face_contact_caliber`]): the hull mark's
+    /// footprint.
+    pub contact_caliber: f32,
     /// What the round did at the face: `Ricochet` for a bounce, `Stopped` or `Through` for a
     /// terminal.
     pub verdict: Verdict,
@@ -1235,6 +1238,11 @@ impl Projectile {
     /// overmatch read.
     fn body(&self) -> RoundBody {
         self.round.body()
+    }
+
+    /// The penetrator's calibre (m): the diameter of the hole a perforation cuts.
+    pub(crate) fn penetrator_caliber(&self) -> f32 {
+        self.body().caliber
     }
 
     /// The round's current speed (m/s) — read by view code that scales an effect off a shell in
@@ -1729,6 +1737,18 @@ impl ImpactOutcome {
 
 /// How an armour terminal ended: the round entered the material and stayed in it or came out.
 ///
+/// The game's damage-model view: the calibre (m) of the body that marks a struck face. A
+/// perforation's hole is cut by the penetrator (`penetrator`, the body the cone's hole reads); a
+/// bounce or a stop is the flying assembly (`flying`, a kept carrier with its core) meeting the
+/// face. Equal for a full-calibre round and for a discarded carrier, whose flying body is its
+/// penetrator.
+pub(crate) fn face_contact_caliber(verdict: Verdict, flying: f32, penetrator: f32) -> f32 {
+    match verdict {
+        Verdict::Through => penetrator,
+        Verdict::Ricochet | Verdict::Stopped | Verdict::Struck => flying,
+    }
+}
+
 /// A terminal is never a bounce — a ricochet is a [`ShellRicochet`], and the march goes on — so the
 /// type has no such variant. Wire receipt validates into it ([`TryFrom<Verdict>`]).
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]

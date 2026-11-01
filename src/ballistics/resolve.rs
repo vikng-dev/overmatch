@@ -2245,6 +2245,11 @@ fn apply_bounce(
             normal: bounce.normal,
             incoming: Vec3::from(bounce.incoming),
             caliber: shell.projectile.caliber(),
+            contact_caliber: super::face_contact_caliber(
+                Verdict::Ricochet,
+                shell.projectile.caliber(),
+                shell.projectile.penetrator_caliber(),
+            ),
             verdict: Verdict::Ricochet,
         });
     }
@@ -2315,6 +2320,11 @@ fn finish_bite(
             normal: bite.normal,
             incoming: Vec3::from(bite.incoming),
             caliber: shell.projectile.caliber(),
+            contact_caliber: super::face_contact_caliber(
+                verdict.into(),
+                shell.projectile.caliber(),
+                shell.projectile.penetrator_caliber(),
+            ),
             verdict: verdict.into(),
         });
     }

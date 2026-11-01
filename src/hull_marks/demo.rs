@@ -160,6 +160,8 @@ fn strike_target(
             normal,
             incoming,
             caliber,
+            // The demo's synthetic strike is one full-calibre body.
+            contact_caliber: caliber,
             verdict,
         });
         info!("hull marks demo: {verdict:?} at {at:.3}, normal {normal:.3}, calibre {caliber} m");
