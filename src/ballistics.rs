@@ -780,6 +780,10 @@ fn bend_toward(dir: Dir3, target: Dir3, angle: f32) -> Dir3 {
 
 /// The game's damage model: a source-body-local box enclosing its colliders at both ends of
 /// this physics interval. Using the body's frame keeps its translation from ending clearance.
+///
+/// Launch clearance belongs to the whole disc: the source stays transparent while any sample start
+/// is inside the box ([`Self::holds_any`]), so a membership read with the source transparent is
+/// handed on only where no start can be inside a source volume (every volume lies in the box).
 #[derive(Clone, Copy)]
 struct SourceBox {
     min: Vec3,
@@ -791,6 +795,29 @@ impl SourceBox {
     fn contains(self, point: Vec3, fraction: f32) -> bool {
         let local = self.body.at(fraction).local(point);
         local.cmpge(self.min).all() && local.cmple(self.max).all()
+    }
+
+    /// Some of `starts` is inside the box at `fraction`.
+    fn holds_any(self, starts: &[Vec3], fraction: f32) -> bool {
+        starts.iter().any(|start| self.contains(*start, fraction))
+    }
+
+    /// [`Self::exit_seconds`] of the last of `starts` inside the box: when the whole disc has left
+    /// it, nudged past the boundary. `None` when a start inside stays inside over the remaining
+    /// chord, or no start is inside.
+    fn clearance_seconds(
+        self,
+        starts: &[Vec3],
+        velocity: Vec3,
+        from: f32,
+        remaining: f32,
+    ) -> Option<f32> {
+        let mut last = None;
+        for &start in starts.iter().filter(|start| self.contains(**start, from)) {
+            let exit = self.exit_seconds(start, velocity, from, remaining)?;
+            last = Some(last.map_or(exit, |last: f32| last.max(exit)));
+        }
+        last
     }
 
     /// The game's damage model uses the same local endpoint chord as moving-collider discovery.
@@ -2695,9 +2722,18 @@ fn march_shell_step(
     let source_box = shooter
         .filter(|_| !shell.projectile.source_cleared)
         .and_then(|source| world.source_box(source));
+    // A burst in flight swaps the round for its nose piece mid-step ([`burst_here`]); the disc keeps
+    // its radius, the nose being the round's calibre.
+    let radius = resolve::disc_radius(shell.projectile.body().caliber);
+    // The step lays its disc on the carried frame at the round's position ([`launch`]): clearance
+    // reads those starts.
+    let laid: Vec<Vec3> = resolve::layout(&shell.projectile.disc, radius)
+        .into_iter()
+        .map(|offset| shell.transform.translation + offset)
+        .collect();
     let ignored_source = std::cell::Cell::new(shooter.filter(|_| {
         !shell.projectile.source_cleared
-            && source_box.is_some_and(|bounds| bounds.contains(shell.transform.translation, 0.0))
+            && source_box.is_some_and(|bounds| bounds.holds_any(&laid, 0.0))
     }));
     let resting = std::cell::RefCell::new(Vec::new());
     let not_own = |entity: Entity| {
@@ -2765,9 +2801,6 @@ fn march_shell_step(
     // also the direction the last step's sweep ran along — not from the shell's visual forward:
     // `looking_to` is degenerate for a round travelling straight down, and the sampling basis is sim
     // state that must not read a view detail.
-    // A burst in flight swaps the round for its nose piece mid-step ([`burst_here`]); the disc keeps
-    // its radius, the nose being the round's calibre.
-    let radius = resolve::disc_radius(shell.projectile.body().caliber);
     let context = resolve::ResolveContext {
         world,
         colliders,
@@ -2784,8 +2817,8 @@ fn march_shell_step(
     loop {
         if ignored_source.get().is_some()
             && source_box.is_some_and(|bounds| {
-                !bounds.contains(
-                    flight.sweep_origin(),
+                !bounds.holds_any(
+                    &flight.sample_starts(radius),
                     (1.0 - budget.remaining() as f32 / dt).clamp(0.0, 1.0),
                 )
             })
@@ -2845,7 +2878,12 @@ fn march_shell_step(
         let exit = ignored_source.get().and_then(|_| {
             source_box
                 .expect("source clearance carries its box")
-                .exit_seconds(origin, dir * flight.speed, from, remaining)
+                .clearance_seconds(
+                    &flight.sample_starts(radius),
+                    dir * flight.speed,
+                    from,
+                    remaining,
+                )
         });
         let scan_seconds = exit.unwrap_or(remaining);
         let leaving_source = scan_seconds < remaining;
@@ -2926,12 +2964,13 @@ fn march_shell_step(
                 if leaving_source {
                     budget.fly(f64::from(scan_seconds));
                     let fraction = (1.0 - budget.remaining() as f32 / dt).clamp(0.0, 1.0);
-                    if source_box
-                        .is_some_and(|bounds| !bounds.contains(flight.sweep_origin(), fraction))
-                    {
+                    // Every start has left the box, so no membership the sweep read with the
+                    // source transparent can miss a source volume: the starts carry on as swept.
+                    if source_box.is_some_and(|bounds| {
+                        !bounds.holds_any(&flight.sample_starts(radius), fraction)
+                    }) {
                         ignored_source.set(None);
                     }
-                    flight.continuation = None;
                     bent = true;
                     continue;
                 }
@@ -3056,7 +3095,8 @@ fn march_shell_step(
             continue;
         }
 
-        playback = decide_playback(
+        let cleared;
+        (playback, cleared) = decide_playback(
             shell,
             &context,
             &not_own,
@@ -3067,6 +3107,10 @@ fn march_shell_step(
             health,
             &mut budget,
         );
+        // The decided chain carries the admission it was planned under; playback reads none.
+        if cleared {
+            ignored_source.set(None);
+        }
         let mut start = 1.0 - budget.remaining() / f64::from(dt);
         let mut ordinal = shell.marks.ricochets.len() as u32;
         for playing in &mut playback {
@@ -3099,8 +3143,8 @@ fn march_shell_step(
     // axis start once its discovery chain has finished.
     shell.projectile.source_cleared = ignored_source.get().is_none()
         || source_box.is_none_or(|bounds| {
-            !bounds.contains(
-                flight.sweep_origin(),
+            !bounds.holds_any(
+                &flight.sample_starts(radius),
                 (1.0 - budget.remaining() as f32 / dt).clamp(0.0, 1.0),
             )
         });
@@ -3178,9 +3222,11 @@ fn launch(
 }
 
 /// The game's damage model freezes each discovered crossing before playback starts. Held
-/// samples finish in that scene. Discovery ends at source-box clearance before continuing with
-/// the source solid; other bodies return to relative discovery. No tick re-collects a crossing
-/// already being played back.
+/// samples finish in that scene. Discovery under launch clearance ends at the decision after which
+/// the source is solid, and says so: a straight decision that hands on every start outside the
+/// source box with none held, or a bounce whose way in took every sample out of it, so a return
+/// meets the source solid wherever the bounce resumes. Other bodies return to relative discovery.
+/// No tick re-collects a crossing already being played back.
 #[expect(
     clippy::too_many_arguments,
     reason = "the immutable planner also closes the struck physical body's actual geometry"
@@ -3195,13 +3241,14 @@ fn decide_playback(
     clearance: Option<SourceBox>,
     health: &Query<&mut ComponentHealth>,
     budget: &mut resolve::Budget,
-) -> std::collections::VecDeque<resolve::Playback> {
+) -> (std::collections::VecDeque<resolve::Playback>, bool) {
     assert!(
         context.deposit,
         "game's damage model: only the authority decides a crossing; a replica's contact ends in \
          its replica state machine"
     );
     let mut out = std::collections::VecDeque::new();
+    let mut cleared = false;
     let mut flight = flight.clone();
     let mut fuze = shell.projectile.fuze;
     let radius = resolve::disc_radius(shell.projectile.body().caliber);
@@ -3269,7 +3316,12 @@ fn decide_playback(
             }
             let reach = clearance
                 .and_then(|bounds| {
-                    bounds.exit_seconds(flight.sweep_origin(), *flight.direction, 0.0, reach)
+                    bounds.clearance_seconds(
+                        &flight.sample_starts(radius),
+                        *flight.direction,
+                        0.0,
+                        reach,
+                    )
                 })
                 .unwrap_or(reach);
             match next_surface(context.world, &flight, radius, reach, admit) {
@@ -3327,13 +3379,28 @@ fn decide_playback(
             matches!(&decision,
             resolve::Decision::Clear { travel, .. } if *travel >= distance)
         });
+        let bounced_out = clearance.is_some_and(|bounds| match &decision {
+            resolve::Decision::Bounce(bounce) => {
+                let way_in = &bounce.approach;
+                let ends: Vec<Vec3> = way_in
+                    .samples
+                    .iter()
+                    .map(|sample| way_in.from + sample.offset + way_in.axis * sample.length)
+                    .collect();
+                !bounds.holds_any(&ends, 0.0)
+            }
+            _ => false,
+        });
         let stopped = follow_fuzed(&mut fuze, &mut flight, decision);
-        let cleared = clearance.is_some_and(|bounds| !bounds.contains(flight.sweep_origin(), 0.0));
+        cleared = bounced_out
+            || clearance.is_some_and(|bounds| {
+                !flight.holds_material() && !bounds.holds_any(&flight.sample_starts(radius), 0.0)
+            });
         if stopped || reached_barrier || cleared || fuze.due_within(0.0).is_some() {
             break;
         }
     }
-    out
+    (out, cleared)
 }
 
 /// AUTHORITY: an unarmed `Impact` fuze reads the body the flight meets `contact` metres ahead

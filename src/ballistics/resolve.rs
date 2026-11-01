@@ -377,7 +377,7 @@ pub(crate) fn transit_starts(
             anchor: request.anchor,
             origin: request.origin,
         },
-        Dir3::new_unchecked(request.axis),
+        request.axis,
         request.frame,
         request.radius,
         request.offsets.clone(),
@@ -1071,6 +1071,16 @@ impl Flight {
         }
     }
 
+    /// Each sample's WORLD start, in canonical sample order: [`sweep_origin`](Self::sweep_origin)
+    /// plus [`sample_offsets`](Self::sample_offsets).
+    pub(crate) fn sample_starts(&self, radius: f32) -> Vec<Vec3> {
+        let origin = self.sweep_origin();
+        self.sample_offsets(radius)
+            .into_iter()
+            .map(|offset| origin + offset)
+            .collect()
+    }
+
     /// A continuation holds a sample inside material ([`Interior::holds_material`]).
     pub(crate) fn holds_material(&self) -> bool {
         self.continuation
@@ -1604,15 +1614,14 @@ pub(crate) fn decide(
             // --- TRANSIT: re-collected along the BENT axis from the hand-off, its membership read
             // on those bent rays. The entrance hits describe the incoming rays and cannot describe
             // this.
-            // `begin` supplies the checked bend's unit vector. Preserve its bits on every ray.
-            let bent = Dir3::new_unchecked(request.axis);
+            let bent = request.axis;
             let starts = transit_starts(context, not_own, &request)?;
             let transit = closing_walk(
                 context,
                 not_own,
                 request.anchor,
                 request.origin,
-                request.axis,
+                *request.axis,
                 request.frame,
                 request.radius,
                 &starts.seeds,

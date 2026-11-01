@@ -2768,3 +2768,184 @@ fn source_clearance_travels_with_the_firing_body() {
         "initial source clearance cannot charge its own material"
     );
 }
+
+/// The game's damage model: launch clearance ends only once the whole disc has left the source
+/// box. A foreign plate at 30° inside the box, hull-to-hull, staggers the perforating disc by up to
+/// r·tan 30° ≈ 25 mm (DERIVED, r = 44 mm) along the travel, so when the axis clears the box face
+/// at the muzzle its lagging samples still sit inside the barrel volume that reaches that face. A
+/// source made solid there charges its own barrel with the round's line, cost and dose. The
+/// foreign plate's spall cone may still dose the barrel: a field is no launch path. Every pose,
+/// size, pool and speed below is fixture data.
+#[test]
+fn a_staggered_disc_clears_its_whole_source_box_before_the_source_turns_solid() {
+    lagging_samples_clear_the_barrel(Vec3::ZERO);
+}
+
+/// [`a_staggered_disc_clears_its_whole_source_box_before_the_source_turns_solid`] with the foreign
+/// body moving (fixture velocity), so the hand-off re-certifies contact-time membership.
+#[test]
+fn a_staggered_disc_clears_its_source_box_in_a_moving_scene() {
+    lagging_samples_clear_the_barrel(Vec3::X * 0.5);
+}
+
+fn lagging_samples_clear_the_barrel(foreign_velocity: Vec3) {
+    let mut app = recording_world(false);
+    app.insert_resource(RetainSpentShells(true));
+    // The barrel alone spans the source box: its front face at z = -3 is the box's.
+    let (source, volumes) = tank(
+        &mut app,
+        Vec3::ZERO,
+        0.0,
+        Vec3::ZERO,
+        &[(
+            "barrel",
+            Vec3::new(0.2, 0.2, 3.0),
+            Vec3::new(0.0, 0.0, -1.5),
+            Kind::Crew(DEEP),
+        )],
+    );
+    app.world_mut()
+        .entity_mut(source)
+        .insert(avian3d::prelude::LockedAxes::ALL_LOCKED);
+    tank(
+        &mut app,
+        Vec3::new(0.0, 0.0, -2.9),
+        30.0_f32.to_radians(),
+        foreign_velocity,
+        &[(
+            "oblique plate",
+            Vec3::new(1.0, 1.0, 0.03),
+            Vec3::ZERO,
+            Kind::Plate,
+        )],
+    );
+    settle(&mut app);
+    let round = crate::tank::WeaponRound::resolve("88mm_AP").unwrap().round;
+    let birth = Vec3::new(0.0, 0.0, -0.5);
+    let mut fire = FireShell::of_round(
+        &round,
+        birth,
+        birth,
+        Dir3::NEG_Z,
+        FireMechanism::Single,
+        false,
+        Some(ShotSource {
+            tank: source,
+            weapon: 0,
+            round: 0,
+        }),
+        None,
+    );
+    fire.speed = SPEED;
+    app.world_mut().trigger(fire);
+    run(&mut app, 4);
+    let mut logs = app.world_mut().query::<&PenetrationMarks>();
+    let marks: Vec<_> = logs
+        .iter(app.world())
+        .flat_map(|marks| &marks.log)
+        .collect();
+    assert!(
+        marks
+            .iter()
+            .any(|mark| matches!(mark, ArmourMark::Crossing { .. })),
+        "the fixture perforates the foreign plate: {marks:?}"
+    );
+    assert!(
+        !marks.iter().any(|mark| matches!(mark,
+            ArmourMark::Wound { volumes: crossed, .. } | ArmourMark::Crossing { volumes: crossed, .. }
+            if crossed.iter().any(|v| v.volume == volumes[0]))),
+        "launch clearance never charges the source's own barrel: {marks:?}"
+    );
+}
+
+/// The game's damage model: an exit followed by an immediate return still ends launch clearance.
+/// An axis-only round leaves its source box at x = 1, meets a foreign reflector 0.1 mm past that
+/// face, inside the boundary nudge discovery reaches, and bounces back at 75° obliquity; outgoing
+/// x = -sin 15° resumes it 0.26 mm back inside the box (DERIVED). The return must then meet the
+/// source's armour solid. Every pose, size and speed below is fixture data.
+#[test]
+fn a_bounce_just_past_the_source_box_returns_into_a_solid_source() {
+    let mut app = recording_world(false);
+    app.insert_resource(RetainSpentShells(true));
+    let (source, volumes) = tank(
+        &mut app,
+        Vec3::ZERO,
+        0.0,
+        Vec3::ZERO,
+        &[
+            (
+                "source front",
+                Vec3::new(2.0, 2.0, 0.4),
+                Vec3::ZERO,
+                Kind::Plate,
+            ),
+            (
+                "source armour",
+                Vec3::new(2.0, 2.0, 0.01),
+                Vec3::NEG_Z * 5.0,
+                Kind::Plate,
+            ),
+        ],
+    );
+    app.world_mut()
+        .entity_mut(source)
+        .insert(avian3d::prelude::LockedAxes::ALL_LOCKED);
+    let angle = 15.0_f32.to_radians();
+    let birth = Vec3::new(0.5, 0.0, 0.0);
+    // Where the axis meets x = 1.0001: (1.0001 - 0.5) / sin 15° of travel.
+    let strike = birth.z - (1.0001 - birth.x) / angle.tan();
+    tank(
+        &mut app,
+        Vec3::ZERO,
+        0.0,
+        Vec3::ZERO,
+        &[(
+            "reflector",
+            Vec3::new(0.3, 3.0, 3.0),
+            Vec3::new(1.0001 + 0.15, 0.0, strike),
+            Kind::Plate,
+        )],
+    );
+    settle(&mut app);
+    let round = crate::tank::WeaponRound::resolve("7.9mm_AP").unwrap().round;
+    assert_eq!(
+        resolve::disc_radius(round.flying.caliber),
+        0.0,
+        "the fixture round samples on its axis alone"
+    );
+    let direction = Dir3::new(Vec3::new(angle.sin(), 0.0, -angle.cos())).unwrap();
+    let mut fire = FireShell::of_round(
+        &round,
+        birth,
+        birth,
+        direction,
+        FireMechanism::Single,
+        false,
+        Some(ShotSource {
+            tank: source,
+            weapon: 0,
+            round: 0,
+        }),
+        None,
+    );
+    fire.speed = SPEED;
+    app.world_mut().trigger(fire);
+    run(&mut app, 4);
+    let mut logs = app.world_mut().query::<&PenetrationMarks>();
+    let marks: Vec<_> = logs
+        .iter(app.world())
+        .flat_map(|marks| &marks.log)
+        .collect();
+    assert!(
+        marks
+            .iter()
+            .any(|mark| matches!(mark, ArmourMark::Bounce { .. })),
+        "the fixture must bounce: {marks:?}"
+    );
+    assert!(
+        marks.iter().any(|mark| matches!(mark,
+            ArmourMark::Crossing { volumes: crossed, .. }
+            if crossed.iter().any(|v| v.volume == volumes[1] && v.cost > 0.0))),
+        "the return must resolve the source's armour: {marks:?}"
+    );
+}

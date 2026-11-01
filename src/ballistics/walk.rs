@@ -3057,8 +3057,9 @@ pub struct SampleSeed {
 pub struct TransitRequest {
     pub entrance: EntranceRead,
     /// The NORMALIZED (bent) travel axis — the transit happens along this, not along the incoming
-    /// direction the entrance was sampled on.
-    pub axis: Vec3,
+    /// direction the entrance was sampled on. Carried as the checked bend `begin` computed, so its
+    /// bits reach every transit ray unchanged.
+    pub axis: Dir3,
     /// WORLD anchor, carried through unchanged from the entrance corridor — see
     /// [`RayCorridor::anchor`]. Sharing it is the point: the handoff below is then a LOCAL offset
     /// from the same origin the entrance's face positions were measured from, so the two agree to
@@ -3185,7 +3186,7 @@ pub fn begin(entrance: &DiscWalk, shot: &Shot, laws: &WalkLaws) -> Result<Begin,
 
     Ok(Begin::Transit(TransitRequest {
         entrance: read,
-        axis: Vec3::from(bent),
+        axis: bent,
         anchor: entrance.anchor,
         origin,
         frame: entrance.frame.transport(entrance.axis, Vec3::from(bent)),
@@ -3264,7 +3265,7 @@ fn validate_transit<'t>(
     request: &TransitRequest,
 ) -> Result<Cow<'t, DiscEvent>, WalkError> {
     let mismatch = |reason| Err(WalkError::CorridorMismatch { reason });
-    if (transit.axis - request.axis).length() > 1.0e-4 {
+    if (transit.axis - *request.axis).length() > 1.0e-4 {
         return mismatch(Mismatch::Axis);
     }
     if transit.anchor != request.anchor {

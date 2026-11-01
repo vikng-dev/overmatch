@@ -280,7 +280,7 @@ fn resumed_disc(
     DiscCorridor {
         anchor: request.anchor,
         origin,
-        axis: request.axis,
+        axis: *request.axis,
         length,
         radius: request.radius,
         frame: request.frame,
@@ -294,7 +294,7 @@ fn resumed_disc(
                     .flat_map(|slab| {
                         slab.hits(
                             origin + seed.offset,
-                            request.axis,
+                            *request.axis,
                             length,
                             seed.inside.contains(&slab.key()),
                         )
@@ -1442,7 +1442,7 @@ fn partial_coverage_scales_the_normalization_bend() {
     )
     .unwrap();
     let full_request = transit_request(&full, &AP_88, &laws);
-    let full_bend = AXIS.angle_between(full_request.axis);
+    let full_bend = AXIS.angle_between(*full_request.axis);
     // At η = 1 the bend is the classic `normalization × incidence`, unscaled.
     assert!(
         (full_bend - laws.normalization * full_request.entrance.incidence).abs() < 1.0e-4,
@@ -1458,7 +1458,7 @@ fn partial_coverage_scales_the_normalization_bend() {
     )
     .unwrap();
     let coverage = partial.events[0].coverage;
-    let partial_bend = AXIS.angle_between(transit_request(&partial, &AP_88, &laws).axis);
+    let partial_bend = AXIS.angle_between(*transit_request(&partial, &AP_88, &laws).axis);
     assert!(
         (partial_bend - coverage * full_bend).abs() < 1.0e-3,
         "η = {coverage}: bent {partial_bend}, expected {}",
@@ -1495,13 +1495,13 @@ fn the_entry_bend_scales_with_the_entrance_resistance() {
         event.coverage * laws.normalization * reference.entrance.incidence,
     );
     assert_eq!(reference.axis.to_array(), Vec3::from(unscaled).to_array());
-    let reference_turn = turn(reference.axis);
+    let reference_turn = turn(*reference.axis);
 
     for factor in [40.0, 150.0, 800.0] {
         let share = factor / laws.rha_reference;
         let (softer, _) = enter(&[facing], &table(&[(1, factor)]));
         assert_eq!(softer.entrance.incidence, reference.entrance.incidence);
-        let softer_turn = turn(softer.axis);
+        let softer_turn = turn(*softer.axis);
         assert!(
             (softer_turn - share * reference_turn).abs() < 1.0e-3 * share * reference_turn,
             "factor {factor}: turned {softer_turn}, expected {}",
@@ -1633,7 +1633,7 @@ fn finish_rejects_a_corridor_that_is_not_the_one_it_asked_for() {
 
     // A re-derived frame instead of the transported one.
     let mut rolled = honest;
-    rolled.frame = DiscFrame::from_axis_and_reference(request.axis, Vec3::X).unwrap();
+    rolled.frame = DiscFrame::from_axis_and_reference(*request.axis, Vec3::X).unwrap();
     assert!(matches!(
         finish_at(&rolled, &request, AP_88_CAPABILITY),
         Err(WalkError::CorridorMismatch { .. })
@@ -1644,7 +1644,7 @@ fn finish_rejects_a_corridor_that_is_not_the_one_it_asked_for() {
     let mut unrelated = transit_disc(&request, &[elsewhere], 3.0);
     for (sample, offset) in unrelated.samples.iter_mut().zip(&request.offsets) {
         sample.initial_presence.clear();
-        sample.hits = elsewhere.hits(request.origin + *offset, request.axis, 3.0, false);
+        sample.hits = elsewhere.hits(request.origin + *offset, *request.axis, 3.0, false);
     }
     let other = walk_disc(&unrelated, &table(&[(9, 1000.0)]), &laws).unwrap();
     assert!(matches!(
@@ -1669,7 +1669,7 @@ fn finish_rejects_a_corridor_whose_samples_moved() {
     // One ray, 10 mm across. Everything the aggregate check looks at is untouched.
     moved.samples[3].offset += Vec3::X * 0.01;
     let moved = walk_disc(&moved, &volumes, &laws).unwrap();
-    assert_eq!(moved.axis, request.axis);
+    assert_eq!(moved.axis, *request.axis);
     assert_eq!(moved.origin, request.origin);
     assert_eq!(moved.samples(), request.samples);
     assert!(matches!(
@@ -1694,7 +1694,7 @@ fn finish_rejects_a_far_crossing_of_the_same_entity() {
     let mut corridor = transit_disc(&request, &[front], 3.0);
     for (sample, offset) in corridor.samples.iter_mut().zip(&request.offsets) {
         sample.initial_presence.clear();
-        sample.hits = elsewhere.hits(request.origin + *offset, request.axis, 3.0, false);
+        sample.hits = elsewhere.hits(request.origin + *offset, *request.axis, 3.0, false);
     }
     let far = walk_disc(&corridor, &volumes, &laws).unwrap();
     assert_eq!(

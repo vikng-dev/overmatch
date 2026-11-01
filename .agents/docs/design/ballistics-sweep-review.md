@@ -410,14 +410,19 @@ would stop mounted rounds in their own barrel or mount. Its fixture evidence rem
 | Coax / 7.9mm_AP, full authored recoil | Coax_MG_Barrel | Stops after 0.0142822 m; barrel reduced by one shown HP point |
 | HullMG / 7.9mm_AP, full authored recoil | Hull_MG_Ball and Hull_MG_Mantlet | Stops after 0.0158691 m; no shown pool loss |
 
-The source is now ignored only until its first box exit. The box is the union of all source-body
+The source is now ignored only until the round's whole disc first leaves its box: it stays
+transparent while any sample start is inside the box. A decided chain ends at the decision after
+which the source is solid: a straight one that hands on every start outside the box with none held,
+or a bounce whose way in took every sample out, so a return meets the source solid wherever the
+bounce resumes. Starts handed on outside the box keep the membership their sweep read, since no
+source volume can hold them. The box is the union of all source-body
 collider AABBs, including ballistic barrel volumes and physics proxies, transformed into the
 firing rigid body's local frame at both captured interval endpoints. It follows that body's pose;
 a tick-end world-space box could move away before the round's march begins. Clearance uses the
-same local endpoint-chord model as moving-collider discovery, splits open flight at the exit,
-and uses the shared boundary nudge before rediscovery. A spawn-time latch keeps the source solid
-thereafter, including later ticks and returns. The whole-flight predicate and its pinned test are
-gone; source identity remains for attribution.
+same local endpoint-chord model as moving-collider discovery, splits open flight at the last
+sample's exit, and uses the shared boundary nudge before rediscovery. A spawn-time latch keeps the
+source solid thereafter, including later ticks and returns. The whole-flight predicate and its
+pinned test are gone; source identity remains for attribution.
 
 MEASURED software checks: the muzzle-birth mutant missed the intervening plate and failed the
 mounted-fire origin test. With collider-exit birth, foreign-hull and unowned-wall fixtures meet
@@ -977,3 +982,40 @@ Wire definitions are unchanged, so PROTOCOL_REV deliberately remains 62. No `src
 `ShotClock`, `WeaponClock` or `Respawn::Opens::tick` definition changed. The shared seams are
 `Weapon` in `src/tank/model.rs` and mechanical weapon-fixture initialization in `src/net` and
 VFX; no tick-type overlap was edited. No captures, pricing, pushes or issue comments were made.
+
+## Review of sweep-ball-10 and whole-disc source clearance
+
+Subject: the game's damage model, game state only. Both blind reviews were present when this lane
+started and were read again before this table was written; neither was missing.
+
+| Reviewer | Finding | Verified / not a defect | Fixed in (commit subject) |
+|---|---|---|---|
+| Claude | P1: main does not build: `bore_length` exists only on the file-side weapon spec | verified | spec: carry the bore length onto the parsed weapon (#247) |
+| Codex | P1: the same build break | verified | spec: carry the bore length onto the parsed weapon (#247) |
+| Claude | P1: a queued chain hands on lagging samples inside the source's own volume with the source made solid | verified | ballistics: end launch clearance when the whole disc leaves its source box (#247) |
+| Codex | P1: an exit followed by an immediate return keeps the source transparent | verified | ballistics: end launch clearance when the whole disc leaves its source box (#247) |
+| Claude | P3: the clearance break ends a chain while a sample still holds material | verified | ballistics: end launch clearance when the whole disc leaves its source box (#247) |
+| Claude | P3: the transit request's unit axis is held only by a doc line | verified | ballistics: end launch clearance when the whole disc leaves its source box (#247) |
+| Claude | P3: a recovered round invents its birth at the muzzle | verified | not fixed: `src/net/` is outside this lane; for the orchestrator to route |
+
+MEASURED regressions and dispositions:
+
+- Both P1s had one cause: clearance tested a single point, the axis start at the decision's end,
+  against the source box. The source now stays transparent while any sample start is inside the
+  box; a chain ends at the decision after which none is (with none held), or at a bounce whose way
+  in took every sample out. The source-clearance section above owns the rule. The open-air exit
+  keeps its swept starts instead of laying a fresh square disc, which could set an oblique disc's
+  samples back inside the box.
+- `a_staggered_disc_clears_its_whole_source_box_before_the_source_turns_solid` and its moving
+  variant (an 88 perforating a foreign plate at 30° inside its own box, its barrel volume reaching
+  the box face) failed before the fix: the round's line crossed its own barrel, static and moving
+  alike (the static case charged it rather than failing its collector). They pass after it. The
+  foreign plate's spall cone still doses the barrel, as any field may.
+- `a_bounce_just_past_the_source_box_returns_into_a_solid_source` (Codex's DERIVED geometry: an
+  axis-only 7.9 mm round reflecting at x = 1.0001 off a box ending at x = 1, outgoing
+  x = −sin 15°) failed before the fix, the return passing through the source's armour; after it
+  the return resolves that armour with positive cost.
+- The transit request carries its bent axis as a `Dir3`, the checked bend `begin` computes; no
+  `new_unchecked` remains on it.
+
+Wire definitions are unchanged, so PROTOCOL_REV deliberately remains 62.
