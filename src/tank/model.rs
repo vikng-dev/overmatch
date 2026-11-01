@@ -403,13 +403,13 @@ impl WeaponGateState {
         matches!(self.timing, WeaponTiming::Ready)
     }
 
-    /// The active deadline, or a paused work clock for diagnostics. A pause has no active
-    /// deadline ordering; its first unmet tick is retained in the displayed work count.
+    /// The active deadline, or the frozen deadline anchored to the pause tick for diagnostics.
+    /// A pause has no active deadline ordering; its work count is exactly what resume arms.
     pub fn ready_tick(self) -> Option<SimTick> {
         match self.timing {
             WeaponTiming::Ready => None,
             WeaponTiming::Loading { ready_tick } => Some(ready_tick),
-            WeaponTiming::Paused { work, since } => Some(since.after(work).after(TickSpan::ONE)),
+            WeaponTiming::Paused { work, since } => Some(since.after(work)),
         }
     }
 
@@ -505,8 +505,7 @@ impl WeaponGateState {
         match self.timing {
             WeaponTiming::Ready => 0,
             WeaponTiming::Loading { ready_tick } => now.remaining_until(ready_tick),
-            // The entry tick cannot consume work, including at the greatest admitted span.
-            WeaponTiming::Paused { work, .. } => work.raw() + 1,
+            WeaponTiming::Paused { work, .. } => work.raw(),
         }
     }
 }

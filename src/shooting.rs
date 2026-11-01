@@ -147,10 +147,10 @@ const ROOT_HAS_SIM: &str = "a weapon's root carries the TankSim built in its con
 
 /// Mature every weapon's absolute readiness deadline, with the crew gate applied per [`FireCycle`]:
 ///
-/// * `Single`: unmet `load` freezes the remaining reload until work resumes.
+/// * `Single`: load effectiveness sets the reload rate; zero freezes the remaining work.
 /// * `Automatic`, belt has rounds: the cyclic deadline matures without a crew gate.
-/// * `Automatic`, belt dry: unmet `load` likewise advances the swap deadline; the belt refills
-///   only on a met-gate tick that reaches the deadline.
+/// * `Automatic`, belt dry: load effectiveness sets the swap rate with the same pause and
+///   rate-change rule; the belt refills only when the work completes.
 ///
 /// Per-tank, not controlled-only: a tank keeps loading whether you're in it or it's a network
 /// peer's.
@@ -191,14 +191,14 @@ fn tick_weapon_gate(
                     if state.deadline_reached(now) {
                         state.finish();
                     }
-                } else if requirement_met(tank_volumes, &weapon.load, &volumes) {
-                    state.resume(now);
+                } else {
+                    let effectiveness =
+                        requirement_effectiveness(tank_volumes, &weapon.load, &volumes);
+                    state.load_at_rate(now, effectiveness);
                     if state.deadline_reached(now) {
                         state.belt_remaining = belt_size;
                         state.finish();
                     }
-                } else {
-                    state.pause(now);
                 }
             }
         }
@@ -431,7 +431,7 @@ fn fire(
                     }
                 }
             };
-            if matches!(weapon.fire_cycle, FireCycle::Single { .. }) {
+            if matches!(weapon.fire_cycle, FireCycle::Single { .. }) || state.belt_remaining == 0 {
                 state.arm_load(
                     weapon_clock.0,
                     delay,
@@ -625,7 +625,7 @@ mod tests {
             r#"{"timing":{"Paused":{"work":3,"since":0}},"belt_remaining":0,"load_rate":1.0}"#,
         )
         .expect("a paused swap holds an empty belt");
-        assert_eq!(valid.remaining_ticks(at(0)), 4);
+        assert_eq!(valid.remaining_ticks(at(0)), 3);
         // DERIVED wire fixtures: Paused's variant index, then its work, start and belt count.
         for (work, belt) in [(1_u32 << 31, 0_u32), (3, 5)] {
             let wire = postcard::to_allocvec(&(2_u32, work, 0_u32, belt, 1.0_f32)).unwrap();
@@ -665,7 +665,7 @@ mod tests {
         let wire = serde_json::to_vec(&authority).unwrap();
         let mut peer: WeaponGateState = serde_json::from_slice(&wire).unwrap();
         peer.pause(at(u32::MAX - 1));
-        assert_eq!(peer.remaining_ticks(at(u32::MAX - 1)), 2);
+        assert_eq!(peer.remaining_ticks(at(u32::MAX - 1)), 1);
     }
 
     /// The game's damage model: the published clock is also the UI's legality clock. The
@@ -704,7 +704,7 @@ mod tests {
         let mut gate = WeaponGateState::default();
         gate.arm(at(u32::MAX - 1), TickSpan::of(3));
         gate.pause(at(u32::MAX));
-        assert_eq!(gate.remaining_ticks(at(100)), 3);
+        assert_eq!(gate.remaining_ticks(at(100)), 2);
         gate.resume(at(1));
         assert_eq!(gate.remaining_ticks(at(1)), 2);
         assert!(!gate.deadline_reached(at(2)));
@@ -732,12 +732,12 @@ mod tests {
         let mut gate = WeaponGateState::default();
         gate.arm(at(0), TickSpan::of(TickSpan::MAX));
         gate.pause(at(0));
-        assert_eq!(gate.remaining_ticks(at(u32::MAX)), 1 << 31);
+        assert_eq!(gate.remaining_ticks(at(u32::MAX)), TickSpan::MAX);
         gate.resume(at(1));
         assert_eq!(gate.remaining_ticks(at(1)), i32::MAX as u32);
         gate.arm(at(10), TickSpan::ONE);
         gate.pause(at(20));
-        assert_eq!(gate.remaining_ticks(at(20)), 1);
+        assert_eq!(gate.remaining_ticks(at(20)), 0);
         gate.resume(at(25));
         assert!(gate.deadline_reached(at(25)));
         gate.arm(at(u32::MAX - 1), TickSpan::of(3));
@@ -1198,6 +1198,34 @@ mod tests {
         );
     }
 
+    /// The game's damage model: only belt-swap work uses loader competence; the mechanical
+    /// cyclic interval stays fixed. A switch-only swap or scaled cyclic timer fails here.
+    /// Fixture: the two-round automatic rig, seven cyclic ticks, 64 base swap ticks.
+    #[test]
+    fn a_backfilled_loader_swaps_belts_at_its_competence() {
+        let mut world = test_world();
+        let (root, loader) = spawn_mg_rig(&mut world, vec![Group::Single(Part::Loader)]);
+        world.entity_mut(loader).insert(Crewman {
+            home: CrewStation::Driver,
+        });
+        world.run_system_once(fire).unwrap();
+        assert_eq!(gate_state(&world, root).ready_tick(), Some(at(7)));
+        advance(&mut world, 7);
+        world.run_system_once(fire).unwrap();
+        let rate = crate::damage::competence(CrewStation::Driver, CrewStation::Loader);
+        let swap_ticks = (64.0_f64 / f64::from(rate)).ceil() as u32;
+        assert_eq!(
+            gate_state(&world, root).ready_tick(),
+            Some(at(7 + swap_ticks))
+        );
+        assert_eq!(gate_state(&world, root).belt_remaining, 0);
+        advance(&mut world, swap_ticks - 1);
+        assert_eq!(gate_state(&world, root).belt_remaining, 0);
+        advance(&mut world, 1);
+        assert_eq!(gate_state(&world, root).belt_remaining, 2);
+        assert!(gate_state(&world, root).is_ready());
+    }
+
     /// The existing single-shot path uses the same absolute gate without acquiring belt semantics.
     #[test]
     fn single_weapon_reloads_on_absolute_deadline() {
@@ -1393,7 +1421,7 @@ mod tests {
         let paused_gate = gate_state(&world, root);
         assert_eq!(
             paused_gate.paused_at_tick(),
-            Some(crate::sim_tick::SimTick::new(8))
+            Some(crate::sim_tick::SimTick::new(7))
         );
         advance(&mut world, 255);
         let gate = gate_state(&world, root);
@@ -1412,11 +1440,14 @@ mod tests {
 
         // Revive the loader (slice-2 backfill shape): the swap resumes, completes, fire returns.
         world.entity_mut(loader).remove::<Dead>();
+        // The first eligible tick resumes the frozen interval, then all 64 work ticks run.
         advance(&mut world, 64);
+        assert_eq!(gate_state(&world, root).belt_remaining, 0);
+        advance(&mut world, 1);
         assert_eq!(
             gate_state(&world, root).belt_remaining,
             2,
-            "revived crew completes the swap"
+            "a backfilled crew member completes the full frozen swap work"
         );
         world.run_system_once(fire).unwrap();
         assert_eq!(weapon_state(&mut world, root).rounds_fired, 3);
