@@ -1116,22 +1116,30 @@ fn scripted(from: f32, to: f32) -> impl FnMut(Res<Time>, ResMut<XRay>, Local<boo
 
 /// Dev-only, offline: `OVERMATCH_XRAY=<from>-<to>` holds the x-ray preference on from
 /// `from` to `to` app seconds (`Time` as `Update` sees it) and lets it go at `to`, for captures.
-/// Mounted only by the offline composition.
+/// Mounted only by the offline composition. User: `scripts/perf/run-pencam-cost.sh` sets it. An
+/// operator's malformed, non-UTF-8 or unordered window refuses the start, never runs untimed.
 pub(crate) fn scripted_xray_plugin(app: &mut App) {
-    let Ok(window) = std::env::var("OVERMATCH_XRAY") else {
+    let Some(window) = crate::env_value("OVERMATCH_XRAY").unwrap_or_else(crate::refuse_start)
+    else {
         return;
     };
-    let Some((from, to)) = window.split_once('-').and_then(|(from, to)| {
-        Some((
-            from.trim().parse::<f32>().ok()?,
-            to.trim().parse::<f32>().ok()?,
+    let (from, to) = parse_xray_window(&window).unwrap_or_else(|| {
+        crate::refuse_start(format!(
+            "OVERMATCH_XRAY={window:?}: expected <from>-<to> app seconds, finite, 0 <= from < to"
         ))
-    }) else {
-        warn!("OVERMATCH_XRAY={window}: expected <from>-<to> seconds");
-        return;
-    };
+    });
     info!("pen cam: the x-ray is on from {from} s to {to} s (OVERMATCH_XRAY)");
     app.add_systems(Update, scripted(from, to).before(toggle));
+}
+
+/// `<from>-<to>` app seconds, both finite with `0 <= from < to`; `None` for anything else.
+fn parse_xray_window(window: &str) -> Option<(f32, f32)> {
+    let (from, to) = window.split_once('-')?;
+    let (from, to) = (
+        from.trim().parse::<f32>().ok()?,
+        to.trim().parse::<f32>().ok()?,
+    );
+    (from.is_finite() && to.is_finite() && 0.0 <= from && from < to).then_some((from, to))
 }
 
 /// One health-bearing volume of the subject tank as its replicated state stands: its shown HP
@@ -1301,6 +1309,18 @@ mod tests {
     use super::*;
     use crate::damage_cam::pen_cam::timeline::Condition;
     use crate::damage_cam::shapes::TankAsset;
+
+    /// The operator's x-ray window parses only as finite, ordered, non-negative seconds: the
+    /// pricing script's `65-95` does, and a typo or reversed window is refused, never read as an
+    /// untimed run (a mutant accepting any parse would take `95-65`).
+    #[test]
+    fn the_xray_window_parses_only_an_ordered_finite_span() {
+        assert_eq!(parse_xray_window("65-95"), Some((65.0, 95.0)));
+        assert_eq!(parse_xray_window(" 0 - 1.5 "), Some((0.0, 1.5)));
+        for refused in ["95-65", "5-5", "65", "a-95", "65-inf", "NaN-3", ""] {
+            assert_eq!(parse_xray_window(refused), None, "{refused:?}");
+        }
+    }
 
     /// Seventeen moments of a fill's rise, its start and its end among them.
     fn rises() -> impl Iterator<Item = f32> {

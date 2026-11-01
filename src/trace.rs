@@ -176,6 +176,10 @@ pub(crate) fn role_path(path: &str, role: &str) -> PathBuf {
 /// Open the role-qualified sink and register the shared meta/flush systems when `SPIKE_TRACE` arms
 /// it. Returns `true` iff tracing is armed, so each composition plugin registers its recorders only
 /// in a traced run (dropping per-frame `resource_exists` gating). Called once per composition root.
+///
+/// Users: `SPIKE_TRACE` is set by `scripts/connect/batch.sh`; `SPIKE_TRACE_SIM_FIELDS` by the
+/// operator for the jittered two-client combat capture ADR-0029 and ADR-0030 name as their product
+/// verification (it reads `simf.wpn` and `simf.srv`); no tracked script sets it.
 fn install(app: &mut App, role: &'static str) -> bool {
     let Some(path) = crate::env_value("SPIKE_TRACE").unwrap_or_else(crate::refuse_start) else {
         return false;
