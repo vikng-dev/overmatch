@@ -289,41 +289,34 @@ struct Charge {
 }
 
 impl Charge {
-    /// The filler is the registry's burst-core substance; the casing is the first burst round's
-    /// among the wall's rounds, read back from its burst (`M = 2E / v_s²`, `M/C = (K / v_s)² − ½`).
-    /// A bare charge where the data names none.
+    /// The game's environment blast tool requires a sourced core and a burst round whose
+    /// casing supplies its cased setting. Missing construction is refused at initialization.
     fn of(rounds: &[WallRound]) -> Self {
         let registry = SubstanceRegistry::shipped_static();
         let core = registry
             .keys()
             .into_iter()
-            .find_map(|name| registry.get(name).ok().and_then(|s| s.burst()));
-        let burst = rounds.iter().find_map(|round| round.round.burst);
-        match (core, burst) {
-            (Some(core), Some(burst)) => {
-                let speed = f64::from(burst.sideways_speed);
-                Self {
-                    density: core.density as f32,
-                    chemical: core.chemical_energy as f32,
-                    speed_constant: core.speed_constant as f32,
-                    casing_ratio: ((core.speed_constant / speed).powi(2) - 0.5) as f32,
-                    casing_speed: burst.sideways_speed,
-                }
-            }
-            (Some(core), None) => Self {
-                density: core.density as f32,
-                chemical: core.chemical_energy as f32,
-                speed_constant: core.speed_constant as f32,
-                casing_ratio: 0.0,
-                casing_speed: 0.0,
-            },
-            _ => Self {
-                density: 1650.0,
-                chemical: 0.0,
-                speed_constant: 0.0,
-                casing_ratio: 0.0,
-                casing_speed: 0.0,
-            },
+            .find_map(|name| {
+                registry
+                    .get(name)
+                    .expect("a registry key resolves to its loaded substance")
+                    .burst()
+            })
+            .expect(
+                "wall blast tool: assets/materials/materials.ron needs a sourced burst core; \
+                 author its burst properties before opening the sandbox",
+            );
+        let burst = rounds.iter().find_map(|round| round.round.burst).expect(
+            "wall blast tool: the selected tank's rounds need a burst block for the cased \
+                 charge setting; author a sourced burst round before opening the sandbox",
+        );
+        let speed = f64::from(burst.sideways_speed);
+        Self {
+            density: core.density as f32,
+            chemical: core.chemical_energy as f32,
+            speed_constant: core.speed_constant as f32,
+            casing_ratio: ((core.speed_constant / speed).powi(2) - 0.5) as f32,
+            casing_speed: burst.sideways_speed,
         }
     }
 

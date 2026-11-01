@@ -524,3 +524,12 @@ fn a_ray_enters_the_hull_not_its_bounding_box() {
     let hit = wedge.entry(Vec3::new(0.25, 0.25, 5.0), Vec3::NEG_Z);
     assert!((hit.expect("through the body") - 4.0).abs() < 1e-4);
 }
+
+/// The game's environment blast tool needs casing construction for its cased setting. The
+/// operator must see the missing burst block at initialization, before a readout or load can
+/// invent zero products momentum. A silent bare-only fallback fails this refusal.
+#[test]
+#[should_panic(expected = "rounds need a burst block")]
+fn the_blast_tool_refuses_missing_casing_construction_at_initialization() {
+    Charge::of(&[]);
+}
