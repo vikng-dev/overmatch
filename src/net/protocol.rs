@@ -234,7 +234,7 @@ use crate::{CombatantId, CombatantLife, ShotId};
 ///
 /// [`WallPiece`]: crate::buildings::breakage::WallPiece
 /// [`WallEvent`]: crate::buildings::breakage::WallEvent
-pub const PROTOCOL_REV: u32 = 51;
+pub const PROTOCOL_REV: u32 = 52;
 
 /// Compatibility tag derived from the complete pinned wire manifest plus the crate version. This
 /// is the runtime handshake value: version-exact, so a version bump intentionally changes it.
@@ -344,6 +344,7 @@ const fn protocol_fingerprint_for(
 
 /// Replicated tank identity; local `Tank` simulation state is never replicated.
 #[derive(Component, Clone, Copy, Default, Serialize, Deserialize)]
+#[require(ParsedTankCommand)]
 pub struct NetTank;
 
 /// Replicated bot identity for client presentation.
@@ -1033,7 +1034,7 @@ const WIRE_SURFACE_HASH: u64 = 0x4fa8a9525007f08a;
 /// The pinned hash of the OWN wire-facing type DEFINITIONS (field layout, not just names). Re-pin it
 /// whenever a wire-facing struct/enum definition changes; house process also bumps
 /// [`PROTOCOL_REV`]. The tripwire prints the new value. See the block above for the coverage model.
-const WIRE_TYPES_HASH: u64 = 0x6fd1cce80fe0d694;
+const WIRE_TYPES_HASH: u64 = 0x224d3889e3865da3;
 
 /// The pinned `Cargo.lock` versions of the external crates whose types ride the wire (avian's
 /// replicated physics components; lightyear's wire framing / input protocol). A bump of either can
@@ -1512,6 +1513,22 @@ mod tests {
             "the midpoint of a pair straddling the wrap sits on the wrap, not half a kilometre \
              back: {}",
             mid.sides[0].phase
+        );
+    }
+
+    /// Parsed input belongs to the received root's construction, before a local view/sim rig
+    /// attaches. A late required component on the raw command alone would violate that boundary.
+    #[test]
+    fn a_replica_has_parsed_input_before_its_rig_attaches() {
+        let mut world = World::new();
+        let root = world.spawn(NetTank).id();
+        let parsed = world
+            .get::<ParsedTankCommand>(root)
+            .expect("identity requires parsed input at spawn");
+        assert_eq!(parsed.command(), TankCommand::default());
+        assert!(
+            world.get::<Rig>(root).is_none(),
+            "the probe precedes rig attachment"
         );
     }
 
