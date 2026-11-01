@@ -692,3 +692,17 @@ requires the saved angles and a filled later hull frame, and refuses a fresh cap
 husk. Format and workspace/all-target clippy passed. MEASURED: 270 targeted damage-cam,
 recording, pen-cam, field-cast, headless and citation tests passed, six ignored; the final five
 focused capture/encounter/citation checks also passed. No capture or pricing was run.
+
+### Local-file admission guard
+
+- **R12, P3 (Claude), verified, fixed** in "test servo admission through the local file loader".
+  Subject: the game's damage-model record admission. The old test called `check_vehicle_servos`
+  directly, so removing the file loader's call left the test green. The replacement writes a
+  record file and calls `PenetrationReport::load`: a complete simulated record loads, missing
+  and undeclared servo names are refused, and a synthetic clip retains its named rest allowance.
+  Each temporary file is removed before the result is asserted. Removing the loader's admission
+  call now makes the rejection assertions fail.
+
+MEASURED: the shared final run passed 331 targeted damage-cam, recording, pen-cam, field-cast,
+headless, round-data, citation, font, net-boundary and bake tests; six ignored instruments.
+Format and workspace/all-target clippy passed. No capture or pricing was run.

@@ -437,11 +437,22 @@ mod tests {
 
     /// The game's damage-model file edge refuses a simulated record that omits a servo its
     /// vehicle declares, or names one it does not: presentation would draw the omitted servo at
-    /// rest, an angle the shot never had. A synthetic clip keeps its explicit rest allowance.
+    /// rest, an angle the shot never had. The test crosses the actual file loader, so removing its
+    /// servo admission call fails it. A synthetic clip keeps its explicit rest allowance.
     #[test]
     fn a_simulated_local_record_names_every_declared_servo() {
+        let load = |report: &PenetrationReport| {
+            let path = std::env::temp_dir().join(format!(
+                "overmatch-servo-admission-{}.ron",
+                std::process::id()
+            ));
+            std::fs::write(&path, ron::ser::to_string(report).unwrap()).unwrap();
+            let loaded = PenetrationReport::load(&path);
+            std::fs::remove_file(path).unwrap();
+            loaded
+        };
         let base = crate::damage_cam::delivery::tests::report("s1_through_crew");
-        assert_eq!(check_vehicle_servos(&base), Ok(()));
+        assert_eq!(load(&base), Ok(base.clone()));
         let omitted = base
             .servo_deg
             .keys()
@@ -450,17 +461,15 @@ mod tests {
             .clone();
         let mut missing = base.clone();
         missing.servo_deg.remove(&omitted);
-        assert_eq!(
-            check_vehicle_servos(&missing),
-            Err(ValidationError::Servo(omitted))
+        assert!(
+            load(&missing)
+                .unwrap_err()
+                .contains(&format!("servo {omitted:?}"))
         );
         let mut extra = base;
         extra.servo_deg.insert("<undeclared>".to_owned(), 0.0);
-        assert_eq!(
-            check_vehicle_servos(&extra),
-            Err(ValidationError::Servo("<undeclared>".to_owned()))
-        );
+        assert!(load(&extra).unwrap_err().contains("servo \"<undeclared>\""));
         missing.synthetic = true;
-        assert_eq!(check_vehicle_servos(&missing), Ok(()));
+        assert!(load(&missing).is_ok());
     }
 }
