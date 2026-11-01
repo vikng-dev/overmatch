@@ -44,6 +44,7 @@ pub struct Potency {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Band {
     /// Below the floor: a full pool keeps the dose its face takes and shows no lost point.
+    #[cfg(test)]
     Nothing,
     /// From the floor up to mid: a full pool shows a lost point and is not emptied, short of the
     /// last half pool unit below mid, which converts to the whole pool
@@ -56,11 +57,12 @@ pub enum Band {
 impl Band {
     /// The band's colour, in the field's teal family: the field teal for knockout, the deep teal
     /// for reduced, none for nothing.
-    pub fn colour(self) -> Option<Color> {
+    pub fn colour(self) -> Color {
         match self {
-            Band::Nothing => None,
-            Band::Reduced => Some(timeline::FIELD_DIM),
-            Band::Knockout => Some(timeline::FIELD),
+            #[cfg(test)]
+            Band::Nothing => Color::NONE,
+            Band::Reduced => timeline::FIELD_DIM,
+            Band::Knockout => timeline::FIELD,
         }
     }
 }
@@ -112,13 +114,7 @@ impl Potency {
     }
 
     /// The band intensity `intensity` (HP points per m²) falls in.
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "the look's shader parts the bands at runtime (`pen_cam_look.wgsl`, `strongest` and `footprint`); this is the law it applies, held by the tests"
-        )
-    )]
+    #[cfg(test)]
     pub fn band(&self, intensity: f32) -> Band {
         if intensity >= self.mid {
             Band::Knockout
@@ -234,16 +230,13 @@ mod tests {
                 );
             }
         }
-        assert_eq!(Band::Nothing.colour(), None);
+        assert_eq!(Band::Nothing.colour(), Color::NONE);
         let luminance = |c: Color| {
             LinearRgba::from(c)
                 .to_vec3()
                 .dot(Vec3::new(0.2126, 0.7152, 0.0722))
         };
-        let (reduced, knockout) = (
-            Band::Reduced.colour().unwrap(),
-            Band::Knockout.colour().unwrap(),
-        );
+        let (reduced, knockout) = (Band::Reduced.colour(), Band::Knockout.colour());
         assert!(luminance(knockout) > 2.0 * luminance(reduced));
         for colour in [reduced, knockout] {
             let c = LinearRgba::from(colour).to_vec3();

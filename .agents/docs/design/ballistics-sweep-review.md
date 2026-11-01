@@ -475,3 +475,30 @@ Explicit-block verification: format and workspace/all-target clippy passed. MEAS
 gun, bake, pen-cam, field-cast, headless and citation tests passed; six ignored. Every omitted
 optional-block control refuses its named field and gives the explicit-authoring fix; the field-cast
 pin remains unchanged.
+
+## P3 record diagnostics, shader oracle and instrument users
+
+Subject: the game's damage model, game state only. Removed unread `RecordedShot::tank` and
+`shooter`, and the recording's duplicate source retained only to write the latter. The recorder
+integration tests now identify recipients by the production `TankLife` reader. Removed the emitted
+`SpallCone`'s pin-only spend, energy and endpoint speeds; its strength stays because the recorder
+reconstructs fields from it. The pin now hashes only retained field data. DERIVED expected schema
+change: six shot-metadata hashes among the pin's 2009 records, deleting four diagnostics from
+each emitted cone; all other record hashes and every shot's ray ends, contacts and HP data remain
+identical to the saved MEASURED baseline after stripping exactly those diagnostics.
+
+The potency classifier and its invisible band are CPU shader oracles compiled only into tests.
+The shipped visible bands return their colours directly. Removed the stale Cargo dependency
+comment. The fuzzer CLI has a tracked user, `scripts/ballistics/fuzz.sh`, for asset authors' bake
+sweeps and ray replay, using the required hidden/unattended composition and machine queue.
+
+**R5, new P2, fixed:** the CI fuzzer's anti-vacuity census named a fixed list of fixture stations
+and ammunition volumes. It now derives that expected set from the selected spec's declared
+component facets. This fixes the named-asset gate without changing B13's owner-held protection
+floor or its admission rule.
+
+P3 diagnostic verification: format and workspace/all-target clippy passed. MEASURED: 239 recorder,
+fuzzer, pen-cam, codec, delivery, field-cast and citation tests passed; five ignored. All 2009 pin
+records passed; the six emitted-shot payloads matched the saved baseline after removing exactly
+the four diagnostics, and the other 2003 pin records were unchanged. The tracked fuzzer runner
+completed 10000 rays with no walk errors, invariant violations or admitted protection-floor route.

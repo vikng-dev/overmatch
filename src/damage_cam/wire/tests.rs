@@ -46,12 +46,10 @@ fn vocabulary(records: &[(String, PenetrationReport)]) -> ShotVocabulary {
 /// Fixture identities: the shooter combatant 7, the struck combatant 9 in its second life.
 fn recorded(report: &PenetrationReport) -> RecordedShot {
     RecordedShot {
-        tank: Entity::PLACEHOLDER,
         life: Some(TankLife {
             combatant: CombatantId(9),
             life: CombatantLife(1),
         }),
-        shooter: None,
         shot: Some(ShotId {
             combatant: CombatantId(7),
             weapon: 0,

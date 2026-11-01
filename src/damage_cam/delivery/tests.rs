@@ -37,9 +37,7 @@ pub(crate) fn recorded(
     life: TankLife,
 ) -> RecordedShot {
     RecordedShot {
-        tank: Entity::PLACEHOLDER,
         life: Some(life),
-        shooter: None,
         shot: Some(ShotId {
             combatant: shooter,
             weapon: 0,

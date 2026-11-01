@@ -1627,7 +1627,8 @@ pub fn replay_ray(config: &FuzzConfig, ray: u64) -> Result<String, String> {
     Ok(app.world().resource::<ReplayOutput>().0.clone())
 }
 
-/// `cargo run --bin ballistic_fuzzer [-- --rays N --seed S --out PATH]` — the bake-scale sweep.
+/// The game's damage-model bake-scale sweep. User: asset authors run `scripts/ballistics/fuzz.sh`
+/// with `--rays N --seed S --out PATH` (or `--replay` for a named ray).
 ///
 /// Exit code 1 means the gate FAILED: a violated invariant, a walk error, or a corridor to crew or
 /// ammunition. The report file is written either way, because a failing run is exactly the one

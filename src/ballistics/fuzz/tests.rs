@@ -59,17 +59,15 @@ fn the_union_field_contract_holds_at_ci_scale() {
         render(&report),
     );
 
-    for volume in [
-        "Commander",
-        "Gunner",
-        "Loader",
-        "Driver",
-        "BowGunner",
-        "Ammo_L_0",
-        "Ammo_L_1",
-        "Ammo_R_0",
-        "Ammo_R_1",
-    ] {
+    for (volume, _) in crate::bake::selected_spec()
+        .volumes
+        .iter()
+        .filter(|(_, volume)| {
+            volume
+                .component()
+                .is_some_and(|component| component.crew.is_some() || component.ammo)
+        })
+    {
         assert!(
             report.presence_census.get(volume).is_some_and(|n| *n > 0),
             "no ray crossed `{volume}` in {CI_RAYS} rays — the gate is not covering it",

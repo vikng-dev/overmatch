@@ -1653,16 +1653,8 @@ pub struct SpallRay {
     pub doses: Vec<(Entity, f32)>,
 }
 
-/// One spall cone — the field thrown from a body exit (design doc §5): origin, axis and field
-/// describe its shape; `spend`, `energy`, the speeds and `strength` are its source's
-/// ([`walk::SpallSource`]); `rays` are its directions as marched, in stratum order.
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "the source parameters are read only by the field-casts pin, which digests them"
-    )
-)]
+/// The game's damage model: one emitted spall field, with its origin, axis, descriptor, total
+/// strength and marched directions. The recorder reads its strength to reconstruct the field.
 #[derive(Clone)]
 pub struct SpallCone {
     pub origin: Vec3,
@@ -1670,14 +1662,6 @@ pub struct SpallCone {
     /// The field law and ratio its directions were weighted by: its exit layer's substance's.
     /// Its rim, the cone's half-angle, is [`spall_cone::FieldDescriptor::half_angle`].
     pub field: spall_cone::FieldDescriptor,
-    /// Reference-mm the round spent across the body it left: a readout.
-    pub spend: f32,
-    /// The kinetic energy (J) the round lost across the body it left.
-    pub energy: f32,
-    /// m/s where the round entered the body.
-    pub entry_speed: f32,
-    /// m/s where it left it.
-    pub exit_speed: f32,
     /// The strength `S` (J) the directions were thrown with, the cone's share of `energy`:
     /// direction `k` carries `S·f_k`, and the cone emits `S/2` in all.
     pub strength: f32,
@@ -3590,10 +3574,6 @@ fn throw_spall_cone(
         origin: source.position,
         axis: throw.axis,
         field: spread.field(),
-        spend: source.spend,
-        energy: source.energy,
-        entry_speed: source.entry_speed,
-        exit_speed: source.exit_speed,
         strength,
         rays,
     });

@@ -355,19 +355,28 @@ fn a_path_through_two_tanks_records_each() {
         Vec3::ZERO,
         &plated(DEEP, Kind::Crew(DEEP)),
     );
+    // FIXTURE DATA: distinct combatant lives identify each record through its production reader.
+    for (root, id) in [(near, 90), (far, 91)] {
+        app.world_mut()
+            .entity_mut(root)
+            .insert((crate::CombatantId(id), crate::CombatantLife(0)));
+    }
     settle(&mut app);
     fire(&mut app, Vec3::new(0.0, 0.0, 40.0), FireMechanism::Single);
     let recorded = run(&mut app, 8);
     assert_eq!(recorded.len(), 2, "one record per struck tank");
+    let life_of = |tank| {
+        Some(crate::damage_cam::wire::TankLife {
+            combatant: *app.world().get::<crate::CombatantId>(tank).unwrap(),
+            life: *app.world().get::<crate::CombatantLife>(tank).unwrap(),
+        })
+    };
     for (tank, volumes) in [(near, &near_volumes), (far, &far_volumes)] {
         let shot = recorded
             .iter()
-            .find(|shot| shot.tank == tank)
+            .find(|shot| shot.life == life_of(tank))
             .expect("each tank has its record");
-        assert!(
-            shot.shooter.is_some() && shot.shot.is_none(),
-            "the shot's own source"
-        );
+        assert!(shot.shot.is_none(), "the fixture shot is unkeyed");
         assert_eq!(shot.report.impact.verdict, ShotVerdict::Penetration);
         assert_eq!(shot.report.components.len(), 2, "its own two components");
         for (name, volume) in [("crew", volumes[1]), ("rear", volumes[2])] {
@@ -382,7 +391,7 @@ fn a_path_through_two_tanks_records_each() {
     let outcome = |tank| {
         recorded
             .iter()
-            .find(|shot| shot.tank == tank)
+            .find(|shot| shot.life == life_of(tank))
             .unwrap()
             .outcome
     };
@@ -996,6 +1005,14 @@ fn a_round_that_strikes_a_tank_again_records_each_encounter() {
         Vec3::ZERO,
         &[("glacis", Vec3::new(0.3, 3.0, 40.0), Vec3::ZERO, Kind::Plate)],
     );
+    // FIXTURE DATA: the recipient life is the record's live production identity.
+    let struck_life = crate::damage_cam::wire::TankLife {
+        combatant: crate::CombatantId(90),
+        life: crate::CombatantLife(0),
+    };
+    app.world_mut()
+        .entity_mut(struck)
+        .insert((struck_life.combatant, struck_life.life));
     settle(&mut app);
     let shot = crate::ShotId {
         combatant: crate::CombatantId(7),
@@ -1020,7 +1037,7 @@ fn a_round_that_strikes_a_tank_again_records_each_encounter() {
     let recorded = run(&mut app, 16);
     let mut encounters: Vec<&RecordedShot> = recorded
         .iter()
-        .filter(|record| record.tank == struck)
+        .filter(|record| record.life == Some(struck_life))
         .collect();
     encounters.sort_by_key(|record| record.encounter);
     assert_eq!(
@@ -1198,10 +1215,6 @@ fn an_emptying_is_timed_at_the_deposit_that_emptied_the_pool() {
         origin: z(4.9),
         axis: Dir3::NEG_Z,
         field: super::spall_cone::FieldDescriptor::ball(2.0),
-        spend: 100.0,
-        energy: joules(100.0),
-        entry_speed: SPEED,
-        exit_speed: SPEED,
         strength: cone,
         rays: vec![SpallRay {
             direction: Dir3::NEG_Z,

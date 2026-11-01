@@ -3385,7 +3385,7 @@ mod tests {
         let mut opacities: Vec<Vec3> = Vec::new();
         let potency = Potency::bound();
         let luminance = |c: Vec3| c.dot(Vec3::new(0.2126, 0.7152, 0.0722));
-        let colour = |band: Band| LinearRgba::from(band.colour().unwrap()).to_vec3();
+        let colour = |band: Band| LinearRgba::from(band.colour()).to_vec3();
         let (knockout, reduced) = (colour(Band::Knockout), colour(Band::Reduced));
         for c in [knockout, reduced] {
             assert!(c.z > c.x && !on_state_scale(c), "{c}");

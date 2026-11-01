@@ -83,7 +83,7 @@ const LINE_WOUND: f32 = 30.0;
 const LINE_REACH: f32 = 20.0;
 
 /// The digest of every line of `field_casts.pinned`, MEASURED on macOS arm64 (the test profile).
-const PINNED_TOTAL: u64 = 0x0dcd_efaf_79e9_28fd;
+const PINNED_TOTAL: u64 = 0x6116982e3fd70978;
 
 const PINNED: &str = include_str!("field_casts.pinned");
 
@@ -698,16 +698,8 @@ fn shot(label: &str, local_origin: Vec3, local_direction: Vec3) -> Record {
         bits(&mut output, cone.field.ratio);
         output.push(' ');
         bits(&mut output, cone.field.half_angle());
-        for value in [
-            cone.spend,
-            cone.energy,
-            cone.entry_speed,
-            cone.exit_speed,
-            cone.strength,
-        ] {
-            output.push(' ');
-            bits(&mut output, value);
-        }
+        output.push(' ');
+        bits(&mut output, cone.strength);
         for ray in &cone.rays {
             output.push(' ');
             bits3(&mut output, ray.end);

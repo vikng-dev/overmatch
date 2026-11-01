@@ -877,7 +877,7 @@ pub fn depth(direction: Vec3, axis: Vec3) -> f32 {
 /// sets).
 fn band_lanes(potency: &Potency) -> [Vec4; 3] {
     let colour = |band: Band| {
-        let c = LinearRgba::from(band.colour().unwrap_or(Color::NONE));
+        let c = LinearRgba::from(band.colour());
         Vec4::new(c.red, c.green, c.blue, 0.0)
     };
     [
@@ -1786,7 +1786,7 @@ mod tests {
 
     /// A band's colour at its opacity, premultiplied.
     fn painted(band: Band, opacity: f32) -> Vec4 {
-        let c = LinearRgba::from(band.colour().unwrap()).to_vec3();
+        let c = LinearRgba::from(band.colour()).to_vec3();
         (c * opacity).extend(opacity)
     }
 

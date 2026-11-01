@@ -42,7 +42,7 @@ use super::record::{self, HullFrame, ShotFacts, ShotLog, StruckTank};
 use super::wire::TankLife;
 use crate::ballistics::{
     ArmourMark, BurstField, ComponentHealth, FireShell, PenetrationMarks, Projectile as Flying,
-    ShellPath, ShotDose, ShotSource, SpallCone, SpallMarks,
+    ShellPath, ShotDose, SpallCone, SpallMarks,
 };
 use crate::damage::{
     Ammo, CrewStation, DamageConsequences, KnockoutCause, KnockoutReason, TankKnockedOut,
@@ -60,29 +60,13 @@ use crate::{ClientReplica, CombatantId, CombatantLife, ShotClock, ShotId};
 const CLEAR_MARGIN: f32 = 0.5;
 
 /// A finished record: the tank the round struck and the life of its combatant it is (`None` for a
-/// tank no match spawned), who fired it, which of the round's encounters with the tank it is (0 the
+/// tank no match spawned), its shot identity when keyed, which of the round's encounters with the tank it is (0 the
 /// first), the [`ShotClock`] ticks the encounter opened and finished on (0 where no clock runs), the
 /// authority outcome a replica draws as the encounter's impact ([`sanctioned_outcome`]), the struck
 /// hull's pose (WORLD) when the encounter opened, and the report.
 #[derive(Message)]
 pub(crate) struct RecordedShot {
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "its local readers, the pen cam's views, are not yet built"
-        )
-    )]
-    pub tank: Entity,
     pub life: Option<TankLife>,
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "its local readers, the pen cam's views, are not yet built"
-        )
-    )]
-    pub shooter: Option<ShotSource>,
     pub shot: Option<ShotId>,
     pub encounter: u32,
     pub contact_tick: u32,
@@ -138,7 +122,6 @@ struct Spent {
 #[derive(Component, Default)]
 pub(crate) struct ShotRecording {
     facts: ShotFacts,
-    source: Option<ShotSource>,
     shot: Option<ShotId>,
     struck: Vec<Struck>,
 }
@@ -179,7 +162,6 @@ impl ShotRecording {
                     .map_or_else(String::new, |round| round.key.clone()),
                 vehicle: None,
             },
-            source: fire.shooter,
             shot: fire.shot,
             struck: Vec::new(),
         }
@@ -568,9 +550,7 @@ fn recorded(
         .zip(world.get::<CombatantLife>(struck.tank))
         .map(|(&combatant, &life)| TankLife { combatant, life });
     Some(RecordedShot {
-        tank: struck.tank,
         life,
-        shooter: recording.source,
         shot: recording.shot,
         encounter: struck.encounter,
         contact_tick: struck.contact_tick,
