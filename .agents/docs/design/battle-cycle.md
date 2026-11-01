@@ -19,7 +19,9 @@ The owner chose the provisional mode in #220; #240 supplies its authority clock.
   (`JoinRefusal::BattleClosed`) until the next fill-up reopens admission. A direct
   client's loading screen shows that cause and stops retrying; a matchmaking client
   returns to its lobby with it.
-- Only combat scores. A combatant's standing remains after disconnect, so leaving
+- Only combat scores. A standing opens when a combatant first enters combat: for
+  an existing tank at combat release, or a spawn during combat. A fill-up-only
+  connection never enters the results. A combatant's standing remains after disconnect, so leaving
   cannot erase its result. Combat runs its full duration regardless of occupancy,
   losses or score. The hosting empty timeout cannot interrupt combat; an expired
   empty timeout can retire the server once combat finishes.
@@ -27,7 +29,7 @@ The owner chose the provisional mode in #220; #240 supplies its authority clock.
   or no contest for an empty board. It removes tanks and flying rounds, including
   detached turrets through the existing root-removal observer. The score freezes.
 - The next fill-up increments the Battle number, empties the score and clears
-  spawn-map picks; its spawns then open each combatant's zero standing. Connected
+  spawn-map picks; its spawns wait for combat before opening zero standings. Connected
   links stay; their combatant identities remain unique for the server lifetime and
   their life counters continue across Battles.
 - Every Battle starts with a fresh battlefield. The next fill-up reconstructs the
@@ -227,3 +229,4 @@ Both blind reviews concern the game's match flow and damage model, game state on
 | Codex | The repair test never drives repair-to-brake selection | verified: the old assertions never reached drive-target selection; the missing-repair-arm mutant fails the new assertion on the selector used by `apply_track_forces` | `track: guard repair and phase holds at the drive-target seam (#253)` |
 | Claude | No test covers either hold arm at the gameplay-to-brake seam | verified: both missing-arm mutants fail independently; the production selector is shared with the repair test, which asserts repair braking, release after completion and phase braking without a repair | `track: guard repair and phase holds at the drive-target seam (#253)` |
 | Codex | A combined census inequality lets either later-generation ledger consumer hide the other's failure | verified: first-generation-only wall and tree mutants fail independently at their own assertions; the later-generation wall record, derived building elements and tree state are checked separately | `net: verify each later-generation environment consumer independently (#253)` |
+| Claude | A fill-up-only connection opens a ghost standing that can win or tie the later result | verified: spawning a waiting combatant populates the old board before combat; a solo fill-up departure can therefore win without participating | `net: open standings only for combat participants (#253)`; combat release opens existing tanks, combat spawns open once, and combat standings survive disconnect and respawn |

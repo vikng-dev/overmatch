@@ -204,6 +204,7 @@ fn cycle_battles(
     mut overrides: ResMut<SpawnOverrides>,
     mut lane: ResMut<SpawnLane>,
     combat: Query<Entity, Or<(With<NetTank>, With<crate::ballistics::Projectile>)>>,
+    combatants: Query<&CombatantId, With<NetTank>>,
     mut commands: Commands,
 ) {
     let (mut battle, mut score) = battles
@@ -213,7 +214,11 @@ fn cycle_battles(
     let mut next = *battle;
     match next.advance(clock.0, !clients.is_empty(), &rules, &score) {
         // The fill-up's tanks are combat's: the hold releases them on this tick.
-        Boundary::Combat => {}
+        Boundary::Combat => {
+            for &combatant in &combatants {
+                score.enter_combat(combatant);
+            }
+        }
         Boundary::Results => {
             pending.0.clear();
             for root in &combat {
@@ -1551,6 +1556,11 @@ mod tests {
             .map(|(root, owner, id)| (root, owner.owner, *id))
             .collect();
         assert_eq!(roots.len(), 2, "exactly one tank per connected link");
+        assert_eq!(
+            app.world().get::<Scoreboard>(board).unwrap().0.len(),
+            roots.len(),
+            "the combat boundary opens the waiting tanks and the boundary joiner once"
+        );
         let &(old_root, _, combatant) = roots
             .iter()
             .find(|(_, owner, _)| *owner == link)
@@ -1614,13 +1624,13 @@ mod tests {
         };
         advance(&mut app, combat_end.remaining_until(results_end));
         app.update();
-        let standings = &app.world().get::<Scoreboard>(board).expect("board").0;
-        assert_eq!(standings.len(), 2, "the fill-up's lives open the new board");
         assert!(
-            standings
-                .iter()
-                .all(|standing| standing.knockouts == 0 && standing.losses == 0),
-            "the next Battle starts with no score"
+            app.world()
+                .get::<Scoreboard>(board)
+                .expect("board")
+                .0
+                .is_empty(),
+            "the new fill-up has no combat participants yet"
         );
         let BattlePhase::FillUp { ends_at: Some(_) } =
             app.world().get::<BattleState>(board).expect("Battle").phase

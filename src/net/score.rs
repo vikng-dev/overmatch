@@ -1,6 +1,7 @@
-//! The match score, game state only: per combatant, its knockouts and losses and when its
+//! The game's damage model: the match score, game state only — per combatant, knockouts, losses
+//! and when its
 //! knocked-out life may respawn. The server holds it on one replicated entity ([`Scoreboard`]),
-//! opens a combatant's standing at its first spawn, and changes it only at the authority's knockout
+//! opens a combatant's standing when it first enters combat, and changes it only at the authority's knockout
 //! transition ([`TankKnockout`]): one loss to the knocked-out tank's combatant, one knockout to the
 //! combatant whose round decided it ([`Credit`]), and the respawn's opening the mode's wait
 //! ([`RespawnWait`]) later. Clients read the board and derive nothing; [`rank`] orders it.
@@ -19,7 +20,7 @@ use crate::sim_tick::{SimTick, TickSpan};
 use crate::tank::TankRoot;
 use crate::{CombatantId, CombatantLife, ShotClock};
 
-/// Every combatant's standing, in the order each first spawned.
+/// Every combat participant's standing, retained through disconnect and respawn.
 #[derive(Component, Serialize, Deserialize, Clone, Debug, Default, PartialEq, Eq)]
 pub(crate) struct Scoreboard(pub(crate) Vec<Standing>);
 
@@ -55,6 +56,18 @@ pub(crate) enum Opening {
 }
 
 impl Scoreboard {
+    /// Enter the contest once; both the combat boundary and a combat spawn use this opening.
+    pub(super) fn enter_combat(&mut self, combatant: CombatantId) {
+        if self.standing_mut(combatant).is_none() {
+            self.0.push(Standing {
+                combatant,
+                knockouts: 0,
+                losses: 0,
+                respawn: Respawn::NeverKnockedOut,
+            });
+        }
+    }
+
     /// The game's damage model: resolve the Battle from the scored standings, including players
     /// who disconnected. Empty boards name no contest; tied best standings name a draw.
     pub(super) fn outcome(&self) -> BattleOutcome {
@@ -210,25 +223,20 @@ fn spawn_scoreboard(mut commands: Commands) {
     ));
 }
 
-/// A combatant's first spawn opens its standing; a respawn, the same combatant, keeps it.
+/// A first combat spawn opens its standing; a fill-up spawn waits for the combat boundary.
 fn open_standing(
     add: On<Add, CombatantId>,
     combatants: Query<&CombatantId>,
-    mut boards: Query<&mut Scoreboard>,
+    mut boards: Query<(&mut Scoreboard, &BattleState)>,
 ) {
     let combatant = *combatants
         .get(add.entity)
         .expect("an added CombatantId is on its entity");
-    let mut board = boards
+    let (mut board, battle) = boards
         .single_mut()
         .expect("server startup spawns exactly one scoreboard before any combatant spawns");
-    if board.standing_mut(combatant).is_none() {
-        board.0.push(Standing {
-            combatant,
-            knockouts: 0,
-            losses: 0,
-            respawn: Respawn::NeverKnockedOut,
-        });
+    if battle.is_combat() {
+        board.enter_combat(combatant);
     }
 }
 
@@ -316,7 +324,7 @@ fn score_knockout(
     }
     let standing = board
         .standing_mut(victim)
-        .expect("a combatant's standing opens at its first spawn");
+        .expect("a combatant's standing opens when it enters combat");
     standing.losses += 1;
     standing.respawn = Respawn::Opens {
         life,
@@ -326,7 +334,7 @@ fn score_knockout(
         Credit::Shooter(shooter) => {
             board
                 .standing_mut(shooter)
-                .expect("a round's combatant spawned before it fired, and a standing outlives its tanks")
+                .expect("a round's combatant entered combat before it fired, and a standing outlives its tanks")
                 .knockouts += 1;
         }
         Credit::NoShooter | Credit::OwnRound => {}
@@ -413,6 +421,47 @@ mod tests {
         );
     }
 
+    /// The game's damage model: results must exclude a player who only waited in fill-up,
+    /// while a combat participant's standing survives disconnect and respawn. ASSUMED fixture
+    /// identities and respawn wait; phase membership is the invariant.
+    #[test]
+    fn standings_start_at_combat_participation_and_outlive_its_tanks() {
+        let mut app = App::new();
+        mount(
+            &mut app,
+            RespawnWait::new(Duration::from_secs(1), Duration::from_millis(10)),
+        );
+        let board = app
+            .world_mut()
+            .spawn((Scoreboard::default(), BattleState::default()))
+            .id();
+        let waiting = app.world_mut().spawn(CombatantId(1)).id();
+        assert!(
+            app.world().get::<Scoreboard>(board).unwrap().0.is_empty(),
+            "waiting alone is not combat participation"
+        );
+        app.world_mut().despawn(waiting);
+        assert_eq!(
+            app.world().get::<Scoreboard>(board).unwrap().outcome(),
+            BattleOutcome::NoContest
+        );
+        *app.world_mut().get_mut::<BattleState>(board).unwrap() = BattleState::combat_fixture();
+        let fighter = app.world_mut().spawn(CombatantId(2)).id();
+        assert_eq!(
+            app.world().get::<Scoreboard>(board).unwrap().outcome(),
+            BattleOutcome::Winner(CombatantId(2))
+        );
+        app.world_mut().despawn(fighter);
+        app.world_mut().spawn(CombatantId(2));
+        let standings = &app.world().get::<Scoreboard>(board).unwrap().0;
+        assert_eq!(
+            standings.len(),
+            1,
+            "a combat disconnect or respawn cannot erase or duplicate a standing"
+        );
+        assert_eq!(standings[0].combatant, CombatantId(2));
+    }
+
     /// The game's damage model: only combat can change score. Fill-up and results ignore a
     /// knockout fact; the result and the retained table stay consistent until the next fill-up.
     #[test]
@@ -426,7 +475,7 @@ mod tests {
         );
         let board = app
             .world_mut()
-            .spawn((Scoreboard::default(), BattleState::default()))
+            .spawn((Scoreboard::default(), BattleState::combat_fixture()))
             .id();
         let tank = app
             .world_mut()
@@ -442,6 +491,7 @@ mod tests {
             tank,
             cause: KnockoutCause::NoKeyedRound,
         };
+        app.world_mut().get_mut::<BattleState>(board).unwrap().phase = BattleState::default().phase;
         app.world_mut().trigger(knockout);
         assert_eq!(
             app.world().get::<Scoreboard>(board).expect("board").0[0].losses,
