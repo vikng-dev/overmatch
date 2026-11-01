@@ -30,7 +30,8 @@ pub(crate) enum Flow {
     /// Matchmaking mode with no link: the Join menu.
     Lobby,
     /// A link exists whose match has nothing to show yet: the loading screen, which covers the
-    /// view through the asset load and the connect until this client's tank has replicated.
+    /// view through the asset load and the connect until this client's own tank is presented
+    /// (`net::client::latch_tank_seen`: its view has bound to a complete local body).
     Joining,
     /// The match world is on screen, a dropped link (RECONNECTING…) included.
     InMatch,
@@ -42,7 +43,7 @@ pub(crate) enum FlowFacts {
     /// The offline root: `playing` is `AppState` past `Loading`.
     Offline { playing: bool },
     /// The net client: whether a link entity exists, whether it has connected this session,
-    /// whether `AppState` is past `Loading`, and whether this link's match has replicated the
+    /// whether `AppState` is past `Loading`, and whether this link's match has presented the
     /// client's own tank once. A tank that later leaves (results, a respawn) keeps the match on
     /// screen.
     Net {
@@ -193,10 +194,10 @@ mod tests {
     }
 
     /// The loading screen covers the empty view until the client has its tank: a connected link
-    /// whose own tank has not replicated is still loading. A match shown before it would show an
+    /// whose own tank is not yet presented is still loading. A match shown before it would show an
     /// empty world; one hidden after it would hide the fill-up the player waits in.
     #[test]
-    fn a_connected_client_loads_until_its_tank_has_replicated() {
+    fn a_connected_client_loads_until_its_tank_is_presented() {
         let loading = FlowFacts::Net {
             link: true,
             connected_once: true,

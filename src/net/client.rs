@@ -974,17 +974,16 @@ pub(super) fn refusal_probe(app: &mut App) -> (Option<JoinRefusal>, String) {
     (refusal, label)
 }
 
-/// Latch [`ConnectRetry::tank_seen`] once the own tank can be presented: interpolation has
-/// supplied its pose, local body construction has finished, and the view has bound.
+/// Latch [`ConnectRetry::tank_seen`] once the own tank is presented: its view has bound
+/// (`TankViewReady`). `tank::view::bind_tank_view` binds only a root carrying `SimParts`, which
+/// the body assembly inserts with the local `Tank` after the rig has attached to the replicated
+/// `Position` and `Rotation`, so the bound view implies the pose and the complete body.
 fn latch_tank_seen(
     own: Query<
         (),
         (
             With<GameControlled>,
             With<NetTank>,
-            With<avian3d::prelude::Position>,
-            With<avian3d::prelude::Rotation>,
-            With<crate::tank::Tank>,
             With<crate::tank::TankViewReady>,
         ),
     >,
@@ -2521,11 +2520,10 @@ mod match_exit;
 /// externally nameable), so the honest test lives here in-crate, over real ECS state.
 #[cfg(test)]
 mod tests {
-    /// The loading screen's consumers need a presented pose, complete local body and bound view;
-    /// ownership alone can precede all three. Results and respawn must retain the once-ready latch.
+    /// The loading screen's consumers need the own tank presented, which its bound view states;
+    /// ownership alone precedes it. Results and respawn must retain the once-ready latch.
     #[test]
-    fn loading_waits_for_the_own_tanks_pose_body_and_view() {
-        use avian3d::prelude::{Position, Rotation};
+    fn loading_waits_for_the_own_tanks_bound_view() {
         use bevy::ecs::system::RunSystemOnce;
         let mut world = World::new();
         world.insert_resource(ConnectRetry {
@@ -2537,20 +2535,6 @@ mod tests {
         assert!(
             !world.resource::<ConnectRetry>().tank_seen,
             "ownership is not presentation"
-        );
-        world
-            .entity_mut(own)
-            .insert((Position(Vec3::ZERO), Rotation::default()));
-        world.run_system_once(latch_tank_seen).unwrap();
-        assert!(
-            !world.resource::<ConnectRetry>().tank_seen,
-            "the body must attach"
-        );
-        world.entity_mut(own).insert(crate::tank::Tank);
-        world.run_system_once(latch_tank_seen).unwrap();
-        assert!(
-            !world.resource::<ConnectRetry>().tank_seen,
-            "the view must bind"
         );
         world.entity_mut(own).insert(crate::tank::TankViewReady);
         world.run_system_once(latch_tank_seen).unwrap();
