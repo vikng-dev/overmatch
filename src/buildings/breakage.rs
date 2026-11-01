@@ -1483,16 +1483,35 @@ fn holes_of(
     lines: &[(usize, Vec3, Vec3, f32)],
     blast: &[Load],
 ) -> Vec<(usize, Hole)> {
-    use std::f32::consts::PI;
     let layout = &kind.layout;
-    let centroid =
-        |c: usize| Vec3::from_array(kind.asset.chunks[layout.chunks[c] as usize].centroid);
-    let crushed = |c: usize, energy: f32| energy / layout.materials[c].crush;
+    cut_holes(
+        &layout.blocks,
+        |c| Vec3::from_array(kind.asset.chunks[layout.chunks[c] as usize].centroid),
+        |c| layout.materials[c].crush,
+        scale,
+        lines,
+        blast,
+    )
+}
+
+/// [`holes_of`] on any chunk table: each law chunk's hull `blocks`, its baked `centroid` (the
+/// hole's frame) and its material's crush energy `crush`, all at scale 1. The sandbox's wall cuts
+/// its holes here too, so its deposits reach [`HOLES_PER_CHUNK`] as the game's do.
+pub(crate) fn cut_holes(
+    blocks: &[Block],
+    centroid: impl Fn(usize) -> Vec3,
+    crush: impl Fn(usize) -> f32,
+    scale: f32,
+    lines: &[(usize, Vec3, Vec3, f32)],
+    blast: &[Load],
+) -> Vec<(usize, Hole)> {
+    use std::f32::consts::PI;
+    let crushed = |c: usize, energy: f32| energy / crush(c);
     let channels = lines.iter().filter_map(|&(c, from, to, energy)| {
         let volume = crushed(c, energy);
         let ball = (0.75 * volume / PI).cbrt();
         let radius = (volume / (PI * from.distance(to))).sqrt().min(ball);
-        let (from, to) = open_ends(&layout.blocks[c], from / scale, to / scale, scale);
+        let (from, to) = open_ends(&blocks[c], from / scale, to / scale, scale);
         Hole::cut(centroid(c), from, to, radius / scale).map(|hole| (c, hole))
     });
     let dishes = blast.iter().filter_map(|load| {

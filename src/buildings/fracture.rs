@@ -3508,9 +3508,10 @@ pub(crate) fn trace_blast<K: Ord + Copy>(
         .collect()
 }
 
-/// Fixture geometry adapter for the production driver. Tests mount convex blocks instead of
-/// a world query; all field sampling and interception still run through [`trace_blast`].
-#[cfg(test)]
+/// The convex-block geometry adapter for the production driver: the sandbox's wall and the
+/// tests mount blocks instead of a world query, each chunk's face areas read once; all field
+/// sampling and interception still run through [`trace_blast`].
+#[cfg(any(test, feature = "dev_ui"))]
 pub(crate) fn sample_blocks(
     blocks: &[Block],
     standing: impl Fn(usize) -> bool,

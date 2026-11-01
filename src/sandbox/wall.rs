@@ -287,20 +287,26 @@ struct Charge {
     casing_speed: f32,
 }
 
+/// The blast tool's cased source round, by key (`assets/dev/wall-tool.ron`).
+fn cased_round() -> String {
+    #[derive(serde::Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct Source {
+        cased_round: String,
+    }
+    let source: Source = ron::from_str(include_str!("../../assets/dev/wall-tool.ron"))
+        .unwrap_or_else(|err| panic!("wall blast tool: assets/dev/wall-tool.ron: {err}; author cased_round as a chambered burst-round key"));
+    source.cased_round
+}
+
 impl Charge {
     /// The game's environment blast tool requires a sourced core and a burst round whose
     /// casing supplies its cased setting. Missing construction is refused at initialization.
     fn of(rounds: &[WallRound]) -> Self {
-        #[derive(serde::Deserialize)]
-        #[serde(deny_unknown_fields)]
-        struct Source {
-            cased_round: String,
-        }
-        let source: Source = ron::from_str(include_str!("../../assets/dev/wall-tool.ron"))
-            .unwrap_or_else(|err| panic!("wall blast tool: assets/dev/wall-tool.ron: {err}; author cased_round as a chambered burst-round key"));
-        let burst = rounds.iter().find(|round| round.key == source.cased_round)
+        let key = cased_round();
+        let burst = rounds.iter().find(|round| round.key == key)
             .and_then(|round| round.round.burst).unwrap_or_else(|| panic!(
-                "wall blast tool: assets/dev/wall-tool.ron field cased_round {:?}: rounds need a burst block for this key; author a chambered burst-round key", source.cased_round));
+                "wall blast tool: assets/dev/wall-tool.ron field cased_round {key:?}: rounds need a burst block for this key; author a chambered burst-round key"));
         // DERIVED from the selected burst's compiled construction: no second core lookup can
         // pair one filler's chemistry with another round's casing.
         let speed2 = burst.sideways_speed * burst.sideways_speed;
@@ -1111,8 +1117,25 @@ fn line_loads(
         .collect()
 }
 
-/// Run one deposit through the game's laws: the wear and dust, the local cracks, the structural
-/// check, and the loose groups with the velocities the blows on them give.
+/// The holes a deposit cuts in the wall, the game's own sizing ([`crate::buildings::breakage::cut_holes`]):
+/// the wall is its own frame at scale 1, each hole about its chunk's centroid.
+fn cut_holes(
+    cut: &model::Cut,
+    lines: &[(usize, Vec3, Vec3, f32)],
+    blast: &[Load],
+) -> Vec<(usize, crate::buildings::breakage::Hole)> {
+    crate::buildings::breakage::cut_holes(
+        &cut.blocks,
+        |c| cut.structure.chunks[c].centroid,
+        |c| cut.structure.chunks[c].material.crush,
+        1.0,
+        lines,
+        blast,
+    )
+}
+
+/// Run one deposit through the game's laws: the wear, holes and dust, the local cracks, the
+/// structural check, and the loose groups with the velocities the blows on them give.
 fn apply_deposit(
     wall: &mut Wall,
     controls: &WallControls,
@@ -1121,13 +1144,16 @@ fn apply_deposit(
     deposit: &Deposit,
 ) -> Applied {
     let mut applied = Applied::default();
-    let loads = match deposit {
+    let (loads, holes) = match deposit {
         Deposit::Line {
             lines,
             along,
             momentum,
             ..
-        } => line_loads(&wall.cut.structure, lines, *along, *momentum),
+        } => (
+            line_loads(&wall.cut.structure, lines, *along, *momentum),
+            cut_holes(&wall.cut, lines, &[]),
+        ),
         &Deposit::Blast {
             mass,
             standoff,
@@ -1138,27 +1164,14 @@ fn apply_deposit(
             let origin = at - into * (standoff + blast.radius);
             let state = &wall.live.state;
             let structure = &wall.cut.structure;
-            let hits: Vec<_> = model::trace_blast(
+            let hits = model::sample_blocks(
+                &wall.cut.blocks,
+                |i| state.standing(i),
+                |i| structure.chunks[i].material,
+                origin,
                 model::Blast::of(blast.energy, blast.radius, blast.products),
                 field,
-                |dir| {
-                    let (chunk, distance, normal) =
-                        model::first_hit(&wall.cut.blocks, |i| state.standing(i), origin, dir)?;
-                    Some(model::BlastSurface {
-                        target: chunk,
-                        chunk,
-                        at: origin + dir * distance,
-                        normal,
-                        direction: dir,
-                        distance,
-                        silhouette: model::silhouette(&wall.cut.blocks[chunk].face_areas(), dir),
-                        material: Some(structure.chunks[chunk].material),
-                    })
-                },
-            )
-            .into_iter()
-            .map(|(_, hit)| hit)
-            .collect();
+            );
             let coupled: f32 = hits.iter().map(|hit| hit.energy).sum();
             let pushed: f32 = hits.iter().map(|hit| hit.impulse.length()).sum();
             let drawn = hits
@@ -1175,7 +1188,8 @@ fn apply_deposit(
                 contacts: &contacts,
             });
             applied.scabs = scabs.len();
-            loads
+            let holes = cut_holes(&wall.cut, &[], &loads);
+            (loads, holes)
         }
     };
     applied.deposited = loads.iter().map(|load| load.energy).sum();
@@ -1186,12 +1200,8 @@ fn apply_deposit(
         .len();
     applied.crushed = loads.iter().map(|load| load.crushed).sum();
     let pools = wall.live.state.pool.clone();
-    let changes = crate::buildings::breakage::run_laws(
-        &wall.cut.element_of,
-        &mut wall.live,
-        &loads,
-        Vec::new(),
-    );
+    let changes =
+        crate::buildings::breakage::run_laws(&wall.cut.element_of, &mut wall.live, &loads, holes);
     applied.worn = pools
         .iter()
         .zip(&wall.live.state.pool)

@@ -537,7 +537,7 @@ fn the_blast_tool_refuses_missing_casing_construction_at_initialization() {
 }
 
 /// The game's environment blast tool shares the production ray driver and deposit pass.
-/// ASSUMED fixture placement; the charge uses the shipped HE construction, not a fitted
+/// ASSUMED fixture placement; the charge uses the tool's cased round's construction, not a fitted
 /// chemical-energy-to-wear conversion. Pressure can remove volume while cavity energy is zero.
 #[test]
 fn the_shared_blast_path_reports_pressure_work_and_rear_scabs() {
@@ -545,8 +545,8 @@ fn the_shared_blast_path_reports_pressure_work_and_rear_scabs() {
     let rounds = super::wall_rounds();
     let he = rounds
         .iter()
-        .find(|round| round.key == "88mm_HE")
-        .expect("HE fixture is shipped");
+        .find(|round| round.key == super::cased_round())
+        .expect("the tool's cased round is shipped");
     let charge = Charge::of(std::slice::from_ref(he));
     let mass = he
         .round
@@ -615,4 +615,66 @@ fn the_shared_blast_path_reports_pressure_work_and_rear_scabs() {
             result.groups.iter().map(|g| g.0.len()).collect::<Vec<_>>()
         );
     }
+}
+
+/// PAST THE HOLE CAP THE SANDBOX'S CHUNK CRUMBLES, AS THE GAME'S DOES: each subcritical channel
+/// through one chunk keeps its hole, and the one past [`HOLES_PER_CHUNK`] turns the chunk to dust
+/// before the laws run. A sandbox that cut no holes never reaches the cap and lets the chunk
+/// stand. ASSUMED fixture: the largest chunk, the crush energy of a quarter of its pool (m³)
+/// spread over the channels.
+#[test]
+fn the_sandbox_crumbles_a_chunk_past_the_hole_cap() {
+    use crate::buildings::breakage::HOLES_PER_CHUNK;
+    let layout = layout();
+    let charge = Charge::of(&super::wall_rounds());
+    let mut wall = Wall {
+        cut: layout.cut.clone(),
+        live: crate::buildings::breakage::Live::from_structure(
+            layout.cut.structure.clone(),
+            layout.cut.elements,
+        ),
+        structural: vec![false; layout.cut.structure.joints.len()],
+        entities: Vec::new(),
+        meshes: Vec::new(),
+        material: brick(),
+    };
+    let controls = WallControls {
+        mass: 0,
+        standoff: 0,
+        cased: true,
+        round: 0,
+        view: View::Front,
+        help: false,
+    };
+    let chunks = &wall.cut.structure.chunks;
+    let c = (0..chunks.len())
+        .max_by(|&a, &b| chunks[a].volume.total_cmp(&chunks[b].volume))
+        .expect("the wall has chunks");
+    let at = chunks[c].centroid;
+    let energy =
+        wall.live.state.pool[c] * chunks[c].material.crush / (4.0 * (HOLES_PER_CHUNK + 1) as f32);
+    let channel = Deposit::Line {
+        what: "fixture channel".to_owned(),
+        lines: vec![(c, at - Vec3::Z * 0.05, at + Vec3::Z * 0.05, energy)],
+        along: Vec3::Z,
+        momentum: 0.0,
+        spall: 0.0,
+    };
+    for kept in 1..=HOLES_PER_CHUNK {
+        let result = apply_deposit(&mut wall, &controls, &charge, &blast_field(), &channel);
+        assert!(
+            !result.dusted.contains(&c),
+            "channel {kept} is under the cap"
+        );
+        assert_eq!(
+            wall.live.holes[c].len(),
+            kept,
+            "each channel keeps its hole"
+        );
+    }
+    let result = apply_deposit(&mut wall, &controls, &charge, &blast_field(), &channel);
+    assert!(
+        result.dusted.contains(&c),
+        "the channel past the cap crumbles the chunk"
+    );
 }
