@@ -6230,7 +6230,7 @@ dependencies = [
 
 [[package]]
 name = "overmatch"
-version = "0.7.0-alpha.6"
+version = "0.7.0-alpha.7"
 dependencies = [
  "avian3d",
  "bevy",
