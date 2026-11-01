@@ -170,3 +170,85 @@ change, so `pen_cam` and `field_casts` were not run.
 MEASURED: the parked tank's slab read the belt's reaction in 64 of 64 ticks, a mean **0.9999** of the
 weight. G1 is untouched (`GRIP_SHEAR_MODULUS_M` unchanged). The orchestrator retains G1, other-tank
 support, pricing of the JSON-chunk gate, captures, merge and push.
+
+## Part 5: blind reviews of part 4, one deadline domain, and hull support
+
+Subject: the game's driving and damage model, game state only. Crew are HP pools at stations;
+weapon changes concern fire eligibility and timing only. Base: main at "net: rebuild the battlefield
+at the next fill-up", lane `sweep-drive-5`, bay-1. MEASURED start: 2026-11-01 16:03:17 +0700.
+
+### Every blind-review finding
+
+| Reviewer | Finding | Verdict and witness | Fixed in |
+|---|---|---|---|
+| Codex C1 | P2: mixed normals choose the first patch's source mass | Verified: orthogonal patches at one off-centre point have different effective masses; the previous group chose its first normal. The regression reverses staging and requires identical mass and reaction bits. | "driving: keep distinct implicit contact normals in distinct budgets" |
+| Codex C2 | P2: equal column lengths admit shear | Verified: the review's composed stretches and rotation passed the old length-only check; the new refusal test failed on that check. | "driving: certify worn rest frames before view admission" |
+| Codex C3 | P2: an admitted reload reaches the clock-overflow panic | Verified: `67_108_860.0` seconds passed the old spec gate; the refusal regression failed, and arming across the counter end panicked. | "driving: share wrapping battle and weapon deadlines" |
+| Claude L1 | P2: a resting top-face press becomes another direction's blow | Verified: the original split read a **100 N·s** blow on the resting face (MEASURED). It now reads zero, while rounded copies of one normal still share their source budget. | "driving: keep distinct implicit contact normals in distinct budgets" |
+| Claude L2 | P3: an unarmed paused gate still freezes silently | Verified: deserializing `ready_tick: null, paused_at_tick: 5` succeeded on the original type; the rejection test failed. Ready, Loading and Paused are now disjoint phases. | "driving: share wrapping battle and weapon deadlines" |
+| Claude L3 | P3: the session-range expect does not bound an authored delay | Verified, the same admitted-duration witness as C3. Reload and swap refusals name the weapon field and repair; the containing asset gate supplies the tank file. | "driving: share wrapping battle and weapon deadlines" |
+| Claude L4 | P3: a peer's last-counter deadline panics the owner's pause | Verified: a serialized gate at `u32::MAX` decoded, then panicked on pause in the original code. The same round trip and pause now succeed. | "driving: share wrapping battle and weapon deadlines" |
+| Claude L5 | P3: the surface-frame refusal is late and omits the glb path | Verified by the two entry points: the document was available at startup, but the check lived in the dress. Startup now checks composed worn frames and names the glb, node path and export fix; a document fixture covers the refusal and articulated boundary. | "driving: certify worn rest frames before view admission" |
+| Claude L6 | P3: the trunk fixture never reaches the trunk reader | Verified: part 4's hull fixture has neither `TreeSegment` nor `TreeBody`; its transfer assertion cannot prove consumption. The new spawned-tree test requires an implicit press to open a structural joint and change the tree state. | "driving: test the trunk reader on implicit belt loads" |
+
+All findings are verified; none is dismissed. Part 4's statement that the invalid sentinel state
+was deleted, and its claim to have tested both the adapter and trunk consumer, were too strong.
+The new enum and consumer test close those gaps.
+
+### Decisions and invariants
+
+- Implicit contacts share a budget within a direction, not across distinct faces. The numerical
+  co-normal envelope is ASSUMED at 32 float epsilons; canonical staging fixes the representative
+  and accumulation order, and the mass uses the load-weighted direction. The one-ulp subdivision
+  guard remains green. This changes no material or grip tuning.
+- `SimTick` is the common battle/weapon deadline domain and implements no numeric ordering.
+  Deadline comparison is its signed wrapped difference; the local weapon counter wraps. The
+  DERIVED maximum authored span is `TickSpan::MAX`, strictly below half the counter. Reload,
+  swap, cyclic and mode load gates enforce it. Frozen work is a checked `TickSpan`, parsed during
+  serde decoding; malformed JSON and actual postcard wire fixtures are refused at that edge.
+  Resuming starts the frozen interval from the resume tick, even after clock wraps. Revision 58
+  and the wire manifest deliberately record the changed gate encoding. Network clock publication
+  continues to read `LocalTimeline`; its transport-clock implementation is outside this change.
+- Worn rest frames must have finite, nonzero, equal-length orthogonal axes within the shader's
+  tolerance. The startup JSON document checks the same articulated boundary the dress uses;
+  the dress also guards programmatically constructed views. Uniform rigid frames remain legal.
+- Every tank pass reads one tick-start support snapshot. All body force state comes through one
+  body query; the driving query holds no second `Forces` borrow. A hull's shapes enter only when
+  another source's footprint query reaches them, and each pass excludes its own body by identity.
+  The response ledger sizes the existing clamp without changing the snapshot; writes land after
+  all passes, within `DrivingForces`, before recoil and physics. No recipient-kind law was added.
+- DERIVED cost property: a lone tank's own colliders are removed before shape gathering, so its
+  open-ground pass reads no hull shape. The sensor reference and solid hull produce identical
+  driving and reaction bits. Pricing is the orchestrator's work; no timing measurement was taken.
+
+### Verification
+
+MEASURED green batches: contact and citations **10 passed**; surface, link-view and citations
+**35 passed**; clock, shooting, spec, state hashes, all `net::` and citations **354 passed, 1 ignored**.
+The clock batch includes real loopback UDP and the battle boundary tests. Formatting and locked
+workspace/all-target CI clippy passed before each implementation commit.
+
+MEASURED: the combined driving, rubble, tree, `pen_cam`, `field_casts`, headless and citation
+batch passed **252 tests, 5 ignored**. The two targeted mutants both failed: immediate reaction
+writes broke entity-order identity, and dropping implicit contacts from `fell_on_loads` left the
+trunk joint intact. Restoring the implementation passed both tests, the upper-belt/lower-hull
+load and reaction test, and the lone-hull field-only identity test. No additional P1/P2 finding
+was found in the touched files.
+
+MEASURED: final formatting and locked workspace/all-target CI clippy passed. The required
+whole-tree guard batch (`doc_citations ui_ascii net_boundary bake::`) remained queued on the
+machine lock at the wall-clock limit, and was stopped with this lane's own processes. Its result
+remains unverified. Before merge, the orchestrator must run:
+
+```sh
+OVERMATCH_CARGO_LOCK_WAIT_S=10800 OVERMATCH_UNATTENDED=1 OVERMATCH_WINDOW=headless \
+  scripts/serial-cargo test --lib --features dev_ui,bitprobe -- doc_citations ui_ascii net_boundary bake::
+```
+
+The later optional numeric load read was not run. The completed support test establishes
+positive carried load and a downward recipient impulse; its exact values were not collected.
+
+MEASURED completion clock check: 2026-11-01 17:32:45 +0700. DERIVED elapsed: 89 minutes 28 seconds.
+
+G1 (`GRIP_SHEAR_MODULUS_M`) is unchanged. No agents, captures, pricing, deployments, external API
+calls or pushes. The orchestrator retains G1 feel review, pricing, merge and push.
