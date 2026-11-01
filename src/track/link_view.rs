@@ -267,7 +267,7 @@ pub(crate) fn template_plugin(app: &mut App) {
 /// name, which is the ambiguity a name scan has to resolve structurally rather than by string.
 /// `Link_Box` is the marker volume [`super::marker_model`] measures the shoe's faces from — it
 /// carries NO material, which is why it renders as a solid white box until it is hidden.
-const LINK_NODE: &str = "Link";
+pub(crate) const LINK_NODE: &str = "Link";
 const LINK_BOX_NODE: &str = "Link_Box";
 /// The pin markers, parented under `Link`: the only meaningful datums it carries.
 const PIN_START_NODE: &str = "Pin_Start";
@@ -649,12 +649,47 @@ impl ShoeBelt {
 /// contains running gear: even an export missing every axle must still supply its template.
 fn require_shoe_template() {
     let path = crate::tank::TANK_GLB_PATH;
-    let bytes =
-        crate::assets::require_file(&crate::assets::asset_root(), path, "track shoe template");
-    let gltf = gltf::Gltf::from_slice(&bytes).unwrap_or_else(|error| {
-        panic!("{path}: track shoe template: {error}; repair and re-export the view glb")
+    verify_template_document(&view_document(path), path);
+}
+
+/// The scene document of the view glb at asset path `path`, read from its JSON chunk alone: a
+/// glTF 2.0 binary is a 12-byte header (`glTF`, version, length) and then its chunks, the JSON
+/// chunk first (glTF 2.0, "GLB File Format Specification"). The binary chunk, the bulk of a view
+/// glb, is neither read nor copied here; the asset server loads it for the view.
+fn view_document(path: &str) -> gltf::Document {
+    use std::io::Read;
+    fn refuse(path: &str, why: impl std::fmt::Display) -> ! {
+        panic!(
+            "{path}: track shoe template: {why}; export the view as a glTF 2.0 binary (an LFS \
+             pointer needs `git lfs pull`)"
+        )
+    }
+    let resolved = crate::assets::asset_root().join(path);
+    let mut file = std::fs::File::open(&resolved).unwrap_or_else(|error| {
+        refuse(
+            path,
+            format_args!("cannot open {}: {error}", resolved.display()),
+        )
     });
-    verify_template_document(&gltf.document, path);
+    let mut header = [0u8; 20];
+    file.read_exact(&mut header)
+        .unwrap_or_else(|error| refuse(path, format_args!("no complete GLB header: {error}")));
+    let word = |at: usize| {
+        u32::from_le_bytes(
+            header[at..at + 4]
+                .try_into()
+                .expect("a four-byte slice of the header"),
+        )
+    };
+    if &header[0..4] != b"glTF" || word(4) != 2 || &header[16..20] != b"JSON" {
+        refuse(path, "not a glTF 2.0 binary whose first chunk is its JSON");
+    }
+    let length = usize::try_from(word(12)).expect("a u32 chunk length fits a 64-bit usize");
+    let mut json = vec![0; length];
+    file.read_exact(&mut json)
+        .unwrap_or_else(|error| refuse(path, format_args!("a truncated JSON chunk: {error}")));
+    let root = gltf::json::Root::from_slice(&json).unwrap_or_else(|error| refuse(path, error));
+    gltf::Document::from_json(root).unwrap_or_else(|error| refuse(path, error))
 }
 
 /// The template contract that can be checked without an instantiated world or loaded meshes.
@@ -2857,8 +2892,8 @@ mod tests {
     fn the_shipped_template_is_authored_at_unit_scale() {
         use bevy::math::Mat4;
 
-        let path = crate::assets::asset_root().join(crate::tank::TANK_GLB_PATH);
-        let gltf::Gltf { document, .. } = gltf::Gltf::open(&path).expect("the Tiger glb opens");
+        // The startup gate's own reader: the JSON chunk alone.
+        let document = view_document(crate::tank::TANK_GLB_PATH);
         verify_template_document(&document, crate::tank::TANK_GLB_PATH);
         let scene = document.scenes().next().expect("the glb carries a scene");
         let mut stack: Vec<(gltf::Node, Mat4)> =
