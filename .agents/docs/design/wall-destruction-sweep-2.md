@@ -203,7 +203,7 @@ The model's narrative lives in `wall-destruction.md`, "One assessment path for f
 chunk groups". The implementation uses shared construction data and the same law pipeline;
 actual physics contacts become transient resting joints, their already-transferred impulse is
 not exchanged twice. A split retains the parent's actual rigid velocity field and replicates
-birth/retirement ticks on the same presentation cursor (protocol revision 59).
+birth/retirement ticks on the same presentation cursor (protocol revision 60, shared with the module repair snapshot).
 
 The baseline two-structure contact regression was run red: the reader panicked because it
 assumed every structural body was static. The existing pure slab fixtures already discriminated
