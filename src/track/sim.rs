@@ -855,7 +855,7 @@ fn apply_track_forces(
         *grip_effect = effect;
     }
     // Every pass has read the tick-start snapshot, so the recipients' sides are sized after
-    // them all, over every tank's contacts at once: the driving tanks' hulls are belt-held.
+    // them all, over every tank's contacts at once, by one law for every recipient body.
     // These writes stay in DrivingForces, before recoil and Avian integration.
     let contacts = entities.iter().flat_map(|&entity| {
         let (.., contacts, _) = tanks
@@ -863,7 +863,7 @@ fn apply_track_forces(
             .expect("a tank gathered for this synchronous tick remains alive");
         contacts.0.iter().flatten()
     });
-    let pushes = piece_impulses(&mut pieces, contacts, &entities, dt);
+    let pushes = piece_impulses(&mut pieces, contacts, dt);
     apply_pushes(&pushes, &mut pieces_query);
 }
 
@@ -1116,6 +1116,89 @@ mod tests {
             (momentum + impulse).length() <= 1e-4 * impulse.length(),
             "the lower hull's momentum {momentum} must be the opposite of {impulse}"
         );
+    }
+
+    /// One reaction law for every recipient: a body under a belt takes its side by its mass and
+    /// inertia at the patches and the belt's springs there, never by what it is. A parked upper
+    /// hull resting on a driving tank, and on a body with the same collider, mass and inertia but
+    /// no running gear, gives each the same momentum, the exact opposite of what the upper belt
+    /// applied. Stacked hulls and heavy fallen construction rely on it; a rule keyed on the
+    /// body's kind (a list of tanks) fails here. FIXTURE DATA: [`fixture_tank`]'s 30 t box hulls.
+    #[test]
+    fn identical_receivers_take_the_same_reaction_whatever_they_are() {
+        use avian3d::prelude::*;
+        let run = |driving: bool| {
+            let (mut app, upper_y) = adapter_app();
+            let lower = if driving {
+                fixture_tank(&mut app, Vec3::ZERO)
+            } else {
+                app.world_mut()
+                    .spawn((
+                        Position(Vec3::ZERO),
+                        Rotation::default(),
+                        RigidBody::Dynamic,
+                        Collider::cuboid(12.0, 0.5, 12.0),
+                        Mass(30_000.0),
+                        AngularInertia::new(Vec3::splat(30_000.0)),
+                        NoAutoMass,
+                        NoAutoAngularInertia,
+                        NoAutoCenterOfMass,
+                        CenterOfMass(Vec3::ZERO),
+                    ))
+                    .id()
+            };
+            let upper = fixture_tank(&mut app, Vec3::Y * upper_y);
+            app.world_mut().entity_mut(upper).insert(Sensor);
+            app.update();
+            app.update();
+            run_adapter(&mut app, &[(lower, Vec3::ZERO), (upper, Vec3::ZERO)]);
+            let dt = app.world().resource::<Time>().delta_secs();
+            let on_lower: Vec<_> = app
+                .world()
+                .get::<TrackContacts>(upper)
+                .unwrap()
+                .0
+                .iter()
+                .flatten()
+                .filter(|c| c.collider == Some(lower))
+                .map(|c| {
+                    (
+                        c.normal * c.load + c.traction,
+                        c.point,
+                        c.normal,
+                        c.stiffness,
+                    )
+                })
+                .collect();
+            let impulse = on_lower.iter().map(|c| c.0).sum::<Vec3>() * dt;
+            assert!(impulse.y > 0.0, "the upper belt bears on the lower body");
+            // DERIVED: the explicit-limit reading of the fixture's 30 t, 30 000 kg m² box.
+            let rate: f32 = on_lower
+                .iter()
+                .map(|&(_, point, normal, stiffness)| {
+                    stiffness * (1.0 / 30_000.0 + point.cross(normal).length_squared() / 30_000.0)
+                })
+                .sum();
+            let momentum = app.world().get::<LinearVelocity>(lower).unwrap().0 * 30_000.0;
+            println!(
+                "MEASURED driving {driving}: reaction {impulse} N s, momentum {momentum} N s, \
+                 dt² Σk/m {}",
+                rate * dt * dt
+            );
+            (impulse, momentum)
+        };
+        let (tank_impulse, tank_momentum) = run(true);
+        let (body_impulse, body_momentum) = run(false);
+        assert!(
+            (tank_impulse - body_impulse).length() <= 1e-6 * tank_impulse.length(),
+            "the identical lower surfaces carry the same belt: {tank_impulse} and {body_impulse}"
+        );
+        for (impulse, momentum) in [(tank_impulse, tank_momentum), (body_impulse, body_momentum)] {
+            assert!(
+                (momentum + impulse).length() <= 1e-4 * impulse.length(),
+                "the lower body's momentum {momentum} must be the opposite of {impulse}"
+            );
+        }
     }
 
     /// Both passes read one tick-start snapshot: exchanging entity order cannot change any

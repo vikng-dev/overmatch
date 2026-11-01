@@ -295,7 +295,6 @@ fn belt_piece_reactions(
     piece_impulses(
         pieces,
         reports.iter().flat_map(|report| &report.contacts),
-        &[],
         dt,
     )
 }
@@ -711,7 +710,8 @@ mod tests {
 
     /// Both tracks share the production reaction order. Sandbox tuning relies on a light
     /// recipient seeing the same clamped impulses as the game, even when each track changes
-    /// its angular velocity. FIXTURE DATA: a 200 kg plank, two contacts closing at 0.2 m/s.
+    /// its angular velocity. FIXTURE DATA: a 200 kg plank, two contacts closing at 0.2 m/s, each
+    /// a 10 MN/m patch.
     #[test]
     fn both_sandbox_tracks_share_the_production_reaction_pass() {
         use avian3d::prelude::*;
@@ -747,6 +747,7 @@ mod tests {
                         normal: Vec3::Y,
                         load: 100_000.0,
                         load_elastic: 100_000.0,
+                        stiffness: 1.0e7,
                         slip: 0.0,
                         slip_lat: 0.0,
                         f_long: 0.0,
@@ -764,7 +765,6 @@ mod tests {
                 let expected = piece_impulses(
                     &mut production,
                     reports.iter().flat_map(|r| &r.contacts),
-                    &[],
                     dt,
                 );
                 let bits = |pushes: &[crate::track::rubble::Push]| {

@@ -362,6 +362,11 @@ pub struct BeltContact {
     pub point: Vec3,
     pub load: f32,
     pub load_elastic: f32,
+    /// The support spring's rate along the normal at this patch (N/m): the per-metre spring over
+    /// the patch's contacting length, at its column's weight and engagement (DERIVED: the
+    /// elastic load's rate in penetration past the engagement ramp). The recipient's reaction law
+    /// reads it as the stiffness the explicit step integrates (`track::rubble::piece_impulses`).
+    pub stiffness: f32,
     /// Longitudinal slip (belt speed − ground-point speed, m/s).
     pub slip: f32,
     /// Lateral scrub speed at the contact (m/s).
@@ -526,6 +531,8 @@ struct ColumnContact {
     normal: Vec3,
     load: f32,
     load_elastic: f32,
+    /// [`BeltContact::stiffness`].
+    stiffness: f32,
     long_dir: Vec3,
     lat_dir: Vec3,
     has_plane: bool,
@@ -961,8 +968,9 @@ fn collect_column_contacts<O: TerrainOracle>(
                 // share of the per-metre coefficients. Damping and slip read the hull's velocity
                 // relative to the surface it presses; recipient motion enters both terms.
                 // The recipient's reaction law (`track::rubble::piece_impulses`) runs later: a
-                // belt-integrated body takes the whole opposite force, while a loose piece
-                // takes the sequentially clamped impulse. Both read tick-start velocities.
+                // body the explicit step integrates this spring against stably takes the whole
+                // opposite force, any other the sequentially clamped impulse. Both read
+                // tick-start velocities.
                 let normal = -out;
                 let hull_vel = vel_at(p);
                 let vel = match collider {
@@ -971,6 +979,7 @@ fn collect_column_contacts<O: TerrainOracle>(
                 };
                 let engage = (pen_max / params.engage_depth).clamp(0.0, 1.0);
                 let load_elastic = weight * params.support_stiffness_per_m * area * engage;
+                let stiffness = weight * params.support_stiffness_per_m * contact_len * engage;
                 let load = weight
                     * (params.support_stiffness_per_m * area
                         - params.support_damping_per_m * contact_len * vel.dot(normal))
@@ -1010,6 +1019,7 @@ fn collect_column_contacts<O: TerrainOracle>(
                     normal,
                     load,
                     load_elastic,
+                    stiffness,
                     long_dir,
                     lat_dir,
                     has_plane,
@@ -1233,6 +1243,7 @@ fn emit_contact_forces(
             point: c.p,
             load: c.load,
             load_elastic: c.load_elastic,
+            stiffness: c.stiffness,
             slip: c.slip_long,
             slip_lat: c.slip_lat,
             f_long,
