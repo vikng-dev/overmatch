@@ -191,6 +191,68 @@ mod tests {
         }
     }
 
+    /// A round born behind its visual muzzle (a mounted bore through its source's envelope) draws its
+    /// streak from its birth, where its `ShellPath` opens, over the barrel-length prefix it flies:
+    /// never behind the birth, and with the tail on the birth while the streak is shorter than its
+    /// nominal length. An anchor at the visual muzzle puts that tail on the muzzle instead. Relied on
+    /// by the presentation of every mounted round (`shooting::outside_source`). Fixture speed, slow
+    /// enough that several frames fall inside the streak's 2 m floor (`min_length_m`).
+    #[test]
+    fn a_streak_born_behind_its_muzzle_is_drawn_from_its_birth() {
+        let birth = MUZZLE + Vec3::Z * 5.0;
+        let mut app = world();
+        spawn_via(
+            &mut app,
+            Born::Local,
+            FireShell {
+                birth,
+                speed: 25.0,
+                ..fire_shell(0, None)
+            },
+        );
+        let mut short = 0;
+        for frame in 0..40 {
+            app.update();
+            let mut shells = app
+                .world_mut()
+                .query_filtered::<(&Transform, &Children), (With<ShellPath>, Without<TracerStreak>)>();
+            let Some((pose, children)) = shells.iter(app.world()).next() else {
+                continue; // not born yet
+            };
+            let (pose, child) = (*pose, children[0]);
+            let streak = app
+                .world()
+                .get::<TracerStreak>(child)
+                .expect("a traced round carries its streak child");
+            let len = app
+                .world()
+                .get::<Transform>(child)
+                .expect("a drawn streak")
+                .scale
+                .y;
+            let travel = (pose.rotation * Vec3::NEG_Z).normalize();
+            let from_birth = (pose.translation - travel * len - birth).dot(travel);
+            assert!(
+                from_birth >= -1.0e-3,
+                "frame {frame}: the tail sits {:.3} m behind the birth",
+                -from_birth
+            );
+            if len < streak.nominal_len - 1.0e-3 {
+                assert!(
+                    from_birth.abs() < 1.0e-3,
+                    "frame {frame}: a {len:.3} m streak, short of its {:.3} m nominal, starts \
+                     {from_birth:.3} m past the birth",
+                    streak.nominal_len
+                );
+                short += 1;
+            }
+        }
+        assert!(
+            short > 1,
+            "the frames reached the barrel-length prefix ({short})"
+        );
+    }
+
     /// The clamp is only ever a SHORTENING: once the round has flown past `nominal_len` the full streak
     /// draws, and it re-anchors at a ricochet so the tail stops at the bounce, not the muzzle.
     #[test]

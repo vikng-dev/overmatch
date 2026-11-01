@@ -2551,7 +2551,7 @@ fn a_barrel_through_a_wall_still_meets_the_plate() {
 /// fire fact keeps the visual muzzle. Fixture data: five metres of bore path, a traced round and
 /// cursor fractions chosen on either side of the muzzle within the first tick.
 #[test]
-fn the_presented_march_and_tracer_include_the_birth_to_muzzle_prefix() {
+fn the_presented_march_includes_the_birth_to_muzzle_prefix() {
     let mut app = recording_world(true);
     settle(&mut app);
     let birth = Vec3::new(0.0, 20.0, 0.0);
@@ -2580,12 +2580,6 @@ fn the_presented_march_and_tracer_include_the_birth_to_muzzle_prefix() {
     assert!(
         pose.translation.z < birth.z && pose.translation.z > muzzle.z,
         "the first fractional presentation lies inside the barrel-length prefix"
-    );
-    let flown = pose.translation.distance(birth);
-    let drawn = TracerStreak { nominal_len: 100.0 }.drawn_transform(flown);
-    assert!(
-        (drawn.scale.y - flown).abs() < 1.0e-5,
-        "the streak covers only the presented prefix"
     );
     app.world_mut().resource_mut::<PathClock>().fraction = 0.75;
     app.update();
