@@ -195,8 +195,8 @@ mod terminate {
     const NS_TERMINATE_CANCEL: NSUInteger = 0;
 
     /// winit's `NSApplicationDelegate` subclass (winit 0.30's `declare_class!` names it exactly
-    /// this). If a winit bump renames it, [`install_terminate_handler`] says so loudly rather than
-    /// silently restoring the old behaviour.
+    /// this). A winit bump that renames it breaks the startup contract and must refuse startup
+    /// rather than restore the broken quit path.
     const WINIT_DELEGATE_CLASS: &CStr = c"WinitApplicationDelegate";
 
     /// The Objective-C type encoding for `- (NSUInteger)applicationShouldTerminate:(id)sender`:
@@ -259,23 +259,18 @@ mod terminate {
         // one is non-null, so it lands on `Some`.
         let added: BOOL = unsafe {
             let class: *const objc_class = objc_getClass(WINIT_DELEGATE_CLASS.as_ptr());
-            if class.is_null() {
-                error!(
-                    "quit: winit's application delegate class is not registered under the name \
-                     this build expects — Cmd+Q will tear the world down mid-frame instead of \
-                     exiting through AppExit (see src/quit.rs)"
-                );
-                return;
-            }
+            assert!(
+                !class.is_null(),
+                "quit: winit must register WinitApplicationDelegate before Startup; update the \
+                 terminate handler for this winit version before starting a windowed root"
+            );
             let selector: *const objc_selector =
                 sel_registerName(c"applicationShouldTerminate:".as_ptr());
-            if !class_getInstanceMethod(class, selector).is_null() {
-                warn!(
-                    "quit: winit now answers applicationShouldTerminate: itself — leaving it \
-                     alone, and this module's Cmd+Q half is dead code (see src/quit.rs)"
-                );
-                return;
-            }
+            assert!(
+                class_getInstanceMethod(class, selector).is_null(),
+                "quit: winit now implements applicationShouldTerminate:; verify its AppExit \
+                 routing and remove the custom terminate handler before starting a windowed root"
+            );
             let imp = mem::transmute::<ShouldTerminateImp, IMP>(application_should_terminate);
             class_addMethod(
                 class.cast_mut(),
@@ -292,10 +287,11 @@ mod terminate {
             reason = "`BOOL` is `bool` on aarch64-apple only; this comparison is the one shape correct on both"
         )]
         let failed = added == NO;
-        if failed {
-            error!("quit: could not install the applicationShouldTerminate: handler");
-            return;
-        }
+        assert!(
+            !failed,
+            "quit: the registered winit delegate must accept applicationShouldTerminate:; \
+             refusing startup without the AppExit quit route"
+        );
         debug!("quit: Cmd+Q now routes through AppExit");
     }
 
