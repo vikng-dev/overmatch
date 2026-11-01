@@ -34,8 +34,9 @@
         ballistics::pen_cam::spall_law_cost (release, macOS arm64, best of 9, the 7 cones of the
         penetrating scenarios): 0.30 ms at N = 24, 0.64 at 64, 1.23 at 128, 2.29 at 256; the dose
         step per direction on the s1 cone at 64 runs from 10.5 HP on the axis to 0.65 HP at the rim,
-        6.25 HP on average (DERIVED: S·f_k / 3000 J per HP / 64, S = 2.40 MJ MEASURED from the s1
-        record). The count changes how finely a box's dose is resolved, never the emitted total")),
+        6.25 HP on average (DERIVED from that historical record's 400 emitted HP:
+        H_C·f_k / (q·N), q = 1/2, the field weights' exact normalization).
+        The count changes how finely a box's dose is resolved, never the emitted total")),
 
     // Total HP emitted per joule lost across the exited body, before its material strength ratio.
     // DERIVED: 0.88 × 1/2 / 3000; the field weights' half-strength normalization is included.
@@ -70,11 +71,11 @@
         // N sets how finely a box's dose is resolved, never how much the burst carries. One
         // throw's cost MEASURED 2026-10-24 by ballistics::pen_cam::burst_law_cost (release, macOS
         // arm64, best of 9, s1's line fired with the burst round). At rest each direction carries
-        // S/2 / N joules, S/2 / (3000 N) HP points of dose (DERIVED, the field uniform over its
-        // support).
+        // H_B / N emitted HP (DERIVED, the field uniform over its support). S is a transport
+        // encoding; it is not the physical energy delivered to environment construction.
         ring_directions: (256, Resolution("provisional, flagged for the owner: the cost against the
             resolution. The ring's throw: 0.50 ms at N = 64, 1.47 at 256, 4.01 at 684; at rest 218,
-            54 and 20 HP points per direction (S = 210 × 397.7 kJ = 83.53 MJ), so at 256 one
-            direction is about two crew pools")),
+            54 and 20 HP points per direction (DERIVED: H_B = 0.035 HP/J × 397.7 kJ, then
+            H_B / N), so at 256 one direction is about two crew pools")),
     ),
 )
