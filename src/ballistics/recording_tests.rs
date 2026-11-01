@@ -474,6 +474,54 @@ fn a_shell_despawned_after_the_shot_keeps_its_record() {
     );
 }
 
+/// The game's damage model: a husk whose turret launched on cook-off stays on the field, and a
+/// later main-gun round can strike it. The launch takes the turret's node out of the servo
+/// mechanism (no `ServoIndex`) while the tank's servo state keeps every slot, so no angle places
+/// that node on the hull: the recorder names that rig as unposable and finishes the encounter
+/// without a record, and the authority keeps simulating. The control, the same rig with the node
+/// still mounted, records every slot's angle. Two servo slots are fixture data.
+#[test]
+fn a_round_into_a_husk_whose_turret_launched_records_nothing_and_keeps_simulating() {
+    use crate::tank::{ServoIndex, TankRoot, TankServos};
+    let record = |launched: bool| {
+        let mut app = recording_world(false);
+        let (root, _) = tank(
+            &mut app,
+            Vec3::ZERO,
+            0.0,
+            Vec3::ZERO,
+            &plated(DEEP, Kind::Crew(DEEP)),
+        );
+        let world = app.world_mut();
+        world.entity_mut(root).insert(TankServos::for_count(2));
+        world.spawn((Name::new("gun"), ServoIndex(0), TankRoot(root)));
+        let turret = world
+            .spawn((Name::new("turret"), ServoIndex(1), TankRoot(root)))
+            .id();
+        if launched {
+            world
+                .entity_mut(turret)
+                .remove::<ServoIndex>()
+                .insert(crate::damage::LaunchedTurret);
+        }
+        settle(&mut app);
+        fire(&mut app, Vec3::new(0.0, 0.0, 30.0), FireMechanism::Single);
+        let recorded = run(&mut app, 8);
+        assert!(app.world().resource::<ShotRecorder>().is_idle());
+        recorded
+    };
+    let mounted = record(false);
+    assert_eq!(mounted.len(), 1, "a mounted rig records");
+    let posed: Vec<&str> = mounted[0]
+        .report
+        .servo_deg
+        .keys()
+        .map(String::as_str)
+        .collect();
+    assert_eq!(posed, ["gun", "turret"], "every slot's angle");
+    assert!(record(true).is_empty(), "a launched rig records nothing");
+}
+
 /// An armed round's record stays open while the fuze the struck tank armed runs, though the round
 /// is clear of the tank: it holds the burst wherever the delay ends, while its nose piece flies on.
 /// The fixture 88 at 800 m/s arms in the 50 mm plate and, on a 50 ms delay (fixture data), flies

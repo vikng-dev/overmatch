@@ -47,7 +47,7 @@ use crate::ballistics::{
     PenetrationMarks, ShellPath, ShotDose, SpallMarks, SpallRay, VolumeCrossing, dose_units,
     energy_units, hp_before_rounding, pool_units_of,
 };
-use crate::damage::{Ammo, CrewStation, FunctionRole, VolumeOf};
+use crate::damage::{Ammo, CrewStation, FunctionRole, LaunchedTurret, VolumeOf};
 #[cfg(test)]
 use crate::tank::{Muzzle, Weapon, rig_world_pose};
 use crate::tank::{RemoteServos, Rig, ServoIndex, TankRoot, TankServos};
@@ -121,10 +121,14 @@ pub struct StruckTank {
 
 impl StruckTank {
     /// The tank's hull frame, every servo's angle and every component it owns, by name, read now
-    /// for a shot about to be marched. `None` for an entity with no rig.
+    /// for a shot about to be marched. `None` for an entity with no rig, or one whose servo node
+    /// left it ([`ServoPose::Detached`]).
     pub fn capture(world: &mut World, tank: Entity) -> Option<Self> {
         let hull = world.get::<Rig>(tank)?.hull;
         let frame = HullFrame::of(world.get::<GlobalTransform>(hull)?);
+        let ServoPose::Posed(servo_deg) = servo_angles(world, tank)? else {
+            return None;
+        };
         let mut owned = world.query::<(Entity, &VolumeOf, &ComponentHealth)>();
         let boxes = owned
             .iter(world)
@@ -135,7 +139,7 @@ impl StruckTank {
             tank,
             from: 0,
             frames: vec![(0, frame)],
-            servo_deg: servo_angles(world, tank)?,
+            servo_deg,
             boxes,
         })
     }
@@ -241,11 +245,28 @@ pub fn muzzle_of(world: &mut World, shooter: Entity, weapon: &str) -> Option<Vec
     rig_world_pose(muzzle, shooter, position, rotation, &parents, &locals).map(|(at, _)| at)
 }
 
+/// The game's damage model: what a live struck tank's servos state for its record.
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) enum ServoPose {
+    /// Every registered servo's angle (degrees), by node name; empty for a rig with no servos.
+    Posed(BTreeMap<String, f32>),
+    /// A servo node left the mechanism: a turret launched on cook-off ([`LaunchedTurret`]) loses
+    /// its `ServoIndex` while the tank's servo state keeps its slot, so no angle places that node
+    /// on the hull, and the encounter has no record.
+    Detached,
+}
+
 /// The game's damage model: every registered servo's angle (degrees), from the same remote-first
 /// state the view poses. `None` means the tank despawned before recording; an existing rig with no
-/// servo nodes has an empty pose. Missing state for registered nodes is a construction bug.
-pub(crate) fn servo_angles(world: &mut World, tank: Entity) -> Option<BTreeMap<String, f32>> {
+/// servo nodes has an empty pose. A launched node keeps its `TankRoot`
+/// (`damage::launch_turrets_on_cookoff` removes only the mechanism's components), which names the
+/// detached rig. Missing state for registered nodes is a construction bug.
+pub(crate) fn servo_angles(world: &mut World, tank: Entity) -> Option<ServoPose> {
     world.get_entity(tank).ok()?; // A tank may despawn while its round still has an open encounter.
+    let mut launched = world.query_filtered::<&TankRoot, With<LaunchedTurret>>();
+    if launched.iter(world).any(|root| root.0 == tank) {
+        return Some(ServoPose::Detached);
+    }
     let mut servos = world.query::<(&Name, &ServoIndex, &TankRoot)>();
     let nodes: Vec<_> = servos
         .iter(world)
@@ -262,7 +283,7 @@ pub(crate) fn servo_angles(world: &mut World, tank: Entity) -> Option<BTreeMap<S
         });
     let states = match states {
         Some(states) => states,
-        None if nodes.is_empty() => return Some(BTreeMap::new()), // This rig declares no servos.
+        None if nodes.is_empty() => return Some(ServoPose::Posed(BTreeMap::new())), // No servos.
         None => panic!(
             "the game's damage model records registered servos from their spawn-complete state"
         ),
@@ -270,14 +291,14 @@ pub(crate) fn servo_angles(world: &mut World, tank: Entity) -> Option<BTreeMap<S
     assert_eq!(
         nodes.len(),
         states.len(),
-        "the game's damage model records every state slot through its registered servo node"
+        "the game's damage model records every state slot of a mounted rig through its registered servo node"
     );
-    Some(nodes.into_iter().map(|(name, slot)| {
+    Some(ServoPose::Posed(nodes.into_iter().map(|(name, slot)| {
         let angle = states.get(slot).expect(
             "the game's damage model assigns every ServoIndex within its root's servo state at spawn"
         ).current();
         (name, angle.to_degrees())
-    }).collect())
+    }).collect()))
 }
 
 /// The path `shell` took through `tank` (every tank, for `None`), as the verdict reads it: its
@@ -1313,13 +1334,17 @@ fn role_of(world: &World, volume: Entity) -> Role {
 mod tests {
     use super::*;
 
-    /// The game's damage model records complete servo poses, distinguishes a despawn from a
-    /// servo-less rig, and refuses a missing state or invalid registered slot before presentation.
+    /// The game's damage model records complete servo poses, distinguishes a despawn and a launched
+    /// node from a servo-less rig, and refuses a missing state or invalid registered slot before
+    /// presentation.
     #[test]
     fn recording_servos_requires_registered_state_and_names_despawn() {
         let mut world = World::new();
         let tank = world.spawn_empty().id();
-        assert_eq!(servo_angles(&mut world, tank), Some(BTreeMap::new()));
+        assert_eq!(
+            servo_angles(&mut world, tank),
+            Some(ServoPose::Posed(BTreeMap::new()))
+        );
         let node = world
             .spawn((Name::new("fixture servo"), ServoIndex(0), TankRoot(tank)))
             .id();
@@ -1330,10 +1355,7 @@ mod tests {
             .is_err()
         );
         world.entity_mut(tank).insert(TankServos::for_count(1));
-        assert_eq!(
-            servo_angles(&mut world, tank).unwrap()["fixture servo"],
-            0.0
-        );
+        assert_eq!(posed(servo_angles(&mut world, tank))["fixture servo"], 0.0);
         world.entity_mut(node).insert(ServoIndex(1));
         assert!(
             std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| servo_angles(
@@ -1348,11 +1370,21 @@ mod tests {
                 0.5, 0.0, 0.0,
             )]));
         assert_eq!(
-            servo_angles(&mut world, tank).unwrap()["fixture servo"],
+            posed(servo_angles(&mut world, tank))["fixture servo"],
             0.5f32.to_degrees()
         );
+        world.spawn((Name::new("launched"), TankRoot(tank), LaunchedTurret));
+        assert_eq!(servo_angles(&mut world, tank), Some(ServoPose::Detached));
         world.despawn(tank);
         assert_eq!(servo_angles(&mut world, tank), None);
+    }
+
+    /// The angles of a posed rig.
+    fn posed(pose: Option<ServoPose>) -> BTreeMap<String, f32> {
+        match pose {
+            Some(ServoPose::Posed(angles)) => angles,
+            other => panic!("a mounted rig is posed: {other:?}"),
+        }
     }
 
     /// Two overlapping tanks inside one crossing: the round comes to rest in B's plate, which

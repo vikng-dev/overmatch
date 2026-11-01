@@ -27,9 +27,9 @@
 //!
 //! An encounter's record is finished ([`finish_records`]) once the shell ended, or is clear of the
 //! tank's colliders with no fuze that tank armed still running: a burst wherever the delay ends is
-//! the encounter's. A tank gone by then (despawned, or respawned as a new entity) gets no record.
-
-use std::collections::BTreeMap;
+//! the encounter's. A tank gone by then (despawned, or respawned as a new entity) gets no record,
+//! nor does one whose servo node launched before its encounter was posed
+//! ([`ServoPose::Detached`]): no angle places that node on the hull.
 
 use avian3d::prelude::{
     ColliderAabb, ColliderTransform, Position, RigidBody, RigidBodyColliders, Rotation,
@@ -38,7 +38,7 @@ use bevy::ecs::system::{SystemParam, SystemState};
 use bevy::prelude::*;
 
 use super::PenetrationReport;
-use super::record::{self, HullFrame, ShotFacts, ShotLog, StruckTank};
+use super::record::{self, HullFrame, ServoPose, ShotFacts, ShotLog, StruckTank};
 use super::wire::TankLife;
 use crate::ballistics::{
     ArmourMark, BurstField, ComponentHealth, FireShell, PenetrationMarks, Projectile as Flying,
@@ -140,7 +140,8 @@ struct Struck {
     /// `(first mark, hull frame)` per sampled contact; standalone static fixtures are unposed
     /// until the post-march recorder reads their frame.
     frames: Vec<(usize, Option<HullFrame>)>,
-    servo_deg: Option<BTreeMap<String, f32>>,
+    /// `None` until [`pose_struck`] reads the live tank's servos.
+    servo_deg: Option<ServoPose>,
     killed: Option<KnockoutReason>,
     done: bool,
 }
@@ -350,7 +351,7 @@ fn pose_struck(world: &mut World) {
         .collect();
     tanks.sort();
     tanks.dedup();
-    let posed: Vec<(Entity, Option<HullFrame>, Option<BTreeMap<String, f32>>)> = tanks
+    let posed: Vec<(Entity, Option<HullFrame>, Option<ServoPose>)> = tanks
         .into_iter()
         .map(|tank| {
             (
@@ -514,7 +515,8 @@ fn finish_records(world: &mut World) {
 }
 
 /// The record of `recording`'s round in encounter `struck`, its logs `log`; `None` where the tank
-/// is gone, a frame was never posed, or the encounter opens no pen cam.
+/// is gone, a frame was never posed, a servo node had left the rig when it was posed, or the
+/// encounter opens no pen cam.
 fn recorded(
     world: &World,
     recording: &ShotRecording,
@@ -528,13 +530,18 @@ fn recorded(
         .map(|&(mark, frame)| Some((mark, frame?)))
         .collect::<Option<Vec<_>>>()?;
     let hull = frames.first().map(|(_, frame)| frame.pose());
+    let servo_deg =
+        match struck.servo_deg.as_ref().expect(
+            "the game's damage model poses every live struck tank before finishing its record",
+        ) {
+            ServoPose::Posed(angles) => angles.clone(),
+            ServoPose::Detached => return None,
+        };
     let tank = StruckTank::recorded(
         struck.tank,
         struck.from,
         frames,
-        struck.servo_deg.clone().expect(
-            "the game's damage model poses every live struck tank before finishing its record",
-        ),
+        servo_deg,
         struck.boxes.clone(),
     );
     let mut report = record::report_from(world, &tank, log, &recording.facts)?;
