@@ -173,8 +173,7 @@ struct SlotLedger {
     owed_swallows: VecDeque<u32>,
     /// The slot's replicated `loaded` index as of the arm, then as of the last fold. A
     /// consumption's reveal takes this value before the fold refreshes it, so a load that
-    /// arrives beside the consumption cannot rename the round it fired. 0 (the default round)
-    /// where no `WeaponLoads` has arrived.
+    /// arrives beside the consumption cannot rename the round it fired.
     arrived_loaded: u8,
 }
 
@@ -387,18 +386,18 @@ pub(super) fn present_shot_at_age(
     recoil.push(shot.shooter.tank, shot.shooter.weapon);
 }
 
-/// Slot `slot`'s replicated `loaded` index: 0 (the default round) where no `WeaponLoads` has
-/// arrived or the slot lies past its list.
-fn loaded_of(loads: Option<&WeaponLoads>, slot: usize) -> u8 {
-    loads
-        .and_then(|loads| loads.weapons.get(slot))
-        .map_or(0, |load| load.loaded)
+/// Slot `slot`'s replicated `loaded` index. The server builds `WeaponLoads` and `WeaponGate` from
+/// the same sorted spec weapons, so a slot past the loads list is a malformed peer record:
+/// [`arm_own_fire_presentation`] logs it, and the reveal names the default round 0.
+fn loaded_of(loads: &WeaponLoads, slot: usize) -> u8 {
+    loads.weapons.get(slot).map_or(0, |load| load.loaded)
 }
 
-/// Arm the own tank once the server stream owns its gate, each slot's load as it arrived.
+/// Arm the own tank once the server stream owns its gate, each slot's load as it arrived. Both
+/// arrive together: one spawn inserts them and one `CombatDisclosure` scope discloses them.
 fn arm_own_fire_presentation(
     tanks: Query<
-        (Entity, &WeaponGate, Option<&WeaponLoads>),
+        (Entity, &WeaponGate, &WeaponLoads),
         (
             With<NetTank>,
             With<Controlled>,
@@ -411,6 +410,14 @@ fn arm_own_fire_presentation(
 ) {
     for (entity, gate, loads) in &tanks {
         info!("net: {entity} own interpolated gate armed with the fire-presentation ledger");
+        if loads.weapons.len() != gate.weapons.len() {
+            warn!(
+                "net: {entity} arrived with {} weapon gates and {} loads (malformed peer record); \
+                 a slot without a load reveals round 0",
+                gate.weapons.len(),
+                loads.weapons.len(),
+            );
+        }
         let slots = gate
             .weapons
             .iter()
@@ -441,11 +448,7 @@ fn stamp_gate_write_mark(mut roots: Query<(Ref<WeaponGate>, &mut OwnFirePresenta
 /// the signal [`heal_refused_presentations`] measures — never a fold.
 fn fold_arrivals(
     arrival: Option<Res<ArrivalDelay>>,
-    mut roots: Query<(
-        Ref<WeaponGate>,
-        Option<&WeaponLoads>,
-        &mut OwnFirePresentation,
-    )>,
+    mut roots: Query<(Ref<WeaponGate>, &WeaponLoads, &mut OwnFirePresentation)>,
 ) {
     let revealed_tick = arrival
         .as_ref()
@@ -923,6 +926,14 @@ mod tests {
             .spawn((
                 WeaponGate {
                     weapons: vec![gate],
+                },
+                // The loads arrive with the gate (one spawn, one disclosure scope).
+                crate::tank::WeaponLoads {
+                    weapons: vec![crate::tank::WeaponLoad {
+                        loaded: 0,
+                        selected: 0,
+                        fuze_modes: Vec::new(),
+                    }],
                 },
                 OwnFirePresentation::with_slots(vec![SlotLedger::seeded(gate)]),
             ))

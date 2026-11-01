@@ -38,6 +38,7 @@ No P1 or P2 was found. Its P3s and the weighed questions:
 | `lib.rs` `cycle_transmission_feel`, code-branching net-A | Already fixed in the base (sweep-net-1); the stale key doc in `spawn_map.rs` is corrected (`591e9bab`). |
 | `quit.rs` handler-install arms | Disagreed: an OS/winit fact with visible logging; the tripwire the inventory proposes needs winit's delegate class, which only `EventLoop::new` registers, on the macOS main thread no test thread is. |
 | `quit.rs` `check_quit_latency` | Disagreed: the warning is the stated choice, and `the_latency_guard_fires_only_on_modes_that_can_swallow_a_quit` pins the two modes the roots insert. |
+| New: `fire_presentation` read `WeaponLoads` as optional | Fixed. One spawn inserts it with `WeaponGate` and one `CombatDisclosure` scope discloses both, so the arm and the fold require it; a loads list shorter than the gates is a malformed peer record, logged at arming. |
 
 Base-truths read of every file in the share: no finding (no per-object rule, named asset or
 per-asset constant in logic; the fixture round keys in `fire_presentation` tests are labelled
@@ -52,8 +53,6 @@ Still open, with owners:
   unreachable now that `receive_ledger` moves the generation on every replacement.
 - Driving area: `tank::scenario::spawn_tank_when_loaded` reads `PendingTankAssets` as optional,
   though `load_tank_assets` inserts it at `Startup`.
-- Net (P3, unverified): `fire_presentation::loaded_of` reads round 0 while no `WeaponLoads` has
-  arrived; whether it can arrive after `WeaponGate` (same spawn, same disclosure) was not checked.
 
 ## Verification
 
@@ -61,4 +60,4 @@ MEASURED, unattended and headless through the queue: CI clippy (locked, workspac
 `dev_ui,bitprobe`) and `cargo fmt --all --check` clean on the final tree. Targeted batches: 197
 passed (changed modules, `bake::`, `doc_citations`, `ui_ascii`, `net_boundary`); 295 passed (`net::`,
 `headless_test`); 1684 run with 1 failure (the kill cam composition, fixed in `06888667`), then 193
-passed (`damage_cam`, `spawn_map`, `shot_transport`).
+passed (`damage_cam`, `spawn_map`, `shot_transport`); 280 passed (`net::`) after the loads change.
