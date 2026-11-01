@@ -394,3 +394,75 @@ checks at 04:55:33 +07 (MEASURED wall-clock, 59 minutes 38 seconds). The final c
 also passed 125 fracture/citation/whole-tree/wire tests and CI clippy. All review findings and
 the pushing-work term are committed separately. The duration remainder above is deliberately
 unimplemented; the approximation note is retained because the code still uses the solver step.
+
+## Part 7: sweep-destr-5 verification and the section law (#249)
+
+Subject: the game's building destruction and damage model, game state only.
+The two sweep-destr-5 reviews were checked against their inputs and the current laws.
+The earlier green implementation steps landed on main; this appendix extends their record.
+
+| Reviewer | Finding | Verified / not a defect | Fixed in (subject) |
+|---|---|---|---|
+| Codex | P2 later structural cuts use the former parent's inertia | verified | buildings: reframe each group before the next seam failure (#249) |
+| Codex | P2 opposed axial loads seed only their whole connected union | verified | buildings: assess opposed loads in separate punch patches (#249) |
+| Codex | P2 numeric birth ordering reverses ancestry at tick wrap | verified | buildings: order split presentation across tick wrap (#249) |
+| Claude | P2 rounded free-fall field supplies a spurious bearing direction | verified | buildings: cancel free-fall forces before reading their direction (#249); buildings: cancel paired free-fall wrenches before reading their moment (#249) |
+| Claude | P3 a detached group's cracked ground anchor remains a bearing contact | verified | buildings: discard detached anchors as bearing contacts (#249) |
+| Claude | P3 a moving group loses its frame when dust consumes all external sources | verified | buildings: frame every unsupported group after source removal (#249) |
+| Claude | P3 the outer frame loop repeats until no failure, despite its stated stopping condition | verified | buildings: reframe each group before the next seam failure (#249) |
+| Claude | P3 belt loads on dynamic recipients still do not reach the structure laws | verified | track: stage the belt's impulse on a moving structure as its contact (#256), landed on main; fenced code unchanged here |
+| Record, new | an axial pull chooses a bending axis from roundoff | verified | buildings: resolve bending axes above input roundoff (#249) |
+| Record, new | bearing rise is construction Y rather than the group's field | verified | buildings: read bearing rise against the group field (#249) |
+
+Every owned counterexample was run red: the split presentation across tick wrap; a binary-exact
+pair under equal opposed contacts; both signs of the averaged-gravity residual; a rest surviving
+after dust consumes the only external source; a detached anchor; an X-directed field with Y- and
+X-normal rests; an axial pull at three fixture scales; and a cheap end seam detaching before a
+gently loaded far seam. The latter covers both impulse and sustained-force assessment. The
+extra-pass finding follows directly from the old outer loop's failure-empty condition; its fix
+shares the current-partition framing change. The belt finding was verified against the former
+dynamic-recipient skip; main now carries its assigned lane's fix, cited above.
+
+**Resolution of a bending axis.** DERIVED from input magnitudes and arithmetic counts:
+`gamma(k) = k*u/(1-k*u)`, `u = f32 EPSILON/2`, bounds centroid accumulation/division, normal
+summation/normalization including its conditioning, and point/cross/projection and load summation.
+Absolute magnitudes are summed before cancellation. A moment within that bound has no resolved
+axis; no finite certified bound also means no resolved axis. A resolved eccentricity still bends.
+MEASURED on the isolated old section fixture: 112.83792 N s m demand against 0.20999762 N s m
+capacity from coordinate rounding alone. `Cause::Push` is angular impulse, whose unit includes the
+lever's metre; this is a separate isolated reading from part 5's framed-row measurement.
+
+**Current group frames.** `GroupLoads` accepts external sources and spin; it derives inertia from
+the current partition. Both strength loops refresh it after a membership change, before another
+section, ring or rest is assessed. Their stopping condition is no remaining failure. The cross-module gate exposed a tied-load
+reference chosen by chunk index: reversing the chunk table changed the post-split outcome.
+Construction-centroid order now breaks that tie, and the original wall renumbering assertion
+remains unchanged. Gravity and
+frame forces use matching rounded products before division. Gravity and applied wrenches are
+accumulated separately so opposite point terms follow matching arithmetic on long groups too.
+The added free-falling row regression checks exact zero force and moment for 100 fixture chunks;
+MEASURED red test on the old sequential cancellation: zero force and a Z moment of
+-2.910383e-11 N m.
+
+**Test time.** Two shielding tests repeatedly drove the full house's fracture search, although
+their invariant needs only a crushable surface and a blocker. A one-cube fixture goes through the
+real asset parser and resolver. Exact ray impulse, body-layer selection, bare wear, shaded
+non-wear and the inside-source control remain asserted. Complete shading legitimately leaves no
+live fracture state. The immutable shipped-house fixture resolves once per process; loader
+refusal tests still parse their own inputs. The real Avian strong/gentle landing pair remains.
+MEASURED serial baseline from the preceding bay: `buildings::` 245.26 s, 136 passed and one ignored;
+`a_ray_that_stops_on_a_moving_body_pushes_it_by_its_share_and_deposits_nothing` carried
+200.838 s, and `the_ground_stops_a_blast_and_a_body_holding_the_burst_shades_nothing` carried
+40.343 s. The final-tree result is
+5.02 s (145 passed, 2 existing ignored), one test thread, under the machine lock; compilation and queue waits are
+excluded by the test harness timer. The implementation is
+`buildings: use minimal shielding fixtures and share immutable layouts (#249)`.
+
+Every implementation step passed formatting, CI clippy, its targeted tests and doc citation
+checks. Both resumed law steps passed `buildings::`, `trees::`, `debris::`, `sandbox::`,
+`headless_test` and `doc_citations`: respectively 229 and 230 passed, 7 existing ignored.
+The final record passed formatting, CI clippy and the whole-tree `doc_citations`, `ui_ascii`,
+`net_boundary` and `bake::` guards, with headless checks again on this checkpoint tree.
+No captures, pricing runs, pushes or subagents. Fenced paths and `Load::mean_force` are unchanged.
+All findings from the sweep-destr-5 reviews above are verified and fixed. The sweep-destr-6
+review double is the next continuation; this checkpoint makes no disposition of its new findings.
