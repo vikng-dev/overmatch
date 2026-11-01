@@ -221,7 +221,7 @@ impl NoseShape {
     }
 
     /// [`Self::factor`] before its cast, for a law that combines the factor with other terms in
-    /// f64 and casts its own result once (the drag form, `ballistics::drag_form`).
+    /// f64 and casts its own result once (the drag form, `ballistics::DragLaw::form`).
     pub(crate) const fn factor_f64(self) -> f64 {
         match self {
             Self::Ogive { crh } => {

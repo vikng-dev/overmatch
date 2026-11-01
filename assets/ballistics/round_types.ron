@@ -6,7 +6,10 @@
 // block, and a round of a type without one does not.
 //
 // The flight nose is what drag reads: the drag form is a base share plus a nose share × the flight
-// nose's factor (`ballistics::drag_form`), so a pointed flight nose keeps more speed downrange. A
+// nose's factor (`ballistics::DragLaw`), so a pointed flight nose keeps more speed downrange. The
+// `drag` block states the law's parameters: the base drag coefficient, and one anchor nose with the
+// form it flies on (form units: a drag coefficient × ρπ/8, ρ = 1.225 kg/m³, so 0.4811 form units per
+// unit drag coefficient, DERIVED); the nose share is DERIVED from the two. A
 // ballistic-capped type flies on its cap's pointed nose and meets the plate with the blunt nose
 // under it. Flight and hit proxies are authored independently; the AP row keeps its fixture hit
 // nose while assuming a pointed flight nose. The carrier decides which body flies: the
@@ -19,6 +22,16 @@
 // PROVENANCE: every value is authored `(value, Kind("source or reason"))` (`src/provenance.rs`);
 // a value without one does not load.
 (
+    drag: (
+        base_drag_coefficient: (0.20, Tuned("ASSUMED: base drag plus skin friction at shell speeds;
+            no aerodynamic source read. 0.0962 form units, DERIVED")),
+        anchor_nose: (Ogive(crh: 1.0), Tuned("the nose the anchor form is stated on: a 1-crh tangent
+            ogive, nose factor 7/24 (DERIVED)")),
+        anchor_form: (0.263, Tuned("provisional: hand-set so a 10.2 kg 88 mm round flying on the
+            anchor nose has k = 2.0e-4 1/m (DERIVED); a drag coefficient of 0.547 (DERIVED:
+            0.263 / 0.4811). No aerodynamic source read; replace both values from measured or
+            published drag data")),
+    ),
     round_types: {
         // High-explosive, full calibre, a nose fuze in its ogive.
         "HE": (

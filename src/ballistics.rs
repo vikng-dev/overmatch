@@ -123,35 +123,63 @@ const KILL_FLOOR: f32 = -100.0;
 /// value is 0.4811 (DERIVED).
 const FORM_PER_DRAG_COEFFICIENT: f64 = 1.225 * std::f64::consts::PI / 8.0;
 
-/// The nose the blunt anchor is stated on: a tangent ogive of 1 crh, nose factor 7/24 (DERIVED,
-/// [`NoseShape::factor`]).
-const BLUNT_ANCHOR_NOSE: NoseShape = NoseShape::Ogive { crh: 1.0 };
-
-/// TUNED anchor, provisional: the form of a round on [`BLUNT_ANCHOR_NOSE`], 0.263, a drag
-/// coefficient of 0.547 (DERIVED: 0.263 / 0.4811). Hand-set on the 88 mm 10.2 kg round, whose `k` it
-/// makes 2.0e-4 1/m (DERIVED); a round whose flight nose is its blunt hit nose flies on it.
-const BLUNT_ANCHOR_FORM: f64 = 0.263;
-
-/// TUNED anchor, provisional: the base share of the form, what a round flies on whatever its nose.
-/// A drag coefficient of 0.20, ASSUMED (base drag plus skin friction at shell speeds), so 0.0962
-/// form units (DERIVED: 0.20 × 0.4811).
-const BASE_FORM: f64 = 0.20 * FORM_PER_DRAG_COEFFICIENT;
-
-/// The nose share of the form per unit nose factor: 0.5718 form units, a drag coefficient of 1.189
-/// (DERIVED: (0.263 − 0.0962) / (7/24), the share that puts [`BLUNT_ANCHOR_NOSE`] on
-/// [`BLUNT_ANCHOR_FORM`]).
-const NOSE_FORM: f64 = (BLUNT_ANCHOR_FORM - BASE_FORM) / BLUNT_ANCHOR_NOSE.factor_f64();
-
-/// The drag form of a round flying on `flight_nose` (form units, the drag coefficient × ρπ/8 of
-/// [`FORM_PER_DRAG_COEFFICIENT`]): the base share plus the nose share × the nose's factor
-/// ([`NoseShape::factor`], the factor the force law reads off a hit nose). A pointed nose flies on
-/// less; [`BLUNT_ANCHOR_NOSE`] flies on [`BLUNT_ANCHOR_FORM`] to the bit. In f64 and cast once, so
-/// the cast rounds the form and not the factor. No Mach dependence, an accepted stand-in: a round
-/// flies on one form at every speed (in flat fire the shipped rifle bullet stays supersonic to
-/// about 1.2 km and every shipped 88 mm round past 3.5 km, DERIVED from their drag).
-pub(crate) fn drag_form(flight_nose: NoseShape) -> f32 {
-    (BASE_FORM + NOSE_FORM * flight_nose.factor_f64()) as f32
+/// The drag law: the form a round flies on (form units, the drag coefficient × ρπ/8 of
+/// [`FORM_PER_DRAG_COEFFICIENT`]) is a base share plus a nose share × its flight nose's factor
+/// ([`NoseShape::factor`], the factor the force law reads off a hit nose), so a pointed nose flies on
+/// less. Its parameters are data: the round-type table's `drag` block
+/// (`assets/ballistics/round_types.ron`) states the base drag coefficient and one anchor nose's
+/// form, each with its provenance, and the nose share is DERIVED so the anchor nose flies on its
+/// form to the bit. In f64 and cast once, so the cast rounds the form and not the factor. No Mach
+/// dependence, an accepted stand-in: a round flies on one form at every speed.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct DragLaw {
+    base_form: f64,
+    nose_form: f64,
 }
+
+impl DragLaw {
+    /// The law over base drag coefficient `base_drag_coefficient` that flies `anchor_nose` on
+    /// `anchor_form` (form units), or why those parameters state no drag law: each finite and
+    /// positive, and the anchor above the base, so that a blunter nose never flies on less.
+    pub(crate) fn stated(
+        base_drag_coefficient: f64,
+        anchor_nose: NoseShape,
+        anchor_form: f64,
+    ) -> Result<Self, String> {
+        let base_form = base_drag_coefficient * FORM_PER_DRAG_COEFFICIENT;
+        if !(base_form.is_finite() && base_form > 0.0) {
+            return Err(format!(
+                "base_drag_coefficient must be finite and positive (got {base_drag_coefficient})"
+            ));
+        }
+        if !(anchor_form.is_finite() && anchor_form > base_form) {
+            return Err(format!(
+                "anchor_form must be finite and above the base share {base_form} (got \
+                 {anchor_form}) — the nose share is what a blunter nose flies on in addition"
+            ));
+        }
+        Ok(Self {
+            base_form,
+            nose_form: (anchor_form - base_form) / anchor_nose.factor_f64(),
+        })
+    }
+
+    /// The form of a round flying on `flight_nose`.
+    pub(crate) fn form(&self, flight_nose: NoseShape) -> f32 {
+        (self.base_form + self.nose_form * flight_nose.factor_f64()) as f32
+    }
+}
+
+/// FIXTURE DATA: the drag law every test fixture flies, the shipped table's values when the
+/// fixtures were measured (base drag coefficient 0.20, a 1-crh ogive on form 0.263).
+#[cfg(test)]
+pub(crate) fn fixture_drag_law() -> DragLaw {
+    DragLaw::stated(0.20, FIXTURE_DRAG_NOSE, 0.263).expect("the fixture law's parameters are valid")
+}
+
+/// FIXTURE DATA: the nose [`fixture_drag_law`] is anchored on and every fixture flies on.
+#[cfg(test)]
+const FIXTURE_DRAG_NOSE: NoseShape = NoseShape::Ogive { crh: 1.0 };
 
 /// A shell's quadratic-drag coefficient `k` (1/m) for the model `dv/dt = −k·v²`: `form` ×
 /// `caliber²` / `mass`, of the body that flies ([`crate::rounds::Round::drag_k`]). The live shell
@@ -161,10 +189,11 @@ pub fn drag_k(form: f32, caliber: f32, mass: f32) -> f32 {
 }
 
 /// The drag coefficient of a fixture round of `caliber` (m) and `mass` (kg) flying on
-/// [`BLUNT_ANCHOR_NOSE`]: the flight every test fixture flies, fixture data.
+/// [`FIXTURE_DRAG_NOSE`] under [`fixture_drag_law`]: the flight every test fixture flies, fixture
+/// data.
 #[cfg(test)]
 pub(crate) fn fixture_drag_k(caliber: f32, mass: f32) -> f32 {
-    drag_k(drag_form(BLUNT_ANCHOR_NOSE), caliber, mass)
+    drag_k(fixture_drag_law().form(FIXTURE_DRAG_NOSE), caliber, mass)
 }
 
 /// One free-flight integration step shared by the live march and range table.
@@ -4112,22 +4141,34 @@ mod tests {
         }
     }
 
-    /// The drag form is stated on its two anchors: the blunt anchor nose flies on the blunt anchor
-    /// form to the bit, so a round whose flight nose is that nose, and every fixture
-    /// ([`fixture_drag_k`]), flies on it; and the base share is the floor a nose approaches as its
-    /// factor goes to zero. A mutant that moves the nose share off the anchor, or drops the base
-    /// share, fails here.
+    /// The drag law is stated on its two data parameters: the anchor nose flies on the anchor form
+    /// to the bit, so a round whose flight nose is that nose flies on it; and the base share is
+    /// the floor a nose approaches as its factor goes to zero. Parameters that state no law (a
+    /// base that is not positive, an anchor at or under the base) are refused. A mutant that moves
+    /// the nose share off the anchor, drops the base share or admits a negative nose share fails
+    /// here. FIXTURE DATA: a 2-crh anchor on 0.3 over a base drag coefficient of 0.25.
     #[test]
-    fn the_drag_form_is_stated_on_its_anchors() {
-        assert_eq!(
-            drag_form(BLUNT_ANCHOR_NOSE).to_bits(),
-            (BLUNT_ANCHOR_FORM as f32).to_bits()
-        );
-        let needle = drag_form(NoseShape::Ogive { crh: 1.0e6 });
+    fn the_drag_law_is_stated_on_its_anchors() {
+        let anchor = NoseShape::Ogive { crh: 2.0 };
+        let law = DragLaw::stated(0.25, anchor, 0.3).expect("fixture parameters state a law");
+        assert_eq!(law.form(anchor).to_bits(), 0.3_f32.to_bits());
+        let base = 0.25 * FORM_PER_DRAG_COEFFICIENT;
+        let needle = law.form(NoseShape::Ogive { crh: 1.0e6 });
         assert!(
-            (needle as f64 / BASE_FORM - 1.0).abs() < 1.0e-5,
-            "a 1e6-crh ogive flies on {needle}, the base share is {BASE_FORM}"
+            (needle as f64 / base - 1.0).abs() < 1.0e-5,
+            "a 1e6-crh ogive flies on {needle}, the base share is {base}"
         );
+        for (coefficient, form) in [
+            (0.0, 0.3),
+            (f64::NAN, 0.3),
+            (0.25, base),
+            (0.25, f64::INFINITY),
+        ] {
+            assert!(
+                DragLaw::stated(coefficient, anchor, form).is_err(),
+                "{coefficient} / {form}"
+            );
+        }
     }
 
     /// Drag only slows a shell — never speeds it up or reverses it — and gravity always pulls the

@@ -47,8 +47,8 @@
 //! Drag reads the round type's flight nose, never the round's hit nose: a ballistic-capped type
 //! flies on a pointed nose and meets the plate with a blunt one. The flying body is the whole round,
 //! or the penetrator where the type's carrier is discarded in flight; [`Round::drag_k`] is
-//! [`crate::ballistics::drag_form`] of the flight nose × that body's calibre² / mass, DERIVED at
-//! load. The shell and the sight's range table both read it.
+//! the table's drag law ([`crate::ballistics::DragLaw`], its `drag` block) of the flight nose × that
+//! body's calibre² / mass, DERIVED at load. The shell and the sight's range table both read it.
 //!
 //! Every value is authored `(value, Kind("source or reason"))` ([`crate::provenance`]); a value
 //! without one does not load. "Q7" in a provenance is the fixture-materials recommendation in
@@ -249,9 +249,19 @@ struct RoundTypeFile {
     carrier: Sourced<Carrier>,
 }
 
+/// The drag law's parameters as authored ([`crate::ballistics::DragLaw::stated`]).
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct DragFile {
+    base_drag_coefficient: Sourced<f64>,
+    anchor_nose: Sourced<NoseShape>,
+    anchor_form: Sourced<f64>,
+}
+
 #[derive(Deserialize)]
 #[serde(rename = "RoundTypes", deny_unknown_fields)]
 struct RoundTypesFile {
+    drag: DragFile,
     round_types: KeyedMap<RoundTypeFile>,
 }
 
@@ -274,6 +284,8 @@ pub(crate) enum RoundError {
     InvalidType { round_type: String, reason: String },
     /// A round parsed but cannot be fired: names the round and the reason.
     Invalid { round: String, reason: String },
+    /// The table's `drag` block states no drag law: the reason.
+    InvalidDrag { reason: String },
     /// A lookup named a round the registry does not carry; carries the registry's vocabulary.
     Unknown { name: String, known: Vec<String> },
 }
@@ -286,6 +298,9 @@ impl std::fmt::Display for RoundError {
                 write!(f, "round type {round_type:?}: {reason}")
             }
             Self::Invalid { round, reason } => write!(f, "round {round:?}: {reason}"),
+            Self::InvalidDrag { reason } => {
+                write!(f, "assets/ballistics/round_types.ron: drag: {reason}")
+            }
             Self::Unknown { name, known } => write!(
                 f,
                 "unknown round {name:?} — assets/rounds/ holds [{}]",
@@ -305,13 +320,28 @@ fn nose_out_of_range(field: &str, nose: NoseShape) -> Option<String> {
     }
 }
 
-/// The authored round-type table, each type refused unless both its noses are in range.
-fn round_types(text: &str) -> Result<BTreeMap<String, RoundType>, RoundError> {
+/// The authored round-type table and its drag law, each type refused unless both its noses are in
+/// range, and the law unless its anchor nose is in range and its parameters state a law.
+fn round_types(
+    text: &str,
+) -> Result<(crate::ballistics::DragLaw, BTreeMap<String, RoundType>), RoundError> {
     let file: RoundTypesFile = ron::de::from_str(text).map_err(|err| RoundError::Parse {
         file: "assets/ballistics/round_types.ron".into(),
         err: err.to_string(),
     })?;
-    file.round_types
+    let drag = file.drag;
+    let invalid_drag = |reason| RoundError::InvalidDrag { reason };
+    if let Some(reason) = nose_out_of_range("anchor_nose", drag.anchor_nose.0) {
+        return Err(invalid_drag(reason));
+    }
+    let law = crate::ballistics::DragLaw::stated(
+        drag.base_drag_coefficient.0,
+        drag.anchor_nose.0,
+        drag.anchor_form.0,
+    )
+    .map_err(invalid_drag)?;
+    let types = file
+        .round_types
         .0
         .into_iter()
         .map(|(key, row)| {
@@ -333,14 +363,15 @@ fn round_types(text: &str) -> Result<BTreeMap<String, RoundType>, RoundError> {
             };
             Ok((key, round_type))
         })
-        .collect()
+        .collect::<Result<_, _>>()?;
+    Ok((law, types))
 }
 
 /// Resolve one authored round against the round types `types` and `substances` into its facts and
 /// its display name, or say why it cannot be fired or shown.
 fn resolved(
     file: RoundFile,
-    types: &BTreeMap<String, RoundType>,
+    (drag, types): (&crate::ballistics::DragLaw, &BTreeMap<String, RoundType>),
     substances: &SubstanceRegistry,
 ) -> Result<(RoundFacts, String), String> {
     let name = file.name.0;
@@ -419,7 +450,7 @@ fn resolved(
         Carrier::None | Carrier::Kept => body,
     };
     let drag_k = crate::ballistics::drag_k(
-        crate::ballistics::drag_form(round_type.flight_nose),
+        drag.form(round_type.flight_nose),
         flying.caliber,
         flying.mass,
     );
@@ -513,7 +544,7 @@ impl RoundRegistry {
         types: &str,
         substances: &SubstanceRegistry,
     ) -> Result<Self, RoundError> {
-        let types = round_types(types)?;
+        let (drag, types) = round_types(types)?;
         let mut rounds = BTreeMap::new();
         for &(key, text) in files {
             let invalid = |reason: String| RoundError::Invalid {
@@ -531,7 +562,7 @@ impl RoundRegistry {
                 file: format!("assets/rounds/{key}.round.ron"),
                 err: err.to_string(),
             })?;
-            let round = resolved(file, &types, substances).map_err(invalid)?;
+            let round = resolved(file, (&drag, &types), substances).map_err(invalid)?;
             rounds.insert(key.to_owned(), round);
         }
         Ok(Self { rounds })
@@ -581,7 +612,9 @@ pub(crate) mod tests {
     use super::*;
 
     /// The fixture round-type table: a full-calibre type and a sub-calibre one. Fixture data.
-    pub(crate) const FIXTURE_TYPES: &str = r#"(round_types: {
+    pub(crate) const FIXTURE_TYPES: &str = r#"(drag: (base_drag_coefficient: (0.20, Tuned("fixture")),
+        anchor_nose: (Ogive(crh: 1.0), Tuned("fixture")), anchor_form: (0.263, Tuned("fixture"))),
+    round_types: {
         "Fixture": (flight_nose: (Ogive(crh: 1.0), Tuned("fixture")),
             hit_nose: (Ogive(crh: 1.0), Tuned("fixture")), carrier: (None, Tuned("fixture"))),
         "Fixture sub-calibre": (flight_nose: (Ogive(crh: 1.0), Tuned("fixture")),
@@ -811,7 +844,9 @@ pub(crate) mod tests {
 
     /// The drag tests' round types: one flying on its blunt hit nose, one capped (a pointed flight
     /// nose over the same blunt hit nose), and a sub-calibre type of each carrier. Fixture data.
-    const DRAG_TYPES: &str = r#"(round_types: {
+    const DRAG_TYPES: &str = r#"(drag: (base_drag_coefficient: (0.20, Tuned("fixture")),
+        anchor_nose: (Ogive(crh: 1.0), Tuned("fixture")), anchor_form: (0.263, Tuned("fixture"))),
+    round_types: {
         "Blunt": (flight_nose: (Ogive(crh: 1.0), Tuned("fixture")),
             hit_nose: (Ogive(crh: 1.0), Tuned("fixture")), carrier: (None, Tuned("fixture"))),
         "Capped": (flight_nose: (Ogive(crh: 4.0), Tuned("fixture")),
@@ -955,7 +990,9 @@ pub(crate) mod tests {
         );
         let types = |flight: &str, hit: &str, carrier: &str| {
             format!(
-                r#"(round_types: {{ "Odd": (flight_nose: ({flight}, Tuned("x")),
+                r#"(drag: (base_drag_coefficient: (0.20, Tuned("x")),
+                    anchor_nose: (Ogive(crh: 1.0), Tuned("x")), anchor_form: (0.263, Tuned("x"))),
+                    round_types: {{ "Odd": (flight_nose: ({flight}, Tuned("x")),
                     hit_nose: ({hit}, Tuned("x")), carrier: ({carrier}, Tuned("x"))) }})"#
             )
         };
