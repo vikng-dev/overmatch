@@ -146,6 +146,8 @@ pub(crate) fn wall_cut(
         structure: Structure { chunks, joints },
         blocks,
         faces,
+        element_of: chunks_of.iter().map(|&c| asset.chunks[c].element).collect(),
+        elements: asset.elements.len(),
     })
 }
 

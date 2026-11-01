@@ -247,7 +247,7 @@ fn blast_coupling_falls_with_standoff() {
         Vec3::new(50.0, 50.0, 0.0),
     )];
     let coupled = |standoff: f32| -> f32 {
-        blast_rays(
+        sample_blocks(
             &slab,
             |_| true,
             |_| brick(),
@@ -267,7 +267,7 @@ fn blast_coupling_falls_with_standoff() {
         Vec3::new(2.0, 1.0, 0.0),
     )];
     let on_wall = |standoff: f32| -> f32 {
-        blast_rays(
+        sample_blocks(
             &wall,
             |_| true,
             |_| brick(),
@@ -344,9 +344,11 @@ fn wall_deposit_at(energy: f32, distance: f32) -> Applied {
     let layout = layout();
     let mut wall = Wall {
         cut: layout.cut.clone(),
-        state: WallState::new(&layout.cut.structure),
+        live: crate::buildings::breakage::Live::from_structure(
+            layout.cut.structure.clone(),
+            layout.cut.elements,
+        ),
         structural: vec![false; layout.cut.structure.joints.len()],
-        sections: SectionCache::default(),
         entities: Vec::new(),
         meshes: Vec::new(),
         material: brick(),
@@ -532,4 +534,85 @@ fn a_ray_enters_the_hull_not_its_bounding_box() {
 #[should_panic(expected = "rounds need a burst block")]
 fn the_blast_tool_refuses_missing_casing_construction_at_initialization() {
     Charge::of(&[]);
+}
+
+/// The game's environment blast tool shares the production ray driver and deposit pass.
+/// ASSUMED fixture placement; the charge uses the shipped HE construction, not a fitted
+/// chemical-energy-to-wear conversion. Pressure can remove volume while cavity energy is zero.
+#[test]
+fn the_shared_blast_path_reports_pressure_work_and_rear_scabs() {
+    let layout = layout();
+    let rounds = super::wall_rounds();
+    let he = rounds
+        .iter()
+        .find(|round| round.key == "88mm_HE")
+        .expect("HE fixture is shipped");
+    let charge = Charge::of(std::slice::from_ref(he));
+    let mass = he
+        .round
+        .burst
+        .expect("the fixture states a burst")
+        .core_mass;
+    for (mass, cased, standoff) in [
+        (mass, true, 0.1),
+        (mass, true, 0.3),
+        (mass, true, 2.0),
+        (0.9, false, 0.1),
+    ] {
+        let mut wall = Wall {
+            cut: layout.cut.clone(),
+            live: crate::buildings::breakage::Live::from_structure(
+                layout.cut.structure.clone(),
+                layout.cut.elements,
+            ),
+            structural: vec![false; layout.cut.structure.joints.len()],
+            entities: Vec::new(),
+            meshes: Vec::new(),
+            material: brick(),
+        };
+        let controls = WallControls {
+            mass: 0,
+            standoff: 0,
+            cased,
+            round: 0,
+            view: View::Front,
+            help: false,
+        };
+        let deposit = Deposit::Blast {
+            mass,
+            standoff,
+            at: super::aim_point(&wall),
+            into: Vec3::NEG_Z,
+        };
+        let result = apply_deposit(&mut wall, &controls, &charge, &blast_field(), &deposit);
+        let (_, _, intercepted, impulse, _) = result.blast.unwrap();
+        if standoff == 0.1 {
+            assert!(
+                result.crushed > 0.0 || result.scabs > 0,
+                "a near-contact field on the aimed solid face must exercise pressure removal"
+            );
+        }
+        assert_eq!(
+            result.deposited, 0.0,
+            "a blast supplies no kinetic cavity energy"
+        );
+        assert!(
+            result.chunks > 0 && impulse > 0.0,
+            "the charge reaches the wall"
+        );
+        println!(
+            "MEASURED shared sandbox: {mass:.3} kg, cased {cased}, standoff {standoff:.2} m: kinetic {} J, audit {intercepted:.1} J, impulse {impulse:.1} N s, crushed {:.6e} m3, scabs {}, cracks {}, freed {} groups {:?}",
+            result.deposited,
+            result.crushed,
+            result.scabs,
+            result.local
+                + result
+                    .failures
+                    .iter()
+                    .map(|f| f.joints.len())
+                    .sum::<usize>(),
+            result.groups.iter().map(|g| g.0.len()).sum::<usize>(),
+            result.groups.iter().map(|g| g.0.len()).collect::<Vec<_>>()
+        );
+    }
 }

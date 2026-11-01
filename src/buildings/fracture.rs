@@ -42,7 +42,7 @@
 //!   mode's strength over its peak; then it is freed whole.
 //! * **Support** ([`loose_groups`]). A chunk group with no path of intact joints to a ground anchor
 //!   or to a buried chunk ([`Chunk::buried`]: the soil holds it) falls as one body.
-//! * **The blast field** ([`blast_rays`]). A charge's blast energy leaves it uniformly over the
+//! * **The blast field** ([`trace_blast`]). A charge's blast energy leaves it uniformly over the
 //!   sphere out to the fits' range ([`Blast::reach`]); each ray stops on the first standing chunk
 //!   it meets and pushes the face it meets with the blast's reflected impulse over the patch it
 //!   stands for ([`Blast::push`]), with the peak force of the blast's peak overpressure over the
@@ -3430,14 +3430,88 @@ pub(crate) struct RayHit {
     pub depth: f32,
 }
 
-/// A blast's rays from `origin`: each of `directions` (unit, with its share of the field; the
-/// shares sum to 1) carries that share of the blast's energy, stops on the first standing block it
-/// meets within the blast's reach ([`Blast::reach`]), which shadows everything behind it, and
-/// pushes the face it meets ([`Blast::push`]) with a peak force ([`Blast::peak`]), crushing the
-/// block's `material` there ([`Blast::crushed`]); the block takes the share of the ray's energy,
-/// push, peak force and crushed volume its silhouette intercepts ([`intercepted`]). A ray that meets none leaves. Coupling is the
-/// geometry's: the share of directions the blocks intercept, and of each cone the block it meets.
-pub(crate) fn blast_rays(
+/// One geometric stop for the shared blast driver. Position, normal and direction are in
+/// the target's load frame; distance and silhouette are world metres and square metres.
+/// `material` is absent for targets whose own law reads only the delivered impulse.
+pub(crate) struct BlastSurface<K> {
+    pub target: K,
+    pub chunk: usize,
+    pub at: Vec3,
+    pub normal: Vec3,
+    pub direction: Vec3,
+    pub distance: f32,
+    pub silhouette: f32,
+    pub material: Option<Masonry>,
+}
+
+/// The game's one blast-ray driver: geometry supplies the nearest visible surface for each
+/// direction; the driver applies the source-radius floor, pressure, impulse, crushing and
+/// silhouette interception once. A shaded direction supplies no target. The world and sandbox
+/// differ only in the geometry they mount here, never in the field laws or their grouping.
+pub(crate) fn trace_blast<K: Ord + Copy>(
+    blast: Blast,
+    directions: &[(Vec3, f32)],
+    mut surface: impl FnMut(Vec3) -> Option<BlastSurface<K>>,
+) -> Vec<(K, RayHit)> {
+    let mut stops = Vec::new();
+    let hits: Vec<_> = directions
+        .iter()
+        .filter_map(|&(direction, share)| {
+            let hit = surface(direction)?;
+            if hit.distance > blast.reach() {
+                return None;
+            }
+            stops.push((
+                hit.target,
+                Blast::section(share, blast.distance(hit.distance)),
+                hit.silhouette,
+            ));
+            let crushed = match hit.material {
+                Some(material) => {
+                    blast.crushed(&material, share, hit.distance, hit.direction, hit.normal)
+                }
+                None => Crushing {
+                    volume: 0.0,
+                    depth: 0.0,
+                },
+            };
+            Some((
+                hit.target,
+                RayHit {
+                    chunk: hit.chunk,
+                    at: hit.at,
+                    normal: hit.normal,
+                    energy: blast.energy * share,
+                    impulse: blast.push(share, hit.distance, hit.direction, hit.normal),
+                    peak: blast.peak(share, hit.distance, hit.direction, hit.normal),
+                    pressure: blast.peak_pressure(hit.distance, -hit.direction.dot(hit.normal)),
+                    crushed: crushed.volume,
+                    depth: crushed.depth,
+                },
+            ))
+        })
+        .collect();
+    hits.into_iter()
+        .zip(intercepted(&stops))
+        .map(|((target, hit), kept)| {
+            (
+                target,
+                RayHit {
+                    energy: hit.energy * kept,
+                    impulse: hit.impulse * kept,
+                    peak: hit.peak * kept,
+                    crushed: hit.crushed * kept,
+                    ..hit
+                },
+            )
+        })
+        .collect()
+}
+
+/// Fixture geometry adapter for the production driver. Tests mount convex blocks instead of
+/// a world query; all field sampling and interception still run through [`trace_blast`].
+#[cfg(test)]
+pub(crate) fn sample_blocks(
     blocks: &[Block],
     standing: impl Fn(usize) -> bool,
     material: impl Fn(usize) -> Masonry,
@@ -3445,48 +3519,26 @@ pub(crate) fn blast_rays(
     blast: Blast,
     directions: &[(Vec3, f32)],
 ) -> Vec<RayHit> {
-    let reach = blast.reach();
-    let mut faces: std::collections::BTreeMap<usize, Vec<(Vec3, f32)>> = Default::default();
-    let mut stops = Vec::new();
-    let hits: Vec<RayHit> = directions
-        .iter()
-        .filter_map(|&(dir, share)| {
-            let (chunk, t, normal) = first_hit(blocks, &standing, origin, dir)?;
-            if t > reach {
-                return None;
-            }
-            let faces = faces
-                .entry(chunk)
-                .or_insert_with(|| blocks[chunk].face_areas());
-            stops.push((
-                chunk,
-                Blast::section(share, blast.distance(t)),
-                silhouette(faces, dir),
-            ));
-            let crushed = blast.crushed(&material(chunk), share, t, dir, normal);
-            Some(RayHit {
-                chunk,
-                at: origin + dir * t,
-                normal,
-                energy: blast.energy * share,
-                impulse: blast.push(share, t, dir, normal),
-                peak: blast.peak(share, t, dir, normal),
-                pressure: blast.peak_pressure(t, -dir.dot(normal)),
-                crushed: crushed.volume,
-                depth: crushed.depth,
-            })
+    let mut faces = std::collections::BTreeMap::new();
+    trace_blast(blast, directions, |dir| {
+        let (chunk, distance, normal) = first_hit(blocks, &standing, origin, dir)?;
+        let areas = faces
+            .entry(chunk)
+            .or_insert_with(|| blocks[chunk].face_areas());
+        Some(BlastSurface {
+            target: chunk,
+            chunk,
+            at: origin + dir * distance,
+            normal,
+            direction: dir,
+            distance,
+            silhouette: silhouette(areas, dir),
+            material: Some(material(chunk)),
         })
-        .collect();
-    hits.into_iter()
-        .zip(intercepted(&stops))
-        .map(|(hit, kept)| RayHit {
-            energy: hit.energy * kept,
-            impulse: hit.impulse * kept,
-            peak: hit.peak * kept,
-            crushed: hit.crushed * kept,
-            ..hit
-        })
-        .collect()
+    })
+    .into_iter()
+    .map(|(_, hit)| hit)
+    .collect()
 }
 
 #[cfg(test)]
@@ -4517,7 +4569,7 @@ mod tests {
             Vec3::new(-1.0, -1.0, 0.0),
             Vec3::new(1.0, 1.0, 0.25),
         )];
-        let hits = blast_rays(
+        let hits = sample_blocks(
             &blocks,
             |_| true,
             |_| material,
@@ -4547,7 +4599,7 @@ mod tests {
                 let radius = (3.0 * mass / (4.0 * PI * 1600.0)).cbrt();
                 let blast = Blast::of(mass * TNT_ENERGY, radius, FIT_ONLY_PRODUCTS);
                 for range in [radius, 0.1_f32.max(radius), 0.5, 1.0] {
-                    let hits = blast_rays(
+                    let hits = sample_blocks(
                         &blocks,
                         |_| true,
                         |_| material,
@@ -4663,7 +4715,7 @@ mod tests {
         );
         let cube = [Block::cuboid(Vec3::splat(-0.125), Vec3::splat(0.125))];
         let origin = Vec3::new(0.0, 0.0, -20.125);
-        let hits = blast_rays(
+        let hits = sample_blocks(
             &cube,
             |_| true,
             |_| brick(),
@@ -4754,7 +4806,7 @@ mod tests {
             let blast = Blast::of(energy, 1e-3, FIT_ONLY_PRODUCTS);
             let origin = Vec3::new(0.1, -0.05, -standoff);
             let crushed = |blocks: &[Block], rays: usize| -> f32 {
-                blast_rays(
+                sample_blocks(
                     blocks,
                     |_| true,
                     |_| brick(),
@@ -4813,7 +4865,7 @@ mod tests {
         }
         let cube = [Block::cuboid(Vec3::ZERO, Vec3::splat(CUBE))];
         let origin = Vec3::new(CUBE / 2.0, CUBE / 2.0, -10.0);
-        let hits = blast_rays(
+        let hits = sample_blocks(
             &cube,
             |_| true,
             |_| brick(),
@@ -4884,7 +4936,7 @@ mod tests {
         let cube = [Block::cuboid(Vec3::ZERO, Vec3::splat(CUBE))];
         let hit = |d: f32| {
             let origin = Vec3::new(CUBE / 2.0, CUBE / 2.0, -d);
-            blast_rays(
+            sample_blocks(
                 &cube,
                 |_| true,
                 |_| brick(),
@@ -6763,7 +6815,7 @@ mod tests {
                 Vec3::new(-1.0, -1.0, 0.0),
                 Vec3::new(1.0, 1.0, thickness),
             )];
-            let hits = blast_rays(
+            let hits = sample_blocks(
                 &slab,
                 |_| true,
                 |_| material,

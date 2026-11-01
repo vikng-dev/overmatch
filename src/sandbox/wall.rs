@@ -50,7 +50,7 @@ use bevy::mesh::{Indices, PrimitiveTopology};
 use bevy::prelude::*;
 
 use self::baked::Placement;
-use self::model::{Block, Cut, Load, Masonry, SectionCache, WallState};
+use self::model::{Block, Cut, Load, Masonry};
 use super::{FreeFlyCam, SEED_SPEC, UI_LEFT, panel_capturing};
 use crate::ballistics::burst::products_momentum;
 use crate::ballistics::{
@@ -197,9 +197,8 @@ struct WallHelp;
 #[derive(Resource)]
 struct Wall {
     cut: Cut,
-    state: WallState,
+    live: crate::buildings::breakage::Live,
     structural: Vec<bool>,
-    sections: SectionCache,
     entities: Vec<Option<Entity>>,
     meshes: Vec<Handle<Mesh>>,
     material: Masonry,
@@ -292,30 +291,26 @@ impl Charge {
     /// The game's environment blast tool requires a sourced core and a burst round whose
     /// casing supplies its cased setting. Missing construction is refused at initialization.
     fn of(rounds: &[WallRound]) -> Self {
-        let registry = SubstanceRegistry::shipped_static();
-        let core = registry
-            .keys()
-            .into_iter()
-            .find_map(|name| {
-                registry
-                    .get(name)
-                    .expect("a registry key resolves to its loaded substance")
-                    .burst()
-            })
-            .expect(
-                "wall blast tool: assets/materials/materials.ron needs a sourced burst core; \
-                 author its burst properties before opening the sandbox",
-            );
-        let burst = rounds.iter().find_map(|round| round.round.burst).expect(
-            "wall blast tool: the selected tank's rounds need a burst block for the cased \
-                 charge setting; author a sourced burst round before opening the sandbox",
-        );
-        let speed = f64::from(burst.sideways_speed);
+        #[derive(serde::Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct Source {
+            cased_round: String,
+        }
+        let source: Source = ron::from_str(include_str!("../../assets/dev/wall-tool.ron"))
+            .unwrap_or_else(|err| panic!("wall blast tool: assets/dev/wall-tool.ron: {err}; author cased_round as a chambered burst-round key"));
+        let burst = rounds.iter().find(|round| round.key == source.cased_round)
+            .and_then(|round| round.round.burst).unwrap_or_else(|| panic!(
+                "wall blast tool: assets/dev/wall-tool.ron field cased_round {:?}: rounds need a burst block for this key; author a chambered burst-round key", source.cased_round));
+        // DERIVED from the selected burst's compiled construction: no second core lookup can
+        // pair one filler's chemistry with another round's casing.
+        let speed2 = burst.sideways_speed * burst.sideways_speed;
+        let casing_per_kg = burst.energy / burst.core_mass;
         Self {
-            density: core.density as f32,
-            chemical: core.chemical_energy as f32,
-            speed_constant: core.speed_constant as f32,
-            casing_ratio: ((core.speed_constant / speed).powi(2) - 0.5) as f32,
+            density: 3.0 * burst.core_mass
+                / (4.0 * std::f32::consts::PI * burst.charge_radius.powi(3)),
+            chemical: (burst.blast + burst.energy) / burst.core_mass,
+            speed_constant: (2.0 * casing_per_kg + 0.5 * speed2).sqrt(),
+            casing_ratio: 2.0 * casing_per_kg / speed2,
             casing_speed: burst.sideways_speed,
         }
     }
@@ -334,7 +329,11 @@ impl Charge {
         } else {
             (0.0, self.speed_constant * std::f32::consts::SQRT_2)
         };
-        let energy = (chemical - casing).max(0.0);
+        let energy = chemical - casing;
+        assert!(
+            energy.is_finite() && energy > 0.0,
+            "a positive tool charge scales the load-certified burst's positive blast energy"
+        );
         let radius = (3.0 * mass / (4.0 * std::f32::consts::PI * self.density)).cbrt();
         let products = products_momentum(mass, speed);
         Blast {
@@ -427,6 +426,8 @@ struct WallLog {
 struct Outcome {
     what: String,
     deposited: f32,
+    crushed: f32,
+    scabs: usize,
     chunks: usize,
     dust: usize,
     local: usize,
@@ -784,9 +785,8 @@ fn spawn_wall(commands: &mut Commands, meshes: &mut Assets<Mesh>, assets: &WallA
         ));
     }
     Wall {
-        state: WallState::new(&cut.structure),
+        live: crate::buildings::breakage::Live::from_structure(cut.structure.clone(), cut.elements),
         structural: vec![false; cut.structure.joints.len()],
-        sections: SectionCache::default(),
         cut,
         entities,
         meshes: chunk_meshes,
@@ -867,7 +867,7 @@ fn wall_keys(mut p: KeysParam) {
     {
         let eye = p.camera.translation;
         let dir = p.camera.forward().as_vec3();
-        let state = &wall.state;
+        let state = &wall.live.state;
         if let Some((_, t, _)) = model::first_hit(&wall.cut.blocks, |i| state.standing(i), eye, dir)
         {
             let at = eye + dir * t;
@@ -1070,6 +1070,8 @@ fn read_hits(mut p: HitsParam) {
 #[derive(Debug, Default)]
 struct Applied {
     deposited: f32,
+    crushed: f32,
+    scabs: usize,
     chunks: usize,
     worn: Vec<usize>,
     dusted: Vec<usize>,
@@ -1134,16 +1136,29 @@ fn apply_deposit(
         } => {
             let blast = charge.blast(mass, controls.cased);
             let origin = at - into * (standoff + blast.radius);
-            let state = &wall.state;
+            let state = &wall.live.state;
             let structure = &wall.cut.structure;
-            let hits = model::blast_rays(
-                &wall.cut.blocks,
-                |i| state.standing(i),
-                |i| structure.chunks[i].material,
-                origin,
+            let hits: Vec<_> = model::trace_blast(
                 model::Blast::of(blast.energy, blast.radius, blast.products),
                 field,
-            );
+                |dir| {
+                    let (chunk, distance, normal) =
+                        model::first_hit(&wall.cut.blocks, |i| state.standing(i), origin, dir)?;
+                    Some(model::BlastSurface {
+                        target: chunk,
+                        chunk,
+                        at: origin + dir * distance,
+                        normal,
+                        direction: dir,
+                        distance,
+                        silhouette: model::silhouette(&wall.cut.blocks[chunk].face_areas(), dir),
+                        material: Some(structure.chunks[chunk].material),
+                    })
+                },
+            )
+            .into_iter()
+            .map(|(_, hit)| hit)
+            .collect();
             let coupled: f32 = hits.iter().map(|hit| hit.energy).sum();
             let pushed: f32 = hits.iter().map(|hit| hit.impulse.length()).sum();
             let drawn = hits
@@ -1153,13 +1168,14 @@ fn apply_deposit(
                 .collect();
             applied.blast = Some((blast, origin, coupled, pushed, drawn));
             let contacts: Vec<_> = state.contacts(structure).collect();
-            Load::blast(&hits, |i| model::Backing {
+            let (loads, scabs) = Load::blast(&hits, |i| model::Backing {
                 block: &wall.cut.blocks[i],
                 scale: 1.0,
                 material: structure.chunks[i].material,
                 contacts: &contacts,
-            })
-            .0
+            });
+            applied.scabs = scabs.len();
+            loads
         }
     };
     applied.deposited = loads.iter().map(|load| load.energy).sum();
@@ -1168,73 +1184,75 @@ fn apply_deposit(
         .map(|load| load.chunk)
         .collect::<std::collections::BTreeSet<_>>()
         .len();
-    let struck = model::strike(&wall.cut.structure, &mut wall.state, &loads);
-    applied.local = struck.cracked.len();
-    // A load on a chunk turned to dust went into crushing it, and moves nothing.
-    let loads: Vec<Load> = loads
-        .into_iter()
-        .filter(|load| wall.state.standing(load.chunk))
-        .collect();
-    applied.failures = model::structural(
-        &wall.cut.structure,
-        &mut wall.state,
+    applied.crushed = loads.iter().map(|load| load.crushed).sum();
+    let pools = wall.live.state.pool.clone();
+    let changes = crate::buildings::breakage::run_laws(
+        &wall.cut.element_of,
+        &mut wall.live,
         &loads,
-        &mut wall.sections,
+        Vec::new(),
     );
-    let pushed: Vec<usize> = struck
-        .cracked
+    applied.worn = pools
         .iter()
-        .chain(applied.failures.iter().flat_map(|failure| &failure.joints))
-        .copied()
+        .zip(&wall.live.state.pool)
+        .enumerate()
+        .filter_map(|(c, (before, after))| (after < before).then_some(c))
         .collect();
-    let weighed = model::weigh(
-        &wall.cut.structure,
-        &mut wall.state,
-        &struck.dusted,
-        &pushed,
-        &loads,
-        &[],
-        &mut wall.sections,
-    );
-    applied.failures.extend(weighed.failures);
-    applied.unassessed = weighed.unassessed.len();
-    applied.weight_steps = weighed.steps;
-    applied.worn = struck.worn;
-    applied.dusted = struck.dusted;
+    applied.dusted = changes
+        .events
+        .iter()
+        .filter_map(|event| match event {
+            crate::buildings::breakage::WallEvent::Dust(c) => Some(usize::from(*c)),
+            _ => None,
+        })
+        .collect();
+    let cracks = changes
+        .events
+        .iter()
+        .filter(|event| matches!(event, crate::buildings::breakage::WallEvent::Crack(_)))
+        .count();
+    applied.failures = changes.failures;
+    applied.local = cracks
+        - applied
+            .failures
+            .iter()
+            .map(|f| f.joints.len())
+            .sum::<usize>();
+    applied.unassessed = changes.unassessed.len();
+    applied.weight_steps = changes.weight_steps;
     for failure in &applied.failures {
         for &j in &failure.joints {
             wall.structural[j] = true;
         }
     }
-    for group in model::fall(&wall.cut.structure, &mut wall.state) {
+    for (group, loads) in changes.groups {
         let chunks = &wall.cut.structure.chunks;
         let mass: f32 = group.iter().map(|&i| chunks[i].mass).sum();
         let centroid = group
             .iter()
             .map(|&i| chunks[i].centroid * chunks[i].mass)
             .sum::<Vec3>()
-            / mass.max(f32::EPSILON);
-        // A group's least moment of inertia: a ball of its mean chunk's size per chunk.
-        let piece =
-            (group.iter().map(|&i| chunks[i].volume).sum::<f32>() / group.len() as f32).cbrt();
-        let on_group = || {
-            loads
-                .iter()
-                .filter(|load| group.binary_search(&load.chunk).is_ok())
-        };
-        let impulse: Vec3 = on_group().map(|load| load.blow).sum();
-        let angular: Vec3 = on_group()
-            .map(|load| (load.at - centroid).cross(load.blow))
-            .sum();
-        let inertia: f32 = group
+            / mass;
+        let colliders = group
             .iter()
-            .map(|&i| chunks[i].mass * (chunks[i].centroid - centroid).length_squared())
-            .sum::<f32>()
-            .max(mass * piece * piece / 6.0);
-        // Momentum conserved: a group leaves with the impulse pushed into it, no more. (A
-        // free-surface velocity `2σ/(ρc)` describes a thin spalled layer, and credited to a whole
-        // group it hands a 3.8 t wall tens of m/s.)
-        let velocity = impulse / mass.max(f32::EPSILON);
+            .map(|&c| {
+                let block = &wall.cut.blocks[c];
+                (
+                    c,
+                    Collider::compound(vec![(
+                        block.center() - centroid,
+                        Quat::IDENTITY,
+                        chunk_collider(block, LOOSE_GAP),
+                    )]),
+                )
+            })
+            .collect();
+        let launch = crate::debris::launch::launch_colliders(
+            centroid,
+            colliders,
+            |c| chunks[c].material.density,
+            &loads,
+        );
         let structural = wall
             .cut
             .structure
@@ -1248,7 +1266,7 @@ fn apply_deposit(
             });
         applied
             .groups
-            .push((group, centroid, velocity, angular / inertia, structural));
+            .push((group, centroid, launch.velocity, launch.spin, structural));
     }
     applied
 }
@@ -1275,10 +1293,14 @@ fn apply_deposits(mut p: ApplyParam) {
     };
     for deposit in std::mem::take(&mut p.queue.0) {
         let applied = apply_deposit(wall, &p.controls, &p.charge, &p.field.0, &deposit);
+        info!(
+            "wall prototype: shared laws: crushed {:.6e} m3, {} rear scabs",
+            applied.crushed, applied.scabs
+        );
         for &chunk in &applied.worn {
             if let Some(entity) = wall.entities[chunk] {
-                let left =
-                    wall.state.pool[chunk] / model::full_pool(&wall.cut.structure.chunks[chunk]);
+                let left = wall.live.state.pool[chunk]
+                    / model::full_pool(&wall.cut.structure.chunks[chunk]);
                 let level = ((1.0 - left) * 10.0).round().clamp(0.0, 10.0) as usize;
                 p.commands
                     .entity(entity)
@@ -1369,6 +1391,8 @@ fn apply_deposits(mut p: ApplyParam) {
         p.log.last = Some(Outcome {
             what,
             deposited: applied.deposited,
+            crushed: applied.crushed,
+            scabs: applied.scabs,
             chunks: applied.chunks,
             dust: applied.dusted.len(),
             local: applied.local,
@@ -1428,7 +1452,7 @@ fn draw_wall(wall: Option<Res<Wall>>, log: Res<WallLog>, mut gizmos: Gizmos<Wall
     let mid = layout().min.z + layout().size.z / 2.0;
     let out = |p: Vec3| p + Vec3::Z * (0.003 * (p.z - mid).signum());
     for (index, joint) in wall.cut.structure.joints.iter().enumerate() {
-        if !wall.state.cracked[index] || !wall.state.live(joint) {
+        if !wall.live.state.cracked[index] || !wall.live.state.live(joint) {
             continue;
         }
         let colour = if wall.structural[index] {
@@ -1590,6 +1614,10 @@ fn detail(
             last.fallen
         ),
     ];
+    lines.push(format!(
+        "      crushed {:.6} m3, {} rear scabs",
+        last.crushed, last.scabs
+    ));
     if let Some((blast, coupled, pushed)) = last.blast {
         lines.push(format!(
             "      blast intercepted {} of {} ({:.0} %, audit), pushed {:.0} N s",

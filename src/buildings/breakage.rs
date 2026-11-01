@@ -15,7 +15,7 @@
 //! * **Deposits** (the authority's, [`ShellMarched`]): a round's line through an element is shared
 //!   among the chunks it crosses by chord; through a chunk it is that chunk's. Every field ray (a
 //!   spall cone's, a burst's fragments) that stops on a chunk deposits its energy there. A burst
-//!   feeds the blast field ([`fracture::blast_rays`]) from its burst point, its energy the core's
+//!   feeds the blast field ([`fracture::trace_blast`]) from its burst point, its energy the core's
 //!   chemical energy less the casing's share. A line pushes with all the momentum the round lost
 //!   in it (the resolved line's share; how much the crushed brick carries away is open); a
 //!   blast pushes each face its rays stop on with its reflected impulse ([`Blast::push`]), over the
@@ -479,10 +479,17 @@ pub(crate) struct Live {
 
 impl Live {
     fn new(kind: &BuildingKind, scale: f32) -> Self {
-        let structure = kind.layout.structure(&kind.asset, scale);
+        Self::from_structure(
+            kind.layout.structure(&kind.asset, scale),
+            kind.layout.elements.len(),
+        )
+    }
+
+    /// Complete live state built synchronously from a structure and its authored element count.
+    pub(crate) fn from_structure(structure: Structure, elements: usize) -> Self {
         Self {
             state: WallState::new(&structure),
-            swapped: vec![false; kind.layout.elements.len()],
+            swapped: vec![false; elements],
             sections: SectionCache::default(),
             held_presses: Vec::new(),
             holes: vec![Vec::new(); structure.chunks.len()],
@@ -1144,7 +1151,7 @@ fn apply_deposits(mut p: DepositParam) {
                 .chain(pressing.iter().copied())
                 .chain(resting.iter().copied())
                 .collect();
-            let changes = run_laws(&kind.layout, live, &loads, holes);
+            let changes = run_laws(&kind.layout.element_of, live, &loads, holes);
             let building = identity.ordinal;
             let counts = [
                 taken.lines.len(),
@@ -1305,15 +1312,7 @@ fn cast_blast(
     // Per building a ray may meet: the origin in its frame, and its bounds.
     let mut views: BTreeMap<Entity, (Vec3, Block)> = BTreeMap::new();
     let mut faces: BTreeMap<(Entity, usize), Vec<(Vec3, f32)>> = BTreeMap::new();
-    // Each stop before interception ([`fracture::intercepted`]): its target, the ray's section
-    // there and the target's silhouette across it; and what it delivers whole.
-    let mut stops: Vec<(Stop, f32, f32)> = Vec::new();
-    let mut chunk_hits: Vec<(Entity, fracture::RayHit)> = Vec::new();
-    let mut thrown: Vec<(Entity, Vec3, Vec3)> = Vec::new();
-    let mut trunk_hits = Vec::new();
-    for &(dir, share) in fracture::blast_directions() {
-        // The nearest present blocker of every building: its root, its law chunk (`None`,
-        // an unbreakable element), its distance in the building frame and in metres.
+    let hits = fracture::trace_blast(blast, fracture::blast_directions(), |dir| {
         let mut stop: Option<(Entity, Option<usize>, f32, f32)> = None;
         for (root, frame) in frames {
             if !frame.may_meet(origin, dir) {
@@ -1349,148 +1348,113 @@ fn cast_blast(
             &meets,
         );
         if let Some(hit) = surface {
-            if near.binary_search(&hit.entity).is_err() {
-                // Terrain and other nonstructural surfaces shade the field. A trunk segment
-                // routes this same world-visible ray to the shared tree laws; no second cast
-                // can push a tree through the wall or ground that blocked this one.
-                if let Ok((&crate::trees::TreeSegment(segment), parent)) =
-                    p.tree_segments.get(hit.entity)
-                    && let Ok((state, root, _)) = p.trunks.get(parent.parent())
-                    && !matches!(*state, crate::trees::TreeState::Down { cut, .. } if segment < cut)
-                {
-                    let aabb = p
-                        .aabbs
-                        .get(hit.entity)
-                        .expect("a world-ray target has collider bounds");
-                    let size = aabb.max - aabb.min;
-                    let shown = dir.x.abs() * size.y * size.z
-                        + dir.y.abs() * size.x * size.z
-                        + dir.z.abs() * size.x * size.y;
-                    stops.push((
-                        Stop::Trunk(parent.parent(), segment),
-                        Blast::section(share, blast.distance(hit.distance)),
-                        shown,
-                    ));
-                    let into = root.rotation.inverse();
-                    trunk_hits.push((
-                        parent.parent(),
-                        Load {
-                            chunk: usize::from(segment),
-                            at: into * (origin + dir * hit.distance - root.translation),
-                            blow: into * blast.push(share, hit.distance, dir, hit.normal),
-                            peak: Some(into * blast.peak(share, hit.distance, dir, hit.normal)),
-                            press: Vec3::ZERO,
-                            energy: 0.0,
-                            crushed: 0.0,
-                            origin: Origin::Field,
-                        },
-                    ));
-                }
-                continue;
-            }
-            let of = p
-                .collider_of
-                .get(hit.entity)
-                .expect("a collider in reach has a body");
             let aabb = p
                 .aabbs
                 .get(hit.entity)
-                .expect("a collider in reach has its bounds");
+                .expect("a world-ray target has collider bounds");
             let size = aabb.max - aabb.min;
             let shown = dir.x.abs() * size.y * size.z
                 + dir.y.abs() * size.x * size.z
                 + dir.z.abs() * size.x * size.y;
-            stops.push((
-                Stop::Body(hit.entity),
-                Blast::section(share, blast.distance(hit.distance)),
-                shown,
-            ));
-            thrown.push((
-                of.body,
-                origin + dir * hit.distance,
-                blast.push(share, hit.distance, dir, hit.normal),
-            ));
-        } else if let Some((root, Some(c), t, d)) = stop
-            && let Ok((_, _, _, breakage)) = p.buildings.get(root)
-        {
-            let (frame, local) = (frames[&root], views[&root].0);
-            let turned = frame.turn(dir);
-            let block = &breakage.kind.layout.blocks[c];
-            let (_, normal) = block
-                .entry_face(local, turned)
-                .expect("the ray's stop is where it enters the chunk");
-            let shown = fracture::silhouette(
-                faces.entry((root, c)).or_insert_with(|| block.face_areas()),
-                turned,
-            ) * frame.scale
-                * frame.scale;
-            stops.push((
-                Stop::Chunk(root, c),
-                Blast::section(share, blast.distance(d)),
-                shown,
-            ));
-            let crushed =
-                blast.crushed(&breakage.kind.layout.materials[c], share, d, turned, normal);
-            chunk_hits.push((
-                root,
-                fracture::RayHit {
-                    chunk: c,
-                    at: (local + turned * t) * frame.scale,
-                    normal,
-                    energy: blast.energy * share,
-                    impulse: blast.push(share, d, turned, normal),
-                    peak: blast.peak(share, d, turned, normal),
-                    pressure: blast.peak_pressure(d, -turned.dot(normal)),
-                    crushed: crushed.volume,
-                    depth: crushed.depth,
-                },
-            ));
+            if near.binary_search(&hit.entity).is_err() {
+                // Terrain shades the ray. A live trunk receives this same visible stop through
+                // its own laws; no second cast can pass the wall or ground before it.
+                let Ok((&crate::trees::TreeSegment(segment), parent)) =
+                    p.tree_segments.get(hit.entity)
+                else {
+                    return None;
+                };
+                let (state, root, _) = p
+                    .trunks
+                    .get(parent.parent())
+                    .expect("a standing segment belongs to its tree root");
+                if matches!(*state, crate::trees::TreeState::Down { cut, .. } if segment < cut) {
+                    return None; // The stump is fixed ground matter.
+                }
+                let into = root.rotation.inverse();
+                return Some(fracture::BlastSurface {
+                    target: Stop::Trunk(parent.parent(), segment),
+                    chunk: usize::from(segment),
+                    at: into * (origin + dir * hit.distance - root.translation),
+                    normal: into * hit.normal,
+                    direction: into * dir,
+                    distance: hit.distance,
+                    silhouette: shown,
+                    material: None,
+                });
+            }
+            return Some(fracture::BlastSurface {
+                target: Stop::Body(hit.entity),
+                chunk: 0,
+                at: origin + dir * hit.distance,
+                normal: hit.normal,
+                direction: dir,
+                distance: hit.distance,
+                silhouette: shown,
+                material: None,
+            });
         }
-    }
-    // The stops are in ray order, bodies and chunks interleaved; each list reads its own in order.
-    let mut body_kept = Vec::with_capacity(thrown.len());
-    let mut chunk_kept = Vec::with_capacity(chunk_hits.len());
-    let mut trunk_kept = Vec::with_capacity(trunk_hits.len());
-    for ((stop, ..), k) in stops.iter().zip(fracture::intercepted(&stops)) {
-        match stop {
-            Stop::Body(_) => body_kept.push(k),
-            Stop::Chunk(..) => chunk_kept.push(k),
-            Stop::Trunk(..) => trunk_kept.push(k),
+        let (root, Some(c), t, d) = stop? else {
+            return None;
+        }; // Unbreakable matter shades it.
+        let (_, _, _, breakage) = p
+            .buildings
+            .get(root)
+            .expect("the stop names a queried building");
+        let (frame, local) = (frames[&root], views[&root].0);
+        let turned = frame.turn(dir);
+        let block = &breakage.kind.layout.blocks[c];
+        let (_, normal) = block
+            .entry_face(local, turned)
+            .expect("the ray's stop is where it enters the chunk");
+        let shown = fracture::silhouette(
+            faces.entry((root, c)).or_insert_with(|| block.face_areas()),
+            turned,
+        ) * frame.scale
+            * frame.scale;
+        Some(fracture::BlastSurface {
+            target: Stop::Chunk(root, c),
+            chunk: c,
+            at: (local + turned * t) * frame.scale,
+            normal,
+            direction: turned,
+            distance: d,
+            silhouette: shown,
+            material: Some(breakage.kind.layout.materials[c]),
+        })
+    });
+    for (target, hit) in hits {
+        match target {
+            Stop::Chunk(root, _) => taken.entry(root).or_default().blast.push(hit),
+            Stop::Trunk(root, segment) => {
+                p.trunks
+                    .get_mut(root)
+                    .expect("the world-ray tree survives this structural pass")
+                    .2
+                    .0
+                    .push(Load {
+                        chunk: usize::from(segment),
+                        at: hit.at,
+                        blow: hit.impulse,
+                        peak: Some(hit.peak),
+                        press: Vec3::ZERO,
+                        energy: 0.0,
+                        crushed: 0.0,
+                        origin: Origin::Field,
+                    });
+            }
+            Stop::Body(collider) => {
+                let of = p
+                    .collider_of
+                    .get(collider)
+                    .expect("a collider in reach has a body");
+                let (mut forces, _) = p
+                    .bodies
+                    .get_mut(of.body)
+                    .expect("a body in reach is dynamic");
+                forces.apply_linear_impulse_at_point(hit.impulse, hit.at);
+            }
         }
-    }
-    for ((root, hit), k) in chunk_hits.into_iter().zip(chunk_kept) {
-        taken.entry(root).or_default().blast.push(fracture::RayHit {
-            energy: hit.energy * k,
-            impulse: hit.impulse * k,
-            peak: hit.peak * k,
-            crushed: hit.crushed * k,
-            ..hit
-        });
-    }
-    if !thrown.is_empty() {
-        debug!(
-            "buildings: a blast pushed moving bodies with {} rays ({:.1} N s)",
-            thrown.len(),
-            thrown
-                .iter()
-                .zip(&body_kept)
-                .map(|((.., i), k)| i.length() * k)
-                .sum::<f32>(),
-        );
-    }
-    for ((root, mut load), kept) in trunk_hits.into_iter().zip(trunk_kept) {
-        load.blow *= kept;
-        load.peak = load.peak.map(|peak| peak * kept);
-        p.trunks
-            .get_mut(root)
-            .expect("the world-ray tree survives this structural pass")
-            .2
-            .0
-            .push(load);
-    }
-    for ((body, at, impulse), k) in thrown.into_iter().zip(body_kept) {
-        let (mut forces, _) = p.bodies.get_mut(body).expect("a body in reach is dynamic");
-        forces.apply_linear_impulse_at_point(impulse * k, at);
     }
 }
 
@@ -1607,7 +1571,7 @@ pub(crate) struct Changes {
 /// laws from changed supports and pressed chunks. An identical press set on unchanged topology
 /// reuses its held verdict; every changed force or point, including a decrease, rechecks.
 pub(crate) fn run_laws(
-    layout: &Layout,
+    element_of: &[u16],
     live: &mut Live,
     loads: &[Load],
     holes: Vec<(usize, Hole)>,
@@ -1699,7 +1663,7 @@ pub(crate) fn run_laws(
         .chain(groups.iter().flatten())
         .copied()
         .chain(cracked_sides)
-        .map(|c| usize::from(layout.element_of[c]))
+        .map(|c| usize::from(element_of[c]))
         .filter(|&e| !live.swapped[e])
         .collect();
     swaps.sort_unstable();

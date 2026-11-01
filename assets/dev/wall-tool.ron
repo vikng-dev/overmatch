@@ -1,0 +1,4 @@
+// The game's environment-destruction sandbox fixture: the cased tool scales this
+// chambered round's compiled filler and casing construction. This is a dev-tool input,
+// independent of the firing tool's currently selected round.
+(cased_round: "88mm_HE")

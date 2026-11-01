@@ -12,4 +12,7 @@ pub(crate) struct Cut {
     pub blocks: Vec<Block>,
     /// Each joint's contact polygon, index-aligned with the joints.
     pub faces: Vec<Vec<bevy::math::Vec3>>,
+    /// Authored element membership for the shared deposit pass.
+    pub element_of: Vec<u16>,
+    pub elements: usize,
 }
