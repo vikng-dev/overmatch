@@ -10,6 +10,10 @@ use crate::tank::{RemoteServos, ServoIndex, ServoState, Tank, TankRoot, TankServ
 use crate::track::sim::TrackContacts;
 
 /// Refuse corrupt or uninitialized physics state before Avian consumes it.
+///
+/// A part is checked when its pose was written since the probe's last run (its first run checks
+/// every part): a value checked finite and not written since is the same finite value, so the
+/// per-tick cost is the parts that moved, not every collider on the map.
 pub(crate) fn fixed_nan_probe(
     bodies: Query<
         (
@@ -29,7 +33,14 @@ pub(crate) fn fixed_nan_probe(
             Option<&Rotation>,
             Option<&ColliderTransform>,
         ),
-        With<ColliderOf>,
+        (
+            With<ColliderOf>,
+            Or<(
+                Changed<Position>,
+                Changed<Rotation>,
+                Changed<ColliderTransform>,
+            )>,
+        ),
     >,
 ) {
     // Avian placeholder positions are finite; reject them as well as non-finite values.
@@ -186,6 +197,28 @@ mod tests {
         let mut world = World::new();
         world.spawn((Tank, Position::PLACEHOLDER, Rotation::IDENTITY));
         world.run_system_once(fixed_nan_probe).unwrap();
+    }
+
+    /// The probe skips parts nothing wrote since its last run, so a part checked finite once and
+    /// written corrupt later must still stop before physics on the next tick. Mutant: checking
+    /// only parts born since the last run lets every later corruption through.
+    #[test]
+    #[should_panic(expected = "FIXED-NAN part")]
+    fn a_part_written_corrupt_after_its_first_check_still_stops() {
+        let mut app = App::new();
+        app.add_systems(Update, fixed_nan_probe);
+        let body = app
+            .world_mut()
+            .spawn((Position(Vec3::ZERO), Rotation::IDENTITY))
+            .id();
+        let part = app
+            .world_mut()
+            .spawn((ColliderOf { body }, Position(Vec3::X), Rotation::IDENTITY))
+            .id();
+        app.update();
+        app.update();
+        app.world_mut().get_mut::<Position>(part).unwrap().0 = Vec3::splat(f32::NAN);
+        app.update();
     }
 
     /// A corrupt velocity must stop before its integration poisons an otherwise finite pose.
