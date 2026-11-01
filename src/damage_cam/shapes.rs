@@ -134,7 +134,7 @@ impl TankAsset {
 
     /// Every component's shape, each servo at its angle in `servo_deg` (degrees, by node name, a
     /// record's [`crate::damage_cam::PenetrationReport::servo_deg`]); a servo it does not name is at
-    /// rest.
+    /// rest, which only a synthetic clip asks for (a simulated record names every declared servo).
     pub fn shapes(&self, servo_deg: &BTreeMap<String, f32>) -> TankShapes {
         TankShapes::from_geometry(&self.geometry, &self.spec, servo_deg)
     }

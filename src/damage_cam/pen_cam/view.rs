@@ -276,7 +276,7 @@ fn place(
 }
 
 /// Turn `servos` to the angles `servo_deg` (degrees, by node name); a servo it does not name is at
-/// rest.
+/// rest, which only a synthetic clip asks for (a simulated record names every declared servo).
 fn pose_servos(
     servos: &[ServoNode],
     servo_deg: &BTreeMap<String, f32>,

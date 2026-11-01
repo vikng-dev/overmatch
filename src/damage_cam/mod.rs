@@ -140,7 +140,8 @@ pub struct PenetrationReport {
     /// Every servo of the struck tank at the shot, by its node name in the tank file: the sim's own
     /// servo angle (degrees), the turn about the servo's axis from its authored rest rotation,
     /// composed as [`crate::tank::servo_pose`] composes it. A simulated report names every declared
-    /// servo. A synthetic local clip may omit angles to show authored rest poses.
+    /// servo: the codec and the record file edge ([`Self::load`]) refuse one that does not. A
+    /// synthetic local clip may omit angles to show authored rest poses.
     pub servo_deg: BTreeMap<String, f32>,
     /// The round fired: a key in the round registry (`assets/rounds/`). A synthetic clip may name a
     /// round the registry does not hold.
@@ -455,9 +456,14 @@ impl PenetrationReport {
         Ok(report)
     }
 
+    /// A record file, admitted as [`Self::from_ron`] admits its text and, for a simulated record,
+    /// against the servos its vehicle's tank file declares (`validation::check_vehicle_servos`).
     pub fn load(path: &Path) -> Result<Self, String> {
         let text = std::fs::read_to_string(path).map_err(|e| format!("{}: {e}", path.display()))?;
-        Self::from_ron(&text).map_err(|e| format!("{}: {e}", path.display()))
+        let report = Self::from_ron(&text).map_err(|e| format!("{}: {e}", path.display()))?;
+        validation::check_vehicle_servos(&report)
+            .map_err(|e| format!("{}: {e}", path.display()))?;
+        Ok(report)
     }
 
     pub fn component(&self, name: &str) -> Option<&ComponentState> {

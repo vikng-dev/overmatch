@@ -15,6 +15,8 @@ pub enum ValidationError {
     Reference(String),
     Round(String),
     Field(&'static str),
+    Vehicle(String),
+    Servo(String),
 }
 
 impl std::fmt::Display for ValidationError {
@@ -36,6 +38,14 @@ impl std::fmt::Display for ValidationError {
                 "round {key:?}: supply a registered round key; only synthetic local clips may name an unregistered round"
             ),
             Self::Field(reason) => write!(f, "field: {reason}"),
+            Self::Vehicle(why) => write!(
+                f,
+                "vehicle: {why}; a simulated record names its vehicle's readable tank file"
+            ),
+            Self::Servo(name) => write!(
+                f,
+                "servo {name:?}: name every servo the vehicle declares, and no other; only a synthetic clip shows a servo at rest"
+            ),
         }
     }
 }
@@ -170,6 +180,40 @@ pub(super) fn check(report: &PenetrationReport) -> Result<(), ValidationError> {
         return Err(ValidationError::Reference(unresolved));
     }
     Ok(())
+}
+
+/// The game's damage model: a simulated local record names every servo its vehicle's tank file
+/// declares, and no other, as the codec's vocabulary requires of every sent and received record.
+/// Only a synthetic clip may omit an angle, to show that servo at its authored rest. The file edge
+/// ([`PenetrationReport::load`]) is the one local gate that resolves the vehicle.
+pub(super) fn check_vehicle_servos(report: &PenetrationReport) -> Result<(), ValidationError> {
+    if report.synthetic {
+        return Ok(());
+    }
+    let vehicle = report
+        .vehicle
+        .as_deref()
+        .ok_or_else(|| ValidationError::Vehicle("none is named".to_owned()))?;
+    let path = crate::assets::asset_root().join(vehicle);
+    let unread = |error: &dyn std::fmt::Display| {
+        ValidationError::Vehicle(format!("{}: {error}", path.display()))
+    };
+    let text = std::fs::read_to_string(&path).map_err(|error| unread(&error))?;
+    let spec: crate::spec::TankSpec = ron::de::from_str(&text).map_err(|error| unread(&error))?;
+    let declared = spec.servos.keys();
+    let unnamed = declared
+        .into_iter()
+        .find(|servo| !report.servo_deg.contains_key(*servo));
+    let undeclared = || {
+        report
+            .servo_deg
+            .keys()
+            .find(|name| !spec.servos.contains_key(*name))
+    };
+    match unnamed.or_else(undeclared) {
+        Some(servo) => Err(ValidationError::Servo(servo.clone())),
+        None => Ok(()),
+    }
 }
 
 fn check_path(report: &PenetrationReport) -> Result<(), ValidationError> {
@@ -389,5 +433,34 @@ mod tests {
         synthetic.spall.clear();
         let text = ron::ser::to_string(&synthetic).unwrap();
         assert!(PenetrationReport::from_ron(&text).is_ok());
+    }
+
+    /// The game's damage-model file edge refuses a simulated record that omits a servo its
+    /// vehicle declares, or names one it does not: presentation would draw the omitted servo at
+    /// rest, an angle the shot never had. A synthetic clip keeps its explicit rest allowance.
+    #[test]
+    fn a_simulated_local_record_names_every_declared_servo() {
+        let base = crate::damage_cam::delivery::tests::report("s1_through_crew");
+        assert_eq!(check_vehicle_servos(&base), Ok(()));
+        let omitted = base
+            .servo_deg
+            .keys()
+            .next()
+            .expect("the corpus vehicle declares servos")
+            .clone();
+        let mut missing = base.clone();
+        missing.servo_deg.remove(&omitted);
+        assert_eq!(
+            check_vehicle_servos(&missing),
+            Err(ValidationError::Servo(omitted))
+        );
+        let mut extra = base;
+        extra.servo_deg.insert("<undeclared>".to_owned(), 0.0);
+        assert_eq!(
+            check_vehicle_servos(&extra),
+            Err(ValidationError::Servo("<undeclared>".to_owned()))
+        );
+        missing.synthetic = true;
+        assert_eq!(check_vehicle_servos(&missing), Ok(()));
     }
 }
