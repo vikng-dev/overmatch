@@ -773,10 +773,10 @@ pub(crate) struct WorldStore {
     near_min: i32,
     /// Near texel centres inside world texel `k` along an axis: a world texel holds
     /// `per_axis[i] × per_axis[j]` of them.
-    per_axis: Vec<u8>,
+    per_axis: Vec<u64>,
     /// Level 0: footprint near texels counted per world texel, in [`WORLD_COUNT_TILE`]² tiles
     /// allocated only where printed.
-    counts: Vec<Option<Box<[u8]>>>,
+    counts: Vec<Option<Box<[u64]>>>,
     /// Levels 1 and up, coverage in 1/255: `mips[k − 1]` is level `k`.
     mips: Vec<Vec<u8>>,
     /// Level-0 upload tiles written since the last [`Self::take_uploads`]: a flag per tile, and the
@@ -788,12 +788,26 @@ pub(crate) struct WorldStore {
 impl WorldStore {
     /// A world layer of `side`² texels over the square of `size_m` centred on the origin.
     pub(crate) fn new(size_m: f32, side: u32) -> Self {
+        assert!(
+            size_m.is_finite() && size_m > 0.0,
+            "an admitted map supplies a finite positive print extent"
+        );
+        assert!(
+            side.is_power_of_two() && side < u32::from(u16::MAX),
+            "the world print raster has power-of-two mip levels and addressable texels beside its u16 sentinel"
+        );
         let texel_m = f64::from(size_m) / f64::from(side);
         let origin_m = -0.5 * f64::from(size_m);
         let near_m = f64::from(NEAR_TEXEL_M);
-        let near_min = (origin_m / near_m).floor() as i32 - 1;
-        let near_max = (-origin_m / near_m).ceil() as i32 + 1;
-        let mut per_axis = vec![0_u8; side as usize];
+        let low = (origin_m / near_m).floor();
+        let high = (-origin_m / near_m).ceil();
+        assert!(
+            low > f64::from(i32::MIN) && high < f64::from(i32::MAX),
+            "the admitted map's print extent fits the signed near-raster address including its border"
+        );
+        let near_min = low as i32 - 1;
+        let near_max = high as i32 + 1;
+        let mut per_axis = vec![0_u64; side as usize];
         let near_to_world = (near_min..near_max)
             .map(|g| {
                 let w = (((f64::from(g) + 0.5) * near_m - origin_m) / texel_m).floor();
@@ -835,7 +849,7 @@ impl WorldStore {
     fn world_of(&self, g: IVec2) -> Option<UVec2> {
         let at = |g: i32| {
             self.near_to_world
-                .get(usize::try_from(g - self.near_min).ok()?)
+                .get(usize::try_from(i64::from(g) - i64::from(self.near_min)).ok()?)
                 .copied()
                 .filter(|&w| w != u16::MAX)
         };
@@ -845,7 +859,7 @@ impl WorldStore {
     /// Near texel `g` became footprint: count it into its world texel.
     fn reach(&mut self, g: IVec2) {
         let Some(w) = self.world_of(g) else {
-            return;
+            return; // A near-raster texel can lie outside the authored map.
         };
         let tiles = self.side.div_ceil(WORLD_COUNT_TILE);
         let tile = self.counts
@@ -855,7 +869,9 @@ impl WorldStore {
             });
         let count = &mut tile
             [((w.y % WORLD_COUNT_TILE) * WORLD_COUNT_TILE + w.x % WORLD_COUNT_TILE) as usize];
-        *count = count.saturating_add(1);
+        *count = count.checked_add(1).expect(
+            "unique near texels in a world cell fit u64: each signed raster axis spans fewer than 2^32 texels",
+        );
         let upload_tiles = self.side.div_ceil(WORLD_UPLOAD_TILE);
         let tile = w / WORLD_UPLOAD_TILE;
         let flag = &mut self.dirty[(tile.y * upload_tiles + tile.x) as usize];
@@ -875,11 +891,17 @@ impl WorldStore {
                     tile[((j % WORLD_COUNT_TILE) * WORLD_COUNT_TILE + i % WORLD_COUNT_TILE)
                         as usize]
                 });
-            let total = u32::from(self.per_axis[i as usize]) * u32::from(self.per_axis[j as usize]);
+            let total = self.per_axis[i as usize]
+                .checked_mul(self.per_axis[j as usize])
+                .expect("a cell's two signed-raster sample counts fit a u64 area");
+            assert!(
+                count <= total,
+                "each near footprint texel enters its world cell once"
+            );
             if total == 0 {
                 return 0;
             }
-            ((u32::from(count) * 255 + total / 2) / total).min(255) as u8
+            ((u128::from(count) * 255 + u128::from(total) / 2) / u128::from(total)) as u8
         } else {
             self.mips[level as usize - 1][(j * (self.side >> level) + i) as usize]
         }
@@ -965,12 +987,12 @@ impl PrintStores {
     /// Lay one stamp: rasterise it once into the history, and feed what it changed to the near
     /// store's uploads and the world layer's counts.
     pub(crate) fn stamp(&mut self, entry: &StampEntry, shoes: &[ClearanceStamp], law: &PrintLaw) {
-        let Some(shoe) = shoes.get(entry.shoe()) else {
-            return;
-        };
+        let shoe = shoes
+            .get(entry.shoe())
+            .expect("every stamp names a shoe registered in the retained print table");
         self.log.count += 1;
         let Some(raster) = Raster::new(entry, shoe, law) else {
-            return;
+            return; // Zero press or an empty projected footprint writes no raster texel.
         };
         let low = raster.span.min.div_euclid(IVec2::splat(CELL));
         let high = (raster.span.max - 1).div_euclid(IVec2::splat(CELL));
@@ -1097,6 +1119,46 @@ mod tests {
         let uploads = stores.take_uploads();
         gpu.apply(&uploads, WORLD_SIDE);
         uploads
+    }
+
+    /// Stamping relies on the registered shoe identity; silently dropping an invalid index loses
+    /// history and cannot be treated as an empty footprint.
+    #[test]
+    #[should_panic(expected = "every stamp names a shoe registered")]
+    fn an_unregistered_stamp_shoe_is_a_bug() {
+        let mut stores = PrintStores::new(64.0, 256); // FIXTURE DATA: a small map.
+        stores.stamp(&entry(Vec2::ZERO, 0.0, 0.0, Vec2::ZERO, false), &[], &LAW);
+    }
+
+    /// A fully covered world texel must reach full coverage independently of map/raster scale.
+    /// Byte counters saturate on this fixture's coarse world texel and falsely leave it partial.
+    /// FIXTURE DATA: a 64 m map with a 64-texel world side, a supported raster configuration.
+    #[test]
+    fn coarse_world_texels_count_all_their_near_footprint_samples() {
+        let mut world = WorldStore::new(64.0, 64);
+        let axis: Vec<_> = world
+            .near_to_world
+            .iter()
+            .enumerate()
+            .filter(|(_, cell)| **cell == 0)
+            .map(|(offset, _)| world.near_min + offset as i32)
+            .collect();
+        assert!(
+            axis.len() * axis.len() > usize::from(u8::MAX),
+            "fixture must exceed a byte counter"
+        );
+        for &x in &axis {
+            for &y in &axis {
+                world.reach(IVec2::new(x, y));
+            }
+        }
+        assert_eq!(
+            world.coverage(0, 0, 0),
+            255,
+            "complete footprint coverage cannot saturate early"
+        );
+        assert_eq!(world.world_of(IVec2::splat(i32::MIN)), None);
+        assert_eq!(world.world_of(IVec2::splat(i32::MAX)), None);
     }
 
     /// The stores must retain the grounded edge of a tilted shoe. Clipping an accepted
