@@ -607,6 +607,16 @@ impl WallState {
         self.fate[chunk] == Fate::Standing
     }
 
+    /// The intact contacts between standing matter. Each occupies area where a blast's rear
+    /// boundary would otherwise be free; an opened joint or departed neighbour occupies none.
+    pub fn contacts<'a>(&'a self, structure: &'a Structure) -> impl Iterator<Item = Joint> + 'a {
+        structure
+            .joints
+            .iter()
+            .enumerate()
+            .filter_map(|(j, joint)| (!self.cracked[j] && self.live(joint)).then_some(*joint))
+    }
+
     /// Whether `joint` still joins standing matter: its chunk and, unless it is an anchor, the
     /// chunk across it.
     pub fn live(&self, joint: &Joint) -> bool {
@@ -3147,6 +3157,9 @@ pub(crate) struct Backing<'a> {
     pub block: &'a Block,
     pub scale: f32,
     pub material: Masonry,
+    /// Intact contacts between standing matter, in the hits' frame. Their rear-face area is
+    /// not a free surface, whether bonded or bearing-only.
+    pub contacts: &'a [Joint],
 }
 
 /// A rear scab (Law 2), about the game's environment destruction (game state only): the layer a
@@ -3182,10 +3195,11 @@ impl Scab {
 /// free back face as tension, it lifts a scab where `σ_b min(1, 2L / λ) ≥ σ_t,d`, of thickness `δ =
 /// λ σ_t,d / (2 σ_b)` (where the net tension first reaches the strength; at most `L`), at `v =
 /// (2σ_b − σ_t,d) / (ρ c)`, over `F_t / σ_b`, the area its transmitted force covers at `σ_b`,
-/// bounded by the chunk's silhouette along the normal (DERIVED: the scab then carries at most `J
+/// bounded by the chunk's exposed rear area projected along the normal (DERIVED: the scab then carries at most `J
 /// F_t / F` of the face's momentum, never more than its blow). ASSUMED: that equivalent area is the
-/// footprint, the back face is free (a bonded chunk behind reflects as open air), the crater's
-/// depth is not taken off the ligament, and the gate reads one back point. `None` where the gate
+/// footprint and the gate reads one back point. Intact contacts take their projected area off
+/// the free rear area; propagation through that contact to a farther free surface is unresolved.
+/// ASSUMED: the crater's depth is not taken off the ligament. `None` where the gate
 /// fails. Every input is the face's and its row's; no body type enters.
 pub(crate) fn scab(rays: &[&RayHit], load: &Load, backing: &Backing) -> Option<Scab> {
     let normal = rays
@@ -3231,7 +3245,21 @@ pub(crate) fn scab(rays: &[&RayHit], load: &Load, backing: &Backing) -> Option<S
     let thickness = length * tensile / (2.0 * stress);
     let speed = (2.0 * stress - tensile) / (material.density * bar_speed);
     let shadow = silhouette(&backing.block.face_areas(), -normal) * backing.scale.powi(2);
-    let mass = material.density * thickness * (transmitted / stress).min(shadow);
+    let covered: f32 = backing
+        .contacts
+        .iter()
+        .filter(|joint| {
+            (joint.a == load.chunk || joint.b == Side::Chunk(load.chunk))
+                && joint.normal.dot(back - joint.centroid).abs() <= ON_PLANE * backing.scale
+        })
+        .map(|joint| joint.area * joint.normal.dot(normal).abs())
+        .sum();
+    let exposed = (shadow - covered).max(0.0);
+    if exposed == 0.0 {
+        // A contact transmits compression; it is no free boundary to reflect it as tension.
+        return None;
+    }
+    let mass = material.density * thickness * (transmitted / stress).min(exposed);
     let thrown = Scab {
         chunk: load.chunk,
         at: back,
@@ -3948,6 +3976,7 @@ mod tests {
                 block: &slab,
                 scale: 1.0,
                 material: brick(),
+                contacts: &[],
             },
         );
         assert!(scabs.is_empty(), "{scabs:?}");
@@ -4005,6 +4034,7 @@ mod tests {
                 block: &slab,
                 scale: 1.0,
                 material: brick(),
+                contacts: &[],
             });
             assert!(scabs.is_empty(), "{scabs:?}");
             assert_eq!(loads.len(), 2, "opposing faces retain their own loads");
@@ -4300,6 +4330,7 @@ mod tests {
             block: &hull,
             scale: 1.0,
             material: chunk.material,
+            contacts: &[],
         };
         let pools: Vec<f32> = [1.0, 1.0e3 * chunk.material.crush * chunk.volume]
             .into_iter()
@@ -4363,6 +4394,7 @@ mod tests {
             block: &cube[0],
             scale: 1.0,
             material: brick(),
+            contacts: &[],
         });
         assert!(scabs.is_empty(), "a far pulse throws no scab: {scabs:?}");
         let struck = strike(&structure, &mut state, &loads);
@@ -6068,6 +6100,80 @@ mod tests {
         lengths * 0.25 * force / (2.0 * material.spall.bar_speed)
     }
 
+    /// Only exposed rear area reflects the game's environment blast as tensile stress. A full
+    /// contact, bonded or resting, throws no scab; a lateral joint covers no rear area. Structure
+    /// loads rely on retaining the blow at internal interfaces. ASSUMED fixture geometry/loading;
+    /// a mutant that treats each baked chunk boundary as air fails on either contact kind.
+    #[test]
+    fn a_scab_needs_exposed_rear_area() {
+        let material = brick();
+        let (hit, slab) = scab_face(&material, scab_blow(&material, 0.1));
+        let contact = Joint {
+            a: 0,
+            b: Side::Chunk(1),
+            area: 4.0,
+            centroid: Vec3::Z * 0.25,
+            normal: Vec3::Z,
+            bond: Bond::Bonded(material.seam),
+        };
+        let thrown = |contacts: &[Joint]| {
+            Load::blast(&[hit], |_| Backing {
+                block: &slab,
+                scale: 1.0,
+                material,
+                contacts,
+            })
+        };
+        assert_eq!(thrown(&[]).1.len(), 1, "the fixture's free rear scabs");
+        for bond in [Bond::Bonded(material.seam), Bond::Resting] {
+            let (loads, scabs) = thrown(&[Joint { bond, ..contact }]);
+            assert!(scabs.is_empty(), "a contact is no free surface: {bond:?}");
+            assert_eq!(loads.len(), 1, "no rear volume is removed");
+            assert_eq!(loads[0].blow, hit.impulse, "the face retains its blow");
+        }
+        let mut structure = row(2);
+        structure.joints = vec![contact];
+        let mut state = WallState::new(&structure);
+        assert!(
+            thrown(&state.contacts(&structure).collect::<Vec<_>>())
+                .1
+                .is_empty()
+        );
+        state.cracked[0] = true;
+        assert_eq!(
+            thrown(&state.contacts(&structure).collect::<Vec<_>>())
+                .1
+                .len(),
+            1
+        );
+        state.cracked[0] = false;
+        for fate in [Fate::Dust, Fate::Fallen] {
+            state.fate[1] = fate;
+            assert_eq!(
+                thrown(&state.contacts(&structure).collect::<Vec<_>>())
+                    .1
+                    .len(),
+                1
+            );
+        }
+        let lateral = Joint {
+            normal: Vec3::X,
+            centroid: Vec3::X,
+            ..contact
+        };
+        assert_eq!(thrown(&[lateral]).1.len(), 1, "a side bond covers no back");
+        let unrelated = Joint {
+            a: 2,
+            b: Side::Chunk(3),
+            ..contact
+        };
+        assert_eq!(
+            thrown(&[unrelated]).1.len(),
+            1,
+            "other chunks' bonds cover no back"
+        );
+    }
+
     /// A LONG PULSE THROWS NO SCAB (the game's environment destruction model, the #237 study's
     /// test 3, Law 2). At a fixed peak stress on a face, lengthening the pulse (a larger blow at
     /// the same peak force, `τ = 2J / F`) thins the reflected tension by `min(1, 2L / λ)` until
@@ -6086,6 +6192,7 @@ mod tests {
                         block: &slab,
                         scale: 1.0,
                         material,
+                        contacts: &[],
                     });
                     !scabs.is_empty()
                 })
@@ -6132,6 +6239,7 @@ mod tests {
                 block: &slab[0],
                 scale: 1.0,
                 material,
+                contacts: &[],
             });
             let [scab] = scabs[..] else {
                 panic!("the near burst scabs the {thickness} m slab's back: {scabs:?}");
@@ -6185,6 +6293,7 @@ mod tests {
                 block: &slab,
                 scale: 1.0,
                 material,
+                contacts: &[],
             });
             let [scab] = scabs[..] else {
                 panic!("the short fixture pulse scabs {material:?}: {scabs:?}");

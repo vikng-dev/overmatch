@@ -1146,10 +1146,12 @@ fn apply_deposit(
                 .map(|hit| hit.at)
                 .collect();
             applied.blast = Some((blast, origin, coupled, pushed, drawn));
+            let contacts: Vec<_> = state.contacts(structure).collect();
             Load::blast(&hits, |i| model::Backing {
                 block: &wall.cut.blocks[i],
                 scale: 1.0,
                 material: structure.chunks[i].material,
+                contacts: &contacts,
             })
             .0
         }

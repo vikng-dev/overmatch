@@ -1027,11 +1027,11 @@ fn apply_deposits(mut p: DepositParam) {
             };
             let frame = frames[&root];
             let kind = breakage.kind.clone();
-            let blast = blast_loads(&identity.id, &kind, frame.scale, &taken.blast);
+            let live = breakage.bypass_change_detection().live();
+            let blast = blast_loads(&identity.id, &kind, frame.scale, &taken.blast, live);
             let holes = holes_of(&kind, frame.scale, &taken.lines, &blast);
             // A run that changes nothing leaves the colliders as they stand: only a recorded
             // change marks the building for the refit (`reconcile`).
-            let live = breakage.bypass_change_detection().live();
             let resting = p.resting.0.get(&root).map_or(&[][..], Vec::as_slice);
             let pressing = presses.get(&root).map_or(&[][..], Vec::as_slice);
             let loads: Vec<Load> = taken
@@ -1099,11 +1099,19 @@ fn apply_deposits(mut p: DepositParam) {
 
 /// A blast's ray hits on one building as its loads ([`Load::blast`]), each face's Law 2 read on
 /// its chunk's hull at the instance's `scale`; logs the rear scabs thrown (debug).
-fn blast_loads(id: &str, kind: &BuildingKind, scale: f32, hits: &[fracture::RayHit]) -> Vec<Load> {
+fn blast_loads(
+    id: &str,
+    kind: &BuildingKind,
+    scale: f32,
+    hits: &[fracture::RayHit],
+    live: &Live,
+) -> Vec<Load> {
+    let contacts: Vec<Joint> = live.state.contacts(&live.structure).collect();
     let (loads, scabs) = Load::blast(hits, |c| fracture::Backing {
         block: &kind.layout.blocks[c],
         scale,
         material: kind.layout.materials[c],
+        contacts: &contacts,
     });
     if !scabs.is_empty() {
         debug!(

@@ -2448,10 +2448,12 @@ fn no_elements_kind_or_name_enters_the_laws() {
             blast,
             fracture::blast_directions(),
         );
+        let contacts: Vec<Joint> = live.state.contacts(&live.structure).collect();
         let (loads, _) = Load::blast(&hits, |c| fracture::Backing {
             block: &layout.blocks[c],
             scale: 1.0,
             material: live.structure.chunks[c].material,
+            contacts: &contacts,
         });
         let changes = run_laws(&layout, &mut live, &loads, Vec::new());
         (layout, live.structure, changes)
