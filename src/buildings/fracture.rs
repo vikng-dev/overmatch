@@ -1755,16 +1755,10 @@ pub(crate) fn structural(
 
 /// The chunks a blow of `loads` reaches, each once, in the order of its first such load.
 fn pushed(structure: &Structure, loads: &[Load]) -> Vec<usize> {
-    pushed_by(structure, loads, |_| true)
-}
-
-/// The chunks a blow of the `loads` that `counts` reaches, each once, in the order of its first
-/// such load.
-fn pushed_by(structure: &Structure, loads: &[Load], counts: impl Fn(&Load) -> bool) -> Vec<usize> {
     let mut seen = vec![false; structure.chunks.len()];
     let mut pushed = Vec::new();
     for load in loads {
-        if load.blow != Vec3::ZERO && !seen[load.chunk] && counts(load) {
+        if load.blow != Vec3::ZERO && !seen[load.chunk] {
             seen[load.chunk] = true;
             pushed.push(load.chunk);
         }
