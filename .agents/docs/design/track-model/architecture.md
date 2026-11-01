@@ -312,6 +312,77 @@ needed one.
   "clear vs unloaded" distinction (`covered`) — out of scope, named so the trait doesn't pretend
   otherwise.
 
+## 5a. Ground under a contact (#146)
+
+Subject: the game's driving model, what the ground under a track changes; game state only.
+
+Surface material is the oracle's second query: `TerrainOracle::ground_at(point)` returns the
+`ContactGround` (friction, rolling resistance coefficient) of the ground under a point, or `None`
+for an oracle that states no ground (the view's and the calibration's geometry-only oracles, bare
+fixture fields).
+
+**Which ground, deterministically, from data.** `ground_field::GroundField` is decoded once at
+startup by `terrain_grid::decode_height_grid`, beside the heightmap: the map's `terrain_masks.png`
+read synchronously from the map directory with the `image` crate (ADR-0014: never the view's
+texture, which a server without a window never loads), its declared row order folded in, held as
+three bytes a texel with the ground-type table's row for each of the four packs. A point's ground
+is those four rows blended by `terrain_blend::print_weights` of the mask read bilinearly and
+clamped at texel centres, the same weights the prints and the muzzle dust are drawn with. A world
+the decode does not build from the map (the flat slab and its authored course, a preset or
+flattened grid) is the base pack's ground everywhere, which is what the blend is where the mask is
+silent; the sandbox's course is the same. `BlockField::with_ground` carries the field into the
+track field; an authored block on the map reads the ground at its own XZ (a graybox building's
+substance is not yet a ground the belt reads).
+
+- Resolution (`Resolution`): the mask's own, 1024² over 1 500 m, 1.46 m a texel (DERIVED). It is
+  the finest statement of the ground the map has, and the material sharpens the visible blend edge
+  inside one texel; a coarser field would let a player see ground the tracks do not feel.
+- Cost: 3 MiB (DERIVED, 1024² × 3 bytes) on every peer that builds the world, one read and
+  decode at startup (MEASURED 12.4 ms in the `edit`-profile test build,
+  `ground_field::tests::the_shipped_mask_decodes_into_the_field`; the boot logs its own as
+  `ground field: masks … decoded for the sim in … ms`), and per terrain contact one bilinear read
+  of four texels and two dot products.
+
+**Grip.** A terrain contact's Coulomb coefficient is the track's pair with the contact's blended
+ground friction under the one pair rule (`√(μ_track·μ_ground)`), so the grip on two grounds differs
+by their table frictions. `GripParams::ground` (the base pack's friction) remains the pair for a
+field that states no ground, and the transmission's whole-vehicle estimates (the service brake's
+grip bound `TrackGear::braking_deceleration`, the reserve floor) still read it: a stand-in for the
+ground under the tank. The terrain's Avian collider carries the base ground alone, so the hull's
+and the pieces' solver contacts with the ground do not read the paint.
+
+**Rolling resistance.** A moving track loses `c_rr × N` to its ground against its travel, `c_rr`
+per ground in `ground_types.ron` (`rolling_resistance`, each `Unknown` with its CLAIMED range and
+what would settle it: the stamping note gives soil fits, not motion resistance) and `N` each
+terrain contact's normal load. The side's rolling load `Σ c_rr·N` fades linearly to zero below
+`forces::ROLLING_FADE_SPEED` = 0.25 m/s (`Resolution`, stability derivation at the constant), so a
+tank at rest takes none, and joins the side's ground reaction `R` at the pre-tick belt speed: the
+transmission's `I·v̇ = Q − R` carries it, and every reader of `R` (the brake's stop force, the
+demand filter, the clutch coupling) sees it as load. A piece is no ground and takes none.
+
+Coast-down, DERIVED: with the belts declutched, belt and hull decelerate together at
+`a = c_rr·g·M/(M + 2I)` down to the fade band, then decay inside it, so a tank coasts
+`d = (v₀² + V²)/(2a)` (`V` the band). On the fixture tank (57 000 kg, 4 750 kg reflected per side)
+from 10 m/s: gravel (the base pack, 0.05) 119.0 m; dirt (0.06) 99.2 m; sand (0.12) 49.6 m; mud
+(0.15) 39.7 m; concrete (0.04) 148.8 m. Before the law, no ground term slowed a declutched tank on
+the flat: only the engine's drag in gear did.
+
+Top speed, MEASURED headless (`full_throttle_reaches_and_holds_the_governed_top_speed`, flat
+world): on a ground with no rolling resistance the fixture tank holds F8 at 10.68 m/s, inside its
+governor's fade (governed 10.51 m/s). On the base pack's gravel it holds F7 at 7.12 m/s, and on
+concrete F7 at 7.15 m/s: the box's refusal of F8 there is right, because the model already loses
+force before any ground term. DERIVED from the governor's fade at those equilibria (read as linear
+from 2 500 to the 2 600 rpm cut, ASSUMED): about 24.7 kN at 10.68 m/s with no ground term, and
+20.8 kN at 7.12 m/s once gravel's 28.0 kN is taken out, about 0.04 of the tank's weight. Its
+source is not measured; the belt contact law's support and bristle dampers working as links enter
+and leave the ground are the likely one. Published tracked-vehicle motion resistance lumps the
+running gear's internal losses in, so the table's values may count part of that loss twice; the
+values are `Unknown`, and settling them settles this.
+
+**The tuning panel saves the label.** `rolling_resistance` is a `provenance::Labelled` value,
+which keeps its job and note through a load and writes them back, so the panel's whole-table save
+keeps every value's source (`ground_types::tests::a_saved_table_reads_back_unchanged`).
+
 ## 6. Tiers and budget (codex G — numbers corrected)
 
 **There is no tier machinery, and the reason is now a measurement, not a deferral.** Every tank
