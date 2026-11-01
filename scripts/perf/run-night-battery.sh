@@ -20,12 +20,11 @@
 #               light, depth prepass, UI, each as an A/B/B/A block sharing its A with the next
 #   battle-30   30 tanks: the levers whose cost scales with draws, same A/B/B/A shape
 #   prints-*    track-print relief levels on the mud pack, forward then reverse
-#   forest-*    trees against cones, forward then reverse
 #   cal-end     the calibration pair again, for drift across the night
 #
 # Expected wall clock (DERIVED: startup ~10 s, ~15 s at 30 tanks, + warmup + measure + cooldown):
 # vis-off 8 x 95 s = 13 min; cal 2 x 2 x 60 s = 4 min; duel-2 31 x 90 s = 47 min; battle-30
-# 19 x 95 s = 30 min; prints 6 x 135 s = 14 min; forest 8 x 100 s = 13 min. About 2 h 05 min.
+# 19 x 95 s = 30 min; prints 6 x 135 s = 14 min. About 1 h 52 min.
 # =======================================================================
 #
 # Usage: run-night-battery.sh <out-dir>
@@ -126,11 +125,6 @@ part prints-fwd env OFFSCREEN=1 DURATION_S="$DURATION" "$HERE/run-track-prints-c
   "$OUT/prints-fwd" mud-lighting mud-parallax mud-sun
 part prints-rev env OFFSCREEN=1 DURATION_S="$DURATION" "$HERE/run-track-prints-cost.sh" \
   "$OUT/prints-rev" mud-sun mud-parallax mud-lighting
-
-part forest-fwd env OFFSCREEN=1 DURATION_S="$DURATION" "$HERE/run-forest-cost.sh" \
-  "$OUT/forest-fwd" forest-cones forest-trees duel-cones duel-trees
-part forest-rev env OFFSCREEN=1 DURATION_S="$DURATION" "$HERE/run-forest-cost.sh" \
-  "$OUT/forest-rev" duel-trees duel-cones forest-trees forest-cones
 
 part cal-end calibration "$OUT/cal-end"
 

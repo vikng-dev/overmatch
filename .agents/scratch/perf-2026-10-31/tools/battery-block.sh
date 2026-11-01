@@ -1,6 +1,6 @@
 #!/bin/zsh
 # battery-block.sh <out-dir> <block> — one offscreen block of scripts/perf/run-night-battery.sh,
-# spelled as that script spells it (cal, duel-2, battle-30, forest-fwd, forest-rev), so each block
+# spelled as that script spells it (cal, duel-2, battle-30), so each block
 # is one lock hold. Skipped: vis-off (visible windows) and prints-* (the track-print demo needs the
 # `track_prints_demo` feature these binaries lack). BIN: bin/A4 (alpha.4 profiling client, trace
 # feature compiled in, spans filtered off at their callsites, chrome writer at /dev/null).
@@ -46,11 +46,5 @@ case "$block" in
       'shadows-off|shadow_distance: Off,' 'cascades-2|shadow_cascades: Two,' \
       'res-2048|shadow_resolution: X2048,' 'msaa-off|msaa: Off,' 'rs50|render_scale: Percent50,' \
       'no-env-light||SPIKE_ABLATE=env_light' ;;
-  forest-fwd)
-    OFFSCREEN=1 DURATION_S="$DURATION" "$R/run-forest-cost.sh" "$OUT/forest-fwd" \
-      forest-cones forest-trees duel-cones duel-trees ;;
-  forest-rev)
-    OFFSCREEN=1 DURATION_S="$DURATION" "$R/run-forest-cost.sh" "$OUT/forest-rev" \
-      duel-trees duel-cones forest-trees forest-cones ;;
   *) echo "unknown block $block" >&2; exit 2 ;;
 esac

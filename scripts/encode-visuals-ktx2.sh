@@ -23,7 +23,6 @@
 #   machined_steel   ambientCG  Metal009    Color, NormalGL, Roughness, Metalness
 #   track_steel      ambientCG  Metal046B   Color, NormalGL, Roughness, Metalness
 #   rubber           ambientCG  Rubber004   Color, NormalGL, Roughness
-#   wood             Poly Haven rough_wood  diff, nor_gl, arm
 #
 # An ambientCG pack ships separate maps, so the ARM is packed here: R is the pack's
 # AmbientOcclusion where it ships one and white (unoccluded) where it does not, G its Roughness,
@@ -39,7 +38,7 @@ OUT="assets/materials/visuals"
 CAMO="assets/materials/camouflage"
 RES=1024
 
-ALL="rolled_steel cast_steel machined_steel track_steel rubber wood stripes"
+ALL="rolled_steel cast_steel machined_steel track_steel rubber stripes"
 TARGETS="${*:-$ALL}"
 
 for tool in basisu magick unzip python3; do
@@ -47,7 +46,7 @@ for tool in basisu magick unzip python3; do
 done
 mkdir -p "$SRC"
 
-# The ambientCG pack a visual is cut from, or nothing for a Poly Haven one.
+# The ambientCG pack a visual is cut from, or nothing for an unknown target.
 acg_pack() {
     case "$1" in
         rolled_steel)   echo Metal046A ;;
@@ -56,14 +55,6 @@ acg_pack() {
         track_steel)    echo Metal046B ;;
         rubber)         echo Rubber004 ;;
         *)              echo "" ;;
-    esac
-}
-
-# The Poly Haven pack a visual is cut from.
-ph_pack() {
-    case "$1" in
-        wood) echo rough_wood ;;
-        *)    echo "" ;;
     esac
 }
 
@@ -122,27 +113,6 @@ cut_acg() {
     encode arm "$work/arm.png" "$OUT/$visual/${visual}_arm.ktx2"
 }
 
-# A Poly Haven pack: its diff, nor_gl and arm masters at 2k, cut as they are.
-cut_ph() {
-    visual="$1"; pack="$2"
-    cdn="https://dl.polyhaven.org/file/ph-assets/Textures"
-    for map in diff:jpg nor_gl:png arm:png; do
-        name="${map%%:*}"; ext="${map##*:}"
-        file="$SRC/${pack}_${name}_2k.$ext"
-        if [ ! -f "$file" ]; then
-            echo "fetch ▸ ${pack}_${name}_2k.$ext"
-            curl -sSf --max-time 900 -o "$file" "$cdn/$ext/2k/$pack/${pack}_${name}_2k.$ext"
-        fi
-    done
-    work="$SRC/$pack"
-    mkdir -p "$work" "$OUT/$visual"
-    to_8bit "$SRC/${pack}_nor_gl_2k.png" "$work/nor_gl.png"
-    to_8bit "$SRC/${pack}_arm_2k.png" "$work/arm.png"
-    encode albedo "$SRC/${pack}_diff_2k.jpg" "$OUT/$visual/${visual}_diff.ktx2"
-    encode nor_gl "$work/nor_gl.png" "$OUT/$visual/${visual}_nor_gl.ktx2"
-    encode arm "$work/arm.png" "$OUT/$visual/${visual}_arm.ktx2"
-}
-
 for target in $TARGETS; do
     if [ "$target" = stripes ]; then
         mkdir -p "$CAMO"
@@ -152,11 +122,8 @@ for target in $TARGETS; do
         continue
     fi
     acg="$(acg_pack "$target")"
-    ph="$(ph_pack "$target")"
     if [ -n "$acg" ]; then
         cut_acg "$target" "$acg"
-    elif [ -n "$ph" ]; then
-        cut_ph "$target" "$ph"
     else
         echo "unknown target: $target" >&2; exit 1
     fi

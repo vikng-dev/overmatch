@@ -275,7 +275,7 @@ struct WallRound {
 struct WallRounds(Vec<WallRound>);
 
 /// The blast tool's charge, from data: the filler's density (kg/m³), chemical energy (J/kg) and
-/// speed constant `K` (m/s), and the casing of the seed tank's burst round as the burst law
+/// speed constant `K` (m/s), and the casing of the tool's cased round (`assets/dev/wall-tool.ron`) as the burst law
 /// derives it — its mass per kg of filler `M/C` and the speed it is driven to, `v_s = K (M/C +
 /// ½)^−½` (m/s). A charge of `C` kg carries `M/C × C` kg of it.
 #[derive(Resource, Clone, Copy, Debug)]

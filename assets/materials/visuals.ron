@@ -48,11 +48,6 @@
             metres_per_repeat: (0.5, Tuned("ASSUMED: ambientCG publishes no size for Rubber004")),
             takes_paint: false,
         ),
-        "wood": Maps(
-            maps: "materials/visuals/wood/wood",
-            metres_per_repeat: (0.5, Measured("Poly Haven rough_wood `dimensions: [500, 500]` mm")),
-            takes_paint: false,
-        ),
         // The buildings' primary surface lane.
         "brick": Maps(
             building_lane: Some(Primary),

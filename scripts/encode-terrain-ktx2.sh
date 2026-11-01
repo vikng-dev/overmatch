@@ -29,8 +29,8 @@
 #   aerial_mud_1          diff         2048  4k  blend layer 2 (lowlands)
 #   brown_mud_leaves_01   diff         2048  4k  staged — nothing loads it
 #   rocks_ground_02       col          2048  4k  staged — nothing loads it
-#   brick_wall_006        diff         1024  2k  building walls — `building_surface::WALL`
-#   dark_planks           diff         1024  2k  building roofs — `building_surface::ROOF`
+#   brick_wall_006        diff         1024  2k  the primary building lane (visuals.ron "brick")
+#   dark_planks           diff         1024  2k  the secondary building lane (visuals.ron "dark_planks")
 #
 # A building pack is cut at 1024², from 2k masters: a house face spans metres, not a horizon, and
 # the LOW preset's GPU is a GTX 1650-class part. Two master texels per shipped texel is all the

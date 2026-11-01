@@ -183,8 +183,8 @@ pub mod sandbox;
 /// The map's object scatter (the map's own `level.json`, resolved through its `prototypes.ron`
 /// library): authored building and tree placement, each instance carrying its map identity,
 /// spawned from shared data on both binaries rather than over the wire. A building is a graybox
-/// box with a static collider that joins `world::TerrainMap`'s block list; a graybox fir carries a
-/// trunk collider only; a damage-model tree is spawned by `trees` — a static root with a state,
+/// box with a static collider that joins `world::TerrainMap`'s block list; a damage-model tree is
+/// spawned by `trees` — a static root with a state,
 /// one frustum collider per segment, each segment with its own HP pool.
 mod scatter;
 /// The scene depth the player's camera serves its soft-edged sprites and hull marks: the camera's
