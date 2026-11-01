@@ -582,10 +582,10 @@ fn record_tick(
                 .map(|(slot, w)| {
                     let gate = weapon_gate.and_then(|gate| gate.weapons.get(slot));
                     Value::Array(vec![
-                        gate.and_then(|gate| gate.ready_tick)
-                            .map_or(Value::Null, Value::from),
-                        gate.and_then(|gate| gate.paused_at_tick)
-                            .map_or(Value::Null, Value::from),
+                        gate.and_then(|gate| gate.ready_tick())
+                            .map_or(Value::Null, |tick| Value::from(tick.raw())),
+                        gate.and_then(|gate| gate.paused_at_tick())
+                            .map_or(Value::Null, |tick| Value::from(tick.raw())),
                         num(w.recoil_offset),
                         num(w.recoil_velocity),
                         gate.map_or(Value::Null, |gate| Value::from(gate.belt_remaining)),

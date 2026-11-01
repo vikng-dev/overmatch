@@ -411,13 +411,14 @@ pub struct WeaponSpec {
 }
 
 /// Whether the game's damage model can count this weapon delay in its fixed-tick gate. The
-/// duration and its tick count must both fit the representations `shooting::duration_ticks` uses.
+/// duration must be representable and its tick span strictly below half the wrapping counter
+/// range (DERIVED), so the shared signed deadline relation is unambiguous.
 fn duration(seconds: f32) -> bool {
     std::time::Duration::try_from_secs_f32(seconds).is_ok_and(|delay| {
         let ticks = delay
             .as_nanos()
             .div_ceil(Time::<Fixed>::default().timestep().as_nanos());
-        u32::try_from(ticks).is_ok()
+        ticks <= u128::from(crate::sim_tick::TickSpan::MAX)
     })
 }
 
@@ -551,7 +552,7 @@ impl WeaponSpec {
             FireCycle::Single { reload_secs } => {
                 if !duration(reload_secs) {
                     return Err(format!(
-                        "Single.reload_secs must be a duration >= 0 s fitting u32 fixed ticks \
+                        "Single.reload_secs must be a duration >= 0 s under 2^31 fixed ticks; reduce the duration \
                          (got {reload_secs})"
                     ));
                 }
@@ -561,8 +562,15 @@ impl WeaponSpec {
             FireCycle::Automatic {
                 belt_size,
                 belt_swap_secs,
+                cyclic_rpm,
                 ..
             } => {
+                if !duration(60.0 / cyclic_rpm) {
+                    return Err(format!(
+                        "assets/guns/{}.gun.ron: Automatic.cyclic_rpm gives an interval outside 2^31 fixed ticks (got {cyclic_rpm}); increase cyclic_rpm",
+                        self.gun
+                    ));
+                }
                 if belt_size == 0 {
                     return Err(
                         "Automatic.belt_size must be > 0 (a 0-round belt can never fire or \
@@ -572,7 +580,7 @@ impl WeaponSpec {
                 }
                 if !duration(belt_swap_secs) {
                     return Err(format!(
-                        "Automatic.belt_swap_secs must be a duration >= 0 s fitting u32 fixed ticks (got \
+                        "Automatic.belt_swap_secs must be a duration >= 0 s under 2^31 fixed ticks; reduce the duration (got \
                          {belt_swap_secs})"
                     ));
                 }
@@ -2407,7 +2415,15 @@ TankSpec(
 
         // A single-shot reload or a belt swap that is no duration: `shooting::duration_ticks`
         // panics in play on each, so the sheet refuses them by name.
-        for secs in [-0.5, f32::NAN, f32::INFINITY, f32::MAX, 100_000_000.0] {
+        for secs in [
+            -0.5,
+            f32::NAN,
+            f32::INFINITY,
+            f32::MAX,
+            100_000_000.0,
+            67_108_860.0,
+            33_554_432.0,
+        ] {
             let err = with_weapon("BadReload", FireMode::Single { reload_secs: secs })
                 .validate()
                 .unwrap_err()

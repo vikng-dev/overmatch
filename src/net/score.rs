@@ -385,7 +385,7 @@ mod tests {
             .get_mut::<BattleState>(board)
             .expect("Battle")
             .phase = BattlePhase::Combat {
-            ends_at: 100,
+            ends_at: crate::sim_tick::SimTick::new(100),
             late_join: LateJoin::Closed,
         };
         app.world_mut().trigger(knockout);
@@ -397,7 +397,7 @@ mod tests {
             .get_mut::<BattleState>(board)
             .expect("Battle")
             .phase = BattlePhase::Results {
-            ends_at: 200,
+            ends_at: crate::sim_tick::SimTick::new(200),
             outcome: BattleOutcome::Winner(CombatantId(1)),
         };
         app.world_mut().trigger(knockout);

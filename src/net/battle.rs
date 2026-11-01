@@ -10,6 +10,7 @@ use serde::{Deserialize, Serialize};
 use super::battle_mode::BattleMode;
 use super::score::Scoreboard;
 use crate::CombatantId;
+use crate::sim_tick::SimTick;
 
 /// One server-owned Battle, on the scoreboard's entity. Deadlines use `ShotClock`'s wrapping ticks.
 #[derive(Component, Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
@@ -21,22 +22,20 @@ pub(crate) struct BattleState {
 #[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum BattlePhase {
     /// No deadline until the first player joins. Once started, fill-up runs to its deadline.
-    FillUp {
-        ends_at: Option<u32>,
-    },
+    FillUp { ends_at: Option<SimTick> },
     Combat {
-        ends_at: u32,
+        ends_at: SimTick,
         late_join: LateJoin,
     },
     Results {
-        ends_at: u32,
+        ends_at: SimTick,
         outcome: BattleOutcome,
     },
 }
 
 #[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum LateJoin {
-    Open { closes_at: u32 },
+    Open { closes_at: SimTick },
     Closed,
 }
 
@@ -71,7 +70,7 @@ impl CycleRules {
         let ticks = |field, span: Duration| {
             let count = span.as_nanos().div_ceil(tick.as_nanos());
             assert!(
-                count <= i32::MAX as u128,
+                count <= u128::from(crate::sim_tick::TickSpan::MAX),
                 "assets/modes/battle.ron: {field} exceeds the authority deadline horizon — reduce the duration"
             );
             count as u32
@@ -92,11 +91,6 @@ pub(super) enum Boundary {
     Combat,
     Results,
     FillUp,
-}
-
-/// DERIVED: a signed wrapped difference is valid because mode spans never exceed `i32::MAX` ticks.
-fn due(now: u32, deadline: u32) -> bool {
-    now.wrapping_sub(deadline) as i32 >= 0
 }
 
 impl BattleState {
@@ -124,28 +118,29 @@ impl BattleState {
         rules: &CycleRules,
         score: &Scoreboard,
     ) -> Boundary {
+        let now = SimTick::new(now);
         match self.phase {
             BattlePhase::FillUp { ends_at: None } if occupied => {
                 self.phase = BattlePhase::FillUp {
-                    ends_at: Some(now.wrapping_add(rules.fill_up)),
+                    ends_at: Some(now.after(rules.fill_up)),
                 };
             }
-            BattlePhase::FillUp { ends_at: Some(end) } if due(now, end) => {
+            BattlePhase::FillUp { ends_at: Some(end) } if now.has_reached(end) => {
                 self.phase = BattlePhase::Combat {
-                    ends_at: now.wrapping_add(rules.combat),
+                    ends_at: now.after(rules.combat),
                     late_join: if rules.late_join == 0 {
                         LateJoin::Closed
                     } else {
                         LateJoin::Open {
-                            closes_at: now.wrapping_add(rules.late_join),
+                            closes_at: now.after(rules.late_join),
                         }
                     },
                 };
                 return Boundary::Combat;
             }
-            BattlePhase::Combat { ends_at, .. } if due(now, ends_at) => {
+            BattlePhase::Combat { ends_at, .. } if now.has_reached(ends_at) => {
                 self.phase = BattlePhase::Results {
-                    ends_at: now.wrapping_add(rules.results),
+                    ends_at: now.after(rules.results),
                     outcome: score.outcome(),
                 };
                 return Boundary::Results;
@@ -153,19 +148,19 @@ impl BattleState {
             BattlePhase::Combat {
                 ends_at,
                 late_join: LateJoin::Open { closes_at },
-            } if due(now, closes_at) => {
+            } if now.has_reached(closes_at) => {
                 self.phase = BattlePhase::Combat {
                     ends_at,
                     late_join: LateJoin::Closed,
                 };
             }
-            BattlePhase::Results { ends_at, .. } if due(now, ends_at) => {
+            BattlePhase::Results { ends_at, .. } if now.has_reached(ends_at) => {
                 self.number = self
                     .number
                     .checked_add(1)
                     .expect("Battle counter exhausted u32");
                 self.phase = BattlePhase::FillUp {
-                    ends_at: occupied.then(|| now.wrapping_add(rules.fill_up)),
+                    ends_at: occupied.then(|| now.after(rules.fill_up)),
                 };
                 return Boundary::FillUp;
             }
@@ -179,7 +174,7 @@ impl BattleState {
         Self {
             number: 1,
             phase: BattlePhase::Combat {
-                ends_at: 100_000,
+                ends_at: SimTick::new(100_000),
                 late_join: LateJoin::Closed,
             },
         }
@@ -196,6 +191,32 @@ pub(super) fn in_combat(battles: Query<&BattleState>) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Every authored phase span is refused at the load gate when the shared signed deadline
+    /// relation would be ambiguous. Operators receive the mode file, field and repair direction.
+    #[test]
+    fn mode_spans_outside_the_signed_horizon_are_refused_by_field() {
+        for field in ["fill_up_s", "combat_s", "late_join_s", "results_s"] {
+            let mut mode = BattleMode::parse(include_str!("fixtures/battle-short.ron"));
+            // DERIVED fixture: at the authority's default fixed step this exceeds half u32.
+            let too_long = Duration::from_secs(67_108_860);
+            match field {
+                "fill_up_s" => mode.fill_up = too_long,
+                "combat_s" => mode.combat = too_long,
+                "late_join_s" => mode.late_join = too_long,
+                "results_s" => mode.results = too_long,
+                _ => unreachable!(),
+            }
+            let failure = std::panic::catch_unwind(|| {
+                CycleRules::new(&mode, Time::<Fixed>::default().timestep())
+            })
+            .expect_err("a mode span must fit the signed horizon");
+            let message = failure.downcast_ref::<String>().unwrap();
+            for word in ["assets/modes/battle.ron", field, "reduce"] {
+                assert!(message.contains(word), "{message}");
+            }
+        }
+    }
 
     /// The cycle's deadlines and full combat span survive the authority tick's wrap. Losing the
     /// last player cannot shorten combat; an empty next fill-up waits for another first join.

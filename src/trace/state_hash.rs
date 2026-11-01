@@ -191,13 +191,13 @@ pub(super) fn hash_tank_state(state: &TankState) -> TankStateHash {
     if let Some(weapon_gate) = weapon_gate {
         hrl.write_u32(weapon_gate.weapons.len() as u32);
         for weapon in &weapon_gate.weapons {
-            hrl.write_bool(weapon.ready_tick.is_some());
-            if let Some(ready_tick) = weapon.ready_tick {
-                hrl.write_u32(ready_tick);
+            hrl.write_bool(weapon.ready_tick().is_some());
+            if let Some(ready_tick) = weapon.ready_tick() {
+                hrl.write_u32(ready_tick.raw());
             }
-            hrl.write_bool(weapon.paused_at_tick.is_some());
-            if let Some(paused_at_tick) = weapon.paused_at_tick {
-                hrl.write_u32(paused_at_tick);
+            hrl.write_bool(weapon.paused_at_tick().is_some());
+            if let Some(paused_at_tick) = weapon.paused_at_tick() {
+                hrl.write_u32(paused_at_tick.raw());
             }
             // Belt count and absolute deadline are the complete authoritative fire gate. Contrast
             // `rounds_fired`, deliberately excluded because it only chooses cosmetic tracers.
@@ -317,8 +317,9 @@ pub(super) fn hash_tank_state(state: &TankState) -> TankStateHash {
 fn test_weapon_gate() -> WeaponGate {
     WeaponGate {
         weapons: vec![crate::tank::WeaponGateState {
-            ready_tick: Some(1_250),
-            paused_at_tick: None,
+            timing: crate::tank::WeaponTiming::Loading {
+                ready_tick: crate::sim_tick::SimTick::new(1_250),
+            },
             belt_remaining: 47,
         }],
     }
@@ -729,7 +730,7 @@ mod tests {
 
         // Readiness deadline: one tick off — must NOT touch recoil despite sharing a weapon slot.
         let mut gate = test_weapon_gate();
-        gate.weapons[0].ready_tick = gate.weapons[0].ready_tick.map(|tick| tick + 1);
+        gate.weapons[0].arm(0, 1_251);
         let r = hash_sample_with_gate((p, q, lv, av), &drive, &grip, &transmission, &gate, &sim);
         assert_ne!(base.rld, r.rld);
         assert_ne!(base.sim, r.sim);
@@ -740,7 +741,7 @@ mod tests {
 
         // Crew-work pause tick: discrete phase within the same atomic gate stream.
         let mut paused_gate = test_weapon_gate();
-        paused_gate.weapons[0].paused_at_tick = Some(1_200);
+        paused_gate.weapons[0].pause(1_200);
         let pause_hash = hash_sample_with_gate(
             (p, q, lv, av),
             &drive,

@@ -103,12 +103,9 @@ impl View {
 /// once it is due, while the phase change is still in flight. Rounded up so the line reads zero
 /// only once the deadline has come. DERIVED: the wrapped signed difference is exact because the
 /// server's phase spans never exceed `i32::MAX` ticks (`battle::CycleRules`).
-fn seconds_left(deadline: u32, now: u32, tick: Duration) -> u32 {
-    let ahead = deadline.wrapping_sub(now) as i32;
-    if ahead <= 0 {
-        return 0;
-    }
-    let nanos = u128::from(ahead.unsigned_abs()) * tick.as_nanos();
+fn seconds_left(deadline: crate::sim_tick::SimTick, now: u32, tick: Duration) -> u32 {
+    let ahead = crate::sim_tick::SimTick::new(now).remaining_until(deadline);
+    let nanos = u128::from(ahead) * tick.as_nanos();
     u32::try_from(nanos.div_ceil(1_000_000_000))
         .expect("an i32 tick span of a sub-second authority tick fits u32 seconds")
 }
@@ -515,13 +512,34 @@ mod tests {
     #[test]
     fn the_time_left_counts_from_the_replicated_deadline() {
         let tick = Duration::from_nanos(15_625_000);
-        assert_eq!(seconds_left(100, 40, tick), 1);
-        assert_eq!(seconds_left(64 * 900, 0, tick), 900);
-        assert_eq!(seconds_left(64 * 900, 1, tick), 900);
-        assert_eq!(seconds_left(64 * 900, 64, tick), 899);
-        assert_eq!(seconds_left(100, 100, tick), 0);
-        assert_eq!(seconds_left(100, 101, tick), 0);
-        assert_eq!(seconds_left(63, u32::MAX - 64, tick), 2);
+        assert_eq!(
+            seconds_left(crate::sim_tick::SimTick::new(100), 40, tick),
+            1
+        );
+        assert_eq!(
+            seconds_left(crate::sim_tick::SimTick::new(64 * 900), 0, tick),
+            900
+        );
+        assert_eq!(
+            seconds_left(crate::sim_tick::SimTick::new(64 * 900), 1, tick),
+            900
+        );
+        assert_eq!(
+            seconds_left(crate::sim_tick::SimTick::new(64 * 900), 64, tick),
+            899
+        );
+        assert_eq!(
+            seconds_left(crate::sim_tick::SimTick::new(100), 100, tick),
+            0
+        );
+        assert_eq!(
+            seconds_left(crate::sim_tick::SimTick::new(100), 101, tick),
+            0
+        );
+        assert_eq!(
+            seconds_left(crate::sim_tick::SimTick::new(63), u32::MAX - 64, tick),
+            2
+        );
         assert_eq!(clock(900), "15:00");
         assert_eq!(clock(59), "0:59");
         assert_eq!(clock(0), "0:00");
@@ -594,7 +612,7 @@ mod tests {
                 BattleState {
                     number: 1,
                     phase: BattlePhase::Results {
-                        ends_at: 100,
+                        ends_at: crate::sim_tick::SimTick::new(100),
                         outcome: BattleOutcome::Draw,
                     },
                 },
@@ -739,7 +757,12 @@ mod tests {
             .set_now(lightyear::core::time::TickInstant::from(
                 lightyear::core::tick::Tick(40),
             ));
-        set_phase(&mut app, BattlePhase::FillUp { ends_at: Some(100) });
+        set_phase(
+            &mut app,
+            BattlePhase::FillUp {
+                ends_at: Some(crate::sim_tick::SimTick::new(100)),
+            },
+        );
         app.update();
         assert_eq!(
             clock_line(&mut app).as_deref(),
@@ -750,7 +773,7 @@ mod tests {
         set_phase(
             &mut app,
             BattlePhase::Combat {
-                ends_at: 40 + 2 * 900,
+                ends_at: crate::sim_tick::SimTick::new(40 + 2 * 900),
                 late_join: LateJoin::Closed,
             },
         );
@@ -792,7 +815,7 @@ mod tests {
         set_phase(
             &mut app,
             BattlePhase::Results {
-                ends_at: 70,
+                ends_at: crate::sim_tick::SimTick::new(70),
                 outcome: BattleOutcome::Winner(CombatantId(7)),
             },
         );
@@ -808,7 +831,7 @@ mod tests {
         set_phase(
             &mut app,
             BattlePhase::Results {
-                ends_at: 70,
+                ends_at: crate::sim_tick::SimTick::new(70),
                 outcome: BattleOutcome::Draw,
             },
         );

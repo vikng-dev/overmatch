@@ -198,7 +198,7 @@ impl SlotLedger {
     fn confirm(&mut self, arriving: WeaponGateState) -> u32 {
         let belt_fired = self.seen_belt.saturating_sub(arriving.belt_remaining);
         let arm_edge =
-            u32::from(self.last_arrived.ready_tick.is_none() && arriving.ready_tick.is_some());
+            u32::from(self.last_arrived.ready_tick().is_none() && arriving.ready_tick().is_some());
         let fired = belt_fired.max(arm_edge);
         self.confirmed = self.confirmed.saturating_add(fired);
         self.seen_belt = arriving.belt_remaining;
@@ -586,7 +586,7 @@ fn record_presentation_gate(
                 .belt_remaining
                 .saturating_sub(current.belt_remaining)
                 .max(u32::from(
-                    entry.presented_gate.ready_tick.is_none() && current.ready_tick.is_some(),
+                    entry.presented_gate.ready_tick().is_none() && current.ready_tick().is_some(),
                 ));
             for _ in 0..consumed {
                 entry.pending_local.push_back(now);
@@ -953,8 +953,7 @@ mod tests {
 
     fn ready(belt: u32) -> WeaponGateState {
         WeaponGateState {
-            ready_tick: None,
-            paused_at_tick: None,
+            timing: crate::tank::WeaponTiming::Ready,
             belt_remaining: belt,
         }
     }

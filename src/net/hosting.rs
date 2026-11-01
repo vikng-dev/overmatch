@@ -970,7 +970,7 @@ mod tests {
             .get_mut::<BattleState>(battle)
             .expect("Battle")
             .phase = BattlePhase::Results {
-            ends_at: 100,
+            ends_at: crate::sim_tick::SimTick::new(100),
             outcome: BattleOutcome::NoContest,
         };
         app.update();

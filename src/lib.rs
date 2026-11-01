@@ -210,6 +210,7 @@ mod shooting;
 /// cost) unless the env var is set. Analyzed by `scripts/shot/analyze.py`.
 mod shot_trace;
 mod sight;
+pub mod sim_tick;
 mod spec;
 mod state;
 /// The global substance registry (`assets/materials/materials.ron`): the material library's numeric
@@ -645,8 +646,8 @@ pub(crate) struct ShotClock(pub u32);
 
 /// Current simulation tick used by the tick-correlated weapon gate. Network compositions publish
 /// `LocalTimeline` into it before gameplay; non-network compositions
-/// advance it once after each playing fixed tick. No session reaches `u32::MAX`
-/// ([`tank::SESSION_TICK_RANGE`]).
+/// advance it once after each playing fixed tick, wrapping freely. Deadline ordering belongs
+/// to [`sim_tick::SimTick`], never the numeric order of this clock's counter.
 #[derive(Resource, Default)]
 pub(crate) struct WeaponClock(pub u32);
 

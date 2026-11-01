@@ -269,33 +269,34 @@ pub struct WeaponState {
     pub rounds_fired: u32,
 }
 
-/// One weapon's complete fire-eligibility state. `ready_tick` is an absolute simulation deadline:
-/// `None` with no pause means loaded/ready, while `Some(tick)` means cyclic, single reload, or belt
-/// swap according to the weapon's [`FireCycle`] and `belt_remaining`. `paused_at_tick`
-/// freezes crew work without changing this component again until work resumes; there is no per-tick
-/// countdown.
-///
-/// Deadlines are absolute `u32` ticks and never wrap. No session exhausts them: 2^32 ticks at the
-/// 64 Hz fixed tick is 776 days (DERIVED). A deadline past the range is a bug, and panics
-/// ([`SESSION_TICK_RANGE`]).
+/// The game's damage model: one weapon's fire eligibility and belt supply. Its timing enum
+/// makes an unarmed-but-paused state unrepresentable, including at the peer deserialization edge.
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default, Serialize, Deserialize)]
 pub struct WeaponGateState {
-    pub ready_tick: Option<u32>,
-    pub paused_at_tick: Option<u32>,
+    pub timing: WeaponTiming,
     pub belt_remaining: u32,
 }
 
-/// Why a weapon clock's arithmetic stays inside `u32`: the bound every gate deadline and the
-/// local clock's advance rely on.
-pub(crate) const SESSION_TICK_RANGE: &str = "a session's weapon clock stays far below u32::MAX: \
-     2^32 ticks at 64 Hz is 776 days (DERIVED), longer than any session runs";
+/// The game's damage model: a weapon is ready, loading against a wrapping deadline, or frozen
+/// with a checked work span. Serde parses this phase and refuses an invalid span at its edge.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default, Serialize, Deserialize)]
+pub enum WeaponTiming {
+    #[default]
+    Ready,
+    Loading {
+        ready_tick: crate::sim_tick::SimTick,
+    },
+    Paused {
+        work: crate::sim_tick::TickSpan,
+        since: crate::sim_tick::SimTick,
+    },
+}
 
 impl WeaponGateState {
     /// Loaded spawn state; automatic weapons start with a full belt.
     pub fn for_cycle(cycle: &FireCycle) -> Self {
         Self {
-            ready_tick: None,
-            paused_at_tick: None,
+            timing: WeaponTiming::Ready,
             belt_remaining: match cycle {
                 FireCycle::Single { .. } => 0,
                 FireCycle::Automatic { belt_size, .. } => *belt_size,
@@ -304,59 +305,85 @@ impl WeaponGateState {
     }
 
     pub fn is_ready(self) -> bool {
-        self.ready_tick.is_none() && self.paused_at_tick.is_none()
+        matches!(self.timing, WeaponTiming::Ready)
     }
 
-    /// Whether an armed deadline is due in Lightyear's ordinary numeric tick order. An absent
-    /// deadline is due.
-    pub fn deadline_reached(self, now: u32) -> bool {
-        self.ready_tick.is_none_or(|ready_tick| now >= ready_tick)
-    }
-
-    pub fn arm(&mut self, now: u32, delay_ticks: u32) {
-        self.ready_tick = Some(
-            now.checked_add(delay_ticks.max(1))
-                .expect(SESSION_TICK_RANGE),
-        );
-        self.paused_at_tick = None;
-    }
-
-    /// Freeze a crew-gated reload/swap. Repeated unmet ticks leave the gate byte-identical.
-    pub fn pause(&mut self, now: u32) {
-        if let (Some(ready_tick), None) = (self.ready_tick, self.paused_at_tick) {
-            // This first unmet tick must not consume work, so defer once on entry. Later paused
-            // ticks are accounted for in one shift on resume.
-            self.ready_tick = Some(ready_tick.checked_add(1).expect(SESSION_TICK_RANGE));
-            self.paused_at_tick = Some(now);
+    /// The active deadline, or a paused work clock for diagnostics. A pause has no active
+    /// deadline ordering; its first unmet tick is retained in the displayed work count.
+    pub fn ready_tick(self) -> Option<crate::sim_tick::SimTick> {
+        match self.timing {
+            WeaponTiming::Ready => None,
+            WeaponTiming::Loading { ready_tick } => Some(ready_tick),
+            WeaponTiming::Paused { work, since } => Some(since.after(work.raw() + 1)),
         }
     }
 
-    /// Resume crew work by shifting the deadline once by the paused interval.
-    pub fn resume(&mut self, now: u32) {
-        // Not paused: no crew work waits to be shifted.
-        let (Some(ready_tick), Some(paused_at_tick)) = (self.ready_tick, self.paused_at_tick)
-        else {
-            return;
+    pub fn paused_at_tick(self) -> Option<crate::sim_tick::SimTick> {
+        match self.timing {
+            WeaponTiming::Paused { since, .. } => Some(since),
+            WeaponTiming::Ready | WeaponTiming::Loading { .. } => None,
+        }
+    }
+
+    pub fn finish(&mut self) {
+        self.timing = WeaponTiming::Ready;
+    }
+
+    /// Every active comparison uses the shared signed wrapped relation, as the battle cycle
+    /// does. Frozen work is not eligible until its load requirement allows resumption.
+    pub fn deadline_reached(self, now: u32) -> bool {
+        match self.timing {
+            WeaponTiming::Ready => true,
+            WeaponTiming::Loading { ready_tick } => {
+                crate::sim_tick::SimTick::new(now).has_reached(ready_tick)
+            }
+            WeaponTiming::Paused { .. } => false,
+        }
+    }
+
+    /// Data admission bounds the span; at least one tick prevents duplicate emission in a tick.
+    pub fn arm(&mut self, now: u32, delay_ticks: u32) {
+        self.timing = WeaponTiming::Loading {
+            ready_tick: crate::sim_tick::SimTick::new(now).after(delay_ticks.max(1)),
         };
-        let later_paused_ticks = now.saturating_sub(paused_at_tick).saturating_sub(1);
-        self.ready_tick = Some(
-            ready_tick
-                .checked_add(later_paused_ticks)
-                .expect(SESSION_TICK_RANGE),
-        );
-        self.paused_at_tick = None;
+    }
+
+    /// Freeze work on entry. Repeated unmet ticks leave the gate byte-identical, and a past
+    /// arriving deadline holds no remaining work rather than almost a full counter's interval.
+    pub fn pause(&mut self, now: u32) {
+        if let WeaponTiming::Loading { ready_tick } = self.timing {
+            let now = crate::sim_tick::SimTick::new(now);
+            let work = crate::sim_tick::TickSpan::try_from(now.remaining_until(ready_tick)).expect(
+                "remaining_until is a nonnegative signed difference, within TickSpan's horizon",
+            );
+            self.timing = WeaponTiming::Paused { work, since: now };
+        }
+    }
+
+    /// A frozen interval survives any number of clock wraps; only the resume tick starts it.
+    pub fn resume(&mut self, now: u32) {
+        if let WeaponTiming::Paused { work, .. } = self.timing {
+            self.timing = WeaponTiming::Loading {
+                ready_tick: crate::sim_tick::SimTick::new(now).after(work.raw()),
+            };
+        }
     }
 
     pub fn remaining_ticks(self, now: u32) -> u32 {
-        let effective_now = self.paused_at_tick.unwrap_or(now);
-        self.ready_tick
-            .map_or(0, |ready_tick| ready_tick.saturating_sub(effective_now))
+        match self.timing {
+            WeaponTiming::Ready => 0,
+            WeaponTiming::Loading { ready_tick } => {
+                crate::sim_tick::SimTick::new(now).remaining_until(ready_tick)
+            }
+            // The entry tick cannot consume work, including at the greatest admitted span.
+            WeaponTiming::Paused { work, .. } => work.raw() + 1,
+        }
     }
 }
 
 /// Tick-correlated authority state for every weapon slot, in deterministic name-sorted slot order.
-/// This is one atomic replicated + owner-predicted component, following `TankTransmission`: a
-/// confirmed value is restored at its producing tick and normal replay derives the present.
+/// The server owns it and replicates it privately to the owner. The owner's fire-presentation
+/// ledger carries its local feedback beside the stream; no client predicts gameplay state.
 #[derive(Component, Clone, PartialEq, Eq, Debug, Default, Serialize, Deserialize)]
 pub struct WeaponGate {
     pub weapons: Vec<WeaponGateState>,

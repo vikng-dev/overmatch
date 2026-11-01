@@ -436,8 +436,7 @@ fn spawn_owned_shooter(
                 },
                 WeaponGate {
                     weapons: vec![WeaponGateState {
-                        ready_tick: None,
-                        paused_at_tick: None,
+                        timing: crate::tank::WeaponTiming::Ready,
                         belt_remaining: OWNER_BELT,
                     }],
                 },
@@ -1163,8 +1162,7 @@ fn every_shot_spawns_exactly_one_shell_under_ten_percent_loss() {
                 && crew.swap.is_none()
                 && gate.weapons
                     == [WeaponGateState {
-                        ready_tick: None,
-                        paused_at_tick: None,
+                        timing: crate::tank::WeaponTiming::Ready,
                         belt_remaining: OWNER_BELT,
                     }]
         });

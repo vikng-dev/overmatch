@@ -19,7 +19,6 @@ mod shadow_proxy;
 mod spawn;
 mod view;
 
-pub(crate) use model::SESSION_TICK_RANGE;
 #[cfg(test)]
 pub use model::WeaponState;
 pub(crate) use model::controlled_one;
@@ -31,7 +30,7 @@ pub(crate) use model::rig_world_pose;
 pub use model::{
     Controlled, EngineSound, Hull, Muzzle, Rig, Roadwheel, Tank, TankRoot, TankServos, TankSim,
     TankViews, TrackSide, Turret, TurretBody, ViewConfig, Weapon, WeaponGate, WeaponGateState,
-    WeaponIndex, WeaponLoad, WeaponLoads, WeaponRound,
+    WeaponIndex, WeaponLoad, WeaponLoads, WeaponRound, WeaponTiming,
 };
 pub use scenario::{client_plugin, sp_spawn_plugin};
 pub(crate) use servo::RemoteServos;

@@ -1528,7 +1528,7 @@ mod tests {
                 .count(),
             0
         );
-        advance(&mut app, fill_end - 1);
+        advance(&mut app, fill_end.raw() - 1);
         app.update();
         assert_eq!(
             app.world_mut()
@@ -1578,7 +1578,10 @@ mod tests {
             panic!("combat started");
         };
         let now = app.world().resource::<crate::ShotClock>().0;
-        advance(&mut app, combat_end - now);
+        advance(
+            &mut app,
+            crate::sim_tick::SimTick::new(now).remaining_until(combat_end),
+        );
         app.update();
         assert!(
             app.world().get_entity(old_root).is_err(),
@@ -1598,7 +1601,7 @@ mod tests {
         else {
             panic!("results started");
         };
-        advance(&mut app, results_end - combat_end);
+        advance(&mut app, combat_end.remaining_until(results_end));
         app.update();
         assert!(
             app.world()
@@ -1614,7 +1617,7 @@ mod tests {
             panic!("connected players start the next fill-up");
         };
         assert!(app.world().get::<Connected>(link).is_some());
-        advance(&mut app, next_start - results_end);
+        advance(&mut app, results_end.remaining_until(next_start));
         app.update();
         let fresh: Vec<_> = app
             .world_mut()
