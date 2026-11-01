@@ -46,6 +46,20 @@ use self::plan::Plan;
 use self::timeline::CornerKind;
 use crate::camera::{CaptiveCameraPlaced, GunnerCameraPlaced, OrbitCameraSet};
 
+/// The game's damage-model view may be unmounted during loading or teardown. Multiple viewers
+/// for one declared role are a construction bug and must never be read as that pending state.
+pub(super) fn pending_viewer<T>(
+    result: Result<T, bevy::ecs::query::QuerySingleError>,
+) -> Option<T> {
+    match result {
+        Ok(viewer) => Some(viewer),
+        Err(bevy::ecs::query::QuerySingleError::NoEntities(_)) => None,
+        Err(error @ bevy::ecs::query::QuerySingleError::MultipleEntities(_)) => {
+            panic!("the game's damage-model view declares at most one viewer per role: {error}")
+        }
+    }
+}
+
 /// The corner as it stands this frame.
 #[derive(Resource, Default, Clone, PartialEq)]
 pub struct Corner {
@@ -176,4 +190,26 @@ pub(super) fn present() -> ScheduleConfigs<ScheduleSystem> {
     )
         .chain()
         .into_configs()
+}
+
+#[cfg(test)]
+mod viewer_tests {
+    use super::*;
+    use bevy::ecs::system::RunSystemOnce;
+
+    /// The game's damage-model viewer may be pending, but duplicate declarations must fail instead
+    /// of disappearing as that absence. Both the mask owner and detail readers rely on it.
+    #[test]
+    fn pending_viewer_distinguishes_loading_from_duplicate_roles() {
+        let mut world = World::new();
+        let read = |viewers: Query<Entity, With<WorldViewer>>| pending_viewer(viewers.single());
+        assert_eq!(world.run_system_once(read).unwrap(), None);
+        let viewer = world.spawn(WorldViewer).id();
+        assert_eq!(world.run_system_once(read).unwrap(), Some(viewer));
+        world.spawn(WorldViewer);
+        assert!(
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| world.run_system_once(read)))
+                .is_err()
+        );
+    }
 }

@@ -244,10 +244,7 @@ impl Run {
             });
         let shooter = live.or(muzzle_point.map(ShooterAt::Point));
         beats.shooter = shooter.is_some();
-        let radius = scene
-            .camera
-            .single()
-            .ok()
+        let radius = super::super::pending_viewer(scene.camera.single())
             .and_then(|(_, _, _, orbit)| orbit)
             .map_or(crate::camera::ORBIT_FAR, OrbitCamera::radius);
         Self {
@@ -391,7 +388,11 @@ fn disconnect(
     ui: Query<Entity, With<KillCamUi>>,
 ) {
     victim.death = None;
-    release(&mut captive, &mut commands, camera.single().ok());
+    release(
+        &mut captive,
+        &mut commands,
+        super::super::pending_viewer(camera.single()),
+    );
     for entity in &ui {
         commands.entity(entity).despawn();
     }
@@ -520,14 +521,11 @@ pub(super) fn drive(
     let settings = settings.as_deref().copied().unwrap_or_default();
     let by = (settings.kill_cam, settings.reduce_motion);
     let victim = &mut *victim;
-    let tank = own.single().ok().filter(|_| scene.free.is_empty());
+    let tank = crate::tank::controlled_one(own.single()).filter(|_| scene.free.is_empty());
     let dead_life = tank.and_then(|(_, &combatant, &life, knocked_out, _)| {
         knocked_out.map(|_| TankLife { combatant, life })
     });
-    let camera_entity = scene
-        .camera
-        .single()
-        .ok()
+    let camera_entity = super::super::pending_viewer(scene.camera.single())
         .map(|(entity, _, profile, _)| (entity, profile));
 
     // Whose death this is.
@@ -688,10 +686,7 @@ pub(super) fn drive(
         if let Some(run) = death.run.as_mut()
             && run.hit.is_none()
         {
-            run.hit = scene
-                .camera
-                .single()
-                .ok()
+            run.hit = super::super::pending_viewer(scene.camera.single())
                 .map(|(_, transform, _, _)| transform.rotation);
         }
         if let Some(sight) = sight.as_mut() {
@@ -822,11 +817,12 @@ fn place(
     let (Some(run), Some(turret)) = (victim.run(), pivot.offset()) else {
         return;
     };
-    let (Ok(tank), Ok((entity, mut transform, mut projection, profile))) =
-        (tank.single(), camera.single_mut())
-    else {
-        return;
+    let Some(tank) = crate::tank::controlled_one(tank.single()) else {
+        return; // The own tank despawned; the driver's next pass releases the captive camera.
     };
+    let (entity, mut transform, mut projection, profile) = camera.single_mut().expect(
+        "the game's damage-model captive view has exactly one player camera while its tank remains",
+    );
     let reduce = settings.as_deref().is_some_and(|s| s.reduce_motion.on());
     let shooter_pivot = run.shooter.and_then(|shooter| match shooter {
         ShooterAt::Tank(entity, turret) => others
@@ -917,6 +913,9 @@ fn hud(
         ),
     >,
 ) {
+    if !victim.ui {
+        return; // The kill-cam UI is unmounted before the driver serves a knocked-out life.
+    }
     let visible = |on: bool| {
         if on {
             Visibility::Inherited
@@ -942,7 +941,10 @@ fn hud(
         _ => 0.0,
     };
     let card_on = enter > 0.0;
-    if let Ok((mut v, mut transform)) = card.single_mut() {
+    {
+        let (mut v, mut transform) = card
+            .single_mut()
+            .expect("the game's damage-model mounted kill-cam UI has exactly one card");
         v.set_if_neq(visible(card_on));
         let scale = Vec2::splat(if reduce { 1.0 } else { 0.96 + 0.04 * enter });
         if transform.scale != scale {
@@ -950,7 +952,10 @@ fn hud(
         }
     }
     if let Some(record) = record {
-        if let Ok(mut background) = accent.single_mut() {
+        {
+            let mut background = accent
+                .single_mut()
+                .expect("the game's damage-model mounted kill-cam card has exactly one accent");
             let color =
                 timeline::verdict_color(CornerKind::of(record.stored.report.impact.verdict));
             background.0 = color.with_alpha(enter);
@@ -970,7 +975,7 @@ fn hud(
 
     // The death screen's stand-in, where the composition has no death screen.
     let stand_in = death_screen && game_death_screen.is_none();
-    let reason = own.single().ok().map(|knocked_out| knocked_out.reason);
+    let reason = crate::tank::controlled_one(own.single()).map(|knocked_out| knocked_out.reason);
     for (index, mut text) in &mut panel_text {
         let line = match index.0 {
             0 => "KNOCKED OUT",

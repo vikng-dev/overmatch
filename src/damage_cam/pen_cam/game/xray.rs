@@ -148,7 +148,9 @@ impl Subject<'_, '_> {
         bool,
     )> {
         match *self.choice {
-            XRaySubject::OwnTank => self.own.single().ok().filter(|row| !row.6),
+            XRaySubject::OwnTank => {
+                crate::tank::controlled_one(self.own.single()).filter(|row| !row.6)
+            }
             XRaySubject::Struck(combatant) => {
                 let mut matching = self.tanks.iter().filter(|row| *row.1 == combatant);
                 let row = matching.next()?;
@@ -502,7 +504,7 @@ pub(super) fn drive(
         .sight
         .is_none_or(|mode| *mode == SightMode::ThirdPerson);
     let body = subject.body();
-    let viewer = viewing.camera.single().ok();
+    let viewer = super::super::pending_viewer(viewing.camera.single());
     let active = xray.on && third_person && !viewing.victim.running() && body.is_some();
     let tank = body.map(|(entity, _)| entity);
     if !active
@@ -1121,23 +1123,46 @@ pub(crate) fn scripted_xray_plugin(app: &mut App) {
     else {
         return;
     };
-    let (from, to) = parse_xray_window(&window).unwrap_or_else(|| {
-        crate::refuse_start(format!(
-            "OVERMATCH_XRAY={window:?}: expected <from>-<to> app seconds, finite, 0 <= from < to"
-        ))
-    });
+    let (from, to) = parse_xray_window(&window)
+        .unwrap_or_else(|error| crate::refuse_start(format!("OVERMATCH_XRAY={window:?}: {error}")));
     info!("pen cam: the x-ray is on from {from} s to {to} s (OVERMATCH_XRAY)");
     app.add_systems(Update, scripted(from, to).before(toggle));
 }
 
-/// `<from>-<to>` app seconds, both finite with `0 <= from < to`; `None` for anything else.
-fn parse_xray_window(window: &str) -> Option<(f32, f32)> {
-    let (from, to) = window.split_once('-')?;
-    let (from, to) = (
-        from.trim().parse::<f32>().ok()?,
-        to.trim().parse::<f32>().ok()?,
-    );
-    (from.is_finite() && to.is_finite() && 0.0 <= from && from < to).then_some((from, to))
+/// The game's damage-model view: typed refusal of an operator's x-ray window.
+#[derive(Debug, PartialEq, Eq)]
+enum XrayWindowError {
+    Syntax,
+    Number,
+    Bounds,
+}
+
+impl std::fmt::Display for XrayWindowError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::Syntax => "expected <from>-<to> app seconds",
+            Self::Number => "both endpoints must parse as app seconds",
+            Self::Bounds => "endpoints must be finite with 0 <= from < to",
+        })
+    }
+}
+
+/// The operator's `<from>-<to>` seconds, parsed once at the input edge.
+fn parse_xray_window(window: &str) -> Result<(f32, f32), XrayWindowError> {
+    let (from, to) = window.split_once('-').ok_or(XrayWindowError::Syntax)?;
+    let from = from
+        .trim()
+        .parse::<f32>()
+        .map_err(|_| XrayWindowError::Number)?;
+    let to = to
+        .trim()
+        .parse::<f32>()
+        .map_err(|_| XrayWindowError::Number)?;
+    if from.is_finite() && to.is_finite() && 0.0 <= from && from < to {
+        Ok((from, to))
+    } else {
+        Err(XrayWindowError::Bounds)
+    }
 }
 
 /// One health-bearing volume of the subject tank as its replicated state stands: its shown HP
@@ -1313,10 +1338,10 @@ mod tests {
     /// untimed run (a mutant accepting any parse would take `95-65`).
     #[test]
     fn the_xray_window_parses_only_an_ordered_finite_span() {
-        assert_eq!(parse_xray_window("65-95"), Some((65.0, 95.0)));
-        assert_eq!(parse_xray_window(" 0 - 1.5 "), Some((0.0, 1.5)));
+        assert_eq!(parse_xray_window("65-95"), Ok((65.0, 95.0)));
+        assert_eq!(parse_xray_window(" 0 - 1.5 "), Ok((0.0, 1.5)));
         for refused in ["95-65", "5-5", "65", "a-95", "65-inf", "NaN-3", ""] {
-            assert_eq!(parse_xray_window(refused), None, "{refused:?}");
+            assert!(parse_xray_window(refused).is_err(), "{refused:?}");
         }
     }
 

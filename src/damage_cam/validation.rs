@@ -13,6 +13,7 @@ pub enum ValidationError {
     Path(&'static str),
     Pool(String),
     Reference(String),
+    Round(String),
     Field(&'static str),
 }
 
@@ -29,6 +30,10 @@ impl std::fmt::Display for ValidationError {
             Self::Reference(name) => write!(
                 f,
                 "component {name:?}: declare the component and its dose placement"
+            ),
+            Self::Round(key) => write!(
+                f,
+                "round {key:?}: supply a registered round key; only synthetic local clips may name an unregistered round"
             ),
             Self::Field(reason) => write!(f, "field: {reason}"),
         }
@@ -71,6 +76,13 @@ fn ordered(times: impl Iterator<Item = f32>, field: &'static str) -> Result<(), 
 
 /// Admit a parsed report before any view constructs a plan from it.
 pub(super) fn check(report: &PenetrationReport) -> Result<(), ValidationError> {
+    if !report.synthetic
+        && crate::rounds::RoundRegistry::shipped()
+            .get(&report.round)
+            .is_err()
+    {
+        return Err(ValidationError::Round(report.round.clone()));
+    }
     let projectile = &report.projectile;
     number(
         projectile.caliber_mm,
@@ -318,6 +330,7 @@ mod tests {
     fn local_record_admission_refuses_invalid_semantics_and_keeps_synthetic_absences() {
         let base = crate::damage_cam::delivery::tests::report("s1_through_crew");
         let spoilers: &[fn(&mut PenetrationReport)] = &[
+            |r| r.round = "<unregistered>".to_owned(),
             |r| r.projectile.mass_kg = 0.0,
             |r| r.projectile.caliber_mm = -1.0,
             |r| r.path[1].t = r.path[0].t - 1.0,
@@ -339,6 +352,7 @@ mod tests {
         }
         let mut synthetic = base;
         synthetic.synthetic = true;
+        synthetic.round = "<authored synthetic round>".to_owned();
         synthetic.vehicle = None;
         synthetic.servo_deg.clear();
         for dose in &mut synthetic.doses {

@@ -492,7 +492,7 @@ pub fn rebuild(
     stage.painted.clear();
     let viewer = corner.showing.and_then(|showing| match showing.surface {
         super::Surface::Corner => stage.camera,
-        super::Surface::World => main.single().ok(),
+        super::Surface::World => super::pending_viewer(main.single()),
     });
     stage.masks = viewer
         .and_then(|viewer| masks.of(viewer))
@@ -1553,10 +1553,18 @@ pub fn animate(
     >,
     mut round: StageRoundPose,
 ) {
-    let Ok((mut camera, mut eye, mut projection)) = camera.single_mut() else {
-        return;
-    };
-    let Ok((mut shell_pose, mut shell_visibility)) = round.shell.single_mut() else {
+    let mounted = (
+        super::pending_viewer(camera.single_mut()),
+        super::pending_viewer(round.shell.single_mut()),
+    );
+    let (Some((mut camera, mut eye, mut projection)), Some((mut shell_pose, mut shell_visibility))) =
+        mounted
+    else {
+        // Rig::teardown removes both roots and clears the corner; no stage is mounted then.
+        assert!(
+            mounted.0.is_none() && mounted.1.is_none() && corner.showing.is_none(),
+            "the game's damage-model stage mounts its camera and round root together before showing a record"
+        );
         return;
     };
     let Some(showing) = corner.showing else {

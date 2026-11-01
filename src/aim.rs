@@ -307,9 +307,9 @@ fn update_centre_reticle(
     controlled: Query<(), With<Controlled>>,
     mut reticle: Query<&mut Visibility, With<CentreReticle>>,
 ) {
-    let Ok(mut visibility) = reticle.single_mut() else {
-        return;
-    };
+    let mut visibility = reticle
+        .single_mut()
+        .expect("the in-match aim HUD is spawned with exactly one centre reticle");
     visibility.set_if_neq(if centre_dot_visible(*mode, !controlled.is_empty()) {
         Visibility::Visible
     } else {
@@ -349,8 +349,8 @@ fn hull_frame(
 fn commit_aim(
     mouse: Res<ButtonInput<MouseButton>>,
     spatial: SpatialQuery,
-    camera_query: Single<(&Camera, &GlobalTransform), With<PlayerView>>,
-    window: Single<&Window>,
+    camera_query: Query<(&Camera, &GlobalTransform), With<PlayerView>>,
+    window: Query<&Window>,
     controlled: ControlledTank,
     poses: Query<(&Position, &Rotation)>,
     volumes: Query<&VolumeOf>,
@@ -382,7 +382,12 @@ fn commit_aim(
         return;
     }
 
-    let (camera, cam_transform) = *camera_query;
+    let (camera, cam_transform) = camera_query
+        .single()
+        .expect("an active aim commitment has exactly one player camera");
+    let window = window
+        .single()
+        .expect("the player input composition has exactly one window");
     let Ok(ray) = camera.viewport_to_world(cam_transform, window.size() / 2.0) else {
         return;
     };
@@ -528,7 +533,7 @@ fn place_indicator(
 )]
 fn update_bore_indicator(
     spatial: SpatialQuery,
-    camera_query: Single<(&Camera, &GlobalTransform), With<PlayerView>>,
+    camera_query: Query<(&Camera, &GlobalTransform), With<PlayerView>>,
     controlled: Query<(Entity, &Rig), With<Controlled>>,
     view_nodes: Query<&ViewNode>,
     muzzle: Query<&GlobalTransform>,
@@ -536,11 +541,13 @@ fn update_bore_indicator(
     parents: Query<&ChildOf>,
     mut indicator: Query<(&mut Node, &mut Visibility), With<BoreIndicator>>,
 ) {
-    let (camera, cam_transform) = *camera_query;
-    let Ok((mut node, mut visibility)) = indicator.single_mut() else {
-        return;
-    };
-    let Ok((tank, rig)) = controlled.single() else {
+    let (camera, cam_transform) = camera_query
+        .single()
+        .expect("the in-match aim HUD has exactly one player camera");
+    let (mut node, mut visibility) = indicator
+        .single_mut()
+        .expect("the in-match aim HUD spawns exactly one indicator of each kind");
+    let Some((tank, rig)) = crate::tank::controlled_one(controlled.single()) else {
         visibility.set_if_neq(Visibility::Hidden);
         return;
     };
@@ -582,16 +589,18 @@ fn update_aim_indicator(
     // committed aim *intention*, which `commit_aim` fixes by projecting screen-centre through the
     // camera pose (ADR-0003). The camera is parentless, so its `Transform` IS its world pose,
     // the exact pose `commit_aim` reads, so the dot stays welded to the point it was committed at.
-    camera_query: Single<(&Camera, &Transform), With<PlayerView>>,
+    camera_query: Query<(&Camera, &Transform), With<PlayerView>>,
     controlled: Query<(&Rig, &TankCommand), With<Controlled>>,
     hull: Query<&GlobalTransform, With<Hull>>,
     mut indicator: Query<(&mut Node, &mut Visibility), With<AimIndicator>>,
 ) {
-    let (camera, cam_transform) = *camera_query;
+    let (camera, cam_transform) = camera_query
+        .single()
+        .expect("the in-match aim HUD has exactly one player camera");
     let cam_transform = GlobalTransform::from(*cam_transform);
-    let Ok((mut node, mut visibility)) = indicator.single_mut() else {
-        return;
-    };
+    let (mut node, mut visibility) = indicator
+        .single_mut()
+        .expect("the in-match aim HUD spawns exactly one indicator of each kind");
 
     // Shown only during free-look (RMB held) — otherwise it coincides with the center reticle.
     if !mouse.pressed(MouseButton::Right) {
@@ -599,7 +608,7 @@ fn update_aim_indicator(
         return;
     }
 
-    let Ok((rig, command)) = controlled.single() else {
+    let Some((rig, command)) = crate::tank::controlled_one(controlled.single()) else {
         *visibility = Visibility::Hidden;
         return;
     };

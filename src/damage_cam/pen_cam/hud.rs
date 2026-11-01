@@ -200,7 +200,7 @@ pub fn detail(
     render_scale: Option<Res<RenderScale>>,
     mut detail: ResMut<PictureDetail>,
 ) {
-    let primary = primary.single().ok();
+    let primary = crate::state::primary_window(primary.single());
     let mut next = *detail;
     if let Some((camera, target, _)) = ui.get().and_then(|ui| cameras.get(ui).ok())
         && let Some((full, scale)) = look::target_now(camera, target, &windows, primary, &images)
@@ -217,7 +217,9 @@ pub fn detail(
             .and_then(|render_scale| render_scale.main_pass_size(size));
         Some(detail_of(scaled.unwrap_or(size)))
     };
-    next.world = world.single().ok().and_then(main_pass).or(next.world);
+    next.world = super::pending_viewer(world.single())
+        .and_then(main_pass)
+        .or(next.world);
     next.xray = xray.0.and_then(main_pass).or(next.xray);
     detail.set_if_neq(next);
 }
@@ -248,9 +250,10 @@ pub fn layout(
     };
     let width = (window.x * WIDTH_FRACTION).clamp(WIDTH_PX.0, WIDTH_PX.1);
     let height = width / ASPECT;
-    if let Ok(mut node) = root.single_mut()
-        && (node.width != Val::Px(width) || node.height != Val::Px(height))
-    {
+    let mut node = root
+        .single_mut()
+        .expect("the game's damage-model corner images are spawned with exactly one HUD root");
+    if node.width != Val::Px(width) || node.height != Val::Px(height) {
         node.width = Val::Px(width);
         node.height = Val::Px(height);
     }
@@ -286,8 +289,10 @@ pub fn layout(
         target.turn = turn;
     }
     if retarget {
-        if let Ok(mut render_target) = targets.p1().single_mut() {
-            *render_target = RenderTarget::Image(bevy::camera::ImageRenderTarget {
+        {
+            *targets.p1().single_mut().expect(
+                "the game's damage-model corner images are spawned with exactly one stage camera",
+            ) = RenderTarget::Image(bevy::camera::ImageRenderTarget {
                 handle: target.images[target.live].clone(),
                 scale_factor: scale,
             });
@@ -313,9 +318,9 @@ pub fn animate(
     mut hairline: Query<(&mut Node, &mut BackgroundColor), (With<Hairline>, Without<Accent>)>,
     mut glyph: Query<&mut ImageNode, With<Glyph>>,
 ) {
-    let Ok((mut visibility, mut transform)) = root.single_mut() else {
-        return;
-    };
+    let (mut visibility, mut transform) = root
+        .single_mut()
+        .expect("the game's damage-model corner images are spawned with exactly one HUD root");
     // The kill cam draws on the world, not in the corner.
     let Some(showing) = corner
         .showing
@@ -338,16 +343,25 @@ pub fn animate(
         node.color = Color::WHITE.with_alpha(alpha);
     }
     let color = timeline::verdict_color(showing.kind);
-    if let Ok((mut node, mut background)) = accent.single_mut() {
+    {
+        let (mut node, mut background) = accent
+            .single_mut()
+            .expect("the game's damage-model mounted corner has exactly one accent");
         let drawn = timeline::ease_enter(timeline::progress(showing.c, 0.0, timeline::ACCENT_S));
         node.width = Val::Percent(100.0 * drawn);
         background.0 = color.with_alpha(showing.opacity);
     }
-    if let Ok((mut node, mut background)) = hairline.single_mut() {
+    {
+        let (mut node, mut background) = hairline
+            .single_mut()
+            .expect("the game's damage-model mounted corner has exactly one hairline");
         node.width = Val::Percent(100.0 * showing.remaining);
         background.0 = Color::srgba(1.0, 1.0, 1.0, 0.55 * showing.opacity);
     }
-    if let Ok(mut node) = glyph.single_mut() {
+    {
+        let mut node = glyph
+            .single_mut()
+            .expect("the game's damage-model mounted corner has exactly one glyph");
         if let Some((_, handle)) = glyphs.images.iter().find(|(k, _)| *k == showing.kind)
             && node.image != *handle
         {

@@ -562,20 +562,24 @@ pub fn own(
                 }
                 None
             }
-            Surface::Corner => inset.single().ok(),
-            Surface::World => main.single().ok(),
+            Surface::Corner => super::pending_viewer(inset.single()),
+            Surface::World => super::pending_viewer(main.single()),
         });
     let mut wanted: Vec<(Entity, UVec2, f32, isize)> = Vec::new();
     for viewer in corners.into_iter().chain(need.0) {
         if wanted.iter().any(|(have, ..)| *have == viewer) {
             continue;
         }
-        let Ok((camera, target)) = cameras.get(viewer) else {
-            continue;
-        };
-        let Some((size, scale)) =
-            viewport_now(camera, target, &windows, primary.single().ok(), &images)
-        else {
+        let (camera, target) = cameras.get(viewer).expect(
+            "the game's damage-model declared mask viewer carries its camera and render target",
+        );
+        let Some((size, scale)) = viewport_now(
+            camera,
+            target,
+            &windows,
+            crate::state::primary_window(primary.single()),
+            &images,
+        ) else {
             continue;
         };
         wanted.push((viewer, size.max(UVec2::ONE), scale, camera.order));

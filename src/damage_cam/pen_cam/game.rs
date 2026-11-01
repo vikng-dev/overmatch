@@ -387,18 +387,21 @@ struct Player<'w, 's> {
 impl Player<'_, '_> {
     /// The tank's life, while it has one and is not knocked out.
     fn life(&self) -> Option<TankLife> {
-        let (&combatant, &life, knocked_out) = self.tank.single().ok()?;
+        let (&combatant, &life, knocked_out) = crate::tank::controlled_one(self.tank.single())?;
         (!knocked_out).then_some(TankLife { combatant, life })
     }
 
     /// The combatant whose shots the corner shows: the [`FreeShooter`] the player fires as, where
     /// there is exactly one, else the tank's [`Self::life`].
     fn shooter(&self) -> Option<TankLife> {
-        self.free
+        if self.free.is_empty() {
+            return self.life(); // No free-shooter possession: use the controlled tank's life.
+        }
+        let (&combatant, &life) = self
+            .free
             .single()
-            .ok()
-            .map(|(&combatant, &life)| TankLife { combatant, life })
-            .or_else(|| self.life())
+            .expect("the game's damage-model player source declares at most one free shooter");
+        Some(TankLife { combatant, life })
     }
 }
 

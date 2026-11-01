@@ -502,3 +502,22 @@ fuzzer, pen-cam, codec, delivery, field-cast and citation tests passed; five ign
 records passed; the six emitted-shot payloads matched the saved baseline after removing exactly
 the four diagnostics, and the other 2003 pin records were unchanged. The tracked fuzzer runner
 completed 10000 rays with no walk errors, invariant violations or admitted protection-floor route.
+
+## P3 presentation cardinality and named pending states
+
+Subject: the game's damage-model view, game state only. Aim HUD furniture and its active player
+camera/window are required, while controlled-tank absence uses the shared possession classifier.
+A pending viewer before mounting or during teardown is distinct from duplicate viewer declarations;
+mask/detail/stage/kill-cam readers now share that distinction. Mounted corner and kill-cam furniture
+and stage camera/round roots are required. The kill-cam UI explicitly idles while unmounted.
+The removed demo, demo-world and demo kill-cam singleton groups were already fixed at this base.
+
+The review's x-ray-input P3 now has a typed syntax/number/domain refusal at its input edge; malformed
+windows still refuse process startup. Local non-synthetic records also refuse an unregistered round
+before body planning, preserving synthetic clips' explicit unknown-round allowance.
+
+Presentation verification: format and workspace/all-target clippy passed. MEASURED: 288 targeted
+presentation, recorder, protocol, pen-cam, field-cast, headless and citation tests passed; seven
+ignored. The teardown controls establish the named unmounted state: both stage roots are absent
+and the corner is clear; partial roots or an open record without them fail. MEASURED: all 43
+whole-tree citation, font, net-boundary and bake guards passed. The field-cast pin is unchanged.
