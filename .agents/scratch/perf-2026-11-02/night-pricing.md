@@ -17,6 +17,12 @@ for a headless bed: the machine lock held, 0 `rustc` running at start, the bed f
 
 | # | Item | Where | Condition | MEASURED cost | Against | Gates | Informs |
 |---|---|---|---|---|---|---|---|
+| 1 | Spall field: shipped sampler | `lane/night-pricing-202-fields` | cone 64 walks / ring 256 walks, a field | cone p50 633–641 µs, p95 1 117–1 122; ring p50 1 830–1 839, p95 3 026–3 066 | itself | passed, 2 runs | #204 |
+| 1 | Spall field: exact visibility | same | snapped, a field | cone p50 2 398–2 405 µs, p95 6 356–6 414 (4.6x the sampler's mean); ring p50 4 550–4 553, p95 7 978–8 045 (2.1x) | the sampler, same fields | passed, 2 runs | #204 |
+| 1 | Spall field: dot picture 64x8 | same | a field | cone p50 14 355–14 392 µs (20x); ring p50 17 509–17 598 (7.7x) | as above | passed, 2 runs | #204 |
+| 1 | Spall field: dot picture 128x8 | same | a field | cone p50 28 600–28 648 µs (39x); ring p50 32 483–32 614 (14.5x) | as above | passed, 2 runs | #204 |
+| 1 | Spall field: dot picture 256x8 | same | a field | cone p50 59 405–59 762 µs (82x); ring p50 70 698–70 937 (33x) | as above | passed, 2 runs | #204 |
+| 1 | Spall field: dot picture 256, centre-only | same | a field | cone p50 12 576–12 597 µs (19x); ring p50 33 519–34 086 (16x) | as above | passed, 2 runs | #204 |
 | 3 | Weight check, per change | main | one chunk to dust, 1 003 chunks | p50 1 193–1 201 µs, p95 2 080–2 096 µs | no change: 0 | passed, 3 runs | #189 |
 | 3 | Weight check, long-wall shot | main | 204 chunks to dust at once | p50 1 344–1 391 µs, p95 1 407–1 449 µs (71 965 steps) | as above | passed, 3 runs | #189 |
 | 3 | Weight check, then the gables | main | 118 more chunks | p50 12 314–12 534 µs, p95 12 727–12 791 µs | as above | passed, 3 runs | #189 |
@@ -44,6 +50,65 @@ for a headless bed: the machine lock held, 0 `rustc` running at start, the bed f
     from 2026-10-31; see item 1).
 - **Window mode.** The beds are headless (`OVERMATCH_WINDOW=headless`): no window, no GPU. No
   client frame was measured (items 2 and 5 below say why).
+
+## Item 1: the spall field models (#204)
+
+Subject: the game's damage model, game state only: how a spall cone or a burst ring doses a
+tank's modules and crew boxes. **Where:** both prototypes are test-only code on 2026-10-31 trees
+(`lane/fields-exact`, `lane/fields-raster`), 568 commits behind main; nothing on main calls either.
+They are merged on `lane/night-pricing-202-fields`: the dot-picture prototype's tree, with the
+exact prototype's `exact.rs`, its volume gather and `Env::exact` added beside it (the two files
+were identical outside those). The shipped sampler priced is that tree's
+(`resolve::field_direction` over the shipped directions, as `Env::sampled` walks it); main's has
+not been re-priced.
+
+**Bed:** `the_field_models_priced_per_field`, on the 49 fields of the prototypes' comparison (33
+cones: the field-casts family at poses A and B and 9 fired plate cones; 16 burst rings fired by
+`88mm_APHE_ring` and `88mm_HE`), each dropped where the comparison drops it. Per field, each
+method's median of 7 repeats, interleaved method by method; one thread, as a throw runs on the
+server. Each method's time is all of its work: the sampler's reach and walks; the exact field's
+volume gather (it copies every box's trimesh in reach), clipping and integration; the picture's
+axis walk, scene and drawing. Two runs (03:02, 03:03; MEASURED, `perf`).
+
+| µs a field, run 1 / run 2 | p50 | p95 | mean | max | mean / sampler |
+|---|---|---|---|---|---|
+| cone, sampler (64) | 641 / 633 | 1 117 / 1 122 | 665 / 670 | 1 322 / 1 336 | 1 |
+| cone, exact | 2 405 / 2 398 | 6 414 / 6 356 | 3 070 / 3 058 | 7 698 / 7 631 | 4.6 |
+| cone, picture 64x8 | 14 355 / 14 392 | 16 543 / 16 704 | 13 414 / 13 482 | 18 337 / 18 443 | 20.1 |
+| cone, picture 128x8 | 28 648 / 28 600 | 33 542 / 33 509 | 25 845 / 25 934 | 37 486 / 37 561 | 38.7–38.9 |
+| cone, picture 256x8 | 59 405 / 59 762 | 74 021 / 74 268 | 54 444 / 54 540 | 79 621 / 79 845 | 81.4–81.8 |
+| cone, picture 256 | 12 576 / 12 597 | 15 867 / 15 913 | 12 620 / 12 619 | 17 812 / 17 481 | 18.8–19.0 |
+| ring, sampler (256) | 1 830 / 1 839 | 3 066 / 3 026 | 1 953 / 1 950 | 3 112 / 3 098 | 1 |
+| ring, exact | 4 553 / 4 550 | 8 045 / 7 978 | 4 062 / 4 054 | 8 859 / 8 827 | 2.1 |
+| ring, picture 64x8 | 17 598 / 17 509 | 22 673 / 22 705 | 15 078 / 15 064 | 23 117 / 23 037 | 7.7 |
+| ring, picture 128x8 | 32 614 / 32 483 | 44 134 / 44 209 | 28 383 / 28 268 | 45 924 / 45 864 | 14.5 |
+| ring, picture 256x8 | 70 937 / 70 698 | 97 339 / 97 623 | 63 853 / 63 602 | 105 241 / 104 521 | 32.6–32.7 |
+| ring, picture 256 | 34 086 / 33 519 | 35 775 / 35 723 | 31 781 / 31 678 | 38 006 / 37 652 | 16.2–16.3 |
+
+Against the 15.625 ms of a 64 Hz tick (DERIVED): a ring costs 12 % of an M4 tick under the
+sampler, 29 % under the exact field and 113 % under the 64x8 picture (p50); on Edgegap's one vCPU
+(DERIVED, 3.7x) about 6.8 ms, 16.8 ms and 65 ms, so the exact field alone fills a tick per
+ring and the picture fills four.
+
+- **Exact visibility is the cheaper of the two models: 2.1x the sampler on rings, 4.6x on
+  cones**, and the only one within a tick on the M4 at its worst field (8.9 ms). Its accuracy is
+  the prototype's record (CLAIMED there, `analytic_field.md` on `lane/fields-exact`): 105 of 106
+  cone and 29 of 32 ring rows within 1 HP or 5 % of the reference aim, no knockout flip. Its own
+  record names reductions not built: integrating only silhouette edges, a bake-time convex hull
+  per box, and not copying trimeshes per throw.
+- **The dot picture costs 8–82x the sampler at the settings that match.** Rings need 256x8 to
+  match every row within one reference (CLAIMED, `analytic_field.md` on `lane/fields-raster`):
+  71 ms p50, 4.5 M4 ticks a ring. 64x8 already costs 7.7x (rings) and 20x (cones); centre-only
+  256 costs 16–19x and leaves the thin openings all-or-nothing. Its record names reductions not
+  built (testing sub-samples only against faces whose outline crosses the dot, adaptive
+  refinement).
+- **The sampler's walks stay on the server either way** while the pen cam draws per-direction
+  lines (#204's second question): a model's cost adds to them unless the picture changes.
+- The per-field rows are in the bed's output (`fields-1.log`, `fields-2.log`, not committed). The
+  costliest fields are the rings that reach the hull's interior (HE and APHE bursts at the
+  driver, turret-left, oblique: picture 256x8 82–105 ms). Four rings cost the exact field
+  466–472 µs (APHE rear, oblique and engine, HE right-rear; MEASURED); that their origins are
+  blocked (a burst in or on a plate, decided by one walk) is ASSUMED from the prototype's rule.
 
 ## Item 3: the building weight check
 
