@@ -503,6 +503,34 @@ mod tests {
         WeaponLoad, WeaponLoads, WeaponRound, WeaponState,
     };
 
+    /// The game's damage model: hull recoil is opposite the bore and linear in shot momentum.
+    /// The owner requested both the shot-momentum reference and the current response as MEASURED
+    /// software readouts; this gate deliberately does not choose their ratio. FIXTURE DATA: the
+    /// synthetic mass and speed below exercise the invariant independently of the registry.
+    #[test]
+    fn hull_recoil_is_an_opposed_linear_response_to_shot_momentum() {
+        let (mass, speed) = (3.5, 220.0);
+        let impulse = super::recoil_impulse(Dir3::Z, mass, speed);
+        assert!(impulse.is_finite() && impulse.z < 0.0);
+        assert_eq!(impulse.x, 0.0);
+        assert_eq!(impulse.y, 0.0);
+        assert_eq!(
+            super::recoil_impulse(Dir3::Z, mass * 2.0, speed),
+            impulse * 2.0
+        );
+        assert_eq!(
+            super::recoil_impulse(Dir3::Z, mass, speed * 2.0),
+            impulse * 2.0
+        );
+        for (gun, key, round) in crate::guns::GunRegistry::shipped().fired_rounds() {
+            let momentum = round.body.mass * round.muzzle_speed;
+            let current = -super::recoil_impulse(Dir3::Z, round.body.mass, round.muzzle_speed).z;
+            println!(
+                "MEASURED software recoil {gun}/{key}: shot_momentum_n_s={momentum:.7} current_n_s={current:.7}"
+            );
+        }
+    }
+
     /// A loader's seat with its own occupant, as a tank spawns it.
     fn native_loader(root: Entity) -> (CrewStation, Crewman, VolumeOf) {
         (

@@ -122,3 +122,24 @@ Verified against the installed Bevy 0.19 source: `WorldAssetRoot` changes are ha
 `WorldInstanceReady` invalidates the stage's mask copies. MEASURED: 192 targeted pen-cam,
 round-effects, headless-composition and citation tests passed; six on-demand instruments stayed
 ignored. Format and workspace/all-target clippy passed. No captures.
+
+## Recoil readout (B3, owner decision)
+
+The game's damage model: MEASURED software readouts from the headless
+`hull_recoil_is_an_opposed_linear_response_to_shot_momentum` test, using the gun registry's
+launched assembly mass and muzzle speed. These are impulse magnitudes along the negative bore,
+not external physical measurements. The shot-momentum reference is `mass × muzzle_speed`; the
+current response is the actual `recoil_impulse` function applied by shooting. No recoil behavior,
+including `RECOIL_FEEL`, changed. No frame/tick timing was measured.
+
+| Gun / round (fixture data at this revision) | Shot momentum (N s), MEASURED | Current hull impulse (N s), MEASURED |
+|---|---:|---:|
+| kwk36_l56 / 88mm_AP | 7884.5996094 | 19711.5000000 |
+| kwk36_l56 / 88mm_APCR | 6789.0000000 | 16972.5000000 |
+| kwk36_l56 / 88mm_APHE_ring | 7884.5996094 | 19711.5000000 |
+| kwk36_l56 / 88mm_HE | 7626.0000000 | 19065.0000000 |
+| mg34 / 7.9mm_AP | 8.9090004 | 22.2725010 |
+
+The synthetic control tests opposition to the bore and linearity in mass and speed, without
+pinning the ratio the owner is deciding. Format, workspace/all-target clippy, the readout and
+citation gates passed. MEASURED: four tests passed, none failed.
