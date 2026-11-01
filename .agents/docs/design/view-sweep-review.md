@@ -23,8 +23,8 @@ DERIVED ratio 2.000000. Driving laws and their material values were unchanged by
 | V1 | Fixed | `camera::TurretPivot` caches the controlled entity with its offset and clears in the tankless gap. A different possessed rig recomputes from its complete skeleton. An ordered PostUpdate chain runs after every Update handoff and before orbit/captive readers. |
 | V2 | Fixed | Required sourced round `effects.ember` states presence, radius, base offset, burn, fade and linear HDR colour. `FlightEffects` is present at shell spawn; `vfx::ember` consumes it independently of scene/calibre. |
 | V3 | Fixed | Required sourced `effects.smoke` states presence, width, growth, lifetime, drift and birth taper. `vfx::trail` carries each emission through the existing path/bounce renderer. |
-| V4 | Open | `vfx::muzzle` still selects seed recipes by calibre. Weapon/shot gas output, radiant geometry, smoke and light need required authored emission facts and a generic consumer. Moving the existing constants into a universal scale would not close this finding. |
-| V5 | Open | Muzzle height still gates ground dust. Required ground erodibility/cohesion and muzzle-gas coupling are absent. The painted-mask CPU seam in `track_prints::PrintDepths` can locate ground weights, but its track-print softness is not a dust law. |
+| V4 | Fixed (lane 2) | Each gun file states a required sourced `muzzle` block (`guns::MuzzleEmission`): core, flames, fireball, glow, smoke ration, light, ground blast. It rides `Round::muzzle` and `FireShell::muzzle` to one `vfx::muzzle` observer; no calibre split or seed-calibre scale remains. Shipped values are the previous provisional look, ASSUMED. |
+| V5 | Fixed (lane 2) | Ground types state a required `dust.erodibility`; the gun states its gas `reach_m`. Puffs = the gun's rolled count × the painted ground's blended erodibility (`terrain_blend::dust_erodibility`). Erodibilities ASSUMED, ordered by hand. |
 | V6 | Fixed for material selection | A volume's `SurfaceFeedback` travels through authority `Bounce`/`Bite`, public `PathImpact`, `Impact` and static-proxy response. Required sourced facts select spark presence and powder colour. Nonsparking materials produce powder without a metal flash/fan. Dimensions remain the separate new finding below. |
 | V7 | Fixed | `ShellStrike` carries the exact struck primitive's response into `HullMark`; late joiners receive it with the record. Shared neutral relief maps receive per-response exposed tint, metallic and roughness factors. No fresh-steel constant selects appearance. |
 
@@ -84,7 +84,7 @@ The P3s, identified by the inventory's symbol/location:
 
 ## Additional findings
 
-- **New P2, open: impact emission geometry.** `vfx::impact`'s compact/large sizes, speeds, light and
+- **New P2, half fixed in lane 2: impact emission geometry.** `vfx::impact`'s compact/large sizes, speeds, light and
   lifetimes remain fixed recipes selected by calibre. Material selection is now honest, but the
   comments' broader physical-scale claim was false. Carry deposited energy and emitted-material
   facts into generic dressing; do not substitute viewer distance or a seed-round multiplier.
@@ -92,6 +92,12 @@ The P3s, identified by the inventory's symbol/location:
   reads `Projectile::body` (the penetrator). A subcalibre construction therefore needs resolved
   contact geometry carried to the mark, rather than treating the exact wire value as proof that
   its footprint is the penetration diameter.
+  Lane 2: the mark half is fixed. `ShellStrike::contact_caliber` (`ballistics::face_contact_caliber`)
+  sizes a perforation's hole by the penetrator and a bounce or stop by the flying assembly; the
+  record cutoff still reads the flying body. The dressing half stays open. It is not a failure site,
+  so none of the four outcomes applies: it is a missing truth. The fix carries the energy the round
+  lost at the face on `Impact` and adds an authored per-substance ejecta response, scaled by a
+  stated law. No calibre boundary or seed multiplier.
 - **New P3, fixed: late ownership scheduling.** An Update capture could precede a possession
   handoff later in that schedule. Pivot capture and optic-exit re-aim now run in one PostUpdate
   chain before the orbit and captive readers; an adversarial late-handoff test covers that frame.
@@ -104,6 +110,37 @@ The P3s, identified by the inventory's symbol/location:
   A checked exact positive finite calibre replaces it, including deserialization refusal at the
   network edge. No upper presentation-size constant remains. Surface roughness uses `NonZeroU8`,
   so outside wire input cannot bypass the authored-file gate with a zero multiplier.
+
+## Lane 2 review of sweep-view
+
+Read against the three lenses and for correctness. No P1 or P2 found. Weighed:
+
+- Flight emissions and surface response: every authored value is sourced, and ASSUMED values are
+  labelled. Presence is a required `Sourced<Option<_>>`, and out-of-domain values refuse at load.
+  The muzzle and ground facts in lane 2 follow the same pattern.
+- PROTOCOL_REV 48 and the checked `MarkCaliber`/`NonZeroU8` domains are correct and pinned. Lane 2
+  changes no wire type.
+- The retired alternatives are gone. No code reads `OVERMATCH_LOD_SHOWCASE`, `SPIKE_MESH_REMOVALS`,
+  `depth_copy` or `terrain-field`. Fixed: the vendored bevy_pbr patch record still named the
+  counter as live.
+- HUD clamp: agreed. The steering law clamps its reverse index to the last forward pair the same
+  way. The HUD now says so, and panics on an empty table, which load refuses.
+
+P3s:
+- Fixed: the drive HUD read the first of several controlled tanks; it now uses `controlled_one`.
+- Listed: `HullMark::pack` drops an invalid calibre through `.ok()`. `MarkBuilder::mark` then
+  panics on it, but its `expect` names only coordinates and directions.
+- Listed: `vfx::verify_vfx_paths` reads every texture whole just to refuse an empty file or an LFS
+  pointer.
+- Listed: `rounds::effects` `resolve` is left unformatted. rustfmt gives up on it, and
+  `--check` still passes.
+
+New findings:
+- P2, base-truths: `ballistics::view` chooses the shell scene or the tracer streak by
+  `TRACER_MAX_CALIBER`. The round's authored construction should decide.
+- P3: the fill glow's alpha and boost and every sprite's playback rate stay shared renderer
+  constants. They are facts of the sprite sheets, not emissions; a gun that needs its own moves
+  them into its `muzzle` block.
 
 ## Validation and owner capture batch
 
@@ -135,7 +172,12 @@ The orchestrator's single capture batch should inspect:
 4. Mark size above the old byte ceiling using labelled synthetic data; no saturation.
 5. Main-pass depth fading, baked terrain shadow reception, and the capture-plan LOD comparison at
    actual certificate ranges on the declared map extent.
+6. Lane 2: main gun and MG muzzles against the previous look. Expect identical layers. The APCR
+   fireball no longer shrinks with its flying body. Check the MG smoke ration and the tracer glimmer.
+7. Lane 2: main-gun ground dust on gravel (now 4-6 puffs), dirt and sand (5-8), mud, and concrete
+   (0-1). Also a muzzle just inside and just outside the 2.5 m reach.
+8. Lane 2: an APCR hole on armour at the core's 35.7 mm, against a full-calibre dent or bounce.
 
-Remaining implementation ownership: V4, V5 and the new impact-geometry P2 need authored emission /
-ground facts and their generic laws. The provisional visual data needs the owner's batched eye
+Remaining implementation ownership: the impact-geometry P2's dressing half, which needs the energy
+lost at the face and a per-substance ejecta response, and the `ballistics::view` calibre split. The provisional visual data needs the owner's batched eye
 review and calibration. No speculative physical calibration was made in this lane.
