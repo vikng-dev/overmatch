@@ -15,8 +15,8 @@
 //! [`server_wall_plugin`] on the dedicated server, which reads the same plan file so that it fires
 //! the wall shots its capture clients frame.
 //!
-//! The target's scale factor is [`SCALE_FACTOR`], so the UI lays out at half the frame's size in
-//! logical pixels, as on a retina window. Every capture run seeds the view RNG (cosmetic effect
+//! The plan's `frames.scale_factor` sets the target's UI ratio (ASSUMED default 2, as on a
+//! retina window), so HUD evidence can also request an ordinary scale-1 window. Every capture run seeds the view RNG (cosmetic effect
 //! variation, otherwise seeded from the wall clock) with [`VIEW_SEED`], so two runs of one scenario
 //! on a fixed step draw the same sprites. The process exits once every frame is on disk, with a
 //! failure code if any is missing.
@@ -58,8 +58,6 @@ use bevy::ui::IsDefaultUiCamera;
 
 use crate::sight::SightMode;
 
-/// Logical-to-physical ratio of the frame; the UI lays out at `size / SCALE_FACTOR` logical pixels.
-const SCALE_FACTOR: f32 = 2.0;
 /// Seconds between the retarget and the first frame. The image's GPU texture, the camera's target
 /// info and the UI's relayout each follow the retarget by a frame; one second covers them all.
 const WARM_UP: f32 = 1.0;
@@ -79,6 +77,7 @@ struct Capture {
     at: Vec<f32>,
     sight: bool,
     size: UVec2,
+    scale_factor: f32,
     gizmos: bool,
     /// The cameras' target once retargeted; each screenshot names it verbatim.
     target: Option<ImageRenderTarget>,
@@ -220,6 +219,7 @@ fn mount(app: &mut App, frames: &plan::Frames) {
         at: frames.at.clone(),
         sight: frames.sight,
         size,
+        scale_factor: frames.scale_factor,
         gizmos: frames.gizmos,
         target: None,
         switched: false,
@@ -519,7 +519,13 @@ fn capture(
         cap.switched = true;
     }
     if cap.target.is_none() && t >= first - WARM_UP {
-        cap.target = Some(retarget(&mut commands, &mut images, &mut cameras, cap.size));
+        cap.target = Some(retarget(
+            &mut commands,
+            &mut images,
+            &mut cameras,
+            cap.size,
+            cap.scale_factor,
+        ));
         if !cap.gizmos
             && let Some(mut store) = gizmo_store
         {
@@ -576,8 +582,9 @@ fn retarget(
     images: &mut Assets<Image>,
     cameras: &mut Query<(Entity, &Camera, &mut RenderTarget, Has<IsDefaultUiCamera>)>,
     size: UVec2,
+    scale_factor: f32,
 ) -> ImageRenderTarget {
-    let target = offscreen_target(images, size, SCALE_FACTOR);
+    let target = offscreen_target(images, size, scale_factor);
     let moved = retarget_to(commands, cameras, &target);
     info!(
         "capture: {moved} camera(s) retargeted to a {}x{} image",
@@ -664,6 +671,7 @@ mod tests {
             at: vec![0.0],
             sight: false,
             size: UVec2::ONE,
+            scale_factor: 2.0,
             gizmos: false,
             target: None,
             switched: false,

@@ -76,7 +76,7 @@ impl Overlay {
 
     /// The z-layer for the gunner sight's own FURNITURE — today the optic mask, the blackout with
     /// the glass cut out of it (`sight::reticle`). Negative, so it draws below every rung above
-    /// (`ViewDead`'s 50 is the lowest) AND below the unindexed HUD nodes at 0, including the sight's
+    /// (`ViewDead`'s 50 is the lowest) AND below world labels and fixed HUD (the named rungs below), including the sight's
     /// own graticule and intent cursor: an optic surround is the bottom of the UI, not a layer over
     /// it. Every overlay therefore covers it whole — a dead gunner's black, a death screen, a map, a
     /// menu, a connect screen.
@@ -86,6 +86,12 @@ impl Overlay {
     /// captures no input, owns no scrim, and is never suppressed by the one-scrim rule — it is part
     /// of the VIEW the overlays cover, not one of them.
     pub(crate) const SIGHT_FURNITURE_Z: i32 = -10;
+
+    /// World-anchored labels sit above optic furniture and below every fixed HUD panel.
+    pub(crate) const WORLD_LABEL_Z: i32 = Self::SIGHT_FURNITURE_Z + 1;
+
+    /// Fixed HUD panels share the ordinary UI rung; their labels cover world-anchored labels.
+    pub(crate) const FIXED_HUD_Z: i32 = 0;
 
     /// The z-layer for the death tint ([`death_tint`]), the full-screen wash over the world on a
     /// death screen — the net client's (`net::death_screen`) and the kill cam's from its handoff
@@ -555,6 +561,14 @@ mod tests {
     /// the death status line (which rides Death's z) shows through the menu.
     #[test]
     fn zindex_contract_is_pinned() {
+        assert_eq!(Overlay::WORLD_LABEL_Z, -9);
+        assert_eq!(Overlay::FIXED_HUD_Z, 0);
+        const {
+            assert!(Overlay::SIGHT_FURNITURE_Z < Overlay::WORLD_LABEL_Z);
+            assert!(Overlay::WORLD_LABEL_Z < Overlay::FIXED_HUD_Z);
+            assert!(Overlay::FIXED_HUD_Z < Overlay::PEN_CAM_CORNER_Z);
+            assert!(Overlay::PEN_CAM_CORNER_Z < Overlay::SCOREBOARD_Z);
+        }
         assert_eq!(Overlay::ConnectStatus.zindex(), 300);
         assert_eq!(Overlay::Death.zindex(), 200);
         assert_eq!(Overlay::Menu.zindex(), 100);

@@ -141,6 +141,10 @@ pub(crate) enum DemoHold {
     Pivot,
 }
 
+fn default_scale_factor() -> f32 {
+    2.0
+}
+
 fn right() -> f32 {
     1.0
 }
@@ -161,6 +165,10 @@ pub(crate) struct Frames {
     /// The frame in physical pixels, `(width, height)`. Default `(2560, 1440)`.
     #[serde(default = "default_size")]
     pub(crate) size: (u32, u32),
+    /// Logical-to-physical UI ratio, finite and positive. ASSUMED default: retina-like 2.
+    /// The board capture recipes also exercise the ordinary scale-1 window.
+    #[serde(default = "default_scale_factor")]
+    pub(crate) scale_factor: f32,
     /// `false` hides every UI tree, every frame. Default `true`.
     #[serde(default = "yes")]
     pub(crate) ui: bool,
@@ -343,6 +351,18 @@ impl CapturePlan {
             }
             if frames.size.0 == 0 || frames.size.1 == 0 {
                 return Err(format!("frames.size: {:?} has a zero side", frames.size));
+            }
+            if !(frames.scale_factor.is_finite() && frames.scale_factor > 0.0) {
+                return Err(format!(
+                    "frames.scale_factor: {} is not finite and positive",
+                    frames.scale_factor
+                ));
+            }
+            if !(frames.size().as_vec2() / frames.scale_factor).is_finite() {
+                return Err(
+                    "frames.scale_factor: the requested logical target size is unrepresentable"
+                        .into(),
+                );
             }
             if let Some(step) = frames.step_s
                 && !(step.is_finite() && step > 0.0)
@@ -606,6 +626,7 @@ mod tests {
         let frames = plan.frames.as_ref().expect("frames");
         assert_eq!(frames.at, vec![6.0]);
         assert_eq!(frames.size(), UVec2::new(2560, 1440));
+        assert_eq!(frames.scale_factor, 2.0);
         assert!(frames.ui && frames.gizmos && !frames.sight);
         assert_eq!((frames.step_s, frames.camera), (None, Camera::Player));
         assert_eq!(
@@ -623,6 +644,31 @@ mod tests {
         assert_eq!(wall.scene.range_wall, Some(RangeWall::default()));
         let scene = CapturePlan::parse("()").expect("an empty plan");
         assert_eq!(scene.frames, None);
+    }
+
+    /// The board's capture recipes must preserve their requested UI geometry; invalid outside
+    /// input fails at plan admission, rather than publishing a misleading or unusable image.
+    #[test]
+    fn capture_scale_is_explicit_and_refused_outside_its_domain() {
+        for scale in [1.0, 2.0] {
+            let text = format!("(frames: (out: \"board.png\", scale_factor: {scale}))");
+            assert_eq!(
+                CapturePlan::parse(&text)
+                    .unwrap()
+                    .frames
+                    .unwrap()
+                    .scale_factor,
+                scale
+            );
+        }
+        for scale in ["0.0", "-1.0", "NaN", "inf", "1e-40"] {
+            let text = format!("(frames: (out: \"board.png\", scale_factor: {scale}))");
+            assert!(
+                CapturePlan::parse(&text)
+                    .unwrap_err()
+                    .contains("scale_factor")
+            );
+        }
     }
 
     /// A PLAN THAT CANNOT MEAN WHAT IT SAYS FAILS THE BOOT, NAMING ITS FIELD (ADR-0011): a typo, a

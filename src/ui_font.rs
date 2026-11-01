@@ -49,6 +49,10 @@ pub(crate) const PANEL_BG: Color = Color::srgba(0.04, 0.06, 0.08, 0.62);
 /// backing rather than a readable-through one.
 pub(crate) const MODAL_BG: Color = Color::srgba(0.03, 0.05, 0.07, 0.92);
 
+/// Opaque backing for a modal HUD card drawn over live world labels. Unlike a full-screen page,
+/// the card owns no scrim; its own surface must obscure the lower layers under its text.
+pub(crate) const MODAL_CARD_BG: Color = Color::srgb(0.03, 0.05, 0.07);
+
 /// The death screen's red wash over the world (TUNED), drawn only by `overlay::death_tint`.
 pub(crate) const DEATH_TINT: Color = Color::srgba(0.15, 0.0, 0.0, 0.6);
 

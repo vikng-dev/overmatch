@@ -1,0 +1,10 @@
+// The game's HUD, game state only. FIXTURE DATA: owner-requested compact board at scale 1.0.
+// Run the client against a local server with OVERMATCH_BOT=29; no timing/pricing is collected.
+(
+ frames: (
+  out: "/tmp/overmatch-tab-board-large.png", at: [76.0, 78.0],
+  size: (1920, 1080), scale_factor: 1.0, ui: true, gizmos: false,
+  camera: Pose(eye: (0.0, 86.0, 112.0), look: (0.0, 34.0, 12.0)),
+ ),
+ keys: [(key: Tab, from: 75.0, to: 80.0), (key: PageDown, from: 77.0, to: 77.2)],
+)

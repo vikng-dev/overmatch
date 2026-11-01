@@ -23,13 +23,14 @@ use crate::view::PlayerView;
 
 /// The HUD's semantic draw order, independent of plugin/spawn order. World labels sit above
 /// sight furniture, fixed panels above labels, and modal boards above both. Full-screen overlay
-/// precedence remains owned by [`crate::overlay::Overlay`]. Modal cards use opaque backing so
-/// lower layers cannot bleed through their text.
+/// precedence remains owned by [`crate::overlay::Overlay`]. A modal card
+/// supplies its own opaque backing (`ui_font::MODAL_CARD_BG`); stamping a layer sets only z order.
 #[derive(Component, Clone, Copy, Debug, PartialEq, Eq)]
 #[component(on_add = stamp_hud_layer)]
 pub(crate) enum HudLayer {
     WorldLabel,
     Fixed,
+    Inset,
     Modal,
 }
 
@@ -37,8 +38,9 @@ impl HudLayer {
     fn zindex(self) -> i32 {
         use crate::overlay::Overlay;
         match self {
-            Self::WorldLabel => Overlay::SIGHT_FURNITURE_Z + 1,
-            Self::Fixed => 0,
+            Self::WorldLabel => Overlay::WORLD_LABEL_Z,
+            Self::Fixed => Overlay::FIXED_HUD_Z,
+            Self::Inset => Overlay::PEN_CAM_CORNER_Z,
             Self::Modal => Overlay::SCOREBOARD_Z,
         }
     }
@@ -64,6 +66,25 @@ pub(crate) enum HudDock {
     Top,
     Bottom,
     Right,
+}
+
+/// The game's damage-model view: the inset's root UI occupies the right dock. This adapter
+/// joins the presentation rig to the shared HUD placement without changing its stage entities.
+/// DERIVED from `damage_cam::pen_cam::timeline::presence`: the inset scales at most to its layout
+/// box, so reserving that box clears the whole entrance/exit animation.
+/// Temporary encounter/death cards remain overlay content: the held board deliberately covers
+/// them, as specified by `Overlay::SCOREBOARD_Z`; they do not reserve permanent HUD space.
+fn dock_corner_ui(
+    add: On<Add, crate::damage_cam::pen_cam::CornerRig>,
+    nodes: Query<(), With<Node>>,
+    mut commands: Commands,
+) {
+    // A presentation rig also has world meshes, lights and cameras. Only its UI root docks.
+    if nodes.contains(add.entity) {
+        commands
+            .entity(add.entity)
+            .insert((HudDock::Right, HudLayer::Inset));
+    }
 }
 
 /// ASSUMED spacing between fixed panels and modal cards, in logical UI pixels.
@@ -137,7 +158,8 @@ struct TankNameplate;
 
 pub fn plugin(app: &mut App) {
     crate::flow::require(app, "hud");
-    app.add_systems(OnEnter(Flow::InMatch), spawn_labels)
+    app.add_observer(dock_corner_ui)
+        .add_systems(OnEnter(Flow::InMatch), spawn_labels)
         .add_systems(
             PostUpdate,
             place_modal_hud
@@ -193,12 +215,14 @@ fn spawn_labels(mut commands: Commands, fonts: Res<UiFonts>) {
 /// Mount the real label pool without its game-state readers for HUD layout tests.
 #[cfg(test)]
 pub(crate) fn mount_layout_test(app: &mut App) {
-    app.add_systems(Startup, spawn_labels).add_systems(
-        PostUpdate,
-        place_modal_hud
-            .after(UiSystems::Content)
-            .before(UiSystems::Layout),
-    );
+    app.add_observer(dock_corner_ui)
+        .add_systems(Startup, spawn_labels)
+        .add_systems(
+            PostUpdate,
+            place_modal_hud
+                .after(UiSystems::Content)
+                .before(UiSystems::Layout),
+        );
 }
 
 #[cfg(test)]

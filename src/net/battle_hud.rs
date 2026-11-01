@@ -26,7 +26,7 @@ use super::score::{Scoreboard, Standing, rank};
 use crate::CombatantId;
 use crate::flow::{Flow, FlowScoped, InMatchSystems};
 use crate::overlay::{self, Overlays};
-use crate::ui_font::{MODAL_BG, TEXT, UiFonts, set_text};
+use crate::ui_font::{MODAL_CARD_BG, TEXT, UiFonts, set_text};
 use lightyear::interpolation::timeline::InterpolationTimeline;
 use lightyear::prelude::NetworkTimeline;
 
@@ -167,7 +167,7 @@ impl Column {
         let mut text = String::from(match self {
             Self::Place => "RANK",
             Self::Name => "PLAYER",
-            Self::Knockouts => "KNOCKOUTS",
+            Self::Knockouts => "Kills",
             Self::Losses => "LOSSES",
             Self::Mark => "",
         });
@@ -311,13 +311,13 @@ fn spawn_battle_hud(mut commands: Commands, fonts: Res<UiFonts>) {
                     max_width: Val::Percent(100.0),
                     min_height: Val::Px(0.0),
                     min_width: Val::Px(0.0),
-                    padding: UiRect::all(Val::Px(16.0)),
-                    row_gap: Val::Px(10.0),
+                    padding: UiRect::all(Val::Px(8.0)),
+                    row_gap: Val::Px(4.0),
                     border_radius: BorderRadius::all(Val::Px(4.0)),
                     ..default()
                 },
                 // Modal HUD text needs opaque backing above world-anchored labels.
-                BackgroundColor(MODAL_BG.with_alpha(1.0)),
+                BackgroundColor(MODAL_CARD_BG),
             ))
             .with_children(|card| {
                 card.spawn((
@@ -326,7 +326,7 @@ fn spawn_battle_hud(mut commands: Commands, fonts: Res<UiFonts>) {
                     TextFont {
                         // SemiBold: the card's all-caps heading.
                         font: fonts.hud.clone().into(),
-                        font_size: FontSize::Px(26.0),
+                        font_size: FontSize::Px(18.0),
                         ..default()
                     },
                     TextColor(TEXT),
@@ -335,7 +335,8 @@ fn spawn_battle_hud(mut commands: Commands, fonts: Res<UiFonts>) {
                     BoardViewport,
                     ScrollPosition::default(),
                     Node {
-                        column_gap: Val::Px(28.0),
+                        column_gap: Val::Px(12.0),
+                        align_items: AlignItems::Start,
                         max_height: Val::Percent(100.0),
                         min_height: Val::Px(0.0),
                         width: Val::Percent(100.0),
@@ -352,9 +353,10 @@ fn spawn_battle_hud(mut commands: Commands, fonts: Res<UiFonts>) {
                             TextFont {
                                 // Regular: dense table rows.
                                 font: fonts.body.clone().into(),
-                                font_size: FontSize::Px(20.0),
+                                font_size: FontSize::Px(14.0),
                                 ..default()
                             },
+                            bevy::text::LineHeight::Px(16.0),
                             TextLayout::justify(column.justify()).with_no_wrap(),
                             Node {
                                 flex_shrink: 0.0,
@@ -369,7 +371,7 @@ fn spawn_battle_hud(mut commands: Commands, fonts: Res<UiFonts>) {
                     Text::new("PAGE UP/DOWN: ROWS  LEFT/RIGHT: COLUMNS"),
                     TextFont {
                         font: fonts.body.clone().into(),
-                        font_size: FontSize::Px(16.0),
+                        font_size: FontSize::Px(12.0),
                         ..default()
                     },
                     TextColor(TEXT),
@@ -673,7 +675,7 @@ mod tests {
 
     /// The narrow-window roster must keep every score column reachable without wrapping any
     /// standing onto extra lines. Players on tall windows rely on horizontal paging rather than
-    /// clipped columns. FIXTURE DATA: the review's narrow window, diagnostics shown.
+    /// clipped columns. FIXTURE DATA: a narrow window, diagnostics shown.
     #[test]
     fn a_narrow_board_keeps_every_column_in_its_scroll_content() {
         let mut app = hud_layout_app(960, 1080, 2.0);
@@ -717,6 +719,89 @@ mod tests {
         }
     }
 
+    /// The compact board preserves one logical row per standing. The shipped-size fixtures pin
+    /// the capacity: a large window fits the full Battle; the small high-scale target retains
+    /// scrolling. FIXTURE DATA: thirty standings and the two viewport/scale combinations below.
+    #[test]
+    fn compact_board_names_the_rows_that_fit_at_both_owner_fixtures() {
+        for (width, height, scale, expected_rows) in [(1280, 720, 2.0, 6), (1920, 1080, 1.0, 30)] {
+            let mut app = hud_layout_app(width, height, scale);
+            let world = app.world_mut();
+            let viewport = world
+                .query_filtered::<&ComputedNode, With<BoardViewport>>()
+                .single(world)
+                .unwrap();
+            let viewport_height = viewport.size.y * viewport.inverse_scale_factor;
+            let rows = ((viewport_height / 16.0).floor() as usize)
+                .saturating_sub(1)
+                .min(30);
+            eprintln!(
+                "MEASURED compact board {width}x{height} scale {scale}: {rows} standings fit, viewport {viewport_height} logical px"
+            );
+            assert_eq!(
+                rows, expected_rows,
+                "MEASURED fixture capacity must remain readable"
+            );
+            assert!(
+                viewport.content_size.y * viewport.inverse_scale_factor >= 31.0 * 16.0,
+                "paging must reach every line of the real laid-out roster"
+            );
+            // The combat board's unused winner column is all blank lines and has no ink box.
+            for (part, text, layout) in world
+                .query::<(&Part, &Text, &bevy::text::TextLayoutInfo)>()
+                .iter(world)
+            {
+                if matches!(part, Part::Column(_)) && !text.0.trim().is_empty() {
+                    assert!(
+                        (layout.size.y - 31.0 * 16.0).abs() < 1.0,
+                        "{part:?}: one header and thirty rendered lines, got {} logical px",
+                        layout.size.y
+                    );
+                    assert_eq!(
+                        layout.glyphs.last().unwrap().line_index,
+                        30,
+                        "soft wrapping must not add standing lines"
+                    );
+                }
+            }
+        }
+    }
+
+    /// The game's damage-model view: the live inset is a fixed right panel, so Tab leaves it
+    /// readable. Its public rig marker is the integration seam; world rig entities never dock.
+    /// FIXTURE DATA: the corner's initial dimensions in the small high-scale target.
+    #[test]
+    fn the_live_corner_reserves_its_laid_out_panel_for_the_board() {
+        let mut app = hud_layout_app(1280, 720, 2.0);
+        let corner = app
+            .world_mut()
+            .spawn((
+                crate::damage_cam::pen_cam::CornerRig,
+                Node {
+                    position_type: PositionType::Absolute,
+                    top: Val::Px(16.0),
+                    right: Val::Px(16.0),
+                    width: Val::Px(384.0),
+                    height: Val::Px(240.0),
+                    ..default()
+                },
+                GlobalZIndex(Overlay::PEN_CAM_CORNER_Z),
+                Visibility::Visible,
+            ))
+            .id();
+        settle_hud(&mut app);
+        let (_, card) = board_entities(app.world_mut());
+        assert!(matches!(
+            app.world().get::<crate::hud::HudDock>(corner),
+            Some(crate::hud::HudDock::Right)
+        ));
+        assert_eq!(
+            app.world().get::<GlobalZIndex>(corner).unwrap().0,
+            Overlay::PEN_CAM_CORNER_Z
+        );
+        assert_modal_clear(app.world_mut(), card);
+    }
+
     fn assert_modal_clear(world: &mut World, card: Entity) {
         let board = hud_rect(world, card);
         assert!(board.width() > 0.0 && board.height() > 0.0);
@@ -737,8 +822,8 @@ mod tests {
             .single(world)
             .unwrap();
         assert!(
-            viewport.size().y > 0.0 && viewport.content_size.y > viewport.size().y,
-            "the populated roster retains a scrollable, nonempty viewport"
+            viewport.size().y > 0.0 && viewport.content_size.y > 0.0,
+            "the populated roster retains a nonempty viewport"
         );
     }
 
@@ -1114,7 +1199,7 @@ mod tests {
         let column = |app: &mut App, which| text(app, Part::Column(which));
         assert_eq!(column(&mut app, Column::Place), "RANK\n1\n2");
         assert_eq!(column(&mut app, Column::Name), "PLAYER\nPLAYER 9\nPLAYER 7");
-        assert_eq!(column(&mut app, Column::Knockouts), "KNOCKOUTS\n3\n1");
+        assert_eq!(column(&mut app, Column::Knockouts), "Kills\n3\n1");
         assert_eq!(column(&mut app, Column::Losses), "LOSSES\n2\n0");
         assert_eq!(column(&mut app, Column::Mark), "\n\n");
         app.world_mut()
