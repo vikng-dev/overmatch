@@ -13,11 +13,16 @@
 #   condition_gates <cond> <log> <stream>          its own gates, after the shared ones and before
 #                                                  the condition's receipt;
 #   condition_launched <cond> <log> <stream>       right after the client starts (CLIENT_PID set);
-#   condition_poll <cond> <log> <stream> <span_s>  on every poll once the stream has rows, with its
-#                                                  span on the app clock, before the span check —
-#                                                  the window's edges are WARMUP_S and
-#                                                  WARMUP_S+DURATION_S of span;
+#   condition_poll <cond> <log> <stream> <span_s>  on every poll, with the stream's span on the app
+#                                                  clock (empty until it has rows), before the span
+#                                                  check — the window's edges are ORIGIN+WARMUP_S
+#                                                  and ORIGIN+WARMUP_S+DURATION_S of span;
 #   run_cleanup                                    on exit, after the client is reaped.
+# ORIGIN is FRAME_RUN_ORIGIN_S, the stream second the window counts from: 0 (the first row) for an
+# offline condition, reset before each launch; a runner that learns where its workload starts sets
+# it from `condition_launched` or `condition_poll` (the online runner: the harness's combat release,
+# `harness: released … app_s=`, on the same app clock as the rows). The loop's span target, its
+# deadline and the analyzer's warmup all carry it, so no held frame enters a window.
 #
 # OFFSCREEN=1 (read from the environment, for every runner) is the mode that takes nobody's screen:
 # a hidden window whose cameras render into a 2560x1440 image at scale factor 2, the visible
@@ -44,6 +49,7 @@ SMOKE_RELAX=()
 [[ -n "$SMOKE" ]] && SMOKE_RELAX=(--occluded-ok --display-ok --surface-ok --undrawn-ok)
 CLIENT="$BIN/overmatch"
 CLIENT_PID=""
+FRAME_RUN_ORIGIN_S=0
 (( ${+FRAME_RUN_CLIENT_ARGS} )) || FRAME_RUN_CLIENT_ARGS=(--offline)
 
 frame_run_invalid() {
@@ -96,7 +102,7 @@ frame_run_begin() {
   [[ -d "$ASSET_ROOT/assets" ]] || { echo "no assets/ under ASSET_ROOT=$ASSET_ROOT" >&2; exit 1; }
 
   mkdir -p "$OUT"
-  rm -f "$OUT"/*.jsonl "$OUT"/*.log "$OUT"/manifest.txt "$OUT"/SMOKE-PLUMBING-ONLY.txt
+  rm -f "$OUT"/*.jsonl "$OUT"/*.log "$OUT"/manifest.txt "$OUT"/SMOKE-PLUMBING-ONLY.txt "$OUT"/origins.tsv
   rm -rf "$OUT"/cfg-*
 
   if [[ -n "$SMOKE" ]]; then
@@ -161,18 +167,20 @@ frame_run_condition() {
     OVERMATCH_CONFIG_DIR="$cfg" SPIKE_FRAME_COST="$OUT/$cond.jsonl" BEVY_ASSET_ROOT="$ASSET_ROOT" \
     "$@" "$CLIENT" "${FRAME_RUN_CLIENT_ARGS[@]}" >"$log" 2>&1 &
   CLIENT_PID=$!
+  FRAME_RUN_ORIGIN_S=0
   if (( $+functions[condition_launched] )); then
     condition_launched "$cond" "$log" "$stream"
   fi
 
-  # Run the condition until the STREAM spans warmup+duration on its own clock — `t` is
+  # Run the condition until the STREAM spans origin+warmup+duration on its own clock — `t` is
   # app-elapsed time, so process startup (asset load, shader compilation, window creation; >10 s
   # cold) is invisible to a wall-clock sleep and would silently eat the measurement window. The
   # analyzer's span gate measures the stream, so the runner must feed it by the same clock.
-  # STARTUP_GRACE_S bounds how long startup may take before the condition is declared stalled.
-  local deadline=$((SECONDS + WARMUP_S + DURATION_S + STARTUP_GRACE_S))
-  local span_ok="" state t_first t_last exit_status
-  while (( SECONDS < deadline )); do
+  # STARTUP_GRACE_S bounds how long startup may take before the condition is declared stalled; the
+  # origin a runner sets during the run extends the target and the deadline alike.
+  local started=$SECONDS
+  local span_ok="" state t_first t_last exit_status span
+  while (( SECONDS < started + FRAME_RUN_ORIGIN_S + WARMUP_S + DURATION_S + STARTUP_GRACE_S )); do
     sleep 1
     # The child must still be ALIVE while the window fills (and not a zombie — kill -0 answers
     # yes for a zombie, so ask ps for the state): a client that died mid-condition produced a
@@ -184,19 +192,21 @@ frame_run_condition() {
       CLIENT_PID=""
       frame_run_invalid "$cond" "client exited (status $exit_status) before the stream spanned $((WARMUP_S + DURATION_S))s — early death, not evidence (see $log)"
     fi
-    [[ -f "$stream" ]] || continue
     # A torn last line simply fails the extraction and this poll waits another second.
+    span=""
     t_first="$(frame_run_t_first "$stream")"
     t_last="$(frame_run_t_last "$stream")"
-    if [[ -n "$t_first" && -n "$t_last" ]] && (( $+functions[condition_poll] )); then
-      condition_poll "$cond" "$log" "$stream" "$(( t_last - t_first ))"
+    [[ -n "$t_first" && -n "$t_last" ]] && span=$(( t_last - t_first ))
+    if (( $+functions[condition_poll] )); then
+      condition_poll "$cond" "$log" "$stream" "$span"
     fi
-    if [[ -n "$t_first" && -n "$t_last" ]] && (( t_last - t_first >= WARMUP_S + DURATION_S )); then
+    if [[ -n "$span" ]] && (( span >= FRAME_RUN_ORIGIN_S + WARMUP_S + DURATION_S )); then
       span_ok=1
       break
     fi
   done
-  [[ -n "$span_ok" ]] || frame_run_invalid "$cond" "stream never spanned $((WARMUP_S + DURATION_S))s within the $((WARMUP_S + DURATION_S + STARTUP_GRACE_S))s deadline — stalled or never armed (see $log)"
+  [[ -n "$span_ok" ]] || frame_run_invalid "$cond" "stream never spanned $((FRAME_RUN_ORIGIN_S + WARMUP_S + DURATION_S))s within the $((FRAME_RUN_ORIGIN_S + WARMUP_S + DURATION_S + STARTUP_GRACE_S))s deadline — stalled or never armed (see $log)"
+  printf '%s\t%s\n' "$cond" "$FRAME_RUN_ORIGIN_S" >>"$OUT/origins.tsv"
   kill "$CLIENT_PID" 2>/dev/null || true
   wait "$CLIENT_PID" 2>/dev/null || true
   CLIENT_PID=""
@@ -232,7 +242,8 @@ frame_run_condition() {
   # fast-enough single monitor and a full-size surface covering all of it. SMOKE relaxes every
   # presentation gate: its window is hidden, so it neither occludes honestly, resolves a monitor or a
   # real surface, nor draws, and its numbers are declared fiction.
-  ( cd "$REPO" && uv run scripts/perf/analyze.py --validate-only --warmup-s "$WARMUP_S" \
+  ( cd "$REPO" && uv run scripts/perf/analyze.py --validate-only \
+      --warmup-s "$((FRAME_RUN_ORIGIN_S + WARMUP_S))" \
       --min-rows "$MIN_ROWS" --expected-duration-s "$DURATION_S" \
       "${SMOKE_RELAX[@]}" "$stream" ) \
     || frame_run_invalid "$cond" "frame stream failed the analyzer's validity gates (see above)"
@@ -282,9 +293,22 @@ frame_run_condition() {
 }
 
 # The tables: `frame_run_analyze <baseline> <stream ...>`, the same gates as each condition's.
+# Conditions that set an origin have windows of their own, so each prints its own table (the
+# analyzer's one warmup cannot name two origins) and no delta column against the baseline.
 frame_run_analyze() {
   local baseline="$1"
   shift
+  local stream cond origin
+  if [[ -f "$OUT/origins.tsv" ]] && awk -F'\t' '$2 != 0 { found = 1 } END { exit !found }' "$OUT/origins.tsv"; then
+    for stream in "$@"; do
+      cond="$(basename "$stream" .client.jsonl)"
+      origin="$(awk -F'\t' -v c="$cond" '$1 == c { print $2 }' "$OUT/origins.tsv")"
+      ( cd "$REPO" && uv run scripts/perf/analyze.py --warmup-s "$(( ${origin:-0} + WARMUP_S ))" \
+          --min-rows "$MIN_ROWS" --expected-duration-s "$DURATION_S" "${SMOKE_RELAX[@]}" \
+          --baseline "$cond" "$stream" )
+    done
+    return
+  fi
   ( cd "$REPO" && uv run scripts/perf/analyze.py --warmup-s "$WARMUP_S" --min-rows "$MIN_ROWS" \
       --expected-duration-s "$DURATION_S" "${SMOKE_RELAX[@]}" --baseline "$baseline" "$@" )
 }

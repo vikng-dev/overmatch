@@ -15,6 +15,7 @@ use bevy::prelude::*;
 use serde_json::json;
 
 use crate::ballistics::Projectile;
+use crate::state::MatchCommands;
 use crate::tank::Tank;
 use crate::trace::{JsonlSink, role_path};
 
@@ -91,9 +92,10 @@ fn close_tick(mut clock: ResMut<TickClock>) {
 #[derive(Resource)]
 struct CostTrace {
     sink: JsonlSink,
-    /// Monotone recorder tick index and warmup gate.
+    /// Monotone recorder tick index and warmup gate: played ticks only, so in a match it counts
+    /// from combat release ([`MatchCommands`]).
     tick: u64,
-    /// Ticks to skip before writing rows.
+    /// Played ticks to skip before writing rows.
     warmup: u64,
 }
 
@@ -139,10 +141,14 @@ fn write_meta(mut cost: ResMut<CostTrace>, fixed: Res<Time<Fixed>>, role: Res<Co
 #[derive(Resource)]
 struct CostRole(&'static str);
 
-/// `FixedLast`, after the clock closes: sample counts and write the row past warmup.
+/// `FixedLast`, after the clock closes: sample counts and write the row past warmup. A held tick
+/// (the match's fill-up or results, [`MatchCommands::Held`]) is neither counted nor written: the
+/// workload under measurement starts at combat release, so the percentile tables hold no held
+/// ticks. A composition without a Battle plays every tick.
 fn write_tick(
     mut cost: ResMut<CostTrace>,
     clock: Res<TickClock>,
+    match_commands: Option<Res<MatchCommands>>,
     projectiles: Query<(), With<Projectile>>,
     tanks: Query<(), With<Tank>>,
     all: Query<Entity>,
@@ -150,6 +156,9 @@ fn write_tick(
     let Some(closed) = clock.closed() else {
         return;
     };
+    if match_commands.is_some_and(|commands| *commands == MatchCommands::Held) {
+        return;
+    }
     let tick = cost.tick;
     cost.tick += 1;
     if tick < cost.warmup {

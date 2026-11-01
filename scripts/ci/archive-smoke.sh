@@ -26,20 +26,19 @@
 #   3. `simulation script complete` + exit status 0 — it played its script out and left cleanly
 # A wedged client is bounded twice: the in-app watchdog (`harness::simulate_watchdog`,
 # startup slack + remaining replicated fill-up before release, then script length / 64 + 20 s
-# from release) and the wall-clock kill below. The outer default is DERIVED: the existing 120 s
-# load allowance + a full fill-up + ceil(script ticks / 64). The fill-up is read from this
-# checkout's `assets/modes/battle.ron`, the file the server compiles in (`BattleMode::shipped`);
-# the server tarball does not ship it. The smoke's idle script uses the same combat clock as every
-# workload and must wait for release.
+# from release) and the wall-clock kill below. The outer bound is DERIVED: the 120 s load
+# allowance + a full fill-up + ceil(script ticks / 64). The fill-up is read from this checkout's
+# `assets/modes/battle.ron` (`scripts/lib/battle-mode.sh`), the file the server compiles in
+# (`BattleMode::shipped`); the server tarball does not ship it. The smoke's idle script uses the
+# same combat clock as every workload and must wait for release. The script length (256 ticks,
+# DERIVED ≈ 4 s at 64 Hz), the bound and the log directory (a temp dir, both logs printed on any
+# failure) are fixed: nothing tracked sets them otherwise.
 #
 # Env:
 #   SMOKE_SERVER_ASSET_ROOT  `BEVY_ASSET_ROOT` for the server only (a server binary that is not
 #                            packaged beside its assets — see the Windows lane's note in
 #                            release.yml). Unset: the server resolves them next to itself, which is
 #                            the shipped tarball's layout.
-#   SMOKE_TICKS              scripted client run length in 64 Hz ticks (default 256 ≈ 4 s).
-#   SMOKE_DEADLINE           wall-clock seconds before kill (default derived as above).
-#   SMOKE_LOGS               directory for `server.log` / `client.log` (default a temp dir).
 #   SMOKE_EXPECT_API         the Worker URL the client must have baked in (`OVERMATCH_DEFAULT_API`
 #                            in release.yml). Unset: not checked, for a locally built client.
 set -uo pipefail
@@ -51,12 +50,13 @@ fi
 
 server_bin=$1
 client_bin=$2
-ticks=${SMOKE_TICKS:-256}
-deadline=${SMOKE_DEADLINE:-}
-logs=${SMOKE_LOGS:-$(mktemp -d)}
-mkdir -p "$logs"
+ticks=256
+logs=$(mktemp -d)
 server_log="$logs/server.log"
 client_log="$logs/client.log"
+repo="$(cd "$(dirname "$0")/../.." && pwd)"
+# shellcheck source=../lib/battle-mode.sh
+. "$repo/scripts/lib/battle-mode.sh"
 
 # PREFLIGHT, and the one class of failure that prints no logs — there are none yet. A missing or
 # non-executable binary (a lost exec bit, an archive that unpacked to a different shape) is fully
@@ -68,17 +68,8 @@ if [ -n "${SMOKE_EXPECT_API:-}" ] && ! grep -q -a -F -- "$SMOKE_EXPECT_API" "$cl
     exit 1
 fi
 
-if [ -z "$deadline" ]; then
-    mode="$(cd "$(dirname "$0")/../.." && pwd)/assets/modes/battle.ron"
-    fill_up_s=$(awk '
-        /^[[:space:]]*fill_up_s:/ {
-            span=$2; sub(/,$/, "", span)
-            print int(span) + (span > int(span)); found=1; exit
-        }
-        END { if (!found) exit 1 }
-    ' "$mode") || { echo "smoke: cannot read fill_up_s from $mode" >&2; exit 1; }
-    deadline=$((120 + fill_up_s + (ticks + 63) / 64))
-fi
+fill_up_s=$(battle_fill_up_s "$repo") || { echo "smoke: no fill-up to bound the run by" >&2; exit 1; }
+deadline=$((120 + fill_up_s + (ticks + 63) / 64))
 
 # From here on, both logs on every failure — the runner is gone the moment this job ends, and a
 # failure whose evidence was not printed is a failure nobody can diagnose.

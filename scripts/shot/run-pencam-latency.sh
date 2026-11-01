@@ -80,8 +80,9 @@ client() {
 # lane on reconnect. The analyzer refuses such a run from the server trace's `link` rows (a
 # connect count other than one per client) and exits non-zero, which this script, its last
 # command, returns; a rerun is warm.
-# DERIVED: the first client runs 128 ticks longer so it outlives the later-started second; their
-# primaries are 128 ticks (half an interval) apart so the two main guns do not fire together.
+# DERIVED: both scripts play from the same combat release (src/net/harness.rs); the first client
+# runs 128 ticks longer so it is still present for the second's last rounds, and their primaries
+# are 128 ticks (half an interval) apart so the two main guns do not fire together.
 client a "8,1.2,2.2" 320 "$((TICKS + 128))" &
 FIRST_PID=$!
 for _ in {1..150}; do

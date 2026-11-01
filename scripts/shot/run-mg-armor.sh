@@ -56,7 +56,8 @@ grep -q "listening" "$OUT/server.log"
 # slices the UASTC source with the RGBA32 destination block geometry on the uncompressed
 # transcode path, the path taken when no RenderApp exists (ktx2.rs:209). Windowed transcodes to
 # a 4x4-block GPU format and loads fine, so captures are windowed-only until the upstream fix.
-# DERIVED: the target runs 128 fixed ticks longer so it remains present for the later-started shooter.
+# DERIVED: both scripts play from the same combat release (src/net/harness.rs); the target runs
+# 128 ticks longer so it is still present when the shooter's last rounds arrive.
 printf '(drive: Idle, ticks: %s)\n' "$((TICKS + 128))" >"$OUT/target.harness.ron"
 env OVERMATCH_HARNESS="$OUT/target.harness.ron" OVERMATCH_WINDOW=hidden OVERMATCH_SERVER=127.0.0.1:5888 \
   SPIKE_LATENCY_MS=80 SPIKE_JITTER_MS=10 SPIKE_SHOT_TRACE="$OUT/target" \

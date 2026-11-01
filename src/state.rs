@@ -76,6 +76,17 @@ pub fn cursor_locked(cursor: Query<&CursorOptions, With<PrimaryWindow>>) -> bool
     primary_window(cursor.single()).is_none_or(|c| c.grab_mode == CursorGrabMode::Locked)
 }
 
+/// Whether the match plays every command or holds it (fill-up, results), published each fixed
+/// tick by the netcode layer from its replicated Battle (`net::battle::hold_commands`), on both
+/// endpoints. A composition without a Battle never inserts it: offline play and the sandboxes
+/// hold nothing. Instruments that measure played ticks (`cost::write_tick`) open their window at
+/// the first live tick.
+#[derive(Resource, Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) enum MatchCommands {
+    Held,
+    Live,
+}
+
 /// Where this frame's Esc press goes, decided once by [`route_escape`] ahead of every consumer: a
 /// kill cam run playing while the cursor is captured takes it as its skip; otherwise it is the
 /// menu's — the pause offline ([`toggle_pause`]), the Esc menu online (`overlay::esc_toggle`). One

@@ -9,15 +9,22 @@
 #          LOAD  set to 1 to saturate all cores with busy-loops for the batch —
 #                REQUIRED to reproduce the §7 hang (0/48 quiet vs 4/12 loaded, 2026-07-11)
 #
-# Classes: OK | HANG_TIMEOUT_KILLED (external 90 s kill) | HANG_NO_INPUT_SLOT (in-app 40 s
-# watchdog) | ANOMALOUS (nonzero exit without script completion — §7 hangs OS-SIGKILLed
-# before 90 s land here, exit 137).
+# Classes: OK | HANG_TIMEOUT_KILLED (the external kill at CLIENT_TIMEOUT) | HANG_NO_INPUT_SLOT
+# (the in-app watchdog: `harness::simulate_watchdog`, startup slack + the remaining fill-up before
+# release, then the script + slack after it) | ANOMALOUS (nonzero exit without script completion —
+# §7 hangs OS-SIGKILLed before the external kill land here, exit 137).
 set -u
 REPO="$(cd "$(dirname "$0")/../.." && pwd)"
 OUT="${OUT:-/tmp/connect-verify}"
 N=${1:-24}
 START=${2:-1}
-CLIENT_TIMEOUT=90   # healthy run exits ~11-25 s; a wedged main loop never exits on its own
+source "$REPO/scripts/lib/battle-mode.sh"
+FILL_UP_S=$(battle_fill_up_s "$REPO") || exit 1
+# The default script plays 600 ticks from combat release (src/net/harness.rs). A healthy run is
+# startup (3–20 s) + the fill-up it joins + 600/64 s; a wedged main loop never exits on its own.
+# DERIVED: the in-app watchdog's two bounds, the startup slack (20 s) + fill-up and the script +
+# slack (20 s) after release, plus 10 s so the watchdog classifies a stall before this kill does.
+CLIENT_TIMEOUT=$((20 + FILL_UP_S + (600 + 63) / 64 + 20 + 10))
 
 mkdir -p "$OUT"
 # The default scripted session (src/net/harness.rs): the arc drive with one primary click.

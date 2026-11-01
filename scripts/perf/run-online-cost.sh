@@ -22,6 +22,14 @@
 # share this Mac's CPU with the measured client, so a condition with load is not the same machine
 # as one without (ASSUMED non-trivial: a 2 ms run loop each).
 #
+# The window opens at the Battle's combat release, not at launch: every client takes its slot
+# during the shipped fill-up and plays its script from the release (src/net/harness.rs), so the
+# measured client's `harness: released … app_s=` line, on the rows' own app clock, is the window's
+# origin (frame-run.zsh's FRAME_RUN_ORIGIN_S): the edges are origin+WARMUP_S and
+# origin+WARMUP_S+DURATION_S of span, and the analyzer discards everything before the first. Until
+# the line appears the origin is the fill-up itself (DERIVED from assets/modes/battle.ron), so the
+# loop waits it out; a condition never released is INVALID.
+#
 # MODE — exactly one, no default, so nothing takes a screen by omission:
 #   VISIBLE=1    the window on screen: every presentation precondition and gate of the frame sweep
 #                (run-frame-sweep.sh's runbook — primary 120 Hz display, 2560x1440, unoccluded,
@@ -31,8 +39,8 @@
 #
 # Per condition, frame-run.zsh's gates (settings loaded, uncapped, the analyzer's stream gates
 # including drawn frames) plus this runner's:
-#   * the measured client connected exactly once (a reconnect burns a lane: cold shader cache) and
-#     held its input slot before the window opened;
+#   * the measured client connected exactly once (a reconnect burns a lane: cold shader cache),
+#     held its input slot and was released into combat before the window opened;
 #   * every load client held its input slot before the window opened, was alive when it closed, and
 #     connected exactly once.
 # NOT gated, and not observable: the measured tank's knockout. No log line marks a player tank's
@@ -55,8 +63,9 @@
 # on stdout the client frame table, the network table and the server table (tables.txt keeps the
 # last two).
 #
-# Wall clock: per condition, startup (5–15 s; longer on a cold shader cache) + WARMUP_S + DURATION_S
-# + COOLDOWN_S, ~1.5–2 min at the defaults; a local server adds ~5 s.
+# Wall clock: per condition, startup (5–15 s; longer on a cold shader cache) + the shipped fill-up
+# (60 s) + WARMUP_S + DURATION_S + COOLDOWN_S, ~2.5–3 min at the defaults; a local server adds
+# ~5 s.
 # =======================================================================
 #
 # Usage: run-online-cost.sh <out-dir> [condition ...]   (default condition: `online|`)
@@ -103,6 +112,9 @@ SESSION="${EDGEGAP_SESSION:-$REPO/scripts/edgegap/session.sh}"
 # first, at the window's close, so the script must outlast the deadline.
 SIM_TICKS=$(((WARMUP_S + DURATION_S + STARTUP_GRACE_S + 60) * 64))
 INPUT_SLOT='— input slot'
+RELEASED='harness: released'
+source "$REPO/scripts/lib/battle-mode.sh"
+FILL_UP_S=$(battle_fill_up_s "$REPO") || exit 1
 
 CONDITIONS=("$@")
 (( ${#CONDITIONS[@]} > 0 )) || CONDITIONS=("online|")
@@ -135,6 +147,7 @@ SERVER_PID=""
 LOAD_PIDS=()
 load_count=0
 connected=""
+released=""
 edge_start=""
 edge_end=""
 marked=""
@@ -204,29 +217,43 @@ launch_load() {
 
 condition_launched() {
   connected=""
+  released=""
   edge_start=""
   edge_end=""
   marked=""
   LOAD_PIDS=()
+  # The expected origin until the release line names the real one.
+  FRAME_RUN_ORIGIN_S=$FILL_UP_S
   printf 'edge\tepoch_s\tspan_s\tbytes_in\tbytes_out\n' >"$OUT/$1.window.tsv"
 }
 
 condition_poll() {
-  local cond="$1" log="$2" span="$4" i
+  local cond="$1" log="$2" stream="$3" span="$4" i release_s t_first
   if [[ -z "$connected" ]] && grep -q -- "$INPUT_SLOT" "$log"; then
     connected=1
     launch_load "$cond"
   fi
+  if [[ -z "$released" ]]; then
+    release_s="$(sed -n "s/.*$RELEASED .*app_s=\([0-9.]*\).*/\1/p" "$log" | head -n1)"
+    t_first="$(frame_run_t_first "$stream")"
+    if [[ -n "$release_s" && -n "$t_first" ]]; then
+      released=1
+      FRAME_RUN_ORIGIN_S=$(( release_s - t_first ))
+      echo "   $cond: combat release at ${release_s}s of app time, origin ${FRAME_RUN_ORIGIN_S}s into the stream"
+    fi
+  fi
+  [[ -n "$span" && -n "$released" ]] || return 0
+  local origin=$FRAME_RUN_ORIGIN_S
   # The server window's start: its last stats line, taken inside the warmup so a container-log pull
   # never runs inside the measured window.
-  if [[ -z "$marked" ]] && (( span >= WARMUP_S - 2 )); then
+  if [[ -z "$marked" ]] && (( span >= origin + WARMUP_S - 2 )); then
     marked=1
     if server_snapshot "$OUT/$cond.marker.log" 2>/dev/null; then
       grep 'server_stats' "$OUT/$cond.marker.log" | tail -1 >"$OUT/$cond.marker" || true
     fi
     rm -f "$OUT/$cond.marker.log"
   fi
-  if [[ -z "$edge_start" ]] && (( span >= WARMUP_S )); then
+  if [[ -z "$edge_start" ]] && (( span >= origin + WARMUP_S )); then
     [[ -n "$connected" ]] || frame_run_invalid "$cond" "the measured client held no input slot by the end of the ${WARMUP_S}s warmup — unreachable server, or a slow connect (raise WARMUP_S; see $log)"
     for (( i = 1; i <= load_count; i++ )); do
       grep -q -- "$INPUT_SLOT" "$OUT/$cond.load$i.log" 2>/dev/null \
@@ -235,7 +262,7 @@ condition_poll() {
     edge_start=1
     net_edge "$cond" start "$span"
   fi
-  if [[ -z "$edge_end" ]] && (( span >= WARMUP_S + DURATION_S )); then
+  if [[ -z "$edge_end" ]] && (( span >= origin + WARMUP_S + DURATION_S )); then
     edge_end=1
     net_edge "$cond" end "$span"
     server_snapshot "$OUT/$cond.server.log" 2>/dev/null \
@@ -250,6 +277,7 @@ condition_poll() {
 
 condition_gates() {
   local cond="$1" log="$2" connects i
+  [[ -n "$released" ]] || frame_run_invalid "$cond" "the measured client was never released into combat (no '$RELEASED' line; see $log)"
   connects="$(grep -c 'client: connected (entity' "$log" || true)"
   (( connects == 1 )) || frame_run_invalid "$cond" "$connects connects for the measured client — a reconnect burned a lane (cold shader cache?); rerun warm (see $log)"
   for (( i = 1; i <= load_count; i++ )); do

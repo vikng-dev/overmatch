@@ -3,7 +3,12 @@
 # Usage: scripts/cost/run.sh [idle1|fire1|fire2|armor1|loft1 ...]
 # OUT selects the output directory; BIN the binary directory (default target/debug).
 # SERVER_BIN / CLIENT_BIN override BIN per role. TICKS defaults to 2560; WARMUP to 384.
-# These are ASSUMED workload lengths. scripts/cost/analyze.py consumes the resulting streams.
+# These are ASSUMED workload lengths. Both count played ticks from combat release: the scripted
+# client plays its ticks from the replicated release (src/net/harness.rs), and the cost recorder
+# (src/cost.rs, SPIKE_COST_WARMUP) counts, skips and writes only released ticks on the server and
+# the client alike, so no held fill-up tick enters a percentile table. The hold itself only adds
+# wall clock: a scenario's run is startup + the shipped fill-up + TICKS / 64 s.
+# scripts/cost/analyze.py consumes the resulting streams.
 set -u
 
 # Hold one machine lock across the workload, including both concurrent clients. The re-entry

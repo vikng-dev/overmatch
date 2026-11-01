@@ -26,7 +26,10 @@
 #   mp-on/off       a local dedicated server and the latency runner's duel
 #                   (scripts/shot/run-pencam-latency.sh): the MEASURED client connects first and
 #                   runs VISIBLE (OVERMATCH_WINDOW=visible), the opponent hidden. Both settings
-#                   On / Off. The opponent's rounds knock the measured tank out about 30 s in
+#                   On / Off. Both scripts play from the Battle's combat release after the shipped
+#                   fill-up (src/net/harness.rs), so the run's span and its analysis count from
+#                   the measured client's `harness: released … app_s=` line, on the rows' own app
+#                   clock. The opponent's rounds knock the measured tank out about 30 s in
 #                   (MEASURED 2026-10-19), and the scripted client never respawns: the analysis
 #                   stops at the kill cam run's start (the on-run's mark, for both runs), where
 #                   the frames turn into the death screen. The MP numbers are the corner's over
@@ -54,6 +57,9 @@ CLIENT="$REPO/$BIN/overmatch"
 SERVER="$REPO/$BIN/overmatch-server"
 STARTUP_GRACE_S="${STARTUP_GRACE_S:-60}"
 WARMUP_S=5
+source "$REPO/scripts/lib/battle-mode.sh"
+FILL_UP_S=$(battle_fill_up_s "$REPO") || exit 1
+RELEASED='harness: released'
 # The marks are `debug!` lines: the default filter (INFO, wgpu=error, naga=warn) plus them.
 LOG_FILTER="info,wgpu=error,naga=warn,overmatch::damage_cam::pen_cam=debug"
 
@@ -133,8 +139,9 @@ wait_span() {
 }
 
 for cond in "${CONDITIONS[@]}"; do
-  # Per-condition shape.
-  mode=offline; corner=Off; killcam=Off; glass=""; armed=""; surfaces=(); scen=()
+  # Per-condition shape. `origin` is the stream second the workload starts at: 0 offline, the
+  # combat release online.
+  mode=offline; corner=Off; killcam=Off; glass=""; armed=""; surfaces=(); scen=(); origin=0
   case "$cond" in
     corner-*)  run_s=82;  scen=(OVERMATCH_TARGET=ahead SPIKE_AUTO_FIRE=1); armed="auto_fire: armed";    surfaces=(corner) ;;
     glass-*)   run_s=100; scen=(OVERMATCH_TARGET=fires);                armed="target fires: armed"; surfaces=(glass) ;;
@@ -183,8 +190,9 @@ for cond in "${CONDITIONS[@]}"; do
       grep -q "knocked out at" "$log" || invalid "$cond" "the player's tank was never knocked out (see $log)"
     fi
   else
-    # DERIVED: 64 Hz fixed ticks; the measured client runs 128 ticks longer so it outlives the
-    # later-started opponent (as the latency runner's first client does).
+    # DERIVED: 64 Hz fixed ticks from the shared combat release; the measured client runs 128
+    # ticks longer so it is still present for the opponent's last rounds (as the latency runner's
+    # first client is).
     ticks=$((run_s * 64))
     # The flat patch (scripts/harness/flat-patch.ron); lane 1 spawns 8 m along +x from lane 0.
     env OVERMATCH_HARNESS="$REPO/scripts/harness/flat-patch.ron" BEVY_ASSET_ROOT="$REPO" \
@@ -216,9 +224,21 @@ for cond in "${CONDITIONS[@]}"; do
       BEVY_ASSET_ROOT="$REPO" \
       "$CLIENT" >"$OUT/$cond.opponent.log" 2>&1 &
     OTHER_PID=$!
+    # Both clients wait out the fill-up in their held tanks; the measured client's release line
+    # is the origin of its span and its analysis window.
+    for _ in $(seq 1 $(( (FILL_UP_S + STARTUP_GRACE_S) * 5 ))); do
+      grep -q "$RELEASED" "$log" 2>/dev/null && break
+      sleep 0.2
+    done
+    release_s="$(sed -n "s/.*$RELEASED .*app_s=\([0-9.]*\).*/\1/p" "$log" | head -n1)"
+    [[ -n "$release_s" ]] || invalid "$cond" "the measured client was never released into combat (no '$RELEASED' line; see $log)"
+    t_first="$(head -n1 "$stream" 2>/dev/null | sed -n 's/.*"t"[[:space:]]*:[[:space:]]*\([0-9.eE+-]*\).*/\1/p')"
+    [[ -n "$t_first" ]] || invalid "$cond" "no frame row by the release (see $log)"
+    origin=$(( release_s - t_first ))
+    echo "   $cond: combat release at ${release_s}s of app time, origin ${origin}s into the stream"
     # The scripted client exits on its own after its ticks (the usual end: `exited`, status 0);
     # `spanned` is the fallback if the stream outruns the schedule, and a kill ends it then.
-    outcome="$(wait_span "$stream" "$((run_s + 10))" "$CLIENT_PID")"
+    outcome="$(wait_span "$stream" "$((origin + run_s + 10))" "$CLIENT_PID")"
     code=0
     if [[ "$outcome" == exited ]]; then
       wait "$CLIENT_PID" 2>/dev/null || code=$?
@@ -226,9 +246,10 @@ for cond in "${CONDITIONS[@]}"; do
       kill "$CLIENT_PID" 2>/dev/null || true; wait "$CLIENT_PID" 2>/dev/null || true
     fi
     CLIENT_PID=""
-    # The opponent's script is shorter than the measured client's, so it has run its ticks and
-    # exited by now: its status and its completion line prove it supplied the schedule. Its
-    # process is this shell's child, so `wait` reads the status.
+    # The opponent's script, from the same release, is 128 ticks shorter than the measured
+    # client's, so it has run its ticks and exited by the measured client's own exit; after a
+    # `spanned` kill it finishes within those two seconds. Its status and its completion line
+    # prove it supplied the schedule. Its process is this shell's child, so `wait` reads the status.
     other_code=0
     wait "$OTHER_PID" 2>/dev/null || other_code=$?
     OTHER_PID=""
@@ -252,7 +273,7 @@ for cond in "${CONDITIONS[@]}"; do
   if grep -qE 'settings: vsync .* is not supported by this surface' "$log"; then
     invalid "$cond" "vsync Off was normalized away — the run was display-paced"
   fi
-  ( cd "$REPO" && uv run scripts/perf/analyze.py --validate-only --warmup-s "$WARMUP_S" \
+  ( cd "$REPO" && uv run scripts/perf/analyze.py --validate-only --warmup-s "$((origin + WARMUP_S))" \
       --min-rows $((run_s * 20)) --expected-duration-s $((run_s - WARMUP_S)) "$stream" ) \
     || invalid "$cond" "frame stream failed the analyzer's validity gates (see above)"
 
@@ -276,7 +297,7 @@ for cond in "${CONDITIONS[@]}"; do
   fi
   # `pipefail` (set above) carries the analyzer's failure through `tee`.
   ( cd "$REPO" && uv run scripts/perf/pencam_cost.py --stream "$stream" --log "$log" \
-      "${surface_args[@]}" "${windows_args[@]}" "${until_args[@]}" --warmup-s "$WARMUP_S" \
+      "${surface_args[@]}" "${windows_args[@]}" "${until_args[@]}" --warmup-s "$((origin + WARMUP_S))" \
       --label "$cond" --json "$OUT/$cond.cost.json" ) | tee -a "$OUT/summary.txt" \
     || invalid "$cond" "the pen cam cost analyzer failed (see above)"
   {

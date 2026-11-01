@@ -13,7 +13,7 @@ use super::score::Scoreboard;
 use crate::CombatantId;
 use crate::command::{ParsedTankCommand, TankCommand};
 use crate::sim_tick::{SimTick, TickSpan};
-use crate::state::GameplaySet;
+use crate::state::{GameplaySet, MatchCommands};
 
 /// One server-owned Battle, on the scoreboard's entity. Deadlines use `ShotClock`'s wrapping ticks.
 #[derive(Component, Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
@@ -186,11 +186,12 @@ pub(super) struct HoldCommands;
 
 /// Both endpoints: the hold runs on the fixed tick after the input bridge.
 pub(super) fn install_hold(app: &mut App) {
-    app.configure_sets(
-        FixedUpdate,
-        HoldCommands.after(InputBridge).before(GameplaySet),
-    )
-    .add_systems(FixedUpdate, hold_commands.in_set(HoldCommands));
+    app.insert_resource(MatchCommands::Held)
+        .configure_sets(
+            FixedUpdate,
+            HoldCommands.after(InputBridge).before(GameplaySet),
+        )
+        .add_systems(FixedUpdate, hold_commands.in_set(HoldCommands));
 }
 
 /// Until combat starts a player controls only the camera. Every tank's command is held
@@ -198,21 +199,28 @@ pub(super) fn install_hold(app: &mut App) {
 /// and every edge by this one rule, and the tank still rests on its suspension. The authority
 /// releases them on combat's first tick, because `server::cycle_battles` advances the phase before
 /// this set. A client holds its own turret and fire presentation by the same rule from its
-/// replicated phase. A composition without a Battle (offline, a fixture) holds nothing.
+/// replicated phase, and the sim-level [`MatchCommands`] states the same rule for instruments.
+/// Before the Battle snapshot (a client's first frames) every command is held.
 fn hold_commands(
     battles: Query<&BattleState>,
+    mut published: ResMut<MatchCommands>,
     mut tanks: Query<(&mut TankCommand, &mut ParsedTankCommand)>,
 ) {
     let battle = match battles.single() {
         Ok(battle) => battle,
-        Err(bevy::ecs::query::QuerySingleError::NoEntities(_)) => return,
+        Err(bevy::ecs::query::QuerySingleError::NoEntities(_)) => {
+            published.set_if_neq(MatchCommands::Held);
+            return;
+        }
         Err(bevy::ecs::query::QuerySingleError::MultipleEntities(_)) => {
             panic!("a peer holds at most one Battle: the server spawns one, a client replicates it")
         }
     };
     if battle.is_combat() {
+        published.set_if_neq(MatchCommands::Live);
         return;
     }
+    published.set_if_neq(MatchCommands::Held);
     for (mut raw, mut parsed) in &mut tanks {
         *parsed = ParsedTankCommand::hold();
         raw.set_if_neq(parsed.command());
