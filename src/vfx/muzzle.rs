@@ -1112,58 +1112,55 @@ mod tests {
         assert_eq!(dust.params.fade.y, 0.9);
     }
 
-    /// The game's damage-model view draws each muzzle shape's statement and only it: at one
-    /// energy, a shape's forward planes lie along the bore, its side jets' planes (two jets, if
-    /// it states them) leave across it, and only a shape stating a fireball plays one. A mutant
-    /// that draws side jets for every shape, drops a shape's jets or a fireball, or lets a
-    /// fireball through for a shape that states none fails. FIXTURE DATA: a 10 kg round at
-    /// 780 m/s, no gun's.
+    /// The game's damage-model view: every shape's planes point along its requested jet axes,
+    /// with exactly one jet on each flank at its resolved angle. Players rely on symmetric gas
+    /// routing, independent of taste edits. A duplicated flank or wrong angle fails this test.
+    /// FIXTURE DATA: a generic shot and legal forward/backward side-jet angles.
     #[test]
     fn each_muzzle_shape_draws_its_shape_and_only_its_shape() {
         use crate::guns::{Mechanism, MuzzleEnergy, MuzzleLook, MuzzleShape};
         let look = MuzzleLook::shipped();
         let energy = MuzzleEnergy::of(10.0, 780.0).expect("a positive fixture");
-        let mut seen_side = false;
         for shape in [MuzzleShape::MuzzleBrake, MuzzleShape::FlashHider] {
             let statement = look.shape(shape);
-            let mut app = harness();
-            let emission = look.emission(shape, energy, Mechanism::Single).unwrap();
-            fire_with(&mut app, emission, SLOW, CANNON_CALIBER, 0, false);
-            let (mut forward, mut side) = (0u8, 0u8);
-            let world = app.world_mut();
-            for transform in world
-                .query_filtered::<&Transform, (
-                    With<Billboard>,
-                    Without<crate::vfx::billboard::FaceCamera>,
-                )>()
-                .iter(world)
-            {
-                // The fire direction is +X; a plane's flame runs along its rotated +Y.
-                let along = (transform.rotation * Vec3::Y).dot(Vec3::X);
-                if along > 0.999 {
-                    forward += 1;
-                } else {
-                    assert!(along < 0.5, "{shape:?}: a plane {along} off the bore and its sides");
-                    side += 1;
+            for angle in [45.0_f32, 100.0, 135.0] {
+                let mut app = harness();
+                let mut emission = look.emission(shape, energy, Mechanism::Single).unwrap();
+                assert_eq!(
+                    emission.flames.side_jets.map(|side| side.angle_rad),
+                    statement.side_jets.map(|side| side.angle_rad)
+                );
+                if let Some(side) = &mut emission.flames.side_jets {
+                    side.angle_rad = angle.to_radians();
                 }
+                fire_with(&mut app, emission, SLOW, CANNON_CALIBER, 0, false);
+                let (mut forward, mut left, mut right) = (0u8, 0u8, 0u8);
+                let world = app.world_mut();
+                for transform in world.query_filtered::<&Transform, (
+                    With<Billboard>, Without<crate::vfx::billboard::FaceCamera>,
+                )>().iter(world) {
+                    // The fixture bore is +X; a flame plane's long axis is rotated +Y.
+                    let axis = transform.rotation * Vec3::Y;
+                    if axis.dot(Vec3::X) > 0.999 {
+                        forward += 1;
+                    } else {
+                        let side = emission.flames.side_jets.expect("only a stated side jet leaves the bore");
+                        assert!((axis.x - side.angle_rad.cos()).abs() < 1e-5, "{shape:?}: {axis:?} at {angle}");
+                        assert!(axis.y.abs() < 1e-5);
+                        assert!((axis.z.abs() - side.angle_rad.sin()).abs() < 1e-5);
+                        if axis.z > 0.0 { left += 1; } else { right += 1; }
+                    }
+                }
+                assert_eq!(forward, statement.forward_planes, "{shape:?}");
+                let planes = statement.side_jets.map_or(0, |jets| jets.planes);
+                assert_eq!((left, right), (planes, planes), "{shape:?} at {angle}");
+                assert_eq!(
+                    blast_cores(&mut app).len(),
+                    usize::from(statement.fireball),
+                    "{shape:?}"
+                );
             }
-            assert_eq!(forward, statement.forward_planes, "{shape:?}");
-            assert_eq!(
-                side,
-                statement.side_jets.map_or(0, |jets| 2 * jets.planes),
-                "{shape:?}"
-            );
-            seen_side |= side > 0;
-            assert_eq!(
-                blast_cores(&mut app).len(),
-                usize::from(statement.fireball),
-                "{shape:?}"
-            );
         }
-        assert!(
-            seen_side,
-            "some shipped shape states side jets: the survey is not vacuous"
-        );
     }
 
     /// Distance LOD contract: beyond `FAR_FULL_DRESSING` only the core, the fireball and the light
