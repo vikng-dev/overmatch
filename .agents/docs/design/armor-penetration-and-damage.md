@@ -1871,11 +1871,19 @@ order. Decisions are checked against the code, rather than inherited from the au
 | Claude | L2: filename assertion adds its own prefix | verified: the old test constructed `fixture.ron: {err}` itself; the regression now reads BoxClasses' real admission error, including crew_hp and repair | provenance: refuse fixtures at every shipped load boundary (#245) |
 | Claude | L3: 37 test values carry fact/resolution labels | verified: five Measured fixtures in substances, five Derived fixtures in attachments, three Resolution fixtures in spall_cone, and 24 Unknown fixture values in rounds/effects | tests: label inline authored data as fixtures (#245) |
 | labels-2 | N1: five more Unknown("f") test values | verified: the drawn-body fixture helper labels five absence/model values Unknown; these have no external fact source | tests: label inline authored data as fixtures (#245) |
+| Claude | L4: rate-strength StandIn sits on an unread rate | verified: Compaction multiplies compressive_strength by compressive_dif for both Brick and Wood; only the load gate reads the reference rate | data: align provenance labels with their readers (#245) |
+| Claude | L5: resistance and presentation siblings disagree | verified: the four resistance values fill compare.md's A9/A10/A11/X24 law gaps; 60 material-feedback and 21 round-effect Unknown values feed view choices | data: align provenance labels with their readers (#245) |
+| Claude | L6: Taste's rule excludes absolute magnitudes and choices | verified: ribbon_vertices reads absolute width/growth/lifetime; fuze resolve matches name against default_mode, so the mode identifier now takes the Derived job of the delay it selects (the schema requires Sourced) | data: align provenance labels with their readers (#245) |
+| Claude | L7: RHA Young modulus is not Measured | verified: its own note selects 205 GPa inside a 190–210 GPa range with no RHA-specific source; Unknown now states the missing measurement | data: align provenance labels with their readers (#245) |
+| Claude | L8: anchor_nose and axis are not computed | verified: anchor_nose selects the fixed drag stand-in's calibration convention (StandIn); axis is an assumed physical direction proxy awaiting angular measurements (Unknown) | data: align provenance labels with their readers (#245) |
+| Claude | L9: shipped round notes say fixture | verified: four core notes, the APHE display note and two reference/proxy comments describe shipped choices using test-only vocabulary; wording now says provisional/reference | data: align provenance labels with their readers (#245) |
+| Claude | L10: exact algebra is caught; job list adds law coefficient | verified: the lens had no exact-algebra exemption and omitted stand-in from the job list; AGENTS and the lens now state the law-form exemption, and the lens uses the five jobs | data: align provenance labels with their readers (#245) |
 | Claude | L11: four non-bisectable main commits | verified by historical source: the new enum lacks Tuned while assets still use it; muzzle retains Tuned through the next two subjects, and bore_length fixtures retain Tuned through the fourth | not fixable; noted: provenance: name each authored value job (#245); data: label authored values by their job (#245); agents: enforce one number one job (#245); data: label the muzzle magnitudes as taste (#245) |
 
 The refusing policy surrounds shipped file readers, including nested registry parses and the raw
-embedded-sheet readers used by CI. Tests authoring inline fixture text (including temporary-file I/O fixtures) use the test policy; a scoped policy on
-each test thread restores its caller on return or unwind. Ordinary builds always refuse Fixture.
+embedded-sheet readers used by CI. Tests authoring inline fixture text (including temporary-file
+I/O fixtures) use the test policy; a scoped policy on each test thread restores its caller on return
+or unwind. Ordinary builds always refuse Fixture.
 No historical commit is rewritten.
 
 **Admission gates (MEASURED):** the initial embedded-value regression failed by accepting Fixture.
@@ -1893,3 +1901,34 @@ unchanged.
 
 **Fixture-label gates (MEASURED):** 83 targeted tests passed, including all five changed test
 modules, provenance and doc-citation guards. Formatting and CI clippy passed.
+
+**Classification decisions:** absolute presentation magnitudes and nonnumeric view choices are
+Taste. A physical-size-driven effect still scales that physical quantity. The fuze mode name is
+an identifier selecting its derived delay, rather than presentation taste; the required Sourced
+schema stays unchanged. The drag anchor selects the existing Mach-drag stand-in's calibration
+convention. The spall axis remains an unknown physical proxy with the measurement that would settle
+it stated in the note. Rate-dependent strength is absent from compaction: its constant multiplier
+owns the StandIn, and the unused reference rate keeps only its datum's provenance.
+
+**Overlap reserved for law lanes:** `assets/ballistics/spall_cone.ron` changes only `axis`'s label
+and note. Its `energy_share` and `driven_energy_factor` notes are untouched for law-energy-units.
+`assets/ballistics/round_types.ron` changes only `drag.anchor_nose`'s label and note; hit noses and
+their notes, including the header's hit-nose wording, remain for law-walk-angles. The admission
+commit also scopes the existing readers in spall_cone.rs and energy_dose.rs: preserve those
+refusing boundaries when the law lanes rewrite the fields. The round proxy header changes only
+its obsolete fixture wording; no nose value changes.
+
+**Authored-data proof (MEASURED):** a RON token comparison of all eight touched asset files leaves
+284 provenance labels before and after. With comments, provenance-kind tokens and their note
+strings removed, every remaining value token is identical. The round files contain no remaining
+fixture wording. The two spall energy notes and the round-type hit noses/notes are byte-for-byte
+unchanged; their law lanes retain ownership. No authored value or schema changes.
+
+**Final gates (MEASURED):** 915 tests passed, with 12 existing ignored measurement tests. The run
+included the requested provenance, spec, rounds, materials, substances, ballistics and buildings
+filters; the headless, pen-cam and field-cast checks; and the whole-tree `doc_citations`,
+`ui_ascii`, `net_boundary` and `bake::` guards. Formatting, `git diff --check` and CI clippy passed.
+The eight-file, 284-label value-token comparison passed again on the final authored data.
+All eleven review findings are verified: L1-L10 are fixed, L11 is not fixable and noted. N1's five
+additional fixture labels are fixed. No owner decision remains; the named law-lane overlaps above
+are intentionally reserved.

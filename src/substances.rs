@@ -188,10 +188,11 @@ pub struct BulkFacts {
 pub struct BlastFacts {
     /// Quasi-static compressive strength, Pa.
     pub compressive_strength: f64,
-    /// Dynamic/static compressive-strength ratio at [`Self::compressive_dif_strain_rate`].
-    /// A reference-rate datum, not a rate-independent multiplier or permission to extrapolate.
+    /// The game's damage model applies this dynamic/static compressive-strength ratio at every
+    /// loading rate, a constant stand-in for loading-rate-dependent strength. Its reference rate is
+    /// [`Self::compressive_dif_strain_rate`].
     pub compressive_dif: f64,
-    /// Strain rate of the stated dynamic ratio, s⁻¹.
+    /// Strain rate of the stated dynamic ratio, s⁻¹; provenance only, not read by compaction.
     pub compressive_dif_strain_rate: f64,
     /// Fully dense grain or cell-wall density, kg/m³, greater than the bulk density. This is an
     /// input to a compaction law, not a measured strain at the onset of densification.

@@ -27,7 +27,8 @@
         base_drag_coefficient: (0.20, StandIn("Stand-in for Mach-dependent drag: ASSUMED: base drag
             plus skin friction at shell speeds; no aerodynamic source read. 0.0962 form units,
             DERIVED")),
-        anchor_nose: (Ogive(crh: 1.0), Derived("the nose the anchor form is stated on: a 1-crh
+        anchor_nose: (Ogive(crh: 1.0), StandIn("Stand-in for Mach-dependent drag: the chosen
+            calibration convention for the fixed drag form, a 1-crh
             tangent ogive, nose factor 7/24 (DERIVED)")),
         anchor_form: (0.263, StandIn("Stand-in for Mach-dependent drag: provisional: hand-set so a
             10.2 kg 88 mm round flying on the anchor nose has k = 2.0e-4 1/m (DERIVED); a drag

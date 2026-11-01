@@ -137,11 +137,11 @@
             resistance: Reference,
             visual: "rolled_steel",
             feedback: (
-                exposed_linear_rgb: ((0.5, 0.51, 0.53), Unknown("ASSUMED: provisional exposed-surface and powder read; no measured optical response read for this substance")),
-                powder_linear_rgb: ((0.47, 0.47, 0.47), Unknown("ASSUMED: provisional exposed-surface and powder read; no measured optical response read for this substance")),
-                metallic: (1.0, Unknown("ASSUMED: provisional exposed-surface and powder read; no measured optical response read for this substance")),
-                roughness_gain: (1.0, Unknown("ASSUMED: provisional exposed-surface and powder read; no measured optical response read for this substance")),
-                sparks: (true, Unknown("ASSUMED: provisional contact-spark emission for this substance")),
+                exposed_linear_rgb: ((0.5, 0.51, 0.53), Taste("material contact and fracture effects: ASSUMED: provisional exposed-surface and powder read; no measured optical response read for this substance")),
+                powder_linear_rgb: ((0.47, 0.47, 0.47), Taste("material contact and fracture effects: ASSUMED: provisional exposed-surface and powder read; no measured optical response read for this substance")),
+                metallic: (1.0, Taste("material contact and fracture effects: ASSUMED: provisional exposed-surface and powder read; no measured optical response read for this substance")),
+                roughness_gain: (1.0, Taste("material contact and fracture effects: ASSUMED: provisional exposed-surface and powder read; no measured optical response read for this substance")),
+                sparks: (true, Taste("material contact and fracture effects: ASSUMED: provisional contact-spark emission for this substance")),
             ),
             debris_half_angle_deg: (26.2, Derived("the constant-angle fit of the MEASURED
                 normal-impact debris extents of Qi et al. 2026, shots 5 and 6 (sin α 0.446 and
@@ -159,9 +159,10 @@
                 flow_strength: (1.0e9, Derived("mean of an RHA-class product's Rp0.2 900 MPa and
                     Rm 1150 MPa (MEASURED: SSAB Armox 370T Class 1 datasheet, Cimpoeru 2016 Table
                     I), the flow-stress convention of Q2; range 0.85–1.25 GPa across thickness bands")),
-                youngs_modulus: (205.0e9, Measured("chosen inside the steel range 190–210 GPa
+                youngs_modulus: (205.0e9, Unknown("chosen inside the steel range 190–210 GPa
                     (MEASURED 190 for Q&T 4340 and 1020, MakeItFrom; 210 generic); Q2 found no
-                    RHA-specific value. Moves results about 1 % (Q5)")),
+                    RHA-specific value. Moves results about 1 % (Q5). Settled by an RHA-grade
+                    Young modulus measurement or datasheet")),
                 poisson_ratio: (0.29, Unknown("chosen inside the steel range 0.27–0.30; Q2 found no
                     RHA-specific value. Moves results about 1 % (Q5). Settled by an RHA datasheet
                     Poisson ratio")),
@@ -174,11 +175,11 @@
                 derived from the facts below, which give ≈ 1129 (DERIVED)"))),
             visual: "machined_steel",
             feedback: (
-                exposed_linear_rgb: ((0.5, 0.51, 0.53), Unknown("ASSUMED: provisional exposed-surface and powder read; no measured optical response read for this substance")),
-                powder_linear_rgb: ((0.47, 0.47, 0.47), Unknown("ASSUMED: provisional exposed-surface and powder read; no measured optical response read for this substance")),
-                metallic: (1.0, Unknown("ASSUMED: provisional exposed-surface and powder read; no measured optical response read for this substance")),
-                roughness_gain: (1.0, Unknown("ASSUMED: provisional exposed-surface and powder read; no measured optical response read for this substance")),
-                sparks: (true, Unknown("ASSUMED: provisional contact-spark emission for this substance")),
+                exposed_linear_rgb: ((0.5, 0.51, 0.53), Taste("material contact and fracture effects: ASSUMED: provisional exposed-surface and powder read; no measured optical response read for this substance")),
+                powder_linear_rgb: ((0.47, 0.47, 0.47), Taste("material contact and fracture effects: ASSUMED: provisional exposed-surface and powder read; no measured optical response read for this substance")),
+                metallic: (1.0, Taste("material contact and fracture effects: ASSUMED: provisional exposed-surface and powder read; no measured optical response read for this substance")),
+                roughness_gain: (1.0, Taste("material contact and fracture effects: ASSUMED: provisional exposed-surface and powder read; no measured optical response read for this substance")),
+                sparks: (true, Taste("material contact and fracture effects: ASSUMED: provisional contact-spark emission for this substance")),
             ),
             debris_half_angle_deg: (26.2, Unknown("no measured debris extent; RHA's value")),
             facts: Some((
@@ -195,11 +196,11 @@
                 ballistically (research pass 2026-08-07)"))),
             visual: "cast_steel",
             feedback: (
-                exposed_linear_rgb: ((0.5, 0.51, 0.53), Unknown("ASSUMED: provisional exposed-surface and powder read; no measured optical response read for this substance")),
-                powder_linear_rgb: ((0.47, 0.47, 0.47), Unknown("ASSUMED: provisional exposed-surface and powder read; no measured optical response read for this substance")),
-                metallic: (1.0, Unknown("ASSUMED: provisional exposed-surface and powder read; no measured optical response read for this substance")),
-                roughness_gain: (1.0, Unknown("ASSUMED: provisional exposed-surface and powder read; no measured optical response read for this substance")),
-                sparks: (true, Unknown("ASSUMED: provisional contact-spark emission for this substance")),
+                exposed_linear_rgb: ((0.5, 0.51, 0.53), Taste("material contact and fracture effects: ASSUMED: provisional exposed-surface and powder read; no measured optical response read for this substance")),
+                powder_linear_rgb: ((0.47, 0.47, 0.47), Taste("material contact and fracture effects: ASSUMED: provisional exposed-surface and powder read; no measured optical response read for this substance")),
+                metallic: (1.0, Taste("material contact and fracture effects: ASSUMED: provisional exposed-surface and powder read; no measured optical response read for this substance")),
+                roughness_gain: (1.0, Taste("material contact and fracture effects: ASSUMED: provisional exposed-surface and powder read; no measured optical response read for this substance")),
+                sparks: (true, Taste("material contact and fracture effects: ASSUMED: provisional contact-spark emission for this substance")),
             ),
             debris_half_angle_deg: (26.2, Unknown("no measured debris extent; RHA's value")),
             friction: Some((0.5, Unknown("ASSUMED, no source read: Avian's own default
@@ -214,11 +215,11 @@
                 (DERIVED)"))),
             visual: "rolled_steel",
             feedback: (
-                exposed_linear_rgb: ((0.5, 0.51, 0.53), Unknown("ASSUMED: provisional exposed-surface and powder read; no measured optical response read for this substance")),
-                powder_linear_rgb: ((0.47, 0.47, 0.47), Unknown("ASSUMED: provisional exposed-surface and powder read; no measured optical response read for this substance")),
-                metallic: (1.0, Unknown("ASSUMED: provisional exposed-surface and powder read; no measured optical response read for this substance")),
-                roughness_gain: (1.0, Unknown("ASSUMED: provisional exposed-surface and powder read; no measured optical response read for this substance")),
-                sparks: (true, Unknown("ASSUMED: provisional contact-spark emission for this substance")),
+                exposed_linear_rgb: ((0.5, 0.51, 0.53), Taste("material contact and fracture effects: ASSUMED: provisional exposed-surface and powder read; no measured optical response read for this substance")),
+                powder_linear_rgb: ((0.47, 0.47, 0.47), Taste("material contact and fracture effects: ASSUMED: provisional exposed-surface and powder read; no measured optical response read for this substance")),
+                metallic: (1.0, Taste("material contact and fracture effects: ASSUMED: provisional exposed-surface and powder read; no measured optical response read for this substance")),
+                roughness_gain: (1.0, Taste("material contact and fracture effects: ASSUMED: provisional exposed-surface and powder read; no measured optical response read for this substance")),
+                sparks: (true, Taste("material contact and fracture effects: ASSUMED: provisional contact-spark emission for this substance")),
             ),
             debris_half_angle_deg: (26.2, Unknown("no measured debris extent; RHA's value")),
             facts: Some((
@@ -239,11 +240,11 @@
                 ≈ 385 (DERIVED)"))),
             visual: "cast_steel",
             feedback: (
-                exposed_linear_rgb: ((0.5, 0.51, 0.53), Unknown("ASSUMED: provisional exposed-surface and powder read; no measured optical response read for this substance")),
-                powder_linear_rgb: ((0.47, 0.47, 0.47), Unknown("ASSUMED: provisional exposed-surface and powder read; no measured optical response read for this substance")),
-                metallic: (1.0, Unknown("ASSUMED: provisional exposed-surface and powder read; no measured optical response read for this substance")),
-                roughness_gain: (1.0, Unknown("ASSUMED: provisional exposed-surface and powder read; no measured optical response read for this substance")),
-                sparks: (true, Unknown("ASSUMED: provisional contact-spark emission for this substance")),
+                exposed_linear_rgb: ((0.5, 0.51, 0.53), Taste("material contact and fracture effects: ASSUMED: provisional exposed-surface and powder read; no measured optical response read for this substance")),
+                powder_linear_rgb: ((0.47, 0.47, 0.47), Taste("material contact and fracture effects: ASSUMED: provisional exposed-surface and powder read; no measured optical response read for this substance")),
+                metallic: (1.0, Taste("material contact and fracture effects: ASSUMED: provisional exposed-surface and powder read; no measured optical response read for this substance")),
+                roughness_gain: (1.0, Taste("material contact and fracture effects: ASSUMED: provisional exposed-surface and powder read; no measured optical response read for this substance")),
+                sparks: (true, Taste("material contact and fracture effects: ASSUMED: provisional contact-spark emission for this substance")),
             ),
             debris_half_angle_deg: (26.2, Unknown("no measured debris extent; RHA's value")),
             facts: Some((
@@ -259,17 +260,17 @@
             )),
         ),
         "TrackSteel": Hard(
-            resistance: Effective((800.0, Unknown("no penetration equivalence for cast manganese
+            resistance: Effective((800.0, StandIn("Stand-in for resistance from each substance's own density and strength: no penetration equivalence for cast manganese
                 track steel; carried at MildSteel's declared factor, the non-armour class. Not
                 derived from the facts below, which give ≈ 673 (DERIVED). Settled by a reading of
                 Hadfield steel against the force law"))),
             visual: "track_steel",
             feedback: (
-                exposed_linear_rgb: ((0.5, 0.51, 0.53), Unknown("ASSUMED: provisional exposed-surface and powder read; no measured optical response read for this substance")),
-                powder_linear_rgb: ((0.47, 0.47, 0.47), Unknown("ASSUMED: provisional exposed-surface and powder read; no measured optical response read for this substance")),
-                metallic: (1.0, Unknown("ASSUMED: provisional exposed-surface and powder read; no measured optical response read for this substance")),
-                roughness_gain: (1.0, Unknown("ASSUMED: provisional exposed-surface and powder read; no measured optical response read for this substance")),
-                sparks: (true, Unknown("ASSUMED: provisional contact-spark emission for this substance")),
+                exposed_linear_rgb: ((0.5, 0.51, 0.53), Taste("material contact and fracture effects: ASSUMED: provisional exposed-surface and powder read; no measured optical response read for this substance")),
+                powder_linear_rgb: ((0.47, 0.47, 0.47), Taste("material contact and fracture effects: ASSUMED: provisional exposed-surface and powder read; no measured optical response read for this substance")),
+                metallic: (1.0, Taste("material contact and fracture effects: ASSUMED: provisional exposed-surface and powder read; no measured optical response read for this substance")),
+                roughness_gain: (1.0, Taste("material contact and fracture effects: ASSUMED: provisional exposed-surface and powder read; no measured optical response read for this substance")),
+                sparks: (true, Taste("material contact and fracture effects: ASSUMED: provisional contact-spark emission for this substance")),
             ),
             debris_half_angle_deg: (26.2, Unknown("no measured debris extent; RHA's value")),
             friction: Some((1.62, StandIn("Stand-in for grouser bite into the ground: the
@@ -299,11 +300,11 @@
                 fill scaling is an assumption, not a fact"))),
             visual: "cast_steel",
             feedback: (
-                exposed_linear_rgb: ((0.5, 0.51, 0.53), Unknown("ASSUMED: provisional exposed-surface and powder read; no measured optical response read for this substance")),
-                powder_linear_rgb: ((0.47, 0.47, 0.47), Unknown("ASSUMED: provisional exposed-surface and powder read; no measured optical response read for this substance")),
-                metallic: (1.0, Unknown("ASSUMED: provisional exposed-surface and powder read; no measured optical response read for this substance")),
-                roughness_gain: (1.0, Unknown("ASSUMED: provisional exposed-surface and powder read; no measured optical response read for this substance")),
-                sparks: (true, Unknown("ASSUMED: provisional contact-spark emission for this substance")),
+                exposed_linear_rgb: ((0.5, 0.51, 0.53), Taste("material contact and fracture effects: ASSUMED: provisional exposed-surface and powder read; no measured optical response read for this substance")),
+                powder_linear_rgb: ((0.47, 0.47, 0.47), Taste("material contact and fracture effects: ASSUMED: provisional exposed-surface and powder read; no measured optical response read for this substance")),
+                metallic: (1.0, Taste("material contact and fracture effects: ASSUMED: provisional exposed-surface and powder read; no measured optical response read for this substance")),
+                roughness_gain: (1.0, Taste("material contact and fracture effects: ASSUMED: provisional exposed-surface and powder read; no measured optical response read for this substance")),
+                sparks: (true, Taste("material contact and fracture effects: ASSUMED: provisional contact-spark emission for this substance")),
             ),
             debris_half_angle_deg: (26.2, Unknown("no measured debris extent; RHA's value")),
             facts: None,
@@ -314,11 +315,11 @@
                 resistance for stowed rounds and propellant"))),
             visual: "machined_steel",
             feedback: (
-                exposed_linear_rgb: ((0.22, 0.17, 0.09), Unknown("ASSUMED: provisional exposed-surface and powder read; no measured optical response read for this substance")),
-                powder_linear_rgb: ((0.25, 0.18, 0.12), Unknown("ASSUMED: provisional exposed-surface and powder read; no measured optical response read for this substance")),
-                metallic: (0.5, Unknown("ASSUMED: provisional exposed-surface and powder read; no measured optical response read for this substance")),
-                roughness_gain: (1.5, Unknown("ASSUMED: provisional exposed-surface and powder read; no measured optical response read for this substance")),
-                sparks: (false, Unknown("ASSUMED: provisional contact-spark emission for this substance")),
+                exposed_linear_rgb: ((0.22, 0.17, 0.09), Taste("material contact and fracture effects: ASSUMED: provisional exposed-surface and powder read; no measured optical response read for this substance")),
+                powder_linear_rgb: ((0.25, 0.18, 0.12), Taste("material contact and fracture effects: ASSUMED: provisional exposed-surface and powder read; no measured optical response read for this substance")),
+                metallic: (0.5, Taste("material contact and fracture effects: ASSUMED: provisional exposed-surface and powder read; no measured optical response read for this substance")),
+                roughness_gain: (1.5, Taste("material contact and fracture effects: ASSUMED: provisional exposed-surface and powder read; no measured optical response read for this substance")),
+                sparks: (false, Taste("material contact and fracture effects: ASSUMED: provisional contact-spark emission for this substance")),
             ),
             debris_half_angle_deg: (26.2, Unknown("no measured debris extent; RHA's value")),
             facts: None,
@@ -329,11 +330,11 @@
                 equivalence for road-wheel rubber"))),
             visual: "rubber",
             feedback: (
-                exposed_linear_rgb: ((0.028, 0.025, 0.023), Unknown("ASSUMED: provisional exposed-surface and powder read; no measured optical response read for this substance")),
-                powder_linear_rgb: ((0.04, 0.035, 0.03), Unknown("ASSUMED: provisional exposed-surface and powder read; no measured optical response read for this substance")),
-                metallic: (0.0, Unknown("ASSUMED: provisional exposed-surface and powder read; no measured optical response read for this substance")),
-                roughness_gain: (2.0, Unknown("ASSUMED: provisional exposed-surface and powder read; no measured optical response read for this substance")),
-                sparks: (false, Unknown("ASSUMED: provisional contact-spark emission for this substance")),
+                exposed_linear_rgb: ((0.028, 0.025, 0.023), Taste("material contact and fracture effects: ASSUMED: provisional exposed-surface and powder read; no measured optical response read for this substance")),
+                powder_linear_rgb: ((0.04, 0.035, 0.03), Taste("material contact and fracture effects: ASSUMED: provisional exposed-surface and powder read; no measured optical response read for this substance")),
+                metallic: (0.0, Taste("material contact and fracture effects: ASSUMED: provisional exposed-surface and powder read; no measured optical response read for this substance")),
+                roughness_gain: (2.0, Taste("material contact and fracture effects: ASSUMED: provisional exposed-surface and powder read; no measured optical response read for this substance")),
+                sparks: (false, Taste("material contact and fracture effects: ASSUMED: provisional contact-spark emission for this substance")),
             ),
             debris_half_angle_deg: (26.2, Unknown("no measured debris extent; RHA's value")),
             facts: None,
@@ -342,17 +343,17 @@
         // are a modern 6 % cobalt cemented-carbide grade's, the class analogue: the wartime cores'
         // composition is not recorded here.
         "TungstenCarbide": Hard(
-            resistance: Effective((1000.0, Unknown("carried at the reference factor: no armour is
+            resistance: Effective((1000.0, StandIn("Stand-in for penetrator deformation and shatter: carried at the reference factor: no armour is
                 made of it and nothing reads a penetrator's factor under the rigid rule; settled
                 when the core-vs-plate hardness contest reads it. Not derived from the facts below,
                 which give ≈ 4160 (DERIVED)"))),
             visual: "machined_steel",
             feedback: (
-                exposed_linear_rgb: ((0.5, 0.51, 0.53), Unknown("ASSUMED: provisional exposed-surface and powder read; no measured optical response read for this substance")),
-                powder_linear_rgb: ((0.47, 0.47, 0.47), Unknown("ASSUMED: provisional exposed-surface and powder read; no measured optical response read for this substance")),
-                metallic: (1.0, Unknown("ASSUMED: provisional exposed-surface and powder read; no measured optical response read for this substance")),
-                roughness_gain: (1.0, Unknown("ASSUMED: provisional exposed-surface and powder read; no measured optical response read for this substance")),
-                sparks: (true, Unknown("ASSUMED: provisional contact-spark emission for this substance")),
+                exposed_linear_rgb: ((0.5, 0.51, 0.53), Taste("material contact and fracture effects: ASSUMED: provisional exposed-surface and powder read; no measured optical response read for this substance")),
+                powder_linear_rgb: ((0.47, 0.47, 0.47), Taste("material contact and fracture effects: ASSUMED: provisional exposed-surface and powder read; no measured optical response read for this substance")),
+                metallic: (1.0, Taste("material contact and fracture effects: ASSUMED: provisional exposed-surface and powder read; no measured optical response read for this substance")),
+                roughness_gain: (1.0, Taste("material contact and fracture effects: ASSUMED: provisional exposed-surface and powder read; no measured optical response read for this substance")),
+                sparks: (true, Taste("material contact and fracture effects: ASSUMED: provisional contact-spark emission for this substance")),
             ),
             debris_half_angle_deg: (26.2, Unknown("no measured debris extent; RHA's value")),
             facts: Some((
@@ -380,16 +381,16 @@
         // strength, scaled to the reference's 1000 — a strength ratio, the same reading the steels'
         // DERIVED rows note, not a measured equivalence.
         "Wood": Hard(
-            resistance: Effective((40.0, Unknown("no penetration data; spruce/pine crushing
+            resistance: Effective((40.0, StandIn("Stand-in for porous timber penetration from its own density and strength: no penetration data; spruce/pine crushing
                 strength along the grain ~40 MPa (birch ~55) over the reference flow strength
                 ~1 GPa, × 1000; the conifers' value, the forest's wood"))),
             visual: "dark_planks",
             feedback: (
-                exposed_linear_rgb: ((0.32, 0.18, 0.08), Unknown("ASSUMED: provisional exposed-surface and powder read; no measured optical response read for this substance")),
-                powder_linear_rgb: ((0.34, 0.22, 0.12), Unknown("ASSUMED: provisional exposed-surface and powder read; no measured optical response read for this substance")),
-                metallic: (0.0, Unknown("ASSUMED: provisional exposed-surface and powder read; no measured optical response read for this substance")),
-                roughness_gain: (2.25, Unknown("ASSUMED: provisional exposed-surface and powder read; no measured optical response read for this substance")),
-                sparks: (false, Unknown("ASSUMED: provisional contact-spark emission for this substance")),
+                exposed_linear_rgb: ((0.32, 0.18, 0.08), Taste("material contact and fracture effects: ASSUMED: provisional exposed-surface and powder read; no measured optical response read for this substance")),
+                powder_linear_rgb: ((0.34, 0.22, 0.12), Taste("material contact and fracture effects: ASSUMED: provisional exposed-surface and powder read; no measured optical response read for this substance")),
+                metallic: (0.0, Taste("material contact and fracture effects: ASSUMED: provisional exposed-surface and powder read; no measured optical response read for this substance")),
+                roughness_gain: (2.25, Taste("material contact and fracture effects: ASSUMED: provisional exposed-surface and powder read; no measured optical response read for this substance")),
+                sparks: (false, Taste("material contact and fracture effects: ASSUMED: provisional contact-spark emission for this substance")),
             ),
             debris_half_angle_deg: (26.2, Unknown("no measured debris extent; RHA's value")),
             friction: Some((0.5, Unknown("ASSUMED, no source read: one side's value (wood on brick
@@ -425,11 +426,11 @@
                         Sci. 53(1), 210103 (2021), Table 3, read primary (specimen moisture 8-10%).
                         https://journals.itb.ac.id/index.php/jets/article/download/13345/pdf_111/44406;
                         doi:10.5614/j.eng.technol.sci.2021.53.1.3"))),
-                    compressive_dif: Some((5.960714285714286, Derived("MEASURED tangential yield
+                    compressive_dif: Some((5.960714285714286, StandIn("Stand-in for loading-rate-dependent compressive strength: MEASURED tangential yield
                         stress 33.38 MPa at 2400 /s (specimen ST-52, Zulkifli et al. 2021,
                         Table 7) divided by the same study's quasi-static mean 5.60 MPa (Table 3).
-                        A reference-rate datum, not a constant over all strain rates; read primary
-                        at the compressive_strength URL. ASSUMED spruce analogue"))),
+                        The current law applies this reference-rate ratio at every loading rate; read
+                        primary at the compressive_strength URL. ASSUMED spruce analogue"))),
                     compressive_dif_strain_rate: Some((2400.0, Measured("2400 /s, tangential
                         specimen ST-52; Zulkifli et al. 2021, Table 7, read primary at the
                         compressive_strength URL. The paper's tangential tests span 591-2530 /s"))),
@@ -473,17 +474,17 @@
         // reads, not a measured equivalence. The unit, not the masonry assemblage (12 MPa with
         // Type N mortar): a round's line crosses brick far more than mortar.
         "Brick": Hard(
-            resistance: Effective((36.5, Unknown("no penetration data; molded solid clay brick mean
+            resistance: Effective((36.5, StandIn("Stand-in for brick penetration: no penetration data; molded solid clay brick mean
                 unit compressive strength 36.5 MPa (s.d. 12.6; extruded 77.9), Brick Industry
                 Association Technical Note 3A (2024) Table 1, read 2026-10-30, over the reference
                 flow strength ~1 GPa, × 1000"))),
             visual: "brick",
             feedback: (
-                exposed_linear_rgb: ((0.45, 0.19, 0.11), Unknown("ASSUMED: provisional exposed-surface and powder read; no measured optical response read for this substance")),
-                powder_linear_rgb: ((0.4, 0.25, 0.18), Unknown("ASSUMED: provisional exposed-surface and powder read; no measured optical response read for this substance")),
-                metallic: (0.0, Unknown("ASSUMED: provisional exposed-surface and powder read; no measured optical response read for this substance")),
-                roughness_gain: (2.4, Unknown("ASSUMED: provisional exposed-surface and powder read; no measured optical response read for this substance")),
-                sparks: (false, Unknown("ASSUMED: provisional contact-spark emission for this substance")),
+                exposed_linear_rgb: ((0.45, 0.19, 0.11), Taste("material contact and fracture effects: ASSUMED: provisional exposed-surface and powder read; no measured optical response read for this substance")),
+                powder_linear_rgb: ((0.4, 0.25, 0.18), Taste("material contact and fracture effects: ASSUMED: provisional exposed-surface and powder read; no measured optical response read for this substance")),
+                metallic: (0.0, Taste("material contact and fracture effects: ASSUMED: provisional exposed-surface and powder read; no measured optical response read for this substance")),
+                roughness_gain: (2.4, Taste("material contact and fracture effects: ASSUMED: provisional exposed-surface and powder read; no measured optical response read for this substance")),
+                sparks: (false, Taste("material contact and fracture effects: ASSUMED: provisional contact-spark emission for this substance")),
             ),
             debris_half_angle_deg: (26.2, Unknown("no measured debris extent; RHA's value")),
             friction: Some((0.65, Unknown("CLAIMED, not read in full: brick sliding on brick,
@@ -518,17 +519,19 @@
                         June 2024, Table 1, read primary:
                         https://www.gobrick.com/media/file/TN_3A_Brick_Masonry_Material_Properties.pdf.
                         This is unit strength, not the masonry prism's f'm"))),
-                    compressive_dif: Some((2.357106867962561, Derived("0.3224 ln(100) + 0.8724,
+                    compressive_dif: Some((2.357106867962561, StandIn("Stand-in for loading-rate-dependent compressive strength: 0.3224 ln(100) + 0.8724,
                         Pereira, Dias and Lourenco, Dynamic Properties of Clay Brick at Different
                         Strain Rates, 12th Canadian Masonry Symposium (2013), eq. 1, read primary:
                         https://www.canadamasonrydesigncentre.com/wp-content/uploads/12th_symposium/621.pdf.
                         Fit to measured handmade Galveias brick; ASSUMED rate analogue for this
                         molded-brick row. Published domain 4 < strain rate < 200 /s; this is a
-                        reference-rate datum, not permission to extrapolate"))),
-                    compressive_dif_strain_rate: Some((100.0, StandIn("Stand-in for
-                        strain-rate-dependent compressive strength: no law reads this rate: ASSUMED
-                        reference rate 100 /s within Pereira et al. 2013 eq. 1's published domain
-                        4-200 /s; compressive_dif evaluates that material-property fit at this rate"))),
+                        fit evaluated at the declared reference rate, applied as a constant at every
+                        loading rate by the current law"))),
+                    compressive_dif_strain_rate: Some((100.0, Unknown("ASSUMED reference rate
+                        100 /s within Pereira et al. 2013 eq. 1's published domain 4-200 /s;
+                        compressive_dif evaluates that material-property fit at this rate. No law
+                        reads this reference rate. Settled by a measured strain-rate history for
+                        the declared construction"))),
                     solid_density: Some((2250.0, Measured("published grade SW brick grain-density
                         parameter, Meyer, ARL-TR-5556 (2011), Table 1, read primary model report:
                         https://www.govinfo.gov/content/pkg/GOVPUB-D101-PURL-gpo10967/pdf/GOVPUB-D101-PURL-gpo10967.pdf.

@@ -52,14 +52,16 @@ each with its default, preserved alternatives, and revert cost. See
 - **One number, one job.** Every authored number does exactly one of five jobs, and its label names the job:
   a fact about the world (`Measured` names the source, `Derived` the inputs and derivation,
   `Unknown` what is missing and what would settle it); a game unit (`Unit` declares a scale that
-  balance lives in and says why this scale); a taste (`Taste` is a magnitude chosen for look or
-  feel, multiplying a physical scalar, never replacing it, and names its effect family); a solver
-  constant (`Resolution` says how finely or stably a law is evaluated, never what it states, and
+  balance lives in and says why this scale); a taste (`Taste` is a magnitude or choice made for look
+  or feel, and names its effect family; where an effect's size follows a physical quantity, the
+  taste scales that quantity rather than replacing it); a solver constant (`Resolution` says how finely or stably a law is evaluated, never what it states, and
   gives the stability or cost reason); or a stand-in (`StandIn` names the law or fact the game does
-  not have yet). Test data uses `Fixture`, accepted only under `cfg(test)`; a shipped file carrying
-  it is refused before play, naming the file and field. A number doing two jobs is the smell "a
-  tuned constant hides a missing law"; a law exposing a variable no player can perceive is the
-  smell "simulate the universe". Code holds only `Resolution` numbers, labelled with their reason;
+  not have yet). Test data uses `Fixture`, accepted only under `cfg(test)` for a test's own inline
+  fixtures; a shipped or embedded file carrying it is refused in every build, CI's test build
+  included, naming the file and field. A number doing two jobs is the smell "a tuned constant hides
+  a missing law"; a law exposing a variable no player can perceive is the smell "simulate the
+  universe". Exact constants of a law's form are not authored numbers with a
+  job; state them beside the law. Code holds only `Resolution` numbers, labelled with their reason;
   everything else is data. Balance lives in game units and game systems, never in a physical
   constant, never per tank. Existing bare code constants migrate when a lane touches their module.
 - **Sim state is built at spawn, from data — never from an asset, never late.** No change may initialize a rollback-registered component from a loaded asset, or insert/attach sim state onto an already-replicated entity after spawn. If it rolls back, it must be constructible synchronously at spawn from data (the glb is a *view*, not the sim constructor). See `.agents/docs/adr/0014-sim-view-split.md`.

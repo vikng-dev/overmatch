@@ -18,7 +18,7 @@ Review test: would this line survive tank #2, house #2 and a new material unchan
   data, or a code default that only one asset's data happens to override.
 - **Tuned past its truth**: a law parameter far from its handbook or measured value, set to make one
   case look right. The missing factor is the finding.
-- **Two jobs in one number**: a fact, law coefficient, unit, taste or resolution value also doing
+- **Two jobs in one number**: a fact, unit, taste, resolution or stand-in value also doing
   a second job. Split it into values with separate jobs and labels.
 - **Bare number in code**: a numeric constant in `src/` that is not `Resolution` with its reason.
   Move it to data under its job.
@@ -31,6 +31,8 @@ Review test: would this line survive tank #2, house #2 and a new material unchan
 
 - Data selecting among generic laws, or supplying their parameters.
 - A `Resolution` constant in code with its stability or cost reason.
+- The exact constants of a law's form, stated beside the law: the 1/2 in S/2, the ball law's
+  exponent 3, π, or the 0.75 in 0.75·V/π. They are its algebra, not authored numbers with a job.
 - Labelled fixture data in tests asserting class invariants.
 - A generic law with a parameter the data sets for every asset of its class.
 

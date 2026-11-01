@@ -2,10 +2,11 @@
 //!
 //! `Measured`, `Derived` and `Unknown` label a fact about the world: the note names the source,
 //! the inputs and derivation, or what is missing and what would settle it. `Unit` declares a game
-//! unit, a scale that balance lives in, and says why this scale. `Taste` is a magnitude chosen for
-//! look or feel, multiplying a physical scalar, never replacing it; its note names the effect
-//! family. `Resolution` says how finely or stably a law is evaluated, never what it states, and
-//! gives the stability or cost reason. `StandIn` names the law or fact the game does not have yet.
+//! unit, a scale that balance lives in, and says why this scale. `Taste` is a magnitude or choice
+//! made for look or feel; its note names the effect family. Where an effect's size follows a
+//! physical quantity, the taste scales that quantity rather than replacing it. `Resolution` says
+//! how finely or stably a law is evaluated, never what it states, and gives the stability or cost
+//! reason. `StandIn` names the law or fact the game does not have yet.
 //!
 //! `Fixture` labels inline test data and loads only under `cfg(test)`. Shipped-file boundaries
 //! use [`shipped`] in every build, including tests. Missing provenance, a blank note
@@ -23,8 +24,8 @@ enum Provenance {
     Derived(String),
     /// A game unit: a declared scale that balance lives in; says why this scale.
     Unit(String),
-    /// A magnitude chosen for look or feel, multiplying a physical scalar, never replacing it;
-    /// names the effect family it belongs to.
+    /// A magnitude or choice made for look or feel; names its effect family. Where an effect's
+    /// size follows a physical quantity, the taste scales that quantity rather than replacing it.
     Taste(String),
     /// A value standing in for a law or fact the game does not have yet; names that law or fact.
     StandIn(String),

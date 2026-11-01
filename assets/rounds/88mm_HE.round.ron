@@ -12,7 +12,7 @@
     penetrator: None,
     name: ("8.8 cm Sprgr. L/4.5", Measured("CITED TM53 pp.444-445")),
     round_type: ("HE", Measured("CITED TM53 pp.444-445: high-explosive shell")),
-    core: ("GunSteel", Unknown("ASSUMED: the shell body as the fixture body steel; no source gives
+    core: ("GunSteel", Unknown("ASSUMED: the shell body as the provisional body steel; no source gives
         its steel. Settled by a sourced body-alloy specification that selects the material class")),
     mass: (9.30, Derived("CITED TM53 p.445: 20.5 lb loaded and fuzed = 9.30 kg; chosen over
         Brit43 pp.91-92's 20.3 lb (9.21 kg), TM53 being the entry that names the Kw.K. 36")),
@@ -49,9 +49,9 @@
     effects: (
         impact: (Layered, Taste("round impact effects: ASSUMED: provisional authored contact-read
             recipe; no emission measurement")),
-        ember: (None, Unknown("ASSUMED: untraced shell; no base-tracer composition is authored")),
-        smoke: (None, Unknown("ASSUMED: no sustained flight smoke emission authored")),
-        body: (Some((model: ("shell/shell.glb", Unknown("ASSUMED: the one authored shell model, an
+        ember: (None, Taste("round flight effects: ASSUMED: untraced shell; no base-tracer composition is authored")),
+        smoke: (None, Taste("round flight effects: ASSUMED: no sustained flight smoke emission authored")),
+        body: (Some((model: ("shell/shell.glb", Taste("round flight effects: ASSUMED: the one authored shell model, an
             88 mm full-calibre body; this round's own body is not modelled")))),
             Taste("round flight effects: a main-gun round is drawn as its body in flight")),
         streak: (None, Taste("round flight effects: an untraced main-gun round; no belt streak")),

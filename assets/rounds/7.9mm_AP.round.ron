@@ -11,7 +11,7 @@
         speed are unsourced and not tied to it")),
     round_type: ("AP", Measured("the S.m.K. is a steel-cored armour-piercing bullet
         (panzerworld.com/german-ammunition-nomenclature)")),
-    core: ("GunSteel", Unknown("fixture label: a quenched-and-tempered alloy-steel core, Q7's
+    core: ("GunSteel", Unknown("provisional material selection: a quenched-and-tempered alloy-steel core, Q7's
         'hardened' belt; GunSteel carries that class's facts. The rigid regime reads no core fact.
         Settled by a sourced core-alloy specification that selects the material class")),
     mass: (0.0118, Unknown("no source recorded in the repo; settled by a cited munition table")),
@@ -23,8 +23,8 @@
     effects: (
         impact: (Compact, Taste("round impact effects: ASSUMED: provisional authored contact-read
             recipe; no emission measurement")),
-        ember: (None, Unknown("ASSUMED: no base-tracer emission authored for this round; belt-selected light streaks are a separate weapon read")),
-        smoke: (None, Unknown("ASSUMED: no sustained flight smoke emission authored")),
+        ember: (None, Taste("round flight effects: ASSUMED: no base-tracer emission authored for this round; belt-selected light streaks are a separate weapon read")),
+        smoke: (None, Taste("round flight effects: ASSUMED: no sustained flight smoke emission authored")),
         body: (None, Taste("round flight effects: a rifle bullet flies undrawn; its belt's tracers
             draw the streak")),
         streak: (Some((
@@ -36,7 +36,7 @@
                 rounds, preserved from the original effect")),
             emissive: ((30.0, 12.0, 3.0), Taste("round flight effects: ASSUMED: provisional
                 warm-orange linear HDR output, preserved from the original effect")),
-        )), Unknown("ASSUMED: retained provisional tracer streak; no measured tracer emission data has been read for this round")),
+        )), Taste("round flight effects: ASSUMED: retained provisional tracer streak; no measured tracer emission data has been read for this round")),
     ),
 
 )
