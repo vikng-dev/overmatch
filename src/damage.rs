@@ -1,4 +1,4 @@
-//! Damage consequences in the game's damage model: what an emptied HP pool means. A crew member
+//! Consequences in the game's damage model: module condition and emptied HP pools. A crew member
 //! whose HP pool is emptied is knocked out (latched as `Dead`); an ammunition volume whose pool is
 //! emptied cooks off; a module whose pool is emptied is out of action and stops supplying the
 //! capabilities that need it; and a tank carries a knocked-out label. Ballistics owns *how* a dose
@@ -486,8 +486,8 @@ pub struct VolumeFacets {
 }
 
 /// How well this capability is currently served on this tank, ∈ [0, 1] (0 = unavailable, 1 = full)
-/// — the *effectiveness* (design §7b). Resolves each [`Part`]'s live quality (living crew → 1.0,
-/// intact module → 1.0; backfill competence and graded damage layer in later), then combines via
+/// — the *effectiveness* (design §7b). Resolves each [`Part`]'s live quality (crew in action →
+/// occupant competence; module → held share of its HP pool), then combines via
 /// [`evaluate`]. Requirements are per-tank RON data ([`TankCapabilities`]); the query walks the
 /// tank's volumes once. An entity without volumes or capabilities is not a bound tank, and serves
 /// nothing (0).
@@ -510,9 +510,8 @@ pub fn capability_effectiveness(
 
 /// The live quality of each [`Part`] on a tank — the shared core behind *every* requirement check
 /// (a tank-wide [`Capability`], a servo's slew gate, a weapon's fire/load gate): resolve once per
-/// tank, then [`evaluate`] any number of requirements against it. Living crew → competence (native
-/// 1.0 / foreign degraded); intact module (its pool not emptied) → 1.0 (graded damage layers in
-/// later); absent → 0. Duplicate parts (two volumes of one station) take the best.
+/// tank, then [`evaluate`] any number of requirements against it. Crew in action → competence
+/// (native 1.0 / foreign reduced); module → held / capacity; emptied or absent → 0. Duplicate parts (two volumes of one station) take the best.
 pub fn part_qualities(
     tank_volumes: &TankVolumes,
     volumes: &Query<VolumeFacets>,
@@ -534,7 +533,7 @@ pub fn part_qualities(
             && !hp.is_empty()
         {
             let q = quality.entry(Part::from(*func)).or_insert(0.0);
-            *q = q.max(1.0);
+            *q = q.max(hp.held() as f32 / hp.capacity() as f32);
         }
     }
     quality
@@ -772,6 +771,33 @@ mod tests {
     /// Build a part→quality map from `(part, quality)` pairs.
     fn q(pairs: &[(Part, f32)]) -> HashMap<Part, f32> {
         pairs.iter().copied().collect()
+    }
+
+    /// The game's damage model: rate consumers rely on a module's held share, including
+    /// zero at knockout. A binary-quality mutant fails the half-full row.
+    #[test]
+    fn module_quality_is_its_held_share() {
+        use super::*;
+        use bevy::ecs::system::RunSystemOnce;
+        // Fixture: a ten-point engine pool at full, half and empty.
+        for share in [1.0, 0.5, 0.0] {
+            let mut world = World::new();
+            let tank = world.spawn_empty().id();
+            let mut hp = ComponentHealth::full(10);
+            hp.set_held((hp.capacity() as f32 * share) as u32);
+            world.spawn((FunctionRole::Engine, hp, VolumeOf(tank)));
+            world
+                .run_system_once(
+                    move |tanks: Query<&TankVolumes>, facets: Query<VolumeFacets>| {
+                        let quality = part_qualities(tanks.get(tank).unwrap(), &facets);
+                        assert_eq!(
+                            evaluate(&vec![Group::Single(Part::Engine)], &quality),
+                            share
+                        );
+                    },
+                )
+                .unwrap();
+        }
     }
 
     /// The game's damage model's one knockout rule (#227), run through the consequence chain's
