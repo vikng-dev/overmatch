@@ -184,7 +184,6 @@ use bevy::ecs::error::BevyError;
 use bevy::math::Affine3A;
 use bevy::mesh::{GenerateTangentsError, Indices, PrimitiveTopology, VertexAttributeValues};
 use bevy::prelude::*;
-use bevy::world_serialization::WorldInstanceReady;
 
 use crate::geometry_lod::certificate::Rung;
 use crate::geometry_lod::{Chain, ChainRef};
@@ -199,7 +198,7 @@ use super::side::{PerSide, Side};
 pub(crate) fn template_plugin(app: &mut App) {
     // The belt's GPU draw: its material, the repeated meshes and the table upload.
     app.add_plugins(super::belt_draw::plugin);
-    app.add_observer(require_shoe_template);
+    app.add_systems(Startup, require_shoe_template);
     app.add_systems(
         Update,
         (
@@ -649,52 +648,102 @@ impl ShoeBelt {
     }
 }
 
-/// Refuse a vehicle view that lands without the shoe template. An instance spawns whole, so the
-/// view whose subtree carries the sheet's sprocket view nodes carries the template's `Link` node
-/// and both pin markers too, or never will: without this the bind would wait for them forever and
-/// every belt would stay undrawn. Other glbs (trees, buildings) carry no sprocket node.
-fn require_shoe_template(
-    ready: On<WorldInstanceReady>,
-    blueprint: Option<Res<crate::bake::TankBlueprint>>,
-    children: Query<&Children>,
-    names: Query<&Name>,
-) {
-    // A composition without a blueprint declares no running gear whose view this could be.
-    let Some(blueprint) = blueprint else {
-        return;
-    };
-    // Every glTF node is named; an unnamed descendant (a sim collider under the hull) is none.
-    let instance = children
-        .iter_descendants(ready.entity)
-        .filter_map(|entity| names.get(entity).ok().map(Name::as_str));
-    if let Some(node) = missing_template_node(instance, &blueprint.spec.track.sprocket.nodes) {
-        panic!(
-            "{}: the vehicle's view glb instanced without the shoe template's `{node}` node; \
-             re-export the view with the `{LINK_NODE}` template and its `{PIN_START_NODE}` / \
-             `{PIN_END_NODE}` markers",
-            blueprint.file
-        );
-    }
+/// Refuse the selected view's template before admission, directly from its authored scene.
+/// Scene instantiation is later than this file gate and cannot establish whether the export
+/// contains running gear: even an export missing every axle must still supply its template.
+fn require_shoe_template() {
+    let path = crate::tank::TANK_GLB_PATH;
+    let bytes =
+        crate::assets::require_file(&crate::assets::asset_root(), path, "track shoe template");
+    let gltf = gltf::Gltf::from_slice(&bytes).unwrap_or_else(|error| {
+        panic!("{path}: track shoe template: {error}; repair and re-export the view glb")
+    });
+    verify_template_document(&gltf.document, path);
 }
 
-/// The first shoe-template node an instance's node names lack, or `None` when the instance is no
-/// vehicle view (it carries neither declared sprocket) or carries the whole template.
-fn missing_template_node<'a>(
-    names: impl IntoIterator<Item = &'a str>,
-    sprockets: &crate::spec::SideNodes,
-) -> Option<&'static str> {
-    let (mut vehicle, mut found) = (false, [false; 3]);
-    let template = [LINK_NODE, PIN_START_NODE, PIN_END_NODE];
-    for name in names {
-        vehicle |= name == sprockets.left || name == sprockets.right;
-        for (node, seen) in template.iter().zip(&mut found) {
-            *seen |= name == *node;
+/// The template contract that can be checked without an instantiated world or loaded meshes.
+/// Binding checks the loaded mesh representation and certificate join when those assets arrive.
+fn verify_template_document(document: &gltf::Document, path: &str) {
+    let scene = document.scenes().next().unwrap_or_else(|| {
+        panic!("{path}: track shoe template: scene 0 is missing; export an active scene")
+    });
+    let template = [LINK_NODE, PIN_START_NODE, PIN_END_NODE, LINK_BOX_NODE];
+    let mut found: [Option<(gltf::Node<'_>, Mat4)>; 4] = std::array::from_fn(|_| None);
+    let mut stack: Vec<_> = scene.nodes().map(|node| (node, Mat4::IDENTITY)).collect();
+    while let Some((node, parent)) = stack.pop() {
+        let world = parent * super::marker_model::node_matrix(&node);
+        for (index, name) in template.iter().enumerate() {
+            if node.name() == Some(*name) {
+                assert!(
+                    found[index].is_none(),
+                    "{path}: track shoe template: duplicate `{name}`; export one template in scene 0"
+                );
+                assert!(
+                    world.is_finite(),
+                    "{path}: track shoe template `{name}` has a non-finite transform; repair its authored frame"
+                );
+                found[index] = Some((node.clone(), world));
+            }
+        }
+        stack.extend(node.children().map(|child| (child, world)));
+    }
+    for index in 0..3 {
+        assert!(
+            found[index].is_some(),
+            "{path}: track shoe template is missing `{}`; export `{LINK_NODE}` with both pin markers in scene 0",
+            template[index]
+        );
+    }
+    let (link, _) = found[0]
+        .as_ref()
+        .expect("the required template node was just checked");
+    for index in [1, 2] {
+        let (pin, _) = found[index]
+            .as_ref()
+            .expect("both required pin markers were just checked");
+        assert!(
+            link.children().any(|child| child.index() == pin.index()),
+            "{path}: track shoe template `{}` must be a direct child of `{LINK_NODE}`; apply its parent frame and re-export",
+            template[index]
+        );
+    }
+    for index in [0, 3] {
+        // Link_Box is a measurement marker in the sim artifact; the view may omit it.
+        if let Some((node, world)) = &found[index] {
+            let scale = Vec3::new(
+                world.x_axis.truncate().length(),
+                world.y_axis.truncate().length(),
+                world.z_axis.truncate().length(),
+            );
+            assert!(
+                scale.is_finite() && (scale - Vec3::ONE).abs().max_element() <= SCALE_TOLERANCE,
+                "{path}: track shoe template `{}` carries scale {scale}; apply its scale and every ancestor's before export",
+                node.name()
+                    .expect("only named template nodes were retained")
+            );
         }
     }
-    vehicle
-        .then(|| template.into_iter().zip(found).find(|(_, seen)| !seen))
-        .flatten()
-        .map(|(node, _)| node)
+    let mesh = link.mesh().unwrap_or_else(|| {
+        panic!(
+            "{path}: track shoe template `{LINK_NODE}` has no mesh; export the shoe on that node"
+        )
+    });
+    let primitives: Vec<_> = mesh.primitives().collect();
+    assert_eq!(
+        primitives.len(),
+        1,
+        "{path}: track shoe template `{LINK_NODE}` must have exactly one primitive; join its shoe geometry before export"
+    );
+    let primitive = &primitives[0];
+    assert!(
+        primitive.material().index().is_some(),
+        "{path}: track shoe template `{LINK_NODE}` has no material; assign its shoe material before export"
+    );
+    assert_eq!(
+        primitive.mode(),
+        gltf::mesh::Mode::Triangles,
+        "{path}: track shoe template `{LINK_NODE}` must be a triangle list; triangulate before export"
+    );
 }
 
 /// Hide the glb's template link the moment it appears.
@@ -717,7 +766,7 @@ fn hide_link_template(mut commands: Commands, fresh: Query<(Entity, &Name), Adde
 ///
 /// It retries every frame until the glb scene has landed (the scene load is async and the rig build
 /// does not wait for it), and latches on inserting [`LinkTemplate`]. Once a pin marker exists its
-/// whole instance does ([`require_shoe_template`] refuses a view without them), so every missing
+/// whole instance does (the startup template gate refuses incomplete exports), so every missing
 /// piece after that is a broken export and refuses; only assets still loading wait. The name scan is global rather
 /// than a walk from a root because `Link` is a SCENE ROOT — a sibling of the hull node, not a
 /// descendant of it — and both tools spawn exactly one template.
@@ -989,7 +1038,8 @@ fn composed_scale(
     let local = |e: Entity| {
         transforms
             .get(e)
-            .map_or(bevy::math::Affine3A::IDENTITY, Transform::compute_affine)
+            .expect("every glTF template ancestor and its WorldAssetRoot carries a Transform")
+            .compute_affine()
     };
     let mut affine = local(entity);
     let mut current = entity;
@@ -1006,7 +1056,7 @@ fn composed_scale(
 
 /// Enforce the scale contract on one template node, or [`refuse_scaled`].
 fn verify_unit_scale(node: &str, scale: Vec3) {
-    if (scale - Vec3::ONE).abs().max_element() > SCALE_TOLERANCE {
+    if !scale.is_finite() || (scale - Vec3::ONE).abs().max_element() > SCALE_TOLERANCE {
         refuse_scaled(node, scale);
     }
 }
@@ -1344,28 +1394,49 @@ mod tests {
 
     use super::*;
 
-    /// A VEHICLE VIEW LANDS WITH ITS WHOLE SHOE TEMPLATE OR IS REFUSED. The bind waits only for
-    /// a view that has not instanced; a mutant that drops a template node from the check, or
-    /// demands the template of a glb with no running gear (a tree's), fails here.
+    /// View admission relies on the file's own template, even when the export omitted all axles.
+    /// Missing nodes, incorrect parenting and a missing material must refuse before instantiation.
     #[test]
-    fn a_vehicle_view_without_its_shoe_template_is_refused() {
-        let sprockets = crate::spec::SideNodes {
-            left: "Sprocket_L".into(),
-            right: "Sprocket_R".into(),
+    fn the_template_file_gate_refuses_incomplete_or_misparented_exports() {
+        let sound = serde_json::json!({
+            "asset": {"version": "2.0"},
+            "scene": 0,
+            "scenes": [{"nodes": [0]}],
+            "nodes": [
+                {"name": LINK_NODE, "mesh": 0, "children": [1, 2]},
+                {"name": PIN_START_NODE, "translation": [0.0, 0.0, 0.1]},
+                {"name": PIN_END_NODE}
+            ],
+            "buffers": [{"byteLength": 36, "uri": "fixture.bin"}],
+            "bufferViews": [{"buffer": 0, "byteLength": 36}],
+            "accessors": [{"bufferView": 0, "componentType": 5126, "count": 3, "type": "VEC3",
+                "min": [0.0, 0.0, 0.0], "max": [1.0, 1.0, 1.0]}],
+            "materials": [{}],
+            "meshes": [{"primitives": [{"attributes": {"POSITION": 0}, "material": 0}]}]
+        });
+        let verify = |json: &serde_json::Value| {
+            let gltf = gltf::Gltf::from_slice(&serde_json::to_vec(json).unwrap()).unwrap();
+            verify_template_document(&gltf.document, "fixture.glb");
         };
-        let whole = [
-            "Hull",
-            "Sprocket_R",
-            LINK_NODE,
-            PIN_START_NODE,
-            PIN_END_NODE,
-        ];
-        assert_eq!(missing_template_node(whole, &sprockets), None);
-        for node in [LINK_NODE, PIN_START_NODE, PIN_END_NODE] {
-            let lacking = whole.into_iter().filter(|name| *name != node);
-            assert_eq!(missing_template_node(lacking, &sprockets), Some(node));
+        verify(&sound);
+        for index in 0..3 {
+            let mut broken = sound.clone();
+            broken["nodes"][index]["name"] = "Unrelated".into();
+            assert!(std::panic::catch_unwind(|| verify(&broken)).is_err());
         }
-        assert_eq!(missing_template_node(["Trunk", "Crown"], &sprockets), None);
+        let mut broken = sound.clone();
+        broken["nodes"][0]["children"] = serde_json::json!([1]);
+        broken["scenes"][0]["nodes"] = serde_json::json!([0, 2]);
+        assert!(std::panic::catch_unwind(|| verify(&broken)).is_err());
+        let mut broken = sound.clone();
+        broken["meshes"][0]["primitives"][0]
+            .as_object_mut()
+            .unwrap()
+            .remove("material");
+        assert!(std::panic::catch_unwind(|| verify(&broken)).is_err());
+        let mut broken = sound;
+        broken["nodes"][0]["scale"] = serde_json::json!([1.0, 2.0, 1.0]);
+        assert!(std::panic::catch_unwind(|| verify(&broken)).is_err());
     }
 
     /// A FIXTURE template, re-measured from `tiger_1.glb` on 2026-07-26 (the export that APPLIED the
@@ -2748,6 +2819,7 @@ mod tests {
         assert!(text.contains("0.8079178"), "must print the scale: {text}");
         assert!(text.contains("Apply"), "must say how to fix it: {text}");
         // Unit scale, and a hair either side of it, pass.
+        assert!(std::panic::catch_unwind(|| verify_unit_scale(LINK_NODE, Vec3::NAN)).is_err());
         verify_unit_scale(LINK_NODE, Vec3::ONE);
         verify_unit_scale(LINK_BOX_NODE, Vec3::splat(1.0 - SCALE_TOLERANCE * 0.5));
         // A single axis is enough to fail — a non-uniform scale is still a scale.
@@ -2767,6 +2839,7 @@ mod tests {
 
         let path = crate::assets::asset_root().join(crate::tank::TANK_GLB_PATH);
         let gltf::Gltf { document, .. } = gltf::Gltf::open(&path).expect("the Tiger glb opens");
+        verify_template_document(&document, crate::tank::TANK_GLB_PATH);
         let scene = document.scenes().next().expect("the glb carries a scene");
         let mut stack: Vec<(gltf::Node, Mat4)> =
             scene.nodes().map(|n| (n, Mat4::IDENTITY)).collect();
