@@ -2,6 +2,7 @@
 //! Esc router ([`EscapeAction`]).
 
 use avian3d::prelude::{Physics, PhysicsTime};
+use bevy::ecs::query::QuerySingleError;
 use bevy::ecs::schedule::ScheduleConfigs;
 use bevy::ecs::system::ScheduleSystem;
 use bevy::prelude::*;
@@ -50,6 +51,19 @@ pub(crate) enum SimPhase {
 #[derive(SystemSet, Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct PlayerInputSet;
 
+/// The primary window's single query match, if there is a primary window: a headless run has none,
+/// and it is gone while the app exits. Bevy assumes the primary window is unique but does not
+/// enforce it, so a second one is a bug.
+pub(crate) fn primary_window<T>(result: Result<T, QuerySingleError>) -> Option<T> {
+    match result {
+        Ok(window) => Some(window),
+        Err(QuerySingleError::NoEntities(_)) => None,
+        Err(error @ QuerySingleError::MultipleEntities(_)) => {
+            panic!("an app has at most one primary window: {error}")
+        }
+    }
+}
+
 /// Run condition: the primary window's cursor is captured (`grab_mode == Locked`). This is the
 /// license [`PlayerInputSet`] gates on — release the cursor (menu, pause, alt-tab) and every
 /// device-reading system idles, so the tank coasts instead of being driven by a freed cursor.
@@ -59,9 +73,7 @@ pub struct PlayerInputSet;
 /// mounts these device systems anyway (`NetClientPlugin` is skipped unless windowed) — so the gate
 /// must never be the thing that stops a windowless run.
 pub fn cursor_locked(cursor: Query<&CursorOptions, With<PrimaryWindow>>) -> bool {
-    cursor
-        .single()
-        .map_or(true, |c| c.grab_mode == CursorGrabMode::Locked)
+    primary_window(cursor.single()).is_none_or(|c| c.grab_mode == CursorGrabMode::Locked)
 }
 
 /// Where this frame's Esc press goes, decided once by [`route_escape`] ahead of every consumer: a
@@ -190,7 +202,7 @@ fn release_on_focus_lost(
     mut focus: MessageReader<WindowFocused>,
     state: Res<State<AppState>>,
     mut next: ResMut<NextState<AppState>>,
-    cursor: Single<&mut CursorOptions, With<PrimaryWindow>>,
+    mut cursors: Query<&mut CursorOptions, With<PrimaryWindow>>,
     suppressed: Option<Res<FocusPauseSuppressed>>,
 ) {
     let Some(false) = collapse_focus(&mut focus) else {
@@ -201,7 +213,10 @@ fn release_on_focus_lost(
         info!("state: focus lost — pause suppressed (unattended run)");
         return;
     }
-    let mut cursor = cursor.into_inner();
+    // No primary window (headless, or closing at exit): no cursor to free.
+    let Some(mut cursor) = primary_window(cursors.single_mut()) else {
+        return;
+    };
     cursor.grab_mode = CursorGrabMode::None;
     cursor.visible = true;
     if *state.get() == AppState::Playing {
@@ -242,12 +257,19 @@ fn toggle_pause(
 
 /// Lock + hide the cursor on entering Playing — fires on the Loading→Playing transition (once
 /// assets are ready) as well as on unpause.
-fn grab_cursor(window: Single<(&mut Window, &mut CursorOptions), With<PrimaryWindow>>) {
-    let (mut window, mut cursor) = window.into_inner();
+fn grab_cursor(mut windows: Query<(&mut Window, &mut CursorOptions), With<PrimaryWindow>>) {
+    // No primary window (headless): no cursor to capture.
+    let Some((mut window, mut cursor)) = primary_window(windows.single_mut()) else {
+        return;
+    };
     grab_now(&mut window, &mut cursor);
 }
 
-fn release_cursor(mut cursor: Single<&mut CursorOptions>) {
+fn release_cursor(mut cursors: Query<&mut CursorOptions, With<PrimaryWindow>>) {
+    // No primary window (headless): no cursor to release.
+    let Some(mut cursor) = primary_window(cursors.single_mut()) else {
+        return;
+    };
     cursor.grab_mode = CursorGrabMode::None;
     cursor.visible = true;
 }

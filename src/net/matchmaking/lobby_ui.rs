@@ -46,6 +46,12 @@ pub(super) enum Target {
     Retry,
 }
 
+/// Why the list and the status line each match exactly once where their refreshers run: [`spawn`]
+/// builds one of each on entering [`Flow::Lobby`], the refreshers run only in it, and leaving it
+/// despawns both.
+const LOBBY_SPAWNED: &str = "the lobby screen spawns one list and one status line on entering Flow::Lobby, and its \
+     refreshers run only there";
+
 #[derive(Component)]
 pub(super) struct LobbyList;
 
@@ -366,8 +372,8 @@ fn list_view(lobby: &Lobby) -> ListView {
     match &lobby.locations {
         Locations::Loading => ListView::Loading,
         Locations::Failed(reason) => ListView::Failed(reason.clone()),
-        Locations::Loaded(_) => ListView::Groups {
-            groups: lobby.groups().unwrap_or_default(),
+        Locations::Loaded(response) => ListView::Groups {
+            groups: picker::groups(response, &lobby.pings),
             selection: lobby.selection.clone(),
             expanded: lobby.expanded.clone(),
             editable: !lobby.flow.busy(),
@@ -379,17 +385,17 @@ pub(super) fn refresh_list(
     mut commands: Commands,
     fonts: Res<UiFonts>,
     lobby: Res<Lobby>,
-    list: Single<Entity, With<LobbyList>>,
+    lists: Query<Entity, With<LobbyList>>,
     mut shown: Local<Option<(Entity, ListView)>>,
 ) {
+    let list_entity = lists.single().expect(LOBBY_SPAWNED);
     let view = list_view(&lobby);
     if shown
         .as_ref()
-        .is_some_and(|(drawn, last)| *drawn == *list && *last == view)
+        .is_some_and(|(drawn, last)| *drawn == list_entity && *last == view)
     {
         return;
     }
-    let list_entity = *list;
     let mut list = commands.entity(list_entity);
     list.despawn_children();
     list.with_children(|list| match &view {
@@ -466,11 +472,11 @@ fn status(lobby: &Lobby, now: f64) -> (String, Color) {
 pub(super) fn refresh_footer(
     lobby: Res<Lobby>,
     time: Res<Time<Real>>,
-    mut line: Single<(&mut Text, &mut TextColor), With<StatusLine>>,
+    mut lines: Query<(&mut Text, &mut TextColor), With<StatusLine>>,
     mut buttons: Query<(&Target, &Hovered, &mut Node, &mut BackgroundColor)>,
 ) {
     let (text, color) = status(&lobby, time.elapsed_secs_f64());
-    let (line_text, line_color) = &mut *line;
+    let (mut line_text, mut line_color) = lines.single_mut().expect(LOBBY_SPAWNED);
     if line_text.0 != text {
         line_text.0 = text;
     }
@@ -511,15 +517,15 @@ pub(super) fn refresh_footer(
 pub(super) fn clicked(
     mut click: On<Pointer<Click>>,
     targets: Query<&Target>,
-    link: Option<Res<WorkerLink>>,
+    link: Res<WorkerLink>,
     time: Res<Time<Real>>,
     mut lobby: ResMut<Lobby>,
 ) {
+    // A click on any other entity (the backdrop, a label) is not the lobby's to handle.
     let Ok(target) = targets.get(click.entity) else {
         return;
     };
     click.propagate(false);
-    let Some(link) = link else { return };
     if click.button != PointerButton::Primary {
         return;
     }

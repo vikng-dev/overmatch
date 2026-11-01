@@ -22,10 +22,11 @@ use crate::overlay::{self, Overlay, OverlayNode, Overlays};
 use crate::tank::Controlled;
 use crate::ui_font::UiFonts;
 
-/// Opens / closes the map. Free in the game client: W/A/S/D + Space drive, R respawns, T cycles,
-/// X is the x-ray, Lshift switches view, Tab is SP-only, F/G are the dev-tools toggles, 1–5 are
-/// crew stations, F3 is the debug panel, Esc is the menu. B and V are unbound. (The track
-/// sandbox's `M` is a different binary.)
+/// Opens / closes the map. Free in the game client (`command::Bindings` and the screens' own
+/// keys): W/A/S/D drive, Space is the secondary trigger, R respawns, Q/E step the round, V
+/// toggles the fuze, C holds the kill cam, X is the x-ray, Lshift switches view, Tab is SP-only,
+/// G is the dev-tools toggle, 1–5 are crew stations, F3 is the debug panel, Esc is the menu. B, F
+/// and T are unbound. (The track sandbox's `M` is a different binary.)
 const SPAWN_MAP_KEY: KeyCode = KeyCode::KeyM;
 
 /// Half-extent of the terrain square, metres — the LIVE world's, read off the decoded grid
@@ -68,6 +69,11 @@ pub(crate) fn spawn_limit(half_extent: f32) -> f32 {
 /// on the CPU-side decode path (`terrain_grid::grid_from_png`); this derived copy is pure view
 /// with no determinism constraints. The `ui_map_is_8_bit_and_square` test pins the format.
 const UI_MAP_FILE: &str = "map_ui.png";
+
+/// Why the map's panel and its two markers each match exactly once: [`spawn_map_overlay`] spawns
+/// them at `Startup` and nothing despawns them.
+const PANEL_SPAWNED: &str =
+    "spawn_map_overlay spawns one panel and one of each marker at startup; nothing despawns them";
 
 /// Panel edge as a fraction of the smaller window dimension — a centred square that always fits.
 const PANEL_FRACTION: f32 = 0.8;
@@ -182,17 +188,21 @@ fn toggle_spawn_map(
 /// number in the same frame, so the mapping cannot drift from what is drawn.
 fn size_spawn_map(
     map: Res<SpawnMap>,
-    window: Single<&Window, With<PrimaryWindow>>,
-    mut panel: Single<(&mut Node, &mut SpawnMapPanel)>,
+    windows: Query<&Window, With<PrimaryWindow>>,
+    mut panel: Query<(&mut Node, &mut SpawnMapPanel)>,
 ) {
     // Writing `Node` marks it changed and re-lays-out the tree, so a closed map costs nothing. The
     // toggle declares in `OverlaySet::Toggle`, before this, so the opening frame is already sized.
     if !map.open {
         return;
     }
+    // No primary window: it is closing at exit, and there is nothing to size.
+    let Some(window) = crate::state::primary_window(windows.single()) else {
+        return;
+    };
     let (width, height) = (window.width(), window.height());
     let edge = width.min(height) * PANEL_FRACTION;
-    let (node, rect) = &mut *panel;
+    let (mut node, mut rect) = panel.single_mut().expect(PANEL_SPAWNED);
     node.width = Val::Px(edge);
     node.height = Val::Px(edge);
     rect.edge_px = edge;
@@ -209,9 +219,9 @@ fn size_spawn_map(
 /// opened on top of the map swallows clicks instead of re-placing the player's spawn.
 fn click_spawn_map(
     buttons: Res<ButtonInput<MouseButton>>,
-    window: Single<&Window, With<PrimaryWindow>>,
+    windows: Query<&Window, With<PrimaryWindow>>,
     overlays: Res<Overlays>,
-    panel: Single<&SpawnMapPanel>,
+    panel: Query<&SpawnMapPanel>,
     mut map: ResMut<SpawnMap>,
     mut senders: Query<&mut MessageSender<SetSpawnPoint>, With<Client>>,
     grid: Option<Res<crate::terrain_grid::HeightGrid>>,
@@ -222,10 +232,13 @@ fn click_spawn_map(
     {
         return;
     }
-    let Some(cursor) = window.cursor_position() else {
+    // No primary window (closing at exit), or no cursor over it: nothing was clicked on the map.
+    let Some(cursor) =
+        crate::state::primary_window(windows.single()).and_then(Window::cursor_position)
+    else {
         return;
     };
-    let Some(uv) = panel_uv(&panel, cursor) else {
+    let Some(uv) = panel_uv(panel.single().expect(PANEL_SPAWNED), cursor) else {
         return;
     };
     // Clamp BEFORE recording the marker, so `chosen` is the point the authority will accept rather
@@ -300,17 +313,21 @@ fn world_to_uv(half_extent: f32, world: Vec2) -> Vec2 {
 /// their offsets are just `uv * edge`, centred on the dot.
 fn place_markers(
     map: Res<SpawnMap>,
-    panel: Single<&SpawnMapPanel>,
+    panel: Query<&SpawnMapPanel>,
     own: Query<&GlobalTransform, With<Controlled>>,
-    mut chosen: Single<(&mut Node, &mut Visibility), (With<ChosenMarker>, Without<SelfMarker>)>,
-    mut own_marker: Single<(&mut Node, &mut Visibility), (With<SelfMarker>, Without<ChosenMarker>)>,
+    mut chosen: Query<(&mut Node, &mut Visibility), (With<ChosenMarker>, Without<SelfMarker>)>,
+    mut own_marker: Query<(&mut Node, &mut Visibility), (With<SelfMarker>, Without<ChosenMarker>)>,
     grid: Option<Res<crate::terrain_grid::HeightGrid>>,
 ) {
     if !map.open {
         return;
     }
     let half = world_half_extent(grid.as_deref());
-    let edge = panel.edge_px;
+    let edge = panel.single().expect(PANEL_SPAWNED).edge_px;
+    let (mut chosen, mut own_marker) = (
+        chosen.single_mut().expect(PANEL_SPAWNED),
+        own_marker.single_mut().expect(PANEL_SPAWNED),
+    );
     let place = |uv: Vec2, node: &mut Node| {
         node.left = Val::Px(uv.x * edge - MARKER_PX * 0.5);
         node.top = Val::Px(uv.y * edge - MARKER_PX * 0.5);
@@ -324,7 +341,7 @@ fn place_markers(
             chosen.1.set_if_neq(Visibility::Hidden);
         }
     }
-    match own.iter().next() {
+    match crate::tank::controlled_one(own.single()) {
         Some(transform) => {
             let pos = transform.translation();
             place(

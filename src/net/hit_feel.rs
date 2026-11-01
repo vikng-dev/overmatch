@@ -259,14 +259,15 @@ fn spawn_cue_ui(mut commands: Commands, fonts: Res<UiFonts>) {
 fn drive_damage_flash(
     time: Res<Time<Real>>,
     mut flash: ResMut<DamageFlash>,
-    frame: Single<&mut BorderColor, With<DamageFlashNode>>,
+    mut frame: Query<&mut BorderColor, With<DamageFlashNode>>,
 ) {
     flash.0 *= CUE_RETAIN.powf(time.delta_secs() * 60.0);
     if flash.0 <= CUE_ZERO_EPS {
         flash.0 = 0.0;
     }
     frame
-        .into_inner()
+        .single_mut()
+        .expect("spawn_cue_ui spawns one damage frame on entering the match; this runs only in it")
         .set_all(Color::srgba(0.9, 0.05, 0.05, flash.0));
 }
 
@@ -274,13 +275,16 @@ fn drive_damage_flash(
 fn drive_hit_confirm(
     time: Res<Time<Real>>,
     mut confirm: ResMut<HitConfirm>,
-    marker: Single<&mut TextColor, With<HitConfirmNode>>,
+    mut marker: Query<&mut TextColor, With<HitConfirmNode>>,
 ) {
     confirm.0 *= CUE_RETAIN.powf(time.delta_secs() * 60.0);
     if confirm.0 <= CUE_ZERO_EPS {
         confirm.0 = 0.0;
     }
-    *marker.into_inner() = TextColor(Color::srgba(1.0, 1.0, 1.0, confirm.0));
+    *marker
+        .single_mut()
+        .expect("spawn_cue_ui spawns one hit marker on entering the match; this runs only in it") =
+        TextColor(Color::srgba(1.0, 1.0, 1.0, confirm.0));
 }
 
 #[cfg(test)]
