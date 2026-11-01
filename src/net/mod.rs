@@ -112,6 +112,7 @@ pub(crate) const CLIENT_VERSION: &str = env!("CARGO_PKG_VERSION");
 /// Shared protocol, physics, and safety wiring. Both endpoints must mount it identically.
 fn plugin(app: &mut App) {
     protocol::plugin(app);
+    battle::install_hold(app);
     physics::plugin(app);
     // Record corrupt values before Avian's physics preparation consumes them.
     app.add_systems(

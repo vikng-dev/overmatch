@@ -456,19 +456,21 @@ The authority publishes phase, deadlines and result. Results stay closed to join
 An in-flight challenge is refused if admission closes before its response arrives;
 a new connection is refused after closure even if it previously played here.
 
-The implementation's boundary policy is provisional too: fresh tanks at combat
-start, no tanks or flying rounds in results or fill-up, score frozen through results
-and reset at the next fill-up. Battlefield destruction persists for the server's
-lifetime; the cycle does not rebuild the battlefield.
+The implementation's boundary policy is provisional too: a fresh tank for every
+connected player at each fill-up and on joining one, held until combat starts (only
+the camera moves); no tanks or flying rounds in results; score frozen through results
+and reset at the next fill-up, which also rebuilds the battlefield (#253, #240).
 
 **Alternatives kept alive.** Shorter or longer phases and admission windows; filled
-or balanced matchmaking lobbies instead of timed fill-up; a fresh battlefield each
-Battle; a different reconnect policy after closure. Other modes can choose a victory
+or balanced matchmaking lobbies instead of timed fill-up; destruction persisting across
+Battles; no tank until combat starts, the fill-up spent on the match screen; a different
+reconnect policy after closure. Other modes can choose a victory
 condition that ends combat early rather than retaining this mode's full timer.
 
 **Why it's a playtest call.** Watch the solo wait, how much useful combat a late
-arrival gets, whether results linger, and whether persistent destruction gives the
-next Battle useful history or an exhausted battlefield.
+arrival gets, whether results linger, whether a fresh battlefield each Battle loses
+useful history, and whether waiting out the fill-up in a held tank reads as a countdown
+rather than a frozen game.
 
 **Revert cost.** Low for duration data. Medium for admission policy; high for replacing
 fill-up with queued matchmaking or resetting world ledgers, colliders and their replicas.
@@ -579,9 +581,10 @@ DERIVED for the current Tiger asset: the largest module pool, 479 HP, takes **23
 Each module stays out of action until its own work finishes, then returns whole. Cancelling
 keeps finished modules and discards the remaining work. There is no repair-use limit.
 
-The existing centralized Drive capability gate closes while any module timer runs: the track
-controller retargets its drive signal to zero and brakes through its existing contact law.
-Repair is a tank activity, so it is not represented as an authored part-quality requirement.
+While any module timer runs the crew holds the tank on its brakes, the same brake hold the
+Battle's fill-up uses (`track::drive::DriveTarget::Brake`): no drive, the full service brakes
+until it stops, then the parking latch. Repair is a tank activity, so it is not represented as
+an authored part-quality requirement: every capability keeps its authored requirement.
 The weapon and servo requirements stay independent: the gun fires and turret turns wherever
 those requirements permit. Crew keep their stations and never return from being out of action;
 ammunition and functionless pools never return. A knocked-out tank cannot start or finish repair.
@@ -602,4 +605,19 @@ edge and changes the protocol fingerprint. Crew restoration or ammunition restor
 change the owner's rule and are not alternatives in this fork.
 
 **Lives in.** `src/damage/repair.rs`, `src/damage.rs`, `src/command.rs`, `src/crew_ui.rs`,
-`src/net/protocol.rs`; capture user `scripts/capture/repair.ron`; tracker #244 and #248.
+`src/net/protocol.rs`, `src/track/sim.rs` (the brake hold); capture user
+`scripts/capture/repair.ron`; tracker #244 and #248.
+
+**Review of the first repair lane** (two blind reviews, each finding checked against the code):
+
+| reviewer | finding | verified / not a defect | fixed in (subject) |
+|---|---|---|---|
+| Codex, Claude | Starting a repair zeroed the drive command, so a moving tank coasted under engine drag instead of braking to a stop | verified: a zero command at speed is coast in `transmission::driver_intent`, and the park latch engages only below 0.05 m/s | `track: a held tank brakes to a stop and stays parked (#253)` |
+| Claude | The panel listed every `FunctionRole` volume while the sim repairs only modules without ammunition or crew, so such a volume showed out of action under the repair hint forever | verified: `VolumeSpec` admits a function on an ammunition or crew pool | same commit: the panel reads `repair::Modules` |
+| Claude | The crew fixture carried no `FunctionRole`, so the crew exclusion went untested | verified: the mutant dropping `Without<CrewStation>` passed | same commit: the crew fixture names a function |
+| Claude | A module's return reads only as text: READY, the same string as an untouched module, with no sound | verified | open: a cue for the return is a presentation choice for the owner |
+| Claude | `capability_effectiveness` and its types' docs omitted the repair override inside its body | verified | same commit: the override is gone; repair holds the brakes and every capability keeps its requirement |
+| Claude | Module rows render tank-authored node names through `Text`; nothing checks them against the Barlow coverage | verified | open: needs a load-gate rule on node names |
+| Claude | The key map lives in both the README and the spawn-map key doc | verified | open: one home for the key map |
+| Claude | All six items landed as one commit | verified, a process finding | not a code defect |
+

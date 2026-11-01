@@ -124,11 +124,12 @@ pub(super) fn plugin(app: &mut App) {
     );
     // Before every `GameplaySet` consumer, after the attested command the bridge writes: the
     // presentation overwrites the owner's consumables, and the gate the cadence left is restored
-    // over whatever arrived since.
+    // over whatever arrived since. Before the Battle's hold, so a held tank presents no round.
     app.add_systems(
         FixedUpdate,
         (present_own_intent, hold_presentation_gate)
             .after(InputBridge)
+            .before(super::battle::HoldCommands)
             .before(GameplaySet),
     );
     // After the cadence has run, so the ledger carries what `fire`/`tick_weapon_gate` just left.
