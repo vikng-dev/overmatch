@@ -622,17 +622,25 @@ servo edge. No capture or pricing.
 ## Release-gate discovery membership
 
 Subject: the game's damage model and shot records, game state only. Fixed in "resolve material
-holding a discovery start". The release capture reports discovery inside one certified shell;
-it records neither that collider's name/owner nor the round's pose or pending playback. The last
-knockout and pictured detached turret do not identify the shell. Its exact identity and route
-into membership therefore remain unestablished by the retained evidence.
+holding a discovery start". The release capture reports discovery inside one certified shell
+whose key names one entity as both volume and primitive. By the spawn code that is a collider
+that is its own volume: a split multi-substance tank volume (`tank::spawn`'s `split` arm), a
+building element, a tree segment or a breakage chunk, never the child primitive of a
+single-substance tank node. The log's last respawn came 5 s before the panic (MEASURED: the
+server log's last respawn at 08:53:39.36Z; the panic follows lines stamped 08:53:44.50Z), so the
+capture's state is not the newborn-body regression's. The likelier route is the second one
+below, a body moving over the round (a falling tree segment or a chunk): DERIVED from the key
+class and the timing, not established. The log still names neither the collider nor the round's
+pose or playback.
 
 The outside-start invariant is false by construction: a new body's birth geometry can contain
 an already flying round; another body can also move over a path while its previously frozen
 crossing plays. Discovery now reads initial membership from the same certified crossing stream
 as later entries, contacts held material immediately, and seeds the ordinary material walk in
-that contact scene. No body is excluded and no round is dropped. Relative rest retains its
-heading; an exhausted discovery interval still gives a finite immediate contact.
+that contact scene. No body is excluded and no round is dropped. Material holding a round at
+relative rest gives the crossing no motion and no clock: the round keeps its world velocity to
+the tick boundary (or an armed delay's end) and its next step reads that membership again. An
+exhausted discovery interval still gives a finite immediate contact.
 
 MEASURED: `a_body_born_around_an_in_flight_round_resolves_its_material` failed before the fix
 with the capture's "discovery starts outside every collider" panic. It now requires the new

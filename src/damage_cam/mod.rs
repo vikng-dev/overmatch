@@ -665,8 +665,10 @@ pub(crate) mod tests {
 
     /// The game's damage-model records resolve every component reference, order their timed
     /// lists, and retain a resting round in a component or any retaining plate. Overlapping
-    /// plates may each retain it; departures can lie between path nodes. A burst starts a path
-    /// leg and its field shares its source's point and time.
+    /// plates may each retain it; departures can lie between path nodes. Unless a bounce ends it,
+    /// the path ends at or past the last perforated plate's exit: the sim marches a perforating
+    /// round on until it rests or leaves the tank. A burst starts a path leg and its field shares
+    /// its source's point and time.
     pub(crate) fn assert_self_consistent(file: &str, report: &PenetrationReport) {
         let cited = report
             .fields()
@@ -775,6 +777,27 @@ pub(crate) mod tests {
                 || report.impact.verdict == ShotVerdict::Ricochet,
             "{file}: a retaining plate requires a resting round"
         );
+        let bounced_last = report.impact.verdict == ShotVerdict::Ricochet
+            || report
+                .ricochets
+                .last()
+                .is_some_and(|bounce| report.plates.last().is_none_or(|plate| bounce.t >= plate.t));
+        if !bounced_last
+            && let Some((exit, plate)) = report
+                .plates
+                .last()
+                .and_then(|plate| plate.exit.map(|exit| (exit, plate)))
+        {
+            let along: f32 = (0..3)
+                .map(|i| (last.point[i] - exit[i]) * (exit[i] - plate.entry[i]))
+                .sum();
+            // DERIVED: independently mm-quantized points can differ by sqrt(3) mm.
+            assert!(
+                along >= -0.002 * distance(exit, plate.entry),
+                "{file}: the path ends behind the exit of {}",
+                plate.name
+            );
+        }
     }
 
     fn distance(a: [f32; 3], b: [f32; 3]) -> f32 {

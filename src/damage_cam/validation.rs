@@ -268,8 +268,9 @@ fn check_path(report: &PenetrationReport) -> Result<(), ValidationError> {
             .iter()
             .any(|p| within(Vec3::from(p.point), Vec3::from(point)))
     };
-    // A departure lies on the path, a node or between two: a crossing that spans overlapping
-    // tanks leaves the first inside the crossing, and that tank's path has no node there.
+    // A departure lies on the path, a node or between two. The authority's records put each
+    // tank's departure on a node; a record read from the wire or a local file meets the
+    // geometric contract alone.
     let on_line = |point: [f32; 3]| {
         let point = Vec3::from(point);
         report.path.windows(2).any(|pair| {
