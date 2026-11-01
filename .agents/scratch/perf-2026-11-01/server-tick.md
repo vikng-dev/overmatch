@@ -152,14 +152,14 @@ body; Battle 2's combat starts at 46 885 and climbs to 48 787 in 60 s. Physics p
 the physics growth: every part with a collider despawned off a body leaked a standalone proxy.
 After fix 3 the pairs stay between 145 and 425 and fall to 1 at Results (table above).
 
-## Not fixed, and owner calls
+## Remainder after server-perf-1
 
 - **The serial drive step.** `apply_track_forces` is 53 % of the combat tick (3.6 ms of 6.8,
   MEASURED traced; about 3.7 ms per tick in `sample`, MEASURED untraced), most of it the belt's
   ground and rubble queries (`belt_tick` into `depth_along_lowered_ground`, `terrain_grid` ray
   casts and heights, `rubble::in_slab`). Re-parallelising it buys nothing on one vCPU; cutting the
-  per-tank cost is the fix, in #238's code. Owner call: whether Edgegap stays on one vCPU (then
-  only the per-tank cost matters) or moves to two (then the loop's parallel form is worth having).
+  per-tank cost is the fix, in #238's code. The owner has since directed one-vCPU optimization;
+  server-perf-2's per-tank changes are recorded below.
 - **Three passes place every child collider each tick.** `motion::place_children`, Avian's
   `update_child_collider_position` and lightyear_avian's `update_child_collider_position` together
   cost 611-1 077 us per tick on the empty map (MEASURED, the before and after traces), each iterating every
@@ -167,7 +167,7 @@ After fix 3 the pairs stay between 145 and 425 and fall to 1 at Results (table a
 - **Frames outside the tick** (1.1-1.5 ms per tick, `mark_dirty_trees`, transform propagation,
   visibility) are the dedicated server running Bevy's transform and visibility plugins over a map
   that does not move. Not investigated further.
-- **Unexplained:** the Edgegap +840 entities through a combat (locally +43 in 150 s; a full
+- **Unexplained in the first inspection:** the Edgegap +840 entities through a combat (locally +43 in 150 s; a full
   16.5 min Battle was not run). Also the short-mode cycle runs' Combat 1 tick p50 of 8.6 ms
   against 4.8-5.2 ms in their Combat 2 and 5.2 ms in the shipped-mode combat run (MEASURED, with
   and without `sample` alike), with the same tanks and entities.
@@ -290,3 +290,71 @@ contacts and measures sort-key construction. It failed on the preceding implemen
 real-UDP world reconstruction, plus the whole-tree guards; 3 existing tests were ignored
 (MEASURED test-harness counts). No golden or physical parameter changed. New tick times remain
 deferred to batched pricing.
+
+## server-perf-2: what the entity count represents
+
+Subject: the game's damage model and environment state, game state only. The census used the
+shipped Battle mode, 29 bots and one parked headless client on 127.0.0.1. Both binaries ran from
+this bay under one machine lock, `OVERMATCH_UNATTENDED=1`, `OVERMATCH_WINDOW=headless`; timing
+recorders were disabled. The build used the warm `edit` profile because the readings are entity
+membership, not execution times. A temporary exclusive `Last` system logged each archetype's
+component list and live count at approximately 10 s intervals (MEASURED local). It was removed
+from the source after the run, and both game processes were stopped.
+
+The lossless readings are `server-entity-census.json.gz`: 46 snapshots and the component lists of
+339 live archetypes (MEASURED local). The JSON's `snapshots` retain the per-archetype counts and
+Battle phase; `archetypes` resolves their local IDs. The table lists classes contributing to growth; other archetype migrations
+preserve their aggregate entity count. Elapsed time is since server startup, including fill-up.
+
+| Archetype class / distinguishing components | Settled fill-up, 60.0 s | Last census, 451.8 s | Change |
+|---|---|---|---|
+| Intact element: `BuildingElement`, `Collider`, `ChildOf` | 2 294 | 2 282 | -12 |
+| Expanded chunk: `BuildingChunk`, `Collider`, `ChildOf` | 0 | 608 | +608 |
+| Live flight: `Projectile`, `Shot`, `ShellPath` | 0 | 16 | +16 |
+| Loose wall body: `WallPiece`, `DebrisPiece`, `RigidBody` | 0 | 1 | +1 |
+| Loose trunk body: `TreePiece`, `DebrisPiece`, `RigidBody` | 0 | 1 | +1 |
+| Wall carrier: `WallPiece`, `DebrisPose` | 0 | 1 | +1 |
+| Trunk carrier: `TreePiece`, `DebrisPose` | 0 | 1 | +1 |
+| Tank roots: `NetTank` | 30 | 30 | 0 |
+| Trunk segments: `TreeSegment` | 9 525 | 9 525 | 0 |
+| **All entities** | **18 226** | **18 842** | **+616** |
+
+Counts and elapsed times are MEASURED local; changes are DERIVED by subtraction. The entire
+increase is accounted for: `608 - 12 + 16 + 1 + 1 + 1 + 1 = 616` (DERIVED). This same accounting
+has zero remainder at every sampled combat boundary (MEASURED census checked by arithmetic).
+The sampled peak was 18 867 entities at 230.6 s, with 43 live projectiles (MEASURED local).
+
+The cause is construction becoming explicit, not abandoned ownership: `buildings::breakage::reconcile`
+replaces a swapped element's coarse collider with its surviving chunk colliders. Its `have_chunks`
+map prevents repeated births for an already-present chunk. `spawn_group` adds a loose body's
+root and its carrier; the tree law reparents its existing segment entities and adds its own
+body and carrier. The chunk population stabilised while the transient flight population varied.
+Use this run as membership attribution; its play trajectory differs from the older inspection.
+
+Decision: preserve these occupied game-state entities. Removing them to suppress the count
+would change construction and contact geometry. This run found no unexplained local entity
+growth in the observed combat window. The exact composition of Edgegap's +842 (DERIVED from #250's
+MEASURED 18 236 and 19 078) remains unmeasured; applying the local attribution to that run is
+an inference, not a verified remote census.
+
+### Census limit and rebuild guard
+
+The game's damage-model walk panicked in `ballistics::integrate_projectiles` after the last
+census, with `UnexpectedExit` for sample 2, volume `18745v1`, primitive `18873v5`, shell 0,
+`t=0.6176264910893549`, triangles `[11]` (MEASURED diagnostic). The archive keeps that diagnostic;
+raw local logs are under `/tmp/server-perf-2-census/`. The census does not establish whether this
+panic predates this lane. No flight-law exception, catch-and-continue path or gameplay quality
+cut was added. The full shipped Battle and its rebuild were not completed.
+
+The existing generic real-UDP test
+`net::world_reset::tests::a_destroyed_world_is_startup_again_at_next_fill_up_over_real_udp`
+passes on this lane. It compares the server's rebuilt construction census with its fresh census,
+checks old roots are gone and checks carrier generations. In production `world::reconstruct`
+sweeps map and loose-body roots with their children; `world_reset::start_next` sweeps the old
+pose carriers and ledgers. This is fixture evidence for ownership cleanup, not a completed
+shipped-cycle measurement.
+
+Remaining verification: resolve the walk invariant and complete a shipped Battle; price the
+landed per-system changes in the orchestrator's batched one-vCPU lane. G1 and the fill-up
+command-path hold were left unchanged. All game source edits and temporary census instrumentation
+are confined to this bay; no remote deployment or issue comment was made.
