@@ -113,11 +113,27 @@ pub(crate) struct Burst {
     pub(crate) charge_radius: f32,
 }
 
+/// The scalar momentum (N·s) of a burst core's detonation products, `C` kg of them expanding
+/// at `speed` m/s at their outer surface: `(2/3) C v`. DERIVED from the burst law's own Gurney
+/// profile, the products' speed rising linearly from the axis to the driven wall, which is what
+/// gives `v_s = K (M/C + ½)^−½` its `½`. A cased core's outer speed is its casing's `v_s`; a bare
+/// one's is the same law with no casing, `K √2`. The game's environment blast field reads it
+/// near the charge (`buildings::fracture::Blast::products_floor`).
+pub(crate) fn products_momentum(core_mass: f32, speed: f32) -> f32 {
+    2.0 / 3.0 * core_mass * speed
+}
+
 impl Burst {
     /// The game's environment blast originates at the authored filler centre, while the fuze's
     /// march position remains the tip. The field's geometry is independent of fuze timing.
     pub(crate) fn filler_center(&self, tip: Vec3, axis: Dir3) -> Vec3 {
         tip - axis * self.filler_setback
+    }
+
+    /// Its detonation products' scalar momentum, N·s ([`products_momentum`] at the casing's
+    /// `v_s`): positive, refused at load otherwise.
+    pub(crate) fn products_momentum(&self) -> f32 {
+        products_momentum(self.core_mass, self.sideways_speed)
     }
 
     /// The burst of `round` (its whole body, of body steel `steel_density`) under `inputs`; refuses
@@ -195,6 +211,15 @@ impl Burst {
                     author usable core mass, cavity diameter and speed_constant with their sources"
                 ));
             }
+        }
+        let products = products_momentum(inputs.core_mass as f32, sideways_speed as f32);
+        if !products.is_finite() || products <= 0.0 {
+            return Err(
+                "the detonation products' momentum (2/3 core mass x sideways_speed) is not \
+                positive and finite in simulation units; author usable core mass and \
+                speed_constant with their sources"
+                    .into(),
+            );
         }
         if !(blast as f32).is_finite() {
             return Err(

@@ -258,10 +258,15 @@ fn shoot(what: &What, (outward, aim, foot): (Vec3, Vec3, Vec3), commands: &mut C
             let at = foot + Vec3::Y * 0.3;
             let radius = (3.0 * mass / (4.0 * std::f32::consts::PI * core.density as f32)).cbrt();
             let energy = mass * core.chemical_energy as f32;
+            // A bare core's products expand at the burst law's no-casing speed, `K √2`.
+            let products = crate::ballistics::burst::products_momentum(
+                mass,
+                core.speed_constant as f32 * std::f32::consts::SQRT_2,
+            );
             let at = at + outward * radius;
             commands.trigger(WallCharge {
                 at,
-                blast: Blast::of(energy, radius),
+                blast: Blast::of(energy, radius, products),
             });
             info!("capture: wall charge of {mass} kg ({energy:.0} J) at {at:?}");
         }

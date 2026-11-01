@@ -52,6 +52,7 @@ use bevy::prelude::*;
 use self::baked::Placement;
 use self::model::{Block, Cut, Load, Masonry, SectionCache, WallState};
 use super::{FreeFlyCam, SEED_SPEC, UI_LEFT, panel_capturing};
+use crate::ballistics::burst::products_momentum;
 use crate::ballistics::{
     ArmourMark, BallisticVolume, CrossingEnd, FireShell, PenetrationMarks, SpallMarks,
 };
@@ -274,14 +275,15 @@ struct WallRound {
 #[derive(Resource)]
 struct WallRounds(Vec<WallRound>);
 
-/// The blast tool's charge, from data: the filler's density (kg/m³) and chemical energy (J/kg),
-/// and the casing of the seed tank's burst round as the burst law derives it — its mass per kg of
-/// filler `M/C` and the speed it is driven to, `v_s = K (M/C + ½)^−½` (m/s). A charge of `C` kg
-/// carries `M/C × C` kg of it.
+/// The blast tool's charge, from data: the filler's density (kg/m³), chemical energy (J/kg) and
+/// speed constant `K` (m/s), and the casing of the seed tank's burst round as the burst law
+/// derives it — its mass per kg of filler `M/C` and the speed it is driven to, `v_s = K (M/C +
+/// ½)^−½` (m/s). A charge of `C` kg carries `M/C × C` kg of it.
 #[derive(Resource, Clone, Copy, Debug)]
 struct Charge {
     density: f32,
     chemical: f32,
+    speed_constant: f32,
     casing_ratio: f32,
     casing_speed: f32,
 }
@@ -303,6 +305,7 @@ impl Charge {
                 Self {
                     density: core.density as f32,
                     chemical: core.chemical_energy as f32,
+                    speed_constant: core.speed_constant as f32,
                     casing_ratio: ((core.speed_constant / speed).powi(2) - 0.5) as f32,
                     casing_speed: burst.sideways_speed,
                 }
@@ -310,12 +313,14 @@ impl Charge {
             (Some(core), None) => Self {
                 density: core.density as f32,
                 chemical: core.chemical_energy as f32,
+                speed_constant: core.speed_constant as f32,
                 casing_ratio: 0.0,
                 casing_speed: 0.0,
             },
             _ => Self {
                 density: 1650.0,
                 chemical: 0.0,
+                speed_constant: 0.0,
                 casing_ratio: 0.0,
                 casing_speed: 0.0,
             },
@@ -324,28 +329,35 @@ impl Charge {
 
     /// A charge of `mass` kg: its chemical energy, its casing's driven energy (none when bare) and
     /// the blast's energy (the difference), all J, the TNT charge that carries it (kg,
-    /// [`model::Blast::of`]), and its radius (m).
+    /// [`model::Blast::of`]), its radius (m) and its detonation products' momentum (N·s, at the
+    /// casing's `v_s`, or the bare core's `K √2`, [`products_momentum`]).
     fn blast(&self, mass: f32, cased: bool) -> Blast {
         let chemical = self.chemical * mass;
-        let casing = if cased {
-            0.5 * self.casing_ratio * mass * self.casing_speed * self.casing_speed
+        let (casing, speed) = if cased {
+            (
+                0.5 * self.casing_ratio * mass * self.casing_speed * self.casing_speed,
+                self.casing_speed,
+            )
         } else {
-            0.0
+            (0.0, self.speed_constant * std::f32::consts::SQRT_2)
         };
         let energy = (chemical - casing).max(0.0);
         let radius = (3.0 * mass / (4.0 * std::f32::consts::PI * self.density)).cbrt();
+        let products = products_momentum(mass, speed);
         Blast {
             mass,
             chemical,
             casing,
             energy,
-            charge: model::Blast::of(energy, radius).charge,
+            charge: model::Blast::of(energy, radius, products).charge,
             radius,
+            products,
         }
     }
 }
 
-/// One charge's energies (J), TNT charge (kg) and radius (m), filler `mass` kg.
+/// One charge's energies (J), TNT charge (kg), radius (m) and products' momentum (N·s), filler
+/// `mass` kg.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 struct Blast {
     mass: f32,
@@ -354,6 +366,7 @@ struct Blast {
     energy: f32,
     charge: f32,
     radius: f32,
+    products: f32,
 }
 
 /// The blast field's directions with their shares (summing to 1): the field machinery's ball at
@@ -1135,7 +1148,7 @@ fn apply_deposit(
                 |i| state.standing(i),
                 |i| structure.chunks[i].material,
                 origin,
-                model::Blast::of(blast.energy, blast.radius),
+                model::Blast::of(blast.energy, blast.radius, blast.products),
                 field,
             );
             let coupled: f32 = hits.iter().map(|hit| hit.energy).sum();

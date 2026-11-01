@@ -15,6 +15,7 @@ const FIXTURE_BLAST: Blast = Blast {
     energy: 1.47e6,
     charge: 1.47e6 / 4.184e6,
     radius: 1e-3,
+    products: FIT_ONLY_PRODUCTS,
 };
 
 /// SUPPORT IS CONNECTIVITY TO AN ANCHOR THROUGH INTACT JOINTS, on the baked wall. An intact wall
@@ -294,7 +295,7 @@ fn wall_face_pushes(energy: f32, distance: f32) -> Vec<Load> {
         layout.min.y + 1.45,
         layout.min.z + layout.size.z + distance,
     );
-    let blast = Blast::of(energy, 1e-3);
+    let blast = Blast::of(energy, 1e-3, FIT_ONLY_PRODUCTS);
     layout
         .cut
         .structure
@@ -361,6 +362,9 @@ fn wall_deposit_at(energy: f32, distance: f32) -> Applied {
     let charge = Charge {
         density: 1650.0,
         chemical: 4.184e6,
+        // ASSUMED fixture: a speed constant whose products floor never reaches the fit, so the
+        // sweep reads the free-air field alone.
+        speed_constant: 1e-6,
         casing_ratio: 0.0,
         casing_speed: 0.0,
     };
@@ -395,7 +399,7 @@ fn the_sampled_wall_reports_its_far_toppling_limit() {
         ("study burst", FIXTURE_BLAST.energy),
         ("bare control", 5.0 * 4.184e6),
     ] {
-        let reach = Blast::of(energy, 1e-3).reach();
+        let reach = Blast::of(energy, 1e-3, FIT_ONLY_PRODUCTS).reach();
         let samples = (reach / step).ceil() as usize + 1;
         let (mut last_topple, mut first_hold, mut previous) = (None, None, None);
         let mut revivals = 0;
@@ -454,7 +458,7 @@ fn a_fixed_far_face_loading_topples_monotonically_and_stops() {
         ("bare control", 5.0 * 4.184e6),
         ("large bare control", 50.0 * 4.184e6),
     ] {
-        let reach = Blast::of(energy, 1e-3).reach();
+        let reach = Blast::of(energy, 1e-3, FIT_ONLY_PRODUCTS).reach();
         let samples = ((reach - from).max(0.0) / step).ceil() as usize + 1;
         let (mut last_topple, mut first_hold) = (None, None);
         for k in 0..=samples {

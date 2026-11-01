@@ -9,6 +9,7 @@ use bevy::time::TimeUpdateStrategy;
 
 use super::*;
 use crate::ballistics::MarchProbe;
+use crate::buildings::fracture::FIT_ONLY_PRODUCTS;
 use crate::buildings::schema::ElementKind;
 use crate::buildings::tests::shipped_house;
 
@@ -1126,7 +1127,7 @@ const CRUSHING_BLAST_J: f32 = 200.0 * 4.184e6;
 
 /// Set off the fixture charge at `at`, and run the tick that applies it and the one after.
 fn charge(app: &mut App, at: Vec3) {
-    set_off(app, at, Blast::of(FIXTURE_BLAST_J, 1e-3));
+    set_off(app, at, Blast::of(FIXTURE_BLAST_J, 1e-3, FIT_ONLY_PRODUCTS));
 }
 
 /// Set off `blast` at `at`, and run the tick that applies it and the one after.
@@ -1153,7 +1154,7 @@ fn a_ray_that_stops_on_a_moving_body_pushes_it_by_its_share_and_deposits_nothing
     let (near, w, _) = through(&kind, e, c, 0.0);
     // The burst a metre before the chunk's near face, the body half-way (fixture data).
     let origin = near - *w * 0.5;
-    let blast = Blast::of(CRUSHING_BLAST_J, 1e-3);
+    let blast = Blast::of(CRUSHING_BLAST_J, 1e-3, FIT_ONLY_PRODUCTS);
     let after = |spawn: Option<&dyn Fn(&mut App) -> Entity>| {
         let (mut app, root) = composed(false);
         let body = spawn.map(|spawn| spawn(&mut app));
@@ -1273,7 +1274,11 @@ fn the_ground_stops_a_blast_and_a_body_holding_the_burst_shades_nothing() {
     moving_cube(&mut app, origin, 0.4, Layer::Vehicle);
     app.update();
     app.update();
-    set_off(&mut app, origin, Blast::of(CRUSHING_BLAST_J, 1e-3));
+    set_off(
+        &mut app,
+        origin,
+        Blast::of(CRUSHING_BLAST_J, 1e-3, FIT_ONLY_PRODUCTS),
+    );
     let breakage = app.world().get::<Breakage>(root).unwrap();
     let live = breakage.live.as_ref().expect("the burst reached the house");
     assert!(
@@ -2429,7 +2434,7 @@ fn no_elements_kind_or_name_enters_the_laws() {
     let (lo, hi) = kind.bounds();
     // ASSUMED fixture charge: the peak exceeds the materials' dynamic crush strengths at the
     // nearest face, so material-dependent wear is exercised without a chemical-energy cavity.
-    let blast = Blast::of(CRUSHING_BLAST_J, 0.05);
+    let blast = Blast::of(CRUSHING_BLAST_J, 0.05, FIT_ONLY_PRODUCTS);
     assert!(
         masonry
             .iter()
@@ -2505,7 +2510,7 @@ fn a_burst_touching_a_face_crushes_it_from_its_filler_center() {
         .burst
         .unwrap();
     let field_origin = burst.filler_center(tip, axis);
-    let blast = Blast::of(burst.blast, burst.charge_radius);
+    let blast = Blast::of(burst.blast, burst.charge_radius, burst.products_momentum());
     assert!(
         blast.peak_pressure(burst.filler_setback, 1.0)
             > kind.layout.materials[chunk].compaction.strength,

@@ -696,7 +696,10 @@ fn read_shell(
         if let ArmourMark::Burst { field_origin, .. } = mark
             && let Some(burst) = marched.burst
         {
-            deposit.blast = Some((*field_origin, Blast::of(burst.blast, burst.charge_radius)));
+            deposit.blast = Some((
+                *field_origin,
+                Blast::of(burst.blast, burst.charge_radius, burst.products_momentum()),
+            ));
         }
     }
     // The game's damage model exposes only lines whose path moments fell in this tick. A
