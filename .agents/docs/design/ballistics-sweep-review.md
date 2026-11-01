@@ -428,3 +428,19 @@ Restored-rule verification: format and workspace/all-target clippy passed. MEASU
 recorder, pen-cam, fuzzer and citation tests passed; four ignored. The temporary audit and unfiltered
 arm are absent from the tree. The history regression's capture-history comment is also replaced
 by its current role and resync invariant (the review's P3 comment finding is fixed).
+
+## Required staging facts (B62/B63, B68, B71)
+
+Subject: the game's damage-model view, game state only. Staging requires the certified tank asset
+named by the decoded vocabulary; a failed load can no longer disable the view. Once a scene's
+hull appears, its declared servo nodes and transforms are required. The existing asset consumer
+contract checks `TankSpec::node_references` against the model; staging now enforces that same
+premise instead of drawing a missing servo at rest. A descriptor reaching shader packing must
+have passed record admission; an invalid law can no longer become a zero/unlit lane. Slice
+materials require the retained original glTF material after its dependencies loaded. Synthetic
+stage fixtures now retain actual materials instead of relying on the deleted fallback.
+
+Staging verification: format and workspace/all-target clippy passed. MEASURED: 194 pen-cam,
+field-cast, headless and citation tests passed; six ignored. The field-cast pin is unchanged.
+Missing-node and malformed-descriptor controls fail explicitly; the shared stage fixture now
+spawns every servo its fixture spec declares.

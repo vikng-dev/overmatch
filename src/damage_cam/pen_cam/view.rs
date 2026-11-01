@@ -233,6 +233,7 @@ fn classify(
 /// has spawned.
 fn place(
     root: Entity,
+    vehicle: &str,
     spec: &TankSpec,
     children: &Query<&Children>,
     names: &Query<&Name>,
@@ -246,25 +247,30 @@ fn place(
     };
     let hull = named(HULL_NODE)?;
     let hull_pose = pose_under(hull, root, parents, |node| {
-        transforms.get(node).ok().copied()
+        Some(
+            *transforms
+                .get(node)
+                .expect("the game's damage-model view's spawned glTF nodes carry Transform"),
+        )
     });
-    if let Ok(mut root_transform) = transforms.get_mut(root) {
-        *root_transform = Transform::from_matrix(hull_pose.inverse());
-    }
+    *transforms
+        .get_mut(root)
+        .expect("the game's damage-model stage root is spawned with Transform") =
+        Transform::from_matrix(hull_pose.inverse());
     let mut servos = Vec::new();
     for (name, servo) in &spec.servos {
-        let Some(node) = named(name) else {
-            warn!("pen cam: no node {name} for the tank file's servo; it is drawn at rest");
-            continue;
-        };
-        if let Ok(transform) = transforms.get(node) {
-            servos.push(ServoNode {
-                entity: node,
-                name: name.clone(),
-                role: servo.role(),
-                rest: transform.rotation,
-            });
-        }
+        let node = named(name).unwrap_or_else(|| {
+            panic!("the game's damage-model view: {vehicle} servos[{name:?}] has no declared view node; export the declared node and rebuild the certified artifacts")
+        });
+        let transform = transforms.get(node).expect(
+            "the game's damage-model view poses every declared servo from its spawned Transform",
+        );
+        servos.push(ServoNode {
+            entity: node,
+            name: name.clone(),
+            role: servo.role(),
+            rest: transform.rotation,
+        });
     }
     Some((hull, servos))
 }
@@ -320,8 +326,15 @@ pub fn prepare_stage(
         return;
     };
     let root = view.root;
-    let Some((hull, servos)) = place(root, spec, &children, &names, &parents, &mut transforms)
-    else {
+    let Some((hull, servos)) = place(
+        root,
+        &view.vehicle,
+        spec,
+        &children,
+        &names,
+        &parents,
+        &mut transforms,
+    ) else {
         return;
     };
     for entity in children.iter_descendants(root) {
@@ -368,5 +381,48 @@ pub fn pose_stage(
         } else {
             Visibility::Hidden
         });
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use bevy::ecs::system::RunSystemOnce;
+
+    /// The game's damage-model stage must reject a certified view that lacks a declared servo;
+    /// otherwise the recorded path is drawn against an invented rest pose. FIXTURE DATA: one yaw.
+    #[test]
+    #[should_panic(expected = "servos[\"fixture servo\"] has no declared view node")]
+    fn a_spawned_stage_requires_its_declared_servo_node() {
+        let text =
+            std::fs::read_to_string(crate::assets::asset_root().join(crate::tank::TANK_SPEC_PATH))
+                .unwrap();
+        let mut spec: TankSpec = ron::from_str(&text).unwrap();
+        let servo = ron::from_str(
+            "(role: Yaw, max_speed: 1.0, accel: 1.0, travel: Continuous, requires: [])",
+        )
+        .unwrap();
+        spec.servos = std::collections::HashMap::from([("fixture servo".to_owned(), servo)]);
+        let mut world = World::new();
+        let root = world.spawn(Transform::IDENTITY).id();
+        world.spawn((Name::new(HULL_NODE), Transform::IDENTITY, ChildOf(root)));
+        world
+            .run_system_once(
+                move |children: Query<&Children>,
+                      names: Query<&Name>,
+                      parents: Query<&ChildOf>,
+                      mut transforms: Query<&mut Transform>| {
+                    place(
+                        root,
+                        "fixture.tank.ron",
+                        &spec,
+                        &children,
+                        &names,
+                        &parents,
+                        &mut transforms,
+                    );
+                },
+            )
+            .unwrap();
     }
 }

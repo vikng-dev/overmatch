@@ -244,33 +244,30 @@ pub(crate) struct Slot {
 }
 
 /// The tank file `vehicle`'s asset, read once into `cache`: the blueprint's when it names that
-/// file, else read from disk. `None`, warned once, when it cannot be read.
+/// file, else read from disk. The decoded vocabulary names certified shipped assets; failure is
+/// an internal asset-contract bug, never a silently disabled view.
 pub(super) fn tank_asset(
     cache: &mut HashMap<String, Arc<TankAsset>>,
     vehicle: &str,
     blueprint: Option<&TankBlueprint>,
-) -> Option<Arc<TankAsset>> {
+) -> Arc<TankAsset> {
     if let Some(tank) = cache.get(vehicle) {
-        return Some(tank.clone());
+        return tank.clone();
     }
     let tank = match blueprint.filter(|blueprint| blueprint.file == vehicle) {
         Some(blueprint) => TankAsset::of_blueprint(blueprint),
-        None => match TankAsset::load(vehicle) {
-            Ok(tank) => tank,
-            Err(error) => {
-                warn_once!("pen cam: cannot stage {vehicle}: {error}");
-                return None;
-            }
-        },
+        None => TankAsset::load(vehicle).unwrap_or_else(|error| {
+            panic!("the game's damage-model view requires the vocabulary's certified tank asset {vehicle}: {error}; rebuild its tank/spec artifacts")
+        }),
     };
     let tank = Arc::new(tank);
     cache.insert(vehicle.to_owned(), tank.clone());
-    Some(tank)
+    tank
 }
 
 impl Slot {
     /// The tank file `vehicle`'s asset ([`tank_asset`]).
-    fn tank(&mut self, vehicle: &str, blueprint: Option<&TankBlueprint>) -> Option<Arc<TankAsset>> {
+    fn tank(&mut self, vehicle: &str, blueprint: Option<&TankBlueprint>) -> Arc<TankAsset> {
         tank_asset(&mut self.tanks, vehicle, blueprint)
     }
 
@@ -498,9 +495,7 @@ fn drive(
         if floor.is_some_and(|floor| recency < floor) {
             continue;
         }
-        let Some(tank) = state.tank(&vehicle, blueprint) else {
-            continue;
-        };
+        let tank = state.tank(&vehicle, blueprint);
         let mut plan = Plan::new(&entry.report, &tank.shapes(&entry.report.servo_deg));
         rig.pictures.share(recency.key, &mut plan);
         let exhibit = Exhibit {
@@ -688,6 +683,9 @@ mod tests {
             Transform::IDENTITY,
             ChildOf(root),
         ));
+        for name in spec.servos.keys() {
+            world.spawn((Name::new(name.clone()), Transform::IDENTITY, ChildOf(root)));
+        }
         let spec = world.resource_mut::<Assets<TankSpec>>().add(spec);
         let mut view = StageView::standing_in(spec, root);
         view.vehicle = vehicle;

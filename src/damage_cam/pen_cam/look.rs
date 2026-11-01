@@ -788,11 +788,12 @@ fn pack(prints: &[FieldPrint], potency: &Potency) -> ([Vec4; PRINT_LANES * FIELD
 /// `spall_cone::Terms`) and `N` (w).
 pub fn law_lane(field: FieldDescriptor, strata: usize) -> Vec4 {
     let n = strata as f32;
-    match field.terms() {
-        Ok(Terms::Cap { l2, w }) => Vec4::new(1.0, l2 as f32, w as f32, n),
-        Ok(Terms::Sphere { lambda }) => Vec4::new(2.0, lambda as f32, 0.0, n),
-        Ok(Terms::Band { lo, hi }) => Vec4::new(3.0, lo as f32, hi as f32, n),
-        Err(_) => Vec4::ZERO,
+    match field.terms().expect(
+        "the game's damage-model record admission validates every descriptor before packing shader lanes"
+    ) {
+        Terms::Cap { l2, w } => Vec4::new(1.0, l2 as f32, w as f32, n),
+        Terms::Sphere { lambda } => Vec4::new(2.0, lambda as f32, 0.0, n),
+        Terms::Band { lo, hi } => Vec4::new(3.0, lo as f32, hi as f32, n),
     }
 }
 
@@ -1480,6 +1481,14 @@ mod tests {
     use super::super::picture::{Casters, Picture, REACH_TOLERANCE_DIAGONALS};
     use super::super::potency::solid_angle;
     use super::*;
+
+    /// The game's damage-model presentation never paints a malformed descriptor as an unlit field.
+    #[test]
+    #[should_panic(expected = "validates every descriptor before packing shader lanes")]
+    fn packing_an_invalid_field_is_a_bug() {
+        law_lane(FieldDescriptor::ball(-1.0), 64);
+    }
+
     use crate::fingerprint::{FNV_OFFSET_BASIS, fnv1a_64};
 
     /// A fixture picture's pitch (rad a texel): about a quarter degree. Fixture data.

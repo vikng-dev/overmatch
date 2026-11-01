@@ -552,9 +552,7 @@ pub(super) fn build(
     };
     let blueprint = blueprint.as_deref();
     let state = &mut *state;
-    let Some(asset) = tank_asset(&mut state.tanks, &vehicle, blueprint) else {
-        return;
-    };
+    let asset = tank_asset(&mut state.tanks, &vehicle, blueprint);
     let hull = ViewNode::resolve(scene.view_nodes.get(rig.hull).ok(), rig.hull);
     if let Some(built) = state
         .built

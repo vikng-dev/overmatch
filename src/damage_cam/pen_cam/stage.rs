@@ -576,7 +576,9 @@ pub fn rebuild(
                     .slices
                     .entry((mesh.original.id(), layer))
                     .or_insert_with(|| {
-                        let mut base = standard.get(&mesh.original).cloned().unwrap_or_default();
+                        let mut base = standard.get(&mesh.original).expect(
+                            "the game's damage-model stage retains each glTF material through its strong original handle after scene dependencies load"
+                        ).clone();
                         base.cull_mode = None;
                         base.double_sided = true;
                         slices.add(SliceMaterial {
@@ -3240,6 +3242,8 @@ mod tests {
         let shapes = asset.shapes(&record.report.servo_deg);
         let mut app = App::new();
         let mut meshes = Assets::<Mesh>::default();
+        let mut standard = Assets::<StandardMaterial>::default();
+        let original = standard.add(StandardMaterial::default());
         let world = app.world_mut();
         let root = world.spawn(Transform::IDENTITY).id();
         let hull = world.spawn((Transform::IDENTITY, ChildOf(root))).id();
@@ -3261,7 +3265,7 @@ mod tests {
                 .spawn((
                     ViewMesh {
                         names: vec![name.to_owned()],
-                        original: Handle::default(),
+                        original: original.clone(),
                         tier: super::super::view::Tier::Component,
                     },
                     Mesh3d(meshes.add(mesh)),
@@ -3274,7 +3278,6 @@ mod tests {
         }
         let mut view = StageView::standing_in(Handle::default(), root);
         // A strong handle of its own, so a piece drawn with any other material is told apart.
-        let mut standard = Assets::<StandardMaterial>::default();
         let round_material = standard.add(StandardMaterial::default());
         view.hull = Some(hull);
         app.insert_resource(library.exhibits())
@@ -3669,13 +3672,16 @@ mod tests {
         let cube = world
             .resource_mut::<Assets<Mesh>>()
             .add(Cuboid::new(1.0, 1.0, 1.0));
+        let original = world
+            .resource_mut::<Assets<StandardMaterial>>()
+            .add(StandardMaterial::default());
         let body = [Tier::Armour, Tier::External, Tier::Detail]
             .map(|tier| {
                 world
                     .spawn((
                         ViewMesh {
                             names: Vec::new(),
-                            original: Handle::default(),
+                            original: original.clone(),
                             tier,
                         },
                         Mesh3d(cube.clone()),

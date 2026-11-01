@@ -632,7 +632,7 @@ pub(super) fn drive(
         let plan = report
             .vehicle
             .as_deref()
-            .and_then(|vehicle| slot.tank(vehicle, blueprint.as_deref()))
+            .map(|vehicle| slot.tank(vehicle, blueprint.as_deref()))
             .map(|tank_asset| {
                 let mut plan = Plan::new(report, &tank_asset.shapes(&report.servo_deg));
                 let key = ExplanationKey::of(&record.stored.explanation);
