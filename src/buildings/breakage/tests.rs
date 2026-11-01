@@ -962,7 +962,7 @@ fn a_nailed_roof_distinguishes_rests_from_local_fixing_failure() {
             &mut live.state,
             &dusted,
             &[],
-            &[],
+            GroupLoads::new(&[], Vec3::ZERO),
             &[],
             &mut live.sections,
         );
@@ -1058,7 +1058,7 @@ fn probe_remaining_roof(live: &mut Live, roof: &[usize]) {
         &mut live.state,
         &[],
         &[],
-        &[],
+        GroupLoads::new(&[], Vec3::ZERO),
         &remaining,
         &mut live.sections,
     );
@@ -3386,7 +3386,7 @@ fn the_weight_check_priced_per_change_and_after_a_long_wall_shot() {
                 &mut live.state,
                 dusted,
                 &[],
-                &[],
+                GroupLoads::new(&[], Vec3::ZERO),
                 &[],
                 &mut live.sections,
             );
@@ -3432,7 +3432,7 @@ fn the_weight_check_priced_per_change_and_after_a_long_wall_shot() {
         &mut long.state,
         &dusted,
         &[],
-        &[],
+        GroupLoads::new(&[], Vec3::ZERO),
         &[],
         &mut long.sections,
     );

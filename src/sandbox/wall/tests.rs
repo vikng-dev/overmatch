@@ -2,6 +2,7 @@
 //! on the game's laws over the baked wall. Fixture numbers are fixture data; the brick is the
 //! shipped row's ([`super::brick`]).
 
+use crate::buildings::fracture::GroupLoads;
 use bevy::math::Vec3;
 
 use super::model::*;
@@ -129,7 +130,7 @@ fn renumbering_the_chunks_changes_no_outcome() {
         structural(
             structure,
             &mut state,
-            &pushes(structure),
+            GroupLoads::new(&pushes(structure), Vec3::ZERO),
             &mut SectionCache::default(),
         );
         let mut cracked: Vec<[i64; 3]> = structure
@@ -229,7 +230,7 @@ fn a_push_fails_the_section_at_its_fracture_impulse() {
         let failures = structural(
             &structure,
             &mut state,
-            &[push],
+            GroupLoads::new(&[push], Vec3::ZERO),
             &mut SectionCache::default(),
         );
         assert_eq!(state.cracked[bed], fails, "{scale} x capacity");
@@ -470,7 +471,7 @@ fn a_fixed_far_face_loading_topples_monotonically_and_stops() {
             let failures = structural(
                 &layout.cut.structure,
                 &mut state,
-                &loads,
+                GroupLoads::new(&loads, Vec3::ZERO),
                 &mut SectionCache::default(),
             );
             let topples = failures.iter().any(|f| f.cause == Cause::Push)

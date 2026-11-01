@@ -809,7 +809,7 @@ a spinning group in otherwise undisturbed flight is assessed at its next deposit
 A moving group's contacts are known loads (the solver's impulses), not unknown supports, so the
 group is determinate in its frame. One reference chunk per group roots the section search and
 fixes which side each section holds: the one its external loads hold hardest (`|J| + |F| Δt`,
-lowest index on a tie), or the first chunk when no external resultant remains. It confers no
+construction-centroid order on a tie), also used when no external resultant remains. It confers no
 tensile anchor, and zero-reaction speculative points never select it. Every section is assessed, a group touching along its whole length included; an even
 landing loads none, since each chunk's share meets its own inertia. Punch rings grow from the
 chunks external loads reach, never from the frame's inertial loads, which reach every chunk.
@@ -817,9 +817,8 @@ Opposed sources seed separate coherent patches (positive work along a source res
 union remains a candidate for distributed loads that cooperate on one ring.
 The energy terms (a section's `E_g`, a rest's lift capacity and shove work) read the group's
 field: gravity on a standing group, its frame's body force on a moving one, so a group lying on
-its support feels its weight and one in free fall feels none. A failure that frees a group in a
-run frames that group and reruns the push check in the same run, until a pass frees nothing
-more. An enclosing wall's successful check no longer erases a locally deferred section from
+its support feels its weight and one in free fall feels none. Every failure that changes group membership refreshes the frame before another seam is
+assessed. Both the impulse and sustained-force loops finish when no failure remains. An enclosing wall's successful check no longer erases a locally deferred section from
 the unassessed count. Rest pressure centres are projected into the bearing plane, so reversing a
 contact does not change the compression-only law.
 

@@ -37,6 +37,7 @@
 //! authority. Replicas receive its pose stream. One break per tree; every segment retains its
 //! HP pool when it changes body. See the wall design's "Trees are structures by the same laws".
 
+use crate::buildings::fracture::GroupLoads;
 use std::collections::{BTreeMap, BTreeSet};
 use std::f32::consts::PI;
 use std::path::Path;
@@ -842,17 +843,21 @@ impl TrunkState {
 /// construction and the loads alone decide where, and whether, it breaks.
 pub(crate) fn load_trunk(body: &TreeBody, trunk: &mut TrunkState, loads: &[Load]) -> Option<u8> {
     let structure = &body.structure;
-    let opened: Vec<usize> =
-        fracture::structural(structure, &mut trunk.state, loads, &mut trunk.sections)
-            .into_iter()
-            .flat_map(|failure| failure.joints)
-            .collect();
+    let opened: Vec<usize> = fracture::structural(
+        structure,
+        &mut trunk.state,
+        GroupLoads::new(loads, Vec3::ZERO),
+        &mut trunk.sections,
+    )
+    .into_iter()
+    .flat_map(|failure| failure.joints)
+    .collect();
     fracture::weigh(
         structure,
         &mut trunk.state,
         &[],
         &opened,
-        loads,
+        GroupLoads::new(loads, Vec3::ZERO),
         &[],
         &mut trunk.sections,
     );

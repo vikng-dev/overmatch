@@ -1234,13 +1234,13 @@ fn graph(structure: &Structure, state: &WallState) -> Graph {
 }
 
 /// The assessment graph roots each accelerating group at one reference chunk: the one its
-/// external loads hold hardest (the most impulse, `|J| + |F| Δt`, the lowest chunk on a tie).
+/// external loads hold hardest (the most impulse, `|J| + |F| Δt`, centroid order on a tie).
 /// A moving group's contacts are known loads, never unknown supports: in its frame
 /// ([`in_group_frames`]) every section carries the balanced wrench of either side, so one
 /// reference fixes which side a section holds, the side the group swings about it, and every
 /// section is assessed. Rooting every loaded chunk instead would leave a group touching along
 /// its whole length with no section to assess. The reference is no tensile anchor: the
-/// support/fall graph never reads it. With no external resultant, the first chunk fixes the
+/// support/fall graph never reads it. With no external resultant, centroid order fixes the
 /// reference: uniform free fall has no demand, while spin can still load internal seams.
 fn loaded_graph(structure: &Structure, state: &WallState, loads: &[Load]) -> Graph {
     let mut graph = graph(structure, state);
@@ -1264,15 +1264,42 @@ fn loaded_graph(structure: &Structure, state: &WallState, loads: &[Load]) -> Gra
         let reference = group
             .iter()
             .copied()
-            .filter(|&c| held[c] > 0.0)
-            .max_by(|&a, &b| held[a].total_cmp(&held[b]).then(b.cmp(&a)));
-        let reference = match reference {
-            Some(reference) => reference,
-            None => group[0], // A nonempty group still needs a reference for spin-only demand.
-        };
+            .max_by(|&a, &b| {
+                let a_at = structure.chunks[a].centroid;
+                let b_at = structure.chunks[b].centroid;
+                held[a].total_cmp(&held[b]).then_with(|| {
+                    b_at.x
+                        .total_cmp(&a_at.x)
+                        .then(b_at.y.total_cmp(&a_at.y))
+                        .then(b_at.z.total_cmp(&a_at.z))
+                })
+            })
+            .expect("an unsupported group contains occupied chunks");
         graph.2[reference] = true;
     }
     graph
+}
+
+/// External sources and the body's angular velocity (construction frame, rad/s) for one
+/// assessment. Inertia is derived from the current partition, never accepted from a prior one.
+#[derive(Clone, Copy)]
+pub(crate) struct GroupLoads<'a> {
+    sources: &'a [Load],
+    spin: Vec3,
+}
+
+impl<'a> GroupLoads<'a> {
+    pub(crate) fn new(sources: &'a [Load], spin: Vec3) -> Self {
+        assert!(
+            sources.iter().all(external),
+            "assessment takes external sources once; current groups supply their own inertia"
+        );
+        Self { sources, spin }
+    }
+
+    fn framed(self, structure: &Structure, state: &WallState) -> Vec<Load> {
+        in_group_frames(structure, state, self.sources, self.spin)
+    }
 }
 
 /// Express external loads in each unsupported group's accelerating frame. DERIVED: subtract
@@ -1614,32 +1641,43 @@ fn plane_bucket(offset: f32) -> i64 {
 /// and its share must pay the energy ([`Reading`]).
 ///
 /// The group a section holds is the part of the pushed chunks' component that loses its last path
-/// to the ground with the section's joints removed ([`held`]): a group no blow reaches takes no
-/// demand, and a blow on a chunk with no path to the ground left (the push rule freed it) bends no
-/// section, its group leaving as a body with that blow ([`super::breakage`]). Only the sections
-/// that cut a pushed chunk's path to the ground are searched for it ([`ground_path`]). Reads the
-/// chunk table and the joint graph only; `sections` is `structure`'s cache of them
+/// to its reference with the section's joints removed ([`held`]): ground on placed construction,
+/// one frame reference on an unsupported group ([`loaded_graph`]). A change to group membership
+/// refreshes inertia before the next failure is read, for sections, rings and rests alike.
+/// Only sections cutting a pushed chunk's reference path are searched ([`ground_path`]);
+/// `sections` is `structure`'s cache of the construction planes
 /// ([`SectionCache`]).
 pub(crate) fn structural(
     structure: &Structure,
     state: &mut WallState,
-    loads: &[Load],
+    inputs: GroupLoads<'_>,
     sections: &mut SectionCache,
 ) -> Vec<Failure> {
     let mut failures = Vec::new();
-    let pushed = pushed(structure, loads);
-    if pushed.is_empty() {
+    if !inputs.sources.iter().any(|load| load.blow != Vec3::ZERO) {
         return failures;
     }
+    let mut groups = loose_groups(structure, state);
+    let mut framed = inputs.framed(structure, state);
     let mut steps = 0;
     let incident = incident(structure);
     // A punch ring grows from where an external blow lands. A group frame's inertial blows
     // reach every chunk of its group; seeded there, the first ring would be the whole group,
     // which has no boundary, and no local punch would be read.
-    let struck_at = ring_seeds(structure, loads, |load| load.blow);
+    let struck_at = ring_seeds(structure, inputs.sources, |load| load.blow);
     // Every pass cracks an intact joint (asserted where it cracks) and none closes again, so
     // the passes end.
     loop {
+        let current = loose_groups(structure, state);
+        if current != groups {
+            groups = current;
+            framed = inputs.framed(structure, state);
+        }
+        let loads = &framed;
+        let pushed: Vec<usize> = pushed(structure, loads)
+            .into_iter()
+            .filter(|&c| state.standing(c))
+            .collect();
         let graph = loaded_graph(structure, state, loads);
         let paths: Vec<Option<Vec<usize>>> = pushed
             .iter()
@@ -1695,42 +1733,22 @@ pub(crate) fn structural(
                 }
             }
         }
-        let Some((_, failure)) = worst else {
-            break;
+        let failure = match worst {
+            Some((_, failure)) => failure,
+            None => match unseated(structure, state, &graph, &pushed, &paths, loads, &mut steps) {
+                Some(failure) => failure,
+                None => break,
+            },
         };
         assert!(
             failure.joints.iter().any(|&j| !state.cracked[j]),
-            "a failing section or ring holds an intact joint on a ground path, so each pass \
+            "a failing section, ring or rest holds an intact joint, so each pass \
              opens one and the passes end"
         );
         for &j in &failure.joints {
             state.cracked[j] = true;
         }
         failures.push(failure);
-    }
-    // A pushed part that stands on rests alone (no bonded path to the ground) leaves with its
-    // blows when the rest law opens every rest it stood on.
-    let graph = loaded_graph(structure, state, loads);
-    let mut seen = vec![false; structure.chunks.len()];
-    for &chunk in &pushed {
-        if !state.standing(chunk) || seen[chunk] || ground_path(chunk, &graph, &mut steps).is_some()
-        {
-            continue;
-        }
-        let group = bonded_group(chunk, &graph, &mut seen);
-        if let Some(failure) = unseat(
-            structure,
-            state,
-            &group,
-            loads,
-            Vec3::NEG_Y * GRAVITY,
-            &mut steps,
-        ) {
-            for &j in &failure.joints {
-                state.cracked[j] = true;
-            }
-            failures.push(failure);
-        }
     }
     failures
 }
@@ -2013,18 +2031,21 @@ pub(crate) struct Weighed {
 /// solve's to decide.
 /// Assessing a larger group's section does not certify a locally deferred section inside it;
 /// that local limit remains counted even when the enclosing wall's section holds. A fall adds no touched chunk: a loose group has no intact joint to a
-/// grounded one, so it neither held nor hung on anything that stands. Reads the chunk table and
-/// the joint graph only; `sections` is `structure`'s cache of them ([`SectionCache`]).
+/// grounded one, so it neither held nor hung on anything that stands. Reads current group frames,
+/// the chunk table and the joint graph; `sections` caches the construction planes ([`SectionCache`]).
 pub(crate) fn weigh(
     structure: &Structure,
     state: &mut WallState,
     dusted: &[usize],
     cracked: &[usize],
-    loads: &[Load],
+    inputs: GroupLoads<'_>,
     unloaded: &[usize],
     sections: &mut SectionCache,
 ) -> Weighed {
     let mut weighed = Weighed::default();
+    let mut groups = loose_groups(structure, state);
+    let mut framed = inputs.framed(structure, state);
+    let loads = &framed;
     if dusted.is_empty()
         && cracked.is_empty()
         && unloaded.is_empty()
@@ -2050,6 +2071,20 @@ pub(crate) fn weigh(
     // Every pass cracks an intact joint (asserted where it cracks) and none closes again, so
     // the passes end.
     loop {
+        let current = loose_groups(structure, state);
+        if current != groups {
+            groups = current;
+            framed = inputs.framed(structure, state);
+        }
+        let loads = &framed;
+        touched.extend(
+            loads
+                .iter()
+                .filter(|load| load.press != Vec3::ZERO)
+                .map(|load| load.chunk),
+        );
+        touched.sort_unstable();
+        touched.dedup();
         touched.retain(|&c| state.standing(c));
         if touched.is_empty() {
             break;
@@ -4013,6 +4048,45 @@ mod tests {
         }
     }
 
+    /// A detached end stops loading its former neighbours before the next seam is assessed.
+    /// Both impulse and sustained-force loops must read the new bodies' own inertia.
+    /// Fixture: an opening-only row, a cheap first seam, one hard end load and a gentle far load.
+    #[test]
+    fn a_split_reframes_before_another_seam_is_assessed() {
+        for sustained in [false, true] {
+            let mut slab = unsupported_slab(3);
+            for (j, joint) in slab.joints.iter_mut().enumerate() {
+                let mut seam = joint.seam().unwrap();
+                seam.tensile = if j == 0 { 100.0 } else { 1.0e5 };
+                seam.fracture_energy = if j == 0 { 0.001 } else { 1.0 };
+                seam.shear = Shear::OpeningOnly;
+                joint.bond = Bond::Bonded(seam);
+            }
+            let mut source = slab_contact(&slab, if sustained { 0.0 } else { 1000.0 });
+            if sustained {
+                source.press = Vec3::Y * 1.0e5;
+            }
+            let gentle = Load {
+                chunk: 2,
+                at: slab.chunks[2].centroid,
+                blow: if sustained {
+                    Vec3::ZERO
+                } else {
+                    Vec3::Y * 0.01
+                },
+                press: if sustained {
+                    Vec3::Y * 0.01
+                } else {
+                    Vec3::ZERO
+                },
+                ..source
+            };
+            let (state, changes) = assess_slab(slab, &[source, gentle]);
+            assert!(state.cracked[0], "the hard end detaches: {changes:?}");
+            assert!(!state.cracked[1], "sustained {sustained}: {changes:?}");
+        }
+    }
+
     /// A fixture physics step, s: the game's 64 Hz tick (fixture data).
     const STEP: f32 = 1.0 / 64.0;
 
@@ -4406,25 +4480,31 @@ mod tests {
     #[test]
     fn a_spinning_group_pulls_its_weak_seam_open() {
         for (omega, opens) in [(5.0, false), (60.0, true)] {
-            let slab = unsupported_slab(3);
-            let mut hold = slab_contact(&slab, 0.01);
-            hold.chunk = 1;
-            hold.at = slab.chunks[1].centroid;
-            hold.press = Vec3::Y * 0.01;
-            let n = slab.chunks.len();
-            let mut live = super::super::breakage::Live::from_structure(slab, 1);
-            super::super::breakage::run_laws(
-                &vec![0; n],
-                &mut live,
-                &[hold],
-                Vec::new(),
-                Vec3::Y * omega,
-            );
-            assert_eq!(
-                live.state.cracked[0] || live.state.cracked[1],
-                opens,
-                "{omega} rad/s"
-            );
+            for source_survives in [false, true] {
+                let slab = unsupported_slab(3);
+                let mut hold = slab_contact(&slab, 0.01);
+                hold.chunk = 1;
+                hold.at = slab.chunks[1].centroid;
+                hold.press = Vec3::Y * 0.01;
+                let n = slab.chunks.len();
+                let mut live = super::super::breakage::Live::from_structure(slab, 1);
+                super::super::breakage::run_laws(
+                    &vec![0; n],
+                    &mut live,
+                    if source_survives {
+                        std::slice::from_ref(&hold)
+                    } else {
+                        &[]
+                    },
+                    Vec::new(),
+                    Vec3::Y * omega,
+                );
+                assert_eq!(
+                    live.state.cracked[0] || live.state.cracked[1],
+                    opens,
+                    "{omega} rad/s"
+                );
+            }
         }
     }
 
@@ -4544,8 +4624,11 @@ mod tests {
         loads: &[Load],
     ) -> Vec<Failure> {
         let mut failures = Vec::new();
+        let sources = loads;
         loop {
-            let graph = graph(structure, state);
+            let framed = in_group_frames(structure, state, sources, Vec3::ZERO);
+            let loads = &framed;
+            let graph = loaded_graph(structure, state, loads);
             let mut worst: Option<(f32, Failure)> = None;
             for section in sections(structure, state) {
                 let mut group: Vec<usize> = Vec::new();
@@ -4719,7 +4802,12 @@ mod tests {
             let expected = structural_by_full_search(&structure, &mut full, &pushes);
             assert!(!expected.is_empty(), "case {index} fails a section");
             assert_eq!(
-                structural(&structure, &mut pruned, &pushes, &mut cache),
+                structural(
+                    &structure,
+                    &mut pruned,
+                    GroupLoads::new(&pushes, Vec3::ZERO),
+                    &mut cache,
+                ),
                 expected,
                 "case {index}"
             );
@@ -4730,7 +4818,15 @@ mod tests {
             state.cracked[j] = joint.a == loose || joint.b == Side::Chunk(loose);
         }
         let pushes = [push(loose, Vec3::Z * 500.0)];
-        assert!(structural(&structure, &mut state, &pushes, &mut cache).is_empty());
+        assert!(
+            structural(
+                &structure,
+                &mut state,
+                GroupLoads::new(&pushes, Vec3::ZERO),
+                &mut cache,
+            )
+            .is_empty()
+        );
     }
 
     /// THE SECTIONS ARE READ AFRESH ONCE THE CRACKS OR FATES CHANGE: on the shipped house (fixture
@@ -5940,7 +6036,7 @@ mod tests {
             &mut state,
             &dusted,
             &[],
-            &[],
+            GroupLoads::new(&[], Vec3::ZERO),
             &[],
             &mut SectionCache::default(),
         );
@@ -6066,11 +6162,27 @@ mod tests {
         let structure = cubes(&cells, 1, &[], 3.0 * cantilever_limit(n));
         let mut state = WallState::new(&structure);
         let mut sections = SectionCache::default();
-        let idle = weigh(&structure, &mut state, &[], &[], &[], &[], &mut sections);
+        let idle = weigh(
+            &structure,
+            &mut state,
+            &[],
+            &[],
+            GroupLoads::new(&[], Vec3::ZERO),
+            &[],
+            &mut sections,
+        );
         assert_eq!(idle, Weighed::default(), "no change, no work");
         let half = full_pool(&structure.chunks[2]) / 2.0;
         assert!(!wear(&structure, &mut state, 2, half), "worn, not dust");
-        let idle = weigh(&structure, &mut state, &[], &[], &[], &[], &mut sections);
+        let idle = weigh(
+            &structure,
+            &mut state,
+            &[],
+            &[],
+            GroupLoads::new(&[], Vec3::ZERO),
+            &[],
+            &mut sections,
+        );
         assert_eq!(idle, Weighed::default(), "a wear alone, no work");
         assert!(fall(&structure, &mut state).is_empty());
 
@@ -6081,7 +6193,7 @@ mod tests {
             &mut state,
             &dusted,
             &[],
-            &[],
+            GroupLoads::new(&[], Vec3::ZERO),
             &[],
             &mut sections,
         );
@@ -6142,7 +6254,7 @@ mod tests {
                 &mut state,
                 &dusted,
                 &[],
-                &[],
+                GroupLoads::new(&[], Vec3::ZERO),
                 &[],
                 &mut SectionCache::default(),
             );
@@ -6183,7 +6295,7 @@ mod tests {
             &mut state,
             &dusted,
             &anchors,
-            &[],
+            GroupLoads::new(&[], Vec3::ZERO),
             &[],
             &mut SectionCache::default(),
         );
@@ -6267,7 +6379,7 @@ mod tests {
             let failures = structural(
                 &structure,
                 &mut state,
-                &[push],
+                GroupLoads::new(&[push], Vec3::ZERO),
                 &mut SectionCache::default(),
             );
             assert_eq!(state.cracked[rest], opens, "{scale} x capacity");
@@ -6406,7 +6518,7 @@ mod tests {
             let failures = structural(
                 &structure,
                 &mut state,
-                &[push],
+                GroupLoads::new(&[push], Vec3::ZERO),
                 &mut SectionCache::default(),
             );
             let fell = fall(&structure, &mut state);
@@ -6463,7 +6575,7 @@ mod tests {
             let failures = structural(
                 &structure,
                 &mut state,
-                &[push],
+                GroupLoads::new(&[push], Vec3::ZERO),
                 &mut SectionCache::default(),
             );
             let fell = fall(&structure, &mut state);
@@ -6592,13 +6704,13 @@ mod tests {
                 let a = structural(
                     &structure,
                     &mut left,
-                    &[field],
+                    GroupLoads::new(&[field], Vec3::ZERO),
                     &mut SectionCache::default(),
                 );
                 let b = structural(
                     &structure,
                     &mut right,
-                    &[body],
+                    GroupLoads::new(&[body], Vec3::ZERO),
                     &mut SectionCache::default(),
                 );
                 assert_eq!(left, right, "height {height}, threshold scale {scale}");
@@ -6771,7 +6883,7 @@ mod tests {
                     &mut state,
                     &[],
                     &[],
-                    &[load],
+                    GroupLoads::new(&[load], Vec3::ZERO),
                     &[],
                     &mut SectionCache::default(),
                 );
@@ -6831,10 +6943,13 @@ mod tests {
                 &mut state,
                 &[],
                 &[],
-                &[Load {
-                    press: force,
-                    ..load
-                }],
+                GroupLoads::new(
+                    &[Load {
+                        press: force,
+                        ..load
+                    }],
+                    Vec3::ZERO,
+                ),
                 &[],
                 &mut SectionCache::default(),
             );
@@ -6998,7 +7113,7 @@ mod tests {
             !structural(
                 &structure,
                 &mut WallState::new(&structure),
-                &[load],
+                GroupLoads::new(&[load], Vec3::ZERO),
                 &mut SectionCache::default(),
             )
             .is_empty()
@@ -7116,7 +7231,7 @@ mod tests {
             let failures = structural(
                 &structure,
                 &mut state,
-                &[load],
+                GroupLoads::new(&[load], Vec3::ZERO),
                 &mut SectionCache::default(),
             );
             (failures, fall(&structure, &mut state))
@@ -7379,7 +7494,7 @@ mod tests {
                     &mut state,
                     &[],
                     &[],
-                    &loads,
+                    GroupLoads::new(&loads, Vec3::ZERO),
                     &[],
                     &mut SectionCache::default(),
                 );
@@ -7436,8 +7551,8 @@ mod tests {
             structural(
                 &structure,
                 &mut state,
-                &[load],
-                &mut SectionCache::default()
+                GroupLoads::new(&[load], Vec3::ZERO),
+                &mut SectionCache::default(),
             )
             .is_empty()
         );
@@ -7446,7 +7561,7 @@ mod tests {
             &mut state,
             &[],
             &[],
-            &[load],
+            GroupLoads::new(&[load], Vec3::ZERO),
             &[],
             &mut SectionCache::default(),
         );
