@@ -2130,3 +2130,40 @@ fn a_body_born_around_an_in_flight_round_resolves_its_material() {
         "the new body's material is crossed, never skipped"
     );
 }
+
+/// The game's damage model: two overlapping bodies moving together share one crossing, whose
+/// world path curves as resistance slows the relative round. The authority's record admission
+/// must accept each body's departure. Dimensions and transverse velocity are fixture data.
+#[test]
+fn a_slowing_shared_crossing_in_a_moving_frame_is_admitted() {
+    let mut app = recording_world(false);
+    for (name, thickness, z) in [("front", 0.05, 0.0), ("behind", 0.5, -0.24)] {
+        tank(
+            &mut app,
+            Vec3::new(0.0, 20.0, 0.0),
+            0.0,
+            Vec3::X * 64.0,
+            &[(
+                name,
+                Vec3::new(4.0, 4.0, thickness),
+                Vec3::Z * z,
+                Kind::Plate,
+            )],
+        );
+    }
+    settle(&mut app);
+    // Follow the bodies' transverse location after the fixture registration steps.
+    let mut roots = app.world_mut().query_filtered::<&Position, With<Rig>>();
+    let x = roots.iter(app.world()).next().unwrap().x;
+    fire(&mut app, Vec3::new(x, 20.0, 2.0), FireMechanism::Single);
+    let records = run(&mut app, 5);
+    assert_eq!(records.len(), 2, "each overlapping body records");
+    for recorded in records {
+        let mut report = recorded.report;
+        report.round = "88mm_AP".to_owned();
+        crate::damage_cam::tests::assert_self_consistent("moving shared crossing", &report);
+        let text = ron::ser::to_string(&report).unwrap();
+        crate::damage_cam::PenetrationReport::from_ron(&text)
+            .expect("a slowing moving crossing is a legitimate record");
+    }
+}

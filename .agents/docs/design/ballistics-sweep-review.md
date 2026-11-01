@@ -635,3 +635,29 @@ body's actual material crossing. The shallow-start and exhausted-boundary checks
 Format and workspace/all-target clippy passed. MEASURED: the targeted motion, recording,
 pen-cam, field-cast, headless and citation run passed with 90 tests and five ignored instruments.
 No capture or pricing was run; the full Battle cycle remains for the orchestrator's release gate.
+
+## Review of sweep-ball-5
+
+Subject: the game's damage model and shot records, game state only. Finding identifiers below
+name the findings in the blind Codex and Claude reviews, including their disagreement.
+
+- **R10, P1 (Codex), verified, fixed** in "record each tank's resolved departure on its path".
+  Two overlapping tanks moving transversely together share a crossing that slows the round.
+  `Playback::point` translates each point by the carrier displacement at that point's resolved
+  time. The mark's hull frame is one frame translated at its mark time, so reading those points
+  in that frame does not straighten the resulting path. The target's last exit can lie off the
+  entrance-to-end chord. The producer now includes that target's actual departure as a path
+  node; admission keeps its geometric contract. No wire fields or protocol vocabulary changed.
+  **Claude's contrary soundness claim is disagreed with:** its chord argument covers the static
+  case, but the moving-state test fails main's admission with "the departure point must lie on
+  the path". The test uses the actual march, playback and recorder, then parses each record.
+- **R11, P3 (Claude), verified, fixed in the same subject.** `RoundEnd::Left` now describes a
+  target's own departure inside a shared crossing. The corpus helper accepts a departure on a
+  path segment and any retaining plate, including overlapping retaining plates. It no longer
+  imposes plate order or an unsupported fixed distance from the final plate's entry. Both the
+  overlapping-retention and shared-departure regression tests now exercise that helper.
+
+MEASURED: the moving-state regression failed on main before the fix and passes with the producer
+change. Format and workspace/all-target clippy passed. MEASURED: 269 damage-cam, recording,
+pen-cam, field-cast, headless and citation tests passed; six ignored instruments. No capture or
+pricing was run.

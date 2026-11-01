@@ -607,6 +607,22 @@ fn timeline(
                     contact = legs.len();
                     legs.push((share.entry, *speed_in, index));
                 }
+                // The game's damage model translates each resolved point at its own clock time.
+                // A slowing crossing's world path need not be its endpoint chord. Keep the
+                // tank's departure as a node, so admission and presentation read that actual point.
+                if let Some(Share {
+                    end: ShareEnd::Left { at },
+                    ..
+                }) = share_of(world, mark, struck.tank)
+                {
+                    let (finish, mean_speed) = match *end {
+                        CrossingEnd::Rest { at } => (at, 0.5 * speed_in),
+                        CrossingEnd::Exit { at, speed: out, .. } => (at, 0.5 * (speed_in + out)),
+                    };
+                    if at != finish {
+                        legs.push((at, mean_speed, index));
+                    }
+                }
                 match *end {
                     CrossingEnd::Rest { at } => {
                         legs.push((at, 0.5 * speed_in, index));

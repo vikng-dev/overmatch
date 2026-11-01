@@ -198,8 +198,8 @@ pub struct Shooter {
 pub enum RoundEnd {
     /// It came to rest inside `volume` (armour or a component), at the path's last point.
     Rest { volume: String },
-    /// It left the struck tank at `at`, a point of the path: the far end of its last crossing, or
-    /// the face of its last bounce. The path runs on past it.
+    /// It left the struck tank at `at`, on its path: the end of that tank's own volumes (possibly
+    /// inside a crossing shared with another tank), or its last bounce. The path runs on past it.
     Left { at: [f32; 3] },
 }
 
@@ -663,13 +663,10 @@ pub(crate) mod tests {
         assert_eq!(PenetrationReport::from_ron(&text).unwrap(), report);
     }
 
-    /// Every name a report's hits and consequences cite resolves to one of its internals, every
-    /// timed list is in time order, and the path ends in or past the last plate: the sim marches a
-    /// perforating shell on until it embeds or leaves the vehicle, so an embed holds the path's
-    /// end and a perforated last plate has it beyond the exit. A deflection leg that ends the path
-    /// (a ricochet's, or a bounce after the last plate) is unconstrained. A burst lies on the path
-    /// and its field is thrown from it; a burst in flight is not the path's end, its nose piece's
-    /// line running on past it.
+    /// The game's damage-model records resolve every component reference, order their timed
+    /// lists, and retain a resting round in a component or any retaining plate. Overlapping
+    /// plates may each retain it; departures can lie between path nodes. A burst starts a path
+    /// leg and its field shares its source's point and time.
     pub(crate) fn assert_self_consistent(file: &str, report: &PenetrationReport) {
         let cited = report
             .fields()
@@ -688,12 +685,11 @@ pub(crate) mod tests {
             RoundEnd::Rest { volume } => {
                 let in_plate = report
                     .plates
-                    .last()
-                    .is_some_and(|plate| plate.exit.is_none() && plate.name == *volume);
+                    .iter()
+                    .any(|plate| plate.exit.is_none() && plate.name == *volume);
                 assert!(
                     in_plate || report.component(volume).is_some(),
-                    "{file}: rested in {volume}, neither its last plate without an exit nor a \
-                     component"
+                    "{file}: rested in {volume}, neither a retaining plate nor a component"
                 );
             }
             RoundEnd::Left { at } => {
@@ -704,8 +700,20 @@ pub(crate) mod tests {
                     "{file}: left the tank, yet a plate holds it"
                 );
                 assert!(
-                    report.path.iter().any(|p| distance(p.point, *at) < 1.0e-5),
-                    "{file}: where it left, {at:?}, is not a point of its path"
+                    report.path.windows(2).any(|pair| {
+                        let a = bevy::prelude::Vec3::from(pair[0].point);
+                        let span = bevy::prelude::Vec3::from(pair[1].point) - a;
+                        let point = bevy::prelude::Vec3::from(*at);
+                        let s = if span.length_squared() > 0.0 {
+                            ((point - a).dot(span) / span.length_squared()).clamp(0.0, 1.0)
+                        } else {
+                            0.0
+                        };
+                        // DERIVED: independently mm-quantized points can differ by sqrt(3) mm.
+                        point.distance(a + span * s)
+                            <= 0.002 + 8.0 * f32::EPSILON * point.abs().max(a.abs()).max_element()
+                    }),
+                    "{file}: departure {at:?} does not lie on its path"
                 );
             }
         }
@@ -761,40 +769,12 @@ pub(crate) mod tests {
                 plate.name
             );
         }
-        if let Some(index) = report.plates.iter().position(|p| p.exit.is_none()) {
-            assert_eq!(
-                index + 1,
-                report.plates.len(),
-                "{file}: a plate without an exit is the last plate"
-            );
-        }
-        let bounced_last = report.impact.verdict == ShotVerdict::Ricochet
-            || report
-                .ricochets
-                .last()
-                .is_some_and(|bounce| report.plates.last().is_none_or(|plate| bounce.t >= plate.t));
-        if !bounced_last && let Some(plate) = report.plates.last() {
-            match plate.exit {
-                None => {
-                    let gap = distance(last.point, plate.entry);
-                    assert!(
-                        gap <= 0.25,
-                        "{file}: the path ends {gap:.2} m from {}",
-                        plate.name
-                    );
-                }
-                Some(exit) => {
-                    let along: f32 = (0..3)
-                        .map(|i| (last.point[i] - exit[i]) * (exit[i] - plate.entry[i]))
-                        .sum();
-                    assert!(
-                        along >= 0.0,
-                        "{file}: the path ends behind the exit of {}",
-                        plate.name
-                    );
-                }
-            }
-        }
+        assert!(
+            report.plates.iter().all(|plate| plate.exit.is_some())
+                || report.rested()
+                || report.impact.verdict == ShotVerdict::Ricochet,
+            "{file}: a retaining plate requires a resting round"
+        );
     }
 
     fn distance(a: [f32; 3], b: [f32; 3]) -> f32 {

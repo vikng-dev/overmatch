@@ -1352,12 +1352,13 @@ fn a_round_resting_inside_overlapping_plates_is_admitted() {
         .collect();
     assert_eq!(held, ["outer", "inner"], "both plates hold the round");
     assert!(report.rested(), "{:?}", report.end);
+    crate::damage_cam::tests::assert_self_consistent("overlapping retaining plates", &report);
     admitted(&report).expect("a round at rest in overlapping plates is a record");
 }
 
 /// A crossing that spans two tanks' overlapping plates: the round leaves tank A's plate inside the
-/// crossing and comes to rest in tank B's. A's record has the round leave A on its path, between
-/// two of its nodes, and that record is admitted. B's 500 mm plate begins 15 mm inside A's 50 mm
+/// crossing and comes to rest in tank B's. A's record keeps its departure as a path node inside
+/// the shared crossing, and that record is admitted. B's 500 mm plate begins 15 mm inside A's 50 mm
 /// one (fixture data).
 #[test]
 fn a_departure_inside_a_shared_crossing_is_admitted() {
@@ -1372,10 +1373,11 @@ fn a_departure_inside_a_shared_crossing_is_admitted() {
     assert!(
         a.path
             .iter()
-            .all(|node| Vec3::from(node.point).distance(Vec3::from(at)) > 1.0e-3),
-        "the departure lies between path nodes: {at:?} on {:?}",
+            .any(|node| Vec3::from(node.point).distance(Vec3::from(at)) < 1.0e-6),
+        "the departure is a path node: {at:?} on {:?}",
         a.path
     );
+    crate::damage_cam::tests::assert_self_consistent("shared crossing departure", &a);
     admitted(&a).expect("a departure inside a shared crossing is a record");
     let b = fixture_shot_at(&volumes, LINE_FROM, Vec3::NEG_Z, 1);
     assert!(b.rested(), "{:?}", b.end);
