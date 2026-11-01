@@ -318,18 +318,13 @@ MEASURED (fixture: a 14.4 kg source closing at 1 m/s on a free slab of the same 
 6.05 N·s against the reduced-mass bound 7.2 N·s, the structure's reading equal to the 15.34 N·s
 the slab took.
 
-**Open: the hull's work and the contact's duration (#256).** Not changed here. `Load::mean_force`
-still divides a body contact's blow by the solver step, and a section's energy limit still reads
-only the freed group's own energy, so a slow ram's verdict still depends on the physics rate and
-on the non-monotone gap in "Bodies in contact". The law to land: a body contact's force comes from
-the pushing body's mass and closing speed and the pair's contact duration, `τ = π √(m / k)` (DERIVED:
-a linear contact spring's half period) with `k`
-the pair's contact stiffness in the material data (labelled `Unknown` until a source settles it),
-and the pushing body's work enters the energy limit beside the freed group's own. It needs
-`breakage::contact_load` to state the duration in `Origin::{Body, Contact}` instead of
-`ContactTransfers::dt`, and the section, ring and rest laws to read the pair's work; both were
-reserved for lane sweep-destr-6 this round. The wall design's "Body contact duration" note stays
-until that law lands.
+**Open: physical contact duration (#256).** The pushing-work term is implemented below.
+The contact force still uses the numerical solver interval: `Load::mean_force` divides the blow
+by `Origin::{Body, Contact}::step`. The remaining law is `tau = pi sqrt(m_pair / k_pair)`
+(DERIVED: the pair spring's half period), with the pair's contact stiffness in material data,
+labelled `Unknown` until a force-indentation source settles it. No duration data or constant is
+introduced by this continuation. The wall design's "Body contact duration" note remains until
+that adapter and its genuine physics-clock invariance test land.
 
 ### Review verification: hull work continuation (#256)
 
@@ -361,3 +356,41 @@ baseline 6.05 N s to 6.9103637 N s (about +0.86 N s, +14.2%); its received impul
 pre-reaction closing reading, not an extra reaction. The parked equal receivers retain their
 9414.24 N s normal momentum. The ramp reports 3999997.8 N/m against the finite-difference
 3999707.3 N/m; the one- and two-patch blows both read 499.99997 N s.
+
+### Pushing work in the energy limit (#256)
+
+Subject: the game's building destruction model; game state only. Fixed construction holds a
+source until its group opens. For source effective mass `m`, receiver modal mass `M`, incoming
+blow `J`, and plastic momentum share `s = M/(m+M)`, the freed receiver's kinetic term is
+`J² M/[2(m+M)²]`; the pushing source contributes `J² m/[2(m+M)²]`. Their sum is
+`J²/[2(m+M)]` (DERIVED). Thus an energy check against `sqrt(2 M W)` reads `J sqrt(s)`, not
+`J s`. `Origin::work_share` supplies this factor to the section, bearing-rest and punch-ring
+energy checks. Hinge checks use the hinge's modal mass; sliding/ring checks use their
+translation mass. Fields and actual contacts already integrated by the solver retain their
+whole impulse. Launch and give-back still use `Origin::share`, the momentum share; the work
+factor never sizes a launch.
+
+**Reproduction and class evidence.** The generic four-seam plug fixture has a 50 t source
+closing at 0.2 m/s and a 28.8 kg receiver (FIXTURE). DERIVED from those inputs and the fixture
+material: receiver term 0.575337 J, pair work 999.4243 J, required work 7.1 J. The old energy
+reading demands 5.7566843 N s against 20.22276 N s and fails the new slow-ram test. The corrected
+reading demands approximately 239.93 N s and opens the ring. This fixture deliberately passes
+the force gate under the current numerical bound; it isolates the missing work, and does not
+discharge the physical-duration remainder above. The hinge mass sweep and both-limit fixtures
+now pin pair work while preserving the independent strength requirement.
+
+Fixed in: **fracture: count pushing work in contact energy (#256)**.
+
+**Work-term gates.** The selected destruction, driving, contact-reader, headless, whole-tree
+and wire-pin run passed 433 tests, with 4 existing ignored measurement tests; CI clippy and
+formatting passed. Physical contact duration, material stiffness authoring and load-gate wiring,
+the real physics-clock invariance test, and retirement of the wall design's duration note remain.
+PROTOCOL_REV stays 63 because no wire type changed. The old shipped-house ram measurements in
+the wall design are explicitly labelled as the receiver-only-energy baseline; no capture or
+new shipped-house measurement is claimed.
+
+**Green stop at the lane limit.** Continuation began at 03:55:55 +07 and reached its final green
+checks at 04:55:33 +07 (MEASURED wall-clock, 59 minutes 38 seconds). The final comment cleanup
+also passed 125 fracture/citation/whole-tree/wire tests and CI clippy. All review findings and
+the pushing-work term are committed separately. The duration remainder above is deliberately
+unimplemented; the approximation note is retained because the code still uses the solver step.

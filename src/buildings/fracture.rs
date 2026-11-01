@@ -766,6 +766,13 @@ impl Reading {
 }
 
 impl Origin {
+    /// Impulse-equivalent pair work for an energy check. A body's source keeps pushing while
+    /// the receiving group opens; fields, actual integrated contacts and inertial balance loads
+    /// retain their whole impulses. Launch and give-back use the momentum share instead.
+    fn work_share(self, inverse_mass: f32) -> f32 {
+        self.share(inverse_mass).sqrt()
+    }
+
     /// The plastic share against a receiver's inverse effective mass (kg⁻¹). DERIVED:
     /// `m_receiver / (m_source + m_receiver)`, written without an infinite hinge mass when
     /// a load acts on the hinge. A field is the zero-source-mass limit of this same exchange.
@@ -1183,7 +1190,7 @@ pub(crate) enum Cause {
     /// the friction work of sliding the part off, N·s.
     Shove,
     /// A group punched out through its ring of joints by blows ([`ring_failure`]): the blows'
-    /// plastic share along its translation against the impulse whose energy opens the ring, N·s.
+    /// work factor along its translation against the impulse whose energy opens the ring, N·s.
     Punch,
     /// A group punched out through its ring of joints by gravity and presses
     /// ([`ring_force_failure`]): their force along its translation against the ring's strength, N.
@@ -1586,7 +1593,7 @@ fn plane_bucket(offset: f32) -> i64 {
 /// section alone holds to the ground about the section's hinge, the edge of the section that the
 /// turn presses (the bending axis is that of the blows' angular impulse in the plane about the
 /// section's centroid, `Σ (x − c) × J`), and the section fails when the angular impulse about the
-/// hinge, with each body's plastic share against the hinge effective mass and each pulse's blow
+/// hinge, with each body's work factor against the hinge effective mass and each pulse's blow
 /// through the demand the section's strength leaves it ([`section_pulse`]), reaches the
 /// impulse whose rotational energy pays for opening the section and for carrying
 /// the group's weight with it, `√(2 I (Σ G_f A + E_g))`: `I` the group's moment of inertia about
@@ -1925,7 +1932,7 @@ fn section_failure(
                 return 0.0;
             }
             let lever = moment / load.blow.length();
-            moment * load.origin.share(lever * lever / inertia) * load.felt(pulse)
+            moment * load.origin.work_share(lever * lever / inertia) * load.felt(pulse)
         })
         .sum();
     if demand <= 0.0 {
@@ -2547,12 +2554,12 @@ fn unseat(
     {
         return open(Cause::Push, turn.demand, turn.capacity);
     }
-    // The blows' plastic shares against the part's mass, each read in `pulse`'s mode.
+    // The blows' work factors against the part's mass, each read in `pulse`'s mode.
     let felt = |pulse: Reading| -> Vec3 {
         loads
             .iter()
             .filter(|load| inside(load.chunk))
-            .map(|load| load.blow * load.origin.share(1.0 / mass) * load.felt(pulse))
+            .map(|load| load.blow * load.origin.work_share(1.0 / mass) * load.felt(pulse))
             .sum()
     };
     let press = felt(lift_pulse).dot(support);
@@ -3204,7 +3211,7 @@ fn ring(
 
 /// The punch ring of `group` under the blows of `loads` ([`structural`]), `None` where they push
 /// it nowhere or no ring forms ([`ring`]): the translation follows their summed blow; the demand
-/// is each blow along it, by its plastic share against the group's mass and by what the ring's
+/// is each blow along it, by its pair-work factor against the group's mass and by what the ring's
 /// strength leaves it ([`Reading`]: a pulse's peak forces against the strength along the
 /// translation, a body blow's least mean force with gravity and the presses), against the
 /// impulse whose energy opens the ring, `√(2 M W)`.
@@ -3233,7 +3240,7 @@ fn ring_failure(
     let demand: f32 = on
         .iter()
         .map(|load| {
-            load.blow.dot(ring.along) * load.origin.share(1.0 / ring.mass) * load.felt(reading)
+            load.blow.dot(ring.along) * load.origin.work_share(1.0 / ring.mass) * load.felt(reading)
         })
         .sum();
     (demand > 0.0).then(|| Failure {
@@ -6491,8 +6498,8 @@ mod tests {
         }
     }
 
-    /// A BODY'S DEMAND IS ITS PLASTIC EXCHANGE WITH THE HELD HINGE MASS (the game's
-    /// environment destruction model). The section and seated-part laws rely on that share;
+    /// A BODY'S WORK INCLUDES ITS PUSH AGAINST THE HELD HINGE MASS (the game's
+    /// environment destruction model). The section and seated-part energy laws rely on the pair work;
     /// feeding them the whole blow, the group's free mass, or its total mass fails the sweep.
     /// The field and vanishing-source-mass verdicts agree on either side of failure, the body's
     /// blow delivered within a vanishing step so that its force beats any strength (a field
@@ -6558,7 +6565,7 @@ mod tests {
                 let reduced =
                     section_failure(&structure, &section, &[1], &[body], Reading::UNRESISTED)
                         .unwrap();
-                let expected = failure.demand / (1.0 + ratio);
+                let expected = failure.demand / (1.0 + ratio).sqrt();
                 assert!(
                     (reduced.demand - expected).abs() <= expected * 2e-5,
                     "height {height}, ratio {ratio}: {} vs {expected}",
@@ -7086,7 +7093,7 @@ mod tests {
         let strength = 4.0 * area * cohesion;
         let capacity = (2.0 * mass * 4.0 * area * energy).sqrt();
         let blow = |source: f32, demand: f32, step: f32| {
-            let share = mass / (source + mass);
+            let share = (mass / (source + mass)).sqrt();
             Load {
                 chunk: plug,
                 at: structure.chunks[plug].centroid + Vec3::Z * (CUBE / 2.0),
@@ -7124,7 +7131,7 @@ mod tests {
             (Vec::new(), Vec::new()),
             "energy alone frees nothing"
         );
-        let heavy = blow(50e3, 0.5, STEP);
+        let heavy = blow(50e3, 0.5, 1e-4);
         assert!(
             force(&heavy) > 10.0 * strength,
             "fixture: the heavy blow's force beats it"
@@ -7145,6 +7152,50 @@ mod tests {
             (Cause::Punch, &opened)
         );
         assert!((failures[0].demand / failures[0].capacity - 2.0).abs() < 1e-3);
+    }
+
+    /// Continued pushing work belongs to the contact pair, beyond the freed plug's own kinetic
+    /// energy. The game's building destruction energy gate relies on it for slow hull-mass rams.
+    /// FIXTURE: source 50 t at 0.2 m/s, plug 28.8 kg, four cube side seams; the force gate is
+    /// deliberately passed under the current numerical contact-force bound (duration remains open).
+    #[test]
+    fn a_slow_ram_counts_the_pushing_bodys_work_beside_the_plugs_energy() {
+        let cells = [[-1, 0, 0], [1, 0, 0], [0, -1, 0], [0, 1, 0], [0, 0, 0]];
+        let structure = cubes(&cells, 4, &[], 28.8);
+        let state = WallState::new(&structure);
+        let incident = incident(&structure);
+        let ring = ring(&structure, &state, &incident, &[4], Vec3::NEG_Z).unwrap();
+        let mass = 50_000.0_f32;
+        let speed = 0.2;
+        let impulse = mass * speed;
+        let own = impulse.powi(2) * ring.mass / (2.0 * (mass + ring.mass).powi(2));
+        let pair = impulse.powi(2) / (2.0 * (mass + ring.mass));
+        assert!(own < ring.work && pair > ring.work);
+        assert!(impulse / STEP > ring.strength);
+        let load = Load {
+            chunk: 4,
+            at: structure.chunks[4].centroid,
+            energy: 0.0,
+            crushed: 0.0,
+            blow: Vec3::NEG_Z * impulse,
+            press: Vec3::ZERO,
+            peak: None,
+            origin: Origin::Body {
+                body: Entity::PLACEHOLDER,
+                mass,
+                speed,
+                step: STEP,
+            },
+        };
+        let failure = ring_failure(&structure, &state, &incident, &[4], &[load]).unwrap();
+        println!(
+            "DERIVED slow ram: own {own} J, pair {pair} J, required {} J; demand {} against {} N s",
+            ring.work, failure.demand, failure.capacity
+        );
+        assert!(
+            failure.demand > failure.capacity,
+            "the pair work opens the ring"
+        );
     }
 
     /// A NONORTHOGONAL RING KEEPS ITS ADMISSIBLE TRANSLATION (the game's environment destruction
