@@ -232,22 +232,23 @@ pub(super) fn apply_belt_support_field(
     // Phase 3 — apply forces in the same per-side report order as ever, commit the state. A
     // dynamic piece under a contact takes its clamped impulse in the same tick.
     touches.0.clear();
+    // No other belt source shares the sandbox. Size both tracks together, in the production
+    // law's canonical contact order, before either side changes a recipient's velocity.
+    let pushes = belt_piece_reactions(&mut pieces, &reports, dt);
+    apply_pushes(&pushes, &mut bodies);
+    for push in &pushes {
+        touches.0.push(super::rubble::Touch {
+            point: push.point,
+            body: push.body,
+            dynamic: true,
+            reaction: push.impulse / dt,
+        });
+    }
     for (si, report) in reports.into_iter().enumerate() {
         let side = Side::ALL[si];
         // Apply in report order — accumulation order is part of bit-reproducibility.
         for app in &report.apps {
             forces.apply_force_at_point(app.force, app.point);
-        }
-        // No other belt source shares the sandbox, so no recipient is belt-held.
-        let pushes = piece_impulses(&mut pieces, &report.contacts, &[], dt);
-        apply_pushes(&pushes, &mut bodies);
-        for push in &pushes {
-            touches.0.push(super::rubble::Touch {
-                point: push.point,
-                body: push.body,
-                dynamic: true,
-                reaction: push.impulse / dt,
-            });
         }
         for c in &report.contacts {
             if let Some(collider) = c.collider
@@ -283,6 +284,20 @@ pub(super) fn apply_belt_support_field(
         belt.set(side, tr.next_speeds[si]);
         phase.set(side, advected);
     }
+}
+
+/// One recipient pass over the complete sandbox footprint, through the production law.
+fn belt_piece_reactions(
+    pieces: &mut RubbleBodies,
+    reports: &[SideReport; 2],
+    dt: f32,
+) -> Vec<crate::track::rubble::Push> {
+    piece_impulses(
+        pieces,
+        reports.iter().flat_map(|report| &report.contacts),
+        &[],
+        dt,
+    )
 }
 
 /// The rig's declared transmission, built in [`build_rig`](super::build_rig) through the
@@ -693,6 +708,91 @@ mod tests {
     use super::super::rig_geom::{RigGeom, tiger_rig};
     use super::*;
     use crate::track::gear_phase::{fold, tooth_tip_angle};
+
+    /// Both tracks share the production reaction order. Sandbox tuning relies on a light
+    /// recipient seeing the same clamped impulses as the game, even when each track changes
+    /// its angular velocity. FIXTURE DATA: a 200 kg plank, two contacts closing at 0.2 m/s.
+    #[test]
+    fn both_sandbox_tracks_share_the_production_reaction_pass() {
+        use avian3d::prelude::*;
+        use bevy::ecs::system::RunSystemOnce;
+        let mut app = App::new();
+        app.add_plugins((
+            MinimalPlugins,
+            bevy::transform::TransformPlugin,
+            AssetPlugin::default(),
+            PhysicsPlugins::default(),
+        ))
+        .init_asset::<Mesh>()
+        .insert_resource(Gravity::ZERO);
+        app.finish();
+        app.cleanup();
+        let plank = app
+            .world_mut()
+            .spawn((
+                Position(Vec3::ZERO),
+                Rotation::default(),
+                RigidBody::Dynamic,
+                Collider::cuboid(4.0, 0.2, 1.0),
+                Mass(200.0),
+            ))
+            .id();
+        app.update();
+        app.world_mut()
+            .run_system_once(move |rubble: RubbleQuery, bodies: Query<PieceData>| {
+                let mut reports = [SideReport::default(), SideReport::default()];
+                for (report, x) in reports.iter_mut().zip([-1.0, 1.0]) {
+                    report.contacts.push(crate::track::forces::BeltContact {
+                        point: Vec3::new(x, 0.1, 0.0),
+                        normal: Vec3::Y,
+                        load: 100_000.0,
+                        load_elastic: 100_000.0,
+                        slip: 0.0,
+                        slip_lat: 0.0,
+                        f_long: 0.0,
+                        f_lat: 0.0,
+                        traction: Vec3::ZERO,
+                        belt_velocity: Vec3::NEG_Y * 0.2,
+                        collider: Some(plank),
+                        mu: 0.9,
+                    });
+                }
+                let mut sandbox = RubbleBodies::gather(&rubble, &[plank], &bodies);
+                let mut production = RubbleBodies::gather(&rubble, &[plank], &bodies);
+                let dt = 1.0 / 64.0;
+                let actual = belt_piece_reactions(&mut sandbox, &reports, dt);
+                let expected = piece_impulses(
+                    &mut production,
+                    reports.iter().flat_map(|r| &r.contacts),
+                    &[],
+                    dt,
+                );
+                let bits = |pushes: &[crate::track::rubble::Push]| {
+                    let mut bits: Vec<_> = pushes
+                        .iter()
+                        .map(|p| {
+                            (
+                                p.point.to_array().map(f32::to_bits),
+                                p.impulse.to_array().map(f32::to_bits),
+                            )
+                        })
+                        .collect();
+                    bits.sort_unstable_by_key(|(point, _)| *point);
+                    bits
+                };
+                assert_eq!(
+                    actual.len(),
+                    2,
+                    "both fixture tracks must reach the recipient"
+                );
+                assert_eq!(
+                    bits(&actual),
+                    bits(&expected),
+                    "sandbox reactions must match the production pass bit for bit"
+                );
+            })
+            .expect("the complete reaction fixture runs");
+    }
 
     /// The flat-ground conformed loop of a side: rest circles (road wheels un-articulated), taut
     /// envelope + sag budgeted to the material length — the same construction family
