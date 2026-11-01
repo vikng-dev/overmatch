@@ -1833,7 +1833,7 @@ fn section_failure(
     let com = weighted / mass;
     // The plane's normal toward the group, a group point moving along it leaving the section: the
     // joints' own, each turned toward the group, by area (one normal for a plane of joints).
-    let n = joints
+    let normal_sum = joints
         .iter()
         .map(|joint| {
             let n = joint.normal;
@@ -1844,18 +1844,58 @@ fn section_failure(
                     -n
                 }
         })
-        .sum::<Vec3>()
-        .try_normalize()?;
+        .sum::<Vec3>();
+    let n = normal_sum.try_normalize()?;
     let on_group = || {
         loads
             .iter()
             .filter(|load| group.binary_search(&load.chunk).is_ok())
     };
-    let moment: Vec3 = on_group()
-        .map(|load| (load.at - centre).cross(load.blow * load.felt(pulse)))
-        .sum();
+    let (moment, magnitude_sum, impulse_sum, count) = on_group().fold(
+        (Vec3::ZERO, 0.0_f64, 0.0_f64, 0_usize),
+        |(moment, scale, impulses, count), load| {
+            let blow = load.blow * load.felt(pulse);
+            let magnitude = blow.as_dvec3().length();
+            (
+                moment + (load.at - centre).cross(blow),
+                scale + (load.at.as_dvec3().length() + centre.as_dvec3().length()) * magnitude,
+                impulses + magnitude,
+                count + 1,
+            )
+        },
+    );
     let bending = moment - n * moment.dot(n);
-    if bending.length() <= 0.0 {
+    // Resolution, DERIVED: gamma(k) = k*u/(1-k*u), u = EPSILON/2, bounds k rounded
+    // operations. The centroid ratio takes at most 2*N+4 steps; normal summation and
+    // normalization take N+8, amplified by the ratio of absolute operands to their sum.
+    // The point/cross/projection chain is bounded by 32 steps plus load summation.
+    // Sum magnitudes before cancellation: rounding in an axial pull cannot choose a hinge.
+    let gamma = |steps: usize| {
+        let rounded = steps as f64 * f64::from(f32::EPSILON) / 2.0;
+        // At k*u >= 1 no finite roundoff bound is certified, so no axis is resolved.
+        if rounded < 1.0 {
+            Some(rounded / (1.0 - rounded))
+        } else {
+            None
+        }
+    };
+    let centre_error = gamma(2 * joints.len() + 4)?
+        * joints
+            .iter()
+            .map(|j| f64::from(j.area) * j.centroid.as_dvec3().length())
+            .sum::<f64>()
+        / f64::from(area);
+    let normal_error = 2.0
+        * gamma(joints.len() + 8)?
+        * joints
+            .iter()
+            .map(|j| f64::from(j.area) * j.normal.as_dvec3().length())
+            .sum::<f64>()
+        / normal_sum.as_dvec3().length();
+    let resolution = centre_error * impulse_sum
+        + gamma(count + 32)? * magnitude_sum
+        + (2.0 * normal_error + normal_error * normal_error) * moment.as_dvec3().length();
+    if bending.as_dvec3().length() <= resolution {
         return None;
     }
     let axis = bending.normalize();
@@ -3939,6 +3979,30 @@ mod tests {
                 bears,
                 "normal {normal}"
             );
+        }
+    }
+
+    /// An axial pull cannot acquire a hinge from coordinate roundoff. The section law must
+    /// still read a resolved eccentricity. Fixture: row geometry at three scales.
+    #[test]
+    fn an_axial_pull_has_no_bending_axis_at_input_resolution() {
+        for scale in [0.001_f32, 1.0, 1000.0] {
+            let mut slab = unsupported_slab(2);
+            for chunk in &mut slab.chunks {
+                chunk.centroid *= scale;
+                chunk.volume *= scale.powi(3);
+                chunk.mass *= scale.powi(3);
+            }
+            for joint in &mut slab.joints {
+                joint.centroid *= scale;
+                joint.area *= scale * scale;
+            }
+            let mut load = slab_contact(&slab, 0.0);
+            load.blow = Vec3::NEG_X * 1000.0;
+            let reading = section_failure(&slab, &[0], &[0], &[load], Reading::UNRESISTED);
+            assert!(reading.is_none(), "scale {scale}: {reading:?}");
+            load.at += Vec3::Y * (0.01 * scale);
+            assert!(section_failure(&slab, &[0], &[0], &[load], Reading::UNRESISTED).is_some());
         }
     }
 
