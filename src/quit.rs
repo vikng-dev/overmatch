@@ -331,14 +331,9 @@ mod terminate {
         }
     }
 
-    /// The invariant guard for [`forward_quit_request`]: warn, loudly and by name, if this root's
-    /// update cadence could swallow a Cmd+Q.
-    ///
-    /// A `warn!` rather than a panic because the failure it describes is a slow quit, not a broken
-    /// game — and because the fix belongs to whoever changed the update mode, who needs to be told
-    /// what they broke, not stopped from booting. `Option<Res<…>>` so a root without winit (the
-    /// headless server never mounts this module, but tests and future roots might) simply says
-    /// nothing.
+    /// Refuse a windowed root whose update cadence can strand a cancelled Cmd+Q. This is an
+    /// application-composition invariant: cancelling termination produces no event to wake winit.
+    /// A root without winit has no window event loop to guard.
     fn check_quit_latency(settings: Option<Res<WinitSettings>>) {
         let Some(settings) = settings else {
             return;
@@ -347,21 +342,29 @@ mod terminate {
             ("focused", settings.focused_mode),
             ("unfocused", settings.unfocused_mode),
         ] {
-            if stalls_quit(mode) {
-                warn!(
-                    "quit: this root's {which} update mode is {mode:?}, which can wait longer than \
-                     {QUIT_LATENCY_BUDGET:?} for an event. Cancelling a terminate produces no \
-                     event, so Cmd+Q will appear to do nothing until something else wakes the \
-                     loop. Either keep the mode continuous (or briefly reactive), or make \
-                     quit::terminate poke the event loop itself (see src/quit.rs)."
-                );
-            }
+            assert!(
+                !stalls_quit(mode),
+                "quit: the {which} update mode {mode:?} can strand a cancelled Cmd+Q beyond \
+                 {QUIT_LATENCY_BUDGET:?}; use continuous or briefly reactive updates, or wake \
+                 the event loop from the terminate callback"
+            );
         }
     }
 
     #[cfg(test)]
     mod tests {
         use super::*;
+
+        /// A root with a stranded quit must fail before play. Merely logging the bad cadence
+        /// leaves the player unable to quit, even though the mode classifier still passes its test.
+        #[test]
+        #[should_panic(expected = "can strand a cancelled Cmd+Q")]
+        fn a_root_that_can_strand_quit_is_refused() {
+            let mut app = App::new();
+            app.insert_resource(WinitSettings::desktop_app())
+                .add_systems(Startup, check_quit_latency);
+            app.update();
+        }
 
         /// The guard has to be silent on every update mode this repo actually ships and loud on the
         /// ones that would break Half B. The first two rows are the reason it is not a
