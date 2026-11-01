@@ -26,9 +26,11 @@
 //!
 //! The simulation reads chunks and joints only; it never reads how the bake chose the cuts.
 //!
-//! [`BuildingAsset::check`] is the format's contract: every index in range, every element's chunk
-//! run contiguous and covering, every joint and anchor of positive area, every attachment kind
-//! named once, every anchor on the foundation plane. The game refuses a file that breaks it, and
+//! [`BuildingAsset::check`] is the format's contract: every coordinate finite, every index in
+//! range, every element's frame unit and orthogonal and its profile a convex counter-clockwise
+//! polygon, every element's chunk run contiguous and covering, every joint and anchor of positive
+//! area, every joint normal unit, every attachment kind named once, every anchor on the foundation
+//! plane. The game refuses a file that breaks it, and
 //! one naming a material or an attachment kind its registries do not hold (ADR-0011).
 
 use bevy::math::{Vec2, Vec3};
@@ -230,6 +232,21 @@ pub struct Anchor {
     pub centroid: [f32; 3],
 }
 
+/// The first corner of a counter-clockwise `profile` that turns clockwise or sits on an edge
+/// shorter than [`PLANE_TOLERANCE_M`], or `None` for a convex polygon. A straight corner is
+/// convex: the sine of its turn may fall short of zero by the tolerance's rounding.
+fn concave_corner(profile: &[[f32; 2]]) -> Option<usize> {
+    let n = profile.len();
+    let edge = |k: usize| Vec2::from_array(profile[(k + 1) % n]) - Vec2::from_array(profile[k]);
+    (0..n).find(|&k| {
+        let (incoming, outgoing) = (edge((k + n - 1) % n), edge(k));
+        let lengths = incoming.length() * outgoing.length();
+        incoming.length() <= PLANE_TOLERANCE_M
+            || outgoing.length() <= PLANE_TOLERANCE_M
+            || incoming.perp_dot(outgoing) < -PLANE_TOLERANCE_M * lengths
+    })
+}
+
 /// The signed area of a polygon, positive when counter-clockwise.
 pub fn polygon_area(points: &[[f32; 2]]) -> f32 {
     let n = points.len();
@@ -258,6 +275,12 @@ impl BuildingAsset {
                 self.format
             ));
         }
+        if !self.foundation_y_m.is_finite() {
+            return Err(format!(
+                "foundation_y_m {} is not finite; rebake the building",
+                self.foundation_y_m
+            ));
+        }
         if self.materials.is_empty() || self.materials.len() > usize::from(u8::MAX) + 1 {
             return Err(format!("{} materials", self.materials.len()));
         }
@@ -280,6 +303,9 @@ impl BuildingAsset {
                 return Err(format!("attachment kind {kind:?} is named twice"));
             }
         }
+        let finite = |values: &[f32]| values.iter().all(|v| v.is_finite());
+        // NaN fails this comparison, so a NaN axis or normal is refused with the rest.
+        let unit = |axis: Vec3| (axis.length() - 1.0).abs() <= PLANE_TOLERANCE_M;
         let material = |index: u8, what: &str| {
             (usize::from(index) < self.materials.len())
                 .then_some(())
@@ -295,12 +321,37 @@ impl BuildingAsset {
                     element.component
                 ));
             }
-            if element.profile.len() < 3 || polygon_area(&element.profile) <= 0.0 {
+            let frame = &element.frame;
+            if !finite(&frame.origin) || !finite(&frame.u) || !finite(&frame.v) {
                 return Err(format!(
-                    "element {name}'s profile is no counter-clockwise polygon"
+                    "element {name}'s frame {frame:?} is not finite; rebake the building"
                 ));
             }
-            if element.depth[0].partial_cmp(&element.depth[1]) != Some(std::cmp::Ordering::Less) {
+            let (u, v) = (Vec3::from_array(frame.u), Vec3::from_array(frame.v));
+            if !(unit(u) && unit(v) && u.dot(v).abs() <= PLANE_TOLERANCE_M) {
+                return Err(format!(
+                    "element {name}'s frame axes u {u} and v {v} are not unit and orthogonal; \
+                     rebake the building"
+                ));
+            }
+            if element.profile.len() < 3
+                || !element.profile.iter().all(|p| finite(p))
+                || !(polygon_area(&element.profile).is_finite()
+                    && polygon_area(&element.profile) > 0.0)
+            {
+                return Err(format!(
+                    "element {name}'s profile is no finite counter-clockwise polygon"
+                ));
+            }
+            if let Some(corner) = concave_corner(&element.profile) {
+                return Err(format!(
+                    "element {name}'s profile is not convex at corner {corner}: its collider is \
+                     the profile's hull and its faces are the profile's edges; split the element"
+                ));
+            }
+            if !finite(&element.depth)
+                || element.depth[0].partial_cmp(&element.depth[1]) != Some(std::cmp::Ordering::Less)
+            {
                 return Err(format!(
                     "element {name}'s depth {:?} is empty",
                     element.depth
@@ -333,6 +384,11 @@ impl BuildingAsset {
             if chunk.hull.len() < 4 || !positive(chunk.volume_m3) || !positive(chunk.mass_kg) {
                 return Err(format!("chunk {index} has no volume or no mass"));
             }
+            if !chunk.hull.iter().all(|p| finite(p)) || !finite(&chunk.centroid) {
+                return Err(format!(
+                    "chunk {index}'s hull or centroid is not finite; rebake the building"
+                ));
+            }
         }
         let count = self.chunks.len() as u32;
         let mut last: Option<(u32, u32)> = None;
@@ -344,8 +400,11 @@ impl BuildingAsset {
             if !(joint.area_m2.is_finite() && joint.area_m2 > 0.0) {
                 return Err(format!("joint {pair:?} has area {}", joint.area_m2));
             }
-            if (Vec3::from_array(joint.normal).length() - 1.0).abs() > PLANE_TOLERANCE_M {
+            if !finite(&joint.normal) || !unit(Vec3::from_array(joint.normal)) {
                 return Err(format!("joint {pair:?}'s normal is not unit"));
+            }
+            if !finite(&joint.centroid) {
+                return Err(format!("joint {pair:?}'s centroid is not finite"));
             }
             let component = |c: u32| {
                 let element = self.chunks[c as usize].element;
@@ -378,6 +437,12 @@ impl BuildingAsset {
             }
             if !(anchor.area_m2.is_finite() && anchor.area_m2 > 0.0) {
                 return Err(format!("anchor on chunk {} has no area", anchor.chunk));
+            }
+            if !finite(&anchor.centroid) {
+                return Err(format!(
+                    "anchor on chunk {}'s centroid is not finite",
+                    anchor.chunk
+                ));
             }
             if (anchor.centroid[1] - self.foundation_y_m).abs() > PLANE_TOLERANCE_M {
                 return Err(format!(

@@ -483,4 +483,63 @@ pub(crate) mod tests {
         let err = resolve("house_1", &unknown).unwrap_err();
         assert!(err.contains("Adobe"), "{err}");
     }
+
+    /// A NON-FINITE OR MALFORMED GEOMETRIC FACT DOES NOT LOAD: NaN passes every `>` and `<`
+    /// comparison the contract once made, so a NaN profile, frame axis, hull corner, joint normal
+    /// or anchor centroid, a skewed frame or a concave profile would reach the colliders, faces
+    /// and laws that read them. Each is refused naming its element, chunk, joint or anchor.
+    #[test]
+    fn a_non_finite_or_malformed_geometric_fact_is_refused() {
+        let path = shipped_assets().join("buildings/house_1/house_1.building.ron");
+        let text = std::fs::read_to_string(&path).unwrap();
+        let asset = BuildingAsset::from_ron(&text).unwrap();
+        let refused = |edit: &dyn Fn(&mut BuildingAsset), part: &str| {
+            let mut wrong = asset.clone();
+            edit(&mut wrong);
+            let err = wrong.check().expect_err(part);
+            assert!(err.contains(part), "{part}: {err}");
+        };
+        refused(&|a| a.foundation_y_m = f32::NAN, "foundation_y_m");
+        refused(&|a| a.elements[0].profile[0][0] = f32::NAN, "profile");
+        refused(&|a| a.elements[0].frame.u[0] = f32::NAN, "frame");
+        refused(
+            &|a| a.elements[0].frame.v = a.elements[0].frame.u,
+            "orthogonal",
+        );
+        refused(&|a| a.elements[0].depth[1] = f32::INFINITY, "depth");
+        refused(&|a| a.chunks[0].hull[0][1] = f32::NAN, "hull or centroid");
+        refused(
+            &|a| a.joints[0].normal = [f32::NAN; 3],
+            "normal is not unit",
+        );
+        refused(
+            &|a| a.joints[0].centroid[2] = f32::NAN,
+            "centroid is not finite",
+        );
+        refused(
+            &|a| a.anchors[0].centroid[0] = f32::NAN,
+            "centroid is not finite",
+        );
+        refused(
+            &|a| {
+                let profile = &mut a
+                    .elements
+                    .iter_mut()
+                    .find(|element| element.profile.len() >= 4)
+                    .expect("the shipped house holds a profile of four corners or more")
+                    .profile;
+                let mean = profile
+                    .iter()
+                    .fold([0.0; 2], |sum, p| [sum[0] + p[0], sum[1] + p[1]]);
+                let n = profile.len() as f32;
+                // A corner pulled just past the centre dents the polygon and keeps its area positive.
+                let centre = [mean[0] / n, mean[1] / n];
+                profile[0] = [
+                    centre[0] - 0.25 * (profile[0][0] - centre[0]),
+                    centre[1] - 0.25 * (profile[0][1] - centre[1]),
+                ];
+            },
+            "not convex",
+        );
+    }
 }
