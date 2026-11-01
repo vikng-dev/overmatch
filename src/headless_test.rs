@@ -439,8 +439,8 @@ fn a_round_is_dressed_from_its_authored_body_and_streak() {
     );
 }
 
-/// The game's damage-model composition gate samples every projectile at birth and removal.
-/// The removal read also catches dressing attached by another birth observer's deferred commands.
+/// The game's damage-model composition gate samples projectile births, frame ends and removals.
+/// Deferred dressing is visible either on the surviving round or before its removal.
 #[derive(Resource, Default)]
 struct ServerRoundSamples {
     seen: bool,
@@ -465,17 +465,24 @@ impl ServerRoundSamples {
     }
 }
 
-type ServerRoundViews<'w, 's> = Query<
-    'w,
-    's,
-    (
-        Has<bevy::world_serialization::WorldAssetRoot>,
-        Has<Mesh3d>,
-        Has<MeshMaterial3d<StandardMaterial>>,
-        Has<Visibility>,
-        Has<crate::ballistics::ShellVisual>,
-    ),
->;
+type ServerRoundFacets = (
+    Has<bevy::world_serialization::WorldAssetRoot>,
+    Has<Mesh3d>,
+    Has<MeshMaterial3d<StandardMaterial>>,
+    Has<Visibility>,
+    Has<crate::ballistics::ShellVisual>,
+);
+
+type ServerRoundViews<'w, 's> = Query<'w, 's, ServerRoundFacets>;
+
+fn sample_server_round_frame(
+    views: Query<ServerRoundFacets, With<crate::ballistics::Projectile>>,
+    mut samples: ResMut<ServerRoundSamples>,
+) {
+    for facets in &views {
+        samples.note(facets);
+    }
+}
 
 fn sample_server_round_birth(
     born: On<Add, crate::ballistics::Projectile>,
@@ -509,7 +516,8 @@ fn a_server_composition_dresses_no_round_at_all() {
     let mut app = booted_sp_app();
     app.init_resource::<ServerRoundSamples>()
         .add_observer(sample_server_round_birth)
-        .add_observer(sample_server_round_removal);
+        .add_observer(sample_server_round_removal)
+        .add_systems(Last, sample_server_round_frame);
     let world = app.world_mut();
     let tank = world
         .query_filtered::<Entity, (With<Tank>, With<Controlled>)>()
@@ -547,6 +555,39 @@ fn a_server_composition_dresses_no_round_at_all() {
             .count(),
         0,
         "a server composition spawned a tracer child"
+    );
+}
+
+/// The game's damage-model composition gate must catch deferred dressing even when its round
+/// survives the frame. Birth alone can precede another observer's component insertion.
+#[test]
+fn the_server_round_gate_catches_dressing_after_birth() {
+    let mut app = App::new();
+    app.init_resource::<ServerRoundSamples>()
+        .add_observer(sample_server_round_birth)
+        .add_observer(sample_server_round_removal)
+        .add_systems(Last, sample_server_round_frame);
+    // FIXTURE DATA: an arbitrary undrawn round; its diameter does not select dressing.
+    let round = app
+        .world_mut()
+        .spawn(crate::ballistics::Projectile::view_test_round(0.05))
+        .id();
+    assert!(
+        app.world()
+            .resource::<ServerRoundSamples>()
+            .dressed
+            .is_empty()
+    );
+    app.world_mut()
+        .entity_mut(round)
+        .insert(Visibility::Inherited);
+    app.update();
+    assert!(
+        app.world()
+            .resource::<ServerRoundSamples>()
+            .dressed
+            .contains(&"Visibility"),
+        "the gate must see late dressing on a surviving round"
     );
 }
 

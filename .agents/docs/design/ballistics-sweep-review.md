@@ -241,3 +241,12 @@ Final frame-invariant validation: format and workspace/all-target clippy passed.
 targeted march, field-law, wire, field-cast, pen-cam, protocol, bake and source-guard tests passed;
 four on-demand instruments stayed ignored. This includes `doc_citations`, `ui_ascii`,
 `net_boundary` and `bake::`. No field-cast pin or wire definition changed.
+
+R2 gate follow-up: frame-end sampling also reads every surviving projectile after deferred birth
+commands. A canary inserts visibility after a clean birth and requires the sampler to report it.
+Birth and removal samples still cover rounds whose whole lifetime fits inside a tick.
+
+R2 final validation: format and workspace/all-target clippy passed. MEASURED: 45 targeted tests
+passed, including the real server composition, the late-dressing canary and all required
+whole-tree citation, font, network-boundary and bake guards. The broader final batch above
+also passed the protocol checks, pen-cam records and unchanged cross-platform field-cast pin.
