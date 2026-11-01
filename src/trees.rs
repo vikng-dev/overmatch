@@ -132,12 +132,12 @@ struct Wood {
     /// The ram threshold's constant, N·s/m²: a tick's `Σ impulse × lever` fells the trunk at
     /// `fell_k × dbh³`.
     fell_k: Sourced<f32>,
-    /// Every declared species has explicit grain facts, checked before any instance spawns.
+    /// Every declared species has grain and root-plate facts, checked before any instance spawns.
     structure: StructureRows,
 }
 
-/// Wood facts for a section normal to the trunk's grain. The structural strength and opening
-/// work laws will read these; the current HP and ram laws do not. The wall design owns the model.
+/// A species' grain and root-plate facts. The structural strength, opening work and anchor
+/// laws will read these; the current HP and ram laws do not. The wall design owns the model.
 #[derive(Debug, Clone, PartialEq, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 struct StructuralWood {
@@ -146,6 +146,10 @@ struct StructuralWood {
     /// Mode-I opening work per section area, J/m²: tension along the grain, breaking across
     /// fibres (LR/LT), not the RL/TL splitting energy of a building's timber seam.
     along_grain_fracture_j_per_m2: Sourced<f32>,
+    /// Ultimate root-plate overturning moment per fresh stem mass, N·m/kg (not per weight in N).
+    /// The authored provenance binds its species, soil and rooting-depth domain. Strength only:
+    /// this coefficient supplies no root-plate separation work or fresh-stem mass conversion.
+    root_plate_overturning_nm_per_kg: Sourced<f32>,
 }
 
 impl StructuralWood {
@@ -155,6 +159,10 @@ impl StructuralWood {
             (
                 "along_grain_fracture_j_per_m2",
                 self.along_grain_fracture_j_per_m2.0,
+            ),
+            (
+                "root_plate_overturning_nm_per_kg",
+                self.root_plate_overturning_nm_per_kg.0,
             ),
         ] {
             if !value.is_finite() || value <= 0.0 {
@@ -192,7 +200,8 @@ impl<'de> serde::Deserialize<'de> for StructureRows {
                     let row: StructuralWood = access.next_value().map_err(|err| {
                         A::Error::custom(format!(
                             "structure row {name:?}: {err}; author along_grain_rupture_pa (Pa) \
-                             and along_grain_fracture_j_per_m2 (J/m²), each with provenance"
+                             along_grain_fracture_j_per_m2 (J/m²) and root_plate_overturning_nm_per_kg \
+                             (N·m/kg fresh stem mass), each with provenance"
                         ))
                     })?;
                     row.validate(&name).map_err(A::Error::custom)?;
@@ -221,7 +230,8 @@ impl Wood {
                 if !wood.structure.0.contains_key(name) {
                     return Err(format!(
                         "structure row {name:?} is missing; author its along_grain_rupture_pa \
-                         and along_grain_fracture_j_per_m2 with their sources"
+                         along_grain_fracture_j_per_m2 and root_plate_overturning_nm_per_kg \
+                         with their sources"
                     ));
                 }
             }
@@ -1582,6 +1592,7 @@ pub(crate) mod tests {
                 StructuralWood {
                     along_grain_rupture_pa: Sourced(4.0e7),
                     along_grain_fracture_j_per_m2: Sourced(2.0e4),
+                    root_plate_overturning_nm_per_kg: Sourced(150.0),
                 },
             )])),
         }
@@ -1591,6 +1602,8 @@ pub(crate) mod tests {
     const GRAIN_RUPTURE: &str = "along_grain_rupture_pa: (4.0e7, Tuned(\"fixture\")),";
     const GRAIN_FRACTURE: &str = "along_grain_fracture_j_per_m2: (2.0e4, Tuned(\"fixture\")),";
 
+    const ROOT_PLATE: &str = "root_plate_overturning_nm_per_kg: (150.0, Tuned(\"fixture\")),";
+
     fn structural_wood_text(rows: &str) -> String {
         format!(
             r#"Wood(substance: "Wood", hp_per_m2: (1000.0, Tuned("fixture")),
@@ -1598,12 +1611,12 @@ pub(crate) mod tests {
         )
     }
 
-    fn grain_row(name: &str, fields: &str) -> String {
+    fn structural_row(name: &str, fields: &str) -> String {
         format!("{name:?}: StructuralWood({fields}),")
     }
 
-    fn grain_fields() -> String {
-        format!("{GRAIN_RUPTURE} {GRAIN_FRACTURE}")
+    fn structural_fields() -> String {
+        format!("{GRAIN_RUPTURE} {GRAIN_FRACTURE} {ROOT_PLATE}")
     }
 
     fn parse_fixture_wood(rows: &str) -> Result<Wood, String> {
@@ -1616,17 +1629,18 @@ pub(crate) mod tests {
 
     /// Structural laws must never inherit the across-grain building seam when a trunk's grain
     /// datum is missing. Every missing field is refused before play with file, species, field
-    /// and repair; a defaulted strength or opening work breaks this load contract.
+    /// and repair; a defaulted grain or root strength/work breaks this load contract.
     #[test]
-    fn every_missing_grain_fact_names_the_file_row_field_and_repair() {
-        parse_fixture_wood(&grain_row("fixture", &grain_fields()))
+    fn every_missing_structural_fact_names_the_file_row_field_and_repair() {
+        parse_fixture_wood(&structural_row("fixture", &structural_fields()))
             .expect("complete fixture material loads");
         for (missing, field) in [
             (GRAIN_RUPTURE, "along_grain_rupture_pa"),
             (GRAIN_FRACTURE, "along_grain_fracture_j_per_m2"),
+            (ROOT_PLATE, "root_plate_overturning_nm_per_kg"),
         ] {
-            let fields = grain_fields().replace(missing, "");
-            let error = parse_fixture_wood(&grain_row("fixture", &fields))
+            let fields = structural_fields().replace(missing, "");
+            let error = parse_fixture_wood(&structural_row("fixture", &fields))
                 .expect_err("missing material fact is refused");
             for required in ["assets/trees/wood.ron", "fixture", field, "author"] {
                 assert!(error.contains(required), "missing {required:?}: {error}");
@@ -1635,22 +1649,22 @@ pub(crate) mod tests {
     }
 
     /// A structural row is usable in simulation units at load, even before its first instance
-    /// exists. A zero, negative or non-finite strength/work cannot silently disable fracture.
+    /// exists. A zero, negative or non-finite grain fact or root coefficient cannot disable failure.
     #[test]
-    fn structural_wood_refuses_nonpositive_nonfinite_or_unsourced_grain_facts() {
-        for datum in [GRAIN_RUPTURE, GRAIN_FRACTURE] {
+    fn structural_wood_refuses_nonpositive_nonfinite_or_unsourced_facts() {
+        for datum in [GRAIN_RUPTURE, GRAIN_FRACTURE, ROOT_PLATE] {
             let field = datum.split(':').next().unwrap();
             for value in ["0.0", "-1.0", "NaN", "inf"] {
                 let replacement = format!("{field}: ({value}, Tuned(\"fixture\")),");
-                let fields = grain_fields().replace(datum, &replacement);
-                let error = parse_fixture_wood(&grain_row("fixture", &fields))
+                let fields = structural_fields().replace(datum, &replacement);
+                let error = parse_fixture_wood(&structural_row("fixture", &fields))
                     .expect_err("unusable material fact is refused");
                 for required in ["assets/trees/wood.ron", "fixture", field, "author"] {
                     assert!(error.contains(required), "missing {required:?}: {error}");
                 }
             }
-            let fields = grain_fields().replace(datum, &format!("{field}: 42.0,"));
-            let error = parse_fixture_wood(&grain_row("fixture", &fields))
+            let fields = structural_fields().replace(datum, &format!("{field}: 42.0,"));
+            let error = parse_fixture_wood(&structural_row("fixture", &fields))
                 .expect_err("a material fact must name its provenance");
             assert!(
                 error.contains("fixture") && error.contains("provenance"),
@@ -1664,12 +1678,12 @@ pub(crate) mod tests {
     /// map or leave an ambiguous answer for the tree builder.
     #[test]
     fn structural_wood_refuses_missing_duplicate_and_unknown_species_rows() {
-        let row = grain_row("fixture", &grain_fields());
+        let row = structural_row("fixture", &structural_fields());
         for (rows, name) in [
             (String::new(), "fixture"),
             (format!("{row} {row}"), "fixture"),
             (
-                format!("{row} {}", grain_row("unknown", &grain_fields())),
+                format!("{row} {}", structural_row("unknown", &structural_fields())),
                 "unknown",
             ),
         ] {
@@ -1687,6 +1701,43 @@ pub(crate) mod tests {
         )
         .expect("all shipped species have sourced structural wood facts");
         assert!(wood.structure.0.keys().eq(species.keys()));
+    }
+
+    /// The map loader must refuse missing structure facts before it constructs any tree asset.
+    /// Startup relies on the actual file-loading path retaining the wood gate: testing the parser
+    /// alone would miss a loader that bypassed it. ASSUMED fixture wood, species and file layout.
+    #[test]
+    fn the_library_refuses_missing_structure_facts_before_reading_a_tree_asset() {
+        for datum in [GRAIN_RUPTURE, GRAIN_FRACTURE, ROOT_PLATE] {
+            let field = datum.split(':').next().unwrap();
+            let unique = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("the fixture directory clock is after the epoch")
+                .as_nanos();
+            let root = std::env::temp_dir().join(format!(
+                "overmatch-wood-gate-{}-{unique}",
+                std::process::id()
+            ));
+            let dir = root.join(TREES_DIR);
+            std::fs::create_dir_all(&dir).expect("create fixture tree directory");
+            std::fs::write(dir.join(SPECIES_FILE), r#"{"fixture": ()}"#)
+                .expect("write fixture species");
+            let fields = structural_fields().replace(datum, "");
+            std::fs::write(
+                dir.join(WOOD_FILE),
+                structural_wood_text(&structural_row("fixture", &fields)),
+            )
+            .expect("write incomplete fixture wood");
+            let outcome = std::panic::catch_unwind(|| TreeLibrary::load(&root, ["fixture"]));
+            std::fs::remove_dir_all(&root).expect("remove fixture files");
+            let failure = outcome.expect_err("the wood gate refuses before any tree asset is read");
+            let error = failure
+                .downcast_ref::<String>()
+                .expect("the load gate panics with its formatted diagnostic");
+            for required in ["wood.ron", "fixture", field, "author"] {
+                assert!(error.contains(required), "missing {required:?}: {error}");
+            }
+        }
     }
 
     fn resolve(asset: TreeAsset, table: &SpeciesTable, wood: &Wood) -> Result<TreeKind, String> {

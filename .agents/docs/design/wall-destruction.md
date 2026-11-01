@@ -444,6 +444,12 @@ Reopen it only for a structure whose bending is visible: a swaying timber barn, 
 
 **Trees are structures by the same laws.**
 A trunk's segments are chunks, its segment boundaries bonded joints of the wood along the grain, its root plate the anchor; the cut is wherever bending stress peaks, never a fixed segment.
+`assets/trees/wood.ron` holds required structural rows for every declared species, refused at
+load if grain rupture strength, longitudinal opening energy or the root-plate overturning
+coefficient is absent. Each row names its sources and any analogue assumptions; it is reserved
+data, with no structural tree consumer yet. The root coefficient's input is fresh stem mass,
+and its provenance binds the soil and rooting-depth domain. It supplies ultimate strength,
+not separation work or a conversion from the existing dry-timber substance density.
 `fell_k` and the ram law go.
 A freed trunk is a dynamic body, like a wall piece: it strikes with its own mass, leaves with the plastic share of the blow that freed it, is stopped by any body, and rests by Avian's sleep.
 
