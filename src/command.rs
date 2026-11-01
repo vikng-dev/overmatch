@@ -178,19 +178,20 @@ impl ParsedAimIntent {
     }
 }
 
-/// Local device/tool authors have no Lightyear action slot. Network snapshots are parsed by the
-/// protocol bridge instead, with a typed refusal and the offending link in its log.
-pub(crate) fn parse_local_commands(
-    mut commands: Query<
-        (&TankCommand, &mut ParsedTankCommand),
-        Without<lightyear::prelude::input::native::ActionState<TankCommand>>,
-    >,
-) {
+/// Every tank's raw command, parsed before gameplay. A tank whose input arrives over a link is
+/// parsed again by the net layer's input bridge, which orders after [`ParseCommands`], attests the
+/// snapshot and replaces this parse; its raw `TankCommand` only ever holds the bridge's previous
+/// parsed value, so this parse of it holds as for a local device or tool writer.
+pub(crate) fn parse_commands(mut commands: Query<(&TankCommand, &mut ParsedTankCommand)>) {
     for (&command, mut parsed) in &mut commands {
         *parsed = ParsedTankCommand::try_from(command)
-            .expect("local device/tool writers author finite bounded commands before gameplay");
+            .expect("device/tool writers and the input bridge author finite bounded commands");
     }
 }
+
+/// The ordering handle of [`parse_commands`]: the net layer's input bridge runs after it.
+#[derive(SystemSet, Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct ParseCommands;
 
 /// An aim intention and the frame it is measured in (ADR-0038).
 ///
@@ -479,7 +480,10 @@ pub struct ConsumeCommandEdges;
 /// command. No devices — the game adds those via [`plugin`]; the sandbox writes commands from its
 /// own controls (the crew bar).
 pub fn core_plugin(app: &mut App) {
-    app.add_systems(FixedUpdate, parse_local_commands.before(GameplaySet));
+    app.add_systems(
+        FixedUpdate,
+        parse_commands.in_set(ParseCommands).before(GameplaySet),
+    );
     app.add_observer(clear_command_on_release).add_systems(
         FixedUpdate,
         consume_edges

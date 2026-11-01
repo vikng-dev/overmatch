@@ -1274,6 +1274,7 @@ pub(crate) fn plugin(app: &mut App) {
         FixedUpdate,
         bridge_action_state_to_tank_command
             .in_set(InputBridge)
+            .after(crate::command::ParseCommands)
             .before(GameplaySet),
     );
 }

@@ -956,7 +956,7 @@ mod tests {
 
         fn run<M, S: bevy::ecs::system::IntoSystem<(), (), M> + 'static>(&mut self, system: S) {
             self.world
-                .run_system_once(crate::command::parse_local_commands)
+                .run_system_once(crate::command::parse_commands)
                 .unwrap();
             self.world
                 .run_system_once(system)
@@ -1538,7 +1538,7 @@ mod tests {
         }
         let nodes = servos.iter().map(|(_, n, _)| *n).collect();
         world
-            .run_system_once(crate::command::parse_local_commands)
+            .run_system_once(crate::command::parse_commands)
             .unwrap();
         (world, nodes)
     }
