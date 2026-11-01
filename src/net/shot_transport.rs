@@ -461,6 +461,8 @@ fn queue_fire(
     );
 
     let event = FireEvent {
+        birth: fire.birth,
+
         origin: fire.origin,
         direction: fire.direction.as_vec3(),
         mechanism: fire.mechanism,
@@ -903,6 +905,8 @@ mod tests {
 
     fn fire(combatant: u64, weapon: u8, tick: u32) -> FireVisualFact {
         FireVisualFact::Fire(FireEvent {
+            birth: Vec3::ZERO,
+
             origin: Vec3::ZERO,
             direction: Vec3::NEG_Z,
             mechanism: crate::spec::FireMechanism::Automatic,

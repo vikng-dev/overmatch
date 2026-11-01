@@ -16,7 +16,7 @@ pub(super) fn plugin(app: &mut App) {
     );
 }
 
-/// Re-derive each tracer streak child from the round's distance-flown-since-anchor (muzzle or last
+/// Re-derive each tracer streak child from the round's distance-flown-since-anchor (birth or last
 /// ricochet), so the head stays on the round and the tail stops at the anchor.
 fn clamp_tracer_streaks(
     // The projectiles carrying a streak; `Without<TracerStreak>` keeps this disjoint from the child
@@ -28,7 +28,7 @@ fn clamp_tracer_streaks(
     mut streaks: Query<(&TracerStreak, &mut Transform), With<TracerStreak>>,
 ) {
     for (proj, path, marks, children) in &projectiles {
-        // Anchor: the most recent ricochet if the round has bounced, else the muzzle (the first
+        // Anchor: the most recent ricochet if the round has bounced, else the physical birth (the first
         // recorded path point). No anchor (empty path) → nothing to clamp against.
         let Some(anchor) = marks
             .ricochets
@@ -67,6 +67,7 @@ mod tests {
         FireShell {
             effects: crate::rounds::FlightEffects::fixture_traced(),
             muzzle: crate::guns::MuzzleEmission::fixture_cannon(),
+            birth: MUZZLE,
             origin: MUZZLE,
             direction: Dir3::NEG_Z,
             speed: 755.0,

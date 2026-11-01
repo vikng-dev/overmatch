@@ -1565,6 +1565,9 @@ impl ReceivedFire {
         if !event.origin.is_finite() {
             return Err(FireRefusal::Origin);
         }
+        if !event.birth.is_finite() {
+            return Err(FireRefusal::Birth);
+        }
         let direction = Dir3::new(event.direction).map_err(|_| FireRefusal::Bore)?;
         Ok(Self {
             event: event.clone(),
@@ -1584,6 +1587,8 @@ impl ReceivedFire {
 enum FireRefusal {
     /// The origin is not finite.
     Origin,
+    /// The game's damage model: the received birth is not finite.
+    Birth,
     /// The bore has no finite nonzero direction.
     Bore,
     /// The shooter's assembled rig has no weapon in this slot.
@@ -2209,6 +2214,8 @@ fn spawn_reconstructed_fire(
         return;
     }
     let facts = super::fire_presentation::ReleasedShot {
+        birth: event.birth,
+
         origin: event.origin,
         direction: fire.direction,
         round,
@@ -3236,6 +3243,8 @@ mod tests {
 
     fn fire_event(shooter: Entity, combatant: u64, tick: u32) -> FireEvent {
         FireEvent {
+            birth: Vec3::ZERO,
+
             origin: Vec3::ZERO,
             direction: Vec3::NEG_Z,
             mechanism: crate::spec::FireMechanism::Automatic,
@@ -3667,6 +3676,10 @@ mod tests {
             event.origin.x = poison;
             assert_eq!(ReceivedFire::parse(&event).err(), Some(FireRefusal::Origin));
             consume_and_release(world, event, Tick(42 + index as u32), None);
+            let mut event = fire_event(root, 7, 52 + index as u32);
+            event.birth.x = poison;
+            assert_eq!(ReceivedFire::parse(&event).err(), Some(FireRefusal::Birth));
+            consume_and_release(world, event, Tick(52 + index as u32), None);
         }
         assert!(world.resource::<ReconstructedFireShells>().0.is_empty());
         assert_eq!(world.resource::<PendingFireEvents>().len(), 0);

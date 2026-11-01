@@ -319,6 +319,7 @@ impl OwnFireDiag {
 /// the seam's to measure.
 #[derive(Clone, Copy)]
 pub(super) struct ReleasedShot {
+    pub(super) birth: Vec3,
     pub(super) origin: Vec3,
     pub(super) direction: Dir3,
     /// The fired round, bound from the shooter's weapon data.
@@ -372,6 +373,7 @@ pub(super) fn present_shot_at_age(
     commands: &mut Commands,
 ) {
     commands.trigger(FireShell {
+        birth: shot.birth,
         shot_origin: FireShellOrigin::Reconstructed,
         catch_up_ticks,
         ..FireShell::of_round(
@@ -690,6 +692,8 @@ fn recover_unannounced_rounds(
                 .get(usize::from(round))
                 .expect("the tank load gate refuses an empty stowage: every weapon has round 0");
             let facts = ReleasedShot {
+                birth: muzzle.translation(),
+
                 origin: muzzle.translation(),
                 direction,
                 round: fired.round,
@@ -1281,6 +1285,7 @@ mod tests {
         let fire = |origin| FireShell {
             effects: crate::rounds::FlightEffects::fixture_traced(),
             muzzle: crate::guns::MuzzleEmission::fixture_cannon(),
+            birth: Vec3::ZERO,
             origin: Vec3::ZERO,
             direction: Dir3::NEG_Z,
             speed: 755.0,
@@ -1880,7 +1885,17 @@ mod tests {
         local.apply_delta(116);
         app.insert_resource(local);
         let shooter = app.world_mut().spawn_empty().id();
+        let points = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let captured_points = points.clone();
+        app.add_observer(move |fire: On<FireShell>| {
+            captured_points
+                .lock()
+                .unwrap()
+                .push((fire.origin, fire.birth))
+        });
         let facts = ReleasedShot {
+            birth: Vec3::new(1.0, 2.0, 8.0),
+
             origin: Vec3::new(1.0, 2.0, 3.0),
             direction: Dir3::NEG_Z,
             round: crate::tank::WeaponRound::resolve("88mm_AP")
@@ -1915,6 +1930,11 @@ mod tests {
             Some(0),
             "released a quarter-overstep before the cursor: age < 1 tick, never the local \
              timeline's 16",
+        );
+        assert_eq!(
+            *points.lock().unwrap(),
+            vec![(Vec3::new(1.0, 2.0, 3.0), Vec3::new(1.0, 2.0, 8.0))],
+            "the echoed birth and visual muzzle remain separate through presentation"
         );
         let world = app.world();
         let captured = world.resource::<CapturedShells>();

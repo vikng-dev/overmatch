@@ -240,6 +240,7 @@ fn fire_round(
     app.world_mut().trigger(FireShell {
         effects: crate::rounds::FlightEffects::fixture_traced(),
         muzzle: crate::guns::MuzzleEmission::fixture_cannon(),
+        birth: from,
         origin: from,
         direction,
         speed: SPEED,
@@ -2439,5 +2440,157 @@ fn relative_rest_still_discovers_a_separate_plate_in_the_same_tick() {
         marks.iter().any(|mark| matches!(mark,
         ArmourMark::Crossing { volumes, .. } if volumes.iter().any(|v| v.volume == separate[0]))),
         "the separate plate must resolve before this tick ends: {marks:?}"
+    );
+}
+
+/// The game's damage model: a barrel through foreign armour or a wall cannot skip it. The
+/// ordinary path starts outside the source physics hull and must pay the intervening plate.
+/// Every dimension, pose and round below is fixture data.
+fn barrel_through_plate(owned: bool) {
+    let mut app = recording_world(false);
+    app.insert_resource(RetainSpentShells(true));
+    let source_at = Vec3::new(0.0, 20.0, 0.0);
+    let shape = Collider::cuboid(2.0, 2.0, 2.0);
+    let source = app
+        .world_mut()
+        .spawn((
+            Transform::from_translation(source_at),
+            RigidBody::Static,
+            shape.clone(),
+            CollisionLayers::new([Layer::Vehicle], LayerMask::ALL),
+        ))
+        .id();
+    let at = source_at + Vec3::NEG_Z * 3.0;
+    let plate = if owned {
+        tank(
+            &mut app,
+            at,
+            0.0,
+            Vec3::ZERO,
+            &[(
+                "foreign plate",
+                Vec3::new(4.0, 4.0, 0.5),
+                Vec3::ZERO,
+                Kind::Plate,
+            )],
+        )
+        .1[0]
+    } else {
+        app.world_mut()
+            .spawn((
+                Transform::from_translation(at),
+                RigidBody::Static,
+                Collider::cuboid(4.0, 4.0, 0.5),
+                CollisionLayers::new([Layer::Armor], LayerMask::ALL),
+                BallisticVolume {
+                    material: walk::VolumeMaterial::fixture(STEEL),
+                    substance: "fixture".into(),
+                },
+            ))
+            .id()
+    };
+    settle(&mut app);
+    let muzzle = source_at + Vec3::NEG_Z * 6.0;
+    let round = crate::tank::WeaponRound::resolve("88mm_AP").unwrap().round;
+    let mut fire = FireShell::of_round(
+        &round,
+        muzzle,
+        Dir3::NEG_Z,
+        FireMechanism::Single,
+        true,
+        Some(ShotSource {
+            tank: source,
+            weapon: 0,
+            round: 0,
+        }),
+        None,
+    );
+    fire.birth = crate::shooting::outside_source(
+        muzzle,
+        Dir3::NEG_Z,
+        &[(source_at, Quat::IDENTITY, &shape)],
+    );
+    app.world_mut().trigger(fire);
+    run(&mut app, 4);
+    let mut logs = app.world_mut().query::<&PenetrationMarks>();
+    let crossed = logs
+        .iter(app.world())
+        .flat_map(|marks| &marks.log)
+        .find_map(|mark| match mark {
+            ArmourMark::Crossing {
+                entrance, volumes, ..
+            } => volumes
+                .iter()
+                .find(|v| v.volume == plate)
+                .map(|volume| (*entrance, *volume)),
+            _ => None,
+        })
+        .expect("a barrel poked through a plate still fires into that plate from outside");
+    assert!(crossed.0.z > at.z, "the plate is met at its entering face");
+    assert!(
+        crossed.1.cost > 0.0 && !crossed.1.perforated,
+        "the intervening plate must be defeated; this thick fixture plate stops the round"
+    );
+}
+
+/// The game's damage model: a foreign hull's plate remains between the source exit and muzzle.
+#[test]
+fn a_barrel_through_foreign_armour_still_meets_the_plate() {
+    barrel_through_plate(true);
+}
+
+/// The game's damage model: a wall between the source exit and muzzle remains ordinary material.
+#[test]
+fn a_barrel_through_a_wall_still_meets_the_plate() {
+    barrel_through_plate(false);
+}
+
+/// The game's damage-model presentation: the replay includes the barrel-length prefix while the
+/// fire fact keeps the visual muzzle. Fixture data: five metres of bore path, a traced round and
+/// cursor fractions chosen on either side of the muzzle within the first tick.
+#[test]
+fn the_presented_march_and_tracer_include_the_birth_to_muzzle_prefix() {
+    let mut app = recording_world(true);
+    settle(&mut app);
+    let birth = Vec3::new(0.0, 20.0, 0.0);
+    let muzzle = birth + Vec3::NEG_Z * 5.0;
+    let round = crate::tank::WeaponRound::resolve("88mm_AP").unwrap().round;
+    let mut fire = FireShell::of_round(
+        &round,
+        muzzle,
+        Dir3::NEG_Z,
+        FireMechanism::Single,
+        true,
+        None,
+        None,
+    );
+    fire.birth = birth;
+    fire.shot_origin = FireShellOrigin::Reconstructed;
+    app.world_mut().trigger(fire);
+    app.world_mut().resource_mut::<PathClock>().fraction = 0.25;
+    app.update();
+    let mut shells = app.world_mut().query::<(&Transform, &ShellPath)>();
+    let (pose, path) = shells.single(app.world()).unwrap();
+    assert_eq!(
+        path.points[0], birth,
+        "replay starts at authoritative birth"
+    );
+    assert!(
+        pose.translation.z < birth.z && pose.translation.z > muzzle.z,
+        "the first fractional presentation lies inside the barrel-length prefix"
+    );
+    let flown = pose.translation.distance(birth);
+    let drawn = TracerStreak { nominal_len: 100.0 }.drawn_transform(flown);
+    assert!(
+        (drawn.scale.y - flown).abs() < 1.0e-5,
+        "the streak covers only the presented prefix"
+    );
+    app.world_mut().resource_mut::<PathClock>().fraction = 0.75;
+    app.update();
+    let mut shells = app.world_mut().query::<&Transform>();
+    let pose = shells.single(app.world()).unwrap();
+    assert!(
+        pose.translation.z < muzzle.z,
+        "the round passes the muzzle inside its first tick"
     );
 }

@@ -43,7 +43,7 @@ impl TracerStreak {
     /// Child transform for a streak that has travelled `flown` metres from its current anchor.
     ///
     /// Invariant: both spawn and view maintenance use this function, so the tail never precedes
-    /// the muzzle or latest ricochet.
+    /// the physical birth or latest ricochet.
     pub(crate) fn drawn_transform(&self, flown: f32) -> Transform {
         let len = self.nominal_len.min(flown).max(0.0);
         Transform {
@@ -186,7 +186,7 @@ fn dress_projectile(
         let streak = TracerStreak {
             nominal_len: (projectile.speed() * look.length_per_speed_s).max(look.min_length_m),
         };
-        // Distance from the muzzle — `ShellPath` opens at the fire origin on both spawn paths, so a
+        // The game's damage-model view: distance from birth; `ShellPath` opens there on both spawn paths, so a
         // net round caught up several ticks downrange seeds its streak at its true flown length.
         let flown = path
             .points

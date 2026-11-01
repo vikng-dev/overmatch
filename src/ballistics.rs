@@ -208,7 +208,7 @@ pub fn freeflight_step(velocity: Vec3, drag_k: f32, dt: f32) -> Vec3 {
     (v / speed) * (speed / (1.0 + drag_k * speed * dt))
 }
 
-/// Free-flight catch-up from the muzzle. Returns the caught-up state plus its path; callers must
+/// The game's damage model: free-flight catch-up from the physical birth. Returns the caught-up state plus its path; callers must
 /// resolve any armor crossed by the skipped chords.
 ///
 /// Positionally equivalent to the live march's open air: the axis is carried as the march carries
@@ -1154,6 +1154,9 @@ pub(crate) struct ShellMarched {
 /// Trigger-agnostic shell spawn seam used by guns and sandbox tools.
 #[derive(Event)]
 pub struct FireShell {
+    /// The game's damage model: physical birth; the march and replica begin here.
+    pub birth: Vec3,
+    /// The visual muzzle, retained for the flash, report and shot explanation.
     pub origin: Vec3,
     pub direction: Dir3,
     pub speed: f32,
@@ -1210,6 +1213,7 @@ impl FireShell {
         shot: Option<ShotId>,
     ) -> Self {
         Self {
+            birth: origin,
             origin,
             direction,
             speed: round.muzzle_speed,
@@ -1986,7 +1990,7 @@ fn on_fire_shell(
     let drag = fire.drag_k;
     let dt = fixed_time.timestep().as_secs_f32();
     let (position, velocity, points) = fast_forward_shell(
-        fire.origin,
+        fire.birth,
         fire.direction * fire.speed,
         drag,
         dt,
@@ -2028,7 +2032,7 @@ fn on_fire_shell(
                 path::Replica::born(
                     fire.shot
                         .map_or(now.wrapping_sub(fire.catch_up_ticks), |shot| shot.fire_tick),
-                    fire.origin,
+                    fire.birth,
                     fire.direction * fire.speed,
                 )
             }),
@@ -5047,6 +5051,7 @@ mod march_tests {
                 ..crate::rounds::FlightEffects::fixture_traced()
             },
             muzzle: crate::guns::MuzzleEmission::fixture_cannon(),
+            birth: Vec3::new(0.0, 2.0, 2.0),
             origin: Vec3::new(0.0, 2.0, 2.0),
             direction: Dir3::NEG_Z,
             speed: 800.0,
@@ -5114,6 +5119,7 @@ mod march_tests {
         app.world_mut().trigger(FireShell {
             effects: crate::rounds::FlightEffects::fixture_traced(),
             muzzle: crate::guns::MuzzleEmission::fixture_cannon(),
+            birth: Vec3::new(0.0, 2.0, 2.0),
             origin: Vec3::new(0.0, 2.0, 2.0),
             direction: Dir3::NEG_Z,
             speed: 800.0,
@@ -5169,6 +5175,7 @@ mod march_tests {
         app.world_mut().trigger(FireShell {
             effects: crate::rounds::FlightEffects::fixture_traced(),
             muzzle: crate::guns::MuzzleEmission::fixture_cannon(),
+            birth: Vec3::new(0.0, 2.0, 2.0),
             origin: Vec3::new(0.0, 2.0, 2.0),
             direction: Dir3::NEG_Z,
             speed: SPEED,

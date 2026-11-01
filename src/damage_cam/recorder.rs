@@ -22,7 +22,7 @@
 //! The record's pool figures are the shot's own ([`crate::ballistics::ShotDose`], see
 //! [`super::record`]). A tank's knockout is the shot's when its own deposition emptied the box that
 //! decided it, in the same tick ([`attribute_kills`]): for a cookoff the first ammunition box
-//! emptied that tick, for crew loss the last crew station, in deposition order across every shell
+//! emptied that tick, for crew loss the pool that takes the in-action count below two, in deposition order across every shell
 //! (automatic fire included, which can empty pools though it is not recorded). The same decision, for
 //! every knocked-out tank, is the authority's [`TankKnockout`] fact, which the match score credits.
 //!
@@ -167,7 +167,7 @@ impl ShotRecording {
         Self {
             facts: ShotFacts {
                 shooter: None,
-                launch: fire.origin,
+                launch: fire.birth,
                 muzzle: fire.shooter.map(|_| fire.origin),
                 projectile: weapon.map_or_else(String::new, |weapon| weapon.name.clone()),
                 caliber_mm: fire.caliber * 1000.0,

@@ -102,6 +102,7 @@ fn scripted_shell(
     FireShell {
         effects: crate::rounds::FlightEffects::fixture_traced(),
         muzzle: crate::guns::MuzzleEmission::fixture_cannon(),
+        birth: MUZZLE,
         origin: MUZZLE,
         direction: Dir3::NEG_Z,
         speed,

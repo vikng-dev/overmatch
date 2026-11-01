@@ -5,8 +5,11 @@
 //! the *player's* gun. The armor sandbox drives the same `FireShell` from its free-fly camera
 //! instead.
 
-use avian3d::prelude::{Forces, Position, Rotation};
+use avian3d::prelude::{Collider, CollisionLayers, Forces, Position, Rotation};
 use bevy::prelude::*;
+
+mod birth;
+pub(crate) use birth::outside_source;
 
 use crate::ballistics::{FireShell, ShotSource};
 use crate::command::{ConsumeCommandEdges, TankCommand};
@@ -225,6 +228,7 @@ fn fire(
     mut sims: Query<&mut TankSim>,
     (mut gates, loads): (Query<&mut WeaponGate>, Query<&WeaponLoads>),
     mut bodies: Query<Forces, With<Tank>>,
+    proxies: Query<(Entity, &Collider, &CollisionLayers)>,
     parents: Query<&ChildOf>,
     locals: Query<&Transform>,
     // Present only on a net client, where own fire is FUSED: a keyed round's one presentation is
@@ -356,7 +360,7 @@ fn fire(
         let fused_echo = replica.is_some() && shot.is_some();
         // Hand off to ballistics: fire the chambered round down the bore at its muzzle speed.
         if !fused_echo {
-            commands.trigger(FireShell::of_round(
+            let mut event = FireShell::of_round(
                 &fired,
                 muzzle_position,
                 bore,
@@ -372,7 +376,17 @@ fn fire(
                     round: loaded,
                 }),
                 shot,
-            ));
+            );
+            let shapes: Vec<_> = proxies
+                .iter()
+                .filter(|(_, _, layers)| layers.memberships.has_all(crate::Layer::Vehicle))
+                .filter_map(|(entity, shape, _)| {
+                    rig_world_pose(entity, root.0, position.0, rotation.0, &parents, &locals)
+                        .map(|(at, turn)| (at, turn, shape))
+                })
+                .collect();
+            event.birth = outside_source(muzzle_position, bore, &shapes);
+            commands.trigger(event);
         }
         // Kick the barrel back (root-resident recoil state); apply_recoil springs it home. The
         // shared `kick_recoil` owns the whole decision (barrel + recoil spec present, slot valid), so
@@ -492,13 +506,13 @@ fn apply_recoil(
 
 #[cfg(test)]
 mod tests {
-    use avian3d::prelude::{Position, Rotation};
+    use avian3d::prelude::{Collider, CollisionLayers, Position, Rotation};
     use bevy::ecs::system::RunSystemOnce;
     use bevy::prelude::*;
 
     use super::{
-        RecoilParams, advance_weapon_clock, apply_recoil, fire, plugin, tick_weapon_gate,
-        tracer_round,
+        FireShell, RecoilParams, advance_weapon_clock, apply_recoil, fire, plugin,
+        tick_weapon_gate, tracer_round,
     };
     use crate::command::{RoundSelect, RoundStep, TankCommand};
     use crate::damage::{CrewStation, Crewman, Dead, Group, Part, Requirement, VolumeOf};
@@ -673,10 +687,37 @@ mod tests {
         assert_eq!(gate.remaining_ticks(at(u32::MAX)), 2);
     }
 
-    /// A minimal `Automatic` rig the real `fire`/`tick_weapon_gate` systems run over: a tank root
-    /// (command holding the secondary trigger, physics pose, one-slot gate with a FULL belt),
-    /// a live Loader crew volume (so `TankVolumes` exists and a `[Loader]` gate is meetable), and
-    /// a muzzle child carrying the `Weapon` with the given `load` gate. Returns (root, loader).
+    /// The game's damage model: firing carries the collider-exit birth beside the unchanged
+    /// visual muzzle. The physics shape and muzzle offset are fixture data.
+    #[test]
+    fn mounted_fire_keeps_the_muzzle_and_exports_the_source_exit() {
+        let mut world = test_world();
+        spawn_main_gun_rig(&mut world);
+        let muzzle = Vec3::NEG_Z * 5.0;
+        world
+            .query_filtered::<&mut Transform, With<Muzzle>>()
+            .single_mut(&mut world)
+            .unwrap()
+            .translation = muzzle;
+        let points = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let captured = points.clone();
+        world.add_observer(move |fire: On<FireShell>| {
+            captured.lock().unwrap().push((fire.origin, fire.birth))
+        });
+        world.run_system_once(fire).unwrap();
+        let points = points.lock().unwrap();
+        let &[(visual, birth)] = points.as_slice() else {
+            panic!("one mounted round fired")
+        };
+        assert_eq!(visual, muzzle, "flash and report stay at the muzzle");
+        assert!(
+            birth.z < -1.0 && birth.z > -1.01,
+            "physical birth is the source's forward exit: {birth:?}"
+        );
+    }
+
+    /// A fixture automatic rig: commanded root, posed physics proxy, ready gate, live Loader
+    /// and a muzzle child with the given load gate. Returns the root and Loader volume.
     fn spawn_mg_rig(world: &mut World, load: Requirement) -> (Entity, Entity) {
         let root = world
             .spawn((
@@ -699,6 +740,10 @@ mod tests {
                 crate::CombatantId(1),
             ))
             .id();
+        world.entity_mut(root).insert((
+            Collider::cuboid(2.0, 2.0, 2.0),
+            CollisionLayers::new([crate::Layer::Vehicle], avian3d::prelude::LayerMask::ALL),
+        ));
         let loader = world.spawn(native_loader(root)).id();
         world.spawn((
             Muzzle,
@@ -743,6 +788,10 @@ mod tests {
                 crate::CombatantId(1),
             ))
             .id();
+        world.entity_mut(root).insert((
+            Collider::cuboid(2.0, 2.0, 2.0),
+            CollisionLayers::new([crate::Layer::Vehicle], avian3d::prelude::LayerMask::ALL),
+        ));
         world.spawn(native_loader(root));
         world.spawn((
             Muzzle,

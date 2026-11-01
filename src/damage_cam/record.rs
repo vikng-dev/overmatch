@@ -226,9 +226,9 @@ pub struct ShotFacts {
     pub vehicle: Option<String>,
 }
 
-/// Where `shooter`'s weapon `weapon` fires from now (WORLD): its muzzle node's tick-truth pose,
-/// composed from the shooter's root through its rig's local transforms, the pose `shooting::fire`
-/// launches a round from. `None` where the shooter has no such weapon. A test oracle: the game's
+/// The game's damage model: `shooter`'s weapon `weapon` visual muzzle now (WORLD), composed
+/// through the rig's tick-truth local transforms, separate from the collider-exit birth.
+/// `None` where the shooter has no such weapon. A test oracle: the game's
 /// record takes the muzzle from the fire event's origin (`recorder`).
 #[cfg(test)]
 pub fn muzzle_of(world: &mut World, shooter: Entity, weapon: &str) -> Option<Vec3> {

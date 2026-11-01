@@ -236,7 +236,8 @@ use crate::{CombatantId, CombatantLife, ShotId};
 /// selects a fresh construction and prevents records and streamed pieces crossing Battles.
 /// REV 61 (#238): `WeaponGateState` decodes through its phase rule and refuses paused load work
 /// beside a belt with rounds left. Its encoding is unchanged; its definition moves.
-pub const PROTOCOL_REV: u32 = 61;
+/// REV 62 (#247): a fired round carries its birth at the source collider exit beside the muzzle.
+pub const PROTOCOL_REV: u32 = 62;
 
 /// Compatibility tag derived from the complete pinned wire manifest plus the crate version. This
 /// is the runtime handshake value: version-exact, so a version bump intentionally changes it.
@@ -450,6 +451,8 @@ pub struct SetSpawnPoint {
 /// copy of the shooter's weapon, and reconstructs a cosmetic shell.
 #[derive(Clone, Serialize, Deserialize)]
 pub struct FireEvent {
+    /// The game's damage model: authoritative collider-exit birth, separate from the muzzle.
+    pub birth: Vec3,
     pub origin: Vec3,
     /// Raw bore direction, validated before conversion to `Dir3` on receipt.
     pub direction: Vec3,
