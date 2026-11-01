@@ -129,8 +129,15 @@ impl Attachments {
                         overturning_nm_per_kg: Sourced(moment),
                     } => {
                         positive("overturning_nm_per_kg", moment)?;
+                        let simulation_moment = moment as f32;
+                        if !simulation_moment.is_finite() || simulation_moment <= 0.0 {
+                            return Err(format!(
+                                "kind {name:?}: overturning_nm_per_kg {moment} is outside the \
+                                 positive finite simulation range; author a representable coefficient"
+                            ));
+                        }
                         Kind::RootPlate(RootPlate {
-                            overturning_nm_per_kg: moment as f32,
+                            overturning_nm_per_kg: simulation_moment,
                         })
                     }
                 };
@@ -311,6 +318,23 @@ mod tests {
         ] {
             let err = Attachments::from_ron(&text, registry()).unwrap_err();
             assert!(err.contains(names), "{text}: {err}");
+        }
+    }
+
+    /// The tree builder relies on a loaded root coefficient remaining positive and finite in
+    /// simulation precision. ASSUMED fixture values straddle that range; checking only the
+    /// authored f64 would admit infinity or zero after conversion and defer failure until spawn.
+    #[test]
+    fn root_coefficients_must_survive_simulation_precision_at_load() {
+        for value in ["1.0e100", "1.0e-100"] {
+            let text = format!(
+                "{{\"fixture_plate\": RootPlate(overturning_nm_per_kg: \
+                 ({value}, Derived(\"fixture\")))}}"
+            );
+            let error = Attachments::from_ron(&text, registry()).unwrap_err();
+            for part in ["fixture_plate", "overturning_nm_per_kg", "author"] {
+                assert!(error.contains(part), "{error}");
+            }
         }
     }
 }
