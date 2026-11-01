@@ -3023,7 +3023,8 @@ fn ring_seeds(
 /// capacity as a candidate grows, so this bound can omit a weaker ring.
 const RING_GROWTH: usize = 2;
 
-/// The punch-ring candidates about coherent loaded patches and their union: each patch, then it grown
+/// The punch-ring candidates about each loaded chunk, coherent loaded patches and their union:
+/// each patch, then it grown
 /// by one and by [`RING_GROWTH`] rings of neighbours through `graph`'s intact bonded joints, each
 /// split into its bonded components, each component ascending, in growth order and without
 /// repeats. Adds the chunks it reaches to `steps`.
@@ -3034,10 +3035,14 @@ fn ring_groups(
     steps: &mut usize,
 ) -> Vec<Vec<usize>> {
     let mut groups: Vec<Vec<usize>> = Vec::new();
-    // A coherent loaded patch does positive work along one source's resultant. Opposed
-    // sources need separate patches; the union also permits distributed loads to cooperate.
+    // Each source neighbourhood can separate under unequal acceleration even when external
+    // loads point the same way. Coherent patches and their union also let sources cooperate.
     let mut patches = Vec::new();
-    for &(_, push) in seeds {
+    for &(chunk, push) in seeds {
+        let local = vec![chunk];
+        if !patches.contains(&local) {
+            patches.push(local);
+        }
         let patch: Vec<usize> = seeds
             .iter()
             .filter(|(_, other)| other.dot(push) > 0.0)
@@ -4385,6 +4390,57 @@ mod tests {
         let (state, changes) = assess_slab(slab, &[left, right]);
         assert_eq!(state.cracked, vec![true]);
         assert_eq!(changes.groups.len(), 2);
+    }
+
+    /// A moving pair's relative load is set by unequal acceleration, including when both
+    /// external sources point the same way. Uniform translation opens nothing; the runtime
+    /// impulse and sustained-force assessments both rely on local punch candidates.
+    /// Fixture: binary-exact pair geometry, equal masses, and axial end loads.
+    #[test]
+    fn unequal_codirectional_contacts_separate_a_pair() {
+        for sustained in [false, true] {
+            for (far, opens) in [(1.0, true), (1000.0, false)] {
+                let mut slab = unsupported_slab(2);
+                for (c, chunk) in slab.chunks.iter_mut().enumerate() {
+                    chunk.centroid = Vec3::new(c as f32 * 0.25, 0.5, 0.0);
+                    chunk.volume = 0.015625;
+                    chunk.mass = chunk.material.density * chunk.volume;
+                }
+                slab.joints[0].centroid = Vec3::new(0.125, 0.5, 0.0);
+                slab.joints[0].area = 0.0625;
+                let axial = |magnitude| {
+                    if sustained {
+                        Vec3::ZERO
+                    } else {
+                        Vec3::NEG_X * magnitude
+                    }
+                };
+                let press = |magnitude| {
+                    if sustained {
+                        Vec3::NEG_X * (magnitude / STEP)
+                    } else {
+                        Vec3::ZERO
+                    }
+                };
+                let left = Load {
+                    blow: axial(1000.0),
+                    press: press(1000.0),
+                    ..slab_contact(&slab, 0.0)
+                };
+                let right = Load {
+                    chunk: 1,
+                    at: slab.chunks[1].centroid,
+                    blow: axial(far),
+                    press: press(far),
+                    ..left
+                };
+                let (state, changes) = assess_slab(slab, &[left, right]);
+                assert_eq!(
+                    state.cracked[0], opens,
+                    "sustained {sustained}, far {far}: {changes:?}"
+                );
+            }
+        }
     }
 
     /// A group touching along its whole length still has sections: its contacts are known

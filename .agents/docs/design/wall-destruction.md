@@ -813,8 +813,9 @@ construction-centroid order on a tie), also used when no external resultant rema
 tensile anchor, and zero-reaction speculative points never select it. Every section is assessed, a group touching along its whole length included; an even
 landing loads none, since each chunk's share meets its own inertia. Punch rings grow from the
 chunks external loads reach, never from the frame's inertial loads, which reach every chunk.
-Opposed sources seed separate coherent patches (positive work along a source resultant); their
-union remains a candidate for distributed loads that cooperate on one ring.
+Each externally loaded chunk seeds its own punch patch, including unequal loads pointing the
+same way. Coherent patches (positive work along a source resultant) and their union remain
+candidates for distributed loads that cooperate on one ring.
 The energy terms (a section's `E_g`, a rest's lift capacity and shove work) read the group's
 field: gravity on a standing group, its frame's body force on a moving one, so a group lying on
 its support feels its weight and one in free fall feels none. Every failure that changes group membership refreshes the frame before another seam is
