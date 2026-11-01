@@ -715,7 +715,7 @@ pub(crate) struct Push {
     pub(crate) point: Vec3,
     /// The contact's normal, unit, from the piece into the source.
     pub(crate) normal: Vec3,
-    /// How fast the piece closed on the belt along `normal` as this impulse was sized (m/s);
+    /// How fast the piece closed on the belt along `normal` before any recipient impulse (m/s);
     /// negative when parting.
     pub(crate) closing_speed: f32,
 }
@@ -751,7 +751,10 @@ pub(crate) fn piece_impulses<'c>(
         };
         let surface = bodies.surface(collider);
         let Some(slot) = surface.body else { continue };
-        dynamic.push((contact, slot, collider, source));
+        let closing_speed = (bodies.bodies[slot].velocity_at(contact.point)
+            - contact.belt_velocity)
+            .dot(contact.normal);
+        dynamic.push((contact, slot, collider, source, closing_speed));
     }
     // Effective masses read the tick-start pose and inertia only, so the impulses sized below
     // never change a recipient's verdict.
@@ -785,10 +788,8 @@ pub(crate) fn piece_impulses<'c>(
         ]
     });
     let mut pushes = Vec::new();
-    for (contact, slot, collider, source) in dynamic {
+    for (contact, slot, collider, source, closing_speed) in dynamic {
         let body = &mut bodies.bodies[slot];
-        let closing_speed =
-            (body.velocity_at(contact.point) - contact.belt_velocity).dot(contact.normal);
         let impulse = if explicit[slot] {
             -source_force(contact) * dt
         } else {
@@ -1588,6 +1589,69 @@ mod tests {
                 }
             })
             .unwrap();
+    }
+
+    /// Footprint subdivision must not alter the structure's blow. The contact reader relies on
+    /// every patch retaining the closing speed before any recipient impulse, even though the
+    /// clamp sizes each impulse against the updated velocity. FIXTURE: two 1000 kg bodies,
+    /// COM-normal reaction 800 N s, closing 1 m/s. DERIVED reduced-mass blow: 500 N s.
+    #[test]
+    fn subdividing_a_reaction_preserves_the_pre_solve_closing_and_blow() {
+        for copies in [1, 2] {
+            let mut app = physics();
+            let slab = piece(&mut app, 0.0, 0.0);
+            let source = piece_box(&mut app, Vec3::Y * 5.0, Vec3::splat(1.0));
+            for body in [slab, source] {
+                app.world_mut()
+                    .entity_mut(body)
+                    .insert((avian3d::prelude::Mass(1000.0), avian3d::prelude::NoAutoMass));
+            }
+            app.world_mut()
+                .entity_mut(slab)
+                .insert((StructureBody, LinearVelocity(Vec3::Y)));
+            app.update();
+            app.update();
+            let pushes = app
+                .world_mut()
+                .run_system_once(
+                    move |rubble: RubbleQuery,
+                          bodies: Query<PieceData>,
+                          mut transfers: ResMut<ContactTransfers>| {
+                        let mut pieces = RubbleBodies::gather(&rubble, &[slab], &bodies);
+                        let centre = pieces.bodies[0].com;
+                        let contacts: Vec<_> = (0..copies)
+                            .map(|_| {
+                                let mut contact = press(centre, slab, 800.0 / DT / copies as f32);
+                                // FIXTURE: a weak undamped spring keeps the recipient in the explicit band.
+                                contact.stiffness = 1000.0 / copies as f32;
+                                contact
+                            })
+                            .collect();
+                        let pushes =
+                            piece_impulses(&mut pieces, contacts.iter().map(|c| (source, c)), DT);
+                        pieces.record_moving_contacts(&pushes, &mut transfers, DT);
+                        pushes
+                    },
+                )
+                .unwrap();
+            app.update();
+            let blow: f32 = app
+                .world()
+                .resource::<ContactTransfers>()
+                .split()
+                .filter(|(p, ..)| p.structure == slab && p.body == source)
+                .map(|(_, blow, ..)| blow.length())
+                .sum();
+            println!(
+                "MEASURED {copies} patches: blow {blow} N s, closing {:?}",
+                pushes.iter().map(|p| p.closing_speed).collect::<Vec<_>>()
+            );
+            assert!(
+                (blow - 500.0).abs() < 1e-3,
+                "{copies} patches read {blow} N s"
+            );
+            assert!(pushes.iter().all(|p| (p.closing_speed - 1.0).abs() < 1e-6));
+        }
     }
 
     /// A PIECE TAKES THE SUPPORT REACTION ONLY UP TO WHAT STOPS IT CLOSING ON THE BELT, AND A
