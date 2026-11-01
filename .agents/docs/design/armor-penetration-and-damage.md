@@ -11,8 +11,8 @@ doesn't masquerade as scope.
 
 ## 1. The knockout model — crew is the only health
 
-There is **no tank HP**. A tank is knocked out when it has **no active crew** — the count threshold
-("fewer than 2 = knocked out") is **deferred pending playtest** (see §1a below). Everything else is
+There is **no tank HP**. A tank is knocked out when **fewer than two crew members are in action**
+(§1a). Everything else is
 emergent and *repairable* — only ammunition is terminal. Three paths empty crew:
 
 - **Direct hits** — a penetrator or spall fragment reaching a crewman.
@@ -22,44 +22,19 @@ emergent and *repairable* — only ammunition is terminal. Three paths empty cre
 Module damage (engine, breech, optics, transmission, …) *never* knocks the tank out — it degrades
 capability and can be repaired. Ammunition is the one exception.
 
-### 1a. Knockout threshold — A/B under test (2026-06-29)
+### 1a. Knockout threshold — fewer than two crew in action (#227)
 
-(Tracked as a playtest fork: `.agents/scratch/playtest-forks/README.md` (F2).)
+(Playtest fork F2, resolved: `.agents/scratch/playtest-forks/README.md`.)
 
-**Background.** Originally (this §1) a tank was knocked out at fewer than 2 active crew — the "a one-man
-tank is operationally finished" rationale. Implementing per-position capability gating (§7) exposed
-a tension: the backfill-slice gameplay we want (a lone survivor choosing which single position to
-staff — drive OR shoot, not both) is *only possible* if a lone-crewman tank is still in action. So the
-<2 threshold gates off the backfill tradeoff before it can exist.
+`knockout_from_counts` (`src/damage.rs`) is the one rule: a tank is knocked out when fewer than two
+of its crew members are in action, whatever emptied their HP pools. A cook-off is a cause the rule
+decides, not a second rule: it empties every crew pool of its tank at once, and the label names it.
+Capability stays per position (§7): `capability_available = staffed AND module HP > 0`, and
+`TankKnockedOut` is a label (HUD, scoring, the Battle), never a capability gate. A tank with every
+module out of action stays in the Battle while two crew members are in action.
 
-**v1 cut (chosen for now, pending playtest): pure per-position gating, no crew-count KO.**
-Capability loss is derived entirely from per-position staffing (§7): `capability_available =
-staffed AND module HP > 0`. A tank with one surviving Driver can still drive; a tank with one
-surviving Gunner can still traverse/fire/reload (but not move or see); etc. `TankKnockedOut`
-becomes a *readout/label* only, never a gameplay gate. A tank is fully knocked out only at **0 active
-crew** (every position unstaffed) — a separate condition from a count threshold.
-
-**A (this cut) vs B (the old <2 rule):**
-- **A — pure per-position (chosen for v1):** enables the backfill-slice tradeoff; smallest
-  primitive; KO gate can be re-added as one AND-clause if A feels wrong in playtest.
-- **B — <2 crew = knocked out:** tanks are knocked out earlier; lone survivors can't act; backfill
-  tradeoff never arises because the tank is already knocked out at the moment a second crewman is
-  knocked out.
-
-**What A means for the existing wiring:**
-- `function_disabled` (module HP gate) stays as-is.
-- A crew-staffing gate is *added* alongside it (§7): capability is on iff position staffed by an
-  active crewman AND module HP > 0. Both must hold; they compose.
-- `TankKnockedOut` is **retired as a gameplay gate** (no system reads it to disable drive/fire).
-  It may survive as a derived label for HUD/scoring, or be removed entirely pending slice-2
-  needs. Cookoff (§8) still knocks out all crew and launches the turret — that hook moves from
-  `TankKnockedOut`-triggered to `CookedOff`-triggered directly.
-- **If A plays wrong in testing**, B is re-added as: `capability_available AND tank not KO`, where
-  KO latches at active crew < 2. One AND-clause, mechanical revert.
-
-**What knocks a tank out under A:** only 0 active crew. (A "combat-ineffective" derived label — no
-combat capability remains, or no drive AND no fire — may be added later for scoring; it is *not* a
-gameplay gate in v1.)
+The rejected alternative, knocked out only at zero crew in action, let a lone survivor staff one
+position (drive or shoot); the owner chose the earlier knockout, so that state never arises.
 
 ## 2. The unified primitive — the ballistic volume
 
@@ -882,9 +857,8 @@ shot crossed, which what the pool held at the shot less the shot's whole take ca
 pool dosed 0.4 HP by the shot, 0.4 HP by another round, 0.4 HP by the shot again shows its point
 lost at the shot's second mark, DERIVED). A record carries that count where the two readings
 differ (`BoxDose::shown_taken`).
-This is *local function state*, not a global health bar. A tank is knocked out at zero active
-crew, a cook-off taking precedence (`knockout_from_counts`, `src/damage.rs`); crew < 2 is the
-kept alternative, playtest fork F2.
+This is *local function state*, not a global health bar. A tank is knocked out when fewer than two
+crew members are in action (`knockout_from_counts`, `src/damage.rs`; §1a).
 
 - **Crew are witnesses** (low HP) — the knockout currency; a graze of the cone's edge leaves a station
   reduced, a station inside the cone's knockout radius is knocked out, and a clean main-gun

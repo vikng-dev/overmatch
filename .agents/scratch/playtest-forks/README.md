@@ -82,41 +82,24 @@ the `Occupies` relationship and the capability-effectiveness evaluator in `src/d
 
 ---
 
-## F2 — Kill threshold (when is a tank dead)
+## F2 — Kill threshold (when is a tank knocked out)
 
-**Status:** open · default chosen 2026-06-29 · settles once §1a-A is played
+**Status:** resolved 2026-11-01 by owner decision (#227) · B ships, A deleted
 
-**The question.** Does a tank die at a crew-*count* threshold (the "a one-man tank is
-operationally finished" rule), or only when every position is unstaffed?
+**The rule.** A tank is knocked out when fewer than two of its crew members are in action
+(`damage::knockout_from_counts`, latched by `mark_dead_tanks`). A cook-off is a cause, not a
+second rule: it empties every crew HP pool of its tank, so the crew rule knocks the tank out and
+names the cook-off. Modules decide capabilities only: a tank with every module out of action
+stays in the Battle while two crew members are in action. `TankKnockedOut` stays a label (scoring
+and the Battle read it); no capability is gated on it.
 
-**Default — A: pure per-position gating, no crew-count KO.** Capability is derived
-entirely from per-position staffing AND module HP. A tank with one surviving Driver can
-still drive; one surviving Gunner can still traverse/fire/reload. A tank is fully dead
-only at **0 living crew**. `TankKnockedOut` survives as a readout/label only — never a
-gameplay gate. Cookoff still kills all crew (→ 0 living → dead) and launches the turret,
-triggered off `CookedOff` directly.
+**The losing arm.** A, knocked out only at zero crew in action so a lone survivor could still
+staff one position (the F1 backfill state), is deleted from the code and from the crew sweep. A
+tank seating fewer than two crew stations is knocked out at spawn under this rule; every shipped
+tank seats more.
 
-Chosen because the backfill-slice gameplay we want (a lone survivor choosing which single
-position to staff) is *only possible* if a lone-crewman tank is still alive — the old
-`<2 = dead` rule gates that tradeoff off before it can exist. A is also the smallest
-primitive.
-
-**Alternative kept alive:**
-- **B — `<2` living crew = dead.** Tanks die earlier; lone survivors can't act; the
-  backfill tradeoff (F1) never arises. Re-added as a single AND-clause:
-  `capability_available AND tank not KO`, where KO latches at living crew `< 2`.
-
-**Why it's a playtest call.** Whether a lone-survivor tank crawling around half-capable
-is compelling (A) or just an annoying mop-up that should already be dead (B). Tightly
-coupled to F1 — if hardcore juggling feels good, A is vindicated; if the lone-survivor
-state feels like dead-time, B (or a "combat-ineffective" derived label) is the answer.
-
-**Revert cost.** Low — B is a one-AND-clause mechanical revert (the design doc spells out
-the exact clause). The risk isn't the flip; it's that A and B imply different *content*
-around the lone-survivor state, so deciding late is more expensive than the code suggests.
-
-**Lives in.** Design §1a (A/B under test). Code: `action_available` / `TankKnockedOut`
-in `src/damage.rs`; cookoff hook on `CookedOff` (§8).
+**Lives in.** `knockout_from_counts` and `mark_dead_tanks` in `src/damage.rs`; the crew sweep
+(`src/ballistics/crew_sweep.rs`) measures shots to knockout under it.
 
 ---
 

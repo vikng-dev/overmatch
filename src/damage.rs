@@ -273,10 +273,10 @@ pub struct Dead;
 #[derive(Component)]
 pub struct CookedOff;
 
-/// Latched tank death label (not a capability gate — design §1a-A). Latches at 0 living crew or on
-/// cookoff. Read by HUD/scoring and the client's death flow (which owns the player's device while
-/// it stands: `command::DeviceOwner`); no sim system gates drive/fire on this. Normal play never
-/// removes it; sandbox reset may.
+/// Latched tank knockout label (not a capability gate). Latches by the one knockout rule,
+/// [`knockout_from_counts`]: fewer than two crew members in action. Read by HUD/scoring and the
+/// client's death flow (which owns the player's device while it stands: `command::DeviceOwner`);
+/// no sim system gates drive/fire on this. Normal play never removes it; sandbox reset may.
 #[derive(Component)]
 pub struct TankKnockedOut {
     pub reason: KnockoutReason,
@@ -317,21 +317,18 @@ pub(crate) enum KnockoutCause {
     NoKeyedRound,
 }
 
-/// The authority's knockout rule: cookoff takes precedence over zero living crew. Replicas receive
-/// the resulting reason through public `NetTankStatus`; they do not re-decide it from private crew
-/// detail.
-pub(crate) fn knockout_from_counts(
-    crew_total: u32,
-    crew_living: u32,
-    ammo_cooked: bool,
-) -> Option<KnockoutReason> {
-    if ammo_cooked {
-        Some(KnockoutReason::Cookoff)
-    } else if crew_total > 0 && crew_living == 0 {
-        Some(KnockoutReason::CrewLoss)
+/// The authority's one knockout rule (#227): a tank is knocked out when fewer than two of its crew
+/// members are in action. A cook-off is a cause, not a second rule: it empties every crew HP pool
+/// of its tank at once ([`process_cookoffs`]), so this rule decides it, and `cooked` (an ammunition
+/// volume of the tank has cooked off) names it as the cause. A tank whose every module is out of
+/// action stays in the Battle while two crew members are in action. Replicas receive the reason
+/// through public `NetTankStatus`; they do not re-decide it from private crew detail.
+pub(crate) fn knockout_from_counts(crew_in_action: u32, cooked: bool) -> Option<KnockoutReason> {
+    (crew_in_action < 2).then_some(if cooked {
+        KnockoutReason::Cookoff
     } else {
-        None
-    }
+        KnockoutReason::CrewLoss
+    })
 }
 
 /// The game's damage-model consequence chain (cookoff → crew knockout → tank label → turret launch). Labeled
@@ -630,9 +627,6 @@ fn process_cookoffs(
             continue;
         }
         commands.entity(ammo_entity).insert(CookedOff);
-        commands.entity(owner.tank()).insert(TankKnockedOut {
-            reason: KnockoutReason::Cookoff,
-        });
         for (crew_owner, mut crew_hp) in &mut crew {
             if crew_owner.tank() == owner.tank() {
                 crew_hp.drain();
@@ -739,32 +733,27 @@ fn kill_crew(
     }
 }
 
-/// Latch the tank-death label at 0 living crew (design §1a-A). This is a *label*, not a gameplay
-/// gate — no system reads `TankKnockedOut` to disable capabilities. Cookoff inserts its own
-/// `TankKnockedOut { reason: Cookoff }` directly (preserving the reason); this system only latches
-/// the crew-loss reason for tanks that aren't already labeled.
+/// Latch each tank's knockout label by the one rule ([`knockout_from_counts`]), its cause a
+/// cook-off when one of its ammunition volumes has cooked off. This is a *label*, not a gameplay
+/// gate — no system reads `TankKnockedOut` to disable capabilities. It runs after
+/// [`process_cookoffs`] and [`kill_crew`], so a cook-off's emptied crew pools are out of action,
+/// and before [`launch_turrets_on_cookoff`], so every tank whose turret launches is already
+/// labelled: the shot recorder opens encounters only for unlabelled tanks and reads their servo
+/// nodes as mounted (`damage_cam::record::servo_angles`).
 fn mark_dead_tanks(
     tanks: Query<(Entity, &TankVolumes), Without<TankKnockedOut>>,
-    volumes: Query<(Option<&CrewStation>, Option<&Dead>)>,
+    volumes: Query<(Option<&CrewStation>, Option<&Dead>, Has<CookedOff>)>,
     mut commands: Commands,
 ) {
     for (tank, tank_volumes) in &tanks {
-        let mut crew_total = 0;
-        let mut crew_living = 0;
+        let mut in_action = 0;
+        let mut cooked = false;
         for volume in tank_volumes.iter() {
-            let (station, dead) = volumes.get(volume).expect(LIVE_VOLUME);
-            if station.is_some() {
-                crew_total += 1;
-                if dead.is_none() {
-                    crew_living += 1;
-                }
-            }
+            let (station, dead, cooked_off) = volumes.get(volume).expect(LIVE_VOLUME);
+            in_action += u32::from(station.is_some() && dead.is_none());
+            cooked |= cooked_off;
         }
-        // The shared threshold rule (also the net client's derive): cookoff is handled by
-        // `process_cookoffs` upstream in the chain (which inserts its own `TankKnockedOut` and is
-        // filtered out by `Without<TankKnockedOut>` here), so this latch only ever reaches the
-        // crew-loss branch — `ammo_cooked = false`.
-        if let Some(reason) = knockout_from_counts(crew_total, crew_living, false) {
+        if let Some(reason) = knockout_from_counts(in_action, cooked) {
             commands.entity(tank).insert(TankKnockedOut { reason });
         }
     }
@@ -778,6 +767,65 @@ mod tests {
     /// Build a part→quality map from `(part, quality)` pairs.
     fn q(pairs: &[(Part, f32)]) -> HashMap<Part, f32> {
         pairs.iter().copied().collect()
+    }
+
+    /// The game's damage model's one knockout rule (#227), run through the consequence chain's
+    /// systems in their order: the knockout label (read by scoring and the Battle) latches when
+    /// fewer than two crew members are in action, whatever emptied their pools. A cook-off is a
+    /// cause the rule decides, since it empties every crew pool of its tank; a tank with every
+    /// module out of action stays in while two crew are in action. A mutant that restores a
+    /// cook-off label of its own, counts modules, or knocks out at zero crew fails a row.
+    #[test]
+    fn the_crew_rule_decides_every_knockout() {
+        use super::{
+            Ammo, CookedOff, CrewStation, KnockoutReason, TankKnockedOut, VolumeOf, kill_crew,
+            mark_dead_tanks, process_cookoffs,
+        };
+        use crate::ballistics::ComponentHealth;
+        use bevy::ecs::system::RunSystemOnce;
+        use bevy::prelude::*;
+
+        let pool = |emptied: bool| {
+            let mut pool = ComponentHealth::full(10);
+            if emptied {
+                pool.drain();
+            }
+            pool
+        };
+        // (crew pools emptied, ammunition pool emptied, module pools emptied) → expected label.
+        let rows: [(&[bool], bool, bool, Option<KnockoutReason>); 5] = [
+            (&[false, false], true, false, Some(KnockoutReason::Cookoff)),
+            (&[false, false], false, true, None),
+            (&[false, true], false, false, Some(KnockoutReason::CrewLoss)),
+            (&[false, false, true], false, true, None),
+            (&[true, true], false, false, Some(KnockoutReason::CrewLoss)),
+        ];
+        let mut world = World::new();
+        let tanks: Vec<Entity> = rows
+            .iter()
+            .map(|&(crew, ammo, modules, _)| {
+                let tank = world.spawn_empty().id();
+                for &emptied in crew {
+                    world.spawn((CrewStation::Gunner, pool(emptied), VolumeOf(tank)));
+                }
+                world.spawn((Ammo, pool(ammo), VolumeOf(tank)));
+                world.spawn((pool(modules), VolumeOf(tank)));
+                world.spawn((pool(modules), VolumeOf(tank)));
+                tank
+            })
+            .collect();
+        world.run_system_once(process_cookoffs).unwrap();
+        world.run_system_once(kill_crew).unwrap();
+        world.run_system_once(mark_dead_tanks).unwrap();
+        for (row, (tank, &(.., expected))) in tanks.iter().zip(&rows).enumerate() {
+            let label = world.get::<TankKnockedOut>(*tank).map(|label| label.reason);
+            assert_eq!(label, expected, "row {row}");
+        }
+        assert_eq!(
+            world.query::<&CookedOff>().iter(&world).count(),
+            1,
+            "only the emptied ammunition pool cooks off"
+        );
     }
 
     #[test]

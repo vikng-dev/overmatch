@@ -1,8 +1,9 @@
 //! The game's damage-model crew-outcome sweep (ADR-0040), game state only: main-gun hits on the
-//! bound tank, counted per station as knocked out, reduced and untouched, and per
-//! hit as a tank knocked out under each [`Rule`]; over the same random hits, the crew outcomes that
-//! change with the spall cone's direction count; and aimed shots fired in sequence at one tank
-//! until it is knocked out, as shots and pen verdicts to the knockout. A measurement, run on demand:
+//! bound tank, counted per station as knocked out, reduced and untouched, and per hit as a tank
+//! knocked out by the one rule ([`crate::damage::knockout_from_counts`]); over the same random
+//! hits, the crew outcomes that change with the spall cone's direction count; and aimed shots
+//! fired in sequence at one tank until it is knocked out, as shots and pen verdicts to the
+//! knockout. A measurement, run on demand:
 //!
 //! `cargo test --profile perf --lib crew_sweep -- --ignored --nocapture`
 //!
@@ -74,26 +75,6 @@ impl Outcome {
     }
 }
 
-/// When a tank is knocked out (playtest fork F2).
-#[derive(Clone, Copy, Debug)]
-enum Rule {
-    /// The shipped rule, [`crate::damage::knockout_from_counts`]: cook-off, or no active crew stations.
-    ZeroCrew,
-    /// The kept alternative: cook-off, or fewer than two active crew stations.
-    UnderTwo,
-}
-
-impl Rule {
-    const ALL: [Rule; 2] = [Rule::ZeroCrew, Rule::UnderTwo];
-
-    fn label(self) -> &'static str {
-        match self {
-            Rule::ZeroCrew => "zero crew (F2 A, shipped)",
-            Rule::UnderTwo => "crew < 2 (F2 B)",
-        }
-    }
-}
-
 /// One hit as the crew came out of it.
 #[derive(Clone)]
 struct Hit {
@@ -113,17 +94,12 @@ impl Hit {
             .count()
     }
 
-    /// The tank is knocked out under `rule`.
-    fn knocked_out(&self, rule: Rule) -> bool {
-        match rule {
-            Rule::ZeroCrew => crate::damage::knockout_from_counts(
-                self.crew.len() as u32,
-                self.active() as u32,
-                self.cooked,
-            )
-            .is_some(),
-            Rule::UnderTwo => self.cooked || self.active() < 2,
-        }
+    /// The tank is knocked out by the one rule. The probe runs no consequence chain, so a cook-off's
+    /// own consequence is applied here: it empties every crew pool of its tank
+    /// (`damage::process_cookoffs`), leaving none in action.
+    fn knocked_out(&self) -> bool {
+        let in_action = if self.cooked { 0 } else { self.active() };
+        crate::damage::knockout_from_counts(in_action as u32, self.cooked).is_some()
     }
 }
 
@@ -141,9 +117,9 @@ fn per_station(outcomes: &[Hit]) -> BTreeMap<CrewStation, [usize; 3]> {
     rows
 }
 
-/// The hits that left the tank knocked out under `rule`.
-fn knockout_count(outcomes: &[Hit], rule: Rule) -> usize {
-    outcomes.iter().filter(|hit| hit.knocked_out(rule)).count()
+/// The hits that left the tank knocked out.
+fn knockout_count(outcomes: &[Hit]) -> usize {
+    outcomes.iter().filter(|hit| hit.knocked_out()).count()
 }
 
 /// splitmix64: a deterministic stream, so a rerun draws the same hits.
@@ -375,7 +351,7 @@ fn fire_hits(app: &mut App, hits: &[(Vec3, Vec3)]) -> Outcomes {
         .collect()
 }
 
-/// One sequence's end under one rule, when the tank was first knocked out.
+/// One sequence's end, when the tank was first knocked out.
 #[derive(Clone, Copy)]
 struct Knockout {
     shots: usize,
@@ -389,79 +365,72 @@ struct Knockout {
 type ToKnockout = Option<Knockout>;
 
 /// [`TRIALS`] sequences of aimed shots in `app`, each at a fresh tank, damage retained shot to shot
-/// until it is knocked out under every [`Rule`]: per sequence, the knockout under each rule.
-fn sequences(app: &mut App) -> Vec<[ToKnockout; 2]> {
+/// until it is knocked out: per sequence, its knockout.
+fn sequences(app: &mut App) -> Vec<ToKnockout> {
     let round = main_round(app);
     let aimer = Aimer::new(app, Aim::Crew);
     let mut state = SEQUENCE_SEED;
     let mut out = Vec::with_capacity(TRIALS);
     for _ in 0..TRIALS {
         restore(app);
-        let mut knockouts: [ToKnockout; 2] = [None; 2];
+        let mut knockout: ToKnockout = None;
         let mut pen_verdicts = 0;
         for shot in 1..=SHOT_CAP {
             let bearing = BEARINGS[(next(&mut state) % BEARINGS.len() as u64) as usize];
             let (origin, direction) = aimer.draw(app, bearing, &mut state);
             let hit = fire_one(app, &round, origin, direction);
             pen_verdicts += usize::from(hit.penetrated);
-            for (knockout, rule) in knockouts.iter_mut().zip(Rule::ALL) {
-                if knockout.is_none() && hit.knocked_out(rule) {
-                    *knockout = Some(Knockout {
-                        shots: shot,
-                        pen_verdicts,
-                        cooked: hit.cooked,
-                    });
-                }
-            }
-            if knockouts.iter().all(Option::is_some) {
+            if hit.knocked_out() {
+                knockout = Some(Knockout {
+                    shots: shot,
+                    pen_verdicts,
+                    cooked: hit.cooked,
+                });
                 break;
             }
         }
-        out.push(knockouts);
+        out.push(knockout);
     }
     out
 }
 
-/// Each rule's shots-to-knockout and pen-verdicts-to-knockout, as counts per value.
-fn print_sequences(label: &str, runs: &[[ToKnockout; 2]]) {
+/// The shots-to-knockout and pen-verdicts-to-knockout, as counts per value.
+fn print_sequences(label: &str, runs: &[ToKnockout]) {
     println!("\n{label}: {} trials, cap {SHOT_CAP} shots", runs.len());
-    for (i, rule) in Rule::ALL.into_iter().enumerate() {
-        let ends: Vec<Knockout> = runs.iter().filter_map(|run| run[i]).collect();
-        let histogram = |pick: fn(&Knockout) -> usize| {
-            let mut counts = BTreeMap::<usize, usize>::new();
-            for end in &ends {
-                *counts.entry(pick(end)).or_default() += 1;
-            }
-            counts
-        };
-        let mean = |pick: fn(&Knockout) -> usize| {
-            ends.iter().map(pick).sum::<usize>() as f64 / ends.len().max(1) as f64
-        };
-        let median = |pick: fn(&Knockout) -> usize| {
-            let mut values: Vec<usize> = ends.iter().map(pick).collect();
-            values.sort_unstable();
-            values.get(values.len() / 2).copied().unwrap_or(0)
-        };
-        println!(
-            "  {}: knocked out in {}/{}, {} by cook-off",
-            rule.label(),
-            ends.len(),
-            runs.len(),
-            ends.iter().filter(|knockout| knockout.cooked).count()
-        );
-        println!(
-            "    shots to knockout: mean {:.2}, median {}, {:?}",
-            mean(|knockout| knockout.shots),
-            median(|knockout| knockout.shots),
-            histogram(|knockout| knockout.shots)
-        );
-        println!(
-            "    pen verdicts to knockout: mean {:.2}, median {}, {:?}",
-            mean(|knockout| knockout.pen_verdicts),
-            median(|knockout| knockout.pen_verdicts),
-            histogram(|knockout| knockout.pen_verdicts)
-        );
-    }
+    let ends: Vec<Knockout> = runs.iter().filter_map(|run| *run).collect();
+    let histogram = |pick: fn(&Knockout) -> usize| {
+        let mut counts = BTreeMap::<usize, usize>::new();
+        for end in &ends {
+            *counts.entry(pick(end)).or_default() += 1;
+        }
+        counts
+    };
+    let mean = |pick: fn(&Knockout) -> usize| {
+        ends.iter().map(pick).sum::<usize>() as f64 / ends.len().max(1) as f64
+    };
+    let median = |pick: fn(&Knockout) -> usize| {
+        let mut values: Vec<usize> = ends.iter().map(pick).collect();
+        values.sort_unstable();
+        values.get(values.len() / 2).copied().unwrap_or(0)
+    };
+    println!(
+        "  knocked out in {}/{}, {} by cook-off",
+        ends.len(),
+        runs.len(),
+        ends.iter().filter(|knockout| knockout.cooked).count()
+    );
+    println!(
+        "    shots to knockout: mean {:.2}, median {}, {:?}",
+        mean(|knockout| knockout.shots),
+        median(|knockout| knockout.shots),
+        histogram(|knockout| knockout.shots)
+    );
+    println!(
+        "    pen verdicts to knockout: mean {:.2}, median {}, {:?}",
+        mean(|knockout| knockout.pen_verdicts),
+        median(|knockout| knockout.pen_verdicts),
+        histogram(|knockout| knockout.pen_verdicts)
+    );
 }
 
 /// One law's row block: per station knocked_out / reduced / untouched, all crew, tanks knocked_out per hit.
@@ -501,15 +470,12 @@ fn print_law(label: &str, outcomes: &Outcomes) {
         total[0] as f64 / hits as f64,
         outcomes.iter().filter(|hit| hit.cooked).count()
     );
-    for rule in Rule::ALL {
-        let k = knockout_count(outcomes, rule);
-        println!(
-            "  tanks knocked_out, {}: {k}/{hits} = {:.3} per hit, {:.3} per pen verdict",
-            rule.label(),
-            k as f64 / hits as f64,
-            knockout_count(&penetrating, rule) as f64 / penetrating.len().max(1) as f64
-        );
-    }
+    let k = knockout_count(outcomes);
+    println!(
+        "  tanks knocked_out: {k}/{hits} = {:.3} per hit, {:.3} per pen verdict",
+        k as f64 / hits as f64,
+        knockout_count(&penetrating) as f64 / penetrating.len().max(1) as f64
+    );
     println!(
         "  pen verdicts {}/{hits}; per pen verdict: crew knocked out {:.3}, a station touched {:.3}",
         penetrating.len(),
@@ -547,11 +513,7 @@ fn print_flips(label: &str, a: &Outcomes, b: &Outcomes) {
                     .or_default() += 1;
             }
         }
-        tank += usize::from(
-            Rule::ALL
-                .iter()
-                .any(|&r| x.knocked_out(r) != y.knocked_out(r)),
-        );
+        tank += usize::from(x.knocked_out() != y.knocked_out());
     }
     let mut total = 0;
     for (station, row) in &flips {
@@ -601,14 +563,14 @@ fn sweep(aim: Aim) {
         );
     }
     println!(
-        "\nper bearing (witness law, N = {shipped}): crew knocked out per hit, tanks knocked_out (zero crew)"
+        "\nper bearing (witness law, N = {shipped}): crew knocked out per hit, tanks knocked_out"
     );
     for (bearing, chunk) in BEARINGS.iter().zip(new.chunks(PER_BEARING)) {
         let knocked_out: usize = per_station(chunk).values().map(|row| row[0]).sum();
         println!(
             "  {bearing:>5}°  {:.2}  {}  pen verdicts {}",
             knocked_out as f64 / chunk.len() as f64,
-            knockout_count(chunk, Rule::ZeroCrew),
+            knockout_count(chunk),
             chunk.iter().filter(|hit| hit.penetrated).count()
         );
     }

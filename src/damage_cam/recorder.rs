@@ -48,7 +48,7 @@ use crate::ballistics::{
     ShellPath, ShotDose, SpallCone, SpallMarks,
 };
 use crate::damage::{
-    Ammo, CrewStation, DamageConsequences, KnockoutCause, KnockoutReason, TankKnockedOut,
+    Ammo, CrewStation, DamageConsequences, Dead, KnockoutCause, KnockoutReason, TankKnockedOut,
     TankKnockout, TankVolumes, VolumeOf,
 };
 use crate::spec::{FireMechanism, TankSpecHandle};
@@ -462,7 +462,7 @@ fn hull_frame(world: &mut World, tank: Entity) -> Option<HullFrame> {
 /// tick's emptied log.
 fn attribute_kills(
     knocked: Query<(Entity, &TankKnockedOut), Added<TankKnockedOut>>,
-    facets: Query<(&VolumeOf, Has<Ammo>, Has<CrewStation>)>,
+    facets: Query<(&VolumeOf, Has<Ammo>, Has<CrewStation>, Has<Dead>)>,
     mut recordings: Query<&mut ShotRecording>,
     mut recorder: ResMut<ShotRecorder>,
     mut commands: Commands,
@@ -471,17 +471,32 @@ fn attribute_kills(
     for (tank, knocked_out) in &knocked {
         let reason = knocked_out.reason;
         let decides = |emptied: &&Emptied| {
-            facets.get(emptied.volume).is_ok_and(|(owner, ammo, crew)| {
-                owner.tank() == tank
-                    && match reason {
-                        KnockoutReason::Cookoff => ammo,
-                        KnockoutReason::CrewLoss => crew,
-                    }
-            })
+            facets
+                .get(emptied.volume)
+                .is_ok_and(|(owner, ammo, crew, _)| {
+                    owner.tank() == tank
+                        && match reason {
+                            KnockoutReason::Cookoff => ammo,
+                            KnockoutReason::CrewLoss => crew,
+                        }
+                })
         };
         let killer = match reason {
             KnockoutReason::Cookoff => recorder.emptied.iter().find(decides),
-            KnockoutReason::CrewLoss => recorder.emptied.iter().rev().find(decides),
+            // The emptying that left fewer than two crew members in action
+            // (`damage::knockout_from_counts`): with `left` in action after this tick's emptied
+            // crew pools, the one that took the count from two to one.
+            KnockoutReason::CrewLoss => {
+                let emptied: Vec<&Emptied> = recorder.emptied.iter().filter(decides).collect();
+                let left = facets
+                    .iter()
+                    .filter(|&(owner, _, crew, dead)| owner.tank() == tank && crew && !dead)
+                    .count();
+                (emptied.len() + left)
+                    .checked_sub(2)
+                    .and_then(|at| emptied.get(at))
+                    .copied()
+            }
         };
         commands.trigger(TankKnockout {
             tank,

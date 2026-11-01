@@ -159,6 +159,22 @@ fn tank(
             volume.id()
         })
         .collect();
+    // The one knockout rule wants two crew members in action (`damage::knockout_from_counts`).
+    // Seats no round reaches make up the count: one beside listed crew boxes, two with none, so a
+    // fixture tank is knocked out exactly when every crew box it lists has its HP pool emptied, or
+    // a cook-off empties every pool, seats included.
+    let listed = volumes
+        .iter()
+        .filter(|&&(.., kind)| matches!(kind, Kind::Crew(_)))
+        .count();
+    for seat in 0..if listed == 0 { 2 } else { 1 } {
+        app.world_mut().spawn((
+            Name::new(format!("seat {seat}")),
+            ComponentHealth::full(1),
+            CrewStation::Loader,
+            VolumeOf(root),
+        ));
+    }
     (root, spawned)
 }
 
@@ -378,7 +394,11 @@ fn a_path_through_two_tanks_records_each() {
             .expect("each tank has its record");
         assert!(shot.shot.is_none(), "the fixture shot is unkeyed");
         assert_eq!(shot.report.impact.verdict, ShotVerdict::Penetration);
-        assert_eq!(shot.report.components.len(), 2, "its own two components");
+        assert_eq!(
+            shot.report.components.len(),
+            3,
+            "its own two boxes and the fixture's seat"
+        );
         for (name, volume) in [("crew", volumes[1]), ("rear", volumes[2])] {
             assert_eq!(
                 lost(&shot.report, name),
