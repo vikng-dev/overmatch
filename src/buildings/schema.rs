@@ -37,7 +37,7 @@ use bevy::math::{Vec2, Vec3};
 use serde::{Deserialize, Serialize};
 
 /// The format revision this build reads and writes. A file of another revision is refused.
-pub const FORMAT: u32 = 4;
+pub const FORMAT: u32 = 5;
 
 /// How far a vertex, a centroid or a plane may sit from where the contract places it, metres:
 /// the f32 rounding of a building-sized coordinate, many times over, and far below any modelled
@@ -86,6 +86,25 @@ pub enum ElementKind {
     Roof,
 }
 
+/// The authored surface frame: upright image mapping, or grain in the building frame.
+/// Grain is a unit direction; its projection onto each face sets that face's tangent.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub enum SurfaceFrame {
+    Upright,
+    Grain([f32; 3]),
+}
+impl SurfaceFrame {
+    pub fn is_valid(self) -> bool {
+        match self {
+            Self::Upright => true,
+            Self::Grain(axis) => {
+                let axis = Vec3::from_array(axis);
+                axis.is_finite() && (axis.length() - 1.0).abs() <= PLANE_TOLERANCE_M
+            }
+        }
+    }
+}
+
 /// An element's frame: origin and two in-plane axes, building frame. The extrusion axis is
 /// `w = u × v`; `u` and `v` are unit and orthogonal.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
@@ -123,6 +142,7 @@ pub struct Element {
     /// Index into [`BuildingAsset::materials`].
     pub material: u8,
     pub frame: Frame,
+    pub surface_frame: SurfaceFrame,
     /// The convex profile in `(u, v)`, counter-clockwise about `w`.
     pub profile: Vec<[f32; 2]>,
     /// The extrusion range along `w`, `[near, far]`, `near < far`.
@@ -320,6 +340,11 @@ impl BuildingAsset {
                 return Err(format!(
                     "element {name} names component {}, past the table",
                     element.component
+                ));
+            }
+            if !element.surface_frame.is_valid() {
+                return Err(format!(
+                    "element {name}'s surface_frame is no finite unit grain; author Upright or a unit Grain direction and rebake the building"
                 ));
             }
             let frame = &element.frame;

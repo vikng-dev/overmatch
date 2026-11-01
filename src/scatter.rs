@@ -239,10 +239,11 @@ impl ScatterView {
             building: library
                 .iter()
                 .filter_map(|(id, shape)| match *shape {
-                    Prototype::Building { min, max, .. } => Some((
+                    Prototype::Building { ref surface, .. } => Some((
                         id.clone(),
                         meshes.add(crate::building_surface::unit_box(
-                            crate::building_surface::ridge_axis(min, max),
+                            Vec3::from_array(surface.top_tangent),
+                            &surface.faces,
                         )),
                     )),
                     Prototype::Tree { .. } | Prototype::Structure { .. } => None,
@@ -413,6 +414,7 @@ mod tests {
             min: [-2.0, -0.5, -3.0],
             max: [2.0, 2.5, 3.0],
             substance: "Brick".to_owned(),
+            surface: crate::map::tests::fixture_box_surface(),
         }
     }
 

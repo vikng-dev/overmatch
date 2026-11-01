@@ -188,6 +188,14 @@ impl MapManifest {
     }
 }
 
+/// The unit cube's face lanes in +X, -X, +Z, -Z, +Y, -Y order, and its top's tangent.
+#[derive(Debug, Clone, PartialEq, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct BoxSurface {
+    pub(crate) faces: [crate::building_surface::SurfaceLane; 6],
+    pub(crate) top_tangent: [f32; 3],
+}
+
 /// What one prototype id resolves to (`prototypes.ron`, module doc). Metres at instance scale 1;
 /// the instance's own scale multiplies the collider as it does the visual.
 #[derive(Debug, Clone, PartialEq, serde::Deserialize)]
@@ -200,6 +208,7 @@ pub(crate) enum Prototype {
         min: [f32; 3],
         max: [f32; 3],
         substance: String,
+        surface: BoxSurface,
     },
     /// A tree of the damage model ([`crate::trees`]): the asset `assets/trees/<asset>/`.
     Tree { asset: String },
@@ -500,7 +509,16 @@ fn check_prototype(id: &str, prototype: &Prototype, library: &Path) {
             min,
             max,
             substance,
+            surface,
         } => {
+            let tangent = bevy::math::Vec3::from_array(surface.top_tangent);
+            assert!(
+                tangent.is_finite()
+                    && (tangent.length() - 1.0).abs() <= 1e-4
+                    && tangent.y.abs() <= 1e-4,
+                "map: {} prototype {id:?} field surface.top_tangent: author a finite horizontal unit direction",
+                library.display()
+            );
             for axis in 0..3 {
                 assert!(
                     min[axis].is_finite() && max[axis].is_finite() && min[axis] < max[axis],
@@ -664,9 +682,16 @@ pub(crate) mod tests {
     /// A library with nothing in it — enough for a placement with no instances.
     const EMPTY_LIBRARY: &str = "{}";
 
+    pub(crate) fn fixture_box_surface() -> BoxSurface {
+        use crate::building_surface::SurfaceLane::{Primary, Secondary};
+        BoxSurface {
+            faces: [Primary, Primary, Primary, Primary, Secondary, Primary],
+            top_tangent: [0.0, 0.0, 1.0],
+        }
+    }
+
     /// A single-building library and a placement that uses it, for the resolution law.
-    const HOUSE_LIBRARY: &str =
-        r#"{"house": Building(min: (-1.0, -0.5, -1.0), max: (1.0, 2.0, 1.0), substance: "Brick")}"#;
+    const HOUSE_LIBRARY: &str = r#"{"house": Building(min: (-1.0, -0.5, -1.0), max: (1.0, 2.0, 1.0), substance: "Brick", surface: (faces: (Primary, Primary, Primary, Primary, Secondary, Primary), top_tangent: (0.0, 0.0, 1.0)))}"#;
     const HOUSE_INSTANCE: &str = r#"{"prototype":"house","translation":[0,0,0],
         "rotation":[0,0,0,1],"scale":[1,1,1],"id":"house_0001"}"#;
 
@@ -676,7 +701,7 @@ pub(crate) mod tests {
     /// map happens to place.
     pub(crate) fn mixed_fixture_manifest() -> MapManifest {
         const LIBRARY: &str = r#"{
-            "house": Building(min: (-1.0, -0.5, -1.0), max: (1.0, 2.0, 1.0), substance: "Brick"),
+            "house": Building(min: (-1.0, -0.5, -1.0), max: (1.0, 2.0, 1.0), substance: "Brick", surface: (faces: (Primary, Primary, Primary, Primary, Secondary, Primary), top_tangent: (0.0, 0.0, 1.0))),
             "fir": Tree(asset: "fir_1"),
             "brick": Structure(asset: "house_1"),
         }"#;
@@ -890,15 +915,15 @@ pub(crate) mod tests {
         let text = manifest_text(750.0, 0.0, 50.0, "+Z");
         for (library, field) in [
             (
-                r#"{"p": Building(min: (1.0, 0.0, 0.0), max: (1.0, 1.0, 1.0), substance: "Brick")}"#,
+                r#"{"p": Building(min: (1.0, 0.0, 0.0), max: (1.0, 1.0, 1.0), substance: "Brick", surface: (faces: (Primary, Primary, Primary, Primary, Secondary, Primary), top_tangent: (0.0, 0.0, 1.0)))}"#,
                 "`min`",
             ),
             (
-                r#"{"p": Building(min: (0.0, 0.0, 0.0), max: (1.0, NaN, 1.0), substance: "Brick")}"#,
+                r#"{"p": Building(min: (0.0, 0.0, 0.0), max: (1.0, NaN, 1.0), substance: "Brick", surface: (faces: (Primary, Primary, Primary, Primary, Secondary, Primary), top_tangent: (0.0, 0.0, 1.0)))}"#,
                 "`min`",
             ),
             (
-                r#"{"p": Building(min: (0.0, 0.0, 0.0), max: (1.0, 1.0, 1.0), substance: "Nope")}"#,
+                r#"{"p": Building(min: (0.0, 0.0, 0.0), max: (1.0, 1.0, 1.0), substance: "Nope", surface: (faces: (Primary, Primary, Primary, Primary, Secondary, Primary), top_tangent: (0.0, 0.0, 1.0)))}"#,
                 "`substance`",
             ),
         ] {
@@ -946,6 +971,7 @@ pub(crate) mod tests {
                 min: [-1.0, -0.5, -1.0],
                 max: [1.0, 2.0, 1.0],
                 substance: "Brick".to_owned(),
+                surface: fixture_box_surface(),
             },
         );
     }

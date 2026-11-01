@@ -104,6 +104,11 @@ pub fn bake(house: &House) -> Result<Baked, String> {
             )
             .map_err(|_| "more components than a u16 names")?,
             material,
+            surface_frame: match plan.kind {
+                schema::ElementKind::Roof => house.surface_frames.roof,
+                schema::ElementKind::WallPlate => house.surface_frames.plates,
+                _ => house.surface_frames.walls,
+            },
             frame: schema::Frame {
                 origin: canon3(frame.origin),
                 u: canon3(frame.u),
@@ -499,6 +504,7 @@ mod tests {
             pitch: (3, 4), plate_height_m: 0.1, board_width_m: 0.2,
             board_thickness_m: 0.05, boards_per_slope: 14, gable_overhang_m: 0.3,
             materials: (walls: Brick, plates: Wood, roof: Wood),
+            surface_frames: (walls: Upright, plates: Grain((0.0, 0.0, 1.0)), roof: Grain((0.0, 0.0, 1.0))),
             walls: (east: [], west: [], north: [], south: []),
             joins: [
                 (kinds: (Pier, Pier), by: "mortared"),

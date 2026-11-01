@@ -377,7 +377,7 @@
             resistance: Effective((40.0, Unknown("no penetration data; spruce/pine crushing
                 strength along the grain ~40 MPa (birch ~55) over the reference flow strength
                 ~1 GPa, × 1000; the conifers' value, the forest's wood"))),
-            visual: "wood",
+            visual: "dark_planks",
             feedback: (
                 exposed_linear_rgb: ((0.32, 0.18, 0.08), Unknown("ASSUMED: provisional exposed-surface and powder read; no measured optical response read for this substance")),
                 powder_linear_rgb: ((0.34, 0.22, 0.12), Unknown("ASSUMED: provisional exposed-surface and powder read; no measured optical response read for this substance")),

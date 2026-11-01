@@ -35,6 +35,8 @@ House(
     // The registry refuses either missing on a breakable material; the punch ring reads
     // them. The separate attachment kinds below do not inherit a timber's intrinsic seam.
     materials: (walls: Brick, plates: Wood, roof: Wood),
+    // ASSUMED authoring choice: boards and plates run along the authored Z ridge.
+    surface_frames: (walls: Upright, plates: Grain((0.0, 0.0, 1.0)), roof: Grain((0.0, 0.0, 1.0))),
     // Openings per wall, `u` along the wall in its own frame (east and west: `u` = −z and +z; north
     // and south: `u` = +x and −x), heights in courses from the foundation. Windows 1.0 m wide from
     // 0.9 m to 2.025 m over the ground point; the door 0.9 m wide from the ground point up.

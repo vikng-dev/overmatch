@@ -2,7 +2,7 @@
 //! never sees it.
 
 use overmatch::buildings::attachments::Attachments;
-use overmatch::buildings::schema::ElementKind;
+use overmatch::buildings::schema::{ElementKind, SurfaceFrame};
 use serde::Deserialize;
 
 use super::house::Material;
@@ -28,10 +28,20 @@ pub struct House {
     pub gable_overhang_m: f64,
     /// What each part is made of.
     pub materials: PartMaterials,
+    pub surface_frames: PartSurfaceFrames,
     pub walls: Walls,
     /// What holds the parts of two components where they touch, by their elements' kinds.
     pub joins: Vec<Join>,
     pub cuts: Cuts,
+}
+
+/// Authored mapping and grain per construction part, in the building frame.
+#[derive(Debug, Clone, Copy, PartialEq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PartSurfaceFrames {
+    pub walls: SurfaceFrame,
+    pub plates: SurfaceFrame,
+    pub roof: SurfaceFrame,
 }
 
 /// What each part of the house is made of, as keys of `assets/materials/materials.ron`. The parts'
@@ -106,6 +116,17 @@ impl House {
     }
 
     pub(super) fn check(&self) -> Result<(), String> {
+        for (part, frame) in [
+            ("walls", self.surface_frames.walls),
+            ("plates", self.surface_frames.plates),
+            ("roof", self.surface_frames.roof),
+        ] {
+            if !frame.is_valid() {
+                return Err(format!(
+                    "surface_frames.{part}: author Upright or a finite unit Grain direction"
+                ));
+            }
+        }
         let positive = |v: f64| v.is_finite() && v > 0.0;
         for (name, value) in [
             ("width_m", self.width_m),

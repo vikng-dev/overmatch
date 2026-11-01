@@ -5,15 +5,15 @@
 //! exactly the colliders' union, and an opening, which is no element, is a hole the camera sees
 //! through. Faces two elements share stay in the mesh; they lie inside the wall and are never seen.
 //!
-//! # Metres on every face, timber by the mesh's word
+//! # Metres and declared surface frames
 //!
 //! Each face carries the frame [`crate::building_surface::unit_box`] uses: outward normal `n`,
 //! tangent `t`, image-up `b = n × t`, `uv = (p·t, −p·b)` at every corner `p`, here in metres of
 //! the building frame. The material's vertex stage multiplies them by the instance's own scale
 //! along `t` and `b`, so a scaled house keeps real-size bricks. A wall face stands its image
-//! upright (`t = Y × n`); a timber face runs its boards along its element's grain, the extrusion
-//! axis, where that lies in the face. The second UV channel's `x` says which pack a face wears:
-//! 1 on timber, 0 on masonry, so a sill's top stays brick and a board's edge stays timber.
+//! upright (`t = Y × n`) when its surface frame declares Upright; a Grain frame projects its
+//! authored direction onto the face. The second UV channel selects the visual's declared
+//! palette lane, resolved through its substance and the visual library.
 //!
 //! # A broken building ([`plugin`])
 //!
@@ -46,20 +46,20 @@ use super::breakage::{
     WallReplicaSet,
 };
 use super::fracture::{Fate, Side, clip_polygon};
-use super::schema::BuildingAsset;
+use super::schema::{BuildingAsset, SurfaceFrame};
 use crate::building_surface::{BuildingMaterial, holed};
 use crate::debris::PresentationClock;
 use crate::scatter::MapInstance;
 
-/// The substance key whose faces wear the timber pack; every other wears the masonry pack.
-const TIMBER: &str = "Wood";
-
-/// The tangent frame of a face with outward normal `n` on an element extruded along `grain`:
-/// the grain where it lies in the face and the face is timber, else `Y × n` (the image upright),
-/// else `X` on a face that is level.
-fn tangent(n: Vec3, grain: Vec3, timber: bool) -> Vec3 {
-    if timber && grain.dot(n).abs() < 1e-3 {
-        return grain.normalize();
+/// A face's authored grain projected into its plane. A grain-normal end face has no
+/// projected grain and uses the upright image convention, as an Upright frame does.
+fn tangent(n: Vec3, frame: SurfaceFrame) -> Vec3 {
+    if let SurfaceFrame::Grain(grain) = frame {
+        let grain = Vec3::from_array(grain);
+        let projected = grain - n * grain.dot(n);
+        if projected.length_squared() > 1e-6 {
+            return projected.normalize();
+        }
     }
     let upright = Vec3::Y.cross(n);
     if upright.length_squared() > 1e-6 {
@@ -82,22 +82,22 @@ struct Faces {
 
 impl Faces {
     /// One face of outward normal `n`, its corners counter-clockwise seen from outside, on an
-    /// element extruded along `grain`, of timber or not; drawn `offset` from where it is (asset
+    /// element with authored surface frame `grain` and palette lane `secondary`; drawn `offset` from where it is (asset
     /// frame) while framed where it is, so a piece keeps the wall's bricks. `tag` is the hole
     /// lookup's (module doc).
     fn face(
         &mut self,
         n: Vec3,
         corners: &[Vec3],
-        grain: Vec3,
-        timber: bool,
+        grain: SurfaceFrame,
+        secondary: bool,
         offset: Vec3,
         tag: f32,
     ) {
         if corners.len() < 3 {
             return;
         }
-        let t = tangent(n, grain, timber);
+        let t = tangent(n, grain);
         let b = n.cross(t);
         let first = u32::try_from(self.positions.len()).expect("a building's mesh fits u32");
         for p in corners {
@@ -105,7 +105,7 @@ impl Faces {
             self.normals.push(n.to_array());
             self.tangents.push(t.extend(1.0).to_array());
             self.uvs.push([p.dot(t), -p.dot(b)]);
-            self.packs.push([if timber { 1.0 } else { 0.0 }, tag]);
+            self.packs.push([if secondary { 1.0 } else { 0.0 }, tag]);
         }
         // Corners run counter-clockwise seen from outside: a fan from the first.
         for k in 1..corners.len() as u32 - 1 {
@@ -116,18 +116,29 @@ impl Faces {
     /// Element `e`'s whole prism.
     fn element(&mut self, asset: &BuildingAsset, e: usize) {
         let element = &asset.elements[e];
-        let timber = asset.materials[usize::from(element.material)] == TIMBER;
+        let secondary = crate::building_surface::lane_for_substance(
+            &asset.materials[usize::from(element.material)],
+        ) == crate::building_surface::SurfaceLane::Secondary;
         for (n, corners) in element.faces() {
-            self.face(n, &corners, element.frame.w(), timber, Vec3::ZERO, 0.0);
+            self.face(
+                n,
+                &corners,
+                element.surface_frame,
+                secondary,
+                Vec3::ZERO,
+                0.0,
+            );
         }
     }
 
     /// Law chunk `c`'s hull, drawn `offset` back, its faces tagged `tag` (module doc).
     fn chunk(&mut self, asset: &BuildingAsset, layout: &Layout, c: usize, offset: Vec3, tag: f32) {
         let element = &asset.elements[usize::from(layout.element_of[c])];
-        let timber = asset.materials[usize::from(element.material)] == TIMBER;
+        let secondary = crate::building_surface::lane_for_substance(
+            &asset.materials[usize::from(element.material)],
+        ) == crate::building_surface::SurfaceLane::Secondary;
         for (n, corners) in layout.blocks[c].faces() {
-            self.face(n, &corners, element.frame.w(), timber, offset, tag);
+            self.face(n, &corners, element.surface_frame, secondary, offset, tag);
         }
     }
 
@@ -742,7 +753,33 @@ mod tests {
     /// east wall (outer face x = 2 m, inner 1.75 m), a sight line through its first window's
     /// middle (z 1.5 m, 1.5 m up; house_1's spec) meets no triangle, and one through the pier
     /// beside it (z 2.5 m) does. A view that drew the wall as its graybox box, or filled the
-    /// openings, fails the first; one that dropped an element fails the second.
+    /// openings, fails the first; one that dropped an element fails the second.    /// Appearance must follow the construction record without changing geometry. The view
+    /// reader relies on frame data even for a material drawn in the primary palette lane.
+    #[test]
+    fn authored_grain_changes_the_frame_and_never_the_silhouette() {
+        use bevy::mesh::VertexAttributeValues;
+        let mut asset = crate::buildings::tests::shipped_house().asset.clone();
+        let before = mesh(&asset);
+        asset.elements[0].surface_frame = SurfaceFrame::Grain([0.0, 0.0, 1.0]);
+        let after = mesh(&asset);
+        let positions = |mesh: &Mesh| match mesh.attribute(Mesh::ATTRIBUTE_POSITION) {
+            Some(VertexAttributeValues::Float32x3(values)) => values.clone(),
+            _ => panic!("positions"),
+        };
+        let tangents = |mesh: &Mesh| match mesh.attribute(Mesh::ATTRIBUTE_TANGENT) {
+            Some(VertexAttributeValues::Float32x4(values)) => values.clone(),
+            _ => panic!("tangents"),
+        };
+        assert_eq!(positions(&before), positions(&after));
+        assert_ne!(tangents(&before), tangents(&after));
+        asset.elements[0].surface_frame = SurfaceFrame::Grain([f32::NAN, 0.0, 0.0]);
+        let error = asset.check().unwrap_err();
+        assert!(
+            error.contains("surface_frame") && error.contains("author"),
+            "{error}"
+        );
+    }
+
     #[test]
     fn a_window_is_a_hole_and_a_pier_is_solid() {
         let triangles = triangles(&mesh(&shipped_house().asset));
@@ -810,7 +847,11 @@ mod tests {
         let expected: usize = asset
             .elements
             .iter()
-            .filter(|element| asset.materials[usize::from(element.material)] == TIMBER)
+            .filter(|element| {
+                crate::building_surface::lane_for_substance(
+                    &asset.materials[usize::from(element.material)],
+                ) == crate::building_surface::SurfaceLane::Secondary
+            })
             .map(|element| element.faces().iter().map(|(_, c)| c.len()).sum::<usize>())
             .sum();
         assert!(expected > 0);

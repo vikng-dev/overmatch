@@ -53,10 +53,17 @@
             metres_per_repeat: (0.5, Measured("Poly Haven rough_wood `dimensions: [500, 500]` mm")),
             takes_paint: false,
         ),
-        // The scatter buildings' wall pack, the one `building_surface::WALL` binds.
+        // The buildings' primary surface lane.
         "brick": Maps(
+            building_lane: Some(Primary),
             maps: "buildings/brick_wall_006/brick_wall_006",
             metres_per_repeat: (3.0, Measured("Poly Haven brick_wall_006 `dimensions: [3000, 3000]` mm")),
+            takes_paint: false,
+        ),
+        "dark_planks": Maps(
+            maps: "buildings/dark_planks/dark_planks",
+            metres_per_repeat: (2.0, Measured("Poly Haven dark_planks dimensions: 2000 by 2000 mm; assets/buildings/dark_planks/cc.txt")),
+            building_lane: Some(Secondary),
             takes_paint: false,
         ),
         // Neither Poly Haven nor ambientCG carries a glass pack (their APIs, queried 2026-10-31), and

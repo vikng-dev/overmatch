@@ -142,6 +142,8 @@ pub(crate) enum Visual {
     Maps {
         maps: String,
         metres_per_repeat: Sourced<f32>,
+        /// The building shader's palette lane, absent for visuals not used by buildings.
+        building_lane: Option<crate::building_surface::SurfaceLane>,
         takes_paint: bool,
     },
     /// No maps: a colour and two factors.
@@ -210,6 +212,10 @@ impl VisualLibrary {
             visual.checked(key)?;
         }
         Ok(Self(file.visuals.0))
+    }
+
+    pub(crate) fn iter(&self) -> impl Iterator<Item = (&str, &Visual)> {
+        self.0.iter().map(|(key, visual)| (key.as_str(), visual))
     }
 
     pub(crate) fn get(&self, key: &str) -> Option<&Visual> {
@@ -823,6 +829,7 @@ impl Dress<'_, '_> {
                 maps,
                 metres_per_repeat,
                 takes_paint,
+                ..
             } => {
                 let load = |map: &str, encoding| {
                     surface_map(

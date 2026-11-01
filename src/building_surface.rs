@@ -1,42 +1,16 @@
-//! The scatter buildings' surface: brick walls under a timber roof, through ONE
-//! [`BuildingMaterial`] every building shares: a graybox building's box ([`crate::scatter`]) and a
-//! building of the destruction model's element mesh ([`crate::buildings::view`]), whose faces are
-//! framed by the same rule in metres and mark their pack per vertex (see Walls and roof below).
+//! Building surfaces, view only: one shared two-lane material. `materials/visuals.ron`
+//! declares both palette lanes and their physical repeats; each substance names its visual.
+//! Meshes always carry their lane in UV1.x and their hole tag in UV1.y. Graybox face membership
+//! and top tangent are prototype data; destruction elements carry an authored surface frame.
+//! The material's vertex stage converts face units to metres under the instance transform.
+//! A holed building wears its own alpha-masked copy with its hole table bound.
 //!
-//! VIEW ONLY (ADR-0014). The drawn box is the collider's own unit cube under the block transform,
-//! so the silhouette is exactly what the simulation blocks; this module decides only what its faces
-//! look like. The dedicated server never builds the material.
-//!
-//! # Metres on every face, one mesh and one material
-//!
-//! Every building is a unit cube scaled per instance — its prototype's box times the instance's own
-//! scale — so no UV a shared mesh bakes can be in metres. [`unit_box`] bakes each face's UV in FACE
-//! UNITS instead: one per cube edge, `u` along the face's tangent and `v` down its image. The
-//! material's vertex stage multiplies them by the world length of those two axes under the
-//! instance's transform (`assets/shaders/building_surface.wgsl`), so every face reads in metres
-//! whatever the box's proportions and the instance's scale, and no instance needs a mesh or a
-//! material of its own: the buildings batch as the graybox did.
-//!
-//! Each pack repeats at its own authored metres ([`SurfacePack::authored_m`], the pack's `cc.txt`):
-//! the wall pack through the standard half's `uv_transform`, the roof pack through
-//! [`BuildingSurfaceParams::roof`].
-//!
-//! # Walls and roof
-//!
-//! The standard half carries the [`WALL`] pack and shades every face. The fragment swaps the
-//! [`ROOF`] pack's albedo, normal and ARM in where the face's normal is within 60° of up: the box's
-//! top, on any building standing within 60° of upright. The roof's boards run along the box's longer
-//! horizontal side ([`ridge_axis`]), as a ridge would. A mesh that carries a second UV channel
-//! decides per vertex instead: its `x` is 1 on a timber face and 0 on masonry, so an element mesh's
-//! sill tops stay brick and its board edges stay timber.
-//!
-//! # Holes
-//!
-//! A building with a hole wears its own copy of the material ([`holed`]): alpha-masked, so bevy
-//! compiles and runs the hole path in the main pass and in the prepass the shadow pass draws
-//! (`assets/shaders/building_holes.wgsl`), with the building's hole table bound
-//! ([`crate::buildings::view::hole_table`]). The shared material binds [`no_holes`] and stays opaque,
-//! so every other building draws exactly as it would without the hole code.
+//! Face UVs are `(p dot t, -p dot (n cross t))`, one face unit per cube edge on a graybox,
+//! asset metres on an element mesh. The vertex stage multiplies those lanes by the world
+//! lengths of the transformed tangent and bitangent, respectively. Each pack's sourced
+//! metres per repeat then sets texture scale; anisotropic repeated sampling and OpenGL
+//! normal maps use that same frame. The shared material is opaque; a holed copy enables
+//! the discard path in both the main pass and the prepass used for shadows.
 
 use bevy::asset::AssetLoadFailedEvent;
 use bevy::math::Affine2;
@@ -49,8 +23,8 @@ use bevy::shader::ShaderRef;
 
 use crate::world::{MapEncoding, MapTiling, surface_map};
 
-/// The buildings' material: bevy's `StandardMaterial` carrying the [`WALL`] pack and every lighting
-/// parameter, extended with [`BuildingSurface`] (the [`ROOF`] pack).
+/// The buildings' material: bevy's `StandardMaterial` carrying the the primary palette lane pack and every lighting
+/// parameter, extended with [`BuildingSurface`] (the the secondary palette lane pack).
 pub(crate) type BuildingMaterial = ExtendedMaterial<StandardMaterial, BuildingSurface>;
 
 /// The vertex stage (face units to metres) and the fragment (the roof swap, a hole), one file.
@@ -59,48 +33,103 @@ const SHADER: &str = "shaders/building_surface.wgsl";
 /// The prepass fragment, which bevy runs only for a [`holed`] material: a hole's discard.
 const PREPASS_SHADER: &str = "shaders/building_surface_prepass.wgsl";
 
-/// One surface pack's contract: which pack it is and the real-world metres it was authored at.
-pub(crate) struct SurfacePack {
-    /// The Poly Haven pack: the folder under `assets/buildings/` whose `cc.txt` carries the
-    /// attribution and the authored size below. Names the files; nothing parses it.
-    pub(crate) pack: &'static str,
-    /// Metres per texture repeat, as the scan declares (`dimensions`, millimetres). Mapping the
-    /// pack onto anything else resizes every brick and board in it.
-    pub(crate) authored_m: f32,
+/// The two lanes the building shader binds; visuals.ron names their current maps.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Deserialize)]
+pub(crate) enum SurfaceLane {
+    Primary,
+    Secondary,
+}
+impl SurfaceLane {
+    fn index(self) -> usize {
+        match self {
+            Self::Primary => 0,
+            Self::Secondary => 1,
+        }
+    }
 }
 
+/// A declared maps visual and its physical repeat.
+struct SurfacePack {
+    visual: String,
+    maps: String,
+    authored_m: f32,
+}
 impl SurfacePack {
-    /// One of the pack's three maps (`diff`, `nor_gl` or `arm`), as the encode script names it.
     fn path(&self, map: &str) -> String {
-        format!("buildings/{0}/{0}_{map}.ktx2", self.pack)
+        format!("{}_{map}.ktx2", self.maps)
     }
-
-    /// Texture repeats per metre.
     fn uv_per_m(&self) -> f32 {
         1.0 / self.authored_m
     }
 }
+fn palette_of(text: &str) -> Result<[SurfacePack; 2], String> {
+    let library = crate::tank_surface::VisualLibrary::parse(text)?;
+    let mut lanes = [None, None];
+    for (key, visual) in library.iter() {
+        if let crate::tank_surface::Visual::Maps {
+            maps,
+            metres_per_repeat,
+            building_lane: Some(lane),
+            ..
+        } = visual
+        {
+            let slot = &mut lanes[lane.index()];
+            if slot.is_some() {
+                return Err(format!(
+                    "building_lane {lane:?} is repeated at visual {key:?}; assign each building lane once"
+                ));
+            }
+            *slot = Some(SurfacePack {
+                visual: key.to_owned(),
+                maps: maps.clone(),
+                authored_m: metres_per_repeat.0,
+            });
+        }
+    }
+    let [Some(primary), Some(secondary)] = lanes else {
+        return Err("building_lane is incomplete; declare one Maps visual for Primary and one for Secondary".to_owned());
+    };
+    Ok([primary, secondary])
+}
+fn palette() -> &'static [SurfacePack; 2] {
+    static PALETTE: std::sync::LazyLock<[SurfacePack; 2]> = std::sync::LazyLock::new(|| {
+        let path = crate::assets::asset_root().join("materials/visuals.ron");
+        let text = std::fs::read_to_string(&path).unwrap_or_else(|err| {
+            panic!(
+                "{}: {err}; restore the required visual library",
+                path.display()
+            )
+        });
+        palette_of(&text).unwrap_or_else(|err| panic!("{}: {err}", path.display()))
+    });
+    &PALETTE
+}
+pub(crate) fn lane_for_visual(key: &str) -> Result<SurfaceLane, String> {
+    for lane in [SurfaceLane::Primary, SurfaceLane::Secondary] {
+        if palette()[lane.index()].visual == key {
+            return Ok(lane);
+        }
+    }
+    Err(format!(
+        "materials/visuals.ron visual {key:?} has no building_lane; declare its palette lane"
+    ))
+}
+pub(crate) fn lane_for_substance(name: &str) -> SurfaceLane {
+    let registry = crate::substances::SubstanceRegistry::shipped_static();
+    let key = registry.visual(name).unwrap_or_else(|| panic!("materials/materials.ron substance {name:?} has no visual; author a hard substance with its visual"));
+    lane_for_visual(key).unwrap_or_else(|err| {
+        panic!("materials/materials.ron substance {name:?} field visual: {err}")
+    })
+}
 
-/// The walls: weathered red brick in lime mortar.
-pub(crate) const WALL: SurfacePack = SurfacePack {
-    pack: "brick_wall_006",
-    authored_m: 3.0,
-};
-
-/// The roof: lapped, weathered timber boards.
-pub(crate) const ROOF: SurfacePack = SurfacePack {
-    pack: "dark_planks",
-    authored_m: 2.0,
-};
-
-/// The [`ROOF`] pack's lane of [`BuildingSurface`].
+/// The the secondary palette lane pack's lane of [`BuildingSurface`].
 #[derive(ShaderType, Reflect, Debug, Clone, Default)]
 pub(crate) struct BuildingSurfaceParams {
     /// `x`: the roof pack's repeats per metre. `yzw`: unused.
     pub roof: Vec4,
 }
 
-/// The roof's half of [`BuildingMaterial`]: the [`ROOF`] pack's three maps and their scale. Bindings
+/// The roof's half of [`BuildingMaterial`]: the the secondary palette lane pack's three maps and their scale. Bindings
 /// start at 100, bevy's convention for a material extension, clear of the `StandardMaterial` slots.
 #[derive(Asset, AsBindGroup, Reflect, Debug, Clone)]
 pub(crate) struct BuildingSurface {
@@ -133,6 +162,19 @@ impl MaterialExtension for BuildingSurface {
 
     fn prepass_fragment_shader() -> ShaderRef {
         PREPASS_SHADER.into()
+    }
+
+    fn specialize(
+        _pipeline: &bevy::pbr::MaterialExtensionPipeline,
+        _descriptor: &mut bevy::render::render_resource::RenderPipelineDescriptor,
+        layout: &bevy::mesh::MeshVertexBufferLayoutRef,
+        _key: bevy::pbr::MaterialExtensionKey<Self>,
+    ) -> Result<(), bevy::render::render_resource::SpecializedMeshPipelineError> {
+        assert!(
+            layout.0.contains(Mesh::ATTRIBUTE_UV_1),
+            "every building mesh carries its authored palette lane and hole tag in UV1"
+        );
+        Ok(())
     }
 }
 
@@ -168,12 +210,13 @@ pub(crate) fn material(
     let load = |pack: &SurfacePack, map: &str, encoding: MapEncoding| {
         surface_map(server, &pack.path(map), encoding, MapTiling::Repeat)
     };
-    let wall_albedo = load(&WALL, "diff", MapEncoding::Srgb);
-    let wall_normal = load(&WALL, "nor_gl", MapEncoding::Linear);
-    let wall_arm = load(&WALL, "arm", MapEncoding::Linear);
-    let roof_albedo = load(&ROOF, "diff", MapEncoding::Srgb);
-    let roof_normal = load(&ROOF, "nor_gl", MapEncoding::Linear);
-    let roof_arm = load(&ROOF, "arm", MapEncoding::Linear);
+    let [wall, roof] = palette();
+    let wall_albedo = load(wall, "diff", MapEncoding::Srgb);
+    let wall_normal = load(wall, "nor_gl", MapEncoding::Linear);
+    let wall_arm = load(wall, "arm", MapEncoding::Linear);
+    let roof_albedo = load(roof, "diff", MapEncoding::Srgb);
+    let roof_normal = load(roof, "nor_gl", MapEncoding::Linear);
+    let roof_arm = load(roof, "arm", MapEncoding::Linear);
     commands.insert_resource(BuildingMaps([
         wall_albedo.id(),
         wall_normal.id(),
@@ -192,16 +235,15 @@ pub(crate) fn material(
             // B metallic, one image feeding both slots.
             occlusion_texture: Some(wall_arm.clone()),
             metallic_roughness_texture: Some(wall_arm),
-            // Factors the maps are multiplied by: 1.0 passes each roughness map through, and a
-            // hard-zero metallic keeps brick and timber dielectric whatever a pack's B holds.
+            // DERIVED identity factors: the declared pack's ARM channels supply both values.
             perceptual_roughness: 1.0,
-            metallic: 0.0,
-            uv_transform: Affine2::from_scale(Vec2::splat(WALL.uv_per_m())),
+            metallic: 1.0,
+            uv_transform: Affine2::from_scale(Vec2::splat(wall.uv_per_m())),
             ..default()
         },
         extension: BuildingSurface {
             params: BuildingSurfaceParams {
-                roof: Vec4::new(ROOF.uv_per_m(), 0.0, 0.0, 0.0),
+                roof: Vec4::new(roof.uv_per_m(), 0.0, 0.0, 0.0),
             },
             roof_albedo,
             roof_normal,
@@ -211,13 +253,6 @@ pub(crate) fn material(
     })
 }
 
-/// The horizontal axis a box's roof boards run along: its longer horizontal side (`Z` on a tie),
-/// in the prototype's local frame. `min`/`max` are the prototype's box.
-pub(crate) fn ridge_axis(min: [f32; 3], max: [f32; 3]) -> Vec3 {
-    let size = Vec3::from_array(max) - Vec3::from_array(min);
-    if size.x > size.z { Vec3::X } else { Vec3::Z }
-}
-
 /// A building's view mesh: the unit cube its block transform scales, the collider's own shape, so
 /// the drawn silhouette is the block's. Each face carries its own frame: outward normal `n`, tangent
 /// `t` (the image's right, `u` increasing) and image-up `b = n × t` (tangent `w = +1`), with
@@ -225,21 +260,22 @@ pub(crate) fn ridge_axis(min: [f32; 3], max: [f32; 3]) -> Vec3 {
 /// That is the frame bevy's normal mapping reads (`B = w · N × T`, a `nor_gl` map's green toward
 /// image-up), and the one the vertex stage rescales to metres (module doc).
 ///
-/// Walls stand their image upright (`b = +Y`); the top's `t` is `ridge` ([`ridge_axis`]).
-pub(crate) fn unit_box(ridge: Vec3) -> Mesh {
+/// Walls use the upright image convention; the top tangent and every face's lane are authored.
+pub(crate) fn unit_box(top_tangent: Vec3, lanes: &[SurfaceLane; 6]) -> Mesh {
     // (outward normal, tangent). A wall's tangent is `Y × n`, which makes its image-up `+Y`.
     let faces = [
         (Vec3::X, Vec3::Y.cross(Vec3::X)),
         (Vec3::NEG_X, Vec3::Y.cross(Vec3::NEG_X)),
         (Vec3::Z, Vec3::Y.cross(Vec3::Z)),
         (Vec3::NEG_Z, Vec3::Y.cross(Vec3::NEG_Z)),
-        (Vec3::Y, ridge),
+        (Vec3::Y, top_tangent),
         // The bottom sits in the ground skirt and is never seen; any frame in its plane serves.
         (Vec3::NEG_Y, Vec3::X),
     ];
+    let mut packs = Vec::new();
     let (mut positions, mut normals, mut tangents, mut uvs, mut indices) =
         (Vec::new(), Vec::new(), Vec::new(), Vec::new(), Vec::new());
-    for (n, t) in faces {
+    for ((n, t), lane) in faces.into_iter().zip(lanes) {
         let b = n.cross(t);
         let first = positions.len() as u16;
         // Counter-clockwise seen from outside: bottom-left, bottom-right, top-right, top-left.
@@ -249,6 +285,7 @@ pub(crate) fn unit_box(ridge: Vec3) -> Mesh {
             normals.push(n.to_array());
             tangents.push(t.extend(1.0).to_array());
             uvs.push([p.dot(t), -p.dot(b)]);
+            packs.push([lane.index() as f32, 0.0]);
         }
         indices.extend([0, 1, 2, 0, 2, 3].map(|k| first + k));
     }
@@ -257,6 +294,7 @@ pub(crate) fn unit_box(ridge: Vec3) -> Mesh {
         .with_inserted_attribute(Mesh::ATTRIBUTE_NORMAL, normals)
         .with_inserted_attribute(Mesh::ATTRIBUTE_TANGENT, tangents)
         .with_inserted_attribute(Mesh::ATTRIBUTE_UV_0, uvs)
+        .with_inserted_attribute(Mesh::ATTRIBUTE_UV_1, packs)
         .with_inserted_indices(Indices::U16(indices))
 }
 
@@ -302,9 +340,9 @@ mod tests {
         }
     }
 
-    /// Every vertex of `unit_box(ridge)`: position, normal, tangent (xyz, w) and uv.
+    /// Every vertex of `unit_box(ridge, &[SurfaceLane::Primary; 6])`: position, normal, tangent (xyz, w) and uv.
     fn corners(ridge: Vec3) -> Vec<(Vec3, Vec3, Vec4, Vec2)> {
-        let mesh = unit_box(ridge);
+        let mesh = unit_box(ridge, &[SurfaceLane::Primary; 6]);
         let positions = vec3s(&mesh, Mesh::ATTRIBUTE_POSITION);
         let normals = vec3s(&mesh, Mesh::ATTRIBUTE_NORMAL);
         let Some(VertexAttributeValues::Float32x4(tangents)) =
@@ -341,6 +379,9 @@ mod tests {
                 let b = t.w * n.cross(t.truncate());
                 assert_eq!(uv, Vec2::new(p.dot(t.truncate()), -p.dot(b)), "corner {p}");
                 assert_eq!(t.w, 1.0);
+                if n == Vec3::Y {
+                    assert_eq!(t.truncate(), ridge, "the authored top tangent is preserved");
+                }
                 assert_eq!(t.truncate().dot(n), 0.0, "the tangent lies in the face");
             }
         }
@@ -352,7 +393,7 @@ mod tests {
     /// building the simulation does not have.
     #[test]
     fn the_box_is_the_unit_cube_wound_outward() {
-        let mesh = unit_box(Vec3::Z);
+        let mesh = unit_box(Vec3::Z, &[SurfaceLane::Primary; 6]);
         let positions = vec3s(&mesh, Mesh::ATTRIBUTE_POSITION);
         let normals = vec3s(&mesh, Mesh::ATTRIBUTE_NORMAL);
         assert!(
@@ -382,8 +423,8 @@ mod tests {
     }
 
     /// WALLS STAND, THE ROOF RUNS ALONG THE RIDGE. Bricks lie in horizontal courses only if every
-    /// wall's image-up is world-up; the roof's boards run along the box's longer side only if the
-    /// top face's tangent is the ridge axis.
+    /// wall's image-up is world-up; the top face preserves its authored tangent independently
+    /// of the box's proportions.
     #[test]
     fn walls_stand_upright_and_the_roof_runs_along_the_ridge() {
         for ridge in [Vec3::X, Vec3::Z] {
@@ -398,13 +439,27 @@ mod tests {
         }
     }
 
-    /// The ridge is the box's longer horizontal side (house_proxy fixture data: 4 m by 6 m, so Z).
+    /// The shared shader requires exactly one declared maps visual per lane. A missing or
+    /// duplicate assignment is a load refusal, never a material-name or orientation default.
     #[test]
-    fn the_ridge_runs_along_the_longer_horizontal_side() {
-        assert_eq!(ridge_axis([-2.0, -0.5, -3.0], [2.0, 2.5, 3.0]), Vec3::Z);
-        assert_eq!(ridge_axis([-3.0, -0.5, -2.0], [3.0, 2.5, 2.0]), Vec3::X);
-        // Height never decides it: a tall, deep tower still ridges along its deeper side.
-        assert_eq!(ridge_axis([-1.0, 0.0, -2.0], [1.0, 30.0, 2.0]), Vec3::Z);
+    fn palette_assignments_are_complete_and_unique() {
+        let visual = |key: &str, lane: &str| {
+            format!(
+                "{key:?}: Maps(maps: {key:?}, metres_per_repeat: (1.0, Tuned(\"ASSUMED fixture\")), building_lane: Some({lane}), takes_paint: false),"
+            )
+        };
+        let primary = visual("first", "Primary");
+        let secondary = visual("second", "Secondary");
+        assert!(palette_of(&format!("(visuals: {{{primary}{secondary}}})")).is_ok());
+        for rows in [
+            primary.clone(),
+            format!("{primary}{}", visual("third", "Primary")),
+        ] {
+            let error = palette_of(&format!("(visuals: {{{rows}}})"))
+                .err()
+                .expect("bad palette must refuse");
+            assert!(error.contains("building_lane"), "{error}");
+        }
     }
 
     /// THE SHIPPED MAPS ARE WHAT THE MATERIAL BINDS. Each of the six is a real KTX2 (not a Git LFS
@@ -417,7 +472,7 @@ mod tests {
         use bevy::image::{CompressedImageFormats, ktx2_buffer_to_image};
         // 1024² ⇒ 11 levels down to 1×1.
         const FULL_MIP_CHAIN: u32 = 11;
-        for pack in [&WALL, &ROOF] {
+        for pack in palette() {
             for (map, is_srgb) in [("diff", true), ("nor_gl", false), ("arm", false)] {
                 let path = pack.path(map);
                 let full = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))

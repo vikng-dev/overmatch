@@ -16,7 +16,7 @@
 // (2.0, 2.5, 3.0))`, and `house_1` keeps that box's footprint and skirt.
 {
     "house_proxy": Structure(asset: "house_1"),
-    "church_proxy": Building(min: (-15.0, -18.5, -7.5), max: (15.0, 18.5, 7.5), substance: "Brick"),
+    "church_proxy": Building(min: (-15.0, -18.5, -7.5), max: (15.0, 18.5, 7.5), substance: "Brick", surface: (faces: (Primary, Primary, Primary, Primary, Secondary, Primary), top_tangent: (0.0, 0.0, 1.0))),
     "fir_tree_01_a_LOD2": Tree(asset: "fir_1"),
     "fir_tree_01_b_LOD2": Tree(asset: "fir_1"),
     "fir_tree_01_c_LOD2": Tree(asset: "fir_1"),
