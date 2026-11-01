@@ -1702,6 +1702,101 @@ pub(crate) mod tests {
         }
     }
 
+    /// The game's damage model and environment construction: implicit belt contacts must enter
+    /// the real trunk load reader. A convex hull alone cannot prove this route; this fixture is
+    /// a spawned tree with TreeBody and TreeSegment, and a source clear of solver contacts.
+    /// FIXTURE DATA: a lateral press above the trunk's strength limit must open a joint.
+    #[test]
+    fn a_trunk_reads_implicit_belt_contacts_and_breaks_under_their_load() {
+        use avian3d::prelude::{ColliderDensity, Gravity, PhysicsPlugins};
+        use bevy::time::TimeUpdateStrategy;
+        use std::time::Duration;
+        let mut app = App::new();
+        app.add_plugins((
+            MinimalPlugins,
+            bevy::transform::TransformPlugin,
+            AssetPlugin::default(),
+            PhysicsPlugins::default(),
+            crate::contact_transfer::sim_plugin,
+            sim_plugin,
+        ))
+        .init_asset::<Mesh>()
+        .insert_resource(Gravity::ZERO)
+        .insert_resource(fixture_grid(|_, _| 0.0))
+        .insert_resource(TimeUpdateStrategy::ManualDuration(Duration::from_micros(
+            15_625,
+        )));
+        while app.plugins_state() == bevy::app::PluginsState::Adding {
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        app.finish();
+        app.cleanup();
+        let kind = fixture_kind();
+        let tree = {
+            let world = app.world_mut();
+            let mut queue = bevy::ecs::world::CommandQueue::default();
+            let mut commands = Commands::new(&mut queue, world);
+            let root = spawn(
+                &mut commands,
+                &kind,
+                MapInstance {
+                    id: "fixture".to_owned(),
+                    ordinal: 0,
+                },
+                Transform::IDENTITY,
+            );
+            queue.apply(world);
+            root
+        };
+        let source = app
+            .world_mut()
+            .spawn((
+                RigidBody::Dynamic,
+                Position(Vec3::X * 10.0),
+                Collider::cuboid(1.0, 1.0, 1.0),
+                ColliderDensity(1000.0),
+            ))
+            .id();
+        for _ in 0..3 {
+            app.update();
+        }
+        assert_eq!(
+            app.world().get::<TreeState>(tree),
+            Some(&TreeState::Standing)
+        );
+        let collider = app.world().get::<TreeParts>(tree).unwrap().0[1];
+        app.world_mut().resource_mut::<ContactTransfers>().stage(
+            crate::contact_transfer::AppliedContact {
+                structure: tree,
+                structure_collider: collider,
+                body: source,
+                point: Vec3::Y * 3.0,
+                normal: Vec3::X,
+                force: Vec3::X * 1.0e9,
+                closing_speed: 0.0,
+            },
+        );
+        app.update();
+        let transfers = app.world().resource::<ContactTransfers>();
+        assert!(
+            transfers
+                .split()
+                .any(|(p, ..)| p.structure == tree && p.body_collider.is_none()),
+            "the physics step publishes an implicit belt point"
+        );
+        assert!(
+            app.world().get::<TrunkState>(tree).unwrap().cut().is_some(),
+            "the trunk reader must apply the implicit press to its joints"
+        );
+        assert!(
+            matches!(
+                app.world().get::<TreeState>(tree),
+                Some(TreeState::Down { .. })
+            ),
+            "the structural cut drives the tree state"
+        );
+    }
+
     /// A sleeping contact starts no structural run: the last awake step checked its press and
     /// the standing trunk has no topology change until it falls. Server work relies on this;
     /// re-running the laws would mark TrunkState changed. A cube asleep on the standing fixture
