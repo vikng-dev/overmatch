@@ -198,8 +198,13 @@ reconstructs without a fixed update and reconnects to a new authority whose Batt
 number coincides with the previous authority's.
 
 The release smoke (`scripts/ci/archive-smoke.sh`) uses the shipped mode. The harness claims its
-input slot during fill-up but advances its script only after replicated combat release; the
-watchdog budgets both the remaining fill-up and the released script separately.
+input slot during fill-up but advances its script only after replicated combat release on a
+synchronized local timeline (lightyear files a slot's command only from one, so an earlier tick
+would never reach the wire); the watchdog budgets both the remaining fill-up, read from that same
+synchronized tick, and the released script separately. Every measurement window opens at the
+release too: the cost recorder counts and writes only played ticks (`state::MatchCommands`, the
+hold the netcode layer publishes to the sim), and the frame-stream runners take the harness's
+`released` line as their window origin.
 
 MEASURED 2026-11-01 for `lane/sweep-net-7`: the end-of-lane smoke ran once with this bay's dev
 server and client, headless and unattended under the machine lock on loopback. The client
@@ -207,6 +212,17 @@ connected and claimed its input slot during fill-up. Its harness clock reported 
 1.628 s, combat release at 61.093 s (script tick zero), and completion at 65.088 s after 256 idle
 script ticks; exit status was zero. Formatting, CI clippy, targeted suites and the final whole-tree
 `doc_citations`, `ui_ascii`, `net_boundary` and `bake::` guards passed.
+
+MEASURED 2026-11-02 for `lane/sweep-net-8`, the same smoke the same way: the slot at 1.503 s,
+combat release at 60.963 s (script tick zero, client tick 3903), completion at 64.950 s after 256
+idle script ticks, exit status zero. The shortest cost run (`scripts/cost/run.sh loft1`, a
+640-tick script, headless under the machine lock) took its slot at 1.714 s, was released at
+61.222 s and completed at 71.216 s; its client stream holds 256 tick rows (t 384..639) and the
+server's 260 (t 384..643, the four ticks until cleanup): no fill-up tick in either percentile
+table. The ordering mutant of `protocol::install_shot_clock` (the `before(GameplaySet)` removed)
+fails `the_clock_is_published_before_every_gameplay_reader` with a `ShotClock` access conflict;
+the restored ordering passes it. Formatting, CI clippy, the targeted suites and the whole-tree
+guards passed.
 
 ## World-reset review
 
@@ -238,3 +254,39 @@ Both blind reviews concern the game's match flow and damage model, game state on
 | Claude | Harness scripts run out inside fill-up and silently exercise no combat | verified, already fixed on main | `net: start harness scripts at combat release (#253)`; `held_ticks_advance_nothing_and_release_writes_tick_zero` and the end-of-lane smoke verify the production release clock |
 | Claude | Crowded-placement prose says combat queues the fresh layout | verified: `Boundary::FillUp` queues it; combat retains those tanks | `docs: record the fill-up review and measured release smoke (#253)` |
 | Lane | The narrative names a pre-merge protocol revision instead of the current wire contract | verified against `net::protocol::PROTOCOL_REV` | `docs: record the fill-up review and measured release smoke (#253)`; refer to the contract's symbol |
+
+## Harness combat-start review
+
+Two blind reviews of the combat-start harness lane; both concern the game's scripted client,
+its watchdog and the measurement scripts, game state only. Main had already landed sweep-net-7,
+sweep-drive-7 (REV 63, which republishes the timeline for fire and deadline clocks and leaves the
+client's sync state untouched) and the smoke's mode-file fix when these were verified.
+
+| reviewer | finding | verified / not a defect | fixed in (subject) |
+|---|---|---|---|
+| Codex, Claude | Script ticks advance before timeline sync, so a late joiner's tick-0 click is spent and never filed | verified: lightyear's `buffer_action_state` reads `SyncedLocalTimeline`, which skips the system while `LocalTimelineSync::is_synced()` is false; REV 63 does not touch it; the held-ticks test now covers a combat snapshot on an unsynchronized timeline | `net: release the harness script on the synchronized timeline (#253)`; `buffer_input` releases only when the phase is combat and the timeline is synced |
+| Codex, Claude | The watchdog's launch bound reads the remaining fill-up against an unsynchronized local tick, once | verified: before sync the tick counts from this process's launch, so the remainder reads the server's uptime | same commit: the watchdog accounts the fill-up only from a synced timeline, and a late join (combat first) adds none |
+| Codex, Claude | Measurement windows and bounds count from launch or the first frame row, not from release | verified: `SPIKE_COST_WARMUP` skipped 384 recorder ticks from startup; `run-online-cost.sh`, `run-debris-stress.sh` and `run-pencam-cost.sh` opened at WARMUP_S of app time | `scripts: open every measurement window at combat release (#253)`; the cost recorder counts played ticks only, the frame-stream runners take the harness's `released` line as their origin, the debris runner waits for every client's release |
+| Claude | P1: the smoke read `fill_up_s` from the server tarball, which never ships the mode file | verified: fixed on main | `ci: read the smoke's fill-up from the checkout's mode file (#253)` |
+| Claude | `batch.sh`'s 90 s kill fires before a healthy run through the fill-up ends | verified: 3–20 s startup + 60 s fill-up + 9.4 s | `scripts: open every measurement window at combat release (#253)`; the bound is DERIVED from the mode file and the watchdog's two slacks |
+| Claude | Stale prose in four runners (input-slot windows, "+128 ticks outlives the later start", "the opponent has exited by now") | verified | same commit; the pen cam runner now spans from the release, so the opponent really has exited |
+| Claude | Two bools beside the clock enum can represent impossible launch states | verified | `net: release the harness script on the synchronized timeline (#253)`; `ScriptClock` is `AwaitingSlot`, `AwaitingFillUp`, `AwaitingRelease`, `Released` |
+| Claude | The smoke's awk ceiling compares text, so `fill_up_s: 60.0` rounds to 61 | verified (MEASURED: the shared helper reads 60 for `60.0` and 60 for `59.25`) | `scripts: open every measurement window at combat release (#253)`; `scripts/lib/battle-mode.sh` is the one reader |
+| Claude | `SMOKE_TICKS`, `SMOKE_DEADLINE`, `SMOKE_LOGS` have no tracked user | verified: release.yml sets only `SMOKE_EXPECT_API` and `SMOKE_SERVER_ASSET_ROOT` | same commit: deleted; the script length, bound and log directory are fixed |
+| Claude | This record still described the one-rule watchdog | verified: fixed on main | `docs: record the fill-up review and measured release smoke (#253)` |
+
+## Net-7 review
+
+| reviewer | finding | verified / not a defect | fixed in (subject) |
+|---|---|---|---|
+| Codex | No P1–P3 findings | — | — |
+| Claude | The loading latch's pose, body and `Tank` filters guard nothing: `TankViewReady` implies them | verified: `tank::view::bind_tank_view` binds only a root carrying `SimParts`, inserted with the body's `Tank` after the rig attached to the replicated pose | `client: latch the loading screen on the bound view alone (#253)` |
+| Claude | `Flow::Joining`, `FlowFacts::Net` and a fixture still say "replicated" where the latch waits for presentation | verified | same commit |
+| Claude | The three publishers' `init_resource::<AuthorityWorld>` keep a code default no production composition uses | verified: `server::run` always installs the Battle after them | `net: derive the authority world generation from the Battle alone (#253)`; the `Default` is gone, a publisher without a Battle fails at its constructor |
+| Claude | Overlong lines rustfmt gave up on in `score.rs` and `world_reset/tests.rs` | verified: seven lines over 100 columns | `net: reflow the lines rustfmt gave up on (#253)` |
+
+## Drive-7 review, the net path
+
+| reviewer | finding | verified / not a defect | fixed in (subject) |
+|---|---|---|---|
+| Claude | `shot_transport::queue_fire`'s fire-tick arm compares the published clock with itself; the enqueued tick's agreement with the timeline rests on an untested ordering | verified: `shooting::fire` stamps the id from the same `ShotClock` in the same tick | `net: pin the clock publication before every gameplay reader (#238)`; `protocol::install_shot_clock` is the one installation, and its test refuses to build a schedule where the publication is unordered against a gameplay reader |
