@@ -70,11 +70,8 @@ used a doorway point; the final fixture uses the sandbox's actual aimed solid fa
 - D12 and the retired Fir alternative fixed ("scatter: remove the retired graybox fir path"): delete variant, constants,
   collider/view arms, obsolete arguments and the ignored comparison bed. Shipped trees remain.
 - D11 left as instructed: terrain-pack schema/loader work is not a data-only fix.
-- The three original P3s remain uncommitted: waiting presentation cursor before synchronization,
-  checked replica segment conversion and typed tree-word errors. Their implementation passed
-  CI clippy, but its targeted test build did not finish within the clock window.
-- Two additional review P2s remain uncommitted: repeated traversal of a convex profile boundary,
-  and a bound tree template with no standing meshes. Guards and regressions were prepared.
+- The three original replica P3s were committed in part 3 ("net: hold the replica's wall view until its clock syncs"): waiting presentation cursor, checked segment conversion and typed tree-word errors.
+- The two additional review P2s were committed in part 3 ("buildings: refuse a profile boundary traced twice" and "trees: refuse a part binding that draws no mesh"). The first guard still admitted a dense star inside the plane tolerance; part 4 verifies and fixes that distinct-vertex counterexample.
 
 ## Verification and handoff
 
@@ -96,9 +93,9 @@ Subject: the game's environment destruction, game state only. Two blind reviews 
 Codex, one Claude) were each decided against the code before any fix; the per-finding verdicts
 went to the orchestrator. Commits, by subject:
 
-- "buildings: refuse a profile boundary traced twice" (both reviewers' P2). With distinct
-  vertices, every vertex inside every edge's half-plane admits only a simple convex boundary: a
-  second winding must step over a strict hull corner, which leaves that corner outside the edge.
+- "buildings: refuse a profile boundary traced twice" (both reviewers' P2). Repeated vertices are refused. The half-plane test still admitted a distinct-vertex dense
+  star whose crossings fit inside its distance tolerance; part 4 adds the independent
+  topological crossing refusal.
 - "trees: refuse a part binding that draws no mesh" (both). The patch's empty-merged-view check
   passed a template missing one trunk's mesh alone; every trunk and cap binding must now be some
   mesh's nearest binding.
@@ -143,8 +140,11 @@ joint's traction then meets its own strength as now. For a loose group, the same
 the group's own accelerating frame (d'Alembert): the body force per unit mass is `g − a − α × r −
 ω × (ω × r)` and its contacts' impulses are loads at their points, so uniform free fall loads
 nothing (DERIVED) while a landing or a spin loads seams, and an overloaded seam splits the body.
-Obstacles: the substances carry no elastic modulus yet (a material truth to add, with
-provenance); a split must spawn new bodies from the group's chunk data at the split tick and
+The material rows already carry Young's modulus in `bulk.blast.youngs_modulus`, parsed by
+`substances` and used by `Spall::of`. A stiffness solve instead lacks joint thickness and the
+attachment stiffness of an `OpeningOnly` fixing: neither `Joint` nor `Seam` states them. They
+would need sourced construction facts; another material modulus would duplicate existing data.
+A split must spawn new bodies from the group's chunk data at the split tick and
 replicate the split as a record event (the wire changes, PROTOCOL_REV bumps); and the contact
 impulses a loose body receives are read in `src/contact_transfer.rs`, outside this lane's files.
 That is a lane of its own.
