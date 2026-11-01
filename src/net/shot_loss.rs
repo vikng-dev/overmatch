@@ -429,6 +429,7 @@ fn spawn_owned_shooter(
                 SHOOTER_COMBATANT,
                 NetCrew {
                     volumes: vec![VolumeSnapshot {
+                        repair: None,
                         held: OWNER_SNAPSHOT_HELD,
                         crew: None,
                     }],
@@ -1156,6 +1157,7 @@ fn every_shot_spawns_exactly_one_shell_under_ten_percent_loss() {
         .any(|(crew, gate)| {
             crew.volumes
                 == [VolumeSnapshot {
+                    repair: None,
                     held: OWNER_SNAPSHOT_HELD,
                     crew: None,
                 }]

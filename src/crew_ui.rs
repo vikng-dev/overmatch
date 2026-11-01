@@ -1,4 +1,4 @@
-//! The game's damage-model view: controlled-tank crew status and swap selection.
+//! The game's damage-model view: controlled-tank crew, weapon and repair status, and swap selection.
 //!
 //! UI selection emits [`CrewSwap`]; simulation validates and executes the swap.
 
@@ -169,7 +169,8 @@ fn round_line(weapon_name: &str, rounds: &[WeaponRound], load: &WeaponLoad) -> O
 
 /// Render the controlled tank's vitals card: crew available/total, Drive + Gunner-sight effectiveness,
 /// each weapon's reload/fire state (`READY` / `x.xs` / `no-fire`), and the round choice of each
-/// weapon that has one ([`round_line`]). A pure view over the controlled tank's local components.
+/// weapon that has one ([`round_line`]), plus module repair progress and readiness.
+/// A pure view over the controlled tank's local components.
 #[expect(
     clippy::too_many_arguments,
     reason = "a view over the controlled tank's crew, weapons, gates and clocks, writing one panel"
@@ -192,6 +193,14 @@ fn update_status_panel(
     loads: Query<&WeaponLoads>,
     weapon_clock: Res<crate::WeaponClock>,
     fixed_time: Res<Time<Fixed>>,
+    modules: Query<
+        (
+            &Name,
+            &crate::ballistics::ComponentHealth,
+            &crate::damage::repair::ModuleRepair,
+        ),
+        With<crate::damage::FunctionRole>,
+    >,
     facets: Query<VolumeFacets>,
     mut panel: Query<(&mut Text, &mut Visibility), With<StatusPanelText>>,
 ) {
@@ -289,8 +298,36 @@ fn update_status_panel(
         .map(|ko| format!("KNOCKED OUT ({})", ko.reason.label()))
         .unwrap_or_else(|| "ALIVE".to_string());
 
+    // The tank also owns armor, crew and ammunition volumes; only module functions get rows.
+    let mut module_rows: Vec<_> = volumes
+        .iter()
+        .filter_map(|volume| {
+            modules.get(volume).ok().map(|(name, health, repair)| {
+                let status = match repair.fraction(health) {
+                    Some(fraction) => format!("REPAIR {:.0}%", (fraction * 100.0).floor()),
+                    None if health.is_empty() => "OUT OF ACTION".to_owned(),
+                    None => "READY".to_owned(),
+                };
+                (name.as_str(), format!("\n{name}: {status}"))
+            })
+        })
+        .collect();
+    module_rows.sort_by_key(|(name, _)| *name);
+    let repairing = volumes.iter().any(|volume| {
+        modules
+            .get(volume)
+            .is_ok_and(|(_, _, repair)| repair.elapsed.is_some())
+    });
+    let repair_hint = if knocked_out.is_some() {
+        "Repair unavailable"
+    } else if repairing {
+        "Repairing — F cancels"
+    } else {
+        "F — repair modules"
+    };
+    let module_lines: String = module_rows.into_iter().map(|(_, row)| row).collect();
     let card = format!(
-        "{state}\nCrew {alive}/{total}\n{} {}%   Gunner {}%\nWeapons: {}{round_lines}",
+        "{state}\nCrew {alive}/{total}\n{} {}%   Gunner {}%\nWeapons: {}{round_lines}\n{repair_hint}{module_lines}",
         Capability::Drive.label(),
         (drive * 100.0).round() as i32,
         (gunner * 100.0).round() as i32,

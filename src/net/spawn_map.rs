@@ -24,9 +24,10 @@ use crate::ui_font::UiFonts;
 
 /// Opens / closes the map. Free in the game client (`command::Bindings` and the screens' own
 /// keys): W/A/S/D drive, Space is the secondary trigger, R respawns, Q/E step the round, V
-/// toggles the fuze, C holds the kill cam, X is the x-ray, Lshift switches view, Tab is SP-only,
-/// G is the dev-tools toggle, 1–5 are crew stations, F3 is the debug panel, Esc is the menu. B, F
-/// and T are unbound. (The track sandbox's `M` is a different binary.)
+/// toggles the fuze, C holds the kill cam, X is the x-ray, Lshift switches view, Tab holds the scoreboard,
+/// G is the dev-tools toggle, 1–5 are crew stations, F3 is the debug panel, Esc is the menu.
+/// The game's damage model uses F to start/cancel module repair. B and T are unbound.
+/// The offline mode uses Tab for possession; the track sandbox's M is a different binary.
 const SPAWN_MAP_KEY: KeyCode = KeyCode::KeyM;
 
 /// Half-extent of the terrain square, metres — the LIVE world's, read off the decoded grid

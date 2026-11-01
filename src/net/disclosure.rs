@@ -139,8 +139,8 @@ mod tests {
     /// The owner-only scope through replicon's own send path: one tank root replicated to its owner
     /// and to one other client. The owner receives every scoped component; the other client
     /// receives the public crank speed and none of the scoped state. Dropping a component from
-    /// [`CombatDisclosure`]'s `Scope` hands it to the non-owner and fails here — which is the
-    /// whole of what makes the transmission (and the shaped drive signal) owner-only.
+    /// [`CombatDisclosure`]'s `Scope` hands it to the non-owner and fails here. The game's
+    /// damage model includes module repair progress in this owner-only combat snapshot.
     #[test]
     fn scoped_drivetrain_state_reaches_only_the_owner() {
         use bevy::state::app::StatesPlugin;
@@ -160,6 +160,7 @@ mod tests {
             ))
             .replicate::<TankTransmission>()
             .replicate::<DriveSignal>()
+            .replicate::<NetCrew>()
             .replicate::<EngineRpm>();
         }
         server.add_visibility_filter::<CombatDisclosure>();
@@ -176,8 +177,17 @@ mod tests {
             throttle: 0.5,
             steer: -0.25,
         };
+        let repair_snapshot = NetCrew {
+            volumes: vec![super::super::protocol::VolumeSnapshot {
+                held: 0,
+                crew: None,
+                repair: Some(0.25),
+            }],
+            swap: None,
+        };
         server.world_mut().spawn((
             Replicated,
+            repair_snapshot.clone(),
             CombatDisclosure::owner(owner_link),
             transmission,
             signal,
@@ -195,24 +205,35 @@ mod tests {
                 Option<&TankTransmission>,
                 Option<&DriveSignal>,
                 Option<&EngineRpm>,
+                Option<&NetCrew>,
             ), With<Remote>>();
             let rows: Vec<_> = query
                 .iter(world)
-                .map(|(transmission, signal, rpm)| {
-                    (transmission.copied(), signal.copied(), rpm.copied())
+                .map(|(transmission, signal, rpm, crew)| {
+                    (
+                        transmission.copied(),
+                        signal.copied(),
+                        rpm.copied(),
+                        crew.cloned(),
+                    )
                 })
                 .collect();
             assert_eq!(rows.len(), 1, "the tank root replicates to every client");
-            rows[0]
+            rows[0].clone()
         };
         assert_eq!(
             received(&mut owner),
-            (Some(transmission), Some(signal), Some(EngineRpm(712))),
+            (
+                Some(transmission),
+                Some(signal),
+                Some(EngineRpm(712)),
+                Some(repair_snapshot)
+            ),
             "the owner receives the transmission, the drive signal and the public rpm"
         );
         assert_eq!(
             received(&mut other),
-            (None, None, Some(EngineRpm(712))),
+            (None, None, Some(EngineRpm(712)), None),
             "another client receives the public rpm, never the transmission or the drive signal"
         );
     }

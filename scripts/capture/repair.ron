@@ -1,0 +1,15 @@
+// The game's damage model: synthetic out-of-action module pools, then the production repair
+// command, timers and own-tank panel. Hidden/silent evidence for #244. ASSUMED cue/frame times.
+// Set OVERMATCH_UNATTENDED=1, OVERMATCH_WINDOW=hidden, and OVERMATCH_CAPTURE to this plan, then
+// run under /usr/bin/lockf -k -t 10800 /tmp/overmatch-cargo.lock target/debug/overmatch --offline.
+// For a requested evidence directory, copy the plan and change frames.out before running.
+(
+    frames: (
+        out: "target/capture/repair/panel.png",
+        at: [20.0, 40.0],
+        size: (1920, 1080),
+        ui: true,
+        gizmos: false,
+    ),
+    repair: (at: 12.0, modules: [Engine, Transmission, Breech]),
+)

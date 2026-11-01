@@ -357,7 +357,11 @@ mod tests {
     fn a_drop_short_of_a_whole_point_raises_no_flash() {
         use crate::ballistics::POOL_UNITS_PER_HP;
         let net = |held: u32| NetCrew {
-            volumes: vec![super::super::protocol::VolumeSnapshot { held, crew: None }],
+            volumes: vec![super::super::protocol::VolumeSnapshot {
+                held,
+                crew: None,
+                repair: None,
+            }],
             swap: None,
         };
         let full = slot_memory(&net(30 * POOL_UNITS_PER_HP));

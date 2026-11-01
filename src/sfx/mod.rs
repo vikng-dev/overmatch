@@ -228,6 +228,7 @@ pub(crate) fn mount_fire_click(app: &mut App) {
 /// edge a fixed tick consumes, so reading it here would click again on every frame the latch
 /// survives — this reads the binding exactly as `command::gather_commands` does. It plays on every
 /// physical press: the click is the switch, and the reload gate belongs to the gun.
+/// The game's damage model reuses this switch click for the repair button.
 fn play_fire_click(
     bindings: Res<Bindings>,
     keys: Res<ButtonInput<KeyCode>>,
@@ -235,7 +236,9 @@ fn play_fire_click(
     clips: Res<SfxClips>,
     mut commands: Commands,
 ) {
-    if !bindings.fire_primary.just_pressed(&keys, &mouse) {
+    if !bindings.fire_primary.just_pressed(&keys, &mouse)
+        && !bindings.repair.just_pressed(&keys, &mouse)
+    {
         return;
     }
     commands.spawn((

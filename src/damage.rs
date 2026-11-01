@@ -22,6 +22,8 @@ use bevy::ecs::system::SystemParam;
 use bevy::prelude::*;
 use serde::{Deserialize, Serialize};
 
+pub(crate) mod repair;
+
 use crate::ShotId;
 use crate::ballistics::ComponentHealth;
 use crate::command::{ConsumeCommandEdges, CrewSwap, TankCommand};
@@ -153,6 +155,7 @@ pub const SWAP_SECONDS: f32 = 4.0;
 /// a weapon gated on its own barrel needs a barrel function no other weapon's barrel serves: the
 /// main gun's ([`Self::GunBarrel`]), the coaxial machine gun's and the bow machine gun's.
 #[derive(Component, Clone, Copy, Debug, PartialEq, Eq, Hash, Deserialize)]
+#[require(repair::ModuleRepair)]
 pub enum FunctionRole {
     Engine,
     Transmission,
@@ -340,6 +343,7 @@ pub(crate) fn knockout_from_counts(crew_in_action: u32, cooked: bool) -> Option<
 pub struct DamageConsequences;
 
 pub fn plugin(app: &mut App) {
+    repair::install(app);
     // A launched turret's colliders change body; the rule keeps their contact pairs naming it.
     app.add_plugins(crate::collider_rehome::plugin);
     // The crew-swap seam: commands start/cancel swaps on the fixed clock (consuming the edge);
@@ -478,6 +482,7 @@ pub struct VolumeFacets {
     pub dead: Option<&'static Dead>,
     pub function: Option<&'static FunctionRole>,
     pub health: Option<&'static ComponentHealth>,
+    pub repair: Option<&'static repair::ModuleRepair>,
 }
 
 /// How well this capability is currently served on this tank, ∈ [0, 1] (0 = unavailable, 1 = full)
@@ -495,6 +500,19 @@ pub fn capability_effectiveness(
     let (Some(tank_volumes), Some(tank_caps)) = (tank_volumes, tank_caps) else {
         return 0.0;
     };
+    // The game's damage model: repair is a tank activity, not a quality supplied by a part.
+    // Close the single Drive capability gate; fire/load/slew still use their authored requirements.
+    if capability == Capability::Drive
+        && tank_volumes.iter().any(|volume| {
+            volumes
+                .get(volume)
+                .expect(LIVE_VOLUME)
+                .repair
+                .is_some_and(|repair| repair.elapsed.is_some())
+        })
+    {
+        return 0.0;
+    }
     let requirement = tank_caps.0.get(&capability).unwrap_or_else(|| {
         panic!(
             "{capability:?}: TankSpec::validate refuses a sheet that does not state every capability"

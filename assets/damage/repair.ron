@@ -1,0 +1,8 @@
+// The game's damage model: one repair work rate shared by every tank.
+(
+    hp_per_second: (20.0, Tuned("provisional playtest balance value, owner mechanism #244:
+        each out-of-action module returns whole at authored HP / this rate.
+        DERIVED: the current Tiger's largest module pool is 479 HP, so its repair takes
+        479 / 20 = 23.95 seconds, within the requested 20–30 second bracket.
+        This is a balance choice, not a physical measurement; judge it in play")),
+)

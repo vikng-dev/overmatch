@@ -37,6 +37,8 @@ pub struct TankCommand {
     pub toggle_fuze: Option<u8>,
     /// Respawn edge; authority validates that this tank is knocked out.
     pub respawn: bool,
+    /// The game's damage model: start or cancel module repair, consumed once.
+    pub repair: bool,
     /// Tick this command was authored for.
     ///
     /// Invariant: the authority commits consumables only when this equals the input tick; levels
@@ -54,6 +56,7 @@ impl TankCommand {
         self.select_round = None;
         self.toggle_fuze = None;
         self.respawn = false;
+        self.repair = false;
     }
 
     /// Fail closed for every consumable: edges plus sustained secondary fire.
@@ -74,6 +77,7 @@ impl TankCommand {
             || self.select_round.is_some()
             || self.toggle_fuze.is_some()
             || self.respawn
+            || self.repair
     }
 
     /// The command of a tank whose death flow owns the device ([`DeviceOwner`]): the respawn edge
@@ -316,6 +320,7 @@ pub struct Bindings {
     pub round_next: ButtonBinding,
     pub round_previous: ButtonBinding,
     pub fuze_mode: ButtonBinding,
+    pub repair: ButtonBinding,
 }
 
 /// Who the player's device speaks for.
@@ -470,6 +475,7 @@ impl Default for Bindings {
             round_previous: ButtonBinding::Key(KeyCode::KeyQ),
             // ASSUMED minimal fuze-mode binding.
             fuze_mode: ButtonBinding::Key(KeyCode::KeyV),
+            repair: ButtonBinding::Key(KeyCode::KeyF),
         }
     }
 }
@@ -636,6 +642,7 @@ pub(crate) fn gather_commands(
         command.steer = bindings.steer.value(&keys);
         // `|=`: a click must survive frames the fixed loop skips, until a tick consumes it.
         command.fire_primary |= bindings.fire_primary.just_pressed(&keys, &mouse);
+        command.repair |= bindings.repair.just_pressed(&keys, &mouse);
         command.fire_secondary = bindings.fire_secondary.pressed(&keys, &mouse);
         // The dial itself (`Ranging`, scroll in the optic) is client-side control state; the
         // command carries its absolute value. `aim` is written by the per-view commit systems.
@@ -807,7 +814,7 @@ mod tests {
     #[test]
     fn clear_edges_resets_every_edge_has_edge_reports() {
         // Each latched-edge variant in isolation: has_edge true, then clear_edges makes it false.
-        let edges: [fn(&mut TankCommand); 5] = [
+        let edges: [fn(&mut TankCommand); 6] = [
             |c| c.fire_primary = true,
             |c| c.crew_swap = Some(CrewSwap::Start(CrewStation::Gunner, CrewStation::Loader)),
             |c| {
@@ -818,6 +825,7 @@ mod tests {
             },
             |c| c.toggle_fuze = Some(0),
             |c| c.respawn = true,
+            |c| c.repair = true,
         ];
         for set_edge in edges {
             let mut command = TankCommand::default();
@@ -842,6 +850,7 @@ mod tests {
             }),
             toggle_fuze: Some(0),
             respawn: true,
+            repair: true,
             for_tick: 0,
         };
         command.clear_edges();
@@ -851,6 +860,34 @@ mod tests {
         assert_eq!(command.aim, Some(AimIntent::World(Vec3::X)));
         assert_eq!(command.range, 800.0);
         assert!(!command.has_edge(), "all edges cleared");
+    }
+
+    /// The game's damage model: a physical held repair key must author one consumable edge.
+    /// Reading the key level instead of its press edge starts/cancels repeatedly and fails here.
+    #[test]
+    fn holding_repair_key_authors_only_one_edge() {
+        use bevy::ecs::system::RunSystemOnce;
+        let mut world = World::new();
+        let bindings = Bindings::default();
+        let ButtonBinding::Key(key) = bindings.repair else {
+            panic!("fixture uses a keyboard repair binding")
+        };
+        world.insert_resource(bindings);
+        world.insert_resource(ButtonInput::<KeyCode>::default());
+        world.insert_resource(ButtonInput::<MouseButton>::default());
+        world.insert_resource(Ranging::default());
+        let tank = world.spawn((Controlled, TankCommand::default())).id();
+        world.resource_mut::<ButtonInput<KeyCode>>().press(key);
+        world.run_system_once(gather_commands).unwrap();
+        assert!(world.get::<TankCommand>(tank).unwrap().repair);
+        world.run_system_once(consume_edges).unwrap();
+        world.resource_mut::<ButtonInput<KeyCode>>().clear();
+        world.run_system_once(gather_commands).unwrap();
+        assert!(!world.get::<TankCommand>(tank).unwrap().repair);
+        world.resource_mut::<ButtonInput<KeyCode>>().release(key);
+        world.resource_mut::<ButtonInput<KeyCode>>().press(key);
+        world.run_system_once(gather_commands).unwrap();
+        assert!(world.get::<TankCommand>(tank).unwrap().repair);
     }
 
     /// One intention, two frames, one point: [`AimIntent`]'s conversions are the seam every

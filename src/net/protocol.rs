@@ -234,7 +234,7 @@ use crate::{CombatantId, CombatantLife, ShotId};
 /// carries only a state word; each freed trunk's TreePiece identifies its map tree and cut.
 /// REV 57: environment ledgers and pose carriers carry `WorldGeneration`; the Battle number
 /// selects a fresh construction and prevents records and streamed pieces crossing Battles.
-pub const PROTOCOL_REV: u32 = 58;
+pub const PROTOCOL_REV: u32 = 59;
 
 /// Compatibility tag derived from the complete pinned wire manifest plus the crate version. This
 /// is the runtime handshake value: version-exact, so a version bump intentionally changes it.
@@ -408,12 +408,15 @@ pub struct VolumeSnapshot {
     pub held: u32,
     /// The occupant facts for a crew seat; `None` for a module or ammo volume.
     pub crew: Option<CrewSnapshot>,
+    /// The game's damage model: owner-only module repair fraction; absent when idle.
+    pub repair: Option<f32>,
 }
 
 /// Owner-private authoritative combat state.
 ///
 /// `volumes` follows `health_bearing_volumes` order on both peers. HP, occupancy, death, and the
-/// in-flight swap are one atomic snapshot; client UI reads it and never predicts those facts.
+/// in-flight swap and module repair progress are one atomic snapshot; client UI reads it and
+/// never predicts those facts.
 #[derive(Component, Clone, Default, PartialEq, Debug, Serialize, Deserialize)]
 pub struct NetCrew {
     /// Every health-bearing volume in [`health_bearing_volumes`] order: HP + (for seats) occupancy.
@@ -617,6 +620,7 @@ pub(crate) fn health_bearing_volumes(
 #[derive(QueryData)]
 struct VolumeSnapshotSource {
     health: &'static ComponentHealth,
+    repair: Option<&'static crate::damage::repair::ModuleRepair>,
     crew: Option<&'static CrewStation>,
     crewman: Option<&'static Crewman>,
     dead: Option<&'static Dead>,
@@ -642,6 +646,7 @@ fn publish_net_crew(
                     .expect("a health bearer is a snapshot source");
                 VolumeSnapshot {
                     held: src.health.held(),
+                    repair: src.repair.and_then(|repair| repair.fraction(src.health)),
                     // A crew seat carries its occupant's home (defaulting to the seat before any
                     // backfill) and the authority's monotonic aliveness.
                     crew: src.crew.map(|seat| CrewSnapshot {
@@ -676,6 +681,7 @@ fn publish_net_crew(
 #[query_data(mutable)]
 struct VolumeSink {
     health: &'static mut ComponentHealth,
+    repair: Option<&'static mut crate::damage::repair::ModuleRepair>,
     crewman: Option<&'static mut Crewman>,
     dead: Has<Dead>,
 }
@@ -712,11 +718,21 @@ fn apply_net_crew(
             );
             continue;
         }
+        if net.volumes.iter().any(|snap| {
+            snap.repair
+                .is_some_and(|fraction| !fraction.is_finite() || !(0.0..=1.0).contains(&fraction))
+        }) {
+            warn!("client: refused a crew snapshot with an invalid module repair fraction");
+            continue;
+        }
         for (volume, snap) in bearers.into_iter().zip(&net.volumes) {
             let mut sink = volumes
                 .get_mut(volume)
                 .expect("a health bearer is a volume sink: `bearers` was filtered on the query");
             sink.health.set_held(snap.held);
+            if let Some(mut repair) = sink.repair {
+                repair.set_fraction(snap.repair, &sink.health);
+            }
             if let Some(crew) = snap.crew {
                 if let Some(mut crewman) = sink.crewman
                     && crewman.home != crew.home
@@ -1067,7 +1083,7 @@ const WIRE_SURFACE_HASH: u64 = 0xc0256acf39c3f9da;
 /// The pinned hash of the OWN wire-facing type DEFINITIONS (field layout, not just names). Re-pin it
 /// whenever a wire-facing struct/enum definition changes; house process also bumps
 /// [`PROTOCOL_REV`]. The tripwire prints the new value. See the block above for the coverage model.
-const WIRE_TYPES_HASH: u64 = 0x9a828006ab344bc9;
+const WIRE_TYPES_HASH: u64 = 0xd1bedda59d0be4cd;
 
 /// The pinned `Cargo.lock` versions of the external crates whose types ride the wire (avian's
 /// replicated physics components; lightyear's wire framing / input protocol). A bump of either can
@@ -2560,6 +2576,7 @@ mod tests {
             }),
             toggle_fuze: Some(0),
             respawn: true,
+            repair: true,
             for_tick: 0,
         };
         let mut world = World::new();
@@ -2594,6 +2611,7 @@ mod tests {
             assert_eq!(cmd.select_round, None, "round-select edge cleared ({lag})");
             assert_eq!(cmd.toggle_fuze, None, "fuze-toggle edge cleared ({lag})");
             assert!(!cmd.respawn, "respawn edge cleared ({lag})");
+            assert!(!cmd.repair, "repair edge cleared ({lag})");
         }
     }
 
@@ -2751,6 +2769,60 @@ mod tests {
         );
     }
 
+    /// The game's damage model: the owner's atomic snapshot must carry both the still-empty
+    /// module and its progress, then the full pool and idle timer together. Either a missing
+    /// publish or a missing apply strands the owner's panel and fails this round trip.
+    #[test]
+    fn module_repair_progress_and_completion_round_trip_in_private_snapshot() {
+        use crate::damage::repair::ModuleRepair;
+        use crate::damage::{FunctionRole, VolumeOf};
+        let mut world = World::new();
+        let source = world.spawn(NetCrew::default()).id();
+        // ASSUMED fixture HP, independent of a tank asset.
+        let mut health = ComponentHealth::full(21);
+        health.drain();
+        let mut repair = ModuleRepair::default();
+        repair.set_fraction(Some(0.25), &health);
+        let module = world
+            .spawn((VolumeOf(source), FunctionRole::Engine, health, repair))
+            .id();
+        world.run_system_once(publish_net_crew).unwrap();
+        let snapshot = world.get::<NetCrew>(source).unwrap().clone();
+        assert_eq!(snapshot.volumes[0].repair, Some(0.25));
+        let replica = world.spawn((Remote, snapshot)).id();
+        let view_module = world
+            .spawn((
+                VolumeOf(replica),
+                FunctionRole::Engine,
+                ComponentHealth::full(21),
+            ))
+            .id();
+        world.run_system_once(apply_net_crew).unwrap();
+        let view_health = world.get::<ComponentHealth>(view_module).unwrap();
+        assert!(view_health.is_empty());
+        assert_eq!(
+            world
+                .get::<ModuleRepair>(view_module)
+                .unwrap()
+                .fraction(view_health),
+            Some(0.25)
+        );
+        world.get_mut::<ComponentHealth>(module).unwrap().refill();
+        world.get_mut::<ModuleRepair>(module).unwrap().elapsed = None;
+        world.run_system_once(publish_net_crew).unwrap();
+        *world.get_mut::<NetCrew>(replica).unwrap() = world.get::<NetCrew>(source).unwrap().clone();
+        world.run_system_once(apply_net_crew).unwrap();
+        let health = world.get::<ComponentHealth>(view_module).unwrap();
+        assert_eq!(health.held(), health.capacity());
+        assert!(
+            world
+                .get::<ModuleRepair>(view_module)
+                .unwrap()
+                .elapsed
+                .is_none()
+        );
+    }
+
     /// The crew-swap false-death tripwire (the corruption this slice ends). Builds the exact
     /// post-corruption local state the OLD client path produced on a `Remote` tank — swap A↔B, seat
     /// A (Gunner) LEFT holding the dead occupant and seat B (Loader) LEFT holding the live one after
@@ -2780,6 +2852,7 @@ mod tests {
                 NetCrew {
                     volumes: vec![
                         VolumeSnapshot {
+                            repair: None,
                             held: FULL,
                             crew: Some(CrewSnapshot {
                                 home: CrewStation::Gunner,
@@ -2787,6 +2860,7 @@ mod tests {
                             }),
                         },
                         VolumeSnapshot {
+                            repair: None,
                             held: 0,
                             crew: Some(CrewSnapshot {
                                 home: CrewStation::Loader,

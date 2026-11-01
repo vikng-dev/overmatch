@@ -564,3 +564,42 @@ who won without inviting irrelevant statistics.
 need a wider authority-owned wire contract.
 
 **Lives in.** `src/net/score.rs`, `src/net/battle.rs`; presentation tracker #243.
+
+
+## F17 — Player-started module repair
+
+**Status:** open · provisional owner mechanism in #244 · simplest playtest default
+
+Subject: the game's damage model, game state only. Crew are HP pools at stations.
+
+**Default — F starts or cancels parallel module repair.** Every function-bearing module
+out of action at the press starts its own timer, authored HP divided by one shared work rate.
+ASSUMED balance choice: **20 HP/s**, held with provenance in `assets/damage/repair.ron`.
+DERIVED for the current Tiger asset: the largest module pool, 479 HP, takes **23.95 s**.
+Each module stays out of action until its own work finishes, then returns whole. Cancelling
+keeps finished modules and discards the remaining work. There is no repair-use limit.
+
+The existing centralized Drive capability gate closes while any module timer runs: the track
+controller retargets its drive signal to zero and brakes through its existing contact law.
+Repair is a tank activity, so it is not represented as an authored part-quality requirement.
+The weapon and servo requirements stay independent: the gun fires and turret turns wherever
+those requirements permit. Crew keep their stations and never return from being out of action;
+ammunition and functionless pools never return. A knocked-out tank cannot start or finish repair.
+Only the authority advances work. The owner's panel receives per-module progress with the private
+combat snapshot; other clients receive no repair status. The button reuses the existing switch click.
+
+**Alternatives kept alive in prose.** Automatic repair; crew leaving their stations; as many
+parallel module timers as crew members in action; one module at a time; progression and other
+later mechanics in #248. None has a runtime switch.
+
+**Why it's a playtest call.** Watch whether choosing to stand still is a useful cost, whether
+independent completion is legible, and whether the work rate and parallelism make repair too
+brief or too idle. Check cancellation under pressure and repair while unable to move or fire.
+
+**Revert cost.** Low for the work rate; medium for scheduling or staffing changes (authority
+state, Drive gate, private snapshot, panel and tests). Removing repair also removes its command
+edge and changes the protocol fingerprint. Crew restoration or ammunition restoration would
+change the owner's rule and are not alternatives in this fork.
+
+**Lives in.** `src/damage/repair.rs`, `src/damage.rs`, `src/command.rs`, `src/crew_ui.rs`,
+`src/net/protocol.rs`; capture user `scripts/capture/repair.ron`; tracker #244 and #248.

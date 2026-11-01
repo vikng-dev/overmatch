@@ -10,6 +10,17 @@ A realistic 3D multiplayer tank game (Bevy 0.19 + Avian 0.7).
 - [Architecture decisions](.agents/docs/adr/) — durable decisions and their rationale.
 - [Playtest forks](.agents/scratch/playtest-forks/README.md) — provisional feel decisions that remain deliberately reversible.
 
+## Controls
+
+W/A/S/D drive; left mouse fires the primary weapon; Space fires secondary weapons.
+Q/E choose the primary weapon's round, V changes its fuze, and 1–5 select crew stations.
+Shift changes view, X toggles x-ray, M opens the spawn map, Tab holds the scoreboard, and Esc opens the menu.
+
+The game's damage model: **F starts or cancels module repair**. The tank brakes and cannot
+drive while repairing; fire and turret controls remain available. The own-tank panel shows
+each module's progress, then READY when it returns whole. A knocked-out tank cannot repair;
+R requests respawn when available. These are game-client controls; sandboxes have their own.
+
 ## Releasing
 
 Bump `version` in `Cargo.toml` on a release branch and refresh `Cargo.lock`:

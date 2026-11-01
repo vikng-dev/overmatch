@@ -42,9 +42,21 @@ pub(crate) struct CapturePlan {
     /// server fires them for its capture clients, reading the same plan.
     #[serde(default)]
     pub(crate) wall: Option<Wall>,
+    /// The game's damage model: offline module-repair panel evidence.
+    #[serde(default)]
+    pub(crate) repair: Option<Repair>,
     /// What the root sets the scene up as ([`Scene`]).
     #[serde(default)]
     pub(crate) scene: Scene,
+}
+
+/// The game's damage model: empty the named module functions and issue one repair command.
+/// Only the offline root mounts this cue; it cannot supply input to a network match.
+#[derive(Deserialize, Debug, Clone, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct Repair {
+    pub(crate) at: f32,
+    pub(crate) modules: Vec<crate::damage::FunctionRole>,
 }
 
 /// The scene: each field is read by the roots it names and ignored by the rest.
@@ -304,6 +316,12 @@ impl CapturePlan {
                 ))
             }
         };
+        if let Some(repair) = &self.repair {
+            finite_at("repair.at", repair.at)?;
+            if repair.modules.is_empty() {
+                return Err("repair.modules: name at least one authored module function".into());
+            }
+        }
         if let Some(frames) = &self.frames {
             if frames
                 .out

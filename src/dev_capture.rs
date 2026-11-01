@@ -39,6 +39,8 @@
 mod fuze;
 pub(crate) use fuze::offline_shot_plugin;
 pub(crate) mod plan;
+mod repair;
+pub(crate) use repair::offline_repair_plugin;
 mod wall;
 pub(crate) use plan::plan;
 pub(crate) use wall::{offline_wall_plugin, server_wall_plugin};
