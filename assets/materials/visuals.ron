@@ -22,30 +22,35 @@
     visuals: {
         "rolled_steel": Maps(
             maps: "materials/visuals/rolled_steel/rolled_steel",
-            metres_per_repeat: (1.0, Tuned("ASSUMED: ambientCG publishes no size for Metal046A; its
-                mill-scale mottling reads at plate scale at one repeat per metre")),
+            metres_per_repeat: (1.0, Taste("material surface appearance: ASSUMED: ambientCG
+                publishes no size for Metal046A; its mill-scale mottling reads at plate scale at one
+                repeat per metre")),
             takes_paint: true,
         ),
         "cast_steel": Maps(
             maps: "materials/visuals/cast_steel/cast_steel",
-            metres_per_repeat: (0.5, Tuned("ASSUMED: ambientCG publishes no size for Metal052C; its
-                pits come out about 1 mm across at half a metre per repeat, a sand-cast grain")),
+            metres_per_repeat: (0.5, Taste("material surface appearance: ASSUMED: ambientCG
+                publishes no size for Metal052C; its pits come out about 1 mm across at half a metre
+                per repeat, a sand-cast grain")),
             takes_paint: true,
         ),
         "machined_steel": Maps(
             maps: "materials/visuals/machined_steel/machined_steel",
-            metres_per_repeat: (0.5, Tuned("ASSUMED: ambientCG publishes no size for Metal009; its
-                tool marks come out sub-millimetre at half a metre per repeat")),
+            metres_per_repeat: (0.5, Taste("material surface appearance: ASSUMED: ambientCG
+                publishes no size for Metal009; its tool marks come out sub-millimetre at half a
+                metre per repeat")),
             takes_paint: true,
         ),
         "track_steel": Maps(
             maps: "materials/visuals/track_steel/track_steel",
-            metres_per_repeat: (0.5, Tuned("ASSUMED: ambientCG publishes no size for Metal046B")),
+            metres_per_repeat: (0.5, Taste("material surface appearance: ASSUMED: ambientCG
+                publishes no size for Metal046B")),
             takes_paint: false,
         ),
         "rubber": Maps(
             maps: "materials/visuals/rubber/rubber",
-            metres_per_repeat: (0.5, Tuned("ASSUMED: ambientCG publishes no size for Rubber004")),
+            metres_per_repeat: (0.5, Taste("material surface appearance: ASSUMED: ambientCG
+                publishes no size for Rubber004")),
             takes_paint: false,
         ),
         // The buildings' primary surface lane.
@@ -64,8 +69,9 @@
         // Neither Poly Haven nor ambientCG carries a glass pack (their APIs, queried 2026-10-31), and
         // a vision block's glass has no relief to map.
         "glass": Flat(
-            colour: ("#1E2622", Tuned("ASSUMED: thick laminated glass reads near black with a green cast")),
-            roughness: (0.05, Tuned("ASSUMED: polished glass")),
+            colour: ("#1E2622", Taste("material surface appearance: ASSUMED: thick laminated glass
+                reads near black with a green cast")),
+            roughness: (0.05, Taste("material surface appearance: ASSUMED: polished glass")),
             metallic: (0.0, Derived("glass is a dielectric")),
             takes_paint: false,
         ),

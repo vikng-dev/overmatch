@@ -1,3 +1,4 @@
+// Subject: the game's damage model and authored presentation; game state only.
 // The round-type table: a round's construction class and the shape proxy it implies, keyed by
 // the name a round file's `round_type` gives (`src/rounds.rs`). A row states its flight nose and
 // its hit nose (`NoseShape`, geometry in calibres) and its carrier: `None` for a round that meets
@@ -23,47 +24,54 @@
 // a value without one does not load.
 (
     drag: (
-        base_drag_coefficient: (0.20, Tuned("ASSUMED: base drag plus skin friction at shell speeds;
-            no aerodynamic source read. 0.0962 form units, DERIVED")),
-        anchor_nose: (Ogive(crh: 1.0), Tuned("the nose the anchor form is stated on: a 1-crh tangent
-            ogive, nose factor 7/24 (DERIVED)")),
-        anchor_form: (0.263, Tuned("provisional: hand-set so a 10.2 kg 88 mm round flying on the
-            anchor nose has k = 2.0e-4 1/m (DERIVED); a drag coefficient of 0.547 (DERIVED:
-            0.263 / 0.4811). No aerodynamic source read; replace both values from measured or
-            published drag data")),
+        base_drag_coefficient: (0.20, StandIn("Stand-in for Mach-dependent drag: ASSUMED: base drag
+            plus skin friction at shell speeds; no aerodynamic source read. 0.0962 form units,
+            DERIVED")),
+        anchor_nose: (Ogive(crh: 1.0), Derived("the nose the anchor form is stated on: a 1-crh
+            tangent ogive, nose factor 7/24 (DERIVED)")),
+        anchor_form: (0.263, StandIn("Stand-in for Mach-dependent drag: provisional: hand-set so a
+            10.2 kg 88 mm round flying on the anchor nose has k = 2.0e-4 1/m (DERIVED); a drag
+            coefficient of 0.547 (DERIVED: 0.263 / 0.4811). No aerodynamic source read; replace both
+            values from measured or published drag data")),
     ),
     round_types: {
         // High-explosive, full calibre, a nose fuze in its ogive.
         "HE": (
-            flight_nose: (Ogive(crh: 4.0), Tuned("ASSUMED: the APCBC's ogive; no source in the
-                research note gives the shell's nose")),
-            hit_nose: (Ogive(crh: 4.0), Tuned("ASSUMED: the flight nose; no cap")),
+            flight_nose: (Ogive(crh: 4.0), Unknown("ASSUMED: the APCBC's ogive; no source in the
+                research note gives the shell's nose. Settled by a sourced drawing of this
+                construction class's flight nose")),
+            hit_nose: (Ogive(crh: 4.0), Unknown("ASSUMED: the flight nose; no cap. Settled by a
+                sourced drawing of this construction class's hit nose")),
             carrier: (None, Derived("full-calibre round")),
         ),
         // Armour-piercing, capped and ballistic-capped.
         "APCBC": (
-            flight_nose: (Ogive(crh: 4.0), Tuned("owner-accepted starting point 2026-10-28: the
-                ballistic cap's pointed ogive over the blunt hit nose")),
-            hit_nose: (Ogive(crh: 1.0), Tuned("labelled fixture value: the Pzgr. 39's blunt ogive
-                of 1 crh")),
+            flight_nose: (Ogive(crh: 4.0), Unknown("owner-accepted starting point 2026-10-28: the
+                ballistic cap's pointed ogive over the blunt hit nose. Settled by a sourced drawing
+                of the ballistic cap ogive")),
+            hit_nose: (Ogive(crh: 1.0), Unknown("unverified physical proxy: the Pzgr. 39's blunt
+                ogive of 1 crh. Settled by a sourced drawing of the blunt ogive beneath the cap")),
             carrier: (None, Derived("a full-calibre round: the whole round meets the plate")),
         ),
         // Armour-piercing, composite rigid: a hard core in a light full-calibre body.
         "APCR": (
-            flight_nose: (Ogive(crh: 1.0), Tuned("no ballistic cap in this table: the round flies
-                on its hit nose, the drag form's blunt anchor")),
-            hit_nose: (Ogive(crh: 1.0), Tuned("labelled fixture value: the Pzgr. 39's blunt ogive
-                of 1 crh")),
+            flight_nose: (Ogive(crh: 1.0), Unknown("no ballistic cap in this table: the round flies
+                on its hit nose, the drag form's blunt anchor. Settled by a sourced drawing of this
+                rigid composite construction flight nose")),
+            hit_nose: (Ogive(crh: 1.0), Unknown("unverified physical proxy: the Pzgr. 39's blunt
+                ogive of 1 crh. Settled by a sourced drawing of this rigid composite construction
+                hit nose")),
             carrier: (Kept, Derived("the core reaches the plate inside its full-calibre body: the
                 round flies whole and meets the plate as its core")),
         ),
         // Armour-piercing small-arms bullet.
         "AP": (
-            flight_nose: (Ogive(crh: 6.0), Tuned("a pointed rifle bullet: a 6-crh tangent ogive,
+            flight_nose: (Ogive(crh: 6.0), Unknown("a pointed rifle bullet: a 6-crh tangent ogive,
                 ASSUMED as a typical spitzer's, its nose 2.4 calibres long (DERIVED); no source in
-                the repo states the bullet's ogive")),
-            hit_nose: (Cap(radius_calibres: 0.5), Tuned("labelled fixture value: a hemispherical
-                cap")),
+                the repo states the bullet's ogive. Settled by a sourced drawing of the pointed
+                bullet flight nose")),
+            hit_nose: (Cap(radius_calibres: 0.5), Unknown("unverified physical proxy: a
+                hemispherical cap. Settled by a sourced drawing of the bullet hit nose")),
             carrier: (None, Derived("a full-calibre bullet: the whole round meets the plate")),
         ),
     },

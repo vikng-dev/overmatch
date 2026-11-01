@@ -11,16 +11,15 @@
 // rate, `wound` in `assets/rounds/`). The law is design doc §§5–6,
 // `.agents/docs/design/armor-penetration-and-damage.md`.
 //
-// PROVENANCE: every value is authored `(value, Kind("source or reason"))`, Kind one of Measured,
-// Derived, Tuned, Resolution, Unknown (`src/provenance.rs`); a value without one does not load.
+// PROVENANCE: every value is authored `(value, Kind("source or reason"))`, Kind names the value's job
+// (`src/provenance.rs`); a value without one does not load.
 (
     // Joules of energy lost per HP point. A box's dose of E joules is E / this HP points, summed
     // with its other doses of the shot and converted to pool units once.
-    joules_per_hp: (3000.0, Tuned("provisional (issue 113): the pools authored under the
-        reference-mm line law keep their scale for the main gun. That law charged 10 HP per
-        reference-mm; the reference 88 mm APCBC round (10.2 kg, nose factor 7/24) at its 773 m/s
-        muzzle speed loses about 3090 J per 0.1 mm of reference steel (DERIVED: the force law's
-        A (a + k v²) × 1e-4 m, A = π/4 × 0.088² m², a = 3.711e9 Pa, k = 7/24 × 7850 kg/m³), rounded
-        to 3000. A slower or smaller round deals less per reference-mm, a stopped one all it had
-        left")),
+    joules_per_hp: (3000.0, Unit("provisional (issue 113): the pools authored under the reference-mm
+        line law keep their scale for the main gun. That law charged 10 HP per reference-mm; the
+        reference 88 mm APCBC round (10.2 kg, nose factor 7/24) at its 773 m/s muzzle speed loses
+        about 3090 J per 0.1 mm of reference steel (DERIVED: the force law's A (a + k v²) × 1e-4 m,
+        A = π/4 × 0.088² m², a = 3.711e9 Pa, k = 7/24 × 7850 kg/m³), rounded to 3000. A slower or
+        smaller round deals less per reference-mm, a stopped one all it had left")),
 )

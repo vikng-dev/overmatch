@@ -12,12 +12,12 @@
     penetrator: None,
     name: ("8.8 cm Sprgr. L/4.5", Measured("CITED TM53 pp.444-445")),
     round_type: ("HE", Measured("CITED TM53 pp.444-445: high-explosive shell")),
-    core: ("GunSteel", Tuned("ASSUMED: the shell body as the fixture body steel; no source gives
-        its steel")),
+    core: ("GunSteel", Unknown("ASSUMED: the shell body as the fixture body steel; no source gives
+        its steel. Settled by a sourced body-alloy specification that selects the material class")),
     mass: (9.30, Derived("CITED TM53 p.445: 20.5 lb loaded and fuzed = 9.30 kg; chosen over
         Brit43 pp.91-92's 20.3 lb (9.21 kg), TM53 being the entry that names the Kw.K. 36")),
     caliber: (0.088, Measured("the gun's nominal 8.8 cm calibre designation")),
-    wound: (30.0, Tuned("ASSUMED: the Pzgr. 39's main-gun crew line rate, for the shell's own line
+    wound: (30.0, Unit("ASSUMED: the Pzgr. 39's main-gun crew line rate, for the shell's own line
         before it bursts and its nose piece's after")),
     // CLAIMED construction: TM53 p.445: A.Z. 23/28, nose fuze.
     // Placement is not an input to the current game fuze law.
@@ -40,19 +40,21 @@
         core_substance: ("Amatol60_40", Measured("CITED TM53 p.445: amatol 60/40, poured")),
         core_mass: (0.9072, Derived("CITED TM53 p.445: 2 lb = 0.9072 kg (0.4536 kg/lb); chosen
             over Brit43 pp.91-92's 1.9 lb cast amatol (0.86 kg) with the shell's mass")),
-        base_mass: (0.3, Tuned("ASSUMED: the base parts behind the cavity; no source gives them")),
-        cavity_diameter: (0.065, Tuned("ASSUMED: no source gives the cavity; with the core it
-            DERIVES a 0.171 m cavity, about two calibres")),
+        base_mass: (0.3, Unknown("ASSUMED: the base parts behind the cavity; no source gives them.
+            Settled by a sourced mass of the parts behind the cavity")),
+        cavity_diameter: (0.065, Unknown("ASSUMED: no source gives the cavity; with the core it
+            DERIVES a 0.171 m cavity, about two calibres. Settled by a sourced cavity drawing")),
         filler_setback: (0.178, Derived("DERIVED cylinder-equivalent estimate rounded to 0.178 m: half the 0.171 m cavity plus the derived nose mass 4.409 kg divided by body-steel density 7800 kg/m3 and full-calibre area. ASSUMED axial geometry; no sourced axial drawing. This author datum locates the filler centre behind the tip, independently of the fuze delay")),
     )),
     effects: (
-        impact: (Layered, Tuned("ASSUMED: provisional authored contact-read recipe; no emission measurement")),
+        impact: (Layered, Taste("round impact effects: ASSUMED: provisional authored contact-read
+            recipe; no emission measurement")),
         ember: (None, Unknown("ASSUMED: untraced shell; no base-tracer composition is authored")),
         smoke: (None, Unknown("ASSUMED: no sustained flight smoke emission authored")),
         body: (Some((model: ("shell/shell.glb", Unknown("ASSUMED: the one authored shell model, an
             88 mm full-calibre body; this round's own body is not modelled")))),
-            Tuned("a main-gun round is drawn as its body in flight")),
-        streak: (None, Tuned("an untraced main-gun round; no belt streak")),
+            Taste("round flight effects: a main-gun round is drawn as its body in flight")),
+        streak: (None, Taste("round flight effects: an untraced main-gun round; no belt streak")),
     ),
 
 )

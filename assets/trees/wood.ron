@@ -34,15 +34,15 @@
 // (`assets/ballistics/energy_dose.ron`); a pool emptied opens the seam at its segment's base, so
 // the trunk breaks there by the same structural state a body's contact breaks it by.
 //
-// PROVENANCE: every number is authored `(value, Kind("source or reason"))`, Kind one of Measured,
-// Derived, Tuned, Resolution, Unknown (`src/provenance.rs`); a value without one does not load. The
+// PROVENANCE: every number is authored `(value, Kind("source or reason"))`, Kind names the value's job
+// (`src/provenance.rs`); a value without one does not load. The
 // loader refuses a non-positive one.
 Wood(
     substance: "Wood",
-    hp_per_m2: (1500.0, Tuned("provisional (issue 149), a round number calibrated loosely: the
-        shipped fir's (fir_1) base segment, 0.405 m across at mid-height, holds 193 HP (DERIVED),
-        so the 88 mm APCBC's centred hit there (156 HP, MEASURED) empties it at the second shot;
-        shots to break every cell MEASURED in
+    hp_per_m2: (1500.0, Unit("provisional (issue 149), a round number calibrated loosely: the
+        shipped fir's (fir_1) base segment, 0.405 m across at mid-height, holds 193 HP (DERIVED), so
+        the 88 mm APCBC's centred hit there (156 HP, MEASURED) empties it at the second shot; shots
+        to break every cell MEASURED in
         .agents/scratch/damage-model-2026-10-29/segment-pools-results.md")),
     structure: {
         "norway_spruce": StructuralWood(
@@ -51,12 +51,13 @@ Wood(
                 spruce MOR 36 MPa (green-wood ForestGALES parameter, not a fresh tree measurement).
                 https://www.plantedforests.org/wp-content/uploads/2025/05/FECOS-D-25-00237_R1paper_only.pdf
                 The table misprints its MOR unit; MPa follows the model definition, not kN/mm2.")),
-            along_grain_fracture_j_per_m2: (22340.0, Tuned("ASSUMED saturated clear-softwood
-                analogue, not measured Norway spruce: Murray, FHWA-HRT-04-097 (2007), section
-                1.7.3, Table 10, saturated parallel mode I 2.234 MPa cm = 22340 J/m2 (DERIVED unit
+            along_grain_fracture_j_per_m2: (22340.0, Unknown("ASSUMED saturated clear-softwood
+                analogue, not measured Norway spruce: Murray, FHWA-HRT-04-097 (2007), section 1.7.3,
+                Table 10, saturated parallel mode I 2.234 MPa cm = 22340 J/m2 (DERIVED unit
                 conversion). Source uses correlated model values for southern yellow pine and
-                Douglas fir, no measured parallel-mode data. Species and living-trunk transfer
-                are unverified. https://www.fhwa.dot.gov/publications/research/safety/04097/04097.pdf")),
+                Douglas fir, no measured parallel-mode data. Species and living-trunk transfer are
+                unverified. https://www.fhwa.dot.gov/publications/research/safety/04097/04097.pdf.
+                Settled by a living Norway-spruce along-grain opening fracture-energy measurement")),
             fresh_density_kg_per_m3: (850.0, Measured("MEASURED transcription: ForestGALES fgr
                 package species parameters (tom-locatelli/fgr, data/ud_species_parameters.rda,
                 read 2026-11-01), row NS,
@@ -70,11 +71,12 @@ Wood(
             along_grain_rupture_pa: (46.0e6, Measured("MEASURED transcription: Merlin et al.
                 (2025), Table 2, default Scots pine MOR 46 MPa, the green-wood ForestGALES
                 parameter. Same source and MOR unit correction as norway_spruce above.")),
-            along_grain_fracture_j_per_m2: (22340.0, Tuned("ASSUMED saturated clear-softwood
+            along_grain_fracture_j_per_m2: (22340.0, Unknown("ASSUMED saturated clear-softwood
                 analogue, not measured Scots pine: Murray, FHWA-HRT-04-097 (2007), section 1.7.3,
                 Table 10, saturated parallel mode I 2.234 MPa cm = 22340 J/m2 (DERIVED conversion).
                 Correlated model values for southern yellow pine and Douglas fir; species and
-                living-trunk transfer unverified. Same FHWA source as norway_spruce above.")),
+                living-trunk transfer unverified. Same FHWA source as norway_spruce above. Settled
+                by a living Scots-pine along-grain opening fracture-energy measurement")),
             fresh_density_kg_per_m3: (850.0, Measured("MEASURED transcription: fgr species
                 parameters, row SP, stem_density 850 kg/m3, green wood density (same source as norway_spruce above; the same
                 table states SP mor 4.6e7 Pa). A model parameter, not a measurement of these
@@ -82,20 +84,21 @@ Wood(
             anchor: "scots_pine_root_plate",
         ),
         "silver_birch": StructuralWood(
-            along_grain_rupture_pa: (63.0e6, Tuned("ASSUMED species transfer of the MEASURED
+            along_grain_rupture_pa: (63.0e6, Measured("ASSUMED species transfer of the MEASURED
                 transcription in Merlin et al. (2025), Table 2: default birch MOR 63 MPa, the
-                green-wood ForestGALES parameter. Table says birch, not specifically Betula
-                pendula; treating it as silver birch is an analogue. Same source and MOR unit
-                correction as norway_spruce above.")),
-            along_grain_fracture_j_per_m2: (22340.0, Tuned("ASSUMED saturated clear-softwood
+                green-wood ForestGALES parameter. Table says birch, not specifically Betula pendula;
+                treating it as silver birch is an analogue. Same source and MOR unit correction as
+                norway_spruce above.")),
+            along_grain_fracture_j_per_m2: (22340.0, Unknown("ASSUMED saturated clear-softwood
                 analogue for hardwood, not measured silver birch: Murray, FHWA-HRT-04-097 (2007),
                 section 1.7.3, Table 10, saturated parallel mode I 2.234 MPa cm = 22340 J/m2
                 (DERIVED conversion). Correlated southern yellow pine/Douglas fir model value;
                 neither species nor living-trunk transfer is verified. No suitable birch
-                longitudinal-opening measurement found. Same FHWA source as norway_spruce above.")),
-            fresh_density_kg_per_m3: (900.0, Tuned("ASSUMED species transfer of the MEASURED
-                transcription in the fgr species parameters, row BI (birch, not specifically Betula pendula),
-                stem_density 900 kg/m3, green wood density (same source as norway_spruce
+                longitudinal-opening measurement found. Same FHWA source as norway_spruce above.
+                Settled by a living silver-birch along-grain opening fracture-energy measurement")),
+            fresh_density_kg_per_m3: (900.0, Measured("ASSUMED species transfer of the MEASURED
+                transcription in the fgr species parameters, row BI (birch, not specifically Betula
+                pendula), stem_density 900 kg/m3, green wood density (same source as norway_spruce
                 above; the same table states BI mor 6.3e7 Pa)")),
             anchor: "silver_birch_root_plate",
         ),

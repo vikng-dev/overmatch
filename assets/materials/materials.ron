@@ -63,8 +63,8 @@
 // speed. Converted once at parse to the field law's ratio λ = 1/sin α (design doc §5); refused
 // outside (0°, 90°].
 //
-// PROVENANCE: every number is authored `(value, Kind("source or reason"))`, Kind one of Measured,
-// Derived, Tuned, Resolution, Unknown (`src/provenance.rs`); a number without one does not load.
+// PROVENANCE: every number is authored `(value, Kind("source or reason"))`, Kind names the value's job
+// (`src/provenance.rs`); a number without one does not load.
 // "Q2" below is the research table in
 // `.agents/scratch/damage-cam-2026-10-08/research/hardness-anchor-free.md`. "Research pass
 // 2026-08-07" is the Tiger metallurgy pass whose sources live in that session's record, not in the
@@ -159,17 +159,19 @@
                 flow_strength: (1.0e9, Derived("mean of an RHA-class product's Rp0.2 900 MPa and
                     Rm 1150 MPa (MEASURED: SSAB Armox 370T Class 1 datasheet, Cimpoeru 2016 Table
                     I), the flow-stress convention of Q2; range 0.85–1.25 GPa across thickness bands")),
-                youngs_modulus: (205.0e9, Tuned("chosen inside the steel range 190–210 GPa
+                youngs_modulus: (205.0e9, Measured("chosen inside the steel range 190–210 GPa
                     (MEASURED 190 for Q&T 4340 and 1020, MakeItFrom; 210 generic); Q2 found no
                     RHA-specific value. Moves results about 1 % (Q5)")),
-                poisson_ratio: (0.29, Tuned("chosen inside the steel range 0.27–0.30; Q2 found no
-                    RHA-specific value. Moves results about 1 % (Q5)")),
+                poisson_ratio: (0.29, Unknown("chosen inside the steel range 0.27–0.30; Q2 found no
+                    RHA-specific value. Moves results about 1 % (Q5). Settled by an RHA datasheet
+                    Poisson ratio")),
             )),
         ),
         "GunSteel": Hard(
-            resistance: Effective((1000.0, Tuned("declared effective factor: forged autofrettaged
-                gun steel taken as RHA quality, unified at the reference (research pass
-                2026-08-07). Not derived from the facts below, which give ≈ 1129 (DERIVED)"))),
+            resistance: Effective((1000.0, StandIn("Stand-in for resistance from each substance's
+                own density and strength: declared effective factor: forged autofrettaged gun steel
+                taken as RHA quality, unified at the reference (research pass 2026-08-07). Not
+                derived from the facts below, which give ≈ 1129 (DERIVED)"))),
             visual: "machined_steel",
             feedback: (
                 exposed_linear_rgb: ((0.5, 0.51, 0.53), Unknown("ASSUMED: provisional exposed-surface and powder read; no measured optical response read for this substance")),
@@ -206,9 +208,10 @@
             facts: None,
         ),
         "MildSteel": Hard(
-            resistance: Effective((800.0, Tuned("non-armour structural and machinery steel taken
-                at ~0.8× RHA (research pass 2026-08-07). Not derived from the facts below, which
-                give ≈ 460 (DERIVED)"))),
+            resistance: Effective((800.0, StandIn("Stand-in for resistance from each substance's own
+                density and strength: non-armour structural and machinery steel taken at ~0.8× RHA
+                (research pass 2026-08-07). Not derived from the facts below, which give ≈ 460
+                (DERIVED)"))),
             visual: "rolled_steel",
             feedback: (
                 exposed_linear_rgb: ((0.5, 0.51, 0.53), Unknown("ASSUMED: provisional exposed-surface and powder read; no measured optical response read for this substance")),
@@ -229,10 +232,11 @@
             )),
         ),
         "CastMild": Hard(
-            resistance: Effective((800.0, Tuned("plain cast machinery steel taken at MildSteel's
-                declared ~0.8× RHA, the class its parts sit in today, so moving a part here changes
-                nothing ballistic until a law reads the facts. Not derived from the facts below,
-                which give ≈ 385 (DERIVED)"))),
+            resistance: Effective((800.0, StandIn("Stand-in for resistance from each substance's own
+                density and strength: plain cast machinery steel taken at MildSteel's declared ~0.8×
+                RHA, the class its parts sit in today, so moving a part here changes nothing
+                ballistic until a law reads the facts. Not derived from the facts below, which give
+                ≈ 385 (DERIVED)"))),
             visual: "cast_steel",
             feedback: (
                 exposed_linear_rgb: ((0.5, 0.51, 0.53), Unknown("ASSUMED: provisional exposed-surface and powder read; no measured optical response read for this substance")),
@@ -268,11 +272,11 @@
                 sparks: (true, Unknown("ASSUMED: provisional contact-spark emission for this substance")),
             ),
             debris_half_angle_deg: (26.2, Unknown("no measured debris extent; RHA's value")),
-            friction: Some((1.62, Tuned("the owner-tuned grip of a track on the terrain, 0.9, on
-                the base ground's 0.5: 0.9² / 0.5 = 1.62 (DERIVED), so the pair rule reproduces it.
-                Far above a steel sliding coefficient (ASSUMED 0.4–0.8 on stone, no source read):
-                the missing factor is the shoe's grousers biting into the ground, which no law reads
-                yet (#146)"))),
+            friction: Some((1.62, StandIn("Stand-in for grouser bite into the ground: the
+                owner-tuned grip of a track on the terrain, 0.9, on the base ground's 0.5: 0.9² /
+                0.5 = 1.62 (DERIVED), so the pair rule reproduces it. Far above a steel sliding
+                coefficient (ASSUMED 0.4–0.8 on stone, no source read): the missing factor is the
+                shoe's grousers biting into the ground, which no law reads yet (#146)"))),
             facts: Some((
                 density: (7890.0, Derived("0.285 lb/in³ × 27 680 (kg/m³)/(lb/in³): CLAIMED for
                     austenitic manganese steel by a Columbia Steel alloy paper, read only in a search
@@ -281,10 +285,12 @@
                     Rm 965 MPa, as-quenched Hadfield steel (CLAIMED: Total Materia, 'High Manganese
                     Austenitic Steels: Part One', read only in a search summary 2026-10-31), the
                     flow-stress convention of Q2")),
-                youngs_modulus: (200.0e9, Tuned("chosen inside the steel range 190–210 GPa; no
-                    source read for the manganese grade")),
-                poisson_ratio: (0.29, Tuned("chosen inside the steel range 0.27–0.30; no source
-                    read for the manganese grade")),
+                youngs_modulus: (200.0e9, Unknown("chosen inside the steel range 190–210 GPa; no
+                    source read for the manganese grade. Settled by a manganese-grade Young modulus
+                    measurement")),
+                poisson_ratio: (0.29, Unknown("chosen inside the steel range 0.27–0.30; no source
+                    read for the manganese grade. Settled by a manganese-grade Poisson ratio
+                    measurement")),
             )),
         ),
         "EngineBlock": Hard(
@@ -438,11 +444,12 @@
                         compression mean E = 118.23 MPa; Zulkifli et al. 2021, Table 3, read primary
                         at the compressive_strength URL. Same specimens as compressive_strength,
                         ASSUMED analogue for the scalar timber; not the longitudinal modulus"))),
-                    tensile_dif: Some((1.0, Tuned("ASSUMED: no dynamic tensile ratio for spruce
-                        across the grain was read, so the scab law holds this row's static
-                        tension perpendicular to grain (bulk.tensile); the #237 study's choice. A
-                        sourced across-grain tensile DIF is the missing truth; this one is not
-                        borrowed from the compressive DIF"))),
+                    tensile_dif: Some((1.0, Unknown("ASSUMED: no dynamic tensile ratio for spruce
+                        across the grain was read, so the scab law holds this row's static tension
+                        perpendicular to grain (bulk.tensile); the #237 study's choice. A sourced
+                        across-grain tensile DIF is the missing truth; this one is not borrowed from
+                        the compressive DIF. Settled by a measured spruce dynamic/static tensile
+                        ratio at the stated reference rate"))),
                 )),
                 shear_cohesion: Some((8.9e6, Measured("red spruce, clear straight-grained wood,
                     12 % moisture: shear parallel to grain 8900 kPa; USDA Forest Products
@@ -518,9 +525,10 @@
                         Fit to measured handmade Galveias brick; ASSUMED rate analogue for this
                         molded-brick row. Published domain 4 < strain rate < 200 /s; this is a
                         reference-rate datum, not permission to extrapolate"))),
-                    compressive_dif_strain_rate: Some((100.0, Tuned("ASSUMED reference rate
-                        100 /s within Pereira et al. 2013 eq. 1's published domain 4-200 /s;
-                        compressive_dif evaluates that material-property fit at this rate"))),
+                    compressive_dif_strain_rate: Some((100.0, StandIn("Stand-in for
+                        strain-rate-dependent compressive strength: no law reads this rate: ASSUMED
+                        reference rate 100 /s within Pereira et al. 2013 eq. 1's published domain
+                        4-200 /s; compressive_dif evaluates that material-property fit at this rate"))),
                     solid_density: Some((2250.0, Measured("published grade SW brick grain-density
                         parameter, Meyer, ARL-TR-5556 (2011), Table 1, read primary model report:
                         https://www.govinfo.gov/content/pkg/GOVPUB-D101-PURL-gpo10967/pdf/GOVPUB-D101-PURL-gpo10967.pdf.
@@ -559,24 +567,28 @@
             burst: Some((
                 density: (1650.0, Derived("1.65 g/cm³: shape-law.md §4")),
                 speed_constant_mps: (2680.0, Derived("shape-law.md §4")),
-                chemical_energy_j_per_kg: (4.184e6, Tuned("ASSUMED: the TNT-equivalent convention,
+                chemical_energy_j_per_kg: (4.184e6, Unknown("ASSUMED: the TNT-equivalent convention,
                     1 kg = 4.184 MJ (CLAIMED, NIST SP 811: the ton of TNT as 4.184e9 J), standing
-                    for this core, whose own heat of detonation no file states (the wall
-                    prototype's value)")),
+                    for this core, whose own heat of detonation no file states (the wall prototype's
+                    value). Settled by a sourced specific chemical energy for the declared
+                    cyclonite/wax composition")),
             )),
         ),
         // The 8.8 cm Sprgr. L/4.5's filler, poured amatol 60/40 (TM53 p.445), named by its burst
         // block's `core_substance`. The research note gives neither burst fact.
         "Amatol60_40": Unworn(
             burst: Some((
-                density: (1600.0, Tuned("ASSUMED poured amatol 60/40, kg/m³; no source in
-                    .agents/scratch/rounds-research/kwk36-rounds-2026-10-30.md gives it")),
-                speed_constant_mps: (2400.0, Tuned("ASSUMED, below the Pzgr. 39 core's 2680 m/s:
-                    amatol is the weaker filler; no source in the research note gives it")),
-                chemical_energy_j_per_kg: (4.184e6, Tuned("ASSUMED: the TNT-equivalent convention,
+                density: (1600.0, Unknown("ASSUMED poured amatol 60/40, kg/m³; no source in
+                    .agents/scratch/rounds-research/kwk36-rounds-2026-10-30.md gives it. Settled by
+                    a sourced poured amatol density for the declared composition")),
+                speed_constant_mps: (2400.0, Unknown("ASSUMED, below the Pzgr. 39 core's 2680 m/s:
+                    amatol is the weaker filler; no source in the research note gives it. Settled by
+                    a sourced Gurney speed constant for the declared amatol composition")),
+                chemical_energy_j_per_kg: (4.184e6, Unknown("ASSUMED: the TNT-equivalent convention,
                     1 kg = 4.184 MJ (CLAIMED, NIST SP 811: the ton of TNT as 4.184e9 J), standing
-                    for amatol 60/40, whose own heat of detonation the research note does not
-                    give")),
+                    for amatol 60/40, whose own heat of detonation the research note does not give.
+                    Settled by a sourced specific chemical energy for the declared amatol
+                    composition")),
             )),
         ),
     },

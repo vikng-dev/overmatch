@@ -8,43 +8,47 @@
 (
     nose: None,
     penetrator: None,
-    name: ("8.8 cm Pzgr. 39 ring", Tuned("the 8.8 cm Pzgr. 39 bursting as the ring; the suffix sets
-        it apart from the solid fixture round of the same designation, 88mm_AP")),
+    name: ("8.8 cm Pzgr. 39 ring", Taste("round display labels: the 8.8 cm Pzgr. 39 bursting as the
+        ring; the suffix sets it apart from the solid fixture round of the same designation, 88mm_AP")),
     round_type: ("APCBC", Measured("CITED TM 9-1985-3 pp.447-448: the Pzgr. 39 listed for the
         Kw.K. 36 as armour-piercing, capped, ballistic-capped, with a filler")),
-    core: ("GunSteel", Tuned("the Pzgr. 39's fixture body steel")),
+    core: ("GunSteel", Unknown("the Pzgr. 39's fixture body steel. Settled by a sourced body-alloy
+        specification that selects the material class")),
     mass: (10.2, Measured("Jentz & Doyle, Tiger I Heavy Tank 1942-45, Osprey New Vanguard 5
         (1993), p.17")),
     caliber: (0.088, Measured("the gun's nominal 8.8 cm calibre designation")),
-    wound: (30.0, Tuned("the Pzgr. 39's main-gun rate, kept by the nose piece past the burst: the
-        30 HP crew pool is emptied at ~10 cm of chord (3 / 0.10)")),
+    wound: (30.0, Unit("the Pzgr. 39's main-gun rate, kept by the nose piece past the burst: the 30
+        HP crew pool is emptied at ~10 cm of chord (3 / 0.10)")),
     // CLAIMED construction: TM53 p.448: Bd.Z. 5103 or 5103/1, base fuze.
     // Placement is not an input to the current game fuze law.
     fuze: Some((
-        trigger: (SpendExit(arming_spend: 35.0), Tuned("UNVERIFIED, CLAIMED: the reference-mm the
-            round spends in one body to arm the fuze, read as the 35 mm of plate of about 115 kg
-            per square mm the Bd.Z. 5127 arms on, perforated at normal impact, values for 1000 m
-            (L.Dv. 487, March 1943, page 487_21). L.Dv. 487 could not be located again, and no
-            other source read gives a plate thickness for the 5103 or the 5127")),
+        trigger: (SpendExit(arming_spend: 35.0), Unknown("UNVERIFIED, CLAIMED: the reference-mm the
+            round spends in one body to arm the fuze, read as the 35 mm of plate of about 115 kg per
+            square mm the Bd.Z. 5127 arms on, perforated at normal impact, values for 1000 m (L.Dv.
+            487, March 1943, page 487_21). L.Dv. 487 could not be located again, and no other source
+            read gives a plate thickness for the 5103 or the 5127. Settled by a sourced arming plate
+            threshold for the declared fuze")),
         modes: [
-            (name: ("delay", Tuned("the fuze's one mode; a name the HUD would draw")),
+            (name: ("delay", Taste("fuze display labels: the fuze's one mode; a name the HUD would
+                draw")),
                 delay_s: (0.0015, Derived("UNVERIFIED, CLAIMED: the midpoint of the 1-2 ms within
                 which the Bd.Z. 5127 bursts after the round's deceleration ends (L.Dv. 487, March
                 1943, page 487_21; not located again). The 5127 is the Pzgr. 39/1's and 39/43's
                 fuze; no time is found for this round's own Bd.Z. 5103"))),
         ],
-        default_mode: ("delay", Tuned("the fuze's one mode")),
+        default_mode: ("delay", Derived("the fuze's one mode")),
     )),
     burst: Some((
-        core_substance: ("88mm_burst_core", Tuned("the burst core's substance in materials.ron,
+        core_substance: ("88mm_burst_core", Derived("the burst core's substance in materials.ron,
             cyclonite/wax 90/10 by TM 9-1985-3 p.448")),
         core_mass: (0.113, Derived("CITED TM 9-1985-3 p.448: 1/4 lb of cyclonite/wax 90/10 in
             blocks, the one entry that names the Kw.K. 36; 0.25 lb x 0.4536 kg/lb = 0.1134 kg,
             rounded to 0.113. The 0.060 kg of TTT30 and TM 9-1985-3 p.438 is the Flak 41's
             Pzgr. Patr. 39, a 'small cavity' round, not this gun's")),
-        base_mass: (0.33, Tuned("UNVERIFIED: HEA12 p.19 gives 11.5 oz = 0.326 kg for the Bd.Z. 5127
-            with its tracer, the Pzgr. 39/1 and 39/43's fuze. This round carries the Bd.Z. 5103 or
-            5103/1 (TM 9-1985-3 p.448), whose mass no source read gives; the 5127's stands in")),
+        base_mass: (0.33, Unknown("UNVERIFIED: HEA12 p.19 gives 11.5 oz = 0.326 kg for the Bd.Z.
+            5127 with its tracer, the Pzgr. 39/1 and 39/43's fuze. This round carries the Bd.Z. 5103
+            or 5103/1 (TM 9-1985-3 p.448), whose mass no source read gives; the 5127's stands in.
+            Settled by a sourced mass of the declared fuze and base assembly")),
         cavity_diameter: (0.0353, Derived("No source gives this round's cavity. The cylinder that
             holds the filler: V = 0.113 kg / 1650 kg/m3 = 68.5 cm3 (the mass CITED above; the
             density the burst core substance carries in materials.ron, DERIVED there and ASSUMED to
@@ -54,27 +58,36 @@
         filler_setback: (0.182, Derived("DERIVED cylinder-equivalent estimate rounded to 0.182 m: half the 0.070 m cavity plus the derived nose mass 6.971 kg divided by body-steel density 7800 kg/m3 and full-calibre area. ASSUMED axial geometry; no sourced axial drawing. This author datum locates the filler centre behind the tip, independently of the fuze delay")),
     )),
     effects: (
-        impact: (Layered, Tuned("ASSUMED: provisional authored contact-read recipe; no emission measurement")),
+        impact: (Layered, Taste("round impact effects: ASSUMED: provisional authored contact-read
+            recipe; no emission measurement")),
         ember: (Some((
-            radius_m: (0.09, Tuned("ASSUMED: provisional presentation bead radius, preserved from the original effect")),
+            radius_m: (0.09, Taste("round flight effects: ASSUMED: provisional presentation bead
+                radius, preserved from the original effect")),
             base_offset_m: (0.35, Unknown("ASSUMED: base of the current shell view; replace from this round's certified visual geometry")),
             burn_s: (2.0, Unknown("ASSUMED: provisional tracer burn, no measured duration read")),
-            fade_s: (0.4, Tuned("ASSUMED: provisional burn-out tail")),
-            emissive: ((10.0, 2.5, 0.5), Tuned("ASSUMED: provisional red-orange linear HDR output")),
+            fade_s: (0.4, Taste("round flight effects: ASSUMED: provisional burn-out tail")),
+            emissive: ((10.0, 2.5, 0.5), Taste("round flight effects: ASSUMED: provisional
+                red-orange linear HDR output")),
         )), Unknown("ASSUMED: retained provisional tracer signature; no measured emission data has been read for this round")),
         smoke: (Some((
-            lifetime_s: (2.2, Tuned("ASSUMED: provisional smoke dissolution time")),
-            width_m: (0.35, Tuned("ASSUMED: provisional smoke birth diameter")),
-            growth_mps: (1.3, Tuned("ASSUMED: provisional smoke expansion rate")),
-            lateral_accel_mps2: (0.4, Tuned("ASSUMED: provisional smoke shear coefficient")),
-            rise_accel_mps2: (0.35, Tuned("ASSUMED: provisional smoke rise coefficient")),
-            start_m: (10.0, Tuned("ASSUMED: muzzle cloud occupies the first travelled arc")),
-            fade_m: (20.0, Tuned("ASSUMED: smoke ribbon's birth taper beyond the muzzle cloud")),
+            lifetime_s: (2.2, Taste("round flight effects: ASSUMED: provisional smoke dissolution
+                time")),
+            width_m: (0.35, Taste("round flight effects: ASSUMED: provisional smoke birth diameter")),
+            growth_mps: (1.3, Taste("round flight effects: ASSUMED: provisional smoke expansion rate")),
+            lateral_accel_mps2: (0.4, Taste("round flight effects: ASSUMED: provisional smoke shear
+                coefficient")),
+            rise_accel_mps2: (0.35, Taste("round flight effects: ASSUMED: provisional smoke rise
+                coefficient")),
+            start_m: (10.0, Taste("round flight effects: ASSUMED: muzzle cloud occupies the first
+                travelled arc")),
+            fade_m: (20.0, Taste("round flight effects: ASSUMED: smoke ribbon's birth taper beyond
+                the muzzle cloud")),
         )), Unknown("ASSUMED: provisional smoke signature retained with this round's tracer")),
         body: (Some((model: ("shell/shell.glb", Unknown("ASSUMED: the one authored shell model, an
             88 mm full-calibre body; this round's own body is not modelled")))),
-            Tuned("a main-gun round is drawn as its body in flight")),
-        streak: (None, Tuned("a main-gun round's tracer is its ember; no belt streak")),
+            Taste("round flight effects: a main-gun round is drawn as its body in flight")),
+        streak: (None, Taste("round flight effects: a main-gun round's tracer is its ember; no belt
+            streak")),
     ),
 
 )

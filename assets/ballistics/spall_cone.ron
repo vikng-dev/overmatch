@@ -1,3 +1,4 @@
+// Subject: the game's damage model and authored presentation; game state only.
 // The spall cone's shape and its potency — the field thrown from every body exit a round
 // reaches —, and a burst's field. Read by `src/ballistics/spall_cone.rs`, embedded and parsed once,
 // validated at parse.
@@ -13,50 +14,49 @@
 // constant of the law. The playtest fork on the axis is F5 in
 // `.agents/scratch/playtest-forks/README.md`.
 //
-// PROVENANCE: every value is authored `(value, Kind("source or reason"))`, Kind one of Measured,
-// Derived, Tuned, Resolution, Unknown (`src/provenance.rs`); a value without one does not load.
+// PROVENANCE: every value is authored `(value, Kind("source or reason"))`, Kind names the value's job
+// (`src/provenance.rs`); a value without one does not load.
 (
     // The cone's axis. `RearNormalBisector`: normalize(rear-face outward normal + exit direction)
     // at a genuine exit, the exit direction at an internal step (which has no face).
     // `ExitDirection`: the exit direction everywhere.
-    axis: (RearNormalBisector, Tuned("engineering assumption (playtest fork F5) with MEASURED
-        support: debris axis about halfway between the shot line and the plate normal, 25°
-        measured against 22.5° predicted at 45° obliquity (Verolme 1997, Recht & Howell 1967;
+    axis: (RearNormalBisector, Derived("engineering assumption (playtest fork F5) with MEASURED
+        support: debris axis about halfway between the shot line and the plate normal, 25° measured
+        against 22.5° predicted at 45° obliquity (Verolme 1997, Recht & Howell 1967;
         research/cloud-angle-deep.md)")),
 
     // N, the number of directions the cone is sampled by, in equal-solid-angle strata of 1/N of the
     // cone each, every one weighted by its stratum's share of the field. The emitted total is S/2
     // at every N, so N changes how finely a box's dose is resolved, never how much the cone
     // carries.
-    directions: (64, Tuned("owner decision 2026-10-17 ('64 for now'), the cost against the
+    directions: (64, Resolution("owner decision 2026-10-17 ('64 for now'), the cost against the
         resolution: one throw under the ball law MEASURED 2026-10-24 by
         ballistics::pen_cam::spall_law_cost (release, macOS arm64, best of 9, the 7 cones of the
         penetrating scenarios): 0.30 ms at N = 24, 0.64 at 64, 1.23 at 128, 2.29 at 256; the dose
-        step per direction on the s1 cone at 64 runs from 10.5 HP on the axis to 0.65 HP at the
-        rim, 6.25 HP on average (DERIVED: S·f_k / 3000 J per HP / 64, S = 2.40 MJ MEASURED from
-        the s1 record). The count changes how finely a box's dose is resolved, never the emitted
-        total")),
+        step per direction on the s1 cone at 64 runs from 10.5 HP on the axis to 0.65 HP at the rim,
+        6.25 HP on average (DERIVED: S·f_k / 3000 J per HP / 64, S = 2.40 MJ MEASURED from the s1
+        record). The count changes how finely a box's dose is resolved, never the emitted total")),
 
     // The cone's strength S (J) per joule of the kinetic energy its round lost across the body it
     // left, ½ m (v_entry² − v_exit²), m the mass that meets the plate (a sub-calibre round's core):
     // the energy the line's dose is (`energy_dose.ron`). The cone emits S/2 in all, and its
     // deposits convert at that file's rate. It sets the potency of every cone at once and nothing
     // else: the shape and the field law both conserve a cone's emitted total.
-    energy_share: (0.88, Tuned("provisional (issue 116, owner decision 2026-10-28: the simplest
-        model): set so that the reference case throws a cone of the strength the retired law
-        (spend × κ × (v_exit / v_entry)² × (d / 88 mm)², converting at 70 HP points per
-        reference-mm) gave it. The reference case: the reference 88 mm APCBC round (10.2 kg, nose
-        factor 7/24) at its 773 m/s muzzle speed perforating its reference plate, 100 mm of
-        reference steel at normal impact (ASSUMED: the plate the retired rate was set against,
-        the s1 cone's, is 101 mm at 10.9°). DERIVED from the force law: the round reads 114.93
-        reference-mm at 773 m/s and leaves the plate at 259.69 m/s; the retired law's S was
-        100 × (259.69 / 773)² = 11.286 reference-mm, emitting 395.0 HP points; the round loses
-        ½ × 10.2 × (773² − 259.69²) = 2.7035 MJ; a cone emitting 395.0 HP points at 3000 J per HP
-        has S = 2.3701 MJ, so the share is 2.3701 / 2.7035 = 0.877, rounded to 0.88 (the reference
-        cone emits 396.5 HP points, +0.4 %). Its knockout radius for the 30 HP crew pool at a
-        0.2 m² mean face through RHA (α = 26.2°, Ω_c = 0.646 sr) is 2.02 m at an average spot and
-        2.63 m on the axis (DERIVED: R = sqrt(2 f(θ) E A / (pool Ω_c)), E = S/2 in HP points,
-        f = ½ and 0.842). A round loses more energy through a thicker plate, so a barely
+    energy_share: (0.88, StandIn("Stand-in for the debris cloud's own mass and speed: provisional
+        (issue 116, owner decision 2026-10-28: the simplest model): set so that the reference case
+        throws a cone of the strength the retired law (spend × κ × (v_exit / v_entry)² × (d / 88
+        mm)², converting at 70 HP points per reference-mm) gave it. The reference case: the
+        reference 88 mm APCBC round (10.2 kg, nose factor 7/24) at its 773 m/s muzzle speed
+        perforating its reference plate, 100 mm of reference steel at normal impact (ASSUMED: the
+        plate the retired rate was set against, the s1 cone's, is 101 mm at 10.9°). DERIVED from the
+        force law: the round reads 114.93 reference-mm at 773 m/s and leaves the plate at 259.69
+        m/s; the retired law's S was 100 × (259.69 / 773)² = 11.286 reference-mm, emitting 395.0 HP
+        points; the round loses ½ × 10.2 × (773² − 259.69²) = 2.7035 MJ; a cone emitting 395.0 HP
+        points at 3000 J per HP has S = 2.3701 MJ, so the share is 2.3701 / 2.7035 = 0.877, rounded
+        to 0.88 (the reference cone emits 396.5 HP points, +0.4 %). Its knockout radius for the 30
+        HP crew pool at a 0.2 m² mean face through RHA (α = 26.2°, Ω_c = 0.646 sr) is 2.02 m at an
+        average spot and 2.63 m on the axis (DERIVED: R = sqrt(2 f(θ) E A / (pool Ω_c)), E = S/2 in
+        HP points, f = ½ and 0.842). A round loses more energy through a thicker plate, so a barely
         perforating round throws the strongest cone of a plate and a thin plate a weak one")),
 
     // A burst's field (design doc §5a, "The burst"): thrown from the burst point about the round's
@@ -72,34 +72,35 @@
         // point enters it, since a burst's energy comes from its explosive. At 1 the field would
         // carry its driven energy and nothing more; the factor that keeps every shipped burst as
         // strong as it was is far from 1.
-        driven_energy_factor: (210.0, Tuned("provisional, flagged for the owner: the burst's
-            potency set against an HP target, not against the energy its wall carries, so the
-            factor is far above 1: the ring emits 105 times its driven energy. DERIVED to keep
-            every burst's potency: 1.0 reference-mm per kJ of driven energy at 70 HP points per
-            reference-mm is 0.07 HP points per J, × 3000 J per HP = 210 J of strength per J
-            driven, the same HP from every burst. That rate was set
-            against an even sphere at rest, the burst's ball until playtest fork F7 retired it: a
-            crew box presenting a 0.2 m² face (a seated crew member's) fully inside it, 2.0 m from
-            the burst, has its 30 HP pool emptied. DERIVED: the box catches A/(4πR²) of the
-            emission E = S/2, and its knockout radius is R = sqrt(E A / (30 × 4π)), E in HP
-            points; R = 2.0 m needs E = 7540 HP points against the 214.8 kJ that ball drove (the
-            8.8 cm Pzgr. 39 less its core). The ring at rest is 5.76 times as bright in its band,
-            R = 4.75 m (design doc §5a, DERIVED). A field that carried only its driven energy
-            (factor 2, emitting ½ M v_s²) would emit 132.6 HP points from the shipped ring's
-            397.7 kJ against 13,922 at 210 (DERIVED), a knockout radius 10.2 times shorter")),
+        driven_energy_factor: (210.0, StandIn("Stand-in for burst fragment dose from the fragments
+            themselves: provisional, flagged for the owner: the burst's potency set against an HP
+            target, not against the energy its wall carries, so the factor is far above 1: the ring
+            emits 105 times its driven energy. DERIVED to keep every burst's potency: 1.0
+            reference-mm per kJ of driven energy at 70 HP points per reference-mm is 0.07 HP points
+            per J, × 3000 J per HP = 210 J of strength per J driven, the same HP from every burst.
+            That rate was set against an even sphere at rest, the burst's ball until playtest fork
+            F7 retired it: a crew box presenting a 0.2 m² face (a crew station's) fully inside it,
+            2.0 m from the burst, has its 30 HP pool emptied. DERIVED: the box catches A/(4πR²) of
+            the emission E = S/2, and its knockout radius is R = sqrt(E A / (30 × 4π)), E in HP
+            points; R = 2.0 m needs E = 7540 HP points against the 214.8 kJ that ball drove (the 8.8
+            cm Pzgr. 39 less its core). The ring at rest is 5.76 times as bright in its band, R =
+            4.75 m (design doc §5a, DERIVED). A field that carried only its driven energy (factor 2,
+            emitting ½ M v_s²) would emit 132.6 HP points from the shipped ring's 397.7 kJ against
+            13,922 at 210 (DERIVED), a knockout radius 10.2 times shorter")),
         // h (degrees): the ring spans θ_c − h to θ_c + h of polar angle from the flight axis,
         // θ_c = atan(1/λ), uniform over that band; its near edge is held at the axis.
-        ring_half_width_deg: (10.0, Tuned("provisional (owner's brief 4b): the band the wall's
-            fragments leave in, one datum for every ring")),
+        ring_half_width_deg: (10.0, Unknown("provisional (owner's brief 4b): the band the wall's
+            fragments leave in, one datum for every ring. Settled by measured fragment angular
+            spread for the declared casing construction")),
         // N for the ring, as `directions` is for the cone: the emitted total is S/2 at every N, so
         // N sets how finely a box's dose is resolved, never how much the burst carries. One
         // throw's cost MEASURED 2026-10-24 by ballistics::pen_cam::burst_law_cost (release, macOS
         // arm64, best of 9, s1's line fired with the burst round). At rest each direction carries
         // S/2 / N joules, S/2 / (3000 N) HP points of dose (DERIVED, the field uniform over its
         // support).
-        ring_directions: (256, Tuned("provisional, flagged for the owner: the cost against the
-            resolution. The ring's throw: 0.50 ms at N = 64, 1.47 at 256, 4.01 at 684; at rest
-            218, 54 and 20 HP points per direction (S = 210 × 397.7 kJ = 83.53 MJ), so at 256 one
+        ring_directions: (256, Resolution("provisional, flagged for the owner: the cost against the
+            resolution. The ring's throw: 0.50 ms at N = 64, 1.47 at 256, 4.01 at 684; at rest 218,
+            54 and 20 HP points per direction (S = 210 × 397.7 kJ = 83.53 MJ), so at 256 one
             direction is about two crew pools")),
     ),
 )

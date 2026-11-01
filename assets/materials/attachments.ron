@@ -88,12 +88,12 @@
     // A silver birch's root plate on freely draining mineral soil, rooting depth 40-80 cm: the
     // Scots pine's, transferred.
     "silver_birch_root_plate": RootPlate(
-        overturning_nm_per_kg: (146.4, Tuned("ASSUMED Scots-pine analogue for silver birch:
-            Nicoll (2006), Table 2-6 SP/A2 coefficient 146.4 N m/kg fresh stem mass, on freely
-            draining mineral soil with rooting depth 40-80 cm. The table has no birch row; no
-            matched silver-birch fresh-stem-mass regression was read. This transfer is not a
-            measured birch anchorage or a bound on it. Site profile also ASSUMED for the game; kg
-            fresh stem mass, no extra g. Same Nicoll thesis URL as norway_spruce_root_plate
-            above.")),
+        overturning_nm_per_kg: (146.4, Unknown("ASSUMED Scots-pine analogue for silver birch: Nicoll
+            (2006), Table 2-6 SP/A2 coefficient 146.4 N m/kg fresh stem mass, on freely draining
+            mineral soil with rooting depth 40-80 cm. The table has no birch row; no matched
+            silver-birch fresh-stem-mass regression was read. This transfer is not a measured birch
+            anchorage or a bound on it. Site profile also ASSUMED for the game; kg fresh stem mass,
+            no extra g. Same Nicoll thesis URL as norway_spruce_root_plate above. Settled by a
+            matched silver-birch root-plate moment versus fresh-stem-mass regression")),
     ),
 }

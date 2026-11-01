@@ -11,37 +11,47 @@
         (1993), p.17")),
     round_type: ("APCBC", Measured("CITED TM 9-1985-3 pp.447-448: the Pzgr. 39 listed for the
         Kw.K. 36 as armour-piercing, capped, ballistic-capped, with a filler")),
-    core: ("GunSteel", Tuned("fixture label: a quenched-and-tempered 4340-class alloy-steel body,
+    core: ("GunSteel", Unknown("fixture label: a quenched-and-tempered 4340-class alloy-steel body,
         the class Q7 recommends for the large round; GunSteel carries that class's facts. The rigid
-        regime reads no core fact")),
+        regime reads no core fact. Settled by a sourced body-alloy specification that selects the
+        material class")),
     mass: (10.2, Measured("Jentz & Doyle, Tiger I Heavy Tank 1942-45, Osprey New Vanguard 5
         (1993), p.17")),
     caliber: (0.088, Measured("the gun's nominal 8.8 cm calibre designation")),
-    wound: (30.0, Tuned("a main-gun round empties the 30 HP crew pool at ~10 cm of chord
-        (3 / 0.10): a clean pass through a station knocks it out, a graze of its edge leaves it
-        reduced (crew-model decision 2026-10-17)")),
+    wound: (30.0, Unit("a main-gun round empties the 30 HP crew pool at ~10 cm of chord (3 / 0.10):
+        a clean pass through a station knocks it out, a graze of its edge leaves it reduced
+        (crew-model decision 2026-10-17)")),
     effects: (
-        impact: (Layered, Tuned("ASSUMED: provisional authored contact-read recipe; no emission measurement")),
+        impact: (Layered, Taste("round impact effects: ASSUMED: provisional authored contact-read
+            recipe; no emission measurement")),
         ember: (Some((
-            radius_m: (0.09, Tuned("ASSUMED: provisional presentation bead radius, preserved from the original effect")),
+            radius_m: (0.09, Taste("round flight effects: ASSUMED: provisional presentation bead
+                radius, preserved from the original effect")),
             base_offset_m: (0.35, Unknown("ASSUMED: base of the current shell view; replace from this round's certified visual geometry")),
             burn_s: (2.0, Unknown("ASSUMED: provisional tracer burn, no measured duration read")),
-            fade_s: (0.4, Tuned("ASSUMED: provisional burn-out tail")),
-            emissive: ((10.0, 2.5, 0.5), Tuned("ASSUMED: provisional red-orange linear HDR output")),
+            fade_s: (0.4, Taste("round flight effects: ASSUMED: provisional burn-out tail")),
+            emissive: ((10.0, 2.5, 0.5), Taste("round flight effects: ASSUMED: provisional
+                red-orange linear HDR output")),
         )), Unknown("ASSUMED: retained provisional tracer signature; no measured emission data has been read for this round")),
         smoke: (Some((
-            lifetime_s: (2.2, Tuned("ASSUMED: provisional smoke dissolution time")),
-            width_m: (0.35, Tuned("ASSUMED: provisional smoke birth diameter")),
-            growth_mps: (1.3, Tuned("ASSUMED: provisional smoke expansion rate")),
-            lateral_accel_mps2: (0.4, Tuned("ASSUMED: provisional smoke shear coefficient")),
-            rise_accel_mps2: (0.35, Tuned("ASSUMED: provisional smoke rise coefficient")),
-            start_m: (10.0, Tuned("ASSUMED: muzzle cloud occupies the first travelled arc")),
-            fade_m: (20.0, Tuned("ASSUMED: smoke ribbon's birth taper beyond the muzzle cloud")),
+            lifetime_s: (2.2, Taste("round flight effects: ASSUMED: provisional smoke dissolution
+                time")),
+            width_m: (0.35, Taste("round flight effects: ASSUMED: provisional smoke birth diameter")),
+            growth_mps: (1.3, Taste("round flight effects: ASSUMED: provisional smoke expansion rate")),
+            lateral_accel_mps2: (0.4, Taste("round flight effects: ASSUMED: provisional smoke shear
+                coefficient")),
+            rise_accel_mps2: (0.35, Taste("round flight effects: ASSUMED: provisional smoke rise
+                coefficient")),
+            start_m: (10.0, Taste("round flight effects: ASSUMED: muzzle cloud occupies the first
+                travelled arc")),
+            fade_m: (20.0, Taste("round flight effects: ASSUMED: smoke ribbon's birth taper beyond
+                the muzzle cloud")),
         )), Unknown("ASSUMED: provisional smoke signature retained with this round's tracer")),
         body: (Some((model: ("shell/shell.glb", Unknown("ASSUMED: the one authored shell model, an
             88 mm full-calibre body; this round's own body is not modelled")))),
-            Tuned("a main-gun round is drawn as its body in flight")),
-        streak: (None, Tuned("a main-gun round's tracer is its ember; no belt streak")),
+            Taste("round flight effects: a main-gun round is drawn as its body in flight")),
+        streak: (None, Taste("round flight effects: a main-gun round's tracer is its ember; no belt
+            streak")),
     ),
 
 )
