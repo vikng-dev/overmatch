@@ -449,6 +449,17 @@ impl SimulateInput {
     }
 }
 
+/// Release evidence: `app_s` retains the watchdog's wall clock; `frame_s` reads the same
+/// `Time<Real>::elapsed_secs_f64` as frame rows and surface marks, excluding initialization
+/// before the first update. Frame runners must use `frame_s` as their window origin.
+fn release_stamp(client_tick: u32, now: Duration, time: &Time<Real>) -> String {
+    format!(
+        "harness: released script_tick=0 client_tick={client_tick} app_s={:.3} frame_s={:.3}",
+        now.as_secs_f64(),
+        time.elapsed_secs_f64()
+    )
+}
+
 /// Headless simulate mode: write the scripted `TankCommand` into the lightyear `ActionState` slot
 /// each tick. Whole-state snapshot per tick, no devices.
 pub(crate) fn buffer_input(
@@ -490,11 +501,7 @@ pub(crate) fn buffer_input(
         return;
     }
     if sim.release(now) {
-        info!(
-            "harness: released script_tick=0 client_tick={} app_s={:.3}",
-            timeline.tick().0,
-            now.as_secs_f64()
-        );
+        info!("{}", release_stamp(timeline.tick().0, now, &time));
     }
     if sim.ticks >= sim.total {
         return;
@@ -1081,6 +1088,26 @@ mod tests {
                 .unwrap()
                 .0
                 .fire_primary
+        );
+    }
+
+    /// Frame runners must open on the frame rows' clock even when window initialization delays
+    /// the first update. Fixture startup and release instants model that excluded interval.
+    #[test]
+    fn release_stamp_uses_the_frame_clock_after_a_delayed_first_update() {
+        use bevy::prelude::{Real, Time};
+        let start = std::time::Instant::now();
+        let mut time = Time::<Real>::new(start);
+        time.update_with_instant(start + Duration::from_secs(8));
+        time.update_with_instant(start + Duration::from_secs(68));
+        let stamp = super::release_stamp(3900, Duration::from_secs(68), &time);
+        assert!(
+            stamp.contains("app_s=68.000"),
+            "the watchdog retains wall time: {stamp}"
+        );
+        assert!(
+            stamp.ends_with("frame_s=60.000"),
+            "the frame window excludes startup: {stamp}"
         );
     }
 

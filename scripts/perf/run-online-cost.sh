@@ -24,7 +24,7 @@
 #
 # The window opens at the Battle's combat release, not at launch: every client takes its slot
 # during the shipped fill-up and plays its script from the release (src/net/harness.rs), so the
-# measured client's `harness: released … app_s=` line, on the rows' own app clock, is the window's
+# measured client's `harness: released … frame_s=` line, on the rows' own app clock, is the window's
 # origin (frame-run.zsh's FRAME_RUN_ORIGIN_S): the edges are origin+WARMUP_S and
 # origin+WARMUP_S+DURATION_S of span, and the analyzer discards everything before the first. Until
 # the line appears the origin is the fill-up itself (DERIVED from assets/modes/battle.ron), so the
@@ -234,12 +234,12 @@ condition_poll() {
     launch_load "$cond"
   fi
   if [[ -z "$released" ]]; then
-    release_s="$(sed -n "s/.*$RELEASED .*app_s=\([0-9.]*\).*/\1/p" "$log" | head -n1)"
+    release_s="$(sed -n "s/.*$RELEASED .*frame_s=\([0-9.]*\).*/\1/p" "$log" | head -n1)"
     t_first="$(frame_run_t_first "$stream")"
     if [[ -n "$release_s" && -n "$t_first" ]]; then
       released=1
       FRAME_RUN_ORIGIN_S=$(( release_s - t_first ))
-      echo "   $cond: combat release at ${release_s}s of app time, origin ${FRAME_RUN_ORIGIN_S}s into the stream"
+      echo "   $cond: combat release at ${release_s}s of frame-clock time, origin ${FRAME_RUN_ORIGIN_S}s into the stream"
     fi
   fi
   [[ -n "$span" && -n "$released" ]] || return 0

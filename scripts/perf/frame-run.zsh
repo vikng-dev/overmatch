@@ -21,7 +21,7 @@
 # ORIGIN is FRAME_RUN_ORIGIN_S, the stream second the window counts from: 0 (the first row) for an
 # offline condition, reset before each launch; a runner that learns where its workload starts sets
 # it from `condition_launched` or `condition_poll` (the online runner: the harness's combat release,
-# `harness: released … app_s=`, on the same app clock as the rows). The loop's span target, its
+# `harness: released … frame_s=`, on the same app clock as the rows). The loop's span target, its
 # deadline and the analyzer's warmup all carry it, so no held frame enters a window.
 #
 # OFFSCREEN=1 (read from the environment, for every runner) is the mode that takes nobody's screen:

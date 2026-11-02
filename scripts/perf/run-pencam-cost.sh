@@ -28,7 +28,7 @@
 #                   runs VISIBLE (OVERMATCH_WINDOW=visible), the opponent hidden. Both settings
 #                   On / Off. Both scripts play from the Battle's combat release after the shipped
 #                   fill-up (src/net/harness.rs), so the run's span and its analysis count from
-#                   the measured client's `harness: released … app_s=` line, on the rows' own app
+#                   the measured client's `harness: released … frame_s=` line, on the rows' own app
 #                   clock. The opponent's rounds knock the measured tank out about 30 s in
 #                   (MEASURED 2026-10-19), and the scripted client never respawns: the analysis
 #                   stops at the kill cam run's start (the on-run's mark, for both runs), where
@@ -230,12 +230,12 @@ for cond in "${CONDITIONS[@]}"; do
       grep -q "$RELEASED" "$log" 2>/dev/null && break
       sleep 0.2
     done
-    release_s="$(sed -n "s/.*$RELEASED .*app_s=\([0-9.]*\).*/\1/p" "$log" | head -n1)"
+    release_s="$(sed -n "s/.*$RELEASED .*frame_s=\([0-9.]*\).*/\1/p" "$log" | head -n1)"
     [[ -n "$release_s" ]] || invalid "$cond" "the measured client was never released into combat (no '$RELEASED' line; see $log)"
     t_first="$(head -n1 "$stream" 2>/dev/null | sed -n 's/.*"t"[[:space:]]*:[[:space:]]*\([0-9.eE+-]*\).*/\1/p')"
     [[ -n "$t_first" ]] || invalid "$cond" "no frame row by the release (see $log)"
     origin=$(( release_s - t_first ))
-    echo "   $cond: combat release at ${release_s}s of app time, origin ${origin}s into the stream"
+    echo "   $cond: combat release at ${release_s}s of frame-clock time, origin ${origin}s into the stream"
     # The scripted client exits on its own after its ticks (the usual end: `exited`, status 0);
     # `spanned` is the fallback if the stream outruns the schedule, and a kill ends it then.
     outcome="$(wait_span "$stream" "$((origin + run_s + 10))" "$CLIENT_PID")"
