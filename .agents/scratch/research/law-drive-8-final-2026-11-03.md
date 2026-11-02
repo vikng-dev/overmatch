@@ -117,3 +117,42 @@ ran through `scripts/serial-cargo` under its one machine lock, unattended, headl
 No source changed between these gates and the evidence commit. All diagnostic and gate
 processes exited; there is no lane process left running. No capture, push, merge, issue comment,
 protocol change, or release occurred.
+
+## Resumed round: owner decision on rollback
+
+The owner replaced the earlier stop rule: a required predicate or design decision is recorded,
+then the lane continues independently. MEASURED restart: 2026-11-02 20:32:55 UTC;
+new deadline 21:32:55 UTC. The earlier evidence and rejected deletion stand.
+
+A temporary unit witness bisected the same -2 m/s, highest-forward-gear, synchronous negative
+crank entry, extending the observation horizon to 120 simulated seconds. Arrest means either
+belt reaches the shared rest tolerance. Twenty bisections bracketed the angle and the per-side
+dynamic brake force. These are MEASURED finite-horizon boundaries, not an infinite-time theorem
+or a real-contact certification. The probe was removed; no failing or ignored test remains.
+
+| Fixture construction | Data `brake_force`, per side | Arrest boundary | Arrest at grip limit requires, per side | Static hold at grip limit requires, per side |
+|---|---:|---:|---:|---:|
+| Heavy | 96,000 N | 26.107626–26.107668° | 157,215.9–157,216.44 N | 124,688.34 N |
+| Compact variant | 25,000 N (original compact: 50,000 N) | 24.089064–24.089102° | 41,846.344–41,846.51 N | 42,187.785 N |
+
+The grip angle is DERIVED as atan(mu), MEASURED 41.987213° for the fixtures' mu 0.9.
+Static hold is DERIVED as W sin(theta)/(2 static_factor); unlike moving arrest it receives the
+static multiplier. A rule requiring static hold alone does not eliminate the heavy rollback.
+Neither brake value is changed in production or in the permanent class fixtures.
+
+| Option | Cost | Player outcome and another tank |
+|---|---|---|
+| A: retain the law | No implementation; document the non-recovery outcome and reassess at every steeper map | The shipped maximum face arrests in the measured entry; sufficiently steep rollback still runs away. Another tank must be checked against its own engine, gearing and brakes, not this map claim. |
+| B: price available arrest capability at the seam | Amend the gear policy and settle moving launch-priced clutch delivery; test both sides of the boundary | Preserve no-cut arrest when controls suffice; select recovery when they do not. Another tank keeps its real brake facts and uses the same capability law. |
+| C: require brake construction to cover the grip limit | Admission needs the supported ground-friction domain and dynamic arrest as well as static hold; refuse incompatible construction or obtain corrected facts | Rollback recovery cases are excluded by the admitted domain. Another tank with genuinely weaker brakes is refused, and adding a higher-grip ground can invalidate a previously admitted tank. Raising authored numbers without evidence would invent construction. |
+| D: unconditional rollback gear choice (the tested deletion) | Small code deletion, but it neither recovers the failures nor preserves no-cut braking | An arrestable entry buys a cut, and both failing class entries remain broken. Rejected by the isolated trial. |
+
+Recommendation: **B**, after the owner settles that policy. It preserves independent construction
+facts and expresses capability for any tank and supported ground. A is an explicit provisional
+choice for the current map, not a general guarantee. C would make brake construction an admission
+policy and needs a declared friction domain; static holding alone does not supply the requested
+moving outcome. No option is implemented. Commit: driving: measure the rollback decision boundary (#146).
+
+MEASURED boundary-record gates on restored code: formatting and CI clippy passed;
+312 targeted track/command/HUD/citation tests passed. The measurement itself passed and
+was removed before these gates. No production source changed.
