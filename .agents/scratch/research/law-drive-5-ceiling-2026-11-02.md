@@ -26,7 +26,7 @@ pricing, issue comments, push, merge or release are authorized or performed.
 - The scheduler enum and field are deleted, including hill-hold and grade-limit display tags,
   trace/hash slots and HUD markers. Eight canonical fields remain: `gear`, `shift_ticks`,
   `steer_step`, `reverse`, `park`, `omega_e`, `clutch`, `reversal_hold_ticks`. Protocol revision
-  77 deliberately names the wire change; pins must match the measured canonical bytes.
+  78 deliberately names the wire change; pins must match the measured canonical bytes.
 - The effective bristle shear distance and elastic breakaway share keep their existing values
   but become required labelled StandIn data in `assets/driving/grip.ron`. Their former comments
   overclaimed a measured pad/ground truth; the data now names the missing constitutive evidence.
@@ -204,7 +204,7 @@ arrival error is bounded by DERIVED `ticks * f32::EPSILON` on the unit axis, rat
 arrival tick. A labelled 0.64 fixture checks accumulated roundoff and final clamping directly.
 MEASURED rerun with 0.64 as the actual authored rise: **6 passed**. The original shipped file
 was restored byte-for-byte afterward; the final commit contains no input-data taste change.
-No wire type or state changes in this input step, so revision 77 remains the deliberate bump.
+No wire type or state changes in this input step, so revision 78 remains the deliberate bump.
 
 MEASURED input-step test-section change: **+53 lines**, using the same cfg(test)-body method as
 the primary count. Whole-lane test-section change is **+323 lines**. The old exact-count proof

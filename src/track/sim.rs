@@ -98,7 +98,7 @@ pub struct DriveSignal {
 }
 
 /// The joint transmission's path-dependent state (gear/window/detent/direction/crank plus the
-/// clutch regime and the transitional brake latch). Server-authoritative, advanced only
+/// clutch regime, park lever and reversal pause). Server-authoritative, advanced only
 /// where the body is dynamic through [`apply_track_forces`], and
 /// replicated as one atomic snapshot to the tank's OWNER only; every other listener reads the
 /// crank through [`EngineRpm`]. The determinism trace hashes every field of the exhaustive

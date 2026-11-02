@@ -84,6 +84,7 @@ impl Measurements {
                 1.0,
                 probe.grip_limit_n,
                 state.clutch,
+                state.omega_e,
             );
             self.pending = Some(Landing {
                 gear: state.gear,
@@ -247,7 +248,7 @@ pub(super) fn place(
 }
 
 /// The Driver's load must agree with nominal weight times each declared ground's rolling
-/// coefficient, independent of the scheduler's entry path. The measurement records every coupled
+/// coefficient, independent of the Driver's entry path. The measurement records every coupled
 /// landing; no particular ground, vehicle or gear is a pass condition. Fixture: uniform flat
 /// ground, rest/top-gear entry, full command for 40 simulated seconds, last-second observation.
 #[test]
@@ -959,6 +960,7 @@ fn shipped_notches_launch_and_sustain_ordered_speed() {
                             pedal,
                             p.grip_limit_n,
                             crate::track::transmission::ClutchState::Slip,
+                            tp.engine.idle_rpm * crate::track::transmission::RPM_TO_RAD,
                         ) > p.perceived_load_n
                     });
                 }

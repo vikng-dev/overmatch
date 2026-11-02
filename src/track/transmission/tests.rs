@@ -64,7 +64,7 @@ fn lab_tp() -> TransmissionParams {
 
 /// FIXTURE DATA: per-side belt inertia (kg) at the scale the shipped sheet's construction sum
 /// derives (DERIVED 4,749.86 kg, `reflected-track-inertia.md`), rounded. The arithmetic tests
-/// assert the scheduler at this coupling; none is a pass condition on the shipped vehicle.
+/// assert gear choices at this coupling; none is a pass condition on the shipped vehicle.
 const TIGER_BELT_INERTIA: f32 = 4_750.0;
 
 /// FIXTURE DATA modelled on the shipped Tiger's declared drivetrain: the torque curve, speed
@@ -1100,7 +1100,7 @@ fn clutch_states_cover_rest_launch_lock_and_shift() {
 }
 
 /// An individually finite authoring cannot publish unusable derived ratios. The live coupling
-/// and scheduler rely on this load gate instead of encountering infinities during play.
+/// and Driver rely on this load gate instead of encountering infinities during play.
 #[test]
 fn derived_parameter_overflow_is_refused_at_construction() {
     let mut authoring = tiger_authoring();
@@ -1209,10 +1209,10 @@ fn no_combustion_no_stored_energy_no_pivot_work() {
     assert_eq!(rep.next_speeds, [0.0; 2]);
 }
 
-/// The game's damage model: the crank and scheduler price the same reduced full-pedal
+/// The game's damage model: the crank and Driver price the same reduced full-pedal
 /// torque, including construction drag that does not scale with combustion.
 #[test]
-fn drag_release_and_scheduler_read_the_command() {
+fn drag_release_and_driver_read_the_command() {
     let (fp, tp) = (lab_fp(), lab_tp());
     let mut st = fresh(&tp);
     st.park = false;
@@ -1231,6 +1231,7 @@ fn drag_release_and_scheduler_read_the_command() {
         1.0,
         f32::INFINITY,
         ClutchState::In,
+        tp.engine.idle_rpm * RPM_TO_RAD,
     );
     let [induced, idle, drag] = engine_torques(&tp, inp.supply, 1550.0 * RPM_TO_RAD, 1.0);
     let actual =
@@ -1238,7 +1239,7 @@ fn drag_release_and_scheduler_read_the_command() {
             / tp.sprocket_radius;
     assert!(
         (modeled - actual).abs() < 0.01,
-        "scheduler {modeled}, crank {actual}"
+        "Driver price {modeled}, crank {actual}"
     );
     assert!(rep.forces[0].is_finite());
     #[cfg(feature = "bitprobe")]
@@ -1514,22 +1515,33 @@ fn commanded_work_consumes_the_task_rate_once() {
     assert!((applied / whole - supply.task_rate).abs() < 1e-6);
 }
 
-/// The game's driving and damage model: a zero task rate cannot deliver idle-catch work
-/// even while staffed controls still command launch. The Drive readout relies on that rate.
+/// The game's driving and damage model: without task work, clutch opening cannot persist at
+/// parked rest or launch, or begin during motion. A removed zero-rate gate fails the rest arms.
 #[test]
-fn zero_task_rate_cannot_open_a_moving_clutch() {
+fn zero_task_rate_springs_clutch_in_at_rest_and_in_motion() {
     for tp in [lab_tp(), tiger_tp()] {
-        let mut state = TransmissionState {
-            park: false,
-            clutch: ClutchState::In,
-            ..fresh(&tp)
-        };
-        let mut inp = input(1.0, 0.0, [5.0; 2], [0.0; 2]); // Fixture rolling entry.
-        inp.supply.task_rate = 0.0;
-        update_clutch_state(&mut state, &tp, &inp, false, 1.0, 5.0);
-        assert_eq!(state.clutch, ClutchState::In);
-        let [fuel, catch, _] = engine_torques(&tp, inp.supply, state.omega_e, 1.0);
-        assert_eq!([fuel, catch], [0.0; 2]);
+        // Fixture: moving drive, parked release, stopped launch and unparked release.
+        for (park, command, speed) in [
+            (false, 1.0, 5.0),
+            (true, 0.0, 0.0),
+            (false, 1.0, 0.0),
+            (false, 0.0, 0.0),
+        ] {
+            let mut state = TransmissionState {
+                park,
+                clutch: ClutchState::Out,
+                ..fresh(&tp)
+            };
+            let mut inp = input(command, 0.0, [speed; 2], [0.0; 2]);
+            inp.supply.task_rate = 0.0;
+            let shaft = speed * tp.gears_fwd[0] / tp.sprocket_radius;
+            update_clutch_state(&mut state, &tp, &inp, false, command, shaft);
+            assert_eq!(
+                state.clutch,
+                ClutchState::In,
+                "park={park} command={command} speed={speed}"
+            );
+        }
     }
 }
 
@@ -1930,6 +1942,7 @@ fn driver_launches_in_the_highest_capable_start_gear() {
                     1.0,
                     inp.perceived_load.grip_n,
                     ClutchState::Slip,
+                    tp.engine.idle_rpm * RPM_TO_RAD,
                 );
                 assert!(
                     force - load > force_margin(&fp, &tp),
@@ -1944,6 +1957,7 @@ fn driver_launches_in_the_highest_capable_start_gear() {
                         1.0,
                         inp.perceived_load.grip_n,
                         ClutchState::Slip,
+                        tp.engine.idle_rpm * RPM_TO_RAD,
                     );
                     assert!(force - load <= force_margin(&fp, &tp));
                 }
@@ -1992,6 +2006,7 @@ fn driver_full_pedal_walks_to_the_top_on_firm_ground() {
                     1.0,
                     inp.perceived_load,
                     state.clutch,
+                    state.omega_e,
                 )
             };
             speed = (speed + (force - load) / coupled_mass(&fp) / TICK_HZ).max(0.0);
@@ -2027,7 +2042,8 @@ fn driver_force_price_uses_the_current_regime_and_both_caps() {
                         ratio,
                         command,
                         grip,
-                        ClutchState::Slip
+                        ClutchState::Slip,
+                        tp.engine.idle_rpm * RPM_TO_RAD
                     ),
                     expected
                 );
@@ -2044,7 +2060,8 @@ fn driver_force_price_uses_the_current_regime_and_both_caps() {
             ratio,
             1.0,
             f32::INFINITY,
-            ClutchState::In
+            ClutchState::In,
+            tp.engine.idle_rpm * RPM_TO_RAD
         ) <= 0.0
     );
     // Fixture: a tiny symmetric grip cap exposes a missing engine-braking cap.
@@ -2056,7 +2073,8 @@ fn driver_force_price_uses_the_current_regime_and_both_caps() {
             ratio,
             0.0,
             100.0,
-            ClutchState::In
+            ClutchState::In,
+            tp.engine.idle_rpm * RPM_TO_RAD
         ),
         -100.0
     );
@@ -2332,6 +2350,7 @@ fn a_moving_lug_is_not_priced_as_launch_slip() {
         1.0,
         f32::INFINITY,
         ClutchState::In,
+        tp.engine.idle_rpm * RPM_TO_RAD,
     );
     assert!(
         (actual - (fuel + catch - drag).min(tp.clutch_capacity) * ratio / tp.sprocket_radius).abs()
@@ -2450,6 +2469,7 @@ fn law_launch_selection_prices_requested_pedal_on_grade() {
             0.5,
             inp.perceived_load.grip_n,
             ClutchState::Slip,
+            tp.engine.idle_rpm * RPM_TO_RAD,
         ) - load;
         println!(
             "MEASURED half-pedal grade gears={} chosen={} spare_n={spare}",
@@ -2464,7 +2484,8 @@ fn law_launch_selection_prices_requested_pedal_on_grade() {
                 tp.gears_fwd[usize::from(g - 1)],
                 0.5,
                 inp.perceived_load.grip_n,
-                ClutchState::Slip
+                ClutchState::Slip,
+                tp.engine.idle_rpm * RPM_TO_RAD
             ) <= load));
         } else {
             assert!(
@@ -2655,6 +2676,7 @@ fn one_way_lever_launches_on_grade_without_rollback_or_extra_cuts() {
             1.0,
             initial.perceived_load.grip_n,
             ClutchState::Slip,
+            tp.engine.idle_rpm * RPM_TO_RAD,
         ) - load;
         let mut state = TransmissionState {
             clutch: ClutchState::In,
@@ -2768,7 +2790,8 @@ fn backward_crank_has_only_opposing_motoring_drag() {
 }
 
 /// The Driver must brake at the curve ceiling without buying a shift; without authority,
-/// only the independent clutch guard remains. Fixture: the same overrun in both ladders.
+/// or throughput, only the independent clutch guard remains. Fixture: overrun below top gear
+/// where the ladder permits it, with a live drive request so gear holding exercises C2.
 #[test]
 fn ceiling_brake_requires_driver_work_and_holds_the_current_gear() {
     for (fp, tp) in [(lab_fp(), lab_tp()), (grade_fixture_fp(), tiger_tp())] {
@@ -2779,23 +2802,30 @@ fn ceiling_brake_requires_driver_work_and_holds_the_current_gear() {
             } else {
                 &tp.gears_fwd
             };
-            let gear = ladder.len() as u8;
-            let ratio = *ladder.last().unwrap();
+            let gear = ladder.len().saturating_sub(1).max(1) as u8;
+            let ratio = ladder[usize::from(gear - 1)];
             let k = ratio / tp.sprocket_radius;
             let ceiling = tp.max_curve_rpm() * RPM_TO_RAD / k;
             let speed = dir * ceiling;
             let mut inp = input(
-                0.0,
+                dir * 0.25, // Fixture: requested drive remains below drag, so C2 must hold.
                 0.0,
                 [speed; 2],
                 [-dir * (engine_drag(&tp, ceiling * k) * k * 0.5 + tp.brake_capacity_n * 0.25); 2],
             );
+            inp.perceived_load = driver_input(
+                &fp,
+                speed,
+                dir * inp.reactions.iter().sum::<f32>(),
+                inp.command,
+            )
+            .perceived_load;
             let mut state = TransmissionState {
                 gear,
                 reverse,
                 park: false,
                 clutch: ClutchState::In,
-                omega_e: ceiling * k,
+                omega_e: tp.max_curve_rpm() * RPM_TO_RAD,
                 ..fresh(&tp)
             };
             let initial = state;
@@ -2803,9 +2833,15 @@ fn ceiling_brake_requires_driver_work_and_holds_the_current_gear() {
             assert!(!staffed.shifting);
             assert_eq!(state.gear, gear);
             assert!(staffed.next_speeds[0] * dir <= ceiling + 1e-5);
-            inp.supply.control_authority = false;
-            let unstaffed = step(&fp, &tp, &mut { initial }, &inp);
-            assert!(unstaffed.next_speeds[0] * dir > staffed.next_speeds[0] * dir);
+            for (authority, rate) in [(false, 1.0), (true, 0.0)] {
+                inp.supply.control_authority = authority;
+                inp.supply.task_rate = rate;
+                let unworked = step(&fp, &tp, &mut { initial }, &inp);
+                assert!(
+                    unworked.next_speeds[0] * dir > staffed.next_speeds[0] * dir + 1e-5,
+                    "ceiling brakes require authority and throughput: {authority}, {rate}"
+                );
+            }
         }
     }
 }
@@ -2838,8 +2874,8 @@ fn rev_match_requires_a_window_or_steering_and_authority() {
     }
 }
 
-/// Beyond brake capacity a reversal cannot promise rest: it retains the old direction,
-/// full service force and a refreshed pause rather than cutting while sliding.
+/// A sliding reversal retains its direction and refreshes the pause; only rest permits a cut.
+/// Fixture: grade force exceeds both static and dynamic brake capacity.
 #[test]
 fn reversal_beyond_brake_capacity_refuses_the_direction_cut() {
     let (fp, tp) = (grade_fixture_fp(), tiger_tp());
@@ -2924,8 +2960,13 @@ fn restaffed_rollback_retains_gear_and_refuses_backward_overrev() {
     let mut state = initial;
     inp.supply.control_authority = false;
     inp.supply.task_rate = 0.0;
+    // The production adapter masks the retained notch while the station is empty.
+    inp.command = 0.0;
+    inp.throttle = 0.0;
     assert!(!step(&fp, &tp, &mut state, &inp).shifting);
     inp.supply = DriveSupply::WHOLE;
+    inp.command = 1.0;
+    inp.throttle = 1.0;
     inp.speeds = [speed; 2];
     let report = step(&fp, &tp, &mut state, &inp);
     assert!(!report.shifting, "restaffing cannot buy a rollback cut");
@@ -2935,5 +2976,48 @@ fn restaffed_rollback_retains_gear_and_refuses_backward_overrev() {
     assert_eq!(
         landed_spare(&tp, &fp, &inp, &initial, candidate, 1.0),
         f32::NEG_INFINITY
+    );
+}
+
+/// Gear pricing must retain the live crank's catch floor through a paid cut. The open crank
+/// cannot cross zero under its own drag; a negative vehicle landing cannot revoke that floor.
+#[test]
+fn driver_price_uses_the_live_cranks_catch_floor_through_a_cut() {
+    let (fp, tp) = (grade_fixture_fp(), tiger_tp());
+    // Fixture: F4 at 0.5 m/s on 20 degrees, pricing one lower gear after its cut.
+    let speed = 0.5;
+    let load = fp.grip.unwrap().side_weight * 2.0 * 20.0_f32.to_radians().sin();
+    let inp = driver_input(&fp, speed, load, 1.0);
+    let state = TransmissionState {
+        gear: 4,
+        clutch: ClutchState::In,
+        omega_e: speed * tp.gears_fwd[3] / tp.sprocket_radius,
+        ..fresh(&tp)
+    };
+    let candidate = state.gear - 1;
+    let ratio = tp.gears_fwd[usize::from(candidate - 1)];
+    let landing = speed - load * f32::from(tp.shift_ticks) / TICK_HZ / coupled_mass(&fp);
+    assert!(
+        landing < 0.0,
+        "fixture must cross the candidate shaft's zero"
+    );
+    let [fuel, catch, drag] = engine_torques(&tp, inp.supply, state.omega_e, 1.0);
+    let floor = crank_guards(&tp, &inp, &state, 1.0, fuel + catch - drag).0;
+    assert!(floor > 0.0, "the live crank must retain its catch floor");
+    let expected = gear_force(
+        &tp,
+        &fp,
+        inp.supply,
+        floor * tp.sprocket_radius / ratio,
+        ratio,
+        1.0,
+        inp.perceived_load,
+        ClutchState::In,
+        state.omega_e,
+    ) - load;
+    let actual = landed_spare(&tp, &fp, &inp, &state, candidate, 1.0);
+    assert!(
+        (actual - expected).abs() < force_margin(&fp, &tp),
+        "candidate price {actual} must share the live crank floor price {expected}"
     );
 }

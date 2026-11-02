@@ -1159,7 +1159,7 @@ const WIRE_SURFACE_HASH: u64 = 0x5afa185f66009321;
 //     stripped, so a doc or reformat edit is invisible; a field/variant/type change is not) and hashes
 //     the lot. This is the whole `WIRE_SURFACE` own-type graph, followed through embeds: `NetCrew`
 //     carries `VolumeSnapshot` which carries `CrewSnapshot`, `TankTransmission` carries
-//     `TransmissionState`/`SchedulerState`, `WeaponGate` carries `WeaponGateState`, `WeaponLoads`
+//     `TransmissionState`/`ClutchState`, `WeaponGate` carries `WeaponGateState`, `WeaponLoads`
 //     carries `WeaponLoad`, `TankCommand` (src/command.rs) carries `CrewSwap` and `RoundSelect`
 //     (which carries `RoundStep`), and both
 //     `CrewSnapshot` and `CrewSwap` carry `CrewStation` (src/damage.rs).

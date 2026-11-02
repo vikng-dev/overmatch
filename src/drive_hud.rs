@@ -402,7 +402,7 @@ fn update_drive_hud(
     );
 
     let debug = format!(
-        "         hull {signed_ground:+5.2} m/s ({:+6.1} km/h)\n\
+        "hull {signed_ground:+5.2} m/s ({:+6.1} km/h)\n\
          belt L {:+5.2} R {:+5.2} | slip L {:+5.2} R {:+5.2}\n\
          cmd thr {:+5.2} steer {:+5.2} | {steering:<15}",
         signed_ground * 3.6,

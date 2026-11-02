@@ -93,8 +93,8 @@ EXIT_SUPPORT_FRACTION = 0.3
 # half-ulp of the printed precision, folded into the ellipse tolerance.
 Q_FORCE = 0.05  # f_long / f_lat at 1 decimal
 Q_LOAD = 0.5  # load at 0 decimals
-# Grip (static-friction) regime bristle shear modulus — mirrors the Rust
-# GRIP_SHEAR_MODULUS_M in src/track/forces.rs; per-side stiffness K = mu·W/2 / this.
+# DERIVED mirror of assets/driving/grip.ron::shear_modulus_m for schema-2 captures;
+# per-side stiffness K = mu·W/2 / this.
 GRIP_SHEAR_MODULUS_M = 0.075
 
 

@@ -1617,7 +1617,7 @@ struct ScriptedDeterminismRun {
     saw_element_strain: bool,
     /// The controlled tank's transmission left its spawn state over the flat script.
     transmission_advanced: bool,
-    /// Slope-segment witness of the transitional brake latch.
+    /// Slope-segment witness of support-priced gear changes.
     saw_slope_shift: bool,
 }
 
@@ -1874,8 +1874,8 @@ fn scripted_determinism_run() -> ScriptedDeterminismRun {
 
     // Fixture: a rolling grade entry exercises support-priced gear choices and paid cuts.
     let rot = Quat::from_rotation_x(20.0_f32.to_radians());
-    // FIXTURE: slow enough that hill hold latches with face still ahead of the front contact
-    // (MEASURED at 4.0 m/s: the front contact reaches the crest's rounding as hold latches).
+    // Fixture: the rolling entry keeps the front contact on the slope face during gear response.
+    // MEASURED at 4.0 m/s: the front contact reaches the crest's rounding during that response.
     let approach_speed = 3.0;
     // DERIVED fixture placement: put the rest envelope on the actual terrain face along its
     // normal, rather than dropping the rig from an unrelated world height.
@@ -2041,8 +2041,7 @@ fn assert_scripted_determinism_witnesses(run: &ScriptedDeterminismRun, label: &s
 /// Two fresh, full simulation compositions must replay one command script bit-for-bit, every tick:
 /// the flat drive-steer-fire script, then the slope segment. The digest hashes the transmission's
 /// exhaustive field projection (`transmission_state_projection`) and both belt speeds, so the
-/// transmission's support-priced gear decisions and transitional brake latch
-/// replays exactly too. The witness assertions
+/// support-priced gear decisions, park lever and reversal pause replay exactly too. The witnesses
 /// keep this from passing because the scenario never reached contact, element strain, slip
 /// traction, steering slip, fire, a transmission off its spawn state, or that grade response.
 #[test]

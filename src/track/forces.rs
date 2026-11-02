@@ -43,7 +43,7 @@ use super::route::{polyline_len, resample};
 use crate::bitprobe::{ContactInputProbe, ElementOutputProbe};
 
 /// Effective bristle constitutive data, admitted before contact construction.
-/// The measurement history and stability bounds live in static-friction-design.md.
+/// The measurement history and stability bounds live in ADR-0026.
 #[derive(serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 struct GripLaw {

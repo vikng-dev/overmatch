@@ -200,8 +200,9 @@ pub struct TransmissionParams {
     /// Zero-throttle engine drag (compression braking): the MID-BAND anchor of the rising
     /// motoring-torque curve, as a fraction of peak torque. [`engine_drag`] equals
     /// `drag_fraction × peak` at `ω_mid = (idle + governed)/2` and grows linearly with
-    /// crank speed from a the authored actuation threshold base (pumping and friction losses
-    /// rise with speed, giving each gear a bounded downhill equilibrium).
+    /// crank speed from the authored actuation threshold base. A downhill equilibrium exists
+    /// only where this drag plus rolling resistance balances grade force before clutch guards
+    /// cap transmitted drag.
     /// A drag TORQUE at the crank (design §3), never the negative half of rated power.
     /// Diesel motoring/compression braking runs ~20–30% of rated torque mid-band
     /// (INFERRED band, tagged at the authoring site).
@@ -814,7 +815,12 @@ fn idle_catch_capacity(tp: &TransmissionParams, supply: DriveSupply) -> f32 {
 
 /// Instrument for the accepted Driver law: price the crank at the landing shaft speed,
 /// or the commanded launch speed while slipping, bounded by clutch and contact grip.
+/// The live crank owns catch-floor admission even when the candidate shaft landing is backward.
 /// This shared price does not select a gear or change delivery.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the force instrument reads construction, supply, landing, ratio, command, grip, clutch and live crank"
+)]
 pub(crate) fn price_driver_force(
     tp: &TransmissionParams,
     supply: DriveSupply,
@@ -823,9 +829,10 @@ pub(crate) fn price_driver_force(
     command: f32,
     grip_n: f32,
     clutch: ClutchState,
+    omega_e: f32,
 ) -> f32 {
     let capacity = supply.transmission_condition * tp.clutch_capacity * gear / tp.sprocket_radius;
-    free_driver_force(tp, supply, shaft, gear, command, clutch)
+    free_driver_force(tp, supply, shaft, gear, command, clutch, omega_e)
         .clamp(-capacity, capacity)
         .clamp(-grip_n, grip_n)
 }
@@ -837,13 +844,10 @@ fn free_driver_force(
     gear: f32,
     command: f32,
     clutch: ClutchState,
+    omega_e: f32,
 ) -> f32 {
     let launch_rpm = tp.launch_omega(command) / RPM_TO_RAD;
-    let floor = if shaft >= 0.0 {
-        idle_floor(tp, supply).unwrap_or(f32::NEG_INFINITY)
-    } else {
-        f32::NEG_INFINITY
-    };
+    let floor = idle_floor(tp, supply, omega_e).unwrap_or(f32::NEG_INFINITY);
     let shaft_rpm = (shaft * gear / tp.sprocket_radius / RPM_TO_RAD).max(floor / RPM_TO_RAD);
     // A moving In clutch below idle is a lug, not a fresh launch.
     let rpm = if clutch == ClutchState::Slip {
@@ -890,7 +894,7 @@ fn force_margin(fp: &ForceParams, tp: &TransmissionParams) -> f32 {
 /// M*a = F-L and F = k*tau-J*k^2*a gives this force. Slip holds its launch rpm.
 #[expect(
     clippy::too_many_arguments,
-    reason = "the force law reads construction, contact, supply, speed, gear, command and clutch"
+    reason = "the force law reads construction, contact, supply, landing, ratio, command, load, clutch and live crank"
 )]
 fn gear_force(
     tp: &TransmissionParams,
@@ -901,8 +905,9 @@ fn gear_force(
     command: f32,
     load: super::load::PerceivedLoad,
     clutch: ClutchState,
+    omega_e: f32,
 ) -> f32 {
-    let force = free_driver_force(tp, supply, shaft, ratio, command, clutch);
+    let force = free_driver_force(tp, supply, shaft, ratio, command, clutch, omega_e);
     let force = if clutch == ClutchState::Slip {
         force
     } else {
@@ -939,6 +944,7 @@ fn launch_pick(
                 command,
                 load,
                 ClutchState::Slip,
+                tp.engine.idle_rpm * RPM_TO_RAD,
             ) - load.total_n()
                 > force_margin(fp, tp)
         })
@@ -989,6 +995,7 @@ pub(crate) fn landed_spare(
         } else {
             ClutchState::In
         },
+        state.omega_e,
     ) - load.total_n()
 }
 
@@ -1007,7 +1014,7 @@ fn choose_gear(
         || st.shift_ticks != 0
         || inp.perceived_load.grip_n == 0.0
     {
-        return; // No Driver, paid cut, or airborne: no gear decision.
+        return; // No Driver work, paid cut, or airborne: no gear decision.
     }
     let ladder = if st.reverse {
         &tp.gears_rev
@@ -1299,24 +1306,15 @@ fn update_clutch_state(
     };
 }
 
-/// The crank's free torque `τ_free = max(τ_command, τ_catch) − τ_drag` from the PRE-tick crank speed, and
-/// the engine power available at that operating point.
-///
-/// Fueling command u. Engaged: the unscaled propulsive throttle (a brake command is not
-/// fueling). The game's damage model scales gross combustion while retaining construction drag.
-/// Declutched: a proportional-band rev governor (the width in `assets/driving/engine.ron`) toward the LARGER of two
-/// targets —
-///   * the REV-MATCH target `|m|·k` (`st.gear` is already the landing gear during the window), so
-///     the clutch re-engages near-synchronous;
-///   * the STEER demand target `idle + (peak_torque_rpm − idle)·|steer|`: the steering member is
-///     engine-driven in every regime, so a steer command revs the crank whether or not the main
-///     clutch is out — the surviving half of the old `cmd_mag` rev-floor contract, now reached
-///     DYNAMICALLY (pivot power spools with the crank).
-///
-/// The induced torque uses the crank's own rpm. The game's damage model scales combustion
-/// and the Driver catch by task throughput; construction motoring drag stays unscaled.
-/// `engine_work` charges the physical sprocket work against combustion and stored crank
-/// energy, so steering loads the crank even while the main clutch is out.
+/// Free crank torque is commanded fuel or the Driver catch, less construction drag, all
+/// evaluated at the pre-tick crank speed. Engaged fueling follows propulsive throttle only.
+/// With the clutch open, authority plus a paid window or active steering admits a proportional
+/// rev governor. A paid window targets `|m|*k` in the already selected landing gear, so the
+/// clutch re-engages near-synchronous; without a window that target is idle. Steering targets
+/// `idle + (peak - idle)*|steer|`; the governor takes the larger target. Open rest requests no
+/// fuel. The catch and induced combustion consume task throughput; drag stays unscaled.
+/// `engine_work` charges sprocket work against combustion and stored crank energy, including
+/// steering work with the main clutch open. The governor width lives in assets/driving/engine.ron.
 #[expect(
     clippy::too_many_arguments,
     reason = "the free-torque law's inputs: params, input, engagement, throttle, belt speed, ratio and both crank speeds"
@@ -1570,15 +1568,12 @@ fn apply_brake_stop_forces(
     service: f32,
 ) {
     // Opposite intent owns the complete stop/pause/cut. Only the launch is one-way.
-    let reversing = inp.command.abs() >= DEAD && (inp.command < 0.0) != st.reverse;
     let one_way = !inp.brake
-        && !reversing
         && st.shift_ticks == 0
         && st.clutch != ClutchState::Out
         && inp.command.abs() >= DEAD
         && inp.supply.control_authority
-        && inp.supply.task_rate > 0.0
-        && fp.grip.is_some();
+        && inp.supply.task_rate > 0.0;
     let lever = (st.park || one_way) && fp.grip.is_some(); // Geometry-only rigs have no terrain hold.
     for (i, qi) in q.iter_mut().enumerate() {
         if !lever && service == 0.0 {
@@ -1700,23 +1695,19 @@ fn crank_guards(
     let over = (tp.max_curve_rpm() + OVERREV_MARGIN_RPM) * RPM_TO_RAD;
     let floor = if st.clutch == ClutchState::Slip && tau_free > 0.0 {
         tp.launch_omega(propulsive)
-    } else if st.omega_e >= 0.0 {
-        idle_floor(tp, inp.supply).unwrap_or(-over)
     } else {
-        -over
+        idle_floor(tp, inp.supply, st.omega_e).unwrap_or(-over)
     };
     // Recovery cannot create crank energy: below the floor, spool before transmitting torque.
     let reachable = st.omega_e + tau_free * inp.dt / tp.engine_inertia;
-    (
-        floor.min(reachable),
-        (tp.max_curve_rpm() + OVERREV_MARGIN_RPM) * RPM_TO_RAD,
-    )
+    (floor.min(reachable), over)
 }
 
-/// The saturated Driver catch alone justifies a positive stall floor.
-fn idle_floor(tp: &TransmissionParams, supply: DriveSupply) -> Option<f32> {
+/// The saturated catch protects only a nonnegative live crank. A cut's free crank cannot cross
+/// zero under drag, so a backward vehicle landing does not revoke this admission in pricing.
+fn idle_floor(tp: &TransmissionParams, supply: DriveSupply, omega_e: f32) -> Option<f32> {
     let point = (tp.engine.idle_rpm - engine_control().idle_guard_band_rpm.value) * RPM_TO_RAD;
-    (idle_catch_capacity(tp, supply) > engine_drag(tp, point)).then_some(point)
+    (omega_e >= 0.0 && idle_catch_capacity(tp, supply) > engine_drag(tp, point)).then_some(point)
 }
 
 /// The input half of the optional drivetrain trace, kept out of the physical solve.
@@ -1752,6 +1743,7 @@ fn force_probe(
     inp: &TransmissionInput,
     (shaft, reduction, delivered, command): (f32, f32, f32, f32),
     clutch: ClutchState,
+    omega_e: f32,
     probe: &mut TransmissionProbe,
 ) {
     probe.priced_force_n = price_driver_force(
@@ -1762,6 +1754,7 @@ fn force_probe(
         command,
         inp.perceived_load.grip_n,
         clutch,
+        omega_e,
     );
     probe.delivered_force_n = delivered.min(inp.perceived_load.grip_n);
 }
@@ -1925,7 +1918,7 @@ pub fn step(
     #[cfg(feature = "bitprobe")]
     {
         let sample = (dir * m, g, dir * f_c, propulsive);
-        force_probe(tp, inp, sample, st.clutch, &mut bitprobe);
+        force_probe(tp, inp, sample, st.clutch, omega_e, &mut bitprobe);
         bitprobe.power_scale = power_scale;
         bitprobe.omega_end = st.omega_e;
     }

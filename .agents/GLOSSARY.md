@@ -231,7 +231,7 @@ The one drivetrain law behind the joint two-output seam: *fixed radii*, geared r
 Mean belt motion expressed relative to the engaged forward or reverse ladder. Normal motion in the selected direction is positive; a belt back-driven against that direction is negative. The sign belongs to the shaft, not the engine crank.
 
 **Engine crank** (`ω_e`):
-The non-negative engine-side angular-speed state. Engine torque, drag, inertia, clutch coupling, stall guard, and declutched rev matching evolve it directly; geared belt speed no longer stands in for engine rpm.
+The engine-side angular speed, positive in its firing direction and negative when back-driven. Its rotation determines engine rpm; belt speed does not stand in for it while the clutch slips.
 
 **Driver gear law**:
 The Driver's choice of a permitted gear from its spare force after a shift, against the perceived ground, slope and steering load at requested pedal. It preserves engine braking on overrun, permits a lower gear on a deficit or engaged lug, and preselects the highest capable launch gear at rest.
