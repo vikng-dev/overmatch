@@ -13,7 +13,7 @@ pub(crate) use birth::outside_source;
 
 use crate::ballistics::{FireShell, ShotSource};
 use crate::command::{ConsumeCommandEdges, TankCommand};
-use crate::damage::{TankVolumes, VolumeFacets, requirement_effectiveness, requirement_met};
+use crate::damage::{TankVolumes, VolumeFacets, requirement_met, requirement_rate};
 use crate::sim_tick::TickSpan;
 use crate::spec::{FireCycle, Trigger};
 use crate::state::{AppState, GameplaySet, SimPhase};
@@ -180,8 +180,8 @@ fn tick_weapon_gate(
         }
         match weapon.fire_cycle {
             FireCycle::Single { reload } => {
-                let effectiveness = requirement_effectiveness(tank_volumes, &weapon.load, &volumes);
-                state.load_at_rate(now, reload, effectiveness);
+                let rate = requirement_rate(tank_volumes, &weapon.load, &volumes);
+                state.load_at_rate(now, reload, rate);
                 if state.deadline_reached(now) {
                     state.finish();
                 }
@@ -194,9 +194,8 @@ fn tick_weapon_gate(
                         state.finish();
                     }
                 } else {
-                    let effectiveness =
-                        requirement_effectiveness(tank_volumes, &weapon.load, &volumes);
-                    state.load_at_rate(now, swap, effectiveness);
+                    let rate = requirement_rate(tank_volumes, &weapon.load, &volumes);
+                    state.load_at_rate(now, swap, rate);
                     if state.deadline_reached(now) {
                         state.belt_remaining = belt_size;
                         state.finish();
@@ -437,7 +436,7 @@ fn fire(
                 state.arm_load(
                     weapon_clock.0,
                     delay,
-                    requirement_effectiveness(tank_volumes, &weapon.load, &volumes),
+                    requirement_rate(tank_volumes, &weapon.load, &volumes),
                 );
             } else {
                 state.arm(weapon_clock.0, delay);

@@ -265,7 +265,7 @@ TankSpec(
     shadow_proxies: [],
     roadwheels: [{roadwheels}],
     capabilities: {{ Drive: [] }},
-    drive_controls: Unstaffed,
+    drive_controls: NotRequired,
 )
 "
     )

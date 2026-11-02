@@ -345,7 +345,7 @@ mod tests {
         let (mut world, tank, _) = fixture();
         world.entity_mut(tank).insert(TankCapabilities::new(
             [(Capability::Drive, vec![])].into(),
-            crate::damage::ControlStaffing::Unstaffed,
+            crate::damage::ControlStaffing::NotRequired,
         ));
         world.spawn((
             VolumeOf(tank),

@@ -295,14 +295,14 @@ pub struct TankCapabilities {
 /// contribution coefficient can grant or revoke that authority.
 #[derive(Clone, Debug, PartialEq, Deserialize)]
 pub enum ControlStaffing {
-    Unstaffed,
+    NotRequired,
     Any(Vec<Vec<CrewStation>>),
 }
 
 impl ControlStaffing {
     pub fn permits(&self, staffed: &std::collections::HashSet<CrewStation>) -> bool {
         match self {
-            Self::Unstaffed => true,
+            Self::NotRequired => true,
             Self::Any(paths) => paths
                 .iter()
                 .any(|stations| stations.iter().all(|station| staffed.contains(station))),
@@ -739,12 +739,12 @@ pub fn requirement_met(
     requirement: &Requirement,
     volumes: &Query<VolumeFacets>,
 ) -> bool {
-    requirement_effectiveness(tank_volumes, requirement, volumes) > 0.0
+    requirement_rate(tank_volumes, requirement, volumes) > 0.0
 }
 
 /// The game's damage model: the rate served by a weapon or other local requirement.
 /// Before a tank's volumes exist it supplies no work.
-pub fn requirement_effectiveness(
+pub fn requirement_rate(
     tank_volumes: Option<&TankVolumes>,
     requirement: &Requirement,
     volumes: &Query<VolumeFacets>,
@@ -1063,7 +1063,7 @@ mod tests {
         assert!(staffing.permits(&[CrewStation::Driver, CrewStation::Commander].into()));
         assert!(staffing.permits(&[CrewStation::Gunner].into()));
         assert!(!staffing.permits(&[].into()));
-        assert!(ControlStaffing::Unstaffed.permits(&[].into()));
+        assert!(ControlStaffing::NotRequired.permits(&[].into()));
     }
 
     /// The game's damage model: equivalent Backup alternatives retain a canonical complete

@@ -191,7 +191,7 @@ fn served_percent(share: f32) -> i32 {
     }
 }
 
-/// Render the controlled tank's vitals card: crew available/total, the applied Drive rate,
+/// Render the controlled tank's vitals card: crew available/total, the available Drive task rate,
 /// each weapon's reload/fire state (`READY` / `x.xs` / `no-fire`), and the round choice of each
 /// weapon that has one ([`round_line`]), plus module repair progress and readiness.
 /// A pure view over the controlled tank's local components.
@@ -254,14 +254,11 @@ fn update_status_panel(
         }
     }
 
-    // The game's damage model: the same selector supplies the sim and the readout,
-    // including phase and repair brake holds. Sight access has no rate consumer.
+    // The game's damage model: the selector supplies one task rate to the sim and HUD;
+    // control authority and brake holds remain separate intent facts.
     let quality = part_facts(volumes, &facets).quality;
     let target = crate::track::sim::drive_target(command, Some(volumes), Some(caps), &facets);
-    let drive = match target.intent {
-        crate::track::drive::DriveIntent::Axes(_) => target.supply.task_rate,
-        crate::track::drive::DriveIntent::Brake | crate::track::drive::DriveIntent::Unmanned => 0.0,
-    };
+    let drive_line = drive_rate_line(&target);
 
     // Weapons: name + per-fire-mode state, flagged `no-fire` when the fire gate is unmet (knocked-out
     // gunner/loader/breech). A `Single` reads as the classic READY / reload countdown; an
@@ -351,12 +348,19 @@ fn update_status_panel(
     };
     let module_lines: String = module_rows.into_iter().map(|(_, row)| row).collect();
     let card = format!(
-        "{state}\nCrew {alive}/{total}\n{} supply {}%\nWeapons: {}{round_lines}\n{repair_hint}{module_lines}",
-        Capability::Drive.label(),
-        served_percent(drive),
-        weapon_line,
+        "{state}\nCrew {alive}/{total}\n{drive_line}\nWeapons: {weapon_line}{round_lines}\n{repair_hint}{module_lines}",
     );
     set_text(text.reborrow(), &card);
+}
+
+/// The game's damage model: the HUD names the same task rate that the simulation consumes.
+/// Holds and unmanned controls change intent, independently of available task throughput.
+pub(crate) fn drive_rate_line(target: &crate::track::drive::DriveTarget) -> String {
+    format!(
+        "{} rate {}%",
+        Capability::Drive.label(),
+        served_percent(target.supply.task_rate)
+    )
 }
 
 /// `1`–`5` crew-bar input for the controlled tank: tap a seat to select it as the swap source, tap
@@ -476,6 +480,30 @@ fn update_crew_bar(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The game's damage model: the HUD cannot recompose source conditions or gate task
+    /// throughput on current intent. Fixture: a complete-path rate distinct from both sources.
+    #[test]
+    fn drive_rate_readout_uses_the_consumed_task_rate() {
+        use crate::track::drive::{DriveAxes, DriveIntent, DriveTarget};
+        use crate::track::transmission::DriveSupply;
+        for intent in [
+            DriveIntent::Axes(DriveAxes::default()),
+            DriveIntent::Brake,
+            DriveIntent::Unmanned,
+        ] {
+            let target = DriveTarget {
+                intent,
+                supply: DriveSupply {
+                    task_rate: 0.3,
+                    engine_condition: 1.0,
+                    transmission_condition: 0.5,
+                    control_authority: !matches!(intent, DriveIntent::Unmanned),
+                },
+            };
+            assert_eq!(super::drive_rate_line(&target), "Drive rate 30%");
+        }
+    }
 
     /// The game's damage model: the player must see a reduced module's rate rather than READY.
     /// Fixture: 14 of 142 HP, whose held share rounds to ten percent.

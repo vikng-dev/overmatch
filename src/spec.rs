@@ -1417,7 +1417,7 @@ impl TankSpec {
         if let ControlStaffing::Any(paths) = &self.drive_controls {
             if paths.is_empty() || paths.iter().any(Vec::is_empty) {
                 return Err(
-                    "drive_controls: author nonempty complete staffing paths, or use Unstaffed"
+                    "drive_controls: author nonempty complete staffing paths, or use NotRequired"
                         .into(),
                 );
             }
@@ -2238,7 +2238,7 @@ TankSpec(
         Commander: (node: "Cannon_Sight", optics: Unaided(60.0), requires: []),
     },
     capabilities: { Drive: [] },
-    drive_controls: Unstaffed,
+    drive_controls: NotRequired,
 )
 "#;
 

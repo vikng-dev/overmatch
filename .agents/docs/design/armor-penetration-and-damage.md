@@ -1215,7 +1215,7 @@ rate. Equivalent alternatives use coefficient and canonical part order, never st
 break ties. Empty graded groups are refused before play; an empty member is a pure ceiling.
 
 Control authority is separately authored as `drive_controls`: `Any` lists complete staffing
-alternatives, while `Unstaffed` explicitly permits controls without a station. The load gate
+alternatives, while `NotRequired` explicitly permits controls without a station. The load gate
 refuses empty paths and undeclared stations. This authority permits axes, repair braking and
 park-lever changes independently of task rate. An unavailable production path cannot erase a
 staffed operator's intent. Drive consumes the resolved task rate directly, alongside the
