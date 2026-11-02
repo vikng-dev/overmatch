@@ -23,7 +23,7 @@
 //!   from its type's.
 //! - `penetrator: Some((mass, caliber))`: the part of a sub-calibre round that meets the plate, its
 //!   nose the round's. The round is sized and shown as its `flying` body and meets the plate as its
-//!   `penetrator` (the force law, the disc, overmatch and the cone's hole read it); the mechanism
+//!   `penetrator` (the force law, the disc, contact and the cone's hole read it); the mechanism
 //!   binds from the penetrator at spawn ([`crate::ballistics`]'s `Projectile`), synchronously and
 //!   from data alone. A round without the block meets the plate whole.
 //! - `fuze: Some((trigger, modes, default_mode))`: what sets the burst off
@@ -88,6 +88,26 @@ pub(crate) use effects::{
 /// synchronously wherever it is bound (ADR-0014: built from data, never from an asset).
 pub(crate) const ROUND_TYPES_RON: &str = include_str!("../assets/ballistics/round_types.ron");
 
+/// The game's damage model: a type's deformation and shatter stand-ins, validated at load.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct ContactPreset {
+    /// kg/m³: the contact pressure proxy's density.
+    pub density: f32,
+    /// tan β: the slope penalty, converted once from authored degrees.
+    pub slope_tan: f32,
+}
+
+#[cfg(test)]
+impl ContactPreset {
+    /// Fixture data: capped-steel class, independent of the shipped presets.
+    pub(crate) fn fixture() -> Self {
+        Self {
+            density: 8000.0,
+            slope_tan: libm::tanf(8.0_f32.to_radians()),
+        }
+    }
+}
+
 /// One round fired from one gun, resolved and validated: the record the laws read.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) struct Round {
@@ -98,7 +118,7 @@ pub(crate) struct Round {
     /// The flying body: the assembly for a kept carrier, the penetrator for a discarded one.
     /// Drag, the shell's view and the momentum a hit delivers read it.
     pub(crate) flying: RoundBody,
-    /// What meets the plate: the force law, the disc, overmatch and the cone's hole read it. The
+    /// What meets the plate: the force law, the disc, contact and the cone's hole read it. The
     /// body's nose factor; mass and calibre no greater than the body's. Equal to `body` for a
     /// round authored without a penetrator block.
     pub(crate) penetrator: RoundBody,
@@ -110,9 +130,7 @@ pub(crate) struct Round {
     /// Positive crew-line coefficient: disc-mean chord times this times
     /// `ballistics::HP_PER_REFERENCE_MM` gives HP dose. Balance data, never read by the hard walk.
     pub(crate) wound: f32,
-    /// The game's damage model: type preset density (kg/m³) and slope tangent, parsed at load.
-    pub(crate) contact_density: f32,
-    pub(crate) slope_penalty_tan: f32,
+    pub(crate) contact: ContactPreset,
     /// The core's material facts. The rigid regime models every core as rigid and reads none of
     /// them; a regime that deforms or erodes the round reads them.
     pub(crate) core: MaterialFacts,
@@ -142,8 +160,7 @@ pub(crate) struct RoundFacts {
     penetrator: RoundBody,
     drag_k: f32,
     wound: f32,
-    contact_density: f32,
-    slope_penalty_tan: f32,
+    contact: ContactPreset,
     core: MaterialFacts,
     pub(crate) burst: Option<Burst>,
     pub(crate) fuze: Option<fuze::Spec>,
@@ -191,8 +208,7 @@ impl RoundFacts {
             muzzle_speed,
             drag_k: self.drag_k,
             wound: self.wound,
-            contact_density: self.contact_density,
-            slope_penalty_tan: self.slope_penalty_tan,
+            contact: self.contact,
             core: self.core,
             burst: self.burst,
             fuze_mode: self.fuze.as_ref().map_or(0, |f| f.default_mode),
@@ -264,7 +280,7 @@ enum Carrier {
     Discarded,
 }
 
-/// A round type as authored: its shape proxy and its carrier.
+/// A round type as authored: shape, contact proxies and carrier.
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct RoundTypeFile {
@@ -299,8 +315,7 @@ struct RoundType {
     flight_nose: NoseShape,
     hit_nose: NoseShape,
     carrier: Carrier,
-    contact_density: f32,
-    slope_penalty_tan: f32,
+    contact: ContactPreset,
 }
 
 /// Why a round registry, or a lookup in one, failed. Every arm names the offending text.
@@ -411,8 +426,10 @@ fn round_types(
                 flight_nose: row.flight_nose.0,
                 hit_nose: row.hit_nose.0,
                 carrier: row.carrier.0,
-                contact_density: row.contact_density.0,
-                slope_penalty_tan: row.slope_penalty_deg.0.to_radians().tan(),
+                contact: ContactPreset {
+                    density: row.contact_density.0,
+                    slope_tan: libm::tanf(row.slope_penalty_deg.0.to_radians()),
+                },
             };
             Ok((key, round_type))
         })
@@ -586,8 +603,7 @@ fn resolved(
             flying,
             penetrator,
             drag_k,
-            contact_density: round_type.contact_density,
-            slope_penalty_tan: round_type.slope_penalty_tan,
+            contact: round_type.contact,
             wound,
             core,
             burst,
@@ -598,11 +614,12 @@ fn resolved(
     ))
 }
 
-/// The parsed, validated round files.
+/// The parsed, validated round files and their type contact presets.
 #[derive(Clone, Debug)]
 pub(crate) struct RoundRegistry {
     /// Each round's facts and display name, by key.
     rounds: BTreeMap<String, (RoundFacts, String)>,
+    contacts: BTreeMap<String, ContactPreset>,
 }
 
 impl RoundRegistry {
@@ -641,7 +658,13 @@ impl RoundRegistry {
             let round = resolved(file, (&drag, &types), substances).map_err(invalid)?;
             rounds.insert(key.to_owned(), round);
         }
-        Ok(Self { rounds })
+        Ok(Self {
+            rounds,
+            contacts: types
+                .into_iter()
+                .map(|(key, row)| (key, row.contact))
+                .collect(),
+        })
     }
 
     /// The shipped registry: every embedded round file ([`crate::armaments_index::ROUND_FILES`]),
@@ -659,6 +682,24 @@ impl RoundRegistry {
             .unwrap_or_else(|err| panic!("rounds: the embedded round files are unusable: {err}"))
         });
         &REGISTRY
+    }
+
+    /// The game's damage model: a declared type preset for hypothetical instrument rounds.
+    pub(crate) fn contact_preset(&self, key: &str) -> Result<ContactPreset, RoundError> {
+        self.contacts
+            .get(key)
+            .copied()
+            .ok_or_else(|| RoundError::InvalidType {
+                round_type: key.to_owned(),
+                reason: "declare this type and its contact preset".into(),
+            })
+    }
+
+    #[cfg(test)]
+    pub(crate) fn contact_presets(&self) -> impl Iterator<Item = (&str, ContactPreset)> {
+        self.contacts
+            .iter()
+            .map(|(key, preset)| (key.as_str(), *preset))
     }
 
     /// The facts of the round keyed `key`; a hard error naming the key and the vocabulary, never a
@@ -845,13 +886,13 @@ pub(crate) mod tests {
         }
         let (_, types) = round_types(ROUND_TYPES_RON).unwrap();
         for preset in types.values() {
-            assert!(preset.contact_density > 0.0);
-            assert!(preset.slope_penalty_tan >= 0.0 && preset.slope_penalty_tan.is_finite());
+            assert!(preset.contact.density > 0.0);
+            assert!(preset.contact.slope_tan >= 0.0 && preset.contact.slope_tan.is_finite());
         }
         let (_, fixture) = round_types(FIXTURE_TYPES).unwrap();
         assert_eq!(
-            fixture["Fixture"].slope_penalty_tan,
-            8.0_f32.to_radians().tan()
+            fixture["Fixture"].contact.slope_tan,
+            libm::tanf(8.0_f32.to_radians())
         );
     }
 

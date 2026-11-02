@@ -276,7 +276,7 @@ fn an_exact_apex_advances_the_clock_and_falls_on_the_next_step() {
         let mut app = world_with_plate(Vec3::ONE, Vec3::splat(-500.0));
         let dt = app.world().resource::<Time>().delta_secs();
         let origin = Vec3::Y * 10.0;
-        let shell = shot(&mut app, origin, -GRAVITY * dt, impact(0.1));
+        let shell = shot(&mut app, origin, -gravity() * dt, impact(0.1));
         let mut round = app.world_mut().get_mut::<Projectile>(shell).unwrap();
         if armed {
             round
@@ -312,7 +312,7 @@ fn a_delay_expiring_at_the_apex_bursts_without_freezing() {
     let dt = app.world().resource::<Time>().delta_secs();
     let origin = Vec3::Y * 10.0;
     let delay = dt * 0.5;
-    let shell = shot(&mut app, origin, -GRAVITY * dt, impact(delay));
+    let shell = shot(&mut app, origin, -gravity() * dt, impact(delay));
     app.world_mut()
         .get_mut::<Projectile>(shell)
         .unwrap()

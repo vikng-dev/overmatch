@@ -77,6 +77,7 @@ pub struct ProbeRound {
     /// Reference striking speed (m/s). Muzzle velocity, so every number in the report reads "at
     /// point blank" — the most permissive case, which is the right bias for a hole hunt.
     pub speed: f32,
+    pub(crate) contact: crate::rounds::ContactPreset,
 }
 
 /// The game's damage-model instrument: a firing gun's identity and authored display label.
@@ -113,54 +114,64 @@ impl ProbeRound {
 /// HYPOTHETICAL probes: period AP loadings for bores the game ships no round of, so an opening's
 /// closing calibre is bracketed between the shipped ones. Separately authored, never a copy of a
 /// shipped round; their nose factor 0.3 is a labelled fixture value.
-const HYPOTHETICAL_PROBES: &[ProbeRound] = &[
-    ProbeRound {
-        gun: None,
-        name: "20mm (hypothetical)",
-        caliber: 0.020,
-        mass: 0.148,
-        nose_factor: 0.3,
-        speed: 830.0,
-    },
-    ProbeRound {
-        gun: None,
-        name: "37mm (hypothetical)",
-        caliber: 0.037,
-        mass: 0.685,
-        nose_factor: 0.3,
-        speed: 762.0,
-    },
-    ProbeRound {
-        gun: None,
-        name: "57mm (hypothetical)",
-        caliber: 0.057,
-        mass: 2.87,
-        nose_factor: 0.3,
-        speed: 815.0,
-    },
-    ProbeRound {
-        gun: None,
-        name: "75mm (hypothetical)",
-        caliber: 0.075,
-        mass: 6.8,
-        nose_factor: 0.3,
-        speed: 790.0,
-    },
-    ProbeRound {
-        gun: None,
-        name: "122mm (hypothetical)",
-        caliber: 0.122,
-        mass: 25.0,
-        nose_factor: 0.3,
-        speed: 795.0,
-    },
-];
+fn hypothetical_probes() -> [ProbeRound; 5] {
+    let contact = crate::rounds::RoundRegistry::shipped()
+        .contact_preset("AP")
+        .expect("hypothetical AP probes use the declared AP class preset");
+    [
+        ProbeRound {
+            gun: None,
+            contact,
+            name: "20mm (hypothetical)",
+            caliber: 0.020,
+            mass: 0.148,
+            nose_factor: 0.3,
+            speed: 830.0,
+        },
+        ProbeRound {
+            gun: None,
+            contact,
+            name: "37mm (hypothetical)",
+            caliber: 0.037,
+            mass: 0.685,
+            nose_factor: 0.3,
+            speed: 762.0,
+        },
+        ProbeRound {
+            gun: None,
+            contact,
+            name: "57mm (hypothetical)",
+            caliber: 0.057,
+            mass: 2.87,
+            nose_factor: 0.3,
+            speed: 815.0,
+        },
+        ProbeRound {
+            gun: None,
+            contact,
+            name: "75mm (hypothetical)",
+            caliber: 0.075,
+            mass: 6.8,
+            nose_factor: 0.3,
+            speed: 790.0,
+        },
+        ProbeRound {
+            gun: None,
+            contact,
+            name: "122mm (hypothetical)",
+            caliber: 0.122,
+            mass: 25.0,
+            nose_factor: 0.3,
+            speed: 795.0,
+        },
+    ]
+}
 
 /// The guns every opening is measured against, ASCENDING by caliber (the sweep takes the first that
 /// admits, so order is load-bearing; ties keep gun/name order): every shipped round as each gun fires
 /// it — the body that meets the plate, at its gun's muzzle speed, identified by gun and round, resolved
 /// through the gun registry so the instrument measures the configuration the game fires — and the
-/// [`HYPOTHETICAL_PROBES`].
+/// [`hypothetical_probes`].
 pub fn probe_rounds() -> &'static [ProbeRound] {
     static PROBES: std::sync::LazyLock<Vec<ProbeRound>> = std::sync::LazyLock::new(|| {
         let guns = crate::guns::GunRegistry::shipped();
@@ -179,8 +190,9 @@ pub fn probe_rounds() -> &'static [ProbeRound] {
                 mass: round.penetrator.mass,
                 nose_factor: round.penetrator.nose_factor,
                 speed: round.muzzle_speed,
+                contact: round.contact,
             })
-            .chain(HYPOTHETICAL_PROBES.iter().copied())
+            .chain(hypothetical_probes())
             .collect();
         probes.sort_by(|a, b| {
             a.caliber
@@ -738,6 +750,7 @@ pub(super) struct DriveFailure {
 pub(super) fn drive(
     context: &ResolveContext<'_, '_, '_>,
     body: RoundBody,
+    preset: crate::rounds::ContactPreset,
     speed: f32,
     origin: Vec3,
     direction: Vec3,
@@ -820,6 +833,7 @@ pub(super) fn drive(
             &|_| true,
             &round,
             round.body().mass,
+            preset,
             &flight,
             contact,
         )
@@ -837,7 +851,7 @@ pub(super) fn drive(
 
 /// The round the gate floor IS: the probe round of least capability, at the speed where its
 /// capability equals the configured floor, or at its own reference speed when none is configured.
-pub(super) fn floor_probe(config: &FuzzConfig) -> (RoundBody, f32) {
+pub(super) fn floor_probe(config: &FuzzConfig) -> (RoundBody, crate::rounds::ContactPreset, f32) {
     let round = probe_rounds()
         .iter()
         .min_by(|a, b| a.capability().total_cmp(&b.capability()))
@@ -845,7 +859,7 @@ pub(super) fn floor_probe(config: &FuzzConfig) -> (RoundBody, f32) {
     let speed = config
         .finding_floor
         .map_or(round.speed, |floor| speed_for(round.body(), floor));
-    (round.body(), speed)
+    (round.body(), round.contact, speed)
 }
 
 impl Pass<'_, '_, '_> {
@@ -1046,6 +1060,7 @@ impl Pass<'_, '_, '_> {
                 let flown = drive(
                     &self.context,
                     round.body(),
+                    round.contact,
                     round.speed,
                     ray.origin,
                     ray.direction,
@@ -1218,7 +1233,7 @@ fn run_fuzz(
         radius,
         ..default()
     };
-    let (floor_body, floor_speed) = floor_probe(&config);
+    let (floor_body, floor_contact, floor_speed) = floor_probe(&config);
     let mut regions: BTreeMap<([i32; 3], TargetKind), Region> = BTreeMap::new();
 
     for index in 0..config.rays {
@@ -1277,6 +1292,7 @@ fn run_fuzz(
             match drive(
                 &pass.context,
                 floor_body,
+                floor_contact,
                 floor_speed,
                 ray.origin,
                 ray.direction,

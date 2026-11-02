@@ -816,7 +816,7 @@ mod tests {
             .unwrap()
             .replica = Some(Replica::born(
             100,
-            Vec3::Y * (super::super::KILL_FLOOR - 1.0),
+            Vec3::Y * (super::super::physical_laws::PhysicalLaws::shipped().floor_m - 1.0),
             Vec3::NEG_Y,
         ));
         app.update();

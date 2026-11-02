@@ -137,7 +137,7 @@ fn sample(offset: Vec3, hits: Vec<FaceHit>) -> SampleCorridor {
 /// A planar slab defined GEOMETRICALLY rather than by `t` values.
 ///
 /// The staged tests need fixtures a ray can be asked about from any origin along any axis — once
-/// normalization bends the axis and the ring is transported, the transit corridor's sample rays
+/// each sample hands off at its own reached point, the transit corridor's sample rays
 /// meet the same plate at different places, and a fixture built from hard-coded `t`s can only
 /// describe the entrance.
 #[derive(Clone, Copy)]
@@ -224,7 +224,7 @@ fn entrance_disc(slabs: &[Slab], length: f32) -> DiscCorridor {
     disc_along(Vec3::ZERO, AXIS, frame, 0.044, length, slabs, |_| true)
 }
 
-/// The game's damage model: analytic transit fixtures certify membership on each bent ray.
+/// The game's damage model: analytic transit fixtures certify membership on each reached ray.
 /// The production driver performs the same reading through its collider probe.
 fn transit_disc(request: &TransitRequest, slabs: &[Slab], length: f32) -> DiscCorridor {
     transit_disc_by(request, length, |_| slabs.to_vec())
@@ -789,22 +789,20 @@ fn chained_welds_are_capped_by_the_run_gap_budget() {
     assert_eq!(result.runs[1].joints, 0);
 }
 
-/// Welded overmatch reads the run's SUMMED factor-weighted thickness — the sandwich behaves as one
-/// plate for the surface laws even though each chord charges its own factor.
+/// The game's damage model reads a welded crossing's summed factor-weighted thickness.
+/// Mutant: treating either member as the whole contact changes the pressure decision.
 #[test]
-fn welded_overmatch_reads_the_summed_factor_weighted_thickness() {
+fn welded_contact_reads_the_summed_factor_weighted_thickness() {
     let volumes = table(&[(1, 1000.0), (2, 900.0)]);
-    // 30 mm RHA + a 0.5 mm void + 30 mm cast = 58.5 mm steel-equivalent; an 88 does not overmatch it
-    // (3 × 58.5 = 175 mm > 88), while either half alone (30 / 27 mm) it would.
+    // Fixture: two factors across a void; the void contributes no material.
     let mut hits = plate(1, 0, 0.5, 0.53);
     hits.extend(plate(2, 0, 0.5305, 0.5605));
     let disc = point_disc(2.0, sample(Vec3::ZERO, hits));
     let walked = walk_disc(&disc, &volumes, &WalkLaws::default()).unwrap();
     match begin(&walked, &AP_88, &WalkLaws::default()).unwrap() {
         Begin::Transit(request) => {
-            assert!(!request.entrance.overmatched);
             // 30 mm × 1000 + 30 mm × 900 = 57 reference-mm, so 57 mm steel-equivalent — the
-            // SUMMED run, not either half (30 mm / 27 mm), each of which an 88 would overmatch.
+            // summed run, not either half.
             assert!(
                 (request.entrance.steel_equivalent - 0.057).abs() < 1.0e-4,
                 "{}",
@@ -857,7 +855,7 @@ fn a_flat_plate_disc_equals_the_point_sample() {
 /// A watertight CONCAVE primitive — the two arms of a bracket, 400 mm apart — is one mesh crossed
 /// at two genuinely separate places. Sharing a primitive says the samples met the same BODY; it
 /// must not be mistaken for meeting the same CROSSING, or two events collapse into one: one
-/// entrance law instead of two, one summed overmatch thickness, and one exit where there are two.
+/// entrance law instead of two, one summed contact thickness, and one exit where there are two.
 #[test]
 fn a_concave_primitive_crossed_twice_stays_two_events() {
     let volumes = table(&[(1, 1000.0)]);
@@ -1254,13 +1252,14 @@ fn the_aggregate_entry_normal_cannot_degenerate() {
 // §13.3 / §13.5 / §3 — the staged resolution
 // ---------------------------------------------------------------------------------------------
 
-/// The striking 88 the entrance fixtures read: the reference APCBC hit nose (`N = 7/24`) with
-/// 50 mm of potency at the face (fixture data), so the 76° grazes of 48–97 mm plates below skid
-/// under the shipped angle laws and the 45° entries bite.
+/// The game's damage model: fixture contact inputs; zero slope penalty isolates walk geometry.
 const AP_88: Shot = Shot {
     caliber: 0.088,
-    nose_factor: 7.0 / 24.0,
-    potency: 0.05,
+    speed: 773.0,
+    contact: crate::rounds::ContactPreset {
+        density: 8000.0,
+        slope_tan: 0.0,
+    },
 };
 
 /// The capability (reference-mm) the staged-resolution fixtures fire with: fixture data.
@@ -1373,19 +1372,17 @@ fn transit_request(walked: &DiscWalk, shot: &Shot, laws: &WalkLaws) -> TransitRe
     }
 }
 
-/// §13.3's motivating pathology: an exposed forearm is ~80 mm "thick", so a GEOMETRIC overmatch test
-/// leaves it un-overmatched and past 70° an arm ricochets an 88. Factor-weighted, 80 mm of flesh is
-/// ~0.2 mm steel-equivalent — overmatched by everything, deflecting nothing.
+/// The game's damage model reads material resistance, so a soft face admits a graze that steel
+/// turns. Mutant: geometric thickness alone makes every substance skid as strongly as steel.
 #[test]
-fn an_arm_does_not_ricochet_an_88() {
+fn a_soft_face_bites_where_reference_steel_skids() {
     let laws = WalkLaws::default();
     // ~76° incidence, past the critical angle the steel plate below gives the fixture 88.
     let normal = Vec3::new(0.0, 0.97, -0.242).normalize();
-    let arm = entrance_disc(&[Slab::at(1, 0, 0.5, normal, 0.08)], 2.0);
+    let soft = entrance_disc(&[Slab::at(1, 0, 0.5, normal, 0.08)], 2.0);
 
-    let walked = walk_disc(&arm, &table(&[(1, 10.0)]), &laws).unwrap();
-    let request = transit_request(&walked, &AP_88, &laws);
-    assert!(request.entrance.overmatched);
+    let walked = walk_disc(&soft, &table(&[(1, 10.0)]), &laws).unwrap();
+    transit_request(&walked, &AP_88, &laws);
 
     // Real armour at the same obliquity DOES deflect it — the law still works where it should.
     let plate = entrance_disc(&[Slab::at(1, 0, 0.5, normal, 0.4)], 2.0);
@@ -1396,49 +1393,27 @@ fn an_arm_does_not_ricochet_an_88() {
     ));
 }
 
-/// The COVERED-sample mean is what overmatch reads (`cost ÷ η`), not the disc mean. Dropping the
-/// division makes a lightly-engaged plate look thin, and a graze that should bounce punches through
-/// instead — the exact inversion of §13.5's graded weakspot.
-///
-/// Sized to straddle the threshold: 200 mm of oblique steel is 48 mm steel-equivalent along the
-/// normal (3 × 48 > 88, so no overmatch), but scaled by a 4/13 coverage it reads 15 mm (3 × 15 < 88,
-/// false overmatch).
+/// The game's damage model reads covered thickness before coverage scales the bounce. Mutant:
+/// diluting thickness by η admits the partially covered face while refusing the full face.
 #[test]
-fn a_lightly_covered_plate_is_not_thin_enough_to_overmatch() {
+fn partial_coverage_does_not_dilute_the_contact_thickness() {
     let laws = WalkLaws::default();
-    let volumes = table(&[(1, 1000.0)]);
-    let normal = Vec3::new(0.0, 0.97, -0.242).normalize();
+    let normal = Vec3::new(
+        0.0,
+        70.0_f32.to_radians().sin(),
+        -70.0_f32.to_radians().cos(),
+    );
     let frame = DiscFrame::from_axis_and_reference(AXIS, Vec3::Y).unwrap();
-    let steel = [Slab::at(1, 0, 0.5, normal, 0.2)];
-    let corridor = disc_along(Vec3::ZERO, AXIS, frame, 0.044, 2.0, &steel, |index| {
-        index % 4 == 0
-    });
-    let covered = corridor
-        .samples
-        .iter()
-        .filter(|s| !s.hits.is_empty())
-        .count();
-    let walked = walk_disc(&corridor, &volumes, &laws).unwrap();
-    let event = &walked.events[0];
-    assert_eq!(covered, 4, "fixture must stay lightly covered");
-    assert!(event.coverage < 0.35, "η = {}", event.coverage);
-
-    match begin(&walked, &AP_88, &laws).unwrap() {
-        Begin::Ricochet { entrance, .. } => {
-            assert!(!entrance.overmatched);
-            // The covered-sample thickness, NOT the η-diluted one.
-            assert!(
-                (entrance.steel_equivalent - 0.0484).abs() < 2.0e-3,
-                "{}",
-                entrance.steel_equivalent
-            );
-            assert!(
-                entrance.steel_equivalent * event.coverage * laws.angles.overmatch_ratio
-                    < AP_88.caliber,
-                "the fixture must actually straddle the threshold"
-            );
-        }
-        other => panic!("a 200 mm oblique plate must deflect an 88: {other:?}"),
+    let slabs = [Slab::at(1, 0, 0.5, normal, 0.2)];
+    for stride in [1, 4] {
+        let corridor = disc_along(Vec3::ZERO, AXIS, frame, 0.044, 2.0, &slabs, |i| {
+            i % stride == 0
+        });
+        let walked = walk_disc(&corridor, &table(&[(1, 1000.0)]), &laws).unwrap();
+        let Begin::Ricochet { entrance, .. } = begin(&walked, &AP_88, &laws).unwrap() else {
+            panic!("the fixture face skids at either coverage");
+        };
+        assert!((entrance.steel_equivalent - 0.2 * AXIS.dot(normal).abs()).abs() < 1.0e-5);
     }
 }
 
@@ -1507,102 +1482,6 @@ fn partial_coverage_scales_the_deflection_angle_and_the_speed_lost() {
             }
             other => panic!("expected a partial ricochet at η = {coverage}: {other:?}"),
         }
-    }
-}
-
-/// Normalization scales by η the same way: a barely-engaged penetrating entry is barely bent.
-#[test]
-fn partial_coverage_scales_the_normalization_bend() {
-    let laws = WalkLaws::default();
-    let volumes = table(&[(1, 1000.0)]);
-    // 45°, inside the ricochet threshold so the round bites in.
-    let normal = Vec3::new(0.0, 1.0, -1.0).normalize();
-    let frame = DiscFrame::from_axis_and_reference(AXIS, Vec3::Y).unwrap();
-    let steel = [Slab::at(1, 0, 0.5, normal, 0.02)];
-
-    let full = walk_disc(
-        &disc_along(Vec3::ZERO, AXIS, frame, 0.044, 2.0, &steel, |_| true),
-        &volumes,
-        &laws,
-    )
-    .unwrap();
-    let full_request = transit_request(&full, &AP_88, &laws);
-    let full_bend = AXIS.angle_between(*full_request.axis);
-    // At η = 1 the bend is the nose's `turn × N × incidence`, unscaled.
-    let share = laws.angles.normalization_turn * AP_88.nose_factor;
-    assert!(
-        (full_bend - share * full_request.entrance.incidence).abs() < 1.0e-4,
-        "{full_bend}"
-    );
-
-    let partial = walk_disc(
-        &disc_along(Vec3::ZERO, AXIS, frame, 0.044, 2.0, &steel, |index| {
-            index % 3 == 0
-        }),
-        &volumes,
-        &laws,
-    )
-    .unwrap();
-    let coverage = partial.events[0].coverage;
-    let partial_bend = AXIS.angle_between(*transit_request(&partial, &AP_88, &laws).axis);
-    assert!(
-        (partial_bend - coverage * full_bend).abs() < 1.0e-3,
-        "η = {coverage}: bent {partial_bend}, expected {}",
-        coverage * full_bend
-    );
-}
-
-/// The entry bend scales with the entrance substance's resistance over the reference's: the same
-/// round at the same incidence turns `factor / rha_reference` as far, and off the reference
-/// substance exactly `η × turn × N × incidence`, bit for bit. The bend reads the substance the
-/// round bites into, not the hardest one behind it. A mutant that drops the share bends a trunk as
-/// hard as armour; one that reads the crossing's hardest factor bends a soft facing as the plate
-/// behind it. Every trunk crossing and every non-reference armour entry relies on it.
-#[test]
-fn the_entry_bend_scales_with_the_entrance_resistance() {
-    let laws = WalkLaws::default();
-    // 45°, inside the ricochet threshold so the round bites in.
-    let normal = Vec3::new(0.0, 1.0, -1.0).normalize();
-    let facing = Slab::at(1, 0, 0.5, normal, 0.02);
-    let backing = Slab::at(2, 0, 0.52, normal, 0.02);
-    let enter = |slabs: &[Slab], volumes: &VolumeTable| {
-        let walked = walk_disc(&entrance_disc(slabs, 2.0), volumes, &laws).unwrap();
-        (transit_request(&walked, &AP_88, &laws), walked)
-    };
-    // The turn from the incoming axis, as `atan2(|a × b|, a · b)`: an arccosine loses the small
-    // bends a soft substance gives.
-    let turn = |axis: Vec3| AXIS.cross(axis).length().atan2(AXIS.dot(axis));
-
-    let (reference, walked) = enter(&[facing], &table(&[(1, laws.rha_reference)]));
-    let event = &walked.events[0];
-    let unscaled = super::super::bend_toward(
-        Dir3::new(walked.axis).unwrap(),
-        -Dir3::new(event.entry_normal).unwrap(),
-        event.coverage
-            * (laws.angles.normalization_turn * AP_88.nose_factor)
-            * reference.entrance.incidence,
-    );
-    assert_eq!(reference.axis.to_array(), Vec3::from(unscaled).to_array());
-    let reference_turn = turn(*reference.axis);
-
-    for factor in [40.0, 150.0, 800.0] {
-        let share = factor / laws.rha_reference;
-        let (softer, _) = enter(&[facing], &table(&[(1, factor)]));
-        assert_eq!(softer.entrance.incidence, reference.entrance.incidence);
-        let softer_turn = turn(*softer.axis);
-        assert!(
-            (softer_turn - share * reference_turn).abs() < 1.0e-3 * share * reference_turn,
-            "factor {factor}: turned {softer_turn}, expected {}",
-            share * reference_turn
-        );
-
-        // The same soft facing over a reference plate, one welded crossing: still the facing's.
-        let (faced, faced_walk) = enter(
-            &[facing, backing],
-            &table(&[(1, factor), (2, laws.rha_reference)]),
-        );
-        assert_eq!(faced_walk.events.len(), 1, "one welded crossing");
-        assert_eq!(faced.axis.to_array(), softer.axis.to_array());
     }
 }
 
@@ -1700,7 +1579,7 @@ fn every_sample_hands_off_on_the_face_it_crossed() {
 }
 
 /// `finish` validates the corridor it is handed against the corridor it asked for. Nothing in the
-/// type system stops a caller collecting along the unbent axis, from the wrong origin, with a
+/// type system stops a caller collecting along a different axis, from the wrong origin, with a
 /// re-derived frame, or around a different contact — and each of those silently resolves one
 /// surface's geometry against another surface's entrance verdict.
 #[test]
@@ -2274,63 +2153,6 @@ fn a_perforation_charges_every_entity_for_its_own_material() {
     );
 }
 
-/// Overmatch charges the PERPENDICULAR projection rather than the oblique chord (§4: it cannot
-/// present its slope to a round that dwarfs it) — and the projection reaches every CONSEQUENCE.
-/// A spall source's spend is the mechanism's readout drop and §6 doses the energy the round lost,
-/// so a projection that stopped at `cost_spent` would spend 15 while throwing spall for 30 and
-/// dosing the energy of 30.
-#[test]
-fn overmatch_charges_the_perpendicular_projection_everywhere() {
-    let laws = WalkLaws::default();
-    let volumes = table(&[(1, 1000.0)]);
-    // 15 mm plate at 60°: a 30 mm chord head-on, and 88 mm overmatches it.
-    let normal = Vec3::new(0.0, 0.866, -0.5).normalize();
-    let slabs = [Slab::at(1, 0, 0.5, normal, 0.03)];
-    let walked = walk_disc(&entrance_disc(&slabs, 3.0), &volumes, &laws).unwrap();
-    let request = transit_request(&walked, &AP_88, &laws);
-    assert!(request.entrance.overmatched);
-
-    let transit = walk_disc(&transit_disc(&request, &slabs, 3.0), &volumes, &laws).unwrap();
-    let plan = finish_at(&transit, &request, AP_88_CAPABILITY).unwrap();
-
-    // Whatever the normalization bend did to the chord, the CHARGE is the 15 mm perpendicular
-    // thickness — which is the point of the projection.
-    assert!((plan.cost_spent - 15.0).abs() < 0.2, "{}", plan.cost_spent);
-    let exit = plan
-        .spall
-        .iter()
-        .find(|source| source.face.is_some())
-        .expect("a perforation exits");
-    assert!(
-        (exit.spend - 15.0).abs() < 0.2,
-        "spall spend {}",
-        exit.spend
-    );
-    let deposit = &plan.deposits[0].dose;
-    let DoseSource::Line { cost, .. } = deposit.source else {
-        panic!("a line dose: {deposit:?}");
-    };
-    assert!((cost - 15.0).abs() < 0.2, "deposit cost {cost}");
-    let (round, state) = solid(AP_88_CAPABILITY);
-    let lost = 0.5 * round.body().mass * (state.speed.powi(2) - plan.state.speed.powi(2)) as f32;
-    let carried: f32 = plan.spall.iter().map(|source| source.emitted).sum();
-    assert!(
-        ((deposit.amount + carried) / lost - 1.0).abs() < 1.0e-4,
-        "the projected crossing spends the energy it took once: {} J dealt, {carried} J carried, \
-         against {lost} J",
-        deposit.amount
-    );
-    assert!(
-        (deposit.line_chord().unwrap() - 0.015).abs() < 5.0e-4,
-        "the charged chord is the perpendicular one: {deposit:?}"
-    );
-    // The GEOMETRY is untouched — the round really did travel its slope chord.
-    match plan.outcome {
-        Outcome::Perforated { t, .. } => assert!(t > 0.02, "{t}"),
-        other => panic!("expected a perforation, got {other:?}"),
-    }
-}
-
 /// An empty disc decides nothing — no fabricated entrance, no fabricated terminal (§13.6's "no
 /// fabricated events").
 #[test]
@@ -2575,7 +2397,7 @@ fn three_abutting_plates_are_byte_identical_to_one_slab_in_every_order() {
 /// hit; only the disc's spread along the ray did, and a constant cannot follow it.
 ///
 /// Three events out of one plate is not a cosmetic defect. Each carries its own entrance read, so
-/// the round is charged three entrance laws, offered three ricochet decisions and three overmatch
+/// the round is charged three entrance laws, offered three ricochet decisions and three contact
 /// thicknesses, and throws spall three times, for a plate it crossed once.
 ///
 /// The bound that holds is the disc's own reach, `2·r·tan(incidence)`: 0.50 m for the 88 at 80° and
@@ -3479,11 +3301,7 @@ fn scalar_outcome(
     breaks.sort_by(f64::total_cmp);
     breaks.dedup();
     breaks.retain(|t| *t >= start && *t <= end);
-    let charge = if request.entrance.overmatched {
-        transit.axis.dot(request.entrance.normal).abs() as f64
-    } else {
-        1.0
-    };
+    let charge = request.entrance.slope_charge;
     let mut cumulative = vec![0.0f64];
     for window in breaks.windows(2) {
         let (a, b) = (window[0], window[1]);
@@ -3555,7 +3373,7 @@ fn scalar_outcome(
 }
 
 /// REFERENCE STEEL ALONE, THE MECHANISM IS THE SCALAR LAW. On randomized stacks of reference-steel
-/// plates — abutting, overlapping, at random obliquity, overmatched or not — and random
+/// plates — abutting, overlapping, at random obliquity, with every slope charge — and random
 /// capabilities, the solid-shot mechanism advancing through the ordered encounters matches the
 /// scalar path ([`scalar_outcome`]) to float precision: the same verdict, the rest point, the
 /// residual speed, the reference-mm spent and every deposit's chord and cost; and the deposits'
@@ -3578,7 +3396,7 @@ fn the_mechanism_matches_the_scalar_law_on_reference_steel() {
         (state >> 11) as f64 / (1u64 << 53) as f64
     };
     let (mut compared, mut ricochets, mut knife_edges) = (0, 0, 0);
-    let (mut embeds, mut overmatches, mut overmatched_rests) = (0, 0, 0);
+    let mut embeds = 0;
     let (scale, inertia) = body.terms();
     // The capability law's inverse in f64: the speed carrying `readout` reference-mm.
     let speed_at = |readout: f64| ((readout / (1000.0 * scale)).exp_m1() / inertia).sqrt();
@@ -3606,7 +3424,7 @@ fn the_mechanism_matches_the_scalar_law_on_reference_steel() {
         // Abutting or overlapping plates are one crossing by construction of the fixture.
         assert_eq!(transit.events.len(), 1, "case {case}: one crossing");
         // Half the cases near the crossing's own cost, so rests inside every kind of crossing
-        // (overmatched ones included) are drawn, not just perforations.
+        // (sloped ones included) are drawn, not just perforations.
         let total = scalar_outcome(&transit, &request, body, 0.0).total;
         let requested = if case % 2 == 0 {
             (1.0 + unit() * 400.0) as f32
@@ -3639,8 +3457,6 @@ fn the_mechanism_matches_the_scalar_law_on_reference_steel() {
         .unwrap();
         compared += 1;
         embeds += old.embed.is_some() as u32;
-        overmatches += request.entrance.overmatched as u32;
-        overmatched_rests += (request.entrance.overmatched && old.embed.is_some()) as u32;
         let tolerance = |value: f64| 1.0e-5 * (1.0 + value.abs());
         match (new.outcome, old.embed) {
             (Outcome::Embedded { t, .. }, Some(at)) => {
@@ -3733,10 +3549,6 @@ fn the_mechanism_matches_the_scalar_law_on_reference_steel() {
     assert!(
         embeds > 20 && compared - embeds > 20,
         "both verdicts must be exercised: {embeds} rests of {compared}"
-    );
-    assert!(
-        overmatches > 20 && overmatched_rests > 5,
-        "the overmatch adapter was exercised {overmatches} times, {overmatched_rests} to a rest"
     );
 }
 
@@ -4152,7 +3964,7 @@ impl Straddle {
     };
 
     /// The block's front at `block` m along the axis. FIXTURE DATA: the plate is 25 mm thick at 75°
-    /// (97 mm of chord, 25 mm steel-equivalent, so an 88 overmatches it and bites) and crosses the
+    /// (97 mm of chord, 25 mm steel-equivalent, so the fixture contact bites) and crosses the
     /// axis at 0.5 m; the block is 80 mm thick and square to the axis.
     fn at(block: f32) -> Self {
         let incidence = 75f32.to_radians();
@@ -4232,7 +4044,7 @@ impl Straddle {
 /// (0.33 m: the block is struck first), between that face and the plate's mean entry (0.35 m), or
 /// past it (0.43 m). Every sample hands off on its own face, so the read covers the whole disc and
 /// presents the same surface in each case. A join decided by the first piece's mean entry instead
-/// read the block alone at 0.33 m, its plate samples bent in air, and at 0.43 m read the plate
+/// read the block alone at 0.33 m, its plate samples read without the plate, and at 0.43 m read the plate
 /// alone.
 #[test]
 fn a_disc_meeting_two_pieces_at_overlapping_depths_resolves() {
@@ -4281,8 +4093,8 @@ fn a_disc_meeting_two_pieces_at_overlapping_depths_resolves() {
     let (_, first) = &reads[0];
     for (block, read) in &reads[1..] {
         assert_eq!(
-            (read.normal, read.incidence, read.overmatched),
-            (first.normal, first.incidence, first.overmatched),
+            (read.normal, read.slope_charge),
+            (first.normal, first.slope_charge),
             "block {block}: the same surface as with the block struck first"
         );
         assert!(
@@ -4301,7 +4113,7 @@ fn a_disc_meeting_two_pieces_at_overlapping_depths_resolves() {
 /// [`Straddle::deep`]: the plate's samples also meet the block's stepped part behind the plate. The
 /// block joins the crossing, and that part is in the block's event, so a read over every run of
 /// the block would add the block behind to the plate those samples strike: spaced armour read as
-/// one plate, its overmatch lost. The read with the block behind is the read without it, whichever
+/// one plate, its thin-plate contact changed. The read with the block behind is the read without it, whichever
 /// piece is struck first, and the transit still charges the block behind.
 #[test]
 fn the_entrance_reads_no_material_behind_a_face() {
@@ -4402,12 +4214,9 @@ impl EdgeAndBehind {
 /// A crossing, and the one behind it, resolve the same however far the entrance was walked, once
 /// that walk closes.
 ///
-/// A sample the edged plate never touches hands off at the crossing's depth, which the plate alone
-/// decides; a hand-off moved to wherever the walk happened to end instead would shift that sample's
-/// bent ray `b` sideways by `δ (u − b (u·b))` for a move `δ` along the incoming axis `u` (DERIVED),
-/// and nothing downstream cancels the shift: the starts a perforation leaves are each sample's own
-/// transit ray ([`DiscWalk::resume_at`]), so the plate behind would be met elsewhere, and its cost,
-/// dose and spall would depend on how far the first corridor reached.
+/// A sample the edged plate never touches hands off at the crossing's own depth. Changing that
+/// start with the query reach can omit material before the later start; the plate behind must
+/// retain the same cost, dose and spall under every sufficient discovery reach.
 ///
 /// FIXTURE DATA: [`EdgeAndBehind`]. The edged plate's crossing ends 55 mm short of the 1.06 m walk
 /// (closed, with the weld lookahead to spare), and the two samples farthest above its edge cross
@@ -4482,102 +4291,6 @@ fn invalid_sampling_frames_are_refused_without_reanchoring() {
     assert!(std::panic::catch_unwind(|| collapsed.transport(Vec3::Z, Vec3::Z)).is_err());
 }
 
-// ---------------------------------------------------------------------------------------------
-// §4 — the angle laws read the hit nose, the potency at the face and the plate
-// ---------------------------------------------------------------------------------------------
-
-/// Steel (fixture factor 1000) `thickness` m thick along its normal, its front face met at
-/// `incidence` rad from the normal: the entrance [`begin`] reads, walked with the shipped laws.
-fn steel_face_at(incidence: f32, thickness: f32) -> DiscWalk {
-    let normal = Vec3::new(0.0, incidence.sin(), -incidence.cos());
-    let disc = entrance_disc(
-        &[Slab::at(1, 0, 0.5, normal, thickness / incidence.cos())],
-        2.0,
-    );
-    walk_disc(&disc, &table(&[(1, 1000.0)]), &WalkLaws::default()).unwrap()
-}
-
-/// The game's damage model: at one obliquity a blunt hit nose bites where a pointed one skids. The
-/// critical angle reads the nose through its factor, the force law's, so a capped round can be aimed
-/// at a slope a pointed one glances off. Fixture: 100 mm of steel along the normal met at 60°, both
-/// rounds an 88 with 120 mm of potency; a hemispherical cap (N = 1/2) against a 6-crh ogive
-/// (N = 47/864). A law that ignored the nose, or read it backwards, fails one of the two.
-#[test]
-fn at_one_obliquity_a_blunt_nose_bites_where_a_pointed_one_skids() {
-    let laws = WalkLaws::default();
-    let walked = steel_face_at(60f32.to_radians(), 0.1);
-    let shot = |nose: crate::spec::NoseShape| Shot {
-        caliber: 0.088,
-        nose_factor: nose.factor(),
-        potency: 0.12,
-    };
-    let blunt = shot(crate::spec::NoseShape::Cap {
-        radius_calibres: 0.5,
-    });
-    let pointed = shot(crate::spec::NoseShape::Ogive { crh: 6.0 });
-    assert!(matches!(
-        begin(&walked, &blunt, &laws).unwrap(),
-        Begin::Transit(_)
-    ));
-    assert!(matches!(
-        begin(&walked, &pointed, &laws).unwrap(),
-        Begin::Ricochet { .. }
-    ));
-}
-
-/// The game's damage model: a slower round skids where a faster one bites. The critical angle reads
-/// the round's potency at the face, the force law's readout at its speed there, so a round that has
-/// flown far or slowed in a first plate glances off a slope it would have bitten at the muzzle.
-/// Fixture: the reference 88 body (10.2 kg, N = 7/24) at 900 and 400 m/s against 100 mm of steel
-/// along the normal at 65°.
-#[test]
-fn a_slower_round_skids_where_a_faster_one_bites() {
-    let laws = WalkLaws::default();
-    let walked = steel_face_at(65f32.to_radians(), 0.1);
-    let body = super::super::RoundBody {
-        mass: 10.2,
-        caliber: 0.088,
-        nose_factor: 7.0 / 24.0,
-    };
-    let shot = |speed: f32| Shot {
-        caliber: body.caliber,
-        nose_factor: body.nose_factor,
-        potency: super::super::capability(body, speed) / laws.rha_reference,
-    };
-    assert!(matches!(
-        begin(&walked, &shot(900.0), &laws).unwrap(),
-        Begin::Transit(_)
-    ));
-    assert!(matches!(
-        begin(&walked, &shot(400.0), &laws).unwrap(),
-        Begin::Ricochet { .. }
-    ));
-}
-
-/// The game's damage model: a thin plate under a large calibre is overmatched. The same plate at the
-/// same obliquity skids a small round off and takes a large one in, and only calibre differs:
-/// overmatch reads the steel-equivalent thickness over the calibre of what meets the plate.
-/// Fixture: 20 mm of steel along the normal at 80°; an 88 (3 × 20 mm < 88 mm) against a 7.9 mm
-/// round, both N = 1/2 with 14.5 mm of potency.
-#[test]
-fn a_thin_plate_under_a_large_calibre_is_overmatched() {
-    let laws = WalkLaws::default();
-    let walked = steel_face_at(80f32.to_radians(), 0.02);
-    let shot = |caliber: f32| Shot {
-        caliber,
-        nose_factor: 0.5,
-        potency: 0.0145,
-    };
-    match begin(&walked, &shot(0.088), &laws).unwrap() {
-        Begin::Transit(request) => assert!(request.entrance.overmatched),
-        other => panic!("the 88 overmatches the thin plate: {other:?}"),
-    }
-    assert!(matches!(
-        begin(&walked, &shot(0.0079), &laws).unwrap(),
-        Begin::Ricochet { .. }
-    ));
-}
-
 // The game's damage model: independent per-volume work read from the force-law stretches before
 // any exit partitions it. The depth-attribution tests below the walk rely on this budget.
 fn lost_at<S>(advanced: &Advanced<S>, address: Entity) -> f64 {
@@ -4588,4 +4301,169 @@ fn lost_at<S>(advanced: &Advanced<S>, address: Entity) -> f64 {
         .filter(|(volume, _, _)| *volume == address)
         .map(|(_, _, energy)| energy)
         .sum()
+}
+
+/// The game's damage model: the contact law's class proofs. Fixture lengths and speeds sweep
+/// construction scales; each preset and the reference facts are read from their data owners.
+#[test]
+fn pressure_contact_obeys_its_class_invariants_and_closed_form() {
+    let laws = WalkLaws::default();
+    let reference = laws.reference.cavity_strength();
+    let shear = laws.reference.flow_strength / 3.0_f64.sqrt();
+    let saturation = reference / (4.0 * shear);
+    println!("DERIVED contact saturation: {saturation:.6} calibres");
+    let registry = crate::rounds::RoundRegistry::shipped();
+    for (class, contact) in registry.contact_presets() {
+        for speed in [0.0, 1.0, 400.0, 1000.0] {
+            let shot = Shot {
+                caliber: 0.05,
+                speed,
+                contact,
+            };
+            for thickness in [0.0, 1.0e-6, 0.05, 10.0] {
+                assert!(
+                    !skids(&shot, 1.0, thickness, 1.0, &laws),
+                    "head-on never skids"
+                );
+            }
+        }
+        for speed in [100.0, 500.0, 1000.0] {
+            for caliber in [0.008, 0.05, 0.1] {
+                let shot = Shot {
+                    caliber,
+                    speed,
+                    contact,
+                };
+                for factor in [0.05, 0.5, 1.0, 2.0] {
+                    for ratio in [0.01, 0.5, 1.0, 2.0, 5.0] {
+                        let thickness = caliber * ratio;
+                        let resistance = (f64::from(factor) * reference)
+                            .min(4.0 * shear * f64::from(thickness / caliber));
+                        let x = resistance
+                            / (2.0 * f64::from(contact.density) * f64::from(speed).powi(2));
+                        let critical_sine = (1.0 + x * x).sqrt() - x;
+                        for degrees in 0..180 {
+                            let angle = (degrees as f32 * 0.5).to_radians();
+                            let expected = f64::from(angle.sin()) > critical_sine;
+                            assert_eq!(
+                                skids(&shot, angle.cos(), thickness, factor, &laws),
+                                expected,
+                                "{class} {speed} {caliber} {factor} {ratio} {degrees}"
+                            );
+                            // Replica scaling: lengths × k and mass × k³ leave pressure contact unchanged.
+                            for k in [0.25, 4.0] {
+                                let scaled = Shot {
+                                    caliber: caliber * k,
+                                    ..shot
+                                };
+                                assert_eq!(
+                                    skids(&scaled, angle.cos(), thickness * k, factor, &laws),
+                                    expected
+                                );
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    // Mutants: a fixed threshold, the strength sign reversed, or an uncapped thickness term.
+    let base = AP_88;
+    let limit = |shot: Shot, thickness: f32, factor: f32| {
+        let (mut low, mut high) = (0.0_f32, std::f32::consts::FRAC_PI_2);
+        for _ in 0..30 {
+            let mid = (low + high) * 0.5;
+            if skids(&shot, mid.cos(), thickness, factor, &laws) {
+                high = mid;
+            } else {
+                low = mid;
+            }
+        }
+        low
+    };
+    let thickness = base.caliber * saturation as f32 * 4.0;
+    let mut denser = base;
+    denser.contact.density *= 2.0;
+    assert!(limit(denser, thickness, 1.0) > limit(base, thickness, 1.0));
+    assert!(
+        limit(
+            Shot {
+                speed: base.speed * 2.0,
+                ..base
+            },
+            thickness,
+            1.0
+        ) > limit(base, thickness, 1.0)
+    );
+    assert!(limit(base, thickness, 2.0) < limit(base, thickness, 1.0));
+    let saturated = base.caliber * saturation as f32;
+    assert_eq!(
+        limit(base, saturated * 2.0, 1.0),
+        limit(base, saturated * 8.0, 1.0)
+    );
+    assert!(limit(base, saturated * 0.1, 1.0) > limit(base, saturated * 0.5, 1.0));
+    assert!(limit(base, 1.0e-8, 1.0).to_degrees() > 89.9);
+}
+
+/// The game's damage model: labelled proxy-note fixtures constrain the published illustration,
+/// while the generic sweep above proves the law. Mutant: omit density or the plug-shear ceiling.
+#[test]
+fn contact_limits_match_the_proxy_note_fixtures() {
+    let laws = WalkLaws::default();
+    let contact = crate::rounds::RoundRegistry::shipped()
+        .contact_preset("APCBC")
+        .unwrap();
+    for (thickness, speed, expected) in [
+        (0.010, 773.0, 76.6),
+        (0.045, 773.0, 62.1),
+        (0.080, 773.0, 53.5),
+        (1.0, 773.0, 43.2),
+        (0.045, 500.0, 48.4),
+    ] {
+        let shot = Shot {
+            caliber: 0.088,
+            speed,
+            contact,
+        };
+        let (mut low, mut high) = (0.0_f32, 90.0_f32);
+        for _ in 0..30 {
+            let mid = (low + high) * 0.5;
+            if skids(&shot, mid.to_radians().cos(), thickness, 1.0, &laws) {
+                high = mid;
+            } else {
+                low = mid;
+            }
+        }
+        println!(
+            "MEASURED fixture: t={thickness} m v={speed} m/s limit={low:.4}° note={expected}°"
+        );
+        assert!((low - expected).abs() < 0.1);
+    }
+}
+
+/// The game's damage model: a harder backing cannot replace the entrance's soft slope share.
+/// Mutant: read the crossing's strongest factor; soft-faced construction relies on this seam.
+#[test]
+fn the_slope_share_reads_the_entrance_not_the_backing() {
+    let laws = WalkLaws::default();
+    let normal = Vec3::new(0.0, 1.0, -1.0).normalize();
+    let facing = Slab::at(1, 0, 0.5, normal, 0.02); // Fixture geometry and factors.
+    let backing = Slab::at(2, 0, 0.52, normal, 0.02);
+    let shot = Shot {
+        contact: crate::rounds::ContactPreset::fixture(),
+        ..AP_88
+    };
+    for factor in [40.0, 150.0, 800.0] {
+        let read = |slabs: &[Slab]| {
+            let walked = walk_disc(
+                &entrance_disc(slabs, 2.0),
+                &table(&[(1, factor), (2, laws.rha_reference)]),
+                &laws,
+            )
+            .unwrap();
+            transit_request(&walked, &shot, &laws).entrance.slope_charge
+        };
+        assert_eq!(read(&[facing]), read(&[facing, backing]));
+        assert!(read(&[facing]) > 1.0);
+    }
 }

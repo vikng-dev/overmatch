@@ -351,14 +351,11 @@ _Avoid_: effective thickness (that is line-of-sight thickness × material factor
 The reference-millimetres of armor a shell can defeat at its *current* velocity — a derivative of velocity for a given shell, not a fixed stat.
 _Avoid_: penetration value, pen (it changes shot-to-shot as velocity bleeds)
 
-**Normalization**:
-The penetrator's path bending toward the surface normal as it enters a volume, shortening its line-of-sight path.
-
 **Ricochet**:
-Deflection off a face met past the round's critical angle, which reads its hit nose, its potency at the face and the plate's steel-equivalent thickness (design doc §4a), without entering — spawns a new path segment, no penetration. In the game's damage model the shell keeps its speed along the face (`v sin θ`, θ from the normal) and loses the motion pointed into it, restitution 0: a struck box with an HP pool takes that energy, `½ m (v cos θ)²`, as its dose; armour takes none. Suppressed by overmatch.
+In the game's damage model, a skid without entry when `ρv²cos²θ < min(fR, 4τt_n/d) sin θ`: type density and speed meet the face's bulk or plug-shear resistance (design doc §4; the penetration proxy note owns the evidence). The shipped exit mirrors the direction and retains speed magnitude `v sin θ`, both blended by coverage. Work and impulse read one flying assembly; its lost energy is the dose to a struck HP pool. A bite goes straight and pays the slope charge.
 
 **Overmatch**:
-When a shell's caliber greatly exceeds a volume's thickness along its normal, suppressing ricochet and slope. The game's namesake, but one modifier among many — not the centre of the model.
+The game's damage model's thin-plate result: decreasing steel-equivalent thickness over contact calibre raises the pressure law's skid limit toward grazing. It grants no separate verdict or slope exemption.
 
 **Field**:
 A dose field thrown by a cause in the game's damage model: strength distributed over directions from an origin, stopped by hard bodies and dosing reached boxes. Its normalized strength distributes carried joules independently of HP; each mechanism converts those joules through its own HP unit, while environment construction reads the physical energy.
@@ -448,7 +445,7 @@ The projectile as a caliber-wide body rather than a line: k sample rays (the axi
 The fraction of a shell's disc covered by material at a crossing. η = 1 is a fully-buried hit, η = 0 flies free, and everything between is continuous — which is what makes a graze a partial ricochet, an MG port a graded weakspot, and a weakspot caliber-gated without any authored weakspot data.
 
 **ε-weld**:
-Runs separated by less than the weld tolerance — DERIVED ≈2 mm, measured **perpendicular** to the faces — merge into one run. It merges event *topology*, not material: one entry face, one exit face, one overmatch test, while the gap itself is never charged and material steps inside the welded run still spall by the field law. Bounds the omitted void per run at ε, so a picket fence cannot chain into one plate.
+Runs separated by less than the weld tolerance — DERIVED ≈2 mm, measured **perpendicular** to the faces — merge into one run. It merges event *topology*, not material: one entry face, one exit face, one contact read, while the gap itself is never charged and material steps inside the welded run still spall by the field law. Bounds the omitted void per run at ε, so a picket fence cannot chain into one plate.
 _Avoid_: tolerance, snapping (this deletes phantom faces; it never creates steel)
 
 **Corridor**:

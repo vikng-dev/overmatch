@@ -233,8 +233,8 @@ pub enum PlateClass {
     External,
 }
 
-/// One armour volume's crossing. Thickness is three numbers: the geometric chord along the path,
-/// its normal steel equivalent, and the cost actually charged against the shell's capability.
+/// The game's damage model: an armour crossing's charged chord and reference-mm cost.
+/// Entry and exit hold the real geometry; the chord readout includes the slope charge.
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 pub struct Plate {
     pub name: String,
@@ -245,7 +245,6 @@ pub struct Plate {
     pub chord_mm: f32,
     pub steel_equiv_mm: f32,
     pub cost_mm: f32,
-    pub overmatched: bool,
     #[serde(default)]
     pub class: PlateClass,
     /// Reference-mm per metre of chord: the substance's factor. Zero on a hand-authored clip.

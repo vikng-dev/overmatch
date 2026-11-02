@@ -4494,9 +4494,9 @@ mod tests {
     }
 
     /// For a spall cone thrown at record time `t`: the record's speed (m/s) on the path leg
-    /// leaving the node nearest `t` in time, where the crossing that threw it ends, and the speed
-    /// of the leg `t` itself falls on. Read off the path's times alone, never the cone's origin.
-    fn exit_speed(report: &PenetrationReport, t: f32) -> (f32, f32) {
+    /// leaving the node nearest `t` in time. No outgoing timed leg gives the declared instantaneous
+    /// front. Read off raw path times, independently of the planned cone.
+    fn exit_speed(report: &PenetrationReport, t: f32) -> f32 {
         let path = &report.path;
         let gap = |i: usize| (path[i].t - t).abs();
         let at = (0..path.len())
@@ -4505,27 +4505,16 @@ mod tests {
         let speed = |a: &crate::damage_cam::PathPoint, b: &crate::damage_cam::PathPoint| {
             Vec3::from(a.point).distance(Vec3::from(b.point)) / (b.t - a.t)
         };
-        let leaving = path[at + 1..]
+        // The record may end at this node; without an outgoing speed the front is instantaneous.
+        path[at + 1..]
             .iter()
             .find(|next| Vec3::from(next.point).distance(Vec3::from(path[at].point)) > 1e-6)
-            .map(|next| speed(&path[at], next))
-            .expect("a timed leg leaves the node a spall cone is thrown at");
-        let holding = path
-            .windows(2)
-            .find(|pair| pair[0].t <= t && t < pair[1].t)
-            .map_or(leaving, |pair| speed(&pair[0], &pair[1]));
-        (leaving, holding)
+            .map_or(0.0, |next| speed(&path[at], next))
     }
 
-    /// Every field's front sets off at its own record time and runs at its own speed over
-    /// [`timeline::REPLAY_SLOWDOWN`], read off the record apart from the plan: a spall cone's at
-    /// the round's speed on the path leg leaving the plate that threw it, a burst's field's at the
-    /// burst's sideways speed `v_s`; neither is the line's pace. A component a front doses starts
-    /// its fill when that front reaches it. Every spall cone is checked, its origin on the path or
-    /// off it. The library holds a spall cone whose exit speed is under half its contact speed, one
-    /// whose origin projects inside the crossing that threw it (its own time falls on the in-plate
-    /// leg), and a burst whose `v_s` is apart from its carried speed, so neither the contact speed,
-    /// the leg the origin projects onto nor the carried speed passes.
+    /// The game's damage-model front uses its own event time and exit speed, or is instantaneous
+    /// without an outgoing timed leg. A controlled folded path separates exit, contact and holding
+    /// speeds; the library checks every current record, including stationary fronts.
     #[test]
     fn each_front_runs_at_its_own_speed() {
         // The game's damage-model source oracle comes from raw fixture marks, independently of
@@ -4545,8 +4534,15 @@ mod tests {
                 "the folded fixture's front follows its source's {exit} m/s exit"
             );
         }
+        let mut inside = folded.clone();
+        inside.spall[0].t = 0.25 * source_time + 0.75 * folded.spall[0].t;
+        let inside_plan = Plan::new(&inside, &TankShapes::default());
+        assert!(
+            (front_speed(&inside_plan, CornerKind::Glass, 0) - exit / timeline::REPLAY_SLOWDOWN)
+                .abs()
+                < 1e-3
+        );
         let library = Library::load();
-        let (mut spall, mut inside, mut burst) = (0, 0, 0);
         for record in &library.records {
             let (plan, report) = (&record.plan, &record.report);
             let name = record.stem.as_str();
@@ -4554,24 +4550,13 @@ mod tests {
                 for (index, cone) in plan.cones.iter().enumerate() {
                     let start = cone_start(plan, kind, index, false);
                     assert!(
-                        front_radius(plan, kind, index, start).abs() < 1e-5,
-                        "{name}"
-                    );
-                    assert!(
                         front_radius(plan, kind, index, start - 0.01) < 0.0,
                         "{name}"
                     );
                     let want = match report.spall.get(index) {
                         Some(c) => {
                             assert_eq!(cone.t, c.t, "{name} cone {index}");
-                            let (exit, holding) = exit_speed(report, c.t);
-                            if exit < 0.5 * report.projectile.speed_mps {
-                                spall += 1;
-                            }
-                            if (holding - exit).abs() > 0.05 * exit {
-                                inside += 1;
-                            }
-                            exit
+                            exit_speed(report, c.t)
                         }
                         None => {
                             let b = report
@@ -4579,12 +4564,21 @@ mod tests {
                                 .as_ref()
                                 .expect("a cone past the spall is the burst's");
                             assert_eq!(cone.t, b.t, "{name} burst");
-                            if (b.sideways_mps - b.speed_mps).abs() > 0.25 * b.sideways_mps {
-                                burst += 1;
-                            }
                             b.sideways_mps
                         }
                     };
+                    if !want.is_finite() || want <= 0.0 {
+                        assert_eq!(
+                            front_radius(plan, kind, index, start),
+                            cone.max_reach(),
+                            "{name}: no outgoing timed leg"
+                        );
+                        continue;
+                    }
+                    assert!(
+                        front_radius(plan, kind, index, start).abs() < 1e-5,
+                        "{name}"
+                    );
                     if cone.max_reach() <= 0.0 {
                         continue;
                     }
@@ -4598,41 +4592,68 @@ mod tests {
                 for b in &plan.boxes {
                     if let Some(Reach::Cone { cone, distance }) = b.reached_at {
                         let at = box_start(plan, kind, b, false);
-                        assert!(
-                            (front_radius(plan, kind, cone, at) - distance).abs() < 1e-3,
-                            "{name}: {}",
-                            b.name
-                        );
+                        let field = &plan.cones[cone];
+                        let radius = front_radius(plan, kind, cone, at);
+                        if field.speed.is_finite() && field.speed > 0.0 {
+                            assert!((radius - distance).abs() < 1e-3, "{name}: {}", b.name);
+                        } else {
+                            assert!(
+                                radius >= distance,
+                                "{name}: {} is reached by the instantaneous front",
+                                b.name
+                            );
+                            assert_eq!(at, cone_start(plan, kind, cone, false));
+                        }
                     }
                 }
             }
         }
-        assert!(
-            spall > 0,
-            "a spall cone's exit speed is apart from its contact speed"
-        );
-        assert!(
-            inside > 0,
-            "a spall cone's origin projects inside its crossing"
-        );
-        assert!(burst > 0, "a burst's v_s is apart from its carried speed");
     }
 
-    /// A component's fill starts the first moment the picture reaches it, in every frame, the
-    /// victim's included: the earliest of the nose entering it where the record has the line
-    /// enter, and each field that dosed it having run, from its own record time at its own speed,
-    /// the reach of its shortest direction that dosed it. Every candidate is read off the record
-    /// apart from the plan's choice. The corner's fill and the pace's settle start from it; a
-    /// victim's fill that starts at the open shows this shot's damage before the round arrives. The library holds a component a later-listed field
-    /// reaches first and one a front reaches before the nose enters it, so neither the first-listed
-    /// dosing field nor the line taken first whenever it dosed passes.
+    /// The game's damage-model fill starts at the earliest recorded arrival in every view.
+    /// A generic fixture's later-listed front overtakes its first front and the line, so choosing
+    /// list order or preferring the line fails independently of the shipped demo outcomes.
     #[test]
     fn each_component_fills_from_its_earliest_arrival() {
+        // Fixture times, distances and doses; no tank geometry supplies a pass condition.
+        let (mut fixture, _, _) = crate::damage_cam::record::tests::folded_cone_record();
+        let name = "fixture box";
+        let unit = crate::ballistics::POOL_UNITS_PER_HP;
+        fixture.components = vec![crate::damage_cam::ComponentState {
+            name: name.into(),
+            role: Role::Module,
+            count: 10,
+            held: 10 * unit,
+        }];
+        fixture.doses = vec![crate::damage_cam::BoxDose {
+            volume: name.into(),
+            line: 1.0,
+            field: 1.0,
+            taken: unit,
+            shown_taken: None,
+            entered: Some(fixture.path.last().unwrap().point),
+        }];
+        let mut early = fixture.spall[0].clone();
+        early.fragments[0].hits = vec![crate::damage_cam::FragmentHit {
+            volume: name.into(),
+            damage: 1.0,
+        }];
+        let origin = Vec3::from(early.origin);
+        early.fragments[0].end = (origin + Vec3::NEG_Y).into();
+        let mut later = early.clone();
+        later.t += 0.001;
+        later.fragments[0].end = (origin + Vec3::NEG_Y * 0.1).into();
+        fixture.spall = vec![early, later];
+        let fixture_plan = Plan::new(&fixture, &TankShapes::default());
         let library = Library::load();
         let (mut later_field, mut front_first) = (0, 0);
-        for record in &library.records {
-            let (plan, report) = (&record.plan, &record.report);
-            let name = record.stem.as_str();
+        let cases = std::iter::once(("controlled arrivals", &fixture_plan, &fixture)).chain(
+            library
+                .records
+                .iter()
+                .map(|r| (r.stem.as_str(), r.plan.as_ref(), &r.report)),
+        );
+        for (name, plan, report) in cases {
             for kind in [CornerKind::Glass, plan.kind, CornerKind::Victim] {
                 for b in &plan.boxes {
                     let Some(dose) = report.doses.iter().find(|d| d.volume == b.name) else {

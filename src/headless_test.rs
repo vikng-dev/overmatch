@@ -2563,16 +2563,14 @@ fn a_main_gun_round_damages_a_tank_on_the_shipped_map() {
         caliber: 0.088,
         mass: 10.2,
         drag_k: crate::ballistics::fixture_drag_k(0.088, 10.2),
-        // A capped hit nose (a hemisphere, N = 1/2), fixture data. The line meets the target's
-        // first face at 52° from its normal on 277 mm of steel-equivalent (MEASURED at the duel
-        // spawn poses), where the angle laws skid a 1-crh ogive (critical 48°) and have a capped
-        // nose bite (60°, DERIVED, design doc §4a).
+        // Fixture hit nose: a hemispherical cap. Contact reads the separate type preset.
         nose_factor: 0.5,
         penetrator_caliber: 0.088,
         penetrator_mass: 10.2,
         wound: 30.0,
         burst: None,
         fuze_mode: 0,
+        contact: crate::rounds::ContactPreset::fixture(),
         mechanism: crate::spec::FireMechanism::Single,
         shooter: Some(ShotSource {
             tank: shooter,

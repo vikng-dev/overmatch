@@ -729,7 +729,6 @@ struct WirePlate {
     chord_mm: f32,
     /// The steel equivalent the record states, and the cost it charged: one number.
     cost_mm: f32,
-    overmatched: bool,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
@@ -979,7 +978,6 @@ fn encode(vocabulary: &ShotVocabulary, report: &PenetrationReport) -> Result<Rec
                 exit: plate.exit.map(Mm::of).transpose()?,
                 chord_mm: plate.chord_mm,
                 cost_mm: plate.cost_mm,
-                overmatched: plate.overmatched,
             })
         })
         .collect::<Result<_, _>>()?;
@@ -1308,7 +1306,6 @@ fn decode(vocabulary: &ShotVocabulary, record: &Record) -> Result<PenetrationRep
                 chord_mm: plate.chord_mm,
                 steel_equiv_mm: plate.cost_mm,
                 cost_mm: plate.cost_mm,
-                overmatched: plate.overmatched,
                 class: *class,
                 factor: if chord > 0.0 {
                     plate.cost_mm / chord

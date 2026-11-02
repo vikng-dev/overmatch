@@ -115,6 +115,7 @@ fn scripted_shell(
         wound,
         burst: None,
         fuze_mode: 0,
+        contact: crate::rounds::ContactPreset::fixture(),
         mechanism,
         tracer: true,
         shot_origin: FireShellOrigin::Local,

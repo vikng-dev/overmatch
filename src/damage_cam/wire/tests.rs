@@ -160,22 +160,8 @@ fn assert_round_trip(name: &str, decoded: &PenetrationReport, recorded: &Penetra
     assert_eq!(decoded.plates.len(), recorded.plates.len(), "{name}");
     for (d, r) in decoded.plates.iter().zip(&recorded.plates) {
         assert_eq!(
-            (
-                &d.name,
-                d.class,
-                d.overmatched,
-                d.chord_mm,
-                d.steel_equiv_mm,
-                d.cost_mm
-            ),
-            (
-                &r.name,
-                r.class,
-                r.overmatched,
-                r.chord_mm,
-                r.steel_equiv_mm,
-                r.cost_mm
-            ),
+            (&d.name, d.class, d.chord_mm, d.steel_equiv_mm, d.cost_mm),
+            (&r.name, r.class, r.chord_mm, r.steel_equiv_mm, r.cost_mm),
             "{name}"
         );
         assert_time(name, d.t, r.t);

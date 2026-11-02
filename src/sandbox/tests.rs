@@ -221,7 +221,6 @@ fn a_shot_met_a_tank_by_its_log() {
         normal: Vec3::Z,
         incoming: Vec3::NEG_Z,
         speed_in: 700.0,
-        overmatched: false,
         volumes,
         end: CrossingEnd::Exit {
             at: Vec3::X,

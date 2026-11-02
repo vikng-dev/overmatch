@@ -83,7 +83,7 @@ const LINE_WOUND: f32 = 30.0;
 const LINE_REACH: f32 = 20.0;
 
 /// The digest of every line of `field_casts.pinned`, MEASURED on macOS arm64 (the test profile).
-const PINNED_TOTAL: u64 = 0x6044c51ec7513e9c;
+const PINNED_TOTAL: u64 = 0xdcf0fc80e7642ab3;
 
 const PINNED: &str = include_str!("field_casts.pinned");
 
@@ -570,9 +570,9 @@ fn spawn_shot_round(
     app: &mut App,
     local_origin: Vec3,
     local_direction: Vec3,
-    round: (f32, f32, f32, f32, f32, f32),
+    round: (f32, f32, f32, f32, f32, f32, crate::rounds::ContactPreset),
 ) -> Entity {
-    let (caliber, mass, nose_factor, speed, wound, drag_k) = round;
+    let (caliber, mass, nose_factor, speed, wound, drag_k, contact) = round;
     let origin = PROBE_TANK_AT + local_origin;
     let direction = local_direction.normalize();
     let body = RoundBody {
@@ -586,6 +586,7 @@ fn spawn_shot_round(
                 impact_style: crate::rounds::ImpactStyle::Compact,
                 velocity: direction * speed,
                 round: bound(body),
+                contact,
                 flying: FlyingBody {
                     caliber,
                     mass,
@@ -626,7 +627,7 @@ const FIXTURE_ROUND: &str = "88mm_AP";
 /// `(caliber, mass, nose_factor, speed, wound, drag_k)` of [`FIXTURE_ROUND`]. A full-calibre inert round:
 /// the casts' input digest carries one body and no burst, so a sub-calibre or burst round is
 /// refused here rather than pinned as its whole body.
-fn main_gun_round() -> (f32, f32, f32, f32, f32, f32) {
+fn main_gun_round() -> (f32, f32, f32, f32, f32, f32, crate::rounds::ContactPreset) {
     let round = crate::guns::GunRegistry::shipped()
         .round_by_key(FIXTURE_ROUND)
         .unwrap_or_else(|err| panic!("the field casts' round: {err}"));
@@ -642,6 +643,7 @@ fn main_gun_round() -> (f32, f32, f32, f32, f32, f32) {
         round.muzzle_speed,
         round.wound,
         round.drag_k,
+        round.contact,
     )
 }
 
@@ -658,7 +660,16 @@ fn shot(label: &str, local_origin: Vec3, local_direction: Vec3) -> Record {
     bits3(&mut input, local_origin);
     input.push(' ');
     bits3(&mut input, local_direction);
-    for value in [round.0, round.1, round.2, round.3, round.4, round.5] {
+    for value in [
+        round.0,
+        round.1,
+        round.2,
+        round.3,
+        round.4,
+        round.5,
+        round.6.density,
+        round.6.slope_tan,
+    ] {
         input.push(' ');
         bits(&mut input, value);
     }
@@ -667,12 +678,19 @@ fn shot(label: &str, local_origin: Vec3, local_direction: Vec3) -> Record {
     let marks = world
         .get::<PenetrationMarks>(shell)
         .expect("the shot's shell is retained");
+    if std::env::var("OVERMATCH_FIELD_CASTS_SHOW").is_ok() {
+        println!(
+            "contact-counts {label}: skids={} bites={}",
+            marks.ricochets.len(),
+            marks.events.len()
+        );
+    }
     for event in &marks.events {
         output.push_str("event ");
         bits3(&mut output, event.entry);
         output.push(' ');
         bits3(&mut output, event.exit);
-        let _ = write!(output, " {};", event.overmatched);
+        output.push(';');
     }
     for mark in &marks.log {
         if let ArmourMark::Wound { volumes, .. } = mark {

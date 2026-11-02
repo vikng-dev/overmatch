@@ -270,7 +270,9 @@ use crate::{CombatantId, CombatantLife, ShotId};
 /// REV 77 (the game's environment destruction model): a freed piece carries its whole hull's mass
 /// and meets contacts on a hull 1 mm inside it.
 /// REV 78 (#146, driving model): eight canonical fields; construction rest and signed crank.
-pub const PROTOCOL_REV: u32 = 78;
+/// REV 79 (#147, the game's damage model): the pressure contact law removes the entry bend and the
+/// overmatch verdict from what a crossing records.
+pub const PROTOCOL_REV: u32 = 79;
 
 /// Compatibility tag derived from the complete pinned wire manifest plus the crate version. This
 /// is the runtime handshake value: version-exact, so a version bump intentionally changes it.

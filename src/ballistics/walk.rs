@@ -39,16 +39,11 @@
 //! contacts keep their order and their chargeable chord even where their public `f32` values
 //! coincide.
 //!
-//! # Staged, because normalization bends the axis
+//! # Staged contact and transit
 //!
-//! Entry faces are sampled along the INCOMING axis, but the transit happens along the bent one (the
-//! serial resolver bends at `ballistics.rs`'s `bend_toward` call before probing the exit). One
-//! pre-collected hit list therefore cannot describe both. So the core is a two-stage continuation:
-//! [`begin`] consumes the entrance disc and returns either a ricochet plan or a
-//! [`TransitRequest`] naming the axis and frame the caller must collect the transit corridor along;
-//! [`finish`] consumes that corridor, advancing the round's mechanism (`super::mechanism`) through
-//! the crossing's ordered [`Encounter`]s, and returns the [`ResolutionPlan`]. Fixture tests answer
-//! the request from fixtures; the runtime answers it with real casts.
+//! The game's damage model reads the entrance with [`begin`], which returns a skid or a straight
+//! [`TransitRequest`]. The caller collects from its per-sample hand-offs; [`finish`] advances the
+//! mechanism through those encounters, charging resistance without changing travelled geometry.
 //!
 //! Each sample hands off between the stages on the face of the piece it crossed
 //! ([`DiscWalk::hand_off`]), and each stage's crossing is its first piece plus every piece that
@@ -79,8 +74,7 @@ use std::borrow::Cow;
 use std::collections::{BTreeMap, BTreeSet};
 
 use super::mechanism::{
-    Control, Dose, DoseSource, Effect, Geometry, Limits, Mechanism, OvermatchProjection,
-    overlap_factor,
+    Control, Dose, DoseSource, Effect, Geometry, Limits, Mechanism, SlopeCharge, overlap_factor,
 };
 use crate::substances::{SubstanceError, SubstanceId, SubstanceRegistry};
 
@@ -373,10 +367,7 @@ pub struct RayCorridor {
 // Laws / knobs
 // ---------------------------------------------------------------------------------------------
 
-/// Every number the walk consumes, gathered so no law reads a hidden constant. The solver's
-/// resolution constants are code; the angle laws [`begin`] applies are data
-/// ([`AngleLaws`](super::angle_laws::AngleLaws), `assets/ballistics/angle_laws.ron`), whose law and
-/// inputs are design doc §4a.
+/// The game's damage model: resolution bounds and the march's reference material facts.
 #[derive(Clone, Copy, Debug)]
 pub struct WalkLaws {
     /// SEED domain — absolute floor (m) under which two `t` name the same boundary at a restart.
@@ -403,7 +394,7 @@ pub struct WalkLaws {
     pub weld_max_lookahead: f32,
     /// Cumulative omitted perpendicular gap allowed across a CHAIN of welds in one run.
     ///
-    /// RULED 2026-08-07 (§13.4): chaining is transitive but budgeted, and the cap IS the tolerance —
+    /// Chaining is transitive but budgeted, and the cap IS the tolerance —
     /// the same 2 mm knob, deliberately, because one constant bounds both extremes at once. A single
     /// two-plate sandwich welds across up to 2 mm of air; an arbitrarily long picket fence can never
     /// collapse into one run with one terminal exit by chaining.
@@ -444,19 +435,9 @@ pub struct WalkLaws {
     /// which a round both declines to ricochet and still presents a resolvable chord. The reach it
     /// implies is never the operative bound — the residual is.
     pub event_secant_cap: f32,
-    /// Overmatch, ricochet and the entry bend, the shipped data's. The speed a bounce keeps is no
-    /// coefficient: it is the striking speed's share along the surface ([`Begin::Ricochet`]).
-    pub angles: super::angle_laws::AngleLaws,
-    /// Reference-mm per metre of the reference substance (RHA), the divisor turning a cost back
-    /// into steel-equivalent METRES so it can be compared against a caliber, and a factor into the
-    /// entry bend's resistance share.
+    pub reference: crate::substances::MaterialFacts,
+    /// Reference-mm per metre of the reference substance.
     pub rha_reference: f32,
-    // NO `significant_step` knob. §13's "meaningful factor step" is still an open tab, and a
-    // declared-but-unread knob is a false affordance — it advertises a lever whose default is
-    // correct only by accident. The pathology it was meant to gate (a thick soft volume deflecting
-    // a main-gun round) is already dead by a different mechanism: factor-weighted overmatch
-    // (§13.3), which is exercised by `an_arm_does_not_ricochet_an_88`. Add the knob back only with
-    // a reader and a test.
 }
 
 impl Default for WalkLaws {
@@ -481,8 +462,8 @@ impl Default for WalkLaws {
             event_plane_tolerance: 2.0e-3,
             event_residual_tolerance: 1.0e-2,
             event_secant_cap: 100.0,
-            angles: *super::angle_laws::AngleLaws::shipped(),
-            rha_reference: 1000.0,
+            reference: SubstanceRegistry::shipped_static().reference_facts(),
+            rha_reference: crate::substances::REFERENCE_FACTOR,
         }
     }
 }
@@ -536,7 +517,7 @@ pub enum WalkError {
     },
     /// The corridor handed to [`finish`] is not the one [`begin`] asked for. Accepting it silently
     /// would resolve one contact's geometry against another contact's entrance decision — an
-    /// overmatch verdict, a normalization bend and a ricochet test all belonging to a surface the
+    /// contact read and a ricochet test all belonging to a surface the
     /// round never met.
     CorridorMismatch { reason: Mismatch },
     /// The covered samples' entry normals cancelled, so no aggregate `n̄` exists.
@@ -622,7 +603,7 @@ impl WalkError {
 /// ([`WalkError::CorridorMismatch`]).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Mismatch {
-    /// Collected along a different axis than the bend asked for.
+    /// Collected along a different axis than the request names.
     Axis,
     /// Collected against a different world anchor.
     Anchor,
@@ -728,7 +709,7 @@ pub struct WeldedRun {
 /// Where the field steps, and what the step means.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum BoundaryKind {
-    /// Air → material at the outermost face: incidence, ricochet, normalization and overmatch read
+    /// Air → material at the outermost face: incidence and contact laws read
     /// here, exactly once per run (§13.4).
     Entrance,
     /// A material → material step inside a run.
@@ -801,8 +782,7 @@ impl Layer {
 
 /// One shell's presence intervals along a sample ray.
 ///
-/// Kept alongside the per-ENTITY union because the staged handoff needs surface identity: after
-/// normalization bends the axis and transports the ring, a transit sample can begin INSIDE material,
+/// Kept alongside the per-ENTITY union because the staged handoff needs surface identity: a transit sample can begin INSIDE material at its hand-off,
 /// and [`RayCorridor::initial_presence`] must be told which shells — inference is forbidden (that is
 /// how a dropped entry face becomes free armour).
 #[derive(Clone, Debug, PartialEq)]
@@ -862,7 +842,7 @@ impl RayWalk {
     ///
     /// "AT the restart" is a TOLERANCE, not an equality, and that is the whole reason this takes
     /// laws. A hand-off on a face reads its seed at exactly that face's `t`, and the transit
-    /// corridor re-measures the face along the bend at `t ≈ 0`; but a second boundary beside that
+    /// corridor re-measures the face along the ray at `t ≈ 0`; but a second boundary beside that
     /// face, or any boundary beside a restart read off no boundary at all (a perforation's resume
     /// point, a hand-off in air), agrees with the restart only to within rounding. Read as an exact
     /// comparison, that hair decides between "the seed owns this entry" and "the corridor does", and
@@ -1807,7 +1787,7 @@ pub fn witness_spans(
 /// It is an INPUT to the core, never reconstructed here. A finite ring is sensitive to rotation
 /// about the axis, and every "cross with world Y, else world X" rule has a discontinuous branch: a
 /// shell whose direction crosses it would have its sample pattern snap to a new phase mid-flight,
-/// and normalization/ricochet would re-roll the ring at every contact. Slice 2 anchors the basis at
+/// and rebuilding at a ricochet would re-roll the ring. The basis is anchored at
 /// spawn (from the muzzle) and parallel-transports it, storing it in the shell's sim bundle — it
 /// affects collision results, so it belongs with the spawn-time invariants.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -2146,7 +2126,7 @@ pub struct DiscEvent {
     /// touched FIRST, ties broken by sample index.
     pub entrance_volume: Entity,
     /// The entrance volume's factor (reference-mm per metre of chord): the resistance of the
-    /// substance the round bites into, which the entry bend reads ([`begin`]).
+    /// substance the round bites into, which the contact and slope laws read ([`begin`]).
     pub entrance_factor: f32,
     /// Every primitive this crossing touched, sorted — the identity half of the transit check.
     pub primitives: Vec<PrimitiveKey>,
@@ -2417,7 +2397,7 @@ pub fn walk_disc(
             // Identity alone is not the relation. One watertight CONCAVE primitive can be crossed
             // twice by the disc at genuinely separate places — the two arms of a bracket are the same
             // mesh, and unioning them collapses two crossings into one: one entrance law instead of
-            // two, one summed overmatch thickness, one exit where there are two. So the runs must
+            // two, one summed contact thickness, one exit where there are two. So the runs must
             // overlap, or be separated by no more than a WELD-CLASS void — the same micro-gap §13.4
             // would have deleted had the two runs lain on one ray. "Inside the weld LOOKAHEAD" is not
             // that: the lookahead bounds where a weld may be looked for, never what qualifies as one.
@@ -2969,17 +2949,24 @@ fn encounters(
 // Stage 3 — the staged resolution (§13.3 surface laws, §5 spall, §3 capability)
 // ---------------------------------------------------------------------------------------------
 
-/// The striking round, reduced to what the entrance rules read: what meets the plate (a sub-calibre
-/// round's core), at its speed at the face.
+/// The game's damage model: only the inputs the contact laws read at the face.
 #[derive(Clone, Copy, Debug)]
 pub struct Shot {
-    /// Calibre (m).
     pub caliber: f32,
-    /// The hit nose's factor `N` in `(0, 1]`, DERIVED at load from its `NoseShape`: the force law's.
-    pub nose_factor: f32,
-    /// Metres of reference steel the round can still defeat at the face: the force law's readout at
-    /// its speed there.
-    pub potency: f32,
+    pub speed: f32,
+    pub contact: crate::rounds::ContactPreset,
+}
+
+/// The game's damage model skids iff ρv²cos²θ < R_eff sin θ. The exact 4 is plug shear's
+/// perimeter-to-area ratio; √3 converts von Mises flow stress to shear flow stress.
+fn skids(shot: &Shot, cosine: f32, thickness: f32, factor: f32, laws: &WalkLaws) -> bool {
+    let cosine = f64::from(cosine.clamp(0.0, 1.0));
+    let sine = (1.0 - cosine * cosine).max(0.0).sqrt();
+    let shear = laws.reference.flow_strength / 3.0_f64.sqrt();
+    let resistance = (f64::from(factor) * laws.reference.cavity_strength())
+        .min(4.0 * shear * f64::from(thickness) / f64::from(shot.caliber));
+    f64::from(shot.contact.density) * f64::from(shot.speed).powi(2) * cosine * cosine
+        < resistance * sine
 }
 
 /// What the entrance disc decided, and what the surface laws read to decide it.
@@ -2992,18 +2979,10 @@ pub struct EntranceRead {
     /// `n̄`, the area-mean entry normal.
     pub normal: Vec3,
     pub coverage: f32,
-    pub incidence: f32,
-    /// Steel-equivalent thickness ALONG THE NORMAL (m) of the material actually engaged.
-    ///
-    /// §13.3's amendment: overmatch and ricochet consult `thickness × factor`, not geometry, or an
-    /// exposed forearm reads 80 mm "thick" and at a graze an arm ricochets an 88.
-    ///
-    /// Measured over the COVERED samples (`cost ÷ η`), not the whole disc: a partial engagement must
-    /// not fake a thin plate and suppress the ricochet that makes a graze a graze (§13.5). Whether a
-    /// bounce happens at all lives here, in the factor-weighted overmatch law; how HARD the round is
-    /// turned is η's business, in [`Begin::Ricochet`].
+    /// Covered-sample steel-equivalent thickness along the normal (m), never diluted by coverage.
     pub steel_equivalent: f32,
-    pub overmatched: bool,
+    /// The game's damage model: resistance-only chord scale; geometry stays on the incoming ray.
+    pub slope_charge: f64,
 }
 
 /// Where [`begin`] leaves the shot.
@@ -3011,16 +2990,15 @@ pub struct EntranceRead {
 pub enum Begin {
     /// The disc met no material.
     Miss,
-    /// Too oblique, not overmatched: deflect off `n̄`, no entry, no spall (§4).
+    /// The contact pressure cannot hold the face: deflect off `n̄`, no entry, no spall (§4).
     Ricochet {
         entrance: EntranceRead,
         /// Outgoing direction, blended from the incoming ray toward the full specular reflection by
-        /// η (§13.5, RULED 2026-08-07). η = 1 is the classic bounce, returned bit-for-bit; η → 0
+        /// η (§13.5). η = 1 is the classic bounce, returned bit-for-bit; η → 0
         /// fades to undisturbed flight. Continuity is the whole point — 1 mm of aim must never flip
         /// the outcome between "flies past" and "full bounce".
         ///
-        /// The lateral TORQUE a corner clip really applies stays deferred (§13.5, re-affirmed
-        /// 2026-08-07): only the deflection MAGNITUDE ships. The mean lateral offset of the covered
+        /// The lateral TORQUE a corner clip really applies stays deferred (§13.5): only the deflection MAGNITUDE ships. The mean lateral offset of the covered
         /// samples is the ready-made kick direction whenever it is wanted.
         direction: Vec3,
         /// Share of the striking speed retained. At η = 1 it is the share along the surface,
@@ -3055,9 +3033,7 @@ pub struct SampleSeed {
 #[derive(Clone, Debug, PartialEq)]
 pub struct TransitRequest {
     pub entrance: EntranceRead,
-    /// The NORMALIZED (bent) travel axis — the transit happens along this, not along the incoming
-    /// direction the entrance was sampled on. Carried as the checked bend `begin` computed, so its
-    /// bits reach every transit ray unchanged.
+    /// The incoming travel axis, unchanged by a bite.
     pub axis: Dir3,
     /// WORLD anchor, carried through unchanged from the entrance corridor — see
     /// [`RayCorridor::anchor`]. Sharing it is the point: the handoff below is then a LOCAL offset
@@ -3069,11 +3045,10 @@ pub struct TransitRequest {
     ///
     /// Deliberately NOT the covered-sample centroid. A centroid drags the shell's line of flight
     /// sideways toward whatever part of the disc happened to touch geometry — a lateral kick, which
-    /// is exactly the asymmetry §13.5 rules out ("lateral asymmetry unmodeled", re-affirmed
-    /// 2026-08-07). The aggregate SURFACE is a mean (`entrance.position`, `n̄`); the shell's AXIS is
+    /// is exactly the asymmetry §13.5 rules out ("lateral asymmetry unmodeled"). The aggregate SURFACE is a mean (`entrance.position`, `n̄`); the shell's AXIS is
     /// not.
     pub origin: Vec3,
-    /// The spawn-anchored basis, parallel-transported onto the bent axis. Never re-derived.
+    /// The incoming sampling basis, unchanged by a bite.
     pub frame: DiscFrame,
     pub radius: f32,
     /// k — the corridor supplied to [`finish`] must sample the disc the same way.
@@ -3085,15 +3060,12 @@ pub struct TransitRequest {
     /// entrance also named" is satisfied by a crossing of a completely different part of the same
     /// hull.
     pub entrance_primitives: Vec<PrimitiveKey>,
-    /// Each sample's hand-off relative to `origin`; no incoming-ray membership survives the bend.
+    /// Each sample's hand-off relative to `origin`; membership is re-read at these hand-offs.
     pub offsets: Vec<Vec3>,
 }
 
-/// Read the entrance disc and decide whether the round enters: §4's decision tree and its angle laws
-/// (§4a, [`AngleLaws`](super::angle_laws::AngleLaws)), on §13.3's factor-weighted thickness.
-///
-/// The read is the first crossing's ([`DiscWalk::hand_off`]), so a disc meeting two pieces that
-/// overlap in depth reads both surfaces, whichever it meets first.
+/// The game's damage model reads its first crossing's contact pressure and slope charge.
+/// The laws and preset basis are in `.agents/scratch/research/penetration-proxy-2026-11-02.md`.
 pub fn begin(entrance: &DiscWalk, shot: &Shot, laws: &WalkLaws) -> Result<Begin, WalkError> {
     let Some(HandOff { read: event, at }) = entrance.hand_off()? else {
         return Ok(Begin::Miss);
@@ -3102,22 +3074,19 @@ pub fn begin(entrance: &DiscWalk, shot: &Shot, laws: &WalkLaws) -> Result<Begin,
         return Ok(Begin::Miss);
     }
     let normal = event.entry_normal;
-    let incidence = entrance.axis.angle_between(-normal);
+    let along_normal = entrance.axis.dot(normal).abs().clamp(0.0, 1.0);
     // Covered-sample mean, then projected onto the normal: the thickness of the material that is
     // actually there, along the direction "thickness" means.
-    let along_normal = entrance.axis.dot(normal).abs();
     let steel_equivalent =
         (event.cost / event.coverage.max(f32::MIN_POSITIVE)) / laws.rha_reference * along_normal;
-    let overmatched =
-        steel_equivalent > 0.0 && shot.caliber >= laws.angles.overmatch_ratio * steel_equivalent;
+    let factor = event.entrance_factor / laws.rha_reference;
     let read = EntranceRead {
         position: event.entry_position,
         volume: event.entrance_volume,
         normal,
         coverage: event.coverage,
-        incidence,
         steel_equivalent,
-        overmatched,
+        slope_charge: super::mechanism::slope_charge(along_normal, shot.contact.slope_tan, factor),
     };
 
     let axis = Dir3::new(entrance.axis).expect(
@@ -3138,14 +3107,9 @@ pub fn begin(entrance: &DiscWalk, shot: &Shot, laws: &WalkLaws) -> Result<Begin,
         )
     };
 
-    let critical = laws
-        .angles
-        .critical_incidence(shot.nose_factor, shot.potency, steel_equivalent);
-    if !overmatched && incidence > critical {
+    if skids(shot, along_normal, steel_equivalent, factor, laws) {
         let specular = super::reflect(axis, surface);
-        // At full coverage the blend IS the classic bounce, so it is returned VERBATIM: rotating a
-        // direction onto its own reflection by quaternion would perturb the low bits, and the
-        // pre-ruling full-bounce path must stay bit-identical.
+        // Full coverage returns the mirror verbatim; rotating onto it would perturb its low bits.
         let direction = if event.coverage >= 1.0 {
             specular
         } else {
@@ -3163,22 +3127,6 @@ pub fn begin(entrance: &DiscWalk, shot: &Shot, laws: &WalkLaws) -> Result<Begin,
         });
     }
 
-    // Normalize: a bend toward the inward normal as it bites in, through `turn × N` of the
-    // incidence, so a blunter nose turns further into the plate. The product is formed first: the
-    // reference APCBC nose's share is then the f32 0.2 the data file derives, to the bit. Scaled by
-    // η on the same ruling (a barely-engaged entry is barely bent) and by the entrance substance's
-    // resistance over the reference's, so a substance that resists a round less turns it less. The
-    // share is unclamped: a substance declared above the reference would bend a round further,
-    // never past the normal (`bend_toward`). Overmatch cancels the slope cost in `finish`;
-    // normalization still bends the axis.
-    let resistance_share = event.entrance_factor / laws.rha_reference;
-    let turn = laws.angles.normalization_turn * shot.nose_factor;
-    let bent = super::bend_toward(
-        axis,
-        -surface,
-        event.coverage * turn * incidence * resistance_share,
-    );
-
     // Each sample resumes where [`DiscWalk::hand_off`] put it, and the transit ray is the AXIS
     // sample's: the request's origin is its hand-off, every other sample's offset carries its own.
     let axis_t = at[0];
@@ -3192,10 +3140,10 @@ pub fn begin(entrance: &DiscWalk, shot: &Shot, laws: &WalkLaws) -> Result<Begin,
 
     Ok(Begin::Transit(TransitRequest {
         entrance: read,
-        axis: bent,
+        axis,
         anchor: entrance.anchor,
         origin,
-        frame: entrance.frame.transport(entrance.axis, Vec3::from(bent)),
+        frame: entrance.frame,
         radius: entrance.radius,
         samples: entrance.samples(),
         entrance_primitives: event.primitives.clone(),
@@ -3252,7 +3200,7 @@ pub struct Exchange {
     pub debris: Vec<(usize, f32)>,
     /// Vector momentum (N s) delivered to the construction, including the debris launch share.
     pub momentum: Vec3,
-    /// The entrance-only share of `momentum`: the core bend and the stopped carrier.
+    /// The entrance-only share of `momentum`: the stopped carrier.
     pub entrance_momentum: Vec3,
     /// The game's damage model: stopped-carrier work (J) included in the retained dose.
     pub entrance_energy: f32,
@@ -3272,7 +3220,7 @@ pub struct Motion {
 /// crossing ([`DiscWalk::first_crossing`]).
 ///
 /// Between the two stages the caller runs a spatial query, and nothing in the type system stops it
-/// from collecting along the UNBENT axis, from the wrong origin, with a re-derived frame, or around
+/// from collecting along a different axis, from the wrong origin, with a re-derived frame, or around
 /// a different contact entirely. Any of those silently resolves one surface's geometry against
 /// another surface's entrance verdict. Tolerances are loose enough for honest f32 round-tripping and
 /// far tighter than any of these mistakes.
@@ -3376,17 +3324,16 @@ pub(crate) fn finish<M: Mechanism>(
         axis: transit.axis,
         entrance_normal: request.entrance.normal,
     };
-    let advanced = if request.entrance.overmatched {
-        advance_through(
-            &OvermatchProjection { inner: mechanism },
-            state,
-            &event.encounters,
-            limits,
-            &geometry,
-        )?
-    } else {
-        advance_through(mechanism, state, &event.encounters, limits, &geometry)?
-    };
+    let advanced = advance_through(
+        &SlopeCharge {
+            inner: mechanism,
+            charge: request.entrance.slope_charge,
+        },
+        state,
+        &event.encounters,
+        limits,
+        &geometry,
+    )?;
     let cost_spent =
         (mechanism.reference_mm(state) - mechanism.reference_mm(advanced.state)) as f32;
 

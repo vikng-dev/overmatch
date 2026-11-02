@@ -10,8 +10,8 @@
 //!
 //! The target structure and its staging are the design doc's:
 //! `.agents/scratch/damage-cam-2026-10-08/research/recommendation-solid-shot.md`, Parts 1 and 5.
-//! What this module still decides by a compatibility rule rather than a law is the overmatch switch
-//! ([`OvermatchProjection`]); what it decides by a modelling convention rather than a law is how an
+//! The slope charge is a type preset proxy ([`SlopeCharge`]); its basis is
+//! `.agents/scratch/research/penetration-proxy-2026-11-02.md`. The modelling convention is how an
 //! authoring overlap of different substances resists ([`overlap_factor`]) and is dosed: only its
 //! strongest volume counts ([`SolidShot`]'s advance, §13.2).
 
@@ -43,11 +43,6 @@ pub(crate) trait Mechanism {
 
     /// The game's damage model: seconds spent over `length` metres between two resolved states.
     fn flight_time(&self, before: Self::State, after: Self::State, length: f64) -> f64;
-
-    /// The kinetic energy (J) the round carries in `state`, `½ m v²`, `m` the mass that meets the
-    /// plate: what a crossing's energy lost is measured from, the line's dose and a spall cone's
-    /// strength alike.
-    fn energy(&self, state: Self::State) -> f64;
 }
 
 /// The limits an advance must respect.
@@ -170,6 +165,11 @@ pub(crate) struct SolidShotState {
 }
 
 impl SolidShot {
+    #[cfg(test)]
+    fn energy(&self, state: SolidShotState) -> f64 {
+        0.5 * self.body.mass as f64 * state.speed * state.speed
+    }
+
     /// Bind `round` against `registry`'s reference steel — synchronous, from data alone.
     pub(crate) fn bind(round: RoundBody, registry: &SubstanceRegistry) -> Self {
         let (scale, inertia) = round.terms_against(&registry.reference_facts());
@@ -438,10 +438,6 @@ impl Mechanism for SolidShot {
         let angle = libm::atan(root * (a - b) / (1.0 + self.inertia * a * b));
         2.0 * root * length / drop * angle
     }
-
-    fn energy(&self, state: SolidShotState) -> f64 {
-        0.5 * self.body.mass as f64 * state.speed * state.speed
-    }
 }
 
 /// THE UNION-FIELD OVERLAP RULE: what one sample is resisted by where several volumes are present
@@ -461,17 +457,30 @@ pub(crate) fn overlap_of(factors: impl IntoIterator<Item = f32>) -> f32 {
     factors.into_iter().fold(0.0f32, f32::max)
 }
 
-/// COMPATIBILITY ADAPTER: the overmatch switch, kept only until turning at the face replaces the
-/// entrance rules (design doc Part 5, step F). An overmatched crossing is charged on the
-/// perpendicular projection of its chord — `|axis · n̄|` of every encounter's length (§4: it cannot
-/// present its slope to a round that dwarfs it) — while the geometry it travels stays the slope
-/// chord: the inner mechanism advances through the projected length, and what it consumed maps back
-/// onto the slope.
-pub(crate) struct OvermatchProjection<'a, M> {
-    pub inner: &'a M,
+/// The game's damage model: Resolution ceiling keeps the resistance charge finite as θ + β → 90°.
+const SLOPE_CHARGE_CEILING: f64 = 5.0;
+
+/// Resistance over LOS, exactly one head-on; a softer entrance pays only its reference share.
+pub(crate) fn slope_charge(cosine: f32, penalty_tan: f32, factor: f32) -> f64 {
+    let cosine = f64::from(cosine.clamp(0.0, 1.0));
+    let sine = (1.0 - cosine * cosine).max(0.0).sqrt();
+    let denominator = cosine - sine * f64::from(penalty_tan);
+    let charge = if denominator <= cosine / SLOPE_CHARGE_CEILING {
+        SLOPE_CHARGE_CEILING
+    } else {
+        cosine / denominator
+    };
+    1.0 + f64::from(factor.min(1.0)) * (charge - 1.0)
 }
 
-impl<M: Mechanism> Mechanism for OvermatchProjection<'_, M> {
+/// The game's damage model: resistance reads a scaled chord; consumed progress and the flight
+/// clock read the real chord. Effects and reference-mm read the same charged state.
+pub(crate) struct SlopeCharge<'a, M> {
+    pub inner: &'a M,
+    pub charge: f64,
+}
+
+impl<M: Mechanism> Mechanism for SlopeCharge<'_, M> {
     type State = M::State;
 
     fn advance(
@@ -481,7 +490,7 @@ impl<M: Mechanism> Mechanism for OvermatchProjection<'_, M> {
         limits: &Limits,
         geometry: &Geometry,
     ) -> Advance<M::State> {
-        let charge = geometry.axis.dot(geometry.entrance_normal).abs() as f64;
+        let charge = self.charge;
         let length = encounter.end - encounter.start;
         let project = |t: f64| encounter.start + (t - encounter.start) * charge;
         let mut projected = Encounter {
@@ -497,7 +506,7 @@ impl<M: Mechanism> Mechanism for OvermatchProjection<'_, M> {
             contact.end = project(contact.end);
         }
         let mut advance = self.inner.advance(state, &projected, limits, geometry);
-        advance.consumed = if advance.control == Control::Continue || charge <= 0.0 {
+        advance.consumed = if advance.control == Control::Continue {
             length
         } else {
             (advance.consumed / charge).min(length)
@@ -514,12 +523,8 @@ impl<M: Mechanism> Mechanism for OvermatchProjection<'_, M> {
     }
 
     fn flight_time(&self, before: M::State, after: M::State, length: f64) -> f64 {
-        // Timing uses the travelled slope length, even when resistance uses its projection.
+        // The clock uses the travelled length between the charged states.
         self.inner.flight_time(before, after, length)
-    }
-
-    fn energy(&self, state: M::State) -> f64 {
-        self.inner.energy(state)
     }
 }
 
@@ -612,7 +617,9 @@ mod tests {
     fn a_stretch_advances_the_speed_by_the_closed_form_force_law() {
         let facts = SubstanceRegistry::shipped_static().reference_facts();
         let a = facts.cavity_strength();
-        let k = super::super::B_INERTIA as f64 * BODY.nose_factor as f64 * facts.density;
+        let k = super::super::physical_laws::PhysicalLaws::shipped().cavity_inertia
+            * BODY.nose_factor as f64
+            * facts.density;
         let area = std::f64::consts::FRAC_PI_4 * (BODY.caliber as f64).powi(2);
         let round = round();
         for (samples, share) in [
@@ -1013,42 +1020,96 @@ mod tests {
         }));
     }
 
-    /// The overmatch compatibility adapter advances the inner mechanism through the perpendicular
-    /// projection of the stretch and maps a rest point back onto the slope.
+    /// The game's damage model's slope proxy is head-on exact, monotone and bounded. The
+    /// mutation cos(θ+β) without cos β charges head-on; shot potency relies on normal calibration.
     #[test]
-    fn the_overmatch_adapter_charges_the_projection_and_maps_the_rest_back() {
-        let round = round();
-        let adapter = OvermatchProjection { inner: &round };
-        // 60° obliquity: the projection is half the slope.
-        let oblique = Geometry {
-            axis: Vec3::Z,
-            entrance_normal: Vec3::new(0.0, 3.0f32.sqrt() / 2.0, -0.5),
-        };
-        let charge = oblique.axis.dot(oblique.entrance_normal).abs() as f64;
-        for (speed, length) in [(800.0f32, 0.04), (300.0, 2.0)] {
-            let projected = round.advance(
-                round.at(speed),
-                &encounter(length * charge, 1, &[&[(1, 1000.0)]]),
-                &LIMITS,
-                &oblique,
+    fn slope_charge_is_head_on_exact_monotone_bounded_and_shared_by_soft_faces() {
+        let registry = crate::rounds::RoundRegistry::shipped();
+        for (_, preset) in registry.contact_presets() {
+            // Fixture chord: every preset preserves the uncharged head-on advance bit for bit.
+            let mechanism = round();
+            let state = mechanism.at(800.0);
+            let chord = encounter(0.04, 1, &[&[(1, 1000.0)]]);
+            let adapted = SlopeCharge {
+                inner: &mechanism,
+                charge: slope_charge(1.0, preset.slope_tan, 1.0),
+            };
+            assert_eq!(
+                adapted.advance(state, &chord, &LIMITS, &HEAD_ON),
+                mechanism.advance(state, &chord, &LIMITS, &HEAD_ON)
             );
-            let adapted = adapter.advance(
-                round.at(speed),
+
+            for factor in [0.0, 0.1, 1.0, 2.0] {
+                assert_eq!(slope_charge(1.0, preset.slope_tan, factor), 1.0);
+                let mut previous = 1.0;
+                for step in 0..=900 {
+                    let cosine = (step as f32 * 0.1).to_radians().cos().max(0.0);
+                    let charge = slope_charge(cosine, preset.slope_tan, factor);
+                    assert!(charge.is_finite() && (1.0..=SLOPE_CHARGE_CEILING).contains(&charge));
+                    assert!(charge + 1.0e-7 >= previous);
+                    previous = charge;
+                }
+            }
+        }
+        for angle in [10.0_f32, 30.0, 60.0, 89.99] {
+            let cosine = angle.to_radians().cos();
+            let mut previous = 1.0;
+            for beta in [0.0_f32, 2.0, 8.0, 15.0, 60.0, 89.99] {
+                let tangent = beta.to_radians().tan();
+                let charge = slope_charge(cosine, tangent, 1.0);
+                assert!(charge >= previous);
+                assert!(slope_charge(cosine, tangent, 0.2) <= charge);
+                previous = charge;
+            }
+        }
+        // Fixture normal potency 120 mm; the note's measured class bands are 85–97 and 31–49 mm.
+        for (class, fixtures) in [("APCBC", [95.5, 45.4]), ("APCR", [87.8, 32.1])] {
+            let preset = registry.contact_preset(class).unwrap();
+            for ((angle, expected), (low, high)) in [30.0_f32, 60.0]
+                .into_iter()
+                .zip(fixtures)
+                .zip([(85.0, 97.0), (31.0, 49.0)])
+            {
+                let cosine = angle.to_radians().cos();
+                let defeated =
+                    120.0 * f64::from(cosine) / slope_charge(cosine, preset.slope_tan, 1.0);
+                println!("MEASURED fixture {class} {angle}°: {defeated:.4} mm; note {expected}");
+                assert!((defeated - expected).abs() < 0.1);
+                assert!((low..=high).contains(&defeated));
+            }
+        }
+    }
+
+    /// The game's damage model: charging resistance changes state and work once; the real chord
+    /// still owns stop progress and flight time. Mutant: charged geometry leaks into the clock.
+    #[test]
+    fn slope_adapter_maps_resistance_back_to_real_progress_and_time() {
+        let round = round();
+        let adapter = SlopeCharge {
+            inner: &round,
+            charge: 3.0,
+        }; // Fixture charge.
+        for (speed, length) in [(800.0_f32, 0.04), (300.0, 2.0)] {
+            let before = round.at(speed);
+            let charged = round.advance(
+                before,
+                &encounter(length * adapter.charge, 1, &[&[(1, 1000.0)]]),
+                &LIMITS,
+                &HEAD_ON,
+            );
+            let actual = adapter.advance(
+                before,
                 &encounter(length, 1, &[&[(1, 1000.0)]]),
                 &LIMITS,
-                &oblique,
+                &HEAD_ON,
             );
-            assert_eq!(adapted.state, projected.state);
-            assert_eq!(adapted.control, projected.control);
-            assert_eq!(adapted.effects, projected.effects);
-            let expected = match projected.control {
-                Control::Continue => length,
-                _ => projected.consumed / charge,
-            };
-            assert!(
-                (adapted.consumed - expected).abs() < 1.0e-12,
-                "{} against {expected}",
-                adapted.consumed
+            assert_eq!(actual.state, charged.state);
+            assert_eq!(actual.effects, charged.effects);
+            assert_eq!(actual.control, charged.control);
+            assert!((actual.consumed - charged.consumed / adapter.charge).abs() < 1.0e-12);
+            assert_eq!(
+                adapter.flight_time(before, actual.state, actual.consumed),
+                round.flight_time(before, charged.state, actual.consumed)
             );
         }
     }

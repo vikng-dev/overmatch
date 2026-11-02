@@ -49,7 +49,7 @@ use bevy::prelude::*;
 #[cfg(any(feature = "dev_ui", test))]
 use super::PenetrationEvent;
 use super::collect::{self, Corridor};
-use super::mechanism::{Dose, DoseSource, Limits, Mechanism, SolidShot};
+use super::mechanism::{Dose, DoseSource, Limits, SolidShot};
 use super::walk::{
     self, Begin, DiscCorridor, DiscFrame, DiscWalk, Outcome, RayCorridor, SampleCorridor,
     SampleSeed, ShellKey, Shot, SpallSource, VolumeTable, WalkError, WalkLaws,
@@ -370,10 +370,10 @@ fn certified_at(
 }
 
 /// The game's damage model: the starts of the transit corridor `request` asks for, each sample's
-/// membership read on the bent ray that corridor sweeps from the sample's hand-off.
+/// membership read on the transit ray that corridor sweeps from the sample's hand-off.
 ///
-/// Incoming-ray membership cannot cross the bend: a grazing face may fall on the other side of
-/// the same rounded start on the new ray. The request therefore supplies only start offsets.
+/// Membership is certified at each reached hand-off; the request supplies offsets, never an
+/// inferred presence from an earlier start.
 pub(crate) fn transit_starts(
     context: &ResolveContext<'_, '_, '_>,
     not_own: &dyn Fn(Entity) -> bool,
@@ -1230,7 +1230,7 @@ pub(crate) enum Decision {
         /// The examined corridor as the round flew it.
         leg: Leg,
     },
-    /// Too oblique and not overmatched: deflected off the face — no entry, no spall.
+    /// The contact pressure cannot hold the face: deflected off the face — no entry, no spall.
     Bounce(Bounce),
     /// It bit in: stopped inside the material or came out the far side.
     Bite(Box<Bite>),
@@ -1374,7 +1374,6 @@ pub(crate) struct Bite {
     pub struck: Entity,
     /// Entrance coverage η.
     pub coverage: f32,
-    pub overmatched: bool,
     /// Entrance ownership for fuze attribution, independent of line momentum routing.
     pub owner: Option<Entity>,
     /// Per-entity transit charges, already clipped at the embed progress: a round that stops in the
@@ -1391,7 +1390,7 @@ pub(crate) struct Bite {
     /// The game's damage model keeps effect progress in corridor f64, before world rounding.
     pub volume_ends: std::collections::BTreeMap<Entity, f64>,
     /// Line-of-sight metres flown from the flight's position, summed over the segments actually
-    /// flown: the approach to the AXIS hand-off along the way in, then the transit along the bend,
+    /// flown: the approach to the AXIS hand-off along the way in, then the transit along the ray,
     /// and for a perforation the nudge on to the resume point.
     ///
     /// Not reconstructible from the cast. The cast knows only where its nearest sample ray first
@@ -1401,19 +1400,19 @@ pub(crate) struct Bite {
     /// across tick accounting boundaries.
     pub travel: f32,
     /// Line-of-sight metres of `travel` flown from the flight's position to the axis hand-off,
-    /// along the way in; the rest is the transit along the bend.
+    /// along the way in; the rest is the transit along the ray.
     pub approach: f32,
     /// The game's damage model: the transit's resolved force-law clock, in corridor metres.
     pub motion: Vec<walk::Motion>,
     pub end: BiteEnd,
-    /// The approach to the axis hand-off along `incoming`, then the transit along the bend to the
+    /// The approach to the axis hand-off along `incoming`, then the transit along the ray to the
     /// rest point or the resume point.
     pub legs: [Leg; 2],
 }
 
 impl Bite {
     /// Metres of path from the flight's position to `point` (WORLD) on the crossing: the approach
-    /// to the axis hand-off, then the transit along the bend to `point`'s place on its axis. At the
+    /// to the axis hand-off, then the transit along the ray to `point`'s place on its axis. At the
     /// rest or resume point it is [`Self::travel`], to rounding.
     pub(crate) fn path_to(&self, point: Vec3) -> f32 {
         let transit = &self.legs[1];
@@ -1425,7 +1424,7 @@ impl Bite {
 #[derive(Clone, Debug)]
 pub(crate) enum BiteEnd {
     /// Defeated: buried at `at`, travelling along `direction` through the body when it stopped
-    /// (the bend at the entrance, not the way in).
+    /// (the incoming heading).
     Embedded { at: Vec3, direction: Dir3 },
     /// Punched through.
     Perforated {
@@ -1513,19 +1512,20 @@ pub(crate) fn entry_force(
 }
 
 /// Decide one crossing of the union field from first contact, with no consequence applied:
-/// corridor closure, the entrance read ([`walk::begin`]), the transit collection along the bend,
+/// corridor closure, the entrance read ([`walk::begin`]), the transit collection along the incoming ray,
 /// [`walk::finish`] advancing the round's bound mechanism, the residual speed, the travel and the
 /// continuation.
 ///
 /// The game's damage model: `round` is the penetrator's mechanism and `mass` the current flying
 /// assembly's kg. On a bite, excess carrier mass stops at the first resisting contact; only the
-/// core bends and continues. A bounce keeps its current assembly. `contact` is the distance from [`Flight::sweep_origin`] to the
+/// core continues straight. A bounce keeps its current assembly. `contact` is the distance from [`Flight::sweep_origin`] to the
 /// nearest sample's first armour contact; it sizes the first corridor and nothing else.
 pub(crate) fn decide(
     context: &ResolveContext<'_, '_, '_>,
     not_own: &dyn Fn(Entity) -> bool,
     round: &SolidShot,
     mass: f32,
+    preset: crate::rounds::ContactPreset,
     flight: &Flight,
     contact: f32,
 ) -> Result<Decision, WalkError> {
@@ -1565,8 +1565,8 @@ pub(crate) fn decide(
     let state_in = round.at(speed);
     let shot = Shot {
         caliber: body.caliber,
-        nose_factor: body.nose_factor,
-        potency: (round.reference_mm(state_in) / f64::from(context.laws.rha_reference)) as f32,
+        speed,
+        contact: preset,
     };
     let owner = |struck: Entity| {
         context
@@ -1642,7 +1642,10 @@ pub(crate) fn decide(
                 coverage: read.coverage,
                 struck,
                 owner: owner(struck),
-                shock: (round.energy(state_in) - round.energy(round.at(kept))).max(0.0) as f32,
+                shock: (0.5
+                    * f64::from(mass)
+                    * (f64::from(speed).powi(2) - f64::from(kept).powi(2)).max(0.0))
+                    as f32,
                 direction: out,
                 speed: kept,
                 incoming: dir,
@@ -1655,10 +1658,8 @@ pub(crate) fn decide(
             }))
         }
         Begin::Transit(request) => {
-            // --- TRANSIT: re-collected along the BENT axis from the hand-off, its membership read
-            // on those bent rays. The entrance hits describe the incoming rays and cannot describe
-            // this.
-            let bent = request.axis;
+            // Transit starts at the reached hand-offs and re-reads membership there.
+            let axis = request.axis;
             let starts = transit_starts(context, not_own, &request)?;
             let transit = closing_walk(
                 context,
@@ -1688,7 +1689,7 @@ pub(crate) fn decide(
                 from,
                 dir,
                 &entrance,
-                bent,
+                axis,
                 speed,
                 owner,
                 &context.laws,
@@ -1714,7 +1715,7 @@ fn bite(
     incoming: Dir3,
     // The resolved entrance rays: the approach's offsets and hard presence.
     entrance_walk: &DiscWalk,
-    bent: Dir3,
+    axis: Dir3,
     // m/s at the entrance.
     speed_in: f32,
     owner: impl Fn(Entity) -> Option<Entity>,
@@ -1756,7 +1757,7 @@ fn bite(
         ),
         Outcome::Perforated { .. } => None,
     };
-    // The game's damage model assigns the bend to the first exposed resisting volume. A weaker
+    // The game's damage model assigns carrier work to the first exposed resisting volume. A weaker
     // cofacial volume can own the entrance mark while contributing no resistance or exposed chord.
     let exposed = exposed_spans(&plan.crossing, rest);
     let (&first, _) = exposed
@@ -1772,8 +1773,7 @@ fn bite(
         carrier >= 0.0,
         "the flying assembly contains its penetrator"
     );
-    first.entrance_momentum = core_mass * speed_in * (Vec3::from(incoming) - Vec3::from(bent))
-        + carrier * speed_in * Vec3::from(incoming);
+    first.entrance_momentum = carrier * speed_in * Vec3::from(incoming);
     first.momentum += first.entrance_momentum;
     first.entrance_energy = 0.5 * carrier * speed_in.powi(2);
     first.dose.amount += first.entrance_energy;
@@ -1786,14 +1786,14 @@ fn bite(
         Outcome::Embedded { at, t } => (
             BiteEnd::Embedded {
                 at: world(at),
-                direction: bent,
+                direction: axis,
             },
             t,
         ),
         Outcome::Perforated { exit, t, .. } if plan.state.speed == 0.0 => (
             BiteEnd::Embedded {
                 at: world(exit),
-                direction: bent,
+                direction: axis,
             },
             t,
         ),
@@ -1807,7 +1807,7 @@ fn bite(
                 BiteEnd::Perforated {
                     exit: world(exit),
                     resume: world(transit.origin + transit.axis * resume),
-                    direction: bent,
+                    direction: axis,
                     speed: residual,
                     continuation: Interior {
                         anchor: transit.anchor,
@@ -1829,7 +1829,6 @@ fn bite(
         normal: plan.entrance.normal,
         struck,
         coverage: plan.entrance.coverage,
-        overmatched: plan.entrance.overmatched,
         owner: owner(struck),
         deposits,
         spall: plan
@@ -1846,7 +1845,7 @@ fn bite(
         end,
         legs: [
             way_in,
-            Leg::new(world(transit.origin), bent, flown, &transit.offsets).with_presence(transit),
+            Leg::new(world(transit.origin), axis, flown, &transit.offsets).with_presence(transit),
         ],
     }
 }
@@ -2370,7 +2369,6 @@ fn finish_bite(
             shell.marks.events.push(PenetrationEvent {
                 entry: bite.entrance,
                 exit: *at,
-                overmatched: bite.overmatched,
             });
             shell.path.points.push(*at);
             // The struck FACE reads at the visible surface for an embed, the embed point being
@@ -2382,7 +2380,6 @@ fn finish_bite(
             shell.marks.events.push(PenetrationEvent {
                 entry: bite.entrance,
                 exit: *exit,
-                overmatched: bite.overmatched,
             });
             shell.path.points.push(*exit);
             (TerminalVerdict::Through, bite.entrance, bite.entrance)

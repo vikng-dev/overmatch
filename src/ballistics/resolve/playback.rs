@@ -610,7 +610,6 @@ impl Playback {
                         normal: bite.normal,
                         incoming: *bite.incoming,
                         speed_in: bite.speed_in,
-                        overmatched: bite.overmatched,
                         volumes: bite.volumes.clone(),
                         end: match &bite.end {
                             BiteEnd::Embedded { at, .. } => CrossingEnd::Rest { at: *at },

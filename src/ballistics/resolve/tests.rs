@@ -146,73 +146,6 @@ fn every_entry_is_owned_once_across_the_hand_off() {
 
 /// A RING SAMPLE HANDING OFF ON A FACE THE BENT AXIS GRAZES.
 ///
-/// The disc bites a block's top face and bends toward its inward normal; the disc's outer samples
-/// pass that face's edge and enter the overhanging side face deeper, handing off there. The
-/// incoming rays meet the side face at 1° to 16° and the bend carries the transit axis across its
-/// plane, so one ray or the other grazes it: a start's rounding off the face becomes a distance
-/// along that ray far past the topology band, and a membership read on the incoming ray disagrees
-/// with the bent corridor about the face. The first boundary of every sample's transit must still
-/// be owned exactly once ([`transit_starts`] reads membership on the bent rays), or the march's
-/// Bite meets the shell's exit with nothing open: `UnexpectedExit`, a panic (#254). MEASURED: with
-/// the seeds read on the incoming rays, the sweep's first pose fails that way. Fixture geometry,
-/// near the world origin and far from it.
-#[test]
-fn a_hand_off_face_the_bent_axis_grazes_is_owned_once() {
-    const HALF: f32 = 0.5;
-    const STEPS: usize = 76;
-    let incidence = 40.0_f32.to_radians();
-    let radius = ROUND.caliber * 0.5;
-    let mut transits = 0;
-    for (centre, rotation) in [
-        (
-            Vec3::new(0.3, 2.0, -0.2),
-            Quat::from_euler(EulerRot::YXZ, 0.7, 0.4, 1.9),
-        ),
-        (
-            Vec3::new(1234.5, 2.0, 987.6),
-            Quat::from_euler(EulerRot::YXZ, 2.3, -0.6, 0.5),
-        ),
-    ] {
-        for step in 0..STEPS {
-            // The incoming ray meets the side face at `graze`. The bend (DERIVED: about 8° at 40°
-            // under the default normalization, scaled by coverage) lies inside the sweep.
-            let graze = (1.0 + 0.2 * step as f32).to_radians();
-            let shear = HALF * (incidence - graze).tan();
-            let (mut app, _) = settled(|app| {
-                vec![mesh_volume(
-                    app,
-                    mapped_box_trimesh(|corner| {
-                        Vec3::new(
-                            HALF * corner.x + shear * corner.z,
-                            HALF * corner.y,
-                            HALF * corner.z,
-                        )
-                    }),
-                    Transform::from_translation(centre).with_rotation(rotation),
-                )]
-            });
-            let direction = rotation * Vec3::new(-incidence.sin(), 0.0, -incidence.cos());
-            // Half a projected radius short of the top face's edge: the outer samples pass it.
-            let point = centre
-                + rotation * Vec3::new(HALF + shear - 0.5 * radius / incidence.cos(), 0.0, HALF);
-            let origin = point - direction * STANDOFF;
-            let pose = format!("graze {graze} rad, block {rotation} at {centre}");
-            match handed_off(&mut app, origin, direction) {
-                Ok(Some(corridor)) => {
-                    assert_single_ownership(&corridor, &pose);
-                    transits += 1;
-                }
-                Ok(None) => {}
-                Err(error) => panic!("{pose}: the hand-off failed to pair: {error:?}"),
-            }
-        }
-    }
-    assert!(
-        transits >= STEPS,
-        "the sweep bit into the block ({transits} transits)"
-    );
-}
-
 /// The runtime's two-stage crossing from `origin` along `direction`, at the march's stand-off: the
 /// entrance corridor, the transit starts, the transit corridor (returned for the ownership check)
 /// and the transit's pairing. `None` when the entrance does not bite.
@@ -237,7 +170,7 @@ fn handed_off(
                     laws: WalkLaws::default(),
                 };
                 // The game's damage model: exercise the production driver and inspect ownership.
-                // Replacing its bent-ray certification with incoming seeds must fail this sweep.
+                // Membership belongs to each reached start, not to the incoming corridor origin.
                 let mut flight = Flight {
                     position: origin,
                     direction: Dir3::new(direction).expect("a real direction"),
@@ -252,6 +185,7 @@ fn handed_off(
                     &|_| true,
                     &bound(ROUND),
                     ROUND.mass,
+                    crate::rounds::ContactPreset::fixture(),
                     &flight,
                     STANDOFF,
                 )?;
@@ -270,8 +204,8 @@ fn handed_off(
                 )?;
                 let shot = Shot {
                     caliber: ROUND.caliber,
-                    nose_factor: ROUND.nose_factor,
-                    potency: capability(ROUND, SPEED) / context.laws.rha_reference,
+                    speed: SPEED,
+                    contact: crate::rounds::ContactPreset::fixture(),
                 };
                 let Begin::Transit(request) = walk::begin(&entrance, &shot, &context.laws)? else {
                     return Ok(None);
@@ -330,8 +264,8 @@ const DT: f32 = 0.016;
 /// drag change the speed but never the direction, and the gate's straight flight is the runtime's.
 const DROP_FROM: Vec3 = Vec3::new(0.1, 3.0, -0.2);
 
-/// The top of a wide target 6.5 m below a plate at `y = 1`, where a partly covered or overmatched
-/// round lands whatever its bend. Fixture data.
+/// The top of a wide target 6.5 m below a plate at `y = 1`, where a partly covered
+/// round lands after its first crossing. Fixture data.
 const FAR_BELOW: f32 = -5.5;
 
 /// Every impact the runtime fired, as `(verdict, position)`.
@@ -390,6 +324,15 @@ fn driven(app: &mut App, body: RoundBody, speed: f32) -> Drive {
 
 /// [`driven`], with the driver's failure returned rather than raised.
 fn try_driven(app: &mut App, body: RoundBody, speed: f32) -> Result<Drive, fuzz::DriveFailure> {
+    try_driven_with_contact(app, body, speed, crate::rounds::ContactPreset::fixture())
+}
+
+fn try_driven_with_contact(
+    app: &mut App,
+    body: RoundBody,
+    speed: f32,
+    preset: crate::rounds::ContactPreset,
+) -> Result<Drive, fuzz::DriveFailure> {
     let (speed, budget) = first_tick(body, speed);
     app.world_mut()
         .run_system_once(
@@ -406,7 +349,15 @@ fn try_driven(app: &mut App, body: RoundBody, speed: f32) -> Result<Drive, fuzz:
                     deposit: false,
                     laws: WalkLaws::default(),
                 };
-                fuzz::drive(&context, body, speed, DROP_FROM, Vec3::NEG_Y, budget)
+                fuzz::drive(
+                    &context,
+                    body,
+                    preset,
+                    speed,
+                    DROP_FROM,
+                    Vec3::NEG_Y,
+                    budget,
+                )
             },
         )
         .expect("the driver system runs")
@@ -636,12 +587,8 @@ fn the_runtime_and_the_gate_decide_the_same_crossings() {
         [Verdict::Stopped],
     );
 
-    // Bounce: a thin plate struck at 75° by a round it cannot overmatch, over a target narrow
-    // enough that the bounced path (30° off the drop line) passes beside it. The straight line
-    // through the plate costs less than the round can spend, so only the bounce keeps it out. The
-    // round has a pointed hit nose (a 6-crh ogive): under the angle laws a round skids off a plate
-    // whose line it could defeat only when `ricochet_grip × N < sin θ`, so a blunter nose bites
-    // here; this one skids past 72° (DERIVED).
+    // Fixture: a pointed round's normal potency would defeat this chord, but contact pressure
+    // makes it skid. The reflected path passes beside the narrow target below.
     let pointed = RoundBody {
         nose_factor: crate::spec::NoseShape::Ogive { crh: 6.0 }.factor(),
         ..FIXTURE_MG
@@ -945,7 +892,7 @@ fn mapped_box_trimesh(place: impl Fn(Vec3) -> Vec3) -> (Collider, BallisticSurfa
 /// millimetres downrange. The immutable batch is refused before delivering any consequence.
 ///
 /// Generic geometry, a single-sample round falling straight down so no bend moves it off the
-/// chain: square entry faces (no normalization bend), exit faces sheared 65° (not opposed to the
+/// chain: square entry faces, exit faces sheared 65° (not opposed to the
 /// next entry, so no ε-weld), and the chain starting three periods short of the budget's end.
 /// Fixture data throughout, the ceiling of 10 crossings included.
 #[test]
@@ -2045,6 +1992,24 @@ fn shot_onto_slab(
     thickness: f32,
     factor: f32,
 ) -> (Drive, Entity) {
+    shot_onto_slab_with_contact(
+        body,
+        speed,
+        incidence,
+        thickness,
+        factor,
+        crate::rounds::ContactPreset::fixture(),
+    )
+}
+
+fn shot_onto_slab_with_contact(
+    body: RoundBody,
+    speed: f32,
+    incidence: f32,
+    thickness: f32,
+    factor: f32,
+    preset: crate::rounds::ContactPreset,
+) -> (Drive, Entity) {
     let mut gate = world_with_trimesh_plates(&[]);
     let rotation = Quat::from_rotation_z(incidence);
     let normal = rotation * Vec3::Y;
@@ -2061,7 +2026,10 @@ fn shot_onto_slab(
     for _ in 0..8 {
         gate.update();
     }
-    (driven(&mut gate, body, speed), slab)
+    (
+        try_driven_with_contact(&mut gate, body, speed, preset).expect("the fixture walk is valid"),
+        slab,
+    )
 }
 
 /// The bounce a flight made at its first contact; a flight that did anything else is a broken
@@ -2230,15 +2198,16 @@ fn a_bounce_keeps_the_speed_along_the_face() {
 fn bounce_dose_bounds_read_the_plate_that_was_struck() {
     let laws = WalkLaws::default();
     let (speed, _) = first_tick(FIXTURE_88, 773.0);
-    for thickness in [
-        1.1 * FIXTURE_88.caliber / laws.angles.overmatch_ratio,
-        0.456,
-    ] {
-        let critical = laws.angles.critical_incidence(
-            FIXTURE_88.nose_factor,
-            capability(FIXTURE_88, speed) / laws.rha_reference,
-            thickness,
-        );
+    for thickness in [0.04, 0.456] {
+        // Fixture metres.
+        let shear = laws.reference.flow_strength / 3.0_f64.sqrt();
+        let resistance = laws
+            .reference
+            .cavity_strength()
+            .min(4.0 * shear * thickness as f64 / FIXTURE_88.caliber as f64);
+        let density = crate::rounds::ContactPreset::fixture().density as f64;
+        let x = resistance / (2.0 * density * (speed as f64).powi(2));
+        let critical = ((1.0 + x * x).sqrt() - x).asin() as f32;
         let (biting, _) = shot_onto_slab(FIXTURE_88, 773.0, critical - 0.01, thickness, STEEL);
         assert!(
             matches!(biting.decisions.first(), Some(Decision::Bite(_))),
@@ -2706,8 +2675,8 @@ fn a_convex_trunk_is_crossed_with_a_chord_at_any_offset_and_incidence() {
                         )?;
                         let shot = Shot {
                             caliber: ROUND.caliber,
-                            nose_factor: ROUND.nose_factor,
-                            potency: capability(ROUND, SPEED) / context.laws.rha_reference,
+                            speed: SPEED,
+                            contact: crate::rounds::ContactPreset::fixture(),
                         };
                         let Begin::Transit(request) = walk::begin(&entrance, &shot, &context.laws)?
                         else {
@@ -3127,4 +3096,143 @@ fn a_finite_material_crossing_longer_than_fifty_metres_closes() {
     assert_eq!(walked.events.len(), 1, "the prism is one crossing");
     assert_eq!(walked.events[0].start, 1.0);
     assert_eq!(walked.events[0].end, 61.0);
+}
+
+/// The game's damage model's mounted decide path must use pressure and the loaded slope preset.
+/// Mutants: a fixed skid angle, ignoring the slope preset, or charging by changing travel length.
+#[test]
+fn mounted_contact_skids_a_thin_graze_bites_head_on_and_charges_only_resistance() {
+    let contact = crate::rounds::ContactPreset::fixture();
+    let (graze, _) = shot_onto_slab_with_contact(
+        FIXTURE_88,
+        773.0,
+        80.0_f32.to_radians(),
+        0.01,
+        STEEL,
+        contact,
+    );
+    first_bounce(&graze);
+    let (head_on, _) = shot_onto_slab_with_contact(FIXTURE_88, 773.0, 0.0, 0.4, STEEL, contact);
+    assert!(matches!(head_on.decisions.first(), Some(Decision::Bite(_))));
+    let bite = |preset| {
+        let (flight, _) = shot_onto_slab_with_contact(
+            FIXTURE_88,
+            773.0,
+            30.0_f32.to_radians(),
+            0.01,
+            STEEL,
+            preset,
+        );
+        let Some(Decision::Bite(bite)) = flight.decisions.into_iter().next() else {
+            panic!("the fixture slope bites");
+        };
+        bite
+    };
+    let charged = bite(contact);
+    let uncharged = bite(crate::rounds::ContactPreset {
+        slope_tan: 0.0,
+        ..contact
+    });
+    let cost = |bite: &Bite| bite.volumes.iter().map(|v| v.cost).sum::<f32>();
+    assert!(cost(&charged) > cost(&uncharged));
+    assert!((charged.travel - uncharged.travel).abs() < 1.0e-5);
+    assert_eq!(charged.legs[1].axis, charged.incoming);
+    assert_eq!(charged.legs[1].axis, uncharged.legs[1].axis);
+    for (a, b) in charged.volumes.iter().zip(&uncharged.volumes) {
+        assert_eq!((a.entry, a.end), (b.entry, b.end));
+    }
+    // The mounted clock uses real progress between the charged states. Mutant: charge its length.
+    use crate::ballistics::mechanism::Mechanism;
+    let mechanism = bound(FIXTURE_88);
+    for motion in &charged.motion {
+        let expected = mechanism.flight_time(
+            mechanism.at(motion.speed_in as f32),
+            mechanism.at(motion.speed_out as f32),
+            motion.end - motion.start,
+        );
+        assert!((motion.seconds - expected).abs() < 1.0e-8);
+    }
+
+    match (&charged.end, &uncharged.end) {
+        (BiteEnd::Perforated { speed: a, .. }, BiteEnd::Perforated { speed: b, .. }) => {
+            assert!(a < b)
+        }
+        _ => panic!("both fixture bites perforate"),
+    }
+}
+
+/// The game's damage model: a first-contact skid keeps the current flying assembly. Mutant:
+/// using penetrator mass for work while impulse reads assembly mass violates one-body exchange.
+#[test]
+fn a_kept_carrier_skid_reads_one_body_for_work_and_impulse() {
+    let mut app = world_with_trimesh_plates(&[]);
+    let angle = 75.0_f32.to_radians(); // Fixture geometry and assembly mass.
+    let rotation = Quat::from_rotation_z(angle);
+    volume(
+        &mut app,
+        Vec3::new(12.0, 0.4, 3.0),
+        Transform::from_translation(
+            Vec3::new(DROP_FROM.x, 1.0, DROP_FROM.z) - rotation * Vec3::Y * 0.2,
+        )
+        .with_rotation(rotation),
+        STEEL,
+        None,
+    );
+    for _ in 0..8 {
+        app.update();
+    }
+    let mass = ROUND.mass * 4.0;
+    let decision = app
+        .world_mut()
+        .run_system_once(
+            move |world: ProjectileMarchWorld,
+                  colliders: Query<(
+                &'static Position,
+                &'static Rotation,
+                &'static Collider,
+                Option<&'static BallisticSurfaces>,
+            )>| {
+                let context = ResolveContext {
+                    world: &world,
+                    colliders: &colliders,
+                    deposit: false,
+                    laws: WalkLaws::default(),
+                };
+                let direction = Dir3::NEG_Y;
+                let frame = DiscFrame::anchored(*direction).unwrap();
+                let flight = Flight::born(
+                    &context,
+                    &|_| true,
+                    DROP_FROM,
+                    direction,
+                    direction,
+                    SPEED,
+                    frame,
+                    disc_radius(ROUND.caliber),
+                )
+                .unwrap();
+                decide(
+                    &context,
+                    &|_| true,
+                    &bound(ROUND),
+                    mass,
+                    crate::rounds::ContactPreset::fixture(),
+                    &flight,
+                    DROP_FROM.y - 1.0,
+                )
+                .unwrap()
+            },
+        )
+        .unwrap();
+    let Decision::Bounce(bounce) = decision else {
+        panic!("the fixture assembly skids");
+    };
+    let expected_work = (0.5
+        * f64::from(mass)
+        * (f64::from(bounce.speed_in).powi(2) - f64::from(bounce.speed).powi(2)))
+        as f32;
+    assert!((bounce.shock - expected_work).abs() < 1.0e-3);
+    let expected_impulse =
+        mass * (*bounce.incoming * bounce.speed_in - *bounce.direction * bounce.speed);
+    assert!((bounce.impulse - expected_impulse).length() < 1.0e-3);
 }

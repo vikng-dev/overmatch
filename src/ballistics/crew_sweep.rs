@@ -292,6 +292,7 @@ fn fire_one(app: &mut App, round: &crate::rounds::Round, origin: Vec3, direction
     );
     projectile.flying.drag_k = round.drag_k;
     projectile.wound = round.wound;
+    projectile.contact = round.contact;
     let shell = app
         .world_mut()
         .spawn((

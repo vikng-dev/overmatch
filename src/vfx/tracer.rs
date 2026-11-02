@@ -80,6 +80,7 @@ mod tests {
             wound: 10.0,
             burst: None,
             fuze_mode: 0,
+            contact: crate::rounds::ContactPreset::fixture(),
             mechanism: crate::spec::FireMechanism::Automatic,
             tracer: true,
             // Identity, not authority — both paths name their shooter (the coax self-exclusion).

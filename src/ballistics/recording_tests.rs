@@ -253,6 +253,7 @@ fn fire_round(
         wound: 30.0,
         burst,
         fuze_mode: 0,
+        contact: crate::rounds::ContactPreset::fixture(),
         mechanism,
         shooter: Some(ShotSource {
             tank: shooter,
@@ -1343,7 +1344,6 @@ fn an_emptying_is_timed_at_the_deposit_that_emptied_the_pool() {
             normal: Vec3::Z,
             incoming: -Vec3::Z,
             speed_in: SPEED,
-            overmatched: false,
             volumes,
             end: CrossingEnd::Exit {
                 at: exit,
@@ -2326,7 +2326,7 @@ fn a_round_at_relative_rest_inside_new_material_builds_no_zero_clock() {
         let (pose, mut projectile) = shells.single_mut(app.world_mut()).unwrap();
         let at = pose.translation;
         // Fixture: the next free-flight step integrates exactly zero world velocity.
-        projectile.velocity = -GRAVITY * TICK.as_secs_f32();
+        projectile.velocity = -gravity() * TICK.as_secs_f32();
         let root = app
             .world_mut()
             .spawn((Transform::from_translation(at), RigidBody::Static))
@@ -2420,7 +2420,7 @@ fn relative_rest_still_discovers_a_separate_plate_in_the_same_tick() {
     ));
     let velocity = Vec3::NEG_Z * 640.0;
     projectile.flying.drag_k = 0.0;
-    projectile.velocity = velocity - GRAVITY * TICK.as_secs_f32();
+    projectile.velocity = velocity - gravity() * TICK.as_secs_f32();
     let (_, carrier) = tank(
         &mut app,
         at,

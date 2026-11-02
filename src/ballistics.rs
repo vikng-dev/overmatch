@@ -33,9 +33,8 @@ pub(crate) use path::{FlightOutcome, PathClock};
 mod walk;
 pub(crate) use walk::VolumeMaterial;
 
-/// The shell walk's angle laws (ricochet, normalization, overmatch): their coefficients, parsed once
-/// from `assets/ballistics/angle_laws.ron`.
-mod angle_laws;
+/// The game's damage model: shared environment and cavity-law stand-ins.
+mod physical_laws;
 
 /// Round mechanisms: how a round's state advances through the ordered encounters of a crossing.
 /// Solid shot is the only one built.
@@ -116,20 +115,18 @@ pub(crate) use sanctioned::{SanctionedInsert, SanctionedShots};
 /// producing an unmatched boundary when the same face is collected again.
 pub(crate) const MARCH_EPS: f32 = 1.0e-3;
 
-/// Gravity applied to shells each fixed tick (m/s²).
-const GRAVITY: Vec3 = Vec3::new(0.0, -9.81, 0.0);
+/// The game's damage model: uniform gravity from the shared environment stand-in (m/s²).
+fn gravity() -> Vec3 {
+    Vec3::NEG_Y * physical_laws::PhysicalLaws::shipped().gravity_mps2
+}
 
-/// World-floor height (m). Shells below it have left the playable world and are culled.
-const KILL_FLOOR: f32 = -100.0;
-
-/// Form units per unit drag coefficient: a round of calibre `d` and mass `m` under the drag force
-/// `½ ρ C_d (π d² / 4) v²` decelerates at `k v²`, `k = C_d · ρπ/8 · d² / m`, so a form ([`drag_k`])
-/// is a drag coefficient × ρπ/8. ρ = 1.225 kg/m³, sea-level air, ASSUMED: one air everywhere. The
-/// value is 0.4811 (DERIVED).
-const FORM_PER_DRAG_COEFFICIENT: f64 = 1.225 * std::f64::consts::PI / 8.0;
+/// Drag force ½ρC_d(πd²/4)v² gives form units C_d·ρπ/8; π/8 is exact algebra.
+fn form_per_drag_coefficient() -> f64 {
+    physical_laws::PhysicalLaws::shipped().air_density * std::f64::consts::PI / 8.0
+}
 
 /// The drag law: the form a round flies on (form units, the drag coefficient × ρπ/8 of
-/// [`FORM_PER_DRAG_COEFFICIENT`]) is a base share plus a nose share × its flight nose's factor
+/// [`form_per_drag_coefficient`]) is a base share plus a nose share × its flight nose's factor
 /// ([`NoseShape::factor`], the factor the force law reads off a hit nose), so a pointed nose flies on
 /// less. Its parameters are data: the round-type table's `drag` block
 /// (`assets/ballistics/round_types.ron`) states the base drag coefficient and one anchor nose's
@@ -151,7 +148,7 @@ impl DragLaw {
         anchor_nose: NoseShape,
         anchor_form: f64,
     ) -> Result<Self, String> {
-        let base_form = base_drag_coefficient * FORM_PER_DRAG_COEFFICIENT;
+        let base_form = base_drag_coefficient * form_per_drag_coefficient();
         if !(base_form.is_finite() && base_form > 0.0) {
             return Err(format!(
                 "base_drag_coefficient must be finite and positive (got {base_drag_coefficient})"
@@ -205,7 +202,7 @@ pub(crate) fn fixture_drag_k(caliber: f32, mass: f32) -> f32 {
 ///
 /// Invariant: drag uses `v / (1 + k * v * dt)` so both paths produce identical velocity.
 pub fn freeflight_step(velocity: Vec3, drag_k: f32, dt: f32) -> Vec3 {
-    let v = velocity + GRAVITY * dt;
+    let v = velocity + gravity() * dt;
     let speed = v.length();
     if speed == 0.0 {
         return v;
@@ -268,11 +265,6 @@ fn reference_steel() -> &'static crate::substances::MaterialFacts {
     &FACTS
 }
 
-/// Target inertia factor `B` of the force law (dimensionless): a named approximation, weakly
-/// constrained by the available plate data (published compressible fits 1.0–1.3, incompressible
-/// theory 1.5).
-const B_INERTIA: f32 = 1.0;
-
 /// What the capability law reads off a round: mass (kg), calibre (m) and nose factor `N`
 /// (dimensionless): the frictionless nose factor of the cavity-expansion form, in `(0, 1]`, derived
 /// from the spec's nose geometry ([`crate::spec::NoseShape`]).
@@ -285,7 +277,7 @@ pub struct RoundBody {
 
 impl RoundBody {
     /// The law's two round terms against the reference steel `reference`: `m / (2 A k)` (m) and
-    /// `k / a` (s²/m²), `k = B_INERTIA · N · ρ_ref` the inertia coefficient (kg/m³) and `a` the
+    /// `k / a` (s²/m²), `k = B · N · ρ_ref` the inertia coefficient (kg/m³) and `a` the
     /// reference's cavity strength term.
     ///
     /// In f64: `m / (2 A k)` grows as `1 / N` and leaves f32's range for a nose factor near f32's
@@ -293,7 +285,9 @@ impl RoundBody {
     fn terms_against(self, reference: &crate::substances::MaterialFacts) -> (f64, f64) {
         let caliber = self.caliber as f64;
         let area = std::f64::consts::FRAC_PI_4 * caliber * caliber;
-        let k = B_INERTIA as f64 * self.nose_factor as f64 * reference.density;
+        let k = physical_laws::PhysicalLaws::shipped().cavity_inertia
+            * self.nose_factor as f64
+            * reference.density;
         (
             self.mass as f64 / (2.0 * area * k),
             k / reference.cavity_strength(),
@@ -326,7 +320,7 @@ fn bound(round: RoundBody) -> mechanism::SolidShot {
 }
 
 /// Reference-mm `round` can still defeat at `speed` m/s — the force law
-/// `C = 1000 · m / (2 A k) · ln(1 + k v² / a)`, `A = π c² / 4`, `k = B_INERTIA · N · ρ_ref`, `a`
+/// `C = 1000 · m / (2 A k) · ln(1 + k v² / a)`, `A = π c² / 4`, `k = B · N · ρ_ref` (`B` the shared cavity-inertia stand-in), `a`
 /// the reference steel's cavity strength term
 /// ([`crate::substances::MaterialFacts::cavity_strength`], ≈ 3.711e9 Pa, DERIVED).
 ///
@@ -1250,7 +1244,7 @@ pub struct FireShell {
     /// capability law.
     pub nose_factor: f32,
     /// The penetrator's calibre (m) ([`crate::rounds::Round::penetrator`]), no greater than
-    /// `caliber`: what meets the plate reads it — the bound mechanism, the disc, overmatch and the
+    /// `caliber`: what meets the plate reads it — the bound mechanism, the disc, contact and the
     /// cone's hole. The whole round's for a full-calibre round.
     pub penetrator_caliber: f32,
     /// The penetrator's mass (kg), no greater than `mass`; the bound mechanism reads it.
@@ -1260,6 +1254,7 @@ pub struct FireShell {
     /// The round's burst ([`crate::rounds::Round::burst`]); `None` for an inert round.
     pub burst: Option<burst::Burst>,
     pub fuze_mode: u8,
+    pub(crate) contact: crate::rounds::ContactPreset,
     /// The game's damage-model view: emissions authored by the round, never inferred from calibre.
     pub(crate) effects: crate::rounds::FlightEffects,
     /// The shot's muzzle emission ([`crate::rounds::Round::muzzle`]), view only.
@@ -1308,6 +1303,7 @@ impl FireShell {
             penetrator_caliber: round.penetrator.caliber,
             penetrator_mass: round.penetrator.mass,
             wound: round.wound,
+            contact: round.contact,
             burst: round.burst,
             fuze_mode: round.fuze_mode,
             effects: round.effects,
@@ -1360,8 +1356,9 @@ pub(crate) struct Projectile {
     velocity: Vec3,
     /// The mechanism of what meets the plate, the round's penetrator, bound at spawn from its fire
     /// data and the substance registry ([`mechanism::SolidShot::bind`]) — data, never an asset.
-    /// The disc, overmatch, the force law and the cone's hole read its body.
+    /// The disc, contact, the force law and the cone's hole read its body.
     round: mechanism::SolidShot,
+    contact: crate::rounds::ContactPreset,
     flying: FlyingBody,
     /// Crew-line coefficient: disc-mean chord times this times [`HP_PER_REFERENCE_MM`] gives HP dose.
     /// Read only by the witness pass; the hard walk never sees it.
@@ -1373,7 +1370,7 @@ pub(crate) struct Projectile {
     /// where the disc's rays go and therefore what the shell hits.
     ///
     /// Anchored at spawn from the fire direction ([`DiscFrame::anchored`]) and parallel-transported
-    /// on every direction change afterwards — gravity's per-tick bend, normalization, a ricochet.
+    /// on every direction change afterwards — gravity's per-tick bend and a ricochet.
     /// Rebuilding it from the current direction instead would snap the sample pattern mid-flight the
     /// moment the direction crossed the anchoring branch.
     ///
@@ -1409,7 +1406,7 @@ impl Projectile {
     }
 
     /// What meets the plate: the penetrator's body, which the capability law, the disc and
-    /// overmatch read.
+    /// contact read.
     fn body(&self) -> RoundBody {
         self.round.body()
     }
@@ -1449,6 +1446,7 @@ impl Projectile {
                 mass: 1.0,
                 drag_k: 0.0,
             },
+            contact: crate::rounds::ContactPreset::fixture(),
             wound: 30.0,
             fuze: burst::Fuze::Inert,
             disc: walk::DiscFrame {
@@ -1656,9 +1654,6 @@ impl ComponentHealth {
 pub struct PenetrationEvent {
     pub entry: Vec3,
     pub exit: Vec3,
-    /// Whether this crossing was an overmatch (calibre ≫ plate thickness): ricochet suppressed,
-    /// slope largely cancelled.
-    pub overmatched: bool,
 }
 
 /// The volume crossings a shell has made this flight — what the sandbox draws to inspect the march.
@@ -1705,7 +1700,6 @@ pub enum ArmourMark {
         normal: Vec3,
         incoming: Vec3,
         speed_in: f32,
-        overmatched: bool,
         /// Every volume the line put a chord into, in volume order.
         volumes: Vec<VolumeCrossing>,
         end: CrossingEnd,
@@ -1995,7 +1989,7 @@ pub fn sim_plugin(app: &mut App) {
     // walk's angle laws at startup.
     box_classes::BoxClasses::shipped();
     energy_dose::joules_per_hp();
-    angle_laws::AngleLaws::shipped();
+    physical_laws::PhysicalLaws::shipped();
     app.configure_sets(
         FixedPostUpdate,
         (
@@ -2130,6 +2124,7 @@ fn on_fire_shell(
             impact_style: fire.effects.impact,
             velocity,
             round: bound(penetrator),
+            contact: fire.contact,
             flying: FlyingBody {
                 caliber: fire.caliber,
                 mass: fire.mass,
@@ -2664,10 +2659,10 @@ fn integrate_projectiles(
                 // Game: the spent shell is done.
                 commands.entity(entity).despawn();
             }
-        } else if step.position.y < KILL_FLOOR {
+        } else if step.position.y < physical_laws::PhysicalLaws::shipped().floor_m {
             // Left the world: cleared the map edge and fell into the void below the terrain. Despawn
             // outright — there is no impact to inspect, so this ignores the sandbox's retain (unlike a
-            // real impact). This is what bounds a shell that never hits terrain; see `KILL_FLOOR`.
+            // real impact). This is what bounds a shell that never hits terrain; see `physical_laws::PhysicalLaws::shipped().floor_m`.
             if let Some(shot) = shot {
                 commands.trigger(FlightOutcome {
                     shot: shot.0,
@@ -2742,7 +2737,7 @@ fn wound_legs(
 /// Ray-march one tick's travel budget for a single shell, resolving every surface it reaches.
 ///
 /// Free flight until a surface, then resolve it — terrain stops the shell; a ballistic volume
-/// ricochets (too oblique) or is crossed (normalize → spend cost → perforate or embed) — and keep
+/// ricochets (too oblique) or is crossed (charge resistance → spend potency → perforate or embed) — and keep
 /// marching the leftover budget along the new direction. The game's damage model treats an
 /// instant at rest as a state: preserve its heading, advance its fuze clock and let the next
 /// gravity step move it. A non-finite flight state is a bug.
@@ -2802,7 +2797,7 @@ fn march_shell_step(
     };
     // Gravity and drag on the velocity through the free-flight kernel the FireEvent catch-up folds
     // ([`fast_forward_shell`]). An unbent open-air step flies exactly `stepped × dt`. The march may
-    // *bend* the direction (normalization / ricochet), so we carry direction + speed and rebuild the
+    // *bend* the direction (ricochet), so we carry direction + speed and rebuild the
     // velocity at the end rather than assuming a straight step.
     assert!(
         shell.projectile.velocity.is_finite(),
@@ -2854,7 +2849,7 @@ fn march_shell_step(
     let mut terminal_emitted = shell.terminal_report.0;
 
     // Ray-march the step: free flight until a surface, then resolve it — terrain stops the
-    // shell; a ballistic volume ricochets (too oblique) or is crossed (normalize → spend cost →
+    // shell; a ballistic volume ricochets (too oblique) or is crossed (charge resistance → spend potency →
     // perforate or embed) — and keep marching the leftover budget along the new direction.
     // The disc's sampling basis, carried through this tick's gravity bend so the ring never re-rolls
     // (§13.5: the frame is spawn-anchored and transported, never rebuilt from the current direction).
@@ -3380,6 +3375,7 @@ fn decide_playback(
                     admit,
                     &shell.projectile.round,
                     flying.mass,
+                    shell.projectile.contact,
                     &flight,
                     distance,
                 )
@@ -4662,7 +4658,7 @@ mod tests {
         let anchor = NoseShape::Ogive { crh: 2.0 };
         let law = DragLaw::stated(0.25, anchor, 0.3).expect("fixture parameters state a law");
         assert_eq!(law.form(anchor).to_bits(), 0.3_f32.to_bits());
-        let base = 0.25 * FORM_PER_DRAG_COEFFICIENT;
+        let base = 0.25 * form_per_drag_coefficient();
         let needle = law.form(NoseShape::Ogive { crh: 1.0e6 });
         assert!(
             (needle as f64 / base - 1.0).abs() < 1.0e-5,
@@ -4834,6 +4830,7 @@ pub(crate) mod march_tests {
                 mass: body.mass,
                 drag_k: fixture_drag_k(body.caliber, body.mass),
             },
+            contact: crate::rounds::ContactPreset::fixture(),
             wound: FIXTURE_WOUND,
             fuze: burst::Fuze::Inert,
             // Anchored on this round's fire direction, as on_fire_shell does.
@@ -5373,6 +5370,7 @@ pub(crate) mod march_tests {
             nose_factor: FIXTURE_88.nose_factor,
             penetrator_caliber: FIXTURE_88.caliber,
             penetrator_mass: FIXTURE_88.mass,
+            contact: crate::rounds::ContactPreset::fixture(),
             wound: 30.0,
             burst: None,
             fuze_mode: 0,
@@ -5441,6 +5439,7 @@ pub(crate) mod march_tests {
             nose_factor: FIXTURE_88.nose_factor,
             penetrator_caliber: FIXTURE_88.caliber,
             penetrator_mass: FIXTURE_88.mass,
+            contact: crate::rounds::ContactPreset::fixture(),
             wound: 30.0,
             burst: None,
             fuze_mode: 0,
@@ -5466,7 +5465,7 @@ pub(crate) mod march_tests {
 
     /// A sub-calibre round flies on its fire's drag and meets the plate as its penetrator: the
     /// shell [`on_fire_shell`] spawns from a fire whose penetrator differs from its body binds the
-    /// penetrator's mechanism (the disc, overmatch and the cone's hole read its calibre), starts
+    /// penetrator's mechanism (the disc, contact and the cone's hole read its calibre), starts
     /// the penetrator's capability at the muzzle, steps the drag coefficient the
     /// fire carries (which body flies is the round registry's to decide, `rounds`), and is sized
     /// for the view as the whole body. Every role's shell of a sub-calibre round is spawned here.
@@ -5497,6 +5496,7 @@ pub(crate) mod march_tests {
             nose_factor: FIXTURE_88.nose_factor,
             penetrator_caliber: CORE.caliber,
             penetrator_mass: CORE.mass,
+            contact: crate::rounds::ContactPreset::fixture(),
             wound: FIXTURE_WOUND,
             burst: None,
             fuze_mode: 0,
@@ -7494,14 +7494,13 @@ pub(crate) mod march_tests {
         let stepped = freeflight_step(Vec3::NEG_Z * 800.0, fixture_drag_k(0.088, 10.2), dt);
         let incoming_speed = stepped.length();
 
-        for degrees in [0.0_f32, 40.0, 72.0] {
+        for degrees in [0.0_f32, 40.0, 60.0] {
             let mut app = world_with_trimesh_plates(&[]);
             app.world_mut().spawn((
                 Transform::from_translation(Vec3::new(0.0, 2.0, 0.0))
                     .with_rotation(Quat::from_rotation_y(degrees.to_radians())),
                 RigidBody::Static,
-                // 20 mm: thin enough that an 88 is overmatched at 72° and transits rather than
-                // bouncing, so every incidence under test resolves the same way.
+                // Fixture: each tested angle bites, isolating the path-distance accounting.
                 box_trimesh(Vec3::new(3.0, 3.0, 0.02)),
                 CollisionLayers::new([Layer::Armor], LayerMask::ALL),
                 BallisticVolume {

@@ -1321,6 +1321,7 @@ mod tests {
             wound: 10.0,
             burst: None,
             fuze_mode: 0,
+            contact: crate::rounds::ContactPreset::fixture(),
             mechanism: crate::spec::FireMechanism::Automatic,
             shooter: None,
             tracer: true,

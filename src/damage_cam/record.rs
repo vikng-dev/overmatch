@@ -756,12 +756,11 @@ pub(crate) fn report_from(
             }
             ArmourMark::Crossing {
                 volumes,
-                overmatched,
                 cones: count,
                 ..
             } => {
                 let cones = thrown.by_ref().take(*count);
-                ledger.crossing(index, on.mine(mark), volumes, *overmatched, cones);
+                ledger.crossing(index, on.mine(mark), volumes, cones);
             }
             ArmourMark::Wound { volumes, .. } => ledger.wound(index, volumes),
             ArmourMark::Burst {
@@ -1003,7 +1002,6 @@ impl<'a> Ledger<'a> {
         index: usize,
         share: Option<Share>,
         volumes: &[VolumeCrossing],
-        overmatched: bool,
         cones: impl Iterator<Item = &'c ThrownCone>,
     ) {
         let on = self.on;
@@ -1034,7 +1032,6 @@ impl<'a> Ledger<'a> {
                 chord_mm: crossed.chord * 1000.0,
                 steel_equiv_mm: crossed.cost,
                 cost_mm: crossed.cost,
-                overmatched,
                 class: if class == VolumeClass::External {
                     PlateClass::External
                 } else {
@@ -1405,7 +1402,6 @@ pub(crate) mod tests {
                 normal: Vec3::Y,
                 incoming: Vec3::NEG_Y,
                 speed_in: 100.0,
-                overmatched: false,
                 volumes: vec![VolumeCrossing {
                     volume,
                     entry,
@@ -1508,7 +1504,7 @@ pub(crate) mod tests {
             events: &events,
             tail: 6,
         });
-        ledger.crossing(5, None, &[], false, std::iter::once(&cone));
+        ledger.crossing(5, None, &[], std::iter::once(&cone));
         let t = ledger.spall[0].t;
         assert!(
             t >= nodes[2].t && t <= nodes[3].t,
@@ -1579,7 +1575,6 @@ pub(crate) mod tests {
             normal: -Vec3::Z,
             incoming,
             speed_in: 800.0,
-            overmatched: false,
             volumes: vec![
                 VolumeCrossing {
                     volume: plate_a,

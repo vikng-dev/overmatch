@@ -9,7 +9,7 @@ use crate::ballistics::pen_cam::{
     FixtureFired, FixtureVolume, Kind, LINE_FROM, THICK, THIN, fixture_fire, fixture_fire_with,
     plate,
 };
-use crate::ballistics::{ArmourMark, CrossingEnd, RoundBody, VolumeCrossing};
+use crate::ballistics::{ArmourMark, RoundBody, VolumeCrossing};
 use crate::damage_cam::{BoxDose, RoundEnd, ShotVerdict};
 
 /// Fire the fixture 88 down the head-on line at `volumes`, all one tank's, with its wound rate set
@@ -640,12 +640,12 @@ fn a_direction_with_no_hard_body_ahead_reaches_the_horizon() {
     }
 }
 
-/// At an oblique bend, each disc sample's line runs to its own handoff and on from there: a thin
+/// The game's damage model: each sample's line runs to its own hand-off and on from there. A thin
 /// witness lying flush in front of a sloped plate is crossed whole by every sample on the way in
 /// and never again on the way through, so its disc-mean chord is its depth over the cosine of the
 /// slope (DERIVED), whatever the samples' spread along the line.
 #[test]
-fn a_witness_beside_an_oblique_bend_is_read_along_each_samples_own_path() {
+fn a_witness_before_a_slope_is_read_once_along_each_samples_own_path() {
     let slope = 40.0_f32.to_radians();
     let turn = Quat::from_rotation_x(slope);
     let normal = turn * Vec3::Z;
@@ -670,18 +670,7 @@ fn a_witness_beside_an_oblique_bend_is_read_along_each_samples_own_path() {
         WOUND,
         |_| {},
     );
-    // The crossing's axis leaves its entrance off the incoming line by more than 0.8° (fixture
-    // threshold).
-    let bent = fired.log.iter().any(|mark| match mark {
-        ArmourMark::Crossing {
-            entrance,
-            incoming,
-            end: CrossingEnd::Exit { at, .. },
-            ..
-        } => (*at - *entrance).normalize().dot(*incoming) < 0.9999,
-        _ => false,
-    });
-    assert!(bent, "the plate bends the round: the fixture tests a bend");
+    // Mutant: one axis hand-off for every sample clips the late samples' approach.
     let chord: f32 = wounds(&fired, "film")
         .iter()
         .map(|crossed| crossed.chord)

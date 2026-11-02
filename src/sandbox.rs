@@ -988,12 +988,7 @@ fn draw_shell_paths(mut gizmos: Gizmos, paths: Query<&ShellPath, Without<MetTank
 fn draw_penetrations(mut gizmos: Gizmos, marks: Query<&PenetrationMarks, Without<MetTank>>) {
     for mark in &marks {
         for event in &mark.events {
-            // Entry green normally, magenta when this crossing was an overmatch.
-            let entry_color = if event.overmatched {
-                Color::srgb(1.0, 0.2, 1.0)
-            } else {
-                Color::srgb(0.2, 1.0, 0.3)
-            };
+            let entry_color = Color::srgb(0.2, 1.0, 0.3);
             gizmos.sphere(Isometry3d::from_translation(event.entry), 0.06, entry_color);
             gizmos.sphere(
                 Isometry3d::from_translation(event.exit),

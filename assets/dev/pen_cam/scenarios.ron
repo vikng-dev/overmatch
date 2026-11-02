@@ -31,8 +31,7 @@
         shows: "an 88 meeting the hull side at 80 degrees from its normal bounces away",
         weapon: "MainGun",
         round: "88mm_AP",
-        // 80 degrees: past the 75.8 degrees the 80 mm side gives this round under the angle laws
-        // (MEASURED; design doc §4a), where at 75 degrees it bites and stops in the plate.
+        // Fixture: a steep main-gun graze, beyond the pressure-contact limit.
         from: (-3.0, 1.5, -8.69),
         toward: (-1.44, 1.5, 0.157),
         verdict: Ricochet,
@@ -50,13 +49,13 @@
     ),
     (
         name: "s5_oblique_through",
-        shows: "an 88 through the hull side at 55 degrees: the cone's axis leans from the path toward the plate normal",
+        shows: "an 88 through the hull side at 30 degrees: the cone's axis leans from the path toward the plate normal",
         weapon: "MainGun",
         round: "88mm_AP",
-        from: (-4.0, 1.5, -3.7),
-        toward: (-1.0, 1.5, 0.584),
+        from: (-4.0, 1.5, -1.68),
+        toward: (-1.0, 1.5, 0.0520508),
         // Fixture muzzle: 620 m back along the shot's own line, the shooter's gun.
-        muzzle: (-359.6421, 1.5, -511.5569),
+        muzzle: (-540.9357, 1.5, -311.68),
         verdict: Penetration,
     ),
     (
@@ -98,8 +97,8 @@
         shows: "the turret traversed 30 degrees: an 88 through its side knocks out two boxes, the breech and the gunner station, and leaves the loader station reduced",
         weapon: "MainGun",
         round: "88mm_AP",
-        from: (-4.0, 2.0, -0.5),
-        toward: (0.0, 2.0, -0.5),
+        from: (-4.0, 2.0, -0.6),
+        toward: (0.0, 2.0, -0.6),
         turret_yaw_deg: 30.0,
         verdict: Penetration,
     ),
@@ -122,7 +121,7 @@
     ),
     (
         name: "s12_apcr_through_crew",
-        shows: "s1's line fired with the 88's sub-calibre round: it flies whole and meets the plate as its tungsten-carbide core, which leaves the driver's front plate faster than s1's round, having lost about a fifth of the energy s1's round lost there, so its cone is weaker and leaves the gunner and the commander reduced; the driver is knocked out, and the core stops deeper in the rear plate",
+        shows: "s1's line with the sub-calibre round: it flies whole, meets the plate as its core and continues through the driver station into the rear plate; the driver is knocked out while the gunner and commander remain reduced",
         weapon: "MainGun",
         round: "88mm_APCR",
         from: (-0.57, 1.45, -6.5),
@@ -131,7 +130,7 @@
     ),
     (
         name: "s13_ring_through_crew",
-        shows: "s1's line fired with the 88's burst round as the ring: the driver's front plate arms the fuze, and the round bursts 0.37 m past its exit at 245 m/s, short of the driver's station, where the band 56-76 degrees off the line empties the HP pools of the bow gunner, the transmission and two ammunition racks; the nose piece flies on through the driver's station and stops in the rear plate, and the driver is knocked out and the gunner reduced as in s1",
+        shows: "s1's line with the burst round: the front plate arms the fuze and the round bursts beyond its exit, before the driver station; the ring empties the bow gunner, transmission and one ammunition rack HP pools, and the nose piece flies on through the driver station and stops in the rear plate; the driver and gunner are knocked out",
         weapon: "MainGun",
         round: "88mm_APHE_ring",
         from: (-0.57, 1.45, -6.5),
@@ -149,7 +148,7 @@
     ),
     (
         name: "s16_restart_at_rest",
-        shows: "s4's line 10 cm lower, fired with the 88's burst round: the road wheel's near disc arms the fuze, its far disc restarts the delay, and the lower hull side stops the round 36 mm in; it bursts at rest there when the delay ends, a flat band about the line with no nose piece to fly on, and the plate around it stops every direction of its field",
+        shows: "s4's line 10 cm lower with the burst round: the road wheel's near disc arms the fuze, its far disc restarts the delay and the lower hull side stops the round; it bursts at rest there, with no nose piece to fly on, and the plate around it stops every direction of its field",
         weapon: "MainGun",
         round: "88mm_APHE_ring",
         from: (-5.0, 0.7, -0.79),

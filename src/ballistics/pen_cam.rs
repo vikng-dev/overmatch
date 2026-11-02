@@ -173,6 +173,7 @@ fn record_edited(
     let mut projectile = fixture_round_with(body, round.penetrator, direction * speed);
     projectile.flying.drag_k = round.drag_k;
     projectile.wound = round.wound;
+    projectile.contact = round.contact;
     projectile.fuze = super::burst::Fuze::of(round.burst);
     let shell = app
         .world_mut()
@@ -437,7 +438,7 @@ fn recorded_scenarios_keep_the_current_interaction_sequence() {
             report
                 .plates
                 .iter()
-                .map(|plate| (plate.name.clone(), plate.exit.is_some(), plate.overmatched))
+                .map(|plate| (plate.name.clone(), plate.exit.is_some()))
                 .collect::<Vec<_>>()
         };
         assert_eq!(
@@ -476,8 +477,22 @@ fn recorded_scenarios_keep_the_current_interaction_sequence() {
 fn bless_scenarios() {
     let dir = crate::assets::asset_root().join(SCENARIO_DIR);
     let bless = crate::tests::bless();
-    for scenario in &scenarios() {
-        let report = record_scenario(scenario);
+    let scenarios = scenarios();
+    let measured: Vec<_> = scenarios
+        .iter()
+        .map(|scenario| {
+            let report = record_scenario(scenario);
+            println!(
+                "MEASURED scenario {}: {:?}, skids={}, armour-bites={}",
+                scenario.name,
+                report.impact.verdict,
+                report.ricochets.len(),
+                report.plates.len()
+            );
+            (scenario, report)
+        })
+        .collect();
+    for (scenario, report) in measured {
         assert_eq!(
             report.impact.verdict, scenario.verdict,
             "PHYSICS CHANGED — {} earns a different verdict; diff consciously before re-recording",
@@ -1946,7 +1961,7 @@ fn a_ground_stop_counts_its_approach_whatever_the_step() {
     .into_iter()
     .map(|step| {
         let dt = step.as_secs_f32();
-        let velocity = target - GRAVITY * dt;
+        let velocity = target - gravity() * dt;
         assert_eq!(
             freeflight_step(velocity, 0.0, dt),
             target,
@@ -2023,60 +2038,6 @@ fn a_ground_stop_counts_its_approach_whatever_the_step() {
         (after - fired[0].1).abs() * exit_speed < SPLIT_TOLERANCE,
         "split in the air: it waits {after} s, not {} s",
         fired[0].1
-    );
-}
-
-/// A round that rests in a body it entered obliquely throws its burst about the direction it
-/// travelled in that body, the entrance's bend and not the way in: the band spins about it. The
-/// 500 mm back plate is turned 15° about `Y` (fixture data), under the 21° critical angle it gives
-/// the round slowed to 590 m/s by the front plate (DERIVED from the angle laws), so the entrance
-/// bends the round off its way in before it stops; the bend must exceed 10 mrad for the check to
-/// tell the two apart, and 1 mrad is the tolerance. A mutant that keeps the way in as the stopped
-/// round's direction fails here.
-#[test]
-fn a_round_at_rest_bursts_about_the_direction_it_stopped_along() {
-    let burst = fixture_burst();
-    let turn = Quat::from_rotation_y(15.0_f32.to_radians());
-    let fired = fixture_fire(
-        &[
-            (plate("front", THIN, 0.0, Kind::Main), 0, Quat::IDENTITY),
-            (plate("back", THICK, -2.0, Kind::Main), 0, turn),
-        ],
-        LINE_FROM,
-        Vec3::NEG_Z,
-        0,
-        |projectile| projectile.fuze = burst::Fuze::of(Some(burst)),
-    );
-    let ends = crossing_ends(&fired.log);
-    assert!(
-        matches!(
-            ends.as_slice(),
-            [CrossingEnd::Exit { .. }, CrossingEnd::Rest { .. }]
-        ),
-        "the back plate stops the round: {ends:?}"
-    );
-    let (incoming, stopped) = fired
-        .log
-        .iter()
-        .find_map(|mark| match mark {
-            ArmourMark::Crossing {
-                incoming, volumes, ..
-            } => volumes
-                .iter()
-                .find(|crossed| fired.names[&crossed.volume] == "back")
-                .map(|crossed| (*incoming, (crossed.end - crossed.entry).normalize())),
-            _ => None,
-        })
-        .expect("the round enters the back plate");
-    let bend = incoming.angle_between(stopped);
-    assert!(bend > 0.01, "the entrance bends the round {bend} rad");
-    let thrown = fired.burst.expect("the burst throws its field");
-    assert_eq!(thrown.field.ratio, 0.0, "thrown at rest");
-    let off = Vec3::from(thrown.axis).angle_between(stopped);
-    assert!(
-        off < 1.0e-3,
-        "the band spins {off} rad off the direction the round stopped along, {bend} rad off \
-         the way in"
     );
 }
 

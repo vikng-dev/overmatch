@@ -119,7 +119,7 @@ march, per volume crossed:
    no wider than the round; without one the round is its own penetrator, bit for bit. Flight reads
    the flying body: the whole round for a kept carrier, the penetrator for a discarded one
    (§3a). Everything at the plate reads the penetrator: the disc the shell samples the world with,
-   overmatch, this law and the core's work (§5, §6). On entering material, a kept carrier stops
+   contact, this law and the core's work (§5, §6). On entering material, a kept carrier stops
    at the first exposed resisting contact: that construction retains its kinetic energy and
    momentum once, while only the core bends and flies on. A discarded carrier contributes none.
    The core's penetration law is unchanged. Ricochet direction and carrier exchange remain part
@@ -138,8 +138,8 @@ Properties:
 
 - **Modules tax the penetrator too** — they are volumes. A shell can run out of steam *inside* the
   tank after crossing the outer plate plus an engine block.
-- **The path is a multi-segment world-space ray** that bends (normalization) and deflects
-  (ricochet). A segment can leave one tank and strike another (skip off a glacis into a neighbour).
+- **The path is a multi-segment world-space ray** that stays straight through bites and deflects
+  at a ricochet. A segment can leave one tank and strike another (skip off a glacis into a neighbour).
 - **Deliberate omission:** *shatter* (penetration going non-monotonic at extreme velocity against
   hard armor) is out of the slice.
 
@@ -170,132 +170,43 @@ Both the energy dose (§6) and flight-nose drag ride unshipped protocol REV 36: 
 on dose units and trajectories. The scenario recorder and field-cast tool regenerate their
 pins from the combined simulation, while the guns gate checks every resolved round field.
 
-## 4. Boundary interaction — the decision tree at each face
+## 4. Boundary interaction — contact and the straight bite
 
-> **Amended by §13.3 (2026-08-03):** overmatch and ricochet consult **factor-weighted**
-> (steel-equivalent) thickness, not geometric thickness, and surface behaviour gates on a
-> significant factor *step* at the boundary — otherwise a thick soft volume (a forearm, a fuel
-> tank) deflects main-gun rounds. The decision tree's structure is unchanged.
+Subject: the game's damage model; game state only. The accepted proxy and its evidence live in
+[the penetration proxy note](../../scratch/research/penetration-proxy-2026-11-02.md).
 
-When the path reaches a volume's face:
+At the first crossing, read the covered-sample steel-equivalent thickness along its normal `t_n`,
+the entrance factor over the reference `f`, contact calibre `d`, speed `v` and type density `ρ`.
+A round skids iff `ρ v² cos²θ < R_eff sin θ`, where `R_eff = min(f R, 4τ t_n/d)`.
+`R` is the march reference steel's cavity strength, `τ = Y/√3` its shear flow stress. The exact
+constants 4 and √3 are plug shear and von Mises respectively. The axis-normal dot gives cos θ;
+`sqrt(1 − cos²θ)` gives sin θ without runtime trigonometry in the decision.
 
-1. **Impact angle** `θ` = angle between path and surface normal at the hit point.
-2. **Overmatch** — if the calibre of what meets the plate is at least `overmatch_ratio` × the
-   crossing's steel-equivalent thickness *along its normal*: suppress ricochet and the slope cost,
-   punch through (the cost along the normal still applies). The game's namesake, but **one
-   modifier among many — not the centerpiece.** Don't over-build it.
-3. **Ricochet** — if not overmatched and `θ` exceeds the round's **critical angle** (§4a):
-   **deflect** — spawn a new path segment off the face, do *not* enter. At full coverage the
-   implementation reflects its direction specularly and retains speed magnitude `v sin θ`
-   (the bounce's dose, §6). The direction's disposition is an owner decision (§4a).
-   **No spall on ricochet** for now (spall is an exit/perforation event only — §5).
-4. **Otherwise** — **normalize** (bend the path toward the normal through the round's share of `θ`,
-   §4a), enter, and march the geometric LOS cost; perforate→exit (spall) or embed.
+A skid retains the shipped mirror direction and speed `v sin θ`, blended by coverage; it does
+not enter or throw spall. Work and impulse both read the current flying assembly. Directional
+slide and finite-disc consequences belong to the footprint rebuild (#260).
 
-The *structure* is the design; its coefficients are labelled data
-(`assets/ballistics/angle_laws.ron`, §4a), never a per-type table of angles.
+Every bite goes straight. Resistance reads the real LOS chord times the slope charge (§4a);
+geometry and flight time retain the real chord. Reference-mm, remaining potency and energy-lost
+dose all read that one charged state. An exhausted round rests inside; a perforation exits and
+can throw a spall cone.
 
-### 4a. The angle laws
+### 4a. The contact and slope proxies
 
-Subject: the game's damage model; game state only (#255). The three laws read one set of inputs:
-the hit nose's factor `N` (DERIVED at load from the `NoseShape` the force law reads, §3), the
-round's potency `P` at the face (the force law's readout at its speed there, metres of reference
-steel), and the crossing's factor-weighted thickness `t` along the face normal (metres of reference
-steel, §13.3) over the calibre `c` of what meets the plate (a sub-calibre round's core). A new round
-type plugs in through its nose and carrier row (`assets/ballistics/round_types.ron`), as drag does.
+Subject: the game's damage model; game state only. The required per-type `contact_density` and
+`slope_penalty_deg` in `assets/ballistics/round_types.ron` stand in for deformation and shatter;
+the penalty is converted once at load to tan β. No per-round construction field or separate cap
+term is used. The capped density rests on one measured round; the proxy note owns the basis.
 
-- **Overmatch:** `c ≥ overmatch_ratio × t`.
-- **Ricochet:** the critical angle is `θ_c = atan(ricochet_grip × N × P / t)`; a round that is not
-  overmatched skids past it. A blunter or capped nose (larger `N`), a faster round (larger `P`) and
-  a thinner plate each raise it; a face of no steel-equivalent deflects nothing.
-- **Normalization:** a round that bites in turns toward the normal through
-  `η × normalization_turn × N × θ × (entrance factor / reference factor)`, `η` the disc's coverage.
+The resistance charge is `cos θ / (cos θ − sin θ tan β)`, exactly one head-on. At a denominator
+at or below `cos θ / CEILING`, it is `CEILING`: Resolution 5 keeps it finite as θ + β approaches
+90 degrees. A softer entrance pays `1 + min(1, f) (charge − 1)`.
 
-**Verified scope and open decisions.** The implemented normalization share reads the nose and
-substance, without a potency, thickness or calibre term. That is narrower than #255's requested
-inputs; no derivation for the omitted dependence has been settled. The law is retained pending the
-owner's choice. At full coverage ricochet currently uses a mirror direction at speed `v sin θ`:
-its along-face velocity is therefore `v sin² θ`, with an outward normal part
-`v sin θ cos θ` (DERIVED). That differs from the restitution-zero slide described in the glossary.
-The owner must settle that direction as well as the thickness read: the entire crossing contributes
-`t`, including material past the round's reach. With `N = 7/24`, `P = 32.6 mm` and the provisional
-grip, increasing `t` from 456 to 912 mm lowers the critical angle from 11.1° to 5.6° (DERIVED).
-The preserved choices are a critical-angle floor, bounding `t` by the round's reach, or retaining
-the current form. No choice is implemented by this review.
-
-The coefficients are `Unknown` in the data file, each with what would settle it; no note in the repo
-gives a critical ricochet angle or an entry bend for any nose. Their provisional values keep the
-walk's former single cliff at one **reference case**: the 88 mm APCBC (Pzgr. 39, hit nose a 1-crh
-ogive, `N = 7/24`) against a plate its potency just matches, `P / t = 1`. There it skids past 70°
-and turns through 0.2 of `θ` (DERIVED: `ricochet_grip = tan 70° / (7/24) = 9.42`,
-`normalization_turn = 0.2 / (7/24) = 0.6857`, authored as the f32 whose product with the f32 nose
-factor is the f32 0.2, so the reference bend keeps its bits). `overmatch_ratio` stays the serial
-resolver's 3.0 (ASSUMED). DERIVED critical angles from those values:
-
-| Round (hit nose, `N`) | Against | `P / t` | `θ_c` |
-|---|---|---|---|
-| Pzgr. 39 APCBC at 773 m/s (1-crh ogive, 7/24; `P` ≈ 115 mm) | 115 mm | 1.00 | 70.0° |
-| the same | 100 mm | 1.15 | 72.4° |
-| the same | 80 mm | 1.44 | 75.8° |
-| the same | 200 mm | 0.58 | 57.7° |
-| the same slowed to 500 m/s (`P` ≈ 53 mm) | 115 mm | 0.46 | 51.5° |
-| a 4-crh ogive hit nose (31/384), same potency | a plate it just matches | 1.00 | 37.3° |
-| 7.9 mm AP at 755 m/s (hemispherical cap, 1/2; `P` ≈ 14.5 mm) | 10 mm | 1.45 | 81.7° |
-| the same | 80 mm | 0.18 | 40.4° |
-
-The form's limit: as `P / t` falls the critical angle falls toward the normal, so a plate several
-times the round's potency deflects it at moderate obliquity (`θ_c` = 34.5° at `P / t = 0.25` for
-the reference nose, DERIVED); no measured critical angle bounds that yet. A round spent inside a
-tank meets blocks far thicker than what it has left, so it glances off them rather than resting in
-them (the s9 and field-cast shifts below). And a round skids off a plate whose line-of-sight chord
-it could defeat only when `ricochet_grip × N < sin θ` (DERIVED: skidding needs
-`P / t < tan θ / (ricochet_grip × N)`, defeating the chord `P / t > 1 / cos θ`): with the
-provisional grip, only a hit nose with `N` under 0.106 can, of the shipped rows the HE's alone. A
-blunter round's bounce is a shot that would have stopped in the plate.
-
-The HE row's hit nose stays an `Unknown` fact (ASSUMED: its 4-crh flight nose, itself the APCBC's
-assumed flight ogive; no source), so it skids at lower obliquity than the capped rounds by that
-assumption alone.
-
-**What moved** when the law replaced the single cliff (MEASURED, the walk's reads at each face):
-
-- *s3_ricochet:* at 74.9° on the 80 mm hull side the 88, 114.7 reference-mm of potency at the
-  face, now bites (`θ_c` 75.75°) and stops in the plate, a non-penetration. The scenario exists to
-  show a main-gun bounce, so it now meets the side at 80.0° from the same point and bounces.
-- *s5_oblique_through* keeps its verdict and its cone. Past the side the round, 3.5 reference-mm
-  left, meets an ammunition rack at 44.0° on 33 mm of steel-equivalent (`θ_c` 15.9°) and glances
-  off it, turning 92°, into the hull side 46 mm behind, where it rests; the rack's line dose falls
-  from 26.1 to 13.5, the bounce's shock, and its field dose is unchanged. The current record
-  contains that reflection. Its turn is 92.0° (DERIVED from the recorded incoming and outgoing
-  vectors), correcting the earlier 88° claim. The stage constrains the drawn body to lead its
-  path with its tail outside the struck plane, checked on every recorded reflection.
-- *s9_breech_and_loader* keeps its verdict and its knockouts (the breech and the gunner station,
-  the loader station reduced). The round, 32.6 reference-mm left, meets the breech at 28.1° on
-  456 mm of steel-equivalent (`θ_c` 11.1°) and glances off it, bounces twice off the turret side
-  and once off the turret bottom (45–47° against `θ_c` 5–15°), and rests in the turret bottom. On
-  the way it reduces the commander station (a line dose of 21.1), and a second, weak cone (2.0 kJ)
-  adds small field doses to an ammunition rack and the loader, gunner and breech; the first cone is
-  unchanged, and the breech's line dose falls from 256.1 to 199.1. The refreshed record contains
-  all four reflections, the first turning 123.7° (DERIVED from the recorded vectors), and the
-  second cone's strength is 2000.6 J (MEASURED). Its additional gunner-station line dose is 83.3 HP
-  (MEASURED); that station's pool is already emptied by the first cone. Both records now follow
-  the current march, with a default guard against stale interaction sequences.
-- *s8b, s11* (the machine-gun round, `N = 1/2`): the entry bend's share rises from 0.2 to
-  0.343 of `θ`, moving their rest points 0.7 mm and 0.2 mm. Every other recorded scenario is
-  unchanged to the bit: the main-gun rounds' 1-crh nose keeps the 0.2 bend exactly.
-- *Field casts:* `shot/turret-left`'s round, 33.2 reference-mm left, meets the breech at 29.4° on
-  339 mm of steel-equivalent (`θ_c` 15.0°) and glances off where it bit; that record alone moved,
-  re-pinned on macOS arm64.
-- *The shipped-map shot* (`headless_test::a_main_gun_round_damages_a_tank_on_the_shipped_map`):
-  its fixture 88 (`N` 0.3, 109 reference-mm at the face) meets the target's first face at 52.0°
-  on 277 mm of steel-equivalent and skids (`θ_c` 48.1°); fired with a capped nose (`N = 1/2`) it
-  bites (`θ_c` 59.7°, DERIVED).
-- *Fixtures re-chosen so each test keeps its subject:* the bounce-dose slabs are 0.4 m of steel,
-  not of a tenth of steel, on which every fixture round skids past 41° (40 mm of steel-equivalent
-  let the 88 bite to 82.8°); the runtime-gate parity bounce fires a pointed (6-crh) round, which
-  skids past 72° off a 3 mm plate whose chord it could defeat, where the capped bullet bites to
-  87.5°; the at-rest burst's back plate is turned 15°, under the 21° its 500 mm give the slowed
-  round, not 40°.
+Overmatch is the contact law's thin-plate result, not a verdict or a slope exemption: thinning a
+plate raises its skid limit toward grazing. Past `t_n/d = R/(4τ)`, thickness stops moving the
+skid decision. Density and speed raise the limit; material strength lowers it. Replica scaling
+preserves it. The tests compare this decision against `sin θc = sqrt(1+x²) − x`,
+`x = R_eff/(2ρv²)`, and the proxy note's labelled fixtures.
 
 ## 5. Spall — the spall cone
 
@@ -738,7 +649,7 @@ field's ratio is `λ = v_c / v_s`, `v_c` the carried speed.
   The nose piece flies on from the burst point at the carried speed as the shell's round, inert:
   its mass the derived nose's, its calibre and nose factor the round's, its drag re-derived, its
   crew line rate the round's. It meets the world as any round's penetrator does (§3: the disc,
-  overmatch, the force law, its own line and its own spall cones). A ring that bursts at rest
+  contact, the force law, its own line and its own spall cones). A ring that bursts at rest
   throws its band and nothing flies on.
 - **Retired: the ball.** The round less its core driven as one lobe under the ball law (§5,
   **Profile**), the whole sphere below `λ = 1`, the round ending at the burst: F7's other shape.
@@ -875,17 +786,16 @@ the core's outgoing kinetic energy equals the incoming assembly's kinetic energy
 Each stretch's work and axial momentum go to its strongest exposed volumes, with tied maxima
 sharing the sample's contribution equally (§13.2). Each line reaches its own body once;
 entrance ownership is fuze attribution, not an impulse destination. The core transfer is
-`m_c (v_in i − v_out b)` for incoming direction `i` and bent direction `b`; a stopped carrier
+`m_c (v_in − v_out) i` for the straight bite direction `i`; a stopped carrier
 adds `(m_f − m_c) v_in i` at entry. Buildings distribute axial transfer along the line, but keep
-the bend and carrier impulse at the entry chunk. Trunks likewise keep entrance impulse at entry.
+the carrier impulse at the entry chunk. Trunks likewise keep entrance impulse at entry.
 The emitter receives the whole resolved transfer, including debris launch: the field carries
 work without a sourced free body's mass or velocity and gives receivers no second blow.
 This closure remains provisional until debris production supplies those facts.
 
 A seam between touching volumes of one substance does not change the force-law advance; each
 volume takes the work and speed loss at its own depths, never a length share of the whole
-crossing. The constant-speed bend's possible outward normal transfer and missing unowned-bounce
-exchange are deferred to the owner-led ricochet rebuild, tracked in the lens backlog.
+crossing. Unowned-matter bounce delivery to construction consumers remains tracked in the lens backlog.
 
 **One line/bounce unit** turns retained line work or bounce loss into HP for a hard pool's line dose or
 bounce shock, a tank's modules and a tree's trunk alike: `joules_per_hp` in
@@ -956,15 +866,10 @@ shot:
 | 80° | 759.53 | 91 475 | 30.5 | 31 |
 | 85° | 768.32 | 23 044 | 7.7 | 8 |
 
-The most a bounce can deal off a given part is just past the round's critical angle against that
-part (§4a), `cos² θ_c` of the striking energy. Writing `k = ricochet_grip × N × P` gives
-`cos² θ_c = t² / (t² + k²)` (DERIVED). It rises with the struck part's thickness, tending to the
-whole striking energy; a thin part's dose cannot bound a thicker one's. The fixture comparison
-`resolve::tests::bounce_dose_bounds_read_the_plate_that_was_struck` covers both cases: a thin,
-unovermatched slab takes less from a bounce than its own square perforation, while a thick slab's
-bounce takes more than that thin slab's perforation. The angle laws' recorded internal bounces
-(s5 off an ammunition rack, s9 off the breech, MEASURED) therefore read those parts' own plate
-terms and pools. Armour bounces still take no HP.
+The most a bounce can deal off a given part is just past its pressure-contact limit (§4a),
+`cos² θc` of the striking energy. It rises with thickness until plug shear reaches the bulk
+resistance. A thin part's dose cannot bound a thicker one's; each reads its own material and
+contact thickness. Armour bounces take no HP.
 
 A witness's chord alone keeps its own unit, one HP point per 0.1 reference-mm
 (`ballistics::HP_PER_REFERENCE_MM`, a unit with Resolution provenance, not a balance value), the
@@ -1521,7 +1426,7 @@ truths form a **material-factor field**: at each point, the set of volumes cover
 contributing its `material_factor`; `hp` stays an independent facet. Two kinds of laws consume it:
 
 - **Field laws** (pointwise): cost and damage integrate over the field.
-- **Boundary laws** (at transitions): ricochet, normalization, spall, entry/exit reads fire where
+- **Boundary laws** (at transitions): contact, spall, entry/exit reads fire where
   the field *steps*.
 
 **Cost law:** `cost = ∫ max(factor over covering volumes) dt`. The combiner `max` is **forced** by
@@ -1566,13 +1471,10 @@ Everything on the wishlist emerges with no class rules:
 
 ### 13.3 Surface-law amendment — factor-weighted thickness (required for classlessness)
 
-§4's overmatch consults **geometric** thickness (`caliber ≥ 3 × thickness`, `ballistics.rs:2253`).
-Classless union breaks here: an exposed forearm is ~80mm "thick" → not overmatched → at a graze **an
-arm ricochets an 88**. Amendment: overmatch, ricochet eligibility, and normalization consult
-**steel-equivalent thickness** (`thickness × factor`) and gate on a **meaningful factor step** at
-the surface. Rubber at 80mm ≈ 4mm-equivalent (DERIVED, factor 50) → overmatched by everything,
-never deflects, never bends the path. (A crewman is a witness, §6, and has no surface law at all.) Bonus: fixes the latent thick-soft-volume bug (fuel, stowage, rubber) that exists
-today independent of unions.
+Subject: the game's damage model; game state only. Contact (§4) reads the covered-sample
+steel-equivalent thickness along the normal: the integral of material factor over real chord,
+projected onto the face normal. Coverage does not dilute this thickness; it scales the resolved
+skid's deflection and speed loss. Witness stations have no material surface law.
 
 ### 13.4 The walk (per sample ray) — welded runs
 
@@ -1610,8 +1512,8 @@ today independent of unions.
      the bake's triangle order — and never crosses a save, replay or wire seam.
 3. **ε-weld:** runs separated by less than the weld tolerance merge into one run. Semantics
    sharpened 2026-08-04:
-   - **It merges event topology, not material.** One entry face (ricochet/normalization/incidence
-     once, at the outer face), one exit at the true inner face, overmatch against the run's summed
+   - **It merges event topology, not material.** One entry face (contact/incidence
+     once, at the outer face), one exit at the true inner face, contact against the run's summed
      factor-weighted thickness. No second ricochet check mid-sandwich.
    - **Spall follows the body, not the run:** welding deletes only the void's exit/entry face
      pair; the material step it exposes is judged under §5 — a lower-factor substance behind a
@@ -1635,7 +1537,7 @@ today independent of unions.
    cost; deposit per-entity damage; fire boundary laws at steps. Interior gaps ≥ ε between runs are
    free flight — **spaced armor is emergent**.
 
-Entry-face semantics (incidence, normalization, ricochet test, the terminal/`Impact` reads) evaluate
+Entry-face semantics (incidence, contact test, the terminal/`Impact` reads) evaluate
 at the outermost *significant* factor step; spall at body exits (§5). **A boundary buried under
 equal-or-higher factor is deliberately eventless** — it is not a field step, so there is no ricochet,
 no spall, no impact and no normal to attribute, and the exposed outer boundary is read from the face
@@ -1654,23 +1556,12 @@ sequence of welded runs `[t_in, t_out]` with chords, factors, and entry/exit fac
 §13.4's walk. A **crossing event** is the cluster of welded runs that overlap longitudinally across
 samples. Per event:
 
-- **Entrance:** `n̄` = area-mean entry normal over covered samples — yes, the normals *integrate*.
-  Incidence, the ricochet test, normalization, and overmatch (§13.3, factor-weighted) consume `n̄`
-  unchanged. This also *repairs* the point model: a point normal at an edge or on curved cast is
-  degenerate (today's `unwrap_or(-dir)`); the patch average is smooth everywhere — corners average
-  to their bisector. **The speed a ricochet loses, impulse exchange, AND the deflection angle
-  scale by η** (RULED 2026-08-07 — angle scaling added): the outgoing direction blends from the
-  incoming ray toward the full-ricochet direction by η, the speed retained blends from all of it
-  toward the share along the face, `1 − η (1 − sin θ)` (issue 145; §6), and normalization on
-  penetrating entries scales the same way. η = 1 is the classic bounce; η → 0 fades to undisturbed
-  flight. Continuity is the
-  point — 1mm of aim must never flip the outcome between "flies past" and "full bounce". Whether
-  a bounce happens at all stays with the angle laws (§4a: overmatch and the critical angle, which
-  read the round's nose and potency on the factor-weighted thickness).
-  Normalization also scales by the entrance volume's resistance over the reference's
-  (`factor / 1000`): the reference steel bends a round `η × normalization_turn × N × incidence`,
-  wood at 40 bends it 4 % as far.
-- **Transit:** `cost = (1/k) Σᵢ costᵢ`, each sample's cost its union-max-factor chord integral,
+- **Entrance:** `n̄` is the area-mean entry normal over covered samples. The pressure test and
+  slope charge (§4) read it unchanged. A skid blends the mirror's deflection angle and retained
+  speed by coverage η; a bite keeps the incoming direction. Whether it skids reads covered-sample
+  thickness, independent of η. Every bite pays the slope charge, with a softer entrance paying
+  only its reference-strength share.
+- **Transit:** `cost = (1/k) Σᵢ costᵢ`, each sample's cost its union-max-factor chord integral times the slope charge,
   uncovered samples contributing 0 — automatically `η × mean covered chord cost`, where
   **η = the covered fraction, the engagement fraction**. Spend against capability unchanged.
   Damage stays per-presence, now per-sample: each HP entity deposits for the samples crossing *it*
@@ -1784,7 +1675,7 @@ moves on a straight chord (lerp/slerp); the departure from its true path is graz
 intervals share both endpoint poses, so their chords agree at the boundary.
 
 **One sampling instant.** First contact freezes every collider at that same tick fraction.
-Entrance, normalization and bent transit consume no world time while deciding the immutable
+Contact and straight transit consume no world time while deciding the immutable
 crossing. A third body whose entry has that same fraction belongs to the same contact set and
 union walk: ordinary simultaneous geometry, rather than an inside-start error. Bodies do not
 advance between these queries. The playback clock then delivers the already-decided effects.
@@ -1809,7 +1700,7 @@ advance between these queries. The playback clock then delivers the already-deci
   is not a new contact-discovery start. Bodies move rather than being placed: a felled tree falls.
 
 **Runtime contract.** The endpoint-local segment discovers contact, then every collector,
-normalization probe, witness line and field reads the same lerp/slerp scene at that fraction.
+transit probe, witness line and field reads the same lerp/slerp scene at that fraction.
 The struck point's velocity is collider-origin translation plus angular velocity crossed with its
 rotated local contact offset; child servo and recoil motion therefore participate. The mechanism
 uses the round's velocity minus this velocity. Its immutable relative path is carried back to world

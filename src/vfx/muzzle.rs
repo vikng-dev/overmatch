@@ -946,6 +946,7 @@ mod tests {
             wound: 30.0,
             burst: None,
             fuze_mode: 0,
+            contact: crate::rounds::ContactPreset::fixture(),
             mechanism: cycle.mechanism(),
             shooter: Some(crate::ballistics::ShotSource {
                 tank: root,
