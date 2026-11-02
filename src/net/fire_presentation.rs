@@ -73,6 +73,7 @@
 use core::time::Duration;
 use std::collections::VecDeque;
 
+use avian3d::prelude::{Collider, CollisionLayers};
 use bevy::ecs::change_detection::Tick as ChangeTick;
 use bevy::ecs::query::QuerySingleError;
 use bevy::prelude::*;
@@ -638,6 +639,8 @@ fn recover_unannounced_rounds(
     cursor: SyncedInterpolationTimeline,
     mut roots: Query<(Entity, &mut OwnFirePresentation)>,
     muzzles: Query<(&Weapon, &WeaponIndex, &TankRoot, &GlobalTransform), With<Muzzle>>,
+    proxies: Query<(Entity, &Collider, &CollisionLayers, &GlobalTransform)>,
+    parents: Query<&ChildOf>,
     mut recoil: ResMut<super::client::PendingRecoilKicks>,
     mut diag: ResMut<OwnFireDiag>,
     mut commands: Commands,
@@ -691,8 +694,29 @@ fn recover_unannounced_rounds(
                 .rounds
                 .get(usize::from(round))
                 .expect("the tank load gate refuses an empty stowage: every weapon has round 0");
+            // The game's damage model: the original shot pose died with its announcement.
+            // Recover from the current rig, but keep physical birth at the first open point of
+            // its source envelope, as firing does; a muzzle beyond a wall cannot skip that bore.
+            // Both envelope and muzzle read this same propagated presentation pose.
+            let shapes: Vec<_> = proxies
+                .iter()
+                .filter(|(entity, _, layers, _)| {
+                    layers.memberships.has_all(crate::Layer::Vehicle)
+                        && (*entity == root
+                            || parents
+                                .iter_ancestors(*entity)
+                                .any(|ancestor| ancestor == root))
+                })
+                .map(|(_, shape, _, pose)| (pose.translation(), pose.rotation(), shape))
+                .collect();
+            let birth = crate::shooting::outside_source(
+                muzzle.translation(),
+                direction,
+                -weapon.bore_length,
+                &shapes,
+            );
             let facts = ReleasedShot {
-                birth: muzzle.translation(),
+                birth,
                 origin: muzzle.translation(),
                 direction,
                 round: fired.round,
@@ -1789,6 +1813,56 @@ mod tests {
             },
         ));
         (app, root)
+    }
+
+    /// The game's damage model: a recovered shot must start at the source envelope's first open
+    /// point so a wall along the remaining bore is still met. Fixture boxes, bore and pose are
+    /// arbitrary; another root's larger proxy must not move this source's birth.
+    #[test]
+    fn recovered_shot_birth_is_the_first_open_point_of_its_source_envelope() {
+        #[derive(Resource, Default)]
+        struct Births(Vec<(Vec3, Vec3)>);
+        let (mut app, root) = recovery_app(105);
+        app.init_resource::<Births>().add_observer(
+            |fire: On<FireShell>, mut births: ResMut<Births>| {
+                births.0.push((fire.birth, fire.origin))
+            },
+        );
+        let world = app.world_mut();
+        let muzzle = world
+            .query_filtered::<Entity, With<Muzzle>>()
+            .single(world)
+            .unwrap();
+        world.get_mut::<Weapon>(muzzle).unwrap().bore_length = 2.0;
+        // Fixture envelope: the bore starts at z=5, leaves its source at z=4, and the muzzle
+        // stands at z=3. The physical birth must precede the visual muzzle along -Z.
+        world.spawn((
+            ChildOf(root),
+            Collider::cuboid(2.0, 2.0, 1.0),
+            CollisionLayers::new([crate::Layer::Vehicle], avian3d::prelude::LayerMask::ALL),
+            GlobalTransform::from(Transform::from_xyz(1.0, 2.0, 4.5)),
+        ));
+        let other = world.spawn_empty().id();
+        world.spawn((
+            ChildOf(other),
+            Collider::cuboid(20.0, 20.0, 20.0),
+            CollisionLayers::new([crate::Layer::Vehicle], avian3d::prelude::LayerMask::ALL),
+            GlobalTransform::from(Transform::from_xyz(1.0, 2.0, 4.5)),
+        ));
+        world.run_system_once(recover_unannounced_rounds).unwrap();
+        let births = &world.resource::<Births>().0;
+        assert_eq!(births.len(), 1);
+        let (birth, origin) = births[0];
+        assert_eq!(
+            origin,
+            Vec3::new(1.0, 2.0, 3.0),
+            "the visual muzzle stays at the barrel tip"
+        );
+        let expected = Vec3::new(1.0, 2.0, 4.0) - Vec3::Z * crate::ballistics::MARCH_EPS;
+        assert!(
+            birth.distance(expected) < 1.0e-5,
+            "physical birth {birth:?}, expected {expected:?}"
+        );
     }
 
     /// HOLE 1, THE DROPPED ANNOUNCEMENT: once the cursor passes the reveal by the derived wait,
