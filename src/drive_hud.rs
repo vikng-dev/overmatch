@@ -307,26 +307,19 @@ pub(crate) fn horizontal_ground_speed(velocity: Vec3) -> f32 {
 /// by [`TransmissionParams`](crate::track::transmission::TransmissionParams).
 pub(crate) fn steering_hud_line(
     st: &TransmissionState,
-    authored_radii: Option<&[(f32, f32)]>,
+    params: Option<&crate::track::transmission::TransmissionParams>,
 ) -> String {
     if st.steer_step == 0 {
         return String::new();
     }
-    let Some(radii) = authored_radii else {
+    let Some(params) = params else {
         return String::new(); // No running gear is built yet: no steering table to read.
     };
-    assert!(
-        !radii.is_empty(),
-        "TransmissionParams::from_authoring refuses a steering table without a pair per forward gear"
-    );
-    // A reverse ladder may be longer than the forward table; the steering law clamps its index
-    // to the last forward pair the same way (`track::transmission`).
-    let gear = usize::from(st.gear).clamp(1, radii.len()) - 1;
-    let (tight, wide) = radii[gear];
-    let (detent, radius) = if st.steer_step == 1 {
-        ("I", wide)
-    } else {
-        ("II", tight)
+    let (tight, wide) = params.steering_radii(st.reverse, st.gear);
+    let (detent, radius) = match st.steer_step {
+        1 => ("I", wide),
+        2 => ("II", tight),
+        _ => panic!("the transmission admits only straight, wide and tight detents"),
     };
     format!("STEER {detent} R~{radius:.0}m")
 }
@@ -398,10 +391,7 @@ fn update_drive_hud(
     let projected = horizontal.dot(forward_horizontal);
     let signed_ground = horizontal.length() * projected.signum();
     let speeds = [drive.sides[0].speed, drive.sides[1].speed];
-    let steering = steering_hud_line(
-        &transmission.0,
-        params.map(|params| params.steer_radii_m.as_slice()),
-    );
+    let steering = steering_hud_line(&transmission.0, params);
 
     let debug = format!(
         "hull {signed_ground:+5.2} m/s ({:+6.1} km/h)\n\

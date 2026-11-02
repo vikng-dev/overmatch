@@ -164,12 +164,14 @@ pub struct TransmissionParams {
     pub launch_gears: u8,
     pub max_step: u8,
     /// Per FORWARD gear `(κ_tight, κ_wide)` where `κ = half_tread / R` — the L600 detents.
-    /// Reverse gears index the same table; admission requires a row for each gear.
+    /// Each ladder declares its own radii.
     pub steer_kappa: Vec<(f32, f32)>,
+    pub reverse_steer_kappa: Vec<(f32, f32)>,
     /// The authored per-forward-gear `(R_tight, R_wide)` table (m), retained verbatim for
     /// presentation. The sim law consumes [`Self::steer_kappa`]; retaining the source table keeps
     /// the HUD from re-deriving and rounding away the authored radii.
     pub steer_radii_m: Vec<(f32, f32)>,
+    pub reverse_steer_radii_m: Vec<(f32, f32)>,
     /// Steering-member force capacity PER OUTPUT (N). The steering member drives the two
     /// outputs DIFFERENTIALLY — each output's steering share is bounded by its own
     /// gearing/grip-scale cap (this datum), so the belt-difference axis `F_s` carries up to
@@ -223,6 +225,8 @@ pub struct TransmissionAuthoring<'a> {
     pub max_step: u8,
     /// Per forward gear `(R_tight, R_wide)` turn radii (m).
     pub steer_radii_m: &'a [(f32, f32)],
+    /// Per reverse gear `(R_tight, R_wide)` turn radii (m).
+    pub reverse_steer_radii_m: &'a [(f32, f32)],
     /// Steering-member force capacity PER OUTPUT (N) — see
     /// [`TransmissionParams::steer_capacity_n`] for the convention (the difference axis
     /// carries 2× this).
@@ -255,8 +259,8 @@ impl TransmissionParams {
         if a.forward_speeds_kmh.is_empty() || a.reverse_speeds_kmh.is_empty() {
             return Err("transmission.gearbox ladders must be non-empty".into());
         }
-        if a.reverse_speeds_kmh.len() > a.forward_speeds_kmh.len() {
-            return Err("track.powertrain.transmission.gearbox.reverse_speeds_kmh (ladder shape): every reverse gear needs a forward steering-radii row; shorten the reverse ladder or supply the forward rows".into());
+        if a.reverse_steer_radii_m.len() != a.reverse_speeds_kmh.len() {
+            return Err("transmission.steering.reverse_radii must have one (tight, wide) pair per reverse gear; author each reverse gear's radii".into());
         }
         if a.steer_radii_m.len() != a.forward_speeds_kmh.len() {
             return Err(format!(
@@ -298,6 +302,12 @@ impl TransmissionParams {
             (
                 "steering.radii",
                 a.steer_radii_m.iter().all(|(tight, wide)| {
+                    tight.is_finite() && wide.is_finite() && *tight > 0.0 && *wide > 0.0
+                }),
+            ),
+            (
+                "steering.reverse_radii",
+                a.reverse_steer_radii_m.iter().all(|(tight, wide)| {
                     tight.is_finite() && wide.is_finite() && *tight > 0.0 && *wide > 0.0
                 }),
             ),
@@ -394,6 +404,11 @@ impl TransmissionParams {
                 .fold((a.idle_rpm, 0.0f32), |best, (rpm, t)| {
                     if t > best.1 { (rpm, t) } else { best }
                 });
+        let reverse_steer_kappa = a
+            .reverse_steer_radii_m
+            .iter()
+            .map(|&(tight, wide)| (a.half_tread_m / tight, a.half_tread_m / wide))
+            .collect();
         // Genuine neutral-steer scale: 1st gear tight curvature × 1st gear governed speed.
         let v1_governed = a.forward_speeds_kmh[0] / 3.6 * (a.governed_rpm / a.rated_rpm);
         let neutral_d_full = steer_kappa[0].0 * v1_governed;
@@ -409,7 +424,9 @@ impl TransmissionParams {
             launch_gears: a.launch_gears,
             max_step: a.max_step,
             steer_kappa,
+            reverse_steer_kappa,
             steer_radii_m: a.steer_radii_m.to_vec(),
+            reverse_steer_radii_m: a.reverse_steer_radii_m.to_vec(),
             steer_capacity_n: a.steer_capacity_n,
             neutral_d_full,
             recirculation: a.recirculation,
@@ -446,13 +463,23 @@ impl TransmissionParams {
                 return Err(fail("gear reduction, coupling divisor or drive force"));
             }
         }
-        for &(tight, wide) in &self.steer_kappa {
+        for &(tight, wide) in self.steer_kappa.iter().chain(&self.reverse_steer_kappa) {
             if ![tight, wide]
                 .into_iter()
                 .all(|value| value.is_finite() && value > 0.0 && (1.0 + value * value).is_finite())
             {
                 return Err(fail("steering curvature"));
             }
+        }
+        // A virtual free tick may add at most one admitted fuel-cut width to the guarded crank.
+        let free_bound =
+            (self.max_curve_rpm() + overrev_margin_rpm() + engine_control().governor_cut_rpm.value)
+                * RPM_TO_RAD;
+        let energy_bound = 0.5 * self.engine_inertia * free_bound * free_bound;
+        if !energy_bound.is_finite() || energy_bound <= 0.0 {
+            return Err(fail(
+                "engine.inertia_kgm2 / engine.torque_curve crank energy",
+            ));
         }
         if !self.roundoff_force_scale().is_finite()
             || self.roundoff_force_scale() <= 0.0
@@ -466,10 +493,26 @@ impl TransmissionParams {
                 .all(|speed| speed.is_finite() && speed > 0.0)
         {
             return Err(fail(
-                "neutral speed, governed speed, paired force capacity or crank arithmetic scale",
+                "neutral speed, governed speed, paired force capacity or arithmetic scale",
             ));
         }
         Ok(())
+    }
+
+    /// The active ladder owns its radii; equal gear indices do not imply equal construction.
+    pub(crate) fn steering_radii(&self, reverse: bool, gear: u8) -> (f32, f32) {
+        let table = if reverse {
+            &self.reverse_steer_radii_m
+        } else {
+            &self.steer_radii_m
+        };
+        *table
+            .get(
+                usize::from(gear)
+                    .checked_sub(1)
+                    .expect("an active gear is one-based"),
+            )
+            .expect("an active gear has an admitted steering row on its own ladder")
     }
 
     /// DERIVED top-gear speed (m/s) at the fuel governor's rpm for the selected ladder.
@@ -837,8 +880,9 @@ fn candidate_load(
     load: super::load::PerceivedLoad,
     gear: u8,
     detent: u8,
+    reverse: bool,
 ) -> super::load::PerceivedLoad {
-    let (tight, wide) = tp.steer_radii_m[usize::from(gear - 1)];
+    let (tight, wide) = tp.steering_radii(reverse, gear);
     let turn_n = match detent {
         0 => 0.0,
         1 => load.turn_moment_nm / wide,
@@ -902,15 +946,20 @@ fn launch_pick(
     tp: &TransmissionParams,
     fp: &ForceParams,
     supply: DriveSupply,
-    ladder: &[f32],
+    reverse: bool,
     load: super::load::PerceivedLoad,
     detent: u8,
     command: f32,
 ) -> Option<u8> {
+    let ladder = if reverse {
+        &tp.gears_rev
+    } else {
+        &tp.gears_fwd
+    };
     (1..=tp.launch_gears.min(ladder.len() as u8))
         .rev()
         .find(|&gear| {
-            let load = candidate_load(tp, load, gear, detent);
+            let load = candidate_load(tp, load, gear, detent, reverse);
             gear_force(
                 tp,
                 fp,
@@ -941,7 +990,13 @@ pub(crate) fn landed_spare(
         &tp.gears_fwd
     };
     let shaft = (inp.speeds[0] + inp.speeds[1]) * 0.5 * if state.reverse { -1.0 } else { 1.0 };
-    let load = candidate_load(tp, inp.perceived_load, candidate, state.steer_step);
+    let load = candidate_load(
+        tp,
+        inp.perceived_load,
+        candidate,
+        state.steer_step,
+        state.reverse,
+    );
     let landing = if candidate == state.gear {
         shaft
     } else {
@@ -996,7 +1051,7 @@ fn choose_gear(
             tp,
             fp,
             inp.supply,
-            ladder,
+            st.reverse,
             inp.perceived_load,
             st.steer_step,
             if command > DEAD { command } else { 1.0 },
@@ -1398,7 +1453,7 @@ fn crank_free_torque(
 /// constraint force λ, and λ's per-output Jacobian `j`. Returned as `(f_s, lambda, j)`; a tick
 /// that commands neither leaves all three at zero.
 ///
-/// κ is table-indexed by the ACTIVE gear (reverse mirrors the low forward gears); `d` follows the
+/// κ is indexed by the active gear on its own forward or reverse ladder; `d` follows the
 /// steer SIGN regardless of travel direction — the superimposed steering shaft is independent of
 /// the gear's direction, historically and mechanically.
 ///
@@ -1420,8 +1475,12 @@ fn steering_force(
 ) -> (f32, f32, [f32; 2]) {
     let dt = inp.dt;
     let [vl, vr] = inp.speeds;
-    let kappa_idx = ((st.gear - 1) as usize).min(tp.steer_kappa.len() - 1);
-    let (k_tight, k_wide) = tp.steer_kappa[kappa_idx];
+    let table = if st.reverse {
+        &tp.reverse_steer_kappa
+    } else {
+        &tp.steer_kappa
+    };
+    let (k_tight, k_wide) = table[usize::from(st.gear - 1)];
     let mut f_s = 0.0;
     let mut lambda = 0.0;
     let mut j = [0.0f32; 2];
@@ -1453,7 +1512,8 @@ fn steering_force(
         let kappa = match st.steer_step {
             0 => 0.0,
             1 => k_wide,
-            _ => k_tight,
+            2 => k_tight,
+            _ => panic!("the transmission admits only straight, wide and tight detents"),
         };
         let a_l = f_c / 2.0 - inp.reactions[0];
         let a_r = f_c / 2.0 - inp.reactions[1];

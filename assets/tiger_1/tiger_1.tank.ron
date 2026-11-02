@@ -133,6 +133,9 @@ TankSpec(
                         (37.47, 110.8),
                         (55.78, 165.0),
                     ],
+                    // DERIVED: these reverse gears have the same speed anchors as the first four
+                    // forward gears; each reverse row states its own construction radius.
+                    reverse_radii: [(3.44, 10.2), (5.28, 15.6), (7.62, 22.5), (11.30, 33.4)],
                     // Steering-member force capacity PER OUTPUT (N): the grip-limit
                     // gearing rule's per-track datum (≈ μ·W/2, same as `force`). The
                     // member drives the two outputs DIFFERENTIALLY, so the belt-difference

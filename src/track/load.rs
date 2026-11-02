@@ -88,7 +88,7 @@ impl PerceivedLoad {
 /// Current detent's declared travel radius; straight travel has none. At rest this prices
 /// impending travel under that detent, independently of the instantaneous belt speeds.
 pub fn turn_radius(tp: &TransmissionParams, state: &TransmissionState) -> Option<f32> {
-    let (tight, wide) = tp.steer_radii_m[(state.gear - 1) as usize];
+    let (tight, wide) = tp.steering_radii(state.reverse, state.gear);
     match state.steer_step {
         0 => None,
         1 => Some(wide),

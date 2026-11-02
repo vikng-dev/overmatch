@@ -981,6 +981,7 @@ impl TransmissionSpec {
             launch_gears: gearbox.launch_gears,
             max_step: gearbox.max_step,
             steer_radii_m: &steering.radii,
+            reverse_steer_radii_m: &steering.reverse_radii,
             steer_capacity_n: steering.capacity,
             recirculation: steering.recirculation,
             brake_capacity_n: *brake_force,
@@ -1064,8 +1065,10 @@ pub struct GearboxSpec {
 #[derive(Deserialize, Clone)]
 #[serde(deny_unknown_fields)]
 pub struct SteeringSpec {
-    /// Per FORWARD gear `(R_tight, R_wide)` turn radii (m); reverse mirrors the low gears.
+    /// Per forward gear `(R_tight, R_wide)` turn radii (m).
     pub radii: Vec<(f32, f32)>,
+    /// Per reverse gear `(R_tight, R_wide)` turn radii (m).
+    pub reverse_radii: Vec<(f32, f32)>,
     /// Steering-member force capacity PER OUTPUT (N): the member drives the two outputs
     /// differentially, so the belt-difference axis `F_s` carries up to 2× this (each side
     /// sees `F_s/2`, bounded by this datum — the gearing/grip-scale per-track cap).
@@ -2186,6 +2189,7 @@ TankSpec(
                 ),
                 steering: (
                     radii: [(4.0, 12.0), (6.0, 18.0), (9.0, 27.0), (14.0, 42.0)],
+                    reverse_radii: [(4.0, 12.0), (6.0, 18.0)],
                     capacity: 100_000.0,
                     recirculation: 0.9,
                 ),
@@ -3042,6 +3046,7 @@ TankSpec(
             // addressed by the runtime's u8 gear index.
             ("ladder shape", |tr| {
                 gearbox(tr).reverse_speeds_kmh = (1..=300).map(|i| i as f32).collect();
+                tr.steering.reverse_radii = vec![(4.0, 12.0); 300]; // Fixture rows isolate index admission.
             }),
             ("drag_fraction", |tr| engine(tr).drag_fraction = 1.5),
         ];

@@ -45,6 +45,7 @@ fn lab_tp() -> TransmissionParams {
             (12.3, 36.4),
             (19.7, 58.3),
         ],
+        reverse_steer_radii_m: &[(3.0, 8.9)],
         steer_capacity_n: 240_000.0,
         recirculation: 0.9,
         brake_capacity_n: 120_000.0,
@@ -100,6 +101,7 @@ fn tiger_authoring() -> TransmissionAuthoring<'static> {
             (37.47, 110.8),
             (55.78, 165.0),
         ],
+        reverse_steer_radii_m: &[(3.44, 10.2), (5.28, 15.6), (7.62, 22.5), (11.30, 33.4)],
         steer_capacity_n: 250_000.0,
         recirculation: 0.9,
         brake_capacity_n: 96_000.0,
@@ -135,6 +137,7 @@ fn compact_drivetrain() -> (ForceParams, TransmissionParams) {
         launch_gears: 2,
         max_step: 1,
         steer_radii_m: &[(3.0, 8.0), (7.2, 19.2), (15.0, 40.0)],
+        reverse_steer_radii_m: &[(3.0, 8.0), (7.2, 19.2)],
         steer_capacity_n: 80000.0,
         recirculation: 0.9,
         brake_capacity_n: 50000.0,
@@ -1635,12 +1638,15 @@ fn the_fuel_cut_includes_drag_reconstruction() {
     }
 }
 
-/// The shared forward radii must cover every admitted reverse gear before the server ticks.
+/// Each reverse gear requires its own steering row before the server ticks.
 #[test]
 fn reverse_ladder_without_steering_radii_is_refused() {
     let mut authoring = tiger_authoring();
     authoring.reverse_speeds_kmh = &[2.8, 4.3, 6.2, 9.2, 14.1, 20.9, 30.5, 45.4, 60.0];
-    assert!(TransmissionParams::from_authoring(&authoring).is_err());
+    let error = TransmissionParams::from_authoring(&authoring)
+        .unwrap_err()
+        .to_string();
+    assert!(error.contains("steering.reverse_radii"), "{error}");
 }
 
 /// Steering detents read the authored row on either ladder; swapping wide and tight must
@@ -1660,8 +1666,8 @@ fn driver_turn_radius_reads_each_detent_on_both_ladders() {
             state.gear = index as u8 + 1;
             for (step, expected) in [
                 (0, None),
-                (1, Some(tp.steer_radii_m[index].1)),
-                (2, Some(tp.steer_radii_m[index].0)),
+                (1, Some(tp.steering_radii(reverse, state.gear).1)),
+                (2, Some(tp.steering_radii(reverse, state.gear).0)),
             ] {
                 state.steer_step = step;
                 assert_eq!(super::super::load::turn_radius(&tp, &state), expected);
@@ -1935,15 +1941,7 @@ fn driver_launches_in_the_highest_capable_start_gear() {
         tp.clutch_capacity *= scale;
         for load in [0.0, 50_000.0 * scale, 100_000.0 * scale] {
             let inp = driver_input(&fp, 0.0, load, 0.0);
-            let chosen = launch_pick(
-                &tp,
-                &fp,
-                inp.supply,
-                &tp.gears_fwd,
-                inp.perceived_load,
-                0,
-                1.0,
-            );
+            let chosen = launch_pick(&tp, &fp, inp.supply, false, inp.perceived_load, 0, 1.0);
             let mut state = fresh(&tp);
             state.park = true;
             choose_gear(&mut state, &tp, &fp, &inp, 0.0, 0.0);
@@ -2311,7 +2309,7 @@ fn capable_launches_gain_speed_against_a_supported_grade() {
                 &tp,
                 &fp,
                 initial.supply,
-                &tp.gears_fwd,
+                false,
                 initial.perceived_load,
                 0,
                 1.0
@@ -2404,7 +2402,7 @@ fn part_pedal_launches_and_sustains_ordered_speed() {
                     &tp,
                     &fp,
                     initial.supply,
-                    &tp.gears_fwd,
+                    false,
                     initial.perceived_load,
                     0,
                     command,
@@ -2625,7 +2623,7 @@ fn one_way_lever_launches_on_grade_without_rollback_or_extra_cuts() {
             &tp,
             &fp,
             initial.supply,
-            &tp.gears_fwd,
+            false,
             initial.perceived_load,
             0,
             1.0,
@@ -3305,4 +3303,57 @@ fn virtual_free_crank_energy_does_not_cap_curve_power() {
             "curve power must remain available at J={inertia}"
         );
     }
+}
+
+/// Reverse steering belongs to reverse construction, even when its ratios differ from forward.
+/// The observer and Driver need that same radius before a belt moves.
+#[test]
+fn reverse_radii_belong_to_the_reverse_gear() {
+    let mut a = tiger_authoring();
+    a.forward_speeds_kmh = &[5.0, 12.0];
+    a.reverse_speeds_kmh = &[10.0]; // Fixture: not a forward prefix.
+    a.reverse_steer_radii_m = &[(6.0, 16.0)];
+    a.steer_radii_m = &[(3.0, 8.0), (7.0, 19.0)];
+    let tp = TransmissionParams::from_authoring(&a).unwrap();
+    let state = TransmissionState {
+        reverse: true,
+        steer_step: 2,
+        ..fresh(&tp)
+    };
+    assert_eq!(super::super::load::turn_radius(&tp, &state), Some(6.0));
+    let load = super::super::load::PerceivedLoad {
+        turn_moment_nm: 1200.0,
+        ..Default::default()
+    }; // Fixture moment.
+    assert_eq!(candidate_load(&tp, load, 1, 2, true).turn_n, 200.0);
+    let fp = grade_fixture_fp();
+    let mut inp = input(0.0, 1.0, [-1.0; 2], [0.0; 2]); // Fixture: reverse travel.
+    inp.dt = 1.0 / TICK_HZ;
+    let (_, _, jacobian) = steering_force(&tp, &fp, &state, &inp, -1.0, 0.0, 0.0);
+    let kappa = a.half_tread_m / 6.0; // DERIVED from the Fixture reverse radius.
+    assert_eq!(jacobian, [(1.0 + kappa) / 2.0, -(1.0 - kappa) / 2.0]);
+    assert_eq!(
+        crate::drive_hud::steering_hud_line(&state, Some(&tp)),
+        "STEER II R~6m"
+    );
+}
+
+/// Finite authored scalars must not publish an overflowing crank-energy budget to the work law.
+#[test]
+fn overflowing_crank_energy_is_refused_before_play() {
+    let mut a = tiger_authoring();
+    // Fixture: finite inertia and angular speed whose energy overflows f32, with tiny reductions.
+    a.idle_rpm = 1e7;
+    a.governed_rpm = 1e8;
+    a.rated_rpm = 1e8;
+    a.torque_nm = &[(1e7, 1.0), (1e8, 1.0)];
+    a.engine_inertia_kgm2 = 1e25;
+    a.forward_speeds_kmh = &[1e25, 2e25];
+    a.reverse_speeds_kmh = &[1e25];
+    a.reverse_steer_radii_m = &[(6.0, 16.0)];
+    a.steer_radii_m = &[(3.0, 8.0), (7.0, 19.0)];
+    let error = TransmissionParams::from_authoring(&a)
+        .unwrap_err()
+        .to_string();
+    assert!(error.contains("crank energy"), "{error}");
 }

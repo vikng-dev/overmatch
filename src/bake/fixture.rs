@@ -248,6 +248,7 @@ TankSpec(
                 ),
                 steering: (
                     radii: [(4.0, 12.0), (6.0, 18.0)],
+                    reverse_radii: [(4.0, 12.0)],
                     capacity: 1.0,
                     recirculation: 0.9,
                 ),

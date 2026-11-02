@@ -406,6 +406,26 @@ impl TrackGear {
             out.f32(&format!("transmission.steer_radii[{index}].tight"), tight);
             out.f32(&format!("transmission.steer_radii[{index}].wide"), wide);
         }
+        for (index, (tight, wide)) in tp.reverse_steer_kappa.iter().copied().enumerate() {
+            out.f32(
+                &format!("transmission.reverse_steer_kappa[{index}].tight"),
+                tight,
+            );
+            out.f32(
+                &format!("transmission.reverse_steer_kappa[{index}].wide"),
+                wide,
+            );
+        }
+        for (index, (tight, wide)) in tp.reverse_steer_radii_m.iter().copied().enumerate() {
+            out.f32(
+                &format!("transmission.reverse_steer_radii[{index}].tight"),
+                tight,
+            );
+            out.f32(
+                &format!("transmission.reverse_steer_radii[{index}].wide"),
+                wide,
+            );
+        }
         out.f32("transmission.steer_capacity_n", tp.steer_capacity_n);
         out.f32("transmission.neutral_d_full", tp.neutral_d_full);
         out.f32("transmission.recirculation", tp.recirculation);
