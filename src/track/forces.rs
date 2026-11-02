@@ -204,14 +204,6 @@ pub(crate) fn material_link(station: usize, wraps: i64, count: usize) -> usize {
     (station as i128 - i128::from(wraps)).rem_euclid(count as i128) as usize
 }
 
-/// `1 − smoothstep` on [0, 1] — the hold blend. The transmission reads it as the
-/// brake-engagement envelope and the drag release (transmission-design.md §3: the hold reframe
-/// keeps the blend only as the engagement smoothing, never as a reaction attenuator).
-pub fn hold_blend(x: f32) -> f32 {
-    let t = x.clamp(0.0, 1.0);
-    1.0 - t * t * (3.0 - 2.0 * t)
-}
-
 /// The force model's parameters: vehicle data (spec-authored) + the per-metre support law.
 /// Nothing here is solver-quality policy — quality lives in the station/column geometry the
 /// caller authors (link pitch sets station density).
@@ -239,9 +231,7 @@ pub struct ForceParams {
     /// plain base (no `+ free_travel`) — the ray origin must sit at `face − base` for every
     /// station or zero-travel return-run origins start too deep (buried-origin saturation).
     pub probe_reach: f32,
-    /// Slip speed (m/s) normalizing the transmission's brake-engagement blend — the scale on
-    /// which a belt counts as "moving".
-    pub slip_saturation: f32,
+
     /// DERIVED per-side belt translation and wheel rotation reflected at belt speed (kg).
     pub inertia: f32,
     /// The traction law's inputs. Each contact's Coulomb coefficient is the pair its track makes
@@ -1530,7 +1520,7 @@ mod tests {
             support_damping_per_m: 1.0e5,
             engage_depth: 0.002,
             probe_reach: 0.5,
-            slip_saturation: 0.5,
+
             inertia: 500.0,
             grip: Some(GripParams {
                 track: crate::substances::contact_friction(0.9),

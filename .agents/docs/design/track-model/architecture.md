@@ -377,7 +377,12 @@ gear pays no cut; changing gear pays the declared interruption. Coupled crank in
 reflected mass to the force price; launch Slip prices the commanded launch rpm.
 C1 admits lower gears only on a deficit beyond M or an engaged crank below the curve floor;
 a spooling launch in Slip is not an engaged lug. C2 preserves overrun, and C3 preselects the
-highest capable declared launch gear at rest. The transitional hill-hold latch uses this same pick.
+highest capable declared launch gear at rest, repriced at requested pedal under intent.
+An upshift cannot land in the sub-curve lug that C1 would immediately correct.
+The brake lever carries only the stop-force shortfall against intent, without a release latch.
+Opposite input brakes to rest, waits the authored pause, then pays one direction cut;
+release during the pause keeps park held. Zero intent below first gear's idle speed parks.
+The [brake-law record](../../../scratch/research/law-drive-4-brake-2026-11-02.md) owns its proof and decisions.
 The protective upshift is absent: the existing clutch over-rev slip guard bounds crank speed
 and retains motoring drag while the Driver holds overrun gear. Service braking at the ceiling
 belongs to the next ceiling law. The bitprobe records load, price and delivered force.
@@ -572,7 +577,8 @@ form. On the fixture tank (57 000 kg, 4 750 kg reflected per side) from 10 m/s: 
 pack, 0.05) 119.0 m; dirt (0.06) 99.2 m; sand (0.12) 49.6 m; mud (0.15) 39.7 m; concrete (0.04)
 148.8 m.
 
-Attained speed at full throttle on flat ground, MEASURED headless (fixture tank, last-second
+Historical contact-law baseline, before the Driver laws; current acceptance belongs to the
+gear and brake records above. Attained speed at full throttle on flat ground, MEASURED headless (fixture tank, last-second
 mean of 40 s). The governed speed is DERIVED 10.509 m/s and the zero-torque cut-off 10.930 m/s;
 the no-rolling-resistance fixture reaches F8, 10.930 m/s. Its FIXTURE acceptance is 1 % below cut-off for
 finite settling and 0.1 % above for fixed-step integration and vertical ride velocity, rather

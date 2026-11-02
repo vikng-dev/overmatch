@@ -401,7 +401,7 @@ fn snapshot_device_command(
 
 /// Decide [`DeviceOwner`] from the controlled tank's knockout fact and, while the death flow owns
 /// the device, write the controlled tank's command [neutral](TankCommand::neutral). In
-/// [`DeviceClaim`].
+/// [`DeviceClaim`]. Absent or knocked-out bodies discard their persistent levers.
 fn claim_device(
     mut owner: ResMut<DeviceOwner>,
     mut drive_input: ResMut<DriveInput>,
@@ -414,7 +414,7 @@ fn claim_device(
         DeviceOwner::Tank
     });
     if dead || own.is_empty() {
-        *drive_input = DriveInput::default();
+        drive_input.retain_for(None);
     }
     if dead {
         for (mut command, _) in &mut own {
@@ -436,20 +436,25 @@ pub struct AxisKeys {
 }
 
 /// Client-only persistent levers. Ownership changes discard both axes so a respawn or Tab swap
-/// cannot inherit a previous tank's cruise command. No field is sent or replicated.
+/// cannot inherit a previous tank's cruise command. Repair brakes mask the request without
+/// moving these levers; the retained notch resumes when repair ends. No field is replicated.
 #[derive(Resource, Default)]
 pub(crate) struct DriveInput {
     owner: Option<Entity>,
     throttle: AxisLever,
     steer: AxisLever,
+    effective: crate::track::drive::DriveAxes,
 }
 
 impl DriveInput {
-    pub(crate) fn notches(&self) -> crate::track::drive::DriveAxes {
-        crate::track::drive::DriveAxes {
-            throttle: self.throttle.notch,
-            steer: self.steer.notch,
+    fn retain_for(&mut self, owner: Option<Entity>) {
+        if self.owner != owner {
+            *self = Self { owner, ..default() };
         }
+    }
+
+    pub(crate) fn notches(&self) -> crate::track::drive::DriveAxes {
+        self.effective
     }
 }
 
@@ -459,8 +464,30 @@ struct AxisLever {
     press: Option<LeverPress>,
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum LeverDirection {
+    Positive,
+    Negative,
+}
+
+impl LeverDirection {
+    fn sign(self) -> f32 {
+        match self {
+            Self::Positive => 1.0,
+            Self::Negative => -1.0,
+        }
+    }
+    fn from_buttons(positive: bool, negative: bool) -> Option<Self> {
+        match (positive, negative) {
+            (true, false) => Some(Self::Positive),
+            (false, true) => Some(Self::Negative),
+            _ => None,
+        }
+    }
+}
+
 struct LeverPress {
-    direction: f32,
+    direction: LeverDirection,
     started_at: f64,
 }
 
@@ -473,14 +500,14 @@ impl AxisLever {
             *self = Self::default();
             return 0.0;
         }
-        let direction = i8::from(pos) as f32 - i8::from(neg) as f32;
+        let direction = LeverDirection::from_buttons(pos, neg);
         if let Some(press) = &self.press {
-            let repressed = if press.direction > 0.0 {
+            let repressed = if press.direction == LeverDirection::Positive {
                 keys.just_released(binding.pos) && keys.just_pressed(binding.pos)
             } else {
                 keys.just_released(binding.neg) && keys.just_pressed(binding.neg)
             };
-            if direction != press.direction || repressed {
+            if direction != Some(press.direction) || repressed {
                 // A hold that ends between gather frames still clears its notch on release.
                 if now - press.started_at >= feel.tap_window_s.0 {
                     self.notch = 0.0;
@@ -490,21 +517,20 @@ impl AxisLever {
         }
         if self.press.is_none() {
             // Both edges may arrive in one frame: a sub-frame tap still steps exactly once.
-            let tapped = i8::from(keys.just_pressed(binding.pos)) as f32
-                - i8::from(keys.just_pressed(binding.neg)) as f32;
-            let start = if direction != 0.0 { direction } else { tapped };
-            if start != 0.0 {
-                self.notch = (self.notch + start * feel.notch_step.0).clamp(-1.0, 1.0);
-                if direction != 0.0 {
-                    self.press = Some(LeverPress {
-                        direction,
-                        started_at: now,
-                    });
-                }
+            let tapped = LeverDirection::from_buttons(
+                keys.just_pressed(binding.pos),
+                keys.just_pressed(binding.neg),
+            );
+            if let Some(start) = direction.or(tapped) {
+                self.notch = (self.notch + start.sign() * feel.notch_step.0).clamp(-1.0, 1.0);
+                self.press = direction.map(|direction| LeverPress {
+                    direction,
+                    started_at: now,
+                });
             }
         }
         match &self.press {
-            Some(press) if now - press.started_at >= feel.tap_window_s.0 => press.direction,
+            Some(press) if now - press.started_at >= feel.tap_window_s.0 => press.direction.sign(),
             _ => self.notch,
         }
     }
@@ -649,10 +675,12 @@ pub fn client_plugin(app: &mut App) {
 /// (`offline_auto_fire_plugin_is_mounted_only_inside_run_offline`, a source scan — "no other plugin
 /// mounts this" is not expressible in the type system).
 pub fn offline_auto_fire_plugin(app: &mut App) {
-    let armed = app.world().get_resource::<AutoFireArmed>().map_or_else(
-        || crate::env_flag("SPIKE_AUTO_FIRE", false).unwrap_or_else(crate::refuse_start),
-        |armed| armed.0,
-    );
+    let armed = crate::env_flag("SPIKE_AUTO_FIRE", false).unwrap_or_else(crate::refuse_start);
+    #[cfg(test)]
+    let armed = app
+        .world()
+        .get_resource::<AutoFireArmed>()
+        .map_or(armed, |armed| armed.0);
     if !armed {
         return;
     }
@@ -673,6 +701,7 @@ pub fn offline_auto_fire_plugin(app: &mut App) {
 /// Whether [`offline_auto_fire_plugin`] arms the scripted trigger. Read once, at that mount: an
 /// `App` already carrying it is taken at its word, and otherwise `SPIKE_AUTO_FIRE` decides. Nothing
 /// in production inserts it.
+#[cfg(test)]
 #[derive(Resource, Clone, Copy)]
 struct AutoFireArmed(bool);
 
@@ -734,18 +763,17 @@ pub(crate) fn gather_commands(
 ) {
     // No controlled body before spawn or between possessions: no persistent drive input.
     let Some((entity, mut command)) = crate::tank::controlled_one(tanks.single_mut()) else {
-        *drive_input = DriveInput::default();
+        drive_input.retain_for(None);
         return;
     };
-    if drive_input.owner != Some(entity) {
-        *drive_input = DriveInput {
-            owner: Some(entity),
-            ..default()
-        };
-    }
+    drive_input.retain_for(Some(entity));
     let now = time.elapsed_secs_f64();
     command.throttle = drive_input.throttle.sample(&bindings.throttle, &keys, now);
     command.steer = drive_input.steer.sample(&bindings.steer, &keys, now);
+    drive_input.effective = crate::track::drive::DriveAxes {
+        throttle: command.throttle,
+        steer: command.steer,
+    };
     // `|=`: a click must survive frames the fixed loop skips, until a tick consumes it.
     command.fire_primary |= bindings.fire_primary.just_pressed(&keys, &mouse);
     command.repair |= bindings.repair.just_pressed(&keys, &mouse);
@@ -1062,9 +1090,12 @@ mod tests {
             let mut script = DriveKeys::new();
             let axis =
                 |v: crate::track::drive::DriveAxes| if throttle { v.throttle } else { v.steer };
-            assert_eq!(axis(script.tap(positive)), 0.25);
-            assert_eq!(axis(script.tap(positive)), 0.5);
-            for expected in [0.25, 0.0, -0.25] {
+            let step = feel.notch_step.0;
+            assert_eq!(axis(script.tap(positive)), step);
+            let mut expected = (2.0 * step).min(1.0);
+            assert_eq!(axis(script.tap(positive)), expected);
+            for _ in 0..3 {
+                expected = (expected - step).max(-1.0);
                 script.press(negative);
                 assert_eq!(axis(script.gather(0.0)), expected);
                 assert_eq!(axis(script.gather(feel.tap_window_s.0 / 2.0)), expected);
@@ -1079,18 +1110,43 @@ mod tests {
         }
     }
 
+    /// Repair changes the brake policy, not the player's retained throttle lever. The
+    /// server must receive the same notch before, during and after the repair edge.
+    #[test]
+    fn repair_edge_preserves_the_throttle_notch() {
+        use bevy::ecs::system::RunSystemOnce;
+        let mut script = DriveKeys::new();
+        let notch = script.tap(KeyCode::KeyW).throttle;
+        script.press(KeyCode::KeyF);
+        assert_eq!(script.gather(0.0).throttle, notch);
+        assert!(script.world.get::<TankCommand>(script.tank).unwrap().repair);
+        script.world.run_system_once(consume_edges).unwrap();
+        script.release(KeyCode::KeyF);
+        assert_eq!(script.gather(0.0).throttle, notch);
+        assert!(!script.world.get::<TankCommand>(script.tank).unwrap().repair);
+    }
+
     /// A hold owns the full axis after the window, then releases to coast/straight. Keeping the
     /// previous notch here would leave the player's vehicle cruising or turning after release.
     #[test]
     fn a_hold_overrides_and_release_clears_each_notch() {
+        let step = crate::track::drive::drive_feel().notch_step.0;
         let window = crate::track::drive::drive_feel().tap_window_s.0;
         for key in [KeyCode::KeyW, KeyCode::KeyS, KeyCode::KeyA, KeyCode::KeyD] {
             let mut script = DriveKeys::new();
             script.tap(key);
             script.press(key);
             let start = script.gather(0.0);
-            assert!(start.throttle.abs() == 0.5 || start.steer.abs() == 0.5);
+            assert!(
+                start.throttle.abs() == (2.0 * step).min(1.0)
+                    || start.steer.abs() == (2.0 * step).min(1.0)
+            );
             let held = script.gather(window);
+            assert_eq!(
+                script.world.resource::<DriveInput>().notches(),
+                held,
+                "the HUD must show the effective held output"
+            );
             assert!(held.throttle.abs() == 1.0 || held.steer.abs() == 1.0);
             script.release(key);
             assert_eq!(
@@ -1098,7 +1154,7 @@ mod tests {
                 crate::track::drive::DriveAxes::default()
             );
             let next = script.tap(key);
-            assert!(next.throttle.abs() == 0.25 || next.steer.abs() == 0.25);
+            assert!(next.throttle.abs() == step || next.steer.abs() == step);
         }
     }
 
@@ -1152,7 +1208,10 @@ mod tests {
             throttle: 0.5,
             steer: 0.0,
         }; // Fixture: forward cruise.
-        assert_eq!(target.throttle, 0.25);
+        assert_eq!(
+            target.throttle,
+            (2.0 * drive_feel().notch_step.0).min(1.0) - drive_feel().notch_step.0
+        );
         let held = script.gather(drive_feel().tap_window_s.0);
         assert_eq!(held.throttle, -1.0);
         assert_eq!(shape_drive(axes, held, 1.0 / 64.0).throttle, 0.0); // Fixture tick.
@@ -1162,12 +1221,13 @@ mod tests {
     /// bounded wire axis must survive repeated taps, a chord, and a change of controlled body.
     #[test]
     fn subframe_taps_clamp_and_opposite_keys_or_possession_cancel_the_lever() {
+        let step = crate::track::drive::drive_feel().notch_step.0;
         let mut script = DriveKeys::new();
         script.press(KeyCode::KeyW);
         script.release(KeyCode::KeyW);
-        assert_eq!(script.gather(0.0).throttle, 0.25);
-        assert_eq!(script.gather(0.0).throttle, 0.25, "tap counts once");
-        for _ in 0..8 {
+        assert_eq!(script.gather(0.0).throttle, step);
+        assert_eq!(script.gather(0.0).throttle, step, "tap counts once");
+        for _ in 0..((1.0 / step).ceil() as usize + 1) {
             script.tap(KeyCode::KeyW);
         } // Fixture: enough to exceed the bound.
         assert_eq!(script.gather(0.0).throttle, 1.0);
@@ -1410,7 +1470,11 @@ mod tests {
         }
         let alive = std::mem::take(&mut app.world_mut().resource_mut::<TickReads>().0);
         assert!(
-            !alive.is_empty() && alive.iter().all(|command| command.throttle == 0.25),
+            !alive.is_empty()
+                && alive
+                    .iter()
+                    .all(|command| command.throttle
+                        == crate::track::drive::drive_feel().notch_step.0),
             "alive, every tick reads the gathered command: {alive:?}"
         );
 
@@ -1419,7 +1483,8 @@ mod tests {
         let reads = &app.world().resource::<TickReads>().0;
         assert_eq!(reads.len(), TICKS_PER_FRAME as usize, "{reads:?}");
         assert_eq!(
-            reads[0].throttle, 0.25,
+            reads[0].throttle,
+            crate::track::drive::drive_feel().notch_step.0,
             "the latching tick read its command before the knockout: {reads:?}"
         );
         assert!(

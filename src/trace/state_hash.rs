@@ -567,8 +567,7 @@ mod tests {
             omega_e: 250.0,
             clutch: crate::track::transmission::ClutchState::Out,
             scheduler: SchedulerState::GradeShift { from: 5, to: 3 },
-            hill_hold: true,
-            hold_reengage_ticks: 11,
+            reversal_hold_ticks: 11,
         })
     }
 
@@ -933,14 +932,14 @@ mod tests {
         assert_ne!(baseline, hash(&gate), "work anchor");
     }
 
-    /// Every field in the authoritative 10-field inventory affects the exact transmission stream.
+    /// Every field in the authoritative 9-field inventory affects the exact transmission stream.
     #[test]
     fn transmission_inventory_fields_all_affect_hash() {
         let (p, q, lv, av, drive, sim) = sample();
         let grip = TrackGrip::default();
         let base = sample_transmission();
         let base_hash = hash_sample((p, q, lv, av), &drive, &grip, &base, &sim).trn;
-        let mut variants = [base; 10];
+        let mut variants = [base; 9];
         variants[0].0.gear = variants[0].0.gear.wrapping_add(1);
         variants[1].0.shift_ticks = variants[1].0.shift_ticks.wrapping_add(1);
         variants[2].0.steer_step = variants[2].0.steer_step.wrapping_add(1);
@@ -949,8 +948,7 @@ mod tests {
         variants[5].0.omega_e = f32::from_bits(variants[5].0.omega_e.to_bits() ^ 1);
         variants[6].0.clutch = crate::track::transmission::ClutchState::Slip;
         variants[7].0.scheduler = SchedulerState::HillHold;
-        variants[8].0.hill_hold = !variants[8].0.hill_hold;
-        variants[9].0.hold_reengage_ticks = variants[9].0.hold_reengage_ticks.wrapping_add(1);
+        variants[8].0.reversal_hold_ticks = variants[8].0.reversal_hold_ticks.wrapping_add(1);
 
         for (index, variant) in variants.iter().enumerate() {
             let hash = hash_sample((p, q, lv, av), &drive, &grip, variant, &sim).trn;
@@ -992,8 +990,8 @@ mod tests {
         assert_eq!(
             base,
             CanonicalTankStateDigest {
-                simulation: 14_652_388_418_780_606_089,
-                rollback: 902_652_863_300_454_137,
+                simulation: 6_398_580_170_003_897_360,
+                rollback: 16_574_472_650_204_573_274,
                 position: 5_276_285_167_157_175_194,
                 rotation: 5_407_327_877_548_523_030,
                 linear_velocity: 8_825_002_124_784_658_797,
@@ -1003,7 +1001,7 @@ mod tests {
                 weapon_gate: 18_442_197_694_147_503_009,
                 recoil: 12_037_784_973_900_930_602,
                 belts: 16_317_528_332_690_472_771,
-                transmission: 4_617_683_446_189_386_887,
+                transmission: 12_149_225_890_944_991_752,
                 elements: 6_815_987_066_798_852_301,
                 rounds_fired: 17_086_694_953_553_481_862,
             }

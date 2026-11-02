@@ -230,7 +230,7 @@ pub(super) fn harness_setup(
     writeln!(
         writer,
         // Schema identifies the telemetry fields; view names the one current renderer.
-        "{{\"t\":\"meta\",\"schema\":2,\"view\":\"wrap\",\"pose\":\"{}\",\"slope_deg\":{},\"z\":{:.3},\"warmup\":{},\"ticks\":{},\"throttle\":{:.3},\"steer\":{:.3},\"t2\":{},\"throttle2\":{:.3},\"steer2\":{:.3},\"slew\":{},\"fixed_dt\":{},\"half_tread\":{half_tread},\"mu\":{mu},\"slip_saturation\":{SLIP_SATURATION},\"weight\":{:.0},\"hull_rest_y\":{hull_rest_y},\"thickness\":{thickness}}}",
+        "{{\"t\":\"meta\",\"schema\":2,\"view\":\"wrap\",\"pose\":\"{}\",\"slope_deg\":{},\"z\":{:.3},\"warmup\":{},\"ticks\":{},\"throttle\":{:.3},\"steer\":{:.3},\"t2\":{},\"throttle2\":{:.3},\"steer2\":{:.3},\"slew\":{},\"fixed_dt\":{},\"half_tread\":{half_tread},\"mu\":{mu},\"weight\":{:.0},\"hull_rest_y\":{hull_rest_y},\"thickness\":{thickness}}}",
         match harness.pose {
             None if harness.runway => "runway".into(),
             None => "lane".into(),

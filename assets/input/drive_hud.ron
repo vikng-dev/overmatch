@@ -8,7 +8,7 @@
     debug_right_px: (12.0, Taste("drive HUD look: debug right screen margin")),
     standard_rgb: ((0.92, 0.94, 0.78), Taste("drive HUD look: ordinary text and live notch highlight sRGB")),
     debug_rgb: ((0.8, 0.75, 0.5), Taste("drive HUD look: debug text and gauge rail sRGB")),
-    gauge_bottom_px: (56.0, Taste("drive HUD look: notch gauges above the normal drive row")),
+    gauge_above_row_gap_px: (4.0, Taste("drive HUD look: gap from the normal drive row to the notch gauges")),
     gauge_width_px: (120.0, Taste("drive HUD look: signed axis rail span")),
     gauge_height_px: (10.0, Taste("drive HUD look: notch mark height")),
     gauge_label_px: (40.0, Taste("drive HUD look: aligned throttle and steer labels")),

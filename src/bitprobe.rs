@@ -174,8 +174,7 @@ const TRANSMISSION_STATE_FIELDS: &[(&str, &str)] = &[
     ("scheduler_tag", "u32"),
     ("scheduler_from", "u32"),
     ("scheduler_to", "u32"),
-    ("hill_hold", "bool"),
-    ("hold_reengage_ticks", "u32"),
+    ("reversal_hold_ticks", "u32"),
 ];
 
 const POSE_FIELDS: &[(&str, &str)] = &[

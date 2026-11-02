@@ -11,7 +11,7 @@
 
 use bevy::ecs::error::BevyError;
 
-use super::forces::{self, ForceParams};
+use super::forces::ForceParams;
 
 #[cfg(feature = "bitprobe")]
 use crate::bitprobe::TransmissionProbe;
@@ -110,14 +110,11 @@ const DEAD: f32 = 0.05;
 /// retains full brake capacity after a breach; this tolerance controls entry only.
 pub(crate) const PARK_ENGAGE_SPEED: f32 = 0.05;
 
-/// Transitional actuator regimes, rather than facts about any one vehicle. Each leaves
-/// with the missing mechanical/Driver law its StandIn label names.
+/// Shared Driver actuation parameters, admitted before play. Labels live with their data.
 #[derive(serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 struct DriverActuation {
-    hold_reengage_ticks: crate::provenance::Labelled<u8>,
-    hill_hold_speed_m_s: crate::provenance::Labelled<f32>,
-    direction_swap_speed_m_s: crate::provenance::Labelled<f32>,
+    reversal_hold_s: crate::provenance::Labelled<f32>,
     neutral_throttle: crate::provenance::Labelled<f32>,
     neutral_speed_m_s: crate::provenance::Labelled<f32>,
 }
@@ -131,8 +128,6 @@ fn driver_actuation() -> &'static DriverActuation {
         )
         .unwrap_or_else(|error| panic!("{error}"));
         for (field, number) in [
-            ("hill_hold_speed_m_s", &data.hill_hold_speed_m_s),
-            ("direction_swap_speed_m_s", &data.direction_swap_speed_m_s),
             ("neutral_throttle", &data.neutral_throttle),
             ("neutral_speed_m_s", &data.neutral_speed_m_s),
         ] {
@@ -144,13 +139,18 @@ fn driver_actuation() -> &'static DriverActuation {
             );
         }
         assert!(
-            data.neutral_throttle.value <= 1.0
-                && data.hold_reengage_ticks.value > 0
+            data.neutral_throttle.value <= 1.0,
+            "{PATH}: neutral_throttle must be a share; repair the actuator data"
+        );
+        assert!(
+            data.reversal_hold_s.value.is_finite()
+                && data.reversal_hold_s.value > 0.0
+                && data.reversal_hold_s.value * TICK_HZ <= f32::from(u8::MAX)
                 && matches!(
-                    data.hold_reengage_ticks.label,
-                    crate::provenance::Provenance::StandIn(_)
+                    data.reversal_hold_s.label,
+                    crate::provenance::Provenance::Taste(_)
                 ),
-            "{PATH}: neutral_throttle must be a share, hold_reengage_ticks positive and StandIn; repair the actuator data"
+            "{PATH}: reversal_hold_s must be positive, fit the fixed-tick countdown and be labelled Taste; author the stop-to-reverse pause"
         );
         data
     });
@@ -501,7 +501,7 @@ impl TransmissionParams {
     }
 
     /// DERIVED top-gear speed (m/s) at the fuel governor's rpm for the selected ladder.
-    /// This scales the brake's command blend; external loads may drive the belts faster.
+    /// External loads may drive the belts faster.
     pub fn governed_speed(&self, reverse: bool) -> f32 {
         let ladder = if reverse {
             &self.gears_rev
@@ -588,9 +588,9 @@ pub struct TransmissionState {
     pub steer_step: u8,
     /// Which ladder is engaged (reverse uses the R ladder).
     pub reverse: bool,
-    /// Parking-brake latch: set by a zero command near standstill, released by any drive
-    /// command. Latched, the brake holds FULL capacity regardless of belt speed (see
-    /// [`PARK_ENGAGE_SPEED`]).
+    /// Park lever: set at rest and by a released low-speed stop. Under drive intent it
+    /// carries only the shortfall against rollback; without intent it holds both directions.
+    /// A breached lever retains its dynamic brake capacity.
     pub park: bool,
     /// Engine crank speed ω_e (rad/s) — stage B's crank state. Initialized explicitly from
     /// vehicle data by [`Self::from_spec`]; the regenerative tick path has no in-band sentinel.
@@ -599,14 +599,9 @@ pub struct TransmissionState {
     pub clutch: ClutchState,
     /// Scheduler/readout state.
     pub scheduler: SchedulerState,
-    /// Anti-rollback latch. While true, the existing service-brake stop-force law runs at its full
-    /// declared envelope until the selected launch gear transmits the capability-derived release
-    /// threshold.
-    pub hill_hold: bool,
-    /// Remaining post-release hill-hold cooldown ticks. While nonzero, a near-rest deficit cannot
-    /// re-latch — never overridable (the latch itself is near-rest-only, and a
-    /// moving roll is `back_driven_intent` braking territory until it re-enters the zone).
-    pub hold_reengage_ticks: u8,
+    /// Remaining stopped ticks before a held opposite request may change direction.
+    /// Moving against that request refreshes it; release cancels it without releasing park.
+    pub reversal_hold_ticks: u8,
 }
 
 /// One field in the authoritative canonical transmission projection. Float values retain their raw
@@ -623,7 +618,7 @@ pub(crate) enum TransmissionProjectionValue {
 /// Adding state fails this destructure until the field is classified exactly once here.
 pub(crate) fn transmission_state_projection(
     state: &TransmissionState,
-) -> [TransmissionProjectionValue; 10] {
+) -> [TransmissionProjectionValue; 9] {
     let TransmissionState {
         gear,
         shift_ticks,
@@ -633,8 +628,7 @@ pub(crate) fn transmission_state_projection(
         omega_e,
         clutch,
         scheduler,
-        hill_hold,
-        hold_reengage_ticks,
+        reversal_hold_ticks,
     } = *state;
     let scheduler = match scheduler {
         SchedulerState::Normal => TransmissionProjectionValue::Scheduler {
@@ -670,8 +664,7 @@ pub(crate) fn transmission_state_projection(
             ClutchState::In => 2,
         }),
         scheduler,
-        Bool(hill_hold),
-        U8(hold_reengage_ticks),
+        U8(reversal_hold_ticks),
     ]
 }
 
@@ -695,12 +688,11 @@ impl TransmissionState {
             shift_ticks: 0,
             steer_step: 0,
             reverse: false,
-            park: false,
+            park: true,
             omega_e,
             clutch: ClutchState::Out,
             scheduler: SchedulerState::Normal,
-            hill_hold: false,
-            hold_reengage_ticks: 0,
+            reversal_hold_ticks: 0,
         }
     }
 }
@@ -828,7 +820,8 @@ fn engine_torques(
     command: f32,
 ) -> [f32; 3] {
     let drag = engine_drag(tp, omega);
-    let released = 1.0 - forces::hold_blend(command / engine_control().drag_throttle_release.value);
+    let pedal = (command / engine_control().drag_throttle_release.value).clamp(0.0, 1.0);
+    let released = pedal * pedal * (3.0 - 2.0 * pedal);
     let rpm = omega / RPM_TO_RAD;
     let curve = tp.torque_at(rpm);
     let induced = supply.task_rate * (command * curve + released * drag * tp.fuel_cut(rpm));
@@ -878,7 +871,13 @@ fn free_driver_force(
     clutch: ClutchState,
 ) -> f32 {
     let launch_rpm = tp.launch_omega(command) / RPM_TO_RAD;
-    let shaft_rpm = shaft.max(0.0) * gear / tp.sprocket_radius / RPM_TO_RAD;
+    let guard = tp.engine.idle_rpm - engine_control().idle_guard_band_rpm.value;
+    let floor = if idle_catch_capacity(tp, supply) > engine_drag(tp, guard * RPM_TO_RAD) {
+        guard
+    } else {
+        0.0
+    };
+    let shaft_rpm = (shaft.max(0.0) * gear / tp.sprocket_radius / RPM_TO_RAD).max(floor);
     // A moving In clutch below idle is a lug, not a fresh launch.
     let rpm = if clutch == ClutchState::Slip {
         launch_rpm
@@ -949,8 +948,8 @@ fn gear_force(
         .clamp(-load.grip_n, load.grip_n)
 }
 
-/// Highest declared launch gear with full-command spare above M; no feasible gear is a
-/// grade limit. Preselection occurs at rest, before the pedal ramp, with no paid drive cut.
+/// Highest declared launch gear affordable at requested pedal. Released park preselects
+/// at full pedal; a live request reprices before actuator travel, with no paid drive cut.
 fn launch_pick(
     tp: &TransmissionParams,
     fp: &ForceParams,
@@ -958,6 +957,7 @@ fn launch_pick(
     ladder: &[f32],
     load: super::load::PerceivedLoad,
     detent: u8,
+    command: f32,
 ) -> Option<u8> {
     (1..=tp.launch_gears.min(ladder.len() as u8))
         .rev()
@@ -969,7 +969,7 @@ fn launch_pick(
                 supply,
                 0.0,
                 ladder[usize::from(gear - 1)],
-                1.0,
+                command,
                 load,
                 ClutchState::Slip,
             ) - load.total_n()
@@ -1000,7 +1000,13 @@ pub(crate) fn landed_spare(
         shaft - load.total_n() * f32::from(tp.shift_ticks) / TICK_HZ / coupled_mass(fp)
     };
     let ratio = ladder[usize::from(candidate - 1)];
-    if landing < 0.0 || landing * ratio / tp.sprocket_radius / RPM_TO_RAD > tp.max_curve_rpm() {
+    // C1 corrects an engaged crank below the curve floor. An upshift into that same lug
+    // would immediately undo itself and price the idle catch as sustained pedal power.
+    let floor = tp.engine.torque_nm[0].0 * RPM_TO_RAD;
+    if candidate > state.gear && landing * ratio / tp.sprocket_radius < floor {
+        return f32::NEG_INFINITY;
+    }
+    if landing * ratio / tp.sprocket_radius / RPM_TO_RAD > tp.max_curve_rpm() {
         return f32::NEG_INFINITY;
     }
     gear_force(
@@ -1037,9 +1043,7 @@ fn choose_gear(
     } else {
         &tp.gears_fwd
     };
-    if !st.hill_hold {
-        st.scheduler = SchedulerState::Normal;
-    }
+    st.scheduler = SchedulerState::Normal;
     if shaft.abs() < PARK_ENGAGE_SPEED {
         if let Some(gear) = launch_pick(
             tp,
@@ -1048,20 +1052,17 @@ fn choose_gear(
             ladder,
             inp.perceived_load,
             st.steer_step,
+            if command > DEAD { command } else { 1.0 },
         ) {
             st.gear = gear;
-            st.scheduler = if st.hill_hold {
-                SchedulerState::HillHold
-            } else {
-                SchedulerState::Normal
-            };
+            st.scheduler = SchedulerState::Normal;
         } else {
             st.scheduler = SchedulerState::GradeLimit;
         }
         return;
     }
     let [fuel, catch, drag] = engine_torques(tp, inp.supply, st.omega_e, command);
-    if command <= 0.0 || fuel + catch <= drag || shaft < 0.0 {
+    if command <= 0.0 || fuel + catch <= drag {
         return;
     }
     let current = landed_spare(tp, fp, inp, st, st.gear, command);
@@ -1090,60 +1091,6 @@ fn choose_gear(
         };
         st.gear = best.0;
         st.shift_ticks = tp.shift_ticks;
-    }
-}
-
-/// Transitional brake latch; lane 4 replaces it with the one-way brake lever. Capability
-/// and launch selection already use the Driver's unfiltered support load and C3.
-fn update_hill_hold(
-    st: &mut TransmissionState,
-    tp: &TransmissionParams,
-    fp: &ForceParams,
-    inp: &TransmissionInput,
-    command: f32,
-    shaft: f32,
-) {
-    if inp.perceived_load.grip_n == 0.0 {
-        return;
-    } // Airborne or support-only: no terrain hold decision.
-    let cooling = st.hold_reengage_ticks > 0;
-    st.hold_reengage_ticks = st.hold_reengage_ticks.saturating_sub(1);
-    if command <= DEAD {
-        st.hill_hold = false;
-        st.scheduler = SchedulerState::Normal;
-    } else if shaft.abs() < driver_actuation().hill_hold_speed_m_s.value && !cooling {
-        let ladder = if st.reverse {
-            &tp.gears_rev
-        } else {
-            &tp.gears_fwd
-        };
-        let force = gear_force(
-            tp,
-            fp,
-            inp.supply,
-            shaft,
-            ladder[usize::from(st.gear - 1)],
-            command,
-            inp.perceived_load,
-            st.clutch,
-        );
-        if st.shift_ticks > 0 || force < inp.perceived_load.total_n() {
-            st.hill_hold = true;
-            st.scheduler = if launch_pick(
-                tp,
-                fp,
-                inp.supply,
-                ladder,
-                inp.perceived_load,
-                st.steer_step,
-            )
-            .is_some()
-            {
-                SchedulerState::HillHold
-            } else {
-                SchedulerState::GradeLimit
-            };
-        }
     }
 }
 
@@ -1234,102 +1181,69 @@ pub(crate) fn brake_capacity_for_regime(
     }
 }
 
-/// The F/R ladder swap: near standstill ONLY. Above the authored actuation threshold a commanded
-/// reversal is a BRAKE command (the service brakes) until the tank is nearly stopped.
-///
-/// The new ladder pays the declared interruption before its launch can engage.
+/// A moving reversal refreshes the stopped countdown. Release cancels the countdown;
+/// only a complete at-rest hold permits one paid direction cut.
 fn swap_ladder_direction(
     tp: &TransmissionParams,
     st: &mut TransmissionState,
     inp: &TransmissionInput,
-    m: f32,
 ) {
-    if st.shift_ticks != 0 {
+    if !inp.supply.control_authority {
         return;
     }
-    let want_rev = inp.throttle < -DEAD;
-    let want_fwd = inp.throttle > DEAD;
-    if (want_rev || want_fwd)
-        && want_rev != st.reverse
-        && m.abs() < driver_actuation().direction_swap_speed_m_s.value
+    let opposite = inp.command.abs() >= DEAD && (inp.command < 0.0) != st.reverse;
+    if !opposite || inp.brake {
+        st.reversal_hold_ticks = 0;
+        return;
+    }
+    if inp
+        .speeds
+        .iter()
+        .any(|speed| speed.abs() >= PARK_ENGAGE_SPEED)
     {
-        st.reverse = want_rev;
+        st.reversal_hold_ticks = (driver_actuation().reversal_hold_s.value * TICK_HZ).ceil() as u8;
+        return;
+    }
+    if st.reversal_hold_ticks > 0 {
+        st.reversal_hold_ticks -= 1;
+        return;
+    }
+    if st.shift_ticks == 0 {
+        st.reverse = inp.command < 0.0;
         st.gear = 1;
         st.shift_ticks = tp.shift_ticks;
         st.scheduler = SchedulerState::Normal;
     }
 }
 
-/// The tick's resolved driver intent, measured against the ENGAGED ladder.
 struct DriverIntent {
-    /// Ladder sign: `+1` forward, `−1` reverse. Every signed drivetrain quantity (`shaft`, the
-    /// release test, the demand projection) is measured against it.
     dir: f32,
-    /// Drive command WITH the engaged ladder, `0..1`.
     propulsive: f32,
-    /// Service-brake command, `0..1` — the driver-intent share of the declared brake capacity.
     service: f32,
 }
 
-/// Resolve the shaped drive axes into the declared W/S contract, with honest mechanisms — never
-/// conflating zero-throttle with brake-to-zero:
-///   * throttle WITH the engaged ladder → drive (`propulsive`);
-///   * throttle AGAINST it → SERVICE BRAKES (`service`, the declared brake capacity) until near
-///     standstill, where [`swap_ladder_direction`] engages the opposite gears — never
-///     `|throttle|`-drive in the engaged direction (that was the measured "cannot decelerate"
-///     bug: full reverse at speed produced full FORWARD force);
-///   * throttle WITH the ladder while the belt is BACK-DRIVEN (past the swap, or a rollback
-///     under W) → drive AND service brakes together until the belt crosses zero (the
-///     through-zero half of the signed-intent contract);
-///   * throttle released → coast under engine drag (compression braking through the CURRENT
-///     gear, growing as the box downshifts);
-///   * zero command at rest → the parking hold (unchanged).
-///
-/// THE THROUGH-ZERO HALF (feel): a drive command held while the belt still moves AGAINST the
-/// engaged ladder keeps the driver's foot on the BRAKE as well. This closes the measured
-/// free-roll gap in the held-S stop→reverse flow: the ladder swap commits at
-/// |m| < driver_actuation().direction_swap_speed_m_s.value while the hull still rolls the OLD way, `opposing` flips false the
-/// same tick, and the declutched swap window then carried NEITHER drive NOR brake — downhill the
-/// tank re-accelerated into its own reversal (the reported "jumpy" crossing). W while rolling
-/// backward is the symmetric case (intent opposing MOTION brakes with everything; the same press
-/// flows into motion once the belt crosses zero and the back-driven arm drops). Thresholded at
-/// the existing −[`PARK_ENGAGE_SPEED`] policy scale so the at-rest numerical residual and a
-/// from-rest launch never read as back-driven.
-///
-/// THE BRAKE HOLD ([`TransmissionInput::brake`]): no drive, and the full service brakes until the
-/// tick starts parked; from then on the parking latch alone holds the tank, with its static
-/// breakaway capacity, exactly as a released stick at rest does. The axes are released with the
-/// brake held, so the latch engages once they have slewed to zero at standstill.
-fn driver_intent(inp: &TransmissionInput, reverse: bool, parked: bool, m: f32) -> DriverIntent {
+/// Opposing motion gets the full service brake at every nonzero notch. The engaged ladder
+/// alone determines propulsion; releasing the request coasts above the data-derived stop speed.
+fn driver_intent(inp: &TransmissionInput, reverse: bool, parked: bool) -> DriverIntent {
     let dir = if reverse { -1.0 } else { 1.0 };
-    if inp.brake {
-        return DriverIntent {
-            dir,
-            propulsive: 0.0,
-            service: if parked { 0.0 } else { 1.0 },
-        };
-    }
-    let opposing = inp.throttle * dir < -DEAD;
-    let propulsive = if opposing {
-        0.0
-    } else {
-        inp.throttle.abs().clamp(0.0, 1.0)
-    };
-    let service = if opposing {
-        inp.throttle.abs().clamp(0.0, 1.0)
-    } else {
-        0.0
-    };
-    let back_driven_intent = propulsive > 0.0 && dir * m < -PARK_ENGAGE_SPEED;
-    let service = if back_driven_intent {
-        propulsive
-    } else {
-        service
-    };
+    let opposing = inp.command * dir < -DEAD;
+    let against_motion = inp.command.abs() >= DEAD
+        && inp
+            .speeds
+            .iter()
+            .any(|v| v * inp.command.signum() < -PARK_ENGAGE_SPEED);
     DriverIntent {
         dir,
-        propulsive,
-        service,
+        propulsive: if inp.brake || opposing {
+            0.0
+        } else {
+            (inp.throttle * dir).clamp(0.0, 1.0)
+        },
+        service: if against_motion || ((inp.brake || opposing) && !parked) {
+            1.0
+        } else {
+            0.0
+        },
     }
 }
 
@@ -1357,17 +1271,28 @@ fn update_steer_detent(st: &mut TransmissionState, steer: f32) {
     };
 }
 
-/// Zero axes near rest set the parking lever; throttle or steer releases it. Steer must
-/// release it for a neutral turn. The latch retains full brake capacity after a breach.
-fn update_park_latch(st: &mut TransmissionState, inp: &TransmissionInput) {
-    // The game's damage model: control authority alone permits moving the existing lever.
+/// At rest the lever is on. Drive lets it carry only rollback; steering releases it for
+/// a neutral turn. A released tank below first gear's idle speed stops and parks.
+fn update_park_latch(st: &mut TransmissionState, tp: &TransmissionParams, inp: &TransmissionInput) {
+    // The game's damage model: an unstaffed station retains the player's lever position.
     if !inp.supply.control_authority {
         return;
     }
-    if inp.throttle.abs() >= DEAD || inp.steer.abs() >= DEAD {
+    let speed = inp.speeds[0].abs().max(inp.speeds[1].abs());
+    let requested = inp.command.abs() >= DEAD;
+    let steering = inp.steer.abs() >= DEAD;
+    let first = if st.reverse {
+        tp.gears_rev[0]
+    } else {
+        tp.gears_fwd[0]
+    };
+    let stop_speed = tp.engine.idle_rpm * RPM_TO_RAD * tp.sprocket_radius / first;
+    if !inp.brake && !requested && steering {
         st.park = false;
-    } else if inp.speeds[0].abs().max(inp.speeds[1].abs()) < PARK_ENGAGE_SPEED {
+    } else if speed < PARK_ENGAGE_SPEED || (!requested && !steering && speed < stop_speed) {
         st.park = true;
+    } else if requested && inp.command * (inp.speeds[0] + inp.speeds[1]) > 0.0 {
+        st.park = false;
     }
 }
 
@@ -1378,8 +1303,9 @@ fn neutral_turn(inp: &TransmissionInput, mean: f32) -> bool {
         && mean.abs() < driver_actuation().neutral_speed_m_s.value
 }
 
-/// Shift windows, the park lever and staffed zero-rate tasks open the clutch. A launch
-/// starts from Out at rest below idle, retaining Slip until the shaft reaches its commanded speed.
+/// Shift windows, a two-sided parked hold, neutral turns and staffed zero-rate tasks open
+/// the clutch. Intent at rest below idle starts Slip regardless of the prior regime,
+/// retaining it until the shaft reaches its commanded launch speed.
 /// At rest an unstaffed station retains its neutral lever. A moving shift interruption expires
 /// with its window, and a released slipping clutch springs In.
 fn update_clutch_state(
@@ -1391,7 +1317,7 @@ fn update_clutch_state(
     shaft_omega: f32,
 ) {
     let mean = (inp.speeds[0] + inp.speeds[1]) * 0.5;
-    st.clutch = if shifting || st.park {
+    st.clutch = if shifting || (st.park && (inp.brake || propulsive < DEAD)) {
         ClutchState::Out
     } else if !inp.supply.control_authority {
         match st.clutch {
@@ -1405,9 +1331,7 @@ fn update_clutch_state(
     {
         ClutchState::Out
     } else if propulsive >= DEAD
-        && ((st.clutch == ClutchState::Out
-            && mean.abs() < PARK_ENGAGE_SPEED
-            && shaft_omega < tp.engine.idle_rpm * RPM_TO_RAD)
+        && ((mean.abs() < PARK_ENGAGE_SPEED && shaft_omega < tp.engine.idle_rpm * RPM_TO_RAD)
             || (st.clutch == ClutchState::Slip && shaft_omega < tp.launch_omega(propulsive)))
     {
         ClutchState::Slip
@@ -1670,51 +1594,9 @@ fn engine_work(
     }
 }
 
-/// Hill-hold release: capability-based, not timer-based — only force actually transmitted through
-/// the coupling (after the power gate) may hand the slope from the modeled brakes back to the
-/// drivetrain. The release threshold is
-///
-///   D + min(selection_margin, max(0, modeled_selected_reserve) * 0.5).
-///
-/// Thus a full-margin gear keeps the ordinary headroom, while a margin-short but capable gear can
-/// release once it transmits its own modeled force: half its non-negative reserve is always below
-/// that force. Equality is accepted for the zero-reserve knife edge. The hold remains through
-/// every declutched window because `f_c = 0` there.
-#[expect(
-    clippy::too_many_arguments,
-    reason = "the release law's inputs: state, construction, contact, supply, shaft, ratio, sign and force"
-)]
-fn release_hill_hold(
-    st: &mut TransmissionState,
-    tp: &TransmissionParams,
-    fp: &ForceParams,
-    supply: DriveSupply,
-    inp: &TransmissionInput,
-    shaft: f32,
-    g: f32,
-    dir: f32,
-    f_c: f32,
-) {
-    // Nothing to release, and the threshold below is a pure function of state — so on the common
-    // path (no hold latched) neither term is worth computing.
-    if !st.hill_hold {
-        return;
-    }
-    let demand = inp.perceived_load.total_n();
-    let reserve = gear_force(tp, fp, supply, shaft, g, 1.0, inp.perceived_load, st.clutch) - demand;
-    let release_margin = force_margin(fp, tp).min(reserve.max(0.0) * 0.5);
-    if dir * f_c >= demand + release_margin {
-        st.hill_hold = false;
-        st.hold_reengage_ticks = driver_actuation().hold_reengage_ticks.value;
-        st.scheduler = SchedulerState::Normal;
-    }
-}
-
-/// The reframed brake (design §3) applied to the assembled per-side sprocket forces: −R always
-/// reaches the belt; near zero command + zero belt speed the parking/service brake statically
-/// balances what the drivetrain doesn't, inside its capacity. `h` reuses the hold-blend
-/// SHAPE ([`forces::hold_blend`]) purely as the engagement envelope (tick-stable, exact at rest); a rig with no grip
-/// (support-only rigs, e.g. calibration) keeps the brake disengaged, like the hold it extends.
+/// The capacity-limited stop force is R-Q-vI/dt. Under intent the lever takes only its
+/// rollback-opposing half, so brake force is zero exactly when propulsion outpulls the slope.
+/// No temporal release decision or command/speed blend participates in that balance.
 fn apply_brake_stop_forces(
     q: &mut [f32; 2],
     tp: &TransmissionParams,
@@ -1722,53 +1604,25 @@ fn apply_brake_stop_forces(
     st: &TransmissionState,
     inp: &TransmissionInput,
     service: f32,
-    hill_brake_active: bool,
-) {
-    let dt = inp.dt;
+) -> bool {
+    let one_way = !inp.brake && inp.command.abs() >= DEAD && fp.grip.is_some();
+    let lever = (st.park || one_way) && fp.grip.is_some(); // Geometry-only rigs have no terrain hold.
+    let mut holding = false;
     for (i, qi) in q.iter_mut().enumerate() {
-        // Engagement envelope: the parking LATCH holds full capacity (post-breach it keeps
-        // rubbing at B_max instead of fading with speed); unlatched, the smooth entry blend h
-        // (zero command + near-zero belt speed) eases the brake in during settle; the service
-        // pedal is the driver-intent brake command. The paths overlap only on the tick the latch
-        // engages, where both are full: service comes from a drive command (which releases the
-        // latch) or a brake hold that started the tick unlatched. A support-only rig (no grip)
-        // keeps the brake disengaged.
-        let h = if fp.grip.is_some() {
-            if st.park {
-                1.0
-            } else if inp.supply.control_authority {
-                let target = inp.side_commands[i] * tp.governed_speed(st.reverse);
-                forces::hold_blend(target.abs() / fp.slip_saturation)
-                    * forces::hold_blend(inp.speeds[i].abs() / fp.slip_saturation)
-            } else {
-                // The game's damage model: an unmanned station cannot ease on the brakes.
-                0.0
-            }
-        } else {
-            0.0
-        };
-        let envelope = h
-            .max(service)
-            .max(if hill_brake_active { 1.0 } else { 0.0 });
-        if envelope > 0.0 {
-            // Static breakaway capacity applies ONLY to a latched, at-rest belt without a
-            // service-brake command. The speed test is per belt and reads the PRE-TICK state:
-            // as soon as a breached belt leaves the at-rest band, this same tick uses the
-            // dynamic cap.
-            let capacity =
-                brake_capacity_for_regime(tp, st.park || hill_brake_active, service, inp.speeds[i]);
-            let cap = envelope * capacity;
-            // The capacity-limited STOP force `B = R − Q − vI/dt = −I·v_unbraked_next/dt`
-            // (clamped): at rest it is exactly the static balance `R − Q` — the hold
-            // gates' law, bit-identical — and in motion it opposes where the belt is
-            // headed, so it SETTLES creep to zero instead of freezing v̇ at the creep
-            // speed (the old `R − Q` alone did exactly that: B·v > 0 cancelling grip and
-            // drag — a passivity defect), saturates at ±cap against a slide, and can
-            // neither speed the belt up nor push it through zero.
-            let stop = inp.reactions[i] - *qi - inp.speeds[i] * fp.inertia / dt;
-            *qi += stop.clamp(-cap, cap);
+        if !lever && service == 0.0 {
+            continue;
         }
+        let cap = brake_capacity_for_regime(tp, lever, service, inp.speeds[i]);
+        let stop = inp.reactions[i] - *qi - inp.speeds[i] * fp.inertia / inp.dt;
+        let brake = if one_way && service == 0.0 {
+            inp.command.signum() * (stop * inp.command.signum()).clamp(0.0, cap)
+        } else {
+            stop.clamp(-cap, cap)
+        };
+        holding |= one_way && brake * inp.command > 0.0;
+        *qi += brake;
     }
+    holding
 }
 
 /// Re-anchor only when the final belt speed implies a within-capacity clutch torque,
@@ -1922,7 +1776,11 @@ pub fn step(
     #[cfg(feature = "bitprobe")]
     let mut bitprobe = input_probe(st, inp, m, d);
 
-    swap_ladder_direction(tp, st, inp, m);
+    if st.shift_ticks == 0 {
+        st.scheduler = SchedulerState::Normal;
+    }
+    swap_ladder_direction(tp, st, inp);
+    update_park_latch(st, tp, inp);
 
     let ladder: &[f32] = if st.reverse {
         &tp.gears_rev
@@ -1936,7 +1794,7 @@ pub fn step(
         dir,
         propulsive,
         service,
-    } = driver_intent(inp, st.reverse, st.park, m);
+    } = driver_intent(inp, st.reverse, st.park);
 
     let shaft = dir * m;
     let command = if inp.brake || inp.command * dir < 0.0 {
@@ -1945,12 +1803,9 @@ pub fn step(
         inp.command.abs().min(1.0)
     };
     update_steer_detent(st, inp.steer);
-    update_hill_hold(st, tp, fp, inp, command, shaft);
     choose_gear(st, tp, fp, inp, command, shaft);
     let shifting = advance_shift_window(st);
     let g = ladder[(st.gear - 1) as usize];
-
-    update_park_latch(st, inp);
 
     // The crank carries real inertia; launch slip limits transmitted torque while it spools.
     let omega_idle = tp.engine.idle_rpm * RPM_TO_RAD;
@@ -2022,9 +1877,6 @@ pub fn step(
     let f_s = f_s_pre_scale * power_scale;
     let lambda = lambda * power_scale;
 
-    let hill_brake_active = st.hill_hold;
-    release_hill_hold(st, tp, fp, inp.supply, inp, shaft, g, dir, f_c);
-
     // --- Integrate the crank: J·ω̇_e = τ_free − τ_c (the transmitted torque scaled by the
     // power gate exactly as the belt-side force was — one bookkeeping for both ends of the
     // clutch). The work allocation below also charges steering and caps any clutch re-anchor
@@ -2038,7 +1890,10 @@ pub fn step(
         f_c / 2.0 - f_s / 2.0 + lambda * j[1],
     ];
 
-    apply_brake_stop_forces(&mut q, tp, fp, st, inp, service, hill_brake_active);
+    let holding = apply_brake_stop_forces(&mut q, tp, fp, st, inp, service);
+    if holding && !shifting && st.scheduler != SchedulerState::GradeLimit {
+        st.scheduler = SchedulerState::HillHold;
+    }
 
     // --- Integrate both sides simultaneously: I·v̇ = Q − R (the reaction ALWAYS applies).
     let next = [

@@ -2345,7 +2345,7 @@ mod tests {
             support_damping_per_m: 1.0e5,
             engage_depth: 0.002,
             probe_reach: 0.5,
-            slip_saturation: 0.5,
+
             inertia: 500.0,
             grip: Some(grip),
         };

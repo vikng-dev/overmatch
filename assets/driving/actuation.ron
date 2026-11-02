@@ -1,7 +1,5 @@
 (
-    hold_reengage_ticks: (32, StandIn("missing one-way brake lever: transitional hill-hold release cooldown in fixed ticks")),
-    hill_hold_speed_m_s: (0.25, StandIn("missing one-way brake lever: transitional near-rest hill-hold entry speed in m/s")),
-    direction_swap_speed_m_s: (0.5, StandIn("missing stop-then-reverse Driver law: transitional direction-swap speed in m/s")),
+    reversal_hold_s: (0.5, Taste("stop-to-reverse pause: release during this stopped window keeps park held")),
     neutral_throttle: (0.1, StandIn("missing physical neutral-turn selector: near-zero throttle regime entry share")),
     neutral_speed_m_s: (0.5, StandIn("missing physical neutral-turn selector: low-speed regime entry in m/s")),
 )

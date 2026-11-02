@@ -265,7 +265,9 @@ use crate::{CombatantId, CombatantLife, ShotId};
 /// REV 74 (#146, driving model): support-priced C1-C3 gear selection removes scheduler memory.
 /// REV 75 (the game's damage-model view): hull-mark snapshots carry stable serials; diffs evict
 /// by physical footprint rather than arrival alone.
-pub const PROTOCOL_REV: u32 = 75;
+/// REV 76 (#146, driving model): the brake law removes the hill-hold latch; a reversal counts its
+/// hold at rest.
+pub const PROTOCOL_REV: u32 = 76;
 
 /// Compatibility tag derived from the complete pinned wire manifest plus the crate version. This
 /// is the runtime handshake value: version-exact, so a version bump intentionally changes it.
@@ -1171,7 +1173,7 @@ const WIRE_SURFACE_HASH: u64 = 0x5afa185f66009321;
 /// The pinned hash of the OWN wire-facing type DEFINITIONS (field layout, not just names). Re-pin it
 /// whenever a wire-facing struct/enum definition changes; house process also bumps
 /// [`PROTOCOL_REV`]. The tripwire prints the new value. See the block above for the coverage model.
-const WIRE_TYPES_HASH: u64 = 0x203121cdd25ce5a4;
+const WIRE_TYPES_HASH: u64 = 0x6a39e231e441eebc;
 
 /// The pinned `Cargo.lock` versions of the external crates whose types ride the wire (avian's
 /// replicated physics components; lightyear's wire framing / input protocol). A bump of either can

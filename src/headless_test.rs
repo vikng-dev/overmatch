@@ -945,8 +945,8 @@ fn contact_law_shipped_ground_speeds() {
                 .0;
             let gear = state.gear;
             println!(
-                "MEASURED ground {name} rolling_start={rolling_start} scheduler {:?}, hill_hold {}",
-                state.scheduler, state.hill_hold
+                "MEASURED ground {name} rolling_start={rolling_start} scheduler {:?}, park {}",
+                state.scheduler, state.park
             );
             println!(
                 "MEASURED ground {name} rolling_start={rolling_start}: F{gear} mean {:.5} m/s spread {:.6}",

@@ -1,6 +1,7 @@
 //! Shared controlled-tank drive HUD for the offline and server-stream clients.
 //!
-//! This is view state only: it reads server-stream components in `Update`, owns one local F3
+//! This is view state only: readouts use server-stream components and the gauge uses the
+//! client's effective lever output in `Update`. It owns one local F3
 //! toggle, and writes only UI text, nodes and visibility. It never writes a tank component or enters a
 //! fixed schedule.
 
@@ -25,7 +26,7 @@ struct HudLook {
     debug_right_px: crate::provenance::Sourced<f32>,
     standard_rgb: crate::provenance::Sourced<[f32; 3]>,
     debug_rgb: crate::provenance::Sourced<[f32; 3]>,
-    gauge_bottom_px: crate::provenance::Sourced<f32>,
+    gauge_above_row_gap_px: crate::provenance::Sourced<f32>,
     gauge_width_px: crate::provenance::Sourced<f32>,
     gauge_height_px: crate::provenance::Sourced<f32>,
     gauge_label_px: crate::provenance::Sourced<f32>,
@@ -50,7 +51,7 @@ fn hud_look() -> &'static HudLook {
             ("left_px", look.left_px.0),
             ("debug_top_px", look.debug_top_px.0),
             ("debug_right_px", look.debug_right_px.0),
-            ("gauge_bottom_px", look.gauge_bottom_px.0),
+            ("gauge_above_row_gap_px", look.gauge_above_row_gap_px.0),
             ("gauge_width_px", look.gauge_width_px.0),
             ("gauge_height_px", look.gauge_height_px.0),
             ("gauge_label_px", look.gauge_label_px.0),
@@ -185,7 +186,16 @@ fn spawn_drive_hud(mut commands: Commands, fonts: Res<UiFonts>) {
             Node {
                 position_type: PositionType::Absolute,
                 left: Val::Px(look.left_px.0),
-                bottom: Val::Px(look.gauge_bottom_px.0),
+                bottom: Val::Px(
+                    look.standard_bottom_px.0
+                        + match bevy::text::LineHeight::default() {
+                            bevy::text::LineHeight::Px(px) => px,
+                            bevy::text::LineHeight::RelativeToFont(scale) => {
+                                scale * look.standard_font_px.0
+                            }
+                        }
+                        + look.gauge_above_row_gap_px.0,
+                ),
                 flex_direction: FlexDirection::Column,
                 row_gap: Val::Px(look.gauge_gap_px.0),
                 ..default()
@@ -286,7 +296,7 @@ pub(crate) fn standard_drive_row(
     if state.park {
         gear.push('P');
     }
-    if state.hill_hold {
+    if state.scheduler == SchedulerState::HillHold {
         gear.push('*');
     }
     let rpm = format!("{:>3.1}k", (operating.rpm / 1_000.0).max(0.0));
@@ -366,12 +376,12 @@ fn update_drive_hud(
         (With<DriveDebugHudText>, Without<StandardDriveHudText>),
     >,
 ) {
-    let Ok((mut standard_text, mut standard_visibility)) = standard_label.single_mut() else {
-        return;
-    };
-    let Ok((mut debug_text, mut debug_visibility)) = debug_label.single_mut() else {
-        return;
-    };
+    let (mut standard_text, mut standard_visibility) = standard_label
+        .single_mut()
+        .expect("the drive HUD mounts exactly one standard row for this match");
+    let (mut debug_text, mut debug_visibility) = debug_label
+        .single_mut()
+        .expect("the drive HUD mounts exactly one debug row for this match");
     let Some((drive, signal, transmission, velocity, rotation)) =
         crate::tank::controlled_one(controlled.single())
     else {
@@ -457,7 +467,10 @@ fn update_notch_gauge(
             NotchMark::Throttle => notches.throttle,
             NotchMark::Steer => notches.steer,
         };
-        node.left = Val::Px(notch_left(value));
+        let left = Val::Px(notch_left(value));
+        if node.left != left {
+            node.left = left;
+        }
     }
 }
 
@@ -497,8 +510,8 @@ mod tests {
         assert_eq!(marks.iter(&world).count(), 2);
         for (axis, node) in marks.iter(&world) {
             let expected = match axis {
-                NotchMark::Throttle => 0.25,
-                NotchMark::Steer => -0.25,
+                NotchMark::Throttle => crate::track::drive::drive_feel().notch_step.0,
+                NotchMark::Steer => -crate::track::drive::drive_feel().notch_step.0,
             }; // Fixture tap.
             assert_eq!(node.left, Val::Px(notch_left(expected)));
         }

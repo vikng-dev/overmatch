@@ -429,7 +429,7 @@ fn force_params(geom: &RigGeom, rig: &RigSpec, envelope: &EnvelopeLaw) -> ForceP
         support_damping_per_m: envelope.damping_per_m,
         engage_depth: rig.engage_depth,
         probe_reach: CONTACT_PROBE,
-        slip_saturation: SLIP_SATURATION,
+
         inertia: rig.belt_inertia,
         grip: Some(rig.grip),
     }
@@ -880,7 +880,7 @@ mod tests {
             support_damping_per_m: law.damping_per_m,
             engage_depth: engage,
             probe_reach: CONTACT_PROBE,
-            slip_saturation: SLIP_SATURATION,
+
             inertia: 1.0,
             grip: None,
         };

@@ -55,8 +55,6 @@ use super::transmission::{
     self, DriveSupply, TransmissionInput, TransmissionParams, TransmissionReport, TransmissionState,
 };
 
-const SLIP_SATURATION: f32 = 0.4;
-
 /// Per-tank belt state: server-authoritative, replicated to every client for the track view
 /// (quantised, `net::wire_quant`). Hashed into the determinism trace (`hblt`).
 #[derive(Component, Clone, Copy, PartialEq, Debug, Default)]
@@ -369,7 +367,6 @@ impl TrackGear {
         out.f32("force.support_damping_per_m", p.support_damping_per_m);
         out.f32("force.engage_depth", p.engage_depth);
         out.f32("force.probe_reach", p.probe_reach);
-        out.f32("force.slip_saturation", p.slip_saturation);
         out.f32("force.inertia", p.inertia);
         let grip = p.grip.expect("the game's running gear grips");
         out.f32("force.grip.track", grip.track.dynamic_coefficient);
@@ -576,7 +573,7 @@ fn init_track_gear(blueprint: Res<TankBlueprint>, mut commands: Commands) {
             support_damping_per_m: cal.damping_per_m,
             engage_depth: spec.suspension.engage,
             probe_reach: 0.5,
-            slip_saturation: SLIP_SATURATION,
+
             inertia: spec
                 .reflected_inertia(&blueprint.spec.roadwheels, geom.wrap_radii())
                 .expect("running-gear admission certified the construction inertia"),
@@ -724,6 +721,7 @@ pub(crate) fn belt_tick<O: TerrainOracle>(
 /// control authority repair remains work and cannot become a remote brake toggle.
 // Brake and Unmanned mask this tick's request. The client's persistent lever remains player
 // intent and resumes when the hold or staffing restriction ends; this policy never clears it.
+// In particular, completing repair releases Brake onto the same retained throttle notch.
 pub(crate) fn drive_target(
     command: &ParsedTankCommand,
     tank: Option<&TankVolumes>,
@@ -2168,6 +2166,49 @@ mod tests {
             speeds[0].to_bits(),
             speeds[1].to_bits(),
             "repair changed the unmanned coast: {speeds:?}"
+        );
+    }
+
+    /// The game's damage model: repair brakes mask the player's notch while work is active;
+    /// completing repair resumes propulsion from that same request, without another key edge.
+    #[test]
+    fn repair_brakes_release_onto_the_retained_notch() {
+        let mut hull = DrivenHull::new();
+        hull.drive_to(5.0);
+        hull.engine_held(168); // Fixture: a reduced, repairable module HP pool.
+        hull.app
+            .world_mut()
+            .entity_mut(hull.engine)
+            .insert(crate::damage::repair::ModuleRepair { elapsed: Some(0.0) });
+        for _ in 0..64 * 5 {
+            hull.tick(0.5, 0.0);
+        }
+        let signal = hull.app.world().get::<DriveSignal>(hull.root).unwrap();
+        assert_eq!(
+            signal.throttle, 0.0,
+            "repair must mask the retained request"
+        );
+        assert!(hull.speed.abs() < super::transmission::PARK_ENGAGE_SPEED);
+        hull.app
+            .world_mut()
+            .get_mut::<crate::damage::repair::ModuleRepair>(hull.engine)
+            .unwrap()
+            .elapsed = None;
+        hull.engine_held(DrivenHull::POOL);
+        for _ in 0..64 * 5 {
+            hull.tick(0.5, 0.0);
+        }
+        assert!(
+            hull.app
+                .world()
+                .get::<DriveSignal>(hull.root)
+                .unwrap()
+                .throttle
+                > 0.0
+        );
+        assert!(
+            hull.speed > super::transmission::PARK_ENGAGE_SPEED,
+            "ending repair must resume the player's notch"
         );
     }
 

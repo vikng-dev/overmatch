@@ -208,6 +208,7 @@ fn place(app: &mut BootedSim, tank: Entity, position: Vec3, rotation: Quat, spee
         .resource::<crate::track::sim::TrackGear>()
         .trans();
     transmission.0.gear = gear;
+    transmission.0.park = speed.abs() < crate::track::transmission::PARK_ENGAGE_SPEED;
     transmission.0.omega_e = (speed * params.gears_fwd[(gear - 1) as usize]
         / params.sprocket_radius)
         .max(params.engine.idle_rpm * crate::track::transmission::RPM_TO_RAD);
@@ -501,10 +502,29 @@ fn perceived_load_and_landing_gaps_on_the_course() {
                 .all(|side| side.speed == 0.0)
         );
         let mut launch_gear = 0;
+        let mut cuts = 0;
+        let mut was_cut = false;
+        let mut minimum = 0.0_f32;
         for tick in 0..30 * FIXED_TICKS_PER_SECOND {
             drive_tick(&mut app, tank, 1.0, 0.0);
             if tick == 0 {
                 launch_gear = app.world().get::<TankTransmission>(tank).unwrap().0.gear;
+            }
+            let p = probe(&app, tank);
+            cuts += usize::from(p.shifting && !was_cut);
+            was_cut = p.shifting;
+            minimum = minimum.min(p.next_speeds[0]).min(p.next_speeds[1]);
+            if degrees == 20.0 {
+                // Fixture: S2's specified class witness.
+                assert!(
+                    p.next_speeds
+                        .iter()
+                        .all(|v| *v >= -crate::track::transmission::PARK_ENGAGE_SPEED),
+                    "a supported launch must not roll against intent: tick={tick} speeds={:?} next={:?} forces={:?}",
+                    p.speeds,
+                    p.next_speeds,
+                    p.forces
+                );
             }
         }
         let climb = (app
@@ -514,7 +534,12 @@ fn perceived_load_and_landing_gaps_on_the_course() {
             .0
             - launch_position)
             .dot(rotation * Vec3::NEG_Z);
-        println!("MEASURED grade launch degrees={degrees} gear={launch_gear} distance_m={climb}");
+        println!(
+            "MEASURED grade launch degrees={degrees} gear={launch_gear} distance_m={climb} cuts={cuts} minimum_belt_m_s={minimum}"
+        );
+        if degrees == 20.0 {
+            assert!(cuts <= 1, "S2 must not cascade through cuts");
+        }
         assert!(
             climb > 0.0,
             "a supported capable launch must gain distance uphill"
@@ -814,4 +839,155 @@ fn empty_driver_station_rest_and_descent() {
         state.clutch,
         state.omega_e / RPM_TO_RAD
     );
+}
+
+/// The shipped composition must launch at every player notch on level ground and on a
+/// supported grade, and sustain increasing steady travel. Fixture: a long firm plane.
+#[test]
+fn shipped_notches_launch_and_sustain_ordered_speed() {
+    for degrees in [0.0_f32, 10.0] {
+        let mut last = 0.0;
+        for pedal in [0.25, 0.5, 0.75] {
+            let angle = degrees.to_radians();
+            let extent = crate::terrain_grid::FIXTURE_EXTENT;
+            let height = extent.half_extent() * angle.tan();
+            let grid = crate::terrain_grid::HeightGrid::new(
+                vec![height, height, -height, -height].into(),
+                2,
+                extent,
+            );
+            let mut app = booted_sim_on(Some(grid));
+            start_fixed_clock(&mut app);
+            app.update();
+            let tank = app
+                .world_mut()
+                .query_filtered::<Entity, (With<Tank>, With<Controlled>)>()
+                .single(app.world())
+                .unwrap();
+            let rotation =
+                Quat::from_rotation_y(std::f32::consts::PI) * Quat::from_rotation_x(-angle);
+            let rest = app
+                .world()
+                .resource::<crate::track::rig_geom::RigGeom>()
+                .hull_rest_y;
+            // Fixture: the plane rises toward -Z; travel climbs it from the positive end.
+            let rotation = if degrees == 0.0 {
+                rotation
+            } else {
+                Quat::from_rotation_x(angle)
+            };
+            let z = if degrees == 0.0 { -350.0 } else { 350.0 };
+            let position = Vec3::new(100.0, -z * angle.tan(), z) + rotation * Vec3::Y * rest;
+            place(&mut app, tank, position, rotation, 0.0, 1);
+            for _ in 0..128 {
+                drive_tick(&mut app, tank, 0.0, 0.0);
+            }
+            let position = app
+                .world()
+                .get::<avian3d::prelude::Position>(tank)
+                .unwrap()
+                .0;
+            place(&mut app, tank, position, rotation, 0.0, 1);
+            use bevy::ecs::system::RunSystemOnce;
+            let supply = app
+                .world_mut()
+                .run_system_once(
+                    move |tanks: Query<(
+                        &crate::damage::TankVolumes,
+                        &crate::damage::TankCapabilities,
+                    )>,
+                          facets: Query<crate::damage::VolumeFacets>| {
+                        let (volumes, caps) = tanks.get(tank).unwrap();
+                        let request = crate::command::ParsedTankCommand::try_from(TankCommand {
+                            throttle: pedal,
+                            ..default()
+                        })
+                        .unwrap();
+                        crate::track::sim::drive_target(
+                            &request,
+                            Some(volumes),
+                            Some(caps),
+                            &facets,
+                        )
+                        .supply
+                    },
+                )
+                .unwrap();
+            let mut lo = f32::INFINITY;
+            let mut hi = f32::NEG_INFINITY;
+            let mut sum = 0.0;
+            let mut capable = false;
+            for tick in 0..60 * FIXED_TICKS_PER_SECOND {
+                drive_tick(&mut app, tank, pedal, 0.0);
+                let p = probe(&app, tank);
+                if tick == 0 {
+                    let tp = app
+                        .world()
+                        .resource::<crate::track::sim::TrackGear>()
+                        .trans();
+                    capable = (1..=tp.launch_gears).any(|g| {
+                        price_driver_force(
+                            tp,
+                            supply,
+                            0.0,
+                            tp.gears_fwd[usize::from(g - 1)],
+                            pedal,
+                            p.grip_limit_n,
+                            crate::track::transmission::ClutchState::Slip,
+                        ) > p.perceived_load_n
+                    });
+                }
+                assert!(
+                    p.grip_limit_n > 0.0,
+                    "the notch proof must remain supported"
+                );
+                assert!(
+                    p.next_speeds
+                        .iter()
+                        .all(|v| *v >= -crate::track::transmission::PARK_ENGAGE_SPEED),
+                    "grade={degrees} pedal={pedal} tick={tick} speeds={:?} next={:?} forces={:?}",
+                    p.speeds,
+                    p.next_speeds,
+                    p.forces
+                );
+                if tick >= 59 * FIXED_TICKS_PER_SECOND {
+                    let v = app
+                        .world()
+                        .get::<avian3d::prelude::LinearVelocity>(tank)
+                        .unwrap()
+                        .0
+                        .dot(rotation * Vec3::NEG_Z);
+                    lo = lo.min(v);
+                    hi = hi.max(v);
+                    sum += v;
+                }
+            }
+            let speed = sum / FIXED_TICKS_PER_SECOND as f32;
+            let params = app
+                .world()
+                .resource::<crate::track::sim::TrackGear>()
+                .trans();
+            println!(
+                "MEASURED shipped notch grade={degrees} pedal={pedal} capable={capable} supply={supply:?} speed={speed} spread={} gear={}",
+                hi - lo,
+                app.world().get::<TankTransmission>(tank).unwrap().0.gear
+            );
+            if capable || degrees == 0.0 {
+                assert!(
+                    speed > crate::track::transmission::PARK_ENGAGE_SPEED && speed > last,
+                    "each capable notch must launch and increasing pedal must sustain increasing speed"
+                );
+                last = speed;
+            } else {
+                assert!(
+                    speed.abs() < crate::track::transmission::PARK_ENGAGE_SPEED,
+                    "an incapable notch must remain parked"
+                );
+            }
+            assert!(
+                hi - lo < 0.01 * params.governed_speed(false),
+                "each notch must settle"
+            );
+        }
+    }
 }

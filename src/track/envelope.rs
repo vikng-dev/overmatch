@@ -134,7 +134,7 @@ pub(crate) fn calibrate(
         support_damping_per_m: 0.0,
         engage_depth,
         probe_reach,
-        slip_saturation: 1.0,
+
         inertia: 1.0,
         grip: None,
     };

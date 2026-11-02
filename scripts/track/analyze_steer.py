@@ -11,7 +11,7 @@ against what
 the model (src/track/forces.rs + drive.rs) promises by construction.
 
 Each file self-describes via its `meta` row (schema:2 — slew, half_tread, mu,
-slip_saturation, plus the command script), so the analyzer needs
+plus the command script), so the analyzer needs
 no scenario flags: pivot / turn / slalom / straight are detected from the
 scripted commands.
 

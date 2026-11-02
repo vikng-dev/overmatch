@@ -494,7 +494,7 @@ mod drive_row_tests {
         let mut state = TransmissionState {
             gear: 1,
             park: true,
-            hill_hold: true,
+            scheduler: track::transmission::SchedulerState::HillHold,
             ..TransmissionState::stopped()
         };
         let mut operating = DriveReadout {
@@ -509,7 +509,7 @@ mod drive_row_tests {
             ["Gear", "F1P*", "RPM", "2.6k", "Speed", "45", "km/h"]
         );
 
-        state.hill_hold = false;
+        state.scheduler = track::transmission::SchedulerState::Normal;
         assert_eq!(
             fields(drive_hud::standard_drive_row(
                 Some((&state, &operating)),
@@ -519,7 +519,7 @@ mod drive_row_tests {
             "park owns P independently of hill hold"
         );
         state.park = false;
-        state.hill_hold = true;
+        state.scheduler = track::transmission::SchedulerState::HillHold;
         assert_eq!(
             fields(drive_hud::standard_drive_row(
                 Some((&state, &operating)),
@@ -530,7 +530,7 @@ mod drive_row_tests {
         );
 
         state.park = false;
-        state.hill_hold = false;
+        state.scheduler = track::transmission::SchedulerState::Normal;
         state.gear = 8;
         operating.gear_label = "F8".to_string();
         assert_eq!(
