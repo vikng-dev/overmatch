@@ -3470,3 +3470,78 @@ fn the_weight_check_priced_per_change_and_after_a_long_wall_shot() {
         dusted.len()
     );
 }
+
+/// Pricing bed for the game's building destruction model, game state only. One deposit on
+/// the shipped construction, with a one-sided patch of externally loaded chunks. Fixture:
+/// nearest unburied centroids to the minimum-X face, parallel 10 N s blows and 100 kN peaks,
+/// no crushing or cavity energy. Setup and fresh-state cloning are outside the timed deposit;
+/// the server's complete `run_laws` path is inside it. No assertion depends on elapsed time.
+#[test]
+#[ignore = "a pricing bed, run on demand under perf and the machine lock"]
+fn a_seeded_blast_deposit_priced_by_loaded_chunks() {
+    let kind = shipped_house();
+    let base = Live::new(&kind, 1.0);
+    let mut candidates: Vec<usize> = (0..base.structure.chunks.len())
+        .filter(|&c| !base.structure.chunks[c].buried)
+        .collect();
+    let centre = base.structure.chunks[candidates[0]].centroid;
+    let face = candidates
+        .iter()
+        .map(|&c| base.structure.chunks[c].centroid.x)
+        .min_by(f32::total_cmp)
+        .unwrap();
+    let source = Vec3::new(face, centre.y, centre.z);
+    candidates.sort_by(|&a, &b| {
+        base.structure.chunks[a]
+            .centroid
+            .distance_squared(source)
+            .total_cmp(&base.structure.chunks[b].centroid.distance_squared(source))
+            .then(a.cmp(&b))
+    });
+    for n in [10, 50, 200] {
+        let loads: Vec<_> = candidates[..n]
+            .iter()
+            .map(|&chunk| Load {
+                chunk,
+                at: base.structure.chunks[chunk].centroid,
+                energy: 0.0,
+                crushed: 0.0,
+                blow: Vec3::X * 10.0,
+                press: Vec3::ZERO,
+                peak: Some(Vec3::X * 100_000.0),
+                origin: Origin::Field,
+            })
+            .collect();
+        let mut micros = Vec::new();
+        let mut outcome = None;
+        // Fixture: seven fresh deposits per size; report distribution, never a time gate.
+        for _ in 0..7 {
+            let mut live = base.clone();
+            let start = std::time::Instant::now();
+            let changes = run_laws(
+                &kind.layout.element_of,
+                &mut live,
+                &loads,
+                Vec::new(),
+                Vec3::ZERO,
+            );
+            micros.push(start.elapsed().as_secs_f64() * 1e6);
+            let observed = (
+                changes.failures.len(),
+                changes.events.len(),
+                changes.groups.len(),
+            );
+            if let Some(expected) = outcome {
+                assert_eq!(observed, expected, "fresh deposits have the same outcome");
+            }
+            outcome = Some(observed);
+            std::hint::black_box(changes);
+        }
+        let (p50, p95, mean, max) = priced(micros);
+        println!(
+            "MEASURED seeded deposit: {} chunks, N {n}; us p50 {p50:.1} p95 {p95:.1} \
+             mean {mean:.1} max {max:.1}; failures/events/groups {outcome:?}",
+            base.structure.chunks.len(),
+        );
+    }
+}

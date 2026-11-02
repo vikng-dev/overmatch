@@ -62,7 +62,7 @@
 //! (`.agents/scratch/destruction-2026-10-30-buildings/wall-prototype/README.md`) owns the
 //! derivations, the values' sources and the verdicts.
 
-use std::f32::consts::PI;
+use std::{collections::HashSet, f32::consts::PI};
 
 use bevy::ecs::entity::Entity;
 use bevy::math::{DVec3, Mat3, Vec3};
@@ -1719,7 +1719,7 @@ pub(crate) fn structural(
     // A punch ring grows from where an external blow lands. A group frame's inertial blows
     // reach every chunk of its group; seeded there, the first ring would be the whole group,
     // which has no boundary, and no local punch would be read.
-    let struck_at = ring_seeds(structure, inputs.sources, |load| load.blow);
+    let struck_at = ring_patches(&ring_seeds(structure, inputs.sources, |load| load.blow));
     // Every pass cracks an intact joint (asserted where it cracks) and none closes again, so
     // the passes end.
     loop {
@@ -1780,8 +1780,9 @@ pub(crate) fn structural(
                 }
             }
         }
+        let ring_loads = RingLoads::new(structure.chunks.len(), loads);
         for group in ring_groups(state, &graph, &struck_at, &mut steps) {
-            if let Some(failure) = ring_failure(structure, state, &incident, &group, loads) {
+            if let Some(failure) = ring_failure(structure, state, &incident, &group, &ring_loads) {
                 let ratio = failure.demand / failure.capacity;
                 if ratio >= 1.0 && worst.as_ref().is_none_or(|(w, _)| ratio > *w) {
                     worst = Some((ratio, failure));
@@ -2129,7 +2130,7 @@ pub(crate) fn weigh(
     let incident = incident(structure);
     weighed.steps += structure.joints.len();
     // Rings grow from external presses, as the push check's grow from external blows.
-    let pressed = ring_seeds(structure, loads, |load| load.press);
+    let pressed = ring_patches(&ring_seeds(structure, loads, |load| load.press));
     // Every pass cracks an intact joint (asserted where it cracks) and none closes again, so
     // the passes end.
     loop {
@@ -2219,13 +2220,14 @@ pub(crate) fn weigh(
                 weighed_with.dedup();
             }
         }
+        let ring_loads = RingLoads::new(structure.chunks.len(), loads);
         for group in ring_groups(state, &graph, &pressed, &mut weighed.steps) {
             let failure = ring_force_failure(
                 structure,
                 state,
                 &incident,
                 &group,
-                loads,
+                &ring_loads,
                 Vec3::NEG_Y * GRAVITY,
             );
             if let Some(failure) = failure {
@@ -3066,11 +3068,13 @@ fn ring_seeds(
     force: impl Fn(&Load) -> Vec3,
 ) -> Vec<(usize, Vec3)> {
     let mut pushes = vec![Vec3::ZERO; structure.chunks.len()];
+    let mut seen = vec![false; structure.chunks.len()];
     let mut chunks = Vec::new();
     for load in loads.iter().filter(|load| external(load)) {
         let push = force(load);
         if push != Vec3::ZERO {
-            if !chunks.contains(&load.chunk) {
+            if !seen[load.chunk] {
+                seen[load.chunk] = true;
                 chunks.push(load.chunk);
             }
             pushes[load.chunk] += push;
@@ -3085,24 +3089,17 @@ fn ring_seeds(
 /// capacity as a candidate grows, so this bound can omit a weaker ring.
 const RING_GROWTH: usize = 2;
 
-/// The punch-ring candidates about each loaded chunk, coherent loaded patches and their union:
-/// each patch, then it grown
-/// by one and by [`RING_GROWTH`] rings of neighbours through `graph`'s intact bonded joints, each
-/// split into its bonded components, each component ascending, in growth order and without
-/// repeats. Adds the chunks it reaches to `steps`.
-fn ring_groups(
-    state: &WallState,
-    (neighbours, ..): &Graph,
-    seeds: &[(usize, Vec3)],
-    steps: &mut usize,
-) -> Vec<Vec<usize>> {
-    let mut groups: Vec<Vec<usize>> = Vec::new();
+/// Source patches do not depend on topology or inertia: form them once per assessment, then
+/// grow them through the current graph on each pass. Membership sets never choose iteration
+/// order; the vectors retain first discovery order for tied failure ratios.
+fn ring_patches(seeds: &[(usize, Vec3)]) -> Vec<Vec<usize>> {
     // Each source neighbourhood can separate under unequal acceleration even when external
     // loads point the same way. Coherent patches and their union also let sources cooperate.
     let mut patches = Vec::new();
+    let mut seen = HashSet::new();
     for &(chunk, push) in seeds {
         let local = vec![chunk];
-        if !patches.contains(&local) {
+        if seen.insert(local.clone()) {
             patches.push(local);
         }
         let patch: Vec<usize> = seeds
@@ -3110,15 +3107,30 @@ fn ring_groups(
             .filter(|(_, other)| other.dot(push) > 0.0)
             .map(|&(chunk, _)| chunk)
             .collect();
-        if !patch.is_empty() && !patches.contains(&patch) {
+        if !patch.is_empty() && seen.insert(patch.clone()) {
             patches.push(patch);
         }
     }
     let union: Vec<usize> = seeds.iter().map(|&(chunk, _)| chunk).collect();
-    if !patches.contains(&union) {
+    if seen.insert(union.clone()) {
         patches.push(union);
     }
-    for seeds in &patches {
+    patches
+}
+
+/// The punch-ring candidates about [`ring_patches`]: each patch, then it grown by one and by
+/// [`RING_GROWTH`] rings of neighbours through `graph`'s intact bonded joints, each split into
+/// its bonded components, each component ascending, in growth order and without repeats.
+/// Adds the chunks it reaches to `steps`.
+fn ring_groups(
+    state: &WallState,
+    (neighbours, ..): &Graph,
+    patches: &[Vec<usize>],
+    steps: &mut usize,
+) -> Vec<Vec<usize>> {
+    let mut groups = Vec::new();
+    let mut unique = HashSet::new();
+    for seeds in patches {
         let mut grown = vec![false; neighbours.len()];
         let mut members: Vec<usize> = Vec::new();
         for &chunk in seeds {
@@ -3164,13 +3176,46 @@ fn ring_groups(
                     }
                 }
                 component.sort_unstable();
-                if !groups.contains(&component) {
+                if unique.insert(component.clone()) {
                     groups.push(component);
                 }
             }
         }
     }
     groups
+}
+
+/// A current frame's loads indexed by chunk. A local punch reads only its own loads, in their
+/// original source order: regrouping their sums by chunk would change cancellation and tied
+/// failure ratios. Both assessment loops rebuild this index after framing their current groups.
+struct RingLoads<'a> {
+    loads: &'a [Load],
+    chunks: Vec<Vec<usize>>,
+}
+
+impl<'a> RingLoads<'a> {
+    fn new(chunks: usize, loads: &'a [Load]) -> Self {
+        let mut indexed = vec![Vec::new(); chunks];
+        for (index, load) in loads.iter().enumerate() {
+            indexed[load.chunk].push(index);
+        }
+        Self {
+            loads,
+            chunks: indexed,
+        }
+    }
+
+    fn on(&self, group: &[usize]) -> Vec<&'a Load> {
+        let mut indices: Vec<_> = group
+            .iter()
+            .flat_map(|&chunk| self.chunks[chunk].iter().copied())
+            .collect();
+        indices.sort_unstable();
+        indices
+            .into_iter()
+            .map(|index| &self.loads[index])
+            .collect()
+    }
 }
 
 /// A punch ring's reading of one group ([`ring`]).
@@ -3325,12 +3370,9 @@ fn ring_failure(
     state: &WallState,
     incident: &[Vec<usize>],
     group: &[usize],
-    loads: &[Load],
+    loads: &RingLoads<'_>,
 ) -> Option<Failure> {
-    let on: Vec<&Load> = loads
-        .iter()
-        .filter(|load| group.binary_search(&load.chunk).is_ok())
-        .collect();
+    let on = loads.on(group);
     let push: Vec3 = on.iter().map(|load| load.blow).sum();
     let ring = ring(structure, state, incident, group, push)?;
     let reaches = |f: Vec3| f.dot(ring.along) >= ring.strength;
@@ -3365,14 +3407,10 @@ fn ring_force_failure(
     state: &WallState,
     incident: &[Vec<usize>],
     group: &[usize],
-    loads: &[Load],
+    loads: &RingLoads<'_>,
     gravity: Vec3,
 ) -> Option<Failure> {
-    let push: Vec3 = loads
-        .iter()
-        .filter(|load| group.binary_search(&load.chunk).is_ok())
-        .map(|load| load.press)
-        .sum();
+    let push: Vec3 = loads.on(group).iter().map(|load| load.press).sum();
     let ring = ring(structure, state, incident, group, push)?;
     Some(Failure {
         joints: ring.opens,
@@ -4495,6 +4533,29 @@ mod tests {
         assert_eq!(changes.groups.len(), 2);
     }
 
+    /// Indexed punch loads retain source order across chunks and retain multiple sources on
+    /// one chunk. The authority's failure selection relies on the same rounded resultant as
+    /// filtering the source stream: summing chunk by chunk loses the final unit blow here.
+    /// Fixture: interleaved axial blows at f32's unit-resolution boundary, plus an outside load.
+    #[test]
+    fn indexed_punch_loads_preserve_cancellation_across_chunks() {
+        let slab = unsupported_slab(3);
+        let loads: Vec<_> = [(0, 16_777_216.0), (1, 7.0), (2, -16_777_216.0), (0, 1.0)]
+            .into_iter()
+            .map(|(chunk, impulse)| Load {
+                chunk,
+                blow: Vec3::X * impulse,
+                at: slab.chunks[chunk].centroid,
+                ..slab_contact(&slab, 0.0)
+            })
+            .collect();
+        let indexed = RingLoads::new(slab.chunks.len(), &loads);
+        let on = indexed.on(&[0, 2]);
+        assert_eq!(on, vec![&loads[0], &loads[2], &loads[3]]);
+        assert_eq!(on.iter().map(|load| load.blow).sum::<Vec3>(), Vec3::X);
+        assert!(indexed.on(&[]).is_empty());
+    }
+
     /// A moving pair's relative load is set by unequal acceleration, including when both
     /// external sources point the same way. Uniform translation opens nothing; the runtime
     /// impulse and sustained-force assessments both rely on local punch candidates.
@@ -4845,10 +4906,11 @@ mod tests {
                     }
                 }
             }
-            let pushed = ring_seeds(structure, loads, |load| load.blow);
+            let pushed = ring_patches(&ring_seeds(structure, loads, |load| load.blow));
+            let ring_loads = RingLoads::new(structure.chunks.len(), loads);
             for group in ring_groups(state, &graph, &pushed, &mut 0) {
                 if let Some(failure) =
-                    ring_failure(structure, state, &incident(structure), &group, loads)
+                    ring_failure(structure, state, &incident(structure), &group, &ring_loads)
                 {
                     let ratio = failure.demand / failure.capacity;
                     if ratio >= 1.0 && worst.as_ref().is_none_or(|(w, _)| ratio > *w) {
@@ -7491,7 +7553,14 @@ mod tests {
                 step: STEP,
             },
         };
-        let failure = ring_failure(&structure, &state, &incident, &[4], &[load]).unwrap();
+        let failure = ring_failure(
+            &structure,
+            &state,
+            &incident,
+            &[4],
+            &RingLoads::new(structure.chunks.len(), &[load]),
+        )
+        .unwrap();
         println!(
             "DERIVED slow ram: own {own} J, pair {pair} J, required {} J; demand {} against {} N s",
             ring.work, failure.demand, failure.capacity
@@ -7529,7 +7598,14 @@ mod tests {
                 step: STEP,
             },
         };
-        let failure = ring_failure(&structure, &state, &incident, &[4], &[load]).unwrap();
+        let failure = ring_failure(
+            &structure,
+            &state,
+            &incident,
+            &[4],
+            &RingLoads::new(structure.chunks.len(), &[load]),
+        )
+        .unwrap();
         assert!(failure.demand > failure.capacity, "the ring opens");
         let loads = debit_work(&structure, &[failure], &[4], [load]);
         let centroid = structure.chunks[4].centroid;
@@ -7654,7 +7730,13 @@ mod tests {
                     step: hz.recip(),
                 },
             };
-            let failure = ring_failure(&structure, &state, &incident, &[4], &[load]);
+            let failure = ring_failure(
+                &structure,
+                &state,
+                &incident,
+                &[4],
+                &RingLoads::new(structure.chunks.len(), &[load]),
+            );
             let failed = failure.is_some_and(|f| f.demand >= f.capacity);
             assert!(
                 !has_failed || failed,
