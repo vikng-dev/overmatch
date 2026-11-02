@@ -1,20 +1,13 @@
-//! Graphics presets: the one table of tier → values, and the PRESET row's label derived from it.
+//! Graphics presets: one tier → values table, never persisted as a tier. [`Preset::of`] derives
+//! the label from exact driven-row equality, else CUSTOM. [`Preset::apply`] writes those rows
+//! through Settings and the normal reconciler/save path, so tier and rows cannot disagree.
 //!
-//! **A preset is never stored.** [`Preset::of`] names the tier whose table equals the current values
-//! of the rows it drives, or `None` — the row's CUSTOM. [`Preset::apply`] writes every one of those
-//! rows at once, into [`Settings`], so choosing a tier goes through the same single writer as any
-//! other row (`apply_settings`) and is saved the same way. Only the rows reach `video.ron`, so a
-//! saved preset cannot disagree with its rows, and editing any driven row reads CUSTOM by itself.
+//! [`Look`] limits scope to picture/cost rows; window, display, vsync, cap, UI scale and gameplay
+//! rows are outside its write set.
 //!
-//! **Scope: [`Look`] is the whole of what a preset drives** — the rows that trade frame time for
-//! picture. Window mode, display, vsync, frame cap, UI scale and every GAMEPLAY row are not fields
-//! of it, so [`Preset::apply`] has no way to write them.
-//!
-//! **The values are provisional** (owner, #159): each tier is to become a hardware promise ("a PC
-//! of class X runs the 30-tank battle at 120 fps on preset Y") and is retuned against the night
-//! battery. Retuning is an edit to [`Preset::look`] alone; the tests pin class invariants
-//! only — every value on its row's ladder, every row non-decreasing in cost from LOW to ULTRA, the
-//! tiers pairwise distinct — never a tier's particular values.
+//! Values are provisional (#159), to be retuned in [`Preset::look`] against the night battery
+//! into hardware promises (class X, 30-tank battle, 120 fps on tier Y). Tests pin ladder membership,
+//! non-decreasing cost and pairwise distinctness, never particular tier values.
 
 use super::{
     BloomLevel, MsaaLevel, PixelBudget, RenderScaleLevel, Settings, ShadowCascades, ShadowDistance,
@@ -76,10 +69,8 @@ impl Look {
         settings.track_print_range = self.track_print_range;
     }
 
-    /// Each driven row's rung, counted from the row's cheapest: the position in its ladder's
-    /// `ORDER` (every one of those ascends in cost), and for the detail budget the slider stop
-    /// counted from the top, because a LARGER pixel budget is the cheaper one. A value off its
-    /// ladder (a hand-edited budget) counts as the stop the slider would show for it.
+    /// Ranks from cheapest: each enum's ORDER position, detail budget from the top (larger error is
+    /// cheaper). An off-ladder budget uses the slider's nearest stop.
     pub(crate) fn ranks(self) -> [usize; DRIVEN_ROWS] {
         [
             rank(&RenderScaleLevel::ORDER, self.render_scale),
@@ -257,10 +248,8 @@ mod tests {
         settings
     }
 
-    /// **Every tier's every value is a rung its row can show.** The PRESET row writes these into
-    /// rows the player then walks with the arrows, and a value off its ladder is one the row can
-    /// render but never step back to (`ui::step_in` resolves it to the bottom rung, and the budget
-    /// slider snaps it on first touch).
+    /// Presets must write reachable row values: enum steps cannot revisit an off-ladder value,
+    /// and the budget slider snaps one on first touch. See `ui::step_in`.
     #[test]
     fn every_tier_value_is_on_its_rows_ladder() {
         for tier in Preset::ORDER {
@@ -323,10 +312,9 @@ mod tests {
         }
     }
 
-    /// **The label is derived: the tier whose table matches exactly, else CUSTOM.** Applying a tier
-    /// reads that tier whatever the undriven rows hold, and a value between two rungs matches no
-    /// table. The one-rung edit of every row, through the row itself, is
-    /// `ui::tests::editing_a_driven_row_reads_custom_and_any_other_row_keeps_the_tier`.
+    /// Undriven rows must not affect tier recognition; off-ladder values must read CUSTOM.
+    /// `ui::tests::editing_a_driven_row_reads_custom_and_any_other_row_keeps_the_tier` covers edits
+    /// through each row.
     #[test]
     fn the_label_is_the_matching_tier_else_custom() {
         for base in [Settings::default(), every_undriven_row_off_default()] {
