@@ -575,10 +575,10 @@ need a wider authority-owned wire contract.
 Subject: the game's damage model, game state only. Crew are HP pools at stations.
 
 **Default — F starts or cancels parallel module repair.** Every function-bearing module
-out of action at the press starts its own timer, authored HP divided by one shared work rate.
-ASSUMED balance choice: **20 HP/s**, held with provenance in `assets/damage/repair.ron`.
+below capacity at the press starts its own timer, missing HP divided by one shared work rate.
+The **20 HP/s** balance `Unit`, held with provenance in `assets/damage/repair.ron`.
 DERIVED for the current Tiger asset: the largest module pool, 479 HP, takes **23.95 s**.
-Each module stays out of action until its own work finishes, then returns whole. Cancelling
+Each module keeps its held share until its own work finishes, then returns whole. Cancelling
 keeps finished modules and discards the remaining work. There is no repair-use limit.
 
 While any module timer runs the crew holds the tank on its brakes, the same brake hold the
@@ -646,8 +646,7 @@ supply; test acceleration and steering in forward and reverse. Both phase and re
 select the service brakes. No timing or capture measurement was taken in this lane.
 
 **Revert cost.** Medium, as specified in design §7b: module resolver, authored checkpoint data,
-admission and invariant tests. The generic rate consumers and existing load-rate wire carrier
-can stay. Keep the discarded continuous path in git when choosing checkpoints.
+admission and invariant tests. The generic rate consumers and bounded load-work wire carrier can stay. Keep the discarded continuous path in git when choosing checkpoints.
 
 **Lives in.** `src/damage.rs`, `src/shooting.rs`, `src/tank/model.rs`, `src/spec.rs`,
 `src/track/sim.rs`, `src/tank/servo.rs`, `src/crew_ui.rs`; tracker #228.
@@ -657,3 +656,8 @@ below capacity may start repair, owing only missing HP at the shared work rate. 
 held share remains until completion; cancellation discards unfinished progress. Compare the
 recovery decision in play, including a nearly empty module. Implemented by
 `damage: repair reduced module pools (#228)`; design §7b owns the rule.
+
+Subject: the game's damage model, game state only. `damage: bound replicated load work before
+rescaling (#228)` makes load work a checked Q63 share of the local admitted base and removes rates
+from Ready and work-free intervals. Design §7b owns the timing contract and the per-finding
+verification table. This also keeps zero-work guards outside the capability-rate budget.

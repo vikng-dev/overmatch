@@ -1346,6 +1346,78 @@ mod tests {
         }
     }
 
+    /// The game's damage model: a positive engine pool below the pedal deadzone must still
+    /// pull away through the production adapter, with full intent and a weaker torque supply.
+    /// Fixture pools are 336 HP full and 30 HP held; no asset-specific threshold is asserted.
+    #[test]
+    fn a_reduced_engine_pulls_away_through_the_production_adapter() {
+        use crate::ballistics::{ComponentHealth, POOL_UNITS_PER_HP};
+        use crate::command::TankCommand;
+        use crate::damage::{CrewStation, Crewman, FunctionRole, Group, Part, VolumeOf};
+        let mut speeds = Vec::new();
+        for held in [336, 30] {
+            let (mut app, roots) = support_fixture(false, false, true, 0.0);
+            let root = roots[0];
+            app.world_mut().entity_mut(root).insert((
+                TankCapabilities(
+                    [(
+                        Capability::Drive,
+                        vec![Group::Single(Part::Driver), Group::Single(Part::Engine)],
+                    )]
+                    .into(),
+                ),
+                ParsedTankCommand::try_from(TankCommand {
+                    throttle: 1.0,
+                    ..default()
+                })
+                .unwrap(),
+            ));
+            app.world_mut().spawn((
+                CrewStation::Driver,
+                Crewman {
+                    home: CrewStation::Driver,
+                },
+                VolumeOf(root),
+            ));
+            app.world_mut().spawn((
+                FunctionRole::Engine,
+                ComponentHealth::holding(336, held * POOL_UNITS_PER_HP),
+                VolumeOf(root),
+            ));
+            for _ in 0..16 {
+                run_adapter(&mut app, &[(root, Vec3::ZERO)]);
+            }
+            assert_eq!(app.world().get::<DriveSignal>(root).unwrap().throttle, 1.0);
+            assert!(
+                !app.world()
+                    .get::<TankTransmission>(root)
+                    .unwrap()
+                    .0
+                    .clutch_out
+            );
+            let speed = app.world().get::<TrackDrive>(root).unwrap().sides[0].speed;
+            assert!(speed > 0.0, "held {held}: speed {speed}");
+            // Hull forward is -Z in this identity-pose fixture. The adapter must apply
+            // forward traction to the hull, rather than merely spin the belts in place.
+            let traction = app
+                .world()
+                .get::<TrackGripEffect>(root)
+                .unwrap()
+                .traction_force
+                .z;
+            assert!(traction < 0.0, "held {held}: forward traction {traction}");
+            speeds.push(speed);
+        }
+        assert!(
+            speeds[1] < speeds[0],
+            "reduced torque must pull away more weakly: {speeds:?}"
+        );
+        println!(
+            "MEASURED fixture belt speeds after input slew: full {}, reduced {} m/s",
+            speeds[0], speeds[1]
+        );
+    }
+
     /// The controller's deceleration estimate must scale with the whole vehicle rather than
     /// retaining a force or mass from its fixture. A brake-only or mass-only scale mutant fails.
     #[test]

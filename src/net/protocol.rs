@@ -238,7 +238,10 @@ use crate::{CombatantId, CombatantLife, ShotId};
 /// beside a belt with rounds left. Its encoding is unchanged; its definition moves.
 /// REV 62 (#247): a fired round carries its birth at the source collider exit beside the muzzle.
 /// REV 63 (#238): respawn openings carry the shared SimTick deadline type.
-pub const PROTOCOL_REV: u32 = 64;
+/// REV 64 (#228): the game's damage model carries a positive load rate in the weapon gate.
+/// REV 65 (#228): bounded load-work shares replace peer-authored rescalable spans; only load
+/// phases carry a rate, and zero-work/cyclic intervals carry none.
+pub const PROTOCOL_REV: u32 = 65;
 
 /// Compatibility tag derived from the complete pinned wire manifest plus the crate version. This
 /// is the runtime handshake value: version-exact, so a version bump intentionally changes it.
@@ -724,20 +727,33 @@ fn apply_net_crew(
             );
             continue;
         }
-        if net.volumes.iter().any(|snap| {
-            snap.repair
-                .is_some_and(|fraction| !fraction.is_finite() || !(0.0..=1.0).contains(&fraction))
-        }) {
-            warn!("client: refused a crew snapshot with an invalid module repair fraction");
-            continue;
-        }
-        for (volume, snap) in bearers.into_iter().zip(&net.volumes) {
+        // Parse every peer timer against its prospective pool before applying the atomic record.
+        let parsed: Result<Vec<_>, _> = bearers
+            .iter()
+            .zip(&net.volumes)
+            .map(|(&volume, snap)| {
+                let sink = volumes
+                    .get(volume)
+                    .expect("a health bearer was filtered on this query");
+                let mut health = *sink.health;
+                health.set_held(snap.held);
+                crate::damage::repair::ModuleRepair::from_snapshot(snap.repair, &health)
+            })
+            .collect();
+        let repairs = match parsed {
+            Ok(repairs) => repairs,
+            Err(error) => {
+                warn!("client: refused a crew snapshot with invalid module repair: {error}");
+                continue;
+            }
+        };
+        for ((volume, snap), parsed_repair) in bearers.into_iter().zip(&net.volumes).zip(repairs) {
             let mut sink = volumes
                 .get_mut(volume)
                 .expect("a health bearer is a volume sink: `bearers` was filtered on the query");
             sink.health.set_held(snap.held);
             if let Some(mut repair) = sink.repair {
-                repair.set_fraction(snap.repair, &sink.health);
+                *repair = parsed_repair;
             }
             if let Some(crew) = snap.crew {
                 if let Some(mut crewman) = sink.crewman
@@ -1125,7 +1141,7 @@ const WIRE_SURFACE_HASH: u64 = 0xc0256acf39c3f9da;
 /// The pinned hash of the OWN wire-facing type DEFINITIONS (field layout, not just names). Re-pin it
 /// whenever a wire-facing struct/enum definition changes; house process also bumps
 /// [`PROTOCOL_REV`]. The tripwire prints the new value. See the block above for the coverage model.
-const WIRE_TYPES_HASH: u64 = 0xe1cba587085a19c1;
+const WIRE_TYPES_HASH: u64 = 0xacc601ec59bc4506;
 
 /// The pinned `Cargo.lock` versions of the external crates whose types ride the wire (avian's
 /// replicated physics components; lightyear's wire framing / input protocol). A bump of either can
@@ -2009,6 +2025,9 @@ mod tests {
         ("src/tank/model.rs", "WeaponGate"),
         ("src/tank/model.rs", "WeaponGateState"),
         ("src/tank/model.rs", "LoadRate"),
+        ("src/tank/model.rs", "LoadShare"),
+        ("src/tank/model.rs", "LoadWork"),
+        ("src/tank/model.rs", "LoadWorkWire"),
         ("src/tank/model.rs", "WeaponTiming"),
         ("src/sim_tick.rs", "SimTick"),
         ("src/sim_tick.rs", "TickSpan"),
@@ -2875,8 +2894,8 @@ mod tests {
         );
     }
 
-    /// The game's damage model: the owner's atomic snapshot must carry both the still-empty
-    /// module and its progress, then the full pool and idle timer together. Either a missing
+    /// The game's damage model: the owner's atomic snapshot must carry both the reduced
+    /// module's held share and its progress, then the full pool and idle timer together. Either a missing
     /// publish or a missing apply strands the owner's panel and fails this round trip.
     #[test]
     fn module_repair_progress_and_completion_round_trip_in_private_snapshot() {
@@ -2884,11 +2903,11 @@ mod tests {
         use crate::damage::{FunctionRole, VolumeOf};
         let mut world = World::new();
         let source = world.spawn(NetCrew::default()).id();
-        // ASSUMED fixture HP, independent of a tank asset.
+        // Fixture: 21 HP capacity, 1 HP held, independent of a tank asset.
         let mut health = ComponentHealth::full(21);
-        health.drain();
-        let mut repair = ModuleRepair::default();
-        repair.set_fraction(Some(0.25), &health);
+        health.set_held(crate::ballistics::POOL_UNITS_PER_HP);
+        let repair = ModuleRepair::from_snapshot(Some(0.25), &health)
+            .expect("fixture repair is active on a reduced module");
         let module = world
             .spawn((VolumeOf(source), FunctionRole::Engine, health, repair))
             .id();
@@ -2905,7 +2924,7 @@ mod tests {
             .id();
         world.run_system_once(apply_net_crew).unwrap();
         let view_health = world.get::<ComponentHealth>(view_module).unwrap();
-        assert!(view_health.is_empty());
+        assert_eq!(view_health.held(), crate::ballistics::POOL_UNITS_PER_HP);
         assert_eq!(
             world
                 .get::<ModuleRepair>(view_module)
@@ -2923,6 +2942,41 @@ mod tests {
         assert!(
             world
                 .get::<ModuleRepair>(view_module)
+                .unwrap()
+                .elapsed
+                .is_none()
+        );
+    }
+
+    /// The game's damage model: a full pool has no repair work denominator. The client must
+    /// refuse an active repair beside it atomically, preserving the previous valid snapshot.
+    #[test]
+    fn a_full_pool_cannot_arrive_with_active_repair_progress() {
+        use crate::damage::{FunctionRole, VolumeOf};
+        let mut world = World::new();
+        let full = ComponentHealth::full(21); // Fixture pool.
+        let root = world
+            .spawn((
+                Remote,
+                NetCrew {
+                    volumes: vec![VolumeSnapshot {
+                        held: full.capacity(),
+                        repair: Some(0.5),
+                        crew: None,
+                    }],
+                    swap: None,
+                },
+            ))
+            .id();
+        let initial = ComponentHealth::holding(21, crate::ballistics::POOL_UNITS_PER_HP);
+        let module = world
+            .spawn((VolumeOf(root), FunctionRole::Engine, initial))
+            .id();
+        world.run_system_once(apply_net_crew).unwrap();
+        assert_eq!(*world.get::<ComponentHealth>(module).unwrap(), initial);
+        assert!(
+            world
+                .get::<crate::damage::repair::ModuleRepair>(module)
                 .unwrap()
                 .elapsed
                 .is_none()

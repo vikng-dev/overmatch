@@ -131,7 +131,7 @@ pub(crate) struct TankState<'a> {
 /// worlds' entity ids. Field order is fixed and load-bearing: `position, rotation, linvel, angvel`,
 /// then `DriveSignal` (the shaped command), `TrackDrive` (per-side belt state), `TrackGrip`, `TrackGripElements`, the
 /// complete `TankTransmission` inventory, `WeaponGate` (`present`, then per slot: deadline-present,
-/// deadline, pause-present, pause tick, belt count), `WeaponLoads` (`present`, then per slot:
+/// deadline, pause-present, pause tick, belt count, work-present, remaining share, rate, reference base, work anchor), `WeaponLoads` (`present`, then per slot:
 /// `loaded`, `selected`), `TankServos` in slot order with each slot's `current, previous, velocity`,
 /// then `TankSim::weapons` in slot order.
 pub(super) fn hash_tank_state(state: &TankState) -> TankStateHash {
@@ -199,10 +199,16 @@ pub(super) fn hash_tank_state(state: &TankState) -> TankStateHash {
             if let Some(paused_at_tick) = weapon.paused_at_tick() {
                 hrl.write_u32(paused_at_tick.raw());
             }
-            // Belt count and absolute deadline are the complete authoritative fire gate. Contrast
-            // `rounds_fired`, deliberately excluded because it only chooses cosmetic tracers.
+            // The game's damage model: every work input is authoritative. Tracer phase
+            // remains cosmetic and stays outside this hash.
             hrl.write_u32(weapon.belt_remaining);
-            hrl.write_f32(weapon.load_rate.get());
+            hrl.write_bool(weapon.load_work().is_some());
+            if let Some((work, since)) = weapon.load_work() {
+                hrl.write_u64(work.share());
+                hrl.write_f32(work.rate());
+                hrl.write_u32(work.base().raw());
+                hrl.write_u32(since.raw());
+            }
         }
     }
     // The round choice rides the gate stream: `loaded` is the round the slot's next shot fires and
@@ -318,11 +324,10 @@ pub(super) fn hash_tank_state(state: &TankState) -> TankStateHash {
 fn test_weapon_gate() -> WeaponGate {
     WeaponGate {
         weapons: vec![crate::tank::WeaponGateState {
-            timing: crate::tank::WeaponTiming::Loading {
+            timing: crate::tank::WeaponTiming::Interval {
                 ready_tick: crate::sim_tick::SimTick::new(1_250),
             },
             belt_remaining: 47,
-            ..Default::default()
         }],
     }
 }
@@ -748,6 +753,11 @@ mod tests {
         // is a dry belt's swap, so both sides of the comparison hold an empty belt.
         let mut swapping = test_weapon_gate();
         swapping.weapons[0].belt_remaining = 0;
+        swapping.weapons[0].arm_load(
+            crate::sim_tick::SimTick::new(0),
+            crate::sim_tick::TickSpan::of(1_250),
+            1.0,
+        );
         let swap_hash = hash_sample_with_gate(
             (p, q, lv, av),
             &drive,
@@ -900,6 +910,41 @@ mod tests {
         assert_ne!(base.elm, dwell_hash.elm);
     }
 
+    /// The game's damage model: every load-work input must affect the trace, since each can
+    /// change the next deadline. Fixtures mutate valid wire states at an unchanged deadline.
+    #[test]
+    fn every_load_work_input_affects_the_gate_hash() {
+        let (p, q, lv, av, drive, sim) = sample();
+        let grip = TrackGrip::default();
+        let transmission = sample_transmission();
+        let mut gate = test_weapon_gate();
+        gate.weapons[0].belt_remaining = 0;
+        gate.weapons[0].arm_load(
+            crate::sim_tick::SimTick::new(0),
+            crate::sim_tick::TickSpan::of(32),
+            0.5,
+        );
+        let hash = |gate: &WeaponGate| {
+            hash_sample_with_gate((p, q, lv, av), &drive, &grip, &transmission, gate, &sim).rld
+        };
+        let baseline = hash(&gate);
+        for (field, value) in [
+            ("share", serde_json::json!(1_u64 << 62)),
+            ("rate", serde_json::json!(1.0)),
+            ("base", serde_json::json!(64)),
+        ] {
+            let mut wire = serde_json::to_value(gate.weapons[0]).unwrap();
+            wire["timing"]["Loading"]["work"][field] = value;
+            let mut changed = gate.clone();
+            changed.weapons[0] = serde_json::from_value(wire).unwrap();
+            assert_ne!(baseline, hash(&changed), "{field}");
+        }
+        let mut wire = serde_json::to_value(gate.weapons[0]).unwrap();
+        wire["timing"]["Loading"]["since"] = serde_json::json!(1);
+        gate.weapons[0] = serde_json::from_value(wire).unwrap();
+        assert_ne!(baseline, hash(&gate), "work anchor");
+    }
+
     /// Every field in the authoritative 16-field inventory affects the exact transmission stream.
     #[test]
     fn transmission_inventory_fields_all_affect_hash() {
@@ -965,15 +1010,15 @@ mod tests {
         assert_eq!(
             base,
             CanonicalTankStateDigest {
-                simulation: 3_703_399_603_721_080_535,
-                rollback: 133_287_615_517_132_249,
+                simulation: 11_550_725_941_933_736_927,
+                rollback: 6_029_533_328_437_272_448,
                 position: 5_276_285_167_157_175_194,
                 rotation: 5_407_327_877_548_523_030,
                 linear_velocity: 8_825_002_124_784_658_797,
                 angular_velocity: 15_886_300_944_198_297_253,
                 drive: 3_269_583_271_824_065_410,
                 servo: 14_071_911_453_643_095_408,
-                weapon_gate: 5_217_450_181_278_491_660,
+                weapon_gate: 18_442_197_694_147_503_009,
                 recoil: 12_037_784_973_900_930_602,
                 belts: 16_317_528_332_690_472_771,
                 transmission: 16_561_026_162_406_393_170,

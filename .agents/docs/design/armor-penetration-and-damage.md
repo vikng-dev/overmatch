@@ -1170,14 +1170,22 @@ member  = coeff × Π(quality of each Part it needs)
 group   = Part/Pool: min(1, Σ members)   |   Backup: max(members)
 effectiveness = min over groups          // 0 = unavailable, 1 = full
 ```
-Effectiveness is a **rate**. Reload and belt swap arm with `base / effectiveness`, ceiling to a
-fixed tick. Zero freezes the remaining work immediately, including at arming. At a positive rate
-change, the absolute deadline is re-derived once from
-`ceil(remaining ticks × old rate / new rate)`; a pause preserves those remaining ticks and the
-old rate, then resumes at the next eligible tick. Unchanged rates keep one stable deadline.
-The frozen readout is exactly the work resumption arms. This is the absolute-deadline rule of
-ADR-0029, extended to changing rates. The data gate refuses a base duration and requirement whose
-smallest positive rate could exceed the signed deadline horizon.
+Subject: the game's damage model, game state only. Effectiveness is a **rate**. Load work is
+a checked Q63 integer share in [0, 1] of the weapon's admitted base, with its retained positive rate and
+reference base. Elapsed working ticks consume work at that rate; a pause freezes the remaining
+share. A positive rate change derives `ceil(local base × remaining share / new rate)` once.
+Unchanged rates retain their stable absolute deadline. Cached deadlines decide eligibility;
+cached paused ticks serve the frozen readout, and neither can become unbounded rescalable work.
+The local spec gate proves the full base fits at the requirement's smallest positive rate, so
+any accepted work share fits too. Integer work makes non-finite shares unrepresentable.
+Decoding refuses out-of-range work units, invalid rates, a zero reference base, and load work
+beside a nonempty belt with typed errors. Exact integer ceiling arithmetic avoids a float
+rounding residue adding a tick at pause/resume; Q63 is a `Resolution` choice whose work quantum
+is below 2^-32 ticks over the admitted signed horizon.
+Zero authored work uses only the one-tick duplicate-emission interval, independent of rate,
+including zero. Cyclic intervals use the same work-free phase; neither interval nor Ready has
+a load rate. The scalar work representation preserves actual work rather than turning tick
+rounding into extra work. This is ADR-0029's stable absolute-deadline contract with bounded work.
 
 Subject: the game's damage model, game state only. Drive scales the delivered torque envelope:
 engine torque, clutch capacity and steering capacity. The scheduler and force solve consume the
@@ -2057,8 +2065,9 @@ kept: verified fixes needing those files remain open, rather than being called f
 Subject: the game's damage model, game state only. Module quality is its pool's held share;
 crew quality remains occupant competence while in action. The production rate consumers are
 reload, belt swap, servo slew and the drive torque supply described in §7b. F18 preserves the
-checkpoint alternative in prose. Declared protocol revision is 64 because the atomic weapon gate
-now carries a checked positive load rate; its state hash includes that rate.
+checkpoint alternative in prose. Declared protocol revision is 65: the atomic weapon gate now carries checked normalized work
+inside load phases. Its state hash includes the share, rate, reference base and work anchor;
+Ready and work-free intervals carry no rate.
 
 MEASURED in generic production-system fixtures: the half-full engine serves 0.5, an empty engine
 zero; a foreign loader takes 54 ticks for 32 base reload ticks and 107 ticks for 64 base swap
@@ -2072,9 +2081,38 @@ even when the frozen interval is zero.
 |---|---|---|---|
 | Claude | P2: reduced modules cannot start repair | verified: the 1 HP held fixture cannot start; repair now owes only missing HP | `damage: repair reduced module pools (#228)` |
 | Claude | P3: reduced module row says READY | verified: the row now shows its held-share rate | `damage: repair reduced module pools (#228)` |
-
 | Claude | P2: scaling intent weakens service brakes | verified in `driver_intent`: opposite throttle is the service pedal; intent now stays full | `damage: preserve drive intent under reduced supply (#228)` |
 | Claude | P2: full command below the clutch threshold cannot launch | verified: scaling intent crosses the neutral threshold; positive supply now engages under a full command | `damage: preserve drive intent under reduced supply (#228)` |
 | Claude | P3: Drive readout misses phase hold | verified: the panel now consumes the production selector, including both brake holds | `damage: preserve drive intent under reduced supply (#228)` |
 | Claude | P3: foreign competence is bare code data | verified: uniform competence is a labelled shared stand-in, not a per-crew fact | `damage: declare foreign competence and pin load floors (#228)` |
 | Claude | P3: load horizon test misses each contributor-floor mutant | verified: separate crew and module fixtures each fit at full rate and exceed the horizon at their own floor | `damage: declare foreign competence and pin load floors (#228)` |
+| Codex | P1: a decoded peer span panics when rescaled | verified red with paused work 2,147,483,647 at rate 0.5; bounded normalized work now parses at the wire edge and scales against the local admitted base | `damage: bound replicated load work before rescaling (#228)` |
+| Codex | P2: zero work scales the duplicate-emission guard | verified red at rate 0.5; zero work now keeps a work-free one-tick interval at every rate, including zero | `damage: bound replicated load work before rescaling (#228)` |
+| Claude | P3: Ready and cyclic gates carry meaningless load rates | verified: only Loading and Paused now hold `LoadWork`, including its retained rate | `damage: bound replicated load work before rescaling (#228)` |
+| Claude | P3: stale gate, trace, protocol, panel fixture and drive prose | verified against their consumers; comments name fire gates versus load rates, complete work hashing, REV 64/65, current Drive text and delivered torque | `damage: bound replicated load work before rescaling (#228)` |
+
+MEASURED in regression fixtures: the original peer span panicked before the fix; its old wire
+shape is now refused. A maximal cached paused span with one full work share resumes in 64 ticks
+for a local 32-tick base at rate 0.5. Zero-work reloads mature after one tick at rates 0, 0.01,
+0.5 and 1. A module holding 1 HP of 21 completes its missing-HP repair on the 64th fixture tick,
+not the 63rd. The production driving adapter preserves full throttle and pulls away under a
+30/336 engine share, with MEASURED belt speeds of 0.037314706 m/s reduced versus 0.20654215 m/s full in the
+stationary-hull fixture after input slew. These are generic fixture
+observations, not authored vehicle pass conditions. No capture or pricing run was taken.
+
+The wire check also exposed a related phase case: a peer could name load work beside a nonempty
+belt and later reach the pause assertion. The load-phase parser now refuses both active and
+paused versions at decoding (`damage: bound replicated load work before rescaling (#228)`).
+
+MEASURED regression mutants: removing both contributor floors admits the fixture's Breech and
+Gunner recipes, and the horizon test reports both; scaling intent makes full throttle read
+0.08928572 in the 30/336 fixture; replacing the reduced row with READY fails the 14/142 fixture.
+Those mutants are removed. A seven-tick native load paused with one tick left exposed a float
+work residue that resumed as two ticks; the Q63 late-pause regression preserves one tick,
+including at the largest admitted span.
+
+A second outside-input case follows from missing-HP repair: an active progress fraction beside
+a full pool has no work denominator. `ModuleRepair::from_snapshot` now parses the complete
+prospective timer before the atomic health record is applied, refusing that contradictory
+snapshot with a typed error and visible handling. Its regression preserves the prior valid
+snapshot (`damage: bound replicated load work before rescaling (#228)`).

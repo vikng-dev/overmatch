@@ -1498,9 +1498,9 @@ impl TankSpec {
                 FireCycle::Single { reload } => reload,
                 FireCycle::Automatic { swap, .. } => swap,
             };
-            if (f64::from(delay.at_least_one().raw()) / f64::from(floor)).ceil()
-                > f64::from(TickSpan::MAX)
-                || floor == 0.0
+            if delay.raw() > 0
+                && ((f64::from(delay.raw()) / f64::from(floor)).ceil() > f64::from(TickSpan::MAX)
+                    || floor == 0.0)
             {
                 return Err(format!(
                     "weapons[\"{name}\"].load: base work / minimum positive effectiveness exceeds the signed deadline horizon; shorten reload/swap, reduce module pools or raise requirement coefficients"
@@ -3305,6 +3305,7 @@ TankSpec(
     /// Fixture work fits at full rate but crosses the horizon at either reduced floor.
     #[test]
     fn load_horizon_requires_both_module_and_crew_floors() {
+        let mut admitted = Vec::new();
         for part in [Part::Breech, Part::Gunner] {
             let mut spec = fixture();
             let weapon = spec.weapons.get_mut("Cannon").unwrap();
@@ -3312,9 +3313,37 @@ TankSpec(
             weapon.fire_cycle = FireCycle::Single {
                 reload: TickSpan::of(TickSpan::MAX / 4 * 3),
             };
-            let error = spec.validate().unwrap_err().to_string();
-            assert!(error.contains("deadline horizon"), "{part:?}: {error}");
+            match spec.validate() {
+                Ok(()) => admitted.push(part),
+                Err(error) => assert!(
+                    error.to_string().contains("deadline horizon"),
+                    "{part:?}: {error}"
+                ),
+            }
         }
+        assert!(
+            admitted.is_empty(),
+            "missing contributor floors admitted: {admitted:?}"
+        );
+    }
+
+    /// The game's damage model: zero authored work needs no reduced-rate horizon budget.
+    /// Fixture tiny positive competence would stretch a one-tick guard beyond that horizon.
+    #[test]
+    fn zero_load_work_does_not_budget_the_emission_guard_as_work() {
+        let mut spec = fixture();
+        for weapon in spec.weapons.values_mut() {
+            weapon.load = vec![Group::Graded(GradedGroup::Backup(vec![(
+                1e-12,
+                vec![Part::Gunner],
+            )]))];
+            match &mut weapon.fire_cycle {
+                FireCycle::Single { reload } => *reload = TickSpan::of(0),
+                FireCycle::Automatic { swap, .. } => *swap = TickSpan::of(0),
+            }
+        }
+        spec.validate()
+            .expect("zero load work stays zero at every rate");
     }
 
     /// A capability the sheet does not key would read as unavailable to every consumer, so

@@ -39,14 +39,50 @@ fn work_rate() -> f64 {
     DATA.hp_per_second.0
 }
 
+/// The game's damage model: malformed outside repair input, refused before applying its snapshot.
+#[derive(Debug)]
+pub(crate) enum RepairSnapshotError {
+    NotFraction(f32),
+    FullPool,
+}
+impl std::fmt::Display for RepairSnapshotError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::NotFraction(value) => {
+                write!(f, "repair progress {value} must be finite and in [0, 1]")
+            }
+            Self::FullPool => write!(
+                f,
+                "active repair requires a module below capacity; a full pool has no missing work"
+            ),
+        }
+    }
+}
+
 impl ModuleRepair {
     pub(crate) fn fraction(&self, health: &ComponentHealth) -> Option<f32> {
-        self.elapsed
-            .map(|elapsed| (elapsed / duration(health)) as f32)
+        self.elapsed.map(|elapsed| {
+            let duration = duration(health);
+            assert!(duration > 0.0, "active repair starts below capacity and completion refills the pool and clears its timer atomically; peer timers are parsed against their snapshot");
+            (elapsed / duration) as f32
+        })
     }
 
-    pub(crate) fn set_fraction(&mut self, fraction: Option<f32>, health: &ComponentHealth) {
-        self.elapsed = fraction.map(|fraction| f64::from(fraction) * duration(health));
+    /// Parse a peer timer once against the same snapshot's health, before either is applied.
+    pub(crate) fn from_snapshot(
+        fraction: Option<f32>,
+        health: &ComponentHealth,
+    ) -> Result<Self, RepairSnapshotError> {
+        match fraction {
+            None => Ok(Self::default()),
+            Some(value) if !value.is_finite() || !(0.0..=1.0).contains(&value) => {
+                Err(RepairSnapshotError::NotFraction(value))
+            }
+            Some(_) if health.held() == health.capacity() => Err(RepairSnapshotError::FullPool),
+            Some(value) => Ok(Self {
+                elapsed: Some(f64::from(value) * duration(health)),
+            }),
+        }
     }
 }
 

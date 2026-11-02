@@ -312,200 +312,339 @@ impl LoadRate {
     pub fn get(self) -> f32 {
         self.0
     }
+    /// IEEE binary32 exactly: value = mantissa / 2^shift. The checked rate is positive,
+    /// finite and at most one, so both normal and subnormal forms have a positive shift.
+    fn ratio(self) -> (u32, u32) {
+        let bits = self.0.to_bits();
+        let exponent = (bits >> 23) & 0xff;
+        let fraction = bits & 0x7f_ffff;
+        if exponent == 0 {
+            (fraction, 149)
+        } else {
+            (fraction | (1 << 23), 150 - exponent)
+        }
+    }
 }
 
-/// The game's damage model: one weapon's fire eligibility and belt supply. Its timing enum
-/// makes an unarmed-but-paused state unrepresentable, including at the peer deserialization edge.
-/// Paused work is load work, a `Single`'s reload or a dry belt's swap, so a pause holds an empty
-/// belt; decoding refuses a paused gate with rounds left ([`WeaponGateError`]).
+/// The game's damage model: a normalized share of one full load.
+/// Resolution: Q63 gives a work quantum below 2^-32 ticks over the admitted signed horizon,
+/// and permits exact u128 ceiling arithmetic for binary32 rates. It never invents work at a
+/// pause boundary. The upper bound leaves invalid wire values for the checked constructor.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
+#[serde(try_from = "u64")]
+pub struct LoadShare(u64);
+
+const FULL_LOAD_WORK: u64 = 1_u64 << 63;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct InvalidLoadShare(u64);
+impl std::fmt::Display for InvalidLoadShare {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "load work units {} exceed one full load ({FULL_LOAD_WORK})",
+            self.0
+        )
+    }
+}
+impl TryFrom<u64> for LoadShare {
+    type Error = InvalidLoadShare;
+    fn try_from(value: u64) -> Result<Self, Self::Error> {
+        if value <= FULL_LOAD_WORK {
+            Ok(Self(value))
+        } else {
+            Err(InvalidLoadShare(value))
+        }
+    }
+}
+
+/// The game's damage model: a bounded amount of work, its retained rate and its reference
+/// base. The reference converts elapsed ticks into completed work; a new deadline always
+/// uses the local weapon's admitted base, never a peer-authored duration.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
+#[serde(try_from = "LoadWorkWire")]
+pub struct LoadWork {
+    share: LoadShare,
+    rate: LoadRate,
+    base: TickSpan,
+}
+#[derive(Deserialize)]
+struct LoadWorkWire {
+    share: LoadShare,
+    rate: LoadRate,
+    base: TickSpan,
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum LoadWorkError {
+    ZeroBase,
+}
+impl std::fmt::Display for LoadWorkError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::ZeroBase => write!(
+                f,
+                "load work needs a positive reference base; zero work uses the duplicate-emission interval"
+            ),
+        }
+    }
+}
+impl TryFrom<LoadWorkWire> for LoadWork {
+    type Error = LoadWorkError;
+    fn try_from(wire: LoadWorkWire) -> Result<Self, Self::Error> {
+        if wire.base.raw() == 0 {
+            return Err(LoadWorkError::ZeroBase);
+        }
+        Ok(Self {
+            share: wire.share,
+            rate: wire.rate,
+            base: wire.base,
+        })
+    }
+}
+impl LoadWork {
+    pub fn share(self) -> u64 {
+        self.share.0
+    }
+    pub fn rate(self) -> f32 {
+        self.rate.get()
+    }
+    pub fn base(self) -> TickSpan {
+        self.base
+    }
+    fn advance(self, since: SimTick, now: SimTick) -> Self {
+        // A peer's anchor can be ahead of the presentation clock; no work has elapsed yet.
+        let elapsed = (now.raw().wrapping_sub(since.raw()) as i32).max(0) as u32;
+        let (mantissa, shift) = self.rate.ratio();
+        let product = u128::from(elapsed) * u128::from(mantissa);
+        let (numerator, denominator) = if shift <= 63 {
+            (product << (63 - shift), u128::from(self.base.raw()))
+        } else {
+            (product, u128::from(self.base.raw()) << (shift - 63))
+        };
+        // Complete partial work quanta rather than rounding them into new work. Saturation
+        // is the law's max(remaining - completed, 0), including an already-due deadline.
+        let consumed = numerator.div_ceil(denominator);
+        let remaining = u128::from(self.share.0).saturating_sub(consumed) as u64;
+        Self {
+            share: LoadShare(remaining),
+            ..self
+        }
+    }
+    fn at_rate(self, base: TickSpan, rate: LoadRate) -> (Self, TickSpan) {
+        let (mantissa, shift) = rate.ratio();
+        // An admitted positive base fits at its minimum rate, so the rate is at least
+        // 1 / TickSpan::MAX; its binary32 denominator shift is therefore at most 54.
+        assert!(
+            shift <= 63,
+            "TankSpec admits the local base at every positive requirement rate"
+        );
+        let denominator = u128::from(mantissa) << (63 - shift);
+        let ticks = (u128::from(self.share.0) * u128::from(base.raw())).div_ceil(denominator);
+        assert!(
+            ticks <= u128::from(TickSpan::MAX),
+            "TankSpec admits the local base work at every positive requirement rate; a decoded work share is at most one"
+        );
+        (Self { base, rate, ..self }, TickSpan::of(ticks as u32))
+    }
+}
+
+/// The game's damage model: one weapon's fire eligibility and belt supply. Only load states
+/// carry work and its rate; ready gates and cyclic/duplicate-emission intervals have neither.
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default, Serialize, Deserialize)]
 #[serde(try_from = "WeaponGateWire")]
 pub struct WeaponGateState {
     pub timing: WeaponTiming,
     pub belt_remaining: u32,
-    /// Rate used to derive the active deadline, retained through a pause.
-    pub load_rate: LoadRate,
 }
-
-/// [`WeaponGateState`]'s decoded fields before its phase rule is checked: the same fields in the
-/// same order, so the encoding is the state's own.
 #[derive(Deserialize)]
 struct WeaponGateWire {
     timing: WeaponTiming,
     belt_remaining: u32,
-    load_rate: LoadRate,
 }
-
-/// A decoded gate no authority can produce.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum WeaponGateError {
-    /// Frozen load work beside a belt with rounds left: an `Automatic` cycling its belt has no
-    /// crew-gated work to freeze, and a `Single` holds no belt.
-    PausedWithRounds(u32),
+    LoadWithRounds(u32),
 }
-
 impl std::fmt::Display for WeaponGateError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::PausedWithRounds(rounds) => write!(
+            Self::LoadWithRounds(rounds) => write!(
                 f,
-                "a paused weapon gate holds {rounds} belt rounds; paused load work holds an empty belt"
+                "a weapon load holds {rounds} belt rounds; load work holds an empty belt"
             ),
         }
     }
 }
-
 impl TryFrom<WeaponGateWire> for WeaponGateState {
     type Error = WeaponGateError;
     fn try_from(wire: WeaponGateWire) -> Result<Self, Self::Error> {
-        match wire.timing {
-            WeaponTiming::Paused { .. } if wire.belt_remaining > 0 => {
-                Err(WeaponGateError::PausedWithRounds(wire.belt_remaining))
-            }
-            timing => Ok(Self {
-                timing,
-                belt_remaining: wire.belt_remaining,
-                load_rate: wire.load_rate,
-            }),
+        if matches!(
+            wire.timing,
+            WeaponTiming::Loading { .. } | WeaponTiming::Paused { .. }
+        ) && wire.belt_remaining > 0
+        {
+            return Err(WeaponGateError::LoadWithRounds(wire.belt_remaining));
         }
+        Ok(Self {
+            timing: wire.timing,
+            belt_remaining: wire.belt_remaining,
+        })
     }
 }
 
-/// The game's damage model: a weapon is ready, loading against a wrapping deadline, or frozen
-/// with a checked work span. Serde parses this phase and refuses an invalid span at its edge.
+/// The game's damage model: an interval is mechanism cadence or a zero-work emission guard.
+/// Load work is bounded at decoding, independently of the peer's clock or cached deadline.
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default, Serialize, Deserialize)]
 pub enum WeaponTiming {
     #[default]
     Ready,
-    Loading {
+    Interval {
         ready_tick: SimTick,
     },
-    Paused {
-        work: TickSpan,
+    Loading {
+        ready_tick: SimTick,
         since: SimTick,
+        work: LoadWork,
+    },
+    Paused {
+        remaining: TickSpan,
+        since: SimTick,
+        work: LoadWork,
     },
 }
-
 impl WeaponGateState {
-    /// Loaded spawn state; automatic weapons start with a full belt.
     pub fn for_cycle(cycle: &FireCycle) -> Self {
         Self {
             timing: WeaponTiming::Ready,
-            load_rate: LoadRate::default(),
             belt_remaining: match cycle {
                 FireCycle::Single { .. } => 0,
                 FireCycle::Automatic { belt_size, .. } => *belt_size,
             },
         }
     }
-
     pub fn is_ready(self) -> bool {
         matches!(self.timing, WeaponTiming::Ready)
     }
-
-    /// The active deadline, or the frozen deadline anchored to the pause tick for diagnostics.
-    /// A pause has no active deadline ordering; its work count is exactly what resume arms.
     pub fn ready_tick(self) -> Option<SimTick> {
         match self.timing {
             WeaponTiming::Ready => None,
-            WeaponTiming::Loading { ready_tick } => Some(ready_tick),
-            WeaponTiming::Paused { work, since } => Some(since.after(work)),
+            WeaponTiming::Interval { ready_tick } | WeaponTiming::Loading { ready_tick, .. } => {
+                Some(ready_tick)
+            }
+            WeaponTiming::Paused {
+                remaining, since, ..
+            } => Some(since.after(remaining)),
         }
     }
-
     pub fn paused_at_tick(self) -> Option<SimTick> {
         match self.timing {
             WeaponTiming::Paused { since, .. } => Some(since),
-            WeaponTiming::Ready | WeaponTiming::Loading { .. } => None,
+            WeaponTiming::Ready | WeaponTiming::Interval { .. } | WeaponTiming::Loading { .. } => {
+                None
+            }
         }
     }
-
+    pub fn load_work(self) -> Option<(LoadWork, SimTick)> {
+        match self.timing {
+            WeaponTiming::Loading { work, since, .. }
+            | WeaponTiming::Paused { work, since, .. } => Some((work, since)),
+            WeaponTiming::Ready | WeaponTiming::Interval { .. } => None,
+        }
+    }
     pub fn finish(&mut self) {
         self.timing = WeaponTiming::Ready;
     }
-
-    /// Every active comparison uses the shared signed wrapped relation, as the battle cycle
-    /// does. Frozen work is not eligible until its load requirement allows resumption.
     pub fn deadline_reached(self, now: SimTick) -> bool {
         match self.timing {
             WeaponTiming::Ready => true,
-            WeaponTiming::Loading { ready_tick } => now.has_reached(ready_tick),
+            WeaponTiming::Interval { ready_tick } | WeaponTiming::Loading { ready_tick, .. } => {
+                now.has_reached(ready_tick)
+            }
             WeaponTiming::Paused { .. } => false,
         }
     }
-
-    /// At least one tick prevents duplicate emission in a tick.
+    /// At least one tick prevents duplicate emission; it is not rate-dependent work.
     pub fn arm(&mut self, now: SimTick, delay: TickSpan) {
-        self.load_rate = LoadRate::default();
-        self.timing = WeaponTiming::Loading {
+        self.timing = WeaponTiming::Interval {
             ready_tick: now.after(delay.at_least_one()),
         };
     }
-
-    /// The game's damage model: arm base work at its current capability rate. No available
-    /// worker freezes the base work immediately; a later positive rate resumes that same work.
+    /// The game's damage model: the zero-work guard stays one tick even with no worker.
     pub fn arm_load(&mut self, now: SimTick, base: TickSpan, effectiveness: f32) {
-        self.arm(now, base);
-        self.load_at_rate(now, effectiveness);
+        if base.raw() == 0 {
+            self.arm(now, base);
+            return;
+        }
+        let work = LoadWork {
+            share: LoadShare(FULL_LOAD_WORK),
+            rate: LoadRate::default(),
+            base,
+        };
+        self.timing = WeaponTiming::Loading {
+            ready_tick: now.after(base),
+            since: now,
+            work,
+        };
+        self.load_at_rate(now, base, effectiveness);
     }
-
-    /// The game's damage model: at a rate change, preserve completed work and re-derive the
-    /// remaining interval once (`old remaining × old rate / new rate`, ceiling to a tick).
-    /// Unchanged rates leave the absolute deadline untouched; paused ticks consume no work.
-    pub fn load_at_rate(&mut self, now: SimTick, effectiveness: f32) {
+    /// The game's damage model: preserve completed work, then derive the deadline from the
+    /// bounded remaining share and the local weapon's admitted base. Unchanged rates keep
+    /// their absolute deadline. See design §7b for the timing rule.
+    pub fn load_at_rate(&mut self, now: SimTick, base: TickSpan, effectiveness: f32) {
+        if base.raw() == 0 {
+            if self.load_work().is_some() {
+                self.arm(now, base);
+            }
+            return;
+        }
         if effectiveness == 0.0 {
             self.pause(now);
             return;
         }
         let rate = LoadRate::try_from(effectiveness)
             .expect("requirement evaluation serves effectiveness in [0, 1]");
-        self.resume(now);
-        if self.load_rate != rate {
-            if let WeaponTiming::Loading { ready_tick } = self.timing {
-                let remaining = f64::from(now.remaining_until(ready_tick))
-                    * f64::from(self.load_rate.get())
-                    / f64::from(rate.get());
-                assert!(
-                    remaining.ceil() <= f64::from(TickSpan::MAX),
-                    "TankSpec admits load work only within the deadline horizon at every positive rate"
-                );
-                self.timing = WeaponTiming::Loading {
-                    ready_tick: now.after(TickSpan::of(remaining.ceil() as u32)),
-                };
+        let work = match self.timing {
+            WeaponTiming::Loading { since, work, .. } if work.rate != rate => {
+                work.advance(since, now)
             }
-            self.load_rate = rate;
-        }
+            WeaponTiming::Paused { work, .. } => work,
+            // These phases owe no re-derivation; an unchanged rate retains its deadline.
+            WeaponTiming::Ready | WeaponTiming::Interval { .. } | WeaponTiming::Loading { .. } => {
+                return;
+            }
+        };
+        let (work, delay) = work.at_rate(base, rate);
+        self.timing = WeaponTiming::Loading {
+            ready_tick: now.after(delay),
+            since: now,
+            work,
+        };
     }
-
-    /// Freeze load work on entry. Repeated unmet ticks leave the gate byte-identical, and a past
-    /// arriving deadline holds no remaining work rather than almost a full counter's interval.
     pub fn pause(&mut self, now: SimTick) {
-        if let WeaponTiming::Loading { ready_tick } = self.timing {
+        if let WeaponTiming::Loading {
+            ready_tick,
+            since,
+            work,
+        } = self.timing
+        {
             assert_eq!(
                 self.belt_remaining, 0,
                 "only load work pauses: a Single holds no belt and an Automatic pauses a dry belt's swap"
             );
-            let work = TickSpan::try_from(now.remaining_until(ready_tick)).expect(
-                "remaining_until is a nonnegative signed difference, within TickSpan's horizon",
-            );
-            self.timing = WeaponTiming::Paused { work, since: now };
-        }
-    }
-
-    /// A frozen interval survives any number of clock wraps; only the resume tick starts it.
-    pub fn resume(&mut self, now: SimTick) {
-        if let WeaponTiming::Paused { work, .. } = self.timing {
-            self.timing = WeaponTiming::Loading {
-                ready_tick: now.after(work),
+            self.timing = WeaponTiming::Paused {
+                remaining: TickSpan::of(now.remaining_until(ready_tick)),
+                since: now,
+                work: work.advance(since, now),
             };
         }
     }
-
     pub fn remaining_ticks(self, now: SimTick) -> u32 {
         match self.timing {
             WeaponTiming::Ready => 0,
-            WeaponTiming::Loading { ready_tick } => now.remaining_until(ready_tick),
-            WeaponTiming::Paused { work, .. } => work.raw(),
+            WeaponTiming::Interval { ready_tick } | WeaponTiming::Loading { ready_tick, .. } => {
+                now.remaining_until(ready_tick)
+            }
+            WeaponTiming::Paused { remaining, .. } => remaining.raw(),
         }
     }
 }

@@ -160,6 +160,22 @@ fn round_line(weapon_name: &str, rounds: &[WeaponRound], load: &WeaponLoad) -> O
     Some(line)
 }
 
+/// The game's damage model: a reduced module names the held-share rate its consumers use.
+fn module_status(
+    health: &crate::ballistics::ComponentHealth,
+    repair: &crate::damage::repair::ModuleRepair,
+) -> String {
+    match repair.fraction(health) {
+        Some(fraction) => format!("REPAIR {:.0}%", (fraction * 100.0).floor()),
+        None if health.is_empty() => "OUT OF ACTION".to_owned(),
+        None if health.held() < health.capacity() => format!(
+            "RATE {:.0}%",
+            100.0 * health.held() as f32 / health.capacity() as f32
+        ),
+        None => "READY".to_owned(),
+    }
+}
+
 /// Render the controlled tank's vitals card: crew available/total, the applied Drive rate,
 /// each weapon's reload/fire state (`READY` / `x.xs` / `no-fire`), and the round choice of each
 /// weapon that has one ([`round_line`]), plus module repair progress and readiness.
@@ -297,15 +313,7 @@ fn update_status_panel(
         .iter()
         .filter_map(|volume| {
             modules.get(volume).ok().map(|(name, health, repair)| {
-                let status = match repair.fraction(health) {
-                    Some(fraction) => format!("REPAIR {:.0}%", (fraction * 100.0).floor()),
-                    None if health.is_empty() => "OUT OF ACTION".to_owned(),
-                    None if health.held() < health.capacity() => format!(
-                        "RATE {:.0}%",
-                        100.0 * health.held() as f32 / health.capacity() as f32
-                    ),
-                    None => "READY".to_owned(),
-                };
+                let status = module_status(health, repair);
                 (name.as_str(), format!("\n{name}: {status}"))
             })
         })
@@ -450,6 +458,20 @@ fn update_crew_bar(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The game's damage model: the player must see a reduced module's rate rather than READY.
+    /// Fixture: 14 of 142 HP, whose held share rounds to ten percent.
+    #[test]
+    fn a_reduced_module_row_names_its_rate() {
+        let health = crate::ballistics::ComponentHealth::holding(
+            142,
+            14 * crate::ballistics::POOL_UNITS_PER_HP,
+        );
+        assert_eq!(
+            module_status(&health, &crate::damage::repair::ModuleRepair::default()),
+            "RATE 10%"
+        );
+    }
 
     const AUTO: FireCycle = FireCycle::Automatic {
         cyclic: crate::sim_tick::TickSpan::of(5),

@@ -179,14 +179,16 @@ fn tick_weapon_gate(
             continue;
         }
         match weapon.fire_cycle {
-            FireCycle::Single { .. } => {
+            FireCycle::Single { reload } => {
                 let effectiveness = requirement_effectiveness(tank_volumes, &weapon.load, &volumes);
-                state.load_at_rate(now, effectiveness);
+                state.load_at_rate(now, reload, effectiveness);
                 if state.deadline_reached(now) {
                     state.finish();
                 }
             }
-            FireCycle::Automatic { belt_size, .. } => {
+            FireCycle::Automatic {
+                belt_size, swap, ..
+            } => {
                 if state.belt_remaining > 0 {
                     if state.deadline_reached(now) {
                         state.finish();
@@ -194,7 +196,7 @@ fn tick_weapon_gate(
                 } else {
                     let effectiveness =
                         requirement_effectiveness(tank_volumes, &weapon.load, &volumes);
-                    state.load_at_rate(now, effectiveness);
+                    state.load_at_rate(now, swap, effectiveness);
                     if state.deadline_reached(now) {
                         state.belt_remaining = belt_size;
                         state.finish();
@@ -591,6 +593,62 @@ mod tests {
         SimTick::new(raw)
     }
 
+    /// The game's damage model: no authored load work must remain no work at every rate.
+    /// The fire consumer still needs one tick between emissions, independently of that rate.
+    #[test]
+    fn zero_load_work_does_not_scale_the_duplicate_emission_guard() {
+        for rate in [0.0, 1.0, 0.5, 0.01] {
+            let mut gate = WeaponGateState::default();
+            gate.arm_load(at(0), TickSpan::of(0), rate);
+            assert!(!gate.deadline_reached(at(0)));
+            assert!(gate.deadline_reached(at(1)), "rate {rate}");
+        }
+    }
+
+    /// The game's damage model: the former peer span is refused at decoding, and a new
+    /// work share can never exceed the local full load. Rescaling must not trust a cached span.
+    #[test]
+    fn peer_work_cannot_panic_when_resumed_at_a_reduced_rate() {
+        let legacy = r#"{"timing":{"Paused":{"work":2147483647,"since":0}},"belt_remaining":0,"load_rate":1.0}"#;
+        assert!(serde_json::from_str::<WeaponGateState>(legacy).is_err());
+        let json = r#"{"timing":{"Paused":{"remaining":2147483647,"since":0,"work":{"share":9223372036854775808,"rate":1.0,"base":2147483647}}},"belt_remaining":0}"#;
+        let mut peer: WeaponGateState = serde_json::from_str(json).unwrap();
+        peer.load_at_rate(at(0), TickSpan::of(32), 0.5); // Fixture local base.
+        assert_eq!(peer.remaining_ticks(at(0)), 64);
+        let bytes = postcard::to_allocvec(&peer).unwrap();
+        assert_eq!(
+            postcard::from_bytes::<WeaponGateState>(&bytes).unwrap(),
+            peer
+        );
+        // DERIVED codec edge cases: positive normal and subnormal retained rates are legal.
+        // Their elapsed-work conversion must stay bounded before a local-rate resume.
+        for rate in [f32::from_bits(1), f32::MIN_POSITIVE, 1.0] {
+            let wire = serde_json::json!({"timing": {"Loading": {
+                "ready_tick": TickSpan::MAX, "since": 0,
+                "work": {"share": 1_u64 << 63, "rate": rate, "base": TickSpan::MAX}
+            }}, "belt_remaining": 0});
+            let mut peer: WeaponGateState = serde_json::from_value(wire).unwrap();
+            peer.pause(at(1));
+            peer.load_at_rate(at(2), TickSpan::of(32), 0.5);
+            assert_eq!(peer.remaining_ticks(at(2)), 64);
+        }
+    }
+
+    /// The game's damage model: the player's frozen readout must equal resumed work at the
+    /// retained rate. Fixture late pauses catch a ceiling tick invented by fractional rounding.
+    #[test]
+    fn pausing_near_completion_never_invents_a_tick_of_work() {
+        for base in [7, 49, 192, 1000, TickSpan::MAX] {
+            let mut gate = WeaponGateState::default();
+            gate.arm_load(at(0), TickSpan::of(base), 1.0);
+            gate.pause(at(base - 1));
+            let displayed = gate.remaining_ticks(at(100));
+            assert_eq!(displayed, 1);
+            gate.load_at_rate(at(u32::MAX), TickSpan::of(base), 1.0);
+            assert_eq!(gate.remaining_ticks(at(u32::MAX)), displayed, "base {base}");
+        }
+    }
+
     /// The game's damage model: an admitted reload must cross clock wrap without panicking.
     /// Fire eligibility relies on the deadline maturing on the far side of the counter's end.
     #[test]
@@ -602,37 +660,55 @@ mod tests {
         assert!(gate.deadline_reached(at(1)));
     }
 
-    /// The game's damage model: the owning client parses a replicated gate into one valid phase
-    /// before its presentation ledger can seed it. Frozen work outside the deadline horizon, and
-    /// frozen work beside a belt with rounds left (which no branch of `tick_weapon_gate` resumes),
-    /// are refused at decoding, in JSON and on the wire; the same phases with valid fields decode.
+    /// The game's damage model: malformed shares, references and phases are refused once
+    /// at the JSON/postcard edge, before the owning client's fire ledger can seed them.
     #[test]
     fn a_peer_cannot_seed_an_invalid_weapon_phase() {
-        let refused = |json: &str| {
-            serde_json::from_str::<WeaponGateState>(json)
+        // DERIVED Q63 codec fixtures: unity is 2^63 work units; larger values are refused.
+        for share in [(1_u64 << 63) + 1, u64::MAX] {
+            let bytes =
+                postcard::to_allocvec(&(3_u32, 3_u32, 0_u32, share, 1.0_f32, 32_u32, 0_u32))
+                    .unwrap();
+            assert!(postcard::from_bytes::<WeaponGateState>(&bytes).is_err());
+            let json = format!(
+                r#"{{"timing":{{"Paused":{{"remaining":3,"since":0,"work":{{"share":{share},"rate":1.0,"base":32}}}}}},"belt_remaining":0}}"#
+            );
+            assert!(
+                serde_json::from_str::<WeaponGateState>(&json)
+                    .unwrap_err()
+                    .to_string()
+                    .contains("work units")
+            );
+        }
+        for share in ["-1", "1.1"] {
+            let json = format!(
+                r#"{{"timing":{{"Paused":{{"remaining":3,"since":0,"work":{{"share":{share},"rate":1.0,"base":32}}}}}},"belt_remaining":0}}"#
+            );
+            assert!(serde_json::from_str::<WeaponGateState>(&json).is_err());
+        }
+        for (base, belt, message) in [(0, 0, "positive reference base"), (32, 5, "empty belt")] {
+            let json = format!(
+                r#"{{"timing":{{"Paused":{{"remaining":3,"since":0,"work":{{"share":9223372036854775808,"rate":1.0,"base":{base}}}}}}},"belt_remaining":{belt}}}"#
+            );
+            assert!(
+                serde_json::from_str::<WeaponGateState>(&json)
+                    .unwrap_err()
+                    .to_string()
+                    .contains(message)
+            );
+        }
+        let mut loading = WeaponGateState::default();
+        loading.arm_load(at(0), TickSpan::of(32), 1.0);
+        loading.belt_remaining = 1; // Fixture impossible belt beside load work.
+        let json = serde_json::to_string(&loading).unwrap();
+        assert!(
+            serde_json::from_str::<WeaponGateState>(&json)
                 .unwrap_err()
                 .to_string()
-        };
-        let error = refused(
-            r#"{"timing":{"Paused":{"work":2147483648,"since":0}},"belt_remaining":0,"load_rate":1.0}"#,
+                .contains("empty belt")
         );
-        assert!(error.contains("under 2^31"), "{error}");
-        let error = refused(
-            r#"{"timing":{"Paused":{"work":3,"since":0}},"belt_remaining":5,"load_rate":1.0}"#,
-        );
-        assert!(error.contains("empty belt"), "{error}");
-        let valid: WeaponGateState = serde_json::from_str(
-            r#"{"timing":{"Paused":{"work":3,"since":0}},"belt_remaining":0,"load_rate":1.0}"#,
-        )
-        .expect("a paused swap holds an empty belt");
-        assert_eq!(valid.remaining_ticks(at(0)), 3);
-        // DERIVED wire fixtures: Paused's variant index, then its work, start and belt count.
-        for (work, belt) in [(1_u32 << 31, 0_u32), (3, 5)] {
-            let wire = postcard::to_allocvec(&(2_u32, work, 0_u32, belt, 1.0_f32)).unwrap();
-            assert!(postcard::from_bytes::<WeaponGateState>(&wire).is_err());
-        }
         let mut valid = WeaponGateState::default();
-        valid.arm(at(u32::MAX), TickSpan::of(TickSpan::MAX));
+        valid.arm_load(at(u32::MAX), TickSpan::of(TickSpan::MAX), 1.0);
         valid.pause(at(u32::MAX));
         let bytes = postcard::to_allocvec(&valid).unwrap();
         assert_eq!(
@@ -641,17 +717,25 @@ mod tests {
         );
     }
 
-    /// The game's damage model: peer rates are parsed before deadline arithmetic. Fixture
-    /// zero, negative, above-full and non-finite rates must be visibly refused on the wire.
+    /// The game's damage model: rates exist only in work-bearing phases, and malformed peer
+    /// rates must be refused before they can affect elapsed work.
     #[test]
     fn a_peer_cannot_seed_an_invalid_load_rate() {
         for rate in [0.0_f32, -1.0, 1.1, f32::INFINITY, f32::NAN] {
-            let wire = postcard::to_allocvec(&(0_u32, 0_u32, rate)).unwrap();
-            assert!(postcard::from_bytes::<WeaponGateState>(&wire).is_err());
+            let bytes =
+                postcard::to_allocvec(&(3_u32, 3_u32, 0_u32, 1_u64 << 63, rate, 32_u32, 0_u32))
+                    .unwrap();
+            assert!(postcard::from_bytes::<WeaponGateState>(&bytes).is_err());
             if rate.is_finite() {
-                let json = format!(r#"{{"timing":"Ready","belt_remaining":0,"load_rate":{rate}}}"#);
-                let error = serde_json::from_str::<WeaponGateState>(&json).unwrap_err();
-                assert!(error.to_string().contains("load rate"), "{error}");
+                let json = format!(
+                    r#"{{"timing":{{"Paused":{{"remaining":3,"since":0,"work":{{"share":9223372036854775808,"rate":{rate},"base":32}}}}}},"belt_remaining":0}}"#
+                );
+                assert!(
+                    serde_json::from_str::<WeaponGateState>(&json)
+                        .unwrap_err()
+                        .to_string()
+                        .contains("load rate")
+                );
             }
         }
     }
@@ -661,7 +745,7 @@ mod tests {
     #[test]
     fn a_peer_gate_at_the_last_tick_can_pause() {
         let mut authority = WeaponGateState::default();
-        authority.arm(at(u32::MAX - 1), TickSpan::ONE);
+        authority.arm_load(at(u32::MAX - 1), TickSpan::ONE, 1.0);
         let wire = serde_json::to_vec(&authority).unwrap();
         let mut peer: WeaponGateState = serde_json::from_slice(&wire).unwrap();
         peer.pause(at(u32::MAX - 1));
@@ -702,10 +786,10 @@ mod tests {
     #[test]
     fn arming_pausing_resuming_and_the_local_clock_wrap() {
         let mut gate = WeaponGateState::default();
-        gate.arm(at(u32::MAX - 1), TickSpan::of(3));
+        gate.arm_load(at(u32::MAX - 1), TickSpan::of(3), 1.0);
         gate.pause(at(u32::MAX));
         assert_eq!(gate.remaining_ticks(at(100)), 2);
-        gate.resume(at(1));
+        gate.load_at_rate(at(1), TickSpan::of(3), 1.0);
         assert_eq!(gate.remaining_ticks(at(1)), 2);
         assert!(!gate.deadline_reached(at(2)));
         assert!(gate.deadline_reached(at(3)));
@@ -716,9 +800,9 @@ mod tests {
         // A peer's complete typed gate, including the last counter value, is safe to pause.
         let wire = serde_json::to_vec(&gate).unwrap();
         let mut peer: WeaponGateState = serde_json::from_slice(&wire).unwrap();
-        peer.arm(at(u32::MAX - 1), TickSpan::ONE);
+        peer.arm_load(at(u32::MAX - 1), TickSpan::ONE, 1.0);
         peer.pause(at(u32::MAX - 1));
-        peer.resume(at(0));
+        peer.load_at_rate(at(0), TickSpan::ONE, 1.0);
         assert_eq!(peer.remaining_ticks(at(0)), 1);
         assert!(peer.deadline_reached(at(1)));
     }
@@ -730,19 +814,19 @@ mod tests {
     #[test]
     fn paused_work_keeps_the_signed_horizon_and_clamps_an_already_due_deadline() {
         let mut gate = WeaponGateState::default();
-        gate.arm(at(0), TickSpan::of(TickSpan::MAX));
+        gate.arm_load(at(0), TickSpan::of(TickSpan::MAX), 1.0);
         gate.pause(at(0));
         assert_eq!(gate.remaining_ticks(at(u32::MAX)), TickSpan::MAX);
-        gate.resume(at(1));
+        gate.load_at_rate(at(1), TickSpan::of(TickSpan::MAX), 1.0);
         assert_eq!(gate.remaining_ticks(at(1)), i32::MAX as u32);
-        gate.arm(at(10), TickSpan::ONE);
+        gate.arm_load(at(10), TickSpan::ONE, 1.0);
         gate.pause(at(20));
         assert_eq!(gate.remaining_ticks(at(20)), 0);
-        gate.resume(at(25));
+        gate.load_at_rate(at(25), TickSpan::ONE, 1.0);
         assert!(gate.deadline_reached(at(25)));
-        gate.arm(at(u32::MAX - 1), TickSpan::of(3));
+        gate.arm_load(at(u32::MAX - 1), TickSpan::of(3), 1.0);
         gate.pause(at(u32::MAX));
-        gate.resume(at(u32::MAX));
+        gate.load_at_rate(at(u32::MAX), TickSpan::of(3), 1.0);
         assert_eq!(gate.remaining_ticks(at(u32::MAX)), 2);
     }
 
@@ -1234,16 +1318,9 @@ mod tests {
 
         world.run_system_once(fire).unwrap();
         assert_eq!(weapon_state(&mut world, root).rounds_fired, 1);
-        assert_eq!(
-            gate_state(&world, root),
-            WeaponGateState {
-                timing: crate::tank::WeaponTiming::Loading {
-                    ready_tick: crate::sim_tick::SimTick::new(32)
-                },
-                belt_remaining: 0,
-                ..default()
-            },
-        );
+        let mut expected = WeaponGateState::default();
+        expected.arm_load(at(0), TickSpan::of(32), 1.0);
+        assert_eq!(gate_state(&world, root), expected);
 
         world.run_system_once(fire).unwrap();
         assert_eq!(weapon_state(&mut world, root).rounds_fired, 1);

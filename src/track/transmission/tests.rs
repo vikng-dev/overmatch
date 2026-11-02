@@ -3580,4 +3580,11 @@ fn reduced_supply_pulls_away_and_retains_full_service_brakes() {
     rolling.park = false;
     apply_brake_stop_forces(&mut q, &tp, &fp, &rolling, &reverse, intent.service, false);
     assert_eq!(q, [-tp.brake_capacity_n; 2]);
+    let mut absent = input(1.0, 1.0, [0.0; 2], [0.0; 2]);
+    absent.effectiveness = 0.0;
+    let mut state = fresh(&tp);
+    let report = step(&fp, &tp, &mut state, &absent);
+    assert_eq!(report.forces, [0.0; 2]);
+    assert_eq!(report.next_speeds, [0.0; 2]);
+    assert!(state.omega_e.is_finite());
 }
