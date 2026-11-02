@@ -676,6 +676,9 @@ fn show_pieces(
     mut surfaces: SurfaceStores,
     mut commands: Commands,
 ) {
+    // The shared cursor owns visibility as well as streamed poses. The net-motion contract says
+    // "Genuine remote-clock resyncs remain discontinuities" (`.agents/docs/design/net-motion-contract.md`).
+    // A backward resync can reverse a handover; a local monotone cursor would detach it from poses.
     let due = |tick: u32| clock.since(tick).is_some_and(|elapsed| elapsed >= 0.0);
     let born_with: BTreeSet<(Entity, u32, u16)> = arrived
         .iter()
@@ -1583,6 +1586,26 @@ mod tests {
                 Transform::IDENTITY,
             ))
             .id();
+        schedule.run(&mut world);
+        assert_eq!(world.get::<Visibility>(parent), Some(&Visibility::Hidden));
+        assert_eq!(world.get::<Visibility>(a), Some(&Visibility::Inherited));
+        assert_eq!(world.get::<Visibility>(b), Some(&Visibility::Inherited));
+        // Fixture backward resync: visibility follows the same discontinuity as the carrier poses.
+        *world.resource_mut::<PresentationClock>() = PresentationClock::At {
+            tick: offset.wrapping_add(19),
+            overstep: 0.0,
+        };
+        schedule.run(&mut world);
+        assert_eq!(
+            world.get::<Visibility>(parent),
+            Some(&Visibility::Inherited)
+        );
+        assert_eq!(world.get::<Visibility>(a), Some(&Visibility::Hidden));
+        assert_eq!(world.get::<Visibility>(b), Some(&Visibility::Hidden));
+        *world.resource_mut::<PresentationClock>() = PresentationClock::At {
+            tick: offset.wrapping_add(20),
+            overstep: 0.0,
+        };
         schedule.run(&mut world);
         assert_eq!(world.get::<Visibility>(parent), Some(&Visibility::Hidden));
         assert_eq!(world.get::<Visibility>(a), Some(&Visibility::Inherited));
