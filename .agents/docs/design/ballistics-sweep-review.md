@@ -1171,7 +1171,7 @@ The field-cast blessing tool re-pinned 2009 records and printed `PINNED_TOTAL = 
 (MEASURED on macOS arm64); the aggregate constant now matches it.
 
 The angle-law form and the owner's open choices are unchanged. No wire definitions changed;
-current main's PROTOCOL_REV 64 is retained. No protected modules, captures, pricing, pushes or
+main's PROTOCOL_REV 65 (bumped by the interleaved #228 commits) is retained. No protected modules, captures, pricing, pushes or
 issue comments were changed or made.
 
 MEASURED continuation gates: 589 targeted tests passed across `ballistics::`, `pen_cam`,
@@ -1179,3 +1179,30 @@ MEASURED continuation gates: 589 targeted tests passed across `ballistics::`, `p
 remained ignored. All 44 whole-tree guards passed (`doc_citations`, `ui_ascii`, `net_boundary`,
 `bake::`). Formatting and locked workspace/all-target CI clippy with `dev_ui,bitprobe` passed.
 The source comments describing the removed bounce nudge now state the reached-hand-off invariant.
+
+## Verification of the sweep-ball-12 review (sweep-ball-14)
+
+Subject: the game's damage model, the shell walk's ricochet resume and the damage cam's view of
+it; game state only. The angle law's form stays the owner's open call.
+
+| reviewer | finding | verified / not a defect | fixed in (subject) |
+|---|---|---|---|
+| Codex | P1: a reflection resumes every sample at its own incoming hand-off, so depth spread becomes lateral offset that compounds | verified: a stepped-face fixture puts a sample 0.0716 m off the outgoing axis against r = 0.044 m (MEASURED) | open |
+| Codex | P2: s9's re-record empties the loader station's HP pool while `shows` says reduced | verified against the record | open (follows the P1 re-record) |
+| Codex | P2: `face_safe_body` panics at a trihedral corner tighter than the model | verified (DERIVED infeasible) | damage_cam: draw a leading body at a corner tighter than the model (#255) |
+| Codex | P2: launch clearance reads a fresh square disc while launch resumes carried starts | verified | ballistics: admit launch clearance on the starts launch resumes (#255) |
+| Codex | P3: the contact-time outgoing membership probe is never read; a Required continuation can cross a tick unread; `launched()` clears membership silently | verified | tick boundary and assertion: ballistics: admit launch clearance on the starts launch resumes (#255); the unread probe is open with the P1 |
+| Codex | P3: `collect_convex`'s accepted-exit exception is unnamed | verified | ballistics: name the convex collector's accepted-exit exception (#255) |
+| Codex | P3: the record says PROTOCOL_REV 64 | verified: 65 at the time, 66 on main now | this record |
+
+The P1 is not landed. A disc of radius r about the outgoing axis, its samples on the struck
+face's plane through the axis hand-off and moved forward out of the struck volume, makes the
+fixture and the thin-neighbour test pass and keeps every other record. On the re-recorded s9 it
+reflects off Breech, Turret_Side, Turret_Side and Turret_Bottom, rests in Turret_Side and
+throws two cones. The gunner station's HP pool is emptied and the breech knocked out; the
+commander station is reduced (14.4 of 30 HP taken) and so is the loader station (13.4 HP taken,
+field dose only) (MEASURED). s5 keeps its four reflections, its rest and its one cone. Two view
+guards fail on that s9: `the_shell_never_sinks_into_the_face_it_glances_off` (the path's nose
+6.2 mm inside the Turret_Bottom face 16 mm past the apex) and `each_front_runs_at_its_own_speed`.
+After the Turret_Bottom reflection a rim sample's 1.17 mm chord into Turret_Side ends the
+flight. The wire definitions and PROTOCOL_REV 66 are unchanged.
