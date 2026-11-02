@@ -1833,6 +1833,17 @@ fn reconcile_shadow_config(config: &mut CascadeShadowConfig, rebuilt: CascadeSha
     }
 }
 
+/// Headless roots may have no primary window; multiple primaries are a construction bug.
+fn optional_primary_window<T>(window: Result<T, bevy::ecs::query::QuerySingleError>) -> Option<T> {
+    match window {
+        Ok(window) => Some(window),
+        Err(bevy::ecs::query::QuerySingleError::NoEntities(_)) => None,
+        Err(bevy::ecs::query::QuerySingleError::MultipleEntities(_)) => {
+            panic!("settings requires at most one primary window")
+        }
+    }
+}
+
 /// Reconcile the rendering world to [`Settings`]. The ONE writer of every knob below, which is what
 /// makes "the page and the picture cannot disagree" true by construction rather than by discipline.
 #[expect(
@@ -1854,7 +1865,7 @@ fn apply_settings(
     )>,
     // Optional because a headless/simulate root has no primary window at all — the present mode is
     // then simply nothing to apply, not a missing dependency.
-    window: Option<Single<&mut Window, With<PrimaryWindow>>>,
+    mut window: Query<&mut Window, With<PrimaryWindow>>,
     // Required: `plugin` mounts `render_scale::plugin` on every path to this system.
     mut render_scale: ResMut<crate::render_scale::RenderScale>,
     // What the surface reported (or an unknown state, before/instead of that) — the gate on the
@@ -1934,9 +1945,8 @@ fn apply_settings(
     // Preserve every window field on a hidden run; see `CaptureWindowPinned` for the macOS
     // fullscreen focus hazard. Nobody watches its present mode either.
     if capture_pinned.is_none()
-        && let Some(window) = window
+        && let Some(mut window) = optional_primary_window(window.single_mut())
     {
-        let mut window = window.into_inner();
         window.present_mode = settings.present_mode(*caps);
         let displays = read_displays(&monitors, &primaries);
         // Both window fields below are derived through `monitor_on`, so the mode and the position
@@ -2231,7 +2241,7 @@ impl RoundTrip {
 )]
 fn observe_window_placement(
     _non_send_marker: bevy::ecs::system::NonSendMarker,
-    window: Option<Single<(Entity, &mut Window), With<PrimaryWindow>>>,
+    mut window: Query<(Entity, &mut Window), With<PrimaryWindow>>,
     mut settings: ResMut<Settings>,
     mut save: MessageWriter<SaveSettings>,
     monitors: Query<(), With<Monitor>>,
@@ -2242,10 +2252,9 @@ fn observe_window_placement(
     mut placement: ResMut<WindowPlacement>,
     mut last_seen: Local<Option<bool>>,
 ) {
-    let Some(window) = window else {
+    let Some((entity, mut window)) = optional_primary_window(window.single_mut()) else {
         return;
     };
-    let (entity, mut window) = window.into_inner();
     let displays = read_displays(&monitors, &primaries);
     let target = settings.display.monitor_on(displays);
     let Some(observed) = bevy::winit::WINIT_WINDOWS.with_borrow(|winit_windows| {

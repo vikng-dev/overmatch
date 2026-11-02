@@ -323,15 +323,12 @@ impl Row {
         }
     }
 
-    /// Where this row sits in [`Row::ORDER`] — the one place the array is searched, so the selection
-    /// and the mouse hit test cannot disagree about what "row 2" means. A row missing from `ORDER`
-    /// is unreachable (the page lays out FROM `ORDER`), and resolves to the first rather than
-    /// panicking.
+    /// ORDER owns the indices shared by selection and controls; every constructed row belongs to it.
     fn index(self) -> usize {
         Row::ORDER
             .iter()
             .position(|row| *row == self)
-            .unwrap_or_default()
+            .expect("every constructed Row belongs to Row::ORDER")
     }
 
     /// Rendered value: ASCII plus the verified typographic set; scalar rows format numbers.
@@ -478,7 +475,7 @@ fn ladder_fraction<T: Copy + PartialEq>(order: &[T], current: T) -> f32 {
     let index = order
         .iter()
         .position(|entry| *entry == current)
-        .unwrap_or(0);
+        .expect("a discrete slider ladder contains its current value");
     index as f32 / (order.len().saturating_sub(1)).max(1) as f32
 }
 
@@ -1209,7 +1206,9 @@ fn spawn_row(
                                 BackgroundColor(SLIDER_TRACK_BG),
                             ))
                             .with_children(|bar| {
-                                let fraction = row.slider_fraction(settings).unwrap_or(0.0);
+                                let fraction = row
+                                    .slider_fraction(settings)
+                                    .expect("RowKind::Slider declares a slider_fraction mapping");
                                 bar.spawn((
                                     SliderFill(row),
                                     Node {
@@ -1348,7 +1347,7 @@ fn page_pressed(
     arrows: Query<&ArrowGlyph>,
     tracks: Query<(&SliderTrack, &ComputedNode, &UiGlobalTransform)>,
     tabs: Query<&TabLabel>,
-    window: Option<Single<&Window, With<PrimaryWindow>>>,
+    window: Query<&Window, With<PrimaryWindow>>,
     caps: Res<PresentCaps>,
     ladder: Res<DisplayLadder>,
     mut page: ResMut<Page>,
@@ -1356,6 +1355,7 @@ fn page_pressed(
     mut settings: ResMut<Settings>,
     mut save: MessageWriter<SaveSettings>,
 ) {
+    let window = super::optional_primary_window(window.single());
     if let Ok(arrow) = arrows.get(press.entity) {
         press.propagate(false);
         if press.button == PointerButton::Primary && arrow.row.enabled(&settings, *caps) {
@@ -1419,7 +1419,7 @@ fn scrub(active: ActiveDrag, cursor_x: f32, settings: &mut ResMut<Settings>) {
 fn mouse_input(
     visible: Res<SettingsPageVisible>,
     buttons: Res<ButtonInput<MouseButton>>,
-    window: Option<Single<&Window, With<PrimaryWindow>>>,
+    window: Query<&Window, With<PrimaryWindow>>,
     rows: Query<(&RowLine, &Hovered), Changed<Hovered>>,
     strip: Query<&Hovered, (With<TabStrip>, Changed<Hovered>)>,
     caps: Res<PresentCaps>,
@@ -1429,6 +1429,7 @@ fn mouse_input(
     mut settings: ResMut<Settings>,
     mut save: MessageWriter<SaveSettings>,
 ) {
+    let window = super::optional_primary_window(window.single());
     // A drag owns selection until release/page close, saves once, and keeps its frozen rect.
     if let Some(active) = drag.0 {
         if !visible.0 || !buttons.pressed(MouseButton::Left) {
@@ -1519,15 +1520,15 @@ fn scroll_rows(
     visible: Res<SettingsPageVisible>,
     mut wheel: MessageReader<bevy::input::mouse::MouseWheel>,
     page: Res<Page>,
-    viewport: Option<
-        Single<(&ComputedNode, &UiGlobalTransform, &mut ScrollPosition), With<RowViewport>>,
+    mut viewport: Query<
+        (&ComputedNode, &UiGlobalTransform, &mut ScrollPosition),
+        With<RowViewport>,
     >,
     rows: Query<(&RowLine, &ComputedNode, &UiGlobalTransform)>,
 ) {
-    let Some(viewport) = viewport else {
-        return;
-    };
-    let (node, transform, mut scroll) = viewport.into_inner();
+    let (node, transform, mut scroll) = viewport
+        .single_mut()
+        .expect("settings::ui::spawn_page creates exactly one RowViewport");
     if !visible.0 {
         // Drain, so a wheel spun over the game with the page shut does not arrive as a jump the
         // next time it opens.
@@ -1657,7 +1658,12 @@ fn refresh_page(
         color.set_if_neq(TextColor(if lit { TEXT } else { TEXT_DIM }));
     }
     for (fill, mut node, mut color) in &mut fills {
-        let width = Val::Percent(fill.0.slider_fraction(&settings).unwrap_or(0.0) * 100.0);
+        let width = Val::Percent(
+            fill.0
+                .slider_fraction(&settings)
+                .expect("every SliderFill row has a slider_fraction mapping")
+                * 100.0,
+        );
         if node.width != width {
             node.width = width;
         }
@@ -2214,11 +2220,6 @@ mod tests {
         assert_eq!(ladder_at_fraction(&order, 0.55), 30, "rounds to nearest");
         assert_eq!(ladder_at_fraction(&order, -3.0), 10, "clamps below");
         assert_eq!(ladder_at_fraction(&order, 7.0), 50, "clamps above");
-        assert_eq!(
-            ladder_fraction(&order, 99),
-            0.0,
-            "an unknown current resolves to the first stop, like step_in"
-        );
     }
 
     /// The track mapping: a cursor at the track's left edge is 0, right edge is 1, centre is 0.5,
@@ -2349,6 +2350,69 @@ mod tests {
         panic!("the card never settled on a layout with both fonts loaded (last {last:?})");
     }
 
+    /// Full settings composition without winit or a GPU. The explicit store path isolates IO.
+    fn headless_settings_app(settings: Settings, path: Option<std::path::PathBuf>) -> App {
+        let mut app = App::new();
+        app.add_plugins(crate::gpu_less_default_plugins(None))
+            .add_plugins(crate::ui_font::plugin)
+            .insert_resource(State::new(crate::state::AppState::Paused))
+            .init_resource::<bevy::winit::WinitMonitors>()
+            .insert_resource(settings)
+            .insert_resource(super::super::store::StorePath(path))
+            .add_plugins(super::super::plugin(super::super::PageEntry::PauseState));
+        app.finish();
+        app.cleanup();
+        app
+    }
+
+    /// The page and window reconcilers require one viewport, at most one primary window and
+    /// mappings for every slider fill. Broken construction must panic rather than freeze controls.
+    #[test]
+    fn invalid_settings_page_construction_panics() {
+        for (defect, expected) in [
+            ("missing viewport", "exactly one RowViewport"),
+            ("duplicate viewport", "exactly one RowViewport"),
+            ("duplicate primary window", "at most one primary window"),
+            ("stepper slider fill", "slider_fraction mapping"),
+        ] {
+            let mut app = headless_settings_app(Settings::default(), None);
+            app.update();
+            let world = app.world_mut();
+            match defect {
+                "missing viewport" => {
+                    let viewport = world
+                        .query_filtered::<Entity, With<RowViewport>>()
+                        .single(world)
+                        .unwrap();
+                    world.entity_mut(viewport).remove::<RowViewport>();
+                }
+                "duplicate viewport" => {
+                    world.spawn((RowViewport, Node::default(), ScrollPosition::default()));
+                }
+                "duplicate primary window" => {
+                    world.spawn((Window::default(), PrimaryWindow));
+                    world.spawn((Window::default(), PrimaryWindow));
+                }
+                "stepper slider fill" => {
+                    world.spawn((
+                        SliderFill(Row::Msaa),
+                        Node::default(),
+                        BackgroundColor::default(),
+                    ));
+                }
+                _ => unreachable!("the fixture names every construction defect"),
+            }
+            let panic = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| app.update()))
+                .expect_err("invalid page construction must panic");
+            let message = panic
+                .downcast_ref::<String>()
+                .map(String::as_str)
+                .or_else(|| panic.downcast_ref::<&str>().copied())
+                .unwrap();
+            assert!(message.contains(expected), "{defect}: {message}");
+        }
+    }
+
     /// Players must see every corrupt-file reset and the recovery location through the shipped
     /// settings plugin; a successful save and reopening must not erase that boot warning.
     #[test]
@@ -2370,17 +2434,8 @@ mod tests {
             assert!(
                 matches!(&note, store::LoadNote::Corrupt { kept, .. } if kept.is_some() == preserve)
             );
-            let mut app = App::new();
-            app.add_plugins(crate::gpu_less_default_plugins(None))
-                .add_plugins(crate::ui_font::plugin)
-                .insert_resource(State::new(crate::state::AppState::Paused))
-                .init_resource::<bevy::winit::WinitMonitors>()
-                .insert_resource(settings)
-                .insert_resource(store::StorePath(Some(path.clone())))
-                .insert_resource(StoreReport(note))
-                .add_plugins(super::super::plugin(super::super::PageEntry::PauseState));
-            app.finish();
-            app.cleanup();
+            let mut app = headless_settings_app(settings, Some(path.clone()));
+            app.insert_resource(StoreReport(note));
             app.update();
             let notice = |app: &mut App| {
                 let world = app.world_mut();
