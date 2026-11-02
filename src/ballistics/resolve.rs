@@ -313,18 +313,32 @@ fn to_resting_height(start: Vec3, axis: Dir3, read: &walk::EntranceRead, rest: f
 /// touch, which no hand-off bounds. It never retraces a paid crossing. If the disc already holds
 /// material, `contact` is zero and the skid ends the round: every exchange spends flight time or is
 /// terminal, including converging faces.
+///
+/// A round flown as its axis alone (`radius` zero) has no sample to spare: its first touch is the
+/// axis on the face, and its slide would then lie in the face's plane, where closed shells do not
+/// alternate ([`walk::WalkError::UnexpectedExit`]). It turns [`REST_CLEARANCE`] short of the face
+/// instead, and one that already stands within that has no room to turn and ends there.
 fn skid_turn(
     start: Vec3,
     axis: Dir3,
     read: &walk::EntranceRead,
     rest: f32,
+    radius: f32,
     hand_off: f32,
     contact: f32,
 ) -> f32 {
     let turn = to_resting_height(start, axis, read, rest)
         .max(0.0)
         .min(hand_off.max(0.0));
-    if turn > 0.0 { turn } else { contact.max(0.0) }
+    if turn > 0.0 {
+        turn
+    } else if radius > 0.0 {
+        contact.max(0.0)
+    } else {
+        contact
+            .min(to_resting_height(start, axis, read, 0.0))
+            .max(0.0)
+    }
 }
 
 /// The game's damage model: `flight` standing before a first touch the sweep found, in the struck
@@ -437,6 +451,33 @@ pub(super) fn at_first_touch(
 /// probe's own origin is never read as sitting on one, and no face within reach of a start belongs
 /// to a candidate the probe set aside.
 pub(super) const PROBE_MARGIN: f32 = MARCH_EPS;
+
+/// How far behind and ahead of its start a containment probe along `axis` reaches: every sample's
+/// ray then ends outside the candidates' bounds `lo..hi` grown by [`PROBE_MARGIN`].
+///
+/// World bounds are rounded, so a face a ray runs along can lie a hair past them, and a start can
+/// stand past them inside that face. Only the grown box is sure to hold every face: past the first
+/// grown slab a ray leaves, it is outside everything.
+fn probe_reach(offsets: &[Vec3], axis: Vec3, lo: Vec3, hi: Vec3) -> (f32, f32) {
+    let (lo, hi) = (lo - PROBE_MARGIN, hi + PROBE_MARGIN);
+    let leave = |point: Vec3, direction: Vec3| {
+        (0..3)
+            .filter_map(|i| match direction[i] {
+                d if d > 0.0 => Some((hi[i] - point[i]) / d),
+                d if d < 0.0 => Some((lo[i] - point[i]) / d),
+                _ => None,
+            })
+            .fold(f32::INFINITY, f32::min)
+            .max(0.0)
+    };
+    let furthest = |direction: Vec3| {
+        offsets
+            .iter()
+            .map(|&offset| leave(offset, direction))
+            .fold(0.0, f32::max)
+    };
+    (furthest(-axis), furthest(axis))
+}
 
 /// Containment work is bounded by the finite candidate geometry loaded into the world. It has no
 /// independent candidate or accumulated-disc quota: every admitted shell must be read.
@@ -595,28 +636,7 @@ pub(crate) fn certified_samples(
             seeds: Interior::laid(at, given).seeds,
         });
     }
-    // How far along `direction` the point leaves the box: past the first slab it leaves, it is
-    // outside the box.
-    let leave = |point: Vec3, direction: Vec3| {
-        (0..3)
-            .filter_map(|i| match direction[i] {
-                d if d > 0.0 => Some((hi[i] - point[i]) / d),
-                d if d < 0.0 => Some((lo[i] - point[i]) / d),
-                _ => None,
-            })
-            .fold(f32::INFINITY, f32::min)
-            .max(0.0)
-    };
-    let behind = offsets
-        .iter()
-        .map(|&offset| leave(offset, -axis))
-        .fold(0.0, f32::max)
-        + PROBE_MARGIN;
-    let ahead = offsets
-        .iter()
-        .map(|&offset| leave(offset, axis))
-        .fold(0.0, f32::max)
-        + PROBE_MARGIN;
+    let (behind, ahead) = probe_reach(&offsets, axis, lo, hi);
     let length = behind + ahead;
     assert!(
         length.is_finite(),
@@ -1806,7 +1826,15 @@ pub(crate) fn decide(
             let out = Dir3::new(direction).expect(
                 "the game's damage model derives a finite nonzero ricochet direction from checked unit directions"
             );
-            let turn = skid_turn(start, dir, &read, rest, hand_offs[0] as f32, contact);
+            let turn = skid_turn(
+                start,
+                dir,
+                &read,
+                rest,
+                radius,
+                hand_offs[0] as f32,
+                contact,
+            );
             if turn == 0.0 {
                 return Ok(skid(&read, &hand_offs, turn, dir, 0.0, None));
             }
@@ -1833,7 +1861,15 @@ pub(crate) fn decide(
             entrance: read,
             hand_offs,
         } => {
-            let turn = skid_turn(start, dir, &read, rest, hand_offs[0] as f32, contact);
+            let turn = skid_turn(
+                start,
+                dir,
+                &read,
+                rest,
+                radius,
+                hand_offs[0] as f32,
+                contact,
+            );
             Ok(skid(&read, &hand_offs, turn, dir, 0.0, None))
         }
         Begin::Transit(request) => {

@@ -3584,7 +3584,7 @@ fn a_skid_never_rewinds_and_a_future_finite_contact_is_reached() {
     };
     let axis = Dir3::new(Vec3::new(0.0, -0.1, 1.0)).unwrap();
     assert_eq!(
-        skid_turn(Vec3::Y * 0.005, axis, &read, 0.044, 0.3, 0.0),
+        skid_turn(Vec3::Y * 0.005, axis, &read, 0.044, 0.044, 0.3, 0.0),
         0.0
     );
     assert_eq!(
@@ -3593,9 +3593,86 @@ fn a_skid_never_rewinds_and_a_future_finite_contact_is_reached() {
             axis,
             &read,
             0.044,
+            0.044,
             2.0,
             1.4
         ),
         1.4
     );
+}
+
+/// The game's damage model: a round flown as one line never turns onto the face it skids on, from
+/// wherever its tick ended short of that face. On the face its slide would lie in the face's plane,
+/// where the containment probe's parity has no answer and the march panics. Fixture: a line round's
+/// start under its resting height by a drawn share of it, and one already within the clearance,
+/// which has no room to turn and ends. Mutant: turn at the first touch, which stands the axis on the
+/// face.
+#[test]
+fn a_line_round_never_turns_onto_the_face_it_skids_on() {
+    let body = FIXTURE_MG;
+    let rest = body.caliber * 0.5;
+    assert_eq!(disc_radius(body.caliber), 0.0, "the fixture flies one line");
+    for incidence in [40.0_f32, 60.0, 80.0] {
+        let incidence = incidence.to_radians();
+        let at_height = |height: f32| {
+            let mut app = world_with_trimesh_plates(&[]);
+            let rotation = Quat::from_rotation_z(incidence);
+            let face = Face {
+                contact: DROP_FROM + Vec3::NEG_Y * (height / incidence.cos()),
+                rotation,
+            };
+            volume(
+                &mut app,
+                Vec3::new(12.0, 0.4, 3.0),
+                Transform::from_translation(face.at(0.0, -0.2)).with_rotation(rotation),
+                STEEL,
+                Some(1000),
+            );
+            for _ in 0..8 {
+                app.update();
+            }
+            (driven(&mut app, body, 500.0), face)
+        };
+        for height in [1.5 * REST_CLEARANCE, 0.5 * rest, rest] {
+            let (flown, face) = at_height(height);
+            let bounce = first_bounce(&flown);
+            assert!(bounce.continuation.is_some(), "{height} m: it slides");
+            let stands = (bounce.resume - face.contact).dot(face.normal());
+            assert!(
+                (stands - REST_CLEARANCE).abs() < 1.0e-5,
+                "{height} m: the axis turned {stands} m off the face"
+            );
+        }
+        let (flown, _) = at_height(0.5 * REST_CLEARANCE);
+        let bounce = first_bounce(&flown);
+        assert!(
+            bounce.continuation.is_none() && bounce.travel == 0.0,
+            "no room to turn: {bounce:?}"
+        );
+    }
+}
+
+/// The game's damage model: a containment probe ends outside its candidates' grown bounds even from
+/// a start a hair past one slab, on a ray nearly parallel to it. World bounds round, so that start
+/// can lie inside the face the slab stands for, and the corridor read from a probe that begins there
+/// meets an exit with no entry. Fixture: a unit box, a start 0.24 um past its face and a heading
+/// 0.08 urad into it. Mutant: leave the ungrown box, which ends the probe at its margin.
+#[test]
+fn a_probe_leaves_the_grown_bounds_from_a_start_past_a_slab() {
+    let (lo, hi) = (Vec3::splat(-1.0), Vec3::splat(1.0));
+    let start = Vec3::new(1.0 + 2.4e-7, 0.0, 0.0);
+    for axis in [
+        Vec3::new(-8.0e-8, 0.85, -0.52).normalize(),
+        Vec3::new(8.0e-8, -0.85, 0.52).normalize(),
+    ] {
+        let (behind, ahead) = probe_reach(&[start], axis, lo, hi);
+        let outside = |point: Vec3| {
+            let margin = 0.99 * PROBE_MARGIN;
+            point.cmplt(lo - margin).any() || point.cmpgt(hi + margin).any()
+        };
+        assert!(
+            outside(start - axis * behind) && outside(start + axis * ahead),
+            "{axis}: behind {behind} m, ahead {ahead} m"
+        );
+    }
 }
