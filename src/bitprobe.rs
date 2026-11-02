@@ -652,6 +652,7 @@ struct DumpWriter {
 impl DumpWriter {
     fn create(path: PathBuf, header: &serde_json::Value) -> std::io::Result<Self> {
         let file = File::create(path)?;
+        // A zero gzip timestamp keeps dump bytes reproducible across runs.
         let mut output = GzBuilder::new()
             .mtime(0)
             .write(BufWriter::new(file), Compression::default());

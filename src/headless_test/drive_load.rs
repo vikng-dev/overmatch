@@ -101,11 +101,7 @@ impl Measurements {
             let tp = gear.trans();
             let target = match state.clutch {
                 ClutchState::Out => unreachable!("an engaged probe has a coupled clutch"),
-                ClutchState::Slip => {
-                    (tp.engine.idle_rpm
-                        + probe.throttle.abs() * (tp.peak_torque_rpm - tp.engine.idle_rpm))
-                        * crate::track::transmission::RPM_TO_RAD
-                }
+                ClutchState::Slip => tp.launch_omega(probe.throttle.abs()),
                 ClutchState::In => {
                     (probe.next_speeds[0] + probe.next_speeds[1]) * 0.5 * probe.direction * probe.k
                 }
@@ -515,5 +511,144 @@ fn perceived_load_during_a_rearward_shot_uphill() {
     assert!(
         change < margin,
         "recoil entered the terrain observation: {change} N"
+    );
+}
+
+/// The game's driving and damage model: crew are HP pools at stations. The shipped sim must
+/// retain the empty station's existing park/neutral at rest, and re-engage a moving clutch after
+/// every interruption without idle-catch work. Fixture: a uniform 10-degree descent, then 5 m/s.
+#[test]
+fn empty_driver_station_rest_and_descent() {
+    use crate::damage::{CrewStation, Dead, VolumeOf};
+    use crate::track::transmission::{ClutchState, PARK_ENGAGE_SPEED, RPM_TO_RAD};
+    let angle = -10.0_f32.to_radians(); // Fixture descent toward the forward axis.
+    let extent = crate::terrain_grid::FIXTURE_EXTENT;
+    let height = extent.half_extent() * angle.tan();
+    let grid = crate::terrain_grid::HeightGrid::new(
+        vec![height, height, -height, -height].into(),
+        2,
+        extent,
+    );
+    let mut app = booted_sim_on(Some(grid));
+    start_fixed_clock(&mut app);
+    app.update();
+    let tank = app
+        .world_mut()
+        .query_filtered::<Entity, (With<Tank>, With<Controlled>)>()
+        .single(app.world())
+        .expect("one controlled fixture tank");
+    let rotation = Quat::from_rotation_x(angle);
+    let normal = rotation * Vec3::Y;
+    let rest = app
+        .world()
+        .resource::<crate::track::rig_geom::RigGeom>()
+        .hull_rest_y;
+    let position = Vec3::new(100.0, 0.0, 0.0) + normal * rest;
+    place(&mut app, tank, position, rotation, 0.0, 1);
+    for _ in 0..128 {
+        drive_tick(&mut app, tank, 0.0, 0.0);
+    }
+    // Empty every pool assigned to this station before the next simulation tick.
+    let drivers: Vec<Entity> = app
+        .world_mut()
+        .query::<(Entity, &CrewStation, &VolumeOf)>()
+        .iter(app.world())
+        .filter_map(|(entity, station, owner)| {
+            (*station == CrewStation::Driver && owner.0 == tank).then_some(entity)
+        })
+        .collect();
+    assert!(!drivers.is_empty(), "the fixture has a Driver station");
+    for driver in drivers {
+        app.world_mut()
+            .get_mut::<crate::ballistics::ComponentHealth>(driver)
+            .unwrap()
+            .set_held(0);
+        app.world_mut().entity_mut(driver).insert(Dead);
+    }
+    let start = app
+        .world()
+        .get::<avian3d::prelude::Position>(tank)
+        .unwrap()
+        .0;
+    let mut previous_crank = app.world().get::<TankTransmission>(tank).unwrap().0.omega_e;
+    for _ in 0..4 * FIXED_TICKS_PER_SECOND {
+        drive_tick(&mut app, tank, 0.0, 0.0);
+        let state = &app.world().get::<TankTransmission>(tank).unwrap().0;
+        assert!(state.park);
+        assert_eq!(state.clutch, ClutchState::Out);
+        assert!(
+            state.omega_e <= previous_crank,
+            "a disconnected crank without fuel cannot gain energy"
+        );
+        previous_crank = state.omega_e;
+        assert_eq!(probe(&app, tank).tau_idle, 0.0);
+    }
+    let state = &app.world().get::<TankTransmission>(tank).unwrap().0;
+    let end = app
+        .world()
+        .get::<avian3d::prelude::Position>(tank)
+        .unwrap()
+        .0;
+    println!(
+        "MEASURED empty Driver at rest on 10 degrees after 4 s: park={}, clutch={:?}, rpm={}, displacement_m={}",
+        state.park,
+        state.clutch,
+        state.omega_e / RPM_TO_RAD,
+        (end - start).length()
+    );
+    // Fixture: a rolling entry in the upper-middle portion of the authored gear ladder.
+    let gear = (app
+        .world()
+        .resource::<crate::track::sim::TrackGear>()
+        .trans()
+        .gears_fwd
+        .len()
+        * 3
+        / 4)
+    .max(1) as u8;
+    place(&mut app, tank, position, rotation, 5.0, gear);
+    app.world_mut()
+        .get_mut::<TankTransmission>(tank)
+        .unwrap()
+        .0
+        .clutch = ClutchState::In;
+    let mut interrupted_ticks = 0;
+    let mut first_drag = None;
+    for _ in 0..8 * FIXED_TICKS_PER_SECOND {
+        drive_tick(&mut app, tank, 0.0, 0.0);
+        let sample = probe(&app, tank);
+        let state = &app.world().get::<TankTransmission>(tank).unwrap().0;
+        assert_eq!(sample.tau_idle, 0.0);
+        assert_eq!(sample.tau_induced, 0.0);
+        if sample.shifting {
+            interrupted_ticks += 1;
+        } else if sample.mean_speed.abs() >= PARK_ENGAGE_SPEED {
+            assert_eq!(
+                state.clutch,
+                ClutchState::In,
+                "a moving interruption must expire even at an empty station"
+            );
+            if first_drag.is_none() {
+                first_drag = Some(sample.forces.iter().sum::<f32>());
+            }
+        }
+    }
+    assert!(
+        first_drag.unwrap() < 0.0,
+        "the rolling entry must receive motoring drag"
+    );
+    let speed = app
+        .world()
+        .get::<avian3d::prelude::LinearVelocity>(tank)
+        .unwrap()
+        .0
+        .dot(rotation * Vec3::NEG_Z);
+    let state = &app.world().get::<TankTransmission>(tank).unwrap().0;
+    println!(
+        "MEASURED empty Driver entering at 5 m/s on 10 degrees after 8 s: first_motor_force_n={}, speed_m_s={speed}, gear={}, clutch={:?}, rpm={}, interrupted_ticks={interrupted_ticks}",
+        first_drag.unwrap(),
+        state.gear,
+        state.clutch,
+        state.omega_e / RPM_TO_RAD
     );
 }

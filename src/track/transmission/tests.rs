@@ -882,8 +882,8 @@ fn steep_grade_after_upshift_corrects_before_lug() {
         grade_confirm_ticks: GRADE_CONFIRM_TICKS - 1,
         ..fresh(&tp)
     };
-    let speeds = [shaft0; 2];
-    step(
+    let mut speeds = [shaft0; 2];
+    let first = step(
         &fp,
         &tp,
         &mut st,
@@ -896,6 +896,23 @@ fn steep_grade_after_upshift_corrects_before_lug() {
         st.gear,
         st.scheduler
     );
+    speeds = first.next_speeds;
+    // Fixture observation: the paid window followed by engaged recovery ticks.
+    for _ in 0..8 {
+        let report = step(
+            &fp,
+            &tp,
+            &mut st,
+            &input(1.0, 0.0, speeds, [demand / 2.0; 2]),
+        );
+        speeds = report.next_speeds;
+    }
+    let mean = (speeds[0] + speeds[1]) * 0.5;
+    assert!(
+        mean > 0.0,
+        "the corrected drivetrain must recover forward motion after its window: {mean}"
+    );
+    assert!(st.gear < 4, "the correction must stand");
 }
 
 /// D3 regression: every sequential continuation is selected again, so a held target cancels
@@ -4250,4 +4267,29 @@ fn idle_guard_refuses_a_catch_wider_than_its_band() {
     control.idle_catch_droop_rpm.value = 150.0;
     control.idle_guard_band_rpm.value = 100.0;
     control.validate();
+}
+
+/// The pedal blend must retain each requested net-curve share, including its gradual drag
+/// compensation. Driver modulation relies on this; a squared-command mutant preserves endpoints.
+#[test]
+fn part_pedal_preserves_the_net_curve_blend() {
+    for tp in [lab_tp(), tiger_tp()] {
+        for rpm in [
+            tp.peak_torque_rpm,
+            (tp.engine.idle_rpm + tp.engine.governed_rpm) * 0.5,
+        ] {
+            for command in [0.25, 0.5, 0.75] {
+                // Fixture part-pedal samples.
+                let omega = rpm * RPM_TO_RAD;
+                let [fuel, catch, drag] = engine_torques(&tp, DriveSupply::WHOLE, omega, command);
+                let expected = command * tp.torque_at(rpm)
+                    - forces::hold_blend(command / DRAG_THROTTLE_RELEASE) * engine_drag(&tp, omega);
+                assert!(
+                    (fuel + catch - drag - expected).abs() < 1e-3,
+                    "command {command}, rpm {rpm}: net {} vs {expected}",
+                    fuel + catch - drag
+                );
+            }
+        }
+    }
 }

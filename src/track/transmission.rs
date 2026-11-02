@@ -698,8 +698,8 @@ impl TransmissionParams {
                     .all(|v| v.is_finite() && *v > 0.0),
             ),
             (
-                // DERIVED healthy idle-guard scale: the 100 rpm guard band needs
-                // positive headroom. The game's damage model can still reach rest.
+                // The authored idle guard needs positive crank-speed headroom.
+                // The game's damage model can still reach rest.
                 "engine.idle_rpm floor",
                 a.idle_rpm > engine_control().idle_guard_band_rpm.value,
             ),
@@ -912,7 +912,7 @@ impl TransmissionParams {
         (1.0 - (rpm - self.engine.governed_rpm) / GOVERNOR_CUT_RPM).clamp(0.0, 1.0)
     }
 
-    fn launch_omega(&self, command: f32) -> f32 {
+    pub(crate) fn launch_omega(&self, command: f32) -> f32 {
         (self.engine.idle_rpm + command * (self.peak_torque_rpm - self.engine.idle_rpm))
             * RPM_TO_RAD
     }
@@ -2335,7 +2335,7 @@ fn neutral_turn(inp: &TransmissionInput, mean: f32) -> bool {
 }
 
 /// Shift windows, the park lever and staffed zero-rate tasks open the clutch. A launch
-/// starts at rest below idle, retaining Slip until the shaft reaches its commanded speed.
+/// starts from Out at rest below idle, retaining Slip until the shaft reaches its commanded speed.
 /// At rest an unstaffed station retains its neutral lever. A moving shift interruption expires
 /// with its window, and a released slipping clutch springs In.
 fn update_clutch_state(
@@ -2361,7 +2361,9 @@ fn update_clutch_state(
     {
         ClutchState::Out
     } else if propulsive >= DEAD
-        && ((mean.abs() < PARK_ENGAGE_SPEED && shaft_omega < tp.engine.idle_rpm * RPM_TO_RAD)
+        && ((st.clutch == ClutchState::Out
+            && mean.abs() < PARK_ENGAGE_SPEED
+            && shaft_omega < tp.engine.idle_rpm * RPM_TO_RAD)
             || (st.clutch == ClutchState::Slip && shaft_omega < tp.launch_omega(propulsive)))
     {
         ClutchState::Slip

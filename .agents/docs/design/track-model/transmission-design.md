@@ -153,13 +153,12 @@ path-dependent transmission state inventoried below.
 ### Authoritative REV-14 transmission-state inventory
 
 This section supersedes the former five-bullet state sketch. The authoritative inventory is the
-current `TransmissionState` shape: **16 fields DERIVED by exhaustive struct inventory**, all
+current `TransmissionState` shape: **17 fields DERIVED by exhaustive struct inventory**, all
 `REPLICATE-EXACT`; `DERIVE` and `LOCAL-VIEW` each contain **0 fields DERIVED**. `f32` fields require
 their raw bits, and discrete fields require their exact value. **REV-14 rider DISCHARGED:**
-`TankTransmission` now replicates as one atomic server-authoritative component, predicts and rolls
-back for the owning client, and joins the exact determinism hash in this field order. A replicated
-root waits for the current snapshot before attaching its local sim body, so join-in-progress cannot
-replace authority state with a fresh spec-derived value.
+`TankTransmission` replicates as one atomic server-authoritative component and joins the exact
+bitprobe hash in this field order. Clients render the server stream; they do not simulate this
+state (ADR-0037).
 
 `REPLICATE-EXACT`:
 
@@ -173,11 +172,12 @@ replace authority state with a fresh spec-derived value.
 - `omega_e` — crank inertia and clutch slip integrate an independent speed that the belts cannot
   reconstruct. The in-band `0.0` sentinel is removed: `from_spec` initializes exact idle speed at
   spawn.
-- `clutch_out` — the coupling seam is hysteretic, so an in-band belt speed admits either latch state.
+- `clutch` — `Out`, `Slip` or `In`; a launch retains Slip until the shaft reaches its target.
 - `demand_n` — raw `f32` EMA history cannot be reconstructed from the current reaction sample.
 - `demand_initialized` — exact first-sample EMA marker: its contact-derived seed is unavailable at
   spawn, so REV 14 replicates and hashes this discrete bool rather than changing seeding semantics.
 - `grade_confirm_ticks` — the leaky deficit-evidence count depends on prior reserve samples.
+- `band_confirm_ticks` — consecutive full-predicate upshift evidence depends on prior decision ticks.
 - `grade_target` — a sequential cascade retains its selected final gear across paid windows.
 - `scheduler` — `Normal`, grade-shift endpoints, hill hold, and grade limit encode prior decisions.
 - `hill_hold` — anti-rollback engagement/release is a persistent capability-derived latch.
@@ -191,7 +191,7 @@ replicated as transmission state.
 state. `TankTransmission` is only the ECS wrapper around `TransmissionState`; crank state is not
 stored separately.
 
-The stale sketch omitted `reverse`, `park`, `last_shift_dir`, `dwell_ticks`, `clutch_out`,
+The stale sketch omitted `reverse`, `park`, `last_shift_dir`, `dwell_ticks`, `clutch`,
 `demand_n`, `demand_initialized`, `grade_confirm_ticks`, `grade_target`, `scheduler`, `hill_hold`,
 and `hold_reengage_ticks`; it also left engine speed conditional instead of definitively classifying
 `omega_e` as exact state.
@@ -475,59 +475,52 @@ flywheel rim alone is 2–4 kg·m²), mid-band. `clutch_capacity_nm: 2400` ≈ 1
 Lab (T-34 config + unit tests): J = 4.0, capacity = 2860 (1.3 × 2200). Validation:
 finite, positive, J ≤ 100, capacity ≤ 50 000. Spec pin test updated deliberately.
 
-**Update law (per tick, inside `regenerative`, replacing the rpm_floor block):**
+**Update law (per tick, inside `step`):**
 
-1. Free torque from the PRE-tick crank: `τ_free = τ_ind + τ_idle − τ_drag` with
-   `τ_ind = u·torque_at(ω_e)` (the governor cut now acts on the crank),
-   `τ_idle = clamp(gain·(ω_idle − ω_e), 0, torque_at(idle))` (gain = full recovery over
-   `K_IDLE_DROOP_RPM` = 50 rpm of droop), `τ_drag = drag_fraction·peak·
-   hold_blend(u/DRAG_THROTTLE_RELEASE)·sat(ω_e/ω_idle)`. Drag moved ENGINE-side: the
-   belt lost its separate `f_drag` term and drag reaches the belt only through the
-   coupling (`reflected_drag` deleted; the old belt-side `DRAG_SAT_SPEED` role is played
-   by the ω_idle saturation).
-2. COUPLING (engaged ⇔ not shifting ∧ not neutral-idle, where neutral-idle =
-   `propulsive < NEUTRAL_THROTTLE ∧ |m| < NEUTRAL_M_SPEED` — the L600 neutral seam
-   GENERALIZED to both adapters; without it an engaged idle-governed crank at standstill
-   rides the clutch at hundreds of kN of creep/pivot-drag force): ONE seamed function
-   `clutch_coupling` — the coupling-law slot; a torque-converter characteristic replaces
-   the clamp for modern automatics later —
-   `τ_c* = [(ω_e − k·s·m)/dt + τ_free/J − k·s·F_other/I_m] / (1/J + k²/I_m)` with
-   `k = G/r_s`, `s` the ladder direction, `I_m = 2·belt inertia`, `F_other = −ΣR`
-   (λ/brakes excluded — near-zero in engaged drive regimes; the end-of-step drift kill
-   re-anchors an exact lock). `τ_c = clamp(τ_c*, ±capacity)`; belt receives
-   `F_c = k·s·τ_c` split per side IN PLACE OF `f_p + f_drag`; crank integrates
-   `ω_e += (τ_free − τ_c·power_scale)·dt/J`. STALL GUARD (ships with this): a landing
-   below `ω_idle − STALL_GUARD_BAND_RPM` (100) reduces τ_c one-sidedly to land exactly
-   at the floor — the clutch slips to protect the crank; the band is 2× the idle droop
-   so the saturated idle governor guarantees the floor is holdable. No stall death
-   (later, playtest-gated).
-3. DECLUTCHED (shift window / neutral-idle): belt gets NO engine force and NO drag; the
-   crank runs a proportional-band rev governor (`REV_MATCH_BAND_RPM` = 200) toward
-   `max(|m|·k_landing, idle + (peak_torque_rpm − idle)·|steer|)`. Two DOCUMENTED
-   deviations from the memo's shorthand: (a) the steer-demand target (the surviving half
-   of the old `cmd_mag` contract) — without it a declutched pivot idles at ~1/5 of its
-   power budget; (b) the target is a SPEED, not blind full fueling — an unloaded crank
-   under u = 1 spools past the peak-power point to the governor cut-out where
-   `torque_at·ω = 0` (the d-path draw does not load the crank in this stage — deferred
-   honestly; the power gate caps the draw instead), so the steer demand must park the
-   crank at the peak-torque point or steady pivot power collapses to zero.
+1. `engine_torques` returns commanded fuel, the catch's additional fuel, and construction drag.
+   `τ_free = max(τ_command, τ_catch) − τ_drag`: one fuel rack, bounded by the governed net curve.
+   The command reconstructs gross combustion behind the net curve and scales by the Drive task
+   rate once; construction drag remains whole. The game's driving and damage model treats the
+   catch as Driver work: it requires control authority and uses the same task rate. Its droop
+   width is `assets/driving/engine.ron::idle_catch_droop_rpm`. Neither an empty station nor a
+   zero-rate task can sustain idle through this catch.
+2. `update_clutch_state` opens the main clutch during shift windows, while parked, for staffed
+   zero-rate tasks, and at released rest or a neutral pivot. An empty station retains neutral at
+   rest; a moving interruption ends with its window. Launch Slip begins from Out under intent at rest,
+   retains `TransmissionParams::launch_omega(command)` until the shaft reaches it, and transmits
+   bounded free torque there. A moving lug stays In and uses the ordinary idle guard.
+   `clutch_coupling` solves
+   `τ_c* = [(ω_e − k·s·m)/dt + τ_free/J − k·s·F_other/I_m] / (1/J + k²/I_m)`, where
+   `k = G/r_s`, `s` is ladder direction, `I_m = 2·belt inertia` and `F_other = −ΣR`.
+   The capacity-clamped torque delivers `F_c = k·s·τ_c`, split per belt, and the crank integrates
+   `ω_e += (τ_free − τ_c·power_scale)·dt/J`. The idle floor is idle minus the authored
+   `idle_guard_band_rpm`, only while the working catch can sustain it. Admission requires the
+   guard band to cover the catch droop, so the catch is saturated at that floor. Without that
+   supply the floor is rest. Launch Slip raises the floor to its target, bounded by the crank
+   speed reachable from this tick's free torque so the floor cannot create energy.
+3. Declutched, the belts receive no main-engine force or drag. A proportional rev governor uses
+   `engine.ron::rev_match_band_rpm` toward
+   `max(|m|·k_landing, idle + (peak_torque_rpm − idle)·|steer|)`. The gearbox's rev-match request
+   and the neutral steering request share the same fuel law. Steering spends the crank's work
+   budget even while the main clutch is Out.
 4. `predict_shift_landing_m` rewritten to the new window physics: reaction-only bleed
    (no drag — the window is declutched in reality too, so prediction and reality agree).
    `POSTSHIFT_MARGIN_RPM` = 150 re-derived UNCHANGED: at full throttle (the dominant
    upshift intent) drag was already fully released (`hold_blend(1/0.5) = 0`), so the
    predictor's arithmetic is identical there; the margin covered reaction-bleed
    prediction error, which is untouched.
-5. Power gate: `p_avail = torque_at(ω_e)·ω_e` — the crank, not the input slew. The
-   rpm_floor hack is deleted.
-6. End of step: if engaged ∧ τ_c unclamped ∧ guard quiet ∧ power_scale = 1, snap
-   `ω_e = k·s·m_next` exactly (drift kill; refused if it would land below the guard
-   floor).
+5. `engine_work` budgets the crank's free-torque step and stored kinetic energy against
+   recirculated sprocket work at midpoint belt speeds. A common force scale prevents either
+   propulsion or steering from spending more than that budget.
+6. `settle_crank` re-anchors to the integrated belts only when the implied total clutch torque
+   fits capacity and the locked speed is inside both guards. Remaining crank energy also bounds
+   the final speed.
 7. `readout` returns ω_e directly — the state IS the display (rpm is still rpm; HUD
    line shape unchanged).
 
 **REV-14 rider — DISCHARGED.** ω_e now replicates and hashes by raw `f32` bits with the complete
-atomic §2 inventory. It is exact sim state a rollback replay restores — NOT derivable from the belt,
-because the clutch slips. Spawn initializes it directly to the authored idle speed; no in-band zero
+atomic §2 inventory. It is exact server sim state, not derivable from the belt because the clutch
+slips. Spawn initializes it directly to the authored idle speed; no in-band zero
 sentinel remains.
 
 **Measured gates (all re-derived; before → after on the declared Tiger data):**
@@ -591,18 +584,14 @@ stage-A regression surface, and the REV-13 boundary all held; four findings fixe
    spec validation `idle_rpm ≥ 300` (100 band + 100 margin + headroom) keeping
    `ω_floor > 0` always. The REV-14 prerequisite cleanup later superseded (b): spawn constructs
    `omega_e` directly at authored idle and the tick-path sentinel branch no longer exists.
-3. **Engagement seam chatter (Medium).** A boundary creeper sawtoothed engage/declutch
-   on the single NEUTRAL_M_SPEED line. The seam is now a LATCH with detent-style
-   hysteresis: `TransmissionState.clutch_out` (path-dependent state promoted atomically in REV 14),
-   out below
-   `NEUTRAL_M_SPEED × 0.8` (0.4 m/s) without propulsive drive, back in at
-   `NEUTRAL_M_SPEED × 1.2` (0.6 m/s) or on any propulsive command (the launch).
-   Deterministic, no blend. Regression: `clutch_seam_hysteresis_kills_boundary_chatter`
-   — a forced ±0.05 oscillation around the old 0.5 threshold produces ZERO regime
-   flips; only genuine excursions past the separated thresholds transition, once each.
+3. **Engagement seam chatter.** `TransmissionState::clutch` carries the launch and neutral
+   regimes. `park` keeps neutral through a capacity-breached slide; belt speed cannot close the
+   clutch and add catch-driven propulsion to the declared brake budget. Shift Out is temporary
+   even at an empty station. `parking_brake_stays_saturated_past_breach` exercises the whole
+   drivetrain, and `empty_station_shift_window_expires_into_motoring_drag` pins window expiry.
 4. **Validation lower bounds (Medium).** The solver's numeric assumptions are now spec-
    protected: `inertia_kgm2 ∈ [0.1, 100]` (the coupling divides by J),
-   `clutch_capacity_nm ∈ [100, 50 000]`, `idle_rpm ≥ 300` (finding 2's floor), and —
+   `clutch_capacity_nm ∈ [100, 50 000]`, idle above the authored guard band, and —
    with a transmission declared — `powertrain.inertia ≥ 1.0` (the lock denominator's
    `k²/I_m` term; the generic finite/> 0 check admitted 1e-30). Negative cases for each.
 
