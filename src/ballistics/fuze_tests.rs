@@ -32,7 +32,7 @@ fn shot(app: &mut App, origin: Vec3, velocity: Vec3, burst: burst::Burst) -> Ent
     let mut round = app.world_mut().get_mut::<Projectile>(shell).unwrap();
     round.fuze = burst::Fuze::of(Some(burst));
     // No drag: the fuze's clock is read off the flight without the drag law in it.
-    round.drag_k = 0.0;
+    round.flying.drag_k = 0.0;
     shell
 }
 

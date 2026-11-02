@@ -171,7 +171,7 @@ fn record_edited(
     let direction = (scenario.toward - scenario.from).normalize();
     let struck = StruckTank::capture(app.world_mut(), tank).expect("the tank has a rig");
     let mut projectile = fixture_round_with(body, round.penetrator, direction * speed);
-    projectile.drag_k = round.drag_k;
+    projectile.flying.drag_k = round.drag_k;
     projectile.wound = round.wound;
     projectile.fuze = super::burst::Fuze::of(round.burst);
     let shell = app
@@ -835,7 +835,7 @@ pub(super) fn fixture_fire_with(
         .map(|projectile| projectile.velocity);
     let flying = world
         .get::<Projectile>(shell)
-        .map(|projectile| (projectile.body(), projectile.mass, projectile.fuze));
+        .map(|projectile| (projectile.body(), projectile.flying.mass, projectile.fuze));
     let names = world
         .query_filtered::<(Entity, &Name), With<VolumeOf>>()
         .iter(world)
@@ -1900,7 +1900,7 @@ fn a_ground_stop_counts_its_approach_whatever_the_step() {
             0,
             FIXTURE_88,
             |projectile| {
-                projectile.drag_k = 0.0;
+                projectile.flying.drag_k = 0.0;
                 projectile.fuze = burst::Fuze::of(Some(burst));
             },
             |app| {

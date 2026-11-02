@@ -446,7 +446,7 @@ pub(crate) fn present(
     mut commands: Commands,
 ) {
     'shells: for (entity, mut projectile, mut transform, mut path, mut marks, shot) in &mut shells {
-        let drag = projectile.drag_k;
+        let drag = projectile.flying.drag_k;
         let style = projectile.impact_style();
         let Some(replica) = &mut projectile.replica else {
             continue;

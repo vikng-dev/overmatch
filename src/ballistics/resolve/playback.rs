@@ -52,6 +52,7 @@ enum Effect {
 /// The game's damage model: only this cursor mutates across ticks; the crossing it reads does not.
 pub(crate) struct Playback {
     crossing: Crossing,
+    outgoing_body: super::super::FlyingBody,
     /// The context's deposit flag: whether this end's pools take the crossing's doses.
     deposit: bool,
     elapsed: f64,
@@ -228,15 +229,21 @@ impl Decision {
 }
 
 impl Playback {
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "the frozen crossing binds physical state and its addressed world effects"
+    )]
     pub(crate) fn new(
         decision: Decision,
         flight: &Flight,
         round: SolidShot,
+        flying: super::super::FlyingBody,
         context: &ResolveContext<'_, '_, '_>,
         admit: &dyn Fn(Entity) -> bool,
         wound: f32,
         is_box: &dyn Fn(Entity) -> bool,
     ) -> Self {
+        let outgoing_body = flying.after(&decision, round.body());
         let mut crossing = Crossing::of(decision, flight, round);
         if let Decision::Bite(bite) = crossing.decision.clone() {
             let entrance = f64::from(bite.approach / bite.speed_in);
@@ -344,6 +351,7 @@ impl Playback {
         crossing.effects.sort_by(|a, b| a.0.total_cmp(&b.0));
         Self {
             crossing,
+            outgoing_body,
             deposit: context.deposit,
             elapsed: 0.0,
             next_effect: 0,
@@ -351,6 +359,10 @@ impl Playback {
             carrier: Vec3::ZERO,
             frames: context.world.hull_frames(),
         }
+    }
+
+    pub(crate) fn outgoing_body(&self) -> super::super::FlyingBody {
+        self.outgoing_body
     }
 
     pub(crate) fn on_entry(
@@ -585,11 +597,7 @@ impl Playback {
                     .fuze
                     .entered(*force, *speed, *owner, *approach),
                 Effect::Mark => {
-                    let core = shell.projectile.body();
-                    shell.projectile.drag_k *= shell.projectile.mass / core.mass
-                        * (core.caliber / shell.projectile.caliber).powi(2);
-                    shell.projectile.mass = core.mass;
-                    shell.projectile.caliber = core.caliber;
+                    shell.projectile.flying = self.outgoing_body;
                     let Decision::Bite(bite) = self.world_decision() else {
                         panic!("only a bite schedules a crossing mark");
                     };

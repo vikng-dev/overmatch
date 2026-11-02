@@ -290,7 +290,7 @@ fn fire_one(app: &mut App, round: &crate::rounds::Round, origin: Vec3, direction
         round.penetrator,
         direction * round.muzzle_speed,
     );
-    projectile.drag_k = round.drag_k;
+    projectile.flying.drag_k = round.drag_k;
     projectile.wound = round.wound;
     let shell = app
         .world_mut()

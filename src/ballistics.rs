@@ -1320,6 +1320,30 @@ impl FireShell {
     }
 }
 
+/// The game's damage model: what flies between contacts. A resisting bite leaves only the core;
+/// discovery advances this value once and playback presents the stored result.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct FlyingBody {
+    mass: f32,
+    caliber: f32,
+    /// Quadratic drag (1/m), proportional to form times calibre squared over mass.
+    drag_k: f32,
+}
+
+impl FlyingBody {
+    fn after(self, decision: &resolve::Decision, core: RoundBody) -> Self {
+        if matches!(decision, resolve::Decision::Bite(_)) {
+            Self {
+                mass: core.mass,
+                caliber: core.caliber,
+                drag_k: self.drag_k * self.mass / core.mass * (core.caliber / self.caliber).powi(2),
+            }
+        } else {
+            self
+        }
+    }
+}
+
 /// A shell in flight. Kinematic — integrated by hand, no physics engine.
 #[derive(Component)]
 #[require(ShotDose)]
@@ -1330,17 +1354,10 @@ pub(crate) struct Projectile {
     /// data and the substance registry ([`mechanism::SolidShot::bind`]) — data, never an asset.
     /// The disc, overmatch, the force law and the cone's hole read its body.
     round: mechanism::SolidShot,
-    /// The flying body's calibre (m).
-    caliber: f32,
-    /// The flying body's mass (kg): a kept carrier stops at its first resisting contact;
-    /// only the penetrator continues. A discarded carrier contributes no exchange.
-    mass: f32,
+    flying: FlyingBody,
     /// Crew-line coefficient: disc-mean chord times this times [`HP_PER_REFERENCE_MM`] gives HP dose.
     /// Read only by the witness pass; the hard walk never sees it.
     wound: f32,
-    /// Quadratic-drag coefficient (1/m), the fired round's ([`FireShell::drag_k`]) at spawn; a
-    /// burst's nose piece keeps the round's form at its own mass.
-    drag_k: f32,
     /// The round's fuze, built at spawn from its fire data ([`burst::Fuze::of`]) and advanced by
     /// the authority's march alone: SIM state, never on the wire.
     fuze: burst::Fuze,
@@ -1380,7 +1397,7 @@ impl Projectile {
 
     /// The flying body's caliber (m), read by the geometric views.
     pub(crate) fn caliber(&self) -> f32 {
-        self.caliber
+        self.flying.caliber
     }
 
     /// What meets the plate: the penetrator's body, which the capability law, the disc and
@@ -1419,10 +1436,12 @@ impl Projectile {
                 caliber,
                 nose_factor: 0.3,
             }),
-            caliber,
-            mass: 1.0,
+            flying: FlyingBody {
+                caliber,
+                mass: 1.0,
+                drag_k: 0.0,
+            },
             wound: 30.0,
-            drag_k: 0.0,
             fuze: burst::Fuze::Inert,
             disc: walk::DiscFrame {
                 u: Vec3::X,
@@ -2103,10 +2122,12 @@ fn on_fire_shell(
             impact_style: fire.effects.impact,
             velocity,
             round: bound(penetrator),
-            caliber: fire.caliber,
-            mass: fire.mass,
+            flying: FlyingBody {
+                caliber: fire.caliber,
+                mass: fire.mass,
+                drag_k: drag,
+            },
             wound: fire.wound,
-            drag_k: drag,
             fuze: burst::Fuze::of(fire.burst),
             // From the BORE, not from the post-catch-up travel direction: a shell reconstructed with
             // catch-up must anchor its ring exactly where the locally fired one did.
@@ -2652,7 +2673,7 @@ fn integrate_projectiles(
                     stopped: true,
                     impact: None,
                     body: shell.projectile.body(),
-                    drag_k: shell.projectile.drag_k,
+                    drag_k: shell.projectile.flying.drag_k,
                 });
             }
             commands.entity(entity).despawn();
@@ -2788,7 +2809,11 @@ fn march_shell_step(
     };
     let mut playback = std::mem::take(&mut shell.projectile.playback);
     let stepped = if playback.is_empty() {
-        freeflight_step(shell.projectile.velocity, shell.projectile.drag_k, dt)
+        freeflight_step(
+            shell.projectile.velocity,
+            shell.projectile.flying.drag_k,
+            dt,
+        )
     } else {
         shell.projectile.velocity
     };
@@ -3155,7 +3180,7 @@ fn march_shell_step(
                     tick.now.wrapping_add(whole as u32),
                     start - whole,
                     ordinal,
-                    shell.projectile.drag_k,
+                    shell.projectile.flying.drag_k,
                 );
                 if matches!(outcome.impact, Some(path::PathImpact::Bounce { .. })) {
                     ordinal += 1;
@@ -3221,7 +3246,7 @@ fn publish_path_state(
         stopped,
         impact,
         body: shell.projectile.body(),
-        drag_k: shell.projectile.drag_k,
+        drag_k: shell.projectile.flying.drag_k,
     });
     shell.projectile.path_sequence += 1;
 }
@@ -3301,6 +3326,7 @@ fn decide_playback(
     let mut cleared = false;
     let mut flight = flight.clone();
     let mut fuze = shell.projectile.fuze;
+    let mut flying = shell.projectile.flying;
     let radius = resolve::disc_radius(shell.projectile.body().caliber);
     let mut contact = Some(contact);
     // The game's damage model freezes geometry at contact. Discovery using launch clearance
@@ -3346,7 +3372,7 @@ fn decide_playback(
                     context,
                     admit,
                     &shell.projectile.round,
-                    shell.projectile.mass,
+                    flying.mass,
                     &flight,
                     distance,
                 )
@@ -3416,6 +3442,7 @@ fn decide_playback(
             decision.clone(),
             &flight,
             shell.projectile.round,
+            flying,
             context,
             admit,
             shell.projectile.wound,
@@ -3424,6 +3451,7 @@ fn decide_playback(
         if let Some((force, owner, speed, approach)) = entered {
             playing.on_entry(force, owner, speed, approach);
         }
+        flying = playing.outgoing_body();
         out.push_back(playing);
         let reached_barrier = barrier.is_some_and(|distance| {
             matches!(&decision,
@@ -3635,8 +3663,8 @@ fn burst_here(
         projectile.round = bound(nose);
         // `k` is the form × calibre² / mass: at the round's calibre and form, it scales as
         // 1 / mass.
-        projectile.drag_k *= projectile.mass / nose.mass;
-        projectile.mass = nose.mass;
+        projectile.flying.drag_k *= projectile.flying.mass / nose.mass;
+        projectile.flying.mass = nose.mass;
         false
     } else {
         true
@@ -4797,10 +4825,12 @@ mod march_tests {
             impact_style: crate::rounds::ImpactStyle::Compact,
             velocity,
             round: bound(penetrator),
-            caliber: body.caliber,
-            mass: body.mass,
+            flying: FlyingBody {
+                caliber: body.caliber,
+                mass: body.mass,
+                drag_k: fixture_drag_k(body.caliber, body.mass),
+            },
             wound: FIXTURE_WOUND,
-            drag_k: fixture_drag_k(body.caliber, body.mass),
             fuze: burst::Fuze::Inert,
             // Anchored on this round's fire direction, as on_fire_shell does.
             disc: test_disc(velocity.normalize()),
@@ -5493,7 +5523,7 @@ mod march_tests {
             capability(FIXTURE_88, SPEED)
         );
         assert_eq!(
-            projectile.drag_k, DRAG,
+            projectile.flying.drag_k, DRAG,
             "the shell flies on its fire's drag"
         );
         for body in [FIXTURE_88, CORE] {
@@ -6414,20 +6444,51 @@ mod march_tests {
 
     /// The game's damage model must deliver the whole resolved momentum exchange independently
     /// of its HP dose. Buildings and freed trunks read these lines. Fixture data: head-on and
-    /// oblique perforations of a 50 mm plate; entry and exit states supply the independent budget.
+    /// oblique perforations of fixture plates, overlapping or spaced on one body or two; entry
+    /// and final exit states supply the independent whole-chain budget.
     #[test]
     fn a_perforation_delivers_its_whole_exchange_independently_of_hp() {
         #[derive(Resource, Default)]
         struct Lines(Vec<DeliveredLine>);
         let oblique = Vec3::new(0.4, -1.0, 0.0).normalize();
-        for (direction, overlapped) in [(Vec3::NEG_Y, false), (oblique, false), (oblique, true)] {
+        for (direction, overlapped, spaced, shared_body) in [
+            (Vec3::NEG_Y, false, false, false),
+            (oblique, false, false, false),
+            (oblique, true, false, false),
+            (Vec3::NEG_Y, false, true, false),
+            (Vec3::NEG_Y, false, true, true),
+            (oblique, false, true, false),
+            (oblique, false, true, true),
+        ] {
             let plate = (Vec3::new(3.0, 0.05, 3.0), Vec3::Y * 50.0);
-            let plates = if overlapped {
+            let plates = if spaced {
+                vec![plate, (plate.0, plate.1 - Vec3::Y * 0.4)]
+            } else if overlapped {
                 vec![plate, plate]
             } else {
                 vec![plate]
             };
             let mut app = world_with_trimesh_plates(&plates);
+            if shared_body {
+                let body = app
+                    .world_mut()
+                    .spawn((RigidBody::Static, Transform::default()))
+                    .id();
+                let parts: Vec<_> = app
+                    .world_mut()
+                    .query::<(Entity, &Transform)>()
+                    .iter(app.world())
+                    .filter(|(_, pose)| pose.translation.y > 40.0)
+                    .map(|(entity, _)| entity)
+                    .collect();
+                for part in parts {
+                    app.world_mut()
+                        .entity_mut(part)
+                        .remove::<RigidBody>()
+                        .insert(ChildOf(body));
+                }
+                settle(&mut app);
+            }
             if overlapped {
                 // Fixture: the first cofacial volume is wholly hidden by the stronger one.
                 let weak = app
@@ -6449,26 +6510,34 @@ mod march_tests {
             let shell = spawn_round(&mut app, FIXTURE_88, Vec3::Y * 51.0, direction * 800.0);
             // Fixture: the carrier has three times the core mass.
             let flying_mass = 4.0 * FIXTURE_88.mass;
-            app.world_mut().get_mut::<Projectile>(shell).unwrap().mass = flying_mass;
+            {
+                let mut projectile = app.world_mut().get_mut::<Projectile>(shell).unwrap();
+                projectile.flying.mass = flying_mass;
+                projectile.flying.drag_k = 0.0;
+            }
             app.update();
             let marks = app.world().get::<PenetrationMarks>(shell).unwrap();
-            let [
+            let (speed_in, incoming) = match &marks.log[0] {
                 ArmourMark::Crossing {
-                    speed_in,
-                    incoming,
+                    speed_in, incoming, ..
+                } => (*speed_in, *incoming),
+                _ => panic!("the fixture enters material"),
+            };
+            let speed = match marks.log.last().unwrap() {
+                ArmourMark::Crossing {
                     end: CrossingEnd::Exit { speed, .. },
                     ..
-                },
-            ] = marks.log.as_slice()
-            else {
-                panic!("the fixture perforates one plate: {:?}", marks.log);
+                } => *speed,
+                _ => panic!("the fixture exits its final plate: {:?}", marks.log),
             };
+            assert_eq!(marks.log.len(), if spaced { 2 } else { 1 });
             let lost = 0.5
-                * (f64::from(flying_mass) * f64::from(*speed_in).powi(2)
-                    - f64::from(FIXTURE_88.mass) * f64::from(*speed).powi(2));
+                * (f64::from(flying_mass) * f64::from(speed_in).powi(2)
+                    - f64::from(FIXTURE_88.mass) * f64::from(speed).powi(2));
             let lines = &app.world().resource::<Lines>().0;
-            let axis = (lines[0].crossing.end - lines[0].crossing.entry).normalize();
-            let expected = flying_mass * *incoming * *speed_in - FIXTURE_88.mass * axis * *speed;
+            let axis = (lines.last().unwrap().crossing.end - lines.last().unwrap().crossing.entry)
+                .normalize();
+            let expected = flying_mass * incoming * speed_in - FIXTURE_88.mass * axis * speed;
             let retained: f64 = lines
                 .iter()
                 .map(|line| f64::from(line.crossing.energy))
@@ -6483,15 +6552,91 @@ mod march_tests {
                 .sum();
             let momentum: Vec3 = lines.iter().map(|line| line.momentum).sum();
             eprintln!(
-                "MEASURED fixture perforation: lost={lost:.6} J, retained={retained:.6} J, debris={carried:.6} J; momentum={momentum:?} N s, expected={expected:?} N s"
+                "MEASURED fixture perforation (spaced={spaced}, shared_body={shared_body}): lost={lost:.6} J, retained={retained:.6} J, debris={carried:.6} J; momentum={momentum:?} N s, expected={expected:?} N s"
             );
             assert_eq!(
-                app.world().get::<Projectile>(shell).unwrap().mass,
+                app.world().get::<Projectile>(shell).unwrap().flying.mass,
                 FIXTURE_88.mass
             );
             assert!(((retained + carried) / lost - 1.0).abs() < 1.0e-5);
             assert!((momentum - expected).length() / expected.length() < 1.0e-4);
         }
+    }
+
+    /// The game's damage model leaves only the core after the first resisting contact. Hull
+    /// impulse consumers rely on a later bounce in the same frozen chain reading that mass.
+    /// Fixture: a thin entrance plate and a thick face at 75 degrees on one inertial body.
+    #[test]
+    fn a_chained_bounce_transfers_only_the_core_momentum() {
+        let mut app = world_with_trimesh_plates(&[]);
+        let mass = 50_000.0;
+        let body = app
+            .world_mut()
+            .spawn((
+                RigidBody::Dynamic,
+                Transform::default(),
+                Mass(mass),
+                AngularInertia::new(Vec3::splat(1.0e5)),
+                NoAutoMass,
+                NoAutoAngularInertia,
+                GravityScale(0.0),
+            ))
+            .id();
+        for (size, pose) in [
+            (
+                Vec3::new(3.0, 0.05, 3.0),
+                Transform::from_translation(Vec3::Y * 50.0),
+            ),
+            (
+                Vec3::new(12.0, 0.4, 3.0),
+                Transform::from_translation(Vec3::Y * 45.0)
+                    .with_rotation(Quat::from_rotation_z(75.0_f32.to_radians())),
+            ),
+        ] {
+            let (collider, surfaces) = box_trimesh(size);
+            app.world_mut().spawn((
+                pose,
+                ChildOf(body),
+                collider,
+                surfaces,
+                CollisionLayers::new([Layer::Armor], LayerMask::ALL),
+                VolumeOf(body),
+                BallisticVolume {
+                    material: walk::VolumeMaterial::fixture(STEEL),
+                    substance: "fixture".into(),
+                },
+            ));
+        }
+        settle(&mut app);
+        let shell = spawn_round(&mut app, FIXTURE_88, Vec3::Y * 51.0, Vec3::NEG_Y * 800.0);
+        let flying_mass = 4.0 * FIXTURE_88.mass;
+        {
+            let mut projectile = app.world_mut().get_mut::<Projectile>(shell).unwrap();
+            projectile.flying.mass = flying_mass;
+            projectile.flying.drag_k = 0.0;
+        }
+        app.update();
+        let marks = &app.world().get::<PenetrationMarks>(shell).unwrap().log;
+        let [
+            ArmourMark::Crossing {
+                incoming, speed_in, ..
+            },
+            ArmourMark::Bounce {
+                outgoing,
+                speed_out,
+                ..
+            },
+        ] = marks.as_slice()
+        else {
+            panic!("the fixture perforates and then bounces: {marks:?}");
+        };
+        let expected =
+            flying_mass * *incoming * *speed_in - FIXTURE_88.mass * *outgoing * *speed_out;
+        let actual = app.world().get::<LinearVelocity>(body).unwrap().0 * mass;
+        assert!(
+            (actual - expected).length() / expected.length() < 1e-4,
+            "the frozen chain transfers {actual:?} N s, expected {expected:?}"
+        );
     }
 
     /// The game's damage model routes each crossed volume's momentum once. A hull sharing a

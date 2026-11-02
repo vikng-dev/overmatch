@@ -2001,6 +2001,11 @@ fn a_zero_world_speed_waits_or_meets_a_moving_body_on_its_clock() {
                         },
                         &flight,
                         bound(FIXTURE_88),
+                        FlyingBody {
+                            mass: FIXTURE_88.mass,
+                            caliber: FIXTURE_88.caliber,
+                            drag_k: 0.0,
+                        },
                         &context,
                         &|_| true,
                         0.0,
@@ -2408,10 +2413,13 @@ fn relative_rest_still_discovers_a_separate_plate_in_the_same_tick() {
     pose.translation = at;
     projectile.starts = Some(resolve::Interior::laid(
         at,
-        resolve::layout(&projectile.disc, resolve::disc_radius(projectile.caliber)),
+        resolve::layout(
+            &projectile.disc,
+            resolve::disc_radius(projectile.flying.caliber),
+        ),
     ));
     let velocity = Vec3::NEG_Z * 640.0;
-    projectile.drag_k = 0.0;
+    projectile.flying.drag_k = 0.0;
     projectile.velocity = velocity - GRAVITY * TICK.as_secs_f32();
     let (_, carrier) = tank(
         &mut app,
