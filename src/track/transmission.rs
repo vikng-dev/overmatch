@@ -38,38 +38,12 @@ struct EngineControl {
     rev_match_band_rpm: crate::provenance::Labelled<f32>,
     drag_throttle_release: crate::provenance::Labelled<f32>,
     motoring_drag_base_share: crate::provenance::Labelled<f32>,
-    controls_rest: ControlsRest,
-}
-
-/// Required construction of the released controls; no Driver policy supplies these rests.
-#[derive(serde::Deserialize)]
-#[serde(deny_unknown_fields)]
-struct ControlsRest {
-    fuel_share: crate::provenance::Labelled<f32>,
-    steer: crate::provenance::Labelled<f32>,
-    clutch: ClutchRest,
-}
-
-#[derive(serde::Deserialize)]
-enum ClutchRest {
-    SpringEngaged,
 }
 
 const ENGINE_CONTROL_PATH: &str = "assets/driving/engine.ron";
 
 impl EngineControl {
     fn validate(&self) {
-        for (field, value) in [
-            ("controls_rest.fuel_share", &self.controls_rest.fuel_share),
-            ("controls_rest.steer", &self.controls_rest.steer),
-        ] {
-            assert!(
-                value.value.is_finite()
-                    && value.value == 0.0
-                    && matches!(value.label, crate::provenance::Provenance::Derived(_)),
-                "{ENGINE_CONTROL_PATH}: {field} must name the zero spring-return stop with Derived provenance; author the control construction"
-            );
-        }
         for (field, number) in [
             ("idle_catch_droop_rpm", &self.idle_catch_droop_rpm),
             ("idle_guard_band_rpm", &self.idle_guard_band_rpm),
@@ -812,12 +786,7 @@ fn engine_torques(
         return [0.0, 0.0, drag]; // A backward crank cannot fire.
     }
     if !supply.control_authority {
-        let fuel = engine_control().controls_rest.fuel_share.value;
-        return [
-            supply.engine_condition * fuel * (tp.torque_at(omega / RPM_TO_RAD) + drag),
-            0.0,
-            drag,
-        ];
+        return [0.0, 0.0, drag]; // No Driver fuel request or independent idle actuator.
     }
     let pedal = (command / engine_control().drag_throttle_release.value).clamp(0.0, 1.0);
     let released = pedal * pedal * (3.0 - 2.0 * pedal);
@@ -1313,9 +1282,7 @@ fn update_clutch_state(
     st.clutch = if shifting {
         ClutchState::Out
     } else if !inp.supply.control_authority || inp.supply.task_rate == 0.0 {
-        match engine_control().controls_rest.clutch {
-            ClutchRest::SpringEngaged => ClutchState::In,
-        }
+        ClutchState::In // Without opening work, the clutch springs engaged.
     } else if (st.park && (inp.brake || propulsive < DEAD))
         || (propulsive < DEAD
             && (mean.abs() < PARK_ENGAGE_SPEED
@@ -1376,7 +1343,7 @@ fn crank_free_torque(
         ((omega_target - omega_e) / (engine_control().rev_match_band_rpm.value * RPM_TO_RAD))
             .clamp(0.0, 1.0)
     } else {
-        engine_control().controls_rest.fuel_share.value
+        0.0
     };
 
     let supply = inp.supply;
@@ -1750,15 +1717,6 @@ fn crank_guards(
 fn idle_floor(tp: &TransmissionParams, supply: DriveSupply) -> Option<f32> {
     let point = (tp.engine.idle_rpm - engine_control().idle_guard_band_rpm.value) * RPM_TO_RAD;
     (idle_catch_capacity(tp, supply) > engine_drag(tp, point)).then_some(point)
-}
-
-/// Construction spring return used at the adapter edge before any Driver policy.
-pub(crate) fn unstaffed_axes() -> super::drive::DriveAxes {
-    let rest = &engine_control().controls_rest;
-    super::drive::DriveAxes {
-        throttle: rest.fuel_share.value,
-        steer: rest.steer.value,
-    }
 }
 
 /// The input half of the optional drivetrain trace, kept out of the physical solve.

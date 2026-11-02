@@ -12,6 +12,7 @@ locked Bevy 0.19.1 and avian3d 0.7.0 registry source before use.
 
 | reviewer | finding | verified / not a defect | fixed in (subject) |
 |---|---|---|---|
+| Claude P2 | fixed rest fields mix staffed and unstaffed fuel and pretend to be data | verified source: only zero and one clutch variant admitted | driving: remove fixed control-rest authoring (#146) |
 | Claude P2 | S3 lower-gear speed bound is print-only | verified: half-drag mutant fails the new equilibrium assertion | driving: assert construction-derived coast equilibrium (#146) |
 | Codex P2 | backward crank reports stopped to audio and HUD | verified red: public RPM 0 and no negative HUD reading | driving: report backward crank rotation (#146) |
 | Claude P2 | backward crank buys rollback cuts after restaffing | verified red: restaffing bought a cut | driving: preserve rollback gear under backward drag (#146) |
@@ -61,3 +62,13 @@ contact tolerance. F6 reproduces 13.315221 m/s after 20 simulated seconds downhi
 MEASURED step-4 gates: fmt, CI clippy and 283 targeted tests (including all drive-load cases) pass.
 The design now gives the F6 measurement explicitly and leaves another loss or changed over-rev
 contract to the owner; this lane adds neither empty-station brakes nor a belt-speed clip.
+
+Step 5 is a source-verified removal of fields with no admitted freedom: `fuel_share` and `steer`
+accepted only zero, and the clutch enum had only `SpringEngaged`. They and their validator are
+removed with the dead unstaffed combustion arithmetic and the zero-axis forwarding function.
+The fixed rest is the absence of actuation: no fuel request, centered axes, spring-engaged clutch
+after an already-paid cut. Staffed open-clutch rest now names its own zero fuel request, without
+reusing an empty-station value. A future independent idle actuator must be actual construction,
+not a nonzero unstaffed pedal or a per-vehicle override. No tank schema or wire type changes.
+MEASURED step-5 gates: fmt, CI clippy and 283 targeted tests including all shipped drive-load cases
+passed. No rest-field reference remains in runtime code or the driving asset.

@@ -217,8 +217,11 @@ shear decay.
 - steering returns to center and the service brakes are released.
 
 The closed-rack rest resolves the proposed idle-fuel conflict: the Driver's catch leaves with
-its work, and no construction governor replaces it. The required rests are authored in
-`assets/driving/engine.ron`. The engine resists motion in either crank direction, firing only
+its work, and no construction governor replaces it. Released command axes are zero and an
+unpowered clutch is engaged after a paid cut expires. These fixed rests have no authoring field:
+there is no adjustable empty-station pedal or single-variant clutch selector. An independent
+idle actuator, if modelled later, belongs to construction rather than an unstaffed pedal share.
+The engine resists motion in either crank direction, firing only
 when turning forward. The clutch slip guard bounds the crank; it does not promise a vehicle-speed
 bound on a grade exceeding guarded drag and contact resistance. See the
 [lane 5 record](law-drive-5-ceiling-2026-11-02.md) for the measured S3 limit.

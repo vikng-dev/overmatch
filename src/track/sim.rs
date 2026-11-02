@@ -628,7 +628,7 @@ pub(crate) fn belt_tick<O: TerrainOracle>(
         DriveIntent::Axes(axes) => (axes, false),
         DriveIntent::Brake => (DriveAxes::default(), true),
         DriveIntent::Unmanned => {
-            let rest = super::transmission::unstaffed_axes();
+            let rest = DriveAxes::default();
             *rig.signal = DriveSignal {
                 throttle: rest.throttle,
                 steer: rest.steer,
@@ -2239,7 +2239,7 @@ mod tests {
                 .get::<DriveSignal>(hull.root)
                 .unwrap()
                 .throttle,
-            super::transmission::unstaffed_axes().throttle
+            0.0
         );
         hull.app
             .world_mut()
