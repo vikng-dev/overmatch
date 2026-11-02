@@ -444,25 +444,6 @@ fn l600_constraint_survives_m_zero_crossing() {
     );
 }
 
-/// The detent law obeys its authored entry/release hysteresis. Persistent notches are
-/// independently checked for history-free selection by `persistent_notches_have_one_steady_detent`.
-#[test]
-fn steer_step_hysteresis() {
-    let feel = crate::track::drive::drive_feel();
-    let mut st = fresh(&lab_tp());
-    for (intent, expected) in [
-        (feel.wide_off.0 / 2.0, 0),
-        (feel.wide_on.0, 1),
-        (feel.tight_on.0, 2),
-        ((feel.tight_on.0 + feel.tight_off.0) / 2.0, 2),
-        ((feel.tight_off.0 + feel.wide_on.0) / 2.0, 1),
-        (feel.wide_off.0 / 2.0, 0),
-    ] {
-        update_steer_detent(&mut st, intent);
-        assert_eq!(st.steer_step, expected);
-    }
-}
-
 /// Static breakaway and dynamic dissipation are separate capacities. A parked belt inside the
 /// multiplied static capacity holds EXACTLY (v̇ = 0, bit-zero); demand past it back-drives.
 #[test]
@@ -1604,29 +1585,6 @@ fn the_fuel_cut_includes_drag_reconstruction() {
             "the governor cuts every combustion source"
         );
         assert!(drag > 0.0);
-    }
-}
-
-/// Persistent input must pick the same detent from either history; otherwise the player
-/// holds one notch but gets two radii. The notch spacing is owned by keyboard feel data.
-#[test]
-fn persistent_notches_have_one_steady_detent() {
-    let step = crate::track::drive::drive_feel().notch_step.0;
-    for index in 1..=(1.0 / step).ceil() as usize {
-        let intent = (index as f32 * step).min(1.0);
-        let mut states = [0, 2].map(|steer_step| TransmissionState {
-            steer_step,
-            ..fresh(&lab_tp())
-        });
-        for state in &mut states {
-            for _ in 0..3 {
-                update_steer_detent(state, intent);
-            }
-        }
-        assert_eq!(
-            states[0].steer_step, states[1].steer_step,
-            "persistent intent {intent} must not remember the previous radius"
-        );
     }
 }
 
@@ -3146,4 +3104,28 @@ fn explicit_hold_without_a_driver_retains_construction_rest() {
         [report.bitprobe.tau_induced, report.bitprobe.tau_idle],
         [0.0; 2]
     );
+}
+
+/// One lever value must select one radius immediately from every prior detent. Entry and
+/// release use the same authored threshold; a retained exit band fails below either threshold.
+#[test]
+fn steer_detents_use_one_threshold_from_every_history() {
+    let feel = super::super::drive::drive_feel();
+    for prior in [0, 1, 2] {
+        for (intent, expected) in [
+            (0.0, 0),
+            (feel.wide_on.0.next_down(), 0),
+            (feel.wide_on.0, 1),
+            (feel.tight_on.0.next_down(), 1),
+            (feel.tight_on.0, 2),
+            (1.0, 2),
+        ] {
+            let mut state = TransmissionState {
+                steer_step: prior,
+                ..fresh(&lab_tp())
+            };
+            update_steer_detent(&mut state, intent);
+            assert_eq!(state.steer_step, expected, "prior={prior}, lever={intent}");
+        }
+    }
 }

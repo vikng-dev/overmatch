@@ -70,7 +70,7 @@ work guards fall from 5 to 1. The held-lever and clutch-opening distinctions are
 | Audit 1 / Claude P1 | scattered Driver ownership; zero-rate steer releases park | verified red: undeliverable steering released the lever | driving: let the Driver own resolved controls (#146) |
 | Claude P2 | ceiling braking conflates staffing with throughput | verified red: a staffed zero-rate descent accelerated above the curve ceiling | driving: let the Driver own resolved controls (#146) |
 | Claude P3 | `belt_tick` forwards default fields; identical engine early returns | verified source: the adapter now uses `DriveSignal::default`; torque receives Driver-admitted throughput | driving: let the Driver own resolved controls (#146) |
-| Audit 6 | two thresholds per detent and reachability search | verified source: keyboard input is monotone between requests; the exit band only delays it | pending step 3 |
+| Audit 6 | two thresholds per detent and reachability search | verified source: keyboard input is monotone between requests; the exit band only delays it | driving: use one threshold per steering detent (#146) |
 | Audit 4 | reflected inertia priced on slip-held landing | verified source: candidate In pricing applies reflected mass even below its admitted floor | pending step 4 experiment |
 | Audit 5 | Slip admission narrower than accepted design | verified source: at-rest check excludes moving entries below idle in launch gears | pending step 4 experiment |
 | Audit 7 | over-rev guard has two jobs | verified source and audit measurement: crank guard also bounds available drag on descent | pending step 5 |
@@ -87,3 +87,104 @@ work guards fall from 5 to 1. The held-lever and clutch-opening distinctions are
 MEASURED step-2 gates: formatting, CI clippy and 288 targeted track/HUD/load/citation tests
 passed. Both red regressions and the independent phase-hold witness pass. No engine API or
 wire shape was added. No new physical predicate was needed; the audit stop rule is not triggered.
+
+## Step 3
+
+MEASURED red: the old law selected wide from straight at the tight threshold, and admitted
+an authored wide threshold exactly on the first notch. Both new witnesses failed before the
+change. The detent witness probes each threshold and its immediately preceding representable
+float from every prior detent, without pinning keyboard travel time or a numerical taste.
+
+Each detent now has one threshold. The off fields, bounded reachability search, two search-only
+panic witnesses, hysteresis arms and redundant persistent-notch witness are removed together.
+Direct admission refuses a threshold coincident with either the neutral-based or clamped-endpoint
+notch grid. Its witness uses binary Fixture notches; it tests admission, not the deleted search.
+The glossary now states the same detent model. No analog input or alternate detent path is kept.
+
+## Remaining work and numeric inventory
+
+Steps 4–7 are not certified by this checkpoint. In particular, the broader Slip admission and
+slip-held landing price have not been tried, so the existing narrow form and upshift refusal
+remain. The over-rev engine outcome is still the owner's call; no new over-rev law is built.
+The remaining review findings and additional inline drivetrain are still required for the lane's
+full acceptance. Existing lab and seed witnesses are not described as the requested new fixture.
+
+MEASURED source inventory of production numeric literals in `transmission.rs` (comments and
+strings excluded): 0, 0.0, 0.05, 0.1, 0.5, 1, 1.0, 2, 2.0, 2.5, 3, 3.0, 3.6, 8, 24, 60.0,
+64.0, 100.0, 255.0, 20_000.0, 50_000.0, 100_000.0. Their remaining non-Resolution uses are:
+
+| use | numbers | status |
+|---|---|---|
+| over-rev guard | 100 rpm | Still mislabelled Resolution while also bounding descent drag; pending step 5's StandIn move |
+| torque-curve admission | 20,000 rpm; 100,000 N m | Existing numeric domain caps, not vehicle facts; pending step 7 audit |
+| static brake admission | upper factor 2.5 | Existing unlabelled class cap; pending step 7 audit |
+| crank-inertia admission | 0.1–100 kg m² | Existing unlabelled domain; pending step 7 audit |
+| clutch-capacity admission | 100–50,000 N m | Existing unlabelled domain; pending step 7 audit |
+| belt-inertia admission | lower 1 kg | Existing numerical divisor floor without an explicit Resolution label; pending step 7 audit |
+| shift-time admission | upper 3 s | Existing coarse bound below the representation limit; pending step 7 audit |
+| exact algebra and indexing | 0, 1, 2, 3, 1/2 | Signs, shares, paired outputs, interpolation polynomial, tuple fields and detent values; no authored tuning |
+| exact representation | 8; 255 | State projection arity and u8 countdown maximum |
+| exact unit conversions | 3.6; tau/60 | km/h to m/s and rpm to rad/s |
+
+The other literals are explicitly Resolution: the solver clock 64 Hz, zero tolerances 0.05,
+24 bisections and the separately named 100 rpm fuel-governor ramp. The over-rev 100 rpm shares
+that numeral but does a different job; it is listed separately above.
+
+Legacy prose also contains source-specific examples (MEASURED lexical inventory, not renewed
+physical measurements): 19/20 teeth; 373/478 and 300/224 kN m; 0.337 m/s at 3000 rpm; efficiency
+0.9; drag 20–30 percent; clutch 1.3 times peak. These are comments, not runtime constants, and
+were not remeasured or used as pass conditions by this lane.
+
+No edited law contains a tank identity or per-tank branch. Full tank-#2 certification remains
+open: the constructor caps above restrict otherwise possible construction; the pending S3 test
+admission excludes neither the rolling fade band nor its invalid full-resistance expectation;
+the additional drivetrain's class scenarios have not been run. These are named limits, not a
+claim that every admitted drivetrain has been proved by the two existing fixtures.
+
+
+## Decisions and checkpoint evidence
+
+- Grip is required construction for every rig reaching the joint step; support-only calibration
+  continues to use the contact law without invoking that step.
+- Service is boolean. Its existing stop regime supplies zero gear command during rollback.
+  This closes the forward-crank cut case without a new backward-motion predicate.
+- C2 compares drag magnitude. Candidate pricing takes the available catch floor without live
+  crank state; the live sign guard remains in crank settlement.
+- The discrete free-crank stop alone regularizes drag at zero; raw Coulomb drag needs no second fade.
+- The Driver owns staffing and work once. Staffing owns park and ceiling brakes; throughput owns
+  fuel, gear/clutch work and worked steering. Empty-station construction rests persist.
+- An explicit phase Brake intent retains its service hold without acquiring a staffed park lever,
+  clutch-opening work or fuel. The persistent client notch is not cleared.
+- A detent is selected by one threshold, from any history. Direct notch-grid admission replaces
+  the search; no analog-input policy or alternative selector is kept.
+- Tests of the deleted fade, rollback-cut recovery, reachability search and hysteresis go with
+  those paths. The surviving tests assert the new class invariants.
+- No wire type changed: PROTOCOL_REV remains 80. No tank-sheet/spec field changed, so there is
+  no Blender fixture schema change. No engine API was added.
+- Steps 4–7 stay pending rather than being described as completed or accepted. In particular,
+  the Slip experiment has no outcome yet, the over-rev outcome remains the owner's call, and
+  tank-#2 acceptance is not certified.
+
+MEASURED final whole-library result: 2,212 passed, 26 ignored, zero failed. It includes the
+track, HUD, drive-load, S1/S2/S4, rollback, bake and source guards. Formatting and CI clippy passed.
+MEASURED source/assets delta against the dispatch base: **41 lines removed** in runtime files
+and the input asset; **106 lines added** in test files, for **65 net lines added** excluding this
+record and the unchanged-size glossary edit. The net-removed count for source/assets is **-65**;
+this is not presented as a line-count reduction. Staffing reads fall 9 to 1 and work guards 5 to 1.
+
+Players stop buying cuts during a service-braked rollback and stop releasing park for an
+undeliverable steering request. Staffed ceiling braking continues with an emptied engine HP
+pool. Radius selection responds at one threshold in either direction. These are asserted paths;
+no visual capture, timing/pricing run or playtest was taken. The remaining #146 acceptance work
+is steps 4–7 above and the owner's over-rev/empty-station descent outcome.
+
+MEASURED separate whole-tree guard rerun: 44 passed, zero failed (`doc_citations ui_ascii
+net_boundary bake::`). `git diff --check` passed. No open lens-backlog row names an edited file.
+MEASURED closing checkpoint: 2026-11-02 18:20:02 UTC, 56 min 47 s after the measured start.
+The next physical-law experiment, its S1/S2/S4 and rollback checks, and a possible tested revert
+cannot fit the remaining 3 min 13 s. The lane therefore stops at green step 3 within the owner's
+60-minute limit. No predicate-based stop was triggered. Steps 4–7 remain unattempted.
+
+Three ordered commits carry the requested co-author trailer. No push, merge, release, issue
+comment or external message was sent. All executions used the machine lock, unattended,
+headless and muted; no lane-started process remains after the final checks.

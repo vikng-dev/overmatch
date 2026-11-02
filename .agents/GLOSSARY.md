@@ -237,7 +237,7 @@ The engine-side angular speed, positive in its firing direction and negative whe
 The Driver's choice of a permitted gear from its spare force after a shift, against the perceived ground, slope and steering load at requested pedal. It preserves engine braking on overrun, permits a lower gear on a deficit or engaged lug, and preselects the highest capable launch gear at rest.
 
 **Steering detent**:
-A fixed-radii steering state selected with hysteresis: straight, wide radius, or tight radius. While a turn detent is engaged, the transmission constrains belt-speed difference to the declared curvature and defers predictor-blind upshifts.
+A fixed-radii steering state selected by one lever threshold per detent: straight, wide radius, or tight radius. While a turn detent is engaged, the transmission constrains belt-speed difference to the declared curvature and defers predictor-blind upshifts.
 
 **Hill-hold**:
 The park lever's support against rollback during launch, carrying only the shortfall the engaged gear cannot supply.

@@ -1269,22 +1269,10 @@ fn driver(
 fn update_steer_detent(st: &mut TransmissionState, steer: f32) {
     let a = steer.abs();
     let feel = super::drive::drive_feel();
-    st.steer_step = match st.steer_step {
-        0 => u8::from(a >= feel.wide_on.0),
-        1 => {
-            if a >= feel.tight_on.0 {
-                2
-            } else {
-                u8::from(a >= feel.wide_off.0)
-            }
-        }
-        _ => {
-            if a < feel.tight_off.0 {
-                1
-            } else {
-                2
-            }
-        }
+    st.steer_step = if a >= feel.tight_on.0 {
+        2
+    } else {
+        u8::from(a >= feel.wide_on.0)
     };
 }
 

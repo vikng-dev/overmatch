@@ -46,9 +46,7 @@ pub(crate) struct DriveFeel {
     pub(crate) notch_step: crate::provenance::Sourced<f32>,
     pub(crate) rise_per_second: crate::provenance::Sourced<f32>,
     pub(crate) wide_on: crate::provenance::Sourced<f32>,
-    pub(crate) wide_off: crate::provenance::Sourced<f32>,
     pub(crate) tight_on: crate::provenance::Sourced<f32>,
-    pub(crate) tight_off: crate::provenance::Sourced<f32>,
 }
 
 impl DriveFeel {
@@ -66,38 +64,17 @@ impl DriveFeel {
             "assets/input/drive.ron: rise_per_second must be finite and positive; author the keyboard rise rate"
         );
         assert!(
-            0.0 < self.wide_off.0
-                && self.wide_off.0 < self.wide_on.0
-                && self.wide_on.0 < self.tight_off.0
-                && self.tight_off.0 < self.tight_on.0
-                && self.tight_on.0 <= 1.0,
-            "assets/input/drive.ron: author ordered wide_off < wide_on < tight_off < tight_on within [0, 1]"
+            0.0 < self.wide_on.0 && self.wide_on.0 < self.tight_on.0 && self.tight_on.0 <= 1.0,
+            "assets/input/drive.ron: author ordered wide_on < tight_on within (0, 1]"
         );
-        // Resolution: bound admission's temporary memory and work; finer authored lattices
-        // must be coarsened rather than leaving an incomplete reachability proof.
-        const MAX_REACHABLE_NOTCHES: usize = 65_536;
-        let mut seen = std::collections::HashSet::from([0.0_f32.to_bits()]);
-        let mut pending = vec![0.0_f32];
-        while let Some(value) = pending.pop() {
-            for direction in [-1.0, 1.0] {
-                let next = (value + direction * self.notch_step.0).clamp(-1.0, 1.0);
-                for (name, off, on) in [
-                    ("wide", self.wide_off.0, self.wide_on.0),
-                    ("tight", self.tight_off.0, self.tight_on.0),
-                ] {
-                    assert!(
-                        next.abs() < off || next.abs() >= on,
-                        "assets/input/drive.ron: {name} detent hysteresis contains a reachable f32 notch; move its thresholds or notch_step so every tap history avoids the band"
-                    );
-                }
-                if seen.insert(next.to_bits()) {
-                    assert!(
-                        seen.len() <= MAX_REACHABLE_NOTCHES,
-                        "assets/input/drive.ron: notch_step creates too many reachable f32 states for bounded admission; author a coarser lever step"
-                    );
-                    pending.push(next);
-                }
-            }
+        // Taps step from neutral or a clamped endpoint. Thresholds must lie between both
+        // notch lattices; equality would let accumulated f32 roundoff choose a radius.
+        for threshold in [self.wide_on.0, self.tight_on.0] {
+            assert!(
+                (threshold / self.notch_step.0).fract() != 0.0
+                    && ((1.0 - threshold) / self.notch_step.0).fract() != 0.0,
+                "assets/input/drive.ron: detent threshold rests on a notch; move wide_on, tight_on or notch_step between lever positions"
+            );
         }
     }
 }
@@ -162,47 +139,6 @@ mod tests {
 
     // Fixture: the simulation tick used to exercise pedal travel.
     const DT: f32 = 1.0 / 64.0;
-
-    /// Fixture: stepping back from a clamped endpoint reaches a notch inside the tight
-    /// detent band. Admission must refuse it so persistent steering has no approach history.
-    #[test]
-    #[should_panic(expected = "notch_step")]
-    fn notch_admission_checks_clamped_endpoint_steps() {
-        let mut feel: DriveFeel = crate::provenance::from_shipped_str(
-            "assets/input/drive.ron",
-            include_str!("../../assets/input/drive.ron"),
-        )
-        .unwrap();
-        feel.notch_step.0 = 0.4;
-        feel.wide_off.0 = 0.05;
-        feel.wide_on.0 = 0.15;
-        feel.tight_off.0 = 0.55;
-        feel.tight_on.0 = 0.65;
-        let persistent = 1.0 - feel.notch_step.0;
-        assert!(persistent >= feel.tight_off.0 && persistent < feel.tight_on.0);
-        feel.validate();
-    }
-
-    /// Fixture: the admitted 0.1-step boundary reaches the tight band after repeated f32
-    /// subtraction. Algebraic enumeration misses it; the player's steering must not depend
-    /// on which tap history reaches the same intended notch.
-    #[test]
-    #[should_panic(expected = "notch_step")]
-    fn notch_admission_checks_accumulated_roundoff() {
-        let mut feel: DriveFeel = crate::provenance::from_shipped_str(
-            "assets/input/drive.ron",
-            include_str!("../../assets/input/drive.ron"),
-        )
-        .unwrap();
-        feel.notch_step.0 = 0.1;
-        feel.wide_off.0 = 0.05;
-        feel.wide_on.0 = 0.09;
-        feel.tight_off.0 = 0.55;
-        feel.tight_on.0 = 0.6;
-        let reached = (0..4).fold(1.0_f32, |v, _| v - feel.notch_step.0);
-        assert!(reached >= feel.tight_off.0 && reached < feel.tight_on.0);
-        feel.validate();
-    }
 
     /// Pedal travel must obey its owner's rate and remain monotone without overshoot.
     /// Accumulated f32 error is bounded, rather than pinning an exact arrival tick.
@@ -310,5 +246,21 @@ mod tests {
         }
         .side_commands();
         assert_eq!(cmds, [1.0, -1.0]);
+    }
+
+    /// Fixture: binary quarter-step notches, with wide exactly on the first notch.
+    /// Admission keeps stationary lever values away from detent thresholds.
+    #[test]
+    #[should_panic(expected = "detent threshold rests on a notch")]
+    fn detent_threshold_cannot_rest_on_a_notch() {
+        let mut feel: DriveFeel = crate::provenance::from_shipped_str(
+            "assets/input/drive.ron",
+            include_str!("../../assets/input/drive.ron"),
+        )
+        .unwrap();
+        feel.notch_step.0 = 0.25;
+        feel.wide_on.0 = 0.25;
+        feel.tight_on.0 = 0.625;
+        feel.validate();
     }
 }
