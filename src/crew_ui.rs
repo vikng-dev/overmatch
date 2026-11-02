@@ -7,7 +7,7 @@ use bevy::prelude::*;
 use crate::command::{CrewSwap, TankCommand, TankDeviceSet};
 use crate::damage::{
     Capability, CrewStation, Crewman, Dead, PendingSwap, TankCapabilities, TankKnockedOut,
-    TankVolumes, VolumeFacets, VolumeOf, capability_effectiveness, evaluate, part_qualities,
+    TankVolumes, VolumeFacets, VolumeOf, evaluate, part_qualities,
 };
 use crate::flow::{Flow, FlowScoped, InMatchSystems, MatchResourceExt};
 use crate::spec::FireCycle;
@@ -175,6 +175,7 @@ fn update_status_panel(
             &TankVolumes,
             &TankCapabilities,
             Option<&TankKnockedOut>,
+            &crate::command::ParsedTankCommand,
         ),
         With<Controlled>,
     >,
@@ -200,7 +201,8 @@ fn update_status_panel(
         return;
     };
     // No local rig before spawn or between possessions: hide the card and its background.
-    let Some((tank, volumes, caps, knocked_out)) = crate::tank::controlled_one(tank.single())
+    let Some((tank, volumes, caps, knocked_out, command)) =
+        crate::tank::controlled_one(tank.single())
     else {
         set_text(text.reborrow(), "");
         visibility.set_if_neq(Visibility::Hidden);
@@ -221,16 +223,11 @@ fn update_status_panel(
         }
     }
 
-    // The game's damage model: Drive's rate is the target scale the sim applies. Sight access is
-    // a boolean gate, so it has no rate readout. Resolve qualities for the weapon gates below.
+    // The game's damage model: the same selector supplies the sim and the readout,
+    // including phase and repair brake holds. Sight access has no rate consumer.
     let quality = part_qualities(volumes, &facets);
-    // The game's damage model: a repairing crew holds the tank on its brakes, so Drive reads zero
-    // until the repair ends or is cancelled.
-    let drive = if crate::damage::repair::underway(volumes, &facets) {
-        0.0
-    } else {
-        capability_effectiveness(Some(volumes), Some(caps), Capability::Drive, &facets)
-    };
+    let (_, _, drive) =
+        crate::track::sim::drive_target(command, Some(volumes), Some(caps), &facets).split();
 
     // Weapons: name + per-fire-mode state, flagged `no-fire` when the fire gate is unmet (knocked-out
     // gunner/loader/breech). A `Single` reads as the classic READY / reload countdown; an

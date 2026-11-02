@@ -631,7 +631,7 @@ Subject: the game's damage model, game state only. Crew are HP pools at stations
 
 **Default.** A module contributes its held HP share, continuously; empty is out of action.
 A crew station contributes its occupant's competence while in action. Reload and belt swap use
-the composed rate with stable absolute deadlines, drive scales normalized control targets, and
+the composed rate with stable absolute deadlines, drive scales delivered torque, and
 servo slew keeps its rate scale. The complete timing rule and consumer contract live in design
 §7b (`.agents/docs/design/armor-penetration-and-damage.md`).
 
@@ -641,9 +641,9 @@ there is no checkpoint table, feature flag or second implementation in code.
 
 **Why it's a playtest call.** Watch whether partial module loss and foreign-station competence
 are legible through reload, driving and slew, or whether discrete checkpoints communicate them
-better. Drive currently scales opposite-throttle braking with the same control targets; test
-that feel in forward and reverse as well as acceleration and steering. Explicit brake holds
-remain full service brakes. No timing or capture measurement was taken in this lane.
+better. Drive preserves full driver intent and service braking while reducing its torque
+supply; test acceleration and steering in forward and reverse. Both phase and repair holds
+select the service brakes. No timing or capture measurement was taken in this lane.
 
 **Revert cost.** Medium, as specified in design §7b: module resolver, authored checkpoint data,
 admission and invariant tests. The generic rate consumers and existing load-rate wire carrier

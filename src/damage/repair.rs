@@ -322,10 +322,13 @@ mod tests {
             .unwrap();
         assert_eq!(
             released,
-            DriveTarget::Axes(DriveAxes {
-                throttle: 1.0,
-                steer: 0.0
-            }),
+            DriveTarget::Axes {
+                axes: DriveAxes {
+                    throttle: 1.0,
+                    steer: 0.0
+                },
+                effectiveness: 1.0,
+            },
             "a finished repair releases the hold"
         );
         assert_eq!(

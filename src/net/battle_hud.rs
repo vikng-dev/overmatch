@@ -630,7 +630,7 @@ mod tests {
         world.get_mut::<Text>(status).unwrap().0 = [
             "ALIVE",
             "Crew 5/5",
-            "Drive 100%   Gunner 100%",
+            "Drive 100%",
             "Weapons: Coax 150 rds   HullMG 150 rds   MainGun READY",
             "MainGun round: 8.8 cm Pzgr. 39 ring",
             "F — repair modules",

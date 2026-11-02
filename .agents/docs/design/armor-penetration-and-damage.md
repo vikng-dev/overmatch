@@ -1158,7 +1158,8 @@ wrapper). Crew-vs-module is intrinsic to the resolved entity, not the reference.
 **Quality** ∈ [0,1], resolved live per `Part`:
 - **Module** → condition: `held / capacity`, continuously; an emptied pool supplies zero.
 - **Crew** → `competence(crewman, station)` while in action: native full, foreign reduced.
-  The current foreign competence is 0.6 (ASSUMED provisional choice); later × skill.
+  The current foreign competence is 0.6, a `StandIn` declared in `assets/damage/crew.ron`
+  until crew/station training data exists; later × skill.
   A partly emptied crew pool does not change competence.
   Competence is **relational** (crewman × station), *not* an attribute of either — the seam the
   skill/training system plugs into.
@@ -1178,13 +1179,14 @@ The frozen readout is exactly the work resumption arms. This is the absolute-dea
 ADR-0029, extended to changing rates. The data gate refuses a base duration and requirement whose
 smallest positive rate could exceed the signed deadline horizon.
 
-Drive scales both normalized throttle and steering targets before the existing command slew;
-this is a control-target rate, not a promise of linear realized power through the transmission.
-It also scales the ordinary opposite-throttle braking command; explicit repair and phase brake
-holds still select the full service-brake hold. Servo slew keeps its existing requirement-rate
-scale. Automatic cyclic cadence, fire eligibility and sight access remain their mechanism or
-on/off gates. The panel shows Drive's applied target rate, actual weapon deadlines and explicit
-load pauses; the old sight-derived Gunner percentage is gone because no rate consumes it.
+Subject: the game's damage model, game state only. Drive scales the delivered torque envelope:
+engine torque, clutch capacity and steering capacity. The scheduler and force solve consume the
+same supplied envelope. Driver intent passes through unchanged, so the clutch/drag thresholds
+read the full command and opposite-throttle braking retains full service capacity. Explicit
+repair and phase holds select the brakes. Servo slew keeps its requirement-rate scale.
+Automatic cyclic cadence, fire eligibility and sight access keep their mechanism or on/off
+gates. The panel shows Drive's supplied rate (zero during either hold), actual weapon deadlines
+and explicit load pauses; the sight-derived Gunner percentage has no rate consumer.
 
 The RON declares only the static *recipe* (structure + coefficients); HP, who's in action, and
 backfill assignment are live inputs — knockout, a changed pool or a swap changes the inputs,
@@ -2054,15 +2056,15 @@ kept: verified fixes needing those files remain open, rather than being called f
 
 Subject: the game's damage model, game state only. Module quality is its pool's held share;
 crew quality remains occupant competence while in action. The production rate consumers are
-reload, belt swap, servo slew and the drive control targets described in §7b. F18 preserves the
+reload, belt swap, servo slew and the drive torque supply described in §7b. F18 preserves the
 checkpoint alternative in prose. Declared protocol revision is 64 because the atomic weapon gate
 now carries a checked positive load rate; its state hash includes that rate.
 
 MEASURED in generic production-system fixtures: the half-full engine serves 0.5, an empty engine
 zero; a foreign loader takes 54 ticks for 32 base reload ticks and 107 ticks for 64 base swap
 ticks at the current 0.6 competence. The pause/rate-change fixture keeps its frozen gate stable
-and reaches its re-derived deadline. Drive's 0.8 throttle target becomes 0.48 under that
-competence and 0.4 under half engine condition. These are fixture observations, never shipped
+and reaches its re-derived deadline. Drive keeps its 0.8 throttle command while its torque supply becomes the foreign competence
+or 0.5 under half engine condition. These are fixture observations, never shipped
 asset pass conditions. The panel removes the unused sight percentage and labels paused work
 even when the frozen interval is zero.
 
@@ -2070,3 +2072,9 @@ even when the frozen interval is zero.
 |---|---|---|---|
 | Claude | P2: reduced modules cannot start repair | verified: the 1 HP held fixture cannot start; repair now owes only missing HP | `damage: repair reduced module pools (#228)` |
 | Claude | P3: reduced module row says READY | verified: the row now shows its held-share rate | `damage: repair reduced module pools (#228)` |
+
+| Claude | P2: scaling intent weakens service brakes | verified in `driver_intent`: opposite throttle is the service pedal; intent now stays full | `damage: preserve drive intent under reduced supply (#228)` |
+| Claude | P2: full command below the clutch threshold cannot launch | verified: scaling intent crosses the neutral threshold; positive supply now engages under a full command | `damage: preserve drive intent under reduced supply (#228)` |
+| Claude | P3: Drive readout misses phase hold | verified: the panel now consumes the production selector, including both brake holds | `damage: preserve drive intent under reduced supply (#228)` |
+| Claude | P3: foreign competence is bare code data | verified: uniform competence is a labelled shared stand-in, not a per-crew fact | `damage: declare foreign competence and pin load floors (#228)` |
+| Claude | P3: load horizon test misses each contributor-floor mutant | verified: separate crew and module fixtures each fit at full rate and exceed the horizon at their own floor | `damage: declare foreign competence and pin load floors (#228)` |

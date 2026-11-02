@@ -12,12 +12,9 @@
 //!   tick-start shape snapshot ([`RubbleBodies`]), checked across the complete shoe footprint.
 //! - Runs every tick unconditionally (this is sim state); stays inside
 //!   `SimPhase::DrivingForces` so drive samples velocity before the weapon-fire impulse.
-//! - `Drive` effectiveness scales the command target; the contact model keeps its grip. An
-//!   out-of-action engine still has
-//!   kinetic grip (the slip law keeps resisting motion — though it creeps on slopes, ADR-0025);
-//!   it just cannot thrust. The cut is not instant: the lost capability retargets the command
-//!   slew, so thrust fades over ~1/[`super::drive::DRIVE_SLEW_PER_SECOND`] s — deliberate, the
-//!   same shaping as a released key, making capability loss/recovery feel mechanical.
+//! - The game's damage model scales delivered drive torque with `Drive` effectiveness.
+//!   Driver intent, service brakes and contact grip retain their construction-defined meaning.
+//!   An out-of-action engine cannot thrust; the contact law still resists slip.
 
 use avian3d::dynamics::rigid_body::forces::ForcesItem;
 use avian3d::prelude::{
@@ -594,7 +591,7 @@ pub(crate) fn belt_tick<O: TerrainOracle>(
     vel_at: impl Fn(Vec3) -> Vec3,
     rig: BeltRig<'_>,
 ) -> ([SideReport; 2], TransmissionReport) {
-    let (target, brake) = target.split();
+    let (target, brake, effectiveness) = target.split();
     let shaped = shape_drive(
         DriveAxes {
             throttle: rig.signal.throttle,
@@ -656,6 +653,7 @@ pub(crate) fn belt_tick<O: TerrainOracle>(
             reactions: [reports[0].belt_reaction, reports[1].belt_reaction],
             dt,
             brake,
+            effectiveness,
         },
     );
     for (si, report) in reports.iter().enumerate() {
@@ -671,7 +669,7 @@ pub(crate) fn belt_tick<O: TerrainOracle>(
 }
 
 /// The game's damage model: a running repair and a phase-held command both select service
-/// brakes. Otherwise the authored Drive effectiveness scales both thrust and steering targets.
+/// brakes. Otherwise driver intent stays intact and Drive effectiveness bounds delivered torque.
 pub(crate) fn drive_target(
     command: &ParsedTankCommand,
     tank: Option<&TankVolumes>,
@@ -682,10 +680,13 @@ pub(crate) fn drive_target(
         DriveTarget::Brake
     } else {
         let effectiveness = capability_effectiveness(tank, caps, Capability::Drive, volumes);
-        DriveTarget::Axes(DriveAxes {
-            throttle: command.throttle * effectiveness,
-            steer: command.steer * effectiveness,
-        })
+        DriveTarget::Axes {
+            axes: DriveAxes {
+                throttle: command.throttle,
+                steer: command.steer,
+            },
+            effectiveness,
+        }
     }
 }
 
@@ -1291,11 +1292,11 @@ mod tests {
         assert_eq!(support_bits(&reference, &a), support_bits(&solid, &b));
     }
 
-    /// The game's damage model: the production adapter's thrust target uses Drive's rate.
-    /// A boolean gate mutant fails both backfill and reduced-module rows. Grip and brakes do
-    /// not enter this selector's rate. Fixture: a ten-point engine and normalized input axes.
+    /// The game's damage model: the production adapter preserves driver intent beside its torque supply.
+    /// Scaling the pedals would weaken service braking and cross clutch thresholds.
+    /// Fixture: a ten-point engine and normalized input axes.
     #[test]
-    fn backfill_and_module_condition_scale_the_drivers_thrust_target() {
+    fn backfill_and_module_condition_scale_supply_without_scaling_intent() {
         use crate::ballistics::ComponentHealth;
         use crate::command::TankCommand;
         use crate::damage::{CrewStation, Crewman, FunctionRole, Group, Part, VolumeOf};
@@ -1331,10 +1332,13 @@ mod tests {
                         let (volumes, caps) = tanks.get(tank).unwrap();
                         assert_eq!(
                             drive_target(&command, Some(volumes), Some(caps), &facets),
-                            DriveTarget::Axes(DriveAxes {
-                                throttle: 0.8 * expected,
-                                steer: -0.4 * expected
-                            })
+                            DriveTarget::Axes {
+                                axes: DriveAxes {
+                                    throttle: 0.8,
+                                    steer: -0.4
+                                },
+                                effectiveness: expected,
+                            }
                         );
                     },
                 )

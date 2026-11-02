@@ -1142,6 +1142,8 @@ pub fn readout(st: &TransmissionState, tp: &TransmissionParams) -> DriveReadout 
 /// envelope consumes the sides; the drive and steering laws consume the axes), the pre-tick
 /// belt speeds, and this tick's summed longitudinal ground reactions.
 pub struct TransmissionInput {
+    /// The game's damage model: delivered torque share; intent and service brakes stay whole.
+    pub effectiveness: f32,
     pub throttle: f32,
     pub steer: f32,
     pub side_commands: [f32; 2],
@@ -2624,6 +2626,16 @@ pub fn step(
     st: &mut TransmissionState,
     inp: &TransmissionInput,
 ) -> TransmissionReport {
+    // The game's damage model: one supplied envelope feeds the scheduler, crank, coupling
+    // and steering member. Intent and the construction's service-brake capacity are unchanged.
+    let mut supplied = tp.clone();
+    for (_, torque) in &mut supplied.engine.torque_nm {
+        *torque *= inp.effectiveness;
+    }
+    supplied.peak_torque_nm *= inp.effectiveness;
+    supplied.clutch_capacity *= inp.effectiveness;
+    supplied.steer_capacity_n *= inp.effectiveness;
+    let tp = &supplied;
     let dt = inp.dt;
     let [vl, vr] = inp.speeds;
     let m = (vl + vr) / 2.0;

@@ -124,6 +124,7 @@ fn tiger_tp() -> TransmissionParams {
 
 fn input(throttle: f32, steer: f32, speeds: [f32; 2], reactions: [f32; 2]) -> TransmissionInput {
     TransmissionInput {
+        effectiveness: 1.0,
         throttle,
         steer,
         side_commands: [
@@ -2352,6 +2353,7 @@ fn brake_hold_stops_a_rolling_tank_and_parks_it() {
         let mut trace = Vec::new();
         for _ in 0..320 {
             let inp = TransmissionInput {
+                effectiveness: 1.0,
                 brake,
                 ..input(0.0, 0.0, speeds, [-5_000.0, -5_000.0])
             };
@@ -3553,4 +3555,29 @@ fn derived_parameter_overflow_is_refused_at_construction() {
             .to_string()
             .contains("derived steering curvature")
     );
+}
+
+/// The game's damage model: a small positive torque supply must engage under a full command.
+/// Fixture pools are 30 / 336 HP; command thresholds must never turn that share into zero drive.
+#[test]
+fn reduced_supply_pulls_away_and_retains_full_service_brakes() {
+    let fp = lab_fp();
+    let tp = lab_tp();
+    let mut full = input(1.0, 0.0, [0.0; 2], [0.0; 2]);
+    let full_report = step(&fp, &tp, &mut fresh(&tp), &full);
+    full.effectiveness = 30.0 / 336.0;
+    let mut state = fresh(&tp);
+    let reduced = step(&fp, &tp, &mut state, &full);
+    assert!(!state.clutch_out);
+    assert!(reduced.forces.iter().all(|force| *force > 0.0));
+    assert!(reduced.forces[0] < full_report.forces[0]);
+    let mut reverse = input(-1.0, 0.0, [10.0; 2], [0.0; 2]);
+    reverse.effectiveness = full.effectiveness;
+    let intent = driver_intent(&reverse, false, false, 10.0);
+    assert_eq!(intent.service, 1.0);
+    let mut q = [0.0; 2];
+    let mut rolling = fresh(&tp);
+    rolling.park = false;
+    apply_brake_stop_forces(&mut q, &tp, &fp, &rolling, &reverse, intent.service, false);
+    assert_eq!(q, [-tp.brake_capacity_n; 2]);
 }

@@ -19,7 +19,7 @@ pub struct DriveAxes {
 #[derive(Clone, Copy, PartialEq, Debug)]
 pub enum DriveTarget {
     /// Chase these axes. Zero is a released throttle: the tank coasts under engine drag.
-    Axes(DriveAxes),
+    Axes { axes: DriveAxes, effectiveness: f32 },
     /// Release both axes and hold the service brakes: the tank brakes to a stop, then the parking
     /// latch holds it (`transmission::TransmissionInput::brake`).
     Brake,
@@ -27,10 +27,13 @@ pub enum DriveTarget {
 
 impl DriveTarget {
     /// The slew target of the two axes and whether the brakes are held.
-    pub fn split(self) -> (DriveAxes, bool) {
+    pub fn split(self) -> (DriveAxes, bool, f32) {
         match self {
-            Self::Axes(axes) => (axes, false),
-            Self::Brake => (DriveAxes::default(), true),
+            Self::Axes {
+                axes,
+                effectiveness,
+            } => (axes, false, effectiveness),
+            Self::Brake => (DriveAxes::default(), true, 0.0),
         }
     }
 }
