@@ -78,9 +78,9 @@ use std::sync::Arc;
 
 use avian3d::collider_tree::{ColliderTrees, update_moved_collider_aabbs};
 use avian3d::prelude::{
-    AngularVelocity, Collider, ColliderAabb, ColliderOf, CollisionLayers, Forces, LinearVelocity,
-    Position, ReadRigidBodyForces, RigidBody, Rotation, SpatialQuery, SpatialQueryFilter,
-    WriteRigidBodyForces,
+    AngularVelocity, Collider, ColliderAabb, ColliderOf, CollisionLayers, Forces, LayerMask,
+    LinearVelocity, Position, ReadRigidBodyForces, RigidBody, Rotation, Sensor, SpatialQuery,
+    SpatialQueryFilter, WriteRigidBodyForces,
 };
 
 use bevy::math::DVec3;
@@ -109,7 +109,7 @@ use crate::{ClientReplica, Layer, ShotClock};
 /// m: the f32 rounding of a stop the walk computed against the same face, many times over.
 const STOP_TOLERANCE_M: f32 = 0.01;
 
-/// Grade in the building frame, m: the plane the building stands on (a building spawns with its
+/// DERIVED from the construction frame: grade is its zero-height plane, m, the plane the building stands on (a building spawns with its
 /// frame's origin on the ground, its foundation below). A chunk wholly below it is buried.
 const GRADE_M: f32 = 0.0;
 /// How far above grade a buried chunk's corner may sit, m: the bake's rounding of a corner it cut
@@ -1977,20 +1977,45 @@ pub(crate) fn chunk_collider(kind: &BuildingKind, c: usize, scale: f32, origin: 
 /// 5.5 cm and 0.22 J/kg from nothing; at 1 mm none gained energy, 1 km from the origin as well.
 const LOOSE_GAP_M: f32 = 1e-3;
 
-/// The hull a freed chunk meets contacts with, `block` at `scale` about `origin`, every face at
-/// least [`LOOSE_GAP_M`] inside the whole hull. Only contact reads it: mass and inertia stay the
-/// whole hull's ([`occupied_mass`]). A shrink toward the mean of at most 80 % stays a solid hull.
+/// Resolution: preserve a solid, numerically resolved hull when the requested inset would
+/// consume a small fragment. This limits contraction, not the fragment's occupied geometry.
+const MIN_INSET_SCALE: f32 = 0.2;
+
+/// A certified hull's points contracted about their mean by `gap` m at `scale`. The nearest face
+/// moves by the gap unless MIN_INSET_SCALE limits contraction; farther faces move proportionally.
+/// Contact separation and visual seams supply independent gaps to this one geometric operation.
+pub(crate) fn inset_point(block: &Block, scale: f32, gap: f32) -> impl Fn(Vec3) -> Vec3 {
+    assert!(
+        block.points.len() >= 4,
+        "a certified solid hull has at least four corners"
+    );
+    assert!(
+        scale.is_finite() && scale > 0.0 && gap.is_finite() && gap >= 0.0,
+        "a certified hull's scale is positive and its requested inset is nonnegative"
+    );
+    let middle = block.points.iter().sum::<Vec3>() / block.points.len() as f32;
+    let radius = block.inradius() * scale;
+    assert!(
+        radius.is_finite() && radius > 0.0,
+        "a certified convex hull's corner mean is strictly inside its bounding planes"
+    );
+    let shrink = (1.0 - gap / radius).max(MIN_INSET_SCALE);
+    move |point| middle + (point - middle) * shrink
+}
+
+/// The hull a freed chunk meets contacts with, inside its whole occupied hull. The nominal
+/// nearest-face gap is LOOSE_GAP_M, reduced by the small-hull cap in inset_point. Mass, inertia
+/// and ballistics read the whole hull instead.
 pub(crate) fn loose_collider(block: &Block, scale: f32, origin: Vec3) -> Collider {
-    let middle = block.points.iter().sum::<Vec3>() / block.points.len().max(1) as f32;
-    let shrink = (1.0 - LOOSE_GAP_M / (block.inradius() * scale).max(1e-6)).max(0.2);
+    let inset = inset_point(block, scale, LOOSE_GAP_M);
     Collider::convex_hull(
         block
             .points
             .iter()
-            .map(|p| (middle + (*p - middle) * shrink) * scale - origin)
+            .map(|p| inset(*p) * scale - origin)
             .collect(),
     )
-    .expect("a load-certified hull, scaled and shrunk toward its mean, stays a solid convex hull")
+    .expect("a certified hull, scaled and contracted about its mean, stays solid")
 }
 
 /// The ballistic volume of law chunk `c`: its element's substance.
@@ -2158,6 +2183,15 @@ fn spawn_group(commands: &mut Commands, departure: Departure, finalize: bool) {
                 occupied_mass(&hull, kind.layout.materials[c].density),
                 piece_layers(),
                 kind.chunk_friction(c),
+                BuildingChunk(c as u16),
+            ));
+            // The game's damage model reads occupied geometry; the sensor adds no solver
+            // contact or mass beside the separately inset contact hull.
+            parent.spawn((
+                Transform::IDENTITY,
+                hull,
+                Sensor,
+                CollisionLayers::new([Layer::Armor], LayerMask::NONE),
                 chunk_volume(&kind, c),
                 BuildingChunk(c as u16),
             ));
@@ -2202,7 +2236,8 @@ fn split_groups(
         for (group, live) in &split.children {
             let mut launch = launch(&breakage.kind, &live.structure, breakage.scale, group, &[]);
             // DERIVED rigid velocity field: every new COM gets v + omega cross r; every child
-            // retains omega. Exact child colliders partition the parent's occupied geometry.
+            // retains omega. Whole occupied child hulls partition the parent's occupied geometry;
+            // contact insets do not enter this mass and inertia calculation.
             launch.velocity = inverse * velocity.0
                 + (inverse * spin.0).cross(launch.centre - breakage.origin - centre.0);
             launch.spin = inverse * spin.0;
@@ -2238,11 +2273,11 @@ fn split_groups(
     }
 }
 
-/// A loose chunk's filter: brick in ballistics ([`Layer::Armor`]), colliding as debris with the
-/// ground, buildings, hulls and other pieces, never with a tank's armour volumes.
+/// A loose chunk's contact filter: debris meets ground, buildings, hulls and other pieces,
+/// never a tank's armour volumes. Its separate whole-hull sensor supplies ballistic geometry.
 pub(crate) fn piece_layers() -> CollisionLayers {
     CollisionLayers::new(
-        [Layer::Debris, Layer::Armor],
+        [Layer::Debris],
         [
             Layer::Terrain,
             Layer::Vehicle,

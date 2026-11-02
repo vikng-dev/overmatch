@@ -712,13 +712,13 @@ fn setup_wall(
 
 /// A chunk's drawn mesh, vertices about its bounding box's centre: its faces inset by [`SEAM`].
 fn chunk_mesh(block: &Block) -> Mesh {
-    let inset = inset(block, SEAM);
+    let inset = crate::buildings::breakage::inset_point(block, 1.0, SEAM);
     let (mut positions, mut normals, mut indices) = (Vec::new(), Vec::new(), Vec::new());
     for &(normal, offset) in &block.planes {
         let face = block.face_on(normal * offset, normal);
         let base = positions.len() as u32;
         for corner in &face {
-            positions.push(inset(*corner).to_array());
+            positions.push((inset(*corner) - block.center()).to_array());
             normals.push(normal.to_array());
         }
         for k in 1..face.len().saturating_sub(1) as u32 {
@@ -732,15 +732,6 @@ fn chunk_mesh(block: &Block) -> Mesh {
     .with_inserted_attribute(Mesh::ATTRIBUTE_POSITION, positions)
     .with_inserted_attribute(Mesh::ATTRIBUTE_NORMAL, normals)
     .with_inserted_indices(Indices::U32(indices))
-}
-
-/// A map from a world point to its place about `block`'s bounding-box centre with every face moved
-/// in by `gap` m: the corners scaled about their centroid.
-fn inset(block: &Block, gap: f32) -> impl Fn(Vec3) -> Vec3 {
-    let centre = block.center();
-    let middle = block.points.iter().sum::<Vec3>() / block.points.len().max(1) as f32;
-    let scale = (1.0 - gap / block.inradius().max(1e-6)).max(0.2);
-    move |p| middle + (p - middle) * scale - centre
 }
 
 /// A convex collider of `block`'s whole hull, about its bounding box's centre: its occupied

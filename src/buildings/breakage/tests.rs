@@ -3980,9 +3980,8 @@ fn freed_in_place(group: &[usize], offset: Vec3) -> (App, (f32, Mat3, Vec3)) {
 
 /// A FREED CHUNK MOVES AS THE MATERIAL IT OCCUPIES (the game's environment destruction model). The
 /// launch holds the mass the structure's weight law carried, and the spawned body holds the
-/// launch's mass, inertia and centre, so a blow leaves the velocity its load computed. A mutant
-/// reading any of them off the contact hull fails; a 5 mm inset read 0.51 to 0.87 of the structure's
-/// mass (MEASURED, shipped house). The two chunks are fixture data.
+/// launch's mass, inertia and centre, so a blow leaves the velocity its load computed.
+/// The two chunks are fixture data.
 #[test]
 fn a_freed_chunk_moves_as_the_material_it_occupies() {
     let kind = shipped_house();
@@ -4019,7 +4018,7 @@ fn a_freed_chunk_moves_as_the_material_it_occupies() {
 /// model). It touched them standing, so the first contact must not resolve that touch as a blow:
 /// kinetic energy stays under gravity's work on it, tick by tick, at the origin and where f32
 /// rounding of a position is coarse. Contact on the whole hull fails: MEASURED +0.22 J/kg and a
-/// 5.5 cm kick. Fixture: the middle chunk of every eighth breakable element.
+/// 5.5 cm kick. Fixture: the middle chunk of at most eight sampled breakable elements.
 #[test]
 fn a_chunk_freed_in_place_takes_no_energy_from_its_neighbours() {
     let kind = shipped_house();
@@ -4060,6 +4059,52 @@ fn a_chunk_freed_in_place_takes_no_energy_from_its_neighbours() {
                     "chunk {c} at {offset}, tick {tick}: {kinetic} J from {work} J of gravity"
                 );
             }
+        }
+    }
+}
+
+/// The game's damage model marches a freed chunk's occupied hull. Contact separation must not
+/// shorten either face of its ballistic chord. This reads the collider spawn_group actually
+/// attached to a live piece, so retaining BallisticVolume on the contact inset fails.
+#[test]
+fn a_freed_chunks_ballistic_chord_is_its_occupied_chord() {
+    let kind = shipped_house();
+    let (_, [c, ..]) = fixture_chunks(&kind);
+    let (mut app, _) = freed_in_place(&[c], Vec3::ZERO);
+    app.insert_resource(Gravity::ZERO);
+    app.update();
+    let origin = app
+        .world_mut()
+        .query_filtered::<&Breakage, With<WallPiece>>()
+        .single(app.world())
+        .unwrap()
+        .origin;
+    let occupied = chunk_collider(&kind, c, 1.0, origin);
+    let centroid = kind.layout.structure(&kind.asset, 1.0).chunks[c].centroid - origin;
+    let mut volumes = app
+        .world_mut()
+        .query::<(&Collider, &BallisticVolume, &ChildOf)>();
+    let colliders: Vec<_> = volumes
+        .iter(app.world())
+        .filter(|(_, _, parent)| app.world().get::<WallPiece>(parent.parent()).is_some())
+        .map(|(hull, _, _)| hull)
+        .collect();
+    assert_eq!(colliders.len(), 1);
+    // Fixture rays in three independent directions, long enough to cross this chunk.
+    for dir in [Vec3::X, Vec3::Y, Vec3::Z] {
+        let reach = (kind.layout.blocks[c].max - kind.layout.blocks[c].min).length();
+        for sign in [-1.0, 1.0] {
+            let ray = dir * sign;
+            let from = centroid - ray * reach;
+            let cast = |hull: &Collider| {
+                hull.cast_ray(Vec3::ZERO, Quat::IDENTITY, from, ray, reach * 2.0, true)
+                    .unwrap()
+                    .0
+            };
+            assert!(
+                (cast(colliders[0]) - cast(&occupied)).abs() < 1e-5,
+                "contact separation changed the game's ballistic face on {ray}"
+            );
         }
     }
 }

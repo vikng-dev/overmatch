@@ -383,7 +383,7 @@ Their press stands on the structure: every run of the laws on it carries the pre
 Contacts reach the laws with their blow and press at each point and one source mass per contact: the body's effective mass along the normal at the blow's centroid, the same on each of its points.
 A plastic share is linear in the blow, so the points of one contact then take its share once; read against each point's own effective mass they would each spend the receiver's whole mass (**DERIVED**: a cube's corner holds a quarter of the cube's mass along its face's normal, so a cube striking square on would hand a held group up to four times its exchange).
 The structural energy check reads the pushing pair's work (`Origin::work_share`) against the held hinge mass; rest lift and slide read it against the translating group's mass.
-A freed group launches against its free collider mass and inertia, and the source receives the rest at the world contact in the same post-physics law pass, before the next solver step.
+A freed group launches against its whole occupied hulls’ mass and inertia, and the source receives the rest at the world contact in the same post-physics law pass, before the next solver step.
 A body blow on dust returns whole: dust has no dynamic carrier. A held chunk returns nothing; the failing tick's press stays with the standing structure. A queued contact whose chunk an earlier deposit already freed also returns whole: that chunk launched as its own body, the next physics step's solver meets it as a dynamic body, and keeping the static stop would take the source's momentum into no body.
 The strength check reads each press alongside each chunk's gravity force, at their respective points, from pressed chunks and changed supports. Navier tension uses the resultant force and moment; rests require compression, a pressure centre inside the bearing hull, and tangent force within friction. For non-coplanar bearing discs, the pressure-centre calculation uses their area-centroid height (**ASSUMED**, the existing horizontal bearing-hull approximation).
 An unchanged set of presses (chunk, point and force) on unchanged topology reuses its held verdict. A changed force or point rechecks, including a decrease or removal (the former loaded chunk remains a check seed): reducing an opposing stabilizing force can expose another load's demand, so a componentwise monotonicity assumption is unsafe. Awake presses join every deposit in the physics step once, including deposits before and after their own contact deposit. Sleeping presses still start no run; they join every run another deposit starts.
@@ -826,7 +826,7 @@ contact does not change the compression-only law.
 A failed seam partitions ownership at the same authoritative tick. `PendingSplit` waits for
 that tick's plastic returns to reach their sources, then creates the children before publication.
 Children inherit `v + omega cross r` at their actual occupied centres of mass and the parent's
-angular velocity; their colliders partition the parent. This adds no kinetic energy. The existing
+angular velocity; their whole occupied hulls partition the parent’s occupied geometry. Contact hulls are inset independently and do not define mass, inertia or ballistic thickness. This adds no kinetic energy. The existing
 fracture-work criterion is a threshold, not a resolved cohesive dissipation/strain model.
 The initial departure's plastic exchange remains the shared launch path.
 
