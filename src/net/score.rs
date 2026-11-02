@@ -194,9 +194,16 @@ impl RespawnGate<'_, '_> {
 }
 
 /// The server's half: the replicated board, the standings it opens and the knockouts it scores.
-pub(super) fn install_server(app: &mut App, wait: RespawnWait) {
+pub(super) fn install_server(app: &mut App, wait: RespawnWait, first: BattleState) {
     mount(app, wait);
-    app.add_systems(Startup, spawn_scoreboard);
+    // Startup publishers need their generation before Startup. Derive it from the same Battle
+    // value captured by the board's constructor, never from a separate default construction.
+    app.insert_resource(super::world_reset::AuthorityWorld(
+        crate::world::WorldGeneration(first.number),
+    ));
+    app.add_systems(Startup, move |commands: Commands| {
+        spawn_scoreboard(commands, first)
+    });
 }
 
 /// The scoring observers and the wait, for a world that spawns its own board.
@@ -206,11 +213,11 @@ pub(crate) fn mount(app: &mut App, wait: RespawnWait) {
         .add_observer(score_knockout);
 }
 
-fn spawn_scoreboard(mut commands: Commands) {
+fn spawn_scoreboard(mut commands: Commands, battle: BattleState) {
     commands.spawn((
         Name::new("Scoreboard"),
         Scoreboard::default(),
-        BattleState::default(),
+        battle,
         Replicate::to_clients(NetworkTarget::All),
     ));
 }
@@ -341,6 +348,32 @@ fn score_knockout(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Startup environment publishers and the replicated board must read one Battle's identity.
+    /// A non-default fixture number detects a second default construction in either consumer.
+    #[test]
+    fn startup_uses_one_battle_for_the_board_and_world_generation() {
+        let mut app = App::new();
+        let first = BattleState {
+            number: 17,
+            ..default()
+        };
+        install_server(
+            &mut app,
+            RespawnWait::new(Duration::from_secs(1), Duration::from_millis(10)),
+            first,
+        );
+        assert_eq!(
+            app.world()
+                .resource::<super::super::world_reset::AuthorityWorld>()
+                .0,
+            crate::world::WorldGeneration(first.number),
+            "publishers read the generation before Startup"
+        );
+        app.world_mut().run_schedule(Startup);
+        let world = app.world_mut();
+        assert_eq!(*world.query::<&BattleState>().single(world).unwrap(), first);
+    }
 
     fn standing(combatant: u64, knockouts: u32, losses: u32) -> Standing {
         Standing {
