@@ -17,8 +17,8 @@
 //! excludes hidden controls. Rewalking UiStack rects would duplicate the backend's work.
 //!
 //! Atomic writes make immediate saves safe, with no Apply button to forget; drags save on release.
-//! [`ActiveDrag`] freezes the
-//! physical track rect so UI-scale-driven layout cannot feed back into its value.
+//! [`ActiveDrag`] freezes the physical track rect so UI-scale-driven layout cannot feed back into
+//! its value.
 //! [`track_fraction`] owns the remaining physical-vs-logical pixel arithmetic.
 
 use bevy::picking::hover::Hovered;
@@ -91,7 +91,7 @@ enum Row {
     RenderScale,
     /// The LOD screen-space error budget, in pixels. Beside render scale because they are the two
     /// rows that trade picture for frames by drawing LESS, rather than by drawing it differently.
-    /// No consumer yet — see `settings::PixelBudget`.
+    /// Consumed by `geometry_lod::compose_view_profile`; see `settings::PixelBudget`.
     LodPixelBudget,
     /// Windowed / borderless fullscreen. Reflects OS-side toggles too — see
     /// `settings::observe_window_placement`.
@@ -1784,8 +1784,6 @@ mod tests {
     /// `store::a_non_finite_budget_cannot_survive_the_parse` guards the boundary.
     #[test]
     fn a_saturated_step_on_any_row_is_a_no_op() {
-        // Finite budgets the parser accepts, including an ordinary off-ladder
-        // hand-edit, so this covers the shape the fix produces rather than only the default.
         for budget in [
             PixelBudget::default(),
             PixelBudget(1.2),
@@ -1862,11 +1860,9 @@ mod tests {
         );
     }
 
-    /// A stored OFF the surface cannot present (Wayland
-    /// refuses `Immediate`) must grey the frame-cap row, because that is precisely what the limiter
-    /// does with it — the row used to stay lit and armed over a compositor-paced surface. The gate
-    /// is the EFFECTIVE rung, so this holds in the frames before `settings::normalize_vsync` has
-    /// written the correction back. Every other row is enabled under every rung on every surface.
+    /// An unpresentable stored OFF (Wayland refuses `Immediate`) must grey the frame-cap row,
+    /// matching the limiter. Gate on the effective rung even before `settings::normalize_vsync`
+    /// persists the correction. Every other row stays enabled under every rung on every surface.
     #[test]
     fn an_unpresentable_off_greys_the_frame_cap_row() {
         let wayland = PresentCaps::Reported {
@@ -2580,8 +2576,7 @@ mod tests {
     /// Card height in PHYSICAL px, measured on the wrapper's child (the 100% wrapper would just
     /// report window height). Do not divide out inverse_scale_factor: it includes UiScale and
     /// would cancel the rescale under test (source on [`mouse_input`]). The headless target scale
-    /// is 1, so this is also the
-    /// logical window height occupied.
+    /// is 1, so this is also the logical window height occupied.
     fn card_height(app: &mut App) -> f32 {
         let world = app.world_mut();
         let mut wrappers = world.query_filtered::<&Children, With<SettingsCard>>();

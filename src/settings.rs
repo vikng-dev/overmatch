@@ -12,8 +12,7 @@
 //! Normalization spends a stored choice only on a positive capability report, never a failed probe
 //! ([`PresentCaps`]). A portable file can name a vsync rung this surface cannot present.
 //!
-//! The table is exhaustive: nothing else writes this resource, so a value can only be in it because
-//! the player put it there.
+//! The table is exhaustive: values express player intent or conclusive capability normalization.
 //!
 //! Only an explicit [`SaveSettings`] writes the file; saving on exit could launder an incidental
 //! resource value into the player's config.
@@ -75,57 +74,25 @@ const SETTINGS_VERSION: u32 = 1;
 /// The DEFAULT cascade count — [`ShadowCascades::default`]'s value, and the ONE number the whole
 /// shadow ladder is priced against.
 ///
-/// **It was 4 (bevy's own `CascadeShadowConfigBuilder::num_cascades`) until 2026-07-28, and it is 3
-/// now.** MEASURED on an M4 (10 GPU cores, two idling Tigers, release, vsync off, 20 s settled
-/// windows): a cascade costs **~1.16 ms of frame time each**, while the whole 1024 → 4096 map-size
-/// axis spans 0.27 ms and the whole 150 → 1000 m distance axis costs ~0.71 ms (re-measured
-/// 2026-07-28 at the shipped 3 cascades / 4096 with track shadow proxies on; the first reading of
-/// this axis was ~1.17 ms at 4 cascades / 2048, which is the same axis priced against a costlier
-/// ladder). The cascade COUNT is the expensive axis and nothing else on this page is close, so
-/// dropping one cascade buys back more than the crispness and the envelope together cost — and the
-/// shipped envelope only spends 0.30 ms of that 0.71 ms axis anyway
-/// ([`ShadowDistance`]'s table). What keeps the picture honest at 3 is
-/// [`SHADOW_FIRST_CASCADE_FAR_BOUND_M`] — see its doc for the split arithmetic, which is the reason
-/// this drop is not simply a quality cut.
+/// MEASURED on an M4 (10 GPU cores, two idling Tigers, release, vsync off, 20 s settled windows):
+/// each cascade costs ~1.16 ms; the 1024 → 4096 map-size axis spans 0.27 ms; the 150 → 1000 m
+/// distance axis costs ~0.71 ms at 3 cascades / 4096 with track shadow proxies. At 4 cascades /
+/// 2048 that distance axis cost ~1.17 ms. Count dominates; dropping one cascade pays for both
+/// crispness and reach. The shipped envelope spends only 0.30 ms of that distance axis
+/// ([`ShadowDistance`]); [`SHADOW_FIRST_CASCADE_FAR_BOUND_M`] keeps the picture crisp at 3 cascades.
 ///
-/// **This used to be a hard constant, and the story below is why.** The count is a live row now
-/// ([`ShadowCascades`]), and changing it at runtime is safe ONLY because bevy 0.19.1 carries
-/// upstream PR #24807; see `upstream/bevy-cascade-count-stale-local-parallel.md` for the upstream
-/// record and the validation evidence. **This row requires `bevy_light` >= 0.19.1**: on stock 0.19.0
-/// the crash below fires on the first grow step. Everything from MEASURED down is kept as the
-/// historical record of the mechanism.
+/// Runtime count changes require registry bevy_light >= 0.19.1: PR #24807 resizes every pooled
+/// thread slot before each view's parallel walk. Stock 0.19.0 can panic on growth; shrinking is
+/// benign. Mechanism and validation: `upstream/bevy-cascade-count-stale-local-parallel.md`.
 ///
-/// MEASURED 2026-07-26 (field crash): stepping a shadow knob from a 2-cascade setting back to a
-/// 4-cascade one panicked in `bevy_light-0.19.0/src/lib.rs:477`,
-/// `check_dir_light_mesh_visibility` — "index out of bounds: the len is 2 but the index is 2".
+/// # Runtime-length audit
 ///
-/// The mechanism, read out of bevy_light/bevy_utils rather than inferred. That system accumulates
-/// per-cascade visible entities into `mut view_visible_entities_queue: Local<Parallel<Vec<Vec<Entity>>>>`.
-/// The per-cascade length is established in `par_iter().for_each_init`'s INIT closure
-/// (`entities.resize(view_frusta.len(), …)`), which only runs on threads that actually receive a
-/// chunk that frame — but the collect loop afterwards walks `Parallel::iter_mut()`, which is
-/// `self.locals.iter_mut()`: EVERY thread-local ever borrowed, including ones that sat out this
-/// frame. Because the `Local` outlives the frame, a queue still sized to the previous cascade count
-/// survives there and gets indexed with the new one. Growing the count (2 → 4) indexes past the end
-/// and panics; shrinking (4 → 2) does not panic and silently drops cascades instead, which is worse
-/// to debug. It is scheduling-dependent — whether any pooled thread misses a frame — so it is
-/// neither reliably reproducible nor reliably absent.
-///
-/// The rule this left ON STOCK 0.19.0: **`maximum_distance` and the shadow-map SIZE are safe to
-/// change at runtime (no per-cascade array length moves); the cascade COUNT is not.** The vendored
-/// backport (above) is what retired that rule — it resizes every thread slot before each view's
-/// par_iter, exactly as merged upstream — and is the sole reason [`ShadowCascades`] may exist.
-///
-/// # The general hazard, and the audit that bounds it
-///
-/// That crash is one instance of a class: bevy caches per-frame work in `Local`s that OUTLIVE the
-/// frame, and a `Local` sized from a config value goes stale the moment that value changes. Every
-/// other setting [`apply_settings`] writes was audited against bevy 0.19 for the same shape
-/// (`Local<Parallel<…>>` — pooled thread-locals, exactly what blew up):
+/// Bevy's per-frame `Local`s outlive frames: config-sized buffers must resize even on idle threads.
+/// Audit of the settings [`apply_settings`] writes against Bevy 0.19's pooled `Local<Parallel<…>>`:
 ///
 /// | Site | Element | Positionally indexed by a config length? |
 /// |---|---|---|
-/// | `bevy_light` `check_dir_light_mesh_visibility` | `Vec<Vec<Entity>>` | **YES — cascade count. The bug.** |
+/// | `bevy_light` `check_dir_light_mesh_visibility` | `Vec<Vec<Entity>>` | yes — cascade count; every slot resized since 0.19.1 |
 /// | same system, `defer_visible_entities_queue` | `Vec<Entity>` | no (flat append) |
 /// | `bevy_light` point/spot visibility | `[Vec<Entity>; 6]`, `Vec<Entity>` | no (cubemap faces are a fixed 6) |
 /// | `bevy_camera` visibility + ranges | `TypeIdMap<Vec<Entity>>`, `Vec<(Entity, u32)>` | no (keyed / flat) |
@@ -228,18 +195,15 @@ impl ShadowCascades {
 /// How far directional shadows are drawn before they stop — the far bound of the last cascade, with
 /// the cascade COUNT its own row ([`ShadowCascades`]).
 ///
-/// **Split from [`ShadowResolution`] on purpose** (Yan, 2026-07-27), and the split is about COST,
-/// not about quality. As costs they really are independent, which is why they are two rows: distance
-/// widens the area each cascade must cover, resolution buys texels at a fixed area, and pairing them
-/// into coupled Low/Medium/High presets — as this type used to — meant a player who wanted the far
-/// envelope had to pay for 4K maps too, and hid which of the two a frame-rate complaint was about.
+/// Separate from [`ShadowResolution`] because their costs are independent: distance widens each
+/// cascade's area; resolution buys texels at fixed area. Coupled presets force players wanting
+/// reach to buy 4K maps too, and hide which axis causes a frame-rate complaint.
 ///
-/// **As QUALITY they are coupled, and the doc here used to say otherwise** (corrected 2026-07-28).
-/// A cascade's texel is `frustum_diameter / map_size`, so distance grows it and resolution shrinks
+/// Quality is coupled: a cascade's texel is `frustum_diameter / map_size`, so distance grows it and resolution shrinks
 /// it, and the artefact that texel size drives is not blur — it is **peter-panning**, the shadow
 /// sliding off the object that casts it. `bevy_pbr` offsets the shadow lookup by
 /// `shadow_normal_bias · √2 · cascade_texel` along the surface normal (see [`crate::world`]'s
-/// `SUN_SHADOW_NORMAL_BIAS`), i.e. detachment is **3.68 × the cascade's texel**, in metres of world.
+/// `SUN_SHADOW_NORMAL_BIAS`); DERIVED detachment is **3.68 × the cascade's texel**, in metres.
 /// Raising the distance without raising the resolution therefore buys far shadows that float:
 ///
 /// | far cascade | texel | detachment |
@@ -255,11 +219,10 @@ impl ShadowCascades {
 /// row at 350 m. The rows stay separate because their COSTS are separable; the coupling is a fact
 /// about the picture that the labels cannot express, so it is written down here instead.
 ///
-/// # Why the default is the FLOOR rung, not the far one (measured 2026-07-28)
+/// # Why the default is the floor rung
 ///
-/// The envelope was priced on an M4 at the shipped 3 cascades / 4096 / 40 m first bound, two tanks
-/// idling with track shadow proxies on, against shadows-off controls that agreed to 0.157 ms across
-/// the session:
+/// MEASURED frame p50 and DERIVED px/texel on an M4 at 3 cascades / 4096 / 40 m first bound, two
+/// idling tanks with track shadow proxies, against shadows-off controls agreeing to 0.157 ms:
 ///
 /// | envelope | frame p50 | px per texel (lower = crisper) |
 /// |---|---|---|
@@ -283,24 +246,15 @@ impl ShadowCascades {
 /// still, and it is exactly the setting whose cut-off shadows started this work. The longer rungs
 /// stay on the ladder for other hardware and other worlds, not as the recommendation.
 ///
-/// **`Off` is reachable, and that RESCINDS a stated product rule.** The rule was: shadows are
-/// GAMEPLAY INFORMATION, not decoration — a hull-down tank's shadow, the shadow a barrel throws
-/// across a slope, the dark under a treeline are all things a player reads to find and range a
-/// target, so a client that could switch them off would see targets its opponent could not, which is
-/// a competitive-integrity break rather than a graphics option (the same reason competitive shooters
-/// pin foliage and shadow draw). That reasoning is NOT withdrawn — it is SUSPENDED pending perf data
-/// (Yan, 2026-07-27): whether the shadow budget is where 15v15 frame headroom has to come from is a
-/// measurement nobody has yet, and the whole-budget number needs the off state to exist. **Removing
-/// `Off` again once that measurement lands is a deliberately open question**, so nothing downstream
-/// may assume either way.
+/// `Off` remains provisional pending the 15v15 frame-headroom measurement: shadows carry gameplay
+/// information. The competitive-integrity decision lives in
+/// `.agents/docs/design/display/shadow-presets.md`; downstream code must not assume its outcome.
 ///
-/// # The ladder moved on 2026-07-28, and old files migrate
+/// # Legacy distance aliases
 ///
-/// The rungs were `100 / 150 / 300`; they are `350 / 700 / 1000` now. The old ceiling was never a
-/// choice anyone made — 150 m is bevy's stock `maximum_distance`, tuned for character-scale scenes —
-/// and it is below this world's PHYSICAL floor: at [`crate::world`]'s 17° sun a shadow runs 3.27×
-/// the caster's height, so 100 m of terrain relief self-shadows out to ~327 m. Under the old ladder
-/// a ridge simply stopped shading the valley behind it partway down, at every rung.
+/// DERIVED: at the world's 17° sun, shadows run 3.27× caster height; 100 m relief needs ~327 m.
+/// The 350 m floor avoids cutting ridge shadows off partway through a valley. Legacy 100/150/300 m
+/// values all fall below it; Bevy's stock 150 m envelope is for character-scale scenes.
 ///
 /// **`M100`/`M150`/`M300` are gone as VARIANTS and survive as `#[serde(alias)]`s** on the nearest
 /// surviving rung, so an existing `video.ron` loads without error and lands on a real ladder
@@ -310,7 +264,7 @@ impl ShadowCascades {
 /// value the page silently rounds. All three land on `M350` (|300 − 350| = 50 beats |300 − 700| =
 /// 400), which does mean a player who chose 100 m for frame rate is moved UP; that is accepted
 /// because the same release drops a cascade, and the 150 → 350 m they are moved across costs
-/// ~0.30 ms (table below) against the ~1.16 ms that one fewer cascade gives back — see
+/// ~0.30 ms (table above) against the ~1.16 ms that one fewer cascade gives back — see
 /// [`SHADOW_CASCADES`]. `M350` being the DEFAULT as well as the migration target means the common
 /// case is a file that lands where a fresh install would.
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default, Serialize, Deserialize)]
@@ -330,8 +284,7 @@ pub(crate) enum ShadowDistance {
     /// This is the rung at which a 1 km map casts whole and the draw volume stops growing —
     /// MEASURED on that map: the cost curve saturates around
     /// 700 m for exactly that reason (700 and 1000 m are within the session's own repeatability).
-    /// It was the shipped default for one day, 2026-07-28; the type doc's envelope table is why it
-    /// is a top rung instead. Only affordable together with [`ShadowResolution::X4096`] — at 2048 it
+    /// The type doc's envelope table makes this a top rung rather than the default. Only affordable together with [`ShadowResolution::X4096`] — at 2048 it
     /// detaches a far shadow by a whole tank.
     M1000,
 }
@@ -388,9 +341,8 @@ impl ShadowDistance {
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default, Serialize, Deserialize)]
 pub(crate) enum ShadowResolution {
     X1024,
-    /// Bevy's own `DirectionalLightShadowMap::default().size`, and the shipped default until
-    /// 2026-07-28 — it detaches a far shadow by ~1.07 m at the shipped 350 m envelope and by ~3 m at
-    /// [`ShadowDistance::M1000`], so it is a budget rung now rather than the reference one.
+    /// Bevy's `DirectionalLightShadowMap::default().size`. DERIVED detachment: ~1.07 m at the
+    /// shipped 350 m envelope and ~3 m at [`ShadowDistance::M1000`], making this a budget rung.
     X2048,
     /// **The shipped default.** 0.27 ms for 4× the texels — the cheapest quality on this page, and
     /// what holds far-shadow detachment to half a metre at the shipped envelope (see
@@ -968,12 +920,9 @@ impl TrackPrintRange {
 /// * **Borderless fullscreen** — `Window::mode = BorderlessFullscreen(selection)`, through
 ///   [`WindowModeSetting::to_window_mode`].
 ///
-/// The second is not redundancy, and assuming it was is the bug this doc used to describe. A
-/// fullscreen window ignores `set_outer_position`, and bevy resolves a borderless window's monitor
-/// from `Window::mode` ALONE — `if window.mode != cache.mode { … select_monitor(&monitor_selection) }`
-/// (vendored bevy_winit-0.19.0/src/system.rs:326-334) — never from the position beside it. So a
-/// player whose file said `window_mode: Fullscreen` plus `display: Display2` booted fullscreen
-/// wherever `Current` landed, and moving the row while fullscreen did nothing at all.
+/// Fullscreen ignores `set_outer_position`: Bevy resolves its monitor from `Window::mode` alone,
+/// never the adjacent position (bevy_winit-0.19.1/src/system.rs:326-334). A fullscreen display
+/// choice written only into position therefore leaves the window on `Current`'s fallback monitor.
 ///
 /// The two are applied differently on purpose, and [`apply_settings`] states which is which:
 /// the MODE is level-triggered (it is also written by `observe_window_placement`, so it must be
@@ -1548,7 +1497,7 @@ pub(crate) struct Settings {
     pub(crate) shadow_distance: ShadowDistance,
     #[serde(skip_serializing_if = "is_default")]
     pub(crate) shadow_resolution: ShadowResolution,
-    /// The cascade count — live-changeable only because of the vendored bevy_light backport; see
+    /// The cascade count — runtime changes require bevy_light >= 0.19.1; see
     /// [`ShadowCascades`] and [`SHADOW_CASCADES`].
     #[serde(skip_serializing_if = "is_default")]
     pub(crate) shadow_cascades: ShadowCascades,
@@ -3319,9 +3268,8 @@ mod tests {
              on creation's fallback monitor — which a component-equality assertion cannot see",
         );
 
-        // CONTROL — the trap, reproduced. Had the boot window carried the resolved selection (what
-        // the roots used to do), Startup would compute the same value, write nothing, and leave the
-        // component EQUAL to the cache: correct-looking, and stranded.
+        // If creation carries the resolved selection, Startup sees no cache difference and leaves
+        // the window stranded despite a correct-looking component.
         let stranded_cache = WindowMode::BorderlessFullscreen(MonitorSelection::Index(1));
         let mut app = booted_window_app(settings, 3, stranded_cache);
         app.update();
@@ -3817,8 +3765,7 @@ mod tests {
             windows.single_mut(world).expect("one window").mode = mode;
         };
 
-        // Step one, and then the frame that used to break it: an unrelated row moving while the
-        // macOS transition is still animating.
+        // An unrelated row changes while the macOS fullscreen transition is still animating.
         set_window_mode(&mut app, RoundTrip::Leaving, WindowMode::Windowed);
         app.world_mut().resource_mut::<Settings>().msaa = MsaaLevel::Off;
         app.update();
@@ -3911,9 +3858,8 @@ mod tests {
     }
 
     /// The LOD budget row reaches the render world through exactly one door — [`apply_settings`]
-    /// writing [`LodPixelBudget`] — which is the same seam
-    /// `the_render_scale_row_is_applied_through_the_one_resource` pins for render scale. There is no
-    /// CONSUMER yet, so this resource is the entire contract that slice has to keep.
+    /// writing [`LodPixelBudget`]. `geometry_lod::compose_view_profile` consumes it; this test pins
+    /// only the resource write, like `the_render_scale_row_is_applied_through_the_one_resource`.
     #[test]
     fn the_lod_budget_row_is_applied_through_the_one_resource() {
         let mut app = App::new();
