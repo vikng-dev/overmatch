@@ -8,7 +8,7 @@ Subject: the game's damage model, how a round moves across armour; game state on
 
 **A spent 88 mm round could end the process by rubbing along a plate.** A disc touching with one rim sample turns only a thirteenth of the way toward the plate's plane per contact, so it converges on the plane over many contacts. The arithmetic stopped that at 0.02 degrees: below 3.45e-4 rad the `acos` of the two headings' dot product reads zero, so the heading stayed pointed into the plate for good and the rim kept touching it every few micrometres, past the step's limit of 4096 decisions. The angle now comes from the cross product, the heading keeps converging, and the same shots end in about 100 contacts. The limit is untouched.
 
-**One more panic is still live.** The live range met `UnexpectedExit` on an 88 mm APCR disc too, which neither fix touches. See "Still open".
+**One more panic is still live.** The live range met `UnexpectedExit` on an 88 mm APCR disc too, and it survives both fixes on the same seed. Its cause is unknown. See "Still open".
 
 **How often a player meets them.** Rarely, but not never: on the unfixed code, from a real muzzle over real ground, about 1 machine-gun flight in 84 000 and about 1 APCR flight in 8 400 ended the process (one event each, so the rates are poorly known), and the crossing limit was never met in 33 601 cannon flights. The last release, `v0.7.0-alpha.9`, does not carry either fixed cause.
 
@@ -41,9 +41,45 @@ Of the classes the brief asks about, this is a grazing ray on a face, not a shar
 
 `panic_reach_on_shipped_ground` flies every fired round from a muzzle 2.2 m over the shipped ground, 60 to 600 m out with a clear line, lofted and led, at the shipped hull standing on that ground at a drawn spot, yaw and slope, still or moving at up to 12 m/s and 0.5 rad/s. Flights in a volley share a tick. Seeded by `REACH_SLICE`. The hull is a posed kinematic body, not driven through its tracks, with no damage consequence. A "touched" flight left an armour mark.
 
-<!-- reach tables -->
+**Unfixed code, MEASURED, 7 slices, 117 826 flights:**
 
-**Can a player meet it?** The machine-gun rate is about one process end per 84 000 flights; a match with some thousands of rounds meets it about once in tens of matches (DERIVED, assuming a thousand or two touching rounds a match). Crossing limit: not in this count, since it needs a spent round on a nearly coplanar pair of faces.
+| Round | Flights | Touched | Process ends | Per 1000 flights |
+|---|---|---|---|---|
+| 7.9mm_AP | 84 225 | 34 702 | 1, `UnexpectedExit`, moving hull | 0.012 |
+| 88mm_AP | 8 400 | 3 491 | 0 | 0 |
+| 88mm_APCR | 8 401 | 3 365 | 1, `UnexpectedExit`, still hull | 0.119 |
+| 88mm_APHE_ring | 8 400 | 3 438 | 0 | 0 |
+| 88mm_HE | 8 400 | 7 503 | 0 | 0 |
+
+Still and moving hulls got half the flights each. `DrainExhausted`: 0 in 33 601 cannon flights. One event per row, so these rates are poorly known.
+
+**With both fixes, MEASURED, the first 3 of those seeds, 50 497 flights:**
+
+| Round | Flights | Touched | Process ends | Per 1000 flights |
+|---|---|---|---|---|
+| 7.9mm_AP | 36 096 | 14 913 | 0 | 0 |
+| 88mm_AP | 3 600 | 1 526 | 0 | 0 |
+| 88mm_APCR | 3 601 | 1 416 | 1, the same `UnexpectedExit`, same `t` | 0.278 |
+| 88mm_APHE_ring | 3 600 | 1 495 | 0 | 0 |
+| 88mm_HE | 3 600 | 3 189 | 0 | 0 |
+
+The machine-gun event of slice 1 is gone on its own seed. Zero in 36 096 only bounds the rate under 0.083 per 1000 (DERIVED, rule of three), which does not separate it from 0.012: the evidence the class is gone is the trace and the recorded aims, not this count.
+
+**Can a player meet it?** The machine-gun rate is about one process end per 84 000 flights; a match with some thousands of rounds meets it about once in tens of matches (DERIVED, assuming a thousand or two touching rounds a match). Crossing limit: not in this count; it needs a spent disc with one rim sample on a face after a skid.
+
+## Mutants
+
+MEASURED, one build with all three mutants, all five tests red:
+
+| Mutant | Test | Verdict |
+|---|---|---|
+| A line round turns at first touch | `a_line_round_never_turns_onto_the_face_it_skids_on` | "0.0015 m: the axis turned 0 m off the face" |
+| The probe leaves ungrown bounds | `a_probe_leaves_the_grown_bounds_from_a_start_past_a_slab` | "behind 0 m, ahead 1.1722866 m" |
+| The blend reads its angle with `acos` | `a_blend_closes_its_share_of_any_angle` | "0.009999996 rad closes half to 0.005002539 rad" |
+| The same | `a_chain_of_rim_contacts_converges_on_the_face` | "the heading stands 0.0003734138 rad off the face" |
+| All three | `the_shots_that_once_ended_the_process_fly` | red at `kwk36_l56 88mm_AP` born at (13.448209, 5.9313054, -3.65905) |
+
+MEASURED on the bed's binaries, which is what splits the last row: with both line-round fixes and the `acos` left, only the recorded 88 mm aim panicked; with all three left, the recorded line-round aims did too. A line-round mutant alone was not built against that test.
 
 ## The last release
 
@@ -57,7 +93,9 @@ So the release carries neither fixed cause, and `main` does. Whether it carries 
 
 ## Still open
 
-- **P1, `UnexpectedExit` on an APCR disc, live.** `kwk36_l56 88mm_APCR`, still hull, slice 0: `UnexpectedExit { sample: 4, key: ShellKey { volume: 213v0, primitive: 260v0, shell: 0 }, t: 0.002513847579125947, triangles: [48] }`. Same `t` before and after these fixes. It did not reproduce from any one shot of its volley alone, since an earlier shot in the volley can move the hull; the bed now prints the whole volley (`PANIC`). Not traced: the lane ran out of its hour. Rerun `REACH_SLICE=0` and replay that line.
+- **P1, `UnexpectedExit` on an APCR disc, live.** `kwk36_l56 88mm_APCR`, still hull, slice 0: `UnexpectedExit { sample: 4, key: ShellKey { volume: 213v0, primitive: 260v0, shell: 0 }, t: 0.002513847579125947, triangles: [48] }`. Same `t` before and after these fixes, so neither cause is this one. Not traced: the lane stopped at its hour. It did not reproduce from one shot alone, so a reproduction needs the whole volley, which `REACH_SLICE=0` prints as a `PANIC` line:
+  - stance: at (-86.52493, 36.072758, -41.99177), rotation (-0.0027453261, 0.58400923, 0.013108572, 0.8116365), velocity and spin zero; muzzle (167.35147, 36.242226, 117.59302);
+  - headings: (-0.8405457, 0.0032754438, -0.5417307), (-0.8422586, 0.0042373147, -0.53905714), (-0.8459738, 0.0024472717, -0.53321874), (-0.8412395, 0.0016141875, -0.54066014), (-0.84520227, 0.002231332, -0.534442), (-0.8420176, 0.0034112849, -0.53943926), (-0.84405303, 0.0042392467, -0.53624296), (-0.846813, 0.0039877538, -0.5318757), (-0.8501675, 0.002411657, -0.5265068), (-0.8444623, 0.00273935, -0.535608), (-0.8463093, 0.0021851626, -0.5326872), (-0.84319264, 0.0027317684, -0.5376046).
 - **P2, a contact is many exchanges.** About 100 marks and shocks for one rim rubbing a plate. The rebuild's contact identity.
 - **P3, a line round within 1 mm of a face ends on it.** New reach of an existing outcome: about 1e-4 / cos(incidence) of line-round skids (DERIVED: 1 mm over 11.8 m of tick travel). An alternative is to lift it the rest of the 1 mm with no clock; it adds a teleport, so not taken.
 - **P3, `contact` is a parry cast in world f32, the walker's hit is exact.** The difference sets a chain's step length.

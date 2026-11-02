@@ -484,6 +484,8 @@ pub enum WalkError {
     BadCorridor { sample: usize, reason: &'static str },
     /// An exit face for a shell the walk is not inside: a dropped entry, an inverted winding, or
     /// an undeclared start-inside. NOT repaired by inventing an interval from the corridor origin.
+    /// Closed shells alternate along any ray but one exactly in a face's plane: the in-plane
+    /// triangle claims nothing and each rim neighbour claims its edge alone.
     UnexpectedExit {
         sample: usize,
         key: ShellKey,

@@ -3050,8 +3050,8 @@ const ONCE_FATAL: &[(&str, [f32; 3], [f32; 3])] = &[
 
 /// The game's damage model: no shot ends the process through the march, on the aims that once did:
 /// line rounds whose start stood under their resting height over a face, and discs whose rim stayed
-/// on a face. A panic ends the server's whole match. Mutants: a line round turning at first touch,
-/// an ungrown probe box, a blend angle read with `acos`.
+/// on a face. A panic ends the server's whole match. Mutant: a line round turning at first touch
+/// with an ungrown probe box, or a blend angle read with `acos`.
 #[test]
 fn the_shots_that_once_ended_the_process_fly() {
     let registry = crate::guns::GunRegistry::shipped();
