@@ -169,7 +169,8 @@ pub(crate) fn disc_radius(caliber: f32) -> f32 {
 /// perforation's resume point one nudge past the exit along that sample's ray — and
 /// `seeds[i].inside` is what that ray's walk says the sample is inside there. A fresh disc
 /// placed at birth or after a catch-up has no swept membership:
-/// [`Flight::born`] and [`Flight::settle`] read it with [`certified`]. A disc laid on an
+/// [`Flight::born`] and [`Flight::settle`] read it with [`certified`]; a reflection's starts
+/// ([`Interior::unread`]) are read by [`Flight::settle`] the same way. A disc laid on an
 /// axis start a sweep reached uses [`Interior::laid`]; relative discovery reads material newly
 /// holding that start at its next scene boundary. Offsets are whatever the rays left
 /// behind — staggered along an oblique plate after a perforation, tilted against the travel after a
@@ -199,9 +200,23 @@ impl Interior {
     /// near the samples. Relative discovery reads material newly holding a start; [`certified`] reads
     /// contact-time membership in the frozen scene.
     pub(crate) fn laid(position: Vec3, offsets: Vec<Vec3>) -> Self {
+        Self::unread(
+            AxisStart {
+                anchor: position,
+                origin: Vec3::ZERO,
+            },
+            offsets,
+        )
+    }
+
+    /// The game's damage model: starts at an anchored axis start that no ray has read on the
+    /// heading they leave on: a reflection's ([`Bounce::continuation`]). Its flight carries
+    /// [`Membership::Required`], so nothing reads the empty membership: [`Flight::settle`] reads
+    /// the starts in the live scene before anything sweeps from them.
+    pub(crate) fn unread(start: AxisStart, offsets: Vec<Vec3>) -> Self {
         Self {
-            anchor: position,
-            origin: Vec3::ZERO,
+            anchor: start.anchor,
+            origin: start.origin,
             seeds: offsets
                 .into_iter()
                 .enumerate()
@@ -1158,8 +1173,8 @@ impl Flight {
                 self.speed = bounce.speed;
                 self.position = bounce.resume;
                 self.continuation = Some(bounce.continuation);
-                // The game's damage model returns to live discovery after reflection playback.
-                // Its world heading and scene may differ from the frozen contact certification.
+                // The game's damage model reads the reflection's starts in the live scene, on the
+                // world heading playback leaves it with ([`Interior::unread`]).
                 self.membership = Membership::Required;
                 false
             }
@@ -1341,7 +1356,8 @@ pub(crate) struct Bounce {
     /// Line-of-sight metres flown from the flight's position to the axis hand-off along the way in.
     pub travel: f32,
     /// The axis hand-off, with no lift or outgoing nudge. Each reflected sample resumes at the
-    /// point its incoming ray reached, certified on its outgoing ray, as a bent transit does.
+    /// point its incoming ray reached; its membership on the outgoing ray is unread until
+    /// [`Flight::settle`] reads it in the live scene ([`Interior::unread`]).
     pub resume: Vec3,
     pub continuation: Interior,
     /// The way in: the flight's position to the face, along `incoming`.
@@ -1605,15 +1621,7 @@ pub(crate) fn decide(
                 .zip(&hand_offs)
                 .map(|(offset, t)| *offset + dir * (*t - hand_offs[0]) as f32)
                 .collect();
-            let continuation = certified_samples(
-                context,
-                not_own,
-                AxisStart { anchor, origin },
-                out,
-                flight.frame.transport(*dir, *out),
-                radius,
-                offsets,
-            )?;
+            let continuation = Interior::unread(AxisStart { anchor, origin }, offsets);
             let way_in = Leg {
                 from: anchor + from,
                 axis: dir,
