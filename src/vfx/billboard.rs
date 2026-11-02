@@ -41,7 +41,8 @@ use bevy::transform::TransformSystems;
 use crate::view::PlayerView;
 
 /// Resolution: shared population cap bounds transient sprites and retained lane-table slots.
-/// Eviction removes the oldest effect first; every emission family spends this same budget.
+/// Eviction removes the oldest effect first. Every sub-second emission family spends this budget; a
+/// ground scar, which outlives them, spends its own ([`super::impact::GROUND_MARK_CAP`]).
 pub(super) const BILLBOARD_CAP: usize = 96;
 
 /// Entries in the lane table: the shared ring's slots `0..BILLBOARD_CAP`, then the ground-mark

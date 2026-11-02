@@ -1430,7 +1430,7 @@ impl Projectile {
     #[cfg(test)]
     pub(crate) fn view_test_round(caliber: f32) -> Self {
         Self {
-            impact_style: crate::rounds::ImpactStyle::Compact,
+            impact_style: crate::rounds::ImpactStyle::fixture(crate::rounds::ImpactPreset::Compact),
             velocity: Vec3::ZERO,
             round: bound(RoundBody {
                 mass: 1.0,
@@ -2117,7 +2117,11 @@ fn on_fire_shell(
     let shell_base = (
         fire.effects,
         Projectile {
-            impact_style: fire.effects.impact,
+            impact_style: crate::rounds::ImpactStyle::of(
+                fire.effects.impact,
+                fire.mass,
+                fire.speed,
+            ),
             velocity,
             round: bound(penetrator),
             contact: fire.contact,
@@ -4812,7 +4816,7 @@ pub(crate) mod march_tests {
         velocity: Vec3,
     ) -> Projectile {
         Projectile {
-            impact_style: crate::rounds::ImpactStyle::Compact,
+            impact_style: crate::rounds::ImpactStyle::fixture(crate::rounds::ImpactPreset::Compact),
             velocity,
             round: bound(penetrator),
             flying: FlyingBody {
@@ -5341,12 +5345,12 @@ pub(crate) mod march_tests {
     fn fire_shell_catch_up(
         app: &mut App,
         catch_up_ticks: u32,
-        style: crate::rounds::ImpactStyle,
+        preset: crate::rounds::ImpactPreset,
     ) -> Vec<Captured> {
         app.add_observer(on_fire_shell);
         app.world_mut().trigger(FireShell {
             effects: crate::rounds::FlightEffects {
-                impact: style,
+                impact: preset,
                 ..crate::rounds::FlightEffects::fixture_traced()
             },
             muzzle: crate::guns::MuzzleEmission::fixture_cannon(),
@@ -5376,13 +5380,15 @@ pub(crate) mod march_tests {
     }
 
     /// The game's damage-model view relies on contact dressing surviving complete spawn and
-    /// authority resolution. Equal projectile bodies may carry either authored art recipe.
+    /// authority resolution. Equal projectile bodies may carry either authored art recipe, and the
+    /// read's scale is the fired round's muzzle energy.
     #[test]
     fn fired_round_preserves_its_authored_contact_recipe_at_impact() {
-        use crate::rounds::ImpactStyle;
-        for style in [ImpactStyle::Compact, ImpactStyle::Layered] {
+        use crate::rounds::{ImpactPreset, ImpactStyle};
+        for preset in [ImpactPreset::Compact, ImpactPreset::Layered] {
+            let style = ImpactStyle::of(preset, FIXTURE_88.mass, 800.0);
             let mut app = world_with_plate(Vec3::new(3.0, 3.0, 0.05), Vec3::new(0.0, 2.0, 0.0));
-            fire_shell_catch_up(&mut app, 0, style);
+            fire_shell_catch_up(&mut app, 0, preset);
             for _ in 0..8 {
                 app.update();
             }
@@ -5534,7 +5540,7 @@ pub(crate) mod march_tests {
         let hits = fire_shell_catch_up(
             &mut app,
             MAX_COSMETIC_CATCH_UP_TICKS + 1,
-            crate::rounds::ImpactStyle::Layered,
+            crate::rounds::ImpactPreset::Layered,
         );
 
         assert!(hits.is_empty(), "a rejected catch-up produces no impact");

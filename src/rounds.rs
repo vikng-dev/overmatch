@@ -81,7 +81,8 @@ use crate::substances::{MaterialFacts, SubstanceRegistry};
 mod effects;
 pub(crate) mod fuze;
 pub(crate) use effects::{
-    BodyModel, EmberEmission, FlightEffects, ImpactStyle, SmokeEmission, StreakEmission,
+    BodyModel, EmberEmission, FlightEffects, ImpactPreset, ImpactStyle, SmokeEmission,
+    StreakEmission,
 };
 
 /// The shipped round-type table, embedded as the round files are, so a round is in hand
@@ -148,6 +149,13 @@ pub(crate) struct Round {
     pub(crate) muzzle: crate::guns::MuzzleEmission,
 }
 
+impl Round {
+    /// The contact read this round's data states, sized from this shot's energy.
+    pub(crate) fn impact_style(&self) -> ImpactStyle {
+        ImpactStyle::of(self.effects.impact, self.flying.mass, self.muzzle_speed)
+    }
+}
+
 /// One round as its file and its type resolve it, before a gun gives it a muzzle speed: its
 /// authored assembly and every field of [`Round`] but speed, validated as far as no speed is needed.
 #[derive(Clone, Debug, PartialEq)]
@@ -168,11 +176,6 @@ pub(crate) struct RoundFacts {
 }
 
 impl RoundFacts {
-    /// The contact read this round's data states, for what raises one without firing it.
-    pub(crate) fn impact_style(&self) -> ImpactStyle {
-        self.effects.impact
-    }
-
     /// The launched assembly's mass (kg), any carrier included: what leaves the muzzle, so what
     /// the shot's muzzle energy reads ([`crate::guns::MuzzleEnergy`]).
     pub(crate) fn launched_mass(&self) -> f32 {
@@ -585,14 +588,14 @@ fn resolved(
     if let Some(burst) = &burst
         && matches!(burst.trigger, fuze::Trigger::Impact { .. })
     {
-        if effects.impact != ImpactStyle::Layered {
+        if effects.impact != ImpactPreset::Layered {
             return Err(
                 "`effects.impact` is Compact on a round whose burst functions at contact; state \
                  Layered, the only read that presents a burst"
                     .into(),
             );
         }
-        effects.impact = ImpactStyle::Bursting {
+        effects.impact = ImpactPreset::Bursting {
             blast_j: burst.blast,
         };
     }
@@ -1228,7 +1231,7 @@ pub(crate) mod tests {
                 let blast_j = burst.blast;
                 assert_eq!(
                     facts.effects.impact,
-                    ImpactStyle::Bursting { blast_j },
+                    ImpactPreset::Bursting { blast_j },
                     "{key}"
                 );
                 println!(
@@ -1237,7 +1240,7 @@ pub(crate) mod tests {
                 );
             } else {
                 assert!(
-                    !matches!(facts.effects.impact, ImpactStyle::Bursting { .. }),
+                    !matches!(facts.effects.impact, ImpactPreset::Bursting { .. }),
                     "{key}"
                 );
             }
@@ -1258,7 +1261,7 @@ pub(crate) mod tests {
             .expect("a compact round whose burst waits to leave a body loads")
             .get("Probe")
             .expect("the fixture round");
-        assert_eq!(inert.effects.impact, ImpactStyle::Compact);
+        assert_eq!(inert.effects.impact, ImpactPreset::Compact);
     }
 
     /// The fixture round with a burst block naming substance `core`, on the sub-calibre type with

@@ -176,7 +176,7 @@ mod tests {
         app.world_mut().trigger(Impact {
             position: Vec3::ZERO,
             normal: Vec3::Y,
-            style: crate::rounds::ImpactStyle::Layered,
+            style: crate::rounds::ImpactStyle::fixture(crate::rounds::ImpactPreset::Layered),
             surface: ImpactSurface::Terrain,
             outcome: ImpactOutcome::Struck,
         });
@@ -193,7 +193,7 @@ mod tests {
             app.world_mut().trigger(Impact {
                 position: Vec3::X * index as f32,
                 normal: Vec3::Y,
-                style: crate::rounds::ImpactStyle::Layered,
+                style: crate::rounds::ImpactStyle::fixture(crate::rounds::ImpactPreset::Layered),
                 surface: ImpactSurface::Terrain,
                 outcome: ImpactOutcome::Struck,
             });

@@ -167,7 +167,7 @@ fn hole(p: Vec2, seed: u32) -> Texel {
         let t = d / lip;
         return Texel {
             // Darkened by the passage at the rim, bright exposed substrate where the ring begins.
-            albedo: (EXPOSED * 0.5).lerp(EXPOSED, t)
+            albedo: (EXPOSED * look().hole_lip_inner_luma).lerp(EXPOSED, t)
                 * (look().hole_ring_luma + look().hole_ring_grain * (grain - 0.5)),
             alpha: 1.0,
             metallic: look().hole_ring_metallic,
@@ -176,7 +176,10 @@ fn hole(p: Vec2, seed: u32) -> Texel {
         };
     }
     if r < ring {
-        return Texel::exposed(grain, 1.0 - smoothstep(ring - look().core_red, ring, r));
+        return Texel::exposed(
+            grain,
+            1.0 - smoothstep(ring - look().hole_ring_feather, ring, r),
+        );
     }
     chipped_paint(p, r - ring, seed)
 }
@@ -208,7 +211,9 @@ fn dent(p: Vec2, seed: u32) -> Texel {
         return texel;
     }
     let flake = fbm(p * look().dent_flake_frequency, seed ^ 0x33);
-    if (0.35..1.15).contains(&rho) && flake > look().dent_flake_threshold {
+    if (look().dent_flake_rho.0..look().dent_flake_rho.1).contains(&rho)
+        && flake > look().dent_flake_threshold
+    {
         let mut texel = Texel::exposed(grain, 1.0);
         texel.height += height;
         return texel;
@@ -235,7 +240,7 @@ fn dent(p: Vec2, seed: u32) -> Texel {
     if rho < look().dent_bowl_outer {
         // The bowl over the paint: a translucent grey the bowl's normal shades.
         return Texel {
-            albedo: Vec3::splat(look().dent_rim_width),
+            albedo: Vec3::splat(look().dent_bowl_luma),
             alpha: look().dent_bowl_alpha
                 * (1.0 - smoothstep(look().dent_bowl_fade, look().dent_bowl_outer, rho)),
             metallic: 0.0,

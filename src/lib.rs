@@ -127,7 +127,7 @@ mod map;
 /// The networking implementation. Executables enter through [`run_client`] and [`run_server`];
 /// the adapter tree is private to the library.
 mod net;
-pub(crate) use net::{env_flag, env_parse, env_value, refuse_start};
+pub(crate) use net::{env_flag, env_parse, env_text, env_value, refuse_start};
 pub use net::{run_client, run_server};
 /// Documentation frames to disk, from the capture plan `OVERMATCH_CAPTURE` names; inert without it.
 /// Public so the sandbox and demo bins can mount it (module doc).

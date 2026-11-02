@@ -662,6 +662,79 @@ pub(crate) fn retarget_to(
 mod tests {
     use super::*;
 
+    /// A raised strike reaches the seam as the plan resolved it: on the ground its probe found,
+    /// carrying the cue's own round and surface. The impact stills judged against ADR-0023 rely on
+    /// it, since no round flies. Mutant: `surface: ImpactSurface::Terrain` hard-coded in
+    /// [`raise_impacts`] shows every substance's still as soil and fails here.
+    #[test]
+    fn a_raised_strike_emits_its_resolved_read_on_the_probed_ground() {
+        use crate::ballistics::Impact;
+        use avian3d::prelude::{Collider, CollisionLayers, LayerMask, PhysicsPlugins, RigidBody};
+        use bevy::time::TimeUpdateStrategy;
+
+        #[derive(Resource, Default)]
+        struct Raised(Vec<(Vec3, Vec3, crate::rounds::ImpactStyle, ImpactSurface)>);
+        use crate::ballistics::ImpactSurface;
+
+        let cue = plan::Impact {
+            x: 3.0,
+            z: -4.0,
+            round: "88mm_AP".into(),
+            surface: plan::StruckSurface::Substance("Wood".into()),
+            at: 0.0,
+        };
+        let (style, surface) = cue.resolved().expect("a shipped round and substance");
+        assert!(matches!(surface, ImpactSurface::Material(_)));
+
+        let mut app = App::new();
+        app.add_plugins((
+            MinimalPlugins,
+            bevy::transform::TransformPlugin,
+            AssetPlugin::default(),
+            PhysicsPlugins::default(),
+        ))
+        .init_asset::<Mesh>()
+        // DERIVED: 1 s / 64, one physics step per update.
+        .insert_resource(TimeUpdateStrategy::ManualDuration(
+            std::time::Duration::from_micros(15_625),
+        ))
+        .init_resource::<Raised>()
+        .add_observer(|impact: On<Impact>, mut raised: ResMut<Raised>| {
+            raised
+                .0
+                .push((impact.position, impact.normal, impact.style, impact.surface));
+        });
+        while app.plugins_state() == bevy::app::PluginsState::Adding {
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+        app.finish();
+        app.cleanup();
+        // FIXTURE: a slab whose top is the plane y = 2 m.
+        app.world_mut().spawn((
+            RigidBody::Static,
+            Transform::from_xyz(0.0, 1.0, 0.0),
+            Collider::cuboid(100.0, 2.0, 100.0),
+            CollisionLayers::new(crate::Layer::Terrain, LayerMask::ALL),
+        ));
+        app.update();
+        app.update();
+        app.insert_resource(ImpactCues(vec![ImpactCue {
+            x: cue.x,
+            z: cue.z,
+            at: cue.at,
+            style,
+            surface,
+        }]))
+        .add_systems(Update, raise_impacts);
+        app.update();
+        let raised = &app.world().resource::<Raised>().0;
+        assert_eq!(
+            raised.as_slice(),
+            [(Vec3::new(3.0, 2.0, -4.0), Vec3::Y, style, surface)]
+        );
+        assert!(app.world().resource::<ImpactCues>().0.is_empty());
+    }
+
     /// A FELL CUE NAMING A TREE THE MAP LACKS FAILS THE RUN AT BOOT: the cue used to log and let the
     /// run exit `Success` with frames of a fall that never happened. A map with no tree at all is
     /// the class case (the check reads the spawned trees and nothing else). Mutant: a check that

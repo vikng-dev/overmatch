@@ -9,6 +9,7 @@ use std::sync::OnceLock;
 
 use bevy::input::keyboard::KeyCode;
 use bevy::math::{UVec2, Vec3};
+use bevy::time::{Time, Virtual};
 use serde::Deserialize;
 
 /// The variable that names the plan file.
@@ -251,15 +252,16 @@ pub(crate) enum StruckSurface {
 }
 
 impl Impact {
-    /// The round's contact style and the surface's response from the shipped tables, or why a key
-    /// names neither.
+    /// The contact read of the round as the first gun chambering it fires it, and the surface's
+    /// response, from the shipped tables, or why a key names neither.
     pub(crate) fn resolved(
         &self,
     ) -> Result<(crate::rounds::ImpactStyle, crate::ballistics::ImpactSurface), String> {
-        let style = crate::rounds::RoundRegistry::shipped()
-            .get(&self.round)
-            .map_err(|error| format!("impacts: round {:?}: {error}", self.round))?
-            .impact_style();
+        let style = crate::guns::GunRegistry::shipped()
+            .fired_rounds()
+            .find(|(_, key, _)| *key == self.round)
+            .map(|(_, _, round)| round.impact_style())
+            .ok_or_else(|| format!("impacts: round {:?}: no gun chambers it", self.round))?;
         let surface = match &self.surface {
             StruckSurface::Terrain => crate::ballistics::ImpactSurface::Terrain,
             StruckSurface::Substance(key) => crate::ballistics::ImpactSurface::Material(
@@ -275,9 +277,11 @@ impl Impact {
     }
 }
 
-/// A capture's fixed frame step: a positive duration a [`std::time::Duration`] represents without
-/// rounding to nothing. A huge step would panic the conversion, and one that rounds to zero would
-/// freeze the capture's clock and its deadline, so both are refused where the plan is read.
+/// A capture's fixed frame step: positive, not rounding to nothing, and within what the virtual
+/// clock takes in one update ([`Time::max_delta`] of a default [`Virtual`]). A step that rounds to
+/// zero freezes the capture's clock and its deadline; the virtual clock clamps one past that
+/// bound, so the frames would step by less than the plan states; a huge one panics `Instant`
+/// arithmetic in `Time::<Real>::update_with_duration`. All are refused where the plan is read.
 #[derive(Deserialize, Debug, Clone, Copy, PartialEq)]
 #[serde(try_from = "f64")]
 pub(crate) struct FrameStep(pub(crate) std::time::Duration);
@@ -286,11 +290,18 @@ impl TryFrom<f64> for FrameStep {
     type Error = String;
 
     fn try_from(step: f64) -> Result<Self, String> {
+        let most = Time::<Virtual>::default().max_delta();
         std::time::Duration::try_from_secs_f64(step)
             .ok()
-            .filter(|duration| !duration.is_zero())
+            .filter(|duration| !duration.is_zero() && *duration <= most)
             .map(Self)
-            .ok_or_else(|| format!("frames.step_s: {step} is not a positive, representable step"))
+            .ok_or_else(|| {
+                format!(
+                    "frames.step_s: {step} is not a positive step of at most {} s, \
+                     what the virtual clock takes in one update",
+                    most.as_secs_f64()
+                )
+            })
     }
 }
 
@@ -762,6 +773,17 @@ mod tests {
                 "frames.step_s",
             ),
             (
+                r#"(frames: (out: "f.png", step_s: 1e19))"#.to_owned(),
+                "frames.step_s",
+            ),
+            (
+                format!(
+                    r#"(frames: (out: "f.png", step_s: {}))"#,
+                    Time::<Virtual>::default().max_delta().as_secs_f64() * 1.01
+                ),
+                "frames.step_s",
+            ),
+            (
                 r#"(frames: (out: "f.png", step_s: 1e-12))"#.to_owned(),
                 "frames.step_s",
             ),
@@ -847,9 +869,12 @@ mod tests {
             at: 0.0,
         };
         let key = "88mm_AP";
-        let facts = crate::rounds::RoundRegistry::shipped()
-            .get(key)
-            .expect("a shipped round");
+        let style = crate::guns::GunRegistry::shipped()
+            .fired_rounds()
+            .find(|(_, round, _)| *round == key)
+            .expect("a shipped gun chambers the round")
+            .2
+            .impact_style();
         let substance = "Wood";
         let feedback = crate::substances::SubstanceRegistry::shipped_static()
             .get(substance)
@@ -859,17 +884,11 @@ mod tests {
             .feedback;
         assert_eq!(
             cue(key, StruckSurface::Substance(substance.into())).resolved(),
-            Ok((
-                facts.impact_style(),
-                crate::ballistics::ImpactSurface::Material(feedback)
-            ))
+            Ok((style, crate::ballistics::ImpactSurface::Material(feedback)))
         );
         assert_eq!(
             cue(key, StruckSurface::Terrain).resolved(),
-            Ok((
-                facts.impact_style(),
-                crate::ballistics::ImpactSurface::Terrain
-            ))
+            Ok((style, crate::ballistics::ImpactSurface::Terrain))
         );
         assert!(
             cue("no such round", StruckSurface::Terrain)

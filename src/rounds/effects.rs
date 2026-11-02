@@ -12,10 +12,38 @@
 use crate::provenance::Sourced;
 use serde::Deserialize;
 
+/// The contact read a shell is born with: the closed shape its round's data states, and the one
+/// physical scalar every magnitude of that read follows, never a viewer's distance (ADR-0023).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct ImpactStyle {
+    pub(crate) preset: ImpactPreset,
+    /// J: half the flying body's mass times its muzzle speed squared.
+    pub(crate) energy_j: f32,
+}
+
+impl ImpactStyle {
+    /// A shot of `mass_kg` leaving at `speed_mps`.
+    pub(crate) fn of(preset: ImpactPreset, mass_kg: f32, speed_mps: f32) -> Self {
+        Self {
+            preset,
+            energy_j: 0.5 * mass_kg * speed_mps * speed_mps,
+        }
+    }
+
+    /// FIXTURE DATA: `preset` at 1 MJ, for a test that raises a read and flies no round.
+    #[cfg(test)]
+    pub(crate) const fn fixture(preset: ImpactPreset) -> Self {
+        Self {
+            preset,
+            energy_j: 1.0e6,
+        }
+    }
+}
+
 /// Authored contact dressing, independent of flying diameter. These are provisional art recipes;
 /// material feedback still determines whether the surface emits sparks or powder.
 #[derive(Clone, Copy, Debug, PartialEq, Deserialize)]
-pub(crate) enum ImpactStyle {
+pub(crate) enum ImpactPreset {
     Compact,
     Layered,
     /// A layered round whose burst functions at contact, its blast energy in J. Never authored: the
@@ -31,7 +59,7 @@ pub(crate) enum ImpactStyle {
 /// plugins alone consume them. An absent emission is an authored construction fact.
 #[derive(bevy::prelude::Component, Clone, Copy, Debug, PartialEq)]
 pub(crate) struct FlightEffects {
-    pub(crate) impact: ImpactStyle,
+    pub(crate) impact: ImpactPreset,
     pub(crate) ember: Option<EmberEmission>,
     pub(crate) smoke: Option<SmokeEmission>,
     /// The model the round's body is drawn as; `None` flies undrawn.
@@ -45,7 +73,7 @@ impl FlightEffects {
     /// Explicitly untraced, smokeless, undrawn fixture data; never a missing-data default.
     #[cfg(test)]
     pub(crate) const NONE: Self = Self {
-        impact: ImpactStyle::Compact,
+        impact: ImpactPreset::Compact,
         ember: None,
         smoke: None,
         body: None,
@@ -56,7 +84,7 @@ impl FlightEffects {
     #[cfg(test)]
     pub(crate) fn fixture_traced() -> Self {
         Self {
-            impact: ImpactStyle::Layered,
+            impact: ImpactPreset::Layered,
             ember: Some(EmberEmission {
                 radius_m: 0.09,
                 base_offset_m: 0.35,
@@ -194,7 +222,7 @@ pub(crate) struct SmokeEmission {
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(super) struct File {
-    impact: Sourced<ImpactStyle>,
+    impact: Sourced<ImpactPreset>,
     ember: Sourced<Option<EmberFile>>,
     smoke: Sourced<Option<SmokeFile>>,
     body: Sourced<Option<BodyFile>>,
@@ -381,8 +409,8 @@ mod tests {
     #[test]
     fn contact_recipe_is_required_and_independent_of_flying_diameter() {
         for (name, expected) in [
-            ("Compact", ImpactStyle::Compact),
-            ("Layered", ImpactStyle::Layered),
+            ("Compact", ImpactPreset::Compact),
+            ("Layered", ImpactPreset::Layered),
         ] {
             let text = format!(
                 r#"(impact: ({name}, Fixture("fixture art")),

@@ -200,7 +200,7 @@ impl std::fmt::Display for RenderControlError {
             Self::Splits(value) => (
                 "SPIKE_SHADOW_SPLITS",
                 value,
-                "comma-separated increasing finite bounds above the stock minimum distance, at most four",
+                "comma-separated increasing finite bounds above the stock minimum distance, at most MAX_CASCADES_PER_LIGHT",
             ),
             Self::Overlap(value) => (
                 "SPIKE_SHADOW_OVERLAP",
@@ -289,12 +289,9 @@ impl ShadowControls {
 }
 
 fn shadow_controls(app: &mut App) {
-    let filter =
-        crate::env_parse::<String>("SPIKE_SHADOW_FILTER").unwrap_or_else(crate::refuse_start);
-    let splits =
-        crate::env_parse::<String>("SPIKE_SHADOW_SPLITS").unwrap_or_else(crate::refuse_start);
-    let overlap =
-        crate::env_parse::<String>("SPIKE_SHADOW_OVERLAP").unwrap_or_else(crate::refuse_start);
+    let filter = crate::env_text("SPIKE_SHADOW_FILTER").unwrap_or_else(crate::refuse_start);
+    let splits = crate::env_text("SPIKE_SHADOW_SPLITS").unwrap_or_else(crate::refuse_start);
+    let overlap = crate::env_text("SPIKE_SHADOW_OVERLAP").unwrap_or_else(crate::refuse_start);
     if filter.is_none() && splits.is_none() && overlap.is_none() {
         return;
     }

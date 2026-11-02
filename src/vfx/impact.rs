@@ -14,7 +14,7 @@ use bevy::prelude::*;
 use std::collections::BTreeMap;
 
 use crate::ballistics::{Impact, ImpactOutcome, ImpactSurface};
-use crate::rounds::ImpactStyle;
+use crate::rounds::{ImpactPreset, ImpactStyle};
 use crate::view::PlayerView;
 
 use super::ViewRng;
@@ -141,11 +141,11 @@ impl ImpactAssets {
     /// A dirt-mass material for the layered splash's plume/ring/cloud: the dust atlas recolored through
     /// the resolved powder palette, alpha-blend occluding mass (glow.y = 0 — never additive), overall
     /// `alpha` per layer. Shares the already-warmed Blend billboard pipeline.
-    fn dirt_material(&self, alpha: f32, palette: Handle<Image>) -> BillboardLook {
+    fn dirt_material(&self, alpha: f32, sharpness: f32, palette: Handle<Image>) -> BillboardLook {
         BillboardLook {
             params: VfxParams {
                 frame: Vec4::new(0.0, 2.0, 2.0, 0.0),
-                fade: Vec4::new(0.0, look().powder_sharpness, 0.0, alpha),
+                fade: Vec4::new(0.0, sharpness, 0.0, alpha),
                 glow: Vec4::new(0.0, 0.0, soft_particle_depth(), 0.0),
             },
             atlas: self.dust_atlas.clone(),
@@ -157,8 +157,11 @@ impl ImpactAssets {
     /// The surface-aligned powder front has no soft-particle depth fade: its whole quad lies
     /// along the surface, so a volume-intersection fade would erase the entire front.
     fn shock_ring_material(&self, palette: Handle<Image>) -> BillboardLook {
-        let mut material = self.dirt_material(look().splash_ring_alpha, palette);
-        material.params.fade.y = look().splash_ring_sharpness;
+        let mut material = self.dirt_material(
+            look().splash_ring_alpha,
+            look().splash_ring_sharpness,
+            palette,
+        );
         material.params.glow.z = 0.0;
         material
     }
@@ -184,7 +187,7 @@ impl ImpactAssets {
         BillboardLook {
             params: VfxParams {
                 frame: Vec4::new(0.0, 2.0, 2.0, 0.0),
-                fade: Vec4::new(0.0, look().spark_sharpness, 0.0, 1.0),
+                fade: Vec4::new(0.0, look().ejecta_sharpness, 0.0, 1.0),
                 glow: Vec4::new(0.0, 0.0, 0.0, 0.0),
             },
             atlas: self.spark_atlas.clone(),
@@ -363,7 +366,7 @@ fn spawn_impact_read(
             &mut kit,
         ),
     }
-    if let ImpactStyle::Bursting { blast_j } = impact.style {
+    if let ImpactPreset::Bursting { blast_j } = impact.style.preset {
         spawn_burst_flash(impact.position, normal, blast_j, &mut kit);
     }
 }
@@ -389,7 +392,7 @@ fn spawn_burst_flash(position: Vec3, normal: Vec3, blast_j: f32, kit: &mut Impac
         BillboardSpec {
             material: assets.ping_material(),
             lifetime: look().burst_flash_lifetime,
-            origin: position + normal * look().flash_clearance_m,
+            origin: position + normal * look().wide_quad_clearance_m,
             drift: Vec3::ZERO,
             frames: 1,
             flipbook: Flipbook::Loop {
@@ -426,9 +429,10 @@ impl PowderRead {
     }
 }
 
-/// One contact's read of the painted ground: one roll picks the soil by each ground's share, as a
-/// muzzle puff's does, and the blended lift sets how much of the recipe it throws. Sparks are the
-/// rolled ground's own fact, under every style.
+/// One contact's read of the painted ground: one roll picks the soil by each ground's lift share, as
+/// a muzzle puff's does, and the blended lift sets how much of the recipe it throws. Sparks are the
+/// struck ground's own fact, independent of its lift: one roll by painted weight picks that ground,
+/// under every style.
 fn spawn_ground_read(
     position: Vec3,
     normal: Vec3,
@@ -440,24 +444,27 @@ fn spawn_ground_read(
     let Some((table, painted)) = kit.ground.resolved() else {
         return; // A world with no painted terrain has no ground to throw.
     };
-    let sources = table.strike_sources(painted.ground_weights(position.xz()));
+    let weights = painted.ground_weights(position.xz());
+    let sources = table.strike_sources(weights);
+    let struck: [(f32, bool); 4] =
+        std::array::from_fn(|slot| (weights[slot], sources[slot].1.sparks));
+    let sparks = soil_of(&struck, kit.rng.next_f32() * weights.element_sum());
     let lifted: f32 = sources.iter().map(|(share, _)| share).sum();
-    if lifted == 0.0 {
-        return; // This ground throws nothing, so nothing reads at the contact.
-    }
-    let soil = soil_of(&sources, kit.rng.next_f32() * lifted);
-    let powder = PowderRead {
-        palette: kit.palettes.palette(&mut kit.images, soil.colour_srgb),
-        amount: lifted,
-        light,
-    };
-    if style == ImpactStyle::Compact {
-        spawn_small_impact(position, normal, to_camera, powder, soil.sparks, kit);
-    } else {
-        spawn_big_splash(position, normal, to_camera, powder, kit);
-        if soil.sparks {
-            spawn_contact_sparks(position, normal, to_camera, kit);
+    if lifted > 0.0 {
+        let soil = soil_of(&sources, kit.rng.next_f32() * lifted);
+        let powder = PowderRead {
+            palette: kit.palettes.palette(&mut kit.images, soil.colour_srgb),
+            amount: lifted,
+            light,
+        };
+        if style.preset == ImpactPreset::Compact {
+            spawn_small_impact(position, normal, style, powder, kit);
+        } else {
+            spawn_big_splash(position, normal, to_camera, style, powder, kit);
         }
+    } // A ground lifting nothing throws no powder; what it states of sparks still holds.
+    if sparks {
+        spawn_contact_sparks(position, normal, to_camera, kit);
     }
 }
 
@@ -473,7 +480,7 @@ pub(super) fn spawn_material_read(
     feedback: SurfaceFeedback,
     kit: &mut ImpactKit,
 ) {
-    if feedback.sparks && style != ImpactStyle::Compact {
+    if feedback.sparks && style.preset != ImpactPreset::Compact {
         spawn_sparking_read(position, normal, to_camera, outcome, feedback, kit);
     } else {
         let powder = PowderRead {
@@ -481,17 +488,25 @@ pub(super) fn spawn_material_read(
             amount: 1.0,
             light: 1.0,
         };
-        spawn_small_impact(position, normal, to_camera, powder, feedback.sparks, kit);
+        spawn_small_impact(position, normal, style, powder, kit);
+        if feedback.sparks {
+            spawn_contact_sparks(position, normal, to_camera, kit);
+        }
     }
 }
 
-/// Powder opacity follows the resolved lifted share. Only a sparking substance adds hot layers.
+/// What every length of a contact read is multiplied by: its round's energy against the reference
+/// its recipe is stated at.
+fn read_scale(style: ImpactStyle) -> f32 {
+    (style.energy_j / look().impact_reference_energy_j).powf(look().impact_size_exponent)
+}
+
+/// Powder opacity follows the resolved lifted share, its size the round's energy.
 fn spawn_small_impact(
     position: Vec3,
     normal: Vec3,
-    to_camera: Vec3,
+    style: ImpactStyle,
     powder: PowderRead,
-    sparks: bool,
     kit: &mut ImpactKit,
 ) {
     let ImpactKit {
@@ -506,7 +521,9 @@ fn spawn_small_impact(
 
     // --- Dust billow: one alpha-blended eroding billboard, random frame/roll/spin, blooming and
     // drifting out along the surface normal (with a gentle rise).
-    let dust_size = rng.range(look().dust_size.0, look().dust_size.1);
+    let scale = read_scale(style);
+    let start_size = look().dust_size.0 * scale;
+    let dust_size = rng.range(look().dust_size.0, look().dust_size.1) * scale;
     spawn_billboard(
         commands,
         materials,
@@ -515,26 +532,22 @@ fn spawn_small_impact(
         BillboardSpec {
             material: billow,
             lifetime: rng.range(look().dust_lifetime.0, look().dust_lifetime.1),
-            origin: position + normal * (look().dust_size.0 * 0.5),
+            origin: position + normal * (start_size * 0.5),
             drift: normal * look().dust_normal_push + Vec3::Y * look().dust_rise,
             frames: 4,
             flipbook: Flipbook::Loop {
                 start: rng.range(0.0, 4.0),
                 rate: look().dust_frame_rate,
             },
-            start_size: look().dust_size.0,
+            start_size,
             end_size: dust_size,
             aspect: Vec3::ONE,
             roll: rng.range(0.0, std::f32::consts::TAU),
             spin: rng.range(-look().dust_spin_max, look().dust_spin_max),
-            erosion_end: 1.0,
+            erosion_end: look().powder_erosion_end,
             rotation: None,
         },
     );
-
-    if sparks {
-        spawn_contact_sparks(position, normal, to_camera, kit);
-    }
 }
 
 /// The hot contact a sparking surface throws: a ping and a fan of streaks.
@@ -604,7 +617,7 @@ fn spawn_contact_sparks(position: Vec3, normal: Vec3, to_camera: Vec3, kit: &mut
                 aspect: Vec3::new(look().spark_width_ratio, 1.0, 1.0),
                 roll: 0.0,
                 spin: 0.0,
-                erosion_end: 1.0,
+                erosion_end: look().streak_erosion_end,
                 rotation: Some(spark_orientation(dir, to_camera)),
             },
         );
@@ -613,11 +626,12 @@ fn spawn_contact_sparks(position: Vec3, normal: Vec3, to_camera: Vec3, kit: &mut
 
 /// The layered soil strike from one resolved ground contribution: ejecta, a tall plume, a shock
 /// ring and a lingering cloud on the shared ring, plus one flat scar in its own ring. Physical
-/// scale, never screen-relative.
+/// scale, never screen-relative: its round's energy sets the sizes.
 fn spawn_big_splash(
     position: Vec3,
     normal: Vec3,
     to_camera: Vec3,
+    style: ImpactStyle,
     powder: PowderRead,
     kit: &mut ImpactKit,
 ) {
@@ -631,6 +645,7 @@ fn spawn_big_splash(
         ..
     } = kit;
     let (tan_a, tan_b) = normal.any_orthonormal_pair();
+    let scale = read_scale(style);
 
     // --- Ejecta streaks: soil clods thrown in an up-biased cone (blend the normal toward straight up
     // by look().ejecta_up_bias, then spread), each a dirt-recolored stretched streak launched at speed and
@@ -644,7 +659,7 @@ fn spawn_big_splash(
         + (rng.next_f32() * (look().ejecta_count.1 - look().ejecta_count.0 + 1) as f32) as u32;
     for _ in 0..((count.min(look().ejecta_count.1) as f32 * powder.amount).round() as u32) {
         let theta = rng.range(0.0, std::f32::consts::TAU);
-        let spread = rng.range(look().spark_spread.0, look().spark_spread.1);
+        let spread = rng.range(look().ejecta_spread.0, look().ejecta_spread.1);
         let dir = (up_axis + (tan_a * theta.cos() + tan_b * theta.sin()) * spread).normalize();
         let speed = rng.range(look().ejecta_speed.0, look().ejecta_speed.1);
         let length = speed * rng.range(look().ejecta_stretch.0, look().ejecta_stretch.1);
@@ -668,7 +683,7 @@ fn spawn_big_splash(
                 aspect: Vec3::new(look().ejecta_width_ratio, 1.0, 1.0),
                 roll: 0.0,
                 spin: 0.0,
-                erosion_end: 1.0,
+                erosion_end: look().streak_erosion_end,
                 rotation: Some(spark_orientation(dir, to_camera)),
             },
             look().debris_gravity,
@@ -687,22 +702,25 @@ fn spawn_big_splash(
             ring,
             assets.quad.clone(),
             BillboardSpec {
-                material: powder
-                    .material(assets.dirt_material(look().plume_alpha, powder.palette.clone())),
+                material: powder.material(assets.dirt_material(
+                    look().plume_alpha,
+                    look().splash_plume_sharpness,
+                    powder.palette.clone(),
+                )),
                 lifetime: look().splash_plume_lifetime,
-                origin: position + normal * (look().splash_plume_size.0 * 0.5),
+                origin: position + normal * (look().splash_plume_size.0 * scale * 0.5),
                 drift: Vec3::Y * look().splash_plume_rise,
                 frames: 4,
                 flipbook: Flipbook::Loop {
                     start: rng.range(0.0, 4.0),
                     rate: 0.0,
                 },
-                start_size: look().splash_plume_size.0,
-                end_size: look().splash_plume_size.1,
+                start_size: look().splash_plume_size.0 * scale,
+                end_size: look().splash_plume_size.1 * scale,
                 aspect: look().splash_plume_aspect,
                 roll: rng.range(-look().plume_roll_rad, look().plume_roll_rad),
                 spin: 0.0,
-                erosion_end: 1.0,
+                erosion_end: look().powder_erosion_end,
                 rotation: None,
             },
         );
@@ -718,19 +736,19 @@ fn spawn_big_splash(
         BillboardSpec {
             material: powder.material(assets.shock_ring_material(powder.palette.clone())),
             lifetime: look().splash_ring_lifetime,
-            origin: position + normal * look().flash_clearance_m,
+            origin: position + normal * look().wide_quad_clearance_m,
             drift: Vec3::ZERO,
             frames: 4,
             flipbook: Flipbook::Loop {
                 start: rng.range(0.0, 4.0),
                 rate: 0.0,
             },
-            start_size: look().splash_ring_size.0,
-            end_size: look().splash_ring_size.1,
+            start_size: look().splash_ring_size.0 * scale,
+            end_size: look().splash_ring_size.1 * scale,
             aspect: Vec3::ONE,
             roll: 0.0,
             spin: 0.0,
-            erosion_end: 1.0,
+            erosion_end: look().powder_erosion_end,
             rotation: Some(ground_orientation(
                 normal,
                 rng.range(0.0, std::f32::consts::TAU),
@@ -746,11 +764,14 @@ fn spawn_big_splash(
         ring,
         assets.quad.clone(),
         BillboardSpec {
-            material: powder
-                .material(assets.dirt_material(look().splash_cloud_alpha, powder.palette.clone())),
+            material: powder.material(assets.dirt_material(
+                look().splash_cloud_alpha,
+                look().splash_cloud_sharpness,
+                powder.palette.clone(),
+            )),
             lifetime: look().splash_cloud_lifetime,
             origin: position
-                + normal * (look().splash_cloud_size.0 * 0.5)
+                + normal * (look().splash_cloud_size.0 * scale * 0.5)
                 + Vec3::Y * look().cloud_lift_m,
             drift: Vec3::Y * look().splash_cloud_rise,
             frames: 4,
@@ -758,12 +779,12 @@ fn spawn_big_splash(
                 start: rng.range(0.0, 4.0),
                 rate: 0.0,
             },
-            start_size: look().splash_cloud_size.0,
-            end_size: look().splash_cloud_size.1,
+            start_size: look().splash_cloud_size.0 * scale,
+            end_size: look().splash_cloud_size.1 * scale,
             aspect: Vec3::ONE,
             roll: rng.range(0.0, std::f32::consts::TAU),
             spin: 0.0,
-            erosion_end: 1.0,
+            erosion_end: look().powder_erosion_end,
             rotation: None,
         },
     );
@@ -787,12 +808,12 @@ fn spawn_big_splash(
                 start: 3.0,
                 rate: 0.0,
             },
-            start_size: look().ground_mark_size,
-            end_size: look().ground_mark_size * look().scar_end_scale,
+            start_size: look().ground_mark_size * scale,
+            end_size: look().ground_mark_size * scale * look().scar_end_scale,
             aspect: Vec3::ONE,
             roll: 0.0,
             spin: 0.0,
-            erosion_end: 1.0,
+            erosion_end: look().scar_erosion_end,
             rotation: Some(ground_orientation(
                 normal,
                 rng.range(0.0, std::f32::consts::TAU),
@@ -846,7 +867,7 @@ fn spawn_sparking_read(
         BillboardSpec {
             material: assets.armor_flash_material(),
             lifetime: look().armor_flash_lifetime,
-            origin: position + normal * look().flash_clearance_m,
+            origin: position + normal * look().wide_quad_clearance_m,
             drift: Vec3::ZERO,
             frames: 1,
             flipbook: Flipbook::Loop {
@@ -895,7 +916,7 @@ fn spawn_sparking_read(
                 aspect: Vec3::new(look().armor_spark_width_ratio, 1.0, 1.0),
                 roll: 0.0,
                 spin: 0.0,
-                erosion_end: 1.0,
+                erosion_end: look().streak_erosion_end,
                 rotation: Some(spark_orientation(dir, to_camera)),
             },
             look().debris_gravity,
@@ -925,7 +946,7 @@ fn spawn_sparking_read(
             aspect: Vec3::ONE,
             roll: rng.range(0.0, std::f32::consts::TAU),
             spin: rng.range(-look().dust_spin_max, look().dust_spin_max),
-            erosion_end: 1.0,
+            erosion_end: look().powder_erosion_end,
             rotation: None,
         },
         look().debris_gravity,
@@ -955,7 +976,7 @@ fn spawn_sparking_read(
                 aspect: Vec3::ONE,
                 roll: rng.range(0.0, std::f32::consts::TAU),
                 spin: 0.0,
-                erosion_end: 1.0,
+                erosion_end: look().flame_erosion_end,
                 rotation: None,
             },
         );
@@ -1001,9 +1022,9 @@ mod tests {
     };
 
     /// FIXTURE DATA: the compact contact recipe.
-    const COMPACT: ImpactStyle = ImpactStyle::Compact;
+    const COMPACT: ImpactStyle = ImpactStyle::fixture(ImpactPreset::Compact);
     /// FIXTURE DATA: the layered contact recipe.
-    const LAYERED: ImpactStyle = ImpactStyle::Layered;
+    const LAYERED: ImpactStyle = ImpactStyle::fixture(ImpactPreset::Layered);
 
     /// Minimal app carrying what the impact observer reads. Real `Assets` stores (initialized bare,
     /// no asset plugins) so the family materials and the lane table are made for real; fixed-seed
@@ -1077,14 +1098,16 @@ mod tests {
     }
 
     /// The game's damage-model view must emit only what the resolved ground throws, by its own
-    /// strike fact: FIXTURE every ground throws nothing and would still give a muzzle blast its
-    /// whole cloud. A fixed terrain recipe, or a strike read off the muzzle number, fails here.
+    /// strike fact: FIXTURE every ground lifts nothing, states no sparks and would still give a
+    /// muzzle blast its whole cloud. A fixed terrain recipe, or a strike read off the muzzle
+    /// number, fails here.
     #[test]
     fn a_ground_that_throws_nothing_emits_nothing() {
         let mut app = harness();
         let mut table = crate::ground_types::GroundTypes::load_shipped();
         for ground in table.types.values_mut() {
             ground.strike.lifted.value = 0.0;
+            ground.strike.sparks.value = false;
             ground.dust.erodibility = 1.0;
         }
         app.insert_resource(table)
@@ -1218,6 +1241,122 @@ mod tests {
         }
     }
 
+    /// A ground's sparks and its lift are two facts. FIXTURE half a lifting ground stating no sparks,
+    /// half a ground lifting nothing that states them. Over contacts the second ground's sparks
+    /// show, every one without any lift of its own to roll on: a read that returns on zero lift, or
+    /// picks its sparks from the lift-weighted soil, never sparks here and fails. A mutant sparking
+    /// on any painted spark fact sparks on every contact and fails too.
+    #[test]
+    fn a_ground_lifting_nothing_still_sparks_by_its_painted_share() {
+        let hot = |app: &mut App| {
+            let world = app.world_mut();
+            world
+                .query::<&Billboard>()
+                .iter(world)
+                .filter(|billboard| billboard.lanes.glow.y > 0.0)
+                .count()
+        };
+        let mut app = harness();
+        let mut table = crate::ground_types::GroundTypes::load_shipped();
+        for (name, lifted, sparks) in [
+            (BASE_GROUND, 0.5, false),
+            (BLEND_LAYERS[0].ground, 0.0, true),
+        ] {
+            let ground = table.types.get_mut(name).expect("a pack's ground");
+            ground.strike.lifted.value = lifted;
+            ground.strike.sparks.value = sparks;
+        }
+        app.insert_resource(table).insert_resource(
+            crate::track_prints::PrintDepths::painted_everywhere(Vec3::new(0.5, 0.0, 0.0)),
+        );
+        let (mut sparked, mut plain) = (0, 0);
+        for _ in 0..64 {
+            let before = hot(&mut app);
+            trigger_impact(&mut app, Vec3::Y, COMPACT);
+            if hot(&mut app) > before {
+                sparked += 1;
+            } else {
+                plain += 1;
+            }
+        }
+        assert!(sparked > 0 && plain > 0, "sparked {sparked}, plain {plain}");
+
+        let mut app = harness();
+        let mut table = crate::ground_types::GroundTypes::load_shipped();
+        for ground in table.types.values_mut() {
+            ground.strike.lifted.value = 0.0;
+            ground.strike.sparks.value = true;
+        }
+        app.insert_resource(table);
+        trigger_impact(&mut app, Vec3::Y, LAYERED);
+        let all = billboards(&mut app);
+        assert!(hot(&mut app) == all && all > 0, "sparks alone: {all}");
+    }
+
+    /// A contact read's lengths follow its round's energy at the data's stated exponent, on the
+    /// small read and the layered one alike, and never reach a viewer: there is none here. Mutant: a
+    /// read sized from a constant, as a rifle round and an 88 mm once were, fails here. The look the
+    /// capture judges relies on it.
+    #[test]
+    fn a_contact_reads_lengths_follow_its_rounds_energy() {
+        let widest = |preset: ImpactPreset, energy_j: f32| {
+            let mut app = harness();
+            let mut table = crate::ground_types::GroundTypes::load_shipped();
+            for ground in table.types.values_mut() {
+                ground.strike.lifted.value = 1.0;
+                ground.strike.sparks.value = false;
+            }
+            app.insert_resource(table);
+            trigger_impact(&mut app, Vec3::Y, ImpactStyle { preset, energy_j });
+            let world = app.world_mut();
+            world
+                .query::<&Billboard>()
+                .iter(world)
+                .map(|billboard| billboard.start_size)
+                .fold(0.0_f32, f32::max)
+        };
+        let reference = look().impact_reference_energy_j;
+        let ratio = 64.0_f32;
+        for preset in [ImpactPreset::Compact, ImpactPreset::Layered] {
+            let stated = widest(preset, reference);
+            let scaled = widest(preset, reference * ratio);
+            let expected = ratio.powf(look().impact_size_exponent);
+            assert!(
+                (scaled / stated - expected).abs() < 1e-3,
+                "{preset:?}: {stated} to {scaled}, expected {expected} times"
+            );
+        }
+        let stated = widest(ImpactPreset::Compact, reference);
+        assert!(
+            (stated - look().dust_size.0).abs() < 1e-5,
+            "the reference energy states the recipe's own sizes: {stated}"
+        );
+    }
+
+    /// The installer the client mounts registers what the read spends: the harness's own table of
+    /// resources can hide a ring it forgets. Mutant: `plugin` without `GroundMarkRing` panics on
+    /// a layered read's first scar, in play and here.
+    #[test]
+    fn the_shipped_installer_gives_a_layered_read_its_scar_ring() {
+        let mut app = App::new();
+        plugin(&mut app);
+        assert!(app.world().contains_resource::<GroundMarkRing>());
+        app.init_resource::<BillboardRing>()
+            .init_resource::<DustPalettes>()
+            .init_resource::<Assets<Mesh>>()
+            .init_resource::<Assets<Image>>()
+            .init_resource::<Assets<VfxBillboardMaterial>>()
+            .init_resource::<Assets<ShaderBuffer>>()
+            .init_resource::<BillboardFamilies>()
+            .init_resource::<Time>()
+            .insert_resource(ViewRng::seeded(42))
+            .insert_resource(ImpactAssets::test_stub())
+            .insert_resource(crate::ground_types::GroundTypes::load_shipped())
+            .insert_resource(crate::track_prints::PrintDepths::unpainted());
+        trigger_impact(&mut app, Vec3::Y, LAYERED);
+        assert_eq!(app.world().resource::<GroundMarkRing>().0.live.len(), 1);
+    }
+
     /// One contact is one read: a blended ground's shares sum into one lift and one roll picks one
     /// soil. FIXTURE half base pack, half first layer, of distinct soils and lifts. Across contacts
     /// both soils appear, while every contact leaves one scar at the blended opacity, and the
@@ -1334,7 +1473,10 @@ mod tests {
             assert_eq!(hot_sizes(COMPACT, surface), Vec::<f32>::new());
             for blast_j in [1.0e6_f32, 8.0e6] {
                 assert_eq!(
-                    hot_sizes(ImpactStyle::Bursting { blast_j }, surface),
+                    hot_sizes(
+                        ImpactStyle::fixture(ImpactPreset::Bursting { blast_j }),
+                        surface
+                    ),
                     [look().burst_flash_scale * blast_j.cbrt()],
                 );
             }

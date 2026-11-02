@@ -188,8 +188,13 @@ look_table! { ImpactLook {
     flame_lick_glow: f32 => finite,
     flame_lick_rise: f32 => finite,
     dust_sharpness: f32 => positive,
+    ejecta_sharpness: f32 => positive,
+    ejecta_spread: (f32, f32) => finite,
     spark_sharpness: f32 => positive,
-    powder_sharpness: f32 => positive,
+    splash_plume_sharpness: f32 => positive,
+    splash_cloud_sharpness: f32 => positive,
+    impact_reference_energy_j: f32 => positive,
+    impact_size_exponent: f32 => positive,
     flash_sharpness: f32 => positive,
     powder_luma: (f32, f32) => finite,
     spark_green: (f32, f32) => finite,
@@ -198,8 +203,8 @@ look_table! { ImpactLook {
     hot_green: (f32, f32) => finite,
     hot_blue: (f32, f32) => finite,
     hot_heat: (f32, f32) => finite,
-    surface_clearance_m: f32 => finite,
-    flash_clearance_m: f32 => finite,
+    surface_clearance_m: f32 => positive,
+    wide_quad_clearance_m: f32 => positive,
     ping_end_scale: f32 => finite,
     spark_end_scale: f32 => finite,
     ejecta_end_scale: f32 => finite,
@@ -211,6 +216,10 @@ look_table! { ImpactLook {
     flame_push_mps: f32 => finite,
     spall_sharpness: f32 => positive,
     soft_particle_depth: f32 => finite,
+    powder_erosion_end: f32 => fraction,
+    scar_erosion_end: f32 => fraction,
+    streak_erosion_end: f32 => fraction,
+    flame_erosion_end: f32 => fraction,
 }}
 pub(super) fn impact() -> &'static ImpactLook {
     &load().impact
@@ -223,7 +232,7 @@ look_table! { MuzzleLook {
     ground_dust_frame_rate: f32 => nonnegative,
     ground_dust_spin_max: f32 => nonnegative,
     ground_dust_erosion_end: f32 => fraction,
-    far_full_dressing: f32 => finite,
+    far_full_dressing: f32 => positive,
     shadow_read_window_s: f32 => finite,
     flash_floor: f32 => finite,
     blast_floor: (f32, f32) => finite,
@@ -293,7 +302,10 @@ look_table! { MarksLook {
     grain_frequency: f32 => finite,
     hole_wall_luma: f32 => finite,
     hole_wall_fade: f32 => finite,
-    core_red: f32 => finite,
+    hole_ring_feather: f32 => positive,
+    hole_lip_inner_luma: f32 => fraction,
+    dent_bowl_luma: f32 => fraction,
+    dent_flake_rho: (f32, f32) => finite,
     core_metallic: f32 => finite,
     core_roughness: f32 => positive,
     hole_ring_luma: f32 => finite,
@@ -432,7 +444,11 @@ mod tests {
             error.contains(FILE) && error.contains("Fixture provenance is test-only"),
             "{error}"
         );
-        let error = parse(&DATA.replace("dust_alpha: (0.6,", "dust_alpha: (NaN,")).unwrap_err();
+        let shipped = format!(
+            "dust_alpha: ({:?},",
+            parse(DATA).expect("the shipped look").impact.dust_alpha
+        );
+        let error = parse(&DATA.replace(&shipped, "dust_alpha: (NaN,")).unwrap_err();
         assert!(
             error.contains(FILE) && error.contains("dust_alpha"),
             "{error}"
