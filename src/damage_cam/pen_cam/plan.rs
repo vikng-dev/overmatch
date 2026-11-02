@@ -486,6 +486,21 @@ impl BoxPlan {
 impl Plan {
     /// The plan of `report`, its components' shapes resolved in `shapes`.
     pub fn new(report: &PenetrationReport, shapes: &TankShapes) -> Self {
+        Self::with_field_units(
+            report,
+            shapes,
+            (
+                spall_cone::cone_unit(),
+                spall_cone::BurstFields::shipped().unit(),
+            ),
+        )
+    }
+
+    fn with_field_units(
+        report: &PenetrationReport,
+        shapes: &TankShapes,
+        units: (spall_cone::FieldUnit, spall_cone::FieldUnit),
+    ) -> Self {
         let verdict = report.impact.verdict;
         let body = match crate::rounds::RoundRegistry::shipped().body_model(&report.round) {
             Ok(body) => body,
@@ -535,9 +550,9 @@ impl Plan {
         let spall = report.spall.iter().map(|c| {
             let node = line.nearest_node_at(c.t);
             let exit = line.leg_speed(node + 1).unwrap_or(0.0);
-            cone(c, &line, exit, spall_cone::cone_unit())
+            cone(c, &line, exit, units.0)
         });
-        let burst_unit = spall_cone::BurstFields::shipped().unit();
+        let burst_unit = units.1;
         let burst_field = report.burst.iter().filter_map(|b| {
             b.field
                 .as_ref()
@@ -959,29 +974,14 @@ pub(super) mod tests {
         }
     }
 
-    /// For every recorded scenario: the drawn span starts before contact and ends at or after
-    /// it, the energy never rises along the path, the plan holds every field the record threw,
-    /// each with a ray for every fragment that left its origin and none for one that did not, a
-    /// box is reached exactly when it took a dose, and a round rested in a plate stops, where the
-    /// drawn line ends. The look, its volumes and the kill cam draw every field from the plan, so
-    /// a field the plan drops (a burst's, say) is one the corner never draws.
-    /// EACH PLANNED FIELD'S HP IS ITS RECORDED JOULES AT ITS OWN MECHANISM'S UNIT (the game's
-    /// damage model): a planned spall cone emits the HP the sim's dose edge gives its recorded
-    /// emission at the cone's unit, a planned burst field the HP it gives at the burst's
-    /// (`ballistics::field_units`). The potency bands classify these HP, so a burst field read at
-    /// the cone's unit (about 14 times dimmer at the shipped units, DERIVED: 0.035 against
-    /// 0.00014667 / 0.06 HP per carried joule), a cone at the burst's, or joules left unconverted
-    /// would draw every band wrong. Fixture: every recorded scenario, which
-    /// between them throw cones and a burst field; the two shipped units differ.
+    /// The game's damage model: planned fields convert recorded joules through the correct
+    /// mechanism's unit. Potency bands rely on this selection, even when shipped units are equal.
+    /// Fixture units deliberately distinguish the two mechanisms without constraining asset data.
     #[test]
     fn each_planned_field_reads_its_own_mechanisms_unit() {
         let units = (
-            spall_cone::cone_unit(),
-            spall_cone::BurstFields::shipped().unit(),
-        );
-        assert_ne!(
-            units.0, units.1,
-            "the two mechanisms' units tell them apart"
+            spall_cone::FieldUnit::fixture(0.5),
+            spall_cone::FieldUnit::fixture(2.0),
         );
         let emitted = |strength: f32, unit| {
             let joules = strength * spall_cone::EMITTED_SHARE;
@@ -991,7 +991,7 @@ pub(super) mod tests {
         };
         let (mut cones, mut bursts) = (0, 0);
         for (name, report) in records() {
-            let plan = Plan::new(&report, &shapes(&report));
+            let plan = Plan::with_field_units(&report, &shapes(&report), units);
             let recorded: Vec<(f32, spall_cone::FieldUnit)> = report
                 .spall
                 .iter()
@@ -1019,6 +1019,12 @@ pub(super) mod tests {
         assert!(cones > 0 && bursts > 0, "{cones} cones, {bursts} bursts");
     }
 
+    /// For every recorded scenario: the drawn span starts before contact and ends at or after
+    /// it, the energy never rises along the path, the plan holds every field the record threw,
+    /// each with a ray for every fragment that left its origin and none for one that did not, a
+    /// box is reached exactly when it took a dose, and a round rested in a plate stops, where the
+    /// drawn line ends. The look, its volumes and the kill cam draw every field from the plan, so
+    /// a field the plan drops (a burst's, say) is one the corner never draws.
     #[test]
     fn every_record_plans_a_drawable_picture() {
         let all = records();
