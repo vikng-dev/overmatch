@@ -198,7 +198,7 @@
 //! | [`CLUTCH_OUT_M_SPEED`]/[`CLUTCH_IN_M_SPEED`] | SIM POLICY |
 //! | [`REV_MATCH_BAND_RPM`] | SIM POLICY |
 //! | `gearbox.shift_addressing` / [`ShiftAddressing`] | VEHICLE DATA |
-//! | `DRAG_SAT_SPEED` | REMOVED (stage B) — the belt-side drag saturation ramp died with the belt-side drag term; what replaces it is the engine-side spin-up fade confined below the stall-guard floor, DERIVED from spec with no new const ([`engine_drag`]) |
+//! | [`CRANK_DRAG_FADE_RPM`] | Resolution: numerical rest band, independent of the healthy idle guard |
 //!
 //! Moved OUT of this module to the spec (they were vehicle data wearing const clothing):
 //! shift time (`gearbox.shift_secs` — a Tiger preselector and a T-34 crash box differ),
@@ -261,12 +261,9 @@ const TICK_HZ: f32 = 64.0;
 /// 2), which fired the down band the tick the freeze lifted — the measured 1-2-1-2 climb
 /// trace. SIM POLICY.
 ///
-/// Stage-B re-derivation (window physics changed: the declutched window carries NO drag on
-/// the belt, in prediction AND reality): 150 stays. At full throttle — the dominant
-/// upshift intent — drag was already fully released (`hold_blend(1/0.5) = 0`), so the
-/// predictor's full-throttle arithmetic is bit-identical to stage A; at partial throttle
-/// the old predictor's drag term matched the old window's real drag, and both died
-/// together.
+/// The declutched predictor carries no crank drag because the coupling transmits nothing.
+/// With whole combustion, the full-pedal gross/drag pair retains the authored net curve;
+/// construction drag remains on the crank even while the belt is disconnected.
 ///
 /// What the margin covers (the predictor decays the drive shear, keeps the ground's rolling
 /// resistance whole and uses the coupled vehicle mass, [`predict_shift_landing_m`]): residual
@@ -434,6 +431,11 @@ const K_IDLE_DROOP_RPM: f32 = 50.0;
 /// The guard cannot add crank energy during recovery from below the band.
 const STALL_GUARD_BAND_RPM: f32 = 100.0;
 
+/// Resolution: regularise the drag sign only within one rpm of rest; the public readout
+/// resolves whole rpm. The nonnegative crank integration clips a crossing to rest;
+/// the healthy idle guard must not set a physical run-down time constant.
+const CRANK_DRAG_FADE_RPM: f32 = 1.0;
+
 /// Declutched rev-match proportional band (rpm): full fueling one band below the landing
 /// target, tapering to zero at it (`u_match = clamp((ω_target − ω_e)/band, 0, 1)`) — a smooth
 /// approach at 64 Hz instead of bang-bang chatter. Only the BAND is policy; the match
@@ -452,12 +454,9 @@ const REV_MATCH_BAND_RPM: f32 = 200.0;
 const CLUTCH_OUT_M_SPEED: f32 = NEUTRAL_M_SPEED * 0.8;
 const CLUTCH_IN_M_SPEED: f32 = NEUTRAL_M_SPEED * 1.2;
 
-/// PROPULSIVE throttle magnitude above which engine drag is fully released (blends out with
-/// the hold-blend shape below it): an open throttle is not motoring. A BRAKE command
-/// (throttle against the engaged ladder) is not propulsive — the engine keeps motoring, so
-/// drag stays engaged under it. Driver-intent SHAPING — where "open throttle" stops meaning
-/// "motoring" — and part of the uniform input contract, the same seam for every tank. SIM
-/// POLICY.
+/// Propulsive command magnitude at which the healthy engine reaches its authored net curve.
+/// Below it the hold-blend shapes the transition from motoring to combustion; construction
+/// friction remains at every command. A brake command is not propulsive. SIM POLICY.
 const DRAG_THROTTLE_RELEASE: f32 = 0.5;
 
 /// Shape of the rising motoring-torque curve ([`engine_drag`]): the CONSTANT
@@ -677,9 +676,8 @@ impl TransmissionParams {
                 }),
             ),
             (
-                // Sanity bounds beyond finiteness: an absurd finite torque can overflow the
-                // reflected-drag multiplication, and the resulting infinity meets a released
-                // throttle as `infinity * 0.0` inside the shift-landing predictor.
+                // Sanity bounds beyond finiteness: an absurd finite torque can overflow
+                // reflected torque and crank work. Refuse it before the physical solve.
                 "engine.torque_curve",
                 a.torque_nm.len() >= 2
                     && a.torque_nm.windows(2).all(|w| w[0].0 < w[1].0)
@@ -699,8 +697,8 @@ impl TransmissionParams {
                     .all(|v| v.is_finite() && *v > 0.0),
             ),
             (
-                // DERIVED healthy idle-guard and drag-fade scale: the 100 rpm guard band
-                // needs positive headroom. The game's damage model can still reach rest.
+                // DERIVED healthy idle-guard scale: the 100 rpm guard band needs
+                // positive headroom. The game's damage model can still reach rest.
                 "engine.idle_rpm floor",
                 a.idle_rpm >= 300.0,
             ),
@@ -1210,27 +1208,17 @@ pub struct TransmissionReport {
     pub(crate) bitprobe: TransmissionProbe,
 }
 
-/// The engine's compression-braking (motoring) drag torque at the CRANK (stage B — drag
-/// moved engine-side; the belt lost its separate `f_drag` term and drag reaches the belt
-/// only through the coupling). Not a flat constant — the magnitude is
-/// the authored `drag_fraction × peak torque` AT MID-BAND, rising linearly with crank
-/// speed ([`MOTORING_DRAG_BASE_SHARE`]: one-third constant base + two-thirds linear in
-/// `ω/ω_mid`, `ω_mid = (idle + governed)/2` — pumping/friction losses grow with speed), so
-/// each gear has a bounded downhill equilibrium instead of a flat-torque runaway. Released
-/// as the driver's propulsive command opens (`hold_blend(u/DRAG_THROTTLE_RELEASE)` — a brake
-/// command is not propulsive). The game's damage model scales produced torque, never this
-/// command threshold or construction drag. Below the healthy idle guard the linear spin-up
-/// fade brings drag to zero at rest; a reduced engine can reach that range (`crank_guards`).
-/// Crank speed is nonnegative, so the drag always opposes rotation.
-fn engine_drag(tp: &TransmissionParams, omega_e: f32, command: f32) -> f32 {
-    let omega_floor = (tp.engine.idle_rpm - STALL_GUARD_BAND_RPM) * RPM_TO_RAD;
+/// The game's damage model: construction motoring drag at the crank (N m), independent of
+/// pedal and combustion. Its authored mid-band anchor is `drag_fraction × peak torque`;
+/// the affine Coulomb/viscous shape rises with speed. Only the numerical rest band fades it.
+/// Combustion reconstructs the gross torque behind the authored net curve (`engine_torques`).
+fn engine_drag(tp: &TransmissionParams, omega_e: f32) -> f32 {
     let omega_mid = (tp.engine.idle_rpm + tp.engine.governed_rpm) * 0.5 * RPM_TO_RAD;
     let rise = MOTORING_DRAG_BASE_SHARE + (1.0 - MOTORING_DRAG_BASE_SHARE) * (omega_e / omega_mid);
     tp.peak_torque_nm
         * tp.drag_fraction
         * rise
-        * forces::hold_blend(command / DRAG_THROTTLE_RELEASE)
-        * (omega_e / omega_floor).clamp(0.0, 1.0)
+        * (omega_e / (CRANK_DRAG_FADE_RPM * RPM_TO_RAD)).clamp(0.0, 1.0)
 }
 
 /// Fix-1a: roll the shift's torque-cut window forward on the mean belt axis and return the
@@ -1294,21 +1282,25 @@ pub(crate) fn predict_shift_landing_m(
     pm
 }
 
-/// The game's damage model: combustion and the idle governor scale with their sources;
-/// motoring release reads the unscaled command. Both the live crank and reserve scheduler
-/// consume these three torques, in N m, at the same operating point.
+/// The game's damage model: the full-load curve is net of construction losses. Reconstruct
+/// the combustion torque it implies, scale only that source, and charge drag whole. The pedal
+/// blend retains the healthy net curve at every command. The crank and reserve scheduler share
+/// these three torques (N m), so an emptied engine keeps friction even under full command.
 fn engine_torques(
     tp: &TransmissionParams,
     supply: DriveSupply,
     omega: f32,
     command: f32,
 ) -> [f32; 3] {
-    let induced = command * supply.delivered() * tp.torque_at(omega / RPM_TO_RAD);
+    let drag = engine_drag(tp, omega);
+    let released = 1.0 - forces::hold_blend(command / DRAG_THROTTLE_RELEASE);
+    let induced =
+        supply.delivered() * (command * tp.torque_at(omega / RPM_TO_RAD) + released * drag);
     let idle_capacity = supply.combustion * tp.torque_at(tp.engine.idle_rpm);
     let idle = (idle_capacity * (tp.engine.idle_rpm * RPM_TO_RAD - omega)
         / (K_IDLE_DROOP_RPM * RPM_TO_RAD))
         .clamp(0.0, idle_capacity);
-    [induced, idle, engine_drag(tp, omega, command)]
+    [induced, idle, drag]
 }
 
 /// Full-throttle mean-axis force available in one gear at the current signed shaft speed. The
@@ -2313,7 +2305,7 @@ fn update_clutch_latch(st: &mut TransmissionState, propulsive: f32, m: f32) {
 /// the engine power available at that operating point.
 ///
 /// Fueling command u. Engaged: the unscaled propulsive throttle (a brake command is not
-/// fueling). The game's damage model scales induced torque after command-based drag release.
+/// fueling). The game's damage model scales gross combustion while retaining construction drag.
 /// Declutched: a proportional-band rev governor ([`REV_MATCH_BAND_RPM`]) toward the LARGER of two
 /// targets —
 ///   * the REV-MATCH target `|m|·k` (`st.gear` is already the landing gear during the window), so
@@ -2324,7 +2316,7 @@ fn update_clutch_latch(st: &mut TransmissionState, propulsive: f32, m: f32) {
 ///     DYNAMICALLY (pivot power spools with the crank).
 ///
 /// The induced torque uses the crank's own rpm. The game's damage model scales combustion
-/// and the idle governor with their sources; command-based motoring release stays unscaled.
+/// and the idle governor with their sources; construction motoring drag stays unscaled.
 /// `engine_work` charges the physical sprocket work against combustion and stored crank
 /// energy, so steering loads the crank even while the main clutch is out.
 #[expect(
@@ -2751,7 +2743,7 @@ fn crank_guards(
 ) -> (f32, f32) {
     let guard_point = (tp.engine.idle_rpm - STALL_GUARD_BAND_RPM) * RPM_TO_RAD;
     let can_idle =
-        supply.combustion * tp.torque_at(tp.engine.idle_rpm) > engine_drag(tp, guard_point, 0.0);
+        supply.combustion * tp.torque_at(tp.engine.idle_rpm) > engine_drag(tp, guard_point);
     let omega_floor = if can_idle { guard_point } else { 0.0 };
     let omega_over = (tp.max_curve_rpm() + OVERREV_MARGIN_RPM) * RPM_TO_RAD;
     // The game's damage model: recovery from rest cannot jump to the idle band for free.

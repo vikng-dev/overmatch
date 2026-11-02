@@ -1780,7 +1780,7 @@ fn gear_shift_hysteresis() {
 }
 
 /// The shift is a torque interruption: propulsion force is zero for exactly
-/// the authored `shift_secs` worth of ticks, then returns. (Throttle 1.0 keeps engine drag released, and
+/// the authored `shift_secs` worth of ticks, then returns. (Throttle 1.0 at whole supply retains the authored net torque, and
 /// reactions are zero, so the per-side force IS the propulsion share.)
 #[test]
 fn shift_torque_interruption_window() {
@@ -3024,33 +3024,44 @@ fn energy_bound_no_free_energy() {
     }
 }
 
-/// The recirculation split reads the PHYSICAL sprocket powers, not the
-/// modal ones. Steer-only at an asymmetric rolling pair (`F_p = 0`, `F_s` at the
-/// difference-axis bound, `v_L = 5, v_R = 3`): the outer sprocket delivers `F_s/2·v_L`, the
-/// inner ABSORBS `F_s/2·v_R` — physical net `= F_s/2·(v_L − η·v_R)`, while the modal split
-/// reads `F_s·d` with no negative term at all. Pinned on the split function itself with fixture
-/// forces: at rolling speed the steering law turns through the λ constraint, not `F_s`, so no
-/// drive scenario isolates the split.
+/// The game's damage model: recirculation prices physical sprocket work through production
+/// motor construction and bisection. Fixture: low transfer efficiency, isolated main clutch,
+/// asymmetric rolling belts and a small crank budget force a positive/negative transfer to bind.
+#[cfg(feature = "bitprobe")]
 #[test]
 fn recirculation_splits_physical_output_powers() {
-    let tp = lab_tp();
-    let (vl, vr) = (5.0f32, 3.0);
-    let f_s = 2.0 * tp.steer_capacity_n;
-    let (p_l, p_r) = (f_s / 2.0 * vl, -f_s / 2.0 * vr);
-    let physical_net = p_l - tp.recirculation * -p_r;
-    // A budget a quarter of the physical demand (fixture data), so the scale binds.
-    let p_avail = physical_net / 4.0;
-    let scale = p_avail / recirculated_work(&tp, [p_l, p_r]);
-    let expect = p_avail / physical_net;
+    let (fp, mut tp) = (lab_fp(), lab_tp());
+    tp.clutch_capacity = 0.0; // Fixture isolation of the geared steering member.
+    tp.recirculation = 0.1; // Fixture loss large enough to bind the work budget.
+    let mut st = fresh(&tp);
+    st.park = false;
+    let inp = input(1.0, 1.0, [5.0, 3.0], [0.0; 2]);
+    let rep = step(&fp, &tp, &mut st, &inp);
     assert!(
-        (scale - expect).abs() < 1e-6,
-        "power_scale {scale} must be the physical-output split {expect}"
+        rep.power_scale > 0.0 && rep.power_scale < 1.0,
+        "{}",
+        rep.power_scale
     );
-    let modal = p_avail / (f_s * ((vl - vr) / 2.0));
+    let physical = [0, 1].map(|i| rep.forces[i] * (inp.speeds[i] + rep.next_speeds[i]) * 0.5);
     assert!(
-        (scale - modal).abs() > 0.02,
-        "the physical split must be distinguishable from the modal one here \
-         (physical {expect} vs modal {modal}) — otherwise this test pins nothing"
+        physical.iter().any(|p| *p > 0.0) && physical.iter().any(|p| *p < 0.0),
+        "{physical:?}"
+    );
+    for (recorded, actual) in [rep.bitprobe.power_left, rep.bitprobe.power_right]
+        .into_iter()
+        .zip(physical)
+    {
+        assert!(
+            (recorded - actual).abs() <= actual.abs() * 1e-5,
+            "recorded {recorded}, physical {actual}"
+        );
+    }
+    let free = rep.bitprobe.omega_pre + rep.bitprobe.tau_free * inp.dt / tp.engine_inertia;
+    let budget = 0.5 * tp.engine_inertia * (free.powi(2) - rep.bitprobe.omega_floor.powi(2));
+    let work = recirculated_work(&tp, physical) * inp.dt;
+    assert!(
+        (work - budget).abs() <= budget * 1e-4,
+        "bisection: {work} of {budget} J"
     );
 }
 
@@ -3165,7 +3176,7 @@ fn coast_drag_reaches_belt_through_coupling() {
         rep = step(&fp, &tp, &mut st, &input(0.0, 0.0, [v, v], [0.0, 0.0]));
     }
     assert_eq!(st.gear, 3, "mid-band coast must not shift");
-    let expect = -(engine_drag(&tp, st.omega_e, 0.0) * g3 / tp.sprocket_radius) / 2.0;
+    let expect = -(engine_drag(&tp, st.omega_e) * g3 / tp.sprocket_radius) / 2.0;
     for side in rep.forces {
         assert!(
             (side - expect).abs() < 100.0,
@@ -3187,13 +3198,13 @@ fn coast_drag_reaches_belt_through_coupling() {
 /// curve itself is pinned here against hand-computed literals from the authored anchors.
 /// Tiger: D = drag_fraction × peak = 0.25 × 1850 = 462.5 N·m, ω_mid = (600 + 2500)/2 =
 /// 1550 rpm, affine law τ(ω) = D·(1/3 + (2/3)·ω/ω_mid) for every LIVE crank speed
-/// (the spin-up fade sits below the stall floor, which the hard clamp makes unreachable):
+/// (the numerical rest band sits below the conditional healthy idle guard):
 ///   500 (stall floor) → 253.6, 600 (idle) → 273.5, 1550 (mid-band) → 462.5 exactly,
 ///   2500 (governed) → 651.5, 3000 (rated/ceiling) → 750.9; a stopped crank → 0.
 #[test]
 fn motoring_drag_curve_pins_documented_anchors() {
     let tp = tiger_tp();
-    let d = |rpm: f32| engine_drag(&tp, rpm * RPM_TO_RAD, 0.0);
+    let d = |rpm: f32| engine_drag(&tp, rpm * RPM_TO_RAD);
     assert_eq!(d(0.0), 0.0, "a stopped crank has no motoring torque");
     let floor = tp.engine.idle_rpm - STALL_GUARD_BAND_RPM;
     for (rpm, expect) in [
@@ -3462,7 +3473,7 @@ fn braking_never_teleports_crank_past_clutch_capacity() {
     // the crank faster than the clutch can physically pull it. The drag bound is the
     // rising motoring curve AT the warmed crank speed — the crank only falls from here
     // and the curve rises with ω, so this is the run's maximum |τ_free|.
-    let drag_max = engine_drag(&tp, st.omega_e, 0.0);
+    let drag_max = engine_drag(&tp, st.omega_e);
     let slew_bound = (tp.clutch_capacity + drag_max) * dt / tp.engine_inertia + 0.1;
     let mut speeds = [1.0f32, 1.0];
     for tick in 0..64 {
@@ -3653,8 +3664,8 @@ fn no_combustion_no_stored_energy_no_pivot_work() {
     assert_eq!(rep.next_speeds, [0.0; 2]);
 }
 
-/// The game's damage model: motoring release is a pedal law, not a second engine-condition
-/// law. The crank and scheduler must price the same full-pedal net torque.
+/// The game's damage model: the crank and scheduler price the same reduced full-pedal
+/// torque, including construction drag that does not scale with combustion.
 #[test]
 fn drag_release_and_scheduler_read_the_command() {
     let (fp, tp) = (lab_fp(), lab_tp());
@@ -3676,10 +3687,10 @@ fn drag_release_and_scheduler_read_the_command() {
     );
     assert!(rep.forces[0].is_finite());
     #[cfg(feature = "bitprobe")]
-    assert_eq!(
-        rep.bitprobe.tau_drag, 0.0,
-        "full pedal releases motoring drag at every supply"
-    );
+    {
+        assert_eq!(rep.bitprobe.tau_drag, engine_drag(&tp, 1550.0 * RPM_TO_RAD));
+        assert!((rep.bitprobe.tau_free - (induced + idle - drag)).abs() < 1e-3);
+    }
 }
 
 /// The game's damage model: a zero-capacity fixture clutch isolates service brakes from
@@ -3856,6 +3867,63 @@ fn all_drive_modes_without_combustion_conserve_total_kinetic_energy() {
                 );
                 previous = next;
             }
+        }
+    }
+}
+
+/// The game's damage model: an emptied declutched engine stops through its authored
+/// construction drag and inertia, rather than an idle-guard-shaped exponential tail.
+#[test]
+fn emptied_declutched_engine_runs_down_under_construction_drag() {
+    let (fp, tp) = (lab_fp(), lab_tp());
+    let mut st = fresh(&tp);
+    st.omega_e = 500.0 * RPM_TO_RAD; // Fixture start below healthy idle.
+    let mut inp = input(0.0, 0.0, [0.0; 2], [0.0; 2]);
+    inp.supply.combustion = 0.0;
+    inp.supply.transmitted = 0.0; // Fixture: no external crank work.
+    let start = st.omega_e;
+    let base_drag = tp.peak_torque_nm * tp.drag_fraction * MOTORING_DRAG_BASE_SHARE;
+    let bound = tp.engine_inertia * start / base_drag;
+    let mut ticks = 0;
+    while st.omega_e > 0.0 && ticks < 64 * 10 {
+        step(&fp, &tp, &mut st, &inp);
+        ticks += 1;
+    }
+    let elapsed = ticks as f32 * inp.dt;
+    println!("MEASURED empty declutched crank: {elapsed} s; DERIVED Coulomb upper bound {bound} s");
+    assert_eq!(st.omega_e, 0.0);
+    assert!(elapsed <= bound + inp.dt);
+}
+
+/// The game's damage model: the full-load net curve already includes construction losses.
+/// Losing combustion cannot release those losses through a held pedal.
+#[test]
+fn absent_combustion_keeps_drag_at_full_pedal() {
+    let tp = lab_tp();
+    let supply = DriveSupply {
+        combustion: 0.0,
+        ..DriveSupply::WHOLE
+    };
+    let omega = 1550.0 * RPM_TO_RAD; // Fixture operating point.
+    let held = engine_torques(&tp, supply, omega, 1.0);
+    let released = engine_torques(&tp, supply, omega, 0.0);
+    assert!(held[2] > 0.0);
+    assert_eq!(held, released);
+}
+
+/// The game's damage model: reconstructing gross combustion must preserve the authored
+/// healthy net torque at fixture operating points, while charging absent combustion full drag.
+#[test]
+fn healthy_net_curve_and_command_blend_are_preserved() {
+    let tp = lab_tp();
+    for rpm in [500.0, 600.0, 1100.0, 1550.0] {
+        for command in [0.0, 0.25, 0.5, 1.0] {
+            let [gross, idle, drag] =
+                engine_torques(&tp, DriveSupply::WHOLE, rpm * RPM_TO_RAD, command);
+            let net = command * tp.torque_at(rpm) + idle
+                - engine_drag(&tp, rpm * RPM_TO_RAD)
+                    * forces::hold_blend(command / DRAG_THROTTLE_RELEASE);
+            assert!((gross + idle - drag - net).abs() < 1e-3);
         }
     }
 }

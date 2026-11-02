@@ -1206,18 +1206,25 @@ clutch engagement. The tank coasts and the existing park lever holds its state; 
 nor the repair toggle moves it. While someone serves it, the command passes through whole
 and competence scales the fueling delivered. The **engine view** scales combustion and its
 idle governor; the **transmission view** scales clutch and steering capacity. Brakes, engine
-drag and compression braking keep their construction. Motoring release reads the unscaled
-propulsive command, including when the engine is reduced. A small positive engine share can
-therefore pull away at full pedal; the free-hull evidence below replaces the stationary-hull
-stall claim. The scheduler uses the crank's torque law, pricing sustained reserve at no less
+drag and compression braking keep their construction. The authored full-load curve is net
+of construction losses: the pedal blend reconstructs its gross combustion torque, only that
+source scales with delivered supply, and construction drag is charged whole. At whole supply
+the gross/drag pair retains the prior healthy net torque at every command. An emptied engine
+therefore keeps its friction at full pedal, including under declutched rev-match commands.
+A small positive share may still pull away from the crank's stored energy; its sustained
+capability must also pay construction losses. The free-hull evidence below replaces the
+stationary-hull stall claim. The scheduler uses the crank's torque law, pricing sustained reserve at no less
 than idle rather than spending the governor's temporary sub-idle recovery.
 
 Both sprockets' midpoint work, including geared steering, is charged against combustion and
 the crank's stored energy. The crank retains only unspent energy; neither acceleration from
 rest nor a clutch re-anchor creates work. Inner-to-outer transfer pays the declared
 recirculation loss; pure engine braking has no such transfer. An engine that cannot sustain
-idle can run down to rest, and the recovery guard never supplies energy of its own. A stopped
-public crank pauses its running sound loop.
+idle can run down to rest, and the recovery guard never supplies energy of its own. The
+healthy idle-guard band is Resolution: 100 rpm, twice the idle-governor droop width. It does
+not also shape engine friction. The separate numerical drag-sign band is Resolution: one rpm,
+at the public readout's whole-rpm resolution; above that band the run-down follows the authored
+drag and crank inertia. A stopped public crank pauses its running sound loop.
 
 A supply change takes effect on its tick. Through a locked clutch the torque step reaches
 the belts on that tick; transmitted capacity and the Unmanned reset also step immediately.
@@ -2264,7 +2271,7 @@ zero. The rebased measurements above and all gates were rerun on the combined tr
 changed no `forces.rs` source and no wire type.
 
 
-#### Drivetrain review follow-up: complete path projection and feature boundaries (#228)
+#### Drivetrain review follow-up: complete paths, construction drag and feature boundaries (#228)
 
 Subject: the game's damage model, game state only. The sweep-dmg-3 review inputs were rerun
 against production requirements and the adapter. The combine interpretation is stated only
@@ -2281,6 +2288,9 @@ in §7b above. The first fix group is `damage: unify complete crew paths and hel
 | Claude | P2: Backup expect cites absent load check | verified, same gate defect as Codex | `damage: unify complete crew paths and held shares (#228)` |
 | Claude | P3: two implementations of group combination | verified by source; one combine core now serves scalar and projected reads | `damage: unify complete crew paths and held shares (#228)` |
 | Claude | P3: integer module row and f32 simulation disagree near whole | verified at fixture 19,999,999/20,000,000 units; both now consume the same reduced share | `damage: unify complete crew paths and held shares (#228)` |
+| Claude | P2: full pedal removes an emptied engine's construction friction | verified red through torques and free-hull production adapter | `damage: retain engine construction drag at every supply (#228)` |
+| Claude | P2: idle-guard band also sets the motoring fade | verified: shared scale in source; declutched empty-engine fixture stayed at 500 rpm for 10 s because rev-match also released drag | `damage: retain engine construction drag at every supply (#228)` |
+| Claude | P3: recirculation test bypasses production motor and bisection | verified by source; replacement calls step, binds the work budget, and compares recorded to physical midpoint output powers | `damage: retain engine construction drag at every supply (#228)` |
 
 Additional verified build finding: without dev_ui, three unconditional headless tests named
 sandbox modules excluded from the build. Those sandbox-only tests now share their modules'
@@ -2290,3 +2300,25 @@ PROTOCOL_REV remains 66. The scheduler, hill hold, park latch and input slew wer
 First-group verification: MEASURED 78 targeted tests passed, including doc_citations, the
 Backup and Pool free-hull adapters, scalar/projection recomposition, the zero-upstream module
 condition and the near-whole row. Formatting and CI workspace/all-target clippy passed.
+
+Second-group MEASURED production results, fixture inputs (game state only):
+
+| Input | Before | After |
+|---|---|---|
+| Engine pool empty at 5 m/s, free hull, distance over 3 s, W held / released | 14.995418 / 13.274488 m | 13.056864 / 13.056864 m |
+| Declutched empty engine at 500 rpm, no transmitted work | 500 rpm still held after 10 s | rest after 0.828125 s; DERIVED base-drag upper bound J × initial angular speed / base drag = 1.1423973 s |
+
+The healthy net-curve test spans fixture commands 0, 0.25, 0.5 and 1 at fixture speeds
+500, 600, 1100 and 1550 rpm. The free-hull 30/336 HP pull-away now measures 0.11817121 m/s
+after 5 s; the earlier review table's 0.5090819 m/s belongs to the prior loss-scaled law.
+No scheduler, hill-hold, park-latch or input-slew behavior was separately changed; the shared
+reserve calculation naturally consumes the corrected engine torque. No wire type changed.
+
+Final implementation gates: MEASURED 728 requested-module tests passed with five intentionally
+ignored; the only first-pass failure was the now-unused DRAG_SAT_SPEED citation allowance.
+After deleting that allowance, all 44 whole-tree guards passed (doc_citations, ui_ascii,
+net_boundary and bake::). The build without optional features (`test --lib --no-run`),
+formatting and CI workspace/all-target clippy passed. The five focused production tests also
+passed, including the physical-output bisection check. Explicit old-motor, old-fade and
+near-whole rounding mutation execution remains to be recorded within the lane budget.
+No capture, pricing run, issue comment or push was taken.

@@ -1649,10 +1649,28 @@ mod tests {
         );
     }
 
+    /// The game's damage model: construction friction remains when combustion is absent.
+    /// A held pedal cannot extend a free hull's coast compared with a released pedal.
+    #[test]
+    fn empty_engine_held_pedal_cannot_extend_free_hull_coast() {
+        let runs = [1.0, 0.0].map(|pedal| {
+            let mut hull = DrivenHull::new();
+            hull.drive_to(5.0); // Fixture rolling initial condition.
+            hull.engine_held(0);
+            hull.distance = 0.0;
+            for _ in 0..64 * 3 {
+                hull.tick(pedal, 0.0);
+            }
+            (hull.distance, hull.speed)
+        });
+        println!("MEASURED empty-engine free coast over 3 s: held/released {runs:?}");
+        assert!(runs[0].0 <= runs[1].0 + 1e-5, "{runs:?}");
+    }
+
     /// The game's damage model: an engine whose HP pool empties while driving stops producing
     /// combustion torque, but its crank keeps turning under stored inertia and the clutch. A
-    /// held full pedal releases motoring drag, so the public speed follows the coasting belt
-    /// rather than holding its last pitch; clutch re-anchors need not be monotonic. On recovery
+    /// construction drag remains under a held pedal, so the public speed follows the coasting
+    /// belt rather than holding its last pitch; clutch re-anchors need not be monotonic. On recovery
     /// the clutch engages against that tracked crank and the tank pulls away again.
     #[test]
     fn an_emptied_engine_runs_down_with_the_belt_and_recovers_from_there() {

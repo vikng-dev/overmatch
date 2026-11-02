@@ -152,12 +152,6 @@ const ALLOWED_IDENTIFIERS: &[(&str, &str, &str)] = &[
     ),
     (
         "src/track/transmission.rs",
-        "DRAG_SAT_SPEED",
-        "The module doc's constant ledger records it as REMOVED (stage B) and says what replaced \
-         it. Deleting the row would delete the record of the removal.",
-    ),
-    (
-        "src/track/transmission.rs",
         "STEER_SERVO_BAND",
         "Same ledger: REMOVED because the steering servo became an exact semi-implicit law, so no \
          proportional band exists to tune. The entry also records that its droop was a bug.",
