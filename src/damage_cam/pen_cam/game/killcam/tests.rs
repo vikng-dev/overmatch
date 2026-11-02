@@ -754,6 +754,7 @@ fn let_go(app: &mut App) {
 /// from the first frame of the new life.
 #[test]
 fn the_death_flow_owns_the_device() {
+    let first_notch = crate::track::drive::drive_feel().notch_step.0;
     for replay in [
         ButtonBinding::Key(KeyCode::Space),
         ButtonBinding::Mouse(MouseButton::Left),
@@ -773,7 +774,11 @@ fn the_death_flow_owns_the_device() {
         hold_all(&mut app, 1, |_| {});
         assert_eq!(clicks(&mut app), 1, "{replay:?}: the trigger clicked");
         let alive = command(&app);
-        assert_eq!((alive.throttle, alive.steer), (1.0, 1.0), "{replay:?}");
+        assert_eq!(
+            (alive.throttle, alive.steer),
+            (first_notch, first_notch),
+            "{replay:?}: the first frame drives in both keys' directions"
+        );
         assert!(alive.fire_primary && alive.fire_secondary, "{replay:?}");
         assert!(alive.aim.is_some(), "{replay:?}: aimed");
         assert_eq!(
@@ -820,8 +825,9 @@ fn the_death_flow_owns_the_device() {
         hold_all(&mut app, 1, |_| {});
         let alive = command(&app);
         assert_eq!(
-            alive.throttle, 1.0,
-            "{replay:?}: the new life's first frame drives"
+            (alive.throttle, alive.steer),
+            (first_notch, first_notch),
+            "{replay:?}: the new life's first frame drives at fresh notches"
         );
         assert!(alive.fire_secondary, "{replay:?}");
         // The first frame's `1` picked the seat the second frame's `2` swaps with.

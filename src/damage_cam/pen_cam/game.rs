@@ -641,6 +641,7 @@ mod tests {
             .init_asset::<super::super::look::LookMaterial>()
             .init_asset::<super::super::look::BeltLookMaterial>()
             .init_resource::<Time>()
+            .init_resource::<Time<Real>>()
             .init_resource::<ShotExplanations>()
             .insert_resource(settings);
         app.world_mut()
@@ -805,9 +806,13 @@ mod tests {
             .contains(&Handle::<Image>::default())
     }
 
+    /// One fixture frame for presentation and wall-clock device input.
     pub(super) fn step(app: &mut App) {
         app.world_mut()
             .resource_mut::<Time>()
+            .advance_by(Duration::from_secs_f32(STEP_S));
+        app.world_mut()
+            .resource_mut::<Time<Real>>()
             .advance_by(Duration::from_secs_f32(STEP_S));
         app.update();
     }
