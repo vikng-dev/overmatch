@@ -222,3 +222,54 @@ clip away combustion work at a guard the physical crank has not reached. Physica
 and final settlement retain their existing outcomes. Both red witnesses pass. MEASURED gates:
 formatting and CI clippy passed; 427 targeted/headless/spec/bake/guard tests passed, four ignored.
 No wire change. Commit: driving: preserve curve work and admit resolved cranks (#146).
+
+## Time boundary and unfinished work
+
+The resumed round reached its measured 60-minute boundary after the final queue waits.
+Items 1–3 above are committed. The remaining draft is preserved outside the bay in
+`/tmp/law-drive-8-unfinished.patch`; production and tests are restored to the last green commit.
+The draft may be resumed by applying that patch, then running
+`python3 /tmp/law-drive-8-mutants-resume.py` from this bay. That script's temporary mutant
+namespace qualification is corrected; its result still needs review, not assumed success.
+
+Item 4 was verified red: forward [5,12], reverse [10], an expected reverse radius of 6 m
+read the forward 3 m radius. A second red showed finite authored inertia/angular speed whose
+crank-energy calculation overflows. The draft adds independent reverse rows, maps all three
+consumers, updates the shipped sheet, spec, Blender fixture and inline bake fixture, and refuses
+non-finite derived crank energy. CI clippy passed on the reverse draft. Its broad test run found
+an inline bake fixture missing reverse rows; that fixture was repaired, but the required final
+checks did not finish. Neither fix is claimed landed.
+
+Item 5 draft adds independent launch affordability/domain and coupled-mass assertions and
+removes the selector-controlled capability gate from the part-pedal test. The requested mutations
+were prepared as function-level clones of the production functions, each run against the same
+unit invariant: launch limit hard-coded to four, hull mass hard-coded to 57 t, and a partial-pedal
+selector returning None. **None counts as executed:** the temporary harness failed to compile
+because its copied mass witness used the wrong module qualification. That harness was removed;
+the draft resume script corrects it. The original compact curve, friction and recirculation
+remain unchanged, and no second-spec/contact composition or additional loaded settling run
+was completed. No mutant survival or rejection is claimed.
+
+Item 6 is verified arithmetically, not fixed. MEASURED binary32 enumeration using the exact
+client tap operation `(notch + sign*step).clamp(-1,1)`, starting from neutral and both clamped
+endpoints, reaches 13 states for step 0.4: -1, -0.800000011920929, -0.6000000238418579,
+-0.4000000059604645, -0.20000001788139343, -0.19999998807907104, 0,
+0.19999998807907104, 0.20000001788139343, 0.4000000059604645,
+0.6000000238418579, 0.800000011920929, 1. The decrement from one equals binary32 tight_on
+0.6 exactly, while the inverse ratios are 1.5 and 0.9999999403953552. The current inverse test
+therefore admits the collision. Admission must enumerate the actual reachable transitions,
+including both signs and rounding. No new failing or ignored test is retained.
+
+Item 7 was not completed. Its HUD composition/backlog rows, staffing encodings, stale comments,
+root requirement and deliberate failure outcomes remain open. No backlog row is closed.
+
+The driving bar does not clear apart from item 1: Slip pricing still needs the owner's decision,
+items 4–7 are unfinished, and the new extreme crank-energy admission defect is only a draft.
+Shipped normal driving is unchanged; authoring now refuses an unresolved crank and governor
+droop has an honest data job. The over-rev and empty-station descent policies are untouched.
+
+Final verification limit: formatting, CI clippy and 427 broad targeted/headless/spec/guard tests
+passed on the committed energy correction (four ignored). The final whole-library run on the
+unfinished draft was cancelled at the time boundary; no final whole-library success is claimed.
+All lane processes were terminated, the draft was removed from the bay, and no push occurred.
+Commit: driving: record the remaining final-review work (#146).
