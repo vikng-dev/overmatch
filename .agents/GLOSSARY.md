@@ -228,7 +228,7 @@ The vehicle-authored engine envelope, gear ladders, steering radii, capacities, 
 The one drivetrain law behind the joint two-output seam: *fixed radii*, geared regenerative steering constrained to the declared radius detents (the L600 family). A vehicle with another drivetrain family adds it as spec data plus a law; the design doc's architecture menu names the candidates.
 
 **Signed shaft**:
-Mean belt motion expressed relative to the engaged forward or reverse ladder. Normal motion in the selected direction is positive; a belt back-driven against that direction is negative. The sign belongs to the shaft, not the engine crank.
+Mean belt motion expressed relative to the engaged forward or reverse ladder. Normal motion in the selected direction is positive; a belt back-driven against that direction is negative. Its reference is the engaged ladder; the crank has its own firing-direction reference.
 
 **Engine crank** (`ω_e`):
 The engine-side angular speed, positive in its firing direction and negative when back-driven. Its rotation determines engine rpm; belt speed does not stand in for it while the clutch slips.

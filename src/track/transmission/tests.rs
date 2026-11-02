@@ -203,6 +203,12 @@ fn readout_reports_crank_state() {
         r.rpm, tp.engine.idle_rpm,
         "fresh spec state must read authored idle"
     );
+    // Fixture: reverse crank rotation, independent of the selected ladder.
+    let backward = TransmissionState {
+        omega_e: -tp.engine.idle_rpm * RPM_TO_RAD,
+        ..st
+    };
+    assert_eq!(readout(&backward, &tp).rpm, -tp.engine.idle_rpm);
     // Driving in reverse at a steady R1 speed: the lock puts the crank AT the geared
     // speed of the belt the transmission itself integrated (`k·s·m_next` — with this
     // harness holding the INPUT speeds externally, the belt it computes each tick sits
@@ -2784,10 +2790,12 @@ fn ceiling_brake_requires_a_driver_and_holds_the_current_gear() {
             let staffed = step(&fp, &tp, &mut state, &inp);
             assert!(!staffed.shifting);
             assert_eq!(state.gear, gear);
+            // Resolution: f32 integration at the construction-derived ceiling.
             assert!(staffed.next_speeds[0] * dir <= ceiling + 1e-5);
             inp.supply.control_authority = false;
             inp.intent = DriveIntent::Unmanned;
             let unworked = step(&fp, &tp, &mut { initial }, &inp);
+            // Resolution: distinguish braking from f32 integration roundoff.
             assert!(
                 unworked.next_speeds[0] * dir > staffed.next_speeds[0] * dir + 1e-5,
                 "ceiling brakes require a staffed Driver"
@@ -2876,6 +2884,7 @@ fn staffed_zero_rate_stops_and_parks_without_engine_work() {
                 speed = step(&fp, &tp, &mut state, &inp).next_speeds[0];
             }
             assert!(state.park, "staffing, not task throughput, owns park");
+            // Resolution: f32 cancellation at a supported stop.
             assert!(speed.abs() < 1e-5, "released coast must stop: {speed}");
             for command in [-1.0, 1.0] {
                 // Fixture: either retained direction at rest.
@@ -2889,13 +2898,14 @@ fn staffed_zero_rate_stops_and_parks_without_engine_work() {
                 inp.supply = supply;
                 let report = step(&fp, &tp, &mut state, &inp);
                 assert!(state.park);
+                // Resolution: f32 cancellation at a supported stop.
                 assert!(report.next_speeds.iter().all(|v| v.abs() < 1e-5));
             }
         }
     }
 }
 
-/// A restaffed Driver must brake rollback in the retained gear, never buy a cut for
+/// A restaffed Driver retains the gear during rollback, never buying a cut for
 /// backward motoring drag. Gear landings also obey the crank ceiling in either direction.
 #[test]
 fn restaffed_rollback_retains_gear_and_refuses_backward_overrev() {
@@ -2916,17 +2926,12 @@ fn restaffed_rollback_retains_gear_and_refuses_backward_overrev() {
     inp.supply.control_authority = false;
     inp.intent = DriveIntent::Unmanned;
     inp.supply.task_rate = 0.0;
-    // The production adapter masks the retained notch while the station is empty.
-    inp.intent = DriveIntent::Axes(DriveAxes::default());
-    inp.throttle = 0.0;
     assert!(!step(&fp, &tp, &mut state, &inp).shifting);
     inp.supply = DriveSupply::WHOLE;
     inp.intent = DriveIntent::Axes(DriveAxes {
         throttle: 1.0,
         steer: 0.0,
     });
-    inp.throttle = 1.0;
-    inp.speeds = [speed; 2];
     let report = step(&fp, &tp, &mut state, &inp);
     assert!(!report.shifting, "restaffing cannot buy a rollback cut");
     assert_eq!(state.gear, gear);
@@ -3225,4 +3230,22 @@ fn coast_expectation_includes_the_rolling_fade_for_every_drivetrain() {
         fade_roots > 0,
         "the expectation must exercise the rolling fade band"
     );
+}
+
+/// A backward crank cannot fire or acquire a positive idle floor. Crank settlement relies
+/// on the live sign even though candidate pricing may assume a forward free crank.
+#[test]
+fn backward_live_crank_has_no_idle_floor() {
+    for (_, tp) in class_drivetrains() {
+        assert!(idle_floor(&tp, DriveSupply::WHOLE, 0.0).is_some());
+        let state = TransmissionState {
+            clutch: ClutchState::In,
+            omega_e: -tp.engine.idle_rpm * RPM_TO_RAD,
+            ..fresh(&tp)
+        };
+        let inp = input(1.0, 0.0, [0.0; 2], [0.0; 2]);
+        let [fuel, catch, drag] = engine_torques(&tp, inp.supply, state.omega_e, 1.0);
+        let (floor, over) = crank_guards(&tp, &inp, &state, 1.0, fuel + catch - drag);
+        assert_eq!(floor, -over);
+    }
 }

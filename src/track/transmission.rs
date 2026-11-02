@@ -193,7 +193,7 @@ pub struct TransmissionParams {
     /// Zero-throttle engine drag (compression braking): the MID-BAND anchor of the rising
     /// motoring-torque curve, as a fraction of peak torque. [`engine_drag`] equals
     /// `drag_fraction × peak` at `ω_mid = (idle + governed)/2` and grows linearly with
-    /// crank speed from the authored actuation threshold base. A downhill equilibrium exists
+    /// crank speed from its Coulomb base. A downhill equilibrium exists
     /// only where this drag plus rolling resistance balances grade force before clutch guards
     /// cap transmitted drag.
     /// A drag TORQUE at the crank (design §3), never the negative half of rated power.
@@ -757,6 +757,7 @@ fn engine_torques(
         return [0.0, 0.0, drag]; // A backward crank cannot fire.
     }
     let pedal = (command / engine_control().drag_throttle_release.value).clamp(0.0, 1.0);
+    // Cubic smoothstep has zero endpoint slopes: 3p² - 2p³.
     let released = pedal * pedal * (3.0 - 2.0 * pedal);
     let rpm = omega / RPM_TO_RAD;
     let curve = tp.torque_at(rpm);
@@ -1392,12 +1393,9 @@ fn crank_free_torque(
 /// that lands `d` exactly on target after this tick's integration (`d` dynamics:
 /// `d_next = d + (F_s/2 − R_d)/I·dt`), reaction-compensated, clamped to the per-output
 /// convention's bound. Exact inside capacity, honest slip beyond it — and no proportional band:
-/// the old P law's steady-state droop let the ground reaction eat the command (the Tiger's whole
-/// neutral target, 0.21 m/s, sat INSIDE the 0.25 m/s band, so a sustained pivot ran at ≤ half
-/// capacity and crawled at 0.03 rad/s — a vehicle-scaling defect the T-34's 0.46 m/s target
-/// masked). The difference-axis bound is 2× the per-output capacity: `F_s` splits `±F_s/2` onto
-/// the outputs, and each output's share is what the per-output datum caps (see
-/// [`TransmissionParams::steer_capacity_n`] — the pivot-dead convention fix).
+/// a proportional band permits steady droop when the target lies inside that band.
+/// The difference-axis bound is twice the per-output capacity because each output receives
+/// half of `F_s`; see [`TransmissionParams::steer_capacity_n`].
 fn steering_force(
     tp: &TransmissionParams,
     fp: &ForceParams,
@@ -1424,10 +1422,7 @@ fn steering_force(
     // consumes it.
     let neutral = neutral_turn(inp, m);
     if neutral {
-        // The marginal brake-gated neutral turn: a slow capacity-limited servo
-        // toward the DERIVED pivot scale `neutral_d_full = κ_tight(F1) ×
-        // v1_governed` — the radii table's own gear-independent invariant (the
-        // unprovenanced `neutral_fraction` that used to shrink it was deleted).
+        // The neutral target is construction's `neutral_d_full` half-difference.
         f_s = servo(inp.steer * tp.neutral_d_full);
     } else {
         // The geared-radius constraint g = d − s·κ·|m| = 0, solved semi-implicitly:

@@ -292,6 +292,8 @@ pub(crate) fn standard_drive_row(
         gear.push('P');
     }
     let rpm = format!("{:>3.1}k", operating.rpm / 1_000.0);
+    // Display rounding must not give zero a direction.
+    let rpm = if rpm == "-0.0k" { "0.0k" } else { &rpm };
     format!("Gear {gear:<4}  RPM {rpm}  {speed}")
 }
 
@@ -454,18 +456,30 @@ mod tests {
     /// magnitude, while the owner row preserves the signed crank state.
     #[test]
     fn backward_crank_keeps_public_rotation_and_signed_hud_rpm() {
-        // Fixture: a backward crank inside the independent over-rev guard.
-        let state = TransmissionState {
-            omega_e: -3_100.0 * crate::track::transmission::RPM_TO_RAD,
-            ..TransmissionState::stopped()
-        };
-        let public = crate::track::sim::EngineRpm::of(&TankTransmission(state));
-        let operating = DriveReadout {
-            rpm: -3_100.0,
-            gear_label: "F6".into(),
-        };
-        let row = standard_drive_row(Some((&state, &operating)), 0.0);
-        assert_eq!((public.rpm(), row.contains("-3.1k")), (3_100.0, true));
+        let spec: crate::spec::TankSpec = crate::provenance::from_shipped_str(
+            crate::tank::TANK_SPEC_PATH,
+            include_str!("../assets/tiger_1/tiger_1.tank.ron"),
+        )
+        .unwrap();
+        let tp = spec
+            .track
+            .nominal_transmission_params(&spec.roadwheels)
+            .unwrap();
+        // Fixture: backward rotations covering visible rpm and values rounding to zero.
+        for rpm in [-3100.0_f32, -40.0, -0.0] {
+            let state = TransmissionState {
+                omega_e: rpm * crate::track::transmission::RPM_TO_RAD,
+                ..TransmissionState::stopped()
+            };
+            let public = crate::track::sim::EngineRpm::of(&TankTransmission(state));
+            let operating = crate::track::transmission::readout(&state, &tp);
+            let row = standard_drive_row(Some((&state, &operating)), 0.0);
+            assert_eq!(public.rpm(), operating.rpm.abs());
+            assert!(!row.contains("-0.0k"));
+            if rpm == -3100.0 {
+                assert!(row.contains("-3.1k"));
+            }
+        }
     }
 
     /// Players need both signed lever positions, including neutral and both bounds. The marks

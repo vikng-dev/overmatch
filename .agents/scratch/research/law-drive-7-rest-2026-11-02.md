@@ -20,13 +20,13 @@ MEASURED start: 2026-11-02 17:23:15 UTC. Lane limit: 60 minutes (owner instructi
 | Audit 5 | Slip admission narrower than accepted design | verified source: at-rest check excludes moving entries below idle in launch gears | not fixed; fallback in driving: record the rejected Slip experiment (#146) |
 | Audit 7 | over-rev guard has two jobs | verified source and audit measurement: crank guard also bounds available drag on descent | driving: declare the over-rev engine stand-in (#146) |
 | Codex P2 | S3 equilibrium admits the rolling-resistance fade band | verified algebra: full rolling resistance is valid only above its owner's fade speed | driving: admit and exercise different drivetrain construction (#146) |
-| Claude P3 | HUD negative zero | verified source: signed formatting rounds small backward rpm to negative zero | pending step 6 |
-| Claude P3 | backward HUD witness bypasses `readout` | verified source: it constructs the display value directly; readout has no backward assertion | pending step 6 |
-| Claude P3 | live idle-floor sign check has no witness | verified source: existing backward engine/gear cases do not distinguish this floor admission | pending step 6 |
-| Claude P3 | rollback witness overclaim, no-op and unlabelled precision | verified source at all named sites | pending step 6 |
-| Claude P3 | `drag_fraction` says actuation threshold | verified source: the base is Coulomb drag, with no actuation threshold | pending step 6 |
-| Claude P3 | Signed shaft excludes crank sign | verified source: contradicts the adjacent signed crank definition | pending step 6 |
-| Claude P3 | determinism fixture carries an unsupported measurement | verified record: no new measurement supports the current-law 4 m/s claim | pending step 6 |
+| Claude P3 | HUD negative zero | verified source: signed formatting rounds small backward rpm to negative zero | driving: close the remaining control review findings (#146) |
+| Claude P3 | backward HUD witness bypasses `readout` | verified source: it constructs the display value directly; readout has no backward assertion | driving: close the remaining control review findings (#146) |
+| Claude P3 | live idle-floor sign check has no witness | verified source: existing backward engine/gear cases do not distinguish this floor admission | driving: close the remaining control review findings (#146) |
+| Claude P3 | rollback witness overclaim, no-op and unlabelled precision | verified source at all named sites | driving: close the remaining control review findings (#146) |
+| Claude P3 | `drag_fraction` says actuation threshold | verified source: the base is Coulomb drag, with no actuation threshold | driving: close the remaining control review findings (#146) |
+| Claude P3 | Signed shaft excludes crank sign | verified source: contradicts the adjacent signed crank definition | driving: close the remaining control review findings (#146) |
+| Claude P3 | determinism fixture carries an unsupported measurement | verified record: no new measurement supports the current-law 4 m/s claim | driving: close the remaining control review findings (#146) |
 | Owner condition | second inline drivetrain and class invariants | verified: three constructions share launch, reverse, slope, settling and staffed-descent invariants | driving: admit and exercise different drivetrain construction (#146) |
 | Tank #2 | ten-degree unstaffed descent must accelerate | verified test-premise defect; not a game-law defect: stronger drag can arrest it; assertions retained with construction-derived demand | driving: admit and exercise different drivetrain construction (#146) |
 | Whole-library gate | spec tests pin removed class caps and belt floor | verified red; obsolete cases deleted; owning Blender spec is admitted directly | driving: admit and exercise different drivetrain construction (#146) |
@@ -283,3 +283,56 @@ The final unchanged-source verification batch covers this step and the independe
 its measured totals are in the closing evidence below. Commit: driving: admit and exercise different drivetrain construction (#146).
 
 MEASURED final verification batch: 2,216 library tests passed, 26 ignored; 44 whole-tree guards and 7 explicit class witnesses passed. CI clippy, formatting and diff checks passed.
+
+## Step 6: review closure and final evidence
+
+MEASURED red: the backward HUD witness now goes through the real readout and fails on
+negative-zero formatting. The formatter normalizes only the already-formatted zero string;
+no new rpm threshold is authored. A real backward crank is also covered directly by readout.
+The idle-floor witness covers the live negative-crank admission on every class drivetrain;
+it passed on the current law and distinguishes the positive catch floor from the negative
+independent guard. Public audio still consumes rotation magnitude.
+
+The rollback witness now claims retained gear, not an unasserted braking outcome. It uses
+Unmanned intent with the retained request rather than manually masking the request, drops
+the no-op speed assignment, and labels stop/ceiling precision as Resolution. Drag's base is
+Coulomb drag, and shaft/crank signs have their own references. The unsupported determinism
+measurement is removed rather than replaced by a new claim. Historical steering numbers
+and deleted-control narration are removed while preserving why a proportional band loses
+capacity. The cubic smoothstep's exact coefficients are stated beside it.
+
+Decisions: retain the failed step-4 fallback and its tests; no extra physical gate or state.
+Keep the over-rev outcome as declared data, with no new law. Admit construction by domains,
+finite derived arithmetic and representation, rather than by vehicle-class caps. Preserve
+all brake assertions; derive a fixture demand that actually needs brakes. Reuse one verified
+working tree for the two independent commit groups, with no source edit between checks and
+commits. No wire change: PROTOCOL_REV remains 80. No engine API was added. The spec test edit
+carries the Blender fixture update in the same step-7 commit. No applicable lens-backlog row
+names an edited file; none was silently waived. All five lenses were read against the diff.
+
+Final numeric inventory in transmission.rs, MEASURED from source with strings/comments
+excluded: 0, 0.0, 0.05, 0.5, 1, 1.0, 2, 2.0, 3, 3.0, 3.6, 8, 24, 60.0, 64.0, 100.0.
+Only Resolution values remain authored in code: 0.05 zero/rest tolerances, 24 bisections,
+64 Hz solver clock and 100 rpm governor ramp. Every other number is exact: zero/identity,
+paired outputs and half factors, cubic smoothstep coefficients, eight-field projection,
+km/h conversion 3.6, rpm conversion tau/60, and u8::MAX (255) representation bounds.
+Tau is an exact mathematical constant. The over-rev 100 rpm is now StandIn data, separately
+from the Resolution governor ramp. No production line requires a vehicle-specific change for
+the second drivetrain; only each inline Fixture's declared construction differs. The narrow
+Slip/refusal laws retain data-derived boundaries and pass both constructions unchanged.
+
+The audit's historical line reduction was independently checked in git: 3,152 to 1,964.
+The lane's dispatch baseline was already 1,966 lines and eight state fields. Thus the missing
+1,188-line/nine-field shrink is not an unrealized projection: that reduction preceded this
+lane. Step 4's failed experiment cannot be presented as a new simplification. Its broader
+Slip/landing design needs another audit. The over-rev engine outcome and empty-station
+brake policy remain the owner's previously reserved scope, not blockers or new decisions.
+
+Players stop buying cuts during a service-braked rollback, stop releasing park for steering
+that cannot be delivered, and stop seeing a false minus on zero-rounded rpm. Staffed ceiling
+braking works independently of engine throughput. Steering enters and exits each detent at
+one threshold. These are test-proved paths, not a visual capture or a playtest.
+
+MEASURED closing source: transmission.rs 1,950 lines (dispatch 1,966), 8 state fields (dispatch eight). PROTOCOL_REV remains 80.
+MEASURED line deltas against dispatch: +181; implementation-file/assets bucket -72; dedicated-test-file bucket +253; all tracked files +520 (net lines removed -520). The file buckets include inline tests in their owning implementation file.
+MEASURED closing evidence written 2026-11-02 19:24:20 UTC, 60.09 minutes after restart. No push, merge, release, issue comment, capture or pricing run. All started test processes completed under the single machine lock, unattended, headless and muted.

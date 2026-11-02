@@ -1875,7 +1875,6 @@ fn scripted_determinism_run() -> ScriptedDeterminismRun {
     // Fixture: a rolling grade entry exercises support-priced gear choices and paid cuts.
     let rot = Quat::from_rotation_x(20.0_f32.to_radians());
     // Fixture: the rolling entry keeps the front contact on the slope face during gear response.
-    // MEASURED at 4.0 m/s: the front contact reaches the crest's rounding during that response.
     let approach_speed = 3.0;
     // DERIVED fixture placement: put the rest envelope on the actual terrain face along its
     // normal, rather than dropping the rig from an unrelated world height.
