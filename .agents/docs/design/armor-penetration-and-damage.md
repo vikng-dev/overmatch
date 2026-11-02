@@ -1187,12 +1187,24 @@ including zero. Cyclic intervals use the same work-free phase; neither interval 
 a load rate. The scalar work representation preserves actual work rather than turning tick
 rounding into extra work. This is ADR-0029's stable absolute-deadline contract with bounded work.
 
-Subject: the game's damage model, game state only. Drive scales the delivered torque envelope:
-engine torque, clutch capacity and steering capacity. The scheduler and force solve consume the
-same supplied envelope. Driver intent passes through unchanged, so the clutch/drag thresholds
-read the full command and opposite-throttle braking retains full service capacity. Explicit
-repair and phase holds select the brakes without changing the underlying torque supply;
-the panel maps either hold to zero applied Drive. Servo slew keeps its requirement-rate scale.
+Subject: the game's damage model, game state only. Drive's requirement is read through three
+views, each where its part acts (a view keeps one kind of part at its live quality and counts
+every other part whole). The **crew view** decides whether a command exists: with nobody
+serving the Driver station there is no driver intent at all (no service brake, park release,
+ladder swap or clutch latch), and the tank coasts with its controls released. While someone
+serves it, the command passes through whole and the occupant's competence scales the fueling
+the driver delivers: a less skilled driver delivers less of what the engine supplies. The
+**engine view** scales combustion torque and the idle governor it powers; the **transmission
+view** scales the clutch's and steering member's transmitted capacity. Brakes, engine drag and
+compression braking are construction and never scale. An engine whose idle governor cannot
+exceed its motoring drag has no stall guard: its crank runs down under drag or follows the belt.
+A pool share below the engine's own loss share therefore cannot keep the engine pulling, an
+emergent threshold of its construction. The scheduler prices reserves against the same supply.
+A supply change takes effect on its tick; the crank's inertia smooths it, not the command
+slew. `TankSpec::validate` refuses a Drive requirement naming any other module. Explicit
+repair and phase holds select the brakes without changing the underlying supply; the panel
+shows the delivered share (the lesser of delivered combustion and transmitted capacity), zero
+under a hold or with nobody driving. Servo slew keeps its requirement-rate scale.
 Automatic cyclic cadence, fire eligibility and sight access keep their mechanism or on/off
 gates. The panel shows Drive's supplied rate (zero during either hold), actual weapon deadlines
 and explicit load pauses; the sight-derived Gunner percentage has no rate consumer.
@@ -2132,3 +2144,40 @@ under a phase hold; the repair fixture checks the same distinction while repair 
 Final gates: MEASURED 885 targeted tests passed, six intentionally ignored; all 44 whole-tree
 `doc_citations`, `ui_ascii`, `net_boundary` and `bake::` guards passed. Formatting and the CI
 workspace/all-target clippy feature set passed. The lane took no captures or pricing runs.
+
+#### Who drives, and what a reduced engine delivers (#228)
+
+Subject: the game's damage model, game state only. The second review of the reduced-supply
+lane, decided against the code. Every fix landed in
+`damage: let the Driver station decide intent and each part scale its own supply (#228)`.
+
+| Reviewer | Finding | Verified / not a defect | Fixed in |
+|---|---|---|---|
+| Claude | P1: with the Driver station's crew member out of action, intent stayed live (full service brakes on S, park release, ladder swap, clutch latch) | verified: S held at 5 m/s stopped the tank in 2.09 s | the crew view decides intent; nobody at the station is `DriveIntent::Unmanned` |
+| Claude | P2: at Drive 0 the crank froze, so the public engine speed held its pitch | verified: 2443 rpm held for 1 s after the engine pool emptied | the engine view scales only combustion and the idle governor; an engine that cannot idle has no stall floor |
+| Claude | P2: scaling peak torque scaled motoring drag, and the clutch clamped engine braking again | verified: a half engine coasted a descent faster than a whole one | drag stays construction; only the transmission view scales clutch and steering capacity |
+| Codex | P2 (same as Claude's first P3): the brake half of the reduced-supply test bypassed `step` | verified: `driver_intent` and `apply_brake_stop_forces` never read the supply | the test brakes through `step` and requires forces equal to the whole engine's |
+| Claude | P3: the brake test bypassed `step` | verified, as the Codex P2 | as the Codex P2 |
+| Claude | P3: supply now steps within a tick where the old command slew faded it, with no record | verified | recorded, not restored: the slew is input shaping, and an engine's torque falls on the tick it loses combustion; the crank's inertia smooths it (§7b, F18 watches it) |
+| Claude | P3: rounding showed a serving module as 0 % and a short one as 100 % | verified: 1 of 336 read 0 %, 335 read 100 % | the panel clamps a serving share to 1–99 % |
+| Claude | P3: `tp.clone()` copied five vectors per tank per tick | verified | each quantity scales where it is used; the scheduler takes the supply |
+| Claude | P3: F18 "Lives in" omitted the drive-supply law, repair and crew data | verified | F18 lists them |
+
+MEASURED through the production adapter on a fixture hull (data-derived running gear, Drive
+`[Driver, Engine, Transmission]`, 336 HP fixture pools), before → after:
+
+| Case | Before | After |
+|---|---|---|
+| Driver out of action at 5.00 m/s, S held | stopped in 2.09 s over 6.14 m | no command: bit-identical to released controls, 1.14 m/s and 43.7 m after 20 s |
+| 10° descent from 5 m/s, throttle released, speed after 10 s | whole 16.53 m/s, half engine 17.88 m/s | whole 16.53 m/s, half engine 16.21 m/s |
+| Engine pool emptied at 2443 rpm, W held, rpm after 1 s | 2443 (frozen) | 1284 (2061, 1786, 1520 at 0.25 s steps); on recovery 1341 rpm on the first tick, pulling away again |
+
+A 30 of 336 HP engine now latches the clutch under a full command but cannot overcome its own
+motoring drag (MEASURED −0.011 m/s fixture belt speed, against 0.160 m/s for a half engine and
+0.207 m/s whole). That is the law's emergent stall threshold, not a gate. A Drive requirement
+naming a module other than Engine or Transmission is refused at load.
+`capability_effectiveness` lost its last consumer and is deleted. No wire type changed.
+
+Final gates: MEASURED 898 targeted tests passed, six intentionally ignored, including the
+whole-tree `doc_citations`, `ui_ascii`, `net_boundary` and `bake::` guards; formatting and CI
+clippy passed. No capture or pricing run.

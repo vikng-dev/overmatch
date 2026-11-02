@@ -631,8 +631,10 @@ Subject: the game's damage model, game state only. Crew are HP pools at stations
 
 **Default.** A module contributes its held HP share, continuously; empty is out of action.
 A crew station contributes its occupant's competence while in action. Reload and belt swap use
-the composed rate with stable absolute deadlines, drive scales delivered torque, and
-servo slew keeps its rate scale. The complete timing rule and consumer contract live in design
+the composed rate with stable absolute deadlines. Drive scales what each part delivers
+(driver competence the fueling, the engine its combustion, the transmission its transmitted
+capacity), with a command only while someone serves the Driver station. Servo slew keeps its
+rate scale. The complete timing rule and consumer contract live in design
 §7b (`.agents/docs/design/armor-penetration-and-damage.md`).
 
 **Preserved alternative.** Authored per-function checkpoints, such as lower power at or below
@@ -641,15 +643,20 @@ there is no checkpoint table, feature flag or second implementation in code.
 
 **Why it's a playtest call.** Watch whether partial module loss and foreign-station competence
 are legible through reload, driving and slew, or whether discrete checkpoints communicate them
-better. Drive preserves full driver intent and service braking while reducing its torque
-supply; test acceleration and steering in forward and reverse. Both phase and repair holds
+better. Drive preserves full driver intent, service braking and engine braking while reducing
+its torque supply; test acceleration, steering and descents in forward and reverse, a driver
+put out of action at speed (the tank coasts), and an engine at a small share, which cannot
+overcome its own motoring drag. Supply changes on the tick of a dose, swap or knockout, and
+the crank's inertia, not the command slew, smooths it: judge whether that loss reads. Both phase and repair holds
 select the service brakes. No timing or capture measurement was taken in this lane.
 
 **Revert cost.** Medium, as specified in design §7b: module resolver, authored checkpoint data,
 admission and invariant tests. The generic rate consumers and bounded load-work wire carrier can stay. Keep the discarded continuous path in git when choosing checkpoints.
 
-**Lives in.** `src/damage.rs`, `src/shooting.rs`, `src/tank/model.rs`, `src/spec.rs`,
-`src/track/sim.rs`, `src/tank/servo.rs`, `src/crew_ui.rs`; tracker #228.
+**Lives in.** `src/damage.rs`, `src/damage/repair.rs`, `assets/damage/crew.ron`,
+`src/shooting.rs`, `src/tank/model.rs`, `src/spec.rs`, `src/track/sim.rs`,
+`src/track/drive.rs`, `src/track/transmission.rs`, `src/tank/servo.rs`, `src/crew_ui.rs`;
+tracker #228.
 
 Subject: the game's damage model, game state only. **Provisional repair extension:** any module
 below capacity may start repair, owing only missing HP at the shared work rate. Its current
@@ -667,3 +674,8 @@ supply and show zero applied Drive (`damage: preserve torque supply during brake
 Repair snapshots also refuse active work for non-module pools before applying any HP
 (`damage: refuse repair work on non-module pools (#228)`). These are boundary invariants;
 design §7b and its #228 verification record remain the home of the rule and evidence.
+
+Subject: the game's damage model, game state only. `damage: let the Driver station decide
+intent and each part scale its own supply (#228)` reads Drive through its crew, engine and
+transmission views: nobody at the Driver station means no command, and engine drag stays
+construction. Design §7b owns the rule and its verification table.
