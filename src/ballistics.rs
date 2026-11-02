@@ -1322,8 +1322,9 @@ impl FireShell {
     }
 }
 
-/// The game's damage model: what flies between contacts. A resisting bite leaves only the core;
-/// discovery advances this value once and playback presents the stored result.
+/// The game's damage model: what flies between contacts. A resisting bite leaves the core and
+/// a burst leaves its nose. This type owns their drag rebuild; contact discovery stores its
+/// result and playback presents it.
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct FlyingBody {
     mass: f32,
@@ -1333,13 +1334,18 @@ pub(crate) struct FlyingBody {
 }
 
 impl FlyingBody {
+    /// At fixed form, quadratic drag scales with calibre squared over mass.
+    fn with_body(self, body: RoundBody) -> Self {
+        Self {
+            mass: body.mass,
+            caliber: body.caliber,
+            drag_k: self.drag_k * self.mass / body.mass * (body.caliber / self.caliber).powi(2),
+        }
+    }
+
     fn after(self, decision: &resolve::Decision, core: RoundBody) -> Self {
         if matches!(decision, resolve::Decision::Bite(_)) {
-            Self {
-                mass: core.mass,
-                caliber: core.caliber,
-                drag_k: self.drag_k * self.mass / core.mass * (core.caliber / self.caliber).powi(2),
-            }
+            self.with_body(core)
         } else {
             self
         }
@@ -3662,10 +3668,7 @@ fn burst_here(
     let ended = if speed > 0.0 {
         let projectile = &mut **shell.projectile;
         projectile.round = bound(nose);
-        // `k` is the form × calibre² / mass: at the round's calibre and form, it scales as
-        // 1 / mass.
-        projectile.flying.drag_k *= projectile.flying.mass / nose.mass;
-        projectile.flying.mass = nose.mass;
+        projectile.flying = projectile.flying.with_body(nose);
         false
     } else {
         true
