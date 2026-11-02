@@ -41,6 +41,9 @@ Code:
 - A comment stating an invariant, a unit, an ordering constraint, a reason, a rejected
   alternative, a counterexample, a measured bound or a MEASURED/DERIVED label. Its wording may be a
   padding finding; its content stays.
+- A version-pinned upstream citation (crate, version, file and lines): the next engine bump rechecks
+  the claim by it.
+- The reason behind player-visible copy: the next copy trim has nothing else to keep a clause by.
 - A protective newtype, an intermediate whose name carries a unit or a derivation, a reused scratch
   buffer.
 - Similar code stating different knowledge: sim and view, server and client.
