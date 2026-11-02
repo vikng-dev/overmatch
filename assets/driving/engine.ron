@@ -2,4 +2,6 @@
     idle_catch_droop_rpm: (50.0, StandIn("missing Driver foot actuation: proportional idle recovery width in rpm")),
     idle_guard_band_rpm: (100.0, StandIn("missing engine stall/restart law: sub-idle clutch slip guard in rpm while combustion can sustain idle")),
     rev_match_band_rpm: (200.0, StandIn("missing gearbox fuel actuator dynamics: proportional rev-match fueling width in rpm")),
+    drag_throttle_release: (0.5, StandIn("missing fuel-pedal to net-loss recovery law: command share at which the authored net curve is fully recovered")),
+    motoring_drag_base_share: (0.33333334, StandIn("missing measured Coulomb/viscous split of motoring torque: base share of the mid-band drag anchor")),
 )

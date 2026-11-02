@@ -600,7 +600,6 @@ fn record_tick(
                 for field in transmission_state_projection(&transmission.0) {
                     match field {
                         TransmissionProjectionValue::U8(value) => trn.push(Value::from(value)),
-                        TransmissionProjectionValue::I8(value) => trn.push(Value::from(value)),
                         TransmissionProjectionValue::Bool(value) => trn.push(Value::from(value)),
                         TransmissionProjectionValue::F32(value) => trn.push(num(value)),
                         TransmissionProjectionValue::Scheduler { tag, from, to } => {

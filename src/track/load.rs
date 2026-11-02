@@ -6,41 +6,52 @@ use bevy::math::Vec3;
 
 use super::transmission::{TransmissionParams, TransmissionState};
 
-/// Numerical force resolution, admitted before play; the scheduler does not consume it yet.
-#[derive(bevy::prelude::Resource)]
+/// Numerical force deadband: observer and crank arithmetic have different scales.
+#[derive(bevy::prelude::Resource, Clone, Copy)]
 pub(crate) struct DriverResolution {
-    pub(crate) landing_force_margin_share: f32,
+    pub(crate) observer_weight_share: f32,
+    pub(crate) crank_roundoff_share: f32,
 }
 
 impl DriverResolution {
-    /// M scales with the vehicle's own nominal weight; the data never carries another rig's N.
-    #[cfg(any(test, feature = "bitprobe"))]
-    pub(crate) fn margin_n(&self, weight_n: f32) -> f32 {
-        self.landing_force_margin_share * weight_n
+    /// L is homogeneous in weight; cancellation in the crank acceleration instead follows
+    /// J*omega/dt reflected through the gearbox. Neither term is a vehicle-specific Newton floor.
+    pub(crate) fn margin_n(&self, weight_n: f32, tp: &TransmissionParams) -> f32 {
+        self.observer_weight_share * weight_n
+            + self.crank_roundoff_share * tp.roundoff_force_scale()
     }
 
     pub(crate) fn load() -> Self {
-        #[derive(serde::Deserialize)]
-        #[serde(deny_unknown_fields)]
-        struct Source {
-            landing_force_margin_share: crate::provenance::Labelled<f32>,
-        }
-        const PATH: &str = "assets/driving/driver.ron";
-        let source: Source = crate::provenance::from_shipped_str(
-            PATH,
-            include_str!("../../assets/driving/driver.ron"),
-        )
-        .unwrap_or_else(|error| panic!("{error}"));
-        let margin = source.landing_force_margin_share;
-        assert!(
-            matches!(margin.label, crate::provenance::Provenance::Resolution(_))
-                && margin.value.is_finite()
-                && margin.value > 0.0,
-            "{PATH}: landing_force_margin_share must be finite, positive and labelled Resolution; remeasure the weight-normalized landing gap and observer spread",
-        );
-        Self {
-            landing_force_margin_share: margin.value,
-        }
+        static DATA: std::sync::LazyLock<DriverResolution> = std::sync::LazyLock::new(|| {
+            #[derive(serde::Deserialize)]
+            #[serde(deny_unknown_fields)]
+            struct Source {
+                observer_weight_share: crate::provenance::Labelled<f32>,
+                crank_roundoff_share: crate::provenance::Labelled<f32>,
+            }
+            const PATH: &str = "assets/driving/driver.ron";
+            let source: Source = crate::provenance::from_shipped_str(
+                PATH,
+                include_str!("../../assets/driving/driver.ron"),
+            )
+            .unwrap_or_else(|error| panic!("{error}"));
+            for (field, number) in [
+                ("observer_weight_share", &source.observer_weight_share),
+                ("crank_roundoff_share", &source.crank_roundoff_share),
+            ] {
+                assert!(
+                    matches!(number.label, crate::provenance::Provenance::Resolution(_))
+                        && number.value.is_finite()
+                        && number.value > 0.0,
+                    "{PATH}: {field} must be finite, positive and Resolution; remeasure the observer and same-instant crank residual separately"
+                );
+            }
+            DriverResolution {
+                observer_weight_share: source.observer_weight_share.value,
+                crank_roundoff_share: source.crank_roundoff_share.value,
+            }
+        });
+        *DATA
     }
 }
 
@@ -63,6 +74,8 @@ pub struct PerceivedLoad {
     pub grade_n: f32,
     pub rolling_n: f32,
     pub turn_n: f32,
+    /// Uniform-pressure resisting moment (N m), before choosing a gear-specific radius.
+    pub turn_moment_nm: f32,
     pub grip_n: f32,
 }
 
@@ -82,6 +95,24 @@ pub fn turn_radius(tp: &TransmissionParams, state: &TransmissionState) -> Option
         2 => Some(tight),
         _ => panic!("the transmission admits only straight, wide and tight detents"),
     }
+}
+
+/// Both driving adapters observe the same ladder frame. Support-only calibration has no
+/// vehicle weight and therefore no terrain load; it is not a vehicle with an invented mass.
+pub(crate) fn observe_rig<'a>(
+    contacts: impl Iterator<Item = &'a SupportFact> + Clone,
+    forward: Vec3,
+    fp: &super::forces::ForceParams,
+    tp: &TransmissionParams,
+    state: &TransmissionState,
+) -> PerceivedLoad {
+    let weight = fp.grip.map_or(0.0, |grip| 2.0 * grip.side_weight);
+    observe(
+        contacts,
+        forward * if state.reverse { -1.0 } else { 1.0 },
+        weight,
+        turn_radius(tp, state),
+    )
 }
 
 /// `L = W sin(theta) + c_rr W cos(theta) + mu W cos(theta) length/(4 radius)`.
@@ -138,6 +169,7 @@ pub fn observe<'a>(
         rolling_n: rolling * weight * normal.y,
         // The exact factor 1/4 is the uniform-pressure resisting-moment integral.
         turn_n: radius.map_or(0.0, |r| mu * weight * normal.y * (max - min) / (4.0 * r)),
+        turn_moment_nm: mu * weight * normal.y * (max - min) / 4.0,
         grip_n: mu * weight * normal.y,
     }
 }
@@ -160,20 +192,23 @@ mod tests {
         })
     }
 
-    /// A second fixture weight must get its own force resolution, rather than a global N
-    /// copied from the calibration rig. The scheduler relies on this homogeneous scaling.
+    /// The observer's relative resolution must cover actual numerical observation error at
+    /// independent weights; an arbitrarily small positive share must fail this witness.
     #[test]
-    fn landing_resolution_scales_with_vehicle_weight() {
+    fn observer_resolution_bounds_independent_weights() {
         let resolution = DriverResolution::load();
-        // Fixture: two vehicle masses, independent of the calibration rig's authored mass.
-        let weights = [20_000.0, 60_000.0].map(|mass| mass * super::super::derive::G);
-        assert!(
-            (resolution.margin_n(weights[1]) / resolution.margin_n(weights[0]) - 3.0).abs() < 1e-6
-        );
-        assert!(
-            resolution.margin_n(weights[0]) < weights[0],
-            "a numerical margin cannot consume a lighter fixture's entire weight"
-        );
+        for mass in [20_000.0, 60_000.0] {
+            // Fixture: independent nominal masses.
+            let weight = mass * super::super::derive::G;
+            for degrees in [10.0_f32, 20.0, 30.0] {
+                // Fixture: support planes.
+                let angle = degrees.to_radians();
+                let contacts = patch(angle, 0.12);
+                let actual = observe(contacts.iter(), Vec3::NEG_Z, weight, None).total_n();
+                let expected = weight * (angle.sin() + 0.12 * angle.cos());
+                assert!((actual - expected).abs() < resolution.observer_weight_share * weight);
+            }
+        }
     }
 
     /// The gear-law observer must price gravity and rolling from support geometry at rest as

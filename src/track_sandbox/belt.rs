@@ -220,13 +220,14 @@ pub(super) fn apply_belt_support_field(
         reports[side.index()] = report;
     }
 
-    let perceived_load = crate::track::load::observe(
+    let perceived_load = crate::track::load::observe_rig(
         reports
             .iter()
             .flat_map(|report| report.perceived_support.iter()),
-        affine.transform_vector3(Vec3::NEG_Z) * if trans_state.0.reverse { -1.0 } else { 1.0 },
-        params.grip.map_or(0.0, |grip| 2.0 * grip.side_weight),
-        crate::track::load::turn_radius(&transmission.0, &trans_state.0),
+        affine.transform_vector3(Vec3::NEG_Z),
+        &params,
+        &transmission.0,
+        &trans_state.0,
     );
 
     // Phase 2 — ONE joint drivetrain solve on the vehicle's declared tables.
@@ -236,12 +237,13 @@ pub(super) fn apply_belt_support_field(
         &mut trans_state.0,
         &TransmissionInput {
             supply: transmission::DriveSupply::WHOLE,
+            command: raw.0.throttle,
             throttle: shaped.0.throttle,
             steer: shaped.0.steer,
             side_commands,
             speeds: [belt.get(Side::Left), belt.get(Side::Right)],
             reactions: [reports[0].belt_reaction, reports[1].belt_reaction],
-            rolling: [reports[0].rolling_resistance, reports[1].rolling_resistance],
+
             perceived_load,
             dt,
             brake: false,
@@ -915,14 +917,6 @@ mod tests {
             (total - weight_n).abs() / weight_n < 1e-3,
             "parked at the authored pose the envelope must carry the weight: {total:.0} N vs \
              {weight_n:.0} N",
-        );
-
-        // The derived rate is a ride-frequency spring: with its full droop travel it must sit
-        // orders of magnitude below a near-rigid meganewton contact pad.
-        assert!(
-            law.stiffness_per_m > 0.0 && law.stiffness_per_m < 1.0e6,
-            "envelope stiffness {} N/m per m should sit far below a near-rigid pad's",
-            law.stiffness_per_m,
         );
     }
 

@@ -732,44 +732,42 @@ fn pivot_clears_its_own_kinematic_yaw_floor() {
     neutral_pivot_gate(&mut app, tank);
 }
 
-/// The fix-1 smoking gun: a standstill full-throttle climb must walk the Tiger ladder
-/// MONOTONICALLY. Pre-fix, every shift's own torque-cut window bled belt speed
-/// (I·v̇ = Q − R keeps subtracting the ground reaction while Q is cut) and the low gears'
-/// steep rpm-per-speed slope turned that into hundreds of rpm — the down band fired the
-/// tick the freeze lifted (measured trace [1,2,1,2,1,2,3,2,3,4,3,4,5,6,7,8]). With the
-/// predicted-landing gate + reversal dwell the gear sequence never decreases.
+/// Full pedal on firm level ground must reach the declared ladder top one gear at a time.
+/// Fixture: the shipped construction, 20 simulated seconds; the Driver relies on no hunting.
 #[test]
-fn gear_climb_monotone_tiger() {
+fn full_pedal_climbs_the_declared_ladder_gear_by_gear() {
     let (mut app, tank) = booted_offline_sim();
     face_positive_z(&mut app, tank);
-    let mut trace: Vec<u8> = vec![];
-    let mut max_gear = 0u8;
-    for _ in 0..(20 * FIXED_TICKS_PER_SECOND) {
+    let top = app
+        .world()
+        .resource::<crate::track::sim::TrackGear>()
+        .trans()
+        .gears_fwd
+        .len() as u8;
+    let mut trace = Vec::new();
+    for _ in 0..20 * FIXED_TICKS_PER_SECOND {
         drive_tick(&mut app, tank, 1.0, 0.0);
-        let st = app
+        let state = app
             .world()
             .get::<crate::track::sim::TankTransmission>(tank)
-            .expect("tank carries transmission state")
+            .unwrap()
             .0;
         assert!(
-            !st.reverse,
-            "full forward throttle must stay on the F ladder"
+            !state.reverse,
+            "forward intent must retain the forward ladder"
         );
-        if trace.last() != Some(&st.gear) {
-            trace.push(st.gear);
+        if trace.last() != Some(&state.gear) {
+            trace.push(state.gear);
         }
-        assert!(
-            st.gear >= max_gear,
-            "gear decreased during the full-throttle climb — shift hunting is back \
-             (trace {trace:?})"
-        );
-        max_gear = max_gear.max(st.gear);
     }
-    println!("tiger full-throttle gear climb trace: {trace:?}");
-    assert!(
-        max_gear >= 6,
-        "20 s of full throttle must climb well up the ladder (reached F{max_gear}, \
-         trace {trace:?})"
+    let first = *trace
+        .first()
+        .expect("the full-pedal fixture samples at least one tick");
+    println!("MEASURED shipped construction gear walk {trace:?}");
+    assert_eq!(
+        trace,
+        (first..=top).collect::<Vec<_>>(),
+        "full pedal must climb every gear through the declared top"
     );
 }
 
@@ -947,8 +945,8 @@ fn contact_law_shipped_ground_speeds() {
                 .0;
             let gear = state.gear;
             println!(
-                "MEASURED ground {name} rolling_start={rolling_start} scheduler {:?}, hill_hold {}, demand {:.3} N",
-                state.scheduler, state.hill_hold, state.demand_n
+                "MEASURED ground {name} rolling_start={rolling_start} scheduler {:?}, hill_hold {}",
+                state.scheduler, state.hill_hold
             );
             println!(
                 "MEASURED ground {name} rolling_start={rolling_start}: F{gear} mean {:.5} m/s spread {:.6}",
@@ -970,18 +968,9 @@ fn contact_law_shipped_ground_speeds() {
     }
 }
 
-/// From rest at full throttle, the automatic box must leave its first gear on a soft ground
-/// whose rolling resistance the second gear out-pulls where the shift window lands: a tank
-/// stopped on soft ground must drive off at more than its first gear's crawl. The scheduler's
-/// upshift landing gate demands a fixed rpm band in the next gear (`shift_down_rpm +
-/// POSTSHIFT_MARGIN_RPM`) at the end of a window that charges the rolling resistance whole, so
-/// it refuses the shift whatever the next gear can pull, and the tank holds first gear at its
-/// governed speed (`.agents/docs/design/track-model/architecture.md` §5a has the MEASURED
-/// inputs). FIXTURE DATA: friction 0.4 and rolling resistance 0.12, a soft ground's scale; the
-/// 5 s acceptance is several times the first gear's run to its governed speed (MEASURED about
-/// 0.9 s on this fixture).
+/// A soft ground that a declared launch gear can out-pull must not strand the vehicle in
+/// first. Fixture: friction 0.4 and rolling resistance 0.12; full pedal for 40 seconds.
 #[test]
-#[ignore = "the from-rest soft-ground upshift: the drive-control redesign settles it (#146)"]
 fn a_tank_leaves_first_gear_from_rest_on_a_soft_ground() {
     let (mut app, tank) = booted_offline_sim();
     {
@@ -1000,16 +989,50 @@ fn a_tank_leaves_first_gear_from_rest_on_a_soft_ground() {
     }
     face_positive_z(&mut app, tank);
     let mut gear = 1;
-    for _ in 0..5 * FIXED_TICKS_PER_SECOND {
+    let mut gears = Vec::new();
+    for _ in 0..40 * FIXED_TICKS_PER_SECOND {
         drive_tick(&mut app, tank, 1.0, 0.0);
         gear = app
             .world()
             .get::<crate::track::sim::TankTransmission>(tank)
-            .expect("tank carries transmission state")
+            .unwrap()
             .0
             .gear;
-        if gear > 1 {
-            break;
+        if gears.last() != Some(&gear) {
+            gears.push(gear);
+        }
+    }
+    println!("MEASURED soft-ground launch and climb {gears:?}");
+    assert!(
+        gears.windows(2).all(|pair| pair[1] > pair[0]),
+        "a uniform-ground launch must not undo its preselection while spooling: {gears:?}"
+    );
+    #[cfg(feature = "bitprobe")]
+    {
+        let construction = app.world().resource::<crate::track::sim::TrackGear>();
+        let state = &app
+            .world()
+            .get::<crate::track::sim::TankTransmission>(tank)
+            .unwrap()
+            .0;
+        if usize::from(gear) < construction.trans().gears_fwd.len() {
+            let probe = app
+                .world()
+                .get::<crate::track::sim::TrackGripEffect>(tank)
+                .unwrap()
+                .transmission_probe;
+            let next = construction.landed_spare(state, probe, gear + 1);
+            let margin = crate::track::load::DriverResolution::load().margin_n(
+                app.world().resource::<TankBlueprint>().spec.mass * crate::track::derive::G,
+                construction.trans(),
+            );
+            println!(
+                "MEASURED soft-ground final gear={gear} next_landed_spare_n={next} margin_n={margin}"
+            );
+            assert!(
+                next < margin,
+                "the next landed gear must lack sustainable spare"
+            );
         }
     }
     let speed = app
@@ -1020,7 +1043,7 @@ fn a_tank_leaves_first_gear_from_rest_on_a_soft_ground() {
         .length();
     assert!(
         gear > 1,
-        "5 s of full throttle from rest must leave first gear (F{gear} at {speed:.4} m/s)"
+        "40 s of full throttle from rest must leave first gear (F{gear} at {speed:.4} m/s)"
     );
 }
 
@@ -1472,7 +1495,8 @@ fn a_driving_tank_rides_onto_loose_pieces_through_its_belt_support() {
     let mut max_piece_speed = 0.0_f32;
     let mut arrived = false;
     for _ in 0..(20 * FIXED_TICKS_PER_SECOND) {
-        drive_tick(&mut app, tank, 0.35, 0.0);
+        // Full requested power gives this support fixture its declared launch capability.
+        drive_tick(&mut app, tank, 1.0, 0.0);
         let world = app.world();
         carried |= world
             .get::<TrackContacts>(tank)
@@ -1494,15 +1518,25 @@ fn a_driving_tank_rides_onto_loose_pieces_through_its_belt_support() {
         }
     }
     assert!(arrived, "the tank never drove onto the fixture pieces");
+    // Lift-off coasts in the retained gear. Service braking keeps the settled support
+    // witness inside these finite pieces, independent of the Driver's arrival gear.
     for _ in 0..(4 * FIXED_TICKS_PER_SECOND) {
-        drive_tick(&mut app, tank, 0.0, 0.0);
+        let moving_forward = app.world().get::<LinearVelocity>(tank).unwrap().0.z
+            > crate::track::transmission::PARK_ENGAGE_SPEED;
+        drive_tick(&mut app, tank, if moving_forward { -1.0 } else { 0.0 }, 0.0);
         for piece in pieces {
             max_piece_y = max_piece_y.max(app.world().get::<Position>(piece).unwrap().0.y);
             max_piece_speed =
                 max_piece_speed.max(app.world().get::<LinearVelocity>(piece).unwrap().0.length());
         }
     }
-    let rise = app.world().get::<Position>(tank).unwrap().0.y - at.y;
+    let settled = app.world().get::<Position>(tank).unwrap().0;
+    assert!(
+        (front + span * 0.5..front + length - span * 0.5).contains(&settled.z),
+        "the settled footprint must remain inside the fixture pieces: z={}, front={front}, length={length}, span={span}",
+        settled.z
+    );
+    let rise = settled.y - at.y;
     // The support law spreads each column's spring over its share of the shoe width, and the strip
     // beside a piece keeps pressing the ground while the rise stays under the free travel. A piece
     // covering the share `s` of every grounded shoe then lifts the hull by `s·h` (DERIVED, level
@@ -1545,11 +1579,8 @@ struct ScriptedDeterminismRun {
     saw_element_strain: bool,
     /// The controlled tank's transmission left its spawn state over the flat script.
     transmission_advanced: bool,
-    /// Slope-segment witnesses of the transmission's grade memory.
-    saw_grade_demand: bool,
-    saw_grade_confirm: bool,
-    saw_grade_target: bool,
-    saw_hill_hold: bool,
+    /// Slope-segment witness of the transitional brake latch.
+    saw_slope_shift: bool,
 }
 
 #[derive(Clone, Copy)]
@@ -1785,10 +1816,8 @@ fn scripted_determinism_run() -> ScriptedDeterminismRun {
                 .world_mut()
                 .get_mut::<TankCommand>(tank)
                 .expect("controlled tank carries TankCommand");
-            // The straight run-up is long because the upshift confirmation
-            // dwell (UPSHIFT_CONFIRM_TICKS per shift) slows the flat gear walk, and the
-            // steering-slip witness needs the hull fast enough that the tight detent
-            // scrubs its loaded contacts past the slip band.
+            // The steering-slip witness needs enough run-up for the tight detent to scrub
+            // its loaded contacts past the slip band.
             command.throttle = if (120..480).contains(&tick) { 1.0 } else { 0.0 };
             command.steer = if (300..480).contains(&tick) { 0.7 } else { 0.0 };
             command.fire_primary = tick == 220;
@@ -1805,14 +1834,7 @@ fn scripted_determinism_run() -> ScriptedDeterminismRun {
         .expect("the controlled tank carries transmission state")
         != fresh_tank_transmission(&app);
 
-    // The slope segment, on the declared transmission: the tank is placed rolling uphill on the
-    // course's 20° face in F6 under Sequential addressing, belts and hull matched at a fixture
-    // 3.0 m/s, W held. Paying adjacent shift windows accumulates the demand EMA and
-    // grade-confirmation evidence, retains a grade target, and latches hill hold before it crests.
-    app.world_mut()
-        .resource_mut::<crate::track::sim::TrackGear>()
-        .trans_mut()
-        .shift_addressing = crate::track::transmission::ShiftAddressing::Sequential;
+    // Fixture: a rolling grade entry exercises support-priced gear choices and paid cuts.
     let rot = Quat::from_rotation_x(20.0_f32.to_radians());
     // FIXTURE: slow enough that hill hold latches with face still ahead of the front contact
     // (MEASURED at 4.0 m/s: the front contact reaches the crest's rounding as hold latches).
@@ -1877,7 +1899,7 @@ fn scripted_determinism_run() -> ScriptedDeterminismRun {
         drive.sides[1].speed = approach_speed;
         *e.get_mut::<crate::track::sim::TankTransmission>().unwrap() = transmission;
     }
-    let (mut demand, mut confirm, mut target, mut hold) = (false, false, false, false);
+    let mut shifted = false;
     for slope_tick in 0..SLOPE_TICKS {
         drive_tick(&mut app, tank, 1.0, 0.0);
         let state = app
@@ -1885,19 +1907,16 @@ fn scripted_determinism_run() -> ScriptedDeterminismRun {
             .get::<crate::track::sim::TankTransmission>(tank)
             .expect("the controlled tank carries transmission state")
             .0;
-        if slope_tick == 0 || (state.hill_hold && !hold) {
+        if slope_tick == 0 {
             let (loaded, off) = off_face(&app);
             assert!(
                 loaded > 0 && off <= ON_FACE_M,
-                "slope tick {slope_tick}: the grade-memory fixture must be supported on the 20° \
-                 face alone (rolling at the start, held before it crests); {loaded} loaded \
+                "slope tick {slope_tick}: the grade-entry fixture must be supported on the 20° \
+                 face alone (rolling at the start, before the grade entry proceeds); {loaded} loaded \
                  contacts lie up to {off} m off the face",
             );
         }
-        demand |= state.demand_n > 0.0;
-        confirm |= state.grade_confirm_ticks > 0;
-        target |= state.grade_target > 0;
-        hold |= state.hill_hold;
+        shifted |= state.gear != 6;
     }
 
     let mut run = app
@@ -1905,10 +1924,7 @@ fn scripted_determinism_run() -> ScriptedDeterminismRun {
         .remove_resource::<ScriptedDeterminismRun>()
         .expect("the scripted digest collector remains installed");
     run.transmission_advanced = transmission_advanced;
-    run.saw_grade_demand = demand;
-    run.saw_grade_confirm = confirm;
-    run.saw_grade_target = target;
-    run.saw_hill_hold = hold;
+    run.saw_slope_shift = shifted;
     run
 }
 
@@ -1929,18 +1945,9 @@ fn assert_scripted_determinism_witnesses(run: &ScriptedDeterminismRun, label: &s
         "{label} advanced the declared transmission from its spawn state",
     );
     assert!(
-        run.saw_grade_demand,
-        "{label} slope segment exercised the demand EMA",
+        run.saw_slope_shift,
+        "{label} slope segment exercised a gear decision"
     );
-    assert!(
-        run.saw_grade_confirm,
-        "{label} slope segment accumulated grade-deficit evidence",
-    );
-    assert!(
-        run.saw_grade_target,
-        "{label} slope segment retained a sequential grade target",
-    );
-    assert!(run.saw_hill_hold, "{label} slope segment latched hill hold");
     assert!(
         run.saw_steering_slip,
         "{label} put a loaded belt contact in the slipping regime while steering",
@@ -1996,10 +2003,10 @@ fn assert_scripted_determinism_witnesses(run: &ScriptedDeterminismRun, label: &s
 /// Two fresh, full simulation compositions must replay one command script bit-for-bit, every tick:
 /// the flat drive-steer-fire script, then the slope segment. The digest hashes the transmission's
 /// exhaustive field projection (`transmission_state_projection`) and both belt speeds, so the
-/// transmission's grade memory (demand EMA, confirmation counter, held target, hill-hold latch)
+/// transmission's support-priced gear decisions and transitional brake latch
 /// replays exactly too. The witness assertions
 /// keep this from passing because the scenario never reached contact, element strain, slip
-/// traction, steering slip, fire, a transmission off its spawn state, or that grade memory.
+/// traction, steering slip, fire, a transmission off its spawn state, or that grade response.
 #[test]
 fn full_simulation_replay_is_bit_exact_through_the_flat_and_slope_scripts() {
     let first = scripted_determinism_run();

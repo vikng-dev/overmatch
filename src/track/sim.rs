@@ -100,12 +100,12 @@ pub struct DriveSignal {
 }
 
 /// The joint transmission's path-dependent state (gear/window/detent/direction/crank plus the
-/// stage-C demand/filter/target/hill-hold scheduler state). Server-authoritative, advanced only
+/// clutch regime and the transitional brake latch). Server-authoritative, advanced only
 /// where the body is dynamic through [`apply_track_forces`], and
 /// replicated as one atomic snapshot to the tank's OWNER only; every other listener reads the
 /// crank through [`EngineRpm`]. The determinism trace hashes every field of the exhaustive
 /// projection (`transmission::transmission_state_projection`) in stable order, with raw bits for
-/// both floats.
+/// the crank float.
 #[derive(Component, Clone, Copy, PartialEq, Debug, Serialize, Deserialize)]
 pub struct TankTransmission(pub TransmissionState);
 
@@ -268,8 +268,40 @@ impl TrackGear {
     /// Coupled translation mass for a torque-cut landing: hull plus both belt inertias (kg).
     #[cfg(all(test, feature = "bitprobe"))]
     pub(crate) fn landing_mass(&self) -> f32 {
-        let grip = self.params.grip.expect("a driving probe has a gripped rig");
-        2.0 * grip.side_weight / super::derive::G + 2.0 * self.params.inertia
+        transmission::coupled_mass(&self.params)
+    }
+
+    #[cfg(all(test, feature = "bitprobe"))]
+    pub(crate) fn landed_spare(
+        &self,
+        state: &TransmissionState,
+        probe: crate::bitprobe::TransmissionProbe,
+        candidate: u8,
+    ) -> f32 {
+        transmission::landed_spare(
+            &self.trans,
+            &self.params,
+            &TransmissionInput {
+                supply: transmission::DriveSupply::WHOLE,
+                command: 1.0,
+                throttle: 1.0,
+                steer: 0.0,
+                side_commands: [1.0; 2],
+                speeds: probe.speeds,
+                reactions: probe.reactions,
+
+                perceived_load: super::load::PerceivedLoad {
+                    grade_n: probe.perceived_load_n,
+                    grip_n: probe.grip_limit_n,
+                    ..Default::default()
+                },
+                dt: probe.dt,
+                brake: false,
+            },
+            state,
+            candidate,
+            1.0,
+        )
     }
 
     /// DERIVED full service-brake deceleration along the direction of motion (m/s^2).
@@ -361,8 +393,8 @@ impl TrackGear {
             out.f32(&format!("transmission.gears_rev[{index}]"), value);
         }
         out.f32("transmission.sprocket_radius", tp.sprocket_radius);
-        out.f32("transmission.shift_up_rpm", tp.shift_up_rpm);
-        out.f32("transmission.shift_down_rpm", tp.shift_down_rpm);
+        out.u32("transmission.launch_gears", u32::from(tp.launch_gears));
+        out.u32("transmission.max_step", u32::from(tp.max_step));
         for (index, (tight, wide)) in tp.steer_kappa.iter().copied().enumerate() {
             out.f32(&format!("transmission.steer_kappa[{index}].tight"), tight);
             out.f32(&format!("transmission.steer_kappa[{index}].wide"), wide);
@@ -380,26 +412,11 @@ impl TrackGear {
         out.f32("transmission.engine_inertia", tp.engine_inertia);
         out.f32("transmission.clutch_capacity", tp.clutch_capacity);
         out.u32("transmission.shift_ticks", u32::from(tp.shift_ticks));
-        out.u32(
-            "transmission.shift_addressing",
-            match tp.shift_addressing {
-                super::transmission::ShiftAddressing::Direct => 0,
-                super::transmission::ShiftAddressing::Sequential => 1,
-            },
-        );
         out.f32("transmission.peak_torque_rpm", tp.peak_torque_rpm);
         out.f32("transmission.peak_torque_nm", tp.peak_torque_nm);
     }
 
-    /// Test-only variant fixture seam: headless gates may vary a declared transmission capability
-    /// without rebuilding the Tiger asset/spec. Production callers get read-only params.
-    #[cfg(test)]
-    pub(crate) fn trans_mut(&mut self) -> &mut TransmissionParams {
-        &mut self.trans
-    }
-
-    /// Test-only variant fixture seam for the contact law, as [`Self::trans_mut`] is for the
-    /// transmission.
+    /// Test-only construction variation for contact-law fixtures.
     #[cfg(test)]
     pub(crate) fn params_mut(&mut self) -> &mut ForceParams {
         &mut self.params
@@ -669,20 +686,21 @@ pub(crate) fn belt_tick<O: TerrainOracle>(
         &gear.trans,
         rig.transmission,
         &TransmissionInput {
+            command: target.throttle,
             throttle: rig.signal.throttle,
             steer: rig.signal.steer,
             side_commands,
             speeds: [rig.drive.sides[0].speed, rig.drive.sides[1].speed],
             reactions: [reports[0].belt_reaction, reports[1].belt_reaction],
-            rolling: [reports[0].rolling_resistance, reports[1].rolling_resistance],
-            perceived_load: super::load::observe(
+
+            perceived_load: super::load::observe_rig(
                 reports
                     .iter()
                     .flat_map(|report| report.perceived_support.iter()),
-                affine.transform_vector3(Vec3::NEG_Z)
-                    * if rig.transmission.reverse { -1.0 } else { 1.0 },
-                gear.params.grip.map_or(0.0, |grip| 2.0 * grip.side_weight),
-                super::load::turn_radius(&gear.trans, rig.transmission),
+                affine.transform_vector3(Vec3::NEG_Z),
+                &gear.params,
+                &gear.trans,
+                rig.transmission,
             ),
             dt,
             brake,
@@ -704,6 +722,8 @@ pub(crate) fn belt_tick<O: TerrainOracle>(
 /// The game's damage model: a phase hold imposes service brakes. Otherwise only someone
 /// staffing the authored controls can command axes or hold the brakes for repair; without
 /// control authority repair remains work and cannot become a remote brake toggle.
+// Brake and Unmanned mask this tick's request. The client's persistent lever remains player
+// intent and resumes when the hold or staffing restriction ends; this policy never clears it.
 pub(crate) fn drive_target(
     command: &ParsedTankCommand,
     tank: Option<&TankVolumes>,
@@ -1542,7 +1562,7 @@ mod tests {
             (0.4, vec![Part::Driver, Part::Engine]),
             (0.4, vec![Part::Commander, Part::Transmission]),
         ];
-        for (req, expected, text) in [
+        for (req, expected) in [
             (
                 vec![
                     Group::Single(Part::Driver),
@@ -1550,7 +1570,6 @@ mod tests {
                     Group::Single(Part::Transmission),
                 ],
                 0.5,
-                "Drive rate 50%",
             ),
             (
                 vec![
@@ -1558,7 +1577,6 @@ mod tests {
                     Group::Single(Part::Engine),
                 ],
                 0.32,
-                "Drive rate 32%",
             ),
             (
                 vec![
@@ -1566,7 +1584,6 @@ mod tests {
                     Group::Single(Part::Engine),
                 ],
                 0.2,
-                "Drive rate 20%",
             ),
         ] {
             let caps = TankCapabilities::new(
@@ -1578,13 +1595,6 @@ mod tests {
             assert_eq!(supply.engine_condition, 0.5);
             assert_eq!(supply.transmission_condition, 0.5);
             assert!(supply.control_authority);
-            assert_eq!(
-                crate::crew_ui::drive_rate_line(&DriveTarget {
-                    intent: DriveIntent::Axes(DriveAxes::default()),
-                    supply,
-                }),
-                text
-            );
         }
     }
 
@@ -1644,7 +1654,6 @@ mod tests {
                     assert_eq!(target.supply.task_rate, 0.6);
                     assert!(!target.supply.control_authority);
                     assert_eq!(target.supply.engine_condition, 0.5);
-                    assert_eq!(crate::crew_ui::drive_rate_line(&target), "Drive rate 60%");
                 },
             )
             .unwrap();

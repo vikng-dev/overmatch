@@ -17,7 +17,7 @@
 REV 14 landed the declared transmission behind one joint two-output seam. Its complete
 `TransmissionState` is constructed synchronously from tank data at spawn and carried atomically in
 `TankTransmission`: the owning client predicts and rolls it back, exact comparisons use raw float
-bits, and canonical hashing follows the same exhaustive DERIVED 16-field projection. A replicated
+bits, and canonical hashing follows the era's exhaustive DERIVED 16-field projection. A replicated
 root waits for its authoritative current transmission snapshot before its sim body attaches, so
 join-in-progress cannot overwrite history with a fresh spec-derived state.
 
@@ -150,55 +150,30 @@ Minimal scheduling change:
 Constraint forces are algebraic and need not replicate. REV 14 adds only the genuine
 path-dependent transmission state inventoried below.
 
-### Authoritative REV-14 transmission-state inventory
+### Authoritative transmission-state inventory
 
-This section supersedes the former five-bullet state sketch. The authoritative inventory is the
-current `TransmissionState` shape: **17 fields DERIVED by exhaustive struct inventory**, all
-`REPLICATE-EXACT`; `DERIVE` and `LOCAL-VIEW` each contain **0 fields DERIVED**. `f32` fields require
-their raw bits, and discrete fields require their exact value. **REV-14 rider DISCHARGED:**
-`TankTransmission` replicates as one atomic server-authoritative component and joins the exact
-bitprobe hash in this field order. Clients render the server stream; they do not simulate this
-state (ADR-0037).
+The current `TransmissionState` has **10 fields DERIVED by exhaustive struct inventory**, all
+`REPLICATE-EXACT`; `DERIVE` and `LOCAL-VIEW` each contain **0 fields DERIVED**. `TankTransmission`
+replicates as one atomic server-authoritative component. Clients render the server stream and do
+not simulate it (ADR-0037). The exhaustive projection owns the hash and trace order.
 
-`REPLICATE-EXACT`:
+- `gear`: the engaged ratio selected by prior decisions.
+- `shift_ticks`: progress through a paid drive interruption.
+- `steer_step`: the retained straight/wide/tight detent.
+- `reverse`: the engaged direction ladder.
+- `park`: the persistent parking lever.
+- `omega_e`: crank speed, with raw float bits; constructed at idle from data at spawn.
+- `clutch`: `Out`, `Slip` or `In`; Slip retains a launch until its shaft catches its target.
+- `scheduler`: the current Driver readout and paid shift endpoints.
+- `hill_hold`: the transitional anti-rollback latch.
+- `hold_reengage_ticks`: the transitional latch's release cooldown.
 
-- `gear` — prior shift decisions select it; the instantaneous belts do not reveal the engaged ratio.
-- `shift_ticks` — elapsed progress through an interruption window is history, not a belt sample.
-- `steer_step` — detent hysteresis retains which threshold was crossed most recently.
-- `reverse` — the engaged ladder depends on a prior near-standstill direction swap.
-- `park` — zero-input near-rest engagement and later command release form a persistent latch.
-- `last_shift_dir` — the last committed band-shift direction is historical anti-hunting memory.
-- `dwell_ticks` — remaining reversal dwell depends on the prior shift time and elapsed decision ticks.
-- `omega_e` — crank inertia and clutch slip integrate an independent speed that the belts cannot
-  reconstruct. The in-band `0.0` sentinel is removed: `from_spec` initializes exact idle speed at
-  spawn.
-- `clutch` — `Out`, `Slip` or `In`; a launch retains Slip until the shaft reaches its target.
-- `demand_n` — raw `f32` EMA history cannot be reconstructed from the current reaction sample.
-- `demand_initialized` — exact first-sample EMA marker: its contact-derived seed is unavailable at
-  spawn, so REV 14 replicates and hashes this discrete bool rather than changing seeding semantics.
-- `grade_confirm_ticks` — the leaky deficit-evidence count depends on prior reserve samples.
-- `band_confirm_ticks` — consecutive full-predicate upshift evidence depends on prior decision ticks.
-- `grade_target` — a sequential cascade retains its selected final gear across paid windows.
-- `scheduler` — `Normal`, grade-shift endpoints, hill hold, and grade limit encode prior decisions.
-- `hill_hold` — anti-rollback engagement/release is a persistent capability-derived latch.
-- `hold_reengage_ticks` — the remaining post-release cooldown depends on the release tick history.
-
-`DERIVE`: none. Mean/difference coordinates, shaft rpm, reserve, constraint forces, brake forces,
-and readouts are algebraic from exact state plus the current belt/input/spec sample and are never
-replicated as transmission state.
-
-`LOCAL-VIEW`: none. HUD/readout values are ephemeral consumers, not sibling per-tank transmission
-state. `TankTransmission` is only the ECS wrapper around `TransmissionState`; crank state is not
-stored separately.
-
-The stale sketch omitted `reverse`, `park`, `last_shift_dir`, `dwell_ticks`, `clutch`,
-`demand_n`, `demand_initialized`, `grade_confirm_ticks`, `grade_target`, `scheduler`, `hill_hold`,
-and `hold_reengage_ticks`; it also left engine speed conditional instead of definitively classifying
-`omega_e` as exact state.
-
-The complete state is constructed from tank data at spawn, alongside the existing rollback state.
-`demand_initialized = false` is intentional complete state: only the first owned contact sample can
-seed the EMA directly.
+All state is constructed synchronously from data at spawn. Mean/difference speeds, perceived
+load, candidate force, spare, brake forces and readouts are algebraic. The accepted Driver-law
+narrative and measurements live in [architecture section 5a](architecture.md#5a-ground-under-a-contact-146)
+and [the drive-control design](../../../scratch/research/drive-control-design-2026-11-02.md).
+The scheduler stages below are historical alternatives; their bands, filters, confirmation,
+dwell, retained target, landing decay and protective upshift are absent from the current law.
 
 ## 3. Braking law
 

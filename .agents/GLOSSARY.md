@@ -233,14 +233,14 @@ Mean belt motion expressed relative to the engaged forward or reverse ladder. No
 **Engine crank** (`ω_e`):
 The non-negative engine-side angular-speed state. Engine torque, drag, inertia, clutch coupling, stall guard, and declutched rev matching evolve it directly; geared belt speed no longer stands in for engine rpm.
 
-**Reserve scheduler**:
-The gear selector for the transmission. It filters signed mean-axis load demand, compares each legal gear's available force with the required reserve, and schedules protective downshifts, hill-hold recovery, or grade-limit truth without discarding the shift and landing guards.
+**Driver gear law**:
+The Driver's choice of a permitted gear from its spare force after a shift, against the perceived ground, slope and steering load at requested pedal. It preserves engine braking on overrun, permits a lower gear on a deficit or engaged lug, and preselects the highest capable launch gear at rest.
 
 **Steering detent**:
 A fixed-radii steering state selected with hysteresis: straight, wide radius, or tight radius. While a turn detent is engaged, the transmission constrains belt-speed difference to the declared curvature and defers predictor-blind upshifts.
 
 **Hill-hold**:
-The reserve scheduler and brake latch holding or rescuing a tank on a grade when the engaged gear lacks launch reserve. Grip remains the belt elements' strain law; hill-hold is drivetrain state, not a world anchor.
+The brake latch holding a tank on a grade until its selected launch gear supplies the required force. Grip remains the belt elements' strain law; hill-hold is drivetrain state, not a world anchor.
 _Avoid_: grip anchor
 
 **Engine-brake / coast-down**:

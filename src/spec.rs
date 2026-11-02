@@ -21,7 +21,7 @@ use crate::guns::{GunError, GunRegistry, Mechanism};
 use crate::provenance::Sourced;
 use crate::sim_tick::TickSpan;
 use crate::tank::{ServoSpec, Tank};
-use crate::track::transmission::{ShiftAddressing, TransmissionAuthoring, TransmissionParams};
+use crate::track::transmission::{TransmissionAuthoring, TransmissionParams};
 
 /// One declared armour node, keyed by model node name in [`TankSpec::volumes`]: main armour, external
 /// armour, or a component with its facets.
@@ -977,8 +977,9 @@ impl TransmissionSpec {
             torque_nm: &engine.torque_curve,
             forward_speeds_kmh: &gearbox.forward_speeds_kmh,
             reverse_speeds_kmh: &gearbox.reverse_speeds_kmh,
-            shift_up_rpm: gearbox.shift_up_rpm,
-            shift_down_rpm: gearbox.shift_down_rpm,
+
+            launch_gears: gearbox.launch_gears,
+            max_step: gearbox.max_step,
             steer_radii_m: &steering.radii,
             steer_capacity_n: steering.capacity,
             recirculation: steering.recirculation,
@@ -989,7 +990,7 @@ impl TransmissionSpec {
             clutch_capacity_nm: engine.clutch_capacity_nm,
             belt_inertia,
             shift_secs: gearbox.shift_secs,
-            shift_addressing: gearbox.shift_addressing,
+
             sprocket_radius_m,
             half_tread_m,
         })
@@ -1051,14 +1052,11 @@ pub struct EngineSoundSpec {
 pub struct GearboxSpec {
     pub forward_speeds_kmh: Vec<f32>,
     pub reverse_speeds_kmh: Vec<f32>,
-    pub shift_up_rpm: f32,
-    pub shift_down_rpm: f32,
+    pub launch_gears: u8,
+    pub max_step: u8,
     /// Gear-shift torque-interruption time (s) — how long the drive is uncoupled through a
     /// shift. Vehicle data, required: a preselector and a crash box differ.
     pub shift_secs: f32,
-    /// Selection capability, required: whether one shift event reaches any gear or one adjacent
-    /// gear is the gearbox's mechanism, which only its sheet can state.
-    pub shift_addressing: ShiftAddressing,
 }
 
 /// The steering member: per-gear fixed radii (the L600's two detents), its force capacity, and the
@@ -2000,11 +1998,7 @@ mod tests {
             );
         }
 
-        // The declared drivetrain. The GEARBOX carries no law: the scheduler bands signed geared
-        // SHAFT rpm (`transmission::run_shift_decision`), which clutch slip, back-drive and the
-        // fuel governor's cut band put outside the crank's idle..governed band; and the reverse
-        // ladder may outrun the forward one — both κ lookups clamp the gear index into the forward
-        // radii table (`transmission::steering_force`, `drive_hud::steering_hud_line`).
+        // The sheet supplies construction; the Driver selects within the admitted ladders.
         let transmission = &spec.track.powertrain.transmission;
         let (engine, steering) = (&transmission.engine, &transmission.steering);
         // The rpm band, in the order the three anchors mean: the engine idles below its
@@ -2184,10 +2178,11 @@ TankSpec(
                 gearbox: (
                     forward_speeds_kmh: [5.0, 8.0, 12.0, 18.0],
                     reverse_speeds_kmh: [5.0, 8.0],
-                    shift_up_rpm: 2000.0,
-                    shift_down_rpm: 900.0,
+
+                    launch_gears: 4,
+                    max_step: 3,
                     shift_secs: 0.3,
-                    shift_addressing: Direct,
+
                 ),
                 steering: (
                     radii: [(4.0, 12.0), (6.0, 18.0), (9.0, 27.0), (14.0, 42.0)],
@@ -3002,7 +2997,7 @@ TankSpec(
         fn gearbox(tr: &mut TransmissionSpec) -> &mut GearboxSpec {
             &mut tr.gearbox
         }
-        let cases: [(&str, fn(&mut TransmissionSpec)); 19] = [
+        let cases: [(&str, fn(&mut TransmissionSpec)); 20] = [
             // Engine audio data: both are DIVISORS in the playback law — a 0-cylinder engine pops
             // at 0 Hz (silence played at speed 0) and a 0 Hz recording makes the anchor infinite.
             ("cylinders", |tr| engine(tr).cylinders = 0),
@@ -3049,9 +3044,8 @@ TankSpec(
             }),
             ("brake_static_factor", |tr| tr.brake_static_factor = 0.99),
             ("brake_static_factor", |tr| tr.brake_static_factor = 2.51),
-            // Post-upshift rpm is `shift_up × v_g/v_g+1` at the widest step; a down band that
-            // close re-downshifts immediately: hunting on a boundary speed.
-            ("hysteresis", |tr| gearbox(tr).shift_down_rpm = 1900.0),
+            ("launch_gears", |tr| gearbox(tr).launch_gears = 0),
+            ("max_step", |tr| gearbox(tr).max_step = 0),
             ("ladder shape", |tr| {
                 gearbox(tr).forward_speeds_kmh.swap(2, 3);
             }),
@@ -3246,7 +3240,8 @@ TankSpec(
         for (field, authored, kept) in [
             ("drag_fraction", "drag_fraction: 0.25,", ""),
             ("shift_secs", "shift_secs: 0.3,", ""),
-            ("shift_addressing", "shift_addressing: Direct,", ""),
+            ("launch_gears", "launch_gears: 4,", ""),
+            ("max_step", "max_step: 3,", ""),
             ("shadow_proxies", "shadow_proxies: [],", ""),
             (
                 "capabilities",

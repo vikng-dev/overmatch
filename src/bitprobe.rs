@@ -109,12 +109,9 @@ const TRANSMISSION_INPUT_FIELDS: &[(&str, &str)] = &[
     ("reaction_right", "f32"),
     ("dt", "f32"),
     ("direction", "f32"),
-    ("demand_sample", "f32"),
-    ("demand_pre", "f32"),
-    ("demand_post", "f32"),
     ("perceived_load_n", "f32"),
     ("grip_limit_n", "f32"),
-    ("demand_updated", "bool"),
+    ("turn_moment_nm", "f32"),
 ];
 
 const CLUTCH_ENGINE_FIELDS: &[(&str, &str)] = &[
@@ -172,15 +169,8 @@ const TRANSMISSION_STATE_FIELDS: &[(&str, &str)] = &[
     ("steer_step", "u32"),
     ("reverse", "bool"),
     ("park", "bool"),
-    ("last_shift_dir", "i32"),
-    ("dwell_ticks", "u32"),
     ("omega_e", "f32"),
     ("clutch", "u32"),
-    ("demand_n", "f32"),
-    ("demand_initialized", "bool"),
-    ("grade_confirm_ticks", "u32"),
-    ("band_confirm_ticks", "u32"),
-    ("grade_target", "u32"),
     ("scheduler_tag", "u32"),
     ("scheduler_from", "u32"),
     ("scheduler_to", "u32"),
@@ -275,14 +265,11 @@ pub(crate) struct TransmissionProbe {
     pub reactions: [f32; 2],
     pub dt: f32,
     pub direction: f32,
-    pub demand_sample: f32,
-    pub demand_pre: f32,
-    pub demand_post: f32,
     pub perceived_load_n: f32,
     pub grip_limit_n: f32,
+    pub turn_moment_nm: f32,
     pub priced_force_n: f32,
     pub delivered_force_n: f32,
-    pub demand_updated: bool,
     pub mean_speed: f32,
     pub difference_speed: f32,
     pub shaft_speed: f32,
@@ -535,16 +522,25 @@ fn startup_dump(app: &App, tank: Entity) -> StartupBuilder {
         .bitprobe_startup(&mut out);
     world.resource::<TrackGear>().bitprobe_startup(&mut out);
     out.f32(
-        "driver.landing_force_margin_share",
+        "driver.observer_weight_share",
         world
             .resource::<crate::track::load::DriverResolution>()
-            .landing_force_margin_share,
+            .observer_weight_share,
+    );
+    out.f32(
+        "driver.crank_roundoff_share",
+        world
+            .resource::<crate::track::load::DriverResolution>()
+            .crank_roundoff_share,
     );
     out.f32(
         "driver.landing_force_margin_n",
         world
             .resource::<crate::track::load::DriverResolution>()
-            .margin_n(world.resource::<TankBlueprint>().spec.mass * crate::track::derive::G),
+            .margin_n(
+                world.resource::<TankBlueprint>().spec.mass * crate::track::derive::G,
+                world.resource::<TrackGear>().trans(),
+            ),
     );
 
     let spec = &world.resource::<TankBlueprint>().spec;
@@ -777,15 +773,12 @@ fn transmission_input_payload(capture: &BitprobeCapture) -> Vec<u32> {
         probe.reactions[1],
         probe.dt,
         probe.direction,
-        probe.demand_sample,
-        probe.demand_pre,
-        probe.demand_post,
         probe.perceived_load_n,
         probe.grip_limit_n,
+        probe.turn_moment_nm,
     ] {
         f32_word(&mut output, value);
     }
-    bool_word(&mut output, probe.demand_updated);
     output
 }
 
@@ -853,7 +846,6 @@ fn transmission_state_payload(transmission: &TankTransmission) -> Vec<u32> {
     for field in transmission_state_projection(&transmission.0) {
         match field {
             TransmissionProjectionValue::U8(value) => output.push(u32::from(value)),
-            TransmissionProjectionValue::I8(value) => output.push((value as i32) as u32),
             TransmissionProjectionValue::Bool(value) => bool_word(&mut output, value),
             TransmissionProjectionValue::F32(value) => f32_word(&mut output, value),
             TransmissionProjectionValue::Scheduler { tag, from, to } => {

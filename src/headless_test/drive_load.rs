@@ -19,6 +19,7 @@ struct Landing {
 struct Measurements {
     loads: Vec<f32>,
     gaps: Vec<f32>,
+    residuals: Vec<f32>,
     landing_speed_errors: Vec<f32>,
     pending: Option<Landing>,
     was_shifting: bool,
@@ -62,6 +63,14 @@ impl Measurements {
         self.loads.push(probe.perceived_load_n);
         let gear = app.world().resource::<crate::track::sim::TrackGear>();
         let state = &app.world().get::<TankTransmission>(tank).unwrap().0;
+        if self
+            .pending
+            .as_ref()
+            .is_some_and(|landing| landing.gear != state.gear)
+        {
+            // A parked C3 preselection pays no cut and is not a landing in the previous gear.
+            self.finish_landing();
+        }
         if probe.shifting && (!self.was_shifting || state.gear != self.last_gear) {
             self.finish_landing();
             let speed = probe.shaft_speed
@@ -127,6 +136,8 @@ impl Measurements {
                     crank_price - inertial_price,
                     inertial_price - probe.delivered_force_n
                 );
+                self.residuals
+                    .push(inertial_price - probe.delivered_force_n);
                 landing.terms.push([
                     landing.price - tick_price,
                     tick_price - crank_price,
@@ -142,14 +153,20 @@ impl Measurements {
         self.last_gear = state.gear;
     }
 
-    fn report(&mut self, label: &str, expected: f32, weight: f32) {
+    fn report(
+        &mut self,
+        label: &str,
+        expected: f32,
+        weight: f32,
+        tp: &crate::track::transmission::TransmissionParams,
+    ) {
         self.finish_landing();
-        let margin = crate::track::load::DriverResolution::load().margin_n(weight);
+        let margin = crate::track::load::DriverResolution::load().margin_n(weight, tp);
         assert!(
-            self.gaps
+            self.residuals
                 .iter()
                 .all(|gap| gap.is_finite() && gap.abs() < margin),
-            "the measured numerical margin must cover sustained landing gaps"
+            "the measured deadband must cover the same-instant numerical residual"
         );
         let summary = |values: &[f32]| {
             if values.is_empty() {
@@ -296,7 +313,14 @@ fn perceived_load_and_landing_gaps_on_declared_grounds() {
                 );
             }
             let expected = ground.contact().rolling_resistance * weight;
-            measurements.report(&format!("{name} rolling={rolling}"), expected, weight);
+            measurements.report(
+                &format!("{name} rolling={rolling}"),
+                expected,
+                weight,
+                app.world()
+                    .resource::<crate::track::sim::TrackGear>()
+                    .trans(),
+            );
             for load in measurements.loads {
                 assert!(
                     (load - expected).abs() < weight * 1e-4,
@@ -304,18 +328,85 @@ fn perceived_load_and_landing_gaps_on_declared_grounds() {
                 );
             }
         }
-        let mut turned = Vec::new();
-        for _ in 0..128 {
-            drive_tick(&mut app, tank, 1.0, 0.7);
-            turned.push(probe(&app, tank).perceived_load_n);
+        // Fixture: frozen supported pose on the uniform plane. The production belt tick returns
+        // its geometric patches, so this expectation includes finite patch spans independently
+        // of observe's own integral and catches a missing turn radius at the adapter seam.
+        let construction = app.world().resource::<crate::track::sim::TrackGear>();
+        let blueprint = app.world().resource::<TankBlueprint>();
+        for steer in [0.25_f32, 1.0] {
+            let mut drive = TrackDrive::default();
+            let mut signal = crate::track::sim::DriveSignal {
+                throttle: 1.0,
+                steer,
+            };
+            let mut grip = crate::track::sim::TrackGrip::default();
+            let mut elements =
+                crate::track::sim::TrackGripElements::for_links(blueprint.spec.track.link_count);
+            let mut state =
+                crate::track::transmission::TransmissionState::from_spec(construction.trans());
+            state.gear = construction
+                .trans()
+                .launch_gears
+                .min(construction.trans().gears_fwd.len() as u8);
+            state.shift_ticks = 1; // Isolate the observer from a new gear decision.
+            state.steer_step = if steer < 0.5 { 1 } else { 2 };
+            let radius = crate::track::load::turn_radius(construction.trans(), &state).unwrap();
+            let (reports, report) = crate::track::sim::belt_tick(
+                construction,
+                app.world()
+                    .resource::<crate::track::terrain::TrackField>()
+                    .field
+                    .as_ref()
+                    .unwrap(),
+                &crate::track::rubble::RubbleBodies::default(),
+                crate::track::drive::DriveTarget {
+                    intent: crate::track::drive::DriveIntent::Axes(
+                        crate::track::drive::DriveAxes {
+                            throttle: 1.0,
+                            steer,
+                        },
+                    ),
+                    supply: DriveSupply::WHOLE,
+                },
+                bevy::math::Affine3A::from_rotation_translation(
+                    Quat::from_rotation_y(std::f32::consts::PI),
+                    start,
+                ),
+                1.0 / FIXED_TICKS_PER_SECOND as f32,
+                |_| Vec3::ZERO,
+                crate::track::sim::BeltRig {
+                    drive: &mut drive,
+                    signal: &mut signal,
+                    grip: &mut grip,
+                    elements: &mut elements,
+                    transmission: &mut state,
+                },
+            );
+            let facts: Vec<_> = reports
+                .iter()
+                .flat_map(|r| r.perceived_support.iter())
+                .collect();
+            assert!(
+                !facts.is_empty(),
+                "the frozen turn fixture must bear on its plane"
+            );
+            let lo = facts
+                .iter()
+                .map(|c| c.point.z - c.half_span.z.abs())
+                .fold(f32::INFINITY, f32::min);
+            let hi = facts
+                .iter()
+                .map(|c| c.point.z + c.half_span.z.abs())
+                .fold(f32::NEG_INFINITY, f32::max);
+            let mu = report.bitprobe.grip_limit_n / weight;
+            let expected_turn = mu * weight * (hi - lo) / (4.0 * radius);
+            let actual_turn =
+                report.bitprobe.perceived_load_n - ground.contact().rolling_resistance * weight;
+            assert!(
+                (actual_turn - expected_turn).abs() < weight * 1e-5,
+                "the shipped turn must charge its full uniform-pressure moment: {actual_turn} vs {expected_turn}"
+            );
         }
-        let expected = ground.contact().rolling_resistance * weight;
-        let extra = turned.iter().copied().fold(f32::NEG_INFINITY, f32::max) - expected;
-        println!("MEASURED turn {name}: peak load above straight {extra:.3} N");
-        assert!(
-            extra > 0.0,
-            "a finite-radius rolling turn must charge resistance"
-        );
     }
 }
 
@@ -381,7 +472,54 @@ fn perceived_load_and_landing_gaps_on_the_course() {
                     .sum::<usize>()
             );
         }
-        // Fixture: excite the existing scheduler with a rolling entry, without replacing it.
+        // Observation on a supported plane does not imply a resting body. The launch proof
+        // starts with fresh motion, strain and drivetrain state on that same supported pose.
+        let launch_position = app
+            .world()
+            .get::<avian3d::prelude::Position>(tank)
+            .unwrap()
+            .0;
+        place(&mut app, tank, launch_position, rotation, 0.0, 1);
+        app.world_mut()
+            .get_mut::<TankTransmission>(tank)
+            .unwrap()
+            .0
+            .park = true;
+        assert_eq!(
+            app.world()
+                .get::<avian3d::prelude::LinearVelocity>(tank)
+                .unwrap()
+                .0,
+            Vec3::ZERO
+        );
+        assert!(
+            app.world()
+                .get::<TrackDrive>(tank)
+                .unwrap()
+                .sides
+                .iter()
+                .all(|side| side.speed == 0.0)
+        );
+        let mut launch_gear = 0;
+        for tick in 0..30 * FIXED_TICKS_PER_SECOND {
+            drive_tick(&mut app, tank, 1.0, 0.0);
+            if tick == 0 {
+                launch_gear = app.world().get::<TankTransmission>(tank).unwrap().0.gear;
+            }
+        }
+        let climb = (app
+            .world()
+            .get::<avian3d::prelude::Position>(tank)
+            .unwrap()
+            .0
+            - launch_position)
+            .dot(rotation * Vec3::NEG_Z);
+        println!("MEASURED grade launch degrees={degrees} gear={launch_gear} distance_m={climb}");
+        assert!(
+            climb > 0.0,
+            "a supported capable launch must gain distance uphill"
+        );
+        // Fixture: observe a rolling entry through the same supported grade.
         let position = app
             .world()
             .get::<avian3d::prelude::Position>(tank)
@@ -397,7 +535,14 @@ fn perceived_load_and_landing_gaps_on_the_course() {
                 "rolling support must price its incline independently of acceleration: {load} vs {expected}"
             );
         }
-        measurements.report(&format!("course {degrees} degrees"), expected, weight);
+        measurements.report(
+            &format!("course {degrees} degrees"),
+            expected,
+            weight,
+            app.world()
+                .resource::<crate::track::sim::TrackGear>()
+                .trans(),
+        );
     }
 }
 
@@ -459,6 +604,7 @@ fn perceived_load_during_a_rearward_shot_uphill() {
         app.world_mut().get_mut::<TankCommand>(tank).unwrap().aim =
             Some(crate::command::AimIntent::HullLocal(Vec3::Z * 1000.0));
         let mut samples = Vec::new();
+        let mut gears = Vec::new();
         for tick in 0..128 {
             app.world_mut()
                 .get_mut::<TankCommand>(tank)
@@ -478,6 +624,8 @@ fn perceived_load_during_a_rearward_shot_uphill() {
                 "the shot fixture must remain on its declared incline: {load} vs {expected}"
             );
             samples.push(load);
+            let state = app.world().get::<TankTransmission>(tank).unwrap().0;
+            gears.push((state.gear, state.shift_ticks));
         }
         let fired = app
             .world()
@@ -494,11 +642,26 @@ fn perceived_load_during_a_rearward_shot_uphill() {
         );
         (
             samples,
+            gears,
             app.world().resource::<TankBlueprint>().spec.mass * crate::track::derive::G,
         )
     };
-    let (baseline, weight) = run(false);
-    let (fired, _) = run(true);
+    let (baseline, baseline_gears, weight) = run(false);
+    let (fired, fired_gears, _) = run(true);
+    assert_eq!(
+        baseline_gears, fired_gears,
+        "a shot must not change the gear decision or interruption timeline"
+    );
+    assert!(
+        fired_gears[64..]
+            .iter()
+            .all(|sample| sample.0 == fired_gears[63].0),
+        "the shot must not start a shift"
+    );
+    println!(
+        "MEASURED rearward shot uphill: gear {} held through the shot",
+        fired_gears[63].0
+    );
     let change = baseline
         .iter()
         .zip(fired)

@@ -110,30 +110,14 @@ TankSpec(
                     // 19-vs-20-tooth discrepancy rule). DERIVED F8 @ governed 2500 → 10.509 m/s.
                     forward_speeds_kmh: [2.8, 4.3, 6.2, 9.2, 14.1, 20.9, 30.5, 45.4],
                     reverse_speeds_kmh: [2.8, 4.3, 6.2, 9.2],
-                    // Auto-shift bands (INFERRED policy): up at 92% of governed; down at
-                    // 1150 ≈ real OLVAR practice — hold the gear down to the low-torque
-                    // knee, not the mid-band. Against the engine's usable envelope (idle
-                    // 600, curve floor 800, peak torque @ 2100, governed 2500) a 1150 rpm
-                    // landing still makes ~1450 N·m (~78% of peak): a landed gear pulls,
-                    // and 1150 sits far clear of the idle-governor/lug region. The runtime
-                    // landing gate demands `landing ≥ down band + 150 rpm` at the END of
-                    // the torque-cut window (validated at load with the margin included):
-                    // the widest ratio step (F1→F2, 0.651) lands 2300 × 0.651 ≈ 1498, so
-                    // 1150 buys ~200 rpm of authored slack in EVERY gear. The previous
-                    // 1400 band left the F1→F2 landing 52 rpm SHORT of its own gate — the
-                    // box could never legally shift at the trigger rpm and only ever
-                    // shifted by over-running the band to the governor.
-                    shift_up_rpm: 2300.0,
-                    shift_down_rpm: 1150.0,
+                    // Measured: operating instructions allow starting in gears 1-4 and
+                    // skipping at most two gears (one event spans three), Fibel pp.40-41.
+                    launch_gears: 4,
+                    max_step: 3,
                     // OLVAR preselector: pre-selected shifts complete with drive uncoupled
                     // for a noticeable fraction of a second — INFERRED ~0.31 s, no shift-
                     // time datum reached.
                     shift_secs: 0.31,
-                    // OLVAR preselector capability [ANCHOR]: British Preliminary Report
-                    // No. 19 and period operating instructions describe preselection of an
-                    // arbitrary gear while any gear is engaged; one shift event therefore
-                    // addresses the scheduler's target directly.
-                    shift_addressing: Direct,
                 ),
                 steering: (
                     // (R_tight, R_wide) per forward gear (m): anchored at BOTH corners

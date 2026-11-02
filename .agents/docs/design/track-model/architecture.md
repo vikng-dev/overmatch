@@ -359,22 +359,28 @@ terrain contact's normal load. The side's rolling load `Σ c_rr·N` fades linear
 `forces::ROLLING_FADE_SPEED` = 0.25 m/s (`Resolution`, stability derivation at the constant), so a
 tank at rest takes none, and joins the side's ground reaction `R` at the pre-tick belt speed: the
 transmission's `I·v̇ = Q − R` carries it, and every reader of `R` (the brake's stop force, the
-demand filter, the clutch coupling) sees it as load. The shift-landing predictor
-(`transmission::predict_shift_landing_m`) relaxes the grip's share of `R` through a torque cut
-and charges the rolling share whole, because the belt still rolls on its ground there. A piece is
-no ground and takes none.
+clutch coupling) sees it as load. The Driver separately forecasts a cut from its geometric
+load L and the coupled hull/belt mass, with no reaction decay. A piece is no ground and takes none.
 
 **Driver observation and measured force resolution.** `track::load::observe` supplies the
 unfiltered `TransmissionInput::perceived_load`: `L = W sin(theta) + c_rr W cos(theta) +
-mu_t W length / (4 R_g)` along the engaged ladder. Nominal weight is vehicle data; normals,
+mu_t W cos(theta) length / (4 R_g)` along the engaged ladder. Nominal weight is vehicle data; normals,
 paired friction and rolling coefficients are the contact pass's own geometric/material facts,
 collected before the normal damper can unload a patch. Uniform pressure weights patches by
 supported length and collocation-column share. The projected support tangent supplies grade;
 the footprint span and current detent radius supply the turn term. Rolling is the full potential
 resistance even at rest, independently of the physical low-speed fade. Airborne means no terrain
 load. No acceleration, spring/damper force, temporal filter or recoil term enters L. The game and
-sandbox share this implementation. The existing scheduler still reads `demand_n` unchanged;
-the bitprobe records both observations, priced force and effective delivered force.
+sandbox share this implementation. The Driver uses requested pedal, not its actuator ramp,
+and prices each permitted gear at its own landing speed and detent radius. Holding the current
+gear pays no cut; changing gear pays the declared interruption. Coupled crank inertia contributes
+reflected mass to the force price; launch Slip prices the commanded launch rpm.
+C1 admits lower gears only on a deficit beyond M or an engaged crank below the curve floor;
+a spooling launch in Slip is not an engaged lug. C2 preserves overrun, and C3 preselects the
+highest capable declared launch gear at rest. The transitional hill-hold latch uses this same pick.
+The protective upshift is absent: the existing clutch over-rev slip guard bounds crank speed
+and retains motoring drag while the Driver holds overrun gear. Service braking at the ceiling
+belongs to the next ceiling law. The bitprobe records load, price and delivered force.
 
 MEASURED by `headless_test::drive_load` after one-rack fueling and `ClutchState` launch slip.
 The instrument waits for the post-tick crank to settle within one rpm of its Slip target or In
@@ -382,7 +388,7 @@ shaft, then averages delivery over up to one interruption's coupled ticks (a new
 partial sample). The forecast belongs to the same landing gear; the raw first coupled force and
 forecast speed error remain diagnostic fields. This replaces the first-tick 327,846 N bound,
 which priced clutch lock-up impulses and even a still-spooling zero-force tick as steady work.
-No scheduler decision has been replaced in this measurement.
+The following table records the scheduler before the accepted gear law.
 
 | Case | L expected kN (DERIVED) | L range kN (MEASURED) | Sustained forecast gap N (MEASURED) |
 |---|---:|---:|---|
@@ -405,9 +411,8 @@ MEASURED maximum absolute observer residual `0.406250 N`. DERIVED the bound is
 `max(span, max(abs(gap))) + residual = 262324.910156 N`. At the fixture's `559170.000000 N`
 weight this is rounded strictly upward at one part per million to `0.469133` of nominal
 vehicle weight. `assets/driving/driver.ron` stores this dimensionless Resolution share, so
-`M = 0.469133 W` (DERIVED `262325.099610 N` on the measured rig). The second-weight
-fixture proves the force resolution scales rather than imposing this rig's absolute Newtons
-on a lighter vehicle.
+`M = 0.469133 W` (DERIVED `262325.099610 N` on the measured rig). The old multiplication-only second-weight fixture did not test a numerical bound;
+the independent-weight instrument below replaces that claim.
 
 This remains a large forecast-versus-delivery envelope: coupled crank acceleration and the
 speed gained while coupling settles change delivery after the original landing forecast.
@@ -443,14 +448,25 @@ observer-noise deadband. The 30-degree near-equal price/delivery pair is grip-cl
 sides, so agreement there does not independently validate engine force. The 20-degree forecast
 also cannot certify a rolling speed loss when the observed cut did not produce that loss.
 
-The current asset and scheduler remain unchanged because the C1-C3 experiment was not green
-at the measured 60-minute boundary. In particular, the draft's rolling S4 fixture produced a
-false stationary equilibrium after relocation; its final split is not certified. The
+The prior C1-C3 experiment stopped before acceptance. Its rolling S4 fixture produced a
+false stationary equilibrium after relocation; those entry results are not certification. The
 [bounded gear-lane handoff](../../../scratch/research/law-drive-3-gear-handoff-2026-11-02.md)
 owns the full dispositions, draft limitations and decisions;
 [its raw calibration](../../../scratch/research/drive-gear-measurements-2026-11-02.json)
-retains every sample and landing mean. The lower proposed M is evidence for that continuation,
-not a production retune.
+retains every sample and landing mean. The unchanged-engine 20-tonne witness rejects weight-only M: MEASURED residuals
+-0.792969 to 1.236328 N exceed its 1.177200 N bound. Observer arithmetic follows W because L is
+homogeneous in W; crank subtraction instead follows `J*omega_over/dt*max(G/r)`.
+
+DERIVED from the 524-sample span: 2.609375 N divided by the calibration rig's approximately
+33,567,936 N crank arithmetic scale is 0.00000007774. Rounding upward to one significant digit
+gives **0.0000001** of that scale. The observer's 0.406250/559170 share rounds upward to
+**0.000001 W**. The production M is the sum of these independently scaled terms. Neither
+coefficient comes from a desired gear. The independent-weight instrument holds each engine
+fixed at 20 and 60 tonnes and checks the same-instant mechanical residual span against the
+crank term; a separate observer witness checks its W term. These are finite fixture bounds,
+not a claim that every possible construction has been measured.
+The [gear continuation record](../../../scratch/research/law-drive-3b-gear-2026-11-02.md)
+owns the executed proof and remaining S4 work.
 
 **Rolling on flat ground costs nothing else.** `c_rr` is published motion resistance, which
 lumps in running-gear losses, so the contact law spends nothing else on steady flat travel.

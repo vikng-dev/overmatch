@@ -47,7 +47,7 @@ use crate::{CombatantId, CombatantLife, ShotId};
 /// not shipped, so both landed as edits to it rather than a further bump.
 ///
 /// REV 20: `TransmissionState` grew `band_confirm_ticks` — the upshift
-/// sustained-speed confirmation counter (`UPSHIFT_CONFIRM_TICKS`), replicated and rolled back
+/// sustained-speed confirmation counter, replicated and rolled back
 /// atomically with the rest of the REV-14 transmission root and hashed in the determinism trace
 /// like every other discrete field.
 ///
@@ -262,7 +262,8 @@ use crate::{CombatantId, CombatantLife, ShotId};
 /// REV 72 (#258, the game's damage-model view): first-contact marks retain the flying calibre;
 /// packed directions refuse zero at the wire edge, with the same three-byte representation.
 /// REV 73: owner-private respawn admission distinguishes waiting space from refused map picks.
-pub const PROTOCOL_REV: u32 = 73;
+/// REV 74 (#146, driving model): support-priced C1-C3 gear selection removes scheduler memory.
+pub const PROTOCOL_REV: u32 = 74;
 
 /// Compatibility tag derived from the complete pinned wire manifest plus the crate version. This
 /// is the runtime handshake value: version-exact, so a version bump intentionally changes it.
@@ -1168,7 +1169,7 @@ const WIRE_SURFACE_HASH: u64 = 0x5afa185f66009321;
 /// The pinned hash of the OWN wire-facing type DEFINITIONS (field layout, not just names). Re-pin it
 /// whenever a wire-facing struct/enum definition changes; house process also bumps
 /// [`PROTOCOL_REV`]. The tripwire prints the new value. See the block above for the coverage model.
-const WIRE_TYPES_HASH: u64 = 0xcfc874f3dc15b147;
+const WIRE_TYPES_HASH: u64 = 0x7acd1cfb275c6d09;
 
 /// The pinned `Cargo.lock` versions of the external crates whose types ride the wire (avian's
 /// replicated physics components; lightyear's wire framing / input protocol). A bump of either can
