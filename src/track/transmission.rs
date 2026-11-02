@@ -3,7 +3,8 @@
 //! the pair of belt speeds, the drive command, and this tick's ground reactions `R_L, R_R`,
 //! then integrates `I·v̇ᵢ = Qᵢ − Rᵢ` for both sides simultaneously; each `Rᵢ` carries the
 //! ground's rolling resistance beside the grip's reaction (`forces::rolling_resistance`), so every
-//! reader of a reaction here sees it as load. Internally it works in the
+//! reader of a reaction here sees it as load, and the shift-landing predictor, which relaxes the
+//! grip's share through a torque cut, keeps that share whole. Internally it works in the
 //! superimposed coordinates `m = (v_L+v_R)/2` (propulsion) and `d = (v_L−v_R)/2` (steering
 //! difference); the per-side belt speeds stay the authoritative external state (design §2 —
 //! reparameterizing saves nothing and every contact call is per-side).
@@ -267,10 +268,10 @@ const TICK_HZ: f32 = 64.0;
 /// the old predictor's drag term matched the old window's real drag, and both died
 /// together.
 ///
-/// What the margin covers (the predictor decays the reaction and uses the coupled vehicle
-/// mass, [`predict_shift_landing_m`]): residual model error,
-/// chiefly the SUSTAINED grade component of the window's deceleration that outlives the
-/// decayed drive-shear reaction. On a steep sustained grade that residual can exceed the
+/// What the margin covers (the predictor decays the drive shear, keeps the ground's rolling
+/// resistance whole and uses the coupled vehicle mass, [`predict_shift_landing_m`]): residual
+/// model error, chiefly the SUSTAINED grade component of the window's deceleration that outlives
+/// the decayed drive-shear reaction. On a steep sustained grade that residual can exceed the
 /// margin; what then prevents hunting is the architecture around the landing, not
 /// predictor exactness — the reversal dwell blocks the down band for 32 post-window ticks,
 /// and the upshift's own reserve gate guarantees the landed gear can out-pull the filtered
@@ -1186,6 +1187,9 @@ pub struct TransmissionInput {
     pub side_commands: [f32; 2],
     pub speeds: [f32; 2],
     pub reactions: [f32; 2],
+    /// Each side's rolling resistance inside `reactions` (N, `forces::SideReport::rolling_resistance`):
+    /// the ground's share, which a cut drive does not relax.
+    pub rolling: [f32; 2],
     pub dt: f32,
     /// The driver holds the service brakes: no drive at any throttle, the full service brakes while
     /// the tank moves, and the parking latch once it is at rest (`driver_intent`).
@@ -1246,11 +1250,13 @@ fn engine_drag(tp: &TransmissionParams, omega_e: f32, u_fuel: f32) -> f32 {
 /// drag-through-the-landing-gear term is absent). The ground reaction changes the mean
 /// speed under the same inertia law as the live belt integration.
 ///
-/// THE WINDOW MODEL (the physical premise). The pre-cut `r_mean` is
-/// dominated by the DRIVE shear the grip elements carry, and cutting the drive is exactly
-/// what removes it: the bristle field relaxes over [`forces::GRIP_SHEAR_MODULUS_M`] of
-/// relative motion (~5 ticks — see [`LANDING_REACTION_DECAY`]), so the reaction DECAYS
-/// geometrically instead of staying frozen. And the mass that reaction decelerates is the
+/// THE WINDOW MODEL (the physical premise). The pre-cut `r_mean` holds the DRIVE shear the
+/// grip elements carry and the ground's rolling resistance `rolling_mean` inside it. Cutting
+/// the drive removes the shear: the bristle field relaxes over [`forces::GRIP_SHEAR_MODULUS_M`]
+/// of relative motion (~5 ticks — see [`LANDING_REACTION_DECAY`]), so that share DECAYS
+/// geometrically instead of staying frozen. The rolling resistance does not relax: the belt
+/// still rolls on its ground through the window, so it is charged whole every tick (above the
+/// fade band, where an upshift happens). And the mass that reaction decelerates is the
 /// COUPLED one: through the still-gripping (merely relaxing) bristle the belt pair carries
 /// the hull, so per side the inertia is `fp.inertia + (W/2)/g` — the belt's links and wheel
 /// moments reflected at belt speed, plus this side's share of the sprung vehicle — `W/2` the
@@ -1283,7 +1289,7 @@ pub(crate) fn predict_shift_landing_m(
     tp: &TransmissionParams,
     fp: &ForceParams,
     m: f32,
-    r_mean: f32,
+    (r_mean, rolling_mean): (f32, f32),
     dt: f32,
 ) -> f32 {
     let side_vehicle_mass = fp
@@ -1291,10 +1297,10 @@ pub(crate) fn predict_shift_landing_m(
         .map_or(0.0, |grip| grip.side_weight / GRAVITY_M_PER_S2);
     let i_coupled = fp.inertia + side_vehicle_mass;
     let mut pm = m;
-    let mut r = r_mean;
+    let mut shear = r_mean - rolling_mean;
     for _ in 0..tp.shift_ticks {
-        pm -= r / i_coupled * dt;
-        r *= LANDING_REACTION_DECAY;
+        pm -= (shear + rolling_mean) / i_coupled * dt;
+        shear *= LANDING_REACTION_DECAY;
     }
     pm
 }
@@ -1868,8 +1874,9 @@ struct DecisionInputs {
     m: f32,
     /// SIGNED geared shaft speed `dir·m` (stage A) — rigid gearing has a sign.
     shaft: f32,
-    /// Mean of this tick's two ground reactions (N), the landing predictor's input.
-    r_mean: f32,
+    /// Mean of this tick's two ground reactions and of their rolling-resistance shares (N), the
+    /// landing predictor's input.
+    r_mean: (f32, f32),
     dt: f32,
     /// Drive command WITH the engaged ladder, `0..1`.
     propulsive: f32,
@@ -2784,7 +2791,10 @@ pub fn step(
         current_reserve,
     );
 
-    let r_mean = (inp.reactions[0] + inp.reactions[1]) / 2.0;
+    let r_mean = (
+        (inp.reactions[0] + inp.reactions[1]) / 2.0,
+        (inp.rolling[0] + inp.rolling[1]) / 2.0,
+    );
     // Ordinary grade shifts still require a forward landing. The braked rollback rescue commits
     // through `refresh_hill_hold` instead: its purpose is gaining capability, so that named path
     // deliberately waives this sign gate just as the protective-upshift arm deliberately waives
