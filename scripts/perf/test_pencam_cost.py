@@ -251,8 +251,9 @@ class Command(unittest.TestCase):
         self.assertIn("until 70 s", out)
 
     def test_paired_online_windows_and_cut_follow_each_runs_release(self) -> None:
-        # Fixture frame clocks: the paired release can precede or follow this run. Both the
-        # corner window and the knockout cut must move; post-knockout rows belong to neither.
+        # The game's damage-model presentation: fixture clocks place the paired release before
+        # or after this run. Both the corner window and knockout cut must move, excluding rows
+        # after the knockout from either side.
         for shift in (-6, 9):
             with self.subTest(shift=shift):
                 (self.dir / "mp-on.log").write_text(

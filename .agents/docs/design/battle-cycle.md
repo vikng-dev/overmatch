@@ -290,3 +290,42 @@ client's sync state untouched) and the smoke's mode-file fix when these were ver
 | reviewer | finding | verified / not a defect | fixed in (subject) |
 |---|---|---|---|
 | Claude | `shot_transport::queue_fire`'s fire-tick arm compares the published clock with itself; the enqueued tick's agreement with the timeline rests on an untested ordering | verified: `shooting::fire` stamps the id from the same `ShotClock` in the same tick | `net: pin the clock publication before every gameplay reader (#238)`; `protocol::install_shot_clock` is the one installation, and its test refuses to build a schedule where the publication is unordered against a gameplay reader |
+
+
+## Net-8 review
+
+Subject: the game's battle cycle, scripted client, measurement windows and damage-model
+presentation, game state only. Both net-8 doubles were present and verified; the Codex double
+was re-read before this table. Its three findings overlap the Claude double. The ball-10 row is
+this lane's assigned net path.
+
+| reviewer | finding | verified / not a defect | fixed in (subject) |
+|---|---|---|---|
+| Claude, Codex (net-8) | Paired pen cam windows and the knockout cut reuse the on-run's absolute clock | verified: earlier and later off-run releases select different script intervals; the new analyzer regression failed before the fix for both directions | `scripts: align paired pen cam windows by combat release (#253)`; shift every paired mark and its cut by off-release minus on-release, read from the frame clock |
+| Claude, Codex (net-8) | The release's wall clock differs from the frame rows' elapsed clock | verified: Bevy's real clock excludes startup before its first update from elapsed time; the delayed-first-update fixture failed with the old stamp | `net: stamp combat release on the frame clock (#253)`; frame runners read `frame_s`, the same elapsed clock as rows and marks; `app_s` remains the named watchdog wall clock |
+| Claude (net-8) | `hold_commands` promises a pre-Battle hold but returns without holding commands | verified: a tank snapshot preceding its Battle keeps its raw and parsed intent while instruments read Held; the old return fails `a_tank_before_its_battle_snapshot_commands_nothing` | `net: hold commands while awaiting the Battle snapshot (#253)`; the absent snapshot follows the same neutral-command hold as non-combat |
+| Claude (net-8) | `cost::write_tick` keeps an unreachable absent-`MatchCommands` fallback and the harness documents it | verified: both recorder compositions mount the net plugin and its publication | `cost: require the match command state in tick recordings (#253)`; a required resource replaces the optional arm and the obsolete lever wording is gone |
+| Claude (net-8) | No system test guards the watchdog's sync gate | verified test gap: deleting that gate fails `watchdog_waits_for_sync_before_accounting_the_fill_up`, which runs the watchdog before and after synchronization against different remaining spans | `net: test watchdog fill-up accounting through synchronization (#253)` |
+| Claude (net-8) | No regression guards held-tick exclusion or its phase publication | verified test gap: removing the recorder skip fails the persisted-row test; publishing Live outside combat fails the phase-publication test | `net: pin held tick recording and phase publication (#253)`; holds spend no warmup or rows, including results after recording begins |
+| Claude (net-8) | Authority generation comes from a different default construction than the spawned Battle | verified structural defect: the defaults agree today, but changing the first Battle independently separates them; a non-default fixture detects a discarded startup value | `net: construct the startup Battle and world generation together (#253)`; one Battle value supplies both the pre-Startup generation and the spawned board |
+| Claude, Codex (net-8) | `battle_fill_up_s` silently coerces compact or unreadable fields to zero | verified: the compact valid field was read as zero; the regression exercises compact, spaced and malformed fields in both Bash and Zsh | `scripts: refuse unreadable battle fill-up spans (#253)`; parse a whole numeric value independently of whitespace and refuse anything unreadable |
+| Claude (net-8) | Release checkout comments claim only the smoke runner is needed | verified: the runner also sources the shared mode reader and reads the checkout's non-LFS mode file | `ci: name every checkout input to the archive smoke (#253)` |
+| Claude (net-8) | The measured client's no-input-slot refusal is redundant after release and advises an obsolete warmup fix | verified: the window requires release, and the script claims its slot before it can release; independent load clients still require their own gates | `scripts: remove the obsolete pre-release input-slot refusal (#253)` |
+| Claude (ball-10) | A recovered shot invents its physical birth as the muzzle | verified: the convex-envelope fixture places the muzzle beyond the source face; the muzzle-birth mutant fails its first-open-point assertion | `net: recover physical shot birth from the source envelope (#247)`; use the current rig's source proxies and authored bore through `shooting::outside_source`, retaining the muzzle as visual origin; the original shot pose is unavailable |
+
+MEASURED 2026-11-02 for `lane/sweep-net-9`: six independent mutants were applied together to
+disjoint test paths. Each failed its own named regression: the pre-snapshot return, non-combat
+publication, recorder skip, watchdog sync gate, separate startup default and muzzle birth. The
+source was restored exactly; the restored targeted `net::`, `cost::` and `headless_test` run
+passed 342 tests with five existing ignored tests. The shell reader's two tests and the pen cam
+analyzer's 24 tests passed; the clock and paired-window regressions had failed on the old paths.
+
+MEASURED: the release smoke (`scripts/ci/archive-smoke.sh`) ran once with freshly built bay dev
+binaries, headless and unattended under the machine lock on loopback. The client's slot was at
+`app_s=1.635`, release at `app_s=61.113 frame_s=60.224` (script tick zero, client tick 3906),
+and completion at `app_s=65.097` after 256 idle ticks; exit status was zero. No wire type changed:
+`PROTOCOL_REV` deliberately remains 65. The excluded simulation modules were untouched.
+
+Formatting and CI clippy passed before each commit. MEASURED final whole-tree guard run:
+44 passed, none ignored (`doc_citations`, `ui_ascii`, `net_boundary`, `bake::`). No findings or
+owner decisions remain from the assigned doubles.

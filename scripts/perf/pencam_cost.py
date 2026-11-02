@@ -3,7 +3,9 @@
 # requires-python = ">=3.11"
 # dependencies = []
 # ///
-"""The pen cam's on-screen frame cost from one capture: frames while a surface is on screen
+"""Subject: the game's damage-model presentation and measurement windows, game state only.
+
+The pen cam's on-screen frame cost from one capture: frames while a surface is on screen
 against frames while no surface is, on the same clock; and, for a paired `-off` run, its frames in
 the `-on` run's windows against the `-on` run's (the workload with and without the surface).
 

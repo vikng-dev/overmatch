@@ -1,5 +1,6 @@
 #!/bin/zsh
 # =============================== RUNBOOK ===============================
+# Subject: the game's damage-model presentation and measurement windows, game state only.
 # The pen cam's frame cost in the game: what each surface costs while it is on screen — the
 # shooter's corner, the x-ray, the kill cam — offline and over the network. Every stream
 # carries its own surface marks (debug lines the client writes on the frame stream's clock,
