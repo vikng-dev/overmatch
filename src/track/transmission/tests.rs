@@ -133,6 +133,7 @@ fn input(throttle: f32, steer: f32, speeds: [f32; 2], reactions: [f32; 2]) -> Tr
         ],
         speeds,
         reactions,
+        rolling: [0.0; 2],
         dt: 1.0 / 64.0,
         brake: false,
     }
@@ -687,6 +688,32 @@ fn correction_priority_fixture() -> (ForceParams, TransmissionParams, f32, f32) 
     (fp, tp, shaft, demand)
 }
 
+/// THE GROUND'S ROLLING RESISTANCE LASTS THROUGH A SHIFT'S TORQUE CUT: the landing predictor
+/// relaxes only the drive shear inside the pre-cut reaction and charges the rolling share whole
+/// every tick, so a reaction that is all rolling resistance lands the belt `shift_ticks` ticks of
+/// it lower. The upshift's landing gate on a soft ground relies on it; a predictor that relaxed
+/// the whole reaction as shear predicts the landing too high and fails. FIXTURE DATA: the
+/// correction-priority fixture's vehicle on the shipped shift window, a 40 kN mean reaction.
+#[test]
+fn a_shift_landing_keeps_the_grounds_rolling_resistance_whole() {
+    let (fp, _, shaft, _) = correction_priority_fixture();
+    let tp = tiger_tp();
+    assert!(tp.shift_ticks > 0, "the shift window cuts torque");
+    let dt = 1.0 / 64.0;
+    let coupled = fp.inertia + fp.grip.expect("the fixture grips").side_weight / GRAVITY_M_PER_S2;
+    let rolling = predict_shift_landing_m(&tp, &fp, shaft, (40_000.0, 40_000.0), dt);
+    let whole = shaft - f32::from(tp.shift_ticks) * 40_000.0 / coupled * dt;
+    assert!(
+        (rolling - whole).abs() < 1e-4,
+        "landing {rolling} m/s against the whole rolling charge's {whole} m/s"
+    );
+    let shear = predict_shift_landing_m(&tp, &fp, shaft, (40_000.0, 0.0), dt);
+    assert!(
+        shear - whole > 0.5 * (shaft - whole),
+        "relaxing shear must charge well under the whole: {shear} vs {whole} m/s from {shaft}"
+    );
+}
+
 /// D2 regression: a threshold-confirmed reserve deficit is a correction and must beat an
 /// otherwise-valid above-band upshift preference on the same decision tick. This is a REAL
 /// two-leg collision proof. The
@@ -711,7 +738,7 @@ fn confirmed_deficit_precedes_upshift_arm() {
         "fixture must sit above the up band (the band leg of the upshift predicate)"
     );
     let g_up = tp.gears_fwd[2];
-    let landing = predict_shift_landing_m(&tp, &fp, shaft, demand / 2.0, 1.0 / 64.0);
+    let landing = predict_shift_landing_m(&tp, &fp, shaft, (demand / 2.0, 0.0), 1.0 / 64.0);
     assert!(
         landing > 0.0
             && landing * g_up / tp.sprocket_radius / RPM_TO_RAD
