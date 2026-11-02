@@ -1637,7 +1637,7 @@ mod tests {
     /// `store::a_non_finite_budget_cannot_survive_the_parse` guards the boundary.
     #[test]
     fn a_saturated_step_on_any_row_is_a_no_op() {
-        // The budget as a parser could deliver it after sanitisation, plus an ordinary off-ladder
+        // Finite budgets the parser accepts, including an ordinary off-ladder
         // hand-edit, so this covers the shape the fix produces rather than only the default.
         for budget in [
             PixelBudget::default(),

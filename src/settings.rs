@@ -1262,23 +1262,9 @@ fn read_displays(
 /// player finds in `video.ron`. A hand-edited value outside the ladder is honoured as written and
 /// clamped only at the absurd ends by [`PixelBudget::pixels`] — the same shape [`FrameCap`] has.
 ///
-/// # Non-finite values are normalised AT THE PARSE, not at the read
-///
-/// RON accepts `NaN` and `inf`, and [`Settings`] derives `PartialEq` — so a single `NaN` on disk
-/// makes the whole settings resource **unequal to itself**. That is not a rendering problem
-/// (`pixels` already answers NaN with the default, so no consumer sees one); it is a WRITE
-/// AMPLIFICATION problem, because the page's two no-op guards are equality tests: `change_row`
-/// returns early when a step produced the same settings, and `scrub` skips a drag frame that landed
-/// where it already was. With a NaN in the struct both comparisons are permanently false, so a
-/// held-still drag saves the file every frame and a saturated keypress on an unrelated row saves on
-/// every repeat.
-///
-/// So the fix belongs at the boundary, where the bad value enters: [`PixelBudget`]'s own
-/// `Deserialize` sanitises. NaN becomes the default, the infinities become the endpoint they point
-/// at, and every FINITE value — including deliberately off-ladder ones like `1.2` — is preserved
-/// exactly, because honouring a hand-edit until it is touched is the behaviour this type shares with
-/// [`FrameCap`]. [`PixelBudget::pixels`]'s own NaN guard stays as the second line: it covers a value
-/// constructed in code, which no parser sees.
+/// Nonfinite values are refused during deserialization and reported through the corrupt-file
+/// outcome. NaN would break Settings' reflexive equality and defeat the page's no-op write guards.
+/// Finite off-ladder edits remain exact until the player touches the control.
 #[derive(Clone, Copy, PartialEq, Debug, Serialize)]
 #[serde(transparent)]
 pub(crate) struct PixelBudget(pub(crate) f32);
@@ -1288,7 +1274,14 @@ impl<'de> Deserialize<'de> for PixelBudget {
     where
         D: serde::Deserializer<'de>,
     {
-        Ok(Self::sanitized(f32::deserialize(deserializer)?))
+        let budget = f32::deserialize(deserializer)?;
+        if !budget.is_finite() {
+            return Err(serde::de::Error::invalid_value(
+                serde::de::Unexpected::Float(f64::from(budget)),
+                &"a finite lod_pixel_budget; replace NaN or infinity with a finite number",
+            ));
+        }
+        Ok(Self(budget))
     }
 }
 
@@ -1311,36 +1304,17 @@ impl PixelBudget {
     /// after this impl pins it against the three constants above.
     const STOPS: u16 = 16;
 
-    /// The value a NON-FINITE `budget` is stored as. The parse boundary — see the type doc for why
-    /// a NaN must never be allowed to REACH the struct, not merely be handled on the way out.
-    ///
-    /// A finite value is returned untouched, off-ladder or not: this normalises what cannot be
-    /// compared, it does not enforce the ladder (that is `step`'s job, on first touch).
-    fn sanitized(budget: f32) -> Self {
-        if budget.is_nan() {
-            Self::default()
-        } else if budget == f32::INFINITY {
-            Self(Self::MAX)
-        } else if budget == f32::NEG_INFINITY {
-            Self(Self::MIN)
-        } else {
-            Self(budget)
-        }
-    }
-
     /// The budget in screen pixels. The clamp is the guard against a hand-edited
     /// `lod_pixel_budget: 0.0` demanding an infinitely fine ladder (or a negative one inverting the
     /// comparison every consumer will write).
     ///
-    /// NaN is answered with the DEFAULT rather than clamped, because `f32::clamp` deliberately
-    /// passes NaN through — and a NaN budget is not a small error downstream: every comparison a
-    /// consumer writes against it is false, so an LOD ladder built from one silently selects
-    /// nothing. [`PixelBudget::sanitized`] means no PARSED value can be one; this covers a budget
-    /// constructed in code.
+    /// Parsed values are finite; a nonfinite value constructed in code is a bug. A NaN would make
+    /// every consumer comparison false and silently select no LOD.
     pub(crate) fn pixels(self) -> f32 {
-        if self.0.is_nan() {
-            return Self::default().0;
-        }
+        assert!(
+            self.0.is_finite(),
+            "PixelBudget comes from finite preset data or checked settings input"
+        );
         self.0.clamp(Self::MIN, Self::MAX)
     }
 

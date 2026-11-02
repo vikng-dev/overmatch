@@ -491,39 +491,31 @@ mod tests {
         );
     }
 
-    /// **A non-finite budget cannot survive the parse.**
-    ///
-    /// RON accepts `NaN` and `inf`, and `Settings` derives `PartialEq` — so one `NaN` on disk makes
-    /// the settings resource unequal to ITSELF, and the settings page's two no-op guards are
-    /// equality tests (`change_row`'s "the step changed nothing" and `scrub`'s "the drag landed
-    /// where it already was"). A NaN would turn a held-still drag into a file write every frame and
-    /// a saturated keypress on any row into a write per repeat. So it is normalised where it enters
-    /// — through the real `parse`, not a unit call on the sanitiser.
+    /// The load report must identify and refuse a nonfinite budget, preserving the player's file;
+    /// otherwise the page's whole-Settings equality guards can amplify writes. Finite off-ladder
+    /// edits remain valid and exact.
     #[test]
     fn a_non_finite_budget_cannot_survive_the_parse() {
-        for (text, want) in [
-            ("NaN", PixelBudget::default()),
-            ("inf", PixelBudget(PixelBudget::MAX)),
-            ("-inf", PixelBudget(PixelBudget::MIN)),
-        ] {
-            let file = format!("(version: 1, lod_pixel_budget: {text})");
-            let Parsed::Ok(settings) = parse(&file) else {
-                panic!("{file} must parse — a hand-edit is not a corrupt file");
+        for value in ["NaN", "inf", "-inf"] {
+            let file = format!("(version: {SETTINGS_VERSION}, lod_pixel_budget: {value})");
+            let Parsed::Corrupt(error) = parse(&file) else {
+                panic!("{file} must refuse a nonfinite budget");
             };
-            assert_eq!(settings.lod_pixel_budget, want, "{file}");
-            assert!(
-                settings.lod_pixel_budget.0.is_finite(),
-                "{file} left a non-finite value in the struct",
-            );
-            // The property that actually matters: the settings resource compares equal to a copy of
-            // itself, so every no-op guard on the page still works.
-            assert_eq!(
-                settings, settings,
-                "{file} poisoned whole-settings equality"
-            );
+            assert!(error.contains("lod_pixel_budget"), "{error}");
+            assert!(error.contains("finite"), "{error}");
+
+            let scratch = ScratchDir::new("nonfinite");
+            std::fs::create_dir_all(&scratch.dir).unwrap();
+            let path = scratch.file();
+            std::fs::write(&path, &file).unwrap();
+            let loaded = load(Some(&path));
+            let LoadNote::Corrupt { error, kept } = loaded.note else {
+                panic!("a nonfinite budget must reach the visible corrupt-file report");
+            };
+            assert!(error.contains("lod_pixel_budget"), "{error}");
+            assert_eq!(loaded.settings, Settings::default());
+            assert_eq!(std::fs::read_to_string(kept.unwrap()).unwrap(), file);
         }
-        // A finite off-ladder hand-edit is still honoured exactly, which is the behaviour this
-        // shares with `FrameCap` — the sanitiser must not quietly become a ladder snap.
         let Parsed::Ok(edited) = parse("(version: 1, lod_pixel_budget: 1.2)") else {
             panic!("a finite off-ladder value must parse");
         };
