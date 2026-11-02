@@ -2072,7 +2072,8 @@ pub(crate) struct Weighed {
     pub steps: usize,
 }
 
-/// The strength check under gravity plus `loads`' presses. It starts from pressed chunks and
+/// The strength check under gravity plus `inputs`' presses, framed for the current groups.
+/// It starts from pressed chunks and
 /// chunks whose support changed ([`touched`]: each side of a joint in `cracked`, each neighbour of
 /// `dusted`, ascending), plus `unloaded` chunks whose former press disappeared. With none of
 /// those seeds it does no work. For each section cutting a touched chunk's path to the ground
@@ -4557,8 +4558,9 @@ mod tests {
     }
 
     /// A moving pair's relative load is set by unequal acceleration, including when both
-    /// external sources point the same way. Uniform translation opens nothing; the runtime
-    /// impulse and sustained-force assessments both rely on local punch candidates.
+    /// external sources point the same way. Uniform translation opens nothing. The impulse
+    /// arm requires local punch candidates; the sustained-force arm independently exercises
+    /// direct axial section tension.
     /// Fixture: binary-exact pair geometry, equal masses, and axial end loads.
     #[test]
     fn unequal_codirectional_contacts_separate_a_pair() {

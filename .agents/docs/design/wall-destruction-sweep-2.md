@@ -571,3 +571,57 @@ headless and whole-tree selection (`headless_test`, `buildings::`, `debris::`, `
 `doc_citations`, protocol pins) passed 528 with 7 existing ignored measurements. Shifted readings: the slow-ram pair now leaves with 992.32 J instead of
 999.42 J (−7.1 J, the seams' work); a slab beside a light piece under one belt takes its
 whole −1875 N s instead of 0. PROTOCOL_REV is unchanged: no serialized type changed.
+
+## Part 10: sweep-destr-7 review and deposit pricing (#249)
+
+Subject: the game's building destruction model, game state only. The single Claude review
+was checked against the lane's starting tree. The local punch candidates are retained; the
+change removes their repeated bookkeeping and global load scans, preserving discovery order
+and source summation order.
+
+| reviewer | finding | verified / not a defect | fixed in (subject) |
+|---|---|---|---|
+| Claude P2 | Local punch candidates introduce linear deduplication and a complete load scan per candidate on every pass | verified: the locked bed below reaches repeated failures at 200 seeds; membership sets replace linear candidate lookup, source patches are formed once per assessment, and each current frame indexes its loads by chunk | buildings: index punch loads and cache source patches (#249) |
+| Claude P3 | The unequal co-directional pair test claims both arms require local candidates | verified: only the impulse arm discriminates that requirement; the sustained-force arm independently reads direct axial tension. The test comment now states that scope | docs: clarify punch regression coverage and record deposit pricing (#249) |
+| Claude P3 | `weigh`'s opening doc names the former `loads` parameter | verified: the input is `GroupLoads`; the doc now names `inputs` and the current group frames | docs: clarify punch regression coverage and record deposit pricing (#249) |
+
+The pair's sustained-force reading is DERIVED from its fixture: relative axial press
+`499.5 / (1/64) = 31968 N`, through `0.0625 m²`, gives `511488 Pa`, above the fixture's
+`100000 Pa` tensile strength. It therefore opens without local punch candidates. The impulse
+arm still guards their presence. Both unequal arms open, and both equal-load controls stay
+joined. This corrects the regression-coverage claim accompanying Part 8, without changing its
+physical result. A new indexed-load regression uses interleaved fixture sources across chunks:
+source-order cancellation retains a final unit impulse that chunk-order summation loses.
+
+**Deposit bed.** `buildings::breakage::tests::a_seeded_blast_deposit_priced_by_loaded_chunks`
+is an ignored pricing bed, as in `.agents/scratch/perf-2026-11-02/night-pricing.md`.
+It times the server law entry point `run_laws` on the shipped house's 1163 law chunks
+(MEASURED), with fixture patches of 10, 50 and 200 nearest unburied centroids on one side.
+Fixture loads are parallel +X blows of 10 N s with 100 kN peaks and no cavity energy,
+crushing or press. This isolates deposit-law cost; it excludes blast tracing, collider/view
+updates and networking. Every timed deposit starts from a fresh clone with an empty section
+cache; fixture preparation and cloning are outside the timer. Seven repeats per size, two
+runs before and two after, on the same Apple M4 / 16 GiB machine, `perf` profile with
+`dev_ui,bitprobe`. Each pair of runs held `/tmp/overmatch-cargo.lock` and recorded zero
+running `rustc` at its start. All runs were unattended, muted and headless.
+
+| seeded chunks | before p50, µs | after p50, µs | before p95, µs | after p95, µs | failures / events / freed groups, before and after |
+|---|---|---|---|---|---|
+| 10 | 1180.4–1215.5 | 1195.7–1196.0 | 1432.5–8979.2 | 1489.2–1748.2 | 0 / 0 / 0 |
+| 50 | 1613.2–1729.0 | 1614.2–1646.9 | 1774.9–1918.5 | 1792.6–1805.0 | 0 / 0 / 0 |
+| 200 | 74766.7–75300.3 | 56318.7–56477.7 | 75737.7–76679.1 | 57046.0–57404.3 | 6 / 182 / 6 |
+
+All times in the table are MEASURED ranges over the two runs' percentiles, with no time-based
+pass condition. DERIVED from the mean of the two p50s: the 200-seed deposit is 24.8% cheaper
+(1.33x as fast); the smaller cases do not resolve a change. The 200-seed cost remains about
+56 ms: local candidates still run the same ring laws, and other section and support work
+remains. No candidate or force/work gate was removed to buy the reduction.
+
+**Gates.** The implementation passed formatting, CI clippy and the required `buildings::`,
+`trees::`, `debris::`, `sandbox::`, `headless_test` and `doc_citations` selection: MEASURED
+235 passed, eight ignored measurement beds, including the new one. The unequal pair and
+indexed-cancellation tests also passed directly in the optimized pricing binary. The final
+record and P3 comment corrections passed formatting, CI clippy and the whole-tree
+`doc_citations`, `ui_ascii`, `net_boundary` and `bake::` guards: MEASURED 44 passed, none ignored.
+No new lens finding, capture, push, issue comment or subagent. The fenced track,
+contact-transfer and ballistics paths are unchanged. No owner decision remains.
