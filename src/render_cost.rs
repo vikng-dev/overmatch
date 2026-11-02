@@ -52,7 +52,7 @@
 //!   by difference. `bloom` and `depth_prepass` remove those components from every `Camera3d`;
 //!   `env_light` stops `world` from filtering the sky's environment light and giving it to views;
 //!   `ui` hides every UI root, which removes the UI's extraction and drawing but not its layout. An
-//!   unknown name panics at boot, so a typo cannot read as a free feature. Never part of a shipped
+//!   unknown name refuses startup, so a typo cannot read as a free feature. Never part of a shipped
 //!   measurement: the picture changes.
 //!   `inset_half`, `inset_masks`, `inset_bloom` price the pen cam corner's parts while it shows
 //!   (`scripts/perf/run-pencam-attribution.sh`): its target at half size (the mask views follow,
@@ -95,8 +95,7 @@ use serde_json::json;
 use crate::render_policy::CameraProfile;
 use crate::trace::{JsonlSink, role_path};
 
-/// Seconds between `phase_census:` reports: the census is a step function of the scene, so a few
-/// lines per run are enough and the log stays readable.
+/// Resolution: census sampling interval, bounding diagnostic log volume for a stepwise scene.
 const PHASE_COUNT_PERIOD_S: f64 = 5.0;
 
 /// Render features removed by `SPIKE_ABLATE` (module doc). Read by `world::light_battlefield_views`
@@ -131,8 +130,8 @@ impl Ablate {
         }
     }
 
-    /// A comma-separated feature list; `Err` names the first unknown feature.
-    pub(crate) fn parse(list: &str) -> Result<Self, String> {
+    /// A comma-separated feature list; an error names the unknown feature and valid choices.
+    fn parse(list: &str) -> Result<Self, RenderControlError> {
         let mut ablate = Self::default();
         for name in list
             .split(',')
@@ -153,7 +152,7 @@ impl Ablate {
                 "inset_bloom" => ablate.inset_bloom = true,
                 "terrain_macro" => ablate.terrain_macro = true,
                 "terrain_layers" => ablate.terrain_layers = true,
-                unknown => return Err(unknown.to_owned()),
+                unknown => return Err(RenderControlError::Ablation(unknown.to_owned())),
             }
         }
         Ok(ablate)
@@ -181,6 +180,44 @@ impl Ablate {
     }
 }
 
+/// Operator configuration errors are refused before the client starts its schedule.
+#[derive(Debug, PartialEq, Eq)]
+enum RenderControlError {
+    Filter(String),
+    Splits(String),
+    Overlap(String),
+    Ablation(String),
+}
+
+impl std::fmt::Display for RenderControlError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let (name, value, expected) = match self {
+            Self::Filter(value) => (
+                "SPIKE_SHADOW_FILTER",
+                value,
+                "gaussian, hardware or temporal",
+            ),
+            Self::Splits(value) => (
+                "SPIKE_SHADOW_SPLITS",
+                value,
+                "comma-separated increasing finite bounds above the stock minimum distance, at most four",
+            ),
+            Self::Overlap(value) => (
+                "SPIKE_SHADOW_OVERLAP",
+                value,
+                "a finite proportion in [0,1)",
+            ),
+            Self::Ablation(value) => (
+                "SPIKE_ABLATE",
+                value,
+                "bloom, env_light, depth_prepass, ui, terrain-casters, tree-casters, house-casters, tank-casters, inset_half, inset_masks, inset_bloom, terrain_macro or terrain_layers",
+            ),
+        };
+        write!(f, "{name}={value:?}: expected {expected}")
+    }
+}
+impl std::error::Error for RenderControlError {}
+
 /// Independent, boot-only stock shadow instruments; never persisted as player settings.
 #[derive(Resource, Default, Debug)]
 pub(crate) struct ShadowControls {
@@ -190,47 +227,54 @@ pub(crate) struct ShadowControls {
 }
 
 impl ShadowControls {
-    fn parse(filter: Option<&str>, splits: Option<&str>, overlap: Option<&str>) -> Self {
-        let filter = filter.map(|value| match value {
-            "gaussian" => ShadowFilteringMethod::Gaussian,
-            "hardware" => ShadowFilteringMethod::Hardware2x2,
-            "temporal" => ShadowFilteringMethod::Temporal,
-            _ => panic!("SPIKE_SHADOW_FILTER: expected gaussian, hardware or temporal"),
-        });
-        let splits = splits.map(|value| {
-            let bounds: Vec<f32> = value
-                .split(',')
-                .map(|v| {
-                    v.trim()
-                        .parse()
-                        .expect("SPIKE_SHADOW_SPLITS: expected comma-separated metres")
-                })
-                .collect();
-            // DERIVED stock minimum distance is 0.1 m; the shader supports at most four cascades.
-            assert!(
-                !bounds.is_empty()
-                    && bounds.len() <= 4
-                    && bounds.iter().all(|v| v.is_finite() && *v > 0.1)
-                    && bounds.windows(2).all(|w| w[0] < w[1]),
-                "SPIKE_SHADOW_SPLITS: expected increasing finite bounds above 0.1 m, at most four"
-            );
-            bounds
-        });
-        let overlap = overlap.map(|value| {
-            let value: f32 = value
-                .parse()
-                .expect("SPIKE_SHADOW_OVERLAP: expected a proportion");
-            assert!(
-                value.is_finite() && (0.0..1.0).contains(&value),
-                "SPIKE_SHADOW_OVERLAP: expected a finite proportion in [0,1)"
-            );
-            value
-        });
-        Self {
+    fn parse(
+        filter: Option<&str>,
+        splits: Option<&str>,
+        overlap: Option<&str>,
+    ) -> Result<Self, RenderControlError> {
+        let filter = filter
+            .map(|value| match value {
+                "gaussian" => Ok(ShadowFilteringMethod::Gaussian),
+                "hardware" => Ok(ShadowFilteringMethod::Hardware2x2),
+                "temporal" => Ok(ShadowFilteringMethod::Temporal),
+                _ => Err(RenderControlError::Filter(value.into())),
+            })
+            .transpose()?;
+        let splits = splits
+            .map(|value| {
+                let invalid = || RenderControlError::Splits(value.into());
+                let bounds: Vec<f32> = value
+                    .split(',')
+                    .map(|v| v.trim().parse().map_err(|_| invalid()))
+                    .collect::<Result<_, _>>()?;
+                // DERIVED: Bevy's stock near boundary and renderer cascade-array capacity.
+                if bounds.is_empty()
+                    || bounds.len() > bevy::pbr::MAX_CASCADES_PER_LIGHT
+                    || !bounds.iter().all(|v| {
+                        v.is_finite() && *v > CascadeShadowConfig::default().minimum_distance
+                    })
+                    || !bounds.windows(2).all(|w| w[0] < w[1])
+                {
+                    return Err(invalid());
+                }
+                Ok(bounds)
+            })
+            .transpose()?;
+        let overlap = overlap
+            .map(|value| {
+                let invalid = || RenderControlError::Overlap(value.into());
+                let proportion: f32 = value.parse().map_err(|_| invalid())?;
+                if !proportion.is_finite() || !(0.0..1.0).contains(&proportion) {
+                    return Err(invalid());
+                }
+                Ok(proportion)
+            })
+            .transpose()?;
+        Ok(Self {
             filter,
             splits,
             overlap,
-        }
+        })
     }
 
     /// Explicit bounds select their own count and envelope; absent fields retain the stock config.
@@ -245,13 +289,17 @@ impl ShadowControls {
 }
 
 fn shadow_controls(app: &mut App) {
-    let filter = crate::env_value("SPIKE_SHADOW_FILTER").unwrap_or_else(crate::refuse_start);
-    let splits = crate::env_value("SPIKE_SHADOW_SPLITS").unwrap_or_else(crate::refuse_start);
-    let overlap = crate::env_value("SPIKE_SHADOW_OVERLAP").unwrap_or_else(crate::refuse_start);
+    let filter =
+        crate::env_parse::<String>("SPIKE_SHADOW_FILTER").unwrap_or_else(crate::refuse_start);
+    let splits =
+        crate::env_parse::<String>("SPIKE_SHADOW_SPLITS").unwrap_or_else(crate::refuse_start);
+    let overlap =
+        crate::env_parse::<String>("SPIKE_SHADOW_OVERLAP").unwrap_or_else(crate::refuse_start);
     if filter.is_none() && splits.is_none() && overlap.is_none() {
         return;
     }
-    let controls = ShadowControls::parse(filter.as_deref(), splits.as_deref(), overlap.as_deref());
+    let controls = ShadowControls::parse(filter.as_deref(), splits.as_deref(), overlap.as_deref())
+        .unwrap_or_else(crate::refuse_start);
     info!("render_cost: shadow controls {controls:?}");
     app.insert_resource(controls)
         .add_systems(Update, apply_shadow_filter);
@@ -283,14 +331,7 @@ fn apply_shadow_filter(
 /// Mount the two ablation instruments of the module doc, each only when its env var is set.
 fn ablation_instruments(app: &mut App) {
     if let Some(list) = crate::env_value("SPIKE_ABLATE").unwrap_or_else(crate::refuse_start) {
-        let ablate = Ablate::parse(&list).unwrap_or_else(|unknown| {
-            panic!(
-                "SPIKE_ABLATE: unknown feature {unknown:?} (known: bloom, env_light, \
-                 depth_prepass, ui, terrain-casters, tree-casters, \
-                 house-casters, tank-casters, inset_half, inset_masks, inset_bloom, terrain_macro, \
-                 terrain_layers)"
-            )
-        });
+        let ablate = Ablate::parse(&list).unwrap_or_else(crate::refuse_start);
         info!("render_cost: ablating {ablate:?}");
         app.insert_resource(ablate)
             .add_systems(Update, ablate_camera_features)
@@ -492,7 +533,7 @@ fn log_sorted<SPI: SortedPhaseItem>(phase: &str, phases: Option<&ViewSortedRende
     }
 }
 
-/// Seconds between sample windows. Freshness math sets the ceiling, not file size: bevy retains
+/// Resolution: seconds between sample windows. Bevy retains
 /// only the newest 120 measurements per diagnostic, so the window must stay under 120 frames or
 /// measurements fall off the back of the history unread. 0.5 s keeps the window inside the cap
 /// up to 240 fps; row volume is one row per ACTIVE span per window.
@@ -683,13 +724,19 @@ mod tests {
     fn shadow_controls_are_independent() {
         let base = CascadeShadowConfig::default();
         let mut config = base.clone();
-        ShadowControls::parse(Some("hardware"), None, None).configure_cascades(&mut config);
+        ShadowControls::parse(Some("hardware"), None, None)
+            .unwrap()
+            .configure_cascades(&mut config);
         assert_eq!(config.bounds, base.bounds);
         assert_eq!(config.overlap_proportion, base.overlap_proportion);
-        ShadowControls::parse(None, Some("60,180,350"), None).configure_cascades(&mut config);
+        ShadowControls::parse(None, Some("60,180,350"), None)
+            .unwrap()
+            .configure_cascades(&mut config);
         assert_eq!(config.bounds, vec![60.0, 180.0, 350.0]);
         assert_eq!(config.overlap_proportion, base.overlap_proportion);
-        ShadowControls::parse(None, None, Some("0.05")).configure_cascades(&mut config);
+        ShadowControls::parse(None, None, Some("0.05"))
+            .unwrap()
+            .configure_cascades(&mut config);
         assert_eq!(config.bounds, vec![60.0, 180.0, 350.0]);
         assert_eq!(config.overlap_proportion, 0.05);
         assert_eq!(config.minimum_distance, base.minimum_distance);
@@ -699,30 +746,106 @@ mod tests {
             ("temporal", ShadowFilteringMethod::Temporal),
         ] {
             assert_eq!(
-                ShadowControls::parse(Some(name), None, None).filter,
+                ShadowControls::parse(Some(name), None, None)
+                    .unwrap()
+                    .filter,
                 Some(filter)
             );
         }
     }
 
-    /// Bad conditions must fail before a battery can silently price a different experiment.
+    /// Operator mistakes must return the offending control, without unwinding through startup.
     #[test]
     fn invalid_shadow_controls_are_rejected() {
-        for splits in ["", "350,40", "0,350", "NaN,350", "1,2,3,4,5"] {
-            assert!(
-                std::panic::catch_unwind(|| ShadowControls::parse(None, Some(splits), None))
-                    .is_err()
+        for splits in [
+            "",
+            "350,40",
+            "0,350",
+            "NaN,350",
+            "1,2,3,4,5",
+            "typo",
+            "1,inf",
+        ] {
+            assert_eq!(
+                ShadowControls::parse(None, Some(splits), None).unwrap_err(),
+                RenderControlError::Splits(splits.into())
             );
         }
-        for overlap in ["NaN", "-0.1", "1"] {
-            assert!(
-                std::panic::catch_unwind(|| ShadowControls::parse(None, None, Some(overlap)))
-                    .is_err()
+        for overlap in ["NaN", "-0.1", "1", "inf", "typo"] {
+            assert_eq!(
+                ShadowControls::parse(None, None, Some(overlap)).unwrap_err(),
+                RenderControlError::Overlap(overlap.into())
             );
         }
-        assert!(
-            std::panic::catch_unwind(|| ShadowControls::parse(Some("typo"), None, None)).is_err()
+        assert_eq!(
+            ShadowControls::parse(Some("typo"), None, None).unwrap_err(),
+            RenderControlError::Filter("typo".into())
         );
+    }
+
+    /// The production installer must refuse operator typos visibly with the configuration exit
+    /// status. A parser-only test would miss an adapter turning its error back into a panic.
+    #[test]
+    fn invalid_render_lever_refuses_startup() {
+        const CHILD: &str = "OVERMATCH_TEST_RENDER_REFUSAL";
+        if let Some(expected) = std::env::var_os(CHILD) {
+            let mut app = App::new();
+            app.add_plugins(client_plugin);
+            if expected == "zero-overlap" {
+                assert_eq!(app.world().resource::<ShadowControls>().overlap, Some(0.0));
+                return;
+            }
+            panic!("invalid render controls must refuse startup before returning");
+        }
+        for (name, value) in [
+            ("SPIKE_SHADOW_FILTER", "typo"),
+            ("SPIKE_SHADOW_SPLITS", "350,40"),
+            ("SPIKE_SHADOW_OVERLAP", "NaN"),
+            ("SPIKE_ABLATE", "typo"),
+            ("SPIKE_SHADOW_OVERLAP", "0"),
+        ] {
+            let mut child = std::process::Command::new(std::env::current_exe().unwrap());
+            for lever in [
+                "SPIKE_SHADOW_FILTER",
+                "SPIKE_SHADOW_SPLITS",
+                "SPIKE_SHADOW_OVERLAP",
+                "SPIKE_ABLATE",
+                "SPIKE_PHASE_COUNTS",
+                "SPIKE_RENDER_COST",
+            ] {
+                child.env_remove(lever);
+            }
+            let output = child
+                .args([
+                    "--exact",
+                    "render_cost::tests::invalid_render_lever_refuses_startup",
+                    "--nocapture",
+                ])
+                .env(
+                    CHILD,
+                    if value == "0" {
+                        "zero-overlap"
+                    } else {
+                        "invalid"
+                    },
+                )
+                .env(name, value)
+                .output()
+                .unwrap();
+            let error = String::from_utf8(output.stderr).unwrap();
+            if value == "0" {
+                assert!(output.status.success(), "zero overlap is valid: {error}");
+                continue;
+            }
+            assert_eq!(output.status.code(), Some(2), "{name}: {error}");
+            assert!(
+                error.contains("overmatch: fatal:")
+                    && error.contains(name)
+                    && error.contains(value)
+                    && error.contains("expected"),
+                "{error}"
+            );
+        }
     }
 
     /// One measurement per simulated frame, 16 ms apart — real histories are never same-instant.
@@ -756,7 +879,7 @@ mod tests {
         assert!(terrain.base_only && !terrain.macro_tint);
         assert_eq!(
             Ablate::parse("bloom,envlight").unwrap_err(),
-            "envlight",
+            RenderControlError::Ablation("envlight".into()),
             "a misspelt feature must be named, not ignored"
         );
     }
