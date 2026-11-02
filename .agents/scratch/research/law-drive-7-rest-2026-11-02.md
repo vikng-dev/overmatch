@@ -188,3 +188,37 @@ cannot fit the remaining 3 min 13 s. The lane therefore stops at green step 3 wi
 Three ordered commits carry the requested co-author trailer. No push, merge, release, issue
 comment or external message was sent. All executions used the machine lock, unattended,
 headless and muted; no lane-started process remains after the final checks.
+
+## Resumed round: step 4 experiment
+
+Subject: the game's driving model. MEASURED restart: 2026-11-02 18:24:15 UTC;
+60-minute deadline 19:24:15 UTC. The same lane branch and bay continue.
+
+The design admission was tried with a red moving-below-idle launch-gear witness (In instead
+of Slip). The experiment replaced the at-rest restriction with the declared launch-gear domain,
+priced fresh candidate launch Slip by that same domain, removed the upshift-into-lug refusal,
+and omitted reflected inertia when the admitted idle guard holds the crank above the shaft.
+The test of the replaced moving-lug admission and its pricing-only companion went with it.
+
+MEASURED trial: 272 track tests passed, three failed. A capable quarter-pedal lab launch on
+level ground selected F5 and finished at zero speed (final speed spread 0.052916586 m/s),
+failing sustained travel. Resuming a retained notch also failed to gain perceptible speed.
+The old catch-floor price expectation also changed, as expected from omitting reflected inertia.
+S2 stayed green: the two grade fixtures launched without rollback or paid cuts, ending at
+3.3605297 and 2.1343575 m/s. Reversal, rollback retention and backward ceiling witnesses passed.
+The shipped headless S1/S4 trial was not run after these decisive class-invariant failures.
+
+Decision: use the brief's explicit fallback. Restore the entire step-4 experiment, including
+its replaced tests, and retain the narrow Slip entry and upshift-into-lug refusal. No compensating
+predicate is introduced. The design statement alone does not preserve capable part-pedal travel;
+removing the refusal still attracts an unsustainable landing. This is a failed experiment,
+not a certified simplification. Its next attempt needs a design audit, not another local gate.
+
+The audit's 3,152 to 1,964 lines and 17 to 8 state fields are a historical reduction already
+reported in its verdict, not a projection for this lane's remaining steps. MEASURED dispatch
+baseline: transmission.rs 1,966 lines and TransmissionState eight fields. Step 4 therefore
+cannot honestly promise another 1,188-line or nine-field deletion: the audit already counted it.
+
+MEASURED restored step-4 gates: formatting and CI clippy passed; 286 targeted track, HUD,
+shipped drive-load and citation tests passed, including S1/S2/S4 and rollback. The green
+checkpoint deliberately retains the original law. Commit: driving: record the rejected Slip experiment (#146).
