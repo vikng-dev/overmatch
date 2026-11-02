@@ -502,13 +502,6 @@ fn bless_scenarios() {
         .iter()
         .map(|scenario| {
             let report = record_scenario(scenario);
-            println!(
-                "MEASURED scenario {}: {:?}, skids={}, armour-bites={}",
-                scenario.name,
-                report.impact.verdict,
-                report.ricochets.len(),
-                report.plates.len()
-            );
             (scenario, report)
         })
         .collect();

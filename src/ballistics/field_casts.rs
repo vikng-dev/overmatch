@@ -680,13 +680,6 @@ fn shot(label: &str, local_origin: Vec3, local_direction: Vec3) -> Record {
     let marks = world
         .get::<PenetrationMarks>(shell)
         .expect("the shot's shell is retained");
-    if std::env::var("OVERMATCH_FIELD_CASTS_SHOW").is_ok() {
-        println!(
-            "contact-counts {label}: skids={} bites={}",
-            marks.ricochets.len(),
-            marks.events.len()
-        );
-    }
     for event in &marks.events {
         output.push_str("event ");
         bits3(&mut output, event.entry);
