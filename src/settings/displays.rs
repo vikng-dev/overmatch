@@ -1,34 +1,14 @@
-//! What the display row OFFERS: `AUTO`, plus one rung per monitor bevy has synchronised, each named
-//! the way the operating system names it.
+//! Offered display ladder: AUTO plus each synchronized monitor, named as the OS names it.
 //!
-//! # Offered and stored are different questions
+//! Persisted [`DisplaySelection`] never narrows: an old Display3 must still parse on a two-panel
+//! machine or the whole video file is lost. Resolve it read-side through `DisplaySelection::resolve`
+//! so row and window agree, without rewriting a choice that may return after hot-plug.
 //!
-//! [`DisplaySelection`] is the persisted enum and it never narrows — a `video.ron` holding
-//! `Display3` on a two-display machine must still parse, because a parse failure costs the player
-//! their whole video file. This module decides only what the row offers THIS MINUTE, and that is the
-//! fact the enum cannot state: a rung the machine does not have is a rung a player can land on by
-//! accident and then cannot tell apart from one that works.
+//! Offer the marked primary as `Primary`, not its ordinal too: two entries would name one panel.
+//! This retains `Primary`'s creation-time placement advantage; indexed selections move after boot.
 //!
-//! Nothing here changes what a stored rung MEANS. `DisplaySelection::resolve` is still the one
-//! read-side fallback, still logs and still never writes; the ladder resolves through it so the row
-//! renders the display the window will actually be placed on.
-//!
-//! # The primary display has no rung of its own
-//!
-//! `PRIMARY` and `DISPLAY 1` named the same panel and rendered as two entries, which is half of how
-//! a settings file goes bad. So the rung for whichever monitor bevy marked `PrimaryMonitor` STORES
-//! [`DisplaySelection::Primary`] instead of its ordinal name, and the ordinal is offered only for
-//! the displays that are not the primary. That keeps the variant alive on disk and keeps its one
-//! functional advantage: `DisplaySelection::at_window_creation` passes `Primary` through to window
-//! creation, so the window is BORN on that display rather than created elsewhere and moved.
-//!
-//! # An empty monitor list is not an empty machine
-//!
-//! No [`Monitor`] entities means the list has not been synchronised yet (or there is no winit at
-//! all), which is "could not learn" — the same tri-state discipline `PresentCaps` and
-//! `DisplaySelection::resolve` are built on. The ladder then offers every variant a file can hold,
-//! because narrowing on no evidence would take a player's display away from a frame that has never
-//! seen one.
+//! An empty monitor list means unsynchronized/no winit, not evidence of no displays. Offer every
+//! persisted variant until monitors are learned, as `PresentCaps` does for unknown capabilities.
 
 use bevy::ecs::system::NonSendMarker;
 use bevy::prelude::*;
@@ -101,13 +81,8 @@ impl DisplayLadder {
         self.rungs[next as usize].selection
     }
 
-    /// Which rung a stored selection sits on.
-    ///
-    /// Two lookups, because a stored value need not be a value the ladder offers. It is RESOLVED
-    /// first, so a rung naming a display that is not attached reads as the one that will actually be
-    /// used. Then, if the resolved rung is still not offered, by the MONITOR it names — the primary
-    /// display's rung stores `Primary`, and a file holding that same display's ordinal name is
-    /// talking about the same panel.
+    /// Resolve an absent display first, then find its rung by selection or monitor ordinal: a file
+    /// may name the primary by its index while the offered rung stores `Primary`.
     fn rung_of(&self, selection: DisplaySelection) -> usize {
         let resolved = selection.resolve(self.displays);
         self.rungs
@@ -143,9 +118,8 @@ fn build(displays: AttachedDisplays, panels: &[Panel<'_>]) -> DisplayLadder {
     }
     let mut rungs = vec![unnamed(DisplaySelection::Auto)];
     for (index, panel) in panels.iter().enumerate() {
-        // A monitor past the enum's indexed rungs gets none: `DisplaySelection` cannot name it, and
-        // a rung that stored some other display's variant would be a mislabelled display rather than
-        // a missing one. See `DisplaySelection::INDEXED`.
+        // Skip unaddressable monitors; borrowing another display's variant would mislabel it.
+        // See `DisplaySelection::INDEXED`.
         let Some(selection) = (if panel.primary {
             Some(DisplaySelection::Primary)
         } else {
@@ -249,11 +223,8 @@ fn refresh_ladder(
             (entity, monitor, handle)
         })
         .collect();
-    // `MonitorSelection::Index(n)` counts in WINIT's list, not in the ECS's: bevy resolves it with
-    // `WinitMonitors::nth` (vendored bevy_winit-0.19.0/src/winit_windows.rs:522). Query order is
-    // spawn order only until a monitor is unplugged, and a rung labelled from the wrong monitor is
-    // the one failure this whole module exists to prevent. Stable, so a world with no `WinitMonitors`
-    // at all (every bare-`App` test) keeps query order rather than shuffling.
+    // Sort by WINIT order (`WinitMonitors::nth`), which `MonitorSelection::Index` uses. ECS query
+    // order diverges after unplugging; stable sort preserves it in bare Apps without handles.
     ordered.sort_by_key(|(_, _, handle)| {
         let index = winit_monitors
             .as_ref()
@@ -295,22 +266,15 @@ fn winit_index(monitors: &WinitMonitors, handle: &MonitorHandle) -> Option<usize
         .position(|candidate| candidate == *handle)
 }
 
-/// The operating system's own name for each handle, positionally. `None` means "this platform has
-/// nothing better than the geometry", never "that display has no name".
+/// OS names in handle order; None means geometry is the best available label.
 ///
-/// macOS is the only platform asked, and it is not asked through winit: `MonitorHandle::name` there
-/// is `format!("Monitor #{}", CGDisplay::model_number())` under a `TODO: Be smarter about this`
-/// (vendored winit-0.30.13/src/platform_impl/macos/monitor.rs:222-228). That is a MODEL number, so
-/// two identical panels share it and no player recognises any of them. `NSScreen::localizedName` is
-/// the string the Displays pane shows.
+/// Ask AppKit on macOS: winit's `MonitorHandle::name` uses a model number, so identical panels
+/// share an unrecognizable name. `NSScreen::localizedName` matches the Displays pane.
 ///
-/// **The pairing is by `CGDirectDisplayID`, which both sides already carry** — winit's `native_id`
-/// and AppKit's `NSScreenNumber` device-description key — so a rung is named by its OWN display or
-/// not named at all. Pairing on geometry instead also works here (MEASURED 2026-08-17 on a two
-/// display machine: flipping AppKit's bottom-left origin and scaling by `backingScaleFactor`
-/// reproduced winit's physical position and size exactly for both) but it pairs by coincidence
-/// rather than by identity, and it needs a main-screen height that is only correct while the primary
-/// is `screens[0]`.
+/// Pair winit's `native_id` with AppKit's `NSScreenNumber` (`CGDirectDisplayID`). Geometry pairing
+/// is rejected despite matching both panels in a MEASURED two-display check: flipping AppKit's
+/// bottom-left origin and applying `backingScaleFactor` works by coincidence, and needs a main
+/// screen height valid only while the primary is `screens[0]`.
 #[cfg(target_os = "macos")]
 fn os_display_names(handles: &[Option<MonitorHandle>]) -> Vec<Option<String>> {
     use objc2_app_kit::NSScreen;
@@ -482,11 +446,9 @@ mod tests {
         );
     }
 
-    /// A stored rung this machine cannot reach still loads, still renders, and still steps — it reads
-    /// as the display it will actually be placed on. Nothing here writes it back; the file keeps the
-    /// player's choice for the day the display returns (see `DisplaySelection::resolve`). Stepping
-    /// saturates at both ends, and `AUTO` is reachable by holding left from anywhere — the only
-    /// rung that hands placement back to the window manager.
+    /// An unreachable stored rung must render and step from the resolved panel without being
+    /// rewritten, so hot-plug can restore the choice. Steps saturate and holding left reaches AUTO,
+    /// returning placement to the window manager.
     #[test]
     fn a_persisted_unreachable_rung_renders_and_steps_without_being_rewritten() {
         let built_in = monitor(3024, 1964, Some(120_000));
