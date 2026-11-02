@@ -112,6 +112,8 @@ TankSpec(
         "Wheel_R": (external: true),
         "Driver": (crew: Driver),
         "Commander": (crew: Commander),
+        "Engine": (hp: 80, function: Engine),
+        "Transmission": (hp: 80, function: Transmission),
     },
     colliders: [(node: "Hull_Collider", substance: "RHA")],
     shadow_proxies: [],
@@ -121,7 +123,8 @@ TankSpec(
     ],
     weapons: {},
     views: {},
-    capabilities: {Drive: []},
+    capabilities: {Drive: [Engine, Transmission]},
+    drive_controls: NotRequired,
 )
 """
 
@@ -239,6 +242,8 @@ def build(directory, library, defect):
               link(library, "MildSteel"))
     for name, offset in (("Driver", 2.0), ("Commander", 4.0)):
         place(scene, name, cube(name), (offset, 0.0, 0.0), link(library, "Flesh"))
+    for name, offset in (("Engine", -2.0), ("Transmission", -4.0)):
+        place(scene, name, cube(name), (offset, 0.0, 0.0), link(library, "MildSteel"))
     if defect == "modifier":
         hull.modifiers.new(name="Bevel", type="BEVEL")
 
