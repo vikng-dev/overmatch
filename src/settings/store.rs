@@ -5,7 +5,8 @@
 //!
 //! `video.ron` is machine-local; future keybindings belong in portable `controls.ron`. Split by
 //! filename in one config directory so Steam Cloud can exclude video/GPU/monitor facts. Valve
-//! requires that separation; Tunnet had to hotfix its video file out of cloud sync.
+//! says "avoid machine-specific configurations such as video settings"; Tunnet hotfixed its video
+//! file out of cloud sync.
 //!
 //! On-disk types use primitives, String and our enums, never Bevy's KeyCode: the 0.12→0.13
 //! variant rename broke player files. Use BTreeMap for stable bytes and per-action Option<Key>
@@ -359,12 +360,12 @@ fn rename_with_retry(from: &Path, to: &Path) -> std::io::Result<()> {
 }
 
 /// Atomically replace settings: serialize, write a pid-unique sibling, sync its bytes, rename,
-/// then best-effort sync the directory on Unix. Pid uniqueness prevents one game instance renaming another's
-/// partial write; last-writer-wins needs no lock. Sync before rename avoids ext4 delayed-allocation
+/// then best-effort sync the directory on Unix. Pid uniqueness prevents one instance renaming
+/// another's partial write; last-writer-wins needs no lock. Sync before rename avoids ext4 delayed-allocation
 /// zero-length files after power loss. `F_FULLFSYNC` is deliberately excluded: SQLite measures it
 /// as profoundly slow, while reverting to the previous whole file is acceptable here.
 ///
-/// Errors retain their cause for the page and logs.
+/// A failed graphics-preference save must not interrupt play; retain its cause for page and logs.
 pub(super) fn save<'a>(path: Option<&'a Path>, settings: &Settings) -> Result<&'a Path, SaveError> {
     use std::io::Write;
 
@@ -536,7 +537,7 @@ mod tests {
                 ..Settings::default()
             }),
             ["version", "shadow_cascades"],
-            "the cascade row diffs sparsely like every other field — the default 4 writes nothing",
+            "the cascade row diffs sparsely like every other field",
         );
     }
 
@@ -844,9 +845,7 @@ mod tests {
         );
         let wanted = Settings {
             version: SETTINGS_VERSION,
-            // Every shadow row deliberately off its default, so the reload proves a WRITTEN key came
-            // back rather than an absent one landing on the same value. `Three` used to serve that
-            // purpose here; it became the default on 2026-07-28, hence `Two`.
+            // Resolution and cascades exercise written keys; distance may be omitted at its default.
             shadow_distance: ShadowDistance::M350,
             shadow_resolution: ShadowResolution::X1024,
             shadow_cascades: ShadowCascades::Two,

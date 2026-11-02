@@ -10,13 +10,14 @@
 //!   because it drives the tank.
 //! * Left/Right steps a row or switches tabs on the strip. Tab remains the offline tank switch.
 //! * Hover selects; visible, highlighted arrow glyphs click to step, tracks click/drag to scrub,
-//!   tab names click to open.
+//!   tab names click to open. Visible arrows avoid invisible half-row click targets.
 //!
 //! Use bevy_picking (UiPickingPlugin comes with UiPlugin): Hovered selects/highlights, Press
 //! observers click. Deepest-node bubbling gives arrows priority over rows; InheritedVisibility
 //! excludes hidden controls. Rewalking UiStack rects would duplicate the backend's work.
 //!
-//! Changes save immediately, except drags save once on release. [`ActiveDrag`] freezes the
+//! Atomic writes make immediate saves safe, with no Apply button to forget; drags save on release.
+//! [`ActiveDrag`] freezes the
 //! physical track rect so UI-scale-driven layout cannot feed back into its value.
 //! [`track_fraction`] owns the remaining physical-vs-logical pixel arithmetic.
 
@@ -211,11 +212,13 @@ impl Row {
     /// ASCII plus the verified typographic set only — it reaches `Text`.
     const fn hint(self) -> &'static str {
         match self {
+            // Moving a window or frame cap via a graphics preset would surprise players.
             // The hint's "nine" is `preset::DRIVEN_ROWS`; its contiguous rows are pinned below.
             Row::Preset => {
                 "Sets the nine rows below it at once; editing one reads CUSTOM. \
                  Window, display, vsync, frame cap and UI scale are never touched."
             }
+            // Name the sharp HUD: crosshair, range dial and labels stay crisp as the world softens.
             // The multisample resolve stays full-res; 4X below 100% pays twice for the same edges.
             // See `render_scale` for this limit.
             Row::RenderScale => {
@@ -231,11 +234,12 @@ impl Row {
                 "Borderless fullscreen on the current display. \
                  The OS's own fullscreen button is reflected here too."
             }
+            // Explain the unplugged-display fallback; unexplained substitution looks broken.
             Row::Display => {
                 "Which monitor the window opens on, * marking your main display. \
                  One that is not attached falls back to it."
             }
-            // State Off's provisional status at point of use; see `ShadowDistance`.
+            // Name the visible cutoff and Off's provisional status; see `ShadowDistance`.
             Row::ShadowDistance => {
                 "How far shadows are drawn before they cut off. \
                  OFF disables them entirely, and may be removed later."
@@ -250,6 +254,7 @@ impl Row {
                 "How many slices the shadow distance is split into. \
                  Fewer is cheaper but blockier up close."
             }
+            // Reassure players lowering this: the trail survives; only depth gets cheaper.
             Row::TrackPrints => {
                 "How track prints show their depth: lit only, with parallax, or with parallax \
                  and the sun's shadow in the rut. Every level keeps the trail."
@@ -259,6 +264,7 @@ impl Row {
                  only. Farther costs more."
             }
             Row::Msaa => "Smooths jagged edges. The cheapest setting to drop for more frames.",
+            // Reassure players lowering this: tracers and halos remain, drawn coarser.
             Row::Bloom => {
                 "The glow around tracers, muzzle flashes and bright light. \
                  LOW draws it at half resolution: cheaper, with coarser halos."
@@ -819,7 +825,7 @@ const CARD_PADDING_PX: f32 = 24.0;
 const CARD_ROW_GAP_PX: f32 = 6.0;
 
 /// Maximum card height before rows scroll. MEASURED headless with 11 rows: 506/666/1000 logical
-/// px at UI scales 75/100/150%, versus a 720 px minimum window; even 9 rows reached ~875 px.
+/// px at UI scales 75/100/150%, versus a 720 px minimum window; 9 rows reached ~875 px at 150%.
 /// Overflow hid the hint and legend.
 ///
 /// 90% leaves a visible scrim and clipped-row affordance. No scrollbar: keyboard selection
@@ -1402,7 +1408,8 @@ fn scrub(active: ActiveDrag, cursor_x: f32, settings: &mut ResMut<Settings>) {
 /// Hovered includes descendants (CSS :hover) and changes only on enter/leave, so crossing an
 /// arrow selects its row without per-frame hover changes.
 ///
-/// Use the physical cursor for [`ActiveDrag`]'s physical rect. A node's inverse_scale_factor
+/// Use `physical_cursor_position()`, not hand-converted `cursor_position() * scale_factor()`,
+/// for [`ActiveDrag`]'s physical rect. A node's inverse_scale_factor
 /// also includes UiScale and converts to CSS, not window-logical pixels; see [`track_fraction`].
 /// Source: bevy_ui-0.19.1/src/update.rs:151-159 (`propagate_ui_target_cameras`).
 #[expect(

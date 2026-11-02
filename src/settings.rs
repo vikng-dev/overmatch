@@ -1793,7 +1793,7 @@ pub(crate) fn plugin(entry: PageEntry) -> impl Plugin {
         app.add_plugins((crate::render_scale::plugin, probe::plugin, ui::plugin))
             .init_resource::<Settings>()
             .init_resource::<store::StorePath>()
-            // `apply_settings` requires this resource; mounting it with the page rules out a missing row.
+            // Omitting this required resource panics on the first reconcile; it cannot just skip a row.
             .init_resource::<LodPixelBudget>()
             // The window-placement state both window writers share — see [`WindowPlacement`] for
             // why an edge memory cannot be a `Local` here.
@@ -1956,8 +1956,8 @@ fn apply_settings(
         if profile.is_some_and(|profile| !profile.lights_battlefield()) {
             continue;
         }
-        // Off preserves the last valid config: a zero-metre rebuild would be degenerate. Count changes
-        // remain pending until the next casting frame; re-enabling needs no repair.
+        // Off keeps the last valid config: nothing samples it while casting is disabled, and a
+        // zero-metre rebuild degenerates. Pending counts apply when casting resumes; no repair is needed.
         if let Some(maximum_distance) = distance.distance_m() {
             // Runtime count changes require bevy_light >= 0.19.1 (see `SHADOW_CASCADES`).
             // Split parameters are explicit: the stock 10 m first bound halves far-field crispness on a

@@ -1,4 +1,5 @@
 //! Offered display ladder: AUTO plus each synchronized monitor, named as the OS names it.
+//! Hide absent rungs: players can select them accidentally and cannot distinguish them from working ones.
 //!
 //! Persisted [`DisplaySelection`] never narrows: an old Display3 must still parse on a two-panel
 //! machine or the whole video file is lost. Resolve it read-side through `DisplaySelection::resolve`
