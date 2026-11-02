@@ -13,8 +13,8 @@
 //! - Runs every tick unconditionally (this is sim state); stays inside
 //!   `SimPhase::DrivingForces` so drive samples velocity before the weapon-fire impulse.
 //! - The game's damage model ([`drive_target`]): a command exists only while someone serves the
-//!   Driver station. The driver's competence, the engine's and the transmission's held shares
-//!   each scale what that part delivers ([`DriveSupply`]); driver intent, service brakes, engine
+//!   authored control stations. Task throughput is resolved once over complete paths;
+//!   local source conditions remain separate ([`DriveSupply`]). Driver intent, service brakes, engine
 //!   drag and contact grip keep their construction-defined meaning. A supply change takes effect
 //!   on the tick it happens. A locked clutch passes a torque step on that tick; inertia only
 //!   limits changes of crank speed, not changes of supply or transmitted capacity.
@@ -30,8 +30,7 @@ use serde::{Deserialize, Serialize};
 use crate::bake::TankBlueprint;
 use crate::command::ParsedTankCommand;
 use crate::damage::{
-    Capability, DriveView, TankCapabilities, TankVolumes, VolumeFacets, evaluate_view,
-    part_qualities,
+    Capability, TankCapabilities, TankVolumes, VolumeFacets, live_quality, part_facts, resolve,
 };
 use crate::state::{GameplaySet, SimPhase};
 use crate::tank::Tank;
@@ -703,8 +702,8 @@ pub(crate) fn belt_tick<O: TerrainOracle>(
 }
 
 /// The game's damage model: a phase hold imposes service brakes. Otherwise only someone
-/// serving the Driver station can command axes or hold the brakes for repair; without that
-/// occupant repair remains work and cannot become a remote brake toggle.
+/// staffing the authored controls can command axes or hold the brakes for repair; without
+/// control authority repair remains work and cannot become a remote brake toggle.
 pub(crate) fn drive_target(
     command: &ParsedTankCommand,
     tank: Option<&TankVolumes>,
@@ -714,10 +713,7 @@ pub(crate) fn drive_target(
     let supply = drive_supply(tank, caps, volumes);
     let intent = if command.held() {
         DriveIntent::Brake
-    } else if caps
-        .zip(tank)
-        .is_some_and(|(caps, tank)| caps.drive_controls.permits(&part_qualities(tank, volumes)))
-    {
+    } else if supply.control_authority {
         if tank.is_some_and(|tank| crate::damage::repair::underway(tank, volumes)) {
             DriveIntent::Brake
         } else {
@@ -732,11 +728,7 @@ pub(crate) fn drive_target(
     DriveTarget { intent, supply }
 }
 
-/// The game's damage model: Drive's requirement read once per part kind, each where it acts.
-/// The crew view (stations at their competence, modules whole) scales the fueling the driver
-/// delivers; the engine view scales combustion; the transmission view scales transmitted
-/// capacity. `TankSpec::validate` admits no other module in Drive's requirement. A tank whose
-/// volumes or capabilities are not yet bound supplies nothing: nobody drives it.
+/// The game's damage model: an unbound tank has no controls, task throughput or sources.
 fn drive_supply(
     tank: Option<&TankVolumes>,
     caps: Option<&TankCapabilities>,
@@ -744,18 +736,27 @@ fn drive_supply(
 ) -> DriveSupply {
     let (Some(tank), Some(caps)) = (tank, caps) else {
         return DriveSupply {
-            competence: 0.0,
-            combustion: 0.0,
-            transmitted: 0.0,
+            control_authority: false,
+            task_rate: 0.0,
+            engine_condition: 0.0,
+            transmission_condition: 0.0,
         };
     };
-    let requirement = caps.requirement(Capability::Drive);
-    let quality = part_qualities(tank, volumes);
-    let view = |stage| evaluate_view(requirement, &quality, stage);
+    let facts = part_facts(tank, volumes);
+    supply_from_parts(caps, &facts.quality, &facts.staffed)
+}
+
+fn supply_from_parts(
+    caps: &TankCapabilities,
+    quality: &std::collections::HashMap<crate::damage::Part, f32>,
+    staffed: &std::collections::HashSet<crate::damage::CrewStation>,
+) -> DriveSupply {
+    let task = resolve(caps.requirement(Capability::Drive), quality);
     DriveSupply {
-        competence: view(DriveView::Crew),
-        combustion: view(DriveView::Engine),
-        transmitted: view(DriveView::Transmission),
+        control_authority: caps.drive_controls.permits(staffed),
+        task_rate: task.rate,
+        engine_condition: live_quality(quality, crate::damage::Part::Engine),
+        transmission_condition: live_quality(quality, crate::damage::Part::Transmission),
     }
 }
 
@@ -1369,13 +1370,11 @@ mod tests {
         assert_eq!(support_bits(&reference, &a), support_bits(&solid, &b));
     }
 
-    /// The game's damage model: the production selector reads each part of Drive where it acts.
-    /// The station's crew decides whether a command exists and scales delivered fueling; each
-    /// module scales only what it produces. A selector that folds the views into one share, or
-    /// keeps intent with nobody at the station, fails a row. Fixture: ten-point pools and
-    /// normalized input axes.
+    /// The game's damage model: the selector preserves authored control authority, the
+    /// requirement's task rate and each source's own condition. Fixture: ten-point pools,
+    /// native and foreign operators, normalized input axes.
     #[test]
-    fn the_driver_station_decides_intent_and_each_part_scales_its_own_supply() {
+    fn drive_reads_staffing_task_rate_and_each_sources_condition() {
         use crate::ballistics::ComponentHealth;
         use crate::command::TankCommand;
         use crate::damage::{CrewStation, Crewman, Dead, FunctionRole, Group, VolumeOf};
@@ -1431,9 +1430,10 @@ mod tests {
                 world.spawn((role, health, VolumeOf(tank)));
             }
             let supply = DriveSupply {
-                competence,
-                combustion: engine,
-                transmitted: gearbox,
+                control_authority: !out,
+                task_rate: competence.min(engine).min(gearbox),
+                engine_condition: engine,
+                transmission_condition: gearbox,
             };
             let command = ParsedTankCommand::try_from(TankCommand {
                 throttle: 0.8,
@@ -1467,6 +1467,61 @@ mod tests {
                 )
                 .unwrap();
         }
+    }
+
+    /// The game's damage model: an unavailable upstream station cannot restore an emptied
+    /// engine or change the transmission's own held share. The idle and clutch consumers rely on it.
+    #[test]
+    fn unavailable_upstream_retains_each_modules_own_condition() {
+        use crate::damage::{ControlStaffing, CrewStation, GradedGroup, Group, Part};
+        // Fixture: an unavailable complete path with a reduced downstream module.
+        let caps = TankCapabilities::new(
+            [(
+                Capability::Drive,
+                vec![Group::Graded(GradedGroup::Backup(vec![(
+                    0.6,
+                    vec![Part::Driver, Part::Engine, Part::Transmission],
+                )]))],
+            )]
+            .into(),
+            ControlStaffing::Any(vec![vec![CrewStation::Driver]]),
+        );
+        let supply = supply_from_parts(&caps, &[(Part::Transmission, 0.25)].into(), &[].into());
+        assert_eq!(
+            supply,
+            DriveSupply {
+                control_authority: false,
+                task_rate: 0.0,
+                engine_condition: 0.0,
+                transmission_condition: 0.25,
+            }
+        );
+    }
+
+    /// The game's damage model: the task rate used by Drive cannot be reconstructed from
+    /// source conditions. Fixture: simultaneous reductions in one complete Backup path.
+    #[test]
+    fn drive_readout_matches_complete_path_rate() {
+        use crate::damage::{ControlStaffing, CrewStation, GradedGroup, Group, Part};
+        let req = vec![Group::Graded(GradedGroup::Backup(vec![(
+            1.0,
+            vec![Part::Driver, Part::Engine, Part::Transmission],
+        )]))];
+        let quality = [
+            (Part::Driver, 0.6),
+            (Part::Engine, 1.0),
+            (Part::Transmission, 0.5),
+        ]
+        .into();
+        let expected = crate::damage::evaluate(&req, &quality);
+        let caps = TankCapabilities::new(
+            [(Capability::Drive, req)].into(),
+            ControlStaffing::Any(vec![vec![CrewStation::Driver]]),
+        );
+        let supply = supply_from_parts(&caps, &quality, &[CrewStation::Driver].into());
+        assert_eq!(supply.task_rate, expected);
+        assert_eq!(supply.task_rate, 0.3);
+        assert!(supply.control_authority);
     }
 
     /// The game's damage model: a fixture hull driven through the production adapter, with
@@ -1908,7 +1963,7 @@ mod tests {
                       facets: Query<VolumeFacets>| {
                     let (volumes, caps) = tanks.get(root).unwrap();
                     let supply = drive_supply(Some(volumes), Some(caps), &facets);
-                    assert_eq!(supply.share(), 0.0, "no complete Backup path: {supply:?}");
+                    assert_eq!(supply.task_rate, 0.0, "no complete Backup path: {supply:?}");
                 },
             )
             .unwrap();
@@ -1943,9 +1998,9 @@ mod tests {
                       facets: Query<VolumeFacets>| {
                     let (volumes, caps) = tanks.get(root).unwrap();
                     let supply = drive_supply(Some(volumes), Some(caps), &facets);
-                    assert_eq!(supply.competence, 1.0);
-                    assert_eq!(supply.combustion, 0.0);
-                    assert_eq!(supply.share(), 0.0);
+                    assert!(supply.control_authority);
+                    assert_eq!(supply.engine_condition, 0.0);
+                    assert_eq!(supply.task_rate, 0.0);
                 },
             )
             .unwrap();

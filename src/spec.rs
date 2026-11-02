@@ -1377,7 +1377,7 @@ impl TankSpec {
         // (`net::protocol::mirror_swap_from_net_crew`) resolve it to the FIRST seat wearing it: two
         // seats under one station are not separately addressable, and the two sides can resolve one
         // command to different seats. Duplicate FUNCTIONS carry no such vocabulary and stay legal —
-        // `damage::part_qualities` max-combines every provider of a role.
+        // `damage::part_facts` max-combines every provider of a role.
         let mut seats: std::collections::HashMap<CrewStation, &str> =
             std::collections::HashMap::new();
         for (node, volume) in &self.volumes {
@@ -1809,19 +1809,6 @@ impl TankSpec {
             return Err(format!(
                 "capabilities states no `{}` — key every capability, `[]` for an ungated one",
                 missing.label()
-            )
-            .into());
-        }
-        // The game's damage model: the drive law reads Drive's crew, its engine (combustion) and
-        // its transmission (transmitted capacity), each where it acts. Any other module has no
-        // drivetrain quantity it produces, so it would be silently ignored.
-        if let Some(part) = requirement_parts(&self.capabilities[&Capability::Drive])
-            .into_iter()
-            .find(|part| !part.is_crew() && !matches!(part, Part::Engine | Part::Transmission))
-        {
-            return Err(format!(
-                "capabilities[Drive] requires {part:?}, a module the drive law has no quantity \
-                 for; Drive reads crew stations, Engine and Transmission only, so drop it"
             )
             .into());
         }
@@ -3418,11 +3405,10 @@ TankSpec(
         );
     }
 
-    /// The game's damage model: the drive law reads only Drive's crew, engine and transmission.
-    /// A sheet whose Drive names another module would have that module silently ignored, so
-    /// `validate` refuses it and names the part.
+    /// The game's damage model: every declared part can constrain a task rate; Drive's
+    /// local source conditions are independent of the task's dependency vocabulary.
     #[test]
-    fn validate_refuses_a_drive_requirement_naming_a_module_the_drive_law_lacks() {
+    fn validate_accepts_a_drive_task_dependency_on_any_declared_part() {
         let mut spec = fixture();
         let provided = spec
             .volumes
@@ -3431,14 +3417,11 @@ TankSpec(
             .filter_map(|volume| volume.function)
             .map(Part::from)
             .find(|part| !matches!(part, Part::Engine | Part::Transmission))
-            .expect("the fixture sheet declares a weapon module");
+            .expect("the fixture declares a module outside the drivetrain");
         spec.capabilities
             .insert(Capability::Drive, vec![Group::Single(provided)]);
-        let err = spec.validate().unwrap_err().to_string();
-        assert!(
-            err.contains("capabilities[Drive]") && err.contains(&format!("{provided:?}")),
-            "the refusal names the field and the part: {err}"
-        );
+        spec.validate()
+            .expect("a declared part can supply the generic task law");
     }
 
     /// The game's damage model: control staffing must name complete, declared station paths

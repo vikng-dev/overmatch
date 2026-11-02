@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 
 use super::model::{TankRoot, TankServos};
 use super::view::{ViewOf, ViewServo};
-use crate::damage::{Requirement, TankVolumes, VolumeFacets, evaluate, part_qualities};
+use crate::damage::{Requirement, TankVolumes, VolumeFacets, evaluate, part_facts};
 
 #[derive(Clone, Copy, Deserialize)]
 pub enum Travel {
@@ -281,7 +281,7 @@ pub(crate) fn drive_servos(
         let volumes = tanks
             .get(root.0)
             .expect("an admitted tank with a servo carries its volume relationship target");
-        let slew = evaluate(&spec.requires, &part_qualities(volumes, &facets));
+        let slew = evaluate(&spec.requires, &part_facts(volumes, &facets).quality);
 
         // Specs author degrees; runtime state and commands use radians.
         let max_speed = spec.max_speed.to_radians() * slew;

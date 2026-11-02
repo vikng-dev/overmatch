@@ -321,7 +321,11 @@ mod tests {
                 drive_target(&drive_command(), Some(volumes), Some(caps), &facets),
                 DriveTarget {
                     intent: DriveIntent::Brake,
-                    supply: DriveSupply::WHOLE,
+                    supply: DriveSupply {
+                        engine_condition: 0.0,
+                        transmission_condition: 0.0,
+                        ..DriveSupply::WHOLE
+                    },
                 },
                 "the gameplay adapter must turn a running repair into service braking"
             );
@@ -369,7 +373,11 @@ mod tests {
                     throttle: 1.0,
                     steer: 0.0
                 }),
-                supply: DriveSupply::WHOLE,
+                supply: DriveSupply {
+                    engine_condition: 1.0,
+                    transmission_condition: 0.0,
+                    ..DriveSupply::WHOLE
+                },
             },
             "a finished repair releases the hold"
         );
@@ -377,7 +385,11 @@ mod tests {
             held,
             DriveTarget {
                 intent: DriveIntent::Brake,
-                supply: DriveSupply::WHOLE,
+                supply: DriveSupply {
+                    engine_condition: 1.0,
+                    transmission_condition: 0.0,
+                    ..DriveSupply::WHOLE
+                },
             },
             "a phase hold still selects service braking with no repair"
         );

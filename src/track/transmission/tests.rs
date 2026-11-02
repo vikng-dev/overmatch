@@ -3594,15 +3594,17 @@ fn reduced_supply_pulls_away_and_retains_full_service_brakes() {
     let fp = lab_fp();
     let tp = lab_tp();
     let reduced_engine = DriveSupply {
-        combustion: 30.0 / 336.0,
+        engine_condition: 30.0 / 336.0,
+        task_rate: 30.0 / 336.0,
         ..DriveSupply::WHOLE
     };
-    let speeds = [1.0, 0.5, reduced_engine.combustion].map(|combustion| {
+    let speeds = [1.0, 0.5, reduced_engine.engine_condition].map(|combustion| {
         let mut state = fresh(&tp);
         let mut speeds = [0.0; 2];
         for _ in 0..64 {
             let mut full = input(1.0, 0.0, speeds, [0.0; 2]);
-            full.supply.combustion = combustion;
+            full.supply.engine_condition = combustion;
+            full.supply.task_rate = combustion;
             speeds = step(&fp, &tp, &mut state, &full).next_speeds;
             assert!(
                 !state.clutch_out,
@@ -3640,7 +3642,7 @@ fn reduced_supply_pulls_away_and_retains_full_service_brakes() {
 
     let mut no_transmission = input(1.0, 1.0, [0.0; 2], [0.0; 2]);
     no_transmission.supply = DriveSupply {
-        transmitted: 0.0,
+        transmission_condition: 0.0,
         ..DriveSupply::WHOLE
     };
     let mut state = fresh(&tp);
@@ -3660,7 +3662,8 @@ fn no_combustion_no_stored_energy_no_pivot_work() {
     let mut st = fresh(&tp);
     st.omega_e = 0.0;
     let mut inp = input(0.0, 1.0, [0.0; 2], [0.0; 2]);
-    inp.supply.combustion = 0.0;
+    inp.supply.engine_condition = 0.0;
+    inp.supply.task_rate = 0.0;
     let rep = step(&fp, &tp, &mut st, &inp);
     assert_eq!(rep.next_speeds, [0.0; 2]);
 }
@@ -3676,12 +3679,14 @@ fn drag_release_and_scheduler_read_the_command() {
     let ratio = tp.gears_fwd[0];
     let speed = st.omega_e * tp.sprocket_radius / ratio;
     let mut inp = input(1.0, 0.0, [speed; 2], [0.0; 2]);
-    inp.supply.combustion = 0.25;
+    inp.supply.engine_condition = 0.25;
+    inp.supply.task_rate = 0.25;
     let rep = step(&fp, &tp, &mut st, &inp);
     let modeled = modeled_reserve_in_gear(&tp, inp.supply, speed, ratio, 0.0);
     let [induced, idle, drag] = engine_torques(&tp, inp.supply, 1550.0 * RPM_TO_RAD, 1.0);
-    let actual = (induced + idle - drag).min(tp.clutch_capacity * inp.supply.transmitted) * ratio
-        / tp.sprocket_radius;
+    let actual =
+        (induced + idle - drag).min(tp.clutch_capacity * inp.supply.transmission_condition) * ratio
+            / tp.sprocket_radius;
     assert!(
         (modeled - actual).abs() < 0.01,
         "scheduler {modeled}, crank {actual}"
@@ -3713,7 +3718,7 @@ fn assert_full_service_brakes(supply: DriveSupply) {
 #[test]
 fn full_service_brakes_ignore_competence() {
     assert_full_service_brakes(DriveSupply {
-        competence: 0.6,
+        task_rate: 0.6,
         ..DriveSupply::WHOLE
     });
 }
@@ -3721,7 +3726,8 @@ fn full_service_brakes_ignore_competence() {
 #[test]
 fn full_service_brakes_ignore_combustion() {
     assert_full_service_brakes(DriveSupply {
-        combustion: 0.25,
+        engine_condition: 0.25,
+        task_rate: 0.25,
         ..DriveSupply::WHOLE
     });
 }
@@ -3729,7 +3735,7 @@ fn full_service_brakes_ignore_combustion() {
 #[test]
 fn full_service_brakes_ignore_transmitted_capacity() {
     assert_full_service_brakes(DriveSupply {
-        transmitted: 0.0,
+        transmission_condition: 0.0,
         ..DriveSupply::WHOLE
     });
 }
@@ -3752,7 +3758,8 @@ fn supply_loss_reaches_a_locked_clutch_on_its_tick() {
         "the fixture must start with a locking clutch"
     );
     let mut reduced_engine = input(1.0, 0.0, [speed; 2], [0.0; 2]);
-    reduced_engine.supply.combustion = 0.0;
+    reduced_engine.supply.engine_condition = 0.0;
+    reduced_engine.supply.task_rate = 0.0;
     let no_combustion = step(&fp, &tp, &mut st, &reduced_engine);
     assert!(
         no_combustion.forces[0] < whole.forces[0],
@@ -3767,7 +3774,7 @@ fn supply_loss_reaches_a_locked_clutch_on_its_tick() {
         park: false,
         ..fresh(&tp)
     };
-    inp.supply.transmitted = 0.0;
+    inp.supply.transmission_condition = 0.0;
     let lost = step(&fp, &tp, &mut st, &inp);
     assert!(whole.forces[0] > 0.0);
     assert_eq!(lost.forces, [0.0; 2]);
@@ -3782,7 +3789,8 @@ fn an_unmanned_station_preserves_the_park_lever() {
         let mut st = fresh(&tp);
         st.park = parked;
         let mut inp = input(0.0, 0.0, [0.0; 2], [1000.0; 2]); // Fixture back-driving load.
-        inp.supply.competence = 0.0;
+        inp.supply.control_authority = false;
+        inp.supply.task_rate = 0.0;
         let rep = step(&fp, &tp, &mut st, &inp);
         assert_eq!(st.park, parked);
         if parked {
@@ -3813,7 +3821,8 @@ fn a_pivot_without_combustion_spends_only_stored_crank_energy() {
         let mut previous = energy(st.omega_e, speeds);
         for _ in 0..64 * 5 {
             let mut inp = input(0.0, 1.0, speeds, [0.0; 2]);
-            inp.supply.combustion = 0.0;
+            inp.supply.engine_condition = 0.0;
+            inp.supply.task_rate = 0.0;
             let rep = step(&fp, &tp, &mut st, &inp);
             speeds = rep.next_speeds;
             let next = energy(st.omega_e, speeds);
@@ -3858,7 +3867,8 @@ fn all_drive_modes_without_combustion_conserve_total_kinetic_energy() {
             let mut previous = energy(st.omega_e, speeds);
             for _ in 0..64 {
                 let mut inp = input(throttle, steer, speeds, [0.0; 2]);
-                inp.supply.combustion = 0.0;
+                inp.supply.engine_condition = 0.0;
+                inp.supply.task_rate = 0.0;
                 speeds = step(&fp, &tp, &mut st, &inp).next_speeds;
                 let next = energy(st.omega_e, speeds);
                 // Resolution: relative f32 roundoff, not an energy source.
@@ -3880,8 +3890,9 @@ fn emptied_declutched_engine_runs_down_under_construction_drag() {
     let mut st = fresh(&tp);
     st.omega_e = 500.0 * RPM_TO_RAD; // Fixture start below healthy idle.
     let mut inp = input(0.0, 0.0, [0.0; 2], [0.0; 2]);
-    inp.supply.combustion = 0.0;
-    inp.supply.transmitted = 0.0; // Fixture: no external crank work.
+    inp.supply.engine_condition = 0.0;
+    inp.supply.task_rate = 0.0;
+    inp.supply.transmission_condition = 0.0; // Fixture: no external crank work.
     let start = st.omega_e;
     let base_drag = tp.peak_torque_nm * tp.drag_fraction * MOTORING_DRAG_BASE_SHARE;
     let bound = tp.engine_inertia * start / base_drag;
@@ -3902,7 +3913,8 @@ fn emptied_declutched_engine_runs_down_under_construction_drag() {
 fn absent_combustion_keeps_drag_at_full_pedal() {
     let tp = lab_tp();
     let supply = DriveSupply {
-        combustion: 0.0,
+        engine_condition: 0.0,
+        task_rate: 0.0,
         ..DriveSupply::WHOLE
     };
     let omega = 1550.0 * RPM_TO_RAD; // Fixture operating point.

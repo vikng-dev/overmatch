@@ -32,8 +32,8 @@ pub enum DriveIntent {
     /// Release both axes and hold the service brakes: the tank brakes to a stop, then the parking
     /// latch holds it (`transmission::TransmissionInput::brake`).
     Brake,
-    /// The game's damage model: nobody serves the Driver station, so no command exists. The
-    /// controls are released at once and nothing brakes; the tank coasts, and parks at rest.
+    /// The game's damage model: the authored controls are unstaffed, so no command exists.
+    /// The controls release at once; the existing park lever retains its state.
     Unmanned,
 }
 

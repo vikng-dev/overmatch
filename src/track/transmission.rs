@@ -1129,42 +1129,27 @@ pub fn readout(st: &TransmissionState, tp: &TransmissionParams) -> DriveReadout 
     }
 }
 
-/// The game's damage model: one tick's drivetrain supply, each share read from the part that
-/// produces it (design §7b). Driver intent, the service brakes and the engine's own losses
-/// (motoring drag, compression braking) are construction and never scale.
+/// The game's damage model: independent staffing, task throughput and local module condition.
+/// The drivetrain consumes the task rate once; source condition also remains available when
+/// the task has no throughput. Brakes and construction losses retain their own laws.
 #[derive(Clone, Copy, PartialEq, Debug)]
 pub struct DriveSupply {
-    /// The share of the engine's supply the Driver station delivers: its occupant's
-    /// competence (Drive's crew view). Zero only when nobody serves the station.
-    pub competence: f32,
-    /// The engine's share of its combustion torque (Drive's engine view), which also powers
-    /// the idle governor. At zero the crank runs down under its own drag and the clutch.
-    pub combustion: f32,
-    /// The transmission's share of its transmitted capacity (Drive's transmission view): the
-    /// main clutch and the steering member.
-    pub transmitted: f32,
+    pub control_authority: bool,
+    pub task_rate: f32,
+    /// The engine's held HP share; the idle governor reads its own source condition.
+    pub engine_condition: f32,
+    /// The transmission's held HP share; clutch and steering capacity read this source.
+    pub transmission_condition: f32,
 }
 
 impl DriveSupply {
-    /// An undamaged drivetrain under its native driver: the sandbox lab's supply.
+    /// The game's damage model: the sandbox lab's staffed, full-rate, whole-source fixture.
     pub const WHOLE: Self = Self {
-        competence: 1.0,
-        combustion: 1.0,
-        transmitted: 1.0,
+        control_authority: true,
+        task_rate: 1.0,
+        engine_condition: 1.0,
+        transmission_condition: 1.0,
     };
-
-    /// The share of the combustion curve the driver delivers: a less skilled driver delivers
-    /// less of what the engine supplies.
-    pub fn delivered(self) -> f32 {
-        self.competence * self.combustion
-    }
-
-    /// The limiting nominal supply share: the lesser of delivered combustion and transmitted
-    /// capacity. This condition readout is not net sprocket force, which also depends on gear,
-    /// crank speed, motoring drag and the clutch's absolute capacity.
-    pub fn share(self) -> f32 {
-        self.delivered().min(self.transmitted)
-    }
 }
 
 /// One tick's joint input: the SHAPED drive axes plus the per-side mixed commands (the brake
@@ -1296,9 +1281,8 @@ fn engine_torques(
 ) -> [f32; 3] {
     let drag = engine_drag(tp, omega);
     let released = 1.0 - forces::hold_blend(command / DRAG_THROTTLE_RELEASE);
-    let induced =
-        supply.delivered() * (command * tp.torque_at(omega / RPM_TO_RAD) + released * drag);
-    let idle_capacity = supply.combustion * tp.torque_at(tp.engine.idle_rpm);
+    let induced = supply.task_rate * (command * tp.torque_at(omega / RPM_TO_RAD) + released * drag);
+    let idle_capacity = supply.engine_condition * tp.torque_at(tp.engine.idle_rpm);
     let idle = (idle_capacity * (tp.engine.idle_rpm * RPM_TO_RAD - omega)
         / (K_IDLE_DROOP_RPM * RPM_TO_RAD))
         .clamp(0.0, idle_capacity);
@@ -1318,7 +1302,8 @@ fn available_force_in_gear(
     // is not reserve the scheduler can spend. The crank and scheduler share the torque law.
     let rpm = (shaft.max(0.0) * gear / tp.sprocket_radius / RPM_TO_RAD).max(tp.engine.idle_rpm);
     let [induced, idle, drag] = engine_torques(tp, supply, rpm * RPM_TO_RAD, 1.0);
-    (induced + idle - drag).min(supply.transmitted * tp.clutch_capacity) * gear / tp.sprocket_radius
+    (induced + idle - drag).min(supply.transmission_condition * tp.clutch_capacity) * gear
+        / tp.sprocket_radius
 }
 
 /// Instrument for the accepted Driver law: price the crank at the landing shaft speed,
@@ -1356,8 +1341,8 @@ fn reserve_floor(fp: &ForceParams, tp: &TransmissionParams, supply: DriveSupply)
         None => 0.0,
     };
     let reduction = tp.gears_fwd[0].max(tp.gears_rev[0]);
-    let drive = (supply.delivered() * tp.peak_torque_nm)
-        .min(supply.transmitted * tp.clutch_capacity)
+    let drive = (supply.task_rate * tp.peak_torque_nm)
+        .min(supply.transmission_condition * tp.clutch_capacity)
         * reduction
         / tp.sprocket_radius;
     RESERVE_CAPACITY_FRACTION * drive.min(contact)
@@ -2296,8 +2281,8 @@ fn run_shift_decision(
 /// already REV-14 replicated state (projection/comparator/trace), deterministic from replicated
 /// inputs, so rollback/prediction see one latch and there is no wire change.
 fn update_park_latch(st: &mut TransmissionState, inp: &TransmissionInput) {
-    // The game's damage model: nobody at the Driver station can move the existing lever.
-    if inp.supply.competence == 0.0 {
+    // The game's damage model: control authority alone permits moving the existing lever.
+    if !inp.supply.control_authority {
         return;
     }
     if inp.throttle.abs() >= DEAD || inp.steer.abs() >= DEAD {
@@ -2378,10 +2363,10 @@ fn crank_free_torque(
     let [tau_ind, tau_idle, tau_drag] = engine_torques(tp, supply, omega_e, u_fuel);
     let tau_free = tau_ind + tau_idle - tau_drag;
 
-    let p_avail = supply.combustion * tp.torque_at(rpm) * omega_e;
+    let p_avail = supply.engine_condition * tp.torque_at(rpm) * omega_e;
     #[cfg(feature = "bitprobe")]
     {
-        probe.u_fuel = u_fuel * supply.delivered();
+        probe.u_fuel = u_fuel * supply.task_rate;
         probe.rpm = rpm;
         probe.tau_idle = tau_idle;
         probe.tau_induced = tau_ind;
@@ -2426,7 +2411,7 @@ fn steering_force(
     let mut f_s = 0.0;
     let mut lambda = 0.0;
     let mut j = [0.0f32; 2];
-    let steer_capacity = inp.supply.transmitted * tp.steer_capacity_n;
+    let steer_capacity = inp.supply.transmission_condition * tp.steer_capacity_n;
     let f_s_max = 2.0 * steer_capacity;
     let r_d = (inp.reactions[0] - inp.reactions[1]) / 2.0;
     let servo =
@@ -2649,7 +2634,7 @@ fn apply_brake_stop_forces(
         let h = if fp.grip.is_some() {
             if st.park {
                 1.0
-            } else if inp.supply.competence > 0.0 {
+            } else if inp.supply.control_authority {
                 let target = inp.side_commands[i] * tp.governed_speed(st.reverse);
                 forces::hold_blend(target.abs() / fp.slip_saturation)
                     * forces::hold_blend(inp.speeds[i].abs() / fp.slip_saturation)
@@ -2772,7 +2757,7 @@ fn crank_guards(
 ) -> (f32, f32) {
     let guard_point = (tp.engine.idle_rpm - STALL_GUARD_BAND_RPM) * RPM_TO_RAD;
     let can_idle =
-        supply.combustion * tp.torque_at(tp.engine.idle_rpm) > engine_drag(tp, guard_point);
+        supply.engine_condition * tp.torque_at(tp.engine.idle_rpm) > engine_drag(tp, guard_point);
     let omega_floor = if can_idle { guard_point } else { 0.0 };
     let omega_over = (tp.max_curve_rpm() + OVERREV_MARGIN_RPM) * RPM_TO_RAD;
     // The game's damage model: recovery from rest cannot jump to the idle band for free.
@@ -2983,7 +2968,7 @@ pub fn step(
         clutch_coupling(
             crank,
             tp.engine_inertia,
-            inp.supply.transmitted * tp.clutch_capacity,
+            inp.supply.transmission_condition * tp.clutch_capacity,
             m,
             i_m,
             -(inp.reactions[0] + inp.reactions[1]),
@@ -3041,7 +3026,7 @@ pub fn step(
     settle_crank(
         st,
         tp,
-        engaged.then_some(inp.supply.transmitted * tp.clutch_capacity),
+        engaged.then_some(inp.supply.transmission_condition * tp.clutch_capacity),
         next,
         crank,
         #[cfg(feature = "bitprobe")]

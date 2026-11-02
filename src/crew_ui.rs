@@ -7,7 +7,7 @@ use bevy::prelude::*;
 use crate::command::{CrewSwap, TankCommand, TankDeviceSet};
 use crate::damage::{
     Capability, CrewStation, Crewman, Dead, PendingSwap, TankCapabilities, TankKnockedOut,
-    TankVolumes, VolumeFacets, VolumeOf, evaluate, part_qualities,
+    TankVolumes, VolumeFacets, VolumeOf, evaluate, part_facts,
 };
 use crate::flow::{Flow, FlowScoped, InMatchSystems, MatchResourceExt};
 use crate::spec::FireCycle;
@@ -256,10 +256,10 @@ fn update_status_panel(
 
     // The game's damage model: the same selector supplies the sim and the readout,
     // including phase and repair brake holds. Sight access has no rate consumer.
-    let quality = part_qualities(volumes, &facets);
+    let quality = part_facts(volumes, &facets).quality;
     let target = crate::track::sim::drive_target(command, Some(volumes), Some(caps), &facets);
     let drive = match target.intent {
-        crate::track::drive::DriveIntent::Axes(_) => target.supply.share(),
+        crate::track::drive::DriveIntent::Axes(_) => target.supply.task_rate,
         crate::track::drive::DriveIntent::Brake | crate::track::drive::DriveIntent::Unmanned => 0.0,
     };
 

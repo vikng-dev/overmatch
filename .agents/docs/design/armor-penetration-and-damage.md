@@ -1206,25 +1206,21 @@ including zero. Cyclic intervals use the same work-free phase; neither interval 
 a load rate. The scalar work representation preserves actual work rather than turning tick
 rounding into extra work. This is ADR-0029's stable absolute-deadline contract with bounded work.
 
-Subject: the game's damage model, game state only. Drive's requirement is read through three
-views, each where its part acts. `evaluate` and every view share the Single/Pool/Backup
-combine law and the group minimum. A Backup selects one complete path by live crew-and-parts
-quality, then serving crew quality, coefficient and canonical part order break ties; authored
-member order cannot decide intent. Within each group, let C be its combined crew-only share,
-E its combined crew-and-engine share, and T its complete share, always using that same selected
-Backup or those same Pool contributors. Its views are C, E/C and T/E, with an already-zero
-upstream share retaining each downstream stage's own module condition (normalised against
-that group's whole share, so coefficients still apply once). The member coefficient is therefore charged
-once, and an incomplete Pool member supplies no missing part to another member. The minimum
-across groups remains independent in each view, preserving the separate source limits of
-separate mandatory groups. Empty Pool/Backup member collections are refused at the sheet gate,
-with file and requirement field; a member's empty dependency list remains a legal pure ceiling.
-The **crew view** decides whether a command exists: with nobody
-serving the station there is no service brake, park-lever change, ladder swap or commanded
-clutch engagement. The tank coasts and the existing park lever holds its state; neither rest
-nor the repair toggle moves it. While someone serves it, the command passes through whole
-and competence scales the fueling delivered. The **engine view** scales combustion and its
-idle governor; the **transmission view** scales clutch and steering capacity. Brakes, engine
+Subject: the game's damage model, game state only. A module supplies its held HP share;
+a crew station supplies its occupant's competence while in action and zero when knocked out.
+A task resolves its requirement once: multiply within complete authored members, capped sum
+across Pool members, best complete Backup alternative, and minimum across required groups.
+The resolution retains each group's contributions and the selected Backup member beside the
+rate. Equivalent alternatives use coefficient and canonical part order, never staffing, to
+break ties. Empty graded groups are refused before play; an empty member is a pure ceiling.
+
+Control authority is separately authored as `drive_controls`: `Any` lists complete staffing
+alternatives, while `Unstaffed` explicitly permits controls without a station. The load gate
+refuses empty paths and undeclared stations. This authority permits axes, repair braking and
+park-lever changes independently of task rate. An unavailable production path cannot erase a
+staffed operator's intent. Drive consumes the resolved task rate directly, alongside the
+engine's and transmission's own held shares for the idle governor and mechanical capacities.
+No source condition is recovered by dividing projected rates. Brakes, engine
 drag and compression braking keep their construction. The authored full-load curve is net
 of construction losses: the pedal blend reconstructs its gross combustion torque, only that
 source scales with delivered supply, and construction drag is charged whole. At whole supply
@@ -1348,8 +1344,6 @@ remaining work is deferred refinements (§9) and the eventual game-side (non-san
 - Repair detail (who, how long, occupies which station).
 - Player feedback / legibility — how the player reads *what happened* to their tank.
 - **Capability model (§7b) deferred edges:**
-  - Cross-group combine: `min` (bottleneck, chosen) vs `product` (compounding) — they agree unless a
-    capability has *two* simultaneously-degraded groups; settle when that first arises.
   - **Min-count floors** — groups that don't degrade gracefully ("need ≥2 or it's 0"), vs the linear
     `Pool` share model.
   - **Skill / training system** — competence beyond the static native/foreign split: per-crewman

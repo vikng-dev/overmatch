@@ -175,7 +175,7 @@ pub const SWAP_SECONDS: f32 = 4.0;
 /// A repairable module function served by this volume. Function loss is derived from its HP.
 /// Identity only — gating keys off [`Capability`] requirements (via [`Part`]), not the function.
 ///
-/// A requirement names a function, and [`part_qualities`] max-combines every volume serving one, so
+/// A requirement names a function, and [`part_facts`] max-combines every volume serving one, so
 /// a weapon gated on its own barrel needs a barrel function no other weapon's barrel serves: the
 /// main gun's ([`Self::GunBarrel`]), the coaxial machine gun's and the bow machine gun's.
 #[derive(Component, Clone, Copy, Debug, PartialEq, Eq, Hash, Deserialize)]
@@ -192,7 +192,7 @@ pub enum FunctionRole {
 /// A gameplay verb the tank can perform (design §7b). Closed enum — consuming systems (driving,
 /// shooting, cameras) reference variants directly. Adding one is a variant, its entry in
 /// [`Self::ALL`] and one consuming system. The *requirements* for each capability are per-tank RON data
-/// ([`TankCapabilities`]); each consumer reads its requirement through [`evaluate`] or [`evaluate_view`].
+/// ([`TankCapabilities`]); each consumer reads its requirement through [`resolve`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Deserialize)]
 pub enum Capability {
     Drive,
@@ -225,22 +225,6 @@ pub enum Part {
     GunBarrel,
     CoaxMgBarrel,
     BowMgBarrel,
-}
-
-impl Part {
-    /// Whether this part names a crew station, whose quality is its occupant's competence,
-    /// rather than a module function, whose quality is its pool's held share.
-    pub fn is_crew(self) -> bool {
-        match self {
-            Part::Commander | Part::Gunner | Part::Loader | Part::Driver | Part::BowGunner => true,
-            Part::Engine
-            | Part::Transmission
-            | Part::Breech
-            | Part::GunBarrel
-            | Part::CoaxMgBarrel
-            | Part::BowMgBarrel => false,
-        }
-    }
 }
 
 impl From<CrewStation> for Part {
@@ -316,14 +300,12 @@ pub enum ControlStaffing {
 }
 
 impl ControlStaffing {
-    pub fn permits(&self, quality: &std::collections::HashMap<Part, f32>) -> bool {
+    pub fn permits(&self, staffed: &std::collections::HashSet<CrewStation>) -> bool {
         match self {
             Self::Unstaffed => true,
-            Self::Any(paths) => paths.iter().any(|stations| {
-                stations
-                    .iter()
-                    .all(|station| live_quality(quality, Part::from(*station)) > 0.0)
-            }),
+            Self::Any(paths) => paths
+                .iter()
+                .any(|stations| stations.iter().all(|station| staffed.contains(station))),
         }
     }
 }
@@ -572,20 +554,24 @@ pub struct VolumeFacets {
     pub repair: Option<&'static repair::ModuleRepair>,
 }
 
-/// The live quality of each [`Part`] on a tank — the shared core behind *every* requirement check
-/// (a tank-wide [`Capability`], a servo's slew gate, a weapon's fire gate or load rate): resolve once per
-/// tank, then [`evaluate`] any number of requirements against it. Crew in action → competence
-/// (native 1.0 / foreign reduced); module → held / capacity; emptied or absent → 0. Duplicate parts (two volumes of one station) take the best.
-pub fn part_qualities(
-    tank_volumes: &TankVolumes,
-    volumes: &Query<VolumeFacets>,
-) -> std::collections::HashMap<Part, f32> {
+/// The game's damage model: independently observed source qualities and station staffing.
+pub struct PartFacts {
+    pub quality: std::collections::HashMap<Part, f32>,
+    pub staffed: std::collections::HashSet<CrewStation>,
+}
+
+/// The game's damage model: collect each tank's facts once. A station in action supplies its
+/// occupant's competence; a module supplies its held HP share. Absent sources supply zero.
+/// Duplicate functions retain their best provider; staffing records station presence directly.
+pub fn part_facts(tank_volumes: &TankVolumes, volumes: &Query<VolumeFacets>) -> PartFacts {
     let mut quality: std::collections::HashMap<Part, f32> = std::collections::HashMap::new();
+    let mut staffed = std::collections::HashSet::new();
     for volume in tank_volumes.iter() {
         let facets = volumes.get(volume).expect(LIVE_VOLUME);
         // A crew station in action supplies its role at the occupant's competence (native 1.0 / foreign
         // degraded).
         if let (Some(role), None) = (facets.crew, facets.dead) {
+            staffed.insert(*role);
             let home = facets
                 .crewman
                 .expect("a crew station is spawned with its occupant (tank::spawn)")
@@ -600,7 +586,7 @@ pub fn part_qualities(
             *q = q.max(module_share(hp));
         }
     }
-    quality
+    PartFacts { quality, staffed }
 }
 
 /// The game's damage model: the shared held share for simulation and rate presentation.
@@ -615,33 +601,6 @@ pub fn module_share(health: &ComponentHealth) -> f32 {
         let ratio = (f64::from(health.held()) / f64::from(health.capacity())) as f32;
         // Resolution: the adjacent representable fraction preserves the reduced/whole boundary.
         ratio.min(f32::from_bits(1.0_f32.to_bits() - 1))
-    }
-}
-
-/// The game's damage model: Drive projects each group along its source chain. The load gate
-/// admits only crew, Engine and Transmission parts in Drive requirements.
-#[derive(Clone, Copy)]
-pub enum DriveView {
-    Crew,
-    Engine,
-    Transmission,
-}
-
-impl DriveView {
-    fn includes(self, part: Part) -> bool {
-        match self {
-            Self::Crew => part.is_crew(),
-            Self::Engine => part.is_crew() || part == Part::Engine,
-            Self::Transmission => true,
-        }
-    }
-
-    fn previous(self) -> Option<Self> {
-        match self {
-            Self::Crew => None,
-            Self::Engine => Some(Self::Crew),
-            Self::Transmission => Some(Self::Engine),
-        }
     }
 }
 
@@ -675,7 +634,7 @@ pub fn resolve<'a>(
 ) -> ResolvedRequirement<'a> {
     let groups: Vec<_> = requirement
         .iter()
-        .map(|group| combine_group(group, quality, |part| live_quality(quality, part)))
+        .map(|group| combine_group(group, quality))
         .collect();
     let mut result = ResolvedRequirement { rate: 1.0, groups };
     result.rate = result
@@ -693,54 +652,7 @@ pub fn evaluate(requirement: &Requirement, quality: &std::collections::HashMap<P
     resolve(requirement, quality).rate
 }
 
-/// The game's damage model: one group's incremental source loss, then the group minimum.
-/// Crew carries the coefficient; engine and transmission carry only the additional loss
-/// through those same members. Pool projections retain each contributor's earlier parts.
-/// Backup uses one whole live path in every projection, with canonical ties.
-/// See the design record §7b for the source-chain interpretation.
-pub fn evaluate_view(
-    requirement: &Requirement,
-    quality: &std::collections::HashMap<Part, f32>,
-    view: DriveView,
-) -> f32 {
-    combine_requirement(requirement, |group| {
-        let projected = |stage: DriveView| {
-            combine_group(group, quality, |p| {
-                if stage.includes(p) {
-                    live_quality(quality, p)
-                } else {
-                    1.0
-                }
-            })
-            .rate
-        };
-        let after = projected(view);
-        match view.previous() {
-            None => after,
-            Some(previous) => {
-                let before = projected(previous);
-                if before == 0.0 {
-                    // No upstream contributor serves. Still retain this stage's own condition:
-                    // an unmanned path cannot turn an emptied engine's idle governor back on.
-                    let own = combine_group(group, quality, |part| {
-                        if view.includes(part) && !previous.includes(part) {
-                            live_quality(quality, part)
-                        } else {
-                            1.0
-                        }
-                    })
-                    .rate;
-                    let whole = combine_group(group, quality, |_| 1.0).rate;
-                    (own / whole).min(1.0)
-                } else {
-                    (after / before).min(1.0)
-                }
-            }
-        }
-    })
-}
-
-fn live_quality(quality: &std::collections::HashMap<Part, f32>, part: Part) -> f32 {
+pub(crate) fn live_quality(quality: &std::collections::HashMap<Part, f32>, part: Part) -> f32 {
     // Absent parts are a legitimate unavailable source, including an out-of-action station.
     quality.get(&part).copied().unwrap_or(0.0)
 }
@@ -751,13 +663,12 @@ fn member_quality(member: &Member, quality: impl Fn(Part) -> f32) -> f32 {
 
 fn combine_group<'a>(
     group: &'a Group,
-    live: &std::collections::HashMap<Part, f32>,
-    projected: impl Fn(Part) -> f32,
+    quality: &std::collections::HashMap<Part, f32>,
 ) -> ResolvedGroup<'a> {
     let member = |index, parts, rate| ResolvedMember { index, parts, rate };
     match group {
         Group::Single(part) => {
-            let rate = projected(*part);
+            let rate = live_quality(quality, *part);
             ResolvedGroup {
                 rate,
                 contributors: vec![member(0, std::slice::from_ref(part), rate)],
@@ -767,7 +678,13 @@ fn combine_group<'a>(
             let contributors: Vec<_> = members
                 .iter()
                 .enumerate()
-                .map(|(index, m)| member(index, m.1.as_slice(), member_quality(m, &projected)))
+                .map(|(index, m)| {
+                    member(
+                        index,
+                        m.1.as_slice(),
+                        member_quality(m, |part| live_quality(quality, part)),
+                    )
+                })
                 .collect();
             let mut result = ResolvedGroup {
                 rate: 0.0,
@@ -782,41 +699,36 @@ fn combine_group<'a>(
             result
         }
         Group::Graded(GradedGroup::Backup(members)) => {
-            let (index, selected) = members
+            let selected = members
                 .iter()
                 .enumerate()
-                .max_by(|(_, a), (_, b)| {
-                    let full = |m: &Member| member_quality(m, |p| live_quality(live, p));
-                    let canonical = |m: &Member| {
-                        let mut parts = m.1.clone();
+                .map(|(index, m)| {
+                    member(
+                        index,
+                        m.1.as_slice(),
+                        member_quality(m, |part| live_quality(quality, part)),
+                    )
+                })
+                .max_by(|a, b| {
+                    let canonical = |parts: &[Part]| {
+                        let mut parts = parts.to_vec();
                         parts.sort_unstable();
                         parts
                     };
-                    full(a)
-                        .total_cmp(&full(b))
-                        .then_with(|| a.0.total_cmp(&b.0))
-                        .then_with(|| canonical(a).cmp(&canonical(b)))
+                    a.rate
+                        .total_cmp(&b.rate)
+                        .then_with(|| members[a.index].0.total_cmp(&members[b.index].0))
+                        .then_with(|| canonical(a.parts).cmp(&canonical(b.parts)))
                 })
                 .expect(
                     "TankSpec::validate refuses empty Backup member lists in every requirement",
                 );
-            let mut contributor = member(index, selected.1.as_slice(), 0.0);
-            contributor.rate = contributor
-                .parts
-                .iter()
-                .fold(members[contributor.index].0, |rate, part| {
-                    rate * projected(*part)
-                });
             ResolvedGroup {
-                rate: contributor.rate,
-                contributors: vec![contributor],
+                rate: selected.rate,
+                contributors: vec![selected],
             }
         }
     }
-}
-
-fn combine_requirement(requirement: &Requirement, group_quality: impl Fn(&Group) -> f32) -> f32 {
-    requirement.iter().map(group_quality).fold(1.0, f32::min)
 }
 
 /// Whether an arbitrary tank *meets* a requirement (effectiveness > 0) — the per-tank analog of
@@ -840,7 +752,7 @@ pub fn requirement_effectiveness(
     let Some(tank_volumes) = tank_volumes else {
         return 0.0;
     };
-    evaluate(requirement, &part_qualities(tank_volumes, volumes))
+    evaluate(requirement, &part_facts(tank_volumes, volumes).quality)
 }
 
 /// The player's tank, bundled for the control systems (drive input, aiming, sight, shooting). It
@@ -874,7 +786,10 @@ impl ControlledTank<'_, '_> {
         let Ok((_, _, Some(tank_volumes))) = self.tank.single() else {
             return false;
         };
-        evaluate(requirement, &part_qualities(tank_volumes, &self.volumes)) > 0.0
+        evaluate(
+            requirement,
+            &part_facts(tank_volumes, &self.volumes).quality,
+        ) > 0.0
     }
 }
 
@@ -1022,7 +937,7 @@ fn mark_dead_tanks(
 
 #[cfg(test)]
 mod tests {
-    use super::{DriveView, GradedGroup, Group, Part, Requirement, evaluate, evaluate_view};
+    use super::{GradedGroup, Group, Part, evaluate};
     use std::collections::HashMap;
 
     /// Build a part→quality map from `(part, quality)` pairs.
@@ -1046,7 +961,7 @@ mod tests {
             world
                 .run_system_once(
                     move |tanks: Query<&TankVolumes>, facets: Query<VolumeFacets>| {
-                        let quality = part_qualities(tanks.get(tank).unwrap(), &facets);
+                        let quality = part_facts(tanks.get(tank).unwrap(), &facets).quality;
                         assert_eq!(
                             evaluate(&vec![Group::Single(Part::Engine)], &quality),
                             share
@@ -1144,19 +1059,11 @@ mod tests {
             vec![CrewStation::Driver, CrewStation::Commander],
             vec![CrewStation::Gunner],
         ]);
-        assert!(!staffing.permits(&q(&[(Part::Driver, 1.0), (Part::Engine, 1.0)])));
-        assert!(staffing.permits(&q(&[(Part::Driver, 0.6), (Part::Commander, 1.0)])));
-        assert!(staffing.permits(&q(&[(Part::Gunner, 0.6)])));
-        assert!(!staffing.permits(&q(&[(Part::Gunner, 0.0)])));
-        assert!(ControlStaffing::Unstaffed.permits(&q(&[])));
-    }
-
-    fn drive_views(req: &Requirement, quality: &HashMap<Part, f32>) -> [f32; 3] {
-        [
-            evaluate_view(req, quality, DriveView::Crew),
-            evaluate_view(req, quality, DriveView::Engine),
-            evaluate_view(req, quality, DriveView::Transmission),
-        ]
+        assert!(!staffing.permits(&[CrewStation::Driver].into()));
+        assert!(staffing.permits(&[CrewStation::Driver, CrewStation::Commander].into()));
+        assert!(staffing.permits(&[CrewStation::Gunner].into()));
+        assert!(!staffing.permits(&[].into()));
+        assert!(ControlStaffing::Unstaffed.permits(&[].into()));
     }
 
     /// The game's damage model: equivalent Backup alternatives retain a canonical complete
@@ -1178,102 +1085,34 @@ mod tests {
             let selected = &result.groups[0].contributors[0];
             assert_eq!(selected.parts, &[Part::Driver, Part::Engine]);
             assert_eq!(selected.parts, members[selected.index].1);
-            assert!(controls.permits(&quality));
+            assert!(controls.permits(&[CrewStation::Driver].into()));
             members.reverse();
         }
     }
 
     /// The game's damage model: cooperative contributors cannot borrow one another's
-    /// absent parts; propulsion relies on each fixture path being complete.
+    /// absent parts; task consumers rely on complete paths even when every contribution is zero.
     #[test]
-    fn pool_views_do_not_splice_incomplete_members() {
+    fn pool_does_not_splice_incomplete_members() {
+        // Fixture: complementary unavailable dependencies on two complete paths.
         let req = vec![Group::Graded(GradedGroup::Pool(vec![
             (1.0, vec![Part::Driver, Part::Engine]),
             (1.0, vec![Part::Commander, Part::Transmission]),
         ]))];
         let quality = q(&[(Part::Commander, 1.0), (Part::Engine, 1.0)]);
-        let [crew, engine, transmission] = drive_views(&req, &quality);
-        assert_eq!(evaluate(&req, &quality), 0.0);
-        assert_eq!(crew * engine * transmission, 0.0);
-    }
-
-    /// The game's damage model: a fixture crew-path ceiling limits delivered work once;
-    /// it cannot also reduce a whole engine and transmission's construction.
-    #[test]
-    fn backup_ceiling_is_charged_once() {
-        let req = vec![
-            Group::Graded(GradedGroup::Backup(vec![
-                (1.0, vec![Part::Driver]),
-                (0.6, vec![Part::Commander]),
-            ])),
-            Group::Single(Part::Engine),
-            Group::Single(Part::Transmission),
-        ];
-        assert_eq!(
-            drive_views(
-                &req,
-                &q(&[
-                    (Part::Commander, 1.0),
-                    (Part::Engine, 1.0),
-                    (Part::Transmission, 1.0)
-                ])
-            ),
-            [0.6, 1.0, 1.0]
+        let result = super::resolve(&req, &quality);
+        assert_eq!(result.rate, 0.0);
+        assert!(
+            result.groups[0]
+                .contributors
+                .iter()
+                .all(|member| member.rate == 0.0)
         );
-    }
-
-    /// The game's damage model: an unavailable upstream station does not restore an
-    /// emptied engine's idle supply, nor replace the transmission's own condition.
-    #[test]
-    fn unavailable_upstream_retains_each_modules_own_condition() {
-        let req = vec![Group::Graded(GradedGroup::Backup(vec![(
-            0.6,
-            vec![Part::Driver, Part::Engine, Part::Transmission],
-        )]))]; // Fixture path ceiling and module share.
-        assert_eq!(
-            drive_views(&req, &q(&[(Part::Transmission, 0.25)])),
-            [0.0, 0.0, 0.25]
-        );
-    }
-
-    /// The game's damage model: per-group projected losses must recompose the scalar
-    /// combine law that capability consumers use, including unavailable fixture paths.
-    #[test]
-    fn projected_group_losses_recompose_live_quality() {
-        for group in [
-            Group::Single(Part::Driver),
-            Group::Single(Part::Engine),
-            Group::Single(Part::Transmission),
-            Group::Graded(GradedGroup::Pool(vec![
-                (0.6, vec![Part::Driver, Part::Engine]),
-                (0.5, vec![Part::Commander, Part::Transmission]),
-            ])),
-            Group::Graded(GradedGroup::Backup(vec![
-                (0.6, vec![Part::Driver, Part::Engine]),
-                (0.5, vec![Part::Commander, Part::Transmission]),
-            ])),
-        ] {
-            let req = vec![group];
-            for crew in [0.0, 0.25, 1.0] {
-                for engine in [0.0, 0.25, 1.0] {
-                    for transmission in [0.0, 0.25, 1.0] {
-                        let quality = q(&[
-                            (Part::Driver, crew),
-                            (Part::Commander, 1.0),
-                            (Part::Engine, engine),
-                            (Part::Transmission, transmission),
-                        ]);
-                        let product: f32 = drive_views(&req, &quality).iter().product();
-                        assert!((product - evaluate(&req, &quality)).abs() < 1e-6);
-                    }
-                }
-            }
-        }
     }
 
     #[test]
     fn single_groups_are_and_all_or_nothing() {
-        // Fire = [Gunner, Breech, GunBarrel] — the Tiger shape.
+        // Fixture: three mandatory contributors.
         let req = vec![
             Group::Single(Part::Gunner),
             Group::Single(Part::Breech),
