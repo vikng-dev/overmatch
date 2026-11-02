@@ -14,7 +14,8 @@
 //! work tree, is that revision's file. Omitted, the registry compiled into this binary is used: the
 //! game ships the two together, so for the game they cannot disagree.
 //!
-//! Exit 1 means the report contains an error. The report goes to stdout either way.
+//! Exit 1 means the report contains an error. Verification reports go to stdout; a canon
+//! refusal goes to stderr so stdout remains exclusively the canon document.
 
 use std::path::{Path, PathBuf};
 
@@ -60,7 +61,9 @@ fn canon(arguments: &[PathBuf], registry: Option<&Path>) {
     match overmatch::canon_lists(spec, registry) {
         Ok(json) => println!("{json}"),
         Err(findings) => {
-            eprint!("{}", overmatch::render(&findings));
+            let text = overmatch::render(&findings);
+            eprint!("{text}");
+            eprintln!("{}", report_envelope(&text));
             std::process::exit(1);
         }
     }
@@ -71,10 +74,19 @@ fn verify(models: &[PathBuf], registry: Option<&Path>) {
     for model in models {
         let findings = overmatch::verify_asset(Path::new(model), registry);
         refused |= overmatch::has_error(&findings);
-        print!("{}", overmatch::render(&findings));
+        let text = overmatch::render(&findings);
+        print!("{text}");
+        if overmatch::has_error(&findings) {
+            println!("{}", report_envelope(&text));
+        }
         println!("{}: {} finding(s)", model.display(), findings.len());
     }
     if refused {
         std::process::exit(1);
     }
+}
+
+/// The Blender adapter's report channel contains only the consumer's own rendering.
+fn report_envelope(text: &str) -> String {
+    format!("overmatch-report ▸ {}", serde_json::json!({ "text": text }))
 }

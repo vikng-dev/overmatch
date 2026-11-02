@@ -2124,7 +2124,7 @@ def main() -> int:
               flush=True)
         return 0
     findings = run(arguments.mode, arguments.canon, arguments.raw)
-    print(report.render_text(findings), end="", flush=True)
+    report.emit(findings)
     print("{} ▸ {}".format(arguments.mode.ljust(5), report.summary(findings)), flush=True)
     return report.exit_code(findings)
 

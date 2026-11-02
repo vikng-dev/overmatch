@@ -61,6 +61,7 @@ bl_info = {
     "category": "Import-Export",
 }
 
+import json
 import os
 import select
 import shutil
@@ -362,40 +363,34 @@ class Refused(Exception):
         self.stage = stage
 
 
-#: The chain's own console protocol: every stage it is about to run is announced on a `build ▸` or
-#: `door  ▸` line, and the one that refused is named on a last line carrying `refused at <stage>`.
-#: Read here for the same reason `_IMAGE_LINE` is — this file reads that stdout and holds no
-#: vocabulary of its own.
-_STAGE_LINES = ("build ▸ ", "door  ▸ ")
-_REFUSED_MARK = "refused at "
+# The door's tagged JSON channel is independent of cargo, Blender and encoder diagnostics.
+_REPORT_PREFIX = "overmatch-report ▸ "
+_VERDICT_PREFIX = "overmatch-verdict ▸ "
 
-#: How many of the refusing stage's lines the popup carries. A popup may summarize; the console and
-#: the door's own stdout hold every row. Findings sort ERRORS FIRST, so a head of the stage's output
-#: is the refusal itself — a tail would be whatever informational census followed it.
+#: Maximum report lines in the popup; the system console retains the complete report.
 POPUP_LINES = 24
 
 
 def refusal_of(printed):
-    """`(stage, message)` for a door run that exited non-zero: the stage the door named, and what
-    the stage that refused printed.
+    """Read only the door's report and stage envelopes after an unsuccessful exit.
 
-    NOTHING IS PARSED OUT OF THE REPORT. Its rows are the door's rendering (`scripts/tank/
-    report.py`) and re-deriving them here would be this file holding a second vocabulary. What is
-    read is only the chain's own stage lines: everything after the LAST stage it announced is
-    what that stage said, and the report is at the head of it because errors sort first. A run that
-    ends some other way — no announcement, no verdict — surfaces whole, under the stage `door`.
+    `printed` contains merged stdout AND stderr, including compiler diagnostics on warm builds.
+    Neither a diagnostic's position nor words resembling a verdict make it an asset finding.
     """
-    end = len(printed)
-    stage = "door"
-    for index in range(len(printed) - 1, -1, -1):
-        if _REFUSED_MARK in printed[index]:
-            stage = printed[index].split(_REFUSED_MARK, 1)[1].split(" ", 1)[0].strip() or stage
-            end = index
-            break
-    announced = [index for index in range(end)
-                 if printed[index].startswith(_STAGE_LINES)]
-    said = printed[announced[-1] + 1:end] if announced else printed[:end]
-    return (stage, "\n".join((said[:POPUP_LINES] or ["the build printed nothing at all"]) + [
+    stage, text = "door", "The door exited without a report."
+    try:
+        for line in printed:
+            if line.startswith(_REPORT_PREFIX):
+                text = json.loads(line[len(_REPORT_PREFIX):])["text"]
+                if not isinstance(text, str):
+                    raise ValueError("report text must be a string")
+            elif line.startswith(_VERDICT_PREFIX):
+                stage = json.loads(line[len(_VERDICT_PREFIX):])["stage"]
+                if not isinstance(stage, str) or not stage:
+                    raise ValueError("refusal stage must be a nonempty string")
+    except (ValueError, KeyError, TypeError):
+        stage, text = "door", "The door returned an invalid report."
+    return (stage, "\n".join(text.splitlines()[:POPUP_LINES] + [
         "", "The tracked model is unchanged. The complete report is in the system console.",
     ]))
 

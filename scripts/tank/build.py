@@ -651,11 +651,12 @@ def run(mode: str, blend: str, spec: Optional[str] = None, glb: Optional[str] = 
             print("build ▸ {} certified".format(mode), flush=True)
             return 0
 
-    print(report.render_text(report.sorted_findings(findings)), end="", flush=True)
+    report.emit(report.sorted_findings(findings))
     print(timeline.render(), end="", flush=True)
     print("build ▸ {} refused at {}{}".format(
         mode, stage, " — the tracked trio is unchanged" if mode == "build" else "",
     ), flush=True)
+    report.refuse(stage)
     return 1
 
 

@@ -923,7 +923,7 @@ def rendered(label, findings):
     """One report, and the exit code it carries. Every entry point ends here, so the console reads
     the same rows in the same order whichever one produced them."""
     findings = report.sorted_findings(findings)
-    print(report.render_text(findings), end="", flush=True)
+    report.emit(findings)
     print("{} ▸ {}".format(label.ljust(5), report.summary(findings)), flush=True)
     return report.exit_code(findings)
 

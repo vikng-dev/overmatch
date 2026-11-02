@@ -11,6 +11,8 @@ Stdlib only, no Blender: this module never imports `bpy`, and a contract test th
 three-second Blender launch would be a contract test nobody runs.
 """
 
+import contextlib
+import io
 import itertools
 import json
 import os
@@ -210,6 +212,29 @@ class ExitStatus(unittest.TestCase):
         findings = [finding(severity=Severity.ERROR), finding(severity=Severity.WARNING),
                     finding(severity=Severity.WARNING)]
         self.assertEqual(report.summary(findings), "1 error, 2 warnings, 0 info")
+
+
+class AdapterChannel(unittest.TestCase):
+    """Artists receive the producer's rendering, even when diagnostics surround it."""
+
+    def test_a_refusal_envelope_preserves_the_complete_rendering(self):
+        rows = [finding(evidence='two lines\nwith "quotes" and ▸')]
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
+            report.emit(rows)
+            report.refuse("consumer (raw)")
+        text, verdict = output.getvalue().splitlines()[-2:]
+        self.assertEqual(json.loads(text[len(report.REPORT_PREFIX):]),
+                         {"text": report.render_text(rows)})
+        self.assertEqual(json.loads(verdict[len(report.VERDICT_PREFIX):]),
+                         {"stage": "consumer (raw)"})
+
+    def test_a_warning_or_empty_report_cannot_replace_a_subprocess_refusal(self):
+        for rows in ([], [finding(severity=Severity.WARNING)]):
+            output = io.StringIO()
+            with contextlib.redirect_stdout(output):
+                report.emit(rows)
+            self.assertNotIn(report.REPORT_PREFIX, output.getvalue())
 
 
 if __name__ == "__main__":

@@ -18,6 +18,7 @@ GUI-ONLY, and left to a human: the popup and the cursor percentage actually appe
 and the File ▸ Export menu entry being clickable. Both are drawing.
 """
 
+import json
 import os
 import sys
 import tempfile
@@ -210,32 +211,42 @@ def a_door_that_never_returns_is_killed_and_refused():
 # ── what reaches the artist when the door says no ────────────────────────────────────────────────
 
 @case
-def a_refusal_carries_the_stage_the_door_named_and_what_that_stage_said():
-    """`refusal_of` reads the door's own `door  ▸` protocol and nothing else: the stage off the
-    verdict line, and the lines after the last stage the door announced — which is what the stage
-    that refused printed, errors first."""
-    stage, message = addon.refusal_of([
-        "door  ▸ toolchain: blender 5.1.2 (/usr/bin/blender)",
-        "door  ▸ source: blender --background testbed.blend",
-        "L1.MODIFIER_STACK error: object `Hull`",
-        "  measured: 1 modifier(s)",
-        "export ▸ 1 error, 0 warnings, 7 info",
-        "door  ▸ export refused at source — testbed.glb is unchanged",
-    ])
-    assert stage == "source", stage
-    assert "L1.MODIFIER_STACK" in message, message
-    assert "blender --background" not in message, "the door's own announcements leaked in"
-    assert "system console" in message, message
+def a_refusal_uses_only_the_doors_report_channel():
+    """The artist needs the actual refusal even after more diagnostics than the popup can hold."""
+    for noise in ([], ["warning: unused import: XRayRelease"] * 40):
+        stage, message = addon.refusal_of(noise + [
+            'overmatch-report ▸ ' + json.dumps({
+                "text": "L1.MODIFIER_STACK error: Hull\n  repair: apply modifier",
+            }),
+            "warning: a compiler message mentions refused at canon",
+            'overmatch-verdict ▸ ' + json.dumps({"stage": "source"}),
+        ])
+        assert stage == "source", stage
+        assert "L1.MODIFIER_STACK" in message and "apply modifier" in message, message
+        assert "warning:" not in message, message
+        assert "system console" in message, message
 
 
 @case
-def a_refusal_with_no_verdict_line_surfaces_whole():
-    """A door that died some other way — a traceback, a killed subprocess — has named no stage and
-    printed no verdict. Everything it did print is the evidence, so none of it is dropped."""
-    stage, message = addon.refusal_of(["Traceback (most recent call last):", "  boom"])
-    assert stage == "door", stage
-    assert "Traceback" in message and "boom" in message, message
-    assert addon.refusal_of([])[1].startswith("the build printed nothing at all")
+def a_multiword_stage_and_a_broken_channel_are_reported_deliberately():
+    stage, message = addon.refusal_of([
+        'overmatch-report ▸ ' + json.dumps({"text": "L2.SPEC error: fix the sheet"}),
+        'overmatch-verdict ▸ ' + json.dumps({"stage": "consumer (raw)"}),
+    ])
+    assert stage == "consumer (raw)" and "L2.SPEC" in message, (stage, message)
+    for broken in ('{"text":', '{"text": null}', '[]'):
+        stage, message = addon.refusal_of(['overmatch-report ▸ ' + broken])
+        assert stage == "door" and "invalid report" in message, (stage, message)
+
+
+@case
+def build_output_without_a_door_report_is_a_process_failure():
+    """An unsuccessful process with no report must not pass compiler output off as asset findings."""
+    for printed in ([], ["warning: unused import: XRayRelease", "refused at canon"]):
+        stage, message = addon.refusal_of(printed)
+        assert stage == "door", stage
+        assert "without a report" in message, message
+        assert "warning:" not in message, message
 
 
 # ── the stock-exporter hook ──────────────────────────────────────────────────────────────────────

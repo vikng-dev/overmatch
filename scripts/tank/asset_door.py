@@ -640,8 +640,9 @@ def door(mode: str, blend: str, spec: Optional[str] = None, glb: Optional[str] =
             print("door  ▸ {} certified".format("stage" if stage_to else mode), flush=True)
             return 0
 
-    print(report.render_text(report.sorted_findings(findings)), end="", flush=True)
+    report.emit(report.sorted_findings(findings))
     print("door  ▸ {} refused at {}".format("stage" if stage_to else mode, stage), flush=True)
+    report.refuse(stage)
     return 1
 
 

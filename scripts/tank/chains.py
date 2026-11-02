@@ -38,6 +38,7 @@ import bpy  # noqa: E402
 import config as CONFIG  # noqa: E402
 import generate as GEN  # noqa: E402
 import measure as M  # noqa: E402
+import report  # noqa: E402
 import trio as TRIO  # noqa: E402
 
 
@@ -379,16 +380,19 @@ if __name__ == "__main__":
         code = main(argv)
     except SystemExit as exc:
         print(f"\nCHAIN CUT FAILED {exc}", file=sys.stderr)
+        report.refusal_text(f"CHAIN CUT FAILED {exc}")
         sys.stderr.flush()
         sys.stdout.flush()
         os._exit(1)
     except M.Refusal as exc:
         print(f"\nCHAIN CUT REFUSED [{exc.reason}] {exc.detail}", file=sys.stderr)
+        report.refusal_text(f"CHAIN CUT REFUSED [{exc.reason}] {exc.detail}")
         sys.stderr.flush()
         sys.stdout.flush()
         os._exit(2)
     except BaseException:
         traceback.print_exc()
+        report.refusal_text(traceback.format_exc())
         sys.stdout.flush()
         sys.stderr.flush()
         os._exit(1)

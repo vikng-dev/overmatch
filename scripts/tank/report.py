@@ -207,3 +207,29 @@ def render_text(findings: Sequence[Finding]) -> str:
 def render_json(findings: Sequence[Finding]) -> str:
     """The complete JSON rendering — the same rows in the same order, one object each."""
     return json.dumps({"findings": [finding.as_dict() for finding in findings]}, indent=2)
+
+
+# The Blender adapter reads this tagged JSON channel; ordinary process output is diagnostic only.
+REPORT_PREFIX = "overmatch-report ▸ "
+VERDICT_PREFIX = "overmatch-verdict ▸ "
+
+
+def emit(findings: Sequence[Finding]) -> None:
+    """Print the human report and its lossless text envelope for the Blender popup.
+
+    Empty reports carry no rows and must not replace a refusing subprocess's report.
+    """
+    text = render_text(findings)
+    print(text, end="", flush=True)
+    if has_error(findings):
+        refusal_text(text)
+
+
+def refusal_text(text: str) -> None:
+    """A refusing producer's own text, without interpreting any process diagnostics."""
+    print(REPORT_PREFIX + json.dumps({"text": text}), flush=True)
+
+
+def refuse(stage: str) -> None:
+    """The wrapper's stage verdict, separate from all subprocess diagnostics."""
+    print(VERDICT_PREFIX + json.dumps({"stage": stage}), flush=True)
