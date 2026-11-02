@@ -153,16 +153,23 @@ def run_stage(stage: str, command, root: str, stdout=None) -> None:
 
 
 def run_tool(stage: str, command, root: str, subject: str, repair: str) -> None:
-    """The same, for a stage that reports prose rather than findings — the encoder. Its exit code
-    becomes one `door.stage-failed` row so the report still holds every refusal in one shape."""
+    """Stream the encoder's own report, adding a mechanical refusal only if it emitted none."""
     print("door  ▸ {}: {}".format(stage, shown(command, root)), flush=True)
-    result = subprocess.run(command, cwd=root, env=own_env())
-    if not result.returncode:
+    reported = False
+    with subprocess.Popen(command, cwd=root, env=own_env(), text=True,
+                          stdout=subprocess.PIPE, stderr=subprocess.STDOUT) as process:
+        for line in process.stdout:
+            print(line, end="", flush=True)
+            reported |= line.startswith(report.REPORT_PREFIX)
+        status = process.wait()
+    if not status:
         return
+    if reported:
+        raise Refused(stage)
     raise Refused(stage, [Finding(
         STAGE_FAILED,
         Subject(SubjectKind.DOOR, stage, subject),
-        "`{}` exited {}".format(shown(command, root), result.returncode),
+        "`{}` exited {}".format(shown(command, root), status),
         repair,
     )])
 

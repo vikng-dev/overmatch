@@ -678,6 +678,44 @@ class ComparisonLaw(unittest.TestCase):
         self.refuses(tracked, "document", "cannot be read")
 
 
+class EncoderReportChannel(unittest.TestCase):
+    """The encoder owns its refusal; the wrapper reports only mechanical failures."""
+
+    def test_an_encoder_role_refusal_is_not_replaced_by_the_wrapper(self):
+        """The artist needs the image-role repair, not a second row saying the encoder exited."""
+        with tempfile.TemporaryDirectory() as work:
+            raw = os.path.join(work, "roles.glb")
+            glb_ktx2.write_glb(raw, {
+                "asset": {"version": "2.0"},
+                "images": [{"name": "shared", "mimeType": "image/png"}],
+                "textures": [{"source": 0}],
+                "materials": [{"name": "paint", "pbrMetallicRoughness": {
+                    "baseColorTexture": {"index": 0},
+                    "metallicRoughnessTexture": {"index": 0},
+                }}],
+            }, b"")
+            driver = """import asset_door, report, sys
+try:
+    asset_door.run_tool('ktx2', sys.argv[1:], '.', 'roles.glb', 'read output above')
+except asset_door.Refused as refusal:
+    report.emit(refusal.findings)
+    report.refuse(refusal.stage)
+"""
+            result = subprocess.run(
+                [sys.executable, "-c", driver, os.path.join(ROOT, asset_door.ENCODE),
+                 raw, os.path.join(work, "baked.glb")], cwd=ROOT,
+                env=dict(os.environ, PYTHONPATH=os.path.join(ROOT, "scripts", "tank")),
+                text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+            )
+        envelopes = [json.loads(line[len(report.REPORT_PREFIX):])["text"]
+                     for line in result.stdout.splitlines()
+                     if line.startswith(report.REPORT_PREFIX)]
+        self.assertEqual(len(envelopes), 1, result.stdout)
+        self.assertIn("D.KTX2_MIPS", envelopes[0])
+        self.assertIn("give the two slots their own image", envelopes[0])
+        self.assertNotIn("door.stage-failed", result.stdout)
+
+
 class RefusalsLeaveTheModelAlone(unittest.TestCase):
     """One case per stage that can refuse. Each asserts the same thing: the tracked glb is the file
     it was, and no candidate was staged."""
