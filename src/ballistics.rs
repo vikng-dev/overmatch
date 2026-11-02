@@ -1197,8 +1197,9 @@ pub(crate) struct PoolEmptied {
 #[derive(Debug, Clone)]
 pub(crate) struct DeliveredLine {
     pub(crate) crossing: VolumeCrossing,
-    /// The game's damage model: exposed sample chords in WORLD, clipped at rest. Construction
-    /// allocation reads these; the crossing's axis endpoints retain the shared rest point.
+    /// The game's damage model: exposed sample chords in WORLD, clipped at rest; none for a skid,
+    /// whose line has no length. Construction allocation reads these; the crossing's axis
+    /// endpoints retain the shared rest point.
     pub(crate) contacts: Vec<(Vec3, Vec3)>,
     pub(crate) momentum: Vec3,
     pub(crate) entrance_momentum: Vec3,

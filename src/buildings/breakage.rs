@@ -1126,7 +1126,10 @@ fn take_lines(
                 let mut crossed = BTreeMap::<usize, (f32, f32, f32)>::new();
                 for &(from, to) in &line.contacts {
                     let (from, to) = (frame.unscaled(from), frame.unscaled(to));
-                    let ray = (to - from).normalize();
+                    // World f32 rounding can close a resolved chord to a point.
+                    let Some(ray) = (to - from).try_normalize() else {
+                        continue;
+                    };
                     for &c in &chunks {
                         let Some((t0, t1)) = layout.blocks[c].span(from, ray) else {
                             continue; // This sample missed the chunk.
@@ -1145,10 +1148,13 @@ fn take_lines(
                         span.2 += t1 - t0;
                     }
                 }
-                assert!(
-                    !crossed.is_empty(),
-                    "a resolved disc contact with a breakable element meets its partitioning chunks"
-                );
+                if crossed.is_empty() {
+                    // A skid's line has no chord, and rounding can close a short one or carry it
+                    // off every hull: the chunk at the line's own point takes it whole.
+                    let owner = nearest_chunk(layout, usize::from(e), a)
+                        .expect("this element's chunks were found above");
+                    crossed.insert(owner, (0.0, length, length));
+                }
                 crossed
                     .into_iter()
                     .map(|(c, (a, b, weight))| (c, a, b, weight))

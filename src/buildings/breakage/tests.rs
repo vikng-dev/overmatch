@@ -3823,6 +3823,40 @@ fn a_rim_crossing_shares_the_work_across_the_chunks_it_met() {
     }
 }
 
+/// The game's damage model: a skid does all its work at the face, so its line has no chord and
+/// names no chunk. Destruction relies on the chunk at its point taking the work and blow whole,
+/// with no panic on the authority's per-round path.
+#[test]
+fn a_skids_line_with_no_chord_wears_the_chunk_at_its_point() {
+    for (near, z) in [(0, 0.1), (1, 1.9)] {
+        let (mut app, root, kind, e, chunks) = stacked_chunks();
+        let at = Vec3::new(1.9, 0.0, z);
+        let entry_blow = Vec3::X * 12.0;
+        let taken = marched_line(
+            &mut app,
+            root,
+            &kind,
+            e,
+            Quat::IDENTITY,
+            (at, at),
+            (Vec3::ZERO, entry_blow),
+        )
+        .expect("the chunk at the skid's point takes its line");
+        assert!(
+            taken
+                .line_loads
+                .iter()
+                .all(|load| load.chunk == chunks[near]),
+            "{:?}",
+            taken.line_loads
+        );
+        let total: Vec3 = taken.line_loads.iter().map(|load| load.blow).sum();
+        assert!((total - entry_blow).length() < 1e-4);
+        let work: f32 = taken.line_loads.iter().map(|load| load.energy).sum();
+        assert!((work - 7.0).abs() < 1e-5);
+    }
+}
+
 /// An element that never breaks owns no chunk ([`Layout::chunks_of`]) and still has its collider,
 /// so a round crossing it is routine. Destruction relies on that line wearing nothing and ending
 /// no session: a mutant that restores the allocation panic fails here.
