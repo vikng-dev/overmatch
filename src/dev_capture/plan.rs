@@ -182,7 +182,7 @@ pub(crate) struct Frames {
     /// A positive, fixed virtual frame step, s, for reproducible comparisons. Asset loading still
     /// runs asynchronously, so capture after the scene is ready.
     #[serde(default)]
-    pub(crate) step_s: Option<f64>,
+    pub(crate) step_s: Option<FrameStep>,
     /// Who places the player's camera ([`Camera`]). Default the player's own writers.
     #[serde(default)]
     pub(crate) camera: Camera,
@@ -229,16 +229,69 @@ pub(crate) struct Fell {
     pub(crate) dir: u8,
 }
 
-/// On the first frame at or after app second `at`, the authored `style` dresses the
-/// terrain under world `x, z`: the view's impact read (dust, smoke, the ground mark) is raised
-/// there with no round flown and no shot recorded.
-#[derive(Deserialize, Debug, Clone, Copy, PartialEq)]
+/// On the first frame at or after app second `at`, the shipped round `round` dresses the terrain
+/// point under world `x, z` as a strike on `surface`: the game's damage-model view raises its
+/// impact read there with no round flown and no shot recorded, so a plan presents what that round's
+/// and that surface's data state.
+#[derive(Deserialize, Debug, Clone, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct Impact {
     pub(crate) x: f32,
     pub(crate) z: f32,
-    pub(crate) style: crate::rounds::ImpactStyle,
+    pub(crate) round: String,
+    pub(crate) surface: StruckSurface,
     pub(crate) at: f32,
+}
+
+/// What a raised strike finds: the painted ground under its point, or a shipped hard substance.
+#[derive(Deserialize, Debug, Clone, PartialEq)]
+pub(crate) enum StruckSurface {
+    Terrain,
+    Substance(String),
+}
+
+impl Impact {
+    /// The round's contact style and the surface's response from the shipped tables, or why a key
+    /// names neither.
+    pub(crate) fn resolved(
+        &self,
+    ) -> Result<(crate::rounds::ImpactStyle, crate::ballistics::ImpactSurface), String> {
+        let style = crate::rounds::RoundRegistry::shipped()
+            .get(&self.round)
+            .map_err(|error| format!("impacts: round {:?}: {error}", self.round))?
+            .impact_style();
+        let surface = match &self.surface {
+            StruckSurface::Terrain => crate::ballistics::ImpactSurface::Terrain,
+            StruckSurface::Substance(key) => crate::ballistics::ImpactSurface::Material(
+                crate::substances::SubstanceRegistry::shipped_static()
+                    .get(key)
+                    .map_err(|error| format!("impacts: substance {key:?}: {error}"))?
+                    .hard()
+                    .ok_or_else(|| format!("impacts: substance {key:?} is not a hard substance"))?
+                    .feedback,
+            ),
+        };
+        Ok((style, surface))
+    }
+}
+
+/// A capture's fixed frame step: a positive duration a [`std::time::Duration`] represents without
+/// rounding to nothing. A huge step would panic the conversion, and one that rounds to zero would
+/// freeze the capture's clock and its deadline, so both are refused where the plan is read.
+#[derive(Deserialize, Debug, Clone, Copy, PartialEq)]
+#[serde(try_from = "f64")]
+pub(crate) struct FrameStep(pub(crate) std::time::Duration);
+
+impl TryFrom<f64> for FrameStep {
+    type Error = String;
+
+    fn try_from(step: f64) -> Result<Self, String> {
+        std::time::Duration::try_from_secs_f64(step)
+            .ok()
+            .filter(|duration| !duration.is_zero())
+            .map(Self)
+            .ok_or_else(|| format!("frames.step_s: {step} is not a positive, representable step"))
+    }
 }
 
 /// On the first frame at or after app second `at`, the shipped round `round` in fuze mode `mode`
@@ -363,11 +416,6 @@ impl CapturePlan {
                     "frames.scale_factor: the requested logical target size is unrepresentable"
                         .into(),
                 );
-            }
-            if let Some(step) = frames.step_s
-                && !(step.is_finite() && step > 0.0)
-            {
-                return Err(format!("frames.step_s: {step} is not a positive step"));
             }
             match frames.camera {
                 Camera::Player => {}
@@ -513,7 +561,7 @@ mod tests {
                 ),
                 keys: [(key: Tab, from: 2.0, to: 3.5)],
                 fell: (instance: "tree_0001", at: 4.0, cut: 1, dir: 3),
-                impacts: [(x: 1.0, z: -2.0, style: Layered, at: 5.0)],
+                impacts: [(x: 1.0, z: -2.0, round: "88mm_HE", surface: Substance("Wood"), at: 5.0)],
                 shot: (round: "88mm_HE", mode: 1, target: Ground, at: 6.0),
                 wall: (
                     shots: [
@@ -535,7 +583,10 @@ mod tests {
         assert_eq!(frames.at, vec![9.0, 12.0]);
         assert_eq!(frames.size(), UVec2::new(640, 360));
         assert!(!frames.ui && !frames.gizmos && frames.sight);
-        assert_eq!(frames.step_s, Some(0.0078125));
+        assert_eq!(
+            frames.step_s,
+            Some(FrameStep(std::time::Duration::from_secs_f64(0.0078125)))
+        );
         assert_eq!(
             frames.camera,
             Camera::Pose {
@@ -565,7 +616,8 @@ mod tests {
             vec![Impact {
                 x: 1.0,
                 z: -2.0,
-                style: crate::rounds::ImpactStyle::Layered,
+                round: "88mm_HE".into(),
+                surface: StruckSurface::Substance("Wood".into()),
                 at: 5.0,
             }]
         );
@@ -706,6 +758,22 @@ mod tests {
                 "frames.step_s",
             ),
             (
+                r#"(frames: (out: "f.png", step_s: 1e300))"#.to_owned(),
+                "frames.step_s",
+            ),
+            (
+                r#"(frames: (out: "f.png", step_s: 1e-12))"#.to_owned(),
+                "frames.step_s",
+            ),
+            (
+                r#"(frames: (out: "f.png", step_s: -1.0))"#.to_owned(),
+                "frames.step_s",
+            ),
+            (
+                r#"(frames: (out: "f.png", step_s: NaN))"#.to_owned(),
+                "frames.step_s",
+            ),
+            (
                 format!(r#"(frames: (out: "f.png", camera: {pose}))"#),
                 "frames.camera",
             ),
@@ -714,7 +782,8 @@ mod tests {
                 "up",
             ),
             (
-                "(impacts: [(x: inf, z: 0.0, style: Compact, at: 1.0)])".to_owned(),
+                r#"(impacts: [(x: inf, z: 0.0, round: "88mm_AP", surface: Terrain, at: 1.0)])"#
+                    .to_owned(),
                 "impacts",
             ),
             (
@@ -763,5 +832,54 @@ mod tests {
         let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("scripts/capture/example.ron");
         let plan = CapturePlan::load(&path).unwrap_or_else(|error| panic!("{error}"));
         assert!(plan.frames.is_some() && plan.wall.is_some());
+    }
+
+    /// A raised strike reads its style and its surface from the shipped tables, so a capture
+    /// presents what the data states; a key naming neither is refused, never read as a default.
+    /// Mutant: a cue that ignores its round or its substance fails here.
+    #[test]
+    fn a_raised_strike_resolves_its_round_and_surface_from_the_shipped_tables() {
+        let cue = |round: &str, surface| Impact {
+            x: 0.0,
+            z: 0.0,
+            round: round.into(),
+            surface,
+            at: 0.0,
+        };
+        let key = "88mm_AP";
+        let facts = crate::rounds::RoundRegistry::shipped()
+            .get(key)
+            .expect("a shipped round");
+        let substance = "Wood";
+        let feedback = crate::substances::SubstanceRegistry::shipped_static()
+            .get(substance)
+            .expect("a shipped substance")
+            .hard()
+            .expect("a hard substance")
+            .feedback;
+        assert_eq!(
+            cue(key, StruckSurface::Substance(substance.into())).resolved(),
+            Ok((
+                facts.impact_style(),
+                crate::ballistics::ImpactSurface::Material(feedback)
+            ))
+        );
+        assert_eq!(
+            cue(key, StruckSurface::Terrain).resolved(),
+            Ok((
+                facts.impact_style(),
+                crate::ballistics::ImpactSurface::Terrain
+            ))
+        );
+        assert!(
+            cue("no such round", StruckSurface::Terrain)
+                .resolved()
+                .is_err()
+        );
+        assert!(
+            cue(key, StruckSurface::Substance("no such substance".into()))
+                .resolved()
+                .is_err()
+        );
     }
 }

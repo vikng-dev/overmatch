@@ -158,9 +158,7 @@ fn mount(app: &mut App, frames: &plan::Frames) {
     // The effects plugin only `init_resource`s the RNG, so this seed holds in either mount order.
     app.insert_resource(crate::vfx::ViewRng::seeded(VIEW_SEED));
     if let Some(step) = frames.step_s {
-        app.insert_resource(bevy::time::TimeUpdateStrategy::ManualDuration(
-            std::time::Duration::from_secs_f64(step),
-        ));
+        app.insert_resource(bevy::time::TimeUpdateStrategy::ManualDuration(step.0));
     }
     match frames.camera {
         plan::Camera::Player => {}
@@ -376,9 +374,19 @@ fn fell_on_cue(
     );
 }
 
+/// A plan's strike with its round's style and its surface resolved.
+#[derive(Clone, Copy, Debug)]
+struct ImpactCue {
+    x: f32,
+    z: f32,
+    at: f32,
+    style: crate::rounds::ImpactStyle,
+    surface: crate::ballistics::ImpactSurface,
+}
+
 /// The plan's `impacts` ([`plan::Impact`]) not yet raised.
 #[derive(Resource, Debug)]
-struct ImpactCues(Vec<plan::Impact>);
+struct ImpactCues(Vec<ImpactCue>);
 
 /// The capture's terrain-impact cue, mounted by the offline root only, where the impact seam has
 /// no replica reading it. Inert unless the plan lists `impacts`.
@@ -390,6 +398,21 @@ pub(crate) fn offline_impact_plugin(app: &mut App) {
         return;
     };
     info!("capture: impacts {cues:?}");
+    let cues = cues
+        .iter()
+        .map(|cue| {
+            let (style, surface) = cue
+                .resolved()
+                .unwrap_or_else(|why| panic!("{}: {why}", plan::VARIABLE));
+            ImpactCue {
+                x: cue.x,
+                z: cue.z,
+                at: cue.at,
+                style,
+                surface,
+            }
+        })
+        .collect();
     app.insert_resource(ImpactCues(cues))
         .add_systems(Update, raise_impacts);
 }
@@ -416,7 +439,7 @@ fn raise_impacts(
                     position,
                     normal: hit.normal,
                     style: cue.style,
-                    surface: crate::ballistics::ImpactSurface::Terrain,
+                    surface: cue.surface,
                     outcome: crate::ballistics::ImpactOutcome::Struck,
                 });
             }
