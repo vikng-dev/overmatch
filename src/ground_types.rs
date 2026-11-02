@@ -79,14 +79,15 @@ pub(crate) struct PrintResponse {
 }
 
 impl PrintResponse {
-    /// The print depth, m, under a ground pressure of `kpa`: softness × pressure, capped, never
-    /// negative. Zero on a ground with no softness, whatever the pressure.
+    /// The shipping depth law for one ground at full weight, at finite, nonnegative `kpa`.
     #[cfg(any(feature = "dev_ui", test))]
     pub(crate) fn depth_m(&self, kpa: f32) -> f32 {
-        (self.softness_mm_per_kpa * kpa)
-            .min(self.depth_cap_mm)
-            .max(0.0)
-            / 1000.0
+        let params = crate::terrain_blend::TerrainBlendParams {
+            print_softness: Vec4::splat(self.softness_mm_per_kpa / 1000.0),
+            print_cap: Vec4::splat(self.depth_cap_mm / 1000.0),
+            ..Default::default()
+        };
+        crate::terrain_blend::print_depth_m(&params, Vec4::X, kpa)
     }
 
     /// The albedo multiplier where a sole lay: 0..=1, as `darkening` is.
@@ -458,10 +459,22 @@ mod tests {
     /// allows. Two pressures, no tank: the law reads the pressure and nothing else about a vehicle.
     #[test]
     fn higher_ground_pressure_prints_deeper_on_the_same_ground() {
+        // Fixture: keep the cap law exercised even if every shipped ground is tuned to be rigid.
+        let deformable = PrintResponse {
+            softness_mm_per_kpa: 0.5,
+            depth_cap_mm: 50.0,
+            darkening: 0.0,
+            roughness_gain: 1.0,
+        };
         let table = GroundTypes::load(&GroundTypes::shipped_path()).expect("the shipped table");
-        for (name, ground) in &table.types {
-            let print = ground.print;
+        for (name, print) in std::iter::once(("inline fixture", deformable)).chain(
+            table
+                .types
+                .iter()
+                .map(|(name, ground)| (name.as_str(), ground.print)),
+        ) {
             if print.softness_mm_per_kpa <= 0.0 || print.depth_cap_mm <= 0.0 {
+                // Grounds that cannot print have no increasing interval.
                 continue;
             }
             // Both witnesses must be below this ground's cap: a valid live-tuned table may
