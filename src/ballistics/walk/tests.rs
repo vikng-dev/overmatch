@@ -11,6 +11,7 @@
 
 use super::*;
 use crate::ballistics::mechanism::{Limits, SolidShot, SolidShotState};
+use crate::ballistics::spall_cone::{EMITTED_SHARE, field_strength};
 use crate::substances::REFERENCE_FACTOR;
 
 // ---------------------------------------------------------------------------------------------
@@ -1862,15 +1863,13 @@ fn spall_through(volumes: &VolumeTable, slabs: &[Slab]) -> Vec<SpallSource> {
 }
 
 /// THE CONE KEEPS THE EXITED SUBSTANCE'S STRENGTH (the game's damage model): a plate of every
-/// shipped hard substance, perforated head-on by the fixture 88, throws `share × energy` scaled by
-/// its factor over the reference's, capped at 1. Every substance at or above the reference (the
-/// reference armour steel, gun steel) throws exactly the strength it threw before the ratio, to
-/// the bit; wood and brick throw at most 4 % of it. A law that skipped the ratio leaves brick's
-/// spall whole; one that scaled armour too, or rounded the product another way, moves an armour
-/// cone's bits.
+/// shipped hard substance, perforated head-on by the fixture 88, throws a field carrying the energy
+/// lost scaled by its factor over the reference's, capped at 1. Every substance at or above the
+/// reference (the reference armour steel, gun steel) carries exactly the energy lost, to the bit;
+/// wood and brick carry at most 4 % of it. A law that skipped the ratio leaves brick's spall whole;
+/// one that scaled armour too, or rounded the product another way, moves an armour cone's bits.
 #[test]
 fn a_softer_exit_throws_a_weaker_cone_and_armour_throws_what_it_threw() {
-    const SHARE: f32 = 0.6;
     let registry = SubstanceRegistry::shipped_static();
     let (mut armour, mut soft) = (Vec::new(), Vec::new());
     for name in registry.keys() {
@@ -1885,16 +1884,19 @@ fn a_softer_exit_throws_a_weaker_cone_and_armour_throws_what_it_threw() {
         let [cone] = cones.as_slice() else {
             panic!("{name}: one cone, {cones:?}");
         };
-        let unscaled = SHARE * cone.energy;
-        assert!(unscaled > 0.0, "{name}: the round lost energy");
-        let strength = cone.strength_at(SHARE);
+        assert!(cone.energy > 0.0, "{name}: the round lost energy");
+        let strength = cone.strength();
         if factor >= REFERENCE_FACTOR {
-            assert_eq!(strength.to_bits(), unscaled.to_bits(), "{name}: unchanged");
+            assert_eq!(
+                strength.to_bits(),
+                field_strength(cone.energy).to_bits(),
+                "{name}: unchanged"
+            );
             armour.push(name);
         } else {
             assert_eq!(
                 strength.to_bits(),
-                (unscaled * (factor / REFERENCE_FACTOR)).to_bits(),
+                field_strength(cone.energy * (factor / REFERENCE_FACTOR)).to_bits(),
                 "{name}: scaled by its strength ratio"
             );
             soft.push(name);
@@ -1944,16 +1946,16 @@ fn equal_factor_plates_in_contact_throw_one_cone_with_the_summed_spend() {
     }
 }
 
-/// THE CONE'S STRENGTH IS A SHARE OF THE ENERGY LOST. For one plate, every round's cone has the
-/// strength `share × ½ m (v_entry² − v_exit²)`, the kinetic energy the round lost crossing it, and
-/// a round that loses more energy there throws the stronger cone, whatever its mass, calibre or
-/// speed: the strengths order as the energies lost. Fixture bodies and speeds, all perforating one
-/// 50 mm fixture plate of the reference factor head-on (a strength ratio of 1), at a fixture share.
-/// A strength read from the spend, the speed ratio or the hole's calibre fails here; the throw's
-/// pool quantum gate, every cone's potency and the pen cam's bands rest on it.
+/// THE CONE CARRIES THE ENERGY LOST. For one plate, every round's cone emits
+/// `½ m (v_entry² − v_exit²)`, the kinetic energy the round lost crossing it (its strength twice
+/// that, [`EMITTED_SHARE`]), and a round that loses more energy there throws the stronger cone,
+/// whatever its mass, calibre or speed: the strengths order as the energies lost. Fixture bodies
+/// and speeds, all perforating one 50 mm fixture plate of the reference factor head-on (a strength
+/// ratio of 1). A strength read from the spend, the speed ratio, the hole's calibre or an HP unit
+/// fails here; the throw's pool quantum gate, every cone's potency, the pen cam's bands and the
+/// energy a building crushes with rest on it.
 #[test]
 fn a_round_that_loses_more_energy_at_a_plate_throws_a_stronger_cone() {
-    const SHARE: f32 = 0.6;
     let laws = WalkLaws::default();
     let table = substance_table(&[(1, SubstanceId::fixture(REFERENCE_FACTOR), REFERENCE_FACTOR)]);
     let slabs = [Slab::at(1, 0, 0.5, -AXIS, 0.05)];
@@ -1995,9 +1997,9 @@ fn a_round_that_loses_more_energy_at_a_plate_throws_a_stronger_cone() {
             };
             let (v_in, v_out) = (speed as f64, cone.exit_speed as f64);
             let lost = 0.5 * mass as f64 * (v_in * v_in - v_out * v_out);
-            let strength = cone.strength_at(SHARE);
+            let strength = cone.strength();
             assert!(
-                (strength as f64 / (SHARE as f64 * lost) - 1.0).abs() < 1.0e-5,
+                (strength as f64 * EMITTED_SHARE as f64 / lost - 1.0).abs() < 1.0e-5,
                 "{mass} kg at {speed} m/s: S = {strength} J against {lost} J lost"
             );
             (lost, strength)

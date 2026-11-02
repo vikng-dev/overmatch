@@ -365,8 +365,8 @@ pub struct FragmentHit {
 
 /// One box's dose from the shot, in HP points before the box's one conversion: the line's (a hard
 /// box's energy and a bounce's shock at the energy rate, a crew station's chord at the round's
-/// crew line rate) and the fields' (the spall cones' and a burst's energy at the energy rate,
-/// [`crate::ballistics::energy_units`]); and the pool units it lost, the sum of the two converted
+/// crew line rate) and the fields' (the spall cones' and a burst's energy, each at its mechanism's
+/// unit, [`crate::ballistics::field_units`]); and the pool units it lost, the sum of the two converted
 /// once to pool units and capped at what its pool held.
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 pub struct BoxDose {

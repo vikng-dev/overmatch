@@ -5,8 +5,8 @@
 // shared among the volumes present at each depth by their cost (chord × factor); a round
 // that comes to rest inside it deals all it had left. A bounce's shock is the energy the round lost
 // at the face it struck. This rate covers those line and shock doses, a tank's modules and a
-// tree's trunk alike. Fields have their own emitted-HP-per-joule units in `spall_cone.ron`; their
-// transport deposits divide by this rate only to cancel the encoding into transport joules.
+// tree's trunk alike. Fields have their own HP-per-joule units in `spall_cone.ron`; this rate never
+// touches a field's energy or its deposits.
 // A crew station's line dose keeps its own law (the round's crew line rate, `wound` in
 // `assets/rounds/`). The law is design doc §§5–6,
 // `.agents/docs/design/armor-penetration-and-damage.md`.

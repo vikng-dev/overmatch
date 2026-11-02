@@ -3,9 +3,10 @@
 // reaches —, and a burst's field. Read by `src/ballistics/spall_cone.rs`, embedded and parsed once,
 // validated at parse.
 // The law (emitted HP, the ball law's centre-weighted profile, shadowing, dose) is design doc
-// §§5–6, `.agents/docs/design/armor-penetration-and-damage.md`. Each mechanism declares its own
-// emitted HP per source joule. Field strengths and deposits use transport joules internally;
-// their conversion through `energy_dose.ron` cancels, rather than setting field potency.
+// §§5–6, `.agents/docs/design/armor-penetration-and-damage.md`. A field carries the energy its
+// source put into it (a cone the energy its round lost at the plate times the exit's strength
+// ratio, a burst its wall's driven energy), which a building crushes with; each mechanism declares
+// its own HP per joule of that energy, which only a box's pool reads.
 // A cone's half-angle and profile follow from its exit layer's debris ratio in
 // `assets/materials/materials.ron`.
 //
@@ -38,8 +39,9 @@
         H_C·f_k / (q·N), q = 1/2, the field weights' exact normalization).
         The count changes how finely a box's dose is resolved, never the emitted total")),
 
-    // Total HP emitted per joule lost across the exited body, before its material strength ratio.
-    // DERIVED: 0.88 × 1/2 / 3000; the field weights' half-strength normalization is included.
+    // HP per joule of the energy a cone carries, the energy lost across the exited body times its
+    // material strength ratio: a box's field dose is the joules a direction left there times it.
+    // DERIVED: 0.88 × 1/2 / 3000, a fixed number of its own that no line unit moves.
     cone_emitted_hp_per_joule: (0.00014666666666666666, Unit("provisional emitted HP per joule lost
         at the plate; balance lives here. Set against the retired reference cone's 395.0 HP target,
         rounded to the scale emitting 396.5 HP (DERIVED). Replaced by the missing fragment-hit law:
@@ -52,8 +54,8 @@
     // is a ring: the wall around the burst core is driven as a band about the flight axis, and the
     // nose piece flies on.
     burst: (
-        // Total HP emitted per joule driven into the wall, independent of the line and cone units.
-        // DERIVED: 210 × 1/2 / 3000, including the field weights' normalization.
+        // HP per joule of the energy a burst field carries, its wall's driven energy, independent
+        // of the line and cone units. DERIVED: 210 × 1/2 / 3000, a fixed number of its own.
         emitted_hp_per_joule: (0.035, Unit("provisional emitted HP per joule driven into the wall;
             balance lives here. Set against the retired even-sphere target: a 0.2 m² face at 2.0 m
             has its 30 HP pool emptied. That target set the retired ball's scale (214.8 kJ driven,
@@ -71,8 +73,8 @@
         // N sets how finely a box's dose is resolved, never how much the burst carries. One
         // throw's cost MEASURED 2026-10-24 by ballistics::pen_cam::burst_law_cost (release, macOS
         // arm64, best of 9, s1's line fired with the burst round). At rest each direction carries
-        // H_B / N emitted HP (DERIVED, the field uniform over its support). S is a transport
-        // encoding; it is not the physical energy delivered to environment construction.
+        // H_B / N emitted HP (DERIVED, the field uniform over its support). S/2 is the wall's
+        // driven energy, the joules environment construction is struck with.
         ring_directions: (256, Resolution("provisional, flagged for the owner: the cost against the
             resolution. The ring's throw: 0.50 ms at N = 64, 1.47 at 256, 4.01 at 684; at rest 218,
             54 and 20 HP points per direction (DERIVED: H_B = 0.035 HP/J × 397.7 kJ, then

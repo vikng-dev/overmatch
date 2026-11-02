@@ -1701,9 +1701,9 @@ fn an_unshadowed_dose_falls_as_the_inverse_square() {
     assert!((ratio - 0.25).abs() < 0.01, "D(2r)/D(r) = {ratio}");
 }
 
-/// The pen cam's potency colour reads this resolver's dose, on every support: the intensity its law draws at distance `r` along a direction (`ρ s / (Ω r²)`,
+/// The pen cam's potency colour reads this resolver's dose, on every support: the intensity its law draws at distance `r` along a direction (`s / (Ω r²)`,
 /// `pen_cam::potency`, `Ω` the support's solid angle) times a thin unresisting face's area there
-/// is `ρ` times the dose the face takes. The colour's promise — a box's face wholly at or above a
+/// is the dose the face takes, in the strength's units. The colour's promise — a box's face wholly at or above a
 /// threshold takes at least that threshold's pool — relies on it; a pen cam law that drifts from
 /// the dose law (a lost `Ω`, a ring's band taken as the cap it lies in, a square dropped, the
 /// profile ignored) fails here.
@@ -1723,7 +1723,7 @@ fn the_pen_cam_intensity_times_a_face_is_its_dose() {
         (ring, Vec3::new(middle.sin(), -middle.cos(), 0.0), 0.2),
     ];
     for (field, face, side) in fields {
-        // The shipped rate; the fixture square's face sets only the thresholds, unread here.
+        // The fixture square's face sets only the thresholds, unread here.
         let potency = Potency::of_crew_face(side * side);
         let spread = ConeShape::new(AxisRule::ExitDirection, 16384)
             .unwrap()
@@ -1748,10 +1748,10 @@ fn the_pen_cam_intensity_times_a_face_is_its_dose() {
             let dose = field_doses_of(&mut app, &boxes, field, 10.0, 16384)[0];
             let e = potency.emission(10.0 * weight, field.inner_angle(), field.half_angle());
             let drawn = intensity(e, depth - 0.001) as f64 * (side * side) as f64;
-            let ratio = drawn / (potency.rate as f64 * dose);
+            let ratio = drawn / dose;
             assert!(
                 (ratio - 1.0).abs() < 0.025,
-                "{field:?}, r = {depth}: I·A / ρD = {ratio}"
+                "{field:?}, r = {depth}: I·A / D = {ratio}"
             );
         }
     }
@@ -1891,19 +1891,18 @@ fn a_cone_reaches_matter_independently_of_tank_ownership() {
 }
 
 /// THE POOL QUANTUM GATE: a body exit whose cone's whole emission `S/2` converts to no pool unit
-/// (`ballistics::pool_units_of`, the quantum a pool keeps) at the energy rate is not thrown — no
+/// (`ballistics::pool_units_of`, the quantum a pool keeps) at the cone's unit is not thrown — no
 /// direction walked, no cone recorded, the crossing counting none — and one above it is, however
 /// far below a whole point: a pool keeps every pool unit, so a gate at a point would drop a dose
 /// the pool accumulates. Fixture: an 88 at 800 m/s through a factor-10 slab as thick as the
-/// readout drop at which it loses `0.3 / share` HP points' worth of energy, so `S/2` is about 0.15
-/// of a point, below the display's whole point (DERIVED from the force law, the slab about 3 mm at
-/// the shipped share); through the same slab at a thousandth of the factor, so it spends and loses
-/// a thousandth as much (the energy drop is linear in so small a readout drop) and `S/2` is about
-/// 0.15 of a pool unit (DERIVED); and through 20 mm of steel.
+/// readout drop at which it loses 0.15 HP points' worth of energy at the cone's unit, below the
+/// display's whole point before the exit's strength ratio (DERIVED from the force law, the slab
+/// about 3 mm at the shipped unit); through the same slab at a thousandth of the factor, so it
+/// spends and loses a thousandth as much (the energy drop is linear in so small a readout drop)
+/// (DERIVED); and through 20 mm of steel.
 #[test]
 fn a_cone_below_the_pool_quantum_is_not_thrown() {
-    let lost = 0.3 * crate::ballistics::energy_dose::joules_per_hp()
-        / crate::ballistics::spall_cone::energy_share() as f64;
+    let lost = 0.15 / crate::ballistics::spall_cone::cone_unit().hp_per_joule();
     let v_in = 800.0f32;
     let v_out = ((v_in as f64).powi(2) - 2.0 * lost / FIXTURE_88.mass as f64).sqrt() as f32;
     // Reference-mm over the factor's reference-mm per metre.

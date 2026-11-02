@@ -151,10 +151,10 @@ impl TryFrom<VolumeEntry> for VolumeSpec {
 /// model" survives — a plate's resistance is now a property of what it is made of, stated once.
 #[derive(Clone)]
 pub struct ComponentSpec {
-    /// HP pool, in whole HP points. Every dose of energy (a hard box's line dose, a bounce's shock,
-    /// a field's deposit) converts at the one energy-to-HP rate,
-    /// `ballistics::energy_dose::joules_per_hp`; a crew station's chord dose (chord × the round's
-    /// crew line rate) converts at `ballistics::HP_PER_REFERENCE_MM`, 0.1 reference-mm a point. A
+    /// HP pool, in whole HP points. A hard box's line dose and a bounce's shock convert at the one
+    /// energy-to-HP rate, `ballistics::energy_dose::joules_per_hp`; a field's deposit at its
+    /// mechanism's unit, `ballistics::spall_cone::FieldUnit`; a crew station's chord dose (chord ×
+    /// the round's crew line rate) at `ballistics::HP_PER_REFERENCE_MM`, 0.1 reference-mm a point. A
     /// crew station's pool is the shared crew pool (`ballistics::box_classes::BoxClasses::crew_hp`),
     /// never authored in a tank file; every other component's is authored. The consequences of the
     /// pool emptying come from the facets below.

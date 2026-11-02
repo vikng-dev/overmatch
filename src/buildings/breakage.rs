@@ -618,8 +618,9 @@ struct RawDeposit {
 }
 
 /// The game's environment destruction model: a field ray's payload at its stop. A spall ray
-/// carries the existing energy reading and no sourced fragment mass; a casing ray carries its
-/// physical energy and ejection momentum, independent of the HP field's potency multiplier.
+/// carries its share of the energy its cone carries, `strength / N` joules (no HP unit enters a
+/// field's energy), and no sourced fragment mass; a casing ray carries its share of the wall's
+/// driven energy and its ejection momentum.
 #[derive(Debug)]
 struct RayDeposit {
     end: Vec3,

@@ -2062,7 +2062,7 @@ fn a_burst_throws_its_field_from_where_it_bursts() {
         "about the flight direction, {:?}",
         thrown.axis
     );
-    assert_eq!(thrown.strength, fields.strength(burst.energy));
+    assert_eq!(thrown.strength, spall_cone::field_strength(burst.energy));
     let (field, law) = fields.field(speed / burst.sideways_speed);
     assert!(matches!(field.law, spall_cone::FieldLaw::Ring { .. }));
     assert_eq!(thrown.field, field);
@@ -2167,12 +2167,29 @@ fn the_record_carries_the_burst() {
         .iter()
         .find(|dose| dose.volume == "lit")
         .expect("the burst doses the lit box");
-    let hits = report
-        .fields()
-        .flat_map(|cone| &cone.fragments)
-        .flat_map(|fragment| &fragment.hits)
-        .filter(|hit| hit.volume == "lit")
-        .map(|hit| energy_units(hit.damage))
+    // Each field's hits convert at its own mechanism's unit: the plate's cone at the cone's, the
+    // burst's field at the burst's.
+    let units = |field: &crate::damage_cam::SpallCone, unit| -> u64 {
+        field
+            .fragments
+            .iter()
+            .flat_map(|fragment| &fragment.hits)
+            .filter(|hit| hit.volume == "lit")
+            .map(|hit| field_units(hit.damage, unit))
+            .sum()
+    };
+    let burst_unit = spall_cone::BurstFields::shipped().unit();
+    let hits: u64 = report
+        .spall
+        .iter()
+        .map(|cone| units(cone, spall_cone::cone_unit()))
+        .chain(
+            report
+                .burst
+                .iter()
+                .filter_map(|burst| burst.field.as_ref())
+                .map(|field| units(field, burst_unit)),
+        )
         .sum();
     assert_eq!(lit.field, hp_before_rounding(hits));
     let emptied = report

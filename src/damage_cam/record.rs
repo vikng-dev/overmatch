@@ -41,11 +41,11 @@ use super::{
     RoundEnd, Shooter, ShotVerdict, SpallCone,
 };
 use crate::ballistics::SpallCone as ThrownCone;
-use crate::ballistics::spall_cone::FieldDescriptor;
+use crate::ballistics::spall_cone::{self, FieldDescriptor, FieldUnit};
 use crate::ballistics::{
     ArmourMark, BallisticVolume, BurstField, ComponentHealth, CrossingEnd, ExternalArmour,
     PenetrationMarks, ShellPath, ShotDose, SpallMarks, SpallRay, VolumeCrossing, dose_units,
-    energy_units, hp_before_rounding, pool_units_of,
+    energy_units, field_units, hp_before_rounding, pool_units_of,
 };
 use crate::damage::{Ammo, CrewStation, FunctionRole, TankKnockedOut, VolumeOf};
 #[cfg(test)]
@@ -1050,7 +1050,7 @@ impl<'a> Ledger<'a> {
         for cone in cones {
             let t = on.time_at(index, cone.origin);
             let thrown = (cone.origin, cone.axis, cone.field, cone.strength);
-            let cone = self.field(index, t, thrown, &cone.rays);
+            let cone = self.field(index, t, thrown, spall_cone::cone_unit(), &cone.rays);
             self.spall.push(cone);
         }
     }
@@ -1071,7 +1071,8 @@ impl<'a> Ledger<'a> {
         let t = on.time_at(index, at) + after;
         let field = thrown.map(|burst| {
             let throw = (burst.origin, burst.axis, burst.field, burst.strength);
-            self.field(index, t, throw, &burst.rays)
+            let unit = spall_cone::BurstFields::shipped().unit();
+            self.field(index, t, throw, unit, &burst.rays)
         });
         let point = on.struck.point(index, at);
         self.burst = Some(Burst {
@@ -1086,12 +1087,13 @@ impl<'a> Ledger<'a> {
 
     /// The field of mark `index` thrown at `t` from `origin` about `axis` (WORLD) by `field` at
     /// strength `S`, marched by `rays`: its fragments, its deposits on the struck tank's components
-    /// added to the ledger's.
+    /// added to the ledger's at its mechanism's unit `unit`, the one its throw converted at.
     fn field(
         &mut self,
         index: usize,
         t: f32,
         (origin, axis, field, strength): (Vec3, Dir3, FieldDescriptor, f32),
+        unit: FieldUnit,
         rays: &[SpallRay],
     ) -> SpallCone {
         let on = self.on;
@@ -1100,7 +1102,7 @@ impl<'a> Ledger<'a> {
             .map(|ray| {
                 let doses = ray.doses.iter().filter(|(volume, _)| on.owned(*volume));
                 for &(volume, dose) in doses.clone() {
-                    self.field.push((volume, energy_units(dose), t, index));
+                    self.field.push((volume, field_units(dose, unit), t, index));
                 }
                 Fragment {
                     end: on.struck.point(index, ray.end),

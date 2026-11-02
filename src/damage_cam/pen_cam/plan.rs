@@ -21,7 +21,7 @@ use std::sync::Arc;
 use super::picture::{Lay, PICTURE_FIELDS, PictureJobs, Pictures, RecordAtlas, ViewPictures};
 use super::potency::Potency;
 use super::timeline::CornerKind;
-use crate::ballistics::spall_cone::FieldDescriptor;
+use crate::ballistics::spall_cone::{self, FieldDescriptor};
 use crate::damage_cam::shapes::{HardBodies, TankShapes};
 use crate::damage_cam::{
     ConsequenceState, PenetrationReport, PlateClass, Role, RoundEnd, SpallCone,
@@ -305,7 +305,9 @@ pub struct Cone {
     /// `N`, the strata the record threw it in: one direction each, those that never left its
     /// origin included.
     pub strata: usize,
-    /// The strength `S` (J): direction `k` was thrown with `S f_k`; zero on a hand-authored clip.
+    /// The strength `S` in HP points: the record's strength (J) times its mechanism's unit
+    /// (`spall_cone::FieldUnit`), converted once here as the sim converts each of its doses, so
+    /// direction `k` is worth `S f_k` HP points; zero on a hand-authored clip.
     pub strength: f32,
     /// Where the line throws it, arc length.
     pub arc: f32,
@@ -533,12 +535,14 @@ impl Plan {
         let spall = report.spall.iter().map(|c| {
             let node = line.nearest_node_at(c.t);
             let exit = line.leg_speed(node + 1).unwrap_or(0.0);
-            cone(c, &line, exit)
+            cone(c, &line, exit, spall_cone::cone_unit())
         });
-        let burst_field = report
-            .burst
-            .iter()
-            .filter_map(|b| b.field.as_ref().map(|c| cone(c, &line, b.sideways_mps)));
+        let burst_unit = spall_cone::BurstFields::shipped().unit();
+        let burst_field = report.burst.iter().filter_map(|b| {
+            b.field
+                .as_ref()
+                .map(|c| cone(c, &line, b.sideways_mps, burst_unit))
+        });
         let cones: Vec<Cone> = spall.chain(burst_field).collect();
         let mass = report.projectile.mass_kg;
         // A nose piece flies on only from a burst in flight: one at rest has no flight to fly on.
@@ -826,8 +830,9 @@ fn dosing_reach(field: &SpallCone, name: &str) -> Option<f32> {
         .reduce(f32::min)
 }
 
-/// The plan's field of `cone`, thrown on `line`, its front running at `speed` (m/s of record).
-fn cone(cone: &SpallCone, line: &Polyline, speed: f32) -> Cone {
+/// The plan's field of `cone`, thrown on `line`, its front running at `speed` (m/s of record), its
+/// joules worth `unit` HP points each.
+fn cone(cone: &SpallCone, line: &Polyline, speed: f32, unit: spall_cone::FieldUnit) -> Cone {
     let origin = Vec3::from(cone.origin);
     let axis = Vec3::from(cone.axis).normalize_or(Vec3::NEG_Z);
     let rays = cone
@@ -846,7 +851,7 @@ fn cone(cone: &SpallCone, line: &Polyline, speed: f32) -> Cone {
         axis,
         cone.field,
         cone.fragments.len(),
-        cone.strength,
+        (f64::from(cone.strength) * unit.hp_per_joule()) as f32,
         Thrown {
             arc: line.arc_of(origin),
             t: cone.t,

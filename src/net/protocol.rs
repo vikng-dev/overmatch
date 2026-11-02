@@ -241,7 +241,12 @@ use crate::{CombatantId, CombatantLife, ShotId};
 /// REV 64 (#228): the game's damage model carries a positive load rate in the weapon gate.
 /// REV 65 (#228): bounded load-work shares replace peer-authored rescalable spans; only load
 /// phases carry a rate, and zero-work/cyclic intervals carry none.
-pub const PROTOCOL_REV: u32 = 65;
+/// REV 66 (#258, the game's damage model): `WireCone::strength` and every hit dose of a field's
+/// palette carry the energy the field carries (a cone's the energy its round lost times the exit's
+/// strength ratio, a burst's its wall's driven energy) instead of HP encoded as joules at the line
+/// rate. The scalar types stay unchanged, but a REV 65 client would part its potency bands at the
+/// wrong rate, so the protocol fingerprint must differ.
+pub const PROTOCOL_REV: u32 = 66;
 
 /// Compatibility tag derived from the complete pinned wire manifest plus the crate version. This
 /// is the runtime handshake value: version-exact, so a version bump intentionally changes it.
@@ -2432,9 +2437,10 @@ mod tests {
     }
 
     /// The game's damage model sends box doses in HP points before conversion, field strengths and
-    /// hit doses in joules, and every pool figure (a crew snapshot's, a record's) in pool units.
-    /// Reference-mm record doses used the same scalar types through REV 35, and whole-point pools
-    /// and reference-mm field strengths through REV 36, so the protocol revision must separate each
+    /// hit doses in the joules the field carries, and every pool figure (a crew snapshot's, a
+    /// record's) in pool units. Reference-mm record doses used the same scalar types through REV
+    /// 35, whole-point pools and reference-mm field strengths through REV 36, and field strengths
+    /// as HP encoded at the line rate through REV 65, so the protocol revision must separate each
     /// meaning even when the wire bytes are laid out the same; the pen cam's bands, the damage panel
     /// and the HUD's cues rely on it. A unit change that forgets the bump fails here.
     #[test]
@@ -2442,6 +2448,7 @@ mod tests {
         for (rev, what) in [
             (35, "reference-mm record doses"),
             (36, "whole-point pools and reference-mm field strengths"),
+            (65, "field strengths encoded at the line rate"),
         ] {
             let older = protocol_fingerprint_for(
                 WIRE_SURFACE_HASH,

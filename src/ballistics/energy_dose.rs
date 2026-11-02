@@ -1,8 +1,9 @@
 //! The energy-to-HP rate of the game's damage model, read from `assets/ballistics/energy_dose.ron`:
 //! the joules a line or bounce shock loses per HP point its pool loses ([`joules_per_hp`]).
-//! [`super::energy_units`] converts with it. Fields declare their own emitted HP per source joule
-//! in [`super::spall_cone`]; this rate cancels their encoding into transport joules. A crew station's
-//! line dose uses its chord at the round's crew line rate. Design doc §§5–6.
+//! [`super::energy_units`] converts with it. Fields declare their own HP per joule of the energy
+//! they carry in [`super::spall_cone`] ([`super::spall_cone::FieldUnit`]); this rate never touches
+//! a field. A crew station's line dose uses its chord at the round's crew line rate. Design doc
+//! §§5–6.
 
 use serde::Deserialize;
 

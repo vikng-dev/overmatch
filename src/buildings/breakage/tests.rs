@@ -3545,3 +3545,76 @@ fn a_seeded_blast_deposit_priced_by_loaded_chunks() {
         );
     }
 }
+
+/// A WALL CRUSHES WITH THE ENERGY A CONE CARRIES (the game's environment destruction model, game
+/// state only). The production shell reader queues each of a cone's directions at `S / N` joules,
+/// so a chunk every direction stops on crushes the energy the cone carries, its round's lost
+/// energy times the exit's strength ratio ([`crate::ballistics::spall_cone::field_strength`]),
+/// over the chunk's crushing energy density: no HP unit, the cone's or the line's, enters it. A
+/// reader that converts a ray's joules through a unit, or drops the `1 / N` share, fails here.
+/// Who relies on it: every building a spall cone meets. Fixture data: 2.7 MJ carried at a ratio
+/// of 1, `λ` 2, 64 directions, all stopping on one law chunk of the shipped house.
+#[test]
+fn a_wall_crushes_with_the_energy_a_cone_carries() {
+    use crate::ballistics::spall_cone::{AxisRule, ConeShape, FieldDescriptor, field_strength};
+    use crate::ballistics::{SpallCone, SpallRay};
+    let kind = shipped_house();
+    let structure = kind.layout.structure(&kind.asset, 1.0);
+    let (_, [c, ..]) = fixture_chunks(&kind);
+    let crush = structure.chunks[c].material.crush;
+    let carried = 2_700_000.0_f32; // Fixture data: J.
+    let strength = field_strength(carried);
+    let spread = ConeShape::new(AxisRule::ExitDirection, 64)
+        .unwrap()
+        .spread(FieldDescriptor::ball(2.0))
+        .unwrap();
+    let rays = spread
+        .directions(Dir3::NEG_Z)
+        .map(|(direction, f)| SpallRay {
+            direction,
+            end: Vec3::ZERO,
+            strength: strength * f,
+            doses: Vec::new(),
+        })
+        .collect();
+    let cone = SpallCone {
+        origin: Vec3::ZERO,
+        axis: Dir3::NEG_Z,
+        field: spread.field(),
+        strength,
+        rays,
+    };
+    let (mut app, _) = composed(false);
+    let shell = app
+        .world_mut()
+        .spawn((
+            PenetrationMarks::default(),
+            SpallMarks {
+                cones: vec![cone],
+                ..default()
+            },
+        ))
+        .id();
+    app.world_mut().trigger(ShellMarched {
+        shell,
+        marks_from: 0,
+        cones_from: 0,
+        lines: Vec::new(),
+        burst: None,
+    });
+    let queue = app.world().resource::<WallQueue>();
+    let hits: Vec<_> = queue.0[0]
+        .rays
+        .iter()
+        .map(|ray| (c, ray.end, ray.energy, ray.blow))
+        .collect();
+    let crushed: f64 = fracture::Load::field(&hits, |_| crush)
+        .iter()
+        .map(|load| f64::from(load.crushed))
+        .sum();
+    let want = f64::from(carried) / f64::from(crush);
+    assert!(
+        (crushed - want).abs() <= 1e-6 * want,
+        "crushed {crushed} m³ against {want} m³ for {carried} J at {crush} J/m³"
+    );
+}

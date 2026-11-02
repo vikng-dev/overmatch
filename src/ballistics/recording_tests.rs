@@ -1301,9 +1301,12 @@ fn an_emptying_is_timed_at_the_deposit_that_emptied_the_pool() {
     let plate = world.spawn((Name::new("plate"), VolumeOf(tank))).id();
     let shell = world.spawn(ShotDose::default()).id();
     // The line's energy (J) for 40 points at mark 0; the cone's energy for 20 points and the line's
-    // for 30 at mark 1, each taken into the tally at the one energy rate.
+    // for 30 at mark 1, each taken into the tally at its own rate: the line's the one energy rate,
+    // the cone's its unit.
     let joules = |points: f32| points * super::energy_dose::joules_per_hp() as f32;
-    let (line_0, cone, line_1) = (joules(40.0), joules(20.0), joules(30.0));
+    let cone_unit = super::spall_cone::cone_unit();
+    let (line_0, line_1) = (joules(40.0), joules(30.0));
+    let cone = (20.0 / cone_unit.hp_per_joule()) as f32;
     let dose = |world: &mut World, units: Vec<u64>, mark: usize| {
         world
             .run_system_once(
@@ -1329,7 +1332,7 @@ fn an_emptying_is_timed_at_the_deposit_that_emptied_the_pool() {
         .set_held(10 * POOL_UNITS_PER_HP);
     dose(
         &mut world,
-        vec![energy_units(cone), energy_units(line_1)],
+        vec![field_units(cone, cone_unit), energy_units(line_1)],
         1,
     );
     assert!(world.get::<ComponentHealth>(ammo).unwrap().is_empty());

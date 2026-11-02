@@ -738,7 +738,7 @@ pub fn follow_pose(
 /// support's half-angle and inner edge (rad), its picture's pitch (rad a texel) and its faces'
 /// lanes ([`super::picture::Picture::lanes`]), how far its front has run (m, negative before it
 /// is thrown), the world's metres per record metre, its longest reach (record m), its strength
-/// `S` (J) and its law ([`law_lane`]).
+/// `S` (HP points, `plan::Cone::strength`) and its law ([`law_lane`]).
 #[derive(Clone, Copy, Debug)]
 pub struct FieldPrint {
     pub origin: Vec3,
@@ -758,7 +758,7 @@ pub struct FieldPrint {
 
 /// The first [`FIELDS`] of `prints` in the fields' lanes, [`PRINT_LANES`] a field, and how many:
 /// the origin (world) and half-angle; the unit axis (world) and the front (m); `u` and the inner
-/// edge; `v` and the picture's pitch; the emission its strength `S` gives, `ρ S / Ω`
+/// edge; `v` and the picture's pitch; the emission its strength `S` gives, `S / Ω`
 /// ([`Potency::emission`], `Ω` its support's solid angle) in world units (squared metres, whose
 /// intensity falls as the square of a world distance), the world's metres per record metre (the
 /// picture holds record metres) and the longest reach (world m); its law ([`law_lane`]), whose
@@ -919,7 +919,7 @@ pub fn paint_fields(
 
 /// The fields' summed intensity (HP points per m²) at world point `p`, as the volume samples it
 /// (`pen_cam_look.wgsl`, `intensity` and `field_at`): each of `prints`, seen as `seen` alike,
-/// adds `ρ S w / (Ω r²)` where `p` lies on its support and within its front, `S w` the strength
+/// adds `S w / (Ω r²)` where `p` lies on its support and within its front, `S w` the strength
 /// its law gives `p`'s direction ([`law`]), lit as its picture lights `p`
 /// ([`super::picture::Picture::lit`]: each texel about `p`'s direction tested against its own
 /// reach), nothing past its longest reach; at its origin, once thrown, it is unbounded (`1e30`),
@@ -961,7 +961,7 @@ pub fn intensity(prints: &[FieldPrint], seen: &[Seen], potency: &Potency, p: Vec
 /// The fields' summed intensity (HP points per m²) a component's surface is painted by at world
 /// point `p`, its unit normal `n` (world), under `rule`, as `pen_cam_look.wgsl`'s `footprint`
 /// sums it with every edge sharp: each of `prints` (seen as `seen`, as [`intensity`] reads them)
-/// that covers `p` adds `ρ S w / (Ω r²)`, `S w` the strength its law gives `p`'s direction
+/// that covers `p` adds `S w / (Ω r²)`, `S w` the strength its law gives `p`'s direction
 /// ([`law`]), lit as its picture lights `p` within the rule's slack past each texel's reach
 /// ([`super::picture::Picture::lit`]). A field covers `p` where `p` lies on its support, within
 /// its front and within its longest reach and the rule's slack past it (a picture can reach past
@@ -1595,7 +1595,7 @@ mod tests {
     }
 
     /// The colour reads no gain: the lanes the volume colours from carry the field's frame, the
-    /// emission `ρ S / Ω` its strength gives in world units (squared metres, whose intensity falls
+    /// emission `S / Ω` its strength gives in world units (squared metres, whose intensity falls
     /// as the square of a world distance), its scale and longest reach, its law, the tank's
     /// thresholds and each band's colour from the band law, and fading the volume, a base surface
     /// or a painted component moves its fade lane alone; each band's opacity and the edges' window
@@ -1625,7 +1625,7 @@ mod tests {
         );
         assert_eq!(
             lane[4].x,
-            4.0 * (potency.rate * print.strength / solid_angle(print.half_angle))
+            4.0 * (print.strength / solid_angle(print.half_angle))
         );
         assert_eq!(lane[4].y, print.scale);
         assert_eq!(lane[4].z, print.longest * print.scale);
@@ -1779,7 +1779,6 @@ mod tests {
         assert!((strength - 5.0).abs() < 1e-4 && (picture.longest - 2.0).abs() < 1e-4);
         let k = strength / solid_angle(picture.half_angle);
         let potency = Potency {
-            rate: 1.0,
             floor: k / (1.6 * 1.6),
             mid: k,
         };
@@ -1960,7 +1959,6 @@ mod tests {
         let seen = [one, one];
         let k = cone.strength * law(law_lane(cone.field, cone.strata), 1.0) / solid_angle(PI);
         let potency = Potency {
-            rate: 1.0,
             floor: k / (1.2 * 1.2),
             mid: k / (0.35 * 0.35),
         };
@@ -2045,7 +2043,6 @@ mod tests {
         let strength = wide_cone.strength * law(law_lane(wide_cone.field, wide_cone.strata), 1.0);
         let k = strength / solid_angle(std::f32::consts::PI);
         let potency = Potency {
-            rate: 1.0,
             floor: k,
             mid: k / (0.1 * 0.1),
         };
@@ -2117,7 +2114,6 @@ mod tests {
         let picture = Picture::of(&cone, PITCH);
         let k = cone.strength * law(law_lane(cone.field, cone.strata), 1.0) / solid_angle(PI);
         let potency = Potency {
-            rate: 1.0,
             floor: k / (1.5 * 1.5),
             mid: k / (0.1 * 0.1),
         };
@@ -2176,7 +2172,6 @@ mod tests {
             print_of(&cone, &picture, -picture.u * 0.1, 5.0, 1.0),
         ];
         let mut potency = Potency {
-            rate: 1.0,
             floor: 0.0,
             mid: 0.0,
         };
@@ -2906,7 +2901,6 @@ mod tests {
             let potency = Potency {
                 floor: at(0.08),
                 mid: at(0.02),
-                ..potency
             };
             let seen = [Seen {
                 picture: &picture,

@@ -1972,7 +1972,7 @@ pub struct SpallSource {
     /// The volumes the reached members' exits leave ([`ExitMember::exited`]), in entity order: the
     /// body that throws the cone. The surface the cone is thrown from is theirs, so a direction
     /// that starts inside one of them has not entered it there, and the cone never doses one of
-    /// them anywhere, since the line has dosed them the energy its strength is a share of. A volume
+    /// them anywhere, since the line has dosed them the energy its field carries. A volume
     /// only an unreached member leaves is not among them: the round never left it, and a direction
     /// starting inside it enters it there.
     pub exited: Vec<Entity>,
@@ -2001,21 +2001,17 @@ pub struct SpallSource {
 }
 
 impl SpallSource {
-    /// The cone's strength at the shipped energy share ([`super::spall_cone::energy_share`]);
-    /// [`Self::strength_at`] states the law.
+    /// The cone's strength `S` (J), the strength of a field carrying `energy × ratio` joules
+    /// ([`super::spall_cone::field_strength`]): the kinetic energy the round lost across the body
+    /// ([`Self::energy`]) times the exited substance's strength ratio ([`Self::strength_ratio`]),
+    /// one IEEE f32 product, which the cone emits whole. No HP unit enters it: a box's pool reads
+    /// it through the cone's unit at its dose edge, a building as the energy it crushes with.
+    /// Whatever the round or the plate, a round that loses more energy across a body of one
+    /// substance throws a stronger cone, and one that loses none throws none. A ratio of exactly 1
+    /// leaves the energy itself, so every exit at or above the reference steel carries all the
+    /// energy lost; a softer exit (brick, wood) carries only its share.
     pub fn strength(&self) -> f32 {
-        self.strength_at(super::spall_cone::energy_share())
-    }
-
-    /// The cone's strength `S = share × energy × ratio` (J): `share` of the kinetic energy the
-    /// round lost across the body ([`Self::energy`]), times the exited substance's strength ratio
-    /// ([`Self::strength_ratio`]), as IEEE f32 products in that order. Whatever the round or the
-    /// plate, a round that loses more energy across a body of one substance throws a stronger
-    /// cone, and one that loses none throws none. A ratio of exactly 1 leaves `share × energy`
-    /// to the bit, so every exit at or above the reference steel throws what it threw before the
-    /// ratio existed; a softer exit (brick, wood) keeps only its share.
-    pub(crate) fn strength_at(&self, share: f32) -> f32 {
-        share * self.energy * self.strength_ratio
+        super::spall_cone::field_strength(self.energy * self.strength_ratio)
     }
 }
 

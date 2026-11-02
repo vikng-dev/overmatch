@@ -110,9 +110,9 @@ pub(crate) enum Effect {
 pub(crate) struct Dose {
     pub address: Entity,
     /// Joules, for either source: a [`DoseSource::Line`] dose is the energy the round lost in the
-    /// box, a [`DoseSource::Field`] dose a direction's strength (a share of the energy its source
-    /// lost) times its share of the field. Both convert at the one energy rate
-    /// ([`super::energy_units`]).
+    /// box, converting at the one energy rate ([`super::energy_units`]); a [`DoseSource::Field`]
+    /// dose a direction's strength (the energy its field carries times its profile) times its
+    /// share of the field, converting at its mechanism's unit ([`super::field_units`]).
     pub amount: f32,
     pub source: DoseSource,
 }
