@@ -16,6 +16,10 @@ what is not a finding, and the fix each class takes.
   commit landed since the last boundary.
 - **Sweep mode**, over the whole tree, area by area (the areas below): the inventory that a sweep
   lane then fixes.
+- **Direction audit**, when one subsystem reaches its third fix round in one chain (each fix
+  exposing the next defect): before the next fix lane, one reviewer reads the subsystem's code and
+  history against the `base-truths` lens and answers whether the chain converges on one declarative
+  statement or stacks compensations, naming that statement and what it deletes.
 
 ## How a reviewer works
 

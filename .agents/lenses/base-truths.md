@@ -26,6 +26,12 @@ Review test: would this line survive tank #2, house #2 and a new material unchan
   numbers are fine when labelled fixture data and the assertion is a class invariant).
 - **Inferred construction**: geometry, joints or membership guessed from names, mesh shape or a
   loaded view asset, where construction should be authored data.
+- **Compensation**: a rule, filter, counter, margin or exception whose reason is another rule's
+  defect rather than a truth about the thing simulated: a confirmation counter that suppresses a
+  jitter some estimate creates, a second solver that re-poses what the first got wrong, a clamp
+  that hides a drift. Read its comment and its git history: "so that X does not …" where X is our
+  own code is the signature. The finding names the defect it covers; the fix is that defect's
+  truth, and the compensation goes with it.
 
 ## Not a finding
 
