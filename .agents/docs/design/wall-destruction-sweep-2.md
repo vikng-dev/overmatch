@@ -25,7 +25,11 @@ downstream shape checks assert the internal record invariant. The structural/wei
 assertions correctly require monotone crack progress. Removing the segmented-tree merge
 fallback is correct: required shipped primitives must merge or refuse.
 
-D1 disagreement: retain the owner-approved hole-cap crumbling path. No alternative was added.
+D1's earlier disposition retained the owner-approved hole-cap crumbling path. The
+fix-p1-destruction lane brief reversed it, implemented in “buildings: only a spent pool turns a
+chunk to dust; the hole cap bounds what is drawn”: a view-table capacity is no material truth
+that can empty a structural pool. Wear continues after the drawing cap; only the pool decides
+dust. This supersedes the earlier disposition.
 
 ## Physical findings
 

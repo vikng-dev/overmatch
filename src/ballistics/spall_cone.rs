@@ -9,7 +9,7 @@
 //! # Units
 //!
 //! A field carries joules, the energy its source put into it: a cone its share of the kinetic
-//! energy its round lost across the body it left (`walk::SpallSource::carried`, the debris share
+//! energy its round lost across the body it left (`walk::SpallSource::emitted`, the debris share
 //! [`ConeEnergy::debris_share`] times the exit material's strength ratio; the line deals the body
 //! the rest), a burst its wall's driven energy (`burst::Burst::energy`). Its strength is that
 //! energy over [`EMITTED_SHARE`] ([`field_strength`]), so its directions emit exactly it, and no

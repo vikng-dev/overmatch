@@ -91,8 +91,8 @@ impl MarkKind {
     ///
     /// A round that came to rest inside the tank after going through the face (lodged) has the
     /// face verdict `Through`, and leaves the same hole as one that left the tank. `Struck` is a
-    /// stop with no crossing resolved — every terrain strike, and an armour contact whose walk
-    /// failed closed — and claims nothing about the face, so it leaves nothing.
+    /// terrain stop with no crossing resolved and claims nothing about an armour face, so it
+    /// leaves nothing. An armour walk contradiction is a bug and panics.
     pub(crate) fn of(verdict: Verdict) -> Option<Self> {
         match verdict {
             Verdict::Ricochet => Some(Self::Scratch),
