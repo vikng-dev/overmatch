@@ -4401,6 +4401,23 @@ mod tests {
     /// the leg the origin projects onto nor the carried speed passes.
     #[test]
     fn each_front_runs_at_its_own_speed() {
+        // The game's damage-model source oracle comes from raw fixture marks, independently of
+        // the record's event time and the plan's node selection. A nearest-leg writer throws
+        // this cone on the earlier reflected leg and fails before any consistency comparison.
+        let (folded, source_time, exit) = crate::damage_cam::record::tests::folded_cone_record();
+        let folded_plan = Plan::new(&folded, &TankShapes::default());
+        assert!(
+            folded.spall[0].t >= source_time,
+            "a cone cannot precede its source crossing"
+        );
+        for kind in [CornerKind::Glass, folded_plan.kind] {
+            let shown = front_speed(&folded_plan, kind, 0);
+            let scaled = exit / timeline::REPLAY_SLOWDOWN;
+            assert!(
+                (shown - scaled).abs() <= 1e-3 * scaled,
+                "the folded fixture's front follows its source's {exit} m/s exit"
+            );
+        }
         let library = Library::load();
         let (mut spall, mut inside, mut burst) = (0, 0, 0);
         for record in &library.records {

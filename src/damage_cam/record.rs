@@ -514,6 +514,8 @@ fn wound_span(
 struct Timeline {
     /// Timed nodes, t = 0 at the struck tank's first contact.
     nodes: Vec<Node>,
+    /// Each mark's own nodes, excluding its incoming flight and the encounter's run-out.
+    events: BTreeMap<usize, std::ops::Range<usize>>,
     /// Where the path starts (WORLD): the launch, or for a later encounter where the round left
     /// the mark before it.
     start: Vec3,
@@ -548,6 +550,7 @@ fn timeline(
     // Each node with the speed of the leg that reaches it and the mark whose frame states it;
     // `contact` is the node of the struck tank's first contact.
     let mut legs: Vec<(Vec3, f32, usize)> = Vec::new();
+    let mut events = BTreeMap::new();
     let mut speed = match marks.get(struck.from)? {
         ArmourMark::Bounce { speed_in, .. } | ArmourMark::Crossing { speed_in, .. } => *speed_in,
         ArmourMark::Wound { speed, .. } => *speed,
@@ -563,6 +566,7 @@ fn timeline(
     let tail = wound_tail(marks, struck.from, last_touch);
     let span = marks[..=last_touch].iter().enumerate().skip(struck.from);
     for (index, mark) in span {
+        let first_node = legs.len();
         if index == first_touch {
             contact = legs.len();
         }
@@ -646,6 +650,9 @@ fn timeline(
                 }
             }
         }
+        if legs.len() > first_node {
+            events.insert(index, first_node..legs.len());
+        }
     }
     // The flight runs on to the next point of the path past everything the encounter reached.
     if flying
@@ -677,6 +684,7 @@ fn timeline(
     }
     Some(Timeline {
         nodes,
+        events,
         start,
         contact_speed: legs[contact].1,
     })
@@ -711,6 +719,7 @@ pub(crate) fn report_from(
 
     let Timeline {
         nodes,
+        events,
         start,
         contact_speed,
     } = timeline(world, struck, log, facts, first_touch, last_touch)?;
@@ -718,6 +727,7 @@ pub(crate) fn report_from(
         world,
         struck,
         nodes: &nodes,
+        events: &events,
         tail: wound_tail(marks, struck.from, last_touch),
     };
     let mut ledger = Ledger::new(on);
@@ -881,6 +891,7 @@ struct Encounter<'a> {
     world: &'a World,
     struck: &'a StruckTank,
     nodes: &'a [Node],
+    events: &'a BTreeMap<usize, std::ops::Range<usize>>,
     tail: usize,
 }
 
@@ -895,9 +906,26 @@ impl Encounter<'_> {
         share_of(self.world, mark, self.struck.tank)
     }
 
-    /// The path's time at `point` (WORLD), [`time_on`].
-    fn time_at(&self, point: Vec3) -> f32 {
-        time_on(self.nodes, point)
+    /// The game's damage-model time at `point` (WORLD) on its source mark's path.
+    fn time_at(&self, index: usize, point: Vec3) -> f32 {
+        let range = self
+            .events
+            .get(&index)
+            .expect("the game's damage model gives every hard mark its own nonempty path span");
+        time_on(&self.nodes[range.clone()], point)
+    }
+
+    /// A witness inside a hard crossing adds no path node. Its source is that crossing, or the
+    /// flight to the next hard mark, never an unrelated folded leg.
+    fn wound_time_at(&self, index: usize, point: Vec3) -> f32 {
+        if self.events.contains_key(&index) {
+            return self.time_at(index, point);
+        }
+        let before = self.events.range(..index).next_back();
+        let after = self.events.range(index..).next();
+        let range = before.map_or(0, |(_, range)| range.start)
+            ..after.map_or(self.nodes.len(), |(_, range)| range.start + 1);
+        time_on(&self.nodes[range], point)
     }
 }
 
@@ -947,7 +975,7 @@ impl<'a> Ledger<'a> {
         shock: f32,
     ) {
         let on = self.on;
-        let t = on.time_at(position);
+        let t = on.time_at(index, position);
         let [normal, incoming, outgoing] =
             directions.map(|direction| on.struck.direction(index, direction));
         self.ricochets.push(Ricochet {
@@ -988,7 +1016,7 @@ impl<'a> Ledger<'a> {
             },
         });
         for crossed in volumes.iter().filter(|crossed| on.owned(crossed.volume)) {
-            let t = on.time_at(crossed.entry);
+            let t = on.time_at(index, crossed.entry);
             let class = class_of(on.world, crossed.volume);
             if class == VolumeClass::Box {
                 self.line
@@ -1020,7 +1048,7 @@ impl<'a> Ledger<'a> {
             });
         }
         for cone in cones {
-            let t = on.time_at(cone.origin);
+            let t = on.time_at(index, cone.origin);
             let thrown = (cone.origin, cone.axis, cone.field, cone.strength);
             let cone = self.field(index, t, thrown, &cone.rays);
             self.spall.push(cone);
@@ -1040,7 +1068,7 @@ impl<'a> Ledger<'a> {
         thrown: Option<&BurstField>,
     ) {
         let on = self.on;
-        let t = on.time_at(at) + after;
+        let t = on.time_at(index, at) + after;
         let field = thrown.map(|burst| {
             let throw = (burst.origin, burst.axis, burst.field, burst.strength);
             self.field(index, t, throw, &burst.rays)
@@ -1104,7 +1132,7 @@ impl<'a> Ledger<'a> {
         // The witness law's dose as it stands, in reference-mm: the energy rate is the hard
         // world's.
         for crossed in volumes.iter().filter(|crossed| on.owned(crossed.volume)) {
-            let t = on.time_at(crossed.entry);
+            let t = on.wound_time_at(index, crossed.entry);
             self.line
                 .push((crossed.volume, dose_units(crossed.cost), t, index));
             self.entered.push((crossed.volume, t, crossed.entry, index));
@@ -1263,9 +1291,12 @@ fn rested_in<'a>(volumes: impl Iterator<Item = &'a VolumeCrossing>, at: Vec3) ->
         .map(|crossed| crossed.volume)
 }
 
-/// The time at which the path passes nearest `point`, interpolated along that leg.
+/// The time nearest `point` within one source mark's nodes, interpolated along its own leg.
 fn time_on(nodes: &[Node], point: Vec3) -> f32 {
-    let mut best = (f32::INFINITY, nodes.first().map_or(0.0, |node| node.t));
+    let first = nodes
+        .first()
+        .expect("the game's damage model times an event on the nonempty span of its source mark");
+    let mut best = (f32::INFINITY, first.t);
     for pair in nodes.windows(2) {
         let (a, b) = (pair[0].point, pair[1].point);
         let span = b - a;
@@ -1332,8 +1363,160 @@ fn role_of(world: &World, volume: Entity) -> Role {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
+
+    /// The game's damage-model folded-path fixture, read through the real report writer. All
+    /// geometry, speeds and energy are fixture data. Returns the source crossing's entry time
+    /// and exit speed, DERIVED independently from the marks for the stage's clock/speed oracle.
+    pub(crate) fn folded_cone_record() -> (PenetrationReport, f32, f32) {
+        let mut world = World::new();
+        let tank = world.spawn_empty().id();
+        let volume = world
+            .spawn((Name::new("fixture plate"), VolumeOf(tank)))
+            .id();
+        let struck = StruckTank {
+            tank,
+            from: 0,
+            frames: vec![(0, HullFrame::posed(Vec3::ZERO, Quat::IDENTITY))],
+            servo_deg: BTreeMap::new(),
+            boxes: Vec::new(),
+        };
+        let entry = Vec3::new(0.5, 0.082, 0.0);
+        let exit = Vec3::new(0.5, 0.081, 0.0);
+        let exit_speed = 50.0;
+        let bounce = |position| ArmourMark::Bounce {
+            position,
+            normal: Vec3::Y,
+            incoming: Vec3::X,
+            outgoing: Vec3::X,
+            speed_in: 100.0,
+            speed_out: 100.0,
+            struck: volume,
+            shock: 0.0,
+        };
+        let marks = [
+            bounce(Vec3::ZERO),
+            bounce(Vec3::X),
+            ArmourMark::Crossing {
+                entrance: entry,
+                normal: Vec3::Y,
+                incoming: Vec3::NEG_Y,
+                speed_in: 100.0,
+                overmatched: false,
+                volumes: vec![VolumeCrossing {
+                    volume,
+                    entry,
+                    end: exit,
+                    chord: 0.001,
+                    cost: 1.0,
+                    energy: 2000.6,
+                    perforated: true,
+                }],
+                end: CrossingEnd::Exit {
+                    at: exit,
+                    speed: exit_speed,
+                },
+                cones: 1,
+            },
+        ];
+        let origin = Vec3::new(0.5, 0.0385, 0.0);
+        let cones = [ThrownCone {
+            origin,
+            axis: Dir3::NEG_Y,
+            field: FieldDescriptor::ball(3.0),
+            strength: 2000.6,
+            rays: vec![SpallRay {
+                direction: Dir3::NEG_Y,
+                end: origin + Vec3::NEG_Y,
+                strength: 2000.6,
+                doses: Vec::new(),
+            }],
+        }];
+        let path = [Vec3::ZERO, Vec3::X, entry, exit, exit + Vec3::NEG_Y];
+        let facts = ShotFacts {
+            launch: Vec3::NEG_X,
+            caliber_mm: 88.0,
+            mass_kg: 10.2,
+            ..ShotFacts::default()
+        };
+        let log = ShotLog {
+            marks: &marks,
+            cones: &cones,
+            burst: None,
+            path: &path,
+            dose: None,
+        };
+        let mut report =
+            report_from(&world, &struck, &log, &facts).expect("fixture opens a record");
+        report.synthetic = true;
+        let source_time = Vec3::X.length() / 100.0 + entry.distance(Vec3::X) / 100.0;
+        (report, source_time, exit_speed)
+    }
+
+    /// The game's damage-model cone belongs to its crossing even when its disc-mean origin is
+    /// nearer an earlier reflected leg. Fixture times and offsets reproduce the review's folded
+    /// path: the early leg is 38.5 mm away, the crossing at least 42.5 mm away (DERIVED).
+    /// The pen cam must not throw the field before the crossing that produced it.
+    #[test]
+    fn a_folded_paths_cone_is_timed_on_its_own_crossing() {
+        let mut world = World::new();
+        let tank = world.spawn_empty().id();
+        let struck = StruckTank {
+            tank,
+            from: 0,
+            frames: vec![(0, HullFrame::posed(Vec3::ZERO, Quat::IDENTITY))],
+            servo_deg: BTreeMap::new(),
+            boxes: Vec::new(),
+        };
+        let nodes = [
+            Node {
+                point: Vec3::ZERO,
+                t: 0.034,
+                mark: 3,
+            },
+            Node {
+                point: Vec3::X,
+                t: 0.035284,
+                mark: 4,
+            },
+            Node {
+                point: Vec3::new(0.5, 0.082, 0.0),
+                t: 0.036097,
+                mark: 5,
+            },
+            Node {
+                point: Vec3::new(0.5, 0.081, 0.0),
+                t: 0.0362,
+                mark: 5,
+            },
+        ];
+        let cone = ThrownCone {
+            origin: Vec3::new(0.5, 0.0385, 0.0),
+            axis: Dir3::NEG_Y,
+            field: FieldDescriptor::ball(3.0),
+            strength: 2000.6,
+            rays: Vec::new(),
+        };
+        let events = BTreeMap::from([(3, 0..1), (4, 1..2), (5, 2..4)]);
+        let mut ledger = Ledger::new(Encounter {
+            world: &world,
+            struck: &struck,
+            nodes: &nodes,
+            events: &events,
+            tail: 6,
+        });
+        ledger.crossing(5, None, &[], false, std::iter::once(&cone));
+        let t = ledger.spall[0].t;
+        assert!(
+            t >= nodes[2].t && t <= nodes[3].t,
+            "cone at {t} precedes its crossing"
+        );
+        assert_eq!(
+            t, nodes[3].t,
+            "the off-axis origin projects to this crossing's exit"
+        );
+    }
 
     /// The game's damage model records complete living-target servo poses, distinguishes a
     /// despawn from a servo-less rig, and refuses missing state or an invalid registered slot.

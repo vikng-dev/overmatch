@@ -1057,8 +1057,9 @@ MEASURED regressions and dispositions:
 - Re-recording changed only s5 and s9. The original stage checks then failed: s5's tail stood
   5.1 mm behind its struck plane and its nose trailed travel. The refreshed stage checks every
   reflection, keeps the body leading, and clears its latest struck plane. Event arcs and cone
-  exit-speed selection use record time, so a folded path cannot select a later moment by spatial
-  proximity. A default scenario test compares the live march's interaction sequence with the
+  exit-speed selection use record time; the follow-up verification below finds that the writer
+  still assigned that time by global spatial proximity. A default scenario test compares the live
+  march's interaction sequence with the
   stored records, including reflected faces, crossed volumes and field counts.
 - s5 now shows one rack reflection and rest in the hull side; its rack line dose is 13.5 HP
   (MEASURED). Its turn is 92.0°, correcting the review's 88° claim (DERIVED from recorded vectors).
@@ -1089,3 +1090,24 @@ commit. Ignored pricing and capture instruments were left ignored.
 Wire definitions are unchanged: PROTOCOL_REV deliberately remains 63. The protected track,
 building, contact-transfer and net modules were not edited. No captures, pricing, pushes or issue
 comments were made.
+
+## Verification of the sweep-ball-11 review (sweep-ball-12)
+
+Subject: the game's damage model, game state only. The lane's single Claude review was present
+and checked against code; the angle-law form remains the owner's open choice.
+
+| reviewer | finding | verified / not a defect | fixed in (subject) |
+|---|---|---|---|
+| Claude | P2: a folded path assigns a cone an earlier leg's record time; the stage comparison repeats that choice | verified | damage_cam: time events on their source crossings (#255) |
+
+MEASURED: the DERIVED folded-path fixture failed with a cone at `0.034642003 s`, before its
+source crossing at `0.036097 s`. The writer now restricts each hard event to its mark's own path
+nodes, excluding approach and run-out. Witnesses without their own node use the adjacent source
+crossing/flight span. The stage guard also reads a synthetic folded log through the actual writer
+and compares against an independently DERIVED source time and its raw mark's exit speed; matching
+the plan's own nearest-time calculation cannot pass it. Re-recording refreshes event times in
+the existing scenarios without changing interaction sequences or wire definitions.
+
+MEASURED clock-step gates: 269 selected tests passed, with four pricing/capture instruments left
+ignored. Formatting and locked workspace/all-target CI clippy with `dev_ui,bitprobe` passed.
+The refreshed s9 second cone is at `0.036387894 s`, within its source crossing (MEASURED).
