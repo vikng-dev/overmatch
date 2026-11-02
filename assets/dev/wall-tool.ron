@@ -2,6 +2,10 @@
 // chambered round's compiled filler and casing construction. This is a dev-tool input,
 // independent of the firing tool's currently selected round.
 (
+    seam_m: (0.004, Taste("wall inspector: visible separation between drawn chunks")),
+    puff_life_s: (1.6, Taste("wall inspector dust: visible lifetime in seconds")),
+    view_fill: (1.8, Taste("wall inspector framing: camera distance in wall heights")),
+    readout_range_m: (12.0, Taste("wall inspector readout: nearby visibility range in metres")),
     cased_round: "88mm_HE",
     spread_rad: (0.003, StandIn("inspection tool: tight automatic-fire group concentrates wear on a few chunks; gun dispersion is not authored yet")),
 )

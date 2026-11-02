@@ -891,8 +891,11 @@ fn the_inspector_reads_delivered_work_through_pool_holes_and_readout() {
 #[test]
 fn the_inspection_tool_refuses_invalid_spread_at_admission() {
     for value in ["-1.0", "NaN", "inf"] {
-        let text =
-            format!(r#"(cased_round: "fixture", spread_rad: ({value}, Fixture("fixture")))"#);
+        let text = format!(
+            r#"(cased_round: "fixture", spread_rad: ({value}, Fixture("fixture")),
+            seam_m: (1.0, Fixture("fixture")), puff_life_s: (1.0, Fixture("fixture")),
+            view_fill: (1.0, Fixture("fixture")), readout_range_m: (1.0, Fixture("fixture")))"#
+        );
         let error = super::tool_from_ron(&text)
             .err()
             .expect("invalid spread is refused");

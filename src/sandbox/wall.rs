@@ -20,7 +20,7 @@
 //!   (out of ballistics; grey-blue when a local crack freed them, purple when a structural one
 //!   did), a one-line readout (the last shot and its energy) and, on H, a help panel of the keys
 //!   and the colour legend. Every value of a resolved shot goes to the log. The readout shows only
-//!   while the camera stands within [`READOUT_RANGE`] of the wall, so the range's own view carries
+//!   while the camera stands within [`WallTool::readout_range_m`] of the wall, so the range's own view carries
 //!   no more text than its round's name.
 //! * **Spall.** Every exit cone the wall throws is read off the shell's record and drawn, and its
 //!   rays' doses are summed on a witness panel behind the wall: the game's own dose.
@@ -62,7 +62,7 @@ use crate::{Layer, spec};
 /// `<wall>/`): the brick elements of that wall.
 const BUILDING: &str = include_str!("../../assets/buildings/house_1/house_1.building.ron");
 const WALL: &str = "east";
-/// Where the wall stands, world metres: clear of the range's plates and target (x within ±7.5)
+/// Fixture layout, world metres: where the wall stands, clear of the range's plates and target (x within ±7.5)
 /// and of the test course (z ≤ −30). Its front face looks down +Z.
 const PLACE: Placement = Placement {
     centre_x: 16.0,
@@ -70,29 +70,19 @@ const PLACE: Placement = Placement {
 };
 /// The substance every chunk wears; its values are its row's ([`Masonry::of`]).
 const SUBSTANCE: &str = "Brick";
-/// The blast tool's filler masses, kg, and standoffs, m (the owner's 0.1–5 kg and 0–5 m).
+/// Fixture inputs: the blast tool's filler masses, kg, and standoffs, m (the owner's 0.1–5 kg and 0–5 m).
 const MASSES: [f32; 6] = [0.1, 0.2, 0.5, 1.0, 2.0, 5.0];
 const STANDOFFS: [f32; 6] = [0.0, 0.5, 1.0, 2.0, 3.0, 5.0];
-/// Rounds an automatic gun fires per F (the brief's burst of 50).
+/// Fixture input: rounds an automatic gun fires per F.
 const BURST: usize = 50;
-/// How far the drawn chunk falls short of its collider on every side, m: the drawn seam.
-const SEAM: f32 = 0.004;
-/// The witness panel: its distance behind the back face (past the back view's camera), its tile
+/// Fixture layout: the witness panel's distance behind the back face (past the back view's camera), its tile
 /// size and count (m, m, x × y).
 const WITNESS_GAP: f32 = 4.4;
 const TILE: f32 = 0.25;
 const TILES: (usize, usize) = (24, 14);
-/// The camera's distance from the face it frames, in wall heights: the wall fills two thirds of a
-/// 45 degree 16:9 view's height, below the readout.
-const VIEW_FILL: f32 = 1.8;
-/// A dust puff's life, s.
-const PUFF_LIFE: f32 = 1.6;
-/// How near the wall's centre the camera must stand for the readout to show, m: the wall's own
-/// views stand 5–9 m off it, the range's boot pose 21 m.
-const READOUT_RANGE: f32 = 12.0;
-/// Blast rays drawn of the last blast: every this-many-th hit.
+/// Resolution: draw every sixth blast hit to bound diagnostic gizmo work; field sampling is unchanged.
 const RAY_DRAW_STRIDE: usize = 6;
-/// The capture script's timeline, app seconds: back view from, front view from, the shot, and the
+/// Fixture capture timeline, app seconds: back view from, front view from, the shot, and the
 /// after back view from. Frames read at 3, 4, 11.5 and 12.5 s fall inside each stand.
 const SCRIPT_BACK: f32 = 3.5;
 const SCRIPT_FRONT: f32 = 4.5;
@@ -277,6 +267,10 @@ struct Charge {
 struct WallTool {
     cased_round: String,
     spread_rad: crate::provenance::Sourced<f32>,
+    seam_m: crate::provenance::Sourced<f32>,
+    puff_life_s: crate::provenance::Sourced<f32>,
+    view_fill: crate::provenance::Sourced<f32>,
+    readout_range_m: crate::provenance::Sourced<f32>,
 }
 
 fn tool_from_ron(text: &str) -> Result<WallTool, String> {
@@ -285,6 +279,18 @@ fn tool_from_ron(text: &str) -> Result<WallTool, String> {
         return Err(
             "spread_rad must be finite and nonnegative; author the inspection spread".to_string(),
         );
+    }
+    for (field, value) in [
+        ("seam_m", tool.seam_m.0),
+        ("puff_life_s", tool.puff_life_s.0),
+        ("view_fill", tool.view_fill.0),
+        ("readout_range_m", tool.readout_range_m.0),
+    ] {
+        if !value.is_finite() || value <= 0.0 {
+            return Err(format!(
+                "{field} must be finite and positive; author the inspection appearance"
+            ));
+        }
     }
     Ok(tool)
 }
@@ -524,8 +530,6 @@ fn wall_rounds() -> Vec<WallRound> {
     rounds
 }
 
-/// `text` with every character outside printable ASCII replaced: the sandbox's default font draws
-/// ASCII only.
 /// The plan's case among the wall's `rounds`.
 ///
 /// # Panics
@@ -604,7 +608,7 @@ fn aim_point(wall: &Wall) -> Vec3 {
 /// The camera's pose at `view`, framing the wall about `aim`.
 fn view_pose(view: View, aim: Vec3) -> Transform {
     let (front, back) = faces();
-    let distance = VIEW_FILL * layout().size.y;
+    let distance = wall_tool().view_fill.0 * layout().size.y;
     let (eye, look) = match view {
         View::Front => (Vec3::new(aim.x, aim.y, front + distance), aim),
         View::Back => (
@@ -712,9 +716,9 @@ fn setup_wall(
     commands.insert_resource(assets);
 }
 
-/// A chunk's drawn mesh, vertices about its bounding box's centre: its faces inset by [`SEAM`].
+/// A chunk's drawn mesh, vertices about its bounding box's centre: its faces inset by [`WallTool::seam_m`].
 fn chunk_mesh(block: &Block) -> Mesh {
-    let inset = crate::buildings::breakage::inset_point(block, 1.0, SEAM);
+    let inset = crate::buildings::breakage::inset_point(block, 1.0, wall_tool().seam_m.0);
     let (mut positions, mut normals, mut indices) = (Vec::new(), Vec::new(), Vec::new());
     for &(normal, offset) in &block.planes {
         let face = block.face_on(normal * offset, normal);
@@ -1470,7 +1474,7 @@ fn paint_witness(
     }
 }
 
-/// Grow and fade each dust puff over [`PUFF_LIFE`], then remove it and its material.
+/// Grow and fade each dust puff over [`wall_tool().puff_life_s.0`], then remove it and its material.
 fn animate_puffs(
     time: Res<Time>,
     mut puffs: Query<(Entity, &DustPuff, &mut Transform)>,
@@ -1478,7 +1482,7 @@ fn animate_puffs(
     mut commands: Commands,
 ) {
     for (entity, puff, mut transform) in &mut puffs {
-        let age = (time.elapsed_secs() - puff.born) / PUFF_LIFE;
+        let age = (time.elapsed_secs() - puff.born) / wall_tool().puff_life_s.0;
         if age >= 1.0 {
             materials.remove(&puff.material);
             commands.entity(entity).despawn();
@@ -1672,7 +1676,7 @@ fn update_readout(mut p: ReadoutParam) {
             .as_ref()
             .map_or_else(|| "no shot yet".to_string(), last_shot),
     );
-    let near = camera.translation.distance(layout().centre()) < READOUT_RANGE;
+    let near = camera.translation.distance(layout().centre()) < wall_tool().readout_range_m.0;
     let shown_if = |on: bool| {
         if on {
             Visibility::Inherited

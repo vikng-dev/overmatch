@@ -133,6 +133,7 @@
         noise_cells: ((8, 21), Taste("trail effects: ASSUMED provisional noise cells; world-space recipe, independent of viewer distance")),
     ),
     marks: (
+        depth_fade_m: (0.04, Taste("hull marks: fade near the surface so distant or occluded faces do not receive a decal")),
         hole_core: (0.30, Taste("marks effects: ASSUMED provisional hole core; world-space recipe, independent of viewer distance")),
         dent_bowl: (0.36, Taste("marks effects: ASSUMED provisional dent bowl; world-space recipe, independent of viewer distance")),
         scratch_width: (0.32, Taste("marks effects: ASSUMED provisional scratch width; world-space recipe, independent of viewer distance")),

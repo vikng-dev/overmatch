@@ -267,6 +267,7 @@ pub(super) fn trail() -> &'static TrailLook {
 }
 
 look_table! { MarksLook {
+    depth_fade_m: f32 => positive,
     hole_core: f32 => finite,
     dent_bowl: f32 => finite,
     scratch_width: f32 => finite,

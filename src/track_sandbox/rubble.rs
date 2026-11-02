@@ -22,17 +22,21 @@ use super::{CONTACT_PROBE, FORCE_VIZ_SCALE, RigGeom, Side, belt_loop};
 
 /// The building asset the yard is cut from.
 const HOUSE: &str = "house_1";
-/// Where the pile's base centre stands (world, on the lane's ground at y = 0): on the open flat
+/// Fixture layout: where the pile's base centre stands (world, on the lane's ground at y = 0): on the open flat
 /// ground left of the washboards.
 pub(super) const PILE_AT: Vec3 = Vec3::new(-13.0, 0.0, -8.0);
-/// Where the wall section's chunks' mean stands (xz only; its height is the asset's own).
+/// Fixture layout: where the wall section's chunks' mean stands (xz only; its height is the asset's own).
 const WALL_AT: Vec2 = Vec2::new(-18.0, -8.0);
-/// How many pieces the pile holds.
+/// Fixture count: how many pieces the pile holds.
 const PILE_PIECES: usize = 108;
-/// Pieces per layer of the drop grid (a square).
+/// Fixture layout: pieces per square layer of the drop grid.
 const PILE_ROW: usize = 6;
-/// The `R` tour's rubble spot: the rig's hull origin (xz), facing −Z at the pile.
+/// Fixture layout: the `R` tour's rubble spot: the rig's hull origin (xz), facing −Z at the pile.
 pub(super) const RUBBLE_SPOT: Vec2 = Vec2::new(PILE_AT.x, PILE_AT.z + 9.0);
+
+/// Fixture layout: fractional grid narrowing per layer and per-piece yaw variation, radians.
+const PILE_TAPER: f32 = 0.15;
+const PILE_YAW_RAD: f32 = 0.7;
 
 /// The contacts of the last fixed tick that pressed on a body, for the gizmos.
 #[derive(Resource, Default)]
@@ -180,11 +184,11 @@ pub(super) fn spawn_rubble_yard(
         let half = (PILE_ROW as f32 - 1.0) / 2.0;
         let at = PILE_AT
             + Vec3::new(
-                (row as f32 - half) * spacing * (1.0 - 0.15 * layer as f32),
+                (row as f32 - half) * spacing * (1.0 - PILE_TAPER * layer as f32),
                 spacing * (0.5 + layer as f32),
-                (col as f32 - half) * spacing * (1.0 - 0.15 * layer as f32),
+                (col as f32 - half) * spacing * (1.0 - PILE_TAPER * layer as f32),
             );
-        let turn = Quat::from_rotation_y(i as f32 * 0.7);
+        let turn = Quat::from_rotation_y(i as f32 * PILE_YAW_RAD);
         commands.spawn((
             Name::new("rubble yard piece"),
             DebrisPiece,

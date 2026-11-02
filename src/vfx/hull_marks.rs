@@ -27,7 +27,7 @@
 //! It is an overlay: `AlphaMode::Blend`, no shadows, depth test `Always`. It is lit with the quad's
 //! normal, not the hull's, and cannot cut a real hole (issue 124's step 2 moves the profile into
 //! the hull's shader for that). Its alpha fades with the distance between the quad and the surface
-//! the depth prepass holds, over [`DEPTH_FADE_M`]: that fade is also what hides a mark behind any
+//! the depth prepass holds, over the marks data's depth fade: that fade is also what hides a mark behind any
 //! surface standing more than a few centimetres in front of it, so it must stay small. Its
 //! UV-parallax term divides the tangent by the world-space image of the scale vector, which is
 //! exact only for an axis-aligned decal; on a rotated one it is wrong in proportion to the quad's
@@ -46,10 +46,6 @@ use crate::hull_marks::{HullMark, HullMarks, MarkKind, in_plane, parts_in_index_
 use crate::substances::SurfaceFeedback;
 use crate::tank::{SimParts, ViewNode};
 use texture::VARIANTS;
-
-/// How far from the surface a decal fades out, m. ASSUMED: "a few centimetres", against bevy's
-/// 8 m default, which would draw a mark on a turret's far face through the turret.
-pub(crate) const DEPTH_FADE_M: f32 = 0.04;
 
 /// The material each (kind, variant) shares.
 #[derive(Resource)]
@@ -206,7 +202,7 @@ pub(super) fn build_materials(
             by_kind[kind_index(kind)][variant] = materials.add(ExtendedMaterial {
                 base: surface_material(base.clone(), *feedback),
                 extension: ForwardDecalMaterialExt {
-                    depth_fade_factor: DEPTH_FADE_M,
+                    depth_fade_factor: super::look::marks().depth_fade_m,
                 },
             });
         }
