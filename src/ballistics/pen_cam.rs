@@ -354,9 +354,57 @@ fn scenarios() -> Vec<Scenario> {
     ron::de::from_str(&text).unwrap_or_else(|error| panic!("{}: {error}", path.display()))
 }
 
+/// Resolution: two parts per million above magnitude one, two millionths below it. This
+/// accommodates accumulated f32 rounding across targets and sum orders without hiding changed
+/// record membership, field identities, integer pool counts or larger changes in value.
+const RECORD_VALUE_RESOLUTION: f64 = 2.0e-6;
+
+/// The game's damage-model records compare structural content exactly and only floats within
+/// the stated resolution. Walking the serialized shape keeps every nested field in the guard.
+fn record_values_match(a: &serde_json::Value, b: &serde_json::Value) -> bool {
+    use serde_json::Value;
+    match (a, b) {
+        (Value::Number(a), Value::Number(b)) if a.is_f64() && b.is_f64() => {
+            let (a, b) = (a.as_f64().unwrap(), b.as_f64().unwrap());
+            (a - b).abs() <= RECORD_VALUE_RESOLUTION * a.abs().max(b.abs()).max(1.0)
+        }
+        (Value::Array(a), Value::Array(b)) => {
+            a.len() == b.len() && a.iter().zip(b).all(|(a, b)| record_values_match(a, b))
+        }
+        (Value::Object(a), Value::Object(b)) => {
+            a.len() == b.len()
+                && a.iter()
+                    .all(|(key, a)| b.get(key).is_some_and(|b| record_values_match(a, b)))
+        }
+        _ => a == b,
+    }
+}
+
+/// The game's damage-model views tolerate rounding while retaining field identity, list
+/// membership, integer pool counts and real changes of value. All numbers here are fixture data.
+#[test]
+fn recorded_content_accepts_rounding_but_rejects_new_content() {
+    let original = serde_json::json!({"strength": 1234.0, "hits": [{"volume": "fixture", "dose": 12.0}], "taken": 100});
+    let mut nudged = original.clone();
+    nudged["strength"] = serde_json::json!(1234.0 * 1.000001);
+    assert!(
+        record_values_match(&original, &nudged),
+        "one part per million is rounding"
+    );
+    for changed in [
+        serde_json::json!({"strength": 1234.0, "hits": [], "taken": 100}),
+        serde_json::json!({"strength": 1234.0, "hits": [{"volume": "other", "dose": 12.0}], "taken": 100}),
+        serde_json::json!({"strength": 1234.0, "hits": [{"volume": "fixture", "dose": 13.0}], "taken": 100}),
+        serde_json::json!({"strength": 1234.0, "hits": [{"volume": "fixture", "dose": 12.0}], "taken": 101}),
+    ] {
+        assert!(!record_values_match(&original, &changed));
+    }
+}
+
 /// The game's damage-model stage and live views rely on the march's interaction sequence.
 /// A stale record must not hide new reflections, crossings or fields behind an unchanged verdict.
-/// This checks interaction topology; the stage tests check the resulting poses and speeds.
+/// This checks topology and dose/field content within the stated floating resolution; the stage
+/// tests check the resulting poses and speeds.
 /// All fixture choices come from scenarios.
 #[test]
 fn recorded_scenarios_keep_the_current_interaction_sequence() {
@@ -404,10 +452,10 @@ fn recorded_scenarios_keep_the_current_interaction_sequence() {
             "{}: field count",
             scenario.name
         );
-        if stored.doses != actual.doses
-            || stored.spall != actual.spall
-            || stored.burst != actual.burst
-        {
+        let content = |report: &PenetrationReport| {
+            serde_json::to_value((&report.doses, &report.spall, &report.burst)).unwrap()
+        };
+        if !record_values_match(&content(&stored), &content(&actual)) {
             stale.push(scenario.name.clone());
         }
     }
