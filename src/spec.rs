@@ -3301,6 +3301,22 @@ TankSpec(
         }
     }
 
+    /// The game's damage model: the load gate independently needs both contributor floors.
+    /// Fixture work fits at full rate but crosses the horizon at either reduced floor.
+    #[test]
+    fn load_horizon_requires_both_module_and_crew_floors() {
+        for part in [Part::Breech, Part::Gunner] {
+            let mut spec = fixture();
+            let weapon = spec.weapons.get_mut("Cannon").unwrap();
+            weapon.load = vec![Group::Single(part)];
+            weapon.fire_cycle = FireCycle::Single {
+                reload: TickSpan::of(TickSpan::MAX / 4 * 3),
+            };
+            let error = spec.validate().unwrap_err().to_string();
+            assert!(error.contains("deadline horizon"), "{part:?}: {error}");
+        }
+    }
+
     /// A capability the sheet does not key would read as unavailable to every consumer, so
     /// `validate` refuses the sheet that omits one.
     #[test]

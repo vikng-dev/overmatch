@@ -127,11 +127,35 @@ pub struct Crewman {
     pub home: CrewStation,
 }
 
-/// How well a crewman serves a station, ∈ [0, 1]: native (`home == seat`) → 1.0; any foreign seat →
-/// a flat 0.6 backfill penalty for now. Later keyed by per-crewman skill/training (design §7b, §9) —
-/// this is the seam that stays, with only the body of the function growing.
+/// The game's damage model: native competence is full; foreign competence is the shared
+/// stand-in until authored training supplies the crew/station relation (design §7b, §9).
 pub fn competence(home: CrewStation, seat: CrewStation) -> f32 {
-    if home == seat { 1.0 } else { 0.6 }
+    if home == seat {
+        1.0
+    } else {
+        foreign_competence()
+    }
+}
+
+fn foreign_competence() -> f32 {
+    #[derive(Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct CrewData {
+        foreign_competence: crate::provenance::Sourced<f32>,
+    }
+    static DATA: std::sync::LazyLock<CrewData> = std::sync::LazyLock::new(|| {
+        let data: CrewData = crate::provenance::from_shipped_str(
+            "assets/damage/crew.ron",
+            include_str!("../assets/damage/crew.ron"),
+        )
+        .expect("assets/damage/crew.ron: foreign_competence needs a value and provenance");
+        assert!(
+            data.foreign_competence.0 > 0.0 && data.foreign_competence.0 <= 1.0,
+            "assets/damage/crew.ron: foreign_competence must be finite and in (0, 1]; author a positive work-rate share"
+        );
+        data
+    });
+    DATA.foreign_competence.0
 }
 
 /// A backfill swap in flight on a tank (design §7b): when `remaining` reaches 0 the occupants of
@@ -343,6 +367,7 @@ pub(crate) fn knockout_from_counts(crew_in_action: u32, cooked: bool) -> Option<
 pub struct DamageConsequences;
 
 pub fn plugin(app: &mut App) {
+    foreign_competence();
     repair::install(app);
     // A launched turret's colliders change body; the rule keeps their contact pairs naming it.
     app.add_plugins(crate::collider_rehome::plugin);
@@ -509,7 +534,7 @@ pub fn capability_effectiveness(
 }
 
 /// The live quality of each [`Part`] on a tank — the shared core behind *every* requirement check
-/// (a tank-wide [`Capability`], a servo's slew gate, a weapon's fire/load gate): resolve once per
+/// (a tank-wide [`Capability`], a servo's slew gate, a weapon's fire gate or load rate): resolve once per
 /// tank, then [`evaluate`] any number of requirements against it. Crew in action → competence
 /// (native 1.0 / foreign reduced); module → held / capacity; emptied or absent → 0. Duplicate parts (two volumes of one station) take the best.
 pub fn part_qualities(
@@ -562,8 +587,8 @@ pub fn evaluate(requirement: &Requirement, quality: &std::collections::HashMap<P
 }
 
 /// Whether an arbitrary tank *meets* a requirement (effectiveness > 0) — the per-tank analog of
-/// [`ControlledTank::meets`], for sim systems that iterate every tank (a weapon's `fire`/`load`
-/// gates in `shooting`). No volumes yet (spec still binding) → not met.
+/// [`ControlledTank::meets`], for sim systems that iterate every tank (a weapon's `fire`
+/// gate in `shooting`; loading consumes a rate). No volumes yet (spec still binding) → not met.
 pub fn requirement_met(
     tank_volumes: Option<&TankVolumes>,
     requirement: &Requirement,
@@ -610,7 +635,7 @@ impl ControlledTank<'_, '_> {
     }
 
     /// Whether the controlled tank *meets* an arbitrary requirement (effectiveness > 0) — for the
-    /// per-weapon / per-part gates (a weapon's `fire`/`load`) that aren't tank-wide capabilities.
+    /// per-weapon / per-part gates (a weapon's `fire` or sight access) that aren't tank-wide capabilities.
     /// An empty requirement is vacuously met. `None` controlled → not met.
     pub fn meets(&self, requirement: &Requirement) -> bool {
         let Ok((_, _, Some(tank_volumes))) = self.tank.single() else {

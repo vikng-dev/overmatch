@@ -1,0 +1,4 @@
+// The game's damage model: uniform foreign-station work competence, game state only.
+(
+    foreign_competence: (0.6, StandIn("uniform foreign-station competence until per-crew training data supplies the crew/station relation; provisional work-rate share for reload, swap, drive and slew")),
+)
