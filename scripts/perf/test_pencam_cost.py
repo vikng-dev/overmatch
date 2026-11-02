@@ -250,6 +250,37 @@ class Command(unittest.TestCase):
         self.assertEqual(result["until_s"], 70.0)
         self.assertIn("until 70 s", out)
 
+    def test_paired_online_windows_and_cut_follow_each_runs_release(self) -> None:
+        # Fixture frame clocks: the paired release can precede or follow this run. Both the
+        # corner window and the knockout cut must move; post-knockout rows belong to neither.
+        for shift in (-6, 9):
+            with self.subTest(shift=shift):
+                (self.dir / "mp-on.log").write_text(
+                    "harness: released script_tick=0 client_tick=3900 app_s=68 frame_s=60\n"
+                    + "\n".join([shows("Slice", 62), clears(64), shows("Slice", 68), run("starts", 70)])
+                )
+                (self.dir / "mp-off.log").write_text(
+                    f"harness: released script_tick=0 client_tick=3900 app_s=90 frame_s={60 + shift}\n"
+                )
+                (self.dir / "mp-off.client.jsonl").write_text(stream(
+                    90, ms_at=lambda t: 11.0 if 62 + shift < t <= 64 + shift or 68 + shift < t <= 70 + shift
+                    else (99.0 if t > 70 + shift else 10.0),
+                ))
+                code, _, err = self.run_main(
+                    "--stream", str(self.dir / "mp-off.client.jsonl"),
+                    "--log", str(self.dir / "mp-off.log"),
+                    "--surface", "corner", "--windows-from", str(self.dir / "mp-on.log"),
+                    "--until-s", "70", "--warmup-s", str(60 + shift),
+                    "--json", str(self.dir / "mp-off.cost.json"),
+                )
+                self.assertEqual(code, 0, err)
+                result = json.loads((self.dir / "mp-off.cost.json").read_text())
+                self.assertEqual(result["until_s"], 70 + shift)
+                self.assertEqual(result["surfaces"]["corner"]["segments"],
+                                 [[62 + shift, 64 + shift], [68 + shift, 70 + shift]])
+                self.assertEqual(result["surfaces"]["corner"]["on"]["p50"], 11)
+                self.assertEqual(result["surfaces"]["corner"]["off"]["worst"], 10)
+
     def test_off_run_takes_the_paired_runs_windows_and_says_derived(self) -> None:
         (self.dir / "corner-on.log").write_text("\n".join([shows("Slice", 60.0), clears(64.0)]) + "\n")
         # The on run's numbers: 16 ms in its window; the off run's same seconds cost 11 ms (the

@@ -8,7 +8,8 @@
 # number is a same-session comparison: frames with the surface on screen against frames without,
 # same clock, same thermals, same background load. The paired `-off` condition runs the same
 # scripted schedule with the surface's setting Off, and the analyzer applies the `-on` run's
-# windows to it (DERIVED alignment — the same seconds hold the same workload minus the surface).
+# windows to it (DERIVED alignment: online windows and the knockout cut shift by off-release
+# minus on-release on the frame clock; offline schedules keep their absolute windows).
 #
 # Usage: run-pencam-cost.sh <out-dir> [condition ...]
 # Conditions (default: all eight, each -on before its -off):
@@ -31,7 +32,8 @@
 #                   the measured client's `harness: released … frame_s=` line, on the rows' own app
 #                   clock. The opponent's rounds knock the measured tank out about 30 s in
 #                   (MEASURED 2026-10-19), and the scripted client never respawns: the analysis
-#                   stops at the kill cam run's start (the on-run's mark, for both runs), where
+#                   stops at the kill cam run's start (the on-run's mark, shifted by the release
+#                   difference for the off-run), where
 #                   the frames turn into the death screen. The MP numbers are the corner's over
 #                   the net before that, nothing more: the x-ray is a player's key with an
 #                   offline-only scripted preference, so it is measured offline.
@@ -290,6 +292,7 @@ for cond in "${CONDITIONS[@]}"; do
     invalid "$cond" "no surface mark in $log — the surface never came on screen, or the debug marks are not in this binary"
   fi
   # MP: the measured tank's knockout ends the workload under measurement (see the runbook).
+  # The analyzer shifts this on-run cut together with its windows for the paired off-run.
   until_args=()
   if [[ "$mode" == mp ]]; then
     cut="$(sed -n 's/.*kill cam: the run starts at t=\([0-9.]*\) s.*/\1/p' "$OUT/${cond%-*}-on.log" | head -n1)"

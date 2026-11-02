@@ -28,8 +28,10 @@ a mark at `t` is the state written during that Update, first drawn by the frame 
 next row: a window is therefore `(start, end]` over row stamps, and the cut keeps the row at the
 cut itself.
 `--windows-from <log>` takes the segments from ANOTHER run's log — the paired `-off` condition,
-whose scripted schedule puts the same workload at the same seconds without the surface; that
-alignment is DERIVED from the schedule, not measured, and the output says so. `--paired-json`
+whose scripted schedule puts the same workload at the same seconds after combat release without
+the surface. Online windows and the `--until-s` cut shift by this run's release minus the paired
+run's, both read from `frame_s` on the frame rows' clock. Offline logs have no combat release and
+keep their absolute windows. This alignment is DERIVED from the schedule; the output says so. `--paired-json`
 then adds the `paired` row: the `-on` run's window against this run's, the surface's cost over
 the same workload, carrying the two runs' baseline drift (the `off` rows show it).
 
@@ -81,6 +83,18 @@ class Mark(NamedTuple):
 class Segment(NamedTuple):
     start: float
     end: float
+
+
+def release_frame_s(log: Path) -> float | None:
+    """The online workload's origin on the frame-row clock; offline logs have no release."""
+    releases = [line for line in log.read_text(errors="replace").splitlines()
+                if "harness: released " in line]
+    if not releases:
+        return None
+    stamp = re.search(r"\bframe_s=([0-9.]+)", releases[0])
+    if len(releases) != 1 or stamp is None:
+        sys.exit(f"{log}: expected one combat release with frame_s; rebuild the client or rerun")
+    return float(stamp[1])
 
 
 def classify(kind: str, surface: str) -> str:
@@ -286,6 +300,18 @@ def main() -> int:
     t_first, t_last = rows[0][0], rows[-1][0]
     marks_log = args.windows_from or args.log
     marks = parse_marks(marks_log.read_text(errors="replace").splitlines())
+    shift = 0.0
+    if args.windows_from:
+        paired_release = release_frame_s(marks_log)
+        own_release = release_frame_s(args.log)
+        if (paired_release is None) != (own_release is None):
+            sys.exit("paired logs must both be online (combat release) or both offline")
+        if paired_release is not None:
+            shift = own_release - paired_release
+            marks = [Mark(mark.t + shift, mark.label) for mark in marks]
+            # The runner reads this cut from the same paired log as the surface windows.
+            if args.until_s is not None:
+                args.until_s += shift
     segs = {s: clip(w, args.until_s) for s, w in segments(marks, t_last).items()}
     own_marks = parse_marks(args.log.read_text(errors="replace").splitlines()) if args.windows_from else marks
     label = args.label or args.stream.name.removesuffix(".client.jsonl").removesuffix(".jsonl")
@@ -307,7 +333,7 @@ def main() -> int:
 
     from_t = t_first + args.warmup_s
     source = (
-        f"DERIVED from {marks_log} (the paired run; same schedule)"
+        f"DERIVED from {marks_log} (the paired run; release shift {shift:+g} s)"
         if derived
         else "MEASURED from this run's marks"
     )
@@ -322,6 +348,7 @@ def main() -> int:
         "stream": str(args.stream),
         "windows_from": str(marks_log),
         "windows_derived": derived,
+        "window_shift_s": shift,
         "warmup_s": args.warmup_s,
         "until_s": args.until_s,
         "span_s": t_last - t_first,
