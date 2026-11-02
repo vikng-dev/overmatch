@@ -451,6 +451,7 @@ TankSpec(
         Gunner:    (node: "Main_Gun_Pitch", optics: Magnified(magnification: 2.5, field_deg: 25.0), requires: [Gunner]),
         Commander: (node: "Turret_Yaw",     optics: Unaided(45.0), requires: [Commander]),
     },
+    drive_controls: Any([[Driver]]),
     capabilities: {
         Drive: [Driver, Engine, Transmission],
     },

@@ -301,12 +301,47 @@ pub type Requirement = Vec<Group>;
 /// Per-tank capability requirements, loaded from the `.tank.ron` spec sheet and inserted on the tank
 /// entity at bind time. Its consumer is the drive selector, `track::sim::drive_target`.
 #[derive(Component, Clone, Debug)]
-pub struct TankCapabilities(pub std::collections::HashMap<Capability, Requirement>);
+pub struct TankCapabilities {
+    pub requirements: std::collections::HashMap<Capability, Requirement>,
+    pub drive_controls: ControlStaffing,
+}
+
+/// The game's damage model: staffing grants control authority independently of task rate.
+/// Each alternative lists all stations that must be in action; no module condition or
+/// contribution coefficient can grant or revoke that authority.
+#[derive(Clone, Debug, PartialEq, Deserialize)]
+pub enum ControlStaffing {
+    Unstaffed,
+    Any(Vec<Vec<CrewStation>>),
+}
+
+impl ControlStaffing {
+    pub fn permits(&self, quality: &std::collections::HashMap<Part, f32>) -> bool {
+        match self {
+            Self::Unstaffed => true,
+            Self::Any(paths) => paths.iter().any(|stations| {
+                stations
+                    .iter()
+                    .all(|station| live_quality(quality, Part::from(*station)) > 0.0)
+            }),
+        }
+    }
+}
 
 impl TankCapabilities {
+    pub fn new(
+        requirements: std::collections::HashMap<Capability, Requirement>,
+        drive_controls: ControlStaffing,
+    ) -> Self {
+        Self {
+            requirements,
+            drive_controls,
+        }
+    }
+
     /// The requirement the sheet states for `capability`.
     pub fn requirement(&self, capability: Capability) -> &Requirement {
-        self.0.get(&capability).unwrap_or_else(|| {
+        self.requirements.get(&capability).unwrap_or_else(|| {
             panic!(
                 "{capability:?}: TankSpec::validate refuses a sheet that does not state every capability"
             )
@@ -1035,6 +1070,23 @@ mod tests {
             KnockoutReason::CrewLoss,
             "a later cook-off cannot rewrite a latched cause"
         );
+    }
+
+    /// The game's damage model: controls require complete staffing alternatives, independent
+    /// of task contributors, coefficients and module condition. Drive relies on this distinction.
+    #[test]
+    fn control_authority_is_a_staffing_fact() {
+        use super::{ControlStaffing, CrewStation};
+        // Fixture: two required stations or one alternative operator.
+        let staffing = ControlStaffing::Any(vec![
+            vec![CrewStation::Driver, CrewStation::Commander],
+            vec![CrewStation::Gunner],
+        ]);
+        assert!(!staffing.permits(&q(&[(Part::Driver, 1.0), (Part::Engine, 1.0)])));
+        assert!(staffing.permits(&q(&[(Part::Driver, 0.6), (Part::Commander, 1.0)])));
+        assert!(staffing.permits(&q(&[(Part::Gunner, 0.6)])));
+        assert!(!staffing.permits(&q(&[(Part::Gunner, 0.0)])));
+        assert!(ControlStaffing::Unstaffed.permits(&q(&[])));
     }
 
     fn drive_views(req: &Requirement, quality: &HashMap<Part, f32>) -> [f32; 3] {

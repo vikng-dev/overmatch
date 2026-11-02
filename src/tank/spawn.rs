@@ -980,7 +980,7 @@ fn insert_root_components(
         NoAutoCenterOfMass,
         CenterOfMass(geometry.nodes[com_index].root_position),
         // Per-tank capability requirements (design §7b) — read by `track::sim::drive_target`.
-        TankCapabilities(spec.capabilities.clone()),
+        TankCapabilities::new(spec.capabilities.clone(), spec.drive_controls.clone()),
         // Per-view FOV + gating requirement (camera FOV, view-death gate).
         TankViews {
             gunner: authored_view(spec, ViewKind::Gunner),

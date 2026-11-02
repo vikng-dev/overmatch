@@ -714,7 +714,10 @@ pub(crate) fn drive_target(
     let supply = drive_supply(tank, caps, volumes);
     let intent = if command.held() {
         DriveIntent::Brake
-    } else if supply.competence > 0.0 {
+    } else if caps
+        .zip(tank)
+        .is_some_and(|(caps, tank)| caps.drive_controls.permits(&part_qualities(tank, volumes)))
+    {
         if tank.is_some_and(|tank| crate::damage::repair::underway(tank, volumes)) {
             DriveIntent::Brake
         } else {
@@ -1399,14 +1402,19 @@ mod tests {
         ] {
             let mut world = World::new();
             let tank = world
-                .spawn(TankCapabilities(std::collections::HashMap::from([(
-                    Capability::Drive,
-                    vec![
-                        Group::Single(Part::Driver),
-                        Group::Single(Part::Engine),
-                        Group::Single(Part::Transmission),
-                    ],
-                )])))
+                .spawn(TankCapabilities::new(
+                    std::collections::HashMap::from([(
+                        Capability::Drive,
+                        vec![
+                            Group::Single(Part::Driver),
+                            Group::Single(Part::Engine),
+                            Group::Single(Part::Transmission),
+                        ],
+                    )]),
+                    crate::damage::ControlStaffing::Any(vec![vec![
+                        crate::damage::CrewStation::Driver,
+                    ]]),
+                ))
                 .id();
             let driver = world
                 .spawn((CrewStation::Driver, Crewman { home }, VolumeOf(tank)))
@@ -1484,17 +1492,22 @@ mod tests {
             use crate::damage::{CrewStation, Crewman, FunctionRole, Group, Part, VolumeOf};
             let (mut app, roots) = support_fixture(false, false, true, 0.0);
             let root = roots[0];
-            app.world_mut().entity_mut(root).insert(TankCapabilities(
-                [(
-                    Capability::Drive,
-                    vec![
-                        Group::Single(Part::Driver),
-                        Group::Single(Part::Engine),
-                        Group::Single(Part::Transmission),
-                    ],
-                )]
-                .into(),
-            ));
+            app.world_mut()
+                .entity_mut(root)
+                .insert(TankCapabilities::new(
+                    [(
+                        Capability::Drive,
+                        vec![
+                            Group::Single(Part::Driver),
+                            Group::Single(Part::Engine),
+                            Group::Single(Part::Transmission),
+                        ],
+                    )]
+                    .into(),
+                    crate::damage::ControlStaffing::Any(vec![vec![
+                        crate::damage::CrewStation::Driver,
+                    ]]),
+                ));
             let driver = app
                 .world_mut()
                 .spawn((
@@ -1854,7 +1867,7 @@ mod tests {
         hull.app
             .world_mut()
             .entity_mut(hull.root)
-            .insert(TankCapabilities(
+            .insert(TankCapabilities::new(
                 [(
                     Capability::Drive,
                     vec![Group::Graded(group(vec![
@@ -1863,6 +1876,7 @@ mod tests {
                     ]))],
                 )]
                 .into(),
+                crate::damage::ControlStaffing::Any(vec![vec![crate::damage::CrewStation::Driver]]),
             ));
         hull.app.world_mut().spawn((
             CrewStation::Commander,
@@ -1911,7 +1925,7 @@ mod tests {
         hull.app
             .world_mut()
             .entity_mut(root)
-            .insert(TankCapabilities(
+            .insert(TankCapabilities::new(
                 [(
                     Capability::Drive,
                     vec![Group::Graded(group(vec![(
@@ -1920,6 +1934,7 @@ mod tests {
                     )]))],
                 )]
                 .into(),
+                crate::damage::ControlStaffing::Any(vec![vec![crate::damage::CrewStation::Driver]]),
             ));
         hull.app
             .world_mut()

@@ -14,7 +14,8 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
 use crate::damage::{
-    Capability, CrewStation, FunctionRole, GradedGroup, Group, Member, Part, Requirement,
+    Capability, ControlStaffing, CrewStation, FunctionRole, GradedGroup, Group, Member, Part,
+    Requirement,
 };
 use crate::guns::{GunError, GunRegistry, Mechanism};
 use crate::provenance::Sourced;
@@ -1253,6 +1254,8 @@ pub struct TankSpec {
     /// Read by the drive selector, `track::sim::drive_target`.
     /// Required; `{}` gates no capability.
     pub capabilities: HashMap<Capability, Requirement>,
+    /// The game's damage model: who may operate Drive controls, regardless of throughput.
+    pub drive_controls: ControlStaffing,
 }
 
 /// What the sim does with a node the spec names — the role half of a typed node reference.
@@ -1411,6 +1414,21 @@ impl TankSpec {
                     .chain(volume.function.map(Part::from))
             })
             .collect();
+        if let ControlStaffing::Any(paths) = &self.drive_controls {
+            if paths.is_empty() || paths.iter().any(Vec::is_empty) {
+                return Err(
+                    "drive_controls: author nonempty complete staffing paths, or use Unstaffed"
+                        .into(),
+                );
+            }
+            for station in paths.iter().flatten() {
+                if !seats.contains_key(station) {
+                    return Err(format!(
+                        "drive_controls names absent station {station:?}; declare its volume or remove the path"
+                    ));
+                }
+            }
+        }
         let mut requirements: Vec<(String, &Requirement)> = Vec::new();
         for (capability, requirement) in &self.capabilities {
             requirements.push((format!("capabilities[{capability:?}]"), requirement));
@@ -2233,6 +2251,7 @@ TankSpec(
         Commander: (node: "Cannon_Sight", optics: Unaided(60.0), requires: []),
     },
     capabilities: { Drive: [] },
+    drive_controls: Unstaffed,
 )
 "#;
 
@@ -3420,6 +3439,35 @@ TankSpec(
             err.contains("capabilities[Drive]") && err.contains(&format!("{provided:?}")),
             "the refusal names the field and the part: {err}"
         );
+    }
+
+    /// The game's damage model: control staffing must name complete, declared station paths
+    /// before play, so the Drive adapter never discovers an impossible authority rule.
+    #[test]
+    fn validate_refuses_incomplete_or_absent_control_staffing() {
+        // Fixture: empty alternatives and a station absent from the fixture sheet.
+        let mut spec = fixture();
+        let absent = [
+            CrewStation::Commander,
+            CrewStation::Gunner,
+            CrewStation::Loader,
+            CrewStation::Driver,
+            CrewStation::BowGunner,
+        ]
+        .into_iter()
+        .find(|station| {
+            !spec
+                .volumes
+                .values()
+                .filter_map(VolumeSpec::component)
+                .any(|volume| volume.crew == Some(*station))
+        })
+        .expect("the fixture leaves a station undeclared");
+        for paths in [vec![], vec![vec![]], vec![vec![absent]]] {
+            spec.drive_controls = ControlStaffing::Any(paths);
+            let err = spec.validate().unwrap_err().to_string();
+            assert!(err.contains("drive_controls"), "{err}");
+        }
     }
 
     /// Silence is authorable: an engine with no `sound` block is a vehicle that runs no loop, not
