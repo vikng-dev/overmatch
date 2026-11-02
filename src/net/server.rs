@@ -125,14 +125,12 @@ pub fn run() {
     app.add_systems(Startup, load_tank_sim_assets);
     install_battle(&mut app, BattleMode::shipped(), TICK);
     app.insert_resource(bot_count);
+    install_spawn_picks(&mut app);
 
     app.add_systems(
         Update,
         (
             (handle_new_clients, spawn_pending_tanks.run_if(places_tanks)).chain(),
-            // Drain the spawn-map lane at frame rate: lightyear clears an undrained `MessageReceiver`
-            // in `Last` every frame (the same rule `grip::answer_resync_requests` follows in `Update`).
-            receive_spawn_points,
             spawn_bots.run_if(places_tanks),
             respawn_dead_bots.run_if(in_combat),
             open_gameplay_gate,
@@ -709,6 +707,11 @@ fn picked_state(previous: RespawnState, pick: &Result<Vec2, SpawnPickRefusal>) -
         Err(SpawnPickRefusal::NonFinite) => RespawnState::InvalidPick,
         Err(SpawnPickRefusal::NoClearGround) => RespawnState::PickBlocked,
     }
+}
+
+/// Drain at frame rate: Lightyear clears unread messages in `Last`, including frames without a tick.
+fn install_spawn_picks(app: &mut App) {
+    app.add_systems(Update, receive_spawn_points);
 }
 
 /// Record each client's latest spawn-map choice. The key is the SENDING LINK, so authority is
@@ -1537,6 +1540,115 @@ mod tests {
         app
     }
 
+    /// Exercise receipt through Lightyear's local typed-message delivery and the shipped installer.
+    fn spawn_pick_app() -> App {
+        let mut app = placement_app();
+        app.add_plugins((MinimalPlugins, bevy::state::app::StatesPlugin));
+        app.add_plugins(lightyear::prelude::client::ClientPlugins {
+            tick_duration: TICK,
+        });
+        app.register_message::<SetSpawnPoint>();
+        app.add_channel::<super::super::protocol::SpawnChannel>(ChannelSettings::default());
+        install_spawn_picks(&mut app);
+        app.finish();
+        app.cleanup();
+        app
+    }
+
+    fn pick_link(app: &mut App, peer: u64) -> Entity {
+        app.world_mut()
+            .spawn((
+                ClientOf,
+                Connected,
+                RemoteId(PeerId::Netcode(peer)),
+                lightyear::connection::host::HostClient { buffer: Vec::new() },
+                MessageSender::<SetSpawnPoint>::default(),
+                MessageReceiver::<SetSpawnPoint>::default(),
+            ))
+            .id()
+    }
+
+    fn send_pick(app: &mut App, link: Entity, point: Vec2) {
+        app.world_mut()
+            .get_mut::<MessageSender<SetSpawnPoint>>(link)
+            .unwrap()
+            .send::<super::super::protocol::SpawnChannel>(SetSpawnPoint {
+                x: point.x,
+                z: point.y,
+            });
+        app.update(); // Local delivery runs in Last, after the receiver drain.
+        app.update();
+    }
+
+    /// A refusal reaches only the sender's root and cannot replace its accepted destination.
+    /// The owner relies on this state for the map and respawn UI; another owner's state stays put.
+    #[test]
+    fn spawn_pick_receipt_updates_only_its_owner_and_retains_the_accepted_point() {
+        let mut app = spawn_pick_app();
+        let link = pick_link(&mut app, 1);
+        let other_link = pick_link(&mut app, 2);
+        let root = app
+            .world_mut()
+            .spawn((
+                ControlledBy {
+                    owner: link,
+                    lifetime: Default::default(),
+                },
+                RespawnState::Idle,
+            ))
+            .id();
+        let other = app
+            .world_mut()
+            .spawn((
+                ControlledBy {
+                    owner: other_link,
+                    lifetime: Default::default(),
+                },
+                RespawnState::WaitingForSpace,
+            ))
+            .id();
+        let accepted = Vec2::new(100.0, 0.0); // Fixture points, one outside the later footprint.
+        let refused = Vec2::new(-100.0, 0.0);
+        send_pick(&mut app, link, accepted);
+        assert_eq!(
+            app.world().resource::<SpawnOverrides>().0.get(&link),
+            Some(&accepted)
+        );
+        app.world_mut()
+            .resource_mut::<SpawnObstacles>()
+            .0
+            .push(Transform::from_xyz(refused.x, 1.0, refused.y).with_scale(Vec3::splat(120.0))); // Fixture footprint covers every nearby candidate, not the accepted point.
+        send_pick(&mut app, link, refused);
+        assert_eq!(
+            app.world().get::<RespawnState>(root),
+            Some(&RespawnState::PickBlocked)
+        );
+        assert_eq!(
+            app.world().get::<RespawnState>(other),
+            Some(&RespawnState::WaitingForSpace)
+        );
+        assert_eq!(
+            app.world().resource::<SpawnOverrides>().0.get(&link),
+            Some(&accepted)
+        );
+        assert!(
+            !app.world()
+                .resource::<SpawnOverrides>()
+                .0
+                .contains_key(&other_link)
+        );
+        send_pick(&mut app, link, Vec2::new(f32::NAN, 0.0));
+        assert_eq!(
+            app.world().get::<RespawnState>(root),
+            Some(&RespawnState::InvalidPick)
+        );
+        send_pick(&mut app, link, accepted);
+        assert_eq!(
+            app.world().get::<RespawnState>(root),
+            Some(&RespawnState::Idle)
+        );
+    }
+
     /// The game's match flow: a player present at a fill-up holds a tank, the one it fights combat
     /// in; combat's boundary spawns no second life, and a connection landing on it joins once.
     /// Results sweeps every tank, and the next fill-up hands every connected player a fresh life at
@@ -1984,9 +2096,9 @@ mod tests {
     #[test]
     fn blocked_map_picks_wait_only_for_body_occupancy() {
         for permanent in [false, true] {
-            let mut app = placement_app();
+            let mut app = spawn_pick_app();
             let client_id = PeerId::Netcode(1);
-            let link = app.world_mut().spawn((RemoteId(client_id), Connected)).id();
+            let link = pick_link(&mut app, 1);
             app.world_mut()
                 .resource_mut::<PendingClients>()
                 .0
@@ -2050,18 +2162,7 @@ mod tests {
                     app.world().get_entity(root).is_ok(),
                     "a refused request cannot become an automatic respawn"
                 );
-                let checked = check_spawn_pick(
-                    750.0,
-                    SetSpawnPoint {
-                        x: picked.x,
-                        z: picked.y,
-                    },
-                    &[],
-                    None,
-                    FIXTURE_BODY_RADIUS_M,
-                );
-                let next = picked_state(expected, &checked);
-                *app.world_mut().get_mut::<RespawnState>(root).unwrap() = next;
+                send_pick(&mut app, link, picked);
                 app.world_mut()
                     .get_mut::<TankCommand>(root)
                     .unwrap()
