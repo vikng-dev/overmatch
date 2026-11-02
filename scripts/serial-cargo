@@ -15,6 +15,9 @@
 # `test` builds under the `edit` profile (Cargo.toml) unless the caller names a profile, so every
 # edit loop shares one build of the crate. OVERMATCH_CARGO_LOCK_WAIT_S bounds the wait for the lock
 # (default 3600 s; lockf exits 75 when it runs out).
+#
+# Each run appends one line to ~/.cache/overmatch/cargo-queue.tsv: queued, started and finished
+# epoch seconds, exit status, worktree, cargo arguments. Started minus queued is the queue wait.
 set -euo pipefail
 
 here=$(cd "$(dirname "$0")" && pwd -P)
@@ -30,8 +33,17 @@ if [[ "${1:-}" == "--holding-lock" ]]; then
   if [[ "${1:-}" == "test" ]] && ! printf '%s\n' "$@" | grep -qE '^(--profile|--release|-r)(=|$)'; then
     set -- test --profile edit "${@:2}"
   fi
-  exec cargo "$@"
+  started=$(date +%s)
+  status=0
+  cargo "$@" || status=$?
+  { mkdir -p "$HOME/.cache/overmatch" &&
+    printf '%s\t%s\t%s\t%s\t%s\t%s\n' "$OVERMATCH_CARGO_QUEUED_AT" "$started" "$(date +%s)" "$status" \
+      "$(basename "$top")" "$*" >>"$HOME/.cache/overmatch/cargo-queue.tsv"; } 2>/dev/null ||
+    echo "serial-cargo: could not append to ~/.cache/overmatch/cargo-queue.tsv; the build's status stands" >&2
+  exit "$status"
 fi
 
+OVERMATCH_CARGO_QUEUED_AT=$(date +%s)
+export OVERMATCH_CARGO_QUEUED_AT
 exec /usr/bin/lockf -k -t "${OVERMATCH_CARGO_LOCK_WAIT_S:-3600}" /tmp/overmatch-cargo.lock \
   "$here/serial-cargo" --holding-lock "$@"
