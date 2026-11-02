@@ -1,42 +1,20 @@
-//! **The persistence seam.** Everything about WHERE settings live, in WHAT format, how they are
-//! written safely, and how tolerant reading them is, lives behind this module's three functions —
-//! [`load`], [`save`], [`location`]. Nothing above it (the [`Settings`] model, the reconcilers, the
-//! settings page) names a path, a file format, or a serializer.
+//! Persistence seam: [`load`], [`save`], [`location`] hide path, format, serialization, tolerance
+//! and write safety from model, reconcilers and page. Evidence and rejected crates:
+//! `.agents/docs/design/display/persistence-brief-2026-07.md` (verified against Bevy 0.19.0,
+//! RON 0.12, serde 1.0.229 and Apple/Microsoft docs).
 //!
-//! Everything here is applied from, and justified in, the research brief at
-//! `.agents/docs/design/display/persistence-brief-2026-07.md` (source-verified against bevy 0.19.0,
-//! ron 0.12, serde 1.0.229, and Apple/Microsoft primary docs). The brief is the reference; this doc
-//! records only what the code does and the few rules a future editor must not break.
+//! `video.ron` is machine-local; future keybindings belong in portable `controls.ron`. Split by
+//! filename in one config directory so Steam Cloud can exclude video/GPU/monitor facts. Valve
+//! requires that separation; Tunnet had to hotfix its video file out of cloud sync.
 //!
-//! # The file is MACHINE-LOCAL, and its name says so
+//! On-disk types use primitives, String and our enums, never Bevy's KeyCode: the 0.12→0.13
+//! variant rename broke player files. Use BTreeMap for stable bytes and per-action Option<Key>
+//! so one bad binding reverts one action, not the whole file.
 //!
-//! `video.ron`, not `settings.ron`. The split axis for config files is **machine-local vs
-//! portable**, not settings vs stats: video/GPU/monitor facts must never roam or cloud-sync, while
-//! keybindings must follow the player to any machine. Valve's Auto-Cloud docs say it outright
-//! ("avoid machine-specific configurations such as video settings"), and Tunnet — the flagship
-//! shipped commercial Bevy game — had to HOTFIX exactly this, moving its video settings into a
-//! separate file the cloud ignores.
-//!
-//! One config directory, split by FILENAME, so a future Steam Cloud manifest can include/exclude by
-//! name. Every field in [`Settings`] today — the render ladders and the V2 display fields (window
-//! mode, frame cap, UI scale) alike — is machine-local and belongs here.
-//!
-//! **Binding for whoever adds keybindings: they go in a NEW `controls.ron`, never in this file.**
-//! And the on-disk key type must be OUR OWN enum, never `bevy::input::keyboard::KeyCode` — bevy
-//! 0.12→0.13 renamed the variants (`KeyCode::W` → `KeyCode::KeyW`, `Up` → `ArrowUp`) and broke
-//! deserialization in every player's file. General rule: **on-disk types contain only primitives,
-//! `String`, and types we define.** Use `BTreeMap` (a `HashMap`'s randomly-seeded hasher writes
-//! different bytes every save) and per-action `Option<Key>` so one bad binding degrades to one
-//! reverted action rather than a full reset.
-//!
-//! # Why hand-rolled, settled
-//!
-//! Verified at the v0.19.0 tag: bevy's own first-party `bevy_settings` writes to macOS's
-//! `~/Library/Preferences`, which Apple's File System Programming Guide explicitly forbids
-//! self-written files in; destroys unknown keys and comments on every save; reverts a bad field
-//! silently with no log; and has no version field at all. `bevy-persistent`'s native write is
-//! truncate-in-place, NOT atomic. `bevy_pkv` silently falls back to writing its database into the
-//! CWD when directory resolution fails. Tunnet hand-rolls exactly this shape. See brief §1.
+//! Hand-rolling is settled (brief §1): `bevy_settings` at v0.19.0 self-writes to macOS Preferences
+//! against Apple's rule, destroys unknown keys/comments, silently reverts bad fields and has no
+//! version. `bevy-persistent` truncates in place; `bevy_pkv` silently falls back to CWD. Tunnet
+//! uses this shape too.
 
 use std::path::{Path, PathBuf};
 
@@ -68,28 +46,18 @@ const RENAME_RETRY_BUDGET: std::time::Duration = std::time::Duration::from_milli
 /// scanner lets go within milliseconds. Never produced by the platforms where they'd be permanent.
 const WINDOWS_TRANSIENT_RENAME_ERRORS: [i32; 3] = [5, 32, 33];
 
-/// Reads ONLY the version, before the schema. The whole point is that it cannot fail on a file whose
-/// SHAPE changed: a missing `version` defaults to 0, and every other key is ignored.
-///
-/// Without this the refuse-newer gate cannot fire where it matters — a future file that renamed or
-/// restructured a field fails the full parse first and gets reported as "corrupt", which is exactly
-/// the case the version number exists to distinguish. Godot (`project_settings.cpp` reads
-/// `config_version` during the streaming parse) and Minecraft (`Options.java` probes out of an
-/// untyped bag, `catch (RuntimeException) ⇒ 0`) both do precisely this.
+/// Probe version before schema: missing means 0, other keys are ignored. A future file with
+/// restructured fields must report FutureVersion, not Corrupt. Godot's streaming config_version
+/// and Minecraft's untyped Options probe use the same ordering.
 #[derive(Deserialize)]
 struct VersionProbe {
     #[serde(default)]
     version: u32,
 }
 
-/// What happened while reading the settings, as DATA rather than a log line.
-///
-/// The distinction is load-bearing, not stylistic: [`load`] runs BEFORE `DefaultPlugins`, because
-/// the present mode has to be known when the primary `Window` is described — and that is also
-/// before `LogPlugin` installs a tracing subscriber, so anything logged there goes nowhere. (MEASURED
-/// 2026-07-27: the first cut of this module logged directly from the boot read and produced not one
-/// line in a real `--offline` launch.) So the outcome is carried as a value and reported by
-/// `settings::report_store_load` once the app is up.
+/// Boot outcome as data: `load` precedes DefaultPlugins and the tracing subscriber. MEASURED:
+/// logging there produced no line in a real `--offline` launch. Carry it to
+/// `settings::report_store_load` at Startup instead.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(super) enum LoadNote {
     /// The file was read and applied.
@@ -118,28 +86,17 @@ pub(super) struct Load {
     pub(super) note: LoadNote,
 }
 
-/// Resolve the config directory from explicit inputs — **pure**, so the platform rule is unit
-/// testable on any OS. Mirrors `assets::asset_root_from`, and for the same reason: the last
-/// path-resolution bug in this repo survived because the rule lived only inside `std::env` reads.
+/// Pure path resolution, unit-testable without env reads (as `assets::asset_root_from`).
+/// Precedence: [`CONFIG_DIR_ENV`], then platform convention:
+/// - macOS: $HOME/Library/Application Support/Overmatch
+/// - Windows: %APPDATA%\Overmatch
+/// - Linux/other: $XDG_CONFIG_HOME/overmatch, else $HOME/.config/overmatch
 ///
-/// Precedence: [`CONFIG_DIR_ENV`] wins outright, then the platform convention:
-/// - macOS: `$HOME/Library/Application Support/Overmatch`
-/// - Windows: `%APPDATA%\Overmatch`
-/// - Linux/other: `$XDG_CONFIG_HOME/overmatch`, else `$HOME/.config/overmatch`
-///
-/// Deliberately NOT beside the executable, and the reasons are stronger than "discouraged":
-/// - a signed macOS `.app` is read-only by Apple's own rule (TN2206: *"Bundles should be treated as
-///   read-only once they have been signed"*), and `scripts/package-macos.sh` signs and notarizes;
-/// - macOS **App Translocation** additionally runs a quarantined, never-Finder-moved `.app` from a
-///   read-only randomized mount whose path CHANGES every launch — exactly the GitHub-release
-///   `.dmg`/`.zip` path;
-/// - a 64-bit Windows game under `Program Files` gets `ACCESS_DENIED` with no fallback (UAC's
-///   VirtualStore redirection is disabled for 64-bit and manifested apps).
-///
-/// The asset root can be exe-relative because it is READ-ONLY; anything written cannot.
-///
-/// Returns `None` when the platform's home/appdata variable is missing — the caller then runs on
-/// defaults and reports [`LoadNote::NoLocation`], rather than inventing a path.
+/// Never exe-relative: signed .apps are read-only (Apple TN2206), App Translocation adds a
+/// randomized read-only mount changing each launch, and 64-bit/manifested Program Files apps
+/// get `ACCESS_DENIED` without VirtualStore. The read-only asset root may be exe-relative; writes
+/// cannot. Missing home/appdata returns None for defaults plus [`LoadNote::NoLocation`], never
+/// an invented path.
 fn config_dir_from(
     target_os: &str,
     env_override: Option<&Path>,
@@ -495,24 +452,10 @@ mod tests {
         assert!(ron::de::from_str::<VersionProbe>(&text).is_ok());
     }
 
-    /// **The sparse-write rule** (the highest-value item in the brief): a value equal to the current
-    /// default is NOT written, so a default can still be changed for existing players later. Once
-    /// `shadow_distance: M150` is on disk it is indistinguishable from a deliberate choice — that is the
-    /// bug `television` had to write a 318-line archaeology system to undo.
-    ///
-    /// **That "later" arrived on 2026-07-28**, when all three shadow defaults moved off measurement.
-    /// Every player who never opened the page picked the new picture up for free, and the only files
-    /// that had to be reasoned about at all were the ones carrying a DELIBERATE choice — which is
-    /// exactly the property this test exists to keep. It is the rule's first real payout, so it is
-    /// recorded here rather than left as a hypothetical.
-    ///
-    /// `version` is the deliberate exception and must ALWAYS be written, or a fully-default file
-    /// probes as version 0.
-    ///
-    /// **Stated as "exactly one key", not as a list of keys that must be absent.** The absent-list
-    /// form was FAIL-OPEN: a field added later without a `skip_serializing_if` would not be on the
-    /// list, so the test would keep passing while every player's file silently froze that field's
-    /// current default. Counting keys makes a new field fail here the day it lands.
+    /// Sparse saves must omit defaults so future defaults can reach existing players, while always
+    /// writing version (otherwise a default file probes as 0). See [`Settings`] for the rationale.
+    /// Assert exactly one key, not an absent-key list: a new field missing skip_serializing_if must
+    /// fail immediately rather than silently freeze its default.
     #[test]
     fn defaults_are_not_written_but_the_version_always_is() {
         // `pretty_config` puts one `key: value,` per line, so the keys are the text left of the
@@ -530,9 +473,7 @@ mod tests {
             ["version"],
             "a fully-default file is the version stamp and NOTHING else",
         );
-        // A non-default value IS written, and only that one — the shadow rows are separate
-        // fields and diff separately. (`M1000` rather than `M350`: the probe only has to be a rung
-        // that is NOT the default, and `M350` became the default on 2026-07-28.)
+        // Non-default shadow rows serialize independently.
         assert_eq!(
             keys_of(&Settings {
                 shadow_distance: ShadowDistance::M1000,
@@ -589,17 +530,10 @@ mod tests {
         assert_eq!(edited.lod_pixel_budget, PixelBudget(1.2));
     }
 
-    /// **The distance-ladder migration, through a whole file** (2026-07-28). The rungs went
-    /// `100/150/300` → `350/700/1000`; the retired tokens are `#[serde(alias)]`es on `M350`, so
-    /// every `video.ron` a player already has keeps loading, and keeps loading onto a rung the
-    /// settings page can actually walk: one in [`ShadowDistance::ORDER`], because `ui::step_in`
-    /// resolves a current value missing from `ORDER` to index 0, which is `Off`, and the next press
-    /// of the right arrow would turn shadows off.
-    ///
-    /// It is a MIGRATION and not a rename, so it is deliberately lossy and deliberately one-way: all
-    /// three old rungs collapse onto the nearest survivor, and the next save writes the new token.
-    /// That is within the module doc's policy (a value's meaning is unchanged — 350 m still means
-    /// 350 m), so [`SETTINGS_VERSION`] does not move.
+    /// Retired shadow tokens migrate through a whole file to the nearest surviving rung in ORDER.
+    /// Off-ladder values would step to Off; other fields must survive. The migration is lossy and
+    /// one-way: the next save writes no retired token. Meaning under a surviving name is unchanged,
+    /// so [`SETTINGS_VERSION`] does not move.
     #[test]
     fn the_retired_shadow_distance_rungs_load_and_migrate() {
         for retired in ["M100", "M150", "M300"] {
@@ -641,8 +575,7 @@ mod tests {
             Settings {
                 version: SETTINGS_VERSION,
                 shadow_distance: ShadowDistance::Off,
-                // A non-default rung on purpose: `X4096` became the default on 2026-07-28, so it
-                // would round-trip through an ABSENT key and stop exercising the written one.
+                // Non-default, so the round-trip exercises a written key.
                 shadow_resolution: ShadowResolution::X1024,
                 shadow_cascades: ShadowCascades::Two,
                 msaa: MsaaLevel::Off,
@@ -697,9 +630,7 @@ mod tests {
         }
     }
 
-    /// **The forward/backward-compatibility contract**, which is what lets the research-pending
-    /// entries land as plain new fields. A file missing a key loads it at its default; a file
-    /// carrying a key this build has never heard of is ignored, not rejected.
+    /// Missing keys default; unknown keys are skipped. New fields must preserve this compatibility.
     #[test]
     fn unknown_and_missing_fields_both_load_cleanly() {
         let Parsed::Ok(missing) = parse("(shadow_distance: M700)") else {
@@ -717,8 +648,7 @@ mod tests {
             "absent vsync takes the default"
         );
 
-        // Genuinely unknown keys (the V2 display fields and bloom graduated to known ones, so these
-        // are the next candidates a future build might write).
+        // Unknown keys a future build could write.
         let Parsed::Ok(unknown) =
             parse("(shadow_distance: M350, film_grain: On, motion_blur: 2, hdr_output: true)")
         else {
@@ -726,8 +656,7 @@ mod tests {
         };
         assert_eq!(unknown.shadow_distance, ShadowDistance::M350);
 
-        // The V2 display fields landing as plain new fields is the contract's second exercise: a
-        // file from before them loads with every one at its default.
+        // Files predating the display fields load their defaults.
         let Parsed::Ok(pre_v2) = parse("(version: 1, msaa: X2)") else {
             panic!("a file from before the V2 display fields must load");
         };
@@ -735,8 +664,7 @@ mod tests {
         assert_eq!(pre_v2.frame_cap, FrameCap::OFF);
         assert_eq!(pre_v2.ui_scale, UiScalePercent::default());
 
-        // The render-scale row landing as a plain new field is the contract's first exercise: a
-        // file written by the build BEFORE it existed must still load, at native.
+        // Files predating render scale load native.
         let Parsed::Ok(pre_render_scale) = parse("(version: 1, msaa: X2)") else {
             panic!("a file from before the render-scale row must load");
         };
@@ -747,16 +675,9 @@ mod tests {
         );
     }
 
-    /// A real file as shipped at version 1 — kept BYTE-FOR-BYTE, because it is what is actually on
-    /// players' disks; the fixture will be joined by one per shipped version, so a future schema
-    /// change proves it can still read what they have.
-    ///
-    /// It now also exercises a REMOVED field: `shadows` was one coupled preset until 2026-07-27 and
-    /// is two fields today. The module doc's policy says removing a field is free, and this is what
-    /// "free" means in practice — the file still loads, every key this build still knows survives,
-    /// and the retired key's two successors come up at their defaults rather than at some guess at
-    /// what `Low` used to mean. That is the deliberate cost of the removal, not a bug (which is also
-    /// why [`SETTINGS_VERSION`] did not move: nothing changed MEANING under the same name).
+    /// Keep the shipped version-1 bytes unchanged; add a fixture per shipped version. Known keys
+    /// must survive, while removed `shadows` leaves both successors at defaults rather than guessing
+    /// what Low meant. Removal needs no version bump: meaning under a surviving name is unchanged.
     #[test]
     fn version_1_fixture_still_loads() {
         const V1: &str =
