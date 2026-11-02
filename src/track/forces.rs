@@ -32,6 +32,7 @@ use bevy::ecs::entity::Entity;
 use bevy::math::{Affine3A, Vec2, Vec3};
 use serde::{Deserialize, Serialize};
 
+use super::load::SupportFact;
 #[cfg(test)]
 use super::oracle::ContactOracle;
 use super::oracle::{TerrainContact, TerrainOracle};
@@ -426,6 +427,8 @@ pub struct SideReport {
     /// The side's rolling resistance this tick (N, [`rolling_resistance`]), inside
     /// [`Self::belt_reaction`]: telemetry of the term.
     pub rolling_resistance: f32,
+    /// Terrain/construction facts before dynamic support damping; Driver observation only.
+    pub perceived_support: Vec<super::load::SupportFact>,
     /// The station probes' oracle-call inputs/results, in execution order (the depth gradient's
     /// differences are not recorded). Measurement builds only.
     #[cfg(feature = "bitprobe")]
@@ -1088,6 +1091,11 @@ fn collect_column_contacts<O: TerrainOracle>(
                     (p, normal),
                     (load, load_elastic),
                 );
+                let (mu, rolling) = surface_under(params.grip, collider, p, oracle, pieces);
+                let half_span = axis * (contact_len / 2.0);
+                let fact =
+                    SupportFact::new(p, normal, half_span, weight * contact_len, (mu, rolling));
+                report.perceived_support.push(fact);
                 if load <= 0.0 {
                     if elements_mode && load_elastic > 0.0 {
                         held.push((material(i) * 3 + ci, load_elastic));
@@ -1098,8 +1106,6 @@ fn collect_column_contacts<O: TerrainOracle>(
                 let (long_dir, lat_dir, has_plane, slip_long, slip_lat) =
                     contact_frame(affine, tan2, normal, vel, belt_speed);
                 let belt_velocity = hull_vel - long_dir * belt_speed;
-                let (mu, rolling) = surface_under(params.grip, collider, p, oracle, pieces);
-
                 cols.push(ColumnContact {
                     p,
                     normal,
@@ -1605,6 +1611,27 @@ mod tests {
                 oracle.calls.get()
             );
         }
+    }
+
+    /// The Driver must still see geometrically supported ground when separating velocity
+    /// unloads the normal damper. A sensor collected only from emitted forces loses that ground.
+    #[test]
+    fn perceived_support_survives_dynamic_load_dropout() {
+        // Fixture: a shallow pad, identical geometry, rest versus a rapid separating velocity.
+        let loop_pts = rect_loop(0.02);
+        let measure = |velocity| {
+            let mut state = SideState::default();
+            let mut elements = GripElements::for_links(25);
+            rig_tick(&loop_pts, &mut state, &mut elements, 0.0, velocity)
+        };
+        let resting = measure(Vec3::ZERO);
+        let separating = measure(Vec3::Y * 20.0);
+        assert!(!resting.perceived_support.is_empty());
+        assert!(
+            separating.contacts.is_empty(),
+            "fixture must unload the damped support"
+        );
+        assert_eq!(resting.perceived_support, separating.perceived_support);
     }
 
     fn strain_sum(elems: &GripElements) -> f32 {

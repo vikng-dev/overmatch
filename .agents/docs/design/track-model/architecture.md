@@ -364,6 +364,56 @@ demand filter, the clutch coupling) sees it as load. The shift-landing predictor
 and charges the rolling share whole, because the belt still rolls on its ground there. A piece is
 no ground and takes none.
 
+**Driver observation and measured force resolution.** `track::load::observe` supplies the
+unfiltered `TransmissionInput::perceived_load`: `L = W sin(theta) + c_rr W cos(theta) +
+mu_t W length / (4 R_g)` along the engaged ladder. Nominal weight is vehicle data; normals,
+paired friction and rolling coefficients are the contact pass's own geometric/material facts,
+collected before the normal damper can unload a patch. Uniform pressure weights patches by
+supported length and collocation-column share. The projected support tangent supplies grade;
+the footprint span and current detent radius supply the turn term. Rolling is the full potential
+resistance even at rest, independently of the physical low-speed fade. Airborne means no terrain
+load. No acceleration, spring/damper force, temporal filter or recoil term enters L. The game and
+sandbox share this implementation. The existing scheduler still reads `demand_n` unchanged;
+the bitprobe records both observations, priced force and effective delivered force.
+
+MEASURED by `headless_test::drive_load`: uniform shipped grounds, rest and rolling entries;
+extended fixture planes at the course angles, parked then rolling. The extension isolates each
+incline from the slab/crest under the short authored ramps. Values below are kN. L ranges pool
+both ground entries; gap ranges include every first coupled landing, with its count in brackets.
+A rolling entry with no shift contributes no landing sample. Distribution, individual landings,
+fixture method and precision are in
+[the measurement record](../../../scratch/research/drive-load-measurements-2026-11-02.json).
+
+| Ground or fixture slope | L expected (DERIVED) | L measured range (MEASURED) | Landing gap range [count] (MEASURED) | M (DERIVED, Resolution) |
+|---|---:|---:|---:|---:|
+| concrete | 22.366799 | 22.366783–22.366809 | −69.476…237.746 [7] | 327.846 |
+| dirt | 33.550199 | 33.550180–33.550211 | −90.099…193.811 [6] | 327.846 |
+| gravel | 27.958500 | 27.958520–27.958549 | −83.800…216.126 [7] | 327.846 |
+| mud | 83.875500 | 83.875445–83.875562 | 38.943…63.028 [2] | 327.846 |
+| sand | 67.100398 | 67.100359–67.100422 | 41.420 [1] | 327.846 |
+| 10° fixture plane | 124.632594 | 124.632531–124.632656 | 51.139…102.517 [2] | 327.846 |
+| 20° fixture plane | 217.519797 | 217.519938–217.520109 | 169.886 [1] | 327.846 |
+| 30° fixture plane | 303.797781 | 303.797375–303.797594 | −0.000125 [1] | 327.846 |
+
+The gap is price at `v_land = v − L t_cut / M_c` minus first-coupled-tick delivery, both bounded
+by the same nominal observed grip; the price follows the most recent cut through contiguous
+windows, so a cascade cannot compare different gears. MEASURED global signed range is
+−90,098.891…237,746.234 N, span 327,845.125 N; maximum absolute L residual is 0.406 N.
+DERIVED `M = floor(span + residual) + 1 N = 327,846 N`, the smallest whole-Newton bound strictly
+above that sum, lives in `assets/driving/driver.ron` under `Resolution` and is admitted before
+play. This is a bound on the **current first-tick drivetrain**, including crank/clutch transients
+and braked shift cuts, not certification of a small margin for the replacement Driver laws.
+For example, MEASURED concrete's first landing prices 411.641 kN (415.758 kN at actual landing
+speed) and delivers 173.895 kN: observer noise cannot explain the gap. Remeasure after the
+clutch/fuel law changes; no scheduler decision consumes this margin in this instrument lane.
+
+MEASURED finite-radius turns add 9.901–16.561 kN above straight rolling across the shipped
+grounds. In the paired rearward-shot uphill probe on the authored middle ramp, one actual primary
+shot changes L by at most 0.093750 N, below M. DERIVED design predictions remain conditional:
+dirt converges on F8 if `M < 8.0 kN`; this measured bound does not meet that premise. Sand's F7
+landing spare of approximately −6 kN refuses the upshift for every positive M. These are the
+accepted design's predictions, not runs of the replacement scheduler.
+
 **Rolling on flat ground costs nothing else.** `c_rr` is published motion resistance, which
 lumps in running-gear losses, so the contact law spends nothing else on steady flat travel.
 The elastic spring integrates the directional penetration profile. Its force acts along the

@@ -1181,6 +1181,8 @@ pub struct TransmissionInput {
     /// Each side's rolling resistance inside `reactions` (N, `forces::SideReport::rolling_resistance`):
     /// the ground's share, which a cut drive does not relax.
     pub rolling: [f32; 2],
+    /// Unfiltered terrain/construction observation; instrumentation only.
+    pub perceived_load: super::load::PerceivedLoad,
     pub dt: f32,
     /// The driver holds the service brakes: no drive at any throttle, the full service brakes while
     /// the tank moves, and the parking latch once it is at rest (`driver_intent`).
@@ -1317,6 +1319,33 @@ fn available_force_in_gear(
     let rpm = (shaft.max(0.0) * gear / tp.sprocket_radius / RPM_TO_RAD).max(tp.engine.idle_rpm);
     let [induced, idle, drag] = engine_torques(tp, supply, rpm * RPM_TO_RAD, 1.0);
     (induced + idle - drag).min(supply.transmitted * tp.clutch_capacity) * gear / tp.sprocket_radius
+}
+
+/// Instrument for the accepted Driver law: price the crank at the landing shaft speed,
+/// or the commanded launch speed while slipping, bounded by clutch and contact grip.
+/// This observes the existing torque law; it does not select a gear or change delivery.
+#[cfg(feature = "bitprobe")]
+pub(crate) fn price_driver_force(
+    tp: &TransmissionParams,
+    supply: DriveSupply,
+    shaft: f32,
+    gear: f32,
+    command: f32,
+    grip_n: f32,
+) -> f32 {
+    let launch_rpm = tp.engine.idle_rpm + command * (tp.peak_torque_rpm - tp.engine.idle_rpm);
+    let shaft_rpm = shaft.max(0.0) * gear / tp.sprocket_radius / RPM_TO_RAD;
+    // The design prices a fresh sub-idle landing as a launch slip; other landings are In.
+    // pricing every sub-peak landing at the peak would invent a slip the clutch never made.
+    let rpm = if shaft_rpm < tp.engine.idle_rpm {
+        launch_rpm
+    } else {
+        shaft_rpm
+    };
+    let [induced, idle, drag] = engine_torques(tp, supply, rpm * RPM_TO_RAD, command);
+    ((induced + idle - drag).min(supply.transmitted * tp.clutch_capacity) * gear
+        / tp.sprocket_radius)
+        .min(grip_n)
 }
 
 /// DERIVED low-demand headroom (N): a fraction of the lesser of drivetrain force capacity and
@@ -2768,10 +2797,32 @@ fn input_probe(
         dt: inp.dt,
         mean_speed: m,
         difference_speed: d,
+        perceived_load_n: inp.perceived_load.total_n(),
+        grip_limit_n: inp.perceived_load.grip_n,
         demand_pre: st.demand_n,
         omega_pre: st.omega_e,
         ..Default::default()
     }
+}
+
+/// The output half of the optional force trace. The operating point is signed shaft speed,
+/// reduction and delivered mean-axis force; recording it cannot mutate the physical solve.
+#[cfg(feature = "bitprobe")]
+fn force_probe(
+    tp: &TransmissionParams,
+    inp: &TransmissionInput,
+    (shaft, reduction, delivered): (f32, f32, f32),
+    probe: &mut TransmissionProbe,
+) {
+    probe.priced_force_n = price_driver_force(
+        tp,
+        inp.supply,
+        shaft,
+        reduction,
+        inp.throttle.abs(),
+        inp.perceived_load.grip_n,
+    );
+    probe.delivered_force_n = delivered.min(inp.perceived_load.grip_n);
 }
 
 /// Advance the interruption window and the dwell on their separate clocks. The returned flag
@@ -3001,6 +3052,7 @@ pub fn step(
         .min((2.0 * work.crank_energy / tp.engine_inertia).sqrt());
     #[cfg(feature = "bitprobe")]
     {
+        force_probe(tp, inp, (dir * m, g, dir * f_c), &mut bitprobe);
         bitprobe.power_scale = power_scale;
         bitprobe.omega_end = st.omega_e;
     }

@@ -134,6 +134,7 @@ fn input(throttle: f32, steer: f32, speeds: [f32; 2], reactions: [f32; 2]) -> Tr
         speeds,
         reactions,
         rolling: [0.0; 2],
+        perceived_load: super::super::load::PerceivedLoad::default(),
         dt: 1.0 / 64.0,
         brake: false,
     }
@@ -3926,4 +3927,29 @@ fn healthy_net_curve_and_command_blend_are_preserved() {
             assert!((gross + idle - drag - net).abs() < 1e-3);
         }
     }
+}
+
+/// The observer is instrumentation: changing its reading must not change any authoritative
+/// transmission state or delivered belt force while the existing scheduler remains in use.
+#[test]
+fn perceived_load_does_not_change_the_existing_solve() {
+    let (fp, tp) = (lab_fp(), lab_tp());
+    let mut before = fresh(&tp);
+    let mut observed = before;
+    // Fixture: the same speeds, reactions and command, with an unrelated observed terrain load.
+    let base = input(1.0, 0.0, [1.0; 2], [20_000.0; 2]);
+    let baseline = step(&fp, &tp, &mut before, &base);
+    let changed = TransmissionInput {
+        perceived_load: super::super::load::PerceivedLoad {
+            grade_n: 300_000.0,
+            rolling_n: 80_000.0,
+            turn_n: 90_000.0,
+            grip_n: 500_000.0,
+        },
+        ..base
+    };
+    let report = step(&fp, &tp, &mut observed, &changed);
+    assert_eq!(before, observed);
+    assert_eq!(baseline.next_speeds, report.next_speeds);
+    assert_eq!(baseline.forces, report.forces);
 }

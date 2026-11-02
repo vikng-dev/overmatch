@@ -112,6 +112,10 @@ const TRANSMISSION_INPUT_FIELDS: &[(&str, &str)] = &[
     ("demand_sample", "f32"),
     ("demand_pre", "f32"),
     ("demand_post", "f32"),
+    ("perceived_load_n", "f32"),
+    ("grip_limit_n", "f32"),
+    ("priced_force_n", "f32"),
+    ("delivered_force_n", "f32"),
     ("demand_updated", "bool"),
 ];
 
@@ -262,7 +266,7 @@ pub(crate) struct ElementOutputProbe {
     pub dwell: u32,
 }
 
-#[derive(Clone, Copy, Debug, Default)]
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub(crate) struct TransmissionProbe {
     pub throttle: f32,
     pub steer: f32,
@@ -274,6 +278,10 @@ pub(crate) struct TransmissionProbe {
     pub demand_sample: f32,
     pub demand_pre: f32,
     pub demand_post: f32,
+    pub perceived_load_n: f32,
+    pub grip_limit_n: f32,
+    pub priced_force_n: f32,
+    pub delivered_force_n: f32,
     pub demand_updated: bool,
     pub mean_speed: f32,
     pub difference_speed: f32,
@@ -529,6 +537,12 @@ fn startup_dump(app: &App, tank: Entity) -> StartupBuilder {
         .expect("fixture readiness checked the field")
         .bitprobe_startup(&mut out);
     world.resource::<TrackGear>().bitprobe_startup(&mut out);
+    out.f32(
+        "driver.landing_force_margin_n",
+        world
+            .resource::<crate::track::load::DriverResolution>()
+            .landing_force_margin_n,
+    );
 
     let spec = &world.resource::<TankBlueprint>().spec;
     out.f32("spec.mass", spec.mass);
@@ -782,6 +796,10 @@ fn transmission_input_payload(capture: &BitprobeCapture) -> Vec<u32> {
         probe.demand_sample,
         probe.demand_pre,
         probe.demand_post,
+        probe.perceived_load_n,
+        probe.grip_limit_n,
+        probe.priced_force_n,
+        probe.delivered_force_n,
     ] {
         f32_word(&mut output, value);
     }

@@ -1,0 +1,526 @@
+{
+  "subject": "The game driving model; game state only.",
+  "method": "Full production headless sim, current scheduler unchanged. Ground cases: rest and governed top-gear entries, 40 simulated seconds at full command, last-second L. Course: uninterrupted fixture planes at the course angles, 64 parked observation ticks followed by 512 ticks from a 3 m/s gear-six entry. One sample per first coupled tick after the most recent cut, including contiguous cuts. Prices and delivery share the nominal contact grip cap. Printed force precision 0.001 N. p95 uses the lower empirical index floor((n-1)*0.95).",
+  "fixture_subject": "Declared vehicle and shipped ground table; no vehicle or ground-specific pass condition. Course geometry and entry speeds/gears are fixture data. Rearward-shot probe uses the authored middle ramp and part command.",
+  "rows": [
+    {
+      "case": "concrete rolling=false",
+      "expected_n_DERIVED": 22366.799,
+      "load_n_MEASURED": {
+        "n": 64,
+        "min": 22366.783,
+        "median": 22366.797,
+        "p95": 22366.803,
+        "max": 22366.809
+      },
+      "gap_n_MEASURED": {
+        "n": 7,
+        "min": -69476.203,
+        "median": -26253.109,
+        "p95": 110442.219,
+        "max": 237746.234
+      },
+      "landing_speed_error_m_s_MEASURED": {
+        "n": 7,
+        "min": -0.028,
+        "median": 0.006,
+        "p95": 0.015,
+        "max": 0.042
+      },
+      "landings_MEASURED": [
+        {
+          "gear": 2,
+          "predicted_force_n": 411641.438,
+          "delivered_force_n": 173895.203,
+          "gap_n": 237746.234,
+          "price_at_actual_n": 415758.094,
+          "speed_error_m_s": 0.014729
+        },
+        {
+          "gear": 3,
+          "predicted_force_n": 299928.531,
+          "delivered_force_n": 189486.312,
+          "gap_n": 110442.219,
+          "price_at_actual_n": 300691.938,
+          "speed_error_m_s": 0.005679
+        },
+        {
+          "gear": 4,
+          "predicted_force_n": 201715.734,
+          "delivered_force_n": 271191.938,
+          "gap_n": -69476.203,
+          "price_at_actual_n": 200011.906,
+          "speed_error_m_s": -0.027907
+        },
+        {
+          "gear": 5,
+          "predicted_force_n": 131704.578,
+          "delivered_force_n": 192506.078,
+          "gap_n": -60801.5,
+          "price_at_actual_n": 131973.391,
+          "speed_error_m_s": 0.010342
+        },
+        {
+          "gear": 6,
+          "predicted_force_n": 90791.477,
+          "delivered_force_n": 129872.531,
+          "gap_n": -39081.055,
+          "price_at_actual_n": 91285.117,
+          "speed_error_m_s": 0.041726
+        },
+        {
+          "gear": 7,
+          "predicted_force_n": 62741.516,
+          "delivered_force_n": 88994.625,
+          "gap_n": -26253.109,
+          "price_at_actual_n": 62769.52,
+          "speed_error_m_s": 0.005041
+        },
+        {
+          "gear": 8,
+          "predicted_force_n": 41841.426,
+          "delivered_force_n": 59787.137,
+          "gap_n": -17945.711,
+          "price_at_actual_n": 41804.43,
+          "speed_error_m_s": -0.014755
+        }
+      ]
+    },
+    {
+      "case": "concrete rolling=true",
+      "expected_n_DERIVED": 22366.799,
+      "load_n_MEASURED": {
+        "n": 64,
+        "min": 22366.785,
+        "median": 22366.797,
+        "p95": 22366.803,
+        "max": 22366.809
+      },
+      "gap_n_MEASURED": null,
+      "landing_speed_error_m_s_MEASURED": null,
+      "landings_MEASURED": []
+    },
+    {
+      "case": "dirt rolling=false",
+      "expected_n_DERIVED": 33550.199,
+      "load_n_MEASURED": {
+        "n": 64,
+        "min": 33550.18,
+        "median": 33550.191,
+        "p95": 33550.203,
+        "max": 33550.207
+      },
+      "gap_n_MEASURED": {
+        "n": 6,
+        "min": -90098.891,
+        "median": -26628.742,
+        "p95": 55259.359,
+        "max": 193810.594
+      },
+      "landing_speed_error_m_s_MEASURED": {
+        "n": 6,
+        "min": -0.023,
+        "median": 0.007,
+        "p95": 0.019,
+        "max": 0.02
+      },
+      "landings_MEASURED": [
+        {
+          "gear": 2,
+          "predicted_force_n": 396933.75,
+          "delivered_force_n": 203123.156,
+          "gap_n": 193810.594,
+          "price_at_actual_n": 402430.281,
+          "speed_error_m_s": 0.019667
+        },
+        {
+          "gear": 3,
+          "predicted_force_n": 292847.906,
+          "delivered_force_n": 237588.547,
+          "gap_n": 55259.359,
+          "price_at_actual_n": 289688.75,
+          "speed_error_m_s": -0.023499
+        },
+        {
+          "gear": 4,
+          "predicted_force_n": 198993.422,
+          "delivered_force_n": 289092.312,
+          "gap_n": -90098.891,
+          "price_at_actual_n": 198653.562,
+          "speed_error_m_s": -0.005566
+        },
+        {
+          "gear": 5,
+          "predicted_force_n": 130205.766,
+          "delivered_force_n": 192506.078,
+          "gap_n": -62300.312,
+          "price_at_actual_n": 130386.969,
+          "speed_error_m_s": 0.006971
+        },
+        {
+          "gear": 6,
+          "predicted_force_n": 90063.367,
+          "delivered_force_n": 129872.531,
+          "gap_n": -39809.164,
+          "price_at_actual_n": 90293.609,
+          "speed_error_m_s": 0.019462
+        },
+        {
+          "gear": 7,
+          "predicted_force_n": 62365.883,
+          "delivered_force_n": 88994.625,
+          "gap_n": -26628.742,
+          "price_at_actual_n": 62316.352,
+          "speed_error_m_s": -0.008916
+        }
+      ]
+    },
+    {
+      "case": "dirt rolling=true",
+      "expected_n_DERIVED": 33550.199,
+      "load_n_MEASURED": {
+        "n": 64,
+        "min": 33550.18,
+        "median": 33550.191,
+        "p95": 33550.203,
+        "max": 33550.211
+      },
+      "gap_n_MEASURED": null,
+      "landing_speed_error_m_s_MEASURED": null,
+      "landings_MEASURED": []
+    },
+    {
+      "case": "gravel rolling=false",
+      "expected_n_DERIVED": 27958.5,
+      "load_n_MEASURED": {
+        "n": 64,
+        "min": 27958.521,
+        "median": 27958.535,
+        "p95": 27958.545,
+        "max": 27958.549
+      },
+      "gap_n_MEASURED": {
+        "n": 7,
+        "min": -83800.109,
+        "median": -26432.926,
+        "p95": 85464.188,
+        "max": 216126.266
+      },
+      "landing_speed_error_m_s_MEASURED": {
+        "n": 7,
+        "min": -0.025,
+        "median": 0.003,
+        "p95": 0.018,
+        "max": 0.033
+      },
+      "landings_MEASURED": [
+        {
+          "gear": 2,
+          "predicted_force_n": 404299.75,
+          "delivered_force_n": 188173.484,
+          "gap_n": 216126.266,
+          "price_at_actual_n": 409258.531,
+          "speed_error_m_s": 0.017743
+        },
+        {
+          "gear": 3,
+          "predicted_force_n": 296381.438,
+          "delivered_force_n": 210917.25,
+          "gap_n": 85464.188,
+          "price_at_actual_n": 295797.656,
+          "speed_error_m_s": -0.004343
+        },
+        {
+          "gear": 4,
+          "predicted_force_n": 200124.297,
+          "delivered_force_n": 283924.406,
+          "gap_n": -83800.109,
+          "price_at_actual_n": 198613.125,
+          "speed_error_m_s": -0.024751
+        },
+        {
+          "gear": 5,
+          "predicted_force_n": 130965.516,
+          "delivered_force_n": 192506.078,
+          "gap_n": -61540.562,
+          "price_at_actual_n": 131288.141,
+          "speed_error_m_s": 0.012412
+        },
+        {
+          "gear": 6,
+          "predicted_force_n": 90433.086,
+          "delivered_force_n": 129872.531,
+          "gap_n": -39439.445,
+          "price_at_actual_n": 90822.961,
+          "speed_error_m_s": 0.032954
+        },
+        {
+          "gear": 7,
+          "predicted_force_n": 62561.699,
+          "delivered_force_n": 88994.625,
+          "gap_n": -26432.926,
+          "price_at_actual_n": 62577.793,
+          "speed_error_m_s": 0.002896
+        },
+        {
+          "gear": 8,
+          "predicted_force_n": 41714.836,
+          "delivered_force_n": 59787.137,
+          "gap_n": -18072.301,
+          "price_at_actual_n": 41676.121,
+          "speed_error_m_s": -0.015443
+        }
+      ]
+    },
+    {
+      "case": "gravel rolling=true",
+      "expected_n_DERIVED": 27958.5,
+      "load_n_MEASURED": {
+        "n": 64,
+        "min": 27958.52,
+        "median": 27958.531,
+        "p95": 27958.543,
+        "max": 27958.549
+      },
+      "gap_n_MEASURED": null,
+      "landing_speed_error_m_s_MEASURED": null,
+      "landings_MEASURED": []
+    },
+    {
+      "case": "mud rolling=false",
+      "expected_n_DERIVED": 83875.5,
+      "load_n_MEASURED": {
+        "n": 64,
+        "min": 83875.453,
+        "median": 83875.508,
+        "p95": 83875.547,
+        "max": 83875.562
+      },
+      "gap_n_MEASURED": null,
+      "landing_speed_error_m_s_MEASURED": null,
+      "landings_MEASURED": []
+    },
+    {
+      "case": "mud rolling=true",
+      "expected_n_DERIVED": 83875.5,
+      "load_n_MEASURED": {
+        "n": 64,
+        "min": 83875.445,
+        "median": 83875.508,
+        "p95": 83875.547,
+        "max": 83875.562
+      },
+      "gap_n_MEASURED": {
+        "n": 2,
+        "min": 38943.484,
+        "median": 63028.062,
+        "p95": 38943.484,
+        "max": 63028.062
+      },
+      "landing_speed_error_m_s_MEASURED": {
+        "n": 2,
+        "min": -0.036,
+        "median": -0.027,
+        "p95": -0.036,
+        "max": -0.027
+      },
+      "landings_MEASURED": [
+        {
+          "gear": 7,
+          "predicted_force_n": 66124.0,
+          "delivered_force_n": 27180.516,
+          "gap_n": 38943.484,
+          "price_at_actual_n": 66266.914,
+          "speed_error_m_s": -0.026548
+        },
+        {
+          "gear": 6,
+          "predicted_force_n": 95601.664,
+          "delivered_force_n": 32573.6,
+          "gap_n": 63028.062,
+          "price_at_actual_n": 96019.227,
+          "speed_error_m_s": -0.036423
+        }
+      ]
+    },
+    {
+      "case": "sand rolling=false",
+      "expected_n_DERIVED": 67100.398,
+      "load_n_MEASURED": {
+        "n": 64,
+        "min": 67100.359,
+        "median": 67100.383,
+        "p95": 67100.406,
+        "max": 67100.422
+      },
+      "gap_n_MEASURED": null,
+      "landing_speed_error_m_s_MEASURED": null,
+      "landings_MEASURED": []
+    },
+    {
+      "case": "sand rolling=true",
+      "expected_n_DERIVED": 67100.398,
+      "load_n_MEASURED": {
+        "n": 64,
+        "min": 67100.359,
+        "median": 67100.383,
+        "p95": 67100.406,
+        "max": 67100.414
+      },
+      "gap_n_MEASURED": {
+        "n": 1,
+        "min": 41419.93,
+        "median": 41419.93,
+        "p95": 41419.93,
+        "max": 41419.93
+      },
+      "landing_speed_error_m_s_MEASURED": {
+        "n": 1,
+        "min": -0.026,
+        "median": -0.026,
+        "p95": -0.026,
+        "max": -0.026
+      },
+      "landings_MEASURED": [
+        {
+          "gear": 7,
+          "predicted_force_n": 64199.293,
+          "delivered_force_n": 22779.365,
+          "gap_n": 41419.93,
+          "price_at_actual_n": 64337.441,
+          "speed_error_m_s": -0.02566
+        }
+      ]
+    },
+    {
+      "case": "course 10 degrees",
+      "expected_n_DERIVED": 124632.594,
+      "load_n_MEASURED": {
+        "n": 576,
+        "min": 124632.531,
+        "median": 124632.594,
+        "p95": 124632.633,
+        "max": 124632.656
+      },
+      "gap_n_MEASURED": {
+        "n": 2,
+        "min": 51138.742,
+        "median": 102516.656,
+        "p95": 51138.742,
+        "max": 102516.656
+      },
+      "landing_speed_error_m_s_MEASURED": {
+        "n": 2,
+        "min": -0.082,
+        "median": -0.061,
+        "p95": -0.082,
+        "max": -0.061
+      },
+      "landings_MEASURED": [
+        {
+          "gear": 5,
+          "predicted_force_n": 129862.703,
+          "delivered_force_n": 78723.961,
+          "gap_n": 51138.742,
+          "price_at_actual_n": 127739.148,
+          "speed_error_m_s": -0.081697
+        },
+        {
+          "gear": 4,
+          "predicted_force_n": 208066.672,
+          "delivered_force_n": 105550.016,
+          "gap_n": 102516.656,
+          "price_at_actual_n": 204327.547,
+          "speed_error_m_s": -0.061242
+        }
+      ]
+    },
+    {
+      "case": "course 20 degrees",
+      "expected_n_DERIVED": 217519.797,
+      "load_n_MEASURED": {
+        "n": 576,
+        "min": 217519.938,
+        "median": 217520.031,
+        "p95": 217520.078,
+        "max": 217520.109
+      },
+      "gap_n_MEASURED": {
+        "n": 1,
+        "min": 169886.062,
+        "median": 169886.062,
+        "p95": 169886.062,
+        "max": 169886.062
+      },
+      "landing_speed_error_m_s_MEASURED": {
+        "n": 1,
+        "min": 1.022,
+        "median": 1.022,
+        "p95": 1.022,
+        "max": 1.022
+      },
+      "landings_MEASURED": [
+        {
+          "gear": 1,
+          "predicted_force_n": 472902.906,
+          "delivered_force_n": 303016.844,
+          "gap_n": 169886.062,
+          "price_at_actual_n": 472902.875,
+          "speed_error_m_s": 1.022185
+        }
+      ]
+    },
+    {
+      "case": "course 30 degrees",
+      "expected_n_DERIVED": 303797.781,
+      "load_n_MEASURED": {
+        "n": 576,
+        "min": 303797.375,
+        "median": 303797.469,
+        "p95": 303797.531,
+        "max": 303797.594
+      },
+      "gap_n_MEASURED": {
+        "n": 1,
+        "min": -0.125,
+        "median": -0.125,
+        "p95": -0.125,
+        "max": -0.125
+      },
+      "landing_speed_error_m_s_MEASURED": {
+        "n": 1,
+        "min": 1.115,
+        "median": 1.115,
+        "p95": 1.115,
+        "max": 1.115
+      },
+      "landings_MEASURED": [
+        {
+          "gear": 1,
+          "predicted_force_n": 435829.906,
+          "delivered_force_n": 435830.031,
+          "gap_n": -0.125,
+          "price_at_actual_n": 435830.031,
+          "speed_error_m_s": 1.114897
+        }
+      ]
+    }
+  ],
+  "turn_peak_extra_n_MEASURED": {
+    "concrete": 10850.025,
+    "dirt": 9903.219,
+    "gravel": 9901.273,
+    "mud": 16560.617,
+    "sand": 13110.93
+  },
+  "rearward_shot_max_load_change_n_MEASURED": 0.09375,
+  "resolution_DERIVED": {
+    "gap_min_n": -90098.891,
+    "gap_max_n": 237746.234,
+    "gap_span_n": 327845.125,
+    "max_absolute_load_residual_n": 0.40600000001722947,
+    "margin_n": 327846,
+    "derivation": "floor(global signed gap span + maximum absolute L residual) + 1 N: the smallest whole-Newton bound strictly above their sum.",
+    "limitation": "Current first-coupled-tick delivery, including crank/clutch transients and braked shift cuts. This does not certify a useful small margin for the replacement Driver laws; remeasure after clutch/fuel changes."
+  }
+}

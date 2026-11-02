@@ -3504,3 +3504,6 @@ fn loose_pieces_priced_per_tick() {
     clear(&mut app, &pieces);
     parked(&mut app, "parked, no pieces", &[]);
 }
+
+#[cfg(feature = "bitprobe")]
+mod drive_load;

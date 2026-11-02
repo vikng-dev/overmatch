@@ -12,6 +12,7 @@
 
 pub mod drive;
 pub mod forces;
+pub mod load;
 pub mod oracle;
 // The marker-driven suspension/track model, promoted out of `track_sandbox` (mirrors `forces`):
 // `derive` = the universal laws (pure f32 math), `marker_model` = the glb marker read (the

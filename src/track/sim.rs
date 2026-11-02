@@ -163,6 +163,9 @@ pub struct TrackGripEffect {
     pub belt_reaction: [f32; 2],
     /// Coarse, quantized digest of the complete element field. Diagnostic evidence only.
     pub field_digest: u32,
+    /// Per-source trace, so multi-tank headless probes read their own solve. Never replicated.
+    #[cfg(feature = "bitprobe")]
+    pub(crate) transmission_probe: crate::bitprobe::TransmissionProbe,
 }
 
 /// Apply an explicit hull impulse at a world point (retaining its torque arm). Forces-based, so
@@ -261,6 +264,13 @@ impl TrackGear {
     /// field stays private so only the drive step and HUD consume it.
     pub fn trans(&self) -> &TransmissionParams {
         &self.trans
+    }
+
+    /// Coupled translation mass for a torque-cut landing: hull plus both belt inertias (kg).
+    #[cfg(all(test, feature = "bitprobe"))]
+    pub(crate) fn landing_mass(&self) -> f32 {
+        let grip = self.params.grip.expect("a driving probe has a gripped rig");
+        2.0 * grip.side_weight / super::derive::G + 2.0 * self.params.inertia
     }
 
     /// DERIVED full service-brake deceleration along the direction of motion (m/s^2).
@@ -398,6 +408,7 @@ impl TrackGear {
 }
 
 pub fn sim_plugin(app: &mut App) {
+    app.insert_resource(super::load::DriverResolution::load());
     // Lazy one-shot: the blueprint lands at Startup (bake); the gear builds on the first
     // frame after and never again.
     app.add_systems(
@@ -665,6 +676,15 @@ pub(crate) fn belt_tick<O: TerrainOracle>(
             speeds: [rig.drive.sides[0].speed, rig.drive.sides[1].speed],
             reactions: [reports[0].belt_reaction, reports[1].belt_reaction],
             rolling: [reports[0].rolling_resistance, reports[1].rolling_resistance],
+            perceived_load: super::load::observe(
+                reports
+                    .iter()
+                    .flat_map(|report| report.perceived_support.iter()),
+                affine.transform_vector3(Vec3::NEG_Z)
+                    * if rig.transmission.reverse { -1.0 } else { 1.0 },
+                gear.params.grip.map_or(0.0, |grip| 2.0 * grip.side_weight),
+                super::load::turn_radius(&gear.trans, rig.transmission),
+            ),
             dt,
             brake,
             supply,
@@ -890,6 +910,10 @@ fn apply_track_forces(
             }
             capture.belt_reaction = [reports[0].belt_reaction, reports[1].belt_reaction];
             capture.transmission = tr.bitprobe;
+        }
+        #[cfg(feature = "bitprobe")]
+        {
+            effect.transmission_probe = tr.bitprobe;
         }
         for (si, report) in reports.into_iter().enumerate() {
             pieces.record_static_contacts(entity, &report.contacts, &mut transfers);
