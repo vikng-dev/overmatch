@@ -232,7 +232,6 @@ pub(super) fn apply_belt_support_field(
             side_commands,
             speeds: [belt.get(Side::Left), belt.get(Side::Right)],
             reactions: [reports[0].belt_reaction, reports[1].belt_reaction],
-            rolling: [reports[0].rolling_resistance, reports[1].rolling_resistance],
             dt,
             brake: false,
         },

@@ -358,62 +358,26 @@ terrain contact's normal load. The side's rolling load `Σ c_rr·N` fades linear
 `forces::ROLLING_FADE_SPEED` = 0.25 m/s (`Resolution`, stability derivation at the constant), so a
 tank at rest takes none, and joins the side's ground reaction `R` at the pre-tick belt speed: the
 transmission's `I·v̇ = Q − R` carries it, and every reader of `R` (the brake's stop force, the
-demand filter, the clutch coupling) sees it as load. The shift-landing predictor
-(`transmission::predict_shift_landing_m`) relaxes the grip's share of `R` through a torque cut
-and charges the rolling share whole, because the belt still rolls on its ground there. A piece is
-no ground and takes none.
-
-**Rolling on flat ground costs nothing else.** `c_rr` is published motion resistance, which lumps
-in the running gear's own losses, so it is the whole of what a ground takes from a rolling tank:
-the contact law spends nothing on steady travel over flat ground. Support and its damper act on
-the depth, along the surface's normal: the field's depth gradient at each column's mid probe
-(exactly 1 along the probe ray by the oracle's directional contract, a 1 cm `Resolution`
-difference along the segment and the pin axis). The damper reads the depth's rate, the gradient
-against the hull's velocity at the contact, and traction lies in the surface's plane. A piece's
-face is the belt's plane, so a piece's gradient is the probe direction. Where a belt run meets
-flat ground at a tilt (the approach runs, which carry load inside the travel band), the earlier
-law pushed along the belt's normal, damped by the hull's velocity along it and laid traction
-along the belt; MEASURED headless at full throttle with no ground term, the shipped tank's mean
-over a second at F8, 10.68 m/s, before that change:
-
-| share of the summed grip reaction | N |
-|---|---|
-| elastic support's horizontal share, tilted contacts | 13 365 |
-| support damper reading `v·sinθ` where no depth changes, tilted contacts | 11 355 |
-| traction along the tilted belt (`f` charged, `f·cosθ` delivered) | 85 |
-| residual (hull acceleration) | 13 |
-| total | 24 818 |
-
-After it, 2 N at 10.93 m/s, the governor's torque cut-off. The class invariant is
-`forces::tests::a_hull_rolling_on_flat_ground_under_tilted_runs_needs_no_drive_force`. Its cost is
-two oracle casts per contacting field column. A surface-derived normal is what the sandbox gave up
-on 2026-07-01 for the belt's own normal (`HQ.md`: a hit normal flipping between a lip's wall and
-top shoved the rig in alternating directions); the gradient is the one the support's own depth
-reads, and the block field's 3 cm edge rounding keeps it continuous across a lip, but driving into
-a ditch and over lips is for the feel session to judge. The ride is unchanged, MEASURED headless
-(a 0.3 rad/s roll kick on the parked tank, before / after): roll rate 0.00010 / 0.00011 rad/s RMS
-over its third second, largest tick-to-tick side-load swing 27.0 / 27.5 kN, sign alternation of
-that swing 0.03 / 0.03 (the 32 Hz side-swap reads near 1), and every settle test green.
+demand filter, the clutch coupling) sees it as load. A piece is no ground and takes none.
 
 Coast-down, DERIVED: with the belts declutched, belt and hull decelerate together at
 `a = c_rr·g·M/(M + 2I)` down to the fade band, then decay inside it, so a tank coasts
-`d = (v₀² + V²)/(2a)` (`V` the band); no other term slows a declutched tank on flat ground, and
-`forces::tests::the_same_vehicle_coasts_to_rest_over_the_distances_its_ground_derives` checks the
-form. On the fixture tank (57 000 kg, 4 750 kg reflected per side) from 10 m/s: gravel (the base
-pack, 0.05) 119.0 m; dirt (0.06) 99.2 m; sand (0.12) 49.6 m; mud (0.15) 39.7 m; concrete (0.04)
-148.8 m.
+`d = (v₀² + V²)/(2a)` (`V` the band). On the fixture tank (57 000 kg, 4 750 kg reflected per side)
+from 10 m/s: gravel (the base pack, 0.05) 119.0 m; dirt (0.06) 99.2 m; sand (0.12) 49.6 m; mud
+(0.15) 39.7 m; concrete (0.04) 148.8 m. Before the law, no ground term slowed a declutched tank on
+the flat: only the engine's drag in gear did.
 
-Top speed at full throttle on flat ground, MEASURED headless (the fixture tank, mean over the last
-second of 40 s, governed 10.51 m/s, torque cut-off 10.93 m/s): no rolling resistance F8 10.93 m/s;
-concrete (0.04) F8 10.71 m/s; gravel (0.05) F8 10.65 m/s; dirt (0.06) F7 7.19 m/s; sand (0.12) F6
-4.89 m/s; mud (0.15) F5 3.31 m/s. `full_throttle_reaches_and_holds_the_governed_top_speed` pins
-the no-resistance case.
-
-| reviewer | finding | verified / not a defect | fixed in (subject) |
-|---|---|---|---|
-| Claude (law-ground-1b review) P2 | `c_rr`, published motion resistance, comes on top of a contact-law loss of about its own size, so hard grounds took about double their CLAIMED total and the tank never reached top gear | verified: 24 818 N MEASURED before any ground term, split above | driving: support and damp each contact along its surface, not its belt (#146) |
-| Claude (law-ground-1b review) P3 | this section said no ground term slowed a declutched tank before the law, derived coast-down from `c_rr` alone and named the bristle dampers as the likely source | verified: the support damper acted with the clutch out; the bristle share was 85 N | docs: record the flat-ground contact law and its measured split (#146) |
-| Claude (law-ground-1b review) P3 | `predict_shift_landing_m` decayed `c_rr·N` as relaxing drive shear, and `POSTSHIFT_MARGIN_RPM`'s note named only the grade as the sustained leftover | verified | transmission: keep the ground's rolling resistance whole through a shift window (#146) |
+Top speed, MEASURED headless (`full_throttle_reaches_and_holds_the_governed_top_speed`, flat
+world): on a ground with no rolling resistance the fixture tank holds F8 at 10.68 m/s, inside its
+governor's fade (governed 10.51 m/s). On the base pack's gravel it holds F7 at 7.12 m/s, and on
+concrete F7 at 7.15 m/s: the box's refusal of F8 there is right, because the model already loses
+force before any ground term. DERIVED from the governor's fade at those equilibria (read as linear
+from 2 500 to the 2 600 rpm cut, ASSUMED): about 24.7 kN at 10.68 m/s with no ground term, and
+20.8 kN at 7.12 m/s once gravel's 28.0 kN is taken out, about 0.04 of the tank's weight. Its
+source is not measured; the belt contact law's support and bristle dampers working as links enter
+and leave the ground are the likely one. Published tracked-vehicle motion resistance lumps the
+running gear's internal losses in, so the table's values may count part of that loss twice; the
+values are `Unknown`, and settling them settles this.
 
 **The tuning panel saves the label.** `rolling_resistance` is a `provenance::Labelled` value,
 which keeps its job and note through a load and writes them back, so the panel's whole-table save

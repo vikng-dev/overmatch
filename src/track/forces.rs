@@ -11,10 +11,8 @@
 //! The model, per station segment × three lateral collocation columns:
 //! - **Support**: directional field depth at pin/mid/pin on the contact envelope (the outer
 //!   face pushed out by the drooped suspension's maximum reach) → two-piece clipped-linear
-//!   pressure profile → spring plus a damper on the depth's rate, soft engagement ramp, along the
-//!   surface's normal (the field's depth gradient; a piece's face is the belt's plane), applied
-//!   at the profile centroid on the terrain surface. Traction lies in that surface's plane, so a
-//!   hull rolling along flat ground under a tilted belt run neither compresses nor shears it.
+//!   pressure profile → spring along the belt's own inward normal (minus normal-velocity
+//!   damping, soft engagement ramp), applied at the profile centroid on the terrain surface.
 //!   Ground intruding into the envelope→rest band IS the suspension compression. The reach is
 //!   the REQUIRED per-position [`SideInput::travel`] profile, not a scalar: 0 at the unsprung
 //!   sprocket/idler, full droop at every road wheel (`envelope::wheel_travel_knots`). An empty
@@ -424,8 +422,7 @@ pub struct SideReport {
     /// The side's rolling resistance this tick (N, [`rolling_resistance`]), inside
     /// [`Self::belt_reaction`]: telemetry of the term.
     pub rolling_resistance: f32,
-    /// The station probes' oracle-call inputs/results, in execution order (the depth gradient's
-    /// differences are not recorded). Measurement builds only.
+    /// Full oracle-call inputs/results, in execution order. Measurement builds only.
     #[cfg(feature = "bitprobe")]
     pub(crate) bitprobe_contacts: Vec<ContactInputProbe>,
     /// Per-station/column post-update load, slip, force, strain, and dwell. Measurement builds only.
@@ -792,64 +789,6 @@ fn probe_depths<O: TerrainOracle>(
     depths
 }
 
-/// The step (m) of the depth gradient's differences along the segment and the pin axis.
-/// `Resolution`: well under the field's finest feature (the block field's 3 cm edge rounding,
-/// `oracle`) so the gradient is the local surface's, and far over f32 position rounding at map
-/// scale (about 6e-5 m at 1 km, DERIVED), so the difference is not rounding noise.
-const DEPTH_GRADIENT_STEP_M: f32 = 0.01;
-
-/// The field's depth gradient at a probe: how much deeper the probe's depth along `out` reads per
-/// metre the probe moves, as a world vector. Along `out` it is exactly 1 by the oracle's
-/// directional contract (a probe moved down its own ray reads that much deeper); along the
-/// segment `axis` and the pin axis `lat` it is a one-sided difference over
-/// [`DEPTH_GRADIENT_STEP_M`]. On a surface parallel to the belt it is `out`; on flat ground under a
-/// tilted belt it points straight down, `1/cos` long. `probe` is the query point, its reach and
-/// the depth already read there.
-fn depth_gradient<O: TerrainOracle>(
-    oracle: &O,
-    (point, reach, depth): (Vec3, f32, f32),
-    (out, axis, lat): (Vec3, Vec3, Vec3),
-) -> Vec3 {
-    let slope = |dir: Vec3| {
-        (oracle.depth_along(point + dir * DEPTH_GRADIENT_STEP_M, out, reach) - depth)
-            / DEPTH_GRADIENT_STEP_M
-    };
-    out + axis * slope(axis) + lat * slope(lat)
-}
-
-/// Fold one support patch into its element's probe record: the load-weighted point, the loads
-/// and the normal. Measurement builds only.
-#[cfg(feature = "bitprobe")]
-fn probe_patch(
-    output: &mut ElementOutputProbe,
-    (p, normal): (Vec3, Vec3),
-    (load, load_elastic): (f32, f32),
-) {
-    output.point = if output.load == 0.0 {
-        p
-    } else {
-        (output.point * output.load + p * load) / (output.load + load)
-    };
-    output.load += load;
-    output.load_elastic += load_elastic;
-    output.normal = normal;
-}
-
-/// A patch's support load (N): the spring on its profile `area` (m²) and the damper on its depth
-/// rate `closing` (m/s) over its contacting `length`, never pulling, at its column's `weight` of
-/// the per-metre coefficients and through the engagement ramp `engage`.
-fn support_load(
-    params: &ForceParams,
-    (weight, engage): (f32, f32),
-    (area, length): (f32, f32),
-    closing: f32,
-) -> f32 {
-    weight
-        * (params.support_stiffness_per_m * area + params.support_damping_per_m * length * closing)
-            .max(0.0)
-        * engage
-}
-
 /// The support force's derivative under a uniform normal displacement, at `closing` m/s. The
 /// profile area's derivative is its contacting length; inside soft engagement the ramp scales
 /// the spring's force and the damper's, so both contribute its slope. A parting damper's
@@ -1001,14 +940,6 @@ fn collect_column_contacts<O: TerrainOracle>(
                 travel.map(|travel| params.probe_reach + travel),
             );
             let pen = probes;
-            // The field's depth gradient, read once per column at its mid probe when a field
-            // patch first needs it.
-            let mid_probe = (
-                (ca + cb) / 2.0 + face_m,
-                params.probe_reach + travel[1],
-                pen[1],
-            );
-            let mut field_gradient: Option<Vec3> = None;
             #[cfg(feature = "bitprobe")]
             let probe_index = {
                 let (query_a, query_m, query_b) =
@@ -1087,42 +1018,41 @@ fn collect_column_contacts<O: TerrainOracle>(
                 let t_c = sample_halves(x_c, len, travel);
                 let p = ca + axis * x_c + out * (params.face_offset + t_c - pen_c);
 
-                // Support: penalty spring and damper on the depth, at the column's share of the
-                // per-metre coefficients, pushing along the surface's own normal (the depth's
-                // gradient). The damper reads the depth's rate, the gradient against the hull's
-                // velocity relative to the surface at `p` (on the ray, so the probe direction's
-                // turning is in it too): a hull gliding along its surface changes no depth and is
-                // damped by nothing, however its belt is tilted. A piece's face is the belt's own
-                // plane (`track::rubble`), so its gradient is the probe direction itself. The
-                // recipient's reaction law (`track::rubble::piece_impulses`) runs later: a body the
-                // explicit step integrates this spring against stably takes the whole opposite
-                // force; any other takes a sequentially clamped impulse. Clamped sizing reads the
-                // recipient's velocity after preceding pushes; whole-force sizing reads no
-                // velocity.
+                // Support: penalty spring along the belt's own inward normal, at the column's
+                // share of the per-metre coefficients. Damping and slip read the hull's velocity
+                // relative to the surface it presses; recipient motion enters both terms.
+                // The recipient's reaction law (`track::rubble::piece_impulses`) runs later: a
+                // body the explicit step integrates this spring against stably takes the whole
+                // opposite force; any other takes a sequentially clamped impulse. Clamped sizing
+                // reads the recipient's velocity after preceding pushes; whole-force sizing
+                // reads no velocity.
+                let normal = -out;
                 let hull_vel = vel_at(p);
-                let (vel, normal, closing) = match collider {
-                    Some(collider) => {
-                        let vel = hull_vel - pieces.velocity_at(collider, p);
-                        (vel, -out, out.dot(vel))
-                    }
-                    None => {
-                        let gradient = *field_gradient.get_or_insert_with(|| {
-                            depth_gradient(oracle, mid_probe, (out, axis, lat_axis))
-                        });
-                        (hull_vel, -gradient.normalize(), gradient.dot(hull_vel))
-                    }
+                let vel = match collider {
+                    Some(collider) => hull_vel - pieces.velocity_at(collider, p),
+                    None => hull_vel,
                 };
                 let engage = (pen_max / params.engage_depth).clamp(0.0, 1.0);
                 let load_elastic = weight * params.support_stiffness_per_m * area * engage;
-                let stiffness =
-                    support_stiffness(params, weight, (area, contact_len, pen_max), closing);
-                let load = support_load(params, (weight, engage), (area, contact_len), closing);
+                let profile = (area, contact_len, pen_max);
+                let stiffness = support_stiffness(params, weight, profile, -vel.dot(normal));
+                let load = weight
+                    * (params.support_stiffness_per_m * area
+                        - params.support_damping_per_m * contact_len * vel.dot(normal))
+                    .max(0.0)
+                    * engage;
                 #[cfg(feature = "bitprobe")]
-                probe_patch(
-                    &mut report.bitprobe_elements[probe_index],
-                    (p, normal),
-                    (load, load_elastic),
-                );
+                {
+                    let output = &mut report.bitprobe_elements[probe_index];
+                    output.point = if output.load == 0.0 {
+                        p
+                    } else {
+                        (output.point * output.load + p * load) / (output.load + load)
+                    };
+                    output.load += load;
+                    output.load_elastic += load_elastic;
+                    output.normal = normal;
+                }
                 if load <= 0.0 {
                     if elements_mode && load_elastic > 0.0 {
                         held.push((material(i) * 3 + ci, load_elastic));
@@ -1599,10 +1529,9 @@ mod tests {
                 |_| Vec3::ZERO,
                 &mut GripElements::for_links(input.count),
             );
-            // Each field contact also reads its depth gradient, two difference casts.
             let raw = report.bitprobe_contacts.len() * 3;
             assert!(
-                oracle.calls.get() - 2 * report.contacts.len() < raw,
+                oracle.calls.get() < raw,
                 "straight neighbours must share their pin casts"
             );
             for contact in &report.bitprobe_contacts {
@@ -2024,89 +1953,6 @@ mod tests {
                     assert_canonical(phase, pitch);
                 }
             }
-        }
-    }
-
-    /// A HULL ROLLING ALONG FLAT RIGID GROUND WITH NO ROLLING RESISTANCE NEEDS NO DRIVE FORCE,
-    /// however its belt's approach runs are tilted: rolling at its belt's speed, the belt's ground
-    /// reaction and the hull's net horizontal force are nil, and the support carries the load
-    /// straight up. The top speed at the governor, the coast-down distances (design doc
-    /// `track-model/architecture.md` §5a) and `c_rr` read as the whole of a ground's motion
-    /// resistance rely on it. A support pushing along the tilted belt's normal (an unbalanced
-    /// horizontal push from asymmetric runs), a damper reading the hull's velocity along that
-    /// normal (a drag growing with speed), or traction along the tilted belt (a slip the flat run
-    /// does not see) fails here.
-    ///
-    /// FIXTURE DATA: an asymmetric loop, its 2 m bottom run between approach runs rising 26.6°
-    /// ahead and 20.6° behind, 0.1 m of travel tapering to 0 at the run ends, its rest face 5 cm
-    /// above directional flat ground; the rig's spring, damper and grip; 2 and 10 m/s over 64 ticks.
-    #[test]
-    fn a_hull_rolling_on_flat_ground_under_tilted_runs_needs_no_drive_force() {
-        let loop_pts = [
-            Vec2::new(-1.0, 0.0),
-            Vec2::new(1.0, 0.0),
-            Vec2::new(1.6, 0.3),
-            Vec2::new(1.6, 0.5),
-            Vec2::new(-1.4, 0.5),
-            Vec2::new(-1.4, 0.15),
-            Vec2::new(-1.0, 0.0),
-        ];
-        let knots = [(-1.4, 0.0), (-1.0, 0.1), (1.0, 0.1), (1.6, 0.0)];
-        let input = SideInput {
-            loop_pts: &loop_pts,
-            count: 40,
-            plane_x: 0.0,
-            columns: TEST_COLUMNS,
-            travel: TravelField { knots: &knots },
-        };
-        let params = ForceParams {
-            free_travel: 0.1,
-            ..rig_params()
-        };
-        let affine = Affine3A::from_translation(Vec3::new(0.0, 0.075, 0.0));
-        for speed in [2.0_f32, 10.0] {
-            let mut state = SideState {
-                speed,
-                ..Default::default()
-            };
-            let mut elems = GripElements::for_links(input.count);
-            let (mut reaction, mut push, mut load, mut tilted) = (0.0, Vec3::ZERO, 0.0, 0);
-            for _ in 0..64 {
-                let report = contact_side(
-                    &input,
-                    state,
-                    affine,
-                    1.0 / 64.0,
-                    &params,
-                    &crate::track::envelope::FlatRest,
-                    &RubbleBodies::default(),
-                    |_| Vec3::new(0.0, 0.0, -speed),
-                    &mut elems,
-                );
-                reaction += report.belt_reaction.abs();
-                push += report.apps.iter().map(|app| app.force).sum::<Vec3>();
-                load += report.contacts.iter().map(|c| c.load).sum::<f32>();
-                tilted += report
-                    .contacts
-                    .iter()
-                    .filter(|c| c.point.z.abs() > 1.0)
-                    .count();
-                state.phase += f64::from(speed / 64.0);
-            }
-            println!(
-                "{speed} m/s: belt reaction {reaction:.3} N, horizontal push {:.3} N, load {load:.0} N, \
-                 {tilted} approach-run contacts",
-                push.z
-            );
-            assert!(tilted > 0, "the approach runs must carry load");
-            assert!(
-                reaction < 1e-5 * load && push.z.abs() < 1e-5 * load && push.x.abs() < 1e-5 * load,
-                "{speed} m/s: belt reaction {reaction} N, push {push} N against {load} N of load"
-            );
-            assert!(
-                (push.y - load).abs() < 1e-5 * load,
-                "the support carries the load upright"
-            );
         }
     }
 
