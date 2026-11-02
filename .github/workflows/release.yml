@@ -437,8 +437,8 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
-      # Only `scripts/ci/archive-smoke.sh` is wanted from the repo — no assets, no LFS. Everything
-      # under test arrives as an artifact.
+      # The smoke runner, scripts/lib/battle-mode.sh and non-LFS assets/modes/battle.ron come
+      # from the checkout. Binaries and their runtime assets under test arrive as artifacts.
       - uses: actions/checkout@v7
         with:
           persist-credentials: false
@@ -509,8 +509,8 @@ jobs:
     runs-on: windows-latest
     timeout-minutes: 15
     steps:
-      # Only `scripts/ci/archive-smoke.sh` is wanted from the repo — no assets, no LFS. Everything
-      # under test arrives as an artifact.
+      # The smoke runner, scripts/lib/battle-mode.sh and non-LFS assets/modes/battle.ron come
+      # from the checkout. Binaries and their runtime assets under test arrive as artifacts.
       - uses: actions/checkout@v7
         with:
           persist-credentials: false
