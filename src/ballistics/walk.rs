@@ -3259,6 +3259,8 @@ pub struct Exchange {
     pub momentum: Vec3,
     /// The entrance-only share of `momentum`: the core bend and the stopped carrier.
     pub entrance_momentum: Vec3,
+    /// The game's damage model: stopped-carrier work (J) included in the retained dose.
+    pub entrance_energy: f32,
 }
 
 /// The game's damage model: one immutable force-law stretch and its elapsed seconds.
@@ -3435,6 +3437,7 @@ pub(crate) fn finish<M: Mechanism>(
                 .collect(),
             momentum: transit.axis * (f64::from(moving_mass) * line.speed_loss) as f32,
             entrance_momentum: Vec3::ZERO,
+            entrance_energy: 0.0,
         })
         .collect();
     for line in &deposits {

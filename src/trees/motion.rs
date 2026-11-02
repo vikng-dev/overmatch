@@ -657,6 +657,7 @@ mod tests {
                     perforated: true,
                 },
                 momentum: rotation * (entrance + axial),
+                entrance_energy: 0.0,
                 entrance_momentum: rotation * entrance,
             }],
         });

@@ -3007,6 +3007,7 @@ fn hard_volume_records_use_only_exposed_contacts() {
             debris: Vec::new(),
             momentum: Vec3::Z,
             entrance_momentum: Vec3::ZERO,
+            entrance_energy: 0.0,
         }];
         let crossed =
             volume_crossings(&walked, &walked.events[0], &exchanges, rest, &|point| point);

@@ -2638,14 +2638,20 @@ fn awake_and_sleeping_presses_join_every_deposit_once() {
             ..default()
         };
         let crossing = RawDeposit {
-            crossings: vec![(
-                volume,
-                at - Vec3::X * 0.001,
-                at + Vec3::X * 0.001,
-                0.0,
-                Vec3::ZERO,
-                Vec3::ZERO,
-            )],
+            crossings: vec![DeliveredLine {
+                crossing: crate::ballistics::VolumeCrossing {
+                    volume,
+                    entry: at - Vec3::X * 0.001,
+                    end: at + Vec3::X * 0.001,
+                    chord: 0.002,
+                    cost: 0.0,
+                    energy: 0.0,
+                    perforated: true,
+                },
+                entrance_energy: 0.0,
+                momentum: Vec3::ZERO,
+                entrance_momentum: Vec3::ZERO,
+            }],
             ..default()
         };
         let deposits = if contact_first {
@@ -3623,102 +3629,104 @@ fn a_wall_crushes_with_the_energy_a_cone_carries() {
 }
 
 /// The game's damage model sends a nonzero line through the shipped message reader and chunk
-/// allocator. Destruction relies on the frame turn, chord shares and entrance-only bend staying
-/// distinct; a whole blow on every chunk or a bend on rear chunks violates this budget.
-/// Fixture: a line joining the farthest chunk centres of a breakable element, rotated in world.
+/// allocator. Destruction relies on the carrier staying at entry and the core following its chord.
+/// Fixture: equal-depth front and rear chunks, head-on and oblique paths, rotated in world;
+/// 5 J stop at entry and the core's 2 J divide equally. Momentum has its own independent budget.
 #[test]
-fn a_marched_line_reaches_its_chunks_once_with_the_bend_at_entry() {
+fn a_marched_line_keeps_carrier_work_and_bend_at_entry() {
     use crate::ballistics::{DeliveredLine, VolumeCrossing};
     use bevy::ecs::system::RunSystemOnce;
-    let (mut app, root) = composed(false);
-    let kind = shipped_house();
-    let (e, _) = fixture_chunks(&kind);
-    let chunks: Vec<_> = kind.layout.chunks_of(e).collect();
-    let (a, b) = chunks
-        .iter()
-        .flat_map(|&a| chunks.iter().map(move |&b| (a, b)))
-        .max_by(|&(a, b), &(c, d)| {
-            kind.layout.blocks[a]
-                .center()
-                .distance_squared(kind.layout.blocks[b].center())
-                .total_cmp(
-                    &kind.layout.blocks[c]
-                        .center()
-                        .distance_squared(kind.layout.blocks[d].center()),
-                )
-        })
-        .unwrap();
-    let (a, b) = (
-        kind.layout.blocks[a].center(),
-        kind.layout.blocks[b].center(),
-    );
-    let dir = (b - a).normalize();
-    let (a, b) = (a - dir * 0.1, b + dir * 0.1);
-    let rotation = Quat::from_rotation_y(0.7);
-    let frame = Frame::new(&Transform::from_rotation(rotation), 1.0, kind.bounds());
-    let volume = app
-        .world_mut()
-        .query::<(Entity, &BuildingElement, &ChildOf)>()
-        .iter(app.world())
-        .find(|(_, index, parent)| usize::from(index.0) == e && parent.parent() == root)
-        .map(|(entity, ..)| entity)
-        .unwrap();
-    let shell = app.world_mut().spawn(PenetrationMarks::default()).id();
-    let entry_axis = dir
-        .cross(if dir.x.abs() < 0.9 { Vec3::X } else { Vec3::Y })
-        .normalize();
-    let entry_blow = entry_axis * 12.0;
-    let transit_blow = dir * 30.0;
-    app.world_mut().trigger(ShellMarched {
-        shell,
-        marks_from: 0,
-        cones_from: 0,
-        burst: None,
-        lines: vec![DeliveredLine {
-            crossing: VolumeCrossing {
-                volume,
-                entry: rotation * a,
-                end: rotation * b,
-                chord: a.distance(b),
-                cost: 0.0,
-                energy: 7.0,
-                perforated: true,
-            },
-            momentum: rotation * (entry_blow + transit_blow),
-            entrance_momentum: rotation * entry_blow,
-        }],
-    });
-    let loads = app
-        .world_mut()
-        .run_system_once(move |p: DepositParam| {
-            let deposit = p
-                .queue
-                .0
-                .last()
-                .expect("the shipped shell observer queues its line");
-            let mut taken = BTreeMap::new();
-            take_lines(&p, &BTreeMap::from([(root, frame)]), deposit, &mut taken);
-            taken.remove(&root).unwrap().line_loads
-        })
-        .unwrap();
-    let total: Vec3 = loads.iter().map(|load| load.blow).sum();
-    assert!((total - entry_blow - transit_blow).length() < 1e-4);
-    assert!((loads.iter().map(|load| load.energy).sum::<f32>() - 7.0).abs() < 1e-5);
-    let first_chunk = loads
-        .iter()
-        .min_by(|a, b| a.at.dot(dir).total_cmp(&b.at.dot(dir)))
-        .unwrap()
-        .chunk;
-    let mut chunks = BTreeMap::<usize, Vec3>::new();
-    for load in loads {
-        *chunks.entry(load.chunk).or_default() += load.blow;
-    }
-    assert!(
-        chunks.len() > 1,
-        "the fixture exercises allocation across chunks"
-    );
-    for (chunk, blow) in chunks {
-        let bend = blow.dot(entry_axis);
-        assert!((bend - if chunk == first_chunk { 12.0 } else { 0.0 }).abs() < 1e-4);
+    for slope in [0.0, 0.4] {
+        let (mut app, root) = composed(false);
+        let mut kind = (*shipped_house()).clone();
+        let (e, [front, rear, _]) = fixture_chunks(&kind);
+        for c in kind.layout.chunks_of(e) {
+            kind.layout.blocks[c] = Block::cuboid(Vec3::splat(100.0), Vec3::splat(101.0));
+        }
+        kind.layout.blocks[front] =
+            Block::cuboid(Vec3::new(-2.0, -1.0, 0.0), Vec3::new(2.0, 1.0, 1.0));
+        kind.layout.blocks[rear] =
+            Block::cuboid(Vec3::new(-2.0, -1.0, 1.0), Vec3::new(2.0, 1.0, 2.0));
+        app.world_mut().get_mut::<Breakage>(root).unwrap().kind = Arc::new(kind.clone());
+        let a = Vec3::new(-0.1 * slope, 0.0, -0.1);
+        let b = Vec3::new(2.1 * slope, 0.0, 2.1);
+        let dir = (b - a).normalize();
+        let rotation = Quat::from_rotation_y(0.7);
+        let frame = Frame::new(&Transform::from_rotation(rotation), 1.0, kind.bounds());
+        let volume = app
+            .world_mut()
+            .query::<(Entity, &BuildingElement, &ChildOf)>()
+            .iter(app.world())
+            .find(|(_, index, parent)| usize::from(index.0) == e && parent.parent() == root)
+            .map(|(entity, ..)| entity)
+            .unwrap();
+        let shell = app.world_mut().spawn(PenetrationMarks::default()).id();
+        let entry_axis = dir
+            .cross(if dir.x.abs() < 0.9 { Vec3::X } else { Vec3::Y })
+            .normalize();
+        let entry_blow = entry_axis * 12.0;
+        let transit_blow = dir * 30.0;
+        app.world_mut().trigger(ShellMarched {
+            shell,
+            marks_from: 0,
+            cones_from: 0,
+            burst: None,
+            lines: vec![DeliveredLine {
+                crossing: VolumeCrossing {
+                    volume,
+                    entry: rotation * a,
+                    end: rotation * b,
+                    chord: a.distance(b),
+                    cost: 0.0,
+                    energy: 7.0,
+                    perforated: true,
+                },
+                momentum: rotation * (entry_blow + transit_blow),
+                entrance_momentum: rotation * entry_blow,
+                entrance_energy: 5.0,
+            }],
+        });
+        let loads = app
+            .world_mut()
+            .run_system_once(move |p: DepositParam| {
+                let deposit = p
+                    .queue
+                    .0
+                    .last()
+                    .expect("the shipped shell observer queues its line");
+                let mut taken = BTreeMap::new();
+                take_lines(&p, &BTreeMap::from([(root, frame)]), deposit, &mut taken);
+                taken.remove(&root).unwrap().line_loads
+            })
+            .unwrap();
+        let total: Vec3 = loads.iter().map(|load| load.blow).sum();
+        assert!((total - entry_blow - transit_blow).length() < 1e-4);
+        assert!((loads.iter().map(|load| load.energy).sum::<f32>() - 7.0).abs() < 1e-5);
+        let first_chunk = loads
+            .iter()
+            .min_by(|a, b| a.at.dot(dir).total_cmp(&b.at.dot(dir)))
+            .unwrap()
+            .chunk;
+        let mut chunks = BTreeMap::<usize, Vec3>::new();
+        let mut energies = BTreeMap::<usize, f32>::new();
+        for load in loads {
+            *energies.entry(load.chunk).or_default() += load.energy;
+            *chunks.entry(load.chunk).or_default() += load.blow;
+        }
+        assert!(
+            chunks.len() > 1,
+            "the fixture exercises allocation across chunks"
+        );
+        for (chunk, energy) in energies {
+            let expected = if chunk == first_chunk { 6.0 } else { 1.0 };
+            assert!(
+                (energy - expected).abs() < 1e-4,
+                "slope {slope}, chunk {chunk}: retained {energy} J, expected {expected} J"
+            );
+        }
+        for (chunk, blow) in chunks {
+            let bend = blow.dot(entry_axis);
+            assert!((bend - if chunk == first_chunk { 12.0 } else { 0.0 }).abs() < 1e-4);
+        }
     }
 }

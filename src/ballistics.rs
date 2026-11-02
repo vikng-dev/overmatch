@@ -1213,6 +1213,8 @@ pub(crate) struct DeliveredLine {
     pub(crate) crossing: VolumeCrossing,
     pub(crate) momentum: Vec3,
     pub(crate) entrance_momentum: Vec3,
+    /// The game's damage model: entrance-only work (J) included in the crossing's retained energy.
+    pub(crate) entrance_energy: f32,
 }
 
 /// One authority march step of `shell` that logged armour marks, threw spall cones or burst,

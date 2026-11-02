@@ -95,7 +95,8 @@ use super::fracture::{
 use super::schema::{self, BuildingAsset};
 use super::{BuildingElement, BuildingKind};
 use crate::ballistics::{
-    ArmourMark, BallisticVolume, BurstField, PenetrationMarks, ShellMarched, SpallMarks,
+    ArmourMark, BallisticVolume, BurstField, DeliveredLine, PenetrationMarks, ShellMarched,
+    SpallMarks,
 };
 use crate::contact_transfer::{ContactTransfer, ContactTransfers};
 use crate::debris::launch::{BodyReturn, Launch, LaunchPlugin, PendingLaunch, launch_colliders};
@@ -606,9 +607,8 @@ pub(crate) struct WallPiece {
 /// What one shell's march step deposited, in world terms, waiting for [`apply_deposits`].
 #[derive(Debug, Default)]
 struct RawDeposit {
-    /// The game's damage model: each line's `(volume, entry, end, retained J, total N s, entrance N s)`
-    /// from the physical exchange, independent of its HP conversion.
-    crossings: Vec<(Entity, Vec3, Vec3, f32, Vec3, Vec3)>,
+    /// The game's damage model: resolved line work and momentum, preserving entrance-only shares.
+    crossings: Vec<DeliveredLine>,
     /// Each field ray's physical energy, direction, stop and blow.
     rays: Vec<RayDeposit>,
     /// A burst's blast: where, and its energy and charge.
@@ -851,17 +851,7 @@ fn read_shell(
     }
     // The game's damage model exposes only lines whose path moments fell in this tick. A
     // crossing mark is immutable metadata and can exist before any of its doses arrive.
-    for line in &marched.lines {
-        let volume = line.crossing;
-        deposit.crossings.push((
-            volume.volume,
-            volume.entry,
-            volume.end,
-            volume.energy,
-            line.momentum,
-            line.entrance_momentum,
-        ));
-    }
+    deposit.crossings.extend_from_slice(&marched.lines);
     if let Some(spall) = spall {
         let cones = spall.cones.get(marched.cones_from..).expect(
             "ShellMarched's cone cursor is its cone list's length before the step; lists only grow",
@@ -1099,7 +1089,17 @@ fn take_lines(
     deposit: &RawDeposit,
     taken: &mut BTreeMap<Entity, Taken>,
 ) {
-    for &(volume, entry, end, energy, impulse, entrance_impulse) in &deposit.crossings {
+    for line in &deposit.crossings {
+        let crate::ballistics::VolumeCrossing {
+            volume,
+            entry,
+            end,
+            energy,
+            ..
+        } = line.crossing;
+        let entrance_energy = line.entrance_energy;
+        let impulse = line.momentum;
+        let entrance_impulse = line.entrance_momentum;
         let Ok((element, chunk, parent)) = p.volumes.get(volume) else {
             continue; // Another body's volume (a hull's armour, a trunk) is another law's.
         };
@@ -1141,13 +1141,13 @@ fn take_lines(
             &[(
                 first,
                 (a + dir * start) * frame.scale,
-                0.0,
+                entrance_energy,
                 frame.turn(entrance_impulse),
             )],
             |c| layout.materials[c].crush,
         ));
         for (c, t0, t1) in shares {
-            let part = energy * (t1 - t0) / chord;
+            let part = (energy - entrance_energy) * (t1 - t0) / chord;
             let (from, to) = ((a + dir * t0) * frame.scale, (a + dir * t1) * frame.scale);
             into.lines.push((c, from, to, part));
             let blow = turned * ((t1 - t0) / chord);

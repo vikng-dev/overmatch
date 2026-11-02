@@ -1775,7 +1775,8 @@ fn bite(
     first.entrance_momentum = core_mass * speed_in * (Vec3::from(incoming) - Vec3::from(bent))
         + carrier * speed_in * Vec3::from(incoming);
     first.momentum += first.entrance_momentum;
-    first.dose.amount += 0.5 * carrier * speed_in.powi(2);
+    first.entrance_energy = 0.5 * carrier * speed_in.powi(2);
+    first.dose.amount += first.entrance_energy;
     let volumes = volume_crossings(transit, &plan.crossing, &deposits, rest, &world);
     let volume_ends = exposed
         .into_iter()

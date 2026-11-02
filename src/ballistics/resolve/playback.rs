@@ -35,6 +35,7 @@ enum Effect {
         context: DoseContext,
         momentum: Vec3,
         entrance_momentum: Vec3,
+        entrance_energy: f32,
         owner: Option<Entity>,
     },
     Witness {
@@ -287,6 +288,7 @@ impl Playback {
                         },
                         momentum: line.momentum,
                         entrance_momentum: line.entrance_momentum,
+                        entrance_energy: line.entrance_energy,
                         owner: context
                             .world
                             .owners
@@ -630,6 +632,7 @@ impl Playback {
                     context,
                     momentum,
                     entrance_momentum,
+                    entrance_energy,
                     owner,
                 } => {
                     let resolved = self.volume(*crossing);
@@ -640,6 +643,7 @@ impl Playback {
                         crossing: self.volume(*crossing),
                         momentum: *momentum,
                         entrance_momentum: *entrance_momentum,
+                        entrance_energy: *entrance_energy,
                     });
                     shell.dose.add_units(
                         crossing.volume,
