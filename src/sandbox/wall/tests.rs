@@ -694,49 +694,99 @@ fn the_sandbox_chunk_outlives_the_hole_cap() {
     assert_eq!(wall.live.holes[c].len(), HOLES_PER_CHUNK);
 }
 
-/// A freed sandbox chunk launches with the mass the weight law carried: the launch reads this
-/// hull, so a contact inset fed to it would fly every freed chunk too fast for its blow.
-#[test]
-fn the_sandbox_launch_reads_the_chunk_the_structure_weighed() {
-    use avian3d::dynamics::rigid_body::mass_properties::bevy_heavy::ComputeMassProperties3d;
-    let cut = &layout().cut;
-    for (c, chunk) in cut.structure.chunks.iter().enumerate() {
-        let mass = super::chunk_collider(&cut.blocks[c])
-            .mass_properties(chunk.material.density)
-            .mass;
-        let ratio = mass / chunk.mass;
-        assert!(
-            (ratio - 1.0).abs() < 1e-3,
-            "chunk {c}: launch/structure mass {ratio}"
-        );
-    }
-}
-
-/// The game's damage-model inspector preserves resolved momentum and entrance work even when
-/// no muzzle speed identifies the round. The observer, shared load owner and hole reader must
-/// agree. All geometry, work and momentum below are fixture data.
-#[test]
-fn the_inspector_reads_delivered_work_and_momentum_without_guessing_a_round() {
+/// Fixture: one baked chunk, either soil-held or unsupported, and the production inspector
+/// observer and deposit system. Work is one percent of its pool; the two independent impulses
+/// make entrance work, linear launch and angular launch observable without a round registry.
+fn inspector_app(held: bool) -> (bevy::prelude::App, crate::ballistics::DeliveredLine) {
     use crate::ballistics::{DeliveredLine, ShellMarched, SpallMarks, VolumeCrossing};
     use bevy::prelude::*;
+    let cut = &layout().cut;
+    let c = (0..cut.blocks.len())
+        .filter(|&c| !cut.structure.chunks[c].buried)
+        .max_by(|&a, &b| {
+            cut.structure.chunks[a]
+                .volume
+                .total_cmp(&cut.structure.chunks[b].volume)
+        })
+        .unwrap();
+    let block = cut.blocks[c].clone();
+    let mut chunk = cut.structure.chunks[c];
+    chunk.buried = held;
+    let structure = Structure {
+        chunks: vec![chunk],
+        joints: Vec::new(),
+    };
+    let live = crate::buildings::breakage::Live::from_structure(structure.clone(), 1);
+    let energy = live.state.pool[0] * chunk.material.crush * 0.01;
+    let reach = (block.max - block.min).length();
+    let from = block.center() - Vec3::Z * reach;
+    let (near, far) = block.span(from, Vec3::Z).unwrap();
+    let (entry, end) = (from + Vec3::Z * near, from + Vec3::Z * far);
+    let wall = Wall {
+        cut: Cut {
+            structure,
+            blocks: vec![block],
+            faces: Vec::new(),
+            element_of: vec![0],
+            elements: 1,
+        },
+        live,
+        structural: Vec::new(),
+        entities: vec![None],
+        meshes: vec![Handle::default()],
+        material: chunk.material,
+    };
     let mut app = App::new();
-    app.init_resource::<super::WallQueue>()
-        .init_resource::<super::WallLog>()
-        .add_observer(super::read_hits);
+    app.add_plugins((
+        MinimalPlugins,
+        AssetPlugin::default(),
+        bevy::transform::TransformPlugin,
+        crate::offline_physics(),
+    ))
+    .init_asset::<Mesh>()
+    .insert_resource(avian3d::prelude::Gravity::ZERO)
+    .insert_resource(bevy::time::TimeUpdateStrategy::ManualDuration(
+        std::time::Duration::from_micros(15_625),
+    ))
+    .insert_resource(wall)
+    .insert_resource(WallControls {
+        mass: 0,
+        standoff: 0,
+        cased: true,
+        round: 0,
+        view: View::Front,
+        help: false,
+    })
+    .insert_resource(Charge::of(&super::wall_rounds()))
+    .insert_resource(super::BlastField(blast_field()))
+    .insert_resource(super::WallAssets {
+        heat: vec![Handle::default(); 11],
+        loose: Handle::default(),
+        toppled: Handle::default(),
+        witness: Vec::new(),
+        puff: Handle::default(),
+    })
+    .init_resource::<Assets<StandardMaterial>>()
+    .init_resource::<super::WallQueue>()
+    .init_resource::<super::WallLog>()
+    .add_observer(super::read_hits)
+    .add_systems(Update, super::apply_deposits);
+    app.finish();
+    app.cleanup();
     let volume = app.world_mut().spawn(super::WallChunk(0)).id();
     let shell = app.world_mut().spawn(SpallMarks::default()).id();
     let line = DeliveredLine {
-        contacts: vec![(Vec3::ZERO, Vec3::Z)],
         crossing: VolumeCrossing {
             volume,
-            entry: Vec3::ZERO,
-            end: Vec3::Z,
-            chord: 1.0,
+            entry,
+            end,
+            chord: entry.distance(end),
             cost: 0.0,
-            energy: 7.0,
+            energy,
             perforated: true,
         },
-        entrance_energy: 5.0,
+        contacts: vec![(entry, end)],
+        entrance_energy: energy * (5.0 / 7.0),
         entrance_momentum: Vec3::X * 12.0,
         momentum: Vec3::X * 12.0 + Vec3::Z * 30.0,
     };
@@ -747,17 +797,94 @@ fn the_inspector_reads_delivered_work_and_momentum_without_guessing_a_round() {
         lines: vec![line.clone()],
         burst: None,
     });
-    let queue = app.world().resource::<super::WallQueue>();
-    let Deposit::Line { lines, .. } = &queue.0[0] else {
-        panic!("one resolved line")
-    };
-    assert_eq!(lines.len(), 1);
-    let loads = crate::buildings::breakage::resolved_line_loads(0, &brick(), &lines[0].1);
-    assert!((loads.iter().map(|load| load.energy).sum::<f32>() - 7.0).abs() < 1e-5);
-    assert!((loads.iter().map(|load| load.blow).sum::<Vec3>() - line.momentum).length() < 1e-4);
-    let entrance = loads.iter().find(|load| load.blow.x > 0.0).unwrap();
-    assert_eq!(entrance.at, Vec3::ZERO);
-    assert_eq!(entrance.energy, 5.0);
+    (app, line)
+}
+
+/// The game's environment destruction inspector launches and spawns the same occupied mass the
+/// structure weighed. Feeding its launch a contact inset, or dropping spawned mass overrides,
+/// changes the body's momentum or spin and fails this production apply_deposits path.
+#[test]
+fn the_sandbox_launch_reads_the_chunk_the_structure_weighed() {
+    use avian3d::dynamics::rigid_body::mass_properties::bevy_heavy::ComputeMassProperties3d;
+    use avian3d::prelude::*;
+    use bevy::prelude::*;
+    let (mut app, line) = inspector_app(false);
+    let wall = app.world().resource::<Wall>();
+    let chunk = wall.cut.structure.chunks[0];
+    let block = &wall.cut.blocks[0];
+    let props = super::chunk_collider(block).mass_properties(chunk.material.density);
+    let centre = block.center() + props.center_of_mass;
+    let inertia = props.angular_inertia_tensor().to_mat3();
+    let angular = (line.crossing.entry - centre).cross(line.entrance_momentum)
+        + ((line.crossing.entry + line.crossing.end) / 2.0 - centre)
+            .cross(line.momentum - line.entrance_momentum);
+    app.update();
+    // Launch is observed before this new body's first integration; free rotation can change
+    // its angular velocity afterwards even with no external torque.
+    let mut motion = app
+        .world_mut()
+        .query_filtered::<(&LinearVelocity, &AngularVelocity), With<super::WallPiece>>();
+    let (velocity, spin) = motion.single(app.world()).unwrap();
+    assert!((velocity.0 * chunk.mass - line.momentum).length() < 1e-3);
+    assert!(
+        (spin.0 - inertia.inverse() * angular).length() < 1e-3,
+        "initial spin {:?}, expected {:?}",
+        spin.0,
+        inertia.inverse() * angular
+    );
+    for _ in 0..2 {
+        app.update();
+    }
+    let mut bodies = app
+        .world_mut()
+        .query_filtered::<(&ComputedMass, &ComputedAngularInertia), With<super::WallPiece>>();
+    let (mass, actual_inertia) = bodies.single(app.world()).unwrap();
+    assert!((mass.value() / chunk.mass - 1.0).abs() < 1e-3);
+    let error = (actual_inertia.tensor().to_mat3() - inertia)
+        .to_cols_array()
+        .map(f32::abs)
+        .into_iter()
+        .fold(0.0, f32::max);
+    assert!(
+        error
+            < 1e-3
+                * inertia
+                    .to_cols_array()
+                    .map(f32::abs)
+                    .into_iter()
+                    .fold(0.0, f32::max)
+    );
+}
+
+/// The game's damage-model inspector reads delivered work through read_hits, apply_deposits,
+/// the shared laws and the hole reader. Dropping entrance work at any of those seams changes
+/// the observed pool, readout or channel; no round metadata supplies an inferred replacement.
+#[test]
+fn the_inspector_reads_delivered_work_through_pool_holes_and_readout() {
+    let (mut app, line) = inspector_app(true);
+    let wall = app.world().resource::<Wall>();
+    let before = wall.live.state.pool[0];
+    let crush = wall.cut.structure.chunks[0].material.crush;
+    let volume = line.crossing.energy / crush;
+    let radius = (volume / (std::f32::consts::PI * line.crossing.chord))
+        .sqrt()
+        .min((0.75 * volume / std::f32::consts::PI).cbrt());
+    app.update();
+    let wall = app.world().resource::<Wall>();
+    let worn = before - wall.live.state.pool[0];
+    assert!((worn / volume - 1.0).abs() < 1e-3);
+    assert_eq!(wall.live.holes[0].len(), 1);
+    assert_eq!(
+        wall.live.holes[0][0].radius,
+        (radius * 1000.0).round() as u16
+    );
+    let outcome = app
+        .world()
+        .resource::<super::WallLog>()
+        .last
+        .as_ref()
+        .unwrap();
+    assert!((outcome.deposited / line.crossing.energy - 1.0).abs() < 1e-4);
 }
 
 /// Authored inspector spread cannot poison a fired direction; the data gate names its repair.
