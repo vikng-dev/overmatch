@@ -197,6 +197,39 @@ The proxy-key write-back itself is sound: either observer order removes the prox
 current tree. No second patch to that fix is warranted. The existing Avian removal guards
 remain the invariant tests.
 
+### sweep-perf-3: verification of server-perf-2's doubles
+
+Subject: the game's dedicated server tick and the walk's collider history, game state only. Each
+finding was checked against Bevy 0.19.1's and the vendored Avian's source. The premise holds:
+`SubApp::update` runs the main schedule and then `World::clear_trackers`, which swaps the
+double-buffered `RemovedComponentMessages`, so a removal is readable in the frame it is made and
+the next only. An ordinary `Message` is swapped only after `signal_message_update_system` has run
+in `FixedPostUpdate` (bevy_time's `TimePlugin`, bevy_ecs's `message_update_system`), so it lives
+until a fixed step has read it.
+
+| reviewer | finding | verified / not a defect | fixed in (subject) |
+|---|---|---|---|
+| Claude | P2: re-enable detection reads removal messages Bevy clears every frame; at about 3.3 frames per tick a re-enable made outside the step is dropped, the march's `expect` fires, and a re-enabled child is never re-placed | Verified: at four frames per tick (fixture cadence), a `Disabled` removal made in `Update` three frames before the step reached neither the history nor Avian's pre-physics pass; both new tests failed on the previous code (MEASURED) | physics: carry re-enables to every boundary in a buffered message (#250) |
+| Codex | P2: a removal that leaves a second disabling marker in place marks the entity seeded, so an admission between the boundaries sweeps from its pre-disabling pose | Verified: the new test failed on the previous code, the interval starting at the pose the collider was disabled at (MEASURED) | physics: carry re-enables to every boundary in a buffered message (#250) |
+| this lane | A body moved while disabled: on its re-enable its attached colliders' entries still held their pre-disabling poses as the interval's start | Verified while fixing the Claude P2: the new test failed on the previous code (MEASURED); admitting a body now admits its attached colliders | physics: carry re-enables to every boundary in a buffered message (#250) |
+| Claude | P3: a body without `Transform` is never listed in `RigidBodyColliders`, so its children are never re-placed; the old `expect` became a skip | Verified in source: Avian's `ColliderOf::on_insert` returns without the link when either entity lacks `GlobalTransform`, and `net::physics::physics_plugins` disables the `PhysicsTransformPlugin` that otherwise requires `Transform` through `Position`. Now a refusal at the attachment. The whole lib suite met it once, in a protocol fixture whose replica hull lacked the `Transform` production gives it (MEASURED) | physics: refuse a collider attachment without global transforms (#250) |
+| Claude | P3: the `piece_impulses` comment describes the edit | Not taken: lane law-hull-work owns `src/track/` | |
+
+The fix: the vendored Avian's `ReenabledPlugin`, added by `ColliderTransformPlugin`, writes
+`Reenabled` from an observer on every disabling component's removal. Avian's pre-physics pass,
+`motion::place_children`, lightyear's frame pass, `motion::seed_births` and `motion::snapshot` each
+read it through their own cursor; the placement boundaries place the named child, or the named
+body's colliders, where they used to visit every child after any removal. An entity still disabled
+by another component, or despawning, matches no query and is admitted by its own later message;
+`seed_births` marks seeded only what it seeded. A disabling component registered after
+`ReenabledPlugin::finish` panics at the first placement boundary. No server run was taken: the
+fixture cadence reproduces the frame-to-tick ratio, and no server code removes a disabling
+component today.
+
+Gates: formatting, CI clippy, the whole lib suite once (2 031 passed, 1 failed on the refusal
+above, 24 on-demand beds ignored, MEASURED) and, after the fixture fix, the 105 protocol, history,
+child-pose, diagnostics and whole-tree guard tests (MEASURED).
+
 ## server-perf-2: each tank reuses its tick-start support candidates
 
 "driving: reuse each tank's tick-start support candidates (#250)" retains the per-tank collider
