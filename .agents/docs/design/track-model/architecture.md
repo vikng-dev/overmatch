@@ -427,6 +427,31 @@ not a valid invariant fixture once the new launch moves the tank onto different 
 record every sustained sample and the raw first delivery. The historical first-tick record remains
 in `drive-load-measurements-2026-11-02.json` for comparison.
 
+**Same-instant calibration, with the gear lane stopped at its boundary.** The contact pass now
+records an actual convex piece face for the Driver independently of the physical overlap law's
+belt-frame orientation. A coarse overlap cell whose centroid ray strikes no face supplies no
+geometric observation; the coarse physical reaction still runs. Turn resistance uses normal
+pressure, `mu_t W cos(theta) length/(4 R_g)`, consistently with grip and rolling.
+
+The same-instant instrument separates forecast-speed drift, actual crank rpm and crank
+acceleration from the numerical residual. MEASURED 524 settled samples leave -1.546875 to
+1.062500 N residual. Including the MEASURED 0.406250 N observer bound gives a DERIVED proposed
+gear-comparison resolution `0.000006 W` (3.355020 N on the 559170 N rig). The preceding D2
+262 kN envelope includes physical transients; the maximum landing mean contains about 202 kN
+crank inertia and 64 kN speed drift, offset by about -5 kN crank-speed difference. It is not an
+observer-noise deadband. The 30-degree near-equal price/delivery pair is grip-clipped on both
+sides, so agreement there does not independently validate engine force. The 20-degree forecast
+also cannot certify a rolling speed loss when the observed cut did not produce that loss.
+
+The current asset and scheduler remain unchanged because the C1-C3 experiment was not green
+at the measured 60-minute boundary. In particular, the draft's rolling S4 fixture produced a
+false stationary equilibrium after relocation; its final split is not certified. The
+[bounded gear-lane handoff](../../../scratch/research/law-drive-3-gear-handoff-2026-11-02.md)
+owns the full dispositions, draft limitations and decisions;
+[its raw calibration](../../../scratch/research/drive-gear-measurements-2026-11-02.json)
+retains every sample and landing mean. The lower proposed M is evidence for that continuation,
+not a production retune.
+
 **Rolling on flat ground costs nothing else.** `c_rr` is published motion resistance, which
 lumps in running-gear losses, so the contact law spends nothing else on steady flat travel.
 The elastic spring integrates the directional penetration profile. Its force acts along the

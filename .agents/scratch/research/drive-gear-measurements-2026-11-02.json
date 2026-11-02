@@ -1,0 +1,4456 @@
+{
+  "subject": "The game driving model; same-instant landing-force instrument",
+  "samples": [
+    {
+      "gear": 2,
+      "forecast_n": 212775.3125,
+      "speed_n": 7086.78125,
+      "crank_n": -83025.09375,
+      "inertia_n": 288713.5625,
+      "residual_n": 0.046875
+    },
+    {
+      "gear": 2,
+      "forecast_n": 153272.03125,
+      "speed_n": -71522.8125,
+      "crank_n": 0.03125,
+      "inertia_n": 224795.296875,
+      "residual_n": -0.484375
+    },
+    {
+      "gear": 2,
+      "forecast_n": 163857.4375,
+      "speed_n": -68084.84375,
+      "crank_n": 0.03125,
+      "inertia_n": 231941.96875,
+      "residual_n": 0.28125
+    },
+    {
+      "gear": 2,
+      "forecast_n": 178548.1875,
+      "speed_n": -64537.53125,
+      "crank_n": 0.0,
+      "inertia_n": 243085.265625,
+      "residual_n": 0.453125
+    },
+    {
+      "gear": 2,
+      "forecast_n": 195692.171875,
+      "speed_n": -60819.8125,
+      "crank_n": -0.03125,
+      "inertia_n": 256512.5,
+      "residual_n": -0.484375
+    },
+    {
+      "gear": 2,
+      "forecast_n": 213941.578125,
+      "speed_n": -56896.75,
+      "crank_n": -0.03125,
+      "inertia_n": 270838.6875,
+      "residual_n": -0.34375
+    },
+    {
+      "gear": 2,
+      "forecast_n": 232187.46875,
+      "speed_n": -52754.625,
+      "crank_n": -0.03125,
+      "inertia_n": 284942.0,
+      "residual_n": 0.140625
+    },
+    {
+      "gear": 2,
+      "forecast_n": 249599.5625,
+      "speed_n": -48396.78125,
+      "crank_n": 0.0,
+      "inertia_n": 297996.25,
+      "residual_n": 0.109375
+    },
+    {
+      "gear": 2,
+      "forecast_n": 265647.1875,
+      "speed_n": -43839.34375,
+      "crank_n": 0.0,
+      "inertia_n": 309485.75,
+      "residual_n": 0.796875
+    },
+    {
+      "gear": 2,
+      "forecast_n": 280016.875,
+      "speed_n": -39106.0625,
+      "crank_n": -0.03125,
+      "inertia_n": 319123.875,
+      "residual_n": -0.921875
+    },
+    {
+      "gear": 2,
+      "forecast_n": 292492.4375,
+      "speed_n": -34225.5,
+      "crank_n": 0.0,
+      "inertia_n": 326718.53125,
+      "residual_n": -0.609375
+    },
+    {
+      "gear": 2,
+      "forecast_n": 311257.3125,
+      "speed_n": 219448.234375,
+      "crank_n": 0.0,
+      "inertia_n": 91809.382812,
+      "residual_n": -0.296875
+    },
+    {
+      "gear": 2,
+      "forecast_n": 332351.78125,
+      "speed_n": 300162.21875,
+      "crank_n": 0.0,
+      "inertia_n": 32188.765625,
+      "residual_n": 0.78125
+    },
+    {
+      "gear": 2,
+      "forecast_n": 351552.1875,
+      "speed_n": 328483.375,
+      "crank_n": 0.0,
+      "inertia_n": 23069.464844,
+      "residual_n": -0.679688
+    },
+    {
+      "gear": 2,
+      "forecast_n": 367956.03125,
+      "speed_n": 348787.375,
+      "crank_n": 0.0,
+      "inertia_n": 19169.417969,
+      "residual_n": -0.761719
+    },
+    {
+      "gear": 2,
+      "forecast_n": 381493.6875,
+      "speed_n": 365662.625,
+      "crank_n": 0.003906,
+      "inertia_n": 15830.335938,
+      "residual_n": 0.736328
+    },
+    {
+      "gear": 3,
+      "forecast_n": 135876.265625,
+      "speed_n": -6634.3125,
+      "crank_n": -31860.375,
+      "inertia_n": 174370.96875,
+      "residual_n": -0.015625
+    },
+    {
+      "gear": 3,
+      "forecast_n": 82945.140625,
+      "speed_n": -35827.875,
+      "crank_n": -0.03125,
+      "inertia_n": 118772.875,
+      "residual_n": 0.171875
+    },
+    {
+      "gear": 3,
+      "forecast_n": 87719.890625,
+      "speed_n": -34011.40625,
+      "crank_n": 0.0,
+      "inertia_n": 121731.40625,
+      "residual_n": -0.109375
+    },
+    {
+      "gear": 3,
+      "forecast_n": 95907.015625,
+      "speed_n": -32149.65625,
+      "crank_n": 0.0,
+      "inertia_n": 128056.78125,
+      "residual_n": -0.109375
+    },
+    {
+      "gear": 3,
+      "forecast_n": 106030.515625,
+      "speed_n": -30191.15625,
+      "crank_n": -0.03125,
+      "inertia_n": 136222.015625,
+      "residual_n": -0.3125
+    },
+    {
+      "gear": 3,
+      "forecast_n": 117056.625,
+      "speed_n": -28107.875,
+      "crank_n": 0.0,
+      "inertia_n": 145164.609375,
+      "residual_n": -0.109375
+    },
+    {
+      "gear": 3,
+      "forecast_n": 128246.234375,
+      "speed_n": -25887.78125,
+      "crank_n": 0.0,
+      "inertia_n": 154134.296875,
+      "residual_n": -0.28125
+    },
+    {
+      "gear": 3,
+      "forecast_n": 138919.734375,
+      "speed_n": -23530.5,
+      "crank_n": 0.0,
+      "inertia_n": 162449.875,
+      "residual_n": 0.359375
+    },
+    {
+      "gear": 3,
+      "forecast_n": 148692.96875,
+      "speed_n": -21046.0,
+      "crank_n": 0.03125,
+      "inertia_n": 169738.625,
+      "residual_n": 0.3125
+    },
+    {
+      "gear": 3,
+      "forecast_n": 157391.84375,
+      "speed_n": -18450.0,
+      "crank_n": 0.0,
+      "inertia_n": 175841.6875,
+      "residual_n": 0.15625
+    },
+    {
+      "gear": 3,
+      "forecast_n": 164870.65625,
+      "speed_n": -15760.78125,
+      "crank_n": 0.0,
+      "inertia_n": 180631.53125,
+      "residual_n": -0.09375
+    },
+    {
+      "gear": 3,
+      "forecast_n": 171098.65625,
+      "speed_n": -12998.21875,
+      "crank_n": 0.0,
+      "inertia_n": 184096.6875,
+      "residual_n": 0.179688
+    },
+    {
+      "gear": 3,
+      "forecast_n": 176221.125,
+      "speed_n": -10182.6875,
+      "crank_n": 0.0,
+      "inertia_n": 186403.96875,
+      "residual_n": -0.15625
+    },
+    {
+      "gear": 3,
+      "forecast_n": 186102.796875,
+      "speed_n": 80812.5625,
+      "crank_n": 0.015625,
+      "inertia_n": 105290.53125,
+      "residual_n": -0.3125
+    },
+    {
+      "gear": 3,
+      "forecast_n": 201951.625,
+      "speed_n": 173248.34375,
+      "crank_n": 0.0,
+      "inertia_n": 28703.296875,
+      "residual_n": 0.0
+    },
+    {
+      "gear": 3,
+      "forecast_n": 218285.09375,
+      "speed_n": 198478.578125,
+      "crank_n": 0.0,
+      "inertia_n": 19806.28125,
+      "residual_n": 0.242188
+    },
+    {
+      "gear": 4,
+      "forecast_n": -71689.375,
+      "speed_n": 1993.21875,
+      "crank_n": -27747.984375,
+      "inertia_n": -45934.734375,
+      "residual_n": 0.125
+    },
+    {
+      "gear": 4,
+      "forecast_n": -82860.8125,
+      "speed_n": -19950.0,
+      "crank_n": -3994.734375,
+      "inertia_n": -58916.046875,
+      "residual_n": -0.03125
+    },
+    {
+      "gear": 4,
+      "forecast_n": -57989.0,
+      "speed_n": -23014.953125,
+      "crank_n": 0.015625,
+      "inertia_n": -34974.125,
+      "residual_n": 0.0625
+    },
+    {
+      "gear": 4,
+      "forecast_n": -23918.890625,
+      "speed_n": -22463.015625,
+      "crank_n": 0.03125,
+      "inertia_n": -1455.96875,
+      "residual_n": 0.0625
+    },
+    {
+      "gear": 4,
+      "forecast_n": 4401.875,
+      "speed_n": -22440.015625,
+      "crank_n": 0.0,
+      "inertia_n": 26841.890625,
+      "residual_n": 0.0
+    },
+    {
+      "gear": 4,
+      "forecast_n": 27115.8125,
+      "speed_n": -22863.609375,
+      "crank_n": 0.0,
+      "inertia_n": 49979.484375,
+      "residual_n": -0.0625
+    },
+    {
+      "gear": 4,
+      "forecast_n": 44636.609375,
+      "speed_n": -23652.375,
+      "crank_n": 0.0,
+      "inertia_n": 68289.140625,
+      "residual_n": -0.15625
+    },
+    {
+      "gear": 4,
+      "forecast_n": 57677.40625,
+      "speed_n": -24730.109375,
+      "crank_n": 0.0,
+      "inertia_n": 82407.578125,
+      "residual_n": -0.0625
+    },
+    {
+      "gear": 4,
+      "forecast_n": 66883.75,
+      "speed_n": -26030.625,
+      "crank_n": 0.015625,
+      "inertia_n": 92914.40625,
+      "residual_n": -0.046875
+    },
+    {
+      "gear": 4,
+      "forecast_n": 73378.015625,
+      "speed_n": -24896.90625,
+      "crank_n": 0.015625,
+      "inertia_n": 98274.921875,
+      "residual_n": -0.015625
+    },
+    {
+      "gear": 4,
+      "forecast_n": 77788.8125,
+      "speed_n": -23393.890625,
+      "crank_n": 0.015625,
+      "inertia_n": 101182.53125,
+      "residual_n": 0.15625
+    },
+    {
+      "gear": 4,
+      "forecast_n": 80639.164062,
+      "speed_n": -21846.421875,
+      "crank_n": 0.015625,
+      "inertia_n": 102485.804688,
+      "residual_n": -0.234375
+    },
+    {
+      "gear": 4,
+      "forecast_n": 82350.210938,
+      "speed_n": -20279.015625,
+      "crank_n": 0.0,
+      "inertia_n": 102629.390625,
+      "residual_n": -0.164062
+    },
+    {
+      "gear": 4,
+      "forecast_n": 83222.210938,
+      "speed_n": -18709.40625,
+      "crank_n": 0.0,
+      "inertia_n": 101931.648438,
+      "residual_n": -0.03125
+    },
+    {
+      "gear": 4,
+      "forecast_n": 83585.179688,
+      "speed_n": -17150.5,
+      "crank_n": 0.0,
+      "inertia_n": 100735.476562,
+      "residual_n": 0.203125
+    },
+    {
+      "gear": 4,
+      "forecast_n": 83544.40625,
+      "speed_n": -15609.875,
+      "crank_n": 0.015625,
+      "inertia_n": 99154.164062,
+      "residual_n": 0.101562
+    },
+    {
+      "gear": 4,
+      "forecast_n": 83312.5625,
+      "speed_n": -14093.421875,
+      "crank_n": 0.015625,
+      "inertia_n": 97405.75,
+      "residual_n": 0.21875
+    },
+    {
+      "gear": 4,
+      "forecast_n": 82971.070312,
+      "speed_n": -12603.734375,
+      "crank_n": 0.015625,
+      "inertia_n": 95574.726562,
+      "residual_n": 0.0625
+    },
+    {
+      "gear": 4,
+      "forecast_n": 82665.96875,
+      "speed_n": -11142.015625,
+      "crank_n": 0.0,
+      "inertia_n": 93808.0625,
+      "residual_n": -0.078125
+    },
+    {
+      "gear": 4,
+      "forecast_n": 82392.148438,
+      "speed_n": -9707.328125,
+      "crank_n": 0.0,
+      "inertia_n": 92099.507812,
+      "residual_n": -0.03125
+    },
+    {
+      "gear": 5,
+      "forecast_n": -53232.75,
+      "speed_n": -10917.234375,
+      "crank_n": -1265.4375,
+      "inertia_n": -41050.109375,
+      "residual_n": 0.03125
+    },
+    {
+      "gear": 5,
+      "forecast_n": -23448.421875,
+      "speed_n": -11534.828125,
+      "crank_n": 0.0,
+      "inertia_n": -11913.515625,
+      "residual_n": -0.078125
+    },
+    {
+      "gear": 5,
+      "forecast_n": 1743.523438,
+      "speed_n": -11346.8125,
+      "crank_n": 0.0,
+      "inertia_n": 13090.34375,
+      "residual_n": -0.007812
+    },
+    {
+      "gear": 5,
+      "forecast_n": 16304.46875,
+      "speed_n": -11553.390625,
+      "crank_n": -0.015625,
+      "inertia_n": 27857.929688,
+      "residual_n": -0.054688
+    },
+    {
+      "gear": 5,
+      "forecast_n": 24023.757812,
+      "speed_n": -11993.046875,
+      "crank_n": 0.0,
+      "inertia_n": 36016.867188,
+      "residual_n": -0.0625
+    },
+    {
+      "gear": 5,
+      "forecast_n": 27558.46875,
+      "speed_n": -12561.453125,
+      "crank_n": 0.0,
+      "inertia_n": 40119.84375,
+      "residual_n": 0.078125
+    },
+    {
+      "gear": 5,
+      "forecast_n": 28598.351562,
+      "speed_n": -13194.609375,
+      "crank_n": 0.0,
+      "inertia_n": 41793.0,
+      "residual_n": -0.039062
+    },
+    {
+      "gear": 5,
+      "forecast_n": 28169.65625,
+      "speed_n": -13854.171875,
+      "crank_n": 0.0,
+      "inertia_n": 42023.914062,
+      "residual_n": -0.085938
+    },
+    {
+      "gear": 5,
+      "forecast_n": 26890.226562,
+      "speed_n": -14517.359375,
+      "crank_n": -0.015625,
+      "inertia_n": 41407.609375,
+      "residual_n": -0.007812
+    },
+    {
+      "gear": 5,
+      "forecast_n": 25202.460938,
+      "speed_n": -15170.84375,
+      "crank_n": 0.0,
+      "inertia_n": 40373.320312,
+      "residual_n": -0.015625
+    },
+    {
+      "gear": 5,
+      "forecast_n": 23411.117188,
+      "speed_n": -15808.0,
+      "crank_n": 0.0,
+      "inertia_n": 39219.039062,
+      "residual_n": 0.078125
+    },
+    {
+      "gear": 5,
+      "forecast_n": 21608.890625,
+      "speed_n": -16426.9375,
+      "crank_n": -0.015625,
+      "inertia_n": 38035.929688,
+      "residual_n": -0.085938
+    },
+    {
+      "gear": 5,
+      "forecast_n": 19926.046875,
+      "speed_n": -17027.21875,
+      "crank_n": 0.0,
+      "inertia_n": 36953.390625,
+      "residual_n": -0.125
+    },
+    {
+      "gear": 5,
+      "forecast_n": 18669.953125,
+      "speed_n": -16849.90625,
+      "crank_n": 0.0,
+      "inertia_n": 35519.945312,
+      "residual_n": -0.085938
+    },
+    {
+      "gear": 5,
+      "forecast_n": 17804.960938,
+      "speed_n": -16306.671875,
+      "crank_n": 0.0,
+      "inertia_n": 34111.546875,
+      "residual_n": 0.085938
+    },
+    {
+      "gear": 5,
+      "forecast_n": 17293.179688,
+      "speed_n": -15784.984375,
+      "crank_n": 0.0,
+      "inertia_n": 33078.203125,
+      "residual_n": -0.039062
+    },
+    {
+      "gear": 5,
+      "forecast_n": 17138.726562,
+      "speed_n": -15279.09375,
+      "crank_n": 0.0,
+      "inertia_n": 32417.726562,
+      "residual_n": 0.09375
+    },
+    {
+      "gear": 5,
+      "forecast_n": 17075.398438,
+      "speed_n": -14783.296875,
+      "crank_n": 0.0,
+      "inertia_n": 31858.757812,
+      "residual_n": -0.0625
+    },
+    {
+      "gear": 5,
+      "forecast_n": 17147.476562,
+      "speed_n": -14296.0625,
+      "crank_n": 0.0,
+      "inertia_n": 31443.601562,
+      "residual_n": -0.0625
+    },
+    {
+      "gear": 5,
+      "forecast_n": 17375.867188,
+      "speed_n": -13815.171875,
+      "crank_n": 0.0,
+      "inertia_n": 31191.0625,
+      "residual_n": -0.023438
+    },
+    {
+      "gear": 6,
+      "forecast_n": -22916.3125,
+      "speed_n": -4474.570312,
+      "crank_n": -258.5625,
+      "inertia_n": -18183.210938,
+      "residual_n": 0.03125
+    },
+    {
+      "gear": 6,
+      "forecast_n": -4006.664062,
+      "speed_n": -4446.164062,
+      "crank_n": 0.0,
+      "inertia_n": 439.460938,
+      "residual_n": 0.039062
+    },
+    {
+      "gear": 6,
+      "forecast_n": 5097.0,
+      "speed_n": -4453.101562,
+      "crank_n": 0.0,
+      "inertia_n": 9550.195312,
+      "residual_n": -0.09375
+    },
+    {
+      "gear": 6,
+      "forecast_n": 7931.132812,
+      "speed_n": -4603.8125,
+      "crank_n": -0.007812,
+      "inertia_n": 12534.898438,
+      "residual_n": 0.054688
+    },
+    {
+      "gear": 6,
+      "forecast_n": 8304.546875,
+      "speed_n": -4801.640625,
+      "crank_n": 0.0,
+      "inertia_n": 13106.257812,
+      "residual_n": -0.070312
+    },
+    {
+      "gear": 6,
+      "forecast_n": 7853.375,
+      "speed_n": -5008.476562,
+      "crank_n": 0.0,
+      "inertia_n": 12861.90625,
+      "residual_n": -0.054688
+    },
+    {
+      "gear": 6,
+      "forecast_n": 7100.867188,
+      "speed_n": -5211.453125,
+      "crank_n": -0.007812,
+      "inertia_n": 12312.3125,
+      "residual_n": 0.015625
+    },
+    {
+      "gear": 6,
+      "forecast_n": 6336.078125,
+      "speed_n": -5405.75,
+      "crank_n": -0.007812,
+      "inertia_n": 11741.796875,
+      "residual_n": 0.039062
+    },
+    {
+      "gear": 6,
+      "forecast_n": 5638.046875,
+      "speed_n": -5591.054688,
+      "crank_n": -0.015625,
+      "inertia_n": 11229.203125,
+      "residual_n": -0.085938
+    },
+    {
+      "gear": 6,
+      "forecast_n": 4994.875,
+      "speed_n": -5768.273438,
+      "crank_n": 0.0,
+      "inertia_n": 10763.101562,
+      "residual_n": 0.046875
+    },
+    {
+      "gear": 6,
+      "forecast_n": 4460.523438,
+      "speed_n": -5938.132812,
+      "crank_n": 0.0,
+      "inertia_n": 10398.679688,
+      "residual_n": -0.023438
+    },
+    {
+      "gear": 6,
+      "forecast_n": 3964.609375,
+      "speed_n": -6102.234375,
+      "crank_n": -0.007812,
+      "inertia_n": 10066.8125,
+      "residual_n": 0.039062
+    },
+    {
+      "gear": 6,
+      "forecast_n": 3558.804688,
+      "speed_n": -6261.109375,
+      "crank_n": -0.007812,
+      "inertia_n": 9819.921875,
+      "residual_n": 0.0
+    },
+    {
+      "gear": 6,
+      "forecast_n": 3185.695312,
+      "speed_n": -6416.085938,
+      "crank_n": -0.007812,
+      "inertia_n": 9601.773438,
+      "residual_n": 0.015625
+    },
+    {
+      "gear": 6,
+      "forecast_n": 2870.101562,
+      "speed_n": -6567.617188,
+      "crank_n": 0.0,
+      "inertia_n": 9437.742188,
+      "residual_n": -0.023438
+    },
+    {
+      "gear": 6,
+      "forecast_n": 2575.195312,
+      "speed_n": -6716.5625,
+      "crank_n": 0.007812,
+      "inertia_n": 9291.671875,
+      "residual_n": 0.078125
+    },
+    {
+      "gear": 6,
+      "forecast_n": 2326.890625,
+      "speed_n": -6863.203125,
+      "crank_n": -0.007812,
+      "inertia_n": 9190.0,
+      "residual_n": 0.101562
+    },
+    {
+      "gear": 6,
+      "forecast_n": 2108.492188,
+      "speed_n": -7008.226562,
+      "crank_n": 0.0,
+      "inertia_n": 9116.65625,
+      "residual_n": 0.0625
+    },
+    {
+      "gear": 6,
+      "forecast_n": 1918.921875,
+      "speed_n": -7152.109375,
+      "crank_n": 0.0,
+      "inertia_n": 9071.0,
+      "residual_n": 0.03125
+    },
+    {
+      "gear": 6,
+      "forecast_n": 1759.179688,
+      "speed_n": -7295.265625,
+      "crank_n": 0.0,
+      "inertia_n": 9054.507812,
+      "residual_n": -0.0625
+    },
+    {
+      "gear": 7,
+      "forecast_n": -20756.503906,
+      "speed_n": -1392.046875,
+      "crank_n": -337.441406,
+      "inertia_n": -19026.945312,
+      "residual_n": -0.070312
+    },
+    {
+      "gear": 7,
+      "forecast_n": -4412.316406,
+      "speed_n": -1429.226562,
+      "crank_n": 0.011719,
+      "inertia_n": -2983.148438,
+      "residual_n": 0.046875
+    },
+    {
+      "gear": 7,
+      "forecast_n": 2204.8125,
+      "speed_n": -1382.140625,
+      "crank_n": 0.0,
+      "inertia_n": 3587.015625,
+      "residual_n": -0.0625
+    },
+    {
+      "gear": 7,
+      "forecast_n": 2822.882812,
+      "speed_n": -1438.75,
+      "crank_n": 0.003906,
+      "inertia_n": 4261.570312,
+      "residual_n": 0.058594
+    },
+    {
+      "gear": 7,
+      "forecast_n": 2599.605469,
+      "speed_n": -1506.0,
+      "crank_n": -0.003906,
+      "inertia_n": 4105.574219,
+      "residual_n": 0.035156
+    },
+    {
+      "gear": 7,
+      "forecast_n": 2311.679688,
+      "speed_n": -1570.792969,
+      "crank_n": 0.0,
+      "inertia_n": 3882.503906,
+      "residual_n": -0.03125
+    },
+    {
+      "gear": 7,
+      "forecast_n": 2019.355469,
+      "speed_n": -1632.0625,
+      "crank_n": 0.0,
+      "inertia_n": 3651.476562,
+      "residual_n": -0.058594
+    },
+    {
+      "gear": 7,
+      "forecast_n": 1773.515625,
+      "speed_n": -1689.691406,
+      "crank_n": 0.003906,
+      "inertia_n": 3463.171875,
+      "residual_n": 0.03125
+    },
+    {
+      "gear": 7,
+      "forecast_n": 1564.164062,
+      "speed_n": -1744.34375,
+      "crank_n": 0.003906,
+      "inertia_n": 3308.472656,
+      "residual_n": 0.03125
+    },
+    {
+      "gear": 7,
+      "forecast_n": 1373.125,
+      "speed_n": -1796.558594,
+      "crank_n": -0.003906,
+      "inertia_n": 3169.707031,
+      "residual_n": -0.019531
+    },
+    {
+      "gear": 7,
+      "forecast_n": 1229.796875,
+      "speed_n": -1846.578125,
+      "crank_n": 0.007812,
+      "inertia_n": 3076.425781,
+      "residual_n": -0.058594
+    },
+    {
+      "gear": 7,
+      "forecast_n": 1082.765625,
+      "speed_n": -1895.125,
+      "crank_n": -0.003906,
+      "inertia_n": 2977.929688,
+      "residual_n": -0.035156
+    },
+    {
+      "gear": 7,
+      "forecast_n": 958.289062,
+      "speed_n": -1942.125,
+      "crank_n": 0.003906,
+      "inertia_n": 2900.4375,
+      "residual_n": -0.027344
+    },
+    {
+      "gear": 7,
+      "forecast_n": 856.351562,
+      "speed_n": -1987.902344,
+      "crank_n": 0.0,
+      "inertia_n": 2844.234375,
+      "residual_n": 0.019531
+    },
+    {
+      "gear": 7,
+      "forecast_n": 751.394531,
+      "speed_n": -2032.789062,
+      "crank_n": 0.007812,
+      "inertia_n": 2784.121094,
+      "residual_n": 0.054688
+    },
+    {
+      "gear": 7,
+      "forecast_n": 676.765625,
+      "speed_n": -2076.726562,
+      "crank_n": 0.0,
+      "inertia_n": 2753.5625,
+      "residual_n": -0.070312
+    },
+    {
+      "gear": 7,
+      "forecast_n": 599.183594,
+      "speed_n": -2120.171875,
+      "crank_n": 0.0,
+      "inertia_n": 2719.375,
+      "residual_n": -0.019531
+    },
+    {
+      "gear": 7,
+      "forecast_n": 524.050781,
+      "speed_n": -2163.09375,
+      "crank_n": 0.0,
+      "inertia_n": 2687.078125,
+      "residual_n": 0.066406
+    },
+    {
+      "gear": 7,
+      "forecast_n": 474.433594,
+      "speed_n": -2205.503906,
+      "crank_n": 0.003906,
+      "inertia_n": 2679.976562,
+      "residual_n": -0.042969
+    },
+    {
+      "gear": 7,
+      "forecast_n": 416.695312,
+      "speed_n": -2247.796875,
+      "crank_n": 0.0,
+      "inertia_n": 2664.480469,
+      "residual_n": 0.011719
+    },
+    {
+      "gear": 8,
+      "forecast_n": -12255.875,
+      "speed_n": -380.691406,
+      "crank_n": -183.382812,
+      "inertia_n": -11691.769531,
+      "residual_n": -0.03125
+    },
+    {
+      "gear": 8,
+      "forecast_n": -1390.246094,
+      "speed_n": -379.5625,
+      "crank_n": 0.0,
+      "inertia_n": -1010.660156,
+      "residual_n": -0.023438
+    },
+    {
+      "gear": 8,
+      "forecast_n": 907.859375,
+      "speed_n": -363.609375,
+      "crank_n": 0.0,
+      "inertia_n": 1271.449219,
+      "residual_n": 0.019531
+    },
+    {
+      "gear": 8,
+      "forecast_n": 645.140625,
+      "speed_n": -383.675781,
+      "crank_n": 0.0,
+      "inertia_n": 1028.855469,
+      "residual_n": -0.039062
+    },
+    {
+      "gear": 8,
+      "forecast_n": 565.367188,
+      "speed_n": -399.90625,
+      "crank_n": 0.0,
+      "inertia_n": 965.3125,
+      "residual_n": -0.039062
+    },
+    {
+      "gear": 8,
+      "forecast_n": 491.675781,
+      "speed_n": -415.144531,
+      "crank_n": -0.003906,
+      "inertia_n": 906.832031,
+      "residual_n": -0.007812
+    },
+    {
+      "gear": 8,
+      "forecast_n": 427.105469,
+      "speed_n": -429.457031,
+      "crank_n": 0.0,
+      "inertia_n": 856.519531,
+      "residual_n": 0.042969
+    },
+    {
+      "gear": 8,
+      "forecast_n": 370.609375,
+      "speed_n": -442.972656,
+      "crank_n": 0.0,
+      "inertia_n": 813.609375,
+      "residual_n": -0.027344
+    },
+    {
+      "gear": 8,
+      "forecast_n": 323.730469,
+      "speed_n": -455.808594,
+      "crank_n": -0.003906,
+      "inertia_n": 779.546875,
+      "residual_n": -0.003906
+    },
+    {
+      "gear": 8,
+      "forecast_n": 280.554688,
+      "speed_n": -468.117188,
+      "crank_n": 0.0,
+      "inertia_n": 748.699219,
+      "residual_n": -0.027344
+    },
+    {
+      "gear": 8,
+      "forecast_n": 238.523438,
+      "speed_n": -479.929688,
+      "crank_n": 0.0,
+      "inertia_n": 718.4375,
+      "residual_n": 0.015625
+    },
+    {
+      "gear": 8,
+      "forecast_n": 202.570312,
+      "speed_n": -491.273438,
+      "crank_n": 0.003906,
+      "inertia_n": 693.816406,
+      "residual_n": 0.023438
+    },
+    {
+      "gear": 8,
+      "forecast_n": 177.367188,
+      "speed_n": -502.222656,
+      "crank_n": 0.0,
+      "inertia_n": 679.613281,
+      "residual_n": -0.023438
+    },
+    {
+      "gear": 8,
+      "forecast_n": 155.855469,
+      "speed_n": -512.941406,
+      "crank_n": 0.0,
+      "inertia_n": 668.8125,
+      "residual_n": -0.015625
+    },
+    {
+      "gear": 8,
+      "forecast_n": 133.625,
+      "speed_n": -523.503906,
+      "crank_n": 0.0,
+      "inertia_n": 657.136719,
+      "residual_n": -0.007812
+    },
+    {
+      "gear": 8,
+      "forecast_n": 113.683594,
+      "speed_n": -533.871094,
+      "crank_n": 0.0,
+      "inertia_n": 647.597656,
+      "residual_n": -0.042969
+    },
+    {
+      "gear": 8,
+      "forecast_n": 98.742188,
+      "speed_n": -544.089844,
+      "crank_n": 0.0,
+      "inertia_n": 642.828125,
+      "residual_n": 0.003906
+    },
+    {
+      "gear": 8,
+      "forecast_n": 84.652344,
+      "speed_n": -554.238281,
+      "crank_n": 0.0,
+      "inertia_n": 638.9375,
+      "residual_n": -0.046875
+    },
+    {
+      "gear": 8,
+      "forecast_n": 67.261719,
+      "speed_n": -564.316406,
+      "crank_n": 0.0,
+      "inertia_n": 631.539062,
+      "residual_n": 0.039062
+    },
+    {
+      "gear": 8,
+      "forecast_n": 54.695312,
+      "speed_n": -574.28125,
+      "crank_n": 0.0,
+      "inertia_n": 629.007812,
+      "residual_n": -0.03125
+    },
+    {
+      "gear": 2,
+      "forecast_n": 212840.59375,
+      "speed_n": -15049.34375,
+      "crank_n": -75780.5625,
+      "inertia_n": 303670.625,
+      "residual_n": -0.125
+    },
+    {
+      "gear": 2,
+      "forecast_n": 166257.546875,
+      "speed_n": -86185.625,
+      "crank_n": 0.0,
+      "inertia_n": 252442.921875,
+      "residual_n": 0.25
+    },
+    {
+      "gear": 2,
+      "forecast_n": 170803.78125,
+      "speed_n": -82324.8125,
+      "crank_n": 0.0,
+      "inertia_n": 253128.21875,
+      "residual_n": 0.375
+    },
+    {
+      "gear": 2,
+      "forecast_n": 178903.671875,
+      "speed_n": -78453.5625,
+      "crank_n": 0.0,
+      "inertia_n": 257357.03125,
+      "residual_n": 0.203125
+    },
+    {
+      "gear": 2,
+      "forecast_n": 189287.03125,
+      "speed_n": -74517.59375,
+      "crank_n": 0.0,
+      "inertia_n": 263805.0625,
+      "residual_n": -0.4375
+    },
+    {
+      "gear": 2,
+      "forecast_n": 200924.8125,
+      "speed_n": -70482.96875,
+      "crank_n": -0.03125,
+      "inertia_n": 271407.875,
+      "residual_n": -0.078125
+    },
+    {
+      "gear": 2,
+      "forecast_n": 213035.734375,
+      "speed_n": -66332.21875,
+      "crank_n": 0.03125,
+      "inertia_n": 279368.25,
+      "residual_n": -0.328125
+    },
+    {
+      "gear": 2,
+      "forecast_n": 225020.875,
+      "speed_n": -62059.5625,
+      "crank_n": -0.03125,
+      "inertia_n": 287080.0,
+      "residual_n": 0.453125
+    },
+    {
+      "gear": 2,
+      "forecast_n": 236401.359375,
+      "speed_n": -57669.0,
+      "crank_n": 0.0,
+      "inertia_n": 294069.46875,
+      "residual_n": 0.890625
+    },
+    {
+      "gear": 2,
+      "forecast_n": 246818.953125,
+      "speed_n": -53171.59375,
+      "crank_n": 0.0,
+      "inertia_n": 299991.46875,
+      "residual_n": -0.921875
+    },
+    {
+      "gear": 2,
+      "forecast_n": 256073.296875,
+      "speed_n": -48583.5625,
+      "crank_n": 0.0,
+      "inertia_n": 304655.9375,
+      "residual_n": 0.9375
+    },
+    {
+      "gear": 2,
+      "forecast_n": 272496.65625,
+      "speed_n": 209367.625,
+      "crank_n": 0.0,
+      "inertia_n": 63128.203125,
+      "residual_n": 0.820312
+    },
+    {
+      "gear": 2,
+      "forecast_n": 290513.9375,
+      "speed_n": 264859.0625,
+      "crank_n": 0.0,
+      "inertia_n": 25654.4375,
+      "residual_n": 0.414062
+    },
+    {
+      "gear": 2,
+      "forecast_n": 306906.375,
+      "speed_n": 287423.3125,
+      "crank_n": 0.0,
+      "inertia_n": 19483.804688,
+      "residual_n": -0.742188
+    },
+    {
+      "gear": 2,
+      "forecast_n": 321016.40625,
+      "speed_n": 304565.96875,
+      "crank_n": -0.007812,
+      "inertia_n": 16450.898438,
+      "residual_n": -0.453125
+    },
+    {
+      "gear": 2,
+      "forecast_n": 332892.1875,
+      "speed_n": 319041.84375,
+      "crank_n": 0.0,
+      "inertia_n": 13849.492188,
+      "residual_n": 0.867188
+    },
+    {
+      "gear": 2,
+      "forecast_n": 342557.125,
+      "speed_n": 331234.1875,
+      "crank_n": 0.0,
+      "inertia_n": 11322.0625,
+      "residual_n": 0.875
+    },
+    {
+      "gear": 2,
+      "forecast_n": 350126.84375,
+      "speed_n": 341200.78125,
+      "crank_n": 0.0,
+      "inertia_n": 8926.140625,
+      "residual_n": -0.085938
+    },
+    {
+      "gear": 3,
+      "forecast_n": 37619.109375,
+      "speed_n": 7296.0,
+      "crank_n": -53155.25,
+      "inertia_n": 83478.40625,
+      "residual_n": -0.046875
+    },
+    {
+      "gear": 3,
+      "forecast_n": -18114.1875,
+      "speed_n": -44582.5625,
+      "crank_n": 0.03125,
+      "inertia_n": 26468.71875,
+      "residual_n": -0.375
+    },
+    {
+      "gear": 3,
+      "forecast_n": -1075.90625,
+      "speed_n": -44177.75,
+      "crank_n": 0.0,
+      "inertia_n": 43101.96875,
+      "residual_n": -0.125
+    },
+    {
+      "gear": 3,
+      "forecast_n": 18809.84375,
+      "speed_n": -43518.5625,
+      "crank_n": 0.0,
+      "inertia_n": 62328.21875,
+      "residual_n": 0.1875
+    },
+    {
+      "gear": 3,
+      "forecast_n": 39943.734375,
+      "speed_n": -42565.34375,
+      "crank_n": 0.03125,
+      "inertia_n": 82509.3125,
+      "residual_n": -0.265625
+    },
+    {
+      "gear": 3,
+      "forecast_n": 60967.015625,
+      "speed_n": -41303.4375,
+      "crank_n": -0.03125,
+      "inertia_n": 102270.703125,
+      "residual_n": -0.21875
+    },
+    {
+      "gear": 3,
+      "forecast_n": 81025.234375,
+      "speed_n": -39739.3125,
+      "crank_n": 0.0,
+      "inertia_n": 120764.46875,
+      "residual_n": 0.078125
+    },
+    {
+      "gear": 3,
+      "forecast_n": 99543.546875,
+      "speed_n": -37892.40625,
+      "crank_n": 0.0,
+      "inertia_n": 137436.203125,
+      "residual_n": -0.25
+    },
+    {
+      "gear": 3,
+      "forecast_n": 116075.296875,
+      "speed_n": -35790.5,
+      "crank_n": 0.03125,
+      "inertia_n": 151865.515625,
+      "residual_n": 0.25
+    },
+    {
+      "gear": 3,
+      "forecast_n": 130386.71875,
+      "speed_n": -33467.875,
+      "crank_n": 0.0,
+      "inertia_n": 163854.328125,
+      "residual_n": 0.265625
+    },
+    {
+      "gear": 3,
+      "forecast_n": 142511.03125,
+      "speed_n": -30961.90625,
+      "crank_n": 0.0,
+      "inertia_n": 173473.15625,
+      "residual_n": -0.21875
+    },
+    {
+      "gear": 3,
+      "forecast_n": 152532.546875,
+      "speed_n": -28308.875,
+      "crank_n": -0.03125,
+      "inertia_n": 180841.734375,
+      "residual_n": -0.28125
+    },
+    {
+      "gear": 3,
+      "forecast_n": 160553.1875,
+      "speed_n": -25543.125,
+      "crank_n": 0.0,
+      "inertia_n": 186096.140625,
+      "residual_n": 0.164062
+    },
+    {
+      "gear": 3,
+      "forecast_n": 166821.15625,
+      "speed_n": -22697.0,
+      "crank_n": -0.0625,
+      "inertia_n": 189518.5625,
+      "residual_n": -0.351562
+    },
+    {
+      "gear": 3,
+      "forecast_n": 171567.8125,
+      "speed_n": -19798.59375,
+      "crank_n": 0.0,
+      "inertia_n": 191366.21875,
+      "residual_n": 0.179688
+    },
+    {
+      "gear": 3,
+      "forecast_n": 174978.875,
+      "speed_n": -16871.875,
+      "crank_n": 0.0,
+      "inertia_n": 191850.75,
+      "residual_n": -0.007812
+    },
+    {
+      "gear": 3,
+      "forecast_n": 185388.28125,
+      "speed_n": 107747.921875,
+      "crank_n": -0.015625,
+      "inertia_n": 77640.40625,
+      "residual_n": -0.023438
+    },
+    {
+      "gear": 3,
+      "forecast_n": 200198.875,
+      "speed_n": 175940.859375,
+      "crank_n": 0.007812,
+      "inertia_n": 24258.351562,
+      "residual_n": -0.34375
+    },
+    {
+      "gear": 3,
+      "forecast_n": 214508.375,
+      "speed_n": 197265.515625,
+      "crank_n": 0.0,
+      "inertia_n": 17242.492188,
+      "residual_n": 0.375
+    },
+    {
+      "gear": 3,
+      "forecast_n": 226999.96875,
+      "speed_n": 212430.59375,
+      "crank_n": -0.007812,
+      "inertia_n": 14568.980469,
+      "residual_n": 0.40625
+    },
+    {
+      "gear": 4,
+      "forecast_n": -80501.15625,
+      "speed_n": -664.75,
+      "crank_n": -28381.359375,
+      "inertia_n": -51455.171875,
+      "residual_n": 0.125
+    },
+    {
+      "gear": 4,
+      "forecast_n": -84928.125,
+      "speed_n": -24114.75,
+      "crank_n": -3038.78125,
+      "inertia_n": -57774.625,
+      "residual_n": 0.03125
+    },
+    {
+      "gear": 4,
+      "forecast_n": -58922.765625,
+      "speed_n": -26241.796875,
+      "crank_n": 0.03125,
+      "inertia_n": -32681.140625,
+      "residual_n": 0.140625
+    },
+    {
+      "gear": 4,
+      "forecast_n": -28428.75,
+      "speed_n": -25726.03125,
+      "crank_n": 0.0,
+      "inertia_n": -2702.578125,
+      "residual_n": -0.140625
+    },
+    {
+      "gear": 4,
+      "forecast_n": -2649.09375,
+      "speed_n": -25683.390625,
+      "crank_n": 0.015625,
+      "inertia_n": 23034.359375,
+      "residual_n": -0.078125
+    },
+    {
+      "gear": 4,
+      "forecast_n": 18584.1875,
+      "speed_n": -26046.890625,
+      "crank_n": 0.0,
+      "inertia_n": 44631.0,
+      "residual_n": 0.078125
+    },
+    {
+      "gear": 4,
+      "forecast_n": 35407.09375,
+      "speed_n": -26751.21875,
+      "crank_n": 0.0,
+      "inertia_n": 62158.390625,
+      "residual_n": -0.078125
+    },
+    {
+      "gear": 4,
+      "forecast_n": 48205.390625,
+      "speed_n": -27732.1875,
+      "crank_n": 0.0,
+      "inertia_n": 75937.796875,
+      "residual_n": -0.21875
+    },
+    {
+      "gear": 4,
+      "forecast_n": 57598.09375,
+      "speed_n": -28930.625,
+      "crank_n": 0.0,
+      "inertia_n": 86528.671875,
+      "residual_n": 0.046875
+    },
+    {
+      "gear": 4,
+      "forecast_n": 64389.375,
+      "speed_n": -27917.65625,
+      "crank_n": 0.015625,
+      "inertia_n": 92306.953125,
+      "residual_n": 0.0625
+    },
+    {
+      "gear": 4,
+      "forecast_n": 69254.234375,
+      "speed_n": -26505.90625,
+      "crank_n": 0.0,
+      "inertia_n": 95760.09375,
+      "residual_n": 0.046875
+    },
+    {
+      "gear": 4,
+      "forecast_n": 72520.46875,
+      "speed_n": -25041.375,
+      "crank_n": 0.03125,
+      "inertia_n": 97561.8125,
+      "residual_n": 0.0
+    },
+    {
+      "gear": 4,
+      "forecast_n": 74563.078125,
+      "speed_n": -23549.28125,
+      "crank_n": 0.015625,
+      "inertia_n": 98112.125,
+      "residual_n": 0.21875
+    },
+    {
+      "gear": 4,
+      "forecast_n": 75702.523438,
+      "speed_n": -22048.78125,
+      "crank_n": 0.03125,
+      "inertia_n": 97751.492188,
+      "residual_n": -0.21875
+    },
+    {
+      "gear": 4,
+      "forecast_n": 76197.15625,
+      "speed_n": -20553.765625,
+      "crank_n": 0.0,
+      "inertia_n": 96750.75,
+      "residual_n": 0.171875
+    },
+    {
+      "gear": 4,
+      "forecast_n": 76253.8125,
+      "speed_n": -19074.109375,
+      "crank_n": 0.03125,
+      "inertia_n": 95327.90625,
+      "residual_n": -0.015625
+    },
+    {
+      "gear": 4,
+      "forecast_n": 75964.6875,
+      "speed_n": -17616.15625,
+      "crank_n": 0.0,
+      "inertia_n": 93580.9375,
+      "residual_n": -0.09375
+    },
+    {
+      "gear": 4,
+      "forecast_n": 75498.453125,
+      "speed_n": -16184.9375,
+      "crank_n": 0.0,
+      "inertia_n": 91683.171875,
+      "residual_n": 0.21875
+    },
+    {
+      "gear": 4,
+      "forecast_n": 74939.726562,
+      "speed_n": -14782.78125,
+      "crank_n": 0.015625,
+      "inertia_n": 89722.507812,
+      "residual_n": -0.015625
+    },
+    {
+      "gear": 4,
+      "forecast_n": 74441.992188,
+      "speed_n": -13410.578125,
+      "crank_n": 0.015625,
+      "inertia_n": 87852.585938,
+      "residual_n": -0.03125
+    },
+    {
+      "gear": 5,
+      "forecast_n": -54946.15625,
+      "speed_n": -11453.40625,
+      "crank_n": -1266.171875,
+      "inertia_n": -42226.65625,
+      "residual_n": 0.078125
+    },
+    {
+      "gear": 5,
+      "forecast_n": -25958.265625,
+      "speed_n": -12053.1875,
+      "crank_n": 0.0,
+      "inertia_n": -13905.0,
+      "residual_n": -0.078125
+    },
+    {
+      "gear": 5,
+      "forecast_n": -2274.375,
+      "speed_n": -11833.75,
+      "crank_n": 0.0,
+      "inertia_n": 9559.515625,
+      "residual_n": -0.140625
+    },
+    {
+      "gear": 5,
+      "forecast_n": 11831.25,
+      "speed_n": -11984.59375,
+      "crank_n": -0.015625,
+      "inertia_n": 23815.742188,
+      "residual_n": 0.117188
+    },
+    {
+      "gear": 5,
+      "forecast_n": 19581.3125,
+      "speed_n": -12360.453125,
+      "crank_n": 0.0,
+      "inertia_n": 31941.78125,
+      "residual_n": -0.015625
+    },
+    {
+      "gear": 5,
+      "forecast_n": 23315.242188,
+      "speed_n": -12864.5625,
+      "crank_n": 0.0,
+      "inertia_n": 36179.804688,
+      "residual_n": 0.0
+    },
+    {
+      "gear": 5,
+      "forecast_n": 24565.039062,
+      "speed_n": -13435.515625,
+      "crank_n": -0.015625,
+      "inertia_n": 38000.53125,
+      "residual_n": 0.039062
+    },
+    {
+      "gear": 5,
+      "forecast_n": 24351.460938,
+      "speed_n": -14035.25,
+      "crank_n": 0.0,
+      "inertia_n": 38386.859375,
+      "residual_n": -0.148438
+    },
+    {
+      "gear": 5,
+      "forecast_n": 23220.203125,
+      "speed_n": -14641.03125,
+      "crank_n": 0.0,
+      "inertia_n": 37861.101562,
+      "residual_n": 0.132812
+    },
+    {
+      "gear": 5,
+      "forecast_n": 21713.703125,
+      "speed_n": -15238.5625,
+      "crank_n": 0.0,
+      "inertia_n": 36952.148438,
+      "residual_n": 0.117188
+    },
+    {
+      "gear": 5,
+      "forecast_n": 20150.546875,
+      "speed_n": -15821.703125,
+      "crank_n": -0.015625,
+      "inertia_n": 35972.390625,
+      "residual_n": -0.125
+    },
+    {
+      "gear": 5,
+      "forecast_n": 18492.289062,
+      "speed_n": -16389.40625,
+      "crank_n": -0.015625,
+      "inertia_n": 34881.710938,
+      "residual_n": 0.0
+    },
+    {
+      "gear": 5,
+      "forecast_n": 16893.375,
+      "speed_n": -16939.890625,
+      "crank_n": -0.015625,
+      "inertia_n": 33833.320312,
+      "residual_n": -0.039062
+    },
+    {
+      "gear": 5,
+      "forecast_n": 15484.054688,
+      "speed_n": -17473.84375,
+      "crank_n": 0.0,
+      "inertia_n": 32957.890625,
+      "residual_n": 0.007812
+    },
+    {
+      "gear": 5,
+      "forecast_n": 14173.421875,
+      "speed_n": -17993.96875,
+      "crank_n": 0.0,
+      "inertia_n": 32167.375,
+      "residual_n": 0.015625
+    },
+    {
+      "gear": 5,
+      "forecast_n": 12960.15625,
+      "speed_n": -18501.625,
+      "crank_n": 0.0,
+      "inertia_n": 31461.773438,
+      "residual_n": 0.007812
+    },
+    {
+      "gear": 5,
+      "forecast_n": 11994.453125,
+      "speed_n": -18415.015625,
+      "crank_n": 0.0,
+      "inertia_n": 30409.320312,
+      "residual_n": 0.148438
+    },
+    {
+      "gear": 5,
+      "forecast_n": 11322.5625,
+      "speed_n": -17949.9375,
+      "crank_n": 0.015625,
+      "inertia_n": 29272.578125,
+      "residual_n": -0.09375
+    },
+    {
+      "gear": 5,
+      "forecast_n": 10892.1875,
+      "speed_n": -17502.25,
+      "crank_n": 0.0,
+      "inertia_n": 28394.335938,
+      "residual_n": 0.101562
+    },
+    {
+      "gear": 5,
+      "forecast_n": 10626.578125,
+      "speed_n": -17068.0,
+      "crank_n": 0.0,
+      "inertia_n": 27694.6875,
+      "residual_n": -0.109375
+    },
+    {
+      "gear": 6,
+      "forecast_n": -35952.117188,
+      "speed_n": -4102.445312,
+      "crank_n": -665.3125,
+      "inertia_n": -31184.414062,
+      "residual_n": 0.054688
+    },
+    {
+      "gear": 6,
+      "forecast_n": -14069.851562,
+      "speed_n": -4275.617188,
+      "crank_n": 0.0,
+      "inertia_n": -9794.132812,
+      "residual_n": -0.101562
+    },
+    {
+      "gear": 6,
+      "forecast_n": -368.453125,
+      "speed_n": -4121.039062,
+      "crank_n": -0.007812,
+      "inertia_n": 3752.648438,
+      "residual_n": -0.054688
+    },
+    {
+      "gear": 6,
+      "forecast_n": 4706.796875,
+      "speed_n": -4180.257812,
+      "crank_n": 0.0,
+      "inertia_n": 8887.09375,
+      "residual_n": -0.039062
+    },
+    {
+      "gear": 6,
+      "forecast_n": 6190.546875,
+      "speed_n": -4320.507812,
+      "crank_n": 0.0,
+      "inertia_n": 10511.132812,
+      "residual_n": -0.078125
+    },
+    {
+      "gear": 6,
+      "forecast_n": 6255.53125,
+      "speed_n": -4486.398438,
+      "crank_n": 0.007812,
+      "inertia_n": 10741.960938,
+      "residual_n": -0.039062
+    },
+    {
+      "gear": 6,
+      "forecast_n": 5730.289062,
+      "speed_n": -4655.914062,
+      "crank_n": -0.007812,
+      "inertia_n": 10386.210938,
+      "residual_n": 0.0
+    },
+    {
+      "gear": 6,
+      "forecast_n": 5090.359375,
+      "speed_n": -4819.828125,
+      "crank_n": -0.007812,
+      "inertia_n": 9910.179688,
+      "residual_n": 0.015625
+    },
+    {
+      "gear": 6,
+      "forecast_n": 4409.0625,
+      "speed_n": -4976.226562,
+      "crank_n": 0.0,
+      "inertia_n": 9385.320312,
+      "residual_n": -0.03125
+    },
+    {
+      "gear": 6,
+      "forecast_n": 3802.289062,
+      "speed_n": -5124.351562,
+      "crank_n": 0.0,
+      "inertia_n": 8926.617188,
+      "residual_n": 0.023438
+    },
+    {
+      "gear": 6,
+      "forecast_n": 3266.078125,
+      "speed_n": -5265.226562,
+      "crank_n": 0.0,
+      "inertia_n": 8531.34375,
+      "residual_n": -0.039062
+    },
+    {
+      "gear": 6,
+      "forecast_n": 2799.773438,
+      "speed_n": -5399.851562,
+      "crank_n": -0.007812,
+      "inertia_n": 8199.6875,
+      "residual_n": -0.054688
+    },
+    {
+      "gear": 6,
+      "forecast_n": 2419.21875,
+      "speed_n": -5529.265625,
+      "crank_n": 0.007812,
+      "inertia_n": 7948.5625,
+      "residual_n": -0.085938
+    },
+    {
+      "gear": 6,
+      "forecast_n": 2084.492188,
+      "speed_n": -5654.695312,
+      "crank_n": -0.007812,
+      "inertia_n": 7739.296875,
+      "residual_n": -0.101562
+    },
+    {
+      "gear": 6,
+      "forecast_n": 1817.265625,
+      "speed_n": -5776.851562,
+      "crank_n": 0.015625,
+      "inertia_n": 7594.078125,
+      "residual_n": 0.023438
+    },
+    {
+      "gear": 6,
+      "forecast_n": 1587.265625,
+      "speed_n": -5896.679688,
+      "crank_n": 0.0,
+      "inertia_n": 7483.945312,
+      "residual_n": 0.0
+    },
+    {
+      "gear": 6,
+      "forecast_n": 1402.703125,
+      "speed_n": -6014.78125,
+      "crank_n": 0.0,
+      "inertia_n": 7417.570312,
+      "residual_n": -0.085938
+    },
+    {
+      "gear": 6,
+      "forecast_n": 1231.007812,
+      "speed_n": -6131.851562,
+      "crank_n": 0.0,
+      "inertia_n": 7362.828125,
+      "residual_n": 0.03125
+    },
+    {
+      "gear": 6,
+      "forecast_n": 1106.03125,
+      "speed_n": -6248.046875,
+      "crank_n": 0.0,
+      "inertia_n": 7354.15625,
+      "residual_n": -0.078125
+    },
+    {
+      "gear": 6,
+      "forecast_n": 1001.820312,
+      "speed_n": -6364.101562,
+      "crank_n": 0.0,
+      "inertia_n": 7365.992188,
+      "residual_n": -0.070312
+    },
+    {
+      "gear": 7,
+      "forecast_n": -24959.574219,
+      "speed_n": -1175.332031,
+      "crank_n": -422.636719,
+      "inertia_n": -23361.667969,
+      "residual_n": 0.0625
+    },
+    {
+      "gear": 7,
+      "forecast_n": -6930.035156,
+      "speed_n": -1229.28125,
+      "crank_n": 0.0,
+      "inertia_n": -5700.785156,
+      "residual_n": 0.03125
+    },
+    {
+      "gear": 7,
+      "forecast_n": 747.441406,
+      "speed_n": -1139.316406,
+      "crank_n": 0.0,
+      "inertia_n": 1886.789062,
+      "residual_n": -0.03125
+    },
+    {
+      "gear": 7,
+      "forecast_n": 1913.515625,
+      "speed_n": -1169.09375,
+      "crank_n": 0.0,
+      "inertia_n": 3082.65625,
+      "residual_n": -0.046875
+    },
+    {
+      "gear": 7,
+      "forecast_n": 1880.574219,
+      "speed_n": -1217.734375,
+      "crank_n": 0.0,
+      "inertia_n": 3098.300781,
+      "residual_n": 0.007812
+    },
+    {
+      "gear": 7,
+      "forecast_n": 1628.933594,
+      "speed_n": -1266.636719,
+      "crank_n": 0.003906,
+      "inertia_n": 2895.511719,
+      "residual_n": 0.054688
+    },
+    {
+      "gear": 7,
+      "forecast_n": 1386.894531,
+      "speed_n": -1312.324219,
+      "crank_n": 0.0,
+      "inertia_n": 2699.242188,
+      "residual_n": -0.023438
+    },
+    {
+      "gear": 7,
+      "forecast_n": 1159.761719,
+      "speed_n": -1354.933594,
+      "crank_n": 0.0,
+      "inertia_n": 2514.707031,
+      "residual_n": -0.011719
+    },
+    {
+      "gear": 7,
+      "forecast_n": 967.402344,
+      "speed_n": -1394.621094,
+      "crank_n": 0.0,
+      "inertia_n": 2362.039062,
+      "residual_n": -0.015625
+    },
+    {
+      "gear": 7,
+      "forecast_n": 814.25,
+      "speed_n": -1431.890625,
+      "crank_n": 0.0,
+      "inertia_n": 2246.15625,
+      "residual_n": -0.015625
+    },
+    {
+      "gear": 7,
+      "forecast_n": 671.675781,
+      "speed_n": -1467.339844,
+      "crank_n": 0.0,
+      "inertia_n": 2138.972656,
+      "residual_n": 0.042969
+    },
+    {
+      "gear": 7,
+      "forecast_n": 569.328125,
+      "speed_n": -1501.097656,
+      "crank_n": 0.0,
+      "inertia_n": 2070.457031,
+      "residual_n": -0.03125
+    },
+    {
+      "gear": 7,
+      "forecast_n": 466.410156,
+      "speed_n": -1533.777344,
+      "crank_n": 0.007812,
+      "inertia_n": 2000.207031,
+      "residual_n": -0.027344
+    },
+    {
+      "gear": 7,
+      "forecast_n": 378.667969,
+      "speed_n": -1565.339844,
+      "crank_n": 0.0,
+      "inertia_n": 1944.003906,
+      "residual_n": 0.003906
+    },
+    {
+      "gear": 7,
+      "forecast_n": 313.902344,
+      "speed_n": -1596.019531,
+      "crank_n": 0.011719,
+      "inertia_n": 1909.964844,
+      "residual_n": -0.054688
+    },
+    {
+      "gear": 7,
+      "forecast_n": 244.566406,
+      "speed_n": -1626.148438,
+      "crank_n": -0.003906,
+      "inertia_n": 1870.714844,
+      "residual_n": 0.003906
+    },
+    {
+      "gear": 7,
+      "forecast_n": 201.316406,
+      "speed_n": -1655.679688,
+      "crank_n": 0.0,
+      "inertia_n": 1856.949219,
+      "residual_n": 0.046875
+    },
+    {
+      "gear": 7,
+      "forecast_n": 154.542969,
+      "speed_n": -1684.992188,
+      "crank_n": 0.0,
+      "inertia_n": 1839.570312,
+      "residual_n": -0.035156
+    },
+    {
+      "gear": 7,
+      "forecast_n": 112.363281,
+      "speed_n": -1714.019531,
+      "crank_n": 0.0,
+      "inertia_n": 1826.390625,
+      "residual_n": -0.007812
+    },
+    {
+      "gear": 7,
+      "forecast_n": 89.636719,
+      "speed_n": -1742.835938,
+      "crank_n": 0.0,
+      "inertia_n": 1832.472656,
+      "residual_n": 0.0
+    },
+    {
+      "gear": 2,
+      "forecast_n": 189258.796875,
+      "speed_n": 7262.0,
+      "crank_n": -90663.1875,
+      "inertia_n": 272660.3125,
+      "residual_n": -0.3125
+    },
+    {
+      "gear": 2,
+      "forecast_n": 138705.09375,
+      "speed_n": -79231.1875,
+      "crank_n": 0.03125,
+      "inertia_n": 217936.3125,
+      "residual_n": -0.0625
+    },
+    {
+      "gear": 2,
+      "forecast_n": 148806.71875,
+      "speed_n": -75898.09375,
+      "crank_n": -0.03125,
+      "inertia_n": 224704.921875,
+      "residual_n": -0.078125
+    },
+    {
+      "gear": 2,
+      "forecast_n": 162878.640625,
+      "speed_n": -72461.5625,
+      "crank_n": 0.0,
+      "inertia_n": 235340.65625,
+      "residual_n": -0.453125
+    },
+    {
+      "gear": 2,
+      "forecast_n": 179388.421875,
+      "speed_n": -68862.3125,
+      "crank_n": 0.0,
+      "inertia_n": 248251.09375,
+      "residual_n": -0.359375
+    },
+    {
+      "gear": 2,
+      "forecast_n": 197064.828125,
+      "speed_n": -65065.65625,
+      "crank_n": 0.0,
+      "inertia_n": 262130.390625,
+      "residual_n": 0.09375
+    },
+    {
+      "gear": 2,
+      "forecast_n": 214864.3125,
+      "speed_n": -61056.6875,
+      "crank_n": 0.0,
+      "inertia_n": 275921.3125,
+      "residual_n": -0.296875
+    },
+    {
+      "gear": 2,
+      "forecast_n": 232093.578125,
+      "speed_n": -56836.78125,
+      "crank_n": 0.03125,
+      "inertia_n": 288930.375,
+      "residual_n": -0.03125
+    },
+    {
+      "gear": 2,
+      "forecast_n": 248212.65625,
+      "speed_n": -52417.90625,
+      "crank_n": -0.03125,
+      "inertia_n": 300630.53125,
+      "residual_n": 0.0625
+    },
+    {
+      "gear": 2,
+      "forecast_n": 262831.6875,
+      "speed_n": -47820.15625,
+      "crank_n": 0.0,
+      "inertia_n": 310651.875,
+      "residual_n": -0.046875
+    },
+    {
+      "gear": 2,
+      "forecast_n": 275714.25,
+      "speed_n": -43069.125,
+      "crank_n": -0.03125,
+      "inertia_n": 318782.8125,
+      "residual_n": 0.578125
+    },
+    {
+      "gear": 2,
+      "forecast_n": 292047.875,
+      "speed_n": 121981.0,
+      "crank_n": 0.0,
+      "inertia_n": 170067.234375,
+      "residual_n": -0.359375
+    },
+    {
+      "gear": 2,
+      "forecast_n": 312143.3125,
+      "speed_n": 271372.6875,
+      "crank_n": 3.015625,
+      "inertia_n": 40767.640625,
+      "residual_n": -0.046875
+    },
+    {
+      "gear": 2,
+      "forecast_n": 331450.75,
+      "speed_n": 307233.46875,
+      "crank_n": 1.523438,
+      "inertia_n": 24216.0625,
+      "residual_n": -0.289062
+    },
+    {
+      "gear": 2,
+      "forecast_n": 348281.625,
+      "speed_n": 328542.4375,
+      "crank_n": 0.0,
+      "inertia_n": 19738.609375,
+      "residual_n": 0.574219
+    },
+    {
+      "gear": 2,
+      "forecast_n": 362466.15625,
+      "speed_n": 345916.1875,
+      "crank_n": 3.019531,
+      "inertia_n": 16547.46875,
+      "residual_n": -0.519531
+    },
+    {
+      "gear": 2,
+      "forecast_n": 374033.34375,
+      "speed_n": 360485.5,
+      "crank_n": 0.0,
+      "inertia_n": 13547.431641,
+      "residual_n": 0.414062
+    },
+    {
+      "gear": 3,
+      "forecast_n": 112051.1875,
+      "speed_n": -5587.03125,
+      "crank_n": -36436.1875,
+      "inertia_n": 154074.46875,
+      "residual_n": -0.0625
+    },
+    {
+      "gear": 3,
+      "forecast_n": 65477.28125,
+      "speed_n": -39666.8125,
+      "crank_n": 0.0,
+      "inertia_n": 105143.75,
+      "residual_n": 0.34375
+    },
+    {
+      "gear": 3,
+      "forecast_n": 70804.484375,
+      "speed_n": -38058.75,
+      "crank_n": -0.03125,
+      "inertia_n": 108863.3125,
+      "residual_n": -0.046875
+    },
+    {
+      "gear": 3,
+      "forecast_n": 79321.40625,
+      "speed_n": -36393.8125,
+      "crank_n": 0.0,
+      "inertia_n": 115715.265625,
+      "residual_n": -0.046875
+    },
+    {
+      "gear": 3,
+      "forecast_n": 89814.890625,
+      "speed_n": -34624.125,
+      "crank_n": 0.0,
+      "inertia_n": 124439.125,
+      "residual_n": -0.109375
+    },
+    {
+      "gear": 3,
+      "forecast_n": 101327.34375,
+      "speed_n": -32720.90625,
+      "crank_n": -0.03125,
+      "inertia_n": 134048.0,
+      "residual_n": 0.28125
+    },
+    {
+      "gear": 3,
+      "forecast_n": 112966.453125,
+      "speed_n": -30670.90625,
+      "crank_n": 0.03125,
+      "inertia_n": 143637.59375,
+      "residual_n": -0.265625
+    },
+    {
+      "gear": 3,
+      "forecast_n": 124180.046875,
+      "speed_n": -28474.125,
+      "crank_n": -0.03125,
+      "inertia_n": 152654.328125,
+      "residual_n": -0.125
+    },
+    {
+      "gear": 3,
+      "forecast_n": 134612.296875,
+      "speed_n": -26139.4375,
+      "crank_n": 0.0,
+      "inertia_n": 160751.828125,
+      "residual_n": -0.09375
+    },
+    {
+      "gear": 3,
+      "forecast_n": 143994.03125,
+      "speed_n": -23680.9375,
+      "crank_n": -0.03125,
+      "inertia_n": 167675.0625,
+      "residual_n": -0.0625
+    },
+    {
+      "gear": 3,
+      "forecast_n": 152175.375,
+      "speed_n": -21116.59375,
+      "crank_n": 0.0,
+      "inertia_n": 173292.15625,
+      "residual_n": -0.1875
+    },
+    {
+      "gear": 3,
+      "forecast_n": 159207.546875,
+      "speed_n": -18466.28125,
+      "crank_n": 0.0,
+      "inertia_n": 177673.6875,
+      "residual_n": 0.140625
+    },
+    {
+      "gear": 3,
+      "forecast_n": 165017.140625,
+      "speed_n": -15748.96875,
+      "crank_n": 0.0,
+      "inertia_n": 180766.203125,
+      "residual_n": -0.09375
+    },
+    {
+      "gear": 3,
+      "forecast_n": 169665.484375,
+      "speed_n": -12984.375,
+      "crank_n": 0.0,
+      "inertia_n": 182650.203125,
+      "residual_n": -0.34375
+    },
+    {
+      "gear": 3,
+      "forecast_n": 181749.953125,
+      "speed_n": 115807.921875,
+      "crank_n": 0.0,
+      "inertia_n": 65941.617188,
+      "residual_n": 0.414062
+    },
+    {
+      "gear": 3,
+      "forecast_n": 197529.9375,
+      "speed_n": 173725.625,
+      "crank_n": -1.085938,
+      "inertia_n": 23805.164062,
+      "residual_n": 0.234375
+    },
+    {
+      "gear": 3,
+      "forecast_n": 212564.5625,
+      "speed_n": 194650.859375,
+      "crank_n": 0.0,
+      "inertia_n": 17913.726562,
+      "residual_n": -0.03125
+    },
+    {
+      "gear": 4,
+      "forecast_n": -87846.21875,
+      "speed_n": 2024.265625,
+      "crank_n": -29378.875,
+      "inertia_n": -60491.609375,
+      "residual_n": 0.0
+    },
+    {
+      "gear": 4,
+      "forecast_n": -90016.46875,
+      "speed_n": -21278.671875,
+      "crank_n": -4032.21875,
+      "inertia_n": -64705.390625,
+      "residual_n": -0.1875
+    },
+    {
+      "gear": 4,
+      "forecast_n": -64570.875,
+      "speed_n": -24289.71875,
+      "crank_n": 0.0,
+      "inertia_n": -40281.3125,
+      "residual_n": 0.15625
+    },
+    {
+      "gear": 4,
+      "forecast_n": -32067.078125,
+      "speed_n": -23654.015625,
+      "crank_n": 0.015625,
+      "inertia_n": -8413.15625,
+      "residual_n": 0.078125
+    },
+    {
+      "gear": 4,
+      "forecast_n": -4581.0625,
+      "speed_n": -23521.25,
+      "crank_n": 0.015625,
+      "inertia_n": 18940.140625,
+      "residual_n": 0.03125
+    },
+    {
+      "gear": 4,
+      "forecast_n": 17975.0625,
+      "speed_n": -23820.1875,
+      "crank_n": 0.046875,
+      "inertia_n": 41795.40625,
+      "residual_n": -0.203125
+    },
+    {
+      "gear": 4,
+      "forecast_n": 35901.625,
+      "speed_n": -24479.78125,
+      "crank_n": 0.015625,
+      "inertia_n": 60381.15625,
+      "residual_n": 0.234375
+    },
+    {
+      "gear": 4,
+      "forecast_n": 49651.53125,
+      "speed_n": -25432.65625,
+      "crank_n": 0.0,
+      "inertia_n": 75084.0,
+      "residual_n": 0.1875
+    },
+    {
+      "gear": 4,
+      "forecast_n": 59807.53125,
+      "speed_n": -26617.625,
+      "crank_n": 0.0,
+      "inertia_n": 86424.953125,
+      "residual_n": 0.203125
+    },
+    {
+      "gear": 4,
+      "forecast_n": 66884.5625,
+      "speed_n": -27617.828125,
+      "crank_n": 0.015625,
+      "inertia_n": 94502.453125,
+      "residual_n": -0.078125
+    },
+    {
+      "gear": 4,
+      "forecast_n": 71886.382812,
+      "speed_n": -26172.515625,
+      "crank_n": 0.015625,
+      "inertia_n": 98058.820312,
+      "residual_n": 0.0625
+    },
+    {
+      "gear": 4,
+      "forecast_n": 75279.78125,
+      "speed_n": -24672.796875,
+      "crank_n": 0.0,
+      "inertia_n": 99952.742188,
+      "residual_n": -0.164062
+    },
+    {
+      "gear": 4,
+      "forecast_n": 77473.40625,
+      "speed_n": -23144.171875,
+      "crank_n": 0.015625,
+      "inertia_n": 100617.335938,
+      "residual_n": 0.226562
+    },
+    {
+      "gear": 4,
+      "forecast_n": 78777.796875,
+      "speed_n": -21605.34375,
+      "crank_n": 0.015625,
+      "inertia_n": 100383.007812,
+      "residual_n": 0.117188
+    },
+    {
+      "gear": 4,
+      "forecast_n": 79380.875,
+      "speed_n": -20070.09375,
+      "crank_n": 0.015625,
+      "inertia_n": 99450.921875,
+      "residual_n": 0.03125
+    },
+    {
+      "gear": 4,
+      "forecast_n": 79550.382812,
+      "speed_n": -18549.109375,
+      "crank_n": 0.0,
+      "inertia_n": 98099.640625,
+      "residual_n": -0.148438
+    },
+    {
+      "gear": 4,
+      "forecast_n": 79415.835938,
+      "speed_n": -17048.8125,
+      "crank_n": 0.015625,
+      "inertia_n": 96464.546875,
+      "residual_n": 0.085938
+    },
+    {
+      "gear": 4,
+      "forecast_n": 79173.007812,
+      "speed_n": -15573.515625,
+      "crank_n": 0.015625,
+      "inertia_n": 94746.382812,
+      "residual_n": 0.125
+    },
+    {
+      "gear": 4,
+      "forecast_n": 78834.960938,
+      "speed_n": -14124.4375,
+      "crank_n": 0.015625,
+      "inertia_n": 92959.546875,
+      "residual_n": -0.164062
+    },
+    {
+      "gear": 4,
+      "forecast_n": 78503.351562,
+      "speed_n": -12702.75,
+      "crank_n": 0.0,
+      "inertia_n": 91206.320312,
+      "residual_n": -0.21875
+    },
+    {
+      "gear": 5,
+      "forecast_n": -37679.382812,
+      "speed_n": -11762.242188,
+      "crank_n": -308.8125,
+      "inertia_n": -25608.265625,
+      "residual_n": -0.0625
+    },
+    {
+      "gear": 5,
+      "forecast_n": -10566.414062,
+      "speed_n": -11666.914062,
+      "crank_n": 0.0,
+      "inertia_n": 1100.390625,
+      "residual_n": 0.109375
+    },
+    {
+      "gear": 5,
+      "forecast_n": 7425.25,
+      "speed_n": -11684.289062,
+      "crank_n": 0.015625,
+      "inertia_n": 19109.609375,
+      "residual_n": -0.085938
+    },
+    {
+      "gear": 5,
+      "forecast_n": 17853.953125,
+      "speed_n": -11985.867188,
+      "crank_n": 0.0,
+      "inertia_n": 29839.703125,
+      "residual_n": 0.117188
+    },
+    {
+      "gear": 5,
+      "forecast_n": 23339.875,
+      "speed_n": -12456.773438,
+      "crank_n": 0.0,
+      "inertia_n": 35796.601562,
+      "residual_n": 0.046875
+    },
+    {
+      "gear": 5,
+      "forecast_n": 25687.757812,
+      "speed_n": -13021.726562,
+      "crank_n": 0.0,
+      "inertia_n": 38709.570312,
+      "residual_n": -0.085938
+    },
+    {
+      "gear": 5,
+      "forecast_n": 26076.210938,
+      "speed_n": -13632.617188,
+      "crank_n": 0.0,
+      "inertia_n": 39708.757812,
+      "residual_n": 0.070312
+    },
+    {
+      "gear": 5,
+      "forecast_n": 25287.546875,
+      "speed_n": -14259.273438,
+      "crank_n": 0.0,
+      "inertia_n": 39546.78125,
+      "residual_n": 0.039062
+    },
+    {
+      "gear": 5,
+      "forecast_n": 23874.273438,
+      "speed_n": -14883.382812,
+      "crank_n": -0.015625,
+      "inertia_n": 38757.523438,
+      "residual_n": 0.148438
+    },
+    {
+      "gear": 5,
+      "forecast_n": 22250.875,
+      "speed_n": -15495.039062,
+      "crank_n": -0.015625,
+      "inertia_n": 37745.789062,
+      "residual_n": 0.140625
+    },
+    {
+      "gear": 5,
+      "forecast_n": 20495.9375,
+      "speed_n": -16090.742188,
+      "crank_n": 0.0,
+      "inertia_n": 36586.804688,
+      "residual_n": -0.125
+    },
+    {
+      "gear": 5,
+      "forecast_n": 18827.710938,
+      "speed_n": -16668.148438,
+      "crank_n": 0.0,
+      "inertia_n": 35495.820312,
+      "residual_n": 0.039062
+    },
+    {
+      "gear": 5,
+      "forecast_n": 17369.28125,
+      "speed_n": -17228.304688,
+      "crank_n": 0.0,
+      "inertia_n": 34597.515625,
+      "residual_n": 0.070312
+    },
+    {
+      "gear": 5,
+      "forecast_n": 16007.359375,
+      "speed_n": -17774.320312,
+      "crank_n": -0.015625,
+      "inertia_n": 33781.625,
+      "residual_n": 0.070312
+    },
+    {
+      "gear": 5,
+      "forecast_n": 15021.570312,
+      "speed_n": -17601.617188,
+      "crank_n": 0.0,
+      "inertia_n": 32623.265625,
+      "residual_n": -0.078125
+    },
+    {
+      "gear": 5,
+      "forecast_n": 14497.882812,
+      "speed_n": -17102.664062,
+      "crank_n": 0.0,
+      "inertia_n": 31600.578125,
+      "residual_n": -0.03125
+    },
+    {
+      "gear": 5,
+      "forecast_n": 14281.484375,
+      "speed_n": -16619.382812,
+      "crank_n": 0.0,
+      "inertia_n": 30900.921875,
+      "residual_n": -0.054688
+    },
+    {
+      "gear": 5,
+      "forecast_n": 14238.195312,
+      "speed_n": -16146.789062,
+      "crank_n": 0.0,
+      "inertia_n": 30384.875,
+      "residual_n": 0.109375
+    },
+    {
+      "gear": 5,
+      "forecast_n": 14296.984375,
+      "speed_n": -15682.085938,
+      "crank_n": 0.0,
+      "inertia_n": 29979.117188,
+      "residual_n": -0.046875
+    },
+    {
+      "gear": 5,
+      "forecast_n": 14350.0,
+      "speed_n": -15223.585938,
+      "crank_n": 0.0,
+      "inertia_n": 29573.6875,
+      "residual_n": -0.101562
+    },
+    {
+      "gear": 6,
+      "forecast_n": -17215.234375,
+      "speed_n": -4446.484375,
+      "crank_n": -33.375,
+      "inertia_n": -12735.28125,
+      "residual_n": -0.09375
+    },
+    {
+      "gear": 6,
+      "forecast_n": -1361.390625,
+      "speed_n": -4278.875,
+      "crank_n": 0.0,
+      "inertia_n": 2917.484375,
+      "residual_n": 0.0
+    },
+    {
+      "gear": 6,
+      "forecast_n": 4913.25,
+      "speed_n": -4324.914062,
+      "crank_n": 0.0,
+      "inertia_n": 9238.195312,
+      "residual_n": -0.03125
+    },
+    {
+      "gear": 6,
+      "forecast_n": 6944.648438,
+      "speed_n": -4470.703125,
+      "crank_n": -0.007812,
+      "inertia_n": 11415.429688,
+      "residual_n": -0.070312
+    },
+    {
+      "gear": 6,
+      "forecast_n": 7149.117188,
+      "speed_n": -4650.859375,
+      "crank_n": -0.007812,
+      "inertia_n": 11799.929688,
+      "residual_n": 0.054688
+    },
+    {
+      "gear": 6,
+      "forecast_n": 6712.09375,
+      "speed_n": -4837.078125,
+      "crank_n": 0.0,
+      "inertia_n": 11549.226562,
+      "residual_n": -0.054688
+    },
+    {
+      "gear": 6,
+      "forecast_n": 6028.757812,
+      "speed_n": -5019.34375,
+      "crank_n": -0.007812,
+      "inertia_n": 11048.046875,
+      "residual_n": 0.0625
+    },
+    {
+      "gear": 6,
+      "forecast_n": 5324.257812,
+      "speed_n": -5193.703125,
+      "crank_n": 0.0,
+      "inertia_n": 10517.898438,
+      "residual_n": 0.0625
+    },
+    {
+      "gear": 6,
+      "forecast_n": 4686.890625,
+      "speed_n": -5359.6875,
+      "crank_n": 0.0,
+      "inertia_n": 10046.523438,
+      "residual_n": 0.054688
+    },
+    {
+      "gear": 6,
+      "forecast_n": 4092.617188,
+      "speed_n": -5518.234375,
+      "crank_n": -0.007812,
+      "inertia_n": 9610.867188,
+      "residual_n": -0.007812
+    },
+    {
+      "gear": 6,
+      "forecast_n": 3601.945312,
+      "speed_n": -5669.914062,
+      "crank_n": -0.007812,
+      "inertia_n": 9271.8125,
+      "residual_n": 0.054688
+    },
+    {
+      "gear": 6,
+      "forecast_n": 3154.8125,
+      "speed_n": -5816.234375,
+      "crank_n": -0.015625,
+      "inertia_n": 8971.015625,
+      "residual_n": 0.046875
+    },
+    {
+      "gear": 6,
+      "forecast_n": 2784.375,
+      "speed_n": -5957.828125,
+      "crank_n": 0.0,
+      "inertia_n": 8742.296875,
+      "residual_n": -0.09375
+    },
+    {
+      "gear": 6,
+      "forecast_n": 2452.851562,
+      "speed_n": -6095.78125,
+      "crank_n": 0.0,
+      "inertia_n": 8548.671875,
+      "residual_n": -0.039062
+    },
+    {
+      "gear": 6,
+      "forecast_n": 2174.773438,
+      "speed_n": -6230.695312,
+      "crank_n": -0.007812,
+      "inertia_n": 8405.570312,
+      "residual_n": -0.09375
+    },
+    {
+      "gear": 6,
+      "forecast_n": 1930.75,
+      "speed_n": -6363.34375,
+      "crank_n": -0.007812,
+      "inertia_n": 8294.164062,
+      "residual_n": -0.0625
+    },
+    {
+      "gear": 6,
+      "forecast_n": 1725.421875,
+      "speed_n": -6494.234375,
+      "crank_n": -0.007812,
+      "inertia_n": 8219.757812,
+      "residual_n": -0.09375
+    },
+    {
+      "gear": 6,
+      "forecast_n": 1555.8125,
+      "speed_n": -6623.960938,
+      "crank_n": 0.0,
+      "inertia_n": 8179.8125,
+      "residual_n": -0.039062
+    },
+    {
+      "gear": 6,
+      "forecast_n": 1419.367188,
+      "speed_n": -6753.039062,
+      "crank_n": 0.0,
+      "inertia_n": 8172.414062,
+      "residual_n": -0.007812
+    },
+    {
+      "gear": 6,
+      "forecast_n": 1321.609375,
+      "speed_n": -6882.023438,
+      "crank_n": 0.0,
+      "inertia_n": 8203.695312,
+      "residual_n": -0.0625
+    },
+    {
+      "gear": 7,
+      "forecast_n": -12190.59375,
+      "speed_n": -1357.28125,
+      "crank_n": -116.140625,
+      "inertia_n": -10717.15625,
+      "residual_n": -0.015625
+    },
+    {
+      "gear": 7,
+      "forecast_n": -1124.839844,
+      "speed_n": -1304.273438,
+      "crank_n": 0.0,
+      "inertia_n": 179.464844,
+      "residual_n": -0.03125
+    },
+    {
+      "gear": 7,
+      "forecast_n": 1914.613281,
+      "speed_n": -1307.109375,
+      "crank_n": 0.0,
+      "inertia_n": 3221.710938,
+      "residual_n": 0.011719
+    },
+    {
+      "gear": 7,
+      "forecast_n": 2224.871094,
+      "speed_n": -1357.953125,
+      "crank_n": 0.0,
+      "inertia_n": 3582.816406,
+      "residual_n": 0.007812
+    },
+    {
+      "gear": 7,
+      "forecast_n": 2015.792969,
+      "speed_n": -1414.503906,
+      "crank_n": 0.0,
+      "inertia_n": 3430.289062,
+      "residual_n": 0.007812
+    },
+    {
+      "gear": 7,
+      "forecast_n": 1749.71875,
+      "speed_n": -1468.636719,
+      "crank_n": 0.003906,
+      "inertia_n": 3218.378906,
+      "residual_n": -0.027344
+    },
+    {
+      "gear": 7,
+      "forecast_n": 1509.167969,
+      "speed_n": -1519.417969,
+      "crank_n": 0.0,
+      "inertia_n": 3028.625,
+      "residual_n": -0.039062
+    },
+    {
+      "gear": 7,
+      "forecast_n": 1288.058594,
+      "speed_n": -1567.226562,
+      "crank_n": 0.007812,
+      "inertia_n": 2855.242188,
+      "residual_n": 0.035156
+    },
+    {
+      "gear": 7,
+      "forecast_n": 1119.511719,
+      "speed_n": -1612.289062,
+      "crank_n": 0.007812,
+      "inertia_n": 2731.835938,
+      "residual_n": -0.042969
+    },
+    {
+      "gear": 7,
+      "forecast_n": 954.90625,
+      "speed_n": -1655.390625,
+      "crank_n": 0.0,
+      "inertia_n": 2610.304688,
+      "residual_n": -0.007812
+    },
+    {
+      "gear": 7,
+      "forecast_n": 816.042969,
+      "speed_n": -1696.585938,
+      "crank_n": 0.0,
+      "inertia_n": 2512.679688,
+      "residual_n": -0.050781
+    },
+    {
+      "gear": 7,
+      "forecast_n": 705.132812,
+      "speed_n": -1736.246094,
+      "crank_n": 0.003906,
+      "inertia_n": 2441.414062,
+      "residual_n": -0.039062
+    },
+    {
+      "gear": 7,
+      "forecast_n": 595.074219,
+      "speed_n": -1774.765625,
+      "crank_n": -0.003906,
+      "inertia_n": 2369.859375,
+      "residual_n": -0.015625
+    },
+    {
+      "gear": 7,
+      "forecast_n": 519.113281,
+      "speed_n": -1812.164062,
+      "crank_n": 0.0,
+      "inertia_n": 2331.328125,
+      "residual_n": -0.050781
+    },
+    {
+      "gear": 7,
+      "forecast_n": 440.003906,
+      "speed_n": -1848.964844,
+      "crank_n": 0.0,
+      "inertia_n": 2289.03125,
+      "residual_n": -0.0625
+    },
+    {
+      "gear": 7,
+      "forecast_n": 368.601562,
+      "speed_n": -1885.089844,
+      "crank_n": 0.003906,
+      "inertia_n": 2253.6875,
+      "residual_n": 0.0
+    },
+    {
+      "gear": 7,
+      "forecast_n": 319.289062,
+      "speed_n": -1920.648438,
+      "crank_n": 0.0,
+      "inertia_n": 2239.929688,
+      "residual_n": 0.007812
+    },
+    {
+      "gear": 7,
+      "forecast_n": 263.527344,
+      "speed_n": -1956.0,
+      "crank_n": 0.0,
+      "inertia_n": 2219.507812,
+      "residual_n": 0.019531
+    },
+    {
+      "gear": 7,
+      "forecast_n": 225.976562,
+      "speed_n": -1991.027344,
+      "crank_n": -0.007812,
+      "inertia_n": 2217.042969,
+      "residual_n": -0.03125
+    },
+    {
+      "gear": 7,
+      "forecast_n": 194.453125,
+      "speed_n": -2026.011719,
+      "crank_n": 0.0,
+      "inertia_n": 2220.519531,
+      "residual_n": -0.054688
+    },
+    {
+      "gear": 8,
+      "forecast_n": -16153.976562,
+      "speed_n": -341.257812,
+      "crank_n": -257.015625,
+      "inertia_n": -15555.746094,
+      "residual_n": 0.042969
+    },
+    {
+      "gear": 8,
+      "forecast_n": -2558.066406,
+      "speed_n": -352.785156,
+      "crank_n": 0.003906,
+      "inertia_n": -2205.234375,
+      "residual_n": -0.050781
+    },
+    {
+      "gear": 8,
+      "forecast_n": 671.757812,
+      "speed_n": -317.980469,
+      "crank_n": 0.0,
+      "inertia_n": 989.738281,
+      "residual_n": 0.0
+    },
+    {
+      "gear": 8,
+      "forecast_n": 545.160156,
+      "speed_n": -333.601562,
+      "crank_n": 0.0,
+      "inertia_n": 878.804688,
+      "residual_n": -0.042969
+    },
+    {
+      "gear": 8,
+      "forecast_n": 458.015625,
+      "speed_n": -347.46875,
+      "crank_n": -0.003906,
+      "inertia_n": 805.53125,
+      "residual_n": -0.042969
+    },
+    {
+      "gear": 8,
+      "forecast_n": 382.351562,
+      "speed_n": -360.1875,
+      "crank_n": 0.0,
+      "inertia_n": 742.570312,
+      "residual_n": -0.03125
+    },
+    {
+      "gear": 8,
+      "forecast_n": 319.523438,
+      "speed_n": -371.898438,
+      "crank_n": -0.003906,
+      "inertia_n": 691.386719,
+      "residual_n": 0.039062
+    },
+    {
+      "gear": 8,
+      "forecast_n": 263.871094,
+      "speed_n": -382.816406,
+      "crank_n": 0.0,
+      "inertia_n": 646.722656,
+      "residual_n": -0.035156
+    },
+    {
+      "gear": 8,
+      "forecast_n": 209.949219,
+      "speed_n": -393.019531,
+      "crank_n": 0.0,
+      "inertia_n": 602.929688,
+      "residual_n": 0.039062
+    },
+    {
+      "gear": 8,
+      "forecast_n": 160.914062,
+      "speed_n": -402.535156,
+      "crank_n": 0.0,
+      "inertia_n": 563.421875,
+      "residual_n": 0.027344
+    },
+    {
+      "gear": 8,
+      "forecast_n": 123.332031,
+      "speed_n": -411.429688,
+      "crank_n": 0.0,
+      "inertia_n": 534.71875,
+      "residual_n": 0.042969
+    },
+    {
+      "gear": 8,
+      "forecast_n": 91.851562,
+      "speed_n": -419.867188,
+      "crank_n": 0.0,
+      "inertia_n": 511.753906,
+      "residual_n": -0.035156
+    },
+    {
+      "gear": 8,
+      "forecast_n": 61.335938,
+      "speed_n": -427.933594,
+      "crank_n": -0.007812,
+      "inertia_n": 489.273438,
+      "residual_n": 0.003906
+    },
+    {
+      "gear": 8,
+      "forecast_n": 36.265625,
+      "speed_n": -435.664062,
+      "crank_n": 0.0,
+      "inertia_n": 471.949219,
+      "residual_n": -0.019531
+    },
+    {
+      "gear": 8,
+      "forecast_n": 15.410156,
+      "speed_n": -443.109375,
+      "crank_n": 0.0,
+      "inertia_n": 458.523438,
+      "residual_n": -0.003906
+    },
+    {
+      "gear": 8,
+      "forecast_n": -5.503906,
+      "speed_n": -450.347656,
+      "crank_n": 0.0,
+      "inertia_n": 444.804688,
+      "residual_n": 0.039062
+    },
+    {
+      "gear": 8,
+      "forecast_n": -27.042969,
+      "speed_n": -457.367188,
+      "crank_n": 0.0,
+      "inertia_n": 430.304688,
+      "residual_n": 0.019531
+    },
+    {
+      "gear": 8,
+      "forecast_n": -39.492188,
+      "speed_n": -464.160156,
+      "crank_n": 0.0,
+      "inertia_n": 424.660156,
+      "residual_n": 0.007812
+    },
+    {
+      "gear": 8,
+      "forecast_n": -47.644531,
+      "speed_n": -470.859375,
+      "crank_n": -0.003906,
+      "inertia_n": 423.203125,
+      "residual_n": 0.015625
+    },
+    {
+      "gear": 8,
+      "forecast_n": -57.773438,
+      "speed_n": -477.535156,
+      "crank_n": 0.0,
+      "inertia_n": 419.792969,
+      "residual_n": -0.03125
+    },
+    {
+      "gear": 7,
+      "forecast_n": 38943.484375,
+      "speed_n": -142.914062,
+      "crank_n": -469.210938,
+      "inertia_n": 39555.675781,
+      "residual_n": -0.066406
+    },
+    {
+      "gear": 7,
+      "forecast_n": 9643.175781,
+      "speed_n": -7.179688,
+      "crank_n": 0.0,
+      "inertia_n": 9650.355469,
+      "residual_n": 0.0
+    },
+    {
+      "gear": 7,
+      "forecast_n": -253.632812,
+      "speed_n": 140.421875,
+      "crank_n": 0.0,
+      "inertia_n": -393.984375,
+      "residual_n": -0.070312
+    },
+    {
+      "gear": 7,
+      "forecast_n": -2764.148438,
+      "speed_n": 134.390625,
+      "crank_n": -0.007812,
+      "inertia_n": -2898.554688,
+      "residual_n": 0.023438
+    },
+    {
+      "gear": 7,
+      "forecast_n": -3125.75,
+      "speed_n": 90.0625,
+      "crank_n": 0.0,
+      "inertia_n": -3215.773438,
+      "residual_n": -0.039062
+    },
+    {
+      "gear": 7,
+      "forecast_n": -2908.78125,
+      "speed_n": 40.882812,
+      "crank_n": -0.007812,
+      "inertia_n": -2949.6875,
+      "residual_n": 0.03125
+    },
+    {
+      "gear": 7,
+      "forecast_n": -2576.257812,
+      "speed_n": -4.234375,
+      "crank_n": 0.0,
+      "inertia_n": -2572.0625,
+      "residual_n": 0.039062
+    },
+    {
+      "gear": 7,
+      "forecast_n": -2270.007812,
+      "speed_n": -43.5625,
+      "crank_n": 0.0,
+      "inertia_n": -2226.460938,
+      "residual_n": 0.015625
+    },
+    {
+      "gear": 7,
+      "forecast_n": -1995.828125,
+      "speed_n": -77.617188,
+      "crank_n": -0.007812,
+      "inertia_n": -1918.21875,
+      "residual_n": 0.015625
+    },
+    {
+      "gear": 7,
+      "forecast_n": -1797.851562,
+      "speed_n": -106.960938,
+      "crank_n": 0.0,
+      "inertia_n": -1690.953125,
+      "residual_n": 0.0625
+    },
+    {
+      "gear": 7,
+      "forecast_n": -1638.273438,
+      "speed_n": -132.8125,
+      "crank_n": 0.0,
+      "inertia_n": -1505.40625,
+      "residual_n": -0.054688
+    },
+    {
+      "gear": 7,
+      "forecast_n": -1541.421875,
+      "speed_n": -155.835938,
+      "crank_n": 0.0,
+      "inertia_n": -1385.617188,
+      "residual_n": 0.03125
+    },
+    {
+      "gear": 7,
+      "forecast_n": -1452.976562,
+      "speed_n": -177.03125,
+      "crank_n": 0.0,
+      "inertia_n": -1275.96875,
+      "residual_n": 0.023438
+    },
+    {
+      "gear": 7,
+      "forecast_n": -1411.90625,
+      "speed_n": -196.539062,
+      "crank_n": 0.0,
+      "inertia_n": -1215.421875,
+      "residual_n": 0.054688
+    },
+    {
+      "gear": 7,
+      "forecast_n": -1381.890625,
+      "speed_n": -215.125,
+      "crank_n": -0.015625,
+      "inertia_n": -1166.75,
+      "residual_n": 0.0
+    },
+    {
+      "gear": 7,
+      "forecast_n": -1388.757812,
+      "speed_n": -232.976562,
+      "crank_n": 0.0,
+      "inertia_n": -1155.742188,
+      "residual_n": -0.039062
+    },
+    {
+      "gear": 7,
+      "forecast_n": -1394.25,
+      "speed_n": -250.648438,
+      "crank_n": -0.007812,
+      "inertia_n": -1143.578125,
+      "residual_n": -0.015625
+    },
+    {
+      "gear": 7,
+      "forecast_n": -1421.304688,
+      "speed_n": -268.148438,
+      "crank_n": 0.007812,
+      "inertia_n": -1153.132812,
+      "residual_n": -0.03125
+    },
+    {
+      "gear": 7,
+      "forecast_n": -1450.226562,
+      "speed_n": -285.773438,
+      "crank_n": 0.0,
+      "inertia_n": -1164.429688,
+      "residual_n": -0.023438
+    },
+    {
+      "gear": 7,
+      "forecast_n": -1501.164062,
+      "speed_n": -303.585938,
+      "crank_n": -0.007812,
+      "inertia_n": -1197.601562,
+      "residual_n": 0.03125
+    },
+    {
+      "gear": 6,
+      "forecast_n": 63042.234375,
+      "speed_n": -417.484375,
+      "crank_n": -584.875,
+      "inertia_n": 64044.660156,
+      "residual_n": -0.066406
+    },
+    {
+      "gear": 6,
+      "forecast_n": 27833.296875,
+      "speed_n": -22.882812,
+      "crank_n": 0.0,
+      "inertia_n": 27856.226562,
+      "residual_n": -0.046875
+    },
+    {
+      "gear": 6,
+      "forecast_n": 9965.726562,
+      "speed_n": 403.132812,
+      "crank_n": 0.007812,
+      "inertia_n": 9562.664062,
+      "residual_n": -0.078125
+    },
+    {
+      "gear": 6,
+      "forecast_n": 2044.585938,
+      "speed_n": 549.398438,
+      "crank_n": -0.007812,
+      "inertia_n": 1495.101562,
+      "residual_n": 0.09375
+    },
+    {
+      "gear": 6,
+      "forecast_n": -993.617188,
+      "speed_n": 572.25,
+      "crank_n": 0.015625,
+      "inertia_n": -1565.914062,
+      "residual_n": 0.03125
+    },
+    {
+      "gear": 6,
+      "forecast_n": -1793.5,
+      "speed_n": 548.3125,
+      "crank_n": 0.0,
+      "inertia_n": -2341.890625,
+      "residual_n": 0.078125
+    },
+    {
+      "gear": 6,
+      "forecast_n": -1523.679688,
+      "speed_n": 512.5,
+      "crank_n": -0.007812,
+      "inertia_n": -2036.234375,
+      "residual_n": 0.0625
+    },
+    {
+      "gear": 6,
+      "forecast_n": -891.8125,
+      "speed_n": 481.359375,
+      "crank_n": -0.007812,
+      "inertia_n": -1373.125,
+      "residual_n": -0.039062
+    },
+    {
+      "gear": 6,
+      "forecast_n": -122.875,
+      "speed_n": 460.359375,
+      "crank_n": 0.0,
+      "inertia_n": -583.195312,
+      "residual_n": -0.039062
+    },
+    {
+      "gear": 6,
+      "forecast_n": 573.679688,
+      "speed_n": 451.429688,
+      "crank_n": 0.0,
+      "inertia_n": 122.179688,
+      "residual_n": 0.070312
+    },
+    {
+      "gear": 6,
+      "forecast_n": 1183.703125,
+      "speed_n": 453.3125,
+      "crank_n": -0.007812,
+      "inertia_n": 730.320312,
+      "residual_n": 0.078125
+    },
+    {
+      "gear": 6,
+      "forecast_n": 1685.4375,
+      "speed_n": 464.476562,
+      "crank_n": -0.007812,
+      "inertia_n": 1220.9375,
+      "residual_n": 0.03125
+    },
+    {
+      "gear": 6,
+      "forecast_n": 2067.476562,
+      "speed_n": 483.15625,
+      "crank_n": -0.007812,
+      "inertia_n": 1584.296875,
+      "residual_n": 0.03125
+    },
+    {
+      "gear": 6,
+      "forecast_n": 2364.289062,
+      "speed_n": 507.375,
+      "crank_n": -0.007812,
+      "inertia_n": 1856.984375,
+      "residual_n": -0.0625
+    },
+    {
+      "gear": 6,
+      "forecast_n": 2562.734375,
+      "speed_n": 535.78125,
+      "crank_n": -0.007812,
+      "inertia_n": 2026.929688,
+      "residual_n": 0.03125
+    },
+    {
+      "gear": 6,
+      "forecast_n": 2713.179688,
+      "speed_n": 566.78125,
+      "crank_n": 0.0,
+      "inertia_n": 2146.359375,
+      "residual_n": 0.039062
+    },
+    {
+      "gear": 6,
+      "forecast_n": 2781.507812,
+      "speed_n": 599.59375,
+      "crank_n": 0.0,
+      "inertia_n": 2181.875,
+      "residual_n": 0.039062
+    },
+    {
+      "gear": 6,
+      "forecast_n": 2831.96875,
+      "speed_n": 632.96875,
+      "crank_n": 0.0,
+      "inertia_n": 2199.0,
+      "residual_n": 0.0
+    },
+    {
+      "gear": 6,
+      "forecast_n": 2820.851562,
+      "speed_n": 666.601562,
+      "crank_n": 0.0,
+      "inertia_n": 2154.1875,
+      "residual_n": 0.0625
+    },
+    {
+      "gear": 6,
+      "forecast_n": 2805.148438,
+      "speed_n": 699.539062,
+      "crank_n": 0.0,
+      "inertia_n": 2105.570312,
+      "residual_n": 0.039062
+    },
+    {
+      "gear": 7,
+      "forecast_n": 41419.929688,
+      "speed_n": -138.148438,
+      "crank_n": -525.90625,
+      "inertia_n": 42084.0,
+      "residual_n": -0.017578
+    },
+    {
+      "gear": 7,
+      "forecast_n": 10727.464844,
+      "speed_n": -20.421875,
+      "crank_n": 0.0,
+      "inertia_n": 10747.871094,
+      "residual_n": 0.015625
+    },
+    {
+      "gear": 7,
+      "forecast_n": 145.390625,
+      "speed_n": 143.949219,
+      "crank_n": 0.0,
+      "inertia_n": 1.449219,
+      "residual_n": -0.007812
+    },
+    {
+      "gear": 7,
+      "forecast_n": -1864.246094,
+      "speed_n": 143.972656,
+      "crank_n": -0.003906,
+      "inertia_n": -2008.175781,
+      "residual_n": -0.039062
+    },
+    {
+      "gear": 7,
+      "forecast_n": -1897.824219,
+      "speed_n": 113.261719,
+      "crank_n": 0.0,
+      "inertia_n": -2011.070312,
+      "residual_n": -0.015625
+    },
+    {
+      "gear": 7,
+      "forecast_n": -1550.535156,
+      "speed_n": 82.507812,
+      "crank_n": 0.0,
+      "inertia_n": -1633.019531,
+      "residual_n": -0.023438
+    },
+    {
+      "gear": 7,
+      "forecast_n": -1179.210938,
+      "speed_n": 57.53125,
+      "crank_n": 0.0,
+      "inertia_n": -1236.714844,
+      "residual_n": -0.027344
+    },
+    {
+      "gear": 7,
+      "forecast_n": -853.949219,
+      "speed_n": 38.621094,
+      "crank_n": -0.003906,
+      "inertia_n": -892.550781,
+      "residual_n": -0.015625
+    },
+    {
+      "gear": 7,
+      "forecast_n": -612.359375,
+      "speed_n": 24.96875,
+      "crank_n": -0.003906,
+      "inertia_n": -637.328125,
+      "residual_n": 0.003906
+    },
+    {
+      "gear": 7,
+      "forecast_n": -416.625,
+      "speed_n": 15.21875,
+      "crank_n": -0.003906,
+      "inertia_n": -431.789062,
+      "residual_n": -0.050781
+    },
+    {
+      "gear": 7,
+      "forecast_n": -266.046875,
+      "speed_n": 8.617188,
+      "crank_n": 0.0,
+      "inertia_n": -274.632812,
+      "residual_n": -0.03125
+    },
+    {
+      "gear": 7,
+      "forecast_n": -166.121094,
+      "speed_n": 4.414062,
+      "crank_n": 0.003906,
+      "inertia_n": -170.488281,
+      "residual_n": -0.050781
+    },
+    {
+      "gear": 7,
+      "forecast_n": -80.511719,
+      "speed_n": 1.808594,
+      "crank_n": 0.0,
+      "inertia_n": -82.273438,
+      "residual_n": -0.046875
+    },
+    {
+      "gear": 7,
+      "forecast_n": -42.6875,
+      "speed_n": 0.546875,
+      "crank_n": 0.003906,
+      "inertia_n": -43.308594,
+      "residual_n": 0.070312
+    },
+    {
+      "gear": 7,
+      "forecast_n": -18.652344,
+      "speed_n": -0.113281,
+      "crank_n": 0.003906,
+      "inertia_n": -18.542969,
+      "residual_n": 0.0
+    },
+    {
+      "gear": 7,
+      "forecast_n": -0.367188,
+      "speed_n": -0.402344,
+      "crank_n": 0.003906,
+      "inertia_n": 0.0,
+      "residual_n": 0.03125
+    },
+    {
+      "gear": 7,
+      "forecast_n": -9.234375,
+      "speed_n": -0.402344,
+      "crank_n": 0.003906,
+      "inertia_n": -8.835938,
+      "residual_n": 0.0
+    },
+    {
+      "gear": 7,
+      "forecast_n": -14.667969,
+      "speed_n": -0.535156,
+      "crank_n": 0.003906,
+      "inertia_n": -14.195312,
+      "residual_n": 0.058594
+    },
+    {
+      "gear": 7,
+      "forecast_n": -41.15625,
+      "speed_n": -0.753906,
+      "crank_n": 0.0,
+      "inertia_n": -40.410156,
+      "residual_n": 0.007812
+    },
+    {
+      "gear": 7,
+      "forecast_n": -60.488281,
+      "speed_n": -1.367188,
+      "crank_n": 0.0,
+      "inertia_n": -59.097656,
+      "residual_n": -0.023438
+    },
+    {
+      "gear": 5,
+      "forecast_n": 51138.742188,
+      "speed_n": 2123.554688,
+      "crank_n": -1787.835938,
+      "inertia_n": 50802.9375,
+      "residual_n": 0.085938
+    },
+    {
+      "gear": 5,
+      "forecast_n": 14274.03125,
+      "speed_n": -466.039062,
+      "crank_n": 0.0,
+      "inertia_n": 14740.007812,
+      "residual_n": 0.0625
+    },
+    {
+      "gear": 5,
+      "forecast_n": 109.0,
+      "speed_n": -698.65625,
+      "crank_n": -0.015625,
+      "inertia_n": 807.75,
+      "residual_n": -0.078125
+    },
+    {
+      "gear": 5,
+      "forecast_n": -6964.765625,
+      "speed_n": -711.398438,
+      "crank_n": -0.007812,
+      "inertia_n": -6253.3125,
+      "residual_n": -0.046875
+    },
+    {
+      "gear": 5,
+      "forecast_n": -9648.71875,
+      "speed_n": -612.710938,
+      "crank_n": 0.0,
+      "inertia_n": -9035.945312,
+      "residual_n": -0.0625
+    },
+    {
+      "gear": 5,
+      "forecast_n": -9770.734375,
+      "speed_n": -470.085938,
+      "crank_n": 0.0,
+      "inertia_n": -9300.710938,
+      "residual_n": 0.0625
+    },
+    {
+      "gear": 5,
+      "forecast_n": -8486.453125,
+      "speed_n": -323.328125,
+      "crank_n": 0.0,
+      "inertia_n": -8163.015625,
+      "residual_n": -0.109375
+    },
+    {
+      "gear": 5,
+      "forecast_n": -6648.515625,
+      "speed_n": -194.5,
+      "crank_n": -0.007812,
+      "inertia_n": -6454.164062,
+      "residual_n": 0.15625
+    },
+    {
+      "gear": 5,
+      "forecast_n": -4612.671875,
+      "speed_n": -92.625,
+      "crank_n": -0.007812,
+      "inertia_n": -4520.007812,
+      "residual_n": -0.03125
+    },
+    {
+      "gear": 5,
+      "forecast_n": -2689.421875,
+      "speed_n": -21.304688,
+      "crank_n": -0.007812,
+      "inertia_n": -2667.953125,
+      "residual_n": -0.15625
+    },
+    {
+      "gear": 5,
+      "forecast_n": -943.882812,
+      "speed_n": 20.8125,
+      "crank_n": 0.0,
+      "inertia_n": -964.726562,
+      "residual_n": 0.03125
+    },
+    {
+      "gear": 5,
+      "forecast_n": 431.320312,
+      "speed_n": 36.03125,
+      "crank_n": -0.007812,
+      "inertia_n": 395.414062,
+      "residual_n": -0.117188
+    },
+    {
+      "gear": 5,
+      "forecast_n": 1551.992188,
+      "speed_n": 29.796875,
+      "crank_n": 0.0,
+      "inertia_n": 1522.132812,
+      "residual_n": 0.0625
+    },
+    {
+      "gear": 5,
+      "forecast_n": 2374.15625,
+      "speed_n": 5.765625,
+      "crank_n": -0.007812,
+      "inertia_n": 2368.414062,
+      "residual_n": -0.015625
+    },
+    {
+      "gear": 5,
+      "forecast_n": 3001.171875,
+      "speed_n": -31.601562,
+      "crank_n": -0.007812,
+      "inertia_n": 3032.65625,
+      "residual_n": 0.125
+    },
+    {
+      "gear": 5,
+      "forecast_n": 3357.109375,
+      "speed_n": -79.46875,
+      "crank_n": 0.007812,
+      "inertia_n": 3436.53125,
+      "residual_n": 0.039062
+    },
+    {
+      "gear": 5,
+      "forecast_n": 3556.273438,
+      "speed_n": -133.6875,
+      "crank_n": 0.0,
+      "inertia_n": 3690.015625,
+      "residual_n": -0.054688
+    },
+    {
+      "gear": 5,
+      "forecast_n": 3604.929688,
+      "speed_n": -191.945312,
+      "crank_n": 0.0,
+      "inertia_n": 3796.859375,
+      "residual_n": 0.015625
+    },
+    {
+      "gear": 5,
+      "forecast_n": 3594.40625,
+      "speed_n": -251.84375,
+      "crank_n": -0.023438,
+      "inertia_n": 3846.359375,
+      "residual_n": -0.085938
+    },
+    {
+      "gear": 5,
+      "forecast_n": 3462.398438,
+      "speed_n": -312.546875,
+      "crank_n": 0.0,
+      "inertia_n": 3774.921875,
+      "residual_n": 0.023438
+    },
+    {
+      "gear": 4,
+      "forecast_n": 102516.65625,
+      "speed_n": 3739.125,
+      "crank_n": -7234.546875,
+      "inertia_n": 106011.929688,
+      "residual_n": 0.148438
+    },
+    {
+      "gear": 4,
+      "forecast_n": 57786.78125,
+      "speed_n": -5168.5,
+      "crank_n": 0.015625,
+      "inertia_n": 62955.046875,
+      "residual_n": 0.21875
+    },
+    {
+      "gear": 4,
+      "forecast_n": 40137.59375,
+      "speed_n": -6162.0,
+      "crank_n": 0.0,
+      "inertia_n": 46299.703125,
+      "residual_n": -0.109375
+    },
+    {
+      "gear": 4,
+      "forecast_n": 28845.671875,
+      "speed_n": -6892.6875,
+      "crank_n": 0.0,
+      "inertia_n": 35738.125,
+      "residual_n": 0.234375
+    },
+    {
+      "gear": 4,
+      "forecast_n": 22651.90625,
+      "speed_n": -7456.71875,
+      "crank_n": 0.015625,
+      "inertia_n": 30108.703125,
+      "residual_n": -0.09375
+    },
+    {
+      "gear": 4,
+      "forecast_n": 19800.25,
+      "speed_n": -7931.875,
+      "crank_n": 0.0,
+      "inertia_n": 27732.1875,
+      "residual_n": -0.0625
+    },
+    {
+      "gear": 4,
+      "forecast_n": 19509.546875,
+      "speed_n": -8369.546875,
+      "crank_n": 0.015625,
+      "inertia_n": 27879.125,
+      "residual_n": -0.046875
+    },
+    {
+      "gear": 4,
+      "forecast_n": 20862.0,
+      "speed_n": -8809.5,
+      "crank_n": 0.0,
+      "inertia_n": 29671.71875,
+      "residual_n": -0.21875
+    },
+    {
+      "gear": 4,
+      "forecast_n": 23106.484375,
+      "speed_n": -9277.796875,
+      "crank_n": 0.015625,
+      "inertia_n": 32384.375,
+      "residual_n": -0.109375
+    },
+    {
+      "gear": 4,
+      "forecast_n": 25880.59375,
+      "speed_n": -9788.859375,
+      "crank_n": 0.015625,
+      "inertia_n": 35669.453125,
+      "residual_n": -0.015625
+    },
+    {
+      "gear": 4,
+      "forecast_n": 28671.28125,
+      "speed_n": -10351.75,
+      "crank_n": 0.0,
+      "inertia_n": 39023.1875,
+      "residual_n": -0.15625
+    },
+    {
+      "gear": 4,
+      "forecast_n": 31211.015625,
+      "speed_n": -10967.625,
+      "crank_n": 0.0,
+      "inertia_n": 42178.609375,
+      "residual_n": 0.03125
+    },
+    {
+      "gear": 4,
+      "forecast_n": 33430.078125,
+      "speed_n": -11633.25,
+      "crank_n": 0.015625,
+      "inertia_n": 45063.171875,
+      "residual_n": 0.140625
+    },
+    {
+      "gear": 4,
+      "forecast_n": 35179.734375,
+      "speed_n": -12344.453125,
+      "crank_n": 0.0,
+      "inertia_n": 47524.21875,
+      "residual_n": -0.03125
+    },
+    {
+      "gear": 4,
+      "forecast_n": 36501.78125,
+      "speed_n": -13094.46875,
+      "crank_n": 0.03125,
+      "inertia_n": 49596.296875,
+      "residual_n": -0.078125
+    },
+    {
+      "gear": 4,
+      "forecast_n": 37374.609375,
+      "speed_n": -13877.140625,
+      "crank_n": 0.0,
+      "inertia_n": 51251.546875,
+      "residual_n": 0.203125
+    },
+    {
+      "gear": 4,
+      "forecast_n": 37701.890625,
+      "speed_n": -14685.96875,
+      "crank_n": 0.0,
+      "inertia_n": 52387.71875,
+      "residual_n": 0.140625
+    },
+    {
+      "gear": 4,
+      "forecast_n": 37674.296875,
+      "speed_n": -15512.75,
+      "crank_n": 0.015625,
+      "inertia_n": 53187.234375,
+      "residual_n": -0.203125
+    },
+    {
+      "gear": 4,
+      "forecast_n": 37278.796875,
+      "speed_n": -16352.140625,
+      "crank_n": 0.015625,
+      "inertia_n": 53630.953125,
+      "residual_n": -0.03125
+    },
+    {
+      "gear": 4,
+      "forecast_n": 36675.375,
+      "speed_n": -17198.53125,
+      "crank_n": 0.015625,
+      "inertia_n": 53873.9375,
+      "residual_n": -0.046875
+    },
+    {
+      "gear": 1,
+      "forecast_n": 376685.96875,
+      "speed_n": 0.03125,
+      "crank_n": 0.0,
+      "inertia_n": 376685.9375,
+      "residual_n": 0.0
+    },
+    {
+      "gear": 1,
+      "forecast_n": 0.0,
+      "speed_n": 0.0,
+      "crank_n": 0.0,
+      "inertia_n": 0.0,
+      "residual_n": 0.0
+    },
+    {
+      "gear": 1,
+      "forecast_n": 0.0,
+      "speed_n": 0.0,
+      "crank_n": 0.0,
+      "inertia_n": 0.0,
+      "residual_n": 0.0
+    },
+    {
+      "gear": 1,
+      "forecast_n": 0.03125,
+      "speed_n": 0.03125,
+      "crank_n": 0.0,
+      "inertia_n": 0.0,
+      "residual_n": 0.0
+    },
+    {
+      "gear": 1,
+      "forecast_n": -0.03125,
+      "speed_n": -0.03125,
+      "crank_n": 0.0,
+      "inertia_n": 0.0,
+      "residual_n": 0.0
+    },
+    {
+      "gear": 1,
+      "forecast_n": 0.0625,
+      "speed_n": 0.0625,
+      "crank_n": 0.0,
+      "inertia_n": 0.0,
+      "residual_n": 0.0
+    },
+    {
+      "gear": 1,
+      "forecast_n": 30049.96875,
+      "speed_n": 0.0,
+      "crank_n": 0.0,
+      "inertia_n": 30050.25,
+      "residual_n": -0.28125
+    },
+    {
+      "gear": 1,
+      "forecast_n": 65749.34375,
+      "speed_n": 0.0,
+      "crank_n": 0.0,
+      "inertia_n": 65749.5,
+      "residual_n": -0.15625
+    },
+    {
+      "gear": 1,
+      "forecast_n": 97652.34375,
+      "speed_n": -0.09375,
+      "crank_n": 0.0,
+      "inertia_n": 97651.8125,
+      "residual_n": 0.625
+    },
+    {
+      "gear": 1,
+      "forecast_n": 126553.71875,
+      "speed_n": 0.0625,
+      "crank_n": 0.0,
+      "inertia_n": 126553.3125,
+      "residual_n": 0.34375
+    },
+    {
+      "gear": 1,
+      "forecast_n": 152081.25,
+      "speed_n": 0.0,
+      "crank_n": 0.0,
+      "inertia_n": 152081.625,
+      "residual_n": -0.375
+    },
+    {
+      "gear": 1,
+      "forecast_n": 173969.75,
+      "speed_n": -0.125,
+      "crank_n": 0.0,
+      "inertia_n": 173969.625,
+      "residual_n": 0.25
+    },
+    {
+      "gear": 1,
+      "forecast_n": 192216.90625,
+      "speed_n": -0.03125,
+      "crank_n": 0.0,
+      "inertia_n": 192218.46875,
+      "residual_n": -1.53125
+    },
+    {
+      "gear": 1,
+      "forecast_n": 206948.5625,
+      "speed_n": -0.03125,
+      "crank_n": 0.0,
+      "inertia_n": 206950.0625,
+      "residual_n": -1.46875
+    },
+    {
+      "gear": 1,
+      "forecast_n": 220767.734375,
+      "speed_n": 0.0625,
+      "crank_n": 0.0,
+      "inertia_n": 220769.203125,
+      "residual_n": -1.53125
+    },
+    {
+      "gear": 1,
+      "forecast_n": 235038.59375,
+      "speed_n": 188830.1875,
+      "crank_n": 0.0,
+      "inertia_n": 46207.71875,
+      "residual_n": 0.6875
+    },
+    {
+      "gear": 1,
+      "forecast_n": 247272.921875,
+      "speed_n": 229441.25,
+      "crank_n": 0.0,
+      "inertia_n": 17832.390625,
+      "residual_n": -0.71875
+    },
+    {
+      "gear": 1,
+      "forecast_n": 256791.109375,
+      "speed_n": 245116.875,
+      "crank_n": 0.0,
+      "inertia_n": 11675.78125,
+      "residual_n": -1.546875
+    },
+    {
+      "gear": 1,
+      "forecast_n": 263731.0625,
+      "speed_n": 255383.375,
+      "crank_n": 0.015625,
+      "inertia_n": 8346.59375,
+      "residual_n": 1.0625
+    },
+    {
+      "gear": 1,
+      "forecast_n": 268394.15625,
+      "speed_n": 262721.78125,
+      "crank_n": -0.015625,
+      "inertia_n": 5673.8125,
+      "residual_n": -1.421875
+    },
+    {
+      "gear": 1,
+      "forecast_n": 0.0625,
+      "speed_n": 0.0625,
+      "crank_n": 0.0,
+      "inertia_n": 0.0,
+      "residual_n": 0.0
+    },
+    {
+      "gear": 1,
+      "forecast_n": -0.21875,
+      "speed_n": -0.21875,
+      "crank_n": 0.0,
+      "inertia_n": 0.0,
+      "residual_n": 0.0
+    },
+    {
+      "gear": 1,
+      "forecast_n": 0.0,
+      "speed_n": 0.0,
+      "crank_n": 0.0,
+      "inertia_n": 0.0,
+      "residual_n": 0.0
+    },
+    {
+      "gear": 1,
+      "forecast_n": 0.0,
+      "speed_n": 0.0,
+      "crank_n": 0.0,
+      "inertia_n": 0.0,
+      "residual_n": 0.0
+    },
+    {
+      "gear": 1,
+      "forecast_n": -0.09375,
+      "speed_n": -0.09375,
+      "crank_n": 0.0,
+      "inertia_n": 0.0,
+      "residual_n": 0.0
+    },
+    {
+      "gear": 1,
+      "forecast_n": 0.03125,
+      "speed_n": 0.03125,
+      "crank_n": 0.0,
+      "inertia_n": 0.0,
+      "residual_n": 0.0
+    },
+    {
+      "gear": 1,
+      "forecast_n": -0.03125,
+      "speed_n": -0.03125,
+      "crank_n": 0.0,
+      "inertia_n": 0.0,
+      "residual_n": 0.0
+    },
+    {
+      "gear": 1,
+      "forecast_n": -0.03125,
+      "speed_n": -0.03125,
+      "crank_n": 0.0,
+      "inertia_n": 0.0,
+      "residual_n": 0.0
+    },
+    {
+      "gear": 1,
+      "forecast_n": -0.03125,
+      "speed_n": -0.03125,
+      "crank_n": 0.0,
+      "inertia_n": 0.0,
+      "residual_n": 0.0
+    },
+    {
+      "gear": 1,
+      "forecast_n": -0.09375,
+      "speed_n": -0.09375,
+      "crank_n": 0.0,
+      "inertia_n": 0.0,
+      "residual_n": 0.0
+    },
+    {
+      "gear": 1,
+      "forecast_n": 0.0,
+      "speed_n": 0.0,
+      "crank_n": 0.0,
+      "inertia_n": 0.0,
+      "residual_n": 0.0
+    },
+    {
+      "gear": 1,
+      "forecast_n": -0.125,
+      "speed_n": -0.125,
+      "crank_n": 0.0,
+      "inertia_n": 0.0,
+      "residual_n": 0.0
+    },
+    {
+      "gear": 1,
+      "forecast_n": 0.0,
+      "speed_n": 0.0,
+      "crank_n": 0.0,
+      "inertia_n": 0.0,
+      "residual_n": 0.0
+    },
+    {
+      "gear": 1,
+      "forecast_n": -0.0625,
+      "speed_n": -0.0625,
+      "crank_n": 0.0,
+      "inertia_n": 0.0,
+      "residual_n": 0.0
+    },
+    {
+      "gear": 1,
+      "forecast_n": -0.15625,
+      "speed_n": -0.15625,
+      "crank_n": 0.0,
+      "inertia_n": 0.0,
+      "residual_n": 0.0
+    },
+    {
+      "gear": 1,
+      "forecast_n": -0.03125,
+      "speed_n": -0.03125,
+      "crank_n": 0.0,
+      "inertia_n": 0.0,
+      "residual_n": 0.0
+    },
+    {
+      "gear": 1,
+      "forecast_n": -0.15625,
+      "speed_n": -0.15625,
+      "crank_n": 0.0,
+      "inertia_n": 0.0,
+      "residual_n": 0.0
+    },
+    {
+      "gear": 1,
+      "forecast_n": 0.03125,
+      "speed_n": 0.03125,
+      "crank_n": 0.0,
+      "inertia_n": 0.0,
+      "residual_n": 0.0
+    },
+    {
+      "gear": 1,
+      "forecast_n": 0.125,
+      "speed_n": 0.125,
+      "crank_n": 0.0,
+      "inertia_n": 0.0,
+      "residual_n": 0.0
+    },
+    {
+      "gear": 1,
+      "forecast_n": -0.03125,
+      "speed_n": -0.03125,
+      "crank_n": 0.0,
+      "inertia_n": 0.0,
+      "residual_n": 0.0
+    }
+  ],
+  "summary": {
+    "forecast_n": {
+      "n": 524,
+      "min": -90016.46875,
+      "median": 4696.84375,
+      "max": 381493.6875
+    },
+    "speed_n": {
+      "n": 524,
+      "min": -86185.625,
+      "median": -4385.539062,
+      "max": 365662.625
+    },
+    "crank_n": {
+      "n": 524,
+      "min": -90663.1875,
+      "median": 0.0,
+      "max": 3.019531
+    },
+    "inertia_n": {
+      "n": 524,
+      "min": -64705.390625,
+      "median": 9978.351563,
+      "max": 376685.9375
+    },
+    "residual_n": {
+      "n": 524,
+      "min": -1.546875,
+      "median": -0.007812,
+      "max": 1.0625
+    }
+  },
+  "sustained_landings": [
+    {
+      "gear": 2,
+      "forecast_gap_n": 261415.078125,
+      "speed_n": 64340.410156,
+      "crank_n": -5189.072266,
+      "inertia_n": 202263.8125,
+      "residual_n": -0.077271
+    },
+    {
+      "gear": 3,
+      "forecast_gap_n": 144832.265625,
+      "speed_n": 9860.077148,
+      "crank_n": -1991.274414,
+      "inertia_n": 136963.46875,
+      "residual_n": -0.004883
+    },
+    {
+      "gear": 4,
+      "forecast_gap_n": 43005.359375,
+      "speed_n": -18629.199219,
+      "crank_n": -1587.128174,
+      "inertia_n": 63221.679688,
+      "residual_n": 0.003906
+    },
+    {
+      "gear": 5,
+      "forecast_gap_n": 14463.070312,
+      "speed_n": -14151.054688,
+      "crank_n": -63.27422,
+      "inertia_n": 28677.417969,
+      "residual_n": -0.023438
+    },
+    {
+      "gear": 6,
+      "forecast_gap_n": 2753.070312,
+      "speed_n": -5804.242188,
+      "crank_n": -12.93125,
+      "inertia_n": 8570.234375,
+      "residual_n": 0.007031
+    },
+    {
+      "gear": 7,
+      "forecast_gap_n": -46.496094,
+      "speed_n": -1804.971313,
+      "crank_n": -16.870312,
+      "inertia_n": 1775.350952,
+      "residual_n": -0.007031
+    },
+    {
+      "gear": 8,
+      "forecast_gap_n": -415.355469,
+      "speed_n": -469.980652,
+      "crank_n": -9.169336,
+      "inertia_n": 63.806053,
+      "residual_n": -0.011133
+    },
+    {
+      "gear": 2,
+      "forecast_gap_n": 250715.40625,
+      "speed_n": 75714.609375,
+      "crank_n": -4210.033203,
+      "inertia_n": 179210.671875,
+      "residual_n": 0.161892
+    },
+    {
+      "gear": 3,
+      "forecast_gap_n": 118062.03125,
+      "speed_n": 9673.087891,
+      "crank_n": -2657.764893,
+      "inertia_n": 111046.734375,
+      "residual_n": -0.030078
+    },
+    {
+      "gear": 4,
+      "forecast_gap_n": 35704.53125,
+      "speed_n": -21928.847656,
+      "crank_n": -1570.996826,
+      "inertia_n": 59204.351562,
+      "residual_n": 0.0125
+    },
+    {
+      "gear": 5,
+      "forecast_gap_n": 10419.445312,
+      "speed_n": -15197.796875,
+      "crank_n": -63.311718,
+      "inertia_n": 25680.560547,
+      "residual_n": 0.000781
+    },
+    {
+      "gear": 6,
+      "forecast_gap_n": 225.507812,
+      "speed_n": -5167.196777,
+      "crank_n": -33.266014,
+      "inertia_n": 5426.003906,
+      "residual_n": -0.035547
+    },
+    {
+      "gear": 7,
+      "forecast_gap_n": -909.425781,
+      "speed_n": -1438.920654,
+      "crank_n": -21.130859,
+      "inertia_n": 550.632629,
+      "residual_n": -0.002344
+    },
+    {
+      "gear": 2,
+      "forecast_gap_n": 251190.71875,
+      "speed_n": 65886.6875,
+      "crank_n": -5332.685547,
+      "inertia_n": 190636.765625,
+      "residual_n": -0.066636
+    },
+    {
+      "gear": 3,
+      "forecast_gap_n": 133674.09375,
+      "speed_n": 7050.079102,
+      "crank_n": -2143.374512,
+      "inertia_n": 128767.382812,
+      "residual_n": -0.003217
+    },
+    {
+      "gear": 4,
+      "forecast_gap_n": 36470.71875,
+      "speed_n": -20617.550781,
+      "crank_n": -1670.543701,
+      "inertia_n": 58758.792969,
+      "residual_n": 0.01875
+    },
+    {
+      "gear": 5,
+      "forecast_gap_n": 14146.820312,
+      "speed_n": -14849.287109,
+      "crank_n": -15.442187,
+      "inertia_n": 29011.535156,
+      "residual_n": 0.014453
+    },
+    {
+      "gear": 6,
+      "forecast_gap_n": 2469.835938,
+      "speed_n": -5549.34668,
+      "crank_n": -1.672656,
+      "inertia_n": 8020.876465,
+      "residual_n": -0.020703
+    },
+    {
+      "gear": 7,
+      "forecast_gap_n": 195.417969,
+      "speed_n": -1660.579346,
+      "crank_n": -5.80625,
+      "inertia_n": 1861.825562,
+      "residual_n": -0.018945
+    },
+    {
+      "gear": 8,
+      "forecast_gap_n": -777.488281,
+      "speed_n": -403.091217,
+      "crank_n": -12.851562,
+      "inertia_n": -361.544525,
+      "residual_n": -0.000781
+    },
+    {
+      "gear": 7,
+      "forecast_gap_n": 815.613281,
+      "speed_n": -109.759377,
+      "crank_n": -23.462891,
+      "inertia_n": 948.834351,
+      "residual_n": -0.000586
+    },
+    {
+      "gear": 6,
+      "forecast_gap_n": 6097.515625,
+      "speed_n": 457.398041,
+      "crank_n": -29.245703,
+      "inertia_n": 5669.34668,
+      "residual_n": 0.017773
+    },
+    {
+      "gear": 7,
+      "forecast_gap_n": 2160.90625,
+      "speed_n": 23.663671,
+      "crank_n": -26.294922,
+      "inertia_n": 2163.544434,
+      "residual_n": -0.008105
+    },
+    {
+      "gear": 5,
+      "forecast_gap_n": 2034.515625,
+      "speed_n": -118.789062,
+      "crank_n": -89.396095,
+      "inertia_n": 2242.708252,
+      "residual_n": -0.004688
+    },
+    {
+      "gear": 4,
+      "forecast_gap_n": 35639.828125,
+      "speed_n": -10106.822266,
+      "crank_n": -361.71875,
+      "inertia_n": 46108.363281,
+      "residual_n": -0.004297
+    },
+    {
+      "gear": 1,
+      "forecast_gap_n": 145695.1875,
+      "speed_n": 59074.667969,
+      "crank_n": 0.0,
+      "inertia_n": 86620.804688,
+      "residual_n": -0.303125
+    },
+    {
+      "gear": 1,
+      "forecast_gap_n": -0.03125,
+      "speed_n": -0.040625,
+      "crank_n": 0.0,
+      "inertia_n": 0.0,
+      "residual_n": 0.0
+    }
+  ],
+  "method": "Same tick speed and pre-tick crank rpm; remove crank acceleration from transmitted force using J*(omega_integrated-omega_pre)/dt, with clutch and grip caps applied. Settled samples use the existing one-rpm coupling criterion. No frame or tick cost was measured.",
+  "margin": {
+    "observer_residual_n": 0.40625,
+    "residual_span_n": 2.609375,
+    "bound_n": 3.015625,
+    "nominal_weight_n": 559170,
+    "share_rounded_strictly_up_at_one_ppm": 6e-06,
+    "rig_margin_n": 3.35502
+  }
+}
