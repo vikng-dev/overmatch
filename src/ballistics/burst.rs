@@ -318,15 +318,20 @@ impl Fuze {
     /// never restarts an `Impact` fuze.
     pub(crate) fn bounced(&mut self, speed: f32, tank: Option<Entity>) {
         if let Self::Armed {
-            burst, remaining, ..
+            burst,
+            remaining,
+            speed: previous_speed,
+            ..
         } = *self
             && remaining > 0.0
             && matches!(burst.trigger, Trigger::SpendExit { .. })
         {
+            // The game's damage model: a held round waits out the restarted delay in time.
+            let reference_speed = if speed > 0.0 { speed } else { previous_speed };
             *self = Self::Armed {
                 burst,
-                remaining: speed * burst.delay,
-                speed,
+                remaining: reference_speed * burst.delay,
+                speed: reference_speed,
                 tank,
             };
         }
@@ -619,6 +624,12 @@ mod tests {
         assert_eq!(fuze.due_within(f32::MAX), Some(200.0 * burst.delay));
         fuze.bounced(100.0, None);
         assert_eq!(fuze.due_within(f32::MAX), Some(100.0 * burst.delay));
+        fuze.bounced(0.0, None);
+        assert_eq!(
+            fuze.delay_left(),
+            Some(burst.delay),
+            "a held round waits out the delay"
+        );
         let mut unarmed = Fuze::of(Some(burst));
         unarmed.bounced(100.0, None);
         assert_eq!(unarmed, Fuze::Unarmed(burst));
