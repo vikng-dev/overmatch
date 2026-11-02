@@ -9,9 +9,14 @@
 battle_fill_up_s() {
     local mode="$1/assets/modes/battle.ron"
     awk '
-        /^[[:space:]]*fill_up_s:/ {
-            span = $2; sub(/,$/, "", span)
-            # `sub` leaves a string; add zero so the ceiling compares numbers, not text.
+        /^[[:space:]]*fill_up_s[[:space:]]*:/ {
+            span = $0
+            sub(/^[[:space:]]*fill_up_s[[:space:]]*:[[:space:]]*/, "", span)
+            sub(/[[:space:]]*\/\/.*$/, "", span)
+            sub(/,[[:space:]]*$/, "", span)
+            sub(/[[:space:]]*$/, "", span)
+            # Accept only a whole RON number; awk numeric coercion alone turns junk into zero.
+            if (span !~ /^[+]?[0-9]+([.][0-9]+)?([eE][+-]?[0-9]+)?$/) exit 1
             span = span + 0
             print int(span) + (span > int(span)); found = 1; exit
         }
