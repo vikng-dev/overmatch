@@ -11,6 +11,7 @@
 
 use bevy::ecs::system::SystemParam;
 use bevy::prelude::*;
+use bevy::ui::UiSystems;
 
 use bevy::render::render_resource::{AsBindGroup, ShaderType};
 use bevy::shader::ShaderRef;
@@ -125,25 +126,33 @@ pub(super) fn plugin(app: &mut App) {
                 .after(super::toggle_sight)
                 .in_set(GameplaySet)
                 .in_set(InMatchSystems),
-        )
-        // Both reprojections run after the camera's pose is final for the frame, and after
-        // propagation: the graticule anchors on the VIEW gun's own `GlobalTransform` as well as
-        // reprojecting through the camera. Every input is render-rate — the mouse (`intent`,
-        // Update) and that VIEW gun pose (blended by `interpolate_servos` in Update, and what the
-        // gunner camera itself is placed from) — so the reprojections are clean by construction, no
-        // aliasing.
-        .add_systems(
-            PostUpdate,
-            (
-                update_intent_reticle,
-                update_ranging_reticle,
-                update_optic_mask,
-            )
-                .in_set(GameplaySet)
-                .after(TransformSystems::Propagate)
-                .after(GunnerCameraPlaced)
-                .in_set(InMatchSystems),
         );
+    mount_placement(app);
+}
+
+/// Mount the same projection schedule in the client and the headless layout fixture.
+fn mount_placement(app: &mut App) {
+    // Both reprojections run after the camera's pose is final for the frame, and after
+    // propagation: the graticule anchors on the VIEW gun's own `GlobalTransform` as well as
+    // reprojecting through the camera. Every input is render-rate — the mouse (`intent`,
+    // Update) and that VIEW gun pose (blended by `interpolate_servos` in Update, and what the
+    // gunner camera itself is placed from) — so the reprojections are clean by construction, no
+    // aliasing.
+    app.add_systems(
+        PostUpdate,
+        (
+            update_intent_reticle,
+            update_ranging_reticle,
+            update_optic_mask,
+        )
+            .in_set(GameplaySet)
+            .after(TransformSystems::Propagate)
+            .after(GunnerCameraPlaced)
+            // Read this frame's target scale and write positions before this frame's layout.
+            .after(UiSystems::Propagate)
+            .before(UiSystems::Layout)
+            .in_set(InMatchSystems),
+    );
 }
 
 fn spawn_intent_reticle(mut commands: Commands) {
@@ -1306,7 +1315,8 @@ mod tests {
     ///
     /// Mutants: a thickness in `Val::Px` (two rows at 2x, none or two at a fractional scale); the
     /// window's scale without `UiScale`; a camera-logical point written to `Val::Px` unconverted
-    /// (the mark slides off the sight line by the `UiScale` ratio).
+    /// (the mark slides off the sight line by the `UiScale` ratio); stale scale or placement
+    /// ordering (the first layout after a mid-run scale or pose change must already be correct).
     #[test]
     fn every_mark_is_one_physical_pixel_at_every_scale() {
         use crate::settings::UiScalePercent;
@@ -1314,75 +1324,75 @@ mod tests {
 
         /// Window scale factors — fixture data: an ordinary display, two fractional desktop
         /// scalings and a retina 2x.
-        const WINDOW_SCALES: [f32; 4] = [1.0, 1.25, 1.5, 2.0];
+        const WINDOW_SCALES: [f32; 5] = [1.0, 1.25, 1.5, 2.0, 1.0];
         /// Lay poses per scale pair, each this far (rad) in pitch and yaw from the last: about a
         /// quarter of a physical pixel on this fixture's optic, so the marks cross pixel fractions.
         const LAY_POSES: u16 = 8;
         const LAY_STEP: Vec2 = Vec2::new(1.1e-4, 1.7e-4);
         /// Slack (px) on the half-pixel bound for f32 round-off through projection and layout.
         const ROUND_OFF: f32 = 1e-3;
-        /// Frames run after a scale change before measuring: the camera's target info, the UI's
-        /// propagated scale and the layout each follow by up to a frame.
-        const SETTLE_FRAMES: usize = 3;
 
         let ui_scales = [UiScalePercent::MIN, 100, 115, UiScalePercent::MAX]
             .map(|percent| UiScalePercent(percent).factor());
 
-        for window_scale in WINDOW_SCALES {
-            let mut app = App::new();
-            app.add_plugins(crate::gpu_less_default_plugins(Some(Window {
-                resolution: WindowResolution::new(VIEWPORT.x, VIEWPORT.y)
-                    .with_scale_factor_override(window_scale),
+        let mut app = App::new();
+        app.add_plugins(crate::gpu_less_default_plugins(Some(Window {
+            resolution: WindowResolution::new(VIEWPORT.x, VIEWPORT.y)
+                .with_scale_factor_override(1.0),
+            ..default()
+        })))
+        .insert_resource(SightMode::Gunner)
+        .insert_resource(Ranging { range: DIALED })
+        .insert_resource(UiFonts {
+            hud: Handle::default(),
+            body: Handle::default(),
+        })
+        .add_systems(Startup, spawn_ranging_reticle)
+        .init_resource::<CommittedAim>()
+        .init_resource::<Assets<OpticMaskMaterial>>()
+        .add_plugins(mount_placement);
+        // `App::run` normally drives plugin finish/cleanup; a bare `update()` loop must do it.
+        while app.plugins_state() == bevy::app::PluginsState::Adding {
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+        app.finish();
+        app.cleanup();
+
+        let world = app.world_mut();
+        // The camera parks at the gun node looking down −Z; the gun lays away from it.
+        world.spawn((
+            Camera3d::default(),
+            Projection::Perspective(PerspectiveProjection {
+                fov: FOV,
                 ..default()
-            })))
-            .insert_resource(SightMode::Gunner)
-            .insert_resource(Ranging { range: DIALED })
-            .insert_resource(UiFonts {
-                hud: Handle::default(),
-                body: Handle::default(),
-            })
-            .add_systems(Startup, spawn_ranging_reticle)
-            .add_systems(
-                PostUpdate,
-                update_ranging_reticle.after(TransformSystems::Propagate),
-            );
-            // `App::run` normally drives plugin finish/cleanup; a bare `update()` loop must do it.
-            while app.plugins_state() == bevy::app::PluginsState::Adding {
-                std::thread::sleep(std::time::Duration::from_millis(1));
-            }
-            app.finish();
-            app.cleanup();
+            }),
+            Transform::from_translation(GUN),
+            PlayerView,
+        ));
+        let gun = world.spawn(Transform::from_translation(GUN)).id();
+        let muzzle = world.spawn(table()).id();
+        let hull = world.spawn_empty().id();
+        world.spawn((
+            Controlled,
+            Rig {
+                hull,
+                turret: hull,
+                gun,
+                muzzle,
+            },
+        ));
 
+        app.update();
+        for window_scale in WINDOW_SCALES {
             let world = app.world_mut();
-            // The camera parks at the gun node looking down −Z; the gun lays away from it.
-            world.spawn((
-                Camera3d::default(),
-                Projection::Perspective(PerspectiveProjection {
-                    fov: FOV,
-                    ..default()
-                }),
-                Transform::from_translation(GUN),
-                PlayerView,
-            ));
-            let gun = world.spawn(Transform::from_translation(GUN)).id();
-            let muzzle = world.spawn(table()).id();
-            let hull = world.spawn_empty().id();
-            world.spawn((
-                Controlled,
-                Rig {
-                    hull,
-                    turret: hull,
-                    gun,
-                    muzzle,
-                },
-            ));
-
+            world
+                .query::<&mut Window>()
+                .single_mut(world)
+                .unwrap()
+                .resolution
+                .set_scale_factor_override(Some(window_scale));
             for ui_scale in ui_scales {
                 app.insert_resource(UiScale(ui_scale));
-                // Settle the camera's target info and the nodes' propagated scale before measuring.
-                for _ in 0..SETTLE_FRAMES {
-                    app.update();
-                }
                 for pose in 0..LAY_POSES {
                     let lay = LAY_STEP * f32::from(pose);
                     app.world_mut().entity_mut(gun).insert(Transform {
@@ -1390,9 +1400,7 @@ mod tests {
                         rotation: Quat::from_rotation_y(lay.x) * Quat::from_rotation_x(lay.y),
                         ..default()
                     });
-                    // One frame places the marks against this pose (after layout), the next lays
-                    // them out.
-                    app.update();
+                    // The first frame after changing scale and pose must already lay out correctly.
                     app.update();
 
                     let world = app.world_mut();
