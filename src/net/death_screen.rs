@@ -467,6 +467,7 @@ mod tests {
         world.insert_resource(Time::<Fixed>::default());
         world.insert_resource(ButtonInput::<KeyCode>::default());
         world.insert_resource(Overlays::default());
+        world.resource_mut::<Overlays>().declare_in_match(true);
         world.insert_resource(UiFonts {
             hud: Handle::default(),
             body: Handle::default(),
@@ -519,6 +520,7 @@ mod tests {
             world.insert_resource(Time::<Fixed>::default());
             world.insert_resource(ButtonInput::<KeyCode>::default());
             world.insert_resource(Overlays::default());
+            world.resource_mut::<Overlays>().declare_in_match(true);
             world.insert_resource(UiFonts {
                 hud: Handle::default(),
                 body: Handle::default(),
@@ -561,6 +563,41 @@ mod tests {
                 "the menu status supplies the way out"
             );
         }
+    }
+
+    /// The game's damage model: the player's first R edge starts a wait; another edge cannot extend its retry deadline.
+    #[test]
+    fn pending_request_refuses_another_edge_without_extending_its_deadline() {
+        use bevy::ecs::system::RunSystemOnce;
+        let mut world = World::new();
+        world.insert_resource(Time::<()>::default());
+        world.insert_resource(Time::<Fixed>::default());
+        world.insert_resource(ButtonInput::<KeyCode>::default());
+        world.insert_resource(Overlays::default());
+        world.resource_mut::<Overlays>().declare_in_match(true);
+        world.insert_resource(AwaitingRespawn::default());
+        let own = world
+            .spawn((
+                Controlled,
+                TankKnockedOut {
+                    reason: crate::damage::KnockoutReason::CrewLoss,
+                },
+                TankCommand::default(),
+            ))
+            .id();
+        world
+            .resource_mut::<ButtonInput<KeyCode>>()
+            .press(RESPAWN_KEY);
+        world.run_system_once(request_respawn).unwrap();
+        assert!(world.get::<TankCommand>(own).unwrap().respawn);
+        let deadline = world.resource::<AwaitingRespawn>().deadline;
+        world.get_mut::<TankCommand>(own).unwrap().respawn = false;
+        world
+            .resource_mut::<Time>()
+            .advance_by(std::time::Duration::from_secs(1)); // Fixture within the retry horizon.
+        world.run_system_once(request_respawn).unwrap();
+        assert!(!world.get::<TankCommand>(own).unwrap().respawn);
+        assert_eq!(world.resource::<AwaitingRespawn>().deadline, deadline);
     }
 
     fn awaiting(active: bool, deadline: f64) -> AwaitingRespawn {
