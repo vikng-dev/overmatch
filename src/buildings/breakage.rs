@@ -78,9 +78,9 @@ use std::sync::Arc;
 
 use avian3d::collider_tree::{ColliderTrees, update_moved_collider_aabbs};
 use avian3d::prelude::{
-    AngularVelocity, Collider, ColliderAabb, ColliderDensity, ColliderOf, CollisionLayers, Forces,
-    LinearVelocity, Position, ReadRigidBodyForces, RigidBody, Rotation, SpatialQuery,
-    SpatialQueryFilter, WriteRigidBodyForces,
+    AngularVelocity, Collider, ColliderAabb, ColliderOf, CollisionLayers, Forces, LinearVelocity,
+    Position, ReadRigidBodyForces, RigidBody, Rotation, SpatialQuery, SpatialQueryFilter,
+    WriteRigidBodyForces,
 };
 
 use bevy::math::DVec3;
@@ -99,17 +99,15 @@ use crate::ballistics::{
     SpallMarks,
 };
 use crate::contact_transfer::{ContactTransfer, ContactTransfers};
-use crate::debris::launch::{BodyReturn, Launch, LaunchPlugin, PendingLaunch, launch_colliders};
+use crate::debris::launch::{
+    BodyReturn, Launch, LaunchPlugin, PendingLaunch, launch_colliders, occupied_mass,
+};
 use crate::scatter::MapInstance;
 use crate::{ClientReplica, Layer, ShotClock};
 
 /// How far a field ray's stop may sit from the chunk face that stops it and still be that chunk's,
 /// m: the f32 rounding of a stop the walk computed against the same face, many times over.
 const STOP_TOLERANCE_M: f32 = 0.01;
-
-/// How far a loose chunk's collider falls short of its hull on every side, m, so a group freed in
-/// place does not start inside its standing neighbours (Resolution).
-const LOOSE_GAP_M: f32 = 0.005;
 
 /// Grade in the building frame, m: the plane the building stands on (a building spawns with its
 /// frame's origin on the ground, its foundation below). A chunk wholly below it is buried.
@@ -1943,20 +1941,33 @@ pub(crate) fn run_laws(
     }
 }
 
-/// A law chunk's collider shape for an instance at `scale`, about `origin` (building frame,
-/// scaled), its faces moved in by `gap` m. The layout certified every law chunk's hull as a
-/// solid convex collider at load; a positive uniform scale and a shrink toward its mean of at
-/// most 80 % keep it one.
-pub(crate) fn chunk_collider(
-    kind: &BuildingKind,
-    c: usize,
-    scale: f32,
-    origin: Vec3,
-    gap: f32,
-) -> Collider {
-    let block = &kind.layout.blocks[c];
+/// A law chunk's whole hull as a collider for an instance at `scale`, about `origin` (building
+/// frame, scaled): its occupied volume, so its mass and inertia at its material's density are the
+/// construction's. The layout certified the hull as a solid convex collider at load; a positive
+/// uniform scale keeps it one.
+pub(crate) fn chunk_collider(kind: &BuildingKind, c: usize, scale: f32, origin: Vec3) -> Collider {
+    Collider::convex_hull(
+        kind.layout.blocks[c]
+            .points
+            .iter()
+            .map(|p| *p * scale - origin)
+            .collect(),
+    )
+    .expect("a load-certified hull at a positive scale stays a solid convex hull")
+}
+
+/// How far a freed chunk's contact hull stands inside its whole hull, m (Resolution). A chunk freed
+/// in place touches its neighbours, and at zero separation the solver's contact normal is rounding
+/// noise. MEASURED on the shipped house, 11 sampled releases: with no gap 3 took kicks of up to
+/// 5.5 cm and 0.22 J/kg from nothing; at 1 mm none gained energy, 1 km from the origin as well.
+const LOOSE_GAP_M: f32 = 1e-3;
+
+/// The hull a freed chunk meets contacts with, `block` at `scale` about `origin`, every face at
+/// least [`LOOSE_GAP_M`] inside the whole hull. Only contact reads it: mass and inertia stay the
+/// whole hull's ([`occupied_mass`]). A shrink toward the mean of at most 80 % stays a solid hull.
+pub(crate) fn loose_collider(block: &Block, scale: f32, origin: Vec3) -> Collider {
     let middle = block.points.iter().sum::<Vec3>() / block.points.len().max(1) as f32;
-    let shrink = (1.0 - gap / (block.inradius() * scale).max(1e-6)).max(0.2);
+    let shrink = (1.0 - LOOSE_GAP_M / (block.inradius() * scale).max(1e-6)).max(0.2);
     Collider::convex_hull(
         block
             .points
@@ -2010,7 +2021,7 @@ pub(crate) fn launch(
         / mass;
     let colliders: Vec<(usize, Collider)> = group
         .iter()
-        .map(|&c| (c, chunk_collider(kind, c, scale, centroid, LOOSE_GAP_M)))
+        .map(|&c| (c, chunk_collider(kind, c, scale, centroid)))
         .collect();
     launch_colliders(centroid, colliders, |c| chunks[c].material.density, loads)
 }
@@ -2078,7 +2089,8 @@ fn spawn_group(commands: &mut Commands, departure: Departure, finalize: bool) {
         mass,
         ..
     } = &launch;
-    let at = root.translation + root.rotation * *centroid;
+    let origin = *centroid;
+    let at = root.translation + root.rotation * origin;
     let mut elements: Vec<&str> = group
         .iter()
         .map(|&c| {
@@ -2109,7 +2121,7 @@ fn spawn_group(commands: &mut Commands, departure: Departure, finalize: bool) {
             kind: kind.clone(),
             scale,
             live: Some(Box::new(live)),
-            origin: *centroid,
+            origin,
         },
         Transform::from_translation(at).with_rotation(root.rotation),
         Position(at),
@@ -2124,11 +2136,11 @@ fn spawn_group(commands: &mut Commands, departure: Departure, finalize: bool) {
         piece.insert(PendingLaunch::new(root, launch));
     }
     piece.with_children(|parent| {
-        for (c, collider) in colliders {
+        for (c, hull) in colliders {
             parent.spawn((
                 Transform::IDENTITY,
-                collider,
-                ColliderDensity(kind.layout.materials[c].density),
+                loose_collider(&kind.layout.blocks[c], scale, origin),
+                occupied_mass(&hull, kind.layout.materials[c].density),
                 piece_layers(),
                 kind.chunk_friction(c),
                 chunk_volume(&kind, c),
@@ -2321,7 +2333,7 @@ fn reconcile(
                     commands.spawn((
                         ChildOf(root),
                         Transform::IDENTITY,
-                        chunk_collider(kind, c, breakage.scale, Vec3::ZERO, 0.0),
+                        chunk_collider(kind, c, breakage.scale, Vec3::ZERO),
                         super::element_layers(),
                         kind.chunk_friction(c),
                         chunk_volume(kind, c),

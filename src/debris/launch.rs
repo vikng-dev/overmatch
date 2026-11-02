@@ -52,6 +52,20 @@ pub(crate) struct Launch {
     pub(crate) exchanges: Vec<(Load, Vec3)>,
 }
 
+/// What a collider contributes to its body's mass, inertia and centre: the occupied `hull`'s at
+/// `density`, whatever shape the collider itself meets contacts with.
+pub(crate) fn occupied_mass(hull: &Collider, density: f32) -> (Mass, AngularInertia, CenterOfMass) {
+    let props = hull.mass_properties(density);
+    (
+        Mass(props.mass),
+        AngularInertia::new_with_local_frame(
+            props.principal_angular_inertia,
+            props.local_inertial_frame,
+        ),
+        CenterOfMass(props.center_of_mass),
+    )
+}
+
 /// The shared free-body launch, from the exact occupied colliders in a frame about `centroid`.
 /// Material density supplies mass; each load transfers its field impulse or plastic body share.
 pub(crate) fn launch_colliders(

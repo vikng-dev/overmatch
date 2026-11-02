@@ -41,8 +41,7 @@ mod model;
 mod tests;
 
 use avian3d::prelude::{
-    AngularVelocity, Collider, ColliderDensity, CollisionLayers, LayerMask, LinearVelocity,
-    RigidBody,
+    AngularVelocity, Collider, CollisionLayers, LayerMask, LinearVelocity, RigidBody,
 };
 use bevy::asset::RenderAssetUsages;
 use bevy::ecs::system::SystemParam;
@@ -78,9 +77,6 @@ const STANDOFFS: [f32; 6] = [0.0, 0.5, 1.0, 2.0, 3.0, 5.0];
 const BURST: usize = 50;
 /// How far the drawn chunk falls short of its collider on every side, m: the drawn seam.
 const SEAM: f32 = 0.004;
-/// How far a loose chunk's collider falls short of its box on every side, m, so a group freed in
-/// place does not start inside its standing neighbours.
-const LOOSE_GAP: f32 = 0.005;
 /// The witness panel: its distance behind the back face (past the back view's camera), its tile
 /// size and count (m, m, x × y).
 const WITNESS_GAP: f32 = 4.4;
@@ -747,11 +743,11 @@ fn inset(block: &Block, gap: f32) -> impl Fn(Vec3) -> Vec3 {
     move |p| middle + (p - middle) * scale - centre
 }
 
-/// A convex collider of `block` with every face moved in by `gap` m, about its bounding box's
-/// centre.
-fn chunk_collider(block: &Block, gap: f32) -> Collider {
-    let inset = inset(block, gap);
-    Collider::convex_hull(block.points.iter().map(|p| inset(*p)).collect())
+/// A convex collider of `block`'s whole hull, about its bounding box's centre: its occupied
+/// volume, so its mass and inertia at the brick's density are the cut's.
+fn chunk_collider(block: &Block) -> Collider {
+    let centre = block.center();
+    Collider::convex_hull(block.points.iter().map(|p| *p - centre).collect())
         .expect("a bake chunk has volume")
 }
 
@@ -766,7 +762,7 @@ fn spawn_wall(commands: &mut Commands, meshes: &mut Assets<Mesh>, assets: &WallA
     for (index, block) in cut.blocks.iter().enumerate() {
         let mesh = meshes.add(chunk_mesh(block));
         chunk_meshes.push(mesh.clone());
-        let collider = chunk_collider(block, 0.0);
+        let collider = chunk_collider(block);
         entities.push(Some(
             commands
                 .spawn((
@@ -1210,7 +1206,7 @@ fn apply_deposit(
                     Collider::compound(vec![(
                         block.center() - centroid,
                         Quat::IDENTITY,
-                        chunk_collider(block, LOOSE_GAP),
+                        chunk_collider(block),
                     )]),
                 )
             })
@@ -1326,8 +1322,11 @@ fn apply_deposits(mut p: ApplyParam) {
                             Mesh3d(wall.meshes[chunk].clone()),
                             MeshMaterial3d(tint.clone()),
                             Transform::from_translation(block.center() - *centroid),
-                            chunk_collider(block, LOOSE_GAP),
-                            ColliderDensity(wall.material.density),
+                            crate::buildings::breakage::loose_collider(block, 1.0, block.center()),
+                            crate::debris::launch::occupied_mass(
+                                &chunk_collider(block),
+                                wall.material.density,
+                            ),
                             crate::substances::contact_friction(wall.material.friction),
                             CollisionLayers::new(
                                 [Layer::Default],

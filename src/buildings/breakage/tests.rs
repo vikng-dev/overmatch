@@ -3851,3 +3851,143 @@ fn a_marched_line_keeps_carrier_work_and_bend_at_entry() {
         }
     }
 }
+
+/// `group` freed where it stood in a composed house `offset` from the origin, its neighbours still
+/// standing and gravity on (fixture 9.81 m/s²): the app, and the body the launch expects, as mass,
+/// inertia and centre about the collider frame.
+fn freed_in_place(group: &[usize], offset: Vec3) -> (App, (f32, Mat3, Vec3)) {
+    let kind = shipped_house();
+    let (mut app, root) = composed(false);
+    app.insert_resource(Gravity(Vec3::NEG_Y * 9.81));
+    app.world_mut()
+        .get_mut::<Transform>(root)
+        .unwrap()
+        .translation = offset;
+    for _ in 0..2 {
+        app.update();
+    }
+    let live = {
+        let mut fixed = app.world_mut().get_mut::<Breakage>(root).unwrap();
+        let live = fixed.live();
+        for &c in group {
+            live.state.fate[c] = Fate::Fallen;
+            live.swapped[usize::from(kind.layout.element_of[c])] = true;
+        }
+        live.clone()
+    };
+    for _ in 0..2 {
+        app.update();
+    }
+    let piece_live = live.group(group);
+    let launched = launch(&kind, &piece_live.structure, 1.0, group, &[]);
+    let body = (
+        launched.mass,
+        launched.inertia,
+        launched.centre - launched.centroid,
+    );
+    let world = app.world_mut();
+    let mut queue = bevy::ecs::world::CommandQueue::default();
+    let mut commands = Commands::new(&mut queue, world);
+    spawn_group(
+        &mut commands,
+        Departure {
+            kind,
+            group: group.to_vec(),
+            root: Transform::from_translation(offset),
+            live: piece_live,
+            scale: 1.0,
+            tick: 0,
+            building: 3,
+            launch: launched,
+        },
+        false,
+    );
+    queue.apply(world);
+    (app, body)
+}
+
+/// A FREED CHUNK MOVES AS THE MATERIAL IT OCCUPIES (the game's environment destruction model). The
+/// launch holds the mass the structure's weight law carried, and the spawned body holds the
+/// launch's mass, inertia and centre, so a blow leaves the velocity its load computed. A mutant
+/// reading any of them off the contact hull fails; a 5 mm inset read 0.51 to 0.87 of the structure's
+/// mass (MEASURED, shipped house). The two chunks are fixture data.
+#[test]
+fn a_freed_chunk_moves_as_the_material_it_occupies() {
+    let kind = shipped_house();
+    let structure = kind.layout.structure(&kind.asset, 1.0);
+    for c in 0..kind.layout.chunks.len() {
+        let mass = launch(&kind, &structure, 1.0, &[c], &[]).mass;
+        let ratio = mass / structure.chunks[c].mass;
+        assert!(
+            (ratio - 1.0).abs() < 1e-3,
+            "chunk {c}: launch/structure mass {ratio}"
+        );
+    }
+    let (_, [c, other, _]) = fixture_chunks(&kind);
+    let (mut app, (mass, inertia, centre)) = freed_in_place(&[c, other], Vec3::ZERO);
+    app.update();
+    let mut bodies = app.world_mut().query_filtered::<(
+        &ComputedMass,
+        &ComputedAngularInertia,
+        &ComputedCenterOfMass,
+    ), With<WallPiece>>();
+    let (body_mass, body_inertia, body_centre) = bodies.single(app.world()).unwrap();
+    assert!((body_mass.value() / mass - 1.0).abs() < 1e-3);
+    let largest = |m: Mat3| {
+        m.to_cols_array()
+            .map(f32::abs)
+            .into_iter()
+            .fold(0.0, f32::max)
+    };
+    assert!(largest(body_inertia.tensor().to_mat3() - inertia) < 1e-3 * largest(inertia));
+    assert!((body_centre.0 - centre).length() < 1e-3);
+}
+
+/// A CHUNK FREED IN PLACE TAKES NO ENERGY FROM ITS NEIGHBOURS (the game's environment destruction
+/// model). It touched them standing, so the first contact must not resolve that touch as a blow:
+/// kinetic energy stays under gravity's work on it, tick by tick, at the origin and where f32
+/// rounding of a position is coarse. Contact on the whole hull fails: MEASURED +0.22 J/kg and a
+/// 5.5 cm kick. Fixture: the middle chunk of every eighth breakable element.
+#[test]
+fn a_chunk_freed_in_place_takes_no_energy_from_its_neighbours() {
+    let kind = shipped_house();
+    let layout = &kind.layout;
+    let structure = layout.structure(&kind.asset, 1.0);
+    let elements: Vec<usize> = (0..layout.elements.len())
+        .filter(|&e| !layout.chunks_of(e).is_empty())
+        .collect();
+    for e in elements.iter().step_by(elements.len().div_ceil(8)) {
+        let chunks = layout.chunks_of(*e);
+        let c = chunks.start + chunks.len() / 2;
+        // No release frees a chunk the soil holds.
+        if structure.chunks[c].buried {
+            continue;
+        }
+        for offset in [Vec3::ZERO, Vec3::splat(1000.0)] {
+            let (mut app, (mass, inertia, _)) = freed_in_place(&[c], offset);
+            let start_height = offset.y + structure.chunks[c].centroid.y;
+            for tick in 0..128 {
+                app.update();
+                let mut bodies = app.world_mut().query_filtered::<(
+                    &Position,
+                    &Rotation,
+                    &LinearVelocity,
+                    &AngularVelocity,
+                ), With<WallPiece>>();
+                let (at, turn, velocity, spin) = bodies
+                    .single(app.world())
+                    .unwrap_or_else(|e| panic!("chunk {c} at {offset}, tick {tick}: {e}"));
+                let turn = Mat3::from_quat(turn.0);
+                let kinetic = 0.5 * mass * velocity.0.length_squared()
+                    + 0.5 * spin.0.dot(turn * inertia * turn.transpose() * spin.0);
+                // The height's own f32 rounding bounds how well gravity's work is known.
+                let rounding = f32::EPSILON * start_height.abs().max(1.0);
+                let work = mass * 9.81 * (start_height - at.0.y + rounding);
+                assert!(
+                    kinetic <= work,
+                    "chunk {c} at {offset}, tick {tick}: {kinetic} J from {work} J of gravity"
+                );
+            }
+        }
+    }
+}

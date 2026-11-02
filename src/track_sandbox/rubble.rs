@@ -136,7 +136,7 @@ pub(super) fn spawn_rubble_yard(
         ))
         .id();
     for &c in &wall_chunks {
-        let collider = chunk_collider(&kind, c, 1.0, Vec3::ZERO, 0.0);
+        let collider = chunk_collider(&kind, c, 1.0, Vec3::ZERO);
         commands.spawn((
             ChildOf(wall_root),
             Transform::IDENTITY,
@@ -171,7 +171,7 @@ pub(super) fn spawn_rubble_yard(
     );
     for (i, &c) in pieces.iter().enumerate() {
         let centroid = structure.chunks[c].centroid;
-        let collider = chunk_collider(&kind, c, 1.0, centroid, 0.0);
+        let collider = chunk_collider(&kind, c, 1.0, centroid);
         let (row, col, layer) = (
             i % PILE_ROW,
             (i / PILE_ROW) % PILE_ROW,

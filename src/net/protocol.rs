@@ -267,7 +267,9 @@ use crate::{CombatantId, CombatantLife, ShotId};
 /// by physical footprint rather than arrival alone.
 /// REV 76 (#146, driving model): the brake law removes the hill-hold latch; a reversal counts its
 /// hold at rest.
-pub const PROTOCOL_REV: u32 = 76;
+/// REV 77 (the game's environment destruction model): a freed piece carries its whole hull's mass
+/// and meets contacts on a hull 1 mm inside it.
+pub const PROTOCOL_REV: u32 = 77;
 
 /// Compatibility tag derived from the complete pinned wire manifest plus the crate version. This
 /// is the runtime handshake value: version-exact, so a version bump intentionally changes it.

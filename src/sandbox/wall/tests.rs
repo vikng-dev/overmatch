@@ -693,6 +693,24 @@ fn the_sandbox_chunk_outlives_the_hole_cap() {
     assert_eq!(wall.live.holes[c].len(), HOLES_PER_CHUNK);
 }
 
+/// A freed sandbox chunk launches with the mass the weight law carried: the launch reads this
+/// hull, so a contact inset fed to it would fly every freed chunk too fast for its blow.
+#[test]
+fn the_sandbox_launch_reads_the_chunk_the_structure_weighed() {
+    use avian3d::dynamics::rigid_body::mass_properties::bevy_heavy::ComputeMassProperties3d;
+    let cut = &layout().cut;
+    for (c, chunk) in cut.structure.chunks.iter().enumerate() {
+        let mass = super::chunk_collider(&cut.blocks[c])
+            .mass_properties(chunk.material.density)
+            .mass;
+        let ratio = mass / chunk.mass;
+        assert!(
+            (ratio - 1.0).abs() < 1e-3,
+            "chunk {c}: launch/structure mass {ratio}"
+        );
+    }
+}
+
 /// The game's damage-model inspector preserves resolved momentum and entrance work even when
 /// no muzzle speed identifies the round. The observer, shared load owner and hole reader must
 /// agree. All geometry, work and momentum below are fixture data.
