@@ -28,6 +28,7 @@ encode may bypass the encoder whose failure the refusal case injects.
 import hashlib
 import json
 import os
+import re
 import shutil
 import stat
 import struct
@@ -755,6 +756,32 @@ class RustReportChannel(unittest.TestCase):
                 self.assertIn("L2.SPEC", envelopes[0])
                 self.assertIn(spec, envelopes[0])
                 self.assertIn(envelopes[0] + report.REPORT_PREFIX, output)
+
+
+class FixtureAdmission(unittest.TestCase):
+    """Generated assets cross the ordinary door; temporary files get no test-label exemption."""
+
+    def test_file_backed_fixture_provenance_is_refused_at_canon(self):
+        blend = trio("fixture-provenance")
+        spec = os.path.splitext(blend)[0] + ".tank.ron"
+        command = asset_door.contract(asset_door.registry_of(blend), "--canon", spec)
+        clean = subprocess.run(command, cwd=ROOT, text=True, capture_output=True)
+        self.assertEqual(clean.returncode, 0, clean.stderr)
+        self.assertTrue(json.loads(clean.stdout)["spec_validates"], clean.stdout)
+        with open(spec, encoding="utf-8") as handle:
+            sheet = handle.read()
+        sheet, changed = re.subn(
+            r'(link_mass:\s*\([^,]+,\s*)[A-Za-z]+\("[^"]*"\)',
+            r'\g<1>Fixture("inline fixture data")', sheet, count=1,
+        )
+        self.assertEqual(changed, 1, "the mutation must reach the assembly field's provenance")
+        with open(spec, "w", encoding="utf-8") as handle:
+            handle.write(sheet)
+        refused = subprocess.run(command, cwd=ROOT, text=True, capture_output=True)
+        self.assertEqual(refused.returncode, 1, refused.stdout + refused.stderr)
+        self.assertEqual(refused.stdout, "", "a refusal must not pollute canon.json")
+        for evidence in (spec, "Fixture provenance is test-only", "replace this field's label"):
+            self.assertIn(evidence, refused.stderr)
 
 
 class RefusalsLeaveTheModelAlone(unittest.TestCase):

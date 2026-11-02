@@ -19,6 +19,10 @@ and the texture derivation finds a colour map, a normal map and a data map to ba
 which is what makes the derivation's role, transfer and tangent laws apply to it at all. Nothing
 here is Tiger-shaped — the door is generic, so its fixture is a second vehicle.
 
+The admission sheet states a nominal construction. Its sourced masses and inertias are `Derived`
+from the design inputs in their notes. `Fixture` is reserved for inline Rust test data; the ordinary
+door refuses it in files, including this generated sheet.
+
 `--defect` builds the same trio with exactly one thing wrong, which is how the suite proves that a
 refusal at each stage leaves the tracked glb untouched.
 """
@@ -52,9 +56,8 @@ SUBSTANCES = ("RHA", "MildSteel", "Flesh")
 
 SPEC = """\
 #![enable(implicit_some)]
-// The synthetic tank the asset door's end-to-end suite is run against. Every number is a nominal
-// value `TankSpec::validate` accepts, because none of them is what is under test: the door is,
-// and the door needs a sheet that parses, validates, and names real nodes.
+// Nominal construction for the asset door. The sourced assembly fields state their design inputs
+// and derivations; this generated sheet crosses the ordinary, non-test admission boundary.
 TankSpec(
     display_name: "Testbed",
     mass: 1000.0,
@@ -64,11 +67,11 @@ TankSpec(
         pin_plane_x: (left: -1.0, right: 1.0),
         substance: "RHA",
         link_count: 8,
-        link_mass: (10.0, Unknown("synthetic assembly; no physical vehicle to measure")),
+        link_mass: (10.0, Derived("nominal link design: 20 kg/m linear mass x 0.5 m length = 10 kg")),
         hinge_torque: 1.0,
         link_angle: (inward_deg: 40.0, outward_deg: 10.0),
-        sprocket: (spin_inertia_kgm2: ((left: 4.0, right: 4.0), Unknown("synthetic rotating assemblies")), tooth_tip_rad: (left: 0.0, right: 0.0), teeth: 9, nodes: (left: "Sprocket_L", right: "Sprocket_R")),
-        idler: (spin_inertia_kgm2: ((left: 4.0, right: 4.0), Unknown("synthetic rotating assemblies")), radius: (left: 0.5, right: 0.5), nodes: (left: "Idler_L", right: "Idler_R")),
+        sprocket: (spin_inertia_kgm2: ((left: 4.0, right: 4.0), Derived("nominal rotating design: two 8 kg point masses at 0.5 m from the axis; I = sum(m*r^2) = 4 kg m^2")), tooth_tip_rad: (left: 0.0, right: 0.0), teeth: 9, nodes: (left: "Sprocket_L", right: "Sprocket_R")),
+        idler: (spin_inertia_kgm2: ((left: 4.0, right: 4.0), Derived("nominal rotating design: two 8 kg point masses at 0.5 m from the axis; I = sum(m*r^2) = 4 kg m^2")), radius: (left: 0.5, right: 0.5), nodes: (left: "Idler_L", right: "Idler_R")),
         powertrain: (
             transmission: (
                 engine: (
@@ -119,8 +122,8 @@ TankSpec(
     colliders: [(node: "Hull_Collider", substance: "RHA")],
     shadow_proxies: [],
     roadwheels: [
-        (node: "Wheel_L", side: Left, spin_inertia_kgm2: (8.0, Unknown("synthetic wheel assembly")), tread: (radius: 0.5, spans: [(-0.5, 0.5)])),
-        (node: "Wheel_R", side: Right, spin_inertia_kgm2: (8.0, Unknown("synthetic wheel assembly")), tread: (radius: 0.5, spans: [(-0.5, 0.5)])),
+        (node: "Wheel_L", side: Left, spin_inertia_kgm2: (8.0, Derived("nominal rotating design: two 16 kg point masses at 0.5 m from the axis; I = sum(m*r^2) = 8 kg m^2")), tread: (radius: 0.5, spans: [(-0.5, 0.5)])),
+        (node: "Wheel_R", side: Right, spin_inertia_kgm2: (8.0, Derived("nominal rotating design: two 16 kg point masses at 0.5 m from the axis; I = sum(m*r^2) = 8 kg m^2")), tread: (radius: 0.5, spans: [(-0.5, 0.5)])),
     ],
     weapons: {},
     views: {},
