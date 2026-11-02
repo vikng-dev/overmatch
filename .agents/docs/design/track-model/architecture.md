@@ -493,8 +493,14 @@ law on the same main/supply-law baseline: sand and mud's earlier recorded gears 
 under this protocol, so their shift is not attributed to the surface-normal fix. Both current
 entry protocols end with scheduler `Normal` and hill hold false. The sand rolling-entry spread
 is 0.003994 m/s over the final second; every other final-second spread is at most 0.000023 m/s.
-The launch/entry dependence belongs to a scheduler investigation; the hill-hold release remains
-the owner's call. The lane preserves the landed supply scaling in `drive_target` and
+The from-rest F1 hold is the upshift landing gate in `transmission::run_shift_decision`, MEASURED
+headless on the fixture of `headless_test::a_tank_leaves_first_gear_from_rest_on_a_soft_ground`
+(friction 0.4, rolling resistance 0.12) with the scheduler's inputs printed each tick: pinned in F1
+at 0.6717 m/s (2591 rpm, past the 2300 rpm up band), the shift-landing predictor, charging the
+33.6 kN a side of rolling resistance whole, lands F2 at 0.3617 m/s, 908 rpm, under the gate's fixed
+`shift_down_rpm + POSTSHIFT_MARGIN_RPM` of 1300 rpm, although F2's modelled full-throttle reserve
+at that landing is 264 kN against a 19 kN margin; a rolling entry never meets that gate, because
+no downshift consults it. The hill-hold release remains the owner's call. The lane preserves the landed supply scaling in `drive_target` and
 `transmission::step`. The step's interruption/dwell countdown is extracted without a behavior
 change to keep it below clippy's function-length limit. No wire type changes.
 

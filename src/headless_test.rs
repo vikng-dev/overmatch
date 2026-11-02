@@ -865,6 +865,9 @@ fn full_throttle_reaches_and_holds_the_governed_top_speed() {
 /// this headless measurement. Fixture: the shipped vehicle on uniform flat ground, 40 s throttle,
 /// last-second mean, both from rest and from a data-derived governed-speed/top-gear entry.
 /// The two entries expose scheduler path dependence; no per-vehicle speed expectation is encoded.
+/// FIXTURE acceptance for steady: the last second's spread within 1 % of the vehicle's governed
+/// top speed, the bound the governed-top-speed test holds the lossless ground to. A ground or
+/// scheduler that leaves the tank hunting between gears or surging fails it.
 #[test]
 fn contact_law_shipped_ground_speeds() {
     for (name, ground) in crate::ground_types::GroundTypes::load_shipped().types {
@@ -952,8 +955,73 @@ fn contact_law_shipped_ground_speeds() {
                 sum / FIXED_TICKS_PER_SECOND as f32,
                 max - min
             );
+            let governed = app
+                .world()
+                .resource::<crate::track::sim::TrackGear>()
+                .trans()
+                .governed_speed(false);
+            assert!(
+                max - min <= 0.01 * governed,
+                "ground {name} (rolling_start={rolling_start}) must drive steadily: F{gear}, \
+                 spread {:.6} m/s over the last second",
+                max - min
+            );
         }
     }
+}
+
+/// From rest at full throttle, the automatic box must leave its first gear on a soft ground
+/// whose rolling resistance the second gear out-pulls where the shift window lands: a tank
+/// stopped on soft ground must drive off at more than its first gear's crawl. The scheduler's
+/// upshift landing gate demands a fixed rpm band in the next gear (`shift_down_rpm +
+/// POSTSHIFT_MARGIN_RPM`) at the end of a window that charges the rolling resistance whole, so
+/// it refuses the shift whatever the next gear can pull, and the tank holds first gear at its
+/// governed speed (`.agents/docs/design/track-model/architecture.md` §5a has the MEASURED
+/// inputs). FIXTURE DATA: friction 0.4 and rolling resistance 0.12, a soft ground's scale; the
+/// 5 s acceptance is several times the first gear's run to its governed speed (MEASURED about
+/// 0.9 s on this fixture).
+#[test]
+#[ignore = "the from-rest soft-ground upshift: the drive-control redesign settles it (#146)"]
+fn a_tank_leaves_first_gear_from_rest_on_a_soft_ground() {
+    let (mut app, tank) = booted_offline_sim();
+    {
+        let mut track = app
+            .world_mut()
+            .resource_mut::<crate::track::terrain::TrackField>();
+        let field = track.field.take().expect("boot builds terrain");
+        track.field = Some(
+            field.with_ground(Some(crate::ground_field::GroundField::uniform(
+                crate::ground_field::ContactGround {
+                    friction: 0.4,
+                    rolling_resistance: 0.12,
+                },
+            ))),
+        );
+    }
+    face_positive_z(&mut app, tank);
+    let mut gear = 1;
+    for _ in 0..5 * FIXED_TICKS_PER_SECOND {
+        drive_tick(&mut app, tank, 1.0, 0.0);
+        gear = app
+            .world()
+            .get::<crate::track::sim::TankTransmission>(tank)
+            .expect("tank carries transmission state")
+            .0
+            .gear;
+        if gear > 1 {
+            break;
+        }
+    }
+    let speed = app
+        .world()
+        .get::<avian3d::prelude::LinearVelocity>(tank)
+        .expect("tank has linear velocity")
+        .0
+        .length();
+    assert!(
+        gear > 1,
+        "5 s of full throttle from rest must leave first gear (F{gear} at {speed:.4} m/s)"
+    );
 }
 
 /// A parked hull's roll kick must decay rather than sustain a side-swap limit cycle. Drivers
