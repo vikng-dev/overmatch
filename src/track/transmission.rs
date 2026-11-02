@@ -1263,7 +1263,7 @@ fn update_steer_detent(st: &mut TransmissionState, steer: f32) {
 /// a neutral turn. A released tank below first gear's idle speed stops and parks.
 fn update_park_latch(st: &mut TransmissionState, tp: &TransmissionParams, inp: &TransmissionInput) {
     // The game's damage model: an unstaffed station retains the player's lever position.
-    if !inp.supply.control_authority || inp.supply.task_rate == 0.0 {
+    if !inp.supply.control_authority {
         return;
     }
     let speed = inp.speeds[0].abs().max(inp.speeds[1].abs());

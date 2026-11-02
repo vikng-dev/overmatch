@@ -2859,3 +2859,47 @@ fn reversal_beyond_brake_capacity_refuses_the_direction_cut() {
     assert!(speed < -PARK_ENGAGE_SPEED);
     assert!(state.reversal_hold_ticks > 0);
 }
+
+/// The game's driving and damage model: a staffed Driver retains the park lever when
+/// either powertrain HP pool is emptied. Players can stop a coast and hold at rest.
+#[test]
+fn staffed_zero_rate_stops_and_parks_without_engine_work() {
+    for (fp, tp) in [(lab_fp(), lab_tp()), (grade_fixture_fp(), tiger_tp())] {
+        for engine_empty in [false, true] {
+            let supply = DriveSupply {
+                task_rate: 0.0,
+                engine_condition: if engine_empty { 0.0 } else { 1.0 },
+                transmission_condition: if engine_empty { 1.0 } else { 0.0 },
+                ..DriveSupply::WHOLE
+            };
+            // Fixture: coast up a supported ten-degree slope with the lever released.
+            let grade = fp.grip.unwrap().side_weight * 10.0_f32.to_radians().sin();
+            let mut state = TransmissionState {
+                omega_e: 0.0,
+                ..fresh(&tp)
+            };
+            let mut speed = 3.0;
+            for _ in 0..64 * 10 {
+                let mut inp = input(0.0, 0.0, [speed; 2], [grade; 2]);
+                inp.supply = supply;
+                speed = step(&fp, &tp, &mut state, &inp).next_speeds[0];
+            }
+            assert!(state.park, "staffing, not task throughput, owns park");
+            assert!(speed.abs() < 1e-5, "released coast must stop: {speed}");
+            for command in [-1.0, 1.0] {
+                // Fixture: either retained direction at rest.
+                state = TransmissionState {
+                    omega_e: 0.0,
+                    ..fresh(&tp)
+                };
+                // Fixture: above dynamic capacity but below static breakaway.
+                let grade = tp.brake_capacity_n * (1.0 + tp.brake_static_factor) * 0.5;
+                let mut inp = input(command, 0.0, [0.0; 2], [grade; 2]);
+                inp.supply = supply;
+                let report = step(&fp, &tp, &mut state, &inp);
+                assert!(state.park);
+                assert!(report.next_speeds.iter().all(|v| v.abs() < 1e-5));
+            }
+        }
+    }
+}
