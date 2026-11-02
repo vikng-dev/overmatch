@@ -11,7 +11,7 @@ use bevy::prelude::*;
 use crate::flow::{Flow, FlowScoped, InMatchSystems, MatchResourceExt};
 use crate::tank::Controlled;
 use crate::track::sim::{DriveSignal, TankTransmission, TrackDrive, TrackGear};
-use crate::track::transmission::{DriveReadout, SchedulerState, TransmissionState, readout};
+use crate::track::transmission::{DriveReadout, TransmissionState, readout};
 use crate::ui_font::{UiFonts, set_text};
 
 /// HUD look is authored data; positions and colours are tastes, never drivetrain parameters.
@@ -276,13 +276,8 @@ fn toggle_drive_debug(keys: Res<ButtonInput<KeyCode>>, mut visible: ResMut<Drive
     visible.0 = debug_visible_after_f3(visible.0, keys.just_pressed(KeyCode::F3));
 }
 
-/// Compact normal-play row. The two suffix markers are independent: `P` is the parking-brake latch
-/// and `*` is the active hill-hold latch, hence `F1P*` when both are true. A shift window has no
-/// standard-row marker; its scheduler detail belongs to the F3 panel.
-///
-/// Gear occupies four characters (the Tiger's `F1P*` maximum), rpm stays at one decimal in thousands,
-/// and speed is an integer km/h in a three-character field. Before the track gear is built there is
-/// no readout, and the row renders only speed — no placeholder noise.
+/// Compact normal-play row: `P` is the parking lever.
+/// A paid shift has no extra marker. Before construction is ready only speed is shown.
 pub(crate) fn standard_drive_row(
     transmission: Option<(&TransmissionState, &DriveReadout)>,
     ground_speed_mps: f32,
@@ -296,9 +291,6 @@ pub(crate) fn standard_drive_row(
     if state.park {
         gear.push('P');
     }
-    if state.scheduler == SchedulerState::HillHold {
-        gear.push('*');
-    }
     let rpm = format!("{:>3.1}k", (operating.rpm / 1_000.0).max(0.0));
     format!("Gear {gear:<4}  RPM {rpm}  {speed}")
 }
@@ -307,20 +299,6 @@ pub(crate) fn standard_drive_row(
 /// excluded: the normal HUD promises ground speed, not signed forward speed.
 pub(crate) fn horizontal_ground_speed(velocity: Vec3) -> f32 {
     Vec3::new(velocity.x, 0.0, velocity.z).length()
-}
-
-/// Render scheduler truth for the drive-debug panel. Grade targets live on whichever ladder the
-/// state currently engages, so reverse shifts read `R4->R2`, not a hard-coded forward label.
-pub(crate) fn scheduler_hud_line(st: &TransmissionState) -> String {
-    match st.scheduler {
-        SchedulerState::Normal => "sched NORMAL       ".to_string(),
-        SchedulerState::GradeShift { from, to } => {
-            let ladder = if st.reverse { 'R' } else { 'F' };
-            format!("sched GRADE {ladder}{from}->{ladder}{to}")
-        }
-        SchedulerState::HillHold => "sched HILL HOLD    ".to_string(),
-        SchedulerState::GradeLimit => "sched GRADE LIMIT  ".to_string(),
-    }
 }
 
 /// Fixed-radius steering visibility from the live detent state and the source radius table retained
@@ -410,12 +388,6 @@ fn update_drive_hud(
     }
     debug_visibility.set_if_neq(Visibility::Visible);
 
-    let scheduler_line = if params.is_some() {
-        scheduler_hud_line(&transmission.0)
-    } else {
-        "sched --           ".to_string()
-    };
-
     // The debug panel preserves the former offline diagnostics: signed hull-forward speed, per-belt
     // speed/slip, shaped commands, and the authored L600 steering detent/radius.
     let forward = rotation.0 * Vec3::NEG_Z;
@@ -430,8 +402,7 @@ fn update_drive_hud(
     );
 
     let debug = format!(
-        "{scheduler_line}\n\
-         hull {signed_ground:+5.2} m/s ({:+6.1} km/h)\n\
+        "         hull {signed_ground:+5.2} m/s ({:+6.1} km/h)\n\
          belt L {:+5.2} R {:+5.2} | slip L {:+5.2} R {:+5.2}\n\
          cmd thr {:+5.2} steer {:+5.2} | {steering:<15}",
         signed_ground * 3.6,

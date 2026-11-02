@@ -437,7 +437,8 @@ pub struct AxisKeys {
 
 /// Client-only persistent levers. Ownership changes discard both axes so a respawn or Tab swap
 /// cannot inherit a previous tank's cruise command. Repair brakes mask the request without
-/// moving these levers; the retained notch resumes when repair ends. No field is replicated.
+/// moving these levers. The game's damage model: an empty Driver station also masks the
+/// request without discarding it; staffing restores the same notch. No field is replicated.
 #[derive(Resource, Default)]
 pub(crate) struct DriveInput {
     owner: Option<Entity>,
@@ -1124,6 +1125,34 @@ mod tests {
         script.release(KeyCode::KeyF);
         assert_eq!(script.gather(0.0).throttle, notch);
         assert!(!script.world.get::<TankCommand>(script.tank).unwrap().repair);
+    }
+
+    /// The game's damage model: a Driver station's HP state cannot take device ownership.
+    /// The player's notch therefore survives an empty station and its return unchanged.
+    #[test]
+    fn empty_driver_station_preserves_the_throttle_notch() {
+        use bevy::ecs::system::RunSystemOnce;
+        let mut script = DriveKeys::new();
+        script.world.insert_resource(DeviceOwner::Tank);
+        let notch = script.tap(KeyCode::KeyW).throttle;
+        let driver = script
+            .world
+            .spawn((
+                crate::damage::CrewStation::Driver,
+                crate::damage::VolumeOf(script.tank),
+                crate::damage::Dead,
+            ))
+            .id();
+        script.world.run_system_once(claim_device).unwrap();
+        assert_eq!(*script.world.resource::<DeviceOwner>(), DeviceOwner::Tank);
+        assert_eq!(script.gather(0.0).throttle, notch);
+        script
+            .world
+            .entity_mut(driver)
+            .remove::<crate::damage::Dead>();
+        script.world.run_system_once(claim_device).unwrap();
+        assert_eq!(*script.world.resource::<DeviceOwner>(), DeviceOwner::Tank);
+        assert_eq!(script.gather(0.0).throttle, notch);
     }
 
     /// A hold owns the full axis after the window, then releases to coast/straight. Keeping the

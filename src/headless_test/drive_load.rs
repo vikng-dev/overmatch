@@ -201,7 +201,14 @@ fn probe(app: &App, tank: Entity) -> TransmissionProbe {
 
 /// Fixture placement resets the complete rig, never a production spawn path. The rest height,
 /// gear speeds and crank speed are construction data; pose and entry gear are fixture choices.
-fn place(app: &mut BootedSim, tank: Entity, position: Vec3, rotation: Quat, speed: f32, gear: u8) {
+pub(super) fn place(
+    app: &mut BootedSim,
+    tank: Entity,
+    position: Vec3,
+    rotation: Quat,
+    speed: f32,
+    gear: u8,
+) {
     let mut transmission = fresh_tank_transmission(app);
     let params = app
         .world()
@@ -702,152 +709,17 @@ fn perceived_load_during_a_rearward_shot_uphill() {
     );
 }
 
-/// The game's driving and damage model: crew are HP pools at stations. The shipped sim must
-/// retain the empty station's existing park/neutral at rest, and re-engage a moving clutch after
-/// every interruption without idle-catch work. Fixture: a uniform 10-degree descent, then 5 m/s.
+/// The game's driving and damage model: crew are HP pools at stations. Without the Driver,
+/// the shipped clutch must stay engaged through an uphill turning point as well as a descent.
+/// A freewheel mutant fails the regime and drag checks. Construction decides whether guard-point
+/// drag can balance this grade; a crank guard alone is not a belt-speed bound.
+/// Fixture: fresh 10-degree plane per entry, 5 m/s in launch and upper-middle gears; 40 seconds in the launch gear and 20 in the upper-middle gear.
 #[test]
-fn empty_driver_station_rest_and_descent() {
+fn empty_driver_station_coast_and_rollback() {
     use crate::damage::{CrewStation, Dead, VolumeOf};
-    use crate::track::transmission::{ClutchState, PARK_ENGAGE_SPEED, RPM_TO_RAD};
-    let angle = -10.0_f32.to_radians(); // Fixture descent toward the forward axis.
-    let extent = crate::terrain_grid::FIXTURE_EXTENT;
-    let height = extent.half_extent() * angle.tan();
-    let grid = crate::terrain_grid::HeightGrid::new(
-        vec![height, height, -height, -height].into(),
-        2,
-        extent,
-    );
-    let mut app = booted_sim_on(Some(grid));
-    start_fixed_clock(&mut app);
-    app.update();
-    let tank = app
-        .world_mut()
-        .query_filtered::<Entity, (With<Tank>, With<Controlled>)>()
-        .single(app.world())
-        .expect("one controlled fixture tank");
-    let rotation = Quat::from_rotation_x(angle);
-    let normal = rotation * Vec3::Y;
-    let rest = app
-        .world()
-        .resource::<crate::track::rig_geom::RigGeom>()
-        .hull_rest_y;
-    let position = Vec3::new(100.0, 0.0, 0.0) + normal * rest;
-    place(&mut app, tank, position, rotation, 0.0, 1);
-    for _ in 0..128 {
-        drive_tick(&mut app, tank, 0.0, 0.0);
-    }
-    // Empty every pool assigned to this station before the next simulation tick.
-    let drivers: Vec<Entity> = app
-        .world_mut()
-        .query::<(Entity, &CrewStation, &VolumeOf)>()
-        .iter(app.world())
-        .filter_map(|(entity, station, owner)| {
-            (*station == CrewStation::Driver && owner.0 == tank).then_some(entity)
-        })
-        .collect();
-    assert!(!drivers.is_empty(), "the fixture has a Driver station");
-    for driver in drivers {
-        app.world_mut()
-            .get_mut::<crate::ballistics::ComponentHealth>(driver)
-            .unwrap()
-            .set_held(0);
-        app.world_mut().entity_mut(driver).insert(Dead);
-    }
-    let start = app
-        .world()
-        .get::<avian3d::prelude::Position>(tank)
-        .unwrap()
-        .0;
-    let mut previous_crank = app.world().get::<TankTransmission>(tank).unwrap().0.omega_e;
-    for _ in 0..4 * FIXED_TICKS_PER_SECOND {
-        drive_tick(&mut app, tank, 0.0, 0.0);
-        let state = &app.world().get::<TankTransmission>(tank).unwrap().0;
-        assert!(state.park);
-        assert_eq!(state.clutch, ClutchState::Out);
-        assert!(
-            state.omega_e <= previous_crank,
-            "a disconnected crank without fuel cannot gain energy"
-        );
-        previous_crank = state.omega_e;
-        assert_eq!(probe(&app, tank).tau_idle, 0.0);
-    }
-    let state = &app.world().get::<TankTransmission>(tank).unwrap().0;
-    let end = app
-        .world()
-        .get::<avian3d::prelude::Position>(tank)
-        .unwrap()
-        .0;
-    println!(
-        "MEASURED empty Driver at rest on 10 degrees after 4 s: park={}, clutch={:?}, rpm={}, displacement_m={}",
-        state.park,
-        state.clutch,
-        state.omega_e / RPM_TO_RAD,
-        (end - start).length()
-    );
-    // Fixture: a rolling entry in the upper-middle portion of the authored gear ladder.
-    let gear = (app
-        .world()
-        .resource::<crate::track::sim::TrackGear>()
-        .trans()
-        .gears_fwd
-        .len()
-        * 3
-        / 4)
-    .max(1) as u8;
-    place(&mut app, tank, position, rotation, 5.0, gear);
-    app.world_mut()
-        .get_mut::<TankTransmission>(tank)
-        .unwrap()
-        .0
-        .clutch = ClutchState::In;
-    let mut interrupted_ticks = 0;
-    let mut first_drag = None;
-    for _ in 0..8 * FIXED_TICKS_PER_SECOND {
-        drive_tick(&mut app, tank, 0.0, 0.0);
-        let sample = probe(&app, tank);
-        let state = &app.world().get::<TankTransmission>(tank).unwrap().0;
-        assert_eq!(sample.tau_idle, 0.0);
-        assert_eq!(sample.tau_induced, 0.0);
-        if sample.shifting {
-            interrupted_ticks += 1;
-        } else if sample.mean_speed.abs() >= PARK_ENGAGE_SPEED {
-            assert_eq!(
-                state.clutch,
-                ClutchState::In,
-                "a moving interruption must expire even at an empty station"
-            );
-            if first_drag.is_none() {
-                first_drag = Some(sample.forces.iter().sum::<f32>());
-            }
-        }
-    }
-    assert!(
-        first_drag.unwrap() < 0.0,
-        "the rolling entry must receive motoring drag"
-    );
-    let speed = app
-        .world()
-        .get::<avian3d::prelude::LinearVelocity>(tank)
-        .unwrap()
-        .0
-        .dot(rotation * Vec3::NEG_Z);
-    let state = &app.world().get::<TankTransmission>(tank).unwrap().0;
-    println!(
-        "MEASURED empty Driver entering at 5 m/s on 10 degrees after 8 s: first_motor_force_n={}, speed_m_s={speed}, gear={}, clutch={:?}, rpm={}, interrupted_ticks={interrupted_ticks}",
-        first_drag.unwrap(),
-        state.gear,
-        state.clutch,
-        state.omega_e / RPM_TO_RAD
-    );
-}
-
-/// The shipped composition must launch at every player notch on level ground and on a
-/// supported grade, and sustain increasing steady travel. Fixture: a long firm plane.
-#[test]
-fn shipped_notches_launch_and_sustain_ordered_speed() {
-    for degrees in [0.0_f32, 10.0] {
-        let mut last = 0.0;
-        for pedal in [0.25, 0.5, 0.75] {
+    use crate::track::transmission::{ClutchState, OVERREV_MARGIN_RPM, RPM_TO_RAD};
+    for degrees in [-10.0_f32, 10.0] {
+        for launch_gear in [true, false] {
             let angle = degrees.to_radians();
             let extent = crate::terrain_grid::FIXTURE_EXTENT;
             let height = extent.half_extent() * angle.tan();
@@ -864,15 +736,136 @@ fn shipped_notches_launch_and_sustain_ordered_speed() {
                 .query_filtered::<Entity, (With<Tank>, With<Controlled>)>()
                 .single(app.world())
                 .unwrap();
-            let rotation =
-                Quat::from_rotation_y(std::f32::consts::PI) * Quat::from_rotation_x(-angle);
+            let rotation = Quat::from_rotation_x(angle);
+            let rest = app
+                .world()
+                .resource::<crate::track::rig_geom::RigGeom>()
+                .hull_rest_y;
+            let position = Vec3::new(100.0, 0.0, 0.0) + rotation * Vec3::Y * rest;
+            let tp = app
+                .world()
+                .resource::<crate::track::sim::TrackGear>()
+                .trans();
+            let gear = if launch_gear {
+                tp.launch_gears
+            } else {
+                (tp.gears_fwd.len() * 3 / 4).max(1) as u8
+            };
+            let guard = (tp.max_curve_rpm() + OVERREV_MARGIN_RPM) * RPM_TO_RAD;
+            place(&mut app, tank, position, rotation, 5.0, gear);
+            app.world_mut()
+                .get_mut::<TankTransmission>(tank)
+                .unwrap()
+                .0
+                .clutch = ClutchState::In;
+            let drivers: Vec<_> = app
+                .world_mut()
+                .query::<(Entity, &CrewStation, &VolumeOf)>()
+                .iter(app.world())
+                .filter_map(|(e, station, owner)| {
+                    (*station == CrewStation::Driver && owner.0 == tank).then_some(e)
+                })
+                .collect();
+            assert!(!drivers.is_empty());
+            for driver in drivers {
+                app.world_mut()
+                    .get_mut::<crate::ballistics::ComponentHealth>(driver)
+                    .unwrap()
+                    .set_held(0);
+                app.world_mut().entity_mut(driver).insert(Dead);
+            }
+            let mut min_speed = 5.0_f32;
+            let mut max_speed = 5.0_f32;
+            let mut final_lo = f32::INFINITY;
+            let mut final_hi = f32::NEG_INFINITY;
+            let mut final_drag = 0.0;
+            let mut max_rpm = 0.0_f32;
+            let seconds = if launch_gear { 40 } else { 20 };
+            for tick in 0..seconds * FIXED_TICKS_PER_SECOND {
+                drive_tick(&mut app, tank, 0.0, 0.0);
+                let sample = probe(&app, tank);
+                let state = &app.world().get::<TankTransmission>(tank).unwrap().0;
+                assert_eq!(
+                    state.clutch,
+                    ClutchState::In,
+                    "no Driver can open the clutch"
+                );
+                assert_eq!(state.gear, gear);
+                assert!(!sample.shifting && !state.park);
+                assert_eq!([sample.tau_induced, sample.tau_idle], [0.0; 2]);
+                assert!(state.omega_e.abs() <= guard + 0.001);
+                assert!(sample.grip_limit_n > 0.0);
+                let speed = app
+                    .world()
+                    .get::<avian3d::prelude::LinearVelocity>(tank)
+                    .unwrap()
+                    .0
+                    .dot(rotation * Vec3::NEG_Z);
+                min_speed = min_speed.min(speed);
+                max_speed = max_speed.max(speed);
+                max_rpm = max_rpm.max(state.omega_e.abs() / RPM_TO_RAD);
+                if tick >= (seconds - 1) * FIXED_TICKS_PER_SECOND {
+                    final_lo = final_lo.min(speed);
+                    final_hi = final_hi.max(speed);
+                    final_drag += sample.delivered_force_n;
+                }
+            }
+            let state = &app.world().get::<TankTransmission>(tank).unwrap().0;
+            assert_eq!(
+                state.omega_e.signum(),
+                if degrees > 0.0 { -1.0 } else { 1.0 },
+                "uphill coast must roll back through the crank"
+            );
+            let drag = final_drag / FIXED_TICKS_PER_SECOND as f32;
+            assert!(
+                if degrees > 0.0 {
+                    drag > 0.0
+                } else {
+                    drag < 0.0
+                },
+                "steady motoring drag must oppose travel"
+            );
+            println!(
+                "MEASURED S3 grade_deg={degrees} gear={gear} min_speed_m_s={min_speed:.6} max_speed_m_s={max_speed:.6} final_range_m_s=[{final_lo:.6},{final_hi:.6}] max_abs_rpm={max_rpm:.6} mean_final_drag_n={drag:.6} speed_settled={}",
+                final_hi - final_lo < 0.01
+            );
+        }
+    }
+}
+
+/// The shipped composition must launch at every player notch on level ground and on a
+/// supported grade, and sustain increasing steady travel. Fixture: a long firm plane.
+#[test]
+fn shipped_notches_launch_and_sustain_ordered_speed() {
+    for degrees in [0.0_f32, 10.0] {
+        let mut last = 0.0;
+        let step = crate::track::drive::drive_feel().notch_step.0;
+        for pedal in std::iter::successors(Some(step), |pedal| {
+            (*pedal < 1.0).then(|| (*pedal + step).min(1.0))
+        }) {
+            let angle = degrees.to_radians();
+            let extent = crate::terrain_grid::FIXTURE_EXTENT;
+            let height = extent.half_extent() * angle.tan();
+            let grid = crate::terrain_grid::HeightGrid::new(
+                vec![height, height, -height, -height].into(),
+                2,
+                extent,
+            );
+            let mut app = booted_sim_on(Some(grid));
+            start_fixed_clock(&mut app);
+            app.update();
+            let tank = app
+                .world_mut()
+                .query_filtered::<Entity, (With<Tank>, With<Controlled>)>()
+                .single(app.world())
+                .unwrap();
             let rest = app
                 .world()
                 .resource::<crate::track::rig_geom::RigGeom>()
                 .hull_rest_y;
             // Fixture: the plane rises toward -Z; travel climbs it from the positive end.
             let rotation = if degrees == 0.0 {
-                rotation
+                Quat::from_rotation_y(std::f32::consts::PI)
             } else {
                 Quat::from_rotation_x(angle)
             };

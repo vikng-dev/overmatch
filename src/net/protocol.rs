@@ -269,7 +269,8 @@ use crate::{CombatantId, CombatantLife, ShotId};
 /// hold at rest.
 /// REV 77 (the game's environment destruction model): a freed piece carries its whole hull's mass
 /// and meets contacts on a hull 1 mm inside it.
-pub const PROTOCOL_REV: u32 = 77;
+/// REV 78 (#146, driving model): eight canonical fields; construction rest and signed crank.
+pub const PROTOCOL_REV: u32 = 78;
 
 /// Compatibility tag derived from the complete pinned wire manifest plus the crate version. This
 /// is the runtime handshake value: version-exact, so a version bump intentionally changes it.
@@ -1175,7 +1176,7 @@ const WIRE_SURFACE_HASH: u64 = 0x5afa185f66009321;
 /// The pinned hash of the OWN wire-facing type DEFINITIONS (field layout, not just names). Re-pin it
 /// whenever a wire-facing struct/enum definition changes; house process also bumps
 /// [`PROTOCOL_REV`]. The tripwire prints the new value. See the block above for the coverage model.
-const WIRE_TYPES_HASH: u64 = 0x6a39e231e441eebc;
+const WIRE_TYPES_HASH: u64 = 0x6d97144c0e2cc746;
 
 /// The pinned `Cargo.lock` versions of the external crates whose types ride the wire (avian's
 /// replicated physics components; lightyear's wire framing / input protocol). A bump of either can
@@ -2056,7 +2057,6 @@ mod tests {
         ("src/track/sim.rs", "TankTransmission"),
         ("src/track/sim.rs", "EngineRpm"),
         ("src/track/transmission.rs", "TransmissionState"),
-        ("src/track/transmission.rs", "SchedulerState"),
         ("src/track/transmission.rs", "ClutchState"),
         ("src/tank/model.rs", "WeaponGate"),
         ("src/tank/model.rs", "WeaponGateState"),

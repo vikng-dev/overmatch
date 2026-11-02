@@ -610,7 +610,7 @@ at 0.6717 m/s (2591 rpm, past the 2300 rpm up band), the shift-landing predictor
 33.6 kN a side of rolling resistance whole, lands F2 at 0.3617 m/s, 908 rpm, under the gate's fixed
 `shift_down_rpm + POSTSHIFT_MARGIN_RPM` of 1300 rpm, although F2's modelled full-throttle reserve
 at that landing is 264 kN against a 19 kN margin; a rolling entry never meets that gate, because
-no downshift consults it. The hill-hold release remains the owner's call. The lane preserves the landed supply scaling in `drive_target` and
+no downshift consults it. This historical scheduler observation is superseded by the accepted four Driver laws in `drive-control-design-2026-11-02.md`. The lane preserves the landed supply scaling in `drive_target` and
 `transmission::step`. The step's interruption/dwell countdown is extracted without a behavior
 change to keep it below clippy's function-length limit. No wire type changes.
 

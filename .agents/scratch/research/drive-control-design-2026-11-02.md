@@ -57,8 +57,9 @@ from code; **(R)** RECALLED. Number jobs: Fact, Unit, Taste, Resolution, StandIn
     law traps a Tiger in F1 on a 20° face.
 - **The brake rule is a lever that carries only the shortfall against rollback,** so "release
   once the gear outpulls the slope" happens by force balance and never by a decision.
-- **With nobody at the Driver station, no control moves.** The clutch stays engaged by
-  construction, so the tank brakes on its engine instead of freewheeling.
+- **With nobody at the Driver station, the Driver policy does no work.** Controls return to
+  or retain their construction rests. The clutch springs engaged after any already-paid cut,
+  including at rest, so the tank receives motoring drag instead of freewheeling.
 - **Taps:** a press heads for the next notch for its first 0.15 s and becomes a hold only after
   that, so a tap that steps down never flashes the brakes.
 - **Size of the change.** State goes from 17 fields to 8 (D); 16 of the 33 module constants go
@@ -178,8 +179,8 @@ shear decay.
 
 **Clutch law.** Three states, `Out | Slip | In`, replacing `clutch_out`.
 
-- **`Out`** covers the shift windows. At rest it is the Fibel's direction lever at "0", which
-  persists with nobody at the station.
+- **`Out`** covers paid shift windows and the Driver's released rest. Without control work,
+  the clutch springs engaged when any already-paid window expires; Out does not persist at rest.
 - **`Slip`** begins under intent with the shaft below idle in a launch gear. It holds the crank at
   ω_launch(u) = idle + u·(peak − idle) until the shaft reaches that speed [US4081065]. This is the
   form the steer rev target already uses: no number.
@@ -207,15 +208,20 @@ shear decay.
 - **At the crank ceiling,** the Driver holds the tachometer there with the service brakes ("never
   over 3000", M [F p.38]), instead of the protective upshift.
 
-**With nobody at the Driver station,** in every architecture, the policy does not run and no
-control moves:
+**With nobody at the Driver station,** the policy does no work. Construction names each rest:
 
-- the throttle is at its stop (idle fuel = drag/torque at idle = 273/1300 ≈ 0.21, D);
-- the clutch is engaged, since hydraulic pressure is what opens it (D [RES §1.1]);
-- the lever, the gear and the park lever stay as they were left;
-- the brakes are released.
+- the fuel rack returns closed: this construction has no independent idle actuator;
+- the clutch springs engaged after an already-paid window expires, including at rest, since
+  hydraulic pressure is what opens it (D [RES §1.1]);
+- the player's intent lever, the gear and the park lever stay as they were left;
+- steering returns to center and the service brakes are released.
 
-The engine therefore brakes the tank in its gear. This leaves the owner's held item open.
+The closed-rack rest resolves the proposed idle-fuel conflict: the Driver's catch leaves with
+its work, and no construction governor replaces it. The required rests are authored in
+`assets/driving/engine.ron`. The engine resists motion in either crank direction, firing only
+when turning forward. The clutch slip guard bounds the crank; it does not promise a vehicle-speed
+bound on a grade exceeding guarded drag and contact resistance. See the
+[lane 5 record](law-drive-5-ceiling-2026-11-02.md) for the measured S3 limit.
 
 **Numbers B needs.**
 
@@ -396,6 +402,8 @@ server, and `TankTransmission` replicates to the owner only. The four measured s
 - *Proof for S3:* with the Driver station's crew member out of action, at 5 m/s on 10°, the clutch
   never goes out. Speed on the descent, and on the rollback after an uphill coast, is bounded by
   the gear's motoring drag or by the over-rev guard, as measured.
+  **Acceptance status:** the lane 5 record certifies clutch engagement and the crank bound,
+  but the F6 vehicle-speed bound is unmet; the record names the construction limit.
 
 **Where it ends** (D): 8 fields remain: `gear`, `shift_ticks`, `steer_step`, `reverse`, `park`,
 `omega_e`, `clutch` and `reversal_hold_ticks`.

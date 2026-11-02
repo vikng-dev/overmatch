@@ -859,112 +859,150 @@ fn full_throttle_reaches_and_holds_the_governed_top_speed() {
     );
 }
 
-/// Every authored ground must yield finite steady driving; the ground law's record relies on
-/// this headless measurement. Fixture: the shipped vehicle on uniform flat ground, 40 s throttle,
-/// last-second mean, both from rest and from a data-derived governed-speed/top-gear entry.
-/// The two entries expose scheduler path dependence; no per-vehicle speed expectation is encoded.
-/// FIXTURE acceptance for steady: the last second's spread within 1 % of the vehicle's governed
-/// top speed, the bound the governed-top-speed test holds the lossless ground to. A ground or
-/// scheduler that leaves the tank hunting between gears or surging fails it.
+/// Every ground/entry must reach a supported, moving equilibrium before its gear can be
+/// called converged or a C1 vehicle-truth split. Mutants which strand a launch, lose support,
+/// exhaust the plane or retain a force deficit fail independently of the selector's answer.
+/// Fixture: fresh app per entry, a 90-second traverse inside the uninterrupted flat plane.
+#[cfg(feature = "bitprobe")]
 #[test]
 fn contact_law_shipped_ground_speeds() {
+    use crate::track::sim::{TankTransmission, TrackContacts, TrackGripEffect};
     for (name, ground) in crate::ground_types::GroundTypes::load_shipped().types {
-        let (mut app, tank) = booted_offline_sim();
-        {
-            let mut track = app
-                .world_mut()
-                .resource_mut::<crate::track::terrain::TrackField>();
-            let field = track.field.take().expect("boot builds terrain");
-            track.field = Some(
-                field.with_ground(Some(crate::ground_field::GroundField::uniform(
-                    ground.contact(),
-                ))),
-            );
-        }
-        face_positive_z(&mut app, tank);
-        let initial_position = app
-            .world()
-            .get::<avian3d::prelude::Position>(tank)
-            .unwrap()
-            .0;
-        for rolling_start in [false, true] {
-            if rolling_start {
-                let params = app
-                    .world()
-                    .resource::<crate::track::sim::TrackGear>()
-                    .trans();
-                let speed = params.governed_speed(false);
-                let mut transmission = crate::track::sim::TankTransmission::from_spec(params);
-                transmission.0.gear = params.gears_fwd.len() as u8;
-                transmission.0.omega_e = params.engine.governed_rpm * std::f32::consts::TAU / 60.0;
-                let mut e = app.world_mut().entity_mut(tank);
-                *e.get_mut::<crate::track::sim::TankTransmission>().unwrap() = transmission;
-                e.get_mut::<avian3d::prelude::Position>().unwrap().0 = initial_position;
-                e.get_mut::<avian3d::prelude::Rotation>().unwrap().0 =
-                    Quat::from_rotation_y(std::f32::consts::PI);
-                e.get_mut::<avian3d::prelude::LinearVelocity>().unwrap().0 = Vec3::Z * speed;
-                e.get_mut::<avian3d::prelude::AngularVelocity>().unwrap().0 = Vec3::ZERO;
-                for side in &mut e.get_mut::<crate::track::sim::TrackDrive>().unwrap().sides {
-                    side.speed = speed;
-                    side.phase = 0.0;
-                }
-                for side in &mut e
-                    .get_mut::<crate::track::sim::TrackGripElements>()
-                    .unwrap()
-                    .sides
-                {
-                    side.strain.fill(Vec3::ZERO);
-                    side.dwell.fill(0);
-                }
+        let mut outcomes = Vec::new();
+        for rolling in [false, true] {
+            let (mut app, tank) = booted_offline_sim();
+            let extent = crate::terrain_grid::FIXTURE_EXTENT;
+            {
+                let mut track = app
+                    .world_mut()
+                    .resource_mut::<crate::track::terrain::TrackField>();
+                let field = track.field.take().expect("boot builds terrain");
+                track.field = Some(field.with_ground(Some(
+                    crate::ground_field::GroundField::uniform(ground.contact()),
+                )));
             }
+            let params = app
+                .world()
+                .resource::<crate::track::sim::TrackGear>()
+                .trans();
+            let (speed, gear) = if rolling {
+                (params.governed_speed(false), params.gears_fwd.len() as u8)
+            } else {
+                (0.0, 1)
+            };
+            let rest = app
+                .world()
+                .resource::<crate::track::rig_geom::RigGeom>()
+                .hull_rest_y;
+            // Fixture: the maximum governed traverse fits within the 1 km plane from this end.
+            let start = Vec3::new(100.0, rest, -480.0);
+            drive_load::place(
+                &mut app,
+                tank,
+                start,
+                Quat::from_rotation_y(std::f32::consts::PI),
+                speed,
+                gear,
+            );
+            let weight =
+                app.world().resource::<TankBlueprint>().spec.mass * crate::track::derive::G;
+            let mut lo = f32::INFINITY;
+            let mut hi = f32::NEG_INFINITY;
             let mut sum = 0.0;
-            let mut min = f32::INFINITY;
-            let mut max = 0.0_f32;
-            for tick in 0..40 * FIXED_TICKS_PER_SECOND {
+            let mut spare_max = 0.0_f32;
+            let mut next_max = f32::NEG_INFINITY;
+            for tick in 0..90 * FIXED_TICKS_PER_SECOND {
                 drive_tick(&mut app, tank, 1.0, 0.0);
-                if tick >= 39 * FIXED_TICKS_PER_SECOND {
+                let position = app
+                    .world()
+                    .get::<avian3d::prelude::Position>(tank)
+                    .unwrap()
+                    .0;
+                assert!(
+                    position.x.abs() < extent.half_extent() - 10.0
+                        && position.z.abs() < extent.half_extent() - 10.0,
+                    "{name} rolling={rolling} must remain on the uninterrupted plane: {position:?}"
+                );
+                let probe = app
+                    .world()
+                    .get::<TrackGripEffect>(tank)
+                    .unwrap()
+                    .transmission_probe;
+                assert!(
+                    probe.grip_limit_n > 0.0,
+                    "{name} rolling={rolling} needs geometric support"
+                );
+                if tick >= 89 * FIXED_TICKS_PER_SECOND {
+                    let contacts = &app.world().get::<TrackContacts>(tank).unwrap().0;
+                    assert!(
+                        contacts
+                            .iter()
+                            .all(|side| side.iter().any(|c| c.load_elastic > 0.0))
+                    );
                     let speed = app
                         .world()
                         .get::<avian3d::prelude::LinearVelocity>(tank)
                         .unwrap()
                         .0
-                        .length();
-                    assert!(
-                        speed.is_finite(),
-                        "ground {name} must deliver finite driving"
-                    );
+                        .z;
+                    assert!(speed > crate::track::transmission::PARK_ENGAGE_SPEED);
+                    let state = &app.world().get::<TankTransmission>(tank).unwrap().0;
+                    let construction = app.world().resource::<crate::track::sim::TrackGear>();
+                    assert_eq!(state.shift_ticks, 0, "equilibrium cannot be a paid cut");
+                    spare_max =
+                        spare_max.max(construction.landed_spare(state, probe, state.gear).abs());
+                    for higher in state.gear + 1
+                        ..=state
+                            .gear
+                            .saturating_add(construction.trans().max_step)
+                            .min(construction.trans().gears_fwd.len() as u8)
+                    {
+                        next_max = next_max.max(construction.landed_spare(state, probe, higher));
+                    }
+                    lo = lo.min(speed);
+                    hi = hi.max(speed);
                     sum += speed;
-                    min = min.min(speed);
-                    max = max.max(speed);
                 }
             }
-            let state = &app
-                .world()
-                .get::<crate::track::sim::TankTransmission>(tank)
-                .unwrap()
-                .0;
-            let gear = state.gear;
-            println!(
-                "MEASURED ground {name} rolling_start={rolling_start} scheduler {:?}, park {}",
-                state.scheduler, state.park
-            );
-            println!(
-                "MEASURED ground {name} rolling_start={rolling_start}: F{gear} mean {:.5} m/s spread {:.6}",
-                sum / FIXED_TICKS_PER_SECOND as f32,
-                max - min
-            );
-            let governed = app
-                .world()
-                .resource::<crate::track::sim::TrackGear>()
-                .trans()
-                .governed_speed(false);
+            let state = &app.world().get::<TankTransmission>(tank).unwrap().0;
+            assert_eq!(state.clutch, crate::track::transmission::ClutchState::In);
+            let construction = app.world().resource::<crate::track::sim::TrackGear>();
             assert!(
-                max - min <= 0.01 * governed,
-                "ground {name} (rolling_start={rolling_start}) must drive steadily: F{gear}, \
-                 spread {:.6} m/s over the last second",
-                max - min
+                state.omega_e / crate::track::transmission::RPM_TO_RAD
+                    >= construction.trans().engine.torque_nm[0].0,
+                "a sustainable C1 split cannot be an engaged lug"
             );
+            let margin =
+                crate::track::load::DriverResolution::load().margin_n(weight, construction.trans());
+            let mean = sum / FIXED_TICKS_PER_SECOND as f32;
+            println!(
+                "MEASURED S4 ground={name} rolling={rolling} gear={} mean_m_s={mean:.6} spread_m_s={:.6} abs_current_spare_n={spare_max:.6} best_higher_spare_n={next_max:.6} margin_n={margin:.6}",
+                state.gear,
+                hi - lo
+            );
+            assert!(
+                hi - lo < 0.01,
+                "{name} rolling={rolling} must settle in speed"
+            );
+            // Fixture observation precision: 0.01% of weight, much smaller than one ground row's load.
+            assert!(
+                spare_max < weight * 0.0001,
+                "{name} rolling={rolling}: equilibrium spare {spare_max} N"
+            );
+            assert!(
+                next_max <= margin,
+                "a sustainable better higher gear must be selected"
+            );
+            outcomes.push((state.gear, mean));
         }
+        println!(
+            "MEASURED S4 {name}: {}",
+            if outcomes[0].0 == outcomes[1].0 && (outcomes[0].1 - outcomes[1].1).abs() < 0.01 {
+                "converged"
+            } else {
+                "C1 vehicle-truth split: both entries are sustainable, neither can afford a higher landing"
+            }
+        );
     }
 }
 

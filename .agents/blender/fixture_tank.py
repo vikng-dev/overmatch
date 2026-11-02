@@ -95,6 +95,7 @@ TankSpec(
                     recirculation: 0.9,
                 ),
                 brake_force: 1.0,
+                // Static breakaway multiplier for the at-rest parking lever.
                 brake_static_factor: 1.5,
             ),
         ),

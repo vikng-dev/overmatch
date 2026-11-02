@@ -481,8 +481,7 @@ mod drive_row_tests {
     use super::*;
     use track::transmission::{DriveReadout, TransmissionState};
 
-    /// One formatter owns the normal row in both client roots. `P` and `*` are independent
-    /// park/hill-hold markers; cruise/reverse leave both markers off; with no readout yet the
+    /// One formatter owns the normal row in both client roots. `P` marks park; with no readout the
     /// row hides the gear/rpm fields without hiding speed, and speed is horizontal ground speed.
     #[test]
     fn standard_drive_row_format_is_shared_and_compact() {
@@ -494,7 +493,6 @@ mod drive_row_tests {
         let mut state = TransmissionState {
             gear: 1,
             park: true,
-            scheduler: track::transmission::SchedulerState::HillHold,
             ..TransmissionState::stopped()
         };
         let mut operating = DriveReadout {
@@ -506,31 +504,10 @@ mod drive_row_tests {
                 Some((&state, &operating)),
                 speed_mps
             )),
-            ["Gear", "F1P*", "RPM", "2.6k", "Speed", "45", "km/h"]
-        );
-
-        state.scheduler = track::transmission::SchedulerState::Normal;
-        assert_eq!(
-            fields(drive_hud::standard_drive_row(
-                Some((&state, &operating)),
-                speed_mps
-            )),
-            ["Gear", "F1P", "RPM", "2.6k", "Speed", "45", "km/h"],
-            "park owns P independently of hill hold"
-        );
-        state.park = false;
-        state.scheduler = track::transmission::SchedulerState::HillHold;
-        assert_eq!(
-            fields(drive_hud::standard_drive_row(
-                Some((&state, &operating)),
-                speed_mps
-            )),
-            ["Gear", "F1*", "RPM", "2.6k", "Speed", "45", "km/h"],
-            "hill hold owns * independently of park"
+            ["Gear", "F1P", "RPM", "2.6k", "Speed", "45", "km/h"]
         );
 
         state.park = false;
-        state.scheduler = track::transmission::SchedulerState::Normal;
         state.gear = 8;
         operating.gear_label = "F8".to_string();
         assert_eq!(

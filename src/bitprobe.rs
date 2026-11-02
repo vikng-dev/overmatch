@@ -171,9 +171,6 @@ const TRANSMISSION_STATE_FIELDS: &[(&str, &str)] = &[
     ("park", "bool"),
     ("omega_e", "f32"),
     ("clutch", "u32"),
-    ("scheduler_tag", "u32"),
-    ("scheduler_from", "u32"),
-    ("scheduler_to", "u32"),
     ("reversal_hold_ticks", "u32"),
 ];
 
@@ -847,9 +844,6 @@ fn transmission_state_payload(transmission: &TankTransmission) -> Vec<u32> {
             TransmissionProjectionValue::U8(value) => output.push(u32::from(value)),
             TransmissionProjectionValue::Bool(value) => bool_word(&mut output, value),
             TransmissionProjectionValue::F32(value) => f32_word(&mut output, value),
-            TransmissionProjectionValue::Scheduler { tag, from, to } => {
-                output.extend([u32::from(tag), u32::from(from), u32::from(to)]);
-            }
         }
     }
     output

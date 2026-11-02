@@ -42,18 +42,47 @@ use super::route::{polyline_len, resample};
 #[cfg(feature = "bitprobe")]
 use crate::bitprobe::{ContactInputProbe, ElementOutputProbe};
 
-/// The static-grip shear modulus (m): the Janosi–Hanamoto `K` for RUBBER TRACK PADS ON
-/// FIRM GROUND (Wong & Chiang's measured parameter set — the terramechanics provenance,
-/// static-friction-design.md §3). Full grip develops over this much shear; a 20° park
-/// settles back ~28 mm before holding — the vehicle "rocks onto its brakes". When the
-/// ground-type mechanic lands, TERRAIN owns this dial (firm soil ~10 mm … loose sand 25 mm).
-///
-/// Deliberately NOT the design draft's 5 mm park target: at 64 Hz that stiffness drove a
-/// full-amplitude coupled roll/yaw limit cycle (measured: 32 Hz side-swap, 7× per-tick load
-/// swings — the textbook undamped-bristle oscillation). At 75 mm every coupled mode sits
-/// deep inside the semi-implicit stability region (ωΔt ≈ 0.27; per-tick growth damping
-/// ratio ≈ 0.07 of the limit).
-pub const GRIP_SHEAR_MODULUS_M: f32 = 0.075;
+/// Effective bristle constitutive data, admitted before contact construction.
+/// The measurement history and stability bounds live in static-friction-design.md.
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct GripLaw {
+    shear_modulus_m: crate::provenance::Labelled<f32>,
+    breakaway_share: crate::provenance::Labelled<f32>,
+}
+
+fn grip_law() -> &'static GripLaw {
+    static DATA: std::sync::LazyLock<GripLaw> = std::sync::LazyLock::new(|| {
+        const PATH: &str = "assets/driving/grip.ron";
+        let data: GripLaw = crate::provenance::from_shipped_str(
+            PATH,
+            include_str!("../../assets/driving/grip.ron"),
+        )
+        .unwrap_or_else(|error| panic!("{error}"));
+        for (field, value) in [
+            ("shear_modulus_m", &data.shear_modulus_m),
+            ("breakaway_share", &data.breakaway_share),
+        ] {
+            assert!(
+                value.value.is_finite()
+                    && value.value > 0.0
+                    && matches!(value.label, crate::provenance::Provenance::StandIn(_)),
+                "{PATH}: {field} must be finite, positive and labelled StandIn; author the missing contact constitutive measurement"
+            );
+        }
+        assert!(
+            data.breakaway_share.value < 1.0,
+            "{PATH}: breakaway_share must be below one; leave a finite plastic-flow interval"
+        );
+        data
+    });
+    &DATA
+}
+
+/// Shear distance (m), shared by the contact law and its quantized strain digest.
+pub(crate) fn grip_shear_modulus_m() -> f32 {
+    grip_law().shear_modulus_m.value
+}
 
 /// The belt speed (m/s) below which rolling resistance fades linearly to zero, so a tank at rest
 /// takes none. `Resolution`: a Coulomb resistance flips sign at zero speed, a step the 64 Hz
@@ -93,6 +122,7 @@ impl GripParams {
     /// A tank's grip from its data: its track's substance, the terrain's base ground, at half
     /// its weight.
     pub(crate) fn of(spec: &crate::spec::TankSpec) -> Self {
+        grip_law();
         Self {
             track: spec.track.friction(),
             ground: crate::ground_types::GroundTypes::load_shipped().terrain_friction(),
@@ -112,7 +142,7 @@ impl GripParams {
     }
 }
 
-/// Bristle damping ratio: the elastic-zone bristle is an undamped integrator in the hull's
+/// Resolution: bristle damping ratio: the elastic-zone bristle is an undamped integrator in the hull's
 /// resonance loop — without its damping partner a large disturbance (spawn drop, explosion
 /// kick) can capture a saturated oscillation attractor (the literature's textbook pairing —
 /// TMeasy `F = c·x + d·ẋ`, Pacejka's Besselink term). LuGre sizes the bristle damper
@@ -126,13 +156,7 @@ impl GripParams {
 /// quantitatively dead: ζ_eq ≈ 0.002 at the observed amplitude, 79× short).
 const GRIP_ELEMENT_DAMPING_RATIO: f32 = 0.5;
 
-/// Elastic fraction of the grip budget: below `GRIP_BREAKAWAY·C` the state is a PURE spring
-/// (zero plastic flow) — the Dupont elasto-plastic branch that kills presliding drift
-/// (plain Dahl ratchets downhill under oscillating loads; our at-rest suspension limit
-/// cycle + MG recoil are exactly that). α blends smoothly to full Dahl flow at the cap.
-const GRIP_BREAKAWAY: f32 = 0.5;
-
-/// Element membership bounds, as fractions of the side's nominal weight: a pad ENTERS the
+/// Resolution: element membership bounds, as fractions of the side's nominal weight: a pad ENTERS the
 /// grip population above the high bound and STAYS down to the low bound (hysteresis).
 /// Membership reads the ELASTIC load only, never the damped load's sign — the damped load
 /// carries the support damper's separation transients, and keying reset to it erased a
@@ -149,7 +173,7 @@ const GRIP_BREAKAWAY: f32 = 0.5;
 const GRIP_ELEMENT_ENTER_FRACTION: f32 = 1e-3;
 const GRIP_ELEMENT_LEAVE_FRACTION: f32 = 2.5e-4;
 
-/// Contact-loss dwell (fixed 64 Hz ticks): a pad whose elastic load falls below the leave
+/// Resolution: contact-loss dwell (fixed 64 Hz ticks): a pad whose elastic load falls below the leave
 /// bound keeps its stored shear this long before departure is definitive and it forgets —
 /// its shear was relieved by ground it no longer touches. 125 ms rides out washboard
 /// corner-contact flicker and separation ticks; it is far shorter than a material link's
@@ -1186,15 +1210,16 @@ fn advance_element_strain(j0: Vec3, sdot: Vec3, normal: Vec3, dt: f32) -> Vec3 {
     let alpha = if j0.dot(sdot) < 0.0 {
         0.0
     } else {
-        let m = ((j0.length() / GRIP_SHEAR_MODULUS_M - GRIP_BREAKAWAY) / (1.0 - GRIP_BREAKAWAY))
+        let m = ((j0.length() / grip_shear_modulus_m() - grip_law().breakaway_share.value)
+            / (1.0 - grip_law().breakaway_share.value))
             .clamp(0.0, 1.0);
         m * m * (3.0 - 2.0 * m)
     };
-    let mut j1 = (j0 + sdot * dt) / (1.0 + alpha * (dt / GRIP_SHEAR_MODULUS_M) * speed);
+    let mut j1 = (j0 + sdot * dt) / (1.0 + alpha * (dt / grip_shear_modulus_m()) * speed);
     j1 -= j1.dot(normal) * normal;
     let j_len = j1.length();
-    if j_len > GRIP_SHEAR_MODULUS_M {
-        j1 *= GRIP_SHEAR_MODULUS_M / j_len;
+    if j_len > grip_shear_modulus_m() {
+        j1 *= grip_shear_modulus_m() / j_len;
     }
     j1
 }
@@ -1305,8 +1330,9 @@ fn update_grip_elements(
         // The damping partner, normalized per unit budget: σ1 = 2ζ√(σ0·m) with the element's
         // stiffness σ0 = μN/K and mass share m = N/g, at the LuGre-canonical ζ and this
         // contact's own pair μ.
-        let d_coef = 2.0 * GRIP_ELEMENT_DAMPING_RATIO / (GRIP_SHEAR_MODULUS_M * c.mu * 9.81).sqrt();
-        let mut g = j1 / GRIP_SHEAR_MODULUS_M + sdot * d_coef;
+        let d_coef = 2.0 * GRIP_ELEMENT_DAMPING_RATIO
+            / (grip_shear_modulus_m() * c.mu * super::derive::G).sqrt();
+        let mut g = j1 / grip_shear_modulus_m() + sdot * d_coef;
         let g_len = g.length();
         if g_len > 1.0 {
             g /= g_len;
@@ -1359,7 +1385,7 @@ fn emit_contact_forces(
         if c.has_plane && elements_mode {
             // Each element's own capped strain+damping direction, scaled by ITS elastic load
             // — isotropic, full μ in every direction. The kinetic regularizer is deliberately
-            // ABSENT: near zero slip its slope is μN/slip_saturation — a ~270 kN·s/m explicit
+            // ABSENT: its former near-zero slope was a ~270 kN·s/m explicit
             // damper per side that sits at the 64 Hz stability margin and rang the contact
             // modes. Under sustained slide the Dahl state saturates to the strain cap — the
             // saturated friction ellipse — so steady sliding converges; what changes is a

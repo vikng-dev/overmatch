@@ -950,7 +950,7 @@ pub struct TransmissionSpec {
     pub steering: SteeringSpec,
     /// Per-side service/parking brake capacity at the sprocket (N).
     pub brake_force: f32,
-    /// Static breakaway multiplier for an at-rest parking or hill-hold latch.
+    /// Static breakaway multiplier for an at-rest parking lever.
     pub brake_static_factor: f32,
 }
 

@@ -106,5 +106,4 @@ This file only shrinks, and a closed row is deleted, never struck through.
 
 | id | P | file::symbol | lens: class | finding, one line with the concrete case | fix, one line | owner |
 |---|---|---|---|---|---|---|
-| driving-03 | P3 | `src/command.rs::DriveInput`; `src/track/sim.rs::drive_target` | base-truths: Unstated control invariant | Unmanned retains the player's notch, so propulsion resumes when the empty-station condition ends. The Brake half is verified by the brake law. | Verify the stated empty-station lever-persistence contract. | law-drive-5-ceiling |
 | driving-04 | P3 | `src/net/death_flow_input.rs` | testing: Coupled assertion | Literal notch-step values make permitted `drive.ron` taste changes fail tests without breaking an invariant. | Read authored tastes from their owner and derive invariant expectations independently. | law-drive-2-clutch |

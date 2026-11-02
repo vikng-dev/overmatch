@@ -152,7 +152,7 @@ path-dependent transmission state inventoried below.
 
 ### Authoritative transmission-state inventory
 
-The current `TransmissionState` has **10 fields DERIVED by exhaustive struct inventory**, all
+The current `TransmissionState` has **8 fields DERIVED by exhaustive struct inventory**, all
 `REPLICATE-EXACT`; `DERIVE` and `LOCAL-VIEW` each contain **0 fields DERIVED**. `TankTransmission`
 replicates as one atomic server-authoritative component. Clients render the server stream and do
 not simulate it (ADR-0037). The exhaustive projection owns the hash and trace order.
@@ -164,9 +164,7 @@ not simulate it (ADR-0037). The exhaustive projection owns the hash and trace or
 - `park`: the persistent parking lever.
 - `omega_e`: crank speed, with raw float bits; constructed at idle from data at spawn.
 - `clutch`: `Out`, `Slip` or `In`; Slip retains a launch until its shaft catches its target.
-- `scheduler`: the current Driver readout and paid shift endpoints.
-- `hill_hold`: the transitional anti-rollback latch.
-- `hold_reengage_ticks`: the transitional latch's release cooldown.
+- `reversal_hold_ticks`: progress through the stopped reversal pause.
 
 All state is constructed synchronously from data at spawn. Mean/difference speeds, perceived
 load, candidate force, spare, brake forces and readouts are algebraic. The accepted Driver-law

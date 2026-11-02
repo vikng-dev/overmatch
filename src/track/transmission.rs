@@ -16,21 +16,6 @@ use super::forces::ForceParams;
 #[cfg(feature = "bitprobe")]
 use crate::bitprobe::TransmissionProbe;
 
-/// Observable state of the reserve scheduler. Kept compact and copyable because the same value is
-/// replicated sim memory and the readout/HUD contract.
-#[derive(Clone, Copy, PartialEq, Eq, Debug, Default, serde::Serialize, serde::Deserialize)]
-pub enum SchedulerState {
-    #[default]
-    Normal,
-    /// The paid gear change currently shown by the drive readout.
-    GradeShift {
-        from: u8,
-        to: u8,
-    },
-    HillHold,
-    GradeLimit,
-}
-
 /// The fixed simulation tick rate the shift countdown quantizes against (the module operates
 /// on fixed 64 Hz ticks). Resolution: shift times quantize to this solver clock.
 const TICK_HZ: f32 = 64.0;
@@ -53,12 +38,38 @@ struct EngineControl {
     rev_match_band_rpm: crate::provenance::Labelled<f32>,
     drag_throttle_release: crate::provenance::Labelled<f32>,
     motoring_drag_base_share: crate::provenance::Labelled<f32>,
+    controls_rest: ControlsRest,
+}
+
+/// Required construction of the released controls; no Driver policy supplies these rests.
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ControlsRest {
+    fuel_share: crate::provenance::Labelled<f32>,
+    steer: crate::provenance::Labelled<f32>,
+    clutch: ClutchRest,
+}
+
+#[derive(serde::Deserialize)]
+enum ClutchRest {
+    SpringEngaged,
 }
 
 const ENGINE_CONTROL_PATH: &str = "assets/driving/engine.ron";
 
 impl EngineControl {
     fn validate(&self) {
+        for (field, value) in [
+            ("controls_rest.fuel_share", &self.controls_rest.fuel_share),
+            ("controls_rest.steer", &self.controls_rest.steer),
+        ] {
+            assert!(
+                value.value.is_finite()
+                    && value.value == 0.0
+                    && matches!(value.label, crate::provenance::Provenance::Derived(_)),
+                "{ENGINE_CONTROL_PATH}: {field} must name the zero spring-return stop with Derived provenance; author the control construction"
+            );
+        }
         for (field, number) in [
             ("idle_catch_droop_rpm", &self.idle_catch_droop_rpm),
             ("idle_guard_band_rpm", &self.idle_guard_band_rpm),
@@ -98,8 +109,7 @@ fn engine_control() -> &'static EngineControl {
 }
 
 /// Resolution: regularise the drag sign only within one rpm of rest; the public readout
-/// resolves whole rpm. The nonnegative crank integration clips a crossing to rest;
-/// the healthy idle guard must not set a physical run-down time constant.
+/// resolves whole rpm. The healthy idle guard must not set a physical run-down time constant.
 const CRANK_DRAG_FADE_RPM: f32 = 1.0;
 
 /// Resolution: near-zero axis tolerance prevents input quantization from moving direction
@@ -107,7 +117,7 @@ const CRANK_DRAG_FADE_RPM: f32 = 1.0;
 const DEAD: f32 = 0.05;
 
 /// Resolution: at-rest belt-speed tolerance (m/s), below perceptible motion. The park latch
-/// retains full brake capacity after a breach; this tolerance controls entry only.
+/// retains full brake capacity after a breach. Direction, launch and static capacity share it.
 pub(crate) const PARK_ENGAGE_SPEED: f32 = 0.05;
 
 /// Shared Driver actuation parameters, admitted before play. Labels live with their data.
@@ -588,8 +598,8 @@ pub struct TransmissionState {
     pub steer_step: u8,
     /// Which ladder is engaged (reverse uses the R ladder).
     pub reverse: bool,
-    /// Park lever: set at rest and by a released low-speed stop. Under drive intent it
-    /// carries only the shortfall against rollback; without intent it holds both directions.
+    /// Park lever: set at rest and by a released low-speed stop. It holds both ways during
+    /// reversal pause/cut and without intent; launch carries only the rollback shortfall.
     /// A breached lever retains its dynamic brake capacity.
     pub park: bool,
     /// Engine crank speed ω_e (rad/s) — stage B's crank state. Initialized explicitly from
@@ -597,28 +607,25 @@ pub struct TransmissionState {
     pub omega_e: f32,
     /// Main clutch's physical regime, replicated with the crank and gear.
     pub clutch: ClutchState,
-    /// Scheduler/readout state.
-    pub scheduler: SchedulerState,
     /// Remaining stopped ticks before a held opposite request may change direction.
-    /// Moving against that request refreshes it; release cancels it without releasing park.
+    /// Any motion refreshes it; release cancels it without releasing park.
     pub reversal_hold_ticks: u8,
 }
 
 /// One field in the authoritative canonical transmission projection. Float values retain their raw
-/// bits; the scheduler carries its pinned trace/hash tag plus stable `from`/`to` slots.
+/// bits.
 #[derive(Clone, Copy, Debug)]
 pub(crate) enum TransmissionProjectionValue {
     U8(u8),
     Bool(bool),
     F32(f32),
-    Scheduler { tag: u8, from: u8, to: u8 },
 }
 
 /// The exhaustive canonical transmission inventory in its canonical replication/hash/trace order.
 /// Adding state fails this destructure until the field is classified exactly once here.
 pub(crate) fn transmission_state_projection(
     state: &TransmissionState,
-) -> [TransmissionProjectionValue; 9] {
+) -> [TransmissionProjectionValue; 8] {
     let TransmissionState {
         gear,
         shift_ticks,
@@ -627,29 +634,8 @@ pub(crate) fn transmission_state_projection(
         park,
         omega_e,
         clutch,
-        scheduler,
         reversal_hold_ticks,
     } = *state;
-    let scheduler = match scheduler {
-        SchedulerState::Normal => TransmissionProjectionValue::Scheduler {
-            tag: 0,
-            from: 0,
-            to: 0,
-        },
-        SchedulerState::GradeShift { from, to } => {
-            TransmissionProjectionValue::Scheduler { tag: 1, from, to }
-        }
-        SchedulerState::HillHold => TransmissionProjectionValue::Scheduler {
-            tag: 2,
-            from: 0,
-            to: 0,
-        },
-        SchedulerState::GradeLimit => TransmissionProjectionValue::Scheduler {
-            tag: 3,
-            from: 0,
-            to: 0,
-        },
-    };
     use TransmissionProjectionValue::{Bool, F32, U8};
     [
         U8(gear),
@@ -663,7 +649,6 @@ pub(crate) fn transmission_state_projection(
             ClutchState::Slip => 1,
             ClutchState::In => 2,
         }),
-        scheduler,
         U8(reversal_hold_ticks),
     ]
 }
@@ -691,7 +676,6 @@ impl TransmissionState {
             park: true,
             omega_e,
             clutch: ClutchState::Out,
-            scheduler: SchedulerState::Normal,
             reversal_hold_ticks: 0,
         }
     }
@@ -713,7 +697,7 @@ pub struct DriveReadout {
 /// Read the drivetrain operating point THROUGH THE LAW: the engaged gear from
 /// [`TransmissionState`] against the active ladder, and the engine rpm from the CRANK STATE
 /// ω_e (stage B — no belt-derived re-derivation: the crank slips against the shaft at
-/// launch, rev-matches through shifts, and idles while back-driven, and the display shows
+/// launch, rev-matches through shifts, and can turn backward when back-driven; the display shows
 /// exactly that state). Pure (no ECS), so the HUD and any legend share one implementation.
 pub fn readout(st: &TransmissionState, tp: &TransmissionParams) -> DriveReadout {
     let ladder: &[f32] = if st.reverse {
@@ -753,9 +737,8 @@ impl DriveSupply {
     };
 }
 
-/// One tick's joint input: the SHAPED drive axes plus the per-side mixed commands (the brake
-/// envelope consumes the sides; the drive and steering laws consume the axes), the pre-tick
-/// belt speeds, and this tick's summed longitudinal ground reactions.
+/// Shaped drive axes, requested intent, pre-tick belt speeds and ground reactions.
+/// The mixed side commands are probe telemetry only.
 pub struct TransmissionInput {
     /// The game's damage model: what the crew, engine and transmission each supply this tick.
     pub supply: DriveSupply,
@@ -802,16 +785,16 @@ pub struct TransmissionReport {
 fn engine_drag(tp: &TransmissionParams, omega_e: f32) -> f32 {
     let omega_mid = (tp.engine.idle_rpm + tp.engine.governed_rpm) * 0.5 * RPM_TO_RAD;
     let rise = engine_control().motoring_drag_base_share.value
-        + (1.0 - engine_control().motoring_drag_base_share.value) * (omega_e / omega_mid);
+        + (1.0 - engine_control().motoring_drag_base_share.value) * (omega_e.abs() / omega_mid);
     tp.peak_torque_nm
         * tp.drag_fraction
         * rise
-        * (omega_e / (CRANK_DRAG_FADE_RPM * RPM_TO_RAD)).clamp(0.0, 1.0)
+        * (omega_e / (CRANK_DRAG_FADE_RPM * RPM_TO_RAD)).clamp(-1.0, 1.0)
 }
 
 /// The game's damage model: the full-load curve is net of construction losses. Reconstruct
 /// the combustion torque it implies, scale only that source, and charge drag whole. The pedal
-/// blend retains the healthy net curve at every command. The crank and reserve scheduler share
+/// blend retains the healthy net curve at every command. The crank and gear selector share
 /// these three torques (N m), so an emptied engine keeps friction even under full command.
 fn engine_torques(
     tp: &TransmissionParams,
@@ -820,6 +803,17 @@ fn engine_torques(
     command: f32,
 ) -> [f32; 3] {
     let drag = engine_drag(tp, omega);
+    if omega < 0.0 {
+        return [0.0, 0.0, drag]; // A backward crank cannot fire.
+    }
+    if !supply.control_authority {
+        let fuel = engine_control().controls_rest.fuel_share.value;
+        return [
+            supply.engine_condition * fuel * (tp.torque_at(omega / RPM_TO_RAD) + drag),
+            0.0,
+            drag,
+        ];
+    }
     let pedal = (command / engine_control().drag_throttle_release.value).clamp(0.0, 1.0);
     let released = pedal * pedal * (3.0 - 2.0 * pedal);
     let rpm = omega / RPM_TO_RAD;
@@ -871,13 +865,12 @@ fn free_driver_force(
     clutch: ClutchState,
 ) -> f32 {
     let launch_rpm = tp.launch_omega(command) / RPM_TO_RAD;
-    let guard = tp.engine.idle_rpm - engine_control().idle_guard_band_rpm.value;
-    let floor = if idle_catch_capacity(tp, supply) > engine_drag(tp, guard * RPM_TO_RAD) {
-        guard
+    let floor = if shaft >= 0.0 {
+        idle_floor(tp, supply).unwrap_or(f32::NEG_INFINITY)
     } else {
-        0.0
+        f32::NEG_INFINITY
     };
-    let shaft_rpm = (shaft.max(0.0) * gear / tp.sprocket_radius / RPM_TO_RAD).max(floor);
+    let shaft_rpm = (shaft * gear / tp.sprocket_radius / RPM_TO_RAD).max(floor / RPM_TO_RAD);
     // A moving In clutch below idle is a lug, not a fresh launch.
     let rpm = if clutch == ClutchState::Slip {
         launch_rpm
@@ -1035,7 +1028,11 @@ fn choose_gear(
     command: f32,
     shaft: f32,
 ) {
-    if !inp.supply.control_authority || st.shift_ticks != 0 || inp.perceived_load.grip_n == 0.0 {
+    if !inp.supply.control_authority
+        || inp.supply.task_rate == 0.0
+        || st.shift_ticks != 0
+        || inp.perceived_load.grip_n == 0.0
+    {
         return; // No Driver, paid cut, or airborne: no gear decision.
     }
     let ladder = if st.reverse {
@@ -1043,7 +1040,6 @@ fn choose_gear(
     } else {
         &tp.gears_fwd
     };
-    st.scheduler = SchedulerState::Normal;
     if shaft.abs() < PARK_ENGAGE_SPEED {
         if let Some(gear) = launch_pick(
             tp,
@@ -1055,9 +1051,6 @@ fn choose_gear(
             if command > DEAD { command } else { 1.0 },
         ) {
             st.gear = gear;
-            st.scheduler = SchedulerState::Normal;
-        } else {
-            st.scheduler = SchedulerState::GradeLimit;
         }
         return;
     }
@@ -1085,10 +1078,6 @@ fn choose_gear(
         }
     }
     if best.0 != st.gear {
-        st.scheduler = SchedulerState::GradeShift {
-            from: st.gear,
-            to: best.0,
-        };
         st.gear = best.0;
         st.shift_ticks = tp.shift_ticks;
     }
@@ -1188,7 +1177,7 @@ fn swap_ladder_direction(
     st: &mut TransmissionState,
     inp: &TransmissionInput,
 ) {
-    if !inp.supply.control_authority {
+    if !inp.supply.control_authority || inp.supply.task_rate == 0.0 {
         return;
     }
     let opposite = inp.command.abs() >= DEAD && (inp.command < 0.0) != st.reverse;
@@ -1212,7 +1201,6 @@ fn swap_ladder_direction(
         st.reverse = inp.command < 0.0;
         st.gear = 1;
         st.shift_ticks = tp.shift_ticks;
-        st.scheduler = SchedulerState::Normal;
     }
 }
 
@@ -1275,7 +1263,7 @@ fn update_steer_detent(st: &mut TransmissionState, steer: f32) {
 /// a neutral turn. A released tank below first gear's idle speed stops and parks.
 fn update_park_latch(st: &mut TransmissionState, tp: &TransmissionParams, inp: &TransmissionInput) {
     // The game's damage model: an unstaffed station retains the player's lever position.
-    if !inp.supply.control_authority {
+    if !inp.supply.control_authority || inp.supply.task_rate == 0.0 {
         return;
     }
     let speed = inp.speeds[0].abs().max(inp.speeds[1].abs());
@@ -1303,11 +1291,11 @@ fn neutral_turn(inp: &TransmissionInput, mean: f32) -> bool {
         && mean.abs() < driver_actuation().neutral_speed_m_s.value
 }
 
-/// Shift windows, a two-sided parked hold, neutral turns and staffed zero-rate tasks open
+/// Shift windows, a two-sided parked hold and neutral turns open
 /// the clutch. Intent at rest below idle starts Slip regardless of the prior regime,
 /// retaining it until the shaft reaches its commanded launch speed.
-/// At rest an unstaffed station retains its neutral lever. A moving shift interruption expires
-/// with its window, and a released slipping clutch springs In.
+/// Without task work the clutch springs In, including at rest. A paid interruption still
+/// expires on its mechanical clock; it cannot be renewed without a Driver.
 fn update_clutch_state(
     st: &mut TransmissionState,
     tp: &TransmissionParams,
@@ -1317,14 +1305,13 @@ fn update_clutch_state(
     shaft_omega: f32,
 ) {
     let mean = (inp.speeds[0] + inp.speeds[1]) * 0.5;
-    st.clutch = if shifting || (st.park && (inp.brake || propulsive < DEAD)) {
+    st.clutch = if shifting {
         ClutchState::Out
-    } else if !inp.supply.control_authority {
-        match st.clutch {
-            ClutchState::Out if mean.abs() < PARK_ENGAGE_SPEED => ClutchState::Out,
-            _ => ClutchState::In,
+    } else if !inp.supply.control_authority || inp.supply.task_rate == 0.0 {
+        match engine_control().controls_rest.clutch {
+            ClutchRest::SpringEngaged => ClutchState::In,
         }
-    } else if inp.supply.task_rate == 0.0
+    } else if (st.park && (inp.brake || propulsive < DEAD))
         || (propulsive < DEAD
             && (mean.abs() < PARK_ENGAGE_SPEED
                 || (inp.steer.abs() >= DEAD && neutral_turn(inp, mean))))
@@ -1355,7 +1342,7 @@ fn update_clutch_state(
 ///     DYNAMICALLY (pivot power spools with the crank).
 ///
 /// The induced torque uses the crank's own rpm. The game's damage model scales combustion
-/// and the idle governor with their sources; construction motoring drag stays unscaled.
+/// and the Driver catch by task throughput; construction motoring drag stays unscaled.
 /// `engine_work` charges the physical sprocket work against combustion and stored crank
 /// energy, so steering loads the crank even while the main clutch is out.
 #[expect(
@@ -1366,6 +1353,7 @@ fn crank_free_torque(
     tp: &TransmissionParams,
     inp: &TransmissionInput,
     engaged: bool,
+    shifting: bool,
     propulsive: f32,
     m: f32,
     k: f32,
@@ -1375,21 +1363,26 @@ fn crank_free_torque(
 ) -> (f32, f32) {
     let u_fuel = if engaged {
         propulsive
-    } else {
-        let omega_match = m.abs() * k;
+    } else if inp.supply.control_authority && (inp.steer.abs() >= DEAD || shifting) {
+        let omega_match = if shifting { m.abs() * k } else { omega_idle };
         let omega_steer =
             omega_idle + (tp.peak_torque_rpm * RPM_TO_RAD - omega_idle) * inp.steer.abs().min(1.0);
         let omega_target = omega_match.max(omega_steer);
         ((omega_target - omega_e) / (engine_control().rev_match_band_rpm.value * RPM_TO_RAD))
             .clamp(0.0, 1.0)
+    } else {
+        engine_control().controls_rest.fuel_share.value
     };
 
     let supply = inp.supply;
     let rpm = omega_e / RPM_TO_RAD;
     let [tau_ind, tau_idle, tau_drag] = engine_torques(tp, supply, omega_e, u_fuel);
-    let tau_free = tau_ind + tau_idle - tau_drag;
+    // A discrete loss can stop the free crank, never drive it through zero. Clutch work
+    // may still back-drive the settled crank in either direction.
+    let stop_drag = tp.engine_inertia * omega_e.abs() / inp.dt;
+    let tau_free = tau_ind + tau_idle - tau_drag.clamp(-stop_drag, stop_drag);
 
-    let p_avail = supply.engine_condition * tp.torque_at(rpm) * omega_e;
+    let p_avail = supply.engine_condition * tp.torque_at(rpm) * omega_e.max(0.0);
     #[cfg(feature = "bitprobe")]
     {
         probe.u_fuel = u_fuel * supply.task_rate;
@@ -1443,7 +1436,7 @@ fn steering_force(
     let servo =
         |target_d: f32| (2.0 * ((target_d - d) * fp.inertia / dt + r_d)).clamp(-f_s_max, f_s_max);
     // The steering detent (`st.steer_step`) was already updated for THIS tick
-    // above the shift scheduler — one detent truth per tick; this law only
+    // before gear selection — one detent truth per tick; this law only
     // consumes it.
     let neutral = neutral_turn(inp, m);
     if neutral {
@@ -1475,9 +1468,7 @@ fn steering_force(
         // One |m| branch of the solve: on branch b, |m| linearizes as `b·m`, so
         // `g = jl·v_L + jr·v_R` with the branch's Jacobian. Returns λ (per-output
         // capacity clamp — straight-gear `max|j| = 1/2` gives the same 2× bound
-        // the servo uses), the Jacobian, and the m the tick lands on under that λ
-        // (brakes are disengaged in this regime: throttle is past the neutral
-        // band, so no park/service term perturbs the prediction).
+        // the servo uses), the Jacobian, and the pre-brake landing m. Brakes act later.
         let solve = |branch: f32| -> (f32, [f32; 2], f32) {
             let e = s * kappa * branch;
             let jl = (1.0 - e) / 2.0;
@@ -1549,11 +1540,12 @@ fn engine_work(
     #[cfg(feature = "bitprobe")] probe: &mut TransmissionProbe,
 ) -> EngineWork {
     let omega_free = (crank.omega_e + crank.tau_free * crank.dt / tp.engine_inertia)
-        .clamp(0.0, crank.omega_over);
+        .clamp(-crank.omega_over, crank.omega_over);
     // DERIVED: the unclamped constant-torque work is tau_free * dt times mean crank
     // speed, including construction losses. Guard clipping discards excess work.
     let energy = 0.5 * tp.engine_inertia * omega_free * omega_free;
-    let spendable = (energy - 0.5 * tp.engine_inertia * crank.omega_floor.powi(2)).max(0.0);
+    let spendable =
+        (energy - 0.5 * tp.engine_inertia * crank.omega_floor.max(0.0).powi(2)).max(0.0);
     let sides_at = |scale: f32| {
         [0, 1].map(|i| {
             let force = motor[i] * scale;
@@ -1595,7 +1587,7 @@ fn engine_work(
 }
 
 /// The capacity-limited stop force is R-Q-vI/dt. Under intent the lever takes only its
-/// rollback-opposing half, so brake force is zero exactly when propulsion outpulls the slope.
+/// rollback-opposing half after the reversal pause and cut, so useful launch motion is free.
 /// No temporal release decision or command/speed blend participates in that balance.
 fn apply_brake_stop_forces(
     q: &mut [f32; 2],
@@ -1604,10 +1596,18 @@ fn apply_brake_stop_forces(
     st: &TransmissionState,
     inp: &TransmissionInput,
     service: f32,
-) -> bool {
-    let one_way = !inp.brake && inp.command.abs() >= DEAD && fp.grip.is_some();
+) {
+    // Opposite intent owns the complete stop/pause/cut. Only the launch is one-way.
+    let reversing = inp.command.abs() >= DEAD && (inp.command < 0.0) != st.reverse;
+    let one_way = !inp.brake
+        && !reversing
+        && st.shift_ticks == 0
+        && st.clutch != ClutchState::Out
+        && inp.command.abs() >= DEAD
+        && inp.supply.control_authority
+        && inp.supply.task_rate > 0.0
+        && fp.grip.is_some();
     let lever = (st.park || one_way) && fp.grip.is_some(); // Geometry-only rigs have no terrain hold.
-    let mut holding = false;
     for (i, qi) in q.iter_mut().enumerate() {
         if !lever && service == 0.0 {
             continue;
@@ -1619,10 +1619,46 @@ fn apply_brake_stop_forces(
         } else {
             stop.clamp(-cap, cap)
         };
-        holding |= one_way && brake * inp.command > 0.0;
         *qi += brake;
     }
-    holding
+}
+
+/// The Driver holds the crank ceiling with service brakes. Below it no brake acts; beyond
+/// capacity the clutch's independent slip guard still bounds the crank. No gear change is paid.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "ceiling service reads construction, contact inertia, Driver state and the tick's crank/brake regime"
+)]
+fn apply_ceiling_brakes(
+    q: &mut [f32; 2],
+    tp: &TransmissionParams,
+    fp: &ForceParams,
+    st: &TransmissionState,
+    inp: &TransmissionInput,
+    crank: CrankTick,
+    shifting: bool,
+    service: f32,
+) {
+    if !inp.supply.control_authority
+        || inp.supply.task_rate == 0.0
+        || shifting
+        || st.clutch == ClutchState::Out
+        || service > 0.0
+        || st.park
+        || crank.omega_e < tp.max_curve_rpm() * RPM_TO_RAD
+    {
+        return;
+    }
+    let mean = (inp.speeds[0] + inp.speeds[1]) * 0.5;
+    let direction = if st.reverse { -1.0 } else { 1.0 };
+    let next =
+        mean + (q[0] + q[1] - inp.reactions[0] - inp.reactions[1]) * inp.dt / (2.0 * fp.inertia);
+    let ceiling = tp.max_curve_rpm() * RPM_TO_RAD / crank.k;
+    let overspeed = (next * direction - ceiling).max(0.0);
+    let brake = (overspeed * fp.inertia / inp.dt).min(tp.brake_capacity_n);
+    for force in q {
+        *force -= direction * brake;
+    }
 }
 
 /// Re-anchor only when the final belt speed implies a within-capacity clutch torque,
@@ -1630,7 +1666,7 @@ fn apply_brake_stop_forces(
 /// steering act after the coupling predictor, so its earlier clamp cannot certify this snap.
 /// An infeasible snap leaves the integrated slipping crank. The caller then caps its energy
 /// by the source budget left after sprocket work; a feasible clutch cannot create energy.
-/// `None` names an open clutch; an engine unable to idle uses rest as its lower guard.
+/// `None` names an open clutch; without a Driver catch the crank may turn backward.
 fn settle_crank(
     st: &mut TransmissionState,
     tp: &TransmissionParams,
@@ -1677,11 +1713,11 @@ fn settle_crank(
 ///
 /// The game's damage model: the stall guard protects an engine that can idle, whose saturated
 /// Driver-operated catch exceeds its motoring drag at the guard point. An engine short of that (no
-/// combustion, or too little) has nothing to guard, so its floor is rest: the crank runs down
+/// Driver catch, or too little) has no positive floor: the crank runs down
 /// under drag or follows the belt through the clutch, and the guard never pulls the belt to
 /// hold a crank speed the engine cannot.
 ///
-/// The over-rev slip guard is independent of gear choice.
+/// The symmetric over-rev slip guard is independent of gear choice.
 fn crank_guards(
     tp: &TransmissionParams,
     inp: &TransmissionInput,
@@ -1689,22 +1725,35 @@ fn crank_guards(
     propulsive: f32,
     tau_free: f32,
 ) -> (f32, f32) {
-    let guard_point =
-        (tp.engine.idle_rpm - engine_control().idle_guard_band_rpm.value) * RPM_TO_RAD;
-    let can_idle = idle_catch_capacity(tp, inp.supply) > engine_drag(tp, guard_point);
+    let over = (tp.max_curve_rpm() + OVERREV_MARGIN_RPM) * RPM_TO_RAD;
     let floor = if st.clutch == ClutchState::Slip && tau_free > 0.0 {
         tp.launch_omega(propulsive)
-    } else if can_idle {
-        guard_point
+    } else if st.omega_e >= 0.0 {
+        idle_floor(tp, inp.supply).unwrap_or(-over)
     } else {
-        0.0
+        -over
     };
     // Recovery cannot create crank energy: below the floor, spool before transmitting torque.
-    let reachable = (st.omega_e + tau_free * inp.dt / tp.engine_inertia).max(0.0);
+    let reachable = st.omega_e + tau_free * inp.dt / tp.engine_inertia;
     (
         floor.min(reachable),
         (tp.max_curve_rpm() + OVERREV_MARGIN_RPM) * RPM_TO_RAD,
     )
+}
+
+/// The saturated Driver catch alone justifies a positive stall floor.
+fn idle_floor(tp: &TransmissionParams, supply: DriveSupply) -> Option<f32> {
+    let point = (tp.engine.idle_rpm - engine_control().idle_guard_band_rpm.value) * RPM_TO_RAD;
+    (idle_catch_capacity(tp, supply) > engine_drag(tp, point)).then_some(point)
+}
+
+/// Construction spring return used at the adapter edge before any Driver policy.
+pub(crate) fn unstaffed_axes() -> super::drive::DriveAxes {
+    let rest = &engine_control().controls_rest;
+    super::drive::DriveAxes {
+        throttle: rest.fuel_share.value,
+        steer: rest.steer.value,
+    }
 }
 
 /// The input half of the optional drivetrain trace, kept out of the physical solve.
@@ -1776,9 +1825,6 @@ pub fn step(
     #[cfg(feature = "bitprobe")]
     let mut bitprobe = input_probe(st, inp, m, d);
 
-    if st.shift_ticks == 0 {
-        st.scheduler = SchedulerState::Normal;
-    }
     swap_ladder_direction(tp, st, inp);
     update_park_latch(st, tp, inp);
 
@@ -1819,6 +1865,7 @@ pub fn step(
         tp,
         inp,
         engaged,
+        shifting,
         propulsive,
         m,
         k,
@@ -1890,10 +1937,8 @@ pub fn step(
         f_c / 2.0 - f_s / 2.0 + lambda * j[1],
     ];
 
-    let holding = apply_brake_stop_forces(&mut q, tp, fp, st, inp, service);
-    if holding && !shifting && st.scheduler != SchedulerState::GradeLimit {
-        st.scheduler = SchedulerState::HillHold;
-    }
+    apply_ceiling_brakes(&mut q, tp, fp, st, inp, crank, shifting, service);
+    apply_brake_stop_forces(&mut q, tp, fp, st, inp, service);
 
     // --- Integrate both sides simultaneously: I·v̇ = Q − R (the reaction ALWAYS applies).
     let next = [
@@ -1910,9 +1955,10 @@ pub fn step(
         #[cfg(feature = "bitprobe")]
         &mut bitprobe,
     );
-    st.omega_e = st
-        .omega_e
-        .min((2.0 * work.crank_energy / tp.engine_inertia).sqrt());
+    st.omega_e = st.omega_e.signum()
+        * st.omega_e
+            .abs()
+            .min((2.0 * work.crank_energy / tp.engine_inertia).sqrt());
     #[cfg(feature = "bitprobe")]
     {
         let sample = (dir * m, g, dir * f_c, propulsive);

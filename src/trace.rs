@@ -592,19 +592,14 @@ fn record_tick(
                     ])
                 })
                 .collect();
-            // Same stable field order as `htrn`; the scheduler occupies tag/from/to slots so the
-            // verbose diagnostic shape stays fixed across variants. Null on a replica of a tank this
-            // client does not own: the transmission is owner-only on the wire.
+            // Canonical transmission order; null on non-owned replicas (owner-only wire state).
             let trn = transmission.map_or(Value::Null, |transmission| {
-                let mut trn = Vec::with_capacity(18);
+                let mut trn = Vec::with_capacity(8);
                 for field in transmission_state_projection(&transmission.0) {
                     match field {
                         TransmissionProjectionValue::U8(value) => trn.push(Value::from(value)),
                         TransmissionProjectionValue::Bool(value) => trn.push(Value::from(value)),
                         TransmissionProjectionValue::F32(value) => trn.push(num(value)),
-                        TransmissionProjectionValue::Scheduler { tag, from, to } => {
-                            trn.extend([Value::from(tag), Value::from(from), Value::from(to)]);
-                        }
                     }
                 }
                 Value::Array(trn)

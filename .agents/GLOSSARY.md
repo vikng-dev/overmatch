@@ -240,7 +240,7 @@ The Driver's choice of a permitted gear from its spare force after a shift, agai
 A fixed-radii steering state selected with hysteresis: straight, wide radius, or tight radius. While a turn detent is engaged, the transmission constrains belt-speed difference to the declared curvature and defers predictor-blind upshifts.
 
 **Hill-hold**:
-The brake latch holding a tank on a grade until its selected launch gear supplies the required force. Grip remains the belt elements' strain law; hill-hold is drivetrain state, not a world anchor.
+The park lever's support against rollback during launch, carrying only the shortfall the engaged gear cannot supply.
 _Avoid_: grip anchor
 
 **Engine-brake / coast-down**:

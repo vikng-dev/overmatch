@@ -241,10 +241,7 @@ pub(super) fn hash_tank_state(state: &TankState) -> TankStateHash {
     }
     let blt = hbl.finish();
 
-    // The transmission module owns the exhaustive REV-14 field order and pinned scheduler tags.
-    // This encoder preserves the original byte stream: scheduler from/to bytes exist only for a
-    // GradeShift tag. An absent transmission (a replica's: owner-only on the wire) hashes as the
-    // empty stream, which no present one can produce — every projection writes all 10 fields.
+    // Owner-only transmission replicas may be absent; present state writes all eight fields.
     let mut htr = Fnv64::new();
     for field in transmission
         .map(|transmission| transmission_state_projection(&transmission.0))
@@ -255,13 +252,6 @@ pub(super) fn hash_tank_state(state: &TankState) -> TankStateHash {
             TransmissionProjectionValue::U8(value) => htr.write_u8(value),
             TransmissionProjectionValue::Bool(value) => htr.write_bool(value),
             TransmissionProjectionValue::F32(value) => htr.write_f32(value),
-            TransmissionProjectionValue::Scheduler { tag, from, to } => {
-                htr.write_u8(tag);
-                if tag == 1 {
-                    htr.write_u8(from);
-                    htr.write_u8(to);
-                }
-            }
         }
     }
     let trn = htr.finish();
@@ -498,7 +488,6 @@ pub(crate) fn canonical_tank_state_digest(state: &TankState) -> CanonicalTankSta
 mod tests {
     use super::*;
     use crate::tank::WeaponState;
-    use crate::track::transmission::SchedulerState;
 
     /// The streaming hasher is FNV-1a 64 over little-endian bytes, so an offline tool re-derives
     /// every trace hash: the published vector for `"a"` (0xaf63dc4c8601ec8c) and a u32 fed as its
@@ -566,7 +555,6 @@ mod tests {
             park: true,
             omega_e: 250.0,
             clutch: crate::track::transmission::ClutchState::Out,
-            scheduler: SchedulerState::GradeShift { from: 5, to: 3 },
             reversal_hold_ticks: 11,
         })
     }
@@ -932,14 +920,14 @@ mod tests {
         assert_ne!(baseline, hash(&gate), "work anchor");
     }
 
-    /// Every field in the authoritative 9-field inventory affects the exact transmission stream.
+    /// Every field in the authoritative 8-field inventory affects the exact transmission stream.
     #[test]
     fn transmission_inventory_fields_all_affect_hash() {
         let (p, q, lv, av, drive, sim) = sample();
         let grip = TrackGrip::default();
         let base = sample_transmission();
         let base_hash = hash_sample((p, q, lv, av), &drive, &grip, &base, &sim).trn;
-        let mut variants = [base; 9];
+        let mut variants = [base; 8];
         variants[0].0.gear = variants[0].0.gear.wrapping_add(1);
         variants[1].0.shift_ticks = variants[1].0.shift_ticks.wrapping_add(1);
         variants[2].0.steer_step = variants[2].0.steer_step.wrapping_add(1);
@@ -947,8 +935,7 @@ mod tests {
         variants[4].0.park = !variants[4].0.park;
         variants[5].0.omega_e = f32::from_bits(variants[5].0.omega_e.to_bits() ^ 1);
         variants[6].0.clutch = crate::track::transmission::ClutchState::Slip;
-        variants[7].0.scheduler = SchedulerState::HillHold;
-        variants[8].0.reversal_hold_ticks = variants[8].0.reversal_hold_ticks.wrapping_add(1);
+        variants[7].0.reversal_hold_ticks = variants[7].0.reversal_hold_ticks.wrapping_add(1);
 
         for (index, variant) in variants.iter().enumerate() {
             let hash = hash_sample((p, q, lv, av), &drive, &grip, variant, &sim).trn;
@@ -990,8 +977,8 @@ mod tests {
         assert_eq!(
             base,
             CanonicalTankStateDigest {
-                simulation: 6_398_580_170_003_897_360,
-                rollback: 16_574_472_650_204_573_274,
+                simulation: 16_384_693_635_036_610_984,
+                rollback: 4_922_620_954_746_276_986,
                 position: 5_276_285_167_157_175_194,
                 rotation: 5_407_327_877_548_523_030,
                 linear_velocity: 8_825_002_124_784_658_797,
@@ -1001,7 +988,7 @@ mod tests {
                 weapon_gate: 18_442_197_694_147_503_009,
                 recoil: 12_037_784_973_900_930_602,
                 belts: 16_317_528_332_690_472_771,
-                transmission: 12_149_225_890_944_991_752,
+                transmission: 7_604_051_283_656_621_841,
                 elements: 6_815_987_066_798_852_301,
                 rounds_fired: 17_086_694_953_553_481_862,
             }

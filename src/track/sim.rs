@@ -221,7 +221,7 @@ pub(crate) fn coarse_grip_digest(elements: &TrackGripElements) -> u32 {
                 write(byte);
             }
             for axis in strain.to_array() {
-                let bin = (axis / super::forces::GRIP_SHEAR_MODULUS_M * 127.0)
+                let bin = (axis / super::forces::grip_shear_modulus_m() * 127.0)
                     .round()
                     .clamp(-127.0, 127.0) as i8;
                 write(bin.to_le_bytes()[0]);
@@ -624,9 +624,12 @@ pub(crate) fn belt_tick<O: TerrainOracle>(
         DriveIntent::Axes(axes) => (axes, false),
         DriveIntent::Brake => (DriveAxes::default(), true),
         DriveIntent::Unmanned => {
-            // No one holds the controls, so none stays applied while it slews out.
-            *rig.signal = DriveSignal::default();
-            (DriveAxes::default(), false)
+            let rest = super::transmission::unstaffed_axes();
+            *rig.signal = DriveSignal {
+                throttle: rest.throttle,
+                steer: rest.steer,
+            };
+            (rest, false)
         }
     };
     let shaped = shape_drive(
@@ -2210,6 +2213,46 @@ mod tests {
             hull.speed > super::transmission::PARK_ENGAGE_SPEED,
             "ending repair must resume the player's notch"
         );
+    }
+
+    /// The game's damage model: staffing masks a retained player request; restoring the station
+    /// resumes propulsion without another input edge. Clearing that request or retaining control
+    /// authority while the Driver is out of action breaks this adapter contract.
+    #[test]
+    fn staffing_resumes_the_retained_notch() {
+        let mut hull = DrivenHull::new();
+        hull.app
+            .world_mut()
+            .entity_mut(hull.driver)
+            .insert(crate::damage::Dead);
+        let notch = super::super::drive::drive_feel().notch_step.0;
+        for _ in 0..64 {
+            hull.tick(notch, 0.0);
+        }
+        assert_eq!(
+            hull.app
+                .world()
+                .get::<DriveSignal>(hull.root)
+                .unwrap()
+                .throttle,
+            super::transmission::unstaffed_axes().throttle
+        );
+        hull.app
+            .world_mut()
+            .entity_mut(hull.driver)
+            .remove::<crate::damage::Dead>();
+        for _ in 0..64 * 5 {
+            hull.tick(notch, 0.0);
+        }
+        assert_eq!(
+            hull.app
+                .world()
+                .get::<DriveSignal>(hull.root)
+                .unwrap()
+                .throttle,
+            notch
+        );
+        assert!(hull.speed > super::transmission::PARK_ENGAGE_SPEED);
     }
 
     /// The controller's deceleration estimate must scale with the whole vehicle rather than

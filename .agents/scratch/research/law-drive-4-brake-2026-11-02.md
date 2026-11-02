@@ -32,7 +32,7 @@ stations. This record owns this lane's measurements, dispositions and decisions.
 - HUD ratchet: show effective held input, centralize possession resets, use a two-valued press
   direction, avoid unchanged node writes, derive gauge bottom from row height and a Taste gap,
   and assert required HUD rows. The offline auto-fire injection is test-only.
-- Protocol revision 75 deliberately names the nine-field drivetrain state and its new wire pin.
+- Protocol revision 76 deliberately names the nine-field drivetrain state and its new wire pin.
   The trace/bitprobe projection carries the countdown. No client prediction, tank exception,
   physical contact law, brake capacity, engine curve or tank data was introduced or retuned.
 

@@ -1,0 +1,4 @@
+(
+    shear_modulus_m: (0.075, StandIn("effective Janosi-Hanamoto shear distance pending pad/ground measurements; the 75 mm regularization keeps the 64 Hz coupled contact modes stable, not a measured rubber property")),
+    breakaway_share: (0.5, StandIn("Dupont elastic-zone share pending measured presliding curves; spring below this budget share, smooth plastic flow above")),
+)
