@@ -15,8 +15,9 @@ boundary use the same parameter. Each system instance retains its own change-det
 The parameter visits children with changed local transforms, poses or attachments, and the
 attached colliders of bodies with changed poses, kinds or collider lists. Bevy still scans the
 change ticks of matching entities; unchanged children incur no pose composition or writes. A
-removed disabling component triggers a membership refresh. Manual `ColliderOf` attachments do
-not require a Transform `Children` component on the parent.
+re-enabled entity is placed from the patched Avian's buffered `Reenabled` message, which every
+instance reads through its own cursor at any frame-to-tick ratio. Manual `ColliderOf`
+attachments do not require a Transform `Children` component on the parent.
 
 Pose expressions are shared with Avian and component writes compare every float bit, including
 signed zeros and NaN payloads. Overmatch replicates no child collider (tank roots carry

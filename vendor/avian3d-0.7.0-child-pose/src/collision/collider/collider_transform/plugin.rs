@@ -45,6 +45,11 @@ impl Plugin for ColliderTransformPlugin {
         // trees that have no colliders.
         app.add_plugins(AncestorMarkerPlugin::<ColliderMarker>::default());
 
+        // OVERMATCH PATCH: every child placement boundary reads re-enabled entities.
+        if !app.is_plugin_added::<ReenabledPlugin>() {
+            app.add_plugins(ReenabledPlugin);
+        }
+
         // Propagate `ColliderTransform`s if there are new colliders.
         // Only traverses trees with `AncestorMarker<ColliderMarker>`.
         app.add_systems(
@@ -116,29 +121,27 @@ pub struct ChildColliderPoses<'w, 's> {
             )>,
         ),
     >,
-    removals: &'w bevy::ecs::lifecycle::RemovedComponentMessages,
-    query_filters: Option<Res<'w, bevy::ecs::entity_disabling::DefaultQueryFilters>>,
-    enabled_cursors: Local<'s, child_pose::EnabledCursors>,
+    body_colliders: Query<
+        'w,
+        's,
+        (
+            &'static Position,
+            &'static Rotation,
+            &'static RigidBodyColliders,
+        ),
+        With<RigidBody>,
+    >,
+    reenabled: MessageReader<'w, 's, Reenabled>,
+    query_filters: Res<'w, bevy::ecs::entity_disabling::DefaultQueryFilters>,
+    watched: Res<'w, WatchedDisabling>,
 }
 
 impl ChildColliderPoses<'_, '_> {
-    /// Place changed child poses, writing only changed bits. Re-enabling a default-filtered
-    /// entity can change membership without a pose write, so that boundary visits every child.
+    /// Place changed child poses, writing only changed bits. A re-enabled entity joins the
+    /// default-filtered queries without a pose write, so each [`Reenabled`] places that child, or
+    /// that body's attached colliders, once.
     pub fn update(&mut self) {
-        let visit_all = self
-            .query_filters
-            .as_ref()
-            .is_some_and(|filters| self.enabled_cursors.any_enabled(filters, self.removals));
-        if visit_all {
-            for (local, mut position, mut rotation, owner) in &mut self.colliders.p1() {
-                // A disabled parent has no active physics pose to propagate.
-                let Ok((at, turn)) = self.bodies.get(owner.body) else {
-                    continue;
-                };
-                child_pose::write(local, at, turn, &mut position, &mut rotation);
-            }
-            return;
-        }
+        self.watched.assert_covers(&self.query_filters);
         for (local, mut position, mut rotation, owner) in &mut self.colliders.p0() {
             // A disabled parent has no active physics pose to propagate.
             let Ok((at, turn)) = self.bodies.get(owner.body) else {
@@ -155,7 +158,98 @@ impl ChildColliderPoses<'_, '_> {
                 }
             }
         }
+        for &Reenabled { entity } in self.reenabled.read() {
+            // The entity is a child collider, a body, or neither. One still disabled by another
+            // component, or despawning, matches no query; its last removal announces it again.
+            if let Ok((local, mut position, mut rotation, owner)) = children.get_mut(entity)
+                && let Ok((at, turn)) = self.bodies.get(owner.body)
+            {
+                child_pose::write(local, at, turn, &mut position, &mut rotation);
+            }
+            if let Ok((at, turn, colliders)) = self.body_colliders.get(entity) {
+                for collider in colliders {
+                    if let Ok((local, mut position, mut rotation, _)) = children.get_mut(collider) {
+                        child_pose::write(local, at, turn, &mut position, &mut rotation);
+                    }
+                }
+            }
+        }
     }
+}
+
+/// OVERMATCH PATCH: an entity that lost a disabling component of [`DefaultQueryFilters`].
+///
+/// Re-enabling moves no change tick, and Bevy clears its removal messages every `App::update`
+/// (`World::clear_trackers`), so a boundary in the fixed schedule, which runs every few frames,
+/// misses a removal made in the frames between its runs. A [`Message`] lives until a fixed step has
+/// run (`signal_message_update_system` in `FixedPostUpdate`), so every reader in or outside the
+/// fixed schedule sees each re-enable once, through its own cursor. The entity may still carry
+/// another disabling component, or be despawning: a reader admits it only where its
+/// default-filtered queries now match it.
+///
+/// [`DefaultQueryFilters`]: bevy::ecs::entity_disabling::DefaultQueryFilters
+#[derive(Message, Clone, Copy, Debug)]
+pub struct Reenabled {
+    /// The entity a disabling component left.
+    pub entity: Entity,
+}
+
+/// OVERMATCH PATCH: writes [`Reenabled`] from an observer on the removal of every disabling
+/// component. Components registered by plugins built after this one are watched from
+/// [`Plugin::finish`]; one registered later still is refused by every placement boundary
+/// ([`WatchedDisabling::assert_covers`]), since its removals would go unannounced.
+pub struct ReenabledPlugin;
+
+impl Plugin for ReenabledPlugin {
+    fn build(&self, app: &mut App) {
+        app.add_message::<Reenabled>()
+            .init_resource::<WatchedDisabling>();
+        watch_new_disabling(app.world_mut());
+    }
+
+    fn finish(&self, app: &mut App) {
+        watch_new_disabling(app.world_mut());
+    }
+}
+
+/// The disabling components whose removal writes [`Reenabled`].
+#[derive(Resource, Default)]
+pub struct WatchedDisabling(Vec<bevy::ecs::component::ComponentId>);
+
+impl WatchedDisabling {
+    /// Panics if a disabling component's removal would not be announced.
+    pub fn assert_covers(&self, filters: &bevy::ecs::entity_disabling::DefaultQueryFilters) {
+        for id in filters.disabling_ids() {
+            assert!(
+                self.0.contains(&id),
+                "disabling component {id:?} was registered after ReenabledPlugin::finish: its \
+                 removals write no Reenabled, and a re-enabled child would keep a stale pose"
+            );
+        }
+    }
+}
+
+fn watch_new_disabling(world: &mut World) {
+    let watched = world.resource::<WatchedDisabling>();
+    let new: Vec<_> = world
+        .resource::<bevy::ecs::entity_disabling::DefaultQueryFilters>()
+        .disabling_ids()
+        .filter(|id| !watched.0.contains(id))
+        .collect();
+    if new.is_empty() {
+        return;
+    }
+    world
+        .resource_mut::<WatchedDisabling>()
+        .0
+        .extend(new.iter().copied());
+    world.spawn(Observer::new(announce_reenabled).with_components(new));
+}
+
+fn announce_reenabled(removed: On<Remove>, mut reenabled: MessageWriter<Reenabled>) {
+    reenabled.write(Reenabled {
+        entity: removed.entity,
+    });
 }
 
 /// Update child collider poses before narrow phase. Post-step consumers use the same parameter
@@ -168,11 +262,6 @@ pub fn update_child_collider_position(mut poses: ChildColliderPoses) {
 // `update_child_collider_position`.
 mod child_pose {
     use super::*;
-    use alloc::vec::Vec;
-    use bevy::ecs::component::ComponentId;
-    use bevy::ecs::entity_disabling::DefaultQueryFilters;
-    use bevy::ecs::lifecycle::{RemovedComponentEntity, RemovedComponentMessages};
-    use bevy::ecs::message::MessageCursor;
 
     /// Writes the pose the child takes from its body, each component only where its bits change.
     /// The stored bits are those an unconditional write leaves; only the change ticks of an
@@ -197,38 +286,6 @@ mod child_pose {
         }
         if !same_bits_rotation(**rotation, new_rotation) {
             **rotation = new_rotation;
-        }
-    }
-
-    /// One removal cursor per disabling component, so a removal (an entity re-enabled) is seen
-    /// once.
-    #[derive(Default)]
-    pub struct EnabledCursors(Vec<(ComponentId, MessageCursor<RemovedComponentEntity>)>);
-
-    impl EnabledCursors {
-        /// Whether a disabling component was removed from any entity since the last call.
-        pub(super) fn any_enabled(
-            &mut self,
-            query_filters: &DefaultQueryFilters,
-            removals: &RemovedComponentMessages,
-        ) -> bool {
-            let mut any = false;
-            for id in query_filters.disabling_ids() {
-                let Some(messages) = removals.get(id) else {
-                    continue;
-                };
-                let index = match self.0.iter().position(|(known, _)| *known == id) {
-                    Some(index) => index,
-                    None => {
-                        self.0.push((id, MessageCursor::default()));
-                        self.0.len() - 1
-                    }
-                };
-                let cursor = &mut self.0[index].1;
-                any |= !cursor.is_empty(messages);
-                cursor.clear(messages);
-            }
-            any
         }
     }
 

@@ -37,7 +37,10 @@ system's last run already holds the bits the pass would compute. Visit:
   `Changed` body query, walking `RigidBodyColliders`);
 - every child, after the removal of any disabling component (`DefaultQueryFilters::disabling_ids`,
   read through `RemovedComponentMessages`): a re-enabled entity matches the queries again without
-  any of those ticks moving.
+  any of those ticks moving. Bevy clears those messages every `App::update`, so this holds only
+  for an instance that runs every frame; one in `FixedPostUpdate` loses a removal made in the
+  frames between steps. Overmatch's vendored copy reads a buffered message written by an observer
+  on each disabling component's removal instead (`vendor/avian3d-0.7.0-child-pose/OVERMATCH_PATCH.md`).
 
 An entity that loses its `RigidBody` loses its `ColliderOf` with it (avian's `on_body_removed`), so
 it re-enters the child query only through a `ColliderOf` insertion, which the filter sees. The pass

@@ -30,9 +30,19 @@ of pose and shape: skipping it for an unchanged pose leaves the same AABB), `wak
 application's boundaries: Avian before narrow phase, the game's walk after physics, and
 lightyear's frame replication. It reads changed local poses, attachments and own poses, plus the
 collider lists of bodies whose pose, kind or collider membership changed. Unchanged inputs cost
-change-tick scans but no pose composition. Removing a default disabling component refreshes
-membership even without a pose write. A manually attached collider follows `ColliderOf` through
+change-tick scans but no pose composition. A manually attached collider follows `ColliderOf` through
 `RigidBodyColliders`, without requiring a Transform `Children` component on its body.
+
+Re-enabling an entity (removing a disabling component of `DefaultQueryFilters`) changes membership
+without a pose write. Bevy clears its removal messages every `App::update` (`World::clear_trackers`),
+so a boundary in the fixed schedule that read them lost a re-enable made in the frames between
+steps. `ReenabledPlugin`, added by `ColliderTransformPlugin`, writes the buffered message
+`Reenabled` from an observer on each disabling component's removal; a `Message` lives until a fixed
+step has run, and each boundary reads it through its own cursor, placing the re-enabled child, or
+the re-enabled body's attached colliders. Disabling components registered by later plugins are
+watched from `finish`; one registered after that is refused by every boundary
+(`WatchedDisabling::assert_covers`). The game's collider history (`src/ballistics/motion.rs`) reads
+the same message.
 
 Guard: `src/tests/avian_child_pose_churn.rs`; the production walk boundary is also exercised by
 `src/ballistics/motion.rs` tests. The current inspection is

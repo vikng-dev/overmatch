@@ -2,7 +2,10 @@
 
 mod plugin;
 
-pub use plugin::{ChildColliderPoses, ColliderTransformPlugin, update_child_collider_position};
+pub use plugin::{
+    ChildColliderPoses, ColliderTransformPlugin, Reenabled, ReenabledPlugin, WatchedDisabling,
+    update_child_collider_position,
+};
 
 use crate::prelude::*;
 use bevy::prelude::*;

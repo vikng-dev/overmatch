@@ -300,8 +300,8 @@ fn lightyears_child_pass_carries_a_child_through_each_input_change() {
 }
 
 /// A child disabled while its body moved is carried once it is enabled again. Its re-enabling moves
-/// none of the change ticks the pass reads, so the pass visits every child after a disabling
-/// component's removal.
+/// none of the change ticks the pass reads, so the pass places each entity a `Reenabled` message
+/// names.
 #[test]
 fn lightyears_child_pass_carries_a_child_re_enabled_after_its_body_moved() {
     let mut app = physics_app();
@@ -317,6 +317,61 @@ fn lightyears_child_pass_carries_a_child_re_enabled_after_its_body_moved() {
         pose(world, child),
         carried_pose(world, child),
         "lightyear_avian's child pass left a re-enabled child where its body stood"
+    );
+}
+
+/// Avian's pre-physics pass carries a child re-enabled in `Update` frames before the next fixed
+/// step, after its body moved. Bevy clears removal messages every frame and the dedicated server
+/// runs about 3.3 frames per fixed tick (MEASURED, `.agents/scratch/perf-2026-11-01/server-tick.md`),
+/// so a pass that read those messages at the step lost the re-enable and kept the child where its
+/// body stood. Who relies on it: the walk, which reads the pose this pass leaves. Fixture cadence:
+/// four frames per tick.
+#[test]
+fn avians_pass_carries_a_child_re_enabled_frames_before_the_next_step() {
+    #[derive(Resource, Default)]
+    struct Steps(u32);
+    #[derive(Resource, Default)]
+    struct Enable(Option<Entity>);
+    let mut app = physics_app();
+    let (body, child) = standing_compound(&mut app);
+    app.world_mut().entity_mut(child).insert(Disabled);
+    app.world_mut().get_mut::<Position>(body).expect("pose").0 += Vec3::X;
+    app.update();
+    // DERIVED: a quarter of the 64 Hz step, 15 625 us / 4.
+    app.insert_resource(TimeUpdateStrategy::ManualDuration(Duration::from_nanos(
+        3_906_250,
+    )))
+    .init_resource::<Steps>()
+    .init_resource::<Enable>()
+    .add_systems(FixedPostUpdate, |mut steps: ResMut<Steps>| steps.0 += 1)
+    .add_systems(
+        Update,
+        |mut enable: ResMut<Enable>, mut commands: Commands| {
+            if let Some(entity) = enable.0.take() {
+                commands.entity(entity).remove::<Disabled>();
+            }
+        },
+    );
+    let stepped = |app: &mut App| {
+        let before = app.world().resource::<Steps>().0;
+        app.update();
+        app.world().resource::<Steps>().0 != before
+    };
+    while !stepped(&mut app) {}
+    app.world_mut().resource_mut::<Enable>().0 = Some(child);
+    let mut frames_between = 0;
+    while !stepped(&mut app) {
+        frames_between += 1;
+    }
+    assert!(
+        frames_between >= 2,
+        "the removal must outlive Bevy's two-frame removal buffer: {frames_between} frames"
+    );
+    let world = app.world();
+    assert_eq!(
+        pose(world, child),
+        carried_pose(world, child),
+        "Avian's pass left a child re-enabled between steps where its body stood"
     );
 }
 
@@ -352,6 +407,7 @@ fn physics_and_replication_share_the_changed_input_placement_law() {
 #[test]
 fn a_manually_attached_child_follows_its_body_without_transform_children() {
     let mut app = App::new();
+    app.add_plugins(avian3d::collision::collider::collider_transform::ReenabledPlugin);
     let body = app
         .world_mut()
         .spawn((
