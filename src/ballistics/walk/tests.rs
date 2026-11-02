@@ -1336,17 +1336,7 @@ fn a_wholly_emitted_exchange_retains_zero_without_subtractive_roundoff() {
     let transit = walk_disc(&transit_disc(&request, &slabs, 3.0), &volumes, &laws).unwrap();
     let (round, state) = solid(AP_88_CAPABILITY);
     let event = &transit.events[0];
-    let advanced = advance_through(
-        &round,
-        state,
-        &event.encounters,
-        &Limits { rest: 0.0 },
-        &Geometry {
-            axis: transit.axis,
-            entrance_normal: request.entrance.normal,
-        },
-    )
-    .unwrap();
+    let advanced = advance_through(&round, state, &event.encounters, &Limits { rest: 0.0 });
     let (_, mut carried) = spall_sources(
         &round,
         &event.exits,
@@ -3627,14 +3617,9 @@ fn a_same_substance_seam_does_not_change_the_outcome() {
     };
     let round = SolidShot::bind(body, SubstanceRegistry::shipped_static());
     let state = round.at(450.0);
-    let geometry = Geometry {
-        axis: AXIS,
-        entrance_normal: -AXIS,
-    };
     let steel = REFERENCE_FACTOR;
     let outcome = |encounters: &[Encounter]| {
-        let advanced =
-            advance_through(&round, state, encounters, &Limits { rest: 0.0 }, &geometry).unwrap();
+        let advanced = advance_through(&round, state, encounters, &Limits { rest: 0.0 });
         let chords: Vec<f64> = advanced.doses.values().map(|line| line.chord).collect();
         (advanced.stop, advanced.state.speed, chords)
     };
@@ -3675,10 +3660,6 @@ fn touching_pools_receive_the_energy_lost_at_their_own_depths() {
         nose_factor: 0.5,
     };
     let round = SolidShot::bind(body, SubstanceRegistry::shipped_static());
-    let geometry = Geometry {
-        axis: AXIS,
-        entrance_normal: -AXIS,
-    };
     for (speed, rear_length, rest) in [(800.0, 0.02, 0.0), (450.0, 0.08, 5.0)] {
         let state = round.at(speed);
         let limits = Limits { rest };
@@ -3686,15 +3667,14 @@ fn touching_pools_receive_the_energy_lost_at_their_own_depths() {
         let end = seam + rear_length;
         let front = stretch(0.0, seam, true, &[(1, REFERENCE_FACTOR)]);
         let rear = stretch(seam, end, false, &[(2, REFERENCE_FACTOR)]);
-        let first = round.advance(state, &front, &limits, &geometry);
+        let first = round.advance(state, &front, &limits);
         assert_eq!(first.control, Control::Continue);
-        let second = round.advance(first.state, &rear, &limits, &geometry);
-        let joined = advance_through(&round, state, &[front, rear], &limits, &geometry).unwrap();
+        let second = round.advance(first.state, &rear, &limits);
+        let joined = advance_through(&round, state, &[front, rear], &limits);
         let whole = round.advance(
             state,
             &stretch(0.0, end, true, &[(1, REFERENCE_FACTOR)]),
             &limits,
-            &geometry,
         );
         assert_eq!(
             joined.state, whole.state,
@@ -3764,15 +3744,10 @@ fn partial_overlaps_share_only_the_energy_lost_while_both_are_present() {
     let round = SolidShot::bind(body, SubstanceRegistry::shipped_static());
     let state = round.at(800.0);
     let limits = Limits { rest: 0.0 };
-    let geometry = Geometry {
-        axis: AXIS,
-        entrance_normal: -AXIS,
-    };
     let first = round.advance(
         state,
         &stretch(0.0, 0.02, true, &[(1, REFERENCE_FACTOR)]),
         &limits,
-        &geometry,
     );
     let joined = advance_through(
         &round,
@@ -3787,9 +3762,7 @@ fn partial_overlaps_share_only_the_energy_lost_while_both_are_present() {
             stretch(0.02, 0.04, false, &[(1, REFERENCE_FACTOR)]),
         ],
         &limits,
-        &geometry,
-    )
-    .unwrap();
+    );
     let front = 0.5 * body.mass as f64 * (state.speed.powi(2) - first.state.speed.powi(2));
     let rear = 0.5 * body.mass as f64 * (first.state.speed.powi(2) - joined.state.speed.powi(2));
     for (index, expected) in [(1, 0.5 * front + rear), (2, 0.5 * front)] {
@@ -3818,17 +3791,8 @@ fn a_pool_half_inside_a_plate_is_dosed_only_over_its_open_half() {
     let round = SolidShot::bind(body, SubstanceRegistry::shipped_static());
     let state = round.at(800.0);
     let limits = Limits { rest: 0.0 };
-    let geometry = Geometry {
-        axis: AXIS,
-        entrance_normal: -AXIS,
-    };
     let (plate, pool) = (REFERENCE_FACTOR, 0.1 * REFERENCE_FACTOR);
-    let through_plate = round.advance(
-        state,
-        &stretch(0.0, 0.02, true, &[(1, plate)]),
-        &limits,
-        &geometry,
-    );
+    let through_plate = round.advance(state, &stretch(0.0, 0.02, true, &[(1, plate)]), &limits);
     let joined = advance_through(
         &round,
         state,
@@ -3838,9 +3802,7 @@ fn a_pool_half_inside_a_plate_is_dosed_only_over_its_open_half() {
             stretch(0.02, 0.03, true, &[(2, pool)]),
         ],
         &limits,
-        &geometry,
-    )
-    .unwrap();
+    );
     assert!(joined.stop.is_none(), "the fixture round perforates");
     let energy = |from: f64, to: f64| 0.5 * body.mass as f64 * (from.powi(2) - to.powi(2));
     let behind = through_plate.state.speed;
@@ -3876,10 +3838,6 @@ fn sequential_layers_advance_in_order_and_cost_both() {
         nose_factor: 0.5,
     };
     let round = SolidShot::bind(body, SubstanceRegistry::shipped_static());
-    let geometry = Geometry {
-        axis: AXIS,
-        entrance_normal: -AXIS,
-    };
     let (hard, soft) = (REFERENCE_FACTOR, 0.1 * REFERENCE_FACTOR);
     let through = |speed: f32, layers: [(u32, f32); 2]| {
         let encounters: Vec<Encounter> = layers
@@ -3890,23 +3848,14 @@ fn sequential_layers_advance_in_order_and_cost_both() {
                 stretch(start, start + 0.05, true, &[*layer])
             })
             .collect();
-        advance_through(
-            &round,
-            round.at(speed),
-            &encounters,
-            &Limits { rest: 0.0 },
-            &geometry,
-        )
-        .unwrap()
+        advance_through(&round, round.at(speed), &encounters, &Limits { rest: 0.0 })
     };
     let hard_alone = advance_through(
         &round,
         round.at(1000.0),
         &[stretch(0.0, 0.05, true, &[(1, hard)])],
         &Limits { rest: 0.0 },
-        &geometry,
-    )
-    .unwrap();
+    );
 
     let hard_first = through(1000.0, [(1, hard), (2, soft)]);
     let soft_first = through(1000.0, [(2, soft), (1, hard)]);

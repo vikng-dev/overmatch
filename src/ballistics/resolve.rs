@@ -1211,11 +1211,7 @@ impl Flight {
                 rests
             }
             Decision::Bite(bite) => match bite.end {
-                BiteEnd::Embedded { at, direction, .. } => {
-                    self.frame = self
-                        .frame
-                        .transport(Vec3::from(self.direction), Vec3::from(direction));
-                    self.direction = direction;
+                BiteEnd::Embedded { at } => {
                     self.position = at;
                     self.continuation = None;
                     true
@@ -1227,9 +1223,7 @@ impl Flight {
                     continuation,
                     ..
                 } => {
-                    self.frame = self
-                        .frame
-                        .transport(Vec3::from(self.direction), Vec3::from(direction));
+                    self.frame = self.frame.transport(*self.direction, *direction);
                     self.direction = direction;
                     self.speed = speed;
                     self.position = resume;
@@ -1463,9 +1457,8 @@ impl Bite {
 /// How a bite ended.
 #[derive(Clone, Debug)]
 pub(crate) enum BiteEnd {
-    /// Defeated: buried at `at`, travelling along `direction` through the body when it stopped
-    /// (the incoming heading).
-    Embedded { at: Vec3, direction: Dir3 },
+    /// Defeated: buried at `at` along the incoming heading.
+    Embedded { at: Vec3 },
     /// Punched through.
     Perforated {
         /// The aggregate exit face — what the crossing's marks record.
@@ -1474,6 +1467,7 @@ pub(crate) enum BiteEnd {
         /// continuation's seeds were read at — WORLD, for the cast; the corridor resumes from the
         /// continuation's own anchor-relative origin.
         resume: Vec3,
+        /// Resume heading: playback adds the struck body's velocity to a relative crossing.
         direction: Dir3,
         /// Residual speed (m/s).
         speed: f32,
@@ -1730,7 +1724,6 @@ pub(crate) fn decide(
         }
         Begin::Transit(request) => {
             // Transit starts at the reached hand-offs and re-reads membership there.
-            let axis = request.axis;
             let starts = transit_starts(context, not_own, &request)?;
             let transit = closing_walk(
                 context,
@@ -1760,7 +1753,6 @@ pub(crate) fn decide(
                 from,
                 dir,
                 &entrance,
-                axis,
                 speed,
                 owner,
                 &context.laws,
@@ -1786,7 +1778,6 @@ fn bite(
     incoming: Dir3,
     // The resolved entrance rays: the approach's offsets and hard presence.
     entrance_walk: &DiscWalk,
-    axis: Dir3,
     // m/s at the entrance.
     speed_in: f32,
     owner: impl Fn(Entity) -> Option<Entity>,
@@ -1855,20 +1846,10 @@ fn bite(
         .map(|(volume, (_, end))| (volume, rest.map_or(end, |stop| end.min(stop))))
         .collect();
     let (end, flown) = match plan.outcome {
-        Outcome::Embedded { at, t } => (
-            BiteEnd::Embedded {
-                at: world(at),
-                direction: axis,
-            },
-            t,
-        ),
-        Outcome::Perforated { exit, t, .. } if plan.state.speed == 0.0 => (
-            BiteEnd::Embedded {
-                at: world(exit),
-                direction: axis,
-            },
-            t,
-        ),
+        Outcome::Embedded { at, t } => (BiteEnd::Embedded { at: world(at) }, t),
+        Outcome::Perforated { exit, t, .. } if plan.state.speed == 0.0 => {
+            (BiteEnd::Embedded { at: world(exit) }, t)
+        }
         Outcome::Perforated { exit, t, .. } => {
             let residual = plan.state.speed as f32;
             // Read at the point the NEXT corridor will actually start from — the flight resumes one
@@ -1879,7 +1860,7 @@ fn bite(
                 BiteEnd::Perforated {
                     exit: world(exit),
                     resume: world(transit.origin + transit.axis * resume),
-                    direction: axis,
+                    direction: incoming,
                     speed: residual,
                     continuation: Interior {
                         anchor: transit.anchor,
@@ -1918,7 +1899,8 @@ fn bite(
         end,
         legs: [
             way_in,
-            Leg::new(world(transit.origin), axis, flown, &transit.offsets).with_presence(transit),
+            Leg::new(world(transit.origin), incoming, flown, &transit.offsets)
+                .with_presence(transit),
         ],
     }
 }

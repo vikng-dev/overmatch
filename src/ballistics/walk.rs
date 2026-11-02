@@ -74,7 +74,7 @@ use std::borrow::Cow;
 use std::collections::{BTreeMap, BTreeSet};
 
 use super::mechanism::{
-    Control, Dose, DoseSource, Effect, Geometry, Limits, Mechanism, SlopeCharge, overlap_factor,
+    Control, Dose, DoseSource, Effect, Limits, Mechanism, SlopeCharge, overlap_factor,
 };
 use crate::substances::{SubstanceError, SubstanceId, SubstanceRegistry};
 
@@ -529,9 +529,6 @@ pub enum WalkError {
     /// against the axis and their sum cannot vanish — `n̄` is well-defined by construction, which is
     /// precisely §13.5's repair of the point model's degenerate normal.
     DegenerateEntryNormal { coverage: f32 },
-    /// A mechanism asked the crossing driver for a control it does not carry out (a redirect or a
-    /// schedule). Never approximated by stopping or continuing.
-    UnsupportedControl,
     /// The game's damage model refused discovery work past the step's crossing ceiling.
     /// Each corridor is bounded; a sequence of crossings need not be.
     DrainExhausted { crossings: usize },
@@ -571,9 +568,6 @@ impl WalkError {
             Self::DegenerateEntryNormal { .. } => {
                 "entry normals oppose the axis and have a nonzero aggregate"
             }
-            Self::UnsupportedControl => {
-                "the mechanism requests only controls implemented by its driver"
-            }
             Self::DrainExhausted { .. } => "a finite step fits its crossing limit",
         };
         panic!(
@@ -596,7 +590,6 @@ impl WalkError {
             WalkError::CollectorFailed { .. } => "collector_failed",
             WalkError::CorridorMismatch { reason } => reason.kind(),
             WalkError::DegenerateEntryNormal { .. } => "degenerate_entry_normal",
-            WalkError::UnsupportedControl => "unsupported_control",
             WalkError::DrainExhausted { .. } => "drain_exhausted",
         }
     }
@@ -3212,7 +3205,6 @@ pub enum Outcome {
     Perforated {
         exit: Vec3,
         exit_normal: Vec3,
-        direction: Vec3,
         t: f32,
     },
 }
@@ -3372,10 +3364,6 @@ pub(crate) fn finish<M: Mechanism>(
 ) -> Result<ResolutionPlan<M::State>, WalkError> {
     let crossing = validate_transit(transit, request)?;
     let event = &*crossing;
-    let geometry = Geometry {
-        axis: transit.axis,
-        entrance_normal: request.entrance.normal,
-    };
     let advanced = advance_through(
         &SlopeCharge {
             inner: mechanism,
@@ -3384,8 +3372,7 @@ pub(crate) fn finish<M: Mechanism>(
         state,
         &event.encounters,
         limits,
-        &geometry,
-    )?;
+    );
     let cost_spent =
         (mechanism.reference_mm(state) - mechanism.reference_mm(advanced.state)) as f32;
 
@@ -3397,7 +3384,6 @@ pub(crate) fn finish<M: Mechanism>(
         None => Outcome::Perforated {
             exit: event.exit_position,
             exit_normal: event.exit_normal,
-            direction: transit.axis,
             t: event.end as f32,
         },
     };
@@ -3546,14 +3532,13 @@ fn advance_through<M: Mechanism>(
     mut state: M::State,
     encounters: &[Encounter],
     limits: &Limits,
-    geometry: &Geometry,
-) -> Result<Advanced<M::State>, WalkError> {
+) -> Advanced<M::State> {
     let mut doses: BTreeMap<Entity, LineSum> = BTreeMap::new();
     let mut stretches: Vec<Stretch<M::State>> = Vec::new();
     for encounter in one_substance_runs(encounters) {
         let encounter = &*encounter;
         let before = state;
-        let advance = mechanism.advance(state, encounter, limits, geometry);
+        let advance = mechanism.advance(state, encounter, limits);
         state = advance.state;
         let mut lines = Vec::with_capacity(advance.effects.len());
         for effect in advance.effects {
@@ -3594,24 +3579,21 @@ fn advance_through<M: Mechanism>(
         match advance.control {
             Control::Continue => {}
             Control::Stop => {
-                return Ok(Advanced {
+                return Advanced {
                     state,
                     stop: Some(encounter.start + advance.consumed),
                     doses,
                     stretches,
-                });
-            }
-            Control::Redirect { .. } | Control::Schedule => {
-                return Err(WalkError::UnsupportedControl);
+                };
             }
         }
     }
-    Ok(Advanced {
+    Advanced {
         state,
         stop: None,
         doses,
         stretches,
-    })
+    }
 }
 
 /// The spall sources of the body exits the round reached ([`SpallSource`]).

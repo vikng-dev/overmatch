@@ -320,7 +320,6 @@ fn blamed_volume(error: &WalkError) -> Option<Entity> {
         | WalkError::CorridorMismatch { .. }
         | WalkError::UnattributedRun { .. }
         | WalkError::DegenerateEntryNormal { .. }
-        | WalkError::UnsupportedControl
         | WalkError::DrainExhausted { .. } => None,
     }
 }

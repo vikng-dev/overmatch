@@ -32,7 +32,6 @@ pub(crate) trait Mechanism {
         state: Self::State,
         encounter: &Encounter,
         limits: &Limits,
-        geometry: &Geometry,
     ) -> Advance<Self::State>;
 
     /// Reference-mm `state` can still defeat: the readout, never the currency.
@@ -53,36 +52,13 @@ pub(crate) struct Limits {
     pub rest: f64,
 }
 
-/// The crossing geometry a mechanism may read.
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub(crate) struct Geometry {
-    /// Unit travel axis through the crossing.
-    pub axis: Vec3,
-    /// The entrance surface's aggregate outward normal `n̄`.
-    pub entrance_normal: Vec3,
-}
-
 /// What the driver does after an advance.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) enum Control {
     /// Go on to the next encounter.
     Continue,
-    /// Leave the crossing along `direction` from the consumed progress.
-    #[expect(
-        dead_code,
-        reason = "part of the mechanism interface; solid shot turns no round yet, and the driver \
-                  panics on it"
-    )]
-    Redirect { direction: Vec3 },
     /// The round is at rest at the consumed progress.
     Stop,
-    /// Suspend the round at the consumed progress for work the driver schedules.
-    #[expect(
-        dead_code,
-        reason = "part of the mechanism interface; solid shot schedules nothing yet, and the driver \
-                  panics on it"
-    )]
-    Schedule,
 }
 
 /// One consequence of an advance.
@@ -256,7 +232,6 @@ impl Mechanism for SolidShot {
         state: SolidShotState,
         encounter: &Encounter,
         limits: &Limits,
-        _geometry: &Geometry,
     ) -> Advance<SolidShotState> {
         let disc = encounter.disc as f64;
         let length = encounter.end - encounter.start;
@@ -488,7 +463,6 @@ impl<M: Mechanism> Mechanism for SlopeCharge<'_, M> {
         state: M::State,
         encounter: &Encounter,
         limits: &Limits,
-        geometry: &Geometry,
     ) -> Advance<M::State> {
         let charge = self.charge;
         let length = encounter.end - encounter.start;
@@ -505,7 +479,7 @@ impl<M: Mechanism> Mechanism for SlopeCharge<'_, M> {
             contact.start = project(contact.start);
             contact.end = project(contact.end);
         }
-        let mut advance = self.inner.advance(state, &projected, limits, geometry);
+        let mut advance = self.inner.advance(state, &projected, limits);
         advance.consumed = if advance.control == Control::Continue {
             length
         } else {
@@ -541,11 +515,6 @@ mod tests {
     };
 
     const LIMITS: Limits = Limits { rest: 0.0 };
-
-    const HEAD_ON: Geometry = Geometry {
-        axis: Vec3::Z,
-        entrance_normal: Vec3::NEG_Z,
-    };
 
     fn round() -> SolidShot {
         SolidShot::bind(BODY, SubstanceRegistry::shipped_static())
@@ -596,7 +565,6 @@ mod tests {
                         state,
                         &encounter(length, 2, &[&[(1, factor)], &[(2, factor), (3, factor)]]),
                         &LIMITS,
-                        &HEAD_ON,
                     );
                     let mut total = 0.0;
                     for Effect::Line { energy, .. } in advance.effects {
@@ -629,12 +597,8 @@ mod tests {
         ] {
             let disc = if samples.len() == 2 { 4 } else { 1 };
             for (speed, length) in [(800.0f32, 0.05), (450.0, 0.01), (1200.0, 0.002)] {
-                let advance = round.advance(
-                    round.at(speed),
-                    &encounter(length, disc, samples),
-                    &LIMITS,
-                    &HEAD_ON,
-                );
+                let advance =
+                    round.advance(round.at(speed), &encounter(length, disc, samples), &LIMITS);
                 assert_eq!(advance.control, Control::Continue);
                 let v0 = speed as f64;
                 let expected = ((v0 * v0 + a / k)
@@ -702,11 +666,10 @@ mod tests {
             round.at(82.0),
             &encounter(0.001, 1, &[&[(1, 1000.0)]]),
             &LIMITS,
-            &HEAD_ON,
         );
         assert_eq!(before.control, Control::Continue);
         let gap = 0.001;
-        let after = round.advance(before.state, &encounter(gap, 1, &[]), &LIMITS, &HEAD_ON);
+        let after = round.advance(before.state, &encounter(gap, 1, &[]), &LIMITS);
         let seconds = round.flight_time(before.state, after.state, after.consumed);
         assert_eq!(after.state, before.state);
         assert_eq!(seconds, gap / before.state.speed);
@@ -719,12 +682,7 @@ mod tests {
     fn partitioning_a_material_path_preserves_seconds_and_dose() {
         let round = round();
         let state = round.at(800.0);
-        let whole = round.advance(
-            state,
-            &encounter(0.1, 1, &[&[(1, 1000.0)]]),
-            &LIMITS,
-            &HEAD_ON,
-        );
+        let whole = round.advance(state, &encounter(0.1, 1, &[&[(1, 1000.0)]]), &LIMITS);
         let duration = round.flight_time(state, whole.state, whole.consumed);
         let energy = |advance: &Advance<SolidShotState>| {
             advance
@@ -739,12 +697,8 @@ mod tests {
         for cuts in [vec![0.03, 0.07], vec![0.01; 10], vec![0.025; 4]] {
             let (mut current, mut seconds, mut dose) = (state, 0.0, 0.0);
             for length in cuts {
-                let part = round.advance(
-                    current,
-                    &encounter(length, 1, &[&[(1, 1000.0)]]),
-                    &LIMITS,
-                    &HEAD_ON,
-                );
+                let part =
+                    round.advance(current, &encounter(length, 1, &[&[(1, 1000.0)]]), &LIMITS);
                 seconds += round.flight_time(current, part.state, part.consumed);
                 current = part.state;
                 dose += energy(&part);
@@ -786,16 +740,11 @@ mod tests {
                 round.at(800.0),
                 &encounter(0.05, 1, &[&[(1, strong)]]),
                 &LIMITS,
-                &HEAD_ON,
             );
             let lost = 0.5 * BODY.mass as f64 * (800.0f64.powi(2) - alone.state.speed.powi(2));
             for listed in [[(1, strong), (2, weak)], [(2, weak), (1, strong)]] {
-                let overlapped = round.advance(
-                    round.at(800.0),
-                    &encounter(0.05, 1, &[&listed]),
-                    &LIMITS,
-                    &HEAD_ON,
-                );
+                let overlapped =
+                    round.advance(round.at(800.0), &encounter(0.05, 1, &[&listed]), &LIMITS);
                 assert_eq!(alone.state, overlapped.state);
                 for (address, chord, cost, energy) in lines(&overlapped) {
                     if address == volume(1) {
@@ -818,7 +767,6 @@ mod tests {
             round.at(800.0),
             &encounter(0.05, 1, &[&[(1, 40.0), (2, 40.0)]]),
             &LIMITS,
-            &HEAD_ON,
         );
         let lost = 0.5 * BODY.mass as f64 * (800.0f64.powi(2) - equal.state.speed.powi(2));
         for (address, chord, cost, energy) in lines(&equal) {
@@ -841,14 +789,12 @@ mod tests {
                 round.at(800.0),
                 &encounter(0.05, 2, &[&[(1, a)], &[(3, b)]]),
                 &LIMITS,
-                &HEAD_ON,
             );
             for tied in [[(1, a), (2, a)], [(2, a), (1, a)]] {
                 let advance = round.advance(
                     round.at(800.0),
                     &encounter(0.05, 2, &[&tied, &[(3, b)]]),
                     &LIMITS,
-                    &HEAD_ON,
                 );
                 assert_eq!(advance.state, alone.state, "a tie adds no resistance");
                 let lost = round.energy(round.at(800.0)) - round.energy(advance.state);
@@ -883,7 +829,6 @@ mod tests {
             round.at(800.0),
             &encounter(0.05, 2, &[&[(1, 1000.0)], &[(2, 10.0)]]),
             &LIMITS,
-            &HEAD_ON,
         );
         let lost = 0.5 * BODY.mass as f64 * (800.0f64.powi(2) - advance.state.speed.powi(2));
         let energy = |index: u32| {
@@ -922,8 +867,8 @@ mod tests {
         };
         let (heavy, light) = (round(), SolidShot::bind(light_body, registry));
         let slab = encounter(0.5, 1, &[&[(1, 40.0)]]);
-        let through = heavy.advance(heavy.at(700.0), &slab, &LIMITS, &HEAD_ON);
-        let stopped = light.advance(light.at(800.0), &slab, &LIMITS, &HEAD_ON);
+        let through = heavy.advance(heavy.at(700.0), &slab, &LIMITS);
+        let stopped = light.advance(light.at(800.0), &slab, &LIMITS);
         assert_eq!(
             through.control,
             Control::Continue,
@@ -986,12 +931,7 @@ mod tests {
             "no length spends exactly the potential"
         );
 
-        let crossed = round.advance(
-            state,
-            &encounter(length, 1, &[&[(1, 1000.0)]]),
-            &LIMITS,
-            &HEAD_ON,
-        );
+        let crossed = round.advance(state, &encounter(length, 1, &[&[(1, 1000.0)]]), &LIMITS);
         assert_eq!(crossed.control, Control::Continue);
         assert_eq!(crossed.consumed, length);
         assert_eq!(crossed.state.speed, 0.0);
@@ -1002,12 +942,7 @@ mod tests {
             "a round left at rest dealt all it had"
         );
 
-        let next = round.advance(
-            crossed.state,
-            &encounter(1.0, 1, &[&[(2, 100.0)]]),
-            &LIMITS,
-            &HEAD_ON,
-        );
+        let next = round.advance(crossed.state, &encounter(1.0, 1, &[&[(2, 100.0)]]), &LIMITS);
         assert_eq!(next.control, Control::Stop);
         assert_eq!(next.consumed, 0.0);
         assert!(next.effects.iter().all(|effect| match effect {
@@ -1035,8 +970,8 @@ mod tests {
                 charge: slope_charge(1.0, preset.slope_tan, 1.0),
             };
             assert_eq!(
-                adapted.advance(state, &chord, &LIMITS, &HEAD_ON),
-                mechanism.advance(state, &chord, &LIMITS, &HEAD_ON)
+                adapted.advance(state, &chord, &LIMITS),
+                mechanism.advance(state, &chord, &LIMITS)
             );
 
             for factor in [0.0, 0.1, 1.0, 2.0] {
@@ -1084,14 +1019,8 @@ mod tests {
                 before,
                 &encounter(length * adapter.charge, 1, &[&[(1, 1000.0)]]),
                 &LIMITS,
-                &HEAD_ON,
             );
-            let actual = adapter.advance(
-                before,
-                &encounter(length, 1, &[&[(1, 1000.0)]]),
-                &LIMITS,
-                &HEAD_ON,
-            );
+            let actual = adapter.advance(before, &encounter(length, 1, &[&[(1, 1000.0)]]), &LIMITS);
             assert_eq!(actual.state, charged.state);
             assert_eq!(actual.effects, charged.effects);
             assert_eq!(actual.control, charged.control);
