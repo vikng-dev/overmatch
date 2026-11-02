@@ -411,8 +411,7 @@ fn top_gear_wide_steer_preserves_the_outer_belt_differential() {
 /// lands m well negative; `d` must stay on the steer's side.
 #[test]
 fn l600_constraint_survives_m_zero_crossing() {
-    let (mut fp, tp) = (lab_fp(), lab_tp());
-    fp.grip = None; // Geometry-only reaction rig isolates steering from the terrain lever.
+    let (fp, tp) = (lab_fp(), lab_tp()); // The paid cut and released park isolate steering.
     let mut st = TransmissionState {
         steer_step: 2,
         shift_ticks: 5,
@@ -502,22 +501,22 @@ fn static_brake_capacity_requires_every_hold_predicate() {
     let static_capacity = dynamic * tp.brake_static_factor;
 
     assert_eq!(
-        brake_capacity_for_regime(&tp, true, 0.0, 0.0),
+        brake_capacity_for_regime(&tp, true, false, 0.0),
         static_capacity,
         "a latched belt strictly inside the at-rest band gets static breakaway capacity"
     );
     assert_eq!(
-        brake_capacity_for_regime(&tp, false, 0.0, 0.0),
+        brake_capacity_for_regime(&tp, false, false, 0.0),
         dynamic,
         "an unlatched settle envelope stays dynamic"
     );
     assert_eq!(
-        brake_capacity_for_regime(&tp, true, 1.0, 0.0),
+        brake_capacity_for_regime(&tp, true, true, 0.0),
         dynamic,
         "service braking stays dynamic even if stale latch state is present"
     );
     assert_eq!(
-        brake_capacity_for_regime(&tp, true, 0.0, PARK_ENGAGE_SPEED),
+        brake_capacity_for_regime(&tp, true, false, PARK_ENGAGE_SPEED),
         dynamic,
         "leaving the strict at-rest band drops the cap that same tick"
     );
@@ -608,8 +607,7 @@ fn parking_brake_stays_saturated_past_breach() {
     );
 }
 
-/// Discrete passivity of the whole brake stack: against a brakeless baseline
-/// (no grip disables park/hold; same drag, same drive), the brake's
+/// Discrete passivity of the stop-force law against free belt integration: the brake's
 /// contribution over one tick never pushes the belt PAST the baseline in its direction
 /// of motion, never reverses it through zero, and never increases |v_next| beyond the
 /// baseline's. Swept over speeds and reactions on both sides of capacity, latched and
@@ -617,20 +615,18 @@ fn parking_brake_stays_saturated_past_breach() {
 #[test]
 fn brake_is_discretely_passive() {
     let tp = lab_tp();
-    let fp_braked = lab_fp();
-    let mut fp_free = lab_fp();
-    fp_free.grip = None;
+    let fp = lab_fp();
     for park in [false, true] {
         for v in [-0.6f32, -0.2, -0.03, 0.0, 0.03, 0.2, 0.6] {
             for r in [-1.5f32, -0.5, 0.0, 0.5, 1.5] {
                 let r = r * tp.brake_capacity_n;
                 let inp = input(0.0, 0.0, [v, v], [r, r]);
-                let mut st_b = TransmissionState { park, ..fresh(&tp) };
-                let braked = step(&fp_braked, &tp, &mut st_b, &inp);
-                let mut st_f = TransmissionState { park, ..fresh(&tp) };
-                let free = step(&fp_free, &tp, &mut st_f, &inp);
-                for i in 0..2 {
-                    let (b, f) = (braked.next_speeds[i], free.next_speeds[i]);
+                let state = TransmissionState { park, ..fresh(&tp) };
+                let mut q = [0.0; 2];
+                apply_brake_stop_forces(&mut q, &tp, &fp, &state, &inp, false);
+                let free = v - r * inp.dt / fp.inertia;
+                for force in q {
+                    let (b, f) = (v + (force - r) * inp.dt / fp.inertia, free);
                     assert!(
                         b.abs() <= f.abs() + 1e-4,
                         "park={park} v={v} R={r}: the brake increased belt speed \
@@ -784,14 +780,13 @@ fn coast_drag_reaches_belt_through_coupling() {
     );
 }
 
-/// Motoring drag vanishes at rest, reads its construction-owned mid-band anchor, and grows
+/// Motoring drag reads its construction-owned mid-band anchor and grows
 /// with speed. The descent law relies on the slope; a flat or incorrectly anchored curve fails.
 #[test]
 fn motoring_drag_matches_its_anchor_and_grows_with_speed() {
     let tp = tiger_tp();
     let mid = (tp.engine.idle_rpm + tp.engine.governed_rpm) * 0.5;
     let d = |rpm: f32| engine_drag(&tp, rpm * RPM_TO_RAD);
-    assert_eq!(d(0.0), 0.0);
     assert!((d(mid) - tp.peak_torque_nm * tp.drag_fraction).abs() < 0.001);
     assert!(d(tp.engine.idle_rpm) < d(mid));
     assert!(d(mid) < d(tp.engine.governed_rpm));
@@ -1231,7 +1226,6 @@ fn drag_release_and_driver_read_the_command() {
         1.0,
         f32::INFINITY,
         ClutchState::In,
-        tp.engine.idle_rpm * RPM_TO_RAD,
     );
     let [induced, idle, drag] = engine_torques(&tp, inp.supply, 1550.0 * RPM_TO_RAD, 1.0);
     let actual =
@@ -1942,7 +1936,6 @@ fn driver_launches_in_the_highest_capable_start_gear() {
                     1.0,
                     inp.perceived_load.grip_n,
                     ClutchState::Slip,
-                    tp.engine.idle_rpm * RPM_TO_RAD,
                 );
                 assert!(
                     force - load > force_margin(&fp, &tp),
@@ -1957,7 +1950,6 @@ fn driver_launches_in_the_highest_capable_start_gear() {
                         1.0,
                         inp.perceived_load.grip_n,
                         ClutchState::Slip,
-                        tp.engine.idle_rpm * RPM_TO_RAD,
                     );
                     assert!(force - load <= force_margin(&fp, &tp));
                 }
@@ -2006,7 +1998,6 @@ fn driver_full_pedal_walks_to_the_top_on_firm_ground() {
                     1.0,
                     inp.perceived_load,
                     state.clutch,
-                    state.omega_e,
                 )
             };
             speed = (speed + (force - load) / coupled_mass(&fp) / TICK_HZ).max(0.0);
@@ -2042,8 +2033,7 @@ fn driver_force_price_uses_the_current_regime_and_both_caps() {
                         ratio,
                         command,
                         grip,
-                        ClutchState::Slip,
-                        tp.engine.idle_rpm * RPM_TO_RAD
+                        ClutchState::Slip
                     ),
                     expected
                 );
@@ -2060,8 +2050,7 @@ fn driver_force_price_uses_the_current_regime_and_both_caps() {
             ratio,
             1.0,
             f32::INFINITY,
-            ClutchState::In,
-            tp.engine.idle_rpm * RPM_TO_RAD
+            ClutchState::In
         ) <= 0.0
     );
     // Fixture: a tiny symmetric grip cap exposes a missing engine-braking cap.
@@ -2073,8 +2062,7 @@ fn driver_force_price_uses_the_current_regime_and_both_caps() {
             ratio,
             0.0,
             100.0,
-            ClutchState::In,
-            tp.engine.idle_rpm * RPM_TO_RAD
+            ClutchState::In
         ),
         -100.0
     );
@@ -2350,7 +2338,6 @@ fn a_moving_lug_is_not_priced_as_launch_slip() {
         1.0,
         f32::INFINITY,
         ClutchState::In,
-        tp.engine.idle_rpm * RPM_TO_RAD,
     );
     assert!(
         (actual - (fuel + catch - drag).min(tp.clutch_capacity) * ratio / tp.sprocket_radius).abs()
@@ -2469,7 +2456,6 @@ fn law_launch_selection_prices_requested_pedal_on_grade() {
             0.5,
             inp.perceived_load.grip_n,
             ClutchState::Slip,
-            tp.engine.idle_rpm * RPM_TO_RAD,
         ) - load;
         println!(
             "MEASURED half-pedal grade gears={} chosen={} spare_n={spare}",
@@ -2484,8 +2470,7 @@ fn law_launch_selection_prices_requested_pedal_on_grade() {
                 tp.gears_fwd[usize::from(g - 1)],
                 0.5,
                 inp.perceived_load.grip_n,
-                ClutchState::Slip,
-                tp.engine.idle_rpm * RPM_TO_RAD
+                ClutchState::Slip
             ) <= load));
         } else {
             assert!(
@@ -2512,36 +2497,6 @@ fn law_arrested_climb_reenters_launch_slip() {
             state.clutch,
             ClutchState::Slip,
             "arrested intent must not remain an engaged lug"
-        );
-    }
-}
-
-/// Braking against rollback must permit a lower gear to recover when service brakes alone
-/// cannot arrest the slope. Fixture: a supported 30-degree face, backward entry in top gear.
-#[test]
-fn law_backward_entry_recovers_in_a_capable_lower_gear() {
-    for (fp, tp) in [(lab_fp(), lab_tp()), (grade_fixture_fp(), tiger_tp())] {
-        let load = fp.grip.unwrap().side_weight * 2.0 * 30.0_f32.to_radians().sin();
-        let mut state = TransmissionState {
-            gear: tp.gears_fwd.len() as u8,
-            park: false,
-            clutch: ClutchState::In,
-            ..fresh(&tp)
-        };
-        let mut speed = -2.0; // Fixture: rollback already beyond the at-rest band.
-        for _ in 0..64 * 20 {
-            let mut inp = driver_input(&fp, speed, load, 1.0);
-            inp.reactions = [load * 0.5; 2];
-            speed = step(&fp, &tp, &mut state, &inp).next_speeds[0];
-        }
-        println!(
-            "MEASURED backward recovery gears={} final_gear={} speed={speed}",
-            tp.gears_fwd.len(),
-            state.gear
-        );
-        assert!(
-            speed > PARK_ENGAGE_SPEED,
-            "a capable lower gear must arrest rollback and launch"
         );
     }
 }
@@ -2635,8 +2590,6 @@ fn held_reversal_waits_at_rest_and_pays_exactly_one_cut() {
 #[test]
 fn released_motion_coasts_without_brake_force() {
     let (fp, tp) = (lab_fp(), lab_tp());
-    let mut free = fp.clone();
-    free.grip = None;
     let speed = tp.governed_speed(false) * 0.5; // Fixture: moving well above the stop threshold.
     let inp = input(0.0, 0.0, [speed; 2], [1000.0; 2]);
     let state = TransmissionState {
@@ -2645,10 +2598,9 @@ fn released_motion_coasts_without_brake_force() {
         gear: 3,
         ..fresh(&tp)
     };
-    assert_eq!(
-        step(&fp, &tp, &mut { state }, &inp).forces,
-        step(&free, &tp, &mut { state }, &inp).forces
-    );
+    let mut q = [0.0; 2];
+    apply_brake_stop_forces(&mut q, &tp, &fp, &state, &inp, false);
+    assert_eq!(q, [0.0; 2]);
 }
 
 /// The one-way lever must carry the launch shortfall without opposing useful motion. A
@@ -2676,7 +2628,6 @@ fn one_way_lever_launches_on_grade_without_rollback_or_extra_cuts() {
             1.0,
             initial.perceived_load.grip_n,
             ClutchState::Slip,
-            tp.engine.idle_rpm * RPM_TO_RAD,
         ) - load;
         let mut state = TransmissionState {
             clutch: ClutchState::In,
@@ -3013,11 +2964,79 @@ fn driver_price_uses_the_live_cranks_catch_floor_through_a_cut() {
         1.0,
         inp.perceived_load,
         ClutchState::In,
-        state.omega_e,
     ) - load;
     let actual = landed_spare(&tp, &fp, &inp, &state, candidate, 1.0);
     assert!(
         (actual - expected).abs() < force_margin(&fp, &tp),
         "candidate price {actual} must share the live crank floor price {expected}"
     );
+}
+
+/// A complete drivetrain requires nominal weight even without current terrain support.
+/// Missing construction must fail before a Driver prices or integrates a tick.
+#[test]
+#[should_panic(expected = "drivetrain requires grip construction")]
+fn drivetrain_refuses_missing_grip_construction() {
+    let (mut fp, tp) = (lab_fp(), lab_tp());
+    fp.grip = None;
+    step(
+        &fp,
+        &tp,
+        &mut fresh(&tp),
+        &input(0.0, 0.0, [0.0; 2], [0.0; 2]),
+    );
+}
+
+/// Full service during rollback must not buy a gear cut, even while crank inertia
+/// still carries forward rotation. The player stops before choosing a launch gear.
+#[test]
+fn forward_crank_rollback_keeps_gear_under_service() {
+    let (fp, tp) = (grade_fixture_fp(), tiger_tp());
+    // Fixture: supported twenty-degree rollback in a retained launch gear.
+    let load = fp.grip.unwrap().side_weight * 2.0 * 20.0_f32.to_radians().sin();
+    let inp = driver_input(&fp, -0.2, load, 1.0);
+    let mut state = TransmissionState {
+        gear: tp.launch_gears,
+        park: false,
+        clutch: ClutchState::In,
+        omega_e: tp.engine.idle_rpm * RPM_TO_RAD,
+        ..fresh(&tp)
+    };
+    let gear = state.gear;
+    let report = step(&fp, &tp, &mut state, &inp);
+    assert_eq!(state.gear, gear);
+    assert!(!report.shifting);
+}
+
+/// Construction drag may stop a free crank but cannot reverse it, including either side
+/// of zero. A second rest fade is unnecessary; the player receives no invented crank energy.
+#[test]
+fn free_crank_drag_stops_without_crossing_zero() {
+    for tp in [lab_tp(), tiger_tp()] {
+        // Fixture: crank speeds on both sides of rest, inside the removed fade's band.
+        for omega in [-0.01_f32, 0.0, 0.01] {
+            let mut inp = input(0.0, 0.0, [0.0; 2], [0.0; 2]);
+            inp.supply.task_rate = 0.0;
+            #[cfg(feature = "bitprobe")]
+            let mut probe = TransmissionProbe::default();
+            let (torque, _) = crank_free_torque(
+                &tp,
+                &inp,
+                false,
+                false,
+                0.0,
+                0.0,
+                1.0,
+                omega,
+                tp.engine.idle_rpm * RPM_TO_RAD,
+                #[cfg(feature = "bitprobe")]
+                &mut probe,
+            );
+            let next = omega + torque * inp.dt / tp.engine_inertia;
+            assert_eq!(
+                next, 0.0,
+                "free drag must stop, not reverse: {omega} -> {next}"
+            );
+        }
+    }
 }

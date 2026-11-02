@@ -84,7 +84,6 @@ impl Measurements {
                 1.0,
                 probe.grip_limit_n,
                 state.clutch,
-                state.omega_e,
             );
             self.pending = Some(Landing {
                 gear: state.gear,
@@ -960,7 +959,6 @@ fn shipped_notches_launch_and_sustain_ordered_speed() {
                             pedal,
                             p.grip_limit_n,
                             crate::track::transmission::ClutchState::Slip,
-                            tp.engine.idle_rpm * crate::track::transmission::RPM_TO_RAD,
                         ) > p.perceived_load_n
                     });
                 }

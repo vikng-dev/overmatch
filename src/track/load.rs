@@ -97,8 +97,7 @@ pub fn turn_radius(tp: &TransmissionParams, state: &TransmissionState) -> Option
     }
 }
 
-/// Both driving adapters observe the same ladder frame. Support-only calibration has no
-/// vehicle weight and therefore no terrain load; it is not a vehicle with an invented mass.
+/// Both driving adapters observe the same ladder frame and nominal construction weight.
 pub(crate) fn observe_rig<'a>(
     contacts: impl Iterator<Item = &'a SupportFact> + Clone,
     forward: Vec3,
@@ -106,7 +105,10 @@ pub(crate) fn observe_rig<'a>(
     tp: &TransmissionParams,
     state: &TransmissionState,
 ) -> PerceivedLoad {
-    let weight = fp.grip.map_or(0.0, |grip| 2.0 * grip.side_weight);
+    let weight = 2.0
+        * fp.grip
+            .expect("a drivetrain requires grip construction")
+            .side_weight;
     observe(
         contacts,
         forward * if state.reverse { -1.0 } else { 1.0 },

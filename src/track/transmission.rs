@@ -82,10 +82,6 @@ fn engine_control() -> &'static EngineControl {
     &DATA
 }
 
-/// Resolution: regularise the drag sign only within one rpm of rest; the public readout
-/// resolves whole rpm. The healthy idle guard must not set a physical run-down time constant.
-const CRANK_DRAG_FADE_RPM: f32 = 1.0;
-
 /// Resolution: near-zero axis tolerance prevents input quantization from moving direction
 /// and parking controls at their zero crossing.
 const DEAD: f32 = 0.05;
@@ -760,16 +756,13 @@ pub(crate) fn motoring_drag_base_share() -> f32 {
 
 /// The game's damage model: construction motoring drag at the crank (N m), independent of
 /// pedal and combustion. Its authored mid-band anchor is `drag_fraction × peak torque`;
-/// the affine Coulomb/viscous shape rises with speed. Only the numerical rest band fades it.
+/// the affine Coulomb/viscous shape rises with speed. The discrete free-crank stop bounds drag at zero.
 /// Combustion reconstructs the gross torque behind the authored net curve (`engine_torques`).
 fn engine_drag(tp: &TransmissionParams, omega_e: f32) -> f32 {
     let omega_mid = (tp.engine.idle_rpm + tp.engine.governed_rpm) * 0.5 * RPM_TO_RAD;
     let rise = motoring_drag_base_share()
         + (1.0 - motoring_drag_base_share()) * (omega_e.abs() / omega_mid);
-    tp.peak_torque_nm
-        * tp.drag_fraction
-        * rise
-        * (omega_e / (CRANK_DRAG_FADE_RPM * RPM_TO_RAD)).clamp(-1.0, 1.0)
+    tp.peak_torque_nm * tp.drag_fraction * rise * omega_e.signum()
 }
 
 /// The game's damage model: the full-load curve is net of construction losses. Reconstruct
@@ -815,12 +808,8 @@ fn idle_catch_capacity(tp: &TransmissionParams, supply: DriveSupply) -> f32 {
 
 /// Instrument for the accepted Driver law: price the crank at the landing shaft speed,
 /// or the commanded launch speed while slipping, bounded by clutch and contact grip.
-/// The live crank owns catch-floor admission even when the candidate shaft landing is backward.
+/// A cut cannot reverse a free crank, so pricing uses the saturated catch floor.
 /// This shared price does not select a gear or change delivery.
-#[expect(
-    clippy::too_many_arguments,
-    reason = "the force instrument reads construction, supply, landing, ratio, command, grip, clutch and live crank"
-)]
 pub(crate) fn price_driver_force(
     tp: &TransmissionParams,
     supply: DriveSupply,
@@ -829,10 +818,9 @@ pub(crate) fn price_driver_force(
     command: f32,
     grip_n: f32,
     clutch: ClutchState,
-    omega_e: f32,
 ) -> f32 {
     let capacity = supply.transmission_condition * tp.clutch_capacity * gear / tp.sprocket_radius;
-    free_driver_force(tp, supply, shaft, gear, command, clutch, omega_e)
+    free_driver_force(tp, supply, shaft, gear, command, clutch)
         .clamp(-capacity, capacity)
         .clamp(-grip_n, grip_n)
 }
@@ -844,10 +832,9 @@ fn free_driver_force(
     gear: f32,
     command: f32,
     clutch: ClutchState,
-    omega_e: f32,
 ) -> f32 {
     let launch_rpm = tp.launch_omega(command) / RPM_TO_RAD;
-    let floor = idle_floor(tp, supply, omega_e).unwrap_or(f32::NEG_INFINITY);
+    let floor = idle_floor(tp, supply, 0.0).unwrap_or(f32::NEG_INFINITY);
     let shaft_rpm = (shaft * gear / tp.sprocket_radius / RPM_TO_RAD).max(floor / RPM_TO_RAD);
     // A moving In clutch below idle is a lug, not a fresh launch.
     let rpm = if clutch == ClutchState::Slip {
@@ -877,16 +864,22 @@ fn candidate_load(
     super::load::PerceivedLoad { turn_n, ..load }
 }
 
-/// Coupled translation mass (kg): the hull is absent on support-only calibration rigs.
+/// Coupled translation mass (kg): nominal hull mass and both belt inertias.
 pub(crate) fn coupled_mass(fp: &ForceParams) -> f32 {
     let hull = fp
         .grip
-        .map_or(0.0, |grip| 2.0 * grip.side_weight / super::derive::G);
+        .expect("a drivetrain requires grip construction")
+        .side_weight
+        * 2.0
+        / super::derive::G;
     hull + 2.0 * fp.inertia
 }
 
 fn force_margin(fp: &ForceParams, tp: &TransmissionParams) -> f32 {
-    let weight = fp.grip.map_or(0.0, |grip| 2.0 * grip.side_weight);
+    let weight = 2.0
+        * fp.grip
+            .expect("a drivetrain requires grip construction")
+            .side_weight;
     super::load::DriverResolution::load().margin_n(weight, tp)
 }
 
@@ -894,7 +887,7 @@ fn force_margin(fp: &ForceParams, tp: &TransmissionParams) -> f32 {
 /// M*a = F-L and F = k*tau-J*k^2*a gives this force. Slip holds its launch rpm.
 #[expect(
     clippy::too_many_arguments,
-    reason = "the force law reads construction, contact, supply, landing, ratio, command, load, clutch and live crank"
+    reason = "the force law reads construction, contact, supply, landing, ratio, command, load and clutch"
 )]
 fn gear_force(
     tp: &TransmissionParams,
@@ -905,9 +898,8 @@ fn gear_force(
     command: f32,
     load: super::load::PerceivedLoad,
     clutch: ClutchState,
-    omega_e: f32,
 ) -> f32 {
-    let force = free_driver_force(tp, supply, shaft, ratio, command, clutch, omega_e);
+    let force = free_driver_force(tp, supply, shaft, ratio, command, clutch);
     let force = if clutch == ClutchState::Slip {
         force
     } else {
@@ -944,7 +936,6 @@ fn launch_pick(
                 command,
                 load,
                 ClutchState::Slip,
-                tp.engine.idle_rpm * RPM_TO_RAD,
             ) - load.total_n()
                 > force_margin(fp, tp)
         })
@@ -995,7 +986,6 @@ pub(crate) fn landed_spare(
         } else {
             ClutchState::In
         },
-        state.omega_e,
     ) - load.total_n()
 }
 
@@ -1036,7 +1026,7 @@ fn choose_gear(
         return;
     }
     let [fuel, catch, drag] = engine_torques(tp, inp.supply, st.omega_e, command);
-    if command <= 0.0 || st.omega_e < 0.0 || fuel + catch <= drag {
+    if command <= 0.0 || fuel + catch <= drag.abs() {
         return;
     }
     let current = landed_spare(tp, fp, inp, st, st.gear, command);
@@ -1141,10 +1131,10 @@ fn clutch_coupling(
 pub(crate) fn brake_capacity_for_regime(
     tp: &TransmissionParams,
     latch_active: bool,
-    service: f32,
+    service: bool,
     belt_speed: f32,
 ) -> f32 {
-    if latch_active && service == 0.0 && belt_speed.abs() < PARK_ENGAGE_SPEED {
+    if latch_active && !service && belt_speed.abs() < PARK_ENGAGE_SPEED {
         tp.brake_capacity_n * tp.brake_static_factor
     } else {
         tp.brake_capacity_n
@@ -1188,7 +1178,7 @@ fn swap_ladder_direction(
 struct DriverIntent {
     dir: f32,
     propulsive: f32,
-    service: f32,
+    service: bool,
 }
 
 /// Opposing motion gets the full service brake at every nonzero notch. The engaged ladder
@@ -1208,11 +1198,7 @@ fn driver_intent(inp: &TransmissionInput, reverse: bool, parked: bool) -> Driver
         } else {
             (inp.throttle * dir).clamp(0.0, 1.0)
         },
-        service: if against_motion || ((inp.brake || opposing) && !parked) {
-            1.0
-        } else {
-            0.0
-        },
+        service: against_motion || ((inp.brake || opposing) && !parked),
     }
 }
 
@@ -1565,23 +1551,22 @@ fn apply_brake_stop_forces(
     fp: &ForceParams,
     st: &TransmissionState,
     inp: &TransmissionInput,
-    service: f32,
+    service: bool,
 ) {
     // Opposite intent owns the complete stop/pause/cut. Only the launch is one-way.
     let one_way = !inp.brake
-        && st.shift_ticks == 0
         && st.clutch != ClutchState::Out
         && inp.command.abs() >= DEAD
         && inp.supply.control_authority
         && inp.supply.task_rate > 0.0;
-    let lever = (st.park || one_way) && fp.grip.is_some(); // Geometry-only rigs have no terrain hold.
+    let lever = st.park || one_way;
     for (i, qi) in q.iter_mut().enumerate() {
-        if !lever && service == 0.0 {
+        if !lever && !service {
             continue;
         }
         let cap = brake_capacity_for_regime(tp, lever, service, inp.speeds[i]);
         let stop = inp.reactions[i] - *qi - inp.speeds[i] * fp.inertia / inp.dt;
-        let brake = if one_way && service == 0.0 {
+        let brake = if one_way && !service {
             inp.command.signum() * (stop * inp.command.signum()).clamp(0.0, cap)
         } else {
             stop.clamp(-cap, cap)
@@ -1604,13 +1589,13 @@ fn apply_ceiling_brakes(
     inp: &TransmissionInput,
     crank: CrankTick,
     shifting: bool,
-    service: f32,
+    service: bool,
 ) {
     if !inp.supply.control_authority
         || inp.supply.task_rate == 0.0
         || shifting
         || st.clutch == ClutchState::Out
-        || service > 0.0
+        || service
         || st.park
         || crank.omega_e < tp.max_curve_rpm() * RPM_TO_RAD
     {
@@ -1743,7 +1728,6 @@ fn force_probe(
     inp: &TransmissionInput,
     (shaft, reduction, delivered, command): (f32, f32, f32, f32),
     clutch: ClutchState,
-    omega_e: f32,
     probe: &mut TransmissionProbe,
 ) {
     probe.priced_force_n = price_driver_force(
@@ -1754,7 +1738,6 @@ fn force_probe(
         command,
         inp.perceived_load.grip_n,
         clutch,
-        omega_e,
     );
     probe.delivered_force_n = delivered.min(inp.perceived_load.grip_n);
 }
@@ -1774,6 +1757,7 @@ pub fn step(
     st: &mut TransmissionState,
     inp: &TransmissionInput,
 ) -> TransmissionReport {
+    fp.grip.expect("a drivetrain requires grip construction");
     let dt = inp.dt;
     let [vl, vr] = inp.speeds;
     let m = (vl + vr) / 2.0;
@@ -1799,7 +1783,7 @@ pub fn step(
     } = driver_intent(inp, st.reverse, st.park);
 
     let shaft = dir * m;
-    let command = if inp.brake || inp.command * dir < 0.0 {
+    let command = if service {
         0.0
     } else {
         inp.command.abs().min(1.0)
@@ -1918,7 +1902,7 @@ pub fn step(
     #[cfg(feature = "bitprobe")]
     {
         let sample = (dir * m, g, dir * f_c, propulsive);
-        force_probe(tp, inp, sample, st.clutch, omega_e, &mut bitprobe);
+        force_probe(tp, inp, sample, st.clutch, &mut bitprobe);
         bitprobe.power_scale = power_scale;
         bitprobe.omega_end = st.omega_e;
     }
