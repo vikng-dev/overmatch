@@ -231,7 +231,7 @@ pub(super) fn setup_muzzle_assets(
 /// the first time that colour's ground lifts dust and kept for the session: the ground table is
 /// the colours' one home, and a tuned table makes its new colour's palette on its next shot.
 #[derive(Resource, Default)]
-struct DustPalettes(BTreeMap<[u32; 3], Handle<Image>>);
+pub(super) struct DustPalettes(BTreeMap<[u32; 3], Handle<Image>>);
 
 impl DustPalettes {
     /// The palette of soil of albedo `colour_srgb`: the albedo where the sprite signal is strong
@@ -239,7 +239,11 @@ impl DustPalettes {
     /// ASSUMED cloud shading: a shadow floor of 0.16 of lit soil, ageing to 0.76 (Y).
     /// These are presentation contrast choices, not measured soil properties. The gain lane
     /// is one: the light's brightness and exposure ride the material.
-    fn palette(&mut self, images: &mut Assets<Image>, colour_srgb: [f32; 3]) -> Handle<Image> {
+    pub(super) fn palette(
+        &mut self,
+        images: &mut Assets<Image>,
+        colour_srgb: [f32; 3],
+    ) -> Handle<Image> {
         self.0
             .entry(colour_srgb.map(f32::to_bits))
             .or_insert_with(|| {

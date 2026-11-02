@@ -47,7 +47,6 @@ This file only shrinks, and a closed row is deleted, never struck through.
 
 | id | P | file::symbol | lens: class | finding, one line with the concrete case | fix, one line | owner |
 |---|---|---|---|---|---|---|
-| view-03 | P1 | `src/vfx/impact.rs::spawn_impact_read` | base-truths: Per-object rule | Wet mud and sand receive the same terrain recipe despite distinct authored material responses. | Resolve material response at the impact position and feed the generic emission renderer. | fix-p1-view |
 | view-04 | P2 | `src/render_scale.rs::prepare_render_scale` | error-handling: Dropped error | Terminal shader compilation failure clears the override and leaves native resolution indefinitely; the later failure handler never matches. | Distinguish pending compilation from terminal errors and fail explicitly for a broken shipped shader. | ratchet |
 | view-05 | P2 | `src/ui_font.rs::plugin` | error-handling: Dropped error | Missing or corrupt bundled fonts do not join presentation admission, allowing play with undrawable HUD text. | Register both fonts as required presentation dependencies and refuse failed loads before play. | ratchet |
 | view-07 | P2 | `src/view.rs::ViewProfile::of` | error-handling: Invented default | Zero, negative or nonfinite supplied pixel budgets silently become one pixel. | Carry a checked positive budget or assert the internal invariant explicitly. | ratchet |

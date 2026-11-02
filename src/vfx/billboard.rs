@@ -1,4 +1,4 @@
-//! The shared billboard-sprite machinery every combat effect is assembled from (survey tricks
+//! The game's damage-model view, game state only: billboard machinery every effect is assembled from (survey tricks
 //! 1/2/4/5/9): camera-facing quads drawing a grayscale flipbook atlas through
 //! [`VfxBillboardMaterial`] — a small custom `Material` whose fragment does alpha EROSION (never a
 //! uniform fade) and gradient-map coloring (grayscale signal × life fraction → a per-effect color
@@ -40,20 +40,12 @@ use bevy::transform::TransformSystems;
 
 use crate::view::PlayerView;
 
-/// Live-billboard ring cap — a leak bound over the ONE ring every consumer shares, the impact puffs
-/// included: they hold no cap of their own and are evicted against this one. Only the long-lived
-/// ground scars are insulated in a ring of their own (`GROUND_MARK_CAP`), so a multi-second scar
-/// survives a sub-second billboard storm. The stack per 88 event is 11–14 at the muzzle (blast
-/// core + flash core + glow card + 2 flame planes + smoke, plus 5–8 ground-dust puffs) and 12–17 at a terrain
-/// impact (contact flash + 8–12 ejecta + 1–2 plumes + shock ring + the 8 s haze); both MGs cycling
-/// add ~50/s at sub-second lifetimes. Eviction is FIFO, so the consequence of pressure is that the
-/// OLDEST billboard goes first: a sustained storm cuts the multi-second layers (haze, ground dust)
-/// short before any of the flash layers that displaced them.
+/// Resolution: shared population cap bounds transient sprites and retained lane-table slots.
+/// Eviction removes the oldest effect first; every emission family spends this same budget.
 pub(super) const BILLBOARD_CAP: usize = 96;
 
-/// Entries in the lane table: the shared ring's slots `0..BILLBOARD_CAP`, then the ground-mark
-/// ring's. Every ring's slot range lies inside it (asserted by [`BillboardRing::new`]).
-pub(super) const BILLBOARD_SLOTS: usize = BILLBOARD_CAP + super::impact::GROUND_MARK_CAP;
+/// Exactly one storage lane per possible live billboard.
+pub(super) const BILLBOARD_SLOTS: usize = BILLBOARD_CAP;
 
 pub(super) fn plugin(app: &mut App) {
     app.init_resource::<BillboardRing>()
@@ -106,8 +98,7 @@ fn lane_stride() -> usize {
 /// Exactly one class carries it: the diffuse MASS volumes (impact dust, dirt, spall; the muzzle's
 /// gas smoke and ground dust). Every other layer is 0.0, for three separate mechanisms — additive
 /// HOT layers (flashes, sparks, flame licks, the blast core) are airborne, so their approach to a
-/// wall is not an intersection to hide; the two layers that LIE on a surface (ground scar, shock
-/// ring) have their whole quad inside the band, which scales them out of existence; and ejecta is
+/// wall is not an intersection to hide; the surface-aligned shock ring have their whole quad inside the band, which scales them out of existence; and ejecta is
 /// solid thrown mass whose silhouette is its own edge, not a gas boundary.
 pub(crate) fn soft_particle_depth() -> f32 {
     super::look::impact().soft_particle_depth

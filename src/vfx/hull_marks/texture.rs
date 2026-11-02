@@ -1,4 +1,4 @@
-//! The marks' maps, generated at startup: no art, one analytic profile per kind.
+//! The game's damage-model view: procedural surface mark maps, game state only.
 //!
 //! A profile answers, for a point `p` of the decal's square (`[-1, 1]²`, +x the shot's direction
 //! across the face, +y the texture's v), what the mark is there: an albedo with its alpha, metallic,
