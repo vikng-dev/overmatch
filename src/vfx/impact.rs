@@ -19,14 +19,30 @@ use crate::view::PlayerView;
 
 use super::ViewRng;
 use super::billboard::{
-    BillboardLook, BillboardMaterials, BillboardRing, BillboardSpec, Flipbook, VfxParams,
-    gradient_lut, soft_particle_depth, spawn_ballistic_billboard, spawn_billboard, unit_quad,
+    BILLBOARD_CAP, BillboardLook, BillboardMaterials, BillboardRing, BillboardSpec, Flipbook,
+    VfxParams, gradient_lut, soft_particle_depth, spawn_ballistic_billboard, spawn_billboard,
+    unit_quad,
 };
 
 // Alpha blending lets dust darken and occlude rather than behave as an emissive effect.
 
+/// Resolution: scar population cap bounds persistent decal slots.
+pub(super) const GROUND_MARK_CAP: usize = 16;
+
+/// The ground scars' own ring, so a sub-second billboard storm cannot evict a multi-second scar.
+/// Its slots lie past the shared ring's, inside the lane table.
+#[derive(Resource)]
+pub(super) struct GroundMarkRing(pub(super) BillboardRing);
+
+impl Default for GroundMarkRing {
+    fn default() -> Self {
+        Self(BillboardRing::new(BILLBOARD_CAP, GROUND_MARK_CAP))
+    }
+}
+
 pub(super) fn plugin(app: &mut App) {
-    app.add_systems(Startup, setup_impact_assets)
+    app.init_resource::<GroundMarkRing>()
+        .add_systems(Startup, setup_impact_assets)
         // The ship impact read: a view-side subscriber to `ballistics`' sim `Impact` event
         // (ADR-0014) — the same seam the debug marker and the sandbox subscribe to. Dust/ping/sparks
         // ride the shared billboard ring + ager, so no impact-local ring or aging system is needed.
@@ -145,6 +161,21 @@ impl ImpactAssets {
         material.params.fade.y = look().splash_ring_sharpness;
         material.params.glow.z = 0.0;
         material
+    }
+
+    /// The flat ground scar: the struck ground's own soil palette lying on the surface, with no
+    /// soft-particle depth because its whole quad lies inside that fade band.
+    fn ground_mark_material(&self, palette: Handle<Image>) -> BillboardLook {
+        BillboardLook {
+            params: VfxParams {
+                frame: Vec4::new(3.0, 2.0, 2.0, 0.0),
+                fade: look().scar_fade,
+                glow: Vec4::ZERO,
+            },
+            atlas: self.dust_atlas.clone(),
+            lut: palette,
+            alpha_mode: AlphaMode::Blend,
+        }
     }
 
     /// The dirt-ejecta material: the spark-streak geometry recolored to dirt (Blend, no glow — soil
@@ -285,6 +316,7 @@ pub(super) struct ImpactKit<'w, 's> {
     assets: ResMut<'w, ImpactAssets>,
     materials: BillboardMaterials<'w>,
     ring: ResMut<'w, BillboardRing>,
+    ground_ring: ResMut<'w, GroundMarkRing>,
     rng: ResMut<'w, ViewRng>,
     /// Absent in undrawn worlds, which have no painted ground to lift.
     ground_types: Option<Res<'w, crate::ground_types::GroundTypes>>,
@@ -532,7 +564,9 @@ fn spawn_small_impact(
     }
 }
 
-/// Layered powder emission from one resolved material contribution.
+/// The layered soil strike from one resolved ground contribution: ejecta, a tall plume, a shock
+/// ring and a lingering cloud on the shared ring, plus one flat scar in its own ring. Physical
+/// scale, never screen-relative.
 fn spawn_big_splash(
     position: Vec3,
     normal: Vec3,
@@ -544,6 +578,7 @@ fn spawn_big_splash(
         assets,
         materials,
         ring,
+        ground_ring,
         rng,
         commands,
         ..
@@ -683,6 +718,38 @@ fn spawn_big_splash(
             spin: 0.0,
             erosion_end: 1.0,
             rotation: None,
+        },
+    );
+
+    // --- Ground scar: one flat patch of the turned-up soil, its opacity the lifted share and its
+    // colour the ground's own, darker by `scar_shade` than the soil in the air.
+    let mut scar = powder.material(assets.ground_mark_material(powder.palette.clone()));
+    scar.params.glow.x = powder.light * look().scar_shade - 1.0;
+    spawn_billboard(
+        commands,
+        materials,
+        &mut ground_ring.0,
+        assets.quad.clone(),
+        BillboardSpec {
+            material: scar,
+            lifetime: look().ground_mark_lifetime,
+            origin: position + normal * look().surface_clearance_m,
+            drift: Vec3::ZERO,
+            frames: 4,
+            flipbook: Flipbook::Loop {
+                start: 3.0,
+                rate: 0.0,
+            },
+            start_size: look().ground_mark_size,
+            end_size: look().ground_mark_size * look().scar_end_scale,
+            aspect: Vec3::ONE,
+            roll: 0.0,
+            spin: 0.0,
+            erosion_end: 1.0,
+            rotation: Some(ground_orientation(
+                normal,
+                rng.range(0.0, std::f32::consts::TAU),
+            )),
         },
     );
 }
@@ -879,8 +946,10 @@ mod tests {
 
     use bevy::render::storage::ShaderBuffer;
 
+    use bevy::mesh::MeshTag;
+
     use crate::vfx::billboard::{
-        BILLBOARD_CAP, Billboard, BillboardFamilies, VfxBillboardMaterial,
+        BILLBOARD_SLOTS, Billboard, BillboardFamilies, VfxBillboardMaterial,
     };
 
     /// FIXTURE DATA: the compact contact recipe.
@@ -894,6 +963,7 @@ mod tests {
     fn harness() -> App {
         let mut app = App::new();
         app.init_resource::<BillboardRing>()
+            .init_resource::<GroundMarkRing>()
             .init_resource::<Assets<Mesh>>()
             .init_resource::<Assets<Image>>()
             .init_resource::<Assets<VfxBillboardMaterial>>()
@@ -1101,6 +1171,101 @@ mod tests {
             billboards(&mut app),
             1,
             "one powder mass: no metal flash, spark fan, plume, shock ring or cloud"
+        );
+    }
+
+    /// The ground scars ride their OWN eviction ring, bounded by GROUND_MARK_CAP, so a storm cannot
+    /// evict a fresh multi-second scar within a frame; each live scar holds its own lane-table slot
+    /// past the shared ring's. A mutant spawning scars on the shared ring fails here.
+    #[test]
+    fn ground_scars_are_ring_capped() {
+        let mut app = harness();
+        for _ in 0..GROUND_MARK_CAP + 8 {
+            trigger_impact(&mut app, Vec3::Y, LAYERED);
+        }
+        let ring = &app.world().resource::<GroundMarkRing>().0;
+        assert_eq!(ring.live.len(), GROUND_MARK_CAP, "bounded by their own cap");
+        let slots: std::collections::BTreeSet<u32> = ring
+            .live
+            .iter()
+            .map(|&scar| app.world().get::<MeshTag>(scar).expect("a live scar").0)
+            .collect();
+        assert_eq!(slots.len(), GROUND_MARK_CAP, "one slot per live scar");
+        assert!(
+            slots
+                .iter()
+                .all(|&slot| (BILLBOARD_CAP..BILLBOARD_SLOTS).contains(&(slot as usize))),
+            "scar slots lie past the shared ring's, inside the lane table"
+        );
+    }
+
+    /// The game's damage-model view: a layered soil strike's scar is the struck ground's own
+    /// colour, darker by `scar_shade`, as opaque as the ground gives up soil; a compact strike and
+    /// a substance leave none. ADR-0023's surface evidence relies on this; a mutant with a fixed
+    /// earth palette or a constant opacity fails here. FIXTURE: every ground the same soil.
+    #[test]
+    fn the_ground_scar_takes_the_grounds_resolved_colour_and_share() {
+        let colour = [0.6, 0.4, 0.2];
+        for amount in [0.25, 1.0] {
+            let mut app = harness();
+            let mut table = crate::ground_types::GroundTypes::load_shipped();
+            for ground in table.types.values_mut() {
+                ground.dust.erodibility = amount;
+                ground.dust.colour_srgb = colour;
+            }
+            app.insert_resource(table);
+            trigger_impact(&mut app, Vec3::Y, LAYERED);
+            let scar = *app
+                .world()
+                .resource::<GroundMarkRing>()
+                .0
+                .live
+                .front()
+                .expect("a layered soil strike leaves one scar");
+            let billboard = app.world().get::<Billboard>(scar).expect("a live scar");
+            assert_eq!(billboard.lanes.fade.w, look().scar_fade.w * amount);
+            let light = crate::world::level_ground_irradiance_lux() / std::f32::consts::PI
+                * Exposure::default().exposure();
+            assert_eq!(billboard.lanes.glow.x, light * look().scar_shade - 1.0);
+            assert_eq!(
+                billboard.lanes.glow.z, 0.0,
+                "the scar lies in the fade band"
+            );
+            let material = app
+                .world()
+                .get::<MeshMaterial3d<VfxBillboardMaterial>>(scar)
+                .expect("a live scar's family material");
+            let lut = app
+                .world()
+                .resource::<Assets<VfxBillboardMaterial>>()
+                .get(&material.0)
+                .expect("the family material exists")
+                .lut
+                .clone();
+            let soil = app
+                .world_mut()
+                .resource_scope(|world, mut assets: Mut<ImpactAssets>| {
+                    assets
+                        .ground_palettes
+                        .palette(&mut world.resource_mut::<Assets<Image>>(), colour)
+                });
+            assert_eq!(lut, soil, "the struck ground's own soil palette");
+        }
+        let mut app = harness();
+        trigger_impact(&mut app, Vec3::Y, COMPACT);
+        trigger_surface(
+            &mut app,
+            Vec3::Y,
+            LAYERED,
+            ImpactSurface::Material(SurfaceFeedback {
+                sparks: false,
+                ..SurfaceFeedback::fixture()
+            }),
+            ImpactOutcome::Struck,
+        );
+        assert!(
+            app.world().resource::<GroundMarkRing>().0.live.is_empty(),
+            "only a layered soil strike scars"
         );
     }
 

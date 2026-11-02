@@ -44,8 +44,9 @@ use crate::view::PlayerView;
 /// Eviction removes the oldest effect first; every emission family spends this same budget.
 pub(super) const BILLBOARD_CAP: usize = 96;
 
-/// Exactly one storage lane per possible live billboard.
-pub(super) const BILLBOARD_SLOTS: usize = BILLBOARD_CAP;
+/// Entries in the lane table: the shared ring's slots `0..BILLBOARD_CAP`, then the ground-mark
+/// ring's. Every ring's slot range lies inside it (asserted by [`BillboardRing::new`]).
+pub(super) const BILLBOARD_SLOTS: usize = BILLBOARD_CAP + super::impact::GROUND_MARK_CAP;
 
 pub(super) fn plugin(app: &mut App) {
     app.init_resource::<BillboardRing>()
@@ -98,7 +99,8 @@ fn lane_stride() -> usize {
 /// Exactly one class carries it: the diffuse MASS volumes (impact dust, dirt, spall; the muzzle's
 /// gas smoke and ground dust). Every other layer is 0.0, for three separate mechanisms — additive
 /// HOT layers (flashes, sparks, flame licks, the blast core) are airborne, so their approach to a
-/// wall is not an intersection to hide; the surface-aligned shock ring have their whole quad inside the band, which scales them out of existence; and ejecta is
+/// wall is not an intersection to hide; the two layers that LIE on a surface (ground scar, shock
+/// ring) have their whole quad inside the band, which scales them out of existence; and ejecta is
 /// solid thrown mass whose silhouette is its own edge, not a gas boundary.
 pub(crate) fn soft_particle_depth() -> f32 {
     super::look::impact().soft_particle_depth

@@ -145,7 +145,7 @@ mod tests {
     use crate::vfx::billboard::{
         Billboard, BillboardFamilies, BillboardRing, VfxBillboardMaterial,
     };
-    use crate::vfx::impact::ImpactAssets;
+    use crate::vfx::impact::{GroundMarkRing, ImpactAssets};
 
     /// FIXTURE DATA: an undrawn round whose authored contact recipe is compact.
     const MG_CALIBER: f32 = 0.0079;
@@ -167,6 +167,7 @@ mod tests {
             16,
         )))
         .init_resource::<BillboardRing>()
+        .init_resource::<GroundMarkRing>()
         .init_asset::<VfxBillboardMaterial>()
         .init_asset::<ShaderBuffer>()
         .init_resource::<BillboardFamilies>()
