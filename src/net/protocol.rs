@@ -15,7 +15,7 @@ use lightyear::prelude::input::native::ActionState;
 use lightyear::prelude::*;
 use serde::{Deserialize, Serialize};
 
-use super::disclosure::{NetTankStatus, apply_net_tank_status};
+use super::disclosure::{NetTankStatus, RespawnState, apply_net_tank_status};
 use crate::ballistics::ComponentHealth;
 use crate::command::{CommandError, DeviceClaim, ParsedTankCommand, TankCommand};
 use crate::damage::{CrewStation, Crewman, Dead, LaunchedTurret, PendingSwap, TankVolumes};
@@ -261,7 +261,8 @@ use crate::{CombatantId, CombatantLife, ShotId};
 /// REV 71 (#258, the game's damage model): each public exit leg carries its own drag.
 /// REV 72 (#258, the game's damage-model view): first-contact marks retain the flying calibre;
 /// packed directions refuse zero at the wire edge, with the same three-byte representation.
-pub const PROTOCOL_REV: u32 = 72;
+/// REV 73: owner-private respawn admission distinguishes waiting space from refused map picks.
+pub const PROTOCOL_REV: u32 = 73;
 
 /// Compatibility tag derived from the complete pinned wire manifest plus the crate version. This
 /// is the runtime handshake value: version-exact, so a version bump intentionally changes it.
@@ -1087,6 +1088,7 @@ const WIRE_SURFACE: &[&str] = &[
     "ServoAngles",
     "NetCrew",
     "NetTankStatus",
+    "RespawnState",
     "LaunchedTurretPose",
     "DestructionLedger",
     "HullMarks",
@@ -1124,7 +1126,7 @@ const WIRE_SURFACE: &[&str] = &[
 ];
 
 /// Pinned hash for the ordered wire surface and a direct handshake-fingerprint input.
-const WIRE_SURFACE_HASH: u64 = 0xc0256acf39c3f9da;
+const WIRE_SURFACE_HASH: u64 = 0x5afa185f66009321;
 
 // ---------------------------------------------------------------------------
 // Deep wire-surface coverage (field-level + external-dep skew)
@@ -1166,7 +1168,7 @@ const WIRE_SURFACE_HASH: u64 = 0xc0256acf39c3f9da;
 /// The pinned hash of the OWN wire-facing type DEFINITIONS (field layout, not just names). Re-pin it
 /// whenever a wire-facing struct/enum definition changes; house process also bumps
 /// [`PROTOCOL_REV`]. The tripwire prints the new value. See the block above for the coverage model.
-const WIRE_TYPES_HASH: u64 = 0xa0fb60f4d89cd6c9;
+const WIRE_TYPES_HASH: u64 = 0xcfc874f3dc15b147;
 
 /// The pinned `Cargo.lock` versions of the external crates whose types ride the wire (avian's
 /// replicated physics components; lightyear's wire framing / input protocol). A bump of either can
@@ -1194,6 +1196,7 @@ pub(crate) fn plugin(app: &mut App) {
     // Minimal public tank-life state. It gives observers death/cookoff presentation without
     // replicating private crew, module, ammunition, or belt facts.
     app.component::<NetTankStatus>().replicate();
+    app.component::<RespawnState>().replicate();
     // Authoritative launched-turret world pose (same plain-replication shape): the client shows the
     // cooked-off toss it does NOT simulate locally, writing the pose onto its own rig turret.
     app.component::<LaunchedTurretPose>().replicate();
@@ -2065,6 +2068,7 @@ mod tests {
         ("src/net/protocol.rs", "ServoAngles"),
         ("src/net/protocol.rs", "NetCrew"),
         ("src/net/disclosure.rs", "NetTankStatus"),
+        ("src/net/disclosure.rs", "RespawnState"),
         ("src/net/protocol.rs", "VolumeSnapshot"),
         ("src/net/protocol.rs", "CrewSnapshot"),
         ("src/net/protocol.rs", "LaunchedTurretPose"),

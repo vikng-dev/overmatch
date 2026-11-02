@@ -14,7 +14,7 @@ use lightyear::prelude::*;
 use super::admission::JoinAdmission;
 use super::battle::{BattleState, Boundary, CycleRules, HoldCommands, in_combat, places_tanks};
 use super::battle_mode::BattleMode;
-use super::disclosure::{CombatDisclosure, NetTankStatus};
+use super::disclosure::{CombatDisclosure, NetTankStatus, RespawnState};
 use super::hosting::{Hosted, HostedConfig};
 use super::protocol::{
     LaunchedTurretPose, NetCrew, NetTank, ServoAngles, SetSpawnPoint, protocol_id,
@@ -356,8 +356,7 @@ struct SpawnLane(u32);
 /// first free candidate wins.
 ///
 /// WHY per-radius counts: 8 fixed compass spokes leave 2π·48/8 ≈ 37.7 m arc gaps at the outer
-/// ring — free ground the search never sampled, so a crowded click could fall back to the lane
-/// spawn with room in plain sight. Each ring's count is
+/// ring — free ground the search never samples. Each ring's count is
 /// `max(8, ceil(2πr / 8 m))` — DERIVED candidates at most ~8 m of arc apart, the fixed
 /// search resolution — pinned by `spawn_search_rings_are_unit_uniform_and_dense_enough`.
 const SPAWN_DIRS_8: [Vec2; 8] = [
@@ -585,24 +584,10 @@ pub(crate) fn lane_spawn_xz(base_xz: Vec2, lane: u32, radius: f32) -> Vec2 {
     base_xz + lane_offset(lane, radius * 2.0)
 }
 
-/// A lane pose: the lane's XZ resolved against the live surface (`terrain_grid::spawn_pos`). On the
-/// flat-slab world this is exactly the old `y = 2.0` pose.
-///
-/// `harness_pose` is the ONE documented exception to horizontal-only spawn data:
-/// `harness::spawn_pose` names an exact resting CONTACT for the beached-rest repro, so its Y is
-/// honoured verbatim and never re-sampled. It is a measurement instrument, not a spawn definition — an ordinary run never
-/// sets it.
-fn lane_spawn_pos(
-    harness_pose: Option<Vec3>,
-    lane: u32,
-    height: Option<&crate::terrain_grid::HeightGrid>,
-    radius: f32,
-) -> Vec3 {
-    let xz = lane_spawn_xz(harness_pose.map_or(Vec2::ZERO, Vec3::xz), lane, radius);
-    match harness_pose {
-        Some(pose) => Vec3::new(xz.x, pose.y, xz.y),
-        None => spawn_pos(height, xz),
-    }
+/// The harness supplies an exact contact pose: lane offsets are horizontal and never resample Y.
+fn lane_spawn_pos(pose: Vec3, lane: u32, radius: f32) -> Vec3 {
+    let xz = lane_spawn_xz(pose.xz(), lane, radius);
+    Vec3::new(xz.x, pose.y, xz.y)
 }
 
 /// The XZ ground a terrain block DENIES a spawn — its world footprint expanded by
@@ -640,11 +625,14 @@ fn footprint_denies(footprint: Rect, candidate: Vec2) -> bool {
     candidate.cmpgt(footprint.min).all() && candidate.cmplt(footprint.max).all()
 }
 
-/// Resolve a requested XZ against live bodies and standing map footprints. Candidates follow
-/// `SPAWN_SEARCH_RINGS` in order; `None` means this finite search budget found no free point.
-/// The authority selects one immutable eager blueprint for every tank in this match, so `radius`
-/// bounds both the candidate and each occupant. Bodies need their summed radii; a standing block
-/// needs one body's radius beyond its footprint. Units are horizontal metres.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SpawnBlockage {
+    Occupied,
+    StandingGeometry,
+}
+
+/// Search the finite nearby candidate set. Bodies can move or be replaced; standing map
+/// footprints cannot clear through waiting for body occupancy, so they require a new pick.
 fn resolve_free_spawn_xz(
     half_extent: f32,
     desired: Vec2,
@@ -652,33 +640,75 @@ fn resolve_free_spawn_xz(
     blocks: &[Transform],
     height: Option<&crate::terrain_grid::HeightGrid>,
     radius: f32,
-) -> Option<(Vec2, bool)> {
-    // What STANDS on the map, resolved once in the block list's own fixed order — the ground terms
-    // drop out here rather than per candidate.
+) -> Result<(Vec2, bool), SpawnBlockage> {
     let standing: Vec<Rect> = blocks
         .iter()
         .filter_map(|block| block_footprint(block, height, radius))
         .collect();
-    let free = |candidate: Vec2| {
-        !occupied
+    let candidates = std::iter::once(desired).chain(SPAWN_SEARCH_RINGS.into_iter().flat_map(
+        |(distance, dirs)| {
+            dirs.iter().map(move |dir| {
+                spawn_map::clamp_to_spawn_limit(half_extent, desired + *dir * distance)
+            })
+        },
+    ));
+    let mut clear_ground = false;
+    for (index, candidate) in candidates.enumerate() {
+        if standing
+            .iter()
+            .any(|footprint| footprint_denies(*footprint, candidate))
+        {
+            continue;
+        }
+        clear_ground = true;
+        if !occupied
             .iter()
             .any(|tank| candidate.distance_squared(*tank) < (2.0 * radius).powi(2))
-            && !standing
-                .iter()
-                .any(|footprint| footprint_denies(*footprint, candidate))
-    };
-    if free(desired) {
-        return Some((desired, false));
-    }
-    for (radius, dirs) in SPAWN_SEARCH_RINGS {
-        for &dir in dirs {
-            let candidate = spawn_map::clamp_to_spawn_limit(half_extent, desired + dir * radius);
-            if free(candidate) {
-                return Some((candidate, true));
-            }
+        {
+            return Ok((candidate, index != 0));
         }
     }
-    None
+    Err(if clear_ground {
+        SpawnBlockage::Occupied
+    } else {
+        SpawnBlockage::StandingGeometry
+    })
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SpawnPickRefusal {
+    NonFinite,
+    NoClearGround,
+}
+
+/// Parse outside coordinates once at receipt, then admit only picks with a candidate on clear
+/// ground. Body occupancy is deliberately absent: it is a retryable placement state.
+fn check_spawn_pick(
+    half_extent: f32,
+    request: SetSpawnPoint,
+    blocks: &[Transform],
+    height: Option<&crate::terrain_grid::HeightGrid>,
+    radius: f32,
+) -> Result<Vec2, SpawnPickRefusal> {
+    let xz = validate_spawn_request(half_extent, request).ok_or(SpawnPickRefusal::NonFinite)?;
+    match resolve_free_spawn_xz(half_extent, xz, &[], blocks, height, radius) {
+        Ok(_) => Ok(xz),
+        Err(SpawnBlockage::StandingGeometry) => Err(SpawnPickRefusal::NoClearGround),
+        Err(SpawnBlockage::Occupied) => {
+            unreachable!("an empty body occupancy list cannot block clear ground")
+        }
+    }
+}
+
+/// A valid re-pick preserves an outstanding automatic request; a refusal cancels it until another
+/// admitted pick. Only the last accepted point survives in `SpawnOverrides`.
+fn picked_state(previous: RespawnState, pick: &Result<Vec2, SpawnPickRefusal>) -> RespawnState {
+    match pick {
+        Ok(_) if previous == RespawnState::WaitingForSpace => RespawnState::WaitingForSpace,
+        Ok(_) => RespawnState::Idle,
+        Err(SpawnPickRefusal::NonFinite) => RespawnState::InvalidPick,
+        Err(SpawnPickRefusal::NoClearGround) => RespawnState::PickBlocked,
+    }
 }
 
 /// Record each client's latest spawn-map choice. The key is the SENDING LINK, so authority is
@@ -689,19 +719,40 @@ fn receive_spawn_points(
     mut receivers: Query<(Entity, &mut MessageReceiver<SetSpawnPoint>), With<ClientOf>>,
     mut overrides: ResMut<SpawnOverrides>,
     height: Option<Res<crate::terrain_grid::HeightGrid>>,
+    map: Res<TerrainMap>,
+    obstacles: Res<SpawnObstacles>,
+    source: TankSimSource,
+    mut own: Query<(&ControlledBy, &mut RespawnState)>,
 ) {
     let half_extent = spawn_map::world_half_extent(height.as_deref());
     for (link, mut receiver) in &mut receivers {
         for request in receiver.receive() {
-            let Some(xz) = validate_spawn_request(half_extent, request) else {
-                warn!("server: rejected non-finite spawn request from link {link}");
-                continue;
-            };
-            overrides.0.insert(link, xz);
-            info!(
-                "server: link {link} set next spawn to ({:.1}, {:.1})",
-                xz.x, xz.y
+            let standing: Vec<Transform> = map.blocks.iter().chain(&obstacles.0).copied().collect();
+            let checked = check_spawn_pick(
+                half_extent,
+                request,
+                &standing,
+                height.as_deref(),
+                source.get().contact_radius(),
             );
+            // A phase boundary can remove the old root before this frame drains its last messages.
+            for (controlled, mut state) in &mut own {
+                if controlled.owner == link {
+                    *state = picked_state(*state, &checked);
+                }
+            }
+            match checked {
+                Ok(xz) => {
+                    overrides.0.insert(link, xz);
+                    info!(
+                        "server: link {link} set next spawn to ({:.1}, {:.1})",
+                        xz.x, xz.y
+                    );
+                }
+                Err(reason) => warn!(
+                    "server: refused spawn pick from link {link}: {reason:?}; choose another point on the map"
+                ),
+            }
         }
     }
 }
@@ -763,12 +814,7 @@ fn spawn_pending_tanks(
             continue;
         }
         let pos = if let Some((pose, _)) = harness_pose {
-            let pos = lane_spawn_pos(
-                Some(pose),
-                lane.0,
-                height.as_deref(),
-                content.contact_radius(),
-            );
+            let pos = lane_spawn_pos(pose, lane.0, content.contact_radius());
             lane.0 += 1;
             pos
         } else {
@@ -842,6 +888,7 @@ fn spawn_player_tank(
                 Replicate::to_clients(NetworkTarget::All),
             ),
             (
+                RespawnState::Idle,
                 // Born empty in the spawn bundle, public, appended by diff.
                 HullMarks::default(),
                 // Clients build their own local skeleton; replicate only root state.
@@ -1018,11 +1065,6 @@ fn respawn_dead_bots(
     }
 }
 
-/// A legitimate crowded-map state: a respawn waits for a free map pick or an automatic point
-/// outside the mode's minimum. The server retries without another client input edge.
-#[derive(Component)]
-struct AwaitingSpawnPoint;
-
 /// The game's damage model: server-authoritative player respawn replaces an owned knocked-out
 /// tank only after a client request. A request remains pending while its placement is blocked.
 /// The authority's `TankKnockedOut` marker validates eligibility; `ControlledBy` excludes bots. A
@@ -1044,7 +1086,7 @@ fn respawn_player_tanks(
             &ControlledBy,
             &CombatantId,
             &CombatantLife,
-            Option<&AwaitingSpawnPoint>,
+            &RespawnState,
         ),
         With<TankKnockedOut>,
     >,
@@ -1075,7 +1117,10 @@ fn respawn_player_tanks(
     // respawned to a client that is leaving.
     let requests: Vec<(Entity, Entity, PeerId, CombatantId, bool)> = dead
         .iter()
-        .filter(|(_, command, _, _, _, waiting)| command.respawn || waiting.is_some())
+        .filter(|(_, command, _, _, _, state)| {
+            **state == RespawnState::WaitingForSpace
+                || (command.respawn && **state == RespawnState::Idle)
+        })
         .filter(
             |(root, _, _, combatant, life, _)| match gate.opening(**combatant, **life) {
                 Opening::Open => true,
@@ -1092,7 +1137,7 @@ fn respawn_player_tanks(
                     controlled.owner,
                     remote.0,
                     *combatant,
-                    waiting.is_some(),
+                    *waiting == RespawnState::WaitingForSpace,
                 )
             })
         })
@@ -1136,7 +1181,7 @@ fn respawn_player_tanks(
                     height.as_deref(),
                     content.contact_radius(),
                 ) {
-                    Some((spot, nudged)) => {
+                    Ok((spot, nudged)) => {
                         if nudged {
                             info!(
                                 "server: spawn override ({:.1}, {:.1}) occupied — nudged to ({:.1}, {:.1})",
@@ -1145,16 +1190,17 @@ fn respawn_player_tanks(
                         }
                         Some(spawn_pos(height.as_deref(), spot))
                     }
-                    None => {
-                        if !waiting {
+                    Err(reason) => {
+                        let state = match reason {
+                            SpawnBlockage::Occupied => RespawnState::WaitingForSpace,
+                            SpawnBlockage::StandingGeometry => RespawnState::PickBlocked,
+                        };
+                        if !waiting || state == RespawnState::PickBlocked {
                             info!(
-                                "server: spawn override ({:.1}, {:.1}) and every candidate within \
-                                 {} m occupied — waiting for space",
-                                xz.x,
-                                xz.y,
-                                SPAWN_SEARCH_RINGS[SPAWN_SEARCH_RINGS.len() - 1].0
+                                "server: spawn pick ({:.1}, {:.1}): {state:?}; player may re-pick on the map",
+                                xz.x, xz.y
                             );
-                            commands.entity(root).insert(AwaitingSpawnPoint);
+                            commands.entity(root).insert(state);
                         }
                         continue;
                     }
@@ -1164,14 +1210,8 @@ fn respawn_player_tanks(
         };
         let spawn_pos = if let Some(pos) = override_pos {
             pos
-        } else if harness_pos.is_some() {
-            // The harness instrument retains its exact contact pose and lane layout.
-            let pos = lane_spawn_pos(
-                harness_pos,
-                lane.0,
-                height.as_deref(),
-                content.contact_radius(),
-            );
+        } else if let Some(pose) = harness_pos {
+            let pos = lane_spawn_pos(pose, lane.0, content.contact_radius());
             lane.0 += 1;
             pos
         } else {
@@ -1184,7 +1224,7 @@ fn respawn_player_tanks(
                     info!(
                         "server: player {client_id} respawn waiting — every map spawn point is inside the minimum distance"
                     );
-                    commands.entity(root).insert(AwaitingSpawnPoint);
+                    commands.entity(root).insert(RespawnState::WaitingForSpace);
                 }
                 continue;
             };
@@ -1885,7 +1925,10 @@ mod tests {
             ..default()
         });
         app.update();
-        assert!(app.world().get::<AwaitingSpawnPoint>(root).is_some());
+        assert_eq!(
+            app.world().get::<RespawnState>(root),
+            Some(&RespawnState::WaitingForSpace)
+        );
         app.world_mut()
             .get_mut::<TankCommand>(root)
             .expect("tank command")
@@ -1936,59 +1979,143 @@ mod tests {
         );
     }
 
-    /// The game's damage model: an exhausted map pick keeps the old life pending instead of
-    /// spawning into occupied space. Players need no second input edge when the space clears.
+    /// The game's damage model: body occupancy keeps the old life pending without another input
+    /// edge; standing footprints refuse the pick and never auto-spawn when that refusal clears.
     #[test]
-    fn an_exhausted_map_pick_waits_and_retries_without_a_lane_fallback() {
-        let mut app = placement_app();
-        let client_id = PeerId::Netcode(1);
-        let link = app.world_mut().spawn((RemoteId(client_id), Connected)).id();
-        app.world_mut()
-            .resource_mut::<PendingClients>()
-            .0
-            .push((link, client_id));
-        app.update();
-        let root = app
-            .world_mut()
-            .query_filtered::<Entity, With<ControlledBy>>()
-            .single(app.world())
-            .expect("one player tank");
-        // Fixture: one standing footprint covers the entire search and the origin lane.
-        app.world_mut()
-            .resource_mut::<SpawnObstacles>()
-            .0
-            .push(Transform::from_translation(Vec3::Y).with_scale(Vec3::splat(1000.0)));
-        let picked = Vec2::new(50.0, 0.0); // Fixture: inside the map, away from the origin.
-        app.world_mut()
-            .resource_mut::<SpawnOverrides>()
-            .0
-            .insert(link, picked);
-        knock_out(&mut app, root);
-        advance(&mut app, shipped_wait().ticks());
-        app.world_mut().entity_mut(root).insert(TankCommand {
-            respawn: true,
-            ..default()
-        });
-        app.update();
-        assert!(
-            app.world().get::<AwaitingSpawnPoint>(root).is_some(),
-            "an occupied search must retain the old root and a pending request"
+    fn blocked_map_picks_wait_only_for_body_occupancy() {
+        for permanent in [false, true] {
+            let mut app = placement_app();
+            let client_id = PeerId::Netcode(1);
+            let link = app.world_mut().spawn((RemoteId(client_id), Connected)).id();
+            app.world_mut()
+                .resource_mut::<PendingClients>()
+                .0
+                .push((link, client_id));
+            app.update();
+            let root = app
+                .world_mut()
+                .query_filtered::<Entity, With<ControlledBy>>()
+                .single(app.world())
+                .unwrap();
+            let picked = Vec2::new(50.0, 0.0); // Fixture in-map point.
+            let mut bodies = Vec::new();
+            if permanent {
+                app.world_mut()
+                    .resource_mut::<SpawnObstacles>()
+                    .0
+                    .push(Transform::from_translation(Vec3::Y).with_scale(Vec3::splat(1000.0))); // Fixture footprint covers the finite search.
+            } else {
+                let points =
+                    std::iter::once(picked).chain(SPAWN_SEARCH_RINGS.into_iter().flat_map(
+                        |(radius, dirs)| dirs.iter().map(move |dir| picked + *dir * radius),
+                    ));
+                for point in points {
+                    bodies.push(
+                        app.world_mut()
+                            .spawn((NetTank, Position(Vec3::new(point.x, 0.0, point.y))))
+                            .id(),
+                    );
+                }
+            }
+            app.world_mut()
+                .resource_mut::<SpawnOverrides>()
+                .0
+                .insert(link, picked);
+            knock_out(&mut app, root);
+            advance(&mut app, shipped_wait().ticks());
+            app.world_mut()
+                .get_mut::<TankCommand>(root)
+                .unwrap()
+                .respawn = true;
+            app.update();
+            let expected = if permanent {
+                RespawnState::PickBlocked
+            } else {
+                RespawnState::WaitingForSpace
+            };
+            assert_eq!(app.world().get::<RespawnState>(root), Some(&expected));
+            app.world_mut()
+                .get_mut::<TankCommand>(root)
+                .unwrap()
+                .respawn = false;
+            app.update();
+            assert!(app.world().get_entity(root).is_ok());
+            app.world_mut().resource_mut::<SpawnObstacles>().0.clear();
+            for body in bodies {
+                app.world_mut().entity_mut(body).despawn();
+            }
+            app.update();
+            if permanent {
+                assert!(
+                    app.world().get_entity(root).is_ok(),
+                    "a refused request cannot become an automatic respawn"
+                );
+                let checked = check_spawn_pick(
+                    750.0,
+                    SetSpawnPoint {
+                        x: picked.x,
+                        z: picked.y,
+                    },
+                    &[],
+                    None,
+                    FIXTURE_BODY_RADIUS_M,
+                );
+                let next = picked_state(expected, &checked);
+                *app.world_mut().get_mut::<RespawnState>(root).unwrap() = next;
+                app.world_mut()
+                    .get_mut::<TankCommand>(root)
+                    .unwrap()
+                    .respawn = true;
+                app.update();
+            }
+            assert!(app.world().get_entity(root).is_err());
+            let position = app
+                .world_mut()
+                .query_filtered::<&Position, With<ControlledBy>>()
+                .single(app.world())
+                .unwrap();
+            assert_eq!(position.0.xz(), picked);
+        }
+    }
+
+    /// Receipt refuses nonfinite coordinates and a search wholly covered by standing footprints.
+    /// A valid re-pick keeps a waiting request, while a refusal cancels that request visibly.
+    #[test]
+    fn spawn_pick_admission_distinguishes_refusal_from_retry() {
+        let half = crate::terrain_grid::FIXTURE_EXTENT.half_extent();
+        let blocked = [Transform::from_translation(Vec3::Y).with_scale(Vec3::splat(1000.0))]; // Fixture footprint.
+        let pick = SetSpawnPoint { x: 0.0, z: 0.0 };
+        let refused = check_spawn_pick(half, pick, &blocked, None, FIXTURE_BODY_RADIUS_M);
+        assert_eq!(refused, Err(SpawnPickRefusal::NoClearGround));
+        assert_eq!(
+            picked_state(RespawnState::WaitingForSpace, &refused),
+            RespawnState::PickBlocked
         );
-        app.world_mut()
-            .get_mut::<TankCommand>(root)
-            .expect("the waiting root retains its command")
-            .respawn = false;
-        app.update();
-        assert!(app.world().get::<AwaitingSpawnPoint>(root).is_some());
-        app.world_mut().resource_mut::<SpawnObstacles>().0.clear();
-        app.update();
-        assert!(app.world().get_entity(root).is_err());
-        let position = app
-            .world_mut()
-            .query_filtered::<&Position, With<ControlledBy>>()
-            .single(app.world())
-            .expect("one replacement after space clears");
-        assert_eq!(position.0.xz(), picked, "the persistent map pick wins");
+        let valid = check_spawn_pick(half, pick, &[], None, FIXTURE_BODY_RADIUS_M);
+        assert_eq!(valid, Ok(Vec2::ZERO));
+        assert_eq!(
+            picked_state(RespawnState::WaitingForSpace, &valid),
+            RespawnState::WaitingForSpace
+        );
+        assert_eq!(
+            picked_state(RespawnState::PickBlocked, &valid),
+            RespawnState::Idle
+        );
+        let malformed = check_spawn_pick(
+            half,
+            SetSpawnPoint {
+                x: f32::NAN,
+                z: 0.0,
+            },
+            &[],
+            None,
+            FIXTURE_BODY_RADIUS_M,
+        );
+        assert_eq!(malformed, Err(SpawnPickRefusal::NonFinite));
+        assert_eq!(
+            picked_state(RespawnState::Idle, &malformed),
+            RespawnState::InvalidPick
+        );
     }
 
     /// Commands are deferred, so two queued joins must include earlier placements in the pass's
@@ -2164,7 +2291,7 @@ mod tests {
         // Free field: untouched, not nudged.
         assert_eq!(
             resolve_free_spawn_xz(half, desired, &[], &[], None, FIXTURE_BODY_RADIUS_M),
-            Some((desired, false))
+            Ok((desired, false))
         );
         // A tank exactly at the radius is NOT blocking (>= is free)…
         let at_radius = desired + Vec2::new(2.0 * FIXTURE_BODY_RADIUS_M, 0.0);
@@ -2177,7 +2304,7 @@ mod tests {
                 None,
                 FIXTURE_BODY_RADIUS_M
             ),
-            Some((desired, false)),
+            Ok((desired, false)),
         );
         // …but one inside it is, and the search takes candidates in fixed ring order: the
         // occupant at +5.9 m X blocks the request, blocks +X@8 (2.1 m away) and NE@8 (5.66 m
@@ -2207,7 +2334,7 @@ mod tests {
         }
         assert_eq!(
             resolve_free_spawn_xz(half, desired, &crowd, &[], None, FIXTURE_BODY_RADIUS_M),
-            None
+            Err(SpawnBlockage::Occupied)
         );
         // Candidates near the map edge clamp into the placeable square.
         let limit = spawn_map::spawn_limit(half);
@@ -2258,7 +2385,7 @@ mod tests {
         );
         assert_eq!(
             resolve_free_spawn_xz(half, desired, &[], &[ground], None, FIXTURE_BODY_RADIUS_M),
-            Some((desired, false)),
+            Ok((desired, false)),
         );
         // A house standing ON that ground is still occupancy — the ground term never masks it.
         let house = building(desired, Vec3::new(4.0, 3.0, 6.0), 0.5);
@@ -2333,11 +2460,8 @@ mod tests {
         );
     }
 
-    /// The between-spokes case the 8-spoke pattern MISSED: park tanks on every candidate the
-    /// old search would have tried (all inner-ring candidates plus the 8 compass points at
-    /// 48 m) — the old search returned `None` (lane fallback) with whole occupancy-diameters of
-    /// free ground between the outer spokes; the dense rings find the spoke neighbour ~7.9 m of
-    /// arc away, deterministically.
+    /// Occupied compass points do not imply occupied intervening arcs. Dense outer rings must
+    /// find clear ground between them; players rely on the nearby candidate search covering it.
     #[test]
     fn outer_ring_between_spokes_gap_is_searched() {
         let half = crate::terrain_grid::FIXTURE_EXTENT.half_extent();
@@ -2415,7 +2539,7 @@ mod tests {
         );
         let harness = Vec3::new(3.0, 0.42, -7.0);
         assert_eq!(
-            lane_spawn_pos(Some(harness), 0, Some(&grid), FIXTURE_BODY_RADIUS_M),
+            lane_spawn_pos(harness, 0, FIXTURE_BODY_RADIUS_M),
             harness,
             "a harness spawn pose is never re-sampled",
         );

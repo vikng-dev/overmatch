@@ -3,6 +3,7 @@
 //! Life state comes from public `NetTankStatus`; private crew state must not drive an observer's UI.
 //! The respawn's opening comes from the server's replicated `score::Scoreboard`: the overlay
 //! counts down to it and the key is inert before it.
+//! Owner-private `RespawnState` names waiting/refusal independently of that opening.
 
 use bevy::ecs::query::QuerySingleError;
 use bevy::ecs::schedule::ScheduleConfigs;
@@ -10,6 +11,7 @@ use bevy::ecs::system::{ScheduleSystem, SystemParam};
 use bevy::prelude::*;
 
 use super::battle::BattleState;
+use super::disclosure::RespawnState;
 use super::score::{Opening, Scoreboard};
 use crate::command::TankCommand;
 use crate::damage::TankKnockedOut;
@@ -25,13 +27,18 @@ use crate::{CombatantId, CombatantLife, ShotClock};
 const RESPAWN_KEY: KeyCode = KeyCode::KeyR;
 
 /// Message represented by the status node.
-#[derive(Component, Clone, Copy, PartialEq, Eq)]
+#[derive(Component, Clone, Copy, Debug, PartialEq, Eq)]
 enum DeathScreenNode {
     /// Dead with no outstanding request; the respawn opens in `opens_in_s` whole seconds, `None`
     /// once the key may be pressed ([`OwnRespawn::seconds_left`]).
-    Died { opens_in_s: Option<u32> },
-    /// Request sent; keep the overlay until a live controlled tank arrives or the request expires.
+    Died {
+        opens_in_s: Option<u32>,
+    },
+    /// Request sent; wait for authoritative admission, a live replacement, or the retry deadline.
     Respawning,
+    WaitingForSpace,
+    PickBlocked,
+    InvalidPick,
 }
 
 /// The own knocked-out life's respawn opening, as the replicated scoreboard names it.
@@ -44,12 +51,22 @@ struct OwnRespawn<'w, 's> {
         (With<Controlled>, With<TankKnockedOut>),
     >,
     boards: Query<'w, 's, &'static Scoreboard>,
+    state: Query<'w, 's, Option<&'static RespawnState>, With<Controlled>>,
     battles: Query<'w, 's, &'static BattleState>,
     clock: Option<Res<'w, ShotClock>>,
     time: Res<'w, Time<Fixed>>,
 }
 
 impl OwnRespawn<'_, '_> {
+    fn state(&self) -> RespawnState {
+        match self.state.single() {
+            Ok(Some(state)) => *state,
+            // Before the owner snapshot arrives, or between links, there is no admission to show.
+            Ok(None) | Err(QuerySingleError::NoEntities(_)) => RespawnState::Idle,
+            Err(QuerySingleError::MultipleEntities(_)) => panic!("a client controls one tank root"),
+        }
+    }
+
     /// The replicated phase closes respawn outside combat, even while the old tank's despawn is
     /// still in flight. Without a Battle yet (or in an isolated death-view fixture), the authority
     /// still decides a request against the life; absence cannot invent a phase.
@@ -101,13 +118,14 @@ impl OwnRespawn<'_, '_> {
     }
 }
 
-/// Bound an unfulfilled request so the player can retry.
+/// Resolution: bound the unacknowledged request wait so a dropped input can be retried.
+/// An authoritative waiting/refusal state takes over immediately and has no local timeout.
 const RESPAWN_TIMEOUT_SECS: f64 = 5.0;
 
 /// In-flight request state. The overlay remains visible through the dead-to-replacement gap.
 #[derive(Resource, Default)]
 struct AwaitingRespawn {
-    /// True from the respawn press until a live tank is re-acquired or the request times out.
+    /// True while the request awaits authoritative admission or a replacement.
     active: bool,
     /// Wall-clock deadline (`Time::elapsed_secs_f64`) past which an unfulfilled request reverts to
     /// `Died`. Meaningful only while `active`.
@@ -186,13 +204,12 @@ fn toggle_death_screen(
 ) {
     let has_live = !live_own.is_empty();
     let between_combats = opening.between_combats();
-    if has_live || between_combats {
-        // A live replacement completes the request; a phase boundary cancels it.
+    let server_state = opening.state();
+    if has_live || between_combats || server_state != RespawnState::Idle {
+        // Authority admission replaces the local wait; a live root or phase boundary completes it.
         awaiting.active = false;
     } else if respawn_timed_out(&awaiting, has_live, time.elapsed_secs_f64()) {
-        // The request stalled past the timeout (asset-gate skip, or a drop while dead): drop the
-        // wait so the overlay reverts to `Died` and the player can press R again. The dead own tank
-        // still exists in that case, so precedence below falls to `Died`.
+        // No authority response arrived within the retry horizon; the player can send again.
         awaiting.active = false;
         info!("client: respawn request timed out — reverting to the death screen");
     }
@@ -202,8 +219,13 @@ fn toggle_death_screen(
     } else if awaiting.active && !has_live {
         Some(DeathScreenNode::Respawning)
     } else if !dead_own.is_empty() && !gate.is_some_and(|gate| gate.holds_death_screen) {
-        Some(DeathScreenNode::Died {
-            opens_in_s: opening.seconds_left(),
+        Some(match server_state {
+            RespawnState::Idle => DeathScreenNode::Died {
+                opens_in_s: opening.seconds_left(),
+            },
+            RespawnState::WaitingForSpace => DeathScreenNode::WaitingForSpace,
+            RespawnState::PickBlocked => DeathScreenNode::PickBlocked,
+            RespawnState::InvalidPick => DeathScreenNode::InvalidPick,
         })
     } else {
         None
@@ -214,7 +236,13 @@ fn toggle_death_screen(
     // `apply_death_visibility`'s job; existence (spawn/despawn below) stays this system's.
     overlays.declare(Overlay::Death, desired.is_some());
 
-    let shown = overlay.single().ok().map(|(_, state)| *state);
+    let shown = match overlay.single() {
+        Ok((_, state)) => Some(*state),
+        Err(QuerySingleError::NoEntities(_)) => None, // No death state is currently declared.
+        Err(QuerySingleError::MultipleEntities(_)) => {
+            panic!("one death-screen node represents the declared state")
+        }
+    };
     if desired == shown {
         return;
     }
@@ -256,6 +284,8 @@ fn request_respawn(
     mut awaiting: ResMut<AwaitingRespawn>,
 ) {
     if opening.between_combats()
+        || awaiting.active
+        || opening.state() != RespawnState::Idle
         || !keys.just_pressed(RESPAWN_KEY)
         || gate.is_some_and(|gate| gate.settling)
         || opening.seconds_left().is_some()
@@ -297,6 +327,16 @@ fn spawn_death_screen(commands: &mut Commands, state: DeathScreenNode, font: &Ha
             opens_in_s: Some(seconds),
         } => format!("YOU DIED\nrespawn in {seconds} s"),
         DeathScreenNode::Respawning => "RESPAWNING…".to_owned(),
+        DeathScreenNode::WaitingForSpace => {
+            "WAITING FOR SPAWN SPACE\nrespawn is automatic when clear\npress M to re-pick"
+                .to_owned()
+        }
+        DeathScreenNode::PickBlocked => {
+            "SPAWN PICK BLOCKED\nno clear ground near this point\npress M to re-pick".to_owned()
+        }
+        DeathScreenNode::InvalidPick => {
+            "SPAWN PICK REFUSED\ninvalid map coordinates\npress M to re-pick".to_owned()
+        }
     };
     // Two markers: the stateful `DeathScreenNode` enum (text form + despawn handle) and the shared
     // `OverlayNode(Death)`, which stamps the one-scrim `GlobalZIndex` via its hook and hands the full
@@ -317,14 +357,13 @@ fn spawn_death_screen(commands: &mut Commands, state: DeathScreenNode, font: &Ha
     commands.entity(screen).with_child(overlay::death_tint());
 }
 
-/// A thin, top-pinned, NON-interactive status line shown only while the death state is latched but the
-/// menu is drawn on top of it ([`overlay::death_status_line`]): "DEAD — respawn on menu close". Exempt
-/// from the one-scrim suppression — it draws no backdrop, and its `GlobalZIndex` (Death's, above the
-/// menu's) keeps it legible THROUGH the menu, so the player knows the respawn key is merely gated
-/// (menu open, cursor released) rather than gone. We never show "press R" while R can't work; this line
-/// is what stands in for it. Spawned once per match and visibility-swapped.
+/// One no-scrim status line carries admission through the map/menu, and refusal while alive.
+/// Death's z-layer keeps it above those backdrops; the connect screen still covers it.
 #[derive(Component)]
 struct DeathStatusLine;
+
+#[derive(Component)]
+struct DeathStatusText;
 
 fn spawn_death_status_line(mut commands: Commands, fonts: Res<UiFonts>) {
     commands
@@ -343,6 +382,7 @@ fn spawn_death_status_line(mut commands: Commands, fonts: Res<UiFonts>) {
         ))
         .with_children(|parent| {
             parent.spawn((
+                DeathStatusText,
                 Text::new("DEAD — respawn on menu close"),
                 TextFont {
                     // SemiBold: a terse all-caps status line.
@@ -355,24 +395,59 @@ fn spawn_death_status_line(mut commands: Commands, fonts: Res<UiFonts>) {
         });
 }
 
-/// Reconcile ONLY the death STATUS LINE — the one one-scrim exemption. The full backdrop node is a
-/// shared `overlay::OverlayNode(Death)`, so its visibility (red backdrop + "YOU DIED / press R", shown
-/// exactly while Death owns the scrim) is `overlay::apply_overlay_visibility`'s job now, and its
-/// existence (spawn/despawn on the death STATE) stays `toggle_death_screen`'s. This system only swaps
-/// the thin status line: `Visible` exactly while the death state is latched but the menu is drawn on
-/// top of it ([`overlay::death_status_line`]) — "DEAD — respawn on menu close", legible THROUGH the
-/// menu — and `Hidden` otherwise. Runs after `OverlaySet::Toggle` so it reads the fully-reconciled set
-/// (the declarers AND the Esc / `M` toggles have both written by then).
+/// The no-scrim status line also carries owner-private admission while a map/menu hides the death
+/// screen, or a living player has just picked an invalid point. Its action follows the top overlay.
 fn apply_death_status_line(
     overlays: Res<Overlays>,
+    opening: OwnRespawn,
     mut status: Query<&mut Visibility, With<DeathStatusLine>>,
+    mut texts: Query<&mut Text, With<DeathStatusText>>,
 ) {
-    if let Ok(mut vis) = status.single_mut() {
-        vis.set_if_neq(if overlay::death_status_line(&overlays) {
-            Visibility::Visible
+    let state = opening.state();
+    let message =
+        if opening.between_combats() || overlay::draws_scrim(&overlays, Overlay::ConnectStatus) {
+            None
+        } else if state == RespawnState::Idle {
+            overlay::death_status_line(&overlays).then(|| "DEAD — respawn on menu close".to_owned())
+        } else if overlay::draws_scrim(&overlays, Overlay::Death) {
+            None // The full death screen already names the admission and action.
         } else {
-            Visibility::Hidden
-        });
+            let action = if overlay::draws_scrim(&overlays, Overlay::SpawnMap) {
+                "click map to re-pick"
+            } else if overlay::draws_scrim(&overlays, Overlay::Menu) {
+                "close menu, then M to re-pick"
+            } else {
+                "press M to re-pick"
+            };
+            Some(match state {
+                RespawnState::WaitingForSpace => {
+                    format!("WAITING FOR SPAWN SPACE — automatic when clear; {action}")
+                }
+                RespawnState::PickBlocked => format!("SPAWN PICK BLOCKED — {action}"),
+                RespawnState::InvalidPick => format!("SPAWN PICK REFUSED — {action}"),
+                RespawnState::Idle => unreachable!("idle admission uses the ordinary death status"),
+            })
+        };
+    let mut visibility = match status.single_mut() {
+        Ok(status) => status,
+        // The composed bare death-view fixture mounts no status-line node.
+        Err(QuerySingleError::NoEntities(_)) => return,
+        Err(QuerySingleError::MultipleEntities(_)) => {
+            panic!("one death status line is spawned per match")
+        }
+    };
+    visibility.set_if_neq(if message.is_some() {
+        Visibility::Visible
+    } else {
+        Visibility::Hidden
+    });
+    if let Some(message) = message {
+        let mut text = texts
+            .single_mut()
+            .expect("the death status line spawns one text child");
+        if text.0 != message {
+            text.0 = message;
+        }
     }
 }
 
@@ -422,6 +497,70 @@ mod tests {
         world.run_system_once(request_respawn).unwrap();
         assert!(!world.get::<TankCommand>(own).unwrap().respawn);
         assert!(!world.resource::<AwaitingRespawn>().active);
+    }
+
+    /// The game's damage model: authoritative admission survives the local retry deadline and
+    /// refuses redundant R edges. A hidden death screen must still explain a pending automatic spawn.
+    #[test]
+    fn authoritative_respawn_admission_outlives_the_request_timeout() {
+        use bevy::ecs::system::RunSystemOnce;
+        for (state, node) in [
+            (
+                RespawnState::WaitingForSpace,
+                DeathScreenNode::WaitingForSpace,
+            ),
+            (RespawnState::PickBlocked, DeathScreenNode::PickBlocked),
+            (RespawnState::InvalidPick, DeathScreenNode::InvalidPick),
+        ] {
+            let mut world = World::new();
+            let mut time = Time::<()>::default();
+            time.advance_by(std::time::Duration::from_secs(10)); // Fixture past the local deadline.
+            world.insert_resource(time);
+            world.insert_resource(Time::<Fixed>::default());
+            world.insert_resource(ButtonInput::<KeyCode>::default());
+            world.insert_resource(Overlays::default());
+            world.insert_resource(UiFonts {
+                hud: Handle::default(),
+                body: Handle::default(),
+            });
+            world.insert_resource(awaiting(true, 1.0));
+            let own = world
+                .spawn((
+                    Controlled,
+                    TankKnockedOut {
+                        reason: crate::damage::KnockoutReason::CrewLoss,
+                    },
+                    TankCommand::default(),
+                    state,
+                ))
+                .id();
+            world.run_system_once(toggle_death_screen).unwrap();
+            assert_eq!(
+                *world.query::<&DeathScreenNode>().single(&world).unwrap(),
+                node
+            );
+            assert!(
+                !world.resource::<AwaitingRespawn>().active,
+                "the authority replaces the local timeout"
+            );
+            world
+                .resource_mut::<ButtonInput<KeyCode>>()
+                .press(RESPAWN_KEY);
+            world.run_system_once(request_respawn).unwrap();
+            assert!(!world.get::<TankCommand>(own).unwrap().respawn);
+            assert!(!world.resource::<AwaitingRespawn>().active);
+            world
+                .resource_mut::<Overlays>()
+                .declare(Overlay::Menu, true);
+            let line = world.spawn((DeathStatusLine, Visibility::Hidden)).id();
+            let text = world.spawn((DeathStatusText, Text::new("fixture"))).id();
+            world.run_system_once(apply_death_status_line).unwrap();
+            assert_eq!(world.get::<Visibility>(line), Some(&Visibility::Visible));
+            assert!(
+                world.get::<Text>(text).unwrap().0.contains("re-pick"),
+                "the menu status supplies the way out"
+            );
+        }
     }
 
     fn awaiting(active: bool, deadline: f64) -> AwaitingRespawn {

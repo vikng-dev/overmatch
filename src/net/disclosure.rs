@@ -18,6 +18,17 @@ pub enum NetTankStatus {
     CookedOff,
 }
 
+/// Owner-private respawn admission. Waiting retries automatically; a refused pick requires a
+/// new map choice. The wire carries meaning, never UI text.
+#[derive(Component, Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub(super) enum RespawnState {
+    #[default]
+    Idle,
+    WaitingForSpace,
+    PickBlocked,
+    InvalidPick,
+}
+
 impl NetTankStatus {
     fn from_knockout(knocked_out: Option<&TankKnockedOut>) -> Self {
         match knocked_out.map(|knocked_out| knocked_out.reason) {
@@ -63,6 +74,7 @@ impl VisibilityFilter for CombatDisclosure {
         WeaponLoads,
         TankTransmission,
         DriveSignal,
+        RespawnState,
     );
 
     fn is_visible(&self, client: Entity, authorized: Option<&AuthorizedClient>) -> bool {
@@ -161,6 +173,7 @@ mod tests {
             .replicate::<TankTransmission>()
             .replicate::<DriveSignal>()
             .replicate::<NetCrew>()
+            .replicate::<RespawnState>()
             .replicate::<EngineRpm>();
         }
         server.add_visibility_filter::<CombatDisclosure>();
@@ -188,6 +201,7 @@ mod tests {
         server.world_mut().spawn((
             Replicated,
             repair_snapshot.clone(),
+            RespawnState::WaitingForSpace,
             CombatDisclosure::owner(owner_link),
             transmission,
             signal,
@@ -235,6 +249,23 @@ mod tests {
             received(&mut other),
             (None, None, Some(EngineRpm(712)), None),
             "another client receives the public rpm, never the transmission or the drive signal"
+        );
+        assert_eq!(
+            owner
+                .world_mut()
+                .query::<&RespawnState>()
+                .single(owner.world())
+                .unwrap(),
+            &RespawnState::WaitingForSpace
+        );
+        assert_eq!(
+            other
+                .world_mut()
+                .query::<&RespawnState>()
+                .iter(other.world())
+                .count(),
+            0,
+            "respawn admission is owner-private through the actual send path"
         );
     }
 
