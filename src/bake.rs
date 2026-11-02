@@ -1940,6 +1940,12 @@ mod tests {
             Node::new("Station_R")
                 .child_of("Hull")
                 .holding(solid(SUBSTANCE, [6.0, 0.0, 0.0])),
+            Node::new("Fixture_Engine")
+                .child_of("Hull")
+                .holding(solid(SUBSTANCE, [0.0, 12.0, 0.0])),
+            Node::new("Fixture_Transmission")
+                .child_of("Hull")
+                .holding(solid(SUBSTANCE, [0.0, 15.0, 0.0])),
             // The game's damage model: fixture construction seats the two-crew floor.
             Node::new("Fixture_SeatA")
                 .child_of("Hull")
@@ -2423,8 +2429,10 @@ mod tests {
             references,
             [
                 ("servos", "Turret_Yaw"),
+                ("volumes", "Fixture_Engine"),
                 ("volumes", "Fixture_SeatA"),
                 ("volumes", "Fixture_SeatB"),
+                ("volumes", "Fixture_Transmission"),
                 ("volumes", "Plate"),
                 ("colliders", "Proxy"),
                 ("roadwheels[0].node", "Station_L"),

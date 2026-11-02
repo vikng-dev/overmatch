@@ -2307,8 +2307,10 @@ fn update_park_latch(st: &mut TransmissionState, inp: &TransmissionInput) {
 /// [`NEUTRAL_M_SPEED`] line. Any propulsive command re-engages at any speed (the launch);
 /// otherwise the belt must fall below [`CLUTCH_OUT_M_SPEED`] to take the clutch out and climb
 /// past [`CLUTCH_IN_M_SPEED`] to put it back in.
-fn update_clutch_latch(st: &mut TransmissionState, propulsive: f32, m: f32) {
-    if propulsive >= NEUTRAL_THROTTLE || m.abs() >= CLUTCH_IN_M_SPEED {
+fn update_clutch_latch(st: &mut TransmissionState, propulsive: f32, m: f32, supply: DriveSupply) {
+    if supply.control_authority && supply.task_rate == 0.0 {
+        st.clutch_out = true;
+    } else if propulsive >= NEUTRAL_THROTTLE || m.abs() >= CLUTCH_IN_M_SPEED {
         st.clutch_out = false;
     } else if m.abs() < CLUTCH_OUT_M_SPEED {
         st.clutch_out = true;
@@ -2934,7 +2936,7 @@ pub fn step(
     let omega_e = st.omega_e;
     let k = g / tp.sprocket_radius;
 
-    update_clutch_latch(st, propulsive, m);
+    update_clutch_latch(st, propulsive, m, inp.supply);
     let engaged = !shifting && !st.clutch_out;
 
     let (tau_free, p_avail) = crank_free_torque(

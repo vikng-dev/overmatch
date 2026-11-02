@@ -2357,3 +2357,13 @@ formatting and CI workspace/all-target clippy passed. The five focused productio
 passed, including the physical-output bisection check. Explicit old-motor, old-fade and
 near-whole rounding mutation execution remains to be recorded within the lane budget.
 No capture, pricing run, issue comment or push was taken.
+
+#### Drive task bottlenecks and physical sources (#146)
+
+The game's driving and damage model uses one evaluated Drive task rate for commanded
+combustion. A transmission-only reduction therefore lowers combustion as well as the clutch
+and steering capacities its physical condition limits; these are separate work and capacity
+constraints, not a reconstructed product of source shares. `TankSpec::validate` requires Engine
+and Transmission on every productive Drive path. A staffed task at zero rate opens the main
+clutch, so the engine's local idle catch cannot launch the hull while Drive reads zero.
+`transmission_bottleneck_reduces_the_one_drive_task_rate` pins the generic bottleneck outcome.

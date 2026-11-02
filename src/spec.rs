@@ -410,7 +410,8 @@ impl TryFrom<WeaponSpecFile> for WeaponSpec {
 fn deserialize_weapons<'de, D: serde::Deserializer<'de>>(
     deserializer: D,
 ) -> Result<HashMap<String, WeaponSpec>, D::Error> {
-    HashMap::<String, WeaponSpecFile>::deserialize(deserializer)?
+    crate::keyed_map::KeyedMap::<WeaponSpecFile>::deserialize(deserializer)?
+        .0
         .into_iter()
         .map(|(name, file)| {
             WeaponSpec::try_from(file)
@@ -1252,7 +1253,7 @@ pub struct TankSpec {
     /// Per-tank capability requirements (design §7b). Each capability maps to a list of requirement
     /// groups (AND'd): a bare `Part` is mandatory; `Pool(..)`/`Backup(..)` express graded redundancy.
     /// Read by the drive selector, `track::sim::drive_target`.
-    /// Required; every capability is keyed, with `[]` for an ungated task.
+    /// Required; Drive must require Engine and Transmission on every productive path.
     pub capabilities: HashMap<Capability, Requirement>,
     /// The game's damage model: who may operate Drive controls, regardless of throughput.
     pub drive_controls: ControlStaffing,
@@ -1472,6 +1473,22 @@ impl TankSpec {
                 return Err(format!(
                     "{field} has a member coefficient of {coefficient}, but a member's share or \
                      ceiling is a fraction of full capability, in (0, 1] — author it there"
+                ));
+            }
+        }
+        // The game's driving and damage model reads both source conditions independently.
+        // A productive path cannot bypass either source and conceal it from the task rate.
+        let drive = &self.capabilities[&Capability::Drive];
+        for source in [Part::Engine, Part::Transmission] {
+            let mandatory = drive.iter().any(|group| match group {
+                Group::Single(part) => *part == source,
+                Group::Graded(GradedGroup::Pool(members) | GradedGroup::Backup(members)) => {
+                    !members.is_empty() && members.iter().all(|(_, parts)| parts.contains(&source))
+                }
+            });
+            if !mandatory {
+                return Err(format!(
+                    "capabilities[Drive] must require {source:?} on every productive path — add it as a mandatory group or to every member of a required Pool/Backup group"
                 ));
             }
         }
@@ -1799,19 +1816,19 @@ impl TankSpec {
             )
             .into());
         }
-        self.check_seats_and_gates()?;
         // A capability the sheet does not key reads as unavailable to every consumer, so each one is
-        // stated: `[]` is an ungated capability.
+        // stated before its requirement is inspected.
         if let Some(missing) = Capability::ALL
             .iter()
             .find(|capability| !self.capabilities.contains_key(capability))
         {
             return Err(format!(
-                "capabilities states no `{}` — key every capability, `[]` for an ungated one",
+                "capabilities states no `{}` — key every capability and author its required sources",
                 missing.label()
             )
             .into());
         }
+        self.check_seats_and_gates()?;
         self.check_armament()?;
         // A playable rig supplies both camera modes. Unarmed structural tooling fixtures have
         // no rig and may declare no views; the complete spawn already requires a primary weapon.
@@ -2195,6 +2212,8 @@ TankSpec(
         "Gunner": (crew: Gunner),
         "Driver": (crew: Driver),
         "Breech": (hp: 80, function: Breech),
+        "Engine": (hp: 80, function: Engine),
+        "Transmission": (hp: 80, function: Transmission),
         "Hull_Plate": (main: true),
         "Wheel_L_0": (external: true),
         "Wheel_R_0": (external: true),
@@ -2237,7 +2256,7 @@ TankSpec(
         Gunner: (node: "Cannon_Sight", optics: Magnified(magnification: 2.5, field_deg: 25.0), requires: [Gunner]),
         Commander: (node: "Cannon_Sight", optics: Unaided(60.0), requires: []),
     },
-    capabilities: { Drive: [] },
+    capabilities: { Drive: [Engine, Transmission] },
     drive_controls: NotRequired,
 )
 "#;
@@ -3227,7 +3246,11 @@ TankSpec(
             ("shift_secs", "shift_secs: 0.3,", ""),
             ("shift_addressing", "shift_addressing: Direct,", ""),
             ("shadow_proxies", "shadow_proxies: [],", ""),
-            ("capabilities", "capabilities: { Drive: [] },", ""),
+            (
+                "capabilities",
+                "capabilities: { Drive: [Engine, Transmission] },",
+                "",
+            ),
             ("drive_controls", "drive_controls: NotRequired,", ""),
             ("fire", "fire: [Gunner, Breech],", ""),
             ("load", "load: [Gunner],", ""),
@@ -3406,23 +3429,65 @@ TankSpec(
         );
     }
 
-    /// The game's damage model: every declared part can constrain a task rate; Drive's
-    /// local source conditions are independent of the task's dependency vocabulary.
+    /// Weapon mounts are keyed construction; a repeated key must never conceal a declaration.
     #[test]
-    fn validate_accepts_a_drive_task_dependency_on_any_declared_part() {
+    fn duplicate_weapon_keys_are_refused() {
+        let text = FIXTURE_RON.replace("weapons: {", "weapons: {\n        \"MG\": (trigger: Secondary, muzzle: \"Duplicate\", bore_length: (1.0, Fixture(\"fixture\")), gun: \"mg34\", stowage: [(round: \"7.9mm_AP\", count: (10, Fixture(\"fixture\")))], fire_mode: Automatic(belt_size: 10, belt_swap_secs: 1.0), fire: [], load: []),");
+        assert!(
+            ron::from_str::<TankSpec>(&text).is_err(),
+            "repeated mounts must refuse during parsing"
+        );
+    }
+
+    /// The game's driving and damage model: Drive must name both physical sources it reads;
+    /// otherwise a valid task path could conceal an absent or emptied source from the HUD.
+    #[test]
+    fn drive_requires_each_physical_source() {
+        for missing in [Part::Engine, Part::Transmission] {
+            let mut spec = fixture();
+            spec.capabilities.insert(
+                Capability::Drive,
+                [Part::Engine, Part::Transmission]
+                    .into_iter()
+                    .filter(|part| *part != missing)
+                    .map(Group::Single)
+                    .collect(),
+            );
+            let error = spec
+                .validate()
+                .expect_err("an omitted drive source must refuse before play")
+                .to_string();
+            assert!(
+                error.contains("capabilities[Drive]") && error.contains(&format!("{missing:?}")),
+                "{error}"
+            );
+        }
+    }
+
+    /// The game's driving and damage model: naming a source only on one alternative must
+    /// not conceal a bypass; additional dependencies remain generic and legal.
+    #[test]
+    fn drive_source_dependencies_cover_alternatives_and_allow_extra_parts() {
         let mut spec = fixture();
-        let provided = spec
-            .volumes
-            .values()
-            .filter_map(VolumeSpec::component)
-            .filter_map(|volume| volume.function)
-            .map(Part::from)
-            .find(|part| !matches!(part, Part::Engine | Part::Transmission))
-            .expect("the fixture declares a module outside the drivetrain");
-        spec.capabilities
-            .insert(Capability::Drive, vec![Group::Single(provided)]);
-        spec.validate()
-            .expect("a declared part can supply the generic task law");
+        for make in [GradedGroup::Pool, GradedGroup::Backup] {
+            spec.capabilities.insert(
+                Capability::Drive,
+                vec![
+                    Group::Single(Part::Transmission),
+                    Group::Graded(make(vec![
+                        (0.5, vec![Part::Engine]),
+                        (0.5, vec![Part::Breech]),
+                    ])),
+                ],
+            );
+            assert!(spec.validate().unwrap_err().to_string().contains("Engine"));
+            spec.capabilities
+                .get_mut(&Capability::Drive)
+                .unwrap()
+                .push(Group::Single(Part::Engine));
+            spec.validate()
+                .expect("mandatory sources may accompany any declared dependency");
+        }
     }
 
     /// The game's damage model: control staffing must name complete, declared station paths

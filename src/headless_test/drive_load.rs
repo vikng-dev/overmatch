@@ -185,12 +185,34 @@ fn perceived_load_and_landing_gaps_on_declared_grounds() {
                 gear,
             );
             let mut measurements = Measurements::default();
+            let mut launch_tick = None;
+            let mut initial_launch_tick = None;
+            // Fixture: elapsed simulation time to 2 m/s, measured on every declared ground.
             for tick in 0..40 * FIXED_TICKS_PER_SECOND {
                 drive_tick(&mut app, tank, 1.0, 0.0);
                 measurements.tick(&app, tank);
+                let speed = app
+                    .world()
+                    .get::<avian3d::prelude::LinearVelocity>(tank)
+                    .unwrap()
+                    .0
+                    .length();
+                if !rolling && initial_launch_tick.is_none() && speed >= 0.5 {
+                    initial_launch_tick = Some(tick + 1);
+                }
+                if !rolling && launch_tick.is_none() && speed >= 2.0 {
+                    launch_tick = Some(tick + 1);
+                }
                 if tick < 39 * FIXED_TICKS_PER_SECOND {
                     measurements.loads.clear();
                 }
+            }
+            if !rolling {
+                println!(
+                    "MEASURED launch {name}: time_to_0_5_m_s={:?} time_to_2_m_s={:?}",
+                    initial_launch_tick.map(|ticks| ticks as f32 / FIXED_TICKS_PER_SECOND as f32),
+                    launch_tick.map(|ticks| ticks as f32 / FIXED_TICKS_PER_SECOND as f32)
+                );
             }
             let expected = ground.contact().rolling_resistance * weight;
             measurements.report(&format!("{name} rolling={rolling}"), expected);

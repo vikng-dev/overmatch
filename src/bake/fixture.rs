@@ -202,6 +202,8 @@ pub(super) fn spec_with(
                 .map(|node| format!("\"{node}\": (main: true)")),
         )
         .chain([
+            "\"Fixture_Engine\": (hp: 10, function: Engine)".to_owned(),
+            "\"Fixture_Transmission\": (hp: 10, function: Transmission)".to_owned(),
             "\"Fixture_SeatA\": (crew: Commander)".to_owned(),
             "\"Fixture_SeatB\": (crew: BowGunner)".to_owned(),
         ])
@@ -264,7 +266,7 @@ TankSpec(
     colliders: [{colliders}],
     shadow_proxies: [],
     roadwheels: [{roadwheels}],
-    capabilities: {{ Drive: [] }},
+    capabilities: {{ Drive: [Engine, Transmission] }},
     drive_controls: NotRequired,
 )
 "

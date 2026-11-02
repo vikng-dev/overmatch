@@ -9,7 +9,6 @@ This file only shrinks, and a closed row is deleted, never struck through.
 
 | id | P | file::symbol | lens: class | finding, one line with the concrete case | fix, one line | owner |
 |---|---|---|---|---|---|---|
-| load-01 | P2 | `src/spec.rs::deserialize_weapons` | error-handling: Silent exit | Duplicate weapon keys overwrite earlier declarations; a valid second `"MG"` hides an invalid first declaration. | Reject duplicate keys during deserialization. | ratchet |
 | load-02 | P2 | `src/geometry_lod.rs::resolve_chains` | error-handling: Silent exit | A certificate chain for nonexistent `"Missing#0"` passes validation because resolution visits only existing meshes. | Require every declared source and rung to resolve; name the certificate, key and repair. | ratchet |
 | load-03 | P2 | `src/bake.rs::verify_asset` | error-handling: Degrade in a build profile | Under `cfg(test)`, shipped files can admit `Fixture` provenance that ordinary builds refuse. | Apply shipped-file provenance refusal in every build; admit synthetic fixtures separately. | ratchet |
 | load-06 | P2 | `tools/src/buildings/house.rs::Material` | base-truths: Named asset in logic | A newly authored material requires Rust changes because the baker accepts only `Brick` and `Wood`. | Read registry keys from construction data and resolve the properties required by generic laws. | ratchet |

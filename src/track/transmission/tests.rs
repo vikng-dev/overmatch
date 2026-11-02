@@ -3987,3 +3987,45 @@ fn commanded_work_and_readout_consume_the_task_rate_once() {
     };
     assert_eq!(crate::crew_ui::drive_rate_line(&target), "Drive rate 30%");
 }
+
+/// The game's driving and damage model: a zero task rate cannot deliver idle-catch work
+/// even while staffed controls still command launch. The Drive readout relies on that rate.
+#[test]
+fn zero_task_rate_opens_clutch() {
+    let (fp, tp) = (lab_fp(), lab_tp());
+    let mut state = fresh(&tp);
+    let mut inp = input(1.0, 0.0, [0.0; 2], [0.0; 2]);
+    inp.supply.task_rate = 0.0;
+    for _ in 0..64 {
+        let report = step(&fp, &tp, &mut state, &inp);
+        assert_eq!(
+            report.forces, [0.0; 2],
+            "zero throughput must not launch through the idle catch"
+        );
+    }
+}
+
+/// The game's driving and damage model: one task bottleneck lowers combustion, even when
+/// only transmission condition is reduced. Mechanical capacity independently limits coupling.
+#[test]
+fn transmission_bottleneck_reduces_the_one_drive_task_rate() {
+    use crate::damage::{Group, Part};
+    let tp = lab_tp();
+    // Fixture: independent mandatory sources, whole engine and a half transmission.
+    let task_rate = crate::damage::evaluate(
+        &vec![
+            Group::Single(Part::Engine),
+            Group::Single(Part::Transmission),
+        ],
+        &[(Part::Engine, 1.0), (Part::Transmission, 0.5)].into(),
+    );
+    let supply = DriveSupply {
+        task_rate,
+        transmission_condition: 0.5,
+        ..DriveSupply::WHOLE
+    };
+    let omega = tp.peak_torque_rpm * RPM_TO_RAD;
+    let [whole, ..] = engine_torques(&tp, DriveSupply::WHOLE, omega, 1.0);
+    let [reduced, ..] = engine_torques(&tp, supply, omega, 1.0);
+    assert_eq!(reduced, whole * 0.5);
+}
