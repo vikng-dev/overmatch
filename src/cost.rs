@@ -195,3 +195,67 @@ pub fn client_plugin(app: &mut App) {
     }
     app.insert_resource(CostRole("client"));
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use bevy::ecs::system::RunSystemOnce;
+
+    /// Cost tables must contain played ticks only: a hold neither spends warmup nor emits a row,
+    /// including a results hold after recording has begun. Fixture costs are not measurements.
+    #[test]
+    fn held_ticks_neither_advance_warmup_nor_write_rows() {
+        let path =
+            std::env::temp_dir().join(format!("overmatch-held-cost-{}.jsonl", std::process::id()));
+        let mut world = World::new();
+        world.insert_resource(CostTrace {
+            sink: JsonlSink::create(&path).unwrap(),
+            tick: 0,
+            warmup: 1,
+        });
+        world.insert_resource(TickClock {
+            closed: Some(TickCost {
+                us: 1.0,
+                march_us: 0.0,
+                march_calls: 0,
+            }),
+            ..default()
+        });
+        world.insert_resource(MatchCommands::Held);
+        for _ in 0..3 {
+            world.run_system_once(write_tick).unwrap();
+        }
+        assert_eq!(
+            world.resource::<CostTrace>().tick,
+            0,
+            "held fill-up never spends warmup"
+        );
+        world.insert_resource(MatchCommands::Live);
+        world.run_system_once(write_tick).unwrap();
+        world.run_system_once(write_tick).unwrap();
+        assert_eq!(world.resource::<CostTrace>().tick, 2);
+        world.insert_resource(MatchCommands::Held);
+        world.run_system_once(write_tick).unwrap();
+        assert_eq!(
+            world.resource::<CostTrace>().tick,
+            2,
+            "results never advance the recorder"
+        );
+        world.insert_resource(MatchCommands::Live);
+        world.run_system_once(write_tick).unwrap();
+        drop(world.remove_resource::<CostTrace>().unwrap());
+        let rows: Vec<serde_json::Value> = std::fs::read_to_string(&path)
+            .unwrap()
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect();
+        assert_eq!(
+            rows.iter()
+                .map(|row| row["t"].as_u64().unwrap())
+                .collect::<Vec<_>>(),
+            vec![1, 2],
+            "only the played ticks past warmup reach the persisted table"
+        );
+        std::fs::remove_file(path).unwrap();
+    }
+}

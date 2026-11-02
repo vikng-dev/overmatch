@@ -274,6 +274,34 @@ mod tests {
         assert_eq!(*world.resource::<MatchCommands>(), MatchCommands::Held);
     }
 
+    /// Instruments read the same phase hold as gameplay: fill-up and results stop counting,
+    /// and combat publishes Live immediately. Fixture deadlines do not choose mode balance.
+    #[test]
+    fn phase_publication_matches_the_command_hold() {
+        use bevy::ecs::system::RunSystemOnce;
+        let mut world = World::new();
+        world.insert_resource(MatchCommands::Live);
+        let battle = world.spawn(BattleState::default()).id();
+        let combat = BattlePhase::Combat {
+            ends_at: SimTick::new(100),
+            late_join: LateJoin::Closed,
+        };
+        let results = BattlePhase::Results {
+            ends_at: SimTick::new(200),
+            outcome: BattleOutcome::NoContest,
+        };
+        for (phase, expected) in [
+            (BattlePhase::FillUp { ends_at: None }, MatchCommands::Held),
+            (combat, MatchCommands::Live),
+            (results, MatchCommands::Held),
+            (combat, MatchCommands::Live),
+        ] {
+            world.get_mut::<BattleState>(battle).unwrap().phase = phase;
+            world.run_system_once(hold_commands).unwrap();
+            assert_eq!(*world.resource::<MatchCommands>(), expected, "{phase:?}");
+        }
+    }
+
     /// Every authored phase span is refused at the load gate when the shared signed deadline
     /// relation would be ambiguous. Operators receive the mode file, field and repair direction.
     #[test]
