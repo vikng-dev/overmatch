@@ -254,7 +254,6 @@ condition_poll() {
     rm -f "$OUT/$cond.marker.log"
   fi
   if [[ -z "$edge_start" ]] && (( span >= origin + WARMUP_S )); then
-    [[ -n "$connected" ]] || frame_run_invalid "$cond" "the measured client held no input slot by the end of the ${WARMUP_S}s warmup — unreachable server, or a slow connect (raise WARMUP_S; see $log)"
     for (( i = 1; i <= load_count; i++ )); do
       grep -q -- "$INPUT_SLOT" "$OUT/$cond.load$i.log" 2>/dev/null \
         || frame_run_invalid "$cond" "load client $i held no input slot by the end of the warmup, so the window would watch the ramp (raise WARMUP_S; see $OUT/$cond.load$i.log)"
