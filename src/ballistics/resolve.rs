@@ -1491,8 +1491,8 @@ pub(crate) struct Bounce {
     pub speed_in: f32,
     /// Momentum handed to `owner` at `position`.
     pub impulse: Vec3,
-    /// Line-of-sight metres flown from the flight's position to `resume` along the way in; 0 where
-    /// the turn is behind it ([`skid_turn`]).
+    /// Line-of-sight metres flown from the flight's position to `resume` along the way in; 0 only
+    /// where the round ends at a contact with no approach ([`skid_turn`]).
     pub travel: f32,
     /// Where the axis leaves the incoming ray ([`skid_turn`]). Each sample resumes on the round's
     /// disc about it, square to `direction`, with no cursor; its membership there is unread until
@@ -1669,7 +1669,8 @@ pub(crate) fn entry_force(
 /// The game's damage model: `round` is the penetrator's mechanism and `mass` the current flying
 /// assembly's kg. On a bite, excess carrier mass stops at the first resisting contact; only the
 /// core continues straight. A bounce keeps its current assembly. `contact` is the distance from [`Flight::sweep_origin`] to the
-/// nearest sample's first armour contact; it sizes the first corridor and nothing else.
+/// nearest sample's first armour contact; it sizes the first corridor, and is a skid's turn where
+/// its resting height gives no forward travel ([`skid_turn`]).
 pub(crate) fn decide(
     context: &ResolveContext<'_, '_, '_>,
     not_own: &dyn Fn(Entity) -> bool,
@@ -1773,7 +1774,7 @@ pub(crate) fn decide(
             incoming: dir,
             speed_in: speed,
             impulse: mass * (v_in - Vec3::from(out) * kept),
-            travel: turn.max(0.0),
+            travel: turn,
             resume: anchor + (start + dir * turn),
             continuation,
             approach: way_in,

@@ -3024,8 +3024,9 @@ pub enum Begin {
         entrance: EntranceRead,
         /// Outgoing direction, blended from the incoming ray toward the slide by η (§13.5). The
         /// slide is the striking direction with its part along `n̄` removed, restitution 0: η = 1
-        /// leaves along the face, and η → 0 fades to undisturbed flight. Continuity is the whole
-        /// point — 1 mm of aim must never flip the outcome between "flies past" and "full slide".
+        /// leaves along the face, and a smaller η bends the round less. The blend does not make a
+        /// graze continuous: a read with no forward turn ends the round at the full exchange,
+        /// whatever η ([`super::resolve::skid_turn`]).
         /// Sources put a rigid pointed round at a small restitution below about 0.6 V50, so the
         /// slide is the simplest exit they allow.
         ///
@@ -3053,8 +3054,9 @@ pub enum Begin {
     ///
     /// The test is an angle, so one law serves every speed: a round gravity alone presses on a
     /// face rests below the angle of repose and slides on above it, and a spent round in a closed
-    /// hull ends on the first face flat enough to hold it. A clip has no such rest: only η of the
-    /// motion into the face is exchanged, so the rest of the round's motion carries it on.
+    /// hull ends on the first face flat enough to hold it. This test holds no clip: a clip is
+    /// [`Begin::Ricochet`], and only a read with no forward turn ends it
+    /// ([`super::resolve::skid_turn`]).
     Held {
         entrance: EntranceRead,
         /// As [`Begin::Ricochet::hand_offs`].

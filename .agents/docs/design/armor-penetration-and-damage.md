@@ -898,8 +898,8 @@ emptied pool opens the joint at its segment's base in the trunk's structural sta
 body's contact breaks too (`wall-destruction.md`, "Trees are structures by the same laws"). A
 species' structural facts (grain, green density, root plate) are its own; its HP rate is not, and
 for the dose a species is the generator's look and ranges only: a player cannot tell that a round lost a little more speed
-in one species than another, while trunk thickness is simple and visible. A round entering a trunk turns by the wood's share of the
-reference resistance, so its slope charge pays 4 % of the reference steel's excess (§13.5). Out of scope, built only if play
+in one species than another, while trunk thickness is simple and visible. A round entering a trunk meets the wood's share of the
+reference resistance, so its slope charge pays 4 % of the reference steel's excess (§13.5); a round that bites keeps its direction. Out of scope, built only if play
 shows it missed: the drag form under the energy law (epic #103); the field's dose is under it (§5).
 
 **Witnesses** (ADR-0040) are dosed by a law of their own. A witness substance has no resistance and

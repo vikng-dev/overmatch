@@ -49,7 +49,7 @@
     ),
     (
         name: "s5_oblique_through",
-        shows: "an 88 through the hull side at 30 degrees: the cone's axis leans from the path toward the plate normal; the spent round skids once off an ammunition box 7 mm behind the plate, a gap narrower than its calibre, and comes to rest in the hull plating behind it. The box's HP pool is emptied (72 of 72 HP taken) and no crew station takes a dose",
+        shows: "an 88 through the hull side at 30 degrees: the cone's axis leans from the path toward the plate normal; the spent round skids once off an ammunition box 7 mm behind the plate, a gap narrower than its calibre, and comes to rest against that box, its rim stopped in the hull plating around it. The box's HP pool is emptied (72 of 72 HP taken) and no crew station takes a dose",
         weapon: "MainGun",
         round: "88mm_AP",
         from: (-4.0, 1.5, -1.68),
