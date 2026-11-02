@@ -1108,12 +1108,24 @@ fn shell_transform(plan: &Plan, head: f32, share: f32) -> Transform {
         .with_scale(Vec3::new(1.0, 1.0, share))
 }
 
-/// The game's damage-model view: a leading unit body axis subject to the tail's plane bounds.
-/// A sphere's closest axis to a desired direction is that direction, on one bound's circle, or
-/// at two circles' intersection. Candidate sets for both chord and travel provide a leading
-/// choice when the chord's own optimum points backwards; the leading candidate nearest the chord
-/// wins. Parallel bounds need no pair candidate: their circles suffice.
+/// The game's damage-model view: a leading unit body axis subject to the tail's plane bounds,
+/// `planes` latest face first. Three faces reached within one model length can leave no leading
+/// axis outside them all (a corner tighter than the model); the earliest faces are then released
+/// one by one, so the pose keeps the latest faces it can, and with none released travel itself
+/// leads.
 fn face_safe_body(chord: Vec3, travel: Vec3, planes: &[(Vec3, f32)]) -> Vec3 {
+    (0..=planes.len())
+        .rev()
+        .find_map(|kept| leading_body(chord, travel, &planes[..kept]))
+        .expect("travel itself is a leading candidate when no face bounds the pose")
+}
+
+/// The game's damage-model view: [`face_safe_body`] under every bound of `planes`, if any leading
+/// axis meets them all. A sphere's closest axis to a desired direction is that direction, on one
+/// bound's circle, or at two circles' intersection. Candidate sets for both chord and travel
+/// provide a leading choice when the chord's own optimum points backwards; the leading candidate
+/// nearest the chord wins. Parallel bounds need no pair candidate: their circles suffice.
+fn leading_body(chord: Vec3, travel: Vec3, planes: &[(Vec3, f32)]) -> Option<Vec3> {
     // Resolution: covers dot/cross/normalization rounding in unit-vector constraints, below a
     // micrometre of tail displacement for the authored models; never widens the position guard.
     const AXIS_SLACK: f32 = 16.0 * f32::EPSILON;
@@ -1153,7 +1165,6 @@ fn face_safe_body(chord: Vec3, travel: Vec3, planes: &[(Vec3, f32)]) -> Vec3 {
                     .all(|&(normal, limit)| axis.dot(normal) <= limit + AXIS_SLACK)
         })
         .max_by(|a, b| a.dot(chord).total_cmp(&b.dot(chord)))
-        .expect("a reflected shell has a leading unit body outside its reached faces")
 }
 
 /// The game's damage-model view: the authored body's length (m), zero without a drawn body.
@@ -2620,6 +2631,22 @@ mod tests {
         );
         assert!(axis.x <= 0.1 + POSITION_TOL_M && axis.y <= 0.1 + POSITION_TOL_M);
         assert!(axis.z > 0.0 && (axis.length() - 1.0).abs() < POSITION_TOL_M);
+    }
+
+    /// The game's damage-model view places a body at every corner the sim's path reaches. Fixture:
+    /// three reflections within one model length off faces of outward normals +X, +Y and +Z, the
+    /// nose 0.3 L off the first two and just past the third apex, travelling (1, 1, 1)/sqrt 3. No
+    /// leading unit axis clears all three: its travel component is at most
+    /// `(2 * 0.3 - sqrt(1 - 2 * 0.3^2)) / sqrt 3 < 0` (DERIVED). The pose keeps the latest two faces
+    /// and leads; a pose that demanded all three would have no body to draw.
+    #[test]
+    fn a_corner_tighter_than_the_model_still_draws_a_leading_body() {
+        let travel = Vec3::ONE.normalize();
+        let planes = [(Vec3::Z, 0.0), (Vec3::Y, 0.3), (Vec3::X, 0.3)];
+        assert!(leading_body(travel, travel, &planes).is_none());
+        let axis = face_safe_body(travel, travel, &planes);
+        assert!(axis.dot(travel) > 0.0 && (axis.length() - 1.0).abs() < POSITION_TOL_M);
+        assert!(axis.z <= POSITION_TOL_M && axis.y <= 0.3 + POSITION_TOL_M);
     }
 
     /// Past a bounce the shell stays on the struck face's outer side, as the record's path does:
