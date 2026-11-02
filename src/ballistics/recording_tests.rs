@@ -3244,6 +3244,8 @@ struct Skid {
     end: Vec3,
     /// `None`: the round came to rest.
     velocity: Option<Vec3>,
+    /// Each bounce mark's axis point, and the path node its [`RicochetMark`] names.
+    turns: Vec<(Vec3, Vec3)>,
 }
 
 /// A drag-free fixture 88 meets [`SKID_FACE`], at rest or moving at `face`, with the relative
@@ -3296,11 +3298,24 @@ fn skid_on(face: Vec3, elsewhere: Option<Vec3>) -> Skid {
     fire.drag_k = 0.0;
     app.world_mut().trigger(fire);
     run(&mut app, 4);
-    let mut shells = app
-        .world_mut()
-        .query::<(&Transform, Option<&Projectile>, &PenetrationMarks)>();
-    let (transform, projectile, marks) = shells.single(app.world()).unwrap();
+    let mut shells = app.world_mut().query::<(
+        &Transform,
+        Option<&Projectile>,
+        &PenetrationMarks,
+        &ShellPath,
+    )>();
+    let (transform, projectile, marks, path) = shells.single(app.world()).unwrap();
     Skid {
+        turns: marks
+            .log
+            .iter()
+            .filter_map(|mark| match mark {
+                ArmourMark::Bounce { at, .. } => Some(*at),
+                _ => None,
+            })
+            .zip(&marks.ricochets)
+            .map(|(at, ricochet)| (at, path.points[ricochet.path_index]))
+            .collect(),
         bounces: marks
             .log
             .iter()
@@ -3351,6 +3366,17 @@ fn unrelated_motion_changes_no_shots_outcome() {
     assert_eq!(at_rest.velocity, moving.velocity, "and what it keeps");
     assert_eq!(at_rest.end, moving.end, "and where it ends");
     assert!(shock > 0.0);
+}
+
+/// The game's damage model: a skid's mark names the axis node it turned at. The trail follows the
+/// path by that place (`vfx::trail`), and a coordinate join misses it: the axis turns a body radius
+/// off the strike. Mutant: the mark names any node but the skid's own.
+#[test]
+fn a_skid_names_its_turn_in_the_shell_path() {
+    let skid = skid_on(Vec3::ZERO, None);
+    assert_eq!(skid.turns.len(), 1, "{skid:?}");
+    let (at, node) = skid.turns[0];
+    assert_eq!(at, node);
 }
 
 /// The game's damage model: a moving face decides a strike in its own frame. A round's verdict, the

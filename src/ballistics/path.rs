@@ -512,8 +512,11 @@ pub(crate) fn present(
                 && replica.drawn.insert(outcome.sequence)
             {
                 if let Some(PathImpact::Bounce { at, .. }) = outcome.impact {
-                    marks.ricochets.push(at);
-                    path.points.push(at);
+                    marks.ricochets.push(super::RicochetMark {
+                        at,
+                        path_index: path.points.len(),
+                    });
+                    path.points.push(outcome.resume);
                 }
                 crate::shot_trace::record(
                     &mut trace,
@@ -804,6 +807,41 @@ mod tests {
         app.update();
         assert!(app.world().get_entity(entity).is_err());
         assert_eq!(app.world().resource::<Drawn>().0, 2);
+    }
+
+    /// The game's damage model: a client's trail follows the round's axis through a skid, as the
+    /// authority's does. The strike stands off the axis (fixture: 45 mm), so a path node there draws
+    /// the trail out and back. Mutant: the replica pushes the strike as its node.
+    #[test]
+    fn a_replica_draws_a_skid_through_its_axis_not_its_strike() {
+        let (mut app, entity) = replica_app();
+        let mut skid = super::super::path_fixture(shot(), 102);
+        let turn = Vec3::X * 20.0;
+        let strike = turn + Vec3::Y * 0.045;
+        skid.resume = turn;
+        skid.impact = Some(PathImpact::Bounce {
+            at: strike,
+            normal: Vec3::NEG_Y,
+            direction: Vec3::X,
+            ordinal: 0,
+            feedback: crate::substances::SurfaceFeedback::fixture(),
+        });
+        assert_eq!(
+            app.world_mut()
+                .resource_mut::<SanctionedShots>()
+                .insert(skid),
+            SanctionedInsert::Inserted
+        );
+        app.update();
+        let marks = app
+            .world()
+            .get::<super::super::PenetrationMarks>(entity)
+            .unwrap();
+        let path = app.world().get::<ShellPath>(entity).unwrap();
+        let ricochet = marks.ricochets[0];
+        assert_eq!(ricochet.at, strike, "the mark keeps where it struck");
+        assert_eq!(path.points[ricochet.path_index], turn);
+        assert!(!path.points.contains(&strike), "{:?}", path.points);
     }
 
     /// The game's damage model: even a cosmetic path below the world waits for a server end.

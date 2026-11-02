@@ -359,33 +359,17 @@ fn consume_recorded_path(
     now: u32,
     shot_trace: &mut Option<ResMut<'_, crate::shot_trace::ShotTrace>>,
 ) {
-    // `rposition` selects the authoritative re-anchor occurrence when a local candidate happened to
-    // share the same point earlier in the path.
-    for (sequence, origin) in marks
+    for (sequence, ricochet) in marks
         .ricochets
         .iter()
         .enumerate()
         .skip(trail.observed_ricochets)
     {
-        if let Some(path_index) = path
-            .points
-            .iter()
-            .rposition(|point| point.distance_squared(*origin) < 1.0e-6)
-        {
-            trail.pending_bounces.push_back(PendingTrailBounce {
-                sequence: sequence as u32,
-                path_index,
-                segment: path_segment(path, path_index),
-            });
-        } else if let Some(shot) = trail.shot {
-            crate::shot_trace::record(
-                shot_trace,
-                "trail",
-                now,
-                shot,
-                || json!({ "res": "bounce_anchor_missing", "seq": sequence }),
-            );
-        }
+        trail.pending_bounces.push_back(PendingTrailBounce {
+            sequence: sequence as u32,
+            path_index: ricochet.path_index,
+            segment: path_segment(path, ricochet.path_index),
+        });
     }
     trail.observed_ricochets = marks.ricochets.len();
 
@@ -1033,6 +1017,47 @@ mod tests {
 
     /// Capture discipline: the spacing filter drops close points, the arc accumulates only over
     /// captured ones, and the hard cap evicts oldest-first.
+    /// The game's damage-model view: a skid owes its trail a station past the axis node it names,
+    /// and its strike stands off every node, as a real skid's does (fixture: 45 mm). The shot
+    /// analyzer's render receipts rely on it. Mutant: joining the mark to the path by coordinate
+    /// loses the obligation.
+    #[test]
+    fn a_skid_is_followed_by_its_path_place_not_its_strike() {
+        let mut rng = ViewRng::seeded(3);
+        let mut ribbon = TrailRibbon {
+            emission: fixture_emission(),
+            shell: Entity::PLACEHOLDER,
+            shot: None,
+            points: VecDeque::new(),
+            consumed: 0,
+            arc: 0.0,
+            observed_ricochets: 0,
+            pending_bounces: VecDeque::new(),
+            #[cfg(test)]
+            mesh_evidence_pending: VecDeque::new(),
+        };
+        let turn = Vec3::X * 20.0;
+        let mut path = ShellPath::default();
+        path.points.extend([Vec3::ZERO, turn]);
+        let mut marks = PenetrationMarks::default();
+        marks.ricochets.push(crate::ballistics::RicochetMark {
+            at: turn + Vec3::Y * 0.045,
+            path_index: 1,
+        });
+        consume_recorded_path(&mut ribbon, &path, &marks, &mut rng, 0, &mut None);
+        let owed = ribbon
+            .pending_bounces
+            .front()
+            .expect("the skid is owed a station");
+        assert_eq!(owed.path_index, 1);
+        path.points.push(Vec3::X * 40.0);
+        consume_recorded_path(&mut ribbon, &path, &marks, &mut rng, 0, &mut None);
+        assert!(
+            ribbon.pending_bounces.is_empty(),
+            "a station past the turn pays it"
+        );
+    }
+
     #[test]
     fn capture_respects_spacing_and_cap() {
         let mut rng = ViewRng::seeded(3);
@@ -1292,9 +1317,9 @@ mod tests {
         // The final fixed tick adds a disconnected bounce segment and despawns BEFORE another trail
         // update. The removal observer must flush those last points while ShellPath is still readable.
         let bounce = Vec3::X * 80.0;
+        let start = app.world().get::<ShellPath>(shell).unwrap().points.len();
         {
             let mut path = app.world_mut().get_mut::<ShellPath>(shell).unwrap();
-            let start = path.points.len();
             path.segment_starts.push(start);
             path.points.extend([bounce, Vec3::X * 100.0]);
         }
@@ -1302,7 +1327,10 @@ mod tests {
             .get_mut::<PenetrationMarks>(shell)
             .unwrap()
             .ricochets
-            .push(bounce);
+            .push(crate::ballistics::RicochetMark {
+                at: bounce + Vec3::Y * 0.045,
+                path_index: start,
+            });
 
         // Impact: the shell despawns; the ribbon must survive it with the final segment consumed...
         app.world_mut().despawn(shell);

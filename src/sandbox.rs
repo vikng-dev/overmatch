@@ -998,9 +998,9 @@ fn draw_penetrations(mut gizmos: Gizmos, marks: Query<&PenetrationMarks, Without
             gizmos.line(event.entry, event.exit, Color::srgb(1.0, 0.45, 0.1));
         }
         // Ricochets — a distinct cyan marker where the round skipped off without entering.
-        for &point in &mark.ricochets {
+        for ricochet in &mark.ricochets {
             gizmos.sphere(
-                Isometry3d::from_translation(point),
+                Isometry3d::from_translation(ricochet.at),
                 0.1,
                 Color::srgb(0.3, 0.8, 1.0),
             );

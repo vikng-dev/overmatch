@@ -2523,7 +2523,10 @@ fn apply_bounce(
         },
     });
     if !held {
-        shell.marks.ricochets.push(bounce.position);
+        shell.marks.ricochets.push(super::RicochetMark {
+            at: bounce.position,
+            path_index: shell.path.points.len(),
+        });
     }
     shell.marks.log.push(ArmourMark::Bounce {
         at: bounce.resume,

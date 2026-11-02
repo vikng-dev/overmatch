@@ -33,7 +33,7 @@ fn clamp_tracer_streaks(
         let Some(anchor) = marks
             .ricochets
             .last()
-            .copied()
+            .map(|ricochet| ricochet.at)
             .or_else(|| path.points.first().copied())
         else {
             continue;
@@ -311,7 +311,10 @@ mod tests {
                     segment_starts: Vec::new(),
                 },
                 PenetrationMarks {
-                    ricochets: vec![Vec3::new(48.0, 0.0, 0.0)],
+                    ricochets: vec![crate::ballistics::RicochetMark {
+                        at: Vec3::new(48.0, 0.0, 0.0),
+                        path_index: 1,
+                    }],
                     ..default()
                 },
             ))

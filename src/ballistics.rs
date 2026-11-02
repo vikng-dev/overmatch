@@ -1652,14 +1652,24 @@ pub struct PenetrationEvent {
     pub exit: Vec3,
 }
 
+/// One skid of a shell's. The strike and the axis's turn are different points (a skid turns a body
+/// radius off the face), so what follows the path reads the turn by its place, never by coordinate.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct RicochetMark {
+    /// Where the round struck the face.
+    pub at: Vec3,
+    /// The axis node the skid turned at, in the shell's [`ShellPath::points`].
+    pub path_index: usize,
+}
+
 /// The volume crossings a shell has made this flight — what the sandbox draws to inspect the march.
 /// Public, like `ShellPath`; freed when the shell despawns.
 #[derive(Component, Default)]
 pub struct PenetrationMarks {
     #[cfg(any(feature = "dev_ui", test))]
     pub events: Vec<PenetrationEvent>,
-    /// Points where the shell ricocheted off a too-oblique face (deflected, did not enter).
-    pub ricochets: Vec<Vec3>,
+    /// Each skid off a too-oblique face (deflected, did not enter), in order.
+    pub ricochets: Vec<RicochetMark>,
     /// Every armour event the authority's march resolved, in march order: the whole path a pen cam
     /// record is read from. Replicas decide no armour; their ricochet points come from public paths.
     pub log: Vec<ArmourMark>,

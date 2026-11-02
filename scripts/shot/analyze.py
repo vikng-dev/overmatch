@@ -390,8 +390,6 @@ def analyze(cmeta: dict, crows: list[dict], smeta: dict, srows: list[dict]) -> d
                 trail["consumed"] += 1
             elif any(r.get("res") == "post_bounce_unrendered" for r in rows):
                 trail["unrendered"] += 1
-            elif any(r.get("res") == "bounce_anchor_missing" for r in rows):
-                trail["anchor_missing"] += 1
             elif any(r.get("res") == "ribbon_missing_at_end" for r in client.get(key, {}).get("trail", [])):
                 trail["ribbon_missing"] += 1
             else:
@@ -490,7 +488,7 @@ def verification_failures(summary: dict) -> list[str]:
     trail = summary["trail"]
     add(
         "main_gun_trail_failures",
-        sum(trail.get(outcome, 0) for outcome in ("unrendered", "anchor_missing", "ribbon_missing", "no_row")),
+        sum(trail.get(outcome, 0) for outcome in ("unrendered", "ribbon_missing", "no_row")),
     )
     return failures
 
