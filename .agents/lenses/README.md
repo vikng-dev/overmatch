@@ -10,6 +10,7 @@ what is not a finding, and the fix each class takes.
 | [`code-branching`](code-branching.md) | Commit to one path |
 | [`base-truths`](base-truths.md) | Tanks are data; behaviour emerges from base truths |
 | [`brevity`](brevity.md) | Say each thing once, in the fewest words that keep it true |
+| [`testing`](testing.md) | A test is written under scrutiny |
 
 ## When a lens runs
 
