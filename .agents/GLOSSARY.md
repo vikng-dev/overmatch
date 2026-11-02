@@ -367,6 +367,8 @@ _Avoid_: cloud (implies an amorphous shape; older records use it to mean a field
 **Spall cone** (spall):
 The field emitted at a reached body exit in the game's damage model, carrying its assigned share of the core's lost energy; the construction retains the rest as line work. A direction still leaving its source has not entered it, but genuine re-entry can return that carried energy to the source, including a hollow body's far wall.
 
+_Avoid_: spalling, fragmentation, frag, spall cloud
+
 **Crossing exchange**:
 The work and momentum a projectile transfers to each construction it crosses in the game's damage model, each addressed once: work is split into retained and emitted debris shares, independently of HP conversion. A kept carrier stops at the first resisting contact and transfers its energy and momentum there; only the core continues.
 

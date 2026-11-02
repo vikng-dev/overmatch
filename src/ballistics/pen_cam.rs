@@ -361,6 +361,7 @@ fn scenarios() -> Vec<Scenario> {
 #[test]
 fn recorded_scenarios_keep_the_current_interaction_sequence() {
     let dir = crate::assets::asset_root().join(SCENARIO_DIR);
+    let mut stale = Vec::new();
     for scenario in &scenarios() {
         let path = dir.join(format!("{}.ron", scenario.name));
         let stored = PenetrationReport::load(&path).unwrap();
@@ -403,7 +404,17 @@ fn recorded_scenarios_keep_the_current_interaction_sequence() {
             "{}: field count",
             scenario.name
         );
+        if stored.doses != actual.doses
+            || stored.spall != actual.spall
+            || stored.burst != actual.burst
+        {
+            stale.push(scenario.name.clone());
+        }
     }
+    assert!(
+        stale.is_empty(),
+        "review and re-record stale doses, field reaches or hits: {stale:?}"
+    );
 }
 
 /// Re-records every scenario file from today's march (ignored; a tool, run on demand):

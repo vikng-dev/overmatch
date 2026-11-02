@@ -2449,3 +2449,51 @@ Final verification (MEASURED): 2,136 library tests passed, zero failed, 27 ignor
 whole-tree citation, UI-font, network-boundary and bake guards passed. Formatting and CI clippy
 passed before every green commit. All runs used the machine lock, unattended headless settings,
 and the required feature set; no captures, windows, pushes or issue comments were made.
+
+### Carrier continuation review (#258)
+
+Subject: the game's damage model; game state only. Crew are HP pools at stations.
+
+| reviewer | finding | verified / not a defect | fixed in (subject) |
+|---|---|---|---|
+| Claude and Codex exchange-2 P1 | later crossings and a chained bounce read the unstripped assembly | verified red on two spaced plates of one body; whole-chain budgets close on one body and two, head-on and obliquely, and the chained bounce reads core mass | `ballistics: advance the flying body at each resolved crossing (#258)` |
+| Codex exchange-2 P1; Claude P2 | carrier work reaches rear chunks | verified red through the shipped message reader and allocator: the fixture front chunk retained 3.5 J instead of 6 J | `ballistics: retain carrier work at the entrance chunk (#258)` |
+| Claude exchange-2 P2 | first-contact marks read the core as the flying calibre | verified red through a real first-contact event: MEASURED 35.7 mm instead of the fixture's 88 mm flying body | `ballistics: preserve the flying body in first-contact marks (#258)` |
+| Claude and Codex exchange-2 P2 | a replica's exit leg uses assembly drag | verified red: MEASURED fixture path drag 0.001 rather than the authority's 0.0004444445 per metre; replica and authority now coincide after perforation | `ballistics: publish the exit body's drag with its path (#258)` |
+| Claude exchange-2 P3 | scenario field doses and hits are stale | verified red by comparing doses, complete fields and bursts in every scenario; s4, s7, s10 and s16 required regeneration | `ballistics: refresh exchange records and review guards (#258)` |
+| Claude exchange-2 P3 | a blank line splits the backlog table | verified by a source check; all ballistics rows now share the table | `ballistics: refresh exchange records and review guards (#258)` |
+| Claude exchange-2 P3 | the Spall cone entry lost its avoid terms | verified by a source check; the settled vocabulary line is restored | `ballistics: refresh exchange records and review guards (#258)` |
+| Claude exchange-2 P3 | `SpallSource::carried` only forwards its field | verified by source; callers read `emitted` directly | `ballistics: refresh exchange records and review guards (#258)` |
+
+MEASURED whole-chain fixture budget, two spaced bodies, head-on: incoming assembly energy less
+outgoing core energy is 12,551,363.091411 J; retained work is 12,386,031.25 J and emitted debris
+165,331.195312 J. The 0.646099 J residual is f32 rounding. Delivered and independently expected
+momentum both read `(0, -29421.637, 0)` N s. The same-body arrangement reads the same budget.
+Obliquely, the two-body loss is 12,644,696.330198 J against 12,473,748.625 J retained and
+170,947.695312 J emitted; delivered momentum is `(11419.842, -27484.455, 0)` N s against
+`(11419.883, -27484.445, 0)` N s independently expected from the entry and final exit.
+These are generic fixture observations, not authored balance targets.
+
+Decisions: `FlyingBody` owns flying mass, calibre and drag. Discovery advances it at each resolved
+crossing; playback installs the frozen result. The penetration mechanism remains the bound core.
+Each crossing also retains its incoming body for the contact event. The mark's contact footprint
+still follows the verdict: core for a hole, flying body for a stop or bounce. Public paths publish
+the outgoing body's drag for their exit leg. Protocol revision 71 names that meaning; revision 72
+names corrected contact marks and checked packed directions, with the wire-definition pin updated.
+
+The addressed exchange carries entrance-only retained work through `DeliveredLine`; the building
+queue keeps that line directly. The entrance chunk takes this work as a point load, while core
+work follows chord. Total retained energy and HP conversion keep their existing owners. The
+head-on and oblique allocator fixtures replace the narrower momentum-only test and retain its
+impulse assertions. The whole-chain budget extends the former single-plate test.
+
+Touching the mark test also closes ratchet rows `view-02` and `view-06`: every positive calibre
+uses the existing bounded FIFO, and a checked `PackedDirection` refuses zero at deserialization
+while preserving valid directions' three snorm8 bytes. The calibre-suppression test is replaced
+by the all-calibre contract; the sub-calibre test now consumes a real first-contact `ShellStrike`.
+The scenario guard compares complete doses, field reaches and hits, and burst fields, so a stable
+interaction sequence or field count cannot hide stale contents. Regeneration changes only the
+four records the guard identified. The forwarder, split table and missing vocabulary line are
+removed or repaired. `destruction-01`, `destruction-03`, `ballistics-23` and `ballistics-24` remain
+with their expressly assigned lanes; the ricochet law and debris-production stand-in stay as they
+were. No owner decision is introduced by this review.

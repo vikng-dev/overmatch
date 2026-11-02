@@ -1966,7 +1966,7 @@ fn a_softer_exit_reduces_debris_and_reference_strength_caps_the_share() {
             * f64::from(crate::ballistics::spall_cone::cone_energy().debris_share())
             * f64::from((factor / REFERENCE_FACTOR).min(1.0));
         assert!(expected > 0.0);
-        assert!((f64::from(cone.carried()) / expected - 1.0).abs() < 1e-5);
+        assert!((f64::from(cone.emitted) / expected - 1.0).abs() < 1e-5);
     }
 }
 
@@ -2231,7 +2231,7 @@ fn a_perforation_charges_every_entity_for_its_own_material() {
         .map(|line| &line.dose)
         .map(|dose| dose.amount as f64)
         .sum();
-    let carried: f64 = plan.spall.iter().map(|cone| cone.carried() as f64).sum();
+    let carried: f64 = plan.spall.iter().map(|cone| cone.emitted as f64).sum();
     assert!(carried > 0.0, "the exits' cones carry energy out");
     let exchange_retained: f64 = plan
         .deposits
@@ -2313,7 +2313,7 @@ fn overmatch_charges_the_perpendicular_projection_everywhere() {
     assert!((cost - 15.0).abs() < 0.2, "deposit cost {cost}");
     let (round, state) = solid(AP_88_CAPABILITY);
     let lost = 0.5 * round.body().mass * (state.speed.powi(2) - plan.state.speed.powi(2)) as f32;
-    let carried: f32 = plan.spall.iter().map(SpallSource::carried).sum();
+    let carried: f32 = plan.spall.iter().map(|source| source.emitted).sum();
     assert!(
         ((deposit.amount + carried) / lost - 1.0).abs() < 1.0e-4,
         "the projected crossing spends the energy it took once: {} J dealt, {carried} J carried, \
@@ -3712,7 +3712,7 @@ fn the_mechanism_matches_the_scalar_law_on_reference_steel() {
             .map(|line| &line.dose)
             .map(|dose| dose.amount as f64)
             .sum();
-        let carried: f64 = new.spall.iter().map(|cone| cone.carried() as f64).sum();
+        let carried: f64 = new.spall.iter().map(|cone| cone.emitted as f64).sum();
         let lost = 0.5 * body.mass as f64 * (state.speed.powi(2) - new.state.speed.powi(2));
         assert!(
             (dealt + carried - lost).abs() <= 1.0e-6 * lost + 1.0e-3,

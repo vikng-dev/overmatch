@@ -2008,18 +2008,13 @@ impl SpallSource {
         super::spall_cone::cone_energy().debris_share() * self.strength_ratio
     }
 
-    /// The energy (J) the cone carries out, summed from its addressed exchanges.
-    pub fn carried(&self) -> f32 {
-        self.emitted
-    }
-
-    /// The cone's strength `S` (J), the strength of a field carrying [`Self::carried`] joules
+    /// The cone's strength `S` (J), the strength of a field carrying [`Self::emitted`] joules
     /// ([`super::spall_cone::field_strength`]), which the cone emits whole. No HP unit enters it: a
     /// box's pool reads it through the cone's unit at its dose edge, a building as the energy it
     /// crushes with. Whatever the round or the plate, a round that loses more energy across a body
     /// of one substance throws a stronger cone, and one that loses none throws none.
     pub fn strength(&self) -> f32 {
-        super::spall_cone::field_strength(self.carried())
+        super::spall_cone::field_strength(self.emitted)
     }
 }
 
