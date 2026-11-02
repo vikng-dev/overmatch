@@ -303,34 +303,13 @@ finding is about its module doc or its internal ordering, not its size.
 Corollary: a long *function* is fair game up to the gate. **Do not add an `#[expect]` to get past
 it.** If your simplification would need one, it is not one.
 
-### B2. Comment volume is not the problem — and the numbers are counter-intuitive
+### B2. Comments: content stays, words go
 
-MEASURED 2026-07-29 over `src/` (87 768 lines):
-
-| kind | lines | share |
-|---|---:|---:|
-| `//!` module docs | 2 134 | 2.4 % |
-| `///` item docs | 12 283 | 14.0 % |
-| `//` narration | 5 686 | 6.5 % |
-| **all comments** | **20 153** | **23.0 %** |
-
-**Reconciling the two figures in circulation:** the "6.9 % and falling" number is the **`//`
-narration row**, not the total. Both are right; they measure different things. A simplifier that
-sees 23 % and reasons "a quarter of this file is comments, cut it" will be destroying the **`///`
-item docs — which are the module interface**. In codebase-design terms the doc comment *is* part of
-the interface: it carries the invariants, units and ordering constraints that `SKILL.md` defines as
-belonging to the interface. Deleting it shrinks nothing and removes the thing that made the module
-deep.
-
-A restatement detector over 83 k lines found **3** candidates, all legitimate. The base rate of
-useless comments here is approximately zero. **Do not open a commit whose purpose is removing
-comments.**
-
-The rule that *does* apply (`AGENTS.md`) is orthogonal to volume: **a comment states the current
-invariant, never the edit history.** `(Codex round 5)`, `(review round, FIX 2)`,
-`X was DELETED 2026-07-27` — drop the label, keep the sentence. Rationale, rejected alternatives,
-counterexamples, measured bounds and named constraints all stay. If you are deleting a whole
-paragraph, you are doing the wrong thing.
+A `///` item doc is part of the module's interface: the invariants, units and ordering constraints
+it states are what make the module deep, and they stay. Their wording, and every comment that says
+nothing the code does not, is fair game: the `brevity` lens (`.agents/lenses/brevity.md`) owns the
+finding classes (restated code, padding, repeated why, edit history, retold narrative) and what
+stays. A commit whose purpose is cutting comments is welcome when each cut is one of those classes.
 
 ### B3. The wire surface is fingerprinted
 
