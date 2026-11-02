@@ -634,7 +634,7 @@ struct SliderFill(Row);
 #[derive(Component)]
 struct HintText;
 
-/// The control legend, replaced by a visible failure notice until a successful save.
+/// The control legend, replaced by retained load or save failures.
 #[derive(Component)]
 struct SaveNotice;
 
@@ -671,13 +671,62 @@ fn save_failure_text(error: &super::store::SaveError) -> &'static str {
     }
 }
 
-fn refresh_save_notice(status: Res<SaveStatus>, mut notice: Query<&mut Text, With<SaveNotice>>) {
+/// File paths and parse errors are outside input; escape unsupported glyphs without losing them.
+fn notice_text(text: &str) -> String {
+    text.chars().fold(String::new(), |mut rendered, character| {
+        if (' '..='~').contains(&character) {
+            rendered.push(character);
+        } else {
+            rendered.extend(character.escape_unicode());
+        }
+        rendered
+    })
+}
+
+fn load_failure_text(note: &super::store::LoadNote) -> Option<String> {
+    use super::store::LoadNote;
+    let text = match note {
+        LoadNote::Corrupt { error, kept } => format!(
+            "Settings reset: invalid settings file ({error}). {}.",
+            super::describe_kept(kept.as_deref(), "Old file"),
+        ),
+        LoadNote::FutureVersion { version, kept } => format!(
+            "Settings reset: file version {version} needs a newer game build. {}.",
+            super::describe_kept(kept.as_deref(), "Old file"),
+        ),
+        LoadNote::Unreadable(error) => format!(
+            "Settings reset: cannot read the settings file ({error}). Original file was not moved."
+        ),
+        LoadNote::NoLocation => {
+            "Settings reset: config folder unavailable. Changes cannot be saved.".to_string()
+        }
+        LoadNote::Loaded | LoadNote::FirstLaunch => return None,
+    };
+    Some(notice_text(&text))
+}
+
+fn refresh_save_notice(
+    status: Res<SaveStatus>,
+    report: Option<Res<super::StoreReport>>,
+    mut notice: Query<&mut Text, With<SaveNotice>>,
+) {
+    if !status.is_changed() && report.as_ref().is_none_or(|report| !report.is_changed()) {
+        return;
+    }
     let mut notice = notice
         .single_mut()
         .expect("settings::ui::spawn_page creates exactly one SaveNotice");
-    let rendered = status.0.as_ref().map_or(SAVE_LEGEND, save_failure_text);
+    let load = report
+        .as_ref()
+        .and_then(|report| load_failure_text(&report.0));
+    let rendered = match (load, status.0.as_ref()) {
+        (Some(load), Some(error)) => format!("{load} {}", save_failure_text(error)),
+        (Some(load), None) => load,
+        (None, Some(error)) => save_failure_text(error).to_string(),
+        (None, None) => SAVE_LEGEND.to_string(),
+    };
     if notice.0 != rendered {
-        notice.0 = rendered.to_string();
+        notice.0 = rendered;
     }
 }
 
@@ -2294,6 +2343,82 @@ mod tests {
             last = Some(now);
         }
         panic!("the card never settled on a layout with both fonts loaded (last {last:?})");
+    }
+
+    /// Players must see every corrupt-file reset and the recovery location through the shipped
+    /// settings plugin; a successful save and reopening must not erase that boot warning.
+    #[test]
+    fn corrupt_loads_show_the_reset_cause_and_kept_file_on_the_page() {
+        use super::super::{StoreReport, store};
+
+        let path = std::env::temp_dir().join(format!(
+            "overmatch-settings-page-{}-{}.ron",
+            std::process::id(),
+            char::from_u32(0x1f4be).unwrap()
+        ));
+        for (text, preserve) in [("not ron {{{", true), ("(lod_pixel_budget: NaN)", false)] {
+            let backup = path.with_extension("ron.bad");
+            if !preserve {
+                std::fs::create_dir(&backup).unwrap();
+            }
+            std::fs::write(&path, text).unwrap();
+            let store::Load { settings, note } = store::load(Some(&path));
+            assert!(
+                matches!(&note, store::LoadNote::Corrupt { kept, .. } if kept.is_some() == preserve)
+            );
+            let mut app = App::new();
+            app.add_plugins(crate::gpu_less_default_plugins(None))
+                .add_plugins(crate::ui_font::plugin)
+                .insert_resource(State::new(crate::state::AppState::Paused))
+                .init_resource::<bevy::winit::WinitMonitors>()
+                .insert_resource(settings)
+                .insert_resource(store::StorePath(Some(path.clone())))
+                .insert_resource(StoreReport(note))
+                .add_plugins(super::super::plugin(super::super::PageEntry::PauseState));
+            app.finish();
+            app.cleanup();
+            app.update();
+            let notice = |app: &mut App| {
+                let world = app.world_mut();
+                world
+                    .query_filtered::<&Text, With<SaveNotice>>()
+                    .single(world)
+                    .unwrap()
+                    .0
+                    .clone()
+            };
+            let reset = notice(&mut app);
+            assert!(reset.contains("Settings reset"), "{reset}");
+            assert!(
+                reset.contains("invalid"),
+                "the cause must be visible: {reset}"
+            );
+            assert!(
+                reset
+                    .chars()
+                    .all(|character| (' '..='~').contains(&character)),
+                "{reset}"
+            );
+            assert!(reset.contains("\\u{1f4be}") || !preserve, "{reset}");
+            if preserve {
+                assert!(reset.contains("ron.bad"), "{reset}");
+            } else {
+                assert!(reset.contains("could NOT be preserved"), "{reset}");
+            }
+            app.world_mut().write_message(SaveSettings);
+            app.update();
+            app.insert_resource(State::new(crate::state::AppState::Playing));
+            app.update();
+            app.insert_resource(State::new(crate::state::AppState::Paused));
+            app.update();
+            assert_eq!(notice(&mut app), reset, "saving cannot undo the boot reset");
+            if preserve {
+                std::fs::remove_file(backup).unwrap();
+            } else {
+                std::fs::remove_dir(backup).unwrap();
+            }
+            std::fs::remove_file(&path).unwrap();
+        }
     }
 
     /// The shipped page must replace its success legend with the retained failure, including after
