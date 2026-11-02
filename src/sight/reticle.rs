@@ -1433,7 +1433,7 @@ mod tests {
                         let height = node.size().y;
                         let top = transform.translation.y - height / 2.0;
                         assert!(
-                            height == HAIRLINE_PHYSICAL_PX && top == top.round(),
+                            height == 1.0 && top == top.round(),
                             "{case}: a mark must lay out one physical row, got {height} px tall \
                              from y = {top}",
                         );
