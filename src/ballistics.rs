@@ -1736,8 +1736,7 @@ pub struct VolumeCrossing {
     /// ([`ArmourMark::Wound`]).
     pub cost: f32,
     /// The game's damage model: retained work (J), after outgoing debris, from the physical
-    /// exchange. Zero for a witness, which
-    /// takes no energy and is dosed by `cost`.
+    /// exchange. Zero for a witness, which takes no energy and is dosed by `cost`.
     pub energy: f32,
     /// The whole disc traversed its exposed portions; it may still occupy a hidden portion.
     pub perforated: bool,
@@ -1770,7 +1769,7 @@ pub struct SpallCone {
     pub field: spall_cone::FieldDescriptor,
     /// The strength `S` (J) the directions were thrown with ([`walk::SpallSource::strength`]):
     /// direction `k` carries `S·f_k`, and the cone emits `S/2` in all, the energy its round lost
-    /// across the body times the exit material's strength ratio.
+    /// across the body times the debris share `κ` and the exit material's strength ratio `r`.
     pub strength: f32,
     pub rays: Vec<SpallRay>,
 }

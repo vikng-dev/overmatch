@@ -2027,9 +2027,8 @@ fn equal_factor_plates_in_contact_throw_one_cone_with_the_summed_spend() {
     }
 }
 
-/// THE CONE CARRIES THE ENERGY LOST. For one plate, every round's cone emits
-/// `½ m (v_entry² − v_exit²)`, the kinetic energy the round lost crossing it (its strength twice
-/// the debris share `κ` of that, [`EMITTED_SHARE`]), and a round that loses more energy there
+/// The game's damage model: a cone carries `κ r ½ m (v_entry² − v_exit²)`, its share of the
+/// kinetic energy the round lost crossing the body (strength over [`EMITTED_SHARE`]). A round that loses more energy there
 /// throws the stronger cone,
 /// whatever its mass, calibre or speed: the strengths order as the energies lost. Fixture bodies
 /// and speeds, all perforating one 50 mm fixture plate of the reference factor head-on (a strength

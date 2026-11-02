@@ -442,12 +442,12 @@ impl BurstFields {
 /// what the share it carries is worth in HP. Built only from a parsed file ([`cone_energy_from_ron`]).
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) struct ConeEnergy {
-    /// `κ`, in `(0, 1]`: the share of the energy lost across a body that its debris carries out
-    /// through an exit of the reference steel's strength (`cone_debris_energy_share`).
+    /// `κ`, in `(0, 1]`: the energy-share `StandIn` for missing construction- and material-dependent
+    /// debris production (`cone_debris_energy_share`), together with the exit ratio's emission role.
     debris_share: f32,
     /// HP per joule the cone carries: the authored emitted HP per joule lost at the plate
-    /// (`cone_emitted_hp_per_joule`, `u_C`) over `κ`, so a cone's emitted HP is `u_C r ΔE`
-    /// whatever `κ`, and `κ` moves only what the body keeps and what a building reads.
+    /// (`cone_emitted_hp_per_joule`, `u_C`) over `κ`. This calibration preserves `u_C r ΔE` emitted
+    /// HP while `κ` changes; it supplies no physical debris-production law.
     unit: FieldUnit,
 }
 
@@ -933,11 +933,9 @@ mod tests {
         }
     }
 
-    /// The cone's HP-per-joule unit is the file's: a shape file's value is what the parse carries, and
-    /// the shipped one is the shipped file's. One that is zero, negative, subnormal or not finite
-    /// is refused at parse naming the field: every cone's emission scales by that unit and the
-    /// energy its round lost, so a zero would silently switch every cone off through the pool quantum gate and
-    /// a negative one throw negative strengths.
+    /// The game's damage model reads the cone's HP calibration from its file and refuses an
+    /// unusable unit before play. Pools and presentation rely on a positive representable unit;
+    /// the carried energy and field strength remain independent of it.
     #[test]
     fn the_cone_hp_unit_is_read_from_the_file_and_must_be_positive() {
         let with = |share: &str| {
@@ -961,6 +959,26 @@ mod tests {
                 error.contains("cone_emitted_hp_per_joule"),
                 "{share}: {error}"
             );
+        }
+    }
+
+    /// The game's damage model must refuse an invalid debris share at parse, before the walk can
+    /// retain negative work or the HP calibration can divide by zero. Fixtures cover both excluded
+    /// bounds and acceptance of one and a small positive share; the exact gate diagnostic prevents
+    /// a later unit-conversion failure from masquerading as this refusal.
+    #[test]
+    fn the_debris_share_is_refused_outside_zero_to_one() {
+        for share in [0.0, -0.5, 1.000_000_1, 1.5, f32::INFINITY, f32::NAN] {
+            let error = cone_energy_from_ron(&units_file(share, 0.5, 0.125)).unwrap_err();
+            assert!(
+                error.starts_with("cone_debris_energy_share must lie in (0, 1]"),
+                "{share}: {error}"
+            );
+        }
+        for share in [f32::MIN_POSITIVE, 0.25, 1.0] {
+            let energy = cone_energy_from_ron(&units_file(share, 0.5, 0.125)).unwrap();
+            assert_eq!(energy.debris_share(), share);
+            assert!((energy.unit.hp_per_joule() * f64::from(share) - 0.5).abs() < 1.0e-6);
         }
     }
 

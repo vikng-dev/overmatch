@@ -1994,8 +1994,9 @@ pub struct SpallSource {
     pub debris_ratio: f32,
     /// The exited substance's strength against the reference armour steel: [`exit_strength_ratio`]
     /// of the highest rear factor among the reached members, the layer [`Self::debris_ratio`] is
-    /// read from. Exactly 1 at or above the reference. Its one job is the exit material's term of
-    /// the energy partition ([`Self::field_share`]).
+    /// read from. Exactly 1 at or above the reference. Its emission role is a `StandIn` for debris
+    /// production from the crossed construction and material; the resistance factor keeps its
+    /// own material-data provenance.
     pub strength_ratio: f32,
     /// The round's speed (m/s) where the latest reached member left it.
     pub exit_speed: f32,
@@ -2004,9 +2005,9 @@ pub struct SpallSource {
 impl SpallSource {
     /// The share of the energy lost across the body that leaves through its exit with the cone,
     /// `κ r`: `κ` the share at the reference steel ([`super::spall_cone::ConeEnergy::debris_share`],
-    /// `Unknown` data) and `r` the exited substance's strength ratio ([`Self::strength_ratio`]),
-    /// so a softer exit lets out proportionally less. The line deals the body's volumes the rest,
-    /// `1 − κ r`, so the energy the round lost is spent once (design doc §5, "Strength"). In
+    /// `StandIn` data) and `r` the exited substance's strength ratio ([`Self::strength_ratio`]).
+    /// Together they stand in for missing construction- and material-dependent debris production.
+    /// The line retains `1 − κ r`, so the energy is spent once (design doc §5, "The energy partition"). In
     /// `(0, 1]`, since `κ` and `r` are.
     pub fn field_share(&self) -> f32 {
         super::spall_cone::cone_energy().debris_share() * self.strength_ratio
@@ -2027,10 +2028,10 @@ impl SpallSource {
     }
 }
 
-/// The spall potency share an exit through a substance of `rear_factor` keeps: its strength against
-/// the reference armour steel, `rear_factor / REFERENCE_FACTOR`, capped at 1. A substance's factor
-/// is its strength ratio × [`crate::substances::REFERENCE_FACTOR`] (`materials.ron`), so the cap
-/// leaves every substance at or above the reference exactly at 1.
+/// The game's damage model: the emission `StandIn` reuses the material's resistance factor,
+/// `min(1, rear_factor / REFERENCE_FACTOR)`. Together with the debris share it replaces the missing
+/// law of debris production from construction and material. The factor's resistance job retains
+/// its own provenance in `materials.ron`; it does not establish a debris yield.
 pub(crate) fn exit_strength_ratio(rear_factor: f32) -> f32 {
     (rear_factor / crate::substances::REFERENCE_FACTOR).min(1.0)
 }
@@ -3367,7 +3368,8 @@ const HANDOFF_PROXIMITY: f32 = 1.0e-3;
 const ENTRANCE_SURFACE_COS: f32 = 0.9;
 
 /// The game's damage model: `moving_mass` is the whole flying assembly, independently of the
-/// mass meeting the plate that the resistance mechanism holds. Resolve the transit corridor into the plan (§3's perforate/embed, §5's spall, §6's deposits):
+/// mass meeting the plate that the resistance mechanism holds. Resolve the transit corridor into
+/// the plan (§3's perforate/embed, §5's spall, §6's deposits):
 /// `mechanism` advances `state` through the crossing's ordered encounters until it stops or the
 /// crossing ends. This is the one driver of a crossing's outcome, for the runtime and the §13.6 gate
 /// alike.
@@ -3494,9 +3496,9 @@ fn retained_lines<S>(
     doses
 }
 
-/// One volume's line over a crossing, summed over the encounters: the disc-mean chord (m), its
-/// readout cost (reference-mm) and the energy the round lost in it (J); [`finish`] makes the dose
-/// of it by taking out what the fields of the reached exits carry ([`SpallSource::field_share`]).
+/// The game's damage model: one volume's disc-mean chord (m), readout (reference-mm), work (J)
+/// and addressed speed loss (m/s). [`retained_lines`] assigns work to retained and debris shares
+/// before [`finish`] constructs the physical exchange and the HP dose.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 struct LineSum {
     chord: f64,
