@@ -244,12 +244,18 @@ def a_multiword_stage_and_a_broken_channel_are_reported_deliberately():
 
 @case
 def build_output_without_a_door_report_is_a_process_failure():
-    """An unsuccessful process with no report must not pass compiler output off as asset findings."""
-    for printed in ([], ["warning: unused import: XRayRelease", "refused at canon"]):
-        stage, message = addon.refusal_of(_ROOT, printed)
-        assert stage == "door", stage
-        assert "without a report" in message, message
-        assert "warning:" not in message, message
+    """Finder-launched artists need the failing process's evidence in their only visible report."""
+    evidence = ["warning: build noise"] * 40 + [
+        "error: could not compile asset_verify", "caused by: compiler failure",
+    ]
+    for verdict in ([], [report.VERDICT_PREFIX + json.dumps({"stage": "canon"})]):
+        stage, message = addon.refusal_of(_ROOT, evidence + verdict)
+        assert stage == ("canon" if verdict else "door"), stage
+        assert "process failed without a structured report" in message, message
+        assert all(line in message for line in evidence), message
+        assert "exited without a report" not in message, message
+    stage, message = addon.refusal_of(_ROOT, [])
+    assert stage == "door" and "produced no output" in message, (stage, message)
 
 
 # ── the stock-exporter hook ──────────────────────────────────────────────────────────────────────

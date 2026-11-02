@@ -681,6 +681,19 @@ class ComparisonLaw(unittest.TestCase):
 class EncoderReportChannel(unittest.TestCase):
     """The encoder owns its refusal; the wrapper reports only mechanical failures."""
 
+    def test_an_unreported_tool_failure_keeps_its_process_evidence(self):
+        """A mechanical refusal must carry the encoder's cause into the artist's report."""
+        with self.assertRaises(asset_door.Refused) as refusal:
+            asset_door.run_tool(
+                "ktx2", [sys.executable, "-c",
+                         "print('encoder could not ' + 'read input'); raise SystemExit(17)"],
+                ROOT, "candidate.glb", "repair the encoder input",
+            )
+        rows = refusal.exception.findings
+        self.assertEqual([row.check.id for row in rows], ["door.stage-failed"])
+        self.assertIn("exited 17", rows[0].evidence)
+        self.assertIn("encoder could not read input", rows[0].evidence)
+
     def test_an_encoder_role_refusal_is_not_replaced_by_the_wrapper(self):
         """The artist needs the image-role repair, not a second row saying the encoder exited."""
         with tempfile.TemporaryDirectory() as work:

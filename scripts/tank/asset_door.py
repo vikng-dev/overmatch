@@ -156,10 +156,12 @@ def run_tool(stage: str, command, root: str, subject: str, repair: str) -> None:
     """Stream the encoder's own report, adding a mechanical refusal only if it emitted none."""
     print("door  ▸ {}: {}".format(stage, shown(command, root)), flush=True)
     reported = False
+    output = []
     with subprocess.Popen(command, cwd=root, env=own_env(), text=True,
                           stdout=subprocess.PIPE, stderr=subprocess.STDOUT) as process:
         for line in process.stdout:
             print(line, end="", flush=True)
+            output.append(line)
             reported |= line.startswith(report.REPORT_PREFIX)
         status = process.wait()
     if not status:
@@ -169,7 +171,8 @@ def run_tool(stage: str, command, root: str, subject: str, repair: str) -> None:
     raise Refused(stage, [Finding(
         STAGE_FAILED,
         Subject(SubjectKind.DOOR, stage, subject),
-        "`{}` exited {}".format(shown(command, root), status),
+        "`{}` exited {}\n{}".format(
+            shown(command, root), status, "".join(output).rstrip("\n")),
         repair,
     )])
 

@@ -364,19 +364,18 @@ class Refused(Exception):
         self.stage = stage
 
 
-#: Maximum report lines in the popup; the system console retains the complete report.
+#: Maximum content lines in the popup; the system console retains the whole run.
 POPUP_LINES = 24
 
 
 def refusal_of(root, printed):
-    """Read only the door's report and stage envelopes after an unsuccessful exit.
+    """Read report and stage envelopes; without a report, show the process's diagnostic tail.
 
-    `printed` contains merged stdout AND stderr, including compiler diagnostics on warm builds.
-    Neither a diagnostic's position nor words resembling a verdict make it an asset finding.
+    Diagnostics explain process failures; only a verdict envelope names the stage.
     """
     channel = runpy.run_path(os.path.join(root, "scripts", "tank", "report.py"))
     report_prefix, verdict_prefix = channel["REPORT_PREFIX"], channel["VERDICT_PREFIX"]
-    stage, text = "door", "The door exited without a report."
+    stage, text = "door", None
     try:
         for line in printed:
             if line.startswith(report_prefix):
@@ -389,8 +388,16 @@ def refusal_of(root, printed):
                     raise ValueError("refusal stage must be a nonempty string")
     except (ValueError, KeyError, TypeError):
         stage, text = "door", "The door returned an invalid report."
+    complete = "report"
+    if text is None:
+        diagnostics = [line for line in printed if not line.startswith(verdict_prefix)]
+        text = "\n".join(["The process failed without a structured report."] + (
+            diagnostics[-(POPUP_LINES - 1):] or ["The process produced no output."]
+        ))
+        complete = "process output"
     return (stage, "\n".join(text.splitlines()[:POPUP_LINES] + [
-        "", "The tracked model is unchanged. The complete report is in the system console.",
+        "", "The tracked model is unchanged. The complete {} is in the system console.".format(
+            complete),
     ]))
 
 
