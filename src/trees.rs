@@ -58,10 +58,11 @@ use crate::Layer;
 use crate::ballistics::{BallisticVolume, ComponentHealth, PoolEmptied, VolumeMaterial};
 use crate::buildings::attachments::{ATTACHMENTS_PATH, Attachments, RootPlate};
 use crate::buildings::fracture::{
-    self, Bond, Chunk, GRAVITY, Joint, Load, Masonry, Origin, Seam, SectionCache, Shear, Side,
-    Structure, WallState,
+    self, Bond, Chunk, Joint, Load, Masonry, Origin, Seam, SectionCache, Shear, Side, Structure,
+    WallState,
 };
 use crate::contact_transfer::ContactTransfers;
+use crate::physical_laws::gravity_mps2;
 use crate::provenance::Sourced;
 use crate::scatter::MapInstance;
 use crate::substances::SubstanceRegistry;
@@ -605,7 +606,8 @@ impl TreeBody {
         let mass: f32 = chunks.iter().map(|chunk| chunk.mass).sum();
         let r0 = radius(0);
         let (area, modulus) = (PI * r0 * r0, PI * r0 * r0 * r0 / 4.0);
-        let anchor = kind.root_plate.overturning_nm_per_kg * mass / modulus - mass * GRAVITY / area;
+        let anchor =
+            kind.root_plate.overturning_nm_per_kg * mass / modulus - mass * gravity_mps2() / area;
         // DERIVED: positive while the base radius is under 4 C / g, about 60 m at the shipped
         // plates' 146 N·m/kg.
         assert!(
@@ -1702,7 +1704,7 @@ pub(crate) mod tests {
                     if j == 0 {
                         plate * mass_above(0) / h
                     } else {
-                        let weight = mass_above(j) * GRAVITY / (PI * r * r);
+                        let weight = mass_above(j) * gravity_mps2() / (PI * r * r);
                         (rupture + weight) * PI * r * r * r / 4.0 / (h - z)
                     }
                 })
@@ -1874,7 +1876,7 @@ pub(crate) mod tests {
             crate::debris::sim_plugin,
         ))
         .init_asset::<Mesh>()
-        .insert_resource(Gravity(Vec3::NEG_Y * 9.81))
+        .insert_resource(Gravity(Vec3::NEG_Y * gravity_mps2()))
         .insert_resource(fixture_grid(|_, _| 0.0))
         .insert_resource(TimeUpdateStrategy::ManualDuration(Duration::from_micros(
             15_625,

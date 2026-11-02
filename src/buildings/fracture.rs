@@ -67,6 +67,7 @@ use std::{collections::HashSet, f32::consts::PI};
 use bevy::ecs::entity::Entity;
 use bevy::math::{DVec3, Mat3, Vec3};
 
+use crate::physical_laws::{PhysicalLaws, gravity_mps2};
 use crate::substances::{BlastFacts, REFERENCE_FACTOR, SubstanceRegistry};
 
 /// Spacing of the point sources a line deposit is split into along its chord, m: a quarter of a
@@ -318,7 +319,8 @@ pub(crate) struct Block {
     pub max: Vec3,
 }
 
-/// How far a point may sit off a plane and still lie on it, m.
+/// Resolution: plane-membership tolerance, m, absorbing f32 hull reconstruction noise
+/// without merging distinct construction faces.
 const ON_PLANE: f32 = 1e-4;
 
 impl Block {
@@ -411,8 +413,9 @@ impl Block {
     }
 
     /// The distance from the centroid of the corners to the nearest bounding plane, m.
+    /// The caller supplies a certified solid with at least four corners.
     pub fn inradius(&self) -> f32 {
-        let centre = self.points.iter().sum::<Vec3>() / self.points.len().max(1) as f32;
+        let centre = self.points.iter().sum::<Vec3>() / self.points.len() as f32;
         self.planes
             .iter()
             .map(|(n, o)| o - n.dot(centre))
@@ -1415,7 +1418,7 @@ pub(crate) fn in_group_frames(
                 energy: 0.0,
                 crushed: 0.0,
                 blow: Vec3::ZERO,
-                press: Vec3::Y * (GRAVITY * chunk.mass)
+                press: Vec3::Y * (gravity_mps2() * chunk.mass)
                     - chunk.mass * (spin.cross(spin.cross(r)) + gyroscopic.cross(r)),
                 peak: None,
                 origin: Origin::Inertia { step: None },
@@ -1861,14 +1864,14 @@ fn field(structure: &Structure, group: &[usize], loads: &[Load]) -> (Vec3, f32) 
     });
     let press: DVec3 = inertial.clone().map(|load| load.press.as_dvec3()).sum();
     if inertial.count() == 0 {
-        return (Vec3::Y, GRAVITY);
+        return (Vec3::Y, gravity_mps2());
     }
     // Cancel the same rounded gravity products the frame supplies, before division.
     // Accumulating in f64 preserves equal/opposite f32 forces instead of inventing an up
     // direction from a rounded average in uniform free fall.
     let gravity: DVec3 = group
         .iter()
-        .map(|&c| (Vec3::NEG_Y * (GRAVITY * structure.chunks[c].mass)).as_dvec3())
+        .map(|&c| (Vec3::NEG_Y * (gravity_mps2() * structure.chunks[c].mass)).as_dvec3())
         .sum();
     let mass: f64 = group
         .iter()
@@ -2059,10 +2062,6 @@ fn crossing(joints: usize, paths: &[Option<Vec<usize>>]) -> Vec<Vec<usize>> {
     crossing
 }
 
-/// The pull of gravity, m/s²: avian's default `Gravity`, the one the game's physics world runs
-/// on, so the weight a section holds is the weight that moves the group once it falls.
-pub(crate) const GRAVITY: f32 = 9.81;
-
 /// What one weight check did ([`weigh`]): the sections it cracked, in order; the touched chunks
 /// it left standing unassessed, ascending; and its operation count, the joints its section scans
 /// and its stress sums read plus the chunks its walks expanded and its stress sums read.
@@ -2202,7 +2201,7 @@ pub(crate) fn weigh(
                             section,
                             &group,
                             loads,
-                            Vec3::NEG_Y * GRAVITY,
+                            Vec3::NEG_Y * gravity_mps2(),
                             &mut weighed.steps,
                         )
                     })
@@ -2230,7 +2229,7 @@ pub(crate) fn weigh(
                 &incident,
                 &group,
                 &ring_loads,
-                Vec3::NEG_Y * GRAVITY,
+                Vec3::NEG_Y * gravity_mps2(),
             );
             if let Some(failure) = failure {
                 let ratio = failure.demand / failure.capacity;
@@ -2366,7 +2365,7 @@ fn unseated(
             state,
             &group,
             loads,
-            Vec3::NEG_Y * GRAVITY,
+            Vec3::NEG_Y * gravity_mps2(),
             steps,
         ) {
             return Some(failure);
@@ -3019,7 +3018,7 @@ fn section_pulse(
     let Some(navier) = Navier::of(structure, section, group, steps) else {
         return Reading::UNRESISTED;
     };
-    let gravity = Vec3::NEG_Y * GRAVITY;
+    let gravity = Vec3::NEG_Y * gravity_mps2();
     let (force, moment) = force_wrench(structure, group, loads, gravity, navier.centre, |load| {
         Some(load.press)
     });
@@ -3379,7 +3378,7 @@ fn ring_failure(
     let ring = ring(structure, state, incident, group, push)?;
     let reaches = |f: Vec3| f.dot(ring.along) >= ring.strength;
     let sustained =
-        on.iter().map(|load| load.press).sum::<Vec3>() + Vec3::NEG_Y * GRAVITY * ring.mass;
+        on.iter().map(|load| load.press).sum::<Vec3>() + Vec3::NEG_Y * gravity_mps2() * ring.mass;
     let peak: Vec3 = on.iter().filter_map(|load| load.peak).sum();
     let mean: Vec3 = on.iter().filter_map(|load| load.mean_force()).sum();
     let reading = Reading {
@@ -3483,102 +3482,10 @@ fn ball_directions(count: usize) -> Vec<(Vec3, f32)> {
 /// about 2.3 of them square on (DERIVED).
 pub(crate) const BLAST_RAYS: usize = 4096;
 
-/// TNT's energy, J/kg: the TNT-equivalent convention (CITED: the ton of TNT is defined as
-/// 4.184 GJ), which the burst cores' rows state as their chemical energy.
-const TNT_ENERGY: f32 = 4.184e6;
-
-/// The charge factor between a surface burst and a free-air one: a hemispherical surface burst of
-/// `W` loads like a free-air burst of `1.8 W` (CLAIMED: UFC 3-340-02's reflection factor for a
-/// surface burst, the ground's crater taking the rest of the doubling). The fits are the surface
-/// burst's; a blast in the air reads them at `W / 1.8`.
-const SURFACE_BURST_FACTOR: f32 = 1.8;
-
 /// The least cosine of incidence a ray's patch is reckoned at (ASSUMED, Resolution): past 84° one
 /// ray's patch, `4π share d² / cos θ`, grows without bound on the face it stops on, though the
 /// face itself bounds the cones that land on it ([`intercepted`]).
 const GRAZING_COS: f32 = 0.1;
-
-/// One of Swisdak's fits of a surface burst of TNT (SOURCED: Swisdak 1994, "Simplified Kingery
-/// Airblast Calculations", 26th DoD Explosives Safety Seminar, DTIC ADA526744, Table 1's metric
-/// rows, PDF pp. 8–10, every coefficient read off the page images; they restate Kingery & Bulmash
-/// 1984, ARBRL-TR-02555, with a mean error under 1 % and a worst cell of 1.5 %, Table 5, Z
-/// 0.2–40): a scaled quantity at scaled distance
-/// `Z = R / W^⅓` (m/kg^⅓) as `exp(Σ cₖ (ln Z)ᵏ)`, each branch good up to its `Z`; the scaled
-/// impulse `i / W^⅓` in kPa·ms per kg^⅓ (Pa·s per kg^⅓), the peak overpressure in kPa. Below
-/// `from` it holds the edge's value; near the charge the detonation products' floor lies above it
-/// ([`Blast::products_floor`]). Nothing is read past the last branch: every walk stops a
-/// ray at the reflected impulse fit's edge ([`Blast::reach`]), and a distance over it by rounding
-/// reads the edge's value.
-struct SwisdakFit {
-    from: f32,
-    branches: &'static [(f32, &'static [f32])],
-}
-
-impl SwisdakFit {
-    /// The last scaled distance a branch covers, m/kg^⅓.
-    const fn edge(&self) -> f32 {
-        self.branches[self.branches.len() - 1].0
-    }
-
-    /// The fit's value at scaled distance `z`, in its own unit.
-    fn at(&self, z: f32) -> f32 {
-        let held = z.clamp(self.from, self.edge());
-        let (_, c) = self
-            .branches
-            .iter()
-            .find(|(to, _)| held <= *to)
-            .expect("held is within the last branch's edge");
-        let l = held.ln();
-        c.iter().rev().fold(0.0, |sum, ck| sum * l + ck).exp()
-    }
-}
-
-/// Swisdak's normally reflected impulse, Z 0.06–40 m/kg^⅓ (SOURCED: Table 1, 3 of 3, PDF p. 10).
-/// Its metric row agrees with the same table's imperial row to 0.05 % (DERIVED; the module's
-/// tests hold it to 0.1 %).
-const REFLECTED_IMPULSE: SwisdakFit = SwisdakFit {
-    from: 0.06,
-    branches: &[(40.0, &[6.7853, -1.3466, 0.101, -0.01123])],
-};
-
-/// Swisdak's incident (side-on) impulse, Z 0.2–158.7 m/kg^⅓ (SOURCED: Table 1, 2 of 3, PDF p. 9).
-const INCIDENT_IMPULSE: SwisdakFit = SwisdakFit {
-    from: 0.2,
-    branches: &[
-        (0.96, &[5.522, 1.117, 0.6, -0.292, -0.087]),
-        (2.38, &[5.465, -0.308, -1.464, 1.362, -0.432]),
-        (33.7, &[5.2749, -0.4677, -0.2499, 0.0588, -0.00554]),
-        (158.7, &[5.9825, -1.062]),
-    ],
-};
-
-/// Swisdak's incident (side-on) peak overpressure, kPa, Z 0.2–198.5 m/kg^⅓ (SOURCED: Table 1, 1
-/// of 3, PDF p. 8). Its branches meet within 0.7 % at their joins (DERIVED).
-const INCIDENT_PRESSURE: SwisdakFit = SwisdakFit {
-    from: 0.2,
-    branches: &[
-        (2.9, &[7.2106, -2.1069, -0.3229, 0.1117, 0.0685]),
-        (23.8, &[7.5938, -3.0523, 0.40977, 0.0261, -0.01267]),
-        (198.5, &[6.0536, -1.4066]),
-    ],
-};
-
-/// Swisdak's normally reflected peak overpressure, kPa, Z 0.06–40 m/kg^⅓ (SOURCED: Table 1, 1 of
-/// 3, PDF p. 8, both branches). Its branches meet within 0.1 % at Z = 2, and it stays at least
-/// 2.01 times the incident fit over the whole field (DERIVED).
-const REFLECTED_PRESSURE: SwisdakFit = SwisdakFit {
-    from: 0.06,
-    branches: &[
-        (
-            2.0,
-            &[9.006, -2.6893, -0.6295, 0.1011, 0.29255, 0.13505, 0.019736],
-        ),
-        (
-            40.0,
-            &[8.8396, -1.733, -2.64, 2.293, -0.8232, 0.14247, -0.0099],
-        ),
-    ],
-};
 
 /// A blast: its energy (J) and its charge `W` (kg of TNT), the TNT that carries that energy
 /// (ASSUMED: impulse equivalence is energy equivalence; the wall design notes they need not agree).
@@ -3620,7 +3527,7 @@ impl Blast {
         );
         Self {
             energy,
-            charge: energy / TNT_ENERGY,
+            charge: energy / PhysicalLaws::shipped().tnt_energy_j_per_kg,
             radius,
             products,
         }
@@ -3643,7 +3550,8 @@ impl Blast {
     /// square on moves it at 0.017 m/s (the cube's face's share of the ray's cone, [`intercepted`]),
     /// under avian's 0.15 m/s sleep threshold.
     pub(crate) fn reach(&self) -> f32 {
-        REFLECTED_IMPULSE.edge() * (self.charge / SURFACE_BURST_FACTOR).cbrt()
+        PhysicalLaws::shipped().reflected_impulse.edge()
+            * (self.charge / PhysicalLaws::shipped().surface_burst_factor).cbrt()
     }
 
     /// The cross-section of the cone a ray of `share` of the field stands for, `distance` m out,
@@ -3658,18 +3566,20 @@ impl Blast {
     /// Bannister 1997, ARL-TR-1310, the ConWep blend, which states it for pressure; read here on
     /// impulse, ASSUMED).
     pub(crate) fn specific_impulse(&self, distance: f32, cos: f32) -> f32 {
-        let scale = (self.charge / SURFACE_BURST_FACTOR).cbrt();
+        let scale = (self.charge / PhysicalLaws::shipped().surface_burst_factor).cbrt();
         if scale <= 0.0 {
             return 0.0;
         }
         let distance = self.distance(distance);
         let z = distance / scale;
         let cos = cos.clamp(0.0, 1.0);
-        let reflected = REFLECTED_IMPULSE.at(z);
+        let reflected = PhysicalLaws::shipped().reflected_impulse.at(z);
         let reflected = self
             .products_floor(distance, scale * reflected)
             .map_or(reflected, |(i, _)| i / scale);
-        scale * (reflected * cos * cos + INCIDENT_IMPULSE.at(z) * (1.0 - cos) * (1.0 - cos))
+        scale
+            * (reflected * cos * cos
+                + PhysicalLaws::shipped().incident_impulse.at(z) * (1.0 - cos) * (1.0 - cos))
     }
 
     /// The detonation products' floor under the normally reflected field `distance` m (floored)
@@ -3691,9 +3601,9 @@ impl Blast {
     }
 
     /// The normally reflected peak overpressure at scaled distance `z` (m/kg^⅓), Pa
-    /// ([`REFLECTED_PRESSURE`]).
+    /// (the environment's reflected-pressure fit).
     fn reflected_pressure(z: f32) -> f32 {
-        REFLECTED_PRESSURE.at(z) * 1e3
+        PhysicalLaws::shipped().reflected_pressure.at(z) * 1e3
     }
 
     /// The peak overpressure (Pa) the blast loads a face with `distance` m from the charge, at
@@ -3702,7 +3612,7 @@ impl Blast {
     /// `p_r cos²θ + p_s (1 + cos²θ − 2 cos θ)` (CLAIMED there, stated for pressure). A function
     /// of the scaled distance alone (Hopkinson–Cranz).
     pub(crate) fn peak_pressure(&self, distance: f32, cos: f32) -> f32 {
-        let scale = (self.charge / SURFACE_BURST_FACTOR).cbrt();
+        let scale = (self.charge / PhysicalLaws::shipped().surface_burst_factor).cbrt();
         if scale <= 0.0 {
             return 0.0;
         }
@@ -3711,9 +3621,13 @@ impl Blast {
         let cos = cos.clamp(0.0, 1.0);
         let reflected = Self::reflected_pressure(z);
         let reflected = self
-            .products_floor(distance, scale * REFLECTED_IMPULSE.at(z))
+            .products_floor(
+                distance,
+                scale * PhysicalLaws::shipped().reflected_impulse.at(z),
+            )
             .map_or(reflected, |(_, k)| reflected * k);
-        reflected * cos * cos + INCIDENT_PRESSURE.at(z) * 1e3 * (1.0 - cos) * (1.0 - cos)
+        reflected * cos * cos
+            + PhysicalLaws::shipped().incident_pressure.at(z) * 1e3 * (1.0 - cos) * (1.0 - cos)
     }
 
     /// The area (m²) of the face a ray of `share` of the field stands for where it stops
@@ -4115,7 +4029,7 @@ mod tests {
             slab.joints[0].bond = Bond::Resting;
             slab.joints[0].normal = normal;
             let frame = Load {
-                press: (Vec3::Y + Vec3::X) * (GRAVITY * slab.chunks[0].mass),
+                press: (Vec3::Y + Vec3::X) * (gravity_mps2() * slab.chunks[0].mass),
                 origin: Origin::Inertia { step: None },
                 ..slab_contact(&slab, 0.0)
             };
@@ -4389,7 +4303,7 @@ mod tests {
                     &slab,
                     &[0, 1, 2],
                     &loads,
-                    Vec3::NEG_Y * GRAVITY,
+                    Vec3::NEG_Y * gravity_mps2(),
                     Vec3::new(0.125, 0.25, -0.5),
                     |load| Some(load.press),
                 ),
@@ -4442,7 +4356,7 @@ mod tests {
                 &slab,
                 &group,
                 &loads,
-                Vec3::NEG_Y * GRAVITY,
+                Vec3::NEG_Y * gravity_mps2(),
                 Vec3::new(0.125, 0.25, -0.5),
                 |load| Some(load.press)
             ),
@@ -4660,7 +4574,8 @@ mod tests {
             stack.joints[0].centroid = Vec3::new(0.0, 0.2, 0.0);
             stack.joints[0].normal = Vec3::Y;
             stack.joints[0].bond = Bond::Resting;
-            let weight: f32 = stack.chunks.iter().map(|chunk| chunk.mass).sum::<f32>() * GRAVITY;
+            let weight: f32 =
+                stack.chunks.iter().map(|chunk| chunk.mass).sum::<f32>() * gravity_mps2();
             let mut ground = slab_contact(&stack, 0.0);
             ground.press = Vec3::Y * weight;
             let struck = Load {
@@ -4787,7 +4702,7 @@ mod tests {
             &slab,
             &[0, 1, 2],
             &loads,
-            Vec3::NEG_Y * GRAVITY,
+            Vec3::NEG_Y * gravity_mps2(),
             Vec3::ZERO,
             |load| Some(load.press),
         );
@@ -5144,33 +5059,66 @@ mod tests {
             .expect("Brick states a seam strength")
     }
 
-    /// THE LAWS READ THE MATERIAL FROM DATA: the shipped Brick's seam strength is its row's
-    /// `tensile`, its crush energy the walk's own static resistance at its factor (135.5 MJ/m³,
-    /// DERIVED in the prototype's README from 36.5 ref-mm/m), and the shipped Wood's seam is its
-    /// own row's, so a timber parts by its sourced strength, never by an assumed one. A law
-    /// reading a constant in place of the row, or breaking every substance, fails here.
+    /// The game's environment destruction reads material facts from each admitted registry row.
+    /// Changing resistance or reference facts must change crushing work without changing this test.
     #[test]
     fn the_material_is_the_substance_row() {
         let registry = SubstanceRegistry::shipped_static();
-        let brick = brick();
-        let bulk = registry.hard("Brick").unwrap().bulk.unwrap();
-        assert_eq!(f64::from(brick.seam.tensile), bulk.tensile.unwrap());
-        assert_eq!(f64::from(brick.density), bulk.density);
-        assert!(
-            (brick.crush / 135.5e6 - 1.0).abs() < 0.01,
-            "crush {}",
-            brick.crush
-        );
-        let wood = Masonry::of(registry, "Wood")
-            .unwrap()
-            .expect("Wood states bulk facts");
-        let bulk = registry.hard("Wood").unwrap().bulk.unwrap();
-        assert_eq!(f64::from(wood.seam.tensile), bulk.tensile.unwrap());
+        for name in registry.keys() {
+            let substance = registry.get(name).unwrap();
+            let Some(hard) = substance.hard() else {
+                continue; // Witnesses and unworn rows are not structural matter.
+            };
+            let material = Masonry::of(registry, name);
+            let Some(bulk) = hard.bulk else {
+                assert!(
+                    material.unwrap().is_none(),
+                    "{name}: no bulk means no fracture law"
+                );
+                continue;
+            };
+            let complete = bulk.tensile.is_some()
+                && bulk.fracture_energy.is_some()
+                && bulk.shear_cohesion.is_some()
+                && bulk.shear_fracture_energy.is_some()
+                && hard.friction.is_some()
+                && bulk.blast.is_some();
+            if !complete {
+                assert!(
+                    material.is_err(),
+                    "{name}: incomplete structural facts are refused"
+                );
+                continue;
+            }
+            let material = material.unwrap().unwrap();
+            assert_eq!(material.density, bulk.density as f32, "{name}");
+            assert_eq!(
+                material.seam.tensile,
+                bulk.tensile.unwrap() as f32,
+                "{name}"
+            );
+            assert_eq!(
+                material.seam.fracture_energy,
+                bulk.fracture_energy.unwrap() as f32,
+                "{name}"
+            );
+            let resistance = f64::from(hard.factor()) / f64::from(REFERENCE_FACTOR);
+            let expected = (resistance * registry.reference_facts().cavity_strength()) as f32;
+            assert!(
+                (material.crush - expected).abs() <= 2.0 * f32::EPSILON * expected.abs(),
+                "{name}"
+            );
+        }
+    }
+
+    /// Held structure and round flight read one environment magnitude. A divergent structural
+    /// gravity fails when the environment data changes, before a freed group can change weight.
+    #[test]
+    fn a_standing_structure_reads_the_environment_gravity() {
         assert_eq!(
-            f64::from(wood.seam.fracture_energy),
-            bulk.fracture_energy.unwrap()
+            field(&row(1), &[0], &[]),
+            (Vec3::Y, crate::physical_laws::gravity_mps2())
         );
-        assert!(Masonry::of(registry, "Adobe").is_err());
     }
 
     /// A POOL WEARS, THEN EMPTIES: crushed volume under a chunk's pool leaves it standing and worn; the
@@ -5523,8 +5471,8 @@ mod tests {
             scaled * KPA_PER_PSI * LB_PER_KG.cbrt()
         };
         for (z, reflected, incident) in [(1.0, 884.7, 236.3), (10.0, 59.33, 31.04)] {
-            let r = REFLECTED_IMPULSE.at(z);
-            let i = INCIDENT_IMPULSE.at(z);
+            let r = PhysicalLaws::shipped().reflected_impulse.at(z);
+            let i = PhysicalLaws::shipped().incident_impulse.at(z);
             assert!(
                 (r / reflected - 1.0).abs() < 1e-3,
                 "reflected at Z {z}: {r}"
@@ -5551,15 +5499,21 @@ mod tests {
     fn the_blast_peak_pressures_are_swisdaks_fits_reflected_at_least_twofold() {
         let close = |got: f32, want: f32| (got / want - 1.0).abs() < 1e-3;
         assert!(close(Blast::reflected_pressure(1.0), 8.1518e6));
-        assert!(close(INCIDENT_PRESSURE.at(1.0) * 1e3, 1.3537e6));
-        assert!(close(INCIDENT_PRESSURE.at(10.0) * 1e3, 14.889e3));
+        assert!(close(
+            PhysicalLaws::shipped().incident_pressure.at(1.0) * 1e3,
+            1.3537e6
+        ));
+        assert!(close(
+            PhysicalLaws::shipped().incident_pressure.at(10.0) * 1e3,
+            14.889e3
+        ));
         assert!(close(Blast::reflected_pressure(10.0), 31.54e3));
-        let join = REFLECTED_PRESSURE.branches[0].0;
-        let far = REFLECTED_PRESSURE.branches[1].1;
+        let join = PhysicalLaws::shipped().reflected_pressure.branches[0].0;
+        let far = &PhysicalLaws::shipped().reflected_pressure.branches[1].1;
         let l = join.ln();
         let beyond = far.iter().rev().fold(0.0, |sum, ck| sum * l + ck).exp();
         assert!(
-            (beyond / REFLECTED_PRESSURE.at(join) - 1.0).abs() < 1e-3,
+            (beyond / PhysicalLaws::shipped().reflected_pressure.at(join) - 1.0).abs() < 1e-3,
             "the reflected branches meet at their join"
         );
         let n = 2000;
@@ -5567,7 +5521,7 @@ mod tests {
         for k in 0..=n {
             let (r, s) = (
                 Blast::reflected_pressure(z(k)),
-                INCIDENT_PRESSURE.at(z(k)) * 1e3,
+                PhysicalLaws::shipped().incident_pressure.at(z(k)) * 1e3,
             );
             assert!(
                 r >= 2.0 * s,
@@ -5577,16 +5531,22 @@ mod tests {
             if k < n {
                 let (r1, s1) = (
                     Blast::reflected_pressure(z(k + 1)),
-                    INCIDENT_PRESSURE.at(z(k + 1)) * 1e3,
+                    PhysicalLaws::shipped().incident_pressure.at(z(k + 1)) * 1e3,
                 );
                 assert!(r1 <= r * 1.01 && s1 <= s * 1.01, "Z {}: rises", z(k));
             }
         }
         // W / 1.8 = 1 kg and 8 kg: the same scaled distance at twice the range (fixture data).
         let (one, eight) = (
-            Blast::of(TNT_ENERGY * SURFACE_BURST_FACTOR, 1e-3, FIT_ONLY_PRODUCTS),
             Blast::of(
-                8.0 * TNT_ENERGY * SURFACE_BURST_FACTOR,
+                PhysicalLaws::shipped().tnt_energy_j_per_kg
+                    * PhysicalLaws::shipped().surface_burst_factor,
+                1e-3,
+                FIT_ONLY_PRODUCTS,
+            ),
+            Blast::of(
+                8.0 * PhysicalLaws::shipped().tnt_energy_j_per_kg
+                    * PhysicalLaws::shipped().surface_burst_factor,
                 1e-3,
                 FIT_ONLY_PRODUCTS,
             ),
@@ -5601,7 +5561,7 @@ mod tests {
         ));
         assert!(close(
             one.peak_pressure(3.0, 0.0),
-            INCIDENT_PRESSURE.at(3.0) * 1e3
+            PhysicalLaws::shipped().incident_pressure.at(3.0) * 1e3
         ));
     }
 
@@ -5661,7 +5621,7 @@ mod tests {
         let radius = (3.0 * mass / (4.0 * PI * 1650.0)).cbrt();
         let speed = 2400.0 * std::f32::consts::SQRT_2;
         Blast::of(
-            mass * TNT_ENERGY,
+            mass * PhysicalLaws::shipped().tnt_energy_j_per_kg,
             radius,
             crate::ballistics::burst::products_momentum(mass, speed),
         )
@@ -5669,8 +5629,11 @@ mod tests {
 
     /// The free-air fit's normally reflected impulse (Pa·s) `distance` m from `blast`.
     fn fit_reflected(blast: &Blast, distance: f32) -> f32 {
-        let scale = (blast.charge / SURFACE_BURST_FACTOR).cbrt();
-        scale * REFLECTED_IMPULSE.at(blast.distance(distance) / scale)
+        let scale = (blast.charge / PhysicalLaws::shipped().surface_burst_factor).cbrt();
+        scale
+            * PhysicalLaws::shipped()
+                .reflected_impulse
+                .at(blast.distance(distance) / scale)
     }
 
     /// Where `blast`'s products floor meets the fit at normal incidence, m: the least distance
@@ -5721,7 +5684,7 @@ mod tests {
             }
             let at_surface =
                 blast.specific_impulse(blast.radius, 1.0) / fit_reflected(&blast, blast.radius);
-            let z = crossing / (blast.charge / SURFACE_BURST_FACTOR).cbrt();
+            let z = crossing / (blast.charge / PhysicalLaws::shipped().surface_burst_factor).cbrt();
             println!(
                 "{mass} kg bare: crossing Z {z:.3} m/kg^(1/3), {at_surface:.2} x the fit at its surface"
             );
@@ -5770,7 +5733,7 @@ mod tests {
     fn outside_its_crossing_the_field_is_the_fit_bit_for_bit() {
         for mass in [0.5_f32, 5.0, 50.0] {
             let blast = bare_charge(mass);
-            let scale = (blast.charge / SURFACE_BURST_FACTOR).cbrt();
+            let scale = (blast.charge / PhysicalLaws::shipped().surface_burst_factor).cbrt();
             let crossing = products_crossing(&blast);
             let steps = 200;
             for k in 1..=steps {
@@ -5778,10 +5741,15 @@ mod tests {
                 let z = blast.distance(r) / scale;
                 for cos in [1.0_f32, 0.7, 0.3, 0.0] {
                     let impulse = scale
-                        * (REFLECTED_IMPULSE.at(z) * cos * cos
-                            + INCIDENT_IMPULSE.at(z) * (1.0 - cos) * (1.0 - cos));
+                        * (PhysicalLaws::shipped().reflected_impulse.at(z) * cos * cos
+                            + PhysicalLaws::shipped().incident_impulse.at(z)
+                                * (1.0 - cos)
+                                * (1.0 - cos));
                     let peak = Blast::reflected_pressure(z) * cos * cos
-                        + INCIDENT_PRESSURE.at(z) * 1e3 * (1.0 - cos) * (1.0 - cos);
+                        + PhysicalLaws::shipped().incident_pressure.at(z)
+                            * 1e3
+                            * (1.0 - cos)
+                            * (1.0 - cos);
                     assert_eq!(
                         blast.specific_impulse(r, cos).to_bits(),
                         impulse.to_bits(),
@@ -5847,7 +5815,11 @@ mod tests {
             for mass in [0.1_f32, 1.0, 5.0] {
                 // ASSUMED fixture filler density, kg/m3; DERIVED equal-volume sphere radius.
                 let radius = (3.0 * mass / (4.0 * PI * 1600.0)).cbrt();
-                let blast = Blast::of(mass * TNT_ENERGY, radius, FIT_ONLY_PRODUCTS);
+                let blast = Blast::of(
+                    mass * PhysicalLaws::shipped().tnt_energy_j_per_kg,
+                    radius,
+                    FIT_ONLY_PRODUCTS,
+                );
                 for range in [radius, 0.1_f32.max(radius), 0.5, 1.0] {
                     let hits = sample_blocks(
                         &blocks,
@@ -5958,7 +5930,9 @@ mod tests {
         // W / 1.8 = 1000 kg at 20 m: Z = 2 m/kg^⅓, a peak far under brick's dynamic strength
         // with a long, heavy pulse (fixture burst).
         let blast = Blast::of(
-            1000.0 * TNT_ENERGY * SURFACE_BURST_FACTOR,
+            1000.0
+                * PhysicalLaws::shipped().tnt_energy_j_per_kg
+                * PhysicalLaws::shipped().surface_burst_factor,
             1e-3,
             FIT_ONLY_PRODUCTS,
         );
@@ -6050,7 +6024,11 @@ mod tests {
             .collect();
         for (name, energy, standoff) in [
             ("88 mm HE burst", 1.47e6_f32, 0.1_f32),
-            ("bare 5 kg", 5.0 * TNT_ENERGY, 0.3),
+            (
+                "bare 5 kg",
+                5.0 * PhysicalLaws::shipped().tnt_energy_j_per_kg,
+                0.3,
+            ),
         ] {
             let blast = Blast::of(energy, 1e-3, FIT_ONLY_PRODUCTS);
             let origin = Vec3::new(0.1, -0.05, -standoff);
@@ -6096,7 +6074,12 @@ mod tests {
     #[test]
     fn a_blast_rays_peak_force_is_its_peak_pressure_over_its_pushs_patch() {
         // W / 1.8 = 1 kg, so the scaled distance is the distance (fixture data).
-        let blast = Blast::of(TNT_ENERGY * SURFACE_BURST_FACTOR, 1e-3, FIT_ONLY_PRODUCTS);
+        let blast = Blast::of(
+            PhysicalLaws::shipped().tnt_energy_j_per_kg
+                * PhysicalLaws::shipped().surface_burst_factor,
+            1e-3,
+            FIT_ONLY_PRODUCTS,
+        );
         let share = 1.0 / BLAST_RAYS as f32;
         let d = 2.0;
         for angle in [0.0_f32, 60.0, 89.4] {
@@ -6141,11 +6124,19 @@ mod tests {
     #[test]
     fn a_blast_ray_pushes_its_face_along_the_normal() {
         // W / 1.8 = 1 kg, so the scaled distance is the distance (fixture data).
-        let blast = Blast::of(TNT_ENERGY * SURFACE_BURST_FACTOR, 1e-3, FIT_ONLY_PRODUCTS);
+        let blast = Blast::of(
+            PhysicalLaws::shipped().tnt_energy_j_per_kg
+                * PhysicalLaws::shipped().surface_burst_factor,
+            1e-3,
+            FIT_ONLY_PRODUCTS,
+        );
         let share = 1.0 / BLAST_RAYS as f32;
         let d = 2.0;
         let patch = 4.0 * PI * share * d * d;
-        let (reflected, incident) = (REFLECTED_IMPULSE.at(d), INCIDENT_IMPULSE.at(d));
+        let (reflected, incident) = (
+            PhysicalLaws::shipped().reflected_impulse.at(d),
+            PhysicalLaws::shipped().incident_impulse.at(d),
+        );
         let close = |got: Vec3, want: Vec3| (got - want).length() <= 1e-4 * want.length();
 
         let square = blast.push(share, d, Vec3::NEG_Z, Vec3::Z);
@@ -6179,7 +6170,12 @@ mod tests {
     #[test]
     fn a_ray_pushes_only_the_face_it_meets_and_stops_at_reach() {
         // W / 1.8 = 1 kg, so the scaled distance is the distance and reach is the fit's edge.
-        let blast = Blast::of(TNT_ENERGY * SURFACE_BURST_FACTOR, 1e-3, FIT_ONLY_PRODUCTS);
+        let blast = Blast::of(
+            PhysicalLaws::shipped().tnt_energy_j_per_kg
+                * PhysicalLaws::shipped().surface_burst_factor,
+            1e-3,
+            FIT_ONLY_PRODUCTS,
+        );
         let share = 1.0 / BLAST_RAYS as f32;
         let face = CUBE * CUBE;
         let cube = [Block::cuboid(Vec3::ZERO, Vec3::splat(CUBE))];
@@ -6199,7 +6195,7 @@ mod tests {
             let kept = (face / section).min(1.0);
             let hits = hit(d);
             assert_eq!(hits.len(), 1, "{d} m");
-            let want = REFLECTED_IMPULSE.at(d) * section * kept;
+            let want = PhysicalLaws::shipped().reflected_impulse.at(d) * section * kept;
             assert!(
                 (hits[0].1.impulse - Vec3::Z * want).length() <= 1e-4 * want,
                 "{d} m: {} against {want}",
@@ -6331,7 +6327,7 @@ mod tests {
     /// bending alone, whose peak `4 M / (π r³)` reaches `f_t` at `m* = π r³ f_t / (2 g s n²)`.
     fn cantilever_limit(n: i32) -> f32 {
         let r = (CUBE * CUBE / PI).sqrt();
-        PI * r.powi(3) * brick().seam.tensile / (2.0 * GRAVITY * CUBE * (n * n) as f32)
+        PI * r.powi(3) * brick().seam.tensile / (2.0 * gravity_mps2() * CUBE * (n * n) as f32)
     }
 
     /// A CANTILEVER PAST ITS DERIVED LIMIT FALLS, AND ONE WITHIN IT STANDS: a fixture arm of four
@@ -6375,7 +6371,7 @@ mod tests {
         let panel: Vec<usize> = (2..cells.len()).collect();
         cells.extend([[0, 0, 0], [1, 0, 0]]);
         let props = vec![cells.len() - 2, cells.len() - 1];
-        let limit = brick().seam.tensile * CUBE * CUBE / (deep as f32 * GRAVITY);
+        let limit = brick().seam.tensile * CUBE * CUBE / (deep as f32 * gravity_mps2());
         for (share, falls) in [(0.98, false), (1.02, true)] {
             let structure = cubes(&cells, 2, &props, limit * share);
             let (_, weighed, fell) = dust_and_weigh(&structure, &props);
@@ -6614,7 +6610,7 @@ mod tests {
         let r = top.centroid - hinge;
         let own = (3.0 * top.volume / (4.0 * PI)).cbrt();
         let inertia = mass * (r.length_squared() - r.x * r.x + 0.4 * own * own);
-        let lift = mass * GRAVITY * (r.y.hypot(r.z) - r.y);
+        let lift = mass * gravity_mps2() * (r.y.hypot(r.z) - r.y);
         let capacity = (2.0 * inertia * lift).sqrt();
         let at = top.centroid + Vec3::new(0.0, CUBE / 2.0, CUBE / 2.0);
         let lever = at.y - joint.centroid.y;
@@ -6756,7 +6752,7 @@ mod tests {
         structure.joints[rest].bond = Bond::Resting;
         let top = structure.chunks[1].centroid;
         let height = top.y - structure.joints[rest].centroid.y;
-        let capacity = mass * (2.0 * GRAVITY * height).sqrt();
+        let capacity = mass * (2.0 * gravity_mps2() * height).sqrt();
         for (scale, opens) in [(1.01, true), (0.99, false)] {
             let mut state = WallState::new(&structure);
             let push = Load {
@@ -6812,7 +6808,7 @@ mod tests {
         structure.joints[rest].bond = Bond::Resting;
         let joint = structure.joints[rest];
         let radius = (joint.area / PI).sqrt();
-        let capacity = mass * (2.0 * friction * GRAVITY * radius).sqrt();
+        let capacity = mass * (2.0 * friction * gravity_mps2() * radius).sqrt();
         for (along, press, opens) in [(1.01, 0.0, true), (0.99, 0.0, false), (1.01, 0.05, false)] {
             let mut state = WallState::new(&structure);
             let push = Load {
@@ -7044,7 +7040,7 @@ mod tests {
                 energy: 0.0,
                 crushed: 0.0,
                 blow: Vec3::ZERO,
-                press: Vec3::NEG_Y * (GRAVITY * mass),
+                press: Vec3::NEG_Y * (gravity_mps2() * mass),
                 peak: None,
                 origin: Origin::Field,
             }];
@@ -7053,7 +7049,7 @@ mod tests {
                 &section,
                 &group,
                 &[],
-                Vec3::NEG_Y * GRAVITY,
+                Vec3::NEG_Y * gravity_mps2(),
                 &mut 0,
             )
             .unwrap();
@@ -7078,12 +7074,19 @@ mod tests {
                 energy: 0.0,
                 crushed: 0.0,
                 blow: Vec3::ZERO,
-                press: Vec3::NEG_Y * (top.mass * GRAVITY),
+                press: Vec3::NEG_Y * (top.mass * gravity_mps2()),
                 peak: None,
                 origin: Origin::Field,
             };
             let state = WallState::new(&structure);
-            let weight = unseat(&structure, &state, &[1], &[], Vec3::NEG_Y * GRAVITY, &mut 0);
+            let weight = unseat(
+                &structure,
+                &state,
+                &[1],
+                &[],
+                Vec3::NEG_Y * gravity_mps2(),
+                &mut 0,
+            );
             let pressed = unseat(&structure, &state, &[1], &[press], Vec3::ZERO, &mut 0);
             assert_eq!(weight, pressed);
             assert_eq!(weight.is_some(), shift > 0.0);
@@ -7166,7 +7169,7 @@ mod tests {
         let rest = joint_between(&structure, 0, 1);
         structure.joints[rest].bond = Bond::Resting;
         let chunk = structure.chunks[1];
-        let weight = chunk.mass * GRAVITY;
+        let weight = chunk.mass * gravity_mps2();
         let friction = crate::substances::pair_friction(
             structure.chunks[0].material.friction,
             chunk.material.friction,
@@ -7337,8 +7340,8 @@ mod tests {
         let at = structure.chunks[1].centroid + Vec3::Y * (CUBE / 2.0);
         let h = at.y - joint.centroid.y;
         let r = (joint.area / PI).sqrt();
-        let strength =
-            (brick().seam.tensile + mass * GRAVITY / joint.area) * PI * r.powi(3) / (4.0 * h);
+        let strength = (brick().seam.tensile + mass * gravity_mps2() / joint.area) * PI * r.powi(3)
+            / (4.0 * h);
         let impulsive = Load {
             chunk: 1,
             at,
@@ -7389,8 +7392,8 @@ mod tests {
         let mut seated = structure.clone();
         seated.joints[section[0]].bond = Bond::Resting;
         let centre = seated.chunks[1].centroid;
-        let paying = mass * (2.0 * GRAVITY * (centre.y - joint.centroid.y)).sqrt();
-        let weight = mass * GRAVITY;
+        let paying = mass * (2.0 * gravity_mps2() * (centre.y - joint.centroid.y)).sqrt();
+        let weight = mass * gravity_mps2();
         let lift = |blow: f32, peak: Option<f32>| Load {
             chunk: 1,
             at: centre,
@@ -7408,7 +7411,7 @@ mod tests {
                 &state,
                 &[1],
                 &[load],
-                Vec3::NEG_Y * GRAVITY,
+                Vec3::NEG_Y * gravity_mps2(),
                 &mut 0,
             )
             .map(|failure| failure.cause)
@@ -7999,7 +8002,11 @@ mod tests {
     /// a planar depth or an extensive depth fails. ASSUMED charge, distances and obliquities.
     #[test]
     fn a_craters_cone_depth_is_independent_of_its_patch_share() {
-        let blast = Blast::of(5.0 * TNT_ENERGY, 0.05, FIT_ONLY_PRODUCTS);
+        let blast = Blast::of(
+            5.0 * PhysicalLaws::shipped().tnt_energy_j_per_kg,
+            0.05,
+            FIT_ONLY_PRODUCTS,
+        );
         for cos in [1.0_f32, 0.5] {
             let dir = Vec3::new((1.0 - cos * cos).sqrt(), 0.0, cos);
             let mut previous = None;

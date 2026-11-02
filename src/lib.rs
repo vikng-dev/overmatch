@@ -138,10 +138,11 @@ pub mod dev_capture;
 /// here keeps `sight` from naming `crate::net` (the `src/net/tests/net_boundary.rs` guard). Mounted
 /// only by [`NetClientPlugin`]; single-player has `state::client_plugin`'s real pause instead.
 mod overlay;
+mod physical_laws;
 /// OS-level process and window helpers that belong to no game layer.
 mod platform;
-/// Provenance of authored data values: a ballistic data value is authored with where it comes from
-/// (MEASURED / DERIVED / TUNED / RESOLUTION / UNKNOWN), and one authored without does not load.
+/// Provenance of authored data values: each authored value names its fact, unit, taste,
+/// resolution or stand-in job; an unlabelled value does not load.
 mod provenance;
 /// Shutting down: the macOS `Cmd+Q` route into [`AppExit`](bevy::app::AppExit), and the recall of
 /// bevy's render `SubApp` that keeps its exit teardown from deadlocking against its own render

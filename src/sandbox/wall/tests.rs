@@ -211,7 +211,7 @@ fn a_push_fails_the_section_at_its_fracture_impulse() {
     let r = top.centroid - hinge;
     let own = (3.0 * top.volume / (4.0 * std::f32::consts::PI)).cbrt();
     let inertia = top.mass * (r.length_squared() - r.x * r.x + 0.4 * own * own);
-    let lift = top.mass * GRAVITY * (r.y.hypot(r.z) - r.y);
+    let lift = top.mass * crate::physical_laws::gravity_mps2() * (r.y.hypot(r.z) - r.y);
     let capacity = (2.0 * inertia * (material.seam.fracture_energy * joint.area + lift)).sqrt();
     let at = Vec3::new(0.1, 0.4, 0.25);
     let lever = at.y - joint.centroid.y;

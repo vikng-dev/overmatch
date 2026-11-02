@@ -34,7 +34,7 @@ mod walk;
 pub(crate) use walk::VolumeMaterial;
 
 /// The game's damage model: shared environment and cavity-law stand-ins.
-mod physical_laws;
+use crate::physical_laws;
 
 /// Round mechanisms: how a round's state advances through the ordered encounters of a crossing.
 /// Solid shot is the only one built.
@@ -117,7 +117,7 @@ pub(crate) const MARCH_EPS: f32 = 1.0e-3;
 
 /// The game's damage model: uniform gravity from the shared environment stand-in (m/s²).
 fn gravity() -> Vec3 {
-    Vec3::NEG_Y * physical_laws::PhysicalLaws::shipped().gravity_mps2
+    Vec3::NEG_Y * physical_laws::gravity_mps2()
 }
 
 /// Drag force ½ρC_d(πd²/4)v² gives form units C_d·ρπ/8; π/8 is exact algebra.

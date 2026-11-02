@@ -3001,7 +3001,7 @@ fn cap_exchanges(
 fn a_heavy_body_push_reports_the_house_release_groups() {
     let kind = shipped_house();
     let (mut app, _) = composed_keeping_contacts();
-    app.insert_resource(Gravity(Vec3::NEG_Y * fracture::GRAVITY));
+    app.insert_resource(Gravity(Vec3::NEG_Y * crate::physical_laws::gravity_mps2()));
     app.world_mut().spawn((
         RigidBody::Static,
         Position(Vec3::new(0.0, -0.5, 0.0)),

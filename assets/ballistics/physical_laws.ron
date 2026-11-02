@@ -1,8 +1,44 @@
-// The game's damage model: shared environment and cavity-law stand-ins, all SI.
+// The game's environment destruction and damage model: shared physical parameters and metric field fits.
 (
-    gravity_mps2: (9.81, StandIn("Uniform Earth-like gravity pending a shared environment gravity owner")),
+    gravity_mps2: (9.81, StandIn("Uniform Earth-like gravity; no map-specific gravity model")),
     air_density: (1.225, StandIn("One sea-level atmosphere pending weather and altitude")),
     cavity_inertia: (1.0, StandIn("Approximate cavity inertia fit pending material-specific calibration")),
     contact_friction: (0.5, StandIn("Coulomb coefficient at which a face holds a round in one contact: the low end of the general dry steel range 0.5 to 0.8, no source read; stands in for a value per surface pair")),
     floor_m: (-100.0, StandIn("Finite play boundary until maps author vertical play bounds; retires a shell that never meets terrain")),
+    tnt_energy_j_per_kg: (4.184e6, Unit("TNT-equivalent energy convention, joules per kilogram")),
+    surface_burst_factor: (1.8, StandIn("Claimed UFC 3-340-02 surface/free-air equivalence; source verification pending, same existing model factor")),
+    reflected_impulse: ((
+        from: 0.06,
+        branches: [(40.0, [6.7853, -1.3466, 0.101, -0.01123])],
+    ), Measured("Swisdak 1994, Simplified Kingery Airblast Calculations, DTIC ADA526744, Table 1 metric normally reflected impulse, PDF page 10; coefficients transcribed by the existing model")),
+    incident_impulse: ((
+        from: 0.2,
+        branches: [
+            (0.96, [5.522, 1.117, 0.6, -0.292, -0.087]),
+            (2.38, [5.465, -0.308, -1.464, 1.362, -0.432]),
+            (33.7, [5.2749, -0.4677, -0.2499, 0.0588, -0.00554]),
+            (158.7, [5.9825, -1.062]),
+        ],
+    ), Measured("Swisdak 1994, DTIC ADA526744, Table 1 metric incident impulse, PDF page 9; coefficients transcribed by the existing model")),
+    incident_pressure: ((
+        from: 0.2,
+        branches: [
+            (2.9, [7.2106, -2.1069, -0.3229, 0.1117, 0.0685]),
+            (23.8, [7.5938, -3.0523, 0.40977, 0.0261, -0.01267]),
+            (198.5, [6.0536, -1.4066]),
+        ],
+    ), Measured("Swisdak 1994, DTIC ADA526744, Table 1 metric incident peak pressure, PDF page 8; coefficients transcribed by the existing model")),
+    reflected_pressure: ((
+        from: 0.06,
+        branches: [
+            (
+                2.0,
+                [9.006, -2.6893, -0.6295, 0.1011, 0.29255, 0.13505, 0.019736],
+            ),
+            (
+                40.0,
+                [8.8396, -1.733, -2.64, 2.293, -0.8232, 0.14247, -0.0099],
+            ),
+        ],
+    ), Measured("Swisdak 1994, DTIC ADA526744, Table 1 metric normally reflected peak pressure, PDF page 8; coefficients transcribed by the existing model")),
 )

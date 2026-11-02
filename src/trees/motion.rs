@@ -999,7 +999,7 @@ mod tests {
     /// leaves it suspended. ASSUMED horizontal trunk and slab fixture; no rest pose is prescribed.
     #[test]
     fn a_trunk_at_rest_sleeps_and_wakes_when_its_support_goes() {
-        let mut app = world(Vec3::NEG_Y * GRAVITY);
+        let mut app = world(Vec3::NEG_Y * gravity_mps2());
         let support = app
             .world_mut()
             .spawn((
