@@ -23,6 +23,8 @@ use super::billboard::{
     VfxParams, gradient_lut, soft_particle_depth, spawn_ballistic_billboard, spawn_billboard,
     unit_quad,
 };
+use super::ground::{PaintedGround, soil_light, soil_of};
+use super::muzzle::DustPalettes;
 
 // Alpha blending lets dust darken and occlude rather than behave as an emissive effect.
 
@@ -61,7 +63,6 @@ pub(super) struct ImpactAssets {
     powder_luts: BTreeMap<[u8; 3], Handle<Image>>,
     /// Hot contact and spark palette; compact sparks use the warmer `spark_lut`.
     hot_lut: Handle<Image>,
-    ground_palettes: super::muzzle::DustPalettes,
 }
 
 #[cfg(test)]
@@ -80,7 +81,6 @@ impl ImpactAssets {
                 .into_iter()
                 .collect(),
             hot_lut: Handle::default(),
-            ground_palettes: super::muzzle::DustPalettes::default(),
         }
     }
 }
@@ -307,21 +307,19 @@ pub(super) fn setup_impact_assets(
         spark_lut,
         powder_luts,
         hot_lut,
-        ground_palettes: super::muzzle::DustPalettes::default(),
     });
 }
 
 #[derive(SystemParam)]
 pub(super) struct ImpactKit<'w, 's> {
-    assets: ResMut<'w, ImpactAssets>,
+    assets: Res<'w, ImpactAssets>,
     materials: BillboardMaterials<'w>,
     ring: ResMut<'w, BillboardRing>,
     ground_ring: ResMut<'w, GroundMarkRing>,
     rng: ResMut<'w, ViewRng>,
-    /// Absent in undrawn worlds, which have no painted ground to lift.
-    ground_types: Option<Res<'w, crate::ground_types::GroundTypes>>,
-    painted: Option<Res<'w, crate::track_prints::PrintDepths>>,
-    images: Option<ResMut<'w, Assets<Image>>>,
+    ground: PaintedGround<'w>,
+    palettes: ResMut<'w, DustPalettes>,
+    images: ResMut<'w, Assets<Image>>,
     pub(super) commands: Commands<'w, 's>,
 }
 
@@ -347,38 +345,14 @@ fn spawn_impact_read(
         )
     };
     match impact.surface {
-        ImpactSurface::Terrain => {
-            let (table, painted) = match (kit.ground_types.as_ref(), kit.painted.as_ref()) {
-                (Some(table), Some(painted)) => (table, painted),
-                (None, None) => return, // Undrawn worlds have no ground response and emit no dust.
-                _ => panic!("drawn terrain installs its ground table and painted mask together"),
-            };
-            let weights = painted.ground_weights(impact.position.xz());
-            let sources = crate::terrain_blend::dust_sources(table, weights);
-            for (amount, soil) in sources {
-                if amount == 0.0 {
-                    continue;
-                } // This source contributes no lifted material.
-                let images = kit
-                    .images
-                    .as_mut()
-                    .expect("a drawn ground has an image asset store");
-                let palette = kit.assets.ground_palettes.palette(images, soil.colour_srgb);
-                spawn_powder_read(
-                    impact.position,
-                    normal,
-                    to_camera,
-                    impact.style,
-                    PowderRead {
-                        palette,
-                        amount,
-                        light: crate::world::level_ground_irradiance_lux() / std::f32::consts::PI
-                            * exposure.exposure(),
-                    },
-                    &mut kit,
-                );
-            }
-        }
+        ImpactSurface::Terrain => spawn_ground_read(
+            impact.position,
+            normal,
+            to_camera,
+            impact.style,
+            soil_light(exposure),
+            &mut kit,
+        ),
         ImpactSurface::Material(feedback) => spawn_material_read(
             impact.position,
             normal,
@@ -410,19 +384,38 @@ impl PowderRead {
     }
 }
 
-/// The same powder renderer serves resolved ground fines and hard-surface powder.
-fn spawn_powder_read(
+/// One contact's read of the painted ground: one roll picks the soil by each ground's share, as a
+/// muzzle puff's does, and the blended lift sets how much of the recipe it throws. Sparks are the
+/// rolled ground's own fact, under every style.
+fn spawn_ground_read(
     position: Vec3,
     normal: Vec3,
     to_camera: Vec3,
     style: ImpactStyle,
-    powder: PowderRead,
+    light: f32,
     kit: &mut ImpactKit,
 ) {
+    let Some((table, painted)) = kit.ground.resolved() else {
+        return; // A world with no painted terrain has no ground to throw.
+    };
+    let sources = table.strike_sources(painted.ground_weights(position.xz()));
+    let lifted: f32 = sources.iter().map(|(share, _)| share).sum();
+    if lifted == 0.0 {
+        return; // This ground throws nothing, so nothing reads at the contact.
+    }
+    let soil = soil_of(&sources, kit.rng.next_f32() * lifted);
+    let powder = PowderRead {
+        palette: kit.palettes.palette(&mut kit.images, soil.colour_srgb),
+        amount: lifted,
+        light,
+    };
     if style == ImpactStyle::Layered {
         spawn_big_splash(position, normal, to_camera, powder, kit);
+        if soil.sparks {
+            spawn_contact_sparks(position, normal, to_camera, kit);
+        }
     } else {
-        spawn_small_impact(position, normal, to_camera, powder, false, kit);
+        spawn_small_impact(position, normal, to_camera, powder, soil.sparks, kit);
     }
 }
 
@@ -497,9 +490,21 @@ fn spawn_small_impact(
         },
     );
 
-    if !sparks {
-        return; // The substance states no contact-spark emission.
+    if sparks {
+        spawn_contact_sparks(position, normal, to_camera, kit);
     }
+}
+
+/// The hot contact a sparking surface throws: a ping and a fan of streaks.
+fn spawn_contact_sparks(position: Vec3, normal: Vec3, to_camera: Vec3, kit: &mut ImpactKit) {
+    let ImpactKit {
+        assets,
+        materials,
+        ring,
+        rng,
+        commands,
+        ..
+    } = kit;
 
     // --- Ping: one small additive round glow at the hit point, 1–2 frames — the instant of contact.
     spawn_billboard(
@@ -948,6 +953,7 @@ mod tests {
 
     use bevy::mesh::MeshTag;
 
+    use crate::terrain_blend::{BASE_GROUND, BLEND_LAYERS};
     use crate::vfx::billboard::{
         BILLBOARD_SLOTS, Billboard, BillboardFamilies, VfxBillboardMaterial,
     };
@@ -964,6 +970,7 @@ mod tests {
         let mut app = App::new();
         app.init_resource::<BillboardRing>()
             .init_resource::<GroundMarkRing>()
+            .init_resource::<DustPalettes>()
             .init_resource::<Assets<Mesh>>()
             .init_resource::<Assets<Image>>()
             .init_resource::<Assets<VfxBillboardMaterial>>()
@@ -1007,6 +1014,19 @@ mod tests {
         app.world_mut().flush();
     }
 
+    fn lut_of(app: &App, billboard: Entity) -> Handle<Image> {
+        let material = app
+            .world()
+            .get::<MeshMaterial3d<VfxBillboardMaterial>>(billboard)
+            .expect("a live billboard's family material");
+        app.world()
+            .resource::<Assets<VfxBillboardMaterial>>()
+            .get(&material.0)
+            .expect("the family material exists")
+            .lut
+            .clone()
+    }
+
     fn billboards(app: &mut App) -> usize {
         app.world_mut()
             .query_filtered::<Entity, With<Billboard>>()
@@ -1014,14 +1034,16 @@ mod tests {
             .count()
     }
 
-    /// The game's damage-model view must emit only dust the resolved ground gives up.
-    /// FIXTURE: every ground retains its fines; a fixed terrain recipe invents a powder cloud.
+    /// The game's damage-model view must emit only what the resolved ground throws, by its own
+    /// strike fact: FIXTURE every ground throws nothing and would still give a muzzle blast its
+    /// whole cloud. A fixed terrain recipe, or a strike read off the muzzle number, fails here.
     #[test]
-    fn non_erodible_ground_emits_no_powder() {
+    fn a_ground_that_throws_nothing_emits_nothing() {
         let mut app = harness();
         let mut table = crate::ground_types::GroundTypes::load_shipped();
         for ground in table.types.values_mut() {
-            ground.dust.erodibility = 0.0;
+            ground.strike.lifted.value = 0.0;
+            ground.dust.erodibility = 1.0;
         }
         app.insert_resource(table)
             .insert_resource(crate::track_prints::PrintDepths::unpainted());
@@ -1029,15 +1051,18 @@ mod tests {
         assert_eq!(billboards(&mut app), 0, "no ground material was lifted");
     }
 
-    /// The game's damage-model view consumes the ground's own colour and lifted share.
-    /// FIXTURE: vary all grounds together so this test owns no terrain pack's identity.
+    /// The game's damage-model view consumes the ground's own colour and strike share, never its
+    /// muzzle share. FIXTURE: vary all grounds together so this test owns no terrain pack's
+    /// identity, with no sparks stated so the powder read stands alone.
     #[test]
     fn ground_powder_density_and_colour_follow_the_authored_response() {
         for (amount, colour) in [(0.25, [0.2, 0.3, 0.4]), (1.0, [0.6, 0.4, 0.2])] {
             let mut app = harness();
             let mut table = crate::ground_types::GroundTypes::load_shipped();
             for ground in table.types.values_mut() {
-                ground.dust.erodibility = amount;
+                ground.strike.lifted.value = amount;
+                ground.strike.sparks.value = false;
+                ground.dust.erodibility = 1.0 - amount;
                 ground.dust.colour_srgb = colour;
             }
             app.insert_resource(table);
@@ -1103,7 +1128,7 @@ mod tests {
             let mut app = harness();
             let mut table = crate::ground_types::GroundTypes::load_shipped();
             for ground in table.types.values_mut() {
-                ground.dust.erodibility = amount;
+                ground.strike.lifted.value = amount;
             }
             app.insert_resource(table);
             trigger_impact(&mut app, Vec3::Y, LAYERED);
@@ -1124,6 +1149,131 @@ mod tests {
                 .flatten()
                 .all(|opacity| *opacity == reads[1][0])
         );
+    }
+
+    /// A strike's hot contact is the struck ground's own fact, under either style, whatever the
+    /// round: FIXTURE every ground states it or none does. A mutant dropping the ground's spark
+    /// fact, or restoring sparks on every ground hit, fails here.
+    #[test]
+    fn a_strike_sparks_exactly_where_its_ground_states_sparks() {
+        for style in [COMPACT, LAYERED] {
+            for sparks in [false, true] {
+                let mut app = harness();
+                let mut table = crate::ground_types::GroundTypes::load_shipped();
+                for ground in table.types.values_mut() {
+                    ground.strike.sparks.value = sparks;
+                }
+                app.insert_resource(table);
+                trigger_impact(&mut app, Vec3::Y, style);
+                let world = app.world_mut();
+                let hot = world
+                    .query::<&Billboard>()
+                    .iter(world)
+                    .filter(|billboard| billboard.lanes.glow.y > 0.0)
+                    .count();
+                assert_eq!(hot > 0, sparks, "{style:?}, sparks stated: {sparks}");
+            }
+        }
+    }
+
+    /// One contact is one read: a blended ground's shares sum into one lift and one roll picks one
+    /// soil. FIXTURE half base pack, half first layer, of distinct soils and lifts. Across contacts
+    /// both soils appear, while every contact leaves one scar at the blended opacity, and the
+    /// layers of a contact share one palette. A mutant looping the sources stacks two reads, each
+    /// fainter, and fails here. ADR-0023's surface evidence relies on it.
+    #[test]
+    fn a_blended_ground_reads_as_one_rolled_soil_per_contact() {
+        let mut app = harness();
+        let mut table = crate::ground_types::GroundTypes::load_shipped();
+        let soils = [[0.2, 0.2, 0.2], [0.8, 0.8, 0.8]];
+        for (name, lifted, colour) in [
+            (BASE_GROUND, 0.4, soils[0]),
+            (BLEND_LAYERS[0].ground, 0.8, soils[1]),
+        ] {
+            let ground = table.types.get_mut(name).expect("a pack's ground");
+            ground.strike.lifted.value = lifted;
+            ground.strike.sparks.value = false;
+            ground.dust.colour_srgb = colour;
+        }
+        app.insert_resource(table).insert_resource(
+            crate::track_prints::PrintDepths::painted_everywhere(Vec3::new(0.5, 0.0, 0.0)),
+        );
+        let palettes = soils.map(|colour| {
+            app.world_mut()
+                .resource_scope(|world, mut palettes: Mut<DustPalettes>| {
+                    palettes.palette(&mut world.resource_mut::<Assets<Image>>(), colour)
+                })
+        });
+        let mut seen = [false; 2];
+        for contact in 1..=GROUND_MARK_CAP {
+            trigger_impact(&mut app, Vec3::Y, LAYERED);
+            let ring = &app.world().resource::<GroundMarkRing>().0;
+            assert_eq!(ring.live.len(), contact, "one scar per contact");
+            let scar = *ring.live.back().expect("this contact's scar");
+            let opacity = app
+                .world()
+                .get::<Billboard>(scar)
+                .expect("live")
+                .lanes
+                .fade
+                .w;
+            assert!(
+                (opacity - look().scar_fade.w * 0.6).abs() < 1e-5,
+                "{opacity}"
+            );
+            let lut = lut_of(&app, scar);
+            let soil = palettes
+                .iter()
+                .position(|palette| *palette == lut)
+                .expect("the scar is one of the painted soils");
+            seen[soil] = true;
+        }
+        assert_eq!(
+            seen,
+            [true, true],
+            "both painted soils are rolled over contacts"
+        );
+
+        let mut app = harness();
+        let table = app
+            .world()
+            .resource::<crate::ground_types::GroundTypes>()
+            .clone();
+        let mut table = table;
+        for (name, colour) in [(BASE_GROUND, soils[0]), (BLEND_LAYERS[0].ground, soils[1])] {
+            let ground = table.types.get_mut(name).expect("a pack's ground");
+            ground.strike.sparks.value = false;
+            ground.dust.colour_srgb = colour;
+        }
+        app.insert_resource(table).insert_resource(
+            crate::track_prints::PrintDepths::painted_everywhere(Vec3::new(0.5, 0.0, 0.0)),
+        );
+        trigger_impact(&mut app, Vec3::Y, LAYERED);
+        let world = app.world_mut();
+        let entities: Vec<Entity> = world
+            .query_filtered::<Entity, With<Billboard>>()
+            .iter(world)
+            .collect();
+        let luts: std::collections::BTreeSet<_> = entities
+            .iter()
+            .map(|&entity| lut_of(&app, entity).id())
+            .collect();
+        assert_eq!(luts.len(), 1, "one contact, one soil's palette");
+    }
+
+    /// A world with no painted terrain (a headless harness, the flat fixture slab) has no ground to
+    /// throw: a terrain contact there reads nothing and panics nothing. The flat slab relies on it.
+    #[test]
+    fn a_world_with_no_painted_terrain_reads_nothing() {
+        let mut app = harness();
+        app.world_mut()
+            .remove_resource::<crate::track_prints::PrintDepths>()
+            .expect("the fixture starts with a painted mask");
+        app.world_mut()
+            .remove_resource::<crate::ground_types::GroundTypes>()
+            .expect("the fixture starts with a ground table");
+        trigger_impact(&mut app, Vec3::Y, LAYERED);
+        assert_eq!(billboards(&mut app), 0);
     }
 
     /// The game's damage-model view cannot read a partially removed ground as an undrawn world.
@@ -1210,7 +1360,7 @@ mod tests {
             let mut app = harness();
             let mut table = crate::ground_types::GroundTypes::load_shipped();
             for ground in table.types.values_mut() {
-                ground.dust.erodibility = amount;
+                ground.strike.lifted.value = amount;
                 ground.dust.colour_srgb = colour;
             }
             app.insert_resource(table);
@@ -1231,25 +1381,16 @@ mod tests {
                 billboard.lanes.glow.z, 0.0,
                 "the scar lies in the fade band"
             );
-            let material = app
-                .world()
-                .get::<MeshMaterial3d<VfxBillboardMaterial>>(scar)
-                .expect("a live scar's family material");
-            let lut = app
-                .world()
-                .resource::<Assets<VfxBillboardMaterial>>()
-                .get(&material.0)
-                .expect("the family material exists")
-                .lut
-                .clone();
             let soil = app
                 .world_mut()
-                .resource_scope(|world, mut assets: Mut<ImpactAssets>| {
-                    assets
-                        .ground_palettes
-                        .palette(&mut world.resource_mut::<Assets<Image>>(), colour)
+                .resource_scope(|world, mut palettes: Mut<DustPalettes>| {
+                    palettes.palette(&mut world.resource_mut::<Assets<Image>>(), colour)
                 });
-            assert_eq!(lut, soil, "the struck ground's own soil palette");
+            assert_eq!(
+                lut_of(&app, scar),
+                soil,
+                "the struck ground's own soil palette"
+            );
         }
         let mut app = harness();
         trigger_impact(&mut app, Vec3::Y, COMPACT);

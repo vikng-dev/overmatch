@@ -168,6 +168,8 @@ mod tests {
         )))
         .init_resource::<BillboardRing>()
         .init_resource::<GroundMarkRing>()
+        .init_resource::<crate::vfx::muzzle::DustPalettes>()
+        .init_asset::<Image>()
         .init_asset::<VfxBillboardMaterial>()
         .init_asset::<ShaderBuffer>()
         .init_resource::<BillboardFamilies>()
@@ -253,7 +255,7 @@ mod tests {
             "the read fires on the frame whose segment crosses the wall"
         );
         let after = counts[entry];
-        assert!(after > 0, "the crossing spawns the terrain read");
+        assert!(after > 0, "the crossing spawns its substance read");
         assert!(
             counts[entry + 1..].iter().all(|count| *count == after),
             "one entry reads once: {counts:?}"

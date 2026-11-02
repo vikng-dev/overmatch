@@ -9,13 +9,15 @@
 //   rolling_resistance   the ground's motion resistance coefficient on a moving track, labelled
 //   dust.erodibility     the share of a gun's muzzle dust cloud this ground lifts, 0..1
 //   dust.colour_srgb     the lifted soil's albedo, sRGB, each channel 0..1
+//   strike.lifted        the share of a round's strike read this ground throws, 0..1, labelled
+//   strike.sparks        whether a strike on this ground throws contact sparks, labelled
 //
 // Every print value is ASSUMED: ordered by the Bekker fits in the ground-stamping note's §2, dirt
 // and gravel raised so a print reads at 10-30 m, then tuned by eye in play (`track_prints::tuning`).
 // The module doc of `src/ground_types.rs` carries the provenance. Every friction is ASSUMED, no
 // source read: gravel, the terrain collider's ground, at Avian's own default 0.5; the others
 // ordered by hand, paving gripping best and mud least. Each rolling resistance carries its own
-// label and note. Every erodibility is ASSUMED, no source read: ordered by hand, loose dry dirt
+// label and note, as does each strike value. Every erodibility is ASSUMED, no source read: ordered by hand, loose dry dirt
 // and sand giving the whole cloud, gravel most of it, wet mud and intact paving little. Each
 // pack's dust colour is DERIVED: the mean of the pack's shipped full-resolution albedo slice
 // (`coast_sand_rocks_02_diff.ktx2`, `blend_diff.ktx2`), MEASURED; concrete names no pack, and its
@@ -35,6 +37,10 @@
                 erodibility: 0.1,
                 colour_srgb: (0.62, 0.61, 0.58),
             ),
+            strike: (
+                lifted: (0.1, Taste("impact effects: ASSUMED share of a round's strike read this ground throws: intact paving gives up little")),
+                sparks: (true, Taste("impact effects: ASSUMED: hard aggregate throws contact sparks under a strike")),
+            ),
         ),
         "dirt": (
             print: (
@@ -48,6 +54,10 @@
             dust: (
                 erodibility: 1.0,
                 colour_srgb: (0.48, 0.39, 0.31),
+            ),
+            strike: (
+                lifted: (1.0, Taste("impact effects: ASSUMED share of a round's strike read this ground throws: loose dry soil gives the whole read")),
+                sparks: (false, Taste("impact effects: ASSUMED: soft soil holds no stone to spark")),
             ),
         ),
         "gravel": (
@@ -63,6 +73,10 @@
                 erodibility: 0.8,
                 colour_srgb: (0.3, 0.28, 0.19),
             ),
+            strike: (
+                lifted: (0.8, Taste("impact effects: ASSUMED share of a round's strike read this ground throws: a stony ground gives most of the read")),
+                sparks: (true, Taste("impact effects: ASSUMED: the stones in this ground throw contact sparks under a strike")),
+            ),
         ),
         "mud": (
             print: (
@@ -77,6 +91,10 @@
                 erodibility: 0.3,
                 colour_srgb: (0.25, 0.23, 0.22),
             ),
+            strike: (
+                lifted: (0.3, Taste("impact effects: ASSUMED share of a round's strike read this ground throws: wet cohesive ground holds together and gives little")),
+                sparks: (false, Taste("impact effects: ASSUMED: wet cohesive ground holds no stone to spark")),
+            ),
         ),
         "sand": (
             print: (
@@ -90,6 +108,10 @@
             dust: (
                 erodibility: 1.0,
                 colour_srgb: (0.27, 0.24, 0.19),
+            ),
+            strike: (
+                lifted: (1.0, Taste("impact effects: ASSUMED share of a round's strike read this ground throws: loose dry sand gives the whole read")),
+                sparks: (false, Taste("impact effects: ASSUMED: fine sand holds no stone to spark")),
             ),
         ),
     },

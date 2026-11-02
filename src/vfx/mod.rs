@@ -7,6 +7,7 @@ use bevy::prelude::*;
 
 pub(crate) mod billboard;
 mod ember;
+mod ground;
 /// The decals that draw each vehicle's replicated hull marks.
 mod hull_marks;
 mod impact;

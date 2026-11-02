@@ -214,6 +214,17 @@ impl PrintDepths {
         }
     }
 
+    /// FIXTURE: a loaded one-texel mask painting `mask` everywhere (R recesses, G slopes,
+    /// B lowlands).
+    #[cfg(test)]
+    pub(crate) fn painted_everywhere(mask: Vec3) -> Self {
+        Self {
+            masks: Handle::default(),
+            mask: Some((UVec2::ONE, vec![mask])),
+            params: TerrainBlendParams::default(),
+        }
+    }
+
     /// The depth (m) the shader draws at world XZ `xz` under a full press by a tank of ground
     /// pressure `kpa`: the deepest point of its print there. The pressure is read as the near store
     /// stores it, in whole [`KPA_PER_UNIT`], so this is the shader's own number.

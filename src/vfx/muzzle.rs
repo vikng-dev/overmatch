@@ -37,6 +37,7 @@ use super::billboard::{
     BillboardLook, BillboardMaterials, BillboardRing, BillboardSpec, Flipbook, VfxParams,
     gradient_lut, smoothstep, soft_particle_depth, spawn_billboard, unit_quad,
 };
+use super::ground::{PaintedGround, soil_light, soil_of};
 
 /// Atlas grid and frame count — [`MuzzleVfxAssets::blast_atlas`]'s two sheets share it
 /// (`scripts/vfx/blast_atlas.py`).
@@ -386,13 +387,8 @@ struct MuzzleKit<'w, 's> {
     weapons: Query<'w, 's, (&'static Weapon, &'static TankRoot, &'static WeaponIndex)>,
     /// The decoded terrain surface, when the world has one: the ground blast's only height query.
     grid: Option<Res<'w, crate::terrain_grid::HeightGrid>>,
-    /// The ground-type table and its painted mask, which `track_prints::install` inserts together
-    /// in the drawn heightmap world. A composition with no drawn ground (no window) has neither,
-    /// states no erodibility and lifts no dust.
-    painted: Option<(
-        Res<'w, crate::ground_types::GroundTypes>,
-        Res<'w, crate::track_prints::PrintDepths>,
-    )>,
+    /// The painted ground a blast lifts; a world with none states no erodibility and lifts no dust.
+    ground: PaintedGround<'w>,
     palettes: ResMut<'w, DustPalettes>,
     images: ResMut<'w, Assets<Image>>,
     commands: Commands<'w, 's>,
@@ -607,14 +603,11 @@ fn dress_fire(fire: On<FireShell>, mut kit: MuzzleKit) {
     if near
         && let Some(blast) = emission.ground_blast
         && let Some(ground_y) = dust_ground_y(kit.grid.as_deref(), origin, blast.reach_m)
-        && let Some((table, painted)) = kit.painted.as_ref()
+        && let Some((table, painted)) = kit.ground.resolved()
     {
         let weights = painted.ground_weights(Vec2::new(origin.x, origin.z));
         let sources = crate::terrain_blend::dust_sources(table, weights);
-        // The key light's radiance per unit albedo on level ground: what lit soil of albedo one
-        // draws at under this camera.
-        let light = crate::world::level_ground_irradiance_lux() / std::f32::consts::PI
-            * exposure.exposure();
+        let light = soil_light(exposure);
         spawn_ground_dust(origin, dir, ground_y, sources, light, &blast, &mut kit);
     }
 
@@ -768,27 +761,6 @@ fn spawn_ground_dust(
             rotation: None,
         });
     }
-}
-
-/// The source whose share interval holds `draw`, a point in `[0, Σ share)`: the sources laid end
-/// to end in slot order. A draw at or past the total (float rounding at the top end) is the last
-/// source with a positive share.
-fn soil_of(
-    sources: &[(f32, crate::ground_types::DustResponse); 4],
-    mut draw: f32,
-) -> crate::ground_types::DustResponse {
-    for (share, soil) in sources {
-        if *share > 0.0 && draw < *share {
-            return *soil;
-        }
-        draw -= share;
-    }
-    sources
-        .iter()
-        .rev()
-        .find(|(share, _)| *share > 0.0)
-        .expect("a ground that lifts a puff has a source with a positive share")
-        .1
 }
 
 /// Decay each muzzle light hard (cubic — most of the drop in the first frames) and despawn at its

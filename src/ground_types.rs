@@ -5,8 +5,9 @@
 //! A type carries how it takes a track print (cosmetic terrain marks, view only,
 //! [`crate::track_prints`]): [`PrintResponse`]; the friction coefficient it brings to a contact
 //! ([`GroundType::friction`], `crate::substances` module doc, "Friction"); the rolling resistance
-//! it puts on a moving track ([`GroundType::rolling_resistance`]); and how readily a muzzle blast
-//! lifts it as dust ([`DustResponse`], view only, `vfx::muzzle`). A type is a record with one block
+//! it puts on a moving track ([`GroundType::rolling_resistance`]); how readily a muzzle blast lifts
+//! it as dust ([`DustResponse`], view only, `vfx::muzzle`); and what a round's strike throws from it
+//! ([`StrikeResponse`], view only, `vfx::impact`). A type is a record with one block
 //! per consumer, so the handling a type will drive later (sinking) joins as a sibling of
 //! [`GroundType::print`] without touching the print's fields. Every field is required: the table
 //! states each value with its provenance (below), and nothing in code stands in for one. A missing
@@ -107,6 +108,25 @@ pub(crate) struct DustResponse {
     pub(crate) colour_srgb: [f32; 3],
 }
 
+/// What a round's strike on this ground throws (view only, `vfx::impact`): its own fact beside
+/// [`DustResponse`], since a muzzle blast's gas and a round's strike do not lift a ground alike.
+/// The thrown soil's colour is [`DustResponse::colour_srgb`]. The domain is [`GroundTypes::parse`]'s.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct StrikeResponse {
+    /// The share of a strike's authored powder read this ground throws, 0..=1.
+    pub(crate) lifted: Labelled<f32>,
+    /// Whether a strike on this ground throws contact sparks.
+    pub(crate) sparks: Labelled<bool>,
+}
+
+/// One painted ground's part in a strike, per [`GroundTypes::strike_sources`].
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct StrikeSource {
+    pub(crate) colour_srgb: [f32; 3],
+    pub(crate) sparks: bool,
+}
+
 /// One ground type: one block per thing the ground drives.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -120,6 +140,7 @@ pub(crate) struct GroundType {
     /// (module doc, "Rolling resistance"): finite and not negative ([`GroundTypes::parse`]).
     pub(crate) rolling_resistance: Labelled<f32>,
     pub(crate) dust: DustResponse,
+    pub(crate) strike: StrikeResponse,
 }
 
 impl GroundType {
@@ -131,6 +152,14 @@ impl GroundType {
         }
     }
 }
+
+/// Every terrain pack's ground in the shader's slot order: the base, then the blend layers.
+const PACK_GROUNDS: [&str; 4] = [
+    crate::terrain_blend::BASE_GROUND,
+    crate::terrain_blend::BLEND_LAYERS[0].ground,
+    crate::terrain_blend::BLEND_LAYERS[1].ground,
+    crate::terrain_blend::BLEND_LAYERS[2].ground,
+];
 
 /// The table, keyed by the name a pack's contract uses.
 #[derive(Resource, Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -153,13 +182,15 @@ const FILE_HEADER: &str = "\
 //   rolling_resistance   the ground's motion resistance coefficient on a moving track, labelled
 //   dust.erodibility     the share of a gun's muzzle dust cloud this ground lifts, 0..1
 //   dust.colour_srgb     the lifted soil's albedo, sRGB, each channel 0..1
+//   strike.lifted        the share of a round's strike read this ground throws, 0..1, labelled
+//   strike.sparks        whether a strike on this ground throws contact sparks, labelled
 //
 // Every print value is ASSUMED: ordered by the Bekker fits in the ground-stamping note's §2, dirt
 // and gravel raised so a print reads at 10-30 m, then tuned by eye in play (`track_prints::tuning`).
 // The module doc of `src/ground_types.rs` carries the provenance. Every friction is ASSUMED, no
 // source read: gravel, the terrain collider's ground, at Avian's own default 0.5; the others
 // ordered by hand, paving gripping best and mud least. Each rolling resistance carries its own
-// label and note. Every erodibility is ASSUMED, no source read: ordered by hand, loose dry dirt
+// label and note, as does each strike value. Every erodibility is ASSUMED, no source read: ordered by hand, loose dry dirt
 // and sand giving the whole cloud, gravel most of it, wet mud and intact paving little. Each
 // pack's dust colour is DERIVED: the mean of the pack's shipped full-resolution albedo slice
 // (`coast_sand_rocks_02_diff.ktx2`, `blend_diff.ktx2`), MEASURED; concrete names no pack, and its
@@ -257,6 +288,12 @@ impl GroundTypes {
                     "an sRGB channel in 0..=1",
                 ),
                 (
+                    "strike.lifted",
+                    ground.strike.lifted.value,
+                    (0.0..=1.0).contains(&ground.strike.lifted.value),
+                    "a share in 0..=1",
+                ),
+                (
                     "print.softness_mm_per_kpa",
                     print.softness_mm_per_kpa,
                     print.softness_mm_per_kpa.is_finite() && print.softness_mm_per_kpa >= 0.0,
@@ -288,12 +325,7 @@ impl GroundTypes {
                 }
             }
         }
-        let packs = std::iter::once(crate::terrain_blend::BASE_GROUND).chain(
-            crate::terrain_blend::BLEND_LAYERS
-                .iter()
-                .map(|layer| layer.ground),
-        );
-        for ground in packs {
+        for ground in PACK_GROUNDS {
             if !table.types.contains_key(ground) {
                 return Err(GroundTableError::Refused(format!(
                     "a terrain pack is ground type {ground:?}, which the table lacks (it has \
@@ -337,6 +369,23 @@ impl GroundTypes {
         })
     }
 
+    /// What a strike on ground of print weights `weights`
+    /// ([`crate::terrain_blend::print_weights`]) throws, per slot: its share of a fully lifting
+    /// ground's read (the slot's painted weight times its [`StrikeResponse::lifted`]) and its soil.
+    /// The shares sum to the blended lift, in 0..=1.
+    pub(crate) fn strike_sources(&self, weights: Vec4) -> [(f32, StrikeSource); 4] {
+        std::array::from_fn(|slot| {
+            let ground = self.get(PACK_GROUNDS[slot]);
+            (
+                weights[slot] * ground.strike.lifted.value,
+                StrikeSource {
+                    colour_srgb: ground.dust.colour_srgb,
+                    sparks: ground.strike.sparks.value,
+                },
+            )
+        })
+    }
+
     /// The table as the file holds it.
     #[cfg(any(feature = "dev_ui", test))]
     pub(crate) fn to_file_text(&self) -> Result<String, GroundTableError> {
@@ -372,7 +421,9 @@ mod tests {
     fn table_text(gravel: &str) -> String {
         let block = "print: (softness_mm_per_kpa: 0.5, depth_cap_mm: 50.0, darkening: 0.2, \
                      roughness_gain: 1.0), friction: 0.5, rolling_resistance: (0.05, \
-                     Fixture(\"fixture\")), dust: (erodibility: 0.5, colour_srgb: (0.5, 0.4, 0.3))";
+                     Fixture(\"fixture\")), dust: (erodibility: 0.5, colour_srgb: (0.5, 0.4, 0.3)), \
+                     strike: (lifted: (0.5, Fixture(\"fixture\")), sparks: (false, \
+                     Fixture(\"fixture\")))";
         format!(
             "(types: {{\"gravel\": ({gravel}), \"dirt\": ({block}), \"sand\": ({block}), \
              \"mud\": ({block})}})"
@@ -431,7 +482,8 @@ mod tests {
     /// A GROUND THAT STATES TOO LITTLE IS REFUSED AT LOAD: a ground with no `print` block would
     /// take no print, a ground with no `friction` would hand the terrain collider Avian's
     /// default, a ground with no `rolling_resistance` (or one with no label) would roll on a
-    /// coefficient nobody stated, a ground with no `dust` would lift a cloud nobody stated, and a
+    /// coefficient nobody stated, a ground with no `dust` would lift a cloud nobody stated, a ground
+    /// with no `strike` would answer a round with a muzzle number or nothing, and a
     /// table lacking a pack's ground would leave that pack nothing to read. Each is refused at
     /// parse, naming what is missing, so no consumer meets one. Mutant: a `#[serde(default)]` on a
     /// required field (including each soil fact), or a parse that skips the pack check, loads one
@@ -440,10 +492,28 @@ mod tests {
     fn a_ground_that_states_too_little_is_refused_at_load() {
         let block = "print: (softness_mm_per_kpa: 0.5, depth_cap_mm: 50.0, darkening: 0.2, \
                      roughness_gain: 1.0)";
-        let dust = "dust: (erodibility: 0.5, colour_srgb: (0.5, 0.4, 0.3))";
+        let dust = "dust: (erodibility: 0.5, colour_srgb: (0.5, 0.4, 0.3)), strike: (lifted: (0.5, \
+                    Fixture(\"fixture\")), sparks: (false, Fixture(\"fixture\")))";
+        let bare_dust = "dust: (erodibility: 0.5, colour_srgb: (0.5, 0.4, 0.3))";
         let rolling = "rolling_resistance: (0.05, Fixture(\"fixture\"))";
+        let with_strike = |strike: &str| {
+            format!("{block}, friction: 0.5, {rolling}, {bare_dust}, strike: ({strike})")
+        };
         for (missing, gravel) in [
             ("print", format!("friction: 0.5, {rolling}, {dust}")),
+            (
+                "strike",
+                format!("{block}, friction: 0.5, {rolling}, {bare_dust}"),
+            ),
+            (
+                "lifted",
+                with_strike("sparks: (false, Fixture(\"fixture\"))"),
+            ),
+            ("sparks", with_strike("lifted: (0.5, Fixture(\"fixture\"))")),
+            (
+                "provenance",
+                with_strike("lifted: (0.5, Fixture(\"fixture\")), sparks: false"),
+            ),
             ("friction", format!("{block}, {rolling}, {dust}")),
             (
                 "rolling_resistance",
@@ -453,14 +523,23 @@ mod tests {
                 "provenance",
                 format!("{block}, friction: 0.5, rolling_resistance: 0.05, {dust}"),
             ),
-            ("dust", format!("{block}, friction: 0.5, {rolling}")),
+            (
+                "dust",
+                format!(
+                    "{block}, friction: 0.5, {rolling}, strike: (lifted: (0.5, Fixture(\"fixture\")), sparks: (false, Fixture(\"fixture\")))"
+                ),
+            ),
             (
                 "colour_srgb",
-                format!("{block}, friction: 0.5, {rolling}, dust: (erodibility: 0.5)"),
+                format!(
+                    "{block}, friction: 0.5, {rolling}, dust: (erodibility: 0.5), strike: (lifted: (0.5, Fixture(\"fixture\")), sparks: (false, Fixture(\"fixture\")))"
+                ),
             ),
             (
                 "erodibility",
-                format!("{block}, friction: 0.5, {rolling}, dust: (colour_srgb: (0.5, 0.4, 0.3))"),
+                format!(
+                    "{block}, friction: 0.5, {rolling}, dust: (colour_srgb: (0.5, 0.4, 0.3)), strike: (lifted: (0.5, Fixture(\"fixture\")), sparks: (false, Fixture(\"fixture\")))"
+                ),
             ),
         ] {
             let error = GroundTypes::parse(&table_text(&gravel))
@@ -504,16 +583,19 @@ mod tests {
             red,
             green,
             blue,
-        ]: [&str; 10]| {
+            lifted,
+        ]: [&str; 11]| {
             format!(
                 "print: (softness_mm_per_kpa: {softness}, depth_cap_mm: {cap}, darkening: \
                  {darkening}, roughness_gain: {roughness}), friction: {friction}, \
                  rolling_resistance: ({rolling}, Fixture(\"fixture\")), \
-                 dust: (erodibility: {erodibility}, colour_srgb: ({red}, {green}, {blue}))"
+                 dust: (erodibility: {erodibility}, colour_srgb: ({red}, {green}, {blue})), \
+                 strike: (lifted: ({lifted}, Fixture(\"fixture\")), sparks: (false, \
+                 Fixture(\"fixture\")))"
             )
         };
         let ok = [
-            "0.5", "50.0", "0.2", "1.0", "0.5", "0.05", "0.5", "0.5", "0.4", "0.3",
+            "0.5", "50.0", "0.2", "1.0", "0.5", "0.05", "0.5", "0.5", "0.4", "0.3", "0.5",
         ];
         let fields = [
             "print.softness_mm_per_kpa",
@@ -526,14 +608,16 @@ mod tests {
             "dust.colour_srgb",
             "dust.colour_srgb",
             "dust.colour_srgb",
+            "strike.lifted",
         ];
-        let bad: [&[&str]; 10] = [
+        let bad: [&[&str]; 11] = [
             &["-0.1", "inf", "NaN"],
             &["-1.0", "inf", "NaN"],
             &["-0.1", "1.1", "NaN"],
             &["0.0", "-1.0", "inf", "NaN"],
             &["-0.1", "inf", "-inf", "NaN"],
             &["-0.01", "inf", "NaN"],
+            &["-0.1", "1.1", "NaN"],
             &["-0.1", "1.1", "NaN"],
             &["-0.1", "1.1", "NaN"],
             &["-0.1", "1.1", "NaN"],
@@ -558,6 +642,29 @@ mod tests {
         assert_eq!(zero.get("gravel").friction, 0.0);
         let misspelt = table_text(&gravel(ok)).replacen("friction:", "fricton:", 1);
         assert!(GroundTypes::parse(&misspelt).is_err());
+    }
+
+    /// A strike's sources lie in the shader's slot order, each the slot's painted weight times that
+    /// ground's own `strike.lifted`, never its muzzle `dust.erodibility`, and carry that ground's
+    /// soil and spark fact. `vfx::impact` rolls one contact's read over them. Mutant: a share read
+    /// from the muzzle number, or a slot order off the paint's, fails here. FIXTURE DATA.
+    #[test]
+    fn strike_sources_weigh_each_pack_by_its_own_lift() {
+        let mut table = GroundTypes::load(&GroundTypes::shipped_path()).expect("the shipped table");
+        for (slot, name) in PACK_GROUNDS.iter().enumerate() {
+            let ground = table.types.get_mut(*name).expect("a pack's ground");
+            ground.strike.lifted.value = 0.1 * (slot + 1) as f32;
+            ground.strike.sparks.value = slot == 2;
+            ground.dust.erodibility = 1.0 - ground.strike.lifted.value;
+            ground.dust.colour_srgb = [0.1 * (slot + 1) as f32; 3];
+        }
+        let weights = Vec4::new(0.4, 0.3, 0.2, 0.1);
+        for (slot, (share, soil)) in table.strike_sources(weights).into_iter().enumerate() {
+            let own = 0.1 * (slot + 1) as f32;
+            assert_eq!(share, weights[slot] * own, "slot {slot}");
+            assert_eq!(soil.colour_srgb, [own; 3], "slot {slot}");
+            assert_eq!(soil.sparks, slot == 2, "slot {slot}");
+        }
     }
 
     /// A saved table reads back as the table: the owner's tuned values survive the round trip
