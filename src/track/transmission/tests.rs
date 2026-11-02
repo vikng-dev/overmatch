@@ -2903,3 +2903,37 @@ fn staffed_zero_rate_stops_and_parks_without_engine_work() {
         }
     }
 }
+
+/// A restaffed Driver must brake rollback in the retained gear, never buy a cut for
+/// backward motoring drag. Gear landings also obey the crank ceiling in either direction.
+#[test]
+fn restaffed_rollback_retains_gear_and_refuses_backward_overrev() {
+    let (fp, tp) = (grade_fixture_fp(), tiger_tp());
+    // Fixture: retained upper-middle forward gear, rollback at 2 m/s on ten degrees.
+    let gear = (tp.gears_fwd.len() * 3 / 4) as u8;
+    let speed = -2.0;
+    let load = fp.grip.unwrap().side_weight * 2.0 * 10.0_f32.to_radians().sin();
+    let mut inp = driver_input(&fp, speed, load, 1.0);
+    inp.reactions = [load * 0.5; 2];
+    let initial = TransmissionState {
+        gear,
+        clutch: ClutchState::In,
+        omega_e: speed * tp.gears_fwd[usize::from(gear - 1)] / tp.sprocket_radius,
+        ..fresh(&tp)
+    };
+    let mut state = initial;
+    inp.supply.control_authority = false;
+    inp.supply.task_rate = 0.0;
+    assert!(!step(&fp, &tp, &mut state, &inp).shifting);
+    inp.supply = DriveSupply::WHOLE;
+    inp.speeds = [speed; 2];
+    let report = step(&fp, &tp, &mut state, &inp);
+    assert!(!report.shifting, "restaffing cannot buy a rollback cut");
+    assert_eq!(state.gear, gear);
+    // Fixture candidate: the lowest allowed step lands beyond the backward curve ceiling.
+    let candidate = gear.saturating_sub(tp.max_step).max(1);
+    assert_eq!(
+        landed_spare(&tp, &fp, &inp, &initial, candidate, 1.0),
+        f32::NEG_INFINITY
+    );
+}

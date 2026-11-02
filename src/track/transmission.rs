@@ -999,7 +999,7 @@ pub(crate) fn landed_spare(
     if candidate > state.gear && landing * ratio / tp.sprocket_radius < floor {
         return f32::NEG_INFINITY;
     }
-    if landing * ratio / tp.sprocket_radius / RPM_TO_RAD > tp.max_curve_rpm() {
+    if (landing * ratio / tp.sprocket_radius / RPM_TO_RAD).abs() > tp.max_curve_rpm() {
         return f32::NEG_INFINITY;
     }
     gear_force(
@@ -1055,7 +1055,7 @@ fn choose_gear(
         return;
     }
     let [fuel, catch, drag] = engine_torques(tp, inp.supply, st.omega_e, command);
-    if command <= 0.0 || fuel + catch <= drag {
+    if command <= 0.0 || st.omega_e < 0.0 || fuel + catch <= drag {
         return;
     }
     let current = landed_spare(tp, fp, inp, st, st.gear, command);
