@@ -92,13 +92,17 @@ impl Relationship for ColliderOf {
 
         let &ColliderOf { body } = collider_ref.get::<ColliderOf>().unwrap();
 
-        // Get the global transform of the collider and its rigid body.
-        let Some(collider_global_transform) = collider_ref.get::<GlobalTransform>() else {
-            return;
-        };
-        let Some(body_global_transform) = world.get::<GlobalTransform>(body) else {
-            return;
-        };
+        // OVERMATCH PATCH: an attachment without both global transforms is refused, not skipped.
+        // Skipped, the collider is never listed in `RigidBodyColliders`, and every child placement
+        // boundary (`ChildColliderPoses`) reaches a moved body's colliders only through that list.
+        // Avian's `PhysicsTransformPlugin` requires `Transform` through `Position`; a composition
+        // that disables it must spawn bodies and colliders with `Transform`.
+        let collider_global_transform = collider_ref.get::<GlobalTransform>().unwrap_or_else(|| {
+            panic!("collider {entity} attaches to body {body} without a GlobalTransform: spawn it with Transform")
+        });
+        let body_global_transform = world.get::<GlobalTransform>(body).unwrap_or_else(|| {
+            panic!("body {body} takes collider {entity} without a GlobalTransform: spawn it with Transform")
+        });
 
         // Get the collider's transform relative to the rigid body.
         let collider_transform = collider_global_transform.reparented_to(body_global_transform);

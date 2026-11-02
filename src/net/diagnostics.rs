@@ -210,11 +210,20 @@ mod tests {
         app.add_systems(Update, fixed_nan_probe);
         let body = app
             .world_mut()
-            .spawn((Position(Vec3::ZERO), Rotation::IDENTITY))
+            .spawn((
+                Position(Vec3::ZERO),
+                Rotation::IDENTITY,
+                GlobalTransform::IDENTITY,
+            ))
             .id();
         let part = app
             .world_mut()
-            .spawn((ColliderOf { body }, Position(Vec3::X), Rotation::IDENTITY))
+            .spawn((
+                ColliderOf { body },
+                Position(Vec3::X),
+                Rotation::IDENTITY,
+                GlobalTransform::from_translation(Vec3::X),
+            ))
             .id();
         app.update();
         app.update();

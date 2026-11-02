@@ -49,6 +49,18 @@ Guard: `src/tests/avian_child_pose_churn.rs`; the production walk boundary is al
 `.agents/scratch/perf-2026-11-01/server-tick.md`; the earlier defect and local upstream draft are
 `upstream/avian-child-collider-pose-churn.md`.
 
+## Attachment refusal (`src/collision/collider/collider_hierarchy/mod.rs`)
+
+`ColliderOf::on_insert` returned without listing the collider in its body's `RigidBodyColliders`
+when the collider or the body had no `GlobalTransform`. Every child placement boundary reaches a
+moved body's colliders through that list, so such a child stayed at its birth pose. Avian's
+`PhysicsTransformPlugin` requires `Transform` through `Position`; Overmatch's networked composition
+disables that plugin (`src/net/physics.rs`), so there a body spawned without `Transform` took this
+path silently. The patch panics, naming both entities and the fix.
+
+Guard: `src/tests/avian_child_pose_churn.rs`
+(`a_collider_attached_to_a_body_without_a_global_transform_is_refused`).
+
 ## Moved-collider bounds prune (`src/collider_tree/update.rs`, `src/collider_tree/diagnostics.rs`)
 
 `update_moved_collider_aabbs` (`ColliderTreeSystems::UpdateAabbs`, every physics step) fetched every

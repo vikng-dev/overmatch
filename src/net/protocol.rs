@@ -1468,6 +1468,7 @@ mod tests {
                 RigidBody::Static,
                 Position(hull_at),
                 Rotation::default(),
+                Transform::default(),
             ))
             .id();
         world.spawn((

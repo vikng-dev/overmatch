@@ -190,10 +190,12 @@ pub(super) fn place_children(
 /// pose and its `ColliderTransform` (a child). Invariant: [`place_children`] runs before this in
 /// the same chain and leaves every child's `Position`/`Rotation` equal to its composed pose, so a
 /// child whose body moved or whose local pose changed had its own `Position` or `Rotation`
-/// written. Change detection on a collider's own pose, shape, body link and local pose therefore
-/// finds every collider whose composed pose can have changed since this system's last run; a
-/// re-enabled one, whose ticks did not move, is [`admitted`]. Every other entry keeps the
-/// endpoints a recompute would give it.
+/// written. It reaches a moved body's children through `RigidBodyColliders`, which lists every
+/// attachment because the vendored Avian's `ColliderOf` hook refuses one it cannot list. Change
+/// detection on a collider's own pose, shape, body link and local pose therefore finds every
+/// collider whose composed pose can have changed since this system's last run; a re-enabled one,
+/// whose ticks did not move, is [`admitted`]. Every other entry keeps the endpoints a recompute
+/// would give it.
 pub(super) fn snapshot(
     mut history: ResMut<ColliderMotion>,
     colliders: Colliders,

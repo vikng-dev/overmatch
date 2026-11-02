@@ -402,6 +402,27 @@ fn physics_and_replication_share_the_changed_input_placement_law() {
     }
 }
 
+/// Every placement boundary reaches a moved body's colliders only through `RigidBodyColliders`,
+/// which Avian's `ColliderOf` hook fills from both entities' `GlobalTransform`. The networked
+/// composition disables `PhysicsTransformPlugin`, which otherwise requires `Transform` on every
+/// body, so a body spawned without one is refused at the attachment; stock Avian skips the link
+/// and leaves the child at its birth pose whenever the body moves.
+#[test]
+#[should_panic(expected = "without a GlobalTransform")]
+fn a_collider_attached_to_a_body_without_a_global_transform_is_refused() {
+    let mut world = World::new();
+    let body = world
+        .spawn((RigidBody::Static, Position(Vec3::ZERO), Rotation::IDENTITY))
+        .id();
+    world.spawn((
+        Collider::sphere(0.5),
+        Position(Vec3::X),
+        Rotation::IDENTITY,
+        GlobalTransform::from_translation(Vec3::X),
+        ColliderOf { body },
+    ));
+}
+
 /// ColliderOf is the actual physics attachment, including manually attached colliders without a
 /// Transform child relationship. A moved body's collider list must carry that child too.
 #[test]
