@@ -12,6 +12,7 @@ locked Bevy 0.19.1 and avian3d 0.7.0 registry source before use.
 
 | reviewer | finding | verified / not a defect | fixed in (subject) |
 |---|---|---|---|
+| Codex P2 | backward crank reports stopped to audio and HUD | verified red: public RPM 0 and no negative HUD reading | driving: report backward crank rotation (#146) |
 | Claude P2 | backward crank buys rollback cuts after restaffing | verified red: restaffing bought a cut | driving: preserve rollback gear under backward drag (#146) |
 | Claude P1 | zero-rate task takes staffed park | verified red: staffed coast never latched | driving: retain staffed park at zero task rate (#146) |
 
@@ -35,3 +36,11 @@ admission uses rotation magnitude. A lower landing beyond the backward ceiling i
 when inspected directly. This changes no wire field.
 MEASURED step-2 gates: fmt, CI clippy and 277 targeted tests passed. Base protocol revision is
 80 (lane 5's eight-field change was revision 78); this lane has not changed wire types.
+
+MEASURED step-3 red: the backward rotation witness returned `(0.0, false)` instead of
+`(3100.0, true)`. Public `EngineRpm` keeps its u16 wire representation and publishes rotation
+magnitude for the existing audio consumer; the owner HUD keeps the signed crank reading.
+Nonfinite simulated crank state now fails explicitly before public conversion. The engine-loop
+consumer already pauses only at zero and otherwise plays at the public rotation rate.
+MEASURED step-3 gates: fmt, CI clippy, 286 targeted track/HUD/audio/citation tests and all five
+shipped drive-load tests passed. The shipped load run also checks the combined park/rollback fixes.

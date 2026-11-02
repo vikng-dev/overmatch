@@ -291,7 +291,7 @@ pub(crate) fn standard_drive_row(
     if state.park {
         gear.push('P');
     }
-    let rpm = format!("{:>3.1}k", (operating.rpm / 1_000.0).max(0.0));
+    let rpm = format!("{:>3.1}k", operating.rpm / 1_000.0);
     format!("Gear {gear:<4}  RPM {rpm}  {speed}")
 }
 
@@ -449,6 +449,24 @@ fn update_notch_gauge(
 mod tests {
     use super::*;
     use bevy::ecs::system::RunSystemOnce;
+
+    /// Back-driven rotation still needs sound and a tachometer reading. Public audio consumes
+    /// magnitude, while the owner row preserves the signed crank state.
+    #[test]
+    fn backward_crank_keeps_public_rotation_and_signed_hud_rpm() {
+        // Fixture: a backward crank inside the independent over-rev guard.
+        let state = TransmissionState {
+            omega_e: -3_100.0 * crate::track::transmission::RPM_TO_RAD,
+            ..TransmissionState::stopped()
+        };
+        let public = crate::track::sim::EngineRpm::of(&TankTransmission(state));
+        let operating = DriveReadout {
+            rpm: -3_100.0,
+            gear_label: "F6".into(),
+        };
+        let row = standard_drive_row(Some((&state, &operating)), 0.0);
+        assert_eq!((public.rpm(), row.contains("-3.1k")), (3_100.0, true));
+    }
 
     /// Players need both signed lever positions, including neutral and both bounds. The marks
     /// stay inside the rails and follow independent axes through the real gather and HUD systems.

@@ -113,21 +113,25 @@ impl TankTransmission {
     }
 }
 
-/// The public crank speed, in whole rpm: the one transmission fact a listener other than the
+/// The public crank rotation magnitude, in whole rpm: the one transmission fact a listener other than the
 /// tank's owner needs (its engine sound). Written from [`TankTransmission`] by
 /// [`publish_engine_rpm`] wherever the body simulates, constructed beside it at spawn, and
 /// replicated to every client.
 ///
-/// Error against the crank: ≤ 0.5 rpm (round to nearest) over 0–65 535 rpm; a crank outside that
-/// band saturates to its bound, a NaN one reads 0. Postcard writes the `u16` as a varint:
+/// Error against the crank magnitude: ≤ 0.5 rpm (round to nearest) over 0–65 535 rpm; a crank
+/// outside that band saturates to its bound. Nonfinite sim state is a bug. Postcard writes the `u16` as a varint:
 /// 2 bytes from 128 to 16 383 rpm.
 #[derive(Component, Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub struct EngineRpm(pub u16);
 
 impl EngineRpm {
     pub fn of(transmission: &TankTransmission) -> Self {
-        // `as` saturates at both bounds and maps NaN to 0.
-        Self((transmission.0.omega_e / transmission::RPM_TO_RAD).round() as u16)
+        let omega = transmission.0.omega_e;
+        assert!(
+            omega.is_finite(),
+            "public RPM requires a finite simulated crank"
+        );
+        Self((omega.abs() / transmission::RPM_TO_RAD).round() as u16)
     }
 
     pub fn rpm(self) -> f32 {
