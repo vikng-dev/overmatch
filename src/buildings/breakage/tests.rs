@@ -3742,6 +3742,36 @@ fn marched_line(
         .unwrap()
 }
 
+/// The game's damage model delivers a point exchange to the contacted construction chunk.
+/// Bounce consumers rely on no invented chord or dropped work. Fixture: the stacked element's
+/// front face receives the helper's point work and impulse, with no transit momentum.
+#[test]
+fn a_point_exchange_reaches_the_chunk_at_its_contact() {
+    let (mut app, root, kind, e, [front, _]) = stacked_chunks();
+    let blow = Vec3::X * 2.0;
+    let taken = marched_line(
+        &mut app,
+        root,
+        &kind,
+        e,
+        Quat::IDENTITY,
+        (Vec3::ZERO, Vec3::ZERO),
+        (Vec3::ZERO, blow),
+    )
+    .unwrap();
+    assert!(
+        taken
+            .line_loads
+            .iter()
+            .all(|load| load.chunk == front && load.at == Vec3::ZERO)
+    );
+    assert!((taken.line_loads.iter().map(|load| load.blow).sum::<Vec3>() - blow).length() < 1e-6);
+    assert_eq!(
+        taken.line_loads.iter().map(|load| load.energy).sum::<f32>(),
+        7.0
+    );
+}
+
 /// The game's damage model reports a crossing on the disc's axis, so a disc whose rim alone bit an
 /// intact element has an axis clear of every chunk. Destruction relies on that line's whole work
 /// and momentum wearing the chunk the rim met. Fixture: the axis runs 30 mm clear of one side, past each chunk.

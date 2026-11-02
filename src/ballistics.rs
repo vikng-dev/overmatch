@@ -6497,6 +6497,58 @@ pub(crate) mod march_tests {
         );
     }
 
+    /// The game's damage model exports a bounce's work and momentum even without tank ownership.
+    /// Environment construction readers rely on the same exchange as owned rigid bodies.
+    /// Fixture: an inert round meets a broad plate at grazing incidence.
+    #[test]
+    fn a_ricochet_delivers_its_exchange_to_unowned_construction() {
+        #[derive(Resource, Default)]
+        struct Lines(Vec<DeliveredLine>);
+        let mut app = world_with_trimesh_plates(&[(Vec3::new(100.0, 0.1, 100.0), Vec3::Y * 50.0)]);
+        app.init_resource::<Lines>().add_observer(
+            |event: On<ShellMarched>, mut lines: ResMut<Lines>| {
+                lines.0.extend_from_slice(&event.lines);
+            },
+        );
+        let direction = Vec3::new(1.0, -0.1, 0.0).normalize();
+        let shell = spawn_round(&mut app, FIXTURE_88, Vec3::Y * 50.3, direction * 800.0);
+        app.update();
+        let marks = app.world().get::<PenetrationMarks>(shell).unwrap();
+        let ArmourMark::Bounce {
+            incoming,
+            outgoing,
+            speed_in,
+            speed_out,
+            shock,
+            struck,
+            position,
+            ..
+        } = marks.log[0]
+        else {
+            panic!("the grazing fixture must bounce");
+        };
+        let lines: Vec<_> = app
+            .world()
+            .resource::<Lines>()
+            .0
+            .iter()
+            .filter(|line| {
+                line.crossing.volume == struck
+                    && line.crossing.entry == position
+                    && line.crossing.end == position
+            })
+            .collect();
+        assert_eq!(lines.len(), 1, "the bounce must publish one exchange");
+        let expected = FIXTURE_88.mass * (incoming * speed_in - outgoing * speed_out);
+        assert!((lines[0].momentum - expected).length() < expected.length() * 1e-5);
+        assert_eq!(lines[0].crossing.volume, struck);
+        assert_eq!(lines[0].crossing.entry, position);
+        assert_eq!(lines[0].crossing.end, position);
+        assert_eq!(lines[0].crossing.energy, shock);
+        assert_eq!(lines[0].entrance_energy, shock);
+        assert_eq!(lines[0].entrance_momentum, lines[0].momentum);
+    }
+
     /// The game's damage model must deliver the whole resolved momentum exchange independently
     /// of its HP dose. Buildings and freed trunks read these lines. Fixture data: head-on and
     /// oblique perforations of fixture plates, overlapping or spaced on one body or two; entry

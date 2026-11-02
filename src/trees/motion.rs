@@ -409,14 +409,12 @@ pub(super) fn derive_systems() -> ScheduleConfigs<ScheduleSystem> {
         .chain()
 }
 
-/// The game's damage model: a march delivers its real line and casing momentum to a trunk
-/// freed in that march, before body construction. A press-only or unsupported departure carries
-/// no invented starting spin. Spall has no sourced fragment mass and supplies no launch blow.
+/// The game's damage model: line and casing momentum load the wood on its current owner,
+/// standing, stump or moving. Spall has no sourced fragment mass and supplies no launch blow.
 pub(super) fn read_shell(
     marched: On<crate::ballistics::ShellMarched>,
     segments: Query<(&TreeSegment, &ChildOf)>,
     mut trees: Query<(
-        Option<&TreeState>,
         &TreeBody,
         &Position,
         &Rotation,
@@ -429,12 +427,9 @@ pub(super) fn read_shell(
         let Ok((&TreeSegment(k), parent)) = segments.get(line.crossing.volume) else {
             continue; // A crossing of anything but a trunk segment is another law's.
         };
-        let (state, body, position, rotation, piece, mut loads) = trees
+        let (body, position, rotation, piece, mut loads) = trees
             .get_mut(parent.parent())
             .expect("a trunk segment's current owner retains its construction and pending loads");
-        if state.is_some_and(|state| *state == TreeState::Standing) {
-            continue; // Standing construction receives the line through its segment pools.
-        }
         let root = body.construction_frame(piece, position.0, rotation.0);
         let into = root.rotation.inverse();
         loads.0.extend(Load::line(
@@ -475,13 +470,10 @@ pub(super) fn read_shell(
             else {
                 continue; // This ray's hard stop is not a trunk segment.
             };
-            let (state, body, position, rotation, piece, mut loads) =
+            let (body, position, rotation, piece, mut loads) =
                 trees.get_mut(parent.parent()).expect(
                     "a trunk segment's current owner retains its construction and pending loads",
                 );
-            if state.is_some_and(|state| *state == TreeState::Standing) {
-                continue; // Standing construction receives the field through its segment pools.
-            }
             let root = body.construction_frame(piece, position.0, rotation.0);
             let energy = f64::from(burst.energy) * f64::from(ray.strength) / total;
             let blow = ray.direction * (2.0 * energy / f64::from(burst.sideways_speed)) as f32;
@@ -1117,71 +1109,120 @@ mod tests {
             "the intervening static surface shades the tree"
         );
     }
-    /// The game's damage model delivers each nonzero marched line to a freed trunk once in its
-    /// root frame. Trunk launch relies on both the frame turn and the entrance-only impulse.
-    /// Fixture: one down trunk, with a rotated root and distinct axial and entrance impulses.
+    /// The game's damage model delivers the same momentum to the same wood, standing or stump.
+    /// Structural assessment relies on the line and casing paths, the frame turn and entrance
+    /// impulse. Fixture: a rotated root and distinct axial, entrance and casing impulses.
     #[test]
-    fn a_marched_line_reaches_the_freed_trunks_loads_once() {
+    fn a_marched_line_reaches_the_same_wood_in_every_grounded_state() {
         use crate::ballistics::{DeliveredLine, ShellMarched, VolumeCrossing};
-        let mut app = world(Vec3::ZERO);
-        let root = tree(&mut app, 0, Vec3::new(3.0, 2.0, 1.0));
-        let rotation = Quat::from_rotation_z(0.4);
-        app.world_mut().entity_mut(root).insert((
-            Transform::from_xyz(3.0, 2.0, 1.0).with_rotation(rotation),
-            Position(Vec3::new(3.0, 2.0, 1.0)),
-            Rotation(rotation),
-        ));
-        app.world_mut()
-            .entity_mut(root)
-            .insert(TreeState::Down { cut: 0, dir: 0 });
-        let segment = app
-            .world_mut()
-            .query::<(Entity, &TreeSegment, &ChildOf)>()
-            .iter(app.world())
-            .find(|(_, index, parent)| index.0 == 0 && parent.parent() == root)
-            .map(|(entity, ..)| entity)
-            .unwrap();
-        let root_transform = *app.world().get::<Transform>(root).unwrap();
-        let entry = Vec3::Y;
-        let end = Vec3::Y * 1.2;
-        let entrance = Vec3::X * 7.0;
-        let axial = Vec3::Y * 11.0;
-        let shell = app
-            .world_mut()
-            .spawn(crate::ballistics::PenetrationMarks::default())
-            .id();
-        app.world_mut().trigger(ShellMarched {
-            shell,
-            marks_from: 0,
-            cones_from: 0,
-            burst: None,
-            lines: vec![DeliveredLine {
-                contacts: vec![(
-                    root_transform.translation + rotation * entry,
-                    root_transform.translation + rotation * end,
-                )],
-                crossing: VolumeCrossing {
-                    volume: segment,
-                    entry: root_transform.translation + rotation * entry,
-                    end: root_transform.translation + rotation * end,
-                    chord: entry.distance(end),
-                    cost: 0.0,
-                    energy: 0.0,
-                    perforated: true,
+        for state in [TreeState::Standing, TreeState::Down { cut: 2, dir: 0 }] {
+            let mut app = world(Vec3::ZERO);
+            let root = tree(&mut app, 0, Vec3::new(3.0, 2.0, 1.0));
+            let rotation = Quat::from_rotation_z(0.4);
+            app.world_mut().entity_mut(root).insert((
+                Transform::from_xyz(3.0, 2.0, 1.0).with_rotation(rotation),
+                Position(Vec3::new(3.0, 2.0, 1.0)),
+                Rotation(rotation),
+            ));
+            app.world_mut().entity_mut(root).insert(state);
+            let segment = app
+                .world_mut()
+                .query::<(Entity, &TreeSegment, &ChildOf)>()
+                .iter(app.world())
+                .find(|(_, index, parent)| index.0 == 0 && parent.parent() == root)
+                .map(|(entity, ..)| entity)
+                .unwrap();
+            let root_transform = *app.world().get::<Transform>(root).unwrap();
+            let entry = Vec3::Y;
+            let end = Vec3::Y * 1.2;
+            let entrance = Vec3::X * 7.0;
+            let axial = Vec3::Y * 11.0;
+            let shell = app
+                .world_mut()
+                .spawn(crate::ballistics::PenetrationMarks::default())
+                .id();
+            app.world_mut().trigger(ShellMarched {
+                shell,
+                marks_from: 0,
+                cones_from: 0,
+                burst: None,
+                lines: vec![DeliveredLine {
+                    contacts: vec![(
+                        root_transform.translation + rotation * entry,
+                        root_transform.translation + rotation * end,
+                    )],
+                    crossing: VolumeCrossing {
+                        volume: segment,
+                        entry: root_transform.translation + rotation * entry,
+                        end: root_transform.translation + rotation * end,
+                        chord: entry.distance(end),
+                        cost: 0.0,
+                        energy: 0.0,
+                        perforated: true,
+                    },
+                    momentum: rotation * (entrance + axial),
+                    entrance_energy: 0.0,
+                    entrance_momentum: rotation * entrance,
+                }],
+            });
+            let loads = &app.world().get::<TrunkLoads>(root).unwrap().0;
+            assert!(!loads.is_empty());
+            assert!(
+                (loads.iter().map(|load| load.blow).sum::<Vec3>() - entrance - axial).length()
+                    < 1e-4
+            );
+            let moment: Vec3 = loads.iter().map(|load| load.at.cross(load.blow)).sum();
+            assert!(
+                (moment - entry.cross(entrance) - ((entry + end) * 0.5).cross(axial)).length()
+                    < 1e-4
+            );
+            let burst = crate::ballistics::burst::Burst {
+                trigger: crate::rounds::fuze::Trigger::Impact { sensitivity_n: 0.0 },
+                delay: 0.0,
+                nose: crate::ballistics::RoundBody {
+                    mass: 1.0,
+                    caliber: 0.1,
+                    nose_factor: 1.0,
                 },
-                momentum: rotation * (entrance + axial),
-                entrance_energy: 0.0,
-                entrance_momentum: rotation * entrance,
-            }],
-        });
-        let loads = &app.world().get::<TrunkLoads>(root).unwrap().0;
-        assert!(!loads.is_empty());
-        assert!(
-            (loads.iter().map(|load| load.blow).sum::<Vec3>() - entrance - axial).length() < 1e-4
-        );
-        let moment: Vec3 = loads.iter().map(|load| load.at.cross(load.blow)).sum();
-        assert!(
-            (moment - entry.cross(entrance) - ((entry + end) * 0.5).cross(axial)).length() < 1e-4
-        );
+                sideways_speed: 2.0,
+                energy: 3.0,
+                core_mass: 1.0,
+                blast: 0.0,
+                filler_setback: 0.1,
+                charge_radius: 0.1,
+            };
+            app.world_mut()
+                .get_mut::<TrunkLoads>(root)
+                .unwrap()
+                .0
+                .clear();
+            app.world_mut()
+                .entity_mut(shell)
+                .insert(crate::ballistics::SpallMarks {
+                    cones: vec![],
+                    burst: Some(crate::ballistics::BurstField {
+                        origin: root_transform.translation,
+                        axis: Dir3::Y,
+                        field: crate::ballistics::spall_cone::FieldDescriptor::ring(0.0, 0.1),
+                        strength: 1.0,
+                        rays: vec![crate::ballistics::SpallRay {
+                            direction: Dir3::new(rotation * Vec3::X).unwrap(),
+                            end: root_transform.translation + rotation * entry,
+                            strength: 1.0,
+                            doses: vec![(segment, 0.0)],
+                        }],
+                    }),
+                });
+            app.world_mut().trigger(ShellMarched {
+                shell,
+                marks_from: 0,
+                cones_from: 0,
+                lines: vec![],
+                burst: Some(burst),
+            });
+            let loads = &app.world().get::<TrunkLoads>(root).unwrap().0;
+            let expected = Vec3::X * (2.0 * burst.energy / burst.sideways_speed);
+            assert!((loads.iter().map(|load| load.blow).sum::<Vec3>() - expected).length() < 1e-4);
+        }
     }
 }
