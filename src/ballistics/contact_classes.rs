@@ -382,7 +382,18 @@ struct Range {
 
 impl Range {
     fn new(mount: RigidBody) -> Self {
+        Self::on(mount, None)
+    }
+
+    /// The range over `ground`, which the march reads as it reads any live map's, or over none.
+    /// Only a kinematic range without ground carries the decoy: on a map it would stand in the
+    /// shots' way.
+    fn on(mount: RigidBody, ground: Option<HeightGrid>) -> Self {
+        let decoyed = mount == RigidBody::Kinematic && ground.is_none();
         let mut app = App::new();
+        if let Some(ground) = ground {
+            app.insert_resource(ground);
+        }
         app.add_plugins((
             MinimalPlugins,
             bevy::transform::TransformPlugin,
@@ -414,7 +425,7 @@ impl Range {
             notes: Mutex::new(Vec::new()),
             tracked: root,
         });
-        let decoy = (mount == RigidBody::Kinematic).then(|| {
+        let decoy = decoyed.then(|| {
             let decoy = app
                 .world_mut()
                 .spawn((
@@ -2622,4 +2633,436 @@ fn contact_classes_on_the_shipped_hull() {
         candidates: 4096,
         moving: 5,
     }));
+}
+
+// --- Reach on a real map -------------------------------------------------------------------------
+
+/// Slant ranges a volley is fired from, metres. A chosen spread of engagement distances, ASSUMED.
+const REACH_RANGES: [f32; 4] = [60.0, 150.0, 300.0, 600.0];
+/// Flights per round and hull state in one slice, and flights per volley: a line round flies in
+/// long bursts, a disc round one shell at a time, so a slice flies many more of the first.
+const REACH_LINE: (usize, usize) = (6_000, 32);
+const REACH_DISC: (usize, usize) = (600, 12);
+/// Ticks a volley is followed: 3.1 s, past a 600 m flight and any skid off the hull.
+const REACH_TICKS: usize = 200;
+/// A moving hull's speed, m/s, and yaw rate, rad/s: the top of each drawn range. Fixture data.
+const REACH_SPEED: f32 = 12.0;
+const REACH_YAW: f32 = 0.5;
+/// Muzzle height over the ground at the shooter's feet, m. Fixture data.
+const REACH_MUZZLE: f32 = 2.2;
+/// Half the span a hull's slope is read over, m, about half a hull's length. Fixture data.
+const REACH_SLOPE_SPAN: f32 = 2.0;
+
+#[derive(Default)]
+struct Reach {
+    flights: usize,
+    touched: usize,
+    panics: BTreeMap<String, usize>,
+}
+
+impl Reach {
+    fn panic_kind(message: &str) -> String {
+        [
+            "UnexpectedExit",
+            "UnexpectedEntry",
+            "IncompleteCorridor",
+            "DrainExhausted",
+        ]
+        .iter()
+        .find(|kind| message.contains(**kind))
+        .map_or_else(
+            || message.chars().take(100).collect(),
+            |kind| (*kind).to_owned(),
+        )
+    }
+}
+
+/// The bounds of every armour volume in the world.
+fn armour_bounds(world: &mut World) -> (Vec3, Vec3) {
+    let mut lo = Vec3::splat(f32::INFINITY);
+    let mut hi = Vec3::splat(f32::NEG_INFINITY);
+    for (_, position, rotation, collider) in world
+        .query::<(&VolumeOf, &Position, &Rotation, &Collider)>()
+        .iter(world)
+    {
+        let aabb = collider.aabb(position.0, rotation.0);
+        lo = lo.min(aabb.min);
+        hi = hi.max(aabb.max);
+    }
+    (lo, hi)
+}
+
+/// Where a volley's hull stands and how it moves.
+#[derive(Clone, Copy, Debug)]
+struct Stance {
+    at: Vec3,
+    rotation: Quat,
+    velocity: Vec3,
+    spin: Vec3,
+}
+
+impl Range {
+    fn stand(&mut self, stance: Stance) {
+        let root = self.root;
+        self.app.world_mut().entity_mut(root).insert((
+            Transform::from_translation(stance.at).with_rotation(stance.rotation),
+            Position(stance.at),
+            Rotation(stance.rotation),
+            LinearVelocity::ZERO,
+            AngularVelocity::ZERO,
+        ));
+        self.app.update();
+        self.app.world_mut().entity_mut(root).insert((
+            LinearVelocity(stance.velocity),
+            AngularVelocity(stance.spin),
+        ));
+        self.app.update();
+    }
+
+    /// Fly `headings` from `muzzle` together and read how many shells touched armour; a panic in the
+    /// march gives its message and how many flights it leaves counted, the rest lost with the world.
+    fn follow(
+        &mut self,
+        round: &crate::rounds::Round,
+        muzzle: Vec3,
+        headings: &[Dir3],
+    ) -> Result<usize, (String, usize)> {
+        for &heading in headings {
+            let fire = FireShell::of_round(
+                round,
+                muzzle,
+                muzzle,
+                heading,
+                crate::spec::FireMechanism::Single,
+                false,
+                None,
+                None,
+            );
+            self.app.world_mut().trigger(fire);
+        }
+        for _ in 0..REACH_TICKS {
+            let world = self.app.world_mut();
+            let flying = world
+                .query_filtered::<(), With<Projectile>>()
+                .iter(world)
+                .count();
+            if flying == 0 {
+                break;
+            }
+            let app = &mut self.app;
+            let Err(payload) = catch_unwind(AssertUnwindSafe(|| app.update())) else {
+                continue;
+            };
+            let message = payload
+                .downcast_ref::<String>()
+                .cloned()
+                .or_else(|| {
+                    payload
+                        .downcast_ref::<&str>()
+                        .map(|text| (*text).to_owned())
+                })
+                .unwrap_or_else(|| "a panic with no message".to_owned());
+            return Err((message, headings.len() - flying + 1));
+        }
+        let world = self.app.world_mut();
+        let shells: Vec<Entity> = world
+            .query_filtered::<Entity, Or<(With<ShellPath>, With<Projectile>)>>()
+            .iter(world)
+            .collect();
+        let mut touched = 0;
+        for shell in shells {
+            if world
+                .get::<PenetrationMarks>(shell)
+                .is_some_and(|marks| !marks.log.is_empty())
+            {
+                touched += 1;
+            }
+            world.despawn(shell);
+        }
+        for mut health in world.query::<&mut ComponentHealth>().iter_mut(world) {
+            health.refill();
+        }
+        Ok(touched)
+    }
+
+    /// Stand the hull on `ground` at a drawn spot, yaw and the slope there, still or under way, and
+    /// fly one volley at it from a muzzle at a drawn range with a clear line to the hull. Each shot
+    /// aims at a drawn point in the hull's bounds, lofted and led by the round's own flight time. A
+    /// panic prints the whole volley: its shots move the hull between them, so one alone need not
+    /// reproduce it.
+    fn volley(
+        &mut self,
+        round: &crate::rounds::Round,
+        moving: bool,
+        shots: usize,
+        ground: &HeightGrid,
+        seed: &mut u64,
+        reach: &mut Reach,
+    ) {
+        let half = ground.half_extent() * 0.5;
+        let spot = Vec2::new(
+            (unit(seed) * 2.0 - 1.0) * half,
+            (unit(seed) * 2.0 - 1.0) * half,
+        );
+        let slope = |dx: f32, dz: f32| {
+            ground.height_at(spot.x + dx, spot.y + dz) - ground.height_at(spot.x - dx, spot.y - dz)
+        };
+        let up = Vec3::new(
+            -slope(REACH_SLOPE_SPAN, 0.0),
+            2.0 * REACH_SLOPE_SPAN,
+            -slope(0.0, REACH_SLOPE_SPAN),
+        )
+        .normalize();
+        let rotation = Quat::from_rotation_arc(Vec3::Y, up)
+            * Quat::from_rotation_y(unit(seed) * std::f32::consts::TAU);
+        let root = self.root;
+        let world = self.app.world_mut();
+        let (low, _) = armour_bounds(world);
+        let foot = world
+            .get::<Position>(root)
+            .expect("the tank root is a body")
+            .0
+            .y
+            - low.y;
+        let (velocity, spin) = if moving {
+            (
+                rotation * Vec3::Z * (unit(seed) * REACH_SPEED),
+                up * (unit(seed) * 2.0 - 1.0) * REACH_YAW,
+            )
+        } else {
+            (Vec3::ZERO, Vec3::ZERO)
+        };
+        let stance = Stance {
+            at: Vec3::new(spot.x, ground.height_at(spot.x, spot.y) + foot, spot.y),
+            rotation,
+            velocity,
+            spin,
+        };
+        self.stand(stance);
+        let (lo, hi) = armour_bounds(self.app.world_mut());
+        let centre = (lo + hi) * 0.5;
+
+        let range = REACH_RANGES[(unit(seed) * REACH_RANGES.len() as f32) as usize];
+        let clear = (0..16).find_map(|_| {
+            let bearing = unit(seed) * std::f32::consts::TAU;
+            let xz = Vec2::new(
+                centre.x + bearing.cos() * range,
+                centre.z + bearing.sin() * range,
+            );
+            if !ground.contains_xz(xz.x, xz.y) {
+                return None;
+            }
+            let muzzle = Vec3::new(xz.x, ground.height_at(xz.x, xz.y) + REACH_MUZZLE, xz.y);
+            let line = centre - muzzle;
+            ground
+                .cast_ray(muzzle, line.normalize(), line.length())
+                .is_none()
+                .then_some(muzzle)
+        });
+        let Some(muzzle) = clear else {
+            return;
+        };
+        let flight_time =
+            ((round.drag_k * range).exp() - 1.0) / (round.drag_k * round.muzzle_speed);
+        let headings: Vec<Dir3> = (0..shots)
+            .map(|_| {
+                let aim = lo
+                    + (hi - lo) * Vec3::new(unit(seed), unit(seed), unit(seed))
+                    + velocity * flight_time
+                    - gravity() * 0.5 * flight_time * flight_time;
+                Dir3::new(aim - muzzle).expect("a muzzle at range has a heading")
+            })
+            .collect();
+        match self.follow(round, muzzle, &headings) {
+            Ok(touched) => {
+                reach.flights += shots;
+                reach.touched += touched;
+            }
+            Err((message, flown)) => {
+                *reach.panics.entry(Reach::panic_kind(&message)).or_default() += 1;
+                reach.flights += flown;
+                println!("PANIC\t{stance:?}\t{muzzle:?}\t{headings:?}");
+                *self = Range::on(self.mount, Some(ground.clone()));
+            }
+        }
+    }
+}
+
+/// How often a player can meet a march panic: every fired round from a muzzle at range over the
+/// shipped ground at a still and a moving hull, seeded by `REACH_SLICE`. A measurement, never a
+/// gate; one line per round and hull state, summed across slices by the record:
+///
+/// `REACH_SLICE=0 scripts/serial-cargo test --lib --features dev_ui,bitprobe panic_reach_on_shipped_ground -- --ignored --nocapture`
+#[test]
+#[ignore = "a measurement, run on demand"]
+fn panic_reach_on_shipped_ground() {
+    let slice: u64 = std::env::var("REACH_SLICE").map_or(0, |slice| {
+        slice.parse().expect("REACH_SLICE is a slice number")
+    });
+    let ground = crate::terrain_grid::tests::shipped_grid();
+    let registry = crate::guns::GunRegistry::shipped();
+    let mut seed = SEED ^ slice.wrapping_mul(0x9e37_79b9_7f4a_7c15);
+    let mut range = Range::on(RigidBody::Kinematic, Some(ground.clone()));
+    for (gun, key, round) in registry.fired_rounds() {
+        let (want, shots) = if round.flying.caliber < resolve::DISC_MIN_CALIBER {
+            REACH_LINE
+        } else {
+            REACH_DISC
+        };
+        for moving in [false, true] {
+            let mut reach = Reach::default();
+            while reach.flights < want {
+                range.volley(&round, moving, shots, &ground, &mut seed, &mut reach);
+            }
+            let hull = if moving { "moving" } else { "still" };
+            println!(
+                "REACH\t{slice}\t{gun}\t{key}\t{hull}\t{}\t{}\t{:?}",
+                reach.flights, reach.touched, reach.panics
+            );
+        }
+    }
+}
+
+/// Shots that once ended the process, each flown from its birth on its post-step velocity with the
+/// range's tank at its spawn pose. Fixture data.
+const ONCE_FATAL: &[(&str, [f32; 3], [f32; 3])] = &[
+    (
+        "kwk36_l56 88mm_AP",
+        [13.448209, 5.9313054, -3.65905],
+        [-114.379295, -136.64839, -74.76734],
+    ),
+    (
+        "kwk36_l56 88mm_AP",
+        [13.447991, 5.931244, -3.6586041],
+        [-114.379295, -136.64839, -74.76734],
+    ),
+    (
+        "kwk36_l56 88mm_AP",
+        [9.337844, 5.4328265, -8.553225],
+        [92.55517, -50.016808, 162.10312],
+    ),
+    (
+        "kwk36_l56 88mm_AP",
+        [9.04861, 5.589129, -9.059797],
+        [92.55517, -50.016808, 162.10312],
+    ),
+    (
+        "kwk36_l56 88mm_AP",
+        [10.570463, 5.4944863, -10.399087],
+        [-5.4192257, -50.01674, 186.5865],
+    ),
+    (
+        "kwk36_l56 88mm_APHE_ring",
+        [13.448209, 5.9313054, -3.65905],
+        [-114.379295, -136.64839, -74.76734],
+    ),
+    (
+        "kwk36_l56 88mm_APHE_ring",
+        [13.447991, 5.931244, -3.6586041],
+        [-114.379295, -136.64839, -74.76734],
+    ),
+    (
+        "kwk36_l56 88mm_APHE_ring",
+        [9.337844, 5.4328265, -8.553225],
+        [92.55517, -50.016808, 162.10312],
+    ),
+    (
+        "kwk36_l56 88mm_APHE_ring",
+        [9.04861, 5.589129, -9.059797],
+        [92.55517, -50.016808, 162.10312],
+    ),
+    (
+        "kwk36_l56 88mm_APHE_ring",
+        [10.570463, 5.4944863, -10.399087],
+        [-5.4192257, -50.01674, 186.5865],
+    ),
+    (
+        "mg34 7.9mm_AP",
+        [11.882101, -3.3190238, -4.647451],
+        [153.88496, 666.9333, -318.66043],
+    ),
+    (
+        "mg34 7.9mm_AP",
+        [13.480293, 3.381734, -6.838281],
+        [-300.5629, 434.80978, 539.0987],
+    ),
+    (
+        "mg34 7.9mm_AP",
+        [10.371233, 4.795458, -6.657592],
+        [195.4084, -728.5137, -33.291897],
+    ),
+    (
+        "mg34 7.9mm_AP",
+        [13.626741, 4.3076735, -4.3707595],
+        [-65.802635, -546.7091, 516.531],
+    ),
+    (
+        "mg34 7.9mm_AP",
+        [13.627799, 4.562245, -5.3784],
+        [-133.4664, 113.61563, -70.034065],
+    ),
+    (
+        "mg34 7.9mm_AP",
+        [10.199447, 3.6056461, -7.847377],
+        [94.37499, -163.12282, -10.529476],
+    ),
+    (
+        "mg34 7.9mm_AP",
+        [13.0494995, 1.7382418, -7.063931],
+        [38.47124, 166.73332, -79.66511],
+    ),
+    (
+        "mg34 7.9mm_AP",
+        [13.627188, 4.792919, -6.4707155],
+        [-94.37499, 163.26141, -8.101518],
+    ),
+    (
+        "mg34 7.9mm_AP",
+        [10.372812, 4.7832394, -7.2671714],
+        [94.37499, -115.535774, -115.63481],
+    ),
+    (
+        "mg34 7.9mm_AP",
+        [13.476771, 3.3868294, -6.8319635],
+        [-75.140724, 108.702446, 134.77467],
+    ),
+    (
+        "mg34 7.9mm_AP",
+        [10.373523, 4.7869205, -6.657982],
+        [48.8521, -182.12842, -8.322974],
+    ),
+    (
+        "mg34 7.9mm_AP",
+        [13.625971, 4.3012667, -4.3647065],
+        [-16.450659, -136.67728, 129.13275],
+    ),
+    (
+        "mg34 7.9mm_AP",
+        [13.628284, 4.320487, -4.3828654],
+        [-16.450659, -136.67728, 129.13275],
+    ),
+    (
+        "mg34 7.9mm_AP",
+        [10.076007, 1.3322017, -5.4783688],
+        [36.176228, 163.79178, -86.54535],
+    ),
+];
+
+/// The game's damage model: no shot ends the process through the march, on the aims that once did:
+/// line rounds whose start stood under their resting height over a face, and discs whose rim stayed
+/// on a face. A panic ends the server's whole match. Mutants: a line round turning at first touch,
+/// an ungrown probe box, a blend angle read with `acos`.
+#[test]
+fn the_shots_that_once_ended_the_process_fly() {
+    let registry = crate::guns::GunRegistry::shipped();
+    let mut range = Range::new(RigidBody::Static);
+    for (arm, birth, post) in ONCE_FATAL {
+        let round = registry
+            .fired_rounds()
+            .find(|(gun, key, _)| format!("{gun} {key}") == *arm)
+            .expect("the arm ships")
+            .2;
+        let flown = range.fly(&round, Vec3::from(*birth), Vec3::from(*post));
+        assert_eq!(flown.panicked, None, "{arm} born at {birth:?}");
+    }
 }
