@@ -10,13 +10,15 @@
 //!
 //! Layers: the flash core, the fireball, the fill glow, the flame planes (a forward jet and any
 //! side jets), the gas smoke, the ground blast's dust cloud and the transient light. The core, the
-//! fireball and the light draw at any range; beyond [`FAR_FULL_DRESSING`] the other layers are
+//! fireball and the light draw at any range; beyond `far_full_dressing` the other layers are
 //! skipped, a cost bound on overdraw that never resizes what is drawn.
 //!
 //! Invariant (ADR-0014): spawned entities are render-only. Light and billboard rings bound replay
 //! duplicates; stale remote shots do not replay an already-expired flash.
 
 use std::collections::BTreeMap;
+
+use super::look::muzzle as look;
 
 use bevy::camera::Exposure;
 use bevy::ecs::system::SystemParam;
@@ -32,11 +34,9 @@ use crate::view::PlayerView;
 
 use super::ViewRng;
 use super::billboard::{
-    BillboardLook, BillboardMaterials, BillboardRing, BillboardSpec, Flipbook, SOFT_PARTICLE_DEPTH,
-    VfxParams, gradient_lut, smoothstep, spawn_billboard, unit_quad,
+    BillboardLook, BillboardMaterials, BillboardRing, BillboardSpec, Flipbook, VfxParams,
+    gradient_lut, smoothstep, soft_particle_depth, spawn_billboard, unit_quad,
 };
-
-// --- The fireball sheet: a 12-frame explosion flipbook played once over the emission's lifetime.
 
 /// Atlas grid and frame count — [`MuzzleVfxAssets::blast_atlas`]'s two sheets share it
 /// (`scripts/vfx/blast_atlas.py`).
@@ -46,33 +46,9 @@ const BLAST_FRAMES: u32 = 12;
 /// How many baked sheets are in the rotation — [`MuzzleVfxAssets::blast_atlas`]'s length and
 /// [`blast_pick`]'s range.
 const BLAST_SHEETS: usize = 2;
-/// Erosion threshold at death. Low, unlike every other muzzle layer: the sheet ALREADY animates its
-/// own dissolution, and the die-off is the blast LUT's cooling term (which reaches black at the last
-/// LUT row, so the layer is gone before it despawns). Erosion here only thins the fringe — ramped to
-/// 1.0 it instead eats the fireball into confetti through the middle of the sequence.
-const BLAST_EROSION: f32 = 0.3;
 
-/// Smoke sprite playback: frames/s over the 4-frame atlas, roll-rate bound (rad/s).
-const SMOKE_FRAME_RATE: f32 = 5.0;
-const SMOKE_SPIN_MAX: f32 = 0.6;
-
-/// Shared muzzle-light population cap; oldest lights are evicted first.
+/// Resolution: population cap bounds simultaneous light work; evict oldest first.
 const LIGHT_CAP: usize = 12;
-
-/// Dust sprite playback: frames/s over the 4-frame dust atlas, and its roll-rate bound (rad/s).
-const GROUND_DUST_FRAME_RATE: f32 = 3.0;
-const GROUND_DUST_SPIN_MAX: f32 = 0.35;
-
-/// The erosion threshold a dust puff reaches at the end of its life: the dust sheet's own signal
-/// ceiling, so a puff dissolves over its whole resolved lifetime. MEASURED on `impact_dust.png`'s
-/// signal (red × alpha) histogram under the shader's erosion at this layer's sharpness: a ramp to
-/// 1.0 halves a puff's coverage at 17 % of its life and quarters it at 28 %; a ramp to 0.5
-/// quarters it at 55 % and leaves 5 % at 90 %.
-const GROUND_DUST_EROSION_END: f32 = 0.5;
-
-/// Beyond this camera distance (m) only the core, the fireball and the light spawn: a cost bound on
-/// near-field overdraw. It skips layers and never changes the size of a drawn one.
-const FAR_FULL_DRESSING: f32 = 400.0;
 
 pub(super) fn plugin(app: &mut App) {
     app.init_resource::<MuzzleLightRing>()
@@ -151,7 +127,7 @@ impl MuzzleVfxAssets {
                 // Moderate sharpness: soft dissolve edges on the puff. w, the overall opacity, is
                 // the emission's: the consumer writes it per puff.
                 fade: Vec4::new(0.0, self.renderer.smoke_sharpness, 0.0, 1.0),
-                glow: Vec4::new(self.renderer.smoke_boost, 0.0, SOFT_PARTICLE_DEPTH, 0.0),
+                glow: Vec4::new(self.renderer.smoke_boost, 0.0, soft_particle_depth(), 0.0),
             },
             atlas: self.smoke_atlas.clone(),
             lut: self.smoke_lut.clone(),
@@ -169,7 +145,7 @@ impl MuzzleVfxAssets {
             params: VfxParams {
                 frame: Vec4::new(0.0, 2.0, 2.0, 0.0),
                 fade: Vec4::new(0.0, self.renderer.dust_sharpness, 0.0, opacity),
-                glow: Vec4::new(light - 1.0, 0.0, SOFT_PARTICLE_DEPTH, 0.0),
+                glow: Vec4::new(light - 1.0, 0.0, soft_particle_depth(), 0.0),
             },
             atlas: self.dust_atlas.clone(),
             lut: palette,
@@ -191,10 +167,16 @@ pub(super) fn setup_muzzle_assets(
     // reading its LUT floor contributes nothing — the additive premultiply already masks fully
     // transparent texels, this catches the anti-aliased fringe.
     let flash_lut = gradient_lut(&mut images, |x, _y| {
-        let floor = smoothstep(0.0, 0.17, x);
-        let color =
-            LinearRgba::rgb(0.9 + 0.1 * x, 0.35 + 0.6 * x * x, 0.08 + 0.5 * x * x * x) * floor;
-        (color, (0.3 + 0.7 * x) * floor)
+        let floor = smoothstep(0.0, look().flash_floor, x);
+        let color = LinearRgba::rgb(
+            look().flash_red.0 + look().flash_red.1 * x,
+            look().flash_green.0 + look().flash_green.1 * x * x,
+            look().flash_blue.0 + look().flash_blue.1 * x * x * x,
+        ) * floor;
+        (
+            color,
+            (look().flash_heat.0 + look().flash_heat.1 * x) * floor,
+        )
     });
     // Blast LUT: a fire ramp rather than the flash's white-out — black through deep red into
     // orange, white-hot only in the top of the signal band. Heat rides the white-hot fraction, so
@@ -202,14 +184,14 @@ pub(super) fn setup_muzzle_assets(
     // is this layer's whole die-off: `cool` holds through the fireball's first half and reaches
     // ZERO at the last LUT row, so the blast is dark before its quad despawns.
     let blast_lut = gradient_lut(&mut images, |x, y| {
-        let floor = smoothstep(0.04, 0.28, x);
-        let hot = smoothstep(0.35, 1.0, x);
-        let cool = 1.0 - smoothstep(0.25, 1.0, y);
-        let lum = (0.18 + 0.82 * x) * floor;
+        let floor = smoothstep(look().blast_floor.0, look().blast_floor.1, x);
+        let hot = smoothstep(look().blast_hot, 1.0, x);
+        let cool = 1.0 - smoothstep(look().blast_cool, 1.0, y);
+        let lum = (look().blast_luma.0 + look().blast_luma.1 * x) * floor;
         let color = LinearRgba::rgb(
             lum,
-            lum * (0.18 + 0.72 * hot),
-            lum * (0.03 + 0.60 * hot * hot),
+            lum * (look().blast_green.0 + look().blast_green.1 * hot),
+            lum * (look().blast_blue.0 + look().blast_blue.1 * hot * hot),
         ) * cool;
         (color, hot * cool)
     });
@@ -217,10 +199,14 @@ pub(super) fn setup_muzzle_assets(
     // signal; heat only in the young, bright texels (flash-lit smoke blooms for the first instants,
     // then it is inert mass).
     let smoke_lut = gradient_lut(&mut images, |x, y| {
-        let lum = 0.16 + 0.55 * x;
-        let warm = (1.0 - y) * 0.25;
-        let color = LinearRgba::rgb(lum * (0.9 + warm), lum * (0.86 + warm * 0.55), lum * 0.82);
-        let heat = x * (-y * 9.0).exp();
+        let lum = look().smoke_luma.0 + look().smoke_luma.1 * x;
+        let warm = (1.0 - y) * look().smoke_warmth;
+        let color = LinearRgba::rgb(
+            lum * (look().smoke_red + warm),
+            lum * (look().smoke_green.0 + look().smoke_green.1 * warm),
+            lum * look().smoke_blue,
+        );
+        let heat = x * (-y * look().smoke_cooling).exp();
         (color, heat)
     });
     commands.insert_resource(MuzzleVfxAssets {
@@ -261,7 +247,8 @@ impl DustPalettes {
                 // The world key's colour is constant for the session; only its elevation varies.
                 let sun = crate::world::sun_light().color.to_linear();
                 gradient_lut(images, |x, y| {
-                    let shade = (0.16 + 0.84 * x) * (0.76 + 0.24 * (1.0 - y));
+                    let shade = (look().soil_shade.x + look().soil_shade.y * x)
+                        * (look().soil_shade.z + look().soil_shade.w * (1.0 - y));
                     (
                         LinearRgba::rgb(
                             albedo.red * sun.red * shade,
@@ -294,14 +281,6 @@ struct MuzzleLight {
 /// Live muzzle lights, oldest first — the refire leak bound (see [`LIGHT_CAP`]).
 #[derive(Resource, Default)]
 struct MuzzleLightRing(std::collections::VecDeque<Entity>);
-
-/// ASSUMED shadow-read window (s): a persistent light or an isolated flash casts; repeated
-/// flashes shorter than this do not. MEASURED evidence for the short/repeating regime:
-/// `scripts/perf/run-fire-capture.sh`, M4, two tanks, M350, vsync off: firing with shadows
-/// moved p50 from 13.5 to 15.5 ms, without from 13.5 to 14.6 ms. DERIVED at the fixture's
-/// combined rate of 25/s and 0.05 s life, each cubemap lasts about three 60 Hz frames.
-/// This window is a presentation policy, not a measured perceptual threshold.
-const SHADOW_READ_WINDOW_S: f32 = 0.1;
 
 /// The game's damage-model flash's shortest refire interval, from its loaded weapon data.
 /// An unattributed dev/test shot, or a delivered shot whose weapon has left the scene, is an
@@ -353,8 +332,9 @@ fn spawn_muzzle_light(
                 intensity: peak,
                 range: light.range_m,
                 radius: light.radius_m,
-                shadow_maps_enabled: lifetime >= SHADOW_READ_WINDOW_S
-                    || refire_interval.is_none_or(|interval| interval >= SHADOW_READ_WINDOW_S),
+                shadow_maps_enabled: lifetime >= look().shadow_read_window_s
+                    || refire_interval
+                        .is_none_or(|interval| interval >= look().shadow_read_window_s),
                 ..default()
             },
             // "The hull occludes it like any object" is only true while the light can SEE the hull.
@@ -451,7 +431,8 @@ fn dress_fire(fire: On<FireShell>, mut kit: MuzzleKit) {
             .single()
             .expect("exactly one camera declares PlayerView");
         (
-            eye.translation().distance_squared(origin) < FAR_FULL_DRESSING * FAR_FULL_DRESSING,
+            eye.translation().distance_squared(origin)
+                < look().far_full_dressing * look().far_full_dressing,
             // Bevy's own rule (`bevy_render::camera::extract_cameras`): a camera with no
             // `Exposure` renders at the default one.
             exposure.copied().unwrap_or_default(),
@@ -525,7 +506,7 @@ fn dress_fire(fire: On<FireShell>, mut kit: MuzzleKit) {
             aspect: Vec3::ONE,
             roll,
             spin: 0.0,
-            erosion_end: BLAST_EROSION,
+            erosion_end: look().blast_erosion,
             rotation: None,
         });
     }
@@ -596,7 +577,7 @@ fn dress_fire(fire: On<FireShell>, mut kit: MuzzleKit) {
         material.params.fade.w = smoke.opacity;
         let start = kit.rng.range(0.0, 4.0);
         let roll = kit.rng.range(0.0, std::f32::consts::TAU);
-        let spin = kit.rng.range(-SMOKE_SPIN_MAX, SMOKE_SPIN_MAX);
+        let spin = kit.rng.range(-look().smoke_spin_max, look().smoke_spin_max);
         kit.billboard(BillboardSpec {
             material,
             lifetime: smoke.lifetime_s,
@@ -605,7 +586,7 @@ fn dress_fire(fire: On<FireShell>, mut kit: MuzzleKit) {
             frames: 4,
             flipbook: Flipbook::Loop {
                 start,
-                rate: SMOKE_FRAME_RATE,
+                rate: look().smoke_frame_rate,
             },
             start_size: smoke.diameter_m.0,
             end_size: smoke.diameter_m.1,
@@ -674,7 +655,7 @@ fn spawn_flame_jet(
         kit.billboard(BillboardSpec {
             material,
             lifetime: flames.lifetime_s,
-            origin: origin + axis * (length * 0.45),
+            origin: origin + axis * (length * look().flame_origin_fraction),
             drift: Vec3::ZERO,
             frames: 4,
             flipbook: Flipbook::Loop {
@@ -758,7 +739,9 @@ fn spawn_ground_dust(
         let lifetime = kit.rng.range(blast.lifetime_s.0, blast.lifetime_s.1);
         let start = kit.rng.range(0.0, 4.0);
         let roll = kit.rng.range(0.0, std::f32::consts::TAU);
-        let spin = kit.rng.range(-GROUND_DUST_SPIN_MAX, GROUND_DUST_SPIN_MAX);
+        let spin = kit
+            .rng
+            .range(-look().ground_dust_spin_max, look().ground_dust_spin_max);
         let palette = kit.palettes.palette(&mut kit.images, soil.colour_srgb);
         let material = kit.assets.dust_material(blast.opacity, palette, light);
         kit.billboard(BillboardSpec {
@@ -770,14 +753,14 @@ fn spawn_ground_dust(
             frames: 4,
             flipbook: Flipbook::Loop {
                 start,
-                rate: GROUND_DUST_FRAME_RATE,
+                rate: look().ground_dust_frame_rate,
             },
             start_size,
             end_size,
             aspect: Vec3::ONE,
             roll,
             spin,
-            erosion_end: GROUND_DUST_EROSION_END,
+            erosion_end: look().ground_dust_erosion_end,
             rotation: None,
         });
     }
@@ -1148,14 +1131,14 @@ mod tests {
                         Some(taste.fireball_boost),
                         opacity,
                     )
-                } else if rate == Some(SMOKE_FRAME_RATE) {
+                } else if rate == Some(look().smoke_frame_rate) {
                     (
                         "smoke",
                         taste.smoke_sharpness,
                         Some(taste.smoke_boost),
                         None,
                     )
-                } else if rate == Some(GROUND_DUST_FRAME_RATE) {
+                } else if rate == Some(look().ground_dust_frame_rate) {
                     ("dust", taste.dust_sharpness, None, None)
                 } else if billboard.erosion_end == 1.0 {
                     let opacity = Some(taste.glow_opacity);
@@ -1267,7 +1250,7 @@ mod tests {
         );
     }
 
-    /// Distance LOD contract: beyond `FAR_FULL_DRESSING` only the core, the fireball and the light
+    /// Distance LOD contract: beyond `look().far_full_dressing` only the core, the fireball and the light
     /// spawn — the glow, flame planes and smoke are near-only.
     #[test]
     fn a_far_shot_drops_to_core_fireball_and_light() {
@@ -1288,14 +1271,14 @@ mod tests {
 
     /// The ground-dust puffs of the last shot in SPAWN order: `(entity, rendered diameter,
     /// rendered position)` each. The flipbook rate is the discriminator — no other muzzle layer
-    /// plays at [`GROUND_DUST_FRAME_RATE`].
+    /// plays at `ground_dust_frame_rate`.
     fn dust_puffs(app: &mut App) -> Vec<(Entity, f32, Vec3)> {
         let world = app.world_mut();
         let mut q = world.query::<(Entity, &Billboard, &Transform)>();
         let mut puffs: Vec<(Entity, f32, Vec3)> = q
             .iter(world)
             .filter(|(_, b, _)| {
-                matches!(b.flipbook, Flipbook::Loop { rate, .. } if rate == GROUND_DUST_FRAME_RATE)
+                matches!(b.flipbook, Flipbook::Loop { rate, .. } if rate == look().ground_dust_frame_rate)
             })
             .map(|(entity, _, t)| (entity, t.scale.x, t.translation))
             .collect();

@@ -5,6 +5,8 @@
 
 use std::collections::VecDeque;
 
+use super::look::trail as look;
+
 use bevy::asset::RenderAssetUsages;
 use bevy::camera::visibility::NoFrustumCulling;
 use bevy::image::Image;
@@ -25,11 +27,11 @@ use crate::{ShotClock, ShotId};
 use super::ViewRng;
 use super::billboard::{gradient_lut, smoothstep};
 
-/// Minimum spacing (m) between captured trail points.
+/// Resolution: minimum ribbon station spacing (m), bounding mesh updates along flight.
 const TRAIL_MIN_SPACING: f32 = 14.0;
-/// Hard per-trail point cap.
+/// Resolution: per-trail point cap bounds ribbon rebuild work.
 const TRAIL_MAX_POINTS: usize = 128;
-/// Live-trail ring cap.
+/// Resolution: live-trail cap bounds retained meshes.
 const TRAIL_CAP: usize = 8;
 
 pub(super) fn plugin(app: &mut App) {
@@ -48,6 +50,7 @@ pub(super) fn plugin(app: &mut App) {
 #[cfg(test)]
 pub(super) fn mount_loss_harness(app: &mut App) {
     app.init_resource::<TrailRing>()
+        .init_resource::<Time<Fixed>>()
         .init_resource::<Assets<Mesh>>()
         .init_resource::<Assets<Image>>()
         .init_resource::<Assets<VfxTrailMaterial>>()
@@ -149,20 +152,20 @@ pub(super) fn setup_trail_assets(
     // Powder smoke: warm gray young trail cooling toward a pale, slightly blue dissipation; a
     // whisper of heat right at the fresh end so the first meters catch a little bloom.
     let lut = gradient_lut(&mut images, |x, y| {
-        let lum = 0.30 + 0.45 * x;
-        let warm = (1.0 - y) * 0.18;
+        let lum = look().luma.0 + look().luma.1 * x;
+        let warm = (1.0 - y) * look().warmth;
         let color = LinearRgba::rgb(
-            lum * (0.92 + warm),
-            lum * (0.90 + warm * 0.5),
-            lum * (0.88 + (y * 0.08)),
+            lum * (look().red + warm),
+            lum * (look().green.0 + look().green.1 * warm),
+            lum * (look().blue.0 + look().blue.1 * y),
         );
-        let heat = 0.35 * x * (-y * 12.0).exp();
+        let heat = look().heat.0 * x * (-y * look().heat.1).exp();
         (color, heat)
     });
     let material = materials.add(VfxTrailMaterial {
         params: TrailParams {
-            shape: Vec4::new(1.0 / 26.0, 0.05, 3.2, 0.55),
-            glow: Vec4::new(4.0, 0.18, 0.0, 0.0),
+            shape: look().shape,
+            glow: look().glow,
         },
         noise,
         lut,
@@ -242,6 +245,7 @@ fn attach_trail(
     add: On<Add, FlightEffects>,
     shells: Query<(&ShellPath, Option<&Shot>, &FlightEffects, Has<TrailedShell>)>,
     assets: Res<TrailAssets>,
+    time: Res<Time<Fixed>>,
     mut ring: ResMut<TrailRing>,
     mut rng: ResMut<ViewRng>,
     mut commands: Commands,
@@ -277,7 +281,7 @@ fn attach_trail(
         capture_point(
             &mut ribbon,
             *point,
-            (pre - i) as f32 * (1.0 / 64.0),
+            (pre - i) as f32 * time.timestep().as_secs_f32(),
             i,
             path_segment(path, i),
             &mut rng,
@@ -322,7 +326,7 @@ fn capture_point(
     // Random lateral direction ⊥ nothing in particular (smoke shear is chaotic) + a constant rise.
     let theta = rng.range(0.0, std::f32::consts::TAU);
     let lateral = Vec3::new(theta.cos(), 0.0, theta.sin())
-        * rng.range(0.5, 1.0)
+        * rng.range(look().lateral_variation.0, look().lateral_variation.1)
         * ribbon.emission.lateral_accel_mps2;
     ribbon.points.push_back(TrailPoint {
         pos,
@@ -800,7 +804,7 @@ fn ribbon_vertices(
 /// A tiny but real ribbon mesh for the startup pipeline prewarm: same attribute layout and enough
 /// geometry that the trail pipeline compiles against exactly what live trails will draw.
 pub(super) fn prewarm_ribbon_mesh() -> Mesh {
-    // ASSUMED synthetic unit emission for pipeline compilation, never a round's emission data.
+    // Resolution: synthetic geometry only compiles the vertex layout; never shown as an effect.
     let emission = SmokeEmission {
         lifetime_s: 2.0,
         width_m: 1.0,
@@ -873,7 +877,8 @@ fn noise_texture(images: &mut Assets<Image>) -> Handle<Image> {
     let mut data = Vec::with_capacity(SIZE * SIZE);
     for y in 0..SIZE {
         for x in 0..SIZE {
-            let v = 0.65 * value_noise(x, y, 8, 0) + 0.35 * value_noise(x, y, 21, 1);
+            let v = look().noise_blend * value_noise(x, y, look().noise_cells.0, 0)
+                + (1.0 - look().noise_blend) * value_noise(x, y, look().noise_cells.1, 1);
             data.push((v.clamp(0.0, 1.0) * 255.0) as u8);
         }
     }
@@ -1102,6 +1107,7 @@ mod tests {
             .init_resource::<Assets<Image>>()
             .init_resource::<Assets<VfxTrailMaterial>>()
             .init_resource::<Time>()
+            .init_resource::<Time<Fixed>>()
             .insert_resource(ViewRng::seeded(9))
             .add_message::<TrailStationMeshEvidence>()
             .add_observer(attach_trail)
@@ -1184,6 +1190,31 @@ mod tests {
             every_asset_has_vertices(&app),
             "no asset was emptied in place"
         );
+    }
+
+    /// The game's damage-model trail ages catch-up points in the simulation's actual step.
+    /// FIXTURE: two nondefault rates expose a duplicated hardcoded sampling interval.
+    #[test]
+    fn catch_up_trail_age_reads_the_fixed_clock() {
+        for seconds in [0.05, 0.2] {
+            let mut app = trail_app();
+            app.insert_resource(Time::<Fixed>::from_seconds(seconds));
+            app.world_mut().spawn((
+                ShellPath {
+                    points: vec![Vec3::ZERO, Vec3::X * TRAIL_MIN_SPACING],
+                    segment_starts: Vec::new(),
+                },
+                PenetrationMarks::default(),
+                FlightEffects::fixture_traced(),
+                Transform::IDENTITY,
+            ));
+            app.world_mut().flush();
+            let world = app.world_mut();
+            let ribbon = world.query::<&TrailRibbon>().single(world).unwrap();
+            let step = world.resource::<Time<Fixed>>().timestep().as_secs_f32();
+            assert_eq!(ribbon.points[0].age, 2.0 * step);
+            assert_eq!(ribbon.points[1].age, step);
+        }
     }
 
     /// A round declaring smoke grows drawable ribbon geometry; an explicitly smokeless round

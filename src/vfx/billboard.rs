@@ -88,7 +88,7 @@ pub(crate) struct VfxParams {
     /// glow (`AlphaMode::Add`), `0.0` = alpha-over mass (`AlphaMode::Blend`). Both alpha modes share
     /// the premultiplied blend state, so the shader must premultiply the additive path itself; this
     /// lane tells it which (see `vfx_billboard.wgsl`). z: soft-particle fade depth in metres
-    /// ([`SOFT_PARTICLE_DEPTH`]), `0.0` = hard-edged. w: reserved.
+    /// ([`soft_particle_depth`]), `0.0` = hard-edged. w: reserved.
     pub glow: Vec4,
 }
 
@@ -109,7 +109,9 @@ fn lane_stride() -> usize {
 /// wall is not an intersection to hide; the two layers that LIE on a surface (ground scar, shock
 /// ring) have their whole quad inside the band, which scales them out of existence; and ejecta is
 /// solid thrown mass whose silhouette is its own edge, not a gas boundary.
-pub(crate) const SOFT_PARTICLE_DEPTH: f32 = 0.75;
+pub(crate) fn soft_particle_depth() -> f32 {
+    super::look::impact().soft_particle_depth
+}
 
 /// One FAMILY's flipbook + erosion + gradient-map billboard material (fragment:
 /// `vfx_billboard.wgsl`; vertex: Bevy's default mesh path — facing is done on the entity's
@@ -549,6 +551,7 @@ pub(crate) fn gradient_lut(
     images: &mut Assets<Image>,
     stop: impl Fn(f32, f32) -> (LinearRgba, f32),
 ) -> Handle<Image> {
+    // Resolution: palette grid bounds generated texels and samples both signal and age.
     const W: usize = 64;
     const H: usize = 16;
     let mut data = Vec::with_capacity(W * H * 4);

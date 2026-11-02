@@ -20,6 +20,8 @@
 //! The tangent-space normal's y follows the mesh bitangent, which mikktspace points along +v for
 //! the decal's quad, so a height rising toward +v tilts it to −y: `n ∝ (−∂h/∂x, −∂h/∂y, 1)`.
 
+use super::super::look::marks as look;
+
 use bevy::asset::RenderAssetUsages;
 use bevy::image::{Image, ImageSampler, ImageSamplerDescriptor};
 use bevy::math::{Vec2, Vec3};
@@ -27,12 +29,10 @@ use bevy::render::render_resource::{Extent3d, TextureDimension, TextureFormat};
 
 use crate::hull_marks::MarkKind;
 
-/// Texels on a side of every map. ASSUMED: a look to tune; at 256 a mark keeps a texel per screen
-/// pixel down to about a metre's viewing distance for an 8.8 cm hole (DERIVED: the hole's quad is
-/// 0.29 m, so 256 texels span it at ~870 per metre).
+/// Resolution: map side bounds startup generation and retained mip memory.
 pub(crate) const SIZE: usize = 256;
 
-/// Noise seeds per kind.
+/// Resolution: variant count bounds generated maps and material families.
 pub(crate) const VARIANTS: usize = 3;
 
 /// One generated set.
@@ -43,36 +43,18 @@ pub(crate) struct MarkMaps {
     pub(crate) depth: Image,
 }
 
-/// The core's radius in the square. The square spans two units, the quad's side, so the core is
-/// `HOLE_CORE` sides across: [`footprint`]'s quad of `1 / HOLE_CORE` calibres puts one calibre
-/// across the core, the lip and the rings outside it (DERIVED: 3.3 calibres, 0.29 m at 88 mm).
-const HOLE_CORE: f32 = 0.30;
-/// A dent's bowl radius in the square, as [`HOLE_CORE`]: the bowl is one calibre across.
-const DENT_BOWL: f32 = 0.36;
-/// A scratch's half-width at its widest, as [`HOLE_CORE`]: the gouge is one calibre wide.
-const SCRATCH_WIDTH: f32 = 0.32;
-
-/// The deepest each profile goes, in the square's units: what white means in its depth map.
-const HOLE_DEPTH: f32 = 0.12;
-const DENT_DEPTH: f32 = 0.05;
-const SCRATCH_DEPTH: f32 = 0.035;
-
 /// Neutral exposed-surface mask. The mark's resolved substance supplies its linear tint and PBR
 /// factors; this procedural map describes relief and grain only.
 const EXPOSED: Vec3 = Vec3::ONE;
-/// The hole's core, near-black.
-const CORE: Vec3 = Vec3::new(0.012, 0.011, 0.010);
-/// A paint edge or crack in shadow.
-const PAINT_EDGE: Vec3 = Vec3::new(0.035, 0.034, 0.030);
 
 /// The decal's footprint per kind, in calibres: x along the shot (before the stretch), y across it.
 /// Each kind's shape — a hole's core, a dent's bowl, a scratch's gouge at its widest — is one
 /// calibre across (issue 124: the hole's diameter is the calibre).
 pub(crate) fn footprint(kind: MarkKind) -> Vec2 {
     let across = match kind {
-        MarkKind::Hole => 1.0 / HOLE_CORE,
-        MarkKind::Dent => 1.0 / DENT_BOWL,
-        MarkKind::Scratch => 1.0 / SCRATCH_WIDTH,
+        MarkKind::Hole => 1.0 / look().hole_core,
+        MarkKind::Dent => 1.0 / look().dent_bowl,
+        MarkKind::Scratch => 1.0 / look().scratch_width,
     };
     Vec2::splat(across)
 }
@@ -85,9 +67,9 @@ pub(crate) fn parallax_depth(kind: MarkKind) -> f32 {
 
 fn deepest(kind: MarkKind) -> f32 {
     match kind {
-        MarkKind::Hole => HOLE_DEPTH,
-        MarkKind::Dent => DENT_DEPTH,
-        MarkKind::Scratch => SCRATCH_DEPTH,
+        MarkKind::Hole => look().hole_depth,
+        MarkKind::Dent => look().dent_depth,
+        MarkKind::Scratch => look().scratch_depth,
     }
 }
 
@@ -103,30 +85,32 @@ struct Texel {
 }
 
 impl Texel {
-    const CLEAR: Self = Self {
-        albedo: Vec3::ZERO,
-        alpha: 0.0,
-        metallic: 0.0,
-        roughness: 0.8,
-        height: 0.0,
-    };
+    fn clear() -> Self {
+        Self {
+            albedo: Vec3::ZERO,
+            alpha: 0.0,
+            metallic: 0.0,
+            roughness: look().paint_roughness,
+            height: 0.0,
+        }
+    }
 
     fn exposed(grain: f32, alpha: f32) -> Self {
         Self {
-            albedo: EXPOSED * (0.88 + 0.3 * (grain - 0.5)),
+            albedo: EXPOSED * (look().exposed_luma + look().exposed_grain * (grain - 0.5)),
             alpha,
-            metallic: 0.85,
-            roughness: 0.36 + 0.16 * (grain - 0.5),
-            height: 0.004 * (grain - 0.5),
+            metallic: look().exposed_metallic,
+            roughness: look().exposed_roughness + look().roughness_grain * (grain - 0.5),
+            height: look().grain_relief * (grain - 0.5),
         }
     }
 
     fn paint_edge(alpha: f32, height: f32) -> Self {
         Self {
-            albedo: PAINT_EDGE,
+            albedo: look().paint_edge,
             alpha,
             metallic: 0.0,
-            roughness: 0.8,
+            roughness: look().paint_roughness,
             height,
         }
     }
@@ -153,130 +137,176 @@ fn square_point(column: usize, row: usize) -> Vec2 {
 
 fn hole(p: Vec2, seed: u32) -> Texel {
     let r = p.length();
-    let core = HOLE_CORE * (1.0 + 0.10 * (fbm(p * 6.0, seed) - 0.5));
+    let core = look().hole_core
+        * (1.0 + look().hole_distortion * (fbm(p * look().hole_edge_frequency, seed) - 0.5));
     let d = r - core;
-    let lip = 0.085;
-    let ring = HOLE_CORE * (1.45 + 0.55 * fbm(p * 4.0 + Vec2::splat(17.0), seed ^ 0xA1));
-    let grain = fbm(p * 22.0, seed ^ 0x5C);
+    let lip = look().hole_lip;
+    let ring = look().hole_core
+        * (look().hole_ring_radius
+            + look().hole_ring_distortion
+                * fbm(
+                    p * look().hole_ring_frequency + Vec2::splat(look().hole_ring_offset),
+                    seed ^ 0xA1,
+                ));
+    let grain = fbm(p * look().grain_frequency, seed ^ 0x5C);
     if d < 0.0 {
         // The bore's wall catches a little light just inside the rim.
-        let wall = smoothstep(-0.05, 0.0, d);
+        let wall = smoothstep(look().hole_wall_fade, 0.0, d);
         return Texel {
-            albedo: CORE.lerp(EXPOSED * 0.12, wall * 0.5),
+            albedo: look().core.lerp(
+                EXPOSED * look().hole_wall_luma,
+                wall * look().hole_wall_gain,
+            ),
             alpha: 1.0,
-            metallic: 0.3,
-            roughness: 0.85,
-            height: -HOLE_DEPTH,
+            metallic: look().core_metallic,
+            roughness: look().core_roughness,
+            height: -look().hole_depth,
         };
     }
     if d < lip {
         let t = d / lip;
         return Texel {
             // Darkened by the passage at the rim, bright exposed substrate where the ring begins.
-            albedo: (EXPOSED * 0.5).lerp(EXPOSED, t) * (0.92 + 0.16 * (grain - 0.5)),
+            albedo: (EXPOSED * 0.5).lerp(EXPOSED, t)
+                * (look().hole_ring_luma + look().hole_ring_grain * (grain - 0.5)),
             alpha: 1.0,
-            metallic: 0.9,
-            roughness: 0.32 + 0.1 * grain,
-            height: -0.045 * (1.0 - t) * (1.0 - t),
+            metallic: look().hole_ring_metallic,
+            roughness: look().hole_ring_roughness + look().hole_roughness_grain * grain,
+            height: look().hole_lip_depth * (1.0 - t) * (1.0 - t),
         };
     }
     if r < ring {
-        return Texel::exposed(grain, 1.0 - smoothstep(ring - 0.012, ring, r));
+        return Texel::exposed(grain, 1.0 - smoothstep(ring - look().core_red, ring, r));
     }
     chipped_paint(p, r - ring, seed)
 }
 
 fn dent(p: Vec2, seed: u32) -> Texel {
-    let rho = p.length() / DENT_BOWL * (1.0 + 0.12 * (fbm(p * 5.0, seed) - 0.5));
+    let rho = p.length() / look().dent_bowl
+        * (1.0 + look().dent_distortion * (fbm(p * look().dent_edge_frequency, seed) - 0.5));
     let bowl = if rho < 1.0 {
         let s = 1.0 - rho * rho;
-        -DENT_DEPTH * s * s
+        -look().dent_depth * s * s
     } else {
         0.0
     };
-    let rim = 0.010 * (-((rho - 1.06) / 0.10).powi(2)).exp();
+    let rim = look().dent_rim_height
+        * (-((rho - look().dent_rim_radius) / look().dent_rim_width).powi(2)).exp();
     let height = bowl + rim;
-    let grain = fbm(p * 22.0, seed ^ 0x5C);
-    let bare = 0.38 + 0.25 * (2.0 * fbm(p * 7.0 + Vec2::splat(3.0), seed ^ 0x11) - 1.0);
+    let grain = fbm(p * look().grain_frequency, seed ^ 0x5C);
+    let bare = look().dent_bare_radius
+        + look().dent_bare_distortion
+            * (2.0
+                * fbm(
+                    p * look().dent_bare_frequency + Vec2::splat(look().dent_bare_offset),
+                    seed ^ 0x11,
+                )
+                - 1.0);
     if rho < bare {
         let mut texel = Texel::exposed(grain, 1.0);
         texel.height += height;
         return texel;
     }
-    let flake = fbm(p * 12.0, seed ^ 0x33);
-    if (0.35..1.15).contains(&rho) && flake > 0.70 {
+    let flake = fbm(p * look().dent_flake_frequency, seed ^ 0x33);
+    if (0.35..1.15).contains(&rho) && flake > look().dent_flake_threshold {
         let mut texel = Texel::exposed(grain, 1.0);
         texel.height += height;
         return texel;
     }
-    let ring_out = 1.5 + 0.3 * (fbm(p * 3.0, seed ^ 0x44) - 0.5);
-    if rho > 0.3 && rho < ring_out {
-        let craze = crack(p * 9.0, seed ^ 0x22, 0.90).max(crack(p * 17.0, seed ^ 0x23, 0.93));
-        let fade = 1.0 - smoothstep(ring_out - 0.25, ring_out, rho);
-        if craze * fade > 0.05 {
-            return Texel::paint_edge(0.85 * craze * fade, height);
+    let ring_out = look().dent_crack_outer
+        + look().dent_crack_distortion
+            * (fbm(p * look().dent_crack_ring_frequency, seed ^ 0x44) - 0.5);
+    if rho > look().dent_crack_inner && rho < ring_out {
+        let craze = crack(
+            p * look().dent_crack_frequency,
+            seed ^ 0x22,
+            look().dent_crack_sharpness,
+        )
+        .max(crack(
+            p * look().dent_fine_crack_frequency,
+            seed ^ 0x23,
+            look().dent_fine_crack_sharpness,
+        ));
+        let fade = 1.0 - smoothstep(ring_out - look().dent_crack_fade, ring_out, rho);
+        if craze * fade > look().dent_crack_floor {
+            return Texel::paint_edge(look().dent_crack_alpha * craze * fade, height);
         }
     }
-    if rho < 1.12 {
+    if rho < look().dent_bowl_outer {
         // The bowl over the paint: a translucent grey the bowl's normal shades.
         return Texel {
-            albedo: Vec3::splat(0.10),
-            alpha: 0.45 * (1.0 - smoothstep(0.95, 1.12, rho)),
+            albedo: Vec3::splat(look().dent_rim_width),
+            alpha: look().dent_bowl_alpha
+                * (1.0 - smoothstep(look().dent_bowl_fade, look().dent_bowl_outer, rho)),
             metallic: 0.0,
-            roughness: 0.7,
+            roughness: look().dent_bowl_roughness,
             height,
         };
     }
     Texel {
         height,
-        ..Texel::CLEAR
+        ..Texel::clear()
     }
 }
 
 fn scratch(p: Vec2, seed: u32) -> Texel {
     // The widest reach past the axis is the noisy half-width, the lip and the chips: under 0.47,
     // so the gouge starts that far inside the square's edge.
-    let (start, end) = (-0.52_f32, 0.80_f32);
+    let (start, end) = (look().scratch_start, look().scratch_end);
     let t = ((p.x - start) / (end - start)).clamp(0.0, 1.0);
     let axis = Vec2::new(start + t * (end - start), 0.0);
     // The gouge tapers toward its tail, the way the round left the face.
-    let width = SCRATCH_WIDTH * (1.0 - 0.8 * t.powf(0.8));
-    let edge = fbm(Vec2::new(p.x * 3.0, p.y * 3.0), seed) - 0.5;
+    let width =
+        look().scratch_width * (1.0 - look().scratch_taper * t.powf(look().scratch_taper_power));
+    let edge = fbm(
+        Vec2::new(
+            p.x * look().scratch_edge_frequency,
+            p.y * look().scratch_edge_frequency,
+        ),
+        seed,
+    ) - 0.5;
     let dist = (p - axis).length();
-    let d = dist - width * (1.0 + 0.25 * edge);
-    let streak = fbm(Vec2::new(p.x * 1.5, p.y * 30.0), seed ^ 0x4);
+    let d = dist - width * (1.0 + look().scratch_edge_distortion * edge);
+    let streak = fbm(
+        Vec2::new(p.x * look().scratch_streak_x, p.y * look().scratch_streak_y),
+        seed ^ 0x4,
+    );
     if d < 0.0 {
         let q = (dist / width).min(1.0);
-        let depth = SCRATCH_DEPTH * (1.0 - 0.7 * t);
+        let depth = look().scratch_depth * (1.0 - look().scratch_depth_taper * t);
         return Texel {
-            albedo: EXPOSED * (0.9 + 0.35 * (streak - 0.5)),
-            alpha: smoothstep(0.0, 0.01, -d),
-            metallic: 0.88,
-            roughness: 0.34 + 0.15 * streak,
+            albedo: EXPOSED * (look().scratch_luma + look().scratch_grain * (streak - 0.5)),
+            alpha: smoothstep(0.0, look().scratch_alpha_edge, -d),
+            metallic: look().scratch_metallic,
+            roughness: look().scratch_roughness + look().scratch_roughness_grain * streak,
             height: -depth * (1.0 - q * q),
         };
     }
-    let lip = 0.035;
+    let lip = look().scratch_lip;
     if d < lip {
         let s = 1.0 - d / lip;
-        return Texel::paint_edge(0.55 * s, 0.004 * s);
+        return Texel::paint_edge(look().scratch_lip_alpha * s, look().scratch_lip_height * s);
     }
-    if d < 0.10 && fbm(p * 18.0, seed ^ 0x77) > 0.72 {
+    if d < look().scratch_chip_reach
+        && fbm(p * look().scratch_chip_frequency, seed ^ 0x77) > look().scratch_chip_threshold
+    {
         return Texel::exposed(streak, 1.0);
     }
-    Texel::CLEAR
+    Texel::clear()
 }
 
 /// Past a hole's bare ring: the dark edge of the paint the ring tore, then scattered bare chips.
 fn chipped_paint(p: Vec2, past: f32, seed: u32) -> Texel {
-    let edge = 0.03;
+    let edge = look().chip_edge;
     if past < edge {
-        return Texel::paint_edge(0.6 * (1.0 - past / edge), 0.003);
+        return Texel::paint_edge(look().chip_alpha * (1.0 - past / edge), look().chip_height);
     }
-    if past < 0.2 && fbm(p * 13.0, seed ^ 0x77) > 0.68 + past {
-        return Texel::exposed(fbm(p * 22.0, seed ^ 0x5C), 1.0);
+    if past < look().chip_reach
+        && fbm(p * look().chip_frequency, seed ^ 0x77) > look().chip_threshold + past
+    {
+        return Texel::exposed(fbm(p * look().grain_frequency, seed ^ 0x5C), 1.0);
     }
-    Texel::CLEAR
+    Texel::clear()
 }
 
 /// A crack network: ridges of `p`'s noise sharper than `sharpness` (0–1), as a 0–1 mask.
@@ -314,7 +344,7 @@ fn value_noise(p: Vec2, seed: u32) -> f32 {
 
 /// Four octaves of [`value_noise`], each turned a little off the last's lattice, in `[0, 1]`.
 fn fbm(p: Vec2, seed: u32) -> f32 {
-    let turn = Vec2::from_angle(0.6);
+    let turn = Vec2::from_angle(look().noise_turn_rad);
     let mut point = p;
     let mut amplitude = 0.5;
     let mut sum = 0.0;
@@ -322,7 +352,7 @@ fn fbm(p: Vec2, seed: u32) -> f32 {
     for octave in 0..4 {
         sum += amplitude * value_noise(point, seed.wrapping_add(octave * 0x9E37));
         total += amplitude;
-        point = turn.rotate(point) * 2.03;
+        point = turn.rotate(point) * look().noise_lacunarity;
         amplitude *= 0.5;
     }
     sum / total

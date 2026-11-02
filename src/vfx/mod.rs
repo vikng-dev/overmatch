@@ -10,6 +10,7 @@ mod ember;
 /// The decals that draw each vehicle's replicated hull marks.
 mod hull_marks;
 mod impact;
+mod look;
 mod muzzle;
 mod prewarm;
 mod scatter_hit;
@@ -73,6 +74,7 @@ pub(crate) fn mount_trail_loss_harness(app: &mut App) {
 }
 
 pub fn plugin(app: &mut App) {
+    look::load();
     app.init_resource::<ViewRng>();
     app.add_plugins((
         billboard::plugin,
