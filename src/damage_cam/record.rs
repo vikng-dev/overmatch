@@ -879,9 +879,9 @@ pub(crate) fn report_from(
 }
 
 /// One deposit on a component: `(volume, units, t, mark)`, its dose in the dose units the shot's
-/// tally took it in (a hard box's line, a bounce's shock and a field at the energy rate, a
-/// witness's chord at the reference-mm rate: [`ShotDose`]) and `mark` the armour mark that dealt
-/// it.
+/// tally took it in (a hard box's line and a bounce's shock at the energy rate, a field at its
+/// mechanism's unit, a witness's chord at the reference-mm rate: [`ShotDose`]) and `mark` the
+/// armour mark that dealt it.
 type Deposit = (Entity, u64, f32, usize);
 
 /// What [`report_from`] reads each mark of an encounter against: the struck tank, the path's timed

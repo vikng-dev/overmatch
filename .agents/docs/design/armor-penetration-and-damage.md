@@ -339,17 +339,17 @@ law: its capability is 114.93 reference-mm and its exit speed 259.69 m/s; the re
 `100 × (259.69 / 773)² = 11.286` reference-mm emitted 395.0 HP at its field conversion. The
 round loses 2.7035 MJ. Matching the target gave the former transport coefficient about 0.877,
 rounded to 0.88; including the field weights' half-strength normalization and the transport
-conversion gives `u_C`. The reference fixture still emits 396.513333 HP, or 396.5 to one decimal
-(MEASURED by `spall_cone::tests::the_reference_emission_totals_are_unchanged`). The retired
+conversion gives `u_C`. The reference fixture still emits 396.513336 HP, or 396.5 to one decimal
+(MEASURED by the ignored bed `spall_cone::tests::the_shipped_emission_totals`). The retired
 hole-calibre and speed-ratio terms have no part in this law: a thin plate yields a weak cone,
 and a barely perforating round yields the strongest cone that plate gives.
 
-The walker and records carry **transport strength** `S = H_C × j / q`, `j = joules_per_hp`,
-`q = EMITTED_SHARE = ½`, the exact normalization of the field weights. Their emission in
-transport joules is `qS`; dividing deposits by `j` recovers `H_C`. These are representation
-factors, not additional potency knobs. The cone coefficient rounds to f32 before multiplying
-lost energy and material ratio; the shipped coefficient and all field-cast results retain the
-same bits. The three mechanisms' units and their replacement law are stated in §6.
+The walker and records carry the **energy the field carries**: strength `S = E ρ / q`, `E` the
+energy lost across the body, `ρ` the exit's strength ratio, `q = EMITTED_SHARE = ½` the exact
+normalization of the field weights, so the field emits `qS = E ρ` joules. No HP unit enters `S`.
+A building reads a direction's `S f_k / N` joules as crushing energy; a box's pool reads the same
+joules times `u_C` (`spall_cone::FieldUnit`, `ballistics::field_units`), so `H_C = u_C qS`. The
+three mechanisms' units and their replacement law are stated in §6.
 
 **Preserved scenario record and open exit-material call** (#116, #182). Subject: the game's
 damage model, HP pools at stations. The earlier energy-law record reported these as MEASURED:
@@ -421,13 +421,13 @@ any other volume has entered it at the throw point.
 
 **Dose.** A box's dose from one cone is `D_b = (1/N) Σ s_i` over the directions that dose it — a
 hard box those stopped in it, a witness every one entering it short of its stop — each direction
-dosing a box once, in transport joules, never scaled by the box's own factor; armour (no count) takes
+dosing a box once, in the field's joules, never scaled by the box's own factor; armour (no count) takes
 nothing. Doses go through the addressed `Dose` effect, like the line's. A box's dose from the whole
 shot (the line, a bounce's shock and every cone) converts to pool units once, on its total (§6).
-Every field deposit, to a hard box and a witness alike, is a share of the cone's emitted HP.
-Internally it enters the tally in transport joules and divides by `joules_per_hp` to cancel that
-encoding (§6); the cone's own unit alone sets its energy-to-HP scale. The pool quantum gate tests
-the whole emitted HP, `qS/j`, against the pool resolution.
+Every field deposit, to a hard box and a witness alike, is a share of the cone's emitted HP: it
+enters the tally as its joules times the cone's unit (§6), the one energy-to-HP scale a field has;
+`joules_per_hp` never touches it. The pool quantum gate tests the whole emitted HP, `u_C qS`,
+against the pool resolution.
 A box of face `A` fully inside the cone, `θ` off its axis, has the knockout radius
 `R = sqrt(2 f(θ) E A / (pool Ω_c))`, `E = qS/j` in HP points, `Ω_c = 2π(1 − cos α)` and `f(θ)` the
 ball's weight there (½ averaged over the cone). A bigger box is a bigger target: it takes more of
@@ -750,11 +750,11 @@ The load-time construction law gives, DERIVED from those inputs:
 kinetic energy driven into its wall (`Burst::energy`, DERIVED at load). `u_B` is
 `burst.emitted_hp_per_joule` in `assets/ballistics/spall_cone.ron`, a provisional `Unit` of
 0.035 emitted HP per joule driven. Neither energy lost reaching the burst nor the cone's unit
-enters it. In the field transport representation `S = H_B × j / q`, as for the cone; the
-ring's equal-solid-angle strata emit `qS` at every direction count. They march, shadow and dose
-as a cone's do (§5), through spatially reached volumes, leaving none, behind the pool quantum
-gate. Converting deposits by `j` cancels the encoding; it does not apply the line's balance scale
-again. The record and wire retain their field descriptor and strength representation. The data
+enters it. Its strength is `S = E_wall / q`, as for the cone the energy it carries over the
+emitted share; the ring's equal-solid-angle strata emit `qS = E_wall` at every direction count.
+They march, shadow and dose as a cone's do (§5), through spatially reached volumes, leaving none,
+behind the pool quantum gate; a deposit's joules times `u_B` are its HP, and a building reads the
+joules themselves. The record and wire carry the field descriptor and that strength. The data
 block also holds the ring's half-width and direction count, independently of potency.
 
 **Potency.** The ring's unit was set against the retired even-sphere target: a crew station's
@@ -771,10 +771,10 @@ construction record). The unit then stayed fixed when the ring drove the current
 crew knockout radius of `sqrt(13920.84 × 0.2 / (4π × 30)) = 2.72 m`. Keeping the unit preserves
 the chosen ring's game potency; it does not claim the ring was re-tuned to the old sphere target.
 
-MEASURED by `spall_cone::tests::the_reference_emission_totals_are_unchanged`, the shipped ring
-emits 13,920.837333 HP with exactly its previous transport strength. The previously quoted
-13,922 HP is an approximate derived figure, not the measured total; preserving behaviour takes
-precedence over tuning to that quotation. A thin unshadowed face `A` wholly inside the band has
+MEASURED by the ignored bed `spall_cone::tests::the_shipped_emission_totals`, the shipped ring
+emits 13,920.837891 HP (13,920.837333 HP in the earlier transport representation). The
+previously quoted 13,922 HP is an approximate derived figure, not the measured total;
+preserving behaviour takes precedence over tuning to that quotation. A thin unshadowed face `A` wholly inside the band has
 knockout radius `R = sqrt(H_B A b / (4π pool))`, `b = 4π p_Ω`, its brightness relative to a
 uniform sphere. DERIVED from the shipped construction above, with the 30 HP crew pool and
 0.2 m² face (a module follows from its own authored pool and face):
@@ -888,8 +888,8 @@ Each mechanism has one balance knob whose name says what it converts:
 The field units are DERIVED from the preserved transport coefficients and normalization (§5,
 §5a); the line unit's derivation is above. There are three because these are three mechanisms
 with independent game potency, not three physical shares of one energy budget. Changing the
-line's unit must not retune a cone or ring: their transport encoding includes the line rate,
-and deposit decoding cancels it. A witness's line is a chord law with the round's crew line
+line's unit does not touch a cone or ring: a field carries joules, which a building crushes
+with, and converts them to HP only through its own unit. A witness's line is a chord law with the round's crew line
 rate, not a fourth energy mechanism.
 
 The cone and ring units stand in for a missing **fragment-hit law**: fragments empty a crew

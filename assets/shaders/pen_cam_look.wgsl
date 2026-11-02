@@ -113,7 +113,7 @@ struct LookParams {
     // (world) and how far its front has run (m), negative before it is thrown; the picture's `u`
     // (world, unit) and the support's inner edge (rad, 0 on a cap and the sphere); the picture's
     // `v` (world, unit) and its pitch (rad a texel); the emission its strength `S` gives
-    // (`ρ S / Ω`, HP points per sr, world), the world's metres per record metre, and the longest
+    // (`S / Ω`, HP points per sr, world), the world's metres per record metre, and the longest
     // reach (m); its law (`law`): the kind of its terms, their two numbers and its strata `N`; and
     // the picture's six faces, two lanes each: the crop's tangent corner `x0, y1` and its size
     // (texels), and its place in `pictures` (texels).
