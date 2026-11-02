@@ -44,6 +44,7 @@ fn work_rate() -> f64 {
 pub(crate) enum RepairSnapshotError {
     NotFraction(f32),
     FullPool,
+    NotModule,
 }
 impl std::fmt::Display for RepairSnapshotError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -51,6 +52,10 @@ impl std::fmt::Display for RepairSnapshotError {
             Self::NotFraction(value) => {
                 write!(f, "repair progress {value} must be finite and in [0, 1]")
             }
+            Self::NotModule => write!(
+                f,
+                "active repair requires a repairable module; crew, ammunition and functionless pools have no repair work"
+            ),
             Self::FullPool => write!(
                 f,
                 "active repair requires a module below capacity; a full pool has no missing work"

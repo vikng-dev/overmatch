@@ -710,6 +710,7 @@ fn apply_net_crew(
         (With<Remote>, Or<(Changed<NetCrew>, Changed<TankVolumes>)>),
     >,
     mut volumes: Query<VolumeSink>,
+    repairables: Query<(), crate::damage::repair::Modules>,
     mut commands: Commands,
 ) {
     for (tank_volumes, net) in &tanks {
@@ -732,6 +733,9 @@ fn apply_net_crew(
             .iter()
             .zip(&net.volumes)
             .map(|(&volume, snap)| {
+                if snap.repair.is_some() && !repairables.contains(volume) {
+                    return Err(crate::damage::repair::RepairSnapshotError::NotModule);
+                }
                 let sink = volumes
                     .get(volume)
                     .expect("a health bearer was filtered on this query");
@@ -752,6 +756,7 @@ fn apply_net_crew(
                 .get_mut(volume)
                 .expect("a health bearer is a volume sink: `bearers` was filtered on the query");
             sink.health.set_held(snap.held);
+            // Non-modules legitimately carry no timer; active work for them was refused above.
             if let Some(mut repair) = sink.repair {
                 *repair = parsed_repair;
             }
@@ -2981,6 +2986,31 @@ mod tests {
                 .elapsed
                 .is_none()
         );
+    }
+
+    /// The game's damage model: peer repair metadata cannot be silently discarded on a
+    /// non-module while the rest of its record changes HP. Refuse the whole record instead.
+    #[test]
+    fn repair_progress_on_a_non_module_is_refused_atomically() {
+        use crate::damage::VolumeOf;
+        let mut world = World::new();
+        let initial = ComponentHealth::holding(21, crate::ballistics::POOL_UNITS_PER_HP); // Fixture.
+        let root = world
+            .spawn((
+                Remote,
+                NetCrew {
+                    volumes: vec![VolumeSnapshot {
+                        held: 2 * initial.held(),
+                        repair: Some(0.5),
+                        crew: None,
+                    }],
+                    swap: None,
+                },
+            ))
+            .id();
+        let volume = world.spawn((VolumeOf(root), initial)).id();
+        world.run_system_once(apply_net_crew).unwrap();
+        assert_eq!(*world.get::<ComponentHealth>(volume).unwrap(), initial);
     }
 
     /// The crew-swap false-death tripwire (the corruption this slice ends). Builds the exact
