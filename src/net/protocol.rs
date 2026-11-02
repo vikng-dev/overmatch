@@ -1171,7 +1171,7 @@ const WIRE_SURFACE_HASH: u64 = 0x5afa185f66009321;
 /// The pinned hash of the OWN wire-facing type DEFINITIONS (field layout, not just names). Re-pin it
 /// whenever a wire-facing struct/enum definition changes; house process also bumps
 /// [`PROTOCOL_REV`]. The tripwire prints the new value. See the block above for the coverage model.
-const WIRE_TYPES_HASH: u64 = 0x7acd1cfb275c6d09;
+const WIRE_TYPES_HASH: u64 = 0x203121cdd25ce5a4;
 
 /// The pinned `Cargo.lock` versions of the external crates whose types ride the wire (avian's
 /// replicated physics components; lightyear's wire framing / input protocol). A bump of either can
