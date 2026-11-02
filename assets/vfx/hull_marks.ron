@@ -1,0 +1,4 @@
+// The game's damage-model view: the grazing-mark appearance limit.
+(
+    max_stretch: (4.0, Taste("hull marks: cap the geometric 1/cos(obliquity) stretch so near-grazing marks do not smear along the plate")),
+)

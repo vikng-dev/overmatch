@@ -25,6 +25,7 @@ impl Diffable for HullMarks {
 
 /// The authority's recorder: each strike's mark rides the diff path to every client.
 pub(super) fn install_server(app: &mut App) {
+    crate::hull_marks::max_stretch();
     app.add_observer(record);
 }
 

@@ -148,6 +148,7 @@ pub(super) fn variant(seed: u16) -> usize {
 }
 
 pub(super) fn plugin(app: &mut App) {
+    crate::hull_marks::max_stretch();
     app.add_systems(Startup, build_materials)
         .add_systems(Update, draw_marks)
         .add_observer(dress_surface);

@@ -38,13 +38,38 @@ use crate::ballistics::{ShellStrike, Verdict};
 use crate::damage::VolumeOf;
 use crate::tank::{SimParts, rig_world_pose};
 
-/// The most marks one vehicle keeps. ASSUMED: the owner's "about 50".
+/// Resolution: bound per-vehicle record storage and decal work to the owner's about-50 budget.
 pub(crate) const MARK_CAP: usize = 50;
 
-/// The longest a mark stretches along the shot, as a multiple of its round footprint. A cylinder
-/// of radius r meeting a plate at obliquity θ cuts an ellipse r × r / cos θ (DERIVED: 2.0× at
-/// 60°, 3.9× at 75°); the clamp keeps a near-grazing strike from smearing a mark down the plate.
-pub(crate) const MAX_STRETCH: f32 = 4.0;
+fn stretch_from_ron(text: &str) -> Result<f32, String> {
+    #[derive(Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct Look {
+        max_stretch: crate::provenance::Sourced<f32>,
+    }
+    let look: Look = ron::from_str(text).map_err(|err| {
+        format!("max_stretch: {err}; author (ratio, Taste(\"appearance reason\"))")
+    })?;
+    let stretch = look.max_stretch.0;
+    if !stretch.is_finite() || stretch < 1.0 {
+        return Err(
+            "max_stretch must be finite and at least one; author a grazing-mark stretch ratio"
+                .to_string(),
+        );
+    }
+    Ok(stretch)
+}
+
+/// The game's damage-model view's grazing-mark Taste, admitted before recording or drawing.
+pub(crate) fn max_stretch() -> f32 {
+    static STRETCH: std::sync::LazyLock<f32> = std::sync::LazyLock::new(|| {
+        crate::provenance::shipped("assets/vfx/hull_marks.ron", || {
+            stretch_from_ron(include_str!("../assets/vfx/hull_marks.ron"))
+        })
+        .unwrap_or_else(|err| panic!("assets/vfx/hull_marks.ron: {err}"))
+    });
+    *STRETCH
+}
 
 /// Which mark a strike leaves.
 #[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -80,15 +105,12 @@ impl MarkKind {
 
 /// How far a mark stretches along the shot's in-plane direction: 1 / cos θ, θ the obliquity
 /// between the round's travel `along` and the face normal `normal` (both unit), clamped at
-/// [`MAX_STRETCH`] — which also answers a travel parallel to the face, where 1 / cos θ has no
+/// [`max_stretch`] — which also answers a travel parallel to the face, where 1 / cos θ has no
 /// value.
 pub(crate) fn stretch(along: Vec3, normal: Vec3) -> f32 {
+    let max = max_stretch();
     let cos = along.dot(normal).abs();
-    if cos * MAX_STRETCH <= 1.0 {
-        MAX_STRETCH
-    } else {
-        1.0 / cos
-    }
+    if cos * max <= 1.0 { max } else { 1.0 / cos }
 }
 
 /// The shot's direction across the face: `along` with its component on `normal` removed. A
@@ -427,6 +449,7 @@ fn seed(strike: &ShellStrike) -> u16 {
 /// The single-player recorder: the local sim is the authority and nothing replicates, so the mark
 /// is written to the component directly.
 pub(crate) fn offline_plugin(app: &mut App) {
+    max_stretch();
     app.add_observer(record_local);
 }
 
@@ -447,6 +470,25 @@ pub(crate) mod tests {
 
     use super::*;
     use crate::{CombatantId, ShotId};
+
+    /// The game's damage-model view refuses a missing provenance, nonfinite or shrinking
+    /// grazing clamp before play. The law and record both rely on a finite ratio at least one.
+    #[test]
+    fn the_mark_stretch_taste_is_required_and_admitted_before_play() {
+        assert_eq!(
+            stretch_from_ron(r#"(max_stretch: (4.0, Fixture("fixture")))"#),
+            Ok(4.0)
+        );
+        for text in [
+            "(max_stretch: 4.0)",
+            "(max_stretch: (0.5, Fixture(\"fixture\")))",
+            "(max_stretch: (NaN, Fixture(\"fixture\")))",
+            "(max_stretch: (inf, Fixture(\"fixture\")))",
+        ] {
+            let error = stretch_from_ron(text).unwrap_err();
+            assert!(error.contains("max_stretch"), "{error}");
+        }
+    }
 
     /// The decal reader needs the authored physical size, including values beyond a byte of
     /// millimetres. Serde must also refuse nonpositive or nonfinite network values at its edge.
@@ -584,7 +626,7 @@ pub(crate) mod tests {
         assert_eq!(MarkKind::of(Verdict::Struck), None);
     }
 
-    /// A mark stretches by 1 / cos θ along the shot, and never past [`MAX_STRETCH`] — including a
+    /// A mark stretches by 1 / cos θ along the shot, and never past [`max_stretch`] — including a
     /// travel parallel to the face, where 1 / cos θ has no value. The view sizes every mark by it;
     /// a mutant that drops the clamp smears a grazing mark metres down the plate (or divides by
     /// zero), one that inverts it shrinks the oblique marks.
@@ -596,15 +638,24 @@ pub(crate) mod tests {
             stretch(Vec3::new(theta.sin(), -theta.cos(), 0.0), normal)
         };
         assert!((at(0.0) - 1.0).abs() < 1e-6, "square on: round");
-        assert!((at(60.0) - 2.0).abs() < 1e-4, "{}", at(60.0));
-        assert!((at(75.0) - 1.0 / 75f32.to_radians().cos()).abs() < 1e-4);
-        assert!(at(75.0) < MAX_STRETCH);
-        assert_eq!(at(80.0), MAX_STRETCH);
-        assert_eq!(at(90.0), MAX_STRETCH, "a travel along the face");
+        assert!(
+            (at(60.0) - 2.0_f32.min(max_stretch())).abs() < 1e-4,
+            "{}",
+            at(60.0)
+        );
+        assert!((at(75.0) - (1.0 / 75f32.to_radians().cos()).min(max_stretch())).abs() < 1e-4);
+        assert_eq!(
+            stretch(Vec3::X, normal),
+            max_stretch(),
+            "a travel along the face"
+        );
         let mut last = 0.0;
         for degrees in 0..=90 {
             let value = at(degrees as f32);
-            assert!(value >= last && value <= MAX_STRETCH, "{degrees}°: {value}");
+            assert!(
+                value >= last && value <= max_stretch(),
+                "{degrees}°: {value}"
+            );
             last = value;
         }
     }
