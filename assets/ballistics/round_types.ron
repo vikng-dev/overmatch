@@ -38,6 +38,8 @@
     round_types: {
         // High-explosive, full calibre, a nose fuze in its ogive.
         "HE": (
+            contact_density: (6000.0, StandIn("Deformation and shatter proxy: uncapped steel survey proxy")),
+            slope_penalty_deg: (8.0, StandIn("Deformation and shatter proxy: survey class slope loss; no cap term without evidence")),
             flight_nose: (Ogive(crh: 4.0), Unknown("ASSUMED: the APCBC's ogive; no source in the
                 research note gives the shell's nose. Settled by a sourced drawing of this
                 construction class's flight nose")),
@@ -47,6 +49,8 @@
         ),
         // Armour-piercing, capped and ballistic-capped.
         "APCBC": (
+            contact_density: (8000.0, StandIn("Deformation and shatter proxy: M51 measured contact limit; no separate cap term without evidence")),
+            slope_penalty_deg: (8.0, StandIn("Deformation and shatter proxy: survey class slope loss; no cap term without evidence")),
             flight_nose: (Ogive(crh: 4.0), Unknown("owner-accepted starting point 2026-10-28: the
                 ballistic cap's pointed ogive over the blunt hit nose. Settled by a sourced drawing
                 of the ballistic cap ogive")),
@@ -56,6 +60,8 @@
         ),
         // Armour-piercing, composite rigid: a hard core in a light full-calibre body.
         "APCR": (
+            contact_density: (14000.0, StandIn("Deformation and shatter proxy: tungsten-carbide core survey proxy")),
+            slope_penalty_deg: (15.0, StandIn("Deformation and shatter proxy: survey class slope loss; no cap term without evidence")),
             flight_nose: (Ogive(crh: 1.0), Unknown("no ballistic cap in this table: the round flies
                 on its hit nose, the drag form's blunt anchor. Settled by a sourced drawing of this
                 rigid composite construction flight nose")),
@@ -67,6 +73,8 @@
         ),
         // Armour-piercing small-arms bullet.
         "AP": (
+            contact_density: (6000.0, StandIn("Deformation and shatter proxy: uncapped steel survey proxy")),
+            slope_penalty_deg: (8.0, StandIn("Deformation and shatter proxy: survey class slope loss; no cap term without evidence")),
             flight_nose: (Ogive(crh: 6.0), Unknown("a pointed rifle bullet: a 6-crh tangent ogive,
                 ASSUMED as a typical spitzer's, its nose 2.4 calibres long (DERIVED); no source in
                 the repo states the bullet's ogive. Settled by a sourced drawing of the pointed

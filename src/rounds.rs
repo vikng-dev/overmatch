@@ -110,6 +110,9 @@ pub(crate) struct Round {
     /// Positive crew-line coefficient: disc-mean chord times this times
     /// `ballistics::HP_PER_REFERENCE_MM` gives HP dose. Balance data, never read by the hard walk.
     pub(crate) wound: f32,
+    /// The game's damage model: type preset density (kg/m³) and slope tangent, parsed at load.
+    pub(crate) contact_density: f32,
+    pub(crate) slope_penalty_tan: f32,
     /// The core's material facts. The rigid regime models every core as rigid and reads none of
     /// them; a regime that deforms or erodes the round reads them.
     pub(crate) core: MaterialFacts,
@@ -139,6 +142,8 @@ pub(crate) struct RoundFacts {
     penetrator: RoundBody,
     drag_k: f32,
     wound: f32,
+    contact_density: f32,
+    slope_penalty_tan: f32,
     core: MaterialFacts,
     pub(crate) burst: Option<Burst>,
     pub(crate) fuze: Option<fuze::Spec>,
@@ -186,6 +191,8 @@ impl RoundFacts {
             muzzle_speed,
             drag_k: self.drag_k,
             wound: self.wound,
+            contact_density: self.contact_density,
+            slope_penalty_tan: self.slope_penalty_tan,
             core: self.core,
             burst: self.burst,
             fuze_mode: self.fuze.as_ref().map_or(0, |f| f.default_mode),
@@ -264,6 +271,8 @@ struct RoundTypeFile {
     flight_nose: Sourced<NoseShape>,
     hit_nose: Sourced<NoseShape>,
     carrier: Sourced<Carrier>,
+    contact_density: Sourced<f32>,
+    slope_penalty_deg: Sourced<f32>,
 }
 
 /// The drag law's parameters as authored ([`crate::ballistics::DragLaw::stated`]).
@@ -290,6 +299,8 @@ struct RoundType {
     flight_nose: NoseShape,
     hit_nose: NoseShape,
     carrier: Carrier,
+    contact_density: f32,
+    slope_penalty_tan: f32,
 }
 
 /// Why a round registry, or a lookup in one, failed. Every arm names the offending text.
@@ -312,7 +323,10 @@ impl std::fmt::Display for RoundError {
         match self {
             Self::Parse { file, err } => write!(f, "{file} failed to parse: {err}"),
             Self::InvalidType { round_type, reason } => {
-                write!(f, "round type {round_type:?}: {reason}")
+                write!(
+                    f,
+                    "assets/ballistics/round_types.ron: round type {round_type:?}: {reason}"
+                )
             }
             Self::Invalid { round, reason } => write!(f, "round {round:?}: {reason}"),
             Self::InvalidDrag { reason } => {
@@ -373,10 +387,32 @@ fn round_types(
                     });
                 }
             }
+            for (field, valid, fix) in [
+                (
+                    "contact_density",
+                    row.contact_density.0.is_finite() && row.contact_density.0 > 0.0,
+                    "author a finite positive density in kg/m³",
+                ),
+                (
+                    "slope_penalty_deg",
+                    row.slope_penalty_deg.0.is_finite()
+                        && (0.0..90.0).contains(&row.slope_penalty_deg.0),
+                    "author a finite penalty in [0, 90) degrees",
+                ),
+            ] {
+                if !valid {
+                    return Err(RoundError::InvalidType {
+                        round_type: key,
+                        reason: format!("{field}: {fix}"),
+                    });
+                }
+            }
             let round_type = RoundType {
                 flight_nose: row.flight_nose.0,
                 hit_nose: row.hit_nose.0,
                 carrier: row.carrier.0,
+                contact_density: row.contact_density.0,
+                slope_penalty_tan: row.slope_penalty_deg.0.to_radians().tan(),
             };
             Ok((key, round_type))
         })
@@ -550,6 +586,8 @@ fn resolved(
             flying,
             penetrator,
             drag_k,
+            contact_density: round_type.contact_density,
+            slope_penalty_tan: round_type.slope_penalty_tan,
             wound,
             core,
             burst,
@@ -662,9 +700,9 @@ pub(crate) mod tests {
         anchor_nose: (Ogive(crh: 1.0), Fixture("fixture")), anchor_form: (0.263, Fixture("fixture"))),
     round_types: {
         "Fixture": (flight_nose: (Ogive(crh: 1.0), Fixture("fixture")),
-            hit_nose: (Ogive(crh: 1.0), Fixture("fixture")), carrier: (None, Fixture("fixture"))),
+            hit_nose: (Ogive(crh: 1.0), Fixture("fixture")), carrier: (None, Fixture("fixture")), contact_density: (8000.0, Fixture("fixture")), slope_penalty_deg: (8.0, Fixture("fixture"))),
         "Fixture sub-calibre": (flight_nose: (Ogive(crh: 1.0), Fixture("fixture")),
-            hit_nose: (Ogive(crh: 1.0), Fixture("fixture")), carrier: (Kept, Fixture("fixture"))),
+            hit_nose: (Ogive(crh: 1.0), Fixture("fixture")), carrier: (Kept, Fixture("fixture")), contact_density: (8000.0, Fixture("fixture")), slope_penalty_deg: (8.0, Fixture("fixture"))),
     })"#;
 
     /// `fields` as authored round fields, each with a fixture provenance.
@@ -772,6 +810,49 @@ pub(crate) mod tests {
             assert!(error.contains("assets/rounds/Probe.round.ron"), "{error}");
             assert!(error.contains(&format!("`{field}: None`")), "{error}");
         }
+    }
+
+    /// The game's damage model refuses invalid contact presets before play; the march relies on
+    /// finite positive pressure and a finite slope tangent. Mutant: accepting NaN at the load edge.
+    #[test]
+    fn contact_presets_are_required_validated_and_converted_once() {
+        for (field, good, bad) in [
+            (
+                "contact_density",
+                "8000.0",
+                &["0.0", "-1.0", "NaN", "inf"][..],
+            ),
+            (
+                "slope_penalty_deg",
+                "8.0",
+                &["-1.0", "90.0", "NaN", "inf"][..],
+            ),
+        ] {
+            let entry = format!(r#"{field}: ({good}, Fixture("fixture"))"#);
+            for value in bad {
+                let text = FIXTURE_TYPES.replace(
+                    &entry,
+                    &format!(r#"{field}: ({value}, Fixture("fixture"))"#),
+                );
+                let err = round_types(&text).unwrap_err().to_string();
+                assert!(
+                    err.contains("assets/ballistics/round_types.ron") && err.contains(field),
+                    "{err}"
+                );
+                assert!(err.contains("author"), "{err}");
+            }
+            assert!(round_types(&FIXTURE_TYPES.replace(&format!(", {entry}"), "")).is_err());
+        }
+        let (_, types) = round_types(ROUND_TYPES_RON).unwrap();
+        for preset in types.values() {
+            assert!(preset.contact_density > 0.0);
+            assert!(preset.slope_penalty_tan >= 0.0 && preset.slope_penalty_tan.is_finite());
+        }
+        let (_, fixture) = round_types(FIXTURE_TYPES).unwrap();
+        assert_eq!(
+            fixture["Fixture"].slope_penalty_tan,
+            8.0_f32.to_radians().tan()
+        );
     }
 
     /// Every shipped round loads, with a core that states its facts and a display name of its own
@@ -913,13 +994,13 @@ pub(crate) mod tests {
         anchor_nose: (Ogive(crh: 1.0), Fixture("fixture")), anchor_form: (0.263, Fixture("fixture"))),
     round_types: {
         "Blunt": (flight_nose: (Ogive(crh: 1.0), Fixture("fixture")),
-            hit_nose: (Ogive(crh: 1.0), Fixture("fixture")), carrier: (None, Fixture("fixture"))),
+            hit_nose: (Ogive(crh: 1.0), Fixture("fixture")), carrier: (None, Fixture("fixture")), contact_density: (8000.0, Fixture("fixture")), slope_penalty_deg: (8.0, Fixture("fixture"))),
         "Capped": (flight_nose: (Ogive(crh: 4.0), Fixture("fixture")),
-            hit_nose: (Ogive(crh: 1.0), Fixture("fixture")), carrier: (None, Fixture("fixture"))),
+            hit_nose: (Ogive(crh: 1.0), Fixture("fixture")), carrier: (None, Fixture("fixture")), contact_density: (8000.0, Fixture("fixture")), slope_penalty_deg: (8.0, Fixture("fixture"))),
         "Kept": (flight_nose: (Ogive(crh: 1.0), Fixture("fixture")),
-            hit_nose: (Ogive(crh: 1.0), Fixture("fixture")), carrier: (Kept, Fixture("fixture"))),
+            hit_nose: (Ogive(crh: 1.0), Fixture("fixture")), carrier: (Kept, Fixture("fixture")), contact_density: (8000.0, Fixture("fixture")), slope_penalty_deg: (8.0, Fixture("fixture"))),
         "Discarded": (flight_nose: (Ogive(crh: 1.0), Fixture("fixture")),
-            hit_nose: (Ogive(crh: 1.0), Fixture("fixture")), carrier: (Discarded, Fixture("fixture"))),
+            hit_nose: (Ogive(crh: 1.0), Fixture("fixture")), carrier: (Discarded, Fixture("fixture")), contact_density: (8000.0, Fixture("fixture")), slope_penalty_deg: (8.0, Fixture("fixture"))),
     })"#;
 
     /// The fixture round of type `round_type` over [`DRAG_TYPES`], of `mass` (kg) and `caliber`
@@ -1059,7 +1140,7 @@ pub(crate) mod tests {
                 r#"(drag: (base_drag_coefficient: (0.20, Fixture("x")),
                     anchor_nose: (Ogive(crh: 1.0), Fixture("x")), anchor_form: (0.263, Fixture("x"))),
                     round_types: {{ "Odd": (flight_nose: ({flight}, Fixture("x")),
-                    hit_nose: ({hit}, Fixture("x")), carrier: ({carrier}, Fixture("x"))) }})"#
+                    hit_nose: ({hit}, Fixture("x")), carrier: ({carrier}, Fixture("x")), contact_density: (8000.0, Fixture("fixture")), slope_penalty_deg: (8.0, Fixture("fixture"))) }})"#
             )
         };
         for (flight, hit, field) in [
