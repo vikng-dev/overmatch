@@ -1058,7 +1058,12 @@ mod tests {
                 let tangent = beta.to_radians().tan();
                 let charge = slope_charge(cosine, tangent, 1.0);
                 assert!(charge >= previous);
-                assert!(slope_charge(cosine, tangent, 0.2) <= charge);
+                let soft = slope_charge(cosine, tangent, 0.2);
+                if charge > 1.0 {
+                    assert!(soft < charge);
+                } else {
+                    assert_eq!(soft, 1.0);
+                }
                 previous = charge;
             }
         }

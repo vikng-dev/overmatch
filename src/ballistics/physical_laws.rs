@@ -86,5 +86,23 @@ mod tests {
                 );
             }
         }
+        for bad in ["NaN", "inf", "-inf"] {
+            let text = RON.replace("floor_m: (-100.0,", &format!("floor_m: ({bad},"));
+            let error = PhysicalLaws::from_ron(&text).unwrap_err();
+            assert!(
+                error.contains(PATH) && error.contains("floor_m") && error.contains("author"),
+                "{error}"
+            );
+        }
+        let missing = RON
+            .lines()
+            .filter(|line| !line.trim_start().starts_with("floor_m:"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(
+            PhysicalLaws::from_ron(&missing)
+                .unwrap_err()
+                .contains("floor_m")
+        );
     }
 }

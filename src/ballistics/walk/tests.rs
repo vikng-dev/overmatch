@@ -1379,7 +1379,7 @@ fn a_soft_face_bites_where_reference_steel_skids() {
     let laws = WalkLaws::default();
     // ~76° incidence, past the critical angle the steel plate below gives the fixture 88.
     let normal = Vec3::new(0.0, 0.97, -0.242).normalize();
-    let soft = entrance_disc(&[Slab::at(1, 0, 0.5, normal, 0.08)], 2.0);
+    let soft = entrance_disc(&[Slab::at(1, 0, 0.5, normal, 0.4)], 2.0);
 
     let walked = walk_disc(&soft, &table(&[(1, 10.0)]), &laws).unwrap();
     transit_request(&walked, &AP_88, &laws);
@@ -3419,6 +3419,10 @@ fn scalar_outcome(
 #[test]
 fn the_mechanism_matches_the_scalar_law_on_reference_steel() {
     let laws = WalkLaws::default();
+    let shot = Shot {
+        contact: crate::rounds::ContactPreset::fixture(),
+        ..AP_88
+    };
     let (round, _) = solid(1.0);
     let body = round.body();
     let mut state = 0x2026_1012_u64;
@@ -3449,7 +3453,7 @@ fn the_mechanism_matches_the_scalar_law_on_reference_steel() {
         }
         let volumes = table(&volumes);
         let entrance = walk_disc(&entrance_disc(&slabs, 3.0), &volumes, &laws).unwrap();
-        let Begin::Transit(request) = begin(&entrance, &AP_88, &laws).unwrap() else {
+        let Begin::Transit(request) = begin(&entrance, &shot, &laws).unwrap() else {
             ricochets += 1;
             continue;
         };
@@ -4500,6 +4504,13 @@ fn the_slope_share_reads_the_entrance_not_the_backing() {
         };
         assert_eq!(read(&[facing]), read(&[facing, backing]));
         assert!(read(&[facing]) > 1.0);
+        let steel = walk_disc(
+            &entrance_disc(&[facing], 2.0),
+            &table(&[(1, laws.rha_reference)]),
+            &laws,
+        )
+        .unwrap();
+        assert!(read(&[facing]) < transit_request(&steel, &shot, &laws).entrance.slope_charge);
     }
 }
 

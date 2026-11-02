@@ -3339,7 +3339,7 @@ fn a_finite_material_crossing_longer_than_fifty_metres_closes() {
 }
 
 /// The game's damage model's mounted decide path must use pressure and the loaded slope preset.
-/// Mutants: a fixed skid angle, ignoring the slope preset, or charging by changing travel length.
+/// Mutants: ignoring the slope preset or charging by changing travel length.
 #[test]
 fn mounted_contact_skids_a_thin_graze_bites_head_on_and_charges_only_resistance() {
     let contact = crate::rounds::ContactPreset::fixture();
