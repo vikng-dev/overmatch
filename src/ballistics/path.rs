@@ -593,6 +593,66 @@ mod tests {
         }
     }
 
+    /// The game's damage model: the public perforation must publish the exit body's drag.
+    /// A replica and the authority must coincide on later free-flight tick boundaries.
+    /// Fixture: a kept carrier three times the core's calibre and four times its mass.
+    #[test]
+    fn replica_and_authority_share_the_core_drag_after_perforation() {
+        use crate::ballistics::march_tests::{spawn_round, world_with_trimesh_plates};
+        use crate::ballistics::{Projectile, Shot};
+        #[derive(Resource, Default)]
+        struct Paths(Vec<FlightOutcome>);
+        let mut app = world_with_trimesh_plates(&[(Vec3::new(3.0, 0.05, 3.0), Vec3::Y * 50.0)]);
+        app.insert_resource(crate::ShotClock(crate::sim_tick::SimTick::new(100)))
+            .init_resource::<Paths>()
+            .add_observer(|event: On<FlightOutcome>, mut paths: ResMut<Paths>| {
+                paths.0.push(event.clone())
+            });
+        let origin = Vec3::Y * 51.0;
+        let velocity = Vec3::NEG_Y * 800.0;
+        let shell = spawn_round(&mut app, FIXTURE_88, origin, velocity);
+        let drag = 0.001; // Fixture drag, per metre.
+        {
+            let mut projectile = app.world_mut().get_mut::<Projectile>(shell).unwrap();
+            projectile.flying.mass = 4.0 * FIXTURE_88.mass;
+            projectile.flying.caliber = 3.0 * FIXTURE_88.caliber;
+            projectile.flying.drag_k = drag;
+        }
+        app.world_mut().entity_mut(shell).insert(Shot(shot()));
+        app.update();
+        let paths = &app.world().resource::<Paths>().0;
+        let through = paths
+            .iter()
+            .find(|path| matches!(path.impact, Some(PathImpact::Through { .. })))
+            .expect("the fixture perforates");
+        let core_drag = app.world().get::<Projectile>(shell).unwrap().flying.drag_k;
+        assert_eq!(
+            through.drag_k, core_drag,
+            "the exit leg publishes its own drag"
+        );
+        assert_ne!(core_drag, drag);
+        let mut replica = Replica::born(100, origin, velocity);
+        replica.outcomes.extend(
+            paths
+                .iter()
+                .cloned()
+                .map(|path| ValidatedPath::try_from(path).unwrap()),
+        );
+        let dt = app.world().resource::<Time>().delta_secs();
+        for tick in 1..=5 {
+            if tick > 1 {
+                app.update();
+            }
+            let actual = app.world().get::<Transform>(shell).unwrap().translation;
+            let (presented, _, stopped) = replica.sample(f64::from(tick), dt, drag).unwrap();
+            assert!(!stopped);
+            assert!(
+                actual.distance(presented) < 0.002,
+                "tick {tick}: authority {actual:?}, replica {presented:?}"
+            );
+        }
+    }
+
     /// The game's damage model: client playback must be the authority's resolved clock,
     /// including the carrier's motion. Mutant: interpolating speed linearly or flying at entry speed.
     #[test]

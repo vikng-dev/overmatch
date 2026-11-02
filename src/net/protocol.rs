@@ -258,7 +258,8 @@ use crate::{CombatantId, CombatantLife, ShotId};
 /// so recorded retained work includes its energy and later crossings carry only the core.
 /// Returning debris can dose its emitting body after genuine re-entry; every field's receiver
 /// contributions are recorded and accumulated before pool rounding.
-pub const PROTOCOL_REV: u32 = 70;
+/// REV 71 (#258, the game's damage model): each public exit leg carries its own drag.
+pub const PROTOCOL_REV: u32 = 71;
 
 /// Compatibility tag derived from the complete pinned wire manifest plus the crate version. This
 /// is the runtime handshake value: version-exact, so a version bump intentionally changes it.

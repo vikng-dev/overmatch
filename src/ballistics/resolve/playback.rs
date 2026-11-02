@@ -396,7 +396,6 @@ impl Playback {
         tick: u32,
         fraction: f64,
         ordinal: u32,
-        drag_k: f32,
     ) -> FlightOutcome {
         let world = self.flight_at_end();
         let (stopped, impact) = match self.world_decision() {
@@ -434,7 +433,7 @@ impl Playback {
         };
         FlightOutcome {
             body: self.crossing.round.body(),
-            drag_k,
+            drag_k: self.outgoing_body.drag_k,
             shot,
             sequence,
             tick,

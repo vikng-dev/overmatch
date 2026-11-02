@@ -3182,7 +3182,6 @@ fn march_shell_step(
                     tick.now.wrapping_add(whole as u32),
                     start - whole,
                     ordinal,
-                    shell.projectile.flying.drag_k,
                 );
                 if matches!(outcome.impact, Some(path::PathImpact::Bounce { .. })) {
                     ordinal += 1;
