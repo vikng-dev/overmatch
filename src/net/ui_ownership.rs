@@ -210,6 +210,8 @@ fn client_ui_app() -> App {
     app.world_mut().spawn(crate::view::PlayerView);
     app.add_plugins((crate::ui_font::plugin, crate::flow::plugin))
         .add_plugins((
+            // Local notch feedback belongs to device gather, as in `NetClientPlugin`.
+            crate::command::client_plugin,
             crate::overlay::plugin,
             crate::aim::client_plugin,
             crate::sight::plugin,
