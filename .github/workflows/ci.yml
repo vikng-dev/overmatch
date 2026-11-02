@@ -128,19 +128,17 @@ jobs:
       # retired opt-0 `ci` profile paid for once at cache-cold. `--locked` builds
       # against the committed Cargo.lock, so CI is reproducible and fails loudly if
       # the lockfile drifts from Cargo.toml.
-      # One feature variant: lightyear compiles unconditionally (the PVP client is the product), and
-      # `--all-targets` covers every bin whose required features are on. `dev_ui` (both sandbox
-      # bins, bevy_egui) and `bitprobe` are named here because cargo SKIPS a bin whose
-      # `required-features` are off — without them those bins were never linted. Additive features
-      # only: the game library plus the developer tools and their optional dependencies.
-      # The retired `--no-default-features` pair proved the sim didn't depend on netcode; that guard
-      # now lives in `src/net/tests/net_boundary.rs` (a source scan) + `src/headless_test.rs`
-      # (boots the sim with no netcode mounted) — no second full build required.
-      # `--workspace`: the game and the asset tools (`tools/`), one feature set, so the game library
-      # compiles once for both.
+      # Developer tools need dev_ui and bitprobe so --all-targets includes their required-feature
+      # bins. The featureless pass checks the asset tool and shipping binaries separately: a dev
+      # or test caller can hide an unused declaration in a build with those callers absent.
+      # --workspace covers both the game and tools in the developer pass.
       - name: Clippy
         if: matrix.task == 'clippy'
         run: cargo clippy --locked --workspace --all-targets --features dev_ui,bitprobe -- -D warnings
+
+      - name: Clippy shipping and asset tools
+        if: matrix.task == 'clippy'
+        run: cargo clippy --locked --lib --bins -- -D warnings
 
       # The LOD lane's math, before the Cargo lane so a broken ladder fails fast and cheaply. Stdlib
       # + numpy, no Blender and no corpus: every named refusal, every declared gate limit, the

@@ -741,9 +741,12 @@ fn drive_supply(
 /// Every tank reads the same tick-start support snapshot and excludes its own hull by identity.
 /// The recipients' sides are sized after every pass, over all tanks' contacts at once
 /// ([`piece_impulses`]), and written before recoil and physics.
-#[expect(
-    clippy::too_many_arguments,
-    reason = "ECS adapter over terrain, tanks and piece reactions"
+#[cfg_attr(
+    feature = "bitprobe",
+    expect(
+        clippy::too_many_arguments,
+        reason = "ECS adapter over terrain, tanks and piece reactions, plus bitprobe capture"
+    )
 )]
 fn apply_track_forces(
     time: Res<Time>,

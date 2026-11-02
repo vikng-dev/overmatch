@@ -105,6 +105,7 @@ pub(crate) struct RigGeom {
     /// Where the authored `link_count` falls in the feasible window at build-time params — the
     /// answer to "can this loop even wrap this hull, and what stops the droop". Recomputed by
     /// [`Self::link_window`] when the suspension knobs move.
+    #[cfg(any(feature = "dev_ui", test))]
     pub window: LinkWindow,
 }
 
@@ -196,8 +197,9 @@ impl std::error::Error for RigFault {}
 impl RigGeom {
     /// Derive a side's whole running gear from the blueprint + its glb. `teeth` and `link_count` are
     /// the two authored counts the caller owns (the sandbox tunes `link_count` against
-    /// [`LinkWindow`]); everything else is measured or derived. `params` is only needed for the
-    /// build-time [`Self::window`] readout — the rest pose itself is knob-free by construction.
+    /// [`LinkWindow`]); everything else is measured or derived. `params` validates the authored
+    /// loop and suspension on both sides and supplies the sandbox's cached window readout.
+    /// The rest pose itself is knob-free by construction.
     pub(crate) fn build(
         blueprint: &TankBlueprint,
         glb_path: &Path,
@@ -247,6 +249,7 @@ impl RigGeom {
             blueprint.spec.track.link_angle.inward_deg.to_radians(),
             teeth,
             link_count,
+            #[cfg(any(feature = "dev_ui", test))]
             params,
         );
         geom.validate(params)
@@ -389,6 +392,7 @@ impl RigGeom {
     /// `teeth` matters here as much as `link_count` does: it sets the chord-exact sprocket pitch
     /// radius, so it moves the front circle, every route around it, all three taut perimeters, and
     /// therefore the window verdict too.
+    #[cfg(any(feature = "dev_ui", test))]
     pub(crate) fn rebuild(&self, teeth: u32, link_count: usize, params: &SuspensionParams) -> Self {
         // `DerivedModel` is `Copy` (a flat bag of measurements); only the wheel-centre lists are
         // heap-backed, and two ~8-element `Vec<Vec3>`s per keypress is nothing next to a glb parse.
@@ -406,6 +410,7 @@ impl RigGeom {
             self.inward_articulation,
             teeth,
             link_count,
+            #[cfg(any(feature = "dev_ui", test))]
             params,
         )
     }
@@ -425,7 +430,7 @@ impl RigGeom {
         inward_articulation: f32,
         teeth: u32,
         link_count: usize,
-        params: &SuspensionParams,
+        #[cfg(any(feature = "dev_ui", test))] params: &SuspensionParams,
     ) -> Self {
         let rest = PerSide(Side::ALL.map(|side| {
             let [sprocket, idler] = *fixed.get(side);
@@ -471,6 +476,7 @@ impl RigGeom {
             pin_planes,
             inward_articulation,
             wheel_treads,
+            #[cfg(any(feature = "dev_ui", test))]
             window: window_of(rest.get(Side::Right), model.pitch, link_count, params),
             model,
             rest,
@@ -569,6 +575,7 @@ impl RigGeom {
     }
 
     /// Road wheels on a side.
+    #[cfg(feature = "dev_ui")]
     pub(crate) fn wheel_count(&self, side: Side) -> usize {
         self.road_wheels.get(side).len()
     }
@@ -576,6 +583,7 @@ impl RigGeom {
     /// Taut wrap length (m) around one side's circles at a pose — the perimeter a zero-slack loop
     /// would need. Built with `belt_len = 0` so the return run stays a straight chord (the editor's
     /// self-check precedent): this measures the HULL, not the belt.
+    #[cfg(any(feature = "dev_ui", test))]
     pub(crate) fn taut_perimeter(&self, side: Side, pose: Pose, params: &SuspensionParams) -> f32 {
         build_route(&self.circles(side, pose, params), 0.0).total()
     }
@@ -677,6 +685,7 @@ impl RigGeom {
 
     /// Where this rig's `link_count` sits in the feasible window at the given suspension knobs.
     /// Right-side diagnostic for the sandbox panel. Admission validates both sides independently.
+    #[cfg(any(feature = "dev_ui", test))]
     pub(crate) fn link_window(&self, params: &SuspensionParams) -> LinkWindow {
         window_of(
             self.rest.get(Side::Right),

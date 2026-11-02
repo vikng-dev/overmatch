@@ -86,7 +86,9 @@ use crate::geometry_lod::{GeometryLodScanned, SourceDetailOnly};
 use crate::render_policy::VisualScope;
 use crate::sight::SightMode;
 use crate::spec::TankSpecHandle;
-use crate::tank::{Controlled, Rig as TankRig, Tank, ViewNode};
+#[cfg(any(feature = "dev_ui", test))]
+use crate::tank::Tank;
+use crate::tank::{Controlled, Rig as TankRig, ViewNode};
 use crate::tank_surface::TankSurfaceMaterial;
 use crate::track::belt_draw::BeltMaterial;
 use crate::view::PlayerView;
@@ -109,6 +111,7 @@ pub(crate) enum XRaySubject {
     OwnTank,
     /// The [`Tank`] of this combatant under the player's shooter records of hits on its current
     /// life, knocked out as well as live.
+    #[cfg(any(feature = "dev_ui", test))]
     Struck(CombatantId),
 }
 
@@ -129,6 +132,7 @@ type SubjectRow = (
 pub(super) struct Subject<'w, 's> {
     choice: Res<'w, XRaySubject>,
     own: Query<'w, 's, SubjectRow, With<Controlled>>,
+    #[cfg(any(feature = "dev_ui", test))]
     tanks: Query<'w, 's, SubjectRow, With<Tank>>,
     volumes: Query<'w, 's, LiveVolume>,
 }
@@ -151,6 +155,7 @@ impl Subject<'_, '_> {
             XRaySubject::OwnTank => {
                 crate::tank::controlled_one(self.own.single()).filter(|row| !row.6)
             }
+            #[cfg(any(feature = "dev_ui", test))]
             XRaySubject::Struck(combatant) => {
                 let mut matching = self.tanks.iter().filter(|row| *row.1 == combatant);
                 let row = matching.next()?;
@@ -164,6 +169,7 @@ impl Subject<'_, '_> {
     fn keyed(&self) -> bool {
         match *self.choice {
             XRaySubject::OwnTank => self.own.iter().any(|row| !row.6),
+            #[cfg(any(feature = "dev_ui", test))]
             XRaySubject::Struck(_) => true,
         }
     }
@@ -205,6 +211,7 @@ impl Subject<'_, '_> {
     ) -> Option<(ExplanationKey, &'a StoredExplanation)> {
         match *self.choice {
             XRaySubject::OwnTank => latest(store, life),
+            #[cfg(any(feature = "dev_ui", test))]
             XRaySubject::Struck(_) => latest_shot(store, life),
         }
     }
@@ -443,12 +450,14 @@ impl Held<'_, '_> {
 /// The x-ray as a composition that despawns its subject reads and lets go of it, from a system
 /// ordered after [`PenCamSet`](super::PenCamSet). Without the pen cam mounted it reads nothing and
 /// lets go of nothing.
+#[cfg(any(feature = "dev_ui", test))]
 #[derive(SystemParam)]
 pub(crate) struct XRayRelease<'w, 's> {
     state: Option<ResMut<'w, XRayState>>,
     held: Held<'w, 's>,
 }
 
+#[cfg(any(feature = "dev_ui", test))]
 impl XRayRelease<'_, '_> {
     /// Restore every dressed handle and despawn every item, with `commands`, ahead of whatever
     /// despawns the subject in them; the next frame dresses afresh whatever subject stands.
@@ -1299,6 +1308,7 @@ pub(super) fn latest(
 /// The record the x-ray draws for a struck tank's `life`: of the shooter projections of hits on it
 /// whose impact is no longer waiting, strictly the newest ([`newest`]). The store holds the
 /// player's records alone, so every shooter projection in it is of a shot the player fired.
+#[cfg(any(feature = "dev_ui", test))]
 pub(super) fn latest_shot(
     store: &ShotExplanations,
     life: TankLife,

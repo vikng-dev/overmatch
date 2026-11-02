@@ -80,6 +80,7 @@ pub(crate) struct PrintResponse {
 impl PrintResponse {
     /// The print depth, m, under a ground pressure of `kpa`: softness × pressure, capped, never
     /// negative. Zero on a ground with no softness, whatever the pressure.
+    #[cfg(any(feature = "dev_ui", test))]
     pub(crate) fn depth_m(&self, kpa: f32) -> f32 {
         (self.softness_mm_per_kpa * kpa)
             .min(self.depth_cap_mm)
@@ -139,6 +140,7 @@ pub(crate) struct GroundTypes {
 }
 
 /// The comment the table is written back under: the file stays self-describing after a save.
+#[cfg(any(feature = "dev_ui", test))]
 const FILE_HEADER: &str = "\
 // The ground-type table (`src/ground_types.rs`): how each kind of ground takes a track print, the
 // game's cosmetic terrain marks. Each terrain pack names its type (`src/terrain_blend.rs`).
@@ -180,6 +182,7 @@ pub(crate) enum GroundTableError {
     /// refusal names the ground and the field.
     Refused(String),
     /// The table could not be written as RON.
+    #[cfg(any(feature = "dev_ui", test))]
     Serialize(ron::Error),
 }
 
@@ -189,6 +192,7 @@ impl std::fmt::Display for GroundTableError {
             Self::Io { path, source } => write!(f, "{}: {source}", path.display()),
             Self::Ron(err) => write!(f, "{err}"),
             Self::Refused(why) => f.write_str(why),
+            #[cfg(any(feature = "dev_ui", test))]
             Self::Serialize(err) => write!(f, "cannot write the table as RON: {err}"),
         }
     }
@@ -334,6 +338,7 @@ impl GroundTypes {
     }
 
     /// The table as the file holds it.
+    #[cfg(any(feature = "dev_ui", test))]
     pub(crate) fn to_file_text(&self) -> Result<String, GroundTableError> {
         let body = ron::ser::to_string_pretty(self, ron::ser::PrettyConfig::new())
             .map_err(GroundTableError::Serialize)?;
@@ -342,6 +347,7 @@ impl GroundTypes {
 
     /// Write the table to `path`, replacing it through a sibling temporary file so a failed write
     /// never leaves half a table.
+    #[cfg(feature = "dev_ui")]
     pub(crate) fn save(&self, path: &Path) -> Result<(), GroundTableError> {
         let text = self.to_file_text()?;
         let temporary = path.with_extension("ron.tmp");

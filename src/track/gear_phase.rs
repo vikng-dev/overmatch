@@ -140,6 +140,7 @@ impl GearFrame {
         })
     }
 
+    #[cfg(feature = "dev_ui")]
     pub(crate) fn rest(&self) -> Transform {
         self.rest
     }

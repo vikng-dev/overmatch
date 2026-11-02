@@ -46,6 +46,8 @@ use avian3d::parry::shape::TypedShape;
 use avian3d::prelude::{Collider, ColliderAabb, Forces, Position, Rotation, SimpleCollider};
 use bevy::prelude::*;
 
+#[cfg(any(feature = "dev_ui", test))]
+use super::PenetrationEvent;
 use super::collect::{self, Corridor};
 use super::mechanism::{Dose, DoseSource, Limits, Mechanism, SolidShot};
 use super::walk::{
@@ -54,8 +56,8 @@ use super::walk::{
 };
 use super::{
     ArmourMark, BallisticSurfaces, ComponentHealth, CrossingEnd, Impact, ImpactOutcome,
-    ImpactSurface, MARCH_EPS, MarchingShell, PenetrationEvent, ProjectileMarchWorld, ShellRicochet,
-    ShellStrike, ShellTerminal, TerminalVerdict, Verdict, VolumeCrossing, apply_hit_impulse,
+    ImpactSurface, MARCH_EPS, MarchingShell, ProjectileMarchWorld, ShellRicochet, ShellStrike,
+    ShellTerminal, TerminalVerdict, Verdict, VolumeCrossing, apply_hit_impulse,
 };
 
 mod playback;
@@ -2353,6 +2355,7 @@ fn finish_bite(
 ) {
     let (verdict, position, terminal_at) = match &bite.end {
         BiteEnd::Embedded { at, impulse, .. } => {
+            #[cfg(any(feature = "dev_ui", test))]
             shell.marks.events.push(PenetrationEvent {
                 entry: bite.entrance,
                 exit: *at,
@@ -2371,6 +2374,7 @@ fn finish_bite(
             if let Some(owner) = bite.owner {
                 apply_hit_impulse(bodies, owner, *impulse, bite.entrance);
             }
+            #[cfg(any(feature = "dev_ui", test))]
             shell.marks.events.push(PenetrationEvent {
                 entry: bite.entrance,
                 exit: *exit,

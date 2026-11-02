@@ -43,14 +43,18 @@ pub use servo::{
 #[cfg(test)]
 pub(crate) use servo::{ServoRest, drive_servos, restore_servo_truth};
 pub(crate) use spawn::TANK_SPEC_PATH;
+#[cfg(feature = "dev_ui")]
+pub(crate) use spawn::TankPresentation;
+#[cfg(any(feature = "dev_ui", test))]
 pub(crate) use spawn::proxy_friction;
 pub(crate) use spawn::spawn_headless_tank;
 pub(crate) use spawn::{
-    PendingTankAssets, TANK_GLB_PATH, TANK_SIM_GLB_PATH, TankContent, TankPresentation,
-    TankSimSource, attach_replicated_tank_body, load_tank_assets, load_tank_sim_assets,
-    spawn_complete_tank,
+    PendingTankAssets, TANK_GLB_PATH, TANK_SIM_GLB_PATH, TankContent, TankSimSource,
+    attach_replicated_tank_body, load_tank_assets, load_tank_sim_assets, spawn_complete_tank,
 };
-pub use view::{SimParts, TankViewReady, ViewNode, ViewOf, view_attach_plugin};
+#[cfg(feature = "dev_ui")]
+pub use view::ViewOf;
+pub use view::{SimParts, TankViewReady, ViewNode, view_attach_plugin};
 
 /// Shared simulation composition and schedule. This stays at the facade so module ownership
 /// cannot accidentally move an ordering edge: restoration before gameplay, servo stepping after.

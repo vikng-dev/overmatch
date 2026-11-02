@@ -54,6 +54,7 @@ use crate::world::ground_distance;
 ///
 /// Mouse delta controls yaw/pitch without time scaling. WASD moves on the horizontal heading plane,
 /// Shift/Ctrl changes altitude, and translation integrates on real-time `delta_secs`.
+#[cfg(feature = "dev_ui")]
 pub(crate) fn free_fly_transform(
     transform: &mut Transform,
     keys: &ButtonInput<KeyCode>,

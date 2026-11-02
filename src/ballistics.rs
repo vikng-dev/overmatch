@@ -1625,6 +1625,7 @@ impl ComponentHealth {
 /// One crossing of a ballistic volume by the penetrator: where it entered and exited the solid.
 /// `(exit - entry).length()` is the geometric line-of-sight thickness — slope captured by geometry,
 /// no cosine term (design doc §2).
+#[cfg(any(feature = "dev_ui", test))]
 pub struct PenetrationEvent {
     pub entry: Vec3,
     pub exit: Vec3,
@@ -1637,6 +1638,7 @@ pub struct PenetrationEvent {
 /// Public, like `ShellPath`; freed when the shell despawns.
 #[derive(Component, Default)]
 pub struct PenetrationMarks {
+    #[cfg(any(feature = "dev_ui", test))]
     pub events: Vec<PenetrationEvent>,
     /// Points where the shell ricocheted off a too-oblique face (deflected, did not enter).
     pub ricochets: Vec<Vec3>,

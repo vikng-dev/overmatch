@@ -1108,6 +1108,7 @@ pub(crate) fn loose_groups(structure: &Structure, state: &WallState) -> Vec<Vec<
 
 /// The first standing block a ray from `origin` along unit `dir` enters: its index, distance and
 /// the outward normal of the face it enters through ([`Block::entry_face`]).
+#[cfg(any(feature = "dev_ui", test))]
 pub(crate) fn first_hit(
     blocks: &[Block],
     standing: impl Fn(usize) -> bool,

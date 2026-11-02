@@ -104,6 +104,7 @@ pub fn wrap_joint_angle(pitch: f32, radius: f32) -> f32 {
 
 /// Link count that fills a belt loop of `perimeter` at `pitch`: `round(perimeter/pitch)`. The
 /// rounding residual is the loop's tension/sag budget (the material loop is exact; the wrap is not).
+#[cfg(feature = "dev_ui")]
 pub fn link_count(perimeter: f32, pitch: f32) -> usize {
     (perimeter / pitch).round().max(1.0) as usize
 }

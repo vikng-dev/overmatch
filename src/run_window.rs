@@ -72,6 +72,7 @@ impl RunWindow {
 
 /// Windowed roots have one primary window; GPU-less harness compositions have none.
 /// The latter is a named absence, while multiple primary windows are a construction bug.
+#[cfg(feature = "dev_ui")]
 pub(crate) fn primary_or_headless<T>(
     result: Result<T, bevy::ecs::query::QuerySingleError>,
 ) -> Option<T> {

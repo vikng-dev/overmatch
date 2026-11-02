@@ -538,6 +538,7 @@ impl RubbleBodies {
     }
 
     /// Whether `collider` belongs to a gathered dynamic piece.
+    #[cfg(any(feature = "dev_ui", test))]
     pub(crate) fn is_dynamic(&self, collider: Entity) -> bool {
         self.surface(collider).body.is_some()
     }
