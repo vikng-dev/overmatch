@@ -1243,17 +1243,15 @@ drag and crank inertia. A stopped public crank pauses its running sound loop.
 
 A supply change takes effect on its tick. Through a locked clutch the torque step reaches
 the belts on that tick; transmitted capacity and the Unmanned reset also step immediately.
-Crank inertia limits speed changes, not those supply steps. `TankSpec::validate` refuses a
-Drive requirement naming a module other than Engine or Transmission. A phase hold imposes
-brakes as an operator rule; a repair hold needs someone serving the station. The panel labels
-its nominal condition fraction **Drive supply**, the lesser of delivered combustion and
-transmitted capacity, zero under a hold or with nobody driving. It is not net sprocket force,
-which also depends on crank speed, gearing, drag and absolute clutch capacity. Module rates
-and simulation read one held-share function: the integer ratio is computed before narrowing,
-and a reduced ratio that rounds to whole is held at the adjacent f32 below whole. Servo slew keeps its rate scale.
-Automatic cyclic cadence, fire eligibility and sight access keep their mechanism or on/off
-gates. The panel shows Drive's supplied rate (zero during either hold), actual weapon deadlines
-and explicit load pauses; the sight-derived Gunner percentage has no rate consumer.
+Crank inertia limits speed changes, not those supply steps. A phase hold imposes brakes as an
+operator rule; a repair hold requires the authored control authority. The panel labels the
+resolved task throughput **Drive rate**, independently of holds and current control authority.
+Net sprocket force also depends on crank speed, gearing, drag and absolute clutch capacity.
+Module rows and simulation read one held-share function: the integer ratio is computed before
+narrowing, and a reduced ratio that rounds to whole is held at the adjacent f32 below whole.
+Servo slew keeps its rate scale. Automatic cyclic cadence, fire eligibility and sight access
+keep their mechanism or on/off gates. The panel reports actual weapon deadlines and explicit
+load pauses; the sight-derived Gunner percentage has no rate consumer.
 
 The RON declares only the static *recipe* (structure + coefficients); HP, who's in action, and
 backfill assignment are live inputs — knockout, a changed pool or a swap changes the inputs,

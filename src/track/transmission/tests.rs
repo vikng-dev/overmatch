@@ -3965,3 +3965,25 @@ fn perceived_load_does_not_change_the_existing_solve() {
     assert_eq!(baseline.next_speeds, report.next_speeds);
     assert_eq!(baseline.forces, report.forces);
 }
+
+/// The game's damage model: commanded work and the HUD consume one task rate even when
+/// local module condition differs. Fixture: a reduced source and a further task bottleneck.
+#[test]
+fn commanded_work_and_readout_consume_the_task_rate_once() {
+    let tp = lab_tp();
+    let supply = DriveSupply {
+        task_rate: 0.3,
+        engine_condition: 0.5,
+        transmission_condition: 0.75,
+        ..DriveSupply::WHOLE
+    };
+    let omega = 1550.0 * RPM_TO_RAD;
+    let [whole, ..] = engine_torques(&tp, DriveSupply::WHOLE, omega, 1.0);
+    let [applied, ..] = engine_torques(&tp, supply, omega, 1.0);
+    assert!((applied / whole - supply.task_rate).abs() < 1e-6);
+    let target = crate::track::drive::DriveTarget {
+        intent: crate::track::drive::DriveIntent::Axes(Default::default()),
+        supply,
+    };
+    assert_eq!(crate::crew_ui::drive_rate_line(&target), "Drive rate 30%");
+}

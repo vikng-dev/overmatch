@@ -80,8 +80,8 @@ impl TankVolumes {
 }
 
 /// A crew volume's station identity — which seat this volume is ("Commander", "Gunner", …). Used
-/// for diagnostic readouts and slice-2 backfill ("who is where"). This is identity/label only —
-/// gating keys off [`Capability`] requirements (via [`Part`]), not the role itself. `Ord` is by
+/// for diagnostic readouts and backfill ("who is where"). Task requirements name the station
+/// through [`Part`]; [`ControlStaffing`] names it directly. `Ord` is by
 /// declaration order (Commander < … < BowGunner) — the deterministic seat order the crew bar uses.
 #[derive(
     Component,
@@ -282,8 +282,8 @@ pub enum GradedGroup {
 /// A capability's requirement: a list of [`Group`]s combined by AND (`min` across groups).
 pub type Requirement = Vec<Group>;
 
-/// Per-tank capability requirements, loaded from the `.tank.ron` spec sheet and inserted on the tank
-/// entity at bind time. Its consumer is the drive selector, `track::sim::drive_target`.
+/// The game's damage model: task requirements and control staffing from the validated sheet,
+/// built with the tank's root components. Read by `track::sim::drive_target`.
 #[derive(Component, Clone, Debug)]
 pub struct TankCapabilities {
     pub requirements: std::collections::HashMap<Capability, Requirement>,
@@ -568,8 +568,6 @@ pub fn part_facts(tank_volumes: &TankVolumes, volumes: &Query<VolumeFacets>) -> 
     let mut staffed = std::collections::HashSet::new();
     for volume in tank_volumes.iter() {
         let facets = volumes.get(volume).expect(LIVE_VOLUME);
-        // A crew station in action supplies its role at the occupant's competence (native 1.0 / foreign
-        // degraded).
         if let (Some(role), None) = (facets.crew, facets.dead) {
             staffed.insert(*role);
             let home = facets
@@ -972,6 +970,47 @@ mod tests {
         }
     }
 
+    /// The game's damage model: a station supplies competence while in action, independent
+    /// of its remaining HP. Task and staffing consumers rely on the same availability boundary.
+    #[test]
+    fn station_quality_is_competence_until_knocked_out() {
+        use super::*;
+        use bevy::ecs::system::RunSystemOnce;
+        // Fixture: a foreign occupant at full, reduced and emptied ten-point pools.
+        for held in [10, 5, 1, 0] {
+            let mut world = World::new();
+            let tank = world.spawn_empty().id();
+            let mut health = ComponentHealth::full(10);
+            health.set_held(held * crate::ballistics::POOL_UNITS_PER_HP);
+            let station = world
+                .spawn((
+                    CrewStation::Driver,
+                    Crewman {
+                        home: CrewStation::Loader,
+                    },
+                    health,
+                    VolumeOf(tank),
+                ))
+                .id();
+            if held == 0 {
+                world.entity_mut(station).insert(Dead);
+            }
+            world
+                .run_system_once(
+                    move |tanks: Query<&TankVolumes>, facets: Query<VolumeFacets>| {
+                        let quality = part_facts(tanks.get(tank).unwrap(), &facets).quality;
+                        let expected = if held == 0 {
+                            0.0
+                        } else {
+                            competence(CrewStation::Loader, CrewStation::Driver)
+                        };
+                        assert_eq!(live_quality(&quality, Part::Driver), expected);
+                    },
+                )
+                .unwrap();
+        }
+    }
+
     /// The game's damage model's one knockout rule (#227), run through the consequence chain's
     /// systems in their order: the knockout label (read by scoring and the Battle) latches when
     /// fewer than two crew members are in action, whatever emptied their pools. A cook-off is a
@@ -1088,6 +1127,43 @@ mod tests {
             assert!(controls.permits(&[CrewStation::Driver].into()));
             members.reverse();
         }
+    }
+
+    /// The game's damage model: a resolution gives consumers the selected complete
+    /// alternative and every cooperative contribution beside the rate, preserving member identity.
+    #[test]
+    fn resolved_paths_retain_selection_and_cooperative_contributors() {
+        // Fixture: unequal complete alternatives, reused as cooperative paths in another group.
+        let members = vec![
+            (0.8, vec![Part::Driver, Part::Engine]),
+            (0.5, vec![Part::Commander, Part::Transmission]),
+        ];
+        let req = vec![
+            Group::Graded(GradedGroup::Backup(members.clone())),
+            Group::Graded(GradedGroup::Pool(members.clone())),
+        ];
+        let quality = q(&[
+            (Part::Driver, 0.6),
+            (Part::Engine, 0.5),
+            (Part::Commander, 1.0),
+            (Part::Transmission, 1.0),
+        ]);
+        let result = super::resolve(&req, &quality);
+        assert_eq!(result.rate, 0.5);
+        let selected = &result.groups[0].contributors;
+        assert_eq!(selected.len(), 1);
+        assert_eq!(selected[0].index, 1);
+        assert_eq!(selected[0].parts, members[1].1);
+        assert_eq!(selected[0].rate, 0.5);
+        let cooperative = &result.groups[1].contributors;
+        assert_eq!(cooperative.len(), members.len());
+        for (index, member) in cooperative.iter().enumerate() {
+            assert_eq!(member.index, index);
+            assert_eq!(member.parts, members[index].1);
+        }
+        assert!((cooperative[0].rate - 0.24).abs() < 1e-6);
+        assert_eq!(cooperative[1].rate, 0.5);
+        assert!((result.groups[1].rate - 0.74).abs() < 1e-6);
     }
 
     /// The game's damage model: cooperative contributors cannot borrow one another's

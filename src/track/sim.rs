@@ -1524,6 +1524,132 @@ mod tests {
         assert!(supply.control_authority);
     }
 
+    /// The game's damage model: simultaneous reductions across required groups take one
+    /// bottleneck; complete cooperative and alternative paths pay their coefficients once.
+    /// Drive and the rendered HUD must read that same task rate, independently of source condition.
+    #[test]
+    fn required_groups_coefficients_and_readout_share_one_rate() {
+        use crate::damage::{ControlStaffing, CrewStation, GradedGroup, Group, Part};
+        // Fixture: reduced operator and two reduced modules, plus an alternative operator.
+        let quality = [
+            (Part::Driver, 0.6),
+            (Part::Commander, 1.0),
+            (Part::Engine, 0.5),
+            (Part::Transmission, 0.5),
+        ]
+        .into();
+        let members = vec![
+            (0.4, vec![Part::Driver, Part::Engine]),
+            (0.4, vec![Part::Commander, Part::Transmission]),
+        ];
+        for (req, expected, text) in [
+            (
+                vec![
+                    Group::Single(Part::Driver),
+                    Group::Single(Part::Engine),
+                    Group::Single(Part::Transmission),
+                ],
+                0.5,
+                "Drive rate 50%",
+            ),
+            (
+                vec![
+                    Group::Graded(GradedGroup::Pool(members.clone())),
+                    Group::Single(Part::Engine),
+                ],
+                0.32,
+                "Drive rate 32%",
+            ),
+            (
+                vec![
+                    Group::Graded(GradedGroup::Backup(members)),
+                    Group::Single(Part::Engine),
+                ],
+                0.2,
+                "Drive rate 20%",
+            ),
+        ] {
+            let caps = TankCapabilities::new(
+                [(Capability::Drive, req)].into(),
+                ControlStaffing::Any(vec![vec![CrewStation::Driver]]),
+            );
+            let supply = supply_from_parts(&caps, &quality, &[CrewStation::Driver].into());
+            assert!((supply.task_rate - expected).abs() < 1e-6);
+            assert_eq!(supply.engine_condition, 0.5);
+            assert_eq!(supply.transmission_condition, 0.5);
+            assert!(supply.control_authority);
+            assert_eq!(
+                crate::crew_ui::drive_rate_line(&DriveTarget {
+                    intent: DriveIntent::Axes(DriveAxes::default()),
+                    supply,
+                }),
+                text
+            );
+        }
+    }
+
+    /// The game's damage model: production alternatives cannot grant control authority.
+    /// Fixture: an available alternative task path with its declared control station unavailable.
+    #[test]
+    fn an_available_task_path_cannot_grant_unstaffed_controls() {
+        use crate::damage::{ControlStaffing, CrewStation, GradedGroup, Group, Part};
+        let caps = TankCapabilities::new(
+            [(
+                Capability::Drive,
+                vec![Group::Graded(GradedGroup::Backup(vec![
+                    (1.0, vec![Part::Driver, Part::Engine]),
+                    (0.6, vec![Part::Commander, Part::Transmission]),
+                ]))],
+            )]
+            .into(),
+            ControlStaffing::Any(vec![vec![CrewStation::Driver]]),
+        );
+        use crate::ballistics::ComponentHealth;
+        use crate::damage::{Crewman, Dead, FunctionRole, VolumeOf};
+        use bevy::ecs::system::RunSystemOnce;
+        let mut world = World::new();
+        let tank = world.spawn(caps).id();
+        world.spawn((
+            CrewStation::Driver,
+            Crewman {
+                home: CrewStation::Driver,
+            },
+            Dead,
+            VolumeOf(tank),
+        ));
+        world.spawn((
+            CrewStation::Commander,
+            Crewman {
+                home: CrewStation::Commander,
+            },
+            VolumeOf(tank),
+        ));
+        for (function, held) in [(FunctionRole::Engine, 5), (FunctionRole::Transmission, 10)] {
+            let mut health = ComponentHealth::full(10);
+            health.set_held(held * crate::ballistics::POOL_UNITS_PER_HP);
+            world.spawn((function, health, VolumeOf(tank)));
+        }
+        let command = ParsedTankCommand::try_from(crate::command::TankCommand {
+            throttle: 1.0,
+            ..default()
+        })
+        .unwrap();
+        world
+            .run_system_once(
+                move |tanks: Query<(&TankVolumes, &TankCapabilities)>,
+                      facets: Query<VolumeFacets>| {
+                    let (volumes, caps) = tanks.get(tank).unwrap();
+                    let target = drive_target(&command, Some(volumes), Some(caps), &facets);
+                    assert_eq!(target.intent, DriveIntent::Unmanned);
+                    assert_eq!(target.supply.task_rate, 0.6);
+                    assert!(!target.supply.control_authority);
+                    assert_eq!(target.supply.engine_condition, 0.5);
+                    assert_eq!(crate::crew_ui::drive_rate_line(&target), "Drive rate 60%");
+                },
+            )
+            .unwrap();
+    }
+
     /// The game's damage model: a fixture hull driven through the production adapter, with
     /// its longitudinal speed integrated from the adapter's own traction at the vehicle mass the
     /// grip law carries (DERIVED: twice its side weight over g). Drive requires

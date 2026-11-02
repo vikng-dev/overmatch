@@ -1357,6 +1357,103 @@ mod tests {
         assert!(gate_state(&world, root).is_ready());
     }
 
+    /// The game's damage model: reload and belt swap consume the same complete-path task
+    /// rate as the evaluator. Fixture: foreign operator, cooperative/alternative coefficients,
+    /// two reduced module pools, and a separate required group. Cadence remains mechanical.
+    #[test]
+    fn loading_consumes_one_resolved_rate_for_complete_paths_and_required_groups() {
+        use crate::damage::{
+            FunctionRole, GradedGroup, Group, Part, TankVolumes, VolumeFacets, VolumeOf,
+            requirement_rate,
+        };
+        for cooperative in [false, true] {
+            for automatic in [false, true] {
+                let mut world = test_world();
+                let members = vec![
+                    (0.8, vec![Part::Loader, Part::Breech]),
+                    (0.2, vec![Part::Commander]),
+                ];
+                let req = vec![
+                    Group::Graded(if cooperative {
+                        GradedGroup::Pool(members)
+                    } else {
+                        GradedGroup::Backup(members)
+                    }),
+                    Group::Single(Part::GunBarrel),
+                ];
+                let (root, loader) = if automatic {
+                    spawn_mg_rig(&mut world, req.clone())
+                } else {
+                    let root = spawn_main_gun_rig(&mut world);
+                    world
+                        .query_filtered::<&mut Weapon, With<Muzzle>>()
+                        .single_mut(&mut world)
+                        .unwrap()
+                        .load = req.clone();
+                    let loader = world
+                        .query_filtered::<Entity, With<CrewStation>>()
+                        .single(&world)
+                        .unwrap();
+                    (root, loader)
+                };
+                world.entity_mut(loader).insert(Crewman {
+                    home: CrewStation::Driver,
+                });
+                world.spawn((
+                    CrewStation::Commander,
+                    Crewman {
+                        home: CrewStation::Commander,
+                    },
+                    VolumeOf(root),
+                ));
+                for (function, held) in [(FunctionRole::Breech, 5), (FunctionRole::GunBarrel, 4)] {
+                    let mut health = crate::ballistics::ComponentHealth::full(10);
+                    health.set_held(held * crate::ballistics::POOL_UNITS_PER_HP);
+                    world.spawn((function, health, VolumeOf(root)));
+                }
+                let rate = world
+                    .run_system_once(
+                        move |tanks: Query<&TankVolumes>, facets: Query<VolumeFacets>| {
+                            requirement_rate(Some(tanks.get(root).unwrap()), &req, &facets)
+                        },
+                    )
+                    .unwrap();
+                let competence =
+                    crate::damage::competence(CrewStation::Driver, CrewStation::Loader);
+                let contribution = 0.8 * competence * 0.5;
+                let expected = if cooperative {
+                    (contribution + 0.2).min(0.4)
+                } else {
+                    contribution.clamp(0.2, 0.4)
+                };
+                assert_eq!(rate, expected);
+                if automatic {
+                    world.get_mut::<WeaponGate>(root).unwrap().weapons[0].belt_remaining = 1;
+                }
+                world.run_system_once(fire).unwrap();
+                let state = gate_state(&world, root);
+                let crate::tank::WeaponTiming::Loading {
+                    work, ready_tick, ..
+                } = state.timing
+                else {
+                    panic!("a nonzero fixture load starts work: {state:?}")
+                };
+                assert_eq!(work.rate(), rate);
+                let cycle = if automatic { MG_CYCLE } else { MAIN_GUN_CYCLE };
+                let base = match cycle {
+                    FireCycle::Single { reload } => reload,
+                    FireCycle::Automatic { swap, .. } => swap,
+                };
+                assert_eq!(
+                    ready_tick,
+                    at((f64::from(base.raw()) / f64::from(rate)).ceil() as u32)
+                );
+                advance(&mut world, 1);
+                assert_eq!(gate_state(&world, root).ready_tick(), Some(ready_tick));
+            }
+        }
+    }
+
     /// The game's damage model: the loader preserves completed work across a pause and each
     /// rate change. The UI and fire legality rely on one stable deadline between changes.
     /// Fixture: 32 base ticks; changes after 8 and 4 working ticks, 10 paused ticks.

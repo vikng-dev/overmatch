@@ -1252,7 +1252,7 @@ pub struct TankSpec {
     /// Per-tank capability requirements (design §7b). Each capability maps to a list of requirement
     /// groups (AND'd): a bare `Part` is mandatory; `Pool(..)`/`Backup(..)` express graded redundancy.
     /// Read by the drive selector, `track::sim::drive_target`.
-    /// Required; `{}` gates no capability.
+    /// Required; every capability is keyed, with `[]` for an ungated task.
     pub capabilities: HashMap<Capability, Requirement>,
     /// The game's damage model: who may operate Drive controls, regardless of throughput.
     pub drive_controls: ControlStaffing,
@@ -3228,6 +3228,7 @@ TankSpec(
             ("shift_addressing", "shift_addressing: Direct,", ""),
             ("shadow_proxies", "shadow_proxies: [],", ""),
             ("capabilities", "capabilities: { Drive: [] },", ""),
+            ("drive_controls", "drive_controls: NotRequired,", ""),
             ("fire", "fire: [Gunner, Breech],", ""),
             ("load", "load: [Gunner],", ""),
             (
