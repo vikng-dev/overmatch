@@ -6,6 +6,7 @@ use super::*;
 use crate::buildings::breakage::piece_layers;
 use crate::debris::launch::{Launch, PendingLaunch, launch_colliders};
 use avian3d::collider_tree::{ColliderTrees, update_moved_collider_aabbs};
+use avian3d::dynamics::rigid_body::mass_properties::components::RecomputeMassProperties;
 use avian3d::prelude::*;
 
 /// Stable segment membership, independent of which body currently owns a segment.
@@ -341,7 +342,11 @@ pub(super) fn split_moving(
                     .cross(frame.rotation * (lower.centre - origin - centre.0)),
         ));
         *trunk = trunk.partition(ranges[0].clone());
-        commands.entity(entity).remove::<Sleeping>();
+        // Avian 0.7 queues the new collider owner only; the surviving lower body lost mass too.
+        commands
+            .entity(entity)
+            .insert(RecomputeMassProperties)
+            .remove::<Sleeping>();
     }
 }
 
@@ -758,7 +763,7 @@ mod tests {
 
     /// A split preserves the parent's rigid velocity field and occupied geometry. Physics users
     /// rely on no invented energy or teleport at release. Fixture: a rotating, translating trunk
-    /// opens both remaining seams in one deposit, with a nonidentity construction rotation.
+    /// opens its seams in two deposits, with a nonidentity construction rotation.
     #[test]
     fn a_split_inherits_the_rigid_velocity_field_without_moving_any_segment() {
         use bevy::ecs::system::RunSystemOnce;
@@ -766,47 +771,125 @@ mod tests {
         let root = tree(&mut app, 0, Vec3::ZERO);
         let parts = app.world().get::<TreeParts>(root).unwrap().0.clone();
         let parent = release(&mut app, root, 0, Vec3::ZERO);
-        let at = Vec3::new(8.0, 3.0, -2.0);
-        let turn = Quat::from_rotation_x(0.7);
-        let velocity = Vec3::new(2.0, 3.0, -1.0);
-        let spin = Vec3::new(0.1, -0.2, 0.3);
-        let com = app.world().get::<ComputedCenterOfMass>(parent).unwrap().0;
-        app.world_mut().entity_mut(parent).insert((
-            Position(at),
-            Rotation(turn),
-            LinearVelocity(velocity),
-            AngularVelocity(spin),
-        ));
+        app.update(); // Avian prepares the newly spawned carrier before the measured split.
         let body = app.world().get::<TreeBody>(parent).unwrap().clone();
-        let before: Vec<_> = parts
-            .iter()
-            .map(|&part| at + turn * app.world().get::<Transform>(part).unwrap().translation)
-            .collect();
-        for &part in &parts[1..] {
+        let total_mass: f32 = body.structure.chunks.iter().map(|chunk| chunk.mass).sum();
+        for cut in [2, 1] {
+            // Fixture: reset the surviving carrier's pose between splits to isolate the handoff.
+            let at = Vec3::new(8.0, 3.0, -2.0);
+            let turn = Quat::from_rotation_x(0.7);
+            let velocity = Vec3::new(2.0, 3.0, -1.0);
+            let spin = Vec3::new(0.1, -0.2, 0.3);
+            let com = app.world().get::<ComputedCenterOfMass>(parent).unwrap().0;
+            let mass = app.world().get::<ComputedMass>(parent).unwrap().value();
+            let inertia = app
+                .world()
+                .get::<ComputedAngularInertia>(parent)
+                .unwrap()
+                .tensor();
+            app.world_mut().entity_mut(parent).insert((
+                Position(at),
+                Rotation(turn),
+                LinearVelocity(velocity),
+                AngularVelocity(spin),
+            ));
+            let before: Vec<_> = parts[..=cut]
+                .iter()
+                .map(|&part| at + turn * app.world().get::<Transform>(part).unwrap().translation)
+                .collect();
             app.world_mut().trigger(PoolEmptied {
-                entity: part,
+                entity: parts[cut],
                 at: Vec3::ZERO,
                 along: Some(Vec3::X),
             });
-        }
-        app.world_mut().run_system_once(split_moving).unwrap();
-        for (k, &part) in parts.iter().enumerate() {
-            let owner = app.world().get::<ChildOf>(part).unwrap().parent();
-            let position = app.world().get::<Position>(owner).unwrap().0;
-            let rotation = app.world().get::<Rotation>(owner).unwrap().0;
-            let local = app.world().get::<Transform>(part).unwrap().translation;
-            assert!((position + rotation * local - before[k]).length() < 1e-5);
-            // DERIVED from the authored frustum centroid; each resulting owner has one segment.
-            let centre = at + turn * (body.structure.chunks[k].centroid - body.piece_centroid(0));
-            let expected = velocity + spin.cross(centre - (at + turn * com));
+            app.world_mut().run_system_once(split_moving).unwrap();
+            let mut momentum = Vec3::ZERO;
+            let mut angular = Vec3::ZERO;
+            for (k, &part) in parts[..=cut].iter().enumerate() {
+                let owner = app.world().get::<ChildOf>(part).unwrap().parent();
+                let position = app.world().get::<Position>(owner).unwrap().0;
+                let rotation = app.world().get::<Rotation>(owner).unwrap().0;
+                let local = app.world().get::<Transform>(part).unwrap().translation;
+                assert!((position + rotation * local - before[k]).length() < 1e-5);
+                let owned = app.world().get::<TrunkState>(owner).unwrap().owned.clone();
+                let chunks = &body.structure.chunks[owned.clone()];
+                let occupied: f32 = chunks.iter().map(|chunk| chunk.mass).sum();
+                let centre = chunks
+                    .iter()
+                    .map(|chunk| chunk.centroid * chunk.mass)
+                    .sum::<Vec3>()
+                    / occupied;
+                let centre = at + turn * (centre - body.piece_centroid(0));
+                let expected = velocity + spin.cross(centre - (at + turn * com));
+                assert!(
+                    (app.world().get::<LinearVelocity>(owner).unwrap().0 - expected).length()
+                        < 1e-4
+                );
+                assert!(
+                    (app.world().get::<AngularVelocity>(owner).unwrap().0 - spin).length() < 1e-6
+                );
+                // Count each owner once; the lower range can still contain several segments.
+                if k == owned.start {
+                    let motion = app.world().get::<LinearVelocity>(owner).unwrap().0;
+                    momentum += occupied * motion;
+                    let launch = launch_range(&body, owned, &[]);
+                    angular += turn * (launch.inertia * (turn.inverse() * spin))
+                        + (centre - (at + turn * com)).cross(occupied * motion);
+                }
+            }
+            // Resolution: relative 1e-4 bounds f32 hull/centroid summation, not physical loss.
             assert!(
-                (app.world().get::<LinearVelocity>(owner).unwrap().0 - expected).length() < 1e-4
+                (momentum - mass * velocity).length() < mass * velocity.length() * 1e-4,
+                "cut {cut}: momentum {momentum:?}, parent mass {mass}, velocity {velocity:?}"
             );
-            assert!((app.world().get::<AngularVelocity>(owner).unwrap().0 - spin).length() < 1e-6);
-            assert_eq!(
-                app.world().get::<TrunkState>(owner).unwrap().owned,
-                k..k + 1
+            assert!(
+                (angular - turn * (inertia * (turn.inverse() * spin))).length()
+                    < angular.length() * 1e-4
             );
+            app.update();
+            let mut sum = 0.0;
+            for owner in app
+                .world_mut()
+                .query_filtered::<Entity, With<LooseTrunk>>()
+                .iter(app.world())
+            {
+                let trunk = app.world().get::<TrunkState>(owner).unwrap();
+                let expected: f32 = body.structure.chunks[trunk.owned.clone()]
+                    .iter()
+                    .map(|chunk| chunk.mass)
+                    .sum();
+                let actual = app.world().get::<ComputedMass>(owner).unwrap().value();
+                assert!(
+                    (actual - expected).abs() < expected * 1e-5,
+                    "occupied mass after cut {cut}: expected {expected}, got {actual}"
+                );
+                let launch = launch_range(&body, trunk.owned.clone(), &[]);
+                let origin = body.piece_centroid(app.world().get::<TreePiece>(owner).unwrap().cut);
+                assert!(
+                    (app.world().get::<ComputedCenterOfMass>(owner).unwrap().0
+                        - (launch.centre - origin))
+                        .length()
+                        < 1e-5
+                );
+                let actual_inertia = app
+                    .world()
+                    .get::<ComputedAngularInertia>(owner)
+                    .unwrap()
+                    .tensor();
+                // Resolution: collider-transform summation and the inverse-tensor round trip
+                // differ at f32 precision; relative 1e-4 bounds that numerical error.
+                for axis in [Vec3::X, Vec3::Y, Vec3::Z] {
+                    let observed = actual_inertia * axis;
+                    let expected = launch.inertia * axis;
+                    assert!(
+                        (observed - expected).length() < expected.length() * 1e-4,
+                        "cut {cut}, axis {axis}: inertia {observed}, expected {expected}, relative error {}",
+                        (observed - expected).length() / expected.length()
+                    );
+                }
+                sum += actual;
+            }
+            assert!((sum - total_mass).abs() < total_mass * 1e-5);
         }
     }
 
