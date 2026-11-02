@@ -2358,6 +2358,7 @@ fn apply_bounce(
 
 fn finish_bite(
     bite: &Bite,
+    flying_caliber: f32,
     mark: usize,
     shell: &mut MarchingShell,
     terminal_emitted: &mut bool,
@@ -2414,10 +2415,10 @@ fn finish_bite(
             at: bite.entrance,
             normal: bite.normal,
             incoming: Vec3::from(bite.incoming),
-            caliber: shell.projectile.caliber(),
+            caliber: flying_caliber,
             contact_caliber: super::face_contact_caliber(
                 verdict.into(),
-                shell.projectile.caliber(),
+                flying_caliber,
                 shell.projectile.penetrator_caliber(),
             ),
             verdict: verdict.into(),

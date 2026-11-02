@@ -15,7 +15,7 @@
 //! [`SimParts`] names, sorted), the impact segment in that part's frame (the round came along
 //! `along` and met the face at `at`), the face normal in the same frame, the round's calibre and a
 //! roll seed hashed from the shot. Marks ride the part they were made on, so a turret mark turns
-//! with the turret. Rounds below [`MIN_MARK_CALIBER_MM`] leave no mark.
+//! with the turret. Every positive calibre uses the same bounded record.
 //!
 //! # Who mounts what
 //!
@@ -40,12 +40,6 @@ use crate::tank::{SimParts, rig_world_pose};
 
 /// The marks one vehicle keeps: the newest this many. ASSUMED: the owner's "about 50".
 pub(crate) const MARK_CAP: usize = 50;
-
-/// The smallest calibre that leaves a mark, in whole millimetres. Machine-gun rounds, below it, leave none, because of [`MARK_CAP`]: one belt on a hull
-/// would turn the whole record over in about 4 s (DERIVED: the shipped machine gun's 750 rpm
-/// cyclic is 12.5 rounds a second, and 50 / 12.5 = 4), dropping every main-gun mark the vehicle
-/// holds. Issue 144 brings them back under a cap of their own. This cap sets the threshold independently of the authored impact recipe.
-pub(crate) const MIN_MARK_CALIBER_MM: u8 = 20;
 
 /// The longest a mark stretches along the shot, as a multiple of its round footprint. A cylinder
 /// of radius r meeting a plate at obliquity θ cuts an ellipse r × r / cos θ (DERIVED: 2.0× at
@@ -144,6 +138,47 @@ impl From<MarkCaliber> for f32 {
     }
 }
 
+/// The game's damage-model view: a nonzero snorm8 direction, checked at its input edge.
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
+#[serde(try_from = "[i8; 3]", into = "[i8; 3]")]
+pub(crate) struct PackedDirection([i8; 3]);
+
+#[derive(Debug)]
+pub(crate) enum PackedDirectionError {
+    Zero,
+}
+
+impl std::fmt::Display for PackedDirectionError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Zero => write!(f, "a packed mark direction must be nonzero"),
+        }
+    }
+}
+
+impl TryFrom<[i8; 3]> for PackedDirection {
+    type Error = PackedDirectionError;
+    fn try_from(value: [i8; 3]) -> Result<Self, Self::Error> {
+        if value == [0; 3] {
+            Err(PackedDirectionError::Zero)
+        } else {
+            Ok(Self(value))
+        }
+    }
+}
+
+impl From<PackedDirection> for [i8; 3] {
+    fn from(value: PackedDirection) -> Self {
+        value.0
+    }
+}
+
+impl PackedDirection {
+    fn direction(self) -> Vec3 {
+        Vec3::from_array(self.0.map(f32::from)).normalize()
+    }
+}
+
 /// One mark, packed for the wire. Positions are in the struck part's frame, so the mark rides the
 /// part; the view re-derives everything else (size, stretch, roll, material) from these fields.
 #[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
@@ -156,9 +191,9 @@ pub(crate) struct HullMark {
     /// Where the round met the face, part frame, millimetres.
     pub(crate) at: [i16; 3],
     /// The round's direction of travel as it met the face, part frame, unit vector in snorm8.
-    pub(crate) along: [i8; 3],
+    pub(crate) along: PackedDirection,
     /// The face's outward normal, part frame, unit vector in snorm8.
-    pub(crate) normal: [i8; 3],
+    pub(crate) normal: PackedDirection,
     /// The round's exact calibre, metres; no presentation-size ceiling or invented minimum.
     pub(crate) caliber: MarkCaliber,
     /// Hashed from the shot and the strike's ordinal in it; the view takes the mark's roll and
@@ -191,7 +226,10 @@ impl HullMark {
         };
         let snorm = |direction: Vec3| {
             let unit = direction.try_normalize()?;
-            Some(unit.to_array().map(|c| (c * 127.0).round() as i8))
+            Some(
+                PackedDirection::try_from(unit.to_array().map(|c| (c * 127.0).round() as i8))
+                    .expect("a unit vector quantizes to a nonzero snorm8 direction"),
+            )
         };
         Some(Self {
             feedback,
@@ -212,26 +250,18 @@ impl HullMark {
 
     /// The round's direction of travel, part frame, unit.
     pub(crate) fn along(&self) -> Vec3 {
-        unsnorm(self.along)
+        self.along.direction()
     }
 
     /// The face's outward normal, part frame, unit.
     pub(crate) fn normal(&self) -> Vec3 {
-        unsnorm(self.normal)
+        self.normal.direction()
     }
 
     /// The round's calibre, metres.
     pub(crate) fn caliber(&self) -> f32 {
         self.caliber.into()
     }
-}
-
-/// A packed unit vector back to unit length. `pack` never writes a zero vector; `Y` stands in for
-/// one a hand-built mark carries.
-fn unsnorm(packed: [i8; 3]) -> Vec3 {
-    Vec3::from_array(packed.map(f32::from))
-        .try_normalize()
-        .unwrap_or(Vec3::Y)
 }
 
 /// A vehicle's marks, oldest first: the newest [`MARK_CAP`] of every mark ever recorded on it.
@@ -318,15 +348,11 @@ pub(crate) struct MarkBuilder<'w, 's> {
 }
 
 impl MarkBuilder<'_, '_> {
-    /// The vehicle root a strike marks, and its mark. `None` when the verdict leaves no mark, the
-    /// round is below [`MIN_MARK_CALIBER_MM`], the struck volume is not a part of a root that
-    /// keeps marks (a tree, a turret thrown clear of its hull). Packing failure violates the
+    /// The vehicle root a strike marks, and its mark. `None` when the verdict leaves no mark or
+    /// the struck volume is not a part of a root that keeps marks (a tree, a turret thrown clear of its hull). Packing failure violates the
     /// bake's coordinate bound or the resolved direction invariants and is a bug.
     pub(crate) fn mark(&self, strike: &ShellStrike) -> Option<(Entity, HullMark)> {
         let kind = MarkKind::of(strike.verdict)?;
-        if strike.caliber * 1000.0 < f32::from(MIN_MARK_CALIBER_MM) {
-            return None;
-        }
         let Ok(owner) = self.owners.get(strike.struck) else {
             return None; // Standalone environment volumes have no vehicle ownership or hull record.
         };
@@ -451,8 +477,8 @@ pub(crate) mod tests {
             kind: MarkKind::ALL[n as usize % 3],
             part: n % 3,
             at: [n as i16, -(n as i16), 7],
-            along: [0, 0, -127],
-            normal: [0, 127, 0],
+            along: PackedDirection::try_from([0, 0, -127]).unwrap(),
+            normal: PackedDirection::try_from([0, 127, 0]).unwrap(),
             caliber: MarkCaliber::try_from(0.088).expect("positive finite fixture calibre"),
             seed: n.wrapping_mul(7919),
         }
@@ -656,8 +682,7 @@ pub(crate) mod tests {
 
     /// The game's damage-model view: a mark's footprint is what marked the face. A sub-calibre
     /// perforation's hole is its penetrator's; its bounce or stop is the whole flying assembly's.
-    /// The record's machine-gun cutoff reads the flying body, so a large carrier's small core
-    /// still leaves its hole. FIXTURE DATA: an 88 mm kept carrier with a 35.7 mm core. A mutant that
+    /// FIXTURE DATA: an 88 mm kept carrier with a 35.7 mm core. A mutant that
     /// sizes the mark off the flying body draws a full-calibre hole no penetrator cut.
     #[test]
     fn a_sub_calibre_marks_its_hole_with_the_penetrator() {
@@ -671,20 +696,42 @@ pub(crate) mod tests {
             let mut world = World::new();
             let fixture = fixture_in(&mut world);
             let plate_world = plate_in_world(&world, &fixture);
-            let mut hit = strike(
-                fixture.collider,
-                plate_world.transform_point(Vec3::ZERO),
-                verdict,
+            let core = crate::ballistics::RoundBody {
+                mass: 1.93,
+                caliber: CORE,
+                nose_factor: 7.0 / 24.0,
+            };
+            let flying = crate::ballistics::RoundBody {
+                mass: 7.3,
+                caliber: FLYING,
+                ..core
+            };
+            let mut hit =
+                crate::ballistics::march_tests::first_contact_strike(flying, core, verdict);
+            assert_eq!(
+                hit.caliber, FLYING,
+                "the event remembers the flying body at contact"
             );
-            hit.contact_caliber = crate::ballistics::face_contact_caliber(verdict, FLYING, CORE);
+            hit.struck = fixture.collider;
+            hit.at = plate_world.transform_point(Vec3::ZERO);
             let (_, mark) = world
                 .run_system_once(move |builder: MarkBuilder| builder.mark(&hit))
                 .unwrap()
                 .expect("a main-gun strike on a part leaves a mark");
             assert_eq!(mark.caliber(), footprint, "{verdict:?}");
         }
-        let mut small_core = strike(Entity::PLACEHOLDER, Vec3::ZERO, Verdict::Through);
-        small_core.contact_caliber = 0.010;
+        let core = crate::ballistics::RoundBody {
+            mass: 1.93,
+            caliber: 0.010,
+            nose_factor: 7.0 / 24.0,
+        };
+        let flying = crate::ballistics::RoundBody {
+            mass: 7.3,
+            caliber: FLYING,
+            ..core
+        };
+        let mut small_core =
+            crate::ballistics::march_tests::first_contact_strike(flying, core, Verdict::Through);
         let mut world = World::new();
         let fixture = fixture_in(&mut world);
         small_core.struck = fixture.collider;
@@ -692,19 +739,13 @@ pub(crate) mod tests {
         let built = world
             .run_system_once(move |builder: MarkBuilder| builder.mark(&small_core))
             .unwrap();
-        assert!(
-            built.is_some(),
-            "the cutoff reads the flying body, not the core"
-        );
+        assert!(built.is_some(), "a small core still leaves its actual hole");
     }
 
-    /// A round below [`MIN_MARK_CALIBER_MM`] leaves no mark whatever its verdict, and a 20 mm
-    /// round leaves one. The cap relies on it: one machine-gun belt would otherwise turn the whole
-    /// [`MARK_CAP`] over in about 4 s and drop every main-gun mark the vehicle holds. A mutant
-    /// that drops the threshold lets a belt flood the record; one that raises it past 20 mm takes
-    /// an autocannon's marks away.
+    /// The game's damage-model view uses one storage policy for every calibre. A small strike
+    /// cannot vanish to preserve a larger one; the bounded FIFO owns persistence.
     #[test]
-    fn rounds_below_20_mm_leave_no_mark() {
+    fn every_positive_calibre_can_leave_a_surface_mark() {
         let mut app = App::new();
         app.add_plugins(offline_plugin);
         let fixture = fixture_in(app.world_mut());
@@ -723,13 +764,40 @@ pub(crate) mod tests {
             .iter()
             .map(|(_, mark)| (mark.kind, mark.caliber()))
             .collect();
-        assert_eq!(
-            marks,
-            [
-                (MarkKind::Scratch, 0.020),
-                (MarkKind::Dent, 0.020),
-                (MarkKind::Hole, 0.020)
-            ],
-        );
+        assert_eq!(marks.len(), 9);
+        for (actual, caliber) in marks.as_chunks::<3>().0.iter().zip([0.0079, 0.019, 0.020]) {
+            assert_eq!(
+                actual,
+                &[
+                    (MarkKind::Scratch, caliber),
+                    (MarkKind::Dent, caliber),
+                    (MarkKind::Hole, caliber)
+                ]
+            );
+        }
+    }
+    /// The game's damage-model record refuses outside input with no direction; the view never
+    /// invents an upward face. Each packed direction's deserializer owns this boundary.
+    #[test]
+    fn packed_mark_directions_refuse_zero_at_the_input_edge() {
+        for field in ["along", "normal"] {
+            let mut value = serde_json::to_value(numbered(0)).unwrap();
+            value[field] = serde_json::json!([0, 0, 0]);
+            assert!(
+                serde_json::from_value::<HullMark>(value).is_err(),
+                "{field} must refuse zero"
+            );
+        }
+    }
+    /// The game's damage-model wire keeps a checked direction in the same three snorm8 bytes.
+    /// Rejecting zero must not alter a valid mark's representation on the network.
+    #[test]
+    fn checked_directions_keep_the_packed_wire_representation() {
+        for packed in [[0, 0, -127], [-128, 127, 1]] {
+            let direction = PackedDirection::try_from(packed).unwrap();
+            let encoded = postcard::to_allocvec(&direction).unwrap();
+            assert_eq!(encoded, postcard::to_allocvec(&packed).unwrap());
+            assert_eq!(encoded.len(), 3);
+        }
     }
 }

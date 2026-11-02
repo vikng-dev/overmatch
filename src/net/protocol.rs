@@ -259,7 +259,9 @@ use crate::{CombatantId, CombatantLife, ShotId};
 /// Returning debris can dose its emitting body after genuine re-entry; every field's receiver
 /// contributions are recorded and accumulated before pool rounding.
 /// REV 71 (#258, the game's damage model): each public exit leg carries its own drag.
-pub const PROTOCOL_REV: u32 = 71;
+/// REV 72 (#258, the game's damage-model view): first-contact marks retain the flying calibre;
+/// packed directions refuse zero at the wire edge, with the same three-byte representation.
+pub const PROTOCOL_REV: u32 = 72;
 
 /// Compatibility tag derived from the complete pinned wire manifest plus the crate version. This
 /// is the runtime handshake value: version-exact, so a version bump intentionally changes it.
@@ -1164,7 +1166,7 @@ const WIRE_SURFACE_HASH: u64 = 0xc0256acf39c3f9da;
 /// The pinned hash of the OWN wire-facing type DEFINITIONS (field layout, not just names). Re-pin it
 /// whenever a wire-facing struct/enum definition changes; house process also bumps
 /// [`PROTOCOL_REV`]. The tripwire prints the new value. See the block above for the coverage model.
-const WIRE_TYPES_HASH: u64 = 0x1a2f2d497a53027a;
+const WIRE_TYPES_HASH: u64 = 0xa0fb60f4d89cd6c9;
 
 /// The pinned `Cargo.lock` versions of the external crates whose types ride the wire (avian's
 /// replicated physics components; lightyear's wire framing / input protocol). A bump of either can
@@ -2070,6 +2072,7 @@ mod tests {
         ("src/net/destruction.rs", "LedgerEntry"),
         ("src/hull_marks.rs", "HullMarks"),
         ("src/hull_marks.rs", "HullMark"),
+        ("src/hull_marks.rs", "PackedDirection"),
         ("src/hull_marks.rs", "MarkCaliber"),
         ("src/substances/feedback.rs", "SurfaceFeedback"),
         ("src/hull_marks.rs", "MarkKind"),

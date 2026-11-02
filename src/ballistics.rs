@@ -4738,7 +4738,7 @@ mod tests {
 /// perforation) and the surface classification are exercised through the REAL `integrate_projectiles`
 /// resolution, not mocked. Modelled on the sandbox's plate targets (`sandbox::spawn_targets`).
 #[cfg(test)]
-mod march_tests {
+pub(crate) mod march_tests {
     use std::time::Duration;
 
     use avian3d::prelude::{
@@ -6386,6 +6386,67 @@ mod march_tests {
                 ),
             ))
             .id()
+    }
+
+    /// The game's damage model: a real first-contact event for surface-mark consumer tests.
+    /// All construction, mass and speed choices below are fixture data; the core stays generic.
+    pub(crate) fn first_contact_strike(
+        flying: RoundBody,
+        core: RoundBody,
+        verdict: Verdict,
+    ) -> ShellStrike {
+        #[derive(Resource, Default)]
+        struct Strikes(Vec<ShellStrike>);
+        let thickness = if verdict == Verdict::Stopped {
+            1.0
+        } else if verdict == Verdict::Ricochet {
+            0.4
+        } else {
+            0.05
+        };
+        let mut app =
+            world_with_trimesh_plates(&[(Vec3::new(12.0, thickness, 3.0), Vec3::Y * 50.0)]);
+        if verdict == Verdict::Ricochet {
+            let plate = app
+                .world_mut()
+                .query::<(Entity, &Transform)>()
+                .iter(app.world())
+                .find(|(_, pose)| pose.translation.y == 50.0)
+                .unwrap()
+                .0;
+            app.world_mut()
+                .get_mut::<Transform>(plate)
+                .unwrap()
+                .rotation = Quat::from_rotation_z(75.0_f32.to_radians());
+            settle(&mut app);
+        }
+        app.init_resource::<Strikes>().add_observer(
+            |event: On<ShellStrike>, mut strikes: ResMut<Strikes>| {
+                strikes.0.push(*event);
+            },
+        );
+        let shell = spawn_round(&mut app, core, Vec3::Y * 51.0, Vec3::NEG_Y * 800.0);
+        *app.world_mut().get_mut::<Projectile>(shell).unwrap() =
+            fixture_round_with(flying, core, Vec3::NEG_Y * 800.0);
+        app.world_mut()
+            .entity_mut(shell)
+            .insert(Shot(crate::ShotId {
+                combatant: crate::CombatantId(7),
+                weapon: 0,
+                fire_tick: 100,
+            }));
+        app.update();
+        let strike = *app
+            .world()
+            .resource::<Strikes>()
+            .0
+            .first()
+            .expect("the fixture reaches its first face");
+        assert_eq!(
+            strike.verdict, verdict,
+            "the fixture resolves its requested contact class"
+        );
+        strike
     }
 
     /// The game's damage model spends a tick's seconds at the speed each stretch actually has.

@@ -53,6 +53,7 @@ enum Effect {
 /// The game's damage model: only this cursor mutates across ticks; the crossing it reads does not.
 pub(crate) struct Playback {
     crossing: Crossing,
+    incoming_body: super::super::FlyingBody,
     outgoing_body: super::super::FlyingBody,
     /// The context's deposit flag: whether this end's pools take the crossing's doses.
     deposit: bool,
@@ -353,6 +354,7 @@ impl Playback {
         crossing.effects.sort_by(|a, b| a.0.total_cmp(&b.0));
         Self {
             crossing,
+            incoming_body: flying,
             outgoing_body,
             deposit: context.deposit,
             elapsed: 0.0,
@@ -707,6 +709,7 @@ impl Playback {
                     }
                     Decision::Bite(bite) => finish_bite(
                         bite,
+                        self.incoming_body.caliber,
                         self.mark
                             .expect("a finished bite has its own crossing mark"),
                         shell,
