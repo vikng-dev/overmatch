@@ -361,11 +361,11 @@ Deflection off a face met past the round's critical angle, which reads its hit n
 When a shell's caliber greatly exceeds a volume's thickness along its normal, suppressing ricochet and slope. The game's namesake, but one modifier among many — not the centre of the model.
 
 **Field**:
-The umbrella term for a dose field thrown by a cause, whatever its shape: strength over directions from an origin, stopped by the hard bodies it meets, dosing the boxes it reaches. Its strength is energy (J), a share of the energy its cause lost or drove, and each box it reaches takes HP from that energy at the one **energy-to-HP rate**. Named in use by cause and shape: **spall cone**, **fragment cone**, **blast sphere**.
+The umbrella term for a dose field thrown by a cause, whatever its shape: strength over directions from an origin, stopped by the hard bodies it meets, dosing the boxes it reaches. Its strength is the energy (J) it carries: a spall cone its share of the energy its round lost, a burst field the energy its explosive drives into the wall. A building reads a direction's joules as the energy it crushes with; a box's HP pool reads them through its mechanism's own HP unit, never the line's **energy-to-HP rate** (design doc §6). Named in use by cause and shape: **spall cone**, **fragment cone**, **blast sphere**.
 _Avoid_: cloud (implies an amorphous shape; older records use it to mean a field)
 
 **Spall cone** (spall):
-The field of fragments thrown from a body exit when a round perforates — brightest on its axis and fading to nothing at its rim (the ball law), its half-angle the exit layer's material's, each direction stopped by the first hard body it meets — dosing every box it reaches but the body it left, which the line has already dosed with the energy the round lost there. Its strength is one fixed share of the kinetic energy the round lost crossing the body it left, the energy a **line dose** reads, so a round that loses more there throws a stronger cone; its law is design doc §5 (`.agents/docs/design/armor-penetration-and-damage.md`).
+The field of fragments thrown from a body exit when a round perforates — brightest on its axis and fading to nothing at its rim (the ball law), its half-angle the exit layer's material's, each direction stopped by the first hard body it meets — dosing every box it reaches but the body it left. It carries a share of the kinetic energy the round lost crossing that body, the debris share `κ` (`assets/ballistics/spall_cone.ron`, an `Unknown`) times the exit material's strength ratio, and the body's **line dose** is the rest, so that energy is spent once and a round that loses more there throws a stronger cone. Its HP potency is its own unit per joule lost, whatever `κ`; its law is design doc §5 (`.agents/docs/design/armor-penetration-and-damage.md`).
 _Avoid_: spalling, fragmentation, frag, spall cloud (the noun is spall; the emitter is the spall cone)
 
 **Witness**:
@@ -377,14 +377,14 @@ A round's dose to a witness per unit of chord (round file field `wound`, `assets
 _Avoid_: wound rate (the code identifier keeps `wound` until a rename is decided)
 
 **Dose**:
-What a line, cone, burst or bounce deposits into a box's HP pool in the game's damage model: HP, from energy — the line's energy lost in a hard pool, a bounce's energy lost at the face it struck (the energy of the motion pointed into it), a spall cone direction's share of the energy its round lost at the plate, a burst field direction's of the energy its explosive drives the wall with — at the one **energy-to-HP rate**. A crew station's line dose alone is its chord × the round's **crew line rate**. A box's dose from one shot is summed and converted to **pool units** once. Law: design doc §§5–6.
+What a line, cone, burst or bounce deposits into a box's HP pool in the game's damage model: HP, from energy. The line's energy lost in a hard pool and a bounce's energy lost at the face it struck (the energy of the motion pointed into it) convert at the one **energy-to-HP rate**; a spall cone direction's share of the energy its cone carries out of the plate, and a burst field direction's of the energy its explosive drives the wall with, convert at their own mechanism's unit. A crew station's line dose alone is its chord × the round's **crew line rate**. A box's dose from one shot is summed and converted to **pool units** once. Law: design doc §§5–6.
 _Avoid_: a dose in reference-mm (reference-mm is a penetration and armour readout, never a dose)
 
 **Energy-to-HP rate**:
-The joules of energy lost per HP point, one rate for every dose but a crew station's chord, a tank's modules, a tree's trunk and every field alike (`joules_per_hp`, `assets/ballistics/energy_dose.ron`, TUNED). Each pool's authored HP alone says how sturdy it is.
+The joules of energy lost per HP point of a hard pool's line dose and a bounce's shock, a tank's modules and a tree's trunk alike (`joules_per_hp`, `assets/ballistics/energy_dose.ron`, a `Unit`). A crew station's line dose is its chord at the **crew line rate**, and a field converts at its own mechanism's unit (design doc §6). Each pool's authored HP alone says how sturdy it is.
 
 **Line dose**:
-What a round deposits along its path in the game's damage model: into a hard pool, the kinetic energy it loses there, taken by the strongest volume present at that depth (volumes of one factor share it; a weaker overlapped volume takes none) and converted at one **energy-to-HP rate** for every hard pool; a stopped round deposits all its remaining energy. Into a witness, its chord in the open (none inside a hard volume) times the round's **crew line rate**.
+What a round deposits along its path in the game's damage model: into a hard pool, the kinetic energy it loses there, taken by the strongest volume present at that depth (volumes of one factor share it; a weaker overlapped volume takes none) and converted at one **energy-to-HP rate** for every hard pool, less the share the **spall cone** of a body the round leaves carries out; a stopped round deposits all its remaining energy. Into a witness, its chord in the open (none inside a hard volume) times the round's **crew line rate**.
 _Avoid_: transit damage; cost (the chord's reference-mm readout, chord × factor, is never a dose)
 
 **Pool unit**:

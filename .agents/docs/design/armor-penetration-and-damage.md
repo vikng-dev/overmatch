@@ -313,13 +313,15 @@ face with the energy lost across both (owner, 2026-10-12), and a step up into ha
 crossed behind it to the same body, since no softer step intervened. Exits reached before the round
 stops still throw; the body the round stops inside throws nothing. A bounce throws nothing.
 
-**The pool quantum gate.** A cone whose whole emission `S/2` converts to no pool unit at the
-energy rate (below half a thousandth of an HP point, §6) is not thrown: no direction is walked and
-nothing is recorded (owner, 2026-10-17; at the pool's quantum since pools keep fractions, issue
-142). `S/2` is the most any one box can take from a cone — every direction doses a box at most
-once, and the directions' weights emit `S/2` (**Sampling**) — so a gated cone could not have cost
-any pool a unit. The gate adds no constant: it is the pool's quantum. A gate at the whole point
-would drop doses a pool accumulates.
+**The pool quantum gate.** A field whose whole emission `S/2` converts to no pool unit at its
+mechanism's unit (below half a thousandth of an HP point, §6) doses no box (owner, 2026-10-17; at
+the pool's quantum since pools keep fractions, issue 142). `S/2` is the most any one box can take
+from a field — every direction doses a box at most once, and the directions' weights emit `S/2`
+(**Sampling**) — so a gated field could not have cost any pool a unit. The gate adds no constant:
+it is the pool's quantum. A gate at the whole point would drop doses a pool accumulates. It gates
+HP alone: a building reads a field's joules whatever its HP unit, so a gated field carrying energy
+is still walked and recorded, its directions dosing nothing, and only a field carrying none is not
+thrown (`FieldThrow::reaches_a_pool_unit`).
 
 **Strength.** The game's damage model emits `H_C = u_C × ΔE × r` HP points from a
 cone. `u_C` is `cone_emitted_hp_per_joule` in `assets/ballistics/spall_cone.ron`, a provisional
@@ -328,9 +330,24 @@ cone. `u_C` is `cone_emitted_hp_per_joule` in `assets/ballistics/spall_cone.ron`
 `½ m (v_entry² − v_exit²)`, with `m` the mass meeting the plate (a sub-calibre round's core, §3).
 Each stretch's energy drop is shared among the disc samples as its spend is and summed over
 samples reaching the exit. `r` is the exit material's strength ratio, its factor over the
-reference steel's factor, capped at unity (`walk::exit_strength_ratio`). It weights the energy;
-it is not another authored energy-to-HP unit. More energy lost across one substance gives more
-emitted HP; no energy lost gives none. A softer exit reduces that emission by its material ratio.
+reference steel's factor, capped at unity (`walk::exit_strength_ratio`). More energy lost across
+one substance gives more emitted HP; no energy lost gives none. A softer exit reduces that
+emission by its material ratio.
+
+**The energy partition.** The energy the round lost across a body is spent once: the cone
+carries `E_C = κ r ΔE` of it out, and the line deals the body's volumes the rest,
+`(1 − κ r) ΔE`, sample by sample over the stretches inside the reached body
+(`walk::SpallSource::field_share`); a body the round stops inside keeps all it lost. `κ` is
+`cone_debris_energy_share` in `assets/ballistics/spall_cone.ron`, an `Unknown` 0.06: the share of
+the energy lost that the debris carries out through an exit of the reference steel's strength. Its
+order of magnitude is DERIVED from a plug of the reference steel (7850 kg/m³) the 88 mm reference
+round's disc wide and its 100 mm plate thick, 4.774 kg, leaving at the round's 259.69 m/s exit
+speed: 161.0 kJ of the 2.7035 MJ lost, 0.0596. Measured behind-armour debris (fragment masses and
+speeds against the energy the plate absorbed) would settle it, per exit substance if it differs.
+`r` is the exit material's term of the partition (ASSUMED: a softer exit's debris carries
+proportionally less), its one job: the cone's HP follows the energy it carries through one unit,
+`u_C / κ` HP per carried joule, so `H_C = u_C r ΔE` whatever `κ`, and `κ` moves only what the body
+keeps and what a building reads.
 
 The unit is a balance scale, not a physical energy share (#258). It was set against the retired
 reference cone's target: an 88 mm APCBC round (10.2 kg, nose factor 7/24) at 773 m/s perforating
@@ -344,12 +361,12 @@ conversion gives `u_C`. The reference fixture still emits 396.513336 HP, or 396.
 hole-calibre and speed-ratio terms have no part in this law: a thin plate yields a weak cone,
 and a barely perforating round yields the strongest cone that plate gives.
 
-The walker and records carry the **energy the field carries**: strength `S = E ρ / q`, `E` the
-energy lost across the body, `ρ` the exit's strength ratio, `q = EMITTED_SHARE = ½` the exact
-normalization of the field weights, so the field emits `qS = E ρ` joules. No HP unit enters `S`.
-A building reads a direction's `S f_k / N` joules as crushing energy; a box's pool reads the same
-joules times `u_C` (`spall_cone::FieldUnit`, `ballistics::field_units`), so `H_C = u_C qS`. The
-three mechanisms' units and their replacement law are stated in §6.
+The walker and records carry the **energy the field carries**: strength `S = E_C / q`,
+`q = EMITTED_SHARE = ½` the exact normalization of the field weights, so the field emits
+`qS = E_C = κ r ΔE` joules. No HP unit enters `S`. A building reads a direction's `S f_k / N`
+joules as crushing energy; a box's pool reads the same joules times `u_C / κ`
+(`spall_cone::FieldUnit`, `spall_cone::cone_unit`, `ballistics::field_units`), so
+`H_C = (u_C / κ) qS`. The three mechanisms' units and their replacement law are stated in §6.
 
 **Preserved scenario record and open exit-material call** (#116, #182). Subject: the game's
 damage model, HP pools at stations. The earlier energy-law record reported these as MEASURED:
@@ -398,12 +415,12 @@ their bits match on every shipped target and a decoder rebuilds them from the de
 **Shadowing and reach.** A direction's strength is constant in air — no drag, no range — and it
 doses only the struck tank's boxes (hitting another tank is a preserved alternative), and **never
 the body that threw it** (issue 143, 2026-10-28, provisional: the simplest model). The volumes its
-exit leaves, recognised by identity (**Walk**), took the energy the round lost there as their line
-dose, and that energy is counted once, on the line: a direction that meets one of them again, as at
-a hollow body's far wall, stops there as at armour and takes nothing. The cone doses only what lies
-beyond its body. MEASURED from the re-recorded scenarios: s10's gun barrel takes its 245.18 HP line
-dose alone, where its near wall's cone added 56.34 HP and emptied the 250 HP pool, so it is reduced,
-not knocked out; no other scenario's doses moved. **Full
+exit leaves, recognised by identity (**Walk**), took what the body kept of the energy the round
+lost there as their line dose, and the cone carries the rest, so that energy is counted once: a
+direction that meets one of them again, as at a hollow body's far wall, stops there as at armour
+and takes nothing. The cone doses only what lies
+beyond its body. MEASURED from the re-recorded s10 record: the gun barrel takes its line dose alone,
+279.36 HP and no field dose from its own walls' cones, which empties its 250 HP pool by itself. **Full
 shadowing** (owner, 2026-10-17): a direction stops at the first hard body it enters. Armour takes
 nothing and stops it, a hard box takes its whole strength and stops it, so whatever hard body lies
 first shields everything behind it, whatever its material; a direction that enters none ends where
@@ -426,10 +443,10 @@ nothing. Doses go through the addressed `Dose` effect, like the line's. A box's 
 shot (the line, a bounce's shock and every cone) converts to pool units once, on its total (§6).
 Every field deposit, to a hard box and a witness alike, is a share of the cone's emitted HP: it
 enters the tally as its joules times the cone's unit (§6), the one energy-to-HP scale a field has;
-`joules_per_hp` never touches it. The pool quantum gate tests the whole emitted HP, `u_C qS`,
-against the pool resolution.
+`joules_per_hp` never touches it. The pool quantum gate tests the whole emitted HP,
+`(u_C / κ) qS = u_C r ΔE`, against the pool resolution.
 A box of face `A` fully inside the cone, `θ` off its axis, has the knockout radius
-`R = sqrt(2 f(θ) E A / (pool Ω_c))`, `E = qS/j` in HP points, `Ω_c = 2π(1 − cos α)` and `f(θ)` the
+`R = sqrt(2 f(θ) E A / (pool Ω_c))`, `E = u_C r ΔE` in HP points, `Ω_c = 2π(1 − cos α)` and `f(θ)` the
 ball's weight there (½ averaged over the cone). A bigger box is a bigger target: it takes more of
 the cone's directions, and nothing scales its pool to match (§6). On the reference cone through
 RHA (`E` = 396.5 HP points, MEASURED fixture), for the 30 HP crew pool at a seated crew member's 0.2 m² mean face,
@@ -442,9 +459,10 @@ well as the hard box that stops it); the emitted budget is.
 record `.agents/scratch/damage-cam-2026-10-08/research/ap-aphe-2026-10-23/decision-2026-10-23.md`,
 #8). Each of the `N` directions stands for `Ω / N` of the field's support (`Ω` its solid angle: a
 cap's, a ring's band's or the sphere's) and deposits `s / N`, so a direction of strength `s` emits
-`ρ s / Ω` HP points per steradian (`ρ` = `1 / joules_per_hp`, the HP points a joule of the
-record's strength converts to, the sim's own rate), and at distance `r` along it, on
-the support and short of its reach, the **local intensity** is `I = ρ s / (Ω r²)` HP points per m²,
+`u s / Ω` HP points per steradian (`u` the field's mechanism's unit, `spall_cone::FieldUnit`: the
+HP points a joule of the record's strength converts to, the sim's own rate, `u_C / κ` for a cone
+and `u_B` for a burst field), and at distance `r` along it, on
+the support and short of its reach, the **local intensity** is `I = u s / (Ω r²)` HP points per m²,
 zero past the reach; a thin unshadowed box of face `A` there takes `I · A` (resolver test
 `the_pen_cam_intensity_times_a_face_is_its_dose`). Doses add, so where fields overlap the bands
 classify the sum of their intensities. Three **potency bands**, parted at thresholds of the
@@ -466,7 +484,7 @@ dose. A box only partly inside a field takes that intensity over that part
 alone. Knockout takes the field teal and reduced the deep teal (`timeline::FIELD`, `FIELD_DIM`;
 relative luminance 0.50 and 0.12, DERIVED, so they part in every colour vision type), nothing no
 colour; neither is the state scale's red. Along a direction the intensity reaches mid at
-`sqrt(ρ s / (Ω T_mid))` and the floor `sqrt(T_mid / T_floor)` ≈ 5.5 times farther (DERIVED); s1's
+`sqrt(u s / (Ω T_mid))` and the floor `sqrt(T_mid / T_floor)` ≈ 5.5 times farther (DERIVED); s1's
 strongest direction (1,038 HP points per steradian) reaches mid at 2.65 m and the floor at 14.5 m,
 past every reach of the shipped records (5.2 m at most); the weakest field, the road wheel's
 rubber cone in s4 and s16 (11.5), reaches its floor at 1.5 m, past its 0.79 m reach (DERIVED from
@@ -654,7 +672,7 @@ factor independence of a box's own dose; shadowing monotone (adding a volume nev
 A cone emits its declared HP-per-joule unit times the energy lost across the body, weighted by
 exit material, and of two rounds
 through one plate the one that loses more energy throws the stronger cone, whatever its mass,
-calibre or speed; a cone below the pool quantum is not thrown; a shot's dose to a box is converted
+calibre or speed; a cone below the pool quantum doses no box; a shot's dose to a box is converted
 to pool units once on its total. A direction stops at the first volume
 it enters, a box there taking its whole strength, armour nothing and shielding what lies behind;
 a plate thinner than any nudge stops it; it is neither stopped nor dosed by a volume its throw
@@ -753,8 +771,8 @@ kinetic energy driven into its wall (`Burst::energy`, DERIVED at load). `u_B` is
 enters it. Its strength is `S = E_wall / q`, as for the cone the energy it carries over the
 emitted share; the ring's equal-solid-angle strata emit `qS = E_wall` at every direction count.
 They march, shadow and dose as a cone's do (§5), through spatially reached volumes, leaving none,
-behind the pool quantum gate; a deposit's joules times `u_B` are its HP, and a building reads the
-joules themselves. The record and wire carry the field descriptor and that strength. The data
+their HP doses behind the pool quantum gate; a deposit's joules times `u_B` are its HP, and a
+building reads the joules themselves. The record and wire carry the field descriptor and that strength. The data
 block also holds the ring's half-width and direction count, independently of potency.
 
 **Potency.** The ring's unit was set against the retired even-sphere target: a crew station's
@@ -798,7 +816,8 @@ extends those radii by a factor `sqrt(0.2033 / 0.2) = 1.008` (DERIVED).
 burst point, its last leg timed at the speed the burst trigger counts it at, so a burst in flight
 lies the delay after the exit that last started it; for a round at rest, the delay's remainder after
 it stopped there), the burst point, the carried speed, the nose piece's mass, and the field as a
-cone record (absent when the pool quantum gate held it). The path runs on with the nose piece's line
+cone record (without doses when the pool quantum gate held them; absent when the field carries
+no energy). The path runs on with the nose piece's line
 to its own end, its open air timed at the carried speed. A struck tank's record stays open while a
 fuze that tank armed runs, so a burst past its last body lands in it. The wire round-trips the
 burst; its 256 directions add 0.3–1.3 KB to a message (MEASURED, `src/damage_cam/wire.rs`). The pen
@@ -2095,7 +2114,7 @@ kept: verified fixes needing those files remain open, rather than being called f
 
 | reviewer | finding | verified / not a defect | fixed in (subject) |
 |---|---|---|---|
-| Claude | E1: transport strength is consumed as physical crushing energy | verified: with `joules_per_hp = 6000` instead of 3000, the cone coefficient and `read_shell` ray energy double, so `Load::field` doubles crushed volume while emitted HP stays fixed; the cone record has no separate physical-energy carrier | `ballistics: carry each field's energy and convert it to HP at each edge (#258)`: a field's strength is the energy it carries over the emitted share, a box's dose converts through its mechanism's `FieldUnit`; MEASURED, a fixture house chunk under a 2.7035 MJ ratio-1 cone crushes 0.019958 m³, was 0.008781 m³; the shipped cone and ring still emit 396.51 HP and 13,920.84 HP |
+| Claude | E1: transport strength is consumed as physical crushing energy | verified: with `joules_per_hp = 6000` instead of 3000, the cone coefficient and `read_shell` ray energy double, so `Load::field` doubles crushed volume while emitted HP stays fixed; the cone record has no separate physical-energy carrier | `ballistics: carry each field's energy and convert it to HP at each edge (#258)`: a field's strength is the energy it carries over the emitted share, a box's dose converts through its mechanism's `FieldUnit`; MEASURED, a fixture house chunk under a 2.7035 MJ ratio-1 cone crushes 0.019958 m³, was 0.008781 m³; the shipped cone and ring still emit 396.51 HP and 13,920.84 HP. E1's "doubling `joules_per_hp` changes crew dose" is tested as the field's own unit at two fixture values, since no field reads `joules_per_hp` after this change; the crushed volume is superseded by the energy-partition review below |
 | Claude | E2: emission tests pin shipped balance and construction | verified: editing either emission unit or the named round's construction breaks `the_reference_emission_totals_are_unchanged`; the 1,800,000,000 fixture also depends on the shipped line unit | `ballistics: carry each field's energy and convert it to HP at each edge (#258)`: `a_field_emits_its_sources_energy_and_hp_through_its_own_unit` and `a_fields_hp_unit_moves_crew_dose_and_never_crushed_volume` hold fixture units; the shipped totals print from an ignored measurement bed that asserts nothing |
 | Claude | E3: deleted scenario evidence and open material call | verified against the predecessor of `ballistics: declare per-mechanism energy-to-HP units (#258)`: s1/s12, s13, #116/#182 and the sub-reference exit call were removed | `docs: preserve the game field-law scenario record (#258)` |
 | Claude | E4: the sphere target does not explain the ring's emitted total | verified: DERIVED 7,540 HP target versus 13,920.84 HP ring emission; the missing bridge is the retired ball's 214.8 kJ calibration | `docs: explain the ring unit's sphere-target calibration (#258)` |
@@ -2103,6 +2122,30 @@ kept: verified fixes needing those files remain open, rather than being called f
 | Claude | E6: sampling notes present old transport factors without the emitted-HP derivation | verified: notes use the reference line conversion and coefficient 210 although emitted HP is the authored quantity | `docs: express field sampling notes in emitted HP (#258)` |
 | Claude | E7: one-rate paragraph overstates the line unit's scope | verified: `energy_units` handles hard line/bounce deposits, while fields encode their separate units through `field_strength_per_joule` | `docs: limit the hard-pool energy unit to line and bounce (#258)` |
 | Claude | E8: the encoder test does not itself sum live deposits | not a defect: that test checks the encoder seam; `a_thrown_cone_is_its_rear_layers_field` separately asserts every live ray equals cone strength times its exact weight, so the proposed extra 1.1 factor fails that runtime test; the face/intensity test checks deposition | none |
+
+### Energy-partition review (#258)
+
+Subject: the game's damage model, how the energy a round loses at a plate is shared between the
+line's dose and the spall cone's field; game state only, crew are HP pools at stations. Both
+reports on the energy-unit lane were verified against the code before this table.
+
+| reviewer | finding | verified / not a defect | fixed in (subject) |
+|---|---|---|---|
+| Claude P2 | the energy a round loses across a body is spent twice: the line deals the whole ΔE to the body's volumes and the exit's cone carries ΔE × r more, which buildings crush with; `r` did a partition job with no label | verified: `SpallSource::strength` was `field_strength(energy × strength_ratio)` while `finish` dealt every stretch's whole loss to the line, and three walk tests pinned line deposits alone at ΔE on perforations | `ballistics: spend a body's lost energy once between its line and its cone (#258)`: the cone carries `κ r ΔE` (`cone_debris_energy_share`, `Unknown` 0.06, §5 "The energy partition"), the line `(1 − κ r) ΔE` sample by sample, the cone's HP unit is `u_C / κ`; the walk tests now sum line and fields to ΔE |
+| Codex P2, Claude P3 | the pool-quantum gate lets a field's HP unit decide whether its joules reach a building | verified: `throw_spall_cone` and `throw_burst` returned before walking a gated field, so the shell reader saw no rays | same commit: the gate withholds HP doses only; a gated field carrying energy is walked and recorded without doses; `a_cone_below_the_pool_quantum_doses_no_pool_and_is_still_thrown` |
+| Codex P3, Claude P3 | §5's knockout radius still read `E = qS/j`, the gate "the energy rate", potency colour `ρ = 1/joules_per_hp` | verified: `qS/j` on the 2.7035 MJ cone gives 901 HP against the 396.5 HP quoted | `docs: state the energy partition and the HP-only gate (#258)` |
+| Claude P3 | the glossary's Field, Spall cone, Dose and Energy-to-HP rate said every field converts at `joules_per_hp` and a cone carries "one fixed share" | verified against `spall_cone::FieldUnit` and `ballistics::field_units`; Line dose had the same gap | same docs commit, Line dose included |
+| Claude P3 | nothing tested the pen cam's per-mechanism joule-to-HP conversion | verified: no test compared a planned field's HP with its mechanism's unit | code commit: `each_planned_field_reads_its_own_mechanisms_unit` compares every recorded field's planned HP with the sim's dose edge at its own unit |
+| Claude P3 | the crew half of `a_fields_hp_unit_moves_crew_dose_and_never_crushed_volume` passes the `ShotDose::add_field` mutant, and the E1 row omits the unit substitution | verified by reading: the crew half called `field_units` itself | code commit: the crew half sums through `ShotDose::add_field` against `u × joules` at two fixture units, neither 1/3000 (the mutant gives 2.2× and 1.1× them, DERIVED, not run); E1 row amended |
+
+MEASURED after the partition, `spall_cone::tests::the_shipped_emission_totals`: the reference
+cone (2.7035 MJ lost, ratio 1) emits 396.513336 HP, unchanged, and carries 162,210 J; a Brick
+chunk every direction stops on (135.46 MJ/m³) crushes 0.001197 m³. Neither earlier figure is now
+true: 0.019958 m³ spent the lost energy a second time and 0.008781 m³ read the HP unit as
+energy. The ring emits 13,920.84 HP, unchanged. In the re-recorded pen cam scenarios s10's
+barrel line dose moves from 297.19 to 279.36 HP, `1 − κ` of it, since gun steel exits at ratio 1,
+and still empties its 250 HP pool (the 245.18 HP §5 quoted was already stale); s9's breech moves
+by 0.00015 HP; field doses move by at most an f32 step; no pool's state moves.
 
 ### Reduced modules and capability rates (#228)
 
