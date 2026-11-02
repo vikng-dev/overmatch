@@ -284,14 +284,18 @@ fn update_range_readout(
     }
 }
 
-/// Reticle graticule colour — amber, grouping it with the other gunnery readouts.
-const RETICLE_COLOR: Color = Color::srgba(1.0, 0.8, 0.3, 0.85);
+/// `Taste` (the sight picture's look): the graticule's colour, its marks and their numbers alike —
+/// black, as a graticule etched in an optic's glass reads against a daylit scene. Opaque, because a
+/// one-pixel line at any lower alpha draws grey and sinks into mid-tone ground.
+const RETICLE_COLOR: Color = Color::BLACK;
 
-/// Bar thickness of every graticule mark (px). Marks are centred on their screen point, so half of
-/// this is the vertical placement offset.
-const MARK_THICKNESS: f32 = 2.0;
+/// `Taste` (the sight picture's look): every graticule mark's thickness, in PHYSICAL pixels — a
+/// hairline, one device pixel at every target scale factor and `UiScale` rung. [`place_mark`] turns
+/// it into each node's `Val::Px` through that node's own scale factor.
+const HAIRLINE_PHYSICAL_PX: f32 = 1.0;
 
-/// Bar width (px) of the zero mark ([`ReticleLine`]) and of the two graduation weights.
+/// `Taste` (the sight picture's look): bar width, in UI px (`Val::Px`, so it follows `UiScale`), of
+/// the zero mark ([`ReticleLine`]) and of the two graduation weights.
 const LINE_WIDTH: f32 = 96.0;
 const MAJOR_TICK_WIDTH: f32 = 24.0;
 const MINOR_TICK_WIDTH: f32 = 12.0;
@@ -308,7 +312,8 @@ fn tick_width(major: bool) -> f32 {
 /// Spawn the ranging reticle: the zero mark and the pool of range graduations (200 m steps, majors
 /// numbered in hundreds of metres). Every mark is absolutely positioned — the whole graticule is
 /// placed against the gun's sight line each frame ([`update_ranging_reticle`]), which is not screen
-/// centre at `sight::GUNNER_BLEND`. All hidden until shown in the optic.
+/// centre at `sight::GUNNER_BLEND`. All hidden until shown in the optic; a mark's height is written
+/// where it is placed ([`place_mark`]).
 fn spawn_ranging_reticle(mut commands: Commands, fonts: Res<UiFonts>) {
     commands.spawn((
         FlowScoped(Flow::InMatch),
@@ -316,7 +321,6 @@ fn spawn_ranging_reticle(mut commands: Commands, fonts: Res<UiFonts>) {
         Node {
             position_type: PositionType::Absolute,
             width: Val::Px(LINE_WIDTH),
-            height: Val::Px(MARK_THICKNESS),
             ..default()
         },
         BackgroundColor(RETICLE_COLOR),
@@ -333,7 +337,6 @@ fn spawn_ranging_reticle(mut commands: Commands, fonts: Res<UiFonts>) {
             Node {
                 position_type: PositionType::Absolute,
                 width: Val::Px(width),
-                height: Val::Px(MARK_THICKNESS),
                 ..default()
             },
             BackgroundColor(RETICLE_COLOR),
@@ -341,6 +344,8 @@ fn spawn_ranging_reticle(mut commands: Commands, fonts: Res<UiFonts>) {
         ));
         if major {
             // Label rides the tick: an absolute child offsets from the tick's own top-left.
+            // `Taste` (the sight picture's look): 5 px clear of the bar's end, and `-7` centres the
+            // 12 px number's line box (bevy's default `LineHeight`, 1.2 × the size) on the hairline.
             tick.with_children(|parent| {
                 parent.spawn((
                     Text::new(format!("{}", (range as i32) / 100)),
@@ -364,12 +369,28 @@ fn spawn_ranging_reticle(mut commands: Commands, fonts: Res<UiFonts>) {
     }
 }
 
-/// Place one graticule mark centred on `screen`, or hide it when the mark has nowhere to go.
-fn place_mark(node: &mut Node, visibility: &mut Visibility, screen: Option<Vec2>, width: f32) {
-    match screen {
-        Some(screen) => {
-            node.left = Val::Px(screen.x - width / 2.0);
-            node.top = Val::Px(screen.y - MARK_THICKNESS / 2.0);
+/// Place one graticule mark as a hairline centred on `point`, in PHYSICAL pixels of the UI's target,
+/// or hide it when the mark has nowhere to go. `target` is the mark node's own render-target info:
+/// its scale factor (the target's, times `UiScale`; `bevy_ui::update::propagate_ui_target_cameras`)
+/// is what layout multiplies this node's `Val::Px` by, so its reciprocal is one physical pixel.
+///
+/// The bar is [`HAIRLINE_PHYSICAL_PX`] tall and its top edge stands half that above `point`. Layout
+/// rounding (`LayoutConfig::use_rounding`, on by default) then puts both edges on the physical grid —
+/// taffy's `round_layout` sets the height to `round(top + h) − round(top)` — so a one-pixel extent
+/// covers exactly one physical row, and that row's centre is within half a pixel of `point`.
+fn place_mark(
+    node: &mut Node,
+    visibility: &mut Visibility,
+    point: Option<Vec2>,
+    width: f32,
+    target: &ComputedUiRenderTargetInfo,
+) {
+    match point {
+        Some(point) => {
+            let ui_px_per_physical = target.scale_factor().recip();
+            node.left = Val::Px(point.x * ui_px_per_physical - width / 2.0);
+            node.top = Val::Px((point.y - HAIRLINE_PHYSICAL_PX / 2.0) * ui_px_per_physical);
+            node.height = Val::Px(HAIRLINE_PHYSICAL_PX * ui_px_per_physical);
             *visibility = Visibility::Visible;
         }
         None => *visibility = Visibility::Hidden,
@@ -406,8 +427,19 @@ fn update_ranging_reticle(
     gun: Query<&GlobalTransform>,
     tables: Query<&RangeTable>,
     camera: Single<(&Camera, &GlobalTransform), With<PlayerView>>,
-    mut line: Query<(&mut Node, &mut Visibility), (With<ReticleLine>, Without<RangeScaleTick>)>,
-    mut ticks: Query<(&RangeScaleTick, &mut Node, &mut Visibility), Without<ReticleLine>>,
+    mut line: Query<
+        (&mut Node, &mut Visibility, &ComputedUiRenderTargetInfo),
+        (With<ReticleLine>, Without<RangeScaleTick>),
+    >,
+    mut ticks: Query<
+        (
+            &RangeScaleTick,
+            &mut Node,
+            &mut Visibility,
+            &ComputedUiRenderTargetInfo,
+        ),
+        Without<ReticleLine>,
+    >,
 ) {
     let (camera, cam_transform) = *camera;
     // Everything the graticule needs or nothing at all: outside the optic, before the rig / range
@@ -422,6 +454,12 @@ fn update_ranging_reticle(
                 .get(ViewNode::resolve(view_nodes.get(rig.gun).ok(), rig.gun))
                 .ok()?;
             let viewport = camera.logical_viewport_rect()?;
+            // The hairline is drawn in physical pixels and `world_to_viewport` answers in the
+            // camera's logical ones. The UI and the player's view share one render target (the
+            // window, or a capture's image), so these physical pixels are the UI's too.
+            let to_physical = camera
+                .target_scaling_factor()
+                .expect("a camera with a logical viewport has the target scale it divided by");
             let dialed = table.superelevation(ranging.range);
             let sight = sight_line(gun.rotation(), dialed);
             // The sight's own origin, which every gunner camera is parked at, so a mark's bearing is
@@ -441,19 +479,26 @@ fn update_ranging_reticle(
                     // answers off-screen coordinates for anything in front of the camera (it only
                     // fails behind the near plane / past the far plane).
                     .filter(|screen| viewport.contains(*screen))
+                    .map(|screen| screen * to_physical)
             })
         })
         .flatten();
 
     // The zero mark, on the sight line itself: `θ(dialed) − θ(dialed)` is zero by construction, so
     // the line and the dialed graduation are one place and the graticule cannot come apart.
-    if let Ok((mut node, mut visibility)) = line.single_mut() {
-        let screen = mark.as_ref().and_then(|mark| mark(ranging.range));
-        place_mark(&mut node, &mut visibility, screen, LINE_WIDTH);
+    if let Ok((mut node, mut visibility, target)) = line.single_mut() {
+        let point = mark.as_ref().and_then(|mark| mark(ranging.range));
+        place_mark(&mut node, &mut visibility, point, LINE_WIDTH, target);
     }
-    for (tick, mut node, mut visibility) in &mut ticks {
-        let screen = mark.as_ref().and_then(|mark| mark(tick.range));
-        place_mark(&mut node, &mut visibility, screen, tick_width(tick.major));
+    for (tick, mut node, mut visibility, target) in &mut ticks {
+        let point = mark.as_ref().and_then(|mark| mark(tick.range));
+        place_mark(
+            &mut node,
+            &mut visibility,
+            point,
+            tick_width(tick.major),
+            target,
+        );
     }
 }
 
@@ -1046,16 +1091,29 @@ mod tests {
                 .collect()
         }
 
+        /// The mark's centre in the camera's logical pixels: its node's UI px, through the physical
+        /// pixels [`place_mark`] draws in.
         fn placed(&self, entity: Entity) -> Option<Vec2> {
             let visibility = self.world.get::<Visibility>(entity)?;
             if *visibility == Visibility::Hidden {
                 return None;
             }
             let node = self.world.get::<Node>(entity)?;
-            Some(Vec2::new(
+            let ui_scale = self
+                .world
+                .get::<ComputedUiRenderTargetInfo>(entity)
+                .expect("a node requires its render-target info")
+                .scale_factor();
+            let camera_scale = self
+                .world
+                .get::<Camera>(self.camera)
+                .and_then(Camera::target_scaling_factor)
+                .expect("the fixture camera has a target");
+            let centre = Vec2::new(
                 px(node.left) + px(node.width) / 2.0,
-                px(node.top) + MARK_THICKNESS / 2.0,
-            ))
+                px(node.top) + px(node.height) / 2.0,
+            );
+            Some(centre * ui_scale / camera_scale)
         }
 
         /// The bearing a screen point names, read back through the camera — so every law below is
@@ -1236,6 +1294,167 @@ mod tests {
                 && picture.graduations().iter().all(|(_, mark)| mark.is_none()),
             "third person has no ranging reticle",
         );
+    }
+
+    /// **Every mark is a hairline: one physical row, at every scale, on the sight line.** The
+    /// owner's sight picture asks for marks one device pixel thick. Measured on bevy's own layout
+    /// headless (`crate::gpu_less_default_plugins`: taffy and its pixel rounding run as shipped), in
+    /// a window at each scale factor below and at each `UiScale` rung, with the gun laid through
+    /// sub-pixel steps so the marks land at many fractions of a pixel. Every drawn mark must lay out
+    /// exactly one physical pixel tall with its top edge on the physical grid, and the zero mark's
+    /// row must hold the sight line's physical projection to within half a pixel on both axes.
+    ///
+    /// Mutants: a thickness in `Val::Px` (two rows at 2x, none or two at a fractional scale); the
+    /// window's scale without `UiScale`; a camera-logical point written to `Val::Px` unconverted
+    /// (the mark slides off the sight line by the `UiScale` ratio).
+    #[test]
+    fn every_mark_is_one_physical_pixel_at_every_scale() {
+        use crate::settings::UiScalePercent;
+        use bevy::window::WindowResolution;
+
+        /// Window scale factors — fixture data: an ordinary display, two fractional desktop
+        /// scalings and a retina 2x.
+        const WINDOW_SCALES: [f32; 4] = [1.0, 1.25, 1.5, 2.0];
+        /// Lay poses per scale pair, each this far (rad) in pitch and yaw from the last: about a
+        /// quarter of a physical pixel on this fixture's optic, so the marks cross pixel fractions.
+        const LAY_POSES: u16 = 8;
+        const LAY_STEP: Vec2 = Vec2::new(1.1e-4, 1.7e-4);
+        /// Slack (px) on the half-pixel bound for f32 round-off through projection and layout.
+        const ROUND_OFF: f32 = 1e-3;
+        /// Frames run after a scale change before measuring: the camera's target info, the UI's
+        /// propagated scale and the layout each follow by up to a frame.
+        const SETTLE_FRAMES: usize = 3;
+
+        let ui_scales = [UiScalePercent::MIN, 100, 115, UiScalePercent::MAX]
+            .map(|percent| UiScalePercent(percent).factor());
+
+        for window_scale in WINDOW_SCALES {
+            let mut app = App::new();
+            app.add_plugins(crate::gpu_less_default_plugins(Some(Window {
+                resolution: WindowResolution::new(VIEWPORT.x, VIEWPORT.y)
+                    .with_scale_factor_override(window_scale),
+                ..default()
+            })))
+            .insert_resource(SightMode::Gunner)
+            .insert_resource(Ranging { range: DIALED })
+            .insert_resource(UiFonts {
+                hud: Handle::default(),
+                body: Handle::default(),
+            })
+            .add_systems(Startup, spawn_ranging_reticle)
+            .add_systems(
+                PostUpdate,
+                update_ranging_reticle.after(TransformSystems::Propagate),
+            );
+            // `App::run` normally drives plugin finish/cleanup; a bare `update()` loop must do it.
+            while app.plugins_state() == bevy::app::PluginsState::Adding {
+                std::thread::sleep(std::time::Duration::from_millis(1));
+            }
+            app.finish();
+            app.cleanup();
+
+            let world = app.world_mut();
+            // The camera parks at the gun node looking down −Z; the gun lays away from it.
+            world.spawn((
+                Camera3d::default(),
+                Projection::Perspective(PerspectiveProjection {
+                    fov: FOV,
+                    ..default()
+                }),
+                Transform::from_translation(GUN),
+                PlayerView,
+            ));
+            let gun = world.spawn(Transform::from_translation(GUN)).id();
+            let muzzle = world.spawn(table()).id();
+            let hull = world.spawn_empty().id();
+            world.spawn((
+                Controlled,
+                Rig {
+                    hull,
+                    turret: hull,
+                    gun,
+                    muzzle,
+                },
+            ));
+
+            for ui_scale in ui_scales {
+                app.insert_resource(UiScale(ui_scale));
+                // Settle the camera's target info and the nodes' propagated scale before measuring.
+                for _ in 0..SETTLE_FRAMES {
+                    app.update();
+                }
+                for pose in 0..LAY_POSES {
+                    let lay = LAY_STEP * f32::from(pose);
+                    app.world_mut().entity_mut(gun).insert(Transform {
+                        translation: GUN,
+                        rotation: Quat::from_rotation_y(lay.x) * Quat::from_rotation_x(lay.y),
+                        ..default()
+                    });
+                    // One frame places the marks against this pose (after layout), the next lays
+                    // them out.
+                    app.update();
+                    app.update();
+
+                    let world = app.world_mut();
+                    let case =
+                        format!("window scale {window_scale}, UiScale {ui_scale}, pose {pose}");
+                    let sight = sight_line(
+                        world
+                            .get::<GlobalTransform>(gun)
+                            .expect("the gun node carries a pose")
+                            .rotation(),
+                        table().superelevation(DIALED),
+                    );
+                    let (camera, view) = world
+                        .query_filtered::<(&Camera, &GlobalTransform), With<PlayerView>>()
+                        .single(world)
+                        .expect("the fixture's one player view");
+                    let sight_point = camera
+                        .world_to_viewport(view, GUN + sight)
+                        .expect("the sight line is in front of the camera")
+                        * camera
+                            .target_scaling_factor()
+                            .expect("the camera renders to the window");
+
+                    let mut drawn = 0;
+                    for (node, transform, visibility, zero) in world
+                        .query_filtered::<(
+                            &ComputedNode,
+                            &UiGlobalTransform,
+                            &Visibility,
+                            Has<ReticleLine>,
+                        ), Or<(With<ReticleLine>, With<RangeScaleTick>)>>()
+                        .iter(world)
+                    {
+                        if *visibility == Visibility::Hidden {
+                            assert!(!zero, "{case}: the zero mark is on screen");
+                            continue;
+                        }
+                        let height = node.size().y;
+                        let top = transform.translation.y - height / 2.0;
+                        assert!(
+                            height == HAIRLINE_PHYSICAL_PX && top == top.round(),
+                            "{case}: a mark must lay out one physical row, got {height} px tall \
+                             from y = {top}",
+                        );
+                        if zero {
+                            let off = (transform.translation - sight_point).abs();
+                            assert!(
+                                off.max_element() <= 0.5 + ROUND_OFF,
+                                "{case}: the zero mark's row must hold the sight line's physical \
+                                 projection {sight_point} to half a pixel, off by {off}",
+                            );
+                        }
+                        drawn += 1;
+                    }
+                    assert!(
+                        drawn > 4,
+                        "{case}: the hairline must be measured on the scale, not on a stray mark \
+                         — only {drawn} marks were drawn",
+                    );
+                }
+            }
+        }
     }
 
     /// The optic surround's fixture: a hull far from the origin AND off the level, so a placement

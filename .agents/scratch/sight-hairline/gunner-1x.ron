@@ -1,0 +1,16 @@
+// The gunner's sight picture on the offline route at scale 1: the game's HUD, game state only.
+// Capture configuration (ASSUMED time and size), not game data. From the checkout root:
+//
+//   OVERMATCH_UNATTENDED=1 OVERMATCH_WINDOW=hidden OVERMATCH_MUTE=1 \
+//     OVERMATCH_CAPTURE=.agents/scratch/sight-hairline/gunner-1x.ron target/debug/overmatch --offline
+(
+    frames: (
+        out: "target/capture/sight-hairline/gunner-1x.png",
+        at: [10.0],
+        size: (1280, 720),
+        scale_factor: 1.0,
+        ui: true,
+        gizmos: false,
+        sight: true,
+    ),
+)
