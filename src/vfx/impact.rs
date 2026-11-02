@@ -394,6 +394,9 @@ fn spawn_powder_read(
     }
 }
 
+/// The resolved substance chooses its emission response. Non-sparking matter produces its own small
+/// powder read under every style: ADR-0023 keeps the plume, the shock ring and the brown cloud off
+/// everything but soil.
 pub(super) fn spawn_material_read(
     position: Vec3,
     normal: Vec3,
@@ -411,11 +414,7 @@ pub(super) fn spawn_material_read(
             amount: 1.0,
             light: 1.0,
         };
-        if feedback.sparks {
-            spawn_small_impact(position, normal, to_camera, powder, true, kit);
-        } else {
-            spawn_powder_read(position, normal, to_camera, style, powder, kit);
-        }
+        spawn_small_impact(position, normal, to_camera, powder, feedback.sparks, kit);
     }
 }
 
@@ -1081,8 +1080,9 @@ mod tests {
         trigger_impact(&mut app, Vec3::Y, LAYERED);
     }
 
-    /// A non-sparking substance produces powder alone. A class-based metal recipe would add a
-    /// flash and sparks here even though the resolved material explicitly emits neither.
+    /// A non-sparking substance produces one small powder read under a Layered round. A class-based
+    /// metal recipe would add a flash and sparks, the soil recipe a plume, a ring and a cloud; the
+    /// resolved material states none of them, and ADR-0023 relies on it.
     #[test]
     fn non_sparking_matter_never_gets_the_metal_read() {
         let mut app = harness();
@@ -1097,14 +1097,11 @@ mod tests {
             ImpactSurface::Material(feedback),
             ImpactOutcome::Through,
         );
-        assert!(billboards(&mut app) > 0);
-        let world = app.world_mut();
-        for billboard in world.query::<&Billboard>().iter(world) {
-            assert_eq!(
-                billboard.lanes.glow.y, 0.0,
-                "powder never gets an additive hot layer"
-            );
-        }
+        assert_eq!(
+            billboards(&mut app),
+            1,
+            "one powder mass: no metal flash, spark fan, plume, shock ring or cloud"
+        );
     }
 
     /// Resolved surfaces supply a finite nonzero normal. Inventing an up-facing surface would
