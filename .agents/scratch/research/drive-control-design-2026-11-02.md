@@ -222,6 +222,13 @@ its work, and no construction governor replaces it. The required rests are autho
 when turning forward. The clutch slip guard bounds the crank; it does not promise a vehicle-speed
 bound on a grade exceeding guarded drag and contact resistance. See the
 [lane 5 record](law-drive-5-ceiling-2026-11-02.md) for the measured S3 limit.
+MEASURED there: F6 on a ten-degree descent reaches 13.315221 m/s after 20 simulated seconds,
+still accelerating (final-second range 12.902819–13.315221 m/s), while the crank stays within
+3100 rpm. The slip guard caps crank speed and thus drag; it cannot bound belt speed when grade
+force exceeds that drag plus rolling resistance. The owner must decide whether another loss or
+changed over-rev contract belongs in the model. No brakes at an empty station or belt-speed clip
+are implied. In a lower gear with a root below the guard, S3 now asserts the equilibrium derived
+from the authored drag anchor, gear ratio and ground resistance, including a weaker-drag mutant.
 
 **Numbers B needs.**
 

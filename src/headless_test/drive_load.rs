@@ -711,8 +711,9 @@ fn perceived_load_during_a_rearward_shot_uphill() {
 
 /// The game's driving and damage model: crew are HP pools at stations. Without the Driver,
 /// the shipped clutch must stay engaged through an uphill turning point as well as a descent.
-/// A freewheel mutant fails the regime and drag checks. Construction decides whether guard-point
-/// drag can balance this grade; a crank guard alone is not a belt-speed bound.
+/// Construction's drag anchor predicts a terminal speed where its rising torque balances
+/// gravity minus rolling resistance below the crank guard. A weaker-drag mutant must miss that
+/// equilibrium; a crank guard alone is not a belt-speed bound in taller gears.
 /// Fixture: fresh 10-degree plane per entry, 5 m/s in launch and upper-middle gears; 40 seconds in the launch gear and 20 in the upper-middle gear.
 #[test]
 fn empty_driver_station_coast_and_rollback() {
@@ -752,6 +753,23 @@ fn empty_driver_station_coast_and_rollback() {
                 (tp.gears_fwd.len() * 3 / 4).max(1) as u8
             };
             let guard = (tp.max_curve_rpm() + OVERREV_MARGIN_RPM) * RPM_TO_RAD;
+            // DERIVED equilibrium from authored facts, independent of engine_drag's implementation:
+            // k*tau = W*(|sin(theta)| - c_rr*cos(theta)), tau = anchor*(b+(1-b)*omega/mid).
+            let k = tp.gears_fwd[usize::from(gear - 1)] / tp.sprocket_radius;
+            let weight =
+                app.world().resource::<TankBlueprint>().spec.mass * crate::track::derive::G;
+            let rolling = crate::ground_types::GroundTypes::load_shipped()
+                .get(crate::terrain_blend::BASE_GROUND)
+                .contact()
+                .rolling_resistance;
+            let torque = weight * (angle.sin().abs() - rolling * angle.cos()) / k;
+            let base = crate::track::transmission::motoring_drag_base_share();
+            let mid = (tp.engine.idle_rpm + tp.engine.governed_rpm) * 0.5 * RPM_TO_RAD;
+            let omega =
+                mid * (torque / (tp.peak_torque_nm * tp.drag_fraction) - base) / (1.0 - base);
+            // This affine inverse is outside the one-rpm rest regularization and below both caps.
+            let equilibrium = (omega > RPM_TO_RAD && omega < guard && torque < tp.clutch_capacity)
+                .then_some(omega / k);
             place(&mut app, tank, position, rotation, 5.0, gear);
             app.world_mut()
                 .get_mut::<TankTransmission>(tank)
@@ -825,8 +843,22 @@ fn empty_driver_station_coast_and_rollback() {
                 },
                 "steady motoring drag must oppose travel"
             );
+            if let Some(expected) = equilibrium {
+                // Resolution: one percent permits the coupled contact discretization and finite
+                // settling window; halving the authored drag's delivery cannot fit this band.
+                let precision = expected * 0.01;
+                assert!(
+                    (final_lo.abs() - expected).abs() < precision
+                        && (final_hi.abs() - expected).abs() < precision,
+                    "motoring equilibrium {expected} m/s, measured [{final_lo}, {final_hi}]"
+                );
+                assert!(
+                    final_hi - final_lo < precision,
+                    "motoring equilibrium must settle"
+                );
+            }
             println!(
-                "MEASURED S3 grade_deg={degrees} gear={gear} min_speed_m_s={min_speed:.6} max_speed_m_s={max_speed:.6} final_range_m_s=[{final_lo:.6},{final_hi:.6}] max_abs_rpm={max_rpm:.6} mean_final_drag_n={drag:.6} speed_settled={}",
+                "MEASURED S3 grade_deg={degrees} gear={gear} min_speed_m_s={min_speed:.6} max_speed_m_s={max_speed:.6} final_range_m_s=[{final_lo:.6},{final_hi:.6}] max_abs_rpm={max_rpm:.6} mean_final_drag_n={drag:.6} expected_equilibrium_m_s={equilibrium:?} speed_settled={}",
                 final_hi - final_lo < 0.01
             );
         }

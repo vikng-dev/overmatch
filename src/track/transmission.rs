@@ -778,14 +778,19 @@ pub struct TransmissionReport {
     pub(crate) bitprobe: TransmissionProbe,
 }
 
+/// Authored Coulomb share of the motoring-drag anchor, shared with the law's instruments.
+pub(crate) fn motoring_drag_base_share() -> f32 {
+    engine_control().motoring_drag_base_share.value
+}
+
 /// The game's damage model: construction motoring drag at the crank (N m), independent of
 /// pedal and combustion. Its authored mid-band anchor is `drag_fraction × peak torque`;
 /// the affine Coulomb/viscous shape rises with speed. Only the numerical rest band fades it.
 /// Combustion reconstructs the gross torque behind the authored net curve (`engine_torques`).
 fn engine_drag(tp: &TransmissionParams, omega_e: f32) -> f32 {
     let omega_mid = (tp.engine.idle_rpm + tp.engine.governed_rpm) * 0.5 * RPM_TO_RAD;
-    let rise = engine_control().motoring_drag_base_share.value
-        + (1.0 - engine_control().motoring_drag_base_share.value) * (omega_e.abs() / omega_mid);
+    let rise = motoring_drag_base_share()
+        + (1.0 - motoring_drag_base_share()) * (omega_e.abs() / omega_mid);
     tp.peak_torque_nm
         * tp.drag_fraction
         * rise

@@ -12,6 +12,7 @@ locked Bevy 0.19.1 and avian3d 0.7.0 registry source before use.
 
 | reviewer | finding | verified / not a defect | fixed in (subject) |
 |---|---|---|---|
+| Claude P2 | S3 lower-gear speed bound is print-only | verified: half-drag mutant fails the new equilibrium assertion | driving: assert construction-derived coast equilibrium (#146) |
 | Codex P2 | backward crank reports stopped to audio and HUD | verified red: public RPM 0 and no negative HUD reading | driving: report backward crank rotation (#146) |
 | Claude P2 | backward crank buys rollback cuts after restaffing | verified red: restaffing bought a cut | driving: preserve rollback gear under backward drag (#146) |
 | Claude P1 | zero-rate task takes staffed park | verified red: staffed coast never latched | driving: retain staffed park at zero task rate (#146) |
@@ -44,3 +45,19 @@ Nonfinite simulated crank state now fails explicitly before public conversion. T
 consumer already pauses only at zero and otherwise plays at the public rotation rate.
 MEASURED step-3 gates: fmt, CI clippy, 286 targeted track/HUD/audio/citation tests and all five
 shipped drive-load tests passed. The shipped load run also checks the combined park/rollback fixes.
+
+MEASURED step-4 red: halving only production `engine_drag` made the shipped S3 witness fail:
+DERIVED equilibrium 1.7630874 m/s versus MEASURED final range [17.964113, 18.292593] m/s.
+The mutant is removed. The expectation inverts the authored mid-band anchor and Coulomb share
+against nominal weight, grade, rolling resistance and gear ratio; it does not call the drag
+implementation for its expected answer. The numerical comparison permits one percent for the
+coupled contact discretization and finite settling window. Only constructions whose root lies
+outside the one-rpm regularization and below both the crank guard and clutch cap claim this bound.
+Taller gears whose guarded drag cannot balance this grade retain only the crank/regime evidence.
+MEASURED restored-law S3: F4 final ranges [1.775128, 1.775237] m/s downhill and
+[-1.774553, -1.774450] m/s after rollback, within the DERIVED 1.7630874 m/s root's one-percent
+contact tolerance. F6 reproduces 13.315221 m/s after 20 simulated seconds downhill and
+-8.660275 m/s after rollback, still accelerating, with 3100 rpm maximum crank magnitude.
+MEASURED step-4 gates: fmt, CI clippy and 283 targeted tests (including all drive-load cases) pass.
+The design now gives the F6 measurement explicitly and leaves another loss or changed over-rev
+contract to the owner; this lane adds neither empty-station brakes nor a belt-speed clip.
