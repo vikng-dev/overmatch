@@ -4067,7 +4067,9 @@ fn a_freed_chunk_moves_as_the_material_it_occupies() {
         &ComputedCenterOfMass,
     ), With<WallPiece>>();
     let (body_mass, body_inertia, body_centre) = bodies.single(app.world()).unwrap();
-    assert!((body_mass.value() / mass - 1.0).abs() < 1e-3);
+    // Resolution: relative 1e-5 exceeds f32 aggregation error but catches a unit-density solid
+    // accidentally contributing mass beside the occupied contact properties.
+    assert!((body_mass.value() / mass - 1.0).abs() < 1e-5);
     let largest = |m: Mat3| {
         m.to_cols_array()
             .map(f32::abs)

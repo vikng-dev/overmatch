@@ -2400,7 +2400,16 @@ impl ProjectileMarchWorld<'_, '_> {
         if self.witness_surfaces.contains(collider) {
             return None;
         }
-        hit_ancestor(collider, &self.volumes, &self.parents)
+        let volume = hit_ancestor(collider, &self.volumes, &self.parents);
+        if volume.is_some() {
+            assert!(
+                self.layers
+                    .get(collider)
+                    .is_ok_and(|layers| layers.memberships.has_all(Layer::Armor)),
+                "game's damage model: a BallisticVolume collider requires Armor membership"
+            );
+        }
+        volume
     }
 
     /// The volume node a collider belongs to, of either kind: a witness's own node for a witness
@@ -5031,6 +5040,28 @@ pub(crate) mod march_tests {
             .entity_mut(plate)
             .remove::<BallisticVolume>();
         fire_and_capture(&mut app, Vec3::new(0.0, 2.0, 2.0), Vec3::NEG_Z, 800.0);
+    }
+
+    /// The game's damage model admits ballistic ancestry only with discovery membership.
+    /// Corridors and fields must fail on a miswired solid instead of disagreeing with flight.
+    #[test]
+    #[should_panic(expected = "a BallisticVolume collider requires Armor membership")]
+    fn a_ballistic_volume_without_armour_membership_is_a_wiring_bug() {
+        use bevy::ecs::system::RunSystemOnce;
+        let mut app = world_with_plate(Vec3::ONE, Vec3::Y * 2.0);
+        let plate = app
+            .world_mut()
+            .query_filtered::<Entity, With<BallisticVolume>>()
+            .single(app.world())
+            .unwrap();
+        app.world_mut()
+            .entity_mut(plate)
+            .insert(CollisionLayers::new([Layer::Debris], LayerMask::ALL));
+        app.world_mut()
+            .run_system_once(move |world: ProjectileMarchWorld| {
+                world.armour(plate);
+            })
+            .unwrap();
     }
 
     /// The game's damage model: a kept carrier delivers the assembly's momentum and a discarded
@@ -7865,6 +7896,110 @@ pub(crate) mod march_tests {
         ));
         for _ in 0..ticks {
             app.update();
+        }
+    }
+
+    /// The game's damage model meets occupied wood at its live pose in every state. Flight,
+    /// corridors, fields and aim rely on the same segment; dropping Armor or its volume fails.
+    /// Fixture: one segment, freed upright then settled sideways away from its standing pose.
+    #[test]
+    fn flight_corridors_fields_and_aim_meet_freed_and_settled_wood() {
+        use avian3d::prelude::Gravity;
+        use bevy::ecs::system::RunSystemOnce;
+        let mut app = tree_world();
+        app.insert_resource(Gravity::ZERO).add_systems(
+            Update,
+            crate::trees::derive_systems().before(integrate_projectiles),
+        );
+        let root = spawn_tree(
+            &mut app,
+            &crate::trees::tests::fixture_kind(),
+            Vec3::ZERO,
+            0,
+        );
+        settle(&mut app);
+        let segment = app.world().get::<crate::trees::TreeParts>(root).unwrap().0[1];
+        for state in 0..3 {
+            if state == 1 {
+                app.world_mut()
+                    .entity_mut(root)
+                    .insert(crate::trees::TreeState::Down { cut: 1, dir: 0 });
+                settle(&mut app);
+            }
+            let owner = app.world().get::<ChildOf>(segment).unwrap().parent();
+            if state == 2 {
+                let at = Vec3::new(4.0, 1.0, 3.0);
+                let turn = Quat::from_rotation_z(std::f32::consts::FRAC_PI_2);
+                app.world_mut().entity_mut(owner).insert((
+                    Transform::from_translation(at).with_rotation(turn),
+                    Position(at),
+                    Rotation(turn),
+                    LinearVelocity::ZERO,
+                    AngularVelocity::ZERO,
+                    avian3d::prelude::Sleeping,
+                ));
+                settle(&mut app);
+            }
+            let at = app.world().get::<Position>(segment).unwrap().0;
+            let turn = app.world().get::<Rotation>(segment).unwrap().0;
+            let origin = at + turn * Vec3::Y * 0.5 + Vec3::Z * 2.0;
+            app.world_mut()
+                .run_system_once(move |world: ProjectileMarchWorld| {
+                    let hit =
+                        cast_disc_segment(&world, &[Vec3::ZERO], origin, Dir3::NEG_Z, 4.0, &|_| {
+                            true
+                        });
+                    assert!(
+                        matches!(hit, Some(SegmentHit::Armor(hit)) if hit.entity == segment),
+                        "state {state}: flight must meet the wood"
+                    );
+                    let context = resolve::ResolveContext {
+                        world: &world,
+                        colliders: &world.geometry,
+                        deposit: true,
+                        laws: walk::WalkLaws::default(),
+                    };
+                    let corridor = resolve::build_corridor(
+                        &context,
+                        &|_| true,
+                        origin,
+                        Vec3::ZERO,
+                        Vec3::NEG_Z,
+                        4.0,
+                        walk::DiscFrame::anchored(Vec3::NEG_Z).unwrap(),
+                        0.0,
+                        &[],
+                    )
+                    .unwrap();
+                    assert!(
+                        corridor.samples[0]
+                            .hits
+                            .iter()
+                            .any(|hit| hit.volume == segment),
+                        "state {state}: corridor"
+                    );
+                    let reach = resolve::FieldReach::of_throw(&context, &|_| true, origin);
+                    let (_, field) = resolve::field_presence(&context, &reach, origin, Dir3::NEG_Z)
+                        .unwrap()
+                        .unwrap();
+                    assert!(
+                        field
+                            .layers
+                            .iter()
+                            .any(|layer| layer.present.iter().any(|p| p.volume == segment)),
+                        "state {state}: field"
+                    );
+                    let aimed = crate::aim::aim_distance(
+                        &world.spatial,
+                        Ray3d::new(origin, Dir3::NEG_Z),
+                        4.0,
+                        Entity::PLACEHOLDER,
+                        &world.owners,
+                        &world.parents,
+                    );
+                    assert!(aimed < 2.0, "state {state}: aim must meet the wood");
+                })
+                .unwrap();
         }
     }
 

@@ -277,15 +277,30 @@ fn attach_trunks(
             ))
             .id();
         for k in usize::from(piece.cut)..body.kind.segments.len() {
+            let local = Transform::from_translation(Vec3::Y * body.prefix[k] - centroid);
+            let segment = TreeSegment(
+                u8::try_from(k).expect("tree load bounds every segment index by the wire byte"),
+            );
             commands.spawn((
                 ChildOf(root),
-                Transform::from_translation(Vec3::Y * body.prefix[k] - centroid),
+                local,
                 crate::trees::replica_segment_collider(body, k),
-                TreeSegment(
-                    u8::try_from(k).expect("tree load bounds every segment index by the wire byte"),
-                ),
+                segment,
                 crate::buildings::breakage::piece_layers(),
                 body.kind.friction,
+            ));
+            // The game's damage-model aim reads the streamed pose even though replica fuzes
+            // never resolve crossings. Contact geometry carries no ballistic volume.
+            commands.spawn((
+                ChildOf(root),
+                local,
+                crate::trees::replica_segment_collider(body, k),
+                segment,
+                avian3d::prelude::Sensor,
+                avian3d::prelude::CollisionLayers::new(
+                    [crate::Layer::Armor],
+                    avian3d::prelude::LayerMask::NONE,
+                ),
                 crate::ballistics::BallisticVolume {
                     material: body.kind.material,
                     substance: body.kind.substance.clone(),
@@ -304,6 +319,7 @@ fn follow_trunks(
     carriers: Query<(&DebrisPose, &WorldGeneration, &TreePiece, &TrunkAttached)>,
     generation: Res<CurrentWorld>,
     trees: Query<(&TreeState, &crate::trees::TreeParts)>,
+    segments: Query<&TreeSegment>,
     mut trunks: Query<(
         Entity,
         &ReplicaTrunk,
@@ -344,8 +360,11 @@ fn follow_trunks(
                     .insert_if_new(avian3d::prelude::ColliderDisabled);
             }
         }
-        for (k, child) in children.iter().enumerate() {
-            if active && usize::from(trunk.cut) + k < end {
+        for child in children.iter() {
+            let segment = segments
+                .get(child)
+                .expect("a replica trunk owns only segment colliders");
+            if active && usize::from(segment.0) < end {
                 commands
                     .entity(child)
                     .remove::<avian3d::prelude::ColliderDisabled>();
@@ -747,7 +766,7 @@ mod tests {
                 let mut counts = [0; 3];
                 for (segment, disabled, parent) in app
                     .world_mut()
-                    .query::<(&TreeSegment, Has<ColliderDisabled>, &ChildOf)>()
+                    .query_filtered::<(&TreeSegment, Has<ColliderDisabled>, &ChildOf), With<crate::ballistics::BallisticVolume>>()
                     .iter(app.world())
                 {
                     if !disabled {

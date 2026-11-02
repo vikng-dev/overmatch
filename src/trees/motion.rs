@@ -142,7 +142,7 @@ fn spawn_range(
     exchange: bool,
 ) -> Entity {
     let cut = u8::try_from(range.start).expect("tree admission bounds segment indices");
-    launch.colliders.clear();
+    let colliders = std::mem::take(&mut launch.colliders);
     let at = frame.translation + frame.rotation * launch.centroid;
     let piece = commands
         .spawn((
@@ -170,8 +170,20 @@ fn spawn_range(
         parts,
         range,
         launch.centroid,
-        piece_layers(),
+        CollisionLayers::new([Layer::Armor], LayerMask::NONE),
     );
+    for (k, hull) in colliders {
+        commands.entity(parts.0[k]).insert(Sensor);
+        commands.spawn((
+            ChildOf(piece),
+            Transform::IDENTITY,
+            hull,
+            piece_layers(),
+            ColliderDensity(body.collider_density()),
+            body.kind.friction,
+            TreeSegment(u8::try_from(k).expect("tree admission bounds segment indices")),
+        ));
+    }
     if exchange {
         commands
             .entity(piece)
@@ -232,6 +244,9 @@ pub(super) fn reset_standing(
             Vec3::ZERO,
             segment_layers(),
         );
+        for &part in &parts.0 {
+            commands.entity(part).remove::<Sensor>();
+        }
         for (entity, piece) in &pieces {
             if piece.tree == identity.ordinal {
                 commands.entity(entity).despawn();
@@ -306,6 +321,7 @@ pub(super) fn split_moving(
         ),
         Changed<TrunkState>,
     >,
+    contacts: Query<(Entity, &TreeSegment, &ChildOf), Without<BallisticVolume>>,
     mut commands: Commands,
 ) {
     for (entity, piece, body, mut trunk, parts, at, rotation, velocity, spin, centre) in &mut pieces
@@ -341,6 +357,11 @@ pub(super) fn split_moving(
                     .0
                     .cross(frame.rotation * (lower.centre - origin - centre.0)),
         ));
+        for (collider, segment, parent) in &contacts {
+            if parent.parent() == entity && !ranges[0].contains(&usize::from(segment.0)) {
+                commands.entity(collider).despawn();
+            }
+        }
         *trunk = trunk.partition(ranges[0].clone());
         // Avian 0.7 queues the new collider owner only; the surviving lower body lost mass too.
         commands
@@ -1022,7 +1043,7 @@ mod tests {
         );
     }
 
-    /// Reparenting retains the actual HP components and one collider per segment. The game's
+    /// Reparenting retains each segment's actual HP component and ballistic solid. The game's
     /// damage model relies on the same pool after a break; copies, refills and lost membership
     /// fail this test, as does a reconnect leaving an old body owning restored segments.
     #[test]

@@ -653,8 +653,8 @@ pub(crate) enum Layer {
     Witness,
     /// Server-simulated pieces (`crate::debris`): a building's fallen chunks and the debris stress
     /// lever's fragments. They collide with `Terrain`, `Vehicle` and each other, and no ground
-    /// query reads them; a building's chunks are also on `Armor`, so the walk meets them as their
-    /// substance.
+    /// query reads them. A construction piece's separate occupied-hull sensors carry `Armor`
+    /// and ballistic volumes, so the game's damage-model walk meets its substance.
     Debris,
     /// Track side faces: physical contacts with bodies and structures, excluded from terrain.
     TrackSide,
