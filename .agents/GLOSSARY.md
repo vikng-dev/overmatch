@@ -361,12 +361,14 @@ Deflection off a face met past the round's critical angle, which reads its hit n
 When a shell's caliber greatly exceeds a volume's thickness along its normal, suppressing ricochet and slope. The game's namesake, but one modifier among many — not the centre of the model.
 
 **Field**:
-The umbrella term for a dose field thrown by a cause, whatever its shape: strength over directions from an origin, stopped by the hard bodies it meets, dosing the boxes it reaches. Its strength is the energy (J) it carries: a spall cone its share of the energy its round lost, a burst field the energy its explosive drives into the wall. A building reads a direction's joules as the energy it crushes with; a box's HP pool reads them through its mechanism's own HP unit, never the line's **energy-to-HP rate** (design doc §6). Named in use by cause and shape: **spall cone**, **fragment cone**, **blast sphere**.
+A dose field thrown by a cause in the game's damage model: strength distributed over directions from an origin, stopped by hard bodies and dosing reached boxes. Its normalized strength distributes carried joules independently of HP; each mechanism converts those joules through its own HP unit, while environment construction reads the physical energy.
 _Avoid_: cloud (implies an amorphous shape; older records use it to mean a field)
 
 **Spall cone** (spall):
-The field of fragments thrown from a body exit when a round perforates — brightest on its axis and fading to nothing at its rim (the ball law), its half-angle the exit layer's material's, each direction stopped by the first hard body it meets — dosing every box it reaches but the body it left. It carries a share of the kinetic energy the round lost crossing that body, the debris share `κ` (`assets/ballistics/spall_cone.ron`, an `Unknown`) times the exit material's strength ratio, and the body's **line dose** is the rest, so that energy is spent once and a round that loses more there throws a stronger cone. Its HP potency is its own unit per joule lost, whatever `κ`; its law is design doc §5 (`.agents/docs/design/armor-penetration-and-damage.md`).
-_Avoid_: spalling, fragmentation, frag, spall cloud (the noun is spall; the emitter is the spall cone)
+The field emitted at a reached body exit in the game's damage model, carrying its assigned share of the core's lost energy; the construction retains the rest as line work. A direction still leaving its source has not entered it, but genuine re-entry can return that carried energy to the source, including a hollow body's far wall.
+
+**Crossing exchange**:
+The work and momentum a projectile transfers to each construction it crosses in the game's damage model, each addressed once: work is split into retained and emitted debris shares, independently of HP conversion. A kept carrier stops at the first resisting contact and transfers its energy and momentum there; only the core continues.
 
 **Witness**:
 A substance kind with no resistance, worn only by crew: no layer of the walk, so it never resists, slows, bends or shadows anything. Its HP pool takes dose from what the hard world sent through it — the shell's disc-mean chord times the round's **crew line rate**, and each field direction entering it. Its opposite is a **hard** substance (armour, modules). Decision: ADR-0040; law: design doc §6.
@@ -377,14 +379,14 @@ A round's dose to a witness per unit of chord (round file field `wound`, `assets
 _Avoid_: wound rate (the code identifier keeps `wound` until a rename is decided)
 
 **Dose**:
-What a line, cone, burst or bounce deposits into a box's HP pool in the game's damage model: HP, from energy. The line's energy lost in a hard pool and a bounce's energy lost at the face it struck (the energy of the motion pointed into it) convert at the one **energy-to-HP rate**; a spall cone direction's share of the energy its cone carries out of the plate, and a burst field direction's of the energy its explosive drives the wall with, convert at their own mechanism's unit. A crew station's line dose alone is its chord × the round's **crew line rate**. A box's dose from one shot is summed and converted to **pool units** once. Law: design doc §§5–6.
+HP deposited into a box in the game's damage model: retained line work and bounce loss convert through their shared energy-to-HP rate, each field's carried joules through its own mechanism's unit, and a crew station's line chord through the crew line rate. Every contribution reaches the box's shot tally before the accumulated total rounds to pool units.
 _Avoid_: a dose in reference-mm (reference-mm is a penetration and armour readout, never a dose)
 
 **Energy-to-HP rate**:
-The joules of energy lost per HP point of a hard pool's line dose and a bounce's shock, a tank's modules and a tree's trunk alike (`joules_per_hp`, `assets/ballistics/energy_dose.ron`, a `Unit`). A crew station's line dose is its chord at the **crew line rate**, and a field converts at its own mechanism's unit (design doc §6). Each pool's authored HP alone says how sturdy it is.
+The shared conversion between retained line work or bounce loss and HP for hard pools in the game's damage model. Crew-station line dose follows the crew line rate, and each field converts through its own mechanism's unit.
 
 **Line dose**:
-What a round deposits along its path in the game's damage model: into a hard pool, the kinetic energy it loses there, taken by the strongest volume present at that depth (volumes of one factor share it; a weaker overlapped volume takes none) and converted at one **energy-to-HP rate** for every hard pool, less the share the **spall cone** of a body the round leaves carries out; a stopped round deposits all its remaining energy. Into a witness, its chord in the open (none inside a hard volume) times the round's **crew line rate**.
+What a projectile deposits along its path in the game's damage model: a hard pool takes its retained share of the core's work after outgoing debris, plus a kept carrier's kinetic energy at its first resisting contact, converted at the energy-to-HP rate. A witness takes its exposed chord times the crew line rate, without resisting or taking physical energy.
 _Avoid_: transit damage; cost (the chord's reference-mm readout, chord × factor, is never a dose)
 
 **Pool unit**:
@@ -392,7 +394,7 @@ A thousandth of an HP point: what an HP pool holds, in the game's damage model, 
 _Avoid_: fractional HP, sub-point damage (the pool is an integer of pool units)
 
 **Shown health**:
-The HP points a pool shows in every view (the HUD's cues, the damage panel, the pen cam): what it holds in **pool units**, rounded up to whole points. A pool short of one whole point lost shows full and is not painted damaged; it shows none exactly when it is emptied. Only the display rounds; the sim never does.
+The HP points a pool shows in every view (the HUD's cues, the damage panel, the pen cam): what it holds in **pool units**, rounded up to whole points. A pool short of one whole point lost shows full and is not painted damaged; it shows none exactly when it is emptied. Only this display conversion rounds to whole HP; the simulation keeps pool units.
 _Avoid_: displayed HP rounding to nearest (a pool 0.5 points down shows full)
 
 **Burst**:
@@ -430,7 +432,7 @@ Detonation of an ammunition volume when its HP pool is emptied — every crew HP
 _Avoid_: ammo rack explosion, detonation (reserve detonation for HE)
 
 **Union field**:
-The material-factor field along a shot's path: at every point, the **max** `material_factor` over the volumes covering it. Cost is its integral, so shared space is charged exactly once, authoring order cannot matter, and adding a volume never lowers protection. In the game's damage model, line dose follows the energy lost at each depth, shared among the hard volumes present there without ownership.
+The material-factor field along a shot's path: at every point, the **max** `material_factor` over the volumes covering it. Cost is its integral, so shared space is charged exactly once, authoring order cannot matter, and adding a volume never lowers protection. In the game's damage model, work is attributed at each depth to the exposed maximum-factor volumes: retained work becomes line dose, outgoing work feeds debris, and ownership filters neither.
 _Avoid_: CSG merge, boolean union of the meshes (the union is evaluated lazily on the ray; no merged mesh exists)
 
 **Walk**:

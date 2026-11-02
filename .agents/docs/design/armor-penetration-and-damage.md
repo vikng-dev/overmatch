@@ -119,9 +119,11 @@ march, per volume crossed:
    no wider than the round; without one the round is its own penetrator, bit for bit. Flight reads
    the flying body: the whole round for a kept carrier, the penetrator for a discarded one
    (§3a). Everything at the plate reads the penetrator: the disc the shell samples the world with,
-   overmatch, this law, the line's energy and the cone's (§5, §6). The momentum a hit or a bounce delivers is the
-   flying body's: a kept carrier stops at the plate with its penetrator; a discarded carrier
-   contributes none. Penetration stays rigid: the penetrator's
+   overmatch, this law and the core's work (§5, §6). On entering material, a kept carrier stops
+   at the first exposed resisting contact: that construction retains its kinetic energy and
+   momentum once, while only the core bends and flies on. A discarded carrier contributes none.
+   The core's penetration law is unchanged. Ricochet direction and carrier exchange remain part
+   of the deferred ricochet rebuild (§4a). Penetration stays rigid: the penetrator's
    material is named (`core`) and read by no law. The 88's Pzgr. 40 reads about 180
    reference-mm at the muzzle (930 m/s) as its 1.93 kg, 35.7 mm core, against about 112 as its
    whole 7.3 kg body and the Pzgr. 39's about 115 (DERIVED, shipped RHA facts); the record gives
@@ -313,15 +315,11 @@ face with the energy lost across both (owner, 2026-10-12), and a step up into ha
 crossed behind it to the same body, since no softer step intervened. Exits reached before the round
 stops still throw; the body the round stops inside throws nothing. A bounce throws nothing.
 
-**The pool quantum gate.** A field whose whole emission `S/2` converts to no pool unit at its
-mechanism's unit (below half a thousandth of an HP point, §6) doses no box (owner, 2026-10-17; at
-the pool's quantum since pools keep fractions, issue 142). `S/2` is the most any one box can take
-from a field — every direction doses a box at most once, and the directions' weights emit `S/2`
-(**Sampling**) — so a gated field could not have cost any pool a unit. The gate adds no constant:
-it is the pool's quantum. A gate at the whole point would drop doses a pool accumulates. It gates
-HP alone: a building reads a field's joules whatever its HP unit, so a gated field carrying energy
-is still walked and recorded, its directions dosing nothing, and only a field carrying none is not
-thrown (`FieldThrow::reaches_a_pool_unit`).
+**Accumulate before rounding.** Every nonzero field is walked, recorded and added to each
+receiver's shot tally at its mechanism's unit. The pool rounds the shot's accumulated total;
+no individual field is filtered at the pool quantum. DERIVED fixture counterexample: two fields
+of 0.0003 HP each sum to 0.0006 HP, which rounds to one thousandth of an HP point, although
+rounding either field alone gives zero. Only a field carrying no energy is not thrown.
 
 **Strength.** The game's damage model emits `H_C = u_C × ΔE × r` HP points from a
 cone. `u_C` is `cone_emitted_hp_per_joule` in `assets/ballistics/spall_cone.ron`, a provisional
@@ -338,16 +336,18 @@ emission by its material ratio.
 carries `E_C = κ r ΔE` of it out, and the line deals the body's volumes the rest,
 `(1 − κ r) ΔE`, sample by sample over the stretches inside the reached body
 (`walk::SpallSource::field_share`); a body the round stops inside keeps all it lost. `κ` is
-`cone_debris_energy_share` in `assets/ballistics/spall_cone.ron`, an `Unknown` 0.06: the share of
+`cone_debris_energy_share` in `assets/ballistics/spall_cone.ron`, a `StandIn` 0.06: the share of
 the energy lost that the debris carries out through an exit of the reference steel's strength. Its
 order of magnitude is DERIVED from a plug of the reference steel (7850 kg/m³) the 88 mm reference
 round's disc wide and its 100 mm plate thick, 4.774 kg, leaving at the round's 259.69 m/s exit
 speed: 161.0 kJ of the 2.7035 MJ lost, 0.0596. Measured behind-armour debris (fragment masses and
-speeds against the energy the plate absorbed) would settle it, per exit substance if it differs.
-`r` is the exit material's term of the partition (ASSUMED: a softer exit's debris carries
-proportionally less), its one job: the cone's HP follows the energy it carries through one unit,
-`u_C / κ` HP per carried joule, so `H_C = u_C r ΔE` whatever `κ`, and `κ` moves only what the body
-keeps and what a building reads.
+speeds against the energy the plate absorbed), together with construction and material inputs,
+are missing from the current debris-production law. The global share and `r`'s emission role
+stand in for that missing law; resistance is not a debris-yield fact. The cone's runtime unit is
+`u_C / κ` HP per carried joule, preserving `H_C = u_C r ΔE` as `κ` changes. This is HP calibration,
+not evidence for the physical partition. The walk accumulates retained and outgoing work directly,
+without subtracting separately rounded debris from a summed loss. Each source's outgoing joules
+are read from its addressed exchanges, rather than recomputed from a second loss ledger.
 
 The unit is a balance scale, not a physical energy share (#258). It was set against the retired
 reference cone's target: an 88 mm APCBC round (10.2 kg, nose factor 7/24) at 773 m/s perforating
@@ -412,24 +412,20 @@ throw's cost against its resolution (one throw MEASURED at each count in
 cone's `μ_k`, `sin θ_k` and `f_k` are built from its `λ` with IEEE arithmetic and `sqrt` alone, so
 their bits match on every shipped target and a decoder rebuilds them from the descriptor.
 
-**Shadowing and reach.** A direction's strength is constant in air — no drag, no range — and it
-doses only the struck tank's boxes (hitting another tank is a preserved alternative), and **never
-the body that threw it** (issue 143, 2026-10-28, provisional: the simplest model). The volumes its
-exit leaves, recognised by identity (**Walk**), took what the body kept of the energy the round
-lost there as their line dose, and the cone carries the rest, so that energy is counted once: a
-direction that meets one of them again, as at a hollow body's far wall, stops there as at armour
-and takes nothing. The cone doses only what lies
-beyond its body. MEASURED from the re-recorded s10 record: the gun barrel takes its line dose alone,
-279.36 HP and no field dose from its own walls' cones, which empties its 250 HP pool by itself. **Full
-shadowing** (owner, 2026-10-17): a direction stops at the first hard body it enters. Armour takes
-nothing and stops it, a hard box takes its whole strength and stops it, so whatever hard body lies
-first shields everything behind it, whatever its material; a direction that enters none ends where
-it leaves the struck tank. A witness (§6) never stops a direction: each one it enters short of
-where it stops is dosed at its strength, so crew never shield crew. The `1/r²` fall-off is not a
-parameter: a box farther away covers fewer directions.
+**Shadowing and reach.** A direction's strength is constant in air — no drag, no range —
+and ownership does not restrict its receivers: neighbouring tanks and environment matter take
+part in the same walk. Full shadowing means the first hard body entered stops the direction:
+armour takes no HP dose, a hard box takes its whole weighted strength, and either shields what
+lies behind. A direction still leaving the emitting body has not entered it; after departure,
+genuine re-entry transfers the returning debris energy to that body, including its far wall.
+The retained line work and returning debris are separate shares, so this does not spend the
+same energy twice. A direction entering no hard body ends at the field's candidate horizon.
+A witness (§6) never stops a direction: each one entered before the stop takes its strength,
+so crew stations never shield other crew stations. The `1/r²` fall-off is geometric: a farther
+box covers fewer directions.
 
 **Walk.** A direction is walked like the line's corridors: the collector and the pairing walk along
-the whole ray through the struck tank, from outside every candidate's bounds through the throw
+the ray through spatially reached volumes, from outside every candidate's bounds through the throw
 point, with nothing declared. So what it starts inside is established, never assumed, and every
 volume along it is present in order, nested and overlapping ones included. No nudge displaces the
 ray: the volumes the exit leaves are recognised by identity, so a direction starting inside one of
@@ -443,8 +439,7 @@ nothing. Doses go through the addressed `Dose` effect, like the line's. A box's 
 shot (the line, a bounce's shock and every cone) converts to pool units once, on its total (§6).
 Every field deposit, to a hard box and a witness alike, is a share of the cone's emitted HP: it
 enters the tally as its joules times the cone's unit (§6), the one energy-to-HP scale a field has;
-`joules_per_hp` never touches it. The pool quantum gate tests the whole emitted HP,
-`(u_C / κ) qS = u_C r ΔE`, against the pool resolution.
+`joules_per_hp` never touches it. Every contribution reaches the shot total before pool rounding.
 A box of face `A` fully inside the cone, `θ` off its axis, has the knockout radius
 `R = sqrt(2 f(θ) E A / (pool Ω_c))`, `E = u_C r ΔE` in HP points, `Ω_c = 2π(1 − cos α)` and `f(θ)` the
 ball's weight there (½ averaged over the cone). A bigger box is a bigger target: it takes more of
@@ -672,11 +667,12 @@ factor independence of a box's own dose; shadowing monotone (adding a volume nev
 A cone emits its declared HP-per-joule unit times the energy lost across the body, weighted by
 exit material, and of two rounds
 through one plate the one that loses more energy throws the stronger cone, whatever its mass,
-calibre or speed; a cone below the pool quantum doses no box; a shot's dose to a box is converted
+calibre or speed; every nonzero cone contributes; a shot's dose to a box is converted
 to pool units once on its total. A direction stops at the first volume
 it enters, a box there taking its whole strength, armour nothing and shielding what lies behind;
 a plate thinner than any nudge stops it; it is neither stopped nor dosed by a volume its throw
-leaves, and has entered any other it starts inside at the throw point. The ball's weights are its
+is still leaving; after departure, re-entry can dose it. Any other volume holding the throw point
+is entered there. The ball's weights are its
 strata's shares of the emission, never grow from the axis to the rim, and leave the rim stratum a
 graze; its continuous weight is zero at and past the rim; a thrown cone's field is its exit layer's
 substance's, and its rays' strengths are `S·f_k` of that field to the bit. Witnesses: adding one
@@ -771,7 +767,7 @@ kinetic energy driven into its wall (`Burst::energy`, DERIVED at load). `u_B` is
 enters it. Its strength is `S = E_wall / q`, as for the cone the energy it carries over the
 emitted share; the ring's equal-solid-angle strata emit `qS = E_wall` at every direction count.
 They march, shadow and dose as a cone's do (§5), through spatially reached volumes, leaving none,
-their HP doses behind the pool quantum gate; a deposit's joules times `u_B` are its HP, and a
+every contribution reaching the shot tally; a deposit's joules times `u_B` are its HP, and a
 building reads the joules themselves. The record and wire carry the field descriptor and that strength. The data
 block also holds the ring's half-width and direction count, independently of potency.
 
@@ -816,8 +812,8 @@ extends those radii by a factor `sqrt(0.2033 / 0.2) = 1.008` (DERIVED).
 burst point, its last leg timed at the speed the burst trigger counts it at, so a burst in flight
 lies the delay after the exit that last started it; for a round at rest, the delay's remainder after
 it stopped there), the burst point, the carried speed, the nose piece's mass, and the field as a
-cone record (without doses when the pool quantum gate held them; absent when the field carries
-no energy). The path runs on with the nose piece's line
+cone record with every addressed contribution (absent only when the field carries no energy).
+The path runs on with the nose piece's line
 to its own end, its open air timed at the carried speed. A struck tank's record stays open while a
 fuze that tank armed runs, so a burst past its last body lands in it. The wire round-trips the
 burst; its 256 directions add 0.3–1.3 KB to a message (MEASURED, `src/damage_cam/wire.rs`). The pen
@@ -863,19 +859,35 @@ directions, so it takes more dose (§5). A crew box is person-sized, one shared 
 (the seed tank's 0.4 × 0.3 × 0.7 m, a 0.2033 m² mean face, MEASURED from its sim geometry), close to
 the 0.2 m² face the fields' knockout radii are quoted at (§5), and the pen cam's potency bands are
 read from it (§5, "Potency colour"). A spall cone doses it by the strength reaching it (§5); the
-**main penetrator transiting** a hard module deposits the energy it lost crossing it; a bounce
+**main penetrator transiting** a hard module deposits its retained work after outgoing debris;
+a carrier's first resisting contact also retains the carrier's kinetic energy. A bounce
 deposits the energy the round lost there, the motion pointed into the face, into the face it
 struck.
 
 **The energy dose** (issue 113, decided 2026-10-28, provisional; owner direction: keep it simple).
-A hard box's line dose is the kinetic energy the round lost crossing it, `½ m (v_in² − v_out²)`,
-`m` the mass that meets the plate (a sub-calibre round's core); a round that comes to rest in it
-deals all it had left, `½ m v_in²`. The energy lost between consecutive volume boundaries is shared
-among samples by their maximum factor, with each sample's share divided equally among its tied
-strongest volumes, so the doses sum to the energy the round lost and a volume a stronger one overlaps takes none of it (§13.2). A seam
-between touching volumes of one substance does not change the force-law advance; each volume
-still takes the energy lost at its own depths, never a length share of the whole crossing.
-**One line/bounce unit** turns lost physical energy into HP for a hard pool's line dose or
+A hard box's line dose is retained work. The core loses `½ m_c (v_in² − v_out²)` over a
+crossing; reached exits carry their assigned `κ r` shares, and the crossed volumes retain the
+rest. A core that stops inside a body emits no debris through that body's unreached exit.
+At first resisting contact a kept carrier adds `½ (m_f − m_c) v_in²` retained joules there;
+later crossings contain only the core. Consequently, retained work plus emitted debris plus
+the core's outgoing kinetic energy equals the incoming assembly's kinetic energy.
+
+Each stretch's work and axial momentum go to its strongest exposed volumes, with tied maxima
+sharing the sample's contribution equally (§13.2). Each line reaches its own body once;
+entrance ownership is fuze attribution, not an impulse destination. The core transfer is
+`m_c (v_in i − v_out b)` for incoming direction `i` and bent direction `b`; a stopped carrier
+adds `(m_f − m_c) v_in i` at entry. Buildings distribute axial transfer along the line, but keep
+the bend and carrier impulse at the entry chunk. Trunks likewise keep entrance impulse at entry.
+The emitter receives the whole resolved transfer, including debris launch: the field carries
+work without a sourced free body's mass or velocity and gives receivers no second blow.
+This closure remains provisional until debris production supplies those facts.
+
+A seam between touching volumes of one substance does not change the force-law advance; each
+volume takes the work and speed loss at its own depths, never a length share of the whole
+crossing. The constant-speed bend's possible outward normal transfer and missing unowned-bounce
+exchange are deferred to the owner-led ricochet rebuild, tracked in the lens backlog.
+
+**One line/bounce unit** turns retained line work or bounce loss into HP for a hard pool's line dose or
 bounce shock, a tank's modules and a tree's trunk alike: `joules_per_hp` in
 `assets/ballistics/energy_dose.ron`, Unit 3000 J per point. Cone and ring deposits use their own
 emitted-HP units below; this line/bounce scale does not define their game potency. It keeps the scale
@@ -900,7 +912,7 @@ Each mechanism has one balance knob whose name says what it converts:
 
 | mechanism | authored unit | dose or emitted HP |
 |---|---|---|
-| hard-pool line and bounce shock | `energy_dose.ron::joules_per_hp`, Unit 3000 J/HP | lost joules / unit |
+| hard-pool line and bounce shock | `energy_dose.ron::joules_per_hp`, Unit 3000 J/HP | retained line joules or bounce loss / unit |
 | spall cone | `spall_cone.ron::cone_emitted_hp_per_joule`, Unit 0.00014666666666666666 HP/J | unit × lost joules × material strength ratio |
 | burst ring | `spall_cone.ron::burst.emitted_hp_per_joule`, Unit 0.035 HP/J | unit × driven wall joules |
 
@@ -2123,7 +2135,7 @@ reports on the energy-unit lane were verified against the code before this table
 
 | reviewer | finding | verified / not a defect | fixed in (subject) |
 |---|---|---|---|
-| Claude P2 | the energy a round loses across a body is spent twice: the line deals the whole ΔE to the body's volumes and the exit's cone carries ΔE × r more, which buildings crush with; `r` did a partition job with no label | verified: `SpallSource::strength` was `field_strength(energy × strength_ratio)` while `finish` dealt every stretch's whole loss to the line, and three walk tests pinned line deposits alone at ΔE on perforations | `ballistics: spend a body's lost energy once between its line and its cone (#258)`: the cone carries `κ r ΔE` (`cone_debris_energy_share`, `Unknown` 0.06, §5 "The energy partition"), the line `(1 − κ r) ΔE` sample by sample, the cone's HP unit is `u_C / κ`; the walk tests now sum line and fields to ΔE |
+| Claude P2 | the energy a round loses across a body is spent twice: the line deals the whole ΔE to the body's volumes and the exit's cone carries ΔE × r more, which buildings crush with; `r` did a partition job with no label | verified: `SpallSource::strength` was `field_strength(energy × strength_ratio)` while `finish` dealt every stretch's whole loss to the line, and three walk tests pinned line deposits alone at ΔE on perforations | `ballistics: spend a body's lost energy once between its line and its cone (#258)`: the cone carries `κ r ΔE` (`cone_debris_energy_share`, then labelled `Unknown` 0.06; current classification is `StandIn`, §5 "The energy partition"), the line `(1 − κ r) ΔE` sample by sample, the cone's HP unit is `u_C / κ`; the walk tests now sum line and fields to ΔE |
 | Codex P2, Claude P3 | the pool-quantum gate lets a field's HP unit decide whether its joules reach a building | verified: `throw_spall_cone` and `throw_burst` returned before walking a gated field, so the shell reader saw no rays | same commit: the gate withholds HP doses only; a gated field carrying energy is walked and recorded without doses; `a_cone_below_the_pool_quantum_doses_no_pool_and_is_still_thrown` |
 | Codex P3, Claude P3 | §5's knockout radius still read `E = qS/j`, the gate "the energy rate", potency colour `ρ = 1/joules_per_hp` | verified: `qS/j` on the 2.7035 MJ cone gives 901 HP against the 396.5 HP quoted | `docs: state the energy partition and the HP-only gate (#258)` |
 | Claude P3 | the glossary's Field, Spall cone, Dose and Energy-to-HP rate said every field converts at `joules_per_hp` and a cone carries "one fixed share" | verified against `spall_cone::FieldUnit` and `ballistics::field_units`; Line dose had the same gap | same docs commit, Line dose included |
@@ -2367,3 +2379,73 @@ constraints, not a reconstructed product of source shares. `TankSpec::validate` 
 and Transmission on every productive Drive path. A staffed task at zero rate opens the main
 clutch, so the engine's local idle catch cannot launch the hull while Drive reads zero.
 `transmission_bottleneck_reduces_the_one_drive_task_rate` pins the generic bottleneck outcome.
+
+### Exchange and receiver review (#258)
+
+Subject: the game's damage model; game state only. Crew are HP pools at stations. Current
+§§5–6 supersede the earlier records' source-body immunity and per-field pool-quantum gate.
+
+The lane's steps delete these paths:
+
+- `ballistics: give every crossed body its exchange once (#258)` removes entrance-owner summed
+  impulse, the continuing carrier, parallel dose/exchange vectors, the second debris-loss
+  computation and the lost-then-retained accumulator. One addressed exchange holds retained dose,
+  emitted work and independent momentum. Entrance impulse stays at entry rather than rear chunks.
+- `ballistics: let returning debris dose its emitting body (#258)` removes permanent source-body
+  immunity and the hollow-body line-only contract; continuous departure remains geometric.
+- `ballistics: tally every field before pool rounding (#258)` removes the HP gate, optional tally
+  path and gate-only counters; every nonzero field preserves its receiver contributions.
+- `ballistics: prove field units with controlled fixtures (#258)` removes shipped-unit inequality
+  as a pass condition and gives each test its own invariant documentation.
+- `docs: state the resolved exchange and receiver contract (#258)` replaces stale full-loss,
+  source-immunity and quantum-gate prose in the design narrative and glossary.
+
+The carried reviews were checked against source. MEASURED regressions: mixed overlap delivered
+2116.354 N s to a hull whose own line carried 1058.177 N s; a fixture assembly of 40.8 kg retained
+that mass after perforation despite its 10.2 kg core. The unequal-mass test now balances retained
+work plus emitted debris against incoming assembly energy less outgoing core energy, head-on and
+obliquely, and compares the vector transfer independently. The building whole-blow mutant and
+trunk duplicate-entrance mutant each fail their nonzero `ShellMarched` consumer tests.
+
+The hollow-body re-entry test was red with field dose zero despite positive retained line dose.
+The accumulation regression was red with settles `[0, 0]`, and the restored HP-bearing receiver
+was missing from the small cone's recorded contributions. Both pass after gate deletion; the
+accumulation test observes `[0, 1]` for its two fixture fields of 0.0003 HP each. These are fixture
+observations, not shipped balance conditions. The fixture-unit test rejects a planner reading
+shipped units instead of the supplied mechanism units.
+
+| reviewer | finding | verified / not a defect | fixed in (subject) |
+|---|---|---|---|
+| Codex ball-15 P2; Claude ball-15 P3 | partitioned line dose silently partitions momentum | verified; lane 1 separates momentum from HP, this lane also fixes mixed-body routing | `ballistics: resolve each crossing's work and momentum once (#258)`; `ballistics: give every crossed body its exchange once (#258)` |
+| Codex ball-15 P2 | subtract-after-sum can retain negative work at a full debris share | verified and already fixed by direct retained contributions; endpoint fixtures remain green | `ballistics: resolve each crossing's work and momentum once (#258)` |
+| Codex ball-15 P2; Claude ball-15 P3 | old gate test has no HP-bearing receiver | verified red with an actual receiver and two small fields | `ballistics: tally every field before pool rounding (#258)` |
+| Codex ball-15 P2; Claude ball-15 P3 | shipped cone and burst units must differ to pass | verified; controlled fixture units replace asset inequality | `ballistics: prove field units with controlled fixtures (#258)` |
+| Claude ball-15 P3 | drawable-picture doc is attached to the unit test | verified; each test now owns its invariant doc | `ballistics: prove field units with controlled fixtures (#258)` |
+| Claude ball-15 P3 | comments say below-quantum fields are not thrown | verified; gate and counters are deleted, nonzero fields always contribute | `ballistics: tally every field before pool rounding (#258)` |
+| Claude ball-15 P3 | full-loss/partition comments and section reference are stale | verified; line means retained work, returning debris is distinct, partition citation corrected | `ballistics: name the debris stand-in and its HP calibration (#258)`; `ballistics: let returning debris dose its emitting body (#258)`; `docs: state the resolved exchange and receiver contract (#258)` |
+| Claude ball-15 P3 | debris-share upper bound lacks direct refusal coverage | verified and already fixed; parser tests refuse both excluded bounds and nonfinite shares | `ballistics: name the debris stand-in and its HP calibration (#258)` |
+| Claude ball-15 P3 | global fixture-derived debris share is labelled as a fact | verified and already fixed in data; narrative and glossary now agree | `ballistics: name the debris stand-in and its HP calibration (#258)`; `docs: state the resolved exchange and receiver contract (#258)` |
+
+| reviewer | finding | verified / not a defect | fixed in (subject) |
+|---|---|---|---|
+| Codex exchange-1 P1; Claude exchange-1 P2 | hull gets the sum while environment gets its line again; reversed entrance loses hull transfer | verified red; each line resolves its own owner once | `ballistics: give every crossed body its exchange once (#258)` |
+| Claude exchange-1 P2/P3 | carrier energy has no owner, carrier keeps flying, unequal-mass bend is untested, mass doc disagrees | verified red; first resisting contact retains carrier work and impulse; only the core bends and continues, with unequal-mass head-on and oblique budget tests | `ballistics: give every crossed body its exchange once (#258)` |
+| Claude exchange-1 P2/P3 | building/trunk consumers have no nonzero line proof; entrance bend spreads into rear chunks | verified through the shipped message and explicit consumer mutants; entry impulse stays at entry | `ballistics: give every crossed body its exchange once (#258)` |
+| Claude exchange-1 P3 | debris is unread while rays recompute it | verified; exit emission now sums addressed exchange work, and the duplicate loss field is deleted | `ballistics: give every crossed body its exchange once (#258)` |
+| Claude exchange-1 P3 | parallel dose/exchange vectors are rejoined by address | verified; one exchange contains its dose, work allocation and momentum | `ballistics: give every crossed body its exchange once (#258)` |
+| Claude exchange-1 P3 | one accumulator changes from lost to retained work | verified; retained contributions accumulate directly in a separately named field | `ballistics: give every crossed body its exchange once (#258)` |
+| Claude exchange-1 P3 | overmatch comment falsely says no bend | verified against `begin`; comment now states overmatch cancels slope cost while normalization bends | `ballistics: give every crossed body its exchange once (#258)` |
+| Claude exchange-1 P3 | ballistics-15 backlog row remains unnarrowed | verified; narrowed with the first step, closed with the re-entry contract | `ballistics: give every crossed body its exchange once (#258)`; `ballistics: let returning debris dose its emitting body (#258)` |
+| Claude exchange-1 P3 | constant-speed bend can transfer momentum outward; bounce has no exchange on unowned matter | verified by source; explicitly deferred by the owner to ricochet rebuild | not fixed: backlog `ballistics-23`, `ballistics-24` |
+
+Decisions: stop the carrier at first resisting contact; keep the core penetration law; route
+momentum by crossed volume; retain the current debris-production `StandIn` and HP calibration;
+permit genuine source re-entry; tally every nonzero field before pool rounding; use controlled
+units at the planner's existing assembly seam. Protocol revision advances from 69 to 70 because
+retained work and recorded field-hit meaning change. No momentum field is added to the wire.
+The two ricochet findings remain the owner's decision; no ricochet alternative is added here.
+
+Final verification (MEASURED): 2,136 library tests passed, zero failed, 27 ignored; all 44
+whole-tree citation, UI-font, network-boundary and bake guards passed. Formatting and CI clippy
+passed before every green commit. All runs used the machine lock, unattended headless settings,
+and the required feature set; no captures, windows, pushes or issue comments were made.

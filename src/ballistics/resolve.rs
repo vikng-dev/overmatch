@@ -1517,9 +1517,9 @@ pub(crate) fn entry_force(
 /// [`walk::finish`] advancing the round's bound mechanism, the residual speed, the travel and the
 /// continuation.
 ///
-/// `round` is what meets the plate, the penetrator's mechanism; `mass` the whole round's (kg),
-/// since the momentum a bounce or a bite delivers is the whole round's, its body stopping at the
-/// plate with its penetrator. `contact` is the distance from [`Flight::sweep_origin`] to the
+/// The game's damage model: `round` is the penetrator's mechanism and `mass` the current flying
+/// assembly's kg. On a bite, excess carrier mass stops at the first resisting contact; only the
+/// core bends and continues. A bounce keeps its current assembly. `contact` is the distance from [`Flight::sweep_origin`] to the
 /// nearest sample's first armour contact; it sizes the first corridor and nothing else.
 pub(crate) fn decide(
     context: &ResolveContext<'_, '_, '_>,
