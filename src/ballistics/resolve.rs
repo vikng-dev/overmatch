@@ -168,7 +168,7 @@ pub(crate) fn disc_radius(caliber: f32) -> f32 {
 /// already reached — the end of an open-air sweep, of a corridor that met nothing, or a
 /// perforation's resume point one nudge past the exit along that sample's ray — and
 /// `seeds[i].inside` is what that ray's walk says the sample is inside there. A fresh disc
-/// placed at birth, after a catch-up or after a bounce has no swept membership:
+/// placed at birth or after a catch-up has no swept membership:
 /// [`Flight::born`] and [`Flight::settle`] read it with [`certified`]. A disc laid on an
 /// axis start a sweep reached uses [`Interior::laid`]; relative discovery reads material newly
 /// holding that start at its next scene boundary. Offsets are whatever the rays left
@@ -237,14 +237,6 @@ impl Interior {
             origin: self.origin - (anchor - self.anchor),
             anchor,
             seeds: self.seeds,
-        }
-    }
-
-    /// The axis sample's start, without what any sample is inside.
-    pub(crate) fn axis(&self) -> AxisStart {
-        AxisStart {
-            anchor: self.anchor,
-            origin: self.origin,
         }
     }
 }
@@ -961,7 +953,7 @@ fn first_solid(
 /// # Where a sweep starts
 ///
 /// A sample may start a sweep only where its membership is KNOWN: at its own start in the
-/// continuation ([`Interior`]). An authority flight without one — just bounced —
+/// continuation ([`Interior`]). An authority flight without one — newly placed —
 /// has a fresh disc to lay, square to `direction` at `position`, and [`settle`](Self::settle)
 /// establishes its membership before anything sweeps from it. Nothing nudges past a start: a face
 /// within a nudge ahead would be stepped over with its entry owned by nobody, and the sample would
@@ -977,38 +969,49 @@ pub(crate) struct Flight {
     /// The sampling basis for `direction`, transported through every bend so far: the frame a fresh
     /// disc is laid on. Resolution reads THIS, never a basis stored for an earlier heading.
     pub frame: DiscFrame,
-    /// Each sample's start and membership; `None` only between a fresh start and its
-    /// [`settle`](Self::settle).
+    /// Each sample's reached start. `membership` states whether its seeds belong to the current
+    /// discovery scene; `None` means a newly placed disc still needs its first layout.
     pub continuation: Option<Interior>,
+    /// Whether discovery can rely on the carried membership, or must first re-read the starts
+    /// after a reflected heading or scene change. Tick-boundary relative discovery starts with
+    /// the preceding scene's clear membership and admits geometry currently holding those points.
+    pub membership: Membership,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Membership {
+    Established,
+    Required,
 }
 
 impl Flight {
-    /// The game's damage model: a new discovery disc on the axis start the last sweep reached,
-    /// outside material in the previous scene. Discovery contacts any material newly holding
-    /// it in the current scene and seeds the ordinary walk. A disc no sweep has reached is placed through
-    /// [`Self::born`] instead.
+    /// The game's damage model: discovery on the sample starts the last sweep reached outside
+    /// material. Relative discovery reads geometry newly holding them in the current scene;
+    /// their reached offsets survive the tick. A disc no sweep reached uses [`Self::born`].
     pub(crate) fn launched(
         swept: Dir3,
         direction: Dir3,
         speed: f32,
         frame: DiscFrame,
-        radius: f32,
-        axis: AxisStart,
+        starts: Interior,
     ) -> Self {
-        let start = axis.rebased();
-        let mut starts = Interior::laid(start.anchor, layout(&frame, radius));
-        starts.origin = start.origin;
+        let mut starts = starts.rebased();
+        for seed in &mut starts.seeds {
+            seed.inside.clear();
+            seed.t = 0.0;
+        }
         Self {
             position: starts.world_origin(),
             direction,
             speed,
             frame: frame.transport(Vec3::from(swept), Vec3::from(direction)),
             continuation: Some(starts),
+            membership: Membership::Established,
         }
     }
 
     /// The game's damage model: a disc no sweep has reached, placed into the scene
-    /// (`ballistics::launch`): the disc [`Self::launched`] lays at `position` with no axis start,
+    /// (`ballistics::launch`): a new disc at `position`, with no previously reached starts,
     /// its membership read there by the containment probe ([`certified`]) along `swept`.
     #[expect(
         clippy::too_many_arguments,
@@ -1031,27 +1034,44 @@ impl Flight {
             speed,
             frame: frame.transport(Vec3::from(swept), Vec3::from(direction)),
             continuation: Some(starts),
+            membership: Membership::Established,
         })
     }
 
-    /// Lay the fresh disc a bounce left — on `frame` at `position`, square to
-    /// `direction` — with its membership established ([`certified`]). A flight that already has its
-    /// starts is left alone.
+    /// The game's damage model: establish membership at the existing reached starts after a
+    /// reflected heading or scene change. Only a newly placed flight lays a new disc at `position`;
+    /// established starts retain both their positions and membership.
     pub(crate) fn settle(
         &mut self,
         context: &ResolveContext<'_, '_, '_>,
         not_own: &dyn Fn(Entity) -> bool,
         radius: f32,
     ) -> Result<(), WalkError> {
-        if self.continuation.is_none() {
-            self.continuation = Some(certified(
-                context,
-                not_own,
-                self.position,
-                self.direction,
-                self.frame,
-                radius,
-            )?);
+        if self.membership == Membership::Required || self.continuation.is_none() {
+            let starts = match &self.continuation {
+                Some(starts) => certified_samples(
+                    context,
+                    not_own,
+                    AxisStart {
+                        anchor: starts.anchor,
+                        origin: starts.origin,
+                    },
+                    self.direction,
+                    self.frame,
+                    radius,
+                    starts.seeds.iter().map(|seed| seed.offset).collect(),
+                )?,
+                None => certified(
+                    context,
+                    not_own,
+                    self.position,
+                    self.direction,
+                    self.frame,
+                    radius,
+                )?,
+            };
+            self.continuation = Some(starts);
+            self.membership = Membership::Established;
         }
         Ok(())
     }
@@ -1081,11 +1101,14 @@ impl Flight {
             .collect()
     }
 
-    /// A continuation holds a sample inside material ([`Interior::holds_material`]).
+    /// Established membership holds a sample inside material ([`Interior::holds_material`]).
+    /// Starts awaiting their live-scene read do not carry a material claim from the old scene.
     pub(crate) fn holds_material(&self) -> bool {
-        self.continuation
-            .as_ref()
-            .is_some_and(Interior::holds_material)
+        self.membership == Membership::Established
+            && self
+                .continuation
+                .as_ref()
+                .is_some_and(Interior::holds_material)
     }
 
     /// Fly `displacement` of open air: every sample's ray was swept that far clear, so every start
@@ -1120,6 +1143,7 @@ impl Flight {
                     .transport(Vec3::from(self.direction), Vec3::from(self.direction));
                 self.position = resume;
                 self.continuation = Some(continuation);
+                self.membership = Membership::Established;
                 false
             }
             Decision::Bounce(bounce) => {
@@ -1129,7 +1153,10 @@ impl Flight {
                 self.direction = bounce.direction;
                 self.speed = bounce.speed;
                 self.position = bounce.resume;
-                self.continuation = None;
+                self.continuation = Some(bounce.continuation);
+                // The game's damage model returns to live discovery after reflection playback.
+                // Its world heading and scene may differ from the frozen contact certification.
+                self.membership = Membership::Required;
                 false
             }
             Decision::Bite(bite) => match bite.end {
@@ -1156,6 +1183,7 @@ impl Flight {
                     self.speed = speed;
                     self.position = resume;
                     self.continuation = Some(continuation);
+                    self.membership = Membership::Established;
                     false
                 }
             },
@@ -1193,7 +1221,7 @@ pub(crate) enum Decision {
 impl Decision {
     /// The straight stretches the round's axis flies following this decision, in order, ending
     /// where the next one starts or where it came to rest — what the witness pass intersects
-    /// ([`super::wound`]). A bounce's lift to its resume point repositions the body and is no leg.
+    /// ([`super::wound`]). A bounce ends at the samples' reached hand-offs.
     pub(crate) fn legs(&self) -> &[Leg] {
         match self {
             Decision::Clear { leg, .. } => std::slice::from_ref(leg),
@@ -1306,19 +1334,12 @@ pub(crate) struct Bounce {
     pub speed_in: f32,
     /// Momentum handed to `owner` at `position`.
     pub impulse: Vec3,
-    /// Line-of-sight metres flown from the flight's position to the face, along the way in, and the
-    /// nudge off it. The lift to `resume` is not travel: it repositions the body clear of the face
-    /// it bounced off.
+    /// Line-of-sight metres flown from the flight's position to the axis hand-off along the way in.
     pub travel: f32,
-    /// Where the flight resumes: lifted off the face along `n̄` by the disc's own radius, then one
-    /// [`MARCH_EPS`] along the outgoing direction. At oblique incidence a disc's lateral offsets
-    /// lie mostly ALONG the struck surface's normal, so resuming at the contact point leaves half
-    /// the ring behind the face and first contact fires again on the very surface just left. A
-    /// point needs only the nudge, which steps off the face this bounce resolved, never past one
-    /// nobody owns; a body needs its radius too. The lift clears the struck face, not the world:
-    /// the fresh disc laid here can start inside neighbouring armour, and its membership is
-    /// established before it sweeps ([`Flight::settle`]).
+    /// The axis hand-off, with no lift or outgoing nudge. Each reflected sample resumes at the
+    /// point its incoming ray reached, certified on its outgoing ray, as a bent transit does.
     pub resume: Vec3,
+    pub continuation: Interior,
     /// The way in: the flight's position to the face, along `incoming`.
     pub approach: Leg,
 }
@@ -1572,7 +1593,23 @@ pub(crate) fn decide(
                 "the game's damage model derives a finite nonzero ricochet direction from checked unit directions"
             );
             let kept = speed * speed_scale;
-            let approach = (read.position - from).dot(Vec3::from(dir)).max(0.0);
+            let approach = hand_offs[0] as f32;
+            let origin = start + dir * approach;
+            let offsets = entrance
+                .offsets
+                .iter()
+                .zip(&hand_offs)
+                .map(|(offset, t)| *offset + dir * (*t - hand_offs[0]) as f32)
+                .collect();
+            let continuation = certified_samples(
+                context,
+                not_own,
+                AxisStart { anchor, origin },
+                out,
+                flight.frame.transport(*dir, *out),
+                radius,
+                offsets,
+            )?;
             let way_in = Leg {
                 from: anchor + from,
                 axis: dir,
@@ -1607,8 +1644,9 @@ pub(crate) fn decide(
                 incoming: dir,
                 speed_in: speed,
                 impulse: mass * (v_in - Vec3::from(out) * kept),
-                travel: approach + MARCH_EPS,
-                resume: position + read.normal * radius + out * MARCH_EPS,
+                travel: approach,
+                resume: continuation.world_origin(),
+                continuation,
                 approach: way_in,
             }))
         }

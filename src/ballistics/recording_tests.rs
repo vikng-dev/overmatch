@@ -1986,6 +1986,7 @@ fn a_zero_world_speed_waits_or_meets_a_moving_body_on_its_clock() {
                         speed: SPEED,
                         frame,
                         continuation: Some(interior.clone()),
+                        membership: resolve::Membership::Established,
                     };
                     // Fixture: the completed relative path's carrier exactly cancels its world velocity.
                     let mut playing = resolve::Playback::new(
@@ -2402,10 +2403,10 @@ fn relative_rest_still_discovers_a_separate_plate_in_the_same_tick() {
     let (mut pose, mut projectile) = shells.single_mut(app.world_mut()).unwrap();
     let at = Vec3::new(0.0, 20.0, 32.0);
     pose.translation = at;
-    projectile.axis = Some(resolve::AxisStart {
-        anchor: at,
-        origin: Vec3::ZERO,
-    });
+    projectile.starts = Some(resolve::Interior::laid(
+        at,
+        resolve::layout(&projectile.disc, resolve::disc_radius(projectile.caliber)),
+    ));
     let velocity = Vec3::NEG_Z * 640.0;
     projectile.drag_k = 0.0;
     projectile.velocity = velocity - GRAVITY * TICK.as_secs_f32();
@@ -2886,9 +2887,9 @@ fn lagging_samples_clear_the_barrel(foreign_velocity: Vec3, across_tick: bool) {
 
 /// The game's damage model: an exit followed by an immediate return still ends launch clearance.
 /// An axis-only round leaves its source box at x = 1, meets a foreign reflector 0.1 mm past that
-/// face, inside the boundary nudge discovery reaches, and bounces back at 75° obliquity; outgoing
-/// x = -sin 15° resumes it 0.26 mm back inside the box (DERIVED). The return must then meet the
-/// source's armour solid. Every pose, size and speed below is fixture data.
+/// face and bounces back at 75° obliquity. Its outgoing x = -sin 15° returns through the source
+/// box by flight (DERIVED), after launch clearance has ended. The return must meet the source's
+/// armour solid. Every pose, size and speed below is fixture data.
 #[test]
 fn a_bounce_just_past_the_source_box_returns_into_a_solid_source() {
     let mut app = recording_world(false);

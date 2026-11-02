@@ -107,15 +107,13 @@ pub use view::{TracerStreak, plugin as view_plugin};
 
 pub(crate) use sanctioned::{SanctionedInsert, SanctionedShots};
 
-/// The march's boundary nudge: a crossing that leaves a face it resolved — a perforation's exit, a
-/// bounce's struck face — resumes this far past it, so the next sweep does not re-touch it. Never
-/// applied past a face nothing resolved: fresh discovery starts where its disc was laid and
-/// refuses interior membership. Contact-time handoffs use [`resolve::certified`].
+/// The game's damage model: Resolution exit nudge (m). A perforation resumes this far past
+/// its resolved exit so the next collection does not re-touch that face. Reflections instead
+/// resume at their reached hand-offs, without a nudge; discovery establishes membership there.
 ///
-/// Shared with [`resolve`] because the two must agree: the interior seed a crossing hands forward
-/// describes the point the NEXT corridor starts from, and that point is nudged. A seed read one
-/// nudge earlier can say "inside" about a plate the corridor has already left, which the walk then
-/// reports as an entry with no exit.
+/// Shared with [`resolve`]: the seed handed forward describes the next corridor's actual start.
+/// A perforation seed read one nudge earlier can still name the plate the corridor has left,
+/// producing an unmatched boundary when the same face is collected again.
 pub(crate) const MARCH_EPS: f32 = 1.0e-3;
 
 /// Gravity applied to shells each fixed tick (m/s²).
@@ -1334,14 +1332,13 @@ pub(crate) struct Projectile {
     /// Authority discovery state, constructed from fire data. Replicas consume the exported path
     /// and never use this sampling frame.
     disc: walk::DiscFrame,
-    /// Where the axis sample stands as the last step ended ([`resolve::AxisStart`]): a position
-    /// held as anchor plus offset, so open flight never re-rounds it at world spacing. Discovery
-    /// lays a fresh disc only when no immutable playback remains, outside resolved material,
-    /// and discovery reads any material newly holding its start.
+    /// The game's damage model: where every sample stands as the last step ended, anchor-relative.
+    /// Discovery retains these reached positions, including reflected or perforated hand-offs,
+    /// and reads any material newly holding them in the current scene.
     ///
     /// `None` at spawn: authority discovery lays its birth disc at the shell's translation.
-    /// Replicas carry no discovery axis.
-    axis: Option<resolve::AxisStart>,
+    /// Replicas carry no discovery starts.
+    starts: Option<resolve::Interior>,
     /// The game's damage model: immutable crossings awaiting their real path moments. Empty
     /// at spawn; authority playback advances its cursor across fixed-tick boundaries.
     playback: std::collections::VecDeque<resolve::Playback>,
@@ -1408,7 +1405,7 @@ impl Projectile {
                 u: Vec3::X,
                 v: Vec3::Y,
             },
-            axis: None,
+            starts: None,
             playback: Default::default(),
             path_sequence: 0,
             replica: None,
@@ -2090,7 +2087,7 @@ fn on_fire_shell(
             // catch-up must anchor its ring exactly where the locally fired one did.
             disc: walk::DiscFrame::anchored(Vec3::from(fire.direction))
                 .expect("a checked fire bore anchors a finite sampling frame"),
-            axis: None,
+            starts: None,
             playback: Default::default(),
             path_sequence: 0,
             contacted: Vec::new(),
@@ -3076,6 +3073,7 @@ fn march_shell_step(
                     )
                     .unwrap_or_else(|error| error.panic()),
                 );
+                flight.membership = resolve::Membership::Established;
                 contact = 0.0;
                 bent = true;
             }
@@ -3150,8 +3148,8 @@ fn march_shell_step(
     if stopped {
         damage_dealt += burst_here(shell, &context, &flight, 0.0, health).1;
     }
-    // The game's damage model carries an immutable playback cursor across ticks, or a clear
-    // axis start once its discovery chain has finished.
+    // The game's damage model carries an immutable playback cursor across ticks, or its clear
+    // reached sample starts once its discovery chain has finished.
     shell.projectile.source_cleared = ignored_source.get().is_none()
         || (playback.is_empty()
             && source_box.is_none_or(|bounds| {
@@ -3161,7 +3159,7 @@ fn march_shell_step(
                 )
             }));
     shell.projectile.disc = flight.frame;
-    shell.projectile.axis = flight.continuation.as_ref().map(resolve::Interior::axis);
+    shell.projectile.starts = flight.continuation.clone();
     shell.projectile.playback = playback;
 
     world.moment.set(None);
@@ -3205,11 +3203,11 @@ fn publish_path_state(
     shell.projectile.path_sequence += 1;
 }
 
-/// The game's damage model: the step's discovery disc. One laid on an axis start a sweep reached is
+/// The game's damage model: the step's discovery samples. Each start a sweep reached is
 /// certified in the previous scene. Geometry born or moved over it contacts immediately in the
 /// new scene and seeds the same material walk. One no sweep has reached is
-/// placed, not moved, into the scene: a round's birth at the muzzle, a catch-up's end, a bounce
-/// lift the last tick ended on. Its membership is read where it stands ([`resolve::Flight::born`]),
+/// placed, not moved, into the scene: a round's birth at the muzzle or a catch-up's end.
+/// Its membership is read where it stands ([`resolve::Flight::born`]),
 /// so a muzzle inside a foreign body starts the round inside that body's material (MEASURED in a
 /// 30-bot run: tanks pressed together, one gun's muzzle in the other's turret side), and the walk
 /// carries it out like any held start.
@@ -3224,8 +3222,8 @@ fn launch(
 ) -> resolve::Flight {
     let position = shell.transform.translation;
     let frame = shell.projectile.disc;
-    match shell.projectile.axis.take() {
-        Some(axis) => resolve::Flight::launched(previous, dir, speed, frame, radius, axis),
+    match shell.projectile.starts.take() {
+        Some(starts) => resolve::Flight::launched(previous, dir, speed, frame, starts),
         None => resolve::Flight::born(
             context, not_own, position, previous, dir, speed, frame, radius,
         )
@@ -3404,7 +3402,7 @@ fn decide_playback(
             _ => false,
         });
         // The game's damage model: a reflection finishes this immutable contact. Playback
-        // spends its approach and outgoing flight time before discovery can reach another face.
+        // spends its approach before discovery can reach another face.
         // A trapped round therefore cannot plan arbitrarily slow future bounces in one tick.
         let bounced = matches!(decision, resolve::Decision::Bounce(_));
         let stopped = follow_fuzed(&mut fuze, &mut flight, decision);
@@ -4691,7 +4689,7 @@ mod march_tests {
             fuze: burst::Fuze::Inert,
             // Anchored on this round's fire direction, as on_fire_shell does.
             disc: test_disc(velocity.normalize()),
-            axis: None,
+            starts: None,
             playback: Default::default(),
             path_sequence: 0,
             replica: None,
@@ -6547,8 +6545,9 @@ mod march_tests {
             .world()
             .get::<Projectile>(shell)
             .unwrap()
-            .axis
-            .map(|axis| axis.anchor + axis.origin)
+            .starts
+            .as_ref()
+            .map(resolve::Interior::world_origin)
             .expect("an open-air flight carries its axis start across the tick");
         assert!(
             (1.5..1.7).contains(&(pose.x - origin.x)),
@@ -6595,7 +6594,7 @@ mod march_tests {
     }
 
     /// An 88 grazing a thick plate at 75°, and a second plate square to the bounce's outgoing ray,
-    /// its face 10 mm past the bounce's resume point and extending `low` m along its own `up` from
+    /// its face offset one calibre radius from the struck plane and 10 mm along the outgoing ray, extending `low` m from
     /// the outgoing axis to 300 mm above it: the impacts the round made. FIXTURE DATA.
     fn graze_then_plate(low: f32) -> Vec<Captured> {
         let incidence = 75.0_f32.to_radians();
@@ -6605,7 +6604,7 @@ mod march_tests {
         let first = (Vec3::new(3.0, 3.0, 0.1), Vec3::new(0.0, 2.0, 0.0));
         let bounce = Vec3::new(0.0, 2.0, 0.05);
         let radius = FIXTURE_88.caliber * 0.5;
-        let resume = bounce + normal * radius;
+        let layout_anchor = bounce + normal * radius;
         // The second plate's frame: local +Z faces back up the outgoing ray, local +Y leans away from
         // the first plate.
         let back = -outgoing;
@@ -6614,7 +6613,8 @@ mod march_tests {
         let rotation = Quat::from_mat3(&Mat3::from_cols(side, up, back));
         let thickness = 0.05;
         let high = 0.300;
-        let centre = resume + outgoing * (0.010 + thickness * 0.5) + up * ((low + high) * 0.5);
+        let centre =
+            layout_anchor + outgoing * (0.010 + thickness * 0.5) + up * ((low + high) * 0.5);
         let mut app = world_with_trimesh_plates(&[first]);
         app.world_mut().spawn((
             Transform::from_translation(centre).with_rotation(rotation),
@@ -6641,34 +6641,20 @@ mod march_tests {
         app.world().resource::<ImpactLog>().0.clone()
     }
 
-    /// A BOUNCE THEN A CONTACT IN ONE TICK SAMPLES THE SECOND SURFACE ON THE CURRENT FRAME.
-    ///
-    /// The march transports the sampling basis through the bounce; resolution must read that
-    /// transported basis, not the one the shell started the tick with. A basis left on the incoming
-    /// heading has a component ALONG the outgoing travel — `sin 30° = 0.5` for a 75° bounce, DERIVED —
-    /// so half the ring starts up to 22 mm (an 88's radius × 0.5) ahead of the disc. A second face
-    /// 10 mm past the bounce's resume point then has ring samples starting inside it with nothing
-    /// declared, and the game's damage-model walk panics on a face the round never reached.
-    ///
-    /// [`graze_then_plate`] with the second plate's lower edge 5 mm above the outgoing axis: clear
-    /// of the incoming disc, whose crossings of that face lie at least 4.4 mm below the axis
-    /// (DERIVED). A plate the incoming disc meets as well is struck with the graze
-    /// ([`a_graze_and_a_plate_struck_together_bite_as_one_crossing`]).
+    /// The game's damage model retains the samples that reached the reflected face. This fixture's
+    /// second plate lies above their outgoing rays, so the reflection alone is recorded. A fresh
+    /// lifted layout would invent a contact there; the thin-neighbour resolver fixture separately
+    /// requires a real outgoing contact to be charged. All geometry is fixture data.
     #[test]
-    fn a_bounce_then_a_contact_samples_the_current_frame() {
+    fn a_bounce_keeps_its_reached_samples_at_the_face() {
         let impacts = graze_then_plate(0.005);
         let read: Vec<(Vec3, Verdict)> = impacts.iter().map(|i| (i.position, i.verdict)).collect();
         assert_eq!(
-            impacts.first().map(|impact| impact.verdict),
-            Some(Verdict::Ricochet),
-            "the graze bounces: {read:?}",
+            read.len(),
+            1,
+            "the reflected rays miss the elevated plate: {read:?}"
         );
-        assert!(
-            impacts
-                .get(1)
-                .is_some_and(|impact| impact.verdict.entered()),
-            "the round bit into the second plate: {read:?}",
-        );
+        assert_eq!(read[0].1, Verdict::Ricochet);
     }
 
     /// A GRAZE AND A PLATE THE DISC MEETS WITHIN THE GRAZE'S DEPTH ARE ONE CROSSING, AND IT BITES.
@@ -6825,11 +6811,10 @@ mod march_tests {
             Dir3::new(stepped).expect("a direction"),
             stepped.length(),
             frame,
-            resolve::disc_radius(FIXTURE_88.caliber),
-            resolve::AxisStart {
-                anchor: position,
-                origin: Vec3::ZERO,
-            },
+            resolve::Interior::laid(
+                position,
+                resolve::layout(&frame, resolve::disc_radius(FIXTURE_88.caliber)),
+            ),
         )
     }
 

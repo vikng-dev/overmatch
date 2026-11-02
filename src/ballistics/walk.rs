@@ -855,11 +855,10 @@ impl RayWalk {
     /// Which shells a corridor RESTARTED at progress `t` would have to declare as initial
     /// presence.
     ///
-    /// The interval is `(open, close]` — the entry face must be STRICTLY behind the restart. A face
-    /// sitting at the restart arrives in the new corridor's own hit list at `t = 0` and is
-    /// processed there, so seeding it as well would double-count the entry
-    /// ([`WalkError::UnexpectedEntry`]). An exit sitting at the restart, conversely, must be seeded
-    /// or it has nothing to pair with.
+    /// Only the strict interior is seeded. An entry coincident with the restart belongs to the
+    /// new corridor; an exit coincident with it has already been left and the unseeded collector
+    /// drops it in the same ownership band. Thus reflection does not charge a rounding-sized
+    /// remainder of the face it just left, while a separate finite interval keeps both faces.
     ///
     /// "AT the restart" is a TOLERANCE, not an equality, and that is the whole reason this takes
     /// laws. A hand-off on a face reads its seed at exactly that face's `t`, and the transit
@@ -879,7 +878,10 @@ impl RayWalk {
                     // would read `∞ ≤ ∞` as the same boundary.
                     let entered =
                         *open == f64::NEG_INFINITY || (*open < t && !coincident(*open, t, laws));
-                    let still_inside = t <= *close || coincident(*close, t, laws);
+                    // The game's damage model treats an outward face at the restart as already
+                    // left. The unseeded collector drops that exit in the same ownership band;
+                    // a reflected ray must not invent a positive chord from its rounding hair.
+                    let still_inside = t < *close && !coincident(*close, t, laws);
                     entered && still_inside
                 })
             })

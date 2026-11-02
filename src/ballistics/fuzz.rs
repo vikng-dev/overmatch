@@ -763,6 +763,7 @@ pub(super) fn drive(
         speed,
         frame,
         continuation: None,
+        membership: resolve::Membership::Required,
     };
     // The probe round's mechanism, bound as a fired shell's is at spawn.
     let round = super::bound(body);

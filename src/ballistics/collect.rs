@@ -111,7 +111,7 @@ pub(crate) struct Corridor<'a> {
     pub behind: f32,
     /// Shells this ray was declared to START inside.
     ///
-    /// Honors the core's `(open, close]` seed contract from the driving side ([`admit_shell`]):
+    /// Honors the core's strict-interior seed contract from the driving side ([`admit_shell`]):
     /// within [`sitting_reach`] of the origin, either side, the one boundary the seed accounts for
     /// (the entry of a seeded shell, the exit of an unseeded one) is dropped, and every other one is
     /// the corridor's, clamped to `t = 0` when it lies behind. The rules are complements — so every
@@ -293,7 +293,7 @@ pub(super) fn collect_collider(
 ///
 /// # The ceiling
 ///
-/// The march resumes one [`super::MARCH_EPS`] past every face it leaves, so a reach that grew to a
+/// A perforation resumes one [`super::MARCH_EPS`] past its exit, so a reach that grew to a
 /// whole nudge would re-collect the EXIT face of the plate just perforated — an exit for a primitive
 /// the walk is not inside, `UnexpectedExit`, and a round stopped dead in mid-air one millimetre past
 /// the plate it punched through. DERIVED: the two bands reach a quarter of the nudge only past
@@ -564,7 +564,7 @@ fn collect_convex(
             if !seeded {
                 if -entry.t <= f64::from(BOUNDARY_PROBE) {
                     push(0.0, entry, true);
-                } else {
+                } else if exit.t > f64::from(reach) {
                     return Err(failed(
                         "a sample begins inside a convex volume it was not seeded for, with no \
                          entry face within the boundary probe",

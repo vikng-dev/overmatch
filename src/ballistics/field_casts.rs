@@ -76,14 +76,14 @@ use super::fuzz::{PROBE_TANK_AT, ProbeTank, probe_world};
 use super::spall_cone::{ConeShape, FieldDescriptor};
 use super::*;
 
-/// The line pass's disc calibre (m), wound rate (reference-mm per metre) and reach (m): fixture
+/// The game's damage model: the line pass's disc calibre (m), crew line rate (HP/m) and reach (m): fixture
 /// data.
 const LINE_CALIBER: f32 = 0.088;
 const LINE_WOUND: f32 = 30.0;
 const LINE_REACH: f32 = 20.0;
 
 /// The digest of every line of `field_casts.pinned`, MEASURED on macOS arm64 (the test profile).
-const PINNED_TOTAL: u64 = 0xc0f38aaa89693c2a;
+const PINNED_TOTAL: u64 = 0x127879570b5d23ea;
 
 const PINNED: &str = include_str!("field_casts.pinned");
 
@@ -592,7 +592,7 @@ fn spawn_shot_round(
                 drag_k,
                 fuze: burst::Fuze::Inert,
                 disc: walk::DiscFrame::anchored(direction).expect("a shot fires along a real axis"),
-                axis: None,
+                starts: None,
                 playback: Default::default(),
                 path_sequence: 0,
                 replica: None,

@@ -1074,46 +1074,86 @@ fn shell_share(plan: &Plan, kind: CornerKind, c: f32, reduce: bool) -> Option<f3
     }
 }
 
-/// The game's damage-model view: the model's nose stays on the recorded path, its length scaled
-/// by the drawn mass share. The body follows the chord behind the nose, constrained to lead the
-/// current leg and to keep its tail outside the most recently struck plane. A sharp reflection
-/// can turn further than a right angle: its incoming chord then points against travel. The
-/// outgoing direction projected onto the struck plane gives that pose a leading, face-safe body.
+/// The game's damage-model view: the nose stays on the recorded path. The body follows its
+/// trailing chord while leading travel and keeping its tail outside the recently struck planes
+/// that still contain the nose. Several reflections can fit within one model length; changing
+/// the latest plane must not release the tail through the preceding face at their shared apex.
 fn shell_transform(plan: &Plan, head: f32, share: f32) -> Transform {
     let nose = plan.line.at(head);
     let length = share * shell_length(plan);
     let back = plan.line.at(head - length);
     let travel = plan.line.direction_at(head);
-    let mut body = (nose - back).try_normalize().unwrap_or(travel);
-    if let Some(bounce) = plan.bounces.iter().rev().find(|bounce| bounce.arc < head)
-        && length > 0.0
-    {
-        // DERIVED: tail = nose - length * body, so its outward distance is nonnegative
-        // exactly when body.dot(normal) <= nose_height / length.
-        let limit = ((nose - bounce.point).dot(bounce.normal) / length).clamp(0.0, 1.0);
-        let outside = |axis: Vec3| {
-            let normal = axis.dot(bounce.normal);
-            if normal <= limit {
-                return axis;
+    let chord = (nose - back).try_normalize().unwrap_or(travel);
+    let mut planes = Vec::new();
+    if length > 0.0 {
+        for bounce in plan
+            .bounces
+            .iter()
+            .rev()
+            .filter(|bounce| bounce.arc <= head)
+        {
+            let height = (nose - bounce.point).dot(bounce.normal);
+            // The latest face remains the pose's constraint. Earlier faces within the body's
+            // trailing span also constrain it while the nose is outside; a later crossing into
+            // an earlier face is recorded travel, not an outside-halfspace claim.
+            if planes.is_empty() || (head - bounce.arc <= length && height >= 0.0) {
+                // DERIVED: tail = nose - length * body, hence body.dot(normal) <= height/length.
+                planes.push((bounce.normal, (height / length).clamp(0.0, 1.0)));
             }
-            let tangent = (axis - bounce.normal * normal)
-                .try_normalize()
-                .unwrap_or_else(|| {
-                    // A chord along the normal has no along-face heading; use the recorded exit's.
-                    (bounce.outgoing - bounce.normal * bounce.outgoing.dot(bounce.normal))
-                        .try_normalize()
-                        .expect("a reflection has a nonzero along-face direction")
-                });
-            tangent * (1.0 - limit * limit).max(0.0).sqrt() + bounce.normal * limit
-        };
-        body = outside(body);
-        if body.dot(travel) <= 0.0 {
-            body = outside(travel);
         }
     }
+    let body = face_safe_body(chord, travel, &planes);
     Transform::from_translation(nose)
         .looking_to(body, Vec3::Y)
         .with_scale(Vec3::new(1.0, 1.0, share))
+}
+
+/// The game's damage-model view: a leading unit body axis subject to the tail's plane bounds.
+/// A sphere's closest axis to a desired direction is that direction, on one bound's circle, or
+/// at two circles' intersection. Candidate sets for both chord and travel provide a leading
+/// choice when the chord's own optimum points backwards; the leading candidate nearest the chord
+/// wins. Parallel bounds need no pair candidate: their circles suffice.
+fn face_safe_body(chord: Vec3, travel: Vec3, planes: &[(Vec3, f32)]) -> Vec3 {
+    // Resolution: covers dot/cross/normalization rounding in unit-vector constraints, below a
+    // micrometre of tail displacement for the authored models; never widens the position guard.
+    const AXIS_SLACK: f32 = 16.0 * f32::EPSILON;
+    let mut candidates = vec![chord, travel];
+    for (i, &(normal, limit)) in planes.iter().enumerate() {
+        for desired in [chord, travel] {
+            // A direction along the normal has no preferred point on this circle.
+            if let Some(tangent) = (desired - normal * desired.dot(normal)).try_normalize() {
+                candidates.push(normal * limit + tangent * (1.0 - limit * limit).max(0.0).sqrt());
+            }
+        }
+        for &(other, bound) in &planes[..i] {
+            let cross = normal.cross(other);
+            let square = cross.length_squared();
+            if square == 0.0 {
+                continue; // Parallel circles have no isolated intersection.
+            }
+            let center = (other.cross(cross) * limit + cross.cross(normal) * bound) / square;
+            let remaining = 1.0 - center.length_squared();
+            if remaining >= 0.0 {
+                let offset = cross * (remaining / square).sqrt();
+                candidates.extend([center + offset, center - offset]);
+            }
+        }
+    }
+    candidates
+        .into_iter()
+        .map(|candidate| {
+            candidate
+                .try_normalize()
+                .expect("a body-axis candidate on the unit sphere is finite and nonzero")
+        })
+        .filter(|axis| {
+            axis.dot(travel) > 0.0
+                && planes
+                    .iter()
+                    .all(|&(normal, limit)| axis.dot(normal) <= limit + AXIS_SLACK)
+        })
+        .max_by(|a, b| a.dot(chord).total_cmp(&b.dot(chord)))
+        .expect("a reflected shell has a leading unit body outside its reached faces")
 }
 
 /// The game's damage-model view: the authored body's length (m), zero without a drawn body.
@@ -2520,6 +2560,66 @@ mod tests {
             spread > 1.25,
             "the library's legs differ in speed: {spread}"
         );
+    }
+
+    /// The game's damage-model view must fit a full body between successive reached faces at
+    /// their shared apex, nose still leading. Fixture: two parallel faces 10 mm apart and a
+    /// 250 mm body; a latest-face-only pose sends its tail through the preceding face. The
+    /// synthetic path keeps this invariant independent of the scenario library's future records.
+    #[test]
+    fn a_folded_body_keeps_both_faces_at_the_next_apex() {
+        use super::super::plan::{Bounce, Polyline};
+        const BODY: crate::rounds::BodyModel = crate::rounds::BodyModel {
+            scene: "fixture",
+            diameter_m: 0.02,
+            length_m: 0.25,
+        };
+        let mut plan = Plan::bare(&TankShapes::default(), Vec::new());
+        plan.body = Some(&BODY);
+        let points = vec![
+            Vec3::new(-1.0, 0.0, -1.0),
+            Vec3::ZERO,
+            Vec3::new(-0.01, 0.0, 0.01),
+            Vec3::new(0.0, 0.0, 0.02),
+        ];
+        let mut arc = vec![0.0];
+        for leg in points.windows(2) {
+            arc.push(arc.last().unwrap() + leg[0].distance(leg[1]));
+        }
+        for (i, normal) in [(1, Vec3::NEG_X), (2, Vec3::X)] {
+            let incoming = (points[i] - points[i - 1]).normalize();
+            plan.bounces.push(Bounce {
+                point: points[i],
+                normal,
+                incoming,
+                outgoing: incoming - 2.0 * incoming.dot(normal) * normal,
+                arc: arc[i],
+            });
+        }
+        let head = arc[2];
+        plan.line = Polyline {
+            points,
+            arc,
+            times: Vec::new(),
+            energy: Vec::new(),
+        };
+        for head in [head.next_down(), head, head.next_up()] {
+            let pose = shell_transform(&plan, head, 1.0);
+            let tail = pose.transform_point(Vec3::Z * BODY.length_m);
+            assert!(pose.translation.distance(plan.line.at(head)) < POSITION_TOL_M);
+            assert!((pose.rotation * Vec3::NEG_Z).dot(plan.line.direction_at(head)) > 0.0);
+            for bounce in plan.bounces.iter().filter(|bounce| bounce.arc <= head) {
+                assert!((bounce.point - tail).dot(bounce.normal) < POSITION_TOL_M);
+            }
+        }
+        // Fixture: a corner with two independent normal bounds needs both constraints at once.
+        let axis = face_safe_body(
+            Vec3::ONE.normalize(),
+            Vec3::Z,
+            &[(Vec3::X, 0.1), (Vec3::Y, 0.1)],
+        );
+        assert!(axis.x <= 0.1 + POSITION_TOL_M && axis.y <= 0.1 + POSITION_TOL_M);
+        assert!(axis.z > 0.0 && (axis.length() - 1.0).abs() < POSITION_TOL_M);
     }
 
     /// Past a bounce the shell stays on the struck face's outer side, as the record's path does:

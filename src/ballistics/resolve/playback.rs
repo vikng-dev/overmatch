@@ -82,7 +82,7 @@ impl Crossing {
                 f64::from(travel / flight.speed),
             ),
             Decision::Bounce(bounce) => {
-                let approach = f64::from((bounce.travel - MARCH_EPS).max(0.0));
+                let approach = f64::from(bounce.travel);
                 crossing.add_stretch(
                     bounce.approach.from,
                     bounce.incoming,
@@ -90,14 +90,6 @@ impl Crossing {
                     f64::from(bounce.speed_in),
                     f64::from(bounce.speed_in),
                     approach / f64::from(bounce.speed_in),
-                );
-                crossing.add_stretch(
-                    bounce.resume - bounce.direction * MARCH_EPS,
-                    bounce.direction,
-                    f64::from(MARCH_EPS),
-                    f64::from(bounce.speed),
-                    f64::from(bounce.speed),
-                    f64::from(MARCH_EPS / bounce.speed),
                 );
             }
             Decision::Bite(bite) => {
@@ -366,9 +358,7 @@ impl Playback {
                         .expect("a bite advances a mechanism encounter")
                         .end,
             ),
-            Decision::Bounce(bounce) => {
-                crossing.seconds_to(f64::from((bounce.travel - MARCH_EPS).max(0.0)))
-            }
+            Decision::Bounce(bounce) => crossing.seconds_to(f64::from(bounce.travel)),
             Decision::Clear { .. } => crossing.seconds,
         };
         crossing.effects.push((finish, Effect::Finish));
@@ -548,6 +538,7 @@ impl Playback {
             Decision::Bounce(bounce) => {
                 bounce.position = self.point(bounce.position);
                 bounce.resume = self.point(bounce.resume);
+                bounce.continuation.anchor += self.carrier * self.crossing.seconds as f32;
                 bounce.direction = direction;
                 bounce.speed = velocity.length();
             }

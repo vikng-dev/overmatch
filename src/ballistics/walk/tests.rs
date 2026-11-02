@@ -407,12 +407,12 @@ fn declared_presence_is_seeded_at_the_corridor_origin() {
     );
     corridor.initial_presence = vec![key];
     let walked = walk(&corridor, &volumes);
-    for t in [-0.0, 0.0, 1.0e-9, 0.1, 0.25] {
+    for t in [-0.0, 0.0, 1.0e-9, 0.1] {
         assert_eq!(walked.inside_at(t, &laws), vec![key], "seeded at {t}");
     }
     assert!(
-        walked.inside_at(0.5, &laws).is_empty(),
-        "and closed past its exit"
+        walked.inside_at(0.25, &laws).is_empty(),
+        "and outside at its exit"
     );
 }
 
@@ -2594,12 +2594,18 @@ fn a_boundary_at_the_restart_belongs_to_the_corridor_not_the_seed() {
             "an entry AT the restart is the new corridor's to process, not the seed's (t = {t})",
         );
     }
-    for t in [0.30, 0.30 + hair, 0.30 - hair, 0.25] {
+    for t in [0.30, 0.30 + hair, 0.30 - hair] {
+        assert!(
+            walked.inside_at(t, &laws).is_empty(),
+            "the game's damage model owns an exit coincident with the restart as already left"
+        );
+    }
+    {
+        let t = 0.25;
         assert_eq!(
             walked.inside_at(t, &laws),
             vec![key],
-            "an exit at or after the restart must be seeded, or it has nothing to pair with \
-             (t = {t})",
+            "a strict interior restart retains the shell until its exit (t = {t})",
         );
     }
     assert!(
