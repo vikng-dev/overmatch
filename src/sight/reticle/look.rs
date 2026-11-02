@@ -86,7 +86,28 @@ mod tests {
     /// defaults, unchecked extents and test-only provenance would hide an authoring error.
     #[test]
     fn shipped_graticule_data_is_required_and_checked_before_play() {
-        GraticuleLook::parse(DATA).unwrap();
+        // Fixture: a permitted width change must not invalidate unrelated admission probes.
+        let retuned = replace_field(DATA, "line_width_ui_px", "97.0");
+        for text in [DATA, retuned.as_str()] {
+            check_admission(text);
+        }
+    }
+
+    fn replace_field(text: &str, field: &str, value: &str) -> String {
+        text.lines()
+            .map(|line| {
+                if line.trim_start().starts_with(&format!("{field}:")) {
+                    format!("    {field}: ({value}, Taste(\"graticule: admission fixture\")),")
+                } else {
+                    line.to_owned()
+                }
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    fn check_admission(text: &str) {
+        GraticuleLook::parse(text).unwrap();
         for field in [
             "hairline_physical_px",
             "line_width_ui_px",
@@ -97,7 +118,7 @@ mod tests {
             "label_font_ui_px",
             "colour_srgba",
         ] {
-            let missing = DATA
+            let missing = text
                 .lines()
                 .filter(|line| !line.trim_start().starts_with(&format!("{field}:")))
                 .collect::<Vec<_>>()
@@ -105,23 +126,20 @@ mod tests {
             let error = GraticuleLook::parse(&missing).unwrap_err();
             assert!(error.contains(FILE) && error.contains(field), "{error}");
         }
-        for (from, to, field) in [
-            ("(1.0, Taste", "(0.0, Taste", "hairline_physical_px"),
-            ("(96.0, Taste", "(-1.0, Taste", "line_width_ui_px"),
-            ("(24.0, Taste", "(inf, Taste", "major_tick_width_ui_px"),
-            ("(12.0, Taste", "(NaN, Taste", "minor_tick_width_ui_px"),
-            ("(5.0, Taste", "(-1.0, Taste", "label_gap_ui_px"),
-            ("(-7.0, Taste", "(NaN, Taste", "label_top_ui_px"),
-            (
-                "(0.0, 0.0, 0.0, 1.0)",
-                "(0.0, 0.0, 0.0, 2.0)",
-                "colour_srgba",
-            ),
+        for (field, value) in [
+            ("hairline_physical_px", "0.0"),
+            ("line_width_ui_px", "-1.0"),
+            ("major_tick_width_ui_px", "inf"),
+            ("minor_tick_width_ui_px", "NaN"),
+            ("label_gap_ui_px", "-1.0"),
+            ("label_top_ui_px", "NaN"),
+            ("label_font_ui_px", "0.0"),
+            ("colour_srgba", "(0.0, 0.0, 0.0, 2.0)"),
         ] {
-            let error = GraticuleLook::parse(&DATA.replace(from, to)).unwrap_err();
+            let error = GraticuleLook::parse(&replace_field(text, field, value)).unwrap_err();
             assert!(error.contains(FILE) && error.contains(field), "{error}");
         }
-        let error = GraticuleLook::parse(&DATA.replace("Taste(", "Fixture(")).unwrap_err();
+        let error = GraticuleLook::parse(&text.replace("Taste(", "Fixture(")).unwrap_err();
         assert!(
             error.contains(FILE) && error.contains("Fixture provenance is test-only"),
             "{error}"
