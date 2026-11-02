@@ -645,19 +645,58 @@ impl DriveView {
     }
 }
 
+/// The game's damage model: a complete authored path and its evaluated contribution.
+/// `index` addresses the member in its group; a Single group has one member.
+#[derive(Debug)]
+pub struct ResolvedMember<'a> {
+    pub index: usize,
+    pub parts: &'a [Part],
+    pub rate: f32,
+}
+
+/// The game's damage model: Pool retains every contribution; Backup retains its selected
+/// complete alternative, including an unavailable path whose rate is zero.
+#[derive(Debug)]
+pub struct ResolvedGroup<'a> {
+    pub rate: f32,
+    pub contributors: Vec<ResolvedMember<'a>>,
+}
+
+/// The game's damage model: task throughput beside the complete paths that supplied it.
+#[derive(Debug)]
+pub struct ResolvedRequirement<'a> {
+    pub rate: f32,
+    pub groups: Vec<ResolvedGroup<'a>>,
+}
+
+pub fn resolve<'a>(
+    requirement: &'a Requirement,
+    quality: &std::collections::HashMap<Part, f32>,
+) -> ResolvedRequirement<'a> {
+    let groups: Vec<_> = requirement
+        .iter()
+        .map(|group| combine_group(group, quality, |part| live_quality(quality, part)))
+        .collect();
+    let mut result = ResolvedRequirement { rate: 1.0, groups };
+    result.rate = result
+        .groups
+        .iter()
+        .map(|group| group.rate)
+        .fold(1.0, f32::min);
+    result
+}
+
 /// The pure combine core (design §7b): member coefficient times its parts' qualities;
 /// group Single / Pool capped-sum / Backup best whole path; minimum across groups.
 /// An absent part supplies no quality.
 pub fn evaluate(requirement: &Requirement, quality: &std::collections::HashMap<Part, f32>) -> f32 {
-    combine_requirement(requirement, |group| {
-        combine_group(group, quality, |p| live_quality(quality, p))
-    })
+    resolve(requirement, quality).rate
 }
 
 /// The game's damage model: one group's incremental source loss, then the group minimum.
 /// Crew carries the coefficient; engine and transmission carry only the additional loss
 /// through those same members. Pool projections retain each contributor's earlier parts.
-/// Backup uses one whole live path in every projection, preferring serving crew on a tie.
+/// Backup uses one whole live path in every projection, with canonical ties.
 /// See the design record §7b for the source-chain interpretation.
 pub fn evaluate_view(
     requirement: &Requirement,
@@ -673,6 +712,7 @@ pub fn evaluate_view(
                     1.0
                 }
             })
+            .rate
         };
         let after = projected(view);
         match view.previous() {
@@ -688,8 +728,9 @@ pub fn evaluate_view(
                         } else {
                             1.0
                         }
-                    });
-                    let whole = combine_group(group, quality, |_| 1.0);
+                    })
+                    .rate;
+                    let whole = combine_group(group, quality, |_| 1.0).rate;
                     (own / whole).min(1.0)
                 } else {
                     (after / before).min(1.0)
@@ -708,32 +749,44 @@ fn member_quality(member: &Member, quality: impl Fn(Part) -> f32) -> f32 {
     member.1.iter().fold(member.0, |q, p| q * quality(*p))
 }
 
-fn combine_group(
-    group: &Group,
+fn combine_group<'a>(
+    group: &'a Group,
     live: &std::collections::HashMap<Part, f32>,
     projected: impl Fn(Part) -> f32,
-) -> f32 {
+) -> ResolvedGroup<'a> {
+    let member = |index, parts, rate| ResolvedMember { index, parts, rate };
     match group {
-        Group::Single(part) => projected(*part),
-        Group::Graded(GradedGroup::Pool(members)) => members
-            .iter()
-            .map(|member| member_quality(member, &projected))
-            .sum::<f32>()
-            .min(1.0),
-        Group::Graded(GradedGroup::Backup(members)) => {
-            let selected = members
+        Group::Single(part) => {
+            let rate = projected(*part);
+            ResolvedGroup {
+                rate,
+                contributors: vec![member(0, std::slice::from_ref(part), rate)],
+            }
+        }
+        Group::Graded(GradedGroup::Pool(members)) => {
+            let contributors: Vec<_> = members
                 .iter()
-                .max_by(|a, b| {
+                .enumerate()
+                .map(|(index, m)| member(index, m.1.as_slice(), member_quality(m, &projected)))
+                .collect();
+            let mut result = ResolvedGroup {
+                rate: 0.0,
+                contributors,
+            };
+            result.rate = result
+                .contributors
+                .iter()
+                .map(|member| member.rate)
+                .sum::<f32>()
+                .min(1.0);
+            result
+        }
+        Group::Graded(GradedGroup::Backup(members)) => {
+            let (index, selected) = members
+                .iter()
+                .enumerate()
+                .max_by(|(_, a), (_, b)| {
                     let full = |m: &Member| member_quality(m, |p| live_quality(live, p));
-                    let crew = |m: &Member| {
-                        member_quality(m, |p| {
-                            if p.is_crew() {
-                                live_quality(live, p)
-                            } else {
-                                1.0
-                            }
-                        })
-                    };
                     let canonical = |m: &Member| {
                         let mut parts = m.1.clone();
                         parts.sort_unstable();
@@ -741,14 +794,23 @@ fn combine_group(
                     };
                     full(a)
                         .total_cmp(&full(b))
-                        .then_with(|| crew(a).total_cmp(&crew(b)))
                         .then_with(|| a.0.total_cmp(&b.0))
                         .then_with(|| canonical(a).cmp(&canonical(b)))
                 })
                 .expect(
                     "TankSpec::validate refuses empty Backup member lists in every requirement",
                 );
-            member_quality(selected, projected)
+            let mut contributor = member(index, selected.1.as_slice(), 0.0);
+            contributor.rate = contributor
+                .parts
+                .iter()
+                .fold(members[contributor.index].0, |rate, part| {
+                    rate * projected(*part)
+                });
+            ResolvedGroup {
+                rate: contributor.rate,
+                contributors: vec![contributor],
+            }
         }
     }
 }
@@ -1097,18 +1159,26 @@ mod tests {
         ]
     }
 
-    /// The game's damage model: a serving station keeps brake intent on a zero-score tie,
-    /// regardless of the fixture paths' authoring order.
+    /// The game's damage model: equivalent Backup alternatives retain a canonical complete
+    /// path while control authority remains the separately authored staffing fact.
     #[test]
-    fn backup_zero_score_ties_preserve_serving_intent() {
+    fn backup_zero_score_ties_do_not_decide_authority() {
+        use super::{ControlStaffing, CrewStation, resolve};
+        // Fixture: both complete paths unavailable, with one staffed operator.
         let mut members = vec![
             (1.0, vec![Part::Driver, Part::Engine]),
             (1.0, vec![Part::Commander, Part::Transmission]),
         ];
         let quality = q(&[(Part::Driver, 1.0), (Part::Transmission, 1.0)]);
+        let controls = ControlStaffing::Any(vec![vec![CrewStation::Driver]]);
         for _ in 0..2 {
             let req = vec![Group::Graded(GradedGroup::Backup(members.clone()))];
-            assert_eq!(drive_views(&req, &quality), [1.0, 0.0, 1.0]);
+            let result = resolve(&req, &quality);
+            assert_eq!(result.rate, 0.0);
+            let selected = &result.groups[0].contributors[0];
+            assert_eq!(selected.parts, &[Part::Driver, Part::Engine]);
+            assert_eq!(selected.parts, members[selected.index].1);
+            assert!(controls.permits(&quality));
             members.reverse();
         }
     }
