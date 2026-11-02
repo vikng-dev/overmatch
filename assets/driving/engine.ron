@@ -1,4 +1,5 @@
 (
+    overrev_margin_rpm: (100.0, StandIn("engine over-rev outcome is not modelled; the clutch guard bounds crank speed and may set descent speed until the owner chooses that law")),
     idle_catch_droop_rpm: (50.0, StandIn("missing Driver foot actuation: proportional idle recovery width in rpm")),
     idle_guard_band_rpm: (100.0, StandIn("missing engine stall/restart law: sub-idle clutch slip guard in rpm while combustion can sustain idle")),
     rev_match_band_rpm: (200.0, StandIn("missing gearbox fuel actuator dynamics: proportional rev-match fueling width in rpm")),

@@ -21,19 +21,22 @@ use crate::bitprobe::TransmissionProbe;
 /// on fixed 64 Hz ticks). Resolution: shift times quantize to this solver clock.
 const TICK_HZ: f32 = 64.0;
 
-/// Resolution: the clutch's over-rev slip band avoids a hard speed discontinuity at the
-/// curve endpoint. Gear choices themselves must land at or below that endpoint.
-pub(crate) const OVERREV_MARGIN_RPM: f32 = 100.0;
-
 /// Fuel-governor cut width (rpm): torque ramps linearly to zero over this band past the
 /// governed rpm, so the top-speed equilibrium is a smooth root instead of a hard clip.
 /// Resolution: a finite ramp avoids discontinuous torque forcing at the fixed tick.
 const GOVERNOR_CUT_RPM: f32 = 100.0;
 
-/// Driver actuation stand-ins, admitted before the drivetrain can be constructed.
+/// StandIn: the slip guard substitutes for the missing over-rev engine outcome. Its width
+/// can set descent speed; the owner must choose that outcome before this guard is replaced.
+pub(crate) fn overrev_margin_rpm() -> f32 {
+    engine_control().overrev_margin_rpm.value
+}
+
+/// Engine and Driver stand-ins, admitted before the drivetrain can be constructed.
 #[derive(serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 struct EngineControl {
+    overrev_margin_rpm: crate::provenance::Labelled<f32>,
     idle_catch_droop_rpm: crate::provenance::Labelled<f32>,
     idle_guard_band_rpm: crate::provenance::Labelled<f32>,
     rev_match_band_rpm: crate::provenance::Labelled<f32>,
@@ -46,6 +49,7 @@ const ENGINE_CONTROL_PATH: &str = "assets/driving/engine.ron";
 impl EngineControl {
     fn validate(&self) {
         for (field, number) in [
+            ("overrev_margin_rpm", &self.overrev_margin_rpm),
             ("idle_catch_droop_rpm", &self.idle_catch_droop_rpm),
             ("idle_guard_band_rpm", &self.idle_guard_band_rpm),
             ("rev_match_band_rpm", &self.rev_match_band_rpm),
@@ -56,7 +60,7 @@ impl EngineControl {
                 number.value.is_finite()
                     && number.value > 0.0
                     && matches!(number.label, crate::provenance::Provenance::StandIn(_)),
-                "{ENGINE_CONTROL_PATH}: {field} must be finite, positive and labelled StandIn; author the missing Driver actuation law's width"
+                "{ENGINE_CONTROL_PATH}: {field} must be finite, positive and labelled StandIn; author the missing engine or Driver law"
             );
         }
         assert!(
@@ -537,7 +541,7 @@ impl TransmissionParams {
             .copied()
             .fold(0.0, f32::max);
         self.engine_inertia
-            * (self.max_curve_rpm() + OVERREV_MARGIN_RPM)
+            * (self.max_curve_rpm() + overrev_margin_rpm())
             * RPM_TO_RAD
             * TICK_HZ
             * ratio
@@ -1717,7 +1721,7 @@ fn crank_guards(
     propulsive: f32,
     tau_free: f32,
 ) -> (f32, f32) {
-    let over = (tp.max_curve_rpm() + OVERREV_MARGIN_RPM) * RPM_TO_RAD;
+    let over = (tp.max_curve_rpm() + overrev_margin_rpm()) * RPM_TO_RAD;
     let floor = if st.clutch == ClutchState::Slip && tau_free > 0.0 {
         tp.launch_omega(propulsive)
     } else {

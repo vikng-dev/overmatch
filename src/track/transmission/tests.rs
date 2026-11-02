@@ -1860,7 +1860,7 @@ fn driver_lower_gear_requires_a_deficit_or_lug_and_overrun_holds() {
     for command in [0.0, 0.01] {
         state.gear = 3;
         state.shift_ticks = 0;
-        state.omega_e = (tp.max_curve_rpm() + OVERREV_MARGIN_RPM) * RPM_TO_RAD;
+        state.omega_e = (tp.max_curve_rpm() + overrev_margin_rpm()) * RPM_TO_RAD;
         let inp = driver_input(&fp, speed * 2.0, 10_000.0, command);
         choose_gear(&mut state, &tp, &fp, &inp, command, speed * 2.0);
         assert_eq!(state.gear, 3, "overrun holds reflected engine braking");
@@ -2113,7 +2113,7 @@ fn overrun_slip_guard_bounds_crank_at_top_gear() {
     for tp in [lab_tp(), tiger_tp()] {
         let top = tp.gears_rev.len() as u8;
         let ratio = tp.gears_rev[usize::from(top - 1)];
-        let guard = (tp.max_curve_rpm() + OVERREV_MARGIN_RPM) * RPM_TO_RAD;
+        let guard = (tp.max_curve_rpm() + overrev_margin_rpm()) * RPM_TO_RAD;
         let speed = -2.0 * guard * tp.sprocket_radius / ratio;
         let mut state = fresh(&tp);
         state.gear = top;

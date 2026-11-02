@@ -718,7 +718,7 @@ fn perceived_load_during_a_rearward_shot_uphill() {
 #[test]
 fn empty_driver_station_coast_and_rollback() {
     use crate::damage::{CrewStation, Dead, VolumeOf};
-    use crate::track::transmission::{ClutchState, OVERREV_MARGIN_RPM, RPM_TO_RAD};
+    use crate::track::transmission::{ClutchState, RPM_TO_RAD, overrev_margin_rpm};
     for degrees in [-10.0_f32, 10.0] {
         for launch_gear in [true, false] {
             let angle = degrees.to_radians();
@@ -752,7 +752,7 @@ fn empty_driver_station_coast_and_rollback() {
             } else {
                 (tp.gears_fwd.len() * 3 / 4).max(1) as u8
             };
-            let guard = (tp.max_curve_rpm() + OVERREV_MARGIN_RPM) * RPM_TO_RAD;
+            let guard = (tp.max_curve_rpm() + overrev_margin_rpm()) * RPM_TO_RAD;
             // DERIVED equilibrium from authored facts, independent of engine_drag's implementation:
             // k*tau = W*(|sin(theta)| - c_rr*cos(theta)), tau = anchor*(b+(1-b)*omega/mid).
             let k = tp.gears_fwd[usize::from(gear - 1)] / tp.sprocket_radius;

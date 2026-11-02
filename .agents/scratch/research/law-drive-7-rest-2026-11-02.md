@@ -222,3 +222,16 @@ cannot honestly promise another 1,188-line or nine-field deletion: the audit alr
 MEASURED restored step-4 gates: formatting and CI clippy passed; 286 targeted track, HUD,
 shipped drive-load and citation tests passed, including S1/S2/S4 and rollback. The green
 checkpoint deliberately retains the original law. Commit: driving: record the rejected Slip experiment (#146).
+
+## Step 5: over-rev provenance
+
+The guard's 100 rpm width now belongs to assets/driving/engine.ron, labelled StandIn for the
+missing engine over-rev outcome. It remains the same independent clutch guard and may set
+available descent drag; this lane builds no replacement over-rev law. The owner decision is
+outside this local fix, not an approval blocker. The field is required, finite, positive and
+StandIn-labelled before construction. The arithmetic scale and witnesses read that one owner.
+MEASURED gates: formatting, CI clippy and 286 targeted tests passed. No tank-sheet/spec or
+wire shape changed. Commit: driving: declare the over-rev engine stand-in (#146).
+
+Queue waits make the owner's priority clause relevant: step 7 precedes the remaining step-6
+findings. Its fade-band expectation is included because Tank #2 must exercise that expectation.
