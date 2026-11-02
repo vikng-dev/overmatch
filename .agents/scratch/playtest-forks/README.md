@@ -651,3 +651,9 @@ can stay. Keep the discarded continuous path in git when choosing checkpoints.
 
 **Lives in.** `src/damage.rs`, `src/shooting.rs`, `src/tank/model.rs`, `src/spec.rs`,
 `src/track/sim.rs`, `src/tank/servo.rs`, `src/crew_ui.rs`; tracker #228.
+
+Subject: the game's damage model, game state only. **Provisional repair extension:** any module
+below capacity may start repair, owing only missing HP at the shared work rate. Its current
+held share remains until completion; cancellation discards unfinished progress. Compare the
+recovery decision in play, including a nearly empty module. Implemented by
+`damage: repair reduced module pools (#228)`; design §7b owns the rule.

@@ -64,7 +64,9 @@ pub(crate) fn underway(tank: &TankVolumes, volumes: &Query<VolumeFacets>) -> boo
 }
 
 fn duration(health: &ComponentHealth) -> f64 {
-    f64::from(health.points()) / work_rate()
+    f64::from(health.capacity() - health.held())
+        / f64::from(crate::ballistics::POOL_UNITS_PER_HP)
+        / work_rate()
 }
 
 pub(super) fn install(app: &mut App) {
@@ -107,7 +109,7 @@ fn toggle_repairs(
         for volume in volumes.iter() {
             // Armor, crew and ammunition are legitimate non-module volumes.
             if let Ok((health, mut repair)) = modules.get_mut(volume) {
-                repair.elapsed = (!cancelling && health.is_empty()).then_some(0.0);
+                repair.elapsed = (!cancelling && health.held() < health.capacity()).then_some(0.0);
             }
         }
     }
@@ -208,6 +210,31 @@ mod tests {
         assert!(world.get::<ComponentHealth>(modules[1]).unwrap().is_empty());
         advance(&mut world, 60);
         let health = world.get::<ComponentHealth>(modules[1]).unwrap();
+        assert_eq!(health.held(), health.capacity());
+    }
+
+    /// The game's damage model: a reduced module can recover without first emptying its pool.
+    /// Fixture: 21 HP capacity, 1 HP held; the owner owes only 20 HP at the shared 20 HP/s.
+    #[test]
+    fn reduced_module_repairs_only_its_missing_hp() {
+        let (mut world, tank, modules) = fixture();
+        let health = &mut *world.get_mut::<ComponentHealth>(modules[0]).unwrap();
+        health.set_held(crate::ballistics::POOL_UNITS_PER_HP);
+        press(&mut world, tank, 1, 1);
+        assert!(
+            world
+                .get::<ModuleRepair>(modules[0])
+                .unwrap()
+                .elapsed
+                .is_some()
+        );
+        advance(&mut world, 63);
+        assert_eq!(
+            world.get::<ComponentHealth>(modules[0]).unwrap().held(),
+            crate::ballistics::POOL_UNITS_PER_HP
+        );
+        advance(&mut world, 1);
+        let health = world.get::<ComponentHealth>(modules[0]).unwrap();
         assert_eq!(health.held(), health.capacity());
     }
 

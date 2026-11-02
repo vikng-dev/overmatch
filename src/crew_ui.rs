@@ -303,6 +303,10 @@ fn update_status_panel(
                 let status = match repair.fraction(health) {
                     Some(fraction) => format!("REPAIR {:.0}%", (fraction * 100.0).floor()),
                     None if health.is_empty() => "OUT OF ACTION".to_owned(),
+                    None if health.held() < health.capacity() => format!(
+                        "RATE {:.0}%",
+                        100.0 * health.held() as f32 / health.capacity() as f32
+                    ),
                     None => "READY".to_owned(),
                 };
                 (name.as_str(), format!("\n{name}: {status}"))

@@ -1194,6 +1194,12 @@ Its revert cost is medium: replace the module resolver, author and validate thos
 change the class-invariant tests and readout assumptions. The rate consumers and wire shape can
 stay; no checkpoint arm or switch remains in code. Playtest fork F18 owns the feel question.
 
+Subject: the game's damage model, game state only. **Provisional repair call (#228):**
+repair may start on any module below capacity. It refills the missing HP at the shared HP/s
+work rate and returns the pool whole on completion; the existing held share remains available
+until then. Cancellation discards unfinished work. This avoids making a nearly empty module
+less recoverable than an empty one. F18 carries this call into playtest.
+
 **RON shape (flat):**
 ```ron
 capabilities: {
@@ -2059,3 +2065,8 @@ and reaches its re-derived deadline. Drive's 0.8 throttle target becomes 0.48 un
 competence and 0.4 under half engine condition. These are fixture observations, never shipped
 asset pass conditions. The panel removes the unused sight percentage and labels paused work
 even when the frozen interval is zero.
+
+| reviewer | finding | verified / not a defect | fixed in (subject) |
+|---|---|---|---|
+| Claude | P2: reduced modules cannot start repair | verified: the 1 HP held fixture cannot start; repair now owes only missing HP | `damage: repair reduced module pools (#228)` |
+| Claude | P3: reduced module row says READY | verified: the row now shows its held-share rate | `damage: repair reduced module pools (#228)` |
