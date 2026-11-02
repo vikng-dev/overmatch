@@ -19,7 +19,7 @@
 //! Every number the fuzzer reports comes back out of the shipped resolution path: the corridor is
 //! built by `resolve::build_corridor` (the march's own kernel), the field integral and the events by
 //! [`walk::walk_ray`]/[`walk::walk_disc`], and ADMISSION by [`drive`] — the runtime's own crossing
-//! state machine ([`resolve::decide`] and [`resolve::Flight::follow`]: entrance rules, bend,
+//! state machine ([`resolve::decide`] and [`resolve::Flight::follow`]: entrance rules,
 //! transit, stop, bounce, continuation), observed with no consequence applied. A gate that
 //! re-derives the law it is gating cannot fail. The one survey number computed here is the
 //! straight-axis prefix integral ([`Report::min_reach`]), which is reported and never admits.
@@ -66,8 +66,7 @@ use crate::tank::{TankSimSource, spawn_headless_tank};
 #[derive(Clone, Copy, Debug)]
 pub struct ProbeRound {
     pub name: &'static str,
-    /// The firing gun; absent for separately authored hypothetical probes.
-    pub gun: Option<ProbeGun>,
+    pub gun: ProbeGun,
     /// Metres.
     pub caliber: f32,
     /// Kilograms.
@@ -89,10 +88,7 @@ pub struct ProbeGun {
 
 impl ProbeRound {
     fn label(&self) -> String {
-        match self.gun {
-            Some(gun) => format!("{} [{}] / {}", gun.label, gun.key, self.name),
-            None => self.name.to_owned(),
-        }
+        format!("{} [{}] / {}", self.gun.label, self.gun.key, self.name)
     }
 
     /// What the capability law and the crossing mechanism read off this round.
@@ -111,67 +107,10 @@ impl ProbeRound {
     }
 }
 
-/// HYPOTHETICAL probes: period AP loadings for bores the game ships no round of, so an opening's
-/// closing calibre is bracketed between the shipped ones. Separately authored, never a copy of a
-/// shipped round; their nose factor 0.3 is a labelled fixture value.
-fn hypothetical_probes() -> [ProbeRound; 5] {
-    let contact = crate::rounds::RoundRegistry::shipped()
-        .contact_preset("AP")
-        .expect("hypothetical AP probes use the declared AP class preset");
-    [
-        ProbeRound {
-            gun: None,
-            contact,
-            name: "20mm (hypothetical)",
-            caliber: 0.020,
-            mass: 0.148,
-            nose_factor: 0.3,
-            speed: 830.0,
-        },
-        ProbeRound {
-            gun: None,
-            contact,
-            name: "37mm (hypothetical)",
-            caliber: 0.037,
-            mass: 0.685,
-            nose_factor: 0.3,
-            speed: 762.0,
-        },
-        ProbeRound {
-            gun: None,
-            contact,
-            name: "57mm (hypothetical)",
-            caliber: 0.057,
-            mass: 2.87,
-            nose_factor: 0.3,
-            speed: 815.0,
-        },
-        ProbeRound {
-            gun: None,
-            contact,
-            name: "75mm (hypothetical)",
-            caliber: 0.075,
-            mass: 6.8,
-            nose_factor: 0.3,
-            speed: 790.0,
-        },
-        ProbeRound {
-            gun: None,
-            contact,
-            name: "122mm (hypothetical)",
-            caliber: 0.122,
-            mass: 25.0,
-            nose_factor: 0.3,
-            speed: 795.0,
-        },
-    ]
-}
-
 /// The guns every opening is measured against, ASCENDING by caliber (the sweep takes the first that
 /// admits, so order is load-bearing; ties keep gun/name order): every shipped round as each gun fires
 /// it — the body that meets the plate, at its gun's muzzle speed, identified by gun and round, resolved
-/// through the gun registry so the instrument measures the configuration the game fires — and the
-/// [`hypothetical_probes`].
+/// through the gun registry so the instrument measures the configuration the game fires.
 pub fn probe_rounds() -> &'static [ProbeRound] {
     static PROBES: std::sync::LazyLock<Vec<ProbeRound>> = std::sync::LazyLock::new(|| {
         let guns = crate::guns::GunRegistry::shipped();
@@ -179,25 +118,24 @@ pub fn probe_rounds() -> &'static [ProbeRound] {
             .fired_rounds()
             .map(|(gun, key, round)| ProbeRound {
                 name: key,
-                gun: Some(ProbeGun {
+                gun: ProbeGun {
                     key: gun,
                     label: guns
                         .gun(gun)
                         .expect("the fired configuration names its registry gun")
                         .display_name(),
-                }),
+                },
                 caliber: round.penetrator.caliber,
                 mass: round.penetrator.mass,
                 nose_factor: round.penetrator.nose_factor,
                 speed: round.muzzle_speed,
                 contact: round.contact,
             })
-            .chain(hypothetical_probes())
             .collect();
         probes.sort_by(|a, b| {
             a.caliber
                 .total_cmp(&b.caliber)
-                .then(a.gun.map(|gun| gun.key).cmp(&b.gun.map(|gun| gun.key)))
+                .then(a.gun.key.cmp(b.gun.key))
                 .then(a.name.cmp(b.name))
         });
         probes
@@ -209,7 +147,7 @@ pub fn probe_rounds() -> &'static [ProbeRound] {
 // Configuration
 // ---------------------------------------------------------------------------------------------
 
-/// Tank-local metres per clustering cell. Findings landing in one cell are ONE opening in the
+/// Resolution: tank-local metres per report-clustering cell. Findings landing in one cell are ONE opening in the
 /// report, which is what makes a 10⁶-ray run readable.
 ///
 /// 0.15 m: coarse enough that a vision slit is one region rather than forty, fine enough that the
@@ -240,6 +178,7 @@ pub struct FuzzConfig {
     pub finding_floor: Option<f32>,
 }
 
+// Resolution defaults bound sampling work; the fixed seed makes every run replayable.
 impl Default for FuzzConfig {
     fn default() -> Self {
         Self {
@@ -526,8 +465,7 @@ fn ray_for(index: u64, config: &FuzzConfig, center: Vec3, radius: f32) -> FuzzRa
 // The headless target
 // ---------------------------------------------------------------------------------------------
 
-/// Where the probe tank stands. Off the world origin on purpose — a target at `(0,0,0)` cannot catch
-/// a frame-mixup, since world and tank-local coincide there.
+/// Resolution: a translated coordinate probe exposes frame mixing that an origin pose hides.
 pub(super) const PROBE_TANK_AT: Vec3 = Vec3::new(12.0, 3.0, -7.0);
 
 /// The bound tank, once spawned.

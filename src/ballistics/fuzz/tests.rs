@@ -133,10 +133,11 @@ fn a_corridor_above_the_gate_floor_fails_the_gate() {
 fn the_probes_are_the_shipped_rounds_as_fired_in_calibre_order() {
     let guns = crate::guns::GunRegistry::shipped();
     let probes = probe_rounds();
+    assert_eq!(probes.len(), guns.fired_rounds().count());
     for (gun, key, round) in guns.fired_rounds() {
         let probe = probes
             .iter()
-            .find(|probe| probe.gun.map(|gun| gun.key) == Some(gun) && probe.name == key)
+            .find(|probe| probe.gun.key == gun && probe.name == key)
             .unwrap_or_else(|| panic!("{key} is not a probe"));
         assert_eq!(probe.body(), round.penetrator, "{key}");
         assert_eq!(probe.speed.to_bits(), round.muzzle_speed.to_bits(), "{key}");

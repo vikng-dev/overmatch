@@ -622,6 +622,7 @@ fn resolved(
 pub(crate) struct RoundRegistry {
     /// Each round's facts and display name, by key.
     rounds: BTreeMap<String, (RoundFacts, String)>,
+    #[cfg(test)]
     contacts: BTreeMap<String, ContactPreset>,
 }
 
@@ -663,6 +664,7 @@ impl RoundRegistry {
         }
         Ok(Self {
             rounds,
+            #[cfg(test)]
             contacts: types
                 .into_iter()
                 .map(|(key, row)| (key, row.contact))
@@ -685,17 +687,6 @@ impl RoundRegistry {
             .unwrap_or_else(|err| panic!("rounds: the embedded round files are unusable: {err}"))
         });
         &REGISTRY
-    }
-
-    /// The game's damage model: a declared type preset for hypothetical instrument rounds.
-    pub(crate) fn contact_preset(&self, key: &str) -> Result<ContactPreset, RoundError> {
-        self.contacts
-            .get(key)
-            .copied()
-            .ok_or_else(|| RoundError::InvalidType {
-                round_type: key.to_owned(),
-                reason: "declare this type and its contact preset".into(),
-            })
     }
 
     #[cfg(test)]
