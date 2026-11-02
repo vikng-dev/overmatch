@@ -85,10 +85,9 @@ TankSpec(
                 gearbox: (
                     forward_speeds_kmh: [5.0, 8.0],
                     reverse_speeds_kmh: [5.0],
-                    shift_up_rpm: 2000.0,
-                    shift_down_rpm: 900.0,
+                    launch_gears: 2,
+                    max_step: 1,
                     shift_secs: 0.3,
-                    shift_addressing: Direct,
                 ),
                 steering: (
                     radii: [(4.0, 12.0), (6.0, 18.0)],

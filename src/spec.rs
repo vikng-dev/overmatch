@@ -1045,8 +1045,8 @@ pub struct EngineSoundSpec {
     pub clip_pop_hz: f32,
 }
 
-/// The gear ladders as authored per-gear top belt speeds (km/h) at `rated_rpm`, plus the
-/// auto-shift rpm bands (hysteresis: the band gap must exceed one ratio step or the box hunts).
+/// The gear ladders as authored per-gear top belt speeds (km/h) at `rated_rpm`, plus what the
+/// construction allows a Driver: the highest launch gear and the widest single shift.
 #[derive(Deserialize, Clone)]
 #[serde(deny_unknown_fields)]
 pub struct GearboxSpec {
