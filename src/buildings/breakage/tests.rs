@@ -3887,6 +3887,84 @@ fn a_skids_line_with_no_chord_wears_the_chunk_at_its_point() {
     }
 }
 
+/// The game's damage model preserves work when world rounding collapses a resolved axis.
+/// Construction reads a surviving sample chord first; only a point without one uses its location.
+/// Fixture: at z = 1000 m, the 1000.00001 m stop rounds to entry, beside a lateral chunk seam.
+#[test]
+fn a_far_collapsed_axis_reads_surviving_contacts_before_its_point() {
+    use crate::ballistics::{DeliveredLine, VolumeCrossing};
+    use bevy::ecs::system::RunSystemOnce;
+    for contacted in [false, true] {
+        let (mut app, root, mut kind, e, [left, right]) = stacked_chunks();
+        kind.layout.blocks[left] =
+            Block::cuboid(Vec3::new(-2.0, -1.0, 0.0), Vec3::new(0.0, 1.0, 1.0));
+        kind.layout.blocks[right] =
+            Block::cuboid(Vec3::new(0.0, -1.0, 0.0), Vec3::new(2.0, 1.0, 1.0));
+        app.world_mut().get_mut::<Breakage>(root).unwrap().kind = Arc::new(kind.clone());
+        let volume = app
+            .world_mut()
+            .query::<(Entity, &BuildingElement, &ChildOf)>()
+            .iter(app.world())
+            .find(|(_, index, parent)| usize::from(index.0) == e && parent.parent() == root)
+            .map(|(entity, ..)| entity)
+            .unwrap();
+        let entry = Vec3::new(0.02, 0.0, 1000.0);
+        let end = Vec3::new(0.02, 0.0, 1000.00001_f64 as f32);
+        assert_eq!(
+            entry, end,
+            "fixture must lose the resolved axis chord to world rounding"
+        );
+        let contacts = if contacted {
+            vec![(
+                Vec3::new(-0.02, 0.0, 1000.0),
+                Vec3::new(-0.02, 0.0, 1000.05),
+            )]
+        } else {
+            vec![(entry, end)]
+        };
+        let blow = Vec3::Z * 30.0 + Vec3::X * 12.0;
+        let deposit = RawDeposit {
+            crossings: vec![DeliveredLine {
+                crossing: VolumeCrossing {
+                    volume,
+                    entry,
+                    end,
+                    chord: 0.00001,
+                    cost: 0.0,
+                    energy: 7.0,
+                    perforated: false,
+                },
+                contacts,
+                momentum: blow,
+                entrance_energy: 5.0,
+                entrance_momentum: Vec3::X * 12.0,
+            }],
+            ..default()
+        };
+        let frame = Frame::new(&Transform::from_xyz(0.0, 0.0, 1000.0), 1.0, kind.bounds());
+        let taken = app
+            .world_mut()
+            .run_system_once(move |p: DepositParam| {
+                let mut taken = BTreeMap::new();
+                take_lines(&p, &BTreeMap::from([(root, frame)]), &deposit, &mut taken);
+                taken
+                    .remove(&root)
+                    .expect("a collapsed line retains its exchange")
+            })
+            .unwrap();
+        let owner = if contacted { left } else { right };
+        assert!(
+            taken.line_loads.iter().all(|load| load.chunk == owner),
+            "contacted {contacted}: {:?}",
+            taken.line_loads
+        );
+        assert!((taken.line_loads.iter().map(|load| load.energy).sum::<f32>() - 7.0).abs() < 1e-5);
+        assert!(
+            (taken.line_loads.iter().map(|load| load.blow).sum::<Vec3>() - blow).length() < 1e-4
+        );
+    }
+}
+
 /// An element that never breaks owns no chunk ([`Layout::chunks_of`]) and still has its collider,
 /// so a round crossing it is routine. Destruction relies on that line wearing nothing and ending
 /// no session: a mutant that restores the allocation panic fails here.

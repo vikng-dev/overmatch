@@ -1118,12 +1118,6 @@ fn take_lines(
         let dir = (b - a).normalize_or_zero();
         let shares: Vec<(usize, f32, f32, f32)> = match (element, chunk) {
             (_, Some(&BuildingChunk(c))) => vec![(usize::from(c), 0.0, length, length)],
-            (Some(&BuildingElement(e)), None) if length == 0.0 => {
-                let Some(c) = nearest_chunk(layout, usize::from(e), a) else {
-                    continue; // An element that never breaks has no chunk to load.
-                };
-                vec![(c, 0.0, 0.0, 0.0)]
-            }
             (Some(&BuildingElement(e)), None) => {
                 let chunks: Vec<_> = layout.chunks_of(usize::from(e)).collect();
                 if chunks.is_empty() {

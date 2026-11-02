@@ -5,6 +5,7 @@ Subject: the game's environment destruction and damage model; game state only.
 | reviewer | finding | verified / not a defect | fixed in (subject) |
 |---|---|---|---|
 | Claude; Codex | P1: flight and aim miss freed trunks | Verified red at the freed-state discovery query; standing, freed and settled discovery, corridor, field and aim checks now pass | trees: make freed trunks ballistic solids (#106) |
+| Claude; Codex; tree reviewer | P1/P2: far-coordinate collapse skips surviving contacts | Verified red: the neighbouring contact received no work; collapsed axes now read sampled contacts before the point outcome, preserving all work and momentum | buildings: read contacts before collapsed-axis point exchanges (#106) |
 | Claude | P3: sensor mass guard and Debris prose | Verified: the old mass tolerance admitted the extra unit-density solid; tightened the spawned-body mass guard and corrected the layer documentation | trees: make freed trunks ballistic solids (#106) |
 
 Decisions:
@@ -16,3 +17,5 @@ Decisions:
 - DERIVED census: one additional contact collider per freed segment on authority and replicas; standing forest collider count is unchanged. No frame/tick pricing or captures were taken, per lane rules; the orchestrator owns pricing. `run-walk.py` has not been run in this lane.
 
 Verification: the real-query regression failed before the fix at `state 1: flight must meet the wood` (MEASURED). The targeted first run passed 102 tests; the full item-one gate passed 651 tests, with 14 ignored measurement/pricing beds (MEASURED). Format check and CI clippy passed. The gate includes trees, debris, network destruction, buildings, ballistics, aim, recording, headless checks and documentation citations. Whole-library and whole-tree final guards remain to run before the final commit.
+
+Rounding step: format check, CI clippy and 215 targeted tests passed (MEASURED), including the far-coordinate regression, trees, debris, network destruction, buildings and doc citations. The earliest-contact entrance allocator is unchanged.
