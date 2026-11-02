@@ -3676,3 +3676,49 @@ fn a_probe_leaves_the_grown_bounds_from_a_start_past_a_slab() {
         );
     }
 }
+
+/// The game's damage model: a blend closes its share of the angle to its target at any angle a unit
+/// direction can hold. A low-coverage contact's chain ends only because each exchange brings the
+/// heading closer to the face's plane. Mutant: read the angle with `acos`, which leaves a heading
+/// under 3.45e-4 rad (DERIVED) unturned.
+#[test]
+fn a_blend_closes_its_share_of_any_angle() {
+    let target = Dir3::new(Vec3::new(0.3, 0.1, -0.9)).unwrap();
+    let side = Dir3::new(target.cross(Vec3::Y)).unwrap();
+    let between = |a: Dir3, b: Dir3| {
+        let (a, b) = (a.as_dvec3(), b.as_dvec3());
+        a.cross(b).length().atan2(a.dot(b)) as f32
+    };
+    for angle in [1.0e-1_f32, 1.0e-2, 1.0e-3, 3.0e-4, 1.0e-4, 1.0e-5, 3.0e-6] {
+        let dir = Dir3::new(Quat::from_axis_angle(*side, angle) * *target).unwrap();
+        let start = between(dir, target);
+        let left = between(super::super::turned_toward(dir, target, 0.5), target);
+        assert!(
+            (left - 0.5 * start).abs() < 2.0e-7,
+            "{start} rad closes half to {left} rad"
+        );
+    }
+}
+
+/// The game's damage model: a chain of low-coverage contacts on one face ends, because each contact
+/// brings the heading closer to the face's plane until the rest of the step fits between the rim and
+/// the face. Fixture: a heading 1.1e-3 rad into a face, blended at the least coverage a ring reads
+/// (1/13), which reaches a unit direction's rounding in about 110 contacts (DERIVED: ln(1.1e-3 /
+/// 1e-7) / ln(13 / 12)). Mutant: read the angle with `acos`, which freezes the heading 3.45e-4 rad
+/// into the face and walks the rest of the step in contacts of rounding's length, past the step's
+/// crossing limit.
+#[test]
+fn a_chain_of_rim_contacts_converges_on_the_face() {
+    let normal = Dir3::new(Vec3::new(0.2, 0.9, -0.3)).unwrap();
+    let side = Dir3::new(normal.cross(Vec3::X)).unwrap();
+    let along = normal.cross(*side);
+    let into = Quat::from_axis_angle(*side, -1.1e-3) * along;
+    assert!(into.dot(*normal) < 0.0, "the fixture heads into the face");
+    let mut heading = Dir3::new(into).unwrap();
+    for _ in 0..130 {
+        let slide = Dir3::new(*heading - *normal * heading.dot(*normal)).unwrap();
+        heading = super::super::turned_toward(heading, slide, 1.0 / 13.0);
+    }
+    let left = heading.dot(*normal).abs();
+    assert!(left < 1.0e-6, "the heading stands {left} rad off the face");
+}

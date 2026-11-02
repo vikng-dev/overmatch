@@ -778,19 +778,18 @@ fn owned_losses(dose: &ShotDose, owners: &Query<&VolumeOf>, shooter: Option<Enti
         .sum()
 }
 
-/// Rotate `dir` toward `target` by at most `angle` radians. Exactly opposed directions name no
-/// plane to turn in, so `dir` stands, as it does for no angle or no gap.
-fn bend_toward(dir: Dir3, target: Dir3, angle: f32) -> Dir3 {
-    let d = Vec3::from(dir);
-    let t = Vec3::from(target);
-    let between = d.angle_between(t);
-    if between < 1.0e-5 || angle <= 0.0 {
+/// Rotate `dir` through `share` of the angle to `target`. The angle comes from the cross product:
+/// an `acos` of the dot reads zero under 3.45e-4 rad (DERIVED: acos(1 - 2^-24)), and a heading
+/// blended toward a face there stops converging on it. Directions exactly parallel or opposed name
+/// no plane to turn in, so `dir` stands.
+fn turned_toward(dir: Dir3, target: Dir3, share: f32) -> Dir3 {
+    let (d, t) = (Vec3::from(dir), Vec3::from(target));
+    let across = d.cross(t);
+    let Ok(axis) = Dir3::new(across) else {
         return dir;
-    }
-    let Ok(axis) = Dir3::new(d.cross(t)) else {
-        return dir; // Opposed: no unique turning plane.
     };
-    Dir3::new(Quat::from_axis_angle(Vec3::from(axis), angle.min(between)) * d)
+    let between = across.length().atan2(d.dot(t));
+    Dir3::new(Quat::from_axis_angle(Vec3::from(axis), share * between) * d)
         .expect("a unit direction turned by a unit quaternion keeps unit length")
 }
 

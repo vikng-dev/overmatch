@@ -3147,17 +3147,6 @@ pub fn begin(entrance: &DiscWalk, shot: &Shot, laws: &WalkLaws) -> Result<Begin,
         "the game's damage model reads a finite collected entry normal after excluding a vanishing aggregate"
     );
 
-    // η scales the deflection ANGLE as well as the speed lost (§13.5). A graze that turned the
-    // round as hard as a square bounce made 1 mm of aim the difference between "flies past" and
-    // "full bounce" — the cliff the disc primitive exists to remove.
-    let blend_by_coverage = |from: Dir3, toward: Dir3, coverage: f32| {
-        super::bend_toward(
-            from,
-            toward,
-            coverage * Vec3::from(from).angle_between(toward.into()),
-        )
-    };
-
     if skids(shot, along_normal, steel_equivalent, factor, laws) {
         // `sin θ` as the striking direction's part along the surface, `√(1 − (axis · n̄)²)`: an
         // IEEE square root rather than the sine of the read incidence, so the share is the same on
@@ -3172,11 +3161,14 @@ pub fn begin(entrance: &DiscWalk, shot: &Shot, laws: &WalkLaws) -> Result<Begin,
         let along = Vec3::from(axis) - Vec3::from(surface) * Vec3::from(axis).dot(normal);
         let slide = Dir3::new(along)
             .expect("the game's damage model skids only with sin θ > 0, so a part along the face");
-        // Full coverage returns the slide verbatim; rotating onto it would perturb its low bits.
+        // η scales the deflection ANGLE as well as the speed lost (§13.5). A graze that turned the
+        // round as hard as a square bounce made 1 mm of aim the difference between "flies past" and
+        // "full bounce" — the cliff the disc primitive exists to remove. Full coverage returns the
+        // slide verbatim; rotating onto it would perturb its low bits.
         let direction = if event.coverage >= 1.0 {
             slide
         } else {
-            blend_by_coverage(axis, slide, event.coverage)
+            super::turned_toward(axis, slide, event.coverage)
         };
         return Ok(Begin::Ricochet {
             entrance: read,
