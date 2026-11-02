@@ -73,18 +73,30 @@ impl DriveFeel {
                 && self.tight_on.0 <= 1.0,
             "assets/input/drive.ron: author ordered wide_off < wide_on < tight_off < tight_on within [0, 1]"
         );
-        for (name, off, on) in [
-            ("wide", self.wide_off.0, self.wide_on.0),
-            ("tight", self.tight_off.0, self.tight_on.0),
-        ] {
-            // The lever can start stepping from zero or either clamped endpoint.
-            for origin in [-1.0, 0.0, 1.0] {
-                let first_notch =
-                    origin + ((off - origin) / self.notch_step.0).ceil() * self.notch_step.0;
-                assert!(
-                    first_notch >= on || first_notch > 1.0,
-                    "assets/input/drive.ron: {name} detent hysteresis contains a persistent notch; move its thresholds or notch_step so steps from zero and clamped endpoints avoid the band"
-                );
+        // Resolution: bound admission's temporary memory and work; finer authored lattices
+        // must be coarsened rather than leaving an incomplete reachability proof.
+        const MAX_REACHABLE_NOTCHES: usize = 65_536;
+        let mut seen = std::collections::HashSet::from([0.0_f32.to_bits()]);
+        let mut pending = vec![0.0_f32];
+        while let Some(value) = pending.pop() {
+            for direction in [-1.0, 1.0] {
+                let next = (value + direction * self.notch_step.0).clamp(-1.0, 1.0);
+                for (name, off, on) in [
+                    ("wide", self.wide_off.0, self.wide_on.0),
+                    ("tight", self.tight_off.0, self.tight_on.0),
+                ] {
+                    assert!(
+                        next.abs() < off || next.abs() >= on,
+                        "assets/input/drive.ron: {name} detent hysteresis contains a reachable f32 notch; move its thresholds or notch_step so every tap history avoids the band"
+                    );
+                }
+                if seen.insert(next.to_bits()) {
+                    assert!(
+                        seen.len() <= MAX_REACHABLE_NOTCHES,
+                        "assets/input/drive.ron: notch_step creates too many reachable f32 states for bounded admission; author a coarser lever step"
+                    );
+                    pending.push(next);
+                }
             }
         }
     }
@@ -171,30 +183,83 @@ mod tests {
         feel.validate();
     }
 
+    /// Fixture: the admitted 0.1-step boundary reaches the tight band after repeated f32
+    /// subtraction. Algebraic enumeration misses it; the player's steering must not depend
+    /// on which tap history reaches the same intended notch.
     #[test]
-    fn slew_rises_exactly_and_never_overshoots() {
-        let mut axes = DriveAxes::default();
-        let target = DriveAxes {
-            throttle: 1.0,
-            steer: 0.0,
-        };
-        let ticks = (1.0 / (drive_feel().rise_per_second.0 * DT)).ceil() as usize;
-        for _ in 1..ticks {
-            axes = shape_drive(axes, target, DT);
-            assert!(axes.throttle < 1.0);
-        }
-        axes = shape_drive(axes, target, DT);
-        assert_eq!(axes.throttle, 1.0);
-        // At the target, further ticks are exact no-ops (no oscillation).
-        assert_eq!(shape_drive(axes, target, DT), axes);
+    #[should_panic(expected = "notch_step")]
+    fn notch_admission_checks_accumulated_roundoff() {
+        let mut feel: DriveFeel = crate::provenance::from_shipped_str(
+            "assets/input/drive.ron",
+            include_str!("../../assets/input/drive.ron"),
+        )
+        .unwrap();
+        feel.notch_step.0 = 0.1;
+        feel.wide_off.0 = 0.05;
+        feel.wide_on.0 = 0.09;
+        feel.tight_off.0 = 0.55;
+        feel.tight_on.0 = 0.6;
+        let reached = (0..4).fold(1.0_f32, |v, _| v - feel.notch_step.0);
+        assert!(reached >= feel.tight_off.0 && reached < feel.tight_on.0);
+        feel.validate();
+    }
 
-        // Descending travel obeys the same authored rate.
-        for _ in 1..ticks {
-            axes = shape_drive(axes, DriveAxes::default(), DT);
-            assert!(axes.throttle > 0.0);
+    /// Pedal travel must obey its owner's rate and remain monotone without overshoot.
+    /// Accumulated f32 error is bounded, rather than pinning an exact arrival tick.
+    #[test]
+    fn slew_follows_the_authored_rate_without_overshoot() {
+        let step = drive_feel().rise_per_second.0 * DT;
+        let ticks = (1.0 / step).ceil() as usize;
+        let mut axes = DriveAxes::default();
+        for target in [1.0, 0.0] {
+            for _ in 0..=ticks {
+                let previous = axes.throttle;
+                axes = shape_drive(
+                    axes,
+                    DriveAxes {
+                        throttle: target,
+                        steer: 0.0,
+                    },
+                    DT,
+                );
+                let travel = (axes.throttle - previous).abs();
+                assert!(travel <= step + f32::EPSILON);
+                assert!(
+                    axes.throttle >= previous.min(target) && axes.throttle <= previous.max(target)
+                );
+            }
+            let roundoff = (ticks + 1) as f32 * f32::EPSILON;
+            assert!((axes.throttle - target).abs() <= roundoff);
+            let at_target = DriveAxes {
+                throttle: target,
+                steer: 0.0,
+            };
+            assert_eq!(shape_drive(at_target, at_target, DT), at_target);
         }
-        axes = shape_drive(axes, DriveAxes::default(), DT);
-        assert_eq!(axes, DriveAxes::default());
+    }
+
+    /// Fixture: 0.64 is an admitted rise taste whose 100 ideal ticks accumulate f32 error.
+    /// The rate law permits that error, then clamps exactly on the next step in either direction.
+    #[test]
+    fn admitted_fractional_rise_tolerates_accumulated_roundoff() {
+        let mut feel: DriveFeel = crate::provenance::from_shipped_str(
+            "assets/input/drive.ron",
+            include_str!("../../assets/input/drive.ron"),
+        )
+        .unwrap();
+        feel.rise_per_second.0 = 0.64;
+        feel.validate();
+        let step = feel.rise_per_second.0 * DT;
+        let ticks = (1.0 / step).ceil() as usize;
+        for (start, target) in [(0.0, 1.0), (1.0, 0.0)] {
+            let mut value = start;
+            for _ in 0..ticks {
+                value = approach(value, target, step);
+            }
+            let roundoff = ticks as f32 * f32::EPSILON;
+            assert!((value - target).abs() <= roundoff);
+            assert_eq!(approach(value, target, step), target);
+        }
     }
 
     /// The Driver must see neutral immediately on reversal; a slew through the previous sign

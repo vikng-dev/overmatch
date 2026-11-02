@@ -65,8 +65,8 @@ one disposition. A source verification is distinguished below from an executed r
 | Claude clutch P2 | launch admission depends on prior Out | not a remaining defect: prior brake lane admits arrested In launch; inherited witness retained | prior brake law |
 | Claude clutch P2 | zero-rate task opens a moving clutch | verified source; moving zero-rate witness replaces the old rest-only assertion | LAW |
 | Claude clutch P2 | open clutch grants fuel without authority or a window | verified source; rev-match admission now needs authority and a paid window or active steering | LAW |
-| Codex clutch P2 | algebraic notch enumeration misses accumulated f32 rounding | verified source; deferred until the primary law is committed green | carried to INPUT |
-| Codex clutch P3 | exact slew tick count rejects admitted 0.64 rise taste | verified source; deferred until the primary law is committed green | carried to INPUT |
+| Codex clutch P2 | algebraic notch enumeration misses accumulated f32 rounding | verified red; reachable f32 traversal refuses the ambiguous history | INPUT |
+| Codex clutch P3 | exact slew tick count rejects admitted 0.64 rise taste | verified red at authored rise 0.64; slew proof bounds rounding instead of exact arrival | INPUT |
 | Claude clutch P3 | free-torque wording assigns catch to combustion sources | verified source; wording names Driver task throughput | LAW |
 | Claude clutch P3 | first empty-station drag sample is transient | verified source; final-second signed motoring drag replaces it | LAW |
 | Claude clutch P3 | moving-lug witness starts In and misses Out landing | verified source; Out moving sub-idle entry now asserts In without fresh launch Slip | LAW |
@@ -181,3 +181,45 @@ headless mode, and no capture or performance pricing. Primary gate completion: 2
 The only carried implementation items after the primary green step are float32 notch admission
 and the slew test's exact tick count. S3's F6 construction limit remains acceptance work for a
 separate physical/control decision, not another switch in this implementation.
+
+
+## Carried input step: green and committed
+
+The unchanged validator and exact-count test both failed the direct red run. MEASURED: the
+0.1-step test did not panic at admission, while an actual authored rise of 0.64 produced
+0.99999934 rather than 1.0 at the old test's hundredth tick. This used the real embedded input
+data and production shaping path, not a reimplementation of its travel.
+
+`DriveFeel::validate` now traverses the complete reachable f32 graph from zero with the same
+add/clamp operations as the lever; clamped endpoints and every history arise from that graph.
+Every reachable magnitude must lie outside each detent's hysteresis band. The independent
+float32 traversal measured nine states for the shipped 0.25 step and 83 for 0.1; the latter
+includes 0.5999999046325684 and 0.5999999642372131 inside the reported tight band. The old algebraic
+lattice and its origin enumeration are deleted. Resolution: admission refuses more than 65,536
+reachable states, naming `notch_step` and asking for a coarser authored step, so startup cannot
+leave a partial proof or allocate without a bound. This is a solver-cost limit, not a new taste.
+
+The slew proof checks monotonic travel, per-tick rate, no overshoot and target stability. Its
+arrival error is bounded by DERIVED `ticks * f32::EPSILON` on the unit axis, rather than a fixed
+arrival tick. A labelled 0.64 fixture checks accumulated roundoff and final clamping directly.
+MEASURED rerun with 0.64 as the actual authored rise: **6 passed**. The original shipped file
+was restored byte-for-byte afterward; the final commit contains no input-data taste change.
+No wire type or state changes in this input step, so revision 77 remains the deliberate bump.
+
+MEASURED input-step test-section change: **+53 lines**, using the same cfg(test)-body method as
+the primary count. Whole-lane test-section change is **+323 lines**. The old exact-count proof
+is replaced; no alternate slew or lever implementation remains.
+
+MEASURED gates after restoring the shipped input: fmt passed; targeted drive/command and the
+whole-tree `doc_citations ui_ascii net_boundary bake::` guards **64 passed, 0 failed**; CI clippy
+with `--locked --workspace --all-targets --features dev_ui,bitprobe -- -D warnings` passed. The
+initial input green run also passed **146** drive, command, drivetrain, staffing and guard tests;
+the final repeat followed a test-only rounding-bound refinement. Final gate completion was
+verified at 21:34:53 +07. MEASURED clean-tree checkpoint: 21:41:23 +07, 61 min 16 s after
+the lane start and within its 90-minute boundary.
+
+All reviewed implementation findings are now fixed or identified as already fixed in the table.
+No carried P2/P3 implementation item remains. S4 is certified on every declared ground; S3's
+clutch engagement and crank bound are proven, but its general vehicle-speed bound remains unmet
+for F6. The accepted design now states the construction rest and that acceptance limit, rather
+than retaining the proposed independent idle fuel. No new control policy hides the limit.
