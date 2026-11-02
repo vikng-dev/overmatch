@@ -146,6 +146,11 @@ pub(crate) struct RoundFacts {
 }
 
 impl RoundFacts {
+    /// The contact read this round's data states, for what raises one without firing it.
+    pub(crate) fn impact_style(&self) -> ImpactStyle {
+        self.effects.impact
+    }
+
     /// The launched assembly's mass (kg), any carrier included: what leaves the muzzle, so what
     /// the shot's muzzle energy reads ([`crate::guns::MuzzleEnergy`]).
     pub(crate) fn launched_mass(&self) -> f32 {
@@ -466,7 +471,7 @@ fn resolved(
         flying.caliber,
         flying.mass,
     );
-    let effects = file.effects.resolve(flying.caliber)?;
+    let mut effects = file.effects.resolve(flying.caliber)?;
     let wound = file.wound.0;
     if !wound.is_finite() || wound <= 0.0 {
         return Err(format!(
@@ -524,6 +529,20 @@ fn resolved(
             )
         }
     };
+    if let Some(burst) = &burst
+        && matches!(burst.trigger, fuze::Trigger::Impact { .. })
+    {
+        if effects.impact != ImpactStyle::Layered {
+            return Err(
+                "`effects.impact` is Compact on a round whose burst functions at contact; state \
+                 Layered, the only read that presents a burst"
+                    .into(),
+            );
+        }
+        effects.impact = ImpactStyle::Bursting {
+            blast_j: burst.blast,
+        };
+    }
     Ok((
         RoundFacts {
             nose,
@@ -1068,10 +1087,71 @@ pub(crate) mod tests {
         assert!(matches!(err, RoundError::Parse { .. }), "{err}");
     }
 
+    /// The game's damage-model view reads a round's contact style from its burst data: a burst
+    /// that functions at contact presents at contact, carrying its own blast energy; any other
+    /// round states no burst read. ADR-0023 ties the hot layer to this. A style authored against
+    /// the data, or `Bursting` authored at all, is refused. Mutant: a derivation keyed on the
+    /// style alone, on a burst block regardless of its trigger, or dropping the energy fails here.
+    #[test]
+    fn a_rounds_contact_style_follows_when_its_burst_functions() {
+        let shipped = &RoundRegistry::shipped().rounds;
+        let mut bursting = 0;
+        for (key, (facts, _)) in shipped {
+            let at_contact = facts
+                .burst
+                .as_ref()
+                .filter(|burst| matches!(burst.trigger, fuze::Trigger::Impact { .. }));
+            if let Some(burst) = at_contact {
+                bursting += 1;
+                let blast_j = burst.blast;
+                assert_eq!(
+                    facts.effects.impact,
+                    ImpactStyle::Bursting { blast_j },
+                    "{key}"
+                );
+                println!(
+                    "MEASURED {key}: blast {blast_j} J, cube root {}",
+                    blast_j.cbrt()
+                );
+            } else {
+                assert!(
+                    !matches!(facts.effects.impact, ImpactStyle::Bursting { .. }),
+                    "{key}"
+                );
+            }
+        }
+        assert!(bursting > 0, "no shipped round bursts at contact: vacuous");
+
+        let compact = with_trigger("Fixture core", false, "Impact(sensitivity_n: 30.0)")
+            .expect_err("a compact read cannot present a contact burst")
+            .to_string();
+        assert!(compact.contains("Compact"), "{compact}");
+        let authored =
+            file(&FIXTURE, "").replace("impact: (Compact", "impact: (Bursting(blast_j: 1.0)");
+        assert!(
+            load(&authored).is_err(),
+            "`Bursting` is derived, never authored"
+        );
+        let inert = with_burst("Fixture core", false)
+            .expect("a compact round whose burst waits to leave a body loads")
+            .get("Probe")
+            .expect("the fixture round");
+        assert_eq!(inert.effects.impact, ImpactStyle::Compact);
+    }
+
     /// The fixture round with a burst block naming substance `core`, on the sub-calibre type with
     /// a penetrator block when `penetrator`, over [`FIXTURE_SUBSTANCES`]. The block's numbers are
     /// fixture data.
     fn with_burst(core: &str, penetrator: bool) -> Result<RoundRegistry, RoundError> {
+        with_trigger(core, penetrator, "SpendExit(arming_spend: 35.0)")
+    }
+
+    /// [`with_burst`] with the fuze of `trigger`.
+    fn with_trigger(
+        core: &str,
+        penetrator: bool,
+        trigger: &str,
+    ) -> Result<RoundRegistry, RoundError> {
         let (round_type, block) = if penetrator {
             (
                 r#""Fixture sub-calibre""#,
@@ -1095,7 +1175,7 @@ pub(crate) mod tests {
             .collect::<Vec<_>>();
         let extra = format!(
             r#"{block}, fuze: Some((
-                trigger: (SpendExit(arming_spend: 35.0), Fixture("x")),
+                trigger: ({trigger}, Fixture("x")),
                 modes: [(name: ("delay", Fixture("x")), delay_s: (0.012, Fixture("x")))],
                 default_mode: ("delay", Fixture("x")))), burst: Some((
                 core_substance: ({core:?}, Fixture("x")),

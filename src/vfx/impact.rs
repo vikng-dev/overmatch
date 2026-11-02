@@ -363,6 +363,48 @@ fn spawn_impact_read(
             &mut kit,
         ),
     }
+    if let ImpactStyle::Bursting { blast_j } = impact.style {
+        spawn_burst_flash(impact.position, normal, blast_j, &mut kit);
+    }
+}
+
+/// The hot layer of a round whose burst functions at this contact, on any surface: the round's blast
+/// energy, never the surface or the viewer, sets its size (ADR-0023). A round with no burst has no
+/// such layer; what else glows at a contact is the surface's own fact.
+fn spawn_burst_flash(position: Vec3, normal: Vec3, blast_j: f32, kit: &mut ImpactKit) {
+    let ImpactKit {
+        assets,
+        materials,
+        ring,
+        rng,
+        commands,
+        ..
+    } = kit;
+    let size = look().burst_flash_scale * blast_j.cbrt();
+    spawn_billboard(
+        commands,
+        materials,
+        ring,
+        assets.quad.clone(),
+        BillboardSpec {
+            material: assets.ping_material(),
+            lifetime: look().burst_flash_lifetime,
+            origin: position + normal * look().flash_clearance_m,
+            drift: Vec3::ZERO,
+            frames: 1,
+            flipbook: Flipbook::Loop {
+                start: 0.0,
+                rate: 0.0,
+            },
+            start_size: size,
+            end_size: size * look().burst_flash_end_scale,
+            aspect: Vec3::ONE,
+            roll: rng.range(0.0, std::f32::consts::TAU),
+            spin: 0.0,
+            erosion_end: 0.0,
+            rotation: None,
+        },
+    );
 }
 
 struct PowderRead {
@@ -409,13 +451,13 @@ fn spawn_ground_read(
         amount: lifted,
         light,
     };
-    if style == ImpactStyle::Layered {
+    if style == ImpactStyle::Compact {
+        spawn_small_impact(position, normal, to_camera, powder, soil.sparks, kit);
+    } else {
         spawn_big_splash(position, normal, to_camera, powder, kit);
         if soil.sparks {
             spawn_contact_sparks(position, normal, to_camera, kit);
         }
-    } else {
-        spawn_small_impact(position, normal, to_camera, powder, soil.sparks, kit);
     }
 }
 
@@ -431,7 +473,7 @@ pub(super) fn spawn_material_read(
     feedback: SurfaceFeedback,
     kit: &mut ImpactKit,
 ) {
-    if feedback.sparks && style == ImpactStyle::Layered {
+    if feedback.sparks && style != ImpactStyle::Compact {
         spawn_sparking_read(position, normal, to_camera, outcome, feedback, kit);
     } else {
         let powder = PowderRead {
@@ -1259,6 +1301,44 @@ mod tests {
             .map(|&entity| lut_of(&app, entity).id())
             .collect();
         assert_eq!(luts.len(), 1, "one contact, one soil's palette");
+    }
+
+    /// The hot layer follows the round's data: a burst round flashes on any surface by the cube
+    /// root of its own blast energy, and an inert round has none on a surface stating no sparks.
+    /// ADR-0023 relies on it. FIXTURE energies and a sparkless ground and substance; a mutant with
+    /// the flash on every layered round, a fixed size, or the flash on terrain alone fails here.
+    #[test]
+    fn a_burst_round_flashes_by_its_energy_and_an_inert_round_does_not() {
+        let hot_sizes = |style: ImpactStyle, surface: ImpactSurface| {
+            let mut app = harness();
+            let mut table = crate::ground_types::GroundTypes::load_shipped();
+            for ground in table.types.values_mut() {
+                ground.strike.sparks.value = false;
+            }
+            app.insert_resource(table);
+            trigger_surface(&mut app, Vec3::Y, style, surface, ImpactOutcome::Struck);
+            let world = app.world_mut();
+            world
+                .query::<&Billboard>()
+                .iter(world)
+                .filter(|billboard| billboard.lanes.glow.y > 0.0)
+                .map(|billboard| billboard.start_size)
+                .collect::<Vec<_>>()
+        };
+        let sparkless = ImpactSurface::Material(SurfaceFeedback {
+            sparks: false,
+            ..SurfaceFeedback::fixture()
+        });
+        for surface in [ImpactSurface::Terrain, sparkless] {
+            assert_eq!(hot_sizes(LAYERED, surface), Vec::<f32>::new());
+            assert_eq!(hot_sizes(COMPACT, surface), Vec::<f32>::new());
+            for blast_j in [1.0e6_f32, 8.0e6] {
+                assert_eq!(
+                    hot_sizes(ImpactStyle::Bursting { blast_j }, surface),
+                    [look().burst_flash_scale * blast_j.cbrt()],
+                );
+            }
+        }
     }
 
     /// A world with no painted terrain (a headless harness, the flat fixture slab) has no ground to

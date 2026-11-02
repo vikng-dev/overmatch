@@ -14,10 +14,17 @@ use serde::Deserialize;
 
 /// Authored contact dressing, independent of flying diameter. These are provisional art recipes;
 /// material feedback still determines whether the surface emits sparks or powder.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Deserialize)]
 pub(crate) enum ImpactStyle {
     Compact,
     Layered,
+    /// A layered round whose burst functions at contact, its blast energy in J. Never authored: the
+    /// registry derives it from the round's fuze and burst ([`crate::rounds`]), so the presentation
+    /// cannot disagree with the round's data.
+    #[serde(skip_deserializing)]
+    Bursting {
+        blast_j: f32,
+    },
 }
 
 /// The round's flight emissions, present on the shell from complete spawn on every role. View
