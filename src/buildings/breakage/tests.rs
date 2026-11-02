@@ -3647,6 +3647,9 @@ fn a_marched_line_keeps_carrier_work_and_bend_at_entry() {
             Block::cuboid(Vec3::new(-2.0, -1.0, 0.0), Vec3::new(2.0, 1.0, 1.0));
         kind.layout.blocks[rear] =
             Block::cuboid(Vec3::new(-2.0, -1.0, 1.0), Vec3::new(2.0, 1.0, 2.0));
+        // Fixture crush energy resolves both channels above the record's millimetre quantum.
+        kind.layout.materials[front].crush = 1000.0;
+        kind.layout.materials[rear].crush = 1000.0;
         app.world_mut().get_mut::<Breakage>(root).unwrap().kind = Arc::new(kind.clone());
         let a = Vec3::new(-0.1 * slope, 0.0, -0.1);
         let b = Vec3::new(2.1 * slope, 0.0, 2.1);
@@ -3686,7 +3689,7 @@ fn a_marched_line_keeps_carrier_work_and_bend_at_entry() {
                 entrance_energy: 5.0,
             }],
         });
-        let loads = app
+        let taken = app
             .world_mut()
             .run_system_once(move |p: DepositParam| {
                 let deposit = p
@@ -3696,9 +3699,24 @@ fn a_marched_line_keeps_carrier_work_and_bend_at_entry() {
                     .expect("the shipped shell observer queues its line");
                 let mut taken = BTreeMap::new();
                 take_lines(&p, &BTreeMap::from([(root, frame)]), deposit, &mut taken);
-                taken.remove(&root).unwrap().line_loads
+                taken.remove(&root).unwrap()
             })
             .unwrap();
+        let holes = holes_of(&kind, 1.0, &taken.lines, &[]);
+        for &(c, from, to, _) in &taken.lines {
+            let energy = if c == front { 6.0 } else { 1.0 };
+            let volume = energy / kind.layout.materials[c].crush;
+            let radius = (volume / (std::f32::consts::PI * from.distance(to)))
+                .sqrt()
+                .min((0.75 * volume / std::f32::consts::PI).cbrt());
+            let hole = holes.iter().find(|(chunk, _)| *chunk == c).unwrap().1;
+            assert_eq!(
+                hole.radius,
+                (radius * 1000.0).round() as u16,
+                "the game's damage-model view must include the entrance work in its first chunk's hole"
+            );
+        }
+        let loads = taken.line_loads;
         let total: Vec3 = loads.iter().map(|load| load.blow).sum();
         assert!((total - entry_blow - transit_blow).length() < 1e-4);
         assert!((loads.iter().map(|load| load.energy).sum::<f32>() - 7.0).abs() < 1e-5);

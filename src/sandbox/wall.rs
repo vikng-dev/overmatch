@@ -7,7 +7,7 @@
 //!   chunks, each a static collider with the `Brick` substance, so the walk crosses them as it
 //!   crosses any hard volume, and the bake's joints and ground anchors.
 //! * **Deposits.** A round's crossing deposits, in each chunk, the energy the walk says it lost
-//!   there ([`ArmourMark::Crossing`]), and pushes it with the momentum the round lost. The blast
+//!   there ([`ShellMarched`]), and pushes it with the momentum the round lost. The blast
 //!   tool (O) bursts a charge of 0.1–5 kg at 0–5 m standoff: a sphere of rays ([`blast_field`])
 //!   each stopping on the first chunk it meets with its share of the energy, pushing the face it
 //!   meets with the blast's reflected impulse ([`model::Blast::push`]).
@@ -53,9 +53,7 @@ use self::baked::Placement;
 use self::model::{Block, Cut, Load, Masonry};
 use super::{FreeFlyCam, SEED_SPEC, UI_LEFT, panel_capturing};
 use crate::ballistics::burst::products_momentum;
-use crate::ballistics::{
-    ArmourMark, BallisticVolume, CrossingEnd, FireShell, PenetrationMarks, SpallMarks,
-};
+use crate::ballistics::{BallisticVolume, DeliveredLine, FireShell, ShellMarched, SpallMarks};
 use crate::buildings::schema::BuildingAsset;
 use crate::dev_capture::plan::RangeWallCase;
 use crate::substances::SubstanceRegistry;
@@ -78,9 +76,6 @@ const MASSES: [f32; 6] = [0.1, 0.2, 0.5, 1.0, 2.0, 5.0];
 const STANDOFFS: [f32; 6] = [0.0, 0.5, 1.0, 2.0, 3.0, 5.0];
 /// Rounds an automatic gun fires per F (the brief's burst of 50).
 const BURST: usize = 50;
-/// The burst's spread half-angle, rad. ASSUMED: no gun file states a dispersion; a tight group so
-/// a burst's wear lands on a few chunks.
-const BURST_SPREAD: f32 = 0.003;
 /// How far the drawn chunk falls short of its collider on every side, m: the drawn seam.
 const SEAM: f32 = 0.004;
 /// How far a loose chunk's collider falls short of its box on every side, m, so a group freed in
@@ -131,6 +126,7 @@ pub(super) fn plugin(app: &mut App) {
         })
         .add_systems(Update, drive_script.before(fire_burst));
     }
+    wall_tool();
     let charge = Charge::of(&rounds);
     app.insert_resource(WallRounds(rounds))
         .insert_resource(charge)
@@ -139,6 +135,7 @@ pub(super) fn plugin(app: &mut App) {
         .init_resource::<WallQueue>()
         .init_resource::<WallLog>()
         .init_resource::<WallBurst>()
+        .add_observer(read_hits)
         .init_gizmo_group::<WallGizmos>()
         .add_systems(Startup, (setup_wall, spawn_readout))
         .add_systems(
@@ -146,7 +143,6 @@ pub(super) fn plugin(app: &mut App) {
             (
                 wall_keys.run_if(not(panel_capturing)),
                 fire_burst,
-                read_hits,
                 apply_deposits,
                 (draw_wall, paint_witness, animate_puffs, update_readout),
             )
@@ -175,13 +171,6 @@ struct WitnessTile(usize);
 struct DustPuff {
     born: f32,
     material: Handle<StandardMaterial>,
-}
-
-/// How much of a shell's record the wall has read: its armour log entries and spall cones.
-#[derive(Component)]
-struct WallRead {
-    log: usize,
-    cones: usize,
 }
 
 /// The readout line: the active rule, the structural check and the last shot.
@@ -263,7 +252,6 @@ struct WallControls {
 #[derive(Clone, Debug)]
 struct WallRound {
     key: String,
-    name: String,
     round: crate::rounds::Round,
     mechanism: spec::FireMechanism,
     count: usize,
@@ -287,24 +275,40 @@ struct Charge {
     casing_speed: f32,
 }
 
-/// The blast tool's cased source round, by key (`assets/dev/wall-tool.ron`).
-fn cased_round() -> String {
-    #[derive(serde::Deserialize)]
-    #[serde(deny_unknown_fields)]
-    struct Source {
-        cased_round: String,
+/// The game's damage-model inspector inputs, parsed once before the tool admits play.
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct WallTool {
+    cased_round: String,
+    spread_rad: crate::provenance::Sourced<f32>,
+}
+
+fn tool_from_ron(text: &str) -> Result<WallTool, String> {
+    let tool: WallTool = ron::from_str(text).map_err(|err| err.to_string())?;
+    if !tool.spread_rad.0.is_finite() || tool.spread_rad.0 < 0.0 {
+        return Err(
+            "spread_rad must be finite and nonnegative; author the inspection spread".to_string(),
+        );
     }
-    let source: Source = ron::from_str(include_str!("../../assets/dev/wall-tool.ron"))
-        .unwrap_or_else(|err| panic!("wall blast tool: assets/dev/wall-tool.ron: {err}; author cased_round as a chambered burst-round key"));
-    source.cased_round
+    Ok(tool)
+}
+
+fn wall_tool() -> &'static WallTool {
+    static TOOL: std::sync::LazyLock<WallTool> = std::sync::LazyLock::new(|| {
+        crate::provenance::shipped("assets/dev/wall-tool.ron", || {
+            tool_from_ron(include_str!("../../assets/dev/wall-tool.ron"))
+        })
+        .unwrap_or_else(|err| panic!("assets/dev/wall-tool.ron: {err}"))
+    });
+    &TOOL
 }
 
 impl Charge {
     /// The game's environment blast tool requires a sourced core and a burst round whose
     /// casing supplies its cased setting. Missing construction is refused at initialization.
     fn of(rounds: &[WallRound]) -> Self {
-        let key = cased_round();
-        let burst = rounds.iter().find(|round| round.key == key)
+        let key = &wall_tool().cased_round;
+        let burst = rounds.iter().find(|round| &round.key == key)
             .and_then(|round| round.round.burst).unwrap_or_else(|| panic!(
                 "wall blast tool: assets/dev/wall-tool.ron field cased_round {key:?}: rounds need a burst block for this key; author a chambered burst-round key"));
         // DERIVED from the selected burst's compiled construction: no second core lookup can
@@ -392,9 +396,7 @@ enum Deposit {
     /// lost there (J); its travel and the momentum it lost across the wall (N·s).
     Line {
         what: String,
-        lines: Vec<(usize, Vec3, Vec3, f32)>,
-        along: Vec3,
-        momentum: f32,
+        lines: Vec<(usize, DeliveredLine)>,
         /// The strength (J) of the exit cones it threw.
         spall: f32,
     },
@@ -513,7 +515,6 @@ fn wall_rounds() -> Vec<WallRound> {
             if let Ok(round) = registry.round(gun_key, key) {
                 rounds.push(WallRound {
                     key: key.to_owned(),
-                    name: ascii(names.name(key).unwrap_or(key)),
                     round,
                     mechanism: gun.mechanism().family(),
                     count,
@@ -527,12 +528,6 @@ fn wall_rounds() -> Vec<WallRound> {
 
 /// `text` with every character outside printable ASCII replaced: the sandbox's default font draws
 /// ASCII only.
-fn ascii(text: &str) -> String {
-    text.chars()
-        .map(|c| if (' '..='~').contains(&c) { c } else { '?' })
-        .collect()
-}
-
 /// The plan's case among the wall's `rounds`.
 ///
 /// # Panics
@@ -810,7 +805,7 @@ struct KeysParam<'w, 's> {
     wall: Option<Res<'w, Wall>>,
     queue: ResMut<'w, WallQueue>,
     burst: ResMut<'w, WallBurst>,
-    camera: Single<'w, 's, &'static mut Transform, With<FreeFlyCam>>,
+    camera: Query<'w, 's, &'static mut Transform, With<FreeFlyCam>>,
     time: Res<'w, Time>,
     rebuild: Rebuild<'w, 's>,
 }
@@ -826,6 +821,10 @@ fn step(keys: &ButtonInput<KeyCode>, down: KeyCode, up: KeyCode, index: &mut usi
 }
 
 fn wall_keys(mut p: KeysParam) {
+    let mut camera = p
+        .camera
+        .single_mut()
+        .expect("the wall inspector has exactly one FreeFlyCam");
     let keys = &p.keys;
     let mut controls = *p.controls;
     if keys.just_pressed(KeyCode::KeyH) {
@@ -858,7 +857,7 @@ fn wall_keys(mut p: KeysParam) {
             View::Witness => View::Front,
         };
         if let Some(wall) = p.wall.as_deref() {
-            **p.camera = view_pose(controls.view, aim_point(wall));
+            *camera = view_pose(controls.view, aim_point(wall));
         }
     }
     if keys.just_pressed(KeyCode::KeyF) {
@@ -872,8 +871,8 @@ fn wall_keys(mut p: KeysParam) {
     if keys.just_pressed(KeyCode::KeyO)
         && let Some(wall) = p.wall.as_deref()
     {
-        let eye = p.camera.translation;
-        let dir = p.camera.forward().as_vec3();
+        let eye = camera.translation;
+        let dir = camera.forward().as_vec3();
         let state = &wall.live.state;
         if let Some((_, t, _)) = model::first_hit(&wall.cut.blocks, |i| state.standing(i), eye, dir)
         {
@@ -930,23 +929,30 @@ impl Rebuild<'_, '_> {
 }
 
 /// Fire the burst's rounds that are due, down the camera's view axis, an automatic gun's spread
-/// over a sunflower of [`BURST_SPREAD`].
+/// over a sunflower of the authored inspection spread.
 fn fire_burst(
     mut burst: ResMut<WallBurst>,
     rounds: Res<WallRounds>,
     time: Res<Time>,
-    camera: Single<&Transform, With<FreeFlyCam>>,
+    camera: Query<&Transform, With<FreeFlyCam>>,
     mut commands: Commands,
 ) {
-    let Some(entry) = rounds.0.get(burst.round) else {
-        return;
-    };
+    if burst.left == 0 {
+        return; // No automatic burst is active.
+    }
+    let entry = rounds
+        .0
+        .get(burst.round)
+        .expect("an active burst names a chambered wall round");
+    let camera = camera
+        .single()
+        .expect("the wall inspector has exactly one FreeFlyCam");
     while burst.left > 0 && time.elapsed_secs() >= burst.next {
         let k = burst.fired;
         let forward = camera.forward().as_vec3();
         let direction = if entry.count > 1 {
             let golden = std::f32::consts::PI * (3.0 - 5.0_f32.sqrt());
-            let r = BURST_SPREAD * ((k as f32 + 0.5) / entry.count as f32).sqrt();
+            let r = wall_tool().spread_rad.0 * ((k as f32 + 0.5) / entry.count as f32).sqrt();
             let angle = k as f32 * golden;
             forward
                 + camera.right().as_vec3() * (r * angle.cos())
@@ -958,7 +964,8 @@ fn fire_burst(
             &entry.round,
             camera.translation,
             camera.translation,
-            Dir3::new(direction).unwrap_or(Dir3::NEG_Z),
+            Dir3::new(direction)
+                .expect("the camera basis and forward-centred spread give a nonzero direction"),
             entry.mechanism,
             true,
             None,
@@ -970,108 +977,61 @@ fn fire_burst(
     }
 }
 
-/// Read every shell's new armour log entries: a crossing that cut a chunk queues its line deposit,
-/// and the cones it threw are the wall's, each ray's dose summed on the witness tile it ended on.
-#[derive(SystemParam)]
-struct HitsParam<'w, 's> {
-    shells: Query<
-        'w,
-        's,
-        (
-            Entity,
-            &'static PenetrationMarks,
-            Option<&'static SpallMarks>,
-            Option<&'static WallRead>,
-        ),
-    >,
-    chunks: Query<'w, 's, &'static WallChunk>,
-    queue: ResMut<'w, WallQueue>,
-    log: ResMut<'w, WallLog>,
-    rounds: Res<'w, WallRounds>,
-    commands: Commands<'w, 's>,
-}
-
-fn read_hits(mut p: HitsParam) {
-    let tiles = TILES.0 * TILES.1;
-    for (shell, marks, spall, read) in &p.shells {
-        let (log_at, mut cone_at) = read.map_or((0, 0), |read| (read.log, read.cones));
-        if log_at >= marks.log.len() {
-            continue;
-        }
-        for mark in &marks.log[log_at..] {
-            let ArmourMark::Crossing {
-                volumes,
-                cones,
-                incoming,
-                speed_in,
-                end,
-                ..
-            } = mark
-            else {
-                continue;
-            };
-            let lines: Vec<(usize, Vec3, Vec3, f32)> = volumes
-                .iter()
-                .filter_map(|crossing| {
-                    p.chunks
-                        .get(crossing.volume)
-                        .ok()
-                        .map(|chunk| (chunk.0, crossing.entry, crossing.end, crossing.energy))
-                })
-                .collect();
-            let thrown = spall
-                .map(|spall| &spall.cones[cone_at.min(spall.cones.len())..])
-                .unwrap_or_default();
-            let thrown = &thrown[..(*cones).min(thrown.len())];
-            cone_at += cones;
-            if lines.is_empty() {
-                continue;
+/// The game's damage-model wall inspector reads resolved work and momentum, never inferred
+/// round construction or immutable crossing metadata. Each tick's delivered lines are read once.
+fn read_hits(
+    marched: On<ShellMarched>,
+    shells: Query<Option<&SpallMarks>>,
+    chunks: Query<&WallChunk>,
+    mut queue: ResMut<WallQueue>,
+    mut log: ResMut<WallLog>,
+) {
+    let lines: Vec<_> = marched
+        .lines
+        .iter()
+        .filter_map(|line| {
+            match chunks.get(line.crossing.volume) {
+                Ok(chunk) => Some((chunk.0, *line)),
+                Err(_) => None, // Another body's volume belongs to its own reader.
             }
-            // The round is the wall round of the nearest muzzle speed: what it is called, and the
-            // mass that meets the plate, whose speed change is the momentum it lost.
-            let round = p.rounds.0.iter().min_by(|a, b| {
-                (a.round.muzzle_speed - speed_in)
-                    .abs()
-                    .total_cmp(&(b.round.muzzle_speed - speed_in).abs())
-            });
-            let speed_out = match end {
-                CrossingEnd::Exit { speed, .. } => *speed,
-                CrossingEnd::Rest { .. } => 0.0,
-            };
-            p.log.witness.resize(tiles, 0.0);
-            let mut strength = 0.0;
-            for cone in thrown {
-                let weight = 1.0 / cone.rays.len().max(1) as f32;
-                for ray in &cone.rays {
-                    if let Some(tile) = witness_at(ray.end) {
-                        p.log.witness[tile] += ray.strength * weight;
-                    }
-                }
-                p.log.cones.push(WallCone {
-                    origin: cone.origin,
-                    rays: cone
-                        .rays
-                        .iter()
-                        .map(|ray| (ray.end, ray.strength))
-                        .collect(),
-                });
-                strength += cone.strength;
-            }
-            p.queue.0.push(Deposit::Line {
-                what: round.map_or_else(|| "a round".to_string(), |round| round.name.clone()),
-                lines,
-                along: incoming.normalize_or(Vec3::NEG_Z),
-                momentum: round.map_or(0.0, |round| {
-                    round.round.penetrator.mass * (speed_in - speed_out).max(0.0)
-                }),
-                spall: strength,
-            });
-        }
-        p.commands.entity(shell).insert(WallRead {
-            log: marks.log.len(),
-            cones: cone_at,
-        });
+        })
+        .collect();
+    if lines.is_empty() {
+        return; // This march deposited no line on the inspector's wall.
     }
+    let spall = shells
+        .get(marched.shell)
+        .expect("ShellMarched observers run before their shell despawns");
+    let mut strength = 0.0;
+    if let Some(spall) = spall {
+        log.witness.resize(TILES.0 * TILES.1, 0.0);
+        for cone in spall
+            .cones
+            .get(marched.cones_from..)
+            .expect("ShellMarched's cone cursor precedes this tick's new cones")
+        {
+            let weight = 1.0 / cone.rays.len().max(1) as f32;
+            for ray in &cone.rays {
+                if let Some(tile) = witness_at(ray.end) {
+                    log.witness[tile] += ray.strength * weight;
+                }
+            }
+            log.cones.push(WallCone {
+                origin: cone.origin,
+                rays: cone
+                    .rays
+                    .iter()
+                    .map(|ray| (ray.end, ray.strength))
+                    .collect(),
+            });
+            strength += cone.strength;
+        }
+    }
+    queue.0.push(Deposit::Line {
+        what: "resolved round".to_string(),
+        lines,
+        spall: strength,
+    });
 }
 
 /// What one deposit did to the wall.
@@ -1094,29 +1054,6 @@ struct Applied {
     /// A blast's charge, origin, intercepted energy (audit only), its rays' summed unsigned
     /// impulse (N·s), and its drawn ray ends.
     blast: Option<(Blast, Vec3, f32, f32, Vec<Vec3>)>,
-}
-
-/// A round's crossing of `structure` as the laws read it: its lines ([`Load::line`]), each blowing
-/// with the round's lost momentum shared among the chunks by the energy each took.
-fn line_loads(
-    structure: &model::Structure,
-    lines: &[(usize, Vec3, Vec3, f32)],
-    along: Vec3,
-    momentum: f32,
-) -> Vec<Load> {
-    let total: f32 = lines.iter().map(|line| line.3).sum();
-    lines
-        .iter()
-        .flat_map(|&(chunk, entry, end, energy)| {
-            let blow = if total > 0.0 {
-                along * (momentum * energy / total)
-            } else {
-                Vec3::ZERO
-            };
-            let material = &structure.chunks[chunk].material;
-            Load::line(chunk, material, entry, end, energy, blow)
-        })
-        .collect()
 }
 
 /// The holes a deposit cuts in the wall, the game's own sizing ([`crate::buildings::breakage::cut_holes`]):
@@ -1147,14 +1084,28 @@ fn apply_deposit(
 ) -> Applied {
     let mut applied = Applied::default();
     let (loads, holes) = match deposit {
-        Deposit::Line {
-            lines,
-            along,
-            momentum,
-            ..
-        } => (
-            line_loads(&wall.cut.structure, lines, *along, *momentum),
-            cut_holes(&wall.cut, lines, &[]),
+        Deposit::Line { lines, .. } => (
+            lines
+                .iter()
+                .flat_map(|(chunk, line)| {
+                    crate::buildings::breakage::resolved_line_loads(
+                        *chunk,
+                        &wall.cut.structure.chunks[*chunk].material,
+                        line,
+                    )
+                })
+                .collect(),
+            cut_holes(
+                &wall.cut,
+                &lines
+                    .iter()
+                    .map(|(chunk, line)| {
+                        let crossing = line.crossing;
+                        (*chunk, crossing.entry, crossing.end, crossing.energy)
+                    })
+                    .collect::<Vec<_>>(),
+                &[],
+            ),
         ),
         &Deposit::Blast {
             mass,
@@ -1364,6 +1315,7 @@ fn apply_deposits(mut p: ApplyParam) {
                     Transform::from_translation(*centroid),
                     Visibility::default(),
                     crate::eased_dynamic_body(),
+                    crate::substances::contact_friction(wall.material.friction),
                     LinearVelocity(*velocity),
                     AngularVelocity(*spin),
                 ))
@@ -1376,6 +1328,7 @@ fn apply_deposits(mut p: ApplyParam) {
                             Transform::from_translation(block.center() - *centroid),
                             chunk_collider(block, LOOSE_GAP),
                             ColliderDensity(wall.material.density),
+                            crate::substances::contact_friction(wall.material.friction),
                             CollisionLayers::new(
                                 [Layer::Default],
                                 [Layer::Default, Layer::Terrain, Layer::Armor],
@@ -1684,20 +1637,20 @@ struct ReadoutParam<'w, 's> {
     wall: Option<Res<'w, Wall>>,
     log: Res<'w, WallLog>,
     controls: Res<'w, WallControls>,
-    camera: Single<'w, 's, &'static Transform, With<FreeFlyCam>>,
-    text: Single<
+    camera: Query<'w, 's, &'static Transform, With<FreeFlyCam>>,
+    text: Query<
         'w,
         's,
         (&'static mut Text, &'static mut Visibility),
         (With<WallReadout>, Without<WallHelp>, Without<super::Legend>),
     >,
-    help: Single<
+    help: Query<
         'w,
         's,
         (&'static mut Text, &'static mut Visibility),
         (With<WallHelp>, Without<WallReadout>, Without<super::Legend>),
     >,
-    range_legend: Single<
+    range_legend: Query<
         'w,
         's,
         &'static mut Visibility,
@@ -1707,7 +1660,11 @@ struct ReadoutParam<'w, 's> {
 
 /// The readout: one line (the last shot), and the help panel
 /// while H has it open. Both show only near the wall, where the range's own H legend stays shut.
-fn update_readout(p: ReadoutParam) {
+fn update_readout(mut p: ReadoutParam) {
+    let camera = p
+        .camera
+        .single()
+        .expect("the wall inspector has exactly one FreeFlyCam");
     if p.wall.is_none() {
         return;
     }
@@ -1719,7 +1676,7 @@ fn update_readout(p: ReadoutParam) {
             .as_ref()
             .map_or_else(|| "no shot yet".to_string(), last_shot),
     );
-    let near = p.camera.translation.distance(layout().centre()) < READOUT_RANGE;
+    let near = camera.translation.distance(layout().centre()) < READOUT_RANGE;
     let shown_if = |on: bool| {
         if on {
             Visibility::Inherited
@@ -1727,18 +1684,27 @@ fn update_readout(p: ReadoutParam) {
             Visibility::Hidden
         }
     };
-    let (mut text, mut visibility) = p.text.into_inner();
+    let (mut text, mut visibility) = p
+        .text
+        .single_mut()
+        .expect("the wall inspector spawns exactly one readout");
     visibility.set_if_neq(shown_if(near));
     if text.0 != line {
         text.0 = line;
     }
-    let (mut help, mut help_visibility) = p.help.into_inner();
+    let (mut help, mut help_visibility) = p
+        .help
+        .single_mut()
+        .expect("the wall inspector spawns exactly one help panel");
     help_visibility.set_if_neq(shown_if(near && c.help));
     if help.0 != HELP {
         help.0 = HELP.to_string();
     }
     if near {
-        p.range_legend.into_inner().set_if_neq(Visibility::Hidden);
+        p.range_legend
+            .single_mut()
+            .expect("the range spawns exactly one legend")
+            .set_if_neq(Visibility::Hidden);
     }
 }
 
@@ -1760,7 +1726,7 @@ struct ScriptParam<'w, 's> {
     script: ResMut<'w, WallScript>,
     wall: Option<Res<'w, Wall>>,
     time: Res<'w, Time>,
-    camera: Single<'w, 's, &'static mut Transform, With<FreeFlyCam>>,
+    camera: Query<'w, 's, &'static mut Transform, With<FreeFlyCam>>,
     burst: ResMut<'w, WallBurst>,
     rounds: Res<'w, WallRounds>,
     queue: ResMut<'w, WallQueue>,
@@ -1768,6 +1734,10 @@ struct ScriptParam<'w, 's> {
 }
 
 fn drive_script(mut p: ScriptParam) {
+    let mut camera = p
+        .camera
+        .single_mut()
+        .expect("the wall inspector has exactly one FreeFlyCam");
     // The range gun's round label names the range's selection, not the wall's case.
     for mut visibility in &mut p.label {
         visibility.set_if_neq(Visibility::Hidden);
@@ -1787,7 +1757,7 @@ fn drive_script(mut p: ScriptParam) {
     } else {
         View::Front
     };
-    **p.camera = view_pose(view, aim);
+    *camera = view_pose(view, aim);
     if p.script.done || t < SCRIPT_FIRE {
         return;
     }

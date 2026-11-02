@@ -1,4 +1,7 @@
 // The game's environment-destruction sandbox fixture: the cased tool scales this
 // chambered round's compiled filler and casing construction. This is a dev-tool input,
 // independent of the firing tool's currently selected round.
-(cased_round: "88mm_HE")
+(
+    cased_round: "88mm_HE",
+    spread_rad: (0.003, StandIn("inspection tool: tight automatic-fire group concentrates wear on a few chunks; gun dispersion is not authored yet")),
+)

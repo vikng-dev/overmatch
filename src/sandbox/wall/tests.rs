@@ -546,7 +546,7 @@ fn the_shared_blast_path_reports_pressure_work_and_rear_scabs() {
     let rounds = super::wall_rounds();
     let he = rounds
         .iter()
-        .find(|round| round.key == super::cased_round())
+        .find(|round| round.key == super::wall_tool().cased_round)
         .expect("the tool's cased round is shipped");
     let charge = Charge::of(std::slice::from_ref(he));
     let mass = he
@@ -656,9 +656,23 @@ fn the_sandbox_crumbles_a_chunk_past_the_hole_cap() {
         wall.live.state.pool[c] * chunks[c].material.crush / (4.0 * (HOLES_PER_CHUNK + 1) as f32);
     let channel = Deposit::Line {
         what: "fixture channel".to_owned(),
-        lines: vec![(c, at - Vec3::Z * 0.05, at + Vec3::Z * 0.05, energy)],
-        along: Vec3::Z,
-        momentum: 0.0,
+        lines: vec![(
+            c,
+            crate::ballistics::DeliveredLine {
+                crossing: crate::ballistics::VolumeCrossing {
+                    volume: bevy::prelude::Entity::PLACEHOLDER,
+                    entry: at - Vec3::Z * 0.05,
+                    end: at + Vec3::Z * 0.05,
+                    chord: 0.1,
+                    cost: 0.0,
+                    energy,
+                    perforated: true,
+                },
+                momentum: Vec3::ZERO,
+                entrance_momentum: Vec3::ZERO,
+                entrance_energy: 0.0,
+            },
+        )],
         spall: 0.0,
     };
     for kept in 1..=HOLES_PER_CHUNK {
@@ -678,4 +692,64 @@ fn the_sandbox_crumbles_a_chunk_past_the_hole_cap() {
         result.dusted.contains(&c),
         "the channel past the cap crumbles the chunk"
     );
+}
+
+/// The game's damage-model inspector preserves resolved momentum and entrance work even when
+/// no muzzle speed identifies the round. The observer, shared load owner and hole reader must
+/// agree. All geometry, work and momentum below are fixture data.
+#[test]
+fn the_inspector_reads_delivered_work_and_momentum_without_guessing_a_round() {
+    use crate::ballistics::{DeliveredLine, ShellMarched, SpallMarks, VolumeCrossing};
+    use bevy::prelude::*;
+    let mut app = App::new();
+    app.init_resource::<super::WallQueue>()
+        .init_resource::<super::WallLog>()
+        .add_observer(super::read_hits);
+    let volume = app.world_mut().spawn(super::WallChunk(0)).id();
+    let shell = app.world_mut().spawn(SpallMarks::default()).id();
+    let line = DeliveredLine {
+        crossing: VolumeCrossing {
+            volume,
+            entry: Vec3::ZERO,
+            end: Vec3::Z,
+            chord: 1.0,
+            cost: 0.0,
+            energy: 7.0,
+            perforated: true,
+        },
+        entrance_energy: 5.0,
+        entrance_momentum: Vec3::X * 12.0,
+        momentum: Vec3::X * 12.0 + Vec3::Z * 30.0,
+    };
+    app.world_mut().trigger(ShellMarched {
+        shell,
+        marks_from: 0,
+        cones_from: 0,
+        lines: vec![line],
+        burst: None,
+    });
+    let queue = app.world().resource::<super::WallQueue>();
+    let Deposit::Line { lines, .. } = &queue.0[0] else {
+        panic!("one resolved line")
+    };
+    assert_eq!(lines.len(), 1);
+    let loads = crate::buildings::breakage::resolved_line_loads(0, &brick(), &lines[0].1);
+    assert!((loads.iter().map(|load| load.energy).sum::<f32>() - 7.0).abs() < 1e-5);
+    assert!((loads.iter().map(|load| load.blow).sum::<Vec3>() - line.momentum).length() < 1e-4);
+    let entrance = loads.iter().find(|load| load.blow.x > 0.0).unwrap();
+    assert_eq!(entrance.at, Vec3::ZERO);
+    assert_eq!(entrance.energy, 5.0);
+}
+
+/// Authored inspector spread cannot poison a fired direction; the data gate names its repair.
+#[test]
+fn the_inspection_tool_refuses_invalid_spread_at_admission() {
+    for value in ["-1.0", "NaN", "inf"] {
+        let text =
+            format!(r#"(cased_round: "fixture", spread_rad: ({value}, Fixture("fixture")))"#);
+        let error = super::tool_from_ron(&text)
+            .err()
+            .expect("invalid spread is refused");
+        assert!(error.contains("spread_rad"));
+    }
 }

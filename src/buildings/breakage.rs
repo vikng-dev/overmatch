@@ -1128,33 +1128,72 @@ fn take_lines(
             }
         };
         let chord: f32 = shares.iter().map(|(_, t0, t1)| t1 - t0).sum();
-        if chord <= 0.0 {
-            continue;
-        }
+        assert!(
+            chord > 0.0,
+            "a resolved building line crosses at least one owned chunk; its work and momentum cannot disappear"
+        );
         let into = taken.entry(root).or_default();
         let turned = frame.turn(impulse - entrance_impulse);
-        let &(first, start, _) = shares
+        let &(first, _, _) = shares
             .iter()
             .min_by(|a, b| a.1.total_cmp(&b.1))
             .expect("a positive chunk chord has an entrance");
-        into.line_loads.extend(Load::field(
-            &[(
-                first,
-                (a + dir * start) * frame.scale,
-                entrance_energy,
-                frame.turn(entrance_impulse),
-            )],
-            |c| layout.materials[c].crush,
-        ));
         for (c, t0, t1) in shares {
-            let part = (energy - entrance_energy) * (t1 - t0) / chord;
+            let share = (t1 - t0) / chord;
+            let entry_energy = if c == first { entrance_energy } else { 0.0 };
+            let entry_blow = if c == first {
+                frame.turn(entrance_impulse)
+            } else {
+                Vec3::ZERO
+            };
             let (from, to) = ((a + dir * t0) * frame.scale, (a + dir * t1) * frame.scale);
-            into.lines.push((c, from, to, part));
-            let blow = turned * ((t1 - t0) / chord);
+            let part = DeliveredLine {
+                crossing: crate::ballistics::VolumeCrossing {
+                    entry: from,
+                    end: to,
+                    energy: (energy - entrance_energy) * share + entry_energy,
+                    ..line.crossing
+                },
+                momentum: turned * share + entry_blow,
+                entrance_energy: entry_energy,
+                entrance_momentum: entry_blow,
+            };
+            into.lines.push((c, from, to, part.crossing.energy));
             into.line_loads
-                .extend(Load::line(c, &layout.materials[c], from, to, part, blow));
+                .extend(resolved_line_loads(c, &layout.materials[c], &part));
         }
     }
+}
+
+/// The game's damage-model construction loads: entrance work and momentum stay at entry;
+/// the remaining work and momentum follow the chord. The building and wall inspector read this
+/// same owner. The line's total energy sizes its chunk's visual channel independently of how
+/// the solver samples its loads.
+pub(crate) fn resolved_line_loads(
+    chunk: usize,
+    material: &Masonry,
+    line: &DeliveredLine,
+) -> Vec<Load> {
+    let crossing = line.crossing;
+    Load::field(
+        &[(
+            chunk,
+            crossing.entry,
+            line.entrance_energy,
+            line.entrance_momentum,
+        )],
+        |_| material.crush,
+    )
+    .into_iter()
+    .chain(Load::line(
+        chunk,
+        material,
+        crossing.entry,
+        crossing.end,
+        crossing.energy - line.entrance_energy,
+        line.momentum - line.entrance_momentum,
+    ))
+    .collect()
 }
 
 /// AUTHORITY: run the tick's deposits through the laws (module doc), record every change and spawn
