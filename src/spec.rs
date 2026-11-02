@@ -2997,7 +2997,7 @@ TankSpec(
         fn gearbox(tr: &mut TransmissionSpec) -> &mut GearboxSpec {
             &mut tr.gearbox
         }
-        let cases: [(&str, fn(&mut TransmissionSpec)); 20] = [
+        let cases: [(&str, fn(&mut TransmissionSpec)); 15] = [
             // Engine audio data: both are DIVISORS in the playback law — a 0-cylinder engine pops
             // at 0 Hz (silence played at speed 0) and a 0 Hz recording makes the anchor infinite.
             ("cylinders", |tr| engine(tr).cylinders = 0),
@@ -3015,20 +3015,10 @@ TankSpec(
                     .expect("the fixture authors a sound block")
                     .clip_pop_hz = f32::NAN;
             }),
-            // Stage-B crank block: absurd-but-finite values must be refused outright, in
-            // BOTH directions — the lower bounds matter too: the coupling divides by J
-            // and the capacity gates every transmitted torque.
+            // Coupling requires positive crank inertia and finite clutch capacity.
             ("inertia_kgm2", |tr| engine(tr).inertia_kgm2 = 0.0),
-            ("inertia_kgm2", |tr| engine(tr).inertia_kgm2 = 0.05),
-            ("inertia_kgm2", |tr| engine(tr).inertia_kgm2 = 250.0),
             ("clutch_capacity_nm", |tr| {
                 engine(tr).clutch_capacity_nm = f32::NAN;
-            }),
-            ("clutch_capacity_nm", |tr| {
-                engine(tr).clutch_capacity_nm = 50.0;
-            }),
-            ("clutch_capacity_nm", |tr| {
-                engine(tr).clutch_capacity_nm = 80_000.0;
             }),
             // The game's driving model requires idle above its authored stall-guard band;
             // the drag regularisation independently reaches rest.
@@ -3043,7 +3033,6 @@ TankSpec(
                 tr.brake_static_factor = f32::NAN
             }),
             ("brake_static_factor", |tr| tr.brake_static_factor = 0.99),
-            ("brake_static_factor", |tr| tr.brake_static_factor = 2.51),
             ("launch_gears", |tr| gearbox(tr).launch_gears = 0),
             ("max_step", |tr| gearbox(tr).max_step = 0),
             ("ladder shape", |tr| {
@@ -3077,30 +3066,22 @@ TankSpec(
             err.contains("brake_static_factor"),
             "missing brake_static_factor should be named: {err}"
         );
-        // FIXTURE: tiny positive construction facts must still meet the coupling divisor's
-        // numerical domain. No independently authored belt inertia can bypass the derivation.
-        let mut spec = fixture();
-        spec.track.link_mass.0 = 1e-6;
-        spec.track.sprocket.spin_inertia_kgm2.0 = SideValues {
-            left: 1e-6,
-            right: 1e-6,
-        };
-        spec.track.idler.spin_inertia_kgm2.0 = SideValues {
-            left: 1e-6,
-            right: 1e-6,
-        };
-        for wheel in &mut spec.roadwheels {
-            wheel.spin_inertia_kgm2.0 = 1e-6;
-        }
-        let err = spec
-            .track
-            .transmission_params(&spec.roadwheels, lab_wrap(0.5), 1.0)
-            .unwrap_err()
-            .to_string();
-        assert!(
-            err.contains("derived belt inertia floor"),
-            "expected the derived inertia floor in: {err}"
-        );
+    }
+
+    /// The asset door relies on its own declared drivetrain remaining valid. Read that
+    /// declaration from its owner, including its small finite crank inertia.
+    #[test]
+    fn blender_fixture_drivetrain_meets_the_generic_admission() {
+        let source = include_str!("../.agents/blender/fixture_tank.py");
+        let (_, declaration) = source
+            .split_once("SPEC = ")
+            .expect("the Blender fixture owns a literal SPEC declaration");
+        let declaration = declaration.trim_start_matches('"').trim_start_matches('\\');
+        let (declaration, _) = declaration
+            .split_once("\"\"\"")
+            .expect("the Blender fixture SPEC declaration must close");
+        let spec: TankSpec = ron::de::from_str(declaration).unwrap();
+        spec.validate().unwrap();
     }
 
     /// FIXTURE: wrap radii for [`fixture`]'s running gear: a sprocket pitch radius and the

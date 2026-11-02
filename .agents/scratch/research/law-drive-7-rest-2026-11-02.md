@@ -1,6 +1,6 @@
 # Driver control seam, lane 7 (#146)
 
-Subject: the game's driving and damage model, game state only. Crew are HP pools at stations.
+Subject: the game's driving model.
 MEASURED start: 2026-11-02 17:23:15 UTC. Lane limit: 60 minutes (owner instruction).
 
 ## Dispositions
@@ -12,6 +12,24 @@ MEASURED start: 2026-11-02 17:23:15 UTC. Lane limit: 60 minutes (owner instructi
 | Audit 8 | redundant drag fade | verified algebra: the discrete stop cap alone bounds drag continuously at zero for any positive crank inertia | driving: remove drivetrain control residue (#146) |
 | Audit residue | shift check implied by clutch; binary service stored as float | verified source: shift opens the clutch before brakes; service has only off/on values | driving: remove drivetrain control residue (#146) |
 | Claude P3 | forward crank during rollback buys a cut | verified red: retained launch gear 4 changed to 2 | driving: remove drivetrain control residue (#146) |
+| Audit 1 / Claude P1 | scattered Driver ownership; zero-rate steer releases park | verified red: undeliverable steering released the lever | driving: let the Driver own resolved controls (#146) |
+| Claude P2 | ceiling braking conflates staffing with throughput | verified red: a staffed zero-rate descent accelerated above the curve ceiling | driving: let the Driver own resolved controls (#146) |
+| Claude P3 | `belt_tick` forwards default fields; identical engine early returns | verified source: the adapter now uses `DriveSignal::default`; torque receives Driver-admitted throughput | driving: let the Driver own resolved controls (#146) |
+| Audit 6 | two thresholds per detent and reachability search | verified source: keyboard input is monotone between requests; the exit band only delays it | driving: use one threshold per steering detent (#146) |
+| Audit 4 | reflected inertia priced on slip-held landing | verified source: candidate In pricing applies reflected mass even below its admitted floor | not fixed; fallback in driving: record the rejected Slip experiment (#146) |
+| Audit 5 | Slip admission narrower than accepted design | verified source: at-rest check excludes moving entries below idle in launch gears | not fixed; fallback in driving: record the rejected Slip experiment (#146) |
+| Audit 7 | over-rev guard has two jobs | verified source and audit measurement: crank guard also bounds available drag on descent | driving: declare the over-rev engine stand-in (#146) |
+| Codex P2 | S3 equilibrium admits the rolling-resistance fade band | verified algebra: full rolling resistance is valid only above its owner's fade speed | driving: admit and exercise different drivetrain construction (#146) |
+| Claude P3 | HUD negative zero | verified source: signed formatting rounds small backward rpm to negative zero | pending step 6 |
+| Claude P3 | backward HUD witness bypasses `readout` | verified source: it constructs the display value directly; readout has no backward assertion | pending step 6 |
+| Claude P3 | live idle-floor sign check has no witness | verified source: existing backward engine/gear cases do not distinguish this floor admission | pending step 6 |
+| Claude P3 | rollback witness overclaim, no-op and unlabelled precision | verified source at all named sites | pending step 6 |
+| Claude P3 | `drag_fraction` says actuation threshold | verified source: the base is Coulomb drag, with no actuation threshold | pending step 6 |
+| Claude P3 | Signed shaft excludes crank sign | verified source: contradicts the adjacent signed crank definition | pending step 6 |
+| Claude P3 | determinism fixture carries an unsupported measurement | verified record: no new measurement supports the current-law 4 m/s claim | pending step 6 |
+| Owner condition | second inline drivetrain and class invariants | verified: three constructions share launch, reverse, slope, settling and staffed-descent invariants | driving: admit and exercise different drivetrain construction (#146) |
+| Tank #2 | ten-degree unstaffed descent must accelerate | verified test-premise defect; not a game-law defect: stronger drag can arrest it; assertions retained with construction-derived demand | driving: admit and exercise different drivetrain construction (#146) |
+| Whole-library gate | spec tests pin removed class caps and belt floor | verified red; obsolete cases deleted; owning Blender spec is admitted directly | driving: admit and exercise different drivetrain construction (#146) |
 
 ## Step 1
 
@@ -65,24 +83,7 @@ mechanical countdown. No new physical premise or compensating predicate is intro
 MEASURED source counts: staffing reads in the transmission fall from 9 to 1; zero/positive task
 work guards fall from 5 to 1. The held-lever and clutch-opening distinctions are retained.
 
-| reviewer | finding | verified / not a defect | fixed in (subject) |
-|---|---|---|---|
-| Audit 1 / Claude P1 | scattered Driver ownership; zero-rate steer releases park | verified red: undeliverable steering released the lever | driving: let the Driver own resolved controls (#146) |
-| Claude P2 | ceiling braking conflates staffing with throughput | verified red: a staffed zero-rate descent accelerated above the curve ceiling | driving: let the Driver own resolved controls (#146) |
-| Claude P3 | `belt_tick` forwards default fields; identical engine early returns | verified source: the adapter now uses `DriveSignal::default`; torque receives Driver-admitted throughput | driving: let the Driver own resolved controls (#146) |
-| Audit 6 | two thresholds per detent and reachability search | verified source: keyboard input is monotone between requests; the exit band only delays it | driving: use one threshold per steering detent (#146) |
-| Audit 4 | reflected inertia priced on slip-held landing | verified source: candidate In pricing applies reflected mass even below its admitted floor | pending step 4 experiment |
-| Audit 5 | Slip admission narrower than accepted design | verified source: at-rest check excludes moving entries below idle in launch gears | pending step 4 experiment |
-| Audit 7 | over-rev guard has two jobs | verified source and audit measurement: crank guard also bounds available drag on descent | pending step 5 |
-| Codex P2 | S3 equilibrium admits the rolling-resistance fade band | verified algebra: full rolling resistance is valid only above its owner's fade speed | pending step 6 |
-| Claude P3 | HUD negative zero | verified source: signed formatting rounds small backward rpm to negative zero | pending step 6 |
-| Claude P3 | backward HUD witness bypasses `readout` | verified source: it constructs the display value directly; readout has no backward assertion | pending step 6 |
-| Claude P3 | live idle-floor sign check has no witness | verified source: existing backward engine/gear cases do not distinguish this floor admission | pending step 6 |
-| Claude P3 | rollback witness overclaim, no-op and unlabelled precision | verified source at all named sites | pending step 6 |
-| Claude P3 | `drag_fraction` says actuation threshold | verified source: the base is Coulomb drag, with no actuation threshold | pending step 6 |
-| Claude P3 | Signed shaft excludes crank sign | verified source: contradicts the adjacent signed crank definition | pending step 6 |
-| Claude P3 | determinism fixture carries an unsupported measurement | verified record: no new measurement supports the current-law 4 m/s claim | pending step 6 |
-| Owner condition | second inline drivetrain and class invariants | existing lab and seed cover separate construction; the requested additional fixture is not yet added | pending step 7 |
+
 
 MEASURED step-2 gates: formatting, CI clippy and 288 targeted track/HUD/load/citation tests
 passed. Both red regressions and the independent phase-hold witness pass. No engine API or
@@ -101,7 +102,7 @@ Direct admission refuses a threshold coincident with either the neutral-based or
 notch grid. Its witness uses binary Fixture notches; it tests admission, not the deleted search.
 The glossary now states the same detent model. No analog input or alternate detent path is kept.
 
-## Remaining work and numeric inventory
+## First-round checkpoint and numeric inventory (historical)
 
 Steps 4–7 are not certified by this checkpoint. In particular, the broader Slip admission and
 slip-held landing price have not been tried, so the existing narrow form and upshift refusal
@@ -235,3 +236,50 @@ wire shape changed. Commit: driving: declare the over-rev engine stand-in (#146)
 
 Queue waits make the owner's priority clause relevant: step 7 precedes the remaining step-6
 findings. Its fade-band expectation is included because Tank #2 must exercise that expectation.
+
+## Step 7: different drivetrain, same invariants
+
+Fixture: a three-forward/two-reverse-speed, 18,000 kg rig, ratios anchored at 5/12/25 km/h,
+1,100 N m peak at 1,400 rpm, 2 kg m² crank and 3,000 kg per-side belt inertia. Its curve,
+gear count, reductions, mass, power, shift window and capacities differ from the seed.
+The fixture's data was not retuned after a failed assertion. All class scenarios also retain
+the seed and the prior arithmetic drivetrain.
+
+MEASURED first run: launch, held reversal, slope lever, part-pedal travel and joint-step
+gear settling passed on the new construction. Its twenty-degree launch selected gear 2,
+never rolled backward, paid zero cuts and ended at 2.3704474 m/s. Reversal paid exactly one
+13-tick cut after the data-owned 32-tick pause. Top-gear settling reached gear 3 at
+6.7000537 m/s with zero changes in the final simulated second. Seed and lab also settled.
+
+Three red findings: constructor caps rejected otherwise finite construction; the coast
+expectation failed the rolling fade; and the zero-rate descent fixture assumed every
+upper-middle gear must accelerate on ten degrees. The last is not a game-law defect:
+this rig's motoring drag already arrests that descent. Assertions are unchanged; the
+brake witness's force setup now exceeds the construction's own drag by a share of its
+service capacity, so a working brake is necessary on every construction. No vehicle datum
+was tuned to make that witness pass. This is a correction to its class premise, not an
+engine/brake-law patch or a relaxed pass condition.
+
+The unexplained limits 20,000 rpm, 100,000 N m, static factor 2.5, crank 0.1–100 kg m²,
+clutch 100–50,000 N m, belt inertia 1 kg and shift duration 3 s are removed. Positive
+algebraic domains and finite derived ratios, divisors and capacities remain. Shift duration
+must round to a representable u8 tick countdown; its saturating conversion is gone.
+The actual derived-overflow witnesses remain. A full-library run exposed five obsolete
+spec cap cases and the tiny-but-finite belt-floor case; those tests go with the replaced
+rule. The same commit updates the Blender fixture to a small finite crank and reads its
+literal spec from its owning script in a Rust admission witness. Python syntax also passes.
+
+S3's independent expected root solves Coulomb/viscous drag plus the ground owner's rolling
+fade, rather than assuming full rolling force. Its class is a positive unclamped root below
+the crank/clutch limits and outside the discrete crank-stop cap. Each fixture must exercise
+a root, and the suite must exercise a root inside the fade band. Missing a root cannot make
+the witness vacuous. It uses the production drag/contact law only to check the independently
+inverted balance, never to compute the expected speed.
+
+MEASURED intermediate gates: formatting, CI clippy and 288 targeted checks passed. The first
+whole-library run was 2,213 passed, one obsolete spec test failed, 26 ignored; the two corrected
+spec tests subsequently passed in the focused run. No structural drivetrain change was needed.
+The final unchanged-source verification batch covers this step and the independent review fixes;
+its measured totals are in the closing evidence below. Commit: driving: admit and exercise different drivetrain construction (#146).
+
+MEASURED final verification batch: 2,216 library tests passed, 26 ignored; 44 whole-tree guards and 7 explicit class witnesses passed. CI clippy, formatting and diff checks passed.

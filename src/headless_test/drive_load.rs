@@ -6,6 +6,42 @@ use crate::bitprobe::TransmissionProbe;
 use crate::track::sim::{TankTransmission, TrackDrive, TrackGripEffect};
 use crate::track::transmission::{DriveSupply, price_driver_force};
 
+/// Independent force-balance inverse for a freely motoring, unclamped drivetrain.
+/// The positive root includes the ground law's linear rolling fade; a root beyond the
+/// crank/clutch guards or inside the discrete crank-stop cap is outside this class.
+pub(crate) fn coast_equilibrium(
+    tp: &crate::track::transmission::TransmissionParams,
+    gear: u8,
+    weight: f32,
+    angle: f32,
+    rolling: f32,
+) -> Option<f32> {
+    use crate::track::transmission::{RPM_TO_RAD, overrev_margin_rpm};
+    let k = tp.gears_fwd[usize::from(gear - 1)] / tp.sprocket_radius;
+    let base = crate::track::transmission::motoring_drag_base_share();
+    let anchor = tp.peak_torque_nm * tp.drag_fraction;
+    let mid = (tp.engine.idle_rpm + tp.engine.governed_rpm) * 0.5 * RPM_TO_RAD;
+    let grade = weight * angle.sin().abs();
+    let rolling_load = weight * rolling * angle.cos();
+    let coulomb = k * anchor * base;
+    let slope = anchor * (1.0 - base) * k * k / mid;
+    let fade = crate::track::forces::ROLLING_FADE_SPEED;
+    let full_root = (grade - coulomb - rolling_load) / slope;
+    let speed = if full_root >= fade {
+        full_root
+    } else {
+        (grade - coulomb) / (slope + rolling_load / fade)
+    };
+    let omega = speed * k;
+    let torque = anchor * (base + (1.0 - base) * omega / mid);
+    (speed.is_finite()
+        && speed > 0.0
+        && omega < (tp.max_curve_rpm() + overrev_margin_rpm()) * RPM_TO_RAD
+        && torque < tp.clutch_capacity
+        && torque <= tp.engine_inertia * omega * FIXED_TICKS_PER_SECOND as f32)
+        .then_some(speed)
+}
+
 struct Landing {
     gear: u8,
     price: f32,
@@ -753,23 +789,13 @@ fn empty_driver_station_coast_and_rollback() {
                 (tp.gears_fwd.len() * 3 / 4).max(1) as u8
             };
             let guard = (tp.max_curve_rpm() + overrev_margin_rpm()) * RPM_TO_RAD;
-            // DERIVED equilibrium from authored facts, independent of engine_drag's implementation:
-            // k*tau = W*(|sin(theta)| - c_rr*cos(theta)), tau = anchor*(b+(1-b)*omega/mid).
-            let k = tp.gears_fwd[usize::from(gear - 1)] / tp.sprocket_radius;
             let weight =
                 app.world().resource::<TankBlueprint>().spec.mass * crate::track::derive::G;
             let rolling = crate::ground_types::GroundTypes::load_shipped()
                 .get(crate::terrain_blend::BASE_GROUND)
                 .contact()
                 .rolling_resistance;
-            let torque = weight * (angle.sin().abs() - rolling * angle.cos()) / k;
-            let base = crate::track::transmission::motoring_drag_base_share();
-            let mid = (tp.engine.idle_rpm + tp.engine.governed_rpm) * 0.5 * RPM_TO_RAD;
-            let omega =
-                mid * (torque / (tp.peak_torque_nm * tp.drag_fraction) - base) / (1.0 - base);
-            // This affine inverse is outside the one-rpm rest regularization and below both caps.
-            let equilibrium = (omega > RPM_TO_RAD && omega < guard && torque < tp.clutch_capacity)
-                .then_some(omega / k);
+            let equilibrium = coast_equilibrium(tp, gear, weight, angle, rolling);
             place(&mut app, tank, position, rotation, 5.0, gear);
             app.world_mut()
                 .get_mut::<TankTransmission>(tank)

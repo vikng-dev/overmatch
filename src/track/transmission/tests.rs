@@ -120,6 +120,45 @@ fn tiger_tp() -> TransmissionParams {
         .expect("Tiger transmission authoring must be valid")
 }
 
+/// Fixture: a lighter three-speed drivetrain with its own curve, ratios and capacities.
+fn compact_drivetrain() -> (ForceParams, TransmissionParams) {
+    let mut fp = lab_fp();
+    fp.inertia = 3000.0;
+    fp.grip.as_mut().unwrap().side_weight = 18000.0 * super::super::derive::G / 2.0;
+    let tp = TransmissionParams::from_authoring(&TransmissionAuthoring {
+        idle_rpm: 700.0,
+        governed_rpm: 2200.0,
+        rated_rpm: 2200.0,
+        torque_nm: &[(700.0, 800.0), (1400.0, 1100.0), (2200.0, 0.0)],
+        forward_speeds_kmh: &[5.0, 12.0, 25.0],
+        reverse_speeds_kmh: &[5.0, 12.0],
+        launch_gears: 2,
+        max_step: 1,
+        steer_radii_m: &[(3.0, 8.0), (7.2, 19.2), (15.0, 40.0)],
+        steer_capacity_n: 80000.0,
+        recirculation: 0.9,
+        brake_capacity_n: 50000.0,
+        brake_static_factor: 1.4,
+        drag_fraction: 0.3,
+        engine_inertia_kgm2: 2.0,
+        clutch_capacity_nm: 1500.0,
+        belt_inertia: fp.inertia,
+        shift_secs: 0.2,
+        sprocket_radius_m: 0.3,
+        half_tread_m: 1.0,
+    })
+    .expect("inline Fixture drivetrain must be admitted");
+    (fp, tp)
+}
+
+fn class_drivetrains() -> [(ForceParams, TransmissionParams); 3] {
+    [
+        (lab_fp(), lab_tp()),
+        (grade_fixture_fp(), tiger_tp()),
+        compact_drivetrain(),
+    ]
+}
+
 fn input(throttle: f32, steer: f32, speeds: [f32; 2], reactions: [f32; 2]) -> TransmissionInput {
     TransmissionInput {
         supply: DriveSupply::WHOLE,
@@ -1935,53 +1974,39 @@ fn driver_launches_in_the_highest_capable_start_gear() {
     }
 }
 
-/// A free full-pedal run must visit every gear above its launch gear and reach the top;
-/// no retained band or confirmation may strand either a fixture curve or the shipped curve.
+/// Under a constant affordable load, the Driver must settle in top gear; players must
+/// not hunt between gears after the acceleration transient, on any admitted construction.
 #[test]
 fn driver_full_pedal_walks_to_the_top_on_firm_ground() {
-    for (fp, tp) in [(lab_fp(), lab_tp()), (lab_fp(), tiger_tp())] {
-        let mut state = fresh(&tp);
-        state.park = true;
-        let mut speed = 0.0;
-        let load = 0.02 * fp.grip.unwrap().side_weight * 2.0;
-        let mut seen = Vec::new();
-        for _ in 0..64 * 120 {
-            let inp = driver_input(&fp, speed, load, 1.0);
-            choose_gear(&mut state, &tp, &fp, &inp, 1.0, speed);
-            if seen.last() != Some(&state.gear) {
-                seen.push(state.gear);
+    for (fp, tp) in class_drivetrains() {
+        let load = 0.02 * fp.grip.unwrap().side_weight * 2.0; // Fixture: light supported load.
+        let mut state = TransmissionState::from_spec(&tp);
+        let mut speeds = [0.0; 2];
+        let mut changes = 0;
+        let mut last = state.gear;
+        for tick in 0..64 * 120 {
+            // Fixture: include acceleration, then a settled final second.
+            let mut inp = driver_input(&fp, speeds[0], load, 1.0);
+            inp.speeds = speeds;
+            inp.reactions = [load * 0.5; 2];
+            speeds = step(&fp, &tp, &mut state, &inp).next_speeds;
+            if tick >= 64 * 119 {
+                changes += usize::from(state.gear != last);
             }
-            state.park = false;
-            let cut = advance_shift_window(&mut state);
-            let ratio = tp.gears_fwd[usize::from(state.gear - 1)];
-            let shaft_omega = speed * ratio / tp.sprocket_radius;
-            state.clutch = if shaft_omega < tp.launch_omega(1.0) {
-                ClutchState::Slip
-            } else {
-                ClutchState::In
-            };
-            state.omega_e = shaft_omega.max(tp.launch_omega(1.0));
-            let force = if cut {
-                0.0
-            } else {
-                gear_force(
-                    &tp,
-                    &fp,
-                    inp.supply,
-                    speed,
-                    ratio,
-                    1.0,
-                    inp.perceived_load,
-                    state.clutch,
-                )
-            };
-            speed = (speed + (force - load) / coupled_mass(&fp) / TICK_HZ).max(0.0);
+            last = state.gear;
         }
-        println!("MEASURED fixture gear walk {seen:?} speed {speed}");
-        assert_eq!(state.gear as usize, tp.gears_fwd.len());
+        println!(
+            "MEASURED class settling gears={} final={} speed={} final_second_changes={changes}",
+            tp.gears_fwd.len(),
+            state.gear,
+            speeds[0]
+        );
+        assert_eq!(usize::from(state.gear), tp.gears_fwd.len());
+        assert_eq!(changes, 0, "steady load must settle without gear hunting");
         assert!(
-            seen.windows(2).all(|pair| pair[1] == pair[0] + 1),
-            "the free run must climb one gear at a time: {seen:?}"
+            speeds
+                .into_iter()
+                .all(|v| v.is_finite() && v > PARK_ENGAGE_SPEED)
         );
     }
 }
@@ -2263,8 +2288,7 @@ fn gear_choice_reads_requested_pedal_before_its_ramp() {
 /// pricing alone cannot prove the clutch, brake latch and selector agree.
 #[test]
 fn capable_launches_gain_speed_against_a_supported_grade() {
-    for tp in [lab_tp(), tiger_tp()] {
-        let fp = lab_fp();
+    for (fp, tp) in class_drivetrains() {
         let load = 0.1 * fp.grip.unwrap().side_weight * 2.0; // Fixture incline load, within grip.
         let mut state = TransmissionState {
             park: true,
@@ -2353,7 +2377,7 @@ fn reversal_release_during_hold_parks_without_a_direction_cut() {
 /// select a gear that a partial pedal cannot pull. Fixture: constant level rolling load.
 #[test]
 fn part_pedal_launches_and_sustains_ordered_speed() {
-    for (fp, tp) in [(lab_fp(), lab_tp()), (grade_fixture_fp(), tiger_tp())] {
+    for (fp, tp) in class_drivetrains() {
         let weight = fp.grip.unwrap().side_weight * 2.0;
         for degrees in [0.0_f32, 10.0, 20.0] {
             // Fixture: level and supported grades.
@@ -2366,17 +2390,16 @@ fn part_pedal_launches_and_sustains_ordered_speed() {
                 let mut lo = f32::INFINITY;
                 let mut hi = f32::NEG_INFINITY;
                 let initial = driver_input(&fp, 0.0, grade + rolling, command);
-                let capable = degrees == 0.0
-                    || launch_pick(
-                        &tp,
-                        &fp,
-                        initial.supply,
-                        &tp.gears_fwd,
-                        initial.perceived_load,
-                        0,
-                        command,
-                    )
-                    .is_some();
+                let capable = launch_pick(
+                    &tp,
+                    &fp,
+                    initial.supply,
+                    &tp.gears_fwd,
+                    initial.perceived_load,
+                    0,
+                    command,
+                )
+                .is_some();
                 for tick in 0..64 * 60 {
                     let mut inp = driver_input(&fp, speed, grade + rolling, command);
                     inp.reactions = [(grade
@@ -2404,6 +2427,7 @@ fn part_pedal_launches_and_sustains_ordered_speed() {
                         "every capable notch must sustain travel"
                     );
                     assert!(speed > last_speed, "more pedal must sustain more speed");
+                    // Resolution: final-window ripple below one percent of the declared speed scale.
                     assert!(
                         hi - lo < 0.01 * tp.governed_speed(false),
                         "the notch must settle"
@@ -2419,7 +2443,7 @@ fn part_pedal_launches_and_sustains_ordered_speed() {
 /// Fixture: both construction ladders on a supported 20-degree incline at half pedal.
 #[test]
 fn law_launch_selection_prices_requested_pedal_on_grade() {
-    for (fp, tp) in [(lab_fp(), lab_tp()), (grade_fixture_fp(), tiger_tp())] {
+    for (fp, tp) in class_drivetrains() {
         let load = fp.grip.unwrap().side_weight * 2.0 * 20.0_f32.to_radians().sin();
         let inp = driver_input(&fp, 0.0, load, 0.5);
         let mut state = fresh(&tp);
@@ -2489,7 +2513,7 @@ fn grade_fixture_fp() -> ForceParams {
 /// Fixture: full-speed entry on each construction, with a full opposite-key hold.
 #[test]
 fn held_reversal_waits_at_rest_and_pays_exactly_one_cut() {
-    for (fp, tp) in [(lab_fp(), lab_tp()), (grade_fixture_fp(), tiger_tp())] {
+    for (fp, tp) in class_drivetrains() {
         for (reverse, degrees) in [(false, 0.0_f32), (false, 10.0), (true, -10.0)] {
             let dir = if reverse { -1.0 } else { 1.0 };
             let grade = fp.grip.unwrap().side_weight * 2.0 * degrees.to_radians().sin();
@@ -2584,7 +2608,7 @@ fn released_motion_coasts_without_brake_force() {
 /// supported launch on 20 degrees uses construction inertia and never rolls out of the rest band.
 #[test]
 fn one_way_lever_launches_on_grade_without_rollback_or_extra_cuts() {
-    for (fp, tp) in [(lab_fp(), lab_tp()), (grade_fixture_fp(), tiger_tp())] {
+    for (fp, tp) in class_drivetrains() {
         let load = fp.grip.unwrap().side_weight * 2.0 * 20.0_f32.to_radians().sin();
         let initial = driver_input(&fp, 0.0, load, 1.0);
         let launch = launch_pick(
@@ -2722,7 +2746,7 @@ fn backward_crank_has_only_opposing_motoring_drag() {
 /// where the ladder permits it, with a live drive request so gear holding exercises C2.
 #[test]
 fn ceiling_brake_requires_a_driver_and_holds_the_current_gear() {
-    for (fp, tp) in [(lab_fp(), lab_tp()), (grade_fixture_fp(), tiger_tp())] {
+    for (fp, tp) in class_drivetrains() {
         for reverse in [false, true] {
             let dir = if reverse { -1.0 } else { 1.0 };
             let ladder = if reverse {
@@ -3029,7 +3053,7 @@ fn free_crank_drag_stops_without_crossing_zero() {
 /// the engine HP pool is emptied. A steering request with no task work must not release it.
 #[test]
 fn zero_rate_steering_retains_park_on_a_supported_slope() {
-    for (fp, tp) in [(lab_fp(), lab_tp()), (grade_fixture_fp(), tiger_tp())] {
+    for (fp, tp) in class_drivetrains() {
         // Fixture: ten-degree supported grade; no stored crank energy can turn the belts.
         let grade = fp.grip.unwrap().side_weight * 10.0_f32.to_radians().sin();
         let mut state = TransmissionState {
@@ -3056,12 +3080,14 @@ fn zero_rate_steering_retains_park_on_a_supported_slope() {
 /// independently of engine throughput. An empty station retains only construction drag.
 #[test]
 fn zero_rate_staffed_descent_keeps_the_crank_ceiling_with_brakes() {
-    for (fp, tp) in [(lab_fp(), lab_tp()), (grade_fixture_fp(), tiger_tp())] {
-        // Fixture: upper-middle forward gear at the curve ceiling on ten degrees downhill.
+    for (fp, tp) in class_drivetrains() {
+        // Fixture: upper-middle gear at the ceiling; descent demand exceeds drag by a
+        // construction-scaled share of service capacity, so both staffing cases differ.
         let gear = (tp.gears_fwd.len() * 3 / 4).max(1) as u8;
         let k = tp.gears_fwd[usize::from(gear - 1)] / tp.sprocket_radius;
         let ceiling = tp.max_curve_rpm() * RPM_TO_RAD / k;
-        let grade = fp.grip.unwrap().side_weight * 10.0_f32.to_radians().sin();
+        let grade = engine_drag(&tp, tp.max_curve_rpm() * RPM_TO_RAD) * k * 0.5
+            + tp.brake_capacity_n * 0.25;
         let state = TransmissionState {
             gear,
             park: false,
@@ -3128,4 +3154,75 @@ fn steer_detents_use_one_threshold_from_every_history() {
             assert_eq!(state.steer_step, expected, "prior={prior}, lever={intent}");
         }
     }
+}
+
+/// Admission follows algebraic domains and representability, not a vehicle class's scale.
+/// Fixture extremes cross every former class cap while retaining finite coupled arithmetic.
+#[test]
+fn construction_admits_finite_scales_and_refuses_unrepresentable_arithmetic() {
+    let mut a = tiger_authoring();
+    a.idle_rpm = 25000.0;
+    a.governed_rpm = 40000.0;
+    a.rated_rpm = 40000.0;
+    a.torque_nm = &[(25000.0, 200000.0), (40000.0, 150000.0)];
+    a.brake_static_factor = 3.0;
+    a.engine_inertia_kgm2 = 200.0;
+    a.clutch_capacity_nm = 100000.0;
+    a.belt_inertia = 0.5;
+    a.shift_secs = 3.5;
+    assert!(TransmissionParams::from_authoring(&a).is_ok());
+    a.engine_inertia_kgm2 = 0.01;
+    a.clutch_capacity_nm = 50.0;
+    assert!(TransmissionParams::from_authoring(&a).is_ok());
+    a.shift_secs = (f32::from(u8::MAX) + 1.0) / TICK_HZ;
+    assert!(TransmissionParams::from_authoring(&a).is_err());
+    a.shift_secs = 0.0;
+    a.belt_inertia = f32::MIN_POSITIVE;
+    assert!(TransmissionParams::from_authoring(&a).is_err());
+}
+
+/// The coast expectation must solve the same force balance below and above the rolling
+/// fade, on every construction; a full-resistance inverse rejects valid slow roots.
+#[test]
+#[cfg(feature = "bitprobe")]
+fn coast_expectation_includes_the_rolling_fade_for_every_drivetrain() {
+    let mut fade_roots = 0;
+    for (fp, mut tp) in class_drivetrains() {
+        let mut roots = 0;
+        for fraction in [tp.drag_fraction, 0.7] {
+            // Fixture: includes a slow root on the seed.
+            tp.drag_fraction = fraction;
+            let weight = fp.grip.unwrap().side_weight * 2.0;
+            let angle = 10.0_f32.to_radians(); // Fixture slope.
+            let rolling = crate::ground_types::GroundTypes::load_shipped()
+                .get(crate::terrain_blend::BASE_GROUND)
+                .contact()
+                .rolling_resistance;
+            for gear in 1..=tp.gears_fwd.len() as u8 {
+                if let Some(speed) =
+                    crate::headless_test::coast_equilibrium(&tp, gear, weight, angle, rolling)
+                {
+                    roots += 1;
+                    fade_roots += usize::from(speed < forces::ROLLING_FADE_SPEED);
+                    let k = tp.gears_fwd[usize::from(gear - 1)] / tp.sprocket_radius;
+                    let drag = engine_drag(&tp, speed * k) * k;
+                    let ground = forces::rolling_resistance(weight * rolling * angle.cos(), speed);
+                    // Resolution: independent inverse and forward f32 arithmetic at vehicle-force scale.
+                    assert!((drag + ground - weight * angle.sin()).abs() < force_margin(&fp, &tp));
+                    println!(
+                        "MEASURED coast gears={} gear={gear} drag_fraction={fraction} speed={speed}",
+                        tp.gears_fwd.len()
+                    );
+                }
+            }
+        }
+        assert!(
+            roots > 0,
+            "each Fixture must exercise an unclamped motoring root"
+        );
+    }
+    assert!(
+        fade_roots > 0,
+        "the expectation must exercise the rolling fade band"
+    );
 }

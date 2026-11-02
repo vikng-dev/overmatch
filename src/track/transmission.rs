@@ -153,15 +153,12 @@ pub struct EngineParams {
 }
 
 /// The joint transmission's declared data — everything vehicle spec, nothing tuned-to-feel.
-/// Built from authored tables via [`TransmissionParams::from_authoring`] (the spec block /
-/// the sandbox's T-34 lab values).
+/// Built from authored tables via [`TransmissionParams::from_authoring`].
 #[derive(Clone, Debug)]
 pub struct TransmissionParams {
     pub engine: EngineParams,
-    /// Total reduction (engine rev per sprocket rev) per forward gear, 1-based order. DERIVED
-    /// from authored per-gear speeds (the anchors) against the spec's own sprocket radius —
-    /// speed ratios are r_s-independent, so the ladder survives the open 19-vs-20-tooth
-    /// sprocket discrepancy (tiger-transmission-data.md implementation rule).
+    /// Total reduction (engine rev per sprocket rev), in 1-based forward order.
+    /// DERIVED from each authored gear speed, anchor rpm and sprocket radius.
     pub gears_fwd: Vec<f32>,
     pub gears_rev: Vec<f32>,
     /// Sprocket pitch radius (m): belt speed = engine speed / G × r_s.
@@ -170,7 +167,7 @@ pub struct TransmissionParams {
     pub launch_gears: u8,
     pub max_step: u8,
     /// Per FORWARD gear `(κ_tight, κ_wide)` where `κ = half_tread / R` — the L600 detents.
-    /// Reverse gears index the same table (R1–R4 mirror F1–F4).
+    /// Reverse gears index the same table; admission requires a row for each gear.
     pub steer_kappa: Vec<(f32, f32)>,
     /// The authored per-forward-gear `(R_tight, R_wide)` table (m), retained verbatim for
     /// presentation. The sim law consumes [`Self::steer_kappa`]; retaining the source table keeps
@@ -180,18 +177,13 @@ pub struct TransmissionParams {
     /// outputs DIFFERENTIALLY — each output's steering share is bounded by its own
     /// gearing/grip-scale cap (this datum), so the belt-difference axis `F_s` carries up to
     /// 2× it (each side sees `F_s/2`), and the L600 constraint force λ is bounded by
-    /// `capacity / max|jᵢ|`. Reading this datum as an `F_s` bound was the pivot-dead bug:
-    /// it halves the yaw ceiling (Tiger: 373 kN·m < its ~478 kN·m footprint scrub — could
-    /// not break away; the T-34 lab's 300 vs 224 kN·m masked it).
+    /// `capacity / max|jᵢ|`. Treating this as the total difference-axis bound halves
+    /// the available steering force.
     pub steer_capacity_n: f32,
-    /// Full neutral-turn belt-speed half-difference (m/s): `κ_tight(F1) × v(F1 @ governed)` —
-    /// the L600's brake-gated neutral-turn target. DERIVED, and the correct emergent pivot
-    /// scale for a fixed-radius box: the radii table's own invariant makes `κ_tight(g) ×
-    /// v(g)` gear-independent (Tiger: ≈ 0.337 m/s @ 3000 rpm in every gear). The authored
-    /// `neutral_fraction` feel scalar that used to shrink it was DELETED as unprovenanced.
+    /// DERIVED neutral-turn belt-speed half-difference (m/s):
+    /// `κ_tight(F1) × v(F1 @ governed)`, from construction's fixed-radius steering.
     pub neutral_d_full: f32,
-    /// Inner→outer recirculation efficiency η (mechanical ~0.9, INFERRED tag at the authoring
-    /// site).
+    /// Inner-to-outer recirculation efficiency, a share in [0, 1].
     pub recirculation: f32,
     /// Per-side service/parking brake capacity at the sprocket (N).
     pub brake_capacity_n: f32,
@@ -205,21 +197,12 @@ pub struct TransmissionParams {
     /// only where this drag plus rolling resistance balances grade force before clutch guards
     /// cap transmitted drag.
     /// A drag TORQUE at the crank (design §3), never the negative half of rated power.
-    /// Diesel motoring/compression braking runs ~20–30% of rated torque mid-band
-    /// (INFERRED band, tagged at the authoring site).
     pub drag_fraction: f32,
-    /// Crank + flywheel + clutch rotational inertia J (kg·m²) — the engine-side inertia the
-    /// stage-B crank state integrates against. Vehicle data (INFERRED at the authoring
-    /// sites: class scaling, flywheel-dominant).
+    /// Crank + flywheel + clutch rotational inertia J (kg·m²).
     pub engine_inertia: f32,
-    /// Main clutch torque capacity (N·m) — the coupling's clamp: the largest torque the
-    /// engaged clutch transmits before slipping (≈ 1.3 × peak engine torque by the usual
-    /// sizing rule; INFERRED at the authoring sites). THE COUPLING-LAW SLOT's one datum —
-    /// a torque-converter characteristic replaces the clamp for modern automatics later.
+    /// Main clutch torque capacity (N·m), the engaged coupling's transmitted-torque clamp.
     pub clutch_capacity: f32,
-    /// Gear-shift torque-interruption window in fixed ticks — DERIVED from the authored
-    /// `shift_secs` (a Tiger preselector and a crash box shift very differently: vehicle
-    /// data, not module policy).
+    /// DERIVED torque-interruption ticks from authored `shift_secs`.
     pub shift_ticks: u8,
     /// Derived at construction: the torque curve's peak (the low-speed rev target).
     pub peak_torque_rpm: f32,
@@ -232,7 +215,7 @@ pub struct TransmissionParams {
 pub struct TransmissionAuthoring<'a> {
     pub idle_rpm: f32,
     pub governed_rpm: f32,
-    /// The rpm the per-gear speeds are anchored at (the Tiger's are quoted @ 3000).
+    /// The rpm the per-gear speeds are anchored at.
     pub rated_rpm: f32,
     pub torque_nm: &'a [(f32, f32)],
     /// Per-gear top BELT speeds (km/h) at `rated_rpm`, 1st..top.
@@ -309,18 +292,11 @@ impl TransmissionParams {
                 }),
             ),
             (
-                // Sanity bounds beyond finiteness: an absurd finite torque can overflow
-                // reflected torque and crank work. Refuse it before the physical solve.
                 "engine.torque_curve",
                 a.torque_nm.len() >= 2
                     && a.torque_nm.windows(2).all(|w| w[0].0 < w[1].0)
                     && a.torque_nm.iter().all(|(rpm, torque)| {
-                        rpm.is_finite()
-                            && torque.is_finite()
-                            && *rpm > 0.0
-                            && *rpm <= 20_000.0
-                            && *torque >= 0.0
-                            && *torque <= 100_000.0
+                        rpm.is_finite() && torque.is_finite() && *rpm > 0.0 && *torque >= 0.0
                     }),
             ),
             (
@@ -358,7 +334,7 @@ impl TransmissionParams {
             (
                 "brake_static_factor",
                 a.brake_static_factor.is_finite()
-                    && (1.0..=2.5).contains(&a.brake_static_factor)
+                    && a.brake_static_factor >= 1.0
                     && (a.brake_capacity_n * a.brake_static_factor).is_finite(),
             ),
             (
@@ -367,24 +343,22 @@ impl TransmissionParams {
             ),
             (
                 "engine.inertia_kgm2",
-                a.engine_inertia_kgm2.is_finite() && (0.1..=100.0).contains(&a.engine_inertia_kgm2),
+                a.engine_inertia_kgm2.is_finite() && a.engine_inertia_kgm2 > 0.0,
             ),
             (
                 "engine.clutch_capacity_nm",
-                a.clutch_capacity_nm.is_finite()
-                    && (100.0..=50_000.0).contains(&a.clutch_capacity_nm),
+                a.clutch_capacity_nm.is_finite() && a.clutch_capacity_nm > 0.0,
             ),
             (
-                // The coupling lock denominator includes `k^2 / (2 * belt_inertia)`; tiny
-                // positive values overflow that term even though the generic belt law accepts
-                // every finite positive inertia.
-                "derived belt inertia floor (coupling divisor)",
-                a.belt_inertia.is_finite() && a.belt_inertia >= 1.0,
+                "belt inertia (positive coupling divisor)",
+                a.belt_inertia.is_finite() && a.belt_inertia > 0.0,
             ),
             (
-                // The u8 countdown represents at most 255 ticks (DERIVED 255 / 64 = 3.984375 s).
+                // Representation bound: the rounded countdown must fit its u8 state field.
                 "gearbox.shift_secs",
-                (0.0..=3.0).contains(&a.shift_secs),
+                a.shift_secs.is_finite()
+                    && a.shift_secs >= 0.0
+                    && (a.shift_secs * TICK_HZ).round() <= f32::from(u8::MAX),
             ),
         ] {
             if !ok {
@@ -432,7 +406,7 @@ impl TransmissionParams {
             drag_fraction: a.drag_fraction,
             engine_inertia: a.engine_inertia_kgm2,
             clutch_capacity: a.clutch_capacity_nm,
-            shift_ticks: (a.shift_secs * TICK_HZ).round().clamp(0.0, 255.0) as u8,
+            shift_ticks: (a.shift_secs * TICK_HZ).round() as u8,
             peak_torque_rpm,
             peak_torque_nm,
         };

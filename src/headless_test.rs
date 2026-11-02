@@ -3518,3 +3518,5 @@ fn loose_pieces_priced_per_tick() {
 
 #[cfg(feature = "bitprobe")]
 mod drive_load;
+#[cfg(feature = "bitprobe")]
+pub(crate) use drive_load::coast_equilibrium;
