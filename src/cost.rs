@@ -144,11 +144,11 @@ struct CostRole(&'static str);
 /// `FixedLast`, after the clock closes: sample counts and write the row past warmup. A held tick
 /// (the match's fill-up or results, [`MatchCommands::Held`]) is neither counted nor written: the
 /// workload under measurement starts at combat release, so the percentile tables hold no held
-/// ticks. A composition without a Battle plays every tick.
+/// ticks. Both recorder compositions install the match-command publication.
 fn write_tick(
     mut cost: ResMut<CostTrace>,
     clock: Res<TickClock>,
-    match_commands: Option<Res<MatchCommands>>,
+    match_commands: Res<MatchCommands>,
     projectiles: Query<(), With<Projectile>>,
     tanks: Query<(), With<Tank>>,
     all: Query<Entity>,
@@ -156,7 +156,7 @@ fn write_tick(
     let Some(closed) = clock.closed() else {
         return;
     };
-    if match_commands.is_some_and(|commands| *commands == MatchCommands::Held) {
+    if *match_commands == MatchCommands::Held {
         return;
     }
     let tick = cost.tick;
