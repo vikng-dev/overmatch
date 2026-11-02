@@ -4511,6 +4511,26 @@ mod tests {
         },
     ];
 
+    /// The game's damage model: measurement tool, not a firing-record acceptance test.
+    /// Fixture: the record's 15 lb, 3 in body, using each existing hit-nose proxy.
+    #[test]
+    #[ignore = "measurement tool: prints limit speeds without firing-row pass conditions"]
+    fn measure_plate_limit_speeds() {
+        for nose_factor in [NoseShape::Ogive { crh: 1.0 }.factor(), 0.5] {
+            let body = RoundBody {
+                mass: 15.0 * 0.453_592_37,
+                caliber: 3.0 * 0.0254,
+                nose_factor,
+            };
+            for ratio in [0.1_f32, 0.2, 0.24, 0.25, 0.3, 0.5, 0.65, 1.0] {
+                let depth = body.caliber * ratio * 1000.0;
+                let speed = speed_for(body, depth);
+                let f = speed / 0.3048 * 15.0_f32.sqrt() / (0.25 * (ratio * 0.25).sqrt());
+                println!("MEASURED nose={nose_factor:.6} t/d={ratio:.2} speed={speed:.6} F={f:.1}");
+            }
+        }
+    }
+
     /// Replica scaling: mass ×s³ and calibre ×s at fixed speed and nose factor scales capability
     /// by s.
     #[test]

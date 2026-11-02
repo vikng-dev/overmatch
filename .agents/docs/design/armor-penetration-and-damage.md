@@ -170,6 +170,27 @@ Both the energy dose (§6) and flight-nose drag ride unshipped protocol REV 36: 
 on dose units and trajectories. The scenario recorder and field-cast tool regenerate their
 pins from the combined simulation, while the guns gate checks every resolved round field.
 
+### 3b. Plate capacity below one calibre (#263)
+
+Subject: the game's damage model; game state only. The ignored
+`measure_plate_limit_speeds` tool evaluates the shipped inverse with a **Fixture** body of
+15 lb and 3 in, using the existing 1-crh hit-nose proxy. Firing rows are comparisons, never
+pass conditions. NPG 1125 Fig. 3 supplies **BY EYE** F values (±1,000); the speeds in its
+research note are **DERIVED**, not measured by this game. No numeric source series was reached.
+
+| t/d | Issue estimate, m/s (DERIVED low-speed limit) | Shipped inverse, m/s (MEASURED) | Record, m/s (DERIVED from F) |
+|---|---:|---:|---:|
+| 0.10 | 195 | 195.847824 | 74 |
+| 0.24 | 302 | 305.916504 | 173 |
+| 0.50 | 435 | 448.414429 | 314 |
+| 1.00 | 616 | 653.524536 | 500 |
+
+The estimates omit target inertia; the shipped inverse includes it. The gap is present.
+The class boundary required by this slice preserves the shipped potency at and above one
+calibre. Consequently the one-calibre firing row cannot also be matched within ±1,000 F:
+the fixture's shipped F is **66,432.8 (MEASURED)** versus **50,800 (BY EYE)**. That residual
+belongs to the bulk law, outside this thin-plate slice.
+
 ## 4. Boundary interaction — contact and the straight bite
 
 Subject: the game's damage model; game state only. The accepted proxy and its evidence live in
