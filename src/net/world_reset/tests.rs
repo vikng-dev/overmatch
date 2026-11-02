@@ -20,8 +20,8 @@ use lightyear::prelude::client::*;
 use lightyear::prelude::*;
 use std::net::{Ipv4Addr, SocketAddr};
 
-// ASSUMED fixture data: a flat surface, short mode and two loopback peers. Asset numbers are
-// fixture inputs; every comparison below is a construction or generation invariant.
+// Fixture inputs: a flat surface, short mode and loopback peers. Comparisons below concern
+// construction and generation, not the fixture assets' particular dimensions or tuning.
 fn build_scene(mut commands: Commands, mut meshes: ResMut<Assets<Mesh>>) {
     let manifest = crate::map::tests::mixed_fixture_manifest();
     let grid = crate::terrain_grid::HeightGrid::new(vec![0.0; 9].into(), 3, manifest.extent);
@@ -53,6 +53,8 @@ fn environment(app: &mut App) {
     .add_systems(Startup, build_scene);
 }
 
+// Direct record injection has no network presentation timeline. The UDP fixture mounts the
+// complete client installer instead.
 fn replica() -> App {
     let mut app = base_app();
     environment(&mut app);
@@ -216,9 +218,15 @@ fn record_arrival_order_cannot_mix_worlds_or_consume_a_snapshot_before_construct
                     position: Vec3::Y * 10.0,
                     rotation: Quat::IDENTITY,
                 },
-                Visibility::Inherited,
+                Visibility::Hidden,
             ))
             .id();
+        app.update();
+        assert_eq!(
+            app.world().get::<Visibility>(old_carrier),
+            Some(&Visibility::Inherited),
+            "a current non-wall carrier becomes visible before its world retires"
+        );
         if !phase_first {
             snapshots(app.world_mut(), 2, Vec::new(), TreeState::Standing, tree);
             app.update();
@@ -412,7 +420,7 @@ fn network_client(port: u16, id: u64) -> App {
     app.init_resource::<crate::ClientReplica>();
     install_client(&mut app);
     crate::net::walls::install_client(&mut app);
-    crate::net::destruction::install_apply(&mut app);
+    crate::net::destruction::install_client(&mut app);
     crate::net::debris_stress::install_client(&mut app);
     let server_addr = SocketAddr::new(Ipv4Addr::LOCALHOST.into(), port);
     let link = app
@@ -475,11 +483,11 @@ fn a_destroyed_world_is_startup_again_at_next_fill_up_over_real_udp() {
     crate::net::walls::install_server(&mut server);
     crate::net::destruction::install_server(&mut server);
     crate::net::debris_stress::install_server(&mut server).unwrap();
-    let mode = crate::net::battle_mode::BattleMode::parse(
-        &include_str!("../fixtures/battle-short.ron")
-            .replace("combat_s: 1.0", "combat_s: 4.0")
-            .replace("late_join_s: 0.5", "late_join_s: 4.0"),
-    );
+    let mut mode =
+        crate::net::battle_mode::BattleMode::parse(include_str!("../fixtures/battle-short.ron"));
+    // Fixture: allow loopback peers to join throughout this combat window.
+    mode.combat = std::time::Duration::from_secs(4);
+    mode.late_join = mode.combat;
     crate::net::server::install_battle(&mut server, mode, TICK);
     finish(&mut server);
     let mut clients = vec![network_client(port, 1)];
@@ -515,32 +523,6 @@ fn a_destroyed_world_is_startup_again_at_next_fill_up_over_real_udp() {
             let WallEvent::Fall(chunk) = walls[1].event else {
                 unreachable!()
             };
-            let (collider, density, friction) = {
-                let breakage = server.world().get::<Breakage>(root).unwrap();
-                let authored = &breakage.kind.asset.chunks
-                    [breakage.kind.layout.chunks[usize::from(chunk)] as usize];
-                let centroid = Vec3::from_array(authored.centroid);
-                let collider = Collider::convex_hull(
-                    authored
-                        .hull
-                        .iter()
-                        .map(|p| (Vec3::from_array(*p) - centroid) * breakage.scale)
-                        .collect(),
-                )
-                .unwrap();
-                let density = breakage
-                    .kind
-                    .layout
-                    .structure(&breakage.kind.asset, breakage.scale)
-                    .chunks[usize::from(chunk)]
-                .material
-                .density;
-                (
-                    collider,
-                    ColliderDensity(density),
-                    breakage.kind.chunk_friction(usize::from(chunk)),
-                )
-            };
             {
                 let mut breakage = server.world_mut().get_mut::<Breakage>(root).unwrap();
                 let live = breakage.live();
@@ -561,9 +543,10 @@ fn a_destroyed_world_is_startup_again_at_next_fill_up_over_real_udp() {
                     retired: None,
                 },
                 RigidBody::Dynamic,
-                collider,
-                density,
-                friction,
+                // Fixture: frictionless, 1 m sides, 1 kg/m³. The probe observes carrier retirement.
+                Collider::cuboid(1.0, 1.0, 1.0),
+                ColliderDensity(1.0),
+                Friction::ZERO,
                 crate::buildings::breakage::piece_layers(),
                 Position(Vec3::Y * 20.0),
                 Rotation::default(),
