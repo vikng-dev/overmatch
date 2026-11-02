@@ -3650,80 +3650,161 @@ fn a_wall_crushes_with_the_energy_a_cone_carries() {
     );
 }
 
+/// A shipped house whose fixture element `e` is two chunks stacked along +Z, `front` over z 0–1 m
+/// and `rear` over z 1–2 m, each 4 m by 2 m about the Z axis; every other chunk of it lies far off.
+/// Fixture crush energy resolves channels above the record's millimetre quantum.
+fn stacked_chunks() -> (App, Entity, BuildingKind, usize, [usize; 2]) {
+    let (app, root) = composed(false);
+    let mut kind = (*shipped_house()).clone();
+    let (e, [front, rear, _]) = fixture_chunks(&kind);
+    for c in kind.layout.chunks_of(e) {
+        kind.layout.blocks[c] = Block::cuboid(Vec3::splat(100.0), Vec3::splat(101.0));
+    }
+    kind.layout.blocks[front] = Block::cuboid(Vec3::new(-2.0, -1.0, 0.0), Vec3::new(2.0, 1.0, 1.0));
+    kind.layout.blocks[rear] = Block::cuboid(Vec3::new(-2.0, -1.0, 1.0), Vec3::new(2.0, 1.0, 2.0));
+    kind.layout.materials[front].crush = 1000.0;
+    kind.layout.materials[rear].crush = 1000.0;
+    (app, root, kind, e, [front, rear])
+}
+
+/// What the shipped shell observer and [`take_lines`] make of a line through element `e` of `kind`,
+/// from `a` to `b` in `root`'s frame turned by `rotation`, spending the fixture's 7 J of which 5 J
+/// at entry, and delivering `transit` N·s along it and `entry_blow` N·s at entry. `None` when no
+/// chunk took the line.
+fn marched_line(
+    app: &mut App,
+    root: Entity,
+    kind: &BuildingKind,
+    e: usize,
+    rotation: Quat,
+    (a, b): (Vec3, Vec3),
+    (transit, entry_blow): (Vec3, Vec3),
+) -> Option<Taken> {
+    use crate::ballistics::{DeliveredLine, VolumeCrossing};
+    use bevy::ecs::system::RunSystemOnce;
+    app.world_mut().get_mut::<Breakage>(root).unwrap().kind = Arc::new(kind.clone());
+    let frame = Frame::new(&Transform::from_rotation(rotation), 1.0, kind.bounds());
+    let volume = app
+        .world_mut()
+        .query::<(Entity, &BuildingElement, &ChildOf)>()
+        .iter(app.world())
+        .find(|(_, index, parent)| usize::from(index.0) == e && parent.parent() == root)
+        .map(|(entity, ..)| entity)
+        .unwrap();
+    let shell = app.world_mut().spawn(PenetrationMarks::default()).id();
+    app.world_mut().trigger(ShellMarched {
+        shell,
+        marks_from: 0,
+        cones_from: 0,
+        burst: None,
+        lines: vec![DeliveredLine {
+            crossing: VolumeCrossing {
+                volume,
+                entry: rotation * a,
+                end: rotation * b,
+                chord: a.distance(b),
+                cost: 0.0,
+                energy: 7.0,
+                perforated: true,
+            },
+            momentum: rotation * (entry_blow + transit),
+            entrance_momentum: rotation * entry_blow,
+            entrance_energy: 5.0,
+        }],
+    });
+    app.world_mut()
+        .run_system_once(move |p: DepositParam| {
+            let deposit = p
+                .queue
+                .0
+                .last()
+                .expect("the shipped shell observer queues its line");
+            let mut taken = BTreeMap::new();
+            take_lines(&p, &BTreeMap::from([(root, frame)]), deposit, &mut taken);
+            taken.remove(&root)
+        })
+        .unwrap()
+}
+
+/// The game's damage model reports a crossing on the disc's axis, so a disc whose rim alone bit an
+/// intact element has an axis clear of every chunk. Destruction relies on that line's whole work
+/// and momentum wearing the chunk the rim met: a mutant that drops the line, or that hands it to
+/// the first chunk, fails here. Fixture: the axis runs 30 mm clear of one side, past each chunk.
+#[test]
+fn a_line_only_the_rim_met_wears_the_chunk_nearest_its_middle() {
+    for (near, z) in [(0, 0.1..0.6), (1, 1.4..1.9)] {
+        let (mut app, root, kind, e, chunks) = stacked_chunks();
+        let (a, b) = (Vec3::new(2.03, 0.0, z.start), Vec3::new(2.03, 0.0, z.end));
+        let (transit, entry_blow) = (Vec3::Z * 30.0, Vec3::X * 12.0);
+        let taken = marched_line(
+            &mut app,
+            root,
+            &kind,
+            e,
+            Quat::from_rotation_y(0.7),
+            (a, b),
+            (transit, entry_blow),
+        )
+        .expect("the element's chunk takes the rim's line");
+        let &[(c, from, to, energy)] = taken.lines.as_slice() else {
+            panic!("one chunk takes the whole line: {:?}", taken.lines);
+        };
+        assert_eq!(c, chunks[near]);
+        assert_eq!(energy, 7.0);
+        assert!(from.distance(a) < 1e-4 && to.distance(b) < 1e-4);
+        assert!(taken.line_loads.iter().all(|load| load.chunk == c));
+        let total: Vec3 = taken.line_loads.iter().map(|load| load.blow).sum();
+        assert!((total - transit - entry_blow).length() < 1e-4);
+        let work: f32 = taken.line_loads.iter().map(|load| load.energy).sum();
+        assert!((work - 7.0).abs() < 1e-5);
+    }
+}
+
+/// An element that never breaks owns no chunk ([`Layout::chunks_of`]) and still has its collider,
+/// so a round crossing it is routine. Destruction relies on that line wearing nothing and ending
+/// no session: a mutant that restores the allocation panic fails here.
+#[test]
+fn a_line_through_an_element_that_never_breaks_wears_nothing() {
+    let (mut app, root, mut kind, e, _) = stacked_chunks();
+    kind.layout.elements[e] = None;
+    let taken = marched_line(
+        &mut app,
+        root,
+        &kind,
+        e,
+        Quat::IDENTITY,
+        (Vec3::new(0.0, 0.0, -0.1), Vec3::new(0.0, 0.0, 2.1)),
+        (Vec3::Z * 30.0, Vec3::X * 12.0),
+    );
+    assert!(taken.is_none());
+}
+
 /// The game's damage model sends a nonzero line through the shipped message reader and chunk
 /// allocator. Destruction relies on the carrier staying at entry and the core following its chord.
 /// Fixture: equal-depth front and rear chunks, head-on and oblique paths, rotated in world;
 /// 5 J stop at entry and the core's 2 J divide equally. Momentum has its own independent budget.
 #[test]
 fn a_marched_line_keeps_carrier_work_and_bend_at_entry() {
-    use crate::ballistics::{DeliveredLine, VolumeCrossing};
-    use bevy::ecs::system::RunSystemOnce;
     for slope in [0.0, 0.4] {
-        let (mut app, root) = composed(false);
-        let mut kind = (*shipped_house()).clone();
-        let (e, [front, rear, _]) = fixture_chunks(&kind);
-        for c in kind.layout.chunks_of(e) {
-            kind.layout.blocks[c] = Block::cuboid(Vec3::splat(100.0), Vec3::splat(101.0));
-        }
-        kind.layout.blocks[front] =
-            Block::cuboid(Vec3::new(-2.0, -1.0, 0.0), Vec3::new(2.0, 1.0, 1.0));
-        kind.layout.blocks[rear] =
-            Block::cuboid(Vec3::new(-2.0, -1.0, 1.0), Vec3::new(2.0, 1.0, 2.0));
-        // Fixture crush energy resolves both channels above the record's millimetre quantum.
-        kind.layout.materials[front].crush = 1000.0;
-        kind.layout.materials[rear].crush = 1000.0;
-        app.world_mut().get_mut::<Breakage>(root).unwrap().kind = Arc::new(kind.clone());
+        let (mut app, root, kind, e, [front, _]) = stacked_chunks();
         let a = Vec3::new(-0.1 * slope, 0.0, -0.1);
         let b = Vec3::new(2.1 * slope, 0.0, 2.1);
         let dir = (b - a).normalize();
-        let rotation = Quat::from_rotation_y(0.7);
-        let frame = Frame::new(&Transform::from_rotation(rotation), 1.0, kind.bounds());
-        let volume = app
-            .world_mut()
-            .query::<(Entity, &BuildingElement, &ChildOf)>()
-            .iter(app.world())
-            .find(|(_, index, parent)| usize::from(index.0) == e && parent.parent() == root)
-            .map(|(entity, ..)| entity)
-            .unwrap();
-        let shell = app.world_mut().spawn(PenetrationMarks::default()).id();
         let entry_axis = dir
             .cross(if dir.x.abs() < 0.9 { Vec3::X } else { Vec3::Y })
             .normalize();
         let entry_blow = entry_axis * 12.0;
         let transit_blow = dir * 30.0;
-        app.world_mut().trigger(ShellMarched {
-            shell,
-            marks_from: 0,
-            cones_from: 0,
-            burst: None,
-            lines: vec![DeliveredLine {
-                crossing: VolumeCrossing {
-                    volume,
-                    entry: rotation * a,
-                    end: rotation * b,
-                    chord: a.distance(b),
-                    cost: 0.0,
-                    energy: 7.0,
-                    perforated: true,
-                },
-                momentum: rotation * (entry_blow + transit_blow),
-                entrance_momentum: rotation * entry_blow,
-                entrance_energy: 5.0,
-            }],
-        });
-        let taken = app
-            .world_mut()
-            .run_system_once(move |p: DepositParam| {
-                let deposit = p
-                    .queue
-                    .0
-                    .last()
-                    .expect("the shipped shell observer queues its line");
-                let mut taken = BTreeMap::new();
-                take_lines(&p, &BTreeMap::from([(root, frame)]), deposit, &mut taken);
-                taken.remove(&root).unwrap()
-            })
-            .unwrap();
+        let taken = marched_line(
+            &mut app,
+            root,
+            &kind,
+            e,
+            Quat::from_rotation_y(0.7),
+            (a, b),
+            (transit_blow, entry_blow),
+        )
+        .unwrap();
         let holes = holes_of(&kind, 1.0, &taken.lines, &[]);
         for &(c, from, to, _) in &taken.lines {
             let energy = if c == front { 6.0 } else { 1.0 };

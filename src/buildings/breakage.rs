@@ -767,13 +767,7 @@ fn contact_load(
     let local = frame.unscaled(transfer.point);
     let chunk = match (element, chunk) {
         (_, Some(&BuildingChunk(c))) => usize::from(c),
-        (Some(&BuildingElement(e)), None) => {
-            layout.chunks_of(usize::from(e)).min_by(|&a, &b| {
-                layout.blocks[a]
-                    .outside(local)
-                    .total_cmp(&layout.blocks[b].outside(local))
-            })?
-        }
+        (Some(&BuildingElement(e)), None) => nearest_chunk(layout, usize::from(e), local)?,
         (None, None) => unreachable!("BuildingColliders admits elements and chunks only"),
     };
     Some((
@@ -1082,6 +1076,15 @@ fn field_blows<'a>(loads: &'a [Load], state: &'a WallState) -> impl Iterator<Ite
     })
 }
 
+/// The chunk of `element` whose hull lies nearest `at`; `None` for an element that never breaks.
+fn nearest_chunk(layout: &Layout, element: usize, at: Vec3) -> Option<usize> {
+    layout.chunks_of(element).min_by(|&a, &b| {
+        layout.blocks[a]
+            .outside(at)
+            .total_cmp(&layout.blocks[b].outside(at))
+    })
+}
+
 /// Map resolved crossings to owned construction chunks, independent of the group's motion.
 fn take_lines(
     p: &DepositParam,
@@ -1115,31 +1118,40 @@ fn take_lines(
         let dir = (b - a).normalize_or_zero();
         let shares: Vec<(usize, f32, f32)> = match (element, chunk) {
             (_, Some(&BuildingChunk(c))) => vec![(usize::from(c), 0.0, length)],
-            (Some(&BuildingElement(e)), None) => layout
-                .chunks_of(usize::from(e))
-                .filter_map(|c| {
-                    let (t0, t1) = layout.blocks[c].span(a, dir)?;
-                    let (t0, t1) = (t0.max(0.0), t1.min(length));
-                    (t1 > t0).then_some((c, t0, t1))
-                })
-                .collect(),
+            (Some(&BuildingElement(e)), None) => {
+                let e = usize::from(e);
+                let crossed: Vec<_> = layout
+                    .chunks_of(e)
+                    .filter_map(|c| {
+                        let (t0, t1) = layout.blocks[c].span(a, dir)?;
+                        let (t0, t1) = (t0.max(0.0), t1.min(length));
+                        (t1 > t0).then_some((c, t0, t1))
+                    })
+                    .collect();
+                if crossed.is_empty() {
+                    // The line is the disc's axis, so a disc whose rim alone met the element has
+                    // an axis clear of every chunk.
+                    nearest_chunk(layout, e, (a + b) / 2.0)
+                        .map(|c| (c, 0.0, length))
+                        .into_iter()
+                        .collect()
+                } else {
+                    crossed
+                }
+            }
             (None, None) => {
                 unreachable!("BuildingColliders admits elements and chunks only")
             }
         };
+        let Some(&(first, _, _)) = shares.iter().min_by(|a, b| a.1.total_cmp(&b.1)) else {
+            continue; // An element that never breaks has no chunk to wear.
+        };
         let chord: f32 = shares.iter().map(|(_, t0, t1)| t1 - t0).sum();
-        assert!(
-            chord > 0.0,
-            "a resolved building line crosses at least one owned chunk; its work and momentum cannot disappear"
-        );
         let into = taken.entry(root).or_default();
         let turned = frame.turn(impulse - entrance_impulse);
-        let &(first, _, _) = shares
-            .iter()
-            .min_by(|a, b| a.1.total_cmp(&b.1))
-            .expect("a positive chunk chord has an entrance");
         for (c, t0, t1) in shares {
-            let share = (t1 - t0) / chord;
+            // Rounding can close a single owner's line; it still takes the line whole.
+            let share = if t1 > t0 { (t1 - t0) / chord } else { 1.0 };
             let entry_energy = if c == first { entrance_energy } else { 0.0 };
             let entry_blow = if c == first {
                 frame.turn(entrance_impulse)
