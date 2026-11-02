@@ -617,7 +617,9 @@ fn mount_device(app: &mut App) {
     app.insert_resource(crate::ui_font::UiFonts {
         hud: Handle::default(),
         body: Handle::default(),
-    });
+    })
+    .init_resource::<Time<Fixed>>()
+    .init_resource::<crate::WeaponClock>();
     bevy::state::app::StatesPlugin.build(app);
     crate::flow::in_match_plugin(app);
     crate::command::client_plugin(app);

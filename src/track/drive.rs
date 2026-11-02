@@ -23,18 +23,14 @@ pub struct DriveTarget {
     pub supply: super::transmission::DriveSupply,
 }
 
-/// Who acts on the controls this tick.
+/// Requested control action; `DriveSupply::control_authority` determines who can act.
 #[derive(Clone, Copy, PartialEq, Debug)]
 pub enum DriveIntent {
-    /// The driver chases these axes. Zero is a released throttle: the tank coasts under engine
-    /// drag.
+    /// Staffed controls chase these axes. Zero releases the throttle to engine drag.
     Axes(DriveAxes),
-    /// Release both axes and hold the service brakes: the tank brakes to a stop, then the parking
-    /// latch holds it.
+    /// Release both axes and hold the service brakes, including an unstaffed phase hold.
+    /// Staffing separately determines whether the park lever can be changed.
     Brake,
-    /// The game's damage model: the authored controls are unstaffed, so no command exists.
-    /// The controls release at once; the existing park lever retains its state.
-    Unmanned,
 }
 
 /// Shared keyboard feel, admitted before play by the command core. The embedded data is also

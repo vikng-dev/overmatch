@@ -711,8 +711,11 @@ pub fn readout(st: &TransmissionState, tp: &TransmissionParams) -> DriveReadout 
     } else {
         &tp.gears_fwd
     };
-    let top = ladder.len() as u8;
-    let gear = st.gear.clamp(1, top);
+    assert!(
+        (1..=ladder.len() as u8).contains(&st.gear),
+        "an active gear belongs to its admitted ladder"
+    );
+    let gear = st.gear;
     let rpm = st.omega_e / RPM_TO_RAD;
     DriveReadout {
         rpm,
@@ -734,6 +737,16 @@ pub struct DriveSupply {
 }
 
 impl DriveSupply {
+    /// The game's damage model: only staffed controls can serve the available Drive task.
+    /// The server's control work and the HUD consume this same rate.
+    pub(crate) fn served_task_rate(self) -> f32 {
+        if self.control_authority {
+            self.task_rate
+        } else {
+            0.0
+        }
+    }
+
     /// The game's damage model: the sandbox lab's staffed, full-rate, whole-source fixture.
     pub const WHOLE: Self = Self {
         control_authority: true,
@@ -817,7 +830,8 @@ fn engine_torques(
     let released = pedal * pedal * (3.0 - 2.0 * pedal);
     let rpm = omega / RPM_TO_RAD;
     let curve = tp.torque_at(rpm);
-    let induced = supply.task_rate * (command * curve + released * drag * tp.fuel_cut(rpm));
+    let induced =
+        supply.served_task_rate() * (command * curve + released * drag * tp.fuel_cut(rpm));
     let idle_capacity = idle_catch_capacity(tp, supply);
     let catch = (idle_capacity * (tp.engine.idle_rpm * RPM_TO_RAD - omega)
         / (engine_control().idle_catch_droop_rpm.value * RPM_TO_RAD))
@@ -828,9 +842,9 @@ fn engine_torques(
 }
 
 /// The game's driving and damage model: the Driver's idle catch is work by the Drive task,
-/// requiring control authority and consuming its throughput once, like commanded fueling.
+/// consuming the served task throughput, like commanded fueling.
 fn idle_catch_capacity(tp: &TransmissionParams, supply: DriveSupply) -> f32 {
-    supply.task_rate * tp.torque_at(tp.engine.idle_rpm)
+    supply.served_task_rate() * tp.torque_at(tp.engine.idle_rpm)
 }
 
 /// Instrument for the accepted Driver law: price the crank at the landing shaft speed,
@@ -892,23 +906,38 @@ fn candidate_load(
     super::load::PerceivedLoad { turn_n, ..load }
 }
 
-/// Coupled translation mass (kg): nominal hull mass and both belt inertias.
-pub(crate) fn coupled_mass(fp: &ForceParams) -> f32 {
-    let hull = fp
-        .grip
-        .expect("a drivetrain requires grip construction")
-        .side_weight
-        * 2.0
-        / super::derive::G;
-    hull + 2.0 * fp.inertia
+/// Required driving weight and belt inertia. Support-only contact parameters cannot enter
+/// the Driver or observer without grip construction.
+#[derive(Clone, Copy)]
+pub(crate) struct DriveConstruction {
+    weight_n: f32,
+    belt_inertia: f32,
 }
 
-fn force_margin(fp: &ForceParams, tp: &TransmissionParams) -> f32 {
-    let weight = 2.0
-        * fp.grip
-            .expect("a drivetrain requires grip construction")
-            .side_weight;
-    super::load::DriverResolution::load().margin_n(weight, tp)
+impl DriveConstruction {
+    pub(crate) fn new(params: &ForceParams) -> Self {
+        let grip = params
+            .grip
+            .expect("a drivetrain requires grip construction");
+        Self {
+            weight_n: 2.0 * grip.side_weight,
+            belt_inertia: params.inertia,
+        }
+    }
+
+    pub(crate) fn weight_n(self) -> f32 {
+        self.weight_n
+    }
+}
+
+/// Coupled translation mass (kg): nominal hull mass and both belt inertias.
+pub(crate) fn coupled_mass(fp: &DriveConstruction) -> f32 {
+    let hull = fp.weight_n / super::derive::G;
+    hull + 2.0 * fp.belt_inertia
+}
+
+fn force_margin(fp: &DriveConstruction, tp: &TransmissionParams) -> f32 {
+    super::load::DriverResolution::load().margin_n(fp.weight_n, tp)
 }
 
 /// A coupled crank accelerates with the vehicle: J*k^2 adds reflected mass. Solving
@@ -919,7 +948,7 @@ fn force_margin(fp: &ForceParams, tp: &TransmissionParams) -> f32 {
 )]
 fn gear_force(
     tp: &TransmissionParams,
-    fp: &ForceParams,
+    fp: &DriveConstruction,
     supply: DriveSupply,
     shaft: f32,
     ratio: f32,
@@ -944,7 +973,7 @@ fn gear_force(
 /// at full pedal; a live request reprices before actuator travel, with no paid drive cut.
 fn launch_pick(
     tp: &TransmissionParams,
-    fp: &ForceParams,
+    fp: &DriveConstruction,
     supply: DriveSupply,
     reverse: bool,
     load: super::load::PerceivedLoad,
@@ -978,7 +1007,7 @@ fn launch_pick(
 /// for holding would keep low gears at their pre-governor force and prevent the ladder walk.
 pub(crate) fn landed_spare(
     tp: &TransmissionParams,
-    fp: &ForceParams,
+    fp: &DriveConstruction,
     inp: &TransmissionInput,
     state: &TransmissionState,
     candidate: u8,
@@ -1033,7 +1062,7 @@ pub(crate) fn landed_spare(
 fn choose_gear(
     st: &mut TransmissionState,
     tp: &TransmissionParams,
-    fp: &ForceParams,
+    fp: &DriveConstruction,
     inp: &TransmissionInput,
     command: f32,
     shaft: f32,
@@ -1222,30 +1251,26 @@ struct Controls {
     shifting: bool,
 }
 
-/// The game's driving and damage model: intent names whether someone acts on the controls.
+/// The game's driving and damage model: policy reads the requested action, staffing and served work.
 /// Absence releases fuel and steering, retains gear and park, and lets the clutch spring In
-/// after any paid cut. Staffing alone works brakes; task throughput works gear and clutch.
+/// after any paid cut. Staffed input works the brakes; a phase hold also works them unstaffed.
+/// Served task throughput works gear and clutch.
 fn driver(
-    intent: DriveIntent,
-    fp: &ForceParams,
+    fp: &DriveConstruction,
     tp: &TransmissionParams,
     st: &mut TransmissionState,
     inp: &TransmissionInput,
 ) -> Controls {
     let mut input = *inp;
-    let mut staffed = input.supply.control_authority;
-    let (command, brake) = match intent {
-        DriveIntent::Axes(axes) => (axes.throttle, false),
+    let staffed = input.supply.control_authority;
+    if !staffed {
+        input.throttle = 0.0;
+    }
+    let (command, brake) = match input.intent {
+        DriveIntent::Axes(axes) => (if staffed { axes.throttle } else { 0.0 }, false),
         DriveIntent::Brake => (0.0, true),
-        DriveIntent::Unmanned => {
-            input.throttle = 0.0;
-            input.steer = 0.0;
-            staffed = false;
-            (0.0, false)
-        }
     };
-    input.supply.task_rate = if staffed { input.supply.task_rate } else { 0.0 };
-    let work = input.supply.task_rate > 0.0;
+    let work = input.supply.served_task_rate() > 0.0;
     if work {
         swap_ladder_direction(tp, st, &input, command, brake);
     } else {
@@ -1261,7 +1286,10 @@ fn driver(
     } else {
         &tp.gears_fwd
     };
-    st.gear = st.gear.clamp(1, ladder.len() as u8);
+    assert!(
+        (1..=ladder.len() as u8).contains(&st.gear),
+        "a direction swap selects first gear on its admitted ladder"
+    );
     let opposing = command * dir < -DEAD;
     let against_motion = command.abs() >= DEAD
         && input
@@ -1292,6 +1320,7 @@ fn driver(
             brake,
         );
     } else {
+        // Without task work the clutch springs In after the already-paid mechanical cut.
         st.clutch = if shifting {
             ClutchState::Out
         } else {
@@ -1360,8 +1389,6 @@ fn neutral_turn(inp: &TransmissionInput, mean: f32) -> bool {
 /// Shift windows, a two-sided parked hold and neutral turns open
 /// the clutch. Intent at rest below idle starts Slip regardless of the prior regime,
 /// retaining it until the shaft reaches its commanded launch speed.
-/// Without task work the clutch springs In, including at rest. A paid interruption still
-/// expires on its mechanical clock; it cannot be renewed without a Driver.
 fn update_clutch_state(
     st: &mut TransmissionState,
     tp: &TransmissionParams,
@@ -1392,8 +1419,8 @@ fn update_clutch_state(
 /// Free crank torque is commanded fuel or the Driver catch, less construction drag, all
 /// evaluated at the pre-tick crank speed. Engaged fueling follows propulsive throttle only.
 /// With the clutch open, a paid window or active steering requests a proportional rev
-/// governor. `driver` admits its task throughput once for all fueling. A paid window targets `|m|*k` in the already selected landing gear, so the
-/// clutch re-engages near-synchronous; without a window that target is idle. Steering targets
+/// governor. `DriveSupply::served_task_rate` gates throughput for all fueling. A paid window
+/// targets `|m|*k` in the selected landing gear, so the clutch re-engages near-synchronous; without a window that target is idle. Steering targets
 /// `idle + (peak - idle)*|steer|`; the governor takes the larger target. Open rest requests no
 /// fuel. The catch and induced combustion consume task throughput; drag stays unscaled.
 /// `engine_work` charges sprocket work against combustion and stored crank energy, including
@@ -1438,7 +1465,7 @@ fn crank_free_torque(
     let p_avail = supply.engine_condition * tp.torque_at(rpm) * omega_e.max(0.0);
     #[cfg(feature = "bitprobe")]
     {
-        probe.u_fuel = u_fuel * supply.task_rate;
+        probe.u_fuel = u_fuel * supply.served_task_rate();
         probe.rpm = rpm;
         probe.tau_idle = tau_idle;
         probe.tau_induced = tau_ind;
@@ -1843,7 +1870,7 @@ pub fn step(
     st: &mut TransmissionState,
     inp: &TransmissionInput,
 ) -> TransmissionReport {
-    fp.grip.expect("a drivetrain requires grip construction");
+    let construction = DriveConstruction::new(fp);
     let dt = inp.dt;
     let [vl, vr] = inp.speeds;
     let m = (vl + vr) / 2.0;
@@ -1851,7 +1878,7 @@ pub fn step(
     #[cfg(feature = "bitprobe")]
     let mut bitprobe = input_probe(st, inp, m, d);
 
-    let controls = driver(inp.intent, fp, tp, st, inp);
+    let controls = driver(&construction, tp, st, inp);
     let inp = &controls.input;
     let Controls {
         dir,

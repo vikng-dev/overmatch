@@ -438,7 +438,8 @@ pub struct AxisKeys {
 /// Client-only persistent levers. Ownership changes discard both axes so a respawn or Tab swap
 /// cannot inherit a previous tank's cruise command. Repair brakes mask the request without
 /// moving these levers. The game's damage model: an empty Driver station also masks the
-/// request without discarding it; staffing restores the same notch. No field is replicated.
+/// request without discarding it; staffing resumes the latest notch, including taps made while absent.
+/// No field is replicated.
 #[derive(Resource, Default)]
 pub(crate) struct DriveInput {
     owner: Option<Entity>,
@@ -1128,9 +1129,9 @@ mod tests {
     }
 
     /// The game's damage model: a Driver station's HP state cannot take device ownership.
-    /// The player's notch therefore survives an empty station and its return unchanged.
+    /// The player can still edit the notch while the station is empty; staffing resumes that latest value.
     #[test]
-    fn empty_driver_station_preserves_the_throttle_notch() {
+    fn empty_driver_station_keeps_player_ownership_of_the_latest_notch() {
         use bevy::ecs::system::RunSystemOnce;
         let mut script = DriveKeys::new();
         script.world.insert_resource(DeviceOwner::Tank);
@@ -1146,13 +1147,15 @@ mod tests {
         script.world.run_system_once(claim_device).unwrap();
         assert_eq!(*script.world.resource::<DeviceOwner>(), DeviceOwner::Tank);
         assert_eq!(script.gather(0.0).throttle, notch);
+        let updated = script.tap(KeyCode::KeyW).throttle;
+        assert!(updated > notch);
         script
             .world
             .entity_mut(driver)
             .remove::<crate::damage::Dead>();
         script.world.run_system_once(claim_device).unwrap();
         assert_eq!(*script.world.resource::<DeviceOwner>(), DeviceOwner::Tank);
-        assert_eq!(script.gather(0.0).throttle, notch);
+        assert_eq!(script.gather(0.0).throttle, updated);
     }
 
     /// A hold owns the full axis after the window, then releases to coast/straight. Keeping the

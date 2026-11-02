@@ -12,7 +12,7 @@
 //!   tick-start shape snapshot ([`RubbleBodies`]), checked across the complete shoe footprint.
 //! - Runs every tick unconditionally (this is sim state); stays inside
 //!   `SimPhase::DrivingForces` so drive samples velocity before the weapon-fire impulse.
-//! - The game's damage model ([`drive_target`]): a command exists only while someone serves the
+//! - The game's damage model ([`drive_target`]): axes actuate only while someone serves the
 //!   authored control stations. Task throughput is resolved once over complete paths;
 //!   local source conditions remain separate ([`DriveSupply`]). Driver intent, service brakes, engine
 //!   drag and contact grip keep their construction-defined meaning. A supply change takes effect
@@ -270,7 +270,7 @@ impl TrackGear {
     /// Coupled translation mass for a torque-cut landing: hull plus both belt inertias (kg).
     #[cfg(all(test, feature = "bitprobe"))]
     pub(crate) fn landing_mass(&self) -> f32 {
-        transmission::coupled_mass(&self.params)
+        transmission::coupled_mass(&transmission::DriveConstruction::new(&self.params))
     }
 
     #[cfg(all(test, feature = "bitprobe"))]
@@ -282,7 +282,7 @@ impl TrackGear {
     ) -> f32 {
         transmission::landed_spare(
             &self.trans,
-            &self.params,
+            &transmission::DriveConstruction::new(&self.params),
             &TransmissionInput {
                 supply: transmission::DriveSupply::WHOLE,
                 intent: DriveIntent::Axes(DriveAxes {
@@ -647,12 +647,12 @@ pub(crate) fn belt_tick<O: TerrainOracle>(
 ) -> ([SideReport; 2], TransmissionReport) {
     let DriveTarget { intent, supply } = target;
     let target = match intent {
-        DriveIntent::Axes(axes) => axes,
-        DriveIntent::Brake => DriveAxes::default(),
-        DriveIntent::Unmanned => {
+        DriveIntent::Axes(axes) if supply.control_authority => axes,
+        DriveIntent::Axes(_) => {
             *rig.signal = DriveSignal::default();
             DriveAxes::default()
         }
+        DriveIntent::Brake => DriveAxes::default(),
     };
     let shaped = shape_drive(
         DriveAxes {
@@ -740,12 +740,10 @@ pub(crate) fn belt_tick<O: TerrainOracle>(
     (reports, tr)
 }
 
-/// The game's damage model: a phase hold imposes service brakes. Otherwise only someone
-/// staffing the authored controls can command axes or hold the brakes for repair; without
-/// control authority repair remains work and cannot become a remote brake toggle.
-// Brake and Unmanned mask this tick's request. The client's persistent lever remains player
-// intent and resumes when the hold or staffing restriction ends; this policy never clears it.
-// In particular, completing repair releases Brake onto the same retained throttle notch.
+/// The game's damage model: a phase hold imposes service brakes independently of staffing.
+/// Repair holds brakes only with staffed controls; the Driver masks unstaffed axis requests.
+// Holds and staffing mask actuation, never the player's local lever. Releasing a hold or
+// restoring staffing resumes the latest notch, including taps made while controls were absent.
 pub(crate) fn drive_target(
     command: &ParsedTankCommand,
     tank: Option<&TankVolumes>,
@@ -753,19 +751,15 @@ pub(crate) fn drive_target(
     volumes: &Query<VolumeFacets>,
 ) -> DriveTarget {
     let supply = drive_supply(tank, caps, volumes);
-    let intent = if command.held() {
+    let repairing = supply.control_authority
+        && tank.is_some_and(|tank| crate::damage::repair::underway(tank, volumes));
+    let intent = if command.held() || repairing {
         DriveIntent::Brake
-    } else if supply.control_authority {
-        if tank.is_some_and(|tank| crate::damage::repair::underway(tank, volumes)) {
-            DriveIntent::Brake
-        } else {
-            DriveIntent::Axes(DriveAxes {
-                throttle: command.throttle,
-                steer: command.steer,
-            })
-        }
     } else {
-        DriveIntent::Unmanned
+        DriveIntent::Axes(DriveAxes {
+            throttle: command.throttle,
+            steer: command.steer,
+        })
     };
     DriveTarget { intent, supply }
 }
@@ -1432,14 +1426,7 @@ mod tests {
             (CrewStation::Driver, false, 0.5, 1.0, axes, 1.0),
             (CrewStation::Driver, false, 1.0, 0.5, axes, 1.0),
             (CrewStation::Driver, false, 0.0, 1.0, axes, 1.0),
-            (
-                CrewStation::Driver,
-                true,
-                1.0,
-                1.0,
-                DriveIntent::Unmanned,
-                0.0,
-            ),
+            (CrewStation::Driver, true, 1.0, 1.0, axes, 0.0),
         ] {
             let mut world = World::new();
             let tank = world
@@ -1672,7 +1659,14 @@ mod tests {
                       facets: Query<VolumeFacets>| {
                     let (volumes, caps) = tanks.get(tank).unwrap();
                     let target = drive_target(&command, Some(volumes), Some(caps), &facets);
-                    assert_eq!(target.intent, DriveIntent::Unmanned);
+                    assert_eq!(
+                        target.intent,
+                        DriveIntent::Axes(DriveAxes {
+                            throttle: command.throttle,
+                            steer: command.steer
+                        })
+                    );
+                    assert_eq!(target.supply.served_task_rate(), 0.0);
                     assert_eq!(target.supply.task_rate, 0.6);
                     assert!(!target.supply.control_authority);
                     assert_eq!(target.supply.engine_condition, 0.5);

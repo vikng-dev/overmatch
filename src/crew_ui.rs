@@ -191,7 +191,7 @@ fn served_percent(share: f32) -> i32 {
     }
 }
 
-/// Render the controlled tank's vitals card: crew available/total, the available Drive task rate,
+/// Render the controlled tank's vitals card: crew available/total, the served Drive task rate,
 /// each weapon's reload/fire state (`READY` / `x.xs` / `no-fire`), and the round choice of each
 /// weapon that has one ([`round_line`]), plus module repair progress and readiness.
 /// A pure view over the controlled tank's local components.
@@ -228,9 +228,9 @@ fn update_status_panel(
     facets: Query<VolumeFacets>,
     mut panel: Query<(&mut Text, &mut Visibility), With<StatusPanelText>>,
 ) {
-    let Ok((mut text, mut visibility)) = panel.single_mut() else {
-        return;
-    };
+    let (mut text, mut visibility) = panel
+        .single_mut()
+        .expect("crew UI mounts exactly one status panel for the match");
     // No local rig before spawn or between possessions: hide the card and its background.
     let Some((tank, volumes, caps, knocked_out, command)) =
         crate::tank::controlled_one(tank.single())
@@ -255,7 +255,7 @@ fn update_status_panel(
     }
 
     // The game's damage model: the selector supplies one task rate to the sim and HUD;
-    // control authority and brake holds remain separate intent facts.
+    // served throughput masks unstaffed controls; brake holds remain separate intent facts.
     let quality = part_facts(volumes, &facets).quality;
     let target = crate::track::sim::drive_target(command, Some(volumes), Some(caps), &facets);
     let drive_line = drive_rate_line(&target);
@@ -354,12 +354,12 @@ fn update_status_panel(
 }
 
 /// The game's damage model: the HUD names the same task rate that the simulation consumes.
-/// Holds and unmanned controls change intent, independently of available task throughput.
+/// A hold keeps served throughput; unstaffed controls serve zero even with an available task path.
 pub(crate) fn drive_rate_line(target: &crate::track::drive::DriveTarget) -> String {
     format!(
         "{} rate {}%",
         Capability::Drive.label(),
-        served_percent(target.supply.task_rate)
+        served_percent(target.supply.served_task_rate())
     )
 }
 
@@ -424,9 +424,9 @@ fn update_crew_bar(
     seats: Query<(Entity, &CrewStation, &Crewman, Option<&Dead>, &VolumeOf)>,
     mut bar: Query<&mut Text, With<CrewBarText>>,
 ) {
-    let Ok(mut text) = bar.single_mut() else {
-        return;
-    };
+    let mut text = bar
+        .single_mut()
+        .expect("crew UI mounts exactly one crew bar for the match");
     let Some((tank, pending)) = crate::tank::controlled_one(tank.single()) else {
         set_text(text.reborrow(), "");
         return;
@@ -481,28 +481,94 @@ fn update_crew_bar(
 mod tests {
     use super::*;
 
-    /// The game's damage model: the HUD cannot recompose source conditions or gate task
-    /// throughput on current intent. Fixture: a complete-path rate distinct from both sources.
+    /// The game's damage model: the mounted panel shows served Drive work for unstaffed
+    /// Backup paths and staffed phase holds, rather than recomposing its sources.
+    /// Fixture: ten-point source pools and an independent Commander Backup path.
     #[test]
     fn drive_rate_readout_uses_the_consumed_task_rate() {
-        use crate::track::drive::{DriveAxes, DriveIntent, DriveTarget};
-        use crate::track::transmission::DriveSupply;
-        for intent in [
-            DriveIntent::Axes(DriveAxes::default()),
-            DriveIntent::Brake,
-            DriveIntent::Unmanned,
-        ] {
-            let target = DriveTarget {
-                intent,
-                supply: DriveSupply {
-                    task_rate: 0.3,
-                    engine_condition: 1.0,
-                    transmission_condition: 0.5,
-                    control_authority: !matches!(intent, DriveIntent::Unmanned),
+        use crate::ballistics::ComponentHealth;
+        use crate::command::ParsedTankCommand;
+        use crate::damage::{ControlStaffing, FunctionRole, GradedGroup, Group, Part};
+        use bevy::ecs::system::RunSystemOnce;
+        let mut world = World::new();
+        world.insert_resource(crate::WeaponClock(crate::sim_tick::SimTick::new(0)));
+        world.insert_resource(Time::<Fixed>::default());
+        let panel = world
+            .spawn((StatusPanelText, Text::new(""), Visibility::Visible))
+            .id();
+        let tank = world
+            .spawn((
+                Controlled,
+                TankCapabilities::new(
+                    [(
+                        Capability::Drive,
+                        vec![Group::Graded(GradedGroup::Backup(vec![
+                            (1.0, vec![Part::Driver, Part::Engine]),
+                            (0.6, vec![Part::Commander, Part::Transmission]),
+                        ]))],
+                    )]
+                    .into(),
+                    ControlStaffing::Any(vec![vec![CrewStation::Driver]]),
+                ),
+                ParsedTankCommand::hold(),
+            ))
+            .id();
+        let driver = world
+            .spawn((
+                CrewStation::Driver,
+                Crewman {
+                    home: CrewStation::Driver,
                 },
-            };
-            assert_eq!(super::drive_rate_line(&target), "Drive rate 30%");
+                VolumeOf(tank),
+            ))
+            .id();
+        world.spawn((
+            CrewStation::Commander,
+            Crewman {
+                home: CrewStation::Commander,
+            },
+            VolumeOf(tank),
+        ));
+        for (role, held) in [(FunctionRole::Engine, 5), (FunctionRole::Transmission, 10)] {
+            world.spawn((
+                role,
+                ComponentHealth::holding(10, held * crate::ballistics::POOL_UNITS_PER_HP),
+                VolumeOf(tank),
+            ));
         }
+        for staffed in [false, true] {
+            if staffed {
+                world.entity_mut(driver).remove::<Dead>();
+            } else {
+                world.entity_mut(driver).insert(Dead);
+            }
+            for command in [
+                ParsedTankCommand::hold(),
+                ParsedTankCommand::try_from(TankCommand {
+                    throttle: 1.0,
+                    ..default()
+                })
+                .unwrap(),
+            ] {
+                world.entity_mut(tank).insert(command);
+                world.run_system_once(update_status_panel).unwrap();
+                let text = &world.get::<Text>(panel).unwrap().0;
+                let expected = if staffed {
+                    "Drive rate 60%"
+                } else {
+                    "Drive rate 0%"
+                };
+                assert!(text.contains(expected), "{text}");
+                assert_eq!(
+                    *world.get::<Visibility>(panel).unwrap(),
+                    Visibility::Visible
+                );
+            }
+        }
+        world.entity_mut(tank).remove::<Controlled>();
+        world.run_system_once(update_status_panel).unwrap();
+        assert!(world.get::<Text>(panel).unwrap().0.is_empty());
+        assert_eq!(*world.get::<Visibility>(panel).unwrap(), Visibility::Hidden);
     }
 
     /// The game's damage model: the player must see a reduced module's rate rather than READY.

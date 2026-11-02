@@ -755,6 +755,7 @@ fn perceived_load_during_a_rearward_shot_uphill() {
 fn empty_driver_station_coast_and_rollback() {
     use crate::damage::{CrewStation, Dead, VolumeOf};
     use crate::track::transmission::{ClutchState, RPM_TO_RAD, overrev_margin_rpm};
+    let mut observed_roots = 0;
     for degrees in [-10.0_f32, 10.0] {
         for launch_gear in [true, false] {
             let angle = degrees.to_radians();
@@ -869,7 +870,9 @@ fn empty_driver_station_coast_and_rollback() {
                 },
                 "steady motoring drag must oppose travel"
             );
+            // None is outside the inverse's unclamped class; drag and guard checks still apply.
             if let Some(expected) = equilibrium {
+                observed_roots += 1;
                 // Resolution: one percent permits the coupled contact discretization and finite
                 // settling window; halving the authored drag's delivery cannot fit this band.
                 let precision = expected * 0.01;
@@ -889,6 +892,10 @@ fn empty_driver_station_coast_and_rollback() {
             );
         }
     }
+    assert!(
+        observed_roots > 0,
+        "S3 must deliver at least one unclamped motoring root"
+    );
 }
 
 /// The shipped composition must launch at every player notch on level ground and on a

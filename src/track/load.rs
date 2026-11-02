@@ -105,10 +105,7 @@ pub(crate) fn observe_rig<'a>(
     tp: &TransmissionParams,
     state: &TransmissionState,
 ) -> PerceivedLoad {
-    let weight = 2.0
-        * fp.grip
-            .expect("a drivetrain requires grip construction")
-            .side_weight;
+    let weight = super::transmission::DriveConstruction::new(fp).weight_n();
     observe(
         contacts,
         forward * if state.reverse { -1.0 } else { 1.0 },

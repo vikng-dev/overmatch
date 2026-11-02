@@ -81,3 +81,88 @@ and integrates longitudinal hull motion from emitted forces. MEASURED at 18,000 
 30,662.777 N, rolling load 6,955.8926 N, grip 178,446.06 N, final-second speed range
 [3.1315382, 3.1315715] m/s. It sustains and settles at a real load. No rollback policy is tested.
 Formatting, CI clippy and all 420 affected-module/guard tests pass after restoring production.
+
+## Driver control seam and review dispositions
+
+Commit: `driving: align Driver authority and HUD task rate (#146)`.
+
+`control_authority` is the one absence encoding. `DriveIntent::Unmanned` and its test arms are
+gone; a request can remain present while staffing masks its actuation. A phase hold still
+works service brakes without staffing. The shared `DriveSupply::served_task_rate` gives both
+fueling and the actual status-panel system zero for unstaffed controls, including an available
+Backup path. The mounted-panel regression checks absent/staffed controls under ordinary input
+and phase holds, then the legitimate no-controlled-tank hide state. The input regression now taps
+while the Driver station is empty and proves that staffing resumes the latest notch.
+
+`driver` reads intent from its input rather than a redundant parameter. Required weight and
+belt inertia enter its selectors through `DriveConstruction`, with one owner of the grip
+requirement; downstream selectors no longer validate and then re-expect optional grip. Invalid
+active gears and missing/duplicate required crew widgets panic with their construction invariant.
+The reverse steering solve already lost its clamped index and invalid-detent fallback in the
+reverse-row commit. Legitimate unclamped-root absence stays named in S3, which now requires at
+least one actual root and therefore cannot silently skip all delivery/settling assertions.
+
+The false Brake/park and clutch-work docs, live-crank pricing-test claim, no-op backward-crank
+staffing arm and edit-history comments are corrected. The upshift refusal and its accurate
+reason remain unchanged. The engine-control file path was already correct at this lane's start;
+it was not a current defect. The inverse-only unit test remains a narrow inverse-law witness;
+S3, not that unit test, owns the shipped delivery claim.
+
+The first whole-library run passed 2,248 tests and exposed one device fixture failure. A focused
+red named the missing crew bar: that minimal app installed `crew_ui` without `UiFonts`, and its
+ignored system-validation errors had concealed the skipped match-entry spawner. The fixture now
+supplies its fonts, fixed time and weapon clock before match entry. Its device test passed after
+the correction. No damage-model behavior changed; this is the game's UI/device composition.
+
+Ratchet: view-14 and view-15 are closed. The crew-panel and crew-bar sites are removed from
+view-08 after verifying their cardinality guarantee; that row still tracks its untouched reticle
+sites. No other backlog row names a file edited by this lane. Self-review covered error handling,
+branching, base truths, testing and brevity. No protocol/wire type changed, so `PROTOCOL_REV`
+remains unchanged. Both rounds of the three production mutations executed and went red; the
+second round ran after the checked-construction/authority interface change.
+
+| reviewer | finding | verified / not a defect | fixed in (subject) |
+|---|---|---|---|
+| Claude | Reverse rows read forward construction | Verified red; observer, pricing, solve and HUD read independent data | driving: give reverse gears their own steering rows (#146) |
+| Claude / resumed admission review | Finite scalar inputs overflow crank energy | Verified red; refused before parameter publication | driving: give reverse gears their own steering rows (#146) |
+| Codex | Decimal notch admission misses binary32 collisions | Verified thirteen-state transition closure and refusal | driving: admit the notches the client actually reaches (#146) |
+| Claude + Codex | Second-construction coverage and selector-controlled assertions | Verified with actual production mutants and loaded spec/contact composition | driving: prove a second construction through the drive laws (#146) |
+| Claude | HUD rate, staffing/notch semantics and duplicate absence encoding | Verified with mounted panel, device and adapter tests | driving: align Driver authority and HUD task rate (#146) |
+| Claude | Redundant intent, false docs, stale tests and required-construction outcomes | Verified against source and affected tests | driving: align Driver authority and HUD task rate (#146) |
+| Claude | S3 can skip every root | Verified missing coverage requirement; a root is now mandatory | driving: align Driver authority and HUD task rate (#146) |
+| Claude | Engine data-path sentence | Not a current defect; already points at assets/driving/engine.ron | No path correction needed |
+| Claude | Inverse witness does not call step | Not a defect for its narrow claim; shipped delivery now has a non-vacuous S3 witness | driving: align Driver authority and HUD task rate (#146) |
+
+## Decisions and player outcome
+
+Decisions: require independent reverse rows rather than infer them from forward ratios; refuse
+unrepresentable crank energy at admission; enumerate the client's exact tap with a bounded
+startup budget; share one inline second spec while explicitly reusing seed geometry; price test
+capability independently of the selector; execute actual production mutations and remove them;
+keep authority as the sole absence fact and share served work with the HUD; use required driving
+construction in selectors; fail fast on invalid gears/widgets; require an S3 root while permitting
+named out-of-class inverse cases; preserve the narrow inverse unit test; correct the minimal
+device fixture's inputs; preserve all reserved calls and the wire revision.
+
+Players stop seeing Drive throughput credited to controls nobody staffs: the panel shows zero,
+then the served Backup-path rate when controls are staffed. Existing shipped driving feel is
+unchanged. A differently constructed reverse ladder gets its own physical and displayed radii.
+Notch behavior is accurately stated and checked: taps during absence still edit the local lever.
+In my judgment the requested driving bar clears apart from the owner's reserved calls: rollback
+that service brakes cannot arrest, sub-idle landing/upshift policy, over-rev outcome and empty-
+station descent. No new model test or predicate was added for those decisions; S3's requested
+coverage check strengthens its existing witness only. Nothing is pushed or merged.
+
+## Final gates and measured finish
+
+Formatting, CI clippy, the focused device regression and all 420 affected-module/whole-tree
+source guards pass. The corrected whole-library run passes: **2,249 passed, 26 ignored**, with
+no failed tests. The ignored tests remain the repository's opt-in beds; none was added here.
+The Blender fixture also passes Python syntax parsing. Final production contains no mutant.
+
+MEASURED ready to commit: 2026-11-02 22:40:49 UTC; elapsed 52.22 minutes.
+MEASURED completed build-queue wait: 862 seconds across 28 commands,
+with a longest wait of 417 seconds. These waits are included in the lane clock.
+There was no capacity stop, capture, pricing run, window, push or merge. All launched
+checks terminated normally or returned their recorded test/build failure; no lane process remains.
+All four requested items are complete within the sixty-minute boundary.
