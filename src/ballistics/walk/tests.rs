@@ -1285,7 +1285,86 @@ fn finish_at(
     capability: f32,
 ) -> Result<ResolutionPlan<SolidShotState>, WalkError> {
     let (round, state) = solid(capability);
-    finish(transit, request, &round, state, &Limits { rest: 0.0 })
+    finish(
+        transit,
+        request,
+        &round,
+        state,
+        &Limits { rest: 0.0 },
+        round.body().mass,
+    )
+}
+
+/// The game's damage model must retain exactly zero at κ = r = 1. The HP edge rejects
+/// negative energy; subtracting fixture contributions 1.0 and 0.2 J from their rounded sum
+/// breaks that invariant even though both contributions are wholly carried away.
+#[test]
+fn a_wholly_emitted_exchange_retains_zero_without_subtractive_roundoff() {
+    let address = volume(1);
+    let stretches: Vec<Stretch<()>> = [1.0, 0.2]
+        .into_iter()
+        .map(|energy| Stretch {
+            start: 0.0,
+            end: 1.0,
+            before: (),
+            after: (),
+            resisted: vec![(0, REFERENCE_FACTOR)],
+            lines: vec![(address, 0, energy)],
+        })
+        .collect();
+    let doses = BTreeMap::from([(
+        address,
+        LineSum {
+            chord: 2.0,
+            cost: 2.0,
+            energy: 1.0 + 0.2,
+            ..Default::default()
+        },
+    )]);
+    let retained = retained_lines(
+        doses,
+        &stretches,
+        &BTreeMap::from([((0, 0), 1.0), ((1, 0), 1.0)]),
+    );
+    assert_eq!(retained[&address].energy, 0.0);
+    super::super::energy_units(retained[&address].energy as f32);
+
+    // The game's damage model uses the same partition on a real fixture crossing's disc samples.
+    let laws = WalkLaws::default();
+    let slabs = [Slab::at(1, 0, 0.5, -AXIS, 0.05)];
+    let volumes = table(&[(1, REFERENCE_FACTOR)]);
+    let walked = walk_disc(&entrance_disc(&slabs, 3.0), &volumes, &laws).unwrap();
+    let request = transit_request(&walked, &AP_88, &laws);
+    let transit = walk_disc(&transit_disc(&request, &slabs, 3.0), &volumes, &laws).unwrap();
+    let (round, state) = solid(AP_88_CAPABILITY);
+    let event = &transit.events[0];
+    let advanced = advance_through(
+        &round,
+        state,
+        &event.encounters,
+        &Limits { rest: 0.0 },
+        &Geometry {
+            axis: transit.axis,
+            entrance_normal: request.entrance.normal,
+        },
+    )
+    .unwrap();
+    let (_, mut carried) = spall_sources(
+        &round,
+        &event.exits,
+        &advanced.stretches,
+        advanced.stop,
+        transit.axis,
+    );
+    assert!(!carried.is_empty(), "the fixture reaches a body exit");
+    // Fixture κ = r = 1, the accepted upper endpoint, on the crossing's reached samples.
+    carried.values_mut().for_each(|share| *share = 1.0);
+    let retained = retained_lines(advanced.doses, &advanced.stretches, &carried);
+    for line in retained.values() {
+        assert_eq!(line.energy, 0.0);
+        assert!(line.debris > 0.0 && line.speed_loss > 0.0);
+        super::super::energy_units(line.energy as f32);
+    }
 }
 
 fn transit_request(walked: &DiscWalk, shot: &Shot, laws: &WalkLaws) -> TransitRequest {
@@ -1989,6 +2068,7 @@ fn a_round_that_loses_more_energy_at_a_plate_throws_a_stronger_cone() {
                 &round,
                 round.at(speed),
                 &Limits { rest: 0.0 },
+                body.mass,
             )
             .unwrap();
             assert!(
@@ -2173,6 +2253,25 @@ fn a_perforation_charges_every_entity_for_its_own_material() {
     let dealt: f64 = plan.deposits.iter().map(|dose| dose.amount as f64).sum();
     let carried: f64 = plan.spall.iter().map(|cone| cone.carried() as f64).sum();
     assert!(carried > 0.0, "the exits' cones carry energy out");
+    let exchange_retained: f64 = plan
+        .exchanges
+        .iter()
+        .map(|exchange| f64::from(exchange.retained))
+        .sum();
+    let exchange_debris: f64 = plan
+        .exchanges
+        .iter()
+        .map(|exchange| f64::from(exchange.debris))
+        .sum();
+    let momentum: Vec3 = plan
+        .exchanges
+        .iter()
+        .map(|exchange| exchange.momentum)
+        .sum();
+    let expected = f64::from(round.body().mass) * (state.speed - plan.state.speed);
+    assert_eq!(exchange_retained, dealt);
+    assert!((exchange_debris / carried - 1.0).abs() < 1.0e-6);
+    assert!((f64::from(momentum.dot(AXIS)) / expected - 1.0).abs() < 1.0e-6);
     assert!(
         ((dealt + carried) / lost - 1.0).abs() < 1.0e-5,
         "line and fields spend the energy lost once: {dealt} J + {carried} J against {lost} J"
@@ -3547,7 +3646,15 @@ fn the_mechanism_matches_the_scalar_law_on_reference_steel() {
             knife_edges += 1;
             continue;
         }
-        let new = finish(&transit, &request, &round, state, &Limits { rest: 0.0 }).unwrap();
+        let new = finish(
+            &transit,
+            &request,
+            &round,
+            state,
+            &Limits { rest: 0.0 },
+            round.body().mass,
+        )
+        .unwrap();
         compared += 1;
         embeds += old.embed.is_some() as u32;
         overmatches += request.entrance.overmatched as u32;
@@ -3771,6 +3878,19 @@ fn touching_pools_receive_the_energy_lost_at_their_own_depths() {
             assert!(
                 (actual / expected - 1.0).abs() < 1.0e-10,
                 "{speed} m/s, pool {index}: {actual} J against its own {expected} J"
+            );
+        }
+        let front_speed_loss = state.speed - first.state.speed;
+        let rear_speed_loss = first.state.speed
+            - if second.control == Control::Stop {
+                0.0
+            } else {
+                second.state.speed
+            };
+        for (index, expected) in [(1, front_speed_loss), (2, rear_speed_loss)] {
+            assert!(
+                (joined.doses[&volume(index)].speed_loss / expected - 1.0).abs() < 1.0e-10,
+                "each pool's physical exchange reads its own depths, independently of retained HP energy"
             );
         }
         if rest > 0.0 {

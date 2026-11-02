@@ -1207,12 +1207,11 @@ pub(crate) struct PoolEmptied {
 }
 
 /// The game's damage model: one line contribution delivered at its resolved path moment.
-/// Its momentum is what its own span took from the round: its energy over the round's speed there.
+/// Its momentum reads the physical exchange, independently of retained energy and HP dose.
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct DeliveredLine {
     pub(crate) crossing: VolumeCrossing,
-    pub(crate) incoming: Vec3,
-    pub(crate) momentum: f32,
+    pub(crate) momentum: Vec3,
 }
 
 /// One authority march step of `shell` that logged armour marks, threw spall cones or burst,
@@ -1736,7 +1735,8 @@ pub struct VolumeCrossing {
     /// carries its `chord × wound` dose here, from the round's crew line rate
     /// ([`ArmourMark::Wound`]).
     pub cost: f32,
-    /// The kinetic energy the round lost in it (J): hard matter's dose. Zero for a witness, which
+    /// The game's damage model: retained work (J), after outgoing debris, from the physical
+    /// exchange. Zero for a witness, which
     /// takes no energy and is dosed by `cost`.
     pub energy: f32,
     /// The whole disc traversed its exposed portions; it may still occupy a hidden portion.
@@ -6460,6 +6460,81 @@ mod march_tests {
         );
     }
 
+    /// The game's damage model must deliver the whole resolved momentum exchange independently
+    /// of its HP dose. Buildings and freed trunks read these lines. Fixture data: head-on and
+    /// oblique perforations of a 50 mm plate; entry and exit states supply the independent budget.
+    #[test]
+    fn a_perforation_delivers_its_whole_exchange_independently_of_hp() {
+        #[derive(Resource, Default)]
+        struct Lines(Vec<DeliveredLine>);
+        let oblique = Vec3::new(0.4, -1.0, 0.0).normalize();
+        for (direction, overlapped) in [(Vec3::NEG_Y, false), (oblique, false), (oblique, true)] {
+            let plate = (Vec3::new(3.0, 0.05, 3.0), Vec3::Y * 50.0);
+            let plates = if overlapped {
+                vec![plate, plate]
+            } else {
+                vec![plate]
+            };
+            let mut app = world_with_trimesh_plates(&plates);
+            if overlapped {
+                // Fixture: the first cofacial volume is wholly hidden by the stronger one.
+                let weak = app
+                    .world_mut()
+                    .query_filtered::<Entity, With<BallisticVolume>>()
+                    .iter(app.world())
+                    .min()
+                    .unwrap();
+                app.world_mut()
+                    .get_mut::<BallisticVolume>(weak)
+                    .unwrap()
+                    .material = walk::VolumeMaterial::fixture(1.0);
+            }
+            app.init_resource::<Lines>().add_observer(
+                |event: On<ShellMarched>, mut lines: ResMut<Lines>| {
+                    lines.0.extend_from_slice(&event.lines);
+                },
+            );
+            let shell = spawn_round(&mut app, FIXTURE_88, Vec3::Y * 51.0, direction * 800.0);
+            app.update();
+            let marks = app.world().get::<PenetrationMarks>(shell).unwrap();
+            let [
+                ArmourMark::Crossing {
+                    speed_in,
+                    incoming,
+                    end: CrossingEnd::Exit { speed, .. },
+                    ..
+                },
+            ] = marks.log.as_slice()
+            else {
+                panic!("the fixture perforates one plate: {:?}", marks.log);
+            };
+            let lost = 0.5
+                * f64::from(FIXTURE_88.mass)
+                * (f64::from(*speed_in).powi(2) - f64::from(*speed).powi(2));
+            let lines = &app.world().resource::<Lines>().0;
+            let axis = (lines[0].crossing.end - lines[0].crossing.entry).normalize();
+            let expected = FIXTURE_88.mass * (*incoming * *speed_in - axis * *speed);
+            let retained: f64 = lines
+                .iter()
+                .map(|line| f64::from(line.crossing.energy))
+                .sum();
+            let carried: f64 = app
+                .world()
+                .get::<SpallMarks>(shell)
+                .unwrap()
+                .cones
+                .iter()
+                .map(|cone| f64::from(cone.strength * spall_cone::EMITTED_SHARE))
+                .sum();
+            let momentum: Vec3 = lines.iter().map(|line| line.momentum).sum();
+            eprintln!(
+                "MEASURED fixture perforation: lost={lost:.6} J, retained={retained:.6} J, debris={carried:.6} J; momentum={momentum:?} N s, expected={expected:?} N s"
+            );
+            assert!(((retained + carried) / lost - 1.0).abs() < 1.0e-5);
+            assert!((momentum - expected).length() / expected.length() < 1.0e-4);
+        }
+    }
+
     /// The game's damage model decides a crossing once. The path and addressed dose survive
     /// both a different tick partition and motion of the original geometry after discovery.
     /// The runtime and destruction consumers rely on effects arriving at their path moments,
@@ -6575,8 +6650,8 @@ mod march_tests {
         );
         assert_eq!(lines_a.len(), 1, "the fixture has one decided volume line");
         assert_eq!(
-            lines_a.iter().map(|line| line.momentum).sum::<f32>(),
-            lines_b.iter().map(|line| line.momentum).sum::<f32>(),
+            lines_a.iter().map(|line| line.momentum).sum::<Vec3>(),
+            lines_b.iter().map(|line| line.momentum).sum::<Vec3>(),
             "the delivered impulse share is partition independent"
         );
         assert_eq!(lines_a.len(), lines_b.len());

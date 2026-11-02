@@ -237,7 +237,7 @@ pub(super) fn read_shell(
             into * (line.crossing.entry - root.translation),
             into * (line.crossing.end - root.translation),
             0.0,
-            into * line.incoming * line.momentum,
+            into * line.momentum,
         ));
     }
     let Some(burst) = marched.burst else {

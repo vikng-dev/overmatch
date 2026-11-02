@@ -3239,22 +3239,32 @@ pub struct ResolutionPlan<S> {
     pub motion: Vec<Motion>,
     /// Reference-mm spent — the readout of the state in, less the readout of the state out.
     pub cost_spent: f32,
-    /// The line's doses, one per volume it put a positive chord into, summed over the crossing in
-    /// volume order ([`DoseSource::Line`]): each the energy the round lost in that volume, joules.
-    ///
-    /// Damage attribution needs no arbitration between bodies: each depth's dose goes to the
-    /// strongest volume present there, ties sharing (§13.2). The IMPULSE does, when a crossing's
-    /// presence set spans several rigid bodies — which can only happen when distinct bodies
-    /// overlap in space, since within one tank every volume shares the body. Per §13.5, the full momentum exchange goes to the body owning the ENTRANCE surface, the first
-    /// one physically touched; anything behind it is shoved through contact by the physics engine.
-    /// So the caller routes the shove by
-    /// [`ResolutionPlan::entrance`], not by these doses — they are the damage.
+    /// The game's damage model: retained line energy addressed to HP pools, in volume order.
     pub deposits: Vec<Dose>,
+    /// The game's damage model: physical transfers before HP conversion. The runtime adds the
+    /// entrance bend's vector transfer; §13.5 routes overlapping rigid bodies by the entrance.
+    pub exchanges: Vec<Exchange>,
     /// One per body exit the round reached, in order: every exit before a stop throws, and the body
     /// the round stops inside throws nothing.
     pub spall: Vec<SpallSource>,
     /// The transit crossing the plan resolved ([`DiscWalk::first_crossing`]), corridor-relative.
     pub crossing: DiscEvent,
+}
+
+/// The game's damage model: one volume's crossing exchange. Energy is assigned once between
+/// retained work and outgoing debris. All transferred momentum stays on the emitting construction:
+/// debris is a work field without sourced mass or velocity, so its launch share goes to that body,
+/// not a second blow on the ray's receiver. A debris-production law must replace this closure
+/// before rays can transport momentum. No HP unit enters these quantities.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Exchange {
+    pub address: Entity,
+    /// Joules retained by the construction.
+    pub retained: f32,
+    /// Joules carried out by its reached exit's field; zero without a reached exit.
+    pub debris: f32,
+    /// Vector momentum (N s) delivered to the construction, including the debris launch share.
+    pub momentum: Vec3,
 }
 
 /// The game's damage model: one immutable force-law stretch and its elapsed seconds.
@@ -3356,7 +3366,8 @@ const HANDOFF_PROXIMITY: f32 = 1.0e-3;
 /// magnitude of the event-plane rule for the same reason: two reads of one surface patch.
 const ENTRANCE_SURFACE_COS: f32 = 0.9;
 
-/// Resolve the transit corridor into the plan (§3's perforate/embed, §5's spall, §6's deposits):
+/// The game's damage model: `moving_mass` is the whole flying assembly, independently of the
+/// mass meeting the plate that the resistance mechanism holds. Resolve the transit corridor into the plan (§3's perforate/embed, §5's spall, §6's deposits):
 /// `mechanism` advances `state` through the crossing's ordered encounters until it stops or the
 /// crossing ends. This is the one driver of a crossing's outcome, for the runtime and the §13.6 gate
 /// alike.
@@ -3366,6 +3377,7 @@ pub(crate) fn finish<M: Mechanism>(
     mechanism: &M,
     state: M::State,
     limits: &Limits,
+    moving_mass: f32,
 ) -> Result<ResolutionPlan<M::State>, WalkError> {
     let crossing = validate_transit(transit, request)?;
     let event = &*crossing;
@@ -3409,29 +3421,29 @@ pub(crate) fn finish<M: Mechanism>(
     );
     // Only a sample's stretch inside a reached body loses energy to a field; the body the round
     // stops inside keeps all the energy lost there.
-    let mut doses = advanced.doses;
-    for (index, stretch) in advanced.stretches.iter().enumerate() {
-        for &(address, sample, energy) in &stretch.lines {
-            if let Some(share) = carried_out.get(&(index, sample)) {
-                doses
-                    .get_mut(&address)
-                    .expect("the game's damage model sums each line where its energy was lost")
-                    .energy -= energy * share;
-            }
-        }
-    }
-    let deposits = doses
+    let doses = retained_lines(advanced.doses, &advanced.stretches, &carried_out);
+    let (deposits, exchanges) = doses
         .into_iter()
         .filter(|(_, line)| line.chord as f32 > 0.0)
-        .map(|(address, line)| Dose {
-            address,
-            amount: line.energy as f32,
-            source: DoseSource::Line {
-                chord: line.chord as f32,
-                cost: line.cost as f32,
-            },
+        .map(|(address, line)| {
+            (
+                Dose {
+                    address,
+                    amount: line.energy as f32,
+                    source: DoseSource::Line {
+                        chord: line.chord as f32,
+                        cost: line.cost as f32,
+                    },
+                },
+                Exchange {
+                    address,
+                    retained: line.energy as f32,
+                    debris: line.debris as f32,
+                    momentum: transit.axis * (f64::from(moving_mass) * line.speed_loss) as f32,
+                },
+            )
         })
-        .collect();
+        .unzip();
 
     Ok(ResolutionPlan {
         entrance: request.entrance,
@@ -3439,6 +3451,7 @@ pub(crate) fn finish<M: Mechanism>(
         state: advanced.state,
         cost_spent,
         deposits,
+        exchanges,
         spall,
         crossing: crossing.into_owned(),
         motion: advanced
@@ -3459,6 +3472,28 @@ pub(crate) fn finish<M: Mechanism>(
     })
 }
 
+fn retained_lines<S>(
+    mut doses: BTreeMap<Entity, LineSum>,
+    stretches: &[Stretch<S>],
+    carried_out: &BTreeMap<(usize, usize), f64>,
+) -> BTreeMap<Entity, LineSum> {
+    for line in doses.values_mut() {
+        line.energy = 0.0;
+    }
+    for (index, stretch) in stretches.iter().enumerate() {
+        for &(address, sample, energy) in &stretch.lines {
+            // The game's damage model has no outgoing share without a reached body exit.
+            let share = carried_out.get(&(index, sample)).copied().unwrap_or(0.0);
+            let line = doses
+                .get_mut(&address)
+                .expect("the game's damage model sums each line where its energy was lost");
+            line.energy += energy * (1.0 - share);
+            line.debris += energy * share;
+        }
+    }
+    doses
+}
+
 /// One volume's line over a crossing, summed over the encounters: the disc-mean chord (m), its
 /// readout cost (reference-mm) and the energy the round lost in it (J); [`finish`] makes the dose
 /// of it by taking out what the fields of the reached exits carry ([`SpallSource::field_share`]).
@@ -3467,6 +3502,8 @@ struct LineSum {
     chord: f64,
     cost: f64,
     energy: f64,
+    debris: f64,
+    speed_loss: f64,
 }
 
 /// Where a mechanism's run through a crossing ended.
@@ -3532,11 +3569,13 @@ fn advance_through<M: Mechanism>(
                     chord,
                     cost,
                     energy,
+                    speed_loss,
                 } => {
                     let slot = doses.entry(address).or_default();
                     slot.chord += chord;
                     slot.cost += cost;
                     slot.energy += energy;
+                    slot.speed_loss += speed_loss;
                     lines.push((address, sample, energy));
                 }
             }

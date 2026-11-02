@@ -33,7 +33,7 @@ enum Effect {
         crossing: VolumeCrossing,
         units: u64,
         context: DoseContext,
-        momentum: f32,
+        momentum: Vec3,
     },
     Witness {
         crossing: VolumeCrossing,
@@ -178,21 +178,6 @@ impl Crossing {
         self.seconds
     }
 
-    /// The round's speed `distance` metres along the resolved path.
-    fn speed_to(&self, distance: f64) -> f64 {
-        let mut remaining = distance.max(0.0);
-        for stretch in &self.path {
-            if remaining < stretch.length {
-                return stretch.speed_at(&self.round, remaining / stretch.length);
-            }
-            remaining -= stretch.length;
-        }
-        self.path
-            .last()
-            .expect("a crossing that delivers a line has a resolved path")
-            .after
-    }
-
     fn point_distance(&self, point: Vec3) -> f64 {
         let (mut prefix, mut nearest) = (0.0, (f32::INFINITY, 0.0));
         for stretch in &self.path {
@@ -291,21 +276,12 @@ impl Playback {
                             entry: volume.entry,
                             along: *bite.incoming,
                         },
-                        // The game's damage model: the momentum a line takes is the energy it
-                        // took over the speed the round had where it lost it, `dp = dE / v`; on one
-                        // span that is `2 E / (v_entry + v_end)`, so disjoint lines sum to the
-                        // round's whole `m (v_in - v_out)` (1000 -> 800 -> 400 m/s gives 1/3, 2/3).
-                        momentum: {
-                            let entry = crossing.speed_to(crossing.point_distance(volume.entry));
-                            let end = crossing.speed_to(
-                                f64::from(bite.approach) + bite.volume_ends[&dose.address],
-                            );
-                            assert!(
-                                entry > 0.0,
-                                "a line's volume is entered at a positive speed"
-                            );
-                            (2.0 * f64::from(dose.amount) / (entry + end)) as f32
-                        },
+                        momentum: bite
+                            .exchanges
+                            .iter()
+                            .find(|exchange| exchange.address == dose.address)
+                            .expect("each line dose reads its resolved physical exchange")
+                            .momentum,
                     },
                 ));
             }
@@ -640,10 +616,6 @@ impl Playback {
                 } => {
                     lines.push(super::super::DeliveredLine {
                         crossing: self.volume(*crossing),
-                        incoming: match &self.crossing.decision {
-                            Decision::Bite(bite) => *bite.incoming,
-                            _ => panic!("only a bite deposits a material line"),
-                        },
                         momentum: *momentum,
                     });
                     shell.dose.add_units(

@@ -606,9 +606,9 @@ pub(crate) struct WallPiece {
 /// What one shell's march step deposited, in world terms, waiting for [`apply_deposits`].
 #[derive(Debug, Default)]
 struct RawDeposit {
-    /// Each crossing: its lines `(volume, entry, end, energy J)`, its unit travel, and the momentum
-    /// its strength term took (N·s).
-    crossings: Vec<(Vec<(Entity, Vec3, Vec3, f32)>, Vec3, f32)>,
+    /// The game's damage model: each line's `(volume, entry, end, retained J, vector N s)`
+    /// from the physical exchange, independent of its HP conversion.
+    crossings: Vec<(Entity, Vec3, Vec3, f32, Vec3)>,
     /// Each field ray's physical energy, direction, stop and blow.
     rays: Vec<RayDeposit>,
     /// A burst's blast: where, and its energy and charge.
@@ -854,8 +854,10 @@ fn read_shell(
     for line in &marched.lines {
         let volume = line.crossing;
         deposit.crossings.push((
-            vec![(volume.volume, volume.entry, volume.end, volume.energy)],
-            line.incoming,
+            volume.volume,
+            volume.entry,
+            volume.end,
+            volume.energy,
             line.momentum,
         ));
     }
@@ -869,6 +871,8 @@ fn read_shell(
                 end: ray.end,
                 direction: ray.direction,
                 energy: ray.strength * share,
+                // The game's damage model keeps the debris launch impulse on its emitting
+                // construction (walk::Exchange); the field transports work without free bodies.
                 blow: Vec3::ZERO,
             }));
         }
@@ -1094,54 +1098,47 @@ fn take_lines(
     deposit: &RawDeposit,
     taken: &mut BTreeMap<Entity, Taken>,
 ) {
-    for (lines, along, impulse) in &deposit.crossings {
-        let total: f32 = lines.iter().map(|line| line.3).sum();
-        for &(volume, entry, end, energy) in lines {
-            let Ok((element, chunk, parent)) = p.volumes.get(volume) else {
-                continue; // Another body's volume (a hull's armour, a trunk) is another law's.
-            };
-            let root = parent.parent();
-            let frame = &frames[&root];
-            let (_, _, _, breakage, _) = p
-                .buildings
-                .get(root)
-                .expect("a building element or chunk is a child of its building's root");
-            let layout = &breakage.kind.layout;
-            let (a, b) = (frame.unscaled(entry), frame.unscaled(end));
-            let length = a.distance(b);
-            let dir = (b - a).normalize_or_zero();
-            let shares: Vec<(usize, f32, f32)> = match (element, chunk) {
-                (_, Some(&BuildingChunk(c))) => vec![(usize::from(c), 0.0, length)],
-                (Some(&BuildingElement(e)), None) => layout
-                    .chunks_of(usize::from(e))
-                    .filter_map(|c| {
-                        let (t0, t1) = layout.blocks[c].span(a, dir)?;
-                        let (t0, t1) = (t0.max(0.0), t1.min(length));
-                        (t1 > t0).then_some((c, t0, t1))
-                    })
-                    .collect(),
-                (None, None) => {
-                    unreachable!("BuildingColliders admits elements and chunks only")
-                }
-            };
-            let chord: f32 = shares.iter().map(|(_, t0, t1)| t1 - t0).sum();
-            if chord <= 0.0 {
-                continue;
+    for &(volume, entry, end, energy, impulse) in &deposit.crossings {
+        let Ok((element, chunk, parent)) = p.volumes.get(volume) else {
+            continue; // Another body's volume (a hull's armour, a trunk) is another law's.
+        };
+        let root = parent.parent();
+        let frame = &frames[&root];
+        let (_, _, _, breakage, _) = p
+            .buildings
+            .get(root)
+            .expect("a building element or chunk is a child of its building's root");
+        let layout = &breakage.kind.layout;
+        let (a, b) = (frame.unscaled(entry), frame.unscaled(end));
+        let length = a.distance(b);
+        let dir = (b - a).normalize_or_zero();
+        let shares: Vec<(usize, f32, f32)> = match (element, chunk) {
+            (_, Some(&BuildingChunk(c))) => vec![(usize::from(c), 0.0, length)],
+            (Some(&BuildingElement(e)), None) => layout
+                .chunks_of(usize::from(e))
+                .filter_map(|c| {
+                    let (t0, t1) = layout.blocks[c].span(a, dir)?;
+                    let (t0, t1) = (t0.max(0.0), t1.min(length));
+                    (t1 > t0).then_some((c, t0, t1))
+                })
+                .collect(),
+            (None, None) => {
+                unreachable!("BuildingColliders admits elements and chunks only")
             }
-            let into = taken.entry(root).or_default();
-            let turned = frame.turn(*along);
-            for (c, t0, t1) in shares {
-                let part = energy * (t1 - t0) / chord;
-                let (from, to) = ((a + dir * t0) * frame.scale, (a + dir * t1) * frame.scale);
-                into.lines.push((c, from, to, part));
-                let blow = if total > 0.0 {
-                    turned * (impulse * part / total)
-                } else {
-                    Vec3::ZERO
-                };
-                into.line_loads
-                    .extend(Load::line(c, &layout.materials[c], from, to, part, blow));
-            }
+        };
+        let chord: f32 = shares.iter().map(|(_, t0, t1)| t1 - t0).sum();
+        if chord <= 0.0 {
+            continue;
+        }
+        let into = taken.entry(root).or_default();
+        let turned = frame.turn(impulse);
+        for (c, t0, t1) in shares {
+            let part = energy * (t1 - t0) / chord;
+            let (from, to) = ((a + dir * t0) * frame.scale, (a + dir * t1) * frame.scale);
+            into.lines.push((c, from, to, part));
+            let blow = turned * ((t1 - t0) / chord);
+            into.line_loads
+                .extend(Load::line(c, &layout.materials[c], from, to, part, blow));
         }
     }
 }

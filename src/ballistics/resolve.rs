@@ -1383,6 +1383,8 @@ pub(crate) struct Bite {
     /// Per-entity transit charges, already clipped at the embed progress: a round that stops in the
     /// first plate deposits nothing behind it.
     pub deposits: Vec<Dose>,
+    /// The game's damage model: addressed energy and momentum, resolved before HP conversion.
+    pub exchanges: Vec<walk::Exchange>,
     /// One spall source per body exit the round reached, embedded or through, positions in WORLD
     /// ([`walk::SpallSource`]).
     pub spall: Vec<SpallSource>,
@@ -1681,7 +1683,7 @@ pub(crate) fn decide(
                 &starts.seeds,
                 ENTRANCE_SPAN,
             )?;
-            let plan = walk::finish(&transit, &request, round, state_in, &LIMITS)?;
+            let plan = walk::finish(&transit, &request, round, state_in, &LIMITS, mass)?;
             let feedback = context
                 .world
                 .volumes
@@ -1728,7 +1730,7 @@ fn bite(
     owner: impl Fn(Entity) -> Option<Entity>,
     laws: &WalkLaws,
 ) -> Bite {
-    let v_in = Vec3::from(incoming) * speed_in;
+    let mut exchanges = plan.exchanges;
     // THE BOUNDARY. Everything the walk reports is anchor-relative. What leaves for presentation and
     // physics — the entrance, the exit, the embed point, spall sources, the resume point — is
     // converted to WORLD here, in one place. The continuation ([`Interior`]) deliberately stays
@@ -1764,8 +1766,28 @@ fn bite(
         ),
         Outcome::Perforated { .. } => None,
     };
-    let volumes = volume_crossings(transit, &plan.crossing, &plan.deposits, rest, &world);
-    let volume_ends = exposed_spans(&plan.crossing, rest)
+    // The game's damage model assigns the bend to the first exposed resisting volume. A weaker
+    // cofacial volume can own the entrance mark while contributing no resistance or exposed chord.
+    let exposed = exposed_spans(&plan.crossing, rest);
+    let (&first, _) = exposed
+        .iter()
+        .min_by(|(a, sa), (b, sb)| sa.0.total_cmp(&sb.0).then(a.cmp(b)))
+        .expect("a material transit has an exposed resisting contact");
+    exchanges
+        .iter_mut()
+        .find(|exchange| exchange.address == first)
+        .expect("each exposed resisting contact has a physical exchange")
+        .momentum += mass * speed_in * (Vec3::from(incoming) - Vec3::from(bent));
+    let impulse = exchanges.iter().map(|exchange| exchange.momentum).sum();
+    let volumes = volume_crossings(
+        transit,
+        &plan.crossing,
+        &plan.deposits,
+        &exchanges,
+        rest,
+        &world,
+    );
+    let volume_ends = exposed
         .into_iter()
         .map(|(volume, (_, end))| (volume, rest.map_or(end, |stop| end.min(stop))))
         .collect();
@@ -1774,7 +1796,7 @@ fn bite(
             BiteEnd::Embedded {
                 at: world(at),
                 direction: bent,
-                impulse: mass * v_in,
+                impulse,
             },
             t,
         ),
@@ -1782,7 +1804,7 @@ fn bite(
             BiteEnd::Embedded {
                 at: world(exit),
                 direction: bent,
-                impulse: mass * v_in,
+                impulse,
             },
             t,
         ),
@@ -1798,7 +1820,7 @@ fn bite(
                     resume: world(transit.origin + transit.axis * resume),
                     direction: bent,
                     speed: residual,
-                    impulse: mass * (v_in - Vec3::from(bent) * residual),
+                    impulse,
                     continuation: Interior {
                         anchor: transit.anchor,
                         origin: transit.origin + transit.axis * resume,
@@ -1822,6 +1844,7 @@ fn bite(
         overmatched: plan.entrance.overmatched,
         owner: owner(struck),
         deposits: plan.deposits,
+        exchanges,
         spall: plan
             .spall
             .into_iter()
@@ -1851,6 +1874,7 @@ fn volume_crossings(
     transit: &DiscWalk,
     event: &walk::DiscEvent,
     deposits: &[Dose],
+    exchanges: &[walk::Exchange],
     rest: Option<f64>,
     world: &impl Fn(Vec3) -> Vec3,
 ) -> Vec<VolumeCrossing> {
@@ -1875,7 +1899,11 @@ fn volume_crossings(
                 end: at(end),
                 chord,
                 cost,
-                energy: dose.amount,
+                energy: exchanges
+                    .iter()
+                    .find(|exchange| exchange.address == dose.address)
+                    .expect("each exposed line has a resolved physical exchange")
+                    .retained,
                 perforated,
             })
         })

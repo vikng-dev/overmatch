@@ -300,7 +300,14 @@ fn handed_off(
                     ENTRANCE_SPAN,
                 )?;
                 let round = bound(ROUND);
-                walk::finish(&transit, &request, &round, round.at(SPEED), &LIMITS)?;
+                walk::finish(
+                    &transit,
+                    &request,
+                    &round,
+                    round.at(SPEED),
+                    &LIMITS,
+                    round.body().mass,
+                )?;
                 Ok::<_, WalkError>(Some(corridor))
             },
         )
@@ -2653,8 +2660,14 @@ fn a_convex_trunk_is_crossed_with_a_chord_at_any_offset_and_incidence() {
                             ENTRANCE_SPAN,
                         )?;
                         let round = bound(ROUND);
-                        let plan =
-                            walk::finish(&transit, &request, &round, round.at(SPEED), &LIMITS)?;
+                        let plan = walk::finish(
+                            &transit,
+                            &request,
+                            &round,
+                            round.at(SPEED),
+                            &LIMITS,
+                            round.body().mass,
+                        )?;
                         Ok::<_, WalkError>(plan.deposits.iter().find_map(
                             |dose| match dose.source {
                                 DoseSource::Line { chord, .. } if dose.address == segment => {
@@ -2923,7 +2936,21 @@ fn hard_volume_records_use_only_exposed_contacts() {
                 cost: 5.0,
             },
         }];
-        let crossed = volume_crossings(&walked, &walked.events[0], &doses, rest, &|point| point);
+        let exchanges = [walk::Exchange {
+            address: module,
+            retained: 2.0, // Fixture J, deliberately distinct from the HP dose's 1.0.
+            debris: 0.0,
+            momentum: Vec3::Z,
+        }];
+        let crossed = volume_crossings(
+            &walked,
+            &walked.events[0],
+            &doses,
+            &exchanges,
+            rest,
+            &|point| point,
+        );
+        assert_eq!(crossed[0].energy, exchanges[0].retained);
         assert_eq!(crossed.len(), 1);
         assert_eq!(crossed[0].entry, Vec3::Z * exposed.0);
         assert_eq!(crossed[0].end, Vec3::Z * exposed.1);

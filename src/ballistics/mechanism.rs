@@ -104,6 +104,9 @@ pub(crate) enum Effect {
         chord: f64,
         cost: f64,
         energy: f64,
+        /// The game's damage model: addressed speed loss (m/s), independently integrated at these
+        /// depths. The crossing multiplies by the flying mass, which may include a kept carrier.
+        speed_loss: f64,
     },
 }
 
@@ -112,8 +115,8 @@ pub(crate) enum Effect {
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) struct Dose {
     pub address: Entity,
-    /// Joules, for either source: a [`DoseSource::Line`] dose is the energy the round lost in the
-    /// box, converting at the one energy rate ([`super::energy_units`]); a [`DoseSource::Field`]
+    /// The game's damage model: joules retained after outgoing debris for a [`DoseSource::Line`],
+    /// converting at the line's unit ([`super::energy_units`]); a [`DoseSource::Field`]
     /// dose a direction's strength (the energy its field carries times its profile) times its
     /// share of the field, converting at its mechanism's unit ([`super::field_units`]).
     pub amount: f32,
@@ -333,6 +336,17 @@ impl Mechanism for SolidShot {
             }
         };
         let mut energies = vec![0.0; contacts.len()];
+        let mut speed_losses = vec![0.0; contacts.len()];
+        let speed_lost_at = |progress: f64| {
+            let speed = if progress <= 0.0 {
+                before
+            } else if progress >= consumed {
+                left.sqrt()
+            } else {
+                self.speed_at((potential - drop * (progress / length)).max(0.0))
+            };
+            before - speed
+        };
         // The game's damage model holds each sample's substance set constant over an encounter,
         // including an absorbed same-substance seam. Its strongest factor is therefore constant;
         // active tied contacts divide that sample's one cost share, never multiply it.
@@ -357,10 +371,12 @@ impl Mechanism for SolidShot {
                 .collect();
             let total: f64 = weights.iter().sum();
             let energy = (lost_at(b) - lost_at(a)).max(0.0);
+            let speed_loss = (speed_lost_at(b) - speed_lost_at(a)).max(0.0);
             if total > 0.0 {
                 for (index, weight) in weights.into_iter().enumerate() {
                     if weight > 0.0 {
                         energies[index] += energy * (weight / total);
+                        speed_losses[index] += speed_loss * (weight / total);
                     }
                 }
             }
@@ -368,7 +384,8 @@ impl Mechanism for SolidShot {
         let effects = contacts
             .into_iter()
             .zip(energies)
-            .map(|((sample, strongest, _, contact), energy)| {
+            .zip(speed_losses)
+            .map(|(((sample, strongest, _, contact), energy), speed_loss)| {
                 let covered = (consumed - (contact.start - encounter.start))
                     .min(contact.end - contact.start)
                     .max(0.0);
@@ -383,6 +400,7 @@ impl Mechanism for SolidShot {
                     chord,
                     cost: chord * contact.material.factor as f64,
                     energy,
+                    speed_loss,
                 }
             })
             .collect();

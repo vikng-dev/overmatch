@@ -2639,9 +2639,11 @@ fn awake_and_sleeping_presses_join_every_deposit_once() {
         };
         let crossing = RawDeposit {
             crossings: vec![(
-                vec![(volume, at - Vec3::X * 0.001, at + Vec3::X * 0.001, 0.0)],
-                Vec3::X,
+                volume,
+                at - Vec3::X * 0.001,
+                at + Vec3::X * 0.001,
                 0.0,
+                Vec3::ZERO,
             )],
             ..default()
         };
