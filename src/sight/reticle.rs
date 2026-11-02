@@ -283,9 +283,9 @@ fn update_range_readout(
     controlled: Query<(), With<Controlled>>,
     mut readout: Query<(&mut Text, &mut Visibility), With<RangeReadout>>,
 ) {
-    let Ok((mut text, mut visibility)) = readout.single_mut() else {
-        return;
-    };
+    let (mut text, mut visibility) = readout
+        .single_mut()
+        .expect("entering a match spawns exactly one range readout");
     if range_readout_visible(*mode, !controlled.is_empty()) {
         set_text(
             text.reborrow(),
@@ -415,7 +415,7 @@ fn update_ranging_reticle(
     view_nodes: Query<&ViewNode>,
     gun: Query<&GlobalTransform>,
     tables: Query<&RangeTable>,
-    camera: Single<(&Camera, &GlobalTransform), With<PlayerView>>,
+    camera: Query<(&Camera, &GlobalTransform), With<PlayerView>>,
     mut line: Query<
         (&mut Node, &mut Visibility, &ComputedUiRenderTargetInfo),
         (With<ReticleLine>, Without<RangeScaleTick>),
@@ -430,7 +430,9 @@ fn update_ranging_reticle(
         Without<ReticleLine>,
     >,
 ) {
-    let (camera, cam_transform) = *camera;
+    let (camera, cam_transform) = camera
+        .single()
+        .expect("the client constructs exactly one player camera before entering a match");
     // Everything the graticule needs or nothing at all: outside the optic, before the rig / range
     // table / view gun bind, or with no viewport to project into, every mark hides together.
     let mark = (*mode == SightMode::Gunner)
@@ -475,17 +477,18 @@ fn update_ranging_reticle(
 
     // The zero mark, on the sight line itself: `θ(dialed) − θ(dialed)` is zero by construction, so
     // the line and the dialed graduation are one place and the graticule cannot come apart.
-    if let Ok((mut node, mut visibility, target)) = line.single_mut() {
-        let point = mark.as_ref().and_then(|mark| mark(ranging.range));
-        place_mark(
-            &mut node,
-            &mut visibility,
-            point,
-            look.line_width_ui_px.0,
-            target,
-            look.hairline_physical_px.0,
-        );
-    }
+    let (mut node, mut visibility, target) = line
+        .single_mut()
+        .expect("entering a match spawns exactly one ranging zero mark");
+    let point = mark.as_ref().and_then(|mark| mark(ranging.range));
+    place_mark(
+        &mut node,
+        &mut visibility,
+        point,
+        look.line_width_ui_px.0,
+        target,
+        look.hairline_physical_px.0,
+    );
     for (tick, mut node, mut visibility, target) in &mut ticks {
         let point = mark.as_ref().and_then(|mark| mark(tick.range));
         place_mark(
@@ -674,14 +677,16 @@ fn update_optic_mask(
     view_nodes: Query<&ViewNode>,
     gun: Query<&GlobalTransform>,
     tables: Query<&RangeTable>,
-    camera: Single<(&Camera, &GlobalTransform), With<PlayerView>>,
+    camera: Query<(&Camera, &GlobalTransform), With<PlayerView>>,
     mut materials: ResMut<Assets<OpticMaskMaterial>>,
     mut mask: Query<(&MaterialNode<OpticMaskMaterial>, &mut Visibility), With<OpticMask>>,
 ) {
-    let Ok((node, mut visibility)) = mask.single_mut() else {
-        return;
-    };
-    let (camera, cam_transform) = *camera;
+    let (node, mut visibility) = mask
+        .single_mut()
+        .expect("entering a match spawns exactly one optic mask");
+    let (camera, cam_transform) = camera
+        .single()
+        .expect("the client constructs exactly one player camera before entering a match");
     let glass = (*mode == SightMode::Gunner)
         .then(|| {
             let rig = crate::tank::controlled_one(controlled.single())?;
@@ -726,7 +731,7 @@ fn update_optic_mask(
 fn update_intent_reticle(
     mode: Res<SightMode>,
     committed: Res<CommittedAim>,
-    camera: Single<(&Camera, &GlobalTransform), With<PlayerView>>,
+    camera: Query<(&Camera, &GlobalTransform), With<PlayerView>>,
     controlled: Query<(Entity, &Rig), With<Controlled>>,
     hull: Query<&GlobalTransform, With<Hull>>,
     mut reticle: Query<
@@ -734,9 +739,9 @@ fn update_intent_reticle(
         With<IntentReticle>,
     >,
 ) {
-    let Ok((mut node, mut visibility, target)) = reticle.single_mut() else {
-        return;
-    };
+    let (mut node, mut visibility, target) = reticle
+        .single_mut()
+        .expect("entering a match spawns exactly one intent cursor");
     if *mode != SightMode::Gunner {
         *visibility = Visibility::Hidden;
         return;
@@ -748,11 +753,14 @@ fn update_intent_reticle(
     let hull = hull
         .get(rig.hull)
         .expect("the complete rig's hull has its global pose");
+    // Before the first aim commit, there is no intent point to draw.
     let Some(local) = committed.get(tank) else {
         *visibility = Visibility::Hidden;
         return;
     };
-    let (camera, cam_transform) = *camera;
+    let (camera, cam_transform) = camera
+        .single()
+        .expect("the client constructs exactly one player camera before entering a match");
 
     let point = hull.affine().transform_point3(local);
 
@@ -839,9 +847,12 @@ fn update_view_death_overlay(
     };
 
     // The overlay's `Visibility` lives on the full-screen node; its prompt `Text` on the child.
-    let (Ok(mut vis), Ok(mut text)) = (overlay_vis.single_mut(), label.single_mut()) else {
-        return;
-    };
+    let mut vis = overlay_vis
+        .single_mut()
+        .expect("startup spawns exactly one view-death overlay");
+    let mut text = label
+        .single_mut()
+        .expect("the view-death overlay spawns exactly one prompt");
 
     // Refresh the prompt whenever the active crewman is down (identical in both modes); a hidden node's
     // stale text is harmless and re-derived here before it can be shown again.
@@ -872,9 +883,9 @@ fn update_toast(
     mut toast: ResMut<Toast>,
     mut label: Query<(&mut Text, &mut Visibility), With<ToastText>>,
 ) {
-    let Ok((mut text, mut visibility)) = label.single_mut() else {
-        return;
-    };
+    let (mut text, mut visibility) = label
+        .single_mut()
+        .expect("entering a match spawns exactly one refusal toast");
     if toast.remaining > 0.0 {
         toast.remaining -= time.delta_secs();
         set_text(text.reborrow(), &toast.message);
@@ -893,6 +904,48 @@ mod tests {
     use super::*;
     use crate::sight::{BLEND_SAMPLES, hull_local_dir, optic_margin, yaw_pitch_of};
     use crate::spec::Optics;
+
+    fn assert_invariant_failure(failure: std::thread::Result<()>, invariant: &str) {
+        let panic = failure.expect_err("a broken widget invariant must stop the update");
+        let message = panic
+            .downcast_ref::<String>()
+            .map(String::as_str)
+            .or_else(|| panic.downcast_ref::<&str>().copied())
+            .expect("the invariant panic has a message");
+        assert!(message.contains(invariant), "{message}");
+    }
+
+    /// Match-entry construction supplies exactly one cursor and zero mark. A broken pool must
+    /// stop with its cause instead of leaving the player looking at frozen sight furniture.
+    #[test]
+    fn required_reticle_cardinalities_fail_visibly() {
+        for count in [0, 2] {
+            let mut picture = SightPicture::new(Quat::IDENTITY);
+            picture.world.insert_resource(CommittedAim::default());
+            for _ in 0..count {
+                picture
+                    .world
+                    .spawn((IntentReticle, Node::default(), Visibility::Hidden));
+            }
+            let failure = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                picture
+                    .world
+                    .run_system_once(update_intent_reticle)
+                    .unwrap();
+            }));
+            assert_invariant_failure(failure, "exactly one intent cursor");
+
+            let mut picture = SightPicture::new(Quat::IDENTITY);
+            picture.world.despawn(picture.line);
+            for _ in 0..count {
+                picture
+                    .world
+                    .spawn((ReticleLine, Node::default(), Visibility::Hidden));
+            }
+            let failure = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| picture.run()));
+            assert_invariant_failure(failure, "exactly one ranging zero mark");
+        }
+    }
 
     /// The fixture's viewport, in px.
     const VIEWPORT: UVec2 = UVec2::new(1280, 720);
@@ -1404,7 +1457,14 @@ mod tests {
             hud: Handle::default(),
             body: Handle::default(),
         })
-        .add_systems(Startup, (spawn_ranging_reticle, spawn_intent_reticle))
+        .add_systems(
+            Startup,
+            (
+                spawn_ranging_reticle,
+                spawn_intent_reticle,
+                spawn_optic_mask,
+            ),
+        )
         .init_resource::<CommittedAim>()
         .init_resource::<Assets<OpticMaskMaterial>>()
         .add_plugins((mount_placement, crate::aim::tests::mount_layout_fixture));
