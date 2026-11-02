@@ -100,7 +100,7 @@ pub(crate) struct ContactPreset {
 
 #[cfg(test)]
 impl ContactPreset {
-    /// Fixture data: capped-steel class, independent of the shipped presets.
+    /// Fixture data: contact fixture, independent of the shipped presets.
     pub(crate) fn fixture() -> Self {
         Self {
             density: 8000.0,

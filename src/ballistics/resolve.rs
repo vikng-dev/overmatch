@@ -1792,7 +1792,7 @@ fn bite(
     let world = |local: Vec3| transit.anchor + local;
     let struck = plan.entrance.volume;
     // The APPROACH: the flight's position to the axis handoff, along the way in. The transit's own
-    // `t` then measures the rest, along the bend.
+    // `t` then measures the rest along the incoming ray.
     let approach = (transit.origin - from).dot(Vec3::from(incoming)).max(0.0);
     // Each sample's way in ends at its own handoff, where its transit ray starts.
     let handoffs: Vec<Vec3> = transit

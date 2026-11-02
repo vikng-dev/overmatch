@@ -1982,7 +1982,7 @@ pub fn sim_plugin(app: &mut App) {
     spall_cone::cone_unit();
     spall_cone::BurstFields::shipped();
     // The game's damage model validates the shared crew HP pool, the hard-pool energy rate and the
-    // walk's angle laws at startup.
+    // walk's shared physical laws at startup.
     box_classes::BoxClasses::shipped();
     energy_dose::joules_per_hp();
     physical_laws::PhysicalLaws::shipped();

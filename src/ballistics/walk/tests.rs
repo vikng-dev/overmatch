@@ -1584,7 +1584,7 @@ fn every_sample_hands_off_on_the_face_it_crossed() {
         );
     }
 
-    // Each sample from its own hand-off, along the bend: the transit pairs and both plates are
+    // Each sample from its own hand-off, along the incoming ray: the transit pairs and both plates are
     // charged.
     let transit = transit_disc_by(&request, 3.0, |sample| vec![slab_of(sample)]);
     let transit = walk_disc(&transit, &volumes, &laws).unwrap();

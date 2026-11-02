@@ -64,7 +64,7 @@ pub(crate) enum Control {
 /// One consequence of an advance.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) enum Effect {
-    /// The round's own line, along disc sample `sample`, put `chord` metres (disc mean) of the
+    /// The round's own line, along disc sample `sample`, put `chord` metres (disc mean, as charged) of the
     /// volume `address` behind it, a readout of `cost` reference-mm (chord × the volume's factor),
     /// and `energy` joules of the kinetic energy the round lost over the advance were lost in it.
     /// The sample names which body the energy was lost in, so the walk can part it between the

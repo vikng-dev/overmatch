@@ -101,10 +101,10 @@ Two differences are reported to the owner: the 45 mm / 500 m/s result rounds to 
 | Slope-charge ceiling 5 | **Resolution**, `mechanism::SLOPE_CHARGE_CEILING`: finite charge as θ + β approaches 90°; unchanged |
 | APCR flight ogive 4 crh | **Unknown**, `round_types.ron`: cap present in TM 9-1985-3 Fig. 427 and TTT No. 24; contour awaits a dimensioned drawing |
 | Gravity 9.81 m/s²; air density 1.225 kg/m³; cavity inertia 1.0 | **StandIn**, `physical_laws.ron`: unchanged environment and cavity priors relocated in the initial law step |
-| World floor -100 m | **Unit**, same file: unchanged world boundary in game metres |
+| World floor -100 m | **StandIn**, same file: finite play boundary until maps author vertical play bounds |
 | Inline speeds, lengths, densities, angles (including the 85° mounted graze), factors, neighbourhoods, tolerances and sweep counts; scenario aim coordinates | **Fixture**, tests/recorder inputs; no firing rows or physical tuning gates |
 
-The law's 4, √3 and square root, and head-on unity are exact form, not new authored magnitudes. `s` is derived from existing facts. The wire revision **77** and hash `0x17afc7e1d850a2fa` remain the compatibility identifiers from the original wire change; this amendment changes no wire type. Field hashes are generated compatibility pins. Outcome tables are **MEASURED**; analytical illustrations and thresholds are **DERIVED**.
+The law's 4, √3 and square root, and head-on unity are exact form, not new authored magnitudes. `s` is derived from existing facts. The compatibility identifiers are owned by `protocol::PROTOCOL_REV` and `protocol::WIRE_TYPES_HASH`; this amendment changes no wire type. Field hashes are generated compatibility pins. Outcome tables are **MEASURED**; analytical illustrations and thresholds are **DERIVED**.
 
 ## Review disposition
 

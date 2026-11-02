@@ -121,9 +121,8 @@ march, per volume crossed:
    (§3a). Everything at the plate reads the penetrator: the disc the shell samples the world with,
    contact, this law and the core's work (§5, §6). On entering material, a kept carrier stops
    at the first exposed resisting contact: that construction retains its kinetic energy and
-   momentum once, while only the core bends and flies on. A discarded carrier contributes none.
-   The core's penetration law is unchanged. Ricochet direction and carrier exchange remain part
-   of the deferred ricochet rebuild (§4a). Penetration stays rigid: the penetrator's
+   momentum once, while only the core flies straight on. A discarded carrier contributes none.
+   The core's penetration law is unchanged. A skid keeps the current flying assembly (§4a). Penetration stays rigid: the penetrator's
    material is named (`core`) and read by no law. The 88's Pzgr. 40 reads about 180
    reference-mm at the muzzle (930 m/s) as its 1.93 kg, 35.7 mm core, against about 112 as its
    whole 7.3 kg body and the Pzgr. 39's about 115 (DERIVED, shipped RHA facts); the record gives
@@ -900,7 +899,7 @@ body's contact breaks too (`wall-destruction.md`, "Trees are structures by the s
 species' structural facts (grain, green density, root plate) are its own; its HP rate is not, and
 for the dose a species is the generator's look and ranges only: a player cannot tell that a round lost a little more speed
 in one species than another, while trunk thickness is simple and visible. A round entering a trunk turns by the wood's share of the
-reference resistance, 4 % of the reference steel's bend (§13.5). Out of scope, built only if play
+reference resistance, so its slope charge pays 4 % of the reference steel's excess (§13.5). Out of scope, built only if play
 shows it missed: the drag form under the energy law (epic #103); the field's dose is under it (§5).
 
 **Witnesses** (ADR-0040) are dosed by a law of their own. A witness substance has no resistance and
@@ -1256,11 +1255,10 @@ remaining work is deferred refinements (§9) and the eventual game-side (non-san
 - Spall strength is settled (§5: `spend × (v_exit / v_entry)²`); remaining tuning = the box counts
   (the owner's feel pass), the half-angle and axis fork, and whether a dedicated brittleness
   (plug vs debris) selects the failure mode.
-- Ricochet threshold dependencies: hit nose, potency and steel-equivalent thickness (§4a); the
-  coefficients await measured critical angles.
+- Contact proxies: density, speed, calibre, material factor and normal steel-equivalent thickness
+  set the pressure-contact limit (§4a); deformation and shatter still need a law.
 - HE: fuse minimum-thickness trigger + delay + dense wide cone (penetration-independent).
-- Numeric magnitudes (the angle-law coefficients, material factors): labelled data (§4a,
-  `materials.ron`).
+- Numeric magnitudes (contact presets and material factors): labelled data (§4a, `materials.ron`).
 - Data homes: ballistic-volume geometry on the model (watertight); material factor + shell specs in
   RON (ADR-0010 spirit — ADR-0010 already flags per-plate armor as a genuinely node-attached case);
   crew/module/station definitions TBD.
@@ -1622,8 +1620,8 @@ Revisit only if seam-threading shots ever matter.
 **The hand-off: each sample resumes on the piece it crossed (RULED 2026-10-31, #191).** Only
 that is the owner's ruling; the crossing's join, the in-air depth and the read built on them are
 PROVISIONAL until he ratifies them. The crossing is staged — the entrance is read along the
-incoming axis, the transit walked along the bent one — so every sample ray stops its entrance
-walk somewhere and resumes along the bend from there. It resumes on the face of the armour piece
+incoming axis, and transit stays on that axis — each sample stops its entrance walk and resumes
+from its own hand-off. It resumes on the face of the armour piece
 it actually crossed, at its own crossing point, never on one plane shared across the disc. The
 shared plane it replaces was the first piece's mean entrance plane, extrapolated across the whole
 disc, and at a graze it lies far from any face: across an 88's disc it spread the hand-offs over
@@ -1645,11 +1643,11 @@ per 240 s at 30 bots, MEASURED 2026-10-31 on the build after the turret-scale fi
   span between the sample's start and the crossing's end. The uncovered part of the disc stays
   where the disc is; a hand-off lies on ground the sample's walk covered and never depends on how
   far the corridor reached. No sample hands off past the first face on its incoming ray. The
-  game's damage model certifies transit membership on the bent rays at those hand-off points:
+  game's damage model certifies transit membership on the continuing rays at those hand-off points:
   a face behind the start's boundary band is owned by the seed, and a face within that band by
-  the corridor. Incoming-ray membership cannot cross the bend.
+  the corridor. Membership belongs to the reached hand-off.
 - **The entrance read is the crossing's faces** (PROVISIONAL). `n̄`, η, the steel-equivalent
-  thickness and the bend are read over the first run of every sample that hands off on a face, so
+  thickness and slope charge are read over the first run of every sample that hands off on a face, so
   a disc meeting two pieces that overlap in depth reads both surfaces, whichever it meets first. A
   run behind that face on the sample's own ray (a hull side behind a fender) is the transit's,
   never summed into the plate the round strikes. With one piece met face-first by every sample the
@@ -1657,7 +1655,7 @@ per 240 s at 30 bots, MEASURED 2026-10-31 on the build after the turret-scale fi
 - **A graze can bite**, under the provisional join and read. A graze that would ricochet alone
   bites when the disc also meets a second piece that begins before the grazed piece's crossing
   ends: the second face enters the read, tilts `n̄` toward the round and can bring the incidence
-  under the round's critical angle (§4a). Corners and overhangs are where this happens
+  into the biting side of the pressure-contact law (§4a). Corners and overhangs are where this happens
   (`a_graze_and_a_plate_struck_together_bite_as_one_crossing`).
 - **The transit crossing** is the transit corridor's crossing, by the same rule, and it begins at
   the hand-off. The flight resumes past the crossing's end, so a run that began inside it and was

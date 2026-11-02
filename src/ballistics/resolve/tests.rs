@@ -144,8 +144,6 @@ fn every_entry_is_owned_once_across_the_hand_off() {
     );
 }
 
-/// A RING SAMPLE HANDING OFF ON A FACE THE BENT AXIS GRAZES.
-///
 /// The runtime's two-stage crossing from `origin` along `direction`, at the march's stand-off: the
 /// entrance corridor, the transit starts, the transit corridor (returned for the ownership check)
 /// and the transit's pairing. `None` when the entrance does not bite.
@@ -562,7 +560,7 @@ fn tilted_plate(app: &mut App, thickness: f32, tilt: f32, at: f32, factor: f32) 
 /// STOP, BOUNCE, PARTIAL COVERAGE, CONTINUATION AND TARGET REACH, ONE MECHANISM.
 ///
 /// The gate admits a route through exactly the crossings the runtime would make: the same entrance
-/// rules, bends, stops, bounces and continuations, decided by the same state machine. Each
+/// rules, stops, bounces and continuations, decided by the same state machine. Each
 /// arrangement is generic geometry with a soft HP-bearing target below it; the round falls straight
 /// down so the runtime's gravity and drag leave its direction alone, and the gate flies the
 /// runtime's own first-tick speed and budget.
@@ -891,7 +889,7 @@ fn mapped_box_trimesh(place: impl Fn(Vec3) -> Vec3) -> (Collider, BallisticSurfa
 /// nudge (DERIVED below), so the worlds' crossing ceiling ([`StepCrossings`]) is reached
 /// millimetres downrange. The immutable batch is refused before delivering any consequence.
 ///
-/// Generic geometry, a single-sample round falling straight down so no bend moves it off the
+/// Generic geometry, a single-sample round falling straight down the
 /// chain: square entry faces, exit faces sheared 65° (not opposed to the
 /// next entry, so no ε-weld), and the chain starting three periods short of the budget's end.
 /// Fixture data throughout, the ceiling of 10 crossings included.
@@ -1984,7 +1982,7 @@ fn a_nonzero_cone_always_records_its_hp_receivers() {
 /// reference-mm per metre, its top face through `y = 1` under [`DROP_FROM`], tilted about `Z` so
 /// the round strikes it at `incidence` (rad) from the face's normal: the driven flight and the slab.
 /// It is 12 m along the tilt, so the line through a 0.4 m slab at up to 85° (4.6 m, DERIVED) ends
-/// on its far face: a line out of its side would read a thinner plate, and overmatch it.
+/// on its far face: a line out of its side would read a thinner plate.
 fn shot_onto_slab(
     body: RoundBody,
     speed: f32,
@@ -2306,8 +2304,8 @@ fn a_corner_and_a_groove_complete_within_the_walks_limits() {
 /// struck is `½ m (v_in² − v_out²)` joules, `m` the mass that meets the plate, as a line dose is
 /// the energy lost crossing a box, so it converts at the one energy rate; a round that loses more
 /// at the bounce jars the face harder. Fixture rounds of different mass and speed graze one
-/// HP-bearing slab of 0.4 m of steel at 75°, past each one's critical angle against it (under 41°,
-/// DERIVED from the angle laws) and too thick for any of them to overmatch. A shock read from the
+/// HP-bearing slab of 0.4 m of steel at 75° (Fixture); each shot asserts a first-contact skid.
+/// A shock read from the
 /// readout, the incidence or a constant fails here; the record's line dose for a bounce and every
 /// dose of energy converting at one rate rely on it.
 #[test]
@@ -2345,8 +2343,8 @@ fn a_bounces_shock_is_the_energy_the_round_lost_there() {
 /// struck and loses the rest, restitution 0, so a full-coverage bounce jars `½ m (v_in cos θ)²`
 /// joules into that face, `θ` the incidence from its normal — the dose falls as `cos² θ`, and a
 /// shallower graze deals less. The fixture 88 grazes one HP-bearing slab of 0.4 m of steel at
-/// 72°, 75°, 80° and 85° (fixture data), past its critical angle against it (39°, DERIVED from the
-/// angle laws) and too thick to overmatch. A bounce that charged a fixed share of the striking
+/// 72°, 75°, 80° and 85° (Fixture); each shot asserts a first-contact skid.
+/// A bounce that charged a fixed share of the striking
 /// energy (a speed bleed), or the energy along the face, fails here; a struck module's bounce dose
 /// in play, and its scale against a perforation's, rely on it.
 #[test]
@@ -2387,8 +2385,8 @@ fn a_bounce_doses_the_energy_pointed_into_the_face() {
 /// A BOUNCE KEEPS THE SPEED ALONG THE FACE: a full-coverage bounce leaves at the striking
 /// velocity's part along the face it struck, `|v_in − (v_in · n̄) n̄| = v_in sin θ`, whatever the
 /// round's mass, its speed or the incidence. Two fixture rounds graze one slab of 0.4 m of steel
-/// at three incidences past each one's critical angle against it (under 40°, DERIVED from the
-/// angle laws; fixture data). A speed retained by a constant share (a bleed), by the round, or kept
+/// at three fixture incidences, each asserting a first-contact skid.
+/// A speed retained by a constant share (a bleed), by the round, or kept
 /// whole fails here; the flight after a bounce, its fuze and the next surface it meets rely on it.
 #[test]
 fn a_bounce_keeps_the_speed_along_the_face() {
@@ -2817,7 +2815,7 @@ const TRUNK_STANDOFFS: [f32; 5] = [0.5, 2.0, 5.3, 9.7, 12.3];
 /// The trees' own 12-gon frustum collider (`trees::spawn`) struck off-centre by the fixture 88's
 /// disc: one disc wholly outboard of the 12-gon's 30° vertex, which meets only the facet whose
 /// normal stands 75° off the line of fire, and discs at 0.70–1.10 of the trunk's radius toward its
-/// 0° vertex. Every disc meets the trunk, and the fixture round overmatches a trunk, so each must
+/// 0° vertex. Every disc meets the trunk, and the fixture round bites its low-resistance material, so each must
 /// bite in and lay a positive chord into the trunk. The game's damage model treats a structured
 /// walk contradiction as a bug and panics, so the generic convex collector must pair honestly.
 ///
