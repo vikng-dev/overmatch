@@ -1070,8 +1070,8 @@ MEASURED regressions and dispositions:
   shooter; s9 is 1728 B and 1680 B, with two cones totalling 1223 B (MEASURED). Every other row
   is unchanged. The false universal message-size claim is removed.
 - The bounce-dose bound is per struck plate: `cos² θ_c = t² / (t² + k²)` rises toward one as
-  thickness grows (DERIVED). The class fixture now checks both a thin slab's mild bounce and a
-  thick slab's bounce exceeding that thin slab's perforation. No physical law or dose changed.
+  thickness grows (DERIVED). The follow-up verification below removes the cross-plate fixture ordering because the
+  thickness term remains an open owner choice. No physical law or dose changed.
 
 Owner decisions remain the reflected direction versus the restitution-zero slide; a floor on
 critical incidence, a thickness read bounded by the round's reach, or the current form; and the
@@ -1099,6 +1099,8 @@ and checked against code; the angle-law form remains the owner's open choice.
 | reviewer | finding | verified / not a defect | fixed in (subject) |
 |---|---|---|---|
 | Claude | P2: a folded path assigns a cone an earlier leg's record time; the stage comparison repeats that choice | verified | damage_cam: time events on their source crossings (#255) |
+| Claude | P2: the ricochet resume skips the unswept normal lift | verified; unfinished at the lane's green stop | not landed |
+| Claude | P3: the thick-plate assertion commits the test to an open plate-term choice | verified | ballistics: keep plate-bound tests independent of the open law choice (#255) |
 
 MEASURED: the DERIVED folded-path fixture failed with a cone at `0.034642003 s`, before its
 source crossing at `0.036097 s`. The writer now restricts each hard event to its mark's own path
@@ -1111,3 +1113,27 @@ the existing scenarios without changing interaction sequences or wire definition
 MEASURED clock-step gates: 269 selected tests passed, with four pricing/capture instruments left
 ignored. Formatting and locked workspace/all-target CI clippy with `dev_ui,bitprobe` passed.
 The refreshed s9 second cone is at `0.036387894 s`, within its source crossing (MEASURED).
+
+The game's damage-model lift fixture reproduced the defect: after a reflection it skipped a
+2 mm neighbour across a 7.2 mm gap (fixture data), with no chord charged. The unlanded hand-off
+prototype passed that regression and 190 resolver/walk/collector/recording checks, but its final
+cross-module run passed 516 tests but still failed the reflected-body view guard and the
+refreshed field-cast check (MEASURED). The cast records themselves matched: their aggregate
+`PINNED_TOTAL` constant had not been updated. The view guard still checked the previous plane
+at the following reflection's apex; that endpoint needs verification before a fix is landed.
+It is not a green implementation and is excluded from the lane commits. The published s5/s9
+records therefore retain the existing march's geometry, with only the clock-step corrections;
+they still show the lift-driven rests identified by the review. Re-recording a corrected walk,
+settling those two failures and running its gates remain for the next lane.
+
+The plate-bound test now checks both sides of each struck plate's own critical angle and its
+own energy bound, without ordering the doses of unrelated plates. The angle law's form, the
+owner's floor/reach-bound choice and PROTOCOL_REV 63 are unchanged.
+
+MEASURED final green-step gates: 83 resolver and whole-tree guard tests passed, including
+`doc_citations`, `ui_ascii`, `net_boundary` and `bake::`. Formatting and locked workspace/all-target
+CI clippy with `dev_ui,bitprobe` passed. Implementation stopped at the user's measured 60-minute
+limit; the already-queued green-step checks completed afterwards. The branch contains the clock
+fix and plate-bound test only; the unlanded walk, its provisional re-records and cast pins are
+excluded. No protected modules, wire definitions, captures, pricing, pushes or issue comments
+were changed or made.

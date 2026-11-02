@@ -2291,58 +2291,42 @@ fn a_bounce_keeps_the_speed_along_the_face() {
     }
 }
 
-/// The game's damage model bounds a bounce by the struck plate's critical angle, not another
-/// plate's. Pool authors cannot use a thin plate's mild bounce as a global ceiling: a thick
-/// plate lowers the critical angle and can take more bounce energy than perforating the thin
-/// one takes. A fixed critical angle or a global thin-plate dose cap fails this comparison.
-/// The 773 m/s speed, 1.1 calibre/overmatch-ratio thin slab, 456 mm thick slab and angular offset
-/// are fixture data for the provisional angle law.
+/// The game's damage model reads each struck plate's own critical angle: on its biting side
+/// the round enters, on its grazing side it reflects, with shock bounded by the energy pointed
+/// into that face at the critical incidence. This holds with a floor or a reach bound too;
+/// no ordering of different plates' doses is required by pool authors. Fixture data: 773 m/s,
+/// a thin slab just above overmatch, a 456 mm slab and a 0.01 rad offset from each critical angle.
 #[test]
 fn bounce_dose_bounds_read_the_plate_that_was_struck() {
     let laws = WalkLaws::default();
-    let thickness = 1.1 * FIXTURE_88.caliber / laws.angles.overmatch_ratio;
-    let critical = laws.angles.critical_incidence(
-        FIXTURE_88.nose_factor,
-        capability(FIXTURE_88, 773.0) / laws.rha_reference,
-        thickness,
-    );
-    let (square, part) = shot_onto_slab(FIXTURE_88, 773.0, 0.0, thickness, STEEL);
-    let Some(Decision::Bite(bite)) = square.decisions.first() else {
-        panic!("square on, the round bites: {:?}", impacts_of(&square));
-    };
-    assert!(
-        matches!(bite.end, BiteEnd::Perforated { .. }),
-        "the round perforates the part square on"
-    );
-    let perforation: f32 = bite
-        .deposits
-        .iter()
-        .filter(|dose| dose.address == part)
-        .map(|dose| dose.amount)
-        .sum();
-
-    let (graze, part) = shot_onto_slab(FIXTURE_88, 773.0, critical + 0.01, thickness, STEEL);
-    let bounce = first_bounce(&graze);
-    assert_eq!(bounce.struck, part);
-    assert!(
-        bounce.shock > 0.0 && bounce.shock < perforation,
-        "a bounce at the ricochet angle jars {} J against {perforation} J perforating the part",
-        bounce.shock
-    );
-    let thick = 0.456;
-    let critical = laws.angles.critical_incidence(
-        FIXTURE_88.nose_factor,
-        capability(FIXTURE_88, 773.0) / laws.rha_reference,
-        thick,
-    );
-    let (graze, part) = shot_onto_slab(FIXTURE_88, 773.0, critical + 0.01, thick, STEEL);
-    let bounce = first_bounce(&graze);
-    assert_eq!(bounce.struck, part);
-    assert!(
-        bounce.shock > perforation,
-        "a thick plate's bounce can exceed the thin plate's {perforation} J perforation: {} J",
-        bounce.shock
-    );
+    let (speed, _) = first_tick(FIXTURE_88, 773.0);
+    for thickness in [
+        1.1 * FIXTURE_88.caliber / laws.angles.overmatch_ratio,
+        0.456,
+    ] {
+        let critical = laws.angles.critical_incidence(
+            FIXTURE_88.nose_factor,
+            capability(FIXTURE_88, speed) / laws.rha_reference,
+            thickness,
+        );
+        let (biting, _) = shot_onto_slab(FIXTURE_88, 773.0, critical - 0.01, thickness, STEEL);
+        assert!(
+            matches!(biting.decisions.first(), Some(Decision::Bite(_))),
+            "the round bites below this plate's critical incidence"
+        );
+        let (graze, part) = shot_onto_slab(FIXTURE_88, 773.0, critical + 0.01, thickness, STEEL);
+        let bounce = first_bounce(&graze);
+        assert_eq!(bounce.struck, part);
+        let upper = 0.5
+            * f64::from(FIXTURE_88.mass)
+            * f64::from(bounce.speed_in).powi(2)
+            * f64::from(critical.cos()).powi(2);
+        assert!(
+            bounce.shock > 0.0 && f64::from(bounce.shock) < upper,
+            "this plate's bounce shock {} J is bounded by {upper} J",
+            bounce.shock
+        );
+    }
 }
 
 /// A plate exit's cone is spread by its rear layer's substance's field: two steel plates in
