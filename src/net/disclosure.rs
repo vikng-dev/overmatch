@@ -18,15 +18,19 @@ pub enum NetTankStatus {
     CookedOff,
 }
 
-/// Owner-private respawn admission. Waiting retries automatically; a refused pick requires a
-/// new map choice. The wire carries meaning, never UI text.
+/// Owner-private admission and independent pick feedback. A refusal keeps the accepted point
+/// and any automatic request; the wire carries meaning, never UI text.
 #[derive(Component, Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
-pub(super) enum RespawnState {
-    #[default]
-    Idle,
-    WaitingForSpace,
-    PickBlocked,
-    InvalidPick,
+pub(super) struct RespawnState {
+    pub waiting: bool,
+    pub pick_refusal: Option<SpawnPickRefusal>,
+}
+
+/// Why an outside map choice was refused; admission and the accepted destination are unaffected.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub(super) enum SpawnPickRefusal {
+    NonFinite,
+    NoClearGround,
 }
 
 impl NetTankStatus {
@@ -201,7 +205,10 @@ mod tests {
         server.world_mut().spawn((
             Replicated,
             repair_snapshot.clone(),
-            RespawnState::WaitingForSpace,
+            RespawnState {
+                waiting: true,
+                pick_refusal: None,
+            },
             CombatDisclosure::owner(owner_link),
             transmission,
             signal,
@@ -256,7 +263,10 @@ mod tests {
                 .query::<&RespawnState>()
                 .single(owner.world())
                 .unwrap(),
-            &RespawnState::WaitingForSpace
+            &RespawnState {
+                waiting: true,
+                pick_refusal: None
+            }
         );
         assert_eq!(
             other

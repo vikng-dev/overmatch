@@ -11,7 +11,7 @@ use bevy::ecs::system::{ScheduleSystem, SystemParam};
 use bevy::prelude::*;
 
 use super::battle::BattleState;
-use super::disclosure::RespawnState;
+use super::disclosure::{RespawnState, SpawnPickRefusal};
 use super::score::{Opening, Scoreboard};
 use crate::command::TankCommand;
 use crate::damage::TankKnockedOut;
@@ -33,12 +33,13 @@ enum DeathScreenNode {
     /// once the key may be pressed ([`OwnRespawn::seconds_left`]).
     Died {
         opens_in_s: Option<u32>,
+        pick_refusal: Option<SpawnPickRefusal>,
     },
     /// Request sent; wait for authoritative admission, a live replacement, or the retry deadline.
     Respawning,
-    WaitingForSpace,
-    PickBlocked,
-    InvalidPick,
+    WaitingForSpace {
+        pick_refusal: Option<SpawnPickRefusal>,
+    },
 }
 
 /// The own knocked-out life's respawn opening, as the replicated scoreboard names it.
@@ -62,7 +63,7 @@ impl OwnRespawn<'_, '_> {
         match self.state.single() {
             Ok(Some(state)) => *state,
             // Before the owner snapshot arrives, or between links, there is no admission to show.
-            Ok(None) | Err(QuerySingleError::NoEntities(_)) => RespawnState::Idle,
+            Ok(None) | Err(QuerySingleError::NoEntities(_)) => RespawnState::default(),
             Err(QuerySingleError::MultipleEntities(_)) => panic!("a client controls one tank root"),
         }
     }
@@ -205,7 +206,7 @@ fn toggle_death_screen(
     let has_live = !live_own.is_empty();
     let between_combats = opening.between_combats();
     let server_state = opening.state();
-    if has_live || between_combats || server_state != RespawnState::Idle {
+    if has_live || between_combats || server_state.waiting {
         // Authority admission replaces the local wait; a live root or phase boundary completes it.
         awaiting.active = false;
     } else if respawn_timed_out(&awaiting, has_live, time.elapsed_secs_f64()) {
@@ -219,13 +220,15 @@ fn toggle_death_screen(
     } else if awaiting.active && !has_live {
         Some(DeathScreenNode::Respawning)
     } else if !dead_own.is_empty() && !gate.is_some_and(|gate| gate.holds_death_screen) {
-        Some(match server_state {
-            RespawnState::Idle => DeathScreenNode::Died {
+        Some(if server_state.waiting {
+            DeathScreenNode::WaitingForSpace {
+                pick_refusal: server_state.pick_refusal,
+            }
+        } else {
+            DeathScreenNode::Died {
                 opens_in_s: opening.seconds_left(),
-            },
-            RespawnState::WaitingForSpace => DeathScreenNode::WaitingForSpace,
-            RespawnState::PickBlocked => DeathScreenNode::PickBlocked,
-            RespawnState::InvalidPick => DeathScreenNode::InvalidPick,
+                pick_refusal: server_state.pick_refusal,
+            }
         })
     } else {
         None
@@ -285,7 +288,7 @@ fn request_respawn(
 ) {
     if opening.between_combats()
         || awaiting.active
-        || opening.state() != RespawnState::Idle
+        || opening.state().waiting
         || !keys.just_pressed(RESPAWN_KEY)
         || gate.is_some_and(|gate| gate.settling)
         || opening.seconds_left().is_some()
@@ -314,6 +317,13 @@ fn request_respawn(
     }
 }
 
+fn refusal_reason(reason: SpawnPickRefusal) -> &'static str {
+    match reason {
+        SpawnPickRefusal::NonFinite => "invalid map coordinates",
+        SpawnPickRefusal::NoClearGround => "no clear ground near this point",
+    }
+}
+
 /// Spawn the graybox death overlay: centered white text, its message chosen by `state`, over the
 /// death tint. Shares `ui_font::spawn_overlay` with the menu, connect and pause overlays so the
 /// family reads as one, but draws no backdrop of its own on Death's z: its wash is the tint child
@@ -322,20 +332,34 @@ fn request_respawn(
 /// hides it with the death screen. The state enum doubles as the node's marker + despawn handle.
 fn spawn_death_screen(commands: &mut Commands, state: DeathScreenNode, font: &Handle<Font>) {
     let text = match state {
-        DeathScreenNode::Died { opens_in_s: None } => "YOU DIED\npress R to respawn".to_owned(),
         DeathScreenNode::Died {
-            opens_in_s: Some(seconds),
-        } => format!("YOU DIED\nrespawn in {seconds} s"),
+            opens_in_s,
+            pick_refusal,
+        } => {
+            let mut text = match opens_in_s {
+                None => "YOU DIED\npress R to respawn".to_owned(),
+                Some(seconds) => format!("YOU DIED\nrespawn in {seconds} s"),
+            };
+            if let Some(reason) = pick_refusal {
+                text.push_str(&format!(
+                    "\n{}; previous spawn choice kept\npress M to re-pick",
+                    refusal_reason(reason)
+                ));
+            }
+            text
+        }
         DeathScreenNode::Respawning => "RESPAWNING…".to_owned(),
-        DeathScreenNode::WaitingForSpace => {
-            "WAITING FOR SPAWN SPACE\nrespawn is automatic when clear\npress M to re-pick"
-                .to_owned()
-        }
-        DeathScreenNode::PickBlocked => {
-            "SPAWN PICK BLOCKED\nno clear ground near this point\npress M to re-pick".to_owned()
-        }
-        DeathScreenNode::InvalidPick => {
-            "SPAWN PICK REFUSED\ninvalid map coordinates\npress M to re-pick".to_owned()
+        DeathScreenNode::WaitingForSpace { pick_refusal } => {
+            let mut text =
+                "WAITING FOR SPAWN SPACE\nrespawn is automatic when clear\npress M to re-pick"
+                    .to_owned();
+            if let Some(reason) = pick_refusal {
+                text.push_str(&format!(
+                    "\n{}; previous spawn choice kept",
+                    refusal_reason(reason)
+                ));
+            }
+            text
         }
     };
     // Two markers: the stateful `DeathScreenNode` enum (text form + despawn handle) and the shared
@@ -407,7 +431,7 @@ fn apply_death_status_line(
     let message =
         if opening.between_combats() || overlay::draws_scrim(&overlays, Overlay::ConnectStatus) {
             None
-        } else if state == RespawnState::Idle {
+        } else if !state.waiting && state.pick_refusal.is_none() {
             overlay::death_status_line(&overlays).then(|| "DEAD — respawn on menu close".to_owned())
         } else if overlay::draws_scrim(&overlays, Overlay::Death) {
             None // The full death screen already names the admission and action.
@@ -419,13 +443,14 @@ fn apply_death_status_line(
             } else {
                 "press M to re-pick"
             };
-            Some(match state {
-                RespawnState::WaitingForSpace => {
-                    format!("WAITING FOR SPAWN SPACE — automatic when clear; {action}")
-                }
-                RespawnState::PickBlocked => format!("SPAWN PICK BLOCKED — {action}"),
-                RespawnState::InvalidPick => format!("SPAWN PICK REFUSED — {action}"),
-                RespawnState::Idle => unreachable!("idle admission uses the ordinary death status"),
+            let refusal = state
+                .pick_refusal
+                .map(|reason| format!("{}; previous spawn choice kept; ", refusal_reason(reason)))
+                .unwrap_or_default();
+            Some(if state.waiting {
+                format!("WAITING FOR SPAWN SPACE — {refusal}automatic when clear; {action}")
+            } else {
+                format!("SPAWN PICK REFUSED — {refusal}{action}")
             })
         };
     let mut visibility = match status.single_mut() {
@@ -505,17 +530,17 @@ mod tests {
     #[test]
     fn authoritative_respawn_admission_outlives_the_request_timeout() {
         use bevy::ecs::system::RunSystemOnce;
-        for (state, node) in [
-            (
-                RespawnState::WaitingForSpace,
-                DeathScreenNode::WaitingForSpace,
-            ),
-            (RespawnState::PickBlocked, DeathScreenNode::PickBlocked),
-            (RespawnState::InvalidPick, DeathScreenNode::InvalidPick),
-        ] {
+        for pick_refusal in [None, Some(SpawnPickRefusal::NoClearGround)] {
+            let state = RespawnState {
+                waiting: true,
+                pick_refusal,
+            };
+            let node = DeathScreenNode::WaitingForSpace { pick_refusal };
             let mut world = World::new();
             let mut time = Time::<()>::default();
-            time.advance_by(std::time::Duration::from_secs(10)); // Fixture past the local deadline.
+            time.advance_by(std::time::Duration::from_secs_f64(
+                RESPAWN_TIMEOUT_SECS * 2.0,
+            )); // Fixture past the local deadline.
             world.insert_resource(time);
             world.insert_resource(Time::<Fixed>::default());
             world.insert_resource(ButtonInput::<KeyCode>::default());
@@ -525,7 +550,7 @@ mod tests {
                 hud: Handle::default(),
                 body: Handle::default(),
             });
-            world.insert_resource(awaiting(true, 1.0));
+            world.insert_resource(awaiting(true, RESPAWN_TIMEOUT_SECS));
             let own = world
                 .spawn((
                     Controlled,
@@ -569,35 +594,51 @@ mod tests {
     #[test]
     fn pending_request_refuses_another_edge_without_extending_its_deadline() {
         use bevy::ecs::system::RunSystemOnce;
-        let mut world = World::new();
-        world.insert_resource(Time::<()>::default());
-        world.insert_resource(Time::<Fixed>::default());
-        world.insert_resource(ButtonInput::<KeyCode>::default());
-        world.insert_resource(Overlays::default());
-        world.resource_mut::<Overlays>().declare_in_match(true);
-        world.insert_resource(AwaitingRespawn::default());
-        let own = world
-            .spawn((
-                Controlled,
-                TankKnockedOut {
-                    reason: crate::damage::KnockoutReason::CrewLoss,
-                },
-                TankCommand::default(),
-            ))
-            .id();
-        world
-            .resource_mut::<ButtonInput<KeyCode>>()
-            .press(RESPAWN_KEY);
-        world.run_system_once(request_respawn).unwrap();
-        assert!(world.get::<TankCommand>(own).unwrap().respawn);
-        let deadline = world.resource::<AwaitingRespawn>().deadline;
-        world.get_mut::<TankCommand>(own).unwrap().respawn = false;
-        world
-            .resource_mut::<Time>()
-            .advance_by(std::time::Duration::from_secs(1)); // Fixture within the retry horizon.
-        world.run_system_once(request_respawn).unwrap();
-        assert!(!world.get::<TankCommand>(own).unwrap().respawn);
-        assert_eq!(world.resource::<AwaitingRespawn>().deadline, deadline);
+        for pick_refusal in [
+            None,
+            Some(SpawnPickRefusal::NonFinite),
+            Some(SpawnPickRefusal::NoClearGround),
+        ] {
+            let mut world = World::new();
+            world.insert_resource(Time::<()>::default());
+            world.insert_resource(Time::<Fixed>::default());
+            world.insert_resource(ButtonInput::<KeyCode>::default());
+            world.insert_resource(Overlays::default());
+            world.resource_mut::<Overlays>().declare_in_match(true);
+            world.insert_resource(AwaitingRespawn::default());
+            let own = world
+                .spawn((
+                    Controlled,
+                    TankKnockedOut {
+                        reason: crate::damage::KnockoutReason::CrewLoss,
+                    },
+                    TankCommand::default(),
+                    RespawnState {
+                        waiting: false,
+                        pick_refusal,
+                    },
+                ))
+                .id();
+            world
+                .resource_mut::<ButtonInput<KeyCode>>()
+                .press(RESPAWN_KEY);
+            world.run_system_once(request_respawn).unwrap();
+            assert!(world.get::<TankCommand>(own).unwrap().respawn);
+            let deadline = world.resource::<AwaitingRespawn>().deadline;
+            world.get_mut::<TankCommand>(own).unwrap().respawn = false;
+            world
+                .resource_mut::<Time>()
+                .advance_by(std::time::Duration::from_secs_f64(
+                    RESPAWN_TIMEOUT_SECS / 2.0,
+                )); // Fixture within the retry horizon.
+            world.resource_mut::<ButtonInput<KeyCode>>().reset_all();
+            world
+                .resource_mut::<ButtonInput<KeyCode>>()
+                .press(RESPAWN_KEY);
+            world.run_system_once(request_respawn).unwrap();
+            assert!(!world.get::<TankCommand>(own).unwrap().respawn);
+            assert_eq!(world.resource::<AwaitingRespawn>().deadline, deadline);
+        }
     }
 
     fn awaiting(active: bool, deadline: f64) -> AwaitingRespawn {

@@ -276,7 +276,8 @@ use crate::{CombatantId, CombatantLife, ShotId};
 /// moving construction; later seams can split and a stump can open a lower cut.
 /// REV 81 (#263, the game's damage model): thin-plate capacity changes resolved stretches,
 /// their work and presented shell march; the skid-pressure stand-in remains independent.
-pub const PROTOCOL_REV: u32 = 81;
+/// REV 82 (the game's spawn flow): respawn admission and map-pick refusal are independent owner-private facts.
+pub const PROTOCOL_REV: u32 = 82;
 
 /// Compatibility tag derived from the complete pinned wire manifest plus the crate version. This
 /// is the runtime handshake value: version-exact, so a version bump intentionally changes it.
@@ -472,8 +473,8 @@ pub struct NetCrew {
 pub struct LaunchedTurretPose(pub Option<(Vec3, Quat)>);
 
 /// A client's REQUEST to place its own next respawn at a world XZ (the spawn map). It is a request,
-/// not a fact: the authority validates the bounds, resolves the ground height itself, and consumes
-/// the override on that client's next respawn — the client never names a Y and never teleports.
+/// not a fact: the authority validates the bounds, resolves the ground height itself, and retains
+/// the last accepted point for that client's subsequent respawns — the client never names a Y and never teleports.
 ///
 /// It carries no entity or combatant reference: the authority keys the override by the SENDING LINK
 /// (the same key `CombatantIds`/`ControlledBy` use), so a forged id cannot move another player.
@@ -1182,7 +1183,7 @@ const WIRE_SURFACE_HASH: u64 = 0x5afa185f66009321;
 /// The pinned hash of the OWN wire-facing type DEFINITIONS (field layout, not just names). Re-pin it
 /// whenever a wire-facing struct/enum definition changes; house process also bumps
 /// [`PROTOCOL_REV`]. The tripwire prints the new value. See the block above for the coverage model.
-const WIRE_TYPES_HASH: u64 = 0x93f567f4b1fdd3d0;
+const WIRE_TYPES_HASH: u64 = 0xa1498b20e15fb952;
 
 /// The pinned `Cargo.lock` versions of the external crates whose types ride the wire (avian's
 /// replicated physics components; lightyear's wire framing / input protocol). A bump of either can
@@ -2082,6 +2083,7 @@ mod tests {
         ("src/net/protocol.rs", "NetCrew"),
         ("src/net/disclosure.rs", "NetTankStatus"),
         ("src/net/disclosure.rs", "RespawnState"),
+        ("src/net/disclosure.rs", "SpawnPickRefusal"),
         ("src/net/protocol.rs", "VolumeSnapshot"),
         ("src/net/protocol.rs", "CrewSnapshot"),
         ("src/net/protocol.rs", "LaunchedTurretPose"),

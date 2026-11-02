@@ -1,9 +1,8 @@
-//! Net-client spawn map: `M` opens a top view of the terrain, a click picks where the player's NEXT
-//! respawn lands.
+//! Net-client spawn map: `M` opens terrain; a click requests a persistent spawn point.
 //!
 //! The click is a REQUEST ([`SetSpawnPoint`]) — nothing teleports, nothing moves now. The authority
-//! validates the bounds, resolves the ground height itself, and consumes the override at the
-//! player's next respawn (`net::server::respawn_player_tanks`). This module is view + input only.
+//! validates bounds and standing geometry, resolves ground height, and retains the last accepted
+//! point for subsequent respawns (`net::server::respawn_player_tanks`). This module is view + input only.
 //!
 //! It joins the `overlay::Overlays` authority as [`Overlay::SpawnMap`], which is what releases the
 //! cursor (a click needs a cursor position) and zeroes the wire command while the map is up.
@@ -12,8 +11,10 @@ use bevy::ecs::schedule::ScheduleConfigs;
 use bevy::ecs::system::ScheduleSystem;
 use bevy::prelude::*;
 
+use crate::provenance::Sourced;
 use bevy::window::PrimaryWindow;
 use lightyear::prelude::*;
+use serde::Deserialize;
 
 use super::protocol::{SetSpawnPoint, SpawnChannel};
 use crate::damage_cam::pen_cam::game::KillCamGate;
@@ -38,19 +39,9 @@ pub(super) fn world_half_extent(grid: Option<&crate::terrain_grid::HeightGrid>) 
     crate::terrain_grid::world_extent(grid).half_extent()
 }
 
-/// Fraction of the half-extent a spawn request is clamped to: a tank placed at the limit still has
-/// ground under its whole hull.
-const SPAWN_LIMIT_FRACTION: f32 = 0.95;
-
-/// How far into the terrain a spawn request is clamped, metres.
-///
-/// ONE home for the bound, read by BOTH ends: the authority clamps every request through it
-/// (`net::server::validate_spawn_request`), and the client applies the SAME clamp before sending
-/// ([`clamp_to_spawn_limit`]). That symmetry is what makes the marker honest — an edge click used to
-/// draw its dot the whole 5 % outside the square the server would actually place the tank in, so the
-/// player was shown one point and respawned at another.
+/// Coordinate bound shared by client and authority; it does not admit standing geometry.
 pub(crate) fn spawn_limit(half_extent: f32) -> f32 {
-    half_extent * SPAWN_LIMIT_FRACTION
+    half_extent * style().limit_fraction.0
 }
 
 /// The map image, in the selected map's `derived/` folder: an 8-BIT RGB copy of the terrain
@@ -76,24 +67,91 @@ const UI_MAP_FILE: &str = "map_ui.png";
 const PANEL_SPAWNED: &str =
     "spawn_map_overlay spawns one panel and one of each marker at startup; nothing despawns them";
 
-/// Panel edge as a fraction of the smaller window dimension — a centred square that always fits.
-const PANEL_FRACTION: f32 = 0.8;
+const STYLE_FILE: &str = "assets/ui/spawn_map.ron";
 
-/// Marker dot edge, px.
-const MARKER_PX: f32 = 12.0;
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SpawnMapStyle {
+    limit_fraction: Sourced<f32>,
+    panel_fraction: Sourced<f32>,
+    marker_px: Sourced<f32>,
+    border_px: Sourced<f32>,
+    title_gap_percent: Sourced<f32>,
+    title_font_px: Sourced<f32>,
+    backdrop: Sourced<[f32; 4]>,
+    frame: Sourced<[f32; 4]>,
+    chosen: Sourced<[f32; 4]>,
+    refused: Sourced<[f32; 4]>,
+    own: Sourced<[f32; 4]>,
+}
 
-/// The panel's visible frame, px. It lives on a WRAPPER node ([`spawn_map_overlay`]), never on the
-/// panel itself — see [`SpawnMapPanel`] for why the panel must stay border-free.
-const PANEL_BORDER_PX: f32 = 2.0;
+pub(super) fn validate_spawn_map_data() {
+    style();
+}
 
-/// Client-side map state. `chosen` is the client's MEMORY of the last point it sent (the feedback
-/// loop: the marker persists across map open/close and across respawns, and the next respawn
-/// empirically lands under it). There is no server→client confirmation message — the reliable
-/// client→server lane plus the observable respawn is the ack.
+fn style() -> &'static SpawnMapStyle {
+    static STYLE: std::sync::OnceLock<SpawnMapStyle> = std::sync::OnceLock::new();
+    STYLE.get_or_init(|| {
+        let style: SpawnMapStyle = crate::provenance::from_shipped_str(
+            STYLE_FILE,
+            include_str!("../../assets/ui/spawn_map.ron"),
+        )
+        .unwrap_or_else(|error| panic!("{error}"));
+        for (field, value) in [
+            ("limit_fraction", style.limit_fraction.0),
+            ("panel_fraction", style.panel_fraction.0),
+        ] {
+            assert!(
+                value.is_finite() && value > 0.0 && value <= 1.0,
+                "{STYLE_FILE}: {field} must be in (0, 1]; author a fraction of the map"
+            );
+        }
+        for (field, value) in [
+            ("marker_px", style.marker_px.0),
+            ("border_px", style.border_px.0),
+            ("title_gap_percent", style.title_gap_percent.0),
+            ("title_font_px", style.title_font_px.0),
+        ] {
+            assert!(
+                value.is_finite() && value > 0.0,
+                "{STYLE_FILE}: {field} must be finite and positive; author a positive size"
+            );
+        }
+        for (field, colour) in [
+            ("backdrop", &style.backdrop),
+            ("frame", &style.frame),
+            ("chosen", &style.chosen),
+            ("refused", &style.refused),
+            ("own", &style.own),
+        ] {
+            assert!(
+                colour
+                    .0
+                    .iter()
+                    .all(|v| v.is_finite() && (0.0..=1.0).contains(v)),
+                "{STYLE_FILE}: {field} needs finite sRGBA channels in [0, 1]; author a valid colour"
+            );
+        }
+        assert_ne!(
+            style.chosen.0, style.refused.0,
+            "{STYLE_FILE}: refused must differ from chosen; make refusal visible on the marker"
+        );
+        style
+    })
+}
+
+fn colour(value: &Sourced<[f32; 4]>) -> Color {
+    let [r, g, b, a] = value.0;
+    Color::srgba(r, g, b, a)
+}
+
+/// The marker remembers the last requested point across map toggles and respawns. Replicated
+/// `RespawnState` supplies refusal feedback; the authority retains its last accepted destination.
 #[derive(Resource, Default)]
 struct SpawnMap {
     open: bool,
     chosen: Option<Vec2>,
+    battle: Option<u32>,
 }
 
 /// The full-screen backdrop + its centred square image panel. The panel's px rect is the ONE thing
@@ -104,7 +162,7 @@ struct SpawnMap {
 /// out against the PADDING box, while `Node::width` under the default `BoxSizing::BorderBox` names the
 /// OUTER box. Put a 2 px border on this node and those three boxes stop coinciding: the recorded rect
 /// describes a square 4 px larger than the drawn image, which skewed every click by up to ~6.4 m at
-/// the terrain edge. The frame therefore lives on a wrapper ([`PANEL_BORDER_PX`]), leaving content ==
+/// the terrain edge. The frame therefore lives on a wrapper (the authored border width), leaving content ==
 /// padding == border box here, so the ONE recorded rect is unambiguously the image's rect and the
 /// click math, the markers, and the pixels all read the same square.
 #[derive(Component)]
@@ -124,6 +182,7 @@ struct ChosenMarker;
 struct SelfMarker;
 
 pub fn plugin(app: &mut App) {
+    style();
     crate::flow::require(app, "net::spawn_map");
     app.init_match_resource::<SpawnMap>()
         .add_systems(Startup, spawn_map_overlay)
@@ -162,8 +221,12 @@ pub(crate) fn mount_bare(app: &mut App) {
             origin_px: Vec2::ZERO,
         },
     ));
-    app.world_mut()
-        .spawn((Node::default(), Visibility::Hidden, ChosenMarker));
+    app.world_mut().spawn((
+        Node::default(),
+        Visibility::Hidden,
+        BackgroundColor::default(),
+        ChosenMarker,
+    ));
     app.world_mut()
         .spawn((Node::default(), Visibility::Hidden, SelfMarker));
 }
@@ -177,7 +240,20 @@ fn toggle_spawn_map(
     gate: Option<Res<KillCamGate>>,
     mut map: ResMut<SpawnMap>,
     mut overlays: ResMut<Overlays>,
+    battles: Query<&super::battle::BattleState>,
 ) {
+    let battle = match battles.single() {
+        Ok(battle) => Some(battle.number),
+        // Before the first snapshot, or between links, no Battle owns a pick.
+        Err(bevy::ecs::query::QuerySingleError::NoEntities(_)) => None,
+        Err(bevy::ecs::query::QuerySingleError::MultipleEntities(_)) => {
+            panic!("a replica has one Battle")
+        }
+    };
+    if map.battle != battle {
+        map.chosen = None;
+        map.battle = battle;
+    }
     // Not in the kill cam's input dead-zone after a knockout ([`KillCamGate::settling`], this
     // frame's: `KillCamGateSet` runs before `OverlaySet::Toggle`).
     let settling = gate.is_some_and(|gate| gate.settling);
@@ -196,7 +272,7 @@ fn toggle_spawn_map(
     overlays.declare(Overlay::SpawnMap, map.open);
 }
 
-/// Keep the panel a centred square of [`PANEL_FRACTION`] × the smaller window dimension, and record
+/// Keep the panel a centred square of the authored window fraction, and record
 /// its px rect for the click math. Both the `Node` size and the recorded rect come from the same
 /// number in the same frame, so the mapping cannot drift from what is drawn.
 fn size_spawn_map(
@@ -214,12 +290,12 @@ fn size_spawn_map(
         return;
     };
     let (width, height) = (window.width(), window.height());
-    let edge = width.min(height) * PANEL_FRACTION;
+    let edge = width.min(height) * style().panel_fraction.0;
     let (mut node, mut rect) = panel.single_mut().expect(PANEL_SPAWNED);
     node.width = Val::Px(edge);
     node.height = Val::Px(edge);
     rect.edge_px = edge;
-    // The backdrop centres the FRAME, whose border box is `edge + 2·PANEL_BORDER_PX`; the border sits
+    // The backdrop centres the FRAME, whose border box is `edge + twice the authored border width`; the border sits
     // OUTSIDE the panel, so the panel's own top-left lands at `(window - edge) / 2` on both axes —
     // the border cancels exactly. (The title is absolutely positioned above, not stacked in a column,
     // so it displaces nothing.) That is why this restatement of the layout is exact rather than an
@@ -254,15 +330,21 @@ fn click_spawn_map(
     let Some(uv) = panel_uv(panel.single().expect(PANEL_SPAWNED), cursor) else {
         return;
     };
-    // Clamp BEFORE recording the marker, so `chosen` is the point the authority will accept rather
-    // than the raw pixel: marker = truth.
+    // Mirror the authority's coordinate clamp; geometry admission still belongs to the server.
     let half = world_half_extent(grid.as_deref());
     let world = clamp_to_spawn_limit(half, uv_to_world(half, uv));
-    map.chosen = Some(world);
-    let Ok(mut sender) = senders.single_mut() else {
-        warn!("client: no server link — spawn point not sent");
-        return;
+    let mut sender = match senders.single_mut() {
+        Ok(sender) => sender,
+        // Between links there is no authority to receive a map choice.
+        Err(bevy::ecs::query::QuerySingleError::NoEntities(_)) => {
+            warn!("client: no server link — spawn point not sent");
+            return;
+        }
+        Err(bevy::ecs::query::QuerySingleError::MultipleEntities(_)) => {
+            panic!("a match client has one server link");
+        }
     };
+    map.chosen = Some(world);
     sender.send::<SpawnChannel>(SetSpawnPoint {
         x: world.x,
         z: world.y,
@@ -303,13 +385,8 @@ fn uv_to_world(half_extent: f32, uv: Vec2) -> Vec2 {
     )
 }
 
-/// Clamp a picked world XZ into the placeable square, applying the SAME [`spawn_limit`] the
-/// authority applies — one rule, read by both ends, so this is a mirror rather than a guess.
-///
-/// The map maps clicks across the FULL ±`half_extent`, but the server only ever places a tank
-/// within ±[`spawn_limit`]. Before this, an edge click drew its marker on the terrain edge and
-/// then respawned the player the 5 % gap inward of it. Clamping here (and marking the clamped point) makes
-/// the server's clamp a no-op on everything the client sends: the dot IS the destination.
+/// Mirror the authority's coordinate bound. Geometry can refuse a bounded point, and occupancy
+/// can nudge an admitted one: the marker names a request, not a guaranteed destination.
 pub(super) fn clamp_to_spawn_limit(half_extent: f32, world: Vec2) -> Vec2 {
     let limit = spawn_limit(half_extent);
     world.clamp(Vec2::splat(-limit), Vec2::splat(limit))
@@ -327,8 +404,11 @@ fn world_to_uv(half_extent: f32, world: Vec2) -> Vec2 {
 fn place_markers(
     map: Res<SpawnMap>,
     panel: Query<&SpawnMapPanel>,
-    own: Query<&GlobalTransform, With<Controlled>>,
-    mut chosen: Query<(&mut Node, &mut Visibility), (With<ChosenMarker>, Without<SelfMarker>)>,
+    own: Query<(&GlobalTransform, Option<&super::disclosure::RespawnState>), With<Controlled>>,
+    mut chosen: Query<
+        (&mut Node, &mut Visibility, &mut BackgroundColor),
+        (With<ChosenMarker>, Without<SelfMarker>),
+    >,
     mut own_marker: Query<(&mut Node, &mut Visibility), (With<SelfMarker>, Without<ChosenMarker>)>,
     grid: Option<Res<crate::terrain_grid::HeightGrid>>,
 ) {
@@ -342,9 +422,17 @@ fn place_markers(
         own_marker.single_mut().expect(PANEL_SPAWNED),
     );
     let place = |uv: Vec2, node: &mut Node| {
-        node.left = Val::Px(uv.x * edge - MARKER_PX * 0.5);
-        node.top = Val::Px(uv.y * edge - MARKER_PX * 0.5);
+        node.left = Val::Px(uv.x * edge - style().marker_px.0 * 0.5);
+        node.top = Val::Px(uv.y * edge - style().marker_px.0 * 0.5);
     };
+    let own = crate::tank::controlled_one(own.single());
+    let refused =
+        own.is_some_and(|(_, state)| state.is_some_and(|state| state.pick_refusal.is_some()));
+    chosen.2.set_if_neq(BackgroundColor(if refused {
+        colour(&style().refused)
+    } else {
+        colour(&style().chosen)
+    }));
     match map.chosen {
         Some(world) => {
             place(world_to_uv(half, world), &mut chosen.0);
@@ -354,8 +442,8 @@ fn place_markers(
             chosen.1.set_if_neq(Visibility::Hidden);
         }
     }
-    match crate::tank::controlled_one(own.single()) {
-        Some(transform) => {
+    match own {
+        Some((transform, _)) => {
             let pos = transform.translation();
             place(
                 world_to_uv(half, Vec2::new(pos.x, pos.z)),
@@ -384,7 +472,7 @@ fn spawn_map_overlay(mut commands: Commands, fonts: Res<UiFonts>, assets: Res<As
                 align_items: AlignItems::Center,
                 ..default()
             },
-            BackgroundColor(Color::srgba(0.0, 0.0, 0.0, 0.75)),
+            BackgroundColor(colour(&style().backdrop)),
             Visibility::Hidden,
         ))
         .with_children(|parent| {
@@ -395,15 +483,17 @@ fn spawn_map_overlay(mut commands: Commands, fonts: Res<UiFonts>, assets: Res<As
                 Node {
                     position_type: PositionType::Absolute,
                     width: Val::Percent(100.0),
-                    top: Val::Percent((1.0 - PANEL_FRACTION) * 50.0 - 4.0),
+                    top: Val::Percent(
+                        (1.0 - style().panel_fraction.0) * 50.0 - style().title_gap_percent.0,
+                    ),
                     justify_content: JustifyContent::Center,
                     ..default()
                 },
                 children![(
-                    Text::new("CLICK TO SET SPAWN — M to close"),
+                    Text::new("CLICK TO PICK — red: refused — M to close"),
                     TextFont {
                         font: fonts.hud.clone().into(),
-                        font_size: FontSize::Px(22.0),
+                        font_size: FontSize::Px(style().title_font_px.0),
                         ..default()
                     },
                     TextColor(Color::WHITE),
@@ -412,15 +502,15 @@ fn spawn_map_overlay(mut commands: Commands, fonts: Res<UiFonts>, assets: Res<As
             // The FRAME. It owns the border so the panel inside it does not (see [`SpawnMapPanel`]);
             // with `width`/`height` left `auto` it shrink-wraps its one fixed-size child, so nothing
             // has to re-derive the outer size when `size_spawn_map` resizes the panel. Centred by the
-            // backdrop, its border box is `edge + 2·PANEL_BORDER_PX`, which puts the panel's own
+            // backdrop, its border box is `edge + twice the authored border width`, which puts the panel's own
             // top-left at exactly `(window - edge) / 2` — the rect `size_spawn_map` records.
             parent
                 .spawn((
                     Node {
-                        border: UiRect::all(Val::Px(PANEL_BORDER_PX)),
+                        border: UiRect::all(Val::Px(style().border_px.0)),
                         ..default()
                     },
-                    BorderColor::all(Color::srgb(0.8, 0.8, 0.85)),
+                    BorderColor::all(colour(&style().frame)),
                 ))
                 .with_children(|frame| {
                     frame
@@ -443,13 +533,13 @@ fn spawn_map_overlay(mut commands: Commands, fonts: Res<UiFonts>, assets: Res<As
                             panel.spawn((
                                 ChosenMarker,
                                 marker_node(),
-                                BackgroundColor(Color::srgb(0.2, 1.0, 0.4)),
+                                BackgroundColor(colour(&style().chosen)),
                                 Visibility::Hidden,
                             ));
                             panel.spawn((
                                 SelfMarker,
                                 marker_node(),
-                                BackgroundColor(Color::srgb(1.0, 0.85, 0.2)),
+                                BackgroundColor(colour(&style().own)),
                                 Visibility::Hidden,
                             ));
                         });
@@ -461,8 +551,8 @@ fn spawn_map_overlay(mut commands: Commands, fonts: Res<UiFonts>, assets: Res<As
 fn marker_node() -> Node {
     Node {
         position_type: PositionType::Absolute,
-        width: Val::Px(MARKER_PX),
-        height: Val::Px(MARKER_PX),
+        width: Val::Px(style().marker_px.0),
+        height: Val::Px(style().marker_px.0),
         ..default()
     }
 }
@@ -474,7 +564,82 @@ mod tests {
     /// The square these pure-mapping pins are made over: the flat-slab fixture world's,
     /// which `world_half_extent` answers with when no heightmap decoded.
     const HALF: f32 = crate::terrain_grid::FIXTURE_EXTENT.half_extent();
-    const LIMIT: f32 = HALF * SPAWN_LIMIT_FRACTION;
+
+    /// The player's marker displays the authority's refusal, including while a respawn is pending.
+    #[test]
+    fn the_requested_marker_shows_refusal_independently_of_waiting() {
+        use super::super::disclosure::RespawnState;
+        use bevy::ecs::system::RunSystemOnce;
+        for waiting in [false, true] {
+            let mut app = App::new();
+            mount_bare(&mut app);
+            app.world_mut().resource_mut::<SpawnMap>().open = true;
+            app.world_mut().resource_mut::<SpawnMap>().chosen = Some(Vec2::ZERO);
+            let own = app
+                .world_mut()
+                .spawn((
+                    Controlled,
+                    GlobalTransform::default(),
+                    RespawnState {
+                        waiting,
+                        pick_refusal: None,
+                    },
+                ))
+                .id();
+            app.world_mut().run_system_once(place_markers).unwrap();
+            let colour = |world: &mut World| {
+                world
+                    .query_filtered::<&BackgroundColor, With<ChosenMarker>>()
+                    .single(world)
+                    .unwrap()
+                    .0
+            };
+            let accepted = colour(app.world_mut());
+            app.world_mut()
+                .get_mut::<RespawnState>(own)
+                .unwrap()
+                .pick_refusal = Some(super::super::disclosure::SpawnPickRefusal::NoClearGround);
+            app.world_mut().run_system_once(place_markers).unwrap();
+            assert_ne!(
+                colour(app.world_mut()),
+                accepted,
+                "refusal must change the marker itself"
+            );
+            app.world_mut()
+                .get_mut::<RespawnState>(own)
+                .unwrap()
+                .pick_refusal = None;
+            app.world_mut().run_system_once(place_markers).unwrap();
+            assert_eq!(
+                colour(app.world_mut()),
+                accepted,
+                "an admitted re-pick clears refusal"
+            );
+        }
+    }
+
+    /// The authority clears picks at the Battle boundary, so the client cannot advertise an old dot.
+    #[test]
+    fn a_new_battle_clears_the_requested_marker() {
+        use bevy::ecs::system::RunSystemOnce;
+        let mut world = World::new();
+        world.init_resource::<SpawnMap>();
+        world.init_resource::<Overlays>();
+        world.init_resource::<ButtonInput<KeyCode>>();
+        let battle = world
+            .spawn(super::super::battle::BattleState::combat_fixture())
+            .id();
+        world.run_system_once(toggle_spawn_map).unwrap();
+        world.resource_mut::<SpawnMap>().chosen = Some(Vec2::ZERO);
+        world.run_system_once(toggle_spawn_map).unwrap();
+        assert_eq!(world.resource::<SpawnMap>().chosen, Some(Vec2::ZERO));
+        world
+            .get_mut::<super::super::battle::BattleState>(battle)
+            .unwrap()
+            .number += 1; // Fixture next Battle.
+        world.run_system_once(toggle_spawn_map).unwrap();
+        assert_eq!(world.resource::<SpawnMap>().chosen, None);
+    }
 
     fn panel(edge: f32, origin: Vec2) -> SpawnMapPanel {
         SpawnMapPanel {
@@ -537,10 +702,10 @@ mod tests {
     #[test]
     fn edge_clicks_clamp_to_the_square_the_server_accepts() {
         let corner = clamp_to_spawn_limit(HALF, uv_to_world(HALF, Vec2::ONE));
-        assert_eq!(corner, Vec2::splat(LIMIT));
+        assert_eq!(corner, Vec2::splat(spawn_limit(HALF)));
         assert_eq!(
             clamp_to_spawn_limit(HALF, uv_to_world(HALF, Vec2::ZERO)),
-            Vec2::splat(-LIMIT),
+            Vec2::splat(-spawn_limit(HALF)),
         );
         assert_eq!(
             clamp_to_spawn_limit(HALF, corner),

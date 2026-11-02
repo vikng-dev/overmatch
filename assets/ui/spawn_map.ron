@@ -1,0 +1,13 @@
+(
+    limit_fraction: (0.95, Unit("spawn-map region: fraction of the terrain half-extent available to player picks")),
+    panel_fraction: (0.8, Taste("spawn map: fit the square inside the smaller window dimension")),
+    marker_px: (12.0, Taste("spawn map: readable requested-point and own-tank dots")),
+    border_px: (2.0, Taste("spawn map: separate the image from the backdrop")),
+    title_gap_percent: (4.0, Taste("spawn map: title clearance above the square, in window percent")),
+    title_font_px: (22.0, Taste("spawn map: compact instruction line")),
+    backdrop: ((0.0, 0.0, 0.0, 0.75), Taste("spawn map: dim the world behind the image")),
+    frame: ((0.8, 0.8, 0.85, 1.0), Taste("spawn map: pale image border")),
+    chosen: ((0.2, 1.0, 0.4, 1.0), Taste("spawn map: green requested point without a reported refusal")),
+    refused: ((1.0, 0.2, 0.2, 1.0), Taste("spawn map: red requested point on authority refusal")),
+    own: ((1.0, 0.85, 0.2, 1.0), Taste("spawn map: yellow own-tank position")),
+)

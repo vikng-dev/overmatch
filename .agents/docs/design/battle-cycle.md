@@ -142,7 +142,7 @@ respawn waits and retries; a phase boundary clears pending placement, and the
 next fill-up places all connected players from an empty combatant field.
 
 The owner receives typed `RespawnState`, scoped by `CombatDisclosure`; no UI text travels on the
-wire. `WaitingForSpace` means the request remains pending and retries automatically. The death
+wire. `RespawnState::waiting` means the request remains pending and retries automatically. The death
 screen says "WAITING FOR SPAWN SPACE", explains automatic respawn when clear, and offers M to
 re-pick. Its status line carries the same meaning through a map or menu, with the action appropriate
 to that overlay. R sends no redundant request and cannot re-arm the local retry timeout. That timeout
@@ -150,13 +150,16 @@ covers only an unacknowledged request, not an authority-reported placement wait.
 
 The authority validates each pick on receipt: reject nonfinite coordinates, clamp finite ones to the
 spawn region, then search for a candidate clear of standing map footprints. If none exists, refuse
-it as `PickBlocked` rather than waiting. Body occupancy is different: tanks can move or their owners
+it as `SpawnPickRefusal::NoClearGround` rather than waiting. Body occupancy is different: tanks can move or their owners
 can replace them, so a geometrically admissible pick may wait for space. This distinction promises no
 deadline for another player's action; re-picking is the waiting player's way out. Placement checks
-again against current geometry and occupants before spawning. A valid re-pick preserves a pending
-request; a refused pick cancels it. After refusal, an admitted re-pick returns to the ordinary R
-prompt. A living player also sees a refused pick on the status line. The most recent accepted point
-persists until replaced or the Battle boundary clears choices; a refused point never replaces it.
+again against current geometry and occupants before spawning. Any re-pick preserves a pending
+request. A refused pick costs nothing: R still requests the previous accepted point, or the automatic
+map spawn rule when there was no accepted point. Admission waiting and pick refusal are independent
+owner-private facts. The death prompt retains R and its countdown; the status line tells a living
+player why the pick was refused and that the previous spawn choice was kept. The requested dot
+turns red on refusal, retains that feedback across respawns, and clears at the next Battle.
+The most recent accepted point persists until replaced or the Battle boundary clears choices; a refused point never replaces it.
 
 MEASURED: the expanded authored candidate set admits the owner's 30-player
 stationary lobby from every possible first point; all candidates pass ground

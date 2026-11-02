@@ -14,7 +14,7 @@ use lightyear::prelude::*;
 use super::admission::JoinAdmission;
 use super::battle::{BattleState, Boundary, CycleRules, HoldCommands, in_combat, places_tanks};
 use super::battle_mode::BattleMode;
-use super::disclosure::{CombatDisclosure, NetTankStatus, RespawnState};
+use super::disclosure::{CombatDisclosure, NetTankStatus, RespawnState, SpawnPickRefusal};
 use super::hosting::{Hosted, HostedConfig};
 use super::protocol::{
     LaunchedTurretPose, NetCrew, NetTank, ServoAngles, SetSpawnPoint, protocol_id,
@@ -673,12 +673,6 @@ fn resolve_free_spawn_xz(
     })
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum SpawnPickRefusal {
-    NonFinite,
-    NoClearGround,
-}
-
 /// Parse outside coordinates once at receipt, then admit only picks with a candidate on clear
 /// ground. Body occupancy is deliberately absent: it is a retryable placement state.
 fn check_spawn_pick(
@@ -698,19 +692,9 @@ fn check_spawn_pick(
     }
 }
 
-/// A valid re-pick preserves an outstanding automatic request; a refusal cancels it until another
-/// admitted pick. Only the last accepted point survives in `SpawnOverrides`.
-fn picked_state(previous: RespawnState, pick: &Result<Vec2, SpawnPickRefusal>) -> RespawnState {
-    match pick {
-        Ok(_) if previous == RespawnState::WaitingForSpace => RespawnState::WaitingForSpace,
-        Ok(_) => RespawnState::Idle,
-        Err(SpawnPickRefusal::NonFinite) => RespawnState::InvalidPick,
-        Err(SpawnPickRefusal::NoClearGround) => RespawnState::PickBlocked,
-    }
-}
-
 /// Drain at frame rate: Lightyear clears unread messages in `Last`, including frames without a tick.
 fn install_spawn_picks(app: &mut App) {
+    spawn_map::validate_spawn_map_data();
     app.add_systems(Update, receive_spawn_points);
 }
 
@@ -741,7 +725,7 @@ fn receive_spawn_points(
             // A phase boundary can remove the old root before this frame drains its last messages.
             for (controlled, mut state) in &mut own {
                 if controlled.owner == link {
-                    *state = picked_state(*state, &checked);
+                    state.pick_refusal = checked.as_ref().err().copied();
                 }
             }
             match checked {
@@ -891,7 +875,7 @@ fn spawn_player_tank(
                 Replicate::to_clients(NetworkTarget::All),
             ),
             (
-                RespawnState::Idle,
+                RespawnState::default(),
                 // Born empty in the spawn bundle, public, appended by diff.
                 HullMarks::default(),
                 // Clients build their own local skeleton; replicate only root state.
@@ -1069,7 +1053,7 @@ fn respawn_dead_bots(
 }
 
 /// The game's damage model: server-authoritative player respawn replaces an owned knocked-out
-/// tank only after a client request. A request remains pending while its placement is blocked.
+/// tank only after a client request. Body occupancy keeps a request pending; standing geometry cancels it and reports refusal.
 /// The authority's `TankKnockedOut` marker validates eligibility; `ControlledBy` excludes bots. A
 /// request before the life's respawn opens (`score::RespawnGate`, the mode's wait after the
 /// knockout) is refused: it is dropped, and the client, which shows the time left, sends another.
@@ -1118,12 +1102,9 @@ fn respawn_player_tanks(
     // respawn this tick. Resolve the owner's `RemoteId` up front (the `PeerId` the fresh tank must be
     // predicted/owned by); an owner link mid-disconnect with no `RemoteId` is skipped rather than
     // respawned to a client that is leaving.
-    let requests: Vec<(Entity, Entity, PeerId, CombatantId, bool)> = dead
+    let requests: Vec<(Entity, Entity, PeerId, CombatantId, RespawnState)> = dead
         .iter()
-        .filter(|(_, command, _, _, _, state)| {
-            **state == RespawnState::WaitingForSpace
-                || (command.respawn && **state == RespawnState::Idle)
-        })
+        .filter(|(_, command, _, _, _, state)| state.waiting || command.respawn)
         .filter(
             |(root, _, _, combatant, life, _)| match gate.opening(**combatant, **life) {
                 Opening::Open => true,
@@ -1134,15 +1115,10 @@ fn respawn_player_tanks(
             },
         )
         .filter_map(|(root, _, controlled, combatant, _, waiting)| {
-            remotes.get(controlled.owner).ok().map(|remote| {
-                (
-                    root,
-                    controlled.owner,
-                    remote.0,
-                    *combatant,
-                    *waiting == RespawnState::WaitingForSpace,
-                )
-            })
+            remotes
+                .get(controlled.owner)
+                .ok()
+                .map(|remote| (root, controlled.owner, remote.0, *combatant, *waiting))
         })
         .collect();
     if requests.is_empty() {
@@ -1165,7 +1141,7 @@ fn respawn_player_tanks(
     // Occupancy also includes the spots ALREADY HANDED OUT this pass: two clients respawning onto
     // the same click in the same tick would otherwise both read the pre-pass world and overlap.
     let mut placed_this_pass: Vec<Vec2> = Vec::new();
-    for (root, link, client_id, combatant, waiting) in requests {
+    for (root, link, client_id, combatant, previous) in requests {
         // Keep the player's spawn-map override and its occupancy nudge ahead of automatic choice.
         let picked = overrides.0.get(&link);
         let override_pos = match picked {
@@ -1194,13 +1170,17 @@ fn respawn_player_tanks(
                         Some(spawn_pos(height.as_deref(), spot))
                     }
                     Err(reason) => {
-                        let state = match reason {
-                            SpawnBlockage::Occupied => RespawnState::WaitingForSpace,
-                            SpawnBlockage::StandingGeometry => RespawnState::PickBlocked,
+                        let state = RespawnState {
+                            waiting: reason == SpawnBlockage::Occupied,
+                            pick_refusal: if reason == SpawnBlockage::StandingGeometry {
+                                Some(SpawnPickRefusal::NoClearGround)
+                            } else {
+                                previous.pick_refusal
+                            },
                         };
-                        if !waiting || state == RespawnState::PickBlocked {
+                        if state != previous {
                             info!(
-                                "server: spawn pick ({:.1}, {:.1}): {state:?}; player may re-pick on the map",
+                                "server: spawn pick ({:.1}, {:.1}): {reason:?}; player may re-pick on the map",
                                 xz.x, xz.y
                             );
                             commands.entity(root).insert(state);
@@ -1223,11 +1203,14 @@ fn respawn_player_tanks(
                 &live,
                 2.0 * content.contact_radius(),
             ) else {
-                if !waiting {
+                if !previous.waiting {
                     info!(
                         "server: player {client_id} respawn waiting — every map spawn point is inside the minimum distance"
                     );
-                    commands.entity(root).insert(RespawnState::WaitingForSpace);
+                    commands.entity(root).insert(RespawnState {
+                        waiting: true,
+                        ..previous
+                    });
                 }
                 continue;
             };
@@ -1250,6 +1233,10 @@ fn respawn_player_tanks(
             combatant,
             combatants.life(combatant),
         );
+        commands.entity(fresh).insert(RespawnState {
+            waiting: false,
+            ..previous
+        });
         info!("server: player {client_id} respawn requested — swept {root}, spawned {fresh}");
     }
 }
@@ -1594,7 +1581,7 @@ mod tests {
                     owner: link,
                     lifetime: Default::default(),
                 },
-                RespawnState::Idle,
+                RespawnState::default(),
             ))
             .id();
         let other = app
@@ -1604,7 +1591,10 @@ mod tests {
                     owner: other_link,
                     lifetime: Default::default(),
                 },
-                RespawnState::WaitingForSpace,
+                RespawnState {
+                    waiting: true,
+                    pick_refusal: None,
+                },
             ))
             .id();
         let accepted = Vec2::new(100.0, 0.0); // Fixture points, one outside the later footprint.
@@ -1621,11 +1611,17 @@ mod tests {
         send_pick(&mut app, link, refused);
         assert_eq!(
             app.world().get::<RespawnState>(root),
-            Some(&RespawnState::PickBlocked)
+            Some(&RespawnState {
+                waiting: false,
+                pick_refusal: Some(SpawnPickRefusal::NoClearGround)
+            })
         );
         assert_eq!(
             app.world().get::<RespawnState>(other),
-            Some(&RespawnState::WaitingForSpace)
+            Some(&RespawnState {
+                waiting: true,
+                pick_refusal: None
+            })
         );
         assert_eq!(
             app.world().resource::<SpawnOverrides>().0.get(&link),
@@ -1640,13 +1636,95 @@ mod tests {
         send_pick(&mut app, link, Vec2::new(f32::NAN, 0.0));
         assert_eq!(
             app.world().get::<RespawnState>(root),
-            Some(&RespawnState::InvalidPick)
+            Some(&RespawnState {
+                waiting: false,
+                pick_refusal: Some(SpawnPickRefusal::NonFinite)
+            })
         );
         send_pick(&mut app, link, accepted);
         assert_eq!(
             app.world().get::<RespawnState>(root),
-            Some(&RespawnState::Idle)
+            Some(&RespawnState::default())
         );
+    }
+
+    /// The game's damage model: a refused map pick costs neither a retained destination nor an
+    /// outstanding automatic respawn. The owner can press R after a living misclick or keep waiting.
+    #[test]
+    fn refused_picks_preserve_the_previous_destination_and_pending_respawn() {
+        for pending in [false, true] {
+            let mut app = spawn_pick_app();
+            let link = pick_link(&mut app, 1);
+            app.world_mut()
+                .resource_mut::<PendingClients>()
+                .0
+                .push((link, PeerId::Netcode(1)));
+            app.update();
+            let root = app
+                .world_mut()
+                .query_filtered::<Entity, With<ControlledBy>>()
+                .single(app.world())
+                .unwrap();
+            let accepted = Vec2::new(100.0, 0.0); // Fixture points separated beyond the search radius.
+            let refused = Vec2::new(-100.0, 0.0);
+            send_pick(&mut app, link, accepted);
+            app.world_mut().resource_mut::<SpawnObstacles>().0.push(
+                Transform::from_xyz(refused.x, 1.0, refused.y).with_scale(Vec3::splat(120.0)),
+            ); // Fixture standing footprint covers every candidate near the refused pick.
+            let mut bodies = Vec::new();
+            if pending {
+                for point in
+                    std::iter::once(accepted).chain(SPAWN_SEARCH_RINGS.into_iter().flat_map(
+                        |(radius, dirs)| dirs.iter().map(move |dir| accepted + *dir * radius),
+                    ))
+                {
+                    bodies.push(
+                        app.world_mut()
+                            .spawn((NetTank, Position(Vec3::new(point.x, 0.0, point.y))))
+                            .id(),
+                    );
+                }
+                knock_out(&mut app, root);
+                advance(&mut app, shipped_wait().ticks());
+                app.world_mut()
+                    .get_mut::<TankCommand>(root)
+                    .unwrap()
+                    .respawn = true;
+                app.update();
+                app.world_mut()
+                    .get_mut::<TankCommand>(root)
+                    .unwrap()
+                    .respawn = false;
+            }
+            send_pick(&mut app, link, refused);
+            if pending {
+                for body in bodies {
+                    app.world_mut().despawn(body);
+                }
+            } else {
+                knock_out(&mut app, root);
+                advance(&mut app, shipped_wait().ticks());
+                app.world_mut()
+                    .get_mut::<TankCommand>(root)
+                    .unwrap()
+                    .respawn = true;
+            }
+            app.update();
+            assert!(
+                app.world().get_entity(root).is_err(),
+                "a refused pick must not disable R or cancel an automatic request"
+            );
+            let position = app
+                .world_mut()
+                .query_filtered::<&Position, With<ControlledBy>>()
+                .single(app.world())
+                .unwrap();
+            assert_eq!(
+                position.0.xz(),
+                accepted,
+                "the accepted destination remains reachable"
+            );
+        }
     }
 
     /// The game's match flow: a player present at a fill-up holds a tank, the one it fights combat
@@ -2039,7 +2117,10 @@ mod tests {
         app.update();
         assert_eq!(
             app.world().get::<RespawnState>(root),
-            Some(&RespawnState::WaitingForSpace)
+            Some(&RespawnState {
+                waiting: true,
+                pick_refusal: None
+            })
         );
         app.world_mut()
             .get_mut::<TankCommand>(root)
@@ -2141,9 +2222,15 @@ mod tests {
                 .respawn = true;
             app.update();
             let expected = if permanent {
-                RespawnState::PickBlocked
+                RespawnState {
+                    waiting: false,
+                    pick_refusal: Some(SpawnPickRefusal::NoClearGround),
+                }
             } else {
-                RespawnState::WaitingForSpace
+                RespawnState {
+                    waiting: true,
+                    pick_refusal: None,
+                }
             };
             assert_eq!(app.world().get::<RespawnState>(root), Some(&expected));
             app.world_mut()
@@ -2188,20 +2275,8 @@ mod tests {
         let pick = SetSpawnPoint { x: 0.0, z: 0.0 };
         let refused = check_spawn_pick(half, pick, &blocked, None, FIXTURE_BODY_RADIUS_M);
         assert_eq!(refused, Err(SpawnPickRefusal::NoClearGround));
-        assert_eq!(
-            picked_state(RespawnState::WaitingForSpace, &refused),
-            RespawnState::PickBlocked
-        );
         let valid = check_spawn_pick(half, pick, &[], None, FIXTURE_BODY_RADIUS_M);
         assert_eq!(valid, Ok(Vec2::ZERO));
-        assert_eq!(
-            picked_state(RespawnState::WaitingForSpace, &valid),
-            RespawnState::WaitingForSpace
-        );
-        assert_eq!(
-            picked_state(RespawnState::PickBlocked, &valid),
-            RespawnState::Idle
-        );
         let malformed = check_spawn_pick(
             half,
             SetSpawnPoint {
@@ -2213,10 +2288,6 @@ mod tests {
             FIXTURE_BODY_RADIUS_M,
         );
         assert_eq!(malformed, Err(SpawnPickRefusal::NonFinite));
-        assert_eq!(
-            picked_state(RespawnState::Idle, &malformed),
-            RespawnState::InvalidPick
-        );
     }
 
     /// Commands are deferred, so two queued joins must include earlier placements in the pass's
