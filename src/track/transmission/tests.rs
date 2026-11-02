@@ -4046,3 +4046,38 @@ fn persistent_notches_have_one_steady_detent() {
         );
     }
 }
+
+/// The shared forward radii must cover every admitted reverse gear before the server ticks.
+#[test]
+fn reverse_ladder_without_steering_radii_is_refused() {
+    let mut authoring = tiger_authoring();
+    authoring.reverse_speeds_kmh = &[2.8, 4.3, 6.2, 9.2, 14.1, 20.9, 30.5, 45.4, 60.0];
+    assert!(TransmissionParams::from_authoring(&authoring).is_err());
+}
+
+/// Steering detents read the authored row on either ladder; swapping wide and tight must
+/// change this result. The Driver needs the selected radius before any belt motion.
+#[test]
+fn driver_turn_radius_reads_each_detent_on_both_ladders() {
+    let tp = lab_tp();
+    for reverse in [false, true] {
+        let top = if reverse {
+            tp.gears_rev.len()
+        } else {
+            tp.gears_fwd.len()
+        };
+        for index in 0..top {
+            let mut state = fresh(&tp);
+            state.reverse = reverse;
+            state.gear = index as u8 + 1;
+            for (step, expected) in [
+                (0, None),
+                (1, Some(tp.steer_radii_m[index].1)),
+                (2, Some(tp.steer_radii_m[index].0)),
+            ] {
+                state.steer_step = step;
+                assert_eq!(super::super::load::turn_radius(&tp, &state), expected);
+            }
+        }
+    }
+}

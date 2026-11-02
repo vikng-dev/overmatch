@@ -438,6 +438,36 @@ pub struct SideReport {
     pub(crate) bitprobe_elements: Vec<ElementOutputProbe>,
 }
 
+impl SideReport {
+    /// Driver geometry is distinct from the piece overlap law's physical orientation.
+    /// Empty space inside a coarse overlap cell has no actual surface to observe.
+    fn observe_support(
+        &mut self,
+        (point, normal): (Vec3, Vec3),
+        half_span: Vec3,
+        length_weight: f32,
+        (mu, rolling_coefficient): (f32, f32),
+        (collider, out): (Option<Entity>, Vec3),
+        pieces: &RubbleBodies,
+    ) {
+        let (point, normal) = match collider {
+            Some(collider) => match pieces.support_face(collider, point, out) {
+                Some(face) => face,
+                None => return, // The coarse cell's centroid lies in empty space.
+            },
+            None => (point, normal),
+        };
+        self.perceived_support.push(SupportFact {
+            point,
+            normal,
+            half_span,
+            length_weight,
+            mu,
+            rolling_coefficient,
+        });
+    }
+}
+
 /// Integrate `max(0, pen(x))` over one linear piece of a pressure profile: `pen` runs
 /// `p0 → p1` across `[x0, x1]`. Returns `(∫pen dx, ∫x·pen dx, contacting length)`, clipping
 /// the sub-range where the profile is negative (that part of the plate is clear of the
@@ -878,10 +908,6 @@ fn collect_column_contacts<O: TerrainOracle>(
     elements_mode: bool,
     report: &mut SideReport,
 ) -> (Vec<ColumnContact>, Vec<(usize, f32)>) {
-    // `report` carries only the measurement-build probe slabs.
-    #[cfg(not(feature = "bitprobe"))]
-    let _ = &report;
-
     let n = stations.len();
     let mut cols: Vec<ColumnContact> = Vec::with_capacity(n);
     let mut held: Vec<(usize, f32)> = Vec::new();
@@ -1059,9 +1085,8 @@ fn collect_column_contacts<O: TerrainOracle>(
                 let t_c = sample_halves(x_c, len, travel);
                 let p = ca + axis * x_c + out * (params.face_offset + t_c - pen_c);
 
-                // The surface owns the support direction. The damper sees only the contact
-                // point's normal velocity, bounded by its speed. A piece's coarse overlap face
-                // is parallel to the belt (orientation stand-in; architecture §5a).
+                // Terrain uses its struck normal; pieces retain the coarse belt-frame
+                // overlap law. The Driver below observes the actual piece face separately.
                 let (p, normal) = match collider {
                     Some(_) => (p, -out),
                     None => {
@@ -1092,10 +1117,14 @@ fn collect_column_contacts<O: TerrainOracle>(
                     (load, load_elastic),
                 );
                 let (mu, rolling) = surface_under(params.grip, collider, p, oracle, pieces);
-                let half_span = axis * (contact_len / 2.0);
-                let fact =
-                    SupportFact::new(p, normal, half_span, weight * contact_len, (mu, rolling));
-                report.perceived_support.push(fact);
+                report.observe_support(
+                    (p, normal),
+                    axis * (contact_len / 2.0),
+                    weight * contact_len,
+                    (mu, rolling),
+                    (collider, out),
+                    pieces,
+                );
                 if load <= 0.0 {
                     if elements_mode && load_elastic > 0.0 {
                         held.push((material(i) * 3 + ci, load_elastic));

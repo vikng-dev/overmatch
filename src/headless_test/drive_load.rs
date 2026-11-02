@@ -12,6 +12,7 @@ struct Landing {
     speed: f32,
     first_delivery: Option<f32>,
     delivery: Vec<f32>,
+    terms: Vec<[f32; 4]>,
 }
 
 #[derive(Default)]
@@ -36,6 +37,14 @@ impl Measurements {
             / landing.delivery.len() as f32;
         let gap = landing.price - mean;
         self.gaps.push(gap);
+        let means: [f32; 4] = std::array::from_fn(|i| {
+            landing.terms.iter().map(|t| t[i] as f64).sum::<f64>() as f32
+                / landing.terms.len() as f32
+        });
+        println!(
+            "MEASURED decomposition gear={} forecast_gap_n={gap:.6} speed_n={:.6} crank_n={:.6} inertia_n={:.6} residual_n={:.6}",
+            landing.gear, means[0], means[1], means[2], means[3]
+        );
         println!(
             "MEASURED sustained_landing gear={} predicted_force_n={:.6} first_delivery_n={:.6} mean_delivery_n={mean:.6} gap_n={gap:.6} samples={}",
             landing.gear,
@@ -73,6 +82,7 @@ impl Measurements {
                 speed,
                 first_delivery: None,
                 delivery: Vec::new(),
+                terms: Vec::new(),
             });
         }
         if !probe.shifting
@@ -104,6 +114,29 @@ impl Measurements {
             // matching the public crank readout. Observe one whole interruption's coupled ticks.
             if (state.omega_e - target).abs() <= crate::track::transmission::RPM_TO_RAD {
                 landing.delivery.push(probe.delivered_force_n);
+                let tick_price = probe.priced_force_n;
+                let crank_price =
+                    (probe.tau_free.min(tp.clutch_capacity) * probe.k).min(probe.grip_limit_n);
+                let acceleration = (probe.omega_integrated - probe.omega_pre) / probe.dt;
+                let inertial_price = ((probe.tau_free - tp.engine_inertia * acceleration)
+                    .min(tp.clutch_capacity)
+                    * probe.k)
+                    .min(probe.grip_limit_n);
+                println!(
+                    "MEASURED instantaneous gear={} forecast_n={:.6} speed_n={:.6} crank_n={:.6} inertia_n={:.6} residual_n={:.6}",
+                    landing.gear,
+                    landing.price - probe.delivered_force_n,
+                    landing.price - tick_price,
+                    tick_price - crank_price,
+                    crank_price - inertial_price,
+                    inertial_price - probe.delivered_force_n
+                );
+                landing.terms.push([
+                    landing.price - tick_price,
+                    tick_price - crank_price,
+                    crank_price - inertial_price,
+                    inertial_price - probe.delivered_force_n,
+                ]);
             }
             if landing.delivery.len() >= usize::from(tp.shift_ticks).max(1) {
                 self.finish_landing();
@@ -362,6 +395,11 @@ fn perceived_load_and_landing_gaps_on_the_course() {
         for _ in 0..512 {
             drive_tick(&mut app, tank, 1.0, 0.0);
             measurements.tick(&app, tank);
+            let load = probe(&app, tank).perceived_load_n;
+            assert!(
+                (load - expected).abs() < weight * 1e-4,
+                "rolling support must price its incline independently of acceleration: {load} vs {expected}"
+            );
         }
         measurements.report(&format!("course {degrees} degrees"), expected, weight);
     }

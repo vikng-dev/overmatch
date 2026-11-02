@@ -57,27 +57,6 @@ pub struct SupportFact {
     pub rolling_coefficient: f32,
 }
 
-impl SupportFact {
-    /// Record one geometric patch with its paired friction and rolling coefficient. The supplied
-    /// weight is geometric length times column share; it is never a spring or damper load.
-    pub(crate) fn new(
-        point: Vec3,
-        normal: Vec3,
-        half_span: Vec3,
-        length_weight: f32,
-        (mu, rolling_coefficient): (f32, f32),
-    ) -> Self {
-        Self {
-            point,
-            normal,
-            half_span,
-            length_weight,
-            mu,
-            rolling_coefficient,
-        }
-    }
-}
-
 /// Separated terms keep the observation auditable beside the reaction-derived demand.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct PerceivedLoad {
@@ -105,7 +84,7 @@ pub fn turn_radius(tp: &TransmissionParams, state: &TransmissionState) -> Option
     }
 }
 
-/// `L = W sin(theta) + c_rr W cos(theta) + mu W length/(4 radius)`.
+/// `L = W sin(theta) + c_rr W cos(theta) + mu W cos(theta) length/(4 radius)`.
 /// The uniform-pressure footprint model weights patches by their geometric length and column
 /// share; actual spring/damper loads never weight the observation. Forward is projected into
 /// the support plane, so hull pitch alone cannot manufacture a grade. The footprint's span is
@@ -158,7 +137,7 @@ pub fn observe<'a>(
         grade_n: weight * tangent.y,
         rolling_n: rolling * weight * normal.y,
         // The exact factor 1/4 is the uniform-pressure resisting-moment integral.
-        turn_n: radius.map_or(0.0, |r| mu * weight * (max - min) / (4.0 * r)),
+        turn_n: radius.map_or(0.0, |r| mu * weight * normal.y * (max - min) / (4.0 * r)),
         grip_n: mu * weight * normal.y,
     }
 }
@@ -171,14 +150,13 @@ mod tests {
     // Fixture: two endpoints of a uniform contact patch.
     fn patch(angle: f32, rolling: f32) -> [SupportFact; 2] {
         let rot = Quat::from_rotation_x(angle);
-        [-2.0, 2.0].map(|z| {
-            SupportFact::new(
-                rot * Vec3::new(0.0, 0.0, z),
-                rot * Vec3::Y,
-                Vec3::ZERO,
-                1.0,
-                (0.7, rolling),
-            )
+        [-2.0, 2.0].map(|z| SupportFact {
+            point: rot * Vec3::new(0.0, 0.0, z),
+            normal: rot * Vec3::Y,
+            half_span: Vec3::ZERO,
+            length_weight: 1.0,
+            mu: 0.7,
+            rolling_coefficient: rolling,
         })
     }
 
@@ -246,6 +224,24 @@ mod tests {
                 before
             );
         }
+    }
+
+    /// The Driver prices the whole patch and normal pressure on a slope, not centroid span
+    /// alone or weight along gravity. Fixture: a single finite patch on a pitched plane.
+    #[test]
+    fn turn_load_reads_half_span_and_normal_pressure() {
+        let rot = Quat::from_rotation_x(30.0_f32.to_radians());
+        let contact = SupportFact {
+            point: Vec3::ZERO,
+            half_span: rot * Vec3::Z * 2.0,
+            normal: rot * Vec3::Y,
+            length_weight: 4.0,
+            mu: 0.7,
+            rolling_coefficient: 0.05,
+        };
+        let actual = observe([contact].iter(), rot * Vec3::NEG_Z, 560_000.0, Some(10.0));
+        let expected = 0.7 * 560_000.0 * contact.normal.y * 4.0 / 40.0;
+        assert!((actual.turn_n - expected).abs() < 0.1);
     }
 
     /// Rolling turns cost the uniform-pressure resisting moment divided by radius; the gear

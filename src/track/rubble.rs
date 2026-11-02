@@ -433,6 +433,31 @@ pub struct RubbleBodies {
 }
 
 impl RubbleBodies {
+    /// The piece's actual struck face, independent of the belt frame. A coarse overlap
+    /// cell may contain empty space at its pressure centroid; then there is no geometric
+    /// support sample for the Driver, although the coarse physical overlap law still runs.
+    pub(crate) fn support_face(
+        &self,
+        collider: Entity,
+        point: Vec3,
+        out: Vec3,
+    ) -> Option<(Vec3, Vec3)> {
+        let surface = self.surface(collider);
+        let reach = (surface.aabb.max - surface.aabb.min).length();
+        let origin = point - out * reach;
+        surface
+            .shape
+            .cast_ray(
+                surface.position,
+                surface.rotation,
+                origin,
+                out,
+                2.0 * reach,
+                false,
+            )
+            .map(|(depth, normal)| (origin + out * depth, normal))
+    }
+
     /// Read the `near` colliders' shapes, frictions and bodies. Every dynamic body must carry the
     /// force state Avian constructs for it, readable through `bodies`.
     pub(crate) fn gather<F: QueryFilter>(
@@ -2351,6 +2376,44 @@ mod tests {
             Vec3::new(0.0, -0.01, 0.3),
             &mut GripElements::for_links(30),
         )
+    }
+
+    /// The Driver must read the supporting piece's plane when ride pitches the hull.
+    /// Fixture: a level broad slab, a pad pitched by one degree, and nominal weight.
+    #[test]
+    fn perceived_piece_grade_is_independent_of_hull_pitch() {
+        let mut app = physics();
+        piece_box(&mut app, Vec3::Y * 0.1, Vec3::new(4.0, 0.2, 4.0));
+        app.update();
+        app.world_mut()
+            .run_system_once(|rubble: RubbleQuery, bodies: Query<PieceData>| {
+                let near = rubble.near(Vec3::ZERO, 4.0);
+                let pieces = RubbleBodies::gather(&rubble, &near, &bodies);
+                for pitch in [-1.0_f32, 1.0] {
+                    let rotation = Quat::from_rotation_x(pitch.to_radians());
+                    let report = pad_pass(
+                        &ground(),
+                        &pieces,
+                        Affine3A::from_rotation_translation(rotation, Vec3::Y * 0.1),
+                        SideState::default(),
+                        Vec3::ZERO,
+                        &mut GripElements::for_links(30),
+                    );
+                    assert!(!report.perceived_support.is_empty());
+                    let load = super::super::load::observe(
+                        report.perceived_support.iter(),
+                        rotation * Vec3::NEG_Z,
+                        560_000.0,
+                        None,
+                    );
+                    assert!(
+                        load.grade_n.abs() < 1.0,
+                        "hull pitch entered piece grade: {} N",
+                        load.grade_n
+                    );
+                }
+            })
+            .unwrap();
     }
 
     /// Park a fixture hull, integrating heave under the actual support and clamped reactions.

@@ -632,6 +632,9 @@ impl TransmissionParams {
         if a.forward_speeds_kmh.is_empty() || a.reverse_speeds_kmh.is_empty() {
             return Err("transmission.gearbox ladders must be non-empty".into());
         }
+        if a.reverse_speeds_kmh.len() > a.forward_speeds_kmh.len() {
+            return Err("track.powertrain.transmission.gearbox.reverse_speeds_kmh (ladder shape): every reverse gear needs a forward steering-radii row; shorten the reverse ladder or supply the forward rows".into());
+        }
         if a.steer_radii_m.len() != a.forward_speeds_kmh.len() {
             return Err(format!(
                 "transmission.steering.radii must have one (tight, wide) pair per forward \
