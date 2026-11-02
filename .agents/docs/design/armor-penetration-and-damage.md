@@ -1188,9 +1188,19 @@ a load rate. The scalar work representation preserves actual work rather than tu
 rounding into extra work. This is ADR-0029's stable absolute-deadline contract with bounded work.
 
 Subject: the game's damage model, game state only. Drive's requirement is read through three
-views, each where its part acts. A Backup first selects one complete path by its live
-crew-and-parts quality; all views project that same path, so unavailable paths cannot supply
-one another's missing parts. The **crew view** decides whether a command exists: with nobody
+views, each where its part acts. `evaluate` and every view share the Single/Pool/Backup
+combine law and the group minimum. A Backup selects one complete path by live crew-and-parts
+quality, then serving crew quality, coefficient and canonical part order break ties; authored
+member order cannot decide intent. Within each group, let C be its combined crew-only share,
+E its combined crew-and-engine share, and T its complete share, always using that same selected
+Backup or those same Pool contributors. Its views are C, E/C and T/E, with an already-zero
+upstream share retaining each downstream stage's own module condition (normalised against
+that group's whole share, so coefficients still apply once). The member coefficient is therefore charged
+once, and an incomplete Pool member supplies no missing part to another member. The minimum
+across groups remains independent in each view, preserving the separate source limits of
+separate mandatory groups. Empty Pool/Backup member collections are refused at the sheet gate,
+with file and requirement field; a member's empty dependency list remains a legal pure ceiling.
+The **crew view** decides whether a command exists: with nobody
 serving the station there is no service brake, park-lever change, ladder swap or commanded
 clutch engagement. The tank coasts and the existing park lever holds its state; neither rest
 nor the repair toggle moves it. While someone serves it, the command passes through whole
@@ -1217,7 +1227,8 @@ brakes as an operator rule; a repair hold needs someone serving the station. The
 its nominal condition fraction **Drive supply**, the lesser of delivered combustion and
 transmitted capacity, zero under a hold or with nobody driving. It is not net sprocket force,
 which also depends on crank speed, gearing, drag and absolute clutch capacity. Module rates
-use integer pool units so a reduced pool cannot round to whole. Servo slew keeps its rate scale.
+and simulation read one held-share function: the integer ratio is computed before narrowing,
+and a reduced ratio that rounds to whole is held at the adjacent f32 below whole. Servo slew keeps its rate scale.
 Automatic cyclic cadence, fire eligibility and sight access keep their mechanism or on/off
 gates. The panel shows Drive's supplied rate (zero during either hold), actual weapon deadlines
 and explicit load pauses; the sight-derived Gunner percentage has no rate consumer.
@@ -2251,3 +2262,31 @@ this fix: MEASURED before the rebase, the corrected drivetrain gave 0.510038 m/s
 −10.141057 m/s rollback at the same observation times; the stopped-engine pivot was already
 zero. The rebased measurements above and all gates were rerun on the combined tree. The lane
 changed no `forces.rs` source and no wire type.
+
+
+#### Drivetrain review follow-up: complete path projection and feature boundaries (#228)
+
+Subject: the game's damage model, game state only. The sweep-dmg-3 review inputs were rerun
+against production requirements and the adapter. The combine interpretation is stated only
+in §7b above. The first fix group is `damage: unify complete crew paths and held shares (#228)`.
+
+| reviewer | finding | verified / not a defect | fixed in (subject) |
+|---|---|---|---|
+| Codex | P2: empty Backup reaches a live expect | verified red: the fixture sheet accepted Backup([]); Pool([]) also refused by the fix | `damage: unify complete crew paths and held shares (#228)` |
+| Codex | P2: zero-score Backup tie discards available Driver intent | verified red with the supplied paths and both authoring orders | `damage: unify complete crew paths and held shares (#228)` |
+| Codex | P2: unconditional tests read optional bitprobe fields | verified: no-feature test compilation failed with E0609 | `damage: unify complete crew paths and held shares (#228)` |
+| Claude | P2: zero-score Backup tie depends on member order | verified, same reproduction as Codex | `damage: unify complete crew paths and held shares (#228)` |
+| Claude | P2: Pool views splice incomplete contributors | verified red: scalar effectiveness zero but projected product one | `damage: unify complete crew paths and held shares (#228)` |
+| Claude | P2: member coefficient is squared and also cuts whole transmission capacity | verified red: supplied backup fixture read 0.6/0.6/0.6; fixed at 0.6/1/1 | `damage: unify complete crew paths and held shares (#228)` |
+| Claude | P2: Backup expect cites absent load check | verified, same gate defect as Codex | `damage: unify complete crew paths and held shares (#228)` |
+| Claude | P3: two implementations of group combination | verified by source; one combine core now serves scalar and projected reads | `damage: unify complete crew paths and held shares (#228)` |
+| Claude | P3: integer module row and f32 simulation disagree near whole | verified at fixture 19,999,999/20,000,000 units; both now consume the same reduced share | `damage: unify complete crew paths and held shares (#228)` |
+
+Additional verified build finding: without dev_ui, three unconditional headless tests named
+sandbox modules excluded from the build. Those sandbox-only tests now share their modules'
+feature boundary; the headless gameplay tests stay available. No wire type changed, so
+PROTOCOL_REV remains 66. The scheduler, hill hold, park latch and input slew were not redesigned.
+
+First-group verification: MEASURED 78 targeted tests passed, including doc_citations, the
+Backup and Pool free-hull adapters, scalar/projection recomposition, the zero-upstream module
+condition and the near-whole row. Formatting and CI workspace/all-target clippy passed.

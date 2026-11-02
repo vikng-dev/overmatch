@@ -3667,16 +3667,15 @@ fn drag_release_and_scheduler_read_the_command() {
     inp.supply.combustion = 0.25;
     let rep = step(&fp, &tp, &mut st, &inp);
     let modeled = modeled_reserve_in_gear(&tp, inp.supply, speed, ratio, 0.0);
-    let actual = rep
-        .bitprobe
-        .tau_free
-        .min(tp.clutch_capacity * inp.supply.transmitted)
-        * ratio
+    let [induced, idle, drag] = engine_torques(&tp, inp.supply, 1550.0 * RPM_TO_RAD, 1.0);
+    let actual = (induced + idle - drag).min(tp.clutch_capacity * inp.supply.transmitted) * ratio
         / tp.sprocket_radius;
     assert!(
         (modeled - actual).abs() < 0.01,
         "scheduler {modeled}, crank {actual}"
     );
+    assert!(rep.forces[0].is_finite());
+    #[cfg(feature = "bitprobe")]
     assert_eq!(
         rep.bitprobe.tau_drag, 0.0,
         "full pedal releases motoring drag at every supply"
@@ -3735,6 +3734,7 @@ fn supply_loss_reaches_a_locked_clutch_on_its_tick() {
     let mut inp = input(1.0, 0.0, [speed; 2], [0.0; 2]);
     let mut whole_state = st;
     let whole = step(&fp, &tp, &mut whole_state, &inp);
+    #[cfg(feature = "bitprobe")]
     assert!(
         whole.bitprobe.engaged && whole.bitprobe.reanchor_feasible,
         "the fixture must start with a locking clutch"

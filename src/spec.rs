@@ -1426,6 +1426,16 @@ impl TankSpec {
             requirements.push((format!("views[{kind:?}].requires"), &view.requires));
         }
         for (field, requirement) in &requirements {
+            for (index, group) in requirement.iter().enumerate() {
+                if let Group::Graded(GradedGroup::Pool(members) | GradedGroup::Backup(members)) =
+                    group
+                    && members.is_empty()
+                {
+                    return Err(format!(
+                        "{field}[{index}].members is empty — author at least one member, or remove the group for an ungated requirement"
+                    ));
+                }
+            }
             if let Some(part) = requirement_parts(requirement)
                 .into_iter()
                 .find(|part| !provided.contains(part))
@@ -1863,13 +1873,14 @@ impl AssetLoader for TankSpecLoader {
         &self,
         reader: &mut dyn Reader,
         _settings: &(),
-        _load_context: &mut LoadContext<'_>,
+        load_context: &mut LoadContext<'_>,
     ) -> Result<TankSpec, BevyError> {
         let mut bytes = Vec::new();
         reader.read_to_end(&mut bytes).await?;
         let spec: TankSpec = ron::de::from_bytes(&bytes)?;
         // Past serde's shape check: reject values that parse but yield an unfirable weapon (ADR-0011).
-        spec.validate()?;
+        spec.validate()
+            .map_err(|error| BevyError::from(format!("{}: {error}", load_context.path())))?;
         Ok(spec)
     }
 
@@ -3267,6 +3278,22 @@ TankSpec(
             .barrel = None;
         let err = unsprung.validate().unwrap_err().to_string();
         assert!(err.contains("Cannon") && err.contains("recoil"), "{err}");
+    }
+
+    /// The game's damage model: empty cooperative or backup groups are asset faults,
+    /// never a panic first discovered by a live requirement consumer.
+    #[test]
+    fn validate_refuses_empty_graded_member_lists() {
+        for group in [GradedGroup::Backup(vec![]), GradedGroup::Pool(vec![])] {
+            let mut spec = fixture();
+            spec.capabilities
+                .insert(Capability::Drive, vec![Group::Graded(group)]);
+            let error = spec.validate().unwrap_err().to_string();
+            assert!(
+                error.contains("capabilities[Drive]") && error.contains("member"),
+                "{error}"
+            );
+        }
     }
 
     /// A member's coefficient is its share (`Pool`) or ceiling (`Backup`) of full capability, so

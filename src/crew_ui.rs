@@ -168,12 +168,12 @@ fn module_status(
     match repair.fraction(health) {
         Some(fraction) => format!("REPAIR {:.0}%", (fraction * 100.0).floor()),
         None if health.is_empty() => "OUT OF ACTION".to_owned(),
-        None if health.held() < health.capacity() => format!(
-            "RATE {}%",
-            ((u64::from(health.held()) * 100 + u64::from(health.capacity()) / 2)
-                / u64::from(health.capacity()))
-            .clamp(1, 99)
-        ),
+        None if health.held() < health.capacity() => {
+            format!(
+                "RATE {}%",
+                served_percent(crate::damage::module_share(health))
+            )
+        }
         None => "READY".to_owned(),
     }
 }
@@ -517,12 +517,14 @@ mod tests {
     fn one_unit_short_is_never_whole() {
         // Fixture: one pool unit short of an admitted 20,000 HP pool.
         let health = crate::ballistics::ComponentHealth::holding(20_000, 19_999_999);
+        let share = crate::damage::module_share(&health);
+        assert!(share < 1.0);
+        assert_eq!(served_percent(share), 99);
         assert_eq!(
             module_status(&health, &crate::damage::repair::ModuleRepair::default()),
             "RATE 99%"
         );
     }
-
     const AUTO: FireCycle = FireCycle::Automatic {
         cyclic: crate::sim_tick::TickSpan::of(5),
         belt_size: 150,

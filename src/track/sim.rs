@@ -30,7 +30,8 @@ use serde::{Deserialize, Serialize};
 use crate::bake::TankBlueprint;
 use crate::command::ParsedTankCommand;
 use crate::damage::{
-    Capability, Part, TankCapabilities, TankVolumes, VolumeFacets, evaluate_view, part_qualities,
+    Capability, DriveView, TankCapabilities, TankVolumes, VolumeFacets, evaluate_view,
+    part_qualities,
 };
 use crate::state::{GameplaySet, SimPhase};
 use crate::tank::Tank;
@@ -727,11 +728,11 @@ fn drive_supply(
     };
     let requirement = caps.requirement(Capability::Drive);
     let quality = part_qualities(tank, volumes);
-    let view = |seen: fn(Part) -> bool| evaluate_view(requirement, &quality, seen);
+    let view = |stage| evaluate_view(requirement, &quality, stage);
     DriveSupply {
-        competence: view(Part::is_crew),
-        combustion: view(|part| part == Part::Engine),
-        transmitted: view(|part| part == Part::Transmission),
+        competence: view(DriveView::Crew),
+        combustion: view(DriveView::Engine),
+        transmitted: view(DriveView::Transmission),
     }
 }
 
@@ -928,6 +929,7 @@ fn apply_track_forces(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::damage::Part;
 
     /// The production adapter's app with real data-derived running gear on a flat field (top
     /// face y = 0), no gravity, one 64 Hz tick per update. Returns it with the fixture hull
@@ -1791,9 +1793,19 @@ mod tests {
     /// cannot borrow the engine from an unavailable Driver path and the crew from another.
     #[test]
     fn backup_paths_are_evaluated_together() {
-        use crate::damage::{
-            CrewStation, Crewman, Dead, FunctionRole, GradedGroup, Group, Part, VolumeOf,
-        };
+        assert_paths_are_evaluated_together(crate::damage::GradedGroup::Backup);
+    }
+
+    /// The game's damage model: a free hull cannot move on spliced Pool contributors.
+    #[test]
+    fn pool_paths_are_evaluated_together() {
+        assert_paths_are_evaluated_together(crate::damage::GradedGroup::Pool);
+    }
+
+    fn assert_paths_are_evaluated_together(
+        group: fn(Vec<crate::damage::Member>) -> crate::damage::GradedGroup,
+    ) {
+        use crate::damage::{CrewStation, Crewman, Dead, FunctionRole, Group, Part, VolumeOf};
         use bevy::ecs::system::RunSystemOnce;
         let mut hull = DrivenHull::new();
         hull.app.world_mut().entity_mut(hull.driver).insert(Dead);
@@ -1803,7 +1815,7 @@ mod tests {
             .insert(TankCapabilities(
                 [(
                     Capability::Drive,
-                    vec![Group::Graded(GradedGroup::Backup(vec![
+                    vec![Group::Graded(group(vec![
                         (1.0, vec![Part::Driver, Part::Engine]),
                         (1.0, vec![Part::Commander, Part::Transmission]),
                     ]))],
@@ -1860,7 +1872,7 @@ mod tests {
             .insert(TankCapabilities(
                 [(
                     Capability::Drive,
-                    vec![Group::Graded(GradedGroup::Backup(vec![(
+                    vec![Group::Graded(group(vec![(
                         1.0,
                         vec![Part::Driver, Part::Engine],
                     )]))],

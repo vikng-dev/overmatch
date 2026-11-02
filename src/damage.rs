@@ -212,7 +212,7 @@ impl Capability {
 /// A reference to any quality-bearing thing on the tank — a crew station or a module function, in
 /// one flat vocabulary (design §7b). No `Crew(..)`/`Module(..)` wrapper: crew-vs-module is intrinsic
 /// to the resolved volume (it carries a [`CrewStation`] or [`FunctionRole`]), not the reference.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Deserialize)]
 pub enum Part {
     Commander,
     Gunner,
@@ -562,78 +562,164 @@ pub fn part_qualities(
             && !hp.is_empty()
         {
             let q = quality.entry(Part::from(*func)).or_insert(0.0);
-            *q = q.max(hp.held() as f32 / hp.capacity() as f32);
+            *q = q.max(module_share(hp));
         }
     }
     quality
 }
 
-/// The pure combine core (design §7b), split out so it is testable without a `World`:
-/// `member = coeff × Π(part qualities)`; `group = Single part / Pool capped-sum / Backup max`;
-/// `capability = min across groups`. A part absent from `quality` scores 0.
-pub fn evaluate(requirement: &Requirement, quality: &std::collections::HashMap<Part, f32>) -> f32 {
-    evaluate_parts(requirement, |p| quality.get(&p).copied().unwrap_or(0.0))
+/// The game's damage model: the shared held share for simulation and rate presentation.
+/// Computing the ratio before narrowing avoids rounding both integer operands to whole.
+/// A reduced pool stays below whole even when its ratio is between adjacent f32 values.
+pub fn module_share(health: &ComponentHealth) -> f32 {
+    if health.is_empty() {
+        0.0
+    } else if health.held() == health.capacity() {
+        1.0
+    } else {
+        let ratio = (f64::from(health.held()) / f64::from(health.capacity())) as f32;
+        // Resolution: the adjacent representable fraction preserves the reduced/whole boundary.
+        ratio.min(f32::from_bits(1.0_f32.to_bits() - 1))
+    }
 }
 
-/// The game's damage model: a requirement read through one view of its parts. Parts `seen`
-/// selects keep their live quality; every other part counts whole. A consumer whose parts act at
-/// different places in one mechanism reads each view where that part acts. Backup selects one
-/// complete path by its live quality before any view (Drive's crew, engine
-/// and transmission: `track::sim::drive_target`).
+/// The game's damage model: Drive projects each group along its source chain. The load gate
+/// admits only crew, Engine and Transmission parts in Drive requirements.
+#[derive(Clone, Copy)]
+pub enum DriveView {
+    Crew,
+    Engine,
+    Transmission,
+}
+
+impl DriveView {
+    fn includes(self, part: Part) -> bool {
+        match self {
+            Self::Crew => part.is_crew(),
+            Self::Engine => part.is_crew() || part == Part::Engine,
+            Self::Transmission => true,
+        }
+    }
+
+    fn previous(self) -> Option<Self> {
+        match self {
+            Self::Crew => None,
+            Self::Engine => Some(Self::Crew),
+            Self::Transmission => Some(Self::Engine),
+        }
+    }
+}
+
+/// The pure combine core (design §7b): member coefficient times its parts' qualities;
+/// group Single / Pool capped-sum / Backup best whole path; minimum across groups.
+/// An absent part supplies no quality.
+pub fn evaluate(requirement: &Requirement, quality: &std::collections::HashMap<Part, f32>) -> f32 {
+    combine_requirement(requirement, |group| {
+        combine_group(group, quality, |p| live_quality(quality, p))
+    })
+}
+
+/// The game's damage model: one group's incremental source loss, then the group minimum.
+/// Crew carries the coefficient; engine and transmission carry only the additional loss
+/// through those same members. Pool projections retain each contributor's earlier parts.
+/// Backup uses one whole live path in every projection, preferring serving crew on a tie.
+/// See the design record §7b for the source-chain interpretation.
 pub fn evaluate_view(
     requirement: &Requirement,
     quality: &std::collections::HashMap<Part, f32>,
-    seen: impl Fn(Part) -> bool,
+    view: DriveView,
 ) -> f32 {
-    let viewed = |p| {
-        if seen(p) {
-            quality.get(&p).copied().unwrap_or(0.0)
-        } else {
-            1.0
-        }
-    };
-    let live_member = |(coeff, parts): &Member| {
-        parts
-            .iter()
-            .fold(*coeff, |q, p| q * quality.get(p).copied().unwrap_or(0.0))
-    };
-    let view_member = |(coeff, parts): &Member| parts.iter().fold(*coeff, |q, p| q * viewed(*p));
-    requirement.iter().fold(1.0_f32, |eff, group| {
-        let value = match group {
-            Group::Single(p) => viewed(*p),
-            Group::Graded(GradedGroup::Pool(members)) => {
-                members.iter().map(view_member).sum::<f32>().min(1.0)
-            }
-            Group::Graded(GradedGroup::Backup(members)) => {
-                // The game's damage model: every view chooses the same complete path by its
-                // live crew-and-parts quality. Views cannot splice incompatible Backup paths.
-                let member = members
-                    .iter()
-                    .max_by(|a, b| live_member(a).total_cmp(&live_member(b)))
-                    .expect("TankSpec::validate admits a nonempty Backup group");
-                view_member(member)
-            }
+    combine_requirement(requirement, |group| {
+        let projected = |stage: DriveView| {
+            combine_group(group, quality, |p| {
+                if stage.includes(p) {
+                    live_quality(quality, p)
+                } else {
+                    1.0
+                }
+            })
         };
-        eff.min(value)
+        let after = projected(view);
+        match view.previous() {
+            None => after,
+            Some(previous) => {
+                let before = projected(previous);
+                if before == 0.0 {
+                    // No upstream contributor serves. Still retain this stage's own condition:
+                    // an unmanned path cannot turn an emptied engine's idle governor back on.
+                    let own = combine_group(group, quality, |part| {
+                        if view.includes(part) && !previous.includes(part) {
+                            live_quality(quality, part)
+                        } else {
+                            1.0
+                        }
+                    });
+                    let whole = combine_group(group, quality, |_| 1.0);
+                    (own / whole).min(1.0)
+                } else {
+                    (after / before).min(1.0)
+                }
+            }
+        }
     })
 }
 
-fn evaluate_parts(requirement: &Requirement, part_quality: impl Fn(Part) -> f32) -> f32 {
-    let member_quality =
-        |(coeff, parts): &Member| parts.iter().fold(*coeff, |q, p| q * part_quality(*p));
+fn live_quality(quality: &std::collections::HashMap<Part, f32>, part: Part) -> f32 {
+    // Absent parts are a legitimate unavailable source, including an out-of-action station.
+    quality.get(&part).copied().unwrap_or(0.0)
+}
 
-    requirement.iter().fold(1.0_f32, |eff, group| {
-        let group_value = match group {
-            Group::Single(p) => part_quality(*p),
-            Group::Graded(GradedGroup::Pool(members)) => {
-                members.iter().map(member_quality).sum::<f32>().min(1.0)
-            }
-            Group::Graded(GradedGroup::Backup(members)) => {
-                members.iter().map(member_quality).fold(0.0_f32, f32::max)
-            }
-        };
-        eff.min(group_value)
-    })
+fn member_quality(member: &Member, quality: impl Fn(Part) -> f32) -> f32 {
+    member.1.iter().fold(member.0, |q, p| q * quality(*p))
+}
+
+fn combine_group(
+    group: &Group,
+    live: &std::collections::HashMap<Part, f32>,
+    projected: impl Fn(Part) -> f32,
+) -> f32 {
+    match group {
+        Group::Single(part) => projected(*part),
+        Group::Graded(GradedGroup::Pool(members)) => members
+            .iter()
+            .map(|member| member_quality(member, &projected))
+            .sum::<f32>()
+            .min(1.0),
+        Group::Graded(GradedGroup::Backup(members)) => {
+            let selected = members
+                .iter()
+                .max_by(|a, b| {
+                    let full = |m: &Member| member_quality(m, |p| live_quality(live, p));
+                    let crew = |m: &Member| {
+                        member_quality(m, |p| {
+                            if p.is_crew() {
+                                live_quality(live, p)
+                            } else {
+                                1.0
+                            }
+                        })
+                    };
+                    let canonical = |m: &Member| {
+                        let mut parts = m.1.clone();
+                        parts.sort_unstable();
+                        parts
+                    };
+                    full(a)
+                        .total_cmp(&full(b))
+                        .then_with(|| crew(a).total_cmp(&crew(b)))
+                        .then_with(|| a.0.total_cmp(&b.0))
+                        .then_with(|| canonical(a).cmp(&canonical(b)))
+                })
+                .expect(
+                    "TankSpec::validate refuses empty Backup member lists in every requirement",
+                );
+            member_quality(selected, projected)
+        }
+    }
+}
+
+fn combine_requirement(requirement: &Requirement, group_quality: impl Fn(&Group) -> f32) -> f32 {
+    requirement.iter().map(group_quality).fold(1.0, f32::min)
 }
 
 /// Whether an arbitrary tank *meets* a requirement (effectiveness > 0) — the per-tank analog of
@@ -839,7 +925,7 @@ fn mark_dead_tanks(
 
 #[cfg(test)]
 mod tests {
-    use super::{GradedGroup, Group, Part, evaluate};
+    use super::{DriveView, GradedGroup, Group, Part, Requirement, evaluate, evaluate_view};
     use std::collections::HashMap;
 
     /// Build a part→quality map from `(part, quality)` pairs.
@@ -949,6 +1035,118 @@ mod tests {
             KnockoutReason::CrewLoss,
             "a later cook-off cannot rewrite a latched cause"
         );
+    }
+
+    fn drive_views(req: &Requirement, quality: &HashMap<Part, f32>) -> [f32; 3] {
+        [
+            evaluate_view(req, quality, DriveView::Crew),
+            evaluate_view(req, quality, DriveView::Engine),
+            evaluate_view(req, quality, DriveView::Transmission),
+        ]
+    }
+
+    /// The game's damage model: a serving station keeps brake intent on a zero-score tie,
+    /// regardless of the fixture paths' authoring order.
+    #[test]
+    fn backup_zero_score_ties_preserve_serving_intent() {
+        let mut members = vec![
+            (1.0, vec![Part::Driver, Part::Engine]),
+            (1.0, vec![Part::Commander, Part::Transmission]),
+        ];
+        let quality = q(&[(Part::Driver, 1.0), (Part::Transmission, 1.0)]);
+        for _ in 0..2 {
+            let req = vec![Group::Graded(GradedGroup::Backup(members.clone()))];
+            assert_eq!(drive_views(&req, &quality), [1.0, 0.0, 1.0]);
+            members.reverse();
+        }
+    }
+
+    /// The game's damage model: cooperative contributors cannot borrow one another's
+    /// absent parts; propulsion relies on each fixture path being complete.
+    #[test]
+    fn pool_views_do_not_splice_incomplete_members() {
+        let req = vec![Group::Graded(GradedGroup::Pool(vec![
+            (1.0, vec![Part::Driver, Part::Engine]),
+            (1.0, vec![Part::Commander, Part::Transmission]),
+        ]))];
+        let quality = q(&[(Part::Commander, 1.0), (Part::Engine, 1.0)]);
+        let [crew, engine, transmission] = drive_views(&req, &quality);
+        assert_eq!(evaluate(&req, &quality), 0.0);
+        assert_eq!(crew * engine * transmission, 0.0);
+    }
+
+    /// The game's damage model: a fixture crew-path ceiling limits delivered work once;
+    /// it cannot also reduce a whole engine and transmission's construction.
+    #[test]
+    fn backup_ceiling_is_charged_once() {
+        let req = vec![
+            Group::Graded(GradedGroup::Backup(vec![
+                (1.0, vec![Part::Driver]),
+                (0.6, vec![Part::Commander]),
+            ])),
+            Group::Single(Part::Engine),
+            Group::Single(Part::Transmission),
+        ];
+        assert_eq!(
+            drive_views(
+                &req,
+                &q(&[
+                    (Part::Commander, 1.0),
+                    (Part::Engine, 1.0),
+                    (Part::Transmission, 1.0)
+                ])
+            ),
+            [0.6, 1.0, 1.0]
+        );
+    }
+
+    /// The game's damage model: an unavailable upstream station does not restore an
+    /// emptied engine's idle supply, nor replace the transmission's own condition.
+    #[test]
+    fn unavailable_upstream_retains_each_modules_own_condition() {
+        let req = vec![Group::Graded(GradedGroup::Backup(vec![(
+            0.6,
+            vec![Part::Driver, Part::Engine, Part::Transmission],
+        )]))]; // Fixture path ceiling and module share.
+        assert_eq!(
+            drive_views(&req, &q(&[(Part::Transmission, 0.25)])),
+            [0.0, 0.0, 0.25]
+        );
+    }
+
+    /// The game's damage model: per-group projected losses must recompose the scalar
+    /// combine law that capability consumers use, including unavailable fixture paths.
+    #[test]
+    fn projected_group_losses_recompose_live_quality() {
+        for group in [
+            Group::Single(Part::Driver),
+            Group::Single(Part::Engine),
+            Group::Single(Part::Transmission),
+            Group::Graded(GradedGroup::Pool(vec![
+                (0.6, vec![Part::Driver, Part::Engine]),
+                (0.5, vec![Part::Commander, Part::Transmission]),
+            ])),
+            Group::Graded(GradedGroup::Backup(vec![
+                (0.6, vec![Part::Driver, Part::Engine]),
+                (0.5, vec![Part::Commander, Part::Transmission]),
+            ])),
+        ] {
+            let req = vec![group];
+            for crew in [0.0, 0.25, 1.0] {
+                for engine in [0.0, 0.25, 1.0] {
+                    for transmission in [0.0, 0.25, 1.0] {
+                        let quality = q(&[
+                            (Part::Driver, crew),
+                            (Part::Commander, 1.0),
+                            (Part::Engine, engine),
+                            (Part::Transmission, transmission),
+                        ]);
+                        let product: f32 = drive_views(&req, &quality).iter().product();
+                        assert!((product - evaluate(&req, &quality)).abs() < 1e-6);
+                    }
+                }
+            }
+        }
     }
 
     #[test]

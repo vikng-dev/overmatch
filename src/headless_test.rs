@@ -2098,6 +2098,7 @@ fn shown_text(app: &mut App) -> Vec<String> {
 /// advance. The view shows one line at boot, the selected round's name: the legend waits behind a
 /// key and no game HUD (crew bar, status card, nameplate) is mounted, since the look shows the
 /// target's state. A mounted HUD, a shown legend or a label carrying more than the name fails it.
+#[cfg(feature = "dev_ui")]
 #[test]
 fn armor_sandbox_boots_headless() {
     let (mut app, _lease) = boot_sandbox_headless(crate::sandbox::plugin);
@@ -2148,6 +2149,7 @@ fn armor_sandbox_boots_headless() {
 /// round's record for the free shooter, naming its shot, the target's life and the gun's selected
 /// round, and no camera opens beside the range's own while it plays. The subject is the game's
 /// damage-model tooling.
+#[cfg(feature = "dev_ui")]
 #[test]
 fn a_range_round_on_the_target_is_explained_and_opens_no_corner() {
     use crate::damage_cam::delivery::ShotExplanations;
@@ -2249,6 +2251,7 @@ fn a_range_round_on_the_target_is_explained_and_opens_no_corner() {
 /// `RigGeom` is the root's own "the rig is up" gate — nearly every system it schedules is
 /// `run_if(resource_exists::<RigGeom>)`, so a boot that never reaches it would exercise almost
 /// nothing and this guard would go quietly blind.
+#[cfg(feature = "dev_ui")]
 #[test]
 fn track_sandbox_boots_headless() {
     let (app, _lease) = boot_sandbox_headless(crate::track_sandbox::plugin);
