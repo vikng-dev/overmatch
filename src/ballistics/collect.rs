@@ -477,7 +477,10 @@ fn collect_trimesh(
 /// already walked. Undeclared containment means the caller lost track of where its samples are,
 /// and that is exactly the thing the walk refuses to infer its way past. Within [`BOUNDARY_PROBE`]
 /// of the entry the sample is sitting on the face it just crossed, and the entry is reported at
-/// `t = 0`.
+/// `t = 0`. Within the sitting reach of the EXIT ahead the sample is sitting on the face it is
+/// leaving, a rounding hair inside (a reflected sample on the face it reflected from): that exit
+/// is already left, and the unseeded drop in [`admit_shell`] discards it in the band the walk's
+/// coincident-exit ownership shares ([`super::walk::RayWalk::inside_at`]).
 ///
 /// The trimesh phase cannot make this check — there is no cheap containment test on a mesh, and
 /// "no faces in reach" is the NORMAL reading of a corridor crossing the hollow interior of a hull.
@@ -560,7 +563,8 @@ fn collect_convex(
             // the face" judgement itself and BOUNDED it. Anything deeper should have been seeded,
             // and if it was not, the walk says so rather than this papering over it. `admit`'s
             // clamp is the trimesh phase's bound, where no such probe limits how far back a sloped
-            // face may be found.
+            // face may be found. An exit within the sitting reach ahead is the face the sample
+            // is leaving, already left: the unseeded drop discards it below.
             if !seeded {
                 if -entry.t <= f64::from(BOUNDARY_PROBE) {
                     push(0.0, entry, true);
