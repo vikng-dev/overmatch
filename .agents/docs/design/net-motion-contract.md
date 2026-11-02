@@ -34,9 +34,9 @@ scripted idle client, no conditioner, 2026-11-01), armed value, then after the o
 
 | Build | Headless | Hidden |
 |---|---|---|
-| Discounted law with the stalled-frame gate (cf4fa4e4) | 17.9 ms; 61.3 ms for 0.6 s, back to 18.0 ms | 22.5 ms; 162.2 ms, two resyncs, back to 18.1 ms |
-| Full spread, drain stamp alone (e5d0cdc7) | 26.2 ms; 113.8 ms held for the 60 s ring | 26.5 ms; 1170.0 ms, four resyncs, client panic |
-| Full spread, last-read lateness (fef25138) | 22.0 ms; 110.7 ms for 0.5 s, back to 24.9 ms | 24.1 ms; 212.3 ms, three resyncs, back to 32.1 ms in ~5 s |
+| Discounted law with the stalled-frame gate (`net: refuse malformed operator levers at startup (#196)`) | 17.9 ms; 61.3 ms for 0.6 s, back to 18.0 ms | 22.5 ms; 162.2 ms, two resyncs, back to 18.1 ms |
+| Full spread, drain stamp alone (`net: seal parsed spawn poses and record sweep dispositions (#196)`) | 26.2 ms; 113.8 ms held for the 60 s ring | 26.5 ms; 1170.0 ms, four resyncs, client panic |
+| Full spread, last-read lateness (`net: read arrival lateness at the last frame that lacked the packet (#196)`) | 22.0 ms; 110.7 ms for 0.5 s, back to 24.9 ms | 24.1 ms; 212.3 ms, three resyncs, back to 32.1 ms in ~5 s |
 
 The headless and hidden columns are different runs; the hidden results include renderer stalls
 and timeline resyncs. They are retained as the prior lane's measurements, not a new measurement
@@ -55,3 +55,38 @@ the empirical spread charged to the delay, the synthetic unchanged-path stall ad
 upper-tail lateness, the quantile's one-sample exclusion at capacity, and a link burst retaining
 its depth under ordinary frames. A future projection proposal must first supply a complete
 motion/impulse and angular-error contract; it cannot reuse the traction-only premise.
+
+## Continuous delay acquisition
+
+The desired headroom is `H = spread + tick`; applied headroom `A` follows it in elapsed time.
+Let `M = 1 + 2*(speedup_factor - 1)`, the Lightyear 0.30.1 controller's maximum speed, and
+`B = min(M - 1, 1/M)`. Each frame applies a signed change `dA`, at most `B*dt` towards `H`,
+and advances the cursor at `controller_rate - dA/dt`. Before synchronization the writer sets
+`min_delay = rtt/2 + A`. Thus `dA` cancels in the controller's clock error, however long acquisition
+lasts. The controller's rate is restored after advancement, so its hysteresis and recovery see
+only its own rate. No delay change writes the cursor's instant. The half-tick-per-frame follower
+is deleted; elapsed-time pacing supplies continuity rather than concealing accumulated drift.
+
+DERIVED from the installed Lightyear speedup factor: `M ≈ 1.1`, `B ≈ 0.1`. The complete cursor
+rate is bounded by `[1/M - B, M + B] ≈ [0.8091, 1.2]` times elapsed time, subject to duration
+rounding. With no clock error, coverage rises at a cursor rate of `0.9` and falls at `1.1`.
+A rise therefore slows the clock; a fall speeds it, without a rewind or an instantaneous hull step.
+RTT/2 is never paced as coverage: it compensates the remote anchor, including before the spread
+estimator warms. Its anchor's EMA can still produce genuine transient estimate error; the ordinary
+clock controller handles that error. A reconnect holds applied coverage until its distribution
+warms, then re-arms the law for that link.
+
+MEASURED by `measure_coverage_arrival_for_the_review_step`, with Lightyear's actual advance and
+controller under a controlled 60 Hz clock and fixture RTT of 10 ms: the review's 35.1 to 147.6 ms
+`min_delay` step takes 68 frames, 1.133333 s, with zero resyncs. DERIVED continuous acquisition time
+is 112.5 ms / 0.1 = 1.125 s; the last frame pays the remainder. Production digests refresh after
+advancement, so a newly observed target starts pacing on the next frame. Until acquisition finishes,
+the extra coverage is not yet available; starvation remains the held-sample policy above.
+
+The regression suite sustains objective motion beyond the resync threshold, bounds both directions
+under multiple frame partitions, preserves nonzero-RTT anchor cancellation, and samples a round
+past the game's cosmetic catch-up horizon through a delay rise. The game's damage-model path
+never rewinds or resets that round's free-flight cache. For delay changes, `show_pieces`' birth and
+handover predicates cannot revert: the shared cursor is monotone. Genuine remote-clock resyncs
+remain discontinuities, observed by the unchanged frontier gauge; a nonzero steady count still
+means every remote hull jumped.

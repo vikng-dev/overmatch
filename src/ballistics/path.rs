@@ -348,7 +348,12 @@ impl Replica {
         f64::from(outcome.tick.wrapping_sub(self.fire_tick)) + outcome.fraction
     }
 
-    fn sample(&mut self, age: f64, dt: f32, drag: f32) -> Result<(Vec3, Vec3, bool), OutcomeError> {
+    pub(crate) fn sample(
+        &mut self,
+        age: f64,
+        dt: f32,
+        drag: f32,
+    ) -> Result<(Vec3, Vec3, bool), OutcomeError> {
         let latest = self
             .outcomes
             .iter()

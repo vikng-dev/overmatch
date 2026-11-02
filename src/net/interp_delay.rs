@@ -11,7 +11,7 @@
 //! Lightyear's own `delay` term is `max(send_interval_ratio × remote_send_interval, min_delay)`,
 //! which carries the gap half only, and our per-tick server advertises `send_interval = 0` — that
 //! collapses the ratio term entirely (`src/net/tests/net_interp_delay.rs` pins the degenerate).
-//! `min_delay` is the only writable slot, so it carries the whole law:
+//! `min_delay` carries the delay objective:
 //!
 //! ```text
 //! headroom  = max(Q_p{l_i} - min{d_i}, 0) + one send interval
@@ -32,17 +32,17 @@
 //!
 //! The law ARMS only once the estimator distribution is valid — the spike window holds a full
 //! 2 s of samples AND the ring holds one window's worth (`ArrivalStats::warmed`, derivation in
-//! `net::sync_margin`). Before arming the installed default rides unchanged (the latch pattern of
-//! the uplink law), so startup estimator pollution — connect/load stalls read as hundreds of ms
+//! `net::sync_margin`). Before arming applied headroom is held (one tick on the first link), while RTT/2
+//! still cancels the anchor, so startup estimator pollution — connect/load stalls read as hundreds of ms
 //! of arrival delay — never reaches the objective; arming then latches for the link
 //! (`ArrivalDelay::link`).
 //!
-//! Lightyear's `sync_timeline` re-reads `Res<InterpolationConfig>` every frame with no caching, so
-//! writing the resource is the whole mechanism. Lightyear converges the timeline by ±5% clock speed, and a
-//! stepped target is an error step the controller escalates to `Resync` (the live gauge showed
-//! `steady=2` from exactly this). The written value therefore FOLLOWS the law through a slewed
-//! follower — at most [`MAX_SLEW_PER_FRAME_TICKS`] per Update frame — and the steady-state
-//! resync count is ZERO (`net::frontier`'s FRONTIER `steady=` counter is the live gauge).
+//! Applied spread delay and cursor pacing move together: `pace_interpolation_delay` changes
+//! the frame's rate before Lightyear advances it, and the writer pays the same elapsed delay
+//! before synchronization. Intentional motion therefore cancels in the controller's error.
+//! RTT/2 is written separately, including during warmup: it cancels the remote anchor and is
+//! never a coverage displacement. Only genuine clock error can trigger a steady-state resync.
+//! The rate bound and coverage cost live in `.agents/docs/design/net-motion-contract.md`.
 //!
 //! The quantile contract and estimator parameters live in `net::sync_margin`'s module doc.
 
@@ -50,28 +50,75 @@ use core::time::Duration;
 
 use bevy::prelude::*;
 use lightyear::core::tick::TickDuration;
-use lightyear::interpolation::timeline::InterpolationConfig;
-use lightyear::prelude::{Client, PingManager, SyncSystems};
+use lightyear::interpolation::timeline::{InterpolationConfig, InterpolationTimeline};
+use lightyear::prelude::{Client, PingManager, SyncSystems, TimelineSync, TimelineSystems};
 
 use super::sync_margin::{ArrivalDelay, ArrivalStats};
 
-/// Log-rate guard, not a term of the law: `rtt()` and the quantile spread move continuously, so an
-/// unconditional log is per-frame spam.
+/// Resolution: suppress sub-5 ms diagnostic changes to bound logging cost as the law moves.
 const LOG_STEP: Duration = Duration::from_millis(5);
 
-/// The written `min_delay` moves at most this far per Update frame toward the law's value: half
-/// the sync controller's ±1-tick deadband (`SyncConfig::error_margin` = 1.0 tick, which
-/// `net::sync_margin::derived_interp_sync` keeps), so target motion alone can never exit the
-/// proportional regime and reach `Resync`.
-const MAX_SLEW_PER_FRAME_TICKS: f64 = 0.5;
+/// Coverage applied so far, excluding RTT anchor compensation. The saved controller rate exists
+/// only around `TimelineSystems::Advance`; synchronization always sees its own uncomposed rate.
+#[derive(Resource)]
+pub(super) struct AppliedDelay {
+    headroom: Duration,
+    link: Option<u64>,
+    controller_rate: Option<f32>,
+}
 
-/// One step of the slewed follower: from `current` at most `step` toward `target`, landing
-/// exactly on it inside the step — a rate-limited pursuit, never the target's step.
-fn slewed(current: Duration, target: Duration, step: Duration) -> Duration {
-    if target > current {
-        (current + step).min(target)
+/// Pace coverage at the controller's maximum rate correction. Its source algorithm bounds the
+/// normal rate by `[1/M, M]`, `M = 1 + 2*(speedup_factor - 1)`. Using budget
+/// `B = min(M - 1, 1/M)` gives a composed rate in `[1/M - B, M + B]`, never negative.
+/// This is a Resolution bound on presentation pacing, not a limit on the delay law's magnitude.
+fn pace_interpolation_delay(
+    time: Res<Time<Virtual>>,
+    tick: Res<TickDuration>,
+    estimator: Res<ArrivalDelay>,
+    config: Res<InterpolationConfig>,
+    mut timeline: ResMut<InterpolationTimeline>,
+    mut applied: ResMut<AppliedDelay>,
+) {
+    if applied.link != Some(estimator.link()) {
+        if !estimator.stats.warmed() {
+            return; // A cold distribution must not add startup-pollution coverage.
+        }
+        applied.link = Some(estimator.link());
+        info!(
+            "net: interpolation delay law ARMED — estimator distribution valid ({})",
+            estimator.describe()
+        );
+    }
+    if !timeline.is_synced() || time.relative_speed() == 0.0 {
+        return; // Handshake acquires the cold cursor; a paused clock has no elapsed pacing.
+    }
+    let frame = time.delta().div_f32(time.relative_speed());
+    if frame.is_zero() {
+        return;
+    }
+    let target = derived_min_delay(Duration::ZERO, &estimator.stats, tick.0);
+    let maximum = 1.0 + 2.0 * (config.sync.speedup_factor - 1.0);
+    let budget = (maximum - 1.0).min(1.0 / maximum);
+    let step = applied.headroom.abs_diff(target).min(frame.mul_f32(budget));
+    let controller_rate = timeline.relative_speed();
+    let rate_change = step.as_secs_f32() / frame.as_secs_f32();
+    let rate = if target > applied.headroom {
+        applied.headroom += step;
+        controller_rate - rate_change
     } else {
-        current.saturating_sub(step).max(target)
+        applied.headroom -= step;
+        controller_rate + rate_change
+    };
+    applied.controller_rate = Some(controller_rate);
+    timeline.set_relative_speed(rate);
+}
+
+fn restore_controller_rate(
+    mut timeline: ResMut<InterpolationTimeline>,
+    mut applied: ResMut<AppliedDelay>,
+) {
+    if let Some(rate) = applied.controller_rate.take() {
+        timeline.set_relative_speed(rate);
     }
 }
 
@@ -87,11 +134,23 @@ fn derived_min_delay(rtt: Duration, stats: &ArrivalStats, tick: Duration) -> Dur
 pub(super) fn install(app: &mut App, tick: Duration) -> InterpolationConfig {
     // No RTT or arrival sample exists before the link opens; the law at rtt = spread = 0 is the
     // one-interval gap term alone, and `derive_interpolation_delay` overwrites this before the
-    // first `SyncSystems::Sync`.
+    // first `SyncSystems::Sync`; RTT anchor compensation is written even before warmup.
     let initial = derived_min_delay(Duration::ZERO, &ArrivalStats::default(), tick);
     info!(
         "net: interpolation min_delay DERIVED = rtt/2 + (Qp − min) + one tick ({:.1} ms cold)",
         millis(initial)
+    );
+    app.insert_resource(AppliedDelay {
+        headroom: initial,
+        link: None,
+        controller_rate: None,
+    });
+    app.add_systems(
+        PreUpdate,
+        (
+            pace_interpolation_delay.before(TimelineSystems::Advance),
+            restore_controller_rate.after(TimelineSystems::Advance),
+        ),
     );
     app.add_systems(
         PostUpdate,
@@ -100,53 +159,30 @@ pub(super) fn install(app: &mut App, tick: Duration) -> InterpolationConfig {
     InterpolationConfig::default().with_min_delay(initial)
 }
 
-/// Follow the measured link every frame, ahead of the frame's timeline sync (and after
-/// `net::sync_margin` refreshes the estimator digest): the written `min_delay` slews at most
-/// [`MAX_SLEW_PER_FRAME_TICKS`] per frame toward the law's value. The `!=` guard keeps change
-/// detection quiet while the follower sits on its target.
+/// Pay exactly the coverage already paced this frame, plus the current RTT anchor compensation.
+/// The estimator refresh precedes this writer; pacing reads that digest on the next frame.
 pub(super) fn derive_interpolation_delay(
-    tick: Res<TickDuration>,
     estimator: Res<ArrivalDelay>,
-    config: Option<ResMut<InterpolationConfig>>,
+    applied: Res<AppliedDelay>,
+    mut config: ResMut<InterpolationConfig>,
     pings: Query<&PingManager, With<Client>>,
-    // The link the law is armed for: the latch holds for one link and re-arms on the next.
-    mut armed: Local<Option<u64>>,
     mut logged: Local<Option<Duration>>,
 ) {
-    if *armed != Some(estimator.link()) {
-        if !estimator.stats.warmed() {
-            // Pre-arm the installed default rides unchanged (module doc: warmup arming).
-            return;
-        }
-        *armed = Some(estimator.link());
-        info!(
-            "net: interpolation delay law ARMED — estimator distribution valid ({})",
-            estimator.describe()
-        );
-    }
-    let Some(mut config) = config else {
-        return;
-    };
+    // No client link exists before connection setup or after disconnect cleanup.
     for pings in &pings {
-        let target = derived_min_delay(pings.rtt(), &estimator.stats, tick.0);
-        let next = slewed(
-            config.min_delay,
-            target,
-            tick.0.mul_f64(MAX_SLEW_PER_FRAME_TICKS),
-        );
-        if config.min_delay == next {
-            continue;
+        let next = pings.rtt() / 2 + applied.headroom;
+        if config.min_delay != next {
+            config.min_delay = next;
         }
-        if logged.is_none_or(|last| last.abs_diff(target) >= LOG_STEP) {
+        if logged.is_none_or(|last| last.abs_diff(next) >= LOG_STEP) {
             info!(
-                "net: interpolation min_delay → {:.1} ms (rtt {:.1} ms, {})",
-                millis(target),
+                "net: interpolation applied min_delay {:.1} ms (rtt {:.1} ms, {})",
+                millis(next),
                 millis(pings.rtt()),
-                estimator.describe(),
+                estimator.describe()
             );
-            *logged = Some(target);
+            *logged = Some(next);
         }
-        config.min_delay = next;
     }
 }
 
@@ -158,19 +194,22 @@ fn millis(duration: Duration) -> f64 {
 mod tests {
     use core::time::Duration;
 
-    use bevy::ecs::system::RunSystemOnce;
-    use bevy::prelude::World;
+    use bevy::prelude::*;
+    use lightyear::connection::network_topology::{NetworkTopology, NetworkingMetadata};
+    use lightyear::core::tick::Tick;
     use lightyear::core::tick::TickDuration;
     use lightyear::interpolation::timeline::InterpolationConfig;
+    use lightyear::interpolation::timeline::{InterpolationTimeline, TimelinePlugin};
+    use lightyear::prelude::client::RemoteTimeline;
     use lightyear::prelude::{Client, PingManager};
+    use lightyear::prelude::{NetworkTimeline, SyncSystems, TimelineSync, TimelineSystems};
 
-    use super::{ArrivalDelay, ArrivalStats, derived_min_delay, slewed};
+    use super::{ArrivalDelay, ArrivalStats, derived_min_delay};
 
-    /// The game's fixed tick (64 Hz), spelled out rather than read from the config —
-    /// `src/net/tests/net_interp_delay.rs` is what fires when lightyear moves its config shape, and
-    /// this test must pin the arithmetic independently of it.
+    // Fixture interval for independent arithmetic checks, not a gate on the shipped tick rate.
     const TICK: Duration = Duration::from_nanos(1_000_000_000 / 64);
 
+    // Resolution: tolerate duration rounding without masking a term of the law.
     const EPSILON: Duration = Duration::from_micros(10);
 
     fn assert_close(actual: Duration, expected: Duration, what: &str) {
@@ -223,125 +262,246 @@ mod tests {
         }
     }
 
-    /// THE FOLLOWER IS RATE-LIMITED IN BOTH DIRECTIONS AND LANDS EXACTLY: every step is at most
-    /// `step`, monotone toward the target, and the final step is the remainder — no overshoot, no
-    /// dither around the target. A follower that writes the target directly reds the per-step
-    /// bound; one that always steps the full `step` reds the exact landing.
-    #[test]
-    fn the_follower_steps_at_most_the_bound_and_lands_exactly() {
-        let step = Duration::from_micros(7_812);
-        for (from, to) in [
-            (Duration::from_millis(15), Duration::from_millis(160)),
-            (Duration::from_millis(160), Duration::from_millis(15)),
-        ] {
-            let mut current = from;
-            let mut steps = 0;
-            while current != to {
-                let next = slewed(current, to, step);
-                assert!(
-                    next.abs_diff(current) <= step,
-                    "one frame moves at most one step"
-                );
-                assert!(
-                    next.abs_diff(to) < current.abs_diff(to),
-                    "every step is toward the target"
-                );
-                current = next;
-                steps += 1;
-                assert!(
-                    steps <= 20,
-                    "145 ms at 7.812 ms/frame lands within 19 frames"
-                );
-            }
-            assert_eq!(steps, 19, "⌈145 / 7.812⌉ frames, the last one partial");
+    #[derive(Resource, Default)]
+    struct Snaps(Vec<i32>);
+
+    // This replaces packet receipt only: the actual Lightyear advance and controller, and our
+    // shipped installer, still run. The fixture remote is a perfect clock with controlled RTT.
+    fn advance_remote(
+        time: Res<Time<Virtual>>,
+        tick: Res<TickDuration>,
+        mut peers: Query<&mut RemoteTimeline>,
+    ) {
+        for mut remote in &mut peers {
+            remote.apply_duration(time.delta().div_f32(time.relative_speed()), tick.0);
         }
-        // On target the follower is a fixed point — the `!=` write guard stays quiet.
-        let settled = Duration::from_millis(60);
-        assert_eq!(slewed(settled, settled, step), settled);
     }
 
-    /// A STEP TARGET NEVER STEPS THE WRITTEN CONFIG: the writer walks `min_delay` toward a
-    /// suddenly-large law value at most half a tick per frame (half the sync controller's ±1-tick
-    /// deadband), and converges exactly. A writer that assigns the law's value directly — the
-    /// steady=2 Resync defect this law retires — reds the per-frame bound on its first frame.
-    #[test]
-    fn a_step_target_walks_to_the_law_inside_the_deadband() {
-        let mut world = World::new();
-        world.insert_resource(TickDuration(TICK));
-        let mut estimator = ArrivalDelay::default();
-        // DERIVED fixture: a 100 ms receipt spread raises the objective by 100 ms.
-        estimator.stats = spread(100.0);
-        world.insert_resource(estimator);
-        let installed = Duration::from_nanos(15_625_000);
-        world.insert_resource(InterpolationConfig::default().with_min_delay(installed));
-        world.spawn((Client, PingManager::default()));
-        let target = derived_min_delay(Duration::ZERO, &spread(100.0), TICK);
-        let step = TICK / 2;
-        let mut last = installed;
-        for _ in 0..64 {
-            world
-                .run_system_once(super::derive_interpolation_delay)
-                .expect("writer runs");
-            let now = world.resource::<InterpolationConfig>().min_delay;
-            assert!(
-                now.abs_diff(last) <= step,
-                "one frame moves min_delay at most half a tick (moved {:?})",
-                now.abs_diff(last)
-            );
-            last = now;
-            if now == target {
-                break;
+    fn sync_clock(
+        tick: Res<TickDuration>,
+        config: Res<InterpolationConfig>,
+        peers: Query<(&RemoteTimeline, &PingManager), With<Client>>,
+        mut cursor: ResMut<InterpolationTimeline>,
+        mut snaps: ResMut<Snaps>,
+    ) {
+        for (remote, pings) in &peers {
+            let now = cursor.now();
+            if let Some(delta) = cursor.sync(now, remote, &config, pings, tick.0) {
+                snaps.0.push(delta);
             }
         }
-        assert_eq!(last, target, "the follower converges on the law exactly");
     }
 
-    /// THE LAW ARMS ONLY ON A VALID DISTRIBUTION, AND ARMING LATCHES. A cold digest — even the
-    /// observed 243 ms startup-pollution Qp — leaves the installed default untouched; the first
-    /// warmed digest arms the writer; a digest later regressing below the warmup bound must not
-    /// re-freeze it. Dropping the arming gate reds the pre-arm half; dropping the latch (gating
-    /// on `warmed()` every frame) reds the regression half.
+    fn fixture(frame: Duration, rtt: Duration) -> (App, Entity) {
+        let mut app = App::new();
+        app.add_plugins(MinimalPlugins)
+            .insert_resource(bevy::time::TimeUpdateStrategy::ManualDuration(frame))
+            .insert_resource(TickDuration(TICK))
+            .init_resource::<ArrivalDelay>()
+            .init_resource::<NetworkingMetadata>()
+            .init_resource::<Snaps>()
+            .add_plugins(TimelinePlugin)
+            .add_systems(PreUpdate, advance_remote.in_set(TimelineSystems::Advance))
+            .add_systems(PostUpdate, sync_clock.after(SyncSystems::Sync));
+        let mut config = super::install(&mut app, TICK);
+        config.sync.handshake_pings = 0; // Fixture bypasses packet handshake, not speed steering.
+        config.sync.jitter_multiple = 0;
+        config.sync.jitter_margin = 0.5;
+        app.insert_resource(config);
+        let mut remote = RemoteTimeline::default();
+        remote.set_now(Tick(1000).into());
+        let mut pings = PingManager::default();
+        pings.rtt_estimator_ewma.final_stats.rtt = rtt;
+        remote.apply_duration(rtt / 2, TICK);
+        let link = app.world_mut().spawn((Client, remote, pings)).id();
+        app.world_mut().resource_mut::<NetworkingMetadata>().mode = NetworkTopology::Client(link);
+        app.update();
+        app.world_mut().resource_mut::<Snaps>().0.clear();
+        (app, link)
+    }
+
+    fn frame(app: &mut App, spread_ms: f64) -> f32 {
+        let before = app.world().resource::<InterpolationTimeline>().now();
+        app.world_mut().resource_mut::<ArrivalDelay>().stats = spread(spread_ms);
+        app.update();
+        (app.world().resource::<InterpolationTimeline>().now() - before).to_f32()
+    }
+
+    /// A sustained intentional objective move must never resync remote hulls, however long it
+    /// outruns coverage. Fixture movement exceeds the controller's snap threshold many times.
     #[test]
-    fn the_writer_holds_the_installed_default_until_the_estimator_warms() {
-        let mut world = World::new();
-        world.insert_resource(TickDuration(TICK));
-        let mut estimator = ArrivalDelay::default();
-        // The observed startup pollution: Qp 243 ms before the distribution is valid.
-        estimator.stats = ArrivalStats::test_cold_spread(0.243);
-        world.insert_resource(estimator);
-        let installed = Duration::from_nanos(15_625_000);
-        world.insert_resource(InterpolationConfig::default().with_min_delay(installed));
-        world.spawn((Client, PingManager::default()));
-        // A registered system keeps its `Local` state across runs — the latch under test.
-        let writer = world.register_system(super::derive_interpolation_delay);
-        let read = |world: &World| world.resource::<InterpolationConfig>().min_delay;
-        for _ in 0..8 {
-            world.run_system(writer).expect("writer runs");
+    fn sustained_delay_motion_never_becomes_clock_error() {
+        let (mut app, _) = fixture(TICK, Duration::ZERO);
+        for index in 0..1000 {
+            frame(&mut app, f64::from(index) * 5.0);
         }
-        assert_eq!(
-            read(&world),
-            installed,
-            "startup pollution must never reach the objective"
-        );
-        world.resource_mut::<ArrivalDelay>().stats = ArrivalStats::test_spread(0.1);
-        world.run_system(writer).expect("writer runs");
-        let after_arm = read(&world);
-        assert_ne!(after_arm, installed, "a valid distribution arms the law");
-        world.resource_mut::<ArrivalDelay>().stats = ArrivalStats::test_cold_spread(0.1);
-        world.run_system(writer).expect("writer runs");
         assert!(
-            read(&world) > after_arm,
-            "arming latches — a regressing digest must not re-freeze the follower"
+            app.world().resource::<Snaps>().0.is_empty(),
+            "intentional delay is not clock drift: {:?}",
+            app.world().resource::<Snaps>().0
         );
-        // A new link re-arms: its cold digest (the startup pollution again) moves nothing.
-        let latched = read(&world);
-        world.resource_mut::<ArrivalDelay>().reset_for_new_link();
-        world.resource_mut::<ArrivalDelay>().stats = ArrivalStats::test_cold_spread(0.243);
-        world.run_system(writer).expect("writer runs");
+    }
+
+    /// Hulls and discrete piece births require a monotone cursor, with each frame's travel bounded
+    /// by the configured speed range, across both rising and falling delay steps.
+    #[test]
+    fn delay_steps_only_change_the_presented_rate() {
+        for millis in [8, 16, 33] {
+            // Fixture render partitions.
+            let dt = Duration::from_millis(millis);
+            let (mut app, _) = fixture(dt, Duration::ZERO);
+            let config = app.world().resource::<InterpolationConfig>();
+            let maximum = 1.0 + 2.0 * (config.sync.speedup_factor - 1.0);
+            let budget = (maximum - 1.0).min(1.0 / maximum);
+            let (lo, hi) = (1.0 / maximum - budget, maximum + budget);
+            for spread in [600.0, 0.0, 112.5, 0.0] {
+                for _ in 0..500 {
+                    let step = f64::from(frame(&mut app, spread)) * TICK.as_secs_f64();
+                    assert!(
+                        step >= dt.as_secs_f64() * f64::from(lo) - 1e-6,
+                        "clock rewound or exceeded the slow-rate bound: {step}"
+                    );
+                    assert!(
+                        step <= dt.as_secs_f64() * f64::from(hi) + 1e-6,
+                        "clock stepped beyond the fast-rate bound: {step}"
+                    );
+                }
+            }
+        }
+    }
+
+    /// The game's damage model: a flying round older than the cosmetic catch-up horizon retains
+    /// its free-flight cache through a delay rise. A cursor rewind would reset it and refuse it.
+    #[test]
+    fn an_old_round_survives_a_delay_rise_with_a_forward_path() {
+        use crate::ballistics::path::Replica;
+        let (mut app, _) = fixture(TICK, Duration::ZERO);
+        let start = app.world().resource::<InterpolationTimeline>().now();
+        let mut round = Replica::born(0, Vec3::ZERO, Vec3::Z * 800.0); // Fixture speed.
+        let mut previous = 0.0;
+        let step_at = crate::ballistics::MAX_COSMETIC_CATCH_UP_TICKS * 2;
+        for index in 0..step_at + 600 {
+            let spread = if index > step_at { 600.0 } else { 0.0 }; // Fixture spread step.
+            frame(&mut app, spread);
+            let age = (app.world().resource::<InterpolationTimeline>().now() - start).to_f32();
+            let (at, _, _) = round
+                .sample(f64::from(age), TICK.as_secs_f32(), 0.0)
+                .expect("a delay rise cannot retire a flying round");
+            assert!(at.z >= previous, "the presented path never runs backward");
+            previous = at.z;
+        }
+    }
+
+    /// RTT/2 cancels the remote estimate's RTT/2 anchor; it must not pace the cursor as though
+    /// coverage changed. Fixture RTT changes together with that anchor, keeping the true objective.
+    #[test]
+    fn rtt_anchor_compensation_is_not_delay_displacement() {
+        let (mut app, link) = fixture(TICK, Duration::from_millis(40));
+        for _ in 0..100 {
+            frame(&mut app, 0.0);
+        }
+        for rtt in [80, 40, 120, 40] {
+            let old = app.world().get::<PingManager>(link).unwrap().rtt();
+            let new = Duration::from_millis(rtt);
+            app.world_mut()
+                .get_mut::<PingManager>(link)
+                .unwrap()
+                .rtt_estimator_ewma
+                .final_stats
+                .rtt = new;
+            let mut remote = app.world_mut().get_mut::<RemoteTimeline>(link).unwrap();
+            use lightyear::core::time::TickDelta;
+            remote.apply_delta(
+                TickDelta::from_duration(new / 2, TICK) - TickDelta::from_duration(old / 2, TICK),
+            );
+            let step = frame(&mut app, 0.0);
+            assert!(
+                (step - 1.0).abs() < 0.001,
+                "anchor compensation must not change presentation rate: {step}"
+            );
+            assert_eq!(
+                app.world().resource::<InterpolationConfig>().min_delay,
+                new / 2 + TICK
+            );
+        }
+        assert!(app.world().resource::<Snaps>().0.is_empty());
+    }
+
+    /// Coverage is eventually paid in full, rather than counted as clock error. Fixture delay
+    /// values are the review's measured step; elapsed time here is the test's controlled clock.
+    #[test]
+    fn measure_coverage_arrival_for_the_review_step() {
+        let dt = Duration::from_nanos(16_666_667); // Fixture 60 Hz render cadence.
+        let rtt = Duration::from_millis(10);
+        let (mut app, _) = fixture(dt, rtt);
+        let before = Duration::from_micros(35_100);
+        let after = Duration::from_micros(147_600);
+        for _ in 0..100 {
+            frame(&mut app, (before - rtt / 2 - TICK).as_secs_f64() * 1000.0);
+        }
         assert_eq!(
-            read(&world),
-            latched,
-            "the latch is the link's: a new link's cold digest must not reach the objective"
+            app.world().resource::<InterpolationConfig>().min_delay,
+            before
         );
+        let mut frames = 0;
+        while app.world().resource::<InterpolationConfig>().min_delay != after {
+            frame(&mut app, (after - rtt / 2 - TICK).as_secs_f64() * 1000.0);
+            frames += 1;
+            assert!(frames < 1000, "coverage must arrive");
+        }
+        println!(
+            "MEASURED controlled-clock coverage: 35.1 -> 147.6 ms in {frames} frames, {:.6} s at fixture 60 Hz",
+            (dt * frames).as_secs_f64()
+        );
+        assert!(app.world().resource::<Snaps>().0.is_empty());
+    }
+    /// Cold startup and reconnect distributions cannot become coverage; RTT cancellation remains
+    /// live. Arming latches for a link, so a temporarily cold digest cannot freeze an active law.
+    #[test]
+    fn warmup_excludes_pollution_and_rearms_per_link() {
+        let (mut app, _) = fixture(TICK, Duration::from_millis(40));
+        let cold = Duration::from_millis(20) + TICK;
+        app.world_mut().resource_mut::<ArrivalDelay>().stats =
+            ArrivalStats::test_cold_spread(0.243);
+        app.update();
+        assert_eq!(
+            app.world().resource::<InterpolationConfig>().min_delay,
+            cold
+        );
+        frame(&mut app, 100.0);
+        let armed = app.world().resource::<InterpolationConfig>().min_delay;
+        assert!(armed > cold);
+        app.world_mut().resource_mut::<ArrivalDelay>().stats = ArrivalStats::test_cold_spread(0.1);
+        app.update();
+        let latched = app.world().resource::<InterpolationConfig>().min_delay;
+        assert!(latched > armed);
+        app.world_mut()
+            .resource_mut::<ArrivalDelay>()
+            .reset_for_new_link();
+        app.world_mut().resource_mut::<ArrivalDelay>().stats =
+            ArrivalStats::test_cold_spread(0.243);
+        app.update();
+        assert_eq!(
+            app.world().resource::<InterpolationConfig>().min_delay,
+            latched
+        );
+    }
+
+    /// Genuine remote-clock error still snaps through Lightyear; the frontier gauge's contract
+    /// remains that every nonzero steady count means every remote hull jumped.
+    #[test]
+    fn genuine_clock_displacement_still_resyncs() {
+        let (mut app, link) = fixture(TICK, Duration::ZERO);
+        let margin = app
+            .world()
+            .resource::<InterpolationConfig>()
+            .sync
+            .max_error_margin;
+        app.world_mut()
+            .get_mut::<RemoteTimeline>(link)
+            .unwrap()
+            .apply_duration(TICK.mul_f32(margin + 2.0), TICK);
+        frame(&mut app, 0.0);
+        assert_eq!(app.world().resource::<Snaps>().0.len(), 1);
     }
 }
