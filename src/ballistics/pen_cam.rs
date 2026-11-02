@@ -1029,17 +1029,13 @@ fn a_box_behind_a_perforated_plate_is_dosed_by_line_and_cone() {
     assert!(!report.spall.is_empty(), "the plate's exit throws a cone");
 }
 
-/// THE GAME'S DAMAGE MODEL: A CONE NEVER DOSES THE BODY THAT THREW IT. A hollow body with an HP
-/// pool, perforated through both walls, takes its line dose alone: the energy the round lost in
-/// its near wall is that line dose, counted once, so the cone the near wall throws doses nothing
-/// where it meets the same body's far wall, which still stops it as armour does. A box beyond the
-/// near wall, inside its cone and off the line, still takes the cone. Every hollow component's HP
-/// pool relies on it: a cone dosing its own body counts the same energy twice and can empty a pool
-/// the line alone leaves reduced. A cone that doses its own body, passes through that body's far
-/// wall, or doses nothing beyond fails it. Fixture data: two 20 mm steel walls 1 m apart, one
-/// volume and one pool, and a soft box between them beside the line.
+/// The game's damage model: retained line work and returning debris are separate energy.
+/// A hollow HP-bearing body receives its own near wall's cone at the far wall, while a direction
+/// still leaving the near wall never enters it. Every hollow component and the record's field
+/// palette rely on real re-entry dosing the source. Fixture: two 20 mm walls sharing one pool,
+/// 1 m apart, and an off-line receiver inside the cone.
 #[test]
-fn a_body_that_throws_a_cone_takes_only_its_line_dose() {
+fn a_body_retains_its_line_work_and_takes_returning_debris() {
     const WALL: f32 = 0.02;
     const GAP: f32 = 1.0;
     let volumes = [
@@ -1096,8 +1092,8 @@ fn a_body_that_throws_a_cone_takes_only_its_line_dose() {
     };
     let hollow = dose("hollow");
     assert!(
-        hollow.line > 0.0 && hollow.field == 0.0,
-        "the body that threw the cone takes its line dose alone: {hollow:?}"
+        hollow.line > 0.0 && hollow.field > 0.0,
+        "the body receives retained line work and returning debris: {hollow:?}"
     );
     let beyond = dose("beyond");
     assert!(
@@ -1114,11 +1110,11 @@ fn a_body_that_throws_a_cone_takes_only_its_line_dose() {
     let stopped = near
         .fragments
         .iter()
-        .filter(|fragment| fragment.hits.is_empty())
+        .filter(|fragment| fragment.hits.iter().any(|hit| hit.volume == "hollow"))
         .inspect(|fragment| {
             assert!(
                 (fragment.end[2] - far_face).abs() < 1.0e-3,
-                "a direction that doses nothing stops at the body's own far wall: {:?}",
+                "returning debris doses and stops at its source's far wall: {:?}",
                 fragment.end
             );
         })
@@ -1128,8 +1124,8 @@ fn a_body_that_throws_a_cone_takes_only_its_line_dose() {
         near.fragments
             .iter()
             .flat_map(|fragment| &fragment.hits)
-            .all(|hit| hit.volume == "beyond"),
-        "the near cone doses only what lies beyond its body"
+            .all(|hit| hit.volume == "beyond" || hit.volume == "hollow"),
+        "the near cone doses the receiver and its emitting body on re-entry"
     );
 }
 

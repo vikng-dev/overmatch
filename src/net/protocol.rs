@@ -256,6 +256,7 @@ use crate::{CombatantId, CombatantLife, ShotId};
 /// REV 69 (#146, driving model): the main clutch carries Out, Slip or In on the wire.
 /// REV 70 (#258, the game's damage model): a kept carrier stops at first resisting contact,
 /// so recorded retained work includes its energy and later crossings carry only the core.
+/// Returning debris can dose its emitting body after genuine re-entry.
 pub const PROTOCOL_REV: u32 = 70;
 
 /// Compatibility tag derived from the complete pinned wire manifest plus the crate version. This

@@ -3798,7 +3798,7 @@ fn throw_burst(
 
 /// The game's damage model: one field's origin, axis, strength (J), its mechanism's unit (the HP
 /// its doses are worth per joule), and the volumes it leaves (a body exit's), which a direction
-/// starting inside one does not enter there and which no direction doses anywhere
+/// starting inside one does not enter while leaving. Re-entry can dose it again
 /// ([`resolve::field_direction`]).
 struct FieldThrow<'a> {
     origin: Vec3,
@@ -3894,10 +3894,8 @@ fn walk_field(
 /// it carries none. The cone is spread
 /// by the ball law at the source's ratio ([`walk::SpallSource::debris_ratio`]): direction `k` of
 /// the spread ([`spall_cone::Spread`]) carries `S·f_k` and stands for `1/N` of the cone, walked
-/// through every spatially reached volume ([`walk_field`]). It never doses the body
-/// that threw it, the volumes the exit leaves ([`walk::SpallSource::exited`]): what the body kept
-/// of the energy the round lost there is their line dose, and the cone carries the rest, so the
-/// energy is spent once. The game's damage model requires the
+/// through every spatially reached volume ([`walk_field`]). Directions still leaving the source
+/// have not entered it; genuine re-entry can return carried energy to it. The game's damage model requires the
 /// source ratio and direction to remain inside the law's domain: substances are validated at
 /// load and the crossing derives the source from a resolved flight.
 fn throw_spall_cone(

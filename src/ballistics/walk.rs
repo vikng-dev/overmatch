@@ -1971,8 +1971,8 @@ pub struct SpallSource {
     pub direction: Vec3,
     /// The volumes the reached members' exits leave ([`ExitMember::exited`]), in entity order: the
     /// body that throws the cone. The surface the cone is thrown from is theirs, so a direction
-    /// that starts inside one of them has not entered it there, and the cone never doses one of
-    /// them anywhere, since the line has dosed them the energy the body kept. A volume
+    /// that starts inside one has not entered it while leaving. After departure, genuine re-entry
+    /// can return the debris energy to the same construction. A volume
     /// only an unreached member leaves is not among them: the round never left it, and a direction
     /// starting inside it enters it there.
     pub exited: Vec<Entity>,
