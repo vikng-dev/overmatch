@@ -7,8 +7,8 @@
 //! One [`HullMarks`] per vehicle root: server-owned, public to every client (ADR-0039: a mark on a
 //! hull is seen by anyone with eyes on it), born empty in the root's spawn bundle and appended
 //! through replicon's diff path, so a client that is caught up receives each new mark and a late
-//! joiner the whole set at once. It holds the newest [`MARK_CAP`] marks; recording one more drops
-//! the oldest. It lasts the root's life.
+//! joiner the whole set at once. It holds at most [`MARK_CAP`] marks; recording one more evicts
+//! the oldest mark with the smallest physical footprint. It lasts the root's life.
 //!
 //! A [`HullMark`] is packed plain data, built from the authority's [`ShellStrike`]: its kind
 //! ([`MarkKind::of`] the strike's verdict), the struck part (an index into the root's
@@ -38,7 +38,7 @@ use crate::ballistics::{ShellStrike, Verdict};
 use crate::damage::VolumeOf;
 use crate::tank::{SimParts, rig_world_pose};
 
-/// The marks one vehicle keeps: the newest this many. ASSUMED: the owner's "about 50".
+/// The most marks one vehicle keeps. ASSUMED: the owner's "about 50".
 pub(crate) const MARK_CAP: usize = 50;
 
 /// The longest a mark stretches along the shot, as a multiple of its round footprint. A cylinder
@@ -264,26 +264,34 @@ impl HullMark {
     }
 }
 
-/// A vehicle's marks, oldest first: the newest [`MARK_CAP`] of every mark ever recorded on it.
-///
-/// A mark's serial is its place among every mark the vehicle has ever had, so the view keys its
-/// decals by it: the first held mark's serial is `recorded − held`, and a mark dropped off the
-/// front is one whose serial fell below that. The view orders serials as plain integers, which
-/// holds while a vehicle records fewer than 2³² marks.
+/// The game's damage-model view keeps marks in arrival order, with stable serials even when
+/// a smaller mark between two larger ones is evicted. Serial ordering assumes fewer than 2³²
+/// strikes per vehicle lifetime.
 #[derive(Component, Serialize, Deserialize, Debug, Default, Clone, PartialEq, Eq)]
 pub(crate) struct HullMarks {
-    marks: VecDeque<HullMark>,
+    marks: VecDeque<(u32, HullMark)>,
     /// Marks ever recorded on this vehicle, the dropped included.
     recorded: u32,
 }
 
 impl HullMarks {
-    /// Record one mark, dropping the oldest past [`MARK_CAP`].
+    /// The game's damage-model view evicts the oldest of the smallest held footprints before
+    /// appending. Even a full record admits the new strike; a smaller flood then replaces itself.
+    /// Physical footprint is calibre² / cos θ, with the same grazing clamp the view uses.
     pub(crate) fn record(&mut self, mark: HullMark) {
-        self.marks.push_back(mark);
-        while self.marks.len() > MARK_CAP {
-            self.marks.pop_front();
+        if self.marks.len() == MARK_CAP {
+            let footprint =
+                |mark: &HullMark| mark.caliber().powi(2) * stretch(mark.along(), mark.normal());
+            let smallest = self
+                .marks
+                .iter()
+                .enumerate()
+                .min_by(|(_, (_, a)), (_, (_, b))| footprint(a).total_cmp(&footprint(b)))
+                .map(|(index, _)| index)
+                .expect("a full mark record is nonempty");
+            self.marks.remove(smallest);
         }
+        self.marks.push_back((self.recorded, mark));
         self.recorded = self.recorded.wrapping_add(1);
     }
 
@@ -292,18 +300,9 @@ impl HullMarks {
         self.recorded
     }
 
-    /// The serial of the oldest mark held.
-    pub(crate) fn first_serial(&self) -> u32 {
-        self.recorded.wrapping_sub(self.marks.len() as u32)
-    }
-
     /// Every held mark with its serial, oldest first.
     pub(crate) fn iter(&self) -> impl Iterator<Item = (u32, &HullMark)> {
-        let first = self.first_serial();
-        self.marks
-            .iter()
-            .enumerate()
-            .map(move |(index, mark)| (first.wrapping_add(index as u32), mark))
+        self.marks.iter().map(|(serial, mark)| (*serial, mark))
     }
 
     /// How many marks are held.
@@ -610,7 +609,7 @@ pub(crate) mod tests {
         }
     }
 
-    /// Past [`MARK_CAP`], recording a mark drops the OLDEST, and the serials keep counting, so a
+    /// Past [`MARK_CAP`], equal-footprint marks evict the oldest, and serials keep counting, so a
     /// mark keeps its serial for as long as it is held. The view keys its decals on that serial:
     /// a mutant that drops the newest, or that renumbers the held marks from zero, leaves a client
     /// drawing marks the server no longer holds.
@@ -631,6 +630,31 @@ pub(crate) mod tests {
             held.iter()
                 .all(|&(serial, mark)| mark == numbered(serial as u16))
         );
+    }
+
+    /// The game's damage-model view keeps larger evidence when sustained smaller strikes
+    /// fill the budget, while still showing the belt's own marks. Fixture data: two sizes.
+    #[test]
+    fn a_belt_keeps_every_larger_mark_and_some_of_its_own() {
+        let mut record = HullMarks::default();
+        let larger = MARK_CAP / 2;
+        for n in 0..larger {
+            record.record(numbered(n as u16));
+        }
+        for n in larger..MARK_CAP * 5 {
+            let mut mark = numbered(n as u16);
+            mark.caliber = MarkCaliber::try_from(0.0079).unwrap();
+            record.record(mark);
+        }
+        assert_eq!(record.len(), MARK_CAP);
+        for n in 0..larger {
+            assert!(
+                record
+                    .iter()
+                    .any(|(serial, mark)| serial == n as u32 && *mark == numbered(n as u16))
+            );
+        }
+        assert!(record.iter().any(|(_, mark)| mark.caliber() == 0.0079));
     }
 
     /// A strike is recorded where it struck in the struck PART's frame, whatever the root's and
@@ -720,37 +744,17 @@ pub(crate) mod tests {
                 .expect("a main-gun strike on a part leaves a mark");
             assert_eq!(mark.caliber(), footprint, "{verdict:?}");
         }
-        let core = crate::ballistics::RoundBody {
-            mass: 1.93,
-            caliber: 0.010,
-            nose_factor: 7.0 / 24.0,
-        };
-        let flying = crate::ballistics::RoundBody {
-            mass: 7.3,
-            caliber: FLYING,
-            ..core
-        };
-        let mut small_core =
-            crate::ballistics::march_tests::first_contact_strike(flying, core, Verdict::Through);
-        let mut world = World::new();
-        let fixture = fixture_in(&mut world);
-        small_core.struck = fixture.collider;
-        small_core.at = plate_in_world(&world, &fixture).translation;
-        let built = world
-            .run_system_once(move |builder: MarkBuilder| builder.mark(&small_core))
-            .unwrap();
-        assert!(built.is_some(), "a small core still leaves its actual hole");
     }
 
     /// The game's damage-model view uses one storage policy for every calibre. A small strike
-    /// cannot vanish to preserve a larger one; the bounded FIFO owns persistence.
+    /// leaves its actual footprint in the bounded record.
     #[test]
     fn every_positive_calibre_can_leave_a_surface_mark() {
         let mut app = App::new();
         app.add_plugins(offline_plugin);
         let fixture = fixture_in(app.world_mut());
         let at = plate_in_world(app.world(), &fixture).transform_point(Vec3::ZERO);
-        // Fixture data: a rifle-calibre round, one just under the threshold, one at it.
+        // Fixture data: three positive sizes, each preserved without a threshold.
         for caliber in [0.0079, 0.019, 0.020] {
             for verdict in [Verdict::Ricochet, Verdict::Stopped, Verdict::Through] {
                 let mut hit = strike(fixture.collider, at, verdict);

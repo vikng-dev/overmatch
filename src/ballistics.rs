@@ -1172,7 +1172,7 @@ pub(crate) struct ShellStrike {
     pub normal: Vec3,
     /// The round's direction of travel as it met the face (WORLD, unit).
     pub incoming: Vec3,
-    /// The flying body's calibre (m), the value [`Impact::caliber`] carries.
+    /// The incoming flying body's calibre (m), retained for the scripted battle's strike log.
     pub caliber: f32,
     /// The calibre (m) of what marked the face ([`face_contact_caliber`]): the hull mark's
     /// footprint.

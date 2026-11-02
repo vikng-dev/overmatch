@@ -5,7 +5,7 @@
 //! # The diff
 //!
 //! [`draw_marks`] keeps each root's decals keyed by mark serial ([`DrawnMarks`]): a mark the record
-//! holds and the root has not drawn is drawn, a decal whose mark fell off the record's front is
+//! holds and the root has not drawn is drawn, a decal whose mark was evicted is
 //! despawned. A decal is a pure function of its mark — nothing in it comes from arrival order, the
 //! frame or a view-side random draw — so a late joiner handed the whole record at once draws what a
 //! client that watched every mark arrive has drawn. A mark whose part has no view node yet (the glb
@@ -260,10 +260,13 @@ pub(super) fn draw_marks(
                 commands.entity(frame).try_despawn();
             }
         }
-        let kept = drawn.drawn.split_off(&record.first_serial());
-        for (_, frame) in std::mem::replace(&mut drawn.drawn, kept) {
-            commands.entity(frame).try_despawn();
-        }
+        drawn.drawn.retain(|serial, frame| {
+            let held = record.iter().any(|(held, _)| held == *serial);
+            if !held {
+                commands.entity(*frame).try_despawn();
+            }
+            held
+        });
         drawn.waiting = false;
         for (serial, mark) in record.iter() {
             if drawn.drawn.contains_key(&serial) {
@@ -435,11 +438,15 @@ mod tests {
         let (root, _) = client_tank(&mut watcher, true);
         let total = MARK_CAP as u16 + 12;
         for n in 0..total {
+            let mut mark = numbered(n);
+            if n > 0 {
+                mark.caliber = crate::hull_marks::MarkCaliber::try_from(0.0079).unwrap();
+            }
             watcher
                 .world_mut()
                 .get_mut::<HullMarks>(root)
                 .unwrap()
-                .record(numbered(n));
+                .record(mark);
             watcher.update();
         }
         let record = watcher.world().get::<HullMarks>(root).unwrap().clone();
@@ -482,7 +489,9 @@ mod tests {
             "the dropped marks' decals are gone"
         );
         let serials: Vec<u32> = watched.iter().map(|row| row.0).collect();
-        let expected: Vec<u32> = (u32::from(total) - MARK_CAP as u32..u32::from(total)).collect();
+        let expected: Vec<u32> = std::iter::once(0)
+            .chain(u32::from(total) - MARK_CAP as u32 + 1..u32::from(total))
+            .collect();
         assert_eq!(serials, expected);
         assert_eq!(watched, joined);
     }

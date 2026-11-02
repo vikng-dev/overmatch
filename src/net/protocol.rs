@@ -263,7 +263,9 @@ use crate::{CombatantId, CombatantLife, ShotId};
 /// packed directions refuse zero at the wire edge, with the same three-byte representation.
 /// REV 73: owner-private respawn admission distinguishes waiting space from refused map picks.
 /// REV 74 (#146, driving model): support-priced C1-C3 gear selection removes scheduler memory.
-pub const PROTOCOL_REV: u32 = 74;
+/// REV 75 (the game's damage-model view): hull-mark snapshots carry stable serials; diffs evict
+/// by physical footprint rather than arrival alone.
+pub const PROTOCOL_REV: u32 = 75;
 
 /// Compatibility tag derived from the complete pinned wire manifest plus the crate version. This
 /// is the runtime handshake value: version-exact, so a version bump intentionally changes it.
