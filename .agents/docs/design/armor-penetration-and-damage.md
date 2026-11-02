@@ -2224,9 +2224,9 @@ MEASURED by headless production-adapter tests on free fixture hulls, before → 
 
 | Input | Before | After |
 |---|---|---|
-| 30/336 HP engine, full W from rest, speed after 5 s | 0.12977146 m/s | 0.510038 m/s |
+| 30/336 HP engine, full W from rest, speed after 5 s | 0.12977146 m/s | 0.5090819 m/s |
 | Engine pool empty, crank and belts stopped, full steer, yaw rate after 1 s | −0.09843076 rad/s | 0 rad/s |
-| Unmanned hull at 5 m/s coasts uphill on a 10° grade, observed for 20 s | brief rollback then automatic park; final speed approximately zero | continued rollback; park unset, final speed −10.141057 m/s |
+| Unmanned hull at 5 m/s coasts uphill on a 10° grade, observed for 20 s | brief rollback then automatic park; final speed approximately zero | continued rollback; park unset, final speed −10.139181 m/s |
 
 Decision: nobody at the Driver station can command repair braking or move the park lever;
 repair work may continue, and a phase hold remains an operator-imposed brake. A Backup chooses
@@ -2239,7 +2239,15 @@ The no-combustion energy tests cover stopped and spinning cranks, propulsion, pi
 turns with asymmetric rolling starts. Every temporary mutant and before-measurement helper
 was removed. No capture, pricing run, issue comment or push was taken.
 
-Final gates: MEASURED 879 targeted and whole-tree guard tests passed, six intentionally ignored,
+Final gates after rebase: MEASURED 889 targeted and whole-tree guard tests passed, six intentionally ignored,
 including `damage`, `tank::`, `track::`, `crew_ui`, `sfx`, `net::`, `trace::`, `headless_test`,
 `doc_citations`, `ui_ascii`, `net_boundary` and `bake::`. Formatting and CI workspace/all-target
 clippy with `dev_ui,bitprobe` passed. No screen, capture or pricing run was taken.
+
+The before column uses the dispatch tree headed by `docs: state the carried-energy field law
+in §§5–6 (#258)`. The after column includes the rebase onto `driving: record surface contact
+traces and entry-dependent speeds (#146)`. To separate that incoming ground-law change from
+this fix: MEASURED before the rebase, the corrected drivetrain gave 0.510038 m/s pull-away and
+−10.141057 m/s rollback at the same observation times; the stopped-engine pivot was already
+zero. The rebased measurements above and all gates were rerun on the combined tree. The lane
+changed no `forces.rs` source and no wire type.
