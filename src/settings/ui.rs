@@ -1513,9 +1513,12 @@ fn refresh_page(
     mut lines: Query<(&RowLine, &mut BackgroundColor), Without<SliderFill>>,
     mut hint: Query<&mut Text, (With<HintText>, Without<RowValueText>)>,
 ) {
-    let Ok(mut card) = card.single_mut() else {
-        return;
-    };
+    let mut card = card
+        .single_mut()
+        .expect("settings::ui::spawn_page creates exactly one SettingsCard");
+    let mut hint = hint
+        .single_mut()
+        .expect("settings::ui::spawn_page creates exactly one HintText inside its card");
     card.set_if_neq(if visible.0 {
         Visibility::Visible
     } else {
@@ -1566,11 +1569,9 @@ fn refresh_page(
             ROW_BG
         }));
     }
-    if let Ok(mut hint) = hint.single_mut() {
-        let rendered = selected.map_or(TAB_STRIP_HINT, Row::hint);
-        if hint.0 != rendered {
-            hint.0 = rendered.to_string();
-        }
+    let rendered = selected.map_or(TAB_STRIP_HINT, Row::hint);
+    if hint.0 != rendered {
+        hint.0 = rendered.to_string();
     }
 }
 
@@ -1622,6 +1623,47 @@ fn refresh_tabs(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Missing or duplicate card/hint nodes are construction bugs, never a silently disabled page.
+    /// Exercise the production reconciler directly so a dropped cardinality check fails here.
+    #[test]
+    fn page_reconciliation_refuses_broken_card_and_hint_cardinalities() {
+        // Fixture cardinalities cover both failure shapes of each singleton.
+        for visible in [false, true] {
+            for (cards, hints, expected) in [
+                (0, 1, "exactly one SettingsCard"),
+                (2, 1, "exactly one SettingsCard"),
+                (1, 0, "exactly one HintText"),
+                (1, 2, "exactly one HintText"),
+            ] {
+                let mut app = App::new();
+                app.insert_resource(SettingsPageVisible(visible))
+                    .init_resource::<Settings>()
+                    .init_resource::<PresentCaps>()
+                    .init_resource::<DisplayLadder>()
+                    .init_resource::<Page>()
+                    .init_resource::<SliderDrag>()
+                    .add_systems(Update, refresh_page);
+                for _ in 0..cards {
+                    app.world_mut().spawn((SettingsCard, Visibility::Hidden));
+                }
+                for _ in 0..hints {
+                    app.world_mut().spawn((HintText, Text::new("")));
+                }
+                let panic = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| app.update()))
+                    .expect_err("broken page construction must panic");
+                let message = panic
+                    .downcast_ref::<String>()
+                    .map(String::as_str)
+                    .or_else(|| panic.downcast_ref::<&str>().copied())
+                    .expect("the page's invariant panic has a message");
+                assert!(
+                    message.contains(expected),
+                    "{cards} cards/{hints} hints: {message}"
+                );
+            }
+        }
+    }
 
     /// The unprobed capability state every pure test steps under: all rungs offered.
     const ALL_RUNGS: PresentCaps = PresentCaps::Unprobed;
