@@ -863,7 +863,8 @@ fn full_throttle_reaches_and_holds_the_governed_top_speed() {
 
 /// Every authored ground must yield finite steady driving; the ground law's record relies on
 /// this headless measurement. Fixture: the shipped vehicle on uniform flat ground, 40 s throttle,
-/// last-second mean; no per-vehicle speed expectation is encoded.
+/// last-second mean, both from rest and from a data-derived governed-speed/top-gear entry.
+/// The two entries expose scheduler path dependence; no per-vehicle speed expectation is encoded.
 #[test]
 fn contact_law_shipped_ground_speeds() {
     for (name, ground) in crate::ground_types::GroundTypes::load_shipped().types {
@@ -880,42 +881,78 @@ fn contact_law_shipped_ground_speeds() {
             );
         }
         face_positive_z(&mut app, tank);
-        let mut sum = 0.0;
-        let mut min = f32::INFINITY;
-        let mut max = 0.0_f32;
-        for tick in 0..40 * FIXED_TICKS_PER_SECOND {
-            drive_tick(&mut app, tank, 1.0, 0.0);
-            if tick >= 39 * FIXED_TICKS_PER_SECOND {
-                let speed = app
-                    .world()
-                    .get::<avian3d::prelude::LinearVelocity>(tank)
-                    .unwrap()
-                    .0
-                    .length();
-                assert!(
-                    speed.is_finite(),
-                    "ground {name} must deliver finite driving"
-                );
-                sum += speed;
-                min = min.min(speed);
-                max = max.max(speed);
-            }
-        }
-        let state = &app
+        let initial_position = app
             .world()
-            .get::<crate::track::sim::TankTransmission>(tank)
+            .get::<avian3d::prelude::Position>(tank)
             .unwrap()
             .0;
-        let gear = state.gear;
-        println!(
-            "MEASURED ground {name} scheduler {:?}, hill_hold {}, demand {:.3} N",
-            state.scheduler, state.hill_hold, state.demand_n
-        );
-        println!(
-            "MEASURED ground {name}: F{gear} mean {:.5} m/s spread {:.6}",
-            sum / FIXED_TICKS_PER_SECOND as f32,
-            max - min
-        );
+        for rolling_start in [false, true] {
+            if rolling_start {
+                let params = app
+                    .world()
+                    .resource::<crate::track::sim::TrackGear>()
+                    .trans();
+                let speed = params.governed_speed(false);
+                let mut transmission = crate::track::sim::TankTransmission::from_spec(params);
+                transmission.0.gear = params.gears_fwd.len() as u8;
+                transmission.0.omega_e = params.engine.governed_rpm * std::f32::consts::TAU / 60.0;
+                let mut e = app.world_mut().entity_mut(tank);
+                *e.get_mut::<crate::track::sim::TankTransmission>().unwrap() = transmission;
+                e.get_mut::<avian3d::prelude::Position>().unwrap().0 = initial_position;
+                e.get_mut::<avian3d::prelude::Rotation>().unwrap().0 =
+                    Quat::from_rotation_y(std::f32::consts::PI);
+                e.get_mut::<avian3d::prelude::LinearVelocity>().unwrap().0 = Vec3::Z * speed;
+                e.get_mut::<avian3d::prelude::AngularVelocity>().unwrap().0 = Vec3::ZERO;
+                for side in &mut e.get_mut::<crate::track::sim::TrackDrive>().unwrap().sides {
+                    side.speed = speed;
+                    side.phase = 0.0;
+                }
+                for side in &mut e
+                    .get_mut::<crate::track::sim::TrackGripElements>()
+                    .unwrap()
+                    .sides
+                {
+                    side.strain.fill(Vec3::ZERO);
+                    side.dwell.fill(0);
+                }
+            }
+            let mut sum = 0.0;
+            let mut min = f32::INFINITY;
+            let mut max = 0.0_f32;
+            for tick in 0..40 * FIXED_TICKS_PER_SECOND {
+                drive_tick(&mut app, tank, 1.0, 0.0);
+                if tick >= 39 * FIXED_TICKS_PER_SECOND {
+                    let speed = app
+                        .world()
+                        .get::<avian3d::prelude::LinearVelocity>(tank)
+                        .unwrap()
+                        .0
+                        .length();
+                    assert!(
+                        speed.is_finite(),
+                        "ground {name} must deliver finite driving"
+                    );
+                    sum += speed;
+                    min = min.min(speed);
+                    max = max.max(speed);
+                }
+            }
+            let state = &app
+                .world()
+                .get::<crate::track::sim::TankTransmission>(tank)
+                .unwrap()
+                .0;
+            let gear = state.gear;
+            println!(
+                "MEASURED ground {name} rolling_start={rolling_start} scheduler {:?}, hill_hold {}, demand {:.3} N",
+                state.scheduler, state.hill_hold, state.demand_n
+            );
+            println!(
+                "MEASURED ground {name} rolling_start={rolling_start}: F{gear} mean {:.5} m/s spread {:.6}",
+                sum / FIXED_TICKS_PER_SECOND as f32,
+                max - min
+            );
+        }
     }
 }
 

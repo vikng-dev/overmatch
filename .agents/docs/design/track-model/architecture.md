@@ -125,7 +125,7 @@ src/track/side.rs         Side + PerSide — the one L/R encoding (left −X, ri
 src/track/rig_geom.rs     RigGeom: the derived running-gear geometry contract
 src/track/marker_model.rs the glb's sharp sources of truth (Pin_* markers, Link_Box, rig meshes)
 src/track/derive.rs       the universal suspension-model derivations (pure)
-src/track/oracle.rs       TerrainOracle (scalar `depth_along`) + BlockField (§5)
+src/track/oracle.rs       TerrainOracle (depth + typed surface hits) + BlockField (§5)
 src/track/terrain.rs      TrackField resource: the ONE field, rebuilt on TerrainMap revision
 src/track/route.rs        route core (pure) — incl. `taut_lower_run`, shared with the wrap
 src/track/envelope.rs     contact-envelope calibration: k from ride frequency, travel knots
@@ -282,9 +282,10 @@ pub trait TerrainOracle {
 }
 ```
 
-Batched probes, hit normals, surface material and `covered` are the recorded growth path — to be
-added WITH their first consumer, not before. `SpatialQueryOracle` was on that list and never
-needed one.
+The force consumer now reads `ContactOracle::contact_along`, the supertrait's typed surface
+query: `TerrainContact::Hit { depth, normal: Dir3 }`, `Miss`, or `Buried` (§5a). The scalar depth
+query remains the geometry consumer's contract. Batched probes, surface material and `covered`
+remain growth paths with no consumer. `SpatialQueryOracle` never needed one.
 
 - **`BlockField`** (the one implementation, held by `track::terrain::TrackField`): a min-fold of
   two exact analytic terms, built as `BlockField::new(blocks).with_height(grid)`.
@@ -363,18 +364,31 @@ demand filter, the clutch coupling) sees it as load. The shift-landing predictor
 and charges the rolling share whole, because the belt still rolls on its ground there. A piece is
 no ground and takes none.
 
-**Rolling on flat ground costs nothing else.** `c_rr` is published motion resistance, which lumps
-in the running gear's own losses, so it is the whole of what a ground takes from a rolling tank:
-the contact law spends nothing on steady travel over flat ground. Support and its damper act on
-the depth, along the surface's normal: the field's depth gradient at each column's mid probe
-(exactly 1 along the probe ray by the oracle's directional contract, a 1 cm `Resolution`
-difference along the segment and the pin axis). The damper reads the depth's rate, the gradient
-against the hull's velocity at the contact, and traction lies in the surface's plane. A piece's
-face is the belt's plane, so a piece's gradient is the probe direction. Where a belt run meets
-flat ground at a tilt (the approach runs, which carry load inside the travel band), the earlier
-law pushed along the belt's normal, damped by the hull's velocity along it and laid traction
-along the belt; MEASURED headless at full throttle with no ground term, the shipped tank's mean
-over a second at F8, 10.68 m/s, before that change:
+**Rolling on flat ground costs nothing else.** `c_rr` is published motion resistance, which
+lumps in running-gear losses, so the contact law spends nothing else on steady flat travel.
+The elastic spring integrates the directional penetration profile. Its force acts along the
+surface's outward **unit** normal at the profile resultant, and its damper reads
+`closing = -normal · contact_point_velocity` (relative to a moving recipient). Thus a tangential
+hull motion is not damped, and closing magnitude cannot exceed point speed. Traction lies in the
+same surface plane and charges the belt what it delivers to the hull.
+
+The surface owns that normal. A rounded block supplies its analytic field gradient at the ray
+hit; a heightfield supplies the struck triangle's facet normal. The contact query is at the
+resultant's own envelope point, and the force is applied at its actual hit. There is no difference
+between neighbouring depths: a neighbouring miss, another first hit, a silhouette or a union seam
+cannot manufacture a slope or magnify closing. `TerrainContact` names `Hit`, `Miss` and `Buried`.
+A miss or a buried origin supplies no struck surface and carries no support; scalar depth still
+returns clearance or saturated depth for geometry consumers. In particular, neither absence
+falls back to the belt's normal.
+
+**Piece orientation is a StandIn.** `track::rubble::in_slab` retains one innermost depth per
+footprint, making every overlap face parallel to the belt. That coarse geometry therefore uses
+`-out` for support and `out · relative_velocity` for closing. A physically level piece under a
+tilted run can still inherit the earlier tilted-run loss. What settles the missing orientation
+is the overlap's actual face normal; this change leaves `rubble.rs` and its recipient law alone.
+
+**The 1c loss split, unchanged.** MEASURED headless before the flat-ground law, full throttle
+with no ground term, the fixture tank at F8, 10.68 m/s, averaged over a second:
 
 | share of the summed grip reaction | N |
 |---|---|
@@ -384,16 +398,67 @@ over a second at F8, 10.68 m/s, before that change:
 | residual (hull acceleration) | 13 |
 | total | 24 818 |
 
-After it, 2 N at 10.93 m/s, the governor's torque cut-off. The class invariant is
-`forces::tests::a_hull_rolling_on_flat_ground_under_tilted_runs_needs_no_drive_force`. Its cost is
-two oracle casts per contacting field column. A surface-derived normal is what the sandbox gave up
-on 2026-07-01 for the belt's own normal (`HQ.md`: a hit normal flipping between a lip's wall and
-top shoved the rig in alternating directions); the gradient is the one the support's own depth
-reads, and the block field's 3 cm edge rounding keeps it continuous across a lip, but driving into
-a ditch and over lips is for the feel session to judge. The ride is unchanged, MEASURED headless
-(a 0.3 rad/s roll kick on the parked tank, before / after): roll rate 0.00010 / 0.00011 rad/s RMS
-over its third second, largest tick-to-tick side-load swing 27.0 / 27.5 kN, sign alternation of
-that swing 0.03 / 0.03 (the 32 Hz side-swap reads near 1), and every settle test green.
+
+The 1c record after its change is 2 N at 10.93 m/s, the torque cut-off. The rolling class test
+now also compares every moving contact's load with its parked load at the same phase, so changing
+only closing to `out.dot(vel)` fails (MEASURED mutant: 39 moving contacts against 42 parked).
+Fixture run directions are 26.6° behind (+z), 20.6° ahead (-z); forward hull travel is -z.
+
+**Edges, MEASURED headless.** The baseline below is the 1c production force law re-landed on the
+current supply law; the fixed tree changes surface normals and normal closing. Both use the same
+fixtures. A downward probe 5 mm inside a flat heightfield edge, 5 cm deep with 0.5 m reach, reads
+normal `(0.999835, 0.018179, 0)` before and `(0, 1, 0)` after. The force-level edge test also pins
+every loaded column upright. A probe 5 mm inside a rounded step silhouette reads 107.31665 m/s
+closing for a 2 m/s hull before, 1.66667 m/s after. The vertical building-corner force fixture,
+crossed along world X (belt lateral), reads 108.31694 / 1.66665 m/s effective closing.
+
+Prescribed-pad longitudinal force trace (positive z is rearward): fixture 2 m pad, its hull held
+at y=0.15 m, moving forward (-z) at 2 m/s across a 0.20 m block ending at z=0. Values are the
+summed hull support and traction; `forces::tests::forward_step_lip_force_trace` reproduces it.
+
+| hull z (m) | 1c force (N) | surface-hit force (N) |
+|---|---:|---:|
+| 1.020 | 203 | 203 |
+| 1.000 | 1 071 | 1 063 |
+| 0.990 | 1 537 | 2 612 |
+| 0.900 | 1 114 279 | 5 740 |
+| 0.800 | 35 690 | 9 856 |
+| 0.600 | 231 216 | 14 613 |
+| 0.400 | 417 500 | 0 |
+| -1.000 | 1 640 000 | 0 |
+
+The full simulated hull also climbs forward over the course's 0.40 m curb. Fixture: start at
+z=-63 from rest, facing -z, full throttle until its centre passes z=-70. The trace is emitted by
+`headless_test::contact_law_forward_step_trace`; it sums support and traction, excluding collider
+solver impulses. Peak and jump use every tick, rather than only the printed position bins.
+
+| full-hull trace | 1c law | surface-hit law |
+|---|---:|---:|
+| peak rearward contact force (N) | 344 716 | 76 025 |
+| largest rearward force increase in one tick (N) | 514 494 | 179 564 |
+| maximum hull rise (m) | 0.39538 | 0.38309 |
+| maximum relative excess over the unit-normal damping bound | 0.93656963 | 0.00000041 |
+
+The fixed trace retains real rounded-face forces and contact-entry changes; it removes the
+amplified damper. The bound reads the contact report's own normal velocity, avoiding a velocity
+sample from another tick phase. The edge, buried/missing-probe, vertical-corner and full-climb
+regressions all fail against the 1c force law. The earlier July lip flip was a wall/top hit-normal
+change, while the reviewed defect was a depth difference across first-hit discontinuities.
+Rounding makes a single primitive's front-facing turn continuous; the union's first-hit selection
+still has silhouettes and seams. This is no claim of global force continuity, and the feel at
+lips remains a playtest judgment.
+
+The ride stays decaying, MEASURED with `headless_test::contact_law_roll_kick_decays`: a 0.3 rad/s
+longitudinal-axis roll kick on the parked fixture, observed for three seconds. The RMS uses the
+third second; peak tick-to-tick change in left-minus-right support and its sign alternation use
+all three seconds. The side-swap limit cycle would alternate near 1 at half the 64 Hz step rate;
+it does not reopen. No damping or grip parameter was retuned, and all settle gates pass.
+
+| ride measurement | 1c law | surface-hit law |
+|---|---:|---:|
+| third-second roll-rate RMS (rad/s) | 0.00011802 | 0.00027498 |
+| largest tick-to-tick side-load swing (kN) | 24.085 | 24.930 |
+| swing sign-alternation fraction | 0.03158 | 0.03158 |
 
 Coast-down, DERIVED: with the belts declutched, belt and hull decelerate together at
 `a = c_rr·g·M/(M + 2I)` down to the fade band, then decay inside it, so a tank coasts
@@ -403,17 +468,49 @@ form. On the fixture tank (57 000 kg, 4 750 kg reflected per side) from 10 m/s: 
 pack, 0.05) 119.0 m; dirt (0.06) 99.2 m; sand (0.12) 49.6 m; mud (0.15) 39.7 m; concrete (0.04)
 148.8 m.
 
-Top speed at full throttle on flat ground, MEASURED headless (the fixture tank, mean over the last
-second of 40 s, governed 10.51 m/s, torque cut-off 10.93 m/s): no rolling resistance F8 10.93 m/s;
-concrete (0.04) F8 10.71 m/s; gravel (0.05) F8 10.65 m/s; dirt (0.06) F7 7.19 m/s; sand (0.12) F6
-4.89 m/s; mud (0.15) F5 3.31 m/s. `full_throttle_reaches_and_holds_the_governed_top_speed` pins
-the no-resistance case.
+Attained speed at full throttle on flat ground, MEASURED headless (fixture tank, last-second
+mean of 40 s). The governed speed is DERIVED 10.509 m/s and the zero-torque cut-off 10.930 m/s;
+the no-rolling-resistance fixture reaches F8, 10.930 m/s. Its FIXTURE acceptance is 1 % below cut-off for
+finite settling and 0.1 % above for fixed-step integration and vertical ride velocity, rather
+than calling either margin a rolling loss.
+
+`headless_test::contact_law_shipped_ground_speeds` reads each shipped ground's full friction and
+rolling-resistance pair and measures two entries: rest, and a fresh top-gear/governed-speed
+rolling entry derived from vehicle data. The latter models entry onto a ground after attaining
+speed elsewhere. These are attained states of the automatic scheduler, not a unique terminal
+speed independent of entry. No ground-specific gear or pass condition is encoded in the test.
+
+| ground | c_rr | earlier 1c record | current from rest | current rolling entry |
+|---|---:|---|---|---|
+| concrete | 0.04 | F8 10.71 | F8 10.70516 | F8 10.70516 |
+| gravel | 0.05 | F8 10.65 | F8 10.64927 | F8 10.64927 |
+| dirt | 0.06 | F7 7.19 | F7 7.19064 | F8 10.59344 |
+| sand | 0.12 | F6 4.89 | F1 0.67151 | F7 6.25914 |
+| mud | 0.15 | F5 3.31 | F1 0.67086 | F6 4.85348 |
+
+All speeds are m/s. The current from-rest speeds reproduce to five decimals with the 1c force
+law on the same main/supply-law baseline: sand and mud's earlier recorded gears do not reproduce
+under this protocol, so their shift is not attributed to the surface-normal fix. Both current
+entry protocols end with scheduler `Normal` and hill hold false. The sand rolling-entry spread
+is 0.003994 m/s over the final second; every other final-second spread is at most 0.000023 m/s.
+The launch/entry dependence belongs to a scheduler investigation; the hill-hold release remains
+the owner's call. The lane preserves the landed supply scaling in `drive_target` and
+`transmission::step`. The step's interruption/dwell countdown is extracted without a behavior
+change to keep it below clippy's function-length limit. No wire type changes.
 
 | reviewer | finding | verified / not a defect | fixed in (subject) |
 |---|---|---|---|
 | Claude (law-ground-1b review) P2 | `c_rr`, published motion resistance, comes on top of a contact-law loss of about its own size, so hard grounds took about double their CLAIMED total and the tank never reached top gear | verified: 24 818 N MEASURED before any ground term, split above | driving: support and damp each contact along its surface, not its belt (#146) |
 | Claude (law-ground-1b review) P3 | this section said no ground term slowed a declutched tank before the law, derived coast-down from `c_rr` alone and named the bristle dampers as the likely source | verified: the support damper acted with the clutch out; the bristle share was 85 N | docs: record the flat-ground contact law and its measured split (#146) |
 | Claude (law-ground-1b review) P3 | `predict_shift_landing_m` decayed `c_rr·N` as relaxing drive shear, and `POSTSHIFT_MARGIN_RPM`'s note named only the grade as the sustained leftover | verified | transmission: keep the ground's rolling resistance whole through a shift window (#146) |
+| Codex (law-ground-1c review) P1 | a neighbouring heightfield-edge miss becomes a fictitious lateral slope | verified by the 5 mm edge fixture and its force pass | driving: read contact normals from struck surfaces (#146) |
+| Claude (law-ground-1c review) P2 | a first-hit jump at a step lip or building corner rotates support and amplifies closing; the column mid probe supplies other patches' normals | verified: the full-hull trace and lateral corner fail the old law; each resultant now queries its own hit. The rounded face's genuine inclination is not a defect | driving: read contact normals from struck surfaces (#146) |
+| Claude (law-ground-1c review) P3 | a saturated/missing mid probe silently takes the old belt-normal law | verified: `Miss` and `Buried` are named, carry no support, and the no-surface force regression fails the old law | driving: read contact normals from struck surfaces (#146) |
+| Claude (law-ground-1c review) P3 | the rolling test does not kill the belt-normal damper mutant and reverses fixture run directions | verified: per-contact moving/parked load comparison kills the mutant; directions corrected | driving: read contact normals from struck surfaces (#146) |
+| Claude (law-ground-1c review) P3 | piece overlap faces are parallel to the belt, not the piece's physical face | verified: orientation is explicitly a StandIn above, settled by the overlap face normal; recipient code stays outside this lane | driving: record surface contact traces and entry-dependent speeds (#146) |
+| Claude (law-ground-1c review) P3 | the no-loss top-speed test lacks an integration margin and calls its band rolling loss | verified: margins now name settling, integration and vertical ride velocity | driving: read contact normals from struck surfaces (#146) |
+| Claude (law-ground-1c review), July lip question | rounding was claimed to keep the depth gradient continuous across every lip | verified false at silhouettes; actual normals and bounded normal closing remove that inference, while true wall/top changes remain for playtest | driving: record surface contact traces and entry-dependent speeds (#146) |
+| Claude (law-ground-1c review), slip-witness question | changing the scripted slip witness from 0.3 to 0.2 m/s weakened a physical bound | not a defect: it is a coverage witness, half the 0.4 m/s saturation scale; the corrected traction frame removes the tilted-run artifact. The replay remains green | transmission: keep the ground's rolling resistance whole through a shift window (#146) |
 
 **The tuning panel saves the label.** `rolling_resistance` is a `provenance::Labelled` value,
 which keeps its job and note through a load and writes them back, so the panel's whole-table save
