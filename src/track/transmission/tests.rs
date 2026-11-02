@@ -2859,9 +2859,13 @@ fn parking_brake_stays_saturated_past_breach() {
     let mut speeds = [0.0f32; 2];
     let mut last = TransmissionReport::default();
     for _ in 0..30 {
-        let mut inp = input(0.0, 0.0, speeds, [r_breach, r_breach]);
-        inp.supply.transmission_condition = 0.0; // Fixture: isolate the brake from clutch torque.
+        let inp = input(0.0, 0.0, speeds, [r_breach, r_breach]);
         last = step(&fp, &tp, &mut st, &inp);
+        assert_eq!(
+            st.clutch,
+            ClutchState::Out,
+            "the park lever retains neutral past breach"
+        );
         speeds = last.next_speeds;
     }
     assert!(
@@ -2885,8 +2889,7 @@ fn parking_brake_stays_saturated_past_breach() {
 
     // Once moving, the result is bit-identical to a factor-1.0 fixture: the latch persists, but
     // its static multiplier is gone rather than becoming 192 kN/side dynamic braking.
-    let mut moving = input(0.0, 0.0, [-fp.slip_saturation; 2], [r_breach; 2]);
-    moving.supply.transmission_condition = 0.0;
+    let moving = input(0.0, 0.0, [-fp.slip_saturation; 2], [r_breach; 2]);
     let mut dynamic_tp = tp.clone();
     dynamic_tp.brake_static_factor = 1.0;
     let mut static_state = TransmissionState {
@@ -4198,4 +4201,53 @@ fn empty_station_at_rest_retains_park_while_crank_runs_down() {
             "without fuel, construction drag stops the crank"
         );
     }
+}
+
+/// A moving, already coupled drivetrain is a lug, not a launch. The Driver must retain
+/// drive through the ordinary idle guard rather than pay another launch-spool interruption.
+#[test]
+fn moving_lug_does_not_restart_launch_slip() {
+    for tp in [lab_tp(), tiger_tp()] {
+        let fp = lab_fp();
+        // Fixture: a tall gear below idle on a 20-degree grade, before a gear correction.
+        let gear = (tp.gears_fwd.len() - 2) as u8;
+        let k = tp.gears_fwd[(gear - 1) as usize] / tp.sprocket_radius;
+        let speed = 0.8 * tp.engine.idle_rpm * RPM_TO_RAD / k;
+        let grade = fp.grip.unwrap().side_weight * 20.0_f32.to_radians().sin();
+        let mut st = TransmissionState {
+            gear,
+            clutch: ClutchState::In,
+            ..fresh(&tp)
+        };
+        let report = step(&fp, &tp, &mut st, &input(1.0, 0.0, [speed; 2], [grade; 2]));
+        assert!(
+            !report.shifting,
+            "fixture must exercise coupling outside a shift"
+        );
+        assert_eq!(
+            st.clutch,
+            ClutchState::In,
+            "a moving lug must not re-enter launch slip"
+        );
+        assert!(
+            report.forces.into_iter().all(|force| force > 0.0),
+            "the lug must retain drive"
+        );
+    }
+}
+
+/// The idle guard relies on a saturated catch at its floor. Invalid control data must be
+/// refused before any drivetrain can use the saturation assumption.
+#[test]
+#[should_panic(expected = "idle_guard_band_rpm")]
+fn idle_guard_refuses_a_catch_wider_than_its_band() {
+    let mut control: EngineControl = crate::provenance::from_shipped_str(
+        ENGINE_CONTROL_PATH,
+        include_str!("../../../assets/driving/engine.ron"),
+    )
+    .unwrap();
+    // Fixture: individually positive widths that violate saturation at the guard.
+    control.idle_catch_droop_rpm.value = 150.0;
+    control.idle_guard_band_rpm.value = 100.0;
+    control.validate();
 }

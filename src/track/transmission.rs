@@ -421,26 +421,37 @@ struct EngineControl {
     rev_match_band_rpm: crate::provenance::Labelled<f32>,
 }
 
-fn engine_control() -> &'static EngineControl {
-    static DATA: std::sync::LazyLock<EngineControl> = std::sync::LazyLock::new(|| {
-        const PATH: &str = "assets/driving/engine.ron";
-        let data: EngineControl = crate::provenance::from_shipped_str(
-            PATH,
-            include_str!("../../assets/driving/engine.ron"),
-        )
-        .unwrap_or_else(|error| panic!("{error}"));
+const ENGINE_CONTROL_PATH: &str = "assets/driving/engine.ron";
+
+impl EngineControl {
+    fn validate(&self) {
         for (field, number) in [
-            ("idle_catch_droop_rpm", &data.idle_catch_droop_rpm),
-            ("idle_guard_band_rpm", &data.idle_guard_band_rpm),
-            ("rev_match_band_rpm", &data.rev_match_band_rpm),
+            ("idle_catch_droop_rpm", &self.idle_catch_droop_rpm),
+            ("idle_guard_band_rpm", &self.idle_guard_band_rpm),
+            ("rev_match_band_rpm", &self.rev_match_band_rpm),
         ] {
             assert!(
                 number.value.is_finite()
                     && number.value > 0.0
                     && matches!(number.label, crate::provenance::Provenance::StandIn(_)),
-                "{PATH}: {field} must be finite, positive and labelled StandIn; author the missing Driver actuation law's width"
+                "{ENGINE_CONTROL_PATH}: {field} must be finite, positive and labelled StandIn; author the missing Driver actuation law's width"
             );
         }
+        assert!(
+            self.idle_guard_band_rpm.value >= self.idle_catch_droop_rpm.value,
+            "{ENGINE_CONTROL_PATH}: idle_guard_band_rpm must be at least idle_catch_droop_rpm; widen the guard or narrow the catch so recovery saturates by the guard point"
+        );
+    }
+}
+
+fn engine_control() -> &'static EngineControl {
+    static DATA: std::sync::LazyLock<EngineControl> = std::sync::LazyLock::new(|| {
+        let data: EngineControl = crate::provenance::from_shipped_str(
+            ENGINE_CONTROL_PATH,
+            include_str!("../../assets/driving/engine.ron"),
+        )
+        .unwrap_or_else(|error| panic!("{error}"));
+        data.validate();
         data
     });
     &DATA
@@ -2323,8 +2334,8 @@ fn neutral_turn(inp: &TransmissionInput, mean: f32) -> bool {
     inp.throttle.abs() < NEUTRAL_THROTTLE && mean.abs() < NEUTRAL_M_SPEED
 }
 
-/// The Driver opens at rest and when its task cannot operate the clutch. A launch starts
-/// below idle, retaining Slip until the signed shaft reaches the commanded launch speed.
+/// Shift windows, the park lever and staffed zero-rate tasks open the clutch. A launch
+/// starts at rest below idle, retaining Slip until the shaft reaches its commanded speed.
 /// At rest an unstaffed station retains its neutral lever. A moving shift interruption expires
 /// with its window, and a released slipping clutch springs In.
 fn update_clutch_state(
@@ -2336,7 +2347,7 @@ fn update_clutch_state(
     shaft_omega: f32,
 ) {
     let mean = (inp.speeds[0] + inp.speeds[1]) * 0.5;
-    st.clutch = if shifting {
+    st.clutch = if shifting || st.park {
         ClutchState::Out
     } else if !inp.supply.control_authority {
         match st.clutch {
@@ -2350,7 +2361,7 @@ fn update_clutch_state(
     {
         ClutchState::Out
     } else if propulsive >= DEAD
-        && (shaft_omega < tp.engine.idle_rpm * RPM_TO_RAD
+        && ((mean.abs() < PARK_ENGAGE_SPEED && shaft_omega < tp.engine.idle_rpm * RPM_TO_RAD)
             || (st.clutch == ClutchState::Slip && shaft_omega < tp.launch_omega(propulsive)))
     {
         ClutchState::Slip

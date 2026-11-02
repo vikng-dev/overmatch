@@ -51,6 +51,45 @@ pub(crate) struct DriveFeel {
     pub(crate) tight_off: crate::provenance::Sourced<f32>,
 }
 
+impl DriveFeel {
+    fn validate(&self) {
+        assert!(
+            self.tap_window_s.0.is_finite() && self.tap_window_s.0 > 0.0,
+            "assets/input/drive.ron: tap_window_s must be finite and positive; author the tap/hold boundary"
+        );
+        assert!(
+            self.notch_step.0.is_finite() && self.notch_step.0 > 0.0 && self.notch_step.0 <= 1.0,
+            "assets/input/drive.ron: notch_step must be in (0, 1]; author a bounded lever step"
+        );
+        assert!(
+            self.rise_per_second.0.is_finite() && self.rise_per_second.0 > 0.0,
+            "assets/input/drive.ron: rise_per_second must be finite and positive; author the keyboard rise rate"
+        );
+        assert!(
+            0.0 < self.wide_off.0
+                && self.wide_off.0 < self.wide_on.0
+                && self.wide_on.0 < self.tight_off.0
+                && self.tight_off.0 < self.tight_on.0
+                && self.tight_on.0 <= 1.0,
+            "assets/input/drive.ron: author ordered wide_off < wide_on < tight_off < tight_on within [0, 1]"
+        );
+        for (name, off, on) in [
+            ("wide", self.wide_off.0, self.wide_on.0),
+            ("tight", self.tight_off.0, self.tight_on.0),
+        ] {
+            // The lever can start stepping from zero or either clamped endpoint.
+            for origin in [-1.0, 0.0, 1.0] {
+                let first_notch =
+                    origin + ((off - origin) / self.notch_step.0).ceil() * self.notch_step.0;
+                assert!(
+                    first_notch >= on || first_notch > 1.0,
+                    "assets/input/drive.ron: {name} detent hysteresis contains a persistent notch; move its thresholds or notch_step so steps from zero and clamped endpoints avoid the band"
+                );
+            }
+        }
+    }
+}
+
 pub(crate) fn drive_feel() -> &'static DriveFeel {
     static DATA: std::sync::LazyLock<DriveFeel> = std::sync::LazyLock::new(|| {
         let data: DriveFeel = crate::provenance::from_shipped_str(
@@ -58,36 +97,7 @@ pub(crate) fn drive_feel() -> &'static DriveFeel {
             include_str!("../../assets/input/drive.ron"),
         )
         .expect("assets/input/drive.ron: author tap_window_s, notch_step and rise_per_second with provenance");
-        assert!(
-            data.tap_window_s.0.is_finite() && data.tap_window_s.0 > 0.0,
-            "assets/input/drive.ron: tap_window_s must be finite and positive; author the tap/hold boundary"
-        );
-        assert!(
-            data.notch_step.0.is_finite() && data.notch_step.0 > 0.0 && data.notch_step.0 <= 1.0,
-            "assets/input/drive.ron: notch_step must be in (0, 1]; author a bounded lever step"
-        );
-        assert!(
-            data.rise_per_second.0.is_finite() && data.rise_per_second.0 > 0.0,
-            "assets/input/drive.ron: rise_per_second must be finite and positive; author the keyboard rise rate"
-        );
-        assert!(
-            0.0 < data.wide_off.0
-                && data.wide_off.0 < data.wide_on.0
-                && data.wide_on.0 < data.tight_off.0
-                && data.tight_off.0 < data.tight_on.0
-                && data.tight_on.0 <= 1.0,
-            "assets/input/drive.ron: author ordered wide_off < wide_on < tight_off < tight_on within [0, 1]"
-        );
-        for (name, off, on) in [
-            ("wide", data.wide_off.0, data.wide_on.0),
-            ("tight", data.tight_off.0, data.tight_on.0),
-        ] {
-            let first_notch = (off / data.notch_step.0).ceil() * data.notch_step.0;
-            assert!(
-                first_notch >= on || first_notch > 1.0,
-                "assets/input/drive.ron: {name} detent hysteresis contains a persistent notch; move both thresholds between notch_step multiples"
-            );
-        }
+        data.validate();
         data
     });
     &DATA
@@ -141,6 +151,26 @@ mod tests {
     // Fixture: the simulation tick used to exercise pedal travel.
     const DT: f32 = 1.0 / 64.0;
 
+    /// Fixture: stepping back from a clamped endpoint reaches a notch inside the tight
+    /// detent band. Admission must refuse it so persistent steering has no approach history.
+    #[test]
+    #[should_panic(expected = "notch_step")]
+    fn notch_admission_checks_clamped_endpoint_steps() {
+        let mut feel: DriveFeel = crate::provenance::from_shipped_str(
+            "assets/input/drive.ron",
+            include_str!("../../assets/input/drive.ron"),
+        )
+        .unwrap();
+        feel.notch_step.0 = 0.4;
+        feel.wide_off.0 = 0.05;
+        feel.wide_on.0 = 0.15;
+        feel.tight_off.0 = 0.55;
+        feel.tight_on.0 = 0.65;
+        let persistent = 1.0 - feel.notch_step.0;
+        assert!(persistent >= feel.tight_off.0 && persistent < feel.tight_on.0);
+        feel.validate();
+    }
+
     #[test]
     fn slew_rises_exactly_and_never_overshoots() {
         let mut axes = DriveAxes::default();
@@ -148,8 +178,8 @@ mod tests {
             throttle: 1.0,
             steer: 0.0,
         };
-        // 4.0/s at 64 Hz = 0.0625/tick → exactly 16 ticks from 0 to 1.
-        for _ in 0..15 {
+        let ticks = (1.0 / (drive_feel().rise_per_second.0 * DT)).ceil() as usize;
+        for _ in 1..ticks {
             axes = shape_drive(axes, target, DT);
             assert!(axes.throttle < 1.0);
         }
@@ -158,8 +188,8 @@ mod tests {
         // At the target, further ticks are exact no-ops (no oscillation).
         assert_eq!(shape_drive(axes, target, DT), axes);
 
-        // The descending branch lands on its target the same way: 1 → 0 in exactly 16 ticks.
-        for _ in 0..15 {
+        // Descending travel obeys the same authored rate.
+        for _ in 1..ticks {
             axes = shape_drive(axes, DriveAxes::default(), DT);
             assert!(axes.throttle > 0.0);
         }
