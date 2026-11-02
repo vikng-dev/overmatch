@@ -887,27 +887,80 @@ fn the_inspector_reads_delivered_work_through_pool_holes_and_readout() {
     assert!((outcome.deposited / line.crossing.energy - 1.0).abs() < 1e-4);
 }
 
-/// Authored inspector spread cannot poison a fired direction; the data gate names its repair.
+/// Inspector magnitudes are refused before play, naming the field an author must repair.
+/// Removing any appearance gate or admitting a nonfinite spread breaks the firing/view contract.
 #[test]
-fn the_inspection_tool_refuses_invalid_spread_at_admission() {
-    for value in ["-1.0", "NaN", "inf"] {
-        let text = format!(
-            r#"(cased_round: "fixture", spread_rad: ({value}, Fixture("fixture")),
-            seam_m: (1.0, Fixture("fixture")), puff_life_s: (1.0, Fixture("fixture")),
-            view_fill: (1.0, Fixture("fixture")), readout_range_m: (1.0, Fixture("fixture")))"#
-        );
-        let error = super::tool_from_ron(&text)
-            .err()
-            .expect("invalid spread is refused");
-        assert!(error.contains("spread_rad"));
+fn the_inspection_tool_refuses_invalid_magnitudes_at_admission() {
+    let source = include_str!("../../../assets/dev/wall-tool.ron");
+    for field in [
+        "spread_rad",
+        "seam_m",
+        "puff_life_s",
+        "view_fill",
+        "readout_range_m",
+        "puff_start_m",
+        "puff_growth_m",
+        "heat_emissive",
+        "roughness",
+        "ray_alpha_floor",
+        "blast_ray_alpha",
+        "gizmo_width_px",
+        "readout_font_px",
+        "readout_padding_px",
+    ] {
+        let prefix = format!("{field}: (");
+        let start = source.find(&prefix).unwrap() + prefix.len();
+        let end = start + source[start..].find(',').unwrap();
+        for bad in ["0.0", "-1.0", "NaN", "inf"] {
+            if bad == "0.0"
+                && matches!(
+                    field,
+                    "spread_rad"
+                        | "puff_growth_m"
+                        | "heat_emissive"
+                        | "roughness"
+                        | "ray_alpha_floor"
+                        | "blast_ray_alpha"
+                        | "readout_padding_px"
+                )
+            {
+                continue;
+            }
+            let mut text = source.to_owned();
+            text.replace_range(start..end, bad);
+            let error = super::tool_from_ron(&text)
+                .err()
+                .expect("invalid magnitude is refused");
+            assert!(error.contains(field), "{field}: {error}");
+        }
+    }
+}
+
+/// The inspector palette cannot pass nonfinite or out-of-range channels to the renderer.
+#[test]
+fn the_inspection_tool_refuses_invalid_palette_channels() {
+    let source = include_str!("../../../assets/dev/wall-tool.ron");
+    for line in source.lines().filter(|line| line.contains("_rgba:")) {
+        let field = line.trim().split(':').next().unwrap();
+        let prefix = format!("{field}: ((");
+        let start = source.find(&prefix).unwrap() + prefix.len();
+        let end = start + source[start..].find(',').unwrap();
+        for bad in ["-1.0", "NaN", "inf", "2.0"] {
+            let mut text = source.to_owned();
+            text.replace_range(start..end, bad);
+            let error = super::tool_from_ron(&text)
+                .err()
+                .expect("invalid palette channel is refused");
+            assert!(error.contains(field), "{field}: {error}");
+        }
     }
 }
 
 /// The game's damage-model inspector must read a cone before any line is delivered, and attach
-/// its strength to the next line exactly once. Fixture: one cone, one witness endpoint and two
-/// later line deliveries; the cone cursor advances before either line.
+/// its strength only to that shell's line. Foreign sources must not enter the wall log.
+/// Fixture: a wall cone, a foreign cone at the same endpoint and an interleaved shell.
 #[test]
-fn a_cone_without_a_line_survives_for_the_next_inspector_deposit() {
+fn the_inspector_attributes_cones_to_their_wall_and_shell() {
     use crate::ballistics::spall_cone::{AxisRule, ConeShape, FieldDescriptor};
     use crate::ballistics::{
         DeliveredLine, ShellMarched, SpallCone, SpallMarks, SpallRay, VolumeCrossing,
@@ -925,6 +978,7 @@ fn a_cone_without_a_line_survives_for_the_next_inspector_deposit() {
     let (direction, profile) = spread.directions(Dir3::NEG_Z).next().unwrap();
     let strength = 17.0; // Fixture: recorded field strength, J.
     let cone = SpallCone {
+        exited: vec![volume],
         origin: Vec3::ZERO,
         axis: Dir3::NEG_Z,
         field: spread.field(),
@@ -936,10 +990,12 @@ fn a_cone_without_a_line_survives_for_the_next_inspector_deposit() {
             doses: Vec::new(),
         }],
     };
+    let mut foreign = cone.clone();
+    foreign.exited = vec![app.world_mut().spawn_empty().id()];
     let shell = app
         .world_mut()
         .spawn(SpallMarks {
-            cones: vec![cone],
+            cones: vec![cone, foreign],
             ..default()
         })
         .id();
@@ -973,21 +1029,27 @@ fn a_cone_without_a_line_survives_for_the_next_inspector_deposit() {
         entrance_energy: 0.0,
         entrance_momentum: Vec3::ZERO,
     };
-    for _ in 0..2 {
+    let other = app.world_mut().spawn(SpallMarks::default()).id();
+    for shell in [other, shell, shell] {
         app.world_mut().trigger(ShellMarched {
             shell,
             marks_from: 0,
-            cones_from: 1,
+            cones_from: if shell == other { 0 } else { 2 },
             lines: vec![line.clone()],
             burst: None,
         });
     }
     let queue = &app.world().resource::<super::WallQueue>().0;
-    assert_eq!(queue.len(), 2);
+    assert_eq!(queue.len(), 3);
     let strength_of = |deposit: &Deposit| match deposit {
         Deposit::Line { spall, .. } => *spall,
         _ => panic!("the fixture emits line deposits"),
     };
-    assert_eq!(strength_of(&queue[0]), strength);
-    assert_eq!(strength_of(&queue[1]), 0.0);
+    assert_eq!(
+        strength_of(&queue[0]),
+        0.0,
+        "another shell cannot consume pending strength"
+    );
+    assert_eq!(strength_of(&queue[1]), strength);
+    assert_eq!(strength_of(&queue[2]), 0.0);
 }

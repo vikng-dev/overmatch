@@ -3610,6 +3610,7 @@ fn a_wall_crushes_with_the_energy_a_cone_carries() {
         })
         .collect();
     let cone = SpallCone {
+        exited: Vec::new(),
         origin: Vec3::ZERO,
         axis: Dir3::NEG_Z,
         field: spread.field(),
@@ -4251,4 +4252,69 @@ fn a_freed_chunks_ballistic_chord_is_its_occupied_chord() {
             );
         }
     }
+}
+
+/// The game's damage model cannot silently discard a malformed empty exit field.
+#[test]
+#[should_panic(expected = "a recorded cone has its admitted nonempty direction set")]
+fn construction_refuses_a_recorded_cone_without_its_direction_set() {
+    let (mut app, _) = composed(false);
+    let shell = app
+        .world_mut()
+        .spawn((
+            PenetrationMarks::default(),
+            crate::ballistics::SpallMarks {
+                cones: vec![crate::ballistics::SpallCone {
+                    exited: Vec::new(),
+                    origin: Vec3::ZERO,
+                    axis: Dir3::Z,
+                    field: crate::ballistics::spall_cone::FieldDescriptor::ball(0.0),
+                    strength: 1.0,
+                    rays: Vec::new(),
+                }],
+                burst: None,
+            },
+        ))
+        .id();
+    app.world_mut().trigger(ShellMarched {
+        shell,
+        marks_from: 0,
+        cones_from: 0,
+        burst: None,
+        lines: Vec::new(),
+    });
+}
+
+/// The game's environment destruction assigns occupied mass once. This control removes the
+/// sensor marker from the actual spawned solid; a missing marker at spawn fails the mass guard.
+#[test]
+fn a_ballistic_sensor_does_not_add_a_second_occupied_mass() {
+    let kind = shipped_house();
+    let (_, [c, ..]) = fixture_chunks(&kind);
+    let (mut app, (mass, _, _)) = freed_in_place(&[c], Vec3::ZERO);
+    app.update();
+    let (solid, parent) = app
+        .world_mut()
+        .query_filtered::<(Entity, &ChildOf), (With<Sensor>, With<BallisticVolume>)>()
+        .iter(app.world())
+        .map(|(e, parent)| (e, parent.parent()))
+        .find(|(_, parent)| app.world().get::<WallPiece>(*parent).is_some())
+        .unwrap();
+    assert!((app.world().get::<ComputedMass>(parent).unwrap().value() / mass - 1.0).abs() < 1e-5);
+    let extra = app
+        .world()
+        .get::<Collider>(solid)
+        .unwrap()
+        .mass_properties(1.0)
+        .mass;
+    app.world_mut().entity_mut(solid).remove::<Sensor>();
+    app.world_mut().entity_mut(parent).insert(
+        avian3d::dynamics::rigid_body::mass_properties::components::RecomputeMassProperties,
+    );
+    app.update();
+    let added = app.world().get::<ComputedMass>(parent).unwrap().value() - mass;
+    assert!(
+        added > extra * 0.9,
+        "the no-sensor control must expose the duplicate mass: {added} of {extra}"
+    );
 }

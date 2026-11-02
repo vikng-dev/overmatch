@@ -1384,6 +1384,7 @@ fn an_emptying_is_timed_at_the_deposit_that_emptied_the_pool() {
         ),
     ];
     let cones = vec![SpallCone {
+        exited: vec![plate],
         origin: z(4.9),
         axis: Dir3::NEG_Z,
         field: super::spall_cone::FieldDescriptor::ball(2.0),

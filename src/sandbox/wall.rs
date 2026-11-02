@@ -82,6 +82,9 @@ const TILE: f32 = 0.25;
 const TILES: (usize, usize) = (24, 14);
 /// Resolution: draw every sixth blast hit to bound diagnostic gizmo work; field sampling is unchanged.
 const RAY_DRAW_STRIDE: usize = 6;
+/// Resolution: these palette steps bound diagnostic material allocation.
+const HEAT_LEVELS: usize = 10;
+const WITNESS_LEVELS: usize = 8;
 /// Fixture capture timeline, app seconds: back view from, front view from, the shot, and the
 /// after back view from. Frames read at 3, 4, 11.5 and 12.5 s fall inside each stand.
 const SCRIPT_BACK: f32 = 3.5;
@@ -271,6 +274,29 @@ struct WallTool {
     puff_life_s: crate::provenance::Sourced<f32>,
     view_fill: crate::provenance::Sourced<f32>,
     readout_range_m: crate::provenance::Sourced<f32>,
+    puff_start_m: crate::provenance::Sourced<f32>,
+    puff_growth_m: crate::provenance::Sourced<f32>,
+    heat_emissive: crate::provenance::Sourced<f32>,
+    roughness: crate::provenance::Sourced<f32>,
+    ray_alpha_floor: crate::provenance::Sourced<f32>,
+    blast_ray_alpha: crate::provenance::Sourced<f32>,
+    gizmo_width_px: crate::provenance::Sourced<f32>,
+    readout_font_px: crate::provenance::Sourced<f32>,
+    readout_padding_px: crate::provenance::Sourced<f32>,
+    brick_rgba: crate::provenance::Sourced<[f32; 4]>,
+    hot_rgba: crate::provenance::Sourced<[f32; 4]>,
+    witness_clear_rgba: crate::provenance::Sourced<[f32; 4]>,
+    witness_low_rgba: crate::provenance::Sourced<[f32; 4]>,
+    witness_high_rgba: crate::provenance::Sourced<[f32; 4]>,
+    loose_rgba: crate::provenance::Sourced<[f32; 4]>,
+    toppled_rgba: crate::provenance::Sourced<[f32; 4]>,
+    dust_rgba: crate::provenance::Sourced<[f32; 4]>,
+    local_crack_rgba: crate::provenance::Sourced<[f32; 4]>,
+    structural_crack_rgba: crate::provenance::Sourced<[f32; 4]>,
+    cone_rgba: crate::provenance::Sourced<[f32; 4]>,
+    blast_rgba: crate::provenance::Sourced<[f32; 4]>,
+    readout_rgba: crate::provenance::Sourced<[f32; 4]>,
+    readout_background_rgba: crate::provenance::Sourced<[f32; 4]>,
 }
 
 fn tool_from_ron(text: &str) -> Result<WallTool, String> {
@@ -292,7 +318,65 @@ fn tool_from_ron(text: &str) -> Result<WallTool, String> {
             ));
         }
     }
+    for (field, value) in [
+        ("puff_start_m", tool.puff_start_m.0),
+        ("puff_growth_m", tool.puff_growth_m.0),
+        ("heat_emissive", tool.heat_emissive.0),
+        ("roughness", tool.roughness.0),
+        ("ray_alpha_floor", tool.ray_alpha_floor.0),
+        ("blast_ray_alpha", tool.blast_ray_alpha.0),
+        ("gizmo_width_px", tool.gizmo_width_px.0),
+        ("readout_font_px", tool.readout_font_px.0),
+        ("readout_padding_px", tool.readout_padding_px.0),
+    ] {
+        if !value.is_finite()
+            || value < 0.0
+            || (value == 0.0
+                && matches!(field, "puff_start_m" | "gizmo_width_px" | "readout_font_px"))
+        {
+            return Err(format!(
+                "{field}: author a finite admissible inspection magnitude"
+            ));
+        }
+    }
+    for (field, value) in [
+        ("brick_rgba", tool.brick_rgba.0),
+        ("hot_rgba", tool.hot_rgba.0),
+        ("witness_clear_rgba", tool.witness_clear_rgba.0),
+        ("witness_low_rgba", tool.witness_low_rgba.0),
+        ("witness_high_rgba", tool.witness_high_rgba.0),
+        ("loose_rgba", tool.loose_rgba.0),
+        ("toppled_rgba", tool.toppled_rgba.0),
+        ("dust_rgba", tool.dust_rgba.0),
+        ("local_crack_rgba", tool.local_crack_rgba.0),
+        ("structural_crack_rgba", tool.structural_crack_rgba.0),
+        ("cone_rgba", tool.cone_rgba.0),
+        ("blast_rgba", tool.blast_rgba.0),
+        ("readout_rgba", tool.readout_rgba.0),
+        ("readout_background_rgba", tool.readout_background_rgba.0),
+    ] {
+        if value
+            .iter()
+            .any(|v| !v.is_finite() || !(0.0..=1.0).contains(v))
+        {
+            return Err(format!("{field}: author finite sRGBA channels in [0, 1]"));
+        }
+    }
+    for (field, value) in [
+        ("roughness", tool.roughness.0),
+        ("ray_alpha_floor", tool.ray_alpha_floor.0),
+        ("blast_ray_alpha", tool.blast_ray_alpha.0),
+    ] {
+        if value > 1.0 {
+            return Err(format!("{field}: author a value in [0, 1]"));
+        }
+    }
     Ok(tool)
+}
+
+/// The inspector palette is authored in sRGBA.
+fn rgba([red, green, blue, alpha]: [f32; 4]) -> Color {
+    Color::srgba(red, green, blue, alpha)
 }
 
 fn wall_tool() -> &'static WallTool {
@@ -429,8 +513,8 @@ struct WallLog {
     cones: Vec<WallCone>,
     witness: Vec<f32>,
     blast: Option<(Vec3, f32, Vec<Vec3>)>,
-    /// The game's damage model can deliver an exit cone before its line's last path moment.
-    pending_spall: f32,
+    /// The game's damage model can deliver a wall exit cone before that shell's line.
+    pending_spall: std::collections::HashMap<Entity, f32>,
 }
 
 /// One deposit's outcome, for the readout.
@@ -630,28 +714,33 @@ fn setup_wall(
     mut gizmos: ResMut<GizmoConfigStore>,
 ) {
     let (config, _) = gizmos.config_mut::<WallGizmos>();
-    config.line.width = 3.0;
+    config.line.width = wall_tool().gizmo_width_px.0;
+    // Resolution: pull diagnostic lines ahead of the face to prevent depth fighting.
     config.depth_bias = -0.05;
-    let brick_colour = LinearRgba::from(Color::srgb(0.42, 0.16, 0.11));
-    let hot = LinearRgba::from(Color::srgb(1.0, 0.85, 0.3));
-    let heat = (0..=10)
+    let brick_colour = LinearRgba::from(rgba(wall_tool().brick_rgba.0));
+    let hot = LinearRgba::from(rgba(wall_tool().hot_rgba.0));
+    let heat = (0..=HEAT_LEVELS)
         .map(|level| {
-            let t = level as f32 / 10.0;
+            let t = level as f32 / HEAT_LEVELS as f32;
             materials.add(StandardMaterial {
                 base_color: Color::LinearRgba(brick_colour.mix(&hot, t)),
-                emissive: hot * (0.8 * t),
-                perceptual_roughness: 0.9,
+                emissive: hot * (wall_tool().heat_emissive.0 * t),
+                perceptual_roughness: wall_tool().roughness.0,
                 ..default()
             })
         })
         .collect();
-    let witness = (0..=8)
+    let witness = (0..=WITNESS_LEVELS)
         .map(|level| {
             let colour = if level == 0 {
-                Color::srgba(0.8, 0.8, 0.85, 0.12)
+                rgba(wall_tool().witness_clear_rgba.0)
             } else {
-                let t = (level - 1) as f32 / 7.0;
-                Color::srgba(1.0, 0.9 - 0.75 * t, 0.2 - 0.15 * t, 0.65)
+                let t = (level - 1) as f32 / (WITNESS_LEVELS - 1) as f32;
+                {
+                    let low = wall_tool().witness_low_rgba.0;
+                    let high = wall_tool().witness_high_rgba.0;
+                    rgba(std::array::from_fn(|i| low[i] + (high[i] - low[i]) * t))
+                }
             };
             materials.add(StandardMaterial {
                 base_color: colour,
@@ -664,13 +753,13 @@ fn setup_wall(
     let assets = WallAssets {
         heat,
         loose: materials.add(StandardMaterial {
-            base_color: Color::srgb(0.47, 0.5, 0.58),
-            perceptual_roughness: 0.9,
+            base_color: rgba(wall_tool().loose_rgba.0),
+            perceptual_roughness: wall_tool().roughness.0,
             ..default()
         }),
         toppled: materials.add(StandardMaterial {
-            base_color: Color::srgb(0.6, 0.3, 0.62),
-            perceptual_roughness: 0.9,
+            base_color: rgba(wall_tool().toppled_rgba.0),
+            perceptual_roughness: wall_tool().roughness.0,
             ..default()
         }),
         witness: witness.clone(),
@@ -992,6 +1081,7 @@ fn read_hits(
     let spall = shells
         .get(marched.shell)
         .expect("ShellMarched observers run before their shell despawns");
+    log.pending_spall.retain(|shell, _| shells.contains(*shell));
     let mut strength = 0.0;
     if let Some(spall) = spall {
         log.witness.resize(TILES.0 * TILES.1, 0.0);
@@ -1000,11 +1090,10 @@ fn read_hits(
             .get(marched.cones_from..)
             .expect("ShellMarched's cone cursor precedes this tick's new cones")
         {
-            assert!(
-                !cone.rays.is_empty(),
-                "a recorded cone has its admitted nonempty direction set"
-            );
-            let weight = 1.0 / cone.rays.len() as f32;
+            if !cone.exited.iter().any(|&source| chunks.contains(source)) {
+                continue; // Another body's exit field belongs to its own inspector.
+            }
+            let weight = cone.ray_share();
             for ray in &cone.rays {
                 if let Some(tile) = witness_at(ray.end) {
                     log.witness[tile] += ray.strength * weight;
@@ -1021,12 +1110,15 @@ fn read_hits(
             strength += cone.strength;
         }
     }
-    log.pending_spall += strength;
+    if strength > 0.0 {
+        *log.pending_spall.entry(marched.shell).or_default() += strength;
+    }
     if !lines.is_empty() {
         queue.0.push(Deposit::Line {
             what: "resolved round".to_string(),
             lines,
-            spall: std::mem::take(&mut log.pending_spall),
+            // A line can emit no exit cone.
+            spall: log.pending_spall.remove(&marched.shell).unwrap_or_default(),
         });
     }
 }
@@ -1266,7 +1358,9 @@ fn apply_deposits(mut p: ApplyParam) {
             if let Some(entity) = wall.entities[chunk] {
                 let left = wall.live.state.pool[chunk]
                     / model::full_pool(&wall.cut.structure.chunks[chunk]);
-                let level = ((1.0 - left) * 10.0).round().clamp(0.0, 10.0) as usize;
+                let level = ((1.0 - left) * HEAT_LEVELS as f32)
+                    .round()
+                    .clamp(0.0, HEAT_LEVELS as f32) as usize;
                 p.commands
                     .entity(entity)
                     .insert(MeshMaterial3d(assets.heat[level].clone()));
@@ -1277,7 +1371,7 @@ fn apply_deposits(mut p: ApplyParam) {
                 p.commands.entity(entity).despawn();
             }
             let material = p.materials.add(StandardMaterial {
-                base_color: Color::srgba(0.78, 0.7, 0.6, 0.75),
+                base_color: rgba(wall_tool().dust_rgba.0),
                 alpha_mode: AlphaMode::Blend,
                 unlit: true,
                 ..default()
@@ -1291,7 +1385,7 @@ fn apply_deposits(mut p: ApplyParam) {
                 Mesh3d(assets.puff.clone()),
                 MeshMaterial3d(material),
                 Transform::from_translation(wall.cut.blocks[chunk].center())
-                    .with_scale(Vec3::splat(0.12)),
+                    .with_scale(Vec3::splat(wall_tool().puff_start_m.0)),
             ));
         }
         for (group, centroid, velocity, spin, structural) in &applied.groups {
@@ -1420,15 +1514,16 @@ fn draw_wall(wall: Option<Res<Wall>>, log: Res<WallLog>, mut gizmos: Gizmos<Wall
         return;
     };
     let mid = layout().min.z + layout().size.z / 2.0;
+    // Resolution: separate face lines from the surface to prevent depth fighting.
     let out = |p: Vec3| p + Vec3::Z * (0.003 * (p.z - mid).signum());
     for (index, joint) in wall.cut.structure.joints.iter().enumerate() {
         if !wall.live.state.cracked[index] || !wall.live.state.live(joint) {
             continue;
         }
         let colour = if wall.structural[index] {
-            Color::srgb(1.0, 0.2, 1.0)
+            rgba(wall_tool().structural_crack_rgba.0)
         } else {
-            Color::srgb(0.2, 1.0, 1.0)
+            rgba(wall_tool().local_crack_rgba.0)
         };
         let face = &wall.cut.faces[index];
         for k in 0..face.len() {
@@ -1438,15 +1533,24 @@ fn draw_wall(wall: Option<Res<Wall>>, log: Res<WallLog>, mut gizmos: Gizmos<Wall
     for cone in &log.cones {
         let strongest = cone.rays.iter().map(|(_, s)| *s).fold(0.0_f32, f32::max);
         for &(end, strength) in &cone.rays {
-            let alpha = (strength / strongest.max(f32::EPSILON)).clamp(0.02, 1.0);
-            gizmos.line(cone.origin, end, Color::srgba(1.0, 0.55, 0.1, alpha));
+            let alpha =
+                (strength / strongest.max(f32::EPSILON)).clamp(wall_tool().ray_alpha_floor.0, 1.0);
+            gizmos.line(
+                cone.origin,
+                end,
+                rgba(wall_tool().cone_rgba.0).with_alpha(alpha),
+            );
         }
     }
-    let marker = Color::srgb(1.0, 0.95, 0.5);
+    let marker = rgba(wall_tool().blast_rgba.0);
     if let Some((origin, radius, rays)) = &log.blast {
         gizmos.sphere(Isometry3d::from_translation(*origin), *radius, marker);
         for &end in rays {
-            gizmos.line(*origin, end, Color::srgba(1.0, 0.95, 0.5, 0.15));
+            gizmos.line(
+                *origin,
+                end,
+                marker.with_alpha(wall_tool().blast_ray_alpha.0),
+            );
         }
     }
 }
@@ -1466,7 +1570,7 @@ fn paint_witness(
         let level = if dose < 1.0 {
             0
         } else {
-            (dose.log10().floor() as usize + 1).min(8)
+            (dose.log10().floor() as usize + 1).min(WITNESS_LEVELS)
         };
         if material.0 != assets.witness[level] {
             material.0 = assets.witness[level].clone();
@@ -1474,7 +1578,7 @@ fn paint_witness(
     }
 }
 
-/// Grow and fade each dust puff over [`wall_tool().puff_life_s.0`], then remove it and its material.
+/// Grow and fade each dust puff over [`WallTool::puff_life_s`], then remove it and its material.
 fn animate_puffs(
     time: Res<Time>,
     mut puffs: Query<(Entity, &DustPuff, &mut Transform)>,
@@ -1488,30 +1592,36 @@ fn animate_puffs(
             commands.entity(entity).despawn();
             continue;
         }
-        transform.scale = Vec3::splat(0.12 + 0.45 * (1.0 - (1.0 - age).powi(3)));
-        if let Some(mut material) = materials.get_mut(&puff.material) {
-            material.base_color.set_alpha(0.75 * (1.0 - age));
-        }
+        transform.scale = Vec3::splat(
+            wall_tool().puff_start_m.0 + wall_tool().puff_growth_m.0 * (1.0 - (1.0 - age).powi(3)),
+        );
+        let mut material = materials
+            .get_mut(&puff.material)
+            .expect("a live dust puff retains its material until it expires");
+        material
+            .base_color
+            .set_alpha(wall_tool().dust_rgba.0[3] * (1.0 - age));
     }
 }
 
 fn spawn_readout(mut commands: Commands, script: Option<Res<WallScript>>) {
+    // Fixture layout: the capture caption and its help row use the screen's upper-left corner.
     let left = Val::Px(if script.is_some() { 6.0 } else { UI_LEFT });
     for (top, help) in [(6.0, false), (30.0, true)] {
         let mut text = commands.spawn((
             Text::new(""),
             TextFont {
-                font_size: FontSize::Px(10.0),
+                font_size: FontSize::Px(wall_tool().readout_font_px.0),
                 ..default()
             },
-            TextColor(Color::srgb(0.92, 0.94, 1.0)),
-            BackgroundColor(Color::srgba(0.0, 0.0, 0.0, 0.5)),
+            TextColor(rgba(wall_tool().readout_rgba.0)),
+            BackgroundColor(rgba(wall_tool().readout_background_rgba.0)),
             Visibility::Hidden,
             Node {
                 position_type: PositionType::Absolute,
                 top: Val::Px(top),
                 left,
-                padding: UiRect::all(Val::Px(4.0)),
+                padding: UiRect::all(Val::Px(wall_tool().readout_padding_px.0)),
                 ..default()
             },
         ));

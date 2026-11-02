@@ -3120,10 +3120,32 @@ fn exposed_walk(slabs: &[(Entity, f64, f64, f32)]) -> DiscWalk {
 fn hard_volume_records_use_only_exposed_contacts() {
     let plate = Entity::from_raw_u32(1).unwrap();
     let module = Entity::from_raw_u32(2).unwrap();
-    for (plate_span, module_span, rest, exposed, perforated) in [
-        ((0.25, 1.0), (0.75, 1.5), None, (1.0, 1.5), true),
-        ((1.0, 1.75), (0.5, 1.5), Some(1.25), (0.5, 1.0), true),
-        ((0.25, 1.0), (0.75, 1.5), Some(1.5), (1.0, 1.5), false),
+    for (plate_span, module_span, rest, target, exposed, perforated) in [
+        ((0.25, 1.0), (0.75, 1.5), None, module, (1.0, 1.5), true),
+        (
+            (1.0, 1.75),
+            (0.5, 1.5),
+            Some(1.25),
+            module,
+            (0.5, 1.0),
+            true,
+        ),
+        (
+            (0.25, 1.0),
+            (0.75, 1.5),
+            Some(1.5),
+            module,
+            (1.0, 1.5),
+            false,
+        ),
+        (
+            (1.0, 1.75),
+            (0.5, 1.5),
+            Some(1.25),
+            plate,
+            (1.0, 1.25),
+            false,
+        ),
     ] {
         let mut walked = exposed_walk(&[
             (plate, plate_span.0, plate_span.1, 1000.0),
@@ -3132,7 +3154,7 @@ fn hard_volume_records_use_only_exposed_contacts() {
         // Fixture: an exposed rim sample, offset from the shared axis readout.
         walked.offsets[0] = Vec3::X * 0.03;
         let doses = [Dose {
-            address: module,
+            address: target,
             amount: 1.0,
             source: DoseSource::Line {
                 chord: 0.5,
@@ -3149,7 +3171,7 @@ fn hard_volume_records_use_only_exposed_contacts() {
         let crossed =
             volume_crossings(&walked, &walked.events[0], &exchanges, rest, &|point| point);
         let contacts = volume_contacts(&walked, &walked.events[0], rest, &|point| point);
-        let sampled = &contacts[&module];
+        let sampled = &contacts[&target];
         assert_eq!(
             sampled.first().unwrap().0,
             Vec3::X * 0.03 + Vec3::Z * exposed.0

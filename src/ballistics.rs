@@ -1782,6 +1782,8 @@ pub struct SpallRay {
 /// strength and marched directions. The recorder reads its strength to reconstruct the field.
 #[derive(Clone)]
 pub struct SpallCone {
+    /// The game's damage-model source volumes, retained for authority-local effect attribution.
+    pub(crate) exited: Vec<Entity>,
     pub origin: Vec3,
     pub axis: Dir3,
     /// The field law and ratio its directions were weighted by: its exit layer's substance's.
@@ -1792,6 +1794,18 @@ pub struct SpallCone {
     /// across the body times the debris share `κ` and the exit material's strength ratio `r`.
     pub strength: f32,
     pub rays: Vec<SpallRay>,
+}
+
+impl SpallCone {
+    /// The game's damage model records one admitted, nonempty direction set per exit field.
+    /// Each direction represents this share of the emitted field.
+    pub(crate) fn ray_share(&self) -> f32 {
+        assert!(
+            !self.rays.is_empty(),
+            "a recorded cone has its admitted nonempty direction set"
+        );
+        1.0 / self.rays.len() as f32
+    }
 }
 
 /// A burst's field (design doc §5a, "The burst"): thrown from the burst point about the round's
@@ -3945,6 +3959,7 @@ fn throw_spall_cone(
         );
     let rays = walk_field(&throw, &spread, dose, context, is_box);
     spall.cones.push(SpallCone {
+        exited: source.exited.clone(),
         origin: source.position,
         axis: throw.axis,
         field: spread.field(),
@@ -6596,6 +6611,26 @@ pub(crate) mod march_tests {
         assert_eq!(lines[0].crossing.energy, shock);
         assert_eq!(lines[0].entrance_energy, shock);
         assert_eq!(lines[0].entrance_momentum, lines[0].momentum);
+    }
+
+    /// The game's damage-model inspector relies on the real throw retaining its emitting solids.
+    /// Fixture: one perforated plate; replacing source identity with an empty list fails.
+    #[test]
+    fn a_live_exit_cone_retains_its_emitting_volume() {
+        let mut app = world_with_plate(Vec3::new(3.0, 0.05, 3.0), Vec3::Y * 50.0);
+        let plate = app
+            .world_mut()
+            .query_filtered::<Entity, With<BallisticVolume>>()
+            .single(app.world())
+            .unwrap();
+        let shell = spawn_round(&mut app, FIXTURE_88, Vec3::Y * 51.0, Vec3::NEG_Y * 800.0);
+        app.update();
+        let cones = &app.world().get::<SpallMarks>(shell).unwrap().cones;
+        assert!(
+            !cones.is_empty(),
+            "the fixture must emit a field through real playback"
+        );
+        assert!(cones.iter().all(|cone| cone.exited.contains(&plate)));
     }
 
     /// The game's damage model must deliver the whole resolved momentum exchange independently

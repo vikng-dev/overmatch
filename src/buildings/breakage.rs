@@ -849,7 +849,7 @@ fn read_shell(
             "ShellMarched's cone cursor is its cone list's length before the step; lists only grow",
         );
         for cone in cones {
-            let share = 1.0 / cone.rays.len().max(1) as f32;
+            let share = cone.ray_share();
             deposit.rays.extend(cone.rays.iter().map(|ray| RayDeposit {
                 end: ray.end,
                 direction: ray.direction,

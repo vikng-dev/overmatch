@@ -1962,9 +1962,8 @@ fn volume_contacts(
                 .iter()
                 .filter(|c| c.material.factor == strongest)
             {
-                let start = contact.start.max(encounter.start);
-                let end = contact.end.min(encounter.end);
-                let end = rest.map_or(end, |stop| end.min(stop));
+                let start = contact.start;
+                let end = rest.map_or(contact.end, |stop| contact.end.min(stop));
                 if end <= start {
                     continue; // This exposed contact lies beyond the resolved rest.
                 }
