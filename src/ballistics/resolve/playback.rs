@@ -44,7 +44,6 @@ enum Effect {
     },
     Cone {
         cone: Option<SpallCone>,
-        gated: usize,
         doses: Vec<(Entity, u64, DoseContext)>,
     },
     Finish,
@@ -308,7 +307,6 @@ impl Playback {
                     moment,
                     Effect::Cone {
                         cone: spall.cones.pop(),
-                        gated: spall.gated,
                         doses,
                     },
                 ));
@@ -663,13 +661,12 @@ impl Playback {
                     });
                     removed += shell.dose.settle(health, self.deposit, mark);
                 }
-                Effect::Cone { cone, gated, doses } => {
+                Effect::Cone { cone, doses } => {
                     for &(address, units, context) in doses {
                         shell
                             .dose
                             .add_units(address, units, self.dose_context(context, *moment));
                     }
-                    shell.spall.gated += gated;
                     let mark = self
                         .mark
                         .expect("an exit field follows its crossing's entrance mark");

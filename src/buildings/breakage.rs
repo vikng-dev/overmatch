@@ -877,7 +877,7 @@ fn read_shell(
                 blow: Vec3::ZERO,
             }));
         }
-        // No recorded field means the source emitted no field above the HP field's quantum.
+        // A source carrying no field energy emits no recorded field.
         if let (Some(burst), Some(field)) = (marched.burst, spall.burst.as_ref()) {
             deposit.rays.extend(RayDeposit::casing(field, &burst));
         }

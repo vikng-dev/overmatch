@@ -1898,19 +1898,73 @@ fn a_cone_reaches_matter_independently_of_tank_ownership() {
     }
 }
 
-/// THE POOL QUANTUM GATE GATES HP ONLY: a body exit whose cone's whole emission `S/2` converts to
-/// no pool unit (`ballistics::pool_units_of`, the quantum a pool keeps) at the cone's unit doses
-/// no box and counts gated, yet is still thrown and
-/// recorded, so a building reads its joules whatever the HP unit; one above it doses, however far
-/// below a whole point: a pool keeps every pool unit, so a gate at a point would drop a dose the
-/// pool accumulates. Fixture: an 88 at 800 m/s through a factor-10 slab as thick as the readout
-/// drop at which it loses 0.15 HP points' worth of energy at the cone's authored HP per joule
-/// lost, below the display's whole point before the exit's strength ratio (DERIVED from the force
-/// law, the slab about 3 mm at the shipped unit); through the same slab at a thousandth of the
-/// factor, so it spends and loses a thousandth as much (the energy drop is linear in so small a
-/// readout drop) (DERIVED); and through 20 mm of steel.
+/// The game's damage model rounds a box's accumulated shot dose, including fields individually
+/// below one pool unit. Pool owners rely on two fixture fields of 0.0003 HP removing one unit
+/// together, even when playback settles after each field. One direction reaches one hard box.
 #[test]
-fn a_cone_below_the_pool_quantum_doses_no_pool_and_is_still_thrown() {
+fn two_subquantum_fields_reach_one_pool_unit_together() {
+    use crate::ballistics::{ShotDose, SpallMarks};
+    let (mut app, boxes) = field_world(|app| vec![slab_below(app, -1.0, 0.2, 10.0, true)]);
+    let target = boxes[0];
+    app.insert_resource(crate::ballistics::spall_cone::SpallLaw(
+        ConeShape::new(AxisRule::ExitDirection, 1).unwrap(),
+    ));
+    let lost = app
+        .world_mut()
+        .run_system_once(
+            move |world: ProjectileMarchWorld,
+                  colliders: Colliders,
+                  mut health: Query<&mut ComponentHealth>| {
+                let context = ResolveContext {
+                    world: &world,
+                    colliders: &colliders,
+                    deposit: true,
+                    laws: WalkLaws::default(),
+                };
+                let source = SpallSource {
+                    t: 0.0,
+                    position: Vec3::ZERO,
+                    face: None,
+                    direction: Vec3::NEG_Y,
+                    exited: Vec::new(),
+                    spend: 0.0,
+                    emitted: (0.0003 / crate::ballistics::spall_cone::cone_unit().hp_per_joule())
+                        as f32,
+                    debris_ratio: 2.4,
+                    strength_ratio: 1.0,
+                    exit_speed: 0.0,
+                };
+                let mut shot = ShotDose::default();
+                let mut spall = SpallMarks::default();
+                let mut lost = Vec::new();
+                for mark in 0..2 {
+                    assert!(crate::ballistics::throw_spall_cone(
+                        &mut spall,
+                        &mut shot,
+                        &source,
+                        &context,
+                        &|volume| volume == target
+                    ));
+                    lost.push(shot.settle(&mut health, true, mark));
+                }
+                lost
+            },
+        )
+        .unwrap();
+    assert_eq!(
+        lost,
+        [0, 1],
+        "the pool rounds the shot total, not each field"
+    );
+    let health = app.world().get::<ComponentHealth>(target).unwrap();
+    assert_eq!(health.capacity() - health.held(), 1);
+}
+
+/// The game's damage model records every nonzero cone's receiver dose, including below the
+/// pool quantum. Environment energy and later shot contributions rely on the same field walk.
+/// Fixture: thin soft slabs and a steel slab, with an HP-bearing receiver below every source.
+#[test]
+fn a_nonzero_cone_always_records_its_hp_receivers() {
     let energy = crate::ballistics::spall_cone::cone_energy();
     let per_joule_lost = crate::ballistics::spall_cone::cone_unit().hp_per_joule()
         * f64::from(energy.debris_share());
@@ -1920,11 +1974,7 @@ fn a_cone_below_the_pool_quantum_doses_no_pool_and_is_still_thrown() {
     // Reference-mm over the factor's reference-mm per metre.
     let slab = (capability(FIXTURE_88, v_in) - capability(FIXTURE_88, v_out)) / 10.0;
     let unit_factor = 10.0 / crate::ballistics::POOL_UNITS_PER_HP as f32;
-    for (thickness, factor, doses) in [
-        (slab, unit_factor, false),
-        (slab, 10.0, true),
-        (0.02, STEEL, true),
-    ] {
+    for (thickness, factor) in [(slab, unit_factor), (slab, 10.0), (0.02, STEEL)] {
         let mut app = world_with_trimesh_plates(&[]);
         volume(
             &mut app,
@@ -1932,6 +1982,13 @@ fn a_cone_below_the_pool_quantum_doses_no_pool_and_is_still_thrown() {
             Transform::from_translation(Vec3::new(DROP_FROM.x, 1.0 - 0.5 * thickness, DROP_FROM.z)),
             factor,
             None,
+        );
+        let receiver = volume(
+            &mut app,
+            Vec3::new(20.0, 0.1, 20.0),
+            Transform::from_translation(Vec3::new(DROP_FROM.x, 0.0, DROP_FROM.z)),
+            0.0,
+            Some(FIELD_HP),
         );
         app.insert_resource(RetainSpentShells(true));
         for _ in 0..8 {
@@ -1952,14 +2009,22 @@ fn a_cone_below_the_pool_quantum_doses_no_pool_and_is_still_thrown() {
             })
             .sum();
         assert_eq!(
-            (spall.cones.len(), spall.gated, counted),
-            (1, usize::from(!doses), 1),
+            (spall.cones.len(), counted),
+            (1, 1),
             "factor {factor}: {:?}",
             spall
                 .cones
                 .iter()
                 .map(|cone| cone.strength)
                 .collect::<Vec<_>>()
+        );
+        assert!(
+            spall.cones[0]
+                .rays
+                .iter()
+                .flat_map(|ray| &ray.doses)
+                .any(|(address, energy)| *address == receiver && *energy > 0.0),
+            "factor {factor}: the HP-bearing receiver keeps the field contribution"
         );
         assert!(
             spall.cones[0].strength > 0.0,

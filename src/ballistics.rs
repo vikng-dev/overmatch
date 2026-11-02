@@ -1796,10 +1796,6 @@ pub struct SpallMarks {
     pub cones: Vec<SpallCone>,
     /// The round's burst field, once it has burst and thrown one.
     pub burst: Option<BurstField>,
-    /// Fields reached whose emission was below the pool quantum, so they dosed no box: body exits'
-    /// cones and a burst's. One carrying energy is still thrown and recorded, without doses, for
-    /// the joules a building reads; one carrying none is not thrown.
-    pub gated: usize,
 }
 
 /// Catch-up age beyond which cosmetic muzzle/impact reads are suppressed. Shared with muzzle VFX;
@@ -3739,8 +3735,8 @@ fn next_surface(
 /// burst's unit ([`spall_cone::BurstFields::unit`]): nothing the round lost reaching `flight`
 /// enters it. Its field is the ring at ratio `speed / v_s`
 /// ([`spall_cone::BurstFields::field`]), walked through every spatially reached volume, leaving
-/// none. A field whose emission converts to no pool unit is not thrown, as a cone's is not
-/// ([`throw_spall_cone`]). The game's damage model requires a derived field to stay inside the
+/// none. Every nonzero field contributes to the shot tally before pool rounding. The game's
+/// damage model requires a derived field to stay inside the
 /// law's domain: the round and law are validated before play, so a contradiction is a bug.
 fn throw_burst(
     shell: &mut MarchingShell,
@@ -3768,10 +3764,6 @@ fn throw_burst(
         throw.strength.is_finite() && throw.strength >= 0.0,
         "the game's damage model derives finite nonnegative burst strength from validated energy",
     );
-    let doses_pools = throw.reaches_a_pool_unit();
-    if !doses_pools {
-        shell.spall.gated += 1;
-    }
     if throw.strength == 0.0 {
         return; // A field carrying no energy has nothing for a pool or a building.
     }
@@ -3780,13 +3772,7 @@ fn throw_burst(
         "the game's damage model derives a burst field from a validated round, finite speed and \
          configured field law; it must remain inside that law's domain",
     );
-    let rays = walk_field(
-        &throw,
-        &spread,
-        doses_pools.then_some(&mut *shell.dose),
-        context,
-        is_box,
-    );
+    let rays = walk_field(&throw, &spread, shell.dose, context, is_box);
     shell.spall.burst = Some(BurstField {
         origin: throw.origin,
         axis: throw.axis,
@@ -3808,26 +3794,10 @@ struct FieldThrow<'a> {
     exited: &'a [Entity],
 }
 
-impl FieldThrow<'_> {
-    /// Whether the field's whole emission `S/2` converts to at least one pool unit at its unit
-    /// ([`field_units`], the rate every one of its doses converts at; [`pool_units_of`], the
-    /// quantum a pool keeps). `S/2` is the most one box can take from it, since every direction
-    /// doses a box at most once and the field's weights emit `S/2` in all
-    /// ([`spall_cone::EMITTED_SHARE`]). It gates the field's HP doses only: a building reads the
-    /// field's joules whatever its HP unit, so a field below it is still walked.
-    fn reaches_a_pool_unit(&self) -> bool {
-        pool_units_of(field_units(
-            self.strength * spall_cone::EMITTED_SHARE,
-            self.unit,
-        )) > 0
-    }
-}
-
 /// Walk every direction of `spread` about `throw`'s axis from its origin, direction `k` at
 /// strength `S·f_k`, standing for `1/N` of the field, through every spatially reached volume
 /// ([`resolve::field_direction`]), adding its doses to `dose`; returns the rays in stratum order.
-/// With no `dose` (a field below the pool quantum, [`FieldThrow::reaches_a_pool_unit`]) the rays
-/// dose nothing and record no dose: only their ends and strengths, which a building reads.
+/// Every contribution reaches the shot tally before its accumulated total rounds to pool units.
 /// Ownership is attribution only: neighboring tanks and unowned environment matter resist and
 /// receive the same field. Material presence and occlusion decide where each direction stops.
 /// The game's damage model requires every direction and witness pass to pair; a contradiction
@@ -3835,7 +3805,7 @@ impl FieldThrow<'_> {
 fn walk_field(
     throw: &FieldThrow<'_>,
     spread: &spall_cone::Spread,
-    mut dose: Option<&mut ShotDose>,
+    dose: &mut ShotDose,
     context: &resolve::ResolveContext<'_, '_, '_>,
     is_box: &dyn Fn(Entity) -> bool,
 ) -> Vec<SpallRay> {
@@ -3857,22 +3827,18 @@ fn walk_field(
             weight,
         );
         let ray = walked.unwrap_or_else(|error| error.panic());
-        let doses = match dose.as_deref_mut() {
-            Some(dose) => {
-                dose.add_field(
-                    &ray.doses,
-                    throw.unit,
-                    DoseContext::Field {
-                        origin: throw.origin,
-                    },
-                );
-                ray.doses
-                    .iter()
-                    .map(|dose| (dose.address, dose.amount))
-                    .collect()
-            }
-            None => Vec::new(),
-        };
+        dose.add_field(
+            &ray.doses,
+            throw.unit,
+            DoseContext::Field {
+                origin: throw.origin,
+            },
+        );
+        let doses = ray
+            .doses
+            .iter()
+            .map(|dose| (dose.address, dose.amount))
+            .collect();
         rays.push(SpallRay {
             direction: ray_dir,
             end: ray.end,
@@ -3888,10 +3854,8 @@ fn walk_field(
 ///
 /// The game's damage-model strength `S` is [`walk::SpallSource::strength`] (J): the cone carries
 /// its share of the energy its round lost across the body ([`walk::SpallSource::carried`]), and
-/// its doses convert at the cone's unit ([`spall_cone::cone_unit`]). A cone whose whole emission
-/// converts to no pool unit ([`FieldThrow::reaches_a_pool_unit`]) doses no box, and is counted
-/// gated; it is still thrown and recorded, without doses, for the joules a building reads, unless
-/// it carries none. The cone is spread
+/// its doses convert at the cone's unit ([`spall_cone::cone_unit`]). Every nonzero cone is walked,
+/// recorded and tallied, including contributions below the pool quantum. The cone is spread
 /// by the ball law at the source's ratio ([`walk::SpallSource::debris_ratio`]): direction `k` of
 /// the spread ([`spall_cone::Spread`]) carries `S·f_k` and stands for `1/N` of the cone, walked
 /// through every spatially reached volume ([`walk_field`]). Directions still leaving the source
@@ -3927,10 +3891,6 @@ fn throw_spall_cone(
         unit: spall_cone::cone_unit(),
         exited: &source.exited,
     };
-    let doses_pools = throw.reaches_a_pool_unit();
-    if !doses_pools {
-        spall.gated += 1;
-    }
     if strength == 0.0 {
         return false; // A cone carrying no energy has nothing for a pool or a building.
     }
@@ -3940,13 +3900,7 @@ fn throw_spall_cone(
             "the game's damage model takes a spall source's ratio from its load-validated \
              material; the derived field must stay inside the configured law's domain",
         );
-    let rays = walk_field(
-        &throw,
-        &spread,
-        doses_pools.then_some(dose),
-        context,
-        is_box,
-    );
+    let rays = walk_field(&throw, &spread, dose, context, is_box);
     spall.cones.push(SpallCone {
         origin: source.position,
         axis: throw.axis,
@@ -4321,7 +4275,7 @@ mod tests {
     /// joules, at the one energy rate ([`energy_dose::joules_per_hp`]); a field deposit, joules
     /// too, at its own mechanism's unit ([`field_units`]), never at the energy rate; a witness's
     /// chord dose at [`HP_PER_REFERENCE_MM`]; mixed deposits sum as whole dose units, in either
-    /// order, before the one conversion. The pool quantum gate and the pen cam's reading of which
+    /// order, before the one conversion. The shot tally and the pen cam's reading of which
     /// boxes a field knocks out rely on every field deposit converting at its field's unit, and
     /// every hard pool's line dose at the one energy rate. Fixture doses: three HP points' worth of
     /// joules in the field at a fixture unit of 1/700 HP per joule (0.7 HP at the shipped energy

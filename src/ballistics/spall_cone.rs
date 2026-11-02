@@ -1260,7 +1260,7 @@ mod tests {
     /// CLASS INVARIANT 1, EXACT EMISSION: with nothing in the field, `(1/N) Σ f_k = ½` to float
     /// precision at every `N`, under the ball at every `λ`, above and below 1, and under every
     /// ring, so a field emits `S/2` whatever its width and resolution. The cone's and the burst's
-    /// energy shares (their potency) and the throw's HP-quantum gate rely on it.
+    /// energy budgets and HP potency rely on it.
     /// Sampling the density at each stratum's midpoint in place of the stratum's share fails at
     /// small `N`; a dropped `N/2` fails everywhere.
     #[test]

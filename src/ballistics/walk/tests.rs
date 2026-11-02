@@ -2008,7 +2008,7 @@ fn equal_factor_plates_in_contact_throw_one_cone_with_the_summed_spend() {
 /// whatever its mass, calibre or speed: the strengths order as the energies lost. Fixture bodies
 /// and speeds, all perforating one 50 mm fixture plate of the reference factor head-on (a strength
 /// ratio of 1). A strength read from the spend, the speed ratio, the hole's calibre or an HP unit
-/// fails here; the throw's pool quantum gate, every cone's potency, the pen cam's bands and the
+/// fails here; every cone's potency, the pen cam's bands and the
 /// energy a building crushes with rest on it.
 #[test]
 fn a_round_that_loses_more_energy_at_a_plate_throws_a_stronger_cone() {

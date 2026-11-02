@@ -132,12 +132,11 @@ fn record_scenario(scenario: &Scenario) -> PenetrationReport {
 }
 
 /// [`record_scenario`] under `law`'s cones (the shipped shape's when `None`), the wall time (s) its
-/// march steps took, and the fields its body exits threw below the pool quantum, dosing no pool
-/// ([`SpallMarks::gated`]).
+/// march steps took. Every nonzero field is walked and recorded with its addressed doses.
 fn record_timed(
     scenario: &Scenario,
     law: Option<&spall_cone::ConeShape>,
-) -> (PenetrationReport, f64, usize) {
+) -> (PenetrationReport, f64) {
     record_edited(scenario, law, |_| {})
 }
 
@@ -146,7 +145,7 @@ fn record_edited(
     scenario: &Scenario,
     law: Option<&spall_cone::ConeShape>,
     edit: impl FnOnce(&mut App),
-) -> (PenetrationReport, f64, usize) {
+) -> (PenetrationReport, f64) {
     let mut app = scenario_world_under(scenario, law);
     edit(&mut app);
     let tank = app.world().resource::<ProbeTank>().0;
@@ -208,13 +207,9 @@ fn record_edited(
         round: key.to_owned(),
         vehicle: Some(crate::tank::TANK_SPEC_PATH.to_owned()),
     };
-    let gated = app
-        .world()
-        .get::<SpallMarks>(shell)
-        .map_or(0, |marks| marks.gated);
     let report = record::report(app.world_mut(), &struck, shell, &facts)
         .unwrap_or_else(|| panic!("{}: the shot opens no pen cam", scenario.name));
-    (report, marched, gated)
+    (report, marched)
 }
 
 /// The distance along `direction` (unit) from `origin` to the nearest triangle of `shape`, if the
@@ -453,7 +448,7 @@ fn bless_scenarios() {
 }
 
 /// The server cost of one cone throw under the shipped law at each of [`COST_DIRECTIONS`]
-/// (ignored; run it on demand), and the cones the pool quantum kept from being thrown. Each
+/// (ignored; run it on demand). Every nonzero cone is thrown. Each
 /// penetrating scenario's march steps are timed under the shipped shape at `N` directions and at
 /// one; the throw's cost is the difference over the cones thrown, scaled from `N − 1` to `N`
 /// directions. The best of [`COST_RUNS`] runs is taken.
@@ -464,7 +459,7 @@ fn spall_law_cost() {
     let best = |scenario: &Scenario, law: &spall_cone::ConeShape| {
         (0..COST_RUNS)
             .map(|_| {
-                let (report, marched, _) = record_timed(scenario, Some(law));
+                let (report, marched) = record_timed(scenario, Some(law));
                 (marched, report.spall.len())
             })
             .fold((f64::INFINITY, 0), |(t, _), (s, cones)| (t.min(s), cones))
@@ -489,16 +484,6 @@ fn spall_law_cost() {
             1000.0 * extra / cones.max(1) as f64 * n / (n - 1.0).max(1.0)
         );
     }
-    let (mut thrown, mut gated) = (0, 0);
-    for scenario in &scenarios() {
-        let (report, _, kept) = record_timed(scenario, None);
-        thrown += report.spall.len();
-        gated += kept;
-    }
-    println!(
-        "across {} scenarios: {thrown} cones thrown, {gated} below the pool quantum dosing no pool",
-        scenarios().len()
-    );
 }
 
 /// The direction counts the throw's cost is measured at.
