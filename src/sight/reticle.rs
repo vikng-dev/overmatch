@@ -297,8 +297,8 @@ fn update_range_readout(
     }
 }
 
-/// Spawn the ranging reticle: the zero mark and the pool of range graduations (200 m steps, majors
-/// numbered in hundreds of metres). Every mark is absolutely positioned — the whole graticule is
+/// Spawn the ranging reticle: the zero mark and the authored graduation pool, numbered in hundreds
+/// of metres. Every mark is absolutely positioned — the whole graticule is
 /// placed against the gun's sight line each frame ([`update_ranging_reticle`]), which is not screen
 /// centre at `sight::GUNNER_BLEND`. All hidden until shown in the optic; a mark's height is written
 /// where it is placed ([`place_mark`]).
@@ -316,9 +316,10 @@ fn spawn_ranging_reticle(mut commands: Commands, fonts: Res<UiFonts>, look: Res<
         Visibility::Hidden,
     ));
 
-    let mut range = 200.0_f32;
-    while range <= 4000.0 {
-        let major = (range as i32) % 400 == 0;
+    for graduation in 1..=look.range_extent_m.0 / look.graduation_spacing_m.0 {
+        let range = graduation * look.graduation_spacing_m.0;
+        let major = range.is_multiple_of(look.major_interval_m.0);
+        let range = f32::from(range);
         let width = look.tick_width(major);
         let mut tick = commands.spawn((
             FlowScoped(Flow::InMatch),
@@ -335,7 +336,7 @@ fn spawn_ranging_reticle(mut commands: Commands, fonts: Res<UiFonts>, look: Res<
             // Label rides the tick: an absolute child offsets from the tick's own top-left.
             tick.with_children(|parent| {
                 parent.spawn((
-                    Text::new(format!("{}", (range as i32) / 100)),
+                    Text::new(format!("{}", range / 100.0)),
                     TextFont {
                         // Regular weight keeps the graduation numbers legible at the authored size.
                         font: fonts.body.clone().into(),
@@ -352,7 +353,6 @@ fn spawn_ranging_reticle(mut commands: Commands, fonts: Res<UiFonts>, look: Res<
                 ));
             });
         }
-        range += 200.0;
     }
 }
 
@@ -466,7 +466,7 @@ fn update_ranging_reticle(
                     .world_to_viewport(cam_transform, origin + dir)
                     .ok()
                     // A mark past the viewport's edge is HIDDEN, never clamped onto it: the scale
-                    // runs out to 4 km, far beyond the optic's reach, and `world_to_viewport`
+                    // extends beyond the optic's reach, and `world_to_viewport`
                     // answers off-screen coordinates for anything in front of the camera (it only
                     // fails behind the near plane / past the far plane).
                     .filter(|screen| viewport.contains(*screen))
@@ -984,6 +984,16 @@ mod tests {
     /// Angular tolerance (rad) for a law asserted through the projection round trip: ~0.6 px here.
     const EPS: f32 = 1e-4;
 
+    fn fixture_look() -> GraticuleLook {
+        use crate::provenance::Sourced;
+        let mut look = GraticuleLook::load();
+        // Fixture: the geometric laws sample a complete scale with DIALED on a graduation.
+        look.graduation_spacing_m = Sourced(200);
+        look.major_interval_m = Sourced(400);
+        look.range_extent_m = Sourced(4000);
+        look
+    }
+
     /// A superelevation that RISES with range across the whole graticule, so every graduation
     /// interpolates rather than saturating on an end row.
     fn table() -> RangeTable {
@@ -1003,7 +1013,7 @@ mod tests {
         }
     }
 
-    /// The sight picture as the client draws it: the shipped graticule pool, a gun node laid where
+    /// The sight picture as the client draws it: the production graduation spawner with inline spacing, a gun node laid where
     /// the test puts it, and a camera the test poses where the blend would put it (on the sight line
     /// at `k = 0`, off it above). Nothing here re-implements the placement law — the shipped system
     /// runs.
@@ -1018,7 +1028,7 @@ mod tests {
 
     impl SightPicture {
         fn new(lay: Quat) -> Self {
-            Self::with_look(lay, GraticuleLook::load())
+            Self::with_look(lay, fixture_look())
         }
 
         fn with_look(lay: Quat, look: GraticuleLook) -> Self {
@@ -1386,6 +1396,9 @@ mod tests {
         // Fixture: deliberately distinct sizes, offsets and colour expose any kept code taste.
         let look = ron::from_str::<GraticuleLook>(
             r#"(
+            graduation_spacing_m: (300, Fixture("inline graduation spacing")),
+            major_interval_m: (600, Fixture("inline numbered interval")),
+            range_extent_m: (1800, Fixture("inline scale extent")),
             hairline_physical_px: (3.0, Fixture("inline thickness")),
             line_width_ui_px: (57.0, Fixture("inline zero width")),
             major_tick_width_ui_px: (31.0, Fixture("inline major width")),
@@ -1399,6 +1412,13 @@ mod tests {
         .unwrap();
         let mut picture = SightPicture::with_look(Quat::IDENTITY, look);
         picture.run();
+        let mut ranges = picture
+            .ticks
+            .iter()
+            .map(|(_, range)| *range)
+            .collect::<Vec<_>>();
+        ranges.sort_by(f32::total_cmp);
+        assert_eq!(ranges, vec![300.0, 600.0, 900.0, 1200.0, 1500.0, 1800.0]);
         let world = &mut picture.world;
         let line = world.get::<Node>(picture.line).unwrap();
         assert_eq!(px(line.width), 57.0);
@@ -1413,6 +1433,7 @@ mod tests {
         {
             assert_eq!(background.0, colour);
             if let Some(tick) = tick {
+                assert_eq!(tick.major, tick.range % 600.0 == 0.0);
                 assert_eq!(px(node.width), if tick.major { 31.0 } else { 17.0 });
             }
         }
@@ -1425,10 +1446,7 @@ mod tests {
             assert_eq!(text_colour.0, colour);
             labels += 1;
         }
-        assert!(
-            labels > 0,
-            "the production spawner supplies numbered graduations"
-        );
+        assert_eq!(labels, 3, "each major interval has one numbered graduation");
     }
 
     /// **Every mark is a hairline: one physical row, at every scale, on the sight line.** The
@@ -1469,7 +1487,7 @@ mod tests {
                 .with_scale_factor_override(1.0),
             ..default()
         })))
-        .insert_resource(GraticuleLook::load())
+        .insert_resource(fixture_look())
         .insert_resource(SightMode::Gunner)
         .insert_resource(Ranging { range: DIALED })
         .insert_resource(UiFonts {

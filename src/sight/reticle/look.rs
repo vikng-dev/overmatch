@@ -11,6 +11,9 @@ const DATA: &str = include_str!("../../../assets/ui/graticule.ron");
 #[derive(Resource, Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(super) struct GraticuleLook {
+    pub(super) graduation_spacing_m: Sourced<u16>,
+    pub(super) major_interval_m: Sourced<u16>,
+    pub(super) range_extent_m: Sourced<u16>,
     pub(super) hairline_physical_px: Sourced<f32>,
     pub(super) line_width_ui_px: Sourced<f32>,
     pub(super) major_tick_width_ui_px: Sourced<f32>,
@@ -41,6 +44,36 @@ impl GraticuleLook {
 
     fn parse(text: &str) -> Result<Self, String> {
         let data: Self = from_shipped_str(FILE, text)?;
+        for (field, value) in [
+            ("graduation_spacing_m", data.graduation_spacing_m.0),
+            ("major_interval_m", data.major_interval_m.0),
+            ("range_extent_m", data.range_extent_m.0),
+        ] {
+            if value == 0 {
+                return Err(format!(
+                    "{FILE}: {field} must be positive; author a nonzero distance in metres"
+                ));
+            }
+        }
+        if !data
+            .major_interval_m
+            .0
+            .is_multiple_of(data.graduation_spacing_m.0)
+        {
+            return Err(format!(
+                "{FILE}: major_interval_m must be a multiple of graduation_spacing_m; put numbered marks on graduations"
+            ));
+        }
+        if !data
+            .range_extent_m
+            .0
+            .is_multiple_of(data.graduation_spacing_m.0)
+            || data.range_extent_m.0 < data.major_interval_m.0
+        {
+            return Err(format!(
+                "{FILE}: range_extent_m must be a multiple of graduation_spacing_m and include a major interval; author a complete scale"
+            ));
+        }
         for (field, value) in [
             ("hairline_physical_px", data.hairline_physical_px.0),
             ("line_width_ui_px", data.line_width_ui_px.0),
@@ -109,6 +142,9 @@ mod tests {
     fn check_admission(text: &str) {
         GraticuleLook::parse(text).unwrap();
         for field in [
+            "graduation_spacing_m",
+            "major_interval_m",
+            "range_extent_m",
             "hairline_physical_px",
             "line_width_ui_px",
             "major_tick_width_ui_px",
@@ -127,6 +163,9 @@ mod tests {
             assert!(error.contains(FILE) && error.contains(field), "{error}");
         }
         for (field, value) in [
+            ("graduation_spacing_m", "0"),
+            ("major_interval_m", "0"),
+            ("range_extent_m", "0"),
             ("hairline_physical_px", "0.0"),
             ("line_width_ui_px", "-1.0"),
             ("major_tick_width_ui_px", "inf"),
@@ -137,6 +176,19 @@ mod tests {
             ("colour_srgba", "(0.0, 0.0, 0.0, 2.0)"),
         ] {
             let error = GraticuleLook::parse(&replace_field(text, field, value)).unwrap_err();
+            assert!(error.contains(FILE) && error.contains(field), "{error}");
+        }
+        // Fixture: complete metre intervals make each malformed relationship independent of
+        // the shipped spacing, extent and numbered interval.
+        let scale = replace_field(text, "graduation_spacing_m", "300");
+        let scale = replace_field(&scale, "major_interval_m", "600");
+        let scale = replace_field(&scale, "range_extent_m", "1800");
+        for (field, value) in [
+            ("major_interval_m", "500"),
+            ("range_extent_m", "1700"),
+            ("range_extent_m", "300"),
+        ] {
+            let error = GraticuleLook::parse(&replace_field(&scale, field, value)).unwrap_err();
             assert!(error.contains(FILE) && error.contains(field), "{error}");
         }
         let error = GraticuleLook::parse(&text.replace("Taste(", "Fixture(")).unwrap_err();

@@ -1,5 +1,8 @@
 // Sight presentation only. Widths and label offsets use UI pixels; mark thickness uses physical pixels.
 (
+    graduation_spacing_m: (200, Taste("graticule range scale: spacing of intermediate graduations in metres")),
+    major_interval_m: (400, Taste("graticule range scale: spacing of numbered graduations in metres")),
+    range_extent_m: (4000, Taste("graticule range scale: furthest authored graduation in metres")),
     hairline_physical_px: (1.0, Taste("graticule: one opaque device row keeps the sight picture clear at every scale")),
     line_width_ui_px: (96.0, Taste("graticule: broad zero reference bar")),
     major_tick_width_ui_px: (24.0, Taste("graticule: numbered graduation width")),
