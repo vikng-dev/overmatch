@@ -645,17 +645,21 @@ there is no checkpoint table, feature flag or second implementation in code.
 are legible through reload, driving and slew, or whether discrete checkpoints communicate them
 better. Drive preserves full driver intent, service braking and engine braking while reducing
 its torque supply; test acceleration, steering and descents in forward and reverse, a driver
-put out of action at speed (the tank coasts), and an engine at a small share, which cannot
-overcome its own motoring drag. Supply changes on the tick of a dose, swap or knockout, and
-the crank's inertia, not the command slew, smooths it: judge whether that loss reads. Both phase and repair holds
-select the service brakes. No timing or capture measurement was taken in this lane.
+put out of action at speed (the tank coasts), and a small positive engine share pulling away
+weakly under full pedal. With nobody at the station, repair cannot command brakes and the
+park lever holds its state; a coasting standstill does not set it. Supply changes on the tick
+of a dose, swap or knockout. A locked clutch passes the torque step immediately; crank inertia
+limits speed changes, not supply or capacity steps. Judge whether that loss reads. Phase
+holds impose brakes; repair holds need someone serving the station. Design §7b owns the
+free-hull evidence and the review verification table. No capture or pricing run was taken.
 
 **Revert cost.** Medium, as specified in design §7b: module resolver, authored checkpoint data,
 admission and invariant tests. The generic rate consumers and bounded load-work wire carrier can stay. Keep the discarded continuous path in git when choosing checkpoints.
 
 **Lives in.** `src/damage.rs`, `src/damage/repair.rs`, `assets/damage/crew.ron`,
 `src/shooting.rs`, `src/tank/model.rs`, `src/spec.rs`, `src/track/sim.rs`,
-`src/track/drive.rs`, `src/track/transmission.rs`, `src/tank/servo.rs`, `src/crew_ui.rs`;
+`src/track/drive.rs`, `src/track/transmission.rs`, `src/tank/servo.rs`, `src/crew_ui.rs`,
+`src/sfx/mod.rs`;
 tracker #228.
 
 Subject: the game's damage model, game state only. **Provisional repair extension:** any module

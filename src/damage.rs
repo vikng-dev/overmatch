@@ -577,19 +577,44 @@ pub fn evaluate(requirement: &Requirement, quality: &std::collections::HashMap<P
 
 /// The game's damage model: a requirement read through one view of its parts. Parts `seen`
 /// selects keep their live quality; every other part counts whole. A consumer whose parts act at
-/// different places in one mechanism reads each view where that part acts (Drive's crew, engine
+/// different places in one mechanism reads each view where that part acts. Backup selects one
+/// complete path by its live quality before any view (Drive's crew, engine
 /// and transmission: `track::sim::drive_target`).
 pub fn evaluate_view(
     requirement: &Requirement,
     quality: &std::collections::HashMap<Part, f32>,
     seen: impl Fn(Part) -> bool,
 ) -> f32 {
-    evaluate_parts(requirement, |p| {
+    let viewed = |p| {
         if seen(p) {
             quality.get(&p).copied().unwrap_or(0.0)
         } else {
             1.0
         }
+    };
+    let live_member = |(coeff, parts): &Member| {
+        parts
+            .iter()
+            .fold(*coeff, |q, p| q * quality.get(p).copied().unwrap_or(0.0))
+    };
+    let view_member = |(coeff, parts): &Member| parts.iter().fold(*coeff, |q, p| q * viewed(*p));
+    requirement.iter().fold(1.0_f32, |eff, group| {
+        let value = match group {
+            Group::Single(p) => viewed(*p),
+            Group::Graded(GradedGroup::Pool(members)) => {
+                members.iter().map(view_member).sum::<f32>().min(1.0)
+            }
+            Group::Graded(GradedGroup::Backup(members)) => {
+                // The game's damage model: every view chooses the same complete path by its
+                // live crew-and-parts quality. Views cannot splice incompatible Backup paths.
+                let member = members
+                    .iter()
+                    .max_by(|a, b| live_member(a).total_cmp(&live_member(b)))
+                    .expect("TankSpec::validate admits a nonempty Backup group");
+                view_member(member)
+            }
+        };
+        eff.min(value)
     })
 }
 

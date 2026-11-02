@@ -92,8 +92,9 @@ impl ModuleRepair {
 }
 
 /// The game's damage model: whether any of this tank's modules is under repair. Repair is a tank
-/// activity, not a quality a part supplies: a repairing crew holds the tank on its brakes
-/// (`track::sim::apply_track_forces`), and every capability keeps its authored requirement.
+/// activity, not a quality a part supplies: while the Driver station is served, repair holds
+/// the brakes (`track::sim::drive_target`). With nobody there it cannot move the controls.
+/// Every capability keeps its authored requirement.
 pub(crate) fn underway(tank: &TankVolumes, volumes: &Query<VolumeFacets>) -> bool {
     tank.iter().any(|volume| {
         volumes

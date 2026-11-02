@@ -16,7 +16,8 @@
 //!   Driver station. The driver's competence, the engine's and the transmission's held shares
 //!   each scale what that part delivers ([`DriveSupply`]); driver intent, service brakes, engine
 //!   drag and contact grip keep their construction-defined meaning. A supply change takes effect
-//!   on the tick it happens; the crank's inertia is what smooths it.
+//!   on the tick it happens. A locked clutch passes a torque step on that tick; inertia only
+//!   limits changes of crank speed, not changes of supply or transmitted capacity.
 
 use avian3d::dynamics::rigid_body::forces::ForcesItem;
 use avian3d::prelude::{
@@ -680,9 +681,9 @@ pub(crate) fn belt_tick<O: TerrainOracle>(
     (reports, tr)
 }
 
-/// The game's damage model: a running repair and a phase-held command both select service
-/// brakes; neither is the driver's command. Otherwise the command exists only while someone
-/// serves the Driver station (Drive's crew view is positive), and passes through whole.
+/// The game's damage model: a phase hold imposes service brakes. Otherwise only someone
+/// serving the Driver station can command axes or hold the brakes for repair; without that
+/// occupant repair remains work and cannot become a remote brake toggle.
 pub(crate) fn drive_target(
     command: &ParsedTankCommand,
     tank: Option<&TankVolumes>,
@@ -690,15 +691,17 @@ pub(crate) fn drive_target(
     volumes: &Query<VolumeFacets>,
 ) -> DriveTarget {
     let supply = drive_supply(tank, caps, volumes);
-    let intent = if command.held()
-        || tank.is_some_and(|tank| crate::damage::repair::underway(tank, volumes))
-    {
+    let intent = if command.held() {
         DriveIntent::Brake
     } else if supply.competence > 0.0 {
-        DriveIntent::Axes(DriveAxes {
-            throttle: command.throttle,
-            steer: command.steer,
-        })
+        if tank.is_some_and(|tank| crate::damage::repair::underway(tank, volumes)) {
+            DriveIntent::Brake
+        } else {
+            DriveIntent::Axes(DriveAxes {
+                throttle: command.throttle,
+                steer: command.steer,
+            })
+        }
     } else {
         DriveIntent::Unmanned
     };
@@ -1429,83 +1432,6 @@ mod tests {
         }
     }
 
-    /// The game's damage model: through the production adapter a full command stays whole and
-    /// latches the clutch at any positive engine pool, even one below the pedal deadzone; a half
-    /// pool pulls away more weakly than a whole one. A pool below the engine's own loss share
-    /// (30 HP here) cannot overcome its motoring drag, which is construction. Fixture pools are
-    /// 336, 168 and 30 of 336 HP; no asset-specific threshold is asserted.
-    #[test]
-    fn a_reduced_engine_pulls_away_through_the_production_adapter() {
-        use crate::ballistics::{ComponentHealth, POOL_UNITS_PER_HP};
-        use crate::command::TankCommand;
-        use crate::damage::{CrewStation, Crewman, FunctionRole, Group, Part, VolumeOf};
-        let mut speeds = Vec::new();
-        for held in [336, 168, 30] {
-            let (mut app, roots) = support_fixture(false, false, true, 0.0);
-            let root = roots[0];
-            app.world_mut().entity_mut(root).insert((
-                TankCapabilities(
-                    [(
-                        Capability::Drive,
-                        vec![Group::Single(Part::Driver), Group::Single(Part::Engine)],
-                    )]
-                    .into(),
-                ),
-                ParsedTankCommand::try_from(TankCommand {
-                    throttle: 1.0,
-                    ..default()
-                })
-                .unwrap(),
-            ));
-            app.world_mut().spawn((
-                CrewStation::Driver,
-                Crewman {
-                    home: CrewStation::Driver,
-                },
-                VolumeOf(root),
-            ));
-            app.world_mut().spawn((
-                FunctionRole::Engine,
-                ComponentHealth::holding(336, held * POOL_UNITS_PER_HP),
-                VolumeOf(root),
-            ));
-            for _ in 0..16 {
-                run_adapter(&mut app, &[(root, Vec3::ZERO)]);
-            }
-            assert_eq!(app.world().get::<DriveSignal>(root).unwrap().throttle, 1.0);
-            assert!(
-                !app.world()
-                    .get::<TankTransmission>(root)
-                    .unwrap()
-                    .0
-                    .clutch_out
-            );
-            let speed = app.world().get::<TrackDrive>(root).unwrap().sides[0].speed;
-            speeds.push(speed);
-            if held == 30 {
-                continue;
-            }
-            assert!(speed > 0.0, "held {held}: speed {speed}");
-            // Hull forward is -Z in this identity-pose fixture. The adapter must apply
-            // forward traction to the hull, rather than merely spin the belts in place.
-            let traction = app
-                .world()
-                .get::<TrackGripEffect>(root)
-                .unwrap()
-                .traction_force
-                .z;
-            assert!(traction < 0.0, "held {held}: forward traction {traction}");
-        }
-        assert!(
-            speeds[1] < speeds[0],
-            "reduced torque must pull away more weakly: {speeds:?}"
-        );
-        println!(
-            "MEASURED fixture belt speeds after input slew: full {}, half {}, 30 HP {} m/s",
-            speeds[0], speeds[1], speeds[2]
-        );
-    }
-
     /// The game's damage model: a fixture hull driven through the production adapter, with
     /// its longitudinal speed integrated from the adapter's own traction at the vehicle mass the
     /// grip law carries (DERIVED: twice its side weight over g). Drive requires
@@ -1666,6 +1592,21 @@ mod tests {
             (held.speed.to_bits(), held.distance.to_bits()),
             (released.speed.to_bits(), released.distance.to_bits())
         );
+        let mut served = DrivenHull::new();
+        served.drive_to(5.0);
+        served.distance = 0.0;
+        for _ in 0..64 * 20 {
+            served.tick(-1.0, 0.0);
+            if served.speed <= 0.01 {
+                break;
+            }
+        }
+        assert!(
+            held.distance > served.distance,
+            "an unmanned coast must travel farther than a serving driver's full brake: {} vs {}",
+            held.distance,
+            served.distance
+        );
         assert!(
             !held
                 .app
@@ -1704,8 +1645,9 @@ mod tests {
     }
 
     /// The game's damage model: an engine whose HP pool empties while driving stops producing
-    /// combustion torque, but its crank keeps turning under its own drag and the clutch, so the
-    /// public engine speed follows the belt down rather than holding its last pitch. On recovery
+    /// combustion torque, but its crank keeps turning under stored inertia and the clutch. A
+    /// held full pedal releases motoring drag, so the public speed follows the coasting belt
+    /// rather than holding its last pitch; clutch re-anchors need not be monotonic. On recovery
     /// the clutch engages against that tracked crank and the tank pulls away again.
     #[test]
     fn an_emptied_engine_runs_down_with_the_belt_and_recovers_from_there() {
@@ -1731,8 +1673,8 @@ mod tests {
             hull.speed
         );
         assert!(
-            trace.windows(2).all(|pair| pair[1] < pair[0]) && trace[0] < at,
-            "the crank must run down, never freeze: {at} then {trace:?}"
+            trace.iter().any(|rpm| rpm.to_bits() != at.to_bits()) && hull.rpm() < at,
+            "the crank follows the coasting belt, never freezes: {at} then {trace:?}"
         );
         let (run_down, slowest) = (hull.rpm(), hull.speed);
         hull.engine_held(DrivenHull::POOL);
@@ -1751,6 +1693,220 @@ mod tests {
             "the clutch engages against the tracked crank: {run_down} -> {first}"
         );
         assert!(hull.speed > slowest, "a recovered engine pulls away again");
+    }
+
+    /// The game's damage model: free-hull measurements distinguish propulsion from belt slip,
+    /// and nobody at the Driver station can set the park lever at a grade's turning point.
+    #[test]
+    fn free_hull_measurements() {
+        let mut reduced = DrivenHull::new();
+        reduced.engine_held(30); // Fixture HP held of the fixture 336 HP pool.
+        for _ in 0..64 * 5 {
+            reduced.tick(1.0, 0.0);
+        }
+        println!("MEASURED 30/336 engine W after 5 s: {} m/s", reduced.speed);
+        let mut grade = DrivenHull::new();
+        grade.drive_to(5.0);
+        grade
+            .app
+            .world_mut()
+            .entity_mut(grade.driver)
+            .insert(crate::damage::Dead);
+        let uphill = -grade.mass * 9.81 * 10.0_f32.to_radians().sin(); // Fixture 10 degree grade.
+        let mut turned = false;
+        for _ in 0..64 * 20 {
+            grade.tick(0.0, uphill);
+            turned |= grade.speed < -0.1;
+        }
+        let parked = grade
+            .app
+            .world()
+            .get::<TankTransmission>(grade.root)
+            .unwrap()
+            .0
+            .park;
+        println!(
+            "MEASURED unmanned 10 degree uphill: rolls back {turned}, park {parked}, final {} m/s",
+            grade.speed
+        );
+        assert!(!parked, "nobody at the station can set the park lever");
+        assert!(turned, "the free hull must roll back after coasting uphill");
+        assert!(
+            reduced.speed > 0.0,
+            "a positive full-pedal combustion supply pulls away"
+        );
+    }
+
+    /// The game's damage model: zero combustion and zero stored crank energy cannot power
+    /// a pivot. Integrate the adapter's traction torque into a free hull's yaw velocity.
+    #[test]
+    fn stopped_engine_cannot_pivot_a_free_hull() {
+        use avian3d::prelude::*;
+        use bevy::ecs::system::RunSystemOnce;
+        let mut hull = DrivenHull::new();
+        hull.engine_held(0);
+        hull.app
+            .world_mut()
+            .get_mut::<TankTransmission>(hull.root)
+            .unwrap()
+            .0
+            .omega_e = 0.0;
+        let mut yaw = 0.0;
+        let mut angle = 0.0;
+        let mut position = hull.app.world().get::<Position>(hull.root).unwrap().0;
+        let mut velocity = Vec3::ZERO;
+        for _ in 0..64 {
+            hull.app.world_mut().entity_mut(hull.root).insert((
+                ParsedTankCommand::try_from(crate::command::TankCommand {
+                    steer: 1.0,
+                    ..default()
+                })
+                .unwrap(),
+                Position(position),
+                Rotation(Quat::from_rotation_y(angle)),
+                LinearVelocity(velocity),
+                AngularVelocity(Vec3::Y * yaw),
+                avian3d::dynamics::integrator::VelocityIntegrationData::default(),
+            ));
+            hull.app
+                .world_mut()
+                .run_system_once(apply_track_forces)
+                .unwrap();
+            let effect = hull.app.world().get::<TrackGripEffect>(hull.root).unwrap();
+            // Fixture yaw inertia is the 30,000 kg m² authored by fixture_tank. Translation
+            // uses the same data-derived mass as the free longitudinal hull fixture.
+            yaw += effect.traction_torque.y / 30_000.0 / 64.0;
+            velocity += effect.traction_force / hull.mass / 64.0;
+            angle += yaw / 64.0;
+            position += velocity / 64.0;
+        }
+        println!("MEASURED empty stopped engine full steer after 1 s: {yaw} rad/s");
+        assert_eq!(yaw, 0.0, "a stopped crank has no energy to give the belts");
+    }
+
+    /// The game's damage model: Backup means one complete crew-and-parts path. The adapter
+    /// cannot borrow the engine from an unavailable Driver path and the crew from another.
+    #[test]
+    fn backup_paths_are_evaluated_together() {
+        use crate::damage::{
+            CrewStation, Crewman, Dead, FunctionRole, GradedGroup, Group, Part, VolumeOf,
+        };
+        use bevy::ecs::system::RunSystemOnce;
+        let mut hull = DrivenHull::new();
+        hull.app.world_mut().entity_mut(hull.driver).insert(Dead);
+        hull.app
+            .world_mut()
+            .entity_mut(hull.root)
+            .insert(TankCapabilities(
+                [(
+                    Capability::Drive,
+                    vec![Group::Graded(GradedGroup::Backup(vec![
+                        (1.0, vec![Part::Driver, Part::Engine]),
+                        (1.0, vec![Part::Commander, Part::Transmission]),
+                    ]))],
+                )]
+                .into(),
+            ));
+        hull.app.world_mut().spawn((
+            CrewStation::Commander,
+            Crewman {
+                home: CrewStation::Commander,
+            },
+            VolumeOf(hull.root),
+        ));
+        let root = hull.root;
+        hull.app
+            .world_mut()
+            .run_system_once(
+                move |mut modules: Query<(
+                    &FunctionRole,
+                    &mut crate::ballistics::ComponentHealth,
+                )>| {
+                    for (role, mut hp) in &mut modules {
+                        if *role == FunctionRole::Transmission {
+                            hp.set_held(0);
+                        }
+                    }
+                },
+            )
+            .unwrap();
+        hull.app
+            .world_mut()
+            .run_system_once(
+                move |tanks: Query<(&TankVolumes, &TankCapabilities)>,
+                      facets: Query<VolumeFacets>| {
+                    let (volumes, caps) = tanks.get(root).unwrap();
+                    let supply = drive_supply(Some(volumes), Some(caps), &facets);
+                    assert_eq!(supply.share(), 0.0, "no complete Backup path: {supply:?}");
+                },
+            )
+            .unwrap();
+        for _ in 0..64 {
+            hull.tick(1.0, 0.0);
+        }
+        assert_eq!(hull.speed, 0.0);
+        // An engine out of action cannot remove an available occupant's brake intent.
+        hull.app
+            .world_mut()
+            .entity_mut(hull.driver)
+            .remove::<Dead>();
+        hull.engine_held(0);
+        hull.app
+            .world_mut()
+            .entity_mut(root)
+            .insert(TankCapabilities(
+                [(
+                    Capability::Drive,
+                    vec![Group::Graded(GradedGroup::Backup(vec![(
+                        1.0,
+                        vec![Part::Driver, Part::Engine],
+                    )]))],
+                )]
+                .into(),
+            ));
+        hull.app
+            .world_mut()
+            .run_system_once(
+                move |tanks: Query<(&TankVolumes, &TankCapabilities)>,
+                      facets: Query<VolumeFacets>| {
+                    let (volumes, caps) = tanks.get(root).unwrap();
+                    let supply = drive_supply(Some(volumes), Some(caps), &facets);
+                    assert_eq!(supply.competence, 1.0);
+                    assert_eq!(supply.combustion, 0.0);
+                    assert_eq!(supply.share(), 0.0);
+                },
+            )
+            .unwrap();
+    }
+
+    /// The game's damage model: repair is work, not a remote service-brake control. With
+    /// nobody at the Driver station, toggling the repair timer must leave a free hull's coast
+    /// bit-identical; a phase hold remains an operator-imposed brake.
+    #[test]
+    fn unmanned_repair_does_not_brake() {
+        let speeds = [false, true].map(|repairing| {
+            let mut hull = DrivenHull::new();
+            hull.drive_to(5.0);
+            hull.engine_held(168); // Fixture reduced pool, admissible repair work.
+            hull.app
+                .world_mut()
+                .entity_mut(hull.driver)
+                .insert(crate::damage::Dead);
+            hull.app.world_mut().entity_mut(hull.engine).insert(
+                crate::damage::repair::ModuleRepair {
+                    elapsed: repairing.then_some(0.0),
+                },
+            );
+            for _ in 0..64 {
+                hull.tick(0.0, 0.0);
+            }
+            hull.speed
+        });
+        assert_eq!(
+            speeds[0].to_bits(),
+            speeds[1].to_bits(),
+            "repair changed the unmanned coast: {speeds:?}"
+        );
     }
 
     /// The controller's deceleration estimate must scale with the whole vehicle rather than

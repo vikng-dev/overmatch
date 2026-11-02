@@ -1552,20 +1552,9 @@ fn steep_grade_full_loop_upshift_freeze_recover_confirm_correct() {
     // eventually-happens bound:
     //   * upshift on tick 11: ~3 ticks of drive to cross the band from 50 rpm
     //     below it, then the 8-tick full-predicate confirmation — the light
-    //     approach load keeps landing and reserve passing throughout, so the counted
-    //     predicate is continuously true from the band crossing;
-    //   * correction on tick 75: the PACING gate is lower-gear
-    //     LEGALITY (F4 sits margin-short at speed and everything below is over-rev/
-    //     fuel-cut-illegal until the deficit bleeds m to ~1.4 m/s, where F3 clears both
-    //     the over-rev gate and the reserve margin and the correction commits on that
-    //     first legal tick). It moved 9 ticks: 5 from the earlier upshift (window end
-    //     now tick 31; EMA recovery, 13-tick deficit confirmation, and dwell expiry all
-    //     anchor to it), plus 4 because the upshift now commits off 5 fewer drive ticks
-    //     — a slightly lower entry speed onto the steep grade, so m bleeds to the
-    //     F3-legal speed sooner. The M2 asymmetric demand fall does not touch this
-    //     trace — the post-window EMA only RISES here (12 kN → 2·steep), and the rise
-    //     path is bit-identical. (The deep override's dwell-crossing behavior is pinned
-    //     separately in `steep_grade_after_upshift_corrects_before_lug`.)
+    //     approach load keeps landing and reserve passing throughout.
+    // MEASURED fixture trace: the confirmed upshift is tick 11 and the first legal
+    // reserve correction is tick 77 under the midpoint-work gate.
     assert_eq!(
         upshift_tick,
         Some(11),
@@ -1574,7 +1563,7 @@ fn steep_grade_full_loop_upshift_freeze_recover_confirm_correct() {
     );
     assert_eq!(
         correction_tick,
-        Some(75),
+        Some(77),
         "the correction's tick moved — EMA rate, confirmation, over-rev legality, or \
              margin arithmetic changed"
     );
@@ -3051,16 +3040,7 @@ fn recirculation_splits_physical_output_powers() {
     let physical_net = p_l - tp.recirculation * -p_r;
     // A budget a quarter of the physical demand (fixture data), so the scale binds.
     let p_avail = physical_net / 4.0;
-    let scale = power_conservation_scale(
-        &tp,
-        vl,
-        vr,
-        0.0,
-        f_s,
-        p_avail,
-        #[cfg(feature = "bitprobe")]
-        &mut TransmissionProbe::default(),
-    );
+    let scale = p_avail / recirculated_work(&tp, [p_l, p_r]);
     let expect = p_avail / physical_net;
     assert!(
         (scale - expect).abs() < 1e-6,
@@ -3426,7 +3406,9 @@ fn rev_match_across_upshift_is_continuous() {
 /// margin.
 #[test]
 fn free_rev_reaches_steer_target_promptly() {
-    let (fp, tp) = (lab_fp(), lab_tp());
+    let (fp, mut tp) = (lab_fp(), lab_tp());
+    // Fixture isolation: steer requests crank rpm but transmits no work to the belts.
+    tp.steer_capacity_n = 0.0;
     let mut st = fresh(&tp);
     let mut reached = None;
     for tick in 0..128 {
@@ -3657,4 +3639,223 @@ fn reduced_supply_pulls_away_and_retains_full_service_brakes() {
     );
     assert_eq!(report.next_speeds, [0.0; 2]);
     assert!(state.omega_e.is_finite());
+}
+
+/// The game's damage model: the exact at-rest input must not create belt kinetic energy.
+#[test]
+fn no_combustion_no_stored_energy_no_pivot_work() {
+    let (fp, tp) = (lab_fp(), lab_tp());
+    let mut st = fresh(&tp);
+    st.omega_e = 0.0;
+    let mut inp = input(0.0, 1.0, [0.0; 2], [0.0; 2]);
+    inp.supply.combustion = 0.0;
+    let rep = step(&fp, &tp, &mut st, &inp);
+    assert_eq!(rep.next_speeds, [0.0; 2]);
+}
+
+/// The game's damage model: motoring release is a pedal law, not a second engine-condition
+/// law. The crank and scheduler must price the same full-pedal net torque.
+#[test]
+fn drag_release_and_scheduler_read_the_command() {
+    let (fp, tp) = (lab_fp(), lab_tp());
+    let mut st = fresh(&tp);
+    st.park = false;
+    st.omega_e = 1550.0 * RPM_TO_RAD; // Fixture crank operating point above idle.
+    let ratio = tp.gears_fwd[0];
+    let speed = st.omega_e * tp.sprocket_radius / ratio;
+    let mut inp = input(1.0, 0.0, [speed; 2], [0.0; 2]);
+    inp.supply.combustion = 0.25;
+    let rep = step(&fp, &tp, &mut st, &inp);
+    let modeled = modeled_reserve_in_gear(&tp, inp.supply, speed, ratio, 0.0);
+    let actual = rep
+        .bitprobe
+        .tau_free
+        .min(tp.clutch_capacity * inp.supply.transmitted)
+        * ratio
+        / tp.sprocket_radius;
+    assert!(
+        (modeled - actual).abs() < 0.01,
+        "scheduler {modeled}, crank {actual}"
+    );
+    assert_eq!(
+        rep.bitprobe.tau_drag, 0.0,
+        "full pedal releases motoring drag at every supply"
+    );
+}
+
+/// The game's damage model: a zero-capacity fixture clutch isolates service brakes from
+/// engine braking, so each supply dimension gets an independent mutant check.
+fn assert_full_service_brakes(supply: DriveSupply) {
+    let fp = lab_fp();
+    let mut tp = lab_tp();
+    tp.clutch_capacity = 0.0; // Fixture isolation: no main-clutch torque.
+    let mut st = fresh(&tp);
+    st.park = false;
+    let mut inp = input(-1.0, 0.0, [10.0; 2], [0.0; 2]); // Fixture rolling state.
+    inp.supply = supply;
+    assert_eq!(
+        step(&fp, &tp, &mut st, &inp).forces,
+        [-tp.brake_capacity_n; 2]
+    );
+}
+
+#[test]
+fn full_service_brakes_ignore_competence() {
+    assert_full_service_brakes(DriveSupply {
+        competence: 0.6,
+        ..DriveSupply::WHOLE
+    });
+}
+
+#[test]
+fn full_service_brakes_ignore_combustion() {
+    assert_full_service_brakes(DriveSupply {
+        combustion: 0.25,
+        ..DriveSupply::WHOLE
+    });
+}
+
+#[test]
+fn full_service_brakes_ignore_transmitted_capacity() {
+    assert_full_service_brakes(DriveSupply {
+        transmitted: 0.0,
+        ..DriveSupply::WHOLE
+    });
+}
+
+/// The game's damage model: losing transmitted capacity changes a locked coupling on this
+/// tick; crank inertia cannot smooth a disconnected clutch into continued belt force.
+#[test]
+fn supply_loss_reaches_a_locked_clutch_on_its_tick() {
+    let (fp, tp) = (lab_fp(), lab_tp());
+    let mut st = fresh(&tp);
+    st.park = false;
+    st.omega_e = 1550.0 * RPM_TO_RAD; // Fixture synchronous operating point.
+    let speed = st.omega_e * tp.sprocket_radius / tp.gears_fwd[0];
+    let mut inp = input(1.0, 0.0, [speed; 2], [0.0; 2]);
+    let mut whole_state = st;
+    let whole = step(&fp, &tp, &mut whole_state, &inp);
+    assert!(
+        whole.bitprobe.engaged && whole.bitprobe.reanchor_feasible,
+        "the fixture must start with a locking clutch"
+    );
+    let mut reduced_engine = input(1.0, 0.0, [speed; 2], [0.0; 2]);
+    reduced_engine.supply.combustion = 0.0;
+    let no_combustion = step(&fp, &tp, &mut st, &reduced_engine);
+    assert!(
+        no_combustion.forces[0] < whole.forces[0],
+        "combustion torque reaches a locked clutch on its tick"
+    );
+    println!(
+        "MEASURED locked-clutch source step, force per belt: whole {}, engine empty {} N",
+        whole.forces[0], no_combustion.forces[0]
+    );
+    let mut st = TransmissionState {
+        omega_e: 1550.0 * RPM_TO_RAD,
+        park: false,
+        ..fresh(&tp)
+    };
+    inp.supply.transmitted = 0.0;
+    let lost = step(&fp, &tp, &mut st, &inp);
+    assert!(whole.forces[0] > 0.0);
+    assert_eq!(lost.forces, [0.0; 2]);
+}
+
+/// The game's damage model: without an occupant, rest cannot set the park lever or its entry
+/// brake blend; a lever already set keeps holding. This must hold at the transmission seam.
+#[test]
+fn an_unmanned_station_preserves_the_park_lever() {
+    let (fp, tp) = (lab_fp(), lab_tp());
+    for parked in [false, true] {
+        let mut st = fresh(&tp);
+        st.park = parked;
+        let mut inp = input(0.0, 0.0, [0.0; 2], [1000.0; 2]); // Fixture back-driving load.
+        inp.supply.competence = 0.0;
+        let rep = step(&fp, &tp, &mut st, &inp);
+        assert_eq!(st.park, parked);
+        if parked {
+            assert_eq!(rep.next_speeds, [0.0; 2]);
+        } else {
+            assert!(rep.next_speeds.iter().all(|speed| *speed < 0.0));
+        }
+    }
+}
+
+/// The game's damage model: a pivot can spend a stopped engine's stored crank energy only
+/// once. With no outside work, total belt-plus-crank kinetic energy cannot grow at any tick.
+#[test]
+fn a_pivot_without_combustion_spends_only_stored_crank_energy() {
+    let (fp, tp) = (lab_fp(), lab_tp());
+    for rpm in [0.0, 600.0, 1550.0] {
+        // Fixture initial energy states.
+        let mut st = fresh(&tp);
+        st.omega_e = rpm * RPM_TO_RAD;
+        let mut speeds = [0.0; 2];
+        let energy = |omega: f32, speeds: [f32; 2]| {
+            0.5 * tp.engine_inertia * omega * omega
+                + speeds
+                    .into_iter()
+                    .map(|v| 0.5 * fp.inertia * v * v)
+                    .sum::<f32>()
+        };
+        let mut previous = energy(st.omega_e, speeds);
+        for _ in 0..64 * 5 {
+            let mut inp = input(0.0, 1.0, speeds, [0.0; 2]);
+            inp.supply.combustion = 0.0;
+            let rep = step(&fp, &tp, &mut st, &inp);
+            speeds = rep.next_speeds;
+            let next = energy(st.omega_e, speeds);
+            // Resolution: f32 kinetic-energy arithmetic permits a relative roundoff margin.
+            assert!(
+                next <= previous * (1.0 + 1e-5) + 1e-5,
+                "no source: energy rose from {previous} to {next} J"
+            );
+            previous = next;
+        }
+    }
+}
+
+/// Recirculation losses apply only to an inner-to-outer transfer; a pure overrun keeps the
+/// declared engine drag. The admitted zero-efficiency corner cannot turn zero output into NaN.
+#[test]
+fn pure_engine_braking_does_not_pay_an_inner_to_outer_transfer_loss() {
+    let mut tp = lab_tp();
+    for efficiency in [0.0, 0.5, 1.0] {
+        // Fixture efficiency corners.
+        tp.recirculation = efficiency;
+        assert_eq!(recirculated_work(&tp, [-20.0, -30.0]), -50.0);
+        assert_eq!(recirculated_work(&tp, [0.0; 2]), 0.0);
+        assert_eq!(recirculated_work(&tp, [20.0, 30.0]), 50.0);
+    }
+}
+
+/// The game's damage model: turning and propulsion cannot spend an empty engine's initial
+/// kinetic energy twice, including an already-rolling asymmetric pair of belts.
+#[test]
+fn all_drive_modes_without_combustion_conserve_total_kinetic_energy() {
+    let (fp, tp) = (lab_fp(), lab_tp());
+    for (throttle, steer) in [(1.0, 0.0), (0.7, 0.8), (0.0, 1.0)] {
+        for seed in [[0.0; 2], [0.5, 0.25], [5.0, -3.0]] {
+            // Fixture initial velocities.
+            let mut st = fresh(&tp);
+            let mut speeds = seed;
+            let energy = |omega: f32, speeds: [f32; 2]| {
+                0.5 * tp.engine_inertia * omega.powi(2)
+                    + 0.5 * fp.inertia * (speeds[0].powi(2) + speeds[1].powi(2))
+            };
+            let mut previous = energy(st.omega_e, speeds);
+            for _ in 0..64 {
+                let mut inp = input(throttle, steer, speeds, [0.0; 2]);
+                inp.supply.combustion = 0.0;
+                speeds = step(&fp, &tp, &mut st, &inp).next_speeds;
+                let next = energy(st.omega_e, speeds);
+                // Resolution: relative f32 roundoff, not an energy source.
+                assert!(
+                    next <= previous * (1.0 + 1e-5) + 1e-5,
+                    "mode {throttle}/{steer}, seed {seed:?}: {previous} -> {next} J"
+                );
+                previous = next;
+            }
+        }
+    }
 }

@@ -1188,23 +1188,36 @@ a load rate. The scalar work representation preserves actual work rather than tu
 rounding into extra work. This is ADR-0029's stable absolute-deadline contract with bounded work.
 
 Subject: the game's damage model, game state only. Drive's requirement is read through three
-views, each where its part acts (a view keeps one kind of part at its live quality and counts
-every other part whole). The **crew view** decides whether a command exists: with nobody
-serving the Driver station there is no driver intent at all (no service brake, park release,
-ladder swap or clutch latch), and the tank coasts with its controls released. While someone
-serves it, the command passes through whole and the occupant's competence scales the fueling
-the driver delivers: a less skilled driver delivers less of what the engine supplies. The
-**engine view** scales combustion torque and the idle governor it powers; the **transmission
-view** scales the clutch's and steering member's transmitted capacity. Brakes, engine drag and
-compression braking are construction and never scale. An engine whose idle governor cannot
-exceed its motoring drag has no stall guard: its crank runs down under drag or follows the belt.
-A pool share below the engine's own loss share therefore cannot keep the engine pulling, an
-emergent threshold of its construction. The scheduler prices reserves against the same supply.
-A supply change takes effect on its tick; the crank's inertia smooths it, not the command
-slew. `TankSpec::validate` refuses a Drive requirement naming any other module. Explicit
-repair and phase holds select the brakes without changing the underlying supply; the panel
-shows the delivered share (the lesser of delivered combustion and transmitted capacity), zero
-under a hold or with nobody driving. Servo slew keeps its requirement-rate scale.
+views, each where its part acts. A Backup first selects one complete path by its live
+crew-and-parts quality; all views project that same path, so unavailable paths cannot supply
+one another's missing parts. The **crew view** decides whether a command exists: with nobody
+serving the station there is no service brake, park-lever change, ladder swap or commanded
+clutch engagement. The tank coasts and the existing park lever holds its state; neither rest
+nor the repair toggle moves it. While someone serves it, the command passes through whole
+and competence scales the fueling delivered. The **engine view** scales combustion and its
+idle governor; the **transmission view** scales clutch and steering capacity. Brakes, engine
+drag and compression braking keep their construction. Motoring release reads the unscaled
+propulsive command, including when the engine is reduced. A small positive engine share can
+therefore pull away at full pedal; the free-hull evidence below replaces the stationary-hull
+stall claim. The scheduler uses the crank's torque law, pricing sustained reserve at no less
+than idle rather than spending the governor's temporary sub-idle recovery.
+
+Both sprockets' midpoint work, including geared steering, is charged against combustion and
+the crank's stored energy. The crank retains only unspent energy; neither acceleration from
+rest nor a clutch re-anchor creates work. Inner-to-outer transfer pays the declared
+recirculation loss; pure engine braking has no such transfer. An engine that cannot sustain
+idle can run down to rest, and the recovery guard never supplies energy of its own. A stopped
+public crank pauses its running sound loop.
+
+A supply change takes effect on its tick. Through a locked clutch the torque step reaches
+the belts on that tick; transmitted capacity and the Unmanned reset also step immediately.
+Crank inertia limits speed changes, not those supply steps. `TankSpec::validate` refuses a
+Drive requirement naming a module other than Engine or Transmission. A phase hold imposes
+brakes as an operator rule; a repair hold needs someone serving the station. The panel labels
+its nominal condition fraction **Drive supply**, the lesser of delivered combustion and
+transmitted capacity, zero under a hold or with nobody driving. It is not net sprocket force,
+which also depends on crank speed, gearing, drag and absolute clutch capacity. Module rates
+use integer pool units so a reduced pool cannot round to whole. Servo slew keeps its rate scale.
 Automatic cyclic cadence, fire eligibility and sight access keep their mechanism or on/off
 gates. The panel shows Drive's supplied rate (zero during either hold), actual weapon deadlines
 and explicit load pauses; the sight-derived Gunner percentage has no rate consumer.
@@ -2158,7 +2171,7 @@ lane, decided against the code. Every fix landed in
 | Claude | P2: scaling peak torque scaled motoring drag, and the clutch clamped engine braking again | verified: a half engine coasted a descent faster than a whole one | drag stays construction; only the transmission view scales clutch and steering capacity |
 | Codex | P2 (same as Claude's first P3): the brake half of the reduced-supply test bypassed `step` | verified: `driver_intent` and `apply_brake_stop_forces` never read the supply | the test brakes through `step` and requires forces equal to the whole engine's |
 | Claude | P3: the brake test bypassed `step` | verified, as the Codex P2 | as the Codex P2 |
-| Claude | P3: supply now steps within a tick where the old command slew faded it, with no record | verified | recorded, not restored: the slew is input shaping, and an engine's torque falls on the tick it loses combustion; the crank's inertia smooths it (§7b, F18 watches it) |
+| Claude | P3: supply now steps within a tick where the old command slew faded it, with no record | verified | recorded, not restored: the slew is input shaping, and an engine's torque falls on the tick it loses combustion; crank inertia limits speed changes, while a locked clutch passes the torque step on that tick (§7b, F18 watches it) |
 | Claude | P3: rounding showed a serving module as 0 % and a short one as 100 % | verified: 1 of 336 read 0 %, 335 read 100 % | the panel clamps a serving share to 1–99 % |
 | Claude | P3: `tp.clone()` copied five vectors per tank per tick | verified | each quantity scales where it is used; the scheduler takes the supply |
 | Claude | P3: F18 "Lives in" omitted the drive-supply law, repair and crew data | verified | F18 lists them |
@@ -2172,12 +2185,61 @@ MEASURED through the production adapter on a fixture hull (data-derived running 
 | 10° descent from 5 m/s, throttle released, speed after 10 s | whole 16.53 m/s, half engine 17.88 m/s | whole 16.53 m/s, half engine 16.21 m/s |
 | Engine pool emptied at 2443 rpm, W held, rpm after 1 s | 2443 (frozen) | 1284 (2061, 1786, 1520 at 0.25 s steps); on recovery 1341 rpm on the first tick, pulling away again |
 
-A 30 of 336 HP engine now latches the clutch under a full command but cannot overcome its own
-motoring drag (MEASURED −0.011 m/s fixture belt speed, against 0.160 m/s for a half engine and
-0.207 m/s whole). That is the law's emergent stall threshold, not a gate. A Drive requirement
-naming a module other than Engine or Transmission is refused at load.
+The MEASURED −0.011 m/s belt reading for 30 of 336 HP came from a stationary-hull fixture
+(half engine 0.160 m/s, whole 0.207 m/s); it did not establish free-hull pull-away. The corrected
+free-hull measurements below supersede the inferred stall claim. A Drive requirement naming
+a module other than Engine or Transmission is refused at load.
 `capability_effectiveness` lost its last consumer and is deleted. No wire type changed.
 
 Final gates: MEASURED 898 targeted tests passed, six intentionally ignored, including the
 whole-tree `doc_citations`, `ui_ascii`, `net_boundary` and `bake::` guards; formatting and CI
 clippy passed. No capture or pricing run.
+
+
+#### Drivetrain review doubles: work, complete paths and unmanned controls (#228)
+
+Subject: the game's damage model, game state only. The two sweep-dmg-2 reviews were checked
+against the production adapter and `transmission::step`. Fixture pools, operating points and
+hull inertias below are test data, never asset pass conditions. All fixes are in
+`damage: conserve drivetrain work and preserve unmanned controls (#228)`.
+
+| reviewer | finding | verified / not a defect | fixed in (subject) |
+|---|---|---|---|
+| Codex | P1: stopped engine powers a pivot from zero combustion | verified red through `step` and a hull free in translation and yaw; pre-tick work missed acceleration | `damage: conserve drivetrain work and preserve unmanned controls (#228)` |
+| Codex | P2: independent Backup views splice incompatible paths | verified red with the review's Driver/Engine and Commander/Transmission paths: neither complete, yet full supply | `damage: conserve drivetrain work and preserve unmanned controls (#228)` |
+| Codex | P2: coast comparison passes if unmanned always brakes | verified by that mutant; the test now also compares a serving driver's full brake | `damage: conserve drivetrain work and preserve unmanned controls (#228)` |
+| Codex | P2: reduced module rounds to RATE 100% in f32 | verified red at 19,999,999 of 20,000,000 pool units; integer units now clamp a reduced row below whole | `damage: conserve drivetrain work and preserve unmanned controls (#228)` |
+| Claude | P2: DRAG_THROTTLE_RELEASE also prices reduced combustion | verified red at full pedal and quarter supply; release now reads command, produced torque reads supply | `damage: conserve drivetrain work and preserve unmanned controls (#228)` |
+| Claude | P2: reserve pricing omits engaged drag | verified red: MEASURED lab reserve 42,676.574 N versus crank 14,814.572 N at the same operating point; crank and reserve now share the torque law | `damage: conserve drivetrain work and preserve unmanned controls (#228)` |
+| Claude | P2: pinned-hull pull-away row proves nothing at 30 HP | verified; the row's assertion-free arm is removed and the free hull pulls away before and after | `damage: conserve drivetrain work and preserve unmanned controls (#228)` |
+| Claude | P2: repair becomes a brake toggle with nobody at the station | verified red: MEASURED one-second coast 4.5573964 m/s versus repair 2.1325536 m/s; repair now leaves unmanned coasting bit-identical | `damage: conserve drivetrain work and preserve unmanned controls (#228)` |
+| Claude | P3: an unmanned standstill sets park | verified red; the lever retains its state and the free grade run continues rolling back | `damage: conserve drivetrain work and preserve unmanned controls (#228)` |
+| Claude | P3: stall-guard, drag and idle-floor comments are stale | verified against the guards and torque law; comments state conditional idle protection, command release and reachable rest | `damage: conserve drivetrain work and preserve unmanned controls (#228)` |
+| Claude | P3: stopped engine retains its running loop | verified red at zero public rpm; birth is paused and live playback pauses at rest | `damage: conserve drivetrain work and preserve unmanned controls (#228)` |
+| Claude | P3: share() and Drive line claim sprocket delivery | verified; both now identify nominal supply condition rather than net traction | `damage: conserve drivetrain work and preserve unmanned controls (#228)` |
+| Claude | P3: brake test misses transmitted/competence mutants | verified: MEASURED mutants yield 0 N and 72,000 N instead of 120,000 N per belt; independent tests reject each | `damage: conserve drivetrain work and preserve unmanned controls (#228)` |
+| Claude | P3: inertia does not smooth a locked-clutch supply step | verified; the one-tick combustion and capacity changes are pinned through `step`, and the narrative records them as steps | `damage: conserve drivetrain work and preserve unmanned controls (#228)` |
+
+MEASURED by headless production-adapter tests on free fixture hulls, before → after:
+
+| Input | Before | After |
+|---|---|---|
+| 30/336 HP engine, full W from rest, speed after 5 s | 0.12977146 m/s | 0.510038 m/s |
+| Engine pool empty, crank and belts stopped, full steer, yaw rate after 1 s | −0.09843076 rad/s | 0 rad/s |
+| Unmanned hull at 5 m/s coasts uphill on a 10° grade, observed for 20 s | brief rollback then automatic park; final speed approximately zero | continued rollback; park unset, final speed −10.141057 m/s |
+
+Decision: nobody at the Driver station can command repair braking or move the park lever;
+repair work may continue, and a phase hold remains an operator-imposed brake. A Backup chooses
+one path before projecting source shares; an available occupant retains intent even if that
+path's engine is out of action. No wire type changed; PROTOCOL_REV remains 66.
+
+Additional verified finding: the unlatched near-rest brake-entry blend also commanded brakes
+without an occupant. It now requires a serving station; a lever already set still holds.
+The no-combustion energy tests cover stopped and spinning cranks, propulsion, pivots and geared
+turns with asymmetric rolling starts. Every temporary mutant and before-measurement helper
+was removed. No capture, pricing run, issue comment or push was taken.
+
+Final gates: MEASURED 879 targeted and whole-tree guard tests passed, six intentionally ignored,
+including `damage`, `tank::`, `track::`, `crew_ui`, `sfx`, `net::`, `trace::`, `headless_test`,
+`doc_citations`, `ui_ascii`, `net_boundary` and `bake::`. Formatting and CI workspace/all-target
+clippy with `dev_ui,bitprobe` passed. No screen, capture or pricing run was taken.

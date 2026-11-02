@@ -336,8 +336,8 @@ struct EngineSfx;
 struct EngineEmitter(EngineSpeedLaw);
 
 /// Give every tank carrying an authored engine recording a looping emitter. Every tank carries the
-/// public [`EngineRpm`] — the own, an opponent, a single-player one — so all of them idle and rev
-/// on this one code path; a tank whose spec authors no `engine.sound` carries no [`EngineSound`]
+/// public [`EngineRpm`] — the own, an opponent, a single-player one — so playback follows the
+/// crank on this one code path, including a paused loop at rest; a tank whose spec authors no `engine.sound` carries no [`EngineSound`]
 /// and stays silent.
 fn attach_engine_loops(
     asset_server: Res<AssetServer>,
@@ -349,15 +349,17 @@ fn attach_engine_loops(
         let law = EngineSpeedLaw::for_engine(sound);
         let clip = clips.tank_clip(&asset_server, &sound.clip);
         commands.entity(tank).insert(EngineSfx);
+        let playback = PlaybackSettings {
+            paused: rpm.rpm() == 0.0,
+            ..PlaybackSettings::LOOP
+                .with_spatial(true)
+                .with_volume(Volume::Linear(ENGINE_VOLUME))
+                .with_speed(law.speed(rpm.rpm()).max(law.min))
+        };
         commands.spawn((
             EngineEmitter(law),
             AudioPlayer::new(clip),
-            PlaybackSettings::LOOP
-                .with_spatial(true)
-                .with_volume(Volume::Linear(ENGINE_VOLUME))
-                // Born at the crank's current speed, so a tank spawned under load does not open
-                // with a frame of idle.
-                .with_speed(law.speed(rpm.rpm())),
+            playback,
             Transform::default(),
             ChildOf(tank),
         ));
@@ -379,6 +381,12 @@ fn drive_engine_speed(
             continue;
         };
         let target = emitter.0.speed(rpm.rpm());
+        if target == 0.0 {
+            // The game's damage model: a stopped crank has no running loop.
+            sink.pause();
+            continue;
+        }
+        sink.play();
         let current = sink.speed();
         sink.set_speed(current + (target - current) * blend);
     }
@@ -396,7 +404,8 @@ fn drive_engine_speed(
 ///     octave above the idle anchor.
 ///   * THE BAND'S EDGES — the speed is clamped to what the law itself yields at
 ///     [`ENGINE_LUG_FRACTION`] of idle and [`ENGINE_OVERSHOOT_FRACTION`] of governed, so a stalled
-///     crank cannot slide into sub-bass and an over-revved one cannot run away.
+///     turning crank cannot slide into sub-bass and an over-revved one cannot run away.
+///     A stopped crank returns zero and its emitter pauses.
 #[derive(Clone, Copy)]
 struct EngineSpeedLaw {
     idle_rpm: f32,
@@ -426,7 +435,10 @@ impl EngineSpeedLaw {
 
     /// Playback speed for this engine's loop at `rpm`.
     fn speed(&self, rpm: f32) -> f32 {
-        let ratio = (rpm / self.idle_rpm).max(0.0);
+        if rpm <= 0.0 {
+            return 0.0;
+        }
+        let ratio = rpm / self.idle_rpm;
         (self.anchor * ratio.powf(self.exponent)).clamp(self.min, self.max)
     }
 }
@@ -511,24 +523,40 @@ mod tests {
                 tank: HashMap::new(),
             });
         let sound = fixture();
-        let rpm = EngineRpm(1_234);
-        let tank = app.world_mut().spawn((sound.clone(), rpm)).id();
-
+        for rpm in [EngineRpm(0), EngineRpm(1_234)] {
+            // Fixture stopped and turning cranks.
+            app.world_mut().spawn((sound.clone(), rpm));
+        }
         app.world_mut()
             .run_system_once(attach_engine_loops)
             .unwrap();
-
         let world = app.world_mut();
-        let mut emitters = world.query::<(&ChildOf, &PlaybackSettings, &EngineEmitter)>();
-        let (parent, playback, _) = emitters
-            .single(world)
-            .expect("the remote tank gets exactly one engine emitter");
-        assert_eq!(parent.parent(), tank);
-        assert_eq!(
-            playback.speed,
-            EngineSpeedLaw::for_engine(&sound).speed(rpm.rpm()),
-            "the emitter is born at the public rpm's speed"
-        );
+        let mut emitters = world.query::<(&ChildOf, &PlaybackSettings)>();
+        let mut count = 0;
+        for (parent, playback) in emitters.iter(world) {
+            let rpm = world.get::<EngineRpm>(parent.parent()).unwrap().rpm();
+            assert_eq!(
+                playback.paused,
+                rpm == 0.0,
+                "a stopped public crank must be born silent"
+            );
+            if rpm > 0.0 {
+                assert_eq!(
+                    playback.speed,
+                    EngineSpeedLaw::for_engine(&sound).speed(rpm),
+                    "a turning emitter is born at the public crank's speed"
+                );
+            }
+            count += 1;
+        }
+        assert_eq!(count, 2, "each public crank gets one emitter");
+    }
+
+    /// The game's damage model: a crank at rest has no running loop; sound must not hold
+    /// its lug pitch after the engine's HP pool empties and its stored energy runs out.
+    #[test]
+    fn a_stopped_crank_has_no_running_loop() {
+        assert_eq!(EngineSpeedLaw::for_engine(&fixture()).speed(0.0), 0.0);
     }
 
     #[test]
@@ -537,9 +565,10 @@ mod tests {
         let law = EngineSpeedLaw::for_engine(&sound);
         let floor = law.speed(ENGINE_LUG_FRACTION * sound.idle_rpm);
         let ceiling = law.speed(ENGINE_OVERSHOOT_FRACTION * sound.governed_rpm);
-        // A stalled, reversed or runaway crank presents as the band's own edge.
-        assert_eq!(law.speed(0.0), floor);
-        assert_eq!(law.speed(-100.0), floor);
+        // The game's damage model: a crank at rest has no running loop; a turning crank
+        // stays inside the pitch band.
+        assert_eq!(law.speed(0.0), 0.0);
+        assert_eq!(law.speed(-100.0), 0.0);
         assert_eq!(law.speed(0.5 * sound.idle_rpm), floor);
         assert_eq!(law.speed(100.0 * sound.governed_rpm), ceiling);
         // The edges bracket the authored band rather than cutting into it.

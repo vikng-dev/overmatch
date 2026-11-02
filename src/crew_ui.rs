@@ -170,7 +170,9 @@ fn module_status(
         None if health.is_empty() => "OUT OF ACTION".to_owned(),
         None if health.held() < health.capacity() => format!(
             "RATE {}%",
-            served_percent(health.held() as f32 / health.capacity() as f32)
+            ((u64::from(health.held()) * 100 + u64::from(health.capacity()) / 2)
+                / u64::from(health.capacity()))
+            .clamp(1, 99)
         ),
         None => "READY".to_owned(),
     }
@@ -349,7 +351,7 @@ fn update_status_panel(
     };
     let module_lines: String = module_rows.into_iter().map(|(_, row)| row).collect();
     let card = format!(
-        "{state}\nCrew {alive}/{total}\n{} {}%\nWeapons: {}{round_lines}\n{repair_hint}{module_lines}",
+        "{state}\nCrew {alive}/{total}\n{} supply {}%\nWeapons: {}{round_lines}\n{repair_hint}{module_lines}",
         Capability::Drive.label(),
         served_percent(drive),
         weapon_line,
@@ -507,6 +509,18 @@ mod tests {
         assert_eq!(row(335), "RATE 99%");
         assert_eq!(served_percent(0.0), 0);
         assert_eq!(served_percent(1.0), 100);
+    }
+
+    /// The game's damage model: integer pool units retain a one-unit shortage above f32's
+    /// exact integer range, so the player still sees the module needs repair.
+    #[test]
+    fn one_unit_short_is_never_whole() {
+        // Fixture: one pool unit short of an admitted 20,000 HP pool.
+        let health = crate::ballistics::ComponentHealth::holding(20_000, 19_999_999);
+        assert_eq!(
+            module_status(&health, &crate::damage::repair::ModuleRepair::default()),
+            "RATE 99%"
+        );
     }
 
     const AUTO: FireCycle = FireCycle::Automatic {
