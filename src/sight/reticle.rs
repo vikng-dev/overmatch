@@ -684,6 +684,9 @@ fn update_optic_mask(
     let (node, mut visibility) = mask
         .single_mut()
         .expect("entering a match spawns exactly one optic mask");
+    let mut material = materials
+        .get_mut(&node.0)
+        .expect("the optic mask material is created synchronously with its match-entry widget");
     let (camera, cam_transform) = camera
         .single()
         .expect("the client constructs exactly one player camera before entering a match");
@@ -712,9 +715,7 @@ fn update_optic_mask(
         visibility.set_if_neq(Visibility::Hidden);
         return;
     };
-    if let Some(mut material) = materials.get_mut(&node.0) {
-        material.params.glass = glass.centre.extend(glass.radius).extend(glass.feather);
-    }
+    material.params.glass = glass.centre.extend(glass.radius).extend(glass.feather);
     visibility.set_if_neq(Visibility::Visible);
 }
 
@@ -945,6 +946,24 @@ mod tests {
             let failure = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| picture.run()));
             assert_invariant_failure(failure, "exactly one ranging zero mark");
         }
+    }
+
+    /// The mask's strong handle names a material created synchronously at match entry. Losing
+    /// that material must stop the update before a stale or unbound mask can be shown.
+    #[test]
+    fn optic_mask_requires_its_synchronous_material() {
+        let mut picture = SightPicture::new(Quat::IDENTITY);
+        picture.bolt_to_sight_line();
+        picture.world.init_resource::<Assets<OpticMaskMaterial>>();
+        picture.world.run_system_once(spawn_optic_mask).unwrap();
+        // Fixture fault: remove the synchronously inserted asset while its widget survives.
+        picture
+            .world
+            .insert_resource(Assets::<OpticMaskMaterial>::default());
+        let failure = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            picture.world.run_system_once(update_optic_mask).unwrap();
+        }));
+        assert_invariant_failure(failure, "the optic mask material is created synchronously");
     }
 
     /// The fixture's viewport, in px.
