@@ -501,7 +501,7 @@ A round's channel and a blast's crater dish are stored as shapes in a per-chunk 
 The chunk's geometry and collider never change.
 The wall's shader skips the surface inside a hole and draws the hole's inner wall, shadow pass included, so sight passes through it.
 Rounds, mass, centroid, inertia and the structural calculation ignore holes: a later round meets the whole chunk.
-A cap on holes per chunk crumbles the chunk past it.
+A cap on holes per chunk bounds what is drawn and recorded; a later hole still wears the chunk's pool, and only a spent pool turns a chunk to dust.
 A hole the size of a chunk or larger stays a chunk fate (`Dust`, `Fall`), as today.
 
 **Server cost.**

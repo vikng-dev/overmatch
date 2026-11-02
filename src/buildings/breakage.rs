@@ -48,8 +48,8 @@
 //!   keeps its hole in a per-chunk list ([`Live::holes`]), for the view to draw. No law, collider
 //!   or mass reads a hole: they see the whole chunk, and [`Shape`] holds none. A hole holds no more
 //!   than the volume its load crushed, the volume it took from the chunk's pool, so one the size
-//!   of its chunk is a spent pool, recorded as dust. A deposit that would leave a chunk holding
-//!   more than [`HOLES_PER_CHUNK`] crumbles it to dust first, before the laws run.
+//!   of its chunk is a spent pool, recorded as dust. Only the pool decides dust: a chunk holding
+//!   [`HOLES_PER_CHUNK`] holes keeps standing and draws no later one.
 //! * **The record** ([`WallRecord`]): every swap, dust, hole, crack and fall, in authority order,
 //!   with its tick. The authority appends; the network carries it ([`crate::net`]'s ledger); a
 //!   replica rebuilds the same state from it ([`derive_from_record`]); the view presents it at the
@@ -118,9 +118,9 @@ const GRADE_M: f32 = 0.0;
 /// on the plane.
 const ON_GRADE_M: f32 = 1e-4;
 
-/// The most holes one chunk holds (module doc); the deposit that would add past it crumbles the
-/// chunk. ASSUMED: the bound on the list the view reads per chunk, and on the record's holes per
-/// chunk; no measured cost or look sets it yet.
+/// The most holes one chunk draws and the record carries (module doc), the earliest cut kept; a
+/// later one still wears the pool (Resolution: bounds the view's per-chunk table and the shared
+/// record, no law reads it). ASSUMED: no measured cost or look sets its size yet.
 pub(crate) const HOLES_PER_CHUNK: usize = 16;
 
 /// The law's view of one building asset (module doc), at scale 1 in the building frame.
@@ -1786,11 +1786,10 @@ pub(crate) struct Changes {
 /// Run one deposit's `loads`, with the `holes` it cuts ([`holes_of`]), through the laws on `live`
 /// (module doc) and say what changed: the elements first touched swap, then the dust, the holes
 /// kept, the cracks (the push rule's, then the structural check's, then the weight check's) and the
-/// falls, each ascending but the holes, in deposit order. A chunk the holes would carry past
-/// [`HOLES_PER_CHUNK`] crumbles to dust before the laws run; a hole is kept only in a chunk
-/// standing after the removal, and no law reads one. A field load on a chunk turned to dust
-/// went into crushing it and moves nothing; a body's blow there is returned whole because dust
-/// has no carrier. A queued contact on a chunk an earlier deposit freed is returned whole too:
+/// falls, each ascending but the holes, in deposit order. A hole is kept only in a chunk standing
+/// after the removal and holding fewer than [`HOLES_PER_CHUNK`], and no law reads one. A field
+/// load on a chunk turned to dust went into crushing it and moves nothing; a body's blow there is
+/// returned whole because dust has no carrier. A queued contact on a chunk an earlier deposit freed is returned whole too:
 /// that chunk launched as its own body, which the next physics step's solver meets as a dynamic
 /// body, so the momentum the static stop took from the source is neither kept nor spent twice.
 /// A held section's energy check reads a body's pair work against its hinge effective mass; a
@@ -1802,32 +1801,17 @@ pub(crate) fn run_laws(
     element_of: &[u16],
     live: &mut Live,
     loads: &[Load],
-    holes: Vec<(usize, Hole)>,
+    mut holes: Vec<(usize, Hole)>,
     spin: Vec3,
 ) -> Changes {
-    let mut cutting: BTreeMap<usize, usize> = BTreeMap::new();
-    for &(c, _) in &holes {
-        *cutting.entry(c).or_default() += 1;
-    }
-    let mut crumbled = Vec::new();
-    for (c, n) in cutting {
-        let pool = live.state.pool[c];
-        if live.holes[c].len() + n > HOLES_PER_CHUNK
-            && fracture::wear(&live.structure, &mut live.state, c, pool)
-        {
-            crumbled.push(c);
+    let struck = fracture::strike(&live.structure, &mut live.state, loads);
+    holes.retain(|&(c, hole)| {
+        let kept = live.state.standing(c) && live.holes[c].len() < HOLES_PER_CHUNK;
+        if kept {
+            live.holes[c].push(hole);
         }
-    }
-    let mut struck = fracture::strike(&live.structure, &mut live.state, loads);
-    struck.dusted.extend(crumbled);
-    struck.dusted.sort_unstable();
-    let holes: Vec<(usize, Hole)> = holes
-        .into_iter()
-        .filter(|&(c, _)| live.state.standing(c))
-        .collect();
-    for &(c, hole) in &holes {
-        live.holes[c].push(hole);
-    }
+        kept
+    });
     let returns = loads
         .iter()
         .filter(|load| !live.state.standing(load.chunk))

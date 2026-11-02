@@ -666,42 +666,64 @@ fn a_hole_changes_no_collider_mass_or_structural_result() {
     assert_eq!(colliders(&mut app), before, "the holes moved no collider");
 }
 
-/// PAST THE CAP A CHUNK CRUMBLES: a chunk keeps a hole from each of [`HOLES_PER_CHUNK`] rounds'
-/// lines, each far too weak to spend its pool; the next round, which would carry it past the cap,
-/// turns it to dust instead of holing it, so the record says `Dust` and the list stops at the cap.
-/// A cap that never fired would grow a chunk's list (and the record) without bound; one that fired
-/// early would crumble a chunk the view still draws.
+/// ONLY THE POOL DECIDES DUST, THE CAP ONLY BOUNDS WHAT IS DRAWN: lines far too weak to spend a
+/// chunk's pool each keep a hole up to [`HOLES_PER_CHUNK`]; every later line still wears the pool,
+/// records no hole and leaves the chunk standing, until the volume they crushed spends the pool.
+/// The view's table and the shared record rely on the bound and the laws on the pool alone: a count
+/// that dusts a chunk, or a wear dropped past the cap, fails this. ASSUMED fixture: one repeated
+/// line sized so that four lines past the cap spend the pool, on seams too strong to open first.
 #[test]
-fn past_the_cap_a_chunk_crumbles() {
+fn past_the_cap_a_chunk_stands_until_its_pool_is_spent() {
     let kind = shipped_house();
     let (e, [c, ..]) = fixture_chunks(&kind);
     let mut live = Live::new(&kind, 1.0);
-    let line = line_through_chunk(&kind, &live.structure, e, c, 1e-3);
+    let to_spend = HOLES_PER_CHUNK + 4;
+    let line = line_through_chunk(&kind, &live.structure, e, c, 1.0 / to_spend as f32);
     let holes = holes_of(&kind, 1.0, &[line], &[]);
     assert_eq!(holes.len(), 1);
     let loads = line_loads(&live.structure, &[line]);
-    for k in 1..=HOLES_PER_CHUNK + 1 {
-        let changes = run_laws(
-            &kind.layout.element_of,
-            &mut live,
-            &loads,
-            holes.clone(),
-            Vec3::ZERO,
-        );
-        let holed = changes
-            .events
-            .iter()
-            .any(|event| matches!(event, WallEvent::Hole(h, _) if usize::from(*h) == c));
-        let dusted = changes.events.contains(&WallEvent::Dust(c as u16));
-        if k <= HOLES_PER_CHUNK {
-            assert!(holed && !dusted, "round {k}: {:?}", changes.events);
-            assert_eq!(live.holes[c].len(), k);
-        } else {
-            assert!(dusted && !holed, "round {k}: {:?}", changes.events);
-            assert_eq!(live.state.fate[c], Fate::Dust);
-            assert_eq!(live.holes[c].len(), HOLES_PER_CHUNK);
+    for joint in &mut Arc::make_mut(&mut live.structure).joints {
+        if let Bond::Bonded(seam) = &mut joint.bond {
+            *seam = fracture::Seam {
+                tensile: 1e12,
+                fracture_energy: 1e12,
+                shear: fracture::Shear::OpeningOnly,
+            };
         }
     }
+    let spent_at = (1..=to_spend + 1)
+        .find(|&k| {
+            let pool = live.state.pool[c];
+            let changes = run_laws(
+                &kind.layout.element_of,
+                &mut live,
+                &loads,
+                holes.clone(),
+                Vec3::ZERO,
+            );
+            if changes.events.contains(&WallEvent::Dust(c as u16)) {
+                return true;
+            }
+            let holed = changes
+                .events
+                .iter()
+                .any(|event| matches!(event, WallEvent::Hole(h, _) if usize::from(*h) == c));
+            assert!(live.state.pool[c] < pool, "line {k} wears the pool");
+            assert_eq!(live.state.fate[c], Fate::Standing, "line {k}");
+            assert_eq!(
+                holed,
+                k <= HOLES_PER_CHUNK,
+                "line {k}: {:?}",
+                changes.events
+            );
+            assert_eq!(live.holes[c].len(), k.min(HOLES_PER_CHUNK));
+            false
+        })
+        .expect("the crushed volume spends the pool");
+    assert!(
+        spent_at.abs_diff(to_spend) <= 1,
+        "the pool, not the count, emptied at line {spent_at} of {to_spend}"
+    );
 }
 
 /// A hole's volume against the crushed volume it should hold, and the relative bound the

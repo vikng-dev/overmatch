@@ -618,13 +618,13 @@ fn the_shared_blast_path_reports_pressure_work_and_rear_scabs() {
     }
 }
 
-/// PAST THE HOLE CAP THE SANDBOX'S CHUNK CRUMBLES, AS THE GAME'S DOES: each subcritical channel
-/// through one chunk keeps its hole, and the one past [`HOLES_PER_CHUNK`] turns the chunk to dust
-/// before the laws run. A sandbox that cut no holes never reaches the cap and lets the chunk
-/// stand. ASSUMED fixture: the largest chunk, the crush energy of a quarter of its pool (m³)
-/// spread over the channels.
+/// THE SANDBOX REACHES THE HOLE CAP AS THE GAME DOES, AND THE CAP DUSTS NOTHING: each subcritical
+/// channel through one chunk keeps its hole up to [`HOLES_PER_CHUNK`]; one past it wears the pool
+/// and leaves the chunk standing. A sandbox that cut no holes, or a count that dusts, fails this.
+/// ASSUMED fixture: the largest chunk, the crush energy of a quarter of its pool (m³) spread over
+/// the channels.
 #[test]
-fn the_sandbox_crumbles_a_chunk_past_the_hole_cap() {
+fn the_sandbox_chunk_outlives_the_hole_cap() {
     use crate::buildings::breakage::HOLES_PER_CHUNK;
     let layout = layout();
     let charge = Charge::of(&super::wall_rounds());
@@ -677,21 +677,20 @@ fn the_sandbox_crumbles_a_chunk_past_the_hole_cap() {
     };
     for kept in 1..=HOLES_PER_CHUNK {
         let result = apply_deposit(&mut wall, &controls, &charge, &blast_field(), &channel);
-        assert!(
-            !result.dusted.contains(&c),
-            "channel {kept} is under the cap"
-        );
+        assert!(!result.dusted.contains(&c), "channel {kept} is subcritical");
         assert_eq!(
             wall.live.holes[c].len(),
             kept,
             "each channel keeps its hole"
         );
     }
+    let pool = wall.live.state.pool[c];
     let result = apply_deposit(&mut wall, &controls, &charge, &blast_field(), &channel);
     assert!(
-        result.dusted.contains(&c),
-        "the channel past the cap crumbles the chunk"
+        !result.dusted.contains(&c) && wall.live.state.pool[c] < pool,
+        "the channel past the cap wears the pool and dusts nothing"
     );
+    assert_eq!(wall.live.holes[c].len(), HOLES_PER_CHUNK);
 }
 
 /// The game's damage-model inspector preserves resolved momentum and entrance work even when
