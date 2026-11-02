@@ -2360,4 +2360,133 @@ mod tests {
         assert_ne!(gear.loop_pts[0], gear.loop_pts[1]);
         assert_ne!(gear.travel_knots[0], gear.travel_knots[1]);
     }
+    /// Spec construction, terrain observation and contact must carry a second drivetrain's
+    /// own mass, curve and launch domain through the production belt tick. Fixture: fixed
+    /// attitude/ride height on a loaded incline; only longitudinal hull motion is integrated.
+    #[test]
+    fn second_spec_drives_and_settles_through_observation_and_contact() {
+        use super::super::drive_fixture::{compact_spec, ground};
+        use super::super::oracle::{BlockField, TerrainBlock};
+        let spec = compact_spec();
+        spec.validate().unwrap();
+        let mass = spec.mass;
+        let launch_limit = spec.track.powertrain.transmission.gearbox.launch_gears;
+        let mut app = App::new();
+        app.add_plugins((crate::bake::plugin, sim_plugin));
+        app.world_mut().run_schedule(Startup);
+        app.world_mut().resource_mut::<TankBlueprint>().spec = std::sync::Arc::new(spec);
+        app.world_mut().run_schedule(PreUpdate);
+        let gear = app.world().resource::<TrackGear>();
+        let rest = app
+            .world()
+            .resource::<super::super::rig_geom::RigGeom>()
+            .hull_rest_y;
+        assert_eq!(gear.trans.launch_gears, launch_limit);
+        assert_eq!(
+            gear.params.grip.unwrap().side_weight * 2.0,
+            mass * super::super::derive::G
+        );
+        assert!(gear.trans.max_curve_rpm() > gear.trans.engine.governed_rpm);
+        let angle = 10.0_f32.to_radians(); // Fixture: supported, loaded travel.
+        let rotation = Quat::from_rotation_x(angle);
+        let forward = rotation * Vec3::NEG_Z;
+        let field = BlockField::new(vec![TerrainBlock::new(
+            rotation * Vec3::NEG_Y * 0.5,
+            rotation,
+            Vec3::new(10_000.0, 1.0, 10_000.0),
+        )])
+        .with_ground(Some(crate::ground_field::GroundField::uniform(ground())));
+        let mut drive = TrackDrive::default();
+        let mut signal = DriveSignal::default();
+        let mut grip = TrackGrip::default();
+        let mut elements = TrackGripElements::for_links(gear.count);
+        let mut transmission = TransmissionState::from_spec(&gear.trans);
+        let pieces = RubbleBodies::default();
+        let dt = 1.0 / 64.0; // Fixture tick.
+        let weight = mass * super::super::derive::G;
+        let mut speed = 0.0;
+        let mut distance = 0.0;
+        let mut final_lo = f32::INFINITY;
+        let mut final_hi = f32::NEG_INFINITY;
+        let mut load = super::super::load::PerceivedLoad::default();
+        for tick in 0..64 * 60 {
+            let (reports, _) = belt_tick(
+                gear,
+                &field,
+                &pieces,
+                DriveTarget {
+                    intent: DriveIntent::Axes(DriveAxes {
+                        throttle: 1.0,
+                        steer: 0.0,
+                    }),
+                    supply: DriveSupply::WHOLE,
+                },
+                Affine3A::from_rotation_translation(
+                    rotation,
+                    rotation * Vec3::Y * rest + forward * distance,
+                ),
+                dt,
+                |_| forward * speed,
+                BeltRig {
+                    drive: &mut drive,
+                    signal: &mut signal,
+                    grip: &mut grip,
+                    elements: &mut elements,
+                    transmission: &mut transmission,
+                },
+            );
+            let supports = reports.iter().flat_map(|r| r.perceived_support.iter());
+            load = super::super::load::observe_rig(
+                supports,
+                forward,
+                &gear.params,
+                &gear.trans,
+                &transmission,
+            );
+            assert!(load.grip_n > 0.0);
+            let expected_mu = gear
+                .params
+                .grip
+                .unwrap()
+                .pair(crate::substances::contact_friction(ground().friction));
+            assert!(
+                reports
+                    .iter()
+                    .flat_map(|r| &r.contacts)
+                    .all(|c| c.mu == expected_mu)
+            );
+            if tick == 0 {
+                assert!(
+                    transmission.gear <= launch_limit,
+                    "the spec's start domain reaches the Driver"
+                );
+            }
+            let force: f32 = reports
+                .iter()
+                .flat_map(|r| &r.apps)
+                .map(|a| a.force.dot(forward))
+                .sum();
+            speed += (force - weight * angle.sin()) / mass * dt;
+            distance += speed * dt;
+            if tick >= 64 * 59 {
+                final_lo = final_lo.min(speed);
+                final_hi = final_hi.max(speed);
+            }
+        }
+        assert!((load.grade_n - weight * angle.sin()).abs() < weight * 1e-4);
+        assert!(
+            load.rolling_n > 0.0,
+            "the contact field must supply a real rolling load"
+        );
+        assert!(final_lo > super::super::transmission::PARK_ENGAGE_SPEED);
+        // Resolution: one percent of construction's governed speed permits discrete contact ripple.
+        assert!(
+            final_hi - final_lo < 0.01 * gear.trans.governed_speed(false),
+            "loaded travel must settle: [{final_lo}, {final_hi}]"
+        );
+        println!(
+            "MEASURED second-spec grade_n={} rolling_n={} grip_n={} speed_range=[{final_lo},{final_hi}] mass_kg={mass}",
+            load.grade_n, load.rolling_n, load.grip_n
+        );
+    }
 }

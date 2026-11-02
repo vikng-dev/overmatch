@@ -124,33 +124,21 @@ fn tiger_tp() -> TransmissionParams {
 
 /// Fixture: a lighter three-speed drivetrain with its own curve, ratios and capacities.
 fn compact_drivetrain() -> (ForceParams, TransmissionParams) {
+    let spec = super::super::drive_fixture::compact_spec();
+    let ground = super::super::drive_fixture::ground();
     let mut fp = lab_fp();
-    fp.inertia = 3000.0;
-    fp.grip.as_mut().unwrap().side_weight = 18000.0 * super::super::derive::G / 2.0;
-    let tp = TransmissionParams::from_authoring(&TransmissionAuthoring {
-        idle_rpm: 700.0,
-        governed_rpm: 2200.0,
-        rated_rpm: 2200.0,
-        torque_nm: &[(700.0, 800.0), (1400.0, 1100.0), (2200.0, 0.0)],
-        forward_speeds_kmh: &[5.0, 12.0, 25.0],
-        reverse_speeds_kmh: &[5.0, 12.0],
-        launch_gears: 2,
-        max_step: 1,
-        steer_radii_m: &[(3.0, 8.0), (7.2, 19.2), (15.0, 40.0)],
-        reverse_steer_radii_m: &[(3.0, 8.0), (7.2, 19.2)],
-        steer_capacity_n: 80000.0,
-        recirculation: 0.9,
-        brake_capacity_n: 50000.0,
-        brake_static_factor: 1.4,
-        drag_fraction: 0.3,
-        engine_inertia_kgm2: 2.0,
-        clutch_capacity_nm: 1500.0,
-        belt_inertia: fp.inertia,
-        shift_secs: 0.2,
-        sprocket_radius_m: 0.3,
-        half_tread_m: 1.0,
-    })
-    .expect("inline Fixture drivetrain must be admitted");
+    fp.inertia = 3000.0; // Fixture belt inertia, independent of the contact composition's geometry.
+    fp.grip = Some(forces::GripParams {
+        track: crate::substances::contact_friction(ground.friction),
+        ground: crate::substances::contact_friction(ground.friction),
+        side_weight: spec.mass * super::super::derive::G / 2.0,
+    });
+    let tp = spec
+        .track
+        .powertrain
+        .transmission
+        .params(0.3, 1.0, fp.inertia)
+        .expect("inline Fixture drivetrain must be admitted");
     (fp, tp)
 }
 
@@ -2398,16 +2386,33 @@ fn part_pedal_launches_and_sustains_ordered_speed() {
                 let mut lo = f32::INFINITY;
                 let mut hi = f32::NEG_INFINITY;
                 let initial = driver_input(&fp, 0.0, grade + rolling, command);
-                let capable = launch_pick(
-                    &tp,
-                    &fp,
-                    initial.supply,
-                    false,
-                    initial.perceived_load,
-                    0,
-                    command,
-                )
-                .is_some();
+                let capable = (1..=tp.launch_gears.min(tp.gears_fwd.len() as u8)).any(|gear| {
+                    price_driver_force(
+                        &tp,
+                        initial.supply,
+                        0.0,
+                        tp.gears_fwd[usize::from(gear - 1)],
+                        command,
+                        initial.perceived_load.grip_n,
+                        ClutchState::Slip,
+                    ) - initial.perceived_load.total_n()
+                        > force_margin(&fp, &tp)
+                });
+                if capable {
+                    assert!(
+                        launch_pick(
+                            &tp,
+                            &fp,
+                            initial.supply,
+                            false,
+                            initial.perceived_load,
+                            0,
+                            command
+                        )
+                        .is_some(),
+                        "an independently affordable pedal must select a launch gear"
+                    );
+                }
                 for tick in 0..64 * 60 {
                     let mut inp = driver_input(&fp, speed, grade + rolling, command);
                     inp.reactions = [(grade
@@ -3356,4 +3361,52 @@ fn overflowing_crank_energy_is_refused_before_play() {
         .unwrap_err()
         .to_string();
     assert!(error.contains("crank energy"), "{error}");
+}
+
+/// Each class's declared launch domain and independent affordability constrain the selector.
+#[test]
+fn launch_selection_obeys_declared_domain_and_capability() {
+    for (fp, tp) in class_drivetrains() {
+        for command in [0.25, 0.5, 1.0] {
+            // Fixture pedal samples.
+            let inp = driver_input(&fp, 0.0, 0.0, command);
+            let capable = (1..=tp.launch_gears.min(tp.gears_fwd.len() as u8)).any(|gear| {
+                price_driver_force(
+                    &tp,
+                    inp.supply,
+                    0.0,
+                    tp.gears_fwd[usize::from(gear - 1)],
+                    command,
+                    inp.perceived_load.grip_n,
+                    ClutchState::Slip,
+                ) > force_margin(&fp, &tp)
+            });
+            let selected = launch_pick(&tp, &fp, inp.supply, false, inp.perceived_load, 0, command);
+            assert_eq!(
+                selected.is_some(),
+                capable,
+                "selector must honor independent affordability"
+            );
+            if let Some(gear) = selected {
+                assert!(
+                    gear <= tp.launch_gears,
+                    "selector must honor the construction's launch limit"
+                );
+            }
+        }
+    }
+}
+
+/// A cut's landing must use this hull's mass and both belt inertias on every construction.
+#[test]
+fn coupled_mass_uses_each_constructions_own_weight() {
+    for (fp, _) in class_drivetrains() {
+        let expected =
+            2.0 * fp.grip.unwrap().side_weight / super::super::derive::G + 2.0 * fp.inertia;
+        assert_eq!(
+            coupled_mass(&fp),
+            expected,
+            "landing mass belongs to this construction"
+        );
+    }
 }

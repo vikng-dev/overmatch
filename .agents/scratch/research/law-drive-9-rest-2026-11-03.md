@@ -49,3 +49,35 @@ Decision: a Resolution budget of 4,096 reachable states bounds startup memory an
 lattice is refused by name with an authoring fix, rather than making startup enumerate millions
 of binary32 states. This is an admission cost bound, not a control threshold. Default shipped
 keyboard feel is unchanged. Formatting, CI clippy and 417 affected-module/guard tests pass.
+
+## Tank #2 and executed mutations
+
+Commit: `driving: prove a second construction through the drive laws (#146)`.
+
+Claude's launch-domain/mass coverage findings and Codex's selector-controlled part-pedal test
+were verified by mutating the production functions, not clones. Each mutation was compiled,
+executed, and restored before the next; no mutant or alternative remains in the tree.
+
+| Production mutation | Executed command filter | MEASURED result |
+|---|---|---|
+| `launch_pick`: launch limit hard-coded to four | `launch_selection_obeys_declared_domain` | red: one failed test, construction launch limit violated |
+| `coupled_mass`: hull mass hard-coded to 57 t | `coupled_mass_uses_each` | red: one failed test, 73,000 kg versus the independently derived 42,500 kg |
+| `launch_pick`: partial pedals return `None` | `part_pedal_launches launch_selection_obeys_declared_domain` | red: two failed tests, affordable launch selection missing |
+
+The second construction's declared limit of two is now checked by the generic domain assertion.
+Capability comes from independent force affordability, so the selector cannot decide whether
+sustained travel and settling assertions run. The shared inline `compact_spec` owns the fixture
+mass, curve, ladders, radii, capacities and recirculation. It retains the seed's running-gear
+geometry, but changes the driving construction; this is not a claim of a second shipped asset.
+
+Fixture differences include a nonzero curve tail beyond governed rpm, friction 0.65 rather than
+the arithmetic lab's 0.9, recirculation 0.65 rather than 0.9, and a lower power/weight. DERIVED
+maximum authored-knot power/weight is about 6.52 kW/t versus the lab's 13.10 kW/t; these are curve
+samples, not measurements of delivered power. No production tank-specific branch was added.
+
+The validated spec goes through production `TrackGear` construction, `belt_tick`, `observe_rig`
+and contact. The narrow integration fixture holds attitude/ride height on a ten-degree plane
+and integrates longitudinal hull motion from emitted forces. MEASURED at 18,000 kg: grade
+30,662.777 N, rolling load 6,955.8926 N, grip 178,446.06 N, final-second speed range
+[3.1315382, 3.1315715] m/s. It sustains and settles at a real load. No rollback policy is tested.
+Formatting, CI clippy and all 420 affected-module/guard tests pass after restoring production.

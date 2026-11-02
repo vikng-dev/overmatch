@@ -11,6 +11,8 @@
 //! game's ECS adapter over `wrap`, mounted by the windowed clients only.
 
 pub mod drive;
+#[cfg(test)]
+pub(crate) mod drive_fixture;
 pub mod forces;
 pub mod load;
 pub mod oracle;
