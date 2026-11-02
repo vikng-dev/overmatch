@@ -1,4 +1,4 @@
-// s5_oblique_through: an 88 through the hull side at 30 degrees: the cone's axis leans from the path toward the plate normal; the spent round skids once off an ammunition box 7 mm behind the plate, a gap narrower than its calibre, and comes to rest in the hull's inner face. The box's HP pool is emptied (72 of 72 HP taken) and no crew station takes a dose
+// s5_oblique_through: an 88 through the hull side at 30 degrees: the cone's axis leans from the path toward the plate normal; the spent round skids once off an ammunition box 7 mm behind the plate, a gap narrower than its calibre, and comes to rest in the hull plating behind it. The box's HP pool is emptied (72 of 72 HP taken) and no crew station takes a dose
 // Recorded by the real march from `scenarios.ron` (`ballistics::pen_cam`); do not edit.
 // Re-record with `OVERMATCH_BLESS=1 cargo test --lib pen_cam::bless -- --ignored`.
 (
@@ -44,33 +44,33 @@
         ),
         (
             name: "Hull_Rear",
-            t: 0.0010073371,
-            entry: (-1.5835285, 1.4994335, -0.28485012),
+            t: 0.00027145265,
+            entry: (-1.5385284, 1.499423, -0.25886917),
             exit: None,
-            chord_mm: 0.89606255,
-            steel_equiv_mm: 0.89606255,
-            cost_mm: 0.89606255,
+            chord_mm: 0.48436978,
+            steel_equiv_mm: 0.48436978,
+            cost_mm: 0.48436978,
             class: Main,
             factor: 1000.0,
         ),
         (
             name: "Hull_Side_Upper_L",
-            t: 0.0010073371,
-            entry: (-1.5835285, 1.4994335, -0.28485012),
+            t: 0.00027145265,
+            entry: (-1.5385284, 1.499423, -0.25886917),
             exit: None,
-            chord_mm: 2.6883852,
-            steel_equiv_mm: 2.6883852,
-            cost_mm: 2.6883852,
+            chord_mm: 2.4219375,
+            steel_equiv_mm: 2.4219375,
+            cost_mm: 2.4219375,
             class: Main,
             factor: 1000.0,
         ),
     ],
     ricochets: [
         (
-            t: 0.00021318696,
+            t: 0.00021318789,
             point: (-1.5385284, 1.499423, -0.25886965),
             normal: (-1.0, 0.0, 0.0),
-            incoming: (0.8660254, -0.00020305307, 0.5),
+            incoming: (0.8660253, -0.00020305306, 0.49999997),
             outgoing: (0.0, -0.00040610615, 1.0),
             volume: "Ammo_L_1",
         ),
@@ -89,12 +89,16 @@
             point: (-1.5457134, 1.4994245, -0.26301718),
         ),
         (
-            t: 0.00021318696,
-            point: (-1.5385284, 1.499423, -0.25886965),
+            t: 0.00021318789,
+            point: (-1.5385284, 1.499423, -0.25886917),
         ),
         (
-            t: 0.0010073371,
-            point: (-1.5835285, 1.4994316, -0.2809744),
+            t: 0.0002422256,
+            point: (-1.5385275, 1.5030894, -0.25886774),
+        ),
+        (
+            t: 0.00035763625,
+            point: (-1.5385284, 1.4994202, -0.252573),
         ),
     ],
     spall: [
@@ -753,12 +757,12 @@
         ),
     ],
     end: Rest(
-        volume: "Hull_Rear",
+        volume: "Ammo_L_1",
     ),
     doses: [
         (
             volume: "Ammo_L_1",
-            line: 81.30659,
+            line: 86.434044,
             field: 398.05914,
             taken: 72000,
             entered: Some((-1.5385284, 1.499423, -0.25886965)),

@@ -177,7 +177,7 @@ pub(crate) fn disc_radius(caliber: f32) -> f32 {
 /// an axis start a sweep reached uses [`Interior::laid`]; relative discovery reads material newly
 /// holding that start at its next scene boundary. A tick's gravity bend leaves the starts where the
 /// sweep reached them, because moving one takes it off the ray that certified it: a cursor then
-/// leans off the new axis by its length × the bend's sine (DERIVED: 54 µm, a 0.135 m cursor at
+/// leans off the new axis by its length × the bend's sine (DERIVED: 51.7 µm, a 0.135 m cursor at
 /// 400 m/s and 64 Hz).
 ///
 /// The origin and the seeds share one anchor so they agree to corridor-scale rounding wherever on
@@ -294,30 +294,24 @@ pub(crate) fn layout(frame: &DiscFrame, radius: f32) -> Vec<Vec3> {
 /// `collect::sitting_reach`), so a ray running along the face owns no crossing of it by rounding.
 pub(crate) const REST_CLEARANCE: f32 = MARCH_EPS;
 
-/// The game's damage model: where along the incoming axis a skid turns, metres from `start`, the
-/// axis start.
-///
-/// INVARIANT: a round slides resting on its face. Its axis leaves the incoming ray where it stands
-/// `rest` (its body radius) plus [`REST_CLEARANCE`] off the read plane, so the disc it lays there,
-/// square to the slide, reaches down to the face and not into it, and nothing is lifted: the axis
-/// is on ground it has flown. DERIVED: that point is `r(1 − sin θ)/cos θ` before the rim's first
-/// contact, and the disc lies inside the cylinder the round swept on its way to the plane, whose
-/// section square to the slide is an ellipse of semi-axes `r/sin θ` and `r`. A face that meets that
-/// disc is a real contact: [`Flight::settle`] reads its samples inside it, and the contact law decides.
-///
-/// The turn is never past `hand_off`, where the axis reached. A start already resting high enough
-/// turns at once; one nearer the face than `rest`, where the last leg ended, steps back along the
-/// ray it came in on, by at most the distance above (the rim's contact is still ahead of it). The
-/// clock charges no travel for it.
-fn skid_turn(start: Vec3, axis: Dir3, read: &walk::EntranceRead, rest: f32, hand_off: f32) -> f32 {
+/// The game's damage model: a skid advances along the incoming ray to its resting height,
+/// bounded by the reached hand-off. It never retraces a paid crossing. If the disc already holds
+/// material, a turn with no forward travel ends the round; a future finite contact must first be
+/// reached. Thus every exchange spends flight time or is terminal, including converging faces.
+fn skid_turn(
+    start: Vec3,
+    axis: Dir3,
+    read: &walk::EntranceRead,
+    rest: f32,
+    hand_off: f32,
+    contact: f32,
+) -> f32 {
     let into = axis.dot(read.normal);
     let height = (start - read.position).dot(read.normal) * -into.signum();
-    let turn = (height - rest - REST_CLEARANCE) / into.abs();
-    if height >= rest {
-        turn.max(0.0).min(hand_off)
-    } else {
-        turn.min(hand_off)
-    }
+    let turn = ((height - rest - REST_CLEARANCE) / into.abs())
+        .max(0.0)
+        .min(hand_off.max(0.0));
+    if turn > 0.0 { turn } else { contact.max(0.0) }
 }
 
 /// How far outside the candidates' bounds a containment probe starts and ends, and how far a
@@ -1352,7 +1346,8 @@ impl Leg {
 
 /// A skid off the entrance face (§4): no entry. The deflection ANGLE and the speed lost both already
 /// carry η from the core (§13.5) — a graze is a partial ricochet in direction as well as in speed.
-/// With no [`continuation`](Self::continuation) the face held the round ([`walk::Begin::Held`]):
+/// With no [`continuation`](Self::continuation) the contact held the round, by friction or because
+/// the disc could not turn forward:
 /// `direction` stays the incoming one and `speed` is 0, the only skid that keeps none.
 #[derive(Clone, Debug)]
 pub(crate) struct Bounce {
@@ -1695,7 +1690,10 @@ pub(crate) fn decide(
             let out = Dir3::new(direction).expect(
                 "the game's damage model derives a finite nonzero ricochet direction from checked unit directions"
             );
-            let turn = skid_turn(start, dir, &read, rest, hand_offs[0] as f32);
+            let turn = skid_turn(start, dir, &read, rest, hand_offs[0] as f32, contact);
+            if turn == 0.0 {
+                return Ok(skid(&read, &hand_offs, turn, dir, 0.0, None));
+            }
             let continuation = Interior::unread(
                 AxisStart {
                     anchor,
@@ -1719,7 +1717,7 @@ pub(crate) fn decide(
             entrance: read,
             hand_offs,
         } => {
-            let turn = skid_turn(start, dir, &read, rest, hand_offs[0] as f32);
+            let turn = skid_turn(start, dir, &read, rest, hand_offs[0] as f32, contact);
             Ok(skid(&read, &hand_offs, turn, dir, 0.0, None))
         }
         Begin::Transit(request) => {
@@ -2414,6 +2412,7 @@ fn apply_bounce(
         shell.marks.ricochets.push(bounce.position);
     }
     shell.marks.log.push(ArmourMark::Bounce {
+        at: bounce.resume,
         position: bounce.position,
         normal: bounce.normal,
         incoming: Vec3::from(bounce.incoming),
@@ -2423,7 +2422,7 @@ fn apply_bounce(
         struck: bounce.struck,
         shock: bounce.shock,
     });
-    shell.path.points.push(bounce.position);
+    shell.path.points.push(bounce.resume);
     if let Some(shot) = shell.shot {
         if !*terminal_emitted {
             if held {

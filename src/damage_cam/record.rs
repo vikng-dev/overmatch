@@ -309,7 +309,11 @@ fn steps_of(
     let mut steps = Vec::new();
     for mark in marks.iter().skip(from) {
         let step = match mark {
-            ArmourMark::Bounce { .. } => Some(PathStep::Bounce),
+            ArmourMark::Bounce { speed_out, .. } => Some(if *speed_out == 0.0 {
+                PathStep::Stopped
+            } else {
+                PathStep::Bounce
+            }),
             ArmourMark::Crossing {
                 entrance,
                 incoming,
@@ -540,7 +544,7 @@ fn timeline(
         .find(|mark| !matches!(mark, ArmourMark::Wound { .. }));
     let start = match before {
         None => facts.launch,
-        Some(ArmourMark::Bounce { position, .. }) => *position,
+        Some(ArmourMark::Bounce { at, .. }) => *at,
         Some(ArmourMark::Crossing {
             end: CrossingEnd::Exit { at, .. },
             ..
@@ -571,14 +575,10 @@ fn timeline(
             contact = legs.len();
         }
         match mark {
-            ArmourMark::Bounce {
-                position,
-                speed_out,
-                ..
-            } => {
-                legs.push((*position, speed, index));
+            ArmourMark::Bounce { at, speed_out, .. } => {
+                legs.push((*at, speed, index));
                 speed = *speed_out;
-                last = *position;
+                last = *at;
             }
             ArmourMark::Crossing {
                 entrance,
@@ -751,6 +751,7 @@ pub(crate) fn report_from(
         match mark {
             ArmourMark::Bounce {
                 position,
+                at,
                 normal,
                 incoming,
                 outgoing,
@@ -760,7 +761,14 @@ pub(crate) fn report_from(
                 ..
             } => {
                 let directions = [*normal, *incoming, *outgoing];
-                ledger.bounce(index, *position, directions, *volume, *shock, *speed_out);
+                ledger.bounce(
+                    index,
+                    [*position, *at],
+                    directions,
+                    *volume,
+                    *shock,
+                    *speed_out,
+                );
             }
             ArmourMark::Crossing {
                 volumes,
@@ -978,25 +986,46 @@ impl<'a> Ledger<'a> {
     fn bounce(
         &mut self,
         index: usize,
-        position: Vec3,
+        points: [Vec3; 2],
         directions: [Vec3; 3],
         volume: Entity,
         shock: f32,
         kept: f32,
     ) {
         let on = self.on;
+        let [position, at] = points;
         let t = on.time_at(index, position);
         let [normal, incoming, outgoing] =
             directions.map(|direction| on.struck.direction(index, direction));
-        self.ricochets.push(Ricochet {
-            t,
-            point: on.struck.point(index, position),
-            normal,
-            incoming,
-            outgoing,
-            volume: name_of(on.world, volume),
-        });
-        if class_of(on.world, volume) == VolumeClass::Box {
+        let class = class_of(on.world, volume);
+        if kept > 0.0 {
+            self.ricochets.push(Ricochet {
+                t,
+                point: on.struck.point(index, position),
+                normal,
+                incoming,
+                outgoing,
+                volume: name_of(on.world, volume),
+            });
+        } else if class != VolumeClass::Box {
+            // The game's damage model held the round on the face without traversing material.
+            self.plates.push(Plate {
+                name: name_of(on.world, volume),
+                t,
+                entry: on.struck.point(index, position),
+                exit: None,
+                chord_mm: 0.0,
+                steel_equiv_mm: 0.0,
+                cost_mm: 0.0,
+                factor: 0.0,
+                class: if class == VolumeClass::External {
+                    PlateClass::External
+                } else {
+                    PlateClass::Main
+                },
+            });
+        }
+        if class == VolumeClass::Box {
             self.line.push((volume, energy_units(shock), t, index));
             self.entered.push((volume, t, position, index));
         }
@@ -1006,7 +1035,7 @@ impl<'a> Ledger<'a> {
             }
         } else {
             RoundEnd::Left {
-                at: on.struck.point(index, position),
+                at: on.struck.point(index, at),
             }
         });
     }
@@ -1382,6 +1411,74 @@ fn role_of(world: &World, volume: Entity) -> Role {
 pub(crate) mod tests {
     use super::*;
 
+    /// The game's damage model: a main-armour Held mark, read through the real ledger.
+    /// Geometry and the zero exit speed are fixture data; identity comes from loaded vocabulary.
+    pub(crate) fn held_plate_record(template: &PenetrationReport) -> PenetrationReport {
+        held_record_at(template, Vec3::ZERO)
+    }
+
+    fn held_record_at(template: &PenetrationReport, strike: Vec3) -> PenetrationReport {
+        let mut world = World::new();
+        let tank = world.spawn_empty().id();
+        let volume = world
+            .spawn((Name::new(template.plates[0].name.clone()), VolumeOf(tank)))
+            .id();
+        let struck = StruckTank::recorded(
+            tank,
+            0,
+            vec![(0, HullFrame::posed(Vec3::ZERO, Quat::IDENTITY))],
+            template.servo_deg.clone(),
+            Vec::new(),
+        );
+        let angle = 20.0_f32.to_radians(); // Fixture incidence within the held cliff.
+        let incoming = Vec3::new(angle.sin(), -angle.cos(), 0.0);
+        let marks = [ArmourMark::Bounce {
+            at: Vec3::ZERO,
+            position: strike,
+            normal: Vec3::Y,
+            incoming,
+            outgoing: incoming,
+            speed_in: 250.0,
+            speed_out: 0.0,
+            struck: volume,
+            shock: 0.0,
+        }];
+        let path = [-incoming, Vec3::ZERO];
+        let facts = ShotFacts {
+            shooter: template.shooter.clone(),
+            launch: -incoming,
+            muzzle: None,
+            projectile: template.projectile.name.clone(),
+            caliber_mm: template.projectile.caliber_mm,
+            mass_kg: template.projectile.mass_kg,
+            round: template.round.clone(),
+            vehicle: template.vehicle.clone(),
+        };
+        report_from(
+            &world,
+            &struck,
+            &ShotLog {
+                marks: &marks,
+                cones: &[],
+                burst: None,
+                path: &path,
+                dose: None,
+            },
+            &facts,
+        )
+        .expect("a held armour contact opens its record")
+    }
+
+    /// The game's damage model clocks the axis flight, not the offset contact point.
+    /// Mutant: use the strike as the path node, inventing travel to a future point and back.
+    #[test]
+    fn a_contact_point_does_not_move_the_recorded_axis_or_its_clock() {
+        let template = crate::damage_cam::delivery::tests::report("s1_through_crew");
+        let report = held_record_at(&template, Vec3::X * 1.4);
+        assert_eq!(report.path.last().unwrap().point, [0.0; 3]);
+        assert!((report.path[0].t + 1.0 / 250.0).abs() < 1.0e-6);
+    }
+
     /// The game's damage-model folded-path fixture, read through the real report writer. All
     /// geometry, speeds and energy are fixture data. Returns the source crossing's entry time
     /// and exit speed, DERIVED independently from the marks for the stage's clock/speed oracle.
@@ -1402,6 +1499,7 @@ pub(crate) mod tests {
         let exit = Vec3::new(0.5, 0.081, 0.0);
         let exit_speed = 50.0;
         let bounce = |position| ArmourMark::Bounce {
+            at: position,
             position,
             normal: Vec3::Y,
             incoming: Vec3::X,

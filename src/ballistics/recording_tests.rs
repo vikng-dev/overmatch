@@ -2612,7 +2612,8 @@ fn the_presented_march_includes_the_birth_to_muzzle_prefix() {
 /// The game's damage model: leaving the source's box ends its launch clearance permanently.
 /// A real armour skid can then bring the round into its source's rear volumes and deposit dose:
 /// the reflector, yawed 10° back toward the source, carries the slide into them. All poses, sizes,
-/// pools, speed and angles below are fixture data.
+/// pools, speed and angles below are fixture data. Faces are fixed: this tests source admission,
+/// independently of carrier motion placing the disc too deep to turn forward.
 #[test]
 fn a_round_that_bounces_back_into_its_source_strikes_it() {
     returning_source_round(false);
@@ -2663,7 +2664,7 @@ fn returning_source_round(queued: bool) {
     app.world_mut()
         .entity_mut(source)
         .insert(avian3d::prelude::LockedAxes::ALL_LOCKED);
-    tank(
+    let (reflector, _) = tank(
         &mut app,
         Vec3::new(6.0, 0.0, -6.0 / 15.0_f32.to_radians().tan()),
         10.0_f32.to_radians(),
@@ -2675,8 +2676,11 @@ fn returning_source_round(queued: bool) {
             Kind::Plate,
         )],
     );
+    app.world_mut()
+        .entity_mut(reflector)
+        .insert(avian3d::prelude::LockedAxes::ALL_LOCKED);
     if queued {
-        tank(
+        let (foreign, _) = tank(
             &mut app,
             Vec3::ZERO,
             0.0,
@@ -2696,6 +2700,9 @@ fn returning_source_round(queued: bool) {
                 ),
             ],
         );
+        app.world_mut()
+            .entity_mut(foreign)
+            .insert(avian3d::prelude::LockedAxes::ALL_LOCKED);
     }
     settle(&mut app);
     let angle = 15.0_f32.to_radians();
@@ -2734,7 +2741,7 @@ fn returning_source_round(queued: bool) {
             |mark| matches!(mark, ArmourMark::Wound { volumes: crossed, .. } | ArmourMark::Crossing { volumes: crossed, .. }
         if crossed.iter().any(|v| v.volume == volumes[1]))
         ),
-        "after box clearance the sliding round must strike its source's rear volume"
+        "after box clearance the sliding round must strike its source's rear volume: {marks:?}"
     );
     assert!(
         marks.iter().any(|mark| matches!(mark,
@@ -3076,7 +3083,7 @@ fn a_spent_round_trapped_in_a_closed_box_comes_to_rest() {
     fire.speed = 30.0;
     fire.drag_k = 0.0;
     app.world_mut().trigger(fire);
-    run(&mut app, 64 * 10);
+    let records = run(&mut app, 64 * 10);
     let mut flying = app.world_mut().query::<&Projectile>();
     assert_eq!(
         flying.iter(app.world()).count(),
@@ -3092,13 +3099,24 @@ fn a_spent_round_trapped_in_a_closed_box_comes_to_rest() {
         );
     };
     assert_eq!(*speed_out, 0.0, "the face held it");
+    assert_eq!(records.len(), 1, "the stopped round delivers its encounter");
+    let report = &records[0].report;
+    let crate::damage_cam::RoundEnd::Rest { volume } = &report.end else {
+        panic!("a held round's record must end at rest");
+    };
+    assert!(
+        report
+            .plates
+            .iter()
+            .any(|plate| &plate.name == volume && plate.exit.is_none())
+    );
 }
 
-/// The game's damage model spends real flight time between reflections. The authority must
+/// The game's damage model spends real flight time between skids. The authority must
 /// return to the tick clock instead of planning the unbounded future of a trapped, fuze-less
 /// round. All dimensions, speeds and the 45-degree direction are fixture data.
 #[test]
-fn a_closed_box_of_reflectors_returns_to_the_flight_clock() {
+fn a_closed_box_of_faces_returns_to_the_flight_clock() {
     let mut app = recording_world(false);
     app.insert_resource(RetainSpentShells(true));
     tank(

@@ -2596,7 +2596,19 @@ fn build_event(
     } else {
         unit_or_zero(exit_sum)
     };
-    let entry_position = entry_position / covered as f32;
+    // The game's damage model: samples already holding material locate a present contact.
+    // Free samples' future entries must not pull its strike ahead of the unmoved disc.
+    let entry_position = if start == 0.0 {
+        let (sum, count) = by_sample
+            .iter()
+            .filter(|&(&sample, runs)| walks[sample].runs[runs[0]].start == 0.0)
+            .fold((Vec3::ZERO, 0), |(sum, count), (&sample, _)| {
+                (sum + rays.origin + rays.offsets[sample], count + 1)
+            });
+        sum / count as f32
+    } else {
+        entry_position / covered as f32
+    };
     let exit_position = exit_position / covered as f32;
 
     let cost = disc_mean_cost(walks, &by_sample, start, end, k);

@@ -4506,3 +4506,29 @@ fn cofacial_material_reads_do_not_depend_on_volume_keys() {
         }
     }
 }
+
+/// The game's damage model locates a contact already holding the disc at its present samples.
+/// Mutant: average in a free sample's future entry, moving a resting strike ahead of its clock.
+#[test]
+fn a_partly_held_disc_does_not_locate_its_strike_at_a_future_entry() {
+    let mut held = sample(Vec3::ZERO, plate(1, 0, -0.5, 1.625));
+    held.hits.remove(0);
+    held.initial_presence = vec![ShellKey {
+        volume: volume(1),
+        primitive: prim(0),
+        shell: 0,
+    }];
+    let mut disc = point_disc(2.0, held);
+    disc.radius = 0.044;
+    disc.samples
+        .push(sample(Vec3::NEG_X * 0.04, plate(1, 0, 1.5, 1.75)));
+    let walked = walk_disc(&disc, &table(&[(1, 1000.0)]), &WalkLaws::default()).unwrap();
+    let event = &walked.events[0];
+    assert_eq!(
+        event.coverage, 1.0,
+        "the present and future samples share one event"
+    );
+    assert_eq!(event.start, 0.0);
+    assert_eq!(event.entry_position.dot(AXIS), 0.0);
+    assert!(event.entry_position.length() <= disc.radius);
+}

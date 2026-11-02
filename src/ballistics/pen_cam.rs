@@ -214,9 +214,8 @@ fn record_edited(
     (report, marched)
 }
 
-/// March a round still inside its tank's bounds until it rests or leaves them: the live encounter
-/// closes on the same two states (`damage_cam::recorder::finish_records`), so a record never states
-/// an end the live game would not.
+/// The game's damage model keeps the encounter open while the round flies inside the tank or
+/// carries a fuze that tank armed, matching `damage_cam::recorder::finish_records`.
 fn march_to_the_end(app: &mut App, tank: Entity, shell: Entity, scenario: &Scenario) {
     /// 30 s of flight, far past a fall through any hull. A round neither resting nor leaving by
     /// then is a bug.
@@ -423,7 +422,7 @@ fn recorded_content_accepts_rounding_but_rejects_new_content() {
 }
 
 /// The game's damage-model stage and live views rely on the march's interaction sequence.
-/// A stale record must not hide new reflections, crossings or fields behind an unchanged verdict.
+/// A stale record must not hide new skids, crossings or fields behind an unchanged verdict.
 /// This checks topology and dose/field content within the stated floating resolution; the stage
 /// tests check the resulting poses and speeds.
 /// All fixture choices come from scenarios.
@@ -1355,12 +1354,15 @@ fn a_bounce_off_armour_that_doses_nothing_is_a_ricochet() {
     );
     assert_eq!(report.impact.verdict, ShotVerdict::Ricochet);
     assert!(report.doses.is_empty(), "{:?}", report.doses);
-    assert_eq!(
-        report.end,
-        RoundEnd::Left {
-            at: report.ricochets[0].point
-        },
-        "it leaves off the face it bounced from"
+    let RoundEnd::Left { at } = report.end else {
+        panic!("the sliding round leaves the tank");
+    };
+    assert!(
+        report
+            .path
+            .iter()
+            .any(|node| node.point == at && node.t == report.ricochets[0].t),
+        "departure is the axis at the contact's clock time"
     );
 }
 

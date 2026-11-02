@@ -429,3 +429,38 @@ fn offline_recording_requires_vocabulary_readiness() {
         .write_message(recorded(&report, SHOOTER, 1200, life(1)));
     app.world_mut().run_schedule(FixedUpdate);
 }
+
+/// The game's damage model must deliver an armour-held round without an authority panic.
+/// Mutant: the ledger names a resting armour volume but records no retaining plate.
+#[test]
+fn a_held_main_armour_contact_survives_real_delivery() {
+    let template = report("s1_through_crew");
+    let report = crate::damage_cam::record::tests::held_plate_record(&template);
+    let vocabulary = vocabulary(&template);
+    let mut app = App::new();
+    app.add_plugins(MinimalPlugins).add_plugins(offline_plugin);
+    app.insert_resource(vocabulary);
+    app.insert_resource(WeaponClock(crate::sim_tick::SimTick::new(0)));
+    app.world_mut().spawn((STRUCK, Controlled));
+    let mut shot = recorded(&report, SHOOTER, 1200, life(1));
+    shot.outcome = None;
+    app.world_mut().write_message(shot);
+    app.world_mut().run_schedule(FixedUpdate);
+    let store = app.world().resource::<ShotExplanations>();
+    let reports: Vec<_> = store.iter().map(|(_, stored)| &stored.report).collect();
+    assert_eq!(reports.len(), 1);
+    assert_eq!(
+        reports[0].impact.verdict,
+        crate::damage_cam::ShotVerdict::NonPen
+    );
+    assert!(reports[0].ricochets.is_empty());
+    assert!(
+        reports[0]
+            .plates
+            .iter()
+            .any(|plate| plate.exit.is_none() && plate.chord_mm == 0.0)
+    );
+    assert!(
+        matches!(&reports[0].end, super::super::RoundEnd::Rest { volume } if volume == &template.plates[0].name)
+    );
+}

@@ -1676,8 +1676,10 @@ pub struct PenetrationMarks {
 /// speeds m/s.
 #[derive(Clone, Debug)]
 pub enum ArmourMark {
-    /// Deflected off a face without entering it.
+    /// The game's damage model: slid off a face or was held there, without entering it.
     Bounce {
+        /// The game's damage model: the axis at the exchange, distinct from its contact point.
+        at: Vec3,
         position: Vec3,
         normal: Vec3,
         incoming: Vec3,
@@ -3300,10 +3302,9 @@ fn launch(
 
 /// The game's damage model freezes each discovered crossing before playback starts. Held
 /// samples finish in that scene. Discovery under launch clearance ends at the decision after which
-/// the source is solid, and says so: a straight decision that hands on every start outside the
-/// source box with none held, or a bounce whose way in took every sample out of it, so a return
-/// meets the source solid wherever the bounce resumes. Every bounce returns to relative discovery
-/// after playback spends its flight time. No tick re-collects a crossing already being played back.
+/// the source is solid, and says so: every start is outside the source box with none held, or
+/// a skid strikes outside it. A continuing skid returns to relative discovery after playback
+/// spends its flight time; a held contact ends the round. No tick re-collects a pending crossing.
 #[expect(
     clippy::too_many_arguments,
     reason = "the immutable planner also closes the struck physical body's actual geometry"
@@ -3474,7 +3475,6 @@ fn decide_playback(
         });
         // The game's damage model: a skid finishes this immutable contact. Playback
         // spends its approach before discovery can reach another face.
-        // A trapped round therefore cannot plan arbitrarily slow future bounces in one tick.
         let bounced = matches!(decision, resolve::Decision::Bounce(_));
         let stopped = follow_fuzed(&mut fuze, &mut flight, decision);
         cleared = bounced_out

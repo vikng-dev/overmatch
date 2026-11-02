@@ -77,6 +77,8 @@ pub enum PenCamFrame {
 pub enum PathStep {
     /// Deflected off a face without entering it.
     Bounce,
+    /// The game's damage model ended the round at a contact, including a face that held it.
+    Stopped,
     /// Entered the material: `perforated_armour` when the whole round came out of an armour volume,
     /// `rested` when it came to rest inside this crossing.
     Crossing {
@@ -106,9 +108,10 @@ impl ShotVerdict {
                 }
             )
         });
-        let rested = steps
-            .iter()
-            .any(|step| matches!(step, PathStep::Crossing { rested: true, .. }));
+        let rested = steps.contains(&PathStep::Stopped)
+            || steps
+                .iter()
+                .any(|step| matches!(step, PathStep::Crossing { rested: true, .. }));
         Some(if perforated {
             Self::Penetration
         } else if steps.contains(&PathStep::Dosed) {
@@ -233,14 +236,14 @@ pub enum PlateClass {
     External,
 }
 
-/// The game's damage model: an armour crossing's charged chord and reference-mm cost.
+/// The game's damage model: an armour contact's charged chord and reference-mm cost.
 /// Entry and exit hold the real geometry; the chord readout includes the slope charge.
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 pub struct Plate {
     pub name: String,
     pub t: f32,
     pub entry: [f32; 3],
-    /// `None` when the shell did not come out the far side: it rests inside, at the path's end.
+    /// `None` when the round rests inside or on this plate, at the path's end. A held face has zero chord.
     pub exit: Option<[f32; 3]>,
     pub chord_mm: f32,
     pub steel_equiv_mm: f32,
@@ -536,6 +539,7 @@ impl PenetrationReport {
         steps
             .into_iter()
             .map(|(_, step)| step)
+            .chain(self.rested().then_some(PathStep::Stopped))
             .chain(dosed.then_some(PathStep::Dosed))
             .collect()
     }
@@ -622,6 +626,7 @@ pub(crate) mod tests {
         let mut report = delivery::tests::report("s1_through_crew");
         report.plates.clear();
         report.ricochets.clear();
+        report.end = RoundEnd::Left { at: [0.0; 3] };
         let full = 30 * POOL_UNITS_PER_HP;
         report.components.push(ComponentState {
             name: "fixture box".to_owned(),

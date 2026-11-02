@@ -2114,13 +2114,6 @@ fn off_axis(offset: Vec3, axis: Vec3) -> f32 {
 fn every_leg_after_a_skid_is_the_rounds_disc_about_its_axis() {
     let incidence = 75.0_f32.to_radians();
     let (mut app, _, face) = world_with_face(incidence);
-    let recessed = volume(
-        &mut app,
-        Vec3::new(12.0, 0.4, 3.0),
-        Transform::from_translation(face.at(-6.0, -0.23)).with_rotation(face.rotation),
-        STEEL,
-        Some(1000),
-    );
     let raised = volume(
         &mut app,
         Vec3::new(12.0, 0.4, 3.0),
@@ -2151,12 +2144,17 @@ fn every_leg_after_a_skid_is_the_rounds_disc_about_its_axis() {
             for seed in &starts.seeds {
                 let off = off_axis(seed.offset, Vec3::from(bounce.direction));
                 assert!(off <= reach, "{off} m off a {reach} m round's axis");
+                assert!(
+                    seed.offset.dot(*bounce.direction).abs() < 1.0e-6,
+                    "the outgoing disc lies square to its axis"
+                );
+                assert_eq!(seed.t, 0.0, "a new leg has no inherited cursor");
             }
         }
     }
     assert!(
         skids > 0,
-        "the fixture skids off its steps: {:?} {recessed:?} {raised:?}",
+        "the fixture skids off its steps: {:?} {raised:?}",
         impacts_of(&flown)
     );
 }
@@ -2244,59 +2242,6 @@ fn a_step_in_a_slides_path_is_met_from_where_the_last_leg_ended() {
     let continuation = bounce.continuation.as_ref().unwrap();
     for (seed, sample) in continuation.seeds.iter().zip(&leg.samples) {
         assert!(seed.offset.distance(sample.offset) < 1.0e-5);
-    }
-}
-
-/// The game's damage model: a trihedral corner and a groove complete within the walk's limits, the
-/// faces each a real contact the law decides. A corner has no room for the disc, so its samples read
-/// inside a face and bite; nothing panics and no count ends it. Fixture: three steel faces square
-/// to each other, opening up the drop, and a 60-degree groove.
-#[test]
-fn a_corner_and_a_groove_complete_within_the_walks_limits() {
-    let corner = Vec3::new(DROP_FROM.x + 0.03, 1.0, DROP_FROM.z - 0.02);
-    let rotation = Quat::from_rotation_arc(Vec3::ONE.normalize(), Vec3::Y);
-    let mut trihedral = world_with_trimesh_plates(&[]);
-    for (normal, a, b) in [
-        (Vec3::X, Vec3::Y, Vec3::Z),
-        (Vec3::Y, Vec3::Z, Vec3::X),
-        (Vec3::Z, Vec3::X, Vec3::Y),
-    ] {
-        let size = (normal * 0.2 + a * 4.0 + b * 4.0).abs();
-        let centre = rotation * (a * 2.0 + b * 2.0 - normal * 0.1);
-        volume(
-            &mut trihedral,
-            size,
-            Transform::from_translation(corner + centre).with_rotation(rotation),
-            STEEL,
-            Some(1000),
-        );
-    }
-    let mut groove = world_with_trimesh_plates(&[]);
-    for (angle, side) in [(60.0_f32, 1.0_f32), (-60.0, -1.0)] {
-        let rotation = Quat::from_rotation_z(angle.to_radians());
-        let centre = Vec3::new(DROP_FROM.x - 0.1, 1.0, DROP_FROM.z)
-            + rotation * (Vec3::X * 2.0 * side - Vec3::Y * 0.1);
-        volume(
-            &mut groove,
-            Vec3::new(4.0, 0.2, 3.0),
-            Transform::from_translation(centre).with_rotation(rotation),
-            STEEL,
-            Some(1000),
-        );
-    }
-    for mut app in [trihedral, groove] {
-        for _ in 0..8 {
-            app.update();
-        }
-        for speed in [150.0, 300.0, 773.0] {
-            let flown = driven(&mut app, FIXTURE_88, speed);
-            assert!(
-                flown.decisions.len() < 64,
-                "{speed} m/s: {} decisions: {:?}",
-                flown.decisions.len(),
-                impacts_of(&flown)
-            );
-        }
     }
 }
 
@@ -3557,4 +3502,78 @@ fn impact_fuze_reads_the_charged_entry_force() {
     });
     fuze.entered(force, SPEED, None, 0.0);
     assert!(matches!(fuze, super::super::burst::Fuze::Armed { .. }));
+}
+
+/// The game's damage model: every skid advances the clock or ends the round. A narrow converging
+/// wedge cannot exchange forever at one axis point. All dimensions and speeds are fixture data.
+#[test]
+fn a_converging_wedge_spends_time_or_holds_the_round() {
+    for air_angle in [10.0_f32, 2.0] {
+        let mut app = world_with_trimesh_plates(&[]);
+        let radius = disc_radius(FIXTURE_88.caliber);
+        let left = DROP_FROM.x - radius - REST_CLEARANCE;
+        volume(
+            &mut app,
+            Vec3::new(0.4, 16.0, 3.0),
+            Transform::from_xyz(left - 0.2, 2.0, DROP_FROM.z),
+            STEEL,
+            Some(1000),
+        );
+        let rotation = Quat::from_rotation_z((90.0 - air_angle).to_radians());
+        let apex = Vec3::new(left, 0.0, DROP_FROM.z);
+        volume(
+            &mut app,
+            Vec3::new(16.0, 0.4, 3.0),
+            Transform::from_translation(apex + rotation * (Vec3::X * 8.0 - Vec3::Y * 0.2))
+                .with_rotation(rotation),
+            STEEL,
+            Some(1000),
+        );
+        for _ in 0..8 {
+            app.update();
+        }
+        let flown = driven(&mut app, FIXTURE_88, 773.0);
+        let mut skids = 0;
+        for decision in &flown.decisions {
+            if let Decision::Bounce(bounce) = decision {
+                skids += 1;
+                assert!(
+                    bounce.travel > 0.0 || bounce.continuation.is_none(),
+                    "{air_angle} degrees: an exchange must spend time or end the round: {bounce:?}"
+                );
+            }
+        }
+        assert!(skids > 0, "the wedge fixture reaches contact");
+    }
+}
+
+/// The game's damage model never rewinds a paid crossing or exchanges against a future plane.
+/// Fixture: the axis already stands below the disc's resting height, or exactly at it, while a
+/// finite strip's first contact is still ahead. Mutant: negative travel or an immediate exchange.
+#[test]
+fn a_skid_never_rewinds_and_a_future_finite_contact_is_reached() {
+    let read = walk::EntranceRead {
+        position: Vec3::ZERO,
+        volume: Entity::PLACEHOLDER,
+        normal: Vec3::Y,
+        coverage: 1.0,
+        steel_equivalent: 400.0,
+        slope_charge: 1.0,
+    };
+    let axis = Dir3::new(Vec3::new(0.0, -0.1, 1.0)).unwrap();
+    assert_eq!(
+        skid_turn(Vec3::Y * 0.005, axis, &read, 0.044, 0.3, 0.0),
+        0.0
+    );
+    assert_eq!(
+        skid_turn(
+            Vec3::Y * (0.044 + REST_CLEARANCE),
+            axis,
+            &read,
+            0.044,
+            2.0,
+            1.4
+        ),
+        1.4
+    );
 }

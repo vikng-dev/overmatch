@@ -312,10 +312,9 @@ impl Fuze {
         };
     }
 
-    /// The round bounced off a face of `tank`'s, leaving at `speed`: a body met, so an armed
-    /// `SpendExit` fuze whose delay still runs restarts from the bounce. An unarmed fuze stays
-    /// unarmed: a bounce spends nothing. A delay that has run out is not restarted, and a bounce
-    /// never restarts an `Impact` fuze.
+    /// The game's damage model: the round meets a face of `tank`'s and leaves or rests at `speed`.
+    /// An armed `SpendExit` fuze whose delay still runs restarts there. This method arms no fuze
+    /// and restarts neither a due delay nor an `Impact` fuze.
     pub(crate) fn bounced(&mut self, speed: f32, tank: Option<Entity>) {
         if let Self::Armed {
             burst,

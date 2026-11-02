@@ -207,6 +207,7 @@ fn a_shot_met_a_tank_by_its_log() {
         perforated: true,
     };
     let bounce = |struck: Entity| ArmourMark::Bounce {
+        at: Vec3::ZERO,
         position: Vec3::ZERO,
         normal: Vec3::Z,
         incoming: Vec3::NEG_Z,
@@ -276,6 +277,7 @@ fn a_spent_tank_shot_goes_and_a_plate_shot_stays() {
     let mut spent = |struck: Entity| {
         let marks = PenetrationMarks {
             log: vec![ArmourMark::Bounce {
+                at: Vec3::ZERO,
                 position: Vec3::ZERO,
                 normal: Vec3::Z,
                 incoming: Vec3::NEG_Z,
