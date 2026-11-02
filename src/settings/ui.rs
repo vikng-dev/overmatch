@@ -804,6 +804,7 @@ const TAB_MARKER_HEIGHT_PX: f32 = 2.0;
 /// not clip. No test measures copy against the slot. Bevy 0.19 text measurement resolves height
 /// as known.or(preferred.or(min)); min_height on Text would fix its height without measuring
 /// content. MEASURED: overlong text on such a node never grew.
+/// Source: bevy_ui-0.19.1/src/measurement.rs:51-68 (`resolve_axis`).
 ///
 /// Neither node has padding; the top margin is outside the reservation.
 const HINT_FONT_PX: f32 = 14.0;
@@ -1403,6 +1404,7 @@ fn scrub(active: ActiveDrag, cursor_x: f32, settings: &mut ResMut<Settings>) {
 ///
 /// Use the physical cursor for [`ActiveDrag`]'s physical rect. A node's inverse_scale_factor
 /// also includes UiScale and converts to CSS, not window-logical pixels; see [`track_fraction`].
+/// Source: bevy_ui-0.19.1/src/update.rs:151-159 (`propagate_ui_target_cameras`).
 #[expect(
     clippy::too_many_arguments,
     reason = "a system spanning page visibility, buttons, window, hovered rows and strip, capabilities, ladder, page, drag, settings and save"
@@ -1479,7 +1481,9 @@ fn change_row(
 
 /// Wheel delta in CSS px for [`ScrollPosition`]; to_css is the viewport's inverse_scale_factor.
 /// Line is a dimensionless notch count scaled by WHEEL_LINE_PX, so it grows with the rows.
-/// Pixel is winit PhysicalPosition copied unchanged by Bevy; convert once to CSS. Layout
+/// Pixel is winit PhysicalPosition copied unchanged by Bevy; convert once to CSS:
+/// winit-0.30.13/src/event.rs:961-975 (`PixelDelta`),
+/// bevy_winit-0.19.1/src/state.rs:342-349 (`MouseWheel`). Layout
 /// multiplies by target scale × UiScale, so omitting conversion scales the flick twice
 /// (0.75x/1.5x at 75/150%, doubled on Retina). Equal physical flicks must move equal physical
 /// content distances. Pure for unit tests without selection-follow interference.
@@ -1499,7 +1503,8 @@ fn wheel_delta_css(unit: bevy::input::mouse::MouseScrollUnit, y: f32, to_css: f3
 ///
 /// ScrollPosition is CSS px; ComputedNode sizes and UiGlobalTransform positions are physical.
 /// Convert rect differences with the viewport's inverse_scale_factor (includes UiScale). Layout
-/// multiplies scroll by its reciprocal.
+/// multiplies scroll by its reciprocal (bevy_ui-0.19.1/src/layout/mod.rs:347-367,
+/// `update_uinode_geometry_recursive`).
 ///
 /// Clamp the component here: Bevy clamps only its rendered clamped_scroll_position, leaving
 /// the component free to bank offsets that wheel-up must unwind before anything moves.
@@ -2567,7 +2572,8 @@ mod tests {
 
     /// Card height in PHYSICAL px, measured on the wrapper's child (the 100% wrapper would just
     /// report window height). Do not divide out inverse_scale_factor: it includes UiScale and
-    /// would cancel the rescale under test. The headless target scale is 1, so this is also the
+    /// would cancel the rescale under test (source on [`mouse_input`]). The headless target scale
+    /// is 1, so this is also the
     /// logical window height occupied.
     fn card_height(app: &mut App) -> f32 {
         let world = app.world_mut();

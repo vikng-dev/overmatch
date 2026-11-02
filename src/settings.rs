@@ -1222,6 +1222,7 @@ pub(crate) struct AttachedDisplays {
     /// `create_monitors` skips known monitors before inserting the marker and never reassigns or
     /// removes it. Only spawning a newly seen primary or despawning a removed monitor changes it.
     /// Hot-plug can therefore leave the new primary unmarked or an obsolete primary marked.
+    /// Source: bevy_winit-0.19.1/src/system.rs:184-190,217-236 (`create_monitors`).
     ///
     /// [`DisplaySelection::monitor_on`] emits `MonitorSelection::Entity` so even a stale marker names
     /// a real attached display, avoiding Wayland's unresolvable `Primary` request. After the marked

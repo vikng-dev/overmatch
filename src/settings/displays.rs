@@ -270,6 +270,7 @@ fn winit_index(monitors: &WinitMonitors, handle: &MonitorHandle) -> Option<usize
 ///
 /// Ask AppKit on macOS: winit's `MonitorHandle::name` uses a model number, so identical panels
 /// share an unrecognizable name. `NSScreen::localizedName` matches the Displays pane.
+/// Source: winit-0.30.13/src/platform_impl/macos/monitor.rs:222-228 (`MonitorHandle::name`).
 ///
 /// Pair winit's `native_id` with AppKit's `NSScreenNumber` (`CGDirectDisplayID`). Geometry pairing
 /// is rejected despite matching both panels in a MEASURED two-display check: flipping AppKit's
