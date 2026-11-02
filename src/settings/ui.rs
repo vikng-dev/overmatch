@@ -30,8 +30,8 @@ use super::displays::DisplayLadder;
 use super::preset::Preset;
 use super::{
     BloomLevel, DebugPanel, FrameCap, KillCam, MsaaLevel, PenCamCorner, PixelBudget, PresentCaps,
-    ReduceMotion, RenderScaleLevel, SaveSettings, Settings, ShadowCascades, ShadowDistance,
-    ShadowResolution, TrackPrintRange, TrackPrintRelief, UiScalePercent, VsyncMode,
+    ReduceMotion, RenderScaleLevel, SaveSettings, SaveStatus, Settings, ShadowCascades,
+    ShadowDistance, ShadowResolution, TrackPrintRange, TrackPrintRelief, UiScalePercent, VsyncMode,
     WindowModeSetting,
 };
 use crate::ui_font::{MODAL_BG, TEXT, TEXT_DIM, UiFonts};
@@ -634,6 +634,53 @@ struct SliderFill(Row);
 #[derive(Component)]
 struct HintText;
 
+/// The control legend, replaced by a visible failure notice until a successful save.
+#[derive(Component)]
+struct SaveNotice;
+
+const SAVE_LEGEND: &str = "Arrows or drag to change  —  Esc to close  —  saved automatically";
+
+/// Static copy avoids rendering arbitrary OS paths/errors outside the bundled font's coverage.
+fn save_failure_text(error: &super::store::SaveError) -> &'static str {
+    use super::store::{SaveError, SaveOperation};
+    match error {
+        SaveError::NoLocation => "Settings not saved: your config folder is unavailable.",
+        SaveError::InvalidPath(_) => "Settings not saved: the config file path is invalid.",
+        SaveError::Io {
+            operation: SaveOperation::SyncDirectory,
+            ..
+        } => "Settings written, but disk sync failed. Power-loss recovery is uncertain.",
+        SaveError::Io { source, .. } if source.kind() == std::io::ErrorKind::PermissionDenied => {
+            "Settings not saved: permission denied. Check your config folder permissions."
+        }
+        SaveError::Io { source, .. } if source.kind() == std::io::ErrorKind::StorageFull => {
+            "Settings not saved: storage is full. Free space, then change a setting to retry."
+        }
+        SaveError::Io {
+            operation: SaveOperation::CreateDirectory,
+            ..
+        } => "Settings not saved: cannot create your config folder. Check the game log.",
+        SaveError::Io {
+            operation: SaveOperation::Write,
+            ..
+        } => "Settings not saved: cannot write your config file. Check the game log.",
+        SaveError::Io {
+            operation: SaveOperation::Replace,
+            ..
+        } => "Settings not saved: cannot replace your config file. Check the game log.",
+    }
+}
+
+fn refresh_save_notice(status: Res<SaveStatus>, mut notice: Query<&mut Text, With<SaveNotice>>) {
+    let mut notice = notice
+        .single_mut()
+        .expect("settings::ui::spawn_page creates exactly one SaveNotice");
+    let rendered = status.0.as_ref().map_or(SAVE_LEGEND, save_failure_text);
+    if notice.0 != rendered {
+        notice.0 = rendered.to_string();
+    }
+}
+
 /// The fixed-height box the hint is drawn into: always exactly two lines tall, whether the selected
 /// row's hint fills one line or two, so walking the selection never moves the rows above it. See
 /// [`HINT_SLOT_HEIGHT_PX`].
@@ -747,7 +794,9 @@ pub(super) fn plugin(app: &mut App) {
         .init_resource::<SettingsPageVisible>()
         .init_resource::<Page>()
         .init_resource::<SliderDrag>()
+        .init_resource::<SaveStatus>()
         .add_systems(Startup, spawn_page)
+        .add_systems(Update, refresh_save_notice.after(super::save_on_request))
         // The click path is a `bevy_picking` observer, which runs in `PreUpdate` — ahead of
         // everything below, so a click and the repaint that shows it land in the same frame.
         .add_observer(page_pressed)
@@ -931,9 +980,8 @@ fn spawn_page(
                         ));
                     });
                     card.spawn((
-                        Text::new(
-                            "Arrows or drag to change  \u{2014}  Esc to close  \u{2014}  saved automatically",
-                        ),
+                        SaveNotice,
+                        Text::new(SAVE_LEGEND),
                         TextFont {
                             // Regular: the control legend.
                             font: fonts.body.clone().into(),
@@ -2246,6 +2294,34 @@ mod tests {
             last = Some(now);
         }
         panic!("the card never settled on a layout with both fonts loaded (last {last:?})");
+    }
+
+    /// The shipped page must replace its success legend with the retained failure, including after
+    /// reopening, and restore the legend when a successful retry clears that failure.
+    #[test]
+    fn save_failures_replace_the_pages_automatic_save_promise_until_recovery() {
+        let mut app = headless_card_app(1.0);
+        app.insert_resource(SaveStatus(Some(super::super::store::SaveError::NoLocation)));
+        app.update();
+        let notice = |app: &mut App| {
+            let world = app.world_mut();
+            let mut notices = world.query_filtered::<&Text, With<SaveNotice>>();
+            notices
+                .single(world)
+                .expect("the page owns one save notice")
+                .0
+                .clone()
+        };
+        assert!(notice(&mut app).contains("not saved"));
+        app.insert_resource(SettingsPageVisible(true));
+        app.update();
+        assert!(
+            notice(&mut app).contains("not saved"),
+            "reopening must preserve the failure"
+        );
+        app.world_mut().resource_mut::<SaveStatus>().0 = None;
+        app.update();
+        assert_eq!(notice(&mut app), SAVE_LEGEND);
     }
 
     /// A synthetic pointer on a laid-out arrow must step its setting through the shipped page

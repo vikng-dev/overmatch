@@ -18,6 +18,7 @@
 
 use std::path::{Path, PathBuf};
 
+use bevy::prelude::Resource;
 use serde::Deserialize;
 
 use super::{SETTINGS_VERSION, Settings};
@@ -150,6 +151,85 @@ pub(super) fn location() -> Option<PathBuf> {
     .map(|dir| dir.join(CONFIG_FILE_NAME))
 }
 
+/// Process config location, resolved once so boot reads and later writes name the same file.
+#[derive(Resource)]
+pub(super) struct StorePath(pub(super) Option<PathBuf>);
+
+impl Default for StorePath {
+    fn default() -> Self {
+        Self(location())
+    }
+}
+
+/// Which filesystem step refused a settings save.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum SaveOperation {
+    CreateDirectory,
+    Write,
+    Replace,
+    SyncDirectory,
+}
+
+impl std::fmt::Display for SaveOperation {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::CreateDirectory => "create directory",
+            Self::Write => "write temporary file",
+            Self::Replace => "replace settings file",
+            Self::SyncDirectory => "sync settings directory",
+        })
+    }
+}
+
+/// Save refusal with its stage, path and OS cause, retained for logging and the settings page.
+#[derive(Debug)]
+pub(super) enum SaveError {
+    NoLocation,
+    InvalidPath(PathBuf),
+    Io {
+        operation: SaveOperation,
+        path: PathBuf,
+        source: std::io::Error,
+    },
+}
+
+impl SaveError {
+    fn io(operation: SaveOperation, path: &Path, source: std::io::Error) -> Self {
+        Self::Io {
+            operation,
+            path: path.to_path_buf(),
+            source,
+        }
+    }
+}
+
+impl std::fmt::Display for SaveError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::NoLocation => f.write_str("no platform config directory"),
+            Self::InvalidPath(path) => write!(
+                f,
+                "settings path {} has no parent directory",
+                path.display()
+            ),
+            Self::Io {
+                operation,
+                path,
+                source,
+            } => write!(f, "cannot {operation} {}: {source}", path.display()),
+        }
+    }
+}
+
+impl std::error::Error for SaveError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Io { source, .. } => Some(source),
+            Self::NoLocation | Self::InvalidPath(_) => None,
+        }
+    }
+}
+
 /// The serializer config, in one place. **`struct_names` MUST stay `false`** (which is
 /// `PrettyConfig::default()`): RON 0.12 does not merely allow an omitted struct name, it *enforces*
 /// the name when one IS present — `Config(version: 3)` read into a differently-named struct fails
@@ -280,84 +360,52 @@ fn rename_with_retry(from: &Path, to: &Path) -> std::io::Result<()> {
     }
 }
 
-/// Write the settings to `path` (`None`: no platform config directory) ATOMICALLY. Returns whether
-/// the write landed.
+/// Atomically replace settings: serialize, write a pid-unique sibling, sync its bytes, rename,
+/// then sync the directory on Unix. Pid uniqueness prevents one game instance renaming another's
+/// partial write; last-writer-wins needs no lock. Sync before rename avoids ext4 delayed-allocation
+/// zero-length files after power loss. `F_FULLFSYNC` is deliberately excluded: SQLite measures it
+/// as profoundly slow, while reverting to the previous whole file is acceptable here.
 ///
-/// The sequence, each step answering a specific documented failure:
-/// 1. serialize (sparse — see [`Settings`]'s `skip_serializing_if` note);
-/// 2. write a **pid-unique** temp file in the same directory. Unique, not fixed: two instances of
-///    the game sharing one fixed temp name can have instance B's partial write renamed into place by
-///    instance A. That was the only live corruption path in the first cut of this module. (A unique
-///    temp name is also why no lock file is needed — last-writer-wins is correct here, and it is
-///    what VS Code does across N windows over one `settings.json`.)
-/// 3. `sync_all` the temp before renaming. `fs::write` never syncs, and that is the ext4
-///    delayed-allocation shape that yields a **zero-length settings file** after a power cut;
-///    deliberately NOT macOS's `F_FULLFSYNC`, which SQLite measures as "profoundly slow" for a worst
-///    case that is merely "revert to the previous whole file";
-/// 4. `rename` over the target, retrying the transient Windows holds ([`rename_with_retry`]);
-/// 5. on unix, sync the DIRECTORY so the rename itself is durable — near-free.
-///
-/// Errors are logged, never propagated: failing to save a graphics preference must not interrupt
-/// play. Unlike [`load`] this DOES log directly, and may — it only ever runs long after boot, from a
-/// settings-page edit.
-pub(super) fn save(path: Option<&Path>, settings: &Settings) -> bool {
+/// Errors retain their cause for the page and logs. A directory-sync failure occurs after the file
+/// was replaced: the bytes are written, but power-loss durability is unconfirmed.
+pub(super) fn save<'a>(path: Option<&'a Path>, settings: &Settings) -> Result<&'a Path, SaveError> {
     use std::io::Write;
 
-    use bevy::prelude::{error, info, warn};
-
-    let Some(path) = path else {
-        warn!("settings: no platform config directory — not saved");
-        return false;
-    };
-    let Some(dir) = path.parent() else {
-        return false;
-    };
-    if let Err(err) = std::fs::create_dir_all(dir) {
-        warn!(
-            "settings: cannot create {} ({err}) — not saved",
-            dir.display()
-        );
-        return false;
-    }
-    let text = match ron::ser::to_string_pretty(settings, pretty_config()) {
-        Ok(text) => text,
-        Err(err) => {
-            error!("settings: cannot serialize ({err}) — not saved");
-            return false;
-        }
-    };
-
+    let path = path.ok_or(SaveError::NoLocation)?;
+    let dir = path
+        .parent()
+        .ok_or_else(|| SaveError::InvalidPath(path.to_path_buf()))?;
+    std::fs::create_dir_all(dir)
+        .map_err(|error| SaveError::io(SaveOperation::CreateDirectory, dir, error))?;
+    let text = ron::ser::to_string_pretty(settings, pretty_config())
+        .expect("Settings contains only RON-serializable fields");
     let temporary = path.with_extension(format!("ron.{}.tmp", std::process::id()));
     let written = std::fs::File::create(&temporary).and_then(|mut file| {
         file.write_all(text.as_bytes())?;
-        // Before the rename, not after: the rename is only atomic with respect to CONTENT that has
-        // actually reached the disk.
         file.sync_all()
     });
-    if let Err(err) = written {
-        warn!(
-            "settings: cannot write {} ({err}) — not saved",
-            temporary.display()
-        );
-        std::fs::remove_file(&temporary).ok();
-        return false;
-    }
-    if let Err(err) = rename_with_retry(&temporary, path) {
-        warn!(
-            "settings: cannot replace {} ({err}) — not saved",
-            path.display()
-        );
-        std::fs::remove_file(&temporary).ok();
-        return false;
+    let result = written
+        .map_err(|error| SaveError::io(SaveOperation::Write, &temporary, error))
+        .and_then(|()| {
+            rename_with_retry(&temporary, path)
+                .map_err(|error| SaveError::io(SaveOperation::Replace, path, error))
+        });
+    if let Err(error) = result {
+        if let Err(error) = std::fs::remove_file(&temporary)
+            && error.kind() != std::io::ErrorKind::NotFound
+        {
+            bevy::log::warn!(
+                "settings: cannot remove failed-save temporary {} ({error})",
+                temporary.display()
+            );
+        }
+        return Err(error);
     }
     #[cfg(unix)]
-    if let Ok(handle) = std::fs::File::open(dir) {
-        // Makes the rename itself durable, not just the bytes. Best-effort: a filesystem that
-        // refuses to sync a directory handle is not a reason to report the save as failed.
-        handle.sync_all().ok();
-    }
-    info!("settings: saved {}", path.display());
-    true
+    std::fs::File::open(dir)
+        .and_then(|directory| directory.sync_all())
+        .map_err(|error| SaveError::io(SaveOperation::SyncDirectory, dir, error))?;
+    Ok(path)
 }
 
 #[cfg(test)]
@@ -818,7 +866,7 @@ mod tests {
             track_prints: TrackPrintRelief::Parallax,
             track_print_range: TrackPrintRange::Farthest,
         };
-        assert!(save(Some(&path), &wanted), "the save must land");
+        save(Some(&path), &wanted).expect("the save must land");
         let reloaded = load(Some(&path));
         assert_eq!(reloaded.settings, wanted);
         assert_eq!(reloaded.note, LoadNote::Loaded);
@@ -833,6 +881,45 @@ mod tests {
             leftovers.is_empty(),
             "the atomic write must leave no temporary behind: {leftovers:?}"
         );
+    }
+
+    /// The save system must retain an OS refusal for the page, then clear it only after a later
+    /// successful request. A real blocked parent exercises the error path without process env edits.
+    #[test]
+    fn a_save_refusal_reaches_the_page_state_and_a_successful_retry_clears_it() {
+        use crate::settings::{SaveSettings, SaveStatus, save_on_request};
+
+        assert!(matches!(
+            save(None, &Settings::default()),
+            Err(SaveError::NoLocation)
+        ));
+        let scratch = ScratchDir::new("save-refusal");
+        std::fs::create_dir_all(&scratch.dir).unwrap();
+        let blocker = scratch.dir.join("blocked");
+        std::fs::write(&blocker, "fixture file in place of a directory").unwrap();
+        let path = blocker.join(CONFIG_FILE_NAME);
+        let mut app = bevy::prelude::App::new();
+        app.init_resource::<Settings>()
+            .init_resource::<SaveStatus>()
+            .insert_resource(StorePath(Some(path.clone())))
+            .add_message::<SaveSettings>()
+            .add_systems(bevy::prelude::Update, save_on_request);
+        app.world_mut().write_message(SaveSettings);
+        app.update();
+        assert!(matches!(
+            &app.world().resource::<SaveStatus>().0,
+            Some(SaveError::Io { operation: SaveOperation::CreateDirectory, path, .. }) if path == &blocker
+        ));
+        assert!(
+            !path.exists(),
+            "the refused save must not pretend a file exists"
+        );
+
+        std::fs::remove_file(&blocker).unwrap();
+        app.world_mut().write_message(SaveSettings);
+        app.update();
+        assert!(app.world().resource::<SaveStatus>().0.is_none());
+        assert_eq!(load(Some(&path)).note, LoadNote::Loaded);
     }
 
     /// A corrupt file is PRESERVED as `.bad` rather than destroyed by the next save — the only
@@ -854,7 +941,7 @@ mod tests {
         assert!(!path.exists(), "the damaged file is moved, not copied");
 
         // And the next save cannot destroy the evidence.
-        assert!(save(Some(&path), &Settings::default()));
+        save(Some(&path), &Settings::default()).expect("settings save");
         assert!(kept.exists(), "the .bad copy must survive a save");
     }
 

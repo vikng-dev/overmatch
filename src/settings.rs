@@ -1739,6 +1739,11 @@ pub(crate) struct ApplySettings;
 #[derive(Resource)]
 pub(crate) struct StoreReport(store::LoadNote);
 
+/// Last save failure, if any; retained until a later successful save so closing/reopening the page
+/// cannot turn a refused write into a success notice.
+#[derive(Resource, Default)]
+struct SaveStatus(Option<store::SaveError>);
+
 /// Load settings before `DefaultPlugins` in each windowed root, returning them for primary
 /// `Window` construction as well as inserting them. The present mode must precede surface
 /// configuration to avoid a visible first-frame reconfigure; queued window-mode/size research
@@ -1750,7 +1755,9 @@ pub(crate) struct StoreReport(store::LoadNote);
 /// Missing/corrupt files yield defaults with a note. [`WindowModeSetting`] rules out exclusive
 /// fullscreen on an unresolvable monitor, so no row needs an escape hatch outside the UI.
 pub(crate) fn load_at_boot(app: &mut App) -> Settings {
-    let store::Load { settings, note } = store::load(store::location().as_deref());
+    let path = store::StorePath::default();
+    let store::Load { settings, note } = store::load(path.0.as_deref());
+    app.insert_resource(path);
     app.insert_resource(settings);
     app.insert_resource(StoreReport(note));
     settings
@@ -1784,6 +1791,7 @@ pub(crate) fn plugin(entry: PageEntry) -> impl Plugin {
     move |app: &mut App| {
         app.add_plugins((crate::render_scale::plugin, probe::plugin, ui::plugin))
             .init_resource::<Settings>()
+            .init_resource::<store::StorePath>()
             // `apply_settings` requires this resource; mounting it with the page rules out a missing row.
             .init_resource::<LodPixelBudget>()
             // The window-placement state both window writers share — see [`WindowPlacement`] for
@@ -2373,12 +2381,26 @@ fn observe_window_placement(
 
 /// Persist on request. Reads the settings AFTER [`ApplySettings`] so what is written is what the
 /// player is now looking at.
-fn save_on_request(mut requests: MessageReader<SaveSettings>, settings: Res<Settings>) {
+fn save_on_request(
+    mut requests: MessageReader<SaveSettings>,
+    settings: Res<Settings>,
+    path: Res<store::StorePath>,
+    mut status: ResMut<SaveStatus>,
+) {
     // Collapse a frame's requests: several rows changed in one frame is still one file write.
     if requests.read().count() == 0 {
         return;
     }
-    store::save(store::location().as_deref(), &settings);
+    match store::save(path.0.as_deref(), &settings) {
+        Ok(saved_path) => {
+            status.0 = None;
+            info!("settings: saved {}", saved_path.display());
+        }
+        Err(error) => {
+            warn!("settings: save failed ({error})");
+            status.0 = Some(error);
+        }
+    }
 }
 
 /// Name where a superseded file was preserved, or say plainly that it was not. Never silently omits
@@ -2393,13 +2415,13 @@ fn describe_kept(kept: Option<&std::path::Path>, subject: &str) -> String {
 
 /// Report the boot read, once, now that a tracing subscriber exists. Absent when a root inserted no
 /// report (tests, the sandboxes) — those simply say nothing.
-fn report_store_load(report: Option<Res<StoreReport>>) {
+fn report_store_load(report: Option<Res<StoreReport>>, path: Res<store::StorePath>) {
     let Some(report) = report else {
         return;
     };
     // Named in every branch, because "where do I edit this?" is the first question a complaint
     // raises. `None` only when there is no platform config directory at all.
-    let path = store::location().map_or_else(
+    let path = path.0.as_ref().map_or_else(
         || "<no config directory>".to_string(),
         |path| path.display().to_string(),
     );
